@@ -15,11 +15,11 @@
 (* suffices.  fusion_duality packages the result.                        *)
 (*                                                                       *)
 (* Imports BladeDMWF, BladeCurrying, BladeCurryingGeneral,               *)
-(* BladeLowering.  Coq 8.18, stdlib only.                                *)
+(* BladeLowering.  Rocq 9.0, stdlib only.                                *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeDMWF BladeCurrying BladeCurryingGeneral BladeLowering.
-Require Import List Arith Lia.
+From Stdlib Require Import List Arith Lia.
 Import ListNotations.
 
 (* The fusion equation, as an addressable fact: the fused primitive IS  *)

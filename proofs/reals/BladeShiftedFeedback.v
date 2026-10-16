@@ -72,7 +72,7 @@
 
 From Blade Require Import BladeBinomial BladeSummary BladeMomentClosure
   BladeShiftedMoments.
-Require Import Reals Lra List Lia.
+From Stdlib Require Import Reals Lra List Lia.
 Import ListNotations.
 Open Scope R_scope.
 

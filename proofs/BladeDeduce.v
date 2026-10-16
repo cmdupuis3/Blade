@@ -61,11 +61,11 @@
 (* assoc op; BladeJacobian's aceq_add_exchange is the syntactic 4-term   *)
 (* cousin of exchange_law over the d-congruence AC relation.             *)
 (*                                                                       *)
-(* Imports BladeLowering.  Coq 8.18, stdlib only.                        *)
+(* Imports BladeLowering.  Rocq 9.0, stdlib only.                        *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeLowering.
-Require Import List Arith Lia ZArith Permutation.
+From Stdlib Require Import List Arith Lia ZArith Permutation.
 Import ListNotations.
 
 (* ---------------- table 1 at a mirror node ---------------- *)

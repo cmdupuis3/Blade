@@ -9,11 +9,11 @@
 (* (formalism 14.x).  The engine is the hockey-stick identity, proved    *)
 (* by induction over the very sum the dmwf_equation produces.            *)
 (*                                                                       *)
-(* Imports BladeDMWF.  Coq 8.18, stdlib only.                            *)
+(* Imports BladeDMWF.  Rocq 9.0, stdlib only.                            *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeDMWF.
-Require Import List Arith Lia.
+From Stdlib Require Import List Arith Lia.
 Import ListNotations.
 
 (* Pascal-recursion binomial coefficient. *)

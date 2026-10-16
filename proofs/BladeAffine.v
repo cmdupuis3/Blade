@@ -20,11 +20,11 @@
 (* arithmetic leaves are discharged by nia (after eliminating the tail   *)
 (* sum in the rank-zero branch).                                         *)
 (*                                                                       *)
-(* Imports BladeDMWF, BladeArrow.  Coq 8.18, stdlib only.                *)
+(* Imports BladeDMWF, BladeArrow.  Rocq 9.0, stdlib only.                *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeDMWF BladeArrow.
-Require Import List Arith Lia Setoid.
+From Stdlib Require Import List Arith Lia Setoid.
 Import ListNotations.
 
 Section AffineArrow.

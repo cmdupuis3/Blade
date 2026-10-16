@@ -52,11 +52,11 @@
 (* under test is arithmetic, and the representation theory that produces  *)
 (* the paths is cited, not proved (plan 6.1).                             *)
 (*                                                                       *)
-(* Imports BladeDMWF, BladeBinomial.  Coq 8.18, stdlib only.              *)
+(* Imports BladeDMWF, BladeBinomial.  Rocq 9.0, stdlib only.              *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeDMWF BladeBinomial.
-Require Import List Arith Lia.
+From Stdlib Require Import List Arith Lia.
 Import ListNotations.
 
 (* ===================================================================== *)
@@ -241,7 +241,7 @@ Lemma s2_cells_aux_length : forall t rem u1,
 Proof.
   intros t rem. induction rem as [|rem IH]; intros u1; destruct t; simpl;
     try reflexivity;
-    rewrite app_length, map_length, seq_length, IH; reflexivity.
+    rewrite length_app, length_map, length_seq, IH; reflexivity.
 Qed.
 
 Lemma s2_cells_length : forall t m, length (s2_cells t m) = tri_sign t m.

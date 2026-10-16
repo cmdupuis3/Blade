@@ -3,7 +3,7 @@
 (*                                                                       *)
 (* Scope: the six results identified in the proof-architecture review,   *)
 (* instantiated at the smallest rank/dimension where they have content   *)
-(* (r = 2, d = 2), with generalization notes.  Checked with Coq 8.18.    *)
+(* (r = 2, d = 2), with generalization notes.  Checked with Rocq 9.0.    *)
 (*                                                                       *)
 (* Sections:                                                             *)
 (*   1. GroupLaw          -- diagonal S_r is the licensed symmetry       *)
@@ -26,7 +26,7 @@
 (*                           composition (trichotomy support lemma)      *)
 (* ===================================================================== *)
 
-Require Import Arith Lia Psatz.
+From Stdlib Require Import Arith Lia Psatz.
 
 (* ===================================================================== *)
 (* 1. GROUP LAW (soundness half).                                        *)

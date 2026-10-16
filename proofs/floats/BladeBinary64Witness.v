@@ -38,7 +38,7 @@
 (* the central one still 2/3.                                            *)
 (* ===================================================================== *)
 
-Require Import Floats List Bool.
+From Stdlib Require Import Floats List Bool.
 Import ListNotations.
 Open Scope float_scope.
 

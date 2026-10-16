@@ -63,7 +63,7 @@
 From Blade Require Import BladeBinomial BladeSummary BladeMomentClosure
   BladeRankBound BladeDescartes BladeRankDomain BladeProuhet BladeNewton.
 From BladeReals Require Import BladeSmoothRank.
-Require Import Reals Lra Psatz List Arith Lia.
+From Stdlib Require Import Reals Lra Psatz List Arith Lia.
 Import ListNotations.
 
 Open Scope R_scope.

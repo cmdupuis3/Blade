@@ -59,7 +59,7 @@
 
 From Blade Require Import BladeBinomial BladeSummary BladeMomentClosure
   BladeRankBound BladeRankDomain BladeProuhet BladeNewton BladeReduceCompiler.
-Require Import List Arith Lia ZArith Ring Bool.
+From Stdlib Require Import List Arith Lia ZArith Ring Bool.
 Import ListNotations.
 Local Open Scope nat_scope.
 

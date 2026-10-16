@@ -21,11 +21,11 @@
 (*     are all-arrays-no-kernel (method_for) and kernel-only             *)
 (*     (object_for).  method_spec_ok / object_spec_ok witness existence. *)
 (*                                                                       *)
-(* Imports BladeDMWF (Layers 0-1).  Coq 8.18, stdlib only.               *)
+(* Imports BladeDMWF (Layers 0-1).  Rocq 9.0, stdlib only.               *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeDMWF.
-Require Import List Arith Lia.
+From Stdlib Require Import List Arith Lia.
 Import ListNotations.
 
 (* ===================================================================== *)

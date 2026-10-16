@@ -31,11 +31,11 @@
 (* term, and the constructive r = 2 storage split the decomposition      *)
 (* suggests is proved in BladeCauchy.v.                                  *)
 (*                                                                       *)
-(* Imports BladeDMWF, BladeBinomial.  Coq 8.18, stdlib only.             *)
+(* Imports BladeDMWF, BladeBinomial.  Rocq 9.0, stdlib only.             *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeDMWF BladeBinomial.
-Require Import List Arith Lia Psatz.
+From Stdlib Require Import List Arith Lia Psatz.
 Import ListNotations.
 
 (* ---------------- generic helpers ---------------- *)
@@ -238,7 +238,7 @@ Section TwoFactor.
       apply NoDup_incl_length.
       - constructor; [exact Hw_out | exact Hnd].
       - intros z [<- | Hz]; [exact Hw_in | apply Hincl; exact Hz]. }
-    unfold img in Hle. rewrite map_length, prod_length in Hle.
+    unfold img in Hle. rewrite length_map, length_prod in Hle.
     lia.
   Qed.
 End TwoFactor.

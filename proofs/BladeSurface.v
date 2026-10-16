@@ -61,14 +61,14 @@
 (* Imports BladeDMWF, BladeShape, BladeTrinity, BladeTrinityAsym,        *)
 (* BladeBinomial, BladeCompute, BladeMonad, BladeMixedRadix,             *)
 (* BladeLowering, BladeCompleteness, BladeOptimal, BladeOrbitWork,       *)
-(* BladeDeduceExact, BladeObject.  Coq 8.18 / Rocq 9, stdlib only.       *)
+(* BladeDeduceExact, BladeObject.  Rocq 9.0, stdlib only.                *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeDMWF BladeShape BladeTrinity BladeTrinityAsym
                           BladeBinomial BladeCompute BladeMonad BladeMixedRadix
                           BladeLowering BladeCompleteness BladeOptimal
                           BladeOrbitWork BladeDeduceExact BladeObject.
-Require Import List Arith Lia Permutation Bool.
+From Stdlib Require Import List Arith Lia Permutation Bool.
 Import ListNotations.
 
 (* ===================================================================== *)
@@ -426,7 +426,7 @@ Proof.
     replace (swidth (fst A) - length t1) with 0 by lia.
     rewrite firstn_O, app_nil_r. simpl.
     f_equal. rewrite <- IH; [reflexivity |].
-    unfold widths. rewrite skipn_length. lia.
+    unfold widths. rewrite length_skipn. lia.
 Qed.
 
 (* ===================================================================== *)
@@ -891,7 +891,7 @@ Proof.
     replace (ix_r c - length t1) with 0 by lia.
     rewrite firstn_O, app_nil_r.
     rewrite <- app_assoc. f_equal. apply IH.
-    unfold swidth. rewrite skipn_length. lia.
+    unfold swidth. rewrite length_skipn. lia.
 Qed.
 
 Lemma shape_dense_app : forall s1 s2 t1 t2,
@@ -906,7 +906,7 @@ Proof.
     rewrite firstn_O, app_nil_r.
     split; [exact Hd |].
     apply IH; [| exact H1 | exact H2].
-    unfold swidth. rewrite skipn_length. lia.
+    unfold swidth. rewrite length_skipn. lia.
 Qed.
 
 Lemma scanon_length : forall s t,
@@ -920,7 +920,7 @@ Proof.
   induction s as [|c s IH]; intros t H; simpl in *.
   - subst. reflexivity.
   - destruct H as [[Hl _] H2]. unfold swidth. simpl.
-    rewrite <- (firstn_skipn (ix_r c) t), app_length, Hl.
+    rewrite <- (firstn_skipn (ix_r c) t), length_app, Hl.
     f_equal. apply IH. exact H2.
 Qed.
 
@@ -996,11 +996,11 @@ Proof.
   - pose proof (Ksym_Kcls (k_arity f) (k_body f) (kwf_Ksym f Hwf Ec)) as Hcls.
     apply Hcls. unfold scls, tab.
     assert (Lv : length (vals (as_of ro (concat (map expand (rle b)))) t) = k_arity f).
-    { rewrite vals_length. unfold as_of. rewrite map_length, rle_expand. exact (eq_sym Har). }
+    { rewrite vals_length. unfold as_of. rewrite length_map, rle_expand. exact (eq_sym Har). }
     assert (Lv' : length (vals (as_of ro (concat (map expand (rle b))))
                                (scanon (concat (map (group_shape true) (rle b))) t))
                   = k_arity f).
-    { rewrite vals_length. unfold as_of. rewrite map_length, rle_expand. exact (eq_sym Har). }
+    { rewrite vals_length. unfold as_of. rewrite length_map, rle_expand. exact (eq_sym Har). }
     rewrite (tab_nth_r _ _ _ Lv), (tab_nth_r _ _ _ Lv').
     apply isort_respects. apply Permutation_sym. exact HP.
   - (* no claim, no quotient: the blockwise canonical form is the identity *)

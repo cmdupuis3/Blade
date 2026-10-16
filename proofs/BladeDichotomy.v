@@ -36,11 +36,11 @@
 (*    generalization of cauchy_cell_count.                               *)
 (*                                                                       *)
 (* Division-free throughout (factors 2 and 6 exhibited, never divided;   *)
-(* the BladeCauchy / BladeSymPower discipline).  Self-contained; Coq     *)
-(* 8.18 / Rocq 9.0, stdlib only, no axioms.                              *)
+(* the BladeCauchy / BladeSymPower discipline).  Self-contained;         *)
+(* Rocq 9.0, stdlib only, no axioms.                                     *)
 (* ===================================================================== *)
 
-Require Import List Arith Lia ZArith Psatz Ring.
+From Stdlib Require Import List Arith Lia ZArith Psatz Ring.
 Import ListNotations.
 Open Scope Z_scope.
 

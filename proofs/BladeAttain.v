@@ -135,13 +135,13 @@
 (*                                                                       *)
 (* Imports BladeDMWF, BladeBinomial, BladeMixedRadix, BladeShape,        *)
 (* BladeCompute, BladeLowering, BladeCompleteness, BladeOptimal,         *)
-(* BladeArrow, BladeObject, BladeSurface.  Coq 8.18 / Rocq 9, stdlib.    *)
+(* BladeArrow, BladeObject, BladeSurface.  Rocq 9.0, stdlib.             *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeDMWF BladeBinomial BladeMixedRadix BladeShape
                           BladeCompute BladeLowering BladeCompleteness
                           BladeOptimal BladeArrow BladeObject BladeSurface.
-Require Import List Arith Lia Permutation FinFun ZArith Cantor Bool.
+From Stdlib Require Import List Arith Lia Permutation FinFun ZArith Cantor Bool.
 Import ListNotations.
 
 (* ===================================================================== *)
@@ -215,7 +215,7 @@ Proof.
   apply (Permutation_nth (ltab R lab v') (ltab R lab v) 0) in HP.
   cbv zeta in HP. destruct HP as (_ & g & Hfun & Hinj & Hnth).
   assert (Hlen : length (ltab R lab v') = R)
-    by (unfold ltab, tab; rewrite map_length, seq_length; reflexivity).
+    by (unfold ltab, tab; rewrite length_map, length_seq; reflexivity).
   rewrite Hlen in Hfun, Hinj, Hnth.
   pose proof (proj1 (bInjective_bSurjective Hfun) Hinj) as Hsurj.
   destruct (bSurjective_bBijective Hfun Hsurj) as (g' & Hfun' & Hbij).
@@ -529,7 +529,7 @@ Section Meet.
       rewrite ltab_margs by (apply enumShape_dense; apply scanon_in; exact Hd).
       rewrite ltab_margs by exact Hd.
       apply isort_respects. apply scanon_vals. exact Hd.
-    - intro f. unfold meet_prog. rewrite ask_all_trace, map_length.
+    - intro f. unfold meet_prog. rewrite ask_all_trace, length_map.
       symmetry. apply shapeCard_is_length.
   Qed.
 
@@ -577,17 +577,17 @@ Proof.
 Qed.
 
 Lemma bshape_length : forall bs n, length (bshape bs n) = length bs.
-Proof. intros. unfold bshape. apply map_length. Qed.
+Proof. intros. unfold bshape. apply length_map. Qed.
 
 Lemma sdense_bshape : forall bs n t,
   length t = lsum bs -> (forall x, In x t -> x < n) -> sdense (bshape bs n) t.
 Proof.
   induction bs as [|b bs IH]; intros n t Hl Hb; simpl; [exact I |].
   simpl in Hl. split; [| split].
-  - rewrite firstn_length. lia.
+  - rewrite length_firstn. lia.
   - intros x Hx. split; [lia |]. apply Hb. rewrite <- (firstn_skipn b t). apply in_or_app. left. exact Hx.
   - apply IH.
-    + rewrite skipn_length. lia.
+    + rewrite length_skipn. lia.
     + intros x Hx. apply Hb. rewrite <- (firstn_skipn b t). apply in_or_app. right. exact Hx.
 Qed.
 
@@ -839,7 +839,7 @@ Section SurfaceGroups.
       split; [| split; [| split]].
       + simpl. rewrite IH1. reflexivity.
       + unfold arity in *. simpl. rewrite IH2. reflexivity.
-      + rewrite app_length, Lx, IH3. reflexivity.
+      + rewrite length_app, Lx, IH3. reflexivity.
       + intros p Hp. simpl sgrp.
         destruct (Nat.ltb_spec p (g_mult g)).
         * rewrite app_nth1 by lia.
@@ -857,7 +857,7 @@ Lemma rle_length : forall b, length b = lsum (map g_mult (rle b)).
 Proof.
   intro b. rewrite <- (rle_expand b) at 1.
   induction (rle b) as [|g gs IH]; simpl; [reflexivity |].
-  rewrite app_length, IH. unfold expand. rewrite repeat_length. reflexivity.
+  rewrite length_app, IH. unfold expand. rewrite repeat_length. reflexivity.
 Qed.
 
 (* the array read by record j of out_shape: the name of identity group j *)
@@ -882,7 +882,7 @@ Proof.
   - rewrite F2. symmetry. apply rle_length.
   - intros a a' Ha Ha' _ E. rewrite F1 in Ha, Ha'. unfold sarr in E.
     pose proof (proj1 (NoDup_nth (map g_name (rle b)) 0) Hnd) as Hnd2.
-    apply (Hnd2 a a'); [rewrite map_length; exact Ha | rewrite map_length; exact Ha' |].
+    apply (Hnd2 a a'); [rewrite length_map; exact Ha | rewrite length_map; exact Ha' |].
     rewrite <- (map_nth g_name (rle b) (mkG 0 [] 0) a) in E.
     rewrite <- (map_nth g_name (rle b) (mkG 0 [] 0) a') in E. exact E.
   - intros p Hp. unfold sarr. symmetry. apply F4. rewrite <- rle_length. exact Hp.
@@ -1114,7 +1114,7 @@ Proof.
     + apply Permutation_refl.
     + unfold tab, aba_args. simpl.
       exact (Permutation_rev [cD 0 k; cD 1 j; cD 0 i]).
-  - intro f. unfold aba_prog. rewrite ask_all_trace, map_length.
+  - intro f. unfold aba_prog. rewrite ask_all_trace, length_map.
     rewrite <- shapeCard_is_length. rewrite shapeCard_binom. simpl.
     rewrite Nat.mul_1_r. replace (n - 0 + 1 - 1) with n by lia.
     replace (n - 0 + 2 - 1) with (n + 1) by lia.
@@ -1436,7 +1436,7 @@ Proof.
     rewrite Hk. reflexivity.
   - rewrite C_zero. reflexivity.
   - rewrite enumA_anti_cons by lia.
-    rewrite app_length, map_length.
+    rewrite length_app, length_map.
     rewrite (IH r (S l)) by lia. rewrite (IH (S r) (S l)) by lia.
     reflexivity.
 Qed.
@@ -1567,7 +1567,7 @@ Section AltSort.
     FL (pre ++ b :: a :: post) = (- FL (pre ++ a :: b :: post))%Z.
   Proof.
     intros pre a b post Hl. destruct Hf as [Hloc Hanti].
-    rewrite app_length in Hl. simpl in Hl.
+    rewrite length_app in Hl. simpl in Hl.
     pose proof (Hanti (length pre) ltac:(lia) (fun p => g (nth p (pre ++ a :: b :: post) 0))) as H.
     unfold FL. rewrite <- H. apply Hloc. intros p _. rewrite nth_sw_mid. reflexivity.
   Qed.
@@ -1580,10 +1580,10 @@ Section AltSort.
     - cbn [ins_sw insert]. destruct (Nat.leb_spec x y).
       + change (par 0) with 1%Z. ring.
       + rewrite (FL_swap pre y x l)
-          by (rewrite app_length in *; simpl in *; lia).
+          by (rewrite length_app in *; simpl in *; lia).
         replace (pre ++ y :: x :: l) with ((pre ++ [y]) ++ x :: l)
           by (rewrite <- app_assoc; reflexivity).
-        rewrite IH by (rewrite <- app_assoc; rewrite app_length in *; simpl in *; lia).
+        rewrite IH by (rewrite <- app_assoc; rewrite length_app in *; simpl in *; lia).
         rewrite <- app_assoc. change ([y] ++ insert x l) with (y :: insert x l).
         rewrite par_S. ring.
   Qed.
@@ -1598,7 +1598,7 @@ Section AltSort.
       rewrite IH by (rewrite <- app_assoc; exact Hl).
       rewrite <- app_assoc. change ([x] ++ isort l) with (x :: isort l).
       rewrite FL_insert
-        by (rewrite app_length in *; simpl in *; rewrite isort_length; lia).
+        by (rewrite length_app in *; simpl in *; rewrite isort_length; lia).
       rewrite par_add. ring.
   Qed.
 
@@ -1758,7 +1758,7 @@ Section AltNest.
       + destruct (not_NoDup_dup ix Hn) as (a & b & Hab & E).
         symmetry. apply (alt_vanishes r f Hf (argsOf dat ix) a b); [lia |].
         unfold argsOf. rewrite E. reflexivity.
-    - intro f. unfold alt_prog. rewrite ask_all_trace, map_length.
+    - intro f. unfold alt_prog. rewrite ask_all_trace, length_map.
       apply strict_length.
   Qed.
 
@@ -1819,7 +1819,7 @@ Qed.
 Lemma nth_map_seq : forall (s : nat -> nat) r p, p < r -> nth p (map s (seq 0 r)) 0 = s p.
 Proof.
   intros s r p Hp.
-  rewrite (nth_indep _ 0 (s 0)) by (rewrite map_length, seq_length; exact Hp).
+  rewrite (nth_indep _ 0 (s 0)) by (rewrite length_map, length_seq; exact Hp).
   rewrite map_nth, seq_nth by exact Hp. reflexivity.
 Qed.
 
@@ -1832,7 +1832,7 @@ Theorem Kalt_sign_character : forall r f, Kalt r f ->
 Proof.
   intros r f Hf s s' Hp v.
   pose proof (alt_sort_sign r f Hf v (map s (seq 0 r))
-                (ltac:(rewrite map_length, seq_length; reflexivity))) as H.
+                (ltac:(rewrite length_map, length_seq; reflexivity))) as H.
   unfold FL in H.
   assert (Hs : isort (map s (seq 0 r)) = seq 0 r).
   { rewrite (isort_respects _ _ (map_s_perm r s s' Hp)).

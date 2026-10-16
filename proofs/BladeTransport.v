@@ -138,7 +138,7 @@
 (* applications (the free model's metric, so an elementwise stage costs  *)
 (* one application per orbit there).                                     *)
 (*                                                                       *)
-(* Imports the tower through BladeSurface.  Coq 8.18 / Rocq 9, stdlib    *)
+(* Imports the tower through BladeSurface.  Rocq 9.0, stdlib             *)
 (* only.                                                                 *)
 (* ===================================================================== *)
 
@@ -146,7 +146,7 @@ From Blade Require Import BladeDMWF BladeShape BladeTrinity BladeTrinityAsym
                           BladeBinomial BladeCompute BladeMonad BladeMixedRadix
                           BladeLowering BladeCompleteness BladeOptimal
                           BladeOrbitWork BladeDeduceExact BladeObject BladeSurface.
-Require Import List Arith Lia Permutation Bool.
+From Stdlib Require Import List Arith Lia Permutation Bool.
 Import ListNotations.
 
 (* ===================================================================== *)
@@ -344,7 +344,7 @@ Proof.
     replace (ix_r c - length t1) with 0 by lia.
     replace (ix_r c - length t1') with 0 by lia.
     rewrite !firstn_O, !app_nil_r.
-    rewrite IH by (rewrite skipn_length; unfold swidth; lia).
+    rewrite IH by (rewrite length_skipn; unfold swidth; lia).
     tauto.
 Qed.
 
@@ -401,10 +401,10 @@ Proof.
   split; [symmetry; apply firstn_skipn |].
   rewrite !enumShape_single_eq. unfold enumIx. cbn [ix_r ix_l ix_u].
   split; apply enum_complete; apply canonical_iff_nondecr; split.
-  - split; [rewrite firstn_length; lia |].
+  - split; [rewrite length_firstn; lia |].
     rewrite Forall_forall in *. intros x Hx. apply HF. exact (in_firstn' _ _ _ _ Hx).
   - apply nondecr_firstn. exact Hn.
-  - split; [rewrite skipn_length; lia |].
+  - split; [rewrite length_skipn; lia |].
     rewrite Forall_forall in *. intros x Hx. apply HF. exact (in_skipn' _ _ _ _ Hx).
   - apply nondecr_skipn. exact Hn.
 Qed.
@@ -700,9 +700,9 @@ Lemma scanon_length_w : forall s t, length t = swidth s -> length (scanon s t) =
 Proof.
   induction s as [|c s IH]; intros t Hl; [reflexivity |].
   unfold swidth in *. cbn [scanon fold_right] in *.
-  rewrite app_length, isort_length, firstn_length, IH.
+  rewrite length_app, isort_length, length_firstn, IH.
   - unfold swidth. lia.
-  - rewrite skipn_length. unfold swidth. lia.
+  - rewrite length_skipn. unfold swidth. lia.
 Qed.
 
 (* sigma(C1 <&> C2) = sigma(C1) x sigma(C2) (10.5).  The pair's shapes   *)
@@ -839,7 +839,7 @@ Proof.
   - rewrite pbind_run, pbind_run. cbn [run]. rewrite !ask_all_run. cbn [rev app].
     unfold veval. cbn [fst snd]. rewrite !map_map. reflexivity.
   - rewrite pbind_trace, pbind_trace. cbn [trace]. rewrite !ask_all_trace, app_nil_r.
-    rewrite app_length, !map_length, !shapeCard_is_length. reflexivity.
+    rewrite length_app, !length_map, !shapeCard_is_length. reflexivity.
 Qed.
 
 (* FUSION DISTRIBUTES, AS A PERFORMANCE GUARANTEE: the fused object's     *)
@@ -1163,7 +1163,7 @@ Definition stage_queries (rho : venv) (prev : list (Arr nat)) (st : stage)
 
 Lemma stage_queries_length : forall rho prev st,
   length (stage_queries rho prev st) = shapeCard (fst (stage_den rho prev st)).
-Proof. intros. unfold stage_queries. rewrite map_length. symmetry. apply shapeCard_is_length. Qed.
+Proof. intros. unfold stage_queries. rewrite length_map. symmetry. apply shapeCard_is_length. Qed.
 
 Fixpoint pipe_prog (rho : venv) (sts : list stage) (prev : list (Arr nat))
   : prog (nat * list nat) nat (list (Arr nat)) :=
@@ -1192,7 +1192,7 @@ Lemma pipe_prog_trace_gen : forall rho sts prev K,
   = lsum (map shapeCard (pipe_shapes (rsh rho) sts (map fst prev))).
 Proof.
   intros rho sts. induction sts as [|st sts IH]; intros prev K; [reflexivity |].
-  cbn [pipe_prog pipe_shapes]. rewrite pbind_trace, app_length, ask_all_trace.
+  cbn [pipe_prog pipe_shapes]. rewrite pbind_trace, length_app, ask_all_trace.
   rewrite stage_queries_length.
   match goal with |- context [pipe_prog rho sts (prev ++ [?M])] =>
     pose proof (IH (prev ++ [M]) K) as H end.
@@ -1234,7 +1234,7 @@ Proof.
       unfold stage_den. cbn [snd]. unfold apply_kernel.
       unfold stage_den in Ht. cbn [fst] in Ht.
       rewrite (vals_agree _ _ Hops t (enum_out_in_dense _ _ t Ht)). reflexivity.
-  - rewrite app_length. cbn [length]. rewrite Nat.add_1_r.
+  - rewrite length_app. cbn [length]. rewrite Nat.add_1_r.
     exact (oracle_ok_tail K st sts (length prev) Hk).
 Qed.
 
@@ -1263,7 +1263,7 @@ Proof.
   rewrite (Forall2_length H).
   assert (L : forall sts prev, length (den_pipe rho sts prev) = length prev + length sts).
   { induction sts0 as [|s0 ss IH0]; intro prev; cbn [den_pipe length]; [lia |].
-    rewrite IH0, app_length. cbn [length]. lia. }
+    rewrite IH0, length_app. cbn [length]. lia. }
   rewrite L. reflexivity.
 Qed.
 
@@ -1492,7 +1492,7 @@ Proof.
   assert (Ht : forall k, length (trace (two_node_qprog n) k)
                          = orbit_work (rsh (rhoA n)) (two_node_pipeline kh0 kg0)).
   { intro k. unfold two_node_qprog. rewrite pbind_trace, tr_prog_trace. cbn [trace].
-    rewrite app_nil_r, map_length. apply pipe_prog_work. }
+    rewrite app_nil_r, length_map. apply pipe_prog_work. }
   split; [| split; [apply Ht | split; [exact Hw |]]].
   - intros k Hk.
     set (K := fun q => k (tq2 q)).
@@ -1775,7 +1775,7 @@ Proof.
     apply T_AppM with (b := shapes_of rho').
     - constructor. exact Hbn.
     - exact Hwf.
-    - unfold shapes_of, rho', stage_ops. rewrite !map_length. exact Har. }
+    - unfold shapes_of, rho', stage_ops. rewrite !length_map. exact Har. }
   rewrite stage_den_shape in Hty.
   split; [exact Hok |]. split; [exact Hty |].
   split; [exact (proj1 (group_of_den _ rho' e _ Hok (or_introl Hty))) |].

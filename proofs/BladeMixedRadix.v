@@ -29,7 +29,7 @@
 (* ===================================================================== *)
 
 From Blade Require Import BladeDMWF BladeBinomial.
-Require Import List Arith Lia.
+From Stdlib Require Import List Arith Lia.
 Import ListNotations.
 
 (* ===================================================================== *)

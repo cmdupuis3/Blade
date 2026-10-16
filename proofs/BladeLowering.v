@@ -30,10 +30,10 @@
 (*                               lower_2_1.                              *)
 (*                                                                       *)
 (* Self-contained (stdlib only); ordered after BladeCurryingGeneral in   *)
-(* the tower.  Coq 8.18.                                                 *)
+(* the tower.  Rocq 9.0.                                                 *)
 (* ===================================================================== *)
 
-Require Import Arith Lia.
+From Stdlib Require Import Arith Lia.
 
 (* ===================================================================== *)
 (* THE GENERAL FRAMEWORK.                                                *)

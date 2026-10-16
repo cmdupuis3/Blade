@@ -142,11 +142,11 @@
 (* elimination and is not built.                                         *)
 (*                                                                       *)
 (* Imports BladeDMWF, BladeBinomial, BladeOptimal.                       *)
-(* Coq 8.18 / Rocq 9, stdlib only.                                       *)
+(* Rocq 9.0, stdlib only.                                                *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeDMWF BladeBinomial BladeOptimal.
-Require Import List Arith Lia Permutation ZArith.
+From Stdlib Require Import List Arith Lia Permutation ZArith.
 Import ListNotations.
 
 (* ===================================================================== *)
@@ -178,7 +178,7 @@ Section SupportBound.
     length (flat_map supp l) <= w * length l.
   Proof.
     intros w l Hw. induction l as [|v l IH]; simpl; [lia |].
-    rewrite app_length. specialize (Hw v). lia.
+    rewrite length_app. specialize (Hw v). lia.
   Qed.
 
   Theorem support_lower_bound : forall (w : nat) (R : list X) (P : prog V A Res),
@@ -190,7 +190,7 @@ Section SupportBound.
   Proof.
     intros w R P Hw Hnd Hpert Hcor k Hk.
     eapply Nat.le_trans; [| apply (supp_flat_length w (trace P k) Hw)].
-    rewrite <- (map_length tgt R).
+    rewrite <- (length_map tgt R).
     destruct (incl_or_witness Cl Cl_dec (map tgt R) (flat_map supp (trace P k)))
       as [Hincl | (c & Hc & Hn)].
     - apply NoDup_incl_length; assumption.
@@ -279,7 +279,7 @@ Lemma nth_map_seq : forall (h : nat -> nat) n i, i < n ->
   nth i (map h (seq 0 n)) 0 = h i.
 Proof.
   intros h n i Hi.
-  rewrite (nth_indep _ 0 (h 0)) by (rewrite map_length, seq_length; exact Hi).
+  rewrite (nth_indep _ 0 (h 0)) by (rewrite length_map, length_seq; exact Hi).
   rewrite map_nth, seq_nth by exact Hi. reflexivity.
 Qed.
 
@@ -331,7 +331,7 @@ Section Separable.
   Theorem sep_prog_trace : forall n f, length (trace (sep_prog n) f) = n.
   Proof.
     intros n f. unfold sep_prog.
-    rewrite ask_all_trace, map_length, seq_length. reflexivity.
+    rewrite ask_all_trace, length_map, length_seq. reflexivity.
   Qed.
 End Separable.
 
@@ -404,7 +404,7 @@ Theorem sep_lower_bound : forall dat,
   forall f, Ksep f -> n <= 2 * length (trace P f).
 Proof.
   intros dat Hinj n Res out P Hcor f Hf.
-  replace n with (length (seq 0 n)) at 1 by apply seq_length.
+  replace n with (length (seq 0 n)) at 1 by apply length_seq.
   apply (support_lower_bound (nat -> nat) nat nat nat Res
            (fun v => [v 0; v 1]) Nat.eq_dec Ksep (dg dat) dat out
            2 (seq 0 n) P).
@@ -550,7 +550,7 @@ Section ZeroFirst.
     intro n. unfold zero_first_prog.
     rewrite ask_then_trace. cbn [rev app].
     rewrite list_sum_map_zero. cbn [Nat.eqb trace].
-    rewrite app_nil_r, map_length. reflexivity.
+    rewrite app_nil_r, length_map. reflexivity.
   Qed.
 End ZeroFirst.
 
@@ -667,7 +667,7 @@ Proof.
         pose proof (remove_length_NoDup a T Hnd) as HlT.
         destruct (IH (map (ckill a) E) (remove Nat.eq_dec a T))
           as (h & Hr & HF & t & Ht & Hh).
-        { rewrite map_length. exact HE. }
+        { rewrite length_map. exact HE. }
         { apply remove_NoDup. exact Hnd. }
         { lia. }
         exists (hkill h a). split; [| split].
@@ -690,7 +690,7 @@ Proof.
       pose proof (remove_length_NoDup b T Hnd) as HlT.
       destruct (IH (map (csub b a flip) E) (remove Nat.eq_dec b T))
         as (h & Hr & HF & t & Ht & Hh).
-      { rewrite map_length. exact HE. }
+      { rewrite length_map. exact HE. }
       { apply remove_NoDup. exact Hnd. }
       { lia. }
       exists (hsub h b a flip). split; [| split].
@@ -736,7 +736,7 @@ Proof.
     as (h & Hr & HF & t & Ht & Hh).
   { apply NoDup_map_inj; [apply NoDup_seq |].
     intros x y _ _ Exy. apply Hinj. exact Exy. }
-  { unfold E. rewrite !map_length, seq_length. exact H. }
+  { unfold E. rewrite !length_map, length_seq. exact H. }
   apply in_map_iff in Ht as (x & Ex & Hx). subst t. apply in_seq in Hx.
   set (g' := fun a => Z.to_nat (Z.of_nat (g a) + h a)).
   set (f' := fun v : nat -> nat => g' (v 0) + g' (v 1)).
@@ -849,9 +849,9 @@ Theorem sep_storage_bound : forall dat,
   C (n + 2 - 1) 2 <= length cells.
 Proof.
   intros dat Hinj n cells acc Hread.
-  rewrite <- storage_cardinality, <- (map_length acc (enum 2 0 n)).
+  rewrite <- storage_cardinality, <- (length_map acc (enum 2 0 n)).
   replace (length cells) with (length (seq 0 (length cells)))
-    by apply seq_length.
+    by apply length_seq.
   apply NoDup_incl_length.
   - apply NoDup_map_inj; [apply enum_NoDup |].
     intros x y Hx Hy E.
@@ -864,7 +864,7 @@ Proof.
     destruct (Nat.lt_ge_cases (acc ix) (length cells)) as [Hl | Hge];
       [lia | exfalso].
     pose proof (Hread (fun _ => 2) Ksep_two ix Hix) as H.
-    rewrite nth_overflow in H by (rewrite map_length; exact Hge).
+    rewrite nth_overflow in H by (rewrite length_map; exact Hge).
     discriminate H.
 Qed.
 
@@ -928,7 +928,7 @@ Proof.
     rewrite ask_all_run. cbn [rev app]. rewrite map_map.
     apply (nth_index_of nat (fun t => f (argsOf dat t)) 0).
     apply enum_complete. exact Hix.
-  - intro f. unfold sym_prog. rewrite ask_all_trace, map_length.
+  - intro f. unfold sym_prog. rewrite ask_all_trace, length_map.
     apply storage_cardinality.
 Qed.
 

@@ -32,11 +32,11 @@
 (*   rank2_subsumed           BladeArrow's concrete rank-2 instance is   *)
 (*                            the [n; m] case of this arrow              *)
 (*                                                                       *)
-(* Imports BladeDMWF, BladeArrow.  Coq 8.18, stdlib only.                *)
+(* Imports BladeDMWF, BladeArrow.  Rocq 9.0, stdlib only.                *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeDMWF BladeArrow.
-Require Import List Arith Lia Bool.
+From Stdlib Require Import List Arith Lia Bool.
 Import ListNotations.
 
 Lemma NoDup_filter' : forall (A : Type) (f : A -> bool) (l : list A),

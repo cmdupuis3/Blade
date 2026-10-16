@@ -62,12 +62,12 @@
 (* the seed (0,3,3) / (1,1,4); and a polynomial a_d that is nonzero at   *)
 (* some r-vector gets its collision point (closure_refused_polynomial).  *)
 (*                                                                       *)
-(* Imports BladeBinomial, BladeSummary, BladeMomentClosure.  Coq 8.18,   *)
+(* Imports BladeBinomial, BladeSummary, BladeMomentClosure.  Rocq 9.0,   *)
 (* stdlib only.                                                          *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeBinomial BladeSummary BladeMomentClosure.
-Require Import List Arith Lia Ring.
+From Stdlib Require Import List Arith Lia Ring.
 Import ListNotations.
 
 Lemma C_diag : forall n, C n n = 1.
@@ -239,7 +239,7 @@ Section Prouhet.
       with (fst (pte (S m)) ++ shift1 (snd (pte (S m)))).
     change (snd (pte (S (S m))))
       with (snd (pte (S m)) ++ shift1 (fst (pte (S m)))).
-    unfold shift1. rewrite !app_length, !map_length, IH1, IH2.
+    unfold shift1. rewrite !length_app, !length_map, IH1, IH2.
     simpl Nat.pow. lia.
   Qed.
 
@@ -273,7 +273,7 @@ Section Prouhet.
     length (pmul l1 l2) = S (n1 + n2).
   Proof.
     induction l1 as [|c l1 IH]; intros l2 n1 n2 H1 H2; [discriminate|].
-    cbn [pmul]. rewrite padd_length. unfold pscale. rewrite map_length, H2.
+    cbn [pmul]. rewrite padd_length. unfold pscale. rewrite length_map, H2.
     destruct l1 as [|c' l1'].
     - simpl in H1. assert (n1 = 0) by lia. subst n1. simpl. lia.
     - destruct n1 as [|n1']; [simpl in H1; lia|].
@@ -363,14 +363,14 @@ Section Prouhet.
 
   Lemma coefs_length : forall d r a x, length (coefs d r a x) = S d.
   Proof.
-    intros. unfold coefs. rewrite map_length, seq_length. reflexivity.
+    intros. unfold coefs. rewrite length_map, length_seq. reflexivity.
   Qed.
 
   Lemma coefs_top : forall d r a x,
     nth d (coefs d r a x) r0 = a d (Qr r x).
   Proof.
     intros d r a x. unfold coefs.
-    rewrite (nth_map_lt R nat _ _ d r0 0) by (rewrite seq_length; lia).
+    rewrite (nth_map_lt R nat _ _ d r0 0) by (rewrite length_seq; lia).
     rewrite seq_nth by lia. reflexivity.
   Qed.
 
@@ -383,7 +383,7 @@ Section Prouhet.
   Qed.
 
   Lemma Fgen_length : forall d r a x, length (Fgen d r a x) = length x.
-  Proof. intros. unfold Fgen. apply map_length. Qed.
+  Proof. intros. unfold Fgen. apply length_map. Qed.
 
   (* THE REFUSAL, AT A COLLISION.  Any two arrays that agree on          *)
   (* p_0 .. p_(dr-1), disagree on p_(dr), and sit where the leading      *)
@@ -409,7 +409,7 @@ Section Prouhet.
     intro E.
     apply (f_equal (fun l => nth (r - 1) l r0)) in E. unfold qr in E.
     rewrite !(nth_map_lt R nat _ _ (r - 1) r0 0) in E
-      by (rewrite seq_length; lia).
+      by (rewrite length_seq; lia).
     rewrite seq_nth in E by lia. replace (1 + (r - 1)) with r in E by lia.
     rewrite !psum_Fgen in E. unfold coefs in E. rewrite <- Hq in E.
     fold (coefs d r a x) in E.
@@ -453,10 +453,10 @@ Section Prouhet.
     destruct (pte_length m') as [L1 L2]. rewrite <- Em in L1, L2.
     apply (closure_refused_at_collision d r N a
              (pte_x (d * r) N) (pte_x' (d * r) N) Hd Hr).
-    - unfold pte_x. rewrite app_length, repeat_length, L1.
+    - unfold pte_x. rewrite length_app, repeat_length, L1.
       replace (d * r - 1) with m' by lia.
       replace (d * r - 1) with m' in HN by lia. lia.
-    - unfold pte_x'. rewrite app_length, repeat_length, L2.
+    - unfold pte_x'. rewrite length_app, repeat_length, L2.
       replace (d * r - 1) with m' by lia.
       replace (d * r - 1) with m' in HN by lia. lia.
     - intros k Hk. apply D_zero_eq. unfold pte_x, pte_x'.
@@ -563,9 +563,9 @@ Section Prouhet.
     { intro k. apply (psum_scale R r0 r1 radd rmul rsub ropp Rth). }
     apply (closure_refused_at_collision d r (length Zs) a Zs
              (map (fun x => s *! x) Zs) Hd Hr eq_refl).
-    - apply map_length.
+    - apply length_map.
     - intros k Hk. destruct k as [|k].
-      + rewrite !(psum_0 R r0 r1 radd rmul), map_length. reflexivity.
+      + rewrite !(psum_0 R r0 r1 radd rmul), length_map. reflexivity.
       + rewrite Hsc, (Horth (S k)) by lia. ring.
     - rewrite Hsc. intro E.
       assert (E2 : (Rpow s (d * r) -! r1) *! Psum (d * r) Zs = r0).
@@ -586,7 +586,7 @@ End Prouhet.
 (* Part E.  Closed instances over Z.                                     *)
 (* ===================================================================== *)
 
-Require Import ZArith.
+From Stdlib Require Import ZArith.
 Open Scope Z_scope.
 
 Lemma Z_integral : forall a b : Z, a * b = 0 -> a = 0 \/ b = 0.

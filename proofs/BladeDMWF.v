@@ -21,10 +21,10 @@
 (*       - residual_not_constant: the seed family is not a constant      *)
 (*         family -- dependent typing is forced (anchor for Thm 9.3)     *)
 (*                                                                       *)
-(* Coq 8.18, stdlib only.                                                *)
+(* Rocq 9.0, stdlib only.                                                *)
 (* ===================================================================== *)
 
-Require Import List Arith Lia.
+From Stdlib Require Import List Arith Lia.
 Import ListNotations.
 
 (* ===================================================================== *)
@@ -46,7 +46,7 @@ Proof. destruct c; [reflexivity | discriminate]. Qed.
 Lemma flat_map_length : forall (A B : Type) (f : A -> list B) (l : list A),
   length (flat_map f l) = lsum (map (fun x => length (f x)) l).
 Proof.
-  induction l; simpl; [reflexivity | rewrite app_length, IHl; reflexivity].
+  induction l; simpl; [reflexivity | rewrite length_app, IHl; reflexivity].
 Qed.
 
 Lemma NoDup_seq : forall len start, NoDup (seq start len).
@@ -203,7 +203,7 @@ Theorem enum_length : forall r l u,
 Proof.
   induction r as [|r IH]; intros; simpl; [reflexivity |].
   rewrite flat_map_length. f_equal.
-  apply map_ext. intro i. rewrite map_length. apply IH.
+  apply map_ext. intro i. rewrite length_map. apply IH.
 Qed.
 
 (* ===================================================================== *)
@@ -322,7 +322,7 @@ Proof.
   intros. simpl.
   transitivity (lsum (map (fun _ : nat => 1) (seq l (u - l)))).
   { f_equal; try (apply map_ext; intro; reflexivity). }
-  rewrite lsum_const, seq_length. lia.
+  rewrite lsum_const, length_seq. lia.
 Qed.
 
 Theorem residual_not_constant :
@@ -358,7 +358,7 @@ Proof.
   induction s as [|c s IH]; simpl; [reflexivity |].
   rewrite flat_map_length.
   transitivity (lsum (map (fun _ : list nat => length (enumShape s)) (enumIx c))).
-  { f_equal. apply map_ext. intro t. apply map_length. }
+  { f_equal. apply map_ext. intro t. apply length_map. }
   rewrite lsum_const, IH. apply Nat.mul_comm.
 Qed.
 

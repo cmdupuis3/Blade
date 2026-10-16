@@ -44,7 +44,7 @@
 
 From Blade Require Import BladeBinomial BladeSummary BladeMomentClosure
   BladeShiftedMoments.
-Require Import Reals Lra List Lia.
+From Stdlib Require Import Reals Lra List Lia.
 Import ListNotations.
 Open Scope R_scope.
 
@@ -91,7 +91,7 @@ Qed.
 Lemma prun_length : forall w xs, length (prun w xs) = length xs.
 Proof.
   induction w as [|[a b] w IH]; intros xs; [reflexivity|].
-  cbn [prun]. rewrite IH, map_length. reflexivity.
+  cbn [prun]. rewrite IH, length_map. reflexivity.
 Qed.
 
 (* Started at the mean, the propagated shift IS the mean, at every step. *)
@@ -102,8 +102,8 @@ Proof.
   induction w as [|[a b] w IH]; intros c xs H; [exact H|].
   cbn [prun crun].
   replace (INR (length xs)) with (INR (length (map (Aff a b) xs)))
-    by (rewrite map_length; reflexivity).
-  apply IH. rewrite map_length, <- ofnat_INR.
+    by (rewrite length_map; reflexivity).
+  apply IH. rewrite length_map, <- ofnat_INR.
   apply (mean_tracked R 0 1 Rplus Rmult Rminus Ropp RTheory).
   rewrite ofnat_INR. exact H.
 Qed.

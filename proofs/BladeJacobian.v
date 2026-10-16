@@ -5,8 +5,8 @@
 (* expression language (Grad.fs's derivRule table / product rule as      *)
 (* structural recursion), with NO real analysis anywhere.                *)
 (*                                                                       *)
-(* Backs the AD roadmap's "Jacobian symmetry theorem" and "symmetric     *)
-(* gradient accumulation" open items (stage C5 of the retired AD plan;   *)
+(* Backs the AD roadmap's "Jacobian symmetry theorem" and 'symmetric     *)
+(* gradient accumulation' open items (stage C5 of the retired AD plan;   *)
 (* surviving AD-posture notes: src/ml/README.md and                      *)
 (* docs/features/equivariant-nn.md sect. 11).                            *)
 (*                                                                       *)
@@ -52,10 +52,10 @@
 (* genuine boundary of the model; no subtraction/division (nat           *)
 (* semiring), so quotient/negation kernels are out of this file.         *)
 (*                                                                       *)
-(* Self-contained over BladeCore (canon2 only).  Coq 8.18 / Rocq 9.0.    *)
+(* Self-contained over BladeCore (canon2 only).  Rocq 9.0.               *)
 (* ===================================================================== *)
 
-Require Import Arith Lia Bool.
+From Stdlib Require Import Arith Lia Bool.
 Require Import Blade.BladeCore.
 
 (* ===================================================================== *)

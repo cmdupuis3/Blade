@@ -26,11 +26,11 @@
 (* never build the buffer.  Loop-fusion soundness with a real store,     *)
 (* not a restatement.                                                    *)
 (*                                                                       *)
-(* Imports BladeDMWF, BladeCompute.  Coq 8.18, stdlib only.              *)
+(* Imports BladeDMWF, BladeCompute.  Rocq 9.0, stdlib only.              *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeDMWF BladeCompute.
-Require Import List Arith Lia.
+From Stdlib Require Import List Arith Lia.
 Import ListNotations.
 
 (* ---------------- plumbing ---------------- *)
@@ -46,7 +46,7 @@ Qed.
 
 Lemma enum1_length : forall l u, length (enum 1 l u) = u - l.
 Proof.
-  intros. rewrite enum1_singletons, map_length, seq_length. reflexivity.
+  intros. rewrite enum1_singletons, length_map, length_seq. reflexivity.
 Qed.
 
 (* ---------------- the triangular offset ---------------- *)
@@ -86,7 +86,7 @@ Proof.
     replace (start + 0) with start by lia.
     replace (0 + (j - start)) with (j - start) by lia.
     rewrite nth_error_app1.
-    2: { rewrite map_length, enum1_length. lia. }
+    2: { rewrite length_map, enum1_length. lia. }
     rewrite enum1_singletons, map_map.
     assert (Hs : nth_error (seq start (u - start)) (j - start) = Some j).
     { rewrite nth_error_seq' by lia. f_equal. lia. }
@@ -94,8 +94,8 @@ Proof.
   - destruct cnt as [|cnt']; [lia |].
     cbn [seq flat_map roff].
     rewrite nth_error_app2.
-    2: { rewrite map_length, enum1_length. lia. }
-    rewrite map_length, enum1_length.
+    2: { rewrite length_map, enum1_length. lia. }
+    rewrite length_map, enum1_length.
     replace (u - start + roff u (S start) d' + (j - (start + S d'))
              - (u - start))
       with (roff u (S start) d' + (j - (S start + d'))) by lia.

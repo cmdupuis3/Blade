@@ -8,8 +8,8 @@
 (* extent 2^(m-1).  At extent m they are "ideal" solutions and none is   *)
 (* known over Z in general.  Over R they come from a polynomial, not     *)
 (* from a list: take prod (1 - x_i Y), bump ONE coefficient, and ask for *)
-(* the roots again.  Everything in that sentence except "ask for the     *)
-(* roots again" is algebra, and is here, over an abstract commutative    *)
+(* the roots again.  Everything in that sentence except 'ask for the     *)
+(* roots again' is algebra, and is here, over an abstract commutative    *)
 (* ring:                                                                 *)
 (*                                                                       *)
 (*   elist, cf                 E(Y) = prod_i (1 - x_i Y) as a            *)
@@ -43,12 +43,12 @@
 (* commutative ring.                                                     *)
 (*                                                                       *)
 (* Imports BladeBinomial, BladeSummary, BladeMomentClosure,              *)
-(* BladeRankBound, BladeRankDomain.  Coq 8.18, stdlib only.              *)
+(* BladeRankBound, BladeRankDomain.  Rocq 9.0, stdlib only.              *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeBinomial BladeSummary BladeMomentClosure
   BladeRankBound BladeRankDomain.
-Require Import List Arith Lia Ring Wf_nat.
+From Stdlib Require Import List Arith Lia Ring Wf_nat.
 Import ListNotations.
 
 Section Newton.
@@ -114,7 +114,7 @@ Section Newton.
   Proof.
     induction xs as [|x xs IH]; [reflexivity|]. cbn [elist length].
     rewrite padd_length. cbn [length]. unfold pscale.
-    rewrite map_length, IH. lia.
+    rewrite length_map, IH. lia.
   Qed.
 
   Lemma peval_elist_cons : forall x xs Y,
@@ -331,7 +331,7 @@ Section Newton.
     set (d := Padd l1 (Pscale (ropp r1) l2)).
     assert (HF : Forall (fun c => c = r0) d).
     { apply (many_roots_dom rs Hnd).
-      - unfold d. rewrite padd_length. unfold pscale. rewrite map_length.
+      - unfold d. rewrite padd_length. unfold pscale. rewrite length_map.
         lia.
       - intros a Ha. unfold d. rewrite pe_padd, pe_pscale, (Hv a Ha). ring. }
     assert (Hj : nth j d r0 = r0).
@@ -380,7 +380,7 @@ Section Newton.
     length (bump m t l) = length l.
   Proof.
     intros m t l Hm. unfold bump.
-    rewrite padd_length, app_length, repeat_length. simpl. lia.
+    rewrite padd_length, length_app, repeat_length. simpl. lia.
   Qed.
 
   Hypothesis R_char0 : forall n, Ofnat (S n) <> r0.

@@ -1,6 +1,14 @@
 # Blade Proof System
 
-Machine-checked kernel of the Blade formalism. Coq 8.18.0, stdlib only.
+Machine-checked kernel of the Blade formalism. Rocq 9.0, stdlib only.
+
+The sources are written to the Rocq 9 standard and build with no
+deprecation warnings: stdlib modules are loaded `From Stdlib Require ...`,
+and the 8.20 / 9.0 names are used (`length_map`, not `map_length`;
+`Nat.Div0.mul_mod`; `Z.eqb`).  Coq 8.18 does not know those names, so it
+cannot build this tower.  CI builds with Rocq 9.0
+(`.github/workflows/proofs.yml`); locally, the Rocq Platform 9.0 supplies
+`coqc` and `coqchk`.
 
 ## Build
 

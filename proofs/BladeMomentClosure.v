@@ -110,11 +110,11 @@
 (* what the rank bounds assume. Exact arithmetic throughout; no source   *)
 (* fragment, no recognition, no code generation.                         *)
 (*                                                                       *)
-(* Imports BladeBinomial, BladeSummary.  Coq 8.18, stdlib only.          *)
+(* Imports BladeBinomial, BladeSummary.  Rocq 9.0, stdlib only.          *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeBinomial BladeSummary.
-Require Import List Arith Lia ZArith Ring.
+From Stdlib Require Import List Arith Lia ZArith Ring.
 Import ListNotations.
 
 (* ===================================================================== *)
@@ -172,7 +172,7 @@ Section Moments.
     j < length l -> nth j (map f l) d = f (nth j l d').
   Proof.
     intros A f l j d d' Hj.
-    rewrite (nth_indep _ d (f d')) by (rewrite map_length; exact Hj).
+    rewrite (nth_indep _ d (f d')) by (rewrite length_map; exact Hj).
     apply map_nth.
   Qed.
 
@@ -252,7 +252,7 @@ Section Moments.
   Lemma bcl_length : forall a b k, length (bcl a b k) = S k.
   Proof.
     induction k as [|k IH]; simpl; [reflexivity|].
-    rewrite padd_length. simpl. unfold pscale. rewrite !map_length, IH.
+    rewrite padd_length. simpl. unfold pscale. rewrite !length_map, IH.
     lia.
   Qed.
 
@@ -437,7 +437,7 @@ Section Moments.
       intros xs j HN Hj. destruct j as [|j]; simpl.
       - rewrite psum_0, HN. reflexivity.
       - unfold qr. rewrite (nth_map_lt nat _ _ _ r0 0)
-          by (rewrite seq_length; lia).
+          by (rewrite length_seq; lia).
         rewrite seq_nth by lia. reflexivity.
     Qed.
 
@@ -456,7 +456,7 @@ Section Moments.
                   Gm hb.
     Proof.
       intros Y hb. constructor.
-      - intros u xs HN. unfold Fm. rewrite map_length. exact HN.
+      - intros u xs HN. unfold Fm. rewrite length_map. exact HN.
       - intros u xs HN. apply moment_step_closed. exact HN.
       - reflexivity.
     Qed.
@@ -512,8 +512,8 @@ Section Moments.
   Proof.
     induction e as [x|e1 IH1 e2 IH2|a b e IH]; simpl.
     - unfold psum. simpl. f_equal; [f_equal|]; ring.
-    - rewrite IH1, IH2, app_length, ofnat_add, !psum_app. reflexivity.
-    - rewrite IH, map_length, affine_sum_closed, affine_square_sum_closed.
+    - rewrite IH1, IH2, length_app, ofnat_add, !psum_app. reflexivity.
+    - rewrite IH, length_map, affine_sum_closed, affine_square_sum_closed.
       reflexivity.
   Qed.
 
@@ -1066,9 +1066,9 @@ Proof.
            ([1; 5; 6] ++ map Z.of_nat (seq 8 (N - 3)))
            ([2; 3; 7] ++ map Z.of_nat (seq 8 (N - 3)))).
   - split; [|apply collision_tail_positive; lia].
-    rewrite app_length, map_length, seq_length. simpl. lia.
+    rewrite length_app, length_map, length_seq. simpl. lia.
   - split; [|apply collision_tail_positive; lia].
-    rewrite app_length, map_length, seq_length. simpl. lia.
+    rewrite length_app, length_map, length_seq. simpl. lia.
   - unfold zq2. rewrite !zpsum_app. reflexivity.
   - unfold zq2, sqmap. rewrite !map_app, !zpsum_app. intro H.
     apply (f_equal snd) in H. cbn [snd] in H.
@@ -1127,7 +1127,7 @@ Proof.
     exfalso.
     assert (L : forall a b c : Z,
               length ([a; b; c] ++ map Z.of_nat (seq 8 (N - 3))) = N).
-    { intros. rewrite app_length, map_length, seq_length. simpl. lia. }
+    { intros. rewrite length_app, length_map, length_seq. simpl. lia. }
     specialize (H _ _ (L 1 5 6) (L 2 3 7)).
     unfold zq2, sqmap in H. rewrite !map_app, !zpsum_app in H.
     specialize (H eq_refl). apply (f_equal snd) in H. cbn [snd] in H.
@@ -1354,8 +1354,8 @@ Proof.
   apply (collision_refutes_update unit (list Z) Z (powmap d) (zpsum 1)
            (fun xs => length xs = N) tt
            ([0; 2] ++ repeat 0 (N - 2)) ([1; 1] ++ repeat 0 (N - 2))).
-  - rewrite app_length, repeat_length. simpl. lia.
-  - rewrite app_length, repeat_length. simpl. lia.
+  - rewrite length_app, repeat_length. simpl. lia.
+  - rewrite length_app, repeat_length. simpl. lia.
   - rewrite !zpsum_app. reflexivity.
   - unfold powmap. rewrite !map_app, !zpsum_app. intro H.
     apply Z.add_cancel_r in H. unfold zpsum, psum in H.

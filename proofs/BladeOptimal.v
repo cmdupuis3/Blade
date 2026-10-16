@@ -80,13 +80,13 @@
 (* still no sufficient one.                                              *)
 (*                                                                       *)
 (* Imports BladeDMWF, BladeBinomial, BladeMixedRadix, BladeShape,        *)
-(* BladeLowering, BladeCompleteness.  Coq 8.18, stdlib only.             *)
+(* BladeLowering, BladeCompleteness.  Rocq 9.0, stdlib only.             *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeDMWF BladeBinomial BladeMixedRadix BladeShape
                           BladeLowering
                           BladeCompleteness.
-Require Import List Arith Lia Permutation FinFun ZArith Cantor.
+From Stdlib Require Import List Arith Lia Permutation FinFun ZArith Cantor.
 Import ListNotations.
 
 (* ===================================================================== *)
@@ -186,8 +186,8 @@ Section OrbitBound.
     forall k, K k -> length R <= length (trace P k).
   Proof.
     intros R P Hnd Hpert Hcor k Hk.
-    rewrite <- (map_length (fun x => cls (args x)) R).
-    rewrite <- (map_length cls (trace P k)).
+    rewrite <- (length_map (fun x => cls (args x)) R).
+    rewrite <- (length_map cls (trace P k)).
     destruct (incl_or_witness C C_dec
                 (map (fun x => cls (args x)) R) (map cls (trace P k)))
       as [Hincl | (c & Hc & Hn)].
@@ -406,7 +406,7 @@ Qed.
 Lemma nth_tab : forall r v x, x < r -> nth x (tab r v) 0 = v x.
 Proof.
   intros r v x Hx. unfold tab.
-  rewrite (nth_indep _ 0 (v 0)) by (rewrite map_length, seq_length; lia).
+  rewrite (nth_indep _ 0 (v 0)) by (rewrite length_map, length_seq; lia).
   rewrite map_nth. rewrite seq_nth by lia. reflexivity.
 Qed.
 
@@ -487,7 +487,7 @@ Section SymNest.
     apply (Permutation_nth (tab r v') (tab r v) 0) in HP.
     cbv zeta in HP. destruct HP as (_ & g & Hfun & Hinj & Hnth).
     assert (Hlen : length (tab r v') = r)
-      by (unfold tab; rewrite map_length, seq_length; reflexivity).
+      by (unfold tab; rewrite length_map, length_seq; reflexivity).
     rewrite Hlen in Hfun, Hinj, Hnth.
     pose proof (proj1 (bInjective_bSurjective Hfun) Hinj) as Hsurj.
     destruct (bSurjective_bBijective Hfun Hsurj) as (g' & Hfun' & Hbij).
@@ -640,7 +640,7 @@ Section SymNest.
       rewrite (nth_index_of nat (fun t => f (argsOf t)) 0).
       + apply (Ksym_Kcls f Hf). apply scls_args_sorted. exact Hl.
       + apply enum_complete. rewrite <- Hl. apply isort_canon. exact Hb.
-    - intro f. unfold sym_prog. rewrite ask_all_trace, map_length.
+    - intro f. unfold sym_prog. rewrite ask_all_trace, length_map.
       apply storage_cardinality.
   Qed.
 
@@ -725,7 +725,7 @@ Fixpoint spairs (n : nat) : list (nat * nat) :=
 Lemma spairs_length : forall n, length (spairs n) = C n 2.
 Proof.
   induction n as [|n IH]; [reflexivity |].
-  simpl spairs. rewrite app_length, map_length, seq_length, IH.
+  simpl spairs. rewrite length_app, length_map, length_seq, IH.
   change (C (S n) 2) with (C n 1 + C n 2). rewrite C_n_1. lia.
 Qed.
 
@@ -896,7 +896,7 @@ Section AntisymPair.
           lia.
         * assert (i = j) by lia. subst j.
           symmetry. apply antisym_diagonal_forced_zero. exact Hf.
-    - intro f. unfold anti_prog. rewrite ask_all_trace, map_length.
+    - intro f. unfold anti_prog. rewrite ask_all_trace, length_map.
       apply spairs_length.
   Qed.
 End AntisymPair.
@@ -1038,7 +1038,7 @@ Section YoungNest.
   Proof.
     induction s as [|c s IH]; intros j t Hd; simpl; [reflexivity |].
     destruct Hd as (Hl & _ & Hd).
-    rewrite app_length, map_length, Hl. unfold arity in IH.
+    rewrite length_app, length_map, Hl. unfold arity in IH.
     rewrite (IH _ _ Hd). reflexivity.
   Qed.
 
@@ -1212,7 +1212,7 @@ Section YoungNest.
       rewrite scls_shargs by (apply enumShape_dense; apply scanon_in; exact Hd).
       rewrite scls_shargs by exact Hd.
       apply isort_respects. apply scanon_vals. exact Hd.
-    - intro f. unfold young_prog. rewrite ask_all_trace, map_length.
+    - intro f. unfold young_prog. rewrite ask_all_trace, length_map.
       symmetry. apply shapeCard_is_length.
   Qed.
 
@@ -1253,13 +1253,13 @@ Section YoungNest.
       rewrite Et. clear Et HF HK.
       unfold arity in Hp. simpl in Hp.
       destruct (Nat.ltb_spec p (ix_r c)).
-      + rewrite app_nth1 by (rewrite map_length; lia).
+      + rewrite app_nth1 by (rewrite length_map; lia).
         rewrite app_nth1 by lia.
-        rewrite (nth_indep _ 0 (D j 0)) by (rewrite map_length; lia).
+        rewrite (nth_indep _ 0 (D j 0)) by (rewrite length_map; lia).
         apply map_nth.
-      + rewrite app_nth2 by (rewrite map_length; lia).
+      + rewrite app_nth2 by (rewrite length_map; lia).
         rewrite app_nth2 by lia.
-        rewrite map_length, Hl.
+        rewrite length_map, Hl.
         apply IH; [exact Hd | unfold arity; lia].
   Qed.
 

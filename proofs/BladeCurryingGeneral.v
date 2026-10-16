@@ -23,11 +23,11 @@
 (*    support is exactly the class of properties that motivates          *)
 (*    method_for.                                                        *)
 (*                                                                       *)
-(* Imports BladeDMWF, BladeCurrying.  Coq 8.18, stdlib only.             *)
+(* Imports BladeDMWF, BladeCurrying.  Rocq 9.0, stdlib only.             *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeDMWF BladeCurrying.
-Require Import List Arith Lia Setoid.
+From Stdlib Require Import List Arith Lia Setoid.
 Import ListNotations.
 
 Definition Kern := nat -> nat -> nat.

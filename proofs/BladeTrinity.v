@@ -26,11 +26,11 @@
 (*                         mirroring residual_not_constant (BladeDMWF)   *)
 (*                         one level up                                  *)
 (*                                                                       *)
-(* Imports BladeDMWF.  Coq 8.18, stdlib only.                            *)
+(* Imports BladeDMWF.  Rocq 9.0, stdlib only.                            *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeDMWF.
-Require Import List Arith Lia.
+From Stdlib Require Import List Arith Lia.
 Import ListNotations.
 
 (* Helper: fold_right mult distributes over app. *)

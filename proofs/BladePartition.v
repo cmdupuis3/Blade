@@ -99,11 +99,11 @@
 (*                                                                        *)
 (* Imports BladeDMWF (lsum register), BladeArrow (enumA and its           *)
 (* soundness/completeness/NoDup theorems), BladeLex (lexlt and the        *)
-(* StronglySorted plumbing).  Coq 8.18 / Rocq 9.0, stdlib only.           *)
+(* StronglySorted plumbing).  Rocq 9.0, stdlib only.                      *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeDMWF BladeArrow BladeLex.
-Require Import List Arith Lia Sorted.
+From Stdlib Require Import List Arith Lia Sorted.
 Import ListNotations.
 
 (* ===================================================================== *)
@@ -304,19 +304,19 @@ Lemma rgs_fibre_count : forall m b j,
 Proof.
   induction m as [|m IH]; intros b j.
   - cbn. destruct (Nat.eqb b j); reflexivity.
-  - cbn [enumA]. rewrite filter_flat_map, flat_map_length.
+  - cbn [enumA]. rewrite filter_flat_map, length_flat_map.
     rewrite (map_ext
       (fun x => length (filter (fun g => Nat.eqb (rgs_blocks_from b g) j)
                                (map (cons x)
                                     (enumA nat rgs_heads rgs_step m (rgs_step b x)))))
       (fun x => stir_open (rgs_step b x) m j)).
-    2: { intro x. rewrite filter_map_cons, map_length. apply IH. }
+    2: { intro x. rewrite filter_map_cons, length_map. apply IH. }
     unfold rgs_heads. rewrite seq_S, map_app, lsum_app.
     rewrite (map_ext_in (fun x => stir_open (rgs_step b x) m j)
                         (fun _ => stir_open b m j)).
     2: { intros x Hx. apply in_seq in Hx. unfold rgs_step.
          replace (Nat.max b (S x)) with b by lia. reflexivity. }
-    rewrite lsum_const, seq_length.
+    rewrite lsum_const, length_seq.
     cbn [map lsum]. unfold rgs_step.
     replace (Nat.max b (S (0 + b))) with (S b) by lia.
     rewrite stir_open_S. nia.
@@ -628,7 +628,7 @@ Proof.
     destruct (rgs_values_cover p 0 y (rgs_ok_app_l p (y :: t2) 0 H2)
                                (Nat.le_0_l y) Hyp) as (j & Hj & Hnth).
     assert (Hlp : length p < length (p ++ y :: t2))
-      by (rewrite app_length; cbn; lia).
+      by (rewrite length_app; cbn; lia).
     assert (Hjl : j < length (p ++ y :: t2)) by lia.
     specialize (Hc (length p) j Hlp Hjl).
     rewrite nth_middle, (app_nth1 p (y :: t2) 0 Hj), Hnth in Hc.
@@ -679,7 +679,7 @@ Proof.
     - apply in_seq. split; [lia |].
       exact (rgs_entry_lt_blocks g2 0 (nth i g2 0) H2 HvIn). }
   apply NoDup_incl_length in Hincl; [| apply NoDup_seq].
-  rewrite seq_length, map_length, seq_length in Hincl. exact Hincl.
+  rewrite length_seq, length_map, length_seq in Hincl. exact Hincl.
 Qed.
 
 (* 3.6's fallback order (block count ascending, then lex) also extends    *)

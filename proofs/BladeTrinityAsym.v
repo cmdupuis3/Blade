@@ -21,11 +21,11 @@
 (* of dependency dimensional currying already requires                   *)
 (* (residual_not_constant, BladeDMWF).  No new resource.                 *)
 (*                                                                       *)
-(* Imports BladeDMWF, BladeArrow, BladeTrinity.  Coq 8.18, stdlib only.  *)
+(* Imports BladeDMWF, BladeArrow, BladeTrinity.  Rocq 9.0, stdlib only.  *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeDMWF BladeArrow BladeTrinity.
-Require Import List Arith Lia Setoid.
+From Stdlib Require Import List Arith Lia Setoid.
 Import ListNotations.
 
 (* ---------------- list plumbing ---------------- *)
@@ -148,13 +148,13 @@ Proof.
   rewrite <- (concat_map_singleton _ s) at 1.
   rewrite trinity_fold_closure.
   split; intros (parts & Et & Hlen & HF); exists parts.
-  - rewrite map_length in Hlen.
+  - rewrite length_map in Hlen.
     split; [exact Et | split; [exact Hlen |]].
     exact (proj1 (Forall2_map_l IxRec Shape (list nat)
                     (fun c => [c]) (fun sh p => In p (enumShape sh))
                     s parts) HF).
   - split; [exact Et | split].
-    + rewrite map_length. exact Hlen.
+    + rewrite length_map. exact Hlen.
     + exact (proj2 (Forall2_map_l IxRec Shape (list nat)
                       (fun c => [c]) (fun sh p => In p (enumShape sh))
                       s parts) HF).

@@ -65,12 +65,12 @@
 (* independence.                                                         *)
 (*                                                                       *)
 (* Imports BladeBinomial, BladeSummary, BladeMomentClosure,              *)
-(* BladeProuhet, BladeNewton.  Coq 8.18, stdlib only.                    *)
+(* BladeProuhet, BladeNewton.  Rocq 9.0, stdlib only.                    *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeBinomial BladeSummary BladeMomentClosure
   BladeProuhet BladeNewton.
-Require Import List Arith Lia Ring.
+From Stdlib Require Import List Arith Lia Ring.
 Import ListNotations.
 
 Lemma C_pos : forall n k, k <= n -> C n k <> 0.
@@ -226,7 +226,7 @@ Section ProuhetShift.
       apply R_integral in E2. destruct E2 as [E2|E2]; [|contradiction].
       replace (Ofnat n) with ((Ofnat n -! Ofnat m) +! Ofnat m) by ring.
       rewrite E2. ring.
-    - rewrite map_length, seq_length. exact HL.
+    - rewrite length_map, length_seq. exact HL.
     - intros a Ha. apply in_map_iff in Ha. destruct Ha as [n [E Hn]].
       subst a. apply in_seq in Hn. apply Hz. lia.
   Qed.
@@ -244,12 +244,12 @@ Section ProuhetShift.
     nth (j - 1) (Qr r y) r0 = Psum j y.
   Proof.
     intros r j y Hj. unfold qr.
-    rewrite (nth_map_lt R nat _ _ (j - 1) r0 0) by (rewrite seq_length; lia).
+    rewrite (nth_map_lt R nat _ _ (j - 1) r0 0) by (rewrite length_seq; lia).
     rewrite seq_nth by lia. f_equal. lia.
   Qed.
 
   Lemma qr_length : forall r y, length (Qr r y) = r.
-  Proof. intros. unfold qr. rewrite map_length, seq_length. reflexivity. Qed.
+  Proof. intros. unfold qr. rewrite length_map, length_seq. reflexivity. Qed.
 
   (* =================================================================== *)
   (* Part A.  The translation lemma.  The affine map y -> t y + 1 turns  *)
@@ -333,7 +333,7 @@ Section ProuhetShift.
                    (seq 0 (S (d * r)))).
     assert (Hcl : Forall (fun c => c = r0) cl).
     { apply (line_coefs_zero cl (d * r) r0 r1);
-        [unfold cl; rewrite map_length, seq_length; lia|exact R_nontrivial|].
+        [unfold cl; rewrite length_map, length_seq; lia|exact R_nontrivial|].
       intros n _. set (t := r0 +! Ofnat n *! r1).
       assert (Hq : Qr r (map (Aff t r1) x) = Qr r (map (Aff t r1) x')).
       { unfold qr. apply map_ext_in. intros k Hk. apply in_seq in Hk.
@@ -342,14 +342,14 @@ Section ProuhetShift.
         - intros j Hj. unfold BladeProuhet.Dp. rewrite (Hlow j) by lia.
           ring. }
       pose proof (power_closure_moments d r N G _ _ H
-                    ltac:(rewrite map_length; exact Hx)
-                    ltac:(rewrite map_length; exact Hx') Hq r
+                    ltac:(rewrite length_map; exact Hx)
+                    ltac:(rewrite length_map; exact Hx') Hq r
                     ltac:(lia)) as E.
       unfold cl. rewrite <- (dp_aff_poly (d * r) t x x').
       unfold BladeProuhet.Dp. rewrite E. ring. }
     apply (Forall_nth_zero cl m) in Hcl. unfold cl in Hcl.
     rewrite (nth_map_lt R nat _ _ m r0 0) in Hcl
-      by (rewrite seq_length; lia).
+      by (rewrite length_seq; lia).
     rewrite seq_nth in Hcl by lia. cbn [Nat.add] in Hcl.
     apply R_integral in Hcl. destruct Hcl as [Hc|Hc].
     - exact (ofnat_nonzero _ (C_pos (d * r) m ltac:(lia)) Hc).
@@ -369,9 +369,9 @@ Section ProuhetShift.
     destruct (p_len r) as [L1 L2].
     apply (power_refused_translated d r N (S r) (Pte_x (S r) N)
              (Pte_x' (S r) N)).
-    - unfold pte_x. rewrite app_length, repeat_length, L1.
+    - unfold pte_x. rewrite length_app, repeat_length, L1.
       replace (S r - 1) with r by lia. lia.
-    - unfold pte_x'. rewrite app_length, repeat_length, L2.
+    - unfold pte_x'. rewrite length_app, repeat_length, L2.
       replace (S r - 1) with r by lia. lia.
     - intros k Hk. apply d_zero. unfold pte_x, pte_x'.
       rewrite d_app, d_refl, (Hlow k) by lia. ring.
@@ -464,7 +464,7 @@ Section ProuhetShift.
     length (Pmul l1 l2) <= S (a + b).
   Proof.
     induction l1 as [|c l1 IH]; intros l2 a b H1 H2; [simpl; lia|].
-    rewrite pmul_cons, padd_length. unfold pscale. rewrite map_length.
+    rewrite pmul_cons, padd_length. unfold pscale. rewrite length_map.
     cbn [length]. destruct l1 as [|c' l1'].
     - cbn [pmul length]. lia.
     - destruct a as [|a']; [cbn [length] in H1; lia|].
@@ -505,7 +505,7 @@ Section ProuhetShift.
   Lemma rep_length : forall n L, length (rep n L) = n * length L.
   Proof.
     induction n as [|n IH]; intros L; [reflexivity|].
-    cbn [rep]. rewrite app_length, IH. reflexivity.
+    cbn [rep]. rewrite length_app, IH. reflexivity.
   Qed.
 
   Lemma psum_rep : forall j n L, Psum j (rep n L) = Ofnat n *! Psum j L.
@@ -526,7 +526,7 @@ Section ProuhetShift.
     length (blocks D w K) = D * (2 ^ K - 1).
   Proof.
     intros D w K Hw. induction K as [|K IH]; [simpl; lia|].
-    cbn [blocks]. rewrite !app_length, !rep_length, IH.
+    cbn [blocks]. rewrite !length_app, !rep_length, IH.
     destruct (p_len K) as [L1 L2]. unfold PA, PB. rewrite L1, L2.
     specialize (Hw K).
     assert (HP : 2 ^ K <> 0) by (apply Nat.pow_nonzero; discriminate).
@@ -690,9 +690,9 @@ Section ProuhetShift.
       by exact (blocks_length D w r Hw).
     apply (lead_forced_zero d r N a G _ (Pte_x' (d * r) N0 ++ blocks D w r)
              H Hd Hr).
-    - unfold pte_x. rewrite !app_length, repeat_length, L1, HB.
+    - unfold pte_x. rewrite !length_app, repeat_length, L1, HB.
       replace (d * r - 1) with m' by lia. unfold N0. lia.
-    - unfold pte_x'. rewrite !app_length, repeat_length, L2, HB.
+    - unfold pte_x'. rewrite !length_app, repeat_length, L2, HB.
       replace (d * r - 1) with m' by lia. unfold N0. lia.
     - intros k Hk. apply d_zero. unfold pte_x, pte_x'.
       rewrite !d_app, !d_refl, (Hlow k Hk). ring.
@@ -752,7 +752,7 @@ Section ProuhetShift.
     intros A0 B0 n HA HB k. induction k as [|k [IH1 IH2]].
     - cbn [pgen fst snd Nat.pow]. lia.
     - cbn [pgen fst snd]. unfold shift1.
-      rewrite !app_length, !map_length, IH1, IH2. cbn [Nat.pow]. lia.
+      rewrite !length_app, !length_map, IH1, IH2. cbn [Nat.pow]. lia.
   Qed.
 
   Definition seedA : list R := [r0; Ofnat 3; Ofnat 3].
@@ -807,8 +807,8 @@ Section ProuhetShift.
     apply (power_refused_translated d r N (3 + k)
              (fst (pgen seedA seedB k) ++ pad)
              (snd (pgen seedA seedB k) ++ pad)).
-    - unfold pad. rewrite app_length, repeat_length, L1. lia.
-    - unfold pad. rewrite app_length, repeat_length, L2. lia.
+    - unfold pad. rewrite length_app, repeat_length, L1. lia.
+    - unfold pad. rewrite length_app, repeat_length, L2. lia.
     - intros j Hj. apply d_zero. rewrite d_app, d_refl, (Hlow j) by lia.
       ring.
     - unfold k. nia.
@@ -825,7 +825,7 @@ End ProuhetShift.
 (* Part D.  Closed instances over Z.                                     *)
 (* ===================================================================== *)
 
-Require Import ZArith.
+From Stdlib Require Import ZArith.
 Open Scope Z_scope.
 
 (* P8 for x -> x^d over the integers from extent 2^r on.                *)

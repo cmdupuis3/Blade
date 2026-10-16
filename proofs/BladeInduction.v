@@ -168,13 +168,13 @@
 (*                                                                       *)
 (* Imports BladeDMWF, BladeShape, BladeTrinityAsym, BladeBinomial,       *)
 (* BladeCompute, BladeMonad, BladeMixedRadix, BladeOptimal, BladeObject. *)
-(* Coq 8.18 / Rocq 9, stdlib only.                                       *)
+(* Rocq 9.0, stdlib only.                                                *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeDMWF BladeShape BladeTrinityAsym BladeBinomial
                           BladeCompute BladeMonad BladeMixedRadix BladeOptimal
                           BladeObject.
-Require Import List Arith Lia ZArith Bool Permutation.
+From Stdlib Require Import List Arith Lia ZArith Bool Permutation.
 Import ListNotations.
 
 (* ===================================================================== *)
@@ -209,7 +209,7 @@ Section Rec.
   Lemma lr_buf_length : forall step n, length (lr_buf step n) = n.
   Proof.
     intros step n. induction n as [|n IH]; simpl; [reflexivity |].
-    rewrite app_length, IH. simpl. lia.
+    rewrite length_app, IH. simpl. lia.
   Qed.
 
   Lemma lr_buf_extends : forall step n m, n <= m ->
@@ -419,7 +419,7 @@ Section Rec.
     simpl lr_buf in Hr, Ht. simpl in Hr.
     split; [exact Hr |]. split; [exact Ht |].
     rewrite Ht, map_map. simpl. rewrite map_id.
-    split; [reflexivity | rewrite map_length, seq_length; reflexivity].
+    split; [reflexivity | rewrite length_map, length_seq; reflexivity].
   Qed.
 
   Lemma sweep_correct : forall step N n,
@@ -474,8 +474,8 @@ Section Rec.
           by (intros m p Hm; apply Hoff; lia).
         apply (Hon step (zread (lr_buf step n) n)). symmetry. exact H1. }
       split; [exact Hall |].
-      rewrite <- (map_length fst (trace P (kstep step))).
-      rewrite <- (seq_length N 0) at 1.
+      rewrite <- (length_map fst (trace P (kstep step))).
+      rewrite <- (length_seq N 0) at 1.
       apply NoDup_incl_length; [apply seq_NoDup |].
       intros n Hin. apply in_seq in Hin. apply Hall. lia.
     Qed.
@@ -630,7 +630,7 @@ Section Shaped.
   Lemma tbuf_length : forall cs n, length (tbuf cs n) = n.
   Proof.
     intros cs n. induction n as [|n IH]; simpl; [reflexivity |].
-    rewrite app_length, IH. simpl. lia.
+    rewrite length_app, IH. simpl. lia.
   Qed.
 
   Lemma tbuf_extends : forall cs n m, n <= m -> exists rest, tbuf cs m = tbuf cs n ++ rest.
@@ -723,7 +723,7 @@ Section Shaped.
   Lemma dbuf_length : forall cs n, length (dbuf cs n) = n.
   Proof.
     intros cs n. induction n as [|n IH]; simpl; [reflexivity |].
-    rewrite app_length, IH. simpl. lia.
+    rewrite length_app, IH. simpl. lia.
   Qed.
 
   Lemma dbuf_extends : forall cs n m, n <= m -> exists rest, dbuf cs m = dbuf cs n ++ rest.
@@ -1097,9 +1097,9 @@ Section ShapedWork.
     pose proof (tsweep_run cs N 0) as Hr. pose proof (tsweep_trace cs N 0) as Ht.
     simpl tbuf in Hr, Ht. simpl in Hr.
     split; [exact Hr |]. split; [exact Ht |].
-    pose proof (f_equal (@length _) Ht) as Hl. rewrite map_length in Hl.
+    pose proof (f_equal (@length _) Ht) as Hl. rewrite length_map in Hl.
     etransitivity; [exact Hl |].
-    rewrite length_prod, seq_length, shapeCard_is_length. reflexivity.
+    rewrite length_prod, length_seq, shapeCard_is_length. reflexivity.
   Qed.
 
   (* --- the lower bound --- *)
@@ -1159,8 +1159,8 @@ Section ShapedWork.
       destruct (list_eq_dec Nat.eq_dec c c) as [_ | Hcc]; [| apply Hcc; reflexivity].
       unfold tprefix in H1. lia. }
     split; [exact Hall |].
-    rewrite <- (map_length cls (trace P (kcell cs))).
-    rewrite shapeCard_is_length, <- (seq_length N 0) at 1.
+    rewrite <- (length_map cls (trace P (kcell cs))).
+    rewrite shapeCard_is_length, <- (length_seq N 0) at 1.
     rewrite <- length_prod.
     apply NoDup_incl_length.
     - apply my_NoDup_list_prod; [apply seq_NoDup | apply enumShape_NoDup].
@@ -1333,7 +1333,7 @@ Section Guard.
   (* total at the declared extent: every ordinal holds a slice *)
   Theorem letrec_guard_total : forall N, length (fst (gbuf N)) = N.
   Proof.
-    intro N. rewrite gbuf_spec. simpl. rewrite app_length, lr_buf_length, repeat_length.
+    intro N. rewrite gbuf_spec. simpl. rewrite length_app, lr_buf_length, repeat_length.
     pose proof (gstop_le N). lia.
   Qed.
 
@@ -1462,7 +1462,7 @@ Lemma my_map_nth_seq : forall (l : list nat) d,
   map (fun i => nth i l d) (seq 0 (length l)) = l.
 Proof.
   intros l d. rewrite <- (rev_involutive l). induction (rev l) as [|x r IH]; [reflexivity |].
-  simpl. rewrite app_length, Nat.add_1_r, seq_S, map_app, Nat.add_0_l. simpl.
+  simpl. rewrite length_app, Nat.add_1_r, seq_S, map_app, Nat.add_0_l. simpl.
   rewrite app_nth2 by lia. rewrite Nat.sub_diag. simpl. f_equal.
   rewrite <- IH at 2. apply map_ext_in. intros i Hi. apply in_seq in Hi.
   rewrite app_nth1 by lia. reflexivity.
@@ -1503,7 +1503,7 @@ Proof.
     simpl index_of.
     assert (Hk : Z.to_nat k < length (lr_buf nat 0 step M))
       by (rewrite lr_buf_length; lia).
-    rewrite (nth_indep _ [] [0]) by (rewrite map_length; exact Hk).
+    rewrite (nth_indep _ [] [0]) by (rewrite length_map; exact Hk).
     rewrite (map_nth (fun x => [x]) _ 0). reflexivity. }
   split; [apply Hb |].
   rewrite traj_veval, Hb, (proj1 (letrec_veval step N)).
@@ -1601,7 +1601,7 @@ Qed.
 
 Lemma dense_tuple_rev : forall r l u t, dense_tuple r l u t -> dense_tuple r l u (rev t).
 Proof.
-  intros r l u t [HL HF]. split; [rewrite rev_length; exact HL |].
+  intros r l u t [HL HF]. split; [rewrite length_rev; exact HL |].
   rewrite Forall_forall in HF |- *. intros x Hx. apply HF. apply in_rev. exact Hx.
 Qed.
 

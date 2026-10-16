@@ -62,12 +62,12 @@
 (* unconstrained.  The H/Stab vocabulary of section 2a is BladeLowering's  *)
 (* OutputSymmetryFramework restated locally (Out, stabilizes, into_range,  *)
 (* neg) rather than imported, exactly as BladeWreath restates permutes.    *)
-(* Checked with Rocq 9.0.1 (the tower targets Coq 8.18; the only           *)
+(* Checked with Rocq 9.0.1 (the tower targets Rocq 9.0; the only           *)
 (* diagnostics are the deprecated-missing-stdlib warnings every file in    *)
 (* the tower emits).                                                      *)
 (* ===================================================================== *)
 
-Require Import Arith Lia List Bool Permutation ZArith.
+From Stdlib Require Import Arith Lia List Bool Permutation ZArith.
 Import ListNotations.
 Open Scope nat_scope.
 

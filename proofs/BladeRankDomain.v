@@ -4,8 +4,8 @@
 (* (docs/research/exact-recurrence-reduction-proofs.md, P6; the          *)
 (* axiom-free half of the C^1 thread).                                   *)
 (*                                                                       *)
-(* The draft's P6 is two facts: the chain rule, DO = DR . Dq, and "a     *)
-(* matrix that factors through m columns has rank at most m".  The first *)
+(* The draft's P6 is two facts: the chain rule, DO = DR . Dq, and 'a     *)
+(* matrix that factors through m columns has rank at most m'.  The first *)
 (* is analysis and lives in reals/BladeSmoothRank.v, which depends on    *)
 (* the axioms of Coq's real numbers.  The second is algebra, and so is   *)
 (* the step that carries a rank computed exactly over Z to a field one   *)
@@ -37,12 +37,12 @@
 (* enter, not here.                                                      *)
 (*                                                                       *)
 (* Imports BladeBinomial, BladeSummary, BladeMomentClosure,              *)
-(* BladeRankBound, BladeDescartes.  Coq 8.18, stdlib only.               *)
+(* BladeRankBound, BladeDescartes.  Rocq 9.0, stdlib only.               *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeBinomial BladeSummary BladeMomentClosure
   BladeRankBound BladeDescartes.
-Require Import List Arith Lia ZArith Ring.
+From Stdlib Require Import List Arith Lia ZArith Ring.
 Import ListNotations.
 
 (* ===================================================================== *)

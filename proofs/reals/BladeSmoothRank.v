@@ -71,7 +71,7 @@
 
 From Blade Require Import BladeBinomial BladeSummary BladeMomentClosure
   BladeRankBound BladeDescartes BladeRankDomain BladeProuhet.
-Require Import Reals Lra List Arith Lia ZArith.
+From Stdlib Require Import Reals Lra List Arith Lia ZArith.
 Import ListNotations.
 
 Open Scope R_scope.

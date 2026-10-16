@@ -1,23 +1,28 @@
 # Blade proofs.
 #
-# Builds the Coq proof tower and its two lanes outside the tower, re-checks
-# the tower's compiled objects with the independent checker, runs
-# `Print Assumptions` on every counted tower result (all must be closed), and
-# verifies the theorem counts quoted in proofs/README.md and docs/proofs.md
-# and that every .v file is in its manifest.
+# Builds the Rocq proof tower and its two lanes outside the tower, re-checks
+# the compiled objects with the independent checker, runs `Print Assumptions`
+# on every counted tower result (all must be closed), and verifies the
+# theorem counts quoted in proofs/README.md and docs/proofs.md and that every
+# .v file is in its manifest.
 #
-# Until 2026-10-15 nothing in CI touched proofs/ (audit 2026-10-15, I01): a
-# change could merge with a broken proof, a new axiom, or a stale count. This
-# workflow is separate from ci.yml because it needs Coq and nothing else --
-# no .NET, no native toolchain -- and runs only when the proofs or their
-# counted documentation change.
+# Separate from ci.yml because it needs Rocq and nothing else -- no .NET, no
+# native toolchain -- and runs only when the proofs or their counted
+# documentation change.
 #
 # The three manifests:
 #   proofs/_CoqProject         the axiom-free tower (counted)
-#   proofs/reals/_CoqProject   Coq Reals axioms, outside the tower (uncounted)
+#   proofs/reals/_CoqProject   Rocq's Reals axioms, outside the tower (uncounted)
 #   proofs/floats/_CoqProject  primitive floats, outside the tower (uncounted)
 #
-# Ubuntu 24.04's `coq` package is Coq 8.18, the version the sources name.
+# The sources follow the Rocq 9 standard (`From Stdlib Require`, the 8.20 /
+# 9.0 lemma names), so the build runs in the official Rocq 9.0.1 image, the
+# version the Rocq Platform supplies locally. Ubuntu's `coq` package is 8.18
+# and cannot build them.
+#
+# Two jobs, because the image has no PowerShell: `manifests` (Ubuntu, pwsh)
+# checks the counts and generates the Print Assumptions probe; `build` (the
+# Rocq image) compiles everything and checks the probe's answers.
 
 name: Proofs
 
@@ -35,17 +40,47 @@ on:
   workflow_dispatch:
 
 jobs:
-  proofs:
+  manifests:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Coq
+      - name: Theorem counts and manifest coverage
+        shell: pwsh
+        run: ./proofs/count-theorems.ps1 -Check
+
+      - name: Generate the Print Assumptions probe
+        shell: pwsh
+        run: ./proofs/check-assumptions.ps1 -EmitProbe "$env:RUNNER_TEMP/BladeAssumptionsProbe.v"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: assumptions-probe
+          path: ${{ runner.temp }}/BladeAssumptionsProbe.v
+          retention-days: 7
+
+  build:
+    needs: manifests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    container:
+      image: rocq/rocq-prover:9.0.1
+      # The image's default user cannot write the runner's mounted workspace.
+      options: --user root
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate Rocq
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends coq
-          coqc --version
+          if ! command -v coqc >/dev/null 2>&1; then
+            coqc_path=$(find / -path /proc -prune -o -name coqc -type f -print 2>/dev/null | head -n 1)
+            echo "found: $coqc_path"
+            dirname "$coqc_path" >> "$GITHUB_PATH"
+          fi
+
+      - name: Rocq version
+        run: coqc --version
 
       - name: Build the tower
         working-directory: proofs
@@ -59,9 +94,24 @@ jobs:
           mods=$(grep -E '\.v$' _CoqProject | sed -E 's/\.v$//; s/^/Blade./')
           coqchk -silent -o -Q . Blade $mods
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: assumptions-probe
+          path: ${{ runner.temp }}/probe
+
       - name: Every tower result is axiom-free (Print Assumptions)
-        shell: pwsh
-        run: ./proofs/check-assumptions.ps1
+        working-directory: proofs
+        run: |
+          probe="$RUNNER_TEMP/probe/BladeAssumptionsProbe.v"
+          total=$(grep -c '^Print Assumptions' "$probe")
+          out=$(coqc -Q . Blade "$probe" 2>&1) || { echo "$out" | tail -n 30; exit 1; }
+          closed=$(printf '%s\n' "$out" | grep -c '^Closed under the global context' || true)
+          axioms=$(printf '%s\n' "$out" | grep -c '^Axioms:' || true)
+          echo "queries: $total  closed: $closed  with axioms: $axioms"
+          if [ "$axioms" -ne 0 ] || [ "$closed" -ne "$total" ]; then
+            printf '%s\n' "$out" | grep -B1 -A6 '^Axioms:' | head -n 60
+            exit 1
+          fi
 
       - name: Build the reals lane
         working-directory: proofs/reals
@@ -78,7 +128,3 @@ jobs:
             echo "coqc $f"
             coqc -Q . BladeFloats "$f"
           done
-
-      - name: Theorem counts and manifest coverage
-        shell: pwsh
-        run: ./proofs/count-theorems.ps1 -Check

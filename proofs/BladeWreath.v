@@ -99,11 +99,11 @@
 (* permutes predicate is the same notion as BladeCompleteness's           *)
 (* perm_pair (two-sided inverse on the position range); it is restated    *)
 (* here rather than imported to keep the file standalone.  Checked with   *)
-(* Rocq 9.0.1 (the tower targets Coq 8.18; the only diagnostics are the   *)
+(* Rocq 9.0.1 (the tower targets Rocq 9.0; the only diagnostics are the   *)
 (* deprecated-missing-stdlib warnings every file in the tower emits).     *)
 (* ===================================================================== *)
 
-Require Import Arith Lia List Permutation.
+From Stdlib Require Import Arith Lia List Permutation.
 Import ListNotations.
 
 (* ===================================================================== *)

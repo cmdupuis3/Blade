@@ -67,12 +67,12 @@
 (*                                                                       *)
 (* Imports BladeDMWF, BladeShape, BladeTrinityAsym, BladeBinomial,       *)
 (* BladeCompute, BladeMonad, BladeMixedRadix, BladeOptimal.              *)
-(* Coq 8.18 / Rocq 9, stdlib only.                                       *)
+(* Rocq 9.0, stdlib only.                                                *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeDMWF BladeShape BladeTrinityAsym BladeBinomial
                           BladeCompute BladeMonad BladeMixedRadix BladeOptimal.
-Require Import List Arith Lia Permutation.
+From Stdlib Require Import List Arith Lia Permutation.
 Import ListNotations.
 
 (* list plumbing: splitting at a known block length *)
@@ -137,8 +137,8 @@ Proof.
   induction r as [|r IH]; intros; simpl; [reflexivity |].
   rewrite BladeDMWF.flat_map_length.
   transitivity (lsum (map (fun _ : nat => (u - l) ^ r) (seq l (u - l)))).
-  { f_equal. apply map_ext. intro i. rewrite map_length. apply IH. }
-  rewrite lsum_const, seq_length. apply Nat.mul_comm.
+  { f_equal. apply map_ext. intro i. rewrite length_map. apply IH. }
+  rewrite lsum_const, length_seq. apply Nat.mul_comm.
 Qed.
 
 (* nondecreasing *)
@@ -320,7 +320,7 @@ Lemma sprod_length : forall l1 l2,
 Proof.
   intros l1 l2. unfold sprod. rewrite BladeDMWF.flat_map_length.
   transitivity (lsum (map (fun _ : list nat => length l2) l1)).
-  { f_equal. apply map_ext. intro t. apply map_length. }
+  { f_equal. apply map_ext. intro t. apply length_map. }
   rewrite lsum_const. apply Nat.mul_comm.
 Qed.
 
@@ -507,7 +507,7 @@ Qed.
 
 Theorem veval_one_per_orbit : forall (U : Type) (A : Arr U),
   length (veval A) = shapeCard (fst A).
-Proof. intros. unfold veval. rewrite map_length. symmetry. apply shapeCard_is_length. Qed.
+Proof. intros. unfold veval. rewrite length_map. symmetry. apply shapeCard_is_length. Qed.
 
 (* ===================================================================== *)
 (* PART E.  THE OBJECT AS A PROGRAM (projection 2: BladeOptimal).        *)

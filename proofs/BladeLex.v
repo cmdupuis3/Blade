@@ -23,11 +23,11 @@
 (* as a remark since no downstream theorem consumes it.                  *)
 (*                                                                       *)
 (* Imports BladeDMWF, BladeArrow, BladeAffine, BladeCompound.            *)
-(* Coq 8.18, stdlib only.                                                *)
+(* Rocq 9.0, stdlib only.                                                *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeDMWF BladeArrow BladeAffine BladeCompound.
-Require Import List Arith Lia Sorted Setoid.
+From Stdlib Require Import List Arith Lia Sorted Setoid.
 Import ListNotations.
 
 (* Strict lexicographic order on index tuples. *)

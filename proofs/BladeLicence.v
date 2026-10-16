@@ -141,7 +141,7 @@
 (*                                                                       *)
 (* Imports BladeNumericContract, BladeDMWF, BladeShape, BladeCompute,    *)
 (* BladeMonad, BladeMixedRadix, BladeLowering, BladeCompleteness,        *)
-(* BladeOptimal, BladeObject, BladeSurface.  Coq 8.18 / Rocq 9, stdlib   *)
+(* BladeOptimal, BladeObject, BladeSurface.  Rocq 9.0, stdlib            *)
 (* only (List, Arith, Lia, Permutation, FinFun, ZArith), no axioms.      *)
 (* ===================================================================== *)
 
@@ -149,7 +149,7 @@ From Blade Require Import BladeNumericContract.
 From Blade Require Import BladeDMWF BladeShape BladeCompute BladeMonad BladeMixedRadix
                           BladeLowering BladeCompleteness BladeOptimal
                           BladeObject BladeSurface.
-Require Import List Arith Lia Permutation FinFun ZArith.
+From Stdlib Require Import List Arith Lia Permutation FinFun ZArith.
 Import ListNotations.
 
 (* ===================================================================== *)
@@ -190,7 +190,7 @@ Section Licence.
     apply (Permutation_nth (tab r v') (tab r v) 0) in HP.
     cbv zeta in HP. destruct HP as (_ & g & Hfun & Hinj & Hnth).
     assert (Hlen : length (tab r v') = r)
-      by (unfold tab; rewrite map_length, seq_length; reflexivity).
+      by (unfold tab; rewrite length_map, length_seq; reflexivity).
     rewrite Hlen in Hfun, Hinj, Hnth.
     pose proof (proj1 (bInjective_bSurjective Hfun) Hinj) as Hsurj.
     destruct (bSurjective_bBijective Hfun Hsurj) as (g' & Hfun' & Hbij).
@@ -288,11 +288,11 @@ Section SurfaceR.
                     (kwf_R_Ksym_R f Hwf Ec)) as Hcls.
       apply Hcls. unfold scls, tab.
       assert (Lv : length (vals (as_of ro (concat (map expand (rle b)))) t) = k_arity f).
-      { rewrite vals_length. unfold as_of. rewrite map_length, rle_expand. exact (eq_sym Har). }
+      { rewrite vals_length. unfold as_of. rewrite length_map, rle_expand. exact (eq_sym Har). }
       assert (Lv' : length (vals (as_of ro (concat (map expand (rle b))))
                                  (scanon (concat (map (group_shape true) (rle b))) t))
                     = k_arity f).
-      { rewrite vals_length. unfold as_of. rewrite map_length, rle_expand. exact (eq_sym Har). }
+      { rewrite vals_length. unfold as_of. rewrite length_map, rle_expand. exact (eq_sym Har). }
       rewrite (tab_nth_r _ _ _ Lv), (tab_nth_r _ _ _ Lv').
       apply isort_respects. apply Permutation_sym. exact HP.
     - assert (E : concat (map (group_shape false) (rle b)) = concat (map dshape (rle b))).
@@ -988,8 +988,8 @@ Proof.
         (TComp (out_shape (k_comm kmod2) [(0, s01_shape); (0, s01_shape)]))).
       apply TC_AppM; [apply TC_Method; reflexivity | apply kmod2_kwf_R | reflexivity].
     - intros x y Hxy. unfold Rmod2 in *.
-      rewrite (Nat.add_mod (x * 3)), (Nat.add_mod (y * 3)), (Nat.mul_mod x),
-              (Nat.mul_mod y), Hxy by discriminate. reflexivity. }
+      rewrite (Nat.Div0.add_mod (x * 3)), (Nat.Div0.add_mod (y * 3)), (Nat.Div0.mul_mod x),
+              (Nat.Div0.mul_mod y), Hxy by discriminate. reflexivity. }
   split; [exact Hty |].
   exact (typed_is_quotient_RC Rmod2 Rmod2_refl Rmod2_trans s01_G s01_rho _ _
            s01_env_ok Hty).

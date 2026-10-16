@@ -57,8 +57,8 @@
 (*   compiler_runs,            the classifier and the generated program, *)
 (*   compiled_affine_runs      run by the kernel on four programs,       *)
 (*                             including an identically-zero quadratic   *)
-(*                             term and the draft's "special parameter   *)
-(*                             value" case.                              *)
+(*                             term and the draft's 'special parameter   *)
+(*                             value' case.                              *)
 (*                                                                       *)
 (* Scope, stated once.  This is a model fragment in Coq, not Blade's     *)
 (* surface syntax or its F# compiler: nothing in src/ implements or is   *)
@@ -72,7 +72,7 @@
 
 From Blade Require Import BladeBinomial BladeSummary BladeMomentClosure
   BladeRankBound BladeRankDomain BladeProuhet BladeNewton.
-Require Import List Arith Lia ZArith Ring Bool InitialRing Setoid.
+From Stdlib Require Import List Arith Lia ZArith Ring Bool InitialRing Setoid.
 Import ListNotations.
 Local Open Scope nat_scope.
 
@@ -117,7 +117,7 @@ Section Reading.
 
   Lemma phi_morph :
     ring_morph k0 k1 kadd kmul ksub kopp (@eq K)
-               0%Z 1%Z Z.add Z.mul Z.sub Z.opp Zeq_bool phi.
+               0%Z 1%Z Z.add Z.mul Z.sub Z.opp Z.eqb phi.
   Proof. apply gen_phiZ_morph; [apply Eqsth|apply Eq_ext|exact Kth]. Qed.
 
   Lemma phi_0 : phi 0%Z = k0.
@@ -271,7 +271,7 @@ Section Reading.
 
   Lemma gridK_length : forall D, length (gridK D) = S D.
   Proof.
-    intro D. unfold gridK. rewrite map_length, seq_length. reflexivity.
+    intro D. unfold gridK. rewrite length_map, length_seq. reflexivity.
   Qed.
 
   Lemma Forall_zero_peval : forall l s,
@@ -417,7 +417,7 @@ Section ZeroTest.
     - intros i Hi. destruct (Hf i Hi) as [_ ->].
       unfold zenv, z.
       rewrite (nth_indep _ 0%Z (Z.of_nat (f 0)))
-        by (rewrite map_length, seq_length; exact Hi).
+        by (rewrite length_map, length_seq; exact Hi).
       rewrite (map_nth (fun i0 => Z.of_nat (f i0)) (seq 0 n) 0 i).
       rewrite seq_nth by exact Hi.
       symmetry. apply (phi_of_nat K k0 k1 kadd kmul ksub kopp Kth).

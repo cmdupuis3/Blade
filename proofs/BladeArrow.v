@@ -24,11 +24,11 @@
 (*   Compound (mask-conditioned) -- the arrow enumerates exactly the     *)
 (*     true cells of the mask (CompoundIdx denotation, rank 2)           *)
 (*                                                                       *)
-(* Imports BladeDMWF.  Coq 8.18, stdlib only.                            *)
+(* Imports BladeDMWF.  Rocq 9.0, stdlib only.                            *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeDMWF.
-Require Import List Arith Lia Bool Setoid.
+From Stdlib Require Import List Arith Lia Bool Setoid.
 Import ListNotations.
 
 (* Helper: pointwise-equal flat_map. *)

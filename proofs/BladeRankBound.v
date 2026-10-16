@@ -32,8 +32,8 @@
 (*   many_roots                a polynomial with more distinct roots     *)
 (*                             than coefficients is zero (Horner         *)
 (*                             division whose quotient coefficients are  *)
-(*                             tail evaluations, so "quotient zero =>    *)
-(*                             dividend zero" is one line).  The only    *)
+(*                             tail evaluations, so 'quotient zero =>    *)
+(*                             dividend zero' is one line).  The only    *)
 (*                             place Z being an integral domain is used. *)
 (*                                                                       *)
 (*   moment_summary_needs_r_coordinates  P4a at EVERY r: the first r     *)
@@ -73,12 +73,12 @@
 (* pure powers, not for the general fragment with coefficient            *)
 (* polynomials a_j(q_r).  No source fragment, no recognition, no code.   *)
 (*                                                                       *)
-(* Imports BladeBinomial, BladeSummary, BladeMomentClosure.  Coq 8.18,   *)
+(* Imports BladeBinomial, BladeSummary, BladeMomentClosure.  Rocq 9.0,   *)
 (* stdlib only.                                                          *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeBinomial BladeSummary BladeMomentClosure.
-Require Import List Arith Lia ZArith Ring.
+From Stdlib Require Import List Arith Lia ZArith Ring.
 Import ListNotations.
 
 Open Scope Z_scope.
@@ -468,7 +468,7 @@ Proof.
     - apply NoDup_map_in; [|apply seq_NoDup].
       intros t t' Ht Ht'. apply in_seq in Ht. apply in_seq in Ht'.
       apply Hinj; lia.
-    - rewrite !map_length, !seq_length. lia.
+    - rewrite !length_map, !length_seq. lia.
     - intros al Hal. apply in_map_iff in Hal. destruct Hal as [t [E Ht]].
       subst al. apply in_seq in Ht. rewrite <- (zsumf_peval c (a t) s 0).
       apply Hroots. lia. }
@@ -726,9 +726,9 @@ Proof.
            ([1; 5; 6] ++ map Z.of_nat (seq 8 (N - 3)))
            ([2; 3; 7] ++ map Z.of_nat (seq 8 (N - 3)))).
   - split; [|apply collision_tail_positive; lia].
-    rewrite app_length, map_length, seq_length. simpl. lia.
+    rewrite length_app, length_map, length_seq. simpl. lia.
   - split; [|apply collision_tail_positive; lia].
-    rewrite app_length, map_length, seq_length. simpl. lia.
+    rewrite length_app, length_map, length_seq. simpl. lia.
   - unfold zq2. rewrite !zpsum_app. reflexivity.
   - unfold zq2, powmap. rewrite !map_app, !zpsum_app. intro Hc.
     apply (f_equal snd) in Hc. cbn [snd] in Hc.

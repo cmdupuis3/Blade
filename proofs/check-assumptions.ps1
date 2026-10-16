@@ -19,13 +19,20 @@
 .PARAMETER Coqc
     The coqc to use. Default: `coqc` on PATH.
 
+.PARAMETER EmitProbe
+    Write the generated probe (`Print Assumptions` for every counted result)
+    to this path and stop, without running coqc. CI uses it: the probe is
+    generated where PowerShell is, and compiled in the Rocq container, which
+    checks that every answer is "Closed under the global context".
+
 .EXAMPLE
     pwsh -File proofs/check-assumptions.ps1
     pwsh -File proofs/check-assumptions.ps1 -Coqc C:\Rocq-Platform~9.0~2025.08\bin\coqc.exe
 #>
 [CmdletBinding()]
 param(
-    [string]$Coqc = 'coqc'
+    [string]$Coqc = 'coqc',
+    [string]$EmitProbe = ''
 )
 
 Set-StrictMode -Version Latest
@@ -81,6 +88,13 @@ foreach ($f in $files) {
     [void]$sb.AppendLine("From Blade Require " + [IO.Path]::GetFileNameWithoutExtension($f) + '.')
 }
 foreach ($n in $names) { [void]$sb.AppendLine("Print Assumptions $n.") }
+
+if ($EmitProbe) {
+    [IO.File]::WriteAllText($EmitProbe, $sb.ToString())
+    Write-Host "Wrote $($names.Count) Print Assumptions queries to $EmitProbe"
+    return
+}
+
 [IO.File]::WriteAllText($probe, $sb.ToString())
 
 try {
