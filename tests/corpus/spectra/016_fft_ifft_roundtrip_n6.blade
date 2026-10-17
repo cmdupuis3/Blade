@@ -1,10 +1,13 @@
-// TEST: Spectra ifft: round-trip at n=6 (DFT fallback both ways)
-// Same round-trip as 015 on the non-power-of-two path: forward table-DFT,
-// inverse synthesis, residual pins at 0.0.
+// TEST: Spectra ifft: round-trip at n=6 (Bluestein both ways)
+// Same round-trip as 015 on the non-power-of-two path: forward and inverse
+// Bluestein (F6). The squared residual is rounding-level (about 1.8e-30;
+// it was exactly 0 under the old table DFT) and its bits depend on
+// contraction, so the pin is a tolerance predicate.
 import spectra as sp
 let x: Array<Float64 like Idx<6>> = [1.5, -0.25, 0.0, 2.75, -1.0, 0.5]
 let X = sp.fft(x)
 let X2: Array<Complex128 like Idx<6>> = X
 let y = sp.ifft(X2)
 let resid = reduce(method_for(range<Idx<6>>) <@> lambda(i) -> (y(i) - x(i)) * (y(i) - x(i)), (+), 0.0)
-// EXPECT: resid = 0.0
+let roundtrip_ok = resid < 1.0e-24
+// EXPECT: roundtrip_ok = true

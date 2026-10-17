@@ -145,7 +145,10 @@ refused at the call; a body that means Float64 arithmetic converts first,
 (g++), the interpreter (`src/Interp/Numerics.fs`), the LLVM lane
 (`src/EmitLlvm.fs` + `src/cpp/blade_llvm_shim.c`) and compile-time static
 evaluation compute the same value, or fail with the same code (a `let static`
-fold refuses at compile time instead):
+fold refuses at compile time instead) -- with one stated exception: a
+default build is FAST, and the floating-point ROUNDING of a compiled program
+may differ from the other lanes where the C++ compiler fuses `a * b + c`
+(see "Fast by default" below):
 
 | Operation | Result |
 |---|---|
@@ -189,10 +192,40 @@ the same P/Invoked real functions. On a platform without that port the
 interpreter keeps best-effort textbook forms for complex `exp`/`log`/`sqrt`/`^`
 (not bit-verified) and declines the rest rather than guess. Outside the
 contract, documented rather than hidden: CUDA device bodies (device libm,
-`thrust::` complex, plain integer `/`), a host
-compiler without asm labels (MSVC, the nvcc host pass: `blade_libm::`
-forwards to `std::` there), and `lgamma`/`digamma`, which are Blade's own
+`thrust::` complex, plain integer `/` and `%`, an unchecked float → int
+cast, and a real `^` through the device `pow` -- none of them can raise a
+panic on the device; integer `^` stays exact and wrapping there for a
+literal nonnegative exponent, and a variable integer exponent is refused in
+a device body, since its negative-exponent BL8013 has no device form), a host
+compiler without asm labels (MSVC, the nvcc host pass on Windows:
+`blade_libm::` forwards to `std::` there, and MSVC has no `-fwrapv`, so
+integer overflow in host code it compiles is not guaranteed to wrap -- every
+g++ host line, the Linux nvcc host pass included, carries `-fwrapv`), and
+`lgamma`/`digamma`, which are Blade's own
 series on both sides (BL8008 outside `x > 0`).
+
+**Fast by default; floating-point reproducibility is the opt-in.** The table
+fixes WHICH operations a program performs. How a compiled program ROUNDS a
+chain of them is fast by default and outside the cross-lane contract: user
+builds compile with `-ffp-contract=fast`, so g++ may fuse `a * b + c` into one
+FMA with a single rounding where the interpreter rounds twice, and a licensed
+reorder (`where omp` / `comm` folds, `BLADE_FP_REASSOC`) or a BLAS/LAPACK route
+may differ in the last ulp. Integer arithmetic, the faults (BL8013, BL8014),
+the run-time libm and `fma(a, b, c)` (its own node: one rounding in every
+lane, under any setting) are unaffected. Reproducibility -- the interpreter's
+operation sequence, bit for bit -- is asked for, never assumed:
+
+- per function, `where repro`: the emitted body is compiled without
+  contraction, never re-inlined into a contracting caller, and declines
+  reordered folds and library routes (features.md, `where repro`);
+- per build, `BLADE_FP_CONTRACT=off` (with no `BLADE_FP_REASSOC` and BLAS
+  routing off, its default without `OPENBLAS_DIR`);
+- in the test gates: the interpreter and oracle differentials pin
+  `BLADE_FP_CONTRACT=off` for their own compiles, which is what makes them
+  byte-exact, and `blade test` clears the reorder and BLAS knobs.
+
+The interpreter, the LLVM lane (whose IR carries no `contract` flag) and
+compile-time evaluation never contract.
 
 **The mixing rule: nothing converts implicitly.** `1` is an Int64 and `1.0`
 a Float64 -- the decimal point is the type, as in F#. An arithmetic operator
@@ -659,6 +692,19 @@ NetCDF, Zarr, CSV and Icechunk providers are implemented (`blade test
 netcdf|zarr|csv|icechunk`); HDF5 is planned. (The earlier spelling
 `type ERA5 = NetCDFProvider<"era5.nc">` is gone.)
 
+A read is a value boundary too: **a missing value never crosses it disguised
+as a number.** A cell the store marks missing -- NaN or ±Inf in a floating
+variable; for NetCDF also `_FillValue`, `missing_value`, a cell outside the
+valid range, the default fill of a never-written floating cell -- makes every
+default read refuse (BL8015) in every lane; a finite Zarr/Icechunk
+`fill_value` is a value. The opt-in is the masked read,
+`era5.vars.t2m |> nc.read_present`: the present cells as a compound array
+(§4.5), built as `compound(raw, mask(raw, present))` over one raw read that
+the program never sees, and `nc.present` is that mask
+([features/sql.md §2a](features/sql.md)). A compile-time fold of such a variable
+(`let static ... |> read`) refuses too, at compile time, under BL3999 (the code of
+every `let static` fold failure) with the same sentence.
+
 ### 3.9 Symmetry lives in the index type
 
 `Array<Float like SymIdx<2, 1000>>` — not a dense array plus an annotation.
@@ -713,6 +759,10 @@ dense — prints its rows bracketed, so `A` above echoes as it was written;
 rank 1 is already one level of brackets and ranks ≥ 3 stay flat. The REPL
 additionally shows only the first five entries per level and elides the rest
 as `...`; that cap is the echo's alone, and `blade run` prints every cell.
+A tuple or a struct prints spelled like its literal too -- `t = (1, 2.0)`,
+`p = P { a = 1.0, b = 2.0 }` -- and so does each element of an array of
+structs, through the same formatter: `ps = [P { a = 1.0 }, P { a = 2.0 }]`.
+(A string inside one prints raw, as a string binding does.)
 
 Printing also agrees with the literal's TYPE. As in source, the decimal point
 is what tells a float from an integer: a `Float64`/`Float32` value, and each
@@ -752,8 +802,8 @@ Iteration emits values tagged with their source index type as a **unit**:
    operation's result -- is checked at run time against the array's own
    extent instead (BL8006), named slot or anonymous alike. A literal index-typed VALUE -- a `Nat<I>`
    `let`, a cell of an index-typed foreign-key column -- is range-checked the
-   same way, with one exception: `-1`, group_by's "excluded" key. A string
-   `EnumIdx` literal must be one of the type's labels.
+   same way, with one exception: `-1`, group_by's "excluded" key. An
+   `EnumIdx` literal must be one of the type's keys (labels), BL4003.
 
 **Positions and casts.** Arithmetic on an index value yields a *position*:
 never a PROVEN index value (`i + 1` is not proved to lie in `I`). An
@@ -793,8 +843,17 @@ leaf of a destructured `let`.
 Everything else -- a position, a plain `Int64`, a `Nat<_>` wildcard, a
 branch, a call, an element read out of an index-typed array (foreign-key
 DATA, including a kernel parameter the loop feeds from such an array) -- is
-checked. A string key subscripting a string `EnumIdx` slot is mapped to its
-label's ordinal, a key that is no label stopping with BL8006. The checks
+checked. **`EnumIdx` subscripts are KEYS.** Every value of an `EnumIdx`
+type `R` is one of R's keys -- an integer one too: `range<R>` over
+`EnumIdx<[100, 200, 300]>` iterates 100, 200, 300, and a cell of an
+`Array<R like ...>` holds a key. An integer key is represented as its
+POSITION in the key list, so a value of type `R` subscripts an array over `R`
+directly, proven and unguarded, and the key is produced where the value is
+observed: printing, arithmetic (`r + 1` is a key plus one, a plain `Int64`),
+comparison, a numeric cast, an integer parameter, a subscript into an axis of
+another type. A literal of type `R` must be one of its keys (BL4003). A plain
+integer or a string subscripting an `EnumIdx` slot is a key looked up among
+R's keys at run time, a key that is none of them stopping with BL8006. The checks
 are what the BL4003 untagged-integer advice points at: iterating with `range<I>` (or `halo<I, ...>` for neighbors)
 removes them. The guarantee follows a named array into a generic parameter:
 an array parameter whose UNNAMED axis (`m: T^1`, `Float64^1`, an anonymous
@@ -1018,6 +1077,21 @@ Return type follows `where` because it may depend on constraints (`comm` can
 produce `SymIdx` outputs). Nested `function` declarations desugar to
 immutable lambda bindings (internally the same marker `let static` uses).
 
+**Rank at a direct call.** A call never broadcasts and never reduces rank:
+each argument is taken at the rank its parameter declares, or refused at that
+argument (BL3001). A parameter declared `T` -- or `T^0`, the same variable --
+takes any value WHOLE, a scalar or an array of any rank, and the instance's
+result rank is whatever the body computes at that instance (an elementwise
+body over array arguments answers an array of their rank; a body that folds
+answers a scalar). A parameter declared `T^k` with k ≥ 1 takes exactly a
+rank-k array: a scalar, or an array of another rank, is refused rather than
+lifted or folded at the call site. Parameters that share one variable take
+one type, so two arrays of different rank cannot both be passed as `T`; a
+scalar meeting a `T^r` operand INSIDE the body broadcasts there, as any
+scalar-array arithmetic does, without the call expanding it. The fix the
+refusal suggests is the caller's or the declaration's: pass a value of the
+declared rank, or declare the parameter `T`.
+
 **Unannotated parameters.** A parameter written without a type is an
 anonymous type variable -- `function inc(x) = x + 1` is `function inc(x: T) =
 x + 1` -- so each call's argument decides its type (one monomorphized body per
@@ -1113,9 +1187,22 @@ tables proved the sign law. A body that reads a CAPTURED Int/Float scalar
 evaluates with that capture bound to a sampled value: the clause is a law
 about the body as written, so it must hold for every value of the capture,
 and a claim true only for the capture's actual value is refused
-(conservatively) rather than trusted. A capture of any other kind (an array,
-a function, a Bool) still makes the body unevaluable, and the claim stays
-trusted.
+(conservatively) rather than trusted. A read of a CAPTURED array at integer
+coordinates evaluates the same way, per cell: each cell is sampled once and
+read consistently across the swap, and the samples honour the array's
+declared storage class (a `SymIdx` group answers every permutation of its
+coordinates from one cell, an `AntisymIdx` group negates by the permutation's
+sign and reads 0 on a repeated coordinate), so a claim the TYPE guarantees
+is never refuted. Cells are keyed by the binder read, so two names bound to
+one array (`let v = w`) are sampled independently, exactly as two captured
+scalars are: a claim true only because they alias is refused. A call of a
+pure (no writes, output or external reads),
+non-recursive user function -- declared, or a module-level `let` of a
+lambda -- evaluates through the function's body with the arguments
+substituted. Everything else stays unevaluable and the claim stays trusted:
+a captured function or Bool, a structured array read (compound, sparse,
+orbit, Hermitian, a partial read), a higher-order parameter, a recursive or
+effectful callee, a reduction.
 
 **Symmetry deduction is exact-ring algebra.** The parity tables prove
 `x + y + z` commutative in every pair by associativity and commutativity of
@@ -1475,7 +1562,13 @@ Semantics: the binding denotes a family `(n : ℕ) → Array<T like Idx<n>, ...>
 destructures the family: `prefix` binds the same array at extent n, `n` the
 new step ordinal. Reading the binding at its declared extent (or any smaller
 one) instantiates the family; interior reads `qh(k)` and final-segment reads
-compose with every combinator.
+compose with every combinator. When the recursion axis is a NAMED index type
+the ordinal is that axis's index value, `n : Nat<Times>`, exactly the
+iteration index a `range<Times>` kernel receives: it reads any array over the
+same axis unchecked, and arithmetic on it (`n - 1`, `(n + 1) % 5`) is a
+position, checked at run time (§3.10). To index an array over a DIFFERENT
+named axis with it, convert explicitly, `Int64(n)` (a cast to the other axis
+refuses a foreign index value).
 
 Rules, all checked syntactically:
 

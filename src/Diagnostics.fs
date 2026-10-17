@@ -221,10 +221,14 @@ module Codes =
             // (plan-match-statements.md §5 R1). Widened to every top-level
             // namespace: a second top-level `let`/`static` of a name (or one
             // beside a `function` of it), a second `type`/`struct`/sum type,
-            // a second `Unit`, and -- across the modules of one program --
-            // a type or variant-constructor name declared twice (type
-            // identity is not module-qualified yet).
+            // a second `Unit`, and a variant-constructor name two sum types
+            // of one module declare (across modules each module's
+            // declarations are its own -- module-qualified identity, D11).
             "BL2009", "duplicate declaration"
+            // BL2010: an unqualified type or constructor name two imported
+            // modules both declare (and the importing module does not); the
+            // message lists the qualified spellings (`A.Red`, `B.Red`).
+            "BL2010", "ambiguous imported name"
             // BL3xxx: types
             "BL3001", "type mismatch"
             "BL3002", "arity mismatch"
@@ -514,6 +518,19 @@ module Codes =
             // the compiled lane used to answer x86's INT_MIN sentinel while
             // the interpreter saturated.
             "BL8014", "float-to-integer conversion out of range"
+            // THE PROVIDER BOUNDARY RULE: a missing value never crosses a
+            // provider boundary disguised as a number. A read whose variable
+            // holds a missing cell -- NaN / +-Inf in a floating variable, a
+            // NetCDF _FillValue / missing_value / valid-range sentinel -- is
+            // refused, naming the variable, the count and the first cell
+            // (ProviderRegistry.MissingRule: blade_rt::refuse_missing in the
+            // compiled lane, Interp/Run.fs materializeProviderRead in the
+            // interpreter; the static fold refuses (the `let static` assertion,
+            // BL3999) carrying the
+            // same sentence). A provider WRITE of a NaN / infinite cell is
+            // refused under the same code. The opt-in is the masked read,
+            // `alias.read_present` / `alias.present`.
+            "BL8015", "provider read holds missing values"
             // BL9xxx: internal compiler errors
             "BL9001", "internal compiler error"
             "BL9002", "internal codegen invariant violated"

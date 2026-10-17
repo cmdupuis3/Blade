@@ -1,0 +1,9 @@
+// TEST: Parenthesized payload variant spelling is steered (rejects)
+// ERROR: BL1004 @ 7:20
+// ERROR-CONTAINS: payload is written with a colon
+// ============================================================================
+// The ML spelling `Circle(Float64)` was refused as implicit multiplication
+// (BL1001), a sentence about the wrong construct. Blade spells a payload
+// `Circle : Float64`; the parser says so.
+type Shape = Circle(Float64) | Square(Float64)
+let s = Circle(1.0)

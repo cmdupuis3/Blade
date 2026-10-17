@@ -1,0 +1,13 @@
+// TEST: Struct array elements print like struct values
+// An array of structs prints each element through the formatter a struct
+// value uses (formalism 3.9), in every lane: a nested struct field as its own
+// literal, a dense array field as its values, an integer EnumIdx field as its
+// KEY. It used to print `[{inner: ..., xs: ...}]`, a spelling no literal has.
+type R = EnumIdx<[100, 200, 300]>
+struct Inner { k: Nat<R>, x: Float64 }
+struct Row { inner: Inner, xs: Array<Float64 like Idx<2>> }
+let codes: Array<Nat<R> like Idx<2>> = [300, 100]
+let a = Row { inner = Inner { k = codes(0), x = 1.0 }, xs = [1.0, 2.0] }
+let b = Row { inner = Inner { k = codes(1), x = 3.0 }, xs = [4.0, 5.0] }
+let rows: Array<Row like Idx<2>> = [a, b]
+// EXPECT: rows = [Row { inner = Inner { k = 300, x = 1.0 }, xs = [1.0, 2.0] }, Row { inner = Inner { k = 100, x = 3.0 }, xs = [4.0, 5.0] }]

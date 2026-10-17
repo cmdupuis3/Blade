@@ -17,7 +17,33 @@ type NcVar = {
     Name: string
     Dims: NcDim list   // slowest-changing first (C/row-major order)
     TypeCode: int      // NC_* type constant
+    /// The CF DECODING attributes the variable carries (`cfDecodingAttrs`).
+    CfAttrs: string list
 }
+
+/// The CF-conventions PACKING attributes, which change what EVERY stored
+/// value means (physical = stored * scale_factor + add_offset). This provider
+/// reads raw stored values and applies neither.
+///
+/// `_FillValue` is deliberately NOT here: writers attach it to nearly every
+/// variable (this repo's own fixtures carry it), and a raw read is exact
+/// wherever a cell does not hold the sentinel. A cell that DOES hold it is
+/// refused by the boundary rule (`missingRuleOf`, BL8015); the masked read
+/// (`alias.read_present`) is the opt-in that drops it instead.
+let cfDecodingAttrs = [ "scale_factor"; "add_offset" ]
+
+/// Why a variable cannot be read faithfully, or None. Reading it raw would
+/// SILENTLY mean something else: a packed variable's stored numbers are not
+/// its values, and an NC_CHAR variable is text the numeric read would turn
+/// into character codes. Refused by name at every read path (codegen, the compile-time
+/// fold, the interpreter) rather than decoded half-way.
+let unreadableReason (v: NcVar) : string option =
+    if v.TypeCode = 2 then
+        Some $"NetCDF variable '{v.Name}' is NC_CHAR (text): this provider reads numeric variables only, and reading text as numbers would yield character codes"
+    elif not v.CfAttrs.IsEmpty then
+        let attrs = v.CfAttrs |> String.concat ", "
+        Some $"NetCDF variable '{v.Name}' carries the CF packing attribute(s) {attrs}, which this provider does not apply: its raw stored values are not the physical values. Unpack it outside Blade (write stored * scale_factor + add_offset to a new variable), or drop the attributes if the values are already physical"
+    else None
 
 type NcFile = {
     Path: string
@@ -61,6 +87,24 @@ module private NcFFI =
 
     [<DllImport("netcdf", CallingConvention = CallingConvention.Cdecl)>]
     extern int nc_inq_vardimid(int fileId, int varid, int[] dimids)
+
+    // 0 (NC_NOERR) when the variable carries the attribute, NC_ENOTATT when not.
+    [<DllImport("netcdf", CallingConvention = CallingConvention.Cdecl)>]
+    extern int nc_inq_attid(int fileId, int varid, string name, int& attnum)
+
+    // The missing-value attributes (`missingRuleOf`): an attribute's type and
+    // length, then its values converted to double by libnetcdf.
+    [<DllImport("netcdf", CallingConvention = CallingConvention.Cdecl)>]
+    extern int nc_inq_att(int fileId, int varid, string name, int& xtype, unativeint& len)
+
+    [<DllImport("netcdf", CallingConvention = CallingConvention.Cdecl)>]
+    extern int nc_get_att_double(int fileId, int varid, string name, double[] data)
+
+    [<DllImport("netcdf", CallingConvention = CallingConvention.Cdecl)>]
+    extern int nc_get_att_longlong(int fileId, int varid, string name, int64[] data)
+
+    [<DllImport("netcdf", CallingConvention = CallingConvention.Cdecl)>]
+    extern int nc_inq_varid(int fileId, string name, int& varid)
 
     // Data reads for the compile-time fold (provider-backed statics): libnetcdf
     // converts any numeric type to the requested C type (double + longlong
@@ -187,7 +231,12 @@ module private NcQuery =
                 | Some dim -> dim
                 | None -> failwith $"Dimension ID {did} not found")
 
-        { Name = name; Dims = dims; TypeCode = xtype }
+        let cfAttrs =
+            cfDecodingAttrs |> List.filter (fun a ->
+                let mutable attnum = 0
+                NcFFI.nc_inq_attid(fileId, varId, a, &attnum) = 0)
+
+        { Name = name; Dims = dims; TypeCode = xtype; CfAttrs = cfAttrs }
 
 // File Loading (compile-time metadata extraction)
 
@@ -242,6 +291,7 @@ let readVarData (path: string) (varName: string) : Result<NcVarData, string> =
                     if v.Name = varName then Some (vid, v) else None)
             match hit with
             | None -> Error $"variable '{varName}' not found in '{path}'"
+            | Some (_, v) when (unreadableReason v).IsSome -> Error (unreadableReason v).Value
             | Some (vid, v) ->
                 let lens = v.Dims |> List.map (fun d -> int d.Length)
                 let count = lens |> List.fold (*) 1
@@ -258,6 +308,132 @@ let readVarData (path: string) (varName: string) : Result<NcVarData, string> =
             NcQuery.closeFile fileId
     with ex ->
         Error ex.Message
+
+// The provider boundary rule (ProviderRegistry.MissingRule)
+
+/// libnetcdf's default fill for a FLOATING type: what a never-written cell
+/// holds when the variable has no `_FillValue`. NC_FILL_FLOAT is a float
+/// constant, compared after the double widening every reader performs.
+/// Integer types answer None: NC_FILL_INT (-2147483647), NC_FILL_SHORT
+/// (-32767), NC_FILL_BYTE (-127) are representable data, so an integer
+/// variable is refused only on an explicit attribute.
+let private defaultFloatFill (typeCode: int) : float option =
+    match typeCode with
+    | 5 -> Some (float 9.9692099683868690e+36f)  // NC_FILL_FLOAT
+    | 6 -> Some 9.9692099683868690e+36           // NC_FILL_DOUBLE
+    | _ -> None
+
+/// A numeric attribute's values (converted to double), or None when the
+/// variable does not carry it or it is not numeric.
+let private numericAttr (fileId: int) (varId: int) (name: string) : float list option =
+    let mutable xtype = 0
+    let mutable len = 0un
+    if NcFFI.nc_inq_att(fileId, varId, name, &xtype, &len) <> 0 || xtype = 2 (* NC_CHAR *) || len = 0un then None
+    else
+        let buf : float[] = Array.zeroCreate (int len)
+        if NcFFI.nc_get_att_double(fileId, varId, name, buf) <> 0 then None
+        else Some (List.ofArray buf)
+
+/// An attribute's values as int64 -- an INTEGER variable's sentinels, exact
+/// (a double would merge NC_FILL_INT64 with its neighbours).
+let private intAttr (fileId: int) (varId: int) (name: string) : int64 list option =
+    let mutable xtype = 0
+    let mutable len = 0un
+    if NcFFI.nc_inq_att(fileId, varId, name, &xtype, &len) <> 0 || xtype = 2 (* NC_CHAR *) || len = 0un then None
+    else
+        let buf : int64[] = Array.zeroCreate (int len)
+        if NcFFI.nc_get_att_longlong(fileId, varId, name, buf) <> 0 then None
+        else Some (List.ofArray buf)
+
+/// The variable's missing-value rule -- the ONE predicate every NetCDF
+/// reader, the interpreter and the static fold share: NaN / +-Inf in a
+/// floating variable; `_FillValue` (NaN -> the NaN test, else a sentinel);
+/// every `missing_value`; `valid_range` / `valid_min` / `valid_max`
+/// (inclusive bounds); and, for a floating variable with no `_FillValue`,
+/// the default fill. A store that cannot be opened answers no rule -- the
+/// read itself reports it.
+let missingRuleOf (path: string) (varName: string) : Blade.ProviderRegistry.MissingRule =
+    let path = Blade.ProviderRegistry.SourceBase.resolve path
+    try
+        let fileId = NcQuery.openFile path 0
+        try
+            let mutable vid = 0
+            if NcFFI.nc_inq_varid(fileId, varName, &vid) <> 0 then Blade.ProviderRegistry.noMissingRule
+            else
+                let mutable tc = 0
+                NcFFI.nc_inq_vartype(fileId, vid, &tc) |> fun st -> NcFFI.check st $"querying the type of '{varName}'"
+                let isFloat = (tc = 5 || tc = 6)
+                let lit (f: float) =
+                    if not isFloat && f = floor f && abs f < 9.0e18 then string (int64 f)
+                    else Blade.ProviderRegistry.ruleLiteral f
+                let fill = numericAttr fileId vid "_FillValue"
+                let missingValue = numericAttr fileId vid "missing_value" |> Option.defaultValue []
+                let range = numericAttr fileId vid "valid_range"
+                let vmin = numericAttr fileId vid "valid_min" |> Option.bind List.tryHead
+                let vmax = numericAttr fileId vid "valid_max" |> Option.bind List.tryHead
+                let (lo, hi) =
+                    match range with
+                    | Some [ a; b ] -> (Some a, Some b)
+                    | _ -> (vmin, vmax)
+                let fillHead = fill |> Option.bind List.tryHead
+                let fillSentinels =
+                    match fillHead with
+                    | Some f when System.Double.IsNaN f -> []
+                    | Some f -> [ f ]
+                    | None -> defaultFloatFill tc |> Option.toList
+                let sentinels =
+                    (fillSentinels @ missingValue)
+                    |> List.filter System.Double.IsFinite
+                    |> List.distinct
+                let describe =
+                    [ if isFloat then
+                          yield (match fillHead with
+                                 | Some f when System.Double.IsNaN f -> "NaN or infinite (_FillValue NaN)"
+                                 | _ -> "NaN or infinite")
+                      match fillHead with
+                      | Some f when System.Double.IsFinite f -> yield $"_FillValue {lit f}"
+                      | Some _ -> ()
+                      | None ->
+                          match defaultFloatFill tc with
+                          | Some d -> yield $"the default fill {lit d} (no _FillValue)"
+                          | None -> ()
+                      let mvs = missingValue |> List.filter System.Double.IsFinite
+                      if not mvs.IsEmpty then
+                          yield "missing_value " + (mvs |> List.map lit |> String.concat ", ")
+                      match lo, hi with
+                      | Some a, Some b -> yield $"outside valid_range [{lit a}, {lit b}]"
+                      | Some a, None -> yield $"below valid_min {lit a}"
+                      | None, Some b -> yield $"above valid_max {lit b}"
+                      | None, None -> () ]
+                    |> String.concat "; "
+                if isFloat then
+                    { Blade.ProviderRegistry.noMissingRule with
+                        NonFinite = true; Sentinels = sentinels; Lo = lo; Hi = hi; Describe = describe }
+                else
+                    // An integer variable: the same attributes, read and
+                    // compared as int64 (exact at any magnitude).
+                    let ifill = intAttr fileId vid "_FillValue" |> Option.bind List.tryHead
+                    let imv = intAttr fileId vid "missing_value" |> Option.defaultValue []
+                    let (ilo, ihi) =
+                        match intAttr fileId vid "valid_range" with
+                        | Some [ a; b ] -> (Some a, Some b)
+                        | _ -> (intAttr fileId vid "valid_min" |> Option.bind List.tryHead,
+                                intAttr fileId vid "valid_max" |> Option.bind List.tryHead)
+                    let idescribe =
+                        [ match ifill with Some f -> yield $"_FillValue {f}" | None -> ()
+                          if not imv.IsEmpty then yield "missing_value " + (imv |> List.map string |> String.concat ", ")
+                          match ilo, ihi with
+                          | Some a, Some b -> yield $"outside valid_range [{a}, {b}]"
+                          | Some a, None -> yield $"below valid_min {a}"
+                          | None, Some b -> yield $"above valid_max {b}"
+                          | None, None -> () ]
+                        |> String.concat "; "
+                    { Blade.ProviderRegistry.noMissingRule with
+                        IntSentinels = (Option.toList ifill @ imv) |> List.distinct
+                        IntLo = ilo; IntHi = ihi; Describe = idescribe }
+        finally
+            NcQuery.closeFile fileId
+    with _ -> Blade.ProviderRegistry.noMissingRule
 
 // Mapping to Blade IR Types
 
@@ -470,8 +646,21 @@ module CppNetcdf =
                 (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan
                     $"NetCDF {what} of '{varName}': dimension {slot} has a runtime extent, and this provider bakes every extent as a literal read from the store at compile time -- runtime NetCDF extents are not supported"))
 
+    /// Refuse (BL7004) a read of a variable `unreadableReason` names. The
+    /// store's metadata is re-read here (the emitters see the path and the
+    /// name only); a store that cannot be opened at this point is left to the
+    /// errors the read itself reports.
+    let private refuseUnreadable (filePath: string) (varName: string) : unit =
+        let file = try Some (load filePath) with _ -> None
+        match file |> Option.bind (fun f -> f.Vars |> List.tryFind (fun v -> v.Name = varName)) |> Option.bind unreadableReason with
+        | Some why ->
+            raise (Blade.Diagnostics.BladeDiagnosticException
+                    (Blade.Diagnostics.Codes.backendRefusal Blade.Ast.noSpan why))
+        | None -> ()
+
     /// Generate C++ code to open a NetCDF file and read a variable
     let genReadVar (filePath: string) (varName: string) (cppVarName: string) (arrType: IRArrayType) : string list =
+        refuseUnreadable filePath varName
         let rank = arrType.IndexTypes.Length
         // Rank 0 has no flat index to build and would emit `new T[];` -- an
         // empty extent product is not valid C++. Refuse rather than emit it.
@@ -533,6 +722,10 @@ module CppNetcdf =
             @ [
                 $"nc_close({cppVarName}_ncid);"
             ]
+            // The boundary rule (BL8015), over the filled buffer before any
+            // cell reaches the program.
+            @ Blade.ProviderRegistry.refuseScanCpp (missingRuleOf filePath varName) varName filePath
+                $"{cppVarName}_flat" (String.concat " * " extentNames) [] [] extentNames
         // Materialize the nested-pointer Array indexed as <v>[i][j]...: allocate<>
         // builds the nested structure, the flat buffer is copied in (runtime-
         // bounded loops compile fast, unlike a baked literal) and released.
@@ -576,6 +769,7 @@ module CppNetcdf =
     let genReadCompoundVar
             (filePath: string) (varName: string) (maskName: string)
             (cppVarName: string) (varArrType: IRArrayType) (maskArrType: IRArrayType) : string list =
+        refuseUnreadable filePath varName
         // The mask covers the leading (compound) dims; remaining variable dims
         // are regular trailing dims folded into a runtime trailing_stride.
         let leadRank = maskArrType.IndexTypes.Length
@@ -657,8 +851,22 @@ module CppNetcdf =
         @ ncShapeGuard v "mask" $"{v}_maskid" maskName filePath leadExtentNames
         @ ncChecked v $"reading mask '{maskName}' from '{filePath}'"
             $"nc_get_var_{ncGet maskElem}({v}_ncid, {v}_maskid, {v}_maskraw)"
+        @ [ $"nc_close({v}_ncid);" ]
+        // The boundary rule (BL8015): the mask variable under its own rule,
+        // then the variable's cells -- only the PRESENT ones (the mask's
+        // absent cells are exactly where the store holds no value).
+        @ Blade.ProviderRegistry.refuseScanCpp (missingRuleOf filePath maskName) maskName filePath
+            $"{v}_maskraw" $"{v}_grid" [] [] leadExtentNames
+        @ (let rule = missingRuleOf filePath varName
+           let decl = Blade.ProviderRegistry.tallyDeclCpp rule v
+           if decl.IsEmpty then []
+           else
+               [ "{" ] @ decl
+               @ [ ("for (size_t " + v + "_c = 0; " + v + "_c < " + v + "_grid; " + v + "_c++) if (" + v + "_maskraw[" + v + "_c] != 0) for (size_t " + v + "_t = 0; " + v + "_t < " + v + "_trail; " + v + "_t++) {"
+                    + Blade.ProviderRegistry.tallyNoteCpp rule v $"{v}_dense[{v}_c * {v}_trail + {v}_t]" $"{v}_c * {v}_trail + {v}_t" + " }") ]
+               @ Blade.ProviderRegistry.tallyReportCpp rule v varName filePath extentNames
+               @ [ "}" ])
         @ [
-            $"nc_close({v}_ncid);"
             // int -> std::vector<bool> (nonzero = present): the load_compound conversion
             $"std::vector<bool> {v}_maskvec({v}_grid);"
             $"for (size_t {v}_i = 0; {v}_i < {v}_grid; {v}_i++) {v}_maskvec[{v}_i] = ({v}_maskraw[{v}_i] != 0);"
@@ -737,6 +945,7 @@ module CppNetcdf =
     /// STREAMED fiber reads: hoisted prologue -- opens the file once and
     /// declares the start/count vectors for nc_get_vara; the handle stays open for the program's lifetime.
     let genStreamOpen (filePath: string) (varName: string) (cppVarName: string) (arrType: IRArrayType) : string list =
+        refuseUnreadable filePath varName
         let v = cppVarName
         let primElem =
             match arrType.ElemType with
@@ -787,9 +996,18 @@ module CppNetcdf =
             | IRTScalar ETInt32 -> "int"
             | IRTScalar ETInt64 -> "longlong"
             | _ -> "double"
+        // The boundary rule per FIBER (BL8015): there is no pre-scan at open
+        // (that would be a second full read), so a missing cell refuses
+        // inside the consuming nest, naming the fiber's site coordinates.
+        let fiberLen =
+            match (List.last arrType.IndexTypes).Extent with
+            | IRLit (IRLitInt n) -> string n
+            | _ -> $"{v}_fiber_ext[0]"
         [ for d in 0 .. siteExprs.Length - 1 -> $"{v}_start[{d}] = (size_t)({siteExprs.[d]});" ]
         @ ncChecked v $"streaming a fiber of '{varName}' from '{filePath}'"
             $"nc_get_vara_{suffix}({v}_ncid, {v}_varid, {v}_start, {v}_count, {destBuf})"
+        @ Blade.ProviderRegistry.refuseScanCpp (missingRuleOf filePath varName) varName filePath
+            destBuf fiberLen siteExprs [] [ fiberLen ]
 
     /// Extract dimension names from a module's index type definitions
     let dimNamesFromModule (modul: IRModule) : string list =

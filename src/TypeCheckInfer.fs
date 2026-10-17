@@ -22,6 +22,40 @@ open Blade.TypeCheckIde
 open Blade.TypeLower
 open Blade.TypeCheckSupport
 
+/// The BODIES (by reference) of lambdas that a nested `function` declaration
+/// desugared to (parseNestedFunction), registered by inferBlock just before
+/// the binding is inferred. inferLambdaFull reads it to give their
+/// UNANNOTATED parameters the meaning a top-level declaration's have: an
+/// anonymous generic `x: T` (formalism 4.3), not an inference variable the
+/// first call pins. A plain block `let f = lambda` is not registered (D5).
+/// Per thread: the test harness checks programs concurrently in one process.
+let private nestedFunctionBodiesTL =
+    new System.Threading.ThreadLocal<System.Collections.Generic.HashSet<Expr>>(fun () ->
+        System.Collections.Generic.HashSet<Expr>(HashIdentity.Reference))
+let internal nestedFunctionBodies () = nestedFunctionBodiesTL.Value
+
+/// A `let rec`'s STEP ORDINAL (`n` in `| prefix :: n -> ..`) runs over the
+/// recursion's leading axis, so it is that axis's index value `Nat<I>` when
+/// the axis is a NAMED index type -- exactly the iteration index a
+/// `method_for(range<I>)` kernel receives (formalism 7.5). The desugar (and
+/// the AD pipeline's own, GradExpand) ascribes the loop's lower bound with
+/// the axis -- `(0 : Step)..5` -- and inferForIn binds the loop variable at
+/// that index type and records its id in `recStepVars`, whose arithmetic
+/// (`n - 1`, `(n + 1) % 5`) is a POSITION that keeps the tag, as a kernel
+/// parameter's does (inferBinOp). Untagged, `f(n)` into the axis warned
+/// BL4003 on correct code.
+let private recStepVarsTL =
+    new System.Threading.ThreadLocal<System.Collections.Generic.Dictionary<IRId, string>>(fun () ->
+        System.Collections.Generic.Dictionary<IRId, string>())
+let internal recStepVars () = recStepVarsTL.Value
+
+/// The per-program side tables above are keyed by ids a program's own builder
+/// mints; a thread checks many programs (the test harness), so each program
+/// starts them empty (TypeCheck.checkProgram).
+let internal resetInferSideTables () =
+    (nestedFunctionBodies ()).Clear()
+    (recStepVars ()).Clear()
+
 /// A CURRIED TREE-READ SPINE: `T(p1)(p2)...(pk)` decomposed into the base
 /// variable and its argument groups, defined only when every group has exactly
 /// one argument and the base names an array whose SOLE index slot is a tree.
@@ -218,12 +252,16 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 | None -> info.Type
             Ok (mkTyped (TExprVar (name, info.VarId, info.Identity)) useTy)
         | None ->
+            // A constructor: typed under its IDENTITY (D11 -- `A.Red` when
+            // module A declares it), which is what lowering emits.
             match Map.tryFind name env.VariantTags with
             | Some (parentName, None) ->
-                Ok (mkTyped (TExprVar (name, env.Builder.FreshId(), None)) (IRTNamed parentName))
+                Ok (mkTyped (TExprVar (ctorIdentityOfKey env parentName name, env.Builder.FreshId(), None)) (IRTNamed parentName))
             | Some (parentName, Some payloadTy) ->
-                Ok (mkTyped (TExprVar (name, env.Builder.FreshId(), None))
+                Ok (mkTyped (TExprVar (ctorIdentityOfKey env parentName name, env.Builder.FreshId(), None))
                             (mkFuncArrow [payloadTy] (IRTNamed parentName)))
+            | None when env.AmbiguousCtors.ContainsKey name ->
+                Error (AmbiguousImport ("constructor", name, env.AmbiguousCtors.[name]))
             | None -> Error (UnboundVariable name)
 
     | ExprKind.ExprQualified names ->
@@ -277,6 +315,30 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 let tField = mkTyped (TExprField (tAlias, "stream", 0)) tE.Type
                 Ok (mkTyped (TExprApp (tField, [tE])) tE.Type)
             | _ -> Error (ProviderStreamNeedsVar alias))
+
+    // ---- The masked read's hidden raw read (ProviderDesugar.rawReadVerb) ----
+    // Typed like `.stream` (the operand's array type, the application shape
+    // kept) so lowering's tryRawRead records a dense spec exempt from the
+    // provider boundary rule. Only ProviderDesugar produces this verb.
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, verb) }, [operand])
+        when verb = Blade.ProviderDesugar.rawReadVerb && (providerAliasName env alias).IsSome ->
+        inferExpr env operand |> Result.bind (fun tE ->
+            match env.Subst.Resolve tE.Type with
+            | ArrayElem at when at.IndexTypes |> List.forall (fun ix -> ix.Symmetry = SymNone && ix.Rank = 1) ->
+                let aliasVi = (lookupVar alias env).Value
+                let tAlias = mkTyped (TExprVar (alias, aliasVi.VarId, aliasVi.Identity)) aliasVi.Type
+                let tField = mkTyped (TExprField (tAlias, verb, 0)) tE.Type
+                Ok (mkTyped (TExprApp (tField, [tE])) tE.Type)
+            | _ ->
+                Error (Other $"`{alias}.read_present` / `{alias}.present` read a DENSE stored variable (`store.vars.<name>`); packed, orbit and compound variables have no masked read"))
+
+    // ---- A masked read ProviderDesugar did not rewrite ----
+    // Unreachable from a checked program (the desugar refuses every position
+    // it cannot serve, BL3007); a clear refusal rather than a missing-member
+    // error if a funnel ever skips the pass.
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, ("read_present" | "present" as verb)) }, _)
+        when (providerAliasName env alias).IsSome ->
+        Error (Other $"`{alias}.{verb}` must be the whole value of a module-level binding (`let t = store.vars.<name> |> {alias}.{verb}`)")
 
     // ---- Windowed packed read: alias.read_window(view, lo, hi) ----
     // Materializes only the cells with every coordinate in [lo, hi): a
@@ -1007,7 +1069,124 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 // Float64 for every other family.
                 let elemTy = if kind0 = "categorical" then IRTScalar ETInt64 else IRTScalar ETFloat64
                 let arrTy = mkArrayArrow indices elemTy None
-                mkTyped (TExprRandGen (kind, tKey, tPars, tWeights, tAddr, dims)) arrTy))))
+                // AN ADDRESSED DRAW AS AN EXPRESSION (D13): its samples are a
+                // pure function of their addresses, so wherever the fill
+                // cannot go -- a function body, a nested expression -- they
+                // are the map over the shape whose cell `(i, j, ..)` is
+                // sample `offset + flat(i, j, ..)` (row-major, the fill's own
+                // order), drawn by `__rand_sample_at`. The operands are bound
+                // once, and their run-time guards (the fill's: stream key in
+                // one counter word, offset non-negative, each parameter in its
+                // domain) raise the same BL8001. A top-level `let` keeps the
+                // fill (Lowering's intercept); this is typed beside it, and
+                // only lowered where the fill is not.
+                let inlineDraw =
+                    match addrArgs with
+                    | [ sE; oE ] ->
+                        let sp = keyE.Span
+                        let syn k = mkExpr sp k
+                        let v (n: string) = syn (ExprKind.ExprVar n)
+                        let ilit (i: int64) = syn (ExprKind.ExprLit (LitInt i))
+                        let flit (f: float) = syn (ExprKind.ExprLit (LitFloat f))
+                        let bin op a b = syn (ExprKind.ExprBinOp (Elementwise, op, a, b))
+                        let sLet (n: string) (e: Expr) =
+                            StmtLet { Pattern = { Kind = PatVar n; Span = sp }; Type = None; Value = e; Mutability = BindLet }
+                        let guard (cond: Expr) (msg: string) =
+                            StmtExpr (syn (ExprKind.ExprApp (v "__rand_guard", [ cond; syn (ExprKind.ExprLit (LitString msg)) ])))
+                        let parNames = parArgs |> List.mapi (fun i _ -> $"__rand_p{i}")
+                        let finite (x: Expr) = bin OpEq (bin OpSub x x) (flit 0.0)
+                        let parGuards =
+                            Blade.Rand.Elaborate.paramGuards kind
+                            |> List.choose (fun (i, pname, dom) ->
+                                if i >= parNames.Length then None
+                                else
+                                    let x = v parNames.[i]
+                                    let cond =
+                                        match dom with
+                                        | Blade.Rand.Elaborate.Positive -> bin OpAnd (bin OpGt x (flit 0.0)) (finite x)
+                                        | Blade.Rand.Elaborate.NonNegative -> bin OpAnd (bin OpGe x (flit 0.0)) (finite x)
+                                        | Blade.Rand.Elaborate.UnitInterval -> bin OpAnd (bin OpGe x (flit 0.0)) (bin OpLe x (flit 1.0))
+                                    Some (guard cond (Blade.Rand.Elaborate.paramGuardMessage kind pname dom)))
+                        let idxNames = dims |> List.mapi (fun i _ -> $"__rand_i{i}")
+                        let flat =
+                            List.zip idxNames dims
+                            |> List.fold (fun (acc: Expr option) (n, d) ->
+                                match acc with
+                                | None -> Some (v n)
+                                | Some a -> Some (bin OpAdd (bin OpMul a (ilit (int64 d))) (v n))) None
+                            |> Option.defaultValue (ilit 0L)
+                        let sampleArgs =
+                            [ syn (ExprKind.ExprLit (LitString kind)); v "__rand_k"; v "__rand_s"; bin OpAdd (v "__rand_o") flat ]
+                            @ (if weightsArg.IsSome then [ v "__rand_w" ] else [])
+                            @ (parNames |> List.map v)
+                        let kernel =
+                            syn (ExprKind.ExprLambda (
+                                    idxNames |> List.map (fun n -> { Name = n; Type = None; Default = None; NameSpan = noSpan }),
+                                    None,
+                                    syn (ExprKind.ExprApp (v "__rand_sample_at", sampleArgs))))
+                        let loop = syn (ExprKind.ExprMethodFor (dims |> List.map (fun d -> syn (ExprKind.ExprDotDot (ilit 0L, ilit (int64 d))))))
+                        let body = syn (ExprKind.ExprCompute (syn (ExprKind.ExprBinOp (Elementwise, OpApply, loop, kernel))))
+                        let stmts =
+                            [ sLet "__rand_k" keyE; sLet "__rand_s" sE; sLet "__rand_o" oE ]
+                            @ (match weightsArg with Some w -> [ sLet "__rand_w" w ] | None -> [])
+                            @ (List.zip parNames parArgs |> List.map (fun (n, p) -> sLet n p))
+                            @ [ guard (bin OpAnd (bin OpGe (v "__rand_s") (ilit 0L)) (bin OpLe (v "__rand_s") (ilit 4294967295L)))
+                                      "rand stream key out of range -- the stream key of an _at family must be in [0, 2^32)"
+                                guard (bin OpGe (v "__rand_o") (ilit 0L))
+                                      "rand sample offset negative -- the sample offset of an _at family must be non-negative" ]
+                            @ parGuards
+                        match inferExpr env (syn (ExprKind.ExprBlock (stmts, Some body))) with
+                        | Ok t -> Some t
+                        | Error _ -> None
+                    | _ -> None
+                mkTyped (TExprRandGen (kind, tKey, tPars, tWeights, tAddr, dims, inlineDraw)) arrTy))))
+
+    // ---- __rand_sample_at("<kind>_at", key, stream, index, [weights], pars..) ----
+    // Compiler-internal: ONE sample of an addressed family, the cell of an
+    // `_at` draw's inline map (above). A scalar: Float64, Int64 for
+    // categorical. The guards ride on the enclosing block.
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__rand_sample_at" },
+                        { Kind = ExprKind.ExprLit (LitString kind) } :: keyE :: sE :: iE :: rest)
+            when (lookupVar "__rand_sample_at" env).IsNone && kind.EndsWith "_at" ->
+        let isCat = kind = "categorical_at"
+        let weightsE, parEs = if isCat then (List.tryHead rest, List.tail rest) else (None, rest)
+        checkExpr env (IRTScalar ETInt64) keyE |> Result.bind (fun tKey ->
+        checkExpr env (IRTScalar ETInt64) sE |> Result.bind (fun tS ->
+        checkExpr env (IRTScalar ETInt64) iE |> Result.bind (fun tI ->
+        parEs |> List.fold (fun acc p ->
+                    acc |> Result.bind (fun ps -> checkExpr env (IRTScalar ETFloat64) p |> Result.map (fun tp -> ps @ [ tp ])))
+                 (Ok [])
+        |> Result.bind (fun tPars ->
+            let tW =
+                match weightsE with
+                | None -> Ok None
+                | Some wE ->
+                    inferExpr env wE |> Result.bind (fun tw ->
+                        match env.Subst.Resolve tw.Type with
+                        | ArrayElem { IndexTypes = [ { Extent = IRLit (IRLitInt k) } ] } when k > 0L -> Ok (Some (tw, int k))
+                        | _ -> Error (Other "rand.categorical_at: the weights must be a rank-1 Float64 array of static extent"))
+            tW |> Result.map (fun tWeights ->
+                let ty = if isCat then IRTScalar ETInt64 else IRTScalar ETFloat64
+                mkTyped (TExprRandGen (kind, tKey, tPars, tWeights, Some (tS, tI), [], None)) ty)))))
+
+    // ---- __rand_guard(cond, "message"): an addressed draw's run-time guard ----
+    // Compiler-internal: the BL8001 domain check of an `_at` draw's inline
+    // form (above), raised in every lane like the fill's own guards.
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__rand_guard" }, [ condE; { Kind = ExprKind.ExprLit (LitString msg) } ])
+            when (lookupVar "__rand_guard" env).IsNone ->
+        checkExpr env (IRTScalar ETBool) condE
+        |> Result.map (fun tCond -> mkTyped (TExprConstraintCheck (tCond, "BL8001", msg)) IRTUnit)
+
+    // ---- __math_converged(cond, "message"): the math module's solver check ----
+    // Compiler-internal (double-underscore reserved): emitted by the synthesized
+    // Jacobi / QR bodies (Math/MathDecls) after their fixed iteration budget.
+    // A false `cond` is the iteration's NON-CONVERGENCE, reported as a BL8008
+    // panic in every lane (the same code the LAPACK route raises on a non-zero
+    // info) instead of a silently unconverged result. Unit-typed; the message
+    // is a literal so both lanes print the same text.
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__math_converged" }, [ condE; { Kind = ExprKind.ExprLit (LitString msg) } ]) ->
+        checkExpr env (IRTScalar ETBool) condE
+        |> Result.map (fun tCond -> mkTyped (TExprConstraintCheck (tCond, "BL8008", msg)) IRTUnit)
 
     // ---- __display_emit(head, quoted, data, metaTail): display module ----
     // Compiler-internal (double-underscore reserved): emitted by the `display`
@@ -1616,6 +1795,20 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             | None -> info.Type
         Ok (mkTyped (TExprVar (qualName, info.VarId, info.Identity)) useTy)
 
+    // A MODULE-QUALIFIED CONSTRUCTOR (D11): `A.Red`, `U.Red` after
+    // `import A as U` -- the spelling that names one of two imported
+    // constructors of one name.
+    | ExprKind.ExprField ({ Kind = ExprKind.ExprVar n }, field)
+        when (lookupVar n env).IsNone && (Map.tryFind $"{n}.{field}" env.VariantTags).IsSome ->
+        let key = $"{n}.{field}"
+        let (parentName, payload) = env.VariantTags.[key]
+        let ident = ctorIdentityOfKey env parentName key
+        let ty =
+            match payload with
+            | None -> IRTNamed parentName
+            | Some payloadTy -> mkFuncArrow [payloadTy] (IRTNamed parentName)
+        Ok (mkTyped (TExprVar (ident, env.Builder.FreshId(), None)) ty)
+
     | ExprKind.ExprField (obj, field) ->
         inferExpr env obj |> Result.bind (fun tObj ->
             // Re-stamp the WHOLE access's span: inferExpr on the object just
@@ -1933,6 +2126,29 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     | ExprKind.ExprDotDot (lo, hi) ->
         inferExpr env lo |> Result.bind (fun tLo ->
         inferExpr env hi |> Result.bind (fun tHi ->
+            // A BOUND IS AN INTEGER (an Int64, or an index value). A float bound
+            // used to type-check and reach the emitted extent and offset as a C++
+            // cast, `(size_t)((3L - 1.5))` / `(int64_t)(1.5)` -- a silent
+            // float-to-int conversion, which the mixing rule (formalism 2.4)
+            // refuses everywhere else. A still-open bound defaults to Int64, as
+            // a subscript does.
+            let boundRefusal (e: Expr) (t: TypedExpr) =
+                match IR.stripUnits (env.Subst.Resolve t.Type) with
+                | IRTScalar (ETInt64 | ETInt32) | IRTNat _ -> None
+                | IRTIdxTagged (inner, _) ->
+                    (match IR.stripUnits (env.Subst.Resolve inner) with
+                     | IRTScalar (ETInt64 | ETInt32) | IRTNat _ | IRTInfer _ -> None
+                     | other -> Some (e, other))
+                | IRTInfer vid -> env.Subst.MarkIndexDefault vid; None
+                | other -> Some (e, other)
+            match boundRefusal lo tLo |> Option.orElse (boundRefusal hi tHi) with
+            | Some (e, ty) ->
+                if e.Span.StartLine > 0 then setCurrentExprSpan e.Span
+                Error (ImplicitNumericMix
+                         ($"a range bound is an integer (an Int64 or an index value), but this bound is {ppIRType ty}: "
+                          + "`lo..hi` counts whole positions, and Blade converts nothing implicitly. "
+                          + "Spell the rounding at the bound -- Int64(floor(x)) or Int64(ceil(x))."))
+            | None ->
             // The extent under the full static contract (literals, `let static`
             // names, static calls): `0..N` with `let static N = 5` is an
             // Idx<5>. A bound that is not static leaves the extent UNKNOWN
@@ -2441,8 +2657,8 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
     let foldKernelIsParallel () =
         match (resolveTypedExpr env tKernel).Kind with
         | TExprLambda li -> not li.Parallel.IsEmpty
-        | TExprVar (fn, _, _) ->
-            (match env.FuncParallel.TryGetValue fn with
+        | TExprVar (_, fnId, _) ->
+            (match env.FuncParallel.TryGetValue fnId with
              | true, (_, s) -> not s.IsEmpty
              | _ -> false)
         | _ -> false
@@ -3129,8 +3345,8 @@ and inferReduceCore (env: TypeEnv) array kernel (init: Expr option) (axes: Expr 
                     match kernel.Kind with
                     | ExprLambda (_, Some wc, _) -> not (List.isEmpty wc.Parallel)
                     | ExprVar fn ->
-                        (match env.FuncParallel.TryGetValue fn with
-                         | true, (_, s) -> not (List.isEmpty s)
+                        (match lookupVar fn env |> Option.map (fun vi -> env.FuncParallel.TryGetValue vi.VarId) with
+                         | Some (true, (_, s)) -> not (List.isEmpty s)
                          | _ -> false)
                     | _ -> false
                 let foldSeeded =
@@ -3437,8 +3653,8 @@ and inferReduceCore (env: TypeEnv) array kernel (init: Expr option) (axes: Expr 
                         (match (resolveTypedExpr env tk).Kind with
                          | TExprLambda li ->
                             li.Parallel |> List.exists _.IsOmp
-                         | TExprVar (fn, _, _) ->
-                            (match env.FuncParallel.TryGetValue fn with
+                         | TExprVar (_, fnId, _) ->
+                            (match env.FuncParallel.TryGetValue fnId with
                              | true, (_, s) -> s |> List.exists _.IsOmp
                              | _ -> false)
                          | _ -> false)
@@ -3766,18 +3982,18 @@ and checkFoldOmpLicense (env: TypeEnv) (tKernel: TypedExpr) : TypeResult<unit> =
         else Error (FoldOmpNeedsLicense "this fold kernel")
     // Named function: the clause and the comm groups live in the side channels
     // checkFunctionDecl fills (a named function's body never reaches here).
-    | TExprVar (fname, _, _) ->
+    | TExprVar (fname, fnId, _) ->
         let asks =
-            match env.FuncParallel.TryGetValue fname with
+            match env.FuncParallel.TryGetValue fnId with
             | true, (_, strategies) -> asksOmp strategies
             | _ -> false
         if not asks then Ok ()
         else
             let licensed =
-                (match env.FuncCommGroups.TryGetValue fname with
+                (match env.FuncCommGroups.TryGetValue fnId with
                  | true, cg -> not (List.isEmpty cg)
                  | _ -> false)
-                || (match env.FuncFoldBuiltin.TryGetValue fname with
+                || (match env.FuncFoldBuiltin.TryGetValue fnId with
                     | true, b -> b
                     | _ -> false)
             if licensed then Ok ()
@@ -4890,6 +5106,8 @@ and inferGroupBy (env: TypeEnv) values grouping : TypeResult<TypedExpr> =
                         Kind = SDimension; Dependencies = []
                     }
                     let outer' = { outer with Id = env.Builder.FreshId(); Tag = Some "__group_outer"; IxKind = IxKGroupOuter }
+                    // The grouping behind this slot, for the read guards (G1).
+                    if tGrouping.Kind.IsTExprVar then env.GroupOuters.[outer'.Id] <- tGrouping
                     // A STRUCTURAL grouping (`segments(A)`, docs/plans/
                     // structural/07): remember which axis this outer slot
                     // partitions, so `ungroup(G)` can restore it.
@@ -4952,6 +5170,14 @@ and inferGroupKeys (env: TypeEnv) keys : TypeResult<TypedExpr> =
                         | Some (TDIIndexType (_, idx, _)) ->
                             ({ idx with Id = env.Builder.FreshId(); Tag = Some name; IxKind = ixKindOfTag (Some name) }, None)
                         | Some (TDIEnumIdx (_, idx, values, _)) ->
+                            // An INTEGER EnumIdx value is represented as its
+                            // position (D2), so the key array already holds
+                            // the bucket numbers: the reverse lookup maps each
+                            // position to itself.
+                            let values =
+                                if values |> List.forall (function EVInt _ -> true | _ -> false)
+                                then values |> List.mapi (fun i _ -> EVInt (int64 i))
+                                else values
                             ({ idx with Id = env.Builder.FreshId(); Tag = Some name; IxKind = ixKindOfTag (Some name) }, Some values)
                         | _ ->
                             ({ Id = env.Builder.FreshId(); Rank = 1
@@ -5470,7 +5696,7 @@ and inferMethodCall (env: TypeEnv) (callSpan: Span) obj method args : TypeResult
             match Map.tryFind (typeName, method) env.ImplMethods with
             | Some (funcVarId, funcType) ->
                 // Resolve to mangled function call: TypeName__method(self, args)
-                let mangledName = $"{typeName}__{method}"
+                let mangledName = $"{Blade.Types.TypeOrigins.sourceName typeName}__{method}"
                 let retTy = match funcType with FuncElem (_, ret) -> ret | _ -> env.Subst.Fresh()
                 let tFunc = mkTyped (TExprVar (mangledName, funcVarId, None)) funcType
                 Ok (mkTyped (TExprApp (tFunc, tObj :: tArgs)) retTy)
@@ -5503,7 +5729,12 @@ and inferMethodCall (env: TypeEnv) (callSpan: Span) obj method args : TypeResult
 
 and inferMask (env: TypeEnv) array pred : TypeResult<TypedExpr> =
     inferExpr env array |> Result.bind (fun tArr ->
-    inferExpr env pred |> Result.bind (fun tPred ->
+    // A NAMED function predicate (`mask(xs, pos)`) is eta-wrapped like a
+    // kernel (`lambda(__k) -> pos(__k)`): left a bare function reference, the
+    // mask lowering found no unary lambda and every cell read `true`.
+    (match etaExpandFunctionKernel env pred with
+     | Some r -> r
+     | None -> inferExpr env pred) |> Result.bind (fun tPred ->
         requireArrayArg env tArr "mask" |> Result.bind (fun arrTy ->
             // The predicate is `Element -> Bool`. inferExpr typed it
             // without knowing the element type, so its param starts as
@@ -5955,7 +6186,49 @@ and inferNumericCast (env: TypeEnv) (span: Span) (name: string) (target: ElemTyp
             | _ ->
                 Error (InvalidCast $"{name}() expects a numeric operand; got {ppIRType resolved}.")))
 
+/// ARITHMETIC ON A `let rec` STEP ORDINAL (recStepVars) is a POSITION: typed
+/// as the plain integer it is for the operator itself (an index value
+/// refuses arithmetic, IndexTypeArithForbidden), and the arithmetic result
+/// keeps the axis tag for the nominal rule -- `prefix(n - 1)`, `u((n + 1) %
+/// 5)` -- exactly as an unannotated `range<I>` kernel parameter's arithmetic
+/// does (formalism 3.10, "Positions and casts"). A comparison is a Bool.
 and inferBinOp env mode op left right : TypeResult<TypedExpr> =
+    let steps = recStepVars ()
+    let stepNames =
+        if steps.Count = 0 then Map.empty
+        else
+            let rec scan (acc: Map<string, IRId * string>) (e: Expr) =
+                match e.Kind with
+                | ExprKind.ExprVar v ->
+                    (match lookupVar v env with
+                     // Still bound at its tag: a nested operand of an outer
+                     // position (`(n + 1) % 5`) is typed under the outer's
+                     // plain rebinding and keeps a plain type until the top.
+                     | Some vi when steps.ContainsKey vi.VarId && vi.Type.IsIRTIdxTagged ->
+                         Map.add v (vi.VarId, steps.[vi.VarId]) acc
+                     | _ -> acc)
+                | ExprKind.ExprBinOp (Elementwise, (OpAdd | OpSub | OpMul | OpDiv | OpMod), l, r) -> scan (scan acc l) r
+                | ExprKind.ExprUnaryOp (OpNeg, x) -> scan acc x
+                | _ -> acc
+            match op with
+            | OpAdd | OpSub | OpMul | OpDiv | OpMod
+            | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe when mode = Elementwise -> scan (scan Map.empty left) right
+            | _ -> Map.empty
+    if stepNames.IsEmpty then inferBinOpCore env mode op left right
+    else
+        let plainEnv =
+            stepNames |> Map.fold (fun e name (vid, _) -> bindVarSimple name vid (IRTScalar ETInt64) e) env
+        // Two ordinals of DIFFERENT axes in one position (nested let recs) keep
+        // the first one's tag; the nominal rule then judges where it is used.
+        let tag = stepNames |> Map.toList |> List.head |> snd |> snd
+        inferBinOpCore plainEnv mode op left right
+        |> Result.map (fun te ->
+            match op, IR.stripUnits (env.Subst.Resolve te.Type) with
+            | (OpAdd | OpSub | OpMul | OpDiv | OpMod), IRTScalar (ETInt64 | ETInt32) ->
+                { te with Type = IRTIdxTagged (IRTScalar ETInt64, IRefNamed tag) }
+            | _ -> te)
+
+and inferBinOpCore env mode op left right : TypeResult<TypedExpr> =
     // REDUCTION JOIN, Form 1: `object_for(<&!>) <@> (r1, r2, ...)`. The
     // fusion operator as the kernel of a loop former (operator sections are
     // already legal kernels) applied over a PACK of reductions joins them into
@@ -5986,7 +6259,47 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
         // A bare named-function reference on the kernel side (the right
         // operand of <@>) is eta-expanded to lambda(__k..) -> f(__k..) so it
         // matches the existing TExprLambda kernel arm in inferApply.
+        // A kernel LAMBDA over INTEGER EnumIdx values -- `method_for(range<R>)`
+        // or an array of R -- is typed with its parameters SEEDED as R: a value
+        // of R is a key (D2), and the body's arithmetic and comparisons observe
+        // it (inferBinOpCore's observeKey) only if the parameter is known to be
+        // one while the body is typed. Left open, `r + 1` took r's own type and
+        // the kernel's result read as a value of R.
+        let seededKernel =
+            // The operands each kernel parameter meets: `method_for(a, b)`, a
+            // zip's members, or the implicit former's one array (`xs <@> ..`).
+            let operandsOf (e: Expr) =
+                match e.Kind with
+                | ExprKind.ExprMethodFor [ { Kind = ExprKind.ExprZip zs } ] -> Some zs
+                | ExprKind.ExprMethodFor ops -> Some ops
+                | ExprKind.ExprVar _ -> Some [ e ]
+                | _ -> None
+            match operandsOf left, right.Kind with
+            | Some operands, ExprKind.ExprLambda (parms, wc, body)
+                    when parms.Length = operands.Length ->
+                let rTag (n: string) =
+                    if (intEnumKeysOfTag env n).IsSome then Some (IRTIdxTagged (IRTScalar ETInt64, IRefNamed n)) else None
+                let seedOf (o: Expr) =
+                    match o.Kind with
+                    | ExprKind.ExprRange [ TyNamed (n, []) ] -> rTag n
+                    | ExprKind.ExprVar v ->
+                        (match lookupVar v env with
+                         | Some vi ->
+                             (match IR.stripUnits (env.Subst.Resolve vi.Type) with
+                              | ArrayElem at when at.IndexTypes.Length = 1 ->
+                                  (match IR.stripUnits (env.Subst.Resolve at.ElemType) with
+                                   | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), IRefNamed n) -> rTag n
+                                   | _ -> None)
+                              | _ -> None)
+                         | None -> None)
+                    | _ -> None
+                let seeds = operands |> List.map seedOf
+                if seeds |> List.exists Option.isSome then Some (inferLambdaSeeded env parms wc body seeds) else None
+            | _ -> None
         let rightResult =
+            match seededKernel with
+            | Some r -> r
+            | None ->
             match etaExpandFunctionKernel env right with
             | Some r -> r
             | None -> inferExpr env right
@@ -6383,9 +6696,15 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                         Error e
                     | None -> Ok (mkTyped (TExprCompose (op, tL, tR)) (mkFuncArrow fArgs gRet))
                 | Error _ -> Error (TypeMismatch (env.Subst.Resolve gIn, env.Subst.Resolve fRet))
-            | FuncElem _, _ ->
-                eprintfn "Warning: right side of >> should be a function"
+            // `f >> g` APPLIES g to f's result, so a right operand that is no
+            // function (`f >> 3.0`) is the refusal any application of a
+            // non-function gets (BL3003). It used to print a raw warning and
+            // succeed, and g++ then rejected the composition (BL9002).
+            | FuncElem _, (IRTInfer _ | IRTUnitAnnotated (IRTInfer _, _)) ->
                 Ok (mkTyped (TExprCompose (op, tL, tR)) tR.Type)
+            | FuncElem _, rt ->
+                if right.Span.StartLine > 0 then setCurrentExprSpan right.Span
+                Error (InvalidApplication rt)
             | _, FuncElem (gArgs, gRet) ->
                 // f might be a fresh/unresolved type -- permissive
                 Ok (mkTyped (TExprCompose (op, tL, tR)) (mkFuncArrow gArgs gRet))
@@ -6405,6 +6724,19 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
         // Arithmetic, comparison, logical
         inferExpr env left |> Result.bind (fun tL ->
         inferExpr env right |> Result.bind (fun tR ->
+            // A value of an INTEGER EnumIdx type is a KEY (D2): arithmetic or
+            // a comparison OBSERVES it, as the plain Int64 its key is. It is
+            // spelled as the cast `Int64(v)` here (an index value refuses
+            // arithmetic otherwise), whose zonk reads the key off the value's
+            // position representation (Zonk.intEnumEdges).
+            let observeKey (t: TypedExpr) =
+                match op, IR.stripUnits (env.Subst.Resolve t.Type) with
+                | (OpAdd | OpSub | OpMul | OpDiv | OpMod | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe),
+                  IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), IRefNamed tag)
+                    when mode = Elementwise && (intEnumKeysOfTag env tag).IsSome ->
+                    mkTypedSpan (TExprUnaryOp (OpCast "Int64", t)) (IRTScalar ETInt64) t.Span
+                | _ -> t
+            let tL, tR = observeKey tL, observeKey tR
             // NOTE (merge, 2026-08-09): master reached this same demand site
             // independently (fix/kernel-capture-module-binding) with a
             // `concreteOperand`/`materializeCaretOperand` pair. Both arrived at
@@ -6930,6 +7262,20 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                                             | Some k -> k < 1
                                             | None -> true) -> Some vid
                     | _ -> None
+                // A COMPARISON between two generic parameter variables (`a > b`
+                // over `a: T, b: U`) meets them exactly as the arithmetic twin
+                // below does: one variable, so two arrays of different rank are
+                // refused at the call (they share no elementwise shape), and a
+                // scalar beside an array is the call's elementwise lift.
+                (match op with
+                 | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe | OpAnd | OpOr
+                        when env.CurrentGenericObligations.IsSome && not env.InLambdaBody ->
+                     (match genVar tL.Type, genVar tR.Type with
+                      | Some a, Some b when a <> b
+                                           && (env.Subst.GetElemCast a).IsNone && (env.Subst.GetElemCast b).IsNone ->
+                          unify env.Subst (IRTInfer a) (IRTInfer b) |> ignore
+                      | _ -> ())
+                 | _ -> ())
                 if isArithOp then
                     match genVar tL.Type, genVar tR.Type with
                     | Some a, Some b when a <> b -> unify env.Subst (IRTInfer a) (IRTInfer b) |> ignore
@@ -7030,7 +7376,56 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                 // caller's `reduce(sw, (+))` ever needed -- while `U` stays free
                 // for the monomorphizer. Nothing is bound; only this node's own
                 // type is stamped.
+                //
+                // AN OUTER PRODUCT WITH AN OPEN GENERIC OPERAND (D4): a pack
+                // `head` (rank k, its instance's array) beside the recursive
+                // call's still-open result (`head [*] outer(tail)`). Its rank
+                // is rank(head) + rank(partner), which only an instance knows
+                // -- the left-operand convention answered `head`'s own
+                // variable, so every instance was typed rank k. Answer a fresh
+                // variable, kept open (polymorphic) for monomorphization to
+                // decide per instance (IRMono learns it from the specialized
+                // body, outer rank = sum of ranks), with a rank lower bound
+                // when either side is known to be an array.
+                let outerOpenResult =
+                    if mode <> Outer then None
+                    else
+                        let leaf (t: IRType) = IR.stripUnits (env.Subst.Resolve t)
+                        let openVar (t: IRType) =
+                            match leaf t with IRTInfer v -> Some v | _ -> None
+                        let polyOpen (t: IRType) =
+                            match openVar t with
+                            | Some v -> env.Subst.IsPolymorphicId v
+                            | None -> false
+                        let arrayish (t: IRType) =
+                            match leaf t with
+                            | ArrayElem _ -> true
+                            | IRTInfer v ->
+                                (match env.Subst.GetArityConstraint v, env.Subst.GetRankLowerBound v with
+                                 | Some k, _ when k >= 1 -> true
+                                 | _, Some k when k >= 1 -> true
+                                 | _ -> false)
+                            | _ -> false
+                        // ...or any open operand inside a PACK function's
+                        // body (a settled base, `Poly<Float64^1>`, gives a
+                        // concrete head beside the call's open result).
+                        let inPackBody =
+                            env.CurrentSignature
+                            |> List.exists (fun t -> (env.Subst.Resolve t).IsIRTPoly)
+                        if (openVar lArith).IsSome || (openVar rArith).IsSome then
+                            if polyOpen lArith || polyOpen rArith || inPackBody then
+                                match env.Subst.Fresh() with
+                                | IRTInfer r as fresh ->
+                                    env.Subst.MarkPolymorphic r
+                                    if arrayish lArith || arrayish rArith then env.Subst.AddRankLowerBound(r, 1)
+                                    Some fresh
+                                | t -> Some t
+                            else None
+                        else None
                 let resTy =
+                    match outerOpenResult with
+                    | Some t -> t
+                    | None ->
                     let unboundVar t = (IR.stripUnits t).IsIRTInfer
                     let reshape (arr: IRArrayType) =
                         match IR.getUnits resTy0 with
@@ -7103,6 +7498,62 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                         mkArrayArrow axes (IRTScalar ETBool) None
                     match deferredBoolRank with
                     | Some k -> abstractBoolArray k
+                    | None ->
+                    // A COMPARISON / LOGICAL op over a bare PARAMETER variable
+                    // (`function gt0(a: T^0, b: T^0) = a > b`; `T^0` is `T`,
+                    // which an array instantiates whole). The promotion rules
+                    // answered the scalar Bool, so an all-array call returned
+                    // `bool` while the body built an Array<bool> -- the
+                    // compiled program printed `true`. Comparison is
+                    // elementwise at every rank (formalism 6.1, 15.6; the D1
+                    // ruling): the result is "the operand's shape with element
+                    // Bool", which each instance settles (Subst.ElemBoolVar --
+                    // a scalar instance's Bool, an array instance's Bool
+                    // array). Beside a scalar the variable decides the shape
+                    // (the scalar broadcasts); beside a second open variable
+                    // (`a: T, b: U`) whichever instance is the array does. A
+                    // body that USES the result as a scalar (a declared
+                    // `-> Bool`, an `if` condition) pins the variable to rank 0
+                    // (Subst.PinScalar), so an array call is refused rather
+                    // than truncated. Only a variable a PARAMETER is declared
+                    // as (or an element cast of one): an array's element var,
+                    // a caret `T^k` (deferredBoolRank above) and a lambda's
+                    // own parameter keep their answers.
+                    let genericBool =
+                        if mode <> Elementwise || not isCmpOrLogical || env.InLambdaBody
+                           || env.CurrentGenericObligations.IsNone
+                           || IR.stripUnits resTy0 <> IRTScalar ETBool then None
+                        else
+                            let sigTys =
+                                env.CurrentSignature
+                                |> List.map (fun t -> env.Subst.Resolve (IR.stripUnits t) |> IR.stripUnits)
+                            let paramTys = if sigTys.IsEmpty then [] else List.take (sigTys.Length - 1) sigTys
+                            let isTop (vid: int) (t: IRType) = match t with IRTInfer r -> r = vid | _ -> false
+                            let paramTop (vid: int) =
+                                List.exists (isTop vid) paramTys
+                                && sigTys |> List.forall (fun t ->
+                                    isTop vid t || not ((freeInferVars env.Subst t).Contains vid))
+                            let openVar (t: IRType) =
+                                match env.Subst.Resolve (IR.stripUnits t) |> IR.stripUnits with
+                                | IRTInfer vid when env.Subst.IsPolymorphicId vid
+                                                    && (env.Subst.GetArityConstraint vid).IsNone
+                                                    && not (env.Subst.IsScalarPinned vid)
+                                                    && (match env.Subst.GetRankLowerBound vid with
+                                                        | Some k -> k < 1
+                                                        | None -> true)
+                                                    && (paramTop vid || (env.Subst.GetElemCast vid).IsSome) -> Some vid
+                                | _ -> None
+                            let scalarSide (t: IRType) =
+                                match IR.stripUnits (env.Subst.Resolve t) with
+                                | IRTScalar _ | IRTNat _ | IRTIdxTagged _ -> true
+                                | _ -> false
+                            match openVar lRes, openVar rRes with
+                            | Some a, Some b -> Some (env.Subst.ElemBoolVar(a, b, ETBool))
+                            | Some a, None when scalarSide rRes -> Some (env.Subst.ElemBoolVar(a, a, ETBool))
+                            | None, Some b when scalarSide lRes -> Some (env.Subst.ElemBoolVar(b, b, ETBool))
+                            | _ -> None
+                    match genericBool with
+                    | Some r -> r
                     | None ->
                     // `zero + a` over an unshaped caret `a`: the promotion
                     // rules answer the LEFT operand, which is the zero's own
@@ -8601,6 +9052,13 @@ and functorMapInheritError (env: TypeEnv) (tF: TypedExpr) (tC: TypedExpr)
 /// kernel positions only, so bare function VALUES elsewhere are unaffected.
 and etaExpandFunctionKernel (env: TypeEnv) (kernelExpr: Expr) : TypeResult<TypedExpr> option =
     match kernelExpr.Kind with
+    // A MODULE-QUALIFIED named function (`A.f`, `U.f` after `import A as U`)
+    // is a named function wherever the bare name is one: the import binds it
+    // as the variable `A.f`, so it takes the bare-name arm below under that
+    // name (D11 follow-up).
+    | ExprKind.ExprField ({ Kind = ExprKind.ExprVar n }, field)
+            when (lookupVar n env).IsNone && (lookupVar $"{n}.{field}" env).IsSome ->
+        etaExpandFunctionKernel env { kernelExpr with Kind = ExprKind.ExprVar $"{n}.{field}" }
     // A unary intrinsic in kernel position: `abs <@> u`, `object_for(sqrt)`.
     // The intrinsics are call-shaped SYNTAX rather than values -- nothing binds
     // the name, so the lookupVar arm below cannot see one and the fall-through
@@ -8698,7 +9156,7 @@ and etaExpandFunctionKernel (env: TypeEnv) (kernelExpr: Expr) : TypeResult<Typed
                             //     position. Without this the whole clause is lost
                             //     and the loop nest is emitted serial, silently.
                             let withComm (li: TypedLambdaInfo) =
-                                match env.FuncCommGroups.TryGetValue name with
+                                match env.FuncCommGroups.TryGetValue info.VarId with
                                 | true, cg when not (List.isEmpty cg) ->
                                     { li with CommGroups = cg; IsCommutative = true }
                                 | _ -> li
@@ -8708,12 +9166,12 @@ and etaExpandFunctionKernel (env: TypeEnv) (kernelExpr: Expr) : TypeResult<Typed
                             // declared-antisymmetric function silently falls back
                             // to dense storage.
                             let withAntisym (li: TypedLambdaInfo) =
-                                match env.FuncAntisymGroups.TryGetValue name with
+                                match env.FuncAntisymGroups.TryGetValue info.VarId with
                                 | true, ag when not (List.isEmpty ag) ->
                                     { li with AntisymGroups = ag }
                                 | _ -> li
                             let withParallel (li: TypedLambdaInfo) =
-                                match env.FuncParallel.TryGetValue name with
+                                match env.FuncParallel.TryGetValue info.VarId with
                                 | true, (calleeNames, strategies) when not (List.isEmpty strategies) ->
                                     { li with Parallel = remapParallelVars calleeNames names strategies }
                                 | _ -> li
@@ -9095,7 +9553,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                 SelfBinding = None  // anonymous: cannot self-reference
             }
             buildApplyInfo env flatArrays identities arrayTypes sDimsPerArray sharedRecords lambdaInfo tLeft (mkTyped (TExprLambda lambdaInfo) (IRTScalar elemType)) false false
-        | TExprVar (fnName, _, _) when
+        | TExprVar (fnName, fnId, _) when
             (match env.Subst.Resolve resolvedKernel.Type with
              | FuncElem (ps, _) ->
                  ps |> List.exists (fun t -> (env.Subst.Resolve t).IsIRTPoly)
@@ -9130,7 +9588,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                         // expanded arguments ONE joint comm group; expand the
                         // pack-level group to the concrete arity revealed here.
                         let li' =
-                            match env.FuncCommGroups.TryGetValue fnName with
+                            match env.FuncCommGroups.TryGetValue fnId with
                             | true, cg when not (List.isEmpty cg) ->
                                 { li with CommGroups = [ [ 0 .. n - 1 ] ]; IsCommutative = true }
                             | _ -> li
@@ -9141,7 +9599,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                         // n params `__of<uid>_0..n-1`; the pragma gate only reads
                         // level 0, so map it onto the first expanded param.
                         let li'' =
-                            match env.FuncParallel.TryGetValue fnName with
+                            match env.FuncParallel.TryGetValue fnId with
                             | true, (calleeNames, strategies)
                                     when not (List.isEmpty strategies) && not (List.isEmpty names) ->
                                 let packNames = calleeNames |> List.map (fun _ -> List.head names)
@@ -9153,10 +9611,10 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                         // the SAME array fills every expanded position --
                         // H  intersect  Stab would license compaction. Dense until the
                         // user pins `where comm(pack)` on the kernel.
-                        (match env.FuncCommGroups.TryGetValue fnName with
+                        (match env.FuncCommGroups.TryGetValue fnId with
                          | true, cg when not (List.isEmpty cg) -> ()
                          | _ ->
-                             match env.PackDeducedComm.TryGetValue fnName with
+                             match env.PackDeducedComm.TryGetValue fnId with
                              | true, (packName, Blade.Deduce.PInv) when n >= 2 ->
                                  let allSame =
                                      match identities with
@@ -9611,13 +10069,13 @@ and buildApplyInfo (env: TypeEnv)
         else
             let etaSummary =
                 match lambdaInfo.Body.Kind with
-                | TExprApp ({ Kind = TExprVar (fname, _, _) }, args)
+                | TExprApp ({ Kind = TExprVar (_, fnId, _) }, args)
                         when args.Length = lambdaInfo.Params.Length
                              && List.forall2 (fun (arg: TypedExpr) (p: TypedParam) ->
                                     match arg.Kind with
                                     | TExprVar (_, aid, _) -> aid = p.VarId
                                     | _ -> false) args lambdaInfo.Params ->
-                    (match env.FuncDeducedPairs.TryGetValue fname with
+                    (match env.FuncDeducedPairs.TryGetValue fnId with
                      | true, (names, ps) when ps.Length = lambdaInfo.Params.Length - 1 ->
                          Some (names, ps)
                      | _ ->
@@ -9626,7 +10084,7 @@ and buildApplyInfo (env: TypeEnv)
                          // every arity specializes to full pairwise symmetry
                          // at this one. Suggestion names the LAMBDA's own
                          // params -- that is where this spelling pins.
-                         (match env.PackDeducedComm.TryGetValue fname with
+                         (match env.PackDeducedComm.TryGetValue fnId with
                           | true, (_, Blade.Deduce.PInv) ->
                               Some (lambdaInfo.Params |> List.map (_.Name),
                                     List.replicate (lambdaInfo.Params.Length - 1) Blade.Deduce.PInv)
@@ -9787,7 +10245,7 @@ and buildApplyInfo (env: TypeEnv)
                         let (a, b) = (ps.[p], ps.[q])
                         let others = ps |> List.indexed |> List.filter (fun (k, _) -> k <> p && k <> q) |> List.map snd
                         let isInt = [ p; q ] |> List.exists (fun k -> k < arrayTypes.Length && intElemT arrayTypes.[k].ElemType)
-                        Blade.Deduce.witnessSwapLawFailure a.VarId b.VarId (others |> List.map (_.VarId)) negate proved isInt lambdaInfo.Body
+                        Blade.Deduce.witnessSwapLawFailure (witnessInlineFn env) a.VarId b.VarId (others |> List.map (_.VarId)) negate proved isInt lambdaInfo.Body
                         |> Option.map (fun w ->
                             let named =
                                 w.Fixed |> List.choose (fun (id, c) ->
@@ -10032,13 +10490,13 @@ and buildApplyInfo (env: TypeEnv)
     // apply path grew a wrapper that forgets the clause again.
     (if List.isEmpty lambdaInfo.Parallel then
         match lambdaInfo.Body.Kind with
-        | TExprApp ({ Kind = TExprVar (fname, _, _) }, args)
+        | TExprApp ({ Kind = TExprVar (fname, fnId, _) }, args)
                 when args.Length = lambdaInfo.Params.Length
                      && List.forall2 (fun (arg: TypedExpr) (p: TypedParam) ->
                             match arg.Kind with
                             | TExprVar (_, aid, _) -> aid = p.VarId
                             | _ -> false) args lambdaInfo.Params ->
-            (match env.FuncParallel.TryGetValue fname with
+            (match env.FuncParallel.TryGetValue fnId with
              | true, (_, strategies) when not (List.isEmpty strategies) ->
                  // Two different situations share this shape, and only one of
                  // them is a compiler bug. A SYNTHESIZED eta wrapper's params
@@ -11843,6 +12301,11 @@ and inferLambdaFull env parms whereClause body (seeds: IRType option list) (retA
     prescanTypeVarNames env ((parms |> List.map (_.Type)) @ [ retAnnot ])
 
     let mutable paramEnv = scopeEnv
+    // A NESTED `function`'s unannotated parameter is generic, exactly as a
+    // top-level one is (checkFunctionDeclWith): `{ function idl(x) = x;
+    // idl(2.0); idl(2) }` was BL3020 at the second call, the first having
+    // pinned `x` to Float64.
+    let genericUnannotated = (nestedFunctionBodies ()).Remove body
     let typedParams = parms |> List.mapi (fun i p ->
         let varId = env.Builder.FreshId()
         let ty = match p.Type with
@@ -11850,6 +12313,10 @@ and inferLambdaFull env parms whereClause body (seeds: IRType option list) (retA
                  | None ->
                      match List.tryItem i seeds with
                      | Some (Some seed) -> seed
+                     | _ when genericUnannotated ->
+                         let v = env.Subst.Fresh()
+                         (match v with IRTInfer id -> env.Subst.MarkPolymorphic id | _ -> ())
+                         v
                      | _ -> env.Subst.Fresh()  // Infer from usage
         // WIDTH SCHEMA (docs/plan-tuples-vs-arg-packs.md 6c): record the
         // WRITTEN `Tuple<k>` width before the annotation is thrown away by
@@ -11938,6 +12405,7 @@ and inferLambdaFull env parms whereClause body (seeds: IRType option list) (retA
     let captures = buildCaptures scopeEnv freeVars
     // An `omp(v: n)` naming no parameter is silently dropped downstream; say so.
     checkOmpVarNames env (typedParams |> List.map (_.Name)) whereClause "this lambda"
+    checkSymmetryVarNames env (typedParams |> List.map (_.Name)) whereClause "this lambda"
 
     let result =
         defaultsResult |> Result.bind (fun typedParams ->
@@ -11957,6 +12425,11 @@ and inferLambdaFull env parms whereClause body (seeds: IRType option list) (retA
                 Error (Other
                     "wildcard `_` is not a value: it cannot be a lambda's body. It is only meaningful as a compound-index coordinate (e.g. B((a, _, c))).")
             else
+            // #17: a parallel body may not reach an outer write through a call
+            // either (the direct, lexical write is assignTargetError's).
+            match (if parallelKernel then parallelCalleeWriteError env (typedParams |> List.map (_.VarId)) tBody else None) with
+            | Some e -> Error e
+            | None ->
             let retCheck =
                 match retAnnot with
                 | Some a -> unify env.Subst tBody.Type (lowerTypeExpr env a)
@@ -12758,6 +13231,9 @@ and irTypeUnknownAxisPath (t: IRType) : string option =
         // tag holding a dotted alias name would otherwise be misdiagnosed as an
         // unresolved store dimension.
         | Some tag when tag.Contains "."
+                        // A module-qualified index type (D11, `Geo.Cell`)
+                        // is a resolved identity, not a store path.
+                        && not (Blade.Types.TypeOrigins.isQualified tag)
                         && not (tag.StartsWith irrepsTagPrefix)
                         && not (tag.StartsWith treeTagPrefix)
                         && not (isProviderAxisTag tag) -> Some tag
@@ -13438,7 +13914,9 @@ and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
                             // Read through a CLAMPED index: merely FORMING an
                             // out-of-range row view is undefined, so the
                             // discarded branch must stay in bounds too.
-                            let safeIdx = guardWrap needsLo needsHi idx idx (iLit 0L)
+                            // (`Int64(idx)`: a position of a named step axis
+                            // is an index value; the clamp's `0` is not.)
+                            let safeIdx = guardWrap needsLo needsHi idx (synAt (ExprUnaryOp (OpCast "Int64", idx))) (iLit 0L)
                             let read = synAt (ExprApp (bufVar, safeIdx :: rest))
                             if isPartial then
                                 // Only the READ is hoisted (that is what the
@@ -13532,11 +14010,21 @@ and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
                 [ StmtLet { Mutability = BindLet; Pattern = mkPat span (PatVar grdName); Type = None; Value = g }
                   // The stopping ordinal: n on the breaking iteration, the
                   // "never stopped" sentinel N re-written on every other.
+                  // (`Int64(n)`: the step ordinal is an index value of the
+                  // recursion axis when that axis is named.)
                   StmtExpr (synAt (ExprAssign (synAt (ExprVar stopName),
-                              synAt (ExprIf (synAt (ExprVar grdName), iLit n, stepVarE))))) ]
+                              synAt (ExprIf (synAt (ExprVar grdName), iLit n,
+                                             synAt (ExprUnaryOp (OpCast "Int64", stepVarE))))))) ]
+        let stepLo =
+            match at.IndexTypes.Head, annotSlots with
+            | { Tag = Some tag; IxKind = IxKPlain; Symmetry = SymNone; Rank = 1 }, Some (slot0 :: _)
+                    when not (tag.StartsWith "__") ->
+                synAt (ExprTyped (iLit loopStart, slot0))
+            | _ -> iLit loopStart
+        let stepRange = synAt (ExprKind.ExprDotDot (stepLo, iLit n))
         let loop =
             StmtForIn (def.StepVar,
-                       synAt (ExprKind.ExprDotDot (iLit loopStart, iLit n)),
+                       stepRange,
                        lagStmts @ guardStmts @ sliceCopyStmts (synAt (ExprVar def.StepVar)) $"__slice_{def.Name}" slice')
         // Zero slices consumed by out-of-prefix lag reads. Annotated from the
         // declared slot list so their index tags match the row views they
@@ -13757,7 +14245,31 @@ and consDestructureLeaves (env: TypeEnv) (scrutTy: IRType) (h: Pattern) (t: Patt
         // `double` instead of `Array<double,1>`). The fresh var only needs
         // internal consistency for body inference; the tail keeps the base
         // (so `f(tail)` sees the same element type) with a fresh arity var.
-        let headTys = List.init k (fun _ -> env.Subst.Fresh())
+        // ...but each keeps the DECLARED RANK of the pack's element (D4):
+        // `Poly<T^1>`'s head is a rank-1 value, so `head [*] f(tail)` is an
+        // outer product at every arity. The fresh var carries the base caret's
+        // rank as a LOWER BOUND (an array of at least that rank -- the caret's
+        // exact pin would have the elementwise rules materialize `head` and
+        // zip it against the recursive call, whose base instance is the
+        // scalar identity arm) and its generic mark, so it stays open for
+        // each instance to name (IRMono: packHeadLinks, the HM learning of
+        // `let head = A_0`); not the variable itself.
+        let headTys =
+            List.init k (fun _ ->
+                // A SETTLED base (`Poly<Float64^1>`) has nothing to collapse:
+                // the head is that type.
+                match IR.stripUnits (env.Subst.Resolve baseTy) with
+                | ArrayElem _ -> baseTy
+                | _ ->
+                let v = env.Subst.Fresh()
+                (match v, IR.stripUnits (env.Subst.Resolve baseTy) with
+                 | IRTInfer hv, IRTInfer bv ->
+                     (match env.Subst.GetArityConstraint bv with
+                      | Some r when r >= 1 -> env.Subst.AddRankLowerBound(hv, r)
+                      | _ -> ())
+                     env.Subst.CopyPolymorphic(bv, hv)
+                 | _ -> ())
+                v)
         let tailArityName = $"r{env.Builder.FreshId()}"
         let tailTy = IRTPoly (baseTy, tailArityName)
         let leafTys = headTys @ [tailTy]
@@ -14123,21 +14635,79 @@ and matchWith env scrutinee cases (resultTy: IRType)
 /// different literal length would be read at the wrong length.
 and inferMatch env scrutinee cases : TypeResult<TypedExpr> =
     let resultTy = env.Subst.Fresh()
+    let unifyArm (body: Expr) (tBody: TypedExpr) =
+        // unify names its FIRST argument as the expectation, and the
+        // expectation here is the arms BEFORE this one (`resultTy`); the
+        // report is flipped rather than the call, whose binding order
+        // the arms' shared type has always relied on.
+        unify env.Subst tBody.Type resultTy
+        |> flipMismatch
+        |> withUnifyContext "the arms of this `match` (the earlier arms vs this arm)"
+        |> Result.bind (fun () ->
+            match staticExtentClash env.Subst resultTy tBody.Type with
+            | Some (d, e, a) ->
+                if body.Span.StartLine > 0 then setCurrentExprSpan body.Span
+                Error (ExtentAscribeMismatch ("this match arm (against the arms before it)", d + 1, e, a))
+            | None -> Ok tBody)
+    // `match arity(pack)` (D4, formalism 8.2): its arms are the SAME function
+    // at different arities, so a concrete SCALAR arm (the empty-pack identity
+    // `| 0 -> 1.0`) is not evidence about the rank of the others -- the
+    // instance whose body selects it narrows to that scalar
+    // (IRMono.specializeFunction's finalScalarType). Unifying it with an arm
+    // built over the pack's rank-k `head` collapsed every instance to a
+    // scalar. Such an arm is held back while the other arms are judged; if
+    // they decide an array (or a variable known to be one), only the scalar's
+    // ELEMENT is held to theirs (where the arms already know it -- the
+    // mixing rule judges the rest per instance), and an open result stays
+    // open for the instances to decide. With no array arm, the held arms
+    // unify exactly as before.
+    let isArityMatch = match scrutinee.Kind with ExprKind.ExprArity _ -> true | _ -> false
+    let held = System.Collections.Generic.List<Expr * TypedExpr>()
+    let mutable judgedOthers = false
     matchWith env scrutinee cases resultTy (fun caseEnv body ->
         inferExpr caseEnv body |> Result.bind (fun tBody ->
-            // unify names its FIRST argument as the expectation, and the
-            // expectation here is the arms BEFORE this one (`resultTy`); the
-            // report is flipped rather than the call, whose binding order
-            // the arms' shared type has always relied on.
-            unify env.Subst tBody.Type resultTy
-            |> flipMismatch
-            |> withUnifyContext "the arms of this `match` (the earlier arms vs this arm)"
-            |> Result.bind (fun () ->
-                match staticExtentClash env.Subst resultTy tBody.Type with
-                | Some (d, e, a) ->
+            let isScalarArm =
+                isArityMatch
+                && (match IR.stripUnits (env.Subst.Resolve tBody.Type) with IRTScalar _ -> true | _ -> false)
+            if isScalarArm then
+                held.Add((body, tBody))
+                Ok tBody
+            else
+                judgedOthers <- true
+                unifyArm body tBody))
+    |> Result.bind (fun tMatch ->
+        if held.Count = 0 then Ok tMatch
+        else
+            let arrayish =
+                judgedOthers
+                && (match IR.stripUnits (env.Subst.Resolve resultTy) with
+                    | ArrayElem _ -> true
+                    | IRTInfer v ->
+                        (match env.Subst.GetArityConstraint v, env.Subst.GetRankLowerBound v with
+                         | Some k, _ when k >= 1 -> true
+                         | _, Some k when k >= 1 -> true
+                         | _ -> false)
+                    | _ -> false)
+            let rec go (arms: (Expr * TypedExpr) list) =
+                match arms with
+                | [] -> Ok ()
+                | (body, tBody) :: rest ->
                     if body.Span.StartLine > 0 then setCurrentExprSpan body.Span
-                    Error (ExtentAscribeMismatch ("this match arm (against the arms before it)", d + 1, e, a))
-                | None -> Ok tBody)))
+                    let r =
+                        if not arrayish then unifyArm body tBody |> Result.map ignore
+                        else
+                            match IR.stripUnits (env.Subst.Resolve resultTy) with
+                            | ArrayElem arr ->
+                                unify env.Subst (IR.stripUnits tBody.Type) (IR.stripUnits arr.ElemType)
+                                |> flipMismatch
+                                |> withUnifyContext "the element of this scalar arm vs the arms of this `match arity(..)`"
+                            | _ -> Ok ()
+                    r |> Result.bind (fun () -> go rest)
+            go (List.ofSeq held) |> Result.map (fun () ->
+                (match IR.stripUnits (env.Subst.Resolve resultTy) with
+                 | IRTInfer v when arrayish -> env.Subst.MarkPolymorphic v
+                 | _ -> ())
+                { tMatch with Type = env.Subst.Resolve resultTy }))
 
 /// Bidirectional match: push the `expected` type into each arm body via
 /// `checkExpr`, so a literal (or scalar) arm can flex to the expected
@@ -14236,6 +14806,9 @@ and inferBlock env stmts finalExpr (expectedFinal: IRType option) : TypeResult<T
                     match binding.Mutability, binding.Pattern.Kind, binding.Value.Kind with
                     | BindConst, PatternKind.PatVar _, ExprKind.ExprLambda _ -> true
                     | _ -> false
+                (match nestedFunction, binding.Value.Kind with
+                 | true, ExprKind.ExprLambda (_, _, lamBody) -> (nestedFunctionBodies ()).Add lamBody |> ignore
+                 | _ -> ())
                 let sigVarLo = curEnv.Subst.NextId
                 let selfInfo =
                     match binding.Mutability, binding.Pattern.Kind, binding.Value.Kind with
@@ -14301,6 +14874,20 @@ and inferBlock env stmts finalExpr (expectedFinal: IRType option) : TypeResult<T
                             let n = match binding.Pattern.Kind with PatternKind.PatVar n -> n | _ -> ""
                             ({ tValue0 with Kind = TExprLambda { info with SelfBinding = Some (n, id) } }, id)
                         | _ -> (tValue0, curEnv.Builder.FreshId())
+                    // #17: a nested `function` (or any let-bound lambda) is a callee a
+                    // parallel body can name; record the bindings outside it that it
+                    // writes, as checkFunctionDecl does for a top-level declaration.
+                    (match tValue.Kind with
+                     | TExprLambda info ->
+                         (match outerWritesOfBody curEnv curEnv info.Body with
+                          | [] -> curEnv.FuncOuterWrites.Remove varId |> ignore
+                          | ws -> curEnv.FuncOuterWrites.[varId] <- ws)
+                         // N16: and the outside bindings it names, so a function
+                         // calling it inherits them (the mut-argument alias check).
+                         (match outerReadsOfBody curEnv curEnv info.Body with
+                          | [] -> curEnv.FuncOuterReads.Remove varId |> ignore
+                          | rs -> curEnv.FuncOuterReads.[varId] <- rs)
+                     | _ -> ())
                     (match selfInfo with
                      | Some (_, _, id) when id <> varId -> curEnv.FuncSigVarRange.Remove id |> ignore
                      | _ -> ())
@@ -14523,7 +15110,15 @@ and inferForIn (env: TypeEnv) (varName: string) (rangeExpr: Expr) (bodyStmts: St
         | Error e, _ | _, Error e -> Error e
         | Ok tLo, Ok tHi ->
             let varId = env.Builder.FreshId()
-            let loopEnv = bindVarSimple varName varId (IRTScalar ETInt64) env
+            // A `let rec` step ordinal over a named axis: its lower bound is
+            // ascribed with the axis (recStepVars).
+            let varTy =
+                match lo.Kind, IR.stripUnits (env.Subst.Resolve tLo.Type) with
+                | ExprKind.ExprTyped _, IRTIdxTagged (_, IRefNamed tag) when not (tag.StartsWith "__") ->
+                    (recStepVars ()).[varId] <- tag
+                    IRTIdxTagged (IRTScalar ETInt64, IRefNamed tag)
+                | _ -> IRTScalar ETInt64
+            let loopEnv = bindVarSimple varName varId varTy env
             let mutable bodyEnv = loopEnv
             let mutable bodyErr = None
             // ResizeArray for the same reason as inferBlock's typedStmts (these
@@ -14869,7 +15464,16 @@ and inferObjectFor env kernel : TypeResult<TypedExpr> =
         }
         Ok (mkTyped (TExprObjectFor info) loopTy))
 
-and inferStructConstruction env name fields (spread: Expr option) : TypeResult<TypedExpr> =
+and inferStructConstruction env srcName fields (spread: Expr option) : TypeResult<TypedExpr> =
+    // The struct's IDENTITY (D11: an imported `P` is `A.P`); the scope key is
+    // only how this module spells it.
+    let name =
+        match lookupTypeDef srcName env with
+        | Some (TDIStruct (ident, _, _, _)) -> ident
+        | _ -> srcName
+    if (lookupTypeDef srcName env).IsNone && env.AmbiguousTypes.ContainsKey srcName then
+        Error (AmbiguousImport ("type", srcName, env.AmbiguousTypes.[srcName]))
+    else
     match lookupTypeDef name env with
     | Some (TDIStruct (_, _, declFields, _)) ->
         let declNames = declFields |> List.map fst
@@ -15662,6 +16266,23 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
             let assign = assignOfBindingMut binding.Mutability
             let (varId, env') = bindLetPatVar env name identity assign tValue
 
+            // A module-level let-bound lambda is a callee like a declared
+            // function: record the outside bindings it writes (#17, the
+            // parallel-body race) and names (N16, the mut-argument alias).
+            (match tValue.Kind with
+             | TExprLambda info ->
+                 (match outerWritesOfBody env env info.Body with
+                  | [] -> env.FuncOuterWrites.Remove varId |> ignore
+                  | ws -> env.FuncOuterWrites.[varId] <- ws)
+                 (match outerReadsOfBody env env info.Body with
+                  | [] -> env.FuncOuterReads.Remove varId |> ignore
+                  | rs -> env.FuncOuterReads.[varId] <- rs)
+                 // D12: a pure, non-recursive module-level lambda is a body
+                 // the comm witness may evaluate through.
+                 recordWitnessBody env varId (info.Params |> List.map (_.VarId)) false
+                                   (effectsOfBody env (Some varId) info.Body) info.Body
+             | _ -> ())
+
             // Dist provenance seeding: a module-level dist binding gets its
             // source-array set from the PPL elaboration state (by name --
             // covers `let d = dist(A, r)` and the call-form combinators);
@@ -16007,23 +16628,26 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                     // and CodeGen, where index aliases need different rendering than
                     // generic IRType aliases (using Name = int64_t; rather than a
                     // promote<>-based template expansion).
-                    match Map.tryFind name env'.TypeDefs with
+                    // The typed declaration carries the IDENTITY (D11): what
+                    // the back ends emit and every use's type names.
+                    let ident = declIdentity env' name
+                    match Map.tryFind ident env'.TypeDefs with
                     | Some (TDIIndexType (_, idx, _)) ->
-                        Ok (TTDIndexType (name, idx))
+                        Ok (TTDIndexType (ident, idx))
                     | Some (TDIEnumIdx (_, idx, values, _)) ->
-                        Ok (TTDEnumIdx (name, idx, values))
+                        Ok (TTDEnumIdx (ident, idx, values))
                     | _ ->
-                        Ok (TTDAlias (name, typeParams, lowerTypeExpr env' body))
+                        Ok (TTDAlias (ident, typeParams, lowerTypeExpr env' body))
                 | TyDeclStruct (name, typeParams, fields, _constraints, _isStatic) ->
                     // Constraint validation happened in registerTypeDecl;
                     // checks materialize per assignment site (PostChecks /
                     // TExprConstraintCheck), not on the type def.
                     let resolvedFields = fields |> List.map (fun f -> (f.Name, lowerTypeExpr env' f.Type))
-                    Ok (TTDStruct (name, typeParams, resolvedFields))
+                    Ok (TTDStruct (declIdentity env' name, typeParams, resolvedFields))
                 | TyDeclSum (name, typeParams, variants) ->
                     let resolvedVariants = variants |> List.map (fun v ->
-                        (v.Name, v.Data |> Option.map (lowerTypeExpr env')))
-                    Ok (TTDVariant (name, typeParams, resolvedVariants))
+                        (declIdentity env' v.Name, v.Data |> Option.map (lowerTypeExpr env')))
+                    Ok (TTDVariant (declIdentity env' name, typeParams, resolvedVariants))
                 | TyDeclMutualGroup (members, _) ->
                     // Constraint validation happened in registerTypeDecl; the
                     // typed decl just carries the member aliases for lowering.
@@ -16044,9 +16668,17 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
         | Some tName ->
             // Register all mangled method names first (enables mutual recursion within impl block)
             let mutable env' = env
+            // The implemented type's IDENTITY (D11): `impl .. for P` in
+            // module A is A's `P`; the method keys and the receiver's type use
+            // it, the mangled name its source spelling (qualifyModuleNames
+            // prefixes a non-main module's functions anyway).
+            let tIdent =
+                match lookupTypeDef tName env with
+                | Some (TDIStruct (i, _, _, _)) | Some (TDIVariant (i, _, _)) -> i
+                | _ -> tName
             let methodIds = implDecl.Methods |> List.map (fun method ->
-                let mangledName = $"{tName}__{method.Name}"
-                let selfType = IRTNamed tName
+                let mangledName = $"{Blade.Types.TypeOrigins.sourceName tIdent}__{method.Name}"
+                let selfType = IRTNamed tIdent
                 let paramTypes = method.Params |> List.map (fun p ->
                     if p.Name = "self" && p.Type.IsNone then selfType
                     else match p.Type with Some t -> lowerTypeExpr env' t | None -> IRTScalar ETFloat64)
@@ -16056,7 +16688,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                 let funcType = mkFuncArrow paramTypes retType
                 let funcVarId = env'.Builder.FreshId()
                 env' <- bindVarSimple mangledName funcVarId funcType env'
-                env' <- { env' with ImplMethods = Map.add (tName, method.Name) (funcVarId, funcType) env'.ImplMethods }
+                env' <- { env' with ImplMethods = Map.add (tIdent, method.Name) (funcVarId, funcType) env'.ImplMethods }
                 (mangledName, funcVarId, paramTypes, retType))
 
             // Validate interface if specified
@@ -16072,7 +16704,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
             | None -> Ok ()
             |> Result.bind (fun () ->
                 // Type-check each method body
-                let selfType = IRTNamed tName
+                let selfType = IRTNamed tIdent
                 let mutable typedMethods = []
                 let mutable methodErr = None
                 for (method, (mangledName, funcVarId, paramTypes, retType)) in List.zip implDecl.Methods methodIds do
@@ -16101,8 +16733,34 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                                 extractCommGroups
                                     (method.Params |> List.map (fun p -> { Name = p.Name; Type = p.Type; Default = None; NameSpan = p.NameSpan } : LambdaParam))
                                     method.WhereClause
+                            // N11: an impl method's `where comm/anticomm` gets the
+                            // same validation as a top-level declaration's -- the
+                            // names must be parameters (BL4001) and the body must
+                            // not contradict the claim (BL4013).
+                            let antisymGroups =
+                                extractAntisymGroups
+                                    (method.Params |> List.map (fun p -> { Name = p.Name; Type = p.Type; Default = None; NameSpan = p.NameSpan } : LambdaParam))
+                                    method.WhereClause
+                            checkSymmetryVarNames env' (method.Params |> List.map (_.Name))
+                                                  method.WhereClause $"method '{tName}.{method.Name}'"
+                            let symErr =
+                                if List.isEmpty commGroups && List.isEmpty antisymGroups then None
+                                else
+                                    let signResolver (calleeId: IRId) =
+                                        match env'.FuncSignParities.TryGetValue calleeId with
+                                        | true, ps -> Some ps
+                                        | _ -> None
+                                    let deducedPairs = Blade.Deduce.deduceAdjacentPairs signResolver typedParams tBody
+                                    declSymmetryContradiction env' typedParams deducedPairs commGroups antisymGroups tBody
+                            symErr |> Option.iter (fun e -> methodErr <- Some e)
                             let effects = effectsOfBody env' (Some funcVarId) tBody
                             env'.FuncEffects.[funcVarId] <- effects
+                            (match outerWritesOfBody env' env' tBody with
+                             | [] -> env'.FuncOuterWrites.Remove funcVarId |> ignore
+                             | ws -> env'.FuncOuterWrites.[funcVarId] <- ws)
+                            (match outerReadsOfBody env' env' tBody with
+                             | [] -> env'.FuncOuterReads.Remove funcVarId |> ignore
+                             | rs -> env'.FuncOuterReads.[funcVarId] <- rs)
                             let tf : TypedFunctionDecl = {
                                 Name = mangledName; SourceName = mangledName; FuncId = funcVarId
                                 TypeParams = method.TypeParams
@@ -16162,14 +16820,16 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                 names |> List.tryFind (fun name ->
                     not (Map.containsKey name exports.Variables
                          || Map.containsKey name exports.TypeDefs
+                         || Map.containsKey name exports.TypeNames
+                         || Map.containsKey name exports.CtorNames
                          || Map.containsKey name exports.StaticFunctions
                          || Map.containsKey name exports.StaticValues
                          || Map.containsKey name exports.Units
                          || Map.containsKey name exports.VariantTags))
                 |> Option.map (fun name ->
                     let exported =
-                        Seq.append (Map.keys exports.Variables) (Map.keys exports.TypeDefs)
-                        |> Seq.filter (fun k -> not (k.StartsWith "__"))
+                        Seq.append (Map.keys exports.Variables) (Map.keys exports.TypeNames)
+                        |> Seq.filter (fun k -> not (k.StartsWith "__") && not (k.Contains "."))
                         |> Seq.distinct |> Seq.sort |> Seq.truncate 12
                         |> String.concat ", "
                     (name, exported))
@@ -16188,10 +16848,24 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                     for kv in exports.Variables do
                         let qualName = $"{alias}.{kv.Key}"
                         e <- bindVar qualName kv.Value e
+                    // TYPES (D11): every identity the module's API carries,
+                    // under its identity; the module's own type and
+                    // constructor names under `alias.name` and -- by the
+                    // scope rule (bindImportedTypeName) -- bare.
                     for kv in exports.TypeDefs do
                         e <- registerTypeDef kv.Key kv.Value e
                     for kv in exports.VariantTags do
                         e <- { e with VariantTags = Map.add kv.Key kv.Value e.VariantTags }
+                    for kv in exports.TypeNames do
+                        match Map.tryFind kv.Value e.TypeDefs with
+                        | Some info -> e <- registerTypeDef $"{alias}.{kv.Key}" info e
+                        | None -> ()
+                        e <- bindImportedTypeName kv.Key kv.Value false e
+                    for kv in exports.CtorNames do
+                        match Map.tryFind kv.Value e.VariantTags with
+                        | Some tag -> e <- { e with VariantTags = Map.add $"{alias}.{kv.Key}" tag e.VariantTags }
+                        | None -> ()
+                        e <- bindImportedCtorName kv.Key kv.Value false e
                     for kv in exports.Units do
                         e <- { e with Units = Map.add kv.Key kv.Value e.Units }
                     // Static functions: register under alias.name. Bare-name
@@ -16208,12 +16882,25 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                     e
                 | ImportSelective names ->
                     let mutable e = env
+                    // Every identity the module's API carries (D11), so a
+                    // named import's fields / constructors resolve.
+                    for kv in exports.TypeDefs do
+                        if Blade.Types.TypeOrigins.isQualified kv.Key then e <- registerTypeDef kv.Key kv.Value e
+                    for kv in exports.VariantTags do
+                        if Blade.Types.TypeOrigins.isQualified kv.Key then
+                            e <- { e with VariantTags = Map.add kv.Key kv.Value e.VariantTags }
                     for name in names do
                         match Map.tryFind name exports.Variables with
                         | Some vi -> e <- bindVar name vi e
                         | None -> ()
-                        match Map.tryFind name exports.TypeDefs with
-                        | Some tdi -> e <- registerTypeDef name tdi e
+                        match Map.tryFind name exports.TypeNames, Map.tryFind name exports.TypeDefs with
+                        | Some ident, _ -> e <- bindImportedTypeName name ident true e
+                        | None, Some tdi -> e <- registerTypeDef name tdi e
+                        | None, None -> ()
+                        // A named constructor binds too (it used to pass the
+                        // missing-name check and bind nothing).
+                        match Map.tryFind name exports.CtorNames with
+                        | Some ident -> e <- bindImportedCtorName name ident true e
                         | None -> ()
                         match Map.tryFind name exports.StaticFunctions with
                         | Some fd ->
@@ -16531,20 +17218,21 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
         // body, and call-site discharge maps them back to actuals.
         (match env.Subst.Resolve paramTypes.[i] with
          | IRTDist _ ->
-             env.Provenance.[varId] <- Set.singleton (Blade.Constraints.paramProvenanceToken funcDecl.Name p.Name)
+             env.Provenance.[varId] <- Set.singleton (Blade.Constraints.paramProvenanceToken (declIdentity env funcDecl.Name) p.Name)
          | _ -> ())
         { Name = p.Name; Type = paramTypes.[i]; Index = i; VarId = varId; Default = None; NameSpan = p.NameSpan } : TypedParam)
 
     // Which of those params a whole-array rebind must be refused on. Every
     // surviving `mut` param is array-typed (MutParamNotArray rejected the rest
     // above), and `let mut` LOCALS must keep their rebind semantics, so the
-    // set is exactly the declared `mut` parameter names. See
-    // TypeEnv.MutArrayParams / assignTargetError.
+    // set is exactly the declared `mut` parameters' BINDER IDS (#51: by name,
+    // a block-local `let mut a` shadowing a `mut` parameter `a` was refused a
+    // whole-array rebind). See TypeEnv.MutArrayParams / assignTargetError.
     bodyEnv <- { bodyEnv with
                    MutArrayParams =
-                       funcDecl.Params
-                       |> List.filter (fun p -> p.Mutability = Mutable)
-                       |> List.map (_.Name)
+                       List.zip funcDecl.Params typedParams
+                       |> List.filter (fun (p, _) -> p.Mutability = Mutable)
+                       |> List.map (fun (_, tp) -> tp.VarId)
                        |> Set.ofList }
 
     // ---- Parameter defaults (BL3012 rules + declaration-time typing) ----
@@ -16653,7 +17341,7 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
     // Open the license scope for the body; closed after `result` is
     // computed (both success and error paths flow past the exit below).
     for (cname, cargs) in customConjuncts do
-        Blade.Constraints.lookupConstraint cname |> Option.iter (fun h -> h.EnterBody funcDecl.Name cargs)
+        Blade.Constraints.lookupConstraint cname |> Option.iter (fun h -> h.EnterBody (declIdentity env funcDecl.Name) cargs)
 
     let result =
         // `repro` is a runtime-emission property; a static function evaluates
@@ -16712,9 +17400,32 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
             // guarded or proven against the name.
             if funcDecl.IsStatic then env.FuncAxisSubscriptParams.Remove funcVarId |> ignore
             else noteAxisSubscriptParams env funcVarId typedParams tBody
+            // A parameter declared at a SYMBOLIC rank (`x: T^k`) that the body
+            // gave a rank (TypeEnv.FuncRankGenericParams): a call at another
+            // rank is the call of an instance checked at the argument's type.
+            env.FuncRankGenericParams.Remove funcVarId |> ignore
+            // (Not with a parameter PACK: its one declared index spans several
+            // call arguments, so the index would read the wrong argument.)
+            (if not funcDecl.IsStatic
+                && not (typedParams |> List.exists (fun tp -> (env.Subst.Resolve tp.Type).IsIRTPoly)) then
+                let symbolicRank (t: TypeExpr option) =
+                    match t with
+                    | Some (TyAbstractArray (_, rankE, _)) ->
+                        (match rankE.Kind with ExprKind.ExprLit (LitInt _) -> false | _ -> true)
+                    | _ -> false
+                let decided =
+                    List.zip funcDecl.Params typedParams
+                    |> List.choose (fun (p, tp) ->
+                        if symbolicRank p.Type && not (fixedParams.ContainsKey tp.Index) then
+                            match IR.stripUnits (env.Subst.Resolve tp.Type) with
+                            | ArrayElem at -> Some (tp.Index, at.IndexTypes.Length)
+                            | _ -> None
+                        else None)
+                if not decided.IsEmpty then env.FuncRankGenericParams.[funcVarId] <- Map.ofList decided)
             env.ArrowDeclSources.Remove funcVarId |> ignore
             if env.FuncArrowObligations.ContainsKey funcVarId
-               || env.FuncAxisSubscriptParams.ContainsKey funcVarId then
+               || env.FuncAxisSubscriptParams.ContainsKey funcVarId
+               || env.FuncRankGenericParams.ContainsKey funcVarId then
                 env.ArrowDeclSources.[funcVarId] <- (funcDecl, envWithFunc, fixedParams, funcVarId)
             pinSubscriptParams env (funcDecl.Params |> List.map (fun p -> p.Type.IsNone)) typedParams tBody
             unify env.Subst tBody.Type retType |> Result.bind (fun () ->
@@ -16740,6 +17451,11 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
                 | Some group, Some retAnnot -> wrapMutualReturnBody envWithFunc retAnnot group tBody
                 | _ -> Ok tBody
             wrappedBodyR |> Result.bind (fun tBody ->
+            // #17: a parallel function body may not reach an outer write
+            // through a call (the direct, lexical write is assignTargetError's).
+            match (if bodyEnv.InParallelBody then parallelCalleeWriteError env (typedParams |> List.map (_.VarId)) tBody else None) with
+            | Some e -> Error e
+            | None ->
             let commGroups =
                 extractCommGroups
                     (funcDecl.Params |> List.map (fun p -> { Name = p.Name; Type = p.Type; Default = None; NameSpan = p.NameSpan } : LambdaParam))
@@ -16749,7 +17465,7 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
             // onto the synthesized wrapper lambda -- otherwise `where comm` on a
             // named function is dropped and the loop emits dense storage.
             if not (List.isEmpty commGroups) then
-                env.FuncCommGroups.[funcDecl.Name] <- commGroups
+                env.FuncCommGroups.[funcVarId] <- commGroups
             // Same for `where anticomm(...)` -- its own side-channel, since a
             // where-clause attribute that no surfacing site re-attaches is
             // dropped by the kernel-position eta wrapper (silently falling
@@ -16759,7 +17475,7 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
                     (funcDecl.Params |> List.map (fun p -> { Name = p.Name; Type = p.Type; Default = None; NameSpan = p.NameSpan } : LambdaParam))
                     funcDecl.WhereClause
             if not (List.isEmpty antisymGroups) then
-                env.FuncAntisymGroups.[funcDecl.Name] <- antisymGroups
+                env.FuncAntisymGroups.[funcVarId] <- antisymGroups
             // Which parameter positions this body CO-ITERATES. Registered for
             // the same reason as the tables above -- the callee's BODY is
             // invisible at the call site -- but for a soundness obligation
@@ -16778,7 +17494,7 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
             // originals to remap by position.
             (match funcDecl.WhereClause with
              | Some wc when not (List.isEmpty wc.Parallel) ->
-                 env.FuncParallel.[funcDecl.Name] <-
+                 env.FuncParallel.[funcVarId] <-
                      (funcDecl.Params |> List.map (_.Name), wc.Parallel)
              | _ -> ())
             // Fold-kernel builtin-body bit, for the parallel-fold reorder
@@ -16787,10 +17503,12 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
             // `reduce(xs, f)` seam, which sees only a `TExprVar`.
             if isBuiltinFoldBodySurface (funcDecl.Params |> List.map (_.Name))
                                         funcDecl.Body then
-                env.FuncFoldBuiltin.[funcDecl.Name] <- true
+                env.FuncFoldBuiltin.[funcVarId] <- true
             // An `omp(v: n)` naming no parameter is silently dropped downstream.
             checkOmpVarNames env (funcDecl.Params |> List.map (_.Name))
                              funcDecl.WhereClause $"function '{shownName}'"
+            checkSymmetryVarNames env (funcDecl.Params |> List.map (_.Name))
+                                  funcDecl.WhereClause $"function '{shownName}'"
             // ... and an `omp(p: n)` read as a licence for a loop this body
             // builds over `p` itself licenses nothing (the clause is about the
             // EXTERNAL S-dims `p` contributes to a CALLER's nest).
@@ -16824,9 +17542,9 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
                 if not (List.isEmpty polyParams) then []
                 else Blade.Deduce.deduceAdjacentPairs signResolver typedParams tBody
             if not (List.isEmpty deducedPairs) then
-                env.FuncDeducedPairs.[funcDecl.Name] <-
+                env.FuncDeducedPairs.[funcVarId] <-
                     (typedParams |> List.map (_.Name), deducedPairs)
-                IdeDeductions.addPairs funcDecl.Name
+                IdeDeductions.addPairs (declIdentity env funcDecl.Name)
                     (typedParams |> List.map (_.Name)) deducedPairs
             // Stage-3 LATE TIER: pack symmetry for arity-polymorphic kernels.
             // The forall -arity AC-fold template first (the head::tail recursion
@@ -16841,16 +17559,16 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
                      match Blade.Deduce.deducePackFold funcDecl.Name packP.Name packP.VarId tBody with
                      | Blade.Deduce.PInv -> Blade.Deduce.PInv
                      | _ ->
-                         let resolver fname =
-                             match env.PackDeducedComm.TryGetValue fname with
+                         let resolver (fid: IRId) =
+                             match env.PackDeducedComm.TryGetValue fid with
                              | true, (_, p) -> Some p
                              | _ -> None
                          Blade.Deduce.packParityOf resolver packP.VarId tBody
                  if packSummary = Blade.Deduce.PInv then
-                     env.PackDeducedComm.[funcDecl.Name] <- (packP.Name, packSummary)
+                     env.PackDeducedComm.[funcVarId] <- (packP.Name, packSummary)
                      Blade.TypeEnv.DeducedFacts.add
                          (Blade.TypeEnv.DeducedPackComm (funcDecl.Name, packP.Name)) tBody.Span
-                     IdeDeductions.addPack funcDecl.Name packP.Name packSummary
+                     IdeDeductions.addPack (declIdentity env funcDecl.Name) packP.Name packSummary
              | _ -> ())
             // RECORDING ONLY (channel (f)) -- everything below this point in the
             // decl's deduction is unchanged; these two loops only WRITE to the
@@ -16897,24 +17615,6 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
             // exchanged: a body provably INVARIANT under a pair declared
             // antisymmetric would be stored on a strict simplex that has no
             // diagonal and negates half its reads.
-            let declContradiction (groups: int list list) (wanted: Blade.Deduce.Parity)
-                                  (mk: string -> string -> TypeError) =
-                if List.isEmpty groups then None
-                else
-                    List.indexed deducedPairs
-                    |> List.tryPick (fun (i, par) ->
-                        if par = wanted
-                           && groups |> List.exists (fun g ->
-                                  List.contains i g && List.contains (i + 1) g) then
-                            Some (mk typedParams.[i].Name typedParams.[i + 1].Name)
-                        else None)
-            // The Hermitian third (see the lambda-kernel twin): declared
-            // comm OR anticomm on a body that provably CONJUGATES under the
-            // swap (PConj) is the same silent-corruption refusal, gated on
-            // the body's element type being provably complex AT THE DECL --
-            // conj is the identity on reals, and a generic/unresolved
-            // element stays trusted (a generic decl applied to complex
-            // arrays is a known gap: the eta-wrapper carries no clause groups).
             let bodyElemIsComplex =
                 let rec complexElem (t: IRType) =
                     match IR.stripUnits (env.Subst.Resolve t) with
@@ -16923,58 +17623,53 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
                     | _ -> false
                 complexElem tBody.Type
             let commContradiction =
-                [ commGroups, Blade.Deduce.PNeg, (fun a b -> CommContradictsBody (a, b))
-                  antisymGroups, Blade.Deduce.PInv, (fun a b -> AntisymmContradictsBody (a, b)) ]
-                @ (if bodyElemIsComplex then
-                       [ commGroups, Blade.Deduce.PConj, (fun a b -> CommContradictsConjBody (a, b))
-                         antisymGroups, Blade.Deduce.PConj, (fun a b -> AntisymmContradictsConjBody (a, b)) ]
-                   else [])
-                |> List.tryPick (fun (g, wanted, mk) -> declContradiction g wanted mk)
-                // The witnessed-asymmetry twin of the lambda-kernel seam (see
-                // Deduce.witnessSwapLawFailure): a declared comm pair the parity
-                // tables leave unproved, disproved by a concrete counterexample.
-                // Real elements only (the evaluator has no complex numbers);
-                // a generic/unresolved element evaluates as Float.
-                // Every claimed pair at every arity, comm AND anticomm: the
-                // lambda-kernel seam's rule (claimed pairs = consecutive
-                // members of each group; other params held fixed across the
-                // swap), see swapWitnessError there.
+                declSymmetryContradiction env typedParams deducedPairs commGroups antisymGroups tBody
+                // The pack twin (N2): a pack is ONE declared parameter, so the
+                // pairs above never reach inside it. Its pairs exist per arity:
+                // unroll the body at small arities (Deduce.witnessPackLawFailure)
+                // and witness the expanded group's pairs. Skipped when the
+                // all-arity template already PROVED the pack invariant (and for
+                // anticomm, where packs never deduce PNeg, the same evaluator
+                // also checks the diagonal).
                 |> Option.orElseWith (fun () ->
-                    if bodyElemIsComplex then None
-                    else
+                    match polyParams with
+                    | [packP] when not bodyElemIsComplex ->
+                        let packIndex = typedParams |> List.findIndex (fun p -> p.VarId = packP.VarId)
+                        let elemTy =
+                            match env.Subst.Resolve packP.Type with
+                            | IRTPoly (bt, _) -> env.Subst.Resolve bt
+                            | other -> other
                         let isIntTy (t: IRType) =
-                            match IR.stripUnits (env.Subst.Resolve t) with
+                            match IR.stripUnits t with
                             | IRTScalar (ETInt32 | ETInt64) -> true
                             | IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), _) -> true
                             | _ -> false
-                        let n = typedParams.Length
-                        let witness (groups: int list list) (negate: bool) (provedLaw: Blade.Deduce.Parity)
-                                    (mk: string * string * string -> TypeError) =
-                            groups
-                            |> List.collect (fun g -> g |> List.distinct |> List.sort |> List.pairwise)
-                            |> List.distinct
-                            |> List.tryPick (fun (p, q) ->
-                                if p < 0 || q >= n || p = q then None
-                                else
-                                    let proved = q = p + 1 && p < deducedPairs.Length && deducedPairs.[p] = provedLaw
-                                    // A proved anticomm pair still has its diagonal checked.
-                                    if proved && not negate then None
+                        let provedInv =
+                            Blade.Deduce.deducePackFold funcDecl.Name packP.Name packP.VarId tBody = Blade.Deduce.PInv
+                        let packWitness (groups: int list list) (negate: bool)
+                                        (mk: string * string * string -> TypeError) =
+                            Blade.Deduce.witnessPackLawFailure (witnessInlineFn env) funcDecl.Name packP.Name packP.VarId packIndex
+                                (typedParams |> List.map (_.VarId)) elemTy groups negate (isIntTy elemTy) tBody
+                            |> Option.map (fun (k, p, q, expanded, w) ->
+                                let nameAt (pos: int) =
+                                    if pos >= packIndex && pos < packIndex + k then $"{packP.Name}[{pos - packIndex}]"
                                     else
-                                        let (a, b) = (typedParams.[p], typedParams.[q])
-                                        let others = typedParams |> List.indexed |> List.filter (fun (k, _) -> k <> p && k <> q) |> List.map snd
-                                        Blade.Deduce.witnessSwapLawFailure a.VarId b.VarId (others |> List.map (_.VarId)) negate proved
-                                            (isIntTy a.Type && isIntTy b.Type) tBody
-                                        |> Option.map (fun w ->
-                                            let named =
-                                                w.Fixed |> List.choose (fun (id, c) ->
-                                                    others |> List.tryFind (fun o -> o.VarId = id) |> Option.map (fun o -> (o.Name, c)))
-                                            let text = swapWitnessText a.Name b.Name named negate w
-                                            match w.Failure with
-                                            | Blade.Deduce.DiagonalNonzero _ -> AnticommDiagonalNonzero (a.Name, b.Name, text)
-                                            | Blade.Deduce.SwapLawFails _ -> mk (a.Name, b.Name, text)))
-                        witness commGroups false Blade.Deduce.PInv CommContradictsWitness
+                                        let decl = if pos < packIndex then pos else pos - k + 1
+                                        typedParams.[decl].Name
+                                let (a, b) = (nameAt p, nameAt q)
+                                let named =
+                                    w.Fixed |> List.choose (fun (id, c) ->
+                                        expanded |> List.tryFindIndex (fun x -> x = id)
+                                        |> Option.map (fun pos -> (nameAt pos, c)))
+                                let text = $"applied to {k} operands, " + swapWitnessText a b named negate w
+                                match w.Failure with
+                                | Blade.Deduce.DiagonalNonzero _ -> AnticommDiagonalNonzero (a, b, text)
+                                | Blade.Deduce.SwapLawFails _ -> mk (a, b, text))
+                        (if provedInv then None
+                         else packWitness commGroups false CommContradictsWitness)
                         |> Option.orElseWith (fun () ->
-                            witness antisymGroups true Blade.Deduce.PNeg AnticommContradictsWitness))
+                            packWitness antisymGroups true AnticommContradictsWitness)
+                    | _ -> None)
             match commContradiction with
             | Some e -> Error e
             | None ->
@@ -17055,7 +17750,15 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
             // for later declarations and grafted onto the IR callable.
             let effects = effectsOfBody env (Some funcVarId) tBody
             env.FuncEffects.[funcVarId] <- effects
+            recordWitnessBody env funcVarId (typedParams |> List.map (_.VarId))
+                              (not (List.isEmpty polyParams)) effects tBody
+            (match outerWritesOfBody env env tBody with
+             | [] -> env.FuncOuterWrites.Remove funcVarId |> ignore
+             | ws -> env.FuncOuterWrites.[funcVarId] <- ws)
             env.FuncSigVarRange.[funcVarId] <- (sigVarLo, env.Subst.NextId)
+            (match outerReadsOfBody env env tBody with
+             | [] -> env.FuncOuterReads.Remove funcVarId |> ignore
+             | rs -> env.FuncOuterReads.[funcVarId] <- rs)
             // A fractional-math demand matters only when the T-typed result
             // reaches the RETURN as T: `-> T^0 = sqrt(x)` truncates at an
             // integer instance, `-> Float64 = sqrt(x) * 2.0` and
@@ -17129,7 +17832,7 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
     // Close the license scope (error paths included -- `result` has
     // materialized either way by this point).
     for (cname, cargs) in customConjuncts do
-        Blade.Constraints.lookupConstraint cname |> Option.iter (fun h -> h.ExitBody funcDecl.Name cargs)
+        Blade.Constraints.lookupConstraint cname |> Option.iter (fun h -> h.ExitBody (declIdentity env funcDecl.Name) cargs)
 
     env.Subst.PopTypeVarScope(savedScope)
     result
@@ -17240,11 +17943,16 @@ and internal wherePredicateAnnotationCheck (env: TypeEnv) (owner: string) (conju
 
 and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
     match typeDecl with
-    | TyDeclAlias (name, _typeParams, body) ->
+    | TyDeclAlias (srcName, _typeParams, body) ->
+        // D11: `name` is the declaration's IDENTITY (`A.Cell` in a non-main
+        // module `A`, the bare name in main) -- what an index alias's Tag and
+        // the registered definition carry; `srcName` is how this module's
+        // own source spells it (a scope key).
+        let name = declIdentity env srcName
         // Keep the SURFACE body: TDIAlias below stores a lowered IRType, and
         // lowering erases min=/max=, so this is the only record of a bound
         // written inside an alias (see TypeEnv.SurfaceAliases).
-        let env = { env with SurfaceAliases = Map.add name body env.SurfaceAliases }
+        let env = { env with SurfaceAliases = Map.add srcName body env.SurfaceAliases }
         // Chase one level of alias indirection: if the body is `TyNamed n`
         // where n is itself a registered TDIIndexType or TDIEnumIdx alias,
         // use n's stored body for our own registration. Each registration
@@ -17621,14 +18329,15 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                 | None -> Ok (TDIAlias (lowerTypeExpr env body))
         defInfoResult |> Result.bind (fun defInfo ->
             chunked |> Result.map (fun seg ->
-                let env' = registerTypeDef name defInfo env
+                let env' = registerDeclaredTypeDef srcName name defInfo env
                 match seg with
                 | Some (_, s) ->
                     Blade.Types.SegmentTable.record name (segmentationOffsets s)
-                    { env' with Segmentations = Map.add name s env'.Segmentations }
+                    { env' with Segmentations = Map.add srcName s env'.Segmentations }
                 | None -> env'))
 
-    | TyDeclStruct (name, typeParams, fields, constraints, isStatic) ->
+    | TyDeclStruct (srcName, typeParams, fields, constraints, isStatic) ->
+        let name = declIdentity env srcName
         // Mutual member types are forbidden as field types -- alias
         // transparency would silently erase the constraint.
         let memberMisuse =
@@ -17729,14 +18438,14 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                            |> Option.orElse invertedBoundErr with
         | Some e -> Error e
         | None ->
-            let env = if isStatic then { env with StaticStructs = Set.add name env.StaticStructs } else env
+            let env = if isStatic then { env with StaticStructs = Set.add srcName (Set.add name env.StaticStructs) } else env
             // The static evaluator's own record of this struct (the same
             // shape StaticEval.resolveStatics builds), so `staticEnvOf`
             // carries it to the index fence and the enumeration route.
             let env =
                 { env with
                     StructStatics =
-                        Map.add name
+                        Map.add srcName
                             ({ StaticEval.StructStaticInfo.Fields = fields |> List.map (_.Name)
                                Conjuncts = structConjuncts fields constraints
                                FieldDecls = fields
@@ -17802,14 +18511,17 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                     (Ok ())
             wherePredicateAnnotationCheck env name allConstraints |> Result.bind (fun () ->
             conjCheck |> Result.map (fun () ->
-                registerTypeDef name (TDIStruct (name, typeParams, fieldTypes, allConstraints)) env))
+                registerDeclaredTypeDef srcName name (TDIStruct (name, typeParams, fieldTypes, allConstraints)) env))
 
-    | TyDeclSum (name, typeParams, variants) ->
+    | TyDeclSum (srcName, typeParams, variants) ->
+        // The sum type and each constructor get the module's identity (D11):
+        // `A.Color` / `A.Red`, emitted `A__Red`, its tag the hash of that.
+        let name = declIdentity env srcName
         let variantTypes = variants |> List.map (fun v ->
-            (v.Name, v.Data |> Option.map (lowerTypeExpr env)))
-        let env' = registerTypeDef name (TDIVariant (name, typeParams, variantTypes)) env
+            (declIdentity env v.Name, v.Data |> Option.map (lowerTypeExpr env)))
+        let env' = registerDeclaredTypeDef srcName name (TDIVariant (name, typeParams, variantTypes)) env
         Ok (variants |> List.fold (fun e v ->
-            registerVariantTag v.Name name (v.Data |> Option.map (lowerTypeExpr env)) e) env')
+            registerDeclaredCtor v.Name (declIdentity env v.Name) name (v.Data |> Option.map (lowerTypeExpr env)) e) env')
 
     | TyDeclMutualGroup (members, constraints) ->
         // Members register as ordinary transparent aliases -- unannotated use

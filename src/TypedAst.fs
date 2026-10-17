@@ -248,7 +248,17 @@ and TypedExprKind =
     // checker off the argument's own type. It rides along rather than being
     // re-read from the TypedExpr's type downstream so that the "is this extent
     // static?" question is asked (and refused) in exactly one place.
-    | TExprRandGen of kind: string * key: TypedExpr * pars: TypedExpr list * weights: (TypedExpr * int) option * address: (TypedExpr * TypedExpr) option * dims: int list
+    //
+    // `inlineDraw`: for an ADDRESSED (`_at`) draw, the same samples as an ordinary
+    // expression -- a map over the shape whose cell is `__rand_sample_at` of
+    // the cell's own address (D13). A top-level `let` keeps the fill
+    // (Lowering's TDeclLet intercept); anywhere else -- a function body, a
+    // nested expression -- lowers this instead. `dims = []` with no inline is
+    // that per-sample draw itself (a scalar). `typedExprChildren` deliberately
+    // does NOT list `inlineDraw` (its operands are the node's own children,
+    // re-typed), so module-wide typed walkers do not see the block; it is
+    // consumed only by Lowering.
+    | TExprRandGen of kind: string * key: TypedExpr * pars: TypedExpr list * weights: (TypedExpr * int) option * address: (TypedExpr * TypedExpr) option * dims: int list * inlineDraw: TypedExpr option
     | TExprGuard of cond: TypedExpr * body: TypedExpr
     | TExprZero
     | TExprReynolds of kernel: TypedExpr * isAntisymmetric: bool

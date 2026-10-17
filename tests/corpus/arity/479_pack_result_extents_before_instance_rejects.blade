@@ -1,0 +1,14 @@
+// TEST: extents of an arity-decided result typed before the instance (rejects)
+// ERROR: BL3009
+// The 474 shape through `extents`: the intrinsic types the open result as a
+// rank-1 array before `outer(x, y)`'s instance (rank 2) exists.
+function outer(a: Poly<T^1>) = {
+    match arity(a) with
+    | 0 -> 1.0
+    | _ -> {
+        let head :: tail = a
+        head [*] outer(tail)
+    }
+}
+let o2 = outer([1.0, 2.0], [3.0, 4.0, 5.0])
+let e2 = extents(o2)

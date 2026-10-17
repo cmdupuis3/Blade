@@ -1,0 +1,14 @@
+// TEST: A comparison over two generic variables used as a kernel
+// ============================================================================
+// `a > b` over `a: T, b: U` makes the two variables one (as `a + b` does);
+// as a kernel each instance meets two scalars, so both an outer-product and
+// a zip use keep working.
+// ============================================================================
+function gt(a: T, b: U) = a > b
+let A = [1.0, 5.0, 3.0]
+let B = [2.0, 4.0]
+let o = method_for(A, B) <@> gt |> compute
+// EXPECT: o = [[false, false], [true, true], [true, false]]
+let C = [2.0, 4.0, 3.0]
+let z = method_for(zip(A, C)) <@> gt |> compute
+// EXPECT: z = [false, true, false]

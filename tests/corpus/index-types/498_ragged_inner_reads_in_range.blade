@@ -1,0 +1,15 @@
+// TEST: Ragged inner coordinates in range read their rows
+// ============================================================================
+// The run-time row-length check passes every in-range read, literal or
+// computed, flat or curried.
+let u = [[1.0], [2.0, 3.0], [4.0, 5.0, 6.0]]
+let i = 0 + 2
+let j = 0 + 1
+let a = u(i, j)
+// EXPECT: a = 5.0
+let b = u(i)(j)
+// EXPECT: b = 5.0
+let c = u(1, 1)
+// EXPECT: c = 3.0
+let d = method_for(range<Idx<3>>) <@> lambda(r) -> u(r, 0) |> compute
+// EXPECT: d = [1.0, 2.0, 4.0]

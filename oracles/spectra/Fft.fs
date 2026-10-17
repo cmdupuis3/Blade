@@ -63,6 +63,98 @@ let pow2Twiddles (sgn: float) (n: int) : Cplx[] =
              let s0 = if j <= q4 then qc.[q4 - j] else qc.[j - q4]
              cplx re (if sgn < 0.0 then -s0 else s0) |]
 
+// ---- Bluestein (chirp-z): every n >= 3 that is not a power of two ----------
+// Mirrors SpectraDecls.nextPow2 / bluesteinChirp / bluesteinKernel /
+// bluesteinStmts step for step (F6): chirp-weighted input zero-padded to m (the
+// smallest power of two >= 2n-1), gather through the bit reversal, forward
+// butterflies, pointwise product with the baked kernel spectrum (which carries
+// the exact 1/m), gather, inverse butterflies, chirp-weighted output.
+
+let nextPow2 (m: int) =
+    let mutable p = 1
+    while p < m do
+        p <- p * 2
+    p
+
+let bluesteinChirp (n: int) (sgn: float) : Cplx[] =
+    [| for j in 0 .. n - 1 ->
+         let r = (int64 j * int64 j) % (2L * int64 n)
+         let a = sgn * System.Math.PI * float r / float n
+         cplx (cos a) (sin a) |]
+
+/// The kernel spectrum FFT_m(b) / m -- the elaborator's `bluesteinKernel`
+/// (it bakes these values; this is the same computation).
+let bluesteinKernel (n: int) (m: int) (sgn: float) : Cplx[] =
+    let c = bluesteinChirp n sgn
+    let b = Array.create m (cplx 0.0 0.0)
+    for j in 0 .. n - 1 do
+        b.[j] <- cplx c.[j].Re (-c.[j].Im)
+        if j > 0 then b.[m - j] <- cplx c.[j].Re (-c.[j].Im)
+    let stages = fftStages m
+    let tw = pow2Twiddles (-1.0) m
+    let sx = [| for i in 0 .. m - 1 -> b.[bitrev stages i] |]
+    for st in 1 .. stages do
+        let len = 1 <<< st
+        let half = len / 2
+        let tstr = m / len
+        for u in 0 .. m / len - 1 do
+            for j in 0 .. half - 1 do
+                let p = u * len + j
+                let q = p + half
+                let t = cmul tw.[j * tstr] sx.[q]
+                let p0 = sx.[p]
+                sx.[p] <- cadd p0 t
+                sx.[q] <- csub p0 t
+    let inv = 1.0 / float m
+    [| for z in sx -> cplx (z.Re * inv) (z.Im * inv) |]
+
+/// The batched radix-2 butterflies over `batches` runs of length m.
+let private batchedButterflies (buf: Cplx[]) (tw: Cplx[]) (m: int) (batches: int) =
+    for st in 1 .. fftStages m do
+        let len = 1 <<< st
+        let half = len / 2
+        let tstr = m / len
+        for g in 0 .. batches - 1 do
+            for u in 0 .. m / len - 1 do
+                for j in 0 .. half - 1 do
+                    let p = g * m + u * len + j
+                    let q = p + half
+                    let t = cmul tw.[j * tstr] buf.[q]
+                    let p0 = buf.[p]
+                    buf.[p] <- cadd p0 t
+                    buf.[q] <- csub p0 t
+
+/// A batched Bluestein DFT of length n with sign `sgn`: `readIn g j` is
+/// element j of vector g, `writeOut g k v` stores output k of vector g.
+let bluestein (n: int) (batches: int) (sgn: float)
+              (readIn: int -> int -> Cplx) (writeOut: int -> int -> Cplx -> unit) =
+    let m = nextPow2 (2 * n - 1)
+    let stages = fftStages m
+    let c = bluesteinChirp n sgn
+    let bh = bluesteinKernel n m sgn
+    let twf = pow2Twiddles (-1.0) m
+    let twi = pow2Twiddles 1.0 m
+    let z = Array.create (batches * m) (cplx 0.0 0.0)
+    for g in 0 .. batches - 1 do
+        for j in 0 .. n - 1 do
+            z.[g * m + j] <- cmul (readIn g j) c.[j]
+    let a = Array.create (batches * m) (cplx 0.0 0.0)
+    for g in 0 .. batches - 1 do
+        for i in 0 .. m - 1 do
+            a.[g * m + i] <- z.[g * m + bitrev stages i]
+    batchedButterflies a twf m batches
+    for g in 0 .. batches - 1 do
+        for k in 0 .. m - 1 do
+            a.[g * m + k] <- cmul a.[g * m + k] bh.[k]
+    let d = Array.create (batches * m) (cplx 0.0 0.0)
+    for g in 0 .. batches - 1 do
+        for i in 0 .. m - 1 do
+            d.[g * m + i] <- a.[g * m + bitrev stages i]
+    batchedButterflies d twi m batches
+    for g in 0 .. batches - 1 do
+        for k in 0 .. n - 1 do
+            writeOut g k (cmul d.[g * m + k] c.[k])
+
 // ---- fft: unnormalized forward DFT of a real signal ------------------------
 
 let fft (x: float[]) : Cplx[] =
@@ -89,6 +181,10 @@ let fft (x: float[]) : Cplx[] =
                     sx.[p] <- cadd p0 t
                     sx.[q] <- csub p0 t
         sx
+    elif n >= 3 then
+        let sx = Array.create n (cplx 0.0 0.0)
+        bluestein n 1 (-1.0) (fun _ j -> cplx x.[j] 0.0) (fun _ k v -> sx.[k] <- v)
+        sx
     else
         let tw = fwdTwiddles n n
         let sx = Array.create n (cplx 0.0 0.0)
@@ -100,8 +196,8 @@ let fft (x: float[]) : Cplx[] =
 
 // ---- ifft: real inverse synthesis (carries the 1/n), any n -----------------
 // Power-of-2 n: the fft butterfly on the complex spectrum with the inverse
-// twiddles, real part, / n (mirrors SpectraDecls.ifftDecl). Otherwise the
-// naive table synthesis.
+// twiddles, real part, / n (mirrors SpectraDecls.ifftDecl). Other n >= 3:
+// Bluestein with the inverse chirp, real part / n; n = 1 the one-term table.
 
 let ifft (xs: Cplx[]) : float[] =
     let n = xs.Length
@@ -125,6 +221,10 @@ let ifft (xs: Cplx[]) : float[] =
                     sx.[p] <- cadd p0 t
                     sx.[q] <- csub p0 t
         [| for i in 0 .. n - 1 -> sx.[i].Re / float n |]
+    elif n >= 3 then
+        let xo = Array.zeroCreate<float> n
+        bluestein n 1 1.0 (fun _ j -> xs.[j]) (fun _ k v -> xo.[k] <- v.Re / float n)
+        xo
     else
         let tw = invTwiddles n n
         let xo = Array.zeroCreate<float> n
@@ -144,7 +244,7 @@ let power (x: float[]) : float[] =
 
 // ---- fft2 / ifft2: separable 2-D DFT (rows, then columns) ------------------
 // Flat row-major buffers of size r*c; each axis takes the radix-2 path when
-// pow2 (>= 2) and the naive table DFT otherwise. MUST stay textually
+// pow2 (>= 2), Bluestein at >= 3 otherwise, the one-term table at 1. MUST stay textually
 // parallel with rowPass2/colPass2 in SpectraDecls.fs (the ulp contract).
 
 /// Row pass: DFT along axis 1 into a fresh flat buffer. `readIn i j` reads
@@ -172,6 +272,9 @@ let private rowPass2 (r: int) (c: int) (mkTw: int -> int -> Cplx[]) (sgn: float)
                         let p0 = sa.[p]
                         sa.[p] <- cadd p0 tt
                         sa.[q] <- csub p0 tt
+        sa
+    elif c >= 3 then
+        bluestein c r sgn (fun g j -> readIn g j) (fun g k v -> sa.[g * c + k] <- v)
         sa
     else
         let twc = mkTw c c
@@ -206,6 +309,9 @@ let private colPass2 (r: int) (c: int) (mkTw: int -> int -> Cplx[]) (sgn: float)
                         let p0 = sb.[p]
                         sb.[p] <- cadd p0 tt
                         sb.[q] <- csub p0 tt
+        sb
+    elif r >= 3 then
+        bluestein r c sgn (fun g i -> sa.[i * c + g]) (fun g k v -> sb.[k * c + g] <- v)
         sb
     else
         let twr = mkTw r r

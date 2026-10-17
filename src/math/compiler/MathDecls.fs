@@ -87,6 +87,40 @@ let tyFloatMat (rows: int) (cols: int) =
 /// Default Jacobi sweep budget: converges quadratically once sweeps begin; 6-8 reach machine epsilon at n <= ~100, 10 gives margin.
 let defaultSweeps = 10
 
+/// The convergence verdict a fixed-budget iteration checks once its budget is
+/// spent: `__math_converged(cond, msg)` types as a BL8008 runtime check
+/// (TypeCheckInfer), so a NaN/Inf operand or a matrix the budget cannot
+/// finish PANICS in every lane -- the code the LAPACK route raises on a
+/// non-zero info -- instead of returning a silently unconverged result.
+let sConverged (cond: Expr) (msg: string) =
+    StmtExpr (syn (ExprApp (v "__math_converged", [ cond; syn (ExprLit (LitString msg)) ])))
+
+/// Relative tolerance of those verdicts: far above the 1e-15 the rotations
+/// aim for (a converged factorization is many orders inside it), far below
+/// any residual that would make the result wrong in print.
+let convergedTol = 1.0e-8
+
+/// `cond`, but false when `x` is not finite: `x - x` is 0.0 exactly for a
+/// finite x and NaN for an infinite or NaN one, so an Inf operand -- whose
+/// norms are Inf, against which every relative test passes (inf <= tol * inf)
+/// -- is refused too.
+let finiteAnd (x: Expr) (cond: Expr) =
+    syn (ExprIf (cmp OpEq (sub x x) (fLit 0.0), cond, syn (ExprLit (LitBool false))))
+
+/// Statements setting the mut `amaxName` to max |cell| over the flat work
+/// array cells `cellAt i j` (i < rows, j < cols), and `invName` (a fresh let)
+/// to 1/amax (0 for an all-zero array). The convergence verdicts measure the
+/// array SCALED by inv: squaring raw entries overflows at scales the solvers
+/// themselves handle (math/091's 1e160 eigh), which would read as "not
+/// converged". A NaN cell is skipped by the max but poisons every scaled sum.
+let maxAbsScale (amaxName: string) (invName: string) (rows: int) (cols: int) (cellAt: Expr -> Expr -> Expr) : Stmt list =
+    [ sAssign (v amaxName) (fLit 0.0)
+      sFor "i" 0 rows
+        [ sFor "j" 0 cols
+            [ sLet "mag" (absE (cellAt (v "i") (v "j")))
+              sAssign (v amaxName) (syn (ExprIf (cmp OpGt (v "mag") (v amaxName), v "mag", v amaxName))) ] ]
+      sLet invName (syn (ExprIf (cmp OpGt (v amaxName) (fLit 0.0), divE (fLit 1.0) (v amaxName), fLit 0.0))) ]
+
 let prodInts (xs: int list) = List.fold (*) 1 xs
 /// Rank-N dense tensor type: Array<Float like Idx<d0>, Idx<d1>, ...>.
 let tyFloatTensor (dims: int list) =
@@ -177,6 +211,26 @@ let svdDecl (name: string) (m: int) (n: int) (sweeps: int) : FunctionDecl =
                               sLet "tq" (vAt (v "i") (v "q"))
                               sAssign (vAt (v "i") (v "p")) (sub (mul (v "cs") (v "tp")) (mul (v "sn") (v "tq")))
                               sAssign (vAt (v "i") (v "q")) (add (mul (v "sn") (v "tp")) (mul (v "cs") (v "tq"))) ] ] ] ]
+              // converged: the columns of w are mutually orthogonal, sqrt(sum c_pq^2) <= tol * ||w||_F^2
+              // (a global scale, so noise-level columns of a rank-deficient operand cannot trip it), measured on
+              // w / max|w| so no square overflows; NaN fails it, an Inf max fails finiteAnd
+              sLetMut "wmax" (fLit 0.0) ]
+            @ maxAbsScale "wmax" "winv" m n wAt
+            @ [
+              sLetMut "offc" (fLit 0.0)
+              sLetMut "nrm2" (fLit 0.0)
+              sFor "j" 0 n
+                [ sFor "i" 0 m
+                    [ sLet "wj" (mul (wAt (v "i") (v "j")) (v "winv"))
+                      sAccum (v "nrm2") (mul (v "wj") (v "wj")) ] ]
+              sFor "p" 0 (n - 1)
+                [ sForE "q" (add (v "p") (iLit 1)) (iLit n)
+                    [ sAssign (v "cc") (fLit 0.0)
+                      sFor "i" 0 m [ sAccum (v "cc") (mul (mul (wAt (v "i") (v "p")) (v "winv"))
+                                                          (mul (wAt (v "i") (v "q")) (v "winv"))) ]
+                      sAccum (v "offc") (mul (v "cc") (v "cc")) ] ]
+              sConverged (finiteAnd (v "wmax") (cmp OpLe (sqrtE (v "offc")) (mul (fLit convergedTol) (v "nrm2"))))
+                  "svd: the one-sided Jacobi iteration did not converge within its sweep budget -- the operand holds NaN/Inf or the budget is too small for it"
               // singular values = column norms of w
               sLetMut "s" (zerosLit n)
               sFor "j" 0 n
@@ -288,6 +342,23 @@ let eighDecl (name: string) (n: int) (sweeps: int) : FunctionDecl =
                               sLet "tq" (qAt (v "i") (v "qq"))
                               sAssign (qAt (v "i") (v "p")) (sub (mul (v "cs") (v "tp")) (mul (v "sn") (v "tq")))
                               sAssign (qAt (v "i") (v "qq")) (add (mul (v "sn") (v "tp")) (mul (v "cs") (v "tq"))) ] ] ] ]
+              // converged: the off-diagonal is negligible, sqrt(sum_{p<q} a_pq^2) <= tol * ||aw||_F, measured on
+              // aw / max|aw| so no square overflows; NaN fails it, an Inf max fails finiteAnd
+              sLetMut "amx" (fLit 0.0) ]
+            @ maxAbsScale "amx" "ainv" n n aAt
+            @ [
+              sLetMut "offa" (fLit 0.0)
+              sLetMut "nrma" (fLit 0.0)
+              sFor "i" 0 n
+                [ sFor "j" 0 n
+                    [ sLet "aij" (mul (aAt (v "i") (v "j")) (v "ainv"))
+                      sAccum (v "nrma") (mul (v "aij") (v "aij")) ] ]
+              sFor "p" 0 (n - 1)
+                [ sForE "qq" (add (v "p") (iLit 1)) (iLit n)
+                    [ sLet "apq" (mul (aAt (v "p") (v "qq")) (v "ainv"))
+                      sAccum (v "offa") (mul (v "apq") (v "apq")) ] ]
+              sConverged (finiteAnd (v "amx") (cmp OpLe (sqrtE (v "offa")) (mul (fLit convergedTol) (sqrtE (v "nrma")))))
+                  "eigh: the Jacobi iteration did not converge within its sweep budget -- the operand holds NaN/Inf or the budget is too small for it"
               // eigenvalues = diagonal
               sLetMut "lam" (zerosLit n)
               sFor "j" 0 n [ sAssign (idx "lam" (v "j")) (aAt (v "j") (v "j")) ]
@@ -480,6 +551,14 @@ let eigDecl (name: string) (n: int) (maxIter: int) : FunctionDecl =
               // freeze windows of size <= 2 (extraction solves them exactly)
               sLet "ffreeze" (mul (v "fact") (bint (cmp OpLe (sub (v "hi") (v "l")) (iLit 2))))
               sAssign (v "hi") (ifE (isOne (v "ffreeze"), v "l", v "hi")) ] ]
+    // ---- converged: every window closed (hi <= 1) within the budget; a stall -- no exceptional shifts,
+    //      so an adversarial equal-modulus spectrum can stall -- or a NaN operand leaves one open ----
+    let converged =
+        if n < 3 then [] else
+        [ sLetMut "amxin" (fLit 0.0) ]
+        @ maxAbsScale "amxin" "ainvin" n n (idx2 "a")
+        @ [ sConverged (finiteAnd (v "amxin") (cmp OpLe (v "hi") (iLit 1)))
+              "eig: the Francis QR iteration did not converge within its iteration budget -- the operand holds NaN/Inf, or its spectrum stalls the shift strategy (e.g. equal-modulus roots of unity)" ]
     // ---- extraction: 1x1 blocks real, 2x2 blocks via the quadratic ----
     let extract =
         [ sLetMut "lre" (zerosLit n)
@@ -535,7 +614,7 @@ let eigDecl (name: string) (n: int) (maxIter: int) : FunctionDecl =
               sAssign (idx "lim" (v "kk")) (idx "lim" (v "best"))
               sAssign (idx "lim" (v "best")) (v "ti") ] ]
     let body =
-        blockE (copyIn @ scratch @ hess @ francis @ extract,
+        blockE (copyIn @ scratch @ hess @ francis @ converged @ extract,
                    Some (tupleE [ v "lre"; v "lim" ]))
     mkFunc name [ ("a", tyFloatMat n n) ] (TyTuple [ tyFloatArr n; tyFloatArr n ]) body
 

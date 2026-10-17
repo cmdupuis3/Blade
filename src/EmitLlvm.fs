@@ -904,6 +904,13 @@ and private Ctx =
       /// order-preserving. Scoped rather than global because the same kernel
       /// text appears in map position too, where no license exists.
       mutable FoldFmf: bool
+      /// The span of the declaration being emitted -- the top-level binding
+      /// main is binding, or the function whose body is open. A runtime GUARD
+      /// panic with no expression span of its own (non-exhaustive match,
+      /// group-key range, empty reduce) is located here, exactly as the C++
+      /// lane's `CodeGenState.declPanicArgs` locates its twin, so the two
+      /// lanes print the same `  --> file:line`.
+      mutable DeclSpan: Blade.Ast.Span
       /// Attribute groups actually referenced, so the module's tail lists the
       /// ones it uses and no others.
       UsedAttrGroups: SortedSet<int> }
@@ -921,6 +928,7 @@ let private newCtx (callables: Map<IRId, IRCallable>) (facts: ModuleFacts) =
       Counter = 0
       Facts = facts
       FoldFmf = false
+      DeclSpan = Blade.Ast.noSpan
       UsedAttrGroups = SortedSet()
       Slots = Dictionary()
       ArrSlots = Dictionary()
@@ -2724,6 +2732,11 @@ and private faultLocArgs (c: Ctx) (loc: SrcLoc) : (Sc * string) list =
     | Some f when f <> "" -> [ ScStr, stringGlobal c f; ScI64, (if span.StartLine > 0 then string span.StartLine else "0") ]
     | _ -> [ ScStr, "null"; ScI64, (if span.StartLine > 0 then string span.StartLine else "0") ]
 
+/// A runtime GUARD panic's location: the declaration being emitted
+/// (`Ctx.DeclSpan`), the twin of the C++ lane's `declPanicArgs`.
+and private declLocArgs (c: Ctx) : (Sc * string) list =
+    faultLocArgs c (SrcLoc c.DeclSpan)
+
 and private emitBinOp (c: Ctx) (op: IRBinOp) (l: IRExpr) (r: IRExpr) (loc: SrcLoc) : Val =
     match op with
     // `&&` / `||` SHORT-CIRCUIT, and that is not a micro-optimization here:
@@ -2999,9 +3012,11 @@ and private emitMatch (c: Ctx) (whole: IRExpr) (scrutinee: IRExpr) (cases: IRMat
             arms rest
     arms cases
     lbl c lFail
-    needShim c "blade_panic"
+    // Located at the declaration being emitted, as the C++ lane's
+    // renderMatchExpr guard is (P3-31).
+    needShim c "blade_panic_at"
     let msg = stringGlobal c "error[BL8002]: Blade: non-exhaustive match"
-    ln c (renderCall { Dest = None; RetTy = ScVoid; Callee = "@blade_panic"; Args = [ ScStr, msg ] })
+    ln c (renderCall { Dest = None; RetTy = ScVoid; Callee = "@blade_panic_at"; Args = [ ScStr, msg ] @ declLocArgs c })
     ln c "unreachable"
     lbl c lEnd
     match slot with
@@ -3203,8 +3218,9 @@ and private emitGroupKeysBinding (c: Ctx) (id: IRId) (keys: IRExpr list) (gkTy: 
     // hash when it shows up in a profile), negatives drop.
     // The C++ lane's BL8006 guards (genGroupKeysBinding; interpreter twin
     // ArrayOps.buildGroupKeys): a key outside its EnumIdx, or a positional key
-    // past the last bucket, aborts -- with no source location, as there --
-    // instead of landing in bucket 0 or writing past the counts pool.
+    // past the last bucket, aborts -- located at the declaration being
+    // emitted, as there -- instead of landing in bucket 0 or writing past the
+    // counts pool.
     let panicUnless (ok: string) (msg: string) =
         let lOk = freshLbl c "gk.ok"
         let lBad = freshLbl c "gk.bad"
@@ -3213,7 +3229,7 @@ and private emitGroupKeysBinding (c: Ctx) (id: IRId) (keys: IRExpr list) (gkTy: 
         needShim c "blade_panic_at"
         let m = stringGlobal c ("error[BL8006]: " + msg)
         ln c (renderCall { Dest = None; RetTy = ScVoid; Callee = "@blade_panic_at"
-                           Args = [ ScStr, m; ScStr, "null"; ScI64, "0" ] })
+                           Args = [ ScStr, m ] @ declLocArgs c })
         ln c "unreachable"
         lbl c lOk
     let (ngOp, bucketOf, dropNeg) : string * (string -> string) * bool =
@@ -4676,8 +4692,9 @@ and private emitReduce (c: Ctx) (arrExpr: IRExpr) (kernelExpr: IRExpr) (initExpr
         refuse "reduce over a rank-2+ array (partial folds are not in the llvm lane yet)"
     // The bound is an OPERAND: a literal for a static axis (byte-identical to
     // the counted loop this always was), the carried length for a peeled
-    // ragged row. An unseeded fold over an empty row is the same UB it is in
-    // the C++ lane; only the statically-provable case refuses.
+    // ragged row. An unseeded fold over a statically empty row refuses; over
+    // a RUNTIME extent it is guarded, BL8003 at the declaration being emitted
+    // -- the C++ lane's genReduceBinding / renderReduceExpr guard.
     let bound = soleExtentOp a
     let acc = allocaOf c (llTy accTy)
     let start =
@@ -4689,7 +4706,19 @@ and private emitReduce (c: Ctx) (arrExpr: IRExpr) (kernelExpr: IRExpr) (initExpr
         | None ->
             (match tryLitI64 bound with
              | Some n when n < 1L -> refuse "reduce over a statically empty array"
-             | _ -> ())
+             | Some _ -> ()
+             | None ->
+                 let isEmpty = freshReg c
+                 ln c ($"{isEmpty} = icmp eq i64 {bound}, 0")
+                 let lEmpty = freshLbl c "reduce.empty"
+                 let lOk = freshLbl c "reduce.ok"
+                 ln c (renderBr { Cond = isEmpty; IfTrue = lEmpty; IfFalse = lOk })
+                 lbl c lEmpty
+                 needShim c "blade_panic_at"
+                 let m = stringGlobal c "error[BL8003]: reduce: empty array, no reduction possible"
+                 ln c (renderCall { Dest = None; RetTy = ScVoid; Callee = "@blade_panic_at"; Args = [ ScStr, m ] @ declLocArgs c })
+                 ln c "unreachable"
+                 lbl c lOk)
             let v0 = coerce c accTy (readCell c a [ { Reg = "0"; Ty = ScI64 } ])
             ln c ($"store {(llTy accTy)} {v0.Reg}, ptr {acc}")
             1L
@@ -4978,6 +5007,11 @@ let private emitFunctionBody (c: Ctx) (cl: IRCallable) (sym: string) : string li
     c.GroupKeys.Clear()
     c.InFunction <- true
     c.StmtStart <- -1
+    // Guard panics in this body are located at the function's declaration
+    // (CodeGenState.emittedDeclSpan: its own span, else its source's).
+    c.DeclSpan <-
+        (let s = Blade.IR.declSpanOf cl.Name
+         if s.StartLine > 0 then s else Blade.IR.declSpanOf cl.SourceName)
     if not (List.isEmpty cl.Captures) then
         refuse ($"the function '{cl.Name}', which captures enclosing bindings")
     // The module bindings this body can read, rebound to their globals: a
@@ -5150,6 +5184,12 @@ let private checkModuleScope (m: IRModule) : unit =
         match td with
         // Index-type and alias declarations are typecheck-time identity; they
         // carry no storage and reach the back end as nothing at all.
+        // An INTEGER EnumIdx's values are keys represented as positions (D2):
+        // printing and every observation read the key table, which this lane
+        // does not build -- the C++ lane takes the program.
+        | IRTDEnumIdx (name, _, values)
+            when not values.IsEmpty && values |> List.forall (function EVInt _ -> true | _ -> false) ->
+            refuse ($"the integer EnumIdx type '{name}'")
         | IRTDAlias _ | IRTDIndexType _ | IRTDEnumIdx _ -> ()
         // A struct DECLARATION needs no runtime representation of its own
         // (idx_card and friends fold to scalars before this lane runs). A
@@ -5220,7 +5260,9 @@ let private emitSeparator (c: Ctx) (flag: string) : unit =
 /// coordinate (the left-justified slot), which is exactly what `arr[i][j]`
 /// indexes on the C++ side; that is what makes a printed triangle the same
 /// bytes in both lanes, which every symmetric corpus EXPECT depends on.
-let private emitArrayPrintGeneric (c: Ctx) (label: string) (a: ArrVal) : unit =
+/// `pre` / `post` frame the bracketed values: `name = [` / `]\n` for a
+/// binding's own line, `[` / `]` for a component inside a tuple's line.
+let private emitArrayPrintGeneric (c: Ctx) (pre: string) (post: string) (a: ArrVal) : unit =
     let rank = a.Rank
     /// The literal bound of axis `d` given the loop registers already open.
     /// Only an axis INSIDE a compact group has a dependent bound.
@@ -5238,7 +5280,7 @@ let private emitArrayPrintGeneric (c: Ctx) (label: string) (a: ArrVal) : unit =
             for p in prior |> List.skip (d - groupPos) do
                 acc <- i64Bin c "sub" acc p
             acc
-    outStr c (label + " = [")
+    outStr c pre
     if rank = 2 then
         emitCountedLoop c a.Extents.[0] (fun i ->
             let t = freshReg c
@@ -5261,16 +5303,16 @@ let private emitArrayPrintGeneric (c: Ctx) (label: string) (a: ArrVal) : unit =
             else
                 emitCountedLoopTo c (boundOf d prior) (fun i -> go (d + 1) (prior @ [ i ]))
         go 0 []
-    outStr c "]\n"
+    outStr c post
 
 /// The print dispatcher. Ragged shapes carry operand bounds the generic
 /// printer's static axis plan cannot express, so they get their own arms --
 /// the SAME bytes the C++ lane's Ragged<T> printer produces: rank 2 nests
 /// with the per-row bound, a peeled row runs flat.
-let private emitArrayPrint (c: Ctx) (label: string) (a: ArrVal) : unit =
+let private emitArrayPrintFramed (c: Ctx) (pre: string) (post: string) (a: ArrVal) : unit =
     match a.Groups with
     | [ GRagged (rows, table) ] ->
-        outStr c (label + " = [")
+        outStr c pre
         emitCountedLoopTo c rows (fun i ->
             let t = freshReg c
             ln c (renderCmp { Dest = t; Kind = "icmp"; Pred = "ne"; Ty = ScI64; Lhs = i; Rhs = "0" })
@@ -5282,16 +5324,58 @@ let private emitArrayPrint (c: Ctx) (label: string) (a: ArrVal) : unit =
                 emitSeparator c flag
                 outVal c (readCell c a [ { Reg = i; Ty = ScI64 }; { Reg = j; Ty = ScI64 } ]))
             outStr c "]")
-        outStr c "]\n"
+        outStr c post
     | [ GDynDense len ] ->
-        outStr c (label + " = [")
+        outStr c pre
         let flag = allocaOf c "i1"
         ln c ($"store i1 true, ptr {flag}")
         emitCountedLoopTo c len (fun j ->
             emitSeparator c flag
             outVal c (readCell c a [ { Reg = j; Ty = ScI64 } ]))
-        outStr c "]\n"
-    | _ -> emitArrayPrintGeneric c label a
+        outStr c post
+    | _ -> emitArrayPrintGeneric c pre post a
+
+let private emitArrayPrint (c: Ctx) (label: string) (a: ArrVal) : unit =
+    emitArrayPrintFramed c (label + " = [") "]\n" a
+
+/// A top-level TUPLE's line, spelled like its literal: the twin of
+/// `CodeGen.genPrintAggregate` (same classification, `aggregatePrintOf`),
+/// over the pack the binding holds. The parentheses follow the TYPE's nesting;
+/// the components are taken left to right from the pack, which is FLAT for a
+/// `<&>` / `<&!>` chain (its type is the left-nested pair tree) and may carry
+/// a nested pack for a nested literal -- both are consumed here. A component
+/// this lane cannot print the C++ lane's way refuses, so the program falls
+/// back to the C++ lane rather than printing a different line.
+let private emitTuplePrint (c: Ctx) (label: string) (ap: Blade.CodeGen.AggregatePrint) (parts: ValKind list) : unit =
+    let bad what = refuse ($"the print of tuple '{label}': {what}")
+    // Print `ap` from the front of `rest`, answering what is left.
+    let rec tuple (aps: Blade.CodeGen.AggregatePrint list) (rest: ValKind list) : ValKind list =
+        outStr c "("
+        let rest' =
+            aps |> List.indexed |> List.fold (fun r (i, p) ->
+                if i > 0 then outStr c ", "
+                go p r) rest
+        outStr c ")"
+        rest'
+    and go (ap: Blade.CodeGen.AggregatePrint) (rest: ValKind list) : ValKind list =
+        match ap, rest with
+        | Blade.CodeGen.APTuple aps, VTuple inner :: tail ->
+            (match tuple aps inner with
+             | [] -> tail
+             | _ -> bad "a nested pack does not match its tuple component")
+        | Blade.CodeGen.APTuple aps, _ -> tuple aps rest
+        | (Blade.CodeGen.APScalar | Blade.CodeGen.APKeyed _), VScalar v :: tail when v.Ty <> ScVoid -> outVal c v; tail
+        | (Blade.CodeGen.APDenseArray _ | Blade.CodeGen.APKeyedArray _), VArray a :: tail -> emitArrayPrintFramed c "[" "]" a; tail
+        | Blade.CodeGen.APOpaque text, _ :: tail -> outStr c text; tail
+        | _, [] -> bad "the pack has fewer components than the tuple's type"
+        | _ -> bad "a component has no print in this lane"
+    match ap with
+    | Blade.CodeGen.APTuple aps ->
+        outStr c (label + " = ")
+        (match tuple aps parts with
+         | [] -> outStr c "\n"
+         | _ -> bad "the pack has more components than the tuple's type")
+    | _ -> bad "not a tuple"
 
 /// Which bindings never print, mirroring `CodeGen.computeDeferredIds`: an
 /// unforced computation has no materialized array to echo. A binding a
@@ -5358,10 +5442,14 @@ let private emitPrints (c: Ctx) (bindings: IRBinding list) : unit =
         | IRTScalar (ETFloat64 | ETFloat32 | ETInt64 | ETInt32 | ETBool | ETComplex64 | ETComplex128 | ETString) -> true
         | IRTIdxTagged _ | IRTNat _ -> true
         | ArrayElem _ -> true
+        // A tuple prints when it has a print form (genPrintStatements'
+        // aggregate arm); a destructuring carrier never does.
+        | IRTTuple _ -> true
         | _ -> false
     for b in bindings do
         let visible =
-            (not (deferred.Contains b.Id) || c.Forced.Contains b.Id)
+            not (Blade.CodeGen.isInternalBindingName b.Name)
+            && (not (deferred.Contains b.Id) || c.Forced.Contains b.Id)
             && printableValue b.Value && printableType b.Type
         if visible then
             match c.Slots.TryGetValue b.Id with
@@ -5387,7 +5475,19 @@ let private emitPrints (c: Ctx) (bindings: IRBinding list) : unit =
             | _ ->
                 match c.ArrSlots.TryGetValue b.Id with
                 | true, a -> emitArrayPrint c b.Name a
-                | _ -> ()
+                | _ ->
+                    match c.TupleSlots.TryGetValue b.Id with
+                    | true, parts when not (Blade.CodeGen.isDestructureCarrier b) ->
+                        match Blade.CodeGen.aggregatePrintOf [] b.Type with
+                        | Some ap -> emitTuplePrint c b.Name ap parts
+                        // No type defs here: a tuple holding a STRUCT reads as
+                        // formless, but the C++ lane prints it -- refuse
+                        // rather than print nothing.
+                        | None when Blade.IR.flattenTupleLeaves b.Type
+                                    |> List.exists (fun t -> (Blade.IR.stripUnits t).IsIRTNamed) ->
+                            refuse ($"the print of tuple '{b.Name}': a struct component")
+                        | None -> ()
+                    | _ -> ()
 
 /// Emit `main`: bindings in declaration order, the `<name> completed in <t>s`
 /// timing line, then the auto-print pass -- the exact statement order
@@ -5409,6 +5509,7 @@ let private emitMain (c: Ctx) (m: IRModule) (programName: string) : string list 
         c.StmtStart <- c.Body.Count
         c.StmtSlots <- Dictionary(c.ArrSlots)
         c.HoistedIds.Clear()
+        c.DeclSpan <- Blade.IR.declSpanOf b.Name
         bindNamed c b.Id b.Name b.Type b.Value
         publishBinding c b.Id
     c.StmtStart <- -1

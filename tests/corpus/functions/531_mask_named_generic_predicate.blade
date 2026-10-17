@@ -1,0 +1,10 @@
+// TEST: A named generic predicate as a mask
+// ============================================================================
+// `mask(xs, pos)` with a named function was left a bare function reference:
+// the mask lowering found no unary lambda and every cell read `true`. A named
+// predicate is eta-wrapped as a kernel is.
+// ============================================================================
+function pos(x: T) = x > 0.0
+let xs = [1.0, -2.0, 3.0]
+let mk = mask(xs, pos)
+// EXPECT: mk = [true, false, true]

@@ -912,6 +912,14 @@ let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
                 fail name ($"""generated C++ unexpectedly contains: {(String.concat " | " present)}""")
             elif not headerOk then
                 fail name "calls the omp_* runtime API but <omp.h> is not included"
+            // Every construct goes through a blade_portability.hpp macro and
+            // every runtime query through its `blade_omp_get_*` stub-able
+            // wrapper: a raw `#pragma omp` line or bare `omp_get_*` call is
+            // an unknown pragma and an unlinkable symbol in a build without
+            // OpenMP (the Path-B team used to be both).
+            elif cpp.Contains "#pragma omp"
+                 || System.Text.RegularExpressions.Regex.IsMatch(cpp, @"(?<![A-Za-z_])omp_get_\w+\(") then
+                fail name "emits a raw `#pragma omp` line or a bare omp_get_* call (use the BLADE_OMP_* macros / blade_omp_get_* wrappers)"
             else
                 passed <- passed + 1
                 resultLine Pass name "emission path as expected"
@@ -958,7 +966,9 @@ let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
         | Error e -> fail ctlName e
         | Ok cpp ->
             let threaded =
-                cpp.Contains "#pragma omp parallel" || cpp.Contains "BLADE_OMP_PARALLEL_FOR"
+                // The construct view: the Path-B team is spelled
+                // BLADE_OMP_PARALLEL_NUM_THREADS(n) since P3-3.
+                (ompConstructView cpp).Contains "#pragma omp parallel"
             if not threaded then
                 fail ctlName "knob OFF emitted no thread construct either (the source lost its licence; the knob arm above is vacuous)"
             elif cpp.Contains "BLADE_OMP_THREADS" then

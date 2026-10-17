@@ -1,0 +1,28 @@
+// TEST: A nested function's unannotated parameter is generic
+// ============================================================================
+// `function inc(x)` means `function inc(x: T)` (formalism 4.3), nested or
+// not. Inside a block the first call pinned `x`: `{ function idl(x) = x;
+// idl(2.0); idl(2) }` was BL3020 at the second call. Each call is its own
+// instance now, as at top level. (A block-scope `let f = lambda` is a
+// separate question and is not covered here.)
+// ============================================================================
+function outer(a: Float64, n: Int64) -> Float64 = {
+    function idl(x) = x
+    let f = idl(a)
+    let i = idl(n)
+    f + Float64(i)
+}
+let r = outer(2.5, 3)
+// EXPECT: r = 5.5
+let blk = {
+    function twice(x) = x + x
+    let p = twice(2.0)
+    let q = twice(4)
+    p + Float64(q)
+}
+// EXPECT: blk = 12.0
+let arr = {
+    function twice(x) = x + x
+    twice([1, 2, 3])
+}
+// EXPECT: arr = [2, 4, 6]

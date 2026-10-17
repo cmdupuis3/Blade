@@ -1,0 +1,12 @@
+// TEST: an impl method's comm claim is validated against its body (rejects)
+// ERROR: BL4013
+// `where comm(a, b)` on an impl method was never checked (N11): the clause is
+// validated only by the top-level declaration check. The method now gets the
+// same check, and `a / b` is not commutative.
+struct P { x: Float64 }
+interface Ratio { function ratio(self, a: Float64, b: Float64) -> Float64 }
+impl Ratio for P {
+    function ratio(self, a: Float64, b: Float64) where comm(a, b) -> Float64 = a / b
+}
+let p = P { x = 1.0 }
+let r = p.ratio(1.0, 2.0)

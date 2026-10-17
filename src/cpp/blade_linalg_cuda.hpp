@@ -240,10 +240,14 @@ namespace blade_cuda_detail {
     // --------------------------------------------------------------------
     // Failure: loud and terminal, through the HOST's panic. See the header
     // note. The message lives in a static buffer because the host's
-    // failure-exit hooks (the run record) read it after this frame is gone.
+    // failure-exit hooks (the run record) read it after this frame is gone,
+    // and a THREAD-LOCAL one because it is formatted before the host panic's
+    // once-flag picks the exiting thread: two threads failing together must
+    // not write one buffer (the winner's thread runs the hooks, so its own
+    // buffer is still alive when they read it).
     // --------------------------------------------------------------------
     [[noreturn]] inline void fail(const char* api, const char* detail, int status) {
-        static char msg[512];
+        static thread_local char msg[512];
         std::snprintf(msg, sizeof msg,
                       "cuBLAS dispatch failed in %s (status %d%s%s)",
                       api, status,

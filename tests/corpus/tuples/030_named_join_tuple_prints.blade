@@ -1,0 +1,12 @@
+// TEST: Named Three-Leg Join Prints Like Its Type
+// A named `<&>` / `<&!>` chain of three legs is held FLAT in C++
+// (`std::make_tuple(r_0, r_1, r_2)`) while its type is the left-nested pair
+// tree `((A, B), C)`. Its print takes the parentheses from the type and the
+// components from the flat tuple, so both lanes print the nested spelling --
+// indexing the nested type into the flat tuple would not compile.
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A)
+let r = (L <@> lambda(x) -> x) <&> (L <@> lambda(x) -> x * 2.0) <&> (L <@> lambda(x) -> x * x) |> compute
+let s = reduce((L <@> lambda(x) -> x) <&!> (L <@> lambda(x) -> x * x) <&!> (L <@> lambda(x) -> 1.0), (+))
+// EXPECT: r = (([1.0, 2.0, 3.0], [2.0, 4.0, 6.0]), [1.0, 4.0, 9.0])
+// EXPECT: s = ((6.0, 14.0), 3.0)

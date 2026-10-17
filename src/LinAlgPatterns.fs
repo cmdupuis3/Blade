@@ -84,13 +84,13 @@ let blasFlavor () : BlasFlavor =
 /// (a test's use-guard, a hand-run) silently ineffective. Every consultation
 /// re-reads.
 let resolveBlasTier () : BlasTier =
-    let gate = Toolchain.get "BLADE_BLAS" |> Option.map _.Trim().ToLowerInvariant()
+    let gate = Toolchain.parseSwitch (Toolchain.get "BLADE_BLAS")
     match gate with
-    | Some "0" | Some "off" -> TierOff
+    | Toolchain.SwitchOff -> TierOff
     | _ ->
         if (Toolchain.get "BLADE_BLAS_LINK").IsSome then TierExplicit
         elif (Toolchain.get "OPENBLAS_DIR").IsSome then TierOpenBlasDir
-        elif gate = Some "1" || gate = Some "on" then TierSystem
+        elif gate = Toolchain.SwitchOn then TierSystem
         else TierOff
 
 /// The BLAS availability gate -- the single source of truth, consulted by
@@ -232,9 +232,7 @@ let blasBuildFlags (wantsBlas: bool) (wantsLapack: bool) : string * string =
 /// CONTRACTIONS. A program can want either without the other.
 let cublasAvailable () : bool =
     not (reproScopeActive ())
-    && (match System.Environment.GetEnvironmentVariable("BLADE_CUBLAS") with
-        | "1" | "on" -> true
-        | _ -> false)
+    && Toolchain.envFlag "BLADE_CUBLAS" false
 
 // Backend mode
 

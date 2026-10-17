@@ -1,0 +1,48 @@
+// TEST: A generic comparison's result follows each instance's rank
+// ============================================================================
+// The D1 ruling: the body decides the output rank. Comparison is elementwise
+// at every rank (formalism 6.1), and a declared `T^0` is the same variable as
+// `T`, which an array instantiates whole. `gt0(a: T^0, b: T^0) = a > b`
+// called with two arrays built an Array<bool> and returned it as `bool`: the
+// binding printed `true`. Each instance's result is now "the operand's shape
+// with element Bool" -- a Bool at a scalar instance, a Bool array of the
+// argument's rank at an array one -- and a scalar beside an array broadcasts.
+// A body that genuinely reduces stays scalar (arity/051, functions/033).
+// ============================================================================
+function gt0(a: T^0, b: T^0) = a > b
+function same(a: T, b: T) = a == b
+function both(a: T, b: T) = a && b
+function gtu(a: T^0, b: U^r) = a > b
+function pos(x: T) = x > 0.0
+function lt2(x) = x < 2
+let gi = gt0([1, 5, 3], [2, 4, 3])
+// EXPECT: gi = [false, true, false]
+let gf = gt0([1.5, 0.5], [0.5, 1.5])
+// EXPECT: gf = [true, false]
+let gm = gt0([[1, 5], [3, 0]], [[2, 4], [3, 1]])
+// EXPECT: gm = [[false, true], [false, false]]
+let gs = gt0(3, 2)
+// EXPECT: gs = true
+let lf = gt0(2, [1, 5, 3])
+// EXPECT: lf = [true, false, false]
+let ce = same([complex(1.0, 2.0), complex(0.0, 1.0)], [complex(1.0, 2.0), complex(1.0, 0.0)])
+// EXPECT: ce = [true, false]
+let bb = both([true, false, true], [true, true, false])
+// EXPECT: bb = [true, false, false]
+let bs = both(true, false)
+// EXPECT: bs = false
+let su = gtu(2, [1, 5, 3])
+// EXPECT: su = [true, false, false]
+let sm = gtu(2, [[1, 5], [3, 0]])
+// EXPECT: sm = [[true, false], [false, true]]
+let ss = gtu(2, 1)
+// EXPECT: ss = true
+let ps = pos([1.0, -2.0])
+// EXPECT: ps = [true, false]
+let p1 = pos(-1.0)
+// EXPECT: p1 = false
+let li = lt2([[1, 2], [3, 0]])
+// EXPECT: li = [[true, false], [false, true]]
+let xs = [1.0, -2.0, 3.0]
+let pm = method_for(xs) <@> pos |> compute
+// EXPECT: pm = [true, false, true]

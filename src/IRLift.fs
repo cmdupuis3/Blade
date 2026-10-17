@@ -24,7 +24,21 @@ let isInlineForm (e: IRExpr) : bool =
     | IRGroupBy _ | IRGroupKeys _ | IRGroupBucket _ | IRGroupSizes _ | IRSegments _ | IRSegmentsGrid _ | IRUngroup _ | IRUngroupRows _ | IRUngroupGrid _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _
     | IRReduceCompute _ | IRMatmul _ | IRGramApply _ | IREigh _ | IRSolve _ | IRLu _ | IRLuSolve _ -> true
     | IRCompute (IRApplyCombinator _) -> true
-    | _ -> false
+    // Every other node: classified, not defaulted (P3-12) -- a new IRExpr
+    // variant must be placed here or above, never fall through a wildcard.
+    | IRLit _ | IRVar _ | IRParam _ | IRBinOp _ | IRUnaryOp _ | IRArrayLit _ | IRIndex _
+    | IRSlice _ | IRCurry _ | IRApp _ | IRTuple _ | IRComplex _ | IRFma _ | IRRandAt _ | IRTupleProj _
+    | IRTupleCons _ | IRTupleDecons _ | IRFieldAccess _ | IRStructLit _ | IRIf _ | IRMatch _
+    | IRLet _ | IRMethodFor _ | IRObjectFor _ | IRApplyCombinator _ | IRComposeApply _
+    | IRBind _ | IRParallel _ | IRFusion _ | IRChoice _ | IRFallback _ | IRArrayProduct _
+    | IRComposeObj _ | IRComposeMeth _ | IRCompose _ | IRFunctorMap _ | IRPure _ | IRCompute _
+    | IRReynolds _ | IRGuard _ | IRSequence _ | IRReplicate _ | IRContains _ | IRDisplayEmit _
+    | IRDisplayJson _ | IRDisplayNum _ | IRDisplayStr _ | IRReduce _ | IRProdSum _ | IRZip _
+    | IRAlign _ | IRStack _ | IRGram _ | IRReverse _ | IRShift _ | IRDiag _ | IRJoin _
+    | IRSubset _ | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _ | IRNth
+    | IRZero _ | IRRank _ | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _
+    | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent
+    | IRAssign _ | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ -> false
 
 /// Nodes whose ONLY emitter is `genBinding` -- they declare an extents table,
 /// call `allocate<>`, and run a fill nest, which is a STATEMENT SEQUENCE.
@@ -70,7 +84,21 @@ let isStatementShaped (e: IRExpr) : bool =
     // BARE registers a name with no declaration behind it. They must be
     // routed in their FORCED spelling -- see `forceDeferringForm`.
     | IRChoice _ | IRFallback _ | IRGuard _ | IRSequence _ -> true
-    | _ -> false
+    // Every other node: classified, not defaulted (P3-12) -- a new IRExpr
+    // variant must be placed here or above, never fall through a wildcard.
+    | IRLit _ | IRVar _ | IRParam _ | IRBinOp _ | IRUnaryOp _ | IRIndex _ | IRSlice _
+    | IRCurry _ | IRApp _ | IRTuple _ | IRComplex _ | IRFma _ | IRRandAt _ | IRTupleProj _ | IRTupleCons _
+    | IRTupleDecons _ | IRFieldAccess _ | IRStructLit _ | IRIf _ | IRMatch _ | IRLet _
+    | IRMethodFor _ | IRObjectFor _ | IRApplyCombinator _ | IRComposeApply _ | IRBind _
+    | IRParallel _ | IRFusion _ | IRArrayProduct _ | IRComposeObj _ | IRComposeMeth _
+    | IRCompose _ | IRFunctorMap _ | IRPure _ | IRCompute _ | IRReynolds _ | IRReplicate _
+    | IRContains _ | IRDisplayEmit _ | IRDisplayJson _ | IRDisplayNum _ | IRDisplayStr _
+    | IRReduce _ | IRReduceCompute _ | IRProdSum _ | IRZip _ | IRAlign _ | IRReverse _
+    | IRShift _ | IRDiag _ | IRSubset _ | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _
+    | IRArity _ | IRNth | IRZero _ | IRRank _ | IRPolyIndex _ | IRPolyTail _ | IRExtent _
+    | IRRaggedLookup _ | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _
+    | IROrbitClass _ | IROpaqueExtent | IRAssign _ | IRForRange _ | IRConstraintCheck _
+    | IRBreakIf _ -> false
 
 /// The four forms whose emission `genBinding` DEFERS: it records the value in
 /// `DeferredComputations` and emits only a `// <deferred ...>` comment, leaving
@@ -100,7 +128,25 @@ let isStatementShaped (e: IRExpr) : bool =
 let isDeferringForm (e: IRExpr) : bool =
     match e with
     | IRChoice _ | IRFallback _ | IRGuard _ | IRSequence _ -> true
-    | _ -> false
+    // Every other node: classified, not defaulted (P3-12) -- a new IRExpr
+    // variant must be placed here or above, never fall through a wildcard.
+    | IRLit _ | IRVar _ | IRParam _ | IRBinOp _ | IRUnaryOp _ | IRArrayLit _ | IRIndex _
+    | IRSlice _ | IRCurry _ | IRApp _ | IRTuple _ | IRComplex _ | IRFma _ | IRRandAt _ | IRTupleProj _
+    | IRTupleCons _ | IRTupleDecons _ | IRFieldAccess _ | IRStructLit _ | IRIf _ | IRMatch _
+    | IRLet _ | IRMethodFor _ | IRObjectFor _ | IRApplyCombinator _ | IRComposeApply _
+    | IRBind _ | IRParallel _ | IRFusion _ | IRArrayProduct _ | IRComposeObj _ | IRComposeMeth _
+    | IRCompose _ | IRFunctorMap _ | IRPure _ | IRCompute _ | IRReynolds _ | IRReplicate _
+    | IRMask _ | IRIntersect _ | IRUnion _ | IRUnique _ | IRContains _ | IRDisplayEmit _
+    | IRDisplayJson _ | IRDisplayNum _ | IRDisplayStr _ | IRGroupBy _ | IRGroupKeys _
+    | IRGroupBucket _ | IRSegments _ | IRSegmentsGrid _ | IRUngroupGrid _ | IRUngroupRows _
+    | IRUngroup _ | IRGroupSizes _ | IRSort _ | IRReduce _ | IRReduceCompute _ | IRProdSum _
+    | IRZip _ | IRAlign _ | IRStack _ | IRTranspose _ | IRDecompact _ | IRGram _ | IRGramApply _
+    | IRMatmul _ | IREigh _ | IRSolve _ | IRLu _ | IRLuSolve _ | IRArrayNegate _
+    | IRArrayConjugate _ | IRReverse _ | IRShift _ | IRDiag _ | IRJoin _ | IRSubset _
+    | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRRank _
+    | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _
+    | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent | IRAssign _
+    | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ -> false
 
 let forceDeferringForm (e: IRExpr) : IRExpr =
     if isDeferringForm e then IRCompute e else e
@@ -117,7 +163,25 @@ let forceDeferringForm (e: IRExpr) : IRExpr =
 let isGroupTableForm (e: IRExpr) : bool =
     match e with
     | IRGroupKeys _ | IRGroupBy _ | IRSegments _ | IRSegmentsGrid _ -> true
-    | _ -> false
+    // Every other node: classified, not defaulted (P3-12) -- a new IRExpr
+    // variant must be placed here or above, never fall through a wildcard.
+    | IRLit _ | IRVar _ | IRParam _ | IRBinOp _ | IRUnaryOp _ | IRArrayLit _ | IRIndex _
+    | IRSlice _ | IRCurry _ | IRApp _ | IRTuple _ | IRComplex _ | IRFma _ | IRRandAt _ | IRTupleProj _
+    | IRTupleCons _ | IRTupleDecons _ | IRFieldAccess _ | IRStructLit _ | IRIf _ | IRMatch _
+    | IRLet _ | IRMethodFor _ | IRObjectFor _ | IRApplyCombinator _ | IRComposeApply _
+    | IRBind _ | IRParallel _ | IRFusion _ | IRChoice _ | IRFallback _ | IRArrayProduct _
+    | IRComposeObj _ | IRComposeMeth _ | IRCompose _ | IRFunctorMap _ | IRPure _ | IRCompute _
+    | IRReynolds _ | IRGuard _ | IRSequence _ | IRReplicate _ | IRMask _ | IRIntersect _
+    | IRUnion _ | IRUnique _ | IRContains _ | IRDisplayEmit _ | IRDisplayJson _ | IRDisplayNum _
+    | IRDisplayStr _ | IRGroupBucket _ | IRUngroupGrid _ | IRUngroupRows _ | IRUngroup _
+    | IRGroupSizes _ | IRSort _ | IRReduce _ | IRReduceCompute _ | IRProdSum _ | IRZip _
+    | IRAlign _ | IRStack _ | IRTranspose _ | IRDecompact _ | IRGram _ | IRGramApply _
+    | IRMatmul _ | IREigh _ | IRSolve _ | IRLu _ | IRLuSolve _ | IRArrayNegate _
+    | IRArrayConjugate _ | IRReverse _ | IRShift _ | IRDiag _ | IRJoin _ | IRSubset _
+    | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRRank _
+    | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _
+    | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent | IRAssign _
+    | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ -> false
 
 /// `isStatementShaped` through an explicit `|> compute`. The user's own force
 /// is the SAME routing problem, not a different one: `sequence(a, b) |> compute`
@@ -142,7 +206,25 @@ let isStatementShapedValue (e: IRExpr) : bool =
 let isArraysSlotAutoMaterialized (e: IRExpr) : bool =
     match e with
     | IRMask _ | IRIntersect _ | IRUnion _ | IRUnique _ -> true
-    | _ -> false
+    // Every other node: classified, not defaulted (P3-12) -- a new IRExpr
+    // variant must be placed here or above, never fall through a wildcard.
+    | IRLit _ | IRVar _ | IRParam _ | IRBinOp _ | IRUnaryOp _ | IRArrayLit _ | IRIndex _
+    | IRSlice _ | IRCurry _ | IRApp _ | IRTuple _ | IRComplex _ | IRFma _ | IRRandAt _ | IRTupleProj _
+    | IRTupleCons _ | IRTupleDecons _ | IRFieldAccess _ | IRStructLit _ | IRIf _ | IRMatch _
+    | IRLet _ | IRMethodFor _ | IRObjectFor _ | IRApplyCombinator _ | IRComposeApply _
+    | IRBind _ | IRParallel _ | IRFusion _ | IRChoice _ | IRFallback _ | IRArrayProduct _
+    | IRComposeObj _ | IRComposeMeth _ | IRCompose _ | IRFunctorMap _ | IRPure _ | IRCompute _
+    | IRReynolds _ | IRGuard _ | IRSequence _ | IRReplicate _ | IRContains _ | IRDisplayEmit _
+    | IRDisplayJson _ | IRDisplayNum _ | IRDisplayStr _ | IRGroupBy _ | IRGroupKeys _
+    | IRGroupBucket _ | IRSegments _ | IRSegmentsGrid _ | IRUngroupGrid _ | IRUngroupRows _
+    | IRUngroup _ | IRGroupSizes _ | IRSort _ | IRReduce _ | IRReduceCompute _ | IRProdSum _
+    | IRZip _ | IRAlign _ | IRStack _ | IRTranspose _ | IRDecompact _ | IRGram _ | IRGramApply _
+    | IRMatmul _ | IREigh _ | IRSolve _ | IRLu _ | IRLuSolve _ | IRArrayNegate _
+    | IRArrayConjugate _ | IRReverse _ | IRShift _ | IRDiag _ | IRJoin _ | IRSubset _
+    | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRRank _
+    | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _
+    | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent | IRAssign _
+    | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ -> false
 
 /// The `Arrays`-slot half of `isStatementShaped`: statement-shaped, NOT already
 /// auto-materialized there, and genuinely ARRAY-TYPED.
@@ -218,7 +300,25 @@ let internal isNestedLoopComputeArg (e: IRExpr) : bool =
     // nest expects an array -- the destructured `Q` / `LAM` are what reach a
     // loop, and those are ordinary IRVars by then. Adding an arm here would be
     // a dead branch that reads as if it guarded something.
-    | _ -> false
+    // Every other node: classified, not defaulted (P3-12) -- a new IRExpr
+    // variant must be placed here or above, never fall through a wildcard.
+    | IRLit _ | IRVar _ | IRParam _ | IRBinOp _ | IRUnaryOp _ | IRArrayLit _ | IRSlice _
+    | IRCurry _ | IRTuple _ | IRComplex _ | IRFma _ | IRRandAt _ | IRTupleProj _ | IRTupleCons _
+    | IRTupleDecons _ | IRFieldAccess _ | IRStructLit _ | IRIf _ | IRMatch _ | IRLet _
+    | IRMethodFor _ | IRObjectFor _ | IRApplyCombinator _ | IRComposeApply _ | IRBind _
+    | IRParallel _ | IRFusion _ | IRChoice _ | IRFallback _ | IRArrayProduct _ | IRComposeObj _
+    | IRComposeMeth _ | IRCompose _ | IRFunctorMap _ | IRPure _ | IRReynolds _ | IRGuard _
+    | IRSequence _ | IRReplicate _ | IRMask _ | IRIntersect _ | IRUnion _ | IRUnique _
+    | IRContains _ | IRDisplayEmit _ | IRDisplayJson _ | IRDisplayNum _ | IRDisplayStr _
+    | IRGroupBy _ | IRGroupKeys _ | IRGroupBucket _ | IRSegments _ | IRSegmentsGrid _
+    | IRUngroupGrid _ | IRUngroupRows _ | IRUngroup _ | IRGroupSizes _ | IRSort _ | IRReduce _
+    | IRReduceCompute _ | IRProdSum _ | IRZip _ | IRAlign _ | IRStack _ | IRTranspose _
+    | IRDecompact _ | IREigh _ | IRLu _ | IRArrayNegate _ | IRArrayConjugate _ | IRReverse _
+    | IRShift _ | IRDiag _ | IRJoin _ | IRSubset _ | IRRange _ | IRVirtualReverse _
+    | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRRank _ | IRPolyIndex _ | IRPolyTail _
+    | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _
+    | IROrbitClass _ | IROpaqueExtent | IRAssign _ | IRForRange _ | IRConstraintCheck _
+    | IRBreakIf _ -> false
 
 /// An INLINE array literal sitting directly in a loop form's `Arrays` list --
 /// e.g. the right operand of `yr - [2.0, -14.0]`. Same gap as
@@ -255,7 +355,26 @@ let internal isArrayValuedSelect (e: IRExpr) : bool =
         match typeOf e with
         | ArrayElem _ -> true
         | _ -> false
-    | _ -> false
+    // Every other node: classified, not defaulted (P3-12) -- a new IRExpr
+    // variant must be placed here or above, never fall through a wildcard.
+    | IRLit _ | IRVar _ | IRParam _ | IRBinOp _ | IRUnaryOp _ | IRArrayLit _ | IRIndex _
+    | IRSlice _ | IRCurry _ | IRApp _ | IRTuple _ | IRComplex _ | IRFma _ | IRRandAt _ | IRTupleProj _
+    | IRTupleCons _ | IRTupleDecons _ | IRFieldAccess _ | IRStructLit _ | IRMatch _ | IRLet _
+    | IRMethodFor _ | IRObjectFor _ | IRApplyCombinator _ | IRComposeApply _ | IRBind _
+    | IRParallel _ | IRFusion _ | IRChoice _ | IRFallback _ | IRArrayProduct _ | IRComposeObj _
+    | IRComposeMeth _ | IRCompose _ | IRFunctorMap _ | IRPure _ | IRCompute _ | IRReynolds _
+    | IRGuard _ | IRSequence _ | IRReplicate _ | IRMask _ | IRIntersect _ | IRUnion _
+    | IRUnique _ | IRContains _ | IRDisplayEmit _ | IRDisplayJson _ | IRDisplayNum _
+    | IRDisplayStr _ | IRGroupBy _ | IRGroupKeys _ | IRGroupBucket _ | IRSegments _
+    | IRSegmentsGrid _ | IRUngroupGrid _ | IRUngroupRows _ | IRUngroup _ | IRGroupSizes _
+    | IRSort _ | IRReduce _ | IRReduceCompute _ | IRProdSum _ | IRZip _ | IRAlign _ | IRStack _
+    | IRTranspose _ | IRDecompact _ | IRGram _ | IRGramApply _ | IRMatmul _ | IREigh _
+    | IRSolve _ | IRLu _ | IRLuSolve _ | IRArrayNegate _ | IRArrayConjugate _ | IRReverse _
+    | IRShift _ | IRDiag _ | IRJoin _ | IRSubset _ | IRRange _ | IRVirtualReverse _
+    | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRRank _ | IRPolyIndex _ | IRPolyTail _
+    | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _
+    | IROrbitClass _ | IROpaqueExtent | IRAssign _ | IRForRange _ | IRConstraintCheck _
+    | IRBreakIf _ -> false
 
 /// A LOOP FORM sitting directly in another loop form's `Arrays` list -- the
 /// fourth instance of the same gap as `isArrayValuedSelect`. A CHAINED MAP
@@ -276,7 +395,25 @@ let internal isArrayValuedSelect (e: IRExpr) : bool =
 let internal isNestedLoopFormArg (e: IRExpr) : bool =
     match e with
     | IRApplyCombinator _ | IRComposeApply _ -> true
-    | _ -> false
+    // Every other node: classified, not defaulted (P3-12) -- a new IRExpr
+    // variant must be placed here or above, never fall through a wildcard.
+    | IRLit _ | IRVar _ | IRParam _ | IRBinOp _ | IRUnaryOp _ | IRArrayLit _ | IRIndex _
+    | IRSlice _ | IRCurry _ | IRApp _ | IRTuple _ | IRComplex _ | IRFma _ | IRRandAt _ | IRTupleProj _
+    | IRTupleCons _ | IRTupleDecons _ | IRFieldAccess _ | IRStructLit _ | IRIf _ | IRMatch _
+    | IRLet _ | IRMethodFor _ | IRObjectFor _ | IRBind _ | IRParallel _ | IRFusion _
+    | IRChoice _ | IRFallback _ | IRArrayProduct _ | IRComposeObj _ | IRComposeMeth _
+    | IRCompose _ | IRFunctorMap _ | IRPure _ | IRCompute _ | IRReynolds _ | IRGuard _
+    | IRSequence _ | IRReplicate _ | IRMask _ | IRIntersect _ | IRUnion _ | IRUnique _
+    | IRContains _ | IRDisplayEmit _ | IRDisplayJson _ | IRDisplayNum _ | IRDisplayStr _
+    | IRGroupBy _ | IRGroupKeys _ | IRGroupBucket _ | IRSegments _ | IRSegmentsGrid _
+    | IRUngroupGrid _ | IRUngroupRows _ | IRUngroup _ | IRGroupSizes _ | IRSort _ | IRReduce _
+    | IRReduceCompute _ | IRProdSum _ | IRZip _ | IRAlign _ | IRStack _ | IRTranspose _
+    | IRDecompact _ | IRGram _ | IRGramApply _ | IRMatmul _ | IREigh _ | IRSolve _ | IRLu _
+    | IRLuSolve _ | IRArrayNegate _ | IRArrayConjugate _ | IRReverse _ | IRShift _ | IRDiag _
+    | IRJoin _ | IRSubset _ | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _
+    | IRNth | IRZero _ | IRRank _ | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _
+    | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent
+    | IRAssign _ | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ -> false
 
 /// Peel any IRLet chain that descendant lifts produced.
 /// When a sub-expression's lift wraps it in `IRLet(id, v, IRLet(...,inner))`,
@@ -308,7 +445,26 @@ let internal isArrayFieldAccess (e: IRExpr) : bool =
         match typeOf e with
         | ArrayElem _ -> true
         | _ -> false
-    | _ -> false
+    // Every other node: classified, not defaulted (P3-12) -- a new IRExpr
+    // variant must be placed here or above, never fall through a wildcard.
+    | IRLit _ | IRVar _ | IRParam _ | IRBinOp _ | IRUnaryOp _ | IRArrayLit _ | IRIndex _
+    | IRSlice _ | IRCurry _ | IRApp _ | IRTuple _ | IRComplex _ | IRFma _ | IRRandAt _ | IRTupleProj _
+    | IRTupleCons _ | IRTupleDecons _ | IRStructLit _ | IRIf _ | IRMatch _ | IRLet _
+    | IRMethodFor _ | IRObjectFor _ | IRApplyCombinator _ | IRComposeApply _ | IRBind _
+    | IRParallel _ | IRFusion _ | IRChoice _ | IRFallback _ | IRArrayProduct _ | IRComposeObj _
+    | IRComposeMeth _ | IRCompose _ | IRFunctorMap _ | IRPure _ | IRCompute _ | IRReynolds _
+    | IRGuard _ | IRSequence _ | IRReplicate _ | IRMask _ | IRIntersect _ | IRUnion _
+    | IRUnique _ | IRContains _ | IRDisplayEmit _ | IRDisplayJson _ | IRDisplayNum _
+    | IRDisplayStr _ | IRGroupBy _ | IRGroupKeys _ | IRGroupBucket _ | IRSegments _
+    | IRSegmentsGrid _ | IRUngroupGrid _ | IRUngroupRows _ | IRUngroup _ | IRGroupSizes _
+    | IRSort _ | IRReduce _ | IRReduceCompute _ | IRProdSum _ | IRZip _ | IRAlign _ | IRStack _
+    | IRTranspose _ | IRDecompact _ | IRGram _ | IRGramApply _ | IRMatmul _ | IREigh _
+    | IRSolve _ | IRLu _ | IRLuSolve _ | IRArrayNegate _ | IRArrayConjugate _ | IRReverse _
+    | IRShift _ | IRDiag _ | IRJoin _ | IRSubset _ | IRRange _ | IRVirtualReverse _
+    | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRRank _ | IRPolyIndex _ | IRPolyTail _
+    | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _
+    | IROrbitClass _ | IROpaqueExtent | IRAssign _ | IRForRange _ | IRConstraintCheck _
+    | IRBreakIf _ -> false
 
 /// Lift a single child if it's an inline form. Returns either ([], child)
 /// for the no-rewrite case, or ([(id, ty, child)], IRVar(id, ty)) for the
@@ -864,6 +1020,16 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         match esFinal with
         | [aF; bF; cF] -> wrapLets binds (IRFma (aF, bF, cF))
         | _ -> wrapLets binds (IRFma (a', b', c'))  // unreachable; defensive
+    | IRRandAt (kind, args, weights) ->
+        let ops = args @ (weights |> Option.map fst |> Option.toList) |> List.map (liftExpr builder)
+        let (binds, esFinal) = liftChildren builder ops
+        let n = args.Length
+        let rebuilt =
+            match weights with
+            | Some (_, k) when esFinal.Length = n + 1 -> IRRandAt (kind, List.take n esFinal, Some (List.last esFinal, k))
+            | None when esFinal.Length = n -> IRRandAt (kind, esFinal, None)
+            | _ -> IRRandAt (kind, args, weights)  // unreachable; defensive
+        wrapLets binds rebuilt
     | IRArrayLit (es, ty) ->
         // Peel any IRLet chains from element results
         // (descendant lifts) and re-wrap them at THIS level. Don't lift an
@@ -1021,6 +1187,38 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
     | IRSparseKeys (SkStatic _) | IRSparseKeys (SkDomain _) -> expr
     // Only the base extent can hold a liftable inline form; the level list is data.
     | IROrbitClass (levels, n) -> IROrbitClass (levels, liftExpr builder n)
+    // A WHOLE-ARRAY assignment whose right-hand side is an allocating form
+    // (an array literal, a statement-shaped node, an elementwise or combinator
+    // computation) has no expression rendering: `a = [3.0, x]` reached the
+    // back end as an inline IRArrayLit (BL7001), and `a = a * 2.0 + x` as an
+    // array-valued inline combinator (BL7004), in function bodies and at
+    // module level alike (F1). Bind the right-hand side to a fresh let --
+    // FORCED, so a deferred combinator materializes rather than registering a
+    // name with no declaration -- and assign the binding. The temp is fully
+    // computed before the target is touched, so a self-referential RHS reads
+    // the old value, as the assignment's semantics require; the copy-in-place
+    // path then applies to the `target = temp` shape as it does to a written
+    // `let`.
+    | IRAssign ((LVVar _) as target, v) ->
+        let v' = liftExpr builder v
+        let (peeled, inner) = peelLetChain v'
+        let arrayTyped = (match typeOf inner with ArrayElem _ -> true | _ -> false)
+        let allocating =
+            arrayTyped
+            && (isStatementShapedValue inner
+                || (match inner with
+                    | IRApplyCombinator _ | IRComposeApply _ | IRCompute _ -> true
+                    | IRBinOp _ | IRUnaryOp _ -> true
+                    | _ -> false))
+        if allocating then
+            let id = builder.FreshId()
+            let forced =
+                match inner with
+                | IRApplyCombinator _ | IRComposeApply _ -> IRCompute inner
+                | _ -> forceDeferringForm inner
+            let ty = typeOf forced
+            wrapLets (peeled @ [ (id, ty, forced) ]) (IRAssign (target, IRVar (id, ty)))
+        else IRAssign (target, v')
     | IRAssign (t, v) -> IRAssign (t, liftExpr builder v)
     | IRConstraintCheck (c, code, msg, sp) -> IRConstraintCheck (liftExpr builder c, code, msg, sp)
     | IRBreakIf c -> IRBreakIf (liftExpr builder c)

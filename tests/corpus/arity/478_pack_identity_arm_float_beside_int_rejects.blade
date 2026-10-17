@@ -1,0 +1,13 @@
+// TEST: a float identity arm beside Int64 pack slices (rejects)
+// ERROR: BL3020
+// The other direction of 477: `| 0 -> 1.0` over Int64 slices puts a Float64
+// beside an integer at every instance.
+function outerf(a: Poly<T^1>) = {
+    match arity(a) with
+    | 0 -> 1.0
+    | _ -> {
+        let head :: tail = a
+        head [*] outerf(tail)
+    }
+}
+let p2 = outerf([1, 2], [3, 4, 5])

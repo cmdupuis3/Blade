@@ -1,0 +1,8 @@
+// TEST: A ragged inner literal past its row is refused (rejects)
+// ERROR: BL4003 @ 7:14
+// ============================================================================
+// The outer coordinate of a ragged array was range-checked; the inner one
+// never was: `u(0, 2)` on a length-1 row read row 1's cell (3.0). A literal
+// inner coordinate is checked against the literal's row length.
+let u = [[1.0], [2.0, 3.0], [4.0, 5.0, 6.0]]
+let a = u(0, 2)

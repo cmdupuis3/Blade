@@ -1,0 +1,10 @@
+// TEST: Rand Indexed: a function-body draw keeps the fill's run-time guards (aborts)
+// ABORT: error[BL8001]
+// ABORT: sample offset
+// D13: an `_at` draw inside a function checks its address exactly as the
+// top-level fill does -- here an offset computed at run time is negative,
+// which would alias another sample; it is refused, not wrapped.
+import rand as r
+function draw(o: Int64) = r.uniform_at(5, 1, o, 4)
+let start = 2 - 3
+let u = draw(start)

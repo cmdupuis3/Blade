@@ -126,6 +126,17 @@ let private emissionCases : (string * (string * string) list * string list * str
           + "let s = rowsums(a)\n") ],
        [ "_shape___method_for_inferred_n" ],
        [ "_double(Array<double, 2> x)"; "x.extents[" ])
+      // ...and to a FIXPOINT (N20): when the caller is itself a generic
+      // copy, its unshaped HM copy is pruned first, and the callee's unshaped
+      // copy -- referenced only from that dead caller -- must go with it.
+      ("caret_hm_origin_called_only_from_dead_copy_is_dropped",
+       [ ("Main",
+          "function rowsums(x: T^2) = reduce(x, (+))\n"
+          + "function outer(x: T^2) = rowsums(x * 2.0)\n"
+          + "let A = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n"
+          + "let r = outer(A)\n") ],
+       [ "rowsums_HM_"; "_shape_" ],
+       [ "_double(Array<double, 2> x)" ])
 
       // ---- Recursion ----
       // Self-recursive and SHAPE-PRESERVING: `a` is forwarded to the recursive

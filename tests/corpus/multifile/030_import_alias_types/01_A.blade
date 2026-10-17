@@ -1,0 +1,10 @@
+// TEST: Types of a module imported under an alias
+// MODULE: A
+module A
+struct P { x: Float64 }
+type Color = Red | Green
+function mk(v: Float64) -> P = P { x = v }
+function fx(p: P) -> Float64 = p.x
+function isRed(c: Color) -> Bool = match c with
+    | Red -> true
+    | Green -> false

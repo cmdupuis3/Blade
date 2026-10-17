@@ -1,0 +1,5 @@
+// TEST: Two modules declaring one __-prefixed type name (rejects)
+// MODULE: A
+module A
+type __X = Idx<3>
+let a: Array<Float64 like __X> = [1.0, 2.0, 3.0]

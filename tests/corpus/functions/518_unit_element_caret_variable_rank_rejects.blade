@@ -1,0 +1,11 @@
+// TEST: A unit-carrying concrete-element caret needs a literal rank (rejects)
+// ERROR: BL1004 @ 9:30
+// ============================================================================
+// `Float64^r` is refused at the head (functions/173), but the type-application
+// spelling `Float64<meters>^r` dropped the caret without a word: the parameter
+// meant `Float64<meters>`, and the array argument was then refused as a rank
+// mismatch against a scalar. It takes the same literal-rank refusal.
+// ============================================================================
+Unit meters
+function f(x: Float64<meters>^r) = x
+let y = f([1.0, 2.0])

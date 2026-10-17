@@ -1,0 +1,11 @@
+// TEST: GroupBy kernel row read past its group aborts (aborts)
+// ABORT: BL8006
+// ABORT: a position outside its group's rows
+// G1: inside a per-group kernel the row parameter is one group's rows;
+// `lambda(g) -> g(2)` over two-row groups read past the group. Checked
+// against the row's own length, in both lanes.
+let region = [0, 1, 0, 1]
+let temps = [10.0, 20.0, 30.0, 40.0]
+let gk = group_keys(region)
+let grouped = group_by(temps, gk)
+let thirds = method_for(grouped) <@> lambda(g) -> g(2) |> compute

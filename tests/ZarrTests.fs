@@ -3073,6 +3073,82 @@ let m2 = method_for(A, A) <@> lambda(x: Array<Float32 like xdim>, y: Array<Float
      else
          printfn "  SKIP nc stream differential: sample.nc not found")
 
+    // ---------------------------------------------------------------
+    // The provider boundary rule (BL8015) and the masked read, BOTH lanes.
+    // A floating Zarr array refuses NaN / +-Inf whether an absent chunk
+    // filled them from a NaN fill_value or a written chunk holds them; a
+    // FINITE fill_value is a value. ABSOLUTE store path, so the compiled exe
+    // (cwd = its own dir) and the interpreter read the same store.
+    // ---------------------------------------------------------------
+    printfn "\n--- boundary rule (BL8015) + masked read (both lanes) ---"
+    (try
+        let bDir = Path.Combine(scratch, "boundary")
+        Directory.CreateDirectory bDir |> ignore
+        let store = Path.Combine(bDir, "zb").Replace("\\", "/")
+        (try Directory.Delete(store, true) with _ -> ())
+        let wv name dims shape chunks fill data omit : ZarrWrite.WriteVar =
+            { Name = name; DimNames = Some dims; Shape = shape; Chunks = chunks; FillValue = fill
+              Data = ZarrWrite.WF64 data; OmitChunks = omit; Blade = None }
+        ZarrWrite.writeStoreV2 store
+            [ // NaN fill, row 1's chunk ABSENT: three NaN cells from the fill.
+              wv "P" [ "pr"; "pc" ] [ 2L; 3L ] [ 1L; 3L ] (FillFloat nan) [| 1.5; 2.5; 3.5; 9.0; 9.0; 9.0 |] [ [ 1L; 0L ] ]
+              // Finite fill, a WRITTEN NaN: refused too (not only fill).
+              wv "Q" [ "q" ] [ 3L ] [ 3L ] (FillFloat 0.0) [| 1.0; nan; 3.0 |] []
+              // Finite fill, an absent chunk: the fill is a VALUE.
+              wv "R" [ "r" ] [ 4L ] [ 2L ] (FillFloat -1.0) [| 1.0; 2.0; 0.0; 0.0 |] [ [ 1L ] ]
+              // Streamed: row 1 holds a +Inf (site 1, cell 1).
+              wv "S" [ "sr"; "sc" ] [ 2L; 3L ] [ 1L; 3L ] (FillFloat 0.0) [| 1.0; 2.0; 3.0; 4.0; infinity; 6.0 |] [] ]
+        let prog (body: string) = "import zarr as z\nlet zb = z.load(\"" + store + "\")\n" + body + "\n"
+        let run (name: string) (body: string) = Blade.Tests.ProviderBoundaryTests.bothLanes e2eDir name [] (prog body)
+        (match run "zarr_boundary_fill" "let p = zb.vars.P |> z.read" with
+         | Ok r ->
+             Blade.Tests.ProviderBoundaryTests.expectRefusal check "zarr: NaN fill_value + absent chunk refused" r
+                 [ $"provider read of 'P' from '{store}'"; "3 cell(s) hold a missing value"; "first at [1, 0]"; "NaN or infinite (fill_value NaN)" ]
+         | Error e -> check "zarr boundary fill: lowers" false e)
+        (match run "zarr_boundary_written" "let q = zb.vars.Q |> z.read" with
+         | Ok r ->
+             Blade.Tests.ProviderBoundaryTests.expectRefusal check "zarr: a WRITTEN NaN under a finite fill refused" r
+                 [ "provider read of 'Q'"; "1 cell(s) hold a missing value"; "first at [1]" ]
+         | Error e -> check "zarr boundary written: lowers" false e)
+        (match run "zarr_boundary_finite" "let rv = zb.vars.R |> z.read" with
+         | Ok r ->
+             Blade.Tests.ProviderBoundaryTests.expectValues check "zarr: a finite fill_value stays a value" r
+                 [ "rv = [1.0, 2.0, -1.0, -1.0]" ]
+         | Error e -> check "zarr boundary finite: lowers" false e)
+        (match run "zarr_boundary_present" "let t = zb.vars.P |> z.read_present\nlet ok = zb.vars.P |> z.present\nlet n = extents(t)\nlet total = reduce(t, (+))" with
+         | Ok r ->
+             Blade.Tests.ProviderBoundaryTests.expectValues check "zarr: masked read (read_present / present)" r
+                 [ "n = 3"; "total = 7.5"; "ok = [[true, true, true], [false, false, false]]" ]
+             // Each masked-read binding is ONE raw read of the store (no second
+             // reader mode): `t` and `ok` are two bindings, so two reads.
+             check "zarr: each masked-read binding reads the store once (2 bindings, 2 raw reads)"
+                 ((r.Cpp.Split([| "_flat = new" |], StringSplitOptions.None)).Length = 3) ""
+         | Error e -> check "zarr masked read: lowers" false e)
+        (match run "zarr_boundary_stream" "let A = zb.vars.S |> z.stream\nlet s = method_for(A) <@> lambda(x: Array<Float64 like sc>) -> reduce(x, (+)) |> compute" with
+         | Ok r ->
+             (match r.Compiled with
+              | None -> printfn "  SKIP zarr stream refusal: toolchain unavailable"
+              | Some (Ok (code, out)) ->
+                  check "zarr: a streamed fiber holding +Inf refuses per fiber (BL8015, site coordinates)"
+                      (code <> 0 && out.Contains "error[BL8015]: provider read of 'S'" && out.Contains "first at [1, 1]") out
+              | Some (Error e) -> check "zarr: stream refusal runs" false e)
+         | Error e -> check "zarr boundary stream: lowers" false e)
+        (match run "zarr_boundary_write" ("let a = [1.0, 2.0]\nlet bad = method_for(a) <@> lambda(x) -> x / (x - x) |> compute\nlet _ = z.write(\"" + store + "_out\", bad)") with
+         | Ok r ->
+             (match r.Compiled with
+              | None -> printfn "  SKIP zarr write refusal: toolchain unavailable"
+              | Some (Ok (code, out)) ->
+                  check "zarr: a write of infinite cells is refused (BL8015)"
+                      (code <> 0 && out.Contains "error[BL8015]: provider write of 'bad'" && out.Contains "2 cell(s) are NaN or infinite") out
+              | Some (Error e) -> check "zarr: write refusal runs" false e)
+         | Error e -> check "zarr boundary write: lowers" false e)
+        (match lower (prog "let static V = zb.vars.Q |> z.read") with
+         | Ok _ -> check "zarr: static fold of a NaN cell refused" false "lowered without error"
+         | Error e ->
+             check "zarr: static fold refuses with the BL8015 sentence (the `let static` assertion)"
+                 (e.Contains "does not evaluate at compile time" && e.Contains "provider read of 'Q'" && e.Contains "first at [1]") e)
+     with ex -> check "zarr boundary rule: no unexpected exception" false ex.Message)
+
     // Cleanup the temp scratch (e2e stores stay in generated_cpp_tests
     // beside the .cpp files, like the netcdf fixtures).
     (try Directory.Delete(scratch, true) with _ -> ())

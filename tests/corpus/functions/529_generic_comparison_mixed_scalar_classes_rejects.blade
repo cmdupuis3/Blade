@@ -1,0 +1,7 @@
+// TEST: A generic comparison of an Int and a Float is refused at the call (rejects)
+// ERROR: BL3999 @ 6:15
+// ============================================================================
+// The two generic variables are one, so an Int64 and a Float64 argument
+// disagree about it at the call (nothing converts implicitly).
+function gt(a: T, b: U) = a > b
+let g = gt(2, 2.5)

@@ -57,6 +57,18 @@ let runInstanceGuardEmissionTests () : BlockResult =
             check name (has = wantGuard)
                 (if has then "the emitted C++ carries a subscript guard" else "the emitted C++ carries no subscript guard")
         | Error e -> check name false e
+    // F5: an integer EnumIdx observation reads the per-type static key table
+    // (`blade_arith::key_table<...>::tab[p]`), not an O(n) if-chain per read.
+    let enumSrc =
+        "type R = EnumIdx<[100, 200, 300]>\n"
+        + "let codes: Array<R like Idx<3>> = [300, 100, 200]\n"
+        + "let a = codes <@> lambda(c) -> c + 1 |> compute\n"
+    match Blade.Tests.Functions.cppOf "enum_key_table" enumSrc with
+    | Ok cpp ->
+        check "an integer EnumIdx observation reads the per-type key table (F5)"
+            (cpp.Contains "blade_arith::key_table<100LL, 200LL, 300LL>::tab[" && not (cpp.Contains "== 1L) ?"))
+            "expected a key_table read and no position if-chain"
+    | Error e -> check "an integer EnumIdx observation reads the per-type key table (F5)" false e
     { Block = "Array-Instance Subscript Guards"
       Passed = passed
       Failed = failed

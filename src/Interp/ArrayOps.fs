@@ -932,8 +932,21 @@ let maskArray (arr: BladeArray) (pred: Value -> Value) : BladeArray =
 /// source's IndexTypes (so `compound(A, m)` sees the shared index space);
 /// element type Bool. `pred` is the caller's kernel closure.
 let maskPresence (arr: BladeArray) (pred: Value -> Value) : BladeArray =
-    if arr.Extents.Length <> 1 then
-        raise (ArrayOpUnsupported "mask over a rank>1 array (rank-1 only; mirrors CodeGen's #error)")
+    if arr.Extents.Length > 1 then
+        // Rank k (materializeMaskForm's dense arm): the Bool array keeps the
+        // whole index space, cells in row-major order.
+        let ext = arr.Extents
+        let total = ext |> Array.fold (fun acc e -> acc * int e) 1
+        let coordsOf (i: int) =
+            let mutable rem = int64 i
+            let cs = Array.zeroCreate ext.Length
+            for d in ext.Length - 1 .. -1 .. 0 do
+                cs.[d] <- rem % ext.[d]
+                rem <- rem / ext.[d]
+            List.ofArray cs
+        let bools = Array.init total (fun i -> toBoolv (pred (readCell arr (coordsOf i))))
+        mkDenseArray (IRTScalar ETBool) arr.IndexTypes ext (SBool bools)
+    else
     let n = arr.Extents.[0]
     let bools = Array.init (int n) (fun i -> toBoolv (pred (readCell arr [ int64 i ])))
     { ElemType = IRTScalar ETBool

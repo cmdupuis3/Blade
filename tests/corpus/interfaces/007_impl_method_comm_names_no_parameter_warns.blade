@@ -1,0 +1,12 @@
+// TEST: an impl method's comm naming no parameter warns BL4001
+// WARN: BL4001
+// The parameter-name half of N11 (and N12): `q` is no parameter of `sum2`,
+// so the name is ignored -- said so, as for a top-level function.
+struct P { x: Float64 }
+interface Sum2 { function sum2(self, a: Float64, b: Float64) -> Float64 }
+impl Sum2 for P {
+    function sum2(self, a: Float64, b: Float64) where comm(a, q) -> Float64 = a + b + self.x
+}
+let p = P { x = 1.0 }
+let r = p.sum2(2.0, 3.0)
+// EXPECT: r = 6.0

@@ -151,22 +151,30 @@
     },
     "BL2008": {
       "title": "provider cannot resolve the store",
-      "explanation": "A provider REFUSED the store named at a load or checkout site (`let repo = ic.load(path)`, `repo.checkout(ref)` -- the checkout desugars into a load of a canonical key). The store, not the library, is the problem: a missing or non-repo directory, a ref that names no branch/tag/snapshot, a bare ref that names BOTH a branch and a tag, a deleted-tag tombstone, an unsupported spec version byte, a repo whose status is Offline, or a snapshot carrying something the reader refuses by name (a virtual chunk ref, a nested group). The checker refuses at the binding site because nothing the store binds can be typed without its metadata: every `store.dims.x` and `store.vars.y` would otherwise fall back to an opaque type and die far downstream as a baffling element-type mismatch. Every provider reports through this code: the same failure from a zarr, NetCDF or CSV load is most often the plain one -- the file or directory is not there, because a relative path was resolved from a different working directory than the one it was written for. The message's detail is the provider's own refusal text, which names the condition and, where a ref is involved, lists the refs that DO exist.",
-      "fix": "Read the detail -- it names the condition precisely. A store that is \"not found\" or \"not a store\" is a path problem first: relative store paths resolve against the compiler's working directory (the source file's directory under `blade run`, the notebook's under an editor), so check where the command was run from before checking the data. A misspelled ref is answered by one of the names it lists; an ambiguous bare ref is answered by a marker (`repo.checkout(\"release\", ic.tag)` or `ic.branch`); a missing repo is a path relative to the compiler's working directory, which for a notebook cell is the notebook's own directory; an Offline repo must be brought online in the tool that manages it; a spec version other than 2 needs a different reader, by design.",
+      "explanation": "A provider REFUSED the store named at a load or checkout site (`let repo = ic.load(path)`, `repo.checkout(ref)` -- the checkout desugars into a load of a canonical key). The store, not the library, is the problem: a missing or non-repo directory, a ref that names no branch/tag/snapshot, a bare ref that names BOTH a branch and a tag, a deleted-tag tombstone, an unsupported spec version byte, a repo whose status is Offline, or a snapshot carrying something the reader refuses by name (a virtual chunk ref, a nested group). The checker refuses at the binding site because nothing the store binds can be typed without its metadata: every `store.dims.x` and `store.vars.y` would otherwise fall back to an opaque type and die far downstream as a baffling element-type mismatch. Every provider reports through this code: the same failure from a zarr, NetCDF or CSV load is most often the plain one -- the file or directory is not there, because a relative path was written relative to some other directory than the source file's own. The message's detail is the provider's own refusal text, which names the condition and, where a ref is involved, lists the refs that DO exist.",
+      "fix": "Read the detail -- it names the condition precisely. A store that is \"not found\" or \"not a store\" is a path problem first: every verb resolves a relative store path against the SOURCE FILE's directory at compile time (a notebook cell's against the notebook's directory), never against the directory the command was run from, so check the path relative to the source before checking the data. A misspelled ref is answered by one of the names it lists; an ambiguous bare ref is answered by a marker (`repo.checkout(\"release\", ic.tag)` or `ic.branch`); a missing repo is a path relative to the source file's directory (for a notebook cell, the notebook's own directory); an Offline repo must be brought online in the tool that manages it; a spec version other than 2 needs a different reader, by design.",
       "examples": [],
       "docs": [
         "docs/plans/plan-icechunk-provider.md"
       ]
     },
+    "BL2010": {
+      "title": "ambiguous imported name",
+      "explanation": "An unqualified type or variant-constructor name that two imported modules both declare, and the importing module does not. A declared type's identity is its module's (module A's `Red` is `A.Red`, B's is `B.Red`), so both may exist in one program; the name alone cannot say which one a use means. A local declaration of the name shadows the imports, and one import of it binds it bare. A constructor PATTERN over a value whose type names the constructor (`match c with | Red -> ..` where `c: A.Color`) is resolved by that type and is never ambiguous.",
+      "fix": "Qualify the use with the module -- `A.Red`, `B.Red`, `let p: A.P = ..` (or the alias of `import A as U`: `U.Red`) -- or declare the name in this module, or import just the one you want (`from A import Red`).",
+      "examples": [
+        "tests/corpus/multifile/027_same_named_constructor_rejects/03_Main.blade"
+      ],
+      "docs": []
+    },
     "BL2009": {
       "title": "duplicate declaration",
-      "explanation": "A second top-level declaration reuses a name its namespace already holds; the refusal names both sites. Values and functions share one namespace (a second `let x`, a `let x` beside `function x`, a leaf of a destructuring `let` an earlier `let` bound), types another (`type`, `struct`, sum types, index types), units a third. Before this code a duplicate function silently SHADOWED the first (calls matching the first signature died blaming the call site), a top-level re-`let` passed the checker and died in g++ as a redeclaration while the interpreter shadowed it -- two lanes, two meanings -- and a duplicate `type`/`struct` let the last one win silently. Across the modules of one program a TYPE name (and a variant-constructor name) may be declared only once: type identity is still the bare name, so two modules' `struct P` would be one type to the checker and two definitions to C++, and a main-module `type Cell` would silently become the same nominal index type as an imported module's `Cell`. Same-scope only: inside a block, `let` and nested `function`s may still shadow outer names, and an imported name (`from X import f`) is not a declaration. Values and functions of different modules never clash: a non-main module's members are namespaced (`Util.scale`).",
-      "fix": "Rename one of the two declarations, or delete the one that was meant to be replaced. To update a top-level `let`, assign it (`x = ...`) rather than declaring it again. For a type or constructor name two modules both declare, rename one of them. If two function bodies were meant to be rank-dispatched alternatives of one function, that is the planned function-clause feature (docs/plans/plan-match-statements.md, R1) -- today, write one function whose body dispatches, or give the variants distinct names.",
+      "explanation": "A second top-level declaration reuses a name its namespace already holds; the refusal names both sites. Values and functions share one namespace (a second `let x`, a `let x` beside `function x`, a leaf of a destructuring `let` an earlier `let` bound), types another (`type`, `struct`, sum types, index types), units a third. Before this code a duplicate function silently SHADOWED the first (calls matching the first signature died blaming the call site), a top-level re-`let` passed the checker and died in g++ as a redeclaration while the interpreter shadowed it -- two lanes, two meanings -- and a duplicate `type`/`struct` let the last one win silently. Within one module a variant-constructor name belongs to one sum type. ACROSS modules nothing clashes: a declared type's identity is its module's (module A's `struct P` is `A.P`, B's is `B.P`, main's is `P`), so two modules may each declare one; an unqualified use that two imports both answer is refused at the use (BL2010). Same-scope only: inside a block, `let` and nested `function`s may still shadow outer names, and an imported name (`from X import f`) is not a declaration. Values and functions of different modules never clash: a non-main module's members are namespaced (`Util.scale`).",
+      "fix": "Rename one of the two declarations, or delete the one that was meant to be replaced. To update a top-level `let`, assign it (`x = ...`) rather than declaring it again. If two function bodies were meant to be rank-dispatched alternatives of one function, that is the planned function-clause feature (docs/plans/plan-match-statements.md, R1) -- today, write one function whose body dispatches, or give the variants distinct names.",
       "examples": [
         "tests/corpus/functions/126_duplicate_function_rejects.blade",
         "tests/corpus/functions/152_duplicate_toplevel_let_rejects.blade",
-        "tests/corpus/structs/056_duplicate_struct_rejects.blade",
-        "tests/corpus/multifile/025_same_named_struct_rejects/03_Main.blade"
+        "tests/corpus/structs/056_duplicate_struct_rejects.blade"
       ],
       "docs": [
         "docs/plans/plan-match-statements.md"
@@ -823,8 +831,8 @@
     },
     "BL6002": {
       "title": "construct not valid in this position",
-      "explanation": "The program typechecks, but a construct sits where lowering has no rule for it: `compound(dense, mask)`, a sequenced `rand.<family>(...)` draw, `sparse(values, keys)` or `fill_random` anywhere but as a top-level `let` value (inside a function body, say), an array-typed `zero` as a return value or call argument, or a `_` outside a compound coordinate or a pattern. The diagnostic is spanned at the expression, and `blade check` reports it (check lowers after typechecking) -- it used to surface only at `emit`, with no span.",
-      "fix": "Do what the message says for that construct: bind it at top level (`let B = compound(dense, mask)`, `let A = rand.uniform(key, n)`) and pass the array in, or bind an array `zero` to an annotated `let` first.",
+      "explanation": "The program typechecks, but a construct sits where lowering has no rule for it: `compound(dense, mask)`, a sequenced `rand.<family>(...)` draw (an addressed `rand.<family>_at(key, stream, offset, ..)` draw is allowed anywhere, function bodies included: each sample is a pure function of its address), `sparse(values, keys)` or `fill_random` anywhere but as a top-level `let` value (inside a function body, say), an array-typed `zero` as a return value or call argument, or a `_` outside a compound coordinate or a pattern. The diagnostic is spanned at the expression, and `blade check` reports it (check lowers after typechecking) -- it used to surface only at `emit`, with no span.",
+      "fix": "Do what the message says for that construct: bind it at top level (`let B = compound(dense, mask)`, `let A = rand.uniform(key, n)`) and pass the array in -- or, for a random draw inside a function, use the addressed family (`rand.uniform_at(key, stream, offset, n)`), or bind an array `zero` to an annotated `let` first.",
       "examples": [
         "tests/corpus/diagnostics/090_compound_in_function_body_rejects.blade",
         "tests/corpus/diagnostics/091_rand_draw_in_function_body_rejects.blade"
@@ -976,6 +984,19 @@
       ],
       "docs": [
         "docs/formalism.md"
+      ]
+    },
+    "BL8015": {
+      "title": "provider read holds missing values",
+      "explanation": "A missing value never crosses a provider boundary disguised as a number. The variable a read names holds cells its store marks missing, and the read is refused instead of handing them to the program as data: NaN or an infinity in any floating-point variable (NetCDF, Zarr, Icechunk, CSV -- written NaNs included, not only fill), and for NetCDF also a cell equal to the variable's `_FillValue` or a `missing_value`, a cell outside `valid_min` / `valid_max` / `valid_range`, and, for a floating variable with no `_FillValue`, the default fill a never-written cell holds. A finite Zarr / Icechunk `fill_value` is a value and reads as one; an integer NetCDF variable is refused only on an explicit attribute. The message names the variable, the store, the number of missing cells and the first one. Every read form applies the rule (`read`, `stream` -- per fiber, so the refusal can come from inside the consuming loop -- `load_compound`, which checks only the cells its mask marks present, and `read_window`), in the compiled program and the interpreter alike; a compile-time fold (`let static ... |> read`) of such a variable fails the `let static` assertion (BL3999) carrying the same sentence. A provider WRITE of a NaN or infinite cell is refused under this code too, since every reader of the store would refuse it.",
+      "fix": "Read the variable with the masked read: `let t = store.vars.x |> alias.read_present` is a compound array of the PRESENT cells only (built from the presence mask, no sentinel or NaN in it), and `let ok = store.vars.x |> alias.present` is that mask (`true` where the cell holds a value). Both must be the whole value of a module-level binding. Otherwise clean the store. Before a write, mask or replace the non-finite cells.",
+      "examples": [
+        "tests/NetcdfTests.fs",
+        "tests/ZarrTests.fs",
+        "tests/CsvTests.fs"
+      ],
+      "docs": [
+        "docs/features/sql.md"
       ]
     },
     "BL9001": {

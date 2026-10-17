@@ -1,0 +1,65 @@
+// TEST: a cons-destructured pack head keeps the declared rank at every arity
+// ============================================================================
+// D4 (formalism 8.2): `Poly<T^1>` promises rank-1 slices, so `head [*]
+// outer(tail)` is an outer product at every instance -- rank 1 at one
+// operand, rank 2 at two, rank 3 at three. The head used to be typed at a
+// fresh scalar variable and the scalar identity arm `| 0 -> 1.0` was unified
+// with the recursive arm, so every instance returned a `double` (g++ refused
+// the Array<double,2> it was handed). Each instance's result is now decided
+// by its own body, smallest arity first.
+// ============================================================================
+function outer(a: Poly<T^1>) = {
+    match arity(a) with
+    | 0 -> 1.0
+    | _ -> {
+        let head :: tail = a
+        head [*] outer(tail)
+    }
+}
+let x = [1.0, 2.0]
+let y = [3.0, 4.0, 5.0]
+let z = [10.0, 20.0]
+let o1 = outer(x)
+// EXPECT: o1 = [1.0, 2.0]
+let o2 = outer(x, y)
+// EXPECT: o2 = [[3.0, 4.0, 5.0], [6.0, 8.0, 10.0]]
+let o3 = outer(x, y, z)
+// EXPECT: o3 = [30.0, 60.0, 40.0, 80.0, 50.0, 100.0, 60.0, 120.0, 80.0, 160.0, 100.0, 200.0]
+let oxx = outer(x, x)
+// EXPECT: oxx = [[1.0, 2.0], [2.0, 4.0]]
+let r3 = rank(o3)
+// EXPECT: r3 = 3
+// Elementwise consumers of a result are judged after the instance is known.
+let twice = o2 * 2.0
+// EXPECT: twice = [[6.0, 8.0, 10.0], [12.0, 16.0, 20.0]]
+// A consumer that needs the shape at type checking reads an annotation.
+let o2t: Array<Float64 like Idx<2>, Idx<3>> = outer(x, y)
+// EXPECT: o2t = [[3.0, 4.0, 5.0], [6.0, 8.0, 10.0]]
+let rows = reduce(o2t, (+))
+// EXPECT: rows = [12.0, 24.0]
+let second = o2t(1)
+// EXPECT: second = [6.0, 8.0, 10.0]
+
+// An integer pack and an integer identity.
+function outeri(a: Poly<T^1>) = {
+    match arity(a) with
+    | 0 -> 1
+    | _ -> {
+        let head :: tail = a
+        head [*] outeri(tail)
+    }
+}
+let p2 = outeri([1, 2], [3, 4, 5])
+// EXPECT: p2 = [[3, 4, 5], [6, 8, 10]]
+
+// A settled element type: the head is the declared slice itself.
+function outerf(a: Poly<Float64^1>) = {
+    match arity(a) with
+    | 0 -> 1.0
+    | _ -> {
+        let head :: tail = a
+        head [*] outerf(tail)
+    }
+}
+let f2 = outerf(x, y)
+// EXPECT: f2 = [[3.0, 4.0, 5.0], [6.0, 8.0, 10.0]]

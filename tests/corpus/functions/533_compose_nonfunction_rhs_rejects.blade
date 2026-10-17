@@ -1,0 +1,10 @@
+// TEST: Composition with a non-function right operand (rejects)
+// ERROR: BL3003 @ 8:14
+// ============================================================================
+// `f >> g` applies g to f's result, so a right operand that is no function
+// is refused like any application of a non-function. The arm printed a raw
+// "Warning: right side of >> should be a function" and succeeded; g++ then
+// rejected the composition (BL9002).
+let f = lambda(x: Float64) -> x * 2.0
+let h = f >> 3.0
+let v = h(1.0)

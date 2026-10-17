@@ -49,6 +49,71 @@ open Blade.Lowering
 module TH = Blade.Tests.TestHarness
 open Blade.CliCommands
 
+/// The environment knobs that change what the compiler EMITS, how the program
+/// is BUILT, or what it PRINTS -- every one read per call from the process
+/// environment, so a developer's shell reaches straight into a test run.
+/// `blade test` clears them all for its duration (and restores them after).
+///
+/// The suites were written against the pristine default, and that is a
+/// correctness matter, not a preference: corpus EXPECT pins are exact printed
+/// values (BLAS routes and reassociated folds are licensed to differ in the
+/// last ULP; FP contraction likewise), emission-shape tests assert the default
+/// loop nests and pass set (BLADE_FUSION / BLADE_CSE / ... off changes the
+/// emitted text), `interp` / `diff-oracle` must never run gate-on
+/// (MathElaborate: the synthesized Jacobi is the verification truth), and
+/// BLADE_PRINT would silently drop every binding a pin reads. A developer whose
+/// shell carried OPENBLAS_DIR for notebook work saw ~8 reds that vanished when
+/// run "clean" -- the same shape as every knob below.
+///
+/// The BLAS explicit tier's keys (BLADE_BLAS_LINK / _INCLUDE / _FLAVOR,
+/// BLADE_LAPACK_LINK / _INCLUDE) are here too: BLADE_BLAS_LINK alone selects
+/// that tier. Clearing is not enough for the BLAS gate, though: an unset
+/// variable falls back to blade.toolchain.json (Toolchain.get), which
+/// `blade setup` writes, so the suite would still run BLAS-on wherever setup
+/// had recorded a BLAS install. `suitePinnedKnobs` therefore pins BLADE_BLAS
+/// OFF for the run, which outranks every tier key from either source.
+///
+/// Blocks that exercise a knob set and restore it in-process, which this clear
+/// does not disturb. Deliberately NOT here: BLADE_MEMCHECK (an ASan corpus
+/// run is a real workflow -- it changes the build profile, not what a correct
+/// program prints), BLADE_EXE_CACHE (where binaries are cached, not what they
+/// are; the cache keys on the emitted text), BLADE_STDLIB, the non-BLAS
+/// toolchain locators (BLADE_LLVM_CLANG, BLADE_TOOLCHAIN_FILE, NETCDF_DIR,
+/// MSMPI_BIN) and BLADE_INTERP_TIMEOUT_MS (a harness diagnostic).
+let internal suiteClearedKnobs =
+    [ "OPENBLAS_DIR"; "BLADE_BLAS"; "BLADE_CUBLAS"
+      "BLADE_BLAS_LINK"; "BLADE_BLAS_INCLUDE"; "BLADE_BLAS_FLAVOR"
+      "BLADE_LAPACK_LINK"; "BLADE_LAPACK_INCLUDE"
+      "BLADE_PRINT"
+      "BLADE_FP_REASSOC"; "BLADE_FP_CONTRACT"; "BLADE_MARCH"
+      "BLADE_OMP_THREADS"
+      "BLADE_TILE_CACHE"; "BLADE_TILE_CACHE_VERBOSE"
+      "BLADE_LLVM"; "BLADE_LLVM_BRICKS"; "BLADE_LLVM_FACTS"
+      "BLADE_AD_HALO_GATHER"; "BLADE_SHAPE_SPEC_CAP"; "BLADE_RUN_RECORD" ]
+    @ Blade.Optimize.optimizerGates
+
+/// Knobs `blade test` SETS (after the clear above) rather than leaves unset,
+/// because unset falls back to blade.toolchain.json. Blocks that test BLAS set
+/// BLADE_BLAS themselves, which overrides this in their scope.
+let internal suitePinnedKnobs = [ "BLADE_BLAS", "off" ]
+
+/// Run `f` in the suite's pristine environment: every `suiteClearedKnobs`
+/// variable unset, every `suitePinnedKnobs` variable pinned, the caller's
+/// values restored afterwards. Says in one line which ambient values it is
+/// ignoring (unless `quiet`).
+let internal withSuiteEnvironment (quiet: bool) (f: unit -> 'a) : 'a =
+    let keys = (suiteClearedKnobs @ List.map fst suitePinnedKnobs) |> List.distinct
+    let saved = keys |> List.map (fun k -> (k, System.Environment.GetEnvironmentVariable k))
+    let ambient = saved |> List.filter (fun (_, v) -> not (isNull v))
+    if not quiet && not ambient.IsEmpty then
+        let names = ambient |> List.map (fun (k, v) -> $"{k}={v}") |> String.concat " "
+        eprintfn "test: ignoring ambient %s for this run (the suites assume the default emission; blocks that exercise a knob set it themselves)" names
+    for (k, _) in ambient do System.Environment.SetEnvironmentVariable(k, null)
+    for (k, v) in suitePinnedKnobs do System.Environment.SetEnvironmentVariable(k, v)
+    try f ()
+    finally
+        for (k, v) in saved do System.Environment.SetEnvironmentVariable(k, v)
+
 let runCliSmokeTests () : TH.BlockResult =
     let blockName = "CLI Smoke"
     TH.printHeader "CLI Smoke Test (blade run from a fresh directory)"
@@ -87,6 +152,33 @@ let runCliSmokeTests () : TH.BlockResult =
                     record "no intermediates left behind" TH.Fail (String.concat ", " leftovers)
         finally
             try Directory.Delete(tmpDir, true) with _ -> ()
+
+    // --- the suite environment: BLAS stays off whatever the shell or the
+    // toolchain file says. Clearing alone left two ways in: the explicit
+    // tier's own keys (BLADE_BLAS_LINK selects it) and blade.toolchain.json,
+    // which an UNSET variable falls back to.
+    (let blasCase = "suite environment: BLAS off despite ambient tier keys and a toolchain file"
+     let tcFile = Path.Combine(Path.GetTempPath(), $"blade_suite_env_{Guid.NewGuid():N}.json")
+     let pinned = [ "BLADE_TOOLCHAIN_FILE", tcFile; "BLADE_BLAS_LINK", "-lmkl_rt"; "BLADE_BLAS", "1" ]
+     let prior = pinned |> List.map (fun (k, _) -> (k, Environment.GetEnvironmentVariable k))
+     try
+        File.WriteAllText(tcFile, "{\"BLADE_BLAS\": \"1\", \"OPENBLAS_DIR\": \"C:/opt/openblas\", \"BLADE_BLAS_LINK\": \"-lopenblas\"}")
+        Blade.Toolchain.refresh ()
+        for (k, v) in pinned do Environment.SetEnvironmentVariable(k, v)
+        let inside =
+            withSuiteEnvironment true (fun () ->
+                (Blade.LinAlgPatterns.resolveBlasTier (), Blade.LinAlgPatterns.blasAvailable (),
+                 Environment.GetEnvironmentVariable "BLADE_BLAS_LINK"))
+        let restored = Environment.GetEnvironmentVariable "BLADE_BLAS_LINK" = "-lmkl_rt"
+                       && Environment.GetEnvironmentVariable "BLADE_BLAS" = "1"
+        match inside with
+        | (Blade.LinAlgPatterns.TierOff, false, null) when restored -> record blasCase TH.Pass ""
+        | (tier, avail, link) ->
+            record blasCase TH.Fail $"tier {tier}, blasAvailable {avail}, BLADE_BLAS_LINK inside = {link}, restored after = {restored}"
+     finally
+        for (k, v) in prior do Environment.SetEnvironmentVariable(k, v)
+        (try File.Delete tcFile with _ -> ())
+        Blade.Toolchain.refresh ())
 
     // --- `--print <names>`: which top-level bindings the program prints ---
     //
@@ -172,6 +264,65 @@ let runCliSmokeTests () : TH.BlockResult =
                  let r = Blade.Interp.Run.runProgram ir ("print_fn_interp_" + sel) Blade.Interp.Value.defaultLimits
                  recordCase $"print: the interpreter refuses {what} the same way"
                      (r.ExitCode <> 0 && r.Stderr.Contains $"{sel} is a function") r.Stderr))
+    // A TUPLE and a STRUCT print now (spelled like their literals), so
+    // selecting one prints it; a binding of a kind with NO printed form (a
+    // sum-type value) is refused by name in both lanes -- it used to emit an
+    // empty print block and exit 0.
+    let aggSrc =
+        "struct P {\n    a: Float64,\n    b: Float64\n}\n\
+         type Direction = North | South\n\
+         let t = (1, 2.0)\n\
+         let p = P { a = 1.0, b = 2.0 }\n\
+         let d = South\n"
+    for sel in [ "t"; "p" ] do
+        withPrint (Some sel) (fun () ->
+            match cppOf ("print_agg_" + sel) aggSrc with
+            | Error e -> record $"print: selecting the aggregate {sel} prints it" TH.Fail e
+            | Ok cpp ->
+                recordCase $"print: selecting the aggregate {sel} prints it"
+                    (cpp.Contains $"cout << \"{sel} = \";" && not (cpp.Contains "#error")) "")
+    withPrint (Some "d") (fun () ->
+        (match cppOf "print_agg_d" aggSrc with
+         | Error e -> record "print: selecting a binding with no printed form refuses" TH.Fail e
+         | Ok cpp ->
+             recordCase "print: selecting a binding with no printed form splices a refusal"
+                 (cpp.Contains "#error" && cpp.Contains "d : " && cpp.Contains "has no printed form") "")
+        (match Blade.Lowering.lower aggSrc with
+         | Error e -> record "print: the interpreter refuses a binding with no printed form" TH.Fail e
+         | Ok ir ->
+             let r = Blade.Interp.Run.runProgram ir "print_agg_interp" Blade.Interp.Value.defaultLimits
+             recordCase "print: the interpreter refuses a binding with no printed form the same way"
+                 (r.ExitCode <> 0 && r.Stderr.Contains "has no printed form") r.Stderr))
+    // Elaborator-internal `__` bindings (`__ppl_cen_A`, `__dist_dx_k1`) are not
+    // echoed by default -- a ppl program printed a screenful of them -- but a
+    // bare expression's `__expr<n>` is the user's value and prints, and a
+    // selected internal name prints.
+    let internalSrc = "let __hidden = 1\nlet shown = 2\n3 + 4\n"
+    (match cppOf "internal_names" internalSrc with
+     | Error e -> record "print: elaborator-internal bindings are not echoed" TH.Fail e
+     | Ok cpp ->
+         recordCase "print: elaborator-internal bindings are not echoed (a bare expression still is)"
+             (cpp.Contains "\"shown = \"" && not (cpp.Contains "\"__hidden = \"") && cpp.Contains "\"__expr") "")
+    withPrint (Some "__hidden") (fun () ->
+        match cppOf "internal_names_sel" internalSrc with
+        | Error e -> record "print: a selected internal binding prints" TH.Fail e
+        | Ok cpp -> recordCase "print: a selected internal binding prints" (cpp.Contains "\"__hidden = \"") "")
+    (match Blade.Lowering.lower internalSrc with
+     | Error e -> record "print: the interpreter hides internal bindings too" TH.Fail e
+     | Ok ir ->
+         let r = Blade.Interp.Run.runProgram ir "internal_names_interp" Blade.Interp.Value.defaultLimits
+         let out = r.Stdout.Replace("\r\n", "\n")
+         recordCase "print: the interpreter hides internal bindings too"
+             (out.Contains "shown = 2" && not (out.Contains "__hidden") && out.Contains "__expr") out)
+    // A runtime GUARD panic (here the computed-row extent check, BL8006) is
+    // located at the declaration being emitted: it used to pass `nullptr, 0`,
+    // which a notebook showed at 1:1. (No file here -- the source is a string
+    // -- so the location is the line alone; `blade run` adds the file.)
+    (match cppOf "guard_line" "let n = reduce([1, 2], (+))\nlet row = Float64(0..n)\nlet final: Array<Float64 like Idx<2>, Idx<4>> = [row, row]\n" with
+     | Error e -> record "guards: a runtime guard panic carries its declaration's line" TH.Fail e
+     | Ok cpp ->
+         recordCase "guards: a runtime guard panic carries its declaration's line"
+             (cpp.Contains "\"array literal extent mismatch\", nullptr, 3)" && not (cpp.Contains "\"array literal extent mismatch\", nullptr, 0)")) "")
     // The two lanes agree under one pin: the interpreter prints the same set.
     withPrint (Some "y") (fun () ->
         match Blade.Lowering.lower printSrc with
@@ -3356,6 +3507,21 @@ let internal resolveCategoryKey (cat: string) : (string * (string * string) list
             Some (key, Blade.Tests.Corpus.categoryTests key)
         | _ -> None
 
+/// Whether `cat` names a corpus directory `test <lane> <cat>` can run: any
+/// single-file category, plus the lane's own extra spellings (`opt-diff`
+/// runs the multi-file corpus too; `interp` walks EVERY multi-file directory,
+/// as its no-category form does; `llvm` takes its reserved words -- `all`,
+/// `goldens`, `facts`, ... -- from `LlvmTests.llvmCategoryWords`).
+let private corpusCategoryExists (lane: string) (cat: string) : bool =
+    let extras () =
+        match lane with
+        | "opt-diff" | "optdiff" -> [ "multifile" ]
+        | "interp" -> (try Blade.Tests.Corpus.multiFileCategories () with _ -> [])
+        | _ -> []
+    List.contains cat (extras ())
+    || (lane = "llvm" && Blade.Tests.LlvmTests.isLlvmCategoryWord cat)
+    || (try List.contains cat (Blade.Tests.Corpus.singleFileCategories ()) with _ -> false)
+
 /// CORPUS WIRING: every directory under tests/corpus is consumed, by name, by
 /// the lanes that claim to sweep the corpus. Part of the default suite.
 ///
@@ -3396,6 +3562,20 @@ let internal runCorpusWiringTests () : TH.BlockResult =
     let interpExcluded = Blade.Tests.InterpDiff.interpExcluded |> List.map fst
     record "every interpreter-differential exclusion names a directory" (missing interpExcluded).IsEmpty
         (listed (missing interpExcluded))
+    // ...and its expected-unsupported set names real tests (a renamed test
+    // would otherwise fail the differential as an unexpected skip, but a
+    // DELETED one would leave a dead entry behind).
+    let allTestNames =
+        single |> List.collect (fun d -> Blade.Tests.Corpus.categoryTests d |> List.map fst) |> Set.ofList
+    let deadUnsupported =
+        Blade.Tests.InterpDiff.interpExpectedUnsupported |> List.map fst
+        |> List.filter (fun n -> not (allTestNames.Contains n))
+    record "every expected interp-unsupported entry names a corpus test" deadUnsupported.IsEmpty
+        (listed deadUnsupported)
+    // `test interp <dir>` accepts every directory it walks, multi-file ones
+    // included (it used to refuse `multifile` as an unknown category).
+    let interpRefused = (single @ multi) |> List.filter (fun d -> not (corpusCategoryExists "interp" d))
+    record "every corpus directory is accepted by `test interp <dir>`" interpRefused.IsEmpty (listed interpRefused)
     // `blade test <dir>`: every single-file directory resolves, to ITS OWN
     // tests (an alias wired to the wrong list would resolve to other names).
     let misKeyed =
@@ -3478,56 +3658,11 @@ let internal runFullSuite opts =
          runIdeServeTests; runIdeEvalTests; runIdeCellsTests; runIdeReferencesTests
          runCorpusWiringTests] opts
 
-/// The environment knobs that change what the compiler EMITS, how the program
-/// is BUILT, or what it PRINTS -- every one read per call from the process
-/// environment, so a developer's shell reaches straight into a test run.
-/// `blade test` clears them all for its duration (and restores them after).
-///
-/// The suites were written against the pristine default, and that is a
-/// correctness matter, not a preference: corpus EXPECT pins are exact printed
-/// values (BLAS routes and reassociated folds are licensed to differ in the
-/// last ULP; FP contraction likewise), emission-shape tests assert the default
-/// loop nests and pass set (BLADE_FUSION / BLADE_CSE / ... off changes the
-/// emitted text), `interp` / `diff-oracle` must never run gate-on
-/// (MathElaborate: the synthesized Jacobi is the verification truth), and
-/// BLADE_PRINT would silently drop every binding a pin reads. A developer whose
-/// shell carried OPENBLAS_DIR for notebook work saw ~8 reds that vanished when
-/// run "clean" -- the same shape as every knob below.
-///
-/// Blocks that exercise a knob set and restore it in-process, which this clear
-/// does not disturb. Deliberately NOT here: BLADE_MEMCHECK (an ASan corpus
-/// run is a real workflow -- it changes the build profile, not what a correct
-/// program prints), BLADE_EXE_CACHE (where binaries are cached, not what they
-/// are; the cache keys on the emitted text), BLADE_STDLIB, the toolchain
-/// locators (BLADE_LLVM_CLANG, BLADE_TOOLCHAIN_FILE, BLADE_*_INCLUDE/LINK)
-/// and BLADE_INTERP_TIMEOUT_MS (a harness diagnostic).
-let internal suiteClearedKnobs =
-    [ "OPENBLAS_DIR"; "BLADE_BLAS"; "BLADE_CUBLAS"
-      "BLADE_PRINT"
-      "BLADE_FP_REASSOC"; "BLADE_FP_CONTRACT"; "BLADE_MARCH"
-      "BLADE_OMP_THREADS"
-      "BLADE_TILE_CACHE"; "BLADE_TILE_CACHE_VERBOSE"
-      "BLADE_LLVM"; "BLADE_LLVM_BRICKS"; "BLADE_LLVM_FACTS"
-      "BLADE_AD_HALO_GATHER"; "BLADE_SHAPE_SPEC_CAP"; "BLADE_RUN_RECORD" ]
-    @ Blade.Optimize.optimizerGates
-
-/// Whether `cat` names a corpus directory `test <lane> <cat>` can run: any
-/// single-file category, plus the lane's own extra spellings (`opt-diff`
-/// runs the multi-file corpus too; `llvm` takes its reserved words --
-/// `all`, `goldens`, `facts`, ... -- from `LlvmTests.llvmCategoryWords`).
-let private corpusCategoryExists (lane: string) (cat: string) : bool =
-    let extras =
-        match lane with
-        | "opt-diff" | "optdiff" -> [ "multifile" ]
-        | _ -> []
-    List.contains cat extras
-    || (lane = "llvm" && Blade.Tests.LlvmTests.isLlvmCategoryWord cat)
-    || (try List.contains cat (Blade.Tests.Corpus.singleFileCategories ()) with _ -> false)
-
 /// Dispatch the `test` subcommand. `rest` is everything after "test".
 ///
-/// Runs with every `suiteClearedKnobs` variable UNSET, restoring the caller's
-/// values afterwards, and says in one line which ones it found set. `--print`
+/// Runs in `withSuiteEnvironment`: every `suiteClearedKnobs` variable UNSET and
+/// BLADE_BLAS pinned off, the caller's values restored afterwards; says in one
+/// line which ones it found set. `--print`
 /// is refused outright: it selects which bindings a program prints, and the
 /// corpus pins read the bindings it would drop.
 let rec internal dispatchTest (rest: string list) : int =
@@ -3546,20 +3681,7 @@ let rec internal dispatchTest (rest: string list) : int =
         eprintfn "       Select a category instead (`blade test <category>`), or run one program with `blade run prog.blade --print a,b`."
         2
     else
-    let saved =
-        suiteClearedKnobs
-        |> List.distinct
-        |> List.choose (fun k ->
-            match System.Environment.GetEnvironmentVariable k with
-            | null -> None
-            | v -> Some (k, v))
-    if not saved.IsEmpty then
-        let names = saved |> List.map (fun (k, v) -> $"{k}={v}") |> String.concat " "
-        eprintfn "test: ignoring ambient %s for this run (the suites assume the default emission; blocks that exercise a knob set it themselves)" names
-    for (k, _) in saved do System.Environment.SetEnvironmentVariable(k, null)
-    try dispatchTestClean rest
-    finally
-        for (k, v) in saved do System.Environment.SetEnvironmentVariable(k, v)
+    withSuiteEnvironment false (fun () -> dispatchTestClean rest)
 
 /// `dispatchTest` after the environment is made pristine.
 and internal dispatchTestClean (rest: string list) : int =
@@ -3931,8 +4053,11 @@ and internal dispatchTestClean (rest: string list) : int =
     | [ "cuda" ] ->
         // CUDA kernel block (differential vs host-loop oracle) plus cuBLAS
         // swap-table verification. Skips without nvcc/GPU; on Windows run from x64 Native Tools prompt.
+        // The toolchain-free buffer/emission checks ride along (they also run
+        // in the full suite), so a targeted `test cuda` reaches them.
         let failed =
-            (Blade.Tests.CudaTests.runCudaTests ()).Failed
+            (Blade.Tests.CudaTests.runBufferTypeTests ()).Failed
+            + (Blade.Tests.CudaTests.runCudaTests ()).Failed
             + (Blade.Tests.CudaTests.runCublasSwapTests ()).Failed
             + (Blade.Tests.CudaTests.runCublasFailureExitTests ()).Failed
         if failed = 0 then 0 else 1

@@ -21,6 +21,10 @@
 #include <atomic>
 #include <type_traits>
 #include <locale>
+#include <initializer_list>
+#include <sstream>
+#include <string>
+#include <vector>
 #if !defined(__CUDA_ARCH__)
 // ---- libm, evaluated at RUN TIME (docs/formalism.md section 2.4) ----------
 //
@@ -269,6 +273,12 @@ namespace blade_arith {
   // would cost the kernel its frame elision.
   inline int64_t ipow_nn64(int64_t b, int64_t e) { return ipow_nn<int64_t>(b, e); }
   inline int32_t ipow_nn32(int32_t b, int32_t e) { return ipow_nn<int32_t>(b, e); }
+  // The key table of an INTEGER EnumIdx (F5): a value of the type is a key
+  // represented as its position, and an observation reads
+  // `key_table<k0, k1, ...>::tab[p]` -- ONE static table per distinct key
+  // list in the whole program (a template instantiation), read in O(1).
+  // No call shape, so the frame-elision scan sees nothing to follow.
+  template <int64_t... K> struct key_table { static constexpr int64_t tab[sizeof...(K)] = { K... }; };
 }
 namespace blade_rt {
   struct Frame { const char* fn; const char* file; int line; };
@@ -374,6 +384,82 @@ namespace blade_rt {
   // symbol the shadow-frame analysis cannot follow, so it keeps its frame.
   [[noreturn]] inline void dll_panic(const char* code, const char* msg) {
     panic(code, msg, nullptr, 0);
+  }
+
+  // ---- The provider boundary rule (BL8015) --------------------------------
+  //
+  // A missing value never crosses a provider boundary disguised as a number:
+  // a cell a store marks missing (NaN / +-Inf in a floating variable, a
+  // NetCDF _FillValue / missing_value / valid-range sentinel) refuses the
+  // read instead of reaching the program as data. The provider emitters
+  // decide WHICH cells are missing (one rule per variable, baked at compile
+  // time: ProviderRegistry.MissingRule, whose F# predicate the interpreter
+  // and the static fold apply to the same cells); these helpers only count
+  // and report. The message is the interpreter's
+  // ProviderRegistry.missingMessage, character for character.
+  //
+  // `lead` are fixed leading coordinates (a streamed fiber's site), `origin`
+  // the per-dimension offset of the scanned buffer inside the variable (a
+  // window), `ext` the buffer's own row-major shape: the first offending
+  // cell is reported in the VARIABLE's coordinates.
+  struct missing_tally {
+    size_t count = 0;
+    size_t first = 0;
+    // The smallest flat index, whatever order the cells were visited in
+    // (chunked assembly is not row-major): the report names the same cell
+    // the interpreter's row-major scan finds first.
+    void note(size_t i) { if (count == 0 || i < first) first = i; ++count; }
+  };
+  [[noreturn]] inline void missing_report(size_t count, size_t first,
+                                          const char* var, const char* path, const char* rule,
+                                          std::initializer_list<long long> lead,
+                                          std::initializer_list<long long> origin,
+                                          std::initializer_list<long long> ext) {
+    std::vector<long long> coords(lead.begin(), lead.end());
+    const size_t r = ext.size();
+    std::vector<long long> local(r, 0);
+    size_t rem = first;
+    for (size_t d = r; d-- > 0;) {
+      long long n = ext.begin()[d];
+      if (n > 0) { local[d] = (long long)(rem % (size_t)n); rem /= (size_t)n; }
+    }
+    for (size_t d = 0; d < r; ++d)
+      coords.push_back(local[d] + (d < origin.size() ? origin.begin()[d] : 0));
+    std::ostringstream os;
+    os << "provider read of '" << var << "' from '" << path << "': " << count
+       << " cell(s) hold a missing value (first at [";
+    for (size_t i = 0; i < coords.size(); ++i) os << (i ? ", " : "") << coords[i];
+    os << "]; missing here: " << rule
+       << ") -- read it with .read_present for the present cells as a compound array, or .present for the presence mask";
+    static std::string msg;
+    msg = os.str();
+    panic("BL8015", msg.c_str(), nullptr, 0);
+  }
+  // Scan a filled destination buffer; refuse if any cell is missing.
+  template <class T, class Missing>
+  inline void refuse_missing(const T* buf, size_t n, Missing missing,
+                             const char* var, const char* path, const char* rule,
+                             std::initializer_list<long long> lead,
+                             std::initializer_list<long long> origin,
+                             std::initializer_list<long long> ext) {
+    missing_tally t;
+    for (size_t i = 0; i < n; ++i) if (missing(buf[i])) t.note(i);
+    if (t.count) missing_report(t.count, t.first, var, path, rule, lead, origin, ext);
+  }
+  // The write side of the same rule: a floating cell that is NaN or infinite
+  // is not written, since every reader of the store would refuse it.
+  template <class T>
+  inline void refuse_nonfinite_write(const T* buf, size_t n, const char* var, const char* path) {
+    missing_tally t;
+    for (size_t i = 0; i < n; ++i) if (!std::isfinite((double)buf[i])) t.note(i);
+    if (t.count == 0) return;
+    std::ostringstream os;
+    os << "provider write of '" << var << "' to '" << path << "': " << t.count
+       << " cell(s) are NaN or infinite (first at flat cell " << t.first
+       << ") -- a read of the store would refuse them; mask or replace them before writing";
+    static std::string msg;
+    msg = os.str();
+    panic("BL8015", msg.c_str(), nullptr, 0);
   }
 
   // ---- Typed float spelling: a floating value prints with a decimal point.
@@ -552,7 +638,7 @@ namespace blade_rt {
     s += 1.5056327351493116e-7 / (x + 7.0);
     const double t = x + 6.5;   // (x - 1) + g + 0.5, with g = 7
     // 0.9189385332046727 = log(2*pi) / 2
-    return 0.9189385332046727 + (x - 0.5) * std::log(t) - t + std::log(s);
+    return 0.9189385332046727 + (x - 0.5) * blade_libm_log(t) - t + blade_libm_log(s);
   }
 
   // ---- digamma(x) = psi(x) = d/dx log Gamma(x), x > 0.
@@ -626,7 +712,7 @@ namespace blade_rt {
     s = s +         (1.0 / 132.0)     / p;  p = p * x2;
     s = s +      (-691.0 / 32760.0)   / p;  p = p * x2;
     s = s +         (1.0 / 12.0)      / p;
-    return r + std::log(x) - 0.5 / x - s;
+    return r + blade_libm_log(x) - 0.5 / x - s;
   }
 }
 #define BLADE_FRAME(fn, file, line) blade_rt::Scope __blade_frame_(fn, file, line)

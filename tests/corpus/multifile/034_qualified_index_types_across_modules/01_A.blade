@@ -1,0 +1,10 @@
+// TEST: Index types declared in a module, used from main
+// MODULE: A
+module A
+type R = EnumIdx<[100, 200, 300]>
+let w: Array<Float64 like R> = [1.0, 2.0, 3.0]
+type H = Idx<5>
+let xs: Array<Float64 like H> = [0.0, 1.0, 4.0, 9.0, 16.0]
+type G = Idx<3>
+let gx: Array<Float64 like G> = [1.0, 2.0, 3.0]
+let S = method_for(gx, gx) <@> lambda(a, b) where comm(a, b) -> a * b |> compute

@@ -33,6 +33,188 @@ type PackedReadOpts = {
     Window: (int64 * int64) option
 }
 
+/// THE PROVIDER BOUNDARY RULE: a missing value never crosses a provider
+/// boundary disguised as a number. One rule per stored variable, computed by
+/// the variable's provider from compile-time metadata (`ProviderSpec.
+/// MissingRuleOf`), says which cells are missing:
+///
+///   * a FLOATING variable: NaN and +-Inf, always (every provider -- a NaN
+///     written into a store whose fill is finite is refused too);
+///   * NetCDF adds its sentinels: `_FillValue`, `missing_value`, the
+///     `valid_min` / `valid_max` / `valid_range` bounds (inclusive), and for a
+///     floating variable with no `_FillValue` the type's default fill
+///     (NC_FILL_FLOAT / NC_FILL_DOUBLE, i.e. never-written cells). An integer
+///     variable is refused only on an EXPLICIT attribute: NC_FILL_INT and
+///     friends are representable data;
+///   * Zarr / Icechunk / CSV add nothing: a finite fill_value is a value.
+///
+/// A default read (`read`, `stream`, `load_compound`, `read_window`) of a
+/// variable holding a missing cell refuses with BL8015 in every lane: the
+/// emitted C++ (blade_rt::refuse_missing over each reader's destination
+/// buffer, from `missingCpp`), the interpreter, and the static fold (BL3999,
+/// the `let static` assertion,
+/// carrying the same sentence) -- all from THIS record, through `isMissing`
+/// and `missingCpp`, so the predicates cannot drift. The opt-in is the
+/// MASKED read (`alias.read_present` / `alias.present`, ProviderDesugar),
+/// which reads the raw cells under `MissingPolicy.allowing` and derives the
+/// presence mask in-language from ProviderDesugar's spelling of this rule.
+type MissingRule = {
+    /// NaN and +-Inf are missing (every floating-point variable).
+    NonFinite: bool
+    /// Finite sentinels, compared after widening to double (a Float32
+    /// `_FillValue` compares as the double libnetcdf widens it to).
+    Sentinels: float list
+    /// Inclusive valid range: a cell below Lo or above Hi is missing.
+    Lo: float option
+    Hi: float option
+    /// An INTEGER variable's sentinels and range, compared as int64 in both
+    /// predicates: a double cannot tell NC_FILL_INT64 (-9223372036854775806)
+    /// from its neighbours. A rule is either floating (the fields above) or
+    /// integral (these), never both.
+    IntSentinels: int64 list
+    IntLo: int64 option
+    IntHi: int64 option
+    /// What makes a cell missing, for the message ("NaN or infinite;
+    /// _FillValue -999.0").
+    Describe: string
+}
+
+/// No cell is ever missing (integer CSV tables, integer Zarr arrays, an
+/// integer NetCDF variable without a fill attribute).
+let noMissingRule : MissingRule =
+    { NonFinite = false; Sentinels = []; Lo = None; Hi = None
+      IntSentinels = []; IntLo = None; IntHi = None; Describe = "" }
+
+/// The floating-point floor of the rule: NaN and +-Inf.
+let nonFiniteRule : MissingRule =
+    { noMissingRule with NonFinite = true; Describe = "NaN or infinite" }
+
+let isTrivialRule (r: MissingRule) =
+    not r.NonFinite && r.Sentinels.IsEmpty && r.Lo.IsNone && r.Hi.IsNone
+    && r.IntSentinels.IsEmpty && r.IntLo.IsNone && r.IntHi.IsNone
+
+/// The F# predicate (interpreter, static fold).
+let isMissing (r: MissingRule) (x: float) : bool =
+    (r.NonFinite && not (System.Double.IsFinite x))
+    || List.contains x r.Sentinels
+    || (match r.Lo with Some lo -> x < lo | None -> false)
+    || (match r.Hi with Some hi -> x > hi | None -> false)
+
+/// The F# predicate over an INTEGER cell: the integral fields in int64,
+/// then the floating ones (empty for an integer variable's rule).
+let isMissingInt (r: MissingRule) (n: int64) : bool =
+    List.contains n r.IntSentinels
+    || (match r.IntLo with Some lo -> n < lo | None -> false)
+    || (match r.IntHi with Some hi -> n > hi | None -> false)
+    || isMissing r (float n)
+
+/// An int64 as a C++ literal (INT64_MIN has no literal spelling).
+let int64Cpp (n: int64) : string =
+    if n = System.Int64.MinValue then "(-9223372036854775807LL - 1)" else $"{n}LL"
+
+/// A double as a round-tripping literal (C++ and Blade source alike).
+let ruleLiteral (f: float) : string =
+    let s = f.ToString("R", System.Globalization.CultureInfo.InvariantCulture)
+    if s.Contains "." || s.Contains "E" || s.Contains "e" then s else s + ".0"
+
+/// The C++ predicate over `x` (any arithmetic type), the twin of `isMissing`.
+let missingCpp (r: MissingRule) (x: string) : string =
+    let d = $"((double)({x}))"
+    let terms =
+        [ if r.NonFinite then yield $"!std::isfinite({d})"
+          for s in r.Sentinels do yield $"{d} == {ruleLiteral s}"
+          match r.Lo with Some lo -> yield $"{d} < {ruleLiteral lo}" | None -> ()
+          match r.Hi with Some hi -> yield $"{d} > {ruleLiteral hi}" | None -> ()
+          let i = $"((long long)({x}))"
+          for s in r.IntSentinels do yield $"{i} == {int64Cpp s}"
+          match r.IntLo with Some lo -> yield $"{i} < {int64Cpp lo}" | None -> ()
+          match r.IntHi with Some hi -> yield $"{i} > {int64Cpp hi}" | None -> () ]
+    match terms with
+    | [] -> "false"
+    | ts -> "(" + String.concat " || " ts + ")"
+
+/// The refusal sentence, shared by the interpreter, the static fold and
+/// (character for character) blade_rt::missing_report.
+let missingMessage (var: string) (path: string) (r: MissingRule) (count: int64) (first: int64 list) : string =
+    let coords = first |> List.map string |> String.concat ", "
+    $"provider read of '{var}' from '{path}': {count} cell(s) hold a missing value (first at [{coords}]; missing here: {r.Describe}) -- read it with .read_present for the present cells as a compound array, or .present for the presence mask"
+
+/// Scan a row-major payload of shape `dims`: None, or the refusal sentence.
+let checkPayload (r: MissingRule) (var: string) (path: string) (dims: int list) (payload: ProviderPayload) : string option =
+    if isTrivialRule r then None
+    else
+        let mutable count = 0L
+        let mutable first = -1L
+        let note (i: int) (x: float) =
+            if isMissing r x then
+                if first < 0L then first <- int64 i
+                count <- count + 1L
+        (match payload with
+         | PFloats xs -> xs |> Array.iteri note
+         | PInts xs ->
+             xs |> Array.iteri (fun i n ->
+                 if isMissingInt r n then
+                     if first < 0L then first <- int64 i
+                     count <- count + 1L))
+        if count = 0L then None
+        else
+            let mutable rem = first
+            let coords =
+                [ for n in List.rev dims ->
+                    let n = int64 n
+                    if n > 0L then
+                        let c = rem % n
+                        rem <- rem / n
+                        c
+                    else 0L ]
+                |> List.rev
+            Some (missingMessage var path r count coords)
+
+/// The masked read's escape from the rule: emitters consult `refusing ()`,
+/// and codegen generates the hidden raw read of `alias.read_present` /
+/// `alias.present` inside `allowing`. Ambient (AsyncLocal) rather than one
+/// more argument on every Gen* signature: only that one hidden read ever
+/// sets it, and it is scoped to the emission of that one binding. NOTHING
+/// ELSE MAY SET IT: any other `allowing` caller would let a missing value
+/// cross the boundary as a number. (The emitted text differs between the two
+/// modes, so the executable cache keys on it for free.)
+module MissingPolicy =
+    let private allow = new System.Threading.AsyncLocal<bool>()
+    let allowing (f: unit -> 'a) : 'a =
+        let saved = allow.Value
+        allow.Value <- true
+        try f () finally allow.Value <- saved
+    let refusing () = not allow.Value
+
+/// A C++ string literal body.
+let private cppStr (s: string) = s.Replace("\\", "\\\\").Replace("\"", "\\\"")
+
+/// The refusal over a FILLED destination buffer `buf` of `count` cells whose
+/// row-major shape is `ext` (C++ expressions), placed at `origin` inside the
+/// variable, under fixed leading coordinates `lead`. Empty when the rule is
+/// trivial or the read is the masked read's raw half.
+let refuseScanCpp (r: MissingRule) (var: string) (path: string) (buf: string) (count: string)
+                  (lead: string list) (origin: string list) (ext: string list) : string list =
+    if isTrivialRule r || not (MissingPolicy.refusing ()) then []
+    else
+        let lst (xs: string list) = "{" + (xs |> List.map (fun e -> $"(long long)({e})") |> String.concat ", ") + "}"
+        let pred = missingCpp r "__bm"
+        [ $"blade_rt::refuse_missing({buf}, (size_t)({count}), [](auto __bm) {{ return {pred}; }}, \"{cppStr var}\", \"{cppStr path}\", \"{cppStr r.Describe}\", {lst lead}, {lst origin}, {lst ext});" ]
+
+/// In-loop counting for readers that fill a destination out of row-major
+/// order (chunked assembly): declare a tally, note each cell as it lands,
+/// report after the loops. All three empty when the rule is inactive.
+let missingActive (r: MissingRule) = not (isTrivialRule r) && MissingPolicy.refusing ()
+let tallyDeclCpp (r: MissingRule) (v: string) : string list =
+    if missingActive r then [ $"blade_rt::missing_tally {v}_miss;" ] else []
+let tallyNoteCpp (r: MissingRule) (v: string) (value: string) (flatIdx: string) : string =
+    if missingActive r then $" if ({missingCpp r value}) {v}_miss.note({flatIdx});" else ""
+let tallyReportCpp (r: MissingRule) (v: string) (var: string) (path: string) (ext: string list) : string list =
+    if missingActive r then
+        let lst (xs: string list) = "{" + (xs |> List.map (fun e -> $"(long long)({e})") |> String.concat ", ") + "}"
+        [ $"if ({v}_miss.count) blade_rt::missing_report({v}_miss.count, {v}_miss.first, \"{cppStr var}\", \"{cppStr path}\", \"{cppStr r.Describe}\", {{}}, {{}}, {lst ext});" ]
+    else []
+
 /// The provider contract. One record per provider, registered under the
 /// surface module name ("netcdf", "zarr").
 type ProviderSpec = {
@@ -43,6 +225,11 @@ type ProviderSpec = {
     LoadAsModule: IRBuilder -> string -> string -> IRModule
     /// Compile-time whole-payload read for the static fold (args: store path, variable name).
     ReadVarData: string -> string -> Result<ProviderVarData, string>
+    /// The variable's missing-value rule (the provider boundary rule, see
+    /// MissingRule), from compile-time metadata. Args: store path, variable
+    /// name. Must not throw on an unreadable store (answer noMissingRule:
+    /// the read itself reports the store).
+    MissingRuleOf: string -> string -> MissingRule
     /// Runtime C++ dense reader. Args: path, varName, cppVarName, arrType.
     GenReadVar: string -> string -> string -> IRArrayType -> string list
     /// Runtime C++ PACKED (SymIdx/AntisymIdx) reader: emits code assembling
@@ -165,6 +352,7 @@ let private resolving (spec: ProviderSpec) : ProviderSpec =
     { spec with
         LoadAsModule = fun builder moduleName path -> spec.LoadAsModule builder moduleName (r path)
         ReadVarData = fun path varName -> spec.ReadVarData (r path) varName
+        MissingRuleOf = fun path varName -> spec.MissingRuleOf (r path) varName
         ReadWreathPool = spec.ReadWreathPool |> Option.map (fun f -> fun path varName -> f (r path) varName)
         StreamRowsBlock = spec.StreamRowsBlock |> Option.map (fun f -> fun path varName -> f (r path) varName)
         VarDimNames = fun path varName -> spec.VarDimNames (r path) varName

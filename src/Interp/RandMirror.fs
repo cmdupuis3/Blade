@@ -345,6 +345,18 @@ let bernoulli (key: int64) (p: float) (n: int) : float[] =
 let beta (key: int64) (a: float) (b: float) (n: int) : float[] =
     fill key n (fun g -> nextBeta g a b)
 
+/// The inverse-CDF step both categorical fills share (rand_runtime.hpp
+/// `categorical_index`): the SMALLEST j in [0, k-1) with u < cum[j], else
+/// k-1 -- the linear walk's answer, found by binary search. `cum` is
+/// nondecreasing, so the two agree index for index.
+let private categoricalIndex (cum: float[]) (k: int) (u: float) : int =
+    let mutable lo = 0
+    let mutable hi = k - 1
+    while lo < hi do
+        let mid = lo + (hi - lo) / 2
+        if u < cum.[mid] then hi <- mid else lo <- mid + 1
+    lo
+
 /// blade_rand::categorical(out, n, key, w, k): `n` indices in [0, k) with
 /// P(i) proportional to w_i. Mirrors the header body statement for statement --
 /// the clamp of non-positive/NaN weights to 0, the running left-to-right scan,
@@ -368,9 +380,7 @@ let categorical (key: int64) (weights: float[]) (n: int) : int64[] =
         let u = nextUniform g
         if degenerate then 0L
         else
-            let mutable j = 0
-            while j + 1 < k && u >= cum.[j] do j <- j + 1
-            int64 j)
+            int64 (categoricalIndex cum k u))
 
 /// Dispatch on the runtime `kind` string that codegen records in
 /// RandGen (IR.fs RandomFillSpec), with the already-evaluated runtime Float64
@@ -474,9 +484,7 @@ let drawsCategoricalAt (kind: string) (key: int64) (stream: int64) (offset: int6
         let u = nextUniform g
         if degenerate then 0L
         else
-            let mutable j = 0
-            while j + 1 < k && u >= cum.[j] do j <- j + 1
-            int64 j)
+            int64 (categoricalIndex cum k u))
 
 // RandomFillSpec executor.
 

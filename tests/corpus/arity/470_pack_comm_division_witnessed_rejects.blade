@@ -1,0 +1,16 @@
+// TEST: comm on a pack kernel whose body divides is witnessed false (rejects)
+// ERROR: BL4013
+// A pack is ONE declared parameter, so the decl-level witness built no pair
+// inside it and the claim was trusted: `object_for(packdiv) <@> (A, A)` stored
+// a triangle and served result(2, 0) = 1/4 for 4 (N2). The body is now
+// unrolled per arity (here 2: a[0] / a[1]) and the claimed pair witnessed.
+function packdiv(a: Poly<T^0>) where comm(a) -> T^0 = {
+    match arity(a) with
+    | 1 -> { let head :: tail = a
+             head }
+    | _ -> { let head :: tail = a
+             head / packdiv(tail) }
+}
+let A = [1.0, 2.0, 4.0]
+let result = object_for(packdiv) <@> (A, A) |> compute
+let r20 = result(2, 0)

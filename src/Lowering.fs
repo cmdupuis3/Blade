@@ -830,11 +830,24 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         // inline / in a nested let, which has no annotation to supply the shape.
         refuseLowering texpr.Span "fill_random(mod) is only valid as an annotated top-level let-binding value (let A: Array<..> = fill_random(mod))"
 
+    // ONE ADDRESSED SAMPLE (`__rand_sample_at`, the cell of an `_at` draw's
+    // inline map -- D13): a pure function of (key, stream, sample index,
+    // parameters), so it is an ordinary scalar expression.
+    | TExprRandGen (kind, key, pars, weights, Some (stream, index), [], None) ->
+        IRRandAt (kind,
+                  [ lowerTypedExpr env key; lowerTypedExpr env stream; lowerTypedExpr env index ]
+                  @ (pars |> List.map (lowerTypedExpr env)),
+                  weights |> Option.map (fun (w, n) -> (lowerTypedExpr env w, n)))
+    // An ADDRESSED draw anywhere but a top-level `let` (which TDeclLet
+    // intercepts into the fill): its samples as the map TypeCheck built.
+    | TExprRandGen (_, _, _, _, Some _, _, Some inl) -> lowerTypedExpr env inl
     | TExprRandGen _ ->
-        // Materialized only as a top-level let-binding value, where TDeclLet
-        // intercepts it (records the kind/key/params in RandomInits, allocates
-        // the self-typed array). Reaching here means it was used inline / nested.
-        refuseLowering texpr.Span "rand.<fam>(...) is only valid as a top-level let-binding value (let A = rand.uniform(key, n)); inside a function, draw at top level and pass the array in"
+        // A SEQUENCED draw is materialized only as a top-level let-binding
+        // value, where TDeclLet intercepts it (records the kind/key/params in
+        // RandomInits, allocates the self-typed array): its samples depend on
+        // the order they are drawn in. Reaching here means it was used inline
+        // / nested.
+        refuseLowering texpr.Span "a sequenced rand.<fam>(...) draw is only valid as a top-level let-binding value (let A = rand.uniform(key, n)); inside a function, use the addressed family (rand.uniform_at(key, stream, offset, n) -- each sample a pure function of its address), or draw at top level and pass the array in"
 
     | TExprCompound _ ->
         // Only meaningful as a top-level let-binding value, where TDeclLet
@@ -1921,7 +1934,8 @@ let tryCompoundRead (env: TypedLowerEnv) (binding: TypedBinding) : ProviderReadS
                               MaskName = Some maskName
                               MaskType = Some maskArr
                               Window = None
-                              Streamed = false }
+                              Streamed = false
+                              AllowMissing = false }
                    | _ -> None)
               | _ -> None)
          | _ -> None)
@@ -1957,7 +1971,8 @@ let tryPlainRead (env: TypedLowerEnv) (binding: TypedBinding) : ProviderReadSpec
                               MaskName = None
                               MaskType = None
                               Window = None
-                              Streamed = false }
+                              Streamed = false
+                              AllowMissing = false }
                    | _ -> None)
               | _ -> None)
          | _ -> None)
@@ -1989,7 +2004,43 @@ let tryStreamRead (env: TypedLowerEnv) (binding: TypedBinding) : ProviderReadSpe
                               MaskName = None
                               MaskType = None
                               Window = None
-                              Streamed = true }
+                              Streamed = true
+                              AllowMissing = false }
+                   | _ -> None)
+              | _ -> None)
+         | _ -> None)
+    | _ -> None
+
+/// Detect the masked read's hidden RAW read (ProviderDesugar.rawReadVerb):
+/// `let __present_raw_t = s.vars.t |> alias.<raw>`. A dense whole-variable
+/// spec like tryPlainRead's, marked AllowMissing: the boundary rule's cells
+/// reach the presence mask instead of refusing the read. The verb's name is
+/// not lexable, so no program can spell this read itself.
+let tryRawRead (env: TypedLowerEnv) (binding: TypedBinding) : ProviderReadSpec option =
+    let rec rootName (e: TypedExpr) =
+        match e.Kind with
+        | TExprVar (n, _, _) -> Some n
+        | TExprField (inner, _, _) -> rootName inner
+        | _ -> None
+    match binding.Value.Kind with
+    | TExprApp ({ Kind = TExprField ({ Kind = TExprVar (alias, _, _) }, verb, _) }, [inner])
+        when verb = Blade.ProviderDesugar.rawReadVerb && Map.containsKey alias env.ProviderAliases ->
+        (match inner.Kind with
+         | TExprField (_, varName, _) ->
+             (match rootName inner with
+              | Some root when Map.containsKey root env.ProviderPaths ->
+                  (match inner.Type with
+                   | ArrayElem varArr ->
+                       let (pname, path) = env.ProviderPaths.[root]
+                       Some { Provider = pname
+                              FilePath = path
+                              VarName = varName
+                              VarType = varArr
+                              MaskName = None
+                              MaskType = None
+                              Window = None
+                              Streamed = false
+                              AllowMissing = true }
                    | _ -> None)
               | _ -> None)
          | _ -> None)
@@ -2023,7 +2074,8 @@ let tryWindowRead (env: TypedLowerEnv) (binding: TypedBinding) : ProviderReadSpe
                               MaskName = None
                               MaskType = None
                               Window = Some (lo, hi)
-                              Streamed = false }
+                              Streamed = false
+                              AllowMissing = false }
                    | _ -> None)
               | _ -> None)
          | _ -> None)
@@ -2259,6 +2311,22 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
             bindings <- bindings @ [bd]
             currentEnv <- bindTypedVar binding.Name binding.VarId currentEnv
             currentEnv <- { currentEnv with ProviderReads = Map.add binding.VarId spec currentEnv.ProviderReads }
+        | TDeclLet binding when (tryRawRead currentEnv binding).IsSome ->
+            // The masked read's hidden raw half (ProviderDesugar): a deferred
+            // dense read exempt from the boundary rule; the presence mask and
+            // the compound that follow it are ordinary bindings.
+            let spec = (tryRawRead currentEnv binding).Value
+            let bd = {
+                Id = binding.VarId
+                Name = binding.Name
+                Type = binding.Type
+                Value = IRLit IRLitUnit
+                IsConst = true
+                IsMutable = binding.IsMutable
+            }
+            bindings <- bindings @ [bd]
+            currentEnv <- bindTypedVar binding.Name binding.VarId currentEnv
+            currentEnv <- { currentEnv with ProviderReads = Map.add binding.VarId spec currentEnv.ProviderReads }
         | TDeclLet binding when (tryWindowRead currentEnv binding).IsSome ->
             // Windowed packed read (`alias.read_window(view, lo, hi)`): same
             // deferred-read mechanics as the arms below; the spec carries the
@@ -2322,7 +2390,7 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
             // checker-pinned static extent through unchanged.
             let kind, keyIR, parIRs, weightsIR, addressIR =
                 match binding.Value.Kind with
-                | TExprRandGen (k, key, pars, weights, address, _) ->
+                | TExprRandGen (k, key, pars, weights, address, _, _) ->
                     k,
                     lowerTypedExpr currentEnv key,
                     (pars |> List.map (lowerTypedExpr currentEnv)),
@@ -2516,11 +2584,10 @@ let qualifyModuleNames (program: IRProgram) : IRProgram =
     match program.Modules with
     | [] | [ _ ] -> program
     | modules ->
-        let lastIdx = modules.Length - 1
         { program with
             Modules =
                 modules |> List.mapi (fun i m ->
-                    if i = lastIdx then m
+                    if Blade.Types.TypeOrigins.isMainModule i modules.Length then m
                     else
                         let q = moduleQualifier i m.Name
                         let fp = moduleCppPrefix q
@@ -2537,6 +2604,61 @@ let qualifyModuleNames (program: IRProgram) : IRProgram =
                                     else { b with Name = $"{q}.{b.Name}" }) }) }
 
 /// Lower a typed program (with optional raw program for static evaluation)
+/// Packed storage whose cell count does not fit int64 is a USER error at the
+/// declaration that needs it (BL4003), not an internal one. A compact group's
+/// count is a binomial -- C(n+r-1, r) symmetric/Hermitian, C(n, r)
+/// antisymmetric, the iterated fold for an OrbIdx class -- and an absurd
+/// extent or rank pushes it past int64. Every pool sizer computes it through
+/// OrbRank's exactly-checked arithmetic, which used to surface the overflow as
+/// an exception the driver could only report as BL9001 ("internal compiler
+/// error ... please report it"). Checked here, once literal extents are known
+/// (after shape monomorphization), over every top-level binding's type and
+/// every function's parameter and return types; the whole array's cell count
+/// (the compact groups times the dense extents) has to fit too.
+let private refuseUncountableStorage (modules: IRModule list) : unit =
+    let groupCells (ix: IRIndexType) : Result<int64, string> option =
+        match ix.Extent with
+        | IROrbitClass (levels, IRLit (IRLitInt n)) ->
+            Some (Blade.OrbRank.cellCountChecked (orbRankLevels levels) n
+                  |> Result.mapError (fun e -> $"the class's iterated binomial over {n}: {e}"))
+        | IRLit (IRLitInt n) ->
+            let r = max 1 ix.Rank
+            match ix.Symmetry with
+            | SymSymmetric | SymHermitian when r >= 2 ->
+                Some (Blade.OrbRank.binomChecked (n + int64 r - 1L) r |> Result.mapError (fun e -> $"C({n + int64 r - 1L}, {r}): {e}"))
+            | SymAntisymmetric when r >= 2 ->
+                Some (Blade.OrbRank.binomChecked n r |> Result.mapError (fun e -> $"C({n}, {r}): {e}"))
+            | _ ->
+                // A dense group: n per axis.
+                Some ([ 1 .. r ] |> List.fold (fun acc _ -> acc |> Result.bind (fun a -> Blade.OrbRank.mulChecked a n)) (Ok 1L))
+        | _ -> None
+    let rec arrays (t: IRType) : IRArrayType list =
+        match stripUnits t with
+        | ArrayElem at -> at :: arrays at.ElemType
+        | IRTTuple ts -> ts |> List.collect arrays
+        | IRTComputation inner -> arrays inner
+        | _ -> []
+    let check (owner: string) (shown: string) (t: IRType) =
+        for at in arrays t do
+            let compact =
+                at.IndexTypes |> List.exists (fun ix ->
+                    ix.Rank >= 2 && ix.Symmetry <> SymNone || not (List.isEmpty (orbitLevelsOf ix)))
+            if compact then
+                let total =
+                    at.IndexTypes |> List.choose groupCells
+                    |> List.fold (fun acc r -> acc |> Result.bind (fun a -> r |> Result.bind (Blade.OrbRank.mulChecked a))) (Ok 1L)
+                match total with
+                | Ok _ -> ()
+                | Error detail ->
+                    raise (Blade.Diagnostics.BladeDiagnosticException
+                            (Blade.Diagnostics.mkError "BL4003" Blade.Diagnostics.PhConstraints (IR.declSpanOf owner)
+                                $"the packed storage of {shown} ({ppIRType (mkArrayLike at)}) has more cells than a 64-bit count can hold ({detail}): a compact array this large cannot be allocated. Reduce the extent or the symmetry rank."))
+    for m in modules do
+        for b in m.Bindings do check b.Name $"'{b.Name}'" b.Type
+        for f in m.Functions do
+            for p in f.Params do check f.Name $"parameter '{p.Name}' of '{f.SourceName}'" p.Type
+            check f.Name $"the result of '{f.SourceName}'" f.RetType
+
 let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (builder: IRBuilder) : IRProgram =
     // The scratch-reuse plan is keyed by let id and let ids restart per
     // compile, so a stale plan from an earlier program in this flow (the test
@@ -2566,7 +2688,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     // user cannot locate. Recorded for every top-level `let`/`static`/
     // `function`; declarations without a surface form simply have no entry and
     // fall back to `noSpan`, exactly as before.
-    (IR.declSpansCell ()).Value <- Map.empty
+    IR.resetDeclSpans ()
     match rawProgram with
     | Some p ->
         // Every name a pattern binds points at the same declaration span; a
@@ -2583,12 +2705,12 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // for a non-main module is its QUALIFIED name (qualifyModuleNames):
         // recording the bare name would both miss the lookup and let an
         // imported module's `x` shadow main's own `x` span.
-        let lastIdx = p.Modules.Length - 1
         p.Modules |> List.iteri (fun i m ->
             let modName = m.Name |> String.concat "."
             let q = moduleQualifier i modName
-            let valueKey (n: string) = if i = lastIdx || lastIdx = 0 then n else $"{q}.{n}"
-            let funcKey (n: string) = if i = lastIdx || lastIdx = 0 then n else $"{moduleCppPrefix q}__{n}"
+            let isMain = Blade.Types.TypeOrigins.isMainModule i p.Modules.Length
+            let valueKey (n: string) = if isMain then n else $"{q}.{n}"
+            let funcKey (n: string) = if isMain then n else $"{moduleCppPrefix q}__{n}"
             for d in m.Decls do
                 match d.Value with
                 | DeclLet b | DeclStatic b ->
@@ -2642,6 +2764,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     // change what a later module sees, and for a single-module program the
     // builder mints exactly the same ids in exactly the same order as before.
     let irModules = IRMono.shapeMonomorphizeModules irModules env.Builder
+    refuseUncountableStorage irModules
 
     // Every struct the program declares, for `zero` at a struct type
     // (IRMono.resolveTypedZerosModule): the struct may live in another module
@@ -2671,6 +2794,11 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // Float literals beside a generic operand a clone made Float32 /
         // Complex64 adapt now, as the checker adapts them beside a concrete one.
         let irModule = IRMono.adaptFloatLiteralsModule irModule
+        // ...and a generic `(*)` fold's implicit `1` seed takes its instance's type.
+        let irModule = IRMono.adaptFoldOneSeedsModule irModule
+        // ...and a specialization at an integer EnumIdx that computes on its
+        // values is refused (keys are represented as positions, D2).
+        IRMono.refuseEnumKeyArithModule irModule
         let irModule = IRMono.lowerArrayBinOpsModule irModule env.Builder programFuncs
         // The semantic-equivalence optimization stage (Blade.Optimize --
         // see its charter): constant-scrutinee match folding (which also
@@ -2817,10 +2945,7 @@ let lower (source: string) : Result<IRProgram, string> =
 /// multi-file and already-parsed entry points so they cannot drift.
 /// Env-gated phase timing (`BLADE_PHASE_TIMING=1`): one `[phase] <name>: <ms>`
 /// line per pipeline phase on stderr. See docs/plan-compile-speed.md Stage 0.
-let phaseTimingEnabled () =
-    match System.Environment.GetEnvironmentVariable "BLADE_PHASE_TIMING" with
-    | null | "" | "0" -> false
-    | _ -> true
+let phaseTimingEnabled () = Blade.Toolchain.envFlag "BLADE_PHASE_TIMING" false
 
 let phaseMark (sw: System.Diagnostics.Stopwatch) (name: string) : unit =
     if phaseTimingEnabled () then

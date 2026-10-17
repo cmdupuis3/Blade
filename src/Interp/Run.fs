@@ -402,6 +402,12 @@ let private materializeProviderRead (state: Core.InterpState) (binding: IRBindin
                 // sizes the store from cellCountChecked (the same fold that
                 // validated shape[0] at metadata parse), so a length disagreement
                 // here is the store lying about its own class.
+                // The boundary rule over the pool (BL8015), as the compiled
+                // reader's assembly tallies it.
+                (match Blade.ProviderRegistry.checkPayload (pspec.MissingRuleOf spec.FilePath spec.VarName)
+                                                          spec.VarName spec.FilePath data.DimLengths data.Payload with
+                 | Some refusal -> raise (InterpPanic ("BL8015", refusal, None, 0))
+                 | None -> ())
                 let arr = ArrayOps.allocWreath spec.VarType.ElemType spec.VarType.IndexTypes levels n
                 let cells = ArrayOps.wreathCellCount arr
                 let got = data.DimLengths |> List.fold (*) 1
@@ -459,6 +465,15 @@ let private materializeProviderRead (state: Core.InterpState) (binding: IRBindin
                                             $"NetCDF variable '{spec.VarName}' in '{spec.FilePath}' has dimension {d} of length {o} at run time; the program was compiled against {n}",
                                             None, 0))
                     | _ -> ())
+                // The provider boundary rule (BL8015), the compiled readers'
+                // twin: the same rule record, the same sentence. The masked
+                // read's raw half (AllowMissing) is exempt -- its mask is
+                // derived from these cells in-language.
+                if not spec.AllowMissing then
+                    match Blade.ProviderRegistry.checkPayload (pspec.MissingRuleOf spec.FilePath spec.VarName)
+                                                             spec.VarName spec.FilePath data.DimLengths data.Payload with
+                    | Some refusal -> raise (InterpPanic ("BL8015", refusal, None, 0))
+                    | None -> ()
                 let extents = observed |> Array.ofList
                 let store =
                     match ArrayOps.elemThrough arrTy.ElemType, data.Payload with
@@ -544,6 +559,7 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
             // main()-locals); the intercept order mirrors CodeGen.genBinding's
             // dispatch (ProviderReads, ProviderWrites, RandomInits, CompoundInits).
             let v =
+              try
                 match Map.tryFind b.Id m.ProviderReads with
                 | Some spec ->
                     materializeProviderRead state b spec
@@ -581,6 +597,16 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
                             Loops.materializeSparseBinding state root b valuesExpr
                         | None ->
                             Core.evalBinding state root b
+              with
+              // A runtime GUARD (shape / extent / key / empty reduce) carries no
+              // expression span; the compiled lane locates it at the declaration
+              // being emitted (CodeGenState.declPanicArgs), so this lane names
+              // the top-level binding being evaluated -- when lowering recorded
+              // its span in this flow. Otherwise it stays unlocated, as before.
+              | InterpPanic (code, msg, None, 0)
+                    when (let s = Blade.IR.declSpanOf b.Name in s.StartLine > 0 && s.File.IsSome) ->
+                  let s = Blade.IR.declSpanOf b.Name
+                  raise (InterpPanic (code, msg, s.File, s.StartLine))
             envBind root b.Id v |> ignore
             if Blade.Display.Frame.emitted () > framesBefore then
                 frameEmitters.Add b.Name |> ignore

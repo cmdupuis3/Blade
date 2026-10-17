@@ -1,0 +1,14 @@
+// TEST: Two modules declaring one __-prefixed type name (rejects)
+// MODULE: Main
+// ERROR: BL2009
+// ERROR-CONTAINS: this name is not module-qualified
+// ============================================================================
+// D11 qualifies a non-main module's declarations (`A.P`), but a
+// `__`-prefixed name keeps its spelling in every module -- the prefix is what
+// marks it compiler-made (stdlib/plot.blade's `__B16` axes) -- so two modules
+// declaring one would be one identity. Still refused, as every cross-module
+// type name used to be.
+module Main
+import A
+import B
+let s = A.a(0) + B.b(0)

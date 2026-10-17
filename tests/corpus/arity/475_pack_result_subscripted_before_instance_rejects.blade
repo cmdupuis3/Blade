@@ -1,0 +1,18 @@
+// TEST: an arity-decided result subscripted before its rank is known (rejects)
+// ERROR: BL3009
+// `o2(1)` was typed while `outer(x, y)`'s result was still open, so it was
+// recorded as a call of an open value; the instance then made `o2` a rank-2
+// array, and the read reached g++ as a call of an Array (BL9002). Refused with
+// the annotation that types the binding up front.
+function outer(a: Poly<T^1>) = {
+    match arity(a) with
+    | 0 -> 1.0
+    | _ -> {
+        let head :: tail = a
+        head [*] outer(tail)
+    }
+}
+let x = [1.0, 2.0]
+let y = [3.0, 4.0, 5.0]
+let o2 = outer(x, y)
+let row = o2(1)

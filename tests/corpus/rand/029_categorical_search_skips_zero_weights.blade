@@ -1,0 +1,17 @@
+// TEST: Rand Categorical Search Skips Zero-Weight Runs
+// The inverse-CDF step of `categorical` / `categorical_at` is a binary search
+// over the cumulative table (it was a linear walk per sample, O(n*k)). Both
+// find the SMALLEST j with u < cum[j]: a zero weight leaves cum flat, so a
+// zero-weight index is never that j -- here only 1, 4 and 6 carry weight, and
+// (i-1)*(i-4)*(i-6) is 0 exactly for those, so a zero sum of squares over every
+// draw rules out every other index (in range or not). The search returns the
+// walk's index sample for sample, so no existing categorical pin moves (rand/
+// 013-017 and 020 pin draws and frequencies, and pass unchanged).
+import rand as r
+let W: Array<Float64 like Idx<9>> = [0.0, 1.0, 0.0, 0.0, 2.0, 0.0, 3.0, 0.0, 0.0]
+let a = r.categorical(7, W, 16)
+let b = r.categorical_at(7, 1, 0, W, 16)
+let pa = (a - 1) * (a - 4) * (a - 6)
+let pb = (b - 1) * (b - 4) * (b - 6)
+let onlyWeighted = reduce(pa * pa, (+)) + reduce(pb * pb, (+)) == 0
+// EXPECT: onlyWeighted = true

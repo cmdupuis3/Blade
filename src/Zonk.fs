@@ -201,9 +201,15 @@ type SubscriptGuardCtx = {
     /// The kernel parameters noteDataKernelParams marked: unproven AND exempt
     /// from the `__`-name stand-down (they carry user data).
     DataVars: System.Collections.Generic.HashSet<IRId>
+    /// Uses of an integer EnumIdx value zonk cannot read faithfully
+    /// (intEnumEdges), reported by TypeCheck.checkModule as BL4003.
+    EnumKeyErrors: System.Collections.Generic.List<Blade.Ast.Span * string>
     /// The labels of a STRING-valued EnumIdx, in declaration (= ordinal)
     /// order; None for any other type name.
     EnumLabels: string -> string list option
+    /// The keys of an INTEGER-valued EnumIdx, in declaration (= ordinal)
+    /// order; None for any other type name.
+    EnumKeys: string -> int64 list option
     /// Lambda parameters a RANGE operand feeds (`method_for(range<I>) <@>
     /// lambda(i) -> ..`), collected over the whole module before zonk
     /// (TypeCheck.rangeFedLambdaParams). Every OTHER user lambda parameter of
@@ -218,6 +224,10 @@ type SubscriptGuardCtx = {
     /// ArrowSubscripts, by HEAD node): the subscript each is, zonked -- and
     /// guarded -- in place of the application.
     Subscripts: System.Collections.Generic.Dictionary<TypedExpr, TypedExpr>
+    /// The grouping (`gk`, the bare group_keys name) a `group_by` result's
+    /// OUTER slot came from, by that slot's id (TypeEnv.GroupOuters): what
+    /// its group count, each group's length and its key type are read from.
+    GroupOuter: IRId -> TypedExpr option
 }
 
 /// A USER index type's values (a compiler tag -- a halo window, a `__`
@@ -349,14 +359,36 @@ let private guardableSlot (ix: IRIndexType) : string option =
 ///     { let __ek = key; check(__ek == l0 || ... , BL8006);
 ///       if __ek == l0 then 0 else if ... else n-1 }
 /// A key outside the label set aborts (BL8006) instead of reading some cell.
+///
+/// An INTEGER-valued EnumIdx (the D2 ruling) maps the same way: its
+/// subscripts are KEYS, so a computed integer subscript -- foreign-key data,
+/// a plain Int64 -- is looked up among the keys, and one that is none of
+/// them aborts with BL8006. A literal key was folded at type-check time; a
+/// PROVEN index (an iteration index of `range<R>`, which counts positions, or
+/// an emitted guard) is already a position and is read as one.
 let private enumKeyOrdinal (ix: IRIndexType) (a: TypedExpr) : TypedExpr option =
     let isStringKey =
         match IR.stripUnits a.Type with
         | IRTIdxTagged (IRTScalar ETString, _) | IRTScalar ETString -> true
         | _ -> false
+    // A value OF the integer EnumIdx type is a key whose representation is
+    // already its POSITION (intEnumEdges: literals, data cells and casts
+    // convert on the way in), so only a PLAIN integer is a key to look up.
+    let isIntValue =
+        match IR.stripUnits a.Type with
+        | IRTScalar (ETInt64 | ETInt32) -> true
+        | _ -> false
+    let keyLabels (ctx: SubscriptGuardCtx) (tag: string) : (TypedExpr -> TypedExpr) list option =
+        if isStringKey then
+            ctx.EnumLabels tag
+            |> Option.map (List.map (fun s -> fun (v: TypedExpr) -> mkTypedSpan (TExprLit (Blade.Ast.LitString s)) v.Type a.Span))
+        elif isIntValue && not a.Kind.IsTExprWildcard then
+            ctx.EnumKeys tag
+            |> Option.map (List.map (fun k -> fun (v: TypedExpr) -> mkTypedSpan (TExprLit (Blade.Ast.LitInt k)) v.Type a.Span))
+        else None
     match subscriptGuardCtx.Value, ix.Tag with
-    | Some ctx, Some tag when isStringKey ->
-        match ctx.EnumLabels tag with
+    | Some ctx, Some tag when isStringKey || isIntValue ->
+        match keyLabels ctx tag with
         | Some labels when not labels.IsEmpty ->
             let span = a.Span
             let mk k ty = mkTypedSpan k ty span
@@ -365,13 +397,14 @@ let private enumKeyOrdinal (ix: IRIndexType) (a: TypedExpr) : TypedExpr option =
             let vid = ctx.FreshId ()
             let name = $"__ek{vid}"
             let v = mk (TExprVar (name, vid, None)) a.Type
-            let eq (s: string) =
-                mk (TExprBinOp (Blade.Ast.Elementwise, Blade.Ast.OpEq, v, mk (TExprLit (Blade.Ast.LitString s)) a.Type)) boolTy
+            let eq (s: TypedExpr -> TypedExpr) =
+                mk (TExprBinOp (Blade.Ast.Elementwise, Blade.Ast.OpEq, v, s v)) boolTy
             let cond =
                 labels |> List.map eq
                 |> List.reduce (fun l r -> mk (TExprBinOp (Blade.Ast.Elementwise, Blade.Ast.OpOr, l, r)) boolTy)
+            let what = if isStringKey then "label" else "key"
             let check =
-                TStmtExpr (mk (TExprConstraintCheck (cond, "BL8006", $"index out of bounds: a key that is not a label of {tag}")) IRTUnit)
+                TStmtExpr (mk (TExprConstraintCheck (cond, "BL8006", $"index out of bounds: a key that is not a {what} of {tag}")) IRTUnit)
             let ordinal =
                 labels
                 |> List.mapi (fun i s -> (i, s))
@@ -491,8 +524,40 @@ let private foldProductSubscripts (arr: TypedExpr) (idxs: TypedExpr list) : Type
         walk idxs at.IndexTypes []
     | _ -> idxs
 
+/// The integer EnumIdx a type names, with its keys: a value of it (`R`, or an
+/// array element of it) is a KEY, represented as its POSITION in the key
+/// list (the D2 ruling, 2026-10-16).
+let private intEnumKeysOfType (ty: IRType) : (string * int64 list) option =
+    match IR.stripUnits ty, subscriptGuardCtx.Value with
+    | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), IRefNamed tag), Some ctx ->
+        ctx.EnumKeys tag |> Option.filter (fun ks -> not ks.IsEmpty) |> Option.map (fun ks -> (tag, ks))
+    | _ -> None
+
+/// THE OBSERVED VALUE of a position-represented EnumIdx value: its key, an
+/// Int64, read from the type's KEY TABLE at the position -- `[k0, k1, ...](p)`
+/// (F5; it was an O(n) `if p == 0 then k0 else if ...` chain per observation).
+/// Positions are in range by construction, so the read is unguarded. The C++
+/// lane renders the subscripted all-literal table as the per-type static
+/// `blade_arith::key_table<k0, k1, ...>::tab[p]` (CodeGenExpr, the
+/// IRIndex-of-IRArrayLit arm): O(1); the interpreter reads the same table.
+let private posToKey (keys: int64 list) (p: TypedExpr) : TypedExpr =
+    let span = p.Span
+    let mk k ty = mkTypedSpan k ty span
+    let intTy = IRTScalar ETInt64
+    let tableId = match subscriptGuardCtx.Value with Some ctx -> ctx.FreshId () | None -> 0
+    let tableTy : IRArrayType =
+        { ElemType = intTy
+          IndexTypes =
+            [ { Id = tableId; Rank = 1; Extent = IRLit (IRLitInt (int64 keys.Length))
+                Symmetry = SymNone; Tag = None; Kind = SDimension; IxKind = IxKPlain
+                Dependencies = [] } ]
+          IsVirtual = false
+          Identity = None }
+    let table = mk (TExprArrayLit (keys |> List.map (fun k -> mk (TExprLit (Blade.Ast.LitInt k)) intTy), tableTy)) (mkArrayLike tableTy)
+    mk (TExprIndex (table, [ p ], None)) intTy
+
 /// Wrap the unproven subscripts of one (zonked) read in their guards.
-let private guardSubscripts (arr: TypedExpr) (idxs: TypedExpr list) : TypedExpr list =
+let private guardSubscriptsPlain (arr: TypedExpr) (idxs: TypedExpr list) : TypedExpr list =
     let synthetic = match arr.Kind with TExprVar (n, _, _) -> n.StartsWith "__" | _ -> false
     match arr.Type with
     | ArrayElem at when not synthetic && idxs.Length <= at.IndexTypes.Length
@@ -511,11 +576,91 @@ let private guardSubscripts (arr: TypedExpr) (idxs: TypedExpr list) : TypedExpr 
                       else mkTA a (TExprTupleIndex (mkTA a (TExprExtents arr) (IRTTuple (List.replicate rank intTy)),
                                                     mkTA a (TExprLit (Blade.Ast.LitInt (int64 k))) intTy)) intTy)
             | _ -> None
+        // A RAGGED row's own length, for its inner coordinate, checked in ONE
+        // short-circuit condition that first checks the OUTER coordinate
+        // (when its row count is static) -- `0 <= i < rows && 0 <= j <
+        // extents(u(i))` -- so the row is never formed from a bad `i`. Placed
+        // on the OUTER subscript of a flat read `u(i, j)`: C++ evaluates an
+        // operator[]'s argument before the call, so the check runs before the
+        // row view exists. A curried read `u(i)(j)` checks on `j`. Only for row
+        // expressions that are safe to evaluate twice.
+        let rec pureRow (e: TypedExpr) =
+            match e.Kind with
+            | TExprVar _ -> true
+            | TExprApp (f, xs) | TExprIndex (f, xs, _) -> pureRow f && xs |> List.forall isPureIndexExpr
+            | _ -> false
+        let isRagged (ix: IRIndexType) =
+            match ix.IxKind with
+            // (A group_by result's rows are materialized as plain arrays and keep
+            // their own discipline.)
+            | IxKRaggedInline | IxKRagged | IxKRaggedOpaque -> true
+            | _ -> false
+        let intTy = IRTScalar ETInt64
+        let boolTy = IRTScalar ETBool
+        let mkAt (a: TypedExpr) k ty = mkTypedSpan k ty a.Span
+        let inRange (a: TypedExpr) (v: TypedExpr) (ext: TypedExpr) =
+            [ mkAt a (TExprBinOp (Blade.Ast.Elementwise, Blade.Ast.OpLe, mkAt a (TExprLit (Blade.Ast.LitInt 0L)) intTy, v)) boolTy
+              mkAt a (TExprBinOp (Blade.Ast.Elementwise, Blade.Ast.OpLt, v, ext)) boolTy ]
+        // The row count: static when the extent is, else read off the array
+        // (`extents(u)[0]`, as the plain guard below reads it). Never dropped:
+        // the row view must not be formed from an unchecked outer coordinate.
+        let outerConds (baseArr: TypedExpr) (baseAt: IRArrayType) (i: TypedExpr) =
+            match Blade.IRPrint.tryEvalIntIR baseAt.IndexTypes.[0].Extent with
+            | Some n -> inRange i i (mkAt i (TExprLit (Blade.Ast.LitInt n)) intTy)
+            | None ->
+                match baseArr.Kind with
+                | TExprVar _ ->
+                    let r = baseAt.IndexTypes.Length
+                    let exts =
+                        if r = 1 then mkAt i (TExprExtents baseArr) intTy
+                        else mkAt i (TExprTupleIndex (mkAt i (TExprExtents baseArr) (IRTTuple (List.replicate r intTy)),
+                                                      mkAt i (TExprLit (Blade.Ast.LitInt 0L)) intTy)) intTy
+                    inRange i i exts
+                | _ -> []
+        let checkedBlock (a: TypedExpr) (conds: TypedExpr list) =
+            let cond = conds |> List.reduce (fun l r -> mkAt a (TExprBinOp (Blade.Ast.Elementwise, Blade.Ast.OpAnd, l, r)) boolTy)
+            mkAt a (TExprBlock ([ TStmtExpr (mkAt a (TExprConstraintCheck (cond, "BL8006", "index out of bounds: a position outside its ragged row")) IRTUnit) ], Some a)) a.Type
+        let raggedFlat =
+            rank = 2 && idxs.Length = 2 && isRagged at.IndexTypes.[1] && pureRow arr
+            && ((Blade.IRPrint.tryEvalIntIR at.IndexTypes.[0].Extent).IsSome || arr.Kind.IsTExprVar)
+            && isPureIndexExpr idxs.[0] && isPureIndexExpr idxs.[1]
+            && not idxs.[1].Kind.IsTExprWildcard && not (mentionsReservedName idxs.[1])
+        let raggedFlatCheck (i: TypedExpr) =
+            let j = idxs.[1]
+            let rowTy = mkArrayLike { at with IndexTypes = [ at.IndexTypes.[1] ] }
+            let row = mkAt i (TExprIndex (arr, [ i ], None)) rowTy
+            checkedBlock i (outerConds arr at i @ inRange j j (mkAt j (TExprExtents row) intTy))
+        let raggedCurriedCheck (j: TypedExpr) =
+            let outer =
+                match arr.Kind with
+                | TExprIndex (b, [ i ], _) | TExprApp (b, [ i ]) ->
+                    (match b.Type with
+                     | ArrayElem bat when bat.IndexTypes.Length = 2 -> outerConds b bat i
+                     | _ -> [])
+                | _ -> []
+            checkedBlock j (outer @ inRange j j (mkAt j (TExprExtents arr) intTy))
         List.mapi (fun k (a: TypedExpr) ->
             let ix = at.IndexTypes.[k]
+            // An integer EnumIdx VALUE subscripting a slot of ANOTHER type (an
+            // anonymous axis) is observed: its key is the position read there.
+            let a =
+                match intEnumKeysOfType a.Type with
+                | Some (tag, keys) when ix.Tag <> Some tag -> posToKey keys a
+                | _ -> a
             match enumKeyOrdinal ix a with
             | Some ord -> ord
             | None ->
+            // THE RAGGED INNER COORDINATE (formalism 3.10): checked at run
+            // time against its row's own length, `extents(u(i))` (BL8006). It
+            // was never checked: `u(0, 2)` on a length-1 row read row 1's
+            // cell. A literal one the checker could see is judged at compile
+            // time too (TypeCheckSupport.raggedInnerLiteralError).
+            match k with
+            | 0 when raggedFlat -> raggedFlatCheck a
+            | 1 when raggedFlat -> a
+            | 0 when rank = 1 && isRagged ix && pureRow arr && isPureIndexExpr a
+                     && not a.Kind.IsTExprWildcard && not (mentionsReservedName a) -> raggedCurriedCheck a
+            | _ ->
             // A LITERAL position into a plain slot with NO static extent --
             // `m(5)` with `m: T^1`, or `m: Array<Float64 like Idx<n>>` (formalism
             // 3.10 rule 3). Rule 3 checks a literal at compile time against the
@@ -571,6 +716,152 @@ let private guardSubscripts (arr: TypedExpr) (idxs: TypedExpr list) : TypedExpr 
                 | None -> a
             | _ -> a) idxs
     | _ -> idxs
+
+/// A read of a `group_by` result's STORAGE (G1; see groupReadSubscripts for
+/// the rules): `grouped(i)` -- the group coordinate, judged on the
+/// subscript -- or `grouped(i, j)`, judged as ONE block that binds each
+/// coordinate once (`__gi`, `__gj`), checks both, and reads with the
+/// bindings, so an impure or non-trivial row coordinate (`k % 3`, `f(k)`) is
+/// checked too and evaluated once. Answers the read (or the guarded row
+/// read), None when `arr` is not grouped storage.
+let private groupStorageRead (arr: TypedExpr) (idxs: TypedExpr list) (nodeTy: IRType) : TypedExpr option =
+    let intTy = IRTScalar ETInt64
+    let boolTy = IRTScalar ETBool
+    let mkAt (a: TypedExpr) k ty = mkTypedSpan k ty a.Span
+    let wild (a: TypedExpr) = a.Kind.IsTExprWildcard || mentionsReservedName a
+    let inRange (a: TypedExpr) (v: TypedExpr) (ext: TypedExpr) =
+        [ mkAt a (TExprBinOp (Blade.Ast.Elementwise, Blade.Ast.OpLe, mkAt a (TExprLit (Blade.Ast.LitInt 0L)) intTy, v)) boolTy
+          mkAt a (TExprBinOp (Blade.Ast.Elementwise, Blade.Ast.OpLt, v, ext)) boolTy ]
+    let conj (a: TypedExpr) (conds: TypedExpr list) =
+        conds |> List.reduce (fun l r -> mkAt a (TExprBinOp (Blade.Ast.Elementwise, Blade.Ast.OpAnd, l, r)) boolTy)
+    match subscriptGuardCtx.Value, arr.Type with
+    | Some ctx, ArrayElem at when at.IndexTypes.Length = 2 && at.IndexTypes.[0].IxKind = IxKGroupOuter
+                                   // the GROUPED storage itself (its rows are a group's members), not
+                                   // a per-group kernel's result over the same group axis
+                                   && at.IndexTypes.[1].IxKind = IxKGroupMember
+                                   && (idxs.Length = 1 || idxs.Length = 2) && arr.Kind.IsTExprVar
+                                   && not (match arr.Kind with TExprVar (n, _, _) -> n.StartsWith "__" | _ -> true) ->
+        match ctx.GroupOuter at.IndexTypes.[0].Id with
+        | Some { Type = IRTGroupKeys (gko, _, enumVals) } when not (wild idxs.[0]) ->
+            let i = idxs.[0]
+            let gname = match arr.Kind with TExprVar (n, _, _) -> n | _ -> "the grouped value"
+            let keyTag = gko.Tag |> Option.filter (fun t -> not (t.StartsWith "__"))
+            let staticCount =
+                match enumVals with
+                | Some vs -> Some (int64 vs.Length)
+                | None -> Blade.IRPrint.tryEvalIntIR gko.Extent
+            let keyTyped =
+                match IR.stripUnits i.Type, keyTag with
+                | IRTIdxTagged (_, IRefNamed t), Some r -> t = r
+                | _ -> false
+            let isString = match IR.stripUnits i.Type with IRTIdxTagged (IRTScalar ETString, _) -> true | _ -> false
+            // A string LABEL becomes its position (checked); an integer key
+            // already is one (D2).
+            let i1 = if keyTyped && isString then enumKeyOrdinal gko i |> Option.defaultValue i else i
+            let litValue =
+                match i.Kind with
+                | TExprLit (Blade.Ast.LitInt n) -> Some n
+                | TExprUnaryOp (Blade.Ast.OpNeg, { Kind = TExprLit (Blade.Ast.LitInt n) }) -> Some (-n)
+                | _ -> None
+            let outerProven =
+                keyTyped
+                || (match litValue, staticCount with
+                    | Some v, Some n ->
+                        if v < 0L || v >= n then
+                            ctx.EnumKeyErrors.Add((i.Span, $"group position {v} is outside the groups of '{gname}' (0 .. {n - 1L}): a plain integer subscript of a grouped value is a group POSITION (a key is a value of the grouping's key type)"))
+                        true
+                    | _ -> false)
+            let jOpt = if idxs.Length = 2 && not (wild idxs.[1]) then Some idxs.[1] else None
+            if outerProven && jOpt.IsNone then Some (mkAt i (TExprIndex (arr, i1 :: List.tail idxs, None)) nodeTy)
+            else
+                let letOf (name: string) (vid: IRId) (ty: IRType) (value: TypedExpr) =
+                    TStmtLet { Name = name; VarId = vid; Type = ty
+                               Identity = None; IsMutable = false; Value = value
+                               SubBindings = []; Destructure = DSPositional; PostChecks = []; ErasedType = None }
+                let gvid = ctx.FreshId ()
+                let gv = mkAt i (TExprVar ($"__gi{gvid}", gvid, None)) i1.Type
+                // The group count: static, or the grouped value's own extent.
+                let count =
+                    match staticCount with
+                    | Some n -> mkAt i (TExprLit (Blade.Ast.LitInt n)) intTy
+                    | None ->
+                        mkAt i (TExprTupleIndex (mkAt i (TExprExtents arr) (IRTTuple [ intTy; intTy ]),
+                                                 mkAt i (TExprLit (Blade.Ast.LitInt 0L)) intTy)) intTy
+                let outerConds = if outerProven then [] else inRange i gv count
+                let check (a: TypedExpr) (conds: TypedExpr list) =
+                    TStmtExpr (mkAt a (TExprConstraintCheck (conj a conds, "BL8006",
+                                         $"index out of bounds: a position outside the groups of {gname} or outside its group's rows")) IRTUnit)
+                match jOpt with
+                | None ->
+                    // A row read: the guarded group coordinate.
+                    let guarded = mkAt i (TExprBlock ([ letOf $"__gi{gvid}" gvid i1.Type i1; check i outerConds ], Some gv)) i1.Type
+                    Some (mkAt i (TExprIndex (arr, guarded :: List.tail idxs, None)) nodeTy)
+                | Some j ->
+                    // A cell read: both coordinates bound once, checked, read.
+                    let gjid = ctx.FreshId ()
+                    let gj = mkAt j (TExprVar ($"__gj{gjid}", gjid, None)) j.Type
+                    let rowTy = mkArrayLike { at with IndexTypes = [ at.IndexTypes.[1] ] }
+                    let rowLen = mkAt i (TExprExtents (mkAt i (TExprIndex (arr, [ gv ], None)) rowTy)) intTy
+                    let stmts =
+                        [ letOf $"__gi{gvid}" gvid i1.Type i1
+                          letOf $"__gj{gjid}" gjid j.Type j
+                          check i (outerConds @ inRange j gj rowLen) ]
+                    Some (mkAt i (TExprBlock (stmts, Some (mkAt i (TExprIndex (arr, [ gv; gj ], None)) nodeTy))) nodeTy)
+        | _ -> None
+    | _ -> None
+
+/// GROUP_BY READS (G1). A `group_by` result is ragged -- groups x the
+/// group's rows -- and neither coordinate was checked: over two-row groups
+/// `lambda(g) -> g(2)` read past its group, and `grouped(0, 5)` read row 5 of
+/// group 0. The rules are formalism 3.10's, with D2's for keys:
+///   * the GROUP coordinate. A value whose TYPE is the grouping's key type
+///     (`Nat<R>` over an `EnumIdx R` or `Idx` grouping) is a KEY: an integer
+///     key is already its position (D2), a string label is mapped to its
+///     position (BL8006 for one the type does not declare). A plain integer
+///     is a POSITION -- what `group_bucket` returns, and every position of a
+///     dynamic grouping -- checked against the group count: a literal at
+///     type checking when the count is static (BL4003), at run time
+///     otherwise (BL8006);
+///   * the ROW coordinate: checked at run time against the group's own
+///     length, `extents(grouped(i))` -- the grouping's offsets, which the
+///     grouped value's extents table carries (CodeGenExprSupport.
+///     emitGroupedExtentsTable; the interpreter's rows know their lengths),
+///     so the check holds wherever the value goes, a captured kernel
+///     included (BL8006); a peeled row (`lambda(g) -> g(2)`, `let g0 =
+///     grouped(0)`) against `extents(g)`.
+/// Answers None when `arr` is not such a read.
+let private groupReadSubscripts (arr: TypedExpr) (idxs: TypedExpr list) : TypedExpr list option =
+    let intTy = IRTScalar ETInt64
+    let boolTy = IRTScalar ETBool
+    let mkAt (a: TypedExpr) k ty = mkTypedSpan k ty a.Span
+    let wild (a: TypedExpr) = a.Kind.IsTExprWildcard || mentionsReservedName a
+    let inRange (a: TypedExpr) (v: TypedExpr) (ext: TypedExpr) =
+        [ mkAt a (TExprBinOp (Blade.Ast.Elementwise, Blade.Ast.OpLe, mkAt a (TExprLit (Blade.Ast.LitInt 0L)) intTy, v)) boolTy
+          mkAt a (TExprBinOp (Blade.Ast.Elementwise, Blade.Ast.OpLt, v, ext)) boolTy ]
+    let conj (a: TypedExpr) (conds: TypedExpr list) =
+        conds |> List.reduce (fun l r -> mkAt a (TExprBinOp (Blade.Ast.Elementwise, Blade.Ast.OpAnd, l, r)) boolTy)
+    match subscriptGuardCtx.Value, arr.Type with
+    // A PEELED ROW: a group kernel's row parameter or a let-bound row.
+    | Some _, ArrayElem at when at.IndexTypes.Length = 1 && at.IndexTypes.[0].IxKind = IxKGroupMember
+                                 && idxs.Length = 1 && arr.Kind.IsTExprVar
+                                 && not (match arr.Kind with TExprVar (n, _, _) -> n.StartsWith "__" | _ -> true)
+                                 && not (wild idxs.[0]) ->
+        let j = idxs.[0]
+        Some [ guardIndex j (mkAt j (TExprExtents arr) intTy) "a position outside its group's rows" ]
+    // A ROW READ OF THE GROUPED VALUE, `grouped(i)`: the group coordinate
+    // (groupStorageRead judges a read of one CELL, `grouped(i, j)`).
+    | Some _, ArrayElem at when at.IndexTypes.Length = 2 && idxs.Length = 1 ->
+        groupStorageRead arr idxs (mkArrayLike { at with IndexTypes = [ at.IndexTypes.[1] ] })
+        |> Option.bind (fun e ->
+            match e.Kind with
+            | TExprIndex (_, [ i' ], _) -> Some [ i' ]
+            | _ -> None)
+    | _ -> None
+
+let private guardSubscripts (arr: TypedExpr) (idxs: TypedExpr list) : TypedExpr list =
+    match groupReadSubscripts arr idxs with
+    | Some guarded -> guarded
+    | None -> guardSubscriptsPlain arr idxs
 
 /// The same guard on an argument meeting a `Nat<I>` PARAMETER of a direct
 /// call, when it is not proven (the call judgment coerces a CLOSED plain
@@ -639,6 +930,120 @@ let private noteDataKernelParams (subst: Subst) (info: TypedApplyInfo) : unit =
         | _ -> ()
     | _ -> ()
 
+/// The EDGES of an integer EnumIdx value (D2): it is a key represented as its
+/// position. On the way IN, a literal typed `R` is folded to its key's
+/// position (an unknown key is BL4003 at type checking,
+/// TypeCheckValidate.collectUnknownEnumKeys). On the way OUT, anything that
+/// OBSERVES the value -- arithmetic, a comparison, a numeric cast, an integer
+/// parameter -- reads the key (posToKey). Subscripting a slot of `R` itself
+/// reads the position directly.
+let private intEnumEdges (e: TypedExpr) : TypedExpr =
+    let observe (x: TypedExpr) =
+        match intEnumKeysOfType x.Type with
+        | Some (_, keys) -> posToKey keys x
+        | None -> x
+    let isR (x: TypedExpr) = (intEnumKeysOfType x.Type).IsSome
+    let isRArray (x: TypedExpr) =
+        match IR.stripUnits x.Type with
+        | ArrayElem at -> (intEnumKeysOfType at.ElemType).IsSome
+        | _ -> false
+    let report (sp: Blade.Ast.Span) (msg: string) =
+        match subscriptGuardCtx.Value with
+        | Some ctx -> ctx.EnumKeyErrors.Add((sp, msg))
+        | None -> ()
+    match e.Kind with
+    | TExprLit (Blade.Ast.LitInt v) ->
+        (match intEnumKeysOfType e.Type with
+         | Some (_, keys) ->
+             (match keys |> List.tryFindIndex ((=) v) with
+              | Some ord -> { e with Kind = TExprLit (Blade.Ast.LitInt (int64 ord)) }
+              | None -> e)
+         | None -> e)
+    | TExprUnaryOp (Blade.Ast.OpNeg, { Kind = TExprLit (Blade.Ast.LitInt v) }) when isR e ->
+        (match intEnumKeysOfType e.Type with
+         | Some (_, keys) ->
+             (match keys |> List.tryFindIndex ((=) (-v)) with
+              | Some ord -> { e with Kind = TExprLit (Blade.Ast.LitInt (int64 ord)) }
+              | None -> e)
+         | None -> e)
+    | TExprBinOp (Blade.Ast.Elementwise, op, l, r) when isR l || isR r ->
+        (match op with
+         | Blade.Ast.OpAdd | Blade.Ast.OpSub | Blade.Ast.OpMul | Blade.Ast.OpDiv | Blade.Ast.OpMod ->
+             // Arithmetic whose RESULT was typed as the EnumIdx itself: the
+             // operand was a kernel parameter still open when the body was
+             // typed, and the kernel's result, its loop output and its binding
+             // all carry that type -- a key plus one read as a value of R.
+             if isR e then
+                 let tag = (intEnumKeysOfType e.Type).Value |> fst
+                 report e.Span
+                     ($"arithmetic on a value of the EnumIdx type '{tag}' computes on its KEY, an Int64, but this result "
+                      + $"was typed as '{tag}' itself: the operand is a kernel parameter typed before it met '{tag}'. "
+                      + "Spell the key where it is computed on -- `Int64(c) + 1` -- or write the kernel as "
+                      + "`method_for(range<R>) <@> lambda(r) -> ...` / `method_for(xs) <@> lambda(c) -> ...`, which types it as R.")
+                 e
+             else
+             { e with Kind = TExprBinOp (Blade.Ast.Elementwise, op, observe l, observe r) }
+         | Blade.Ast.OpEq | Blade.Ast.OpNeq | Blade.Ast.OpLt | Blade.Ast.OpLe | Blade.Ast.OpGt | Blade.Ast.OpGe ->
+             { e with Kind = TExprBinOp (Blade.Ast.Elementwise, op, observe l, observe r) }
+         | _ -> e)
+    | TExprUnaryOp (Blade.Ast.OpNeg, x) when isR x && isR e ->
+        report e.Span "negating a value of an EnumIdx type computes on its KEY: spell it `-Int64(c)`"
+        e
+    | TExprUnaryOp ((Blade.Ast.OpCast _ | Blade.Ast.OpNeg) as op, x) when isR x ->
+        let ty = if isR e then IRTScalar ETInt64 else e.Type
+        { e with Kind = TExprUnaryOp (op, observe x); Type = ty }
+    // A cast of a whole ARRAY of EnumIdx values, a fold over them with an
+    // arithmetic section, a display of them: each would read the positions
+    // that represent the keys.
+    | TExprUnaryOp (Blade.Ast.OpCast _, x) when isRArray x ->
+        report e.Span "a cast of an array of EnumIdx values converts each KEY: map it, `method_for(xs) <@> lambda(c) -> Int64(c)`"
+        e
+    | TExprProdSum args when args |> List.exists isRArray ->
+        report e.Span "prodsum over EnumIdx values computes on their KEYS: map them to Int64 first, `method_for(xs) <@> lambda(c) -> Int64(c)`"
+        e
+    | (TExprGram (l, r, _) | TExprMatmul (l, r)) when isRArray l || isRArray r ->
+        report e.Span "a contraction over EnumIdx values computes on their KEYS: map them to Int64 first, `method_for(xs) <@> lambda(c) -> Int64(c)`"
+        e
+    | TExprGramApply (l, r, x) when isRArray l || isRArray r || isRArray x ->
+        report e.Span "a contraction over EnumIdx values computes on their KEYS: map them to Int64 first, `method_for(xs) <@> lambda(c) -> Int64(c)`"
+        e
+    | TExprReduce (a, { Kind = TExprSection (Blade.Ast.OpAdd | Blade.Ast.OpSub | Blade.Ast.OpMul | Blade.Ast.OpDiv | Blade.Ast.OpMod | Blade.Ast.OpCaret) }, _)
+        when isRArray a ->
+        report e.Span "a fold over EnumIdx values computes on their KEYS: map them to Int64 first, `reduce(method_for(xs) <@> lambda(c) -> Int64(c), (+))`"
+        e
+    // A sort KEY that is a value of the EnumIdx: sorted by its key, which
+    // the key kernel reads (posToKey) -- positions follow declaration order.
+    | TExprSort (a, ({ Kind = TExprLambda li } as k)) when isR li.Body ->
+        let keys = (intEnumKeysOfType li.Body.Type).Value |> snd
+        let li' = { li with Body = posToKey keys li.Body; ReturnType = IRTScalar ETInt64 }
+        { e with Kind = TExprSort (a, { k with Kind = TExprLambda li' }) }
+    | TExprSort (_, k) when (match IR.stripUnits k.Type with
+                             | FuncElem (_, ret) -> (intEnumKeysOfType ret).IsSome
+                             | _ -> false) ->
+        report e.Span "a sort key that is a value of an EnumIdx sorts by its KEY: spell it, `lambda(c) -> Int64(c)`"
+        e
+    | (TExprDisplayEmit (_, _, d, _, _) | TExprDisplayJson (_, d) | TExprDisplayNum d) when isRArray d || isR d ->
+        report e.Span "displaying EnumIdx values: map them to their keys first, `method_for(xs) <@> lambda(c) -> Int64(c)`"
+        e
+    | TExprApp (f, args) ->
+        (match IR.stripUnits f.Type with
+         // A GENERIC parameter reached by an EnumIdx value only here (a named
+         // function used as a kernel: its eta wrapper's parameter was open at
+         // the call) -- the instance would compute on positions.
+         | FuncElem (ps, _) when List.zip (List.truncate args.Length ps) (List.truncate ps.Length args)
+                                 |> List.exists (fun (p, a) -> (IR.stripUnits p).IsIRTInfer && isR a) ->
+             report e.Span "a generic function applied to values of an EnumIdx (here as a kernel) would compute on the positions that represent their keys: spell the key, `lambda(c) -> f(Int64(c))`"
+             e
+         | FuncElem (ps, _) when args |> List.exists isR ->
+             let args' =
+                 args |> List.mapi (fun i a ->
+                     match List.tryItem i ps |> Option.map IR.stripUnits with
+                     | Some (IRTScalar (ETInt64 | ETInt32 | ETFloat64 | ETFloat32)) when isR a -> observe a
+                     | _ -> a)
+             { e with Kind = TExprApp (f, args') }
+         | _ -> e)
+    | _ -> e
+
 /// Zonk all types in a TypedExpr tree (bottom-up)
 let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
     match subscriptGuardCtx.Value, expr.Kind with
@@ -665,8 +1070,8 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         | TExprFillRandom e -> TExprFillRandom (z e)
         // The weights extent is a resolved static int, not a type -- only the
         // paired expression is zonked.
-        | TExprRandGen (k, key, pars, weights, address, dims) ->
-            TExprRandGen (k, z key, List.map z pars, weights |> Option.map (fun (w, n) -> (z w, n)), address |> Option.map (fun (s, o) -> (z s, z o)), dims)
+        | TExprRandGen (k, key, pars, weights, address, dims, inl) ->
+            TExprRandGen (k, z key, List.map z pars, weights |> Option.map (fun (w, n) -> (z w, n)), address |> Option.map (fun (s, o) -> (z s, z o)), dims, Option.map z inl)
         | TExprRank e -> TExprRank (z e)
         | TExprDotDot (lo, hi) -> TExprDotDot (z lo, z hi)
         | TExprReynolds (k, a) -> TExprReynolds (z k, a)
@@ -728,6 +1133,30 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
             TExprApp (f', guardIndexArgs f' (zs args))
         | TExprTupleIndex (t, i) -> TExprTupleIndex (z t, z i)
         | TExprPolyTail (p, drop) -> TExprPolyTail (z p, drop)
+        // A CURRIED read of a grouped value, `grouped(i)(j)`, is judged as the
+        // flat `grouped(i, j)` (G1): the row coordinate is checked against
+        // group i's length, which only the pair knows.
+        | TExprIndex (({ Kind = TExprIndex (b, [ i ], _) } as inner), [ j ], id)
+                when (match b.Type with
+                      | ArrayElem bat -> bat.IndexTypes.Length = 2 && bat.IndexTypes.[0].IxKind = IxKGroupOuter
+                                         && bat.IndexTypes.[1].IxKind = IxKGroupMember
+                      | _ -> false) && b.Kind.IsTExprVar ->
+            let b' = z b
+            match groupStorageRead b' [ z i; z j ] (zt expr.Type) with
+            | Some e -> e.Kind
+            | None ->
+                let arr' = z inner
+                TExprIndex (arr', guardSubscripts arr' [ z j ], id)
+        // A CELL read of a grouped value, `grouped(i, j)` (G1).
+        | TExprIndex (b, [ i; j ], id)
+                when (match b.Type with
+                      | ArrayElem bat -> bat.IndexTypes.Length = 2 && bat.IndexTypes.[0].IxKind = IxKGroupOuter
+                                         && bat.IndexTypes.[1].IxKind = IxKGroupMember
+                      | _ -> false) && b.Kind.IsTExprVar ->
+            let b' = z b
+            match groupStorageRead b' [ z i; z j ] (zt expr.Type) with
+            | Some e -> e.Kind
+            | None -> TExprIndex (b', guardSubscripts b' [ z i; z j ], id)
         | TExprIndex (arr, idxs, id) ->
             let arr' = z arr
             // Per-dimension coordinates of a product-framed compact group
@@ -804,7 +1233,7 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
     // its open operand gave it, because the guard (guardSubscripts) trusts no
     // type -- only the closed PROVEN list -- and retyping a value node without
     // its binding / kernel return / apply output would only make them disagree.
-    let zonked = { expr with Kind = kind; Type = zt expr.Type }
+    let zonked = intEnumEdges { expr with Kind = kind; Type = zt expr.Type }
     // An index cast `(e : I)` whose operand was still OPEN when it was typed
     // got the checked conversion (TypeCheckInfer.inferIndexCast); when the
     // operand turned out to be a PROVEN index of I itself (a same-tag

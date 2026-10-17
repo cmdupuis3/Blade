@@ -1,0 +1,11 @@
+// TEST: A generic function specialized at an array of EnumIdx keys that computes on them (rejects)
+// ERROR: BL4003 @ 9:22
+// ERROR-CONTAINS: would compute on positions
+// ============================================================================
+// `inc(codes)` specializes `T` at the R array itself; its `x + 1` would add
+// one to the positions that represent the keys. Refused after
+// monomorphization, where the type first meets the body.
+type R = EnumIdx<[100, 200, 300]>
+let codes: Array<R like Idx<3>> = [300, 100, 200]
+function inc(x: T) = x + 1
+let v = inc(codes)

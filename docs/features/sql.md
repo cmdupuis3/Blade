@@ -53,8 +53,10 @@ values are copied and no compaction happens here. Compaction is deferred to
   operations (§3).
 - Predicate composition in a single pass is supported
   (`mask(A, lambda(x) -> p(x) && q(x))`).
-- Rank-1 sources only, currently. Rank-k masks are reserved for the compound
-  composition round (v7 emits an error).
+- Rank-1 sources, and rank-k PLAIN DENSE sources: the mask keeps the whole
+  index space and `compound(A, m)` then compacts every dimension (the masked
+  provider read of §2a is built this way). A rank-k packed, ragged, compound
+  or sparse source is refused (BL7004).
 
 v7: `TypeCheck.fs inferMask`, IR `IRMask`, codegen `materializeMaskForm`.
 Tests: `sql-masks` ("Mask Basic", "SQL WHERE", "Mask Composition").
@@ -93,6 +95,64 @@ v7: `TypeCheck.fs compoundViewType`, IR `IRCompoundMask`, index kinds
 `IxKCompound`/`IxKCompoundDynamic`. (`IRCompoundProject` is the residual
 carrier, now reached only from a SparseIdx head.) Tests: `sql-masks/001`,
 `index-types/001–017`; the sparse counterparts are `index-types/171–184`.
+
+## 2a. Missing values at a provider boundary — `read_present` / `present`
+
+**The boundary rule: a missing value never crosses a provider boundary disguised
+as a number.** A stored variable whose cells the store marks missing is
+REFUSED by every default read (`alias.read`, `.stream`, `load_compound`,
+`read_window`) with BL8015, which names the variable, the store, how many
+cells are missing and the first one. One rule per variable, fixed at compile
+time from the store's metadata:
+
+| Provider | A cell is missing when it is |
+|----------|------------------------------|
+| every provider, floating variable | NaN or ±Inf — fill or written alike |
+| NetCDF | equal to `_FillValue` or a `missing_value`; outside `valid_min` / `valid_max` / `valid_range` (inclusive bounds); the default fill (`NC_FILL_FLOAT` / `NC_FILL_DOUBLE`) of a floating variable with no `_FillValue` — a never-written cell |
+| Zarr / Icechunk | nothing more: a FINITE `fill_value` is a value and reads as one |
+| CSV | nothing more: `nan` / `inf` / `-inf` cells parse (the table is Float64) but are refused |
+
+An INTEGER NetCDF variable is refused only on an explicit attribute:
+`NC_FILL_INT`, `NC_FILL_SHORT` and `NC_FILL_BYTE` are representable integers,
+so an unwritten integer cell is indistinguishable from a stored one.
+NaN that a program COMPUTES is untouched — the rule is about values entering
+the program, not arithmetic inside it. The rule holds in every lane: the
+compiled reader scans the buffer it filled, the interpreter scans the same
+cells with the same predicate, and a compile-time fold (`let static ... |>
+read`) fails the `let static` assertion (BL3999, the code of every
+compile-time fold failure) carrying the same sentence. A streamed read
+(`.stream`) checks each fiber as it is read, with no pre-scan at open, so its
+refusal can come from inside the consuming loop after earlier output — the
+message then names the fiber's site coordinates. A `load_compound` read checks
+only the cells its mask marks present. Writes keep the round trip honest: a
+provider write of a NaN or infinite cell is refused under the same code, since
+every reader of the store would refuse it.
+
+**The opt-in is the masked read** — the present cells, as a compound array
+(§2), with no sentinel or NaN ever exposed:
+
+```blade
+import csv as c
+let obs  = c.load("tests/fixtures/csv_files/ms_nan.csv")  // 2 x 3, one nan and one inf cell
+let vals = obs.vars.data |> c.read_present  // compound array of the 4 present cells
+let ok   = c.present(obs.vars.data)         // Array<Bool like the table's axes>: true = present
+let n    = extents(vals)                    // COUNT(*) of the present cells
+```
+
+`alias.read_present` and `alias.present` take the same operand as `read`
+(`store.vars.<name>`, a dense variable) in both spellings, `alias.f(view)` and
+`view |> alias.f`, and must be the whole value of a module-level binding, like
+`compound`. They are built from §1 and §2: ONE raw read of the store, exempt
+from the rule and never visible to the program (not printed, not selectable
+with `--print`), then `mask(raw, present)` with the variable's rule spelled as
+the mask predicate, then `compound(raw, mask)` — so `read_present` is exactly
+`compound(raw, present)`, and the mask composes with companion columns like
+any other mask. v7: `src/ProviderDesugar.fs` (the masked read),
+`ProviderRegistry.MissingRule` (the rule and its two predicates). Tests:
+`blade test netcdf|zarr|csv|icechunk` (refusals per provider, the finite-fill
+case, the masked read) and the interpreter differential's provider block
+(`blade test interp <category>`), which pins the masked read's values and the
+refusal's sentence in both lanes.
 
 ## 2b. `sparse(values, keys)` — bundle values with an explicit key set
 
@@ -321,7 +381,11 @@ recovers the original value at row `i` by ordinary gather. That is what lets a
 per-group aggregation be re-expressed as a dense gather through `bucket`, the
 shape reverse-mode AD needs through `group_by`
 (`docs/plans/plan-ad-combinators.md` §2.17a). A surface accessor for `rank` does not
-exist yet.
+exist yet. The rule that makes this compose: a plain integer subscript of a grouped
+value is a group POSITION (what `group_bucket` returns), checked against the group count,
+while a value of the grouping's key type (`Nat<R>` over an `EnumIdx R` grouping) is a KEY,
+mapped to its position (the D2 rule); the row coordinate is checked against that group's
+own length (BL8006 at run time, BL4003 for a literal past a static group count).
 
 Under `ad.grad` / `ad.jvp` you no longer write that gather yourself: a fully
 reduced per-group loss over a group-linear peel kernel (`reduce(r, (+))`,

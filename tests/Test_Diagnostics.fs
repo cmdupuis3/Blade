@@ -310,6 +310,48 @@ let runDiagnosticsCoreTests () : BlockResult =
              && not (prefix.Contains "panic("))
             (if cut < 0 then "no `namespace blade_rt {` in blade_runtime.hpp"
              else "the namespaces codegen treats as panic-free must stay above blade_rt and panic-free (CodeGen.panicFreeNamespaces)")
+        // The headers' OWN transcendentals (lgamma, digamma, the rand
+        // samplers) go through the no-fold barrier like every user-visible
+        // intrinsic: a std::log/exp/cos/pow inlined with a literal operand is
+        // folded by g++ through MPFR, while the interpreter calls the run-time
+        // libm (§2.4). Scanned with `//` comments stripped; blade_runtime.hpp
+        // from `namespace blade_rt {` on (above it sit the barrier itself and
+        // the MSVC forwarding fallback, which name std:: by design).
+        let codeLines (text: string) =
+            text.Split('\n') |> Array.map (fun l -> match l.IndexOf "//" with -1 -> l | i -> l.Substring(0, i))
+        let foldable = System.Text.RegularExpressions.Regex @"std::(log|log10|exp|sin|cos|tan|sinh|cosh|tanh|asin|acos|atan|atan2|pow)\s*\("
+        let unbarriered =
+            [ "rand_runtime.hpp", File.ReadAllText(Path.Combine(root, "rand_runtime.hpp"))
+              "blade_runtime.hpp (blade_rt)", (if cut < 0 then "" else rt.Substring cut) ]
+            |> List.collect (fun (file, text) ->
+                codeLines text |> Array.indexed
+                |> Array.filter (fun (_, l) -> foldable.IsMatch l)
+                |> Array.map (fun (i, l) -> $"{file}:+{i + 1}: {l.Trim()}") |> List.ofArray)
+        check "runtime-header transcendentals call the blade_libm_* barrier, not foldable std:: builtins"
+            unbarriered.IsEmpty (String.concat "; " unbarriered)
+        // The DLL-side failure messages are formatted BEFORE the host panic's
+        // once-flag picks the exiting thread, so a shared function-static
+        // buffer let two threads failing together garble the winner's line:
+        // every such buffer is thread_local.
+        let sharedMsgBuffers =
+            [ "blade_dll_panic.hpp"; "blade_linalg_cuda.hpp" ]
+            |> List.collect (fun f ->
+                codeLines (File.ReadAllText(Path.Combine(root, f))) |> Array.indexed
+                |> Array.filter (fun (_, l) ->
+                    System.Text.RegularExpressions.Regex.IsMatch(l, @"\bstatic\s+char\s+\w+\s*\["))
+                |> Array.map (fun (i, l) -> $"{f}:{i + 1}: {l.Trim()}") |> List.ofArray)
+        check "DLL failure-message buffers are thread_local (no shared static char buffer)"
+            sharedMsgBuffers.IsEmpty (String.concat "; " sharedMsgBuffers)
+
+    // -- integer overflow wraps on every g++ host pass (§2.4) ----------------
+    // The g++ lane carries -fwrapv (optFlags); the CUDA builds' g++ host
+    // passes (Linux nvcc -Xcompiler, the shared DLL builds) did not, so signed
+    // overflow there was UB. MSVC hosts have no such flag (documented in §2.4).
+    check "CUDA g++ host passes carry -fwrapv (shared DLL, whole-program .cu)"
+        ((Blade.Build.cudaSharedHostFlags false).Contains "-fwrapv"
+         && (Blade.Build.cudaProgramHostFlags false).Contains "-fwrapv"
+         && (Blade.Build.optFlags ()).Contains "-fwrapv")
+        $"{Blade.Build.cudaSharedHostFlags false} | {Blade.Build.cudaProgramHostFlags false}"
 
     // -- `blade run` names an OS-level crash (Build.describeCrashExit) -------
     // A panic exits 1 with its own error line and is NOT a crash; an ordinary

@@ -1,0 +1,37 @@
+// TEST: Every value of an integer EnumIdx is a key
+// ============================================================================
+// The D2 ruling, completed: a value of `R = EnumIdx<[100, 200, 300]>` is one
+// of R's KEYS, wherever it comes from -- `range<R>` iterates 100, 200, 300.
+// Internally it is represented as its POSITION, so subscripting an array
+// over R with it reads that position directly (no lookup, no guard); the
+// key is produced where the value is OBSERVED: printing, arithmetic, a
+// comparison, a numeric cast. Literals and data cells of R enter as keys.
+// ============================================================================
+type R = EnumIdx<[100, 200, 300]>
+let w: Array<Float64 like R> = [1.0, 2.0, 3.0]
+let ks = method_for(range<R>) <@> lambda(r) -> r |> compute
+// EXPECT: ks = [100, 200, 300]
+let t = method_for(range<R>) <@> lambda(r) -> w(r) |> compute
+// EXPECT: t = [1.0, 2.0, 3.0]
+let codes: Array<R like Idx<4>> = [300, 100, 200, 300]
+// EXPECT: codes = [300, 100, 200, 300]
+function get(r: Nat<R>) -> Float64 = w(r)
+let gk = get(codes(0))
+// EXPECT: gk = 3.0
+let g2 = get(200)
+// EXPECT: g2 = 2.0
+let kk = 100 + 200
+let g3 = get(kk)
+// EXPECT: g3 = 3.0
+let c0 = codes(0)
+// EXPECT: c0 = 300
+let plus = codes(0) + 1
+// EXPECT: plus = 301
+let big = method_for(range<R>) <@> lambda(r) -> r > 150 |> compute
+// EXPECT: big = [false, true, true]
+let shifted = method_for(range<R>) <@> lambda(r) -> r + 1 |> compute
+// EXPECT: shifted = [101, 201, 301]
+let f = Float64(codes(1))
+// EXPECT: f = 100.0
+let same = codes(0) == codes(3)
+// EXPECT: same = true

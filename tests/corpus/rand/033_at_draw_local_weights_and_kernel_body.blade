@@ -1,0 +1,26 @@
+// TEST: Rand Indexed: a body-local categorical weights array and a draw inside a kernel
+// ============================================================================
+// D13 (see 031): the inline form binds the draw's operands in a block and
+// captures them into its map's kernel. Two more positions: the categorical
+// weights are a BODY-LOCAL array (captured from the function's own block,
+// not a module binding), and the draw sits inside another kernel's body (the
+// block nests a map inside that kernel). Both equal the top-level fill.
+// ============================================================================
+import rand as r
+
+function cat_local(k: Int64, o: Int64) = {
+    let wl = [0.1, 0.0, 0.4, 0.5]
+    r.categorical_at(k, 3, o, wl, 3)
+}
+let wt = [0.1, 0.0, 0.4, 0.5]
+let c_fill = r.categorical_at(99, 3, 5, wt, 3)
+let c_local = cat_local(99, 5)
+let dc = reduce((c_local - c_fill) * (c_local - c_fill), (+))
+// EXPECT: dc = 0
+
+// Row sums of three 4-sample chunks, each drawn inside the map's kernel.
+let sums = method_for(0..3) <@> lambda(i) -> reduce(r.uniform_at(12345, 7, i * 4, 4), (+)) |> compute
+let whole = r.uniform_at(12345, 7, 0, [3, 4])
+let ref_sums = reduce(whole, (+))
+let ds = reduce((sums - ref_sums) * (sums - ref_sums), (+))
+// EXPECT: ds = 0.0

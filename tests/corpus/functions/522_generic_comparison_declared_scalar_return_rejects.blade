@@ -1,0 +1,7 @@
+// TEST: A declared scalar return refuses an array comparison instance (rejects)
+// ERROR: BL3001
+// ============================================================================
+// `-> Bool` says the comparison is a scalar, so `T` is one; an array call
+// is refused rather than truncated to one Bool (the D1 ruling).
+function gt0(a: T^0, b: T^0) -> Bool = a > b
+let g = gt0([1, 5, 3], [2, 4, 3])

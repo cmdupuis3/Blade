@@ -34,25 +34,23 @@ let private typeDeclNames (td: TypeDecl) : string list =
     | TyDeclAlias (n, _, _) | TyDeclStruct (n, _, _, _, _) | TyDeclSum (n, _, _) -> [ n ]
     | TyDeclMutualGroup (members, _) -> members |> List.map fst
 
-/// BL2009 across MODULES, for the names that are not module-qualified yet.
+/// BL2009 for a variant constructor two sum types of ONE module declare.
 ///
-/// Values and functions of a non-main module are namespaced at lowering
-/// (Lowering.qualifyModuleNames), but a TYPE's identity is still its bare
-/// name: `IRTNamed "P"`, an index type's `IRefNamed "Cell"`. So two modules
-/// each declaring `struct P` emitted two global C++ `struct P` (a g++
-/// redefinition) and the call judgment could not tell them apart -- `A.fx(q)`
-/// accepted B's `P` -- and a main-module `type Cell = Idx<5>` became the SAME
-/// nominal index type as an imported module's `Cell = Idx<3>`, so a
-/// provenance check that exists to keep them apart passed. Until type
-/// identity is keyed by (module, name), one program may declare a type name
-/// once. Variant constructors are global C++ names (enum members, ctor
-/// functions) and their tag table is keyed by bare name too, so they get the
-/// same rule -- within a module as well, since two sum types there sharing a
-/// constructor collide identically.
+/// Type identity is module-qualified (D11, Types.TypeOrigins): module A's
+/// `struct P` is `A.P`, B's is `B.P`, main's is `P`, so two modules may each
+/// declare a type or constructor of one name, and an unqualified use that two
+/// imports both answer is refused at the USE (BL2010). Within one module a
+/// constructor still names one sum type: its tag table and its C++ name
+/// (enum member, constructor function) are keyed by the module's identity.
 let private crossModuleDeclErrors (env: TypeEnv) (program: Program) : CompileError list =
     let errors = ResizeArray<CompileError>()
-    let seenTypes = System.Collections.Generic.Dictionary<string, string * Span>()
     let seenCtors = System.Collections.Generic.Dictionary<string, string * Span>()
+    // ...and a name that is NOT module-qualified in two modules: a
+    // `__`-prefixed (synthetic) name keeps its spelling in every module
+    // (TypeOrigins.identityOf), and the main module's names are bare, so two
+    // such declarations would be one identity -- still refused.
+    let seenUnqualified = System.Collections.Generic.Dictionary<string, string * Span>()
+    let moduleCount = program.Modules.Length
     // The error-location side channel still holds the LAST expression the
     // checker visited (in whichever module ran last); cleared per refusal so
     // each one points at its own declaration.
@@ -64,25 +62,31 @@ let private crossModuleDeclErrors (env: TypeEnv) (program: Program) : CompileErr
         match first.File, here.File with
         | Some f1, Some f2 when f1 <> f2 -> $"{f1}, {where}"
         | _ -> where
-    for m in program.Modules do
+    for (mi, m) in List.indexed program.Modules do
         let modName = m.Name |> String.concat "."
+        let isMain = Blade.Types.TypeOrigins.isMainModule mi moduleCount || modName = ""
+        let unqualified (kind: string) (n: string) (span: Span) =
+            if isMain || n.StartsWith "__" then
+                match seenUnqualified.TryGetValue (kind + "\u0000" + n) with
+                | true, (firstMod, firstSpan) when firstMod <> modName ->
+                    refuse span (DuplicateDecl (kind, n, siteOf firstSpan span, Some firstMod))
+                | true, _ -> ()
+                | _ -> seenUnqualified.[kind + "\u0000" + n] <- (modName, span)
         for d in m.Decls do
             match d.Value with
             | DeclType td ->
-                for n in typeDeclNames td do
-                    match seenTypes.TryGetValue n with
-                    | true, (firstMod, firstSpan) when firstMod <> modName ->
-                        refuse d.Span (DuplicateDecl ("type", n, siteOf firstSpan d.Span, Some firstMod))
-                    | true, _ -> ()   // same module: checkModule's own BL2009
-                    | _ -> seenTypes.[n] <- (modName, d.Span)
+                for n in typeDeclNames td do unqualified "type" n d.Span
+                match td with
+                | TyDeclSum (_, _, variants) -> for v in variants do unqualified "constructor" v.Name d.Span
+                | _ -> ()
                 match td with
                 | TyDeclSum (_, _, variants) ->
                     for v in variants do
-                        match seenCtors.TryGetValue v.Name with
-                        | true, (firstMod, firstSpan) ->
-                            let crossModule = if firstMod <> modName then Some firstMod else None
-                            refuse d.Span (DuplicateDecl ("constructor", v.Name, siteOf firstSpan d.Span, crossModule))
-                        | _ -> seenCtors.[v.Name] <- (modName, d.Span)
+                        let key = modName + "\u0000" + v.Name
+                        match seenCtors.TryGetValue key with
+                        | true, (_, firstSpan) ->
+                            refuse d.Span (DuplicateDecl ("constructor", v.Name, siteOf firstSpan d.Span, None))
+                        | _ -> seenCtors.[key] <- (modName, d.Span)
                 | _ -> ()
             | _ -> ()
     List.ofSeq errors
@@ -514,20 +518,27 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     // The zonk walk also retypes index POSITIONS and guards unproven
     // subscripts into named index types (Zonk.fs, SUBSCRIPT POSITIONS AND
     // GUARDS); its context carries the builder for guard bindings.
+    let enumKeyErrorSink = System.Collections.Generic.List<Span * string>()
     let zonked =
         let saved = subscriptGuardCtx.Value
         subscriptGuardCtx.Value <-
             Some { FreshId = (fun () -> currentEnv.Builder.FreshId())
                    Positions = System.Collections.Generic.HashSet<IRId>()
                    DataVars = System.Collections.Generic.HashSet<IRId>()
+                   EnumKeyErrors = enumKeyErrorSink
                    RangeFedParams = rangeFedLambdaParams typedModule
                    Retargets = currentEnv.ArrowRetargets
                    Subscripts = currentEnv.ArrowSubscripts
+                   GroupOuter = fun id ->
+                       match currentEnv.GroupOuters.TryGetValue id with
+                       | true, gk -> Some gk
+                       | _ -> None
                    EnumLabels = fun tag ->
                        match Map.tryFind tag currentEnv.TypeDefs with
                        | Some (TDIEnumIdx (_, _, values, _)) when EnumValue.allString values ->
                            Some (values |> List.choose (function EVString s -> Some s | _ -> None))
                        | _ -> None
+                   EnumKeys = fun tag -> intEnumKeysOfTag currentEnv tag
                    IndexExtent = fun tag ->
                        match Map.tryFind tag currentEnv.TypeDefs with
                        | Some (TDIIndexType (_, idx, _)) when idx.IxKind = IxKPlain && idx.Symmetry = SymNone ->
@@ -597,6 +608,23 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     // Misplaced provider writes: structural, inference-independent (an
     // unresolved receiver simply fails the IRTNamed match), so unlike the rank
     // sweep it runs even when the module already has errors.
+    // A literal of an integer EnumIdx that is none of its keys
+    // (collectUnknownEnumKeys): judged on the UNZONKED tree.
+    let enumKeyErrors =
+        if List.isEmpty errors && List.isEmpty staticAssertErrors then
+            (typedModule.Decls |> List.collect declExprs
+                               |> List.collect (collectUnknownEnumKeys currentEnv))
+            @ (enumKeyErrorSink |> Seq.map (fun (sp, msg) ->
+                   ({ Error = EnumKeyObserved msg; Span = sp; Context = []; Code = None } : CompileError))
+               |> Seq.distinctBy (fun e -> e.Span) |> List.ofSeq)
+        else []
+    // A `zero` at a sum type (collectValuelessZeros): judged on the zonked
+    // types, with the same cascade suppression as the subscript sweep.
+    let zeroErrors =
+        if List.isEmpty errors && List.isEmpty staticAssertErrors then
+            zonked.Decls |> List.collect declExprs
+                         |> List.collect (collectValuelessZeros currentEnv)
+        else []
     let writeErrors =
         zonked.Decls |> List.collect declWriteRoots
                      |> List.collect (fun (nested, e) -> collectMisplacedProviderWrites currentEnv.Subst nested e)
@@ -611,24 +639,47 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     let mutCaptureErrors =
         zonked.Decls |> List.collect declMutCaptureRoots
                      |> List.collect (fun (pos, e) -> collectMutCaptureEscapes currentEnv.Subst pos e)
-    (zonked, currentEnv, staticAssertErrors @ List.rev errors @ rankErrors @ treeArgErrors @ subscriptErrors @ mixErrors @ writeErrors @ groupKeysErrors @ mutCaptureErrors)
+    (zonked, currentEnv, staticAssertErrors @ List.rev errors @ rankErrors @ treeArgErrors @ subscriptErrors @ mixErrors @ enumKeyErrors @ zeroErrors @ writeErrors @ groupKeysErrors @ mutCaptureErrors)
 
 let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError list * string list =
+    resetInferSideTables ()
     let env = emptyEnv ()
     let mutable modules = []
     let mutable allErrors = []
     let mutable moduleExports = Map.empty<string, TypeModuleExport>
-    for modul in program.Modules do
-        let envWithExports = { env with ModuleExports = moduleExports }
+    for (i, modul) in List.indexed program.Modules do
+        let moduleName = modul.Name |> String.concat "."
+        // D11: a non-main module's declarations get the identity
+        // `<module>.<name>` (Types.TypeOrigins); the main module -- the
+        // entry, which every program-assembling path puts LAST (the rule
+        // Lowering.qualifyModuleNames uses for values) -- keeps bare names.
+        let qualifier =
+            if Blade.Types.TypeOrigins.isMainModule i program.Modules.Length || moduleName = "" then None
+            else Some moduleName
+        let envWithExports = { env with ModuleExports = moduleExports; ModuleQualifier = qualifier }
         let (tm, finalEnv, errs) = checkModule envWithExports modul
         modules <- tm :: modules
         allErrors <- allErrors @ errs
-        // Build export from this module's checked environment
-        let moduleName = modul.Name |> String.concat "."
+        // Build export from this module's checked environment. TYPES: every
+        // qualified identity the module's tables hold (its own and,
+        // transitively, the ones its API mentions) under its identity; the
+        // module's own names as TypeNames / CtorNames for the importer's
+        // scope keys; other undotted entries (provider structs) as before.
+        // Provider axes (`store.index.d`) stay out: dotted but no identity.
+        let isScopeKey (k: string) =
+            finalEnv.LocalTypeNames.ContainsKey k || finalEnv.ImportedTypeNames.ContainsKey k
+        let isCtorScopeKey (k: string) =
+            finalEnv.LocalCtorNames.ContainsKey k || finalEnv.ImportedCtorNames.ContainsKey k
         let export : TypeModuleExport = {
             Variables = finalEnv.Variables |> Map.filter (fun k _ -> not (k.Contains(".")))
-            TypeDefs = finalEnv.TypeDefs |> Map.filter (fun k _ -> not (k.Contains(".")))
-            VariantTags = finalEnv.VariantTags
+            TypeDefs =
+                finalEnv.TypeDefs |> Map.filter (fun k _ ->
+                    Blade.Types.TypeOrigins.isQualified k || (not (k.Contains(".")) && not (isScopeKey k)))
+            VariantTags =
+                finalEnv.VariantTags |> Map.filter (fun k _ ->
+                    Blade.Types.TypeOrigins.isQualified k || (not (k.Contains(".")) && not (isCtorScopeKey k)))
+            TypeNames = finalEnv.LocalTypeNames
+            CtorNames = finalEnv.LocalCtorNames
             Units = finalEnv.Units
             StaticFunctions = finalEnv.StaticFunctions |> Map.filter (fun k _ -> not (k.Contains(".")))
             StaticValues = finalEnv.StaticValues |> Map.filter (fun k _ -> not (k.Contains(".")))

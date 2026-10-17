@@ -69,6 +69,11 @@
          decompositions diverge on purpose (see section 6, MPI row, of
          docs/plans/plan-simplex-blocked-compute.md) and agree on the
          identities, which `blade test llvm goldens` pins module vs module. -->
+    <!-- OrbRank.fs (the OrbIdx bijection layer, documented at its old slot below)
+         precedes SimplexBlocksCore: its binomOrZero is the one exact binomial
+         every pool sizer routes through (P3-15). Both are dependency-free, except that
+         binomOrZero raises a Diagnostics BL4003 past int64 (F2). -->
+    <Compile Include="src/OrbRank.fs" />
     <Compile Include="src/SimplexBlocksCore.fs" />
     <Compile Include="src/Lexer.fs" />
     <!-- The parser, five layers in dependency order. ParserCore.fs holds the
@@ -102,10 +107,10 @@
          canonicalizer, the §2 segment-peeled traversal stream, and the §3
          arithmetic rank/unrank pair. Deliberately dependency-free — FSharp.Core
          only, no Blade module is opened — so proofs/ scripts and external
-         checkers can `#load` the file standalone. Sits here because IR.fs is
-         its eventual consumer (the checked sibling of `binomI64`, IR.fs:2438),
-         and nothing it needs compiles later. -->
-    <Compile Include="src/OrbRank.fs" />
+         checkers can `#load` the file standalone. Its <Compile> entry now sits
+         ahead of SimplexBlocksCore.fs (see there): binomOrZero is the one exact
+         binomial behind SimplexBlocksCore, IRStorage.binomI64, the providers and
+         the CodeGen pool sizers. -->
     <!-- TreeIdx storage/indexing bijections (docs/plans/plan-graphs-trees.md
          P1, pure-function layer): degree-sequence validation, the derived
          preorder tables (sizes / leaf counts / leaf offsets / parent / depth /
@@ -591,6 +596,10 @@
          made in MathElaborate, which runs inside typecheck. -->
     <Compile Include="tests/LapackTests.fs" />
     <Compile Include="tests/AllocTests.fs" />
+    <!-- The provider boundary rule (BL8015) and the masked read: both-lanes runner,
+         refusal/value judges and the isMissing/missingCpp parity probe, shared by
+         the netcdf/zarr/csv/icechunk blocks below. -->
+    <Compile Include="tests/ProviderBoundaryTests.fs" />
     <Compile Include="tests/NetcdfTests.fs" />
     <Compile Include="tests/ZarrTests.fs" />
     <Compile Include="tests/CsvTests.fs" />

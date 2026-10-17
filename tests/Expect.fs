@@ -116,6 +116,12 @@ type ExpectedValue =
     | ExpectedArray1DComplex of string * (Num * Num) list
     | ExpectedString of string * string
     | ExpectedArray1DString of string * string list
+    /// A TUPLE or STRUCT print, `(1, 2.0, true)` / `P { a = 1.0, b = 2 }`,
+    /// compared as exact text (whitespace-trimmed): the aggregate's literal
+    /// spelling already fixes every component's form. A two-number tuple
+    /// `(1, 2.0)` reads as a complex pin first, which checks the same values
+    /// and spellings.
+    | ExpectedAggregate of string * string
 
 /// Split the BODY of a bracketed list at the commas that sit at nesting
 /// depth zero, so `[0, 1], [20, 21]` yields the two row texts rather than
@@ -408,6 +414,10 @@ let private tryParseExpectPin (payload: string) : ExpectedValue option =
                 // (tryParseNestedBoolPin). Without this arm the pin was
                 // reported malformed although the program printed it exactly.
                 | None -> tryParseNestedBoolPin value |> Option.map (fun bs -> ExpectedArray1DBool (name, bs))
+        elif System.Text.RegularExpressions.Regex.IsMatch(value, @"^\[[A-Za-z_][A-Za-z0-9_]* \{ .* \}\]$") then
+            // An array of structs, each element spelled like its literal:
+            // `[P { a = 1.0 }, P { a = 2.0 }]` -- exact text, like a struct pin.
+            Some (ExpectedAggregate (name, value))
         elif value.StartsWith("[(") then
             // Complex array: [(r1,i1), (r2,i2), ...]
             match parseComplexArray value with
@@ -435,7 +445,14 @@ let private tryParseExpectPin (payload: string) : ExpectedValue option =
             // Complex scalar: (re, im)
             match parseComplexPair value with
             | Some (re, im) -> Some (ExpectedComplex (name, re, im))
-            | None -> None
+            | None ->
+                // A tuple: `(a, b, ...)` with at least two top-level parts.
+                if value.EndsWith(")") && (splitTopLevelCommas (value.Substring(1, value.Length - 2))).Length >= 2
+                then Some (ExpectedAggregate (name, value))
+                else None
+        elif System.Text.RegularExpressions.Regex.IsMatch(value, @"^[A-Za-z_][A-Za-z0-9_]* \{ .* \}$") then
+            // A struct: `P { a = 1.0, b = 2 }`.
+            Some (ExpectedAggregate (name, value))
         elif value.StartsWith("\"") then
             // Scalar string: "..."
             match tryParseQuotedString value with
@@ -456,6 +473,9 @@ let private tryParseExpectPin (payload: string) : ExpectedValue option =
 /// Format: // EXPECT: varname = [1.0, 2.0, 3.0]
 /// Format: // EXPECT: varname = [[1.0, 2.0], [3.0, 4.0]]
 /// Format: // EXPECT: varname = (1.0, 2.0)                        (Complex scalar)
+/// Format: // EXPECT: varname = (1, 2.0, true)                    (Tuple -- exact text; a 2-number one reads as complex)
+/// Format: // EXPECT: varname = P { a = 1.0, b = 2 }              (Struct -- exact text)
+/// Format: // EXPECT: varname = [P { a = 1.0 }, P { a = 2.0 }]  (Array of structs -- exact text)
 /// Format: // EXPECT: varname = [(1.0, 0.0), (0.0, 1.0)]          (Complex array)
 /// Format: // EXPECT: varname = "hello"                           (String scalar — quotes required)
 /// Format: // EXPECT: varname = ["a", "b", "c"]                   (String array — quotes around each element)
@@ -736,7 +756,8 @@ let private pinName (e: ExpectedValue) : string =
     match e with
     | ExpectedScalar (n, _) | ExpectedBool (n, _) | ExpectedArray1D (n, _)
     | ExpectedArray1DBool (n, _) | ExpectedArray2D (n, _) | ExpectedComplex (n, _, _)
-    | ExpectedArray1DComplex (n, _) | ExpectedString (n, _) | ExpectedArray1DString (n, _) -> n
+    | ExpectedArray1DComplex (n, _) | ExpectedString (n, _) | ExpectedArray1DString (n, _)
+    | ExpectedAggregate (n, _) -> n
 
 /// Check if expected values match actual output
 let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result<unit, string list> =
@@ -972,6 +993,13 @@ let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result
                     | Some actualStr ->
                         if actualStr.Trim() = expected then None
                         else Some ($"{name}: expected \"{expected}\", got \"{(actualStr.Trim())}\"")
+                    | None -> Some ($"{name}: not found in output")
+
+                | ExpectedAggregate (name, expected) ->
+                    match actual.TryFind name with
+                    | Some actualStr ->
+                        if actualStr.Trim() = expected then None
+                        else Some ($"{name}: expected {expected}, got {(actualStr.Trim())}")
                     | None -> Some ($"{name}: not found in output")
 
                 | ExpectedArray1DString (name, expectedVals) ->

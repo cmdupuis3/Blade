@@ -1,0 +1,23 @@
+// TEST: Memfree Inline Sparse Gather In Every Scalar Position
+// ============================================================================
+// memfree/024 pins the reduce / prodsum / extents consumers. Every OTHER
+// scalar-valued consumer of an inline partial sparse read allocated a gather
+// per access and freed none (N7): `contains` (which spells its operand in the
+// loop bound and again in the body), a subscript of the gather, a call
+// argument, and a top-level expression. Each now binds the gather once at its
+// consumer and frees it before returning; the values are what the gathers
+// hold, in key insertion order.
+// ============================================================================
+let static K = [(2, 1), (0, 3), (1, 0), (0, 5)]
+type E = Idx<4>
+let flat: Array<Float64 like E> = [1.0, 2.0, 3.0, 4.0]
+let F = sparse(flat, K)
+function head1(v: T^1) -> T^0 = v(0)
+let has2 = method_for(0..3) <@> lambda(i) -> contains(F((i, _)), 2.0) |> compute
+let first = method_for(0..3) <@> lambda(i) -> F((i, _))(0) |> compute
+let viaCall = method_for(0..3) <@> lambda(i) -> head1(F((i, _))) * 10.0 |> compute
+let top = contains(F((2, _)), 1.0)
+// EXPECT: has2 = [true, false, false]
+// EXPECT: first = [2.0, 3.0, 1.0]
+// EXPECT: viaCall = [20.0, 30.0, 10.0]
+// EXPECT: top = true

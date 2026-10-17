@@ -1,0 +1,11 @@
+// TEST: Math eig: an Inf operand panics BL8008 (aborts)
+// The twin of the NaN probe: an infinite entry makes every norm infinite, and
+// a relative convergence test alone passes on it (inf <= tol * inf). The
+// check therefore also requires the operand's norm to be finite, so an Inf
+// operand is refused with the same BL8008 instead of a "result" built from it.
+import math as m
+let big = 1.0 / 0.0
+let S: Array<Float64 like Idx<3>, Idx<3>> = [[2.0, 1.0, 0.0], [1.0, big, 1.0], [0.0, 1.0, 2.0]]
+let (RE, IM) = m.eig(S)
+// ABORT: error[BL8008]
+// ABORT: did not converge

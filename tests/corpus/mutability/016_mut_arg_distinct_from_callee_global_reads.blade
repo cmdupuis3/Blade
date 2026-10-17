@@ -1,0 +1,22 @@
+// TEST: a mut argument distinct from the globals the callee reads is accepted
+// The N16 refusal (mutability-errors/011) is by binder id: `bump` reads the
+// global `x` by name, and passing a DIFFERENT array `y` to its `mut` parameter
+// has no alias. A parameter merely named like a global is not the global.
+let mut x = [1.0, 2.0]
+let mut y = [10.0, 20.0]
+function bump(a: mut Array<Float64 like Idx<2>>) -> Float64 = {
+    a(0) = 5.0
+    x(0) + a(0)
+}
+function own(x: mut Array<Float64 like Idx<2>>) -> Float64 = {
+    x(1) = 7.0
+    x(1)
+}
+let r = bump(y)
+let s = own(y)
+let y0 = y(0)
+let y1 = y(1)
+// EXPECT: r = 6.0
+// EXPECT: s = 7.0
+// EXPECT: y0 = 5.0
+// EXPECT: y1 = 7.0

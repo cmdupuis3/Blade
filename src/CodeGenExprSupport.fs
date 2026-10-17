@@ -148,6 +148,21 @@ let binOpToCpp = function
 /// (TypeCheck rejects complex ones), so no complex coercion is needed. In the
 /// CUDA device dialect the names go UNQUALIFIED, matching renderUnaryOpTyped's
 /// real-operand rule -- CUDA's device overloads live in the global namespace.
+/// ONE ADDRESSED SAMPLE (IRRandAt, D13): `blade_rand::<kind>_one(key,
+/// stream, index[, weights pool, k], pars..)` -- the fill's own transform at
+/// one address (rand_runtime.hpp). `args` are rendered: key, stream, index,
+/// then the Float64 parameters.
+let renderRandAt (kind: string) (args: string list) (weights: (string * int) option) : string =
+    match args with
+    | key :: stream :: index :: pars ->
+        let w =
+            match weights with
+            | Some (wStr, k) -> $", nested_array_utilities::pool_base(({wStr}).data), (size_t){k}LL"
+            | None -> ""
+        let ps = pars |> List.map (fun p -> $", (double)({p})") |> String.concat ""
+        $"blade_rand::{kind}_one((int64_t)({key}), (int64_t)({stream}), (int64_t)({index}){w}{ps})"
+    | _ -> "/* malformed IRRandAt */ 0"
+
 let renderMath2 (name: string) (lStr: string) (rStr: string) : string =
     // Host: blade_libm:: -- the run-time libm, never a compile-time fold, and
     // its overloads round a Float32 pair once to float (the arithmetic
@@ -352,6 +367,18 @@ let renderContractBinOp
     // the guard reads only on its cold path (blade_runtime.hpp idiv/imod/ipow).
     let at = panicSpanArgs loc.Span
     match op with
+    // Device integer `^`: EXACT and wrapping like the host's (section 2.4),
+    // never the double `pow` it used to become. Only a literal nonnegative
+    // exponent reaches here -- the negative-exponent panic cannot be raised
+    // on the device, so a variable exponent is refused before rendering
+    // (CodeGenCuda.cudaScalarNodeOk). The helper is emitted into the .cu
+    // (getCudaFileContent) whenever a kernel names it.
+    | IRCaret when inCudaDeviceDialect () ->
+        match scalarElemOf (inferTy l), scalarElemOf (inferTy r), intLiteralOf r with
+        | Some le, Some re, Some n when isInt le && isInt re && n >= 0L ->
+            let w = if le = ETInt64 || re = ETInt64 then "64" else "32"
+            Some $"blade_dev_ipow{w}({lStr}, {rStr})"
+        | _ -> None
     | IRDiv | IRMod | IRCaret when not (inCudaDeviceDialect ()) ->
         match scalarElemOf (inferTy l), scalarElemOf (inferTy r) with
         | Some le, Some re when isInt le && isInt re ->
@@ -450,7 +477,7 @@ let rec exprToCppSimple (names: Map<IRId, string>) (expr: IRExpr) : string =
     | IRLit (IRLitString s) -> $"std::string({(escapeStringLit s)})"
     | IRLit IRLitUnit -> "((void)0)"
     | IRVar (id, _) -> Map.tryFind id names |> Option.defaultValue ($"__v{id}")
-    | IRParam (name, _, _) -> name
+    | IRParam (name, _, _) -> Blade.Types.TypeOrigins.cppName name
     | IRBinOp (_, op, l, r, loc) ->
         let lStr = exprToCppSimple names l
         let rStr = exprToCppSimple names r
@@ -461,6 +488,9 @@ let rec exprToCppSimple (names: Map<IRId, string>) (expr: IRExpr) : string =
         | None, _ -> emitBinOpWithComplexCoercion op l r lStr rStr inferExprType binOpToCpp
     | IRFma (a, b, c) ->
         $"std::fma({(exprToCppSimple names a)}, {(exprToCppSimple names b)}, {(exprToCppSimple names c)})"
+    | IRRandAt (kind, args, weights) ->
+        renderRandAt kind (args |> List.map (exprToCppSimple names))
+                     (weights |> Option.map (fun (w, n) -> (exprToCppSimple names w, n)))
     | IRUnaryOp (IRConj, e) ->
         let inner = exprToCppSimple names e
         if isComplexType (inferExprType e) then $"""{(complexFnName "conj")}({inner})"""
@@ -625,6 +655,32 @@ let genSparseIndexFromKeys (source: SparseKeysSource) (keysName: string option) 
               $"sparse_index_t<{rank}>* {idxName} = new sparse_index_t<{rank}>(\"{idxName}\", std::move({idxName}_keys));" ]
         | None ->
             [ refusalErrorLine "" "SparseIdx: runtime keys variable not found in scope at codegen" ]
+
+/// Where a callable's captured bindings get their C++ names when its body is
+/// rendered (F8: one helper for what were sixteen hand folds in two variants).
+/// The two policies are two different LEXICAL situations, not two styles:
+type CaptureNamePolicy =
+    /// The body is rendered as its OWN C++ function (a lifted callable, its
+    /// std::function closure, a CUDA __global__ kernel): every capture is a
+    /// PARAMETER of that function, declared under the capture's own name, so
+    /// that name must replace whatever the enclosing scope called the
+    /// binding.
+    | CapturesAreParameters
+    /// The body is rendered INLINE in the enclosing scope (a loop nest, a
+    /// peel, a fused kernel, a row map): the binding is read where it lives,
+    /// under the name that scope EMITTED for it -- a block-local `let k` is
+    /// `__v<id>` there, not `k` -- so an id the map already knows keeps its
+    /// name and the capture's source name only fills a gap. Overwriting here
+    /// re-spells the binding to its source name: an undeclared identifier,
+    /// or worse, a different binding of the same name (a module-level `k`).
+    | EnclosingNamesWin
+
+/// Extend `names` with `captures` under `policy` (see CaptureNamePolicy).
+let withCaptureNames (policy: CaptureNamePolicy) (captures: CaptureInfo list) (names: Map<IRId, string>) : Map<IRId, string> =
+    captures |> List.fold (fun (m: Map<IRId, string>) (c: CaptureInfo) ->
+        match policy with
+        | CapturesAreParameters -> Map.add c.Id c.Name m
+        | EnclosingNamesWin -> if Map.containsKey c.Id m then m else Map.add c.Id c.Name m) names
 
 /// Resolve a capture to the C++ identifier naming it in the SCOPE where the
 /// forwarding closure is emitted. A capture's `Name` is its SOURCE name,
@@ -1358,6 +1414,18 @@ let emitExtentsTable (ind: string) (extentsName: string) (rank: int)
         (($"{ind}size_t* {extentsName} = new size_t[{rank}];")
          :: (dims |> List.mapi (fun d (e, _) -> $"{ind}{extentsName}[{d}] = {e};")),
          Some extentsName)
+
+/// A `group_by` result's extents table (G1): `[ngroups, 0, offsets[0 ..
+/// ngroups]]` -- slot 1 is ragged, and the grouping's offsets ride along, so
+/// a read of group i's rows is checked against its own length (`extents[2 +
+/// i + 1] - extents[2 + i]`, renderExtentExpr) wherever the grouped value
+/// goes, a kernel it is captured into included.
+let emitGroupedExtentsTable (ind: string) (extentsName: string) (gkName: string) : string list * string option =
+    ([ $"{ind}size_t* {extentsName} = new size_t[3 + {gkName}__ngroups];"
+       $"{ind}{extentsName}[0] = {gkName}__ngroups;"
+       $"{ind}{extentsName}[1] = 0; /* inner extent is ragged */"
+       $"{ind}for (size_t __g = 0; __g <= {gkName}__ngroups; __g++) {extentsName}[2 + __g] = {gkName}__offsets[__g];" ],
+     Some extentsName)
 
 /// The word a dispatch marker comment leads with, for a route resolved by
 /// `LinAlgPatterns.resolveNodeRoute`. Names the BACKEND because that's the only

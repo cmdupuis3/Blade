@@ -1,0 +1,52 @@
+// TEST: a function-body let mut copy of a local array stays a copy when the local is read afterwards
+// `let mut q2 = q` over a function-local `q` may share q's storage only when
+// nothing after it reads `q` (the let-rec staging shape). Here `q` is read
+// after a write through `q2` -- directly, as the return value, and through a
+// let derived from it, including a map bound before the copy and forced after
+// it -- so each read must see q's own value (N1: the C++
+// lane aliased and returned 100.0; the interpreter copied). `write_only`
+// never reads `q` again, so the alias is legal there and the write shows.
+type I = Idx<2>
+function read_src(x: Array<Float like I>) -> Float = {
+    let q = x * 2.0
+    let mut q2 = q
+    q2((0 : I)) = 100.0
+    q((0 : I))
+}
+function return_src(x: Array<Float like I>) -> Array<Float like I> = {
+    let q = x * 2.0
+    let mut q2 = q
+    q2((0 : I)) = 100.0
+    q
+}
+function read_derived(x: Array<Float like I>) -> Float = {
+    let q = x * 2.0
+    let s = q + 1.0
+    let mut q2 = q
+    q2((1 : I)) = 50.0
+    s((1 : I)) + q2((1 : I))
+}
+function write_only(x: Array<Float like I>) -> Array<Float like I> = {
+    let q = x * 2.0
+    let mut q2 = q
+    q2((0 : I)) = 100.0
+    q2
+}
+function deferred_before(x: Array<Float like I>) -> Float = {
+    let q = x * 2.0
+    let L = method_for(q) <@> lambda(v) -> v + 1.0
+    let mut q2 = q
+    q2((0 : I)) = 100.0
+    reduce(L |> compute, (+))
+}
+let a = [1.0, 2.0]
+let m = read_src(a)
+let v = return_src(a)
+let d = read_derived(a)
+let w = write_only(a)
+let lz = deferred_before(a)
+// EXPECT: m = 2.0
+// EXPECT: v = [2.0, 4.0]
+// EXPECT: d = 55.0
+// EXPECT: w = [100.0, 4.0]
+// EXPECT: lz = 8.0

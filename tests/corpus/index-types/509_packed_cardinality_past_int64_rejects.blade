@@ -1,0 +1,9 @@
+// TEST: Packed cardinality past int64 is a user diagnostic (rejects)
+// ERROR: BL4003 @ 8:1
+// ERROR-CONTAINS: has more cells than a 64-bit count can hold (C(1000019, 20)
+// A compact group's cell count is a binomial -- C(n+r-1, r) for SymIdx<r, n> --
+// and an absurd extent or rank pushes it past int64. Every pool sizer computes
+// it with exactly-checked arithmetic, whose overflow used to escape as BL9001
+// ("internal compiler error ... please report it"). It is a BL4003 at the
+// declaration that needs the count.
+let A: Array<Float64 like SymIdx<20, 1000000>> = fill_random(10)

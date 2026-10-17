@@ -1,0 +1,12 @@
+// TEST: a comm law that holds through a callee reading a global stays accepted
+// `scaled` reads the module-level `s`; the D12 witness evaluates through it
+// with `s` sampled like any captured scalar, and `scaled(x) + scaled(y)` is
+// symmetric for every `s`, so the claim stands.
+let s = 3.0
+function scaled(a: Float64) -> Float64 = a * s
+let A = [1.0, 2.0, 4.0]
+let r = method_for(A, A) <@> lambda(x, y) where comm(x, y) -> scaled(x) + scaled(y) |> compute
+let r02 = r(0, 2)
+let r20 = r(2, 0)
+// EXPECT: r02 = 15.0
+// EXPECT: r20 = 15.0

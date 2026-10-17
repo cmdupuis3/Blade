@@ -1,0 +1,14 @@
+// TEST: anticomm over reads of a captured AntisymIdx array stays accepted
+// The D12 witness samples captured array cells honouring the array's storage
+// class: an AntisymIdx read negates under a swap and is 0 on the diagonal by
+// its TYPE, so `A(i, j)` under anticomm is a law that holds for every content
+// and is not refused (symmetry/094 is the comm twin, refused).
+let A: Array<Float64 like AntisymIdx<2, 3>> = [[1.0, 2.0], [3.0], []]
+let idx = [0, 1, 2]
+let r = method_for(idx, idx) <@> lambda(i, j) where anticomm(i, j) -> A(i, j) |> compute
+let r01 = r(0, 1)
+let r10 = r(1, 0)
+let r21 = r(2, 1)
+// EXPECT: r01 = 1.0
+// EXPECT: r10 = -1.0
+// EXPECT: r21 = -3.0

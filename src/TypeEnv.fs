@@ -181,8 +181,17 @@ let segmentationFileOffsets (s: Segmentation) : int64 list option =
 
 type TypeModuleExport = {
     Variables: Map<string, VarInfo>
+    /// Every QUALIFIED identity the module's tables hold (its own
+    /// declarations and, transitively, every type its signatures mention --
+    /// D11), plus the non-type entries (provider structs) as before. A user
+    /// type's bare / alias SCOPE keys are not here: see TypeNames.
     TypeDefs: Map<string, TypeDefInfo>
     VariantTags: Map<string, string * IRType option>
+    /// The module's OWN type declarations: source name -> identity. An
+    /// importer binds `alias.name` and, by the scope rule, the bare name.
+    TypeNames: Map<string, string>
+    /// The module's own variant constructors: source name -> identity.
+    CtorNames: Map<string, string>
     Units: Map<string, UnitSig>
     /// Static function ASTs from this module, imported alongside Variables so
     /// an importing module's eta-reduced DepIdx can inline a static function
@@ -367,7 +376,7 @@ type TypeEnv = {
     /// into a binding captured from outside the body is a data race
     /// (assignTargetError refuses it).
     InParallelBody: bool
-    /// Names of the `mut` parameters of the function whose body is being
+    /// Binder ids of the `mut` parameters of the function whose body is being
     /// checked (all array-typed -- MutParamNotArray rejects any other kind
     /// first). Rebinding one WHOLE (`a = <array expr>`) cannot reach the
     /// caller, because the C++ ABI passes the `Array<>` wrapper by value; only
@@ -375,8 +384,10 @@ type TypeEnv = {
     /// BINDING, by contrast, may be rebound whole -- that is real rebind
     /// semantics with its own corpus (memfree/015, 016) -- and both bind
     /// `MutPassable`, so assignability alone cannot tell them apart. This set
-    /// is how `assignTargetError` does.
-    MutArrayParams: Set<string>
+    /// is how `assignTargetError` does. Keyed by binder id, not name (#51): a
+    /// block-local `let mut a` shadowing a `mut` parameter `a` is its own
+    /// binding and keeps its rebind semantics.
+    MutArrayParams: Set<IRId>
     CurrentCommGroups: int list list
     /// Interface name -> InterfaceDecl
     Interfaces: Map<string, InterfaceDecl>
@@ -397,6 +408,22 @@ type TypeEnv = {
     Context: string list
     /// Exports from modules type-checked earlier in this compilation
     ModuleExports: Map<string, TypeModuleExport>
+    /// D11: the qualifier of the module being checked -- Some "A" for a
+    /// non-main module (its declarations' identities are `A.P`), None for
+    /// the main module (bare identities).
+    ModuleQualifier: string option
+    /// This module's own type / constructor declarations (source -> identity).
+    LocalTypeNames: Map<string, string>
+    LocalCtorNames: Map<string, string>
+    /// Bare names bound by an IMPORT (source -> identity), for the scope
+    /// rule: a second import of the same name with another identity makes the
+    /// bare name ambiguous; a local declaration shadows both.
+    ImportedTypeNames: Map<string, string>
+    ImportedCtorNames: Map<string, string>
+    /// Bare names two imports declare (source -> qualified spellings): a use
+    /// is refused (BL2010) naming them.
+    AmbiguousTypes: Map<string, string list>
+    AmbiguousCtors: Map<string, string list>
     /// Static function ASTs, populated in checkModule's pre-pass. Lets
     /// lowerIndexTypeList inline eta-reduced DepIdx bodies (`DepIdx<O, f>`
     /// desugars to `lambda(i) -> Idx<f(i)>`; substitution needs f's body).
@@ -419,6 +446,10 @@ type TypeEnv = {
     /// when G's outer slot carries one of these ids (inferGroupBy mints the
     /// slot fresh, so the id is the only handle that survives).
     SegmentedOuters: System.Collections.Generic.Dictionary<IRId, string>
+    /// The grouping a `group_by` result's OUTER slot came from (its bare
+    /// group_keys name), by that slot's id: what Zonk's group-read guard
+    /// (G1) reads the group count, each group's length and the key type off.
+    GroupOuters: System.Collections.Generic.Dictionary<IRId, TypedExpr>
     /// The `Chunked` aliases named by a value binding's ANNOTATION, per slot
     /// (None for a slot that is not a Chunked alias), by binding name: what
     /// `segments(a)` over a VALUE reads. An array whose slots are all
@@ -486,6 +517,14 @@ type TypeEnv = {
     /// false BL4005), and two modules' same-named functions judge each other.
     /// Shared by reference.
     MutParamPositions: System.Collections.Generic.Dictionary<IRId, int list>
+    /// Function BINDER ID -> the bindings declared OUTSIDE it that its body
+    /// reads or writes BY NAME, directly or through a callee (name, binder id).
+    /// Read by the call-site no-alias check (N16): passing such a binding to a
+    /// `mut` parameter gives the callee two names for one array -- its writes
+    /// through the parameter show through the direct reads mid-call.
+    /// Populated beside FuncOuterWrites (TypeCheckSupport.outerReadsOfBody).
+    /// Shared by reference.
+    FuncOuterReads: System.Collections.Generic.Dictionary<IRId, (string * IRId) list>
     /// Callee BINDER ID -> the co-iterations its body performs over its own
     /// PARAMETERS: each entry names the parameter positions walked plus the
     /// literal leading extents and leading index records of that
@@ -543,18 +582,18 @@ type TypeEnv = {
     /// int list list. Populated by checkFunctionDecl; must survive
     /// eta-expansion (etaExpandFunctionKernel) onto the loop-kernel wrapper, or
     /// `object_for(f)` on a `where comm` function silently produces DENSE output. Shared by reference.
-    FuncCommGroups: System.Collections.Generic.Dictionary<string, int list list>
+    FuncCommGroups: System.Collections.Generic.Dictionary<IRId, int list list>
     /// Named functions' `where anticomm(...)` groups (by param index):
     /// funcName -> int list list. Signed twin of FuncCommGroups, same seam: if
     /// not re-attached to the synthesized kernel, `object_for(f) <@> (A, A)`
     /// silently falls back to dense. Shared by reference.
-    FuncAntisymGroups: System.Collections.Generic.Dictionary<string, int list list>
+    FuncAntisymGroups: System.Collections.Generic.Dictionary<IRId, int list list>
     /// Stage-3 deduction, early tier: per-function parameter NAMES plus
     /// ADJACENT-pair swap parities (n params -> n-1 entries), from
     /// checkFunctionDecl for fixed-arity functions. buildApplyInfo consults it
     /// so an eta-expanded `object_for(f)` gets f's deduced symmetry and real
     /// param names, without reanalyzing. Shared by reference.
-    FuncDeducedPairs: System.Collections.Generic.Dictionary<string, string list * Blade.Deduce.Parity list>
+    FuncDeducedPairs: System.Collections.Generic.Dictionary<IRId, string list * Blade.Deduce.Parity list>
     /// Stage-3 interprocedural sign-linearity: per-function, per-param sign
     /// parities in decl order (checkFunctionDecl, fixed-arity only). SOdd
     /// means `f(.., -x, ..) = -f(..)`; the call rule uses it to propagate
@@ -597,6 +636,23 @@ type TypeEnv = {
     /// DeclaredFuncIds: a shadowing local never borrows a summary. Shared
     /// by reference.
     FuncEffects: System.Collections.Generic.Dictionary<IRId, Blade.Effects.EffectSummary>
+    /// Function BINDER ID -> the bindings declared OUTSIDE the function that
+    /// its body writes, directly or through a callee (name, binder id):
+    /// a module-level or captured `let mut` assigned whole or through an
+    /// element/field. Populated beside FuncEffects (declaration order), by
+    /// TypeCheckSupport.outerWritesOfBody. Read by the parallel-body check
+    /// (parallelCalleeWriteError): a serial function may keep that write
+    /// channel, but a call to it from an `omp`/`cuda` body runs it in every
+    /// cell at once (#17). Writes to the function's own locals and through its
+    /// `mut` parameters are not listed (a call's arguments are checked at the
+    /// call). Shared by reference.
+    FuncOuterWrites: System.Collections.Generic.Dictionary<IRId, (string * IRId) list>
+    /// Function BINDER ID -> (parameter ids, typed body) of a PURE (Effects
+    /// repeatable), NON-RECURSIVE, fixed-arity user function or module-level
+    /// let-bound lambda: the bodies the comm/anticomm witness may evaluate
+    /// through when a kernel calls one (D12, Deduce.witnessSwapLawFailure).
+    /// Shared by reference.
+    FuncWitnessBodies: System.Collections.Generic.Dictionary<IRId, IRId list * TypedExpr>
     /// Function BINDER ID -> the GENERIC CASTS its body performs: casts whose
     /// operand is one of the declaration's own signature variables
     /// (`Float64(reduce(row, (+)))` over `row: T^1`), as (operand var id, cast
@@ -629,6 +685,13 @@ type TypeEnv = {
     /// subscript into the named axis: proven, or guarded (BL8006). Keyed by
     /// id like FuncSigVarRange. Shared by reference.
     FuncAxisSubscriptParams: System.Collections.Generic.Dictionary<IRId, Set<int>>
+    /// Function BINDER ID -> the parameters declared at a SYMBOLIC rank
+    /// (`x: T^k`) whose rank the body's routing decided (a `reduce` over an
+    /// unshaped operand synthesizes rank 1). A call handing such a parameter
+    /// an array of ANOTHER rank is the call of an ARRAY INSTANCE (ArrowVariant)
+    /// checked with the parameter typed as that array, so the body routes by
+    /// the argument's concrete rank. Shared by reference.
+    FuncRankGenericParams: System.Collections.Generic.Dictionary<IRId, Map<int, int>>
     /// Function BINDER ID (of a declaration with ArrowObligations, or with
     /// FuncAxisSubscriptParams) -> what its
     /// array instances are checked from: the SOURCE declaration, the
@@ -689,21 +752,21 @@ type TypeEnv = {
     /// (Deduce.deducePackFold) or compositionally (Deduce.packParityOf,
     /// resolving callees via this table in decl order). Packs never claim
     /// PNeg (no signed exchange law) -- fuels suggestions only, never errors. Shared by reference.
-    PackDeducedComm: System.Collections.Generic.Dictionary<string, string * Blade.Deduce.Parity>
+    PackDeducedComm: System.Collections.Generic.Dictionary<IRId, string * Blade.Deduce.Parity>
     /// Named functions' `where` parallel strategies (`omp`/`cuda`/`mpi`) with
     /// param NAMES: funcName -> (paramNames, strategies). Consulted so the
     /// clause survives onto a synthesized loop-kernel wrapper -- without it,
     /// `object_for(f)` on a `where omp(...)` function silently emitted a
     /// SERIAL nest (`Parallel = []` reached lowering). Names matter because
     /// `extractParallelism` resolves `omp(a: n)` by NAME, but wrapper params are renamed (`__k<uid>_<i>`); surfacing remaps by position. Shared by reference.
-    FuncParallel: System.Collections.Generic.Dictionary<string, string list * ParallelStrategy list>
+    FuncParallel: System.Collections.Generic.Dictionary<IRId, string list * ParallelStrategy list>
     /// Named 2-param functions whose BODY is a bare builtin commutative +
     /// associative op over the two params (`a + b`, `a * b`, `a && b`,
     /// `a || b`, either order): funcName -> true. Populated by
     /// checkFunctionDecl; consulted only by the fold-kernel omp licence check
     /// (`reduce(xs, f)` where `f` carries `where omp`) -- a side channel since
     /// BODY lives nowhere else in TypeEnv. Codegen re-derives the same predicate from IRCallable (CodeGen.foldKernelBuiltinOp); the two must agree.
-    FuncFoldBuiltin: System.Collections.Generic.Dictionary<string, bool>
+    FuncFoldBuiltin: System.Collections.Generic.Dictionary<IRId, bool>
     /// WIDTH SCHEMA side channel (docs/plan-tuples-vs-arg-packs.md 6c, Design
     /// C): parameters DECLARED `Tuple<N>`, keyed by the parameter's binder
     /// VarId -> N. A parameter list is a width schema over the pack's flat leaf
@@ -736,6 +799,7 @@ let emptyEnv () = {
     TypeDefs = Map.empty
     Segmentations = Map.empty
     SegmentedOuters = System.Collections.Generic.Dictionary<IRId, string>()
+    GroupOuters = System.Collections.Generic.Dictionary<IRId, TypedExpr>()
     SlotAliases = System.Collections.Generic.Dictionary<string, string option list>()
     VariantTags = Map.empty
     Subst = Subst()
@@ -753,6 +817,13 @@ let emptyEnv () = {
     UnitTarget = None
     Context = []
     ModuleExports = Map.empty
+    ModuleQualifier = None
+    LocalTypeNames = Map.empty
+    LocalCtorNames = Map.empty
+    ImportedTypeNames = Map.empty
+    ImportedCtorNames = Map.empty
+    AmbiguousTypes = Map.empty
+    AmbiguousCtors = Map.empty
     StaticFunctions = Map.empty
     StaticValues = Map.empty
     SurfaceAliases = Map.empty
@@ -767,21 +838,25 @@ let emptyEnv () = {
     MutualMembers = Map.empty
     MutualReturnFuncs = System.Collections.Generic.Dictionary<string, string>()
     MutParamPositions = System.Collections.Generic.Dictionary<IRId, int list>()
+    FuncOuterReads = System.Collections.Generic.Dictionary<IRId, (string * IRId) list>()
     FuncCoIterObligations = System.Collections.Generic.Dictionary<IRId, CoIterObligation list>()
     FuncUnitTransform = System.Collections.Generic.Dictionary<IRId, int list * UnitSig>()
     FuncUnitEqualities = System.Collections.Generic.Dictionary<IRId, (UnitSig * UnitSig) list>()
-    FuncCommGroups = System.Collections.Generic.Dictionary<string, int list list>()
-    FuncAntisymGroups = System.Collections.Generic.Dictionary<string, int list list>()
-    FuncDeducedPairs = System.Collections.Generic.Dictionary<string, string list * Blade.Deduce.Parity list>()
+    FuncCommGroups = System.Collections.Generic.Dictionary<IRId, int list list>()
+    FuncAntisymGroups = System.Collections.Generic.Dictionary<IRId, int list list>()
+    FuncDeducedPairs = System.Collections.Generic.Dictionary<IRId, string list * Blade.Deduce.Parity list>()
     FuncSignParities = System.Collections.Generic.Dictionary<IRId, Blade.Deduce.SignParity list>()
     DeclaredFuncIds = System.Collections.Generic.HashSet<IRId>()
     FuncSigVarRange = System.Collections.Generic.Dictionary<IRId, int * int>()
     FuncEffects = System.Collections.Generic.Dictionary<IRId, Blade.Effects.EffectSummary>()
+    FuncOuterWrites = System.Collections.Generic.Dictionary<IRId, (string * IRId) list>()
+    FuncWitnessBodies = System.Collections.Generic.Dictionary<IRId, IRId list * TypedExpr>()
     FuncGenericObligations = System.Collections.Generic.Dictionary<IRId, GenericObligation list>()
     CurrentGenericObligations = None
     PendingArrowApps = ResizeArray<ArrowApplication>()
     FuncArrowObligations = System.Collections.Generic.Dictionary<IRId, ArrowObligation list>()
     FuncAxisSubscriptParams = System.Collections.Generic.Dictionary<IRId, Set<int>>()
+    FuncRankGenericParams = System.Collections.Generic.Dictionary<IRId, Map<int, int>>()
     ArrowDeclSources =System.Collections.Generic.Dictionary<IRId, FunctionDecl * TypeEnv * Map<int, IRType> * IRId>()
     ArrowVariants = System.Collections.Generic.Dictionary<string, ArrowVariant>()
     ArrowVariantDecls = ResizeArray<IRId * TypedDecl>()
@@ -791,9 +866,9 @@ let emptyEnv () = {
     CurrentSignature = []
     FuncRepSigs = System.Collections.Generic.Dictionary<IRId, Blade.DeduceRep.RepSigT>()
     FuncRepSpec = Blade.DeduceRep.RepSpecTable()
-    PackDeducedComm = System.Collections.Generic.Dictionary<string, string * Blade.Deduce.Parity>()
-    FuncParallel = System.Collections.Generic.Dictionary<string, string list * ParallelStrategy list>()
-    FuncFoldBuiltin = System.Collections.Generic.Dictionary<string, bool>()
+    PackDeducedComm = System.Collections.Generic.Dictionary<IRId, string * Blade.Deduce.Parity>()
+    FuncParallel = System.Collections.Generic.Dictionary<IRId, string list * ParallelStrategy list>()
+    FuncFoldBuiltin = System.Collections.Generic.Dictionary<IRId, bool>()
     DeclaredTupleWidths = System.Collections.Generic.Dictionary<IRId, int>()
     JoinLegLists = System.Collections.Generic.Dictionary<string, Expr list>()
 }
@@ -1000,15 +1075,23 @@ let private formatTypeErrorRaw (err: TypeError) : string =
             match kind with
             | "value" ->
                 "top-level value", "A top-level name is bound once per module: rename one of them (inside a block, `let` may shadow; at top level a second `let` would be two globals of one name, and assignment `x = ...` is the way to update a `let`)."
-            | "type" -> "type", "A type name is declared once per program: rename one of them."
+            | "type" -> "type", "A type name is declared once per module: rename one of them. (Two MODULES may each declare one -- a type's identity is its module's.)"
             | "unit" -> "unit", "A unit is declared once per module: rename one, or derive it (`Unit b = a`)."
             | "constructor" ->
-                "variant constructor", "A constructor name belongs to one sum type per program (constructors are matched and emitted by bare name): rename one of them."
+                "variant constructor", "A constructor name belongs to one sum type per module: rename one of them. (Two MODULES may each declare one; an unqualified use both imports answer is refused, and `A.Red` names A's.)"
             | other -> other, "Rename one of the declarations."
         $"duplicate declaration of {what} '{name}': this module already declares it at {firstSite}. {advice}"
     | DuplicateDecl (kind, name, firstSite, Some firstModule) ->
         let what = if kind = "constructor" then "variant constructor" else kind
-        $"duplicate declaration of {what} '{name}': module '{firstModule}' already declares a {what} of that name (at {firstSite}), and one program cannot hold two of one name -- type identity is not module-qualified yet, so the two would be confused with each other (and emitted as one C++ name). Rename one of them."
+        $"duplicate declaration of {what} '{name}': module '{firstModule}' already declares a {what} of that name (at {firstSite}), and this name is not module-qualified (a `__`-prefixed synthetic name keeps its spelling in every module), so the two would be one. Rename one of them."
+    | AmbiguousImport (kind, name, candidates) ->
+        let what = if kind = "constructor" then "variant constructor" else kind
+        let spelled = candidates |> List.map (fun c -> $"`{c}`") |> String.concat ", "
+        let extra =
+            if kind = "constructor" then
+                " (a pattern over a value whose type names the constructor needs no qualifier)"
+            else ""
+        $"ambiguous {what} '{name}': the imported modules declare more than one -- {spelled}. Name the one you mean with its module{extra}, or declare '{name}' in this module, which shadows the imports."
     | DuplicateFunctionDecl (name, firstSite) ->
         $"duplicate declaration of function '{name}': this scope already declares it at {firstSite}. A function name may be declared only once per scope -- without this refusal the later declaration silently shadows the earlier one, and calls matching the first signature fail blaming the call site. Rename one of the declarations. (Dispatching one name across several signatures -- function clauses -- is a planned feature, not yet supported.)"
     | TypeMismatch (exp, act) ->
@@ -1017,6 +1100,13 @@ let private formatTypeErrorRaw (err: TypeError) : string =
         // apart; sides that still render alike differ by a provider identity,
         // which indexIdentityNote explains.
         let e, a = ppIRType exp, ppIRType act
+        // Two modules' types of one source name (D11: `A.P` vs `B.P`) print
+        // alike by source name: spell them qualified.
+        let e, a =
+            if e = a then
+                let qe, qa = withQualifiedTypeNames (fun () -> ppIRType exp, ppIRType act)
+                if qe <> qa then qe, qa else e, a
+            else e, a
         let rendered = $"Type mismatch: expected {e}, got {a}"
         if e = a then rendered + indexIdentityNote exp act else rendered
     | ArityMismatch (exp, act) -> $"Arity mismatch: expected {exp} args, got {act}"
@@ -1046,7 +1136,11 @@ let private formatTypeErrorRaw (err: TypeError) : string =
     | ProviderStoreUnresolvable (provider, path, detail) ->
         $"provider '{provider}' cannot resolve the store '{path}' at compile time: {detail}"
     // Promoted variants (Stage 5): text reproduced verbatim.
-    | IndexTagMismatchNamed (expected, actual) -> $"Array index tag mismatch: slot expects '{expected}' but argument has type '{actual}'."
+    | IndexTagMismatchNamed (expected, actual) ->
+        // Source names (D11), qualified when two modules' tags coincide.
+        let e, a = Blade.Types.TypeOrigins.sourceName expected, Blade.Types.TypeOrigins.sourceName actual
+        let e, a = if e = a && expected <> actual then expected, actual else e, a
+        $"Array index tag mismatch: slot expects '{e}' but argument has type '{a}'."
     | IndexTagMismatchAnon expected -> $"Array index tag mismatch: slot expects named tag '{expected}' but argument is an anonymous index value."
     | IndexCastForeignTag (target, source) ->
         $"cannot cast a '{source}' index value to the index type '{target}': index types are nominal, and `(e : {target})` converts INTEGERS into '{target}', not the values of another index type. If this '{source}' position really is meant as a '{target}' position, convert it to an integer first -- `(Int64(e) : {target})` is a checked conversion (BL8006 outside '{target}'); if the two spaces are the same space, give them one index type."
@@ -1157,6 +1251,8 @@ class IS implemented, and the dense result folds like any other array." op level
     | ImportNameMissing (modul, name, exported) ->
         let known = if System.String.IsNullOrEmpty exported then "" else $" It exports: {exported}."
         $"module '{modul}' has no export named '{name}', so `from {modul} import {name}` binds nothing.{known}"
+    | MutArgAliasesCalleeGlobal (func, mutPos, name) ->
+        $"function '{func}': argument {mutPos} is passed to a `mut` parameter, but it is '{name}', a binding '{func}' also uses by name (directly or through a function it calls) -- the callee's writes through the parameter would be visible through its own reads of '{name}' mid-call. Pass a separate array (a copy), or pass '{name}' to the callee as a parameter instead of reading it by name."
     | MutArgAliased (func, mutPos, otherPos, name) ->
         $"function '{func}': argument {mutPos} is passed to a `mut` parameter, and argument {otherPos} is the same binding '{name}' -- the callee's writes through one would be visible through the other mid-call. Pass a separate array (a copy) to one of them."
     | ZipExtentMismatch (pos, expected, actual) ->
@@ -1262,6 +1358,11 @@ complex half)." where_
     | CumulantNeedsDist got -> $"cumulant expects cumulant(d, k) where d is a Dist value (a dist(...) binding or Dist-typed parameter); got {got}"
     | DistOpUndefined (left, right) -> $"this operator is not defined on Dist values (left: {left}, right: {right}): dists support scalar * (multilinearity), + and - of independent dists, and component projection via cumulant(d, k)"
     | EnumIdxMixedKinds name -> $"EnumIdx '{name}' has mixed value kinds: integer and string literals in the same EnumIdx<[...]> aren't allowed. The runtime backing must be one or the other (int64_t or std::string)."
+    | EnumKeyObserved msg -> msg
+    | SubscriptIsRange slot ->
+        $"a range is not a subscript: `A(lo..hi)` reads like a slice of {slot}, and slicing is planned but not built yet. Read the cells you need through the range instead -- `method_for(lo..hi) <@> lambda(i) -> A(i)` -- or subscript one position at a time."
+    | EnumIdxUnknownKey (enumName, key, available) ->
+        $"""{key} is not a key of EnumIdx '{enumName}' (keys: {(available |> String.concat ", ")}). A value of an EnumIdx type -- a subscript into it, a cell of an array of it -- is one of its KEYS, so a literal must be one of the type's keys."""
     | EnumIdxUnknownLabel (enumName, label, available) ->
         $"""'{label}' is not a value of EnumIdx '{enumName}'. Available: {(available |> String.concat ", ")}."""
     | ImplMissingMethods (iface, typeName, methods) -> $"impl {iface} for {typeName} is missing required methods: {methods}"
@@ -1365,6 +1466,8 @@ the array's flat storage holds them in." shape detail
     // Wording must match Unify.fs's rank-bound block: `got` carries the
     // whole "a scalar" / "a rank-N array" tail, so the sentence stays exact.
     | RankBoundViolation (needed, got) -> $"this value flows into a position that requires a rank-{needed} (or higher) array, but it resolved to {got}"
+    | ScalarPinnedArray got ->
+        $"rank mismatch: this generic value must be a scalar -- its elementwise result (a comparison or cast of it) is used as a scalar in the function (a declared scalar return such as `-> Bool`, or an `if` condition) -- but it is given {got}. A call neither broadcasts nor reduces rank: drop the scalar return annotation so the result follows the argument's rank (comparison and arithmetic are elementwise at every rank), or pass a scalar."
     | ProviderImportByModule (suggestion, providers) -> $"provider modules are imported by module name -- write `import {suggestion} as <alias>` (the Providers.* spelling was removed; registered providers: {providers})"
     | ProviderNoSelectiveImport pname -> $"provider module '{pname}' does not support selective import -- use `import {pname} as <alias>` and call <alias>.load/read/write"
     | IndexTypeArithForbidden name -> $"Arithmetic on index type '{name}' is not permitted. Index types are nominal labels -- for value-level arithmetic on positions, use virtual array iteration (which produces plain ints); for new index types derived from arithmetic, type-level construction is a separate workstream not yet implemented."
@@ -1455,6 +1558,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             // Same-scope duplicate `function` name: a name-binding refusal,
             // so it lives in the BL2xxx resolution band, not BL3xxx.
             | DuplicateFunctionDecl _ | DuplicateDecl _ -> "BL2009"
+            | AmbiguousImport _ -> "BL2010"
             // Environment condition, not a type judgment: the provider's
             // native library is unloadable, so the store's names cannot
             // resolve -- same band as BL2004's "module not found".
@@ -1463,7 +1567,8 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             // resolve, so no name it binds can. BL2007's sibling, one condition
             // over (library vs store).
             | ProviderStoreUnresolvable _ -> "BL2008"
-            | TypeMismatch _ | ArgRankMismatch _ | ArgTypeMismatch _ | DenseCaretCompactArg _ | HaloWindowEscapes -> "BL3001"
+            | TypeMismatch _ | ArgRankMismatch _ | ArgTypeMismatch _ | DenseCaretCompactArg _ | HaloWindowEscapes
+            | ScalarPinnedArray _ -> "BL3001"
             | CaretHeadSpelling _ -> "BL1004"
             | ArityMismatch _ | KernelPackArity _ | IndexOverApplied _ -> "BL3002"
             | InvalidApplication _ -> "BL3003"
@@ -1561,7 +1666,8 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | UnknownWhereConstraint _ -> "BL4001"
             | DistOrderCompileTime _ -> "BL4002"
             | IndexTagMismatchNamed _ | IndexTagMismatchAnon _ | IndexCastForeignTag _ | CrossNominalIndexArith _
-            | SubscriptNotIntegral _ | SubscriptOutOfRange _ | SubscriptTupleForm _
+            | SubscriptNotIntegral _ | SubscriptOutOfRange _ | SubscriptTupleForm _ | EnumIdxUnknownKey _
+            | SubscriptIsRange _ | EnumKeyObserved _
             | CrossAnonIndexArith _ | IndexTypeArithForbidden _ | IrrepsIdxArgMismatch _
             | BlockSpecArgMismatch _
             | CompoundTupleForm _ | CompoundUnderSupplied _ | CompoundOverSupplied _
@@ -1583,7 +1689,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | StackNeedsArrays _ | StackShapeMismatch _ | JoinNeedsArrays _
             | JoinDimRange _ | JoinShapeMismatch _ | StackJoinCompactSlot _ -> "BL4004"
             | ImmutableStaticAssign _ | MutParamNotArray _ | MutAssignRefused _
-            | MutArgNotPassable _ | MutArgAliased _ | MutCaptureEscapes _ -> "BL4005"
+            | MutArgNotPassable _ | MutArgAliased _ | MutArgAliasesCalleeGlobal _ | MutCaptureEscapes _ -> "BL4005"
             | MutualBindJointly _ | MutualDirectElementsOnly _ | MutualMixedGroups
             | MutualDuplicateMember _ | MutualIncompleteAnnotation _ | MutualJointAnnotationOnly _
             | MutualParamMemberType _ | MutualBindTuple _ | MutualReturnTupleElements _
@@ -1745,6 +1851,112 @@ let isEnumType (env: TypeEnv) (parentName: string) : bool =
 
 let registerVariantTag tag parentName payload (env: TypeEnv) =
     { env with VariantTags = Map.add tag (parentName, payload) env.VariantTags }
+
+/// The identity a declaration of `source` in the module being checked gets
+/// (D11): `A.P` in a non-main module `A`, `P` in the main module.
+let declIdentity (env: TypeEnv) (source: string) : string =
+    Blade.Types.TypeOrigins.identityOf env.ModuleQualifier source
+
+/// Register a LOCAL type declaration under its identity and its source name
+/// (a local declaration shadows an imported one of that name, and clears an
+/// ambiguity between two imports).
+let registerDeclaredTypeDef (source: string) (identity: string) (info: TypeDefInfo) (env: TypeEnv) =
+    Blade.Types.TypeOrigins.record identity (defaultArg env.ModuleQualifier "") source
+    let env = registerTypeDef identity info env
+    let env = if source <> identity then registerTypeDef source info env else env
+    { env with
+        LocalTypeNames = Map.add source identity env.LocalTypeNames
+        ImportedTypeNames = Map.remove source env.ImportedTypeNames
+        AmbiguousTypes = Map.remove source env.AmbiguousTypes }
+
+/// The constructor counterpart of registerDeclaredTypeDef.
+let registerDeclaredCtor (source: string) (identity: string) parentIdentity payload (env: TypeEnv) =
+    Blade.Types.TypeOrigins.record identity (defaultArg env.ModuleQualifier "") source
+    let env = registerVariantTag identity parentIdentity payload env
+    let env = if source <> identity then registerVariantTag source parentIdentity payload env else env
+    { env with
+        LocalCtorNames = Map.add source identity env.LocalCtorNames
+        ImportedCtorNames = Map.remove source env.ImportedCtorNames
+        AmbiguousCtors = Map.remove source env.AmbiguousCtors }
+
+/// Bind an IMPORTED type's bare name by the scope rule (D11): a local
+/// declaration wins; one import binds it; a second import of ANOTHER
+/// identity makes it ambiguous (BL2010 at a use). `explicitly` (a selective
+/// `from M import P`) binds it regardless of earlier imports.
+let bindImportedTypeName (source: string) (identity: string) (explicitly: bool) (env: TypeEnv) =
+    if Map.containsKey source env.LocalTypeNames then env
+    else
+        match Map.tryFind identity env.TypeDefs with
+        | None -> env
+        | Some info ->
+            match Map.tryFind source env.ImportedTypeNames, Map.tryFind source env.AmbiguousTypes with
+            | _ when explicitly ->
+                { env with
+                    TypeDefs = Map.add source info env.TypeDefs
+                    ImportedTypeNames = Map.add source identity env.ImportedTypeNames
+                    AmbiguousTypes = Map.remove source env.AmbiguousTypes }
+            | Some prev, _ when prev = identity -> env
+            | Some prev, _ ->
+                { env with
+                    TypeDefs = Map.remove source env.TypeDefs
+                    ImportedTypeNames = Map.remove source env.ImportedTypeNames
+                    AmbiguousTypes = Map.add source [ prev; identity ] env.AmbiguousTypes }
+            | None, Some cands ->
+                if List.contains identity cands then env
+                else { env with AmbiguousTypes = Map.add source (cands @ [ identity ]) env.AmbiguousTypes }
+            | None, None ->
+                { env with
+                    TypeDefs = Map.add source info env.TypeDefs
+                    ImportedTypeNames = Map.add source identity env.ImportedTypeNames }
+
+/// The constructor counterpart of bindImportedTypeName.
+let bindImportedCtorName (source: string) (identity: string) (explicitly: bool) (env: TypeEnv) =
+    if Map.containsKey source env.LocalCtorNames then env
+    else
+        match Map.tryFind identity env.VariantTags with
+        | None -> env
+        | Some tag ->
+            match Map.tryFind source env.ImportedCtorNames, Map.tryFind source env.AmbiguousCtors with
+            | _ when explicitly ->
+                { env with
+                    VariantTags = Map.add source tag env.VariantTags
+                    ImportedCtorNames = Map.add source identity env.ImportedCtorNames
+                    AmbiguousCtors = Map.remove source env.AmbiguousCtors }
+            | Some prev, _ when prev = identity -> env
+            | Some prev, _ ->
+                { env with
+                    VariantTags = Map.remove source env.VariantTags
+                    ImportedCtorNames = Map.remove source env.ImportedCtorNames
+                    AmbiguousCtors = Map.add source [ prev; identity ] env.AmbiguousCtors }
+            | None, Some cands ->
+                if List.contains identity cands then env
+                else { env with AmbiguousCtors = Map.add source (cands @ [ identity ]) env.AmbiguousCtors }
+            | None, None ->
+                { env with
+                    VariantTags = Map.add source tag env.VariantTags
+                    ImportedCtorNames = Map.add source identity env.ImportedCtorNames }
+
+/// The identity of the constructor a variant type `parent` declares under
+/// the source name `ctor` (None when it declares none).
+let ctorIdentityIn (env: TypeEnv) (parent: string) (ctor: string) : string option =
+    match Map.tryFind parent env.TypeDefs with
+    | Some (TDIVariant (_, _, variants)) ->
+        variants |> List.tryPick (fun (cid, _) ->
+            if Blade.Types.TypeOrigins.sourceName cid = ctor then Some cid else None)
+    | _ -> None
+
+/// The identity of the constructor a SCOPE KEY names (`Red`, `U.Red`, or the
+/// identity `A.Red` itself), given the parent type the key resolved to.
+/// Constructor source names never contain a dot, so an alias key's source
+/// name is the part after its last one.
+let ctorIdentityOfKey (env: TypeEnv) (parent: string) (key: string) : string =
+    let source =
+        if Blade.Types.TypeOrigins.isQualified key then Blade.Types.TypeOrigins.sourceName key
+        else
+            match key.LastIndexOf '.' with
+            | -1 -> key
+            | i -> key.Substring(i + 1)
+    ctorIdentityIn env parent source |> Option.defaultValue key
 
 /// Why a UnitExpr failed to resolve. Both cases are hard declaration-site
 /// errors at a `Unit` RHS -- an unknown name is BL3015, a terminal-quantity

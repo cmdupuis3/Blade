@@ -1,0 +1,4 @@
+// TEST: Same-named functions of two modules keep their own symmetry facts
+// MODULE: A
+module A
+function f(a: Float64, b: Float64) where comm(a, b) -> Float64 = a * b

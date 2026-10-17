@@ -1,0 +1,48 @@
+// TEST: Rand Indexed: an addressed draw is allowed inside a function body
+// ============================================================================
+// D13: an `_at` sample is a pure function of its address (key, stream,
+// offset + i), so a function may draw it -- unlike a SEQUENCED draw, whose
+// samples depend on the order of the fill (diagnostics/091 stays refused).
+// Inside a function (or any nested position) the draw is the map over its
+// shape whose cell is its own address; it is bit-identical to the same
+// samples of a top-level fill, in both lanes. Values from rand/019's fill.
+// ============================================================================
+import rand as r
+
+// The fill's samples 3..6, drawn inside a function.
+function chunk(k: Int64, s: Int64, o: Int64) = r.uniform_at(k, s, o, 4)
+let c = chunk(12345, 7, 3)
+// EXPECT: c = [0.77727048413232, 0.499890972608356, 0.763231823234597, 0.59615090690598]
+
+// Drawn and consumed in a body: the same bits as the top-level fill.
+function chunk_sum(k: Int64, o: Int64) -> Float64 = {
+    let u = r.uniform_at(k, 7, o, 3)
+    reduce(u, (+))
+}
+let ref_fill = r.uniform_at(12345, 7, 9, 3)
+let ds = chunk_sum(12345, 9) - reduce(ref_fill, (+))
+// EXPECT: ds = 0.0
+
+// A rank-2 shape: cell (i, j) is sample offset + 4 i + j, row-major.
+function grid(k: Int64) = r.uniform_at(k, 7, 0, [3, 4])
+let g = grid(12345)
+// EXPECT: g = [[0.902240796843615, 0.631736146677231, 0.0958510291085241, 0.77727048413232], [0.499890972608356, 0.763231823234597, 0.59615090690598, 0.450859546118179], [0.112129852171726, 0.260392849237905, 0.0409828851902844, 0.246015902956492]]
+
+// A parameterized family and categorical: identical to the fill.
+function gam(k: Int64, o: Int64, shape: Float64) = r.gamma_at(k, 3, o, shape, 1.0, 4)
+let g_fill = r.gamma_at(99, 3, 6, 2.5, 1.0, 4)
+let g_body = gam(99, 6, 2.5)
+let dg = reduce((g_body - g_fill) * (g_body - g_fill), (+))
+// EXPECT: dg = 0.0
+let w = [0.1, 0.0, 0.4, 0.5]
+function cat(k: Int64, o: Int64) = r.categorical_at(k, 3, o, w, 3)
+let c_fill = r.categorical_at(99, 3, 5, w, 3)
+let c_body = cat(99, 5)
+let dc = reduce((c_body - c_fill) * (c_body - c_fill), (+))
+// EXPECT: dc = 0
+
+// A nested position at top level is no longer refused either.
+let nested = reduce(r.normal_at(5, 2, 0, 6), (+))
+let n_fill = r.normal_at(5, 2, 0, 6)
+let dn = nested - reduce(n_fill, (+))
+// EXPECT: dn = 0.0

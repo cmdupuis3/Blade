@@ -1,0 +1,17 @@
+// TEST: a block-local let mut shadowing a mut parameter may be rebound whole
+// A `mut` PARAMETER may not be rebound whole (the caller would see nothing),
+// but a block-local `let mut a` that shadows it is its own binding, with
+// ordinary rebind semantics. The rule is keyed by binder id (#51): it used to
+// be keyed by name, so this rebind was refused BL4005.
+function f(a: mut Array<Float64 like Idx<2>>) -> Float64 = {
+    a(0) = 5.0
+    let mut a = [1.0, 2.0]
+    let b = [3.0, 5.0]
+    a = b
+    a(0) + a(1)
+}
+let mut x = [0.0, 0.0]
+let r = f(x)
+let x0 = x(0)
+// EXPECT: r = 8.0
+// EXPECT: x0 = 5.0

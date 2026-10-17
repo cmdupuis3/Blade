@@ -83,6 +83,14 @@ namespace nested_array_utilities {
         constexpr operator T*() const { return data; }
     };
 
+    // The length of ONE GROUP's rows (G1), whichever way the row reached the
+    // reader: a let-bound row is a RaggedRow (`.len`), a peeled kernel row an
+    // Array<T, 1> view over the group's slice (`.extents[0]`).
+    template<typename T>
+    constexpr size_t group_row_len(const RaggedRow<T>& r) { return r.len; }
+    template<typename T>
+    constexpr size_t group_row_len(const Array<T, 1>& a) { return a.extents[0]; }
+
     // Ragged array wrapper. Mirrors the existing CSR-style layout:
     //   - `data` is the row-pointer array (T**) -- each row may have a different length.
     //   - `extents` carries the outer-dimension extent (`extents[0] = n`, the number of rows). Kept as a pointer for

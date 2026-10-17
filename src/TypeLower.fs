@@ -412,12 +412,17 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
                 | None when isIntBase ->
                     // `Nat<LatIdx>` -- the explicit spelling of what
                     // elemTypeForIterationIndex produces for `range<LatIdx>`.
+                    // The definition's own name is its IDENTITY (D11: an
+                    // imported `Cell` is `Geo.Cell`), the scope key only how
+                    // this module spells it.
                     match lookupTypeDef argName env with
-                    | Some (TDIIndexType _) ->
-                        IRTIdxTagged (taggedInner, IRefNamed argName)
-                    | Some (TDIEnumIdx (_, _, values, _)) ->
+                    | Some (TDIIndexType (ident, _, _)) ->
+                        IRTIdxTagged (taggedInner, IRefNamed ident)
+                    | Some (TDIEnumIdx (ident, _, values, _)) ->
                         IRTIdxTagged (IRTScalar (EnumValue.underlyingElemType values),
-                                      IRefNamed argName)
+                                      IRefNamed ident)
+                    | None when env.AmbiguousTypes.ContainsKey argName ->
+                        raise (TypeErrorRaised (AmbiguousImport ("type", argName, env.AmbiguousTypes.[argName]), None))
                     | _ -> baseType
                 | None -> baseType  // not a unit, ignore
             | [TyUnitExpr ue] ->
@@ -485,21 +490,25 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
             | Some (TDIAlias resolvedTy) -> resolvedTy
             | Some (TDIStruct (n, _, _, _)) -> IRTNamed n
             | Some (TDIVariant (n, _, _)) -> IRTNamed n
-            | Some (TDIIndexType _) ->
+            | Some (TDIIndexType (ident, _, _)) ->
                 // Aliased index type in value position (function param,
                 // struct field, let-binding annotation, etc.). Under Option C
                 // this lowers to IRTIdxTagged (int64, IRefNamed name) -- an
-                // int64 tagged by the index type's nominal name. The codegen
+                // int64 tagged by the index type's nominal name (its
+                // IDENTITY, D11). The codegen
                 // emits `using <name> = int64_t;` so the C++ type carries
                 // the alias for documentation; runtime backing is still int.
-                IRTIdxTagged (IRTScalar ETInt64, IRefNamed name)
-            | Some (TDIEnumIdx (_, _, values, _)) ->
+                IRTIdxTagged (IRTScalar ETInt64, IRefNamed ident)
+            | Some (TDIEnumIdx (ident, _, values, _)) ->
                 // Same shape, but the underlying type follows the values
                 // list (all-string -> ETString, else ETInt64). The C++
                 // typedef emitted alongside resolves the alias to the
                 // matching primitive.
                 let underlying = EnumValue.underlyingElemType values
-                IRTIdxTagged (IRTScalar underlying, IRefNamed name)
+                IRTIdxTagged (IRTScalar underlying, IRefNamed ident)
+            | None when env.AmbiguousTypes.ContainsKey name ->
+                // Two imports declare it and this module does not (D11).
+                raise (TypeErrorRaised (AmbiguousImport ("type", name, env.AmbiguousTypes.[name]), None))
             | None ->
                 // If this name is in the type variable scope (introduced by T^k
                 // elsewhere in this declaration), bare T means T^0 (scalar).
@@ -834,11 +843,11 @@ and lowerElemType env ty : IRType =
     match ty with
     | TyNamed (name, []) ->
         match lookupTypeDef name env with
-        | Some (TDIIndexType _) ->
-            IRTIdxTagged (IRTScalar ETInt64, IRefNamed name)
-        | Some (TDIEnumIdx (_, _, values, _)) ->
+        | Some (TDIIndexType (ident, _, _)) ->
+            IRTIdxTagged (IRTScalar ETInt64, IRefNamed ident)
+        | Some (TDIEnumIdx (ident, _, values, _)) ->
             let underlying = EnumValue.underlyingElemType values
-            IRTIdxTagged (IRTScalar underlying, IRefNamed name)
+            IRTIdxTagged (IRTScalar underlying, IRefNamed ident)
         | _ -> lowerTypeExpr env ty   // struct, sum, alias, type variable, etc.
     | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyOrbIdx _ | TyHermitianIdx _ ->
         // Raw index type syntax in element position (e.g., Array<Idx<3> like ...>).
@@ -1239,6 +1248,8 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
                    Symmetry = SymNone; Tag = Some "__sparseidx"; IxKind = IxKSparse
                    Kind = SDimension; Dependencies = [] }
              | Error why -> raise (TypeErrorRaised (ConstrainedDomainRefused (name, why), None)))
+        | None when env.AmbiguousTypes.ContainsKey name ->
+            raise (TypeErrorRaised (AmbiguousImport ("type", name, env.AmbiguousTypes.[name]), None))
         | _ ->
             { Id = id; Rank = 1; Extent = IRParam (name, 0, IRTNat None); Symmetry = SymNone
               Tag = Some name; IxKind = ixKindOfTag (Some name); Kind = SDimension; Dependencies = [] }

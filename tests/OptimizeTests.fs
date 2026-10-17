@@ -576,6 +576,60 @@ let private inlineGatherBoundOnce () =
             resultLine Fail name ($"expected 3 producers and 3 frees (one each per site); got producers={producers}, frees={frees}")
             false
 
+/// N7: every OTHER scalar consumer of an inline partial sparse read --
+/// `contains` (whose loop spells the operand twice), a subscript of the
+/// gather, a call argument and a top-level expression -- binds it once at the
+/// consumer and frees it: every producer is paired with a free (each kernel
+/// body is emitted both as its lifted function and inline in its nest, so the
+/// four sites render seven times).
+let private inlineGatherEveryPositionSrc =
+    "let static K = [(2, 1), (0, 3), (1, 0), (0, 5)]\n"
+    + "type E = Idx<4>\n"
+    + "let flat: Array<Float64 like E> = [1.0, 2.0, 3.0, 4.0]\n"
+    + "let F = sparse(flat, K)\n"
+    + "function head1(v: T^1) -> T^0 = v(0)\n"
+    + "let has2 = method_for(0..3) <@> lambda(i) -> contains(F((i, _)), 2.0) |> compute\n"
+    + "let first = method_for(0..3) <@> lambda(i) -> F((i, _))(0) |> compute\n"
+    + "let viaCall = method_for(0..3) <@> lambda(i) -> head1(F((i, _))) * 10.0 |> compute\n"
+    + "let top = contains(F((2, _)), 1.0)\n"
+
+let private inlineGatherEveryPosition () =
+    let name = "inline_sparse_gather_every_scalar_position"
+    match cppOfSource name inlineGatherEveryPositionSrc with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let count (p: string) = System.Text.RegularExpressions.Regex.Matches(cpp, p).Count
+        let producers = count @"nested_array_utilities::make_sparse_gather_dense<"
+        let frees = count @"nested_array_utilities::deallocate_gather_dense\("
+        if producers >= 4 && frees = producers then
+            resultLine Pass name ($"4 sites (contains, subscript, call argument, top level): {producers} gathers, each freed")
+            true
+        else
+            resultLine Fail name ($"expected every gather freed (at least 4 sites); got producers={producers}, frees={frees}")
+            false
+
+/// P3-16: a fused inner body the host reads twice is bound ONCE per cell --
+/// `e * e` over `exp(x) * 3.0` evaluated exp twice per cell after fusion.
+let private fusionRepeatedParamSrc =
+    "let x = [1.0, 2.0, 3.0, 4.0, 5.0]\n"
+    + "let z = method_for(exp(x) * 3.0) <@> lambda(e) -> e * e |> compute\n"
+
+let private fusionRepeatedParamBoundOnce () =
+    let name = "fusion_repeated_param_binds_inner_once"
+    match cppOfSource name fusionRepeatedParamSrc with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        // The fused nest is the line writing `z`; the inner map's own lifted
+        // kernel (`return blade_libm::exp(...)`) is emitted separately.
+        let nest = cpp.Split('\n') |> Array.filter (fun l -> l.Contains "z[") |> Array.filter (fun l -> l.Contains "blade_libm::exp(")
+        let perLine = nest |> Array.map (fun l -> System.Text.RegularExpressions.Regex.Matches(l, @"blade_libm::exp\(").Count)
+        if nest.Length >= 1 && perLine |> Array.forall (fun c -> c = 1) then
+            resultLine Pass name "the fused nest evaluates exp once per cell"
+            true
+        else
+            resultLine Fail name ($"expected one blade_libm::exp per fused cell; got per-line counts {perLine}")
+            false
+
 /// Let-level CSE: `reduce(y, (+))` computed twice in one body (once for the
 /// mean, once again for the scale) runs once; the second let is dropped and
 /// its reads go to the first. Pinned as the count of scalar-fold IIFEs per
@@ -1002,6 +1056,30 @@ let private planGramSrc =
     "let A: Array<Float64 like Idx<9>, Idx<5>> = method_for(range<Idx<9>>, range<Idx<5>>) <@> lambda(i, j) -> Float64(i + j) |> compute\n"
     + "let G = gram(A, A)\n"
 
+/// #65: Lowering's per-program reset of the codegen-refusal span table
+/// (IR.declSpansCell) used to clear the ref IN PLACE. A child flow (Task.Run,
+/// a large-stack thread) shares its parent's ref, so a child lowering its own
+/// program wiped the parent's spans mid-codegen. The reset now installs a
+/// fresh ref (the freshCell pattern): the parent's table survives.
+let private declSpanResetIsolated () =
+    let name = "decl_span_reset_installs_fresh_ref"
+    IR.resetDeclSpans ()
+    let marker = { Blade.Ast.noSpan with StartLine = 41; EndLine = 41; EndCol = 9 }
+    IR.recordDeclSpan "__parent_marker" marker
+    let child =
+        System.Threading.Tasks.Task.Run(fun () ->
+            match lower "let c = 1\nlet d = c + 1\n" with
+            | Ok _ -> true
+            | Error _ -> false)
+    let childLowered = child.Result
+    let parentKept = IR.declSpanOf "__parent_marker" = marker
+    if childLowered && parentKept then
+        resultLine Pass name "a child flow's lowering starts its own span table; the parent's survives"
+        true
+    else
+        resultLine Fail name ($"childLowered={childLowered}, parentKept={parentKept}")
+        false
+
 /// PARALLEL EMISSION ISOLATION. The per-program emission cells are
 /// AsyncLocal refs, and a child flow inherits its parent's ref OBJECT: when
 /// the parent had assembled a program first (as this does, on purpose), every
@@ -1183,6 +1261,9 @@ let runOptimizeTests () =
               (declinedMentioning "may abort") "declined: the inner kernel may abort under a branch"
           decisionCase "decision_fusion_applied_unconditional_abort" fusionMayAbortUnconditional "elementwise-fusion" applied
               "elementwise-fusion applied (inner read on every cell)"
+          fusionRepeatedParamBoundOnce ()
+          decisionCase "decision_fusion_applied_repeated_param" fusionRepeatedParamSrc "elementwise-fusion" applied
+              "elementwise-fusion applied (inner value bound once per cell)"
           // Reverse-mode AD of an additive recurrence is O(n): loop count pin.
           recarrayGradEmission ()
           recarrayGradNonlinearEmission ()
@@ -1202,6 +1283,7 @@ let runOptimizeTests () =
           // producer's teardown, the escaping ones spared.
           sparseGatherTeardowns ()
           inlineGatherBoundOnce ()
+          inlineGatherEveryPosition ()
           decisionCase "decision_pool_reuse_applied" poolReuseChainSrc "pool-reuse" applied
               "pool-reuse applied"
           // Let-level CSE over repeatable values, and its decision.
@@ -1263,7 +1345,7 @@ let runOptimizeTests () =
           decisionCase "decision_gram_apply_advisory" gramAdvisorySrc "gram-apply-advisory"
               (declinedMentioning "gram_apply(A, A, v)") "advisory names gram_apply(A, A, v)" ]
         @ planCases ()
-        @ [ parallelEmissionIsolated () ]
+        @ [ parallelEmissionIsolated (); declSpanResetIsolated () ]
         @ validatorPins ()
     let passed = results |> List.filter id |> List.length
     let failed = results.Length - passed

@@ -168,6 +168,7 @@ let private applyFunctorWrappers (st: InterpState) (info: ApplyInfo) (wrappers: 
                     | IRTuple es -> IRTuple (es |> List.map subst)
                     | IRComplex (re, im) -> IRComplex (subst re, subst im)
                     | IRFma (a, b, c) -> IRFma (subst a, subst b, subst c)
+                    | IRRandAt (k, args, w) -> IRRandAt (k, List.map subst args, w |> Option.map (fun (x, n) -> (subst x, n)))
                     | IRTupleProj (e, i, flat) -> IRTupleProj (subst e, i, flat)
                     | IRFieldAccess (e, f) -> IRFieldAccess (subst e, f)
                     | IRLet (id, v, b) -> IRLet (id, subst v, subst b)

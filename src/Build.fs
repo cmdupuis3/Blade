@@ -35,12 +35,17 @@ type ProcessStartInfo = System.Diagnostics.ProcessStartInfo
 //   `off`  -> no -march flag (portable / cross-machine repro)
 //   other  -> `-march=<value>` verbatim (e.g. `skylake`, `x86-64-v3`)
 //
-// `-ffp-contract` defaults to `fast` (FMA on). Contraction fuses a*b+c into
-// one rounding, which breaks the BYTE-IDENTITY differential harnesses:
-// src/Interp/Numerics.fs is bit-pinned to non-FMA scalar semantics. Those
-// harnesses PIN `BLADE_FP_CONTRACT=off` for their own runs (tests/
-// InterpDiff.fs, tests/DiffOracle.fs), since byte-identity is a property
-// of the differential gates, not of user builds.
+// `-ffp-contract` defaults to `fast` (FMA on): Blade is FAST BY DEFAULT, and
+// floating-point reproducibility is the opt-in (formalism 2.4, "Fast by
+// default"). Contraction fuses a*b+c into one rounding, so a default build
+// may round differently from the interpreter (src/Interp/Numerics.fs is
+// bit-pinned to non-FMA scalar semantics); that is outside the cross-lane
+// contract by design. The reproducible modes are `where repro` per function
+// (BLADE_REPRO_FN: noinline + -ffp-contract=off on the body),
+// `BLADE_FP_CONTRACT=off` per build, and the differential harnesses, which
+// PIN `BLADE_FP_CONTRACT=off` for their own runs (tests/InterpDiff.fs,
+// tests/DiffOracle.fs) -- byte-identity is a property of those gates and of
+// builds that ask for it, not of default user builds.
 //   unset  -> `fast` (default: FMA on)
 //   other  -> `-ffp-contract=<value>` verbatim (`fast` | `on` | `off`)
 // The `fma(a, b, c)` intrinsic is the explicit, lane-identical form: it is its
@@ -112,10 +117,7 @@ let optFlags () = "-O3" + marchFlag () + fpContractFlag () + " -fno-math-errno -
 /// Whether `blade run` / `compile` / `emit` try the direct LLVM back end first.
 /// UNSET IS THE DEFAULT AND MEANS OFF: with the variable absent every lane in
 /// the compiler behaves byte-for-byte as it did before the back end existed.
-let llvmEnabled () : bool =
-    match System.Environment.GetEnvironmentVariable("BLADE_LLVM") with
-    | "1" | "on" -> true
-    | _ -> false
+let llvmEnabled () : bool = Toolchain.envFlag "BLADE_LLVM" false
 
 /// Optimization flags for the clang lane. `-O3` plus the SAME `BLADE_MARCH`
 /// mapping the g++ lane uses, so an A/B between the two back ends compares
@@ -339,6 +341,22 @@ let runProc (exe: string) (args: string) (timeoutMs: int) : Result<unit, string>
             else Error $"{exe} failed (exit {proc.ExitCode}):\n{combined}\nCommand: {exe} {args}"
     with ex -> Error $"{exe} exception: {ex.Message}"
 
+/// nvcc's HOST-compiler flags, one definition per role so every CUDA build
+/// line agrees. `-fwrapv` rides every g++ host pass (Linux): integer
+/// overflow WRAPS (formalism section 2.4), as on every other g++ line
+/// (optFlags). MSVC (the Windows host) has no such flag and is documented as
+/// outside that clause; `/Zc:preprocessor` is there because CCCL
+/// (thrust/complex.h) refuses MSVC's traditional preprocessor.
+let cudaSharedHostFlags (onWindows: bool) : string =
+    if onWindows then "-shared -Xcompiler /Zc:preprocessor"
+    else "-shared -Xcompiler -fPIC,-fwrapv"
+
+/// Host flags for a whole-program `.cu` compile (compileCuda) and for the
+/// `.cu` half of the split build (compileCudaSplit).
+let cudaProgramHostFlags (onWindows: bool) : string =
+    if onWindows then "-Xcompiler /Zc:preprocessor"
+    else "-Xcompiler -Werror=float-conversion,-Werror=narrowing,-fwrapv"
+
 /// The include line a cuBLAS-dispatching program carries, analogous to the
 /// `blade_linalg.hpp` / `blade_lapack.hpp` sniffs below: codegen writes it
 /// exactly when `LinAlgPatterns.resolveNodeRoute` picked the device backend.
@@ -392,9 +410,7 @@ let buildCublasDevice (cppFullPath: string) : Result<string, string> =
         | None ->
         // /Zc:preprocessor: CCCL headers refuse MSVC's traditional
         // preprocessor (same rule as compileCudaSplit / compileCudaMpiHybrid).
-        let sharedFlags =
-            if onWindows then "-shared -Xcompiler /Zc:preprocessor"
-            else "-shared -Xcompiler -fPIC"
+        let sharedFlags = cudaSharedHostFlags onWindows
         let args =
             $"-std=c++17 -O2 {sharedFlags} -o \"{libFile}\" \"{cuFile}\" -lcublas"
         match runProc "nvcc" args 300000 with
@@ -559,25 +575,18 @@ let private exeCacheDir () : string option =
         let root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
         if String.IsNullOrEmpty root then None
         else Some (Path.Combine(root, "Blade", "exe-cache"))
-    match Environment.GetEnvironmentVariable "BLADE_EXE_CACHE" with
-    | null | "" -> defaultDir ()
-    | v ->
-        match v.Trim() with
-        | "" -> defaultDir ()
-        | t when t = "1" || t.ToLowerInvariant() = "on" || t.ToLowerInvariant() = "true" -> defaultDir ()
-        | t when t = "0" || t.ToLowerInvariant() = "off" || t.ToLowerInvariant() = "false" -> None
-        | t when Path.IsPathRooted t -> Some t
-        | _ -> None
+    match Toolchain.envSwitch "BLADE_EXE_CACHE" with
+    | Toolchain.SwitchUnset | Toolchain.SwitchOn -> defaultDir ()
+    | Toolchain.SwitchOff -> None
+    | Toolchain.SwitchOther t when Path.IsPathRooted t -> Some t
+    | Toolchain.SwitchOther _ -> None
 
 /// `[cache] hit/store <hash8>` tracing on stderr. `compileCppWithExtraSource`
 /// takes no verbose parameter (it is reached from the CLI, the REPL and five
 /// test blocks), so the flag travels as a process-level env pin -- the same
 /// spelling `--memcheck` uses for BLADE_MEMCHECK. `blade run --verbose` sets it
 /// during argument parsing (Cli.fs).
-let private exeCacheVerbose () =
-    match Environment.GetEnvironmentVariable "BLADE_EXE_CACHE_VERBOSE" with
-    | null | "" | "0" -> false
-    | _ -> true
+let private exeCacheVerbose () = Toolchain.envFlag "BLADE_EXE_CACHE_VERBOSE" false
 
 /// The compiler's identity: resolved g++ path + the first line of
 /// `g++ --version`. Memoized for the process (one subprocess, ~50-170 ms, and
@@ -760,15 +769,11 @@ let tileCacheDir () : string option =
         let root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
         if String.IsNullOrEmpty root then None
         else Some (Path.Combine(root, "Blade", "tile-cache"))
-    match Environment.GetEnvironmentVariable "BLADE_TILE_CACHE" with
-    | null | "" -> None
-    | v ->
-        match v.Trim() with
-        | "" -> None
-        | t when t = "1" || t.ToLowerInvariant() = "on" || t.ToLowerInvariant() = "true" -> defaultDir ()
-        | t when t = "0" || t.ToLowerInvariant() = "off" || t.ToLowerInvariant() = "false" -> None
-        | t when Path.IsPathRooted t -> Some t
-        | _ -> None
+    match Toolchain.envSwitch "BLADE_TILE_CACHE" with
+    | Toolchain.SwitchUnset | Toolchain.SwitchOff -> None
+    | Toolchain.SwitchOn -> defaultDir ()
+    | Toolchain.SwitchOther t when Path.IsPathRooted t -> Some t
+    | Toolchain.SwitchOther _ -> None
 
 /// The exe cache's caps, applied to tile files: oldest-mtime first, down to
 /// 3/4 of whichever cap tripped. BOTH caps matter and for the exe cache's
@@ -1085,13 +1090,7 @@ let compileCuda (cuFile: string) (outputDir: string) : Result<string, string> =
         // front-end doesn't accept -Werror=float-conversion, so route it via
         // -Xcompiler (cl.exe uses different flag spellings, so Windows drops
         // the g++-specific ones and relies on nvcc/cl defaults).
-        let hostWarn =
-            if Platforms.os = Platforms.Windows then
-                // CCCL (thrust/complex.h) refuses MSVC's traditional
-                // preprocessor; the conforming one is safe for all generated
-                // CUDA code, so it is passed unconditionally.
-                "-Xcompiler /Zc:preprocessor"
-            else "-Xcompiler -Werror=float-conversion,-Werror=narrowing"
+        let hostWarn = cudaProgramHostFlags (Platforms.os = Platforms.Windows)
 
         let args = $"-std=c++17 -O2 {hostWarn} -o \"{exeFullPath}\" \"{cuFullPath}\""
 
@@ -1163,8 +1162,11 @@ let compileCudaSplit (cuFile: string) (cppFile: string) (outputDir: string) : Re
     else
         // Linux: nvcc compiles the .cu (host code via g++), g++ compiles the
         // .cpp; both share the g++ ABI, so the split + link is safe.
-        let nvccCu = $"-std=c++17 -O2 -c -o \"{cuObj}\" \"{cuFull}\""
-        let gppCpp = $"-std=c++17 -O2 -fopenmp -Werror=float-conversion -Werror=narrowing -c -o \"{cppObj}\" \"{cppFull}\""
+        // `-fwrapv` on both host halves: integer overflow WRAPS (formalism
+        // section 2.4), as on every other g++ line (optFlags). MSVC hosts (the
+        // Windows arm above) have no such flag and are outside that clause.
+        let nvccCu = $"-std=c++17 -O2 -Xcompiler -fwrapv -c -o \"{cuObj}\" \"{cuFull}\""
+        let gppCpp = $"-std=c++17 -O2 -fwrapv -fopenmp -Werror=float-conversion -Werror=narrowing -c -o \"{cppObj}\" \"{cppFull}\""
         let nvccLink = $"-std=c++17 -O2 -Xcompiler -fopenmp -o \"{exeFull}\" \"{cuObj}\" \"{cppObj}\""
         match runProc "nvcc" nvccCu 120000 with
         | Error e -> Error e
@@ -1192,9 +1194,7 @@ let compileCudaMpiHybrid (cuFile: string) (cppFile: string) (outputDir: string) 
         let dllFull = Path.Combine(Path.GetFullPath outputDir, Path.GetFileNameWithoutExtension cuFile + "_cuda" + dllExt)
         // /Zc:preprocessor on Windows: CCCL (thrust/complex.h) refuses MSVC's
         // traditional preprocessor (see compileCudaSplit).
-        let sharedFlags =
-            if caps.Platform = PWindows then "-shared -Xcompiler /Zc:preprocessor"
-            else "-shared -Xcompiler -fPIC"
+        let sharedFlags = cudaSharedHostFlags (caps.Platform = PWindows)
         let nvccArgs = $"-std=c++17 -O2 {sharedFlags} -o \"{dllFull}\" \"{cuFull}\""
         match runProc "nvcc" nvccArgs 180000 with
         | Error e -> Error e

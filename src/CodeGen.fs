@@ -470,7 +470,7 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // MutableArrayLets independently of IsMutable, so both must go.
             let aliasStaging =
                 match value with
-                | IRVar (srcId, _) -> canAliasStagingLet lets (Some id) srcId
+                | IRVar (srcId, _) -> canAliasStagingLet lets (Some id) srcId [retExpr]
                 | _ -> false
             let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let bodyCtx =
@@ -1389,8 +1389,7 @@ let genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) :
         funcDef.Params
         |> List.fold (fun m p -> Map.add p.VarId p.Name m) ctx.VarNames
     let bodyNames =
-        funcDef.Captures
-        |> List.fold (fun m c -> Map.add c.Id c.Name m) bodyNames
+        withCaptureNames CapturesAreParameters funcDef.Captures bodyNames
 
     // Generate proper C++ function
     let safeName = sanitizeCppName funcDef.Name
@@ -1544,7 +1543,7 @@ let genFuncDefAsLambda (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFu
     let bodyNames = funcDef.Params |> List.fold (fun m p -> Map.add p.VarId p.Name m) ctx.VarNames
     // Parity with genFuncDef (which folds captures in alongside params): the
     // body's IRVar references to captures resolve to the declared names.
-    let bodyNames = funcDef.Captures |> List.fold (fun m c -> Map.add c.Id c.Name m) bodyNames
+    let bodyNames = withCaptureNames CapturesAreParameters funcDef.Captures bodyNames
     let safeName = sanitizeCppName funcDef.Name
     // std::function type: one param type per Blade param, then the captures'.
     let paramTypeList =
@@ -2115,6 +2114,8 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
     // Merge context warnings into module-level collector
     let cell = exprWarningsCell ()
     cell.Value <- cell.Value @ finalCtx.Warnings.Value
+    // main()'s flat tuples, for the print pass (moduleTupleChildrenCell).
+    (moduleTupleChildrenCell ()).Value <- finalCtx.TupleChildren
 
     // Settle every shadow-frame marker before the code leaves this function:
     // both buckets are analyzed together (a file-scope function and a
@@ -2234,6 +2235,7 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
     let computeCode = List.ofSeq computeLines
     let cell = exprWarningsCell ()
     cell.Value <- cell.Value @ finalCtx.Warnings.Value
+    (moduleTupleChildrenCell ()).Value <- finalCtx.TupleChildren
     // See genModule: markers are resolved across all three buckets at once.
     match resolveShadowFrames [funcCode; setupCode; computeCode] with
     | [fc; sc; cc] -> (fc, sc, cc)
@@ -2241,6 +2243,7 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
 
 /// Generate a complete C++ program with main() from an IR module
 let genStructDef (name: string) (fields: (string * IRType) list) : string list =
+    let name = Blade.Types.TypeOrigins.cppName name
     let fieldLines = fields |> List.map (fun (fname, fty) ->
         // Array-typed fields render as Array<T,N> / Ragged<T> wrappers so
         // the field carries its shape with it. Other types use the
@@ -2260,6 +2263,11 @@ let genTypeDefs (modul: IRModule) : string list =
     modul.Types |> List.collect (function
         | IRTDStruct (name, fields) -> genStructDef name fields
         | IRTDVariant (name, variants) ->
+            // The type and every constructor through the one sanitizer (D11):
+            // module A's `Red` is the global C++ name `A__Red` (plain enum
+            // members and constructor functions are unscoped).
+            let name = Blade.Types.TypeOrigins.cppName name
+            let variants = variants |> List.map (fun (v, d) -> (Blade.Types.TypeOrigins.cppName v, d))
             let hasData = variants |> List.exists (fun (_, d) -> d.IsSome)
             if hasData then
                 // Tagged union using std::variant. Wrapper structs use a _T
@@ -2287,7 +2295,7 @@ let genTypeDefs (modul: IRModule) : string list =
                 [$"""enum {name} {{ {(variants |> List.map fst |> String.concat ", ")} }};"""
                  ""]
         | IRTDAlias (name, ty) ->
-            [$"using {name} = {(irTypeToCpp ty)};"; ""]
+            [$"using {(Blade.Types.TypeOrigins.cppName name)} = {(irTypeToCpp ty)};"; ""]
         | IRTDIndexType (name, _) ->
             // Emit a typedef for the index type so foreign-key element types
             // (IRTIdxTagged (_, IRefNamed name)) can render as the alias
@@ -2463,6 +2471,134 @@ let genPrintFieldArray (expr: string) (rank: int) (ind: string) : string list =
         @ [ for d in rank - 1 .. -1 .. 0 -> $"""{ind}    {(String.replicate d "    ")}}}""" ]
         @ [ $"{ind}    cout << \"]\";"
             $"{ind}}}" ]
+
+/// The keys of the INTEGER EnumIdx a tag names (through aliases), in
+/// position order: a value of it is a KEY represented as its POSITION (D2).
+let intEnumKeysOfModule (types: IRTypeDef list) (tag: string) : int64 list option =
+    let rec go (fuel: int) (t: string) =
+        if fuel <= 0 then None else
+        types |> List.tryPick (fun td ->
+            match td with
+            | IRTDEnumIdx (n, _, values) when n = t
+                    && not values.IsEmpty && values |> List.forall (function EVInt _ -> true | _ -> false) ->
+                Some (Some (values |> List.choose (function EVInt k -> Some k | _ -> None)))
+            | IRTDAlias (n, IRTIdxTagged (_, IRefNamed t2)) when n = t && t2 <> t -> Some (go (fuel - 1) t2)
+            | _ -> None)
+        |> Option.flatten
+    go 16 tag
+
+/// How a top-level TUPLE or STRUCT value prints: spelled like its literal,
+/// `t = (1, 2.0)`, `p = P { a = 1.0, b = 2.0 }`, nesting as the literal nests.
+/// Shared by both lanes (Interp/Print.fs walks the same classification), so
+/// the two cannot disagree about which aggregates print or how.
+type AggregatePrint =
+    /// `cout << x`: any printable scalar (an index-tagged or Nat value prints
+    /// as its integer, a string verbatim, exactly like a scalar binding).
+    | APScalar
+    /// A value of an INTEGER EnumIdx: a key represented as its position (D2),
+    /// printed as its key through the type's key table.
+    | APKeyed of keys: int64 list
+    /// A dense array of integer EnumIdx values: its KEYS, in the dense format.
+    | APKeyedArray of rank: int * keys: int64 list
+    /// A dense array of printable scalars: its values in the top-level array
+    /// format (genPrintFieldArray -- rank 2 nested, every other rank flat).
+    | APDenseArray of rank: int
+    /// Any other array: the struct-field placeholder (`<rank-2 array>`).
+    | APOpaque of text: string
+    | APTuple of AggregatePrint list
+    | APStruct of name: string * fields: (string * AggregatePrint) list
+
+/// The print form of a tuple- or struct-typed value, or None when it has none
+/// (a component that is a function, a loop object, a variant, unit, ...). A
+/// struct prints through its DECLARED field list (`types` = IRModule.Types);
+/// a recursive struct reference has no finite literal and is None.
+let aggregatePrintOf (types: IRTypeDef list) (t: IRType) : AggregatePrint option =
+    let rec go (seen: Set<string>) (t: IRType) : AggregatePrint option =
+        let all (xs: AggregatePrint option list) =
+            if xs |> List.forall Option.isSome then Some (List.map Option.get xs) else None
+        match IR.stripUnits t with
+        | IRTScalar ETUnit -> None
+        | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), IRefNamed tag) when (intEnumKeysOfModule types tag).IsSome ->
+            Some (APKeyed (intEnumKeysOfModule types tag).Value)
+        | IRTScalar _ | IRTIdxTagged _ | IRTNat _ -> Some APScalar
+        | ArrayElem _ as at ->
+            let keyedElem =
+                match at with
+                | ArrayElem a ->
+                    (match IR.stripUnits a.ElemType with
+                     | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), IRefNamed tag) -> intEnumKeysOfModule types tag
+                     | _ -> None)
+                | _ -> None
+            (match structFieldPrint at, keyedElem with
+             | FieldDenseArray rank, Some keys -> Some (APKeyedArray (rank, keys))
+             | FieldDenseArray rank, None -> Some (APDenseArray rank)
+             | FieldOpaqueArray text, _ -> Some (APOpaque text)
+             | FieldScalar, _ -> None)
+        | IRTTuple ts when not ts.IsEmpty -> ts |> List.map (go seen) |> all |> Option.map APTuple
+        | IRTNamed n when not (seen.Contains n) ->
+            let fields =
+                types |> List.tryPick (function
+                    | IRTDStruct (m, fs) when m = n -> Some fs
+                    | _ -> None)
+            (match fields with
+             | Some fs when not fs.IsEmpty ->
+                 let seen' = seen.Add n
+                 fs |> List.map (fun (_, ft) -> go seen' ft) |> all
+                 |> Option.map (fun ps -> APStruct (n, List.zip (List.map fst fs) ps))
+             | _ -> None)
+        | _ -> None
+    match IR.stripUnits t with
+    | IRTTuple _ | IRTNamed _ -> go Set.empty t
+    | _ -> None
+
+/// The statements printing the aggregate `expr` (a C++ expression of the
+/// value's type) in its literal spelling, no name and no newline.
+let rec genPrintAggregate (ap: AggregatePrint) (expr: string) (ind: string) : string list =
+    match ap with
+    | APScalar -> [ $"{ind}cout << {expr};" ]
+    | APKeyed keys ->
+        let table = keys |> List.map (fun k -> $"{k}LL") |> String.concat ", "
+        [ $"{ind}cout << std::array<int64_t, {keys.Length}>{{{{{table}}}}}[{expr}];" ]
+    | APDenseArray rank -> genPrintFieldArray expr rank ind
+    | APKeyedArray (rank, keys) ->
+        let table = keys |> List.map (fun k -> $"{k}LL") |> String.concat ", "
+        let e = System.Text.RegularExpressions.Regex.Escape expr
+        let cellRe = System.Text.RegularExpressions.Regex($@"cout << ({e}(\[[^\]]+\])+);")
+        genPrintFieldArray expr rank ind
+        |> List.map (fun l -> cellRe.Replace(l, $"cout << std::array<int64_t, {keys.Length}>{{{{{table}}}}}[$1];"))
+    | APOpaque text -> [ $"{ind}cout << \"{text}\";" ]
+    | APTuple parts ->
+        [ $"{ind}cout << \"(\";" ]
+        @ (parts |> List.mapi (fun i p ->
+            (if i > 0 then [ $"{ind}cout << \", \";" ] else [])
+            @ genPrintAggregate p $"std::get<{i}>({expr})" ind) |> List.concat)
+        @ [ $"{ind}cout << \")\";" ]
+    | APStruct (name, fields) ->
+        // The SOURCE name (D11: module A's `P` prints `P { .. }`, as the
+        // literal is written), in both lanes.
+        let name = Blade.Types.TypeOrigins.sourceName name
+        [ $"{ind}cout << \"{name} {{ \";" ]
+        @ (fields |> List.mapi (fun i (f, p) ->
+            let sep = if i > 0 then ", " else ""
+            [ $"{ind}cout << \"{sep}{f} = \";" ]
+            @ genPrintAggregate p $"{expr}.{f}" ind) |> List.concat)
+        @ [ $"{ind}cout << \" }}\";" ]
+
+/// The statements printing a tuple held FLAT (`std::make_tuple(t_0, t_1,
+/// t_2)` under a left-nested type, moduleTupleChildrenCell): the parentheses
+/// follow the classification's nesting, the components are `std::get<k>` of
+/// the flat tuple, k counting leaves left to right (IR.flattenTupleLeaves'
+/// order -- the order the emitters register the leaves in).
+let rec private genPrintAggregateFlatLeaves (ap: AggregatePrint) (flat: string) (ind: string) (k: int) : string list * int =
+    match ap with
+    | APTuple parts ->
+        let (lines, k') =
+            parts |> List.indexed |> List.fold (fun (acc, k) (i, p) ->
+                let sep = if i > 0 then [ $"{ind}cout << \", \";" ] else []
+                let (ls, k') = genPrintAggregateFlatLeaves p flat ind k
+                (acc @ sep @ ls, k')) ([], k)
+        ([ $"{ind}cout << \"(\";" ] @ lines @ [ $"{ind}cout << \")\";" ], k')
+    | leaf -> (genPrintAggregate leaf $"std::get<{k}>({flat})" ind, k + 1)
 
 /// Generate print loop for arrays with per-dimension symmetry awareness.
 /// Expands IRIndexType list into per-dimension loop structure:
@@ -2652,6 +2788,84 @@ let functionPrintRefusal (names: string list) : string =
     let what = if names.Length = 1 then $"{ns} is a function" else $"{ns} are functions"
     $"--print: {what}, not a value, so there is nothing to print -- select a binding that applies it (e.g. `let y = {names.Head}(...)`)"
 
+/// A destructuring carrier (`let (a, b) = e` binds `_(a, b)`, emitted as
+/// `__tup_<id>`): the compiler's own binding, never printed -- its components
+/// print under their own names.
+let isDestructureCarrier (b: IRBinding) : bool = b.Name.StartsWith "_("
+
+/// A binding an ELABORATOR introduced (`__ppl_cen_A`, `__dist_dx_k1`, ...): a
+/// leading `__` marks an internal, non-API name. It is not echoed by default
+/// -- a ppl program used to print a screenful of these around the user's own
+/// bindings -- but prints when selected by name (`--print`). A bare top-level
+/// expression's carrier `__expr<n>` is the user's value and always prints.
+let isInternalBindingName (name: string) : bool =
+    name.StartsWith "__" && not (System.Text.RegularExpressions.Regex.IsMatch(name, @"^__expr\d+$"))
+
+/// Whether a binding that passes the printability gate (not deferred, not a
+/// streamed read, not an unmaterialized loop value) still has NO printed form:
+/// genPrintStatements' arms that emit only a C++ comment, decided from the
+/// TYPE. Both lanes' `--print` refusals read it (Interp/Print.fs), so a
+/// selected binding that would print nothing is refused by name instead of
+/// leaving the run silent. The value-dependent comment arms (a ragged or
+/// compound-row SUB-VIEW) are not covered: they hinge on codegen state the
+/// interpreter does not share.
+let hasNoPrintedForm (modul: IRModule) (b: IRBinding) : bool =
+    match IR.stripUnits b.Type with
+    | IRTScalar ETUnit | IRTUnit -> true
+    | IRTScalar _ | IRTIdxTagged _ | IRTNat _ -> false
+    | IRTTuple _ | IRTNamed _ -> (aggregatePrintOf modul.Types b.Type).IsNone
+    | ArrayElem arrType ->
+        let wreathUnprintable =
+            arrType.IndexTypes |> List.exists (fun ix -> ix.Symmetry = SymWreath)
+            && (match arrType.IndexTypes with
+                | [ ix ] -> (match orbitBaseExtent ix with IRLit (IRLitInt _) -> false | _ -> true)
+                | _ -> true)
+        let elemUnprintable =
+            match arrType.ElemType with
+            | FuncElem _ | IRTTuple _ -> true
+            | IRTNamed _ ->
+                not (arrayRank arrType = 1 && (aggregatePrintOf modul.Types arrType.ElemType).IsSome)
+            | _ -> false
+        wreathUnprintable || isCompoundArrayType arrType || isSparseArrayType arrType || elemUnprintable
+    | _ -> true
+
+/// The `--print` refusal for selected bindings with no printed form, one text
+/// for both lanes.
+let formlessPrintRefusal (modul: IRModule) (names: string list) : string =
+    let typeOfName n =
+        modul.Bindings |> List.tryFind (fun b -> b.Name = n)
+        |> Option.map (fun b -> Blade.IRPrint.ppIRType b.Type) |> Option.defaultValue "?"
+    let described = names |> List.map (fun n -> $"{n} : {typeOfName n}") |> String.concat ", "
+    let verb = if names.Length = 1 then "has no printed form" else "have no printed form"
+    $"--print: {described} {verb}, so there is nothing to print -- select a binding derived from it"
+/// The integer EnumIdx a binding's value (a scalar, or an array's element) is
+/// of, with its keys.
+let intEnumKeysOfBindingType (modul: IRModule) (ty: IRType) : int64 list option =
+    let elemTag (t: IRType) =
+        match IR.stripUnits t with
+        | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), IRefNamed tag) -> Some tag
+        | _ -> None
+    match IR.stripUnits ty with
+    | ArrayElem at -> elemTag at.ElemType
+    | t -> elemTag t
+    |> Option.bind (intEnumKeysOfModule modul.Types)
+
+/// A binding of an integer EnumIdx type prints its KEYS: every streamed
+/// value `v` of the printer becomes `__ek[v]` over a local key table.
+let private intEnumKeyedPrint (modul: IRModule) (b: IRBinding) (lines: string list) : string list =
+    match intEnumKeysOfBindingType modul b.Type with
+    | Some keys when not lines.IsEmpty ->
+        let v = System.Text.RegularExpressions.Regex.Escape (sanitizeCppName b.Name)
+        let scalarRe = System.Text.RegularExpressions.Regex($"<< ({v}) << endl;")
+        let cellRe = System.Text.RegularExpressions.Regex($@"cout << ({v}(\[[^\]]+\])+);")
+        let table = keys |> List.map (fun k -> $"{k}LL") |> String.concat ", "
+        let body =
+            lines |> List.map (fun l ->
+                let l = cellRe.Replace(l, "cout << __ek[$1];")
+                scalarRe.Replace(l, "<< __ek[$1] << endl;"))
+        [ $"    {{ static const int64_t __ek[] = {{{table}}};" ] @ body @ [ "    }" ]
+    | _ -> lines
+
 let genPrintStatements (modul: IRModule) : string list =
     let deferredIds = computeDeferredIds modul.Bindings
     // `--print <names>` (BLADE_PRINT, CodeGenState.printSelection): print only
@@ -2697,8 +2911,16 @@ let genPrintStatements (modul: IRModule) : string list =
             let sep = ", "
             // An eliminated generic-function alias is still a binding the
             // source has; it is refused below as a function, not as a typo.
+            // The masked read's hidden raw half (ProviderReadSpec.AllowMissing)
+            // is NOT a selectable binding: printing it would expose exactly the
+            // missing cells the boundary rule keeps out of the program.
             let declared =
-                modul.Bindings |> List.map (fun b -> b.Name) |> Set.ofList
+                modul.Bindings
+                |> List.filter (fun b ->
+                    match Map.tryFind b.Id modul.ProviderReads with
+                    | Some spec -> not spec.AllowMissing
+                    | None -> true)
+                |> List.map (fun b -> b.Name) |> Set.ofList
                 |> Set.union modul.FunctionAliasNames
             let unknown = Set.difference names declared |> Set.toList
             // A SELECTED binding holding a FUNCTION has no printed form in
@@ -2713,7 +2935,16 @@ let genPrintStatements (modul: IRModule) : string list =
                 modul.Bindings
                 |> List.filter (fun b -> Set.contains b.Name names && not (isPrintableBinding b))
                 |> List.map (fun b -> b.Name) |> List.distinct
-            if unknown.IsEmpty && functions.IsEmpty && silent.IsEmpty then []
+            // A SELECTED binding of a kind with no printed form (a variant, a
+            // compound array, a tuple holding a function, ...) prints nothing
+            // either -- same refusal, third cause.
+            let formless =
+                modul.Bindings
+                |> List.filter (fun b ->
+                    Set.contains b.Name names && isPrintableBinding b && hasNoPrintedForm modul b)
+                |> List.map (fun b -> b.Name) |> List.distinct
+                |> List.filter (fun n -> not (List.contains n functions))
+            if unknown.IsEmpty && functions.IsEmpty && silent.IsEmpty && formless.IsEmpty then []
             elif not unknown.IsEmpty then
                 let known = declared |> Set.toList |> List.filter (fun n -> not (n.StartsWith "__")) |> String.concat sep
                 let missing = String.concat sep unknown
@@ -2724,10 +2955,13 @@ let genPrintStatements (modul: IRModule) : string list =
             else
                 let names = String.concat sep silent
                 let verb = if silent.Length = 1 then "is a deferred loop value (or streamed read) that is never materialized" else "are deferred loop values (or streamed reads) that are never materialized"
-                [ refusalErrorLine "    " $"--print: {names} {verb}, so there is nothing to print -- materialize it with `|> compute` to print it" ]
+                if not silent.IsEmpty then
+                    [ refusalErrorLine "    " $"--print: {names} {verb}, so there is nothing to print -- materialize it with `|> compute` to print it" ]
+                else
+                    [ refusalErrorLine "    " (formlessPrintRefusal modul formless) ]
         | None -> []
     selectionRefusal @
-    (modul.Bindings |> List.collect (fun b ->
+    (let printLinesOf (b: IRBinding) : string list =
         let isPrintable = isPrintableBinding b
         
         let hasSymmetry =
@@ -2742,7 +2976,7 @@ let genPrintStatements (modul: IRModule) : string list =
         let wanted =
             match selection with
             | Some names -> Set.contains b.Name names
-            | None -> true
+            | None -> not (isInternalBindingName b.Name)
 
         if isPrintable && wanted then
             match IR.stripUnits b.Type with
@@ -2800,51 +3034,33 @@ let genPrintStatements (modul: IRModule) : string list =
                     // (e.g. `let r = funcs(1)(5.0)`) still runs.
                     [$"    // (array '{b.Name}' of function values not auto-printed; std::function isn't streamable)"]
                 | IRTNamed structName ->
+                    // A rank-1 array of structs prints each ELEMENT spelled like
+                    // its literal, through the one aggregate formatter a struct
+                    // value uses (formalism 3.9: printing agrees with the
+                    // literal): `pts = [P { x = 1.0, y = 2.0 }, P { x = 3.0, y = 4.0 }]`.
+                    // It used to print `[{x: 1.0, y: 2.0}, ...]`, a spelling no
+                    // literal has. An element with no print form (a variant
+                    // field, a function field), or rank > 1, prints nothing.
                     let rank = arrayRank arrType
-                    let structFields =
-                        modul.Types |> List.tryPick (fun td ->
-                            match td with
-                            | IRTDStruct (n, fs) when n = structName -> Some fs
-                            | _ -> None)
-                    match structFields, rank with
-                    | Some fields, 1 when not (List.isEmpty fields) ->
+                    match aggregatePrintOf modul.Types arrType.ElemType, rank with
+                    | Some ap, 1 ->
                         let bv = sanitizeCppName b.Name
                         let firstVar = $"{bv}__first"
-                        let fieldPrints =
-                            fields |> List.collect (fun (fname, ftype) ->
-                                let i = fields |> List.findIndex (fun (n, _) -> n = fname)
-                                let prefix = if i = 0 then "" else ", "
-                                let label = $"        cout << \"{prefix}{fname}: \";"
-                                match structFieldPrint ftype with
-                                | FieldDenseArray rank ->
-                                    // An ARRAY-typed field used to stream as
-                                    // `cout << row.field`, i.e. the wrapper's
-                                    // data POINTER (`samples: 0x1fe4df26e90`),
-                                    // which both differential normalizers then
-                                    // masked. Printed as its values instead, in
-                                    // the top-level array format.
-                                    label :: genPrintFieldArray $"{bv}[{printLoopVar 0}].{fname}" rank "        "
-                                | FieldOpaqueArray text ->
-                                    [ $"        cout << \"{prefix}{fname}: {text}\";" ]
-                                | FieldScalar ->
-                                    [ $"        cout << \"{prefix}{fname}: \" << {bv}[{printLoopVar 0}].{fname};" ])
                         [
                             $"    cout << \"{b.Name} = [\";"
                             $"    bool {firstVar} = true;"
                             $$"""    for (size_t {{printLoopVar 0}} = 0; {{printLoopVar 0}} < {{bv}}.extents[0]; {{printLoopVar 0}}++) {"""
                             $"        if (!{firstVar}) cout << \", \";"
                             $"        {firstVar} = false;"
-                            "        cout << \"{\";"
                         ]
-                        @ fieldPrints
+                        @ genPrintAggregate ap $"{bv}[{printLoopVar 0}]" "        "
                         @ [
-                            "        cout << \"}\";"
                             "    }"
                             "    cout << \"]\" << endl;"
                         ]
                     | _ ->
-                        // Struct not found in module Types, or rank > 1, or
-                        // no fields -- emit diagnostic comment and skip.
+                        // No element print form, or rank > 1 -- emit a
+                        // diagnostic comment and skip.
                         [$"    // (array '{b.Name}' of struct '{structName}' not auto-printed; access individual fields via {b.Name}[i].field)"]
                 | IRTTuple _ ->
                     // std::tuple has no operator<<; value-checks read
@@ -2988,11 +3204,27 @@ let genPrintStatements (modul: IRModule) : string list =
                     genPrintArraySymAware b.Name arrType.IndexTypes
                 else
                     genPrintArrayFlat b.Name rank
+            // A TUPLE or STRUCT prints spelled like its literal (`t = (1, 2.0)`,
+            // `p = P { a = 1.0, b = 2.0 }`); one with no print form (a
+            // variant, a component that is a function, ...) prints nothing,
+            // and `--print` refuses it above (hasNoPrintedForm).
+            | IRTTuple _ | IRTNamed _ when not (isDestructureCarrier b) ->
+                (match aggregatePrintOf modul.Types b.Type with
+                 | Some ap ->
+                     let v = sanitizeCppName b.Name
+                     let body =
+                         match Map.tryFind v (moduleTupleChildrenCell ()).Value with
+                         | Some leaves when leaves.Length = (IR.flattenTupleLeaves b.Type).Length ->
+                             fst (genPrintAggregateFlatLeaves ap v "    " 0)
+                         | _ -> genPrintAggregate ap v "    "
+                     [ $"    cout << \"{b.Name} = \";" ] @ body @ [ "    cout << endl;" ]
+                 | None -> [])
             | IRTTuple _ -> []
             | IRTNamed _ -> []
             | IRTUnit -> []
             | _ -> []
-        else [])
+        else []
+     modul.Bindings |> List.collect (fun b -> intEnumKeyedPrint modul b (printLinesOf b))
     )
 
 /// Assemble the main() function wrapper around binding code and print statements.
@@ -3295,6 +3527,14 @@ let getCudaFileContent () : string option =
               "#include <cstddef>"
               "#include <cstdint>" ]
             @ (if usesComplex then ["#include <complex>"; "#include <thrust/complex.h>"] else [])
+            // Device integer `^` (renderContractBinOp's device arm): exact
+            // square-and-multiply in UNSIGNED arithmetic, so it wraps like the
+            // host's blade_arith::ipow_nn (formalism section 2.4) rather than
+            // going through a double `pow`. Emitted only when a kernel names it.
+            @ (if defs |> List.exists (fun (l: string) -> l.Contains "blade_dev_ipow") then
+                   [ "__host__ __device__ inline int64_t blade_dev_ipow64(int64_t b, int64_t e) { uint64_t r = 1, x = (uint64_t)b; while (e > 0) { if (e & 1) r *= x; x *= x; e >>= 1; } return (int64_t)r; }"
+                     "__host__ __device__ inline int32_t blade_dev_ipow32(int32_t b, int32_t e) { uint32_t r = 1, x = (uint32_t)b; while (e > 0) { if (e & 1) r *= x; x *= x; e >>= 1; } return (int32_t)r; }" ]
+               else [])
             // Failure exit: the wrappers' CUDA statuses are checked
             // (checkCudaStatuses) and fail through the panic the host binds
             // in through this binder (dllPanicBindLines binds it whenever this

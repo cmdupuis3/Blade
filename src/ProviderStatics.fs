@@ -67,6 +67,7 @@ let netcdfSpec : Blade.ProviderRegistry.ProviderSpec = {
     LoadAsModule = Blade.NetcdfProvider.loadAsModule
     ReadVarData = fun path varName ->
         Blade.NetcdfProvider.readVarData path varName |> Result.map netcdfAdapt
+    MissingRuleOf = Blade.NetcdfProvider.missingRuleOf
     GenReadVar = Blade.NetcdfProvider.CppNetcdf.genReadVar
     GenReadPacked = None  // packed (SymIdx/AntisymIdx) NetCDF I/O: future arc
     ReadWreathPool = None // OrbIdx (iterated-wreath) NetCDF I/O: same arc, refused
@@ -140,6 +141,14 @@ let private readAndFoldUncached (provider: string) (path: string) (varName: stri
             if count > foldCeiling then
                 Error $"'{varName}' has {count} elements -- beyond the {foldCeiling}-element fold ceiling; large closed inputs take the runtime schedule (bind with a plain `let ... |> {provider}.read`)"
             else
+            // The provider boundary rule BEFORE anything folds: a missing cell
+            // (NaN / +-Inf, a NetCDF sentinel) must not become a compile-time
+            // constant. The fold's own failure (the `let static` assertion, BL3999,
+            // the code of every compile-time fold failure) carries the runtime
+            // refusal's sentence, so one ERROR-CONTAINS pin matches either.
+            match Blade.ProviderRegistry.checkPayload (spec.MissingRuleOf path varName) varName path data.DimLengths data.Payload with
+            | Some refusal -> Error refusal
+            | None ->
                 let h = spec.Fingerprint path
                 provenance.Add((path, varName, h))
                 foldHashes.[key] <- h

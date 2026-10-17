@@ -113,7 +113,7 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         let ctx' = addVarName binding.Id name ctx
         (forceCode @ code, ctx')
     | IRArrayLit (elements, arrType) ->
-        let code = genArrayLiteral ctx name elements arrType
+        let code = genArrayLiteral ctx name binding.Name elements arrType
         let ctx' = addVarName binding.Id name ctx
         (code, ctx')
     
@@ -233,7 +233,7 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         genVarAliasBinding ctx binding builder srcId
     | IRBind (comp, cont) ->
         genBindChainBinding ctx binding builder comp cont
-    | IRTuple _ | IRComplex _ | IRFma _ | IRFieldAccess _ | IRLit _ | IRBinOp _ | IRUnaryOp _ | IRIf _ | IRApp _ | IRParam _ | IRMatch _
+    | IRTuple _ | IRComplex _ | IRFma _ | IRRandAt _ | IRFieldAccess _ | IRLit _ | IRBinOp _ | IRUnaryOp _ | IRIf _ | IRApp _ | IRParam _ | IRMatch _
     // display.emit is a Bool-valued scalar like the rest of this group -- the
     // frame write is a side effect of evaluating it, and it lands in main()'s
     // BODY, ahead of the timing line and the print block. That position is what
@@ -482,7 +482,7 @@ and genGroupKeysBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
                     // key type: abort (BL8006, the interpreter's twin in
                     // ArrayOps.buildGroupKeys) instead of writing past the
                     // stack counts array. Negative keys already dropped.
-                    [ $$"""{{ind}}    if ((size_t)__k >= {{ngroups}}) blade_rt::panic("BL8006", "index out of bounds: a group_keys key outside 0 .. {{ngroups - 1}}", nullptr, 0);"""
+                    [ $$"""{{ind}}    if ((size_t)__k >= {{ngroups}}) blade_rt::panic("BL8006", "index out of bounds: a group_keys key outside 0 .. {{ngroups - 1}}", {{declPanicArgs ()}});"""
                       $"{ind}    {name}__counts[__k]++;"
                       $"{ind}}}"
                       $"{ind}size_t {name}__offsets[{ngroups + 1}];"
@@ -530,7 +530,7 @@ and genGroupKeysBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
                 let bucketMapDecl =
                     $"static const std::unordered_map<{elemStr}, size_t> {name}__bucket_map = {{{bucketEntries}}};"
                 let bucketLambdaDecl =
-                    $$"""auto {{name}}__bucket = [](const {{elemStr}}& __v) -> size_t { auto it = {{name}}__bucket_map.find(__v); if (it == {{name}}__bucket_map.end()) blade_rt::panic("BL8006", "index out of bounds: a group_keys key outside its EnumIdx", nullptr, 0); return it->second; };"""
+                    $$"""auto {{name}}__bucket = [](const {{elemStr}}& __v) -> size_t { auto it = {{name}}__bucket_map.find(__v); if (it == {{name}}__bucket_map.end()) blade_rt::panic("BL8006", "index out of bounds: a group_keys key outside its EnumIdx", {{declPanicArgs ()}}); return it->second; };"""
                 let code = keysElemErrCode @ [
                     $"{ind}// group_keys: {ngroups} groups, EnumIdx reverse lookup (unordered_map dispatch)"
                     $"{ind}size_t {name}__ngroups = {ngroups};"
@@ -732,6 +732,7 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                         | IRTuple es -> IRTuple (es |> List.map subst)
                         | IRComplex (re, im) -> IRComplex (subst re, subst im)
                         | IRFma (a, b, c) -> IRFma (subst a, subst b, subst c)
+                        | IRRandAt (k, args, w) -> IRRandAt (k, List.map subst args, w |> Option.map (fun (x, n) -> (subst x, n)))
                         | IRTupleProj (e, i, flat) -> IRTupleProj (subst e, i, flat)
                         | IRFieldAccess (e, f) -> IRFieldAccess (subst e, f)
                         | IRLet (id, v, b) -> IRLet (id, subst v, subst b)
@@ -1367,6 +1368,14 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
 
 
 and genProviderReadBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
+    // The masked read's hidden raw half (`alias.read_present` / `.present`,
+    // ProviderDesugar) is the one read exempt from the provider boundary
+    // rule: every emitter it reaches consults ProviderRegistry.MissingPolicy.
+    if ctx.ProviderReads.[binding.Id].AllowMissing then
+        Blade.ProviderRegistry.MissingPolicy.allowing (fun () -> genProviderReadBindingRuled ctx binding builder)
+    else genProviderReadBindingRuled ctx binding builder
+
+and genProviderReadBindingRuled (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
     let ind = indentStr ctx
     let name = bindingCppName binding
     // Deferred provider read materialized at the `|> alias.read` force point
@@ -1548,6 +1557,15 @@ and genProviderWriteBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
     let baseName = $"{srcCpp}_wr{int binding.Id}"
     let arrTy = spec.SourceType
     let elemCpp = elemTypeToCpp arrTy.ElemType
+    // The write side of the provider boundary rule (BL8015): a floating cell
+    // that is NaN or infinite is not written -- every reader of the store
+    // would refuse it. One scan of the flat buffer the writer is handed, for
+    // every provider (CSV, NetCDF, Zarr, Icechunk) and every storage arm.
+    let refuseNonFinite (count: string) =
+        if elemCpp = "double" || elemCpp = "float" then
+            let esc (t: string) = t.Replace("\\", "\\\\").Replace("\"", "\\\"")
+            [ $"blade_rt::refuse_nonfinite_write({baseName}_flat, (size_t)({count}), \"{esc spec.VarName}\", \"{esc spec.FilePath}\");" ]
+        else []
     // The wreath arm runs BEFORE the component-extent fold below: a wreath
     // record's Extent is the IROrbitClass marker, not an IRLit, so the literal
     // check would fire first and report "requires literal extents" for a class
@@ -1575,7 +1593,7 @@ and genProviderWriteBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
                    $$"""for (size_t __ow_i = 0; __ow_i < {{cells}}; __ow_i++) { {{baseName}}_flat[__ow_i] = {{srcCpp}}[__ow_i]; }""" ]
              let writeCode = pspec.GenWriteVar spec.FilePath spec.VarName baseName arrTy spec.DimNames
              let cleanup = [ $"delete[] {baseName}_flat;" ]
-             (guardProviderWrite ind (flatten @ writeCode @ cleanup), ctx)
+             (guardProviderWrite ind (flatten @ refuseNonFinite (string cells) @ writeCode @ cleanup), ctx)
          | other ->
              failwith (orbitStorageUnsupported
                            (sprintf "provider write of '%s' (%A)" spec.VarName other) (orbitLevelsOf ix)))
@@ -1606,7 +1624,7 @@ and genProviderWriteBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
             @ genPackedPoolCopy arrTy srcCpp baseName spec.VarName true
         let writeCode = pspec.GenWriteVar spec.FilePath spec.VarName baseName arrTy spec.DimNames
         let cleanup = [ $"delete[] {baseName}_flat;" ]
-        (guardProviderWrite ind (flatten @ writeCode @ cleanup), ctx)
+        (guardProviderWrite ind (flatten @ refuseNonFinite poolCount @ writeCode @ cleanup), ctx)
     else
     // DESTINATION PASSING, gate 1 (plan-fortran-killer-2.md section 4): a
     // plain dense source already IS the flat buffer the writer wants.
@@ -1626,7 +1644,7 @@ and genProviderWriteBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
             [ $"// Write {spec.VarName} to {spec.FilePath} (destination passing: the pool is the row-major buffer)"
               $"{elemCpp}* {baseName}_flat = pool_base({srcCpp}.data);" ]
         let writeCode = pspec.GenWriteVar spec.FilePath spec.VarName baseName arrTy spec.DimNames
-        (guardProviderWrite ind (alias @ writeCode), ctx)
+        (guardProviderWrite ind (alias @ refuseNonFinite (String.concat " * " extentTerms) @ writeCode), ctx)
     else
     let extentNames = extentTerms |> List.mapi (fun i _ -> $"{baseName}_ext{i}")
     let extentDecls =
@@ -1656,7 +1674,7 @@ and genProviderWriteBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
         @ [ for d in rank - 1 .. -1 .. 0 -> $"""{(String.replicate d "    ")}}}""" ]
     let writeCode = pspec.GenWriteVar spec.FilePath spec.VarName baseName arrTy spec.DimNames
     let cleanup = [ $"delete[] {baseName}_flat;" ]
-    (guardProviderWrite ind (flatten @ writeCode @ cleanup), ctx)
+    (guardProviderWrite ind (flatten @ refuseNonFinite (String.concat " * " extentNames) @ writeCode @ cleanup), ctx)
 
 
 /// rand.<fam>(key, params.., shape): allocate the dense array (self-typed from
@@ -1727,7 +1745,7 @@ and genRandGenBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                             let msg = Blade.Rand.Elaborate.paramGuardMessage kind pname dom
                             [ $"{ind}if (!({Blade.Rand.Elaborate.paramDomainCpp dom (parName i)})) {{"
                               $"{ind}    std::cerr << \"Blade runtime: {msg} (got \" << {parName i} << \")\" << std::endl;"
-                              $"{ind}    blade_rt::panic(\"BL8001\", \"{msg}\", nullptr, 0);"
+                              $"{ind}    blade_rt::panic(\"BL8001\", \"{msg}\", {(declPanicArgs ())});"
                               $"{ind}}}" ])
                     binds @ checks,
                     (parExprs |> List.mapi (fun i _ -> $", {parName i}") |> String.concat "")
@@ -1749,11 +1767,11 @@ and genRandGenBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                        $"{ind}const int64_t {oName} = (int64_t)({(exprToCpp ctx.VarNames oExpr)});"
                        $$"""{{ind}}if ({{sName}} < 0 || (((uint64_t){{sName}}) >> 32) != 0) {"""
                        $"{ind}    std::cerr << \"Blade runtime: rand: the stream key of an _at family must be in [0, 2^32) (got \" << {sName} << \")\" << std::endl;"
-                       $"{ind}    blade_rt::panic(\"BL8001\", \"rand stream key out of range\", nullptr, 0);"
+                       $"{ind}    blade_rt::panic(\"BL8001\", \"rand stream key out of range\", {(declPanicArgs ())});"
                        $"{ind}}}"
                        $$"""{{ind}}if ({{oName}} < 0) {"""
                        $"{ind}    std::cerr << \"Blade runtime: rand: the sample offset of an _at family must be non-negative (got \" << {oName} << \")\" << std::endl;"
-                       $"{ind}    blade_rt::panic(\"BL8001\", \"rand sample offset negative\", nullptr, 0);"
+                       $"{ind}    blade_rt::panic(\"BL8001\", \"rand sample offset negative\", {(declPanicArgs ())});"
                        $"{ind}}}" ],
                      $", {sName}, {oName}")
             let fillLine =
@@ -2022,7 +2040,7 @@ and genSparseInitBinding (ctx: CodeGenContext) (binding: IRBinding) : string lis
          let trailExpr = match trailTerms with | [] -> "1" | xs -> String.concat " * " xs
          let lines =
              (idxLines |> List.map (fun l -> ind + l))
-             @ [ $"{ind}if ({valuesName}.extents[0] != {idxName}->cardinality) {{ blade_rt::panic(\"BL8001\", \"sparse(values, keys): values length does not match key count\", nullptr, 0); }}"
+             @ [ $"{ind}if ({valuesName}.extents[0] != {idxName}->cardinality) {{ blade_rt::panic(\"BL8001\", \"sparse(values, keys): values length does not match key count\", {(declPanicArgs ())}); }}"
                  $"{ind}size_t {name}_trail = {trailExpr};"
                  $"{ind}{elemCpp}* {name}_valpool = nested_array_utilities::pool_base({valuesName}.data);"
                  $"{ind}{elemCpp}* {name}_compact = new {elemCpp}[{idxName}->cardinality * {name}_trail];"
@@ -2259,8 +2277,7 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
             let elemStr = elemTypeToCpp spec.VarType.ElemType
             let g1 = bounds.[1].Length - 1
             let extentsDecl =
-                fst (emitExtentsTable ind (name + "_extents") 2
-                         [($"{gkName}__ngroups", false); ("0 /* inner extent is ragged */", false)])
+                fst (emitGroupedExtentsTable ind (name + "_extents") gkName)
             let tileRead =
                 genWindow spec.FilePath spec.VarName valsName ($"{name}__pool + {gkName}__offsets[__t]")
                           [ ($"{gkName}__b0[__t0]", $"{gkName}__b0[__t0 + 1]"); ($"{gkName}__b1[__t1]", $"{gkName}__b1[__t1 + 1]") ]
@@ -2291,8 +2308,7 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         | Some genRows ->
             let elemStr = elemTypeToCpp spec.VarType.ElemType
             let extentsDecl =
-                fst (emitExtentsTable ind (name + "_extents") 2
-                         [($"{gkName}__ngroups", false); ("0 /* inner extent is ragged */", false)])
+                fst (emitGroupedExtentsTable ind (name + "_extents") gkName)
             let rowRead =
                 genRows spec.FilePath spec.VarName valsName ($"{name}__pool + __off") $"{gkName}__offsets[__g]" $"{gkName}__offsets[__g + 1]" spec.VarType
                 |> List.map (fun s -> ind + "    " + s)
@@ -2330,8 +2346,7 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         let elemStr = elemTypeToCpp elemType
         let g1 = bounds.[1].Length - 1
         let extentsDecl =
-            fst (emitExtentsTable ind (name + "_extents") 2
-                     [($"{gkName}__ngroups", false); ("0 /* inner extent is ragged */", false)])
+            fst (emitGroupedExtentsTable ind (name + "_extents") gkName)
         let code =
             elemErrCode
             @ [ $"{ind}// group_by: tile gather over a rank-2 value (grid grouping {gkName})" ]
@@ -2364,8 +2379,7 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
     // outlives this frame) would hand its consumer a dangling shape. Same
     // return-extent ABI the peel emitters follow; see emitExtentsTable.
     let extentsDecl =
-        fst (emitExtentsTable ind (name + "_extents") 2
-                 [($"{gkName}__ngroups", false); ("0 /* inner extent is ragged */", false)])
+        fst (emitGroupedExtentsTable ind (name + "_extents") gkName)
     // GATHER ELISION: every consumer of this binding reads only row LENGTHS
     // (computeExtentsOnlyGroupBys), which come from the gk offsets. The row
     // TABLE is still emitted -- the peel indexes it -- but the per-group
@@ -3002,7 +3016,7 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
         if isStaticallyNonEmpty || initExpr.IsSome then []
         else [
             $"{ind}// reduce: dynamic extent -- runtime non-emptiness guard"
-            $"{ind}if ({boundExpr} == 0) {{ blade_rt::panic(\"BL8003\", \"reduce: empty array, no reduction possible\", nullptr, 0); }}"
+            $"{ind}if ({boundExpr} == 0) {{ blade_rt::panic(\"BL8003\", \"reduce: empty array, no reduction possible\", {(declPanicArgs ())}); }}"
         ]
 
     // Comm-licensed parallel fold. `where ... omp` on the fold kernel is the
@@ -3256,7 +3270,7 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                     $"{ind}    const size_t __rlo0 = {loopStart};"
                     $"{ind}    const size_t __rcnt = ({rnName} > __rlo0) ? ({rnName} - __rlo0) : (size_t)0;"
                     $$"""{{ind}}    if (__rcnt > 0) {"""
-                    $"{ind}        int __rT = omp_get_max_threads();"
+                    $"{ind}        int __rT = blade_omp_get_max_threads();"
                     $"{ind}        if ((size_t)__rT > __rcnt) __rT = (int)__rcnt;"
                     $"{ind}        if (__rT < 1) __rT = 1;"
                     // num_threads(n) is a REQUEST, not a guarantee: dynamic
@@ -3269,10 +3283,10 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                     // region's implicit barrier publishes it).
                     $"{ind}        int __rTact = __rT;"
                     $"{ind}        {elemStr}* {partName} = new {elemStr}[__rT];"
-                    $"{ind}        #pragma omp parallel num_threads(__rT)"
+                    $"{ind}        BLADE_OMP_PARALLEL_NUM_THREADS(__rT)"
                     $$"""{{ind}}        {"""
-                    $"{ind}            const int __rnt = omp_get_num_threads();"
-                    $"{ind}            const int __rt = omp_get_thread_num();"
+                    $"{ind}            const int __rnt = blade_omp_get_num_threads();"
+                    $"{ind}            const int __rt = blade_omp_get_thread_num();"
                     $"{ind}            if (__rt == 0) __rTact = __rnt;"
                     $"{ind}            const size_t __rlo = __rlo0 + (__rcnt * (size_t)__rt) / (size_t)__rnt;"
                     $"{ind}            const size_t __rhi = __rlo0 + (__rcnt * ((size_t)__rt + 1)) / (size_t)__rnt;"
@@ -3655,10 +3669,7 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                 paramFinalNames
                                 |> Map.fold (fun acc k v -> Map.add k v acc) ctx.VarNames
                             let nameMap =
-                                cg.Captures
-                                |> List.fold (fun acc c ->
-                                       if Map.containsKey c.Id acc then acc else Map.add c.Id c.Name acc)
-                                   nameMap
+                                withCaptureNames EnclosingNamesWin cg.Captures nameMap
                             let bodyExpr =
                                 (genKernelExprWithReynolds cg.KernelExpr cg.KernelParams
                                      false false nameMap paramFinalNames).CppExpr
@@ -4278,8 +4289,7 @@ and genVarAliasBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
                     | ArrayElem at -> elemTypeToCpp at.ElemType
                     | _ -> "double"
                 let extentsDecl =
-                    fst (emitExtentsTable ind (name + "_extents") 2
-                             [($"{gkName}__ngroups", false); ("0 /* inner extent is ragged */", false)])
+                    fst (emitGroupedExtentsTable ind (name + "_extents") gkName)
                 let code =
                     [ $"{ind}// {name} = {srcName}: copy of a grouped array (grouping {gkName})" ]
                     @ extentsDecl
@@ -4452,7 +4462,7 @@ and genFallbackMaterialize (ctx: CodeGenContext) (binding: IRBinding) (builder: 
                 // and element types are checkable -- the mask is runtime data).
                 let guards =
                     [ for d in 0 .. leadRank - 1 ->
-                        $"{ind}if ({nameL}.idx->extents[{d}] != {name}_extents[{d}]) {{ blade_rt::panic(\"BL8001\", \"<|:>: compound left operand's underlying extents disagree with the dense right operand's shape\", nullptr, 0); }}" ]
+                        $"{ind}if ({nameL}.idx->extents[{d}] != {name}_extents[{d}]) {{ blade_rt::panic(\"BL8001\", \"<|:>: compound left operand's underlying extents disagree with the dense right operand's shape\", {(declPanicArgs ())}); }}" ]
                 let mutable lines = guards
                 let mutable depth = ctx.Indent
                 for i in 0 .. leadRank - 1 do
@@ -4663,7 +4673,7 @@ and genLetChainBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
     // allocation instead of two.
     let aliasableStagingRef =
         match finalExpr with
-        | IRVar (srcId, _) -> canAliasStagingLet lets None srcId
+        | IRVar (srcId, _) -> canAliasStagingLet lets None srcId []
         | _ -> false
     let finalBinding = {
         Id = binding.Id; Name = name; Type = binding.Type

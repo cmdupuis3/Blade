@@ -114,6 +114,14 @@ type IRExpr =
     /// pair: it is bit-identical on every lane REGARDLESS of BLADE_FP_CONTRACT,
     /// where a*b + c is not (see the header of Build.fs).
     | IRFma of a: IRExpr * b: IRExpr * c: IRExpr
+    /// ONE SAMPLE of an addressed rand family (`<fam>_at`, D13): args are the
+    /// key, the stream key, the sample index, then the family's Float64
+    /// parameters; `weights` is categorical's array and its static extent.
+    /// A pure function of its operands -- `blade_rand::<kind>_one` in C++,
+    /// RandMirror.drawsAt at one sample in the interpreter -- so it is an
+    /// ordinary scalar (Float64; Int64 for categorical_at). Its range guards
+    /// are explicit checks beside it (TypeCheckInfer's inline draw).
+    | IRRandAt of kind: string * args: IRExpr list * weights: (IRExpr * int) option
     | IRTupleProj of IRExpr * int * bool  // expr, index, isFlat (true=flat leaf index, false=structural type index)
     | IRTupleCons of head: IRExpr * tail: IRExpr
     | IRTupleDecons of tuple: IRExpr
@@ -1693,6 +1701,12 @@ type ProviderReadSpec = {
     /// binding would render as a value (CodeGenState, "STREAMED VALUES NEVER
     /// REACH C++"), never an undeclared name handed to g++.
     Streamed: bool
+    /// The masked read's hidden RAW half (`alias.read_present` /
+    /// `alias.present`, ProviderDesugar): the provider boundary rule
+    /// (ProviderRegistry.MissingRule, BL8015) is NOT applied -- the masked
+    /// read derives its presence mask from these cells instead. Never set by
+    /// a spelling a program can write.
+    AllowMissing: bool
 }
 
 /// Specification for a deferred provider data write (`alias.write("path", A)`),
@@ -2294,6 +2308,12 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     // -- Three children -------------------------------------------------------
     | IRIf (c, t, e) -> [c; t; e], (function [c'; t'; e'] -> IRIf (c', t', e') | _ -> badChildren "IRIf")
     | IRFma (a, b, c) -> [a; b; c], (function [a'; b'; c'] -> IRFma (a', b', c') | _ -> badChildren "IRFma")
+    | IRRandAt (kind, args, weights) ->
+        (args @ (weights |> Option.map fst |> Option.toList)),
+        (fun cs ->
+            match weights with
+            | Some (_, n) -> IRRandAt (kind, List.take args.Length cs, Some (List.last cs, n))
+            | None -> IRRandAt (kind, cs, None))
     | IRSlice (arr, d, s, e) -> [arr; s; e], (function [arr'; s'; e'] -> IRSlice (arr', d, s', e') | _ -> badChildren "IRSlice")
     | IRSubset (arr, d, s, len) -> [arr; s; len], (function [arr'; s'; len'] -> IRSubset (arr', d, s', len') | _ -> badChildren "IRSubset")
     | IRForRange (vid, lo, hi, body) -> [lo; hi; body], (function [lo'; hi'; b'] -> IRForRange (vid, lo', hi', b') | _ -> badChildren "IRForRange")
@@ -2485,7 +2505,7 @@ let irNodeMayAbort (e: IRExpr) : bool =
     // A cast to an integer type aborts on a NaN / out-of-range float
     // operand (BL8014). Judged without the operand type, like `/`.
     | IRUnaryOp (IRCast ((ETInt64 | ETInt32), _), _) -> true
-    | IRBinOp _ | IRComplex _ | IRFma _ -> false
+    | IRBinOp _ | IRComplex _ | IRFma _ | IRRandAt _ -> false
     | IRUnaryOp (IRMath ("lgamma" | "digamma"), _) -> true
     | IRUnaryOp _ -> false
     | IRTuple _ | IRTupleProj _ | IRTupleCons _ | IRTupleDecons _
@@ -2561,7 +2581,7 @@ let rec isFreshPoolFormWith (appFresh: IRExpr -> bool) (e: IRExpr) : bool =
     | IRVar _ | IRIndex _ | IRSlice _ | IRCurry _ | IRSubset _ | IRShift _ | IRReverse _
     | IRDiag _ | IRAlign _ | IRTuple _ | IRTupleProj _ | IRFieldAccess _ | IRIf _ | IRMatch _ -> false
     | IRLit _ | IRParam _ | IRNth | IRZero _ | IROpaqueExtent | IRArity _ | IRRange _
-    | IRVirtualReverse _ | IRBinOp _ | IRUnaryOp _ | IRComplex _ | IRFma _
+    | IRVirtualReverse _ | IRBinOp _ | IRUnaryOp _ | IRComplex _ | IRFma _ | IRRandAt _
     | IRTupleCons _ | IRTupleDecons _ | IRStructLit _ | IRLet _
     | IRMethodFor _ | IRObjectFor _ | IRBind _ | IRComposeObj _ | IRCompose _ | IRPure _
     | IRReynolds _ | IRArrayProduct _ | IRContains _
@@ -2804,6 +2824,13 @@ let declSpansCell () : Map<string, Blade.Ast.Span> ref =
         fresh
     else v
 
+/// Start a program's table: install a FRESH ref for this flow, never clear
+/// the one found (#65). A child flow (Task.Run, a large-stack thread) copies
+/// the parent's REFERENCE, so mutating it in place would wipe a sibling
+/// pipeline's spans mid-codegen; the CodeGenState.freshCell pattern.
+let resetDeclSpans () : unit =
+    declSpansStorage.Value <- ref Map.empty
+
 /// Record one declaration's span. Later declarations with the same name (a
 /// shadowing `let`) win, matching what the emitted code refers to last.
 let recordDeclSpan (name: string) (span: Blade.Ast.Span) : unit =
@@ -3041,6 +3068,7 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
          | IRCast (et, _) -> IRTScalar et)
     | IRTuple exprs -> IRTTuple (exprs |> List.map typeOf)
     | IRFma _ -> IRTScalar ETFloat64
+    | IRRandAt (kind, _, _) -> if kind = "categorical_at" then IRTScalar ETInt64 else IRTScalar ETFloat64
     | IRComplex (re, _) ->
         // Complex type derived from component width: Float32 -> Complex64,
         // Float64 -> Complex128. Reports as a scalar (NOT a tuple) -- that's
@@ -3704,6 +3732,7 @@ let rec exprTypeIfKnown (expr: IRExpr) : IRType option =
          | Some (AnyPrimElem ETFloat64), Some (AnyPrimElem ETFloat64), Some (AnyPrimElem ETFloat64) ->
              Some (IRTScalar ETFloat64)
          | _ -> None)
+    | IRRandAt _ -> Some (typeOf expr)
     // ---- Value-preserving wrappers --------------------------------------
     // A block's value IS its body's; sort, whole-array negate and conjugate
     // keep their operand's shape and element.

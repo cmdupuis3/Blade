@@ -52,9 +52,6 @@ preserved as well.
 - [PPL order accounting](../features/ppl.md#4-order-accounting) already tracks
   the growth of required moments under polynomial transformations. Sections 8
   and 9 develop refusal proofs rather than silently closing that hierarchy.
-- [World models](../plans/plan-world-models.md) discusses fitted dynamics and
-  moment limitations. Here the source recurrence is given and reductions are
-  exact identities, rather than fitted laws.
 - [Uniform optimality](../plans/plan-uniform-optimality.md) concerns work under
   an oracle/law contract. The reductions here use additional algebraic facts
   and an explicit observation contract; their savings do not refute that bound.

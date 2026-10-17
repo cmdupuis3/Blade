@@ -1,0 +1,9 @@
+// TEST: A ragged inner computed coordinate past its row aborts (aborts)
+// ============================================================================
+// A computed inner coordinate is checked at run time against its row's own
+// length (BL8006) instead of reading the next row's cell.
+let u = [[1.0], [2.0, 3.0], [4.0, 5.0, 6.0]]
+let i = 0 + 1
+let j = 0 + 2
+let b = u(i, j)
+// ABORT: BL8006

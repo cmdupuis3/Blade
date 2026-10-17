@@ -71,6 +71,13 @@
 #include <cmath>
 #include <random>
 #include <vector>
+// The transcendentals below go through blade_runtime.hpp's no-fold
+// barrier (blade_libm_log & co.), like every user-visible intrinsic: a
+// sampler inlined with a literal parameter (`r.poisson(k, n, 4.0)`) would
+// otherwise let g++ fold `std::exp(-lam)` through MPFR at compile time,
+// while the interpreter mirror (RandMirror.fs) calls the run-time libm.
+// sqrt stays std:: (correctly rounded, so a fold IS the run-time value).
+#include "blade_runtime.hpp"
 
 namespace blade_rand {
 
@@ -99,7 +106,7 @@ template <class G> inline double next_normal(G& g) {
     double u1 = next_uniform(g);
     double u2 = next_uniform(g);
     if (u1 < (1.0 / 9007199254740992.0)) u1 = (1.0 / 9007199254740992.0);
-    return std::sqrt(-2.0 * std::log(u1)) * std::cos(two_pi * u2);
+    return std::sqrt(-2.0 * blade_libm_log(u1)) * blade_libm_cos(two_pi * u2);
 }
 
 // Exp(rate) by inverse CDF: -log(1-u)/rate. ONE uniform per draw. u in [0,1)
@@ -107,7 +114,7 @@ template <class G> inline double next_normal(G& g) {
 // would be the singular one is unreachable from the OPEN end of the interval).
 template <class G> inline double next_exponential(G& g, double rate) {
     double u = next_uniform(g);
-    return -std::log(1.0 - u) / rate;
+    return -blade_libm_log(1.0 - u) / rate;
 }
 
 // Gamma(shape, 1) for shape >= 1 -- Marsaglia-Tsang (2000) squeeze. Each
@@ -128,7 +135,7 @@ template <class G> inline double next_gamma_ge1(G& g, double shape) {
         double u = next_uniform(g);
         double x2 = x * x;
         if (u < 1.0 - 0.0331 * x2 * x2) return d * v;
-        if (std::log(u) < 0.5 * x2 + d * (1.0 - v + std::log(v))) return d * v;
+        if (blade_libm_log(u) < 0.5 * x2 + d * (1.0 - v + blade_libm_log(v))) return d * v;
     }
 }
 
@@ -140,7 +147,7 @@ template <class G> inline double next_gamma(G& g, double shape, double rate) {
     if (shape < 1.0) {
         double gg = next_gamma_ge1(g, shape + 1.0);
         double u = next_uniform(g);
-        return gg * std::pow(u, 1.0 / shape) / rate;
+        return gg * blade_libm_pow(u, 1.0 / shape) / rate;
     }
     return next_gamma_ge1(g, shape) / rate;
 }
@@ -181,7 +188,7 @@ template <class G> inline double next_gamma(G& g, double shape, double rate) {
 constexpr double kPoissonKnuthMaxLam = 10.0;
 
 template <class G> inline double next_poisson_knuth(G& g, double lam) {
-    const double L = std::exp(-lam);
+    const double L = blade_libm_exp(-lam);
     double p = 1.0;
     double k = 0.0;
     for (;;) {
@@ -236,9 +243,9 @@ BLADE_RAND_NO_CONTRACT inline double poisson_loggam(double x) {
     const double x2 = 1.0 / (x0 * x0);
     double gl0 = a[9];
     for (int k = 8; k >= 0; --k) gl0 = gl0 * x2 + a[k];
-    double gl = gl0 / x0 + 0.9189385332046727 + (x0 - 0.5) * std::log(x0) - x0;
+    double gl = gl0 / x0 + 0.9189385332046727 + (x0 - 0.5) * blade_libm_log(x0) - x0;
     for (int k = 1; k <= n; ++k) {
-        gl -= std::log(x0 - 1.0);
+        gl -= blade_libm_log(x0 - 1.0);
         x0 -= 1.0;
     }
     return gl;
@@ -260,7 +267,7 @@ BLADE_RAND_NO_CONTRACT inline double poisson_loggam(double x) {
 template <class G> BLADE_RAND_NO_CONTRACT inline double next_poisson_ptrs(G& g, double lam) {
     BLADE_RAND_FP_CONTRACT_OFF_BODY
     const double slam = std::sqrt(lam);
-    const double loglam = std::log(lam);
+    const double loglam = blade_libm_log(lam);
     const double b = 0.931 + 2.53 * slam;
     const double a = -0.059 + 0.02483 * b;
     const double invalpha = 1.1239 + 1.1328 / (b - 3.4);
@@ -272,7 +279,7 @@ template <class G> BLADE_RAND_NO_CONTRACT inline double next_poisson_ptrs(G& g, 
         const double k = std::floor((2.0 * a / us + b) * U + lam + 0.43);
         if (us >= 0.07 && V <= vr) return k;
         if (k < 0.0 || (us < 0.013 && V > us)) continue;
-        if (std::log(V) + std::log(invalpha) - std::log(a / (us * us) + b)
+        if (blade_libm_log(V) + blade_libm_log(invalpha) - blade_libm_log(a / (us * us) + b)
                 <= -lam + k * loglam - poisson_loggam(k + 1.0))
             return k;
     }
@@ -374,6 +381,22 @@ inline void beta(double* out, size_t n, int64_t key, double a, double b) {
 // BIT-identical (the scan and the division by the total scale exactly), which is
 // what the corpus scale-invariance test pins. For a general scale factor the
 // draws agree up to the rounding of the scan, as with any float reduction.
+// The inverse-CDF step both categorical fills share: the SMALLEST j in
+// [0, k-1) with u < cum[j], else k-1 -- exactly what the linear walk
+// `while (j + 1 < k && u >= cum[j]) ++j;` returns, found by binary search
+// (O(log k) per sample instead of O(k)). cum is nondecreasing (a running sum
+// of clamped nonnegative weights, then each divided by one positive total --
+// IEEE division is monotone), so the predicate `u < cum[j]` is monotone in j
+// and the two searches agree index for index: no pinned sample moves.
+inline size_t categorical_index(const std::vector<double>& cum, size_t k, double u) {
+    size_t lo = 0, hi = k - 1;   // answer in [lo, hi]; hi = k-1 is the clamp
+    while (lo < hi) {
+        const size_t mid = lo + (hi - lo) / 2;
+        if (u < cum[mid]) hi = mid; else lo = mid + 1;
+    }
+    return lo;
+}
+
 inline void categorical(int64_t* out, size_t n, int64_t key, const double* w, size_t k) {
     std::mt19937_64 g(mix64(static_cast<uint64_t>(key)));
     // One-time cumulative scan, running sum left to right (the mirror sums in
@@ -396,9 +419,7 @@ inline void categorical(int64_t* out, size_t n, int64_t key, const double* w, si
     for (size_t i = 0; i < n; ++i) {
         double u = next_uniform(g);
         if (degenerate) { out[i] = 0; continue; }
-        size_t j = 0;
-        while (j + 1 < k && u >= cum[j]) ++j;
-        out[i] = static_cast<int64_t>(j);
+        out[i] = static_cast<int64_t>(categorical_index(cum, k, u));
     }
 }
 
@@ -424,6 +445,18 @@ inline void categorical(int64_t* out, size_t n, int64_t key, const double* w, si
 // engine). Known-answer vectors from Random123's `kat_vectors` are pinned in
 // tests/RandMirrorTests.fs against the F# twin, and the interpreter
 // differential ties this header to that twin.
+//
+// FAMILIES SHARE UNIFORMS AT ONE ADDRESS -- BY DESIGN. The address names no
+// family: (key, stream, sample, draw) is the whole counter, so every `_at`
+// family at one address reads the SAME uniforms, and `exponential_at(k, s, o,
+// rate)` is the inverse-CDF transform of the `uniform_at(k, s, o)` uniform
+// (likewise normal_at's Box-Muller pair, categorical_at's one uniform).
+// Draws from two families at one address are COUPLED, intentionally: a caller
+// that wants them independent gives them different `stream` ids, which is
+// what the stream key is for. Folding a per-family constant into the key
+// (domain separation) was considered and declined (P3-23): it would change
+// every pinned `_at` sample, which the contract above forbids -- a separated
+// variant could only ship as NEW family names. rand/030 pins the coupling.
 constexpr uint32_t kPhiloxM0 = 0xD2511F53u;
 constexpr uint32_t kPhiloxM1 = 0xCD9E8D57u;
 constexpr uint32_t kPhiloxW0 = 0x9E3779B9u;
@@ -517,6 +550,32 @@ inline void bernoulli_at(double* out, size_t n, int64_t key, int64_t stream, int
 inline void beta_at(double* out, size_t n, int64_t key, int64_t stream, int64_t offset, double a, double b) {
     fill_at(out, n, key, stream, offset, [a, b](philox_stream& g) { return next_beta(g, a, b); });
 }
+// ONE SAMPLE of an `_at` family at sample index `index` (D13): the fill above
+// at n = 1, so a draw spelled as an expression (inside a function, a map whose
+// cell is its own address) is bit-identical to the same sample of a fill. No
+// new address contract: these ARE the families' fills. The range guards are
+// emitted beside the call, as for the fills.
+inline double uniform_at_one(int64_t key, int64_t stream, int64_t index) {
+    double v; uniform_at(&v, 1, key, stream, index); return v;
+}
+inline double normal_at_one(int64_t key, int64_t stream, int64_t index) {
+    double v; normal_at(&v, 1, key, stream, index); return v;
+}
+inline double exponential_at_one(int64_t key, int64_t stream, int64_t index, double rate) {
+    double v; exponential_at(&v, 1, key, stream, index, rate); return v;
+}
+inline double gamma_at_one(int64_t key, int64_t stream, int64_t index, double shape, double rate) {
+    double v; gamma_at(&v, 1, key, stream, index, shape, rate); return v;
+}
+inline double poisson_at_one(int64_t key, int64_t stream, int64_t index, double lam) {
+    double v; poisson_at(&v, 1, key, stream, index, lam); return v;
+}
+inline double bernoulli_at_one(int64_t key, int64_t stream, int64_t index, double p) {
+    double v; bernoulli_at(&v, 1, key, stream, index, p); return v;
+}
+inline double beta_at_one(int64_t key, int64_t stream, int64_t index, double a, double b) {
+    double v; beta_at(&v, 1, key, stream, index, a, b); return v;
+}
 // categorical_at: the sequenced body's scan, then ONE uniform per sample from
 // that sample's own stream (draw budget 1, unconditionally, as above).
 inline void categorical_at(int64_t* out, size_t n, int64_t key, int64_t stream, int64_t offset, const double* w, size_t k) {
@@ -536,10 +595,11 @@ inline void categorical_at(int64_t* out, size_t n, int64_t key, int64_t stream, 
         philox_stream g(key, s, static_cast<uint64_t>(offset) + static_cast<uint64_t>(i));
         double u = next_uniform(g);
         if (degenerate) { out[i] = 0; continue; }
-        size_t j = 0;
-        while (j + 1 < k && u >= cum[j]) ++j;
-        out[i] = static_cast<int64_t>(j);
+        out[i] = static_cast<int64_t>(categorical_index(cum, k, u));
     }
+}
+inline int64_t categorical_at_one(int64_t key, int64_t stream, int64_t index, const double* w, size_t k) {
+    int64_t v; categorical_at(&v, 1, key, stream, index, w, k); return v;
 }
 
 } // namespace blade_rand

@@ -39,13 +39,7 @@ open Blade.IRMono
 
 /// A default-ON pass gate: `0` / `off` / `false` disable it, anything else
 /// (or unset) leaves it on. Read per call.
-let private gateOn (var: string) =
-    match System.Environment.GetEnvironmentVariable var with
-    | null -> true
-    | v ->
-        match v.Trim().ToLowerInvariant() with
-        | "0" | "off" | "false" -> false
-        | _ -> true
+let private gateOn (var: string) = Blade.Toolchain.envFlag var true
 
 /// BLADE_FREEZE_IDIOM=0|off disables freeze-idiom recognition (the A/B
 /// escape hatch, read per call like every other gate).

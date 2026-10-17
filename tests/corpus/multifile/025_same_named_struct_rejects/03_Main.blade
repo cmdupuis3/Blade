@@ -1,12 +1,15 @@
 // TEST: Two modules declaring one struct name (rejects)
 // MODULE: Main
-// ERROR: BL2009
-// ERROR-CONTAINS: duplicate declaration of type 'P': module 'A' already declares a type of that name
+// ERROR: BL3001
+// ERROR-CONTAINS: the parameter is declared A.P but the argument is B.P
 // ============================================================================
-// A struct's identity is its bare name, so A's `P` and B's `P` were ONE type
-// to the checker -- `A.fx(B.mk())` passed A's field read a B value -- and two
-// global `struct P` definitions to g++ (a redefinition). Until type identity
-// is module-qualified, one program declares a type name once.
+// A struct's identity used to be its bare name, so A's `P` and B's `P` were
+// ONE type to the checker -- `A.fx(B.mk())` passed A's field read a B value --
+// and two global `struct P` definitions to g++; the program was refused
+// (BL2009) as soon as two modules declared one type name. Identity is now the
+// declaring module's (D11): both modules link (multifile/029), and handing
+// B's `P` to A's function is the type mismatch it is, spelled qualified
+// because the two source names coincide.
 module Main
 import A
 import B

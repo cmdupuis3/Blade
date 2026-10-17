@@ -1,0 +1,16 @@
+// TEST: GroupBy cell reads with computed coordinates, captured into a kernel
+// G1: a non-trivial row coordinate (`k % 2`) is bound once and checked
+// against its group's length; a read inside a kernel the grouped value is
+// captured into is checked the same way (the offsets ride in the grouped
+// value's extents table).
+let region = [0, 1, 0, 1]
+let temps = [10.0, 20.0, 30.0, 40.0]
+let gk = group_keys(region)
+let grouped = group_by(temps, gk)
+let k = 3
+let r = grouped(1, k % 2)
+// EXPECT: r = 40.0
+let rc = grouped(0)(k % 2)
+// EXPECT: rc = 30.0
+let pick = method_for(0..2) <@> lambda(g) -> grouped(g, 1) |> compute
+// EXPECT: pick = [30.0, 40.0]

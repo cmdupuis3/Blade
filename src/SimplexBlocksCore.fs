@@ -33,18 +33,10 @@ module Blade.SimplexBlocksCore
 // The landed math (identities shared with the provider)
 // ---------------------------------------------------------------------------
 
-/// C(m, k) -- cardinality arithmetic. Byte-for-byte the provider's `binom`
-/// (ZarrProvider.fs), including its zero answer for k < 0 or m < k, because
-/// the empty-diagonal rule below depends on that zero.
-let binom (m: int64) (k: int) : int64 =
-    if k < 0 || m < int64 k then 0L
-    else
-        let mutable num = 1L
-        let mutable den = 1L
-        for i in 0 .. k - 1 do
-            num <- num * (m - int64 i)
-            den <- den * int64 (i + 1)
-        num / den
+/// C(m, k) -- cardinality arithmetic, with its zero answer for k < 0 or m < k
+/// (the empty-diagonal rule below depends on that zero). One spelling for the
+/// whole compiler: OrbRank.binomOrZero (exact, overflow-checked).
+let binom (m: int64) (k: int) : int64 = Blade.OrbRank.binomOrZero m k
 
 /// Combinadic rank of a canonical coordinate tuple in ascending-lex order
 /// (sorted; strictly increasing when `strict`). Mirrors

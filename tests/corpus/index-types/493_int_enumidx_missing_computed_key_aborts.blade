@@ -1,0 +1,10 @@
+// TEST: An integer EnumIdx computed subscript that is no key aborts (aborts)
+// ============================================================================
+// A computed key is looked up among R's keys at run time; one that is none of
+// them stops with BL8006 instead of reading some cell. The position 1 is not
+// a key of R either: a subscript into R is a key.
+type R = EnumIdx<[100, 200, 300]>
+let w: Array<Float64 like R> = [1.0, 2.0, 3.0]
+let k = 0 + 1
+let u = w(k)
+// ABORT: BL8006

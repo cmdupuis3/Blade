@@ -942,7 +942,12 @@ let rec private witnessKindOf (t: IRType) : ElemType option =
     | IRTScalar ((ETInt32 | ETInt64 | ETFloat32 | ETFloat64 | ETBool) as et) -> Some et
     | _ -> None
 
-let witnessSwapLawFailure (pi: IRId) (pj: IRId) (others: IRId list) (negate: bool)
+/// `inlineFn` resolves a call head's binder id to a PURE, NON-RECURSIVE user
+/// function's (parameter ids, typed body) -- the checker's FuncWitnessBodies
+/// table -- so a body that calls one evaluates through it (D12). A call it
+/// does not resolve leaves the body unevaluable (trusted), as before.
+let witnessSwapLawFailure (inlineFn: IRId -> (IRId list * TypedExpr) option)
+                          (pi: IRId) (pj: IRId) (others: IRId list) (negate: bool)
                           (skipSwap: bool) (isInt: bool) (body: TypedExpr)
                           : LawWitness option =
     let body = flattenBindings body
@@ -983,6 +988,90 @@ let witnessSwapLawFailure (pi: IRId) (pj: IRId) (others: IRId list) (negate: boo
                 | _ -> None   // bool, aggregate, function, unresolved: no evaluation
             v |> Option.iter (fun v -> captured.[id] <- v; capturedOrder.Add((name, id)))
             v
+    // Captured ARRAY cells (D12): a read `w(i, j)` of a captured array at
+    // integer coordinates evaluates to a sampled value, per cell -- the law
+    // must hold for every content of the capture, exactly as for a captured
+    // scalar. Keyed by (array binder, coordinates), memoized, so the same cell
+    // reads the same value across a swap; pools disjoint from the scalars'.
+    let cellPoolInt = [ 23L; -9L; 31L; 4L; -15L; 27L; 6L; -21L ]
+    let cellPoolFloat = [ 0.3125; -1.875; 2.6875; 4.0625; -0.5625; 1.4375; 3.8125; -2.9375 ]
+    let cells = System.Collections.Generic.Dictionary<IRId * int64 list, WitnessVal>()
+    let cellOrder = System.Collections.Generic.List<string * (IRId * int64 list)>()
+    // A cell read honours the captured array's DECLARED storage class: a
+    // compact symmetric group answers every permutation of its coordinates
+    // from one cell (coordinates sorted), an antisymmetric one negates by the
+    // permutation's sign and reads 0 on a repeated coordinate -- the type
+    // guarantees those laws, so sampling must not break them. Any other
+    // structured slot (compound, sparse, orbit, Hermitian, a partial read)
+    // is not sampled: the body stays unevaluable (trusted).
+    let canonicalCell (arrTy: IRType) (coords: int64 list) : (int64 list * int) option =
+        match stripUnits arrTy with
+        | ArrayElem at ->
+            let rec walk (slots: IRIndexType list) (cs: int64 list) (acc: int64 list) (sign: int) =
+                match slots, cs with
+                | [], [] -> Some (List.rev acc, sign)
+                | [], _ | _, [] -> None
+                | ix :: rest, _ ->
+                    let r = max 1 ix.Rank
+                    if ix.IxKind <> IxKPlain || cs.Length < r then None
+                    else
+                        let mine = List.take r cs
+                        let tail = List.skip r cs
+                        match ix.Symmetry with
+                        | SymNone -> walk rest tail (List.rev mine @ acc) sign
+                        | SymSymmetric -> walk rest tail (List.rev (List.sort mine) @ acc) sign
+                        | SymAntisymmetric ->
+                            if List.length (List.distinct mine) < r then Some ([], 0)
+                            else
+                                // Parity of the sorting permutation (count inversions).
+                                let arr = List.toArray mine
+                                let mutable inv = 0
+                                for a in 0 .. arr.Length - 1 do
+                                    for b in a + 1 .. arr.Length - 1 do
+                                        if arr.[a] > arr.[b] then inv <- inv + 1
+                                let s' = if inv % 2 = 0 then sign else -sign
+                                walk rest tail (List.rev (List.sort mine) @ acc) s'
+                        | _ -> None
+            walk at.IndexTypes coords [] 1
+        | _ -> Some (coords, 1)
+    let cell (name: string) (id: IRId) (arrTy: IRType) (coords: int64 list) (e: TypedExpr) : WitnessVal option =
+        match canonicalCell arrTy coords with
+        | None -> None
+        | Some (_, 0) ->
+            (match witnessKindOf e.Type with
+             | Some (ETInt32 | ETInt64) -> Some (WInt 0L)
+             | Some (ETFloat32 | ETFloat64) -> Some (WFloat 0.0)
+             | _ -> None)
+        | Some (canon, sign) ->
+        let negIf (v: WitnessVal) =
+            if sign >= 0 then v
+            else
+                match v with
+                | WInt i -> WInt (0L - i)
+                | WFloat f -> WFloat (-f)
+                | b -> b
+        let key = (id, canon)
+        match cells.TryGetValue key with
+        | true, v -> Some (negIf v)
+        | _ ->
+            let k = cells.Count
+            let v =
+                match witnessKindOf e.Type with
+                | Some (ETInt32 | ETInt64) -> Some (WInt (cellPoolInt.[k % cellPoolInt.Length] + int64 (k / cellPoolInt.Length)))
+                | Some (ETFloat32 | ETFloat64) -> Some (WFloat (cellPoolFloat.[k % cellPoolFloat.Length] + float (k / cellPoolFloat.Length)))
+                | _ -> None
+            v |> Option.iter (fun v ->
+                cells.[key] <- v
+                let label = name + "(" + (canon |> List.map string |> String.concat ", ") + ")"
+                cellOrder.Add((label, key)))
+            v |> Option.map negIf
+    // Inlining guards: the resolver only answers non-recursive functions, so
+    // the depth cap bounds a long call chain, not a cycle; the per-evaluation
+    // budget bounds the fan-out of a chain that calls each callee more than
+    // once (2^depth evaluations). Past either, the body answers None -- the
+    // claim stays trusted, as for any body the evaluator cannot decide.
+    let mutable inlineDepth = 0
+    let mutable inlineBudget = 0
     let panic msg = raise (WitnessPanic msg)
     let asFloat (v: WitnessVal) =
         match v with
@@ -1160,9 +1249,37 @@ let witnessSwapLawFailure (pi: IRId) (pj: IRId) (others: IRId list) (negate: boo
             (match go c with
              | Some cv -> if truthy cv then go t else go f
              | None -> None)
+        // A call of a pure, non-recursive user function: its body with the
+        // arguments substituted for its parameters (D12). Substitution is
+        // capture-free (binder ids are globally unique); a body outside the
+        // rewritable world answers None, as an unevaluable kernel does.
+        | TExprApp ({ Kind = TExprVar (_, fid, _) }, args) when inlineDepth < 16 ->
+            inlineBudget <- inlineBudget + 1
+            if inlineBudget > 256 then None else
+            (match inlineFn fid with
+             | Some (ps, fbody) when ps.Length = args.Length ->
+                 let substituted =
+                     List.zip ps args
+                     |> List.fold (fun acc (p, a) -> acc |> Option.bind (substVar p a)) (Some fbody)
+                 (match substituted with
+                  | Some b ->
+                      inlineDepth <- inlineDepth + 1
+                      try go (flattenBindings b)
+                      finally inlineDepth <- inlineDepth - 1
+                  | None -> None)
+             | _ -> None)
+        // A read of a CAPTURED array at integer coordinates (not a parameter
+        // or a fixed other input): a sampled cell value (see `cell`).
+        | TExprIndex ({ Kind = TExprVar (name, aid, _) } as arrE, idxs, _)
+                when aid <> pi && aid <> pj && not (fixedIdx.ContainsKey aid) && not (List.isEmpty idxs) ->
+            let coords = idxs |> List.map go
+            if coords |> List.forall (function Some (WInt _) -> true | _ -> false) then
+                cell name aid arrE.Type (coords |> List.map (function Some (WInt i) -> i | _ -> 0L)) e
+            else None
         | _ -> None
     /// One evaluation: Ok value, Error panic message, or None (no evaluation).
     let run (a: float) (b: float) : Result<WitnessVal, string> option =
+        inlineBudget <- 0
         try ev a b body |> Option.map Ok
         with WitnessPanic msg -> Some (Error msg)
     let finite (v: WitnessVal) =
@@ -1189,7 +1306,9 @@ let witnessSwapLawFailure (pi: IRId) (pj: IRId) (others: IRId list) (negate: boo
                       match fixedSeen.TryGetValue id with
                       | true, v -> Some (id, render v)
                       | _ -> None)
-          Captured = capturedOrder |> Seq.map (fun (n, id) -> (n, render captured.[id])) |> List.ofSeq }
+          Captured =
+              (capturedOrder |> Seq.map (fun (n, id) -> (n, render captured.[id])) |> List.ofSeq)
+              @ (cellOrder |> Seq.map (fun (label, key) -> (label, render cells.[key])) |> List.ofSeq) }
     let samples =
         if isInt then [ (2.0, 1.0); (1.0, 3.0); (3.0, 5.0); (-2.0, 7.0); (4.0, 9.0) ]
         else [ (2.0, 1.0); (1.0, 3.0); (0.5, 4.0); (-1.5, 2.5); (3.0, 5.0) ]
@@ -1313,17 +1432,17 @@ let deducePackFold (fname: string) (packName: string) (packId: IRId) (body: Type
 /// through EVERY operator (permuting invariant subvalues changes nothing).
 /// Base cases: expressions untouching the pack, `arity(pack)`, a whole-pack
 /// call to an already-invariant function, and the bare pack itself (unknown).
-let packParityOf (resolver: string -> Parity option) (packId: IRId) (body: TypedExpr) : Parity =
+let packParityOf (resolver: IRId -> Parity option) (packId: IRId) (body: TypedExpr) : Parity =
     let rec go (e: TypedExpr) : Parity =
         let allInv es = if es |> List.forall (fun x -> go x = PInv) then PInv else PBottom
         match e.Kind with
         | _ when not (usesVar packId e) -> PInv
         | TExprVar _ -> PBottom   // the bare pack (pack-free vars hit the guard above)
-        | TExprApp ({ Kind = TExprVar (fname, _, _) }, args) ->
+        | TExprApp ({ Kind = TExprVar (_, fid, _) }, args) ->
             let argOk (a: TypedExpr) =
                 match a.Kind with
                 | TExprVar (_, aid, _) when aid = packId ->
-                    (match resolver fname with Some PInv -> true | _ -> false)
+                    (match resolver fid with Some PInv -> true | _ -> false)
                 | _ -> go a = PInv
             if args |> List.forall argOk then PInv else PBottom
         | TExprBinOp (_, _, l, r) -> allInv [l; r]
@@ -1349,3 +1468,166 @@ let packParityOf (resolver: string -> Parity option) (packId: IRId) (body: Typed
     // prod(a); mean(s) }` flattens to `mean(prod(a))` for the wrapper walk
     // (deducePackFold keeps the RAW body; DSConsRest is skipped by flattening).
     go (flattenBindings body)
+
+// Late tier, witness half: a declared comm/anticomm on a Poly pack.
+//
+// A pack is ONE declared parameter, so the decl-level witness (which builds
+// its pairs from parameter indices) never saw a pair inside it, and IRMono
+// expands the group per arity without re-checking it: `packdiv(a) where
+// comm(a) = head / packdiv(tail)` stored a triangle and served 1/4 for 4
+// (N2). The pack's pairs exist per ARITY, so the body is unrolled at small
+// arities into the closed fixed-arity body `specializeFunction` builds for
+// the primal -- `arity(view)` folded, `match arity(view)` reduced to its live
+// arm, `let head :: tail = view` and `view[k]` resolved to expanded element
+// parameters, the self call re-entered on the tail view -- and the ordinary
+// witness runs on each claimed pair of the expanded group. Every shape
+// outside that world answers None: no unrolled body, no witness, and the
+// claim stays trusted exactly as before (a precision loss, never a false
+// refusal).
+
+/// The pack arities the witness tries. Two operands already exhibit most
+/// failures; three and four catch folds whose small instances happen to hold.
+let private packWitnessArities = [ 2; 3; 4 ]
+
+/// Unroll a pack function body at a concrete view. `views` maps a pack-view
+/// binder id (the declared pack, every `tail`) to the element expressions it
+/// still holds; `viewNames` is the same by surface name, for `arity(name)`.
+let rec private unrollPackBody (fname: string) (declPackId: IRId) (declPackName: string)
+                               (declBody: TypedExpr) (budget: int ref)
+                               (views: Map<IRId, TypedExpr list>) (viewNames: Map<string, TypedExpr list>)
+                               (e: TypedExpr) : TypedExpr option =
+    let go = unrollPackBody fname declPackId declPackName declBody budget views viewNames
+    let gos (es: TypedExpr list) =
+        let rs = es |> List.map go
+        if rs |> List.forall Option.isSome then Some (rs |> List.map Option.get) else None
+    let ok k = Some { e with Kind = k }
+    let touchesView (x: TypedExpr) =
+        views |> Map.exists (fun vid _ -> usesVar vid x)
+    let viewOf (x: TypedExpr) =
+        match (unwrapBlock x).Kind with
+        | TExprVar (_, vid, _) -> Map.tryFind vid views
+        | _ -> None
+    match e.Kind with
+    | TExprArity name ->
+        (match Map.tryFind name viewNames with
+         | Some elems -> ok (TExprLit (LitInt (int64 elems.Length)))
+         | None -> None)
+    | TExprVar (_, vid, _) when Map.containsKey vid views -> None   // a bare pack: not unrollable here
+    | TExprTupleIndex (p, { Kind = TExprLit (LitInt k) }) when (viewOf p).IsSome ->
+        let elems = (viewOf p).Value
+        if k >= 0L && k < int64 elems.Length then Some elems.[int k] else None
+    | TExprApp ({ Kind = TExprVar (n, _, _) }, [arg]) when n = fname && (viewOf arg).IsSome ->
+        budget.Value <- budget.Value - 1
+        let elems = (viewOf arg).Value
+        // An empty view is fine: `match arity(view)` picks a `| 0` base arm,
+        // and a `let head :: tail` of it answers None in `walk`.
+        if budget.Value < 0 then None
+        else
+            unrollPackBody fname declPackId declPackName declBody budget
+                (Map.ofList [ declPackId, elems ]) (Map.ofList [ declPackName, elems ]) declBody
+    | TExprMatch (scrut, cases) ->
+        (match (unwrapBlock scrut).Kind with
+         | TExprArity name when Map.containsKey name viewNames ->
+             let k = int64 viewNames.[name].Length
+             // The first arm that matches the literal arity, as the primal's
+             // specialization reduces it; a guard or any other pattern is
+             // outside the world (None), never skipped.
+             let rec pick (cs: TypedMatchCase list) =
+                 match cs with
+                 | [] -> None
+                 | c :: rest ->
+                     match c.Pattern.Kind, c.Guard with
+                     | TPatLit (LitInt n), None -> if n = k then Some c else pick rest
+                     | TPatWild, None -> Some c
+                     | _ -> None
+             pick cases |> Option.bind (fun c -> go c.Body)
+         | _ -> if touchesView e then None else Some e)
+    | TExprBlock (stmts, final) ->
+        // Thread the statements: a `let head :: tail = view` binds the head to
+        // the view's first element (substituted into everything after it) and
+        // the tail to the rest; a plain let is kept, its value unrolled.
+        let rec walk (vs: Map<IRId, TypedExpr list>) (vns: Map<string, TypedExpr list>)
+                     (ss: TypedStmt list) (acc: TypedStmt list) (substs: (IRId * TypedExpr) list) =
+            let subAll (x: TypedExpr) =
+                substs |> List.fold (fun st (vid, repl) -> st |> Option.bind (substVar vid repl)) (Some x)
+            let goIn = unrollPackBody fname declPackId declPackName declBody budget vs vns
+            match ss with
+            | [] ->
+                (match final with
+                 | None -> None
+                 | Some f ->
+                     subAll f |> Option.bind goIn
+                     |> Option.map (fun f' -> { e with Kind = TExprBlock (List.rev acc, Some f') }))
+            | TStmtLet b :: rest ->
+                (match b.Destructure, b.SubBindings, (unwrapBlock b.Value).Kind with
+                 | DSConsRest, [ (_, headId, _); (tailName, tailId, _) ], TExprVar (_, vid, _) when Map.containsKey vid vs ->
+                     (match vs.[vid] with
+                      | h :: t -> walk (Map.add tailId t vs) (Map.add tailName t vns) rest acc ((headId, h) :: substs)
+                      | [] -> None)
+                 | DSPositional, [], _ when List.isEmpty b.PostChecks ->
+                     subAll b.Value |> Option.bind goIn
+                     |> Option.bind (fun v -> walk vs vns rest (TStmtLet { b with Value = v } :: acc) substs)
+                 | _ -> None)
+            | _ -> None
+        walk views viewNames stmts [] []
+    | TExprBinOp (m, op, l, r) ->
+        (match go l, go r with
+         | Some a, Some b -> ok (TExprBinOp (m, op, a, b))
+         | _ -> None)
+    | TExprUnaryOp (op, i) -> go i |> Option.bind (fun a -> ok (TExprUnaryOp (op, a)))
+    | TExprIf (c, t, f) ->
+        (match go c, go t, go f with
+         | Some a, Some b, Some d -> ok (TExprIf (a, b, d))
+         | _ -> None)
+    | TExprCompute i -> go i |> Option.bind (fun a -> ok (TExprCompute a))
+    | TExprPure i -> go i |> Option.bind (fun a -> ok (TExprPure a))
+    | TExprLet (n, vid, value, body) ->
+        (match go value, go body with
+         | Some a, Some b -> ok (TExprLet (n, vid, a, b))
+         | _ -> None)
+    | TExprApp (f, args) when not (touchesView f) ->
+        gos args |> Option.bind (fun a -> ok (TExprApp (f, a)))
+    | _ -> if touchesView e then None else Some e
+
+/// A witnessed failure of a declared comm/anticomm group on a pack function:
+/// (arity, expanded position p, expanded position q, witness), positions
+/// counted over the EXPANDED parameter list -- a pack slot of arity k
+/// occupies k consecutive positions, as IRMono's expandGroups lays them out.
+/// `paramIds` are the declared parameters in order; `packIndex` the pack's;
+/// `elemType` the pack's element type.
+let witnessPackLawFailure (inlineFn: IRId -> (IRId list * TypedExpr) option)
+                          (fname: string) (packName: string) (packId: IRId) (packIndex: int)
+                          (paramIds: IRId list) (elemType: IRType)
+                          (groups: int list list) (negate: bool) (isInt: bool) (body: TypedExpr)
+                          : (int * int * int * IRId list * LawWitness) option =
+    let groupsWithPack = groups |> List.filter (List.contains packIndex)
+    if List.isEmpty groupsWithPack then None
+    else
+        packWitnessArities |> List.tryPick (fun k ->
+            // Element parameters get ids no binder can hold (binder ids are
+            // positive and globally unique).
+            let elemIds = List.init k (fun i -> System.Int32.MinValue + 16 + i)
+            let elems =
+                elemIds |> List.mapi (fun i id ->
+                    { Kind = TExprVar ($"{packName}[{i}]", id, None); Type = elemType; Span = body.Span })
+            let budget = ref 64
+            match unrollPackBody fname packId packName body budget
+                      (Map.ofList [ packId, elems ]) (Map.ofList [ packName, elems ]) body with
+            | None -> None
+            | Some unrolled ->
+                let expanded =
+                    paramIds |> List.mapi (fun i id -> if i = packIndex then elemIds else [ id ]) |> List.concat
+                let posOf (i: int) =
+                    let start = if i <= packIndex then i else i + k - 1
+                    if i = packIndex then List.init k (fun j -> start + j) else [ start ]
+                groupsWithPack
+                |> List.collect (fun g -> g |> List.distinct |> List.sort |> List.collect posOf |> List.pairwise)
+                |> List.distinct
+                |> List.tryPick (fun (p, q) ->
+                    if p < 0 || q >= expanded.Length || p = q then None
+                    else
+                        let pi = expanded.[p]
+                        let pj = expanded.[q]
+                        let others = expanded |> List.filter (fun id -> id <> pi && id <> pj)
+                        witnessSwapLawFailure inlineFn pi pj others negate false isInt unrolled
+                        |> Option.map (fun w -> (k, p, q, expanded, w))))

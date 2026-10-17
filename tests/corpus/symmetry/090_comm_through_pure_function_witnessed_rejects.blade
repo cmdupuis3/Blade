@@ -1,0 +1,8 @@
+// TEST: comm on a kernel that calls a non-commutative pure function is witnessed false (rejects)
+// ERROR: BL4013
+// The witness used to stop at any user-function call and trust the claim
+// (D12). A pure, non-recursive function is now evaluated through: `ratio(x,
+// y)` is x / y, 2 at (2, 1) and 0.5 at (1, 2).
+function ratio(a: Float64, b: Float64) -> Float64 = a / b
+let A = [1.0, 2.0, 4.0]
+let r = method_for(A, A) <@> lambda(x, y) where comm(x, y) -> ratio(x, y) |> compute

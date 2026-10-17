@@ -3880,6 +3880,45 @@ let total = reduce(F, (+), axes = 2)
      with ex -> check "tiles: revision reuse" false ex.Message)
 
     // ---------------------------------------------------------------
+    // The provider boundary rule (BL8015) and the masked read, BOTH lanes:
+    // Icechunk reads through the Zarr chunk core and shares its rule -- a
+    // NaN fill_value over an absent chunk is refused, a finite fill is a
+    // value, and the masked read returns the present cells.
+    // ---------------------------------------------------------------
+    printfn "\n--- boundary rule (BL8015) + masked read (both lanes) ---"
+    (try
+        let root = Path.GetFullPath(fixRepo "ic_boundary").Replace("\\", "/")
+        let arr name fill =
+            { IW.mkArray name [ "r" ] [ 4L ] [ 2L ] (IW.IceF64 [| 1.0; 2.0; 0.0; 0.0 |]) with
+                Fill = fill
+                OmitChunks = [ [ 1L ] ] }
+        IW.writeRepo root
+            { IW.emptyRepo with
+                Seed = 11
+                Snapshots = [ IW.mkSnapshot "s1" [ arr "v" (IW.IceFillFloat nan); arr "w" (IW.IceFillFloat -1.0) ] ]
+                Branches = [ ("main", "s1") ] }
+        let prog (body: string) =
+            "import icechunk as ic\nlet repo = ic.load(\"" + root + "\")\nlet ck = repo.checkout(\"main\", ic.branch)\n" + body + "\n"
+        let run (name: string) (body: string) = Blade.Tests.ProviderBoundaryTests.bothLanes e2eDir name [] (prog body)
+        (match run "ic_boundary_fill" "let v = ck.vars.v |> ic.read" with
+         | Ok r ->
+             Blade.Tests.ProviderBoundaryTests.expectRefusal check "icechunk: NaN fill_value + absent chunk refused" r
+                 [ "provider read of 'v'"; "2 cell(s) hold a missing value"; "first at [2]"; "NaN or infinite (fill_value NaN)" ]
+         | Error e -> check "icechunk boundary fill: lowers" false e)
+        (match run "ic_boundary_finite" "let w = ck.vars.w |> ic.read" with
+         | Ok r ->
+             Blade.Tests.ProviderBoundaryTests.expectValues check "icechunk: a finite fill_value stays a value" r
+                 [ "w = [1.0, 2.0, -1.0, -1.0]" ]
+         | Error e -> check "icechunk boundary finite: lowers" false e)
+        (match run "ic_boundary_present" "let t = ck.vars.v |> ic.read_present\nlet ok = ic.present(ck.vars.v)\nlet n = extents(t)\nlet total = reduce(t, (+))" with
+         | Ok r ->
+             Blade.Tests.ProviderBoundaryTests.expectValues check "icechunk: masked read (read_present / present)" r
+                 [ "n = 2"; "total = 3.0"; "ok = [true, true, false, false]" ]
+         | Error e -> check "icechunk masked read: lowers" false e)
+        (try Directory.Delete(root, true) with _ -> ())
+     with ex -> check "icechunk boundary rule: no unexpected exception" false ex.Message)
+
+    // ---------------------------------------------------------------
     // Summary
     // ---------------------------------------------------------------
     printFooter "Icechunk Provider" [$"{passed} passed"; $"{failed} failed"]

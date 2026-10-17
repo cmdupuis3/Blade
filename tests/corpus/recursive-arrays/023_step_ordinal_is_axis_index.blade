@@ -1,0 +1,22 @@
+// TEST: A recursion's step ordinal is an index of its named axis
+// ============================================================================
+// `n` in `| prefix :: n -> ..` runs over the recursion's leading axis, so it
+// is `Nat<Step>` -- the iteration index a `method_for(range<Step>)` kernel
+// receives. Untagged, `f(n)` over the same axis warned BL4003 on correct
+// code (and `u((n + 1) % 5)` did too); the same reads inside a range kernel
+// were silent. Arithmetic on `n` is a position that keeps the tag, checked
+// at run time like a kernel parameter's.
+// ============================================================================
+type Step = Idx<5>
+let f: Array<Float64 like Step> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let u: Array<Float64 like Step> = [10.0, 20.0, 30.0, 40.0, 50.0]
+let rec x: Array<Float64 like Step> =
+    match x with
+    | zero -> zero
+    | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + f(n) + u((n + 1) % 5)
+// EXPECT: x = [21.0, 42.5, 64.25, 86.125, 58.0625]
+let rec c: Array<Int64 like Step> =
+    match c with
+    | zero -> zero
+    | prefix :: n -> prefix :: (if n < 2 then 1 else prefix(n - 1) + prefix(n - 2))
+// EXPECT: c = [1, 1, 2, 3, 5]

@@ -34,10 +34,9 @@ type AttrsTest = {
     Run: unit -> ExprAttrs * ExprAttrs   // (actual, expected)
 }
 
-let private mkAttrs (free: int list) (bound: int list) (isPure: bool) : ExprAttrs =
+let private mkAttrs (free: int list) (bound: int list) : ExprAttrs =
     { FreeVars  = Set.ofList free
-      BoundVars = Set.ofList bound
-      IsPure    = isPure }
+      BoundVars = Set.ofList bound }
 
 let private intTy = IRTScalar ETInt64
 let private boolTy = IRTScalar ETBool
@@ -50,7 +49,7 @@ let test_lit_has_no_refs = {
     Name = "Leaf: literal has empty attrs"
     Run = fun () ->
         let actual = exprAttrs (IRLit (IRLitInt 42L))
-        let expected = mkAttrs [] [] true
+        let expected = mkAttrs [] []
         (actual, expected)
 }
 
@@ -58,7 +57,7 @@ let test_var_is_free = {
     Name = "Leaf: IRVar contributes one FreeVar"
     Run = fun () ->
         let actual = exprAttrs (IRVar (7, intTy))
-        let expected = mkAttrs [7] [] true
+        let expected = mkAttrs [7] []
         (actual, expected)
 }
 
@@ -66,7 +65,7 @@ let test_param_has_no_refs = {
     Name = "Leaf: IRParam has empty attrs (params are not variables)"
     Run = fun () ->
         let actual = exprAttrs (IRParam ("p", 0, intTy))
-        let expected = mkAttrs [] [] true
+        let expected = mkAttrs [] []
         (actual, expected)
 }
 
@@ -80,7 +79,7 @@ let test_binop_unions_children = {
         // x + y → free {x, y}
         let e = IRBinOp (IRElementwise, IRAdd, IRVar (1, intTy), IRVar (2, intTy), SrcLoc.Nowhere)
         let actual = exprAttrs e
-        let expected = mkAttrs [1; 2] [] true
+        let expected = mkAttrs [1; 2] []
         (actual, expected)
 }
 
@@ -90,7 +89,7 @@ let test_unaryop_passes_through = {
         // -x → free {x}
         let e = IRUnaryOp (IRNeg, IRVar (3, intTy))
         let actual = exprAttrs e
-        let expected = mkAttrs [3] [] true
+        let expected = mkAttrs [3] []
         (actual, expected)
 }
 
@@ -100,7 +99,7 @@ let test_tuple_unions_all = {
         // (x, y, x) → free {x, y}
         let e = IRTuple [IRVar (1, intTy); IRVar (2, intTy); IRVar (1, intTy)]
         let actual = exprAttrs e
-        let expected = mkAttrs [1; 2] [] true
+        let expected = mkAttrs [1; 2] []
         (actual, expected)
 }
 
@@ -117,7 +116,7 @@ let test_let_binds_id = {
             IRLet (10, IRLit (IRLitInt 1L),
                 IRBinOp (IRElementwise, IRAdd, IRVar (10, intTy), IRVar (20, intTy), SrcLoc.Nowhere))
         let actual = exprAttrs e
-        let expected = mkAttrs [20] [10] true
+        let expected = mkAttrs [20] [10]
         (actual, expected)
 }
 
@@ -137,7 +136,7 @@ let test_let_shadowing = {
                         IRBinOp (IRElementwise, IRAdd, IRVar (10, intTy), IRVar (20, intTy), SrcLoc.Nowhere))
         let e = IRLet (10, IRVar (99, intTy), inner)
         let actual = exprAttrs e
-        let expected = mkAttrs [99] [10; 20] true
+        let expected = mkAttrs [99] [10; 20]
         (actual, expected)
 }
 
@@ -150,7 +149,7 @@ let test_let_value_can_be_free = {
             IRLet (10, IRVar (5, intTy),
                 IRBinOp (IRElementwise, IRAdd, IRVar (10, intTy), IRLit (IRLitInt 1L), SrcLoc.Nowhere))
         let actual = exprAttrs e
-        let expected = mkAttrs [5] [10] true
+        let expected = mkAttrs [5] [10]
         (actual, expected)
 }
 
@@ -178,7 +177,7 @@ let test_forrange_binds_loop_var = {
         let body = IRBinOp (IRElementwise, IRAdd, IRVar (30, intTy), IRVar (5, intTy), SrcLoc.Nowhere)
         let e = IRForRange (30, IRLit (IRLitInt 0L), IRVar (99, intTy), body)
         let actual = exprAttrs e
-        let expected = mkAttrs [99; 5] [30] true
+        let expected = mkAttrs [99; 5] [30]
         (actual, expected)
 }
 
@@ -195,7 +194,7 @@ let test_match_pattern_binds = {
         let e = IRMatch (IRVar (99, intTy), [case])
         let actual = exprAttrs e
         // scrut contributes 99 free; case body has 5 bound, 8 free
-        let expected = mkAttrs [99; 8] [5] true
+        let expected = mkAttrs [99; 8] [5]
         (actual, expected)
 }
 
@@ -214,7 +213,7 @@ let test_match_tuple_pattern = {
         }
         let e = IRMatch (IRVar (99, intTy), [case])
         let actual = exprAttrs e
-        let expected = mkAttrs [99; 8] [5; 6] true
+        let expected = mkAttrs [99; 8] [5; 6]
         (actual, expected)
 }
 
@@ -228,7 +227,7 @@ let test_mask_arm = {
         // mask(a_1, p_2)
         let e = IRMask (IRVar (1, intTy), IRVar (2, intTy))
         let actual = exprAttrs e
-        let expected = mkAttrs [1; 2] [] true
+        let expected = mkAttrs [1; 2] []
         (actual, expected)
 }
 
@@ -237,7 +236,7 @@ let test_intersect_arm = {
     Run = fun () ->
         let e = IRIntersect (IRVar (1, intTy), IRVar (2, intTy))
         let actual = exprAttrs e
-        let expected = mkAttrs [1; 2] [] true
+        let expected = mkAttrs [1; 2] []
         (actual, expected)
 }
 
@@ -246,7 +245,7 @@ let test_union_arm = {
     Run = fun () ->
         let e = IRUnion (IRVar (1, intTy), IRVar (2, intTy))
         let actual = exprAttrs e
-        let expected = mkAttrs [1; 2] [] true
+        let expected = mkAttrs [1; 2] []
         (actual, expected)
 }
 
@@ -255,7 +254,7 @@ let test_unique_arm = {
     Run = fun () ->
         let e = IRUnique (IRVar (1, intTy))
         let actual = exprAttrs e
-        let expected = mkAttrs [1] [] true
+        let expected = mkAttrs [1] []
         (actual, expected)
 }
 
@@ -267,7 +266,7 @@ let test_contains_arm = {
         let arr = IRVar (1, intTy)
         let e = IRContains (arr, IRVar (2, intTy))
         let actual = exprAttrs e
-        let expected = mkAttrs [1; 2] [] true
+        let expected = mkAttrs [1; 2] []
         (actual, expected)
 }
 
@@ -276,7 +275,7 @@ let test_sort_arm = {
     Run = fun () ->
         let e = IRSort (IRVar (1, intTy), IRVar (2, intTy))
         let actual = exprAttrs e
-        let expected = mkAttrs [1; 2] [] true
+        let expected = mkAttrs [1; 2] []
         (actual, expected)
 }
 
@@ -285,7 +284,7 @@ let test_reduce_arm = {
     Run = fun () ->
         let e = IRReduce (IRVar (1, intTy), IRVar (2, intTy), None)
         let actual = exprAttrs e
-        let expected = mkAttrs [1; 2] [] true
+        let expected = mkAttrs [1; 2] []
         (actual, expected)
 }
 
@@ -300,7 +299,7 @@ let test_slice_finds_refs = {
         // arr_1[2:start_3:stop_4]
         let e = IRSlice (IRVar (1, intTy), 0, IRVar (3, intTy), IRVar (4, intTy))
         let actual = exprAttrs e
-        let expected = mkAttrs [1; 3; 4] [] true
+        let expected = mkAttrs [1; 3; 4] []
         (actual, expected)
 }
 
@@ -309,7 +308,7 @@ let test_join_finds_refs = {
     Run = fun () ->
         let e = IRJoin ([IRVar (1, intTy); IRVar (2, intTy); IRVar (3, intTy)], 0)
         let actual = exprAttrs e
-        let expected = mkAttrs [1; 2; 3] [] true
+        let expected = mkAttrs [1; 2; 3] []
         (actual, expected)
 }
 
@@ -319,7 +318,7 @@ let test_shift_with_pad = {
         // shift(arr_1, dim, offset_2, BndPad fill_3)
         let e = IRShift (IRVar (1, intTy), 0, IRVar (2, intTy), BndPad (IRVar (3, intTy)))
         let actual = exprAttrs e
-        let expected = mkAttrs [1; 2; 3] [] true
+        let expected = mkAttrs [1; 2; 3] []
         (actual, expected)
 }
 
@@ -355,7 +354,7 @@ let test_probe_in_binop = {
         let cont = IRContains (arrB, IRVar (2, intTy))
         let e = IRBinOp (IRElementwise, IRAnd, cont, IRLit (IRLitBool true), SrcLoc.Nowhere)
         let actual = exprAttrs e
-        let expected = mkAttrs [1; 2] [] true
+        let expected = mkAttrs [1; 2] []
         (actual, expected)
 }
 
@@ -367,7 +366,7 @@ let test_probe_in_if = {
         let cont = IRContains (arrB, IRVar (3, intTy))
         let e = IRIf (IRVar (1, boolTy), cont, IRLit (IRLitBool false))
         let actual = exprAttrs e
-        let expected = mkAttrs [1; 2; 3] [] true
+        let expected = mkAttrs [1; 2; 3] []
         (actual, expected)
 }
 
@@ -394,7 +393,7 @@ let test_multiple_probes_in_one_predicate = {
         let cont2 = IRContains (arrC, IRVar (3, intTy))
         let e = IRBinOp (IRElementwise, IROr, cont1, cont2, SrcLoc.Nowhere)
         let actual = exprAttrs e
-        let expected = mkAttrs [1; 2; 3] [] true
+        let expected = mkAttrs [1; 2; 3] []
         (actual, expected)
 }
 
@@ -408,7 +407,7 @@ let test_probe_in_let_value = {
         let e = IRLet (10, cont, IRVar (10, boolTy))
         let actual = exprAttrs e
         // FreeVars: {1, 2}; BoundVars: {10}; probe propagates.
-        let expected = mkAttrs [1; 2] [10] true
+        let expected = mkAttrs [1; 2] [10]
         (actual, expected)
 }
 
@@ -461,7 +460,7 @@ let test_probe_imported_via_callable_table = {
             // which is the substitution working), and the NON-parameter
             // IRVar(55) survives — so the walk adds exactly {55}.
             // Probes: one probe with BuildOn = IRVar(1) (after substitution).
-            let expected = mkAttrs [99; 1; 2; 55] [] true
+            let expected = mkAttrs [99; 1; 2; 55] []
             (actual, expected)
         finally
             restoreAnalysisContext prev
@@ -479,7 +478,7 @@ let test_no_probe_import_without_callable_table = {
         let prev = setCallablesContext Map.empty
         try
             let actual = exprAttrs crossProcCallSite
-            let expected = mkAttrs [99; 1; 2] [] true
+            let expected = mkAttrs [99; 1; 2] []
             (actual, expected)
         finally
             restoreAnalysisContext prev
@@ -528,13 +527,12 @@ let private fmtAttrs (a: ExprAttrs) : string =
     let setStr (s: Set<IRId>) =
         s |> Set.toList |> List.sort
           |> List.map string |> String.concat ", "
-    sprintf "{ Free={%s}; Bound={%s}; Pure=%b }"
-        (setStr a.FreeVars) (setStr a.BoundVars) a.IsPure
+    sprintf "{ Free={%s}; Bound={%s} }"
+        (setStr a.FreeVars) (setStr a.BoundVars)
 
 let private attrsEqual (a: ExprAttrs) (b: ExprAttrs) : bool =
     a.FreeVars = b.FreeVars
         && a.BoundVars = b.BoundVars
-        && a.IsPure = b.IsPure
 
 /// Run all attribute tests, returning (passed, failed). Prints per-test
 /// status; on failure also prints actual vs expected so the difference

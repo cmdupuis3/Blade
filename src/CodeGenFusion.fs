@@ -345,8 +345,7 @@ let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs:
                 // block-local emitted as `__v<id>` must not be re-spelled to
                 // its source name here.
                 let nameMap =
-                    cg.Captures
-                    |> List.fold (fun acc c -> if Map.containsKey c.Id acc then acc else Map.add c.Id c.Name acc) nameMap
+                    withCaptureNames EnclosingNamesWin cg.Captures nameMap
                 let rr = genKernelExprWithReynolds cg.KernelExpr cg.KernelParams cg.HasReynolds cg.IsAntisymmetric nameMap pfn
                 if cg.HasReynolds && rr.UniqueTerms < rr.TotalPerms then
                     lines <- lines @ [ind depth + $"// Reynolds: {rr.UniqueTerms}/{rr.TotalPerms} perms unique (dedup {rr.TotalPerms / max 1 rr.UniqueTerms}x)"]
@@ -945,7 +944,7 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
                 else
                     match genCudaCoFusion leafCgs leafNames name blockSizes.Head with
                     | Some inlineLines -> Ok (wrapDevice inlineLines)
-                    | None -> Error "cuda co-fusion requires the leaves to be rectangular, non-Reynolds, boundary-safe, and share the same input arrays -- force the leaves separately with |> compute"
+                    | None -> Error "cuda co-fusion requires the leaves to be rectangular, non-Reynolds, boundary-safe, capture-free, and share the same input arrays -- force the leaves separately with |> compute"
             // ---- All mpi: domain co-fusion ---------------------------------
             // ONE outer-row slab decomposition SHARED by every leaf: each rank
             // runs the merged (possibly staggered) nest over its [lo, hi) rows,
@@ -1307,15 +1306,7 @@ let genPackedPoolCopy (arrTy: IRArrayType) (arrayCpp: string) (flatBase: string)
         | _ -> raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan ($"packed pool copy of '{varName}' requires literal extents")))
     let n = litOf lead.Extent
     let r = lead.Rank
-    let binom (m: int64) (k: int) : int64 =
-        if k < 0 || m < int64 k then 0L
-        else
-            let mutable num = 1L
-            let mutable den = 1L
-            for i in 0 .. k - 1 do
-                num <- num * (m - int64 i)
-                den <- den * int64 (i + 1)
-            num / den
+    let binom (m: int64) (k: int) : int64 = Blade.OrbRank.binomOrZero m k
     let card =
         match lead.Symmetry with
         | SymSymmetric -> binom (n + int64 r - 1L) r
@@ -1392,6 +1383,7 @@ let collectDeferredPositionalReads (ctx: CodeGenContext) (root: IRExpr) : IRId l
         | IRJoin (es, _) -> List.iter walk es
         | IRComplex (re, im) -> walk re; walk im
         | IRFma (a, b, c) -> walk a; walk b; walk c
+        | IRRandAt (_, args, w) -> List.iter walk args; w |> Option.iter (fst >> walk)
         | IRFieldAccess (o, _) -> walk o
         | IRTupleProj (x, _, _) -> walk x
         | IRTupleCons (h, t) -> walk h; walk t

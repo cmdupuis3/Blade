@@ -1,0 +1,10 @@
+// TEST: Arithmetic on an EnumIdx value in a kernel typed before it met R (rejects)
+// ERROR: BL4003
+// ERROR-CONTAINS: Spell the key where it is computed on
+// ============================================================================
+// `k` is a lambda VALUE, typed before it meets the R array, so its `c + 1`
+// would be read as a value of R. Spelling the key, `Int64(c) + 1`, is exact.
+type R = EnumIdx<[100, 200, 300]>
+let codes: Array<R like Idx<3>> = [300, 100, 200]
+let k = lambda(c) -> c + 1
+let d = object_for(k) <@> codes |> compute

@@ -1,0 +1,11 @@
+// TEST: omp lambda calls a module-level lambda that writes a global (rejects)
+// ERROR: BL4005
+// A let-bound lambda is a callee like a declared function (#17): `tally`
+// writes the global `g`, so calling it from every cell of an omp kernel races.
+let mut g = [0.0]
+let tally = lambda(x: Float64) -> {
+    g(0) = g(0) + x
+    x
+}
+let a = [1.0, 2.0, 3.0]
+let r = a <@> lambda(x) where omp(x: 1) -> tally(x) |> compute

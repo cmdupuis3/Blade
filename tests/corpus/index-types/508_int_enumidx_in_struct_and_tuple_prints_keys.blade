@@ -1,0 +1,21 @@
+// TEST: An integer EnumIdx value inside a struct or tuple prints its key
+// ============================================================================
+// A top-level struct or tuple prints like its literal; a component of an
+// integer EnumIdx type is a key represented as its position (D2), so it
+// prints through the key table -- nested structs and tuples, and an array
+// component of such keys, too, in both lanes.
+// ============================================================================
+type R = EnumIdx<[100, 200, 300]>
+struct Rec { code: Nat<R>, x: Float64 }
+struct Outer { inner: Rec, tag: Nat<R> }
+let codes: Array<Nat<R> like Idx<2>> = [300, 100]
+let p = Rec { code = codes(0), x = 1.0 }
+// EXPECT: p = Rec { code = 300, x = 1.0 }
+let t = (codes(1), 2.0)
+// EXPECT: t = (100, 2.0)
+let o = Outer { inner = p, tag = codes(1) }
+// EXPECT: o = Outer { inner = Rec { code = 300, x = 1.0 }, tag = 100 }
+let w = ((codes(0), 1), 3.5)
+// EXPECT: w = ((300, 1), 3.5)
+let u = (codes, 7)
+// EXPECT: u = ([300, 100], 7)

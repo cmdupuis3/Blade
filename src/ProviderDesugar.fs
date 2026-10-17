@@ -1,4 +1,6 @@
-/// ProviderDesugar -- the icechunk `checkout` desugar (raw AST -> raw AST).
+/// ProviderDesugar -- the icechunk `checkout` desugar and the MASKED READ
+/// (`alias.read_present` / `alias.present`, at the end of this file) (raw AST
+/// -> raw AST).
 ///
 /// Icechunk is the first provider whose module-creating verb has a DERIVED
 /// binding as its receiver rather than the imported alias:
@@ -471,6 +473,215 @@ let private desugarModule (diags: ResizeArray<Blade.Diagnostics.Diagnostic>)
 
     if changed.Value then { m with Decls = decls' } else m
 
+// ---------------------------------------------------------------------------
+// The MASKED READ: `alias.read_present` / `alias.present`
+// ---------------------------------------------------------------------------
+//
+// The opt-in to the provider boundary rule (ProviderRegistry.MissingRule,
+// BL8015). A default read refuses a variable holding a missing cell; the
+// masked read returns the PRESENT cells as a compound array (and/or the
+// presence mask), with no sentinel and no NaN ever exposed:
+//
+//     let t  = s.vars.temp |> nc.read_present   // compound: present cells only
+//     let ok = s.vars.temp |> nc.present        // Array<Bool like temp's dims>
+//
+// It is built from existing machinery only, so every lane already runs it:
+//
+//     let t = s.vars.temp |> nc.read_present
+//         =>  let __present_raw_t  = s.vars.temp |> nc.<raw>     // one store read, rule exempt
+//             let __present_mask_t = mask(__present_raw_t, lambda(__px) -> <present __px>)
+//             let t                = compound(__present_raw_t, __present_mask_t)
+//
+// `<raw>` is `rawReadVerb`, a field name no source can spell (Lowering's
+// tryRawRead marks the spec AllowMissing); `<present x>` is the variable's
+// rule spelled in Blade over `Float64(x)` (`presentExpr`), so the mask is an
+// ordinary kernel in the compiled lane and the interpreter alike. The raw
+// binding is not printable, by default (`__`) or by `--print`.
+//
+// Same blessed position as a checkout: a module-level binding (the store's
+// path and the rule are resolved at compile time). Anywhere else is refused.
+
+/// The hidden raw read's verb. Not lexable as an identifier, so only this
+/// pass can produce it.
+let rawReadVerb = "read<raw>"
+
+let private presentVerbs = set [ "read_present"; "present" ]
+
+/// The presence predicate as Blade AST over the variable `x`: the negation
+/// of ProviderRegistry.isMissing, conjunct by conjunct. `y - y == 0.0` is
+/// "finite" (false for NaN and for +-Inf) in every lane.
+let private presentExpr (span: Span) (r: Blade.ProviderRegistry.MissingRule) (x: string) : Expr =
+    let mk k = mkExpr span k
+    let d () = mk (ExprKind.ExprApp (mk (ExprKind.ExprVar "Float64"), [ mk (ExprKind.ExprVar x) ]))
+    let flt (f: float) = mk (ExprKind.ExprLit (LitFloat f))
+    let bin op a b = mk (ExprKind.ExprBinOp (Elementwise, op, a, b))
+    let terms =
+        [ if r.NonFinite then yield bin OpEq (bin OpSub (d ()) (d ())) (flt 0.0)
+          for sv in r.Sentinels do yield bin OpNeq (d ()) (flt sv)
+          match r.Lo with Some lo -> yield bin OpGe (d ()) (flt lo) | None -> ()
+          match r.Hi with Some hi -> yield bin OpLe (d ()) (flt hi) | None -> ()
+          // An integer variable's sentinels compare in the element's own type.
+          let v () = mk (ExprKind.ExprVar x)
+          let ilit (n: int64) = mk (ExprKind.ExprLit (LitInt n))
+          for sv in r.IntSentinels do yield bin OpNeq (v ()) (ilit sv)
+          match r.IntLo with Some lo -> yield bin OpGe (v ()) (ilit lo) | None -> ()
+          match r.IntHi with Some hi -> yield bin OpLe (v ()) (ilit hi) | None -> () ]
+    match terms with
+    | [] -> mk (ExprKind.ExprLit (LitBool true))
+    | t :: rest -> rest |> List.fold (fun acc u -> bin OpAnd acc u) t
+
+/// `read_present` / `present` outside a module-level binding.
+let private presentPositionError (span: Span) (alias: string) (verb: string) : Blade.Diagnostics.Diagnostic =
+    let msg =
+        $"`{alias}.{verb}` is not in a position a masked read can be resolved from. A masked read must be "
+        + $"the whole value of a module-level binding (`let t = store.vars.<name> |> {alias}.{verb}`): the "
+        + "variable's missing-value rule is read from the store at compile time."
+    Blade.Diagnostics.mkError "BL3007" (Blade.Diagnostics.Codes.phaseOfCode "BL3007") span msg
+
+/// A masked read whose operand is not `store.vars.<name>` of a store loaded
+/// at module level above it.
+let private presentOperandError (span: Span) (alias: string) (verb: string) : Blade.Diagnostics.Diagnostic =
+    let msg =
+        $"`{alias}.{verb}` reads a stored variable: its operand must be `store.vars.<name>` of a store "
+        + $"bound above it at module level (`let store = {alias}.load(\"path\")`)."
+    Blade.Diagnostics.mkError "BL3007" (Blade.Diagnostics.Codes.phaseOfCode "BL3007") span msg
+
+/// Every sub-expression, binders included (the position scan only reports).
+let rec private allChildren (e: Expr) : Expr list =
+    match e.Kind with
+    | ExprKind.ExprLambda (parms, _, body) -> (parms |> List.choose (fun p -> p.Default)) @ [ body ]
+    | ExprKind.ExprLet (b, body) -> [ b.Value; body ]
+    | ExprKind.ExprMatch (scrutinee, cases) ->
+        scrutinee :: (cases |> List.collect (fun c -> Option.toList c.Guard @ [ c.Body ]))
+    | ExprKind.ExprBlock (stmts, tail) ->
+        let rec stmtExprs (st: Stmt) =
+            match st with
+            | StmtSpanned (inner, _) -> stmtExprs inner
+            | StmtLet b -> [ b.Value ]
+            | StmtAssign (lhs, _, rhs) -> [ lhs; rhs ]
+            | StmtExpr x -> [ x ]
+            | StmtForIn (_, rangeE, body) -> rangeE :: (body |> List.collect stmtExprs)
+        (stmts |> List.collect stmtExprs) @ Option.toList tail
+    | ExprKind.ExprRecArray def ->
+        (def.SeedArm |> Option.map snd |> Option.toList) @ Option.toList def.Guard @ [ def.SliceExpr ]
+    | _ -> childrenOf e
+
+let private presentModule (diags: ResizeArray<Blade.Diagnostics.Diagnostic>) (m: ModuleDecl) : ModuleDecl =
+    // Provider aliases (any registered provider module). The registry is
+    // installed by ProviderStatics.install, which typecheck runs first; the
+    // other funnels run after it.
+    let aliases =
+        m.Decls |> List.fold (fun acc d ->
+            match d.Value with
+            | DeclImport ([ pname ], ImportQualified aliasOpt) when (Blade.ProviderRegistry.tryFind pname).IsSome ->
+                Map.add (aliasOpt |> Option.defaultValue pname) pname acc
+            | _ -> acc) Map.empty
+    let isPresentCall (e: Expr) =
+        match e.Kind with
+        | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, verb) }, [ _ ]) ->
+            aliases.ContainsKey alias && presentVerbs.Contains verb
+        | _ -> false
+    let rec mentions (e: Expr) = isPresentCall e || (allChildren e |> List.exists mentions)
+    // Fast path: no provider import, or no masked read anywhere.
+    let anyDecl (d: Located<Decl>) =
+        match d.Value with
+        | DeclLet b | DeclStatic b -> mentions b.Value
+        | DeclFunction fd -> mentions fd.Body || (fd.Params |> List.exists (fun p -> p.Default |> Option.exists mentions))
+        | DeclImpl impl -> impl.Methods |> List.exists (fun fd -> mentions fd.Body)
+        | _ -> false
+    if aliases.IsEmpty || not (m.Decls |> List.exists anyDecl) then m else
+    // store binding -> (provider, path), left to right as for checkouts.
+    let stores : Map<string, string * string> ref = ref Map.empty
+    let reportMisplaced (e: Expr) =
+        let rec walk (x: Expr) =
+            (match x.Kind with
+             | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, verb) }, [ _ ])
+                 when aliases.ContainsKey alias && presentVerbs.Contains verb ->
+                 diags.Add(presentPositionError x.Span alias verb)
+             | _ -> ())
+            allChildren x |> List.iter walk
+        walk e
+    let decls' =
+        m.Decls |> List.collect (fun (d: Located<Decl>) ->
+            let record (b: Binding) =
+                for n in patternBoundNames b.Pattern do
+                    stores.Value <- Map.remove n stores.Value
+                match b.Pattern.Kind, b.Value.Kind with
+                | PatternKind.PatVar root,
+                  ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, "load") },
+                                    [ { Kind = ExprKind.ExprLit (LitString path) } ])
+                    when aliases.ContainsKey alias ->
+                    stores.Value <- Map.add root (aliases.[alias], path) stores.Value
+                | _ -> ()
+            match d.Value with
+            | DeclLet b ->
+                (match b.Pattern.Kind, b.Value.Kind with
+                 | PatternKind.PatVar t,
+                  ExprKind.ExprApp (({ Kind = ExprKind.ExprField (({ Kind = ExprKind.ExprVar alias } as aliasE), verb) } as headE), [ view ])
+                    when aliases.ContainsKey alias && presentVerbs.Contains verb ->
+                    reportMisplaced view
+                    let target =
+                        match view.Kind with
+                        | ExprKind.ExprField ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar root }, "vars") }, varName)
+                            when stores.Value.ContainsKey root -> Some (stores.Value.[root], varName)
+                        | _ -> None
+                    (match target with
+                     | None ->
+                        diags.Add(presentOperandError b.Value.Span alias verb)
+                        record b
+                        [ d ]
+                     | Some ((pname, path), varName) ->
+                        let rule =
+                            match Blade.ProviderRegistry.tryFind pname with
+                            | Some spec -> spec.MissingRuleOf path varName
+                            | None -> Blade.ProviderRegistry.noMissingRule
+                        let sp = b.Value.Span
+                        let mk k = mkExpr sp k
+                        let rawName = $"__present_raw_{t}"
+                        let maskName = $"__present_mask_{t}"
+                        let rawValue =
+                            mk (ExprKind.ExprApp (mkExpr headE.Span (ExprKind.ExprField (aliasE, rawReadVerb)), [ view ]))
+                        let maskValue =
+                            let px = "__px"
+                            let lam =
+                                mk (ExprKind.ExprLambda (
+                                        [ ({ Name = px; Type = None; Default = None; NameSpan = noSpan } : LambdaParam) ],
+                                        None, presentExpr sp rule px))
+                            mk (ExprKind.ExprMask (mk (ExprKind.ExprVar rawName), lam))
+                        let letOf (name: string) (value: Expr) (ty: TypeExpr option) =
+                            let nb : Binding =
+                                { Mutability = BindLet
+                                  Pattern = mkPat b.Pattern.Span (PatternKind.PatVar name)
+                                  Type = ty
+                                  Value = value }
+                            { d with Value = DeclLet nb }
+                        record b
+                        if verb = "present" then
+                            [ letOf rawName rawValue None
+                              { d with Value = DeclLet { b with Value = maskValue } } ]
+                        else
+                            [ letOf rawName rawValue None
+                              letOf maskName maskValue None
+                              { d with Value = DeclLet { b with Value = mk (ExprKind.ExprCompound (mk (ExprKind.ExprVar rawName), mk (ExprKind.ExprVar maskName))) } } ])
+                 | _ ->
+                    reportMisplaced b.Value
+                    record b
+                    [ d ])
+            | DeclStatic b ->
+                reportMisplaced b.Value
+                record b
+                [ d ]
+            | DeclFunction fd ->
+                stores.Value <- Map.remove fd.Name stores.Value
+                for p in fd.Params do p.Default |> Option.iter reportMisplaced
+                reportMisplaced fd.Body
+                [ d ]
+            | DeclImpl impl ->
+                for fd in impl.Methods do reportMisplaced fd.Body
+                [ d ]
+            | _ -> [ d ])
+    { m with Decls = decls' }
+
 // Entry points
 
 /// The pass entry point -- same shape as the other AST->AST expansions
@@ -483,7 +694,9 @@ let expand (program: Program) : Result<Program, Blade.Diagnostics.Diagnostic lis
     let changed = ref false
     let modules' =
         program.Modules |> List.map (fun m ->
-            let m' = desugarModule diags m
+            // Checkouts first: a masked read of a checkout reads the store
+            // the checkout became.
+            let m' = desugarModule diags m |> presentModule diags
             if not (LanguagePrimitives.PhysicalEquality m' m) then changed.Value <- true
             m')
     if diags.Count > 0 then Error (List.ofSeq diags)

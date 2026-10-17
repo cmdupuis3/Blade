@@ -1,0 +1,6 @@
+// TEST: Two arrays of different rank in one generic variable are refused (rejects)
+// ERROR: BL3999 @ 5:21
+// ============================================================================
+// `a` and `b` share `T`; a rank-1 and a rank-2 array cannot both be it.
+function gt0(a: T^0, b: T^0) = a > b
+let g = gt0([1, 5], [[2, 4], [3, 1]])

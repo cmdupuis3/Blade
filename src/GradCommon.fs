@@ -301,12 +301,11 @@ let internal err (fname: string) (msg: string) : Result<'a, string> =
 /// harness (tests/AccessTests.fs) runs both and compares the outputs
 /// byte-for-byte. Read per call, never cached, so that toggle works.
 let internal haloGatherEnabled () : bool =
-    match System.Environment.GetEnvironmentVariable "BLADE_AD_HALO_GATHER" with
-    | null | "" -> true
-    | s ->
-        match s.Trim().ToLowerInvariant() with
-        | "0" | "off" | "false" | "no" -> false
-        | _ -> true
+    match Blade.Toolchain.envSwitch "BLADE_AD_HALO_GATHER" with
+    | Blade.Toolchain.SwitchOff -> false
+    // `no` predates the shared grammar and still means off here.
+    | Blade.Toolchain.SwitchOther t when t.ToLowerInvariant() = "no" -> false
+    | _ -> true
 
 // Kernel-shape refusal wording, spoken by more than one site.
 //

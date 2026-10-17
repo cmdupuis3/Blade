@@ -1,0 +1,17 @@
+// TEST: A reduce over a symbolic-rank parameter routes by each call's rank
+// ============================================================================
+// `x: T^k` names no rank, so the routing of `reduce(x, (+))` cannot be
+// decided at the declaration: it synthesized rank 1, and a rank-2 call was
+// refused (BL3001 "expects a rank-1 array"). A call at another rank is the
+// call of the declaration's instance at that array, where the fold takes the
+// innermost axis of whatever rank arrives (the default `axes = 1`).
+// ============================================================================
+function tot(x: T^k) = reduce(x, (+))
+let v = tot([1.0, 2.0])
+// EXPECT: v = 3.0
+let m = tot([[1.0, 2.0], [3.0, 4.0]])
+// EXPECT: m = [3.0, 7.0]
+let c = tot([[[1, 2], [3, 4]], [[5, 6], [7, 8]]])
+// EXPECT: c = [[3, 7], [11, 15]]
+let v2 = tot([4, 5, 6])
+// EXPECT: v2 = 15

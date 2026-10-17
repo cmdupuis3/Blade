@@ -104,8 +104,14 @@ on:
         default: all
         options: [all, none, cpp, providers, netcdf, zarr, csv, icechunk, provider-desugar, hybrid, llvm, llvm-suite, interp, opt-diff, differentials, docs]
 
+# The group keys on the ref AND on whether this is the nightly. The schedule
+# runs on refs/heads/master, the ref every master push uses too, so with the
+# ref alone a push landing while the nightly ran (it takes hours) cancelled
+# interp, opt-diff, the providers, llvm and docs for that night. A push still
+# cancels an older push's run on its ref; only the next nightly cancels a
+# nightly.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'schedule' && 'nightly' || 'ci' }}
   cancel-in-progress: true
 
 env:

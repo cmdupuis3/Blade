@@ -20,7 +20,12 @@ them as assets: edit deliberately, never regenerate mechanically.
   guard-combinators/007 header for a cautionary tale about duplicate names.
 - `// EXPECT: <var> = <value>` lines are parsed by tests/Expect.fs and checked
   against the program's printed output. Scalars, 1-D arrays, 2-D `[[..]]`
-  arrays, complex pairs `(re, im)`, and quoted strings are all checked.
+  arrays, complex pairs `(re, im)`, and quoted strings are all checked. A
+  TUPLE or STRUCT binding prints spelled like its literal, and its pin is
+  compared as exact text: `// EXPECT: t = (1, 2.0, true)`,
+  `// EXPECT: p = P { a = 1.0, b = 2 }`, and an array of structs prints each
+  element the same way, `// EXPECT: ps = [P { a = 1.0 }, P { a = 2.0 }]` (a two-number tuple reads as a
+  complex pair, which checks the same values and spellings).
 - **Numbers are spelled as their type prints** (docs/formalism.md 3.9): a
   float with a decimal point or exponent (`2.0`, `[1.0, 0.5]`, `(1.0, -2.0)`,
   `1e+20`, `nan`), an integer bare (`2`, `[1, 2]`). A numeric pin token matches

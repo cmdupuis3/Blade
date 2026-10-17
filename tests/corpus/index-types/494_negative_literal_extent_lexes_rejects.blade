@@ -1,0 +1,7 @@
+// TEST: A negative literal extent reaches the extent judgment (rejects)
+// ERROR-CONTAINS: must be a non-negative integer
+// ============================================================================
+// The lexer glued `<-` into one token, so `Idx<-2>` was a parse error about
+// the wrong thing. `<-` is no token: the extent is `-2`, refused as negative.
+type I = Idx<-2>
+let r = method_for(range<I>) <@> lambda(i) -> 1.0 |> compute

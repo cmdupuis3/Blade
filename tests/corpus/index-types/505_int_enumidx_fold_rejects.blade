@@ -1,0 +1,9 @@
+// TEST: An arithmetic fold over EnumIdx values is refused (rejects)
+// ERROR: BL4003
+// ERROR-CONTAINS: a fold over EnumIdx values
+// ============================================================================
+// A `(+)` fold would sum the positions that represent the keys; mapping the
+// keys to Int64 first states the fold that is meant.
+type R = EnumIdx<[100, 200, 300]>
+let codes: Array<R like Idx<3>> = [300, 100, 200]
+let s = reduce(codes, (+))

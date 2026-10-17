@@ -1,0 +1,8 @@
+// TEST: comm on a kernel reading captured array cells asymmetrically is witnessed false (rejects)
+// ERROR: BL4013
+// A read of a captured array at the kernel's index parameters now evaluates
+// to a sampled cell value, as a captured scalar does (D12): the claim must
+// hold for every content of `w`, and `w(i) * 2.0 + w(j)` does not.
+let w = [1.0, 5.0, 2.0]
+let idx = [0, 1, 2]
+let r = method_for(idx, idx) <@> lambda(i, j) where comm(i, j) -> w(i) * 2.0 + w(j) |> compute

@@ -250,11 +250,14 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
         | [single] -> success single remaining
         | _ -> success (TyTuple types) remaining
 
-    // `Tuple<-2>`: the lexer glues `<-` into ONE token, so a negative width
-    // never reaches the arm below. Caught here so it gets the width
-    // diagnostic rather than falling through to `TyNamed "Tuple"` and
-    // failing at the `=` with an unrelated message.
-    | Some (TokIdent "Tuple") when (match peek (advance tokens) with Some (TokOp "<-") -> true | _ -> false) ->
+    // `Tuple<-2>`: a negative width never reaches the width arm below (its
+    // argument is no literal). Caught here so it gets the width diagnostic
+    // rather than falling through to `TyNamed "Tuple"` and failing at the `=`
+    // with an unrelated message. (`<-` is no token: it lexes as `<` `-`, so
+    // `Idx<-2>` reaches the extent judgment and `a(0)<-1` is a comparison.)
+    | Some (TokIdent "Tuple") when (match tokens with
+                                   | _ :: lt :: mt :: _ -> lt.Kind = TokOp "<" && mt.Kind = TokOp "-"
+                                   | _ -> false) ->
         let (line, col) = currentPos (advance tokens)
         errorC "BL1004" "A tuple width cannot be negative: `Tuple<N>` requires an integer literal N >= 2" line col
 
@@ -427,8 +430,19 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
             // which of the two the head is.
             match peek afterApplied with
             | Some (TokOp "^") ->
+                let (cline, ccol) = currentPos afterApplied
                 advance afterApplied |> parseRankExpr >>= fun rankExpr afterRank ->
-                success (TyAbstractArray (applied, rankExpr, None)) afterRank
+                match rankExpr.Kind with
+                // A BUILT-IN element head (`Float64<meters>^r`) takes a LITERAL
+                // rank, exactly as the unit-free `Float64^r` above: a variable
+                // rank belongs to a type variable. Lowering has no shape to
+                // build for it and fell back to the bare scalar, so the
+                // annotation silently meant `Float64<meters>` and an array
+                // argument was refused as a rank mismatch against a scalar.
+                | ExprKind.ExprLit (LitInt _) -> success (TyAbstractArray (applied, rankExpr, None)) afterRank
+                | _ when isCaretElementBaseName name ->
+                    errorC "BL1004" $"`{name}<...>^...` needs an integer literal rank (`{name}<...>^1` is a rank-1 array of {name} elements): a variable rank belongs to a type variable -- write `T<...>^r` for any element, or a literal rank for {name}" cline ccol
+                | _ -> success (TyAbstractArray (applied, rankExpr, None)) afterRank
             | _ -> success applied afterApplied
         | _ ->
             success (TyNamed (name, [])) afterName

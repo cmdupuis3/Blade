@@ -1,0 +1,28 @@
+// TEST: Same-named functions of two modules keep their own symmetry facts
+// MODULE: Main
+// WARN: BL4010
+// ============================================================================
+// D11 (function side): the checker's per-function facts -- declared `comm`
+// groups, deduced adjacent-pair parities, pack summaries, omp / fold
+// licences -- were keyed by the BARE function name, so B's `f` (no comm,
+// antisymmetric body) used as a kernel in main read A's `where comm(a, b)` and
+// was stored symmetric: f(1, 2) and f(2, 1) one cell. They are keyed by the
+// declaration now.
+module Main
+import A
+from B import f
+let xs = [1.0, 2.0]
+let mb = method_for(xs, xs) <@> f |> compute
+let b01 = mb(0)(1)
+// EXPECT: b01 = -1.0
+let b10 = mb(1)(0)
+// EXPECT: b10 = 1.0
+let ma = method_for(xs, xs) <@> A.f |> compute
+let a01 = ma(0, 1)
+// EXPECT: a01 = 2.0
+let a10 = ma(1, 0)
+// EXPECT: a10 = 2.0
+// A module-qualified function is a kernel wherever the bare name is one.
+let oa = object_for(A.f) <@> (xs, xs) |> compute
+let fa = reduce(xs, A.f)
+// EXPECT: fa = 2.0

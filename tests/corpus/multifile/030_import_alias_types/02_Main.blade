@@ -1,0 +1,16 @@
+// TEST: Types of a module imported under an alias
+// MODULE: Main
+// ============================================================================
+// D11: `import A as U` names A's types and constructors `U.P` / `U.Red`, as
+// it names its values `U.x`; the unique import also binds them bare.
+module Main
+import A as U
+let p: U.P = U.mk(1.0)
+let q = U.fx(p)
+// EXPECT: q = 1.0
+let c: U.Color = U.Green
+let r = U.isRed(c)
+// EXPECT: r = false
+let pz = P { x = 3.0 }
+let z = U.fx(pz)
+// EXPECT: z = 3.0

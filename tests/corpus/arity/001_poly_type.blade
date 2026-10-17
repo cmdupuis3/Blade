@@ -1,7 +1,9 @@
 // TEST: Poly Type
 // Poly<T^r> type parsing
+// (This declaration used to carry `where comm(args)`. Its body returns the
+// FIRST operand, which is not commutative; the claim went unchecked until the
+// per-arity pack witness (N2, arity/470), which now refuses it.)
 function comoment(args: Poly<T^0>)
-where comm(args)
 -> T^0
 = args[0]
 

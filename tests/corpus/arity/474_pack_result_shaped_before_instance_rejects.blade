@@ -1,0 +1,19 @@
+// TEST: an arity-decided result shaped at type checking at another rank (rejects)
+// ERROR: BL3009
+// `outer(x, y)` is rank 2, a rank only its instance decides (D4, formalism
+// 8.2). `reduce(o2, (+))` typed the still-open result as the smallest array it
+// could be (rank 1) before the instance existed; that used to reach g++ as an
+// Array<double,2> converted to Array<double,1> (BL9002). It is refused, naming
+// the annotation that types the binding up front.
+function outer(a: Poly<T^1>) = {
+    match arity(a) with
+    | 0 -> 1.0
+    | _ -> {
+        let head :: tail = a
+        head [*] outer(tail)
+    }
+}
+let x = [1.0, 2.0]
+let y = [3.0, 4.0, 5.0]
+let o2 = outer(x, y)
+let s2 = reduce(o2, (+))

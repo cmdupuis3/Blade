@@ -1,0 +1,12 @@
+// TEST: FA T24: runtime row-extent guard names the Blade binding (aborts)
+// A computed row whose extent is only known at run time is guarded against the
+// declared extent in both lanes (BL8006). The message names the binding: the
+// interpreter used to spell it through the C++ rename table (a binding named
+// `final`, a C++ keyword, is `final_` there, and a long REPL session could show
+// a stale rename), so the two lanes could name one binding two ways. Both now
+// use the Blade name.
+let n = reduce([1, 2], (+))
+let row = Float64(0..n)
+let final: Array<Float64 like Idx<2>, Idx<4>> = [row, row]
+// ABORT: BL8006
+// ABORT: row [0] of 'final' has extent 3

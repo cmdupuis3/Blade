@@ -2708,7 +2708,7 @@ module CppIcechunk =
             failwith $"icechunk codegen: variable '{varName}' is rank 0 -- rank-0 arrays are not supported by the icechunk provider (this indicates a typing inconsistency)"
         let v = cppVarName
         let elemCpp = elemCppOf arrType.ElemType
-        let assemble = ZarrProvider.CppZarr.genAssembleFlatVia (icechunkChunkFetch ra) ra.Meta v elemCpp
+        let assemble = ZarrProvider.CppZarr.genAssembleFlatVia path (icechunkChunkFetch ra) ra.Meta v elemCpp
         assemble @ materializeFlat ra v elemCpp true true
 
     /// The dense read in two phases for revision reuse (docs/plans/
@@ -2732,10 +2732,10 @@ module CppIcechunk =
         let fetch = icechunkChunkFetch ra
         let phase1 =
             [ $"size_t {v}__read1 = 0, {v}__read2 = 0;" ]
-            @ ZarrProvider.CppZarr.genAssembleFlatPhased fetch ra.Meta v elemCpp (Some (needName, doneName, $"{v}__read1")) 1
+            @ ZarrProvider.CppZarr.genAssembleFlatPhased path fetch ra.Meta v elemCpp (Some (needName, doneName, $"{v}__read1")) 1
             @ materializeFlat ra v elemCpp true false
         let phase2 =
-            ZarrProvider.CppZarr.genAssembleFlatPhased fetch ra.Meta v elemCpp (Some (needName, doneName, $"{v}__read2")) 2
+            ZarrProvider.CppZarr.genAssembleFlatPhased path fetch ra.Meta v elemCpp (Some (needName, doneName, $"{v}__read2")) 2
             @ materializeFlat ra v elemCpp false true
         let release = [ $"delete[] {v}_cbuf;"; $"delete[] {v}_flat;" ]
         phase1, phase2, release
@@ -2778,7 +2778,7 @@ module CppIcechunk =
                  failwith $"icechunk codegen: variable '{varName}': the store declares an orbit (iterated-wreath) head, so the variable must type as a SOLE OrbIdx group")
             if opts.Distribute then
                 failwith $"icechunk codegen: variable '{varName}': the MPI-distributed read is not defined for an OrbIdx (iterated-wreath) pool (spec_version 2 is the flat single-pool layout only)"
-            ZarrProvider.CppZarr.genAssembleFlatVia (icechunkChunkFetch ra) meta cppVarName (elemCppOf arrType.ElemType)
+            ZarrProvider.CppZarr.genAssembleFlatVia path (icechunkChunkFetch ra) meta cppVarName (elemCppOf arrType.ElemType)
         | Some layout ->
             let g = layout.Group
             (match arrType.IndexTypes with
@@ -2798,7 +2798,7 @@ module CppIcechunk =
              | [] -> failwith $"icechunk codegen: variable '{varName}': packed read with no index types")
             // opts.Distribute is ignored for the flat pool layout, exactly as
             // the Zarr provider does: only the blocks assembler is rank-scoped.
-            ZarrProvider.CppZarr.genAssembleFlatVia (icechunkChunkFetch ra) meta cppVarName (elemCppOf arrType.ElemType)
+            ZarrProvider.CppZarr.genAssembleFlatVia path (icechunkChunkFetch ra) meta cppVarName (elemCppOf arrType.ElemType)
 
     /// Writes are refused BY NAME: an Icechunk write is a COMMIT, not an
     /// in-place store write (§8, §11).
@@ -2817,6 +2817,14 @@ let spec : Blade.ProviderRegistry.ProviderSpec = {
     Name = "icechunk"
     LoadAsModule = loadAsModule
     ReadVarData = readVarData
+    // The boundary rule: the Zarr core's, over the resolved array's metadata
+    // (a floating array refuses NaN / +-Inf; a finite fill is a value).
+    MissingRuleOf = fun path varName ->
+        try
+            match resolveArray path varName with
+            | Ok ra -> ZarrProvider.missingRuleOfMeta ra.Meta
+            | Error _ -> Blade.ProviderRegistry.noMissingRule
+        with _ -> Blade.ProviderRegistry.noMissingRule
     GenReadVar = CppIcechunk.genReadVar
     // Presence of these two is the provider's packed/wreath CAPABILITY
     // declaration at every codegen and interpreter seam (§8 lists both as v1

@@ -24,8 +24,9 @@
 // "2.0 " reads as 2.0 in both. Whole-table dtype: every cell an integer literal
 // THAT FITS Int64 -> Int64, else Float64 (so 99999999999999999999 makes the table
 // Float64 rather than saturating in strtoll or throwing in Int64.Parse);
-// locale-independent; "nan"/"inf"/"-inf" accepted as float specials to round-trip
-// C++ output.
+// locale-independent; "nan"/"inf"/"-inf" are PARSED as float specials (they
+// classify the table Float64), but a read refuses them (BL8015, the provider
+// boundary rule -- `missingRuleOf`), and a write refuses to produce them.
 //
 // Writes (`c.write("out.csv", A)`, rank <= 2): no header row; rank-1 writes one value
 // per line (reloads as R x 1), rank-2 writes comma rows. Floats print with 17
@@ -242,6 +243,18 @@ let readVarData (path: string) (varName: string) : Result<Blade.ProviderRegistry
                     Blade.ProviderRegistry.PFloats xs
             Ok { DimLengths = [rows; cols]; Payload = payload })
 
+/// The table's missing-value rule (the provider boundary rule): a Float64
+/// table refuses its `nan` / `inf` / `-inf` cells -- the parser still accepts
+/// them (so the dtype and the shape are what the file says), but they never
+/// reach a program as numbers. An Int64 table has no rule. Shared by the
+/// emitted reader, the interpreter and the static fold.
+let missingRuleOf (path: string) (varName: string) : Blade.ProviderRegistry.MissingRule =
+    if varName <> DataVarName then Blade.ProviderRegistry.noMissingRule
+    else
+        match parseFile path with
+        | Ok (f, _) when f.Elem <> ETInt64 -> Blade.ProviderRegistry.nonFiniteRule
+        | _ -> Blade.ProviderRegistry.noMissingRule
+
 // Mapping to Blade IR types
 
 /// Anonymous plain index (matrix axes and the table's row axis).
@@ -409,7 +422,11 @@ module CppCsv =
         let v = cppVarName
         let elemCpp = elemCppOf arrType.ElemType
         let isInt = (f.Elem = ETInt64)
-        let assemble = genParseFill path v elemCpp isInt headered rows cols
+        let assemble =
+            genParseFill path v elemCpp isInt headered rows cols
+            // The boundary rule (BL8015) over the parsed buffer.
+            @ Blade.ProviderRegistry.refuseScanCpp (missingRuleOf path varName) varName path
+                  $"{v}_flat" (string (rows * cols)) [] [] [ string rows; string cols ]
         let materialize =
             [ $"size_t {v}_extent_0 = {rows};"
               $"size_t {v}_extent_1 = {cols};"
@@ -504,6 +521,7 @@ let spec : Blade.ProviderRegistry.ProviderSpec = {
     Name = "csv"
     LoadAsModule = loadAsModule
     ReadVarData = readVarData
+    MissingRuleOf = missingRuleOf
     GenReadVar = CppCsv.genReadVar
     GenReadPacked = None       // packed groups: not representable in CSV
     ReadWreathPool = None      // OrbIdx pools: likewise (CSV has no pool axis)

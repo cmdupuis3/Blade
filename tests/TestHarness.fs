@@ -197,13 +197,15 @@ let printGrandTotal (blocks: BlockResult list) =
 // macro invocations back to it, and `hasOmpPin` is `Contains` over the raw
 // text OR that view -- so a positive pin matches either spelling and a
 // negative one ("must not contain `#pragma omp`") still sees every construct.
+// The Path-B folds' explicit team, `BLADE_OMP_PARALLEL_NUM_THREADS(n)`,
+// renders as `#pragma omp parallel num_threads(n)` the same way.
 // The fp-reassoc `BLADE_OMP_SIMD_REDUCTION(spec)` accumulation form is left
 // as it is: it was a macro before the routing and its pins name the macro.
 // ----------------------------------------------------------------------------
 
 let private ompMacroRx =
     System.Text.RegularExpressions.Regex(
-        @"\bBLADE_OMP_(?:PARALLEL_FOR_SIMD_REDUCTION\((?<red>[^)]*)\)|PARALLEL_FOR_COLLAPSE\((?<n>\d+)\)|(?<k>PARALLEL_FOR_DYNAMIC|PARALLEL_FOR_SIMD|PARALLEL_FOR|SIMD)\b)")
+        @"\bBLADE_OMP_(?:PARALLEL_NUM_THREADS\((?<nt>[^)]*)\)|PARALLEL_FOR_SIMD_REDUCTION\((?<red>[^)]*)\)|PARALLEL_FOR_COLLAPSE\((?<n>\d+)\)|(?<k>PARALLEL_FOR_DYNAMIC|PARALLEL_FOR_SIMD|PARALLEL_FOR|SIMD)\b)")
 
 /// The emitted text with each BLADE_OMP_* loop-construct macro replaced by
 /// the `#pragma omp ...` line it expands to under OpenMP 4.0+.
@@ -211,7 +213,9 @@ let ompConstructView (cpp: string) : string =
     ompMacroRx.Replace(cpp, fun (m: System.Text.RegularExpressions.Match) ->
         let red = m.Groups.["red"]
         let n = m.Groups.["n"]
-        if red.Success then $"#pragma omp parallel for simd reduction({red.Value})"
+        let nt = m.Groups.["nt"]
+        if nt.Success then $"#pragma omp parallel num_threads({nt.Value})"
+        elif red.Success then $"#pragma omp parallel for simd reduction({red.Value})"
         elif n.Success then $"#pragma omp parallel for collapse({n.Value})"
         else
             match m.Groups.["k"].Value with

@@ -1,0 +1,11 @@
+// TEST: omp lambda calls a nested function that writes a captured let mut (rejects)
+// ERROR: BL4005
+// The nested `h` may write the enclosing function's `acc` when called
+// serially; called from the omp kernel it writes it from every cell (#17).
+type I = Idx<3>
+function k(a: Array<Float64 like I>) -> Array<Float64 like I> = {
+    let mut acc = [0.0]
+    function h(x: Float64) -> Float64 = { acc(0) = acc(0) + x; x }
+    method_for(a) <@> lambda(x) where omp(x: 1) -> h(x) |> compute
+}
+let r = k([1.0, 2.0, 3.0])

@@ -1,0 +1,17 @@
+// TEST: Constructor patterns resolve against the scrutinee's type
+// MODULE: Main
+// ============================================================================
+// D11: both imports declare `Red`, so a bare `Red` EXPRESSION is ambiguous
+// (BL2010, see 027) -- but a pattern over a value of type `A.Color` names one
+// of A.Color's constructors, so it needs no qualifier.
+module Main
+import A
+import B
+function f(c: A.Color) -> Int64 = match c with
+    | Red -> 1
+    | Green -> 2
+function g(l: B.Light) -> Int64 = match l with
+    | Red -> 10
+    | Amber -> 20
+let k = f(A.Green) + g(B.Red)
+// EXPECT: k = 12

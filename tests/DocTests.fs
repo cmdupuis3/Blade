@@ -189,6 +189,39 @@ let collectBlocks (root: string) (filter: string option) : DocBlock list =
     |> List.filter (fun p -> match filter with Some f -> p.Contains f | None -> true)
     |> List.collect (fun p -> extractBlocks p (File.ReadAllText(Path.Combine(root, p))))
 
+/// The LINK CHECK: every relative markdown link `[text](path)` on a page must
+/// name a file or directory that exists (resolved against the page's own
+/// directory; `#anchor` suffixes and URLs are not checked), and every
+/// `tests/corpus/.../*.blade` path a page cites must exist. Links are read
+/// with fenced blocks and inline code stripped (`P[0](k)` is code, not a
+/// link); corpus paths are read everywhere, code included -- that is where
+/// pages cite them. Plans cite test files as evidence, and corpus files get
+/// renumbered: a stale path reads as evidence that is not there.
+let linkProblems (root: string) (pages: string list) : (string * string) list =
+    let linkRx = Text.RegularExpressions.Regex @"\]\(([^)\s]+)\)"
+    let corpusRx = Text.RegularExpressions.Regex @"tests/corpus/[A-Za-z0-9_\-./]+\.blade"
+    let fenceRx = Text.RegularExpressions.Regex(@"^\s*```.*?^\s*```", Text.RegularExpressions.RegexOptions.Multiline ||| Text.RegularExpressions.RegexOptions.Singleline)
+    let inlineRx = Text.RegularExpressions.Regex @"`[^`\n]*`"
+    pages |> List.collect (fun page ->
+        let text = File.ReadAllText(Path.Combine(root, page)).Replace("\r\n", "\n")
+        let prose = inlineRx.Replace(fenceRx.Replace(text, ""), "")
+        let pageDir = Path.GetDirectoryName(Path.Combine(root, page))
+        let badLinks =
+            [ for m in linkRx.Matches prose do
+                let target = m.Groups.[1].Value
+                let path = target.Split('#').[0]
+                let isUrl = Text.RegularExpressions.Regex.IsMatch(target, @"^[a-zA-Z][a-zA-Z0-9+.-]*:")
+                if not isUrl && path <> "" then
+                    let full = Path.GetFullPath(Path.Combine(pageDir, path))
+                    if not (File.Exists full || Directory.Exists full) then
+                        yield (page, $"dead link ({target})") ]
+        let badCorpus =
+            [ for m in corpusRx.Matches text do
+                if not (File.Exists(Path.Combine(root, m.Value))) then
+                    yield (page, $"cites a corpus file that does not exist ({m.Value})") ]
+            |> List.distinct
+        badLinks @ badCorpus)
+
 let private blockName (b: DocBlock) =
     let baseName = $"{b.Page}:{b.Line}"
     if b.Kind = Rejects then baseName + " (rejects)" else baseName
@@ -271,7 +304,13 @@ let runDocTests (filter: string option) : BlockResult =
         | Pass, Check | Skip, Sketch -> ()
         | _ -> resultLine o (blockName b) d
     let n o = verdicts |> List.filter (fun (_, (x, _)) -> x = o) |> List.length
-    let passed, failed, skipped = n Pass, n Fail, n Skip
+    // The link check over the same pages the blocks came from.
+    let linkPages = docPages root |> List.filter (fun p -> match filter with Some f -> p.Contains f | None -> true)
+    let links = linkProblems root linkPages
+    for (page, what) in links do resultLine Fail $"{page} (links)" what
+    if links.IsEmpty then resultLine Pass "links" $"{linkPages.Length} page(s): every relative link and cited corpus path exists"
+    let linkFailedNames = links |> List.map (fun (page, what) -> $"{page} (links): {what}")
+    let passed, failed, skipped = n Pass + (if links.IsEmpty then 1 else 0), n Fail + links.Length, n Skip
     printfn "  pages: %d; blocks: %d checked, %d run, %d rejects, %d sketch (%.1fs)"
         (blocks |> List.map (_.Page) |> List.distinct |> List.length)
         (count Check) (count Run) (count Rejects) (count Sketch) sw.Elapsed.TotalSeconds
@@ -283,4 +322,4 @@ let runDocTests (filter: string option) : BlockResult =
       // counted on the census line above, not in the suite's skip total
       // (which is read as "something could not run").
       Skipped = skipped - count Sketch
-      FailedNames = verdicts |> List.filter (fun (_, (o, _)) -> o = Fail) |> List.map (fst >> blockName) }
+      FailedNames = (verdicts |> List.filter (fun (_, (o, _)) -> o = Fail) |> List.map (fst >> blockName)) @ linkFailedNames }

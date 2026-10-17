@@ -484,6 +484,18 @@ let runOrbRankTests () : BlockResult =
     check "binomChecked at the int64 edge: C(66,33) exact, C(67,33) diagnoses"
           (binomChecked 66L 33 = Ok 7219428434016265740L
            && isError (binomChecked 67L 33)) ""
+    // P3-15: the ONE pool-sizing binomial (binomOrZero, behind SimplexBlocksCore,
+    // IRStorage.binomI64, the providers and the CodeGen sizers). The num/den
+    // copies it replaced overflowed at C(1000, 7) (1000^7 > 2^63) although the
+    // answer fits; the zero convention for k < 0 or m < k is kept.
+    check "binomOrZero C(1000, 7) exact where the num/den copies wrapped"
+          (binomOrZero 1000L 7 = 194280608456793000L
+           && Blade.SimplexBlocksCore.binom 1000L 7 = 194280608456793000L
+           && Blade.IRStorage.binomI64 1000L 7L = 194280608456793000L) ""
+    check "binomOrZero keeps the zero convention (k < 0, m < k) and refuses past int64 as BL4003, not an ICE"
+          (binomOrZero 5L 7 = 0L && binomOrZero 5L (-1) = 0L && binomOrZero (-3L) 0 = 0L
+           && (try binomOrZero 67L 33 |> ignore; false
+               with Blade.Diagnostics.BladeDiagnosticException d -> d.Code = "BL4003")) ""
     let d3 = [ (2, OPlus); (2, OPlus); (2, OPlus) ]
     let m360 = 2228651736717934395L
     check "depth-3 n=360 fits exactly under the wall: 2228651736717934395 cells"

@@ -1,0 +1,7 @@
+// TEST: A type reaching main through another module's API
+// MODULE: B
+module B
+import A
+type Q = A.P
+function g(q: Q) -> Float64 = q.x
+function mkq() -> Q = A.mk(1.5)

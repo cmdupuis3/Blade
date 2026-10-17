@@ -316,7 +316,11 @@ let private variantResultName (ty: IRType) : string option =
     | FuncElem (_, IRTNamed tn) -> Some tn
     | _ -> None
 
-let private isCtorName (name: string) = not (name.Contains ".")
+// A constructor declared by a non-main module carries the dotted IDENTITY
+// `A.Red` (D11, Types.TypeOrigins), so "no dot" is not the test: a registered
+// constructor identity is one, any other dotted name a qualified value.
+let private isCtorName (name: string) =
+    not (name.Contains ".") || Blade.Types.TypeOrigins.isQualified name
 
 // Pattern literal comparison (IRPatLit): value-level, IEEE/ordinal exact.
 
@@ -542,6 +546,29 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         let y = toF64 (evalExpr st env b)
         let z = toF64 (evalExpr st env c)
         VFloat (System.Math.FusedMultiplyAdd (x, y, z))
+
+    // ONE ADDRESSED SAMPLE (D13): the fill's own transform at one address --
+    // RandMirror's `_at` draw of a single sample at index `i`, which is the
+    // compiled lane's `blade_rand::<kind>_one` (rand_runtime.hpp: the fill at
+    // n = 1). Operands cast as codegen casts them.
+    | IRRandAt (kind, args, weights) ->
+        let vals = args |> List.map (evalExpr st env)
+        match vals with
+        | key :: stream :: index :: pars ->
+            let key, stream, index = toI64 key, toI64 stream, toI64 index
+            match weights with
+            | Some (wExpr, k) ->
+                let w =
+                    match evalExpr st env wExpr with
+                    | VArray ba ->
+                        (match ba.Data with
+                         | SFloat data when data.Length = k -> data
+                         | _ -> raise (InterpUnsupported "rand.categorical_at weights are not a dense Float64 pool of the pinned extent"))
+                    | _ -> raise (InterpUnsupported "rand.categorical_at weights did not evaluate to an array")
+                VInt (RandMirror.drawsCategoricalAt kind key stream index w 1).[0]
+            | None ->
+                VFloat (RandMirror.drawsAt kind key stream index (pars |> List.map toF64) 1).[0]
+        | _ -> raise (InterpUnsupported "malformed IRRandAt")
 
     // `&&` / `||` short-circuit exactly like the emitted C++ (CodeGen.fs:782):
     // the right operand is not evaluated when the left decides the result.
@@ -1365,10 +1392,11 @@ let rec evalBinding (st: InterpState) (env: Env) (b: IRBinding) : Value =
         // too, not a silently mis-shaped array (func-arrays T12 abort probe).
         (match b.Value, value with
          | IRArrayLit (elements, arrType), VArray arr ->
-             // The C++ lane's own spelling (bindingCppName): a module member
-             // `M.x` is `M__x` there, and the panic text must agree.
-             let cppName = if b.Name.StartsWith "_(" then $"__tup_{b.Id}" else Blade.CodeGenState.sanitizeCppName b.Name
-             checkArrayLitRowExtents cppName elements arrType arr
+             // The BLADE name, as the C++ lane's guard spells it too
+             // (genArrayLiteral's sourceName). It used to go through
+             // sanitizeCppName, which reads whatever rename table this flow
+             // last installed -- a long REPL session could show `a_extents_`.
+             checkArrayLitRowExtents b.Name elements arrType arr
          | _ -> ())
         // Copy semantics for assignable top-level array bindings whose
         // initializer references an existing array (`let U = Z`) -- the

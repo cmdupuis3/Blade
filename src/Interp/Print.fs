@@ -9,9 +9,12 @@
 // SCOPE: Milestone M0 (scalars) + M2 (dense array binding print). Supported:
 //   Float64 / Float32 / Int64 / Int32 / Bool / String / Complex128 (Complex64)
 //   scalars, and index-tagged scalars (Nat<I> etc., which print as their int).
-// TUPLE, STRUCT (named), and UNIT bindings emit nothing -- genPrintStatements
-// returns [] for IRTTuple / IRTNamed / IRTUnit. FUNCTION-valued bindings also
-// print nothing (their IRTArrow type is not an array and falls through).
+// TUPLE and STRUCT bindings print spelled like their literals, `t = (1, 2.0)`,
+// `p = P { a = 1.0, b = 2.0 }`, through the classification both lanes share
+// (CodeGen.aggregatePrintOf); one with no print form (a variant, a component
+// that is a function, ...) and UNIT bindings emit nothing, as
+// genPrintStatements does. FUNCTION-valued bindings also print nothing (their
+// IRTArrow type is not an array and falls through).
 //
 // ARRAY bindings (M2) dispatch exactly as CodeGen.genPrintStatements' ArrayElem
 // arms do -- this module owns the kind dispatch, Interp/ArrayOps owns the cell/
@@ -140,6 +143,56 @@ let private formatScalar (name: string) (et: ElemType) (v: Value) : string =
     // ETUnit is never a printable scalar (skipped before reaching here).
     | ETUnit -> bad ()
 
+/// Render a tuple or struct Value in its literal spelling, walking the
+/// shared classification (CodeGen.aggregatePrintOf) beside the value's
+/// declared type -- the type fixes each scalar's operator<< overload, exactly
+/// as it fixes a scalar binding's. Byte-twin of CodeGen.genPrintAggregate.
+let rec private formatAggregate (name: string) (types: IRTypeDef list) (ap: Blade.CodeGen.AggregatePrint) (t: IRType) (v: Value) : string =
+    let bad what =
+        raise (PrintUnsupported $"binding '{name}': {what} (value case {v.GetType().Name})")
+    match ap with
+    | Blade.CodeGen.APScalar ->
+        let et =
+            match stripUnits t with
+            | IRTNat _ -> Some ETInt64
+            | t' -> elemThrough t'
+        match et with
+        | Some et when isPrintableScalarEt et -> formatScalar name et v
+        | _ -> bad "a tuple/struct component is not a printable scalar"
+    // An integer EnumIdx value: the binding's value was already mapped to its
+    // KEY by printBindingsOnly's typed lookup (CodeGen's twin indexes the key
+    // table), so it prints as the Int64 it now is.
+    | Blade.CodeGen.APKeyed _ -> formatScalar name ETInt64 v
+    | Blade.CodeGen.APDenseArray _ | Blade.CodeGen.APKeyedArray _ ->
+        match stripUnits t, v with
+        | ArrayElem at, VArray fa ->
+            match elemThrough at.ElemType with
+            | Some et -> ArrayOps.formatDenseArrayText fa et
+            | None -> bad "an array component has no scalar element type"
+        | _ -> bad "an array component holds no array value"
+    | Blade.CodeGen.APOpaque text -> text
+    | Blade.CodeGen.APTuple parts ->
+        match stripUnits t, v with
+        | IRTTuple ts, VTuple vs when ts.Length = parts.Length && vs.Length = parts.Length ->
+            let items = List.map3 (fun p ct cv -> formatAggregate name types p ct cv) parts ts (List.ofArray vs)
+            "(" + String.concat ", " items + ")"
+        | _ -> bad "a tuple component holds no tuple value of the declared arity"
+    | Blade.CodeGen.APStruct (sn, fields) ->
+        let declared =
+            types |> List.tryPick (function
+                | IRTDStruct (n, fs) when n = sn -> Some fs
+                | _ -> None)
+        match declared, v with
+        | Some fts, VStruct (_, fvs) ->
+            let items =
+                fields |> List.map (fun (f, p) ->
+                    let ft = fts |> List.find (fun (n, _) -> n = f) |> snd
+                    match fvs |> Array.tryPick (fun (n, x) -> if n = f then Some x else None) with
+                    | Some fv -> f + " = " + formatAggregate name types p ft fv
+                    | None -> bad $"struct value has no field '{f}'")
+            Blade.Types.TypeOrigins.sourceName sn + " { " + String.concat ", " items + " }"
+        | _ -> bad $"no struct value of type '{sn}'"
+
 /// The interpreter twin of genPrintStatements' `--print` refusal: an AMBIENT
 /// selection (BLADE_PRINT) naming something that is not a top-level binding,
 /// or a binding that never prints (a deferred loop value, a streamed read),
@@ -164,8 +217,14 @@ let checkAmbientSelection (forcedIds: System.Collections.Generic.HashSet<IRId>) 
     // Same order as genPrintStatements: a name the program never bound, then
     // a function-valued binding (incl. an eliminated generic alias, which is
     // still a binding the source has), then a never-materialized one.
+    // The masked read's raw half is not selectable (CodeGen's twin).
     let declared =
-        irModule.Bindings |> List.map (fun b -> b.Name) |> Set.ofList
+        irModule.Bindings
+        |> List.filter (fun b ->
+            match Map.tryFind b.Id irModule.ProviderReads with
+            | Some spec -> not spec.AllowMissing
+            | None -> true)
+        |> List.map (fun b -> b.Name) |> Set.ofList
         |> Set.union irModule.FunctionAliasNames
     let unknown = Set.difference names declared
     if not unknown.IsEmpty then
@@ -181,6 +240,14 @@ let checkAmbientSelection (forcedIds: System.Collections.Generic.HashSet<IRId>) 
     if not silent.IsEmpty then
         let ns = String.concat ", " silent
         raise (PrintUnsupported $"--print: {ns} never materialized (deferred loop value)")
+    let formless =
+        irModule.Bindings
+        |> List.filter (fun b ->
+            Set.contains b.Name names && isPrintable b && Blade.CodeGen.hasNoPrintedForm irModule b
+            && not (List.contains b.Name functions))
+        |> List.map (fun b -> b.Name) |> List.distinct
+    if not formless.IsEmpty then
+        raise (PrintUnsupported (Blade.CodeGen.formlessPrintRefusal irModule formless))
 
 /// Append to `sb` exactly what the compiled binary's main() prints -- the timing
 /// line followed by the module's top-level binding prints, in declaration order.
@@ -207,6 +274,70 @@ let checkAmbientSelection (forcedIds: System.Collections.Generic.HashSet<IRId>) 
 /// value is looked at, so a binding whose PRINT the interpreter does not
 /// support cannot fail a run that never asked to see it.
 let printBindingsOnly (progName: string) (lookup: IRId -> Value option) (forcedIds: System.Collections.Generic.HashSet<IRId>) (irModule: IRModule) (only: Set<string> option) (sb: StringBuilder) : unit =
+    // A value of an INTEGER EnumIdx type prints its KEY: it is a key
+    // represented as its position (D2) -- the twin of CodeGen's key-table
+    // printers. Driven by the binding's TYPE, through arrays (any store:
+    // dense, nested, ragged, boxed), tuples and struct fields.
+    let lookup =
+        let keysOf (t: IRType) =
+            match stripUnits t with
+            | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), IRefNamed tag) ->
+                Blade.CodeGen.intEnumKeysOfModule irModule.Types tag |> Option.map List.toArray
+            | _ -> None
+        let structFieldsOf (n: string) =
+            irModule.Types |> List.tryPick (fun td ->
+                match td with
+                | IRTDStruct (sn, fs) when sn = n -> Some fs
+                | _ -> None)
+        let key (keys: int64[]) (v: Value) =
+            match v with
+            | VInt p when p >= 0L && p < int64 keys.Length -> VInt keys.[int p]
+            | VInt32 p when p >= 0 && p < keys.Length -> VInt keys.[p]
+            | _ -> v
+        let rec mentionsKeys (fuel: int) (t: IRType) =
+            fuel > 0 &&
+            (match stripUnits t with
+             | ArrayElem at -> mentionsKeys (fuel - 1) at.ElemType
+             | IRTTuple ts -> ts |> List.exists (mentionsKeys (fuel - 1))
+             | IRTNamed n -> structFieldsOf n |> Option.exists (List.exists (fun (_, ft) -> mentionsKeys (fuel - 1) ft))
+             | t -> (keysOf t).IsSome)
+        let rec mapValue (fuel: int) (t: IRType) (v: Value) : Value =
+            if fuel <= 0 then v else
+            match keysOf t, stripUnits t, v with
+            | Some keys, _, _ -> key keys v
+            | None, ArrayElem at, VArray arr when mentionsKeys 8 at.ElemType ->
+                let rec mapStore (st: Store) =
+                    match st with
+                    | SInt a ->
+                        (match keysOf at.ElemType with
+                         | Some keys -> SInt (a |> Array.map (fun p -> if p >= 0L && p < int64 keys.Length then keys.[int p] else p))
+                         | None -> st)
+                    | SObj a -> SObj (a |> Array.map (mapValue (fuel - 1) at.ElemType))
+                    | SNested a -> SNested (a |> Array.map mapStore)
+                    | SRagged (rows, lens, offs) -> SRagged (rows |> Array.map mapStore, lens, offs)
+                    | _ -> st
+                VArray { arr with Data = mapStore arr.Data }
+            | None, IRTTuple ts, VTuple vs when ts.Length = vs.Length ->
+                VTuple (Array.map2 (mapValue (fuel - 1)) (List.toArray ts) vs)
+            | None, IRTNamed n, VStruct (sn, fs) ->
+                (match structFieldsOf n with
+                 | Some decl ->
+                     VStruct (sn, fs |> Array.map (fun (fname, fv) ->
+                         match decl |> List.tryFind (fun (dn, _) -> dn = fname) with
+                         | Some (_, ft) -> (fname, mapValue (fuel - 1) ft fv)
+                         | None -> (fname, fv)))
+                 | None -> v)
+            | _ -> v
+        let keyedTypes =
+            irModule.Bindings
+            |> List.choose (fun b -> if mentionsKeys 8 b.Type then Some (b.Id, b.Type) else None)
+            |> Map.ofList
+        if keyedTypes.IsEmpty then lookup
+        else
+            fun (id: IRId) ->
+                match lookup id, Map.tryFind id keyedTypes with
+                | Some v, Some t -> Some (mapValue 16 t v)
+                | v, _ -> v
     // Timing line first, mirroring genMainWrapper, where `timing` precedes
     // `printCode`. Constant elapsed (gate-stripped); see module header.
     sb.Append(progName).Append(" completed in 0s").Append('\n') |> ignore
@@ -265,83 +396,24 @@ let printBindingsOnly (progName: string) (lookup: IRId -> Value option) (forcedI
         match arrType.ElemType with
         | FuncElem _ ->
             ()   // arrays of function values: comment only (std::function unstreamable).
-        | IRTNamed structName ->
-            // Rank-1 struct arrays with a known field list print a per-field
-            // loop (stdout), mirroring genPrintStatements:
-            //   name = [{f1: V1, f2: V2}, {f1: V1, f2: V2}, ...]
-            // Each field prints as CodeGen.structFieldPrint classifies it: a
-            // scalar through its DECLARED ElemType (which fixes the C++
-            // operator<< overload -- reuse formatScalar); a DENSE array field
-            // as its values in the top-level array format; any other array as
-            // the same `<rank-N array>` placeholder the compiled side prints.
-            // (Array fields used to print as the compiled wrapper's data
-            // POINTER, masked by both differential normalizers, and this lane
-            // skipped them -- structs/013's `samples: 0x1fe4df26e90`.)
-            // Rows ", "-separated inside `[...]`; fields ", "-separated inside
-            // `{...}`; field ORDER follows the declared IRTDStruct list.
-            // rank>1 or unknown/empty field list -> CodeGen comment (no
-            // stdout, emit nothing).
-            let structFields =
-                irModule.Types |> List.tryPick (fun td ->
-                    match td with
-                    | IRTDStruct (n, fs) when n = structName -> Some fs
-                    | _ -> None)
-            match structFields with
-            | Some fields when rank = 1 && not (List.isEmpty fields) ->
-                // Resolve every field's rendering FIRST (before touching sb):
-                // a field this printer cannot render defers the whole program.
-                let fieldRenders =
-                    fields |> List.map (fun (fname, ftype) ->
-                        let render : Value -> string =
-                            match Blade.CodeGen.structFieldPrint ftype with
-                            | Blade.CodeGen.FieldOpaqueArray text -> fun _ -> text
-                            | Blade.CodeGen.FieldDenseArray _ ->
-                                let et =
-                                    match stripUnits ftype with
-                                    | ArrayElem at -> elemThrough at.ElemType
-                                    | _ -> None
-                                match et with
-                                | Some et ->
-                                    fun v ->
-                                        match v with
-                                        | VArray fa -> ArrayOps.formatDenseArrayText fa et
-                                        | _ ->
-                                            raise (PrintUnsupported
-                                                    $"rank-1 struct array '{b.Name}' print: field '{fname}' holds no array value")
-                                | None ->
-                                    raise (PrintUnsupported
-                                            $"rank-1 struct array '{b.Name}' print: field '{fname}' has no scalar element type")
-                            | Blade.CodeGen.FieldScalar ->
-                                match elemThrough ftype with
-                                | Some et when isPrintableScalarEt et -> fun v -> formatScalar b.Name et v
-                                | _ ->
-                                    raise (PrintUnsupported
-                                            ($"rank-1 struct array '{b.Name}' print: field '{fname}' is not a printable scalar (M2.6)"))
-                        (fname, render))
+        | IRTNamed _ ->
+            // A rank-1 array of structs prints each ELEMENT spelled like its
+            // literal through the aggregate formatter a struct value uses
+            // (formatAggregate over CodeGen.aggregatePrintOf) -- the twin of
+            // genPrintStatements' arm: `pts = [P { x = 1.0, y = 2.0 }, ...]`.
+            // No element print form, or rank > 1 -> CodeGen comment, nothing.
+            match Blade.CodeGen.aggregatePrintOf irModule.Types arrType.ElemType with
+            | Some ap when rank = 1 ->
                 match lookup b.Id with
                 | Some (VArray ba) ->
-                    sb.Append(b.Name).Append(" = [") |> ignore
                     let n = if ba.Extents.Length = 0 then 0L else ba.Extents.[0]
-                    for i in 0L .. n - 1L do
-                        if i > 0L then sb.Append(", ") |> ignore
-                        let rowFields =
-                            match ArrayOps.readCell ba [ i ] with
-                            | VStruct (_, fs) -> fs
-                            | _ ->
-                                raise (PrintUnsupported
-                                        $"rank-1 struct array '{b.Name}' print: row {i} is not a struct value")
-                        sb.Append("{") |> ignore
-                        fieldRenders |> List.iteri (fun j (fname, render) ->
-                            if j > 0 then sb.Append(", ") |> ignore
-                            let fv =
-                                match rowFields |> Array.tryPick (fun (nm, v) -> if nm = fname then Some v else None) with
-                                | Some v -> v
-                                | None ->
-                                    raise (PrintUnsupported
-                                            $"rank-1 struct array '{b.Name}' print: row missing field '{fname}'")
-                            sb.Append(fname).Append(": ").Append(render fv) |> ignore)
-                        sb.Append("}") |> ignore
-                    sb.Append("]").Append('\n') |> ignore
+                    // Render every element FIRST: an element this printer
+                    // cannot render defers the whole program before any byte
+                    // of the line is written.
+                    let items =
+                        [ for i in 0L .. n - 1L ->
+                            formatAggregate b.Name irModule.Types ap arrType.ElemType (ArrayOps.readCell ba [ i ]) ]
+                    sb.Append(b.Name).Append(" = [").Append(String.concat ", " items).Append("]").Append('\n') |> ignore
                 | Some _ ->
                     raise (PrintUnsupported $"rank-1 struct array '{b.Name}': value is not a VArray")
                 | None ->
@@ -427,7 +499,9 @@ let printBindingsOnly (progName: string) (lookup: IRId -> Value option) (forcedI
         let wanted =
             match only with
             | Some names -> Set.contains b.Name names
-            | None -> true
+            // Elaborator-internal `__` names are not echoed (genPrintStatements'
+            // twin, CodeGen.isInternalBindingName).
+            | None -> not (Blade.CodeGen.isInternalBindingName b.Name)
         if isPrintable && wanted then
             // Type dispatch mirrors genPrintStatements after IR.stripUnits.
             match stripUnits b.Type with
@@ -451,8 +525,20 @@ let printBindingsOnly (progName: string) (lookup: IRId -> Value option) (forcedI
                 emitScalar b ETInt64
             | ArrayElem arrType ->
                 printArrayBinding b arrType
-            | IRTTuple _ -> ()   // genPrintStatements: [] -- top-level tuples print nothing
-            | IRTNamed _ -> ()   // genPrintStatements: [] -- structs/sum types print nothing
+            | IRTTuple _ | IRTNamed _ when not (Blade.CodeGen.isDestructureCarrier b) ->
+                // Tuples and structs in their literal spelling; one with no
+                // print form (a variant, a function component) prints nothing,
+                // as genPrintStatements' twin arm does.
+                match Blade.CodeGen.aggregatePrintOf irModule.Types b.Type with
+                | Some ap ->
+                    match lookup b.Id with
+                    | Some v ->
+                        let text = formatAggregate b.Name irModule.Types ap b.Type v
+                        sb.Append(b.Name).Append(" = ").Append(text).Append('\n') |> ignore
+                    | None -> raise (PrintUnsupported $"binding '{b.Name}': no evaluated value")
+                | None -> ()
+            | IRTTuple _ -> ()   // a destructuring carrier: its components print by name
+            | IRTNamed _ -> ()
             | IRTUnit -> ()      // genPrintStatements: [] -- unit prints nothing
             | _ -> ()            // function values (IRTArrow non-array), inference vars, etc.
 

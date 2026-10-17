@@ -805,6 +805,63 @@ let static B = b.vars.data |> c.read
               else check "agree: compiles" false e)
      | Error e -> check "agree: lowers" false e)
 
+    // ---------------------------------------------------------------
+    // 11. The provider boundary rule (BL8015) and the masked read, BOTH
+    //     lanes: a Float64 table's nan / inf cells are refused by `read`
+    //     (and by the static fold, BL3999 with the same sentence), the
+    //     masked read returns the present cells, and a write of a NaN /
+    //     infinite cell is refused (the CSV round trip stays honest).
+    // ---------------------------------------------------------------
+    printfn "\n--- boundary rule (BL8015) + masked read, both lanes ---"
+    Blade.Tests.ProviderBoundaryTests.predicateParity check e2eDir
+    let msFix = fixFile "ms_nan.csv"   // 2 x 3: 1.5,nan,4.0 / 2.0,3.0,inf
+    (match Blade.Tests.ProviderBoundaryTests.bothLanes e2eDir "csv_boundary_refuse" [ msFix ] (sprintf """
+import csv as c
+let obs = c.load("%s")
+let v = obs.vars.data |> c.read
+"""                                                                                         msFix) with
+     | Ok r ->
+         Blade.Tests.ProviderBoundaryTests.expectRefusal check "csv: read of nan/inf cells (BL8015)" r
+             [ $"provider read of 'data' from '{msFix}'"; "2 cell(s) hold a missing value"; "first at [0, 1]"; "missing here: NaN or infinite" ]
+     | Error e -> check "csv: boundary refusal lowers" false e)
+    (match Blade.Tests.ProviderBoundaryTests.bothLanes e2eDir "csv_boundary_present" [ msFix ] (sprintf """
+import csv as c
+let obs = c.load("%s")
+let vals = obs.vars.data |> c.read_present
+let ok = c.present(obs.vars.data)
+let n = extents(vals)
+let total = reduce(vals, (+))
+"""                                                                                          msFix) with
+     | Ok r ->
+         Blade.Tests.ProviderBoundaryTests.expectValues check "csv: masked read (read_present / present)" r
+             [ "n = 4"; "total = 10.5"; "ok = [[true, false, true], [true, true, false]]" ]
+         check "csv: the raw half is never printed" (not (r.InterpOut.Contains "__present_raw")) r.InterpOut
+     | Error e -> check "csv: masked read lowers" false e)
+    (let foldSource = sprintf """
+import csv as c
+let m = c.load("%s")
+let static V = m.vars.data |> c.read
+"""                           msFix
+     match lower foldSource with
+     | Ok _ -> check "csv: static fold of nan/inf cells refused" false "lowered without error"
+     | Error e ->
+         check "csv: static fold refuses with the BL8015 sentence (the `let static` assertion)"
+             (e.Contains "does not evaluate at compile time" && e.Contains "2 cell(s) hold a missing value" && e.Contains "first at [0, 1]") e)
+    (match Blade.Tests.ProviderBoundaryTests.bothLanes e2eDir "csv_boundary_write" [] (sprintf """
+import csv as c
+let a = [1.0, 2.0, 3.0]
+let bad = method_for(a) <@> lambda(x) -> (x - x) / (x - x) |> compute
+let _ = c.write("%s", bad)
+"""                                                                                        (fixFile "ms_wr_out.csv")) with
+     | Ok r ->
+         (match r.Compiled with
+          | None -> printfn "  SKIP csv write refusal: toolchain unavailable"
+          | Some (Ok (code, out)) ->
+              check "csv: a write of NaN cells is refused (BL8015)"
+                  (code <> 0 && out.Contains "error[BL8015]: provider write of 'bad'" && out.Contains "3 cell(s) are NaN or infinite") out
+          | Some (Error e) -> check "csv: write refusal runs" false e)
+     | Error e -> check "csv: write refusal lowers" false e)
+
     (try Directory.Delete(tmp, true) with _ -> ())
 
     printfn "\n=== CSV Provider Tests: %d passed, %d failed ===" passed failed

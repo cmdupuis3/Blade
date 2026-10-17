@@ -117,7 +117,7 @@ let private shapeSources =
     "spectra ops read the DECLARED shape at compile time (the generated transform bakes in the per-axis radix choice and the twiddle tables), so the argument must carry an annotation"
 
 /// The declared shape AND element class of an op's array argument. The shape must be statically known (the generated
-/// transform picks radix-2 vs table DFT per axis and bakes twiddle/bit-reversal tables into the source), but it need not
+/// transform picks radix-2 vs Bluestein per axis and bakes twiddle/bit-reversal tables into the source), but it need not
 /// come from a module-level let. `scope` carries the lexical shapes in force here. The returned label is what messages quote.
 let private arrayShape (ctx: Ctx) (scope: Scope) (what: string) (e: Expr) : Result<string * ElemClass * int list, string> =
     let finish (label: string) ((elem, idxs): TypeExpr * TypeExpr list) =

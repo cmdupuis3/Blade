@@ -1332,7 +1332,7 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     if ompInstrument && outerIsParallel then
         lines <- lines @ [
             ind depth + "// [omp-coverage] thread observation (test mode)"
-            ind depth + "int __omp_maxth = omp_get_max_threads();"
+            ind depth + "int __omp_maxth = blade_omp_get_max_threads();"
             ind depth + "bool* __omp_seen = new bool[__omp_maxth]();"
             ind depth + "int* __omp_team = new int[__omp_maxth]();"
         ]
@@ -1355,7 +1355,7 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
             ind depth + "// reduce over computation: comm-licensed parallel fold, outer level chunked"
             ind depth + "{"
             ind (depth + 1) + $"const size_t {fcRn} = {outerBound};"
-            ind (depth + 1) + $"int {fcT} = omp_get_max_threads();"
+            ind (depth + 1) + $"int {fcT} = blade_omp_get_max_threads();"
             ind (depth + 1) + $"if ((size_t){fcT} > {fcRn}) {fcT} = (int){fcRn};"
             ind (depth + 1) + $"if ({fcT} < 1) {fcT} = 1;"
             ind (depth + 1) + $$"""if ({{fcRn}} > 0) {"""
@@ -1365,10 +1365,10 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
             // (num_threads is a request -- see the flat path's note) and skips a
             // chunk whose inner nest contributed nothing.
             ind (depth + 2) + $"bool* {fcHad} = new bool[{fcT}]();"
-            ind (depth + 2) + $"#pragma omp parallel num_threads({fcT})"
+            ind (depth + 2) + $"BLADE_OMP_PARALLEL_NUM_THREADS({fcT})"
             ind (depth + 2) + "{"
-            ind (depth + 3) + "const int __rnt = omp_get_num_threads();"
-            ind (depth + 3) + "const int __rt = omp_get_thread_num();"
+            ind (depth + 3) + "const int __rnt = blade_omp_get_num_threads();"
+            ind (depth + 3) + "const int __rt = blade_omp_get_thread_num();"
             ind (depth + 3) + $"const size_t __rlo = ({fcRn} * (size_t)__rt) / (size_t)__rnt;"
             ind (depth + 3) + $"const size_t __rhi = ({fcRn} * ((size_t)__rt + 1)) / (size_t)__rnt;"
             // Value-initialized, never READ before __rhas turns true; the
@@ -1599,7 +1599,7 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
         // values), so running it per innermost-iteration is harmless.
         if ompInstrument && outerIsParallel && bidx = lastBindingIdx then
             lines <- lines @ [
-                ind depth + "{ int __tn = omp_get_thread_num(); __omp_seen[__tn] = true; __omp_team[__tn] = omp_get_num_threads(); }"
+                ind depth + "{ int __tn = blade_omp_get_thread_num(); __omp_seen[__tn] = true; __omp_team[__tn] = blade_omp_get_num_threads(); }"
             ]
         bidx <- bidx + 1
         
@@ -1653,8 +1653,7 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     // emitted spelling, so only fill in ids the enclosing scope doesn't know --
     // same precedence rule as `captureForwardName`.
     let nameMap =
-        codeGen.Captures
-        |> List.fold (fun acc c -> if Map.containsKey c.Id acc then acc else Map.add c.Id c.Name acc) nameMap
+        withCaptureNames EnclosingNamesWin codeGen.Captures nameMap
     
     // Generate kernel assignment (with Reynolds permutation sum if applicable).
     // The shape of the assignment depends on output type:
@@ -1917,18 +1916,8 @@ let genLoopNest (codeGen: LoopNestCodeGen) (outerNames: Map<int, string>) (inden
 // The gate is deliberately CONSERVATIVE -- the nested fallback is always
 // correct, so every uncertain shape returns None.
 
-/// Binomial C(m, k) in int64, 0 when k < 0 or m < k. Local twin of
-/// genPackedPoolCopy's -- same closed form, same overflow envelope (the caller
-/// only ever feeds it literal corpus-scale extents).
-let internal flatBinom (m: int64) (k: int) : int64 =
-    if k < 0 || m < int64 k then 0L
-    else
-        let mutable num = 1L
-        let mutable den = 1L
-        for i in 0 .. k - 1 do
-            num <- num * (m - int64 i)
-            den <- den * int64 (i + 1)
-        num / den
+/// Binomial C(m, k) in int64, 0 when k < 0 or m < k (OrbRank.binomOrZero).
+let internal flatBinom (m: int64) (k: int) : int64 = Blade.OrbRank.binomOrZero m k
 
 /// One storage GROUP of a flat-eligible array: (rank, symmetry class, literal
 /// extent). Two arrays whose group lists are structurally equal have
@@ -2163,8 +2152,7 @@ let tryGenFlatElementwiseNest
                    Map.empty
             let nameMap = paramFinalNames |> Map.fold (fun acc k v -> Map.add k v acc) outerNames
             let nameMap =
-                codeGen.Captures
-                |> List.fold (fun acc c -> if Map.containsKey c.Id acc then acc else Map.add c.Id c.Name acc) nameMap
+                withCaptureNames EnclosingNamesWin codeGen.Captures nameMap
             let body =
                 genKernelExprWithReynolds codeGen.KernelExpr codeGen.KernelParams
                                           false false nameMap paramFinalNames
@@ -2303,8 +2291,7 @@ let tryGenRowFoldJamNest
         // with the precedence rule every nest emitter uses: the enclosing
         // scope's emitted names first, captures only fill gaps.
         let nameMap =
-            codeGen.Captures
-            |> List.fold (fun acc c -> if Map.containsKey c.Id acc then acc else Map.add c.Id c.Name acc) outerNames
+            withCaptureNames EnclosingNamesWin codeGen.Captures outerNames
         // A fold operand is either a row param or an invariant NAMED rank-1
         // plain dense array (hoisted once to a restrict pointer; a computed
         // operand could be a temporary, which a hoisted `&x[0]` would outlive).
@@ -2409,7 +2396,7 @@ let tryGenRowFoldJamNest
             | _ ->
                 // The IIFE's empty-row panic, raised where it would have been:
                 // at the first row, before any row is folded.
-                [ $$"""if (__jm > 0 && __jn == 0) { blade_rt::panic("BL8003", "reduce: empty array, no reduction possible", nullptr, 0); }""" ]
+                [ $$"""if (__jm > 0 && __jn == 0) { blade_rt::panic("BL8003", "reduce: empty array, no reduction possible", {{declPanicArgs ()}}); }""" ]
         let tile =
             [ $$"""for (; {{iv}} + {{jamR}} <= __jm; {{iv}} += {{jamR}}) {""" ]
             @ ([ 0 .. jamR - 1 ] |> List.collect (fun k -> rowDecls k $"{iv} + {k}") |> List.map (fun s -> "    " + s))
@@ -2470,10 +2457,7 @@ let internal tryGenGemvDispatch
             // flat path use, so the vector resolves to the identifier the
             // kernel body would have rendered.
             let nameMap =
-                codeGen.Captures
-                |> List.fold (fun acc (c: CaptureInfo) ->
-                        if Map.containsKey c.Id acc then acc else Map.add c.Id c.Name acc)
-                   outerNames
+                withCaptureNames EnclosingNamesWin codeGen.Captures outerNames
             let resolve src =
                 match src with
                 | Blade.LinAlgPatterns.FromNestArray n
@@ -2590,10 +2574,7 @@ let internal tryGenSyrkDispatch
                 // pattern module's OWN peel so the two cannot disagree about
                 // what a scaled contraction is.
                 let nameMap =
-                    codeGen.Captures
-                    |> List.fold (fun acc (c: CaptureInfo) ->
-                            if Map.containsKey c.Id acc then acc else Map.add c.Id c.Name acc)
-                       outerNames
+                    withCaptureNames EnclosingNamesWin codeGen.Captures outerNames
                 let renderScalar (e: IRExpr) : string option =
                     match e with
                     | IRVar (id, _) when not (Map.containsKey id nameMap) -> None
@@ -3169,8 +3150,39 @@ let isFreshPoolForm (e: IRExpr) : bool =
 ///      either would be visible through the other. A block chain cannot pose
 ///      this (it has exactly one value, which is not itself one of `scopeLets`);
 ///      a flattened function body can.
-let canAliasStagingLet (scopeLets: (IRId * IRExpr) list) (selfId: IRId option) (srcId: IRId) : bool =
+///  (4) nothing evaluated AFTER the alias reads the staging let, directly or
+///      through a let derived from it (a deferred combinator or lambda bound
+///      before the alias reads its operand only where it is consumed). After
+///      the alias, a write through it is a write to the source's pool, so a
+///      later read of the source would see it (N1: `let q = x * 2.0; let mut
+///      q2 = q; q2(0) = 100.0; q(0)` returned 100.0 where the interpreter's
+///      copy gives 2.0). "After" is the lets following `selfId` in `scopeLets`
+///      plus `tailExprs` (a function body's return expression). A block chain
+///      (selfId = None) is the source's last mention by construction: its value
+///      IS the reference and nothing in the chain follows it. Derivation is
+///      over-approximated (any let whose value mentions the source or a
+///      derived let, before or after), which can only keep a copy.
+let canAliasStagingLet (scopeLets: (IRId * IRExpr) list) (selfId: IRId option) (srcId: IRId) (tailExprs: IRExpr list) : bool =
     let scopeIds = scopeLets |> List.map fst |> Set.ofList
+    let derived =
+        let rec grow (acc: Set<IRId>) =
+            let acc' =
+                scopeLets |> List.fold (fun s (id, v) ->
+                    if Some id = selfId || Set.contains id s then s
+                    elif Set.isEmpty (Set.intersect (collectVarRefsIR v) s) then s
+                    else Set.add id s) acc
+            if acc' = acc then acc else grow acc'
+        grow (Set.singleton srcId)
+    let readAfterAlias =
+        let laterLets =
+            match selfId with
+            | Some sid ->
+                match List.tryFindIndex (fun (id, _) -> id = sid) scopeLets with
+                | Some k -> scopeLets |> List.skip (k + 1) |> List.map snd
+                | None -> scopeLets |> List.map snd   // self not in scope: assume everything follows
+            | None -> []
+        (laterLets @ tailExprs)
+        |> List.exists (fun e -> not (Set.isEmpty (Set.intersect (collectVarRefsIR e) derived)))
     let srcOwnsPool =
         scopeLets |> List.exists (fun (id, v) -> id = srcId && isFreshPoolForm v)
     let assignLeaksSrc =
@@ -3192,6 +3204,7 @@ let canAliasStagingLet (scopeLets: (IRId * IRExpr) list) (selfId: IRId option) (
             Some id <> selfId
             && (match v with IRVar (vid, _) -> vid = srcId | _ -> false))
     Set.contains srcId scopeIds && srcOwnsPool && not assignLeaksSrc && not rivalAlias
+    && not readAfterAlias
 
 // Whole-array mut reassignment as copy-into-place.
 //
@@ -3941,7 +3954,9 @@ let peekAllocScopeFrees (ind: string) : string list =
     | Some frame -> renderFrameFrees ind frame
 
 /// Generate code to allocate and initialize an array from literal values
-let genArrayLiteral (ctx: CodeGenContext) (varName: string) (elements: IRExpr list) (arrType: IRArrayType) : string list =
+/// `sourceName` is the binding's BLADE name, for the runtime guard's message
+/// (the C++ spelling `varName` can be a rename, `a_extents_` / `M__x`).
+let genArrayLiteral (ctx: CodeGenContext) (varName: string) (sourceName: string) (elements: IRExpr list) (arrType: IRArrayType) : string list =
     let ind = indentStr ctx
     let elemType = elemTypeToCpp arrType.ElemType
     let rank = arrayRank arrType
@@ -4227,8 +4242,37 @@ let genArrayLiteral (ctx: CodeGenContext) (varName: string) (elements: IRExpr li
             let formatIndexPath (path: int list) : string =
                 path |> List.map (sprintf "[%d]") |> String.concat ""
             
+            // A literal of CONSTANT scalar leaves (a baked table: spectra's
+            // twiddles and chirps, a data literal) is one `static const`
+            // initializer copied into the pool, not one statement per element
+            // (F6): O(1) statements, the table lives in read-only data, and a
+            // function that bakes one initializes it once. Dense rectangular
+            // pools are contiguous in row-major order (pool_base), so the
+            // flat initializer is the cell order.
+            let constLeaf (e: IRExpr) =
+                match e with
+                | IRLit _ -> true
+                | IRUnaryOp (IRNeg, IRLit _) -> true
+                | IRComplex ((IRLit _ | IRUnaryOp (IRNeg, IRLit _)), (IRLit _ | IRUnaryOp (IRNeg, IRLit _))) -> true
+                | _ -> false
+            let leaves = walkLeaves [] (IRArrayLit (elements, arrType))
+            let staticInit =
+                isFreeableDenseArrayType arrType && totalExpected >= 2
+                && (match stripUnits arrType.ElemType with
+                    | IRTScalar et -> et <> ETString
+                    | _ -> false)
+                && (useFastScalarPath
+                    || (leaves.Length = totalExpected
+                        && leaves |> List.forall (fun (path, leaf) -> path.Length = rank && constLeaf leaf)))
             let initCode =
-                if useFastScalarPath then
+                if staticInit then
+                    let cells =
+                        if useFastScalarPath then values |> List.map (renderLiteralLeaf elemType)
+                        else leaves |> List.map (fun (_, leaf) -> exprToCpp ctx.VarNames leaf)
+                    let joined = String.concat ", " cells
+                    [ $"{ind}static const {elemType} {varName}__init[{totalExpected}] = {{ {joined} }};"
+                      $"{ind}std::copy_n({varName}__init, {totalExpected}, nested_array_utilities::pool_base({varName}.data));" ]
+                elif useFastScalarPath then
                     // Row-major enumeration of (i0,...,i(n-1)) tuples zipped with
                     // the flat value list. extractLiteralValues already walks
                     // in row-major order, so the alignment is exact.
@@ -4265,7 +4309,7 @@ let genArrayLiteral (ctx: CodeGenContext) (varName: string) (elements: IRExpr li
                                 $"{ind}    const auto& {srcName} = ({(exprToCpp ctx.VarNames leaf)});"
                             let guards =
                                 subDims |> List.mapi (fun j n ->
-                                    $"{ind}    if ({srcName}.extents[{j}] != {n}) {{ std::cerr << \"Blade runtime: array literal row {(formatIndexPath path)} of '{varName}' has extent \" << {srcName}.extents[{j}] << \" in dim {j}, but the declared type expects {n}\" << std::endl; blade_rt::panic(\"BL8006\", \"array literal extent mismatch\", nullptr, 0); }}")
+                                    $"{ind}    if ({srcName}.extents[{j}] != {n}) {{ std::cerr << \"Blade runtime: array literal row {(formatIndexPath path)} of '{sourceName}' has extent \" << {srcName}.extents[{j}] << \" in dim {j}, but the declared type expects {n}\" << std::endl; blade_rt::panic(\"BL8006\", \"array literal extent mismatch\", {(declPanicArgs ())}); }}")
                             let opens =
                                 List.zip loopVars subDims
                                 |> List.mapi (fun j (v, n) ->

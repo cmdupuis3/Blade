@@ -1,0 +1,13 @@
+// TEST: comm on an alternating pack fold is witnessed false (rejects)
+// ERROR: BL4013
+// `head - packalt(tail)` is a[0] - a[1] at two operands: the pair is not
+// commutative, and the per-arity unrolling of the pack (N2) shows it.
+function packalt(a: Poly<T^0>) where comm(a) -> T^0 = {
+    match arity(a) with
+    | 1 -> { let head :: tail = a
+             head }
+    | _ -> { let head :: tail = a
+             head - packalt(tail) }
+}
+let A = [1.0, 2.0, 4.0]
+let result = object_for(packalt) <@> (A, A) |> compute

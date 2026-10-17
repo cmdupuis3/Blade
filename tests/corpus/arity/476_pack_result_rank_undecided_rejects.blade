@@ -1,0 +1,16 @@
+// TEST: an instance whose body cannot decide its result rank (rejects)
+// ERROR: BL3009
+// The recursive call at the SAME arity (`loopy(a)`) sits behind a run-time
+// guard, so the arity-1 instance's result is learned from neither a smaller
+// instance nor a base arm. Falling back to a declared or unified type would
+// truncate the value; the instance is refused instead.
+function loopy(a: Poly<T^1>) = {
+    match arity(a) with
+    | 0 -> 1.0
+    | _ -> {
+        let head :: tail = a
+        if reduce(head, (+)) > 100.0 then head [*] loopy(a) else head [*] loopy(tail)
+    }
+}
+let x = [1.0, 2.0]
+let l1 = loopy(x)

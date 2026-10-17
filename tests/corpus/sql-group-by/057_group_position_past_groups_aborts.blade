@@ -1,0 +1,12 @@
+// TEST: GroupBy computed group position past the groups aborts (aborts)
+// ABORT: BL8006
+// ABORT: outside the groups of grouped
+// G1: a plain integer subscript of a grouped value is a group POSITION
+// (what group_bucket returns; every position of a dynamic grouping), checked
+// against the group count -- here only known at run time.
+let region = [7, 3, 7, 3]
+let temps = [10.0, 20.0, 30.0, 40.0]
+let gk = group_keys(region)
+let grouped = group_by(temps, gk)
+let k = 1 + 1
+let bad = grouped(k)

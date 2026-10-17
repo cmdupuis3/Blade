@@ -1,0 +1,10 @@
+// TEST: zero bound at a sum type is refused by the checker (rejects)
+// ERROR: BL3999 @ 9:16
+// ERROR-CONTAINS: zero at the named type 'Shape' has no value
+// ============================================================================
+// A sum type has no zero (formalism 10.4). In expression position both lanes
+// refused it with this sentence; in BINDING position `let v: Shape = zero`
+// type-checked and then died in emission (BL7001 "no rule for IRZero in
+// binding position", a back-end gap). The checker refuses it now.
+type Shape = Circle | Square
+let v: Shape = zero

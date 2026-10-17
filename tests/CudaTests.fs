@@ -100,6 +100,30 @@ let runBufferTypeTests () : Blade.Tests.TestHarness.BlockResult =
     checkBnd "complex128" (IRTScalar ETComplex128) true
     checkBnd "complex64" (IRTScalar ETComplex64) true
     checkBnd "string" (IRTScalar ETString) false
+    // F8 review: the CO-FUSED __global__ forwards no captures (its signature is
+    // the shared inputs, the outputs and the cardinality), so a capturing leaf
+    // must be refused with steering, never emitted with an undeclared name.
+    // Codegen only (cuda emission mode), no toolchain.
+    let cofuseCaptureSrc =
+        "let s = 3.0\n"
+        + "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]\n"
+        + "let (u, v) = (method_for(A) <@> lambda(x) where cuda(block: 64) -> x * s) <&!> (method_for(A) <@> lambda(x) where cuda(block: 64) -> x + 100.0) |> compute\n"
+    let cofuseOutcome =
+        CodeGen.setCudaEmitMode true
+        try
+            try
+                match lower cofuseCaptureSrc with
+                | Error e -> Error ($"lower: {e}")
+                | Ok ir ->
+                    let (cpp, _) = CodeGen.genSelfContainedProgramFromIR ir "cofuse_capture"
+                    let cu = CodeGen.getCudaFileContent () |> Option.defaultValue ""
+                    Ok (cpp + cu)
+            with ex -> Ok ex.Message
+        finally CodeGen.setCudaEmitMode false
+    match cofuseOutcome with
+    | Ok text when text.Contains "capture-free" -> pass "cofuse_capturing_leaf_refused" "steering names capture-free"
+    | Ok _ -> fail "cofuse_capturing_leaf_refused" "a capturing co-fusion leaf was not refused"
+    | Error e -> fail "cofuse_capturing_leaf_refused" e
     printFooter "Buffer Type" [$"{passed} passed"; $"{failures} failure(s)"]
     { Block = "Buffer Type"; Passed = passed; Failed = failures; Skipped = 0; FailedNames = failedNames }
 
@@ -371,6 +395,18 @@ let R = method_for(A) <@> lambda(x) -> x * 10 |> compute
 let A = [1, 2, 3, 4, 5, 6]
 let R = method_for(A) <@> lambda(x) where cuda(block: 64) -> x * 10 |> compute
 """
+        // Integer `^` on the device: EXACT and WRAPPING like the host's (section
+        // 2.4), not the double `pow` it used to become. 3^41 and 6^41 overflow
+        // Int64 (they wrap) and 4^41 = 2^82 wraps to 0 -- a double pow rounds
+        // all three to something else, so the differential sees the difference.
+        let ipowHost = """
+let A = [1, 2, 3, 4, 5, 6]
+let R = method_for(A) <@> lambda(x) -> x ^ 41 + x ^ 2 |> compute
+"""
+        let ipowCuda = """
+let A = [1, 2, 3, 4, 5, 6]
+let R = method_for(A) <@> lambda(x) where cuda(block: 64) -> x ^ 41 + x ^ 2 |> compute
+"""
         // non-trivial kernel body: a polynomial in x exercises a deeper
         // exprToCpp expression in the kernel (multiple ops, reuse of the bound
         // element), not just a single multiply.
@@ -564,6 +600,16 @@ let (m2a, m2b) = (method_for(A, A) <@> lambda(x, y) where comm(x, y), cuda(block
         let softMixed = """
 let A = [1.0, 2.0, 3.0, 4.0]
 let (u, m2) = (method_for(A) <@> lambda(x) where cuda(block: 64) -> x * 3.0) <&> (method_for(A, A) <@> lambda(x, y) where comm(x, y), cuda(block: 32) -> x * y) |> compute
+"""
+        // A <&> soft join whose leaves CAPTURE a scalar: the co-fused kernel
+        // forwards no captures, so its gate declines; the soft join's split
+        // per-leaf kernels do not stage captures either (planCudaDevice's
+        // softSplit refusal), so the leaves run as host loops -- correct, no
+        // .cu, never an undeclared name in device code (F8 review).
+        let softCapture = """
+let s = 3.0
+let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+let (u, v) = (method_for(A) <@> lambda(x) where cuda(block: 64) -> x * s) <&> (method_for(A) <@> lambda(x) where cuda(block: 64) -> x + s) |> compute
 """
         // COMPLEX cases (thrust device dialect). The differential demands
         // byte-identical stdout, so these use EXACT complex arithmetic only
@@ -803,6 +849,7 @@ let R = stats(t, s, ws) |> compute
               ("rank1_multiblock", mbHost, mbCuda)
               ("rank3_nonuniform", rank3Host, rank3Cuda)
               ("int_elem", intHost, intCuda)
+              ("int_pow_wraps", ipowHost, ipowCuda)
               ("poly_body", polyHost, polyCuda)
               ("big_multiblock", bigHost, bigCuda)
               ("sym_triangular", symTriHost, symTriCuda)
@@ -834,6 +881,45 @@ let R = stats(t, s, ws) |> compute
         let symRc = runHostCompileCase "sym_output" symHost "R = ["
         if symRc = 0 then passed <- passed + 1
         else (failures <- failures + 1; failedNames <- failedNames @ ["sym_output"])
+        // A VARIABLE integer exponent has no device form (its negative-exponent
+        // BL8013 panic cannot be raised on the device): the kernel falls back
+        // to the host loop -- no .cu -- instead of computing a double `pow`.
+        let ipowVarRc =
+            let label = "int_pow_variable_exponent_falls_back"
+            CodeGen.setCudaEmitMode true
+            let outcome =
+                try
+                    match genVariant "cuda_ipow_var"
+                            "let A = [1, 2, 3]\nlet R = method_for(A) <@> lambda(x) where cuda(block: 64) -> x ^ x |> compute\n" with
+                    | Error e -> Error e
+                    | Ok (_, None) -> Ok ()
+                    | Ok (_, Some _) -> Error "a variable integer exponent reached a device kernel"
+                finally CodeGen.setCudaEmitMode false
+            match outcome with
+            | Ok () -> Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass label "host fallback, no .cu"; 0
+            | Error e -> Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label e; 1
+        let softCapRc =
+            let label = "softjoin_capture_falls_back_to_host"
+            CodeGen.setCudaEmitMode true
+            let outcome =
+                try
+                    match genVariant "cuda_softjoin_capture" softCapture with
+                    | Error e -> Error e
+                    | Ok (_, None) -> Ok ()
+                    | Ok (_, Some cu) ->
+                        // A device path is fine too, as long as the capture
+                        // reached it as a parameter (never a bare `s`).
+                        let text = File.ReadAllText cu
+                        if text.Contains "__blade_cap_s" then Ok ()
+                        else Error "a capturing soft-join leaf reached device code with an unforwarded capture"
+                finally CodeGen.setCudaEmitMode false
+            match outcome with
+            | Ok () -> Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass label "capturing leaves stay host loops (or forward the capture)"; 0
+            | Error e -> Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label e; 1
+        if softCapRc = 0 then passed <- passed + 1
+        else (failures <- failures + 1; failedNames <- failedNames @ ["softjoin_capture_falls_back_to_host"])
+        if ipowVarRc = 0 then passed <- passed + 1
+        else (failures <- failures + 1; failedNames <- failedNames @ ["int_pow_variable_exponent_falls_back"])
         // Soft-join STRUCTURE: the .cu must carry per-leaf kernels + split
         // begin/end wrappers with in-wrapper device selection, and the host
         // must sequence EVERY begin before the FIRST end (that ordering is

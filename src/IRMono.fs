@@ -326,7 +326,9 @@ let rec canonTypeKey (ty: IRType) : string =
     | IRTScalar ETString -> "string"
     | IRTScalar ETComplex64 -> "c64"
     | IRTScalar ETComplex128 -> "c128"
-    | IRTNamed n -> n
+    // A spec NAME is built from this key (C++ identifier): a non-main
+    // module's identity `A.P` sanitizes to `A__P` (D11).
+    | IRTNamed n -> Blade.Types.TypeOrigins.cppName n
     | IRTUnit -> "unit"
     | IRTIdxTagged (inner, _) -> canonTypeKey inner
     | IRTUnitAnnotated (inner, _) -> canonTypeKey inner
@@ -571,8 +573,9 @@ let eliminateGenericAliases (modules: IRModule list) : IRModule list =
 /// variables at a module-level call. Iterated (a learned result can make the
 /// next call's arguments concrete); only fully concrete teachings are kept,
 /// and a variable already bound is never rebound.
-let private learnFromInnerCalls (func: IRFuncDef) (callables: Map<IRId, IRCallable>)
-                                (bindings: Map<int, IRType>) : Map<int, IRType> =
+let rec private learnFromInnerCallsAt (memo: System.Collections.Generic.Dictionary<string, Map<int, IRType>>)
+                                      (depth: int) (func: IRFuncDef) (callables: Map<IRId, IRCallable>)
+                                      (bindings: Map<int, IRType>) : Map<int, IRType> =
     let concrete (t: IRType) = Set.isEmpty (collectInferIds t)
     // The closures the body builds over its own parameters (and, transitively,
     // over theirs): an ARROW PARAMETER may be applied inside one
@@ -625,7 +628,8 @@ let private learnFromInnerCalls (func: IRFuncDef) (callables: Map<IRId, IRCallab
             match e with
             | IRApp (IRVar (fid, _), args, retTy) when fid <> func.Id ->
                 (match Map.tryFind fid callables with
-                 | Some callee when hasTypeVarsInParams callee && callee.Params.Length = args.Length ->
+                 | Some callee when (hasTypeVarsInParams callee || not (concrete retTy))
+                                    && callee.Params.Length = args.Length ->
                      let cb =
                          List.zip callee.Params args
                          |> List.fold (fun m (p, a) ->
@@ -633,6 +637,32 @@ let private learnFromInnerCalls (func: IRFuncDef) (callables: Map<IRId, IRCallab
                              | Some t -> unifyParamWithArg p.Type t m
                              | None -> m) Map.empty
                      let ret = substTypeInIRType cb callee.RetType
+                     // A RESULT ONLY THE CALLEE'S BODY DECIDES (D4): an arity
+                     // instance's open result (`outer_arity_1`, its rank the
+                     // instance's), or an element cast of a pack element's
+                     // variable. Learn the callee at THIS call's bindings --
+                     // what its own inner calls teach, recursively (arity
+                     // instances bottom out at the scalar base arm) --
+                     // memoized per (callee, bindings); a cycle (mutual
+                     // recursion at one instance) sees only the call's own
+                     // bindings, never loops.
+                     let ret =
+                         if concrete ret || depth >= 16 then ret
+                         else
+                             let key =
+                                 cb |> Map.toList
+                                 |> List.map (fun (k, t) -> $"{k}={canonTypeKey t}")
+                                 |> String.concat ","
+                                 |> fun s -> $"{callee.Id}|{s}"
+                             let learned =
+                                 match memo.TryGetValue key with
+                                 | true, l -> l
+                                 | _ ->
+                                     memo.[key] <- cb
+                                     let l = learnFromInnerCallsAt memo (depth + 1) callee callables cb
+                                     memo.[key] <- l
+                                     l
+                             substTypeInIRType learned callee.RetType
                      if concrete ret then
                          unifyParamWithArg retTy ret Map.empty
                          |> Map.iter (fun k v ->
@@ -679,6 +709,32 @@ let private learnFromInnerCalls (func: IRFuncDef) (callables: Map<IRId, IRCallab
                  | Some (AnyPrimElem e), Some ((ArrayElem at) as aty)
                         when (match at.ElemType with AnyPrimElem ae -> ae = e | _ -> false) -> Some aty
                  | _ -> exprTypeIfKnown e)
+            // A COMPARISON / LOGICAL op over an operand the instance made an
+            // array is that array's shape of Bool (formalism 6.1: elementwise
+            // at every rank) -- the result variable TypeCheck typed it with
+            // (Subst.ElemBoolVar, the D1 ruling) is named here; lowering's
+            // array-binop pass builds the Bool array after monomorphization.
+            | IRBinOp (IRElementwise, (IREq | IRNeq | IRLt | IRLe | IRGt | IRGe | IRAnd | IROr), l, r, _) ->
+                (match bodyTypeIfKnown l, bodyTypeIfKnown r with
+                 | Some (ArrayElem at), _ | _, Some (ArrayElem at) ->
+                     Some (mkArrayLike { at with ElemType = IRTScalar ETBool; Identity = None; IsVirtual = false })
+                 | _ -> exprTypeIfKnown e)
+            // AN OUTER PRODUCT (D4): rank A + rank B, the left element (the
+            // arithmetic-outer convention; Bool for a comparison), axes the
+            // left's then the right's. An array beside a scalar is that
+            // array's shape (the scalar broadcasts). `head [*] outer(tail)`
+            // at an arity instance, once the smaller instance is learned.
+            | IRBinOp (IROuter, op, l, r, _) ->
+                let elemOf (at: IRArrayType) =
+                    if isCmpOrLogicalIROp op then IRTScalar ETBool else at.ElemType
+                (match bodyTypeIfKnown l, bodyTypeIfKnown r with
+                 | Some (ArrayElem la), Some (ArrayElem ra) ->
+                     Some (mkArrayLike { la with IndexTypes = la.IndexTypes @ ra.IndexTypes
+                                                 ElemType = elemOf la; Identity = None; IsVirtual = false })
+                 | Some (ArrayElem at), Some (AnyPrimElem _)
+                 | Some (AnyPrimElem _), Some (ArrayElem at) ->
+                     Some (mkArrayLike { at with ElemType = elemOf at; Identity = None; IsVirtual = false })
+                 | _ -> exprTypeIfKnown e)
             | IRLet (_, _, body) -> bodyTypeIfKnown body
             | _ -> exprTypeIfKnown e
         let learnFrom (declTy: IRType) (value: IRExpr) =
@@ -705,6 +761,10 @@ let private learnFromInnerCalls (func: IRFuncDef) (callables: Map<IRId, IRCallab
         let b' = pass b
         if fuel <= 0 || b'.Count = b.Count then b' else fix b' (fuel - 1)
     fix bindings 8
+
+let private learnFromInnerCalls (func: IRFuncDef) (callables: Map<IRId, IRCallable>)
+                                (bindings: Map<int, IRType>) : Map<int, IRType> =
+    learnFromInnerCallsAt (System.Collections.Generic.Dictionary()) 0 func callables bindings
 
 /// AN ARROW PARAMETER'S APPLICATION never meets an array here. TypeCheck leaves
 /// an applied parameter generic (TypeEnv.ArrowObligation), and its application
@@ -967,6 +1027,45 @@ let specializeHMFunction (func: IRFuncDef) (keyBindings: Map<int, IRType>) (buil
 /// *declared type* (TypeCheck leaves it `IRTInfer N` when the call site's
 /// return was polymorphic), and (b) substitutes types throughout each spec
 /// body so it's free of `IRTInfer`.
+/// AN ARITY-DECIDED RESULT, JUDGED AT ITS CALL (D4). A pack function whose
+/// result TypeCheck left open (its rank is the instance's: `head [*]
+/// outer(tail)`) has each instance's result learned from the instance's body
+/// (learnFromInnerCalls). Two ways that can fail, both refused (BL3009) rather
+/// than handed to the back end as a value of the wrong rank:
+///   * the instance's result could not be learned (a same-arity recursion
+///     whose base arm sits behind a run-time guard) -- falling back to the
+///     declaration's type would truncate it;
+///   * the CALL was typed at another rank before the instance existed -- a
+///     subscript or intrinsic applied to the open result at type checking
+///     shapes it as the smallest array it could be.
+let internal arityResultClash (span: Blade.Ast.Span) (origFunc: IRFuncDef) (spec: IRFuncDef) (callRetTy: IRType) : unit =
+    if origFunc.Name.Contains "_arity_" then
+        let paramIds =
+            origFunc.Params |> List.fold (fun s p -> Set.union s (collectInferIds p.Type)) Set.empty
+        let bodyOnly = collectInferIds origFunc.RetType |> Set.exists (fun v -> not (paramIds.Contains v))
+        if bodyOnly then
+            let n = origFunc.Params.Length
+            let what = $"`{origFunc.SourceName}` at {n} pack element" + (if n = 1 then "" else "s")
+            let rankOf (t: IRType) =
+                match IR.stripUnits t with
+                | ArrayElem a -> a.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
+                | _ -> 0
+            let fail (msg: string) =
+                raise (Blade.Diagnostics.BladeDiagnosticException (
+                        Blade.Diagnostics.mkError "BL3009" Blade.Diagnostics.PhTypes span msg))
+            if not (Set.isEmpty (collectInferIds spec.RetType)) then
+                fail ($"the result of {what} has a rank only its instance decides (formalism 8.2), and this "
+                      + "instance's body does not decide it -- its result reaches no arm a smaller instance or a "
+                      + "base case types. Declare the function's return type (`-> T^k`) or give the recursion a "
+                      + "literal-arity base arm")
+            elif (match IR.stripUnits callRetTy with ArrayElem _ | IRTScalar _ -> true | _ -> false)
+                 && rankOf callRetTy <> rankOf spec.RetType then
+                fail ($"the result of {what} is a rank-{rankOf spec.RetType} value (its rank is decided per "
+                      + $"instance, formalism 8.2), but this program uses it as rank {rankOf callRetTy}: a "
+                      + "subscript or intrinsic applied to the result typed it before the instance existed. "
+                      + "Annotate the binding with the instance's type (`let o: Array<...> = "
+                      + $"{origFunc.SourceName}(..)`)")
+
 let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
     // 1. Identify functions with type vars in signature
     // Only functions with type vars in their PARAMETERS get dropped-and-
@@ -1101,6 +1200,9 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
                     derivedOrigins <- Map.add c.Id origFunc.Id derivedOrigins
                 changed <- true
 
+    // The declaration a call being rewritten sits in, for the span of an
+    // arity-decided result's refusal (arityResultClash).
+    let mutable clashSpan = Blade.Ast.noSpan
     // 3. Build the call-site rewriter using the now-frozen specMap.
     //    Same logic as before, but operating against a complete spec map.
     let rewriteCallSite e =
@@ -1119,6 +1221,7 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
             let key = (funcId, sortedBindings |> List.map (fun (id, ty) -> (id, canonTypeKey ty)))
             match Map.tryFind key specMap with
             | Some spec ->
+                arityResultClash clashSpan func spec (match e with IRApp (_, _, t) -> t | _ -> spec.RetType)
                 IRApp (IRVar (spec.Id, mkFuncArrow (spec.Params |> List.map _.Type) spec.RetType),
                        args, spec.RetType)
             | None -> e
@@ -1219,6 +1322,7 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
     // repointed at their specs, residual IRTInfer substituted out of the body,
     // signature and captures.
     let rewriteFunc (f: IRFuncDef) =
+        clashSpan <- IR.declSpanOf f.SourceName
         let bindings = mergeBindings (unionBindingsFromExpr f.Body)
         let bodyWithRewrittenCalls = mapIRExpr rewriteCallSite f.Body
         let bodyWithSubstitutedTypes = substTypeInIRExpr bindings bodyWithRewrittenCalls
@@ -1238,11 +1342,53 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
     let newBindings =
         modul.Bindings
         |> List.map (fun b ->
+            clashSpan <- IR.declSpanOf b.Name
             let bindings = mergeBindings (unionBindingsFromExpr b.Value)
             let newType = substTypeInIRType bindings b.Type
             let valueWithRewrittenCalls = mapIRExpr rewriteCallSite b.Value
             let valueWithSubstitutedTypes = substTypeInIRExpr bindings valueWithRewrittenCalls
             { b with Type = newType; Value = valueWithSubstitutedTypes })
+    // A BINDING OF AN ARITY-DECIDED RESULT APPLIED AT TYPE CHECKING (D4):
+    // `let o = outer(x, y)` then `o(1)`. Its rank was unknown when `o(1)` was
+    // typed, so the application was recorded as a call of an open value
+    // (TypeEnv.ArrowApplication), and the instance has since made `o` an
+    // array -- a subscript nothing checked. Refused, with the annotation that
+    // types it up front (arityResultClash names the other half).
+    (let decidedSpecs =
+        specMap |> Map.toList |> List.choose (fun ((fid, _), spec) ->
+            let f = hmFuncMap.[fid]
+            let paramIds = f.Params |> List.fold (fun s p -> Set.union s (collectInferIds p.Type)) Set.empty
+            if f.Name.Contains "_arity_"
+               && (collectInferIds f.RetType |> Set.exists (fun v -> not (paramIds.Contains v))) then
+                Some (spec.Id, f)
+            else None)
+        |> Map.ofList
+     // An instance whose result nothing learned is refused here whether or
+     // not a call site was rewritten to it.
+     for ((fid, _), spec) in Map.toList specMap do
+        if decidedSpecs.ContainsKey spec.Id then arityResultClash (IR.declSpanOf hmFuncMap.[fid].SourceName) hmFuncMap.[fid] spec spec.RetType
+     if not decidedSpecs.IsEmpty then
+        let holders =
+            newBindings |> List.choose (fun b ->
+                match b.Value with
+                | IRApp (IRVar (sid, _), _, _) when decidedSpecs.ContainsKey sid -> Some (b.Id, (b.Name, decidedSpecs.[sid]))
+                | _ -> None)
+            |> Map.ofList
+        if not holders.IsEmpty then
+            let check (e: IRExpr) =
+                iterIRExpr (fun n ->
+                    match n with
+                    | IRApp (IRVar (id, ArrayElem _), _, _) when holders.ContainsKey id ->
+                        let (name, f) = holders.[id]
+                        raise (Blade.Diagnostics.BladeDiagnosticException (
+                                Blade.Diagnostics.mkError "BL3009" Blade.Diagnostics.PhTypes (IR.declSpanOf name)
+                                    ($"`{name}` holds the result of `{f.SourceName}`, whose rank only its instance "
+                                     + "decides (formalism 8.2), and it is subscripted before that rank is known. "
+                                     + $"Annotate the binding with the instance's type (`let {name}: Array<...> = "
+                                     + $"{f.SourceName}(..)`)")))
+                    | _ -> ()) e
+            for b in newBindings do check b.Value
+            for f in newFunctions do check f.Body)
     // Spec function bodies need the same treatment as ordinary function
     // bodies: their inner HM calls (e.g. `id(id(x))` inside `twiceId`'s spec)
     // must be rewritten to point at the inner specs, and any residual
@@ -1526,6 +1672,96 @@ let resolveTypedZerosModule (structFields: string -> (string * IRType) list opti
         Functions = modul.Functions |> List.map (fun f -> { f with Body = rewrite f.Body })
         Bindings = modul.Bindings |> List.map (fun b -> { b with Value = rewrite b.Value }) }
 
+/// Post-monomorphization: a FUSED `(*)` FOLD's implicit seed, the identity
+/// `1`, at its instance's type. The checker seeds a `(*)` fold over an
+/// element still OPEN in a generic body (`reduce(method_for(v) <@> k, (*))`
+/// over `v: T^1`) with the Float64 literal `1.0` -- the one value it can
+/// spell without a type (the `(+)` twin has a typed `zero`, resolved in
+/// resolveTypedZerosModule). At an Int64 instance that seeded an integer
+/// accumulator with a double: C++ converted it silently, the interpreter
+/// folded in doubles and printed `48.0` for an Int64 `48`. The specialized
+/// KERNEL's result is the accumulator's type, so the seed is that type's one.
+/// A user-written init is never rewritten: it unifies with the element at
+/// type checking, so a Float64 init pins a Float64 kernel here.
+let adaptFoldOneSeedsModule (modul: IRModule) : IRModule =
+    let oneFor (ret: IRType) : IRExpr option =
+        match IR.stripUnits ret with
+        | IRTScalar (ETInt64 | ETInt32) -> Some (IRLit (IRLitInt 1L))
+        | IRTScalar ETFloat32 -> Some (IRLit (IRLitFloat32 1.0f))
+        | _ -> None
+    let kernelRet (k: IRExpr) =
+        match exprTypeIfKnown k with
+        | Some (FuncElem (_, ret)) -> Some ret
+        | _ -> None
+    let resolve (e: IRExpr) : IRExpr =
+        match e with
+        | IRReduceCompute (comp, k, IRLit (IRLitFloat 1.0)) ->
+            (match kernelRet k |> Option.bind oneFor with
+             | Some one -> IRReduceCompute (comp, k, one)
+             | None -> e)
+        | IRReduceCompute (comp, (IRTuple ks as kt), IRTuple seeds) when ks.Length = seeds.Length ->
+            let seeds' =
+                List.map2 (fun k s ->
+                    match s with
+                    | IRLit (IRLitFloat 1.0) -> kernelRet k |> Option.bind oneFor |> Option.defaultValue s
+                    | _ -> s) ks seeds
+            IRReduceCompute (comp, kt, IRTuple seeds')
+        | _ -> e
+    { modul with
+        Functions = modul.Functions |> List.map (fun f -> { f with Body = mapIRExpr resolve f.Body })
+        Bindings = modul.Bindings |> List.map (fun b -> { b with Value = mapIRExpr resolve b.Value }) }
+
+/// Post-monomorphization: a value of an INTEGER EnumIdx is a key represented
+/// as its POSITION (D2); the type checker and zonk read the key wherever such
+/// a value is computed on. A GENERIC body meets the type only here, when a
+/// specialization substitutes it (`function f(x: T) = x + 1` handed an array
+/// of keys): its arithmetic, negation or cast would compute on positions.
+/// Refused, with the type checker's sentence, before either lane runs.
+let refuseEnumKeyArithModule (modul: IRModule) : unit =
+    let intEnumTags =
+        let direct =
+            modul.Types |> List.choose (fun td ->
+                match td with
+                | IRTDEnumIdx (n, _, values)
+                    when not values.IsEmpty && values |> List.forall (function EVInt _ -> true | _ -> false) -> Some n
+                | _ -> None) |> Set.ofList
+        let rec close (tags: Set<string>) =
+            let more =
+                modul.Types |> List.choose (fun td ->
+                    match td with
+                    | IRTDAlias (n, IRTIdxTagged (_, IRefNamed t)) when tags.Contains t && not (tags.Contains n) -> Some n
+                    | _ -> None)
+            if more.IsEmpty then tags else close (Set.union tags (Set.ofList more))
+        close direct
+    if not intEnumTags.IsEmpty then
+        let isKey (e: IRExpr) =
+            let elem (t: IRType) =
+                match IR.stripUnits t with
+                | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), IRefNamed tag) -> intEnumTags.Contains tag
+                | _ -> false
+            match exprTypeIfKnown e with
+            | Some (ArrayElem at) -> elem at.ElemType
+            | Some t -> elem t
+            | None -> false
+        // Located at the offending expression in the generic body (the
+        // arithmetic / cast node's own source location).
+        let refuse (loc: SrcLoc) =
+            let span = if isNull loc then Blade.Ast.noSpan else loc.Span
+            raise (Blade.Diagnostics.BladeDiagnosticException (
+                Blade.Diagnostics.mkError "BL4003" Blade.Diagnostics.PhConstraints span
+                    ("a generic function is specialized at an EnumIdx type and computes on its values (arithmetic, a "
+                     + "negation or a cast): a value of an EnumIdx is a KEY, represented as its position, so the "
+                     + "specialization would compute on positions. Spell the keys at the call -- f(Int64(c)), or "
+                     + "f(method_for(xs) <@> lambda(c) -> Int64(c)) for an array.")))
+        let check (e: IRExpr) =
+            match e with
+            | IRBinOp (_, (IRAdd | IRSub | IRMul | IRDiv | IRMod | IRCaret), l, r, loc) when isKey l || isKey r -> refuse loc
+            | IRUnaryOp (IRCast (_, loc), x) when isKey x -> refuse loc
+            | IRUnaryOp (IRNeg, x) when isKey x -> refuse SrcLoc.Nowhere
+            | _ -> ()
+        modul.Functions |> List.iter (fun f -> iterIRExpr check f.Body)
+        modul.Bindings |> List.iter (fun b -> iterIRExpr check b.Value)
+
 /// Post-monomorphization: FLOAT LITERALS ARE WIDTH-POLYMORPHIC (formalism
 /// 2.4: `a32 * 1.0` stays Float32), and the checker adapts a literal to a
 /// Float32 / Complex64 partner when it types the op (inferBinOp's
@@ -1665,7 +1901,7 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs:
     // that inner one is itself a trigger in the un-rewritten tree.
     let isArrayBinOpTrigger (e: IRExpr) : bool =
         match e with
-        | IRBinOp (IRElementwise, _, l, r, _) ->
+        | IRBinOp ((IRElementwise | IROuter), _, l, r, _) ->
             (match operandType l, operandType r with
              | Some (ArrayElem _), Some _ | Some _, Some (ArrayElem _) -> true
              | _ -> false)
@@ -1998,6 +2234,116 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs:
             | Some (AnyPrimElem sElem), Some ((ArrayElem ra) as rt) ->
                 broadcastScalar op r rt ra l sElem true
             | _ -> e
+        // AN OUTER PRODUCT whose operands became arrays only at an instance
+        // (D4: `head [*] outer(tail)` in a pack kernel -- TypeCheck typed it
+        // over open operands, so its own method_for re-synthesis never
+        // fired, and the raw op reached codegen as `a * b` on two Array
+        // wrappers). The checker's shape for `A [op] B`: the all-pairs
+        // `method_for(A, B) <@> lambda(__ol, __or) -> __ol op __or |>
+        // compute`, rank A + rank B (formalism 7.2). An array beside a
+        // scalar is the elementwise broadcast (the scalar has no axes).
+        | IRBinOp (IROuter, op, l, r, loc) ->
+            // THE MIXING RULE AT THE INSTANCE (formalism 2.4): TypeCheck typed
+            // this op over open operands, so an integer beside a float or a
+            // complex -- `| 0 -> 1` as the identity of a Float64 pack -- is
+            // first visible here. Refused, never promoted.
+            let mixClash (le: ElemType) (re: ElemType) =
+                let cls (e: ElemType) =
+                    match e with
+                    | ETInt32 | ETInt64 -> Some 0
+                    | ETFloat32 | ETFloat64 -> Some 1
+                    | ETComplex64 | ETComplex128 -> Some 2
+                    | _ -> None
+                match cls le, cls re with
+                | Some a, Some b when a <> b && (a = 0 || b = 0) ->
+                    let span = if isNull loc then Blade.Ast.noSpan else loc.Span
+                    let name (e: ElemType) = (sprintf "%A" e).Substring 2
+                    let inFn = match scope with Some s -> $" in `{s}`" | None -> ""
+                    raise (Blade.Diagnostics.BladeDiagnosticException (
+                            Blade.Diagnostics.mkError "BL3020" Blade.Diagnostics.PhTypes span
+                                ($"an outer product{inFn} combines {name le} and {name re} elements at one of its "
+                                 + "instances -- Blade converts nothing implicitly (formalism 2.4). In a pack "
+                                 + "function, write the identity arm in the elements' type (`| 0 -> 1.0` over "
+                                 + "Float64 slices, `| 0 -> 1` over Int64 ones)")))
+                | _ -> ()
+            match operandType l, operandType r with
+            | Some ((ArrayElem la) as lt), Some ((ArrayElem ra) as rt) ->
+                let elemTypeL = arrayBinOpKernelElem la.ElemType
+                let elemTypeR = arrayBinOpKernelElem ra.ElemType
+                mixClash elemTypeL elemTypeR
+                let kernelRet =
+                    if isCmpOrLogical op then IRTScalar ETBool else IRTScalar elemTypeL
+                let aId = builder.FreshId()
+                let bId = builder.FreshId()
+                let kbody =
+                    IRBinOp (IRElementwise, op,
+                             IRVar (aId, IRTScalar elemTypeL),
+                             IRVar (bId, IRTScalar elemTypeR), loc)
+                let parms : IRParam list =
+                    [ { Name = "__ol"; Type = IRTScalar elemTypeL; Index = 0; VarId = aId }
+                      { Name = "__or"; Type = IRTScalar elemTypeR; Index = 1; VarId = bId } ]
+                let lam =
+                    mkLambdaCallable builder parms kbody kernelRet [] false [] [] false false 256 false
+                    |> shownAs (operatorFunctionName op)
+                newLambdas.Add lam
+                callableOf.[lam.Id] <- lam
+                let kernelFuncType =
+                    IRTArrow ([SVal (IRTScalar elemTypeL); SVal (IRTScalar elemTypeR)], kernelRet, None)
+                // Named operands, as the co-iteration arm above binds them.
+                let mutable prelude : (IRId * IRExpr) list = []
+                let materialize (operand: IRExpr) (ty: IRType) : IRExpr =
+                    match operand with
+                    | IRVar _ -> operand
+                    | _ ->
+                        let id = builder.FreshId()
+                        prelude <- prelude @ [(id, operand)]
+                        IRVar (id, ty)
+                let lArr = materialize l lt
+                let rArr = materialize r rt
+                let identities = [identityOf lArr; identityOf rArr]
+                let arrayTypes = [la; ra]
+                let sdimsPerArray = [la.IndexTypes.Length; ra.IndexTypes.Length]
+                let mfInfo : MethodForInfo =
+                    { Arrays = [lArr; rArr]
+                      Identities = identities
+                      ArrayTypes = arrayTypes
+                      SDimsPerArray = sdimsPerArray
+                      TotalSDims = List.sum sdimsPerArray
+                      SharedIndexTypes = [] }
+                // The result's axes: the left operand's, then the right's
+                // (fresh records, so `outer(x, x)` names two axes).
+                let outAxes =
+                    la.IndexTypes @ (ra.IndexTypes |> List.map (fun ix -> { ix with Id = builder.FreshId() }))
+                let outputType =
+                    mkArrayLike { la with IndexTypes = outAxes; ElemType = kernelRet
+                                          Identity = None; IsVirtual = false }
+                let applyInfo : ApplyInfo =
+                    { Loop = IRMethodFor mfInfo
+                      Kernel = IRVar (lam.Id, kernelFuncType)
+                      Arrays = [lArr; rArr]
+                      Identities = identities
+                      ArrayTypes = arrayTypes
+                      SharedIndexTypes = []
+                      SymcomStates = [SCNeither; SCNeither]
+                      TriangularLevels = [false; false]
+                      SDimsPerArray = sdimsPerArray
+                      KernelInputRanks = [0; 0]
+                      KernelOutputRank = 0
+                      KernelTDims = []
+                      SpeedupFactor = 1L
+                      ReynoldsSpeedup = 1L
+                      HasReynolds = false
+                      OutputType = outputType
+                      IsCoIteration = false }
+                let combined = IRCompute (IRApplyCombinator applyInfo)
+                List.foldBack (fun (id, v) acc -> IRLet (id, v, acc)) prelude combined
+            | Some ((ArrayElem la) as lt), Some (AnyPrimElem sElem) ->
+                mixClash (arrayBinOpKernelElem la.ElemType) sElem
+                broadcastScalar op l lt la r sElem false
+            | Some (AnyPrimElem sElem), Some ((ArrayElem ra) as rt) ->
+                mixClash sElem (arrayBinOpKernelElem ra.ElemType)
+                broadcastScalar op r rt ra l sElem true
+            | _ -> e
         | _ -> e
     // A ROUNDED CAST over an operand the clone made an array --
     // `Int64(floor(x))` over `x: T` at an array instance -- is lifted as ONE
@@ -2056,13 +2402,7 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs:
 // materialized-operand shape `lowerArrayBinOpsModule` produces for pack
 // elements) are deliberately out of scope for v1: fusing those needs a
 // use-count census; the direct nest is where the user-facing chains live.
-let private fusionEnabled () =
-    match System.Environment.GetEnvironmentVariable "BLADE_FUSION" with
-    | null -> true
-    | v ->
-        match v.Trim().ToLowerInvariant() with
-        | "0" | "off" | "false" -> false
-        | _ -> true
+let private fusionEnabled () = Blade.Toolchain.envFlag "BLADE_FUSION" true
 
 // The fusion pass's admission predicates, LIFTED so a second consumer can
 // ask the same questions without a copy: the tile planner (CodeGenTiles,
@@ -2262,7 +2602,14 @@ let fuseElementwiseChainsModule (modul: IRModule) (builder: IRBuilder) (programF
     // for hygiene, and rewrite its body onto the fresh ids.
     let freshen (ik: IRCallable) : IRParam list * IRExpr =
         let mapping = ik.Params |> List.map (fun p -> p.VarId, builder.FreshId())
-        let mapped = Map.ofList mapping
+        // A spliced body's own `let` binders are freshened too: a kernel that
+        // was itself fused binds a repeated inner value once (see the splice
+        // below), and splicing that kernel twice must not mint one binder twice.
+        let letBinders =
+            let acc = System.Collections.Generic.List<IRId>()
+            iterIRExpr (fun e -> match e with IRLet (id, _, _) -> acc.Add id | _ -> ()) ik.Body
+            acc |> Seq.distinct |> Seq.map (fun id -> id, builder.FreshId()) |> List.ofSeq
+        let mapped = Map.ofList (mapping @ letBinders)
         let params' =
             ik.Params |> List.map (fun p ->
                 let nid = mapped.[p.VarId]
@@ -2273,6 +2620,10 @@ let fuseElementwiseChainsModule (modul: IRModule) (builder: IRBuilder) (programF
                 | IRVar (id, t) ->
                     (match Map.tryFind id mapped with
                      | Some nid -> IRVar (nid, t)
+                     | None -> e)
+                | IRLet (id, v, b) ->
+                    (match Map.tryFind id mapped with
+                     | Some nid -> IRLet (nid, v, b)
                      | None -> e)
                 | _ -> e) ik.Body
         params', body'
@@ -2337,7 +2688,20 @@ let fuseElementwiseChainsModule (modul: IRModule) (builder: IRBuilder) (programF
                          keep ()
                      | Some ik ->
                          let ps', innerBody = freshen ik
-                         body <- substVar hk.Params.[i].VarId innerBody body
+                         let pid = hk.Params.[i].VarId
+                         // A host reading the parameter more than once would
+                         // evaluate the spliced body once PER OCCURRENCE
+                         // (P3-16: `method_for(exp(x) * 3.0) <@> lambda(e) ->
+                         // e * e` emitted two exp calls per cell). Bind it once
+                         // per cell instead; a bare variable or literal is
+                         // free to repeat.
+                         body <-
+                             match innerBody with
+                             | IRVar _ | IRLit _ -> substVar pid innerBody body
+                             | _ when occurrences pid body > 1 ->
+                                 let nid = builder.FreshId()
+                                 IRLet (nid, innerBody, substVar pid (IRVar (nid, hk.Params.[i].Type)) body)
+                             | _ -> substVar pid innerBody body
                          total <- total + inner.Arrays.Length - 1
                          fusedAny <- true
                          if sharedFromInner.IsEmpty then
@@ -2697,6 +3061,39 @@ let collectPolyCallSites (polyFuncMap: Map<IRId, IRFuncDef>) (expr: IRExpr) : (I
 /// Create a monomorphized copy of a poly function for a list of slot arities.
 /// `arities` carries one arity per Poly slot, in declaration order -- packs
 /// are independent, so different slots may have different sizes.
+/// A PACK ELEMENT'S TYPE VARIABLES, READ OFF ITS INSTANCE (D4). TypeCheck
+/// types a cons-destructured `head` at a fresh variable that keeps the base
+/// caret's rank and generic mark (consDestructureLeaves) but NOT the base
+/// variable itself -- `head + ..` would otherwise collapse the pack's own
+/// type -- and a body op may shape it (`head - mean(head)` materializes the
+/// caret as `Array<E, ..>`). In a specialization the element IS an expanded
+/// parameter, so each use of a let bound to one names its variables in terms
+/// of that parameter's type. Only CONCRETE answers are returned (a pack whose
+/// base type was settled at type checking); an open base is the HM pass's to
+/// learn per instance (learnFromInnerCalls reads the same let).
+let packHeadLinks (spec: IRFuncDef) : Map<int, IRType> =
+    let paramTy = spec.Params |> List.map (fun p -> (p.VarId, p.Type)) |> Map.ofList
+    let headLets = System.Collections.Generic.Dictionary<IRId, IRType>()
+    iterIRExpr (fun e ->
+        match e with
+        | IRLet (id, IRVar (pid, _), _) when paramTy.ContainsKey pid -> headLets.[id] <- paramTy.[pid]
+        | _ -> ()) spec.Body
+    let mutable link : Map<int, IRType> = Map.empty
+    if headLets.Count > 0 then
+        iterIRExpr (fun e ->
+            match e with
+            | IRVar (id, useTy) when headLets.ContainsKey id ->
+                let bt = headLets.[id]
+                if useTy <> bt && Set.isEmpty (collectInferIds bt) then
+                    (match useTy with
+                     | IRTInfer h -> Map.ofList [ (h, bt) ]
+                     | _ -> unifyParamWithArg useTy bt Map.empty)
+                    |> Map.iter (fun k v ->
+                        if not (link.ContainsKey k) && Set.isEmpty (collectInferIds v) then
+                            link <- Map.add k v link)
+            | _ -> ()) spec.Body
+    link
+
 let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId, IRFuncDef>) (builder: IRBuilder) : IRFuncDef =
     let polyIndices = findPolyParamIndices func
     if List.isEmpty polyIndices then func  // Not actually poly -- shouldn't happen
@@ -3036,6 +3433,23 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
             match finalScalarType newBody with
             | Some sTy -> sTy               // arity-collapsed scalar base (see above)
             | None -> declaredRetType
+        // AN ARITY-DECIDED RESULT (D4): an undeclared return TypeCheck left
+        // open because its rank is the instance's (`head [*] outer(tail)`:
+        // rank 1 at arity 1, rank 2 at arity 2 -- inferMatch, the outer-op
+        // rule). It is ONE variable in the generic body, shared by the
+        // function's result and its own recursive call; each instance gets
+        // its own copy, so the instance's result and the result of the
+        // smaller instance it calls are learned apart (IRMono's HM learning,
+        // learnFromInnerCalls). A variable a parameter mentions is the
+        // instance's by substitution already, and keeps its name.
+        let newBody, newRetType =
+            let paramIds =
+                expandedParams |> List.fold (fun s p -> Set.union s (collectInferIds p.Type)) Set.empty
+            match IR.stripUnits newRetType with
+            | IRTInfer x when not (paramIds.Contains x) ->
+                let link = Map.ofList [ (x, builder.FreshInferType()) ]
+                substTypeInIRExpr link newBody, substTypeInIRType link newRetType
+            | _ -> newBody, newRetType
 
         // Commutativity group expansion: each original index maps to a
         // (newStart, span) in the expanded list. For a Poly slot, span =
@@ -3194,19 +3608,29 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     //    computePolyArity (shape-aware: variadic vs tuple-as-pack), and the
     //    args are flattened at the Poly slot so they line up with the
     //    specialization's expanded param list.
-    let rewriteCallSite e =
+    //    A call OUTSIDE the specializations whose instance result is still
+    //    open (an arity-decided return, see specializeFunction) keeps the
+    //    caller's own result variable: HM monomorphization binds it per call
+    //    (specSide) once the instance's result is learned. Inside a
+    //    specialization the call names the CALLEE instance's variable, which
+    //    is what that learning reads.
+    let rewriteCallSiteWith (keepOpenCallerType: bool) e =
         match e with
-        | IRApp (IRVar (funcId, fty), args, _) when polyFuncIds.Contains funcId ->
+        | IRApp (IRVar (funcId, fty), args, origRetTy) when polyFuncIds.Contains funcId ->
             let func = polyFuncMap.[funcId]
             match computePolyArity func args with
             | Some arity ->
                 match Map.tryFind (funcId, arity) specMap with
                 | Some spec ->
                     let flatArgs = flattenAtPolyPosition func args
-                    IRApp (IRVar (spec.Id, fty), flatArgs, spec.RetType)
+                    let retTy =
+                        if keepOpenCallerType && not (Set.isEmpty (collectInferIds spec.RetType)) then origRetTy
+                        else spec.RetType
+                    IRApp (IRVar (spec.Id, fty), flatArgs, retTy)
                 | None -> e
             | None -> e
         | _ -> e
+    let rewriteCallSite e = rewriteCallSiteWith true e
 
     // 5. Rewrite all expressions in module
     let newFunctions =
@@ -3221,7 +3645,7 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     // too, or the recursion would reference a poly function that no longer exists.
     let specFuncs =
         specializations |> List.map (fun (_, spec) ->
-            { spec with Body = mapIRExpr rewriteCallSite spec.Body })
+            { spec with Body = mapIRExpr (rewriteCallSiteWith false) spec.Body })
 
     // Prune lifted kernel lambdas that captured a poly PACK and are now dead.
     // The pack-former unroller inlines such a lambda's body into the
@@ -3230,6 +3654,81 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     // longer exists as a scalar). Drop it once unreferenced. The gate is
     // narrow (synthesized "__lambda_" name, Poly-typed capture, unreferenced)
     // so no live function is ever removed.
+    // The pack elements' variables a settled base type names (packHeadLinks),
+    // over the whole module: a lifted kernel built over `head` (`head -
+    // mean(head)`'s broadcast) carries them too. Every instance of one
+    // function reads the same base type, so the answers agree; a variable
+    // two answers disagree on is left alone.
+    let headLink =
+        specializations
+        |> List.collect (fun (_, s) -> packHeadLinks s |> Map.toList)
+        |> List.groupBy fst
+        |> List.choose (fun (k, vs) ->
+            match vs |> List.map snd |> List.distinct with
+            | [ v ] -> Some (k, v)
+            | _ -> None)
+        |> Map.ofList
+    let linkFunc (f: IRFuncDef) =
+        if headLink.IsEmpty then f
+        else
+            { f with Body = substTypeInIRExpr headLink f.Body
+                     RetType = substTypeInIRType headLink f.RetType
+                     Params = f.Params |> List.map (fun p -> { p with Type = substTypeInIRType headLink p.Type })
+                     Captures = f.Captures |> List.map (fun c -> { c with Type = substTypeInIRType headLink c.Type }) }
+    let newFunctions = newFunctions |> List.map linkFunc
+    let specFuncs = specFuncs |> List.map linkFunc
+    let newBindings =
+        if headLink.IsEmpty then newBindings
+        else newBindings |> List.map (fun b -> { b with Type = substTypeInIRType headLink b.Type
+                                                        Value = substTypeInIRExpr headLink b.Value })
+    // ARITY-DECIDED RESULTS OF A SETTLED PACK (D4): an instance whose
+    // parameters are already concrete is no HM function, so nothing else
+    // learns its open result. Learn each from its body here, smallest arity
+    // first (a larger instance reads the smaller one's result), then bind the
+    // callers' own result variables per binding / function.
+    let specFuncs, newFunctions, newBindings =
+        let decided =
+            specFuncs |> List.filter (fun s ->
+                not (hasTypeVarsInParams s) && not (Set.isEmpty (collectInferIds s.RetType)))
+        if decided.IsEmpty then specFuncs, newFunctions, newBindings
+        else
+            let mutable cm = (newFunctions @ specFuncs) |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+            let learnedById =
+                decided
+                |> List.sortBy (fun s -> s.Params.Length)
+                |> List.map (fun s ->
+                    let s = cm.[s.Id]
+                    let b = learnFromInnerCalls s cm Map.empty
+                    let s' = { s with Body = substTypeInIRExpr b s.Body; RetType = substTypeInIRType b s.RetType }
+                    cm <- Map.add s.Id s' cm
+                    (s.Id, s'))
+                |> Map.ofList
+            let callerBindings (e: IRExpr) =
+                let mutable acc : Map<int, IRType> = Map.empty
+                iterIRExpr (fun n ->
+                    match n with
+                    | IRApp (IRVar (sid, fty), _, retTy) when learnedById.ContainsKey sid ->
+                        let spec = learnedById.[sid]
+                        arityResultClash Blade.Ast.noSpan (decided |> List.find (fun d -> d.Id = sid)) spec retTy
+                        // ...and the head's arrow, which still names the
+                        // declaration's result.
+                        let headRet = match fty with FuncElem (_, r) -> [ r ] | _ -> []
+                        for t in retTy :: headRet do
+                            unifyParamWithArg t spec.RetType Map.empty
+                            |> Map.iter (fun k v -> if not (acc.ContainsKey k) then acc <- Map.add k v acc)
+                    | _ -> ()) e
+                acc
+            let relink (f: IRFuncDef) =
+                let f = match Map.tryFind f.Id learnedById with Some s -> s | None -> f
+                let b = callerBindings f.Body
+                if b.IsEmpty then f
+                else { f with Body = substTypeInIRExpr b f.Body; RetType = substTypeInIRType b f.RetType }
+            (specFuncs |> List.map relink),
+            (newFunctions |> List.map relink),
+            (newBindings |> List.map (fun bd ->
+                let b = callerBindings bd.Value
+                if b.IsEmpty then bd
+                else { bd with Type = substTypeInIRType b bd.Type; Value = substTypeInIRExpr b bd.Value }))
     let allFuncs = newFunctions @ specFuncs
     let referencedIds =
         (allFuncs |> List.map _.Body)
@@ -4210,13 +4709,26 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
         reportCensus ()
         rewritten
     else
-    let referenced =
-        rewritten |> List.fold (fun acc m ->
-            let fromFuncs =
-                m.Functions |> List.map (fun f -> Set.remove f.Id (collectVarRefsIR f.Body))
-            let fromBindings = m.Bindings |> List.map (fun b -> collectVarRefsIR b.Value)
-            Set.unionMany (acc :: fromFuncs @ fromBindings)) Set.empty
-    let dead = Set.difference deadCandidates referenced
+    // To a FIXPOINT (N20): a candidate referenced only from another dead copy
+    // is dead too -- `outer(x: T^2) = rowsums(x * 2.0)` left the unshaped
+    // `rowsums_HM_..._double` called only by the unshaped `outer_HM_...`, which
+    // the first round pruned. References from a dead definition stop counting
+    // once it is known dead; the set only grows, so this terminates.
+    let refsOf =
+        rewritten |> List.collect (fun m ->
+            (m.Functions |> List.map (fun f -> (Some f.Id, Set.remove f.Id (collectVarRefsIR f.Body))))
+            @ (m.Bindings |> List.map (fun b -> (None, collectVarRefsIR b.Value))))
+    let rec grow (dead: Set<IRId>) =
+        let referenced =
+            refsOf
+            |> List.choose (fun (owner, refs) ->
+                match owner with
+                | Some id when Set.contains id dead -> None
+                | _ -> Some refs)
+            |> Set.unionMany
+        let dead' = Set.difference deadCandidates referenced
+        if dead' = dead then dead else grow dead'
+    let dead = grow Set.empty
     reportCensus ()
     if Set.isEmpty dead then rewritten
     else

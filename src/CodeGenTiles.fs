@@ -40,13 +40,10 @@ open Blade.CodeGenState
 /// path -> that directory; anything else -> off. Read per call, like every
 /// other env gate.
 let tileCacheEnabled () : bool =
-    match Environment.GetEnvironmentVariable "BLADE_TILE_CACHE" with
-    | null | "" -> false
-    | v ->
-        match v.Trim().ToLowerInvariant() with
-        | "0" | "off" | "false" | "" -> false
-        | "1" | "on" | "true" -> true
-        | _ -> IO.Path.IsPathRooted (v.Trim())
+    match Blade.Toolchain.envSwitch "BLADE_TILE_CACHE" with
+    | Blade.Toolchain.SwitchOn -> true
+    | Blade.Toolchain.SwitchOther t -> IO.Path.IsPathRooted t
+    | _ -> false
 
 let private sha256Hex (s: string) : string =
     use sha = Security.Cryptography.SHA256.Create()
@@ -110,10 +107,7 @@ let planTiles (modul: IRModule) : Map<string, TilePlan> * Map<IRId, TilePlan> =
     let functionRefs = modul.Functions |> List.fold (fun acc f -> Set.union acc (referencedIds f.Body)) Set.empty
     let claimed = Collections.Generic.HashSet<IRId>()
     let plans = Collections.Generic.List<TilePlan>()
-    let verbose =
-        match Environment.GetEnvironmentVariable "BLADE_TILE_CACHE_VERBOSE" with
-        | null | "" | "0" -> false
-        | _ -> true
+    let verbose = Blade.Toolchain.envFlag "BLADE_TILE_CACHE_VERBOSE" false
     let decline (b: IRBinding) (why: string) =
         recordCodegenDecision "tile-cache" b.Name (Blade.Effects.Declined why) []
         if verbose then eprintfn "[tiles] plan %s: declined -- %s" b.Name why
@@ -244,7 +238,9 @@ let planTiles (modul: IRModule) : Map<string, TilePlan> * Map<IRId, TilePlan> =
                                 let need = $"{cpp}__need"
                                 let don = $"{cpp}__done"
                                 let (p1, p2, rel) =
-                                    Blade.IcechunkProvider.CppIcechunk.genReadVarPhased spec.FilePath spec.VarName cpp spec.VarType need don
+                                    let gen () = Blade.IcechunkProvider.CppIcechunk.genReadVarPhased spec.FilePath spec.VarName cpp spec.VarType need don
+                                    // The masked read's raw half is exempt from the boundary rule.
+                                    if spec.AllowMissing then Blade.ProviderRegistry.MissingPolicy.allowing gen else gen ()
                                 let otherReaders =
                                     Set.contains id functionRefs
                                     || (modul.Bindings |> List.exists (fun ob ->

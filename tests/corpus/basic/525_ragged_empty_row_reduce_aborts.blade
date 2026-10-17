@@ -1,0 +1,11 @@
+// TEST: Ragged Empty Row Reduce Aborts (aborts)
+// ============================================================================
+// An unseeded fold over a RUNTIME-length row that turns out empty panics
+// BL8003, located at the declaration being emitted (`sums`, line 10). The
+// LLVM lane used to emit no guard here at all (the fold read cell 0 of an
+// empty row); it now guards the peeled row's carried length and prints the
+// same `error[BL8003]` and `  --> file:line` lines as the C++ lane.
+// ============================================================================
+let rows = [[1.0, 2.0], [3.0], []]
+let sums = method_for(rows) <@> lambda(row) -> reduce(row, (+)) |> compute
+// ABORT: error[BL8003]: reduce: empty array, no reduction possible

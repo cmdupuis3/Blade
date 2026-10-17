@@ -1181,6 +1181,16 @@ let internal expandRecArray (fname: string) (ctx: Ctx)
         let bufLet = StmtLet { Mutability = BindMut; Pattern = synPat (PatVar bufName); Type = None; Value = zeros }
         let stepVar = def.StepVar
         let prefixVar = def.PrefixVar
+        // The step ordinal is an index of the recursion's NAMED axis, as in
+        // the checker's own desugar (TypeCheckInfer.recStepVars): the loop's
+        // lower bound is ascribed with that axis. Pure construction only: a
+        // recurrence's reverse sweep (GradSweeps' CarryLoop) does arithmetic
+        // on the bounds themselves, which an index value refuses.
+        let stepLo (lo: int64) =
+            match resolveTy ctx annot with
+            | TyArray (_, (TyNamed (_, []) as slot0) :: _) when resolveTy ctx slot0 <> slot0 ->
+                syn (ExprTyped (iLit lo, slot0))
+            | _ -> iLit lo
         // `name := repl` inside a slice or a seed arm -- binding a
         // recurrence's step ordinal or its prefix name to the buffer.
         //
@@ -1249,7 +1259,7 @@ let internal expandRecArray (fname: string) (ctx: Ctx)
                 | None -> 0L, []
             let loop =
                 StmtForIn (stepVar,
-                           syn (ExprDotDot (iLit loopStart, iLit (int64 n))),
+                           syn (ExprDotDot (stepLo loopStart, iLit (int64 n))),
                            [ StmtExpr (syn (ExprAssign (sAt (v stepVar), def.SliceExpr))) ])
             Ok (bufLet :: (seedStmts @ [loop]), n)
     | Some (true, exts) ->

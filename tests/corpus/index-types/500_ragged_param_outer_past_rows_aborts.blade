@@ -1,0 +1,8 @@
+// TEST: A ragged parameter read with its row past the rows aborts (aborts)
+// ============================================================================
+// The same check inside a function over a ragged parameter.
+function at(A: Array<Float64 like Idx<3>, RaggedIdx<_>>, i: Int64, j: Int64) -> Float64 = A(i, j)
+let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]
+let ok = at(r, 2, 3)
+let bad = at(r, 1, 2)
+// ABORT: BL8006

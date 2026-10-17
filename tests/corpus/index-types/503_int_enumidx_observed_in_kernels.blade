@@ -1,0 +1,34 @@
+// TEST: Integer EnumIdx keys are observed in every kernel form
+// ============================================================================
+// A value of `R` is a key represented as its position (index-types/501). The
+// key is what every observation reads: a kernel over an R array in the
+// implicit or zip form, a lifted cast, a sort key, a struct field, a grouping
+// over R keys -- in both lanes.
+// ============================================================================
+type R = EnumIdx<[100, 200, 300]>
+let codes: Array<R like Idx<3>> = [300, 100, 200]
+// EXPECT: codes = [300, 100, 200]
+let w = [1.0, 2.0, 3.0]
+let a = codes <@> lambda(c) -> c + 1 |> compute
+// EXPECT: a = [301, 101, 201]
+let b = method_for(zip(codes, w)) <@> lambda(c, x) -> Float64(c) * x |> compute
+// EXPECT: b = [300.0, 200.0, 600.0]
+let srt = sort(codes, lambda(x) -> x)
+// EXPECT: srt = [100, 200, 300]
+let ci = Int64(codes)
+// EXPECT: ci = [300, 100, 200]
+struct Rec { code: Nat<R>, x: Float64 }
+let recs: Array<Rec like Idx<2>> = [Rec { code = 300, x = 1.0 }, Rec { code = 100, x = 2.0 }]
+let rc = recs(0).code
+// EXPECT: rc = 300
+let gk = group_keys(codes)
+let gg = group_by(codes, gk)
+// EXPECT: gg = [[100], [200], [300]]
+// A generic function handed a value of R computes on its key (the call
+// observes it): an Int64 instance.
+function inc(x: T) = x + 1
+let v = inc(codes(0))
+// EXPECT: v = 301
+function same(x: T) -> T = x
+let g = same(codes(1))
+// EXPECT: g = 100

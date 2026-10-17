@@ -47,6 +47,20 @@ let interpExcluded : (string * string) list =
       "the allocation-churn MEMORY gate (~30k iterations x a 2 MiB temp): ~8e9 element ops blow the interp "
       + "timeout ceiling and, per runInterpTimed's caveat, an abandoned walk contaminates every later timing" ]
 
+/// The tests the interpreter is EXPECTED to report as unsupported (exit 125,
+/// "interp-unsupported: <feature>"), by `// TEST:` name, each with the prefix
+/// its feature line must start with. Strict BOTH ways, like a WARN pin:
+///   * any OTHER test that reports unsupported FAILS. SKIP-UNSUPPORTED folds
+///     into the Skipped bucket and CI never fails on skips, so a program that
+///     regressed from "interpreted" to "unsupported" used to turn a nightly
+///     pass into a silent skip;
+///   * a listed test the interpreter now EVALUATES fails too, so the entry
+///     cannot outlive the gap it records.
+/// The corpus-wiring block checks that every entry still names a corpus test.
+let interpExpectedUnsupported : (string * string) list =
+    [ "Fill Random Symmetric", "fill_random(mod)"        // C rand() % mod is nondeterministic
+      "Fill Random Antisymmetric", "fill_random(mod)" ]
+
 /// The slice the `test interp` arm (and `blade test --interp`) runs: EVERY
 /// corpus category on disk -- single-file and multi-file, DISCOVERED -- minus
 /// `interpExcluded`. A function, not a value: discovery reads the corpus root.
@@ -165,7 +179,8 @@ let private rejectOnlyCategories = Blade.Tests.Corpus.rejectOnlyCategories
 ///     land — line boundaries are irrelevant.
 ///   * normal test: byte-equal NORMALIZED stdout + matching exit-code class,
 ///     then a second gate — Expect.checkExpectedValues over the interp output.
-///   * interp reports ExitUnsupported (125): [SKIP-UNSUPPORTED], counted apart.
+///   * interp reports ExitUnsupported (125): [SKIP-UNSUPPORTED], counted apart,
+///     for a test in `interpExpectedUnsupported`; a FAIL for any other test.
 ///   * compiled FRONT-END rejected a test that is NOT marked "(rejects)" and is
 ///     not in a rejectOnlyCategory: FAIL, exactly as the main suite scores it.
 ///     This branch used to PASS such a test ("compile-reject (unmarked, no
@@ -241,19 +256,29 @@ let runInterpDiffTests (categories: string list) : BlockResult =
             interpTimes.Add(name, sw.Elapsed.TotalSeconds, heapMbBefore, GC.CollectionCount 2 - gen2Before)
             r
 
-        let pass name detail =
-            passed <- passed + 1
-            resultLine Pass name detail
+        let expectedUnsupported = Map.ofList interpExpectedUnsupported
         let fail name detail =
             failed <- failed + 1
             failedNames <- failedNames @ [ name ]
             resultLine Fail name detail
+        let pass name detail =
+            if expectedUnsupported.ContainsKey name then
+                fail name "the interpreter now evaluates this test: remove its InterpDiff.interpExpectedUnsupported entry"
+            else
+                passed <- passed + 1
+                resultLine Pass name detail
         let skip name detail =
             skipped <- skipped + 1
             resultLine Skip name detail
-        let skipUnsupported name feature =
-            unsupported <- unsupported + 1
-            resultLine Skip name ($"SKIP-UNSUPPORTED: {feature}")
+        let skipUnsupported name (feature: string) =
+            match expectedUnsupported.TryFind name with
+            | Some prefix when feature.StartsWith prefix ->
+                unsupported <- unsupported + 1
+                resultLine Skip name ($"SKIP-UNSUPPORTED: {feature}")
+            | Some prefix ->
+                fail name ($"interp-unsupported for a different feature than InterpDiff.interpExpectedUnsupported expects ('{prefix}'): {feature}")
+            | None ->
+                fail name ($"interp-unsupported, and not in InterpDiff.interpExpectedUnsupported (a regression from interpreted to unsupported): {feature}")
 
         // The value verdict both arms share: exit classes first, then
         // byte-identical NORMALIZED stdout, then the EXPECT pins against the

@@ -1,11 +1,12 @@
 // TEST: rand draw inside a function body is a spanned lowering refusal (rejects)
-// ERROR: BL6002 @ 9:1
-// ERROR-CONTAINS: rand.<fam>(...) is only valid as a top-level let-binding value
+// ERROR: BL6002 @ 11:13
+// ERROR-CONTAINS: a sequenced rand.<fam>(...) draw is only valid as a top-level let-binding value
 // ============================================================================
 // A sequenced rand draw materializes only as a top-level `let` value; inside a
 // function it typechecks and used to fail lowering with no code and no span.
-// The span is the enclosing function's: the typed rand node carries no span
-// of its own (a typecheck-side follow-up), and lowering reports what it has.
+// The span is the CALL's: the rand elaboration keeps the user's call span on
+// the intrinsic it builds, so the typed rand node carries it (it used to
+// carry none, and the refusal pointed at the enclosing `function` line).
 import rand as r
 function f(k: Int64) -> Float = {
     let u = r.uniform(k, 5)

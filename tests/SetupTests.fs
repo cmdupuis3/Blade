@@ -79,6 +79,31 @@ let runSetupTests () : BlockResult =
             try File.Delete tmp with _ -> ()
             Toolchain.refresh ()
 
+    // ---- ONE switch grammar for every BLADE_* on/off knob (Toolchain.envFlag) ----
+    // Trimmed, case-insensitive 1/on/true vs 0/off/false; unset, empty or an
+    // unrecognized value reads as the knob's DEFAULT. BLADE_MEMCHECK=off used
+    // to turn memcheck ON (anything but "0" was on), and BLADE_LLVM / _CUBLAS /
+    // _FP_REASSOC refused ` ON ` / `true`.
+    for (raw, expected) in
+            [ "1", Toolchain.SwitchOn; " On ", Toolchain.SwitchOn; "TRUE", Toolchain.SwitchOn
+              "0", Toolchain.SwitchOff; "off", Toolchain.SwitchOff; " False", Toolchain.SwitchOff
+              "", Toolchain.SwitchUnset; "   ", Toolchain.SwitchUnset
+              "C:/x", Toolchain.SwitchOther "C:/x" ] do
+        check $"switch grammar: '{raw}'" (Toolchain.parseSwitch (Some raw) = expected) (sprintf "%A" (Toolchain.parseSwitch (Some raw)))
+    check "switch grammar: unset" (Toolchain.parseSwitch None = Toolchain.SwitchUnset) ""
+    for (var, gate) in
+            [ "BLADE_MEMCHECK", Blade.CodeGenState.memcheckEnabled
+              "BLADE_LLVM", Blade.Build.llvmEnabled
+              "BLADE_FP_REASSOC", Blade.CodeGenState.fpReassocEnabled
+              "BLADE_CUBLAS", Blade.LinAlgPatterns.cublasAvailable ] do
+        let reads (v: string) =
+            use _p = pinEnv var v
+            gate ()
+        check $"{var}: off / 0 / false / unset / garbage are off; ON / true / 1 are on"
+            (not (reads "off") && not (reads "0") && not (reads " FALSE ") && not (reads null)
+             && not (reads "yes") && reads " ON " && reads "true" && reads "1")
+            ""
+
     // ---- package hints are data for every OS (never empty) ----
     check "package hints exist for the deps setup names"
         (["openblas"; "make"; "netcdf"; "mpi"]

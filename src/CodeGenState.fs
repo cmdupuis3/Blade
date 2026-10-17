@@ -233,6 +233,14 @@ let emittedDeclSpan (name: string) : Blade.Ast.Span =
 /// (Blade.Effects.Decisions.start), so ordinary compiles pay one AsyncLocal read.
 let decisionSpan () : Blade.Ast.Span = emittedDeclSpan (currentDeclCell ()).Value
 
+/// The `file, line` arguments of a runtime GUARD panic (a shape / extent /
+/// key / empty-reduce / solver check) that has no expression span of its
+/// own: the declaration being emitted. Such guards used to pass `nullptr, 0`,
+/// so a notebook showed their code at 1:1; the declaration's line is the
+/// nearest position the source has. The arithmetic panics keep their
+/// operator's own span (panicSpanArgs loc.Span).
+let declPanicArgs () : string = panicSpanArgs (decisionSpan ())
+
 let recordCodegenDecision (rule: string) (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) : unit =
     if Blade.Effects.Decisions.active () then
         let decl = (currentDeclCell ()).Value
@@ -281,6 +289,23 @@ let forcedDeferredIdsCell () : Set<int> ref =
     if isNull (box v) then
         let fresh = ref Set.empty
         forcedDeferredIdsStorage.Value <- fresh
+        fresh
+    else v
+
+/// main()'s FLAT tuples: the module-level ctx.TupleChildren genModule /
+/// genModuleSplit end with (C++ name -> the flat leaf names). Every fusion /
+/// join emitter builds ONE flat `std::make_tuple(t_0, t_1, t_2)` while the
+/// binding's IR type is the left-nested pair tree, so the print pass must
+/// index such a tuple by FLAT leaf (`std::get<k>(t)`) and take only the
+/// parentheses from the type. Reset per program assembly.
+let internal moduleTupleChildrenStorage =
+    System.Threading.AsyncLocal<Map<string, string list> ref>()
+
+let moduleTupleChildrenCell () : Map<string, string list> ref =
+    let v = moduleTupleChildrenStorage.Value
+    if isNull (box v) then
+        let fresh = ref Map.empty
+        moduleTupleChildrenStorage.Value <- fresh
         fresh
     else v
 
@@ -653,10 +678,7 @@ let splitTimingModeEnabled () : bool =
 /// test's scoped ON, a hand-run between two compiles in one process) silently
 /// ineffective. Same reason `LinAlgPatterns.blasAvailable` and `Build.fs`'s
 /// `fpContractFlag` are functions. Every consultation re-reads.
-let fpReassocEnabled () : bool =
-    match System.Environment.GetEnvironmentVariable("BLADE_FP_REASSOC") with
-    | "1" | "on" -> true
-    | _ -> false
+let fpReassocEnabled () : bool = Blade.Toolchain.envFlag "BLADE_FP_REASSOC" false
 
 /// How many independent LANE accumulators a reassociated accumulation chain
 /// runs. A single accumulator makes the sweep a serial dependence chain through
@@ -785,8 +807,15 @@ let internal laneCountForStreams (s: int) : int =
 /// first touch and would make a mid-process pin (a test's scoped guard)
 /// silently ineffective. Every consultation re-reads.
 let ompThreadEmissionEnabled () : bool =
-    match System.Environment.GetEnvironmentVariable("BLADE_OMP_THREADS") with
-    | "1" | "0" | "off" -> false
+    // Not a plain switch but a THREAD COUNT with off-words: `1` (one thread)
+    // suppresses exactly as `0` / `off` / `false` do, while `on` / `true` are
+    // no count at all and leave emission on. Trimmed and case-insensitive,
+    // like Toolchain.parseSwitch.
+    match Blade.Toolchain.envSwitch "BLADE_OMP_THREADS" with
+    | Blade.Toolchain.SwitchOff -> false
+    | Blade.Toolchain.SwitchOn ->
+        // `1` reads as SwitchOn in the shared grammar; here it is the count 1.
+        (System.Environment.GetEnvironmentVariable "BLADE_OMP_THREADS").Trim() <> "1"
     | _ -> true
 
 /// The reason string every site hands to the emitted-C++ marker when this knob
@@ -1109,10 +1138,7 @@ let ompTestModeEnabled () : bool =
 /// set by `blade run --memcheck` before codegen starts. Default
 /// (unset/empty/"0") emits NOTHING -- default output stays byte-identical,
 /// and the interpreter/REPL lanes never pay for it.
-let memcheckEnabled () : bool =
-    match System.Environment.GetEnvironmentVariable "BLADE_MEMCHECK" with
-    | null | "" | "0" -> false
-    | _ -> true
+let memcheckEnabled () : bool = Blade.Toolchain.envFlag "BLADE_MEMCHECK" false
 
 /// CUDA emission gate. genCudaKernel[Simplicial] emits an `extern "C"` launch
 /// call into the host .cpp plus a `__global__` kernel into a separate .cu, which
@@ -1418,6 +1444,7 @@ let resetProgramStateCells () : unit =
     freshCell currentDeclStorage ""
     freshCell declShownNamesStorage Map.empty
     freshCell forcedDeferredIdsStorage Set.empty
+    freshCell moduleTupleChildrenStorage Map.empty
     cudaKernelDefsStorage.Value <- DeclCollector()
     symmDeclsStorage.Value <- DeclCollector()
     moduleGlobalDeclsStorage.Value <- DeclCollector()
@@ -1752,6 +1779,8 @@ let cppLibraryGlobals = Set.ofList [
 /// generated C++ for the overwhelming majority of index types is byte-identical
 /// to what it was before this guard existed.
 let indexTypeCppName (name: string) : string =
+    // A non-main module's index type is `Geo.Cell` (D11): `Geo__Cell`.
+    let name = Blade.Types.TypeOrigins.cppName name
     if Set.contains name cppReservedWords || Set.contains name cppLibraryGlobals
     then name + "_"
     else name
@@ -1989,7 +2018,9 @@ and irTypeToCpp = function
         cell.Value <- cell.Value @ ["irTypeToCpp: IRTDist reached codegen -- Dist erasure was skipped at lowering"]
         "BLADE_ERROR_DIST_TYPE"
     | IRTNamed "String" -> "std::string"  // Blade String -> C++ std::string
-    | IRTNamed name -> name  // Named types (structs, etc.) use their name directly
+    // Named types (structs, etc.) use their name directly -- a non-main
+    // module's IDENTITY `A.P` through the one sanitizer (D11), `A__P`.
+    | IRTNamed name -> Blade.Types.TypeOrigins.cppName name
     | IRTInfer n ->
         let cell = exprWarningsCell ()
         cell.Value <- cell.Value @ [$"unresolved type variable _{n} reached codegen"]

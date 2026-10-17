@@ -77,6 +77,25 @@ let internal deviceParamRef (expr: IRExpr) : string option =
     go expr
     hit
 
+/// An integer `^` whose exponent is not a literal nonnegative integer.
+/// Section 2.4 makes a negative exponent a BL8013 panic, which a device body
+/// cannot raise, so such a power has no device form; a literal nonnegative
+/// exponent renders as the exact wrapping `blade_dev_ipow` instead
+/// (renderContractBinOp's device arm).
+let internal deviceVariableIntPow (expr: IRExpr) : bool =
+    let isInt (t: IRType) = match scalarElemOf t with Some (ETInt32 | ETInt64) -> true | _ -> false
+    let mutable hit = false
+    let rec go (e: IRExpr) =
+        if hit then () else
+        match e with
+        | IRBinOp (_, IRCaret, l, r, _)
+            when isInt (inferExprType l) && isInt (inferExprType r)
+                 && (match r with IRLit (IRLitInt n) -> n < 0L | _ -> true) ->
+            hit <- true
+        | ExprShape (kids, _) -> kids |> List.iter go
+    go expr
+    hit
+
 /// Why this kernel body cannot be rendered into the .cu as one device
 /// expression, given `declared` -- the ids the `__global__` itself binds (the
 /// peeled operand reads, plus any forwarded captures). `None` means it can.
@@ -88,6 +107,8 @@ let cudaDeviceBodyRefusal (declared: Set<IRId>) (names: Map<IRId, string>) (body
     let spell id = Map.tryFind id names |> Option.defaultValue ($"__v{id}")
     if not (kernelBodyIsExpressionShaped body) then
         Some "a kernel-local array materialization"
+    elif deviceVariableIntPow body then
+        Some "an integer `^` with a non-literal exponent (its negative-exponent panic, BL8013, has no device form)"
     else
         match deviceFreeVarIds body |> Set.toList |> List.filter (fun id -> not (Set.contains id declared)) with
         | id :: _ -> Some ($"the captured value '{(spell id)}'")
@@ -256,6 +277,11 @@ let rec internal cudaInlineCalls (fuel: int) (expr: IRExpr) : IRExpr =
 let rec internal cudaScalarNodeOk (e: IRExpr) : bool =
     match e with
     | IRLit _ | IRVar _ -> true
+    // Integer `^` with a non-literal (or negative) exponent: section 2.4 makes
+    // a negative exponent a BL8013 panic, which a device body cannot raise,
+    // so it has no device form. A literal nonnegative exponent renders as the
+    // exact wrapping blade_dev_ipow (renderContractBinOp's device arm).
+    | IRBinOp (IRElementwise, IRCaret, _, _, _) when deviceVariableIntPow e -> false
     | IRBinOp (IRElementwise, _, l, r, _) -> cudaScalarNodeOk l && cudaScalarNodeOk r
     | IRUnaryOp (_, x) -> cudaScalarNodeOk x
     | IRComplex (re, im) -> cudaScalarNodeOk re && cudaScalarNodeOk im
@@ -770,15 +796,7 @@ let genCudaKernelSimplicial (mpiRange: bool) (softSplit: bool) (codeGen: LoopNes
     let r = int grpRank
     // card = C(neff, R), neff = strict ? N : N+R-1
     let neff = if strict then n else n + int64 r - 1L
-    let binom (m: int64) (k: int) : int64 =
-        if k < 0 || m < int64 k then 0L
-        else
-            let mutable num = 1L
-            let mutable den = 1L
-            for i in 0 .. k - 1 do
-                num <- num * (m - int64 i)
-                den <- den * int64 (i + 1)
-            num / den
+    let binom (m: int64) (k: int) : int64 = Blade.OrbRank.binomOrZero m k
     let card = binom neff r
     let kernelName = $"__cuda_{(sanitizeCppName name)}"
     let launchName = $"__launch_{(sanitizeCppName name)}"
@@ -802,8 +820,13 @@ let genCudaKernelSimplicial (mpiRange: bool) (softSplit: bool) (codeGen: LoopNes
                 let etStr = cudaDevElemTypeToCpp elem.ArrayElemType
                 paramFinalNames <- Map.add elem.ParamVarId readName paramFinalNames
                 yield $"    {etStr} {readName} = {srcName}[{idxVar}];" ]
+    // The simplicial kernel forwards NO captures (see the gate below): they
+    // enter this map only so the body renders, and cudaDeviceBodyRefusal --
+    // whose allowed set is the peeled operands alone -- sees a capture and
+    // declines the kernel to the host loop. Neither policy names a forwarded
+    // parameter here; EnclosingNamesWin, because the map is the host's view.
     let nameMap =
-        codeGen.Captures |> List.fold (fun acc c -> Map.add c.Id c.Name acc) paramFinalNames
+        withCaptureNames EnclosingNamesWin codeGen.Captures paramFinalNames
     // CAPABILITY GATE. The simplicial kernel declares exactly the peeled operand
     // reads, so a body naming anything else (a capture, a lifted host function)
     // would emit an undefined identifier into the .cu. Refuse to the host loop
@@ -1094,15 +1117,7 @@ let genMpiNestSimplicial (innerOmp: bool) (codeGen: LoopNestCodeGen) (name: stri
         let elemCpp = elemTypeToCpp outElemTy
         let r = int grpRank
         let neff = if strict then n else n + int64 r - 1L
-        let binom (m: int64) (k: int) : int64 =
-            if k < 0 || m < int64 k then 0L
-            else
-                let mutable num = 1L
-                let mutable den = 1L
-                for i in 0 .. k - 1 do
-                    num <- num * (m - int64 i)
-                    den <- den * int64 (i + 1)
-                num / den
+        let binom (m: int64) (k: int) : int64 = Blade.OrbRank.binomOrZero m k
         let card = binom neff r
         let nsName = if strict then "antisymmetric" else "symmetric"
         let idxVar = $"__blade_mpi_idx_{name}"
@@ -1129,8 +1144,10 @@ let genMpiNestSimplicial (innerOmp: bool) (codeGen: LoopNestCodeGen) (name: stri
                         yield sprintf "        Array<%s, %d> %s = { %s.data[%s[%d]], %s.extents + 1 };"
                                   (elemTypeToCpp elem.ArrayElemType) resultRank readName
                                   elem.ArrayName idxVar b.Level elem.ArrayName ]
+        // The MPI loop is HOST code inline in the enclosing scope: captures read
+        // in place, so the enclosing spelling wins (CaptureNamePolicy).
         let nameMap =
-            codeGen.Captures |> List.fold (fun acc c -> Map.add c.Id c.Name acc) paramFinalNames
+            withCaptureNames EnclosingNamesWin codeGen.Captures paramFinalNames
         // Antisym: Reynolds fold (true,true) emits the signed
         // antisymmetrization; symmetric: raw comm kernel (false,false).
         let reynolds =
@@ -1582,8 +1599,13 @@ let genCudaCoFusion (leafCgs: LoopNestCodeGen list) (leafNames: string list) (na
         match cg.OutputType with
         | ArrayElem arr when isCudaBoundarySafeElem arr.ElemType -> Some arr.ElemType
         | _ -> None
+    // No leaf may CAPTURE: the co-fused __global__'s signature is the shared
+    // inputs, the outputs and the cardinality -- it forwards no capture (the
+    // per-leaf rectangular kernel does, as __blade_cap_<name> parameters), so a
+    // captured name would be an undeclared identifier in the .cu (F8 review).
     if not sameArity || not sameInputs || nDims = 0
-       || leafCgs |> List.exists (fun cg -> not (rectOk cg) || cg.HasReynolds || (outElemOpt cg).IsNone)
+       || leafCgs |> List.exists (fun cg -> not (rectOk cg) || cg.HasReynolds || (outElemOpt cg).IsNone
+                                           || not cg.Captures.IsEmpty)
     then None
     else
     let extentLits = bindings |> List.map (fun b -> match b.Extent with IRLit (IRLitInt n) -> n | _ -> 0L)
@@ -1639,7 +1661,9 @@ let genCudaCoFusion (leafCgs: LoopNestCodeGen list) (leafNames: string list) (na
                 cg.Bindings |> List.collect (_.Elements)
                 |> List.choose (fun e -> Map.tryFind e.ArrayPosition sharedFinal |> Option.map (fun nm -> (e.ParamVarId, nm)))
                 |> Map.ofList
-            let nameMap = cg.Captures |> List.fold (fun acc c -> Map.add c.Id c.Name acc) pfn
+            // No captures reach here (the gate above refuses a capturing
+            // leaf), so the leaf's names are its peeled operands alone.
+            let nameMap = pfn
             // __global__ body text: render in the device dialect.
             let rr =
                 withCudaDeviceDialect (fun () ->
@@ -1879,8 +1903,7 @@ let internal genWreathApply
         let withParams =
             binds |> List.fold (fun acc (local, _, vid) ->
                 match vid with Some v -> Map.add v local acc | None -> acc) ctx.VarNames
-        rk.Callable.Captures
-        |> List.fold (fun acc c -> if Map.containsKey c.Id acc then acc else Map.add c.Id c.Name acc) withParams
+        withCaptureNames EnclosingNamesWin rk.Callable.Captures withParams
     let bodyStr = exprToCppCore emptySubst nameMap rk.Callable.Body
     // The pool is a flat `new T[cells]` in orb_visit order; `delete[]` is the
     // matching free (RawAlloc), not the skeleton deallocator -- there is no
@@ -2311,8 +2334,7 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                         let eName = $"{name}__e"
                         let nameMap0 = Map.add param.VarId eName ctx.VarNames
                         let nameMap =
-                            callable.Captures
-                            |> List.fold (fun m c -> Map.add c.Id c.Name m) nameMap0
+                            withCaptureNames EnclosingNamesWin callable.Captures nameMap0
                         let bodyStr = exprToCpp nameMap callable.Body
                         let code =
                             [ $"{ind}// ragged elementwise map over '{arrName}' (shape-preserving; shares extents/lens/offsets)"
@@ -2385,8 +2407,7 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                         let subName = $"{name}__sub"
                         let nameMap0 = Map.add param.VarId subName ctx.VarNames
                         let nameMap =
-                            callable.Captures
-                            |> List.fold (fun m c -> Map.add c.Id c.Name m) nameMap0
+                            withCaptureNames EnclosingNamesWin callable.Captures nameMap0
                         // Array-valued rows render as a CALL to the lifted
                         // callable when the body is not expression-shaped (or
                         // ends in an array literal); `body` above is the same
@@ -2569,8 +2590,7 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                     // and ctx.VarNames already carries that emitted name --
                     // overriding it with the SOURCE name forwards an
                     // undeclared identifier.
-                    callable.Captures
-                    |> List.fold (fun m c -> if Map.containsKey c.Id m then m else Map.add c.Id c.Name m) withRows
+                    withCaptureNames EnclosingNamesWin callable.Captures withRows
                 // S2 routing, in the peel's own idiom: a body that materializes
                 // an array cannot render as one C++ expression, so call the
                 // lifted callable instead of inlining its text. The peel's row
@@ -2970,7 +2990,7 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                 |> List.collect (fun (tname, d, declared) ->
                     [ $$"""{{ind}}if ((int64_t)({{tname}}.extents[{{d}}]) != {{declared}}LL) {"""
                       $"{ind}    std::cerr << \"Blade runtime: the halo window over '{tname}' declares an inner extent of {declared}, but '{tname}' has runtime extent \" << {tname}.extents[{d}] << \" on index slot {d} -- the window walk would read out of bounds (oversized halo) or silently emit fewer windows (undersized)\" << std::endl;"
-                      $"{ind}    blade_rt::panic(\"BL8009\", \"halo extent mismatch\", nullptr, 0);"
+                      $"{ind}    blade_rt::panic(\"BL8009\", \"halo extent mismatch\", {(declPanicArgs ())});"
                       $"{ind}}}" ])
             preCode <- preCode @ guardLines)
 
@@ -3105,7 +3125,7 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                         | RealArray when hasExtents e.ArrayPosition && not trusted ->
                             [ $$"""{{ind}}if ((int64_t)({{e.ArrayName}}.extents[{{e.DimIndex}}]) != {{boundText}}) {"""
                               $"{ind}    std::cerr << \"Blade runtime: co-iteration over '{e0.ArrayName}' and '{e.ArrayName}' needs equal extents on axis {e.DimIndex}, but '{e0.ArrayName}' has \" << {e0.ArrayName}.extents[{e0.DimIndex}] << \" and '{e.ArrayName}' has \" << {e.ArrayName}.extents[{e.DimIndex}] << \" -- the walk is bounded by the first operand, so the shorter one would be read past its end\" << std::endl;"
-                              $"{ind}    blade_rt::panic(\"BL8011\", \"co-iteration extent mismatch\", nullptr, 0);"
+                              $"{ind}    blade_rt::panic(\"BL8011\", \"co-iteration extent mismatch\", {(declPanicArgs ())});"
                               $"{ind}}}" ]
                         | _ -> [])
                 | _ -> [])

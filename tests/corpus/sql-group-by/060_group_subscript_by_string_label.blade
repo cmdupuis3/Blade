@@ -1,0 +1,13 @@
+// TEST: GroupBy subscript by string label over an EnumIdx grouping
+// G1 + D2: a string-labelled grouping's group subscript of the label type is
+// the label, mapped to its position; a plain integer stays a position.
+type Site = EnumIdx<["x", "y"]>
+let sites: Array<Site like Idx<5>> = ["y", "x", "y", "y", "x"]
+let vals: Array<Float64 like Idx<5>> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let gk = group_keys(sites)
+let grouped = group_by(vals, gk)
+let s0 = sites(0)
+let gy = grouped(s0)
+// EXPECT: gy = [1.0, 3.0, 4.0]
+let gx = grouped(0)
+// EXPECT: gx = [2.0, 5.0]

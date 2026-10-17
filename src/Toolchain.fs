@@ -88,3 +88,43 @@ let getWithOrigin (key: string) : (string * Origin) option =
 /// Env-first lookup (the common form; provenance dropped).
 let get (key: string) : string option =
     getWithOrigin key |> Option.map fst
+
+/// The reading of an on/off switch. ONE grammar for every BLADE_* boolean
+/// knob, trimmed and case-insensitive: `1` / `on` / `true` is on, `0` / `off`
+/// / `false` is off, unset or empty (or all blanks) is unset, and anything
+/// else is `SwitchOther` with the trimmed text, for the knobs that also take
+/// a value (a cache directory). The knobs used to parse independently --
+/// three accepted only an exact `1` or `on`, the cache knobs trimmed and
+/// accepted `true`, and BLADE_MEMCHECK read anything but `0` as ON, so
+/// `BLADE_MEMCHECK=off` turned memcheck on.
+type Switch =
+    | SwitchOn
+    | SwitchOff
+    | SwitchUnset
+    | SwitchOther of string
+
+/// Parse one switch value (`None` = unset).
+let parseSwitch (value: string option) : Switch =
+    match value with
+    | None -> SwitchUnset
+    | Some v ->
+        let t = v.Trim()
+        match t.ToLowerInvariant() with
+        | "" -> SwitchUnset
+        | "1" | "on" | "true" -> SwitchOn
+        | "0" | "off" | "false" -> SwitchOff
+        | _ -> SwitchOther t
+
+/// The switch named `name`, read from the process environment PER CALL (never
+/// cached: harnesses pin these mid-process).
+let envSwitch (name: string) : Switch =
+    parseSwitch (match Environment.GetEnvironmentVariable name with null -> None | v -> Some v)
+
+/// A boolean knob: on or off as spelled, else `defaultOn` -- an unset knob
+/// AND an unrecognized value both read as the default, so a typo never
+/// flips a default-off knob on (or a default-on pass off).
+let envFlag (name: string) (defaultOn: bool) : bool =
+    match envSwitch name with
+    | SwitchOn -> true
+    | SwitchOff -> false
+    | SwitchUnset | SwitchOther _ -> defaultOn

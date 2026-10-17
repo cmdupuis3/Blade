@@ -1421,7 +1421,9 @@ let private readOperandProvenance (aliases: Map<string, string>) (priorOf: strin
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, meth) }, args)
         when aliases.ContainsKey alias ->
         (match meth, args with
-         | ("read" | "stream"), [operand]                    // alias.read(v) / alias.stream(v)
+         | m, [operand] when m = Blade.ProviderDesugar.rawReadVerb ->   // the masked read's raw half
+             storeMember operand |> Option.map (fun pr -> ProvRead, pr)
+         | ("read" | "stream" | "read_present" | "present"), [operand]  // alias.read(v) / .stream / the masked read
          | "read_window", [operand; _; _]                    // alias.read_window(v, lo, hi)
          | "load_compound", [operand; _] ->                  // alias.load_compound(v, mask)
              storeMember operand |> Option.map (fun pr -> ProvRead, pr)

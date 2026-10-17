@@ -30,9 +30,9 @@ let dumpAll () =
     printfn "// EXPECT: X = %s" (fmtCArr (fft cosBin2))
     printfn ""
 
-    // corpus spectra/013: fft at n=6 (naive table-DFT fallback path).
+    // corpus spectra/013: fft at n=6 (Bluestein path).
     let ramp6 = [| 0.0; 1.0; 2.0; 3.0; 4.0; 5.0 |]
-    printfn "// corpus spectra/013 (n=6 fallback):"
+    printfn "// corpus spectra/013 (n=6 Bluestein):"
     printfn "// EXPECT: X = %s" (fmtCArr (fft ramp6))
     printfn ""
 
@@ -117,8 +117,10 @@ let dumpAll () =
     printfn "// corpus spectra/046 (roundtrip 8x8): resid actual = %s" (fmt resid46)
     printfn ""
 
-    // corpus spectra/047: Parseval at 6x4 (naive rows axis, radix-2 cols
-    // axis): sum|X|^2 - rc*sum x^2, accumulated in row-major order.
+    // corpus spectra/047: Parseval at 6x4 (Bluestein rows axis, radix-2 cols
+    // axis): sum|X|^2 - rc*sum x^2, accumulated in row-major order. The
+    // residual is rounding-level and order/contraction-sensitive, so the pin
+    // is the predicate |resid| < 1e-9 (F6).
     let x64 = [| for t in 0 .. 23 -> 0.5 * float t - 3.0 |]
     printfn "// corpus spectra/047 input:"
     printfn "//   x = %s" (fmt2D 6 4 x64)
@@ -132,7 +134,8 @@ let dumpAll () =
         for j in 0 .. 3 do
             let z = sX47.[i * 4 + j]
             sXX47 <- sXX47 + z.Re * z.Re + z.Im * z.Im
-    printfn "// EXPECT: resid = %s" (fmt (sXX47 - 24.0 * sx47))
+    printfn "//   resid (oracle order) = %s" (fmt (sXX47 - 24.0 * sx47))
+    printfn "// EXPECT: parseval_ok = %b" (abs (sXX47 - 24.0 * sx47) < 1.0e-9)
     printfn ""
 
     // corpus spectra/048: fft2 inside a for body on a module-level mut
@@ -150,7 +153,7 @@ let dumpAll () =
     printfn "// EXPECT: acc = %s" (fmt acc48)
     printfn ""
 
-    // corpus spectra/051: fft2 at 3x5 (naive table DFT on both axes).
+    // corpus spectra/051: fft2 at 3x5 (Bluestein on both axes).
     let x35 = [| for t in 0 .. 14 -> 0.25 * float t - 1.0 |]
     printfn "// corpus spectra/051 input:"
     printfn "//   x = %s" (fmt2D 3 5 x35)

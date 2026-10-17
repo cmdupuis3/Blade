@@ -1,0 +1,8 @@
+// TEST: A range subscript is refused until slicing lands (rejects)
+// ERROR: BL4003 @ 7:14
+// ERROR-CONTAINS: slicing is planned
+// ============================================================================
+// `A(1..3)` reads like a slice, which is not built yet; it type-checked and
+// then died in emission (BL7001 "no rule for IRRange in expression position").
+let A = [1.0, 2.0, 3.0, 4.0]
+let s = A(1..3)

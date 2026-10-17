@@ -1,0 +1,14 @@
+// TEST: comm naming no parameter warns BL4001 (function and lambda)
+// WARN: BL4001
+// `where comm(x, q)` with no parameter `q` dropped the name silently and left
+// a one-member group that claims nothing, while the same typo in `omp(q: 1)`
+// warned (N12). Both conjunct kinds now share BL4001; `anticomm` too. The
+// clause stays inert, so the values are the dense ones.
+function dv(x: Float64, y: Float64) where comm(x, q) -> Float64 = x / y
+let a = [1.0, 2.0, 4.0]
+let r = method_for(a, a) <@> dv |> compute
+let s = method_for(a, a) <@> lambda(u, v) where anticomm(u, w) -> u - v |> compute
+let r20 = r(2, 0)
+let s20 = s(2, 0)
+// EXPECT: r20 = 4.0
+// EXPECT: s20 = 3.0

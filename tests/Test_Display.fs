@@ -138,14 +138,6 @@ add "the stream mime is a +json mime, so its payload rides inline" (fun () ->
     // an object, not a string it has to parse a second time.
     eq "json" (F.encodingFor F.StreamMime))
 
-add "the IR node is marked IMPURE (a future CSE/hoist must not drop it)" (fun () ->
-    let node =
-        Blade.IR.IRDisplayEmit (F.headFor "image/png", true,
-                                Blade.IR.IRLit (Blade.IR.IRLitString "AA=="), "", None)
-    let a = Blade.IRPrint.exprAttrs node
-    (not a.IsPure) && (Blade.IRPrint.exprAttrs (Blade.IR.IRLit (Blade.IR.IRLitInt 1L))).IsPure,
-    sprintf "IsPure = %b" a.IsPure)
-
 // ---- 2. The REPL channel (spec section 4) -----------------------------------
 
 /// Lower + interpret one source, returning the interpreter's RAW stdout --

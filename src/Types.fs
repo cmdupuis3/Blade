@@ -499,6 +499,53 @@ module SegmentTable =
     let tryFind (alias: string) : int64 list option = Map.tryFind alias (entries ())
     let reset () = table.Value <- Map.empty
 
+/// WHERE A DECLARED TYPE CAME FROM (D11: module-qualified type identity).
+/// A type, index type or variant constructor declared by a NON-main module
+/// `A` has the IDENTITY `A.P` (A's own `P`, never confused with B's `P` or
+/// main's): what IRTNamed / an index `Tag` / IRefNamed / VariantTags /
+/// IRTypeDef carry from the declaration on. The main module's declarations
+/// keep their bare names (a single-module program is unchanged). This table
+/// maps a qualified identity to its declaring module and SOURCE name, for
+/// every consumer that shows a type to the user (diagnostics, printed struct
+/// and enum values) -- never string surgery on the identity (dotted module
+/// names, provider axes `store.index.y` and synthesized tags all contain
+/// dots). The mapping is a pure function of the declaration (module and
+/// name), so one process-wide table serves every compilation.
+module TypeOrigins =
+    let private table = System.Collections.Concurrent.ConcurrentDictionary<string, string * string>()
+    /// The identity of `source` declared in `moduleName` (None = main).
+    let identityOf (moduleQualifier: string option) (source: string) : string =
+        match moduleQualifier with
+        // A `__`-prefixed (synthetic) name keeps its spelling: the prefix is
+        // what every gate reads to treat it as compiler-made (plot.blade's
+        // `__B16` index aliases), so a qualifier must never hide it.
+        | Some m when m <> "" && not (source.StartsWith "__") -> m + "." + source
+        | _ -> source
+    let record (identity: string) (moduleName: string) (source: string) =
+        if identity <> source then table.[identity] <- (moduleName, source)
+    let tryFind (identity: string) : (string * string) option =
+        match table.TryGetValue identity with
+        | true, v -> Some v
+        | _ -> None
+    /// The name the program wrote: a qualified identity's source name, any
+    /// other string as-is.
+    let sourceName (identity: string) : string =
+        match table.TryGetValue identity with
+        | true, (_, s) -> s
+        | _ -> identity
+    let isQualified (identity: string) : bool = table.ContainsKey identity
+    /// THE MAIN MODULE of a program of `count` modules: the entry, which
+    /// every program-assembling path (ModuleResolve's dependency order, the
+    /// multi-file corpus harness, `ide check`'s dependency prepend) puts LAST.
+    /// Its declarations keep bare names -- the checker's identity rule and
+    /// Lowering.qualifyModuleNames' value rule read this one predicate.
+    let isMainModule (index: int) (count: int) : bool = index = count - 1
+    /// The C++ spelling of a type / constructor identity: the module dots
+    /// become `__` (the binding scheme, `A.x` -> `A__x`); a main-module name
+    /// is unchanged.
+    let cppName (identity: string) : string =
+        if table.ContainsKey identity then identity.Replace(".", "__") else identity
+
 /// SCRATCH REUSE ACROSS BARRIERS (plan-fortran-killer-2 section 4, gate 2):
 /// the plan `Blade.Optimize.planPoolReuse` computes per function body and
 /// codegen consumes. A let whose fresh dense pool has the same element type

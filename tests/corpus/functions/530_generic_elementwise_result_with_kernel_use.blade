@@ -1,0 +1,26 @@
+// TEST: A generic elementwise result survives a kernel use of its function
+// ============================================================================
+// A named function used as a kernel (`<@> f`) is eta-wrapped, and its call
+// inside the wrapper meets an open argument. The call's result -- "T with
+// element Float64" for a cast, "T with element Bool" for a comparison -- was
+// not recognized as reached through T, so the wrapper took the DECLARED
+// return and bound the declaration's own result variable to the kernel's
+// scalar: every array call then returned a scalar (the cast's half predates
+// D1). Each use is now its own instance.
+// ============================================================================
+function tof(x: T) = Float64(x)
+let ca = tof([1, 2])
+// EXPECT: ca = [1.0, 2.0]
+let ck = method_for([1, 2, 3]) <@> tof |> compute
+// EXPECT: ck = [1.0, 2.0, 3.0]
+function pos(x: T) = x > 0.0
+let pk = method_for([1.0, -2.0, 3.0]) <@> pos |> compute
+// EXPECT: pk = [true, false, true]
+let pa = pos([1.0, -2.0])
+// EXPECT: pa = [true, false]
+// A chained result: the comparison's source is itself a cast's result.
+function posf(x: T) = Float64(x) > 0.5
+let fk = method_for([1, 0, 2]) <@> posf |> compute
+// EXPECT: fk = [true, false, true]
+let fa = posf([0, 3])
+// EXPECT: fa = [false, true]

@@ -717,27 +717,27 @@ the first gate builds — the memo's thesis in its checkable form.
 
 Corpus (default lane; pins are exact because inputs are dyadic):
 
-1. `tests/corpus/ad/025_halo_stencil_grad.blade` — the §1.2 stencil,
+1. `tests/corpus/ad/030_halo_stencil_grad_linear.blade` — the §1.2 stencil,
    `f(a) = reduce(method_for(halo<H,[-1,0,1]>) <@> lambda(w) -> a(w(1)) - a(w(-1)) |> compute, (+))`,
    `a = [0,1,2,3,4]`: `EXPECT: v = 6`, `EXPECT: da = [-1, -1, 0, 1, 1]`
    (∂/∂a_j of Σ_{i<3} (a_{i+2} − a_i)). Also `ad.jvp(f)(a, t)` with
    `t = [1,0,0,0,1]`: `t_out = 0 = ⟨da, t⟩` — the JVP leg travels a completely
    different route (capture-read, §1.3), so the equality is a differential, not
    a tautology (the pattern `098` uses).
-2. `tests/corpus/ad/026_halo_stencil_grad_nonlinear.blade` — kernel
+2. `tests/corpus/ad/031_halo_stencil_grad_nonlinear.blade` — kernel
    `a(w(1)) * a(w(-1))`, `a = [1,2,4,8,16]`: `v = 84`, `da = [4, 8, 17, 2, 4]`
    (cell 2 receives two contributions, `a_0 + a_4`).
-3. `tests/corpus/ad/027_halo_lagset_grad.blade` — offsets `[-2, -4]` (no 0,
+3. `tests/corpus/ad/032_halo_stencil_grad_lag_set.blade` — offsets `[-2, -4]` (no 0,
    `Start = 4`, `M = N - 4`), `a = 1..8`, kernel `a(w(0)) * a(w(-2))`:
    `v = 122` (matches `loops/078`'s `s_lag2`),
    `da = [0, 0, 5, 6, 10, 12, 5, 6]` — cells 0 and 1 have *no* contributors,
    the boundary case the ZeroOutside transpose exists for.
-4. `tests/corpus/loops/165_halo_offset_outside_window_rejects.blade` — the
+4. `tests/corpus/loops/202_halo_offset_outside_set_rejects.blade` — the
    §1.5 probe, `// ERROR: BL4019`; a compound-inner sibling with `w(2)` on
    `halo<CompoundIdx<..>, [-1,0,1]>` pins the same code (today that shape reaches
    Lowering's `failwith` at `:464` only for non-literals; literals are silently
    accepted).
-5. `tests/corpus/ad/028_halo_computed_offset_grad_scatter.blade` — the `loops/080`
+5. `tests/corpus/ad/033_halo_stencil_grad_computed_offset.blade` — the `loops/080`
    shape (`S(w(0 - i))`) differentiated: G declines, S handles it; pins the
    values and, in the harness, that no gather loop was emitted.
 

@@ -1,0 +1,11 @@
+// TEST: a parameter shadowing the written global does not hide a parallel callee's race (rejects)
+// ERROR: BL4005
+// `h` writes the module-level `g`. Inside `k` the name `g` is a scalar
+// parameter, but the store `h` performs is still to the global, from every
+// cell of the omp kernel at once (#17). The refusal is decided by binder id,
+// not by which `g` the kernel's scope happens to see.
+let mut g = [0.0, 0.0]
+function h(x: Float64) -> Float64 = { g(0) = g(0) + x; x }
+function k(g: Float64, a: Array<Float64 like Idx<3>>) -> Array<Float64 like Idx<3>> =
+    method_for(a) <@> lambda(x) where omp(x: 1) -> h(x) + g |> compute
+let r = k(1.0, [1.0, 2.0, 3.0])

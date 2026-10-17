@@ -73,6 +73,44 @@ let (|GatherTeardown|_|) (value: IRExpr) : string option = partialSparseGatherTe
 let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) : string =
     match expr with
     | IRLit lit -> litToCpp lit
+    // INLINE PARTIAL SPARSE READS under any SCALAR-valued consumer (N7).
+    // `reduce`, `prodsum` and `extents` bound theirs since September; every
+    // other position -- `contains(F((i, _)), v)` (whose loop spells the operand
+    // in its bound AND its body), a subscript `F((i, _))(0)`, a call argument
+    // `g(F((i, _)))`, a top-level expression -- still allocated a gather per
+    // access and freed none. The consumer is the gather's immediate parent, so
+    // binding there keeps every coordinate's binder in scope and moves no
+    // evaluation across a conditional. A scalar result cannot be a view into
+    // the gather, so the free cannot dangle; array-valued consumers keep their
+    // own handling (a `let` registers the scope-exit free).
+    // A SUBSCRIPTED all-literal rank-1 table (`[100, 200, 300](p)`): the key
+    // table an integer EnumIdx observation reads (Zonk.posToKey, F5), or a
+    // user's inline lookup: a constant table read in O(1) -- an inline array
+    // literal has no expression rendering otherwise (BL7001), and a lift
+    // would allocate it per evaluation.
+    | IRIndex (IRArrayLit (elems, at), [ p ], _)
+        when at.IndexTypes.Length = 1 && not elems.IsEmpty
+             && (match stripUnits at.ElemType with IRTScalar (ETInt64 | ETInt32 | ETFloat64 | ETFloat32) -> true | _ -> false)
+             && elems |> List.forall (function IRLit (IRLitInt _) | IRLit (IRLitFloat _) -> true | _ -> false) ->
+        let pStr = exprToCppCore subst names p
+        // An integer table is the per-type static `key_table` (one
+        // instantiation per distinct key list, program-wide); a float table
+        // reads a constant std::array, which g++ folds into read-only data.
+        // Neither spelling is call-shaped, so the frame-elision scan
+        // (CodeGen.scanBodyCalls) is unaffected.
+        if elems |> List.forall (function IRLit (IRLitInt _) -> true | _ -> false) then
+            let ks = elems |> List.map (function IRLit (IRLitInt k) -> $"{k}LL" | _ -> "0LL") |> String.concat ", "
+            $"blade_arith::key_table<{ks}>::tab[{pStr}]"
+        else
+            let elemStr = elemTypeToCpp at.ElemType
+            let cells = elems |> List.map (exprToCppCore subst names) |> String.concat ", "
+            $"std::array<{elemStr}, {elems.Length}>{{{{ {cells} }}}}[{pStr}]"
+    | ExprShape (children, rebuild)
+        when children |> List.exists (function GatherTeardown _ -> true | _ -> false)
+             && (match stripUnits (inferExprType expr) with
+                 | IRTScalar _ | IRTIdxTagged _ -> true
+                 | _ -> false) ->
+        bindInlineGathers subst names children (fun cs -> exprToCppCore subst names (rebuild cs))
     | IRVar (id, _) ->
         // A reference to a lifted callable WITH captures cannot stand bare
         // in value position: the lifted C++ function carries trailing
@@ -118,7 +156,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
                  | Some sentinel -> sentinel
                  | None -> name)
             | None -> $"__v{id}"
-    | IRParam (name, _, _) -> name
+    | IRParam (name, _, _) -> Blade.Types.TypeOrigins.cppName name
     | IRHaloUnhash (w, off) ->
         // halo window read over a masked domain: coordinate of the present
         // cell at (center + off). The window param is a pointer into the
@@ -158,6 +196,9 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         // the interpreter's Math.FusedMultiplyAdd under any -ffp-contract --
         // contraction only ever fuses SEPARATE nodes, never unfuses this one.
         $"std::fma({(exprToCppCore subst names a)}, {(exprToCppCore subst names b)}, {(exprToCppCore subst names c)})"
+    | IRRandAt (kind, args, weights) ->
+        renderRandAt kind (args |> List.map (exprToCppCore subst names))
+                     (weights |> Option.map (fun (w, n) -> (exprToCppCore subst names w, n)))
     | IRComplex (re, im) ->
         // Determine width from the component type. checkExpr enforces
         // that Complex128 components are Float64 and Complex64 are
@@ -196,7 +237,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
     | IRStructLit (typeName, fields) ->
         let fieldInits = fields |> List.map (fun (fname, e) -> 
             $".{fname} = {(exprToCppCore subst names e)}") |> String.concat ", "
-        $$"""{{typeName}} { {{fieldInits}} }"""
+        $$"""{{(Blade.Types.TypeOrigins.cppName typeName)}} { {{fieldInits}} }"""
     | IRIndex (arr, indices, _) ->
         // Carousel substitution (reference equality, see SubstMap): a dense
         // halo window read hoisted to a rotating local renders as that local.
@@ -1046,7 +1087,7 @@ and renderMatchExpr (subst: SubstMap) (names: Map<IRId, string>) scrutinee cases
                  | IRTInfer _ -> "double"
                  | t -> irTypeToCpp t)
             | None -> "double"
-        $$"""([&]() -> {{retTyStr}} { blade_rt::panic("BL8002", "Blade: non-exhaustive match", nullptr, 0); return {}; }())"""
+        $$"""([&]() -> {{retTyStr}} { blade_rt::panic("BL8002", "Blade: non-exhaustive match", {{declPanicArgs ()}}); return {}; }())"""
 
     let mergeParts (parts: (string list * (IRId * string * string) list) list) =
         (parts |> List.collect fst, parts |> List.collect snd)
@@ -1118,7 +1159,8 @@ and renderMatchExpr (subst: SubstMap) (names: Map<IRId, string>) scrutinee cases
                 // body over dangling identifiers, which is what the
                 // pre-rewrite catch-all did.
                 ([ exprError "cons pattern (head :: tail) in a match needs a tuple scrutinee with at least two slots; destructure a parameter pack with a let binding instead" ], [])
-        | IRPatVariant (ctorName, _, innerOpt, isEnum) ->
+        | IRPatVariant (ctorIdent, _, innerOpt, isEnum) ->
+            let ctorName = Blade.Types.TypeOrigins.cppName ctorIdent
             let test =
                 if isEnum then $"{access} == {ctorName}"
                 else $"std::holds_alternative<{ctorName}_T>({access})"
@@ -1404,7 +1446,7 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
         | None ->
         let guard =
             if reduceNonEmpty then ""
-            else $"if ({reduceBound} == 0) {{ blade_rt::panic(\"BL8003\", \"reduce: empty array, no reduction possible\", nullptr, 0); }} "
+            else $"if ({reduceBound} == 0) {{ blade_rt::panic(\"BL8003\", \"reduce: empty array, no reduction possible\", {(declPanicArgs ())}); }} "
         if mayLane then laneForm "1" (reduceAccAt "0") guard
         else
         sprintf "[&]() { %s%s%s %s __r = %s; for (size_t __ri = 1; __ri < %s; __ri++) { __r = %s(__r, %s); } return __r; }()"
@@ -1586,6 +1628,17 @@ and renderExtentExpr (subst: SubstMap) (names: Map<IRId, string>) arr dim : stri
     match arr with
     | GatherTeardown _ ->
         bindInlineGathers subst names [ arr ] (fun ops -> renderExtentExpr subst names (List.head ops) dim)
+    // GROUP i's LENGTH, `extents(grouped(i))` (G1): read off the offsets the
+    // grouped value's extents table carries (emitGroupedExtentsTable) -- the
+    // row view is a bare pointer with no length of its own.
+    | IRIndex (baseArr, [ gi ], _) when dim = 0
+                                     && (match inferExprType baseArr with
+                                         | ArrayElem bat -> bat.IndexTypes.Length = 2 && bat.IndexTypes.[0].IxKind = IxKGroupOuter
+                                                            && bat.IndexTypes.[1].IxKind = IxKGroupMember
+                                         | _ -> false) ->
+        let b = exprToCppCore subst names baseArr
+        let iS = exprToCppCore subst names gi
+        $"(int64_t)({b}.extents[2 + ({iS}) + 1] - {b}.extents[2 + ({iS})])"
     | _ ->
     // Statically resolved when the index type's extent expression is a
     // literal-arithmetic value (Idx<5>, Idx<n+1> with n compile-time, etc.)
@@ -1611,7 +1664,12 @@ and renderExtentExpr (subst: SubstMap) (names: Map<IRId, string>) arr dim : stri
             // (Multi-rank compound extents are rejected at typecheck,
             // same ill-posedness rule as ragged slots.)
             let isRank1Compound = (isCompoundArrayType at || isSparseArrayType at) && at.IndexTypes.Length = 1
-            if isRaggedRow && dim = 0 then
+            // A GROUP's row (G1) reaches a reader as a RaggedRow (a let-bound
+            // row) or an Array<T, 1> view (a peeled kernel row): one overload
+            // answers both.
+            if dim = 0 && at.IndexTypes.Length = 1 && at.IndexTypes.[0].IxKind = IxKGroupMember then
+                $"(int64_t)(group_row_len({arrName}))"
+            elif isRaggedRow && dim = 0 then
                 $"(int64_t)({arrName}.len)"
             elif isRank1Compound && dim = 0 then
                 $"(int64_t)({arrName}.idx->cardinality)"
@@ -1647,7 +1705,7 @@ and genApplyCombinatorExpr (subst: SubstMap) (names: Map<IRId, string>) (info: A
         info.Arrays |> List.mapi (fun i arr ->
             match arr with
             | IRVar (id, _) -> Map.tryFind id names |> Option.defaultValue ($"arr{i}")
-            | IRParam (name, _, _) -> name
+            | IRParam (name, _, _) -> Blade.Types.TypeOrigins.cppName name
             | _ -> $"arr{i}")
     
     // Kernel resolution is unified via `resolveCallable`; the wrapper carries
@@ -1849,8 +1907,38 @@ and materializeMaskForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
     // returned out of the function body that built it.
     let (extentsDecl, ownedExtents) =
         emitExtentsTable "" ($"{varName}_extents") 1 [srcBoundDim]
-    if maskRank <> 1 then
-        Some ([refusalErrorLine "" ($"Blade codegen: mask over a rank-{maskRank} array is not yet supported (rank-1 only for now; rank-k masks land with the compound composition round)")], [])
+    // RANK-k over a plain dense source (the masked read's presence mask over
+    // a rank-k stored variable, `mask(A, p)` over a matrix): the Bool array
+    // keeps A's whole index space, allocated like any dense array, and the
+    // predicate walks both contiguous row-major pools in step -- the cell
+    // order compound()'s index build reads the mask in.
+    let plainDenseSource =
+        match inferExprType arrExpr with
+        | ArrayElem a ->
+            not (isRaggedRowType a)
+            && a.IndexTypes |> List.forall (fun ix -> ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank = 1)
+        | _ -> false
+    if maskRank > 1 && plainDenseSource then
+        match resolveCallable predExpr, inferExprType arrExpr with
+        | Some callable, ArrayElem a when callable.Params.Length = 1 ->
+            let (wrapperCode, wname) = genCallableWrapper names varName callable
+            let dims = [ for d in 0 .. maskRank - 1 -> extentDimOfArray a arrName d ]
+            let (extDecl, owned) = emitExtentsTable "" ($"{varName}_extents") maskRank dims
+            let total = dims |> List.map (fun (e, _) -> $"(size_t)({e})") |> String.concat " * "
+            let srcElemStr = elemTypeToCpp a.ElemType
+            Some (
+                wrapperCode @ extDecl @ [
+                    $"Array<bool, {maskRank}> {varName} = {{ allocate<typename promote<bool, {maskRank}>::type, nullptr>({varName}_extents), {varName}_extents }};"
+                    $"{{ bool* __mp = nested_array_utilities::pool_base({varName}.data);"
+                    $"  {srcElemStr}* __ms = nested_array_utilities::pool_base({arrName}.data);"
+                    $"  for (size_t __mi = 0; __mi < {total}; __mi++) __mp[__mi] = {wname}(__ms[__mi]); }}"
+                ],
+                [MatPool (varName, "bool", maskRank, "nullptr", None, owned)]
+            )
+        | _ ->
+            Some ([refusalErrorLine "" ($"Blade codegen: mask over a rank-{maskRank} array needs a one-parameter predicate")], [])
+    elif maskRank <> 1 then
+        Some ([refusalErrorLine "" ($"Blade codegen: mask over a rank-{maskRank} array is supported over plain dense arrays only (packed, ragged, compound and sparse sources have no row-major pool)")], [])
     else
     match resolveCallable predExpr with
     | Some callable when callable.Params.Length = 1 ->
@@ -2964,7 +3052,7 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                     let rInner = literalOrRuntimeExtentOfArray ra rName 1
                     [ $$"""if ((int64_t)({{nExtent}}) != (int64_t)({{rInner}})) {"""
                       $"    std::cerr << \"Blade runtime: gram(A, B) contracts over A's trailing axis (\" << {nExtent} << \") and B's trailing axis (\" << {rInner} << \"), which must be equal\" << std::endl;"
-                      "    blade_rt::panic(\"BL8011\", \"co-iteration extent mismatch\", nullptr, 0);"
+                      $"    blade_rt::panic(\"BL8011\", \"co-iteration extent mismatch\", {(declPanicArgs ())});"
                       "}" ]
             let extentDecl = extentDecl @ contractGuard
             let allocDecl =
@@ -3182,7 +3270,7 @@ and materializeGramApplyForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
             | _ ->
                 [ $$"""if ((int64_t)({{lhs}}) != (int64_t)({{rhs}})) {"""
                   $"    std::cerr << \"Blade runtime: gram_apply(A, B, x): {what} (\" << {lhs} << \" vs \" << {rhs} << \")\" << std::endl;"
-                  "    blade_rt::panic(\"BL8011\", \"co-iteration extent mismatch\", nullptr, 0);"
+                  $"    blade_rt::panic(\"BL8011\", \"co-iteration extent mismatch\", {(declPanicArgs ())});"
                   "}" ]
         let guards =
             guardIf (literalExtentOfArray la 1) (literalExtentOfArray ra 1) nExtent (literalOrRuntimeExtentOfArray ra rName 1) "A's and B's trailing axes must be equal"
@@ -3533,7 +3621,7 @@ and materializeEighForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
             // it handed back whatever the driver left in Q and LAM.
             let infoName = $"{varName}__info"
             let dispatch =
-                $"/* lapack dispatch: eigh(S) -> (Q, LAM), {routeLabel} */ int {infoName} = {entry}({nExtent}, {operandArg}, {lamName}.data, {qName}.data); if ({infoName} != 0) {{ blade_rt::panic(\"BL8008\", \"eigh(S): the LAPACK eigensolver failed (non-zero info) -- the operand holds NaN/Inf or did not converge\", nullptr, 0); }}"
+                $"/* lapack dispatch: eigh(S) -> (Q, LAM), {routeLabel} */ int {infoName} = {entry}({nExtent}, {operandArg}, {lamName}.data, {qName}.data); if ({infoName} != 0) {{ blade_rt::panic(\"BL8008\", \"eigh(S): the LAPACK eigensolver failed (non-zero info) -- the operand holds NaN/Inf or did not converge\", {(declPanicArgs ())}); }}"
             // The binding value the existing destructuring consumes. Spelled
             // with the EXPLICIT tuple type rather than `auto` so it matches the
             // `std::tuple<Array<double, 2>, Array<double, 1>>` form a
@@ -3616,7 +3704,7 @@ and materializeLuForm (subst: SubstMap) (names: Map<IRId, string>) (varName: str
             @ [ arrayAlloc { Ind = ""; Elem = elemStr; Rank = 2; Name = luName; Symm = "nullptr"; Strict = None; Extents = luExtents } ]
             @ pivExtentsDecl
             @ [ arrayAlloc { Ind = ""; Elem = "int64_t"; Rank = 1; Name = pivName; Symm = "nullptr"; Strict = None; Extents = pivExtents } ]
-        let panicLine = "blade_rt::panic(\"BL8007\", \"lu(A): the matrix is SINGULAR -- LU factorization found an exactly-zero pivot\", nullptr, 0);"
+        let panicLine = $"blade_rt::panic(\"BL8007\", \"lu(A): the matrix is SINGULAR -- LU factorization found an exactly-zero pivot\", {(declPanicArgs ())});"
         let body =
             match shimEntry with
             | Some entry ->
@@ -3689,7 +3777,7 @@ and materializeLuSolveForm (subst: SubstMap) (names: Map<IRId, string>) (varName
             | Some entry ->
                 [ $"const size_t {nName} = {nExtent};"
                   $"/* lapack dispatch: lu_solve(LU, piv, b) -> x, {modeWord} */ int {infoName} = {entry}({nName}, {lName}.data, {pName}.data, {bName}.data, {varName}.data, {transArg});"
-                  $$"""if ({{infoName}} != 0) { blade_rt::panic("BL8007", "lu_solve: the stored factorization is invalid", nullptr, 0); }""" ]
+                  $$"""if ({{infoName}} != 0) { blade_rt::panic("BL8007", "lu_solve: the stored factorization is invalid", {{declPanicArgs ()}}); }""" ]
             | None when not transposed ->
                 [ "/* lu solve: pivots, then L (unit lower), then U */"
                   $"const size_t {nName} = {nExtent};"
@@ -3804,7 +3892,7 @@ and materializeSolveForm (subst: SubstMap) (names: Map<IRId, string>) (varName: 
         // swallow the rest of the statement (the lesson math/057 taught the
         // gram emitter).
         let panicLine (ind: string) =
-            $"{ind}blade_rt::panic(\"BL8007\", \"{solveSingularMessage}\", nullptr, 0);"
+            $"{ind}blade_rt::panic(\"BL8007\", \"{solveSingularMessage}\", {(declPanicArgs ())});"
         let luCell (i: string) (j: string) = $"{luName}[{i} * {nName} + {j}]"
         let body =
             match shimEntry with

@@ -20,7 +20,11 @@
 /// function of that address (Philox4x32-10 counter mode, cpp/rand_runtime.hpp): the same samples drawn
 /// whole, in uneven chunks, in any chunk order, or as a subrange are the same bits, with no prefix
 /// replay. `stream` must lie in [0, 2^32) and `offset` must be non-negative (literal violations are
-/// refused, runtime ones abort with BL8001 in both lanes).
+/// refused, runtime ones abort with BL8001 in both lanes). The address names no family, so the `_at`
+/// families SHARE uniforms at one address by design (`exponential_at` at (key, stream, offset) is the
+/// transform of `uniform_at`'s uniform there): draws meant to be independent take different `stream`
+/// ids. Per-family key separation was declined (P3-23) -- it would move every pinned sample, and the
+/// address contract (cpp/rand_runtime.hpp) makes any such change a new family name.
 ///
 /// `key` is an Int64 stream key (same key => same draws). The distribution parameters are ordinary RUNTIME Float64
 /// expressions -- they need not be static, and are evaluated once per fill. `shape` is a static int or a list of static
@@ -234,7 +238,10 @@ let rec private rewriteExpr (statics: StaticEnv) (aliases: Set<string>) (e: Expr
         | Some x -> r x |> Result.map Some
     match e.Kind with
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, op) }, args) when Set.contains alias aliases ->
-        rList args |> Result.bind (fun args' -> elabOp statics op args')
+        // The intrinsic call keeps the user's call span, so the typed rand
+        // node (and any refusal of it -- a sequenced draw inside a function,
+        // BL6002) points at `r.uniform(...)`, not at the enclosing declaration.
+        rList args |> Result.bind (fun args' -> elabOp statics op args' |> Result.map (fun x -> inheritSpan e x.Kind))
     | ExprKind.ExprLit _ | ExprKind.ExprVar _ -> Ok e
     | ExprKind.ExprApp (f, args) ->
         r f |> Result.bind (fun f' -> rList args |> Result.map (fun args' -> inheritSpan e (ExprApp (f', args'))))

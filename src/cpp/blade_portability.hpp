@@ -234,6 +234,40 @@
 #endif
 
 // ---------------------------------------------------------------------------
+// BLADE_OMP_PARALLEL_NUM_THREADS(n) and blade_omp_get_{max_threads,
+// num_threads, thread_num}() -- the explicit TEAM the comm-licensed Path-B
+// folds open (CodeGenBinding's contiguous per-thread partials, the loop
+// nest's fold-combine region): request `n` threads, read back the team the
+// region actually got and each thread's id.
+//
+// These were the last raw `#pragma omp parallel` lines and unguarded omp_*
+// calls in emitted code. A generated `.cpp` compiled without OpenMP (by
+// hand, or cl.exe's host half of a CUDA build) then met an unknown pragma
+// and an omp_get_max_threads it could not link. Under no OpenMP the region
+// is the empty expansion and the queries answer the serial team -- one
+// thread, id 0 -- so the same code runs as ONE chunk covering the whole
+// range, combined exactly as the threaded form combines a one-thread team.
+// `parallel num_threads` is OpenMP 2.0, so `_OPENMP` alone gates it.
+#ifndef BLADE_OMP_PARALLEL_NUM_THREADS
+  #if defined(_OPENMP)
+    #define BLADE_OMP_NT_PRAGMA_(x) _Pragma(#x)
+    #define BLADE_OMP_PARALLEL_NUM_THREADS(n) BLADE_OMP_NT_PRAGMA_(omp parallel num_threads(n))
+  #else
+    #define BLADE_OMP_PARALLEL_NUM_THREADS(n)
+  #endif
+#endif
+#if defined(_OPENMP)
+  #include <omp.h>
+  inline int blade_omp_get_max_threads() { return omp_get_max_threads(); }
+  inline int blade_omp_get_num_threads() { return omp_get_num_threads(); }
+  inline int blade_omp_get_thread_num() { return omp_get_thread_num(); }
+#else
+  inline int blade_omp_get_max_threads() { return 1; }
+  inline int blade_omp_get_num_threads() { return 1; }
+  inline int blade_omp_get_thread_num() { return 0; }
+#endif
+
+// ---------------------------------------------------------------------------
 // BLADE_REPRO_FN -- the `where repro` discharge on an emitted function
 // definition: the body's floating-point operation sequence is the source's
 // (no FMA contraction), and the function is never re-inlined into a caller

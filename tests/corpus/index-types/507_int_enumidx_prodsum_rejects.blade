@@ -1,0 +1,8 @@
+// TEST: A prodsum over EnumIdx values is refused (rejects)
+// ERROR: BL4003
+// ERROR-CONTAINS: prodsum over EnumIdx values
+// ============================================================================
+// It would multiply the positions that represent the keys.
+type R = EnumIdx<[100, 200, 300]>
+let codes: Array<R like Idx<3>> = [300, 100, 200]
+let p = prodsum(codes, codes)

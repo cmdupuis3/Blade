@@ -106,9 +106,128 @@ let invTwiddles (n: int) (m: int) : (float * float) list =
         (cos (2.0 * System.Math.PI * float j / float n),
          sin (2.0 * System.Math.PI * float j / float n)) ]
 
+// Bluestein (chirp-z) DFT -- the O(m log m) path for every n that is not a power of two (F6)
+//
+// X_k = Sum_j x_j e^(sgn*2*pi*i*jk/n) with jk = (j^2 + k^2 - (k-j)^2)/2 is the chirp-weighted CONVOLUTION
+//   X_k = c_k * Sum_j (x_j c_j) * conj(c_(k-j)),   c_j = e^(sgn*pi*i*(j^2 mod 2n)/n),
+// evaluated as a circular convolution of length m = the smallest power of two >= 2n-1 through two radix-2 FFTs of
+// length m and a pointwise product with the baked kernel spectrum B = FFT_m(b) / m (b_j = conj(c_j) at j and at m-j;
+// the 1/m is exact, m a power of two). It replaced the O(n^2) table DFT; its rounding is O(log m) ulps, checked
+// against the exact DFT by spectra/063 (both lanes) -- the ulp contract with the oracle is unchanged in kind: the
+// chirp and kernel tables are baked F# values, and the generated arithmetic is mirrored step for step by
+// spectra/Fft.fs's `bluestein`.
+
+/// The smallest power of two >= m.
+let nextPow2 (m: int) =
+    let mutable p = 1
+    while p < m do
+        p <- p * 2
+    p
+
+/// The chirp c_j = e^(sgn*pi*i*(j^2 mod 2n)/n), j = 0 .. n-1 (the angle reduced exactly in Int64 first, so a large
+/// j^2 never costs precision).
+let bluesteinChirp (n: int) (sgn: float) : (float * float) list =
+    [ for j in 0 .. n - 1 ->
+        let r = (int64 j * int64 j) % (2L * int64 n)
+        let a = sgn * System.Math.PI * float r / float n
+        (cos a, sin a) ]
+
+/// The baked kernel spectrum: FFT_m of b (b_j = conj(c_j) for j < n, b_(m-j) = conj(c_j) for 0 < j < n, else 0),
+/// scaled by 1/m. Computed HERE, at elaboration, by the same radix-2 butterfly the generated code runs (the same
+/// quarter-wave twiddles, the same operation order); spectra/Fft.fs's `bluesteinKernel` is the oracle's copy.
+let bluesteinKernel (n: int) (m: int) (sgn: float) : (float * float) list =
+    let c = bluesteinChirp n sgn |> Array.ofList
+    let b = Array.create m (0.0, 0.0)
+    for j in 0 .. n - 1 do
+        let (re, im) = c.[j]
+        b.[j] <- (re, -im)
+        if j > 0 then b.[m - j] <- (re, -im)
+    let stages = fftStages m
+    let q4 = m / 4
+    let qc = quarterCos m |> Array.ofList
+    let tw =
+        [| for j in 0 .. m / 2 - 1 ->
+             let re = if j <= q4 then qc.[j] else -qc.[m / 2 - j]
+             let s0 = if j <= q4 then qc.[q4 - j] else qc.[j - q4]
+             (re, -s0) |]
+    let sx = [| for i in 0 .. m - 1 -> b.[bitrev stages i] |]
+    let cmulP (ar, ai) (br, bi) = (ar * br - ai * bi, ar * bi + ai * br)
+    for st in 1 .. stages do
+        let len = 1 <<< st
+        let half = len / 2
+        let tstr = m / len
+        for u in 0 .. m / len - 1 do
+            for j in 0 .. half - 1 do
+                let p = u * len + j
+                let q = p + half
+                let (tr, ti) = cmulP tw.[j * tstr] sx.[q]
+                let (pr, pi) = sx.[p]
+                sx.[p] <- (pr + tr, pi + ti)
+                sx.[q] <- (pr - tr, pi - ti)
+    let inv = 1.0 / float m
+    [ for (re, im) in sx -> (re * inv, im * inv) ]
+
+/// The radix-2 butterflies, in place on `buf` (`batches` contiguous runs of length m, already bit-reversed), with the
+/// twiddle table `tw` (the same loop nest as the pow2 fft, one more loop over the batch). Stages statically unrolled.
+let private batchedButterflies (buf: string) (tw: string) (m: int) (batches: int) : Stmt list =
+    [ for st in 1 .. fftStages m do
+        let len = 1 <<< st
+        let half = len / 2
+        let tstr = m / len
+        yield sFor "g" 0 batches
+          [ sFor "u" 0 (m / len)
+              [ sFor "j" 0 half
+                  [ sLet "p" (add (add (mul (v "g") (iLit m)) (mul (v "u") (iLit len))) (v "j"))
+                    sLet "q" (add (v "p") (iLit half))
+                    sLet "t" (mul (idx tw (mul (v "j") (iLit tstr))) (idx buf (v "q")))
+                    sLet "p0" (idx buf (v "p"))
+                    sAssign (idx buf (v "p")) (add (v "p0") (v "t"))
+                    sAssign (idx buf (v "q")) (sub (v "p0") (v "t")) ] ] ] ]
+
+/// A batched Bluestein DFT of length n (n >= 3, any n) with sign `sgn` (-1 forward, +1 inverse synthesis, both
+/// unnormalized). `batches` independent vectors: `readIn g j` is element j of vector g (a complex Expr), and
+/// `writeOut g k value` stores the k-th output of vector g. `pre` prefixes every binding so two passes in one body do
+/// not collide. Work buffers are flat (`batches` runs of length m).
+let bluesteinStmts (pre: string) (n: int) (batches: int) (sgn: float)
+                   (readIn: Expr -> Expr -> Expr) (writeOut: Expr -> Expr -> Expr -> Stmt) : Stmt list =
+    let m = nextPow2 (2 * n - 1)
+    let stages = fftStages m
+    let nm name = pre + name
+    let at (buf: string) (g: Expr) (i: Expr) = idx (nm buf) (add (mul g (iLit m)) i)
+    [ sLet (nm "c") (cplxArrLit (bluesteinChirp n sgn))
+      sLet (nm "bh") (cplxArrLit (bluesteinKernel n m sgn)) ]
+    @ pow2TwiddleStmts (nm "twf") (nm "qf") m (-1.0)
+    @ pow2TwiddleStmts (nm "twi") (nm "qi") m 1.0
+    @ [ // Chirp-weighted input, zero-padded to m.
+        sLetMut (nm "z") (cplxZerosLit (batches * m))
+        sFor "g" 0 batches
+          [ sFor "j" 0 n
+              [ sAssign (at "z" (v "g") (v "j")) (mul (readIn (v "g") (v "j")) (idx (nm "c") (v "j"))) ] ]
+        // Forward FFT_m: gather through the bit-reversal permutation, then the butterflies.
+        sLetMut (nm "a") (cplxZerosLit (batches * m))
+        sFor "g" 0 batches
+          [ sFor "i" 0 m
+              [ sAssign (at "a" (v "g") (v "i")) (at "z" (v "g") (bitrevE stages (v "i"))) ] ] ]
+    @ batchedButterflies (nm "a") (nm "twf") m batches
+    @ [ // The convolution in frequency space (the kernel spectrum carries the 1/m).
+        sFor "g" 0 batches
+          [ sFor "k" 0 m
+              [ sAssign (at "a" (v "g") (v "k")) (mul (at "a" (v "g") (v "k")) (idx (nm "bh") (v "k"))) ] ]
+        // Inverse FFT_m (unnormalized: inverse twiddles), gather then butterflies.
+        sLetMut (nm "d") (cplxZerosLit (batches * m))
+        sFor "g" 0 batches
+          [ sFor "i" 0 m
+              [ sAssign (at "d" (v "g") (v "i")) (at "a" (v "g") (bitrevE stages (v "i"))) ] ] ]
+    @ batchedButterflies (nm "d") (nm "twi") m batches
+    @ [ // Chirp-weighted output, the first n of each run.
+        sFor "g" 0 batches
+          [ sFor "k" 0 n
+              [ writeOut (v "g") (v "k") (mul (at "d" (v "g") (v "k")) (idx (nm "c") (v "k"))) ] ] ]
+
 // fft -- unnormalized forward DFT of a real signal, complex output
 
-/// Radix-2 iterative Cooley-Tukey for power-of-2 n; naive table-driven O(n^2) DFT otherwise. Stages are statically
+/// Radix-2 iterative Cooley-Tukey for power-of-2 n; Bluestein (above) for every other n >= 3; n = 1 is the identity
+/// (the one-term table DFT). Stages are statically
 /// unrolled in F#: a runtime stage loop would need the multiplicative loop-carried scalar `len = len*2`, which Grad's
 /// loop discipline rejects (spectra elaborates BEFORE Grad) -- do not "simplify" this back into a loop.
 let fftDecl (name: string) (n: int) : FunctionDecl =
@@ -137,8 +256,15 @@ let fftDecl (name: string) (n: int) : FunctionDecl =
                               sAssign (idx "sx" (v "p")) (add (v "p0") (v "t"))
                               sAssign (idx "sx" (v "q")) (sub (v "p0") (v "t")) ] ] ]
             blockE (stmts, Some (v "sx"))
+        elif n >= 3 then
+            let stmts =
+                [ sLetMut "sx" (cplxZerosLit n) ]
+                @ bluesteinStmts "bf_" n 1 (-1.0)
+                    (fun _ j -> cplx (idx "x" j) (fLit 0.0))
+                    (fun _ k value -> sAssign (idx "sx" k) value)
+            blockE (stmts, Some (v "sx"))
         else
-            // Naive DFT: X(k) = Sum_i x(i) * e^(-2*pi*i*k*i/n), twiddle by table at (k*i) mod n (nonnegative Int %, C++ semantics match F#).
+            // n = 1: the one-term table DFT, X(0) = x(0).
             let stmts =
                 [ sLet "tw" (cplxArrLit (fwdTwiddles n n))
                   sLetMut "sx" (cplxZerosLit n)
@@ -154,7 +280,7 @@ let fftDecl (name: string) (n: int) : FunctionDecl =
 //
 // Power-of-2 n (>= 2) runs the SAME radix-2 butterfly as `fft` on the complex spectrum with the inverse twiddles
 // (e^(+2*pi*i*j/n)), then keeps the real part and scales by 1/n: O(n log n), where it used to take the naive O(n^2)
-// synthesis at every n. Other n keep the naive table-driven synthesis.
+// synthesis at every n. Other n >= 3 take Bluestein with the inverse chirp (real part / n); n = 1 the one-term table.
 let ifftDecl (name: string) (n: int) : FunctionDecl =
     let stmts =
         if isPow2 n && n >= 2 then
@@ -179,6 +305,11 @@ let ifftDecl (name: string) (n: int) : FunctionDecl =
             @ [ sLetMut "xo" (zerosLit n)
                 sFor "i" 0 n
                   [ sAssign (idx "xo" (v "i")) (divE (realE (idx "sx" (v "i"))) (fLit (float n))) ] ]
+        elif n >= 3 then
+            [ sLetMut "xo" (zerosLit n) ]
+            @ bluesteinStmts "bi_" n 1 1.0
+                (fun _ j -> idx "xs" j)
+                (fun _ k value -> sAssign (idx "xo" k) (divE (realE value) (fLit (float n))))
         else
             [ sLet "tw" (cplxArrLit (invTwiddles n n))
               sLetMut "xo" (zerosLit n)
@@ -242,7 +373,8 @@ let polyspecDecl (name: string) (n: int) (k: int) (fftName: string) : FunctionDe
 
 // fft2 / ifft2 -- separable 2-D DFT over a rank-2 field (rows, then columns). Both passes work on flat row-major complex
 // buffers of size r*c (MathDecls house style); the rank-2 result is the nested-literal-of-reads convention. Each axis
-// independently takes the radix-2 path when pow2 (>= 2) and the naive table DFT otherwise -- the same per-axis contract
+// independently takes the radix-2 path when pow2 (>= 2), Bluestein when >= 3 otherwise (batched over the other axis),
+// and the one-term table at extent 1 -- the same per-axis contract
 // as the 1-D fft, and the same ulp discipline: twiddles baked, naive complex multiply, loop structure textually parallel
 // with rowPass2/colPass2 in spectra/Fft.fs.
 
@@ -274,6 +406,11 @@ let private rowPass2 (r: int) (c: int) (mkTw: int -> int -> (float * float) list
                           sLet "p0" (idx "sa" (v "p"))
                           sAssign (idx "sa" (v "p")) (add (v "p0") (v "tt"))
                           sAssign (idx "sa" (v "q")) (sub (v "p0") (v "tt")) ] ] ] ]
+    elif c >= 3 then
+        [ sLetMut "sa" (cplxZerosLit (r * c)) ]
+        @ bluesteinStmts "br_" c r sgn
+            (fun g j -> readIn g j)
+            (fun g k value -> sAssign (idx "sa" (flatIJ g k)) value)
     else
         [ sLet "twc" (cplxArrLit (mkTw c c))
           sLetMut "sa" (cplxZerosLit (r * c))
@@ -310,6 +447,11 @@ let private colPass2 (r: int) (c: int) (mkTw: int -> int -> (float * float) list
                           sLet "p0" (idx "sb" (v "p"))
                           sAssign (idx "sb" (v "p")) (add (v "p0") (v "tt"))
                           sAssign (idx "sb" (v "q")) (sub (v "p0") (v "tt")) ] ] ] ]
+    elif r >= 3 then
+        [ sLetMut "sb" (cplxZerosLit (r * c)) ]
+        @ bluesteinStmts "bc_" r c sgn
+            (fun g i -> idx "sa" (flatIJ i g))
+            (fun g k value -> sAssign (idx "sb" (flatIJ k g)) value)
     else
         [ sLet "twr" (cplxArrLit (mkTw r r))
           sLetMut "sb" (cplxZerosLit (r * c))

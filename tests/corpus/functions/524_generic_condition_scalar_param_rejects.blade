@@ -1,0 +1,7 @@
+// TEST: A generic comparison used as a condition pins its operand scalar (rejects)
+// ERROR: BL3001
+// ============================================================================
+// `if x > 0.0` needs ONE Bool, so `x` is a scalar; an array argument used to
+// type-check and die in emission. It is refused at the call.
+function absval(x: T) = if x > 0.0 then x else -x
+let g = absval([1.0, -5.0])

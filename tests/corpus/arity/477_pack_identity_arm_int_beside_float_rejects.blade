@@ -1,0 +1,15 @@
+// TEST: an integer identity arm beside Float64 pack slices (rejects)
+// ERROR: BL3020
+// The scalar identity arm of `match arity(..)` is held back from the arms
+// over the pack's slices (D4), so the mixing rule (formalism 2.4) is judged
+// at the instance: `x [*] 1` over a Float64 slice is an integer beside a
+// float, refused -- it used to be promoted silently by the broadcast kernel.
+function outerm(a: Poly<T^1>) = {
+    match arity(a) with
+    | 0 -> 1
+    | _ -> {
+        let head :: tail = a
+        head [*] outerm(tail)
+    }
+}
+let m2 = outerm([1.0, 2.0], [3.0, 4.0, 5.0])

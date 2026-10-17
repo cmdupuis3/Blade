@@ -1,0 +1,16 @@
+// TEST: A generic product fold seeds each instance with its own one
+// ============================================================================
+// Only `(+)` had a typed seed (`zero`). A `(*)` fold over an element still
+// open in a generic body was seeded with the Float64 `1.0` at every
+// instance: an Int64 instance folded into a double accumulator (C++
+// converted silently; the interpreter printed `48.0` for an Int64 `48`).
+// The seed is the instance's own one now.
+// ============================================================================
+function prodtwice(v: T^1) = reduce(method_for(v) <@> lambda(x) -> x + x, (*))
+let pi = prodtwice([1, 2, 3])
+// EXPECT: pi = 48
+let pf = prodtwice([1.0, 2.5])
+// EXPECT: pf = 10.0
+let x32: Array<Float32 like Idx<2>> = [1.5, 2.0]
+let p32 = prodtwice(x32)
+// EXPECT: p32 = 12.0

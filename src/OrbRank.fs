@@ -146,6 +146,25 @@ let binomChecked (m: int64) (r: int) : Result<int64, string> =
                 acc <- mulChecked (a / (int64 i / g)) (f / g)
         acc
 
+/// C(m, k) with the cardinality-arithmetic convention every pool sizer uses:
+/// 0 when k < 0 or m < k, else the exact binomial through binomChecked. The ONE
+/// spelling behind every compile-time binomial (P3-15): the num/den copies it
+/// replaced multiplied the whole numerator before dividing, so C(1000, 7)
+/// wrapped int64 although the answer fits. A binomial that genuinely exceeds
+/// int64 raises instead of returning a wrapped count.
+let binomOrZero (m: int64) (k: int) : int64 =
+    if k < 0 || m < int64 k then 0L
+    else
+        match binomChecked m k with
+        | Ok v -> v
+        // A stable USER diagnostic, never an ICE: Lowering.refuseUncountableStorage
+        // refuses an uncountable declared type at its declaration first, and a
+        // pool sized anywhere else lands here (BL4003, no span to give).
+        | Error msg ->
+            raise (Blade.Diagnostics.BladeDiagnosticException
+                    (Blade.Diagnostics.mkError "BL4003" Blade.Diagnostics.PhConstraints Blade.Ast.noSpan
+                        $"a packed storage count, C({m}, {k}), does not fit a 64-bit count ({msg}): a compact array this large cannot be allocated. Reduce the extent or the symmetry rank."))
+
 /// Sequence a list of Results, keeping the first error.
 let private resultAll (xs: Result<'a, string> list) : Result<'a list, string> =
     let rec go acc rest =

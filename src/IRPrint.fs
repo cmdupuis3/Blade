@@ -7,6 +7,19 @@ open Blade.IR
 
 // Pretty Printing
 
+/// D11: how a declared type's name is shown. A non-main module's identity
+/// (`A.P`) prints as the SOURCE name (`P`) -- what the program wrote --
+/// unless a diagnostic sets `qualifiedTypeNames` because two different
+/// identities would print alike ("expected A.P, got B.P").
+let private qualifiedTypeNamesSlot = new System.Threading.AsyncLocal<bool>()
+let typeDisplayName (identity: string) : string =
+    if qualifiedTypeNamesSlot.Value then identity else TypeOrigins.sourceName identity
+/// Run `f` with qualified type names shown.
+let withQualifiedTypeNames (f: unit -> 'a) : 'a =
+    let prev = qualifiedTypeNamesSlot.Value
+    qualifiedTypeNamesSlot.Value <- true
+    try f () finally qualifiedTypeNamesSlot.Value <- prev
+
 let rec ppIRType = function
     | IRTScalar ETInt32 -> "Int32"
     | IRTScalar ETInt64 -> "Int64"
@@ -50,7 +63,7 @@ let rec ppIRType = function
         // wrapper shape.
         let tagStr =
             match idxRef with
-            | IRefNamed name -> name
+            | IRefNamed name -> typeDisplayName name
             | IRefAnon (id, extent) ->
                 let extentStr =
                     match extent with
@@ -66,7 +79,7 @@ let rec ppIRType = function
     | IRTDist (order, elem, axes) ->
         let axesStr = axes |> List.map ppIndexType |> String.concat ", "
         $"Dist<{order}, {ppIRType elem} like {axesStr}>"
-    | IRTNamed name -> name  // Named types print as themselves
+    | IRTNamed name -> typeDisplayName name  // Named types print as their source name (D11)
     | IRTInfer id -> $"T?{id}"
     // Type-argument rendering (ppUnitSigType, not ppUnitSig): a quantity
     // renders as its nominal name (`Float64<speed>`), a structural signature
@@ -157,7 +170,7 @@ and ppIndexType (idx: IRIndexType) =
 /// dropped both the class and its rank.
 and userIndexName (idx: IRIndexType) : string option =
     match idx.Tag with
-    | Some t when t <> "" && not (t.StartsWith "__") -> Some t
+    | Some t when t <> "" && not (t.StartsWith "__") -> Some (typeDisplayName t)
     | _ -> None
 
 /// The product frame a COMPACT record carries -- `SymIdx<r, <I1, ..., Id>>`,
@@ -343,6 +356,9 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
         $"complex({pp re}, {pp im})"
     | IRFma (a, b, c) ->
         $"fma({pp a}, {pp b}, {pp c})"
+    | IRRandAt (kind, args, weights) ->
+        let ws = weights |> Option.map (fun (w, _) -> [ pp w ]) |> Option.defaultValue []
+        "rand_sample." + kind + "(" + String.concat ", " ((args |> List.map pp) @ ws) + ")"
     | IRTupleProj (e, i, _) ->
         $"{pp e}.{i}"
     | IRIf (c, t, e) ->
@@ -473,7 +489,7 @@ let rec tryEvalIntIR (expr: IRExpr) : int64 option =
 // AnalysisContext -- unified callable-walking for cross-procedural analysis
 //
 // `exprAttrs` walks an expression tree to compute attributes (FreeVars,
-// BoundVars, IsPure); its IRApp arm follows IRVar(fId) through the
+// BoundVars); its IRApp arm follows IRVar(fId) through the
 // CallablesTable, substitutes the callee's params with the call's args, and
 // walks the body, so free variables from inside a callee surface to the
 // caller's analysis. `Visited` short-circuits recursion (mutual and direct
@@ -573,7 +589,6 @@ let buildCallablesTableForModule (modul: IRModule) : CallablesTable =
 // A single bottom-up pass that computes
 //   FreeVars  -- IRIds referenced from outside this expression's binders
 //   BoundVars -- IRIds introduced inside (by IRLet, lambda params, etc.)
-//   IsPure    -- no observable side effects
 // for any IRExpr.
 //
 // This does NOT drive any rewrite. It exists so that future passes (a
@@ -583,11 +598,10 @@ let buildCallablesTableForModule (modul: IRModule) : CallablesTable =
 // Design notes:
 //   - No memoization: a correctness foundation, not a hot path. Add a
 //     reference-keyed cache if profiling later shows this dominating.
-//   - IsPure is true for all native Blade IR EXCEPT IRDisplayEmit, the one
-//     construct with observable I/O (it writes a display frame to stdout).
-//     Nothing consumes IsPure yet; the flag is set correctly so that when a
-//     hoist/LICM/CSE pass arrives it cannot silently move, merge or drop a
-//     frame emission.
+//   - No purity flag: effects are judged by the optimizer's own facts
+//     (Optimize.cseFactsOf over Blade.Effects summaries, IR.irNodeMayAbort),
+//     which is what CSE and hoisting consume. An `IsPure` field here was
+//     never read and called IRAssign pure (P3-14), so it was removed.
 //   - Exhaustive by construction: only semantically special variants have
 //     explicit arms (IRVar contributes a free var; IRApp follows resolvable
 //     callees; BinderShape variants scope their bound ids). Everything else
@@ -596,16 +610,14 @@ let buildCallablesTableForModule (modul: IRModule) : CallablesTable =
 type ExprAttrs = {
     FreeVars:  Set<IRId>
     BoundVars: Set<IRId>
-    IsPure:    bool
 }
 
 let internal emptyAttrs : ExprAttrs =
-    { FreeVars = Set.empty; BoundVars = Set.empty; IsPure = true }
+    { FreeVars = Set.empty; BoundVars = Set.empty }
 
 let internal mergeAttrs (a: ExprAttrs) (b: ExprAttrs) : ExprAttrs =
     { FreeVars  = Set.union a.FreeVars  b.FreeVars
-      BoundVars = Set.union a.BoundVars b.BoundVars
-      IsPure    = a.IsPure && b.IsPure }
+      BoundVars = Set.union a.BoundVars b.BoundVars }
 
 let internal mergeMany (xs: ExprAttrs list) : ExprAttrs =
     List.fold mergeAttrs emptyAttrs xs
@@ -615,16 +627,6 @@ let rec exprAttrs (expr: IRExpr) : ExprAttrs =
     // -- Variable reference: the one FreeVars source --
     | IRVar (id, _) ->
         { emptyAttrs with FreeVars = Set.singleton id }
-
-    // -- The one IMPURE construct: display.emit writes a frame to stdout, so
-    //    a future hoist/CSE/dead-binding pass must not move it, merge two of
-    //    them, or drop one whose value is unused. This is the "future impure
-    //    construct" the header anticipated; the payload's own attrs still
-    //    merge in (it can reference bindings like anything else).
-    | IRDisplayEmit (_, _, data, _, idOpt) ->
-        // The emit_id id is an ordinary operand: its own free vars merge in
-        // beside the payload's, and the whole node stays impure.
-        { mergeMany (exprAttrs data :: (idOpt |> Option.toList |> List.map exprAttrs)) with IsPure = false }
 
     | IRApp (f, args, _) ->
         let baseAttrs = mergeMany (exprAttrs f :: List.map exprAttrs args)
@@ -677,8 +679,7 @@ let rec exprAttrs (expr: IRExpr) : ExprAttrs =
             scopes |> List.map (fun (bound, parts) ->
                 let a = parts |> List.map exprAttrs |> mergeMany
                 { FreeVars  = Set.difference a.FreeVars bound
-                  BoundVars = Set.union a.BoundVars bound
-                  IsPure    = a.IsPure })
+                  BoundVars = Set.union a.BoundVars bound })
         mergeMany (freeAttrs :: scopeAttrs)
 
     // -- Everything else: merge over the canonical children --

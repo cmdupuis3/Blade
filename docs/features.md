@@ -16,7 +16,7 @@ corpus wins.
 
 | Feature | Usage | Status | Description / Notes |
 |---------|-------|--------|---------------------|
-| Scalar types | `Int32/Int64/Float32/Float64/`<br>`Complex64/Complex128`, `Bool`, `String`, `Char`, `Nat`, `Void` | Core | `Int` = `Int64`, `Float` = `Double` = `Float64`; `Nat` is the index-value type (`Nat<I>` tagged, §5a) |
+| Scalar types | `Int32/Int64/Float32/Float64/`<br>`Complex64/Complex128`, `Bool`, `String`, `Char`, `Nat`, `Void` | Core | `Int` = `Int32` (an integer literal is `Int64`), `Float` = `Double` = `Float64`; `Nat` is the index-value type (`Nat<I>` tagged, §5a) |
 | Explicit numeric casts | `Float32(x)`, `Float64(extents(a))`,<br>`Int64(floor(x))`, `Complex128(r)` | Core | Scalar type name in call position; shadowable plain-call intrinsic. Complex→real refuses (BL3019: project with `real`/`imag`/`abs`/`arg`); float→int only through a floor/ceil visible at the cast site. A cast converts the element only: arrays (and generic `T` / `T^k` operands) keep their shape, symmetry and units. Nothing converts implicitly: an int/float mix in arithmetic or a comparison, an integer into a float parameter or binding, two non-literal widths of one class -- all BL3020 (a literal adapts within its class only) |
 | Fused multiply-add | `fma(a, b, c)` | Core | `a*b + c` rounded ONCE; Float64 scalars; shadowable plain-call intrinsic. Its own IR node, so it is bit-identical across the compiled, interpreted and LLVM lanes under any `BLADE_FP_CONTRACT` (unlike `a*b + c`). The building block of error-free transformations / double-double arithmetic. AD: partials b, a, 1 |
 | Type variables | `A -> B -> ...` | Core | Same letter = same type in a signature |
@@ -190,7 +190,7 @@ Full semantics in [features/sql.md](features/sql.md). All implemented and tested
 
 | Operation | SQL analogue | One-liner |
 |-----------|--------------|-----------|
-| `mask(A, pred)` | WHERE predicate | Bool presence array over A's own index space; combine with `&&`/`\|\|` |
+| `mask(A, pred)` | WHERE predicate | Bool presence array over A's own index space; combine with `&&`/`\|\|`; rank 1, or rank k over a plain dense array (the whole index space; `compound(A, m)` compacts every dimension -- tests/corpus/sql-masks/013_rank2_mask_compound.blade) |
 | `compound(A, m)` | WHERE materialization | Compact CompoundIdx view; coordinate-based reads; cardinality = pass count |
 | `intersect(A, B)` | INTERSECT | Value-based, dedups, first-occurrence order from A |
 | `union(A, B)` | UNION | Dedups both sides, A's occurrences first |
@@ -256,6 +256,7 @@ Full semantics in [features/sql.md](features/sql.md). All implemented and tested
 |---------|--------|-----------------|
 | NetCDF | Core |  |
 | Zarr | Core |  |
+| Missing values at the read boundary | Core | A default read refuses a variable holding cells its store marks missing (BL8015, every lane, the static fold included): NaN/±Inf in any floating variable, NetCDF `_FillValue` / `missing_value` / valid range / default fill; finite Zarr/Icechunk fills are values; provider writes refuse NaN/Inf too. Opt-in: the masked read `alias.read_present` (present cells as a compound array) / `alias.present` (the mask) — docs/features/sql.md §2a |
 | Triangular Zarr file format | Partly Done | Provides Zarr storage spec for natively triangular or wreath-shaped tensors |
 | Icechunk | Partly Done | Versioned (transactional) Zarr: `repo.checkout` with branch/tag/snapshot unit markers, compile-time snapshot pinning, cross-checkout axis identity. Writes, `read_window`, and packed-blocks reads pending. `.stream` and `load_compound` are REFUSED outright (`GenStreamOpen` / `GenReadCompoundVar` are `None`; the refusals are pinned in the icechunk test lane), not silently degraded — docs/plans/plan-icechunk-provider.md |
 

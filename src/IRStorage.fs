@@ -218,19 +218,11 @@ let isCudaBoundarySafeElem (ty: IRType) : bool =
     | AnyPrimElem ETComplex64 | AnyPrimElem ETComplex128 -> true
     | _ -> false
 
-/// Binomial C(n, k) as int64. Incremental multiplicative form; each partial
-/// C(n, i+1) = C(n, i)*(n-i)/(i+1) is itself an integer, so the mid-loop
-/// division is EXACT (not lossy).
+/// Binomial C(n, k) as int64, 0 when k < 0 or k > n (OrbRank.binomOrZero: the
+/// incremental form here wrapped transiently in `result * (n - i)`).
 let binomI64 (n: int64) (k: int64) : int64 =
     if k < 0L || k > n then 0L
-    else
-        let k = if k > n - k then n - k else k
-        let mutable result = 1L
-        let mutable i = 0L
-        while i < k do
-            result <- result * (n - i) / (i + 1L)
-            i <- i + 1L
-        result
+    else Blade.OrbRank.binomOrZero n (int k)
 
 /// Per-group scalar count as an IRExpr. Literal extents fold to a literal:
 ///   rectangular (Rank=1)      => extent

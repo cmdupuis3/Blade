@@ -855,6 +855,61 @@ let rec internal collectNumericMixErrors (env: TypeEnv) (expr: TypedExpr) : Comp
     | [] -> here
     | inner -> List.truncate 1 inner
 
+/// A `zero` the checker has typed at a SUM TYPE (or a struct, tuple or array
+/// with a sum-type part) has no value (formalism 10.4: no rule picks a
+/// canonical zero variant). Both back ends refuse it in EXPRESSION position
+/// (IR.zeroHasNoValueMessage), but a binding (`let v: Shape = zero`) reached
+/// C++ emission's binding arms, which have no rule for it (BL7001, "a gap in
+/// the back end"). Refused here, with the back ends' own sentence, wherever
+/// the type is already known; a generic `zero` that only an instance makes a
+/// sum type keeps the back ends' refusal.
+let rec internal collectValuelessZeros (env: TypeEnv) (expr: TypedExpr) : CompileError list =
+    let rec sumPart (fuel: int) (t: IRType) : bool =
+        fuel > 0
+        && (match IR.stripUnits (env.Subst.Resolve t) with
+            | IRTNamed n ->
+                (match lookupTypeDef n env with
+                 | Some (TDIVariant _) -> true
+                 | Some (TDIStruct (_, _, fields, _)) -> fields |> List.exists (fun (_, ft) -> sumPart (fuel - 1) ft)
+                 | _ -> false)
+            | IRTTuple ts -> ts |> List.exists (sumPart (fuel - 1))
+            | ArrayElem a -> sumPart (fuel - 1) a.ElemType
+            | _ -> false)
+    let here =
+        match expr.Kind with
+        | TExprZero ->
+            let t = env.Subst.Resolve expr.Type
+            if sumPart 32 t then
+                match IR.zeroHasNoValueMessage (IR.stripUnits t) with
+                | Some msg -> [ { Error = Other msg; Span = expr.Span; Context = []; Code = None } ]
+                | None -> []
+            else []
+        | _ -> []
+    here @ (typedExprChildren expr |> List.collect (collectValuelessZeros env))
+
+/// An integer literal typed as an INTEGER EnumIdx `R` is a key; one that is
+/// none of R's keys has no position to be represented as (Zonk.intEnumEdges
+/// leaves it unfolded) -- refused here, BL4003 like an unknown subscript key.
+/// Run on the UNZONKED tree (types through the substitution): zonk folds the
+/// known keys to positions, which would read as keys again.
+let rec internal collectUnknownEnumKeys (env: TypeEnv) (expr: TypedExpr) : CompileError list =
+    let here =
+        let lit =
+            match expr.Kind with
+            | TExprLit (LitInt v) -> Some v
+            | TExprUnaryOp (OpNeg, { Kind = TExprLit (LitInt v) }) -> Some (-v)
+            | _ -> None
+        match lit, IR.stripUnits (env.Subst.Resolve expr.Type) with
+        | Some v, IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), IRefNamed tag) ->
+            (match intEnumKeysOfTag env tag with
+             | Some keys when not (List.contains v keys) ->
+                 [ { Error = EnumIdxUnknownKey (tag, v, keys |> List.map string); Span = expr.Span; Context = []; Code = None } ]
+             | _ -> [])
+        | _ -> []
+    match expr.Kind with
+    | TExprUnaryOp (OpNeg, { Kind = TExprLit (LitInt _) }) -> here
+    | _ -> here @ (typedExprChildren expr |> List.collect (collectUnknownEnumKeys env))
+
 /// Every expression a zonked declaration carries, for the sweep above.
 let internal declExprs (decl: TypedDecl) : TypedExpr list =
     let ofFunc (f: TypedFunctionDecl) = [f.Body]

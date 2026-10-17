@@ -1,9 +1,9 @@
 // TEST: Struct Array Print
-// exercises per-field auto-print of POD struct array.
-// Validator can't parse [{x: 1, y: 2}, ...] as a float list, so the
-// EXPECT line tests a scalar derived from the array. The print codegen
-// runs as a side effect — if it fails to compile, the whole test
-// regresses at Compile:OK.
+// The auto-print of a POD struct array: each element prints spelled like
+// its literal, `Particle { x = 1.0, y = 2.0 }`, the way a struct value does
+// (formalism 3.9). It used to print `[{x: 1.0, y: 2.0}, ...]`, a spelling no
+// literal has, which no pin could read -- so only a derived scalar was
+// pinned. The whole line is pinned now, in every lane.
 struct Particle {
     x: Float64,
     y: Float64
@@ -14,3 +14,4 @@ let pts: Array<Particle like Idx<2>> = [
 ]
 let sum_x = pts[0].x + pts[1].x
 // EXPECT: sum_x = 4.0
+// EXPECT: pts = [Particle { x = 1.0, y = 2.0 }, Particle { x = 3.0, y = 4.0 }]
