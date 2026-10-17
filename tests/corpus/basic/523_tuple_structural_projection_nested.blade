@@ -1,0 +1,18 @@
+// TEST: Tuple Structural Projection Past A Nested Component
+// `t[i]` counts the tuple TYPE's components, not its leaves: in
+// `((1, 2), 3)`, `t[1]` is 3 and `t[0]` is the pair. The LLVM lane carries
+// tuples as flat packs and once indexed the pack with the structural index,
+// answering the second LEAF (2) -- silently, in both a direct projection and
+// one out of a match-bound variable.
+let t = ((1, 2), 3)
+let b = t[1]
+let p = t[0]
+let q = p[1]
+let r = match t with
+    | x -> x[1]
+let s = match t with
+    | (pair, last) -> pair[0] * 100 + last
+// EXPECT: b = 3
+// EXPECT: q = 2
+// EXPECT: r = 3
+// EXPECT: s = 103

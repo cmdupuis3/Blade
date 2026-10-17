@@ -7,6 +7,92 @@ is the record of what landed and what the numbers said; everything from §1 down
 implementation was scored against. Where §0 and a later section disagree, §0 is the
 measurement and the later section is the forecast.
 
+**Update (2026-10-17): coverage audit — §0.9.** `blade test llvm` 470/0 at 54.1%
+coverage on master -> 597/0 at 65.1%, the August group_by slice ported, two
+harness gaps closed (stdlib importers and abort probes were never compared), and
+four silent-wrong / invalid-IR defects fixed, one of them pre-existing in the fact
+layer (`willreturn` on functions that can panic).
+
+---
+
+## 0.9 Coverage audit 2026-10-17 (branch `feat/llvm-audit-2026-10`)
+
+Two months of master (236 commits) had landed since the lane was last worked.
+Baseline on master `e977b6a`: **470 passed, 0 failed; 387 of 715 comparable
+programs emitted (54.1%)**. After this round: **597/0; 513 of 788 (65.1%)** -- the
+denominator grew because stdlib importers and `(aborts)` probes are now compared
+at all, and `sql-group-by` joined the default sweep. The
+round was pair-programmed with Codex (diagnosis and design review, drafts of the
+constraint-check, transpose and gram arms); every change went through the full
+differential before it was committed.
+
+**Defects found (not coverage — wrong behavior):**
+
+- *The group_by slice crashed on master.* `feat/llvm-groupby` (August, unmerged)
+  cherry-picked without a textual conflict but every grouped program hit an
+  access violation: its CSR build assumed calloc pools, and `4761eca` made
+  `blade_alloc_cells` return uninitialized storage the same day. Fixed by
+  explicit zeroing; master's C++ lane had also started printing grouped rows
+  rather than the `[[], []]` placeholder, so the placeholder special case went.
+  sql-group-by 0/18 -> 18/0.
+- *A forced deferred module binding could break dominance.* loops/129: a kernel
+  inside a nest forced `c` in place; the pool did not dominate later statements.
+  Forcing a deferred MODULE binding from main now hoists to the start of the
+  current top-level statement (the C++ lane's `forceDeferredPositionalReads`
+  point), guarded on the binding being the same instance it was at statement
+  start (a mid-statement rebinding would put its registers after the hoist).
+- *Function bodies inherited main's tuple and group-key registers* (TupleSlots,
+  GroupKeys were not reset per function). Latent; reset now.
+- *Harness: the differential never saw stdlib importers.* `Lowering.lower` has no
+  entry path, so `from stats import mean` refused at the front end and was
+  counted as a front-end skip. Now `lowerCaptured`, the corpus runner's entry.
+
+**Found by the final review (a Fable/high read-only pass) and fixed:**
+
+- *`willreturn` on functions that can panic* -- PRE-EXISTING in the fact layer.
+  Group 0 asserted `willreturn` on every function of a recursion-free module,
+  including ones that reach a `noreturn` shim panic; that call is then UB, LLVM
+  deletes the panic path, and the program traps with no message (exit 3 /
+  0x80000003 where the C++ lane prints `error[BL8006] ...`). It hid because the
+  differential SKIPPED every `(aborts)` probe. `willreturn` now drops module-wide
+  once any panicking shim symbol is declared, as `nofree` does for frees; the
+  differential compares abort probes (same exit code, same `error[...]` and
+  `-->` lines) and 37 of them now pass.
+- *Structural tuple projection read the flat pack*: `t[1]` of `((1, 2), 3)`
+  answered 2. `tupleComponent` now honors the IR's `isFlat` flag, counting leaf
+  offsets from the parent's tuple type (corpus basic/523).
+- *group_keys dropped the C++ lane's BL8006 guards*: an int key outside its
+  EnumIdx went to bucket 0, a positional key >= N wrote past the counts pool.
+  Both now abort with the C++ lane's bytes (sql-group-by/051, /055).
+- *The statement-start hoist could precede an inline upgrade*: a loop-body
+  producer force upgraded a module array inline, then a later hoisted producer
+  read it before its allocation (invalid IR). Loop-body forces of module
+  bindings now hoist too, and a hoist requires every pre-existing array slot to
+  be unchanged or hoist-produced (corpus loops/470).
+- Nit: gram honors `BLADE_FP_CONTRACT` like `emitProdSum`.
+
+Verified sound by the same review: module publication (one storage location,
+recursion, prints), IRBreakIf frees, gram/decompact storage-coordinate algebra,
+nested match literals and guards, the pipeline arm's gates.
+
+**Coverage landed:** module bindings readable from function bodies (published to
+internal globals by a transitive read closure; a call proves its callee's reads
+are published, which is also the init-order proof); `decompact` (producer over
+canonRead — compact storage coordinates are steps over the previous floor and are
+converted to logical indices first); `IRConstraintCheck` (BL8001/8006/8010 via the
+shim's located panic); struct declarations; `while`-guarded `let rec`
+(`IRBreakIf`, with the trip's frees before the branch); `transpose` (hard copy);
+`gram` (ordered native fold, refuses when a BLAS route is active); array
+negate/conjugate (eager copy); forced two-stage `>>@` pipelines (two full
+sweeps, as the C++ lane runs them); tuple and cons match patterns.
+
+**Top of the worklist now** (counts from the 2026-10-17 histogram): runtime-extent
+loop levels 22 (heterogeneous: 8 enumerable domains — reachable now that struct
+declarations no longer refuse the program — 5 sparse iteration, compound, bind,
+abstract-parameter shapes; each needs its own nest support), complex ~25,
+function-typed parameters ~20, fused compound loop levels 9, OrbIdx output 8,
+IRApplyCombinator in value position 7, Irreps literals 7, ComposeApply 5.
+
 ---
 
 ## 0. Status 2026-08-18 — implemented through M5, and measured

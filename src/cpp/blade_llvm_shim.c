@@ -84,7 +84,7 @@ BLADE_NORETURN void blade_panic(const char *msg) {
 /* The located twin: blade_rt::panic's `  --> file:line` second line, when the
  * emitter knew where the faulting expression was (file null or line 0 when it
  * did not), before the trace. Byte-identical to the C++ lane's rendering. */
-BLADE_NORETURN static void blade_panic_at(const char *msg, const char *file, long long line) {
+BLADE_NORETURN void blade_panic_at(const char *msg, const char *file, long long line) {
     fputs(msg, stderr);
     fputc('\n', stderr);
     if (file && line > 0) fprintf(stderr, "  --> %s:%lld\n", file, line);

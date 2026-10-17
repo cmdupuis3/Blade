@@ -1,0 +1,18 @@
+// TEST: A Function Writes A Module Scalar And Main Sees It
+// A serial function may assign a captured module-level `let mut`. The write
+// must land in the one storage location main reads: the C++ lane captures by
+// reference; the LLVM lane publishes the binding to a global that main's own
+// slot re-points at.
+let mut s = 1
+function bump() -> Int64 = {
+    s = s + 1
+    s
+}
+let a = bump()
+let b = s
+let c = bump()
+let d = s
+// EXPECT: a = 2
+// EXPECT: b = 2
+// EXPECT: c = 3
+// EXPECT: d = 3

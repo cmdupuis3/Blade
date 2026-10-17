@@ -1119,9 +1119,10 @@ let s = method_for(v, v) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
 /// `index-types` and `reynolds` are where the packed simplex pools live, and
 /// they joined the default sweep when the lane learned to emit them;
 /// `recursive-arrays` joined with the IRForRange arm (the ordered serial
-/// loop: `let rec` and whole-rank folds). Every other category is reachable
-/// standalone with `blade test llvm <category>`.
-let defaultCategories = [ "basic"; "functions"; "loops"; "symmetry"; "index-types"; "reynolds"; "recursive-arrays" ]
+/// loop: `let rec` and whole-rank folds); `sql-group-by` with the group_by
+/// port (2026-10), so the CSR build and its BL8006 aborts stay gated. Every
+/// other category is reachable standalone with `blade test llvm <category>`.
+let defaultCategories = [ "basic"; "functions"; "loops"; "symmetry"; "index-types"; "reynolds"; "recursive-arrays"; "sql-group-by" ]
 
 /// What happened to one file. `Matched` carries a note so an agreement that
 /// asserts NOTHING -- both lanes printed no values at all -- is visible in the
@@ -1154,10 +1155,20 @@ let private runCase (dir: string) (name: string) (source: string) : CaseOutcome 
     let cppStem = "llvmdiff_cpp_" + stem
     let llStem = "llvmdiff_ll_" + stem
     try
-        if name.EndsWith "(rejects)" || name.EndsWith "(aborts)" then
-            SkippedCase "a reject/abort probe (nothing to compare)"
+        // A `(rejects)` probe has no program to run. An `(aborts)` probe
+        // DOES: both lanes must abort the same way (below), which is the only
+        // place a dropped runtime guard (BL8006, BL8013, ...) can show up --
+        // skipping these is how the group_keys guards went missing unseen.
+        let isAbortProbe = name.EndsWith "(aborts)"
+        if name.EndsWith "(rejects)" then
+            SkippedCase "a reject probe (nothing to compare)"
         else
-        match Lowering.lower source with
+        // lowerCaptured, not lower: it resolves FILE-BACKED imports (stdlib
+        // `stats`, `units.SI`, `plot`) the way the corpus runner and `blade
+        // run` do, and hands warnings back instead of printing them. `lower`
+        // refused every stdlib-importing test, which this block then counted
+        // as a front-end skip rather than as lane coverage.
+        match fst (Lowering.lowerCaptured source) with
         | Error _ -> SkippedCase "the front end refuses this program"
         | Ok ir0 ->
         match IRValidate.validateIR ir0 with
@@ -1172,7 +1183,7 @@ let private runCase (dir: string) (name: string) (source: string) : CaseOutcome 
             // their own analysis contexts over the IR they consume, and the
             // oracle has to be exactly what `blade test basic` would have
             // compiled -- not an IRProgram another emitter has already walked.
-            match Lowering.lower source with
+            match fst (Lowering.lowerCaptured source) with
             | Error _ -> SkippedCase "the front end refuses this program"
             | Ok ir1 ->
             match IRValidate.validateIR ir1 with
@@ -1202,8 +1213,8 @@ let private runCase (dir: string) (name: string) (source: string) : CaseOutcome 
             | Ok cppExe ->
             match runExeCapture cppExe with
             | Error e -> SkippedCase ("the C++ oracle does not run: " + e)
-            | Ok (code, _, _) when code <> 0 -> SkippedCase ($"the C++ oracle exits {code}")
-            | Ok (_, cppOut, _) ->
+            | Ok (code, _, _) when code <> 0 && not isAbortProbe -> SkippedCase ($"the C++ oracle exits {code}")
+            | Ok (cppCode, cppOut, cppErr) ->
             // ---- llvm lane --------------------------------------------------
             let llFile = Path.Combine(dir, llStem + ".ll")
             File.WriteAllText(llFile, ll)
@@ -1211,9 +1222,19 @@ let private runCase (dir: string) (name: string) (source: string) : CaseOutcome 
             | Error e when e.StartsWith "Skipped:" -> SkippedCase e
             | Error e -> FailedCase ($"""llvm compile failed ({llFile}): {(e.Replace("\n", " ") |> fun s -> if s.Length > 400 then s.Substring(0, 400) + "..." else s)}""")
             | Ok llExe ->
+            // An abort's identity: the `error[BLxxxx]: message` line and its
+            // `  --> file:line` location, in order. (The trace lines under them
+            // are the shadow-frame machinery's own business.)
+            let abortLines (err: string) =
+                err.Replace("\r\n", "\n").Split('\n')
+                |> Array.filter (fun l -> l.StartsWith "error[" || l.StartsWith "  --> ")
+                |> List.ofArray
             match runExeCapture llExe with
             | Error e -> FailedCase ($"llvm run failed ({llFile}): {e}")
-            | Ok (code, out, err) when code <> 0 ->
+            | Ok (code, _, err) when cppCode <> 0 && (code <> cppCode || abortLines err <> abortLines cppErr) ->
+                let show (e: string) = String.concat " / " (abortLines e)
+                FailedCase ($"abort differs -- cpp exits {cppCode} with [{show cppErr}]; llvm exits {code} with [{show err}] ({llFile})")
+            | Ok (code, _, err) when code <> 0 && cppCode = 0 ->
                 FailedCase ($"llvm exe exits {code} ({llFile}): {(err.Trim())}")
             | Ok (_, llvmOut, _) ->
                 match compareRuns 3 cppOut llvmOut with
@@ -1221,7 +1242,9 @@ let private runCase (dir: string) (name: string) (source: string) : CaseOutcome 
                     // Keep only what a reader would want: matched artifacts
                     // are regenerable and 300 of them fill a scratch dir.
                     clearArtifacts dir [ cppStem; llStem ]
-                    Matched (if stripTiming cppOut = "" then "agreed, but neither lane printed a value" else "")
+                    Matched (if cppCode <> 0 then "both lanes aborted with the same error"
+                             elif stripTiming cppOut = "" then "agreed, but neither lane printed a value"
+                             else "")
                 | Error diffs ->
                     FailedCase
                         ($"""stdout differs -- {(String.concat " | " diffs)} (kept {cppFile} and {llFile})""")

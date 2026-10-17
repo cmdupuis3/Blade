@@ -1,0 +1,21 @@
+// TEST: A Hoisted Force After A Loop-Body Force In The Same Statement
+// One top-level statement forces two deferred module bindings: `b` because a
+// `let rec` body reads it positionally (the loop-body producer force), then
+// `d`, whose kernel reads `b` by name. In the LLVM lane a forced module
+// binding hoists to the start of its statement; `b`'s force once stayed
+// inline, so the hoisted `d` read `b`'s pool before it was allocated
+// (invalid IR). Both forces now hoist, in order.
+type I = Idx<4>
+type S = Idx<3>
+let b = method_for(range<I>) <@> lambda(i) -> Float64(i) + 1.0
+let d = method_for(range<I>) <@> lambda(i) -> b((1 : I)) + Float64(i)
+let y = {
+    let rec x: Array<Float like S> =
+        match x with
+        | zero -> zero
+        | zero :: s -> zero :: 1.0
+        | prefix :: n -> prefix :: prefix(n - 1) + b((2 : I))
+    d((1 : I)) + d((2 : I)) + x((2 : S))
+}
+// d(1) = 3, d(2) = 4, x = [1, 4, 7] (each step adds b(2) = 3): 3 + 4 + 7
+// EXPECT: y = 14.0

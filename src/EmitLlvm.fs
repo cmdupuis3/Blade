@@ -206,7 +206,7 @@ let private grpShimPanic = 5          // the panic path
 let private grpShimFree = 6           // the pool deallocator (obviously not `nofree`)
 let private grpShimArith = 7          // arithmetic-contract helpers: may panic (BL8013/BL8014), so no `willreturn`
 
-let private attrGroupText (anyFrees: bool) (g: int) : string =
+let private attrGroupText (anyFrees: bool) (anyPanics: bool) (g: int) : string =
     // Blade has no exceptions (nounwind: deletes all Windows SEH lowering)
     // and no atomics or threads in this lane (nosync). `nofree` holds for the
     // whole module ONLY while no scope-exit free was emitted (`Ctx.AnyFrees`):
@@ -215,7 +215,15 @@ let private attrGroupText (anyFrees: bool) (g: int) : string =
     // groups drop it together. (Groups are shared across functions by design;
     // per-function precision would need per-function attribute lists.)
     let drop (s: string) = if anyFrees then s.Replace("nofree ", "") else s
-    if g = grpFnTerminating then drop "mustprogress nofree norecurse nosync nounwind willreturn"
+    // `willreturn` is a claim that the function RETURNS. A Blade function that
+    // can reach a panic (a constraint check, a non-exhaustive match, an
+    // arithmetic-contract helper) exits the process instead, and a `noreturn`
+    // call inside a `willreturn` function is undefined behavior: LLVM deletes
+    // the panic path and the program traps with no message (found by the
+    // differential's abort-probe comparison). Like `nofree`, the claim drops
+    // module-wide the moment any panicking shim symbol is declared.
+    let dropWr (s: string) = if anyPanics then s.Replace(" willreturn", "") else s
+    if g = grpFnTerminating then drop (dropWr "mustprogress nofree norecurse nosync nounwind willreturn")
     elif g = grpFnNoRecurse then drop "nofree norecurse nosync nounwind"
     elif g = grpFnRecursive then drop "nofree nosync nounwind"
     // The shim's printers do I/O and libm may set errno, so neither gets a
@@ -414,6 +422,89 @@ let private computeModuleFacts (m: IRModule) (callables: Map<IRId, IRCallable>) 
       ReadOnce = readOnce
       FreshReturns = freshReturns }
 
+/// MODULE READS -- which top-level bindings each callable can read, through
+/// everything it calls or inlines. An out-of-line function gets fresh slot
+/// tables (emitFunctionBody), so a module binding it reads must cross the
+/// function boundary some other way: `main` PUBLISHES it to an internal
+/// global, and the function reads the global. The closure runs over every
+/// callable reference -- calls, kernel slots, inlined capturing callees --
+/// because a kernel inlined INTO a function body resolves through that
+/// function's tables, not main's (an over-approximation only publishes a
+/// binding nobody reads across a call). A loop object or callable alias has no
+/// storage of its own, so a read of one is a read of what its value names.
+/// Returns (callable id -> transitive module reads, bindings to publish): the
+/// second set is the union over CALL ROOTS -- callables with no captures that
+/// appear in call position, the ones emitCall outlines.
+let private computeModuleReads (m: IRModule) (callables: Map<IRId, IRCallable>)
+    : Dictionary<IRId, HashSet<IRId>> * HashSet<IRId> =
+    let isOpaqueValue (v: IRExpr) =
+        match v with
+        | IRMethodFor _ | IRObjectFor _ | IRComposeObj _ | IRCompose _ -> true
+        | _ -> false
+    let storageIds = HashSet<IRId>()
+    let opaque = Dictionary<IRId, IRExpr>()
+    for b in m.Bindings do
+        if not (callables.ContainsKey b.Id) then
+            if isOpaqueValue b.Value then opaque.[b.Id] <- b.Value
+            else storageIds.Add b.Id |> ignore
+    // Nodes are callables (by their OWN id, aliases resolved) and opaque
+    // module bindings; edges are references, reads land on storage ids.
+    let direct = Dictionary<IRId, HashSet<IRId>>()
+    let edges = Dictionary<IRId, HashSet<IRId>>()
+    let roots = HashSet<IRId>()
+    let scan (node: IRId) (e: IRExpr) =
+        let reads = HashSet<IRId>()
+        let outs = HashSet<IRId>()
+        iterIRExpr
+            (fun n ->
+                match n with
+                | IRVar (id, _) ->
+                    (match Map.tryFind id callables with
+                     | Some t -> outs.Add t.Id |> ignore
+                     | None ->
+                         if storageIds.Contains id then reads.Add id |> ignore
+                         elif opaque.ContainsKey id then outs.Add id |> ignore)
+                | _ -> ())
+            e
+        direct.[node] <- reads
+        edges.[node] <- outs
+    let distinctCallables =
+        callables |> Map.toSeq |> Seq.map snd |> Seq.distinctBy (_.Id) |> Seq.toList
+    for cl in distinctCallables do scan cl.Id cl.Body
+    for KeyValue (id, v) in opaque do scan id v
+    let noteRoots (e: IRExpr) =
+        iterIRExpr
+            (fun n ->
+                match n with
+                | IRApp (IRVar (fid, _), _, _) ->
+                    (match Map.tryFind fid callables with
+                     | Some t when List.isEmpty t.Captures -> roots.Add t.Id |> ignore
+                     | _ -> ())
+                | _ -> ())
+            e
+    for b in m.Bindings do noteRoots b.Value
+    for cl in distinctCallables do noteRoots cl.Body
+    // reads*(n) = direct(n) U reads*(every node n references), to a fixpoint.
+    let closure = Dictionary<IRId, HashSet<IRId>>()
+    for KeyValue (id, r) in direct do closure.[id] <- HashSet<IRId>(r)
+    let mutable changed = true
+    while changed do
+        changed <- false
+        for KeyValue (id, outs) in edges do
+            let mine = closure.[id]
+            for t in outs do
+                match closure.TryGetValue t with
+                | true, theirs ->
+                    for x in theirs do
+                        if mine.Add x then changed <- true
+                | _ -> ()
+    let publish = HashSet<IRId>()
+    for r in roots do
+        match closure.TryGetValue r with
+        | true, reads -> publish.UnionWith reads
+        | _ -> ()
+    (closure, publish)
+
 // ---------------------------------------------------------------------------
 // Typed builders
 //
@@ -426,6 +517,14 @@ let private computeModuleFacts (m: IRModule) (callables: Map<IRId, IRCallable>) 
 /// An emitted value: the textual operand (an SSA register, or a literal --
 /// `.ll` takes constants wherever it takes registers) plus its scalar type.
 type private Val = { Reg: string; Ty: Sc }
+
+/// A match scrutinee with its tuple NESTING restored. Tuples travel as flat
+/// packs in this lane (Tuples Design C), but a pattern like `((a, b), c)` or
+/// `h :: rest` is structural, so emitMatch rebuilds the tree from the
+/// scrutinee's static type before testing patterns against it.
+type private MatchTree =
+    | MLeaf of Val
+    | MNode of MatchTree list
 
 type private BinInstr =
     { Dest: string
@@ -504,7 +603,7 @@ type private Grp =
     /// IR already makes (IxKRaggedInline literals bake their lens; a ragged
     /// function parameter's lens arrive at run time) lives in the TABLE, so
     /// addressing and loop shapes are one code path for both lanes.
-    | GRagged of rows: int64 * table: RaggedTable
+    | GRagged of rows: string * table: RaggedTable
     /// RANK 1 with an OPERAND extent: the residual of peeling one row off a
     /// ragged group. The operand is a literal for a static-lane row peeled at
     /// a literal index, a register otherwise -- either way `emitCountedLoopTo`
@@ -522,6 +621,14 @@ and private RaggedTable =
     | RtStatic of offsets: int64[] * tableSym: string
     | RtDynamic of tablePtr: string
 
+/// A module binding `main` published for out-of-line functions (see
+/// computeModuleReads): the internal global's symbol plus, for an array, the
+/// shape a function rebuilds its view from -- only the pool pointer crosses,
+/// and only static shapes are published.
+type private PubVal =
+    | PubScalar of sym: string * ty: Sc
+    | PubArray of sym: string * elem: Sc * groups: Grp list
+
 let private grpRank = function GDense _ | GDynDense _ -> 1 | GSym (r, _) -> r | GAnti (r, _) -> r | GRagged _ -> 2
 let private grpExtent =
     function
@@ -533,6 +640,14 @@ let private grpStrict (g: Grp) = g.IsGAnti
 let private grpCompact = function GSym _ | GAnti _ -> true | _ -> false
 let private isRaggedGrp (g: Grp) = g.IsGRagged
 let private hasRagged (gs: Grp list) = gs |> List.exists isRaggedGrp
+
+/// A rank-1 dense group from an extent OPERAND: the literal spelling keeps
+/// the static `GDense` (so every existing consumer stays on its static path),
+/// a register becomes the runtime-extent axis.
+let private denseOfOp (ext: string) : Grp =
+    match System.Int64.TryParse ext with
+    | true, n -> GDense n
+    | _ -> GDynDense ext
 
 /// How many AXES a group spans, as extents (a rank-2 group spans two).
 let private grpAxes (g: Grp) : int64 list = List.replicate (grpRank g) (grpExtent g)
@@ -546,7 +661,10 @@ let private grpCells (g: Grp) : int64 =
     | GSym (r, n) -> Blade.SimplexBlocksCore.binom (n + int64 r - 1L) r
     | GAnti (r, n) -> Blade.SimplexBlocksCore.binom n r
     // offsets[rows] IS the total cell count -- the static lane's one number.
-    | GRagged (rows, RtStatic (offsets, _)) -> offsets.[int rows]
+    | GRagged (rows, RtStatic (offsets, _)) ->
+        (match System.Int64.TryParse rows with
+         | true, r -> offsets.[int r]
+         | _ -> refuse "a ragged shape with a runtime row count where a static cell count is required")
     | GRagged (_, RtDynamic _) -> refuse "a dynamic ragged shape where a static cell count is required"
     | GDynDense _ -> refuse "a runtime-extent axis where a static cell count is required"
 
@@ -664,6 +782,21 @@ and private PoolScope =
       Pools: ResizeArray<string * string>
       KnownIds: HashSet<IRId> }
 
+/// One emitted group_keys binding: the llvm-lane port of the C++ lane's
+/// name-suffixed CSR ABI (`<name>__ngroups/__offsets/__perm/__nsrc`,
+/// CodeGenBinding.fs) as four values keyed by the binding's IRId -- BL3017
+/// guarantees a grouping is only ever its bare binding name, so a table keyed
+/// by id IS the whole aliasing story. NGroups is an OPERAND: a literal for
+/// the annotated regimes (Idx<N> positional, int EnumIdx), a register for
+/// dynamic first-occurrence discovery. NSrc stays compile-time (the key
+/// array's own static extent), and is carried because a dropped (negative)
+/// key leaves __perm under-filled: offsets[ngroups] cannot recover it.
+and private GkVal =
+    { NGroups: string
+      Offsets: string
+      Perm: string
+      NSrc: int64 }
+
 and private Ctx =
     { /// Module-scope constants (string literals for print labels and panics).
       Globals: ResizeArray<string>
@@ -707,6 +840,8 @@ and private Ctx =
       /// storage and print nothing; the table exists so a reference to one
       /// can be diagnosed as a loop object instead of an unbound variable.
       LoopObjs: HashSet<IRId>
+      /// Emitted group_keys bindings, by binding id (see GkVal).
+      GroupKeys: Dictionary<IRId, GkVal>
       /// Bindings whose value is a flat tuple of scalars (fusion-join folds,
       /// tuple-returning kernels). `IRTupleProj` reads these.
       mutable TupleSlots: Dictionary<IRId, ValKind list>
@@ -723,6 +858,37 @@ and private Ctx =
       /// Callables currently being inlined (capturing callees), so a
       /// recursive one refuses instead of expanding forever.
       Inlining: HashSet<IRId>
+      /// Callable id -> the module bindings it can read, transitively
+      /// (computeModuleReads). Consulted at a call site -- everything the
+      /// callee reads must already be published -- and at a function's entry,
+      /// where those bindings are rebound to their globals.
+      mutable ModuleReads: Dictionary<IRId, HashSet<IRId>>
+      /// The bindings `main` publishes as it binds them.
+      mutable PublishWanted: HashSet<IRId>
+      /// What has been published so far, by binding id.
+      Published: Dictionary<IRId, PubVal>
+      /// Top-level binding id -> its source name, for refusal messages.
+      mutable ModuleNames: Map<IRId, string>
+      /// True while emitting an out-of-line function body (false in main).
+      mutable InFunction: bool
+      /// `c.Body` index where the current TOP-LEVEL statement of main began,
+      /// or -1 anywhere else. Forcing a deferred module binding is hoisted to
+      /// this point (see materializeExpr).
+      mutable StmtStart: int
+      /// main's array bindings as they stood when the current top-level
+      /// statement began. A forced binding is hoisted only if it is still
+      /// that same instance: one rebound earlier in this statement holds
+      /// registers the hoisted code would precede.
+      mutable StmtSlots: Dictionary<IRId, ArrVal>
+      /// Bindings whose force was hoisted in the current statement: their
+      /// upgraded slots live in the hoisted prefix, so a later hoist may read
+      /// them.
+      HoistedIds: HashSet<IRId>
+      /// Open IRForRange loops, innermost on top: the exit label an IRBreakIf
+      /// branches to (minted by the FIRST break, "" until then), and the
+      /// PoolScopes depth BEFORE the loop's trip scope (the scopes a break
+      /// must free).
+      BreakTargets: Stack<string ref * int>
       /// ENTRY-BLOCK allocas, spliced ahead of the body at assembly time. An
       /// `alloca` inside a loop body would allocate once PER ITERATION (stack
       /// is reclaimed at function return, not at block exit), so a nest over
@@ -761,10 +927,20 @@ let private newCtx (callables: Map<IRId, IRCallable>) (facts: ModuleFacts) =
       NameSlots = Dictionary()
       NameArrSlots = Dictionary()
       LoopObjs = HashSet()
+      GroupKeys = Dictionary()
       TupleSlots = Dictionary()
       Forced = HashSet()
       BindingValues = Map.empty
       Inlining = HashSet()
+      ModuleReads = Dictionary()
+      PublishWanted = HashSet()
+      Published = Dictionary()
+      ModuleNames = Map.empty
+      InFunction = false
+      StmtStart = -1
+      StmtSlots = Dictionary()
+      HoistedIds = HashSet()
+      BreakTargets = Stack()
       Allocas = ResizeArray()
       Body = ResizeArray() }
 
@@ -881,6 +1057,7 @@ let private shimTable : Map<string, ShimFn> =
     Map.ofList
         [ "blade_now", io "double" []
           "blade_panic", { Ret = "void"; RetAttrs = ""; Args = [ "ptr" ]; Group = grpShimPanic }
+          "blade_panic_at", { Ret = "void"; RetAttrs = ""; Args = [ "ptr"; "ptr"; "i64" ]; Group = grpShimPanic }
           "blade_alloc_cells",
           { Ret = "ptr"; RetAttrs = "noalias align 64"; Args = [ "i64"; "i64" ]; Group = grpShimAlloc }
           "blade_free", { Ret = "void"; RetAttrs = ""; Args = [ "ptr" ]; Group = grpShimFree }
@@ -1545,7 +1722,8 @@ let private hasFlatRead (a: ArrVal) : bool =
 /// one load for a dynamic-table ragged pair.
 let private shapeCellsOp (c: Ctx) (gs: Grp list) : string =
     match gs with
-    | [ GRagged (rows, table) ] -> raggedOffAt c table (string rows)
+    | [ GRagged (rows, table) ] -> raggedOffAt c table rows
+    | [ GDynDense len ] -> len
     | _ -> string (shapeCells gs)
 
 /// The single extent of a rank-1 shape, as an OPERAND: a literal for a dense
@@ -1998,6 +2176,27 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
     | IRLit (IRLitString s) -> { Reg = stringGlobal c s; Ty = ScStr }
     | IRLit IRLitUnit -> { Reg = ""; Ty = ScVoid }
 
+    // A runtime constraint guard (BL8001 value constraints, BL8006 checked
+    // index conversions and subscripts, BL8010 the recursive-array budget):
+    // statement-shaped and unit-valued, exactly the C++ lane's
+    // `if (!(cond)) blade_rt::panic(code, message, file, line)`. The shim's
+    // located panic renders the same `error[CODE]: MESSAGE` / `  --> file:line`
+    // bytes, then the shadow-frame trace.
+    | IRConstraintCheck (cond, code, message, span) ->
+        let cv = emitExpr c cond
+        if cv.Ty <> ScBool then refuse "a constraint check whose condition is not a Bool"
+        let lPass = freshLbl c "check.pass"
+        let lFail = freshLbl c "check.fail"
+        ln c (renderBr { Cond = cv.Reg; IfTrue = lPass; IfFalse = lFail })
+        lbl c lFail
+        needShim c "blade_panic_at"
+        let msg = stringGlobal c $"error[{code}]: {message}"
+        ln c (renderCall { Dest = None; RetTy = ScVoid; Callee = "@blade_panic_at"
+                           Args = [ ScStr, msg ] @ faultLocArgs c (SrcLoc span) })
+        ln c "unreachable"
+        lbl c lPass
+        { Reg = ""; Ty = ScVoid }
+
     | IRVar (id, _) ->
         (match c.Slots.TryGetValue id with
          | true, (slot, sc) -> loadSlot c slot sc
@@ -2052,7 +2251,7 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
     | IRMatch (scrutinee, cases) -> emitMatch c e scrutinee cases
 
     | IRLet (id, value, body) ->
-        bindLet c id value
+        bindLetIn c id value body
         emitExpr c body
 
     | IRSequence exprs ->
@@ -2096,12 +2295,21 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
                       // rebound target may predate an open tracking scope, in
                       // which case the new pool escapes it (same rule as
                       // materializeExpr's upgrade).
-                      let a = emitArr c value
+                      // A function holds a PUBLISHED module array as a view
+                      // loaded at its entry; re-pointing that view would
+                      // rebind only the function's copy, so it refuses. In
+                      // main the new pool is republished (materialized first:
+                      // a function reads it through a bare pointer).
+                      let published = c.PublishWanted.Contains id
+                      if published && c.InFunction then
+                          refuse "a function rebinding a whole module-level array"
+                      let a = if published then materialize c (emitArr c value) else emitArr c value
                       bindArray c id "" a
                       (match a.Src with
                        | APool p when c.PoolScopes |> Seq.exists (fun s -> s.KnownIds.Contains id) ->
                            keepPool c p
                        | _ -> ())
+                      if published then publishBinding c id
                       { Reg = ""; Ty = ScVoid }
                   else refuse "assignment to a variable with no storage in this scope")
          | _ -> refuse "assignment to a non-variable target")
@@ -2116,13 +2324,35 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
     // guarded reads -- and the rank-k dense fold `reduce(A, op, axes = k)`.
     | IRForRange (vid, lo, hi, body) -> emitForRange c vid lo hi body
 
-    // The rec-array `while` guard's early exit (and the budget abort that
-    // rides with it as IRConstraintCheck) would need a conditional-branch
-    // loop shape this emitter's single-block for-range does not have yet.
-    // Refuse LOUDLY: a silently dropped break would run the full budget and
-    // overwrite the frozen slices.
-    | IRBreakIf _ ->
-        refuse "a `while`-guarded recursive array (early exit / IRBreakIf) -- not supported by the llvm lane yet"
+    // The rec-array `while` guard's early exit: leave the innermost
+    // IRForRange. As in the C++ lane (genBinding's IRBreakIf arm, which runs
+    // peekAllocScopeFrees before its `break`), the pools this trip has
+    // tracked SO FAR are freed first -- the bottom-of-trip frees never run on
+    // this path. A slot loaded here holds this trip's pool or null (the
+    // trip-entry resets dominate the break), so freeing it is exact. The
+    // budget abort that rides with the guard is an ordinary
+    // IRConstraintCheck after the loop.
+    | IRBreakIf cond ->
+        if c.BreakTargets.Count = 0 then
+            refuse "a `while` guard outside the recursive array's loop"
+        let (lExit, depth) = c.BreakTargets.Peek()
+        if lExit.Value = "" then lExit.Value <- freshLbl c "range.exit"
+        let cv = emitExpr c cond
+        if cv.Ty <> ScBool then refuse "a `while` guard whose condition is not a Bool"
+        let lBreak = freshLbl c "range.break"
+        let lCont = freshLbl c "range.cont"
+        ln c (renderBr { Cond = cv.Reg; IfTrue = lBreak; IfFalse = lCont })
+        lbl c lBreak
+        for k in c.PoolScopes.Count - 1 .. -1 .. depth do
+            for (_, slot) in c.PoolScopes.[k].Pools do
+                c.AnyFrees <- true
+                needShim c "blade_free"
+                let p = freshReg c
+                ln c ($"{p} = load ptr, ptr {slot}")
+                ln c ($"call void @blade_free(ptr {p})")
+        ln c (sprintf "br label %%%s" lExit.Value)
+        lbl c lCont
+        { Reg = ""; Ty = ScVoid }
 
     // ---- array-derived scalars -------------------------------------------
     // A read CONSUMES its base where it can: one cell of a producer costs one
@@ -2135,13 +2365,7 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
     // loops/117, /192) without being stored here, where a pool allocated
     // inside a nest would not dominate the print that reads it afterwards.
     | IRIndex (arrExpr, idxExprs, _) ->
-        let a =
-            match arrExpr with
-            | IRVar (id, _) when not (c.Facts.ReadOnce.Contains id) -> materializeExpr c arrExpr
-            | IRVar (id, _) when c.BindingValues.ContainsKey id ->
-                markForced c id
-                emitArr c arrExpr
-            | _ -> emitArr c arrExpr
+        let a = consumeArrOperand c arrExpr
         let idxs = idxExprs |> List.map (fun ix -> coerce c ScI64 (emitExpr c ix))
         if List.length idxs <> a.Rank then
             refuse ($"a partial index ({(List.length idxs)} of {a.Rank}) in value position")
@@ -2183,8 +2407,8 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
          | [ v ] -> v
          | vs -> refuse ($"a fused reduction producing {List.length vs} accumulators in scalar position"))
 
-    | IRTupleProj (parent, idx, _) ->
-        (match tupleComponent c parent idx with
+    | IRTupleProj (parent, idx, isFlat) ->
+        (match tupleComponent c parent idx isFlat with
          | VScalar v -> v
          | _ -> refuse ($"tuple projection [{idx}] of a non-scalar component in value position"))
 
@@ -2274,7 +2498,12 @@ and private emitForRange (c: Ctx) (vid: IRId) (lo: IRExpr) (hi: IRExpr) (body: I
     let slot = ensureSlot c vid ScI64
     forceLoopBodyProducers c body
     let before = arrSlotSnapshot c
-    emitCountedLoopTo c trips (fun k ->
+    // The exit an IRBreakIf (`while` guard) leaves through. The label is
+    // minted and emitted only when a break uses it, so an unguarded `let rec`
+    // keeps its exact emission (register numbering included).
+    let lExit = ref ""
+    c.BreakTargets.Push((lExit, c.PoolScopes.Count))
+    let trip (k: string) =
         ln c ($"store i64 {(i64Add c loV.Reg k)}, ptr {slot}")
         // Each trip is a tracking scope: a step's materializations (a rank-2
         // `let rec`'s per-step slice, a copy-on-alias) are dead when the trip
@@ -2284,7 +2513,12 @@ and private emitForRange (c: Ctx) (vid: IRId) (lo: IRExpr) (hi: IRExpr) (body: I
         // their slot via `keepPool` and survive.
         pushPoolScope c
         emitExpr c body |> ignore
-        popPoolScope c None true)
+        popPoolScope c None true
+    try emitCountedLoopTo c trips trip
+    finally c.BreakTargets.Pop() |> ignore
+    if lExit.Value <> "" then
+        ln c (sprintf "br label %%%s" lExit.Value)
+        lbl c lExit.Value
     requireArrSlotsStable c before
     { Reg = ""; Ty = ScVoid }
 
@@ -2316,8 +2550,12 @@ and private forceLoopBodyProducers (c: Ctx) (body: IRExpr) : unit =
     if not (Map.isEmpty deferred) then
         let probe = { Blade.CodeGenState.emptyContext () with DeferredComputations = deferred }
         for id in Blade.CodeGenFusion.collectDeferredPositionalReads probe body do
-            match c.ArrSlots.TryGetValue id with
-            | true, a ->
+            match c.ArrSlots.TryGetValue id, Map.tryFind id c.BindingValues with
+            // A MODULE binding goes through materializeExpr, so in main it
+            // hoists like every other forced module binding -- an inline
+            // upgrade here would sit after a later hoist that reads it.
+            | (true, _), Some v -> materializeExpr c (IRVar (id, typeOf v)) |> ignore
+            | (true, a), None ->
                 c.ArrSlots.[id] <- materialize c a
                 markForced c id
             | _ -> ()
@@ -2373,13 +2611,7 @@ and private emitProdSum (c: Ctx) (args: IRExpr list) : Val =
     //     that reads it afterwards.
     let ops =
         args
-        |> List.map (fun a ->
-            match a with
-            | IRVar (id, _) when not (c.Facts.ReadOnce.Contains id) -> materializeExpr c a
-            | IRVar (id, _) when c.BindingValues.ContainsKey id ->
-                markForced c id
-                emitArr c a
-            | _ -> emitArr c a)
+        |> List.map (consumeArrOperand c)
     let head = List.head ops
     if head.Rank <> 1 then refuse "prodsum over a rank-2+ operand"
     let ty = if head.Elem = ScBool then ScI64 else head.Elem
@@ -2422,11 +2654,39 @@ and private bindContinuationBody (c: Ctx) (comp: IRExpr) (cont: IRExpr) : IRExpr
      | _ -> refuse "a bind over a pack-valued computation")
     cl.Body
 
-and private tupleComponent (c: Ctx) (parent: IRExpr) (idx: int) : ValKind =
+and private tupleComponent (c: Ctx) (parent: IRExpr) (idx: int) (isFlat: bool) : ValKind =
     let parts = emitTupleParts c parent
-    if idx < 0 || idx >= List.length parts then
-        refuse ($"tuple projection [{idx}] outside a pack of {List.length parts}")
-    parts.[idx]
+    let flatAt (k: int) =
+        if k < 0 || k >= List.length parts then
+            refuse ($"tuple projection [{k}] outside a pack of {List.length parts}")
+        parts.[k]
+    // A STRUCTURAL index (`t[i]`, destructuring) counts the parent TYPE's
+    // components, while the pack is flat: for `((1, 2), 3)`, `t[1]` is the
+    // third leaf, not the second, and `t[0]` is the two-leaf slice. Leaf
+    // offsets come from the type; a pack whose leaf count disagrees with its
+    // type refuses rather than guess.
+    if isFlat then flatAt idx
+    else
+        match Blade.IR.stripUnits (typeOf parent) with
+        | IRTTuple ts ->
+            let rec leafCount (t: IRType) =
+                match Blade.IR.stripUnits t with
+                | IRTTuple sub -> sub |> List.sumBy leafCount
+                | _ -> 1
+            if List.sumBy leafCount ts <> List.length parts then
+                refuse "a tuple pack whose leaf count disagrees with its type"
+            if idx < 0 || idx >= List.length ts then
+                refuse ($"tuple projection [{idx}] outside a {List.length ts}-component tuple")
+            let start = ts |> List.take idx |> List.sumBy leafCount
+            (match Blade.IR.stripUnits ts.[idx] with
+             | IRTTuple _ -> VTuple (parts |> List.skip start |> List.take (leafCount ts.[idx]))
+             | _ -> flatAt start)
+        | _ ->
+            // No tuple type to count with: structural and flat agree only when
+            // the pack has no nested component, which a flat pack cannot show.
+            if parts |> List.exists (function VTuple _ -> true | _ -> false) then
+                refuse "a structural tuple projection over a pack with no tuple type"
+            flatAt idx
 
 /// The per-AXIS extents of an array-valued EXPRESSION -- what `extents()` and
 /// `rank()` report. Prefers the declared type (free) and falls back to
@@ -2651,7 +2911,34 @@ and private callLibm2 (c: Ctx) (fn: string) (a: Val) (b: Val) : Val =
 and private emitMatch (c: Ctx) (whole: IRExpr) (scrutinee: IRExpr) (cases: IRMatchCase list) : Val =
     if List.isEmpty cases then refuse "a match with no arms"
     let resTy = requireScalar "a match expression" (typeOf whole)
-    let sv = emitExpr c scrutinee
+    // The scrutinee as a tree: a scalar is one leaf; a tuple's flat pack is
+    // regrouped by its type (IRTTuple nests where the pack does not).
+    let tree =
+        match Blade.IR.stripUnits (typeOf scrutinee) with
+        | IRTTuple _ as tupTy ->
+            let parts =
+                emitTupleParts c scrutinee
+                |> List.map (function
+                    | VScalar v -> v
+                    | _ -> refuse "a match over a tuple with a non-scalar component")
+            let rec build (t: IRType) (rest: Val list) : MatchTree * Val list =
+                match Blade.IR.stripUnits t, rest with
+                | IRTTuple ts, _ ->
+                    let (kids, rest') =
+                        ts |> List.fold (fun (acc, r) ct ->
+                            let (k, r') = build ct r
+                            (k :: acc, r')) ([], rest)
+                    (MNode (List.rev kids), rest')
+                | _, v :: rest' -> (MLeaf v, rest')
+                | _, [] -> refuse "a tuple scrutinee with fewer components than its type"
+            match build tupTy parts with
+            | (t, []) -> t
+            | _ -> refuse "a tuple scrutinee with more components than its type"
+        | _ -> MLeaf (emitExpr c scrutinee)
+    let rec leaves (t: MatchTree) : Val list =
+        match t with
+        | MLeaf v -> [ v ]
+        | MNode ks -> ks |> List.collect leaves
     let slot = allocSlot c resTy
     let lEnd = freshLbl c "match.end"
     let lFail = freshLbl c "match.fail"
@@ -2664,24 +2951,38 @@ and private emitMatch (c: Ctx) (whole: IRExpr) (scrutinee: IRExpr) (cases: IRMat
             // matches -- so `lNext` for that arm is simply unreachable, which
             // is well-formed as long as it still gets a terminator (it does,
             // from the arm that follows or from the empty-case arm above).
-            (match case.Pattern with
-             | IRPatWild -> ()
-             | IRPatVar vid ->
-                 let slotV = allocaOf c (llTy sv.Ty)
-                 ln c ($"store {(llTy sv.Ty)} {sv.Reg}, ptr {slotV}")
-                 c.Slots.[vid] <- (slotV, sv.Ty)
-             | IRPatLit lit ->
-                 let lv = coerce c sv.Ty (emitExpr c (IRLit lit))
-                 if sv.Ty = ScStr then refuse "a String literal pattern"
-                 let t = freshReg c
-                 let kind = if sv.Ty = ScF64 then "fcmp" else "icmp"
-                 let pred = if sv.Ty = ScF64 then "oeq" else "eq"
-                 ln c (renderCmp { Dest = t; Kind = kind; Pred = pred; Ty = sv.Ty; Lhs = sv.Reg; Rhs = lv.Reg })
-                 let lBody = freshLbl c "match.body"
-                 ln c (renderBr { Cond = t; IfTrue = lBody; IfFalse = lNext })
-                 lbl c lBody
-             | other ->
-                 refuse (sprintf "the match pattern %A -- the llvm lane handles wildcard, variable and literal patterns" other))
+            // The pattern test, structurally: a literal leaf that differs
+            // jumps to `lNext`; a variable binds a leaf as a scalar and a
+            // subtree as a flat pack; `h :: t` peels the first component and
+            // matches the REST -- the bare element for a pair (Blade has no
+            // 1-tuple), the interpreter's tryMatch rule.
+            let rec test (pat: IRPattern) (t: MatchTree) : unit =
+                match pat, t with
+                | IRPatWild, _ -> ()
+                | IRPatVar vid, MLeaf sv ->
+                    let slotV = allocaOf c (llTy sv.Ty)
+                    ln c ($"store {(llTy sv.Ty)} {sv.Reg}, ptr {slotV}")
+                    c.Slots.[vid] <- (slotV, sv.Ty)
+                | IRPatVar vid, MNode _ ->
+                    c.TupleSlots.[vid] <- leaves t |> List.map VScalar
+                | IRPatLit lit, MLeaf sv ->
+                    let lv = coerce c sv.Ty (emitExpr c (IRLit lit))
+                    if sv.Ty = ScStr then refuse "a String literal pattern"
+                    let r = freshReg c
+                    let kind = if sv.Ty = ScF64 then "fcmp" else "icmp"
+                    let pred = if sv.Ty = ScF64 then "oeq" else "eq"
+                    ln c (renderCmp { Dest = r; Kind = kind; Pred = pred; Ty = sv.Ty; Lhs = sv.Reg; Rhs = lv.Reg })
+                    let lBody = freshLbl c "match.body"
+                    ln c (renderBr { Cond = r; IfTrue = lBody; IfFalse = lNext })
+                    lbl c lBody
+                | IRPatTuple pats, MNode ks when List.length pats = List.length ks ->
+                    List.iter2 test pats ks
+                | IRPatCons (hp, tp), MNode (k0 :: (_ :: _ as more)) ->
+                    test hp k0
+                    test tp (match more with [ one ] -> one | _ -> MNode more)
+                | other, _ ->
+                    refuse (sprintf "the match pattern %A -- the llvm lane handles wildcard, variable, literal, tuple and cons patterns" other)
+            test case.Pattern tree
             // A failed guard falls through to the next arm, and on the LAST
             // arm that lands in the panic block -- the same non-exhaustive
             // behavior renderMatchExpr gives the C++ lane.
@@ -2742,6 +3043,16 @@ and private emitCall (c: Ctx) (func: IRExpr) (args: IRExpr list) : Val =
     else
     if List.length callable.Params <> List.length args then
         refuse ($"a partial application of '{callable.SourceName}' ({(List.length args)} of {(List.length callable.Params)} arguments)")
+    // Everything the callee can read from module scope must already sit in
+    // its global. From main this is also the INITIALIZATION-ORDER proof: a
+    // binding not yet bound has not been published either.
+    (match c.ModuleReads.TryGetValue callable.Id with
+     | true, reads ->
+         for rid in reads do
+             if not (c.Published.ContainsKey rid) then
+                 let nm = defaultArg (Map.tryFind rid c.ModuleNames) (string rid)
+                 refuse ($"'{callable.SourceName}' reads the module binding '{nm}', which is not a stored scalar or statically shaped array at this call")
+     | _ -> ())
     let sym = ensureFunction c callable
     // An array argument crosses as its POOL POINTER, which is also what makes
     // `mut` work: the callee's element writes land in the caller's storage
@@ -2766,7 +3077,7 @@ and private emitCall (c: Ctx) (func: IRExpr) (args: IRExpr list) : Val =
                     // operand; a forwarded parameter's table is a register.
                     let av = materializeExpr c a
                     (match av.Groups, av.Src with
-                     | [ GRagged (r2, table) ], APool ptr when av.Elem = elem && r2 = rows ->
+                     | [ GRagged (r2, table) ], APool ptr when av.Elem = elem && r2 = string rows ->
                          let tp = match table with RtStatic (_, sym) -> sym | RtDynamic reg -> reg
                          [ (ScStr, ptr); (ScStr, tp) ]
                      | _ ->
@@ -2836,6 +3147,233 @@ and private bindArray (c: Ctx) (varId: IRId) (name: string) (a: ArrVal) : unit =
     c.ArrSlots.[varId] <- a
     if name <> "" then c.NameArrSlots.[name] <- a
 
+/// Emit one group_keys binding: the CSR build (counts, exclusive prefix sum,
+/// scatter) in pure `.ll`, mirroring genGroupKeysBinding's static regimes
+/// pass for pass. POSITIONAL (Idx<N> keys): bucket IS the key value, a
+/// negative key drops its row from every pass, and a key at or past N aborts
+/// BL8006. ENUM (int EnumIdx): bucket is the value's position in the declared
+/// list via a select chain, a key outside the list aborts BL8006, and nothing
+/// drops. DYNAMIC: first-occurrence discovery by a linear scan. Multi-key
+/// tuple hashing and string keys are refused by name.
+///
+/// The four pools are ordinary `blade_alloc_cells` allocations, so the
+/// existing scope machinery owns their lifetime. They arrive UNINITIALIZED
+/// (blade_alloc_cells stopped zeroing in 4761eca, matching the C++ lane's
+/// `new T[]`), so counts/fill/offsets[0] are zeroed explicitly below.
+and private emitGroupKeysBinding (c: Ctx) (id: IRId) (keys: IRExpr list) (gkTy: IRType) : unit =
+    let (outerIdx, enumValues) =
+        match gkTy with
+        | IRTGroupKeys (o, _, ev) -> (o, ev)
+        | _ -> refuse "a group_keys binding without its IRTGroupKeys type"
+    let ngroupsOpt = Blade.IRPrint.tryEvalIntIR outerIdx.Extent
+    let keyArr =
+        match keys with
+        | [ k ] ->
+            consumeArrOperand c k
+        | _ -> refuse "multi-key group_keys (compound tuple hashing is not in the llvm lane yet)"
+    if keyArr.Elem = ScStr then
+        refuse "string group_keys (string EnumIdx dispatch is not in the llvm lane yet)"
+    let nsrc =
+        match keyArr.Groups with
+        | [ GDense n ] -> n
+        | _ -> refuse "group_keys over a key array that is not a dense rank-1 axis"
+    let enumInts =
+        enumValues
+        |> Option.map (List.map (function
+            | EVInt n -> n
+            | EVString _ -> refuse "string EnumIdx group_keys (not in the llvm lane yet)"))
+    let i64At (pool: string) (idx: string) : string = gepCell c ScI64 pool idx
+    let ifThen (cond: string) (body: unit -> unit) =
+        let lT = freshLbl c "gk.then"
+        let lE = freshLbl c "gk.end"
+        ln c (renderBr { Cond = cond; IfTrue = lT; IfFalse = lE })
+        lbl c lT
+        body ()
+        ln c (sprintf "br label %%%s" lE)
+        lbl c lE
+    let readKey (ki: string) : string =
+        (coerce c ScI64 (readCell c keyArr [ { Reg = ki; Ty = ScI64 } ])).Reg
+    // The three regimes, as (group count operand, bucket-of-key emitter,
+    // negative-keys-drop?). ENUM: position-in-list select chain, an unknown
+    // key aborts BL8006, nothing drops. POSITIONAL: bucket IS the key,
+    // negatives drop, a key >= N aborts BL8006. DYNAMIC: buckets in
+    // first-occurrence order over the observed keys -- discovered here by a
+    // LINEAR scan of the distinct-keys table (O(n*G); correct at any size,
+    // and the once-per-program cost the plan later routes through a shim
+    // hash when it shows up in a profile), negatives drop.
+    // The C++ lane's BL8006 guards (genGroupKeysBinding; interpreter twin
+    // ArrayOps.buildGroupKeys): a key outside its EnumIdx, or a positional key
+    // past the last bucket, aborts -- with no source location, as there --
+    // instead of landing in bucket 0 or writing past the counts pool.
+    let panicUnless (ok: string) (msg: string) =
+        let lOk = freshLbl c "gk.ok"
+        let lBad = freshLbl c "gk.bad"
+        ln c (renderBr { Cond = ok; IfTrue = lOk; IfFalse = lBad })
+        lbl c lBad
+        needShim c "blade_panic_at"
+        let m = stringGlobal c ("error[BL8006]: " + msg)
+        ln c (renderCall { Dest = None; RetTy = ScVoid; Callee = "@blade_panic_at"
+                           Args = [ ScStr, m; ScStr, "null"; ScI64, "0" ] })
+        ln c "unreachable"
+        lbl c lOk
+    let (ngOp, bucketOf, dropNeg) : string * (string -> string) * bool =
+        match enumInts with
+        | Some vals ->
+            let n =
+                match ngroupsOpt with
+                | Some n -> n
+                | None -> refuse "an EnumIdx grouping without a static group count"
+            let bucket (kReg: string) =
+                let mutable acc = "0"
+                let mutable found = "false"
+                vals |> List.iteri (fun i v ->
+                    let eq = freshReg c
+                    ln c (renderCmp { Dest = eq; Kind = "icmp"; Pred = "eq"; Ty = ScI64; Lhs = kReg; Rhs = string v })
+                    let sel = freshReg c
+                    ln c (sprintf "%s = select i1 %s, i64 %d, i64 %s" sel eq i acc)
+                    acc <- sel
+                    let f = freshReg c
+                    ln c (sprintf "%s = or i1 %s, %s" f found eq)
+                    found <- f)
+                panicUnless found "index out of bounds: a group_keys key outside its EnumIdx"
+                acc
+            (string n, bucket, false)
+        | None ->
+            match ngroupsOpt with
+            | Some n ->
+                // Only reached past the negative-key drop, so `k < n` is the
+                // whole bound (the C++ lane's `(size_t)__k >= ngroups`).
+                let bucket (kReg: string) =
+                    let ok = freshReg c
+                    ln c (renderCmp { Dest = ok; Kind = "icmp"; Pred = "slt"; Ty = ScI64; Lhs = kReg; Rhs = string n })
+                    panicUnless ok ($"index out of bounds: a group_keys key outside 0 .. {n - 1L}")
+                    kReg
+                (string n, bucket, true)
+            | None ->
+                // First-occurrence discovery. distinct[] can hold at most
+                // nsrc keys; the running count lives in a slot so the scan
+                // loop's bound is the value discovered SO FAR.
+                let distinct = allocPool c ScI64 (string nsrc)
+                let ngSlot = allocaOf c "i64"
+                ln c (sprintf "store i64 0, ptr %s" ngSlot)
+                emitCountedLoop c nsrc (fun ki ->
+                    let k = readKey ki
+                    let ok = freshReg c
+                    ln c (renderCmp { Dest = ok; Kind = "icmp"; Pred = "sge"; Ty = ScI64; Lhs = k; Rhs = "0" })
+                    ifThen ok (fun () ->
+                        let ng = freshReg c
+                        ln c (sprintf "%s = load i64, ptr %s" ng ngSlot)
+                        let foundSlot = allocaOf c "i1"
+                        ln c (sprintf "store i1 false, ptr %s" foundSlot)
+                        emitCountedLoopTo c ng (fun d ->
+                            let dk = loadCell c ScI64 (i64At distinct d)
+                            let eq = freshReg c
+                            ln c (renderCmp { Dest = eq; Kind = "icmp"; Pred = "eq"; Ty = ScI64; Lhs = dk.Reg; Rhs = k })
+                            let f = freshReg c
+                            ln c (sprintf "%s = load i1, ptr %s" f foundSlot)
+                            let nf = freshReg c
+                            ln c (sprintf "%s = or i1 %s, %s" nf f eq)
+                            ln c (sprintf "store i1 %s, ptr %s" nf foundSlot))
+                        let f = freshReg c
+                        ln c (sprintf "%s = load i1, ptr %s" f foundSlot)
+                        let fresh = freshReg c
+                        ln c (sprintf "%s = xor i1 %s, true" fresh f)
+                        ifThen fresh (fun () ->
+                            storeCell c ScI64 (i64At distinct ng) { Reg = k; Ty = ScI64 }
+                            ln c (sprintf "store i64 %s, ptr %s" (i64Bin c "add" ng "1") ngSlot))))
+                let ngReg = freshReg c
+                ln c (sprintf "%s = load i64, ptr %s" ngReg ngSlot)
+                let bucket (kReg: string) =
+                    let bSlot = allocaOf c "i64"
+                    ln c (sprintf "store i64 0, ptr %s" bSlot)
+                    emitCountedLoopTo c ngReg (fun d ->
+                        let dk = loadCell c ScI64 (i64At distinct d)
+                        let eq = freshReg c
+                        ln c (renderCmp { Dest = eq; Kind = "icmp"; Pred = "eq"; Ty = ScI64; Lhs = dk.Reg; Rhs = kReg })
+                        let cur = freshReg c
+                        ln c (sprintf "%s = load i64, ptr %s" cur bSlot)
+                        let sel = freshReg c
+                        ln c (sprintf "%s = select i1 %s, i64 %s, i64 %s" sel eq d cur)
+                        ln c (sprintf "store i64 %s, ptr %s" sel bSlot))
+                    let b = freshReg c
+                    ln c (sprintf "%s = load i64, ptr %s" b bSlot)
+                    b
+                (ngReg, bucket, true)
+    let ngPlus1 =
+        match tryLitI64 ngOp with
+        | Some n -> string (n + 1L)
+        | None -> i64Bin c "add" ngOp "1"
+    let counts = allocPool c ScI64 ngOp
+    let offs = allocPool c ScI64 ngPlus1
+    let fill = allocPool c ScI64 ngOp
+    let perm = allocPool c ScI64 (string nsrc)
+    emitCountedLoopTo c ngOp (fun gi ->
+        storeCell c ScI64 (i64At counts gi) { Reg = "0"; Ty = ScI64 }
+        storeCell c ScI64 (i64At fill gi) { Reg = "0"; Ty = ScI64 })
+    storeCell c ScI64 (i64At offs "0") { Reg = "0"; Ty = ScI64 }
+    /// One pass over the key array: `body ki bucket` under the regime's own
+    /// admission rule.
+    let withEachKey (body: string -> string -> unit) =
+        emitCountedLoop c nsrc (fun ki ->
+            let k = readKey ki
+            if dropNeg then
+                let ok = freshReg c
+                ln c (renderCmp { Dest = ok; Kind = "icmp"; Pred = "sge"; Ty = ScI64; Lhs = k; Rhs = "0" })
+                ifThen ok (fun () -> body ki (bucketOf k))
+            else body ki (bucketOf k))
+    // Pass 1: counts[bucket]++ (counts zeroed above).
+    withEachKey (fun _ b ->
+        let p = i64At counts b
+        let cur = loadCell c ScI64 p
+        storeCell c ScI64 p { Reg = i64Bin c "add" cur.Reg "1"; Ty = ScI64 })
+    // Exclusive prefix sum from offsets[0] = 0 (stored above).
+    emitCountedLoopTo c ngOp (fun gi ->
+        let o = loadCell c ScI64 (i64At offs gi)
+        let n = loadCell c ScI64 (i64At counts gi)
+        storeCell c ScI64 (i64At offs (i64Bin c "add" gi "1"))
+            { Reg = i64Bin c "add" o.Reg n.Reg; Ty = ScI64 })
+    // Pass 2: scatter row ordinals group-contiguously.
+    withEachKey (fun ki b ->
+        let o = loadCell c ScI64 (i64At offs b)
+        let fp = i64At fill b
+        let f = loadCell c ScI64 fp
+        storeCell c ScI64 (i64At perm (i64Bin c "add" o.Reg f.Reg)) { Reg = ki; Ty = ScI64 }
+        storeCell c ScI64 fp { Reg = i64Bin c "add" f.Reg "1"; Ty = ScI64 })
+    c.GroupKeys.[id] <- { NGroups = ngOp; Offsets = offs; Perm = perm; NSrc = nsrc }
+
+/// Resolve a grouping operand to its emitted tables. BL3017 makes the bare
+/// name the only legal spelling, so anything else here is an escape.
+and private gkOf (c: Ctx) (grouping: IRExpr) : GkVal =
+    match grouping with
+    | IRVar (gkid, _) ->
+        (match c.GroupKeys.TryGetValue gkid with
+         | true, gk -> gk
+         | _ -> refuse "a grouping read before its group_keys binding was emitted")
+    | _ -> refuse "a grouping that is not a bound group_keys name"
+
+/// `IRLet` with the let's own continuation in hand -- which is where a
+/// FUNCTION-BODY `let gk = group_keys(...)` recovers its bucketing regime: a
+/// body let is a bare (id, value) pair and IRGroupKeys types as unit, but
+/// every legal MENTION of the grouping is the bare name, stamped by Lowering
+/// with the inferred IRTGroupKeys. Same recovery, same reason, as the C++
+/// lane's groupKeysTypeInScope (CodeGen.fs) -- guessing the regime instead
+/// would silently renumber buckets (positional counts empty groups, dynamic
+/// numbers first-occurrence). A grouping nobody mentions needs no tables.
+and private bindLetIn (c: Ctx) (id: IRId) (value: IRExpr) (scope: IRExpr) : unit =
+    match value with
+    | IRGroupKeys keys ->
+        let mutable found : IRType option = None
+        iterIRExpr
+            (fun n ->
+                match n with
+                | IRVar (vid, (IRTGroupKeys _ as ty)) when vid = id && found.IsNone -> found <- Some ty
+                | _ -> ())
+            scope
+        (match found with
+         | Some ty -> emitGroupKeysBinding c id keys ty
+         | None -> ())
+    | _ -> bindLet c id value
+
 /// Bind a NAME to a value: the one entry point for both `IRLet` and a
 /// top-level binding, so the two cannot drift on the copy rule below.
 ///
@@ -2847,6 +3385,14 @@ and private bindArray (c: Ctx) (varId: IRId) (name: string) (a: ArrVal) : unit =
 /// to share, and copying it would materialize -- and therefore PRINT -- a
 /// computation the program never forced.
 and private bindNamed (c: Ctx) (id: IRId) (name: string) (declTy: IRType) (value: IRExpr) : unit =
+    match value with
+    | IRGroupKeys keys ->
+        // A module-scope grouping carries its regime on the binding record;
+        // the sentinel itself has no runtime value and prints nothing.
+        (match declTy with
+         | IRTGroupKeys _ -> emitGroupKeysBinding c id keys declTy
+         | _ -> refuse "a group_keys binding whose regime type is unavailable")
+    | _ ->
     match classifyValue c value with
     | VArray a ->
         let stored =
@@ -2863,6 +3409,38 @@ and private bindNamed (c: Ctx) (id: IRId) (name: string) (declTy: IRType) (value
             let target = match scalarTyOf declTy with Some t when t <> ScVoid -> t | _ -> v.Ty
             bindScalar c id name (coerce c target v)
     | VOpaque -> c.LoopObjs.Add id |> ignore
+
+/// Publish a top-level binding that some out-of-line function reads (see
+/// computeModuleReads). A SCALAR moves into its global outright: main's slot
+/// entry re-points at the global, so every later main-side read and store --
+/// and every function's -- goes through one storage location, and a write
+/// from a function body is visible to main exactly as the C++ lane's
+/// by-reference capture makes it. An ARRAY publishes its pool pointer, and
+/// only a STORED, statically shaped one: a deferred producer would have to be
+/// forced at a demand point this lane does not track, and a ragged or
+/// runtime-extent shape carries operands a bare pointer cannot. Those stay
+/// unpublished, and a call that needs them refuses (emitCall).
+and private publishBinding (c: Ctx) (id: IRId) : unit =
+    if c.PublishWanted.Contains id then
+        let sym = $"@bl_mod_{id}"
+        match c.Slots.TryGetValue id with
+        | true, (slot, sc) when sc <> ScVoid ->
+            if not (c.Published.ContainsKey id) then
+                c.Globals.Add($"{sym} = internal global {(llTy sc)} zeroinitializer")
+            if slot <> sym then
+                let v = loadSlot c slot sc
+                ln c ($"store {(llTy sc)} {v.Reg}, ptr {sym}")
+                c.Slots.[id] <- (sym, sc)
+            c.Published.[id] <- PubScalar (sym, sc)
+        | _ ->
+            match c.ArrSlots.TryGetValue id with
+            | true, ({ Src = APool p } as a)
+                when a.Groups |> List.forall (function GDense _ | GSym _ | GAnti _ -> true | _ -> false) ->
+                if not (c.Published.ContainsKey id) then
+                    c.Globals.Add($"{sym} = internal global ptr null")
+                ln c ($"store ptr {p}, ptr {sym}")
+                c.Published.[id] <- PubArray (sym, a.Elem, a.Groups)
+            | _ -> c.Published.Remove id |> ignore
 
 and private bindLet (c: Ctx) (id: IRId) (value: IRExpr) : unit =
     bindNamed c id "" (typeOf value) value
@@ -2969,6 +3547,75 @@ and private emitArr (c: Ctx) (e: IRExpr) : ArrVal =
 
     // `|> compute` IS the materialization site, and the only one: everything
     // else in this file stays a producer.
+    // `|> compute` of a TWO-STAGE PIPELINE (`object_for(f) >>@ object_for(g)`
+    // applied, then forced): the C++ lane runs two complete sweeps with a
+    // stage-typed intermediate (CodeGenFusion's staged path), and nesting a
+    // forced stage-one application inside the stage-two application is that
+    // order exactly -- objectForApply emits its operand once, and the inner
+    // IRCompute finishes stage one before stage two reads it. Conservative:
+    // unary scalar stages over a stored, static dense input; everything else
+    // (bare deferred pipelines, row kernels, several inputs, nested chains)
+    // refuses. Drafted by Codex.
+    | IRCompute (IRComposeApply info) ->
+        let rec resolve (seen: Set<IRId>) (expr: IRExpr) =
+            match expr with
+            | IRVar (id, _) when not (Set.contains id seen) ->
+                (match Map.tryFind id c.BindingValues with
+                 | Some value -> resolve (Set.add id seen) value
+                 | None -> expr)
+            | _ -> expr
+        let stage (expr: IRExpr) =
+            let obj =
+                match resolve Set.empty expr with
+                | IRObjectFor obj when obj.InputRanks = [ 0 ] && obj.OutputRank = 0 -> obj
+                | _ -> refuse "a staged pipeline leaf other than a unary scalar object_for"
+            let cl =
+                match resolveCallable obj.Kernel with
+                | Some cl -> cl
+                | None -> refuse "an unresolved staged pipeline kernel"
+            if cl.IsArityPoly || cl.IsCudaKernel || cl.IsMpiParallel then
+                refuse "a staged pipeline kernel with unsupported polymorphism or strategy"
+            let paramTy =
+                match cl.Params with
+                | [ p ] -> p.Type
+                | _ -> refuse "a staged pipeline kernel with non-unary parameters"
+            let retTy =
+                match cl.RetType with
+                | IRTInfer _ -> typeOf cl.Body
+                | t -> t
+            let scalar (what: string) (ty: IRType) =
+                match scalarTyOf ty with
+                | Some sc when sc = ScI64 || sc = ScF64 || sc = ScBool -> sc
+                | _ -> refuse ($"a staged pipeline {what} outside Int64/Float64/Bool")
+            (obj, retTy, scalar "parameter" paramTy, scalar "result" retTy)
+        let (left, right) =
+            match resolve Set.empty info.Composition with
+            | IRComposeObj (l, r) -> (l, r)
+            | _ -> refuse "a staged pipeline that does not resolve to two object stages"
+        let (o1, t1, p1, r1) = stage left
+        let (o2, _, p2, r2) = stage right
+        let src =
+            match info.InputArrays with
+            | [ (IRVar _ | IRParam _) as src ] -> src
+            | [ _ ] -> refuse "a staged pipeline over an anonymous input"
+            | _ -> refuse "a staged pipeline over multiple inputs"
+        let srcType =
+            match Blade.IR.stripUnits (typeOf src) with
+            | ArrayElem at -> at
+            | _ -> refuse "a staged pipeline over a non-array input"
+        let a = emitArr c src
+        (match a.Src with
+         | APool _ -> ()
+         | _ -> refuse "a staged pipeline over a deferred input")
+        if not (a.Groups |> List.forall (function GDense _ -> true | _ -> false)) then
+            refuse "a staged pipeline over compact, ragged, or runtime storage"
+        let (outElem, outGroups) = requireArray "a staged pipeline result" info.OutputType
+        if p1 <> a.Elem || p2 <> r1 || r2 <> outElem || outGroups <> a.Groups then
+            refuse "a staged pipeline with incompatible stage types or shapes"
+        let s1Type = mkArrayLike { srcType with ElemType = t1 }
+        let first = IRCompute (IRApp (IRObjectFor o1, [ src ], s1Type))
+        materialize c (objectForApply c o2 [ first ] info.OutputType)
+
     | IRCompute inner -> materialize c (emitArr c inner)
     | IRPure inner -> emitArr c inner
 
@@ -2983,13 +3630,13 @@ and private emitArr (c: Ctx) (e: IRExpr) : ArrVal =
             refuse "a full index where an array was expected"
         rowView c a idxs
 
-    | IRTupleProj (parent, idx, _) ->
-        (match tupleComponent c parent idx with
+    | IRTupleProj (parent, idx, isFlat) ->
+        (match tupleComponent c parent idx isFlat with
          | VArray a -> a
          | _ -> refuse ($"tuple projection [{idx}] of a non-array component in array position"))
 
     | IRLet (id, value, body) ->
-        bindLet c id value
+        bindLetIn c id value body
         emitArr c body
 
     | IRSequence exprs ->
@@ -3066,7 +3713,195 @@ and private emitArr (c: Ctx) (e: IRExpr) : ArrVal =
                     | Some s -> loadSlot c2 s a.Elem
                     | None -> refuse "a choice over unit cells") }
 
+    // group_by(vals, gk): ONE group-contiguous CSR pool, gathered through the
+    // permutation in a single flat loop -- versus the C++ lane's ngroups
+    // separate `new T[sz]` blocks plus the same gather. The result is the
+    // ragged pair over the gk's offsets table, so every downstream consumer
+    // (peel, row view, direct read, row reduce) is the machinery ragged
+    // already built; nothing below this arm knows it came from a grouping.
+    | IRGroupBy (values, grouping) ->
+        let gk = gkOf c grouping
+        let vals = consumeArrOperand c values
+        (match vals.Groups with
+         | [ GDense _ ] -> ()
+         | _ -> refuse "group_by over a values operand that is not a dense rank-1 axis")
+        let table = RtDynamic gk.Offsets
+        let total = raggedOffAt c table gk.NGroups
+        let out = allocPool c vals.Elem total
+        emitCountedLoopTo c total (fun t ->
+            let p = loadCell c ScI64 (gepCell c ScI64 gk.Perm t)
+            let v = coerce c vals.Elem (readCell c vals [ p ])
+            storeCell c vals.Elem (gepCell c vals.Elem out t) v)
+        { Elem = vals.Elem; Groups = [ GRagged (gk.NGroups, table) ]
+          Src = APool out; RowOpBytes = 0L }
+
+    // extents(gk): per-group sizes, offsets[g+1] - offsets[g], no gather --
+    // a producer, so a sizes-only consumer never touches the data at all
+    // (the gather-elision special case, obtained structurally).
+    | IRGroupSizes grouping ->
+        let gk = gkOf c grouping
+        { Elem = ScI64; Groups = [ denseOfOp gk.NGroups ]; RowOpBytes = 0L
+          Src = AVirt (fun c2 idxs ->
+                    match idxs with
+                    | [ g ] -> { Reg = raggedLenAt c2 (RtDynamic gk.Offsets) g.Reg; Ty = ScI64 }
+                    | _ -> refuse "a group-sizes read at other than its group coordinate") }
+
+    // group_bucket(gk): invert the CSR -- row -> bucket, -1 for dropped rows.
+    // The -1 prefill is explicit (the pool arrives uninitialized, and 0 is
+    // a real bucket); the inversion walks groups x members with the row bounds
+    // hoisted once per group.
+    | IRGroupBucket grouping ->
+        let gk = gkOf c grouping
+        let out = allocPool c ScI64 (string gk.NSrc)
+        emitCountedLoop c gk.NSrc (fun t ->
+            storeCell c ScI64 (gepCell c ScI64 out t) { Reg = "-1"; Ty = ScI64 })
+        emitCountedLoopTo c gk.NGroups (fun g ->
+            let lo = loadCell c ScI64 (gepCell c ScI64 gk.Offsets g)
+            let hi = loadCell c ScI64 (gepCell c ScI64 gk.Offsets (i64Bin c "add" g "1"))
+            emitCountedLoopTo c (i64Bin c "sub" hi.Reg lo.Reg) (fun j ->
+                let t = i64Bin c "add" lo.Reg j
+                let row = loadCell c ScI64 (gepCell c ScI64 gk.Perm t)
+                storeCell c ScI64 (gepCell c ScI64 out row.Reg) { Reg = g; Ty = ScI64 }))
+        { Elem = ScI64; Groups = [ GDense gk.NSrc ]; Src = APool out; RowOpBytes = 0L }
+
+    // negate / conjugate of a whole array: an EAGER copy into fresh,
+    // same-shape storage (the C++ lane's negate_pool / conjugate path), so a
+    // later write to the source never shows through. Shape-preserving and
+    // cell-congruent, so a packed sym/antisym operand is one flat loop.
+    // Conjugation of a real element is the identity copy; complex refuses at
+    // the element gate.
+    | IRArrayNegate arrExpr | IRArrayConjugate arrExpr ->
+        let negate = match e with IRArrayNegate _ -> true | _ -> false
+        let (elem, groups) = requireArray "an array negate/conjugate" (typeOf e)
+        if elem <> ScI64 && elem <> ScF64 then
+            refuse "array negate/conjugate with a non-Int64/Float64 element"
+        let a = materialize c (consumeArrOperand c arrExpr)
+        if a.Elem <> elem || a.Groups <> groups then
+            refuse "array negate/conjugate with inconsistent operand storage"
+        let total = shapeCellsOp c groups
+        let ptr = allocPool c elem total
+        emitCountedLoopTo c total (fun k ->
+            let v = readFlat c a { Reg = k; Ty = ScI64 }
+            let out =
+                if not negate then v
+                else
+                    let r = freshReg c
+                    (match elem with
+                     | ScF64 -> ln c ($"{r} = fneg double {v.Reg}")
+                     | _ -> ln c ($"{r} = sub i64 0, {v.Reg}"))
+                    { Reg = r; Ty = elem }
+            storeCell c elem (gepCell c elem ptr k) out)
+        { a with Src = APool ptr; RowOpBytes = 0L }
+
+    // gram(A, B) = A Bᴴ, eager, the C++ lane's NATIVE contraction: each cell
+    // starts at zero and accumulates A[i,k] * conj(B[j,k]) with k ascending
+    // innermost (conj is the identity on the real elements this lane has).
+    // The C++ lane jams columns without changing any cell's order, so the
+    // per-cell fold is the whole contract. Same-array output is the packed
+    // triangle i <= j, whose storage coordinate is jr = j - i. Never
+    // reassociated (the fold stays ordered); `contract` only under
+    // BLADE_FP_CONTRACT, as g++ contracts the C++ lane's `acc += a*b`. A BLAS or
+    // cuBLAS route belongs to the C++ lane, so its presence refuses.
+    | IRGram (left, right, isSameArray) ->
+        if (Blade.LinAlgPatterns.classify e |> Option.bind Blade.LinAlgPatterns.resolveNodeRoute).IsSome then
+            refuse "gram routed to BLAS/cuBLAS (the C++ lane owns library routes)"
+        let a = consumeArrOperand c left
+        let b = consumeArrOperand c right
+        let m, n, p =
+            match a.Groups, b.Groups with
+            | [ GDense m; GDense n ], [ GDense p; GDense k ] when n = k -> m, n, p
+            | _ -> refuse "gram requires two static dense rank-2 operands with equal trailing extents"
+        let elem, groups = requireArray "a gram result" (typeOf e)
+        if (elem <> ScF64 && elem <> ScI64) || a.Elem <> elem || b.Elem <> elem then
+            refuse "gram requires matching Int64 or Float64 elements"
+        let expected = if isSameArray then [ GSym (2, m) ] else [ GDense m; GDense p ]
+        if groups <> expected || (isSameArray && m <> p) then
+            refuse "a gram whose checked type disagrees with its operand shape"
+        let ptr = allocPool c elem (string (shapeCells groups))
+        let acc = allocaOf c (llTy elem)
+        let zero = if elem = ScF64 then f64Const 0.0 else "0"
+        let mulOp, addOp = if elem = ScF64 then "fmul", "fadd" else "mul", "add"
+        emitShapeNest c groups (fun idxs off ->
+            let i = idxs.[0]
+            let j = if isSameArray then { Reg = i64Add c i.Reg idxs.[1].Reg; Ty = ScI64 } else idxs.[1]
+            ln c ($"store {(llTy elem)} {zero}, ptr {acc}")
+            emitCountedLoop c n (fun k ->
+                let kv = { Reg = k; Ty = ScI64 }
+                let av = readCell c a [ i; kv ]
+                let bv = readCell c b [ j; kv ]
+                let prod = freshReg c
+                ln c (renderBin { Dest = prod; Opcode = mulOp; Flags = fmfFor c elem; Ty = elem; Lhs = av.Reg; Rhs = bv.Reg })
+                let cur = loadSlot c acc elem
+                let sum = freshReg c
+                ln c (renderBin { Dest = sum; Opcode = addOp; Flags = fmfFor c elem; Ty = elem; Lhs = cur.Reg; Rhs = prod })
+                ln c ($"store {(llTy elem)} {sum}, ptr {acc}"))
+            storeCell c elem (gepCell c elem ptr off.Reg) (loadSlot c acc elem))
+        { Elem = elem; Groups = groups; Src = APool ptr; RowOpBytes = 0L }
+
+    // transpose(A, d1, d2): a HARD copy into a fresh pool, as the C++ lane's
+    // materializer makes it (swapped extents, filled in source order), so a
+    // later write to A never shows through and the binding is eager and
+    // prints. Dense static axes only: a symmetric within-group swap is
+    // erased upstream, an antisymmetric/Hermitian one would need a
+    // negate/conjugate copy, and the C++ materializer itself assumes
+    // rectangular slots.
+    | IRTranspose (arrExpr, d1, d2) ->
+        let a = consumeArrOperand c arrExpr
+        if not (a.Groups |> List.forall (function GDense _ -> true | _ -> false)) then
+            refuse "transpose of a compact, ragged, or runtime-extent array"
+        let rank = a.Groups.Length
+        if d1 < 0 || d2 < 0 || d1 >= rank || d2 >= rank || d1 = d2 then
+            refuse "transpose with invalid or equal axes"
+        let swapDim d = if d = d1 then d2 elif d = d2 then d1 else d
+        let groups = List.init rank (fun d -> a.Groups.[swapDim d])
+        if snd (requireArray "a transpose result" (typeOf e)) <> groups then
+            refuse "a transpose whose checked type disagrees with its swapped operand shape"
+        let ptr = allocPool c a.Elem (string (shapeCells groups))
+        emitNest c a.Extents (fun idxs ->
+            let v = readCell c a idxs
+            let dstIdxs = List.init rank (fun d -> idxs.[swapDim d])
+            storeCell c a.Elem (gepCell c a.Elem ptr (storageOffset c groups dstIdxs)) v)
+        { a with Groups = groups; Src = APool ptr; RowOpBytes = 0L }
+
     | IRZip _ -> refuse "zip(...) outside a method_for (a bare zip has no materialized shape)"
+
+    // decompact(A, d): value-equivalent group FISSION. The logical axes and
+    // their order are unchanged -- only the grouping is -- so cell
+    // (i1, ..., ik) of the result, in whatever groups the checker gave it, is
+    // the operand read at the SAME logical coordinates: canonRead sorts them
+    // into the operand's own groups and applies an antisymmetric sign. A
+    // producer, like the interpreter's decompactArray (readCompact per output
+    // cell); the operand rule forces a deferred input exactly where the C++
+    // lane's forceDeferredArrayInput does.
+    | IRDecompact (arrExpr, _) ->
+        let a = consumeArrOperand c arrExpr
+        if hasRagged a.Groups then refuse "decompact of a ragged array"
+        let (_, groups) = requireArray "a decompact result" (typeOf e)
+        if List.sumBy grpRank groups <> a.Rank then
+            refuse "a decompact whose result rank differs from its operand's"
+        // A producer is handed STORAGE coordinates: a compact group's k-th
+        // coordinate is the step above the previous index's canonical floor
+        // (grpOffset), so the logical index is the running sum
+        // i_k = i_(k-1) + strict + s_k. canonRead wants logical indices.
+        let toLogical (c2: Ctx) (idxs: Val list) : Val list =
+            let mutable rest = idxs
+            [ for g in groups do
+                let r = grpRank g
+                let mine = rest |> List.truncate r
+                rest <- rest |> List.skip r
+                if not (grpCompact g) then yield! mine
+                else
+                    let sInc = if grpStrict g then "1" else "0"
+                    let mutable prev : string option = None
+                    for (sk: Val) in mine do
+                        let ik =
+                            match prev with
+                            | None -> sk.Reg
+                            | Some p -> i64Add c2 (i64Add c2 p sInc) sk.Reg
+                        prev <- Some ik
+                        yield { Reg = ik; Ty = ScI64 } ]
+        { Elem = a.Elem; Groups = groups; RowOpBytes = 0L
+          Src = AVirt (fun c2 idxs -> canonRead c2 a (toLogical c2 idxs)) }
 
     | other ->
         refuse ($"the IR node {(caseName other)} in array position -- no arm in the llvm lane")
@@ -3105,7 +3940,7 @@ and private emitRaggedLit (c: Ctx) (elems: IRExpr list) (elem: Sc) (rows: int64)
     rowElems |> List.concat |> List.iteri (fun i x ->
         let v = coerce c elem (emitExpr c x)
         storeCell c elem (gepCell c elem ptr (string i)) v)
-    { Elem = elem; Groups = [ GRagged (rows, RtStatic (offsets, sym)) ]
+    { Elem = elem; Groups = [ GRagged (string rows, RtStatic (offsets, sym)) ]
       Src = APool ptr; RowOpBytes = 0L }
 
 /// A literal array. The IR nests one `IRArrayLit` per rank level; the pool is
@@ -3160,13 +3995,22 @@ and private materialize (c: Ctx) (a: ArrVal) : ArrVal =
          | [ GRagged (rows, table) ] ->
              let total = shapeCellsOp c a.Groups
              let ptr = allocPool c a.Elem total
-             emitCountedLoop c rows (fun g ->
+             emitCountedLoopTo c rows (fun g ->
                  let off = raggedOffAt c table g
                  emitCountedLoopTo c (raggedLenAt c table g) (fun j ->
                      let v = coerce c a.Elem (readCell c a [ { Reg = g; Ty = ScI64 }; { Reg = j; Ty = ScI64 } ])
                      storeCell c a.Elem (gepCell c a.Elem ptr (i64Add c off j)) v))
              { a with Src = APool ptr }
          | _ -> refuse "a coordinate producer over a mixed ragged shape")
+    // A rank-1 producer whose extent is an OPERAND (a peel over a
+    // runtime-counted grouping): one counted loop, the bound taken as-is.
+    | AVirt _ when (match a.Groups with [ GDynDense _ ] -> true | _ -> false) ->
+        let len = match a.Groups with [ GDynDense l ] -> l | _ -> refuse "unreachable"
+        let ptr = allocPool c a.Elem len
+        emitCountedLoopTo c len (fun k ->
+            let v = coerce c a.Elem (readCell c a [ { Reg = k; Ty = ScI64 } ])
+            storeCell c a.Elem (gepCell c a.Elem ptr k) v)
+        { a with Src = APool ptr }
     | AVirt _ when isDenseShape a.Groups ->
         let total = shapeCells a.Groups
         let ptr = allocPool c a.Elem (string total)
@@ -3199,8 +4043,63 @@ and private materialize (c: Ctx) (a: ArrVal) : ArrVal =
 /// binding's slot is upgraded to the pool, so later reads share the storage
 /// instead of re-running the kernel -- and so a `mut` callee writing through
 /// the pointer is visible to the caller.
+/// The ARRAY-OPERAND RULE every eager consumer shares (reduce, prodsum,
+/// IRIndex, group_keys, group_by, decompact): a multi-read name FORCES, so its
+/// readers share one pool; a sole-read module binding is CONSUMED where it
+/// stands but marked forced, because forcing is what makes a deferred
+/// binding print (the pool would not dominate a print after a loop nest);
+/// anything else is consumed where it stands. emitReduce spells the same
+/// rule out longhand, with the history.
+and private consumeArrOperand (c: Ctx) (e: IRExpr) : ArrVal =
+    match e with
+    | IRVar (id, _) when not (c.Facts.ReadOnce.Contains id) -> materializeExpr c e
+    | IRVar (id, _) when c.BindingValues.ContainsKey id ->
+        markForced c id
+        emitArr c e
+    | _ -> emitArr c e
+
 and private materializeExpr (c: Ctx) (e: IRExpr) : ArrVal =
-    let a = materialize c (emitArr c e)
+    let a =
+        match e with
+        // FORCING A DEFERRED MODULE BINDING HOISTS to the start of main's
+        // current top-level statement -- the C++ lane's
+        // forceDeferredPositionalReads / forceDeferredArrayInput, which emit
+        // the force at the enclosing statement's indent. Inline, a consumer
+        // sitting in a loop nest (a kernel reading `c((1 : X))` once per
+        // cell) would allocate the pool inside the nest, and the slot upgrade
+        // below would hand later statements a register that does not
+        // dominate them (corpus loops/129). The producer closes only over
+        // registers of EARLIER statements, so the hoisted code is well
+        // formed; with no tracking scope open nothing else indexes `c.Body`.
+        // Nested forcings inside the hoist emit inline into the hoisted block.
+        //
+        // The producer reads module arrays BY NAME when it is emitted, so the
+        // hoist is sound only while every array binding that existed at
+        // statement start still holds either that same instance or one an
+        // earlier hoist of THIS statement produced (which sits in the prefix,
+        // ahead of this block). Anything upgraded inline mid-statement would
+        // be read here before its definition; then the force stays inline.
+        // Bindings born in the statement do not count: a module binding's
+        // producer cannot name them.
+        | IRVar (id, _) when c.StmtStart >= 0 && c.PoolScopes.Count = 0
+                             && c.BindingValues.ContainsKey id
+                             && c.StmtSlots.ContainsKey id
+                             && c.StmtSlots |> Seq.forall (fun kv ->
+                                    match c.ArrSlots.TryGetValue kv.Key with
+                                    | true, now -> obj.ReferenceEquals(now, kv.Value) || c.HoistedIds.Contains kv.Key
+                                    | _ -> true) ->
+            let outer = c.Body
+            let at = c.StmtStart
+            c.Body <- ResizeArray()
+            c.StmtStart <- -1
+            try materialize c (emitArr c e)
+            finally
+                let hoisted = c.Body
+                c.Body <- outer
+                c.Body.InsertRange(at, hoisted)
+                c.StmtStart <- at + hoisted.Count
+                c.HoistedIds.Add id |> ignore
+        | _ -> materialize c (emitArr c e)
     (match e with
      | IRVar (id, _) when c.ArrSlots.ContainsKey id ->
          c.ArrSlots.[id] <- a
@@ -3606,32 +4505,20 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
 /// row, and the output is a plain dense vector). Both stay producers;
 /// `|> compute` materializes as usual.
 and private applyRaggedPeel (c: Ctx) (info: ApplyInfo) (cl: IRCallable) : ArrVal =
-    let hasGroupKind (t: IRType) =
-        match Blade.IR.stripUnits t with
-        | ArrayElem arr ->
-            arr.IndexTypes |> List.exists (fun ix ->
-                ix.IxKind = IxKGroupOuter || ix.IxKind = IxKGroupMember)
-        | _ -> false
-    if hasGroupKind info.OutputType
-       || (info.Arrays |> List.exists (fun a -> hasGroupKind (typeOf a))) then
-        refuse "a group_by result in a combinator (grouped shapes are not in the llvm lane yet)"
     match info.Arrays, cl.Params with
     | [ arrExpr ], [ _ ] ->
         // The operand rule is emitReduce's three-way rule: a multi-read name
         // forces so readers share one pool; a sole-read module binding is
         // consumed but marked forced so it still prints; anything else is
         // consumed where it stands.
-        let a =
-            match arrExpr with
-            | IRVar (id, _) when not (c.Facts.ReadOnce.Contains id) -> materializeExpr c arrExpr
-            | IRVar (id, _) when c.BindingValues.ContainsKey id ->
-                markForced c id
-                emitArr c arrExpr
-            | _ -> emitArr c arrExpr
+        let a = consumeArrOperand c arrExpr
         let rows =
             match a.Groups with
             | [ GRagged (rows, _) ] -> rows
             | _ -> refuse "a ragged peel whose operand is not a sole ragged pair"
+        // Snapshot the row count OUTSIDE the producer closure: a grouped
+        // operand's count is a register, and the closure must not re-emit
+        // whatever computed it.
         let outputRagged =
             match Blade.IR.stripUnits info.OutputType with
             | ArrayElem arr -> arr.IndexTypes |> List.exists (fun ix -> isRaggedRowKind ix.IxKind)
@@ -3650,7 +4537,7 @@ and private applyRaggedPeel (c: Ctx) (info: ApplyInfo) (cl: IRCallable) : ArrVal
               Src = AVirtFlat (fun c2 k ->
                         coerce c2 elem (applyKernel c2 cl [ KScalar (readFlat c2 a k) ])) }
         else
-            { Elem = elem; Groups = [ GDense rows ]; RowOpBytes = 0L
+            { Elem = elem; Groups = [ denseOfOp rows ]; RowOpBytes = 0L
               Src = AVirt (fun c2 idxs ->
                         match idxs with
                         | [ g ] -> coerce c2 elem (applyKernel c2 cl [ KArray (rowView c2 a [ g ]) ])
@@ -4036,9 +4923,9 @@ and private emitTupleParts (c: Ctx) (e: IRExpr) : ValKind list =
         emitTupleParts c inner
         |> List.map (fun p -> match p with VArray a -> VArray (materialize c a) | other -> other)
     | IRPure inner -> emitTupleParts c inner
-    | IRLet (id, v, body) -> bindLet c id v; emitTupleParts c body
-    | IRTupleProj (parent, idx, _) ->
-        (match tupleComponent c parent idx with
+    | IRLet (id, v, body) -> bindLetIn c id v body; emitTupleParts c body
+    | IRTupleProj (parent, idx, isFlat) ->
+        (match tupleComponent c parent idx isFlat with
          | VTuple ps -> ps
          | single -> [ single ])
     // TERMINATION: the base case must NOT hand a pack-typed node back to
@@ -4086,8 +4973,27 @@ let private emitFunctionBody (c: Ctx) (cl: IRCallable) (sym: string) : string li
     c.ArrSlots <- Dictionary()
     c.NameSlots <- Dictionary()
     c.NameArrSlots <- Dictionary()
+    // These two hold main's REGISTERS too; a function must not see them.
+    c.TupleSlots <- Dictionary()
+    c.GroupKeys.Clear()
+    c.InFunction <- true
+    c.StmtStart <- -1
     if not (List.isEmpty cl.Captures) then
         refuse ($"the function '{cl.Name}', which captures enclosing bindings")
+    // The module bindings this body can read, rebound to their globals: a
+    // scalar's slot IS its global, an array's pool pointer is loaded once in
+    // the entry block (every caller proved it published; see emitCall).
+    (match c.ModuleReads.TryGetValue cl.Id with
+     | true, reads ->
+         for rid in reads do
+             match c.Published.TryGetValue rid with
+             | true, PubScalar (sym, sc) -> c.Slots.[rid] <- (sym, sc)
+             | true, PubArray (sym, elem, groups) ->
+                 let r = freshReg c
+                 c.Allocas.Add($"  {r} = load ptr, ptr {sym}")
+                 c.ArrSlots.[rid] <- { Elem = elem; Groups = groups; Src = APool r; RowOpBytes = 0L }
+             | _ -> ()
+     | _ -> ())
     if (raggedArrShape cl.RetType).IsSome then
         refuse ($"'{cl.Name}' returns a ragged array (ragged returns are not in the llvm lane yet)")
     // An array parameter arrives as a bare `ptr` with its shape baked from the
@@ -4147,7 +5053,7 @@ let private emitFunctionBody (c: Ctx) (cl: IRCallable) (sym: string) : string li
             c.NameArrSlots.[p.Name] <- a
         | PRagged (elem, rows) ->
             let a = { Elem = elem
-                      Groups = [ GRagged (rows, RtDynamic (sprintf "%%a%dr" i)) ]
+                      Groups = [ GRagged (string rows, RtDynamic (sprintf "%%a%dr" i)) ]
                       Src = APool (sprintf "%%a%d" i); RowOpBytes = 0L }
             c.ArrSlots.[p.VarId] <- a
             c.NameArrSlots.[p.Name] <- a
@@ -4245,7 +5151,12 @@ let private checkModuleScope (m: IRModule) : unit =
         // Index-type and alias declarations are typecheck-time identity; they
         // carry no storage and reach the back end as nothing at all.
         | IRTDAlias _ | IRTDIndexType _ | IRTDEnumIdx _ -> ()
-        | IRTDStruct (name, _) -> refuse ($"the struct type '{name}'")
+        // A struct DECLARATION needs no runtime representation of its own
+        // (idx_card and friends fold to scalars before this lane runs). A
+        // struct VALUE still refuses wherever one reaches emission -- the
+        // scalar/array type gates do not admit IRTStruct -- so this claims
+        // no layout or calling convention.
+        | IRTDStruct _ -> ()
         | IRTDVariant (name, _) -> refuse ($"the variant type '{name}'")
 
 // ---------------------------------------------------------------------------
@@ -4360,7 +5271,7 @@ let private emitArrayPrint (c: Ctx) (label: string) (a: ArrVal) : unit =
     match a.Groups with
     | [ GRagged (rows, table) ] ->
         outStr c (label + " = [")
-        emitCountedLoop c rows (fun i ->
+        emitCountedLoopTo c rows (fun i ->
             let t = freshReg c
             ln c (renderCmp { Dest = t; Kind = "icmp"; Pred = "ne"; Ty = ScI64; Lhs = i; Rhs = "0" })
             emitIfThen c t (fun () -> outStr c ", ")
@@ -4495,7 +5406,12 @@ let private emitMain (c: Ctx) (m: IRModule) (programName: string) : string list 
     let t0 = freshReg c
     ln c (renderCall { Dest = Some t0; RetTy = ScF64; Callee = "@blade_now"; Args = [] })
     for b in m.Bindings do
+        c.StmtStart <- c.Body.Count
+        c.StmtSlots <- Dictionary(c.ArrSlots)
+        c.HoistedIds.Clear()
         bindNamed c b.Id b.Name b.Type b.Value
+        publishBinding c b.Id
+    c.StmtStart <- -1
     let t1 = freshReg c
     ln c (renderCall { Dest = Some t1; RetTy = ScF64; Callee = "@blade_now"; Args = [] })
     let elapsed = freshReg c
@@ -4633,6 +5549,10 @@ let tryEmitProgramNamed (programName: string) (program: IRProgram) : Result<stri
                     eprintfn "[llvm ir-dump] callable %d (%s):" cid cl.Name
                     eprintfn "%s" (Blade.IRPrint.ppIRExprWithNames names 1 cl.Body)
             let c = newCtx callables (computeModuleFacts m callables)
+            let (moduleReads, publishWanted) = computeModuleReads m callables
+            c.ModuleReads <- moduleReads
+            c.PublishWanted <- publishWanted
+            c.ModuleNames <- m.Bindings |> List.map (fun b -> (b.Id, b.Name)) |> Map.ofList
             // main FIRST: it discovers which functions are actually reachable,
             // and the worklist below emits only those. An unreachable helper
             // (a static function already folded away, say) never has to be
@@ -4667,8 +5587,13 @@ let tryEmitProgramNamed (programName: string) (program: IRProgram) : Result<stri
             // something referenced.
             if c.UsedAttrGroups.Count > 0 then
                 put ""
+                // Any declared shim symbol that can panic (shimPanicSymbols: the
+                // panic path and the arithmetic-contract helpers).
+                let anyPanics =
+                    c.Externs |> Seq.exists (fun d ->
+                        shimPanicSymbols |> Set.exists (fun sym -> d.Contains("@" + sym + "(")))
                 for g in c.UsedAttrGroups do
-                    put ($$"""attributes #{{g}} = { {{(attrGroupText c.AnyFrees g)}} }""")
+                    put ($$"""attributes #{{g}} = { {{(attrGroupText c.AnyFrees anyPanics g)}} }""")
             Ok (sb.ToString())
             finally Blade.IR.restoreAnalysisContext prevCtx
     with LlvmRefusal reason -> Error reason
