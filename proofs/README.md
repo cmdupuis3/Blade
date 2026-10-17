@@ -184,11 +184,14 @@ run it with `-Check` to verify the numbers below and the headline in
   form a lossless layout (srank_in_range, sunrank_srank, sunrank_in,
   srank_sunrank, srank_injective; packaged as
   mixed_radix_bijection), with cell count
-  prod_j C(u_j - l_j + r_j - 1, r_j) (shapeCard_binom).  Per-group
-  ranks are classical (combinadics; ADOL-C tensor_address;
-  Neidinger 2005) and the SIZE formula ships in CTF's
-  sy_packed_size; the composed bijection itself appears nowhere in
-  the literature (2026 survey) -- this file is the named artifact.
+  prod_j C(u_j - l_j + r_j - 1, r_j) (shapeCard_binom).  None of the
+  arithmetic is new: per-group ranks are classical (combinadics;
+  ADOL-C tensor_address; Neidinger 2005) and the composed mixed-radix
+  layout is CTF's calc_idx_arr / sy_calc_idx_arr with sy_packed_size
+  as its size formula (Solomonik et al., IPDPS 2013).  The contribution
+  is the machine-checked two-sided layout CONTRACT (range, membership,
+  both round trips) over the tower's own enumeration -- not a new
+  layout principle.
 - BladeJacobian.v (47): the AD seam, at the level the compiler actually
   differentiates: SYMBOLIC differentiation over a small expression
   language (Grad.fs's derivRule table as a FORMAL derivative slot; no

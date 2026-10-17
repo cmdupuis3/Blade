@@ -50,7 +50,7 @@ Rules of this document:
 | The one model, and the surface calculus | BladeObject, BladeSurface | the DMWF IS the quotient: its enumeration is the image of the dense box under canonical form, with fibres exactly the orbits (one record, then every shape under the Young action); arrays as functions on the transversal with canonicalizing access = the storage lookup; the object as the program that asks one question per orbit, which is BladeOptimal's attaining program read through the data. The structure-first core as a calculus: progress, preservation, normalization; a denotation into the object that every step preserves on the nose; and the quotient as a theorem about TYPING DERIVATIONS — the typed output of `L <@> f` is `out_shape`, every dense cell is recovered from it by canonicalizing access, and it holds one cell per orbit; nothing is quotiented without `comm`; a deduced swap-symmetry (BladeDeduceExact's `teq`) is a licence |
 | The theory's remaining items (plan items 3–7) | BladeTransport, BladeAttain, BladeInduction, BladeLicence, BladeBoundary | the licence group through every combinator (`<*>` glues identity groups at the seam, so the typed output of a product is a quotient of the product; zip, pipe, `<&>`, `<&!>` with fusion's one-traversal cost and its evaluation cost on mismatched licences; the orbit work of a pipeline attained by the composed object program and bridged program-level to BladeOrbitWork's free-model bound on the two-node schema); the orbit bound at proper subgroups (block licences composed with the binding's cut — the meet — forced and attained; the sign character at every r from adjacent anti-invariance alone; the neighbour rule of §8.3 proved sound but not optimal at (A, B, A)); the inductive side (`let rec` as the unique solution of the zero-extended recurrence on the leading axis, its work N × orbits forced and attained, the quotient surviving on the remaining axes, the `while` guard); numerics as a parameter (typing, soundness and the quotient theorem relative to a declared relation R; reordering needs a congruence, re-bracketing an identity too; a rounded reduce's licence is necessarily coarse); the scope boundary (the bound holds on every free class; separable kernels beat the query bound with n questions but not the storage bound; the converse is open) |
 | AD seam | BladeJacobian | symbolic differentiation: renaming equivariance, the Jacobian symmetry transfer, joint-pair-swap tangent symmetry, the accumulation multiplicity rule |
-| ML seam | BladeSymPower, BladePartition, BladePointGroup | the S₂ partition of a self-tensor weight space; the Sym^k/Λ^k composition-sector counts (Vandermonde, both flavours); set partitions as restricted growth strings — Bell/Stirling counts, RGS-lex extends refinement, the unitriangular witness certificate; the C₄/D₄ point-group registry — table closure, computed Frobenius–Schur indicators, the J identities, the e-weighted Hom count |
+| ML seam | BladeRepStatus, BladeSymPower, BladePartition, BladePointGroup | the `ml.equiv` representation-status transfer table, one soundness theorem per Rep/Inv row (abstract G-set model); the S₂ partition of a self-tensor weight space; the Sym^k/Λ^k composition-sector counts (Vandermonde, both flavours); set partitions as restricted growth strings — Bell/Stirling counts, RGS-lex extends refinement, the unitriangular witness certificate; the C₄/D₄ point-group registry — table closure, computed Frobenius–Schur indicators, the J identities, the e-weighted Hom count |
 
 Import structure is a DAG rooted at BladeDMWF (BladeCore and BladeLowering are
 self-contained); build order per `_CoqProject`.
@@ -188,11 +188,16 @@ sunrank : Shape → nat → tuple        (div/mod, inverted group by group)
 BladeSafety), so the theorem is independent of any particular offset
 formula.
 
-Context (2026 literature sweep): per-group simplicial ranks are classical
-(combinadics; Knuth TAOCP §7.2.1.3; ADOL-C `tensor_address`; Neidinger 2005
-Eq. 7.4), and the *size* formula ships in CTF's `sy_packed_size` — but the
-composed rank/unrank bijection for the product index set appears nowhere.
-This file is the named artifact.
+Context (2026 literature sweeps): none of the arithmetic is new. Per-group
+simplicial ranks are classical (combinadics; Knuth TAOCP §7.2.1.3; ADOL-C
+`tensor_address`; Neidinger 2005 Eq. 7.4), and the composed mixed-radix
+layout is exactly CTF's `calc_idx_arr` / `sy_calc_idx_arr`, with
+`sy_packed_size` as its size formula (Solomonik, Matthews, Hammond, Demmel,
+IPDPS 2013). An earlier version of this section claimed the composed
+bijection "appears nowhere"; that was wrong. The contribution is the
+machine-checked two-sided layout *contract* — range, membership, both round
+trips — stated over the tower's own enumeration: a checked contract, not a
+new layout principle.
 
 ## BladeCurrying.v — dependence boundary; two maximal curryings
 
@@ -749,6 +754,35 @@ kernels (Grad.fs's quotient/power rules) are outside this file; and the
 intrinsic-derivative slot is formal by design — the refutation shows
 that boundary is essential to the statement, not an accident of the
 model.
+
+## BladeRepStatus.v (18 theorems) — soundness of the `ml.equiv` transfer table
+
+The partial mechanization of the compile-time equivariance checker.
+`src/ml/compiler/MLEquiv.fs`'s `judge` walks a `where ml.equiv(G)`-certified
+body bottom-up and assigns each subexpression a status — `Rep spec`
+(transforms as the named representation), `Inv` (held fixed by the action),
+or `Opaque` (the PBottom default; licenses nothing) — from a fixed
+per-primitive table. This file proves, abstractly (no concrete group, no
+concrete representation), that every table row which ever answers Rep or
+Inv is the soundness theorem for a genuine semantic fact about functions of
+a G-set input: `neg_covariant` / `sum_covariant` / `diff_covariant`
+(pass-through and Rep ± Rep at the same spec), `scalar_scale_covariant`
+(invariant scalar × Rep), `inv_closure_binop` (Inv op Inv, any operator),
+`const_invariant`, `certified_call_sound` / `certified_call_inv_arg_sound`
+(the pinned-callee arm, with and without the invariant weight buffer),
+`inv_call_inv` (an uncertified callee on all-invariant arguments, any arity),
+`branch_agree_sound` (`if` with an invariant condition and agreeing arms), and
+`equivariance_downward` (the subgroup-meet direction the not-yet-shipped
+`ml.restrict` row would cite).
+
+Scope: this is the certificate's "conditional theorem" reading — IF every
+representation-typed argument transforms as its declared `IrrepsIdx` spec,
+THEN the result transforms as its declared spec — not a model of the ML
+module's elaboration (CG tables, `derive_poly`) or of `IrrepsIdx` storage.
+It is self-contained and imports nothing from BladeDeduce: that tower's
+`invariant_under` is invariance of a kernel under permuting its own argument
+list; this file's is equivariance of a function under the group acting on
+its domain — same word, different object.
 
 ## BladeSymPower.v — the S₂ partition and the copy-splitting counts
 
@@ -2682,6 +2716,7 @@ itself unmechanized · **CORRECTED** = v10 claim refuted/amended by the tower.
 | 13.2 typing rules; 14.4 compute | `progress`, `preservation`, `normalizes`, `step_den`, `eval_sound` | CORE (the structure-first fragment: rank-0 kernels, rank-1 identity groups, top-level binding) |
 | 8.4 step 3 / 11.2 as a function of the derivation | `typed_app_is_quotient`, `comm_license_needed`, `covariance_shape`, `aba_unlicensed` | FULL at `s = 1`; compound groups (`s > 1`) are plan item 3 |
 | 9.19/9.20 deduced commutativity is a licence | `deduced_comm_is_licence` | INSTANCE (binary kernels; general arity via `deduced_group_largest` open) |
+| `where ml.equiv(G)` representation-status transfer table (features.md §17; MLEquiv.fs `judge`) | `BladeRepStatus.neg/sum/diff_covariant`, `scalar_scale_covariant`, `inv_closure_binop`, `const_invariant`, `certified_call_sound(_inv_arg)`, `inv_call_inv`, `branch_agree_sound`; `equivariance_downward` (meet direction; its table row not yet shipped) | CORE — one soundness theorem per table row that answers Rep/Inv, in an abstract G-set model (no concrete group or representation; Opaque licenses nothing); the checker's elaboration side (CG tables, `IrrepsIdx` storage) is corpus-pinned, not mechanized |
 | 10.2/10.5 combinator symmetry laws (σ(C₁<&>C₂)=σ₁×σ₂, `<*>` = shape concatenation, zip common shape, `>>@` first stage, `<&!>` same loop / meet) | `BladeTransport.out_shape_app_clean`, `block_perm_app`, `shapeCard_product_seam`, `zip_transport`, `pipe_transport`, `par_group_product`, `fuse_meet`, `fuse_is_par`, `group_of_laws` | FULL for rank-1 identity groups; `<*>` concatenation is a fact about the LOOP, the typed output glues the seam (`out_shape_app`); compound and symmetric-operand groups left dense (D1 not built) |
 | Orbit work formula W = Σ ω(G_v, X_v) for map pipelines; fusion cost | `BladeTransport.pipeline_attains_orbit_work`, `stage_is_surface`, `two_node_translation`, `fuse_object_prog`, `fusion_evaluations` + BladeOrbitWork's lower bound | Attainment for every pipeline; free-model bound bridged program-level on the two-node schema; typed W exceeds the free count when the type rule under-quotients (12 vs 9); folds out |
 | Orbit bound attained at proper subgroups H < S_R: comm on declared blocks composed with the binding (the meet) | `BladeAttain.uniform_optimality_subgroup`, `meet_lower_bound`, `meet_attained`, `uniform_optimality_block_nat`, `meet_ex_forced`, `surface_comm_optimal`, `surface_den_is_call_site` | FULL when H ∩ Stab's classes are contiguous; one split instance (A, B, A); general split classes open |
