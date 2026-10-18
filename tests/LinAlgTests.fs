@@ -1508,6 +1508,166 @@ let runSyrkTileTests () : BlockResult =
         { Block = blockName; Passed = passed; Failed = failed; Skipped = 0; FailedNames = names }
 
 
+/// The antisym-pair tile (review item M7) and the rank-3 simplex tile (M8):
+/// ROUTING pins on the emitted text (pure codegen: the tile call, its schedule
+/// knob, the crossovers, the spellings that must decline), then the RAW-BIT
+/// gate -- cpp/row_contraction_tile_tests.cpp built twice, -ffp-contract=off
+/// (bitwise the emitted serial forms by construction) and =fast (bitwise the
+/// one-fma-per-step chains), plus the vfmadd census of each build.
+/// `blade test row-tile`; also part of `blade test linalg` and the default
+/// suite (beside `syrk-tile`).
+let runRowContractionTileTests () : BlockResult =
+    let blockName = "Row Contraction Tiles"
+    printHeader "Antisym-Pair and Simplex Tiles (routes + raw-bit, both contraction modes)"
+    use _ompThreads = pinEnv "BLADE_OMP_THREADS" null
+    use _anti = pinEnv "BLADE_ANTISYM_TILE" null
+    use _simplex = pinEnv "BLADE_SIMPLEX_TILE" null
+    let mutable passed = 0
+    let mutable failed = 0
+    let mutable names = []
+    let fail (n: string) (detail: string) =
+        failed <- failed + 1
+        names <- names @ [ n ]
+        resultLine Fail n detail
+    let pass (n: string) (detail: string) =
+        passed <- passed + 1
+        resultLine Pass n detail
+    // ---- routes ----
+    let antiSrc (p: int) (n: int) (licence: string) (body: string) =
+        $"type P = Idx<{p}>\ntype C = Idx<2>\ntype S = Idx<{n}>\n"
+        + "let z = method_for(range<P>, range<C>, range<S>) <@> lambda(i, c, s) -> Float64((i * 5 + c * 3 + s) % 7) - 3.0 |> compute\n"
+        + $"let l = method_for(z, z) <@> lambda(a: Array<Float64 like C, S>, b: Array<Float64 like C, S>) where {licence} -> {body} |> compute\n"
+    let antiBody = "prodsum(a((0 : C)), b((1 : C))) - prodsum(b((0 : C)), a((1 : C)))"
+    let sym3Src (p: int) (n: int) (licence: string) (body: string) =
+        $"type V = Idx<{p}>\ntype S = Idx<{n}>\nlet static nn = {n}\n"
+        + "let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 5) - 2.0 |> compute\n"
+        + $"let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>, c: Array<Float64 like S>) where {licence} -> {body} |> compute\n"
+    let cases : (string * (string * string) list * string * string list * string list) list =
+        [ ("antisym_tile_sequential_6x8_by_default", [],
+           antiSrc 29 11 "anticomm(a, b)" antiBody,
+           [ "blade_pgemm::dantisym_tri((size_t)(29), (size_t)(11), z.data, (size_t)0, (size_t)1, nested_array_utilities::pool_base(l.data), 0, (double)(0.0), false, 0);"
+             "#include \"blade_packed_gemm.hpp\"" ],
+           [ "z____i0" ])
+          ("antisym_tile_paired_4x4_under_the_knob", [ ("BLADE_ANTISYM_TILE", "4x4") ],
+           antiSrc 29 11 "anticomm(a, b)" antiBody,
+           [ "dantisym_tri((size_t)(29), (size_t)(11), z.data, (size_t)0, (size_t)1, nested_array_utilities::pool_base(l.data), 0, (double)(0.0), false, 1);" ],
+           [ "z____i0" ])
+          ("antisym_tile_knob_off_keeps_the_nest", [ ("BLADE_ANTISYM_TILE", "0") ],
+           antiSrc 29 11 "anticomm(a, b)" antiBody,
+           [ "z____i0"; "__i1 < 29 - __i0 - 1" ], [ "dantisym_tri" ])
+          ("antisym_tile_takes_the_omp_licence", [],
+           antiSrc 29 11 "anticomm(a, b), omp(a: 1)" antiBody,
+           [ "nested_array_utilities::pool_base(l.data), 0, (double)(0.0), true, 0);" ], [ "z____i0" ])
+          ("antisym_tile_census_under_serial_emission", [ ("BLADE_OMP_THREADS", "1") ],
+           antiSrc 29 11 "anticomm(a, b), omp(a: 1)" antiBody,
+           [ "[omp] requested but emitted serial"; "(double)(0.0), false, 0);" ], [ "z____i0" ])
+          ("antisym_tile_scale_divides_the_finished_cell", [],
+           antiSrc 29 11 "anticomm(a, b)" ("(" + antiBody + ") / 4.0"),
+           [ "pool_base(l.data), 1, (double)(4.0), false, 0);" ], [ "z____i0" ])
+          ("antisym_below_crossover_keeps_the_nest", [],
+           antiSrc 23 11 "anticomm(a, b)" antiBody, [ "z____i0" ], [ "dantisym_tri" ])
+          ("antisym_reversed_q_operands_decline", [],
+           antiSrc 29 11 "anticomm(a, b)" "prodsum(a((0 : C)), b((1 : C))) - prodsum(a((1 : C)), b((0 : C)))",
+           [ "z____i0" ], [ "dantisym_tri" ])
+          ("antisym_p_plus_negated_q_declines", [],
+           antiSrc 29 11 "anticomm(a, b)" "prodsum(a((0 : C)), b((1 : C))) + (-prodsum(b((0 : C)), a((1 : C))))",
+           [ "z____i0" ], [ "dantisym_tri" ])
+          ("simplex_tile_with_the_cast_divisor", [],
+           sym3Src 29 67 "comm(a, b, c)" "prodsum(a, b, c) / Float64(nn)",
+           [ "blade_pgemm::dsym3_tri((size_t)(29), (size_t)(67), x.data, nested_array_utilities::pool_base(t.data), 1, (double)("
+             "false, (size_t)336);"; "#include \"blade_packed_gemm.hpp\"" ],
+           [ "x____i0" ])
+          ("simplex_tile_takes_the_omp_licence", [],
+           sym3Src 61 11 "comm(a, b, c), omp(a: 1)" "prodsum(a, b, c)",
+           [ "dsym3_tri((size_t)(61), (size_t)(11), x.data, nested_array_utilities::pool_base(t.data), 0, (double)(0.0), true, (size_t)336);" ],
+           [ "x____i0" ])
+          ("simplex_tile_knob_off_keeps_the_nest", [ ("BLADE_SIMPLEX_TILE", "0") ],
+           sym3Src 29 67 "comm(a, b, c)" "prodsum(a, b, c)", [ "x____i0" ], [ "dsym3_tri" ])
+          ("simplex_below_crossover_keeps_the_nest", [],
+           sym3Src 13 201 "comm(a, b, c)" "prodsum(a, b, c)", [ "x____i0" ], [ "dsym3_tri" ])
+          ("simplex_inner_level_first_declines", [],
+           sym3Src 29 67 "comm(a, b, c)" "prodsum(c, a, b)", [ "x____i0" ], [ "dsym3_tri" ]) ]
+    for (name, env, src, must, mustNot) in cases do
+        let pins = env |> List.map (fun (k, v) -> pinEnv k v)
+        let r = cppOf false name src
+        pins |> List.rev |> List.iter (fun d -> d.Dispose())
+        match r with
+        | Error e -> fail name e
+        | Ok cpp ->
+            let missing = must |> List.filter (fun s -> not (cpp.Contains s))
+            let present = mustNot |> List.filter (fun s -> cpp.Contains s)
+            if not missing.IsEmpty then fail name ($"""generated C++ lacks: {(String.concat " | " missing)}""")
+            elif not present.IsEmpty then fail name ($"""generated C++ unexpectedly contains: {(String.concat " | " present)}""")
+            else pass name "emission as expected"
+    // ---- raw bits ----
+    let cppDir = Path.Combine(AppContext.BaseDirectory, "cpp")
+    let testSrc = Path.Combine(cppDir, "row_contraction_tile_tests.cpp")
+    let caps = capabilities.Value
+    let mutable skipped = 0
+    if not caps.HasGpp then
+        printfn "Skipped: g++ not found (cannot compile the C++ tile tests)."
+        skipped <- 1
+    elif not (File.Exists testSrc) then
+        fail "row_contraction_tile_tests.cpp missing" testSrc
+    else
+        let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
+        let work = Path.Combine(Path.GetTempPath(), "blade-row-tile-" + Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory(work) |> ignore
+        let runProc (exe: string) (args: string) (timeoutMs: int) =
+            let psi = ProcessStartInfo(exe, args)
+            psi.RedirectStandardOutput <- true
+            psi.RedirectStandardError <- true
+            psi.UseShellExecute <- false
+            psi.CreateNoWindow <- true
+            psi.WorkingDirectory <- cppDir
+            use p = Process.Start(psi)
+            let o = Blade.Runtime.readToEndOffPool p.StandardOutput
+            let e = Blade.Runtime.readToEndOffPool p.StandardError
+            if p.WaitForExit(timeoutMs) then (Some p.ExitCode, o.Result, e.Result)
+            else
+                (try p.Kill(true) with _ -> ())
+                (None, o.Result, e.Result)
+        let baseFlags = "-std=c++17 -O3 -march=native -fno-math-errno -fwrapv -fopenmp"
+        for (mode, extra) in [ ("off", ""); ("fast", " -DBLADE_TEST_FMA_REF") ] do
+            let exe = Path.Combine(work, $"row_tile_{mode}{exeExt}")
+            let asm = Path.Combine(work, $"row_tile_{mode}.s")
+            let flags = $"{baseFlags} -ffp-contract={mode}{extra}"
+            match runProc "g++" $"{flags} -o \"{exe}\" \"{testSrc}\"" 180000 with
+            | Some 0, _, _ ->
+                match runProc exe "" 300000 with
+                | None, _, _ -> fail $"raw-bit contract={mode}" "test binary TIMED OUT (300s)"
+                | Some code, out, err ->
+                    let outText = out.Replace("\r\n", "\n")
+                    let m = System.Text.RegularExpressions.Regex.Match(outText, @"ROW TILE TESTS:\s*(\d+)/(\d+)\s*passed")
+                    let firstFails =
+                        outText.Split('\n') |> Array.filter (fun l -> l.StartsWith "[FAIL]") |> Array.truncate 5
+                        |> String.concat " | "
+                    if m.Success && code = 0 && m.Groups.[1].Value = m.Groups.[2].Value then
+                        pass $"raw-bit contract={mode}" ($"{m.Groups.[1].Value}/{m.Groups.[2].Value} shapes bitwise (antisym 6x8 + 4x4, simplex)")
+                    elif m.Success then
+                        fail $"raw-bit contract={mode}" ($"{m.Groups.[1].Value}/{m.Groups.[2].Value} passed: {firstFails} {err.Trim()}")
+                    else
+                        fail $"raw-bit contract={mode}" ($"no summary line (exit {code}): {err.Trim()}")
+            | _, o, e -> fail $"raw-bit contract={mode}" ($"compile failed: {(o + e).Trim()}")
+            match runProc "g++" $"{flags} -S -o \"{asm}\" \"{testSrc}\"" 180000 with
+            | Some 0, _, _ ->
+                let lines = File.ReadAllLines asm
+                let count (pat: string) = lines |> Array.filter (fun l -> l.Contains pat) |> Array.length
+                let anyFma = count "vfmadd" + count "vfmsub" + count "vfnmadd"
+                let packedFma = count "vfmadd231pd" + count "vfmadd132pd" + count "vfmadd213pd"
+                if mode = "off" then
+                    if anyFma = 0 then pass "vfmadd census contract=off" "0 fused instructions in the TU (mul + add, as the serial loops)"
+                    else fail "vfmadd census contract=off" ($"{anyFma} fused instruction(s) under -ffp-contract=off")
+                else
+                    // 12 per step per 6x8 kloop (P, Q, simplex) + 8 per paired 4x4 step
+                    if packedFma >= 20 then pass "vfmadd census contract=fast" ($"{packedFma} packed vfmadd (6x8 kloops: 12 per step; paired 4x4: 8)")
+                    else fail "vfmadd census contract=fast" ($"only {packedFma} packed vfmadd: the tiles did not contract")
+            | _, o, e -> fail $"vfmadd census contract={mode}" ($"-S failed: {(o + e).Trim()}")
+        (try Directory.Delete(work, true) with _ -> ())
+    printFooter blockName [ $"{passed} passed"; $"{failed} failed" ]
+    { Block = blockName; Passed = passed; Failed = failed; Skipped = skipped; FailedNames = names }
+
+
 /// The four-tier BLAS/LAPACK resolution (docs/plans/plan-toolchain-packaging.md):
 /// pure in-process unit checks of `resolveBlasTier` / `blasAvailable` /
 /// `lapackAvailable` / `blasFlavor` / `blasBuildFlags`, plus `Toolchain.get`'s

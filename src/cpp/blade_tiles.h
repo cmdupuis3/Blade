@@ -158,6 +158,183 @@ BLADE_TILE_INLINE void blade_tri_tile_edge(size_t kc, const double* ap, const do
     }
 }
 
+/* ===========================================================================
+ * The kernel's SCALAR TAIL, applied to a FINISHED cell: the source's own
+ * `<sum> / d` or `<sum> * s`, once, never folded into an operand, never a
+ * reciprocal. A vector divide/multiply by a broadcast is correctly rounded per
+ * lane, i.e. the scalar operation lane by lane. Kind is explicit -- a real
+ * division by zero must still divide.
+ * ======================================================================== */
+#define BLADE_TILE_SCALE_NONE 0
+#define BLADE_TILE_SCALE_DIV 1
+#define BLADE_TILE_SCALE_MUL 2
+
+BLADE_TILE_INLINE double blade_tile_scale1(double v, int sk, double sc) {
+    return sk == BLADE_TILE_SCALE_DIV ? v / sc : sk == BLADE_TILE_SCALE_MUL ? v * sc : v;
+}
+
+BLADE_TILE_INLINE blade_tile_v4d blade_tile_scale4(blade_tile_v4d v, int sk, double sc) {
+    const blade_tile_v4d s = {sc, sc, sc, sc};
+    return sk == BLADE_TILE_SCALE_DIV ? v / s : sk == BLADE_TILE_SCALE_MUL ? v * s : v;
+}
+
+/* ===========================================================================
+ * THE ANTISYM PAIR (bench/notes/microkernel-sketches-review.md M7).
+ *     L(i, j) = P(i, j) - Q(i, j),   i < j < p   (the STRICT triangle, S = 1)
+ *     P = sum_s X(i, s) * Y(j, s)    the source's prodsum(a(cx), b(cy))
+ *     Q = sum_s X(j, s) * Y(i, s)    the source's prodsum(b(cx), a(cy))
+ * X(r, s) = Z(r, cx, s), Y(r, s) = Z(r, cy, s). Each of P and Q is ONE chain
+ * per cell -- seeded +0.0, ascending s, the product in SOURCE factor order
+ * (P: the broadcast X(i) first; Q: the VECTOR X(j) first) -- and the
+ * subtraction happens ONCE per cell after both chains complete (never a
+ * per-s or per-block difference, which would re-associate). The whole sample
+ * chain runs inside one tile visit (no K blocking, so no partial is ever
+ * stored), which is the serial form's operation sequence verbatim: bitwise
+ * under -ffp-contract=off by construction, and the one-fma-per-step chain
+ * under =fast (both verified by cpp/row_contraction_tile_tests.cpp).
+ *
+ * Output: row i of the strict packed triangle is crow_i[j - i - 1].
+ * ======================================================================== */
+
+/* The Q pass's s loop: c[r][h] += B(s, 4h..4h+3) * A(r, s) -- the VECTOR
+ * operand first (Q's source product is X(j, s) * Y(i, s)). */
+BLADE_TILE_INLINE void blade_tri_kloop_vb(size_t kc, const double* ap, const double* bp,
+                                          blade_tile_v4d c[BLADE_TILE_MR][2]) {
+    size_t s, r;
+    for (s = 0; s < kc; s++) {
+        blade_tile_v4d b0, b1;
+        memcpy(&b0, bp + s * BLADE_TILE_NR, 32);
+        memcpy(&b1, bp + s * BLADE_TILE_NR + 4, 32);
+        for (r = 0; r < BLADE_TILE_MR; r++) {
+            const double a = ap[s * BLADE_TILE_MR + r];
+            const blade_tile_v4d av = {a, a, a, a};
+            c[r][0] += b0 * av;              /* X(j, s) * Y(i, s): source factor order */
+            c[r][1] += b1 * av;
+        }
+    }
+}
+
+/* Store P - Q (then the scale) for the real lanes of one row of a tile: lane
+ * q is cell (i, j0 + q), real iff q < nr and j0 + q >= i + 1. A row whose
+ * lanes are all real takes the vector path; an offset is formed only for a
+ * real lane. NR = 8 (pv/qv hold two vectors) or 4 (one). */
+BLADE_TILE_INLINE void blade_anti_store_row(double* crow, size_t i, size_t j0, size_t nr,
+                                            size_t NRW, const double* pr, const double* qr,
+                                            int sk, double sc) {
+    size_t q;
+    if (nr == NRW && j0 >= i + 1) {
+        double* dst = crow + (j0 - i - 1);
+        for (q = 0; q < NRW; q += 4) {
+            blade_tile_v4d pv, qv, lv;
+            memcpy(&pv, pr + q, 32);
+            memcpy(&qv, qr + q, 32);
+            lv = blade_tile_scale4(pv - qv, sk, sc);
+            memcpy(dst + q, &lv, 32);
+        }
+    } else {
+        for (q = 0; q < nr; q++)
+            if (j0 + q >= i + 1) crow[j0 + q - i - 1] = blade_tile_scale1(pr[q] - qr[q], sk, sc);
+    }
+}
+
+/* SEQUENTIAL 6 x 8 (the reviewed default): the gram tile's register budget
+ * (12 accumulators + 2 B vectors + 1 broadcast) run TWICE -- P with the
+ * X(i) / Y(j) panels, spilled to 48 stack doubles, then Q with Y(i) / X(j) --
+ * and one subtraction per real lane. axp/ayp: s-major 6-wide X(i) / Y(i)
+ * panels; bxp/byp: s-major 8-wide X(j) / Y(j) panels; crow[r] for r < mr. */
+BLADE_TILE_INLINE void blade_anti_tile_6x8(size_t n, const double* axp, const double* ayp,
+                                           const double* bxp, const double* byp,
+                                           double* const* crow, size_t i0, size_t j0,
+                                           size_t mr, size_t nr, int sk, double sc) {
+    blade_tile_v4d c[BLADE_TILE_MR][2];
+    double P[BLADE_TILE_MR][BLADE_TILE_NR];
+    double Q[BLADE_TILE_NR];
+    size_t r;
+    for (r = 0; r < BLADE_TILE_MR; r++) {
+        const blade_tile_v4d z = {0.0, 0.0, 0.0, 0.0};
+        c[r][0] = z; c[r][1] = z;
+    }
+    blade_tri_kloop(n, axp, byp, c);         /* P: X(i, s) * Y(j, s) */
+    for (r = 0; r < BLADE_TILE_MR; r++) {
+        const blade_tile_v4d z = {0.0, 0.0, 0.0, 0.0};
+        memcpy(P[r], &c[r][0], 32);
+        memcpy(P[r] + 4, &c[r][1], 32);
+        c[r][0] = z; c[r][1] = z;
+    }
+    blade_tri_kloop_vb(n, ayp, bxp, c);      /* Q: X(j, s) * Y(i, s) */
+    for (r = 0; r < mr; r++) {
+        memcpy(Q, &c[r][0], 32);
+        memcpy(Q + 4, &c[r][1], 32);
+        blade_anti_store_row(crow[r], i0 + r, j0, nr, BLADE_TILE_NR, P[r], Q, sk, sc);
+    }
+}
+
+/* PAIRED 4 x 4 (the measured alternative, BLADE_ANTISYM_TILE=4x4): P and Q
+ * in ONE pass -- 4 + 4 vector accumulators, the two 4-wide B vectors X(j) and
+ * Y(j), 8 broadcasts per s (10 loads per 8 FMAs) and no spill. Same chains,
+ * same factor order, same single subtraction. Panels 4-wide, s-major. */
+#define BLADE_ANTI4_MR 4
+#define BLADE_ANTI4_NR 4
+
+BLADE_TILE_INLINE void blade_anti_tile_4x4(size_t n, const double* axp, const double* ayp,
+                                           const double* bxp, const double* byp,
+                                           double* const* crow, size_t i0, size_t j0,
+                                           size_t mr, size_t nr, int sk, double sc) {
+    blade_tile_v4d pc[BLADE_ANTI4_MR], qc[BLADE_ANTI4_MR];
+    double P[BLADE_ANTI4_NR], Q[BLADE_ANTI4_NR];
+    size_t r, s;
+    for (r = 0; r < BLADE_ANTI4_MR; r++) {
+        const blade_tile_v4d z = {0.0, 0.0, 0.0, 0.0};
+        pc[r] = z; qc[r] = z;
+    }
+    for (s = 0; s < n; s++) {
+        blade_tile_v4d xj, yj;
+        memcpy(&xj, bxp + s * BLADE_ANTI4_NR, 32);
+        memcpy(&yj, byp + s * BLADE_ANTI4_NR, 32);
+        for (r = 0; r < BLADE_ANTI4_MR; r++) {
+            const double xa = axp[s * BLADE_ANTI4_MR + r];
+            const double ya = ayp[s * BLADE_ANTI4_MR + r];
+            const blade_tile_v4d xv = {xa, xa, xa, xa};
+            const blade_tile_v4d yv = {ya, ya, ya, ya};
+            pc[r] += xv * yj;                /* P: X(i, s) * Y(j, s) */
+            qc[r] += xj * yv;                /* Q: X(j, s) * Y(i, s) */
+        }
+    }
+    for (r = 0; r < mr; r++) {
+        memcpy(P, &pc[r], 32);
+        memcpy(Q, &qc[r], 32);
+        blade_anti_store_row(crow[r], i0 + r, j0, nr, BLADE_ANTI4_NR, P, Q, sk, sc);
+    }
+}
+
+/* ===========================================================================
+ * THE RANK-3 SIMPLEX (review M8): T(i, j, k) = (sum_s X(i,s) X(j,s) X(k,s)),
+ * i <= j <= k < p, then the kernel's scale. The serial chain's term is
+ * `(X(i,s) * X(j,s)) * X(k,s)` -- C++'s left-to-right product, the emitted
+ * `__ps += a[t] * b[t] * c[t]` -- so its FIRST product reads only the two
+ * outer levels: the W panel W(r, s) = round(X(i, s) * X(j0 + r, s)) is that
+ * product formed ONCE per (i, j) prefix and reused over every k panel. The
+ * per-term arithmetic is unchanged (round(a*b), then times c, then add --
+ * or, under =fast, round(a*b) then one fma, as the serial loop contracts),
+ * so the tile is the gram tile itself over (row = j, column = k): the driver
+ * hands blade_tri_tile_full / _edge the W panel as A and an X(k) panel as B,
+ * with the row pointers of the (i, j) rows of the packed simplex.
+ * ======================================================================== */
+
+/* W panel: dst[s * MR + r] = X(i, s) * X(j_r, s) for r < rows (factor order
+ * i first), zero past rows (padding lanes: computed, never stored). xi and
+ * xj[r] already point at the block's first sample. */
+static inline void blade_sym3_pack_w(const double* xi, const double* const* xj, size_t rows,
+                                     size_t kc, double* dst) {
+    size_t r, s;
+    for (r = 0; r < rows; r++) {
+        const double* row = xj[r];
+        for (s = 0; s < kc; s++) dst[s * BLADE_TILE_MR + r] = xi[s] * row[s];
+    }
+    for (r = rows; r < BLADE_TILE_MR; r++)
+        for (s = 0; s < kc; s++) dst[s * BLADE_TILE_MR + r] = 0.0;
+}
+
 #endif /* __GNUC__ || __clang__ */
 
 #endif /* BLADE_TILES_H */

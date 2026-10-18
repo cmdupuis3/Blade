@@ -1563,6 +1563,173 @@ let (|BlasL3|_|) ((streamedCount, ompRequested, operandTypes, cg): int * bool * 
         | _ -> None
     | _ -> None
 
+// (|RowContraction|_|) -- the antisym pair and the rank-3 simplex, for the tiles
+
+/// The two same-array row contractions BEYOND syrk that Blade's own packed
+/// tiles compute (blade_tiles.h; drivers `blade_pgemm::dantisym_tri` and
+/// `blade_pgemm::dsym3_tri`). Matched as ORDERED ARITHMETIC, never as a
+/// normalised signed sum: the subtraction, its operand order and each
+/// prodsum's operand order are exactly the ones below, or the match declines.
+type RowContractionShape =
+    /// `prodsum(a(cx), b(cy)) - prodsum(b(cx), a(cy))` over `method_for(Z, Z)`
+    /// with `where anticomm(a, b)`: Z a dense rank-3 (p, c, n) array, the
+    /// output Blade's STRICT packed triangle (AntisymIdx<2, p>, no diagonal).
+    /// P = sum_s Z(i, cx, s) Z(j, cy, s) and Q = sum_s Z(j, cx, s) Z(i, cy, s),
+    /// each one ascending chain, the subtraction once after both.
+    | AntiPair of cx: int64 * cy: int64
+    /// `prodsum(a, b, c)` over `method_for(X, X, X)` with `where comm(a, b, c)`:
+    /// X a dense rank-2 (p, n) array, the output the packed SymIdx<3, p>
+    /// simplex. The operands are the peels of levels 0, 1, 2 IN THAT ORDER, so
+    /// the serial chain's first product `a * b` reads only the two OUTER
+    /// levels and can be formed once per (i, j) prefix (the W panel) --
+    /// `prodsum(c, a, b)` would make it read the inner level and declines.
+    | Sym3
+
+type RowContraction = {
+    Shape: RowContractionShape
+    /// The one input array (both / all three slots name it).
+    ArrayName: string
+    /// The output (the nest's own materialized pool).
+    OutputName: string
+    /// The kernel's own trailing scalar, applied to each FINISHED cell (never
+    /// folded into an operand, never a reciprocal).
+    Scale: NestScale option
+}
+
+/// A component subscript `a(c)` on a peeled fiber with a LITERAL c (the
+/// stacked-inputs spelling `a((0 : Comp))`), answered as (fiber var, c).
+let private componentPeel (e: IRExpr) : (IRId * int64) option =
+    let rec lit (x: IRExpr) =
+        match x with
+        | IRLit (IRLitInt v) -> Some v
+        | IRUnaryOp (IRCast _, inner) -> lit inner
+        | _ -> None
+    match e with
+    | IRIndex (IRVar (id, _), [ ix ], _) -> lit ix |> Option.map (fun c -> (id, c))
+    | IRCurry (IRVar (id, _), ix, 1) -> lit ix |> Option.map (fun c -> (id, c))
+    | _ -> None
+
+/// The scalar-tail peel for the row-contraction tiles: `body`, `body / d`,
+/// `body * s` or `s * body`, where the scale is a literal, a plain variable, or
+/// a numeric CAST of one (`/ Float64(n)`, the moment kernels' spelling). A
+/// cast is admitted HERE and not in `ProdSumScaled` because the BLAS route's
+/// post-pass is pinned to that peel; the tile drivers divide each finished
+/// cell in place, which is the same operation whatever renders the divisor.
+let private (|ScaledBody|) (e: IRExpr) : IRExpr * NestScale option =
+    let rec scalarOk (s: IRExpr) =
+        (match s with
+         | IRLit (IRLitFloat _) | IRLit (IRLitFloat32 _) | IRLit (IRLitInt _) | IRVar _ -> true
+         | IRUnaryOp (IRCast (ETFloat64, _), (IRVar _ | IRLit _)) -> true
+         | _ -> false)
+        && (match typeOf s with
+            | IRTScalar ETFloat64 -> true
+            | _ -> false)
+    match e with
+    | IRBinOp (_, IRDiv, b, d, _) when scalarOk d -> (b, Some (ScaleDiv d))
+    | IRBinOp (_, IRMul, b, s, _) when scalarOk s && not (scalarOk b) -> (b, Some (ScaleMul s))
+    | IRBinOp (_, IRMul, s, b, _) when scalarOk s && not (scalarOk b) -> (b, Some (ScaleMul s))
+    | _ -> (e, None)
+
+/// THE MATCH. Every structural check `(|BlasL3|_|)` makes, re-stated for the
+/// two shapes (no fold wrapper / chunk, `nestModeOk`, one physical dense f64
+/// input in every slot, levels over the same extent of the same axis, the
+/// exact compact output group of the same extent, peels identified by
+/// `ArrayPosition` and `ParamVarId`), then the ordered kernel body. Precision
+/// is f64 only (the tiles are binary64 vector extensions). A scale that reads a
+/// kernel parameter is not a scale (it would vary per cell) and declines.
+///
+/// NO LICENCE IS CONSULTED and none is needed: the tiles keep every cell's
+/// operation sequence (one ascending chain per prodsum, the subtraction or the
+/// scale once on the finished value), so the match is the same in the default
+/// and the BLADE_FP_REPRO=1 build.
+let (|RowContraction|_|) ((streamedCount, operandTypes, cg): int * IRArrayType list * LoopNestCodeGen)
+        : RowContraction option =
+    if cg.FoldWrapper.IsSome || cg.FoldChunk.IsSome || cg.ShareDecl.IsSome then None
+    elif not (nestModeOk streamedCount cg) then None
+    else
+    let isKernelParam id = cg.KernelParams |> List.exists (fun (p: IRParam) -> p.VarId = id)
+    let scaleOk (scale: NestScale option) =
+        match scale with
+        | Some (ScaleDiv (IRVar (id, _))) | Some (ScaleMul (IRVar (id, _)))
+        | Some (ScaleDiv (IRUnaryOp (_, IRVar (id, _)))) | Some (ScaleMul (IRUnaryOp (_, IRVar (id, _)))) ->
+            not (isKernelParam id)
+        | _ -> true
+    let outGroup (rank: int) (sym: SymmetryClass) (extent: IRExpr) =
+        match cg.OutputType with
+        | ArrayElem outTy ->
+            not outTy.IsVirtual
+            && precisionOf outTy.ElemType = Some PrecD
+            && (match outTy.IndexTypes with
+                | [ ix ] ->
+                    ix.Rank = rank
+                    && ix.Symmetry = sym
+                    && ix.IxKind = IxKPlain
+                    && ix.Dependencies.IsEmpty
+                    && extentsAgree ix.Extent extent
+                    && (match ix.Tag with Some t -> not (isKindSentinelTag t) | None -> true)
+                | _ -> false)
+        | _ -> false
+    let peelOk (rank: int) (aName: string) (pos: int) (e: ElementBinding) =
+        (match e.Virtual with RealArray -> true | _ -> false)
+        && e.ArrayPosition = pos
+        && e.ArrayName = aName
+        && e.ArrayRank = rank
+        && e.DimIndex = 0
+        && precisionOf e.ArrayElemType = Some PrecD
+        && (match e.SlotTag with Some t -> not (t.StartsWith "__") | None -> true)
+    let sameAxis (l0: LoopIndexBinding) (l: LoopIndexBinding) =
+        l.FusedRank.IsNone
+        && l.ExtentArrayRef = l0.ExtentArrayRef
+        && l.ExtentDimRef = l0.ExtentDimRef
+        && extentsAgree l0.Extent l.Extent
+    match cg.Bindings, cg.InputArrayNames, operandTypes with
+    // ---- the antisym pair: two levels, the STRICT triangle ----
+    | [ l0; l1 ], [ aName; bName ], [ aTy; bTy ]
+        when aName = bName
+             && l0.BoundDependencies.IsEmpty && l0.StrictOffset = 0 && l0.FusedRank.IsNone
+             && l1.BoundDependencies = [ 0 ] && l1.StrictOffset = 1
+             && sameAxis l0 l1
+             && denseBlasArrayOfRank 3 aTy = Some PrecD
+             && denseBlasArrayOfRank 3 bTy = Some PrecD
+             && outGroup 2 SymAntisymmetric l0.Extent ->
+        match l0.Elements, l1.Elements with
+        | [ e0 ], [ e1 ] when peelOk 3 aName 0 e0 && peelOk 3 aName 1 e1 && e0.ParamVarId <> e1.ParamVarId ->
+            let (ScaledBody (body, scale)) = cg.KernelExpr
+            match body with
+            | IRBinOp (_, IRSub, IRProdSum [ pa; pb ], IRProdSum [ qa; qb ], _) when scaleOk scale ->
+                match componentPeel pa, componentPeel pb, componentPeel qa, componentPeel qb with
+                | Some (v1, cx), Some (v2, cy), Some (v3, cx'), Some (v4, cy')
+                    when v1 = e0.ParamVarId && v2 = e1.ParamVarId
+                         && v3 = e1.ParamVarId && v4 = e0.ParamVarId
+                         && cx = cx' && cy = cy' && cx >= 0L && cy >= 0L ->
+                    Some { Shape = AntiPair (cx, cy); ArrayName = aName
+                           OutputName = cg.OutputName; Scale = scale }
+                | _ -> None
+            | _ -> None
+        | _ -> None
+    // ---- the rank-3 simplex: three levels, the inclusive simplex ----
+    | [ l0; l1; l2 ], [ aName; bName; cName ], [ aTy; bTy; cTy ]
+        when aName = bName && bName = cName
+             && l0.BoundDependencies.IsEmpty && l0.StrictOffset = 0 && l0.FusedRank.IsNone
+             && l1.BoundDependencies = [ 0 ] && l1.StrictOffset = 0
+             && Set.ofList l2.BoundDependencies = Set.ofList [ 0; 1 ] && l2.StrictOffset = 0
+             && sameAxis l0 l1 && sameAxis l0 l2
+             && [ aTy; bTy; cTy ] |> List.forall (fun t -> denseBlasArrayOfRank 2 t = Some PrecD)
+             && outGroup 3 SymSymmetric l0.Extent ->
+        match l0.Elements, l1.Elements, l2.Elements with
+        | [ e0 ], [ e1 ], [ e2 ]
+            when peelOk 2 aName 0 e0 && peelOk 2 aName 1 e1 && peelOk 2 aName 2 e2
+                 && e0.ParamVarId <> e1.ParamVarId && e1.ParamVarId <> e2.ParamVarId
+                 && e0.ParamVarId <> e2.ParamVarId ->
+            let (ScaledBody (body, scale)) = cg.KernelExpr
+            match body with
+            | IRProdSum [ IRVar (a, _); IRVar (b, _); IRVar (c, _) ]
+                when a = e0.ParamVarId && b = e1.ParamVarId && c = e2.ParamVarId && scaleOk scale ->
+                Some { Shape = Sym3; ArrayName = aName; OutputName = cg.OutputName; Scale = scale }
+            | _ -> None
+        | _ -> None
+    | _ -> None
+
 // Still planned -- L3 nest matching, the OTHER shapes
 //
 // A genuine three-level dense contraction written as loops (rather than the

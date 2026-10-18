@@ -90,7 +90,7 @@ let internal suiteClearedKnobs =
       "BLADE_TILE_CACHE"; "BLADE_TILE_CACHE_VERBOSE"
       "BLADE_LLVM"; "BLADE_LLVM_BRICKS"; "BLADE_LLVM_FACTS"
       "BLADE_AD_HALO_GATHER"; "BLADE_SHAPE_SPEC_CAP"; "BLADE_RUN_RECORD"
-      "BLADE_SYRK_TILE" ]
+      "BLADE_SYRK_TILE"; "BLADE_ANTISYM_TILE"; "BLADE_SIMPLEX_TILE" ]
     @ Blade.Optimize.optimizerGates
 
 /// Knobs `blade test` SETS (after the clear above) rather than leaves unset,
@@ -3820,8 +3820,15 @@ and internal dispatchTestClean (rest: string list) : int =
         let emitFailed = (Blade.Tests.LinAlgTests.runLinAlgEmissionTests ()).Failed
         let probeFailed = (Blade.Tests.LinAlgTests.runLinAlgProbeTests ()).Failed
         let tileFailed = (Blade.Tests.LinAlgTests.runSyrkTileTests ()).Failed
+                         + (Blade.Tests.LinAlgTests.runRowContractionTileTests ()).Failed
         let tierFailed = (Blade.Tests.LinAlgTests.runBlasTierTests ()).Failed
         if emitFailed + probeFailed + tileFailed + tierFailed = 0 then 0 else 1
+    | [ "row-tile" ] | [ "rowtile" ] | [ "antisym-tile" ] | [ "simplex-tile" ] ->
+        // The antisym-pair and rank-3 simplex tiles alone: emission routes,
+        // raw-bit vs the serial forms (contract=off) and the one-fma chains
+        // (contract=fast), vfmadd census.
+        let failed = (Blade.Tests.LinAlgTests.runRowContractionTileTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "syrk-tile" ] | [ "syrktile" ] ->
         // The packed-triangle SYRK tile alone: raw-bit vs the serial prodsum
         // (contract=off) and the one-fma chain (contract=fast), vfmadd census.

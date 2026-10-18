@@ -1072,6 +1072,29 @@ let private planSyrkTileSrc = planSyrkSrc 20 8
 let private planGramTileSrc =
     "let A: Array<Float64 like Idx<20>, Idx<8>> = method_for(range<Idx<20>>, range<Idx<8>>) <@> lambda(i, j) -> Float64(i + j) |> compute\n"
     + "let G = gram(A, A)\n"
+/// The antisym pair `prodsum(a(0), b(1)) - prodsum(b(0), a(1))` over the
+/// stacked Z(p, 2, n) (review item M7's spelling, bench/kernels/antisym).
+let private planAntiSrc (p: int) (n: int) =
+    $"type P = Idx<{p}>
+type C = Idx<2>
+type S = Idx<{n}>
+"
+    + "let z = method_for(range<P>, range<C>, range<S>) <@> lambda(i, c, s) -> Float64(i * 3 + c + s) |> compute
+"
+    + "let l = method_for(z, z) <@> lambda(a: Array<Float64 like C, S>, b: Array<Float64 like C, S>) where anticomm(a, b) -> prodsum(a((0 : C)), b((1 : C))) - prodsum(b((0 : C)), a((1 : C))) |> compute
+"
+
+/// The rank-3 simplex `prodsum(a, b, c) / Float64(n)` (review item M8's
+/// spelling, bench/kernels/comoment3).
+let private planSym3Src (p: int) (n: int) =
+    $"type V = Idx<{p}>
+type S = Idx<{n}>
+let static nn = {n}
+"
+    + "let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64(i + s) |> compute
+"
+    + "let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>, c: Array<Float64 like S>) where comm(a, b, c) -> prodsum(a, b, c) / Float64(nn) |> compute
+"
 
 let private planGramSrc =
     "let A: Array<Float64 like Idx<9>, Idx<5>> = method_for(range<Idx<9>>, range<Idx<5>>) <@> lambda(i, j) -> Float64(i + j) |> compute\n"
@@ -1221,7 +1244,47 @@ let private planCases () =
       pinBlas "0" (fun () ->
        withGate "BLADE_SYRK_TILE" "0" (fun () ->
           planCase "plan_syrk_tile_declined_knob" planSyrkTileSrc "microkernel"
-              (declinedMentioning "BLADE_SYRK_TILE") "syrk tile declined by BLADE_SYRK_TILE=0")) ]
+              (declinedMentioning "BLADE_SYRK_TILE") "syrk tile declined by BLADE_SYRK_TILE=0"))
+      // The antisym pair (review M7) and the rank-3 simplex (M8): the review's
+      // route shapes tile, the small ones keep the nest, the knobs restore it,
+      // and the tiles are ON under BLADE_FP_REPRO=1 (no reorder licence used).
+      for (p, n) in [ (61, 401); (61, 600) ] do
+          withGate "BLADE_ANTISYM_TILE" null (fun () ->
+              planCase $"plan_antisym_tile_route_{p}x{n}" (planAntiSrc p n) "fold-form"
+                  (fun d -> applied d && evidenceMentioning "fold form: antisym tile sequential 6x8" d)
+                  $"antisym tile at {p} x {n}")
+      withGate "BLADE_ANTISYM_TILE" "4x4" (fun () ->
+          planCase "plan_antisym_tile_paired_knob" (planAntiSrc 61 401) "fold-form"
+              (fun d -> applied d && evidenceMentioning "fold form: antisym tile paired 4x4" d)
+              "BLADE_ANTISYM_TILE=4x4 selects the paired schedule")
+      withGate "BLADE_ANTISYM_TILE" null (fun () ->
+       withGate "BLADE_FP_REPRO" "1" (fun () ->
+          planCase "plan_antisym_tile_applied_in_repro" (planAntiSrc 61 401) "fold-form"
+              (fun d -> applied d && evidenceMentioning "fold form: antisym tile" d)
+              "the antisym tile is ON under BLADE_FP_REPRO=1"))
+      withGate "BLADE_ANTISYM_TILE" null (fun () ->
+          planCase "plan_antisym_tile_route_23x11_declines" (planAntiSrc 23 11) "microkernel"
+              (declinedMentioning "antisym-tile crossover") "23 x 11 keeps the per-cell nest")
+      withGate "BLADE_ANTISYM_TILE" "0" (fun () ->
+          planCase "plan_antisym_tile_declined_knob" (planAntiSrc 61 401) "microkernel"
+              (declinedMentioning "BLADE_ANTISYM_TILE") "antisym tile declined by BLADE_ANTISYM_TILE=0")
+      for (p, n, kc) in [ (29, 67, 67); (29, 201, 201); (61, 11, 11); (61, 201, 201); (29, 700, 234) ] do
+          withGate "BLADE_SIMPLEX_TILE" null (fun () ->
+              planCase $"plan_simplex_tile_route_{p}x{n}" (planSym3Src p n) "fold-form"
+                  (fun d -> applied d && evidenceMentioning $"fold form: simplex tile 6x8 with W panel, KC={kc}, then / d per cell" d)
+                  $"simplex tile at {p} x {n}, KC={kc}")
+      withGate "BLADE_SIMPLEX_TILE" null (fun () ->
+       withGate "BLADE_FP_REPRO" "1" (fun () ->
+          planCase "plan_simplex_tile_applied_in_repro" (planSym3Src 29 67) "fold-form"
+              (fun d -> applied d && evidenceMentioning "fold form: simplex tile" d)
+              "the simplex tile is ON under BLADE_FP_REPRO=1"))
+      for (p, n) in [ (13, 11); (13, 201) ] do
+          withGate "BLADE_SIMPLEX_TILE" null (fun () ->
+              planCase $"plan_simplex_tile_route_{p}x{n}_declines" (planSym3Src p n) "microkernel"
+                  (declinedMentioning "simplex-tile crossover") $"{p} x {n} keeps the per-cell nest")
+      withGate "BLADE_SIMPLEX_TILE" "0" (fun () ->
+          planCase "plan_simplex_tile_declined_knob" (planSym3Src 29 67) "microkernel"
+              (declinedMentioning "BLADE_SIMPLEX_TILE") "simplex tile declined by BLADE_SIMPLEX_TILE=0") ]
 
 let private runCase (name: string) (src: string) (wantBreaks: int) (wantAborts: int) =
     match cppOfSource name src with

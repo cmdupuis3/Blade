@@ -1,0 +1,28 @@
+// TEST: Antisym Tile Strict Pair
+// The angular-momentum shape L = X Y^T - Y X^T over stacked inputs Z(p, 2, n),
+// `prodsum(a(0), b(1)) - prodsum(b(0), a(1))` under `where anticomm(a, b)`, at
+// p = 61 (61 = 10*6 + 1 rows, 7*8 + 4 strict columns: ragged last row panel AND
+// column panel) and n = 401 samples. In the C++ lane this is the antisym pair
+// tile (blade_pgemm::dantisym_tri, sequential 6x8): per cell the two chains in
+// source factor order, then ONE subtraction, written into the strict packed pool.
+/// Z(i, c, s) = ((5 i + 3 c + s) mod 7) - 3: small integers, so every product and
+/// partial sum is an exact integer and ANY association gives the same L -- the pins
+/// are association-invariant (CLAUDE.md fold policy); the route is pinned by
+/// `blade plan` (tests/OptimizeTests.fs plan_antisym_tile_*) and the arithmetic
+/// bitwise by `blade test row-tile` and `blade test interp symmetry`.
+type P = Idx<61>
+type C = Idx<2>
+type S = Idx<401>
+let (ss, l01, l10, l_edge, l_diag, row0) = {
+    let z = method_for(range<P>, range<C>, range<S>) <@> lambda(i, c, s) -> Float64((i * 5 + c * 3 + s) % 7) - 3.0 |> compute
+    let l = method_for(z, z) <@> lambda(a: Array<Float64 like C, S>, b: Array<Float64 like C, S>) where anticomm(a, b) -> prodsum(a((0 : C)), b((1 : C))) - prodsum(b((0 : C)), a((1 : C))) |> compute
+    let total = reduce(method_for(range<P>) <@> lambda(i) -> reduce(method_for(range<P>) <@> lambda(j) -> l(i, j) * l(i, j), (+)), (+))
+    let r0 = reduce(method_for(range<P>) <@> lambda(j) -> l(0, j), (+))
+    (total, l(0, 1), l(1, 0), l(59, 60), l(7, 7), r0)
+}
+// EXPECT: ss = 2392183214.0
+// EXPECT: l01 = 803.0
+// EXPECT: l10 = -803.0
+// EXPECT: l_edge = 803.0
+// EXPECT: l_diag = 0.0
+// EXPECT: row0 = -398.0

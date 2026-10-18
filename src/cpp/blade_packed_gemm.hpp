@@ -321,6 +321,213 @@ inline void dsyrk_tri(size_t p, size_t k, double* const* X, double* const* C, si
     }
 }
 
+// ---------------------------------------------------------------------------
+// The antisym pair over Blade's STRICT packed triangle (review item M7):
+//     L(i, j) = sum_s X(i,s) Y(j,s) - sum_s X(j,s) Y(i,s),  i < j < p,
+// X(r, s) = Z[r][cx][s], Y(r, s) = Z[r][cy][s] (the stacked-inputs array
+// Z(p, c, n) of `method_for(Z, Z) <@> lambda(a, b) where anticomm(a, b) ->
+// prodsum(a(cx), b(cy)) - prodsum(b(cx), a(cy))`), then the kernel's scale.
+// The arithmetic is blade_tiles.h's (blade_anti_tile_6x8 / _4x4); this is the
+// C++ driver: packing, blocking and the thread team.
+//
+// BITWISE the serial per-cell form under the same -ffp-contract: each P and Q
+// is one ascending chain run whole inside one tile visit (no K blocking: no
+// partial is ever stored), the subtraction once after both. Cells are split
+// across threads, sums never are, so every team size gives the same bits.
+//
+// Blocking: a column block of NC j-rows is packed as X(j) and Y(j) panels over
+// the WHOLE sample range (2 * NC * n doubles, capped at ~8 MB so the B side
+// stays in L3); then row panels (MR rows, X(i) and Y(i) packed, 2 * MR * n
+// doubles, L1/L2) visit the column tiles from their diagonal rightward -- the
+// syrk driver's order. The expert Fortran runs the same two-tile scheme with
+// the whole n per tile (bench/kernels/antisym/expert.f90).
+//
+// pool: the strict packed pool base (row i starts at i (2p - i - 1) / 2).
+// variant: 0 = sequential 6 x 8 (default), 1 = paired 4 x 4.
+// ---------------------------------------------------------------------------
+
+inline size_t anti_nc(size_t n, size_t W) {
+    const size_t cap = (size_t(8) << 20) / sizeof(double) / 2;   // doubles per side
+    size_t nc = (n == 0) ? 4096 : cap / n;
+    nc = nc / W * W;
+    return std::max(W, std::min<size_t>(nc, 4096));
+}
+
+inline void dantisym_tri(size_t p, size_t n, double* const* const* Z, size_t cx, size_t cy,
+                         double* pool, int sk, double sc, bool threaded, int variant,
+                         size_t ncMax = 0) {
+    if (p <= 1) return;                       // the strict triangle is empty
+    const bool paired = (variant == 1);
+    const size_t RM = paired ? (size_t)BLADE_ANTI4_MR : MR;
+    const size_t RN = paired ? (size_t)BLADE_ANTI4_NR : NR;
+    size_t NCb = anti_nc(n, RN);
+    if (ncMax != 0) NCb = std::max(RN, std::min(NCb, ncMax / RN * RN));
+    static thread_local Scratch bxs, bys;
+    size_t T = 1;
+#ifdef _OPENMP
+    if (threaded && !omp_in_parallel())
+        T = std::max<size_t>(1, std::min<size_t>((size_t)omp_get_max_threads(), (p * p * n) >> 20));
+#else
+    (void)threaded;
+    (void)T;
+#endif
+    auto rowStart = [&](size_t i) { return pool + i * (2 * p - i - 1) / 2; };
+    for (size_t jc = 0; jc < p; jc += NCb) {
+        const size_t nc = std::min(NCb, p - jc);
+        const size_t npad = (nc + RN - 1) / RN * RN;
+        const size_t jEnd = jc + nc;
+        const size_t iTop = std::min(p, jEnd - 1);    // rows meeting the block: i + 1 <= jEnd - 1
+        double* bxp = bxs.get(n * npad + 1);
+        double* byp = bys.get(n * npad + 1);
+        auto packB = [&](size_t jr) {
+            const double* sx[NR];
+            const double* sy[NR];
+            const size_t rows = std::min(RN, nc - jr);
+            for (size_t q = 0; q < rows; q++) { sx[q] = Z[jc + jr + q][cx]; sy[q] = Z[jc + jr + q][cy]; }
+            blade_tile_pack_t(sx, rows, RN, n, bxp + jr * n);
+            blade_tile_pack_t(sy, rows, RN, n, byp + jr * n);
+        };
+        auto rowPanel = [&](size_t i0, double* axp, double* ayp) {
+            const size_t mr = std::min(RM, iTop - i0);
+            const double* sx[MR];
+            const double* sy[MR];
+            for (size_t r = 0; r < mr; r++) { sx[r] = Z[i0 + r][cx]; sy[r] = Z[i0 + r][cy]; }
+            blade_tile_pack_t(sx, mr, RM, n, axp);
+            blade_tile_pack_t(sy, mr, RM, n, ayp);
+            double* crow[MR];
+            for (size_t r = 0; r < MR; r++) crow[r] = (r < mr) ? rowStart(i0 + r) : nullptr;
+            // first column panel reaching row i0's first cell (i0 + 1)
+            const size_t jlo = (i0 + 1 > jc) ? (i0 + 1 - jc) / RN * RN : 0;
+            for (size_t jr = jlo; jr < nc; jr += RN) {
+                const size_t j0 = jc + jr, nr = std::min(RN, nc - jr);
+                if (paired)
+                    blade_anti_tile_4x4(n, axp, ayp, bxp + jr * n, byp + jr * n, crow, i0, j0, mr, nr, sk, sc);
+                else
+                    blade_anti_tile_6x8(n, axp, ayp, bxp + jr * n, byp + jr * n, crow, i0, j0, mr, nr, sk, sc);
+            }
+        };
+        static thread_local Scratch axs, ays;      // private per executing thread
+#ifdef _OPENMP
+        if (T > 1) {
+#pragma omp parallel num_threads((int)T)
+            {
+#pragma omp for schedule(static)
+                for (size_t jr = 0; jr < nc; jr += RN) packB(jr);
+                double* axp = axs.get(RM * n + 1);
+                double* ayp = ays.get(RM * n + 1);
+#pragma omp for schedule(dynamic, 1)
+                for (size_t i0 = 0; i0 < iTop; i0 += RM) rowPanel(i0, axp, ayp);
+            }
+            continue;
+        }
+#endif
+        for (size_t jr = 0; jr < nc; jr += RN) packB(jr);
+        double* axp = axs.get(RM * n + 1);
+        double* ayp = ays.get(RM * n + 1);
+        for (size_t i0 = 0; i0 < iTop; i0 += RM) rowPanel(i0, axp, ayp);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The rank-3 simplex over Blade's packed SymIdx<3, p> pool (review item M8):
+//     T(i, j, k) = sum_s X(i,s) X(j,s) X(k,s),  i <= j <= k < p,
+// then the kernel's scale, the `method_for(X, X, X) <@> lambda(a, b, c) where
+// comm(a, b, c) -> prodsum(a, b, c) / d` nest. The serial chain's term is
+// `(a*b)*c`, so W(i, j)(s) = round(X(i,s) X(j,s)) is formed once per (i, j)
+// prefix (6 j rows at a time) and the gram tile runs over k with W as the
+// broadcast panel: blade_tri_tile_full / _edge with row = j, column = k,
+// S = 0, crow[r] = the packed (i, j0 + r) row (cell k at crow[r][k - j]).
+//
+// BITWISE the serial per-cell form under the same -ffp-contract: one
+// ascending chain per cell, K blocks store and reload the exact UNSCALED
+// partial, the scale is applied once per cell after the last block (over the
+// prefix block's finished rows, which are hot). Cells split across threads
+// (dynamic over i: the i = 0 sub-simplex is the largest), sums never.
+//
+// Packing: every X(k) row once into NR-wide s-major panels (ceil(p/8) * 8 * n
+// doubles, L2 at the bench shape), shared by the team; W per thread (MR x KC).
+// pool layout (the emitted nest's): (i, j) row base =
+//   C(p+2, 3) - C(p+2-i, 3) + C(p+1-i, 2) - C(p+1-j, 2), C falling binomials.
+// ---------------------------------------------------------------------------
+
+inline size_t sym3_row_base(size_t p, size_t i, size_t j) {
+    auto c3 = [](size_t e) { return e * (e - 1) * (e - 2) / 6; };
+    auto c2 = [](size_t e) { return e * (e - 1) / 2; };
+    return c3(p + 2) - c3(p + 2 - i) + c2(p + 1 - i) - c2(p + 1 - j);
+}
+
+inline void dsym3_tri(size_t p, size_t n, double* const* X, double* pool, int sk, double sc,
+                      bool threaded, size_t kcMax = TRI_KC_MAX) {
+    if (p == 0) return;
+    const size_t kcn = (n == 0) ? 0 : tri_kc(n, kcMax == 0 ? TRI_KC_MAX : kcMax);
+    const size_t nq = (p + NR - 1) / NR;               // k panels
+    static thread_local Scratch xks;
+    double* xk = xks.get(nq * NR * n + 1);             // panel q: n x NR, s-major
+    size_t T = 1;
+#ifdef _OPENMP
+    if (threaded && !omp_in_parallel())
+        T = std::max<size_t>(1, std::min<size_t>((size_t)omp_get_max_threads(), (p * p * p / 6 * n) >> 20));
+#else
+    (void)threaded;
+    (void)T;
+#endif
+    auto packK = [&](size_t q) {
+        const double* src[NR];
+        const size_t rows = std::min(NR, p - q * NR);
+        for (size_t l = 0; l < rows; l++) src[l] = X[q * NR + l];
+        blade_tile_pack_t(src, rows, NR, n, xk + q * NR * n);
+    };
+    // One i: its whole sub-simplex, prefix blocks of MR j rows.
+    auto doI = [&](size_t i, double* w) {
+        for (size_t j0 = i; j0 < p; j0 += MR) {
+            const size_t mr = std::min(MR, p - j0);
+            double* crow[MR];
+            const double* xj[MR];
+            for (size_t r = 0; r < MR; r++) crow[r] = (r < mr) ? pool + sym3_row_base(p, i, j0 + r) : nullptr;
+            const size_t qlo = j0 / NR;
+            if (n == 0) {
+                // The empty sum: every cell is the seed +0.0 (then the scale).
+                for (size_t r = 0; r < mr; r++)
+                    for (size_t t = 0; t < p - (j0 + r); t++) crow[r][t] = 0.0;
+            }
+            for (size_t pc = 0; pc < n; pc += kcn) {     // ascending: the chain order
+                const size_t kc = std::min(kcn, n - pc);
+                const int first = (pc == 0);
+                for (size_t r = 0; r < mr; r++) xj[r] = X[j0 + r] + pc;
+                blade_sym3_pack_w(X[i] + pc, xj, mr, kc, w);
+                for (size_t q = qlo; q < nq; q++) {
+                    const size_t k0 = q * NR, nr = std::min(NR, p - k0);
+                    const double* bp = xk + q * NR * n + pc * NR;
+                    if (mr == MR && nr == NR && k0 >= j0 + (MR - 1))
+                        blade_tri_tile_full(kc, w, bp, crow, k0 - j0, first);
+                    else
+                        blade_tri_tile_edge(kc, w, bp, crow, j0, k0, mr, nr, 0, first);
+                }
+            }
+            if (sk != BLADE_TILE_SCALE_NONE)
+                for (size_t r = 0; r < mr; r++)
+                    for (size_t t = 0; t < p - (j0 + r); t++) crow[r][t] = blade_tile_scale1(crow[r][t], sk, sc);
+        }
+    };
+    static thread_local Scratch wscratch;
+#ifdef _OPENMP
+    if (T > 1) {
+#pragma omp parallel num_threads((int)T)
+        {
+#pragma omp for schedule(static)
+            for (size_t q = 0; q < nq; q++) packK(q);
+            double* w = wscratch.get(MR * (kcn + 1));
+#pragma omp for schedule(dynamic, 1)
+            for (size_t i = 0; i < p; i++) doI(i, w);
+        }
+        return;
+    }
+#endif
+    for (size_t q = 0; q < nq; q++) packK(q);
+    double* w = wscratch.get(MR * (kcn + 1));
+    for (size_t i = 0; i < p; i++) doI(i, w);
+}
+
 
 #else   // not GCC/Clang (cl.exe: the memcheck MSVC fallback, nvcc's host half)
 
@@ -352,6 +559,35 @@ inline void dsyrk_tri(size_t p, size_t k, double* const* X, double* const* C, si
             for (size_t s = 0; s < k; s++) acc += a[s] * b[s];
             C[i][jr] = acc;
         }
+}
+
+// The antisym pair and the rank-3 simplex, likewise the loops they replace.
+inline double tile_scale1(double v, int sk, double sc) {
+    return sk == 1 ? v / sc : sk == 2 ? v * sc : v;
+}
+
+inline void dantisym_tri(size_t p, size_t n, double* const* const* Z, size_t cx, size_t cy,
+                         double* pool, int sk, double sc, bool, int, size_t = 0) {
+    size_t off = 0;
+    for (size_t i = 0; i + 1 < p; i++)
+        for (size_t j = i + 1; j < p; j++) {
+            double P = 0, Q = 0;
+            for (size_t s = 0; s < n; s++) P += Z[i][cx][s] * Z[j][cy][s];
+            for (size_t s = 0; s < n; s++) Q += Z[j][cx][s] * Z[i][cy][s];
+            pool[off++] = tile_scale1(P - Q, sk, sc);
+        }
+}
+
+inline void dsym3_tri(size_t p, size_t n, double* const* X, double* pool, int sk, double sc,
+                      bool, size_t = 0) {
+    size_t off = 0;
+    for (size_t i = 0; i < p; i++)
+        for (size_t j = i; j < p; j++)
+            for (size_t k = j; k < p; k++) {
+                double acc = 0;
+                for (size_t s = 0; s < n; s++) acc += X[i][s] * X[j][s] * X[k][s];
+                pool[off++] = tile_scale1(acc, sk, sc);
+            }
 }
 
 #endif

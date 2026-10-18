@@ -2832,6 +2832,135 @@ let internal tryGenSyrkDispatch
     | _ -> None
 
 
+/// The antisym pair and the rank-3 simplex (`LinAlgPatterns.(|RowContraction|_|)`):
+/// the comm / anticomm nest becomes ONE call of Blade's own packed tile
+/// (`blade_pgemm::dantisym_tri` -- review item M7 -- or `blade_pgemm::dsym3_tri`
+/// -- M8; cores in blade_tiles.h) when the literal extents clear
+/// `packedAntiWorth` / `packedSym3Worth` and the knob (BLADE_ANTISYM_TILE /
+/// BLADE_SIMPLEX_TILE) is not off; otherwise None and the ordinary nest.
+///
+/// NO LICENCE NEEDED, so this arm is the same in the default and the
+/// BLADE_FP_REPRO=1 build, and the BLAS gate does not enter: every cell keeps
+/// its operation sequence (antisym: two ascending chains -- P in factor order
+/// X(i) * Y(j), Q in X(j) * Y(i) -- then ONE subtraction; simplex: one
+/// ascending chain of `(a*b)*c` terms with the first product formed once per
+/// (i, j) prefix, the W panel), then the kernel's own scalar ONCE on the
+/// finished value. Bitwise the serial per-cell form under -ffp-contract=off
+/// (the differential gates' mode), the one-fma-per-step chain under =fast --
+/// cpp/row_contraction_tile_tests.cpp (`blade test row-tile`). The default
+/// build's per-cell dots were REASSOCIATED simd reductions, so the tiles move
+/// the default's bits by ulps (toward the serial chain) and the repro build's
+/// not at all under =off.
+let internal tryGenRowContractionTile
+        (streamed: Map<string, ProviderReadSpec>)
+        (operandTypes: IRArrayType list)
+        (codeGen: LoopNestCodeGen)
+        (outerNames: Map<int, string>)
+        (indent: int) : string list option =
+    match (Map.count streamed, operandTypes, codeGen) with
+    | Blade.LinAlgPatterns.RowContraction rc ->
+        let aName = rc.ArrayName
+        let cName = rc.OutputName
+        let aTy = List.head operandTypes
+        let mExtent =
+            genLoopBoundExpr (compoundArrayNamesOf codeGen.Bindings) (List.head codeGen.Bindings)
+        let (tileName, sampleDim) =
+            match rc.Shape with
+            | Blade.LinAlgPatterns.AntiPair _ -> ("antisym tile", 2)
+            | Blade.LinAlgPatterns.Sym3 -> ("simplex tile", 1)
+        let nExtent = literalOrRuntimeExtentOfArray aTy aName sampleDim
+        let declineTile (why: string) (shape: string) =
+            recordCodegenDecision "microkernel" cName (Blade.Effects.Declined why) [ tileName; shape ]
+            None
+        let nameMap = withCaptureNames EnclosingNamesWin codeGen.Captures outerNames
+        let renderScalar (e: IRExpr) : string option =
+            match e with
+            | IRVar (id, _) | IRUnaryOp (_, IRVar (id, _)) when not (Map.containsKey id nameMap) -> None
+            | _ ->
+                let r = genKernelExprWithReynolds e codeGen.KernelParams false false nameMap Map.empty
+                Some r.CppExpr
+        // (kind, scalar text): 0 none, 1 divide, 2 multiply -- the header's
+        // BLADE_TILE_SCALE_* codes. None = a scale this site cannot spell.
+        let scaleArgs : (int * string) option =
+            match rc.Scale with
+            | None -> Some (0, "0.0")
+            | Some (Blade.LinAlgPatterns.ScaleDiv d) -> renderScalar d |> Option.map (fun t -> (1, t))
+            | Some (Blade.LinAlgPatterns.ScaleMul s) -> renderScalar s |> Option.map (fun t -> (2, t))
+        let lit (s: string) = match System.Int64.TryParse s with | true, v -> Some v | _ -> None
+        let threadedArg =
+            if codeGen.OmpRequested && ompThreadEmissionEnabled () then "true" else "false"
+        // The omp census: a licensed kernel's team is the DRIVER's (row panels
+        // / i sub-simplices under schedule(dynamic); cells split across the
+        // team, sums never), recorded as applied; a licence the build knob
+        // suppresses gets the one census phrase, as a block comment (the
+        // call may be space-joined into an inline IIFE).
+        let ompCensus (driver: string) : string =
+            if not codeGen.OmpRequested then ""
+            elif ompThreadEmissionEnabled () then
+                recordOmpConstruct cName "omp parallel num_threads(T) inside the tile driver"
+                    $"{driver}: work units under schedule(dynamic), cells split across the team, sums never"
+                ""
+            else $"/* {(ompSuppressedPhrase (ompThreadsSuppressedReason ()))} */ "
+        let scaleNote (sk: int) = match sk with 1 -> ", then / d per cell" | 2 -> ", then * s per cell" | _ -> ""
+        match scaleArgs with
+        | None -> declineTile "the kernel's scale is not renderable at this site" ""
+        | Some (sk, scTxt) ->
+        match rc.Shape with
+        | Blade.LinAlgPatterns.AntiPair (cx, cy) ->
+            match antisymTileSchedule () with
+            | AntiOff ->
+                declineTile "BLADE_ANTISYM_TILE=0/off: the plain per-cell nest (A/B knob)" ""
+            | sched ->
+            // The component subscripts must be PROVEN in range on the literal
+            // component extent: the driver reads Z[i][cx] / Z[i][cy] with no
+            // check, where the nest would have kept its BL8006 guard.
+            let compsOk =
+                match lit (literalOrRuntimeExtentOfArray aTy aName 1) with
+                | Some c -> cx < c && cy < c
+                | None -> false
+            if not compsOk then
+                declineTile "component subscripts not proven inside the literal component extent" $"components=({cx},{cy})"
+            else
+            match lit mExtent, lit nExtent with
+            | Some p, Some n when packedAntiWorth p n ->
+                (packedGemmUsedCell ()).Value <- true
+                let (variant, form) =
+                    match sched with
+                    | AntiPaired4x4 -> (1, "paired 4x4 (P and Q in one pass)")
+                    | _ -> (0, "sequential 6x8 (P pass, spill, Q pass)")
+                recordCodegenDecision "microkernel" cName Blade.Effects.Applied
+                    [ $"antisym tile (blade_pgemm::dantisym_tri, {form}, strict packed triangle)"
+                      $"P={p} N={n} components=({cx},{cy})" ]
+                recordFoldForm cName $"antisym tile {form}, whole chain per tile{scaleNote sk}"
+                    "same-array anticomm row-contraction pair (two ascending chains per cell, one subtraction; no reorder licence used)"
+                Some [ String.replicate indent "    "
+                       + ompCensus "dantisym_tri row panels"
+                       + $"/* anticomm nest: antisym pair tile (blade_packed_gemm.hpp dantisym_tri, {form}), per cell the serial prodsum - prodsum */ blade_pgemm::dantisym_tri((size_t)({mExtent}), (size_t)({nExtent}), {aName}.data, (size_t){cx}, (size_t){cy}, nested_array_utilities::pool_base({cName}.data), {sk}, (double)({scTxt}), {threadedArg}, {variant});" ]
+            | Some p, Some n ->
+                declineTile "below the antisym-tile crossover (p >= 24, n >= 8): the per-cell nest wins" $"P={p} N={n}"
+            | _ -> declineTile "non-literal extents: the per-cell nest" "non-literal extents"
+        | Blade.LinAlgPatterns.Sym3 ->
+            if not (simplexTileEnabled ()) then
+                declineTile "BLADE_SIMPLEX_TILE=0/off: the plain per-cell nest (A/B knob)" ""
+            else
+            match lit mExtent, lit nExtent with
+            | Some p, Some n when packedSym3Worth p n ->
+                (packedGemmUsedCell ()).Value <- true
+                let kc = syrkTileKc n
+                recordCodegenDecision "microkernel" cName Blade.Effects.Applied
+                    [ "simplex tile (blade_pgemm::dsym3_tri, W = X(i) * X(j) panel x 6x8 register tile over k, packed SymIdx<3> pool)"
+                      $"P={p} N={n} KC={kc}" ]
+                recordFoldForm cName $"simplex tile 6x8 with W panel, KC={kc}{scaleNote sk}"
+                    "same-array 3-way comm row contraction (one ascending (a*b)*c chain per cell; no reorder licence used)"
+                Some [ String.replicate indent "    "
+                       + ompCensus "dsym3_tri i sub-simplices"
+                       + $"/* comm nest: rank-3 simplex tile (blade_packed_gemm.hpp dsym3_tri, W panel + 6x8, KC={kc}), per cell the serial prodsum */ blade_pgemm::dsym3_tri((size_t)({mExtent}), (size_t)({nExtent}), {aName}.data, nested_array_utilities::pool_base({cName}.data), {sk}, (double)({scTxt}), {threadedArg}, (size_t){syrkTileKcMax});" ]
+            | Some p, Some n ->
+                declineTile "below the simplex-tile crossover (p >= 24, n >= 4): the per-cell nest wins" $"P={p} N={n}"
+            | _ -> declineTile "non-literal extents: the per-cell nest" "non-literal extents"
+    | _ -> None
+
+
 /// The linear-algebra dispatch chain at the apply-combinator site: each
 /// recognised NEST shape in turn, falling through to the flat elementwise path
 /// (`tryGenFlatElementwiseNest`) and then `genLoopNestStreamed`, unchanged --
@@ -2854,7 +2983,10 @@ let tryGenLinAlgNest
     else
     match tryGenGemvDispatch streamed operandTypes codeGen outerNames indent with
     | Some lines -> Some lines
-    | None -> tryGenSyrkDispatch streamed operandTypes codeGen outerNames indent
+    | None ->
+    match tryGenSyrkDispatch streamed operandTypes codeGen outerNames indent with
+    | Some lines -> Some lines
+    | None -> tryGenRowContractionTile streamed operandTypes codeGen outerNames indent
 
 
 // Symmetry Vector Generation
