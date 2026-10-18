@@ -749,6 +749,14 @@ let recordFoldForm (subject: string) (form: string) (where: string) : unit =
         else Blade.Effects.Applied
     recordCodegenDecision "fold-form" subject outcome [ $"fold form: {form}"; where ]
 
+/// `blade plan`'s line for how a `range<R>` over a static-struct domain (or a
+/// SparseIdx range in a fold) is ENUMERATED (docs/plans/structural/06): the
+/// closed-form affine nest is `applied`; a table route is `declined` with why.
+/// `domain` names the struct; `form` and `consumer` are the evidence.
+let recordDomainEnum (subject: string) (domain: string) (closedForm: bool) (form: string) (consumer: string) : unit =
+    let outcome = if closedForm then Blade.Effects.Applied else Blade.Effects.Declined form
+    recordCodegenDecision "domain-enum" subject outcome [ $"enumeration of {domain}: {form}"; consumer ]
+
 /// The serial-form label for a licensed fold this build did not reorder.
 let serialFoldForm () : string =
     if fpReproEnabled () then "serial (repro)" else "serial (no reorder licence)"

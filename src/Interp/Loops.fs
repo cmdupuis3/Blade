@@ -2186,8 +2186,41 @@ let rec private forceReduceCompute (st: InterpState) (env: Env) (comp: IRExpr) (
         match seed with
         | VTuple ss when ss.Length = infos.Length -> List.ofArray ss
         | _ -> infos |> List.map (fun _ -> seed)
+    // A CLOSED-FORM DOMAIN leaf (`range<R>` over a static struct with linear
+    // conjuncts, docs/plans/structural/06) folds its solutions in LEX order --
+    // `enumerateDomain`, the same walk the C++ affine nest and the LLVM lane's
+    // emitDomainNest make -- with no array in between, the twin of the
+    // compiled lanes' streamed fold.
+    let domainLeaf (info: ApplyInfo) : DomainPlan option =
+        match info.Arrays with
+        | [ IRRange ([ ix ], _) ] ->
+            (match ix.Extent with IRSparseKeys (SkDomain plan) -> Some plan | _ -> None)
+        | _ -> None
+    let foldDomainLeaf (info: ApplyInfo) (plan: DomainPlan) (fold: Value -> Value -> Value) (seed0: Value) : Value =
+        let cg = buildLoopNestCodeGen info [ "a0" ] "acc" st.Builder
+        let kenv = envChild env
+        bindKernelCaptures st env kenv cg.Captures cg.KernelExpr
+        let paramCells = Dictionary<IRId, ValueRef>()
+        for p in cg.KernelParams do
+            let cell = { V = VUnit }
+            paramCells.[p.VarId] <- cell
+            envBindRef kenv p.VarId cell
+        let paramCoord =
+            cg.Bindings |> List.collect (fun b -> b.Elements |> List.map (fun e -> (e.ParamVarId, e.RankComponent)))
+        st.Cells <- st.Cells + plan.Card
+        let mutable acc = seed0
+        for key in enumerateDomain plan do
+            for (pv, rc) in paramCoord do
+                match paramCells.TryGetValue pv with
+                | true, cell -> cell.V <- VInt key.[rc]
+                | _ -> ()
+            acc <- fold acc (force st kenv (Core.evalExpr st kenv cg.KernelExpr))
+        acc
     let accVals =
         infos |> List.mapi (fun li info ->
+            match domainLeaf info with
+            | Some plan -> foldDomainLeaf info plan legFolds.[li] legSeeds.[li]
+            | None ->
             gateInputs info
             let names = info.Arrays |> List.mapi (fun i _ -> $"a{i}")
             let cg = buildLoopNestCodeGen info names "acc" st.Builder

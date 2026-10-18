@@ -616,6 +616,11 @@ type private Grp =
     /// a literal index, a register otherwise -- either way `emitCountedLoopTo`
     /// takes it as-is.
     | GDynDense of len: string
+    /// A CLOSED-FORM ENUMERABLE DOMAIN (a static struct with linear
+    /// conjuncts): ONE group spanning the struct's fields, coordinates =
+    /// field values, cells = the plan's solutions in lex order (see
+    /// `emitDomainNest`).
+    | GDomain of plan: DomainPlan
 
 /// Where a ragged group's offsets live. rows+1 entries; offsets[rows] is the
 /// total cell count. The STATIC lane carries the values (folded straight into
@@ -636,11 +641,12 @@ type private PubVal =
     | PubScalar of sym: string * ty: Sc
     | PubArray of sym: string * elem: Sc * groups: Grp list
 
-let private grpRank = function GDense _ | GDynDense _ -> 1 | GSym (r, _) -> r | GAnti (r, _) -> r | GRagged _ -> 2
+let private grpRank = function GDense _ | GDynDense _ -> 1 | GSym (r, _) -> r | GAnti (r, _) -> r | GRagged _ -> 2 | GDomain p -> p.Levels.Length
 let private grpExtent =
     function
     | GDense n -> n | GSym (_, n) -> n | GAnti (_, n) -> n
     | GRagged _ -> refuse "a ragged index group where a single static extent is required"
+    | GDomain _ -> refuse "an enumerated-domain group where a single static extent is required"
     | GDynDense _ -> refuse "a runtime-extent axis where a static extent is required"
 /// Antisymmetric groups are STRICT (i < j) and store no diagonal.
 let private grpStrict (g: Grp) = g.IsGAnti
@@ -673,6 +679,7 @@ let private grpCells (g: Grp) : int64 =
          | true, r -> offsets.[int r]
          | _ -> refuse "a ragged shape with a runtime row count where a static cell count is required")
     | GRagged (_, RtDynamic _) -> refuse "a dynamic ragged shape where a static cell count is required"
+    | GDomain p -> p.Card
     | GDynDense _ -> refuse "a runtime-extent axis where a static cell count is required"
 
 let private shapeCells (gs: Grp list) : int64 = gs |> List.fold (fun acc g -> acc * grpCells g) 1L
@@ -1380,6 +1387,9 @@ let private simplexFitsI64 (r: int) (n: int64) : bool =
 /// Project ONE index record onto a shape group, or None when this lane has no
 /// storage for it.
 let private groupOfIndexType (ix: IRIndexType) : Grp option =
+    match ix.IxKind, ix.Extent with
+    | IxKSparse, IRSparseKeys (SkDomain plan) -> Some (GDomain plan)
+    | _ ->
     if ix.IxKind <> IxKPlain || not (List.isEmpty ix.Dependencies) then None
     else
         match Blade.IRPrint.tryEvalIntIR ix.Extent with
@@ -1549,6 +1559,155 @@ let private raggedLenAt (c: Ctx) (table: RaggedTable) (i: string) : string =
         let lo = raggedOffAt c table i
         i64Bin c "sub" hi lo
 
+// ---------------------------------------------------------------------------
+// CLOSED-FORM ENUMERABLE DOMAINS (docs/plans/structural/06, bench gap G4)
+// ---------------------------------------------------------------------------
+// A `range<R>` over a static struct whose conjuncts are linear is ONE shape
+// group, `GDomain plan`, spanning the struct's r fields. Its coordinates are
+// the FIELD VALUES (not storage coordinates: there is no box), its cells are
+// the plan's solutions in lex order, and a cell's pool offset is its lex rank.
+// Iteration is the affine nest (`emitDomainNest`): field k over [max of its
+// lower forms, min of its upper forms], the ends affine in the outer fields,
+// with one running counter for the offset -- the same nest the C++ lane's
+// genDomainLoopHeader writes and the interpreter's `enumerateDomain` walks.
+// A KEYED read (`R((i, j))`) of a materialized domain array needs the rank
+// from coordinates: the per-level PREFIX TABLES below (static constants, one
+// entry per valid prefix of the outer r-1 fields -- never one per cell),
+// behind a membership check that aborts BL8006 like the C++ key index does.
+
+/// `c + sum a_j x_j` from the outer fields' registers.
+let private domainAffineReg (c: Ctx) (f: DomainAffine) (xs: string[]) : string =
+    let mutable acc = string f.Const
+    for (j, a) in f.Coefs do
+        let t = if a = 1L then xs.[j] else i64Bin c "mul" xs.[j] (string a)
+        acc <- (match tryLitI64 acc with
+                | Some 0L -> t
+                | _ -> i64Bin c "add" acc t)
+    acc
+
+/// A level's end: the max of its lower forms, the min of its upper forms
+/// (signed compare + select; a constant pair folds at emission).
+let private domainBoundReg (c: Ctx) (isLower: bool) (b: DomainBound) (xs: string[]) : string =
+    let regs = b |> List.distinct |> List.map (fun f -> domainAffineReg c f xs)
+    match regs with
+    | [] -> refuse "an enumerated-domain level with no bound"
+    | first :: rest ->
+        rest |> List.fold (fun acc r ->
+            match tryLitI64 acc, tryLitI64 r with
+            | Some a, Some b -> string (if isLower then max a b else min a b)
+            | _ ->
+                let t = freshReg c
+                ln c (renderCmp { Dest = t; Kind = "icmp"; Pred = (if isLower then "sgt" else "slt"); Ty = ScI64; Lhs = acc; Rhs = r })
+                let s = freshReg c
+                ln c ($"{s} = select i1 {t}, i64 {acc}, i64 {r}")
+                s) first
+
+/// THE AFFINE NEST over a domain's solutions, lex order, handing the body the
+/// field values and the cell's offset (its lex rank: a running counter, so
+/// the nest pays one add per cell and no table).
+let private emitDomainNest (c: Ctx) (plan: DomainPlan) (body: Val list -> Val -> unit) : unit =
+    let lv = Array.ofList plan.Levels
+    let r = lv.Length
+    let cnt = allocaOf c "i64"
+    ln c ($"store i64 0, ptr {cnt}")
+    let rec go (k: int) (xs: string list) =
+        if k = r then
+            let off = freshReg c
+            ln c ($"{off} = load i64, ptr {cnt}")
+            body (xs |> List.map (fun x -> { Reg = x; Ty = ScI64 })) { Reg = off; Ty = ScI64 }
+            let next = i64Bin c "add" off "1"
+            ln c ($"store i64 {next}, ptr {cnt}")
+        else
+            let arr = Array.ofList xs
+            let lo = domainBoundReg c true lv.[k].Lo arr
+            let hi = domainBoundReg c false lv.[k].Hi arr
+            // trips = hi - lo + 1; an empty interval gives trips <= 0, which the
+            // counted loop's signed `<` runs zero times.
+            let trips =
+                match tryLitI64 lo, tryLitI64 hi with
+                | Some l, Some h -> string (h - l + 1L)
+                | _ -> i64Bin c "add" (i64Bin c "sub" hi lo) "1"
+            emitCountedLoopTo c trips (fun t ->
+                let v = match tryLitI64 lo with Some 0L -> t | _ -> i64Bin c "add" lo t
+                go (k + 1) (xs @ [ v ]))
+    go 0 []
+
+/// The prefix tables of a plan's lex rank: `firsts.[k].[q]` is the rank, among
+/// the level-(k+1) prefixes, of the first child of level-k prefix q (prefixes
+/// of the OUTER r-1 fields only; rank 1 needs none). Walked at compile time.
+let private domainPrefixTables (plan: DomainPlan) : int64[][] =
+    let lv = Array.ofList plan.Levels
+    let r = lv.Length
+    let tables = ResizeArray<int64[]>()
+    if r >= 2 then
+        let full (p: int64[]) = Array.append p (Array.zeroCreate (r - p.Length))
+        let lo0 = Blade.Types.domainLower lv.[0].Lo (Array.zeroCreate r)
+        let hi0 = Blade.Types.domainUpper lv.[0].Hi (Array.zeroCreate r)
+        let mutable level : int64[] list = [ for x in lo0 .. hi0 -> [| x |] ]
+        for k in 0 .. r - 2 do
+            let firsts = ResizeArray<int64>()
+            let children = ResizeArray<int64[]>()
+            let mutable running = 0L
+            for q in level do
+                firsts.Add running
+                let pf = full q
+                let lo = Blade.Types.domainLower lv.[k + 1].Lo pf
+                let hi = Blade.Types.domainUpper lv.[k + 1].Hi pf
+                if hi >= lo then
+                    running <- running + (hi - lo + 1L)
+                    if k < r - 2 then
+                        for x in lo .. hi do children.Add (Array.append q [| x |])
+            tables.Add (firsts.ToArray())
+            level <- List.ofSeq children
+    tables.ToArray()
+
+/// The pool offset of the cell at FIELD VALUES `xs`, after the membership
+/// check (every field within its interval at that prefix) -- a key outside the
+/// domain aborts BL8006 with the C++ key index's message.
+let private domainRankReg (c: Ctx) (plan: DomainPlan) (xs: Val list) : string =
+    let lv = Array.ofList plan.Levels
+    let r = lv.Length
+    if List.length xs <> r then
+        refuse ($"an enumerated domain of {r} field(s) addressed by {List.length xs} coordinate(s)")
+    let regs = xs |> List.map (fun v -> v.Reg) |> Array.ofList
+    // Every level's interval depends on the coordinates only, so the whole
+    // membership test is formed BEFORE any table load can go out of range.
+    let bounds = [| for k in 0 .. r - 1 -> (domainBoundReg c true lv.[k].Lo regs, domainBoundReg c false lv.[k].Hi regs) |]
+    let mutable ok = "true"
+    for k in 0 .. r - 1 do
+        let (lo, hi) = bounds.[k]
+        let ge = freshReg c
+        ln c (renderCmp { Dest = ge; Kind = "icmp"; Pred = "sge"; Ty = ScI64; Lhs = regs.[k]; Rhs = lo })
+        let le = freshReg c
+        ln c (renderCmp { Dest = le; Kind = "icmp"; Pred = "sle"; Ty = ScI64; Lhs = regs.[k]; Rhs = hi })
+        let both = freshReg c
+        ln c ($"{both} = and i1 {ge}, {le}")
+        if ok = "true" then ok <- both
+        else
+            let a = freshReg c
+            ln c ($"{a} = and i1 {ok}, {both}")
+            ok <- a
+    let lOk = freshLbl c "dom.ok"
+    let lBad = freshLbl c "dom.bad"
+    ln c (renderBr { Cond = ok; IfTrue = lOk; IfFalse = lBad })
+    lbl c lBad
+    needShim c "blade_panic"
+    let m = stringGlobal c "error[BL8006]: index out of bounds: a key outside the sparse key set"
+    ln c (renderCall { Dest = None; RetTy = ScVoid; Callee = "@blade_panic"; Args = [ ScStr, m ] })
+    ln c "unreachable"
+    lbl c lOk
+    let tables = domainPrefixTables plan
+    let mutable p = i64Bin c "sub" regs.[0] (fst bounds.[0])
+    for k in 1 .. r - 1 do
+        let sym = raggedTableGlobal c tables.[k - 1]
+        let g = freshReg c
+        ln c ($"{g} = getelementptr inbounds i64, ptr {sym}, i64 {p}")
+        let first = freshReg c
+        ln c ($"{first} = load i64, ptr {g}")
+        let within = i64Bin c "sub" regs.[k] (fst bounds.[k])
+        p <- i64Bin c "add" first within
+    p
+
 /// `C(x, m)` for a RUNTIME x and a compile-time m: the falling factorial
 /// x(x-1)...(x-m+1) over the constant m!. Exact in integers -- a product of m
 /// consecutive integers is always divisible by m! -- so this needs no rounding
@@ -1619,6 +1778,7 @@ let private grpOffset (c: Ctx) (g: Grp) (idxs: Val list) : string =
     // folded outright when the row is a literal against a static table.
     | GRagged (_, table), [ i; j ] -> i64Add c (raggedOffAt c table i.Reg) j.Reg
     | GRagged _, _ -> refuse "a ragged group addressed by other than (row, element) coordinates"
+    | GDomain plan, xs -> domainRankReg c plan xs
     | _ ->
         let r = grpRank g
         let n = grpExtent g
@@ -2164,6 +2324,9 @@ let private emitShapeNest (c: Ctx) (groups: Grp list) (body: Val list -> Val -> 
         | g :: tl when grpCompact g ->
             emitSimplexR c (grpRank g) (grpExtent g) (grpStrict g) None (fun emit -> emit ())
                 (fun coords _ -> go (List.fold (fun a x -> x :: a) acc coords) tl)
+        | GDomain plan :: [] when List.isEmpty acc ->
+            // the sole group: its own counter IS the pool offset
+            emitDomainNest c plan body
         | _ -> refuse "an index group the llvm lane cannot iterate"
     go [] groups
 
@@ -2382,6 +2545,21 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
     // `forceDeferredPositionalReads` notes it for exactly this, corpus
     // loops/117, /192) without being stored here, where a pool allocated
     // inside a nest would not dominate the print that reads it afterwards.
+    // A KEYED read of a domain array, `R((i, j))`: the coordinates are field
+    // values; a pool reads at the lex rank (with the membership check inside
+    // `domainRankReg`), a producer checks membership and runs the kernel.
+    | IRIndex (arrExpr, [ IRTuple coords ], _)
+        when (match arrayShapeOf (typeOf arrExpr) with
+              | Some (_, [ GDomain _ ]) -> true
+              | _ -> false) ->
+        let a = consumeArrOperand c arrExpr
+        let xs = coords |> List.map (fun x -> coerce c ScI64 (emitExpr c x))
+        (match a.Groups, a.Src with
+         | [ GDomain _ ], APool _ -> readCell c a xs
+         | [ GDomain plan ], _ ->
+             domainRankReg c plan xs |> ignore
+             readCell c a xs
+         | _ -> refuse "a keyed read of a non-domain array")
     | IRIndex (arrExpr, idxExprs, _) ->
         let a = consumeArrOperand c arrExpr
         let idxs = idxExprs |> List.map (fun ix -> coerce c ScI64 (emitExpr c ix))
@@ -4013,6 +4191,15 @@ and private materialize (c: Ctx) (a: ArrVal) : ArrVal =
             let v = coerce c a.Elem (f c { Reg = k; Ty = ScI64 })
             storeCell c a.Elem (gepCell c a.Elem ptr k) v)
         { a with Src = APool ptr }
+    | AVirt _ when (match a.Groups with [ GDomain _ ] -> true | _ -> false) ->
+        // A domain producer: one pool of Card cells, filled by the affine
+        // nest in lex order (the counter is the offset).
+        let plan = match a.Groups with [ GDomain p ] -> p | _ -> refuse "unreachable"
+        let ptr = allocPool c a.Elem (string (max plan.Card 1L))
+        emitDomainNest c plan (fun xs off ->
+            let v = coerce c a.Elem (readCell c a xs)
+            storeCell c a.Elem (gepCell c a.Elem ptr off.Reg) v)
+        { a with Src = APool ptr }
     | AVirt _ when hasRagged a.Groups ->
         // A coordinate producer over the ragged pair: the nest is the ragged
         // walk itself -- outer rows, inner bound off the table, pool offset
@@ -4241,6 +4428,34 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
         match resolveKernel info.Kernel with
         | Some rk -> rk
         | None -> refuse "an apply-combinator whose kernel does not resolve to a callable"
+    // A CLOSED-FORM DOMAIN range (`range<R>` over a static struct with linear
+    // conjuncts) is a producer over the GDomain group: the kernel at the
+    // cell's field values, positional. The shared loop builder describes it
+    // as one runtime-extent level over a key index this lane has no use for,
+    // so it never sees it; every consumer iterates the affine nest itself.
+    match info.Arrays with
+    | [ IRRange ([ ix ], _) ] when (match ix.Extent with IRSparseKeys (SkDomain _) -> true | _ -> false) ->
+        let plan = match ix.Extent with IRSparseKeys (SkDomain p) -> p | _ -> refuse "unreachable"
+        let cl = rk.Callable
+        if cl.Params.Length <> plan.Levels.Length then
+            refuse ($"a kernel of {cl.Params.Length} parameter(s) over the {plan.Levels.Length}-field domain {plan.Name}")
+        let elem =
+            match scalarTyOf cl.RetType with
+            | Some s when s <> ScVoid -> s
+            | _ ->
+                match Blade.IR.stripUnits info.OutputType with
+                | ArrayElem arr -> requireScalar "a domain map's element" arr.ElemType
+                | t -> requireScalar "a domain map's result" t
+        { Elem = elem; Groups = [ GDomain plan ]; RowOpBytes = 0L
+          Src = AVirt (fun c2 xs -> coerce c2 elem (applyKernel c2 cl (xs |> List.map KScalar))) }
+    // Every OTHER tabulated range -- a table-enumerated static struct (its
+    // conjuncts are not linear, so there is no affine nest) or a SparseIdx key
+    // list -- iterates a runtime key index this lane does not build.
+    | arrays when arrays |> List.exists (function
+                    | IRRange (ixs, _) -> ixs |> List.exists (fun ix -> ix.IxKind = IxKSparse)
+                    | _ -> false) ->
+        refuse "a range over a key table (a table-enumerated static struct -- its conjuncts are not linear, so it has no closed-form nest -- or a SparseIdx key list)"
+    | _ ->
     // A RAGGED operand or output takes its own peel BEFORE the shared loop
     // builder runs: buildLoopNestCodeGen has no ragged story (the C++ lane
     // routes these through tryRaggedPeel for the same reason), and an
@@ -4698,6 +4913,55 @@ and private emitReduce (c: Ctx) (arrExpr: IRExpr) (kernelExpr: IRExpr) (initExpr
         | Some s when s <> ScVoid -> s
         | _ -> a.Elem
     if a.Groups |> List.exists grpCompact then emitCompactFold c a cl accTy initExpr else
+    match a.Groups with
+    | [ GDomain plan ] ->
+        // A domain array (materialized or not) folds WHOLE, its cells in lex
+        // order -- `reduce` over the sparse-shaped array is the flat walk in
+        // both other lanes, and lex order IS pool order.
+        let acc = allocaOf c (llTy accTy)
+        let seeded =
+            match initExpr with
+            | Some ini ->
+                let v = coerce c accTy (emitExpr c ini)
+                ln c ($"store {(llTy accTy)} {v.Reg}, ptr {acc}")
+                true
+            | None ->
+                if plan.Card < 1L then refuse "reduce over a statically empty domain"
+                false
+        let have = allocaOf c "i1"
+        let seededLit = if seeded then "true" else "false"
+        ln c ($"store i1 {seededLit}, ptr {have}")
+        let licensed = foldFmfDecorable cl
+        emitDomainNest c plan (fun idxs off ->
+            let cell =
+                match a.Src with
+                | APool _ -> readFlat c a off
+                | _ -> readCell c a idxs
+            if seeded then
+                let cur = loadSlot c acc accTy
+                let next = withFoldFmf c licensed (fun () -> coerce c accTy (applyKernel c cl [ KScalar cur; KScalar cell ]))
+                ln c ($"store {(llTy accTy)} {next.Reg}, ptr {acc}")
+            else
+                // Unseeded: the first cell seeds (a left fold from cell 0).
+                let h = freshReg c
+                ln c ($"{h} = load i1, ptr {have}")
+                let lSeed = freshLbl c "dfold.seed"
+                let lStep = freshLbl c "dfold.step"
+                let lJoin = freshLbl c "dfold.join"
+                ln c (renderBr { Cond = h; IfTrue = lStep; IfFalse = lSeed })
+                lbl c lSeed
+                let v0 = coerce c accTy cell
+                ln c ($"store {(llTy accTy)} {v0.Reg}, ptr {acc}")
+                ln c ($"store i1 true, ptr {have}")
+                ln c (sprintf "br label %%%s" lJoin)
+                lbl c lStep
+                let cur = loadSlot c acc accTy
+                let next = withFoldFmf c licensed (fun () -> coerce c accTy (applyKernel c cl [ KScalar cur; KScalar cell ]))
+                ln c ($"store {(llTy accTy)} {next.Reg}, ptr {acc}")
+                ln c (sprintf "br label %%%s" lJoin)
+                lbl c lJoin)
+        loadSlot c acc accTy
+    | _ ->
     if a.Rank <> 1 then
         refuse "reduce over a rank-2+ array (partial folds are not in the llvm lane yet)"
     // The bound is an OPERAND: a literal for a static axis (byte-identical to
@@ -4894,6 +5158,10 @@ and private emitReduceCompute (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExpr) (
     if kernels.Length <> legs.Length || seeds.Length <> legs.Length then
         refuse "a fused reduction whose kernel/seed pack does not match its leaf count"
     let arrs = legs |> List.map (emitArr c)
+    let domainShape =
+        match (List.head arrs).Groups with
+        | [ GDomain plan ] -> Some plan
+        | _ -> None
     let shape = (List.head arrs).Groups
     for a in arrs do
         if a.Groups <> shape then refuse "a fused reduction over legs of different shapes"
@@ -4925,6 +5193,21 @@ and private emitReduceCompute (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExpr) (
         | [ (a, cl, ty, _, _) ] -> [ emitCompactFold c a cl ty (Some (List.head seeds)) ]
         | _ -> refuse "a fused reduction join over compact (symmetric/antisymmetric) storage"
     else
+    // A CLOSED-FORM DOMAIN: the fold streams the affine nest -- no pool, no
+    // key table -- accumulating in lex order exactly as the serial C++ nest
+    // and the interpreter do.
+    match domainShape with
+    | Some plan ->
+        emitDomainNest c plan (fun idxs _ ->
+            for (a, cl, ty, slot, licensed) in plans do
+                let cur = loadSlot c slot ty
+                let cell = readCell c a idxs
+                let next =
+                    withFoldFmf c licensed (fun () ->
+                        coerce c ty (applyKernel c cl [ KScalar cur; KScalar cell ]))
+                ln c ($"store {(llTy ty)} {next.Reg}, ptr {slot}"))
+        plans |> List.map (fun (_, _, ty, slot, _) -> loadSlot c slot ty)
+    | None ->
     emitNest c (axisExtents shape) (fun idxs ->
         for (a, cl, ty, slot, licensed) in plans do
             let cur = loadSlot c slot ty
@@ -5375,6 +5658,11 @@ let private emitArrayPrintFramed (c: Ctx) (pre: string) (post: string) (a: ArrVa
     | _ -> emitArrayPrintGeneric c pre post a
 
 let private emitArrayPrint (c: Ctx) (label: string) (a: ArrVal) : unit =
+    // A domain (sparse-shaped) array has no printed form in the C++ lane
+    // (`Sparse<T,RANK>` has no operator<<; genPrintStatements notes it in a
+    // comment), so it prints nothing here either.
+    if a.Groups |> List.exists (function GDomain _ -> true | _ -> false) then ()
+    else
     emitArrayPrintFramed c (label + " = [") "]\n" a
 
 /// A top-level TUPLE's line, spelled like its literal: the twin of

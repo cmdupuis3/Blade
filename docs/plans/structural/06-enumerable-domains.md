@@ -1,5 +1,26 @@
 # 06 — Enumerable constrained domains: skip the excluded space
 
+**2026-10-18 (bench gap G4): the CONSUMERS stream the nest.** A closed-form
+(`SkDomain`) slot is no longer ITERATED through its key table in any lane: the
+C++ nest emitters render the slot's one level as the affine nest
+(`CodeGenLoopNest.genDomainLoopHeader`, one header line, field k over
+`[max(lo forms), min(hi forms)]`, the cell counter carried outermost-init to
+innermost-step), the kernel binds field values, and a fold written over the
+map (`reduce(method_for(range<R>) <@> k, op)`, top level or a function body --
+a body-local map read only by its fold is spliced and left unbuilt) streams it
+with no array and no `sparse_index_t` (BL7004 lifted for closed-form domains;
+a licensed fold kernel is `omp simd reduction` on the innermost field). The
+LLVM lane has a `GDomain` shape group (affine nest, compare+select bounds,
+per-prefix rank tables for keyed reads) and the interpreter folds
+`enumerateDomain` directly. A materialized map still keeps the hashed
+`sparse_index_t` VIEW for keyed reads (built from the same lex walk). Table
+(class B) domains: an unforced fold is refused by name, LLVM refuses the range
+by name. `Int` (Int32) fields accept `let static` bounds as a checked
+compile-time conversion. Plan lines: `[domain-enum v1]`. Corpus `domains/`;
+LLVM fact pins "closed-form enumerable domains". Still not done: the §4 timing
+gate, a threaded form of the nest, a closed-form keyed-read index in the C++
+lane, tag flow onto kernel params.
+
 **Status: v1 BUILT 2026-09-07 (feat/revision-reuse), with the user's decisions
 of 2026-09-07 — the `static struct` name IS the index type (`range<R>`,
 `Array<T like R>`); `Int` and `Nat` fields (a Nat box may not start below 0);

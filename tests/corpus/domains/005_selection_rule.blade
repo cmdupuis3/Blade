@@ -1,0 +1,36 @@
+// TEST: Closed-Form Domain: Selection Rules i + j <= n And a + b + c == L
+// A SUM constraint is not a difference constraint, so it bounds its last
+// field by an affine form over the earlier ones, attached as it stands:
+// `i + j <= n` gives j in [0, min(n, n - i)]. The rank-3 rule `a + b + c ==
+// L` SOLVES the innermost field (c in [L - a - b, L - a - b], one cell or
+// none), so the nest is two loops and an assignment-sized third -- the
+// C(L+2, 2) = 28 compositions of 6, never the 7^3 box.
+let static n = 10
+let static L = 6
+
+static struct Under {
+    i: Int<min=0, max=n>,
+    j: Int<min=0, max=n>
+} where i + j <= n
+
+static struct Comp {
+    a: Int<min=0, max=L>,
+    b: Int<min=0, max=L>,
+    c: Int<min=0, max=L>
+} where a + b + c == L
+
+let static UNDER = idx_card(Under)
+// EXPECT: UNDER = 66
+let under = reduce(method_for(range<Under>) <@> lambda(i, j) -> i * j, (+))
+// EXPECT: under = 495
+let static COMP = idx_card(Comp)
+// EXPECT: COMP = 28
+let comps = reduce(method_for(range<Comp>) <@> lambda(a, b, c) -> 1, (+))
+// EXPECT: comps = 28
+let moment = reduce(method_for(range<Comp>) <@> lambda(a, b, c) -> Float64(a * b * c) * 0.5, (+))
+// EXPECT: moment = 28.0
+let ord = reduce(method_for(range<Comp>) <@> lambda(a, b, c) -> a * 100 + b * 10 + c, lambda(x, y) -> (x * 7 + y) % 1000003, 0)
+// EXPECT: ord = 783501
+let C = method_for(range<Comp>) <@> lambda(a, b, c) -> a * 100 + b * 10 + c |> compute
+let mid = C((2, 1, 3))
+// EXPECT: mid = 213

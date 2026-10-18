@@ -1,0 +1,18 @@
+// TEST: Closed-Form Domain: A Non-Linear Conjunct Has No Nest To Stream (rejects)
+// WARN: BL4010
+// REJECT-AT: codegen
+// ERROR-CONTAINS: only a static struct whose conjuncts are all LINEAR inequalities
+// WARN-CODEGEN: is not streamed over a table-enumerated domain
+// `(i * j) % 3 == 1` is not a linear inequality, so the domain takes the
+// table route (index-types/264: the BL4010 advisory says the box was paid at
+// compile time). A table has no affine nest, so a fold written straight over
+// its map is refused by name -- the program says which conjunct shapes
+// stream -- rather than silently materializing; `|> compute` then `reduce`
+// is the working spelling (264). `blade plan` records the table enumeration
+// as a declined `[domain-enum v1]` line.
+static struct Prod {
+    i: Int<min=0, max=6>,
+    j: Int<min=0, max=6>
+} where (i * j) % 3 == 1
+
+let total = reduce(method_for(range<Prod>) <@> lambda(i, j) -> i * 10 + j, (+))
