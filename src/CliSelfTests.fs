@@ -549,6 +549,26 @@ let runCliSmokeTests () : TH.BlockResult =
                 let (code, out, err) = spawnWith (laneEnv "1") dir [ "plan"; "lane.blade"; "--json" ]
                 recordCase "cli: `plan --json` under BLADE_LLVM=1 names the lane"
                     (code = 0 && out.Contains "\"lane\":\"llvm\"") (out + err)
+                // THE TILE CORE (M6): a gram above the crossover, BLAS off,
+                // materializes through the shared C core in the LLVM lane, and
+                // the plan says so in this lane's words (not the C++ lane's
+                // dsyrk_tri, which this executable does not contain).
+                File.WriteAllText(Path.Combine(dir, "tile.blade"),
+                    "type V = Idx<61>\ntype S = Idx<31>\n"
+                    + "let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64(i * 11 + s) * 0.25 |> compute\n"
+                    + "let g = method_for(x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>) where comm(a, b) -> prodsum(a, b) |> compute\n")
+                let tileEnv knob = [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", "1"); ("BLADE_SYRK_TILE", knob); ("BLADE_FP_REPRO", null) ]
+                let (code, out, err) = spawnWith (tileEnv null) dir [ "plan"; "tile.blade" ]
+                recordCase "cli: `plan` under BLADE_LLVM=1 reports the syrk tile through the shared C core"
+                    (code = 0 && out.Contains "fold form: syrk tile (shared C core) 6x8, KC=31"
+                     && out.Contains "[microkernel v1] g @ "
+                     && out.Contains ": applied [packed syrk tile (shared C core")
+                    (out + err)
+                let (code, out, err) = spawnWith (tileEnv "0") dir [ "plan"; "tile.blade" ]
+                recordCase "cli: `plan` under BLADE_LLVM=1, BLADE_SYRK_TILE=0 reports the tile declined"
+                    (code = 0 && out.Contains "declined -- BLADE_SYRK_TILE=0/off: the brick nest"
+                     && not (out.Contains "fold form: syrk tile (shared C core)"))
+                    (out + err)
         finally
             try Directory.Delete(dir, true) with _ -> ()
     if not capabilities.Value.HasGpp || selfExe.IsNone then

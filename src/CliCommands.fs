@@ -992,6 +992,50 @@ let internal llvmLaneDecision (d: Blade.Effects.Decision) : Blade.Effects.Decisi
         declined $"C++-lane {d.Rule}: the LLVM lane emits its own loop nest" []
     | _ -> d
 
+/// A record the LLVM emitter made ITSELF: the syrk tile core's (M6), tagged
+/// `(shared C core)` in its evidence.
+let internal isLlvmTileRecord (d: Blade.Effects.Decision) : bool =
+    (d.Rule = "microkernel" || d.Rule = "fold-form")
+    && d.Evidence |> List.exists (fun e -> e.Contains "(shared C core")
+
+/// The LLVM lane's plan: every C++ record `ds` re-stated by
+/// `llvmLaneDecision`, EXCEPT that the lane's own tile-core records `own`
+/// (M6) take the place of the C++ records for the SAME contraction -- same
+/// rule, same declaration span, evidence naming the syrk tile. The C++
+/// verdict is kept as trailing evidence and its subject (the C++ name the
+/// rest of the plan uses) is adopted. A tile record with no C++ counterpart
+/// -- the C++ lane routed the contraction to BLAS, which records no fold
+/// form -- is appended under the BLAS record's subject.
+let internal mergeLlvmTileRecords (ds: Blade.Effects.Decision list) (own: Blade.Effects.Decision list) : Blade.Effects.Decision list =
+    let mentionsSyrk (d: Blade.Effects.Decision) =
+        d.Evidence |> List.exists (fun e -> e.Contains "syrk tile")
+    let pending = System.Collections.Generic.List<Blade.Effects.Decision>(own)
+    let merged =
+        ds |> List.map (fun d ->
+            match (if mentionsSyrk d then pending |> Seq.tryFindIndex (fun o -> o.Rule = d.Rule && o.Span = d.Span) else None) with
+            | Some ix ->
+                let o = pending.[ix]
+                pending.RemoveAt ix
+                let cppVerdict =
+                    match d.Outcome with
+                    | Blade.Effects.Applied -> $"""C++ lane: applied ({(d.Evidence |> List.tryHead |> Option.defaultValue "")})"""
+                    | Blade.Effects.Declined why -> $"C++ lane: declined -- {why}"
+                { o with Subject = d.Subject; Evidence = o.Evidence @ [ cppVerdict ] }
+            // Not this lane's tile, or a C++ syrk record for a contraction
+            // this lane recorded nothing about: the ordinary re-statement.
+            | None -> llvmLaneDecision d)
+    // Unmatched (the C++ lane took the BLAS route): adopt the subject of that
+    // route's record for the same declaration, so both lines name one value.
+    let adopted =
+        pending |> Seq.map (fun o ->
+            match ds |> List.tryFind (fun d ->
+                    d.Rule = "blas-routing" && d.Span = o.Span
+                    && d.Evidence |> List.exists (fun e -> e.Contains "Syrk")) with
+            | Some d -> { o with Subject = d.Subject }
+            | None -> o)
+        |> List.ofSeq
+    merged @ adopted
+
 let planFile (filePath: string) (json: bool) : int =
     if not (File.Exists filePath) then
         reportFailure $"File not found: {filePath}"
@@ -1046,10 +1090,13 @@ let planFile (filePath: string) (json: bool) : int =
                         | Some _, Some ir ->
                             (try EmitLlvm.tryEmitProgramNamed (Path.GetFileNameWithoutExtension filePath) ir
                              with ex -> Error ex.Message)
-                    // The LLVM emitter records nothing the plan describes.
-                    Blade.Effects.Decisions.drain () |> ignore
+                    // The LLVM emitter's OWN records: only its tile-core
+                    // decisions (M6) are plan material; anything a shared
+                    // layer recorded while it ran is a duplicate of the C++
+                    // pass above and is dropped.
+                    let llvmOwn = Blade.Effects.Decisions.drain () |> List.filter isLlvmTileRecord
                     match verdict with
-                    | Ok _ -> Some ("llvm", "LLVM (BLADE_LLVM=1): C++-only routes below are reported for this lane"), List.map llvmLaneDecision ds
+                    | Ok _ -> Some ("llvm", "LLVM (BLADE_LLVM=1): C++-only routes below are reported for this lane"), mergeLlvmTileRecords ds llvmOwn
                     | Error reason -> Some ("cpp", $"C++ (BLADE_LLVM=1, but the LLVM lane refused: {reason})"), ds
             if json then
                 let js = Blade.Effects.Decisions.renderJson filePath ds

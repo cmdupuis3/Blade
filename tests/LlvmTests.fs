@@ -346,7 +346,7 @@ let private withEnv (pins: (string * string option) list) (body: unit -> 'a) : '
 /// The knobs that change emitted text. Pinned OFF around any assertion about
 /// default emission; listed once so a knob added later is added in one place.
 let private numericKnobs =
-    [ "BLADE_FP_REASSOC"; "BLADE_FP_REPRO"; "BLADE_FP_CONTRACT"; "BLADE_LLVM_FACTS"; "BLADE_LLVM_BRICKS" ]
+    [ "BLADE_FP_REASSOC"; "BLADE_FP_REPRO"; "BLADE_FP_CONTRACT"; "BLADE_LLVM_FACTS"; "BLADE_LLVM_BRICKS"; "BLADE_SYRK_TILE" ]
 
 let private defaultEmissionEnv = numericKnobs |> List.map (fun k -> k, None)
 
@@ -832,10 +832,220 @@ let total = reduce(xs, lambda(a, b) where omp -> a + b, 0.0)
              fail name "a program with no omp request carries a census line"
          else pass name "census comment in both builds, none without a request")
 
+    // ---- the syrk tile core (microkernel review item M6) --------------------
+    // A same-array comm row contraction at or above the crossover (p >= 16,
+    // k >= 4) materializes through ONE call to blade_llvm_tiles.c, with the
+    // emitter's argument recipe: p, k, the operand pool, ldx = k, the output
+    // pool, strict 0, the kc cap, the scale mode + value, the scratch pool and
+    // its capacity (EmitLlvm.syrkTileScratchCells). The declaration carries the
+    // core's honest attributes. Below the crossover, under BLADE_SYRK_TILE=0,
+    // or for a contraction of two DIFFERENT arrays, the nest stays.
+    printSubHeader "the syrk tile core (M6)"
+    let gramSrc (p: int) (k: int) (tail: string) (ys: string) = $"""
+type V = Idx<{p}>
+type S = Idx<{k}>
+let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) %% 5) - 2.5 |> compute
+let y = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64((i * 5 + s) %% 7) |> compute
+let g = method_for(x, {ys}) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>) where comm(a, b) -> prodsum(a, b){tail} |> compute
+let t = reduce(method_for(range<V>) <@> lambda(i) -> g(i, i), (+))
+"""
+    let tileSym = "@" + EmitLlvm.tilesSymbol
+    let scratch6131 = EmitLlvm.syrkTileScratchCells 61L (Blade.CodeGenExprSupport.syrkTileKc 31L)
+    check "syrk tile: gram's shape (61 x 31) calls the core with the emitter's recipe"
+        [ "BLADE_SYRK_TILE", None ] (gramSrc 61 31 "" "x")
+        [ $"call void {tileSym}(i64 61, i64 31, ptr "
+          ", i64 31, ptr "
+          $", i64 0, i64 {Blade.CodeGenExprSupport.syrkTileKcMax}, i64 0, double 0x3FF0000000000000, ptr "
+          $", i64 {scratch6131})"
+          $"declare void {tileSym}(i64 noundef, i64 noundef, ptr noundef readonly captures(none), i64 noundef, ptr noundef captures(none),"
+          "mustprogress nofree nosync nounwind willreturn memory(argmem: readwrite)" ]
+        [ "readnone" ]
+    check "syrk tile: the `/ d` tail rides the call as mode 1 and the divisor"
+        [ "BLADE_SYRK_TILE", None ] (gramSrc 97 257 " / 4.0" "x")
+        [ $"call void {tileSym}(i64 97, i64 257, ptr "; ", i64 1, double 0x4010000000000000, ptr " ]
+        []
+    check "syrk tile: the `* s` tail rides the call as mode 2"
+        [ "BLADE_SYRK_TILE", None ] (gramSrc 24 8 " * 0.5" "x")
+        [ $"call void {tileSym}(i64 24, i64 8, ptr "; ", i64 2, double 0x3FE0000000000000, ptr " ]
+        []
+    check "syrk tile: below the crossover (13 x 31) keeps the nest"
+        [ "BLADE_SYRK_TILE", None ] (gramSrc 13 31 "" "x") [] [ tileSym ]
+    check "syrk tile: k below the crossover (61 x 3) keeps the nest"
+        [ "BLADE_SYRK_TILE", None ] (gramSrc 61 3 "" "x") [] [ tileSym ]
+    check "syrk tile: BLADE_SYRK_TILE=0 keeps the nest (the A/B knob)"
+        [ "BLADE_SYRK_TILE", Some "0" ] (gramSrc 61 31 "" "x") [] [ tileSym ]
+    check "syrk tile: two DIFFERENT arrays are not a same-array contraction"
+        [ "BLADE_SYRK_TILE", None ] (gramSrc 61 31 "" "y") [] [ tileSym ]
+    check "syrk tile: the fact kill switch strips the declaration's attributes"
+        [ "BLADE_SYRK_TILE", None; "BLADE_LLVM_FACTS", Some "off" ] (gramSrc 61 31 "" "x")
+        [ $"declare void {tileSym}(i64, i64, ptr, i64, ptr, i64, i64, i64, double, ptr, i64)" ]
+        [ "captures(none)"; "memory(argmem" ]
+
     printFooter "LLVM Fact Layer"
         [ $"{passed} passed"; $"{failed} failed"; "0 skipped" ]
     { Block = "LLVM Fact Layer"; Passed = passed; Failed = failed; Skipped = 0
       FailedNames = failedNames }
+
+// ---------------------------------------------------------------------------
+// Block 2b: the syrk tile core, raw bits across the lanes (M6)
+// ---------------------------------------------------------------------------
+//
+// The LLVM lane's tile core (blade_llvm_tiles.c, compiled by clang through
+// Build.buildLlvmTilesObject -- the object the lane links) and the C++ lane's
+// tile (blade_pgemm::dsyrk_tri, compiled by g++ with Build.optFlags) must
+// produce the SAME BITS for the same operand, in both contraction modes. One
+// polyglot source (src/cpp/llvm_tiles_rawbit.c) is built both ways; each build
+// self-checks every cell bitwise against its own serial chain, and the runner
+// compares the two builds' per-case hashes of the raw packed pool. Both modes
+// build into ONE directory, which also asserts the policy keying: the =off and
+// =fast tile objects must be different files.
+
+/// A sample block under a cap, the header's balanced rule (tri_kc).
+let private balancedKc (k: int64) (cap: int64) : int64 =
+    if k <= 0L then 0L
+    else
+        let nkb = (k + cap - 1L) / cap
+        (k + nkb - 1L) / nkb
+
+let runLlvmTilesRawBitTests () : BlockResult =
+    let blockName = "LLVM Tiles Raw-Bit"
+    printHeader "LLVM Tile Core vs C++ Tile (raw bits, both contraction modes)"
+    let skipBlock (why: string) =
+        printfn "  Skipped: %s" why
+        printFooter blockName [ "0 passed"; "0 failed"; "1 skipped" ]
+        { Block = blockName; Passed = 0; Failed = 0; Skipped = 1; FailedNames = [] }
+    match Build.resolveClang () with
+    | None -> skipBlock "no clang found (set BLADE_LLVM_CLANG)."
+    | Some _ when not Build.capabilities.Value.HasGpp -> skipBlock "requires g++ for the C++ lane's tile."
+    | Some clang ->
+    let cppDir = Path.Combine(AppContext.BaseDirectory, "cpp")
+    let testSrc = Path.Combine(cppDir, "llvm_tiles_rawbit.c")
+    if not (File.Exists testSrc) then skipBlock $"llvm_tiles_rawbit.c not deployed at {testSrc}"
+    else
+    let mutable passed = 0
+    let mutable failed = 0
+    let mutable failedNames = []
+    let pass name detail =
+        passed <- passed + 1
+        resultLine Pass name detail
+    let fail name detail =
+        failed <- failed + 1
+        failedNames <- failedNames @ [ name ]
+        resultLine Fail name detail
+    let work = Path.Combine(Path.GetTempPath(), "blade-llvm-tiles-" + Guid.NewGuid().ToString("N"))
+    Directory.CreateDirectory work |> ignore
+    // The cases, from the EMITTER's numbers: the kc cap it passes, and the
+    // scratch it allocates for that cap. (p, k, cap, mode, scale, data, short
+    // scratch?) -- smoke sizes around every edge the driver has: the
+    // crossover itself, ragged row (p mod 6) and column (p mod 8) panels,
+    // several K blocks (k > 336, and a cap of 7), a second NC column block
+    // (p = 2057), both scale tails, and the core's scalar fallback.
+    let cases =
+        [ 16, 4, 336, 0, 1.0, 0, false
+          17, 5, 336, 0, 1.0, 1, false
+          23, 31, 336, 0, 1.0, 2, false
+          24, 8, 336, 2, 0.37, 0, false
+          29, 1001, 336, 0, 1.0, 1, false
+          61, 31, 336, 0, 1.0, 1, false      // the bench's smoke size
+          61, 257, 336, 1, 4.0, 0, false
+          61, 701, 336, 0, 1.0, 2, false
+          97, 257, 336, 1, 3.0, 1, false
+          97, 513, 336, 2, 0.1, 3, false
+          130, 337, 336, 0, 1.0, 4, false
+          29, 50, 7, 0, 1.0, 0, false
+          31, 23, 5, 1, 7.0, 2, false
+          2057, 5, 336, 0, 1.0, 0, false
+          40, 20, 336, 0, 1.0, 2, true ]
+    let caseLines =
+        cases |> List.map (fun (p, k, cap, mode, scale, data, short) ->
+            let kc =
+                if cap = 336 then Blade.CodeGenExprSupport.syrkTileKc (int64 k)
+                else balancedKc (int64 k) (int64 cap)
+            let scratch = if short then 0L else EmitLlvm.syrkTileScratchCells (int64 p) kc
+            let sc = scale.ToString("R", Globalization.CultureInfo.InvariantCulture)
+            let sc = if sc.Contains "." || sc.Contains "E" then sc else sc + ".0"
+            $"    {{ {p}, {k}, {cap}, {scratch}, {mode}, {sc}, {data} }},")
+    if Blade.CodeGenExprSupport.syrkTileKcMax <> 336L then
+        fail "kc cap" $"the cases assume the emitter's cap 336; syrkTileKcMax is {Blade.CodeGenExprSupport.syrkTileKcMax}"
+    File.WriteAllText(Path.Combine(work, "llvm_tiles_cases.h"),
+                      "static const tile_case tile_cases[] = {\n" + String.concat "\n" caseLines + "\n};\n")
+    File.Copy(testSrc, Path.Combine(work, "llvm_tiles_rawbit.c"), true)
+    EmitLlvm.deployShim work
+    let exeExt = if Platforms.os = Platforms.Windows then ".exe" else ".out"
+    let runText (exe: string) (args: string) =
+        let psi = ProcessStartInfo(exe, args)
+        psi.RedirectStandardOutput <- true
+        psi.RedirectStandardError <- true
+        psi.UseShellExecute <- false
+        psi.CreateNoWindow <- true
+        psi.WorkingDirectory <- work
+        use pr = Process.Start psi
+        let o = Blade.Runtime.readToEndOffPool pr.StandardOutput
+        let e = Blade.Runtime.readToEndOffPool pr.StandardError
+        if pr.WaitForExit 300000 then (Some pr.ExitCode, o.Result.Replace("\r\n", "\n"), e.Result)
+        else
+            (try pr.Kill true with _ -> ())
+            (None, o.Result, e.Result)
+    let caseHashes (out: string) =
+        out.Split('\n') |> Array.filter (fun l -> l.StartsWith "CASE ") |> Array.toList
+    let objects = ResizeArray<string>()
+    let modeHashes = ResizeArray<string list>()
+    for (mode, contract) in [ "off", Some "off"; "fast", None ] do
+        withEnv [ "BLADE_FP_CONTRACT", contract; "BLADE_LLVM_FACTS", None ] (fun () ->
+            let fmaRef = if mode = "fast" then " -DBLADE_TEST_FMA_REF" else ""
+            match Build.buildLlvmTilesObject clang work with
+            | Error e -> fail $"tile object contract={mode}" e
+            | Ok (obj, _) ->
+                objects.Add obj
+                let src = Path.Combine(work, "llvm_tiles_rawbit.c")
+                let llvmExe = Path.Combine(work, $"tiles_llvm_{mode}{exeExt}")
+                let cppExe = Path.Combine(work, $"tiles_cpp_{mode}{exeExt}")
+                // The C side: the lane's tile flags (same contraction) for the
+                // reference chain too, linked with the REAL object.
+                let llvmBuild =
+                    runText clang ($"""-x c -std=c11 {(Build.llvmOptFlags ())}{(EmitLlvm.tilesContractFlag ())}{fmaRef} -I "{work}" -o "{llvmExe}" "{src}" -x none "{obj}" """)
+                let cppBuild =
+                    runText "g++" ($"""-x c++ -std=c++17 {(Build.optFlags ())}{fmaRef} -I "{work}" -I "{cppDir}" -o "{cppExe}" "{src}" """)
+                match llvmBuild, cppBuild with
+                | (Some 0, _, _), (Some 0, _, _) ->
+                    let (lc, lo, _) = runText llvmExe ""
+                    let (cc, co, _) = runText cppExe ""
+                    let summary (o: string) =
+                        o.Split('\n') |> Array.tryFind (fun l -> l.StartsWith "LLVM TILES RAWBIT") |> Option.defaultValue "(no summary)"
+                    let firstFails (o: string) =
+                        o.Split('\n') |> Array.filter (fun l -> l.StartsWith "[FAIL]") |> Array.truncate 3 |> String.concat " | "
+                    (if lc = Some 0 then pass $"llvm tile core vs its serial chain, contract={mode}" (summary lo)
+                     else fail $"llvm tile core vs its serial chain, contract={mode}" (firstFails lo + " " + summary lo))
+                    (if cc = Some 0 then pass $"C++ tile vs its serial chain, contract={mode}" (summary co)
+                     else fail $"C++ tile vs its serial chain, contract={mode}" (firstFails co + " " + summary co))
+                    let lh, ch = caseHashes lo, caseHashes co
+                    if lh.IsEmpty || lh.Length <> cases.Length then
+                        fail $"cross-lane bits, contract={mode}" $"the llvm build printed {lh.Length} case hashes, expected {cases.Length}"
+                    elif lh = ch then
+                        modeHashes.Add lh
+                        pass $"cross-lane bits, contract={mode}" $"{lh.Length} cases: every packed pool byte-identical"
+                    else
+                        let diffs = List.zip lh ch |> List.filter (fun (a, b) -> a <> b) |> List.truncate 3
+                        fail $"cross-lane bits, contract={mode}"
+                            (diffs |> List.map (fun (a, b) -> $"llvm `{a}` vs cpp `{b}`") |> String.concat " | ")
+                | (code, _, err), (Some 0, _, _) -> fail $"llvm driver build, contract={mode}" ($"exit {code}: " + err.Trim())
+                | _, (code, _, err) -> fail $"C++ driver build, contract={mode}" ($"exit {code}: " + err.Trim()))
+    // The test has teeth only if the two modes give DIFFERENT bits somewhere
+    // (else a tile that never contracted would pass the fma reference too).
+    if modeHashes.Count = 2 then
+        let differing = List.zip modeHashes.[0] modeHashes.[1] |> List.filter (fun (a, b) -> a <> b) |> List.length
+        if differing > 0 then
+            pass "the two contraction modes are distinguishable" $"{differing}/{modeHashes.[0].Length} cases differ between =off and =fast"
+        else fail "the two contraction modes are distinguishable" "=off and =fast gave identical bits in every case"
+    // Same directory, two policies, two objects (the M6 keying requirement).
+    if objects.Count = 2 then
+        if objects.[0] <> objects.[1] && File.Exists objects.[0] && File.Exists objects.[1] then
+            pass "policy keying: =off and =fast build distinct tile objects in one directory"
+                $"{Path.GetFileName objects.[0]} / {Path.GetFileName objects.[1]}"
+        else fail "policy keying: =off and =fast build distinct tile objects in one directory" $"both resolved to {objects.[0]}"
+    (try Directory.Delete(work, true) with _ -> ())
+    printFooter blockName [ $"{passed} passed"; $"{failed} failed"; "0 skipped" ]
+    { Block = blockName; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }
 
 // ---------------------------------------------------------------------------
 // Block 3: the simplex-blocks agreement pins
@@ -2174,6 +2384,7 @@ let runLlvmTests () : int =
         [ runLlvmCompareRuleTests ()
           runLlvmGoldenTests ()
           runLlvmFactTests ()
+          runLlvmTilesRawBitTests ()
           runSimplexAgreementTests ()
           runLlvmSimplexGate ()
           runLlvmDifferentialTests () ]
@@ -2186,7 +2397,7 @@ let runLlvmTests () : int =
 /// must be added here too -- a word missing here is refused before it runs
 /// (CI's `test llvm goldens` step was, once).
 let llvmCategoryWords =
-    [ "all"; "corpus"; "goldens"; "pins"; "facts"; "blocks"; "simplex"; "bricks"; "bench" ]
+    [ "all"; "corpus"; "goldens"; "pins"; "facts"; "tiles"; "blocks"; "simplex"; "bricks"; "bench" ]
 
 let isLlvmCategoryWord (cat: string) =
     List.contains (cat.ToLower().TrimStart('-')) llvmCategoryWords
@@ -2225,6 +2436,10 @@ let runLlvmCategory (cat: string) : int =
     | "facts" ->
         let f = runLlvmFactTests ()
         if f.Failed = 0 then 0 else 1
+    | "tiles" ->
+        // The tile core's cross-lane raw-bit block (M6): needs clang AND g++.
+        let t = runLlvmTilesRawBitTests ()
+        if t.Failed = 0 then 0 else 1
     | "blocks" | "simplex" | "bricks" ->
         let a = runSimplexAgreementTests ()
         let g = runLlvmSimplexGate ()

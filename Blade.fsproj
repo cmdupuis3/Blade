@@ -820,6 +820,20 @@
       <Link>cpp/blade_llvm_shim.c</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <!-- The BLADE_LLVM lane's tile core (microkernel review item M6): a serial
+         C driver over blade_tiles.h, compiled by clang per policy key
+         (Build.buildLlvmTilesObject) and linked only into a .ll that calls it. -->
+    <None Include="src/cpp/blade_llvm_tiles.c">
+      <Link>cpp/blade_llvm_tiles.c</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <!-- Its cross-lane raw-bit test: one C/C++ polyglot, built by clang as C
+         over the REAL tile object and by g++ as C++ over blade_pgemm::dsyrk_tri
+         (`blade test llvm-tiles`). -->
+    <None Include="src/cpp/llvm_tiles_rawbit.c">
+      <Link>cpp/llvm_tiles_rawbit.c</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <!-- Round D's cuBLAS swap-table verification, compiled with nvcc and run
          by Blade.Tests.CudaTests.runCublasSwapTests (`blade test cuda`).
          Needs a real GPU, so it rides the opt-in CUDA phase. -->
