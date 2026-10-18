@@ -2798,6 +2798,16 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                           preCode <- preCode @ (idxLines |> List.map (fun s -> ind + s))
                           registerShapedAlloc ($"{rname}_cidx")
                               "deallocate_compound_index_only" ($"{rname}_cidx")
+                          // The map's fill DRIVES the affine nest
+                          // (genDomainLoopHeader); the key index above is only
+                          // the materialized array's read view (keyed reads,
+                          // partial gathers), built from the same lex walk.
+                          (match src with
+                           | SkDomain plan ->
+                               recordDomainEnum name plan.Name true
+                                   $"closed-form affine nest ({plan.Levels.Length} level(s): {domainPlanSummary plan}), {plan.Card} cell(s)"
+                                   "consumer: map (the fill streams the nest; the materialized array keeps a sparse key view of the same lex order for keyed reads)"
+                           | _ -> ())
                       | IRSparseKeys (SkRuntime (IRVar (kid, _)) as src) ->
                           (match Map.tryFind kid tempCtx.VarNames with
                            | Some keysName ->

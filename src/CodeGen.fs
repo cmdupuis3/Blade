@@ -159,6 +159,9 @@ let rec private genFuncBodyScoped
     // ONLY as a join operand. Computed over the whole body at once, because
     // the accounting that makes the exemption safe is global.
     let joinDeferredIds = Blade.Lowering.joinDeferrableIdsMany ((lets |> List.map snd) @ [retExpr])
+    // S2's other exemption: a closed-form domain map the fold that consumed it
+    // spliced (and streams itself), now read by nothing.
+    let unreadDomainIds = Blade.Lowering.unreadDomainMapIdsOfLets lets retExpr
     // Flat-tuple child names registered by THIS body's lets, threaded for the
     // same reason as currentGrouped above. EVERY tuple this file emits is FLAT
     // (`std::make_tuple(x_0, x_1, x_2)` -- tryGenMergedCompute, genParallelTree
@@ -287,6 +290,11 @@ let rec private genFuncBodyScoped
             let code = genApplyCombinator bodyCtx varName info builder
             currentNames <- Map.add id varName currentNames
             code
+        | IRApplyCombinator _ when Set.contains id unreadDomainIds ->
+            // A closed-form domain map no statement reads: the fold that
+            // consumed it streams the affine nest itself (docs/plans/
+            // structural/06), so there is nothing to build here.
+            [$"{indent}// {varName} = <closed-form domain map, streamed by its fold>"]
         | IRApplyCombinator _ when Set.contains id joinDeferredIds ->
             // REDUCTION-JOIN OPERAND: the one body-level let that legitimately
             // stays deferred. A later join in this same body inlines it as a

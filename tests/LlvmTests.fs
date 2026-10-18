@@ -520,6 +520,30 @@ let b = x ^ 2.5
 let i = n ^ n
 """
 
+/// A band over a static struct (structural/06): the fold streams the nest.
+let private domainBandFoldSource = """
+let static n = 23
+let static w = 3
+static struct Band {
+    i: Int<min=0, max=n-1>,
+    j: Int<min=0, max=n-1>
+} where abs(i - j) <= w
+let total = reduce(method_for(range<Band>) <@> lambda(i, j) -> Float64(i * j) * 0.5, (+))
+"""
+
+/// The same band materialized and read by key.
+let private domainBandKeyedSource = """
+let static n = 23
+let static w = 3
+static struct Band {
+    i: Int<min=0, max=n-1>,
+    j: Int<min=0, max=n-1>
+} where abs(i - j) <= w
+let R = method_for(range<Band>) <@> lambda(i, j) -> i * 100 + j |> compute
+let k = 7
+let v = R((k, k + 2))
+"""
+
 /// Drop `;` comment lines before asserting on emitted text. The module banner
 /// NAMES the knobs it documents ("per-instruction `contract`"), so a bare
 /// substring search over the whole file would find `contract` in a module that
@@ -589,6 +613,21 @@ let runLlvmFactTests () : BlockResult =
         [ "fnattrs", true; "paramattrs", false; "fmf", false ]
     switchCase "an unrecognized token disables nothing" (Some "banana")
         [ "fnattrs", true; "paramattrs", true; "fmf", true ]
+
+    printSubHeader "closed-form enumerable domains (structural/06, bench G4)"
+    // A fold over a `range<R>` of a static struct with linear conjuncts is the
+    // affine nest itself -- bounds by compare + select on the outer field, an
+    // accumulator, no pool and no table. The differential sweep cannot say
+    // this: a refusal there is a quiet SKIP, so the lane's acceptance of the
+    // shape is asserted here by name.
+    check "a band fold streams the affine nest (no pool, no table)" [] domainBandFoldSource
+        [ "icmp sgt i64"; "select i1"; "fadd reassoc nsz contract double" ]
+        [ "@.blade.roff"; "@blade_alloc_cells" ]
+    // A KEYED read of a materialized domain array addresses it by lex rank
+    // through a prefix table of the OUTER field only (one entry per row,
+    // never per cell), behind the C++ key index's BL8006 membership abort.
+    check "a keyed read ranks through a per-row prefix table" [] domainBandKeyedSource
+        [ "@.blade.roff"; "index out of bounds: a key outside the sparse key set" ] []
 
     printSubHeader "function and parameter attributes"
     check "a non-recursive module claims termination" [] licensedFoldSource
@@ -1138,9 +1177,10 @@ let s = method_for(v, v) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
 /// they joined the default sweep when the lane learned to emit them;
 /// `recursive-arrays` joined with the IRForRange arm (the ordered serial
 /// loop: `let rec` and whole-rank folds); `sql-group-by` with the group_by
-/// port (2026-10), so the CSR build and its BL8006 aborts stay gated. Every
+/// port (2026-10), so the CSR build and its BL8006 aborts stay gated; `domains`
+/// with the closed-form domain nest (structural/06, bench G4). Every
 /// other category is reachable standalone with `blade test llvm <category>`.
-let defaultCategories = [ "basic"; "functions"; "loops"; "symmetry"; "index-types"; "reynolds"; "recursive-arrays"; "sql-group-by" ]
+let defaultCategories = [ "basic"; "functions"; "loops"; "symmetry"; "index-types"; "reynolds"; "recursive-arrays"; "sql-group-by"; "domains" ]
 
 /// What happened to one file. `Matched` carries a note so an agreement that
 /// asserts NOTHING -- both lanes printed no values at all -- is visible in the

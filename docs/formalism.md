@@ -659,6 +659,31 @@ sparse array over the solution set (full-key reads `R((i, j))`, flat folds in
 lex order), a domain slot is the whole iteration space (`range<R, J>` is
 refused), and an empty domain warns and iterates zero times.
 
+What is closed-form TODAY, consumer by consumer (bench gap G4; corpus
+`domains/`): a closed-form domain is never lowered to a key table to be
+ITERATED. A fold written over its map — `reduce(method_for(range<R>) <@> k,
+op[, init])`, at top level or inside a function body (a body-local map that
+only its fold reads is spliced into the fold and never built) — streams the
+affine nest with a scalar accumulator in lex order, in every lane (C++: the
+`r` nested `for`s, with a licensed fold kernel spent as `omp simd reduction`
+on the innermost field; LLVM: the same nest with compare-and-select bounds;
+the interpreter walks the same plan). A map that is MATERIALIZED (`|>
+compute`) is filled by the same nest — the cell counter is the storage offset
+— and keeps a sparse key view of the same lex order for keyed reads (C++: the
+`sparse_index_t`; LLVM: a per-prefix table of the outer fields, one entry per
+row, never per cell). Any number of fields is supported (every level gets its
+own affine interval; an unprojected general bound costs an empty inner loop
+at a dead prefix). A TABLE-enumerated domain has no nest: a fold written over
+its map is refused at codegen (BL7004, naming the linear spellings that
+stream), the LLVM lane refuses its range by name, and `|> compute` then
+`reduce` is the working spelling. `blade plan` reports each consumer as a
+`[domain-enum v1]` line (the bounds in the struct's field names, the cell
+count, and whether the consumer streams or fills). Fields may be `Int`
+(Int32) with `let static` bounds and half-widths: a static integer in a
+conjunct is typed as the literal it folds to, a CHECKED conversion — a value
+outside Int32 refuses the declaration (BL4001) with the fix, `Int64<...>`
+fields.
+
 Tuple indexing with wildcards: a full key is an O(1) hash lookup (a missing
 key is a runtime error); a wildcard/short-prefix partial returns the matching
 entries **by gather** — with no sorted table there is no contiguous-window

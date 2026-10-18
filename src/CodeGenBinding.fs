@@ -3458,17 +3458,55 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
     else
         // The fold bypasses genApplyCombinator's special input paths
         // (ragged peel, grouped, compound, CUDA) -- reject what they handle.
+        //
+        // EXCEPT a closed-form enumerable domain (`range<R>` over a static
+        // struct whose conjuncts are linear, docs/plans/structural/06): its
+        // level renders as an affine nest that needs no driver index at all
+        // (genDomainLoopHeader), so the fold streams the solutions with no
+        // array and no key table. A TABLE-enumerated domain (class B) and a
+        // SparseIdx range still need the `_cidx` key index this path never
+        // builds; they keep the refusal, worded for what they are.
+        let operandPairs (info: ApplyInfo) =
+            info.ArrayTypes |> List.mapi (fun i at -> (List.tryItem i info.Arrays, at))
+        let isClosedFormDomainOperand (arr: IRExpr option) =
+            match arr with
+            | Some (IRRange ([ ix ], _)) ->
+                (match ix.Extent with IRSparseKeys (SkDomain _) -> true | _ -> false)
+            | _ -> false
         let unsupportedInput =
             infos |> List.exists (fun info ->
-                info.ArrayTypes |> List.exists (fun at ->
+                operandPairs info |> List.exists (fun (arr, at) ->
                     at.IndexTypes |> List.exists (fun ix ->
                         isRaggedFamilyKind ix.IxKind || ix.IxKind = IxKDepInner
                         || ix.IxKind = IxKGroupOuter || ix.IxKind = IxKCompound
-                        // a sparse/domain range's driver index is declared by
+                        // a sparse range's driver index is declared by
                         // genApplyCombinator only; this path never builds one
-                        || ix.IxKind = IxKSparse)))
-        if unsupportedInput then
-            (codegenError ctx ind "reduce over a deferred computation is not supported for ragged/grouped/compound/sparse inputs yet -- bind the map with |> compute and reduce the array", ctx')
+                        || (ix.IxKind = IxKSparse && not (isClosedFormDomainOperand arr)))))
+        let sparseInput =
+            infos |> List.exists (fun info ->
+                operandPairs info |> List.exists (fun (arr, at) ->
+                    not (isClosedFormDomainOperand arr)
+                    && at.IndexTypes |> List.exists (fun ix -> ix.IxKind = IxKSparse)))
+        // Census for `blade plan`: which enumeration each domain leaf took.
+        for info in infos do
+            for (arr, _) in operandPairs info do
+                match arr with
+                | Some (IRRange ([ ix ], _)) ->
+                    (match ix.Extent with
+                     | IRSparseKeys (SkDomain plan) ->
+                         recordDomainEnum name plan.Name true
+                             $"closed-form affine nest ({plan.Levels.Length} level(s): {domainPlanSummary plan}), {plan.Card} cell(s)"
+                             "consumer: streamed fold (no array, no key table)"
+                     | IRSparseKeys (SkStatic entries) ->
+                         recordDomainEnum name "(table)" false
+                             $"table-enumerated domain or SparseIdx range ({entries.Length} baked key(s)): its conjuncts are not linear inequalities, so there is no closed-form nest to stream"
+                             "consumer: fold (refused -- force the map with |> compute)"
+                     | _ -> ())
+                | _ -> ()
+        if unsupportedInput && sparseInput then
+            (codegenError ctx ind "reduce over a deferred computation is not streamed over a table-enumerated domain or a SparseIdx range: only a static struct whose conjuncts are all LINEAR inequalities on its fields (`i - j <= w`, `abs(i - j) <= w`, `i < j`, `i + j <= n`, `m1 + m2 == m_out`) enumerates in closed form -- bind the map with |> compute and reduce the array", ctx')
+        elif unsupportedInput then
+            (codegenError ctx ind "reduce over a deferred computation is not supported for ragged/grouped/compound inputs yet -- bind the map with |> compute and reduce the array", ctx')
         else
             match resolveCallable kernelExpr with
             | Some callable when callable.Params.Length = 2 ->
@@ -3521,7 +3559,10 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                         callable.IsOmpParallel
                         && foldReorderLicensed callable
                         && (match cg0.Bindings with
+                            // a closed-form domain head is a whole affine nest
+                            // over its fields, not a [0, extent) sweep to split
                             | head :: _ -> head.BoundDependencies.IsEmpty && head.StrictOffset = 0
+                                           && (domainPlanOfLevel head).IsNone
                             | [] -> false)
                     let cg =
                         if chunkable then
@@ -3628,7 +3669,7 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                         // reaches genLoopNest, where it used to be printed.
                         | [lvl] when fpReassocEnabled () && foldReorderLicensed callable
                                      && (cg.FoldChunk.IsNone || not (ompThreadEmissionEnabled ()))
-                                     && laneable lvl ->
+                                     && (laneable lvl || (domainPlanOfLevel lvl).IsSome) ->
                             // The nest's own element peels and kernel expression,
                             // built exactly as genLoopNestStreamed builds them for
                             // one level. `restrictPeelSites` is provably EMPTY for
@@ -3719,6 +3760,39 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                 if cg.FoldChunk.IsSome
                                 then [ $"{ind}/* {(ompSuppressedPhrase (ompThreadsSuppressedReason ()))} */" ]
                                 else []
+                            // A CLOSED-FORM DOMAIN level (docs/plans/structural/06):
+                            // the affine nest over the struct's fields, with the
+                            // licence spent as `omp simd reduction` on the
+                            // INNERMOST field's run -- the contiguous, affine-
+                            // bounded inner loop the band/triangle shapes
+                            // vectorize on. The nest carries no cell counter
+                            // (there is no output to address), which keeps the
+                            // inner loop in OpenMP canonical form. A level that
+                            // also peels a REAL array needs the counter
+                            // (`R.data[__iL]`) and keeps the serial nest.
+                            match domainPlanOfLevel lvl with
+                            | Some plan ->
+                                let realOperand = lvl.Elements |> List.exists (_.Virtual.IsRealArray)
+                                match fpReassocSimdOp callable elemStr with
+                                | Some opStr when not realOperand ->
+                                    let (outerOpen, innerDecl, innerHeader, outerClose) = genDomainFoldNest lvl plan
+                                    recordFoldForm name "simd-reduction" $"reduce over a closed-form domain ({plan.Name}: affine nest, simd on the innermost field)"
+                                    Some (
+                                        chunkNote @
+                                        [ $"{ind}/* reduce over computation: closed-form domain {plan.Name} ({plan.Card} cells), affine nest, omp simd reduction on the innermost field (licensed reorder) */"
+                                          $"{ind}{{" ]
+                                        @ (aliasDecls |> List.map (fun s -> ind + "    " + s))
+                                        @ (outerOpen |> Option.map (fun h -> [ $"{ind}    {h}" ]) |> Option.defaultValue [])
+                                        @ [ $"{ind}        {innerDecl}"
+                                            $"{ind}        BLADE_OMP_SIMD_REDUCTION({opStr}:{name})"
+                                            $"{ind}        {innerHeader}" ]
+                                        @ (peels |> List.map (fun s -> $"{ind}            {s}"))
+                                        @ [ $"{ind}            {name} = {name} {opStr} {bodyExpr};"
+                                            $"{ind}        }}" ]
+                                        @ (outerClose |> Option.map (fun c -> [ $"{ind}    {c}" ]) |> Option.defaultValue [])
+                                        @ [ $"{ind}}}" ])
+                                | _ -> None
+                            | None ->
                             match fpReassocSimdOp callable elemStr with
                             | Some opStr ->
                                 // SIMD FORM, and the site the two forms differ
@@ -3813,9 +3887,19 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                     // The fold nest as emitted today, and the lane form when the
                     // knob and the gate above both admit it. Shared by both
                     // non-dispatch arms so they cannot drift.
+                    // A `where omp` fold kernel over a closed-form domain: the
+                    // nest has no thread-level form (never chunked, see
+                    // `chunkable`), so the thread half of the licence is
+                    // declined -- never silently.
+                    let domainOmpNote =
+                        match cg.Bindings with
+                        | head :: _ when callable.IsOmpParallel && (domainPlanOfLevel head).IsSome ->
+                            [ ind + "/* " + ompSuppressedPhrase "a closed-form domain nest has no thread-level form yet (its licence is spent on the innermost-field simd reduction where the kernel allows one)" + " */" ]
+                        | _ -> []
                     let foldNestLines () =
                         wrapperLines
                         @ [$"{ind}{elemStr} {name} = {seedStr};"]
+                        @ domainOmpNote
                         @ (match laneLines () with
                            | Some ls -> ls
                            | None ->
@@ -3828,6 +3912,8 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                        "threaded(Path B chunks, serial within each chunk)"
                                    elif cg.Bindings.Length <> 1 then
                                        "serial (multi-level nest: no lane or simd form for a fold over a nest yet)"
+                                   elif (domainPlanOfLevel (List.head cg.Bindings)).IsSome then
+                                       "serial (closed-form domain: affine nest; the fold kernel has no simd reduction operator, or a real array rides the level)"
                                    else "serial (head level is not a plain rectangular sweep)"
                                recordFoldForm name form "reduce over a deferred computation"
                                genLoopNest cg ctx.VarNames ctx.Indent)

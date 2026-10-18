@@ -396,8 +396,44 @@ let rec forceBareCombinatorLetsExcept (skip: Set<IRId>) (expr: IRExpr) : IRExpr 
         IRMatch (scrut, cases |> List.map (fun c -> { c with Body = forceBareCombinatorLetsExcept skip c.Body }))
     | _ -> expr
 
+/// S2's second exemption: a body-local map over a CLOSED-FORM DOMAIN
+/// (`range<R>` over a static struct with linear conjuncts) that nothing reads.
+/// The typechecker splices such a map into the fold that consumed it
+/// (tryInferReduceCompute's `overClosedFormDomain`), and the fold streams the
+/// affine nest itself, so the let is left with no reader; forcing it would
+/// build the sparse key view and a value buffer nobody looks at. Narrow on
+/// purpose: any other dead combinator let keeps today's forcing.
+let isClosedFormDomainApply (info: ApplyInfo) : bool =
+    info.ArrayTypes |> List.exists (fun at ->
+        at.IndexTypes |> List.exists (fun ix ->
+            ix.IxKind = IxKSparse
+            && (match ix.Extent with IRSparseKeys (SkDomain _) -> true | _ -> false)))
+
+/// Over a body already split into its let list (CodeGen.genFuncBodyScoped):
+/// the domain-map lets no value and no return reads.
+let unreadDomainMapIdsOfLets (lets: (IRId * IRExpr) list) (retExpr: IRExpr) : Set<IRId> =
+    let refs = System.Collections.Generic.HashSet<IRId>()
+    for e in (lets |> List.map snd) @ [ retExpr ] do
+        iterIRExpr (fun n -> match n with IRVar (id, _) -> refs.Add id |> ignore | _ -> ()) e
+    lets
+    |> List.choose (fun (id, v) ->
+        match v with
+        | IRApplyCombinator info when isClosedFormDomainApply info && not (refs.Contains id) -> Some id
+        | _ -> None)
+    |> Set.ofList
+
+let unreadDomainMapIds (expr: IRExpr) : Set<IRId> =
+    let refs = System.Collections.Generic.HashSet<IRId>()
+    let candidates = System.Collections.Generic.HashSet<IRId>()
+    iterIRExpr (fun e ->
+        match e with
+        | IRVar (id, _) -> refs.Add id |> ignore
+        | IRLet (id, IRApplyCombinator info, _) when isClosedFormDomainApply info -> candidates.Add id |> ignore
+        | _ -> ()) expr
+    candidates |> Seq.filter (fun id -> not (refs.Contains id)) |> Set.ofSeq
+
 let forceBareCombinatorLets (expr: IRExpr) : IRExpr =
-    forceBareCombinatorLetsExcept (joinDeferrableIds expr) expr
+    forceBareCombinatorLetsExcept (Set.union (joinDeferrableIds expr) (unreadDomainMapIds expr)) expr
 
 /// The RETURN half of the same rule (docs/plan-kernel-body-materialization.md
 /// manifestation M-D, stage S4): **the callee forces**. A callable whose return

@@ -2662,11 +2662,25 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
              | true, (_, s) -> not s.IsEmpty
              | _ -> false)
         | _ -> false
+    // A map over a CLOSED-FORM DOMAIN (`range<R>` over a static struct whose
+    // conjuncts are linear, docs/plans/structural/06) is the one body-local
+    // let the fold should still SPLICE: the fused nest streams the solutions
+    // with no array and no key table, while the materialized route builds the
+    // sparse key view AND the value buffer only to walk them once. Lowering's
+    // S2 leaves such a let unforced once the splice has left it unreferenced
+    // (`forceBareCombinatorLets`), so nothing is computed twice.
+    let overClosedFormDomain (info: TypedApplyInfo) =
+        info.ArrayTypes |> List.exists (fun at ->
+            at.IndexTypes |> List.exists (fun ix ->
+                ix.IxKind = IxKSparse
+                && (match ix.Extent with IRSparseKeys (SkDomain _) -> true | _ -> false)))
     let alreadyMaterializedLet () =
         match tArr.Kind with
         | TExprVar (name, _, _) when (bodyLocalBinding name env || capturedOuterBinding name env)
                                      && not (foldKernelIsParallel ()) ->
             (match (resolveTypedExpr env tArr).Kind with
+             | TExprApply info when not info.IsComposeApply && overClosedFormDomain info
+                                    && bodyLocalBinding name env -> false
              | TExprApply info when not info.IsComposeApply ->
                 (match env.Subst.Resolve info.OutputType with
                  | ArrayElem arr ->
@@ -18529,7 +18543,70 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
             // Full conjunct list (declared where + desugared field bounds)
             // via the SHARED helper -- StaticEval uses the same one for
             // fold-time checks, so the two worlds cannot drift.
-            let allConstraints = structConjuncts fields constraints
+            //
+            // A `let static` INTEGER named in a conjunct (`max=n-1`, `abs(i -
+            // j) <= w`) is a compile-time constant, so it is typed as the
+            // LITERAL it folds to: `let static w = 2` is Int64, and as a value
+            // it met an `Int<...>` (Int32) field with BL4001 although the
+            // literal `2` in the same place compiled (bench gap G17, the style
+            // guide's own band spelling). The conversion is CHECKED at compile
+            // time: a constant outside Int32's range when the struct has an
+            // Int32 field is refused (BL4001) with the fix -- widen the fields
+            // to Int64<...>. Field names shadow statics.
+            let staticOverflow : string option ref = ref None
+            let allConstraints =
+                let fieldNames = fields |> List.map (_.Name) |> Set.ofList
+                let hasInt32Field =
+                    fields |> List.exists (fun f ->
+                        match lowerTypeExpr env f.Type with
+                        | IRTScalar ETInt32 -> true
+                        | _ -> false)
+                let fits (v: int64) =
+                    not hasInt32Field || (v >= int64 System.Int32.MinValue && v <= int64 System.Int32.MaxValue)
+                let senv = lazy (Blade.TypeLower.staticEnvOf env)
+                let asLiteral (e: Expr) (v: int64) =
+                    if v < 0L then inheritSpan e (ExprUnaryOp (OpNeg, inheritSpan e (ExprLit (LitInt (-v)))))
+                    else inheritSpan e (ExprLit (LitInt v))
+                let rec inlineStatics (e: Expr) : Expr =
+                    // A FIELD-FREE subexpression naming a static (`n - 1`, `w`)
+                    // folds whole: `n - 1` as two literals would still default
+                    // to Int64 under the arithmetic.
+                    let free = StaticEval.collectFreeNames e
+                    // Only an Int32-field struct needs it: elsewhere the static's
+                    // own Int64 already matches, and nothing else changes.
+                    let namesStatic =
+                        hasInt32Field
+                        && not (Set.isEmpty free)
+                        && free |> Set.forall (fun n -> not (fieldNames.Contains n))
+                        && free |> Set.exists (fun n -> env.StaticValues.ContainsKey n)
+                    let folded =
+                        if not namesStatic then None
+                        else
+                            match StaticEval.evalExpr senv.Value StaticEval.maxSteps e with
+                            | Ok (StaticEval.SVInt v) when fits v -> Some (asLiteral e v)
+                            | Ok (StaticEval.SVInt v) ->
+                                if staticOverflow.Value.IsNone then
+                                    let names = String.concat ", " (Set.toList free)
+                                    staticOverflow.Value <- Some $"the static bound {v} (from {names}) does not fit the Int32 field type -- a static integer in a constraint converts to its field's type only when it fits; declare the fields Int64<min=..., max=...>"
+                                None
+                            | _ -> None
+                    match folded with
+                    | Some lit -> lit
+                    | None ->
+                    match e.Kind with
+                    | ExprKind.ExprVar _ | ExprKind.ExprLit _ -> e
+                    | ExprKind.ExprField (o, f) -> inheritSpan e (ExprField (inlineStatics o, f))
+                    | ExprKind.ExprApp (f, args) -> inheritSpan e (ExprApp (f, args |> List.map inlineStatics))
+                    | ExprKind.ExprBinOp (m, op, l, r) -> inheritSpan e (ExprBinOp (m, op, inlineStatics l, inlineStatics r))
+                    | ExprKind.ExprUnaryOp (op, i) -> inheritSpan e (ExprUnaryOp (op, inlineStatics i))
+                    | ExprKind.ExprIf (c, t, f) -> inheritSpan e (ExprIf (inlineStatics c, inlineStatics t, inlineStatics f))
+                    | ExprKind.ExprTuple es -> inheritSpan e (ExprTuple (es |> List.map inlineStatics))
+                    | ExprKind.ExprTyped (i, ty) -> inheritSpan e (ExprTyped (inlineStatics i, ty))
+                    | _ -> e
+                structConjuncts fields constraints |> List.map inlineStatics
+            match staticOverflow.Value with
+            | Some why -> Error (StructWhereError (name, why))
+            | None ->
             // Validate all conjuncts at declaration: fields bound, each
             // conjunct must typecheck to Bool. Hard errors -- a malformed
             // constraint is a compile error, not a silently dropped check.

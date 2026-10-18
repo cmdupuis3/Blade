@@ -1,0 +1,32 @@
+// TEST: Closed-Form Domain: A Band Fold Inside A Function Streams Too
+// bench/notes/repro/A-F5: the band kernel the benchmark suite had to drop.
+// Inside a function body a NAMED map used to be forced first (S2), so the
+// fold walked a materialized Sparse<double, 2> behind a hashed key table
+// built from the same enumeration -- two passes and O(card) keys. A map over
+// a closed-form domain that only its fold reads is spliced into the fold and
+// left unforced, so the body is one affine nest with a scalar accumulator.
+let static n = 11
+let static w = 2
+type Pts = Idx<n>
+
+static struct Band {
+    i: Int<min=0, max=n-1>,
+    j: Int<min=0, max=n-1>
+} where abs(i - j) <= w
+
+function lcg(k: Int64, seed: Int64) -> Float64 = {
+    let h1 = ((k + seed) * 1103515245 + 12345) % 2147483648
+    let h2 = (h1 * 1103515245 + 12345) % 2147483648
+    Float64(h2) / 2147483648.0
+}
+
+function band_sum(v: Array<Float64 like Pts>) -> Float64 = {
+    let r = method_for(range<Band>) <@> lambda(i, j) -> v((i : Pts)) * v((j : Pts)) / Float64(1 + abs(i - j))
+    reduce(r, (+))
+}
+
+let checksum = {
+    let x = method_for(range<Pts>) <@> lambda(i) -> 0.5 + lcg(i, 9) |> compute
+    band_sum(x)
+}
+// EXPECT: checksum = 32.8972854572294

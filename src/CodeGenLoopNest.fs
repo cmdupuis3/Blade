@@ -43,6 +43,121 @@ let exprToCppWithSubst (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExp
 
 // Loop Nest Code Generation
 
+// ---------------------------------------------------------------------------
+// CLOSED-FORM ENUMERABLE DOMAINS AS AN AFFINE NEST (docs/plans/structural/06,
+// bench gap G4). A `range<R>` over a `static struct` whose conjuncts are linear
+// carries `IRSparseKeys (SkDomain plan)`. Its ONE loop level is rendered as r
+// nested `for`s -- field k over [max(lower forms), min(upper forms)], the ends
+// affine in the outer fields -- with the level's own counter `__iL` (the cell's
+// lex rank, which IS its storage offset in the sparse-shaped output) declared
+// in the OUTERMOST init and stepped in the INNERMOST. One opening line, one
+// closing brace: every nest emitter that renders a level through
+// genForLoopHeader gets the nest unchanged, and kernel params bind the FIELD
+// VALUES (`__iL_dk`) -- never an unhash of a key table, never a box scan.
+// ---------------------------------------------------------------------------
+
+/// The plan when this level iterates a closed-form domain through a VIRTUAL
+/// `range<R>` element. A level driven only by a materialized domain array keeps
+/// its flat walk over the compact buffer (`R.data[__iL]`), which is already
+/// O(card) and needs no coordinates.
+let domainPlanOfLevel (level: LoopIndexBinding) : DomainPlan option =
+    match level.Extent with
+    | IRSparseKeys (SkDomain plan)
+        when level.Elements |> List.exists (fun e -> e.Virtual.IsVirtualRange) -> Some plan
+    | _ -> None
+
+/// The C++ name of field k's loop variable at this level.
+let domainFieldVar (level: LoopIndexBinding) (k: int) : string = $"{level.IndexName}_d{k}"
+
+/// One affine form `c + sum a_j x_j` over the field variables, written the way
+/// a reader writes it (`__i0_d0 - 2LL`, not `(-2LL) + 1LL * __i0_d0`).
+let domainAffineCpp (fieldVar: int -> string) (f: DomainAffine) : string =
+    let parts =
+        f.Coefs
+        |> List.mapi (fun n (j, a) ->
+            let v = fieldVar j
+            let mag = abs a
+            let body = if mag = 1L then v else $"{mag}LL * {v}"
+            if n = 0 then (if a < 0L then "-" + body else body)
+            else (if a < 0L then " - " + body else " + " + body))
+        |> String.concat ""
+    match parts, f.Const with
+    | "", c -> $"{c}LL"
+    | p, 0L -> p
+    | p, c when c < 0L -> $"{p} - {-c}LL"
+    | p, c -> $"{p} + {c}LL"
+
+/// A level's end: the MAX of its lower forms, the MIN of its upper forms.
+let domainBoundCpp (fieldVar: int -> string) (isLower: bool) (b: DomainBound) : string =
+    let fn = if isLower then "std::max<int64_t>" else "std::min<int64_t>"
+    // Constant forms fold to their tightest one at plan time; affine forms stay.
+    let consts, affine = b |> List.distinct |> List.partition (fun f -> f.Coefs.IsEmpty)
+    let constForm =
+        match consts with
+        | [] -> []
+        | cs -> [ { Const = (if isLower then cs |> List.map _.Const |> List.max else cs |> List.map _.Const |> List.min); Coefs = [] } ]
+    match (constForm @ affine) |> List.map (domainAffineCpp fieldVar) with
+    | [] -> if isLower then "INT64_MIN" else "INT64_MAX"
+    | [ one ] -> one
+    | first :: rest -> rest |> List.fold (fun acc t -> $"{fn}({acc}, {t})") first
+
+/// The single-line header of a domain level: r nested `for`s, each hoisting its
+/// upper end into `__iL_ek`, the counter carried from the outermost init to the
+/// innermost step when `withCounter` (a fold has no output to address and
+/// leaves it out, which keeps the innermost loop in OpenMP canonical form).
+let genDomainLoopHeaderWith (withCounter: bool) (level: LoopIndexBinding) (plan: DomainPlan) : string =
+    let r = plan.Levels.Length
+    let v = domainFieldVar level
+    plan.Levels
+    |> List.mapi (fun k lvl ->
+        let lo = domainBoundCpp v true lvl.Lo
+        let hi = domainBoundCpp v false lvl.Hi
+        let e = $"{level.IndexName}_e{k}"
+        let counterInit = if withCounter && k = 0 then $", {level.IndexName} = 0" else ""
+        let counterStep = if withCounter && k = r - 1 then $", ++{level.IndexName}" else ""
+        $"for (int64_t {v k} = {lo}, {e} = {hi}{counterInit}; {v k} <= {e}; ++{v k}{counterStep})")
+    |> String.concat " "
+    |> fun s -> s + " {"
+
+let genDomainLoopHeader (level: LoopIndexBinding) (plan: DomainPlan) : string =
+    genDomainLoopHeaderWith true level plan
+
+/// The same nest split for a vectorized FOLD: the outer fields' single-line
+/// header (None at rank 1), the innermost field's hoisted upper end, the
+/// innermost header in OpenMP canonical form (no counter), and the outer close.
+/// The caller puts its `omp simd reduction` pragma between the last two.
+let genDomainFoldNest (level: LoopIndexBinding) (plan: DomainPlan)
+        : string option * string * string * string option =
+    let r = plan.Levels.Length
+    let v = domainFieldVar level
+    let lvls = Array.ofList plan.Levels
+    let outer =
+        if r = 1 then None
+        else
+            [ 0 .. r - 2 ]
+            |> List.map (fun k ->
+                let e = $"{level.IndexName}_e{k}"
+                $"for (int64_t {v k} = {domainBoundCpp v true lvls.[k].Lo}, {e} = {domainBoundCpp v false lvls.[k].Hi}; {v k} <= {e}; ++{v k})")
+            |> String.concat " "
+            |> fun s -> Some (s + " {")
+    let k = r - 1
+    let e = $"{level.IndexName}_e{k}"
+    let innerDecl = $"const int64_t {e} = {domainBoundCpp v false lvls.[k].Hi};"
+    let innerHeader = $"for (int64_t {v k} = {domainBoundCpp v true lvls.[k].Lo}; {v k} <= {e}; ++{v k}) {{"
+    (outer, innerDecl, innerHeader, (if r = 1 then None else Some "}"))
+
+/// `blade plan` / comment text for a plan's bounds: `i in [0, 10], j in
+/// [max(0, i - 2), min(10, i + 2)]` in the struct's own field names.
+let domainPlanSummary (plan: DomainPlan) : string =
+    let names = plan.Levels |> List.map _.Field |> Array.ofList
+    let v k = names.[k]
+    let ends isLower (b: DomainBound) =
+        let s = (domainBoundCpp v isLower b).Replace("std::max<int64_t>", "max").Replace("std::min<int64_t>", "min")
+        System.Text.RegularExpressions.Regex.Replace(s, @"(\d)LL\b", "$1")
+    plan.Levels
+    |> List.map (fun lvl -> $"{lvl.Field} in [{ends true lvl.Lo}, {ends false lvl.Hi}]")
+    |> String.concat ", "
+
 /// Generate the element binding expression for a single array at a loop level
 /// Returns (cppCode, newPeeledName) where newPeeledName is used for subsequent levels
 ///
@@ -78,6 +193,11 @@ let genElementBindingPeel (rawRowPeel: bool) (level: LoopIndexBinding) (elem: El
         let code =
             $"const std::array<size_t, 1>* {elem.ParamName} = &{elem.ArrayName}_cidx->rank_to_tuple[{centerExpr}];"
         (code, elem.ParamName)
+    | VirtualRange _ when (domainPlanOfLevel level).IsSome ->
+        // range<R> over a closed-form static-struct domain: the level is the
+        // affine nest genDomainLoopHeader renders, and each kernel param binds
+        // its FIELD's loop variable -- the coordinate itself, no key table.
+        (sprintf "int64_t %s = %s;" elem.ParamName (domainFieldVar level elem.RankComponent), elem.ParamName)
     | VirtualRange _ when (match level.Extent with IRCompoundMask _ | IRSparseKeys _ -> true | _ -> false) ->
         // range<CompoundIdx<m>> / range<SparseIdx<keys>>: ONE loop level over
         // the present cells (compound: lex order; sparse: given key order); each
@@ -510,6 +630,8 @@ let genNestPragma (bindings: LoopIndexBinding list) (pragmaIndent: string) : str
         // `ompThreadEmissionEnabled` for why the licence stays in source.
         if not (ompThreadEmissionEnabled ()) then ""
         elif not outer.IsParallel then ""
+        // a closed-form domain level's cell counter is sequential (pragmaLevelOf)
+        elif (domainPlanOfLevel outer).IsSome then ""
         else
             // A level is "rectangular" iff its bound is independent of outer indices.
             let isRectangular (b: LoopIndexBinding) =
@@ -598,7 +720,11 @@ let genNestPragma (bindings: LoopIndexBinding list) (pragmaIndent: string) : str
 /// Returns None when no level is licensed (no clause, or a clause covering
 /// nothing), in which case the nest is serial.
 let pragmaLevelOf (bindings: LoopIndexBinding list) : int option =
-    bindings |> List.tryFindIndex (_.IsParallel)
+    // A closed-form domain level is a whole affine nest carrying ONE sequential
+    // cell counter; a parallel-for over its outer field would race on it, so
+    // it is never a pragma level (the omp census marker then says the licence
+    // found no level to spend on).
+    bindings |> List.tryFindIndex (fun b -> b.IsParallel && (domainPlanOfLevel b).IsNone)
 
 /// Explain, IN THE GENERATED C++, why a nest whose kernel asked for OpenMP is
 /// nonetheless emitted serial.
@@ -719,6 +845,9 @@ let compoundArrayNamesOf (bindings: LoopIndexBinding list) : Set<string> =
 let genLoopBoundExpr (compoundArrays: Set<string>) (binding: LoopIndexBinding) : string =
     match binding.Extent with
     | IRLit (IRLitInt n) -> string n
+    // A closed-form domain driver's cardinality is the plan's count, known at
+    // compile time -- and the fold path builds no `_cidx` index to read it off.
+    | IRSparseKeys (SkDomain plan) when (domainPlanOfLevel binding).IsSome -> string plan.Card
     // A compound axis iterates its present cells, so its bound is the
     // runtime cardinality of the compact index, not a dense .extents entry.
     // (The compound level carries IRCompoundMask as its Extent; ExtentArrayRef
@@ -757,6 +886,9 @@ let genLoopBoundExpr (compoundArrays: Set<string>) (binding: LoopIndexBinding) :
     | _ -> $"{binding.ExtentArrayRef}.extents[{binding.ExtentDimRef}]"
 
 let genForLoopHeader (compoundArrays: Set<string>) (binding: LoopIndexBinding) : string =
+    match domainPlanOfLevel binding with
+    | Some plan -> genDomainLoopHeader binding plan
+    | None ->
     let extentStr = genLoopBoundExpr compoundArrays binding
 
     // Compute bound subtraction from dependencies
@@ -1509,6 +1641,8 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
                     if not (ompThreadEmissionEnabled ()) then ompThreadsSuppressedReason ()
                     elif codeGen.FoldWrapper.IsSome then
                         "fold accumulates into a shared scalar, which is not race-safe"
+                    elif codeGen.Bindings |> List.exists (fun b -> (domainPlanOfLevel b).IsSome) then
+                        "a closed-form domain nest carries one sequential cell counter and has no thread-level form yet"
                     else "the omp(...) depth licenses no level of this nest"
                 // "Emitted" means the nest gets a pragma SOMEWHERE, not
                 // necessarily at this level -- an inner-licensed nest is
@@ -1533,6 +1667,11 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
         // the slab prologue genApplyCombinator emitted before the nest.
         // Inner levels are untouched.
         let header =
+            // A closed-form domain level is its own affine nest; it is never
+            // chunked (chunkable excludes it) and never MPI-sliced.
+            match domainPlanOfLevel binding with
+            | Some plan -> genDomainLoopHeader binding plan
+            | None ->
             if isOuter && codeGen.MpiSlab then
                 sprintf "for (size_t %s = __blade_mpi_lo_%s; %s < __blade_mpi_hi_%s; %s++) {"
                     binding.IndexName codeGen.OutputName

@@ -798,6 +798,25 @@ let runCliSmokeTests () : TH.BlockResult =
                  && out.Contains "[invariant-hoist v1] lambda in e: applied [`mymean(a)` does not read the element"
                  && out.Contains "[cse v2] k: applied"
                  && not (internalName (out + err))) (out + err)
+            // Closed-form enumerable domains (docs/plans/structural/06, bench
+            // G4): `plan` names the ENUMERATION FORM per consumer -- the affine
+            // nest's bounds in the struct's own field names, and whether the
+            // consumer streams it (a fold) or fills an array (a map).
+            File.WriteAllText(Path.Combine(dir, "d.blade"),
+                "let static n = 13\n"
+                + "let static w = 3\n"
+                + "static struct Band {\n"
+                + "    i: Int<min=0, max=n-1>,\n"
+                + "    j: Int<min=0, max=n-1>\n"
+                + "} where abs(i - j) <= w\n"
+                + "let s = reduce(method_for(range<Band>) <@> lambda(i, j) -> i * j, (+))\n"
+                + "let R = method_for(range<Band>) <@> lambda(i, j) -> i + j |> compute\n")
+            let (code, out, err) = spawn dir [ "plan"; "d.blade" ]
+            expectCase "domains: plan names the closed-form affine nest and its consumer"
+                (code = 0
+                 && out.Contains "[domain-enum v1] s @ 7:1: applied [enumeration of Band: closed-form affine nest (2 level(s): i in [0, 12], j in [max(0, i - 3), min(12, i + 3)]), 79 cell(s); consumer: streamed fold"
+                 && out.Contains "[domain-enum v1] R @ 8:1: applied [enumeration of Band: closed-form affine nest"
+                 && out.Contains "consumer: map (the fill streams the nest") (out + err)
         finally
             try Directory.Delete(dir, true) with _ -> ()
     // The editor payload and the REPL: the instance is the same declaration,
