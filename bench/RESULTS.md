@@ -1463,10 +1463,10 @@ numbers.
 
 | loss | mechanism | gap | status |
 |---|---|---|---|
-| antisym vs both experts (0.416 / 0.395, verdict loss) | per-cell operand reloads, 2 loads/FMA vs 0.67; 7.7 / 5.0 vs 16.7–18.6 G FMA/s | G1 | open |
-| gram vs experts (0.52 / 0.47, indicative) | same; C++ lane adds the single-accumulator simd reduction | G1, G26 | open |
+| antisym vs both experts (0.416 / 0.395, verdict loss) | per-cell operand reloads, 2 loads/FMA vs 0.67; 7.7 / 5.0 vs 16.7–18.6 G FMA/s | G1 | G1 fixed in C++ post-matrix (F, M7; scratch 120.8 → 36.9 ms, not harness-measured); LLVM twin deferred |
+| gram vs experts (0.52 / 0.47, indicative) | same; C++ lane adds the single-accumulator simd reduction | G1, G26 | G1 fixed in both lanes post-matrix (E M5/follow-on, G M6; scratch cpp 275 → 93, llvm 154 → 68.5 ms, not harness-measured); G26 moot here |
 | comoment3 vs experts (0.28 / 0.28, indicative) | multiply + FMA per term with 3 loads vs hoisted pair product; checksum share 36% / 70% | G1b, G3a, G3b | G3b FIXED post-matrix (b3272712; scratch: C++ 147 → ~44 ms, not harness-measured); G1b, G3a open |
-| pairkernel vs experts (0.77 / 0.72, indicative) | 6.27M-read logical checksum; kernel equivalent | G3a, G2 | open |
+| pairkernel vs experts (0.77 / 0.72, indicative) | 6.27M-read logical checksum; kernel equivalent | G3a, G2 | G3a fixed post-matrix for the licensed build (H, M4 orbit fold; scratch llvm 42 → 29, cpp 73 → 30 ms, not harness-measured); G2 partly |
 | recur vs experts and baselines (0.09–0.17, indicative) | per-step allocator page faults (eight 160 KB temporaries) | G6, G8 | G6 FIXED post-matrix (b3272712; scratch: 136 → 24 ms, not harness-measured); G8 open |
 | C++ lane vs LLVM lane on every group-A kernel (1.15–2.64) | single-accumulator simd reduction; out-of-line canonicalizing read | G26, G3b | open |
 | maskagg vs both tiers (0.043–0.157, indicative; session 1b) | one `unordered_map` insert per kept cell (~85% of the time), Bool mask pass, `y*y` temporary; LLVM lane refuses `mask`/`compound` | G9, G12 | open |
@@ -1649,8 +1649,25 @@ new domain gaps (G30: the C++ lane's inner loop is scalar; G31: no thread-level 
 and let-rec zero-fill elision (G6 fixed: recur C++ 136.4 → 23.8 ms, LLVM 131.5 → 22.3 ms,
 page faults 107k → 13.6k and 95k → 13.3k, checksum identical, 7 interleaved serial runs)
 and the compare-swap canonical read with bind-once (G3b fixed: comoment3 C++ 147 → ~44 ms;
-the flat-offset read was built, measured slower, and is not emitted); G3a (the logical
-checksum pass itself) stays open pending H's M4.
+the flat-offset read was built, measured slower, and is not emitted); (d) **wave 2 fully
+merged (tip 957c1e0e)**: E's follow-on (be915333) extends the syrk tile to the `gram(A,
+A)` node's BLAS-off arm (bitwise the jam under contract=off); F's M7 antisym tile and M8
+comoment3 simplex tile with the W panel (5a4b2a86 / 7134398f; G1 largely fixed in C++,
+G1b fixed; scratch antisym blade-cpp 120.8 → 36.9 ms vs experts 31.7 / 30.7, comoment3
+kernel-only 4.52 → 1.90 ms at p = 91; peak WS 18.3 → 25.7 MB); G's M6 LLVM syrk tile via
+a shared C core (b0932c5e / 7159b133; scratch blade-llvm gram 153.8 → 68.5 ms vs gf-expert
+77–85 in the same sessions; cross-lane pools byte-identical 15/15); H's M4 orbit-class
+fold (2a23e51a / 957c1e0e; G3a fixed for the licensed build, G2 partly: scratch comoment3
+llvm 41.05 → 25.03 / cpp 108.6 → 29.09 ms, pairkernel llvm 42.03 → 29.05 / cpp 73.35 →
+29.63 ms; declines under repro). The coordinator's single-run full-size checks on the
+merged binary before H (serial licensed, ms llvm/cpp): gram 60/61, antisym 76/30, comoment3
+41–51/19–23, recur 22/24, pairkernel 44/41; repro antisym llvm 668 (no LLVM antisym
+tile) / cpp 32; all pins hold in both lanes and regimes. **Deferred and flagged for the
+re-measure:** the LLVM antisym/comoment3 tile twins (so blade-llvm may now trail blade-cpp
+on those two), K blocking in the antisym driver, the orbit fold's threading (a `where omp`
+outer checksum fold now runs one serial orbit pass — an mt8 regression risk), G26 where
+tiles do not apply (dot-class folds), G30/G31 on band. The one full gate run and the
+harness re-measure come next; nothing above is a result.
 
 | # | item (plan §) | effort | forecast (ms, from the session-1a/1b medians) | gap |
 |---|---|---|---|---|
