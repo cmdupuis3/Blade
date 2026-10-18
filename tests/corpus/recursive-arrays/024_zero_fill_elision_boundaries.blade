@@ -1,0 +1,39 @@
+// TEST: Recursive Array Zero-Fill Elision Boundaries
+// ============================================================================
+// Formalism 7.5 "Zero-fill elision": the buffer's up-front zero fill is
+// dropped when every prefix occurrence in the inductive arm is a row/cell
+// READ (guarded outside the built prefix, so the buffer's value is never
+// selected there) and there is no `while` guard -- every row is then written
+// before it is read. Each shape below sits on one side of that rule, and
+// every value is the same either way (009_zero_history amplifies its lags by
+// 1e300, which would make an uninitialized cell visible).
+// ============================================================================
+type S6 = Idx<6>
+type S5 = Idx<5>
+type S4 = Idx<4>
+
+// ELIDED: lags 1, 2 and 3; at n < 3 the deeper lags read the implicit zero.
+// x0 = 1; x(n) = x(n-1) + x(n-2) + x(n-3) + 1, the missing lags zero.
+let rec trib: Array<Float like S6> =
+    match trib with
+    | zero -> zero
+    | zero :: s -> zero :: 1.0
+    | prefix :: n -> prefix :: prefix(n - 1) + prefix(n - 2) + prefix(n - 3) + 1.0
+// EXPECT: trib = [1.0, 2.0, 4.0, 8.0, 15.0, 28.0]
+
+// KEPT: a WHOLE-prefix read sees the unbuilt rows, which must be zero.
+// w(n) = (sum of the whole buffer, rows >= n still zero) + 1: 1, 2, 4, 8, 16.
+let rec w: Array<Float like S5> =
+    match w with
+    | zero -> zero
+    | zero :: s -> zero :: 1.0
+    | prefix :: n -> prefix :: reduce(prefix, (+)) + 1.0
+// EXPECT: w = [1.0, 2.0, 4.0, 8.0, 16.0]
+
+// ELIDED, no seed: the inductive arm writes row 0 itself (its lag reads the
+// implicit zero there), then every later row.
+let rec noseed: Array<Float like S4> =
+    match noseed with
+    | zero -> zero
+    | prefix :: n -> prefix :: prefix(n - 1) * 2.0 + 1.0
+// EXPECT: noseed = [1.0, 3.0, 7.0, 15.0]

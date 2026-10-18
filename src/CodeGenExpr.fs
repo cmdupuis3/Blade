@@ -69,6 +69,28 @@ let partialSparseGatherTeardown (value: IRExpr) : string option =
 /// Match-arm spelling of partialSparseGatherTeardown (one evaluation per arm).
 let (|GatherTeardown|_|) (value: IRExpr) : string option = partialSparseGatherTeardown value
 
+/// Is `e` a canonicalizing compact read worth binding once when it is BOTH
+/// operands of a binary operator (`t(i, j, k) * t(i, j, k)`)? A full-cover
+/// read of a compact-group array whose array and coordinates are plain
+/// variables or literals: evaluating it once or twice reads the same cell and
+/// has no other effect, so binding it changes no value and no evaluation
+/// order -- it only drops the second fold and fetch (bench G3b; generated
+/// comoment3.cpp read the cell twice per checksum term).
+let isBindOnceCompactRead (inferTy: IRExpr -> IRType) (e: IRExpr) : bool =
+    let isPureOperand (x: IRExpr) = match x with IRVar _ | IRParam _ | IRLit _ -> true | _ -> false
+    match e with
+    | IRIndex ((IRVar _ | IRParam _) as arr, idxs, _) when idxs |> List.forall isPureOperand ->
+        match inferTy arr with
+        | ArrayElem arrTy ->
+            let slots = arrTy.IndexTypes
+            let totalRank = slots |> List.sumBy (fun s -> max 1 s.Rank)
+            slots |> List.exists (fun s -> s.Symmetry <> SymNone && s.Symmetry <> SymWreath && s.Rank >= 2)
+            && slots |> List.forall (fun s -> s.Symmetry <> SymWreath)
+            && idxs.Length = totalRank
+            && (match arrTy.ElemType with IRTScalar _ -> true | _ -> false)
+        | _ -> false
+    | _ -> false
+
 /// Convert IRExpr to C++ expression string
 let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) : string =
     match expr with
@@ -169,13 +191,25 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         let wS = exprToCppCore subst names w
         $"{wS}[({off}L)][0]"
     | IRBinOp (_, op, l, r, loc) ->
+        let render (lStr: string) (rStr: string) =
+            match renderContractBinOp op l r lStr rStr inferExprType loc, op with
+            | Some s, _ -> s
+            | None, IRCaret -> $"pow({lStr}, {rStr})"
+            | None, IRMath2 name -> renderMath2 name lStr rStr
+            | None, _ -> emitBinOpWithComplexCoercion op l r lStr rStr inferExprType binOpToCpp
+        // BIND ONCE (bench/notes/microkernel-sketches-review.md M2): the SAME
+        // canonicalizing compact read on both sides (`t(i, j, k) * t(i, j, k)`)
+        // is evaluated once into a local and the operator applied to it --
+        // one fold and one fetch instead of two. Pure read, same cell, same
+        // operator on the same two values: no value or order changes.
+        if l = r && isBindOnceCompactRead inferExprType l then
+            let once = exprToCppCore subst names l
+            let applied = render "__bo" "__bo"
+            $"([&]() {{ const auto __bo = {once}; return {applied}; }}())"
+        else
         let lStr = exprToCppCore subst names l
         let rStr = exprToCppCore subst names r
-        match renderContractBinOp op l r lStr rStr inferExprType loc, op with
-        | Some s, _ -> s
-        | None, IRCaret -> $"pow({lStr}, {rStr})"
-        | None, IRMath2 name -> renderMath2 name lStr rStr
-        | None, _ -> emitBinOpWithComplexCoercion op l r lStr rStr inferExprType binOpToCpp
+        render lStr rStr
     | IRUnaryOp (IRConj, e) ->
         // conj is std::conj/thrust::conj on complex operands; the identity on
         // reals (mathematically conj(x)=x for real x, and std::conj(double)
@@ -813,6 +847,16 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
             let slots = arrTy.IndexTypes
             let totalRank = slots |> List.sumBy (fun s -> max 1 s.Rank)
             let anyCompact = slots |> List.exists (fun s -> s.Symmetry <> SymNone && (max 1 s.Rank) >= 2)
+            // The fold below is canon_fold, whose rank-2/3 instances are a
+            // compare-exchange network (no out-of-line std::sort; bench
+            // G3b, review M2). The fetch stays the nested walk
+            // `t[c0][c1][c2]`: a FLAT pool offset of the sorted tuple
+            // (`canon_off2` / `canon_off3`, exact and exhaustively checked
+            // in cpp/alloc_layout_tests.cpp) was built and MEASURED slower
+            // on both bench shapes at full size, serial, interleaved medians
+            // (comoment3 rank 3: 50.1 vs 44.2 ms; pairkernel rank 2: 55.4
+            // vs 52.6 ms) -- the binomial arithmetic costs more than two
+            // L1-resident row-pointer loads g++ already schedules around.
             if anyCompact && indices.Length = totalRank then
                 let elemTypeStr = irTypeToCpp arrTy.ElemType
                 let idxStrs = indices |> List.map (fun i -> exprToCppCore subst names i) |> Array.ofList
@@ -1832,6 +1876,24 @@ and materializeInlineForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
     // as IREigh above -- this arm must not force it).
     | IRRange (ixs, offset) ->
         materializeRangeForm subst names varName ixs offset
+    // The let-rec buffer whose zero fill the desugar proved dead (IR.IRUninit,
+    // formalism 7.5): a dense, statically shaped pool, allocated and NOT
+    // filled -- allocate<> already returns uninitialized storage, and every
+    // cell is written by the recursion before any read.
+    | IRUninit (ArrayElem at) when at.IndexTypes |> List.forall (fun ix -> ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank = 1) ->
+        let exts = at.IndexTypes |> List.map (fun ix -> Blade.IRPrint.tryEvalIntIR ix.Extent)
+        if exts |> List.exists Option.isNone then None
+        else
+        let rank = exts.Length
+        let elemStr = elemTypeToCpp at.ElemType
+        let extentsName = $"{varName}_extents"
+        let (extentDecl, ownedExtents) =
+            emitExtentsTable "" extentsName rank [ for e in exts -> (string e.Value, true) ]
+        let allocDecl =
+            arrayAlloc { Ind = ""; Elem = elemStr; Rank = rank; Name = varName
+                         Symm = "nullptr"; Strict = None; Extents = extentsName }
+        Some (extentDecl @ [ allocDecl; $"// {varName}: every cell is written by the recursion before it is read -- no zero fill (formalism 7.5)" ],
+              [MatPool (varName, elemStr, rank, "nullptr", None, ownedExtents)])
     // A rank-1 ARRAY LITERAL bound inside a kernel block (`let z = [0.0, 0.0]`,
     // or the literal operand `join` lifts to a let): every other let-site emits
     // it through genArrayLiteral, but a kernel body renders its lets here, and

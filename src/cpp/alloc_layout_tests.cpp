@@ -24,8 +24,12 @@
 
 #include <cstdio>
 #include <cstddef>
+#include <cstdint>
 #include <new>
+#include <thread>
 #include <vector>
+// The retained-block cache's counters (run_pool_cache_tests reads them).
+#define BLADE_POOL_CACHE_STATS 1
 #include "nested_array_utilities.hpp"
 #include "nested_array_types.hpp"
 #include "linearized_storage.hpp"
@@ -211,6 +215,259 @@ static bool check_contiguous_mixed3(double*** a, size_t n) {
         }
     return ok;
 }
+
+// ---------------------------------------------------------------------------
+// blade_pool: the retained-block cache behind allocate<> / deallocate<>
+// (nested_array_utilities.hpp; bench/notes/microkernel-sketches-review.md M1).
+//
+// Values cannot see the cache (a hit hands back a live block, nothing else
+// changes), so these read its counters (BLADE_POOL_CACHE_STATS, defined at the
+// top of this file) and the array operators' live count. Every check that
+// wants a clean slate calls blade_pool::flush() first, which also keeps the
+// balance tests above untouched by blocks an earlier test left retained.
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// canon_fold's rank-2/3 compare-exchange network and the flat canonical offsets
+// (bench/notes/microkernel-sketches-review.md M2). Exhaustive over EVERY
+// coordinate tuple at extents n = 0..9: the network's sorted tuple, parity and
+// strict-zero flag equal the generic inversion-count + std::sort fold
+// (reproduced verbatim below as the reference), and the flat offset of every
+// canonical cell is exactly that cell's address in allocate<>'s pool, as the
+// nested walk t[c0][c1][c2] reaches it.
+// ---------------------------------------------------------------------------
+template<size_t R>
+static int ref_fold(std::array<size_t, R>& idx, bool strict, bool& zero) {
+    zero = false;
+    if (strict) {
+        for (size_t a = 0; a < R; a++)
+            for (size_t b = a + 1; b < R; b++)
+                if (idx[a] == idx[b]) { zero = true; return 0; }
+    }
+    int inv = 0;
+    for (size_t a = 0; a < R; a++)
+        for (size_t b = a + 1; b < R; b++)
+            if (idx[a] > idx[b]) inv++;
+    std::sort(idx.begin(), idx.end());
+    return inv & 1;
+}
+
+static void run_canon_offset_tests() {
+    static constexpr const size_t m2[2] = {1, 1};
+    static constexpr const size_t m3[3] = {1, 1, 1};
+    using T2 = promote<double, 2>::type;
+    using T3 = promote<double, 3>::type;
+    bool foldOk = true, off2 = true, off3 = true;
+    long long cells = 0;
+    for (size_t n = 0; n <= 9; n++) {
+        for (int strict = 0; strict <= 1; strict++) {
+            for (size_t i = 0; i < n; i++)
+                for (size_t j = 0; j < n; j++) {
+                    std::array<size_t, 2> g = { i, j }, r = { i, j };
+                    bool zg, zr;
+                    int pg = canon_fold<2>(g, strict != 0, zg), pr = ref_fold<2>(r, strict != 0, zr);
+                    if (zg != zr || (!zr && (pg != pr || g != r))) foldOk = false;
+                    for (size_t k = 0; k < n; k++) {
+                        std::array<size_t, 3> g3 = { i, j, k }, r3 = { i, j, k };
+                        bool z3, zr3;
+                        int p3 = canon_fold<3>(g3, strict != 0, z3), q3 = ref_fold<3>(r3, strict != 0, zr3);
+                        if (z3 != zr3 || (!zr3 && (p3 != q3 || g3 != r3))) foldOk = false;
+                    }
+                }
+        }
+        const size_t ext2[2] = { n, n }, ext3[3] = { n, n, n };
+        // inclusive rank 2
+        if (n > 0) {
+            T2 a = allocate<T2, m2>(ext2);
+            double* base = pool_base(a);
+            for (size_t i = 0; i < n; i++)
+                for (size_t j = i; j < n; j++, cells++)
+                    if (&a[i][j - i] != base + canon_off2<false>(i, j, n)) off2 = false;
+            deallocate<T2, m2>(a, ext2);
+        }
+        // strict rank 2 (n >= 2 has cells)
+        if (n >= 2) {
+            T2 a = allocate<T2, m2, false>(ext2);
+            double* base = pool_base(a);
+            for (size_t i = 0; i < n; i++)
+                for (size_t j = i + 1; j < n; j++, cells++)
+                    if (&a[i][j - i - 1] != base + canon_off2<true>(i, j, n)) off2 = false;
+            deallocate<T2, m2, false>(a, ext2);
+        }
+        // inclusive rank 3
+        if (n > 0) {
+            T3 a = allocate<T3, m3>(ext3);
+            double* base = pool_base(a);
+            for (size_t i = 0; i < n; i++)
+                for (size_t j = i; j < n; j++)
+                    for (size_t k = j; k < n; k++, cells++)
+                        if (&a[i][j - i][k - j] != base + canon_off3<false>(i, j, k, n)) off3 = false;
+            deallocate<T3, m3>(a, ext3);
+        }
+        // strict rank 3 (n >= 3 has cells)
+        if (n >= 3) {
+            T3 a = allocate<T3, m3, false>(ext3);
+            double* base = pool_base(a);
+            for (size_t i = 0; i < n; i++)
+                for (size_t j = i + 1; j < n; j++)
+                    for (size_t k = j + 1; k < n; k++, cells++)
+                        if (&a[i][j - i - 1][k - j - 1] != base + canon_off3<true>(i, j, k, n)) off3 = false;
+            deallocate<T3, m3, false>(a, ext3);
+        }
+    }
+    printf("  [info]: canonical offsets checked over %lld cells\n", cells);
+    check("canon_fold_network_matches_generic_r2_r3", foldOk);
+    check("canon_flat_offsets_rank2", off2);
+    check("canon_flat_offsets_rank3", off3);
+    // Large legal extents: the offset arithmetic stays exact far past any
+    // allocatable array (the helpers' precondition bound is n <= 2,000,000).
+    {
+        const size_t n = 2000000;
+        bool ok = canon_off3<false>(n - 1, n - 1, n - 1, n) == canon_t3(n) - 1
+               && canon_off2<false>(n - 1, n - 1, n) == canon_t2(n) - 1
+               && canon_off3<true>(n - 3, n - 2, n - 1, n) == canon_t3(n - 2) - 1
+               && canon_off2<true>(n - 2, n - 1, n) == canon_t2(n - 1) - 1;
+        check("canon_flat_offsets_last_cell_at_n_2e6", ok);
+    }
+}
+
+#if !(defined(BLADE_POOL_CACHE_OFF) && BLADE_POOL_CACHE_OFF)
+static long long pool_fresh()    { return blade_pool::g_stats.fresh.load(); }
+static long long pool_reused()   { return blade_pool::g_stats.reused.load(); }
+static long long pool_retained() { return blade_pool::g_stats.retained.load(); }
+static long long pool_evicted()  { return blade_pool::g_stats.evicted.load(); }
+
+static const size_t k_ext3000[1] = { 3000 };       // 24 KB of doubles: eligible
+static const size_t k_ext100[1]  = { 100 };        // 800 B: below the band
+static const size_t k_ext3001[1] = { 3001 };
+static const size_t k_big[1]     = { 600000 };     // 4.8 MB: above the 4 MB block cap
+static const size_t k_3mb[1]     = { 393216 };     // exactly 3 MB of doubles
+static const size_t k_rec[1]     = { 20011 };      // the bench recur row (160,088 B)
+static const size_t k_2d[2]      = { 50, 60 };     // rank 2, 3000 cells
+
+static void run_pool_cache_tests() {
+    using P1 = promote<double, 1>::type;
+    using P2 = promote<double, 2>::type;
+    blade_pool::flush();
+
+    // Exact-size reuse: the second allocation of the same type and count gets
+    // the block the first one released, and it is counted as a hit.
+    {
+        double* a = allocate<P1>(k_ext3000);
+        long long f0 = pool_fresh(), r0 = pool_reused();
+        deallocate<P1>(a, k_ext3000);
+        double* b = allocate<P1>(k_ext3000);
+        check("pool_reuse_same_size_returns_released_block", b == a && pool_reused() == r0 + 1 && pool_fresh() == f0);
+        deallocate<P1>(b, k_ext3000);
+        blade_pool::flush();
+    }
+    // A different cell count, or a different element type of the SAME byte
+    // size, is a miss: reuse is exact-size and typed.
+    {
+        double* a = allocate<P1>(k_ext3000);
+        deallocate<P1>(a, k_ext3000);
+        long long f0 = pool_fresh(), r0 = pool_reused();
+        double* b = allocate<P1>(k_ext3001);
+        int64_t* c = allocate<promote<int64_t, 1>::type>(k_ext3000);
+        check("pool_miss_on_other_count_or_type", pool_reused() == r0 && pool_fresh() == f0 + 2
+                                                  && (void*)c != (void*)a && b != a);
+        deallocate<P1>(b, k_ext3001);
+        deallocate<promote<int64_t, 1>::type>(c, k_ext3000);
+        blade_pool::flush();
+    }
+    // Outside the size band nothing is retained: a small pool and a pool above
+    // the 4 MB block cap both go straight back to delete[].
+    {
+        long long t0 = pool_retained();
+        size_t live0 = live_arrays();
+        double* s = allocate<P1>(k_ext100);
+        double* g = allocate<P1>(k_big);
+        deallocate<P1>(s, k_ext100);
+        deallocate<P1>(g, k_big);
+        check("pool_small_and_huge_not_retained", pool_retained() == t0 && live_arrays() == live0);
+    }
+    // The per-thread budget (8 MB, all types together): a third 3 MB block
+    // evicts the oldest one rather than growing past it.
+    {
+        double* x = allocate<P1>(k_3mb);
+        double* y = allocate<P1>(k_3mb);
+        double* z = allocate<P1>(k_3mb);
+        long long e0 = pool_evicted();
+        deallocate<P1>(x, k_3mb);
+        deallocate<P1>(y, k_3mb);
+        bool twoKept = (pool_evicted() == e0);
+        deallocate<P1>(z, k_3mb);
+        check("pool_budget_evicts_oldest", twoKept && pool_evicted() == e0 + 1
+                                           && blade_pool::tl_cache.bytes <= blade_pool::kBudget);
+        blade_pool::flush();
+    }
+    // The slot cap: seventeen eligible releases keep sixteen.
+    {
+        double* xs[17];
+        for (int k = 0; k < 17; k++) xs[k] = allocate<P1>(k_ext3000);
+        long long e0 = pool_evicted();
+        for (int k = 0; k < 17; k++) deallocate<P1>(xs[k], k_ext3000);
+        check("pool_slot_cap_16", blade_pool::tl_cache.n == blade_pool::kSlots && pool_evicted() == e0 + 1);
+        blade_pool::flush();
+    }
+    // A rank-2 pool is released with allocate's own count (the skeleton rows
+    // are NOT cached: only the scalar pool is).
+    {
+        double** m = allocate<P2>(k_2d);
+        double* base = pool_base(m);
+        deallocate<P2>(m, k_2d);
+        double** m2 = allocate<P2>(k_2d);
+        check("pool_rank2_pool_reused", pool_base(m2) == base);
+        deallocate<P2>(m2, k_2d);
+        blade_pool::flush();
+    }
+    // flush() returns every retained block: the live count is back where it was.
+    {
+        size_t live0 = live_arrays();
+        double* a = allocate<P1>(k_ext3000);
+        deallocate<P1>(a, k_ext3000);
+        bool held = (live_arrays() == live0 + 1);
+        blade_pool::flush();
+        check("pool_flush_frees_retained", held && live_arrays() == live0 && blade_pool::tl_cache.n == 0);
+    }
+    // Thread exit frees that thread's cache.
+    {
+        size_t live0 = live_arrays();
+        std::thread t([] {
+            double* a = allocate<P1>(k_ext3000);
+            deallocate<P1>(a, k_ext3000);
+        });
+        t.join();
+        check("pool_thread_exit_frees_cache", live_arrays() == live0);
+    }
+    // TRIPWIRE, the recur shape (bench G6): 300 time steps, each allocating 8
+    // row temporaries of 20011 doubles and freeing them at the end of the step.
+    // Without the cache that is 2400 fresh heap blocks of 160 KB, each one
+    // re-faulting its pages; with it, only the first step's 8 are fresh.
+    {
+        blade_pool::flush();
+        long long f0 = pool_fresh(), r0 = pool_reused();
+        double checksum = 0.0;
+        for (int step = 0; step < 300; step++) {
+            double* tmp[8];
+            for (int k = 0; k < 8; k++) {
+                tmp[k] = allocate<P1>(k_rec);
+                for (size_t i = 0; i < 20011; i++) tmp[k][i] = double(step + k);
+            }
+            for (int k = 0; k < 8; k++) { checksum += tmp[k][20010]; deallocate<P1>(tmp[k], k_rec); }
+        }
+        long long fresh = pool_fresh() - f0, reused = pool_reused() - r0;
+        printf("  [info]: recur-shaped tripwire: fresh=%lld reused=%lld (of 2400 allocations)\n", fresh, reused);
+        // sum over steps s and slots k of (s + k) = 8 * (0 + .. + 299) + 300 * (0 + .. + 7)
+        check("pool_recur_tripwire_fresh_le_8", fresh <= 8 && reused >= 2392
+                                                && checksum == double(8 * (299 * 300 / 2) + 300 * 28));
+        blade_pool::flush();
+    }
+}
+#else
+static void run_pool_cache_tests() {
+    check("pool_cache_compiled_off (BLADE_POOL_CACHE_OFF)", true);
+}
+#endif
 
 int main() {
     // ----- Rectangular 3x3x3 -----
@@ -963,6 +1220,9 @@ int main() {
               empty && parentIntact
               && live_arrays() == snap && g_live_cidx == csnap);
     }
+
+    run_canon_offset_tests();
+    run_pool_cache_tests();
 
     printf("ALLOC TESTS: %d/%d passed\n", g_pass, g_total);
     return (g_pass == g_total) ? 0 : 1;

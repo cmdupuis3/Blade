@@ -263,6 +263,16 @@ type IRExpr =
     /// (IRMono.resolveTypedZerosModule, via `zeroLiteralOf`). The type rides
     /// the node so HM substitution reaches it like any other carried type.
     | IRZero of ty: IRTypeG<IRExpr>
+    /// A FRESH array of the carried (dense, statically shaped) array type
+    /// whose cells are written before any is read, so no fill is emitted:
+    /// the recursive-array buffer when the desugar PROVED every row is
+    /// written before it is read (TypeCheckInfer's let-rec desugar,
+    /// `__recu_` buffers; formalism 7.5 "Zero-fill elision"). Built ONLY
+    /// there, and only for a binding (`Lowering.lowerTypedBlock`). The
+    /// compiled lanes allocate without filling (allocate<> / blade_alloc_cells
+    /// already return uninitialized storage); the interpreter allocates
+    /// zeros, which no read can observe -- the license is that none happens.
+    | IRUninit of ty: IRTypeG<IRExpr>
     | IRRank of array: IRExpr
     | IRPolyIndex of pack: IRExpr * index: IRExpr  // Dynamic poly-pack indexing: args[k]
     // Pack tail from cons-destructuring `let head :: tail = A`: a "shifted
@@ -2201,12 +2211,19 @@ let mapKernelInner (transform: IRCallable -> IRExpr) (expr: IRExpr) : IRExpr =
 let private badChildren (ctor: string) : 'a =
     failwith $"ExprShape.rebuild: child list does not match {ctor}'s shape"
 
+/// The buffer-name prefix by which the let-rec desugar (TypeCheckInfer) tells
+/// Lowering that a recursive array's buffer needs NO zero fill: every cell is
+/// provably written before it is read (formalism 7.5). Lowering then binds
+/// the buffer to `IRUninit` instead of the checked zero former. Ordinary
+/// buffers keep the `__rec_` prefix. Reserved: `__`-names are internal.
+let recUninitBufferPrefix = "__recu_"
+
 /// Total active pattern: an expression's immediate children, plus a function
 /// rebuilding the same variant around replacement children.
 let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     match expr with
     // -- Leaves: no expression children ------------------------------------
-    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero _ | IROpaqueExtent
+    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero _ | IRUninit _ | IROpaqueExtent
     | IRVirtualReverse _ | IRArity _ ->
         [], (function [] -> expr | _ -> badChildren "leaf")
     | IRRange (idxTys, offset) ->
@@ -2485,7 +2502,7 @@ let (|BinderShape|_|) (expr: IRExpr) : (IRExpr list * (Set<IRId> * IRExpr list) 
 let irNodeMayAbort (e: IRExpr) : bool =
     match e with
     // -- cannot abort on their own ------------------------------------------
-    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero _ | IROpaqueExtent
+    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero _ | IRUninit _ | IROpaqueExtent
     | IRArity _ | IRRange _ | IRVirtualReverse _ -> false
     // Integer `/` and `%` by zero abort (BL8013 in every lane, the arithmetic
     // contract of docs/formalism.md section 2.4). The node is judged without
@@ -2565,6 +2582,9 @@ let rec isFreshPoolFormWith (appFresh: IRExpr -> bool) (e: IRExpr) : bool =
     | IRCompute inner -> isFreshPoolFormWith appFresh inner
     | IRApplyCombinator _ | IRComposeApply _ -> true
     | IRArrayLit _ -> true
+    // An unfilled fresh pool, registered for freeing exactly like a
+    // materialized map (MatPool in the C++ lane, a tracked allocPool in LLVM).
+    | IRUninit _ -> true
     | IRMask _ | IRSort _ | IRUnique _ | IRIntersect _ | IRUnion _ -> true
     | IRTranspose _ | IRDecompact _ | IRStack _ | IRJoin _ | IRGram _ | IRGramApply _ | IRMatmul _ -> true
     // eigh / lu: BOTH pools each produces are fresh (`allocate<>` under derived
@@ -2686,6 +2706,7 @@ let substTypeInIRExpr (bindings: Map<int, IRType>) (expr: IRExpr) : IRExpr =
         | IRVar (id, ty) -> IRVar (id, st ty)
         | IRParam (n, i, ty) -> IRParam (n, i, st ty)
         | IRZero ty -> IRZero (st ty)
+        | IRUninit ty -> IRUninit (st ty)
         | IRApp (fn, args, retType) -> IRApp (fn, args, st retType)
         | IRArrayLit (elems, aty) ->
             IRArrayLit (elems, { aty with ElemType = st aty.ElemType })
@@ -2733,6 +2754,7 @@ let (|CarriedType|_|) (expr: IRExpr) : IRType option =
     | IRLit (IRLitString _) -> Some (IRTScalar ETString)
     | IRLit IRLitUnit -> Some IRTUnit
     | IRZero ty -> Some ty
+    | IRUninit ty -> Some ty
     | _ -> None
 
 /// Map from struct name to its fields, used by typeOf for IRFieldAccess
@@ -3581,7 +3603,7 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
     // typing rule -- and if one of these arms ever fires, a family pattern
     // was edited out of sync: fail loudly, never mistype.
     | IRVar _ | IRParam _ | IRApp _ | IRArrayLit _ | IRStructLit _
-    | IRApplyCombinator _ | IRComposeApply _ | IRLit _ | IRZero _ ->
+    | IRApplyCombinator _ | IRComposeApply _ | IRLit _ | IRZero _ | IRUninit _ ->
         unreachableTyping "CarriedType" expr
     | IRSort _ | IRArrayNegate _ | IRArrayConjugate _ | IRIntersect _
     | IRUnion _ | IRUnique _ | IRCompute _ | IRPure _ | IRLet _ | IRIf _

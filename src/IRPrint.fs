@@ -420,6 +420,7 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
     | IRArity (Some n, name) -> $"arity({name}={n})"
     | IRNth -> "nth"
     | IRZero _ -> "zero"
+    | IRUninit ty -> $"uninit<{ppIRType ty}>"
     | IRRank arr -> $"rank({pp arr})"
     | IRPolyIndex (pack, idx) -> $"{pp pack}[{pp idx}]"
     | IRPolyTail (pack, drop) -> $"{pp pack}[{drop}..]"

@@ -171,8 +171,118 @@ long long blade_f2i64(double x, const char *file, long long line) {
  * is undefined. */
 #define BLADE_POOL_ALIGN 64
 
-static void *blade_alloc_aligned(size_t bytes) {
+/* ---- the retained-block cache (bench/notes/microkernel-sketches-review.md M1)
+ *
+ * The twin of the C++ lane's `blade_pool` (nested_array_utilities.hpp): the
+ * UCRT heap returns a freed block of a few hundred KB to the OS, so the next
+ * pool of the same size demand-faults all its pages again -- a time-stepping
+ * recursive array allocates and frees the same row-sized temporaries every
+ * step (bench recur: 8 x 160 KB per step, ~29.5 faults per allocation). A few
+ * freed pools stay COMMITTED here and go back to the next request of the SAME
+ * rounded byte size. Nothing a program computes changes: a reused pool is as
+ * uninitialized as a fresh one (see the NO memset note below), and every cell
+ * the language promises a value for is an explicit store in the IR.
+ *
+ * Every pool carries a BLADE_POOL_HDR-byte header in front of the payload
+ * holding its rounded payload size, because `blade_free(void*)` has no size
+ * parameter. The header is a whole alignment unit, so the payload keeps the
+ * 64-byte alignment the `align 64` declaration promises; the TRUE base (the
+ * pointer the platform allocator returned) is always `payload - HDR`, and only
+ * pools this allocator made ever reach blade_free.
+ *
+ * Policy (measured, not semantics; review section 4.4): payloads of 16 KB ..
+ * 4 MB, at most 16 slots and 8 MB retained, oldest evicted first, exact-size
+ * matching, newest first. PLAIN GLOBALS, like the shadow stack above: this
+ * lane has no threads (every emitted function is `nosync`); a future thread
+ * runtime must make these _Thread_local. Retained blocks are freed by an
+ * atexit hook.
+ *
+ * OFF under BLADE_POOL_CACHE_OFF (Build.fs defines it for every memcheck
+ * build, and the shim object is keyed on its defines so the two never share
+ * an object) and under AddressSanitizer: a cached free is no free to a leak
+ * counter and would hide a use-after-free. Off, every free is a real free; the
+ * header layout is the same either way. */
+#define BLADE_POOL_HDR ((size_t)BLADE_POOL_ALIGN)
+
+#if defined(__SANITIZE_ADDRESS__)
+#  ifndef BLADE_POOL_CACHE_OFF
+#    define BLADE_POOL_CACHE_OFF 1
+#  endif
+#elif defined(__has_feature)
+#  if __has_feature(address_sanitizer)
+#    ifndef BLADE_POOL_CACHE_OFF
+#      define BLADE_POOL_CACHE_OFF 1
+#    endif
+#  endif
+#endif
+#if defined(BLADE_POOL_CACHE_OFF) && BLADE_POOL_CACHE_OFF
+#  define BLADE_POOL_CACHE_ON 0
+#else
+#  define BLADE_POOL_CACHE_ON 1
+#endif
+
+#define BLADE_CACHE_MIN      ((size_t)16 << 10)
+#define BLADE_CACHE_MAXBLOCK ((size_t)4 << 20)
+#define BLADE_CACHE_BUDGET   ((size_t)8 << 20)
+#define BLADE_CACHE_SLOTS    16
+
+#if defined(BLADE_POOL_CACHE_STATS) && BLADE_POOL_CACHE_STATS
+/* Test builds only: fresh (eligible miss) / reused / retained / evicted. */
+static long long g_pool_stats[4];
+#  define BLADE_POOL_COUNT(k) (g_pool_stats[(k)]++)
+/* out[0..3] = fresh, reused, retained, evicted; out[4] = cache on (1) / off (0). */
+void blade_pool_cache_stats(long long *out) {
+    int k;
+    for (k = 0; k < 4; k++) out[k] = g_pool_stats[k];
+    out[4] = BLADE_POOL_CACHE_ON;
+}
+#else
+#  define BLADE_POOL_COUNT(k) ((void)0)
+#endif
+
+static void *blade_raw_alloc(size_t bytes) {
     void *p = NULL;
+#if defined(_WIN32)
+    p = _aligned_malloc(bytes, (size_t)BLADE_POOL_ALIGN);
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+    p = aligned_alloc((size_t)BLADE_POOL_ALIGN, bytes);
+#else
+    if (posix_memalign(&p, (size_t)BLADE_POOL_ALIGN, bytes) != 0) p = NULL;
+#endif
+    return p;
+}
+
+static void blade_raw_free(void *raw) {
+#if defined(_WIN32)
+    _aligned_free(raw);
+#else
+    free(raw);
+#endif
+}
+
+#if BLADE_POOL_CACHE_ON
+static char  *g_cache_raw[BLADE_CACHE_SLOTS];   /* true bases (header included) */
+static size_t g_cache_b[BLADE_CACHE_SLOTS];     /* rounded payload sizes */
+static int    g_cache_n;
+static size_t g_cache_bytes;
+static int    g_cache_hooked;
+
+static void blade_cache_evict_oldest(void) {
+    blade_raw_free(g_cache_raw[0]);
+    g_cache_bytes -= g_cache_b[0];
+    memmove(&g_cache_raw[0], &g_cache_raw[1], (size_t)(g_cache_n - 1) * sizeof(char *));
+    memmove(&g_cache_b[0], &g_cache_b[1], (size_t)(g_cache_n - 1) * sizeof(size_t));
+    g_cache_n--;
+    BLADE_POOL_COUNT(3);
+}
+
+static void blade_cache_flush(void) {
+    while (g_cache_n > 0) blade_cache_evict_oldest();
+}
+#endif
+
+static void *blade_alloc_aligned(size_t bytes) {
+    char *raw;
     /* A zero-cell pool still gets storage: the emitted code may hold the
      * pointer even when no loop iteration ever dereferences it, and a NULL
      * would make that harmless hold undefined. */
@@ -181,23 +291,46 @@ static void *blade_alloc_aligned(size_t bytes) {
      * multiple of the alignment, and rounding is harmless for the others. */
     size_t rounded = (want + (size_t)(BLADE_POOL_ALIGN - 1))
                      & ~(size_t)(BLADE_POOL_ALIGN - 1);
-    if (rounded < want) blade_panic("error[BL8006]: allocation size overflow");
-#if defined(_WIN32)
-    p = _aligned_malloc(rounded, (size_t)BLADE_POOL_ALIGN);
-#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
-    p = aligned_alloc((size_t)BLADE_POOL_ALIGN, rounded);
+    if (rounded < want || rounded + BLADE_POOL_HDR < rounded)
+        blade_panic("error[BL8006]: allocation size overflow");
+#if BLADE_POOL_CACHE_ON
+    if (rounded >= BLADE_CACHE_MIN && rounded <= BLADE_CACHE_MAXBLOCK) {
+        int k;
+        for (k = g_cache_n - 1; k >= 0; k--) {          /* newest first: the hottest pages */
+            if (g_cache_b[k] == rounded) {
+                raw = g_cache_raw[k];
+                memmove(&g_cache_raw[k], &g_cache_raw[k + 1], (size_t)(g_cache_n - 1 - k) * sizeof(char *));
+                memmove(&g_cache_b[k], &g_cache_b[k + 1], (size_t)(g_cache_n - 1 - k) * sizeof(size_t));
+                g_cache_n--;
+                g_cache_bytes -= rounded;
+                BLADE_POOL_COUNT(1);
+                return raw + BLADE_POOL_HDR;
+            }
+        }
+        BLADE_POOL_COUNT(0);
+    }
 #else
-    if (posix_memalign(&p, (size_t)BLADE_POOL_ALIGN, rounded) != 0) p = NULL;
+    if (rounded >= BLADE_CACHE_MIN && rounded <= BLADE_CACHE_MAXBLOCK) BLADE_POOL_COUNT(0);
 #endif
-    if (!p) blade_panic("error[BL8006]: out of memory");
+    raw = (char *)blade_raw_alloc(rounded + BLADE_POOL_HDR);
+#if BLADE_POOL_CACHE_ON
+    if (!raw && g_cache_n > 0) {
+        /* Out of memory with pools still retained: give them back, retry once. */
+        blade_cache_flush();
+        raw = (char *)blade_raw_alloc(rounded + BLADE_POOL_HDR);
+    }
+#endif
+    if (!raw) blade_panic("error[BL8006]: out of memory");
+    *(size_t *)raw = rounded;
     /* NO memset. Zeros the language promises (a recursive array's unbuilt
      * prefix, guard's else arm) are explicit stores in the emitted IR -- the
      * same contract the C++ lane's uninitialized `new T[]` pools live by. A
      * blanket zero here was one full write pass per pool inside the timed
      * region, and the emitter's fill was about to overwrite every cell of it
      * (every allocPool caller in src/EmitLlvm.fs fills the whole pool before
-     * any read; see the invariant note on allocPool). */
-    return p;
+     * any read; see the invariant note on allocPool). A pool handed back by
+     * the cache above is exactly as uninitialized, for the same reason. */
+    return raw + BLADE_POOL_HDR;
 }
 
 /* `n * elemBytes`, with the multiplication checked: an extent product that
@@ -233,12 +366,26 @@ void *blade_alloc_cells(long long n, long long cellBytes) {
  * load a tracking slot that holds null whenever the allocation's branch was
  * not taken this execution, or the pool escaped its scope (`keepPool`). */
 void blade_free(void *p) {
+    char *raw;
     if (!p) return;
-#if defined(_WIN32)
-    _aligned_free(p);
-#else
-    free(p);
+    raw = (char *)p - BLADE_POOL_HDR;
+#if BLADE_POOL_CACHE_ON
+    {
+        size_t b = *(size_t *)raw;
+        if (b >= BLADE_CACHE_MIN && b <= BLADE_CACHE_MAXBLOCK) {
+            if (!g_cache_hooked) { g_cache_hooked = 1; atexit(blade_cache_flush); }
+            while (g_cache_n > 0 && (g_cache_n == BLADE_CACHE_SLOTS || g_cache_bytes + b > BLADE_CACHE_BUDGET))
+                blade_cache_evict_oldest();
+            g_cache_raw[g_cache_n] = raw;
+            g_cache_b[g_cache_n] = b;
+            g_cache_n++;
+            g_cache_bytes += b;
+            BLADE_POOL_COUNT(2);
+            return;
+        }
+    }
 #endif
+    blade_raw_free(raw);
 }
 
 /* ---- clock ------------------------------------------------------------ */

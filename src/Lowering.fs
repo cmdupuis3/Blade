@@ -1248,7 +1248,19 @@ and lowerTypedBlock env (stmts: TypedStmt list) (finalExpr: TypedExpr option) : 
     | stmt :: rest, _ ->
         match stmt with
         | TStmtLet binding ->
-            let value = lowerBoundValue env binding.Name binding.Value
+            let value =
+                match binding.Type with
+                // A let-rec buffer the desugar proved needs no zero fill
+                // (`IR.recUninitBufferPrefix`, formalism 7.5): bind the
+                // UNFILLED pool instead of lowering the checked zero former.
+                // The former was still type-checked against the declared
+                // annotation, so the binding's type is the annotation's.
+                | ArrayElem at when binding.Name.StartsWith Blade.IR.recUninitBufferPrefix
+                                    && at.IndexTypes |> List.forall (fun ix ->
+                                           ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank = 1
+                                           && (Blade.IRPrint.tryEvalIntIR ix.Extent).IsSome) ->
+                    IRUninit binding.Type
+                | _ -> lowerBoundValue env binding.Name binding.Value
             // A named, recursive lambda binding (`let const f = lambda ... f
             // ...`, incl. the nested-`function` desugar) lifts to a
             // module-level callable whose id IS binding.VarId, so `f`

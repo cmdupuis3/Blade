@@ -2075,6 +2075,140 @@ let runLlvmBench () : int =
     if blocks |> List.sumBy (_.Failed) = 0 then 0 else 1
 
 // ---------------------------------------------------------------------------
+// Block: the runtime shim's build identity and its retained-block cache
+// (bench/notes/microkernel-sketches-review.md M0 + M1)
+// ---------------------------------------------------------------------------
+
+/// A C driver over the shim's allocator ABI. It reads the cache counters
+/// (`blade_pool_cache_stats`, compiled in only under BLADE_POOL_CACHE_STATS)
+/// and asserts per mode: with the cache ON a released pool comes back to the
+/// next request of the same size and a recur-shaped workload (300 steps x 8
+/// rows of 20011 doubles) makes at most 8 fresh allocations; OFF, every
+/// allocation is fresh. Both modes: 64-byte payloads, null-safe free,
+/// zero-cell pools, the size band, the budget.
+let private shimPoolDriver = """
+#include <stdio.h>
+void *blade_alloc_cells(long long n, long long cellBytes);
+void blade_free(void *p);
+void blade_pool_cache_stats(long long *out);
+static int pass = 0, total = 0;
+static void check(const char *name, int ok) {
+    total++;
+    if (ok) { pass++; printf("  [PASS]: %s\n", name); } else printf("  [FAIL]: %s\n", name);
+}
+static long long st(int k) { long long s[5]; blade_pool_cache_stats(s); return s[k]; }
+int main(void) {
+    long long s0[5]; blade_pool_cache_stats(s0);
+    int on = (int)s0[4];
+    printf("  [info]: cache %s\n", on ? "on" : "off");
+    blade_free((void *)0);
+    check("free_null_is_noop", 1);
+    void *z = blade_alloc_cells(0, 8);
+    check("zero_cell_pool_nonnull_aligned", z != 0 && ((unsigned long long)z & 63u) == 0);
+    blade_free(z);
+    void *a = blade_alloc_cells(3000, 8);
+    check("payload_aligned_64", ((unsigned long long)a & 63u) == 0);
+    ((double *)a)[2999] = 1.0;
+    blade_free(a);
+    long long r0 = st(1);
+    void *b = blade_alloc_cells(3000, 8);
+    if (on) check("same_size_reuses_released_pool", b == a && st(1) == r0 + 1);
+    else    check("off_never_reuses", st(1) == 0);
+    blade_free(b);
+    long long t0 = st(2);
+    void *small = blade_alloc_cells(100, 8);
+    void *huge = blade_alloc_cells(600000, 8);
+    blade_free(small); blade_free(huge);
+    check("small_and_huge_not_retained", st(2) == t0);
+    void *x = blade_alloc_cells(393216, 8), *y = blade_alloc_cells(393216, 8), *w = blade_alloc_cells(393216, 8);
+    long long e0 = st(3);
+    blade_free(x); blade_free(y); blade_free(w);
+    /* the 24 KB pool above is still retained too: the third 3 MB block evicts
+     * it AND the first 3 MB block to stay within the 8 MB budget */
+    if (on) check("budget_evicts_oldest", st(3) == e0 + 2);
+    long long f0 = st(0), u0 = st(1);
+    double sum = 0.0;
+    int step, k, i;
+    for (step = 0; step < 300; step++) {
+        double *t[8];
+        for (k = 0; k < 8; k++) {
+            t[k] = (double *)blade_alloc_cells(20011, 8);
+            for (i = 0; i < 20011; i++) t[k][i] = (double)(step + k);
+        }
+        for (k = 0; k < 8; k++) { sum += t[k][20010]; blade_free(t[k]); }
+    }
+    long long fresh = st(0) - f0, reused = st(1) - u0;
+    printf("  [info]: recur-shaped tripwire: fresh=%lld reused=%lld (of 2400 allocations)\n", fresh, reused);
+    if (on) check("recur_tripwire_fresh_le_8", fresh <= 8 && reused >= 2392);
+    else    check("recur_tripwire_off_all_fresh", fresh == 2400 && reused == 0);
+    check("recur_values", sum == (double)(8 * (299 * 300 / 2) + 300 * 28));
+    printf("SHIM POOL TESTS: %d/%d passed\n", pass, total);
+    return pass == total ? 0 : 1;
+}
+"""
+
+let runLlvmRuntimeShimTests () : BlockResult =
+    printHeader "LLVM Runtime Shim (object identity, retained-block cache)"
+    let block = "LLVM Runtime Shim"
+    match Build.resolveClang () with
+    | None ->
+        printfn "Skipped: no clang found (set BLADE_LLVM_CLANG, or install C:\\msys64\\clang64)."
+        printFooter block [ "0 passed"; "0 failed"; "1 skipped" ]
+        { Block = block; Passed = 0; Failed = 0; Skipped = 1; FailedNames = [] }
+    | Some clang ->
+    let dir = Path.GetFullPath(Path.Combine(outputDir, "llvm_shim_identity"))
+    (try if Directory.Exists dir then Directory.Delete(dir, true) with _ -> ())
+    Directory.CreateDirectory dir |> ignore
+    EmitLlvm.deployShim dir
+    let mutable passed = 0
+    let mutable failed = 0
+    let mutable failedNames = []
+    let record (name: string) (ok: bool) (detail: string) =
+        if ok then
+            passed <- passed + 1
+            resultLine Pass name ""
+        else
+            failed <- failed + 1
+            failedNames <- failedNames @ [ name ]
+            resultLine Fail name detail
+    // M0: a normal, a memcheck, then a normal build of the shim in ONE
+    // directory. The memcheck object must be its own (the cache compiled
+    // out), and the second normal build must reuse the first's object rather
+    // than recompile or pick up the memcheck one.
+    let build memcheck =
+        withEnv [ "BLADE_MEMCHECK", (if memcheck then Some "1" else None) ] (fun () -> Build.buildLlvmShim clang dir)
+    match build false, build true with
+    | Ok (o1, id1), Ok (o2, id2) ->
+        let t1 = File.GetLastWriteTimeUtc o1
+        record "memcheck_shim_is_a_distinct_object" (o1 <> o2 && id1 <> id2 && File.Exists o1 && File.Exists o2)
+               $"normal {o1} / memcheck {o2}"
+        (match build false with
+         | Ok (o3, id3) ->
+             record "same_configuration_reuses_its_object" (o3 = o1 && id3 = id1 && File.GetLastWriteTimeUtc o3 = t1)
+                    $"rebuilt or switched object: {o3}"
+         | Error e -> record "same_configuration_reuses_its_object" false e)
+    | r1, r2 ->
+        let err = function Error (e: string) -> e | Ok _ -> "ok"
+        record "memcheck_shim_is_a_distinct_object" false ($"{err r1} / {err r2}")
+    // M1: the allocator itself, both modes, through the real shim source.
+    let driver = Path.Combine(dir, "shim_pool_driver.c")
+    File.WriteAllText(driver, shimPoolDriver)
+    let shimSrc = Path.Combine(dir, EmitLlvm.shimFileName)
+    for (mode, defines) in [ "on", "-DBLADE_POOL_CACHE_STATS=1"; "off", "-DBLADE_POOL_CACHE_STATS=1 -DBLADE_POOL_CACHE_OFF=1" ] do
+        let exe = Path.Combine(dir, $"shim_pool_{mode}{Platforms.exeExtension}")
+        match Build.runProc clang ($"-O2 {defines} -o \"{exe}\" \"{driver}\" \"{shimSrc}\"") 120000 with
+        | Error e -> record ($"shim_pool_cache_{mode}") false ($"driver compile failed: {e}")
+        | Ok () ->
+            match runExeCapture exe with
+            | Error e -> record ($"shim_pool_cache_{mode}") false e
+            | Ok (code, out, _) ->
+                printf "%s" out
+                let ok = code = 0 && out.Contains "SHIM POOL TESTS:" && not (out.Contains "[FAIL]")
+                record ($"shim_pool_cache_{mode}") ok ($"exit {code}")
+    printFooter block [ $"{passed} passed"; $"{failed} failed"; "0 skipped" ]
+    { Block = block; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }
+
+// ---------------------------------------------------------------------------
 // Entry points for `blade test llvm [category]`
 // ---------------------------------------------------------------------------
 
@@ -2089,6 +2223,7 @@ let runLlvmTests () : int =
           runLlvmFactTests ()
           runSimplexAgreementTests ()
           runLlvmSimplexGate ()
+          runLlvmRuntimeShimTests ()
           runLlvmDifferentialTests () ]
     printGrandTotal blocks
     if blocks |> List.sumBy (_.Failed) = 0 then 0 else 1
@@ -2099,7 +2234,7 @@ let runLlvmTests () : int =
 /// must be added here too -- a word missing here is refused before it runs
 /// (CI's `test llvm goldens` step was, once).
 let llvmCategoryWords =
-    [ "all"; "corpus"; "goldens"; "pins"; "facts"; "blocks"; "simplex"; "bricks"; "bench" ]
+    [ "all"; "corpus"; "goldens"; "pins"; "facts"; "blocks"; "simplex"; "bricks"; "bench"; "shim" ]
 
 let isLlvmCategoryWord (cat: string) =
     List.contains (cat.ToLower().TrimStart('-')) llvmCategoryWords
@@ -2138,6 +2273,9 @@ let runLlvmCategory (cat: string) : int =
     | "facts" ->
         let f = runLlvmFactTests ()
         if f.Failed = 0 then 0 else 1
+    | "shim" ->
+        let s = runLlvmRuntimeShimTests ()
+        if s.Failed = 0 then 0 else 1
     | "blocks" | "simplex" | "bricks" ->
         let a = runSimplexAgreementTests ()
         let g = runLlvmSimplexGate ()
