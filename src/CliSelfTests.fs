@@ -430,11 +430,16 @@ let runCliSmokeTests () : TH.BlockResult =
     let selfExe =
         [ Path.Combine(AppContext.BaseDirectory, "Blade.exe"); Path.Combine(AppContext.BaseDirectory, "Blade") ]
         |> List.tryFind File.Exists
-    let spawn (cwd: string) (args: string list) : int * string * string =
+    let rec spawn (cwd: string) (args: string list) : int * string * string = spawnWith [] cwd args
+    /// `spawn` with extra environment for the CHILD only (null unsets), so a
+    /// knob a case needs never leaks into this process's other blocks.
+    and spawnWith (env: (string * string) list) (cwd: string) (args: string list) : int * string * string =
         match selfExe with
         | None -> (-1, "", "no Blade executable beside the test assembly")
         | Some exe ->
             let psi = System.Diagnostics.ProcessStartInfo(exe)
+            for (k, v) in env do
+                if isNull v then psi.Environment.Remove k |> ignore else psi.Environment.[k] <- v
             for a in args do psi.ArgumentList.Add a
             psi.WorkingDirectory <- cwd
             psi.RedirectStandardOutput <- true
@@ -508,6 +513,41 @@ let runCliSmokeTests () : TH.BlockResult =
                 (code = 0 && out.Contains "\"rule\":\"symmetric-storage\"" && out.Contains "\"outcome\":\"applied\""
                  && out.Contains "\"version\":1" && out.Contains "\"evidence\":[" && out.Contains "\"inputs\":")
                 (out + err)
+            // LANE-CORRECT PLAN (bench gap G23 / G11). The same gram with the
+            // BLAS gate forced on routes to syrk in the C++ lane; with
+            // BLADE_LLVM=1 the LLVM lane takes the program, links no OpenBLAS
+            // and opens no thread team, so the plan must say declined for both
+            // -- never `[blas-routing v1] ...: applied`. The C++ twin (same
+            // knobs minus BLADE_LLVM) is the control that keeps it non-vacuous.
+            File.WriteAllText(Path.Combine(dir, "lane.blade"),
+                "type V = Idx<7>\ntype S = Idx<11>\n"
+                + "let x = method_for(range<V>, range<S>) <@> lambda(i, s) where omp(i: 1) -> Float64(i * 11 + s) * 0.25 |> compute\n"
+                + "let g = method_for(x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>) where comm(a, b) -> prodsum(a, b) |> compute\n")
+            let laneEnv llvm = [ ("BLADE_BLAS", "1"); ("BLADE_LLVM", llvm); ("BLADE_OMP_THREADS", null); ("BLADE_FP_REPRO", null) ]
+            let (code, out, err) = spawnWith (laneEnv null) dir [ "plan"; "lane.blade" ]
+            recordCase "cli: `plan` (C++ lane) reports the BLAS route and the thread pragma applied"
+                (code = 0 && out.Contains "[blas-routing v1] g" && out.Contains ": applied [Syrk" && not (out.Contains "lane: ")
+                 && out.Contains "[omp v1] x" && not (out.Contains "the LLVM lane"))
+                (out + err)
+            if (Blade.Build.resolveClang ()).IsNone then
+                record "cli: `plan` under BLADE_LLVM=1 reports the LLVM lane's decisions" TH.Skip "no clang (the LLVM lane is unavailable)"
+            else
+                let (code, out, err) = spawnWith (laneEnv "1") dir [ "plan"; "lane.blade" ]
+                let lines = out.Split('\n') |> Array.map (_.Trim())
+                let routeLines = lines |> Array.filter (fun (l: string) -> l.StartsWith "[blas-routing v1]")
+                let ompLines = lines |> Array.filter (fun (l: string) -> l.StartsWith "[omp v1]")
+                recordCase "cli: `plan` under BLADE_LLVM=1 reports the LLVM lane's decisions"
+                    (code = 0 && out.Contains "lane: LLVM (BLADE_LLVM=1)"
+                     && routeLines.Length > 0
+                     && routeLines |> Array.forall (fun l -> l.Contains "declined -- the LLVM lane has no BLAS/LAPACK route")
+                     && ompLines.Length > 0
+                     && ompLines |> Array.forall (fun l ->
+                            l.Contains "declined -- the LLVM lane has no thread-level form"
+                            && l.Contains "[omp] requested but emitted serial"))
+                    (out + err)
+                let (code, out, err) = spawnWith (laneEnv "1") dir [ "plan"; "lane.blade"; "--json" ]
+                recordCase "cli: `plan --json` under BLADE_LLVM=1 names the lane"
+                    (code = 0 && out.Contains "\"lane\":\"llvm\"") (out + err)
         finally
             try Directory.Delete(dir, true) with _ -> ()
     if not capabilities.Value.HasGpp || selfExe.IsNone then

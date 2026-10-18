@@ -5629,6 +5629,41 @@ let private resolveFrames (c: Ctx) (bodies: string list list) : string list list
         c.Globals.Add "@blade_frame_stack = external global [65 x ptr]"
     resolved
 
+// ---------------------------------------------------------------------------
+// The omp census for this lane (bench gap G11)
+//
+// The lane has no thread runtime by design (nosync, no atomics, the shim has
+// no threads), so EVERY `where omp` licence compiles serial here. The
+// "a dropped omp is never silent" invariant still holds: the threading half is
+// reported with the same census phrase the C++ lane uses
+// (`[omp] requested but emitted serial: <reason>`) -- as a comment in the
+// emitted `.ll`, in `blade plan`, and on the build's stderr. The reordering
+// half of the licence is what the lane spends (`foldFmfLicensed` -> `reassoc
+// nsz` on the accumulator chain), except in the REPRO build, which keeps every
+// fold serial in both lanes.
+// ---------------------------------------------------------------------------
+
+/// The reason half of the lane's census line, for the current build.
+let ompCensusReason () : string =
+    if Blade.CodeGenState.fpReassocEnabled () then
+        "the LLVM lane has no thread-level form; the licence is honoured as fold reassociation"
+    else
+        "the LLVM lane has no thread-level form, and BLADE_FP_REPRO=1 keeps every fold serial (no reassociation either)"
+
+/// The full census phrase (same spelling as the C++ lane's
+/// `ompSuppressedPhrase`, which is what lets one grep cover both lanes).
+let ompCensusPhrase () : string =
+    $"[omp] requested but emitted serial: {(ompCensusReason ())}"
+
+/// The callables of `program` that carry an `omp` request, by the name the
+/// program wrote (a lambda's is `lambda in <scope>`), deduplicated in order.
+let ompRequestedKernels (program: IRProgram) : string list =
+    program.Modules
+    |> List.collect (fun m -> m.Functions)
+    |> List.filter (fun f -> f.IsOmpParallel)
+    |> List.map (fun f -> if String.IsNullOrEmpty f.SourceName then f.Name else f.SourceName)
+    |> List.distinct
+
 /// Emit the whole program as textual LLVM IR, or refuse it by name.
 ///
 /// `programName` is the label the timing line carries -- the C++ lane uses the
@@ -5685,6 +5720,11 @@ let tryEmitProgramNamed (programName: string) (program: IRProgram) : Result<stri
             put "; `reassoc nsz` ONLY on licensed accumulator chains (off under"
             put "; BLADE_FP_REPRO=1), `contract` per instruction unless"
             put "; BLADE_FP_CONTRACT=off -- the C++ lane's default regime."
+            // The omp census (G11): one line per kernel that asked for omp,
+            // emitted only when one did, so a program without a licence keeps
+            // its exact text.
+            for k in ompRequestedKernels program do
+                put $"; {(ompCensusPhrase ())} ({k})"
             put ""
             for g in c.Globals do put g
             if c.Globals.Count > 0 then put ""

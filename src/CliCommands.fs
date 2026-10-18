@@ -414,6 +414,14 @@ let compileArtifact (filePath: string) (verbose: bool) (strictPins: bool) : Resu
                     | Error reason -> fallback reason
                     | Ok ll ->
                         mark "emit-llvm"
+                        // The omp census (G11): the lane has no thread runtime,
+                        // so every `where omp` licence compiled serial. Printed
+                        // unprompted, like the refusal notice above -- "you
+                        // asked and did not get it" is never a --verbose detail.
+                        match EmitLlvm.ompRequestedKernels ir with
+                        | [] -> ()
+                        | ks ->
+                            eprintfn "[blade] llvm lane: %s (%s)" (EmitLlvm.ompCensusPhrase ()) (String.concat ", " ks)
                         Ok (LlvmArtifact ll)
 
 // ---------------------------------------------------------------------------
@@ -942,6 +950,48 @@ let replLoop () : int =
 /// had one, applied or declined with the first reason, and the evidence
 /// the pass discharged. Diagnostic data only -- nothing here is a licence
 /// to branch on an optimizer outcome from Blade source.
+/// One emission decision, re-read for the LLVM lane (bench gap G23).
+///
+/// `blade plan` records its emission decisions by generating the C++ (the
+/// only back end that records them). When BLADE_LLVM is on and the LLVM lane
+/// takes the program, several of those are C++-ONLY routes the executable will
+/// not contain -- the plan used to print `[blas-routing v1] applied` for a
+/// program whose LLVM executable links no OpenBLAS. Each such record is
+/// re-stated for the lane that will emit: declined with the lane's reason, the
+/// C++ lane's own verdict kept as evidence. Decisions both lanes share (the
+/// optimizer's, storage and iteration shape) pass through unchanged.
+let internal llvmLaneDecision (d: Blade.Effects.Decision) : Blade.Effects.Decision =
+    let cppVerdict =
+        match d.Outcome with
+        | Blade.Effects.Applied -> "C++ lane: applied"
+        | Blade.Effects.Declined why -> $"C++ lane: declined -- {why}"
+    let declined (why: string) (extra: string list) =
+        { d with Outcome = Blade.Effects.Declined why; Evidence = extra @ (cppVerdict :: d.Evidence) }
+    match d.Rule with
+    | "blas-routing" ->
+        declined "the LLVM lane has no BLAS/LAPACK route (its executable links no OpenBLAS or cuBLAS): Blade's own loops run" []
+    | "omp" ->
+        // The census phrase tag, as every C++ decline record carries it.
+        declined (EmitLlvm.ompCensusReason ()) [ "[omp] requested but emitted serial" ]
+    | "fold-form" ->
+        // The C++ fold forms (simd reduction, K lanes, thread team, row jam,
+        // BLAS dot) are that lane's. The LLVM lane folds with ONE accumulator
+        // chain whose adds carry `reassoc nsz` when the fold is licensed
+        // (`foldFmfLicensed`): exactly the folds the C++ lane did not leave
+        // serial for want of a licence or under the repro build.
+        let cppForm = d.Evidence |> List.tryHead |> Option.defaultValue ""
+        if cppForm.StartsWith "fold form: serial (no reorder licence"
+           || cppForm.StartsWith "fold form: serial (repro" then
+            declined "the fold keeps its serial association in the LLVM lane too" []
+        else
+            { d with
+                Outcome = Blade.Effects.Applied
+                Evidence = [ "fold form: one accumulator chain with `reassoc nsz` (LLVM lane; the vectorizer picks the lanes)"
+                             $"C++ lane {cppForm}" ] @ List.tail (if d.Evidence.IsEmpty then [ "" ] else d.Evidence) }
+    | "microkernel" | "tile-cache" when d.Outcome = Blade.Effects.Applied ->
+        declined $"C++-lane {d.Rule}: the LLVM lane emits its own loop nest" []
+    | _ -> d
+
 let planFile (filePath: string) (json: bool) : int =
     if not (File.Exists filePath) then
         reportFailure $"File not found: {filePath}"
@@ -968,21 +1018,52 @@ let planFile (filePath: string) (json: bool) : int =
             // BLADE_OMP_THREADS, BLADE_TILE_CACHE, ...).
             // A plan without its emission half says so (stderr), rather than
             // passing for a program that simply made no emission decisions.
-            (match Blade.IRValidate.validateIR program with
-             | Ok ir ->
-                 (try
-                     CodeGen.genSelfContainedProgramFromIR ir (Path.GetFileNameWithoutExtension filePath) |> ignore
-                     CodeGen.takeUnhandledIRNodeDiagnostics () |> ignore
-                  with ex -> eprintfn "plan: code generation failed (%s); emission decisions are missing" ex.Message)
-             | Error errs ->
-                 eprintfn "plan: IR validation failed (%s); emission decisions are missing" (String.concat "; " errs))
+            let validated =
+                match Blade.IRValidate.validateIR program with
+                | Ok ir ->
+                    (try
+                        CodeGen.genSelfContainedProgramFromIR ir (Path.GetFileNameWithoutExtension filePath) |> ignore
+                        CodeGen.takeUnhandledIRNodeDiagnostics () |> ignore
+                     with ex -> eprintfn "plan: code generation failed (%s); emission decisions are missing" ex.Message)
+                    Some ir
+                | Error errs ->
+                    eprintfn "plan: IR validation failed (%s); emission decisions are missing" (String.concat "; " errs)
+                    None
             let ds = Blade.Effects.Decisions.drain ()
+            // LANE-CORRECT PLAN (bench gap G23). With BLADE_LLVM on, the plan
+            // asks the same question `compileArtifact` asks -- does the LLVM
+            // lane take this program? -- and, when it does, re-states the C++-
+            // only routes for the lane that will actually emit. A refusal (or
+            // no clang) means the C++ lane builds it, and the plan says so.
+            // BLADE_LLVM unset: not consulted, the plan text is unchanged.
+            let lane, ds =
+                if not (Build.llvmEnabled ()) then None, ds
+                else
+                    let verdict =
+                        match Build.resolveClang (), validated with
+                        | None, _ -> Error "no clang found (set BLADE_LLVM_CLANG)"
+                        | _, None -> Error "IR validation failed"
+                        | Some _, Some ir ->
+                            (try EmitLlvm.tryEmitProgramNamed (Path.GetFileNameWithoutExtension filePath) ir
+                             with ex -> Error ex.Message)
+                    // The LLVM emitter records nothing the plan describes.
+                    Blade.Effects.Decisions.drain () |> ignore
+                    match verdict with
+                    | Ok _ -> Some ("llvm", "LLVM (BLADE_LLVM=1): C++-only routes below are reported for this lane"), List.map llvmLaneDecision ds
+                    | Error reason -> Some ("cpp", $"C++ (BLADE_LLVM=1, but the LLVM lane refused: {reason})"), ds
             if json then
                 let js = Blade.Effects.Decisions.renderJson filePath ds
+                let laneJs =
+                    match lane with
+                    | Some (key, _) -> $",\"lane\":\"{key}\""
+                    | None -> ""
                 // `{"file":..,"decisions":[..]}` -> add the manifest as a sibling.
-                printfn "%s" (js.Substring(0, js.Length - 1) + ",\"inputs\":" + Blade.RunRecord.renderJson inputs + "}")
+                printfn "%s" (js.Substring(0, js.Length - 1) + laneJs + ",\"inputs\":" + Blade.RunRecord.renderJson inputs + "}")
             else
                 printfn "plan: %s -- %d optimization decision(s)" filePath ds.Length
+                match lane with
+                | Some (_, text) -> printfn "lane: %s" text
+                | None -> ()
                 for d in ds do
                     printfn "  %s" (Blade.Effects.Decisions.render d)
                 printfn "inputs: %d (identity policy: `content` = folded at compile time, hashed; `version` = read at run time, size + mtime observed -- BLADE_RUN_RECORD=<path> writes the run record)" inputs.Length
