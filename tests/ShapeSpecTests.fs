@@ -89,7 +89,8 @@ let private emissionCases : (string * (string * string) list * string list * str
       ("cross_module_call_specializes_defining_modules_function",
        [ ("Shapes", "module Shapes\n" + sumFn "vsum")
          ("Main", "module Main\nimport Shapes\n" + vec5 + "let s = Shapes.vsum(w5)\n") ],
-       [ "vsum_shape_n5"; "__ri < 5" ],
+       // `__rn = 5`: the baked bound of the default K-lane fold form.
+       [ "vsum_shape_n5"; "__rn = 5" ],
        [])
       // Two importers, two shapes, two copies — and the generic copy survives
       // for anything that pins nothing.
@@ -149,7 +150,7 @@ let private emissionCases : (string * (string * string) list * string list * str
           + vec5 + "let s = rec_sum(w5, 2)\n") ],
        [ "rec_sum_shape_n5"
          // the baked bound, and the recursive call rewritten to the spec
-         "__ri < 5"; "rec_sum_shape_n5(a," ],
+         "__rn = 5"; "rec_sum_shape_n5(a," ],
        [])
       // Self-recursive and extent-CHANGING: the recursive call hands over a
       // DIFFERENT array, so the signature is not closed and chasing it would

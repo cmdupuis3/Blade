@@ -1009,14 +1009,16 @@ let rec flattenAssocOp (mode: IRBinOpMode) (op: IRBinOp) (expr: IRExpr) : IRExpr
 ///   * an associative `+` / `*` chain is FLATTENED (operands sorted across the
 ///     whole chain) only where reassociation is exact or licensed: integer and
 ///     Bool chains (two's-complement wrap is associative) always, float chains
-///     only under BLADE_FP_REASSOC. `(x + y) + z` and `x + (y + z)` are
+///     only under an EXPLICIT BLADE_FP_REASSOC=1 (`fpReassocExplicitOptIn`:
+///     this merge is not a source licence, so the 2026-10-17 fast default does
+///     not reach it). `(x + y) + z` and `x + (y + z)` are
 ///     different float values, so merging them unlicensed would be exactly the
 ///     reassociation that gate exists to withhold.
 ///
 /// Shared by codegen, the interpreter (Interp/Loops.fs) and the LLVM emitter,
 /// so every lane computes the same term plan by construction.
 let canonicalKey (nameMap: Map<int, string>) (expr: IRExpr) : IRExpr =
-    let reassoc = fpReassocEnabled ()
+    let reassoc = fpReassocExplicitOptIn ()
     let rec exactScalar (t: IRType) =
         match t with
         | IRTScalar (ETInt32 | ETInt64 | ETBool) -> true
@@ -1300,8 +1302,12 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     // (`ompThreadEmissionEnabled` guards the FoldChunk half for the same reason
     // it guards `pragmaLevel`: with the knob off no team is opened anywhere in
     // this nest, so there is nothing for the coverage instrumentation to see.)
+    // The REPRO build (BLADE_FP_REPRO=1) drops the chunk plan too: Path B's
+    // per-thread partials reassociate the fold, and that build keeps the serial
+    // association of every fold. Same consumer-side drop as the threads knob.
+    let foldChunkLive = codeGen.FoldChunk.IsSome && ompThreadEmissionEnabled () && fpReassocEnabled ()
     let outerIsParallel =
-        pragmaLevel.IsSome || (codeGen.FoldChunk.IsSome && ompThreadEmissionEnabled ())
+        pragmaLevel.IsSome || foldChunkLive
     // Path B: a comm-licensed fold nest. `pragmaLevel` stays None on
     // purpose -- a `parallel for` over the outer level would race on the shared
     // accumulator, which is exactly why folds were blanket-suppressed. What
@@ -1316,7 +1322,7 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     // `chunkable`) deliberately still SETS the plan, because `FoldChunk.IsSome`
     // is read elsewhere as a FACT about the fold -- see the note there.
     // Without the plan the nest is the ordinary serial fold.
-    let foldChunk = if ompThreadEmissionEnabled () then codeGen.FoldChunk else None
+    let foldChunk = if foldChunkLive then codeGen.FoldChunk else None
     let fcTag = match foldChunk with Some p -> p.Tag | None -> ""
     let fcRn = $"__rn_{fcTag}"
     let fcT = $"__rT_{fcTag}"
@@ -1517,6 +1523,8 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
                 // trace. This is the census line for exactly that case.
                 @ (if codeGen.FoldChunk.IsSome && not (ompThreadEmissionEnabled ())
                    then [ ind depth + $"// [omp] requested but emitted serial: {(ompThreadsSuppressedReason ())}" ]
+                   elif codeGen.FoldChunk.IsSome && not (fpReassocEnabled ())
+                   then [ ind depth + $"// {(ompSuppressedPhrase (fpReproReason ()))}" ]
                    else [])
             else []
         atOuterLevel <- false
@@ -2238,8 +2246,17 @@ let tryGenFlatElementwiseNest
 /// `reduce(row, <builtin op>[, init])` or `prodsum(...)` over row params and
 /// invariant NAMED rank-1 arrays. A recognised builtin op keeps the jam from
 /// interleaving any user code (whose panics' order would become observable);
-/// BLADE_FP_REASSOC leaves both shapes to their licensed lane forms; an omp
-/// request leaves the nest to the path that places (or marks) its pragma.
+/// an omp request leaves the nest to the path that places (or marks) its pragma.
+///
+/// IN EVERY BUILD, including the 2026-10-17 fast default. This gate used to
+/// decline under BLADE_FP_REASSOC (leaving each row to its per-row lane/simd
+/// fold). When that knob's forms became the default the choice was MEASURED
+/// again (12 row folds per program, OMP_NUM_THREADS=1, medians of 9-15
+/// interleaved runs): at 2003 x 1009 (bandwidth-bound) the jam beat the
+/// per-row forms 1.10x (`reduce`) / 1.30x (`prodsum`); at 403 x 251
+/// (cache-resident) the per-row forms won 1.31x / 1.09x. No winner, so the
+/// jam -- the shape's old default, and BITWISE, so legal in the repro build
+/// too -- stays the default (plan-fp-default-fastest.md section 6.2).
 let tryGenRowFoldJamNest
         (streamed: Map<string, ProviderReadSpec>)
         (operandTypes: IRArrayType list)
@@ -2255,7 +2272,7 @@ let tryGenRowFoldJamNest
         ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank = 1 && ix.Dependencies.IsEmpty
     if codeGen.FoldWrapper.IsSome || codeGen.FoldChunk.IsSome || codeGen.ShareDecl.IsSome then None
     elif codeGen.MpiSlab || codeGen.HasReynolds || codeGen.IsAntisymmetric then None
-    elif not (Map.isEmpty streamed) || ompTestModeEnabled () || fpReassocEnabled () then None
+    elif not (Map.isEmpty streamed) || ompTestModeEnabled () then None
     elif codeGen.OmpRequested then None
     elif List.length operandTypes <> List.length codeGen.InputArrayNames then None
     else
@@ -2419,6 +2436,7 @@ let tryGenRowFoldJamNest
         recordCodegenDecision "microkernel" codeGen.OutputName Blade.Effects.Applied
             [ (if kind = "reduce" then "row-fold jam (partial reduce over rows)" else "matvec jam (row-map prodsum)")
               $"{jamR} rows per tile, one accumulator per row (bitwise)" ]
+        recordFoldForm codeGen.OutputName $"row-fold jam({jamR} rows, bitwise)" $"{kind} over the rows of a row map"
         Some (
             [ ind indent + $"// row-fold jam: {kind} over rows, {jamR} rows per tile, one accumulator per row (bitwise: each row keeps its own ascending fold)"
               ind indent + "{" ]

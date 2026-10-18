@@ -1469,10 +1469,10 @@ let isAssociativeOp (op: IRBinOp) : bool =
 // the serial loop with a visible marker rather than parallelizing on a licence
 // nobody granted.
 //
-// The SAME predicate answers "may BLADE_FP_REASSOC turn this serial chain into
-// lanes?" -- the knob supplies the reproducibility opt-in that `omp` supplies
-// on the parallel paths, never the licence itself. An unlicensed user kernel
-// stays serial with the knob on.
+// The SAME predicate answers "may this serial chain become lanes / an `omp simd
+// reduction`?" -- spent by DEFAULT since 2026-10-17 (`fpReassocEnabled`), and
+// withheld only by the repro build (BLADE_FP_REPRO=1), which is a polarity, never
+// the licence itself. An unlicensed user kernel stays serial in every build.
 
 /// The builtin binary op a 2-parameter fold callable's body IS, when the body is
 /// exactly `p0 <op> p1` (either argument order) and `op` is both commutative and
@@ -1521,8 +1521,12 @@ let foldKernelReproVetoed (callable: IRCallable) : bool =
 /// Answers only the LICENCE question -- whether omp was requested is separate
 /// (callable.IsOmpParallel), so the two can be reported independently.
 /// `where repro` vetoes unconditionally: this one predicate gates the OpenMP
-/// fold paths, every BLADE_FP_REASSOC lane, and the LLVM lane's fast-math
-/// flags, so the veto lands on all of them at once.
+/// fold paths, every K-lane / `omp simd reduction` fold form, and the LLVM
+/// lane's fast-math flags, so the veto lands on all of them at once. (The
+/// BUILD-wide twin, BLADE_FP_REPRO=1, is `fpReassocEnabled` -- checked beside
+/// this predicate at each site, because the predicate is also read as a FACT
+/// about the kernel, e.g. by the Path B chunk plan, whose route selection must
+/// not depend on a build knob.)
 let foldReorderLicensed (callable: IRCallable) : bool =
     not (foldKernelReproVetoed callable)
     && (callable.IsCommutative

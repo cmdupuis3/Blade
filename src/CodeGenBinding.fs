@@ -3032,9 +3032,15 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
     //     element is needed. Deterministic for a fixed OMP_NUM_THREADS.
     // Both are flat 1-D sweeps (`reduce` takes rank-1 arrays only); compound/
     // sparse operands walk their contiguous `.data` buffer of present cells.
+    // The REPRO build (`fpReproEnabled`, BLADE_FP_REPRO=1) keeps the serial
+    // association of every fold, the thread-level forms included: both paths
+    // reassociate (Path A through the reduction clause, Path B through its
+    // per-thread partials), so neither survives it. The fold then lands on the
+    // serial arm below, and `pathBSuppressedNote` says why.
     let parallelFold =
         match resolveCallable kernelExpr with
-        | Some c when c.Params.Length = 2 && c.IsOmpParallel && foldReorderLicensed c -> Some c
+        | Some c when c.Params.Length = 2 && c.IsOmpParallel && foldReorderLicensed c
+                      && fpReassocEnabled () -> Some c
         | _ -> None
     // Path A additionally needs an element type OpenMP's built-in reduction
     // identities are defined for. Complex (and anything non-arithmetic) takes
@@ -3092,6 +3098,11 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
         match resolveCallable kernelExpr with
         | Some c when c.Params.Length = 2 && c.IsOmpParallel && foldKernelReproVetoed c ->
             [ $"{ind}// [omp] requested but emitted serial: fold kernel is `where repro` (the operation order is the contract; reorder licence vetoed)" ]
+        // The BUILD-WIDE twin of the veto above: BLADE_FP_REPRO=1 is `where
+        // repro` on every fold kernel at once, so an `omp` request it declines
+        // gets the same census line, naming the knob.
+        | Some c when c.Params.Length = 2 && c.IsOmpParallel && foldReorderLicensed c && fpReproEnabled () ->
+            [ $"{ind}// {(ompSuppressedPhrase (fpReproReason ()))}" ]
         | _ -> []
     // STREAMED FOLD (docs/plans/structural/07, decision D6 as read: a fold over
     // a segmented axis is the plain flat fold at the API). The operand is a
@@ -3191,6 +3202,7 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                 // <omp.h> dependency it does not have -- which is also what lets
                 // "serial emission contains no `omp_get_`" be checkable by
                 // grepping the output.
+                recordFoldForm name "simd-reduction" "reduce over a materialized array (Path A, thread team suppressed)"
                 elemErrCode @ guardLines @ [
                     $"{ind}// reduce: comm-licensed reduction (builtin '{(binOpToCpp op)}'), flat sweep"
                     $"{ind}// [omp] requested but emitted serial: {(ompThreadsSuppressedReason ())}"
@@ -3206,6 +3218,7 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                 (ompApiUsedCell ()).Value <- true
                 recordOmpConstruct name $"BLADE_OMP_PARALLEL_FOR_SIMD_REDUCTION({redOp}:{name})"
                     "licensed fold with a builtin operator: OpenMP reduction over the flat sweep (Path A)"
+                recordFoldForm name "threaded(parallel for simd reduction)" "reduce over a materialized array (Path A)"
                 elemErrCode @ guardLines @ [
                     $"{ind}// reduce: comm-licensed OpenMP reduction (builtin '{(binOpToCpp op)}'), flat sweep"
                     $"{ind}const size_t {rnName} = {boundExpr};"
@@ -3223,6 +3236,7 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                 // result is the seed alone (which is exactly the serial answer
                 // for an empty range, init form included).
                 (ompApiUsedCell ()).Value <- true
+                recordFoldForm name $"threaded(Path B chunks, K-lanes({foldLaneCount}) per chunk)" "reduce over a materialized array (Path B)"
                 let partName = $"__rpart_{name}"
                 // K independent LANE accumulators inside each chunk. Lane l owns
                 // __rlo+l, __rlo+l+K, __rlo+l+2K, ... and seeds from its own
@@ -3343,8 +3357,9 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                 let (laneStmts, resultLane) =
                     fpReassocLaneStmts kLanes elemStr "__rlane" "__ri" "__rlo" "__rhi" elemAt
                         (fun acc rhs -> $"{acc} = {wname}({acc}, {rhs});")
+                recordFoldForm name $"K-lanes({kLanes})" "reduce over a materialized array"
                 elemErrCode @ guardLines @ wrapperLines @ pathBSuppressedNote @ [
-                    $"{ind}// reduce: accumulator loop, eager ({kLanes}-lane, BLADE_FP_REASSOC)"
+                    $"{ind}// reduce: accumulator loop, eager ({kLanes}-lane, licensed reorder)"
                     $"{ind}{elemStr} {name} = {seedStr};"
                     $"{ind}{{"
                     $"{ind}    const size_t __rlo = {loopStart};"
@@ -3363,6 +3378,9 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                     $"{ind}}}"
                 ]
             | None, None ->
+            recordFoldForm name
+                (if foldReorderLicensed callable then serialFoldForm () else "serial (no reorder licence)")
+                "reduce over a materialized array"
             elemErrCode @ guardLines @ wrapperLines @ pathBSuppressedNote @ [
                 $"{ind}// reduce: accumulator loop, eager"
                 $"{ind}{elemStr} {name} = {seedStr};"
@@ -3597,8 +3615,20 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                     | Some t -> not (t.StartsWith "__halowin")
                                     | None -> true))
                         match cg.Bindings with
+                        // `FoldChunk` (an `omp`-licensed fold) keeps Path B's
+                        // thread team whenever this build opens teams. When it
+                        // does NOT (BLADE_OMP_THREADS=1) the chunk plan is dead
+                        // at its consumer, and the licence `omp` carried is the
+                        // same reorder licence this arm spends -- so the fold
+                        // takes the vectorized form instead of the serial chain
+                        // it used to fall to ("omp implies simd", 2026-10-17;
+                        // the dot / composed-chain / checksum shapes of
+                        // bench gap G20). The census line for the dropped team
+                        // is emitted below (`chunkNote`), because this arm never
+                        // reaches genLoopNest, where it used to be printed.
                         | [lvl] when fpReassocEnabled () && foldReorderLicensed callable
-                                     && cg.FoldChunk.IsNone && laneable lvl ->
+                                     && (cg.FoldChunk.IsNone || not (ompThreadEmissionEnabled ()))
+                                     && laneable lvl ->
                             // The nest's own element peels and kernel expression,
                             // built exactly as genLoopNestStreamed builds them for
                             // one level. `restrictPeelSites` is provably EMPTY for
@@ -3685,6 +3715,10 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                 |> List.distinct
                                 |> List.length
                             let boundStr = genLoopBoundExpr (compoundArrayNamesOf cg.Bindings) lvl
+                            let chunkNote =
+                                if cg.FoldChunk.IsSome
+                                then [ $"{ind}/* {(ompSuppressedPhrase (ompThreadsSuppressedReason ()))} */" ]
+                                else []
                             match fpReassocSimdOp callable elemStr with
                             | Some opStr ->
                                 // SIMD FORM, and the site the two forms differ
@@ -3720,8 +3754,14 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                 // NAMED scalar accumulators -- it has nothing to
                                 // say about vector-register partials, whose
                                 // width the compiler picks.
+                                recordFoldForm name "simd-reduction" "reduce over a deferred computation (one level)"
                                 Some (
-                                    [ $"""{ind}// reduce over computation: accumulator loop (omp simd reduction, BLADE_FP_REASSOC, {streams} operand stream{(if streams = 1 then "" else "s")})"""
+                                    chunkNote @
+                                    // BLOCK comments on this arm and the lane arm: a
+                                    // kernel-body fold's statements are SPACE-JOINED
+                                    // into a one-line IIFE (corpus loops/467), where
+                                    // a `//` would swallow the rest of the fold.
+                                    [ $"""{ind}/* reduce over computation: accumulator loop (omp simd reduction, licensed reorder, {streams} operand stream{(if streams = 1 then "" else "s")}) */"""
                                       $"{ind}{{"
                                       $"{ind}    const size_t __rhi = {boundStr};" ]
                                     @ (aliasDecls |> List.map (fun s -> ind + "    " + s))
@@ -3747,8 +3787,10 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                             let (laneStmts, resultLane) =
                                 fpReassocLaneStmts kLanes elemStr "__rlane" "__ri" "0" "__rhi" bodyAt
                                     (fun acc rhs -> $"{acc} = {wname}({acc}, {rhs});")
+                            recordFoldForm name $"K-lanes({kLanes})" "reduce over a deferred computation (one level)"
                             Some (
-                                [ $"""{ind}// reduce over computation: accumulator loop ({kLanes}-lane, BLADE_FP_REASSOC, {streams} operand stream{(if streams = 1 then "" else "s")})"""
+                                chunkNote @
+                                [ $"""{ind}/* reduce over computation: accumulator loop ({kLanes}-lane, licensed reorder, {streams} operand stream{(if streams = 1 then "" else "s")}) */"""
                                   $"{ind}{{"
                                   $"{ind}    const size_t __rhi = {boundStr};" ]
                                 @ (aliasDecls |> List.map (fun s -> ind + "    " + s))
@@ -3776,7 +3818,19 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                         @ [$"{ind}{elemStr} {name} = {seedStr};"]
                         @ (match laneLines () with
                            | Some ls -> ls
-                           | None -> genLoopNest cg ctx.VarNames ctx.Indent)
+                           | None ->
+                               // What the ordinary nest makes of this fold, for
+                               // `blade plan` (the lane arm records its own).
+                               let form =
+                                   if not (foldReorderLicensed callable) then "serial (no reorder licence)"
+                                   elif not (fpReassocEnabled ()) then "serial (repro)"
+                                   elif cg.FoldChunk.IsSome && ompThreadEmissionEnabled () then
+                                       "threaded(Path B chunks, serial within each chunk)"
+                                   elif cg.Bindings.Length <> 1 then
+                                       "serial (multi-level nest: no lane or simd form for a fold over a nest yet)"
+                                   else "serial (head level is not a plain rectangular sweep)"
+                               recordFoldForm name form "reduce over a deferred computation"
+                               genLoopNest cg ctx.VarNames ctx.Indent)
                     let code =
                         match dotCall with
                         | Some (call, entry) ->
@@ -3791,6 +3845,7 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                   nameOf Blade.LinAlgPatterns.RoleB with
                             | Some xName, Some yName ->
                                 (linalgUsedCell ()).Value <- true
+                                recordFoldForm name "blas-dot" "reduce over a deferred computation (L1 dispatch)"
                                 let nExtent =
                                     genLoopBoundExpr (compoundArrayNamesOf cg.Bindings)
                                                      (List.head cg.Bindings)
@@ -3824,7 +3879,27 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                             leafNames |> List.map (fun ln -> $"{ind}{elemStr} {ln} = {seedStr};")
                         let (sm, sp, sNew) = streamedNestSetup ctx.StreamedArrays ind leafCgs
                         registerStreamBufDecls sNew
-                        let loopCode = sp @ genFusedLoopNestStreamed sm leafCgs ctx.VarNames ctx.Indent false None
+                        // VECTORIZED FOLD form ("omp implies simd", 2026-10-17):
+                        // the shared kernel's licence, spent as ONE
+                        // `omp simd reduction` over every leaf's accumulator.
+                        let simdPlan =
+                            fusedFoldSimdPlan sm leafCgs (leafNames |> List.map (fun ln -> (ln, callable, elemStr)))
+                        let (simdFold, form) =
+                            match simdPlan with
+                            | Ok p -> (Some p, "simd-reduction")
+                            | Error why -> (None, why)
+                        recordFoldForm name form $"fused fold over {leafNames.Length} leaves (one traversal)"
+                        // A `where omp` on the shared kernel: no fused fold opens
+                        // a team (several accumulators, one traversal), so the
+                        // thread half is declined -- never silently.
+                        let ompNote =
+                            if callable.IsOmpParallel then
+                                [ ind + "/* " + ompSuppressedPhrase
+                                    (if simdFold.IsSome
+                                     then "a fused fold keeps several accumulators in one traversal and has no thread-level form yet (its reorder licence is spent on the vectorized form)"
+                                     else $"a fused fold keeps several accumulators in one traversal and has no thread-level form yet ({form})") + " */" ]
+                            else []
+                        let loopCode = sp @ ompNote @ genFusedLoopNestStreamedWith simdFold sm leafCgs ctx.VarNames ctx.Indent false None
                         let tupleLine = $"""{ind}auto {name} = std::make_tuple({(leafNames |> String.concat ", ")});"""
                         // Destructure sub-bindings resolve through TupleChildren
                         // straight to the accumulator names (the fusion-tree
@@ -4080,7 +4155,27 @@ and genReduceJoinCore (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         let allCgs = shareCgs @ leafCgs
         let (sm, sp, sNew) = streamedNestSetup ctx.StreamedArrays ind allCgs
         registerStreamBufDecls sNew
-        let loopCode = sp @ genFusedLoopNestStreamed sm allCgs ctx.VarNames ctx.Indent false None
+        // VECTORIZED FOLD form for the join ("omp implies simd", 2026-10-17):
+        // every leg's licence, spent as ONE `omp simd reduction` clause over
+        // all the accumulators (gate: `fusedFoldSimdPlan`).
+        let simdPlan =
+            fusedFoldSimdPlan sm allCgs (List.zip3 leafNames callables elemStrs)
+        let (simdFold, form) =
+            match simdPlan with
+            | Ok p -> (Some p, "simd-reduction")
+            | Error why -> (None, why)
+        recordFoldForm name form $"reduction join of {leafNames.Length} legs (one traversal)"
+        // `where omp` on a leg's fold kernel: a join opens no team, so the
+        // request's thread half is declined -- with the census line, never
+        // silently (bench gap G7 / F4).
+        let ompNote =
+            if callables |> List.exists (_.IsOmpParallel) then
+                [ ind + "/* " + ompSuppressedPhrase
+                    (if simdFold.IsSome
+                     then "a reduction join keeps several accumulators in one traversal and has no thread-level form yet (its legs' reorder licence is spent on the vectorized form)"
+                     else $"a reduction join keeps several accumulators in one traversal and has no thread-level form yet ({form})") + " */" ]
+            else []
+        let loopCode = sp @ ompNote @ genFusedLoopNestStreamedWith simdFold sm allCgs ctx.VarNames ctx.Indent false None
         let tupleLine = $"""{ind}auto {name} = std::make_tuple({(leafNames |> String.concat ", ")});"""
         let shareNote =
             if sharedIds.IsEmpty then []

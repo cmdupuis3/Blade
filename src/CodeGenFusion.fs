@@ -176,7 +176,15 @@ let checkJoinCompatible (leafCgs: LoopNestCodeGen list) : Result<LoopNestCodeGen
 /// a contiguous outer-row slab, restored by a per-leaf Allgatherv). Under
 /// mpi+omp hybrid co-fusion, hostParallel additionally puts a bare
 /// `#pragma omp parallel for` on the cell loop inside each rank's slab.
-let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs: LoopNestCodeGen list) (outerNames: Map<int, string>) (indent: int) (hostParallel: bool) (mpiSlabVar: string option) : string list =
+/// `simdFold`: the VECTORIZED FOLD form of a fused fold / reduction join
+/// (docs/plans/plan-fp-default-fastest.md). `Some (opStr, accs)` puts
+/// `BLADE_OMP_SIMD_REDUCTION(<opStr>:<accs>)` on the (single) loop header and
+/// spells every fold leaf's update as the builtin operator, `acc = acc op x`
+/// -- the reduction-statement form the clause needs, and what the leaf's
+/// wrapper computes (the caller only passes this when every leg's kernel IS
+/// that builtin op, `fpReassocSimdOp`). The CALLER owns the gate: one level,
+/// no streamed sources, no team, no MPI slab, a plain rectangular head.
+let genFusedLoopNestStreamedWith (simdFold: (string * string list) option) (streamed: Map<string, ProviderReadSpec>) (leafCgs: LoopNestCodeGen list) (outerNames: Map<int, string>) (indent: int) (hostParallel: bool) (mpiSlabVar: string option) : string list =
     let ind n = String.replicate n "    "
     let primary = leafCgs |> List.maxBy (_.Bindings.Length)
     let staggered = leafCgs |> List.exists (fun cg -> cg.Bindings.Length <> primary.Bindings.Length)
@@ -273,7 +281,12 @@ let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs:
             | Some sv when j = 0 ->
                 $"for (size_t {pBinding.IndexName} = __blade_mpi_lo_{sv}; {pBinding.IndexName} < __blade_mpi_hi_{sv}; {pBinding.IndexName}++) {{"
             | _ -> genForLoopHeader compoundArrays pBinding
-        lines <- lines @ suppressedMarker @ [ind depth + pragmaPrefix + header]
+        let simdLine =
+            match simdFold with
+            | Some (opStr, accs) when j = 0 ->
+                [ ind depth + $"""BLADE_OMP_SIMD_REDUCTION({opStr}:{(String.concat ", " accs)})""" ]
+            | _ -> []
+        lines <- lines @ suppressedMarker @ simdLine @ [ind depth + pragmaPrefix + header]
         depth <- depth + 1
 
         // Element peels for every leaf that iterates this level, from the
@@ -357,9 +370,10 @@ let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs:
                     match cg.ShareDecl with
                     | Some elemCpp -> $"const {elemCpp} {cg.OutputName} = {rr.CppExpr};"
                     | None ->
-                    match cg.FoldWrapper with
-                    | Some wname -> $"{cg.OutputName} = {wname}({cg.OutputName}, {rr.CppExpr});"
-                    | None ->
+                    match cg.FoldWrapper, simdFold with
+                    | Some _, Some (opStr, _) -> $"{cg.OutputName} = {cg.OutputName} {opStr} ({rr.CppExpr});"
+                    | Some wname, None -> $"{cg.OutputName} = {wname}({cg.OutputName}, {rr.CppExpr});"
+                    | None, _ ->
                         let outputIdx =
                             cg.Bindings |> List.map (fun b -> $"[{b.IndexName}]") |> String.concat ""
                         $"{cg.OutputName}{outputIdx} = {rr.CppExpr};"
@@ -371,6 +385,53 @@ let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs:
         lines <- lines @ [ind depth + "}"]
 
     lines
+
+/// The fused-nest emitter in its ordinary (non-vectorized-fold) form.
+let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs: LoopNestCodeGen list) (outerNames: Map<int, string>) (indent: int) (hostParallel: bool) (mpiSlabVar: string option) : string list =
+    genFusedLoopNestStreamedWith None streamed leafCgs outerNames indent hostParallel mpiSlabVar
+
+/// May a fused fold / reduction join over `allCgs` (fold legs plus any shared
+/// leaves) take the VECTORIZED FOLD form? `legs` pairs each fold leg's
+/// accumulator name with its kernel and accumulator C++ type. Ok (op, accs) is
+/// the `BLADE_OMP_SIMD_REDUCTION(op:accs)` plan; Error is the `blade plan`
+/// reason the fold stays serial.
+///
+/// The licence is the ordinary one, leg by leg (`foldReorderLicensed`, so a
+/// `where repro` leg vetoes the whole join -- one traversal has one order),
+/// spent only in a build that reorders (`fpReassocEnabled`). The FORM needs a
+/// builtin `+`/`*` body on every leg, ONE operator across them (a reduction
+/// clause names one operator per list, and one `_Pragma` carries one clause),
+/// and the same rectangular single-level sweep the one-leg simd arm requires
+/// (genReduceComputeBindingCore's `laneable`): no bound dependencies or strict
+/// offset, no compound/sparse/fused head, no halo window, no Reynolds body, no
+/// MPI slab, no streamed source.
+let fusedFoldSimdPlan (streamed: Map<string, ProviderReadSpec>) (allCgs: LoopNestCodeGen list)
+                      (legs: (string * IRCallable * string) list) : Result<string * string list, string> =
+    let headOk (cg: LoopNestCodeGen) =
+        match cg.Bindings with
+        | [ lvl ] ->
+            lvl.BoundDependencies.IsEmpty && lvl.StrictOffset = 0 && lvl.FusedRank.IsNone
+            && (match lvl.Extent with IRCompoundMask _ | IRSparseKeys _ -> false | _ -> true)
+            && not cg.HasReynolds && not cg.MpiSlab
+            && (lvl.Elements |> List.forall (fun e ->
+                    match e.SlotTag with
+                    | Some t -> not (t.StartsWith "__halowin")
+                    | None -> true))
+        | _ -> false
+    if not (fpReassocEnabled ()) then Error (serialFoldForm ())
+    elif legs |> List.exists (fun (_, c, _) -> not (foldReorderLicensed c)) then
+        Error "serial (a leg has no reorder licence; one traversal has one order)"
+    elif not (Map.isEmpty streamed) then Error "serial (streamed source)"
+    elif not (allCgs |> List.forall headOk) then
+        Error "serial (multi-level or non-rectangular nest: no vectorized form for a fused fold over it yet)"
+    else
+        let ops = legs |> List.map (fun (_, c, elemStr) -> fpReassocSimdOp c elemStr)
+        if ops |> List.exists Option.isNone then
+            Error "serial (a leg's kernel is not a builtin +/* over a scalar: no reduction clause can name it, and the joined traversal has no K-lane form yet)"
+        else
+            match ops |> List.choose id |> List.distinct with
+            | [ op ] -> Ok (op, legs |> List.map (fun (acc, _, _) -> acc))
+            | _ -> Error "serial (legs fold with different operators: one reduction clause names one)"
 
 /// The ordinary (no streamed sources) fused-nest emitter.
 let genFusedLoopNest (leafCgs: LoopNestCodeGen list) (outerNames: Map<int, string>) (indent: int) (hostParallel: bool) (mpiSlabVar: string option) : string list =

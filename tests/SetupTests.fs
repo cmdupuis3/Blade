@@ -94,7 +94,7 @@ let runSetupTests () : BlockResult =
     for (var, gate) in
             [ "BLADE_MEMCHECK", Blade.CodeGenState.memcheckEnabled
               "BLADE_LLVM", Blade.Build.llvmEnabled
-              "BLADE_FP_REASSOC", Blade.CodeGenState.fpReassocEnabled
+              "BLADE_FP_REPRO", Blade.CodeGenState.fpReproEnabled
               "BLADE_CUBLAS", Blade.LinAlgPatterns.cublasAvailable ] do
         let reads (v: string) =
             use _p = pinEnv var v
@@ -103,6 +103,24 @@ let runSetupTests () : BlockResult =
             (not (reads "off") && not (reads "0") && not (reads " FALSE ") && not (reads null)
              && not (reads "yes") && reads " ON " && reads "true" && reads "1")
             ""
+    // BLADE_FP_REASSOC is DEFAULT-ON since 2026-10-17 (the licensed fold forms
+    // are the default; plan-fp-default-fastest.md): unset and garbage read as
+    // the default, and only an off-word turns it off -- the same grammar,
+    // mirrored. Its off-words are the compatibility spelling of BLADE_FP_REPRO=1.
+    (let reads (v: string) =
+        use _p = pinEnv "BLADE_FP_REASSOC" v
+        Blade.CodeGenState.fpReassocEnabled ()
+     check "BLADE_FP_REASSOC: unset / garbage / ON / true / 1 are on; off / 0 / false are off"
+        (reads null && reads "yes" && reads " ON " && reads "true" && reads "1"
+         && not (reads "off") && not (reads "0") && not (reads " FALSE "))
+        "")
+    (let both (repro: string) (reassoc: string) =
+        use _a = pinEnv "BLADE_FP_REPRO" repro
+        use _b = pinEnv "BLADE_FP_REASSOC" reassoc
+        (Blade.CodeGenState.fpReproEnabled (), Blade.CodeGenState.fpReassocEnabled ())
+     check "BLADE_FP_REPRO=1 outranks BLADE_FP_REASSOC=1; BLADE_FP_REASSOC=0 is repro"
+        (both "1" "1" = (true, false) && both null "0" = (true, false) && both null null = (false, true))
+        "")
 
     // ---- package hints are data for every OS (never empty) ----
     check "package hints exist for the deps setup names"

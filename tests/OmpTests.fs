@@ -1639,11 +1639,14 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                                                    n (if integerData then "exact" else "vs serial") diff)
                     | _ -> fail name "no scalar binding 's' in program output (comparison would be vacuous)"
 
-        // ---- BLADE_FP_REASSOC: the reassociation opt-in -------------------
-        // The knob licenses the emitter to reassociate a SERIAL floating-point
-        // accumulation chain -- `prodsum`'s fiber sweep, a reduce over a
-        // deferred computation, and an UNQUALIFIED builtin `reduce` (one the
-        // user never marked `omp`).
+        // ---- Fold reassociation: the fast default vs the repro build -------
+        // Since 2026-10-17 the DEFAULT build reassociates a licensed SERIAL
+        // floating-point accumulation chain -- `prodsum`'s fiber sweep, a
+        // reduce over a deferred computation, and an UNQUALIFIED builtin
+        // `reduce` (one the user never marked `omp`) -- and
+        // `BLADE_FP_REASSOC=0` (= `BLADE_FP_REPRO=1`) is the serial build. The
+        // arms below pin "1" (the default, spelled out) against "0", so every
+        // property they assert is unchanged by the polarity flip.
         //
         // TWO EMITTED FORMS, chosen per site by measurement (CodeGen.fs
         // `fpReassocSimdStmts` / `fpReassocLaneStmts`, each of which carries the
@@ -1661,8 +1664,7 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
         //              available -- above all for a `comm`-declared kernel,
         //              whose combine is a CALL.
         //
-        // Everything above this point, and every other suite, runs with the
-        // knob at its DEFAULT (off), which is what makes "off means
+        // The `0` arm is the REPRO build, which is what makes "repro means
         // byte-identical" checkable at all. The pin below is per-COMPILE and
         // restored immediately, so nothing outside these arms can see it. (Test
         // blocks run sequentially in one process -- see Cli.fs -- so a
@@ -1893,7 +1895,22 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
               ("unlicensed_kernel_stays_serial",
                "function myK(a: Float64, b: Float64) = (a + b) * 1.0000001\n"
                  + $"let A = [{(laneLit 17 awkward)}]\n"
-                 + "let s = reduce(A, myK)\n", "unchanged") ]
+                 + "let s = reduce(A, myK)\n", "unchanged")
+              // A FUSED FOLD over a `<&!>` tree (one shared builtin kernel,
+              // one accumulator per leaf) -> ONE `omp simd reduction` clause
+              // naming every accumulator (2026-10-17; the onepass shape, bench
+              // gap G20/F11). Before, the tree stayed serial in every build.
+              ("fused_join_simd",
+               $"let x = [{(laneLit 17 awkward)}]\n"
+                 + "let l = method_for(x)\n"
+                 + "let (s1, s2) = reduce((l <@> lambda(v) -> v) <&!> (l <@> lambda(v) -> v * v), (+))\n"
+                 + "let s = s1 + s2\n", "simd")
+              // A REDUCTION JOIN with per-leg builtin `+` folds: same clause.
+              ("pack_join_simd",
+               $"let x = [{(laneLit 17 awkward)}]\n"
+                 + $"let y = [{(laneLit 17 (fun i -> awkward (i + 3)))}]\n"
+                 + "let (a, b) = object_for(<&!>) <@> (reduce(x, (+), 0.0), prodsum(x, y))\n"
+                 + "let s = a + b\n", "simd") ]
         for (label, src, expectForm) in fprEmitCases do
             let name = "fp_reassoc_emission_" + label
             match withReassoc true (fun () -> withBlasOff (fun () -> emitOnly name src)),
@@ -1908,7 +1925,7 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                 // the regression.
                 let hasSimd (s: string) = s.Contains "BLADE_OMP_SIMD_REDUCTION"
                 if hasLanes offCpp || hasSimd offCpp then
-                    fail name "knob OFF emitted a reassociated form (the default must never reassociate)"
+                    fail name "BLADE_FP_REASSOC=0 (the repro build) emitted a reassociated form (it must never reassociate)"
                 else
                     match expectForm with
                     | "lanes" when not (hasLanes onCpp) ->
@@ -1925,6 +1942,41 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                     | "simd" -> pass name "omp simd reduction form, only with the knob on"
                     | "unchanged" -> pass name "byte-identical with the knob on (unlicensed, stays serial)"
                     | other -> fail name ($"test bug: unknown expected form {other}")
+
+        // "omp IMPLIES simd" on a fold over a DEFERRED computation: a `where omp`
+        // fold kernel sets the Path B chunk plan, which a serial-emission build
+        // (`BLADE_OMP_THREADS=1`) drops at its consumer. The fold used to fall to
+        // the plain serial chain there (bench gap G20 / F11 -- the dot, composed
+        // chain and checksum shapes); it now takes the vectorized form, with the
+        // census line for the dropped team. Three builds of one source:
+        //   threads on (default)        -> the Path B team, no simd clause
+        //   BLADE_OMP_THREADS=1         -> BLADE_OMP_SIMD_REDUCTION + the census line
+        //   ... + BLADE_FP_REASSOC=0    -> neither (the repro build)
+        (let name = "fp_reassoc_emission_omp_deferred_fold_serial_build_simd"
+         let src =
+             $"let x = [{(laneLit 17 awkward)}]\n"
+               + $"let y = [{(laneLit 17 (fun i -> awkward (i + 3)))}]\n"
+               + "let s = reduce(method_for(zip(x, y)) <@> lambda(a: Float64, b: Float64) -> a * b, lambda(p, q) where omp -> p + q, 0.0)\n"
+         let withThreads (v: string) (f: unit -> 'a) : 'a =
+             let prior = System.Environment.GetEnvironmentVariable("BLADE_OMP_THREADS")
+             System.Environment.SetEnvironmentVariable("BLADE_OMP_THREADS", v)
+             try f ()
+             finally System.Environment.SetEnvironmentVariable("BLADE_OMP_THREADS", prior)
+         let hasSimd (s: string) = s.Contains "BLADE_OMP_SIMD_REDUCTION("
+         let hasTeam (s: string) = s.Contains "BLADE_OMP_PARALLEL_NUM_THREADS("
+         let census (s: string) = s.Contains "[omp] requested but emitted serial: BLADE_OMP_THREADS="
+         match withReassoc true (fun () -> withBlasOff (fun () -> withThreads null (fun () -> emitOnly name src))),
+               withReassoc true (fun () -> withBlasOff (fun () -> withThreads "1" (fun () -> emitOnly name src))),
+               withReassoc false (fun () -> withBlasOff (fun () -> withThreads "1" (fun () -> emitOnly name src))) with
+         | Ok team, Ok serial, Ok repro ->
+             if not (hasTeam team) || hasSimd team then
+                 fail name "threads on: expected the Path B team and no simd clause"
+             elif not (hasSimd serial) || not (census serial) || hasTeam serial then
+                 fail name "BLADE_OMP_THREADS=1: expected BLADE_OMP_SIMD_REDUCTION and the census line, no team"
+             elif hasSimd repro || hasTeam repro then
+                 fail name "repro build: expected the serial chain"
+             else pass name "team / vectorized + census / serial, as each build should"
+         | Error e, _, _ | _, Error e, _ | _, _, Error e -> fail name ($"emit: {e}"))
 
         // ---- The lane COUNT is a function of the operand-stream count -------
         // `laneCountForStreams` divides a fixed register/ILP budget among the

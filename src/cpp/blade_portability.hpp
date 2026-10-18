@@ -147,8 +147,13 @@
 // PARAMETERIZED, so unlike the two macros above it cannot be a fixed _Pragma:
 // the operator and the accumulator's name are both emission-site facts. The
 // two-step stringize is the standard idiom (`_Pragma` takes a string literal;
-// `#spec` makes one out of the argument's tokens). `spec` must therefore be
-// comma-free, which every `<op>:<name>` reduction-spec is.
+// `#__VA_ARGS__` makes one out of the argument's tokens). VARIADIC, because a
+// fused fold / reduction join names SEVERAL accumulators in one list
+// (`+:s_0, s_1, s_2`) and the commas would otherwise split the argument; one
+// operator per clause, which the emitter guarantees (`fusedFoldSimdPlan`).
+//
+// THE DEFAULT FORM since 2026-10-17: every licensed fold takes it (or the
+// K-lane form) unless the build is BLADE_FP_REPRO=1.
 //
 // GATED ON OpenMP 4.0 (`_OPENMP >= 201307`), not merely on `_OPENMP`: `simd`
 // entered the standard in 4.0, and MSVC's `/openmp` is still 2.0 (`_OPENMP` =
@@ -159,10 +164,10 @@
 // site discharges the licence (`foldReorderLicensed` + the knob).
 #ifndef BLADE_OMP_SIMD_REDUCTION
   #if defined(_OPENMP) && (_OPENMP >= 201307)
-    #define BLADE_OMP_SIMD_PRAGMA_(x) _Pragma(#x)
-    #define BLADE_OMP_SIMD_REDUCTION(spec) BLADE_OMP_SIMD_PRAGMA_(omp simd reduction(spec))
+    #define BLADE_OMP_SIMD_PRAGMA_(...) _Pragma(#__VA_ARGS__)
+    #define BLADE_OMP_SIMD_REDUCTION(...) BLADE_OMP_SIMD_PRAGMA_(omp simd reduction(__VA_ARGS__))
   #else
-    #define BLADE_OMP_SIMD_REDUCTION(spec)
+    #define BLADE_OMP_SIMD_REDUCTION(...)
   #endif
 #endif
 

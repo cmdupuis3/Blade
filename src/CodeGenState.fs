@@ -605,30 +605,74 @@ let setSplitTimingMode (on: bool) : unit =
 let splitTimingModeEnabled () : bool =
     (splitTimingModeCell ()).Value
 
-// ---- Floating-point reassociation opt-in (BLADE_FP_REASSOC) -----------------
+// ---- Floating-point fold association: fast by default, BLADE_FP_REPRO opts out --
 
-/// May the emitter reassociate a SERIAL floating-point accumulation chain?
+/// Does THIS BUILD keep the serial association of every fold? The opt-in for
+/// reproducibility (docs/plans/plan-fp-default-fastest.md):
 ///
-///   BLADE_FP_REASSOC=1|on   -> yes
-///   unset / 0 / anything else -> NO (the default)
+///   BLADE_FP_REPRO=1|on      -> yes
+///   BLADE_FP_REASSOC=0|off   -> yes (the compatibility spelling of the same thing)
+///   unset (both)             -> NO -- the default emits every licensed fold in
+///                               its fastest form (the owner's 2026-10-17 policy:
+///                               "always fastest" by default, reproducibility
+///                               opt-in)
+///
+/// BLADE_FP_REPRO=1 wins over BLADE_FP_REASSOC=1 when both are set: asking for
+/// reproducibility is the stronger request. Under it, EVERY fold keeps the
+/// ascending serial association the interpreter evaluates -- the K-lane and
+/// `omp simd reduction` forms below, the LLVM lane's `reassoc nsz` flags, AND
+/// the thread-level fold forms a `where omp` kernel would otherwise get (Path A
+/// `parallel for simd reduction`, Path B's chunked partials), each of which
+/// then prints the census marker naming this knob. Map loops are untouched
+/// (their cells do not depend on an evaluation order) and so is contraction
+/// (BLADE_FP_CONTRACT is its own knob; byte identity with the interpreter
+/// needs BOTH `BLADE_FP_REPRO=1` and `BLADE_FP_CONTRACT=off`, which is exactly
+/// what the differential harnesses pin).
+///
+/// A FUNCTION, per call, never cached -- see `fpReassocEnabled` below.
+let fpReproEnabled () : bool =
+    Blade.Toolchain.envFlag "BLADE_FP_REPRO" false
+    || Blade.Toolchain.envSwitch "BLADE_FP_REASSOC" = Blade.Toolchain.SwitchOff
+
+/// Which spelling selected the repro build, for the census markers and the
+/// `blade plan` fold-form lines (one phrase, so a grep finds every site).
+let fpReproReason () : string =
+    if Blade.Toolchain.envFlag "BLADE_FP_REPRO" false
+    then "BLADE_FP_REPRO=1 -- this build keeps the serial association of every fold (the reorder licence in source is unchanged)"
+    else "BLADE_FP_REASSOC=0 -- this build keeps the serial association of every fold (the reorder licence in source is unchanged)"
+
+/// May the emitter spend a fold's reorder licence -- reassociate a SERIAL
+/// floating-point accumulation chain into lanes / a vectorized reduction, or
+/// (the thread-level fold paths) into per-thread partials?
+///
+///   unset                   -> YES (the default since 2026-10-17)
+///   BLADE_FP_REASSOC=1|on   -> yes (still accepted; it is the default)
+///   BLADE_FP_REASSOC=0|off  -> no  (= BLADE_FP_REPRO=1)
+///   BLADE_FP_REPRO=1|on     -> no
 ///
 /// CONTRACT, stated where the knob lives so it cannot be read without it:
 ///
 ///  * Reassociation CHANGES BITWISE RESULTS. `(a+b)+c` and `a+(b+c)` are
-///    different doubles. Off is therefore the default, and OFF MEANS NO
-///    REASSOCIATION ANYWHERE: every site guarded by this predicate emits,
-///    character for character, the serial chain it emitted before the knob
-///    existed. (The separate `literalOrRuntimeExtent` rule below changes some
-///    of those chains' loop BOUNDS from a runtime read to the literal the type
-///    already carries. That is a textual change on both settings and a
-///    numerically inert one -- same trip count, same summands, same order.)
-///  * The INTERPRETER DIFFERENTIALS MUST RUN WITH IT OFF. `src/Interp` is a
+///    different doubles. The REPRO build therefore means NO REASSOCIATION
+///    ANYWHERE: every site guarded by this predicate emits, character for
+///    character, the serial chain it emitted before the knob existed. (The
+///    separate `literalOrRuntimeExtent` rule below changes some of those
+///    chains' loop BOUNDS from a runtime read to the literal the type already
+///    carries. That is a textual change on both settings and a numerically
+///    inert one -- same trip count, same summands, same order.)
+///  * It reorders only what a SOURCE LICENCE covers: a recognised builtin fold
+///    body or a declared `comm`, and never a `where repro` kernel
+///    (`foldReorderLicensed`). An unlicensed user kernel is serial in every
+///    build. What changed on 2026-10-17 is the polarity, not the licence.
+///  * The INTERPRETER DIFFERENTIALS RUN THE REPRO BUILD. `src/Interp` is a
 ///    byte-identity twin of exactly these chains (`ArrayOps.prodSum` walks `t`
 ///    ascending through one accumulator, and so does the fold), so
-///    `blade test interp ...` and `diff-oracle` compare two evaluators that
-///    only agree while the emitter is not reassociating. Nothing has to be
-///    done to keep them honest -- they inherit the default -- but a harness
-///    that pins this ON is asserting a false equality.
+///    `blade test interp ...`, `diff-oracle` and `opt-diff` compare two
+///    evaluators that only agree while the emitter is not reassociating; they
+///    pin `BLADE_FP_REPRO=1` for their own runs (beside the
+///    `BLADE_FP_CONTRACT=off` pin they already carried), while the default
+///    suite runs the fast default. A harness that compares bytes WITHOUT that
+///    pin is asserting a false equality.
 ///  * DETERMINISM, and this is the part that CHANGED. What the knob buys is
 ///    instruction-level and SIMD parallelism, never threads -- no site guarded
 ///    by this predicate creates a team, so a surrounding parallel region and
@@ -678,7 +722,36 @@ let splitTimingModeEnabled () : bool =
 /// test's scoped ON, a hand-run between two compiles in one process) silently
 /// ineffective. Same reason `LinAlgPatterns.blasAvailable` and `Build.fs`'s
 /// `fpContractFlag` are functions. Every consultation re-reads.
-let fpReassocEnabled () : bool = Blade.Toolchain.envFlag "BLADE_FP_REASSOC" false
+let fpReassocEnabled () : bool = not (fpReproEnabled ())
+
+/// The one EXPLICIT spelling `BLADE_FP_REASSOC=1` (unset does not count),
+/// for the single consumer whose reassociation is NOT a source licence: the
+/// Reynolds term merger (`canonicalKey`), which may flatten a float `+`/`*`
+/// chain the user wrote (`(x + y) + z`) -- arithmetic no `comm` or builtin
+/// fold body covers. The 2026-10-17 default flip honours SOURCE licences; it
+/// does not invent one, so that merger keeps its old opt-in polarity (corpus
+/// reynolds/026 pins the default).
+let fpReassocExplicitOptIn () : bool =
+    Blade.Toolchain.envSwitch "BLADE_FP_REASSOC" = Blade.Toolchain.SwitchOn
+    && not (fpReproEnabled ())
+
+/// Record, for `blade plan`, which FORM a fold was emitted in (rule
+/// `fold-form`). `form` is one of the census spellings
+///
+///   simd-reduction | K-lanes(k) | threaded(...) | serial (repro) | serial (<why>)
+///
+/// and `where` names the emitter site. A fast form is `applied`; every serial
+/// outcome is `declined` with its reason, so `blade plan` answers "what did
+/// this fold become" for every fold the C++ lane emits.
+let recordFoldForm (subject: string) (form: string) (where: string) : unit =
+    let outcome =
+        if form.StartsWith "serial" then Blade.Effects.Declined form
+        else Blade.Effects.Applied
+    recordCodegenDecision "fold-form" subject outcome [ $"fold form: {form}"; where ]
+
+/// The serial-form label for a licensed fold this build did not reorder.
+let serialFoldForm () : string =
+    if fpReproEnabled () then "serial (repro)" else "serial (no reorder licence)"
 
 /// How many independent LANE accumulators a reassociated accumulation chain
 /// runs. A single accumulator makes the sweep a serial dependence chain through

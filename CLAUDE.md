@@ -112,6 +112,14 @@ Requirements: .NET 10 SDK (F# 10); MSYS2 **ucrt64** g++ on PATH for anything tha
   `blade test --omp --cuda --mpi --timing --interp --diff-oracle`. The NetCDF/Zarr/CSV/hybrid
   provider blocks are reachable **only standalone** (`blade test netcdf|zarr|csv|hybrid`) —
   no flag folds them into the full suite.
+- FOLD ASSOCIATION POLICY (2026-10-17, `docs/plans/plan-fp-default-fastest.md`): the
+  default suite runs the FAST default (licensed folds reassociated, contraction on) and
+  its `// EXPECT:` pins hold at 1e-9 relative, so they read association-invariant values;
+  a test ABOUT a value under cancellation uses integer-valued or unlicensed folds, never a
+  loosened pin. The byte-identity differentials -- `test interp`, `diff-oracle`,
+  `opt-diff` -- pin `BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off` for their own compiles
+  (policy (b): twins stay byte-honest, no tolerance). `test llvm` compares the two
+  lanes' fast defaults with its 1e-9 token rule.
 - Missing toolchain pieces make tests **skip, not fail**, and skips don't affect the exit
   code — always check the `, N skipped` suffix in the totals before trusting a green run.
 - Two different category namespaces:
@@ -139,7 +147,7 @@ Requirements: .NET 10 SDK (F# 10); MSYS2 **ucrt64** g++ on PATH for anything tha
   `blade test sql` runs the discovered sql-* union.
 - `blade test` clears every emission-affecting knob for its duration (`suiteClearedKnobs` in
   `src/CliSelfTests.fs`: BLAS gates and explicit-tier keys, BLADE_PRINT,
-  FP_REASSOC/FP_CONTRACT/MARCH, OMP_THREADS, TILE_CACHE, LLVM, the optimizer gates,
+  FP_REASSOC/FP_REPRO/FP_CONTRACT/MARCH, OMP_THREADS, TILE_CACHE, LLVM, the optimizer gates,
   AD_HALO_GATHER, ...), PINS `BLADE_BLAS=off` (an unset variable would fall back to
   `blade.toolchain.json`), prints one line naming any it found set, and restores them after;
   blocks that exercise a knob set it themselves.
@@ -188,10 +196,11 @@ final-newline fixing — these are byte-pinned assets; never auto-reformat them.
 | `BLADE_CUBLAS` | `1`/`on` routes L3 contractions to cuBLAS; strictly opt-in |
 | `BLADE_MEMCHECK` | non-`0` → ASan-instrumented Debug profile (clang64 preferred, MSVC fallback) |
 | `BLADE_OMP_THREADS` | `1`/`0`/`off`/`false` (trimmed, any case) **suppresses OMP pragma emission**; runtime thread count is plain `OMP_NUM_THREADS` |
-| `BLADE_FP_REASSOC` | `1`/`on` licenses reassociated (lane-parallel) fold codegen |
+| `BLADE_FP_REPRO` | `1`/`on`: the REPRODUCIBLE build -- every fold keeps the ascending serial association the interpreter evaluates (no K lanes, no `omp simd reduction`, no `reassoc` flag in the LLVM lane, and no thread-level fold form: a `where omp` fold prints `[omp] requested but emitted serial: BLADE_FP_REPRO=1 ...`). Unset = OFF: licensed folds take their fastest form by default (2026-10-17 policy, `docs/plans/plan-fp-default-fastest.md`). Leaves contraction alone; byte identity with the interpreter is `BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off` (what the differential gates pin) |
+| `BLADE_FP_REASSOC` | DEFAULT ON since 2026-10-17 (unset = the licensed fast fold forms; a fold without a source licence is serial in every build). `0`/`off` is the compatibility spelling of `BLADE_FP_REPRO=1`; `BLADE_FP_REPRO=1` wins when both are set. An EXPLICIT `1` additionally lets the Reynolds term merger flatten float `+`/`*` chains (not a source licence, so never on by default; corpus `reynolds/026`) |
 | `BLADE_AD_HALO_GATHER` | reverse-mode rule for a `halo` stencil map: unset/`1` keeps the map and emits the GATHER adjoint (default); `0`/`off` lowers it into the construction loop and scatters. Same function either way; `blade test access` compares the two byte-for-byte |
 | `BLADE_FUSION` / `BLADE_FREEZE_IDIOM` / `BLADE_CSE` / `BLADE_POOL_REUSE` / `BLADE_HOIST` | the optimizer's per-pass escape hatches (`src/Optimize.fs`, `optimizerGates`): `0`/`off` disables elementwise-chain fusion / freeze-idiom recognition / let-level CSE / scratch pool reuse / kernel-invariant hoisting (`a - mean(a)` evaluates `mean(a)` once before the nest, not once per cell); unset = on. A disabled CSE, pool-reuse or hoisting pass still records its decision as `declined -- disabled by ...` in `blade plan`. They change the EMISSION, so the exe cache keys on them for free. `blade test opt-diff` compares every program with all of them off vs on |
-| `BLADE_MARCH` / `BLADE_FP_CONTRACT` | g++ `-march=` (default `native`) / `-ffp-contract=` (default `fast`: Blade is fast by default, so a user build may round `a*b + c` differently from the interpreter; `off` is the per-build reproducible mode, `where repro` the per-function one, and the differential gates pin `off`) |
+| `BLADE_MARCH` / `BLADE_FP_CONTRACT` | g++ `-march=` (default `native`) / `-ffp-contract=` (default `fast`: Blade is fast by default, so a user build may round `a*b + c` differently from the interpreter; `off` is the per-build reproducible mode, `where repro` the per-function one, and the differential gates pin `off`). The LLVM lane follows the SAME default since 2026-10-17 (unset = per-instruction `contract`; `off`/`0` = none) |
 | `BLADE_STDLIB` | extra stdlib search root |
 | `BLADE_PRINT` | which top-level bindings the program prints (comma/space separated); unset = all of them, the default every corpus pin reads. Set by `--print a,b` on any verb. Read by BOTH lanes (codegen's print pass and the interpreter's), so a differential run compares like with like; a name that is no binding refuses BL7004. It changes the EMISSION, so the exe cache keys on it for free |
 | `BLADE_TILE_CACHE` | revision reuse (structural/04): unset = OFF; `1`/`on` = `%LOCALAPPDATA%\Blade\tile-cache`, an absolute path = that store. Read by the COMPILER (plans tiled bindings) and by the COMPILED PROGRAM (probe/load/store); `BLADE_TILE_CACHE_VERBOSE=1` prints the planner's admissions and the run's `[tiles]`/`[chunks]` census |
@@ -255,12 +264,15 @@ type EarthArray = Array<Float like LatIdx, LonIdx>
 - Arithmetic has one contract in every lane (formalism §2.4): integers wrap; integer `/`
   `%` by zero and a negative integer exponent panic BL8013; a NaN/out-of-range float→int
   cast panics BL8014. Floating-point ROUNDING is fast by default (a compiled build may
-  contract `a*b + c` to one FMA); bit-reproducibility is opt-in: `where repro` per
-  function, `BLADE_FP_CONTRACT=off` per build.
+  contract `a*b + c` to one FMA, and every LICENSED fold is reassociated into lanes /
+  `omp simd reduction`); bit-reproducibility is opt-in: `where repro` per function,
+  `BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off` per build.
 - `where` clauses carry kernel metadata: `comm(a, b)` / `anticomm(...)` (interchangeable
   args), `omp(x: n)` (parallelism license, depth-capped), `cuda`, `tdim({...})`. A bare
   `omp` on a `reduce` kernel licenses fold reordering and requires commutativity (else
-  BL4016). `reynolds(g)` *manufactures* a commutative kernel by symmetrization when you
+  BL4016), and is emitted vectorized/laned by default (`where omp` implies simd, even
+  under `BLADE_OMP_THREADS=1`); `BLADE_FP_REPRO=1` restores the serial association.
+  `reynolds(g)` *manufactures* a commutative kernel by symmetrization when you
   can't annotate one.
 
 ## Style guide

@@ -272,6 +272,7 @@ Full semantics in [features/sql.md](features/sql.md). All implemented and tested
 | OpenBLAS lowering for `gram()` (`cblas_?syrk`/`cblas_?herk` same-array / `cblas_?gemm` distinct) | Experimental | All four precisions `s`/`d`/`c`/`z` (complex same-array is a Hermitian `herk` rank-k update; distinct is `gemm` with `ConjTrans`); operands must agree in precision — mixed or unit-annotated element types keep the scalar loops; opt-in via `BLADE_BLAS=1` (or `OPENBLAS_DIR` set; `BLADE_BLAS=0` forces off). Output layout unchanged (packed symmetric / dense) — BLAS fills a staging buffer, repack lands Blade storage. Emitted `#include <cblas.h>` keys Build.fs's `-I`/link resolution (`OPENBLAS_DIR`, netcdf-style). Measured: gram p=1024×n=16384, 8.6 s loops → 0.55 s 1-thread / 0.15 s 16-thread; values agree to ~1e-14 rel |
 | Comm-licensed parallel reductions: bare `omp` on a fold kernel | Core | See below; `tests/OmpTests.fs` (`blade test omp-reduce`, `omp-pragma`, `omp-coverage`), corpus `loops/110–111`, `diagnostics/049` |
 | Serial-emission build knob `BLADE_OMP_THREADS` | Core | See 16.0; `CodeGen.ompThreadEmissionEnabled` |
+| Licensed folds fast by default; `BLADE_FP_REPRO=1` opts into serial association | Core (2026-10-17) | Every fold with a reorder licence (builtin `+`/`*` body, declared `comm`, `where omp`, `prodsum`, builtin reduction-join legs) emits its fastest form by DEFAULT: `omp simd reduction` / K-lane accumulators in the C++ lane -- including folds over DEFERRED computations (a composed `>>@` chain, a zip map, a checksum over a computed map) and `<&!>` joins / fused folds (one `BLADE_OMP_SIMD_REDUCTION(+:a, b, ...)` over every accumulator) -- and `reassoc nsz` in the LLVM lane, which now also contracts by default like g++. `where omp` implies simd: under `BLADE_OMP_THREADS=1` an omp fold vectorizes instead of falling to the serial chain. `BLADE_FP_REPRO=1` (or `BLADE_FP_REASSOC=0`) keeps the ascending serial association in every fold, threaded ones included (census line names the knob); contraction stays `BLADE_FP_CONTRACT`'s. `blade plan` reports `fold form: ...` per fold (rule `fold-form`). Still serial in every build: multi-level fold nests (no simd/lane form; Path B threads the outer level when teams are on), joins with a comm-declared or mixed-operator leg, the expression-position reduce's thread half. [plans/plan-fp-default-fastest.md](plans/plan-fp-default-fastest.md) |
 | Print selection (`blade run --print a,b` / `BLADE_PRINT`) | Core | the compiled program prints only the named top-level bindings instead of every one, in both lanes; an unknown name refuses (BL7004). What a program prints is its own cost at scale: a 4000 x 4000 map printed 231 MB and took 31 s, of which 28 s was the printing. For benchmarking, large arrays, and pipelines whose inputs are not the answer. `CodeGenState.printSelection`, `CodeGen.genPrintStatements`, `Interp/Run`; pins in `blade test cli` |
 | Revision reuse: tile cache across Icechunk snapshots (`BLADE_TILE_CACHE=<dir>`; a pure elementwise map / co-iteration over whole-variable dense icechunk reads runs one leading-axis tile at a time, each tile keyed by the task text, the output geometry and the content identities of exactly the chunks it reads; a warm run skips the recompute and, with the probe hoisted before the read, the chunk reads of every unchanged tile; cold = warm = interpreter stdout; an input nothing observes but the tiled nest -- with `--print` selecting away the array itself -- never fetches the chunks its hit tiles would have needed, which is where the saving becomes real: 2.5x warm over untiled on a 4000 x 4000 field with a transcendental kernel) | Core (v1, opt-in) | `src/CodeGenTiles.fs`, `src/cpp/blade_tilecache.hpp`, `ZarrProvider.genAssembleFlatPhased`; docs/plans/structural/04; `tests/IcechunkTests.fs` §22; `BLADE_TILE_CACHE_VERBOSE=1` prints the `[tiles]`/`[chunks]` census |
 | Input manifests + run records (`blade plan` lists every provider read and compile-time fold with element type, axes, storage and identity policy -- `content` hash for folds, `version` size+mtime for runtime reads; `BLADE_RUN_RECORD=<path>` / `blade run --run-record` makes the executable write a JSON record at exit: status incl. BLxxxx aborts, observed inputs, executable + toolchain identity, march/fp policy and linked routes via `-DBLADE_RR_*`, RNG generator) | Core | `src/RunRecord.fs`, `src/cpp/blade_run_record.hpp`; plan-fortran-killer-2 §7; `tests/RunRecordTests.fs` (`blade test run-record`) |
@@ -307,8 +308,14 @@ drops to `omp simd reduction(<op>:acc)` — the thread half goes, the vector hal
 stays.
 
 **Guarantees.** Serial emission changes *what is emitted*, never *which programs
-compile* and never the values: a suppressed nest is byte-identical to the same
-program with the clause deleted, and each decline leaves a
+compile*, and never the values of a MAP: a suppressed map nest is byte-identical
+to the same program with the clause deleted. A licensed FOLD keeps spending its
+reorder licence in the vector half (`where omp` implies simd: Path A drops to
+`omp simd reduction`, a Path B fold over a one-level deferred computation takes
+the `omp simd reduction` / K-lane form), so its last bits may differ from the
+threaded build's -- both are the serial fold up to the licensed reassociation;
+`BLADE_FP_REPRO=1` is the build that keeps the serial association. Each decline
+leaves a
 `// [omp] requested but emitted serial: BLADE_OMP_THREADS=…` line in the
 generated C++, so a dropped clause is never silent. A numeric value ≥ 2 does
 **not** bake `num_threads(n)` into the binary — v1 leaves the degree to the
@@ -388,7 +395,7 @@ neither contracts to FMA nor gets re-inlined into a contraction-licensed
 caller; (b) call form everywhere a named function already has it (direct
 calls, kernel positions via the eta wrapper — loops call the function rather
 than inlining its arithmetic); (c) a veto inside `foldReorderLicensed`, which
-covers the OpenMP fold paths, every `BLADE_FP_REASSOC` lane, and the LLVM
+covers the OpenMP fold paths, every K-lane / `omp simd reduction` fold form, and the LLVM
 lane's fast-math flags at once — `where comm(a, b), omp, repro` on a fold
 kernel emits serial with a `// [omp] requested but emitted serial: fold
 kernel is `where repro`` marker; and (d) BLAS/LAPACK/cuBLAS routing declined
