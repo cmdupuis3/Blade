@@ -765,6 +765,14 @@
       <Link>cpp/blade_packed_gemm.hpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Include="src/cpp/blade_tiles.h">
+      <Link>cpp/blade_tiles.h</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="src/cpp/syrk_tile_tests.cpp">
+      <Link>cpp/syrk_tile_tests.cpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <None Include="src/cpp/blade_linalg.hpp">
       <Link>cpp/blade_linalg.hpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

@@ -89,7 +89,8 @@ let internal suiteClearedKnobs =
       "BLADE_OMP_THREADS"
       "BLADE_TILE_CACHE"; "BLADE_TILE_CACHE_VERBOSE"
       "BLADE_LLVM"; "BLADE_LLVM_BRICKS"; "BLADE_LLVM_FACTS"
-      "BLADE_AD_HALO_GATHER"; "BLADE_SHAPE_SPEC_CAP"; "BLADE_RUN_RECORD" ]
+      "BLADE_AD_HALO_GATHER"; "BLADE_SHAPE_SPEC_CAP"; "BLADE_RUN_RECORD"
+      "BLADE_SYRK_TILE" ]
     @ Blade.Optimize.optimizerGates
 
 /// Knobs `blade test` SETS (after the clear above) rather than leaves unset,
@@ -3778,8 +3779,14 @@ and internal dispatchTestClean (rest: string list) : int =
         // must be REFUSED, not handed to BLAS past its pool.
         let emitFailed = (Blade.Tests.LinAlgTests.runLinAlgEmissionTests ()).Failed
         let probeFailed = (Blade.Tests.LinAlgTests.runLinAlgProbeTests ()).Failed
+        let tileFailed = (Blade.Tests.LinAlgTests.runSyrkTileTests ()).Failed
         let tierFailed = (Blade.Tests.LinAlgTests.runBlasTierTests ()).Failed
-        if emitFailed + probeFailed + tierFailed = 0 then 0 else 1
+        if emitFailed + probeFailed + tileFailed + tierFailed = 0 then 0 else 1
+    | [ "syrk-tile" ] | [ "syrktile" ] ->
+        // The packed-triangle SYRK tile alone: raw-bit vs the serial prodsum
+        // (contract=off) and the one-fma chain (contract=fast), vfmadd census.
+        let failed = (Blade.Tests.LinAlgTests.runSyrkTileTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "doctor" ] ->
         // Structural pins for the doctor's rows and JSON shape; the probes
         // run for real but machine-dependent statuses are not asserted.
