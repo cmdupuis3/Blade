@@ -1,0 +1,43 @@
+// REPRO A-F5 (blade-A, 2026-10-17, compiler 0.20.0): ENUMERABLE DOMAIN IS MATERIALIZED
+// (C++ lane) AND REFUSED (LLVM lane).
+// `reduce(method_for(range<Band>) <@> k, (+))` inside a FUNCTION: the C++ lane emits the
+// closed-form bounds j in [max(0, i - w), min(n - 1, i + w)] (no predicate, as advertised)
+// but pushes every solution into a std::vector of keys, builds a hashed sparse_index_t,
+// materializes a Sparse<double,2> value array (unhash per cell), then folds it in a second
+// pass; each `v((i : Pts))` read keeps a runtime BL8006 range check although the field bounds
+// prove it. The SAME deferred reduce written in a top-level block is refused instead:
+// error[BL7004]: reduce over a deferred computation is not supported for
+// ragged/grouped/compound/sparse inputs yet (see design-decisions D1).
+// Lanes affected: C++ (memory/perf shape: ~24+ B per domain cell plus the hash index);
+// LLVM refuses.
+// Run: BLADE_BLAS=0 blade run A-F5-band-domain-materialized.blade   (and with BLADE_LLVM=1)
+// Expected: one streaming loop pair over the band; the LLVM lane accepts static affine bounds.
+// Observed: C++ prints checksum = 32.8972854572294 (correct) via the sparse path;
+//   LLVM stderr: [blade] llvm lane refused: a loop level with a runtime extent (the llvm lane
+//   bakes extents); falling back to C++
+// Also note (A-F6): the fields are Int64<...>; the style guide's Int<...> spelling with an
+// Int64 `let static w` is BL4001.
+let static n = 11
+let static w = 2
+type Pts = Idx<n>
+
+static struct Band {
+    i: Int64<min=0, max=n-1>,
+    j: Int64<min=0, max=n-1>
+} where abs(i - j) <= w
+
+function lcg(k: Int64, seed: Int64) -> Float64 = {
+    let h1 = ((k + seed) * 1103515245 + 12345) % 2147483648
+    let h2 = (h1 * 1103515245 + 12345) % 2147483648
+    Float64(h2) / 2147483648.0
+}
+
+function band_sum(v: Array<Float64 like Pts>) -> Float64 = {
+    let r = method_for(range<Band>) <@> lambda(i, j) -> v((i : Pts)) * v((j : Pts)) / Float64(1 + abs(i - j))
+    reduce(r, (+))
+}
+
+let checksum = {
+    let x = method_for(range<Pts>) <@> lambda(i) -> 0.5 + lcg(i, 9) |> compute
+    band_sum(x)
+}

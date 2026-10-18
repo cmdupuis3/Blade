@@ -1,0 +1,144 @@
+{
+  "_doc": "Harness configuration (owner: harness agent). REQUIRED (review M3: no silent defaults). See bench/harness/README.md. Keys starting with '_' are comments. Source of the flag table: bench/README.md section 3 (fp axis licensed / repro / fastmath, coordinator 2026-10-17) and bench/notes/fortran-notes.md.",
+  "controls": [
+    {
+      "name": "compute",
+      "kernel": "recur",
+      "arm": "gfortran-expert",
+      "regime": "serial-repro-native",
+      "size": "full",
+      "_why": "README 6 drift control: compute-bound RK4, deterministic"
+    },
+    {
+      "name": "memory",
+      "kernel": "saxpy",
+      "arm": "gfortran-expert",
+      "regime": "serial-repro-native",
+      "size": "control",
+      "_why": "README / coordinator 2026-10-17: memory-bound control, three 5.6 MB streams (saxpy sizes.control n = 700,001); needs a saxpy/control pin"
+    }
+  ],
+  "tolerance": {
+    "licensed": 1e-12,
+    "repro": 1e-12,
+    "fastmath": 1e-08,
+    "_why": "relative checksum tolerance vs the pin; kernel.json `tolerance` may override per kernel"
+  },
+  "verdict_delta": 0.1,
+  "serial_affinity_cpu": 2,
+  "_serial_affinity_why": "review M20: serial arms pinned to logical CPU 2 (first SMT thread of physical core 1). mt8 arms are unbound (no OMP_PLACES/OMP_PROC_BIND, KMP_AFFINITY=disabled).",
+  "run_env": {
+    "serial": {
+      "OMP_NUM_THREADS": "1",
+      "OPENBLAS_NUM_THREADS": "1",
+      "OMP_DYNAMIC": "FALSE"
+    },
+    "mt8": {
+      "OMP_NUM_THREADS": "8",
+      "OMP_DYNAMIC": "FALSE",
+      "OPENBLAS_NUM_THREADS": "8",
+      "KMP_AFFINITY": "disabled",
+      "_why": "fortran-notes.md jitter investigation (coordinator 2026-10-17): all mt8 arms run UNBOUND -- libgomp cannot bind on Windows, libiomp5 binding under OMP_PLACES=cores/OMP_PROC_BIND=close caused 17-48 ms jitter; KMP_AFFINITY=disabled is harmless for libgomp"
+    }
+  },
+  "blade_knobs": {
+    "all": {},
+    "llvm": {
+      "BLADE_FP_CONTRACT": "fast",
+      "_why": "blade-A F14: the LLVM lane does no FMA contraction by default; contraction only, the licence every other arm has"
+    },
+    "licensed": {
+      "BLADE_FP_REASSOC": "1"
+    },
+    "repro": {},
+    "fastmath": {
+      "BLADE_FP_REASSOC": "1"
+    },
+    "_flip_after_rebuild": {
+      "_doc": "Pending the FP-default compiler change (coordinator 2026-10-17). When the new Blade.exe is confirmed, replace the licensed/repro/fastmath entries above with these. Until then the current mapping stands.",
+      "licensed": {},
+      "repro": {
+        "BLADE_FP_REPRO": "1",
+        "BLADE_FP_REASSOC": "0"
+      },
+      "fastmath": {}
+    }
+  },
+  "fortran_flags": {
+    "gfortran": {
+      "licensed": [
+        "-O3",
+        "-march=native",
+        "-ffp-contract=fast",
+        "-fno-external-blas",
+        "-fno-external-blas64",
+        "-cpp",
+        "-DBENCH_LICENSED"
+      ],
+      "repro": [
+        "-O3",
+        "-march=native",
+        "-ffp-contract=fast",
+        "-fno-external-blas",
+        "-fno-external-blas64",
+        "-cpp"
+      ],
+      "fastmath": [
+        "-O3",
+        "-march=native",
+        "-ffast-math",
+        "-fno-external-blas",
+        "-fno-external-blas64",
+        "-cpp"
+      ],
+      "serial_extra": [
+        "-fopenmp-simd"
+      ],
+      "mt8_extra": [
+        "-fopenmp"
+      ]
+    },
+    "ifx": {
+      "licensed": [
+        "/O3",
+        "/QxHost",
+        "/fp:precise",
+        "-mllvm",
+        "-fp-contract=fast",
+        "/fpp",
+        "/DBENCH_LICENSED"
+      ],
+      "repro": [
+        "/O3",
+        "/QxHost",
+        "/fp:precise",
+        "-mllvm",
+        "-fp-contract=fast",
+        "/fpp"
+      ],
+      "fastmath": [
+        "/O3",
+        "/QxHost",
+        "/fp:fast",
+        "/fpp"
+      ],
+      "serial_extra": [
+        "/Qopenmp-simd"
+      ],
+      "mt8_extra": [
+        "/Qopenmp"
+      ],
+      "_strict_why": "fortran-notes.md 3: ifx 2026.1 /fp:precise does not contract FMAs; -mllvm -fp-contract=fast enables contraction only"
+    }
+  },
+  "fortran_twin_flags": {
+    "gfortran": [
+      "-cpp",
+      "-DBENCH_INPUTONLY"
+    ],
+    "ifx": [
+      "/fpp",
+      "/DBENCH_INPUTONLY"
+    ]
+  }
+}

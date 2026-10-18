@@ -1,0 +1,80 @@
+[20:27:54.138 +    0.0s] check: 1 kernel(s): dot; size smoke
+[20:27:54.184 +    0.1s] fingerprinting the machine
+[20:27:55.834 +    1.7s] power: ac, max processor state AC 100%, boost mode AC None, Power Scheme GUID: 64a64f24-65b9-4b56-befd-5ec1eaced9b3  (Silent)
+[20:27:58.411 +    4.3s] build dot serial-licensed-native smoke blade-llvm
+[20:28:01.601 +    7.5s]   -> ok (1.6s)
+[20:28:01.601 +    7.5s] build dot serial-licensed-native smoke blade-cpp
+[20:28:06.075 +   12.0s]   -> ok (2.8s)
+[20:28:06.075 +   12.0s] build dot serial-licensed-native smoke gfortran-natural
+[20:28:06.869 +   12.7s]   -> ok (0.7s)
+[20:28:06.869 +   12.7s] build dot serial-licensed-native smoke gfortran-expert
+[20:28:07.642 +   13.5s]   -> ok (0.7s)
+[20:28:07.642 +   13.5s] build dot serial-licensed-native smoke ifx-natural
+[20:28:10.046 +   15.9s]   -> ok (2.2s)
+[20:28:10.046 +   15.9s] build dot serial-licensed-native smoke ifx-expert
+[20:28:12.386 +   18.3s]   -> ok (2.2s)
+[20:28:12.386 +   18.3s] build dot serial-licensed-native smoke blade-llvm-inputonly
+[20:28:15.523 +   21.4s]   -> ok (1.6s)
+[20:28:15.523 +   21.4s] build dot serial-licensed-native smoke blade-cpp-inputonly
+[20:28:19.801 +   25.7s]   -> ok (2.7s)
+[20:28:19.801 +   25.7s] build dot serial-licensed-native smoke gfortran-natural-inputonly
+[20:28:20.572 +   26.4s]   -> ok (0.7s)
+[20:28:20.572 +   26.4s] build dot serial-licensed-native smoke gfortran-expert-inputonly
+[20:28:21.323 +   27.2s]   -> ok (0.7s)
+[20:28:21.323 +   27.2s] build dot serial-licensed-native smoke ifx-natural-inputonly
+[20:28:23.798 +   29.7s]   -> ok (2.3s)
+[20:28:23.798 +   29.7s] build dot serial-licensed-native smoke ifx-expert-inputonly
+[20:28:26.148 +   32.0s]   -> ok (2.2s)
+[20:28:26.196 +   32.1s]   blade-llvm: ok t=0.0001121s checksum=7442.48757101503 input=29915.9891938041 peakWS=4.6MB
+[20:28:26.249 +   32.1s]   blade-cpp: ok t=0.0002386s checksum=7442.48757101503 input=29915.9891938041 peakWS=5.9MB
+[20:28:26.304 +   32.2s]   gfortran-natural: ok t=0.0002471s checksum=7.4424875710150345E+003 input=2.9915989193804096E+004 peakWS=5.7MB
+[20:28:26.356 +   32.2s]   gfortran-expert: ok t=0.0002312s checksum=7.4424875710150218E+003 input=2.9915989193804096E+004 peakWS=5.7MB
+[20:28:26.419 +   32.3s]   ifx-natural: ok t=0.0001841s checksum=7.4424875710150345E+003 input=2.9915989193804096E+004 peakWS=4.6MB
+[20:28:26.481 +   32.4s]   ifx-expert: ok t=0.0001514s checksum=7.4424875710150227E+003 input=2.9915989193804096E+004 peakWS=4.6MB
+[20:28:26.529 +   32.4s]   blade-llvm-inputonly: ok t=0.0001078s checksum=0.0 input=29915.9891938041 peakWS=4.6MB
+[20:28:26.583 +   32.5s]   blade-cpp-inputonly: ok t=0.0002081s checksum=0.0 input=29915.9891938041 peakWS=5.9MB
+[20:28:26.636 +   32.5s]   gfortran-natural-inputonly: ok t=0.0002103s checksum=0.0000000000000000E+000 input=2.9915989193804096E+004 peakWS=5.7MB
+[20:28:26.690 +   32.6s]   gfortran-expert-inputonly: ok t=0.0002141s checksum=0.0000000000000000E+000 input=2.9915989193804096E+004 peakWS=5.7MB
+[20:28:26.751 +   32.6s]   ifx-natural-inputonly: ok t=0.0001516s checksum=0.0000000000000000E+000 input=2.9915989193804096E+004 peakWS=4.6MB
+[20:28:26.816 +   32.7s]   ifx-expert-inputonly: ok t=0.000146s checksum=0.0000000000000000E+000 input=2.9915989193804096E+004 peakWS=4.6MB
+
+# Blade vs Fortran -- check session 2026-10-17T20:27:54
+
+- host LAPTOP-350H6LDB | AMD Ryzen 7 5800HS with Radeon Graphics | 8C/16T | 15.41 GB | power ac | max processor state AC 100% | boost AC None | Power Scheme GUID: 64a64f24-65b9-4b56-befd-5ec1eaced9b3  (Silent)
+- git 74b964456fada22c70fb479f6f492f21a8ec59d3 | Blade.dll 6c663c49d05dbe7a | GNU Fortran (Rev4, Built by MSYS2 project) 16.2.0 | Intel(R) Fortran Compiler for applications running on Intel(R) 64, Version 2026.1.0 Build 20260617 | clang version 22.1.8 (https://github.com/msys2/MINGW-packages d34feaaa1d0aff624c870910b6f2589aa40d20de)
+- size `smoke` | duration 32.7 s | pins: pins-A.json, pins-B.json
+
+## serial-licensed-native
+
+Blade reference per kernel: dot=blade-llvm
+
+| kernel | arm | status | n | min (s) | median (s) | IQR (s) | ratio vs ref [95% CI] | verdict | hypothesis | fold form | peak WS (MB) | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| dot | blade-llvm | ok | 1 | 0.0001121 | 0.0001121 | 0 |  |  |  | reordered (3 reassoc flags) | 4.6 |  |
+| dot | blade-cpp | ok | 1 | 0.0002386 | 0.0002386 | 0 |  |  |  | in-order | 5.9 |  |
+| dot | gfortran-natural | ok | 1 | 0.0002471 | 0.0002471 | 0 |  |  | parity |  | 5.7 |  |
+| dot | gfortran-expert | ok | 1 | 0.0002312 | 0.0002312 | 0 |  |  | parity |  | 5.7 |  |
+| dot | ifx-natural | ok | 1 | 0.0001841 | 0.0001841 | 0 |  |  | parity |  | 4.6 |  |
+| dot | ifx-expert | ok | 1 | 0.0001514 | 0.0001514 | 0 |  |  | parity |  | 4.6 |  |
+| dot | blade-llvm-inputonly | ok | 1 | 0.0001078 | 0.0001078 | 0 |  |  |  | reordered (2 reassoc flags) | 4.6 |  |
+| dot | blade-cpp-inputonly | ok | 1 | 0.0002081 | 0.0002081 | 0 |  |  |  | in-order | 5.9 |  |
+| dot | gfortran-natural-inputonly | ok | 1 | 0.0002103 | 0.0002103 | 0 |  |  |  |  | 5.7 |  |
+| dot | gfortran-expert-inputonly | ok | 1 | 0.0002141 | 0.0002141 | 0 |  |  |  |  | 5.7 |  |
+| dot | ifx-natural-inputonly | ok | 1 | 0.0001516 | 0.0001516 | 0 |  |  |  |  | 4.6 |  |
+| dot | ifx-expert-inputonly | ok | 1 | 0.000146 | 0.000146 | 0 |  |  |  |  | 4.6 |  |
+
+[20:28:26.829 +   32.7s] wrote C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\.build\sessions\2026-10-17-LAPTOP-350H6LDB\session-202754-check
+dot serial-licensed-native size=smoke {'n': 30011} reference=pin pins-B.json
+  blade-llvm                   ok               checksum=7442.48757101503  input_checksum=29915.9891938041  t=0.000112056732177734
+  blade-cpp                    ok               checksum=7442.48757101503  input_checksum=29915.9891938041  t=0.0002386
+  gfortran-natural             ok               checksum=7.4424875710150345E+003  input_checksum=2.9915989193804096E+004  t=0.0002471
+  gfortran-expert              ok               checksum=7.4424875710150218E+003  input_checksum=2.9915989193804096E+004  t=0.0002312
+  ifx-natural                  ok               checksum=7.4424875710150345E+003  input_checksum=2.9915989193804096E+004  t=0.0001841
+  ifx-expert                   ok               checksum=7.4424875710150227E+003  input_checksum=2.9915989193804096E+004  t=0.0001514
+  blade-llvm-inputonly         ok               checksum=0.0  input_checksum=29915.9891938041  t=0.000107765197753906
+  blade-cpp-inputonly          ok               checksum=0.0  input_checksum=29915.9891938041  t=0.0002081
+  gfortran-natural-inputonly   ok               checksum=0.0000000000000000E+000  input_checksum=2.9915989193804096E+004  t=0.0002103
+  gfortran-expert-inputonly    ok               checksum=0.0000000000000000E+000  input_checksum=2.9915989193804096E+004  t=0.0002141
+  ifx-natural-inputonly        ok               checksum=0.0000000000000000E+000  input_checksum=2.9915989193804096E+004  t=0.0001516
+  ifx-expert-inputonly         ok               checksum=0.0000000000000000E+000  input_checksum=2.9915989193804096E+004  t=0.000146
+[20:28:26.848 +   32.7s] exit 0: 0 failure(s), 0 flag(s)

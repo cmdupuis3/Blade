@@ -1,0 +1,18 @@
+// REPRO A-F11 (blade-A, 2026-10-17, compiler 0.20.0): PER-CELL HEAP ALLOCATION (C++ lane).
+// Any elementwise array op on a T^k kernel parameter is materialized per cell. Here the
+// pairwise squared distance `prodsum(a - b, a - b)` allocates TWO length-3 temporaries
+// (four heap calls: two `new size_t[1]`, two `allocate<...>`) for every output cell,
+// although prodsum itself streams.
+// Lanes affected: C++ only (performance). The LLVM lane fuses it.
+// Run: BLADE_BLAS=0 BLADE_PRINT=checksum blade emit A-F11-rowdiff-alloc.blade
+// Expected: an inline loop over the 3 coordinates per cell, no allocation.
+// Observed: the kernel lambda allocates, fills `a[t] - b[t]` twice, dots, frees.
+// The pairkernel source spells the distance by components over a concretely typed point
+// (`a: Array<Float64 like Dim>`, `a((0 : Dim)) - b((0 : Dim))`, ...) and has no allocation.
+type Pts = Idx<6>
+type Dim = Idx<3>
+let checksum = {
+    let p = method_for(range<Pts>, range<Dim>) <@> lambda(i, d) -> 0.125 * Float64(i * 3 + d) |> compute
+    let k = method_for(p, p) <@> lambda(a: T^1, b: T^1) where comm(a, b) -> exp(-prodsum(a - b, a - b)) |> compute
+    k((0 : Pts), (1 : Pts)) + k((2 : Pts), (5 : Pts))
+}

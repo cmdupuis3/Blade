@@ -1,0 +1,95 @@
+[20:03:18.114 +    0.0s] smoke: 11 kernel(s): antisym, comoment3, gram, pairkernel, fusedchain, maskagg, onepass, recur, stencil, dot, saxpy; size smoke
+[20:03:18.176 +    0.1s] fingerprinting the machine
+[20:03:19.897 +    1.8s] power: ac, max processor state AC 100%, boost mode AC None, Power Scheme GUID: 64a64f24-65b9-4b56-befd-5ec1eaced9b3  (Silent)
+[20:03:22.600 +    4.5s] build antisym serial-licensed-native smoke blade-llvm
+[20:03:26.319 +    8.2s]   -> ok (1.8s)
+[20:03:26.319 +    8.2s] build antisym serial-licensed-native smoke blade-cpp
+[20:03:31.931 +   13.8s]   -> ok (3.7s)
+[20:03:31.932 +   13.8s] build antisym serial-licensed-native smoke gfortran-natural
+[20:03:32.839 +   14.7s]   -> ok (0.8s)
+[20:03:32.839 +   14.7s] build antisym serial-licensed-native smoke gfortran-expert
+[20:03:33.932 +   15.8s]   -> ok (1.0s)
+[20:03:33.932 +   15.8s] build antisym serial-licensed-native smoke ifx-natural
+[20:03:36.766 +   18.7s]   -> ok (2.7s)
+[20:03:36.766 +   18.7s] build antisym serial-licensed-native smoke ifx-expert
+[20:03:40.361 +   22.3s]   -> ok (3.4s)
+[20:03:40.464 +   22.4s]   blade-llvm: ok t=9.298e-06s checksum=390.607241954913 input=239.513063936029 peakWS=4.2MB
+[20:03:40.560 +   22.5s]   blade-cpp: ok t=9.7e-06s checksum=390.607241954913 input=239.513063936029 peakWS=5.4MB
+[20:03:40.628 +   22.5s]   gfortran-natural: ok t=1.04e-05s checksum=3.9060724195491298E+002 input=2.3951306393602863E+002 peakWS=5.3MB
+[20:03:40.697 +   22.6s]   gfortran-expert: ok t=1.73e-05s checksum=3.9060724195491275E+002 input=2.3951306393602863E+002 peakWS=5.3MB
+[20:03:40.777 +   22.7s]   ifx-natural: ok t=1.36e-05s checksum=3.9060724195491304E+002 input=2.3951306393602863E+002 peakWS=4.6MB
+[20:03:40.860 +   22.8s]   ifx-expert: ok t=1.61e-05s checksum=3.9060724195491275E+002 input=2.3951306393602863E+002 peakWS=4.6MB
+[20:03:40.865 +   22.8s] build antisym mt8-licensed-native smoke blade-llvm
+[20:03:44.576 +   26.5s]   -> serial-only: LLVM lane has no OpenMP (2.0s)
+[20:03:44.576 +   26.5s] build antisym mt8-licensed-native smoke blade-cpp
+[20:03:49.782 +   31.7s]   -> ok (3.4s)
+[20:03:49.782 +   31.7s] build antisym mt8-licensed-native smoke gfortran-natural
+[20:03:50.601 +   32.5s]   -> ok (0.7s)
+[20:03:50.601 +   32.5s] build antisym mt8-licensed-native smoke gfortran-expert
+[20:03:51.631 +   33.5s]   -> ok (1.0s)
+[20:03:51.631 +   33.5s] build antisym mt8-licensed-native smoke ifx-natural
+[20:03:54.685 +   36.6s]   -> ok (2.9s)
+[20:03:54.685 +   36.6s] build antisym mt8-licensed-native smoke ifx-expert
+[20:03:57.401 +   39.3s]   -> ok (2.5s)
+[20:03:57.470 +   39.4s]   blade-cpp: ok t=0.0008707s checksum=390.607241954913 input=239.513063936029 peakWS=5.8MB
+[20:03:57.534 +   39.4s]   gfortran-natural: ok t=0.0009188s checksum=3.9060724195491292E+002 input=2.3951306393602863E+002 peakWS=5.7MB
+[20:03:57.598 +   39.5s]   gfortran-expert: ok t=0.001181s checksum=3.9060724195491264E+002 input=2.3951306393602863E+002 peakWS=5.7MB
+[20:03:57.675 +   39.6s]   ifx-natural: ok t=0.003932s checksum=3.9060724195491292E+002 input=2.3951306393602863E+002 peakWS=7.3MB
+[20:03:57.753 +   39.7s]   ifx-expert: ok t=0.003286s checksum=3.9060724195491264E+002 input=2.3951306393602863E+002 peakWS=7.3MB
+[20:03:57.762 +   39.7s]   FAIL: harness exception: PermissionError(13, 'Access is denied')
+[20:03:57.762 +   39.7s] Traceback (most recent call last):
+  File "C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\harness\run.py", line 1942, in run
+    for regime in self.regimes_for(k):
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\harness\run.py", line 1746, in run_block
+    blk["finished"] = dt.datetime.now().isoformat(timespec="seconds")
+    ^^^^^^^^^^^^^^^^^
+  File "C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\harness\run.py", line 1449, in checkpoint
+    write_json_atomic(self.bundle / "session.json", self.data)
+    ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\harness\run.py", line 310, in write_json_atomic
+    os.replace(tmp, path)
+    ~~~~~~~~~~^^^^^^^^^^^
+PermissionError: [WinError 5] Access is denied: 'C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\.build\\sessions\\2026-10-17-LAPTOP-350H6LDB\\session-200318-smoke\\session.json.tmp' -> 'C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\.build\\sessions\\2026-10-17-LAPTOP-350H6LDB\\session-200318-smoke\\session.json'
+
+
+# Blade vs Fortran -- smoke session 2026-10-17T20:03:18
+
+- host LAPTOP-350H6LDB | AMD Ryzen 7 5800HS with Radeon Graphics | 8C/16T | 15.41 GB | power ac | max processor state AC 100% | boost AC None | Power Scheme GUID: 64a64f24-65b9-4b56-befd-5ec1eaced9b3  (Silent)
+- git 74b964456fada22c70fb479f6f492f21a8ec59d3 | Blade.dll 6c663c49d05dbe7a | GNU Fortran (Rev4, Built by MSYS2 project) 16.2.0 | Intel(R) Fortran Compiler for applications running on Intel(R) 64, Version 2026.1.0 Build 20260617 | clang version 22.1.8 (https://github.com/msys2/MINGW-packages d34feaaa1d0aff624c870910b6f2589aa40d20de)
+- size `smoke` | duration 39.6 s | pins: pins-A.json, pins-B.json
+- **ABORTED**: harness exception: PermissionError(13, 'Access is denied')
+
+## serial-licensed-native
+
+Blade reference per kernel: antisym=blade-llvm
+
+| kernel | arm | status | n | min (s) | median (s) | IQR (s) | ratio vs ref [95% CI] | verdict | hypothesis | fold form | peak WS (MB) | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| antisym | blade-llvm | ok | 1 | 9.298e-06 | 9.298e-06 | 0 |  |  |  | reordered (7 reassoc flags) | 4.2 |  |
+| antisym | blade-cpp | ok | 1 | 9.7e-06 | 9.7e-06 | 0 |  |  |  | reordered (6 SIMD_REDUCTION) | 5.4 |  |
+| antisym | gfortran-natural | ok | 1 | 1.04e-05 | 1.04e-05 | 0 |  |  | WIN ~2x (half the cells, no diagonal) |  | 5.3 |  |
+| antisym | gfortran-expert | ok | 1 | 1.73e-05 | 1.73e-05 | 0 |  |  | parity +-15% |  | 5.3 |  |
+| antisym | ifx-natural | ok | 1 | 1.36e-05 | 1.36e-05 | 0 |  |  | WIN ~2x (half the cells, no diagonal) |  | 4.6 |  |
+| antisym | ifx-expert | ok | 1 | 1.61e-05 | 1.61e-05 | 0 |  |  | parity +-15% |  | 4.6 |  |
+
+## mt8-licensed-native
+
+Blade reference per kernel: antisym=blade-cpp
+
+| kernel | arm | status | n | min (s) | median (s) | IQR (s) | ratio vs ref [95% CI] | verdict | hypothesis | fold form | peak WS (MB) | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| antisym | blade-llvm | serial-only | 0 | -- | -- | -- |  |  |  | reordered (7 reassoc flags) |  | LLVM lane has no OpenMP |
+| antisym | blade-cpp | ok | 1 | 0.0008707 | 0.0008707 | 0 |  |  |  | reordered (6 SIMD_REDUCTION) | 5.8 |  |
+| antisym | gfortran-natural | ok | 1 | 0.0009188 | 0.0009188 | 0 |  |  | WIN ~2x (half the cells, no diagonal) |  | 5.7 |  |
+| antisym | gfortran-expert | ok | 1 | 0.001181 | 0.001181 | 0 |  |  | parity +-15% |  | 5.7 |  |
+| antisym | ifx-natural | ok | 1 | 0.003932 | 0.003932 | 0 |  |  | WIN ~2x (half the cells, no diagonal) |  | 7.3 |  |
+| antisym | ifx-expert | ok | 1 | 0.003286 | 0.003286 | 0 |  |  | parity +-15% |  | 7.3 |  |
+
+## Failures
+
+- harness exception: PermissionError(13, 'Access is denied')
+
+[20:03:57.768 +   39.7s] wrote C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\.build\sessions\2026-10-17-LAPTOP-350H6LDB\session-200318-smoke
+[20:03:57.781 +   39.7s] exit 1: 1 failure(s), 0 flag(s)
+exit 1

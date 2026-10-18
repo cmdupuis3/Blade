@@ -1,0 +1,19 @@
+// REPRO A-F4 (blade-A, 2026-10-17, compiler 0.20.0): SILENT WRONG VALUE.
+// The elementwise square of an antisymmetric (AntisymIdx) array keeps the antisymmetric
+// class: `R * R` is EVEN under the sign flip ((-a)(-b) = ab), so it is symmetric with a
+// zero diagonal, but it is typed and stored AntisymIdx and every mirrored read is negated.
+// The unary analogue `R + 1.0` IS refused (BL4015 "UNKNOWN sign parity"); the binary
+// self-product slips through the parity deduction.
+// Lanes affected: C++, LLVM (BLADE_LLVM=1) and the interpreter (blade_eval) -- all agree on
+// the wrong values, so the differential gates cannot see it.
+// Run: blade run A-F4-antisym-self-product.blade --print s01,s10,total
+// Expected: s01 = 1.0, s10 = 1.0, total = 28.0   (2 * (1 + 9 + 4))
+// Observed: s01 = 1.0, s10 = -1.0, total = 0.0   (every lane)
+// Spelling that is right today: decompact(R, 0) * decompact(R, 0), or a gather
+// method_for(range<I>, range<I>) <@> lambda(i, j) -> R(i, j) * R(i, j).
+let A = [1.0, 2.0, 4.0]
+let R = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> x - y |> compute
+let S = R * R
+let s01 = S(0, 1)
+let s10 = S(1, 0)
+let total = reduce(reduce(decompact(S, 0), (+)), (+))

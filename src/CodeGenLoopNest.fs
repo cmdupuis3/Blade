@@ -2878,7 +2878,7 @@ let genIncludesExternal () : string list =
     @ Blade.Display.Frame.cppRuntime ()
     @
     [""
-     "#define TIME std::chrono::high_resolution_clock::now()"
+     "#define TIME std::chrono::steady_clock::now()"
      "#define TIME_DIFF std::chrono::duration_cast<std::chrono::nanoseconds>(__blade_t1 - __blade_t0).count()"
      ""]
 

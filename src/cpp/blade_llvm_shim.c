@@ -243,15 +243,37 @@ void blade_free(void *p) {
 
 /* ---- clock ------------------------------------------------------------ */
 
-/* Seconds, monotone enough for the "<name> completed in <t>s" line. The C++
- * lane uses std::chrono::high_resolution_clock; both are wall-clock
- * measurements, so the VALUE differs run to run in either lane and only the
- * line's shape is pinned. */
+/* Seconds on a MONOTONIC clock, for the "<name> completed in <t>s" line. The
+ * C++ lane uses std::chrono::steady_clock, which is QueryPerformanceCounter
+ * on Windows; this reads the same counter so both lanes (and the Fortran
+ * benchmark arms, which call QPC directly) time with one clock. Neither lane
+ * pins the VALUE -- it differs run to run -- only the line's shape. */
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 double blade_now(void) {
+#ifdef _WIN32
+    static double period = 0.0;
+    LARGE_INTEGER c;
+    if (period == 0.0) {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        period = 1.0 / (double)f.QuadPart;
+    }
+    QueryPerformanceCounter(&c);
+    return (double)c.QuadPart * period;
+#else
     struct timespec ts;
-    if (timespec_get(&ts, TIME_UTC) == TIME_UTC)
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
         return (double)ts.tv_sec + 1e-9 * (double)ts.tv_nsec;
     return (double)clock() / (double)CLOCKS_PER_SEC;
+#endif
 }
 
 /* ---- printing --------------------------------------------------------- */

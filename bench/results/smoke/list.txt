@@ -1,0 +1,153 @@
+﻿antisym  (group A)
+    size smoke    {'p': 23, 'n': 11}
+    size full     {'p': 1201, 'n': 401}
+    regimes  serial-licensed-native, mt8-licensed-native, serial-repro-native, mt8-repro-native, serial-fastmath-native, mt8-fastmath-native
+    arm blade-llvm                   antisym.blade        present
+    arm blade-cpp                    antisym.blade        present
+    arm gfortran-natural             natural.f90          present
+    arm gfortran-expert              expert.f90           present
+    arm ifx-natural                  natural.f90          present
+    arm ifx-expert                   expert.f90           present
+comoment3  (group A)
+    size smoke    {'p': 13, 'n': 11}
+    size full     {'p': 171, 'n': 201}
+    regimes  serial-licensed-native, mt8-licensed-native, serial-repro-native, mt8-repro-native, serial-fastmath-native, mt8-fastmath-native
+    arm blade-llvm                   comoment3.blade      present
+    arm blade-cpp                    comoment3.blade      present
+    arm gfortran-natural             natural.f90          present
+    arm gfortran-expert              expert.f90           present
+    arm ifx-natural                  natural.f90          present
+    arm ifx-expert                   expert.f90           present
+gram  (group A)
+    size smoke    {'p': 61, 'n': 31}
+    size full     {'p': 1601, 'n': 1001}
+    size scale    {'p': 2003, 'n': 1001}
+    regimes  serial-licensed-native, mt8-licensed-native, serial-repro-native, mt8-repro-native, serial-fastmath-native, mt8-fastmath-native, serial-licensed-blas, mt8-licensed-blas
+    arm blade-llvm                   gram.blade           present
+    arm blade-cpp                    gram.blade           present
+    arm gfortran-natural             natural.f90          present
+    arm gfortran-expert              expert.f90           present
+    arm gfortran-expert (blas)       expert_blas.f90      MISSING
+    arm ifx-natural                  natural.f90          present
+    arm ifx-expert                   expert.f90           present
+    arm ifx-expert (blas)            expert_blas.f90      MISSING
+pairkernel  (group A)
+    size smoke    {'n': 53}
+    size full     {'n': 2503}
+    regimes  serial-licensed-native, mt8-licensed-native, serial-repro-native, mt8-repro-native
+    arm blade-llvm                   pairkernel.blade     present
+    arm blade-cpp                    pairkernel.blade     present
+    arm gfortran-natural             natural.f90          present
+    arm gfortran-expert              expert.f90           present
+    arm ifx-natural                  natural.f90          present
+    arm ifx-expert                   expert.f90           present
+fusedchain  (group B)
+    size smoke    {'n': 20011}
+    size full     {'n': 2000003}
+    regimes  serial-licensed-native, mt8-licensed-native, serial-repro-native, mt8-repro-native, serial-fastmath-native, mt8-fastmath-native
+    arm blade-llvm                   fusedchain.blade     present
+    arm blade-cpp                    fusedchain.blade     present
+    arm gfortran-natural             natural.f90          present
+    arm gfortran-expert              expert.f90           present
+    arm ifx-natural                  natural.f90          present
+    arm ifx-expert                   expert.f90           present
+    arm blade-llvm-inputonly         inputonly.blade      present
+    arm blade-cpp-inputonly          inputonly.blade      present
+    arm gfortran-natural-inputonly   natural.f90          present
+    arm gfortran-expert-inputonly    expert.f90           present
+    arm ifx-natural-inputonly        natural.f90          present
+    arm ifx-expert-inputonly         expert.f90           present
+maskagg  (group B)
+    size smoke    {'n': 30011}
+    size full     {'n': 1000003}
+    regimes  serial-licensed-native, serial-repro-native
+    arm blade-llvm                   maskagg.blade        present
+    arm blade-cpp                    maskagg.blade        present
+    arm gfortran-natural             natural.f90          present
+    arm gfortran-expert              expert.f90           present
+    arm ifx-natural                  natural.f90          present
+    arm ifx-expert                   expert.f90           present
+    arm blade-llvm-inputonly         inputonly.blade      present
+    arm blade-cpp-inputonly          inputonly.blade      present
+    arm gfortran-natural-inputonly   natural.f90          present
+    arm gfortran-expert-inputonly    expert.f90           present
+    arm ifx-natural-inputonly        natural.f90          present
+    arm ifx-expert-inputonly         expert.f90           present
+    expected_llvm = fallback (the LLVM lane refuses `compound` (notes/llvm-acceptance-B.md); blade-cpp is the Blade figure)
+onepass  (group B)
+    size smoke    {'n': 50021}
+    size full     {'n': 5000011}
+    regimes  serial-licensed-native, mt8-licensed-native, serial-repro-native, mt8-repro-native, serial-fastmath-native, mt8-fastmath-native
+    arm blade-llvm                   onepass.blade        present
+    arm blade-cpp                    onepass.blade        present
+    arm gfortran-natural             natural.f90          present
+    arm gfortran-expert              expert.f90           present
+    arm ifx-natural                  natural.f90          present
+    arm ifx-expert                   expert.f90           present
+    arm blade-llvm-inputonly         inputonly.blade      present
+    arm blade-cpp-inputonly          inputonly.blade      present
+    arm gfortran-natural-inputonly   natural.f90          present
+    arm gfortran-expert-inputonly    expert.f90           present
+    arm ifx-natural-inputonly        natural.f90          present
+    arm ifx-expert-inputonly         expert.f90           present
+    no_parallel_form (Blade, mt8): ['all']
+recur  (group B)
+    size smoke    {'nt': 11, 'nx': 211}
+    size full     {'nt': 301, 'nx': 20011}
+    regimes  serial-licensed-native, mt8-licensed-native, serial-repro-native, mt8-repro-native
+    arm blade-llvm                   recur.blade          present
+    arm blade-cpp                    recur.blade          present
+    arm gfortran-natural             natural.f90          present
+    arm gfortran-expert              expert.f90           present
+    arm ifx-natural                  natural.f90          present
+    arm ifx-expert                   expert.f90           present
+    no_parallel_form (Blade, mt8): ['all']
+stencil  (group B)
+    size smoke    {'ny': 31, 'nx': 41}
+    size full     {'ny': 1501, 'nx': 2003}
+    regimes  serial-licensed-native, mt8-licensed-native, serial-repro-native, mt8-repro-native
+    arm blade-llvm                   stencil.blade        present
+    arm blade-cpp                    stencil.blade        present
+    arm gfortran-natural             natural.f90          present
+    arm gfortran-expert              expert.f90           present
+    arm ifx-natural                  natural.f90          present
+    arm ifx-expert                   expert.f90           present
+    arm blade-llvm-inputonly         inputonly.blade      present
+    arm blade-cpp-inputonly          inputonly.blade      present
+    arm gfortran-natural-inputonly   natural.f90          present
+    arm gfortran-expert-inputonly    expert.f90           present
+    arm ifx-natural-inputonly        natural.f90          present
+    arm ifx-expert-inputonly         expert.f90           present
+dot  (group C)
+    size smoke    {'n': 30011}
+    size full     {'n': 3000017}
+    regimes  serial-licensed-native, mt8-licensed-native, serial-repro-native, mt8-repro-native, serial-fastmath-native, mt8-fastmath-native
+    arm blade-llvm                   dot.blade            present
+    arm blade-cpp                    dot.blade            present
+    arm gfortran-natural             natural.f90          present
+    arm gfortran-expert              expert.f90           present
+    arm ifx-natural                  natural.f90          present
+    arm ifx-expert                   expert.f90           present
+    arm blade-llvm-inputonly         inputonly.blade      present
+    arm blade-cpp-inputonly          inputonly.blade      present
+    arm gfortran-natural-inputonly   natural.f90          present
+    arm gfortran-expert-inputonly    expert.f90           present
+    arm ifx-natural-inputonly        natural.f90          present
+    arm ifx-expert-inputonly         expert.f90           present
+saxpy  (group C)
+    size smoke    {'n': 20011}
+    size full     {'n': 2000003}
+    size control  {'n': 700001}
+    regimes  serial-licensed-native, mt8-licensed-native, serial-repro-native, mt8-repro-native
+    arm blade-llvm                   saxpy.blade          present
+    arm blade-cpp                    saxpy.blade          present
+    arm gfortran-natural             natural.f90          present
+    arm gfortran-expert              expert.f90           present
+    arm ifx-natural                  natural.f90          present
+    arm ifx-expert                   expert.f90           present
+    arm blade-llvm-inputonly         inputonly.blade      present
+    arm blade-cpp-inputonly          inputonly.blade      present
+    arm gfortran-natural-inputonly   natural.f90          present
+    arm gfortran-expert-inputonly    expert.f90           present
+    arm ifx-natural-inputonly        natural.f90          present
+    arm ifx-expert-inputonly         expert.f90           present
