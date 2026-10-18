@@ -225,7 +225,11 @@ opens no team (`BLADE_OMP_THREADS=1`) still vectorizes the licensed fold. The
 result is the serial fold up to reassociation -- deterministic for a fixed
 binary (the lane form for a fixed K; the simd form for the vectorizer's
 width), not bit-reproducible across compilers or flags. A fold with no licence
-is the serial chain in every build. `blade plan` names each fold's form
+is the serial chain in every build. The thread licence may sit on the fold
+kernel or on the MAP the fold consumes: `omp(i: 1)` covering the outermost level
+of a reorder-licensed fold's nest threads that level (per-thread partials).
+The LLVM lane has no thread runtime, so it spends only the reordering half and
+reports the threading half with the census line. `blade plan` names each fold's form
 (`fold form: simd-reduction | K-lanes(k) | threaded(...) | serial (repro) |
 serial (<why>)`).
 

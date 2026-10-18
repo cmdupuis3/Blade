@@ -1515,14 +1515,17 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
                 // parallelized and must not be reported as serial. A Path B
                 // fold nest counts as emitted: the parallel region is the
                 // prologue above, not a `for` pragma on any level.
-                ompSuppressedMarker codeGen.OmpRequested
+                // A MAP licence the fold turned into a chunk plan (bench gap
+                // G27) is reported by the FoldChunk lines below when the plan
+                // is dead, so it is excluded here -- one census line per drop.
+                ompSuppressedMarker (codeGen.OmpRequested && codeGen.FoldChunk.IsNone)
                                     (pragmaLevel.IsSome || foldChunk.IsSome) reason (ind depth)
                 // A Path B fold nest requested omp through `FoldChunk`, not
                 // through `OmpRequested` (which the fold path leaves unset), so
                 // a knob-suppressed chunk plan would otherwise vanish without a
                 // trace. This is the census line for exactly that case.
                 @ (if codeGen.FoldChunk.IsSome && not (ompThreadEmissionEnabled ())
-                   then [ ind depth + $"// [omp] requested but emitted serial: {(ompThreadsSuppressedReason ())}" ]
+                   then [ ind depth + $"// {(ompSuppressedPhrase (ompThreadsSuppressedReason ()))}" ]
                    elif codeGen.FoldChunk.IsSome && not (fpReassocEnabled ())
                    then [ ind depth + $"// {(ompSuppressedPhrase (fpReproReason ()))}" ]
                    else [])
@@ -2197,7 +2200,7 @@ let tryGenFlatElementwiseNest
             // construct and the `for` it governs.
             let pragmaMarker =
                 if allParallel && not threadsOn
-                then [ ind (indent + 1) + $"// [omp] requested but emitted serial: {(ompThreadsSuppressedReason ())}" ]
+                then [ ind (indent + 1) + $"// {(ompSuppressedPhrase (ompThreadsSuppressedReason ()))}" ]
                 else []
             let shapeNote =
                 sg

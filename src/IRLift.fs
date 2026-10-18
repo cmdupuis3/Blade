@@ -1308,8 +1308,41 @@ let liftInlineFormsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     // result types. Required for hoisting array-typed field accesses to
     // let-RHS so codegen can synthesize their _extents companions.
     setStructFieldsCache modul.Types
+    // A `where omp` FOLD left inside a top-level binding's result TUPLE --
+    // `let (a, b) = { ...; (kernel(x), reduce(x, lambda(u, v) where omp -> u + v, 0.0)) }`
+    // -- rendered as an expression-position reduce, which opens no thread team,
+    // while the same fold bound to its own `let` takes the parallel form (bench
+    // gap G27 / G14). A module binding's tuple is a STATEMENT position (never a
+    // kernel body, never inside a team), so the component is bound to its own
+    // let here: one spelling, one emission. Scalar folds only (a rank-1
+    // operand); function bodies are left alone -- there the expression form's
+    // structural reason (the context may already be a parallel region) holds.
+    let ompKernelIds =
+        modul.Functions |> List.filter (fun f -> f.IsOmpParallel) |> List.map (fun f -> f.Id) |> Set.ofList
+    let liftLicensedTupleFolds (value: IRExpr) : IRExpr =
+        if Set.isEmpty ompKernelIds then value
+        else
+        let (outer, tail) = peelLetChain value
+        match tail with
+        | IRTuple es ->
+            let isLicensedScalarFold (e: IRExpr) =
+                match e with
+                | IRReduce (_, IRVar (kid, _), _) when Set.contains kid ompKernelIds ->
+                    (match typeOf e with IRTScalar _ -> true | _ -> false)
+                | _ -> false
+            if not (List.exists isLicensedScalarFold es) then value
+            else
+                let (binds, esFinal) =
+                    es |> List.fold (fun (accB, accE) e ->
+                        if isLicensedScalarFold e then
+                            let id = builder.FreshId()
+                            let ty = typeOf e
+                            (accB @ [(id, ty, e)], accE @ [IRVar (id, ty)])
+                        else (accB, accE @ [e])) ([], [])
+                wrapLets (outer @ binds) (IRTuple esFinal)
+        | _ -> value
     let liftedBindings =
-        modul.Bindings |> List.map (fun b -> { b with Value = liftExpr builder b.Value })
+        modul.Bindings |> List.map (fun b -> { b with Value = liftLicensedTupleFolds (liftExpr builder b.Value) })
     // A KERNEL lambda whose whole body is a data-dependent form --
     // `lambda(row) -> sort(row, k)` -- is inlined into the loop nest and its
     // body rendered as an expression, where these forms have no rendering

@@ -1,0 +1,20 @@
+// TEST: Omp Map Licence Feeding Fold
+// Bench gap G27: `where omp(i: 1)` on the ROW MAP a fold consumes licenses the
+// level the fold sweeps, so the fold threads (Path B, the map's level chunked
+// per thread) instead of the licence being accepted and silently dropped. And a
+// `where omp` fold left inside a top-level result TUPLE is bound to its own let
+// (IRLift), so it opens the same team the let-bound spelling does. The emission
+// shapes are pinned by `blade test omp-pragma` / `omp-reduce`; this file pins
+// the VALUES. Integer-valued data: exact under every association, so the
+// threaded folds and the interpreter's serial ones agree bit for bit.
+type I = Idx<13>
+type J = Idx<7>
+let x = method_for(range<I>, range<J>) <@> lambda(i, j) -> Float64(i * 3 + j) |> compute
+let cs = reduce(method_for(range<I>) <@> lambda(i) where omp(i: 1) -> reduce(method_for(range<J>) <@> lambda(j) -> x(i, j) * x(i, j), (+)), (+))
+let (rows, total) = {
+    let r = reduce(x, (+))
+    (reduce(r, (+)), reduce(r, lambda(u, v) where omp -> u + v, 0.0))
+}
+// EXPECT: cs = 51961.0
+// EXPECT: rows = 1911.0
+// EXPECT: total = 1911.0
