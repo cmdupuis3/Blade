@@ -667,8 +667,10 @@ the emitted C++/LLVM, the machine code, or a counter).
 
 **Inventory of workloads (M26).** Beside the eleven measured kernels every report lists the
 workloads that were dropped or recast and why, so the supported claim is not wider than the
-measured one: `band` (closed-form constrained enumeration — dropped: the domain fold is
-refused at codegen, BL7004, and the compute form builds a hashed key table; D1, G4); the
+measured one: `band` (closed-form constrained enumeration — dropped on 2026-10-17 because
+the domain fold was refused at codegen, BL7004, and the compute form built a hashed key
+table, D1/G4; **restored on 2026-10-18 after G4 was fixed** — `kernels/band/spec.md`, the
+twelfth kernel, unmeasured until its sources land); the
 **pair sum** over a `comm` kernel (recast as the `pairkernel` MATRIX: a fold over compact
 storage is refused, BL3999; D2, G2); the O(1)-per-cell antisymmetric map (recast as the
 angular-momentum tensor: a ~5 ms write under the 64 MB cap; D4). The claim the suite can

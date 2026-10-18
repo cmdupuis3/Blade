@@ -38,7 +38,14 @@ Fortran (`stencil`, `recur`, `maskagg`, `dot`, `saxpy`, and `gram` in the strict
 
 Changes against the charter's candidate list (reasons in `notes/design-decisions.md`):
 
-- **A5 `band` is DROPPED.** `reduce(method_for(range<Band>) <@> k, (+))` is refused at
+- **A5 `band` — dropped on 2026-10-17, RESTORED on 2026-10-18 after G4 was fixed** (agent
+  C, 1ea0ddf3 / 4b1a5224: linear-conjunct domains stream as an affine nest in all lanes).
+  Spec: `kernels/band/spec.md` — the banded quadratic form xᵀBx over `range<Band>` with
+  `abs(i - j) <= w`, n = 20011, w = 101 (4.05M band cells vs 4e8 dense visits), hypothesis
+  equivalent to the expert's clipped-bounds nest, ~50–100x over the predicate-nest
+  baseline. Unmeasured as of the 2026-10-18 matrix; sources to be written by blade-B and
+  the Fortran agent after the rebuild. The original reason for dropping it follows.
+- **A5 `band` was DROPPED (2026-10-17).** `reduce(method_for(range<Band>) <@> k, (+))` is refused at
   codegen (BL7004, "reduce over a deferred computation is not supported for
   ragged/grouped/compound/sparse inputs -- bind with |> compute first"), and the
   `|> compute` form builds a hashed `sparse_index_t` key table of O(card) entries

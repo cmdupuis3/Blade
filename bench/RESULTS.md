@@ -1565,8 +1565,10 @@ an observation, not a re-analysis of the earlier sessions.
 
 ### 11.3 Dropped and recast workloads (README §8 inventory)
 
-`band` (closed-form constrained enumeration) — dropped: the domain fold is refused at
-codegen (BL7004) and the `|> compute` form builds a hashed key table (D1, G4). The **pair
+`band` (closed-form constrained enumeration) — dropped before measurement: the domain
+fold was refused at codegen (BL7004) and the `|> compute` form built a hashed key table
+(D1, G4); **G4 was fixed after the matrix (agent C, 1ea0ddf3 / 4b1a5224) and `band` is
+restored as a twelfth kernel (`kernels/band/spec.md`), unmeasured in this document**. The **pair
 SUM** over a `comm` kernel — recast as the `pairkernel` MATRIX: a fold over compact
 storage is refused (BL3999; D2, G2), and the suite therefore measures materialized
 symmetric objects, not pair sums. The O(1)-per-cell antisymmetric map — recast as the
