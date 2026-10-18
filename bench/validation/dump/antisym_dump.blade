@@ -20,8 +20,8 @@ function lcg(k: Int64, seed: Int64) -> Float64 = {
     Float64(h5) / 2147483648.0
 }
 
-let z = method_for(range<Part>, range<Comp>, range<Obs>) <@> lambda(i, c, s) -> lcg(i * n + s, 10000019 * (c + 1)) |> compute
+let z = method_for(range<Part>, range<Comp>, range<Obs>) <@> lambda(i, c, s) where omp(i: 1) -> lcg(i * n + s, 10000019 * (c + 1)) |> compute
 let l = method_for(z, z) <@> lambda(a: Array<Float64 like Comp, Obs>, b: Array<Float64 like Comp, Obs>) where anticomm(a, b), omp(a: 1) -> prodsum(a((0 : Comp)), b((1 : Comp))) - prodsum(b((0 : Comp)), a((1 : Comp))) |> compute
 let L = method_for(range<Part>, range<Part>) <@> lambda(i, j) -> l(i, j) |> compute
-let checksum = reduce(method_for(range<Part>) <@> lambda(i) -> reduce(method_for(range<Part>) <@> lambda(j) -> l(i, j) * l(i, j), (+)), (+))
-let input_checksum = reduce(reduce(reduce(z, (+)), (+)), (+))
+let checksum = reduce(method_for(range<Part>) <@> lambda(i) -> reduce(method_for(range<Part>) <@> lambda(j) -> l(i, j) * l(i, j), (+)), lambda(u, v) where omp -> u + v, 0.0)
+let input_checksum = reduce(reduce(reduce(z, (+)), (+)), lambda(u, v) where omp -> u + v, 0.0)

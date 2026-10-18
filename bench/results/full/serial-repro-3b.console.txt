@@ -1,0 +1,389 @@
+[13:04:38.530 +    0.0s] bench: 5 kernel(s): fusedchain, maskagg, onepass, dot, saxpy; size full
+[13:04:38.594 +    0.1s] fingerprinting the machine
+[13:04:40.648 +    2.1s] power: ac, max processor state AC 100%, boost mode AC None, Power Scheme GUID: 64a64f24-65b9-4b56-befd-5ec1eaced9b3  (Silent)
+[13:04:43.262 +    4.7s] control compute: recur/gfortran-expert/serial-repro-native/full
+[13:04:44.137 +    5.6s] control memory: saxpy/gfortran-expert/serial-repro-native/control
+[13:04:45.101 +    6.6s] build fusedchain serial-repro-native full blade-llvm
+[13:04:48.631 +   10.1s]   -> ok (2.0s)
+[13:04:48.631 +   10.1s] build fusedchain serial-repro-native full blade-cpp
+[13:04:53.012 +   14.5s]   -> ok (2.8s)
+[13:04:53.012 +   14.5s] build fusedchain serial-repro-native full gfortran-natural
+[13:04:53.775 +   15.3s]   -> ok (0.7s)
+[13:04:53.776 +   15.3s] build fusedchain serial-repro-native full gfortran-expert
+[13:04:54.513 +   16.0s]   -> ok (0.7s)
+[13:04:54.513 +   16.0s] build fusedchain serial-repro-native full ifx-natural
+[13:04:56.928 +   18.4s]   -> ok (2.3s)
+[13:04:56.928 +   18.4s] build fusedchain serial-repro-native full ifx-expert
+[13:04:59.285 +   20.8s]   -> ok (2.2s)
+[13:04:59.285 +   20.8s] build fusedchain serial-repro-native full blade-llvm-inputonly
+[13:05:02.689 +   24.2s]   -> ok (1.8s)
+[13:05:02.689 +   24.2s] build fusedchain serial-repro-native full blade-cpp-inputonly
+[13:05:06.888 +   28.4s]   -> ok (2.7s)
+[13:05:06.888 +   28.4s] build fusedchain serial-repro-native full gfortran-natural-inputonly
+[13:05:07.628 +   29.1s]   -> ok (0.7s)
+[13:05:07.628 +   29.1s] build fusedchain serial-repro-native full gfortran-expert-inputonly
+[13:05:08.355 +   29.8s]   -> ok (0.7s)
+[13:05:08.355 +   29.8s] build fusedchain serial-repro-native full ifx-natural-inputonly
+[13:05:10.775 +   32.3s]   -> ok (2.3s)
+[13:05:10.775 +   32.3s] build fusedchain serial-repro-native full ifx-expert-inputonly
+[13:05:13.153 +   34.6s]   -> ok (2.2s)
+[13:05:13.229 +   34.7s]   blade-llvm: ok t=0.008336s checksum=4640.89121018634 input=999516.086692066 peakWS=19.8MB
+[13:05:15.297 +   36.8s]   blade-cpp: ok t=0.008325s checksum=4640.89121018634 input=999516.086692066 peakWS=20.5MB
+[13:05:17.373 +   38.9s]   gfortran-natural: ok t=0.01803s checksum=4.6408912101863398E+003 input=9.9951608669206640E+005 peakWS=66.1MB
+[13:05:19.446 +   40.9s]   gfortran-expert: ok t=0.008301s checksum=4.6408912101863398E+003 input=9.9951608669206640E+005 peakWS=20.3MB
+[13:05:21.541 +   43.0s]   ifx-natural: ok t=0.01424s checksum=4.6408912101863398E+003 input=9.9951608669206640E+005 peakWS=65.6MB
+[13:05:23.615 +   45.1s]   ifx-expert: ok t=0.005222s checksum=4.6408912101863398E+003 input=9.9951608669206640E+005 peakWS=19.8MB
+[13:05:25.672 +   47.2s]   blade-llvm-inputonly: ok t=0.004639s checksum=0.0 input=999516.086692066 peakWS=19.8MB
+[13:05:27.743 +   49.2s]   blade-cpp-inputonly: ok t=0.008367s checksum=0.0 input=999516.086692066 peakWS=20.6MB
+[13:05:29.815 +   51.3s]   gfortran-natural-inputonly: ok t=0.008224s checksum=0.0000000000000000E+000 input=9.9951608669206640E+005 peakWS=20.3MB
+[13:05:31.889 +   53.4s]   gfortran-expert-inputonly: ok t=0.008127s checksum=0.0000000000000000E+000 input=9.9951608669206640E+005 peakWS=20.3MB
+[13:05:33.975 +   55.5s]   ifx-natural-inputonly: ok t=0.005976s checksum=0.0000000000000000E+000 input=9.9951608669206640E+005 peakWS=19.9MB
+[13:05:36.066 +   57.5s]   ifx-expert-inputonly: ok t=0.005738s checksum=0.0000000000000000E+000 input=9.9951608669206640E+005 peakWS=19.8MB
+[13:05:38.068 +   59.6s] fusedchain/serial-repro-native: 21 rounds x 12 arms + 2 control(s) (minimum 21 (memory-bound: median warm-up < 50 ms)); ratio reference blade-llvm
+[13:06:06.642 +   88.1s]   round 1/21: [memory]=6.531ms gfortran-expert=9.725ms blade-llvm=7ms ifx-natural-inputonly=4.709ms blade-llvm-inputonly=4.625ms ifx-expert=5.499ms ifx-expert-inputonly=5.826ms gfortran-natural=24.01ms ifx-natural=15.17ms blade-cpp=8.448ms [compute]=13.07ms gfortran-expert-inputonly=6.641ms gfortran-natural-inputonly=6.732ms blade-cpp-inputonly=6.589ms
+[13:06:35.210 +  116.7s]   round 2/21: ifx-expert-inputonly=4.413ms gfortran-natural=20.08ms blade-cpp-inputonly=6.811ms blade-llvm=6.899ms gfortran-expert-inputonly=6.792ms gfortran-expert=8.318ms ifx-natural-inputonly=4.681ms ifx-natural=14.3ms ifx-expert=5.01ms blade-llvm-inputonly=4.351ms blade-cpp=8.419ms [memory]=5.931ms gfortran-natural-inputonly=6.939ms [compute]=13.07ms
+[13:07:03.741 +  145.2s]   round 3/21: ifx-expert-inputonly=4.563ms [compute]=13.84ms ifx-expert=5.319ms blade-llvm-inputonly=4.464ms gfortran-expert-inputonly=6.66ms gfortran-expert=8.245ms [memory]=5.251ms ifx-natural=14.17ms blade-llvm=6.948ms gfortran-natural=18.11ms gfortran-natural-inputonly=6.801ms blade-cpp-inputonly=6.835ms ifx-natural-inputonly=4.692ms blade-cpp=8.243ms
+[13:07:32.285 +  173.8s]   round 4/21: ifx-natural-inputonly=5.245ms blade-llvm-inputonly=4.975ms gfortran-natural-inputonly=6.61ms [memory]=5.301ms gfortran-natural=18.53ms gfortran-expert=8.416ms ifx-natural=13.95ms gfortran-expert-inputonly=6.798ms blade-llvm=8.12ms ifx-expert=6.796ms blade-cpp=9.701ms blade-cpp-inputonly=7.271ms ifx-expert-inputonly=5.04ms [compute]=16.03ms
+[13:08:00.864 +  202.3s]   round 5/21: [compute]=14.82ms ifx-expert=5.805ms blade-llvm-inputonly=5.432ms ifx-natural=15.67ms gfortran-expert=8.836ms blade-llvm=7.268ms [memory]=5.951ms gfortran-natural-inputonly=7.293ms ifx-expert-inputonly=5.243ms blade-cpp-inputonly=7.431ms ifx-natural-inputonly=5.338ms gfortran-expert-inputonly=7.431ms gfortran-natural=22.69ms blade-cpp=8.431ms
+[13:08:29.444 +  230.9s]   round 6/21: ifx-expert-inputonly=4.573ms blade-llvm-inputonly=4.447ms gfortran-expert-inputonly=6.726ms blade-cpp=8.159ms ifx-natural=14.16ms [memory]=5.215ms gfortran-natural=17.35ms blade-cpp-inputonly=6.675ms gfortran-natural-inputonly=6.604ms gfortran-expert=9.812ms blade-llvm=7.683ms [compute]=16.58ms ifx-expert=5.76ms ifx-natural-inputonly=5.567ms
+[13:08:58.025 +  259.5s]   round 7/21: ifx-expert=5.401ms ifx-natural-inputonly=5.155ms gfortran-expert=8.684ms gfortran-natural-inputonly=7.45ms blade-cpp=8.783ms gfortran-natural=22.73ms gfortran-expert-inputonly=6.607ms blade-cpp-inputonly=6.821ms ifx-natural=14.37ms [memory]=5.713ms blade-llvm-inputonly=4.573ms ifx-expert-inputonly=4.448ms blade-llvm=7.6ms [compute]=13.41ms
+[13:09:26.635 +  288.1s]   round 8/21: blade-llvm-inputonly=5.454ms blade-llvm=8.581ms ifx-expert=5.635ms blade-cpp-inputonly=7.672ms gfortran-natural-inputonly=7.609ms blade-cpp=8.823ms ifx-expert-inputonly=5.542ms [memory]=6.864ms ifx-natural-inputonly=5.728ms gfortran-expert-inputonly=8.341ms ifx-natural=19.9ms [compute]=15.7ms gfortran-natural=21.83ms gfortran-expert=8.773ms
+[13:09:55.211 +  316.7s]   round 9/21: gfortran-natural-inputonly=6.746ms ifx-natural=13.4ms blade-llvm-inputonly=4.363ms blade-cpp=8.236ms gfortran-expert-inputonly=6.827ms ifx-expert-inputonly=4.836ms [compute]=15.63ms gfortran-expert=8.925ms blade-cpp-inputonly=7.371ms ifx-natural-inputonly=4.63ms gfortran-natural=19.51ms [memory]=5.976ms blade-llvm=7.484ms ifx-expert=6.137ms
+[13:10:23.816 +  345.3s]   round 10/21: gfortran-natural-inputonly=6.686ms blade-cpp-inputonly=6.629ms ifx-natural-inputonly=4.602ms [compute]=16.72ms ifx-expert-inputonly=5.817ms gfortran-expert=9.801ms gfortran-expert-inputonly=7.967ms blade-llvm-inputonly=5.286ms blade-llvm=7.674ms ifx-natural=19.52ms gfortran-natural=21.62ms ifx-expert=4.983ms [memory]=5.192ms blade-cpp=9.954ms
+[13:10:52.413 +  373.9s]   round 11/21: gfortran-expert=9.705ms gfortran-natural=23.31ms blade-llvm=7.025ms ifx-natural=18.76ms [compute]=12.78ms gfortran-natural-inputonly=6.676ms ifx-expert=6.04ms blade-cpp=8.745ms gfortran-expert-inputonly=7.737ms ifx-expert-inputonly=5.07ms [memory]=6.643ms blade-llvm-inputonly=5.161ms blade-cpp-inputonly=7.416ms ifx-natural-inputonly=4.947ms
+[13:11:20.999 +  402.5s]   round 12/21: gfortran-expert=8.775ms blade-llvm-inputonly=4.844ms blade-llvm=7.171ms blade-cpp-inputonly=6.802ms ifx-natural=18.8ms ifx-expert=4.963ms gfortran-natural-inputonly=7.412ms [compute]=13.21ms gfortran-expert-inputonly=6.554ms ifx-natural-inputonly=4.577ms [memory]=5.37ms ifx-expert-inputonly=4.395ms blade-cpp=8.314ms gfortran-natural=19.05ms
+[13:11:49.583 +  431.1s]   round 13/21: blade-cpp=8.314ms ifx-expert=5.192ms [compute]=14.66ms blade-cpp-inputonly=6.833ms gfortran-expert=8.5ms ifx-natural=16.86ms gfortran-natural-inputonly=6.662ms gfortran-expert-inputonly=7.366ms blade-llvm-inputonly=5.694ms [memory]=6.484ms ifx-natural-inputonly=5.303ms gfortran-natural=21.69ms blade-llvm=7.12ms ifx-expert-inputonly=4.379ms
+[13:12:18.167 +  459.6s]   round 14/21: gfortran-expert-inputonly=6.827ms gfortran-natural=18.55ms ifx-expert=5.198ms blade-cpp=8.333ms [compute]=12.67ms blade-llvm=6.903ms [memory]=5.263ms ifx-expert-inputonly=4.906ms blade-llvm-inputonly=6.323ms gfortran-expert=9.538ms ifx-natural-inputonly=4.577ms blade-cpp-inputonly=6.806ms gfortran-natural-inputonly=6.986ms ifx-natural=13.79ms
+[13:12:46.740 +  488.2s]   round 15/21: blade-cpp=8.178ms ifx-expert=5.057ms blade-llvm=7.208ms gfortran-natural-inputonly=6.683ms gfortran-expert=8.242ms ifx-expert-inputonly=4.546ms [compute]=12.86ms gfortran-expert-inputonly=6.599ms ifx-natural-inputonly=4.874ms ifx-natural=15.09ms blade-cpp-inputonly=6.575ms blade-llvm-inputonly=4.391ms gfortran-natural=18.23ms [memory]=5.611ms
+[13:13:15.310 +  516.8s]   round 16/21: ifx-expert-inputonly=4.539ms gfortran-natural-inputonly=7.474ms gfortran-expert-inputonly=6.79ms blade-cpp-inputonly=6.872ms gfortran-expert=8.366ms ifx-expert=5.317ms ifx-natural-inputonly=4.473ms blade-llvm-inputonly=4.391ms blade-cpp=8.272ms gfortran-natural=22.14ms ifx-natural=15.43ms blade-llvm=6.898ms [compute]=12.92ms [memory]=5.266ms
+[13:13:43.909 +  545.4s]   round 17/21: [memory]=5.329ms blade-cpp-inputonly=6.837ms blade-llvm-inputonly=4.706ms [compute]=13.73ms ifx-natural-inputonly=4.472ms blade-llvm=7.043ms ifx-expert-inputonly=4.666ms blade-cpp=8.28ms gfortran-expert=9.677ms ifx-natural=18.3ms gfortran-expert-inputonly=6.667ms gfortran-natural-inputonly=8.165ms gfortran-natural=22.96ms ifx-expert=6.067ms
+[13:14:12.509 +  574.0s]   round 18/21: ifx-expert=6.408ms blade-llvm-inputonly=5.367ms ifx-natural-inputonly=5.305ms blade-llvm=8.107ms [compute]=15.29ms gfortran-expert-inputonly=7.052ms gfortran-natural-inputonly=7.208ms blade-cpp=8.7ms gfortran-expert=9.397ms ifx-expert-inputonly=5.155ms gfortran-natural=21.44ms [memory]=5.333ms blade-cpp-inputonly=6.99ms ifx-natural=14.57ms
+[13:14:41.097 +  602.6s]   round 19/21: [memory]=5.38ms ifx-expert=5.059ms ifx-expert-inputonly=4.389ms gfortran-expert=8.308ms blade-cpp=8.423ms gfortran-natural-inputonly=6.849ms [compute]=12.88ms ifx-natural=13.5ms blade-llvm=7.16ms blade-cpp-inputonly=6.739ms ifx-natural-inputonly=4.674ms gfortran-natural=18.63ms gfortran-expert-inputonly=6.604ms blade-llvm-inputonly=4.416ms
+[13:15:09.670 +  631.2s]   round 20/21: blade-llvm=6.774ms ifx-natural-inputonly=4.379ms [compute]=13.42ms gfortran-natural-inputonly=6.547ms gfortran-natural=18.88ms gfortran-expert-inputonly=6.852ms blade-cpp=8.259ms blade-llvm-inputonly=4.397ms blade-cpp-inputonly=6.614ms ifx-expert=4.878ms gfortran-expert=8.8ms [memory]=5.539ms ifx-expert-inputonly=4.648ms ifx-natural=14.78ms
+[13:15:38.229 +  659.7s]   round 21/21: gfortran-expert=8.384ms blade-llvm=7.105ms gfortran-expert-inputonly=6.547ms [memory]=5.332ms ifx-natural=14.11ms gfortran-natural-inputonly=6.547ms gfortran-natural=18.47ms [compute]=12.83ms blade-cpp-inputonly=7.094ms ifx-expert-inputonly=5.298ms ifx-natural-inputonly=4.669ms blade-llvm-inputonly=4.356ms ifx-expert=4.887ms blade-cpp=8.374ms
+[13:15:38.653 +  660.1s] cooldown 10s (between kernels)
+[13:15:48.763 +  670.2s] build maskagg serial-repro-native full blade-llvm
+[13:15:53.321 +  674.8s]   -> fallback: a compound-index initializer (3.0s)
+[13:15:53.321 +  674.8s] build maskagg serial-repro-native full blade-cpp
+[13:15:57.740 +  679.2s]   -> ok (2.9s)
+[13:15:57.740 +  679.2s] build maskagg serial-repro-native full gfortran-natural
+[13:15:58.537 +  680.0s]   -> ok (0.7s)
+[13:15:58.537 +  680.0s] build maskagg serial-repro-native full gfortran-expert
+[13:15:59.288 +  680.8s]   -> ok (0.7s)
+[13:15:59.288 +  680.8s] build maskagg serial-repro-native full ifx-natural
+[13:16:01.836 +  683.3s]   -> ok (2.4s)
+[13:16:01.836 +  683.3s] build maskagg serial-repro-native full ifx-expert
+[13:16:04.191 +  685.7s]   -> ok (2.2s)
+[13:16:04.192 +  685.7s] build maskagg serial-repro-native full blade-llvm-inputonly
+[13:16:07.478 +  689.0s]   -> ok (1.8s)
+[13:16:07.478 +  689.0s] build maskagg serial-repro-native full blade-cpp-inputonly
+[13:16:11.680 +  693.2s]   -> ok (2.7s)
+[13:16:11.680 +  693.2s] build maskagg serial-repro-native full gfortran-natural-inputonly
+[13:16:12.407 +  693.9s]   -> ok (0.7s)
+[13:16:12.407 +  693.9s] build maskagg serial-repro-native full gfortran-expert-inputonly
+[13:16:13.138 +  694.6s]   -> ok (0.7s)
+[13:16:13.138 +  694.6s] build maskagg serial-repro-native full ifx-natural-inputonly
+[13:16:15.522 +  697.0s]   -> ok (2.2s)
+[13:16:15.522 +  697.0s] build maskagg serial-repro-native full ifx-expert-inputonly
+[13:16:17.862 +  699.3s]   -> ok (2.2s)
+[13:16:17.991 +  699.5s]   blade-cpp: ok t=0.06601s checksum=1664272.56474546 input=999324.11850267 peakWS=46.5MB
+[13:16:20.065 +  701.5s]   gfortran-natural: ok t=0.008433s checksum=1.6642725647454616E+006 input=9.9932411850266997E+005 peakWS=17.4MB
+[13:16:22.143 +  703.6s]   gfortran-expert: ok t=0.00484s checksum=1.6642725647454616E+006 input=9.9932411850266997E+005 peakWS=16.5MB
+[13:16:24.225 +  705.7s]   ifx-natural: ok t=0.01087s checksum=1.6642725647454616E+006 input=9.9932411850266997E+005 peakWS=23.6MB
+[13:16:26.308 +  707.8s]   ifx-expert: ok t=0.003757s checksum=1.6642725647454616E+006 input=9.9932411850266997E+005 peakWS=16.0MB
+[13:16:28.379 +  709.9s]   blade-llvm-inputonly: ok t=0.002322s checksum=0.0 input=999324.11850267 peakWS=12.2MB
+[13:16:30.448 +  711.9s]   blade-cpp-inputonly: ok t=0.003268s checksum=0.0 input=999324.11850267 peakWS=12.9MB
+[13:16:32.508 +  714.0s]   gfortran-natural-inputonly: ok t=0.003333s checksum=0.0000000000000000E+000 input=9.9932411850266997E+005 peakWS=12.6MB
+[13:16:34.570 +  716.1s]   gfortran-expert-inputonly: ok t=0.003303s checksum=0.0000000000000000E+000 input=9.9932411850266997E+005 peakWS=12.6MB
+[13:16:36.652 +  718.1s]   ifx-natural-inputonly: ok t=0.002218s checksum=0.0000000000000000E+000 input=9.9932411850266997E+005 peakWS=12.2MB
+[13:16:38.727 +  720.2s]   ifx-expert-inputonly: ok t=0.002253s checksum=0.0000000000000000E+000 input=9.9932411850266997E+005 peakWS=12.2MB
+[13:16:40.732 +  722.2s] maskagg/serial-repro-native: 21 rounds x 11 arms + 2 control(s) (minimum 21 (memory-bound: median warm-up < 50 ms)); ratio reference blade-cpp
+[13:17:07.310 +  748.8s]   round 1/21: blade-llvm-inputonly=2.297ms gfortran-expert=4.797ms blade-cpp-inputonly=3.35ms gfortran-expert-inputonly=3.359ms ifx-natural=11.07ms ifx-natural-inputonly=2.18ms gfortran-natural=8.237ms ifx-expert-inputonly=2.217ms blade-cpp=72.27ms gfortran-natural-inputonly=3.32ms [compute]=12.76ms ifx-expert=3.687ms [memory]=5.495ms
+[13:17:33.905 +  775.4s]   round 2/21: ifx-expert-inputonly=2.149ms blade-cpp=76.13ms blade-cpp-inputonly=3.374ms blade-llvm-inputonly=2.364ms gfortran-expert=4.789ms gfortran-expert-inputonly=3.647ms gfortran-natural=8.284ms [compute]=12.71ms ifx-expert=3.777ms ifx-natural=10.65ms ifx-natural-inputonly=2.3ms gfortran-natural-inputonly=3.675ms [memory]=5.18ms
+[13:18:00.465 +  801.9s]   round 3/21: ifx-expert-inputonly=2.183ms blade-cpp-inputonly=3.271ms ifx-natural-inputonly=2.229ms [memory]=5.417ms ifx-expert=3.698ms blade-llvm-inputonly=2.285ms gfortran-natural-inputonly=3.321ms gfortran-natural=8.172ms ifx-natural=10.69ms blade-cpp=68.56ms gfortran-expert-inputonly=3.395ms [compute]=13.03ms gfortran-expert=5.026ms
+[13:18:27.033 +  828.5s]   round 4/21: gfortran-expert=5.055ms gfortran-natural=8.356ms [compute]=12.97ms [memory]=5.325ms gfortran-expert-inputonly=3.388ms blade-llvm-inputonly=2.182ms ifx-natural-inputonly=2.154ms ifx-expert-inputonly=2.212ms blade-cpp=68.98ms ifx-expert=3.661ms blade-cpp-inputonly=3.25ms ifx-natural=10.39ms gfortran-natural-inputonly=3.463ms
+[13:18:53.614 +  855.1s]   round 5/21: ifx-natural-inputonly=2.188ms gfortran-expert=4.793ms gfortran-expert-inputonly=3.469ms [memory]=5.26ms ifx-expert-inputonly=2.154ms blade-cpp=70.9ms ifx-expert=3.906ms ifx-natural=10.44ms [compute]=12.95ms blade-cpp-inputonly=3.304ms gfortran-natural=8.246ms blade-llvm-inputonly=2.184ms gfortran-natural-inputonly=3.317ms
+[13:19:20.202 +  881.7s]   round 6/21: gfortran-expert=5.079ms blade-cpp-inputonly=3.3ms ifx-expert=3.752ms ifx-natural-inputonly=2.161ms ifx-natural=10.79ms gfortran-natural-inputonly=3.301ms blade-llvm-inputonly=2.215ms blade-cpp=68.86ms ifx-expert-inputonly=2.163ms gfortran-expert-inputonly=3.358ms [compute]=12.8ms [memory]=5.715ms gfortran-natural=8.352ms
+[13:19:46.798 +  908.3s]   round 7/21: blade-llvm-inputonly=2.296ms gfortran-natural-inputonly=3.316ms blade-cpp=75.8ms ifx-expert-inputonly=2.174ms ifx-natural=11.09ms ifx-natural-inputonly=2.15ms [compute]=12.79ms gfortran-natural=8.204ms gfortran-expert-inputonly=3.281ms [memory]=5.237ms ifx-expert=3.817ms blade-cpp-inputonly=3.335ms gfortran-expert=4.782ms
+[13:20:13.379 +  934.9s]   round 8/21: ifx-expert=3.777ms blade-llvm-inputonly=2.174ms gfortran-natural-inputonly=3.474ms gfortran-natural=8.195ms gfortran-expert-inputonly=3.305ms ifx-natural-inputonly=2.189ms blade-cpp-inputonly=3.235ms [memory]=5.936ms ifx-expert-inputonly=2.163ms blade-cpp=68.35ms gfortran-expert=4.983ms [compute]=12.68ms ifx-natural=10.48ms
+[13:20:39.976 +  961.5s]   round 9/21: gfortran-natural=8.181ms ifx-natural=10.77ms blade-llvm-inputonly=2.146ms gfortran-expert=5.556ms gfortran-natural-inputonly=3.393ms blade-cpp=67.97ms [compute]=12.74ms ifx-expert-inputonly=2.257ms blade-cpp-inputonly=3.372ms ifx-expert=4.073ms gfortran-expert-inputonly=3.435ms ifx-natural-inputonly=2.193ms [memory]=5.506ms
+[13:21:06.570 +  988.1s]   round 10/21: gfortran-expert=5.123ms gfortran-natural-inputonly=3.318ms [compute]=12.84ms gfortran-expert-inputonly=3.356ms blade-llvm-inputonly=2.149ms ifx-natural=10.52ms ifx-expert=4.116ms gfortran-natural=8.345ms blade-cpp-inputonly=3.341ms ifx-natural-inputonly=2.327ms ifx-expert-inputonly=2.186ms blade-cpp=70.77ms [memory]=5.187ms
+[13:21:33.156 + 1014.6s]   round 11/21: gfortran-natural-inputonly=3.322ms [compute]=13.07ms ifx-natural=10.88ms [memory]=5.234ms ifx-expert-inputonly=2.18ms blade-cpp-inputonly=3.301ms blade-cpp=68.61ms gfortran-natural=8.195ms gfortran-expert=4.933ms ifx-expert=3.69ms gfortran-expert-inputonly=3.464ms ifx-natural-inputonly=2.283ms blade-llvm-inputonly=2.185ms
+[13:21:59.746 + 1041.2s]   round 12/21: [memory]=5.725ms blade-cpp-inputonly=3.298ms ifx-expert=3.714ms ifx-expert-inputonly=2.196ms ifx-natural=10.36ms gfortran-natural=8.589ms gfortran-expert-inputonly=3.307ms gfortran-natural-inputonly=3.388ms blade-llvm-inputonly=2.165ms blade-cpp=68.44ms ifx-natural-inputonly=2.506ms gfortran-expert=5.099ms [compute]=12.86ms
+[13:22:26.348 + 1067.8s]   round 13/21: blade-llvm-inputonly=2.171ms ifx-expert=3.726ms gfortran-natural=8.463ms [compute]=12.77ms ifx-natural=10.32ms blade-cpp-inputonly=3.327ms ifx-expert-inputonly=2.164ms gfortran-expert=4.806ms gfortran-natural-inputonly=3.309ms [memory]=5.429ms blade-cpp=68.27ms gfortran-expert-inputonly=3.415ms ifx-natural-inputonly=2.232ms
+[13:22:52.965 + 1094.4s]   round 14/21: gfortran-natural-inputonly=3.298ms [memory]=5.462ms [compute]=12.71ms ifx-natural-inputonly=2.174ms gfortran-expert=4.982ms blade-llvm-inputonly=2.177ms gfortran-natural=8.203ms blade-cpp=73.33ms gfortran-expert-inputonly=3.293ms ifx-natural=10.46ms blade-cpp-inputonly=3.369ms ifx-expert-inputonly=2.163ms ifx-expert=4.219ms
+[13:23:19.559 + 1121.0s]   round 15/21: gfortran-natural-inputonly=3.317ms gfortran-expert=4.809ms blade-llvm-inputonly=2.174ms [memory]=5.394ms ifx-natural-inputonly=2.214ms gfortran-natural=8.436ms ifx-natural=10.73ms blade-cpp-inputonly=3.313ms [compute]=13.31ms ifx-expert-inputonly=2.175ms blade-cpp=72.61ms gfortran-expert-inputonly=3.299ms ifx-expert=3.826ms
+[13:23:46.181 + 1147.7s]   round 16/21: ifx-expert-inputonly=2.172ms blade-cpp=74.83ms [memory]=5.452ms ifx-natural=10.64ms ifx-expert=3.708ms [compute]=14.1ms gfortran-natural-inputonly=3.331ms gfortran-expert-inputonly=4.461ms blade-llvm-inputonly=2.784ms ifx-natural-inputonly=2.503ms blade-cpp-inputonly=3.452ms gfortran-expert=5.511ms gfortran-natural=8.406ms
+[13:24:12.778 + 1174.3s]   round 17/21: gfortran-natural-inputonly=3.442ms gfortran-expert-inputonly=3.315ms gfortran-expert=5.139ms [memory]=5.557ms ifx-natural=10.63ms [compute]=12.8ms gfortran-natural=8.388ms ifx-natural-inputonly=2.169ms blade-cpp-inputonly=3.245ms blade-llvm-inputonly=2.157ms ifx-expert-inputonly=2.191ms blade-cpp=66.38ms ifx-expert=3.645ms
+[13:24:39.354 + 1200.8s]   round 18/21: blade-llvm-inputonly=2.155ms gfortran-natural=8.288ms gfortran-expert=4.783ms blade-cpp=68.14ms ifx-natural=10.51ms ifx-expert-inputonly=2.164ms ifx-natural-inputonly=2.153ms ifx-expert=3.695ms blade-cpp-inputonly=4.021ms gfortran-expert-inputonly=3.373ms [compute]=12.97ms [memory]=5.445ms gfortran-natural-inputonly=3.329ms
+[13:25:05.951 + 1227.4s]   round 19/21: blade-cpp=64.56ms gfortran-expert=4.749ms ifx-natural=10.41ms blade-cpp-inputonly=3.265ms ifx-natural-inputonly=2.204ms gfortran-natural=8.18ms gfortran-expert-inputonly=3.311ms ifx-expert-inputonly=2.337ms ifx-expert=3.781ms [compute]=12.93ms [memory]=5.57ms blade-llvm-inputonly=2.17ms gfortran-natural-inputonly=3.323ms
+[13:25:32.536 + 1254.0s]   round 20/21: ifx-natural-inputonly=2.174ms gfortran-natural=8.777ms blade-cpp-inputonly=3.273ms [compute]=12.78ms blade-llvm-inputonly=2.149ms gfortran-expert=5.23ms ifx-expert=3.673ms gfortran-expert-inputonly=3.288ms [memory]=5.612ms blade-cpp=65.47ms ifx-natural=10.45ms ifx-expert-inputonly=2.158ms gfortran-natural-inputonly=3.304ms
+[13:25:59.127 + 1280.6s]   round 21/21: gfortran-natural=8.337ms ifx-expert=3.796ms blade-llvm-inputonly=2.214ms gfortran-natural-inputonly=3.292ms blade-cpp=71.61ms blade-cpp-inputonly=3.265ms [memory]=5.686ms ifx-natural-inputonly=2.157ms ifx-natural=10.51ms ifx-expert-inputonly=2.251ms gfortran-expert=4.777ms [compute]=13.18ms gfortran-expert-inputonly=3.467ms
+[13:25:59.386 + 1280.9s] cooldown 10s (between kernels)
+[13:26:09.500 + 1291.0s] build onepass serial-repro-native full blade-llvm
+[13:26:12.894 + 1294.4s]   -> ok (1.9s)
+[13:26:12.894 + 1294.4s] build onepass serial-repro-native full blade-cpp
+[13:26:17.050 + 1298.5s]   -> ok (2.7s)
+[13:26:17.050 + 1298.5s] build onepass serial-repro-native full gfortran-natural
+[13:26:17.821 + 1299.3s]   -> ok (0.7s)
+[13:26:17.821 + 1299.3s] build onepass serial-repro-native full gfortran-expert
+[13:26:18.537 + 1300.0s]   -> ok (0.7s)
+[13:26:18.537 + 1300.0s] build onepass serial-repro-native full ifx-natural
+[13:26:20.940 + 1302.4s]   -> ok (2.2s)
+[13:26:20.941 + 1302.4s] build onepass serial-repro-native full ifx-expert
+[13:26:23.152 + 1304.6s]   -> ok (2.1s)
+[13:26:23.152 + 1304.6s] build onepass serial-repro-native full blade-llvm-inputonly
+[13:26:26.387 + 1307.9s]   -> ok (1.8s)
+[13:26:26.387 + 1307.9s] build onepass serial-repro-native full blade-cpp-inputonly
+[13:26:30.443 + 1311.9s]   -> ok (2.6s)
+[13:26:30.443 + 1311.9s] build onepass serial-repro-native full gfortran-natural-inputonly
+[13:26:31.166 + 1312.6s]   -> ok (0.7s)
+[13:26:31.166 + 1312.6s] build onepass serial-repro-native full gfortran-expert-inputonly
+[13:26:31.872 + 1313.4s]   -> ok (0.6s)
+[13:26:31.872 + 1313.4s] build onepass serial-repro-native full ifx-natural-inputonly
+[13:26:34.196 + 1315.7s]   -> ok (2.2s)
+[13:26:34.196 + 1315.7s] build onepass serial-repro-native full ifx-expert-inputonly
+[13:26:36.466 + 1317.9s]   -> ok (2.1s)
+[13:26:36.539 + 1318.0s]   blade-llvm: ok t=0.01651s checksum=112257923.888799 input=4998570.40460638 peakWS=42.7MB
+[13:26:38.628 + 1320.1s]   blade-cpp: ok t=0.02123s checksum=112257923.888799 input=4998570.40460638 peakWS=43.4MB
+[13:26:40.727 + 1322.2s]   gfortran-natural: ok t=0.03289s checksum=1.1225792388879874E+008 input=4.9985704046063777E+006 peakWS=43.2MB
+[13:26:42.813 + 1324.3s]   gfortran-expert: ok t=0.02113s checksum=1.1225792388879874E+008 input=4.9985704046063777E+006 peakWS=43.2MB
+[13:26:44.901 + 1326.4s]   ifx-natural: ok t=0.013s checksum=1.1225792388879873E+008 input=4.9985704046063777E+006 peakWS=42.7MB
+[13:26:46.986 + 1328.5s]   ifx-expert: ok t=0.01285s checksum=1.1225792388879873E+008 input=4.9985704046063777E+006 peakWS=42.7MB
+[13:26:49.059 + 1330.5s]   blade-llvm-inputonly: ok t=0.01143s checksum=0.0 input=4998570.40460638 peakWS=42.7MB
+[13:26:51.143 + 1332.6s]   blade-cpp-inputonly: ok t=0.0166s checksum=0.0 input=4998570.40460638 peakWS=43.4MB
+[13:26:53.224 + 1334.7s]   gfortran-natural-inputonly: ok t=0.0167s checksum=0.0000000000000000E+000 input=4.9985704046063777E+006 peakWS=43.2MB
+[13:26:55.304 + 1336.8s]   gfortran-expert-inputonly: ok t=0.0167s checksum=0.0000000000000000E+000 input=4.9985704046063777E+006 peakWS=43.2MB
+[13:26:57.391 + 1338.9s]   ifx-natural-inputonly: ok t=0.01138s checksum=0.0000000000000000E+000 input=4.9985704046063777E+006 peakWS=42.7MB
+[13:26:59.480 + 1341.0s]   ifx-expert-inputonly: ok t=0.01175s checksum=0.0000000000000000E+000 input=4.9985704046063777E+006 peakWS=42.7MB
+[13:27:01.490 + 1343.0s] onepass/serial-repro-native: 21 rounds x 12 arms + 2 control(s) (minimum 21 (memory-bound: median warm-up < 50 ms)); ratio reference blade-llvm
+[13:27:30.236 + 1371.7s]   round 1/21: ifx-natural-inputonly=11.64ms ifx-expert-inputonly=11.32ms blade-llvm=16.55ms blade-cpp=20.92ms gfortran-expert=21.72ms ifx-natural=12.43ms blade-llvm-inputonly=11.16ms blade-cpp-inputonly=16.97ms gfortran-natural=32.61ms gfortran-natural-inputonly=16.75ms [compute]=12.44ms gfortran-expert-inputonly=17.44ms ifx-expert=12.77ms [memory]=5.919ms
+[13:27:58.975 + 1400.5s]   round 2/21: blade-llvm=16.62ms ifx-natural=12.59ms blade-cpp-inputonly=16.69ms gfortran-natural=33.95ms [memory]=5.253ms ifx-expert=12.76ms blade-cpp=20.81ms gfortran-natural-inputonly=16.73ms ifx-natural-inputonly=11.17ms [compute]=12.65ms gfortran-expert=21.41ms gfortran-expert-inputonly=16.76ms blade-llvm-inputonly=11.5ms ifx-expert-inputonly=11.66ms
+[13:28:27.767 + 1429.3s]   round 3/21: blade-llvm=17.4ms ifx-expert-inputonly=12.07ms gfortran-natural-inputonly=16.83ms ifx-natural-inputonly=11.72ms gfortran-natural=32.6ms gfortran-expert-inputonly=17.18ms blade-llvm-inputonly=13.78ms [memory]=5.57ms blade-cpp=21.05ms blade-cpp-inputonly=16.7ms [compute]=12.53ms ifx-natural=13.09ms ifx-expert=12.49ms gfortran-expert=21.23ms
+[13:28:56.512 + 1458.0s]   round 4/21: blade-llvm=16.66ms blade-cpp-inputonly=16.56ms gfortran-expert=21.37ms gfortran-natural-inputonly=16.91ms ifx-natural-inputonly=11.75ms blade-llvm-inputonly=11.79ms gfortran-natural=33.23ms ifx-expert=13.19ms ifx-expert-inputonly=14.28ms ifx-natural=12.99ms [memory]=5.234ms [compute]=13.18ms gfortran-expert-inputonly=17.26ms blade-cpp=21.06ms
+[13:29:25.294 + 1486.8s]   round 5/21: [compute]=13.19ms gfortran-expert=21.33ms ifx-expert-inputonly=13.46ms ifx-natural=15.11ms gfortran-natural-inputonly=16.88ms ifx-natural-inputonly=11.73ms blade-cpp=20.79ms [memory]=5.189ms blade-cpp-inputonly=16.84ms gfortran-expert-inputonly=17.6ms blade-llvm-inputonly=13.02ms ifx-expert=13.48ms blade-llvm=16.93ms gfortran-natural=32.8ms
+[13:29:54.051 + 1515.5s]   round 6/21: blade-llvm-inputonly=11.48ms gfortran-expert=21.81ms ifx-expert-inputonly=12.56ms blade-cpp-inputonly=17.11ms gfortran-natural=32.78ms [memory]=5.326ms blade-llvm=17.02ms gfortran-natural-inputonly=17.12ms ifx-expert=12.78ms [compute]=14.06ms ifx-natural-inputonly=12.28ms gfortran-expert-inputonly=18.75ms blade-cpp=21.04ms ifx-natural=13.12ms
+[13:30:22.847 + 1544.3s]   round 7/21: blade-llvm-inputonly=11.63ms [compute]=14.67ms ifx-expert-inputonly=12.47ms gfortran-expert=21.67ms blade-cpp-inputonly=17.87ms blade-llvm=17.31ms ifx-expert=16.17ms blade-cpp=21.98ms gfortran-natural-inputonly=17.72ms gfortran-expert-inputonly=18.89ms gfortran-natural=38.53ms ifx-natural-inputonly=16.01ms [memory]=7.272ms ifx-natural=17.02ms
+[13:30:51.688 + 1573.2s]   round 8/21: ifx-natural=17.65ms [memory]=5.133ms ifx-natural-inputonly=11.79ms ifx-expert=13.75ms gfortran-expert-inputonly=16.78ms [compute]=13.15ms gfortran-natural=33.36ms ifx-expert-inputonly=11.68ms blade-cpp-inputonly=16.55ms blade-llvm-inputonly=11.45ms gfortran-expert=25.2ms blade-llvm=20.49ms gfortran-natural-inputonly=21.43ms blade-cpp=21.53ms
+[13:31:20.538 + 1602.0s]   round 9/21: ifx-natural-inputonly=12.25ms gfortran-expert=21.64ms blade-cpp-inputonly=17.23ms gfortran-expert-inputonly=17.08ms ifx-expert=12.78ms blade-cpp=22.24ms gfortran-natural=39.38ms ifx-natural=14.43ms [compute]=13.55ms ifx-expert-inputonly=12.72ms blade-llvm-inputonly=12.03ms [memory]=5.72ms gfortran-natural-inputonly=19.35ms blade-llvm=17.56ms
+[13:31:49.348 + 1630.8s]   round 10/21: gfortran-expert=23.34ms ifx-natural-inputonly=13.9ms ifx-natural=16.16ms blade-cpp-inputonly=16.93ms blade-cpp=21.46ms ifx-expert=12.69ms ifx-expert-inputonly=11.69ms gfortran-natural=32.63ms [memory]=5.721ms blade-llvm-inputonly=12.09ms blade-llvm=16.47ms gfortran-expert-inputonly=16.62ms gfortran-natural-inputonly=16.9ms [compute]=13ms
+[13:32:18.106 + 1659.6s]   round 11/21: ifx-expert=13.21ms gfortran-natural-inputonly=16.85ms ifx-natural=13.04ms ifx-expert-inputonly=11.39ms blade-llvm-inputonly=11.27ms blade-cpp=20.84ms [memory]=5.58ms blade-llvm=17.22ms gfortran-expert-inputonly=16.87ms blade-cpp-inputonly=16.75ms gfortran-natural=32.46ms ifx-natural-inputonly=11.4ms [compute]=12.89ms gfortran-expert=21.43ms
+[13:32:46.900 + 1688.4s]   round 12/21: blade-llvm=16.49ms gfortran-expert=21.15ms [memory]=5.207ms gfortran-natural=32.78ms [compute]=12.99ms ifx-natural-inputonly=13.66ms ifx-expert-inputonly=13.61ms blade-cpp=22.86ms blade-llvm-inputonly=14.06ms blade-cpp-inputonly=18.37ms gfortran-expert-inputonly=18.48ms ifx-expert=14.6ms ifx-natural=14.52ms gfortran-natural-inputonly=17.69ms
+[13:33:15.682 + 1717.2s]   round 13/21: ifx-expert=13.43ms ifx-expert-inputonly=12.57ms gfortran-expert=21.9ms blade-llvm=18.37ms ifx-natural-inputonly=12.64ms blade-cpp-inputonly=17.24ms gfortran-expert-inputonly=18.21ms blade-cpp=22.86ms ifx-natural=12.72ms [compute]=12.9ms gfortran-natural-inputonly=16.78ms gfortran-natural=32.48ms [memory]=5.282ms blade-llvm-inputonly=11.19ms
+[13:33:44.454 + 1745.9s]   round 14/21: [compute]=12.64ms gfortran-expert-inputonly=16.78ms gfortran-natural=32.8ms blade-cpp=20.91ms blade-llvm-inputonly=11.33ms [memory]=5.255ms blade-cpp-inputonly=17.66ms ifx-expert-inputonly=11.57ms gfortran-natural-inputonly=16.95ms blade-llvm=17.8ms gfortran-expert=22.17ms ifx-expert=13.46ms ifx-natural-inputonly=12.67ms ifx-natural=13.5ms
+[13:34:13.247 + 1774.7s]   round 15/21: [memory]=5.856ms gfortran-natural-inputonly=18.16ms blade-cpp-inputonly=18.09ms ifx-expert=13.75ms blade-llvm=17.07ms [compute]=13.3ms gfortran-natural=32.27ms ifx-expert-inputonly=12.07ms gfortran-expert-inputonly=17.01ms blade-cpp=20.81ms ifx-natural=12.91ms ifx-natural-inputonly=11.38ms gfortran-expert=21.06ms blade-llvm-inputonly=11.52ms
+[13:34:42.043 + 1803.5s]   round 16/21: blade-cpp-inputonly=16.58ms blade-llvm=16.63ms gfortran-expert=21.34ms ifx-natural-inputonly=11.39ms ifx-natural=12.69ms gfortran-natural=32.92ms [compute]=13.11ms gfortran-expert-inputonly=16.81ms blade-cpp=21.04ms ifx-expert-inputonly=11.6ms [memory]=5.228ms gfortran-natural-inputonly=16.89ms blade-llvm-inputonly=11.42ms ifx-expert=12.92ms
+[13:35:10.933 + 1832.4s]   round 17/21: gfortran-expert-inputonly=16.98ms [memory]=5.316ms [compute]=13.29ms blade-llvm=16.88ms gfortran-natural=32.82ms ifx-natural-inputonly=12.01ms ifx-expert=13.06ms ifx-natural=12.87ms blade-cpp=21.09ms ifx-expert-inputonly=11.73ms gfortran-expert=22.41ms blade-cpp-inputonly=16.97ms blade-llvm-inputonly=13.07ms gfortran-natural-inputonly=17.19ms
+[13:35:39.719 + 1861.2s]   round 18/21: blade-llvm=17.16ms ifx-expert=13.12ms gfortran-expert=21.59ms ifx-expert-inputonly=11.94ms [memory]=5.304ms ifx-natural-inputonly=12.6ms gfortran-expert-inputonly=17.88ms gfortran-natural=33.27ms blade-cpp=21.97ms blade-cpp-inputonly=17.26ms gfortran-natural-inputonly=17.35ms blade-llvm-inputonly=12.94ms ifx-natural=13.75ms [compute]=13.91ms
+[13:36:08.512 + 1890.0s]   round 19/21: blade-cpp=21.65ms [memory]=5.779ms gfortran-expert-inputonly=17.85ms gfortran-natural-inputonly=17.8ms ifx-expert=13.46ms [compute]=14.02ms ifx-natural-inputonly=12.26ms blade-cpp-inputonly=18.02ms ifx-natural=13.57ms blade-llvm=17.58ms ifx-expert-inputonly=12.38ms blade-llvm-inputonly=12.38ms gfortran-expert=22.64ms gfortran-natural=33.61ms
+[13:36:37.307 + 1918.8s]   round 20/21: ifx-natural-inputonly=12.87ms ifx-natural=13.86ms [memory]=5.438ms [compute]=14.08ms gfortran-expert=21.85ms gfortran-expert-inputonly=18.24ms blade-cpp=22.13ms gfortran-natural=34.74ms blade-llvm-inputonly=12.11ms ifx-expert-inputonly=12.33ms blade-cpp-inputonly=18.26ms gfortran-natural-inputonly=18.88ms ifx-expert=13.79ms blade-llvm=17.5ms
+[13:37:06.133 + 1947.6s]   round 21/21: gfortran-expert=22.72ms ifx-natural=14.23ms ifx-expert-inputonly=12.97ms ifx-natural-inputonly=13.67ms gfortran-expert-inputonly=18.32ms blade-llvm=19.25ms ifx-expert=13.46ms blade-llvm-inputonly=12.9ms gfortran-natural-inputonly=18.58ms [memory]=5.516ms [compute]=15.54ms blade-cpp=22.21ms blade-cpp-inputonly=18.51ms gfortran-natural=34.2ms
+[13:37:06.446 + 1947.9s] cooldown 10s (between kernels)
+[13:37:16.555 + 1958.0s] build dot serial-repro-native full blade-llvm
+[13:37:19.903 + 1961.4s]   -> ok (1.9s)
+[13:37:19.903 + 1961.4s] build dot serial-repro-native full blade-cpp
+[13:37:24.071 + 1965.6s]   -> ok (2.7s)
+[13:37:24.071 + 1965.6s] build dot serial-repro-native full gfortran-natural
+[13:37:24.821 + 1966.3s]   -> ok (0.7s)
+[13:37:24.821 + 1966.3s] build dot serial-repro-native full gfortran-expert
+[13:37:25.528 + 1967.0s]   -> ok (0.6s)
+[13:37:25.528 + 1967.0s] build dot serial-repro-native full ifx-natural
+[13:37:27.949 + 1969.4s]   -> ok (2.3s)
+[13:37:27.949 + 1969.4s] build dot serial-repro-native full ifx-expert
+[13:37:30.201 + 1971.7s]   -> ok (2.1s)
+[13:37:30.201 + 1971.7s] build dot serial-repro-native full blade-llvm-inputonly
+[13:37:33.449 + 1974.9s]   -> ok (1.8s)
+[13:37:33.449 + 1974.9s] build dot serial-repro-native full blade-cpp-inputonly
+[13:37:37.544 + 1979.0s]   -> ok (2.6s)
+[13:37:37.544 + 1979.0s] build dot serial-repro-native full gfortran-natural-inputonly
+[13:37:38.264 + 1979.7s]   -> ok (0.7s)
+[13:37:38.264 + 1979.7s] build dot serial-repro-native full gfortran-expert-inputonly
+[13:37:38.986 + 1980.5s]   -> ok (0.7s)
+[13:37:38.986 + 1980.5s] build dot serial-repro-native full ifx-natural-inputonly
+[13:37:41.301 + 1982.8s]   -> ok (2.2s)
+[13:37:41.301 + 1982.8s] build dot serial-repro-native full ifx-expert-inputonly
+[13:37:43.536 + 1985.0s]   -> ok (2.1s)
+[13:37:43.613 + 1985.1s]   blade-llvm: ok t=0.01715s checksum=749475.148712715 input=2998681.67744271 peakWS=50.3MB
+[13:37:45.708 + 1987.2s]   blade-cpp: ok t=0.02263s checksum=749475.148712715 input=2998681.67744271 peakWS=51.1MB
+[13:37:47.793 + 1989.3s]   gfortran-natural: ok t=0.02009s checksum=7.4947514871271467E+005 input=2.9986816774427094E+006 peakWS=50.8MB
+[13:37:49.880 + 1991.4s]   gfortran-expert: ok t=0.01993s checksum=7.4947514871271467E+005 input=2.9986816774427094E+006 peakWS=50.8MB
+[13:37:51.971 + 1993.5s]   ifx-natural: ok t=0.01415s checksum=7.4947514871271467E+005 input=2.9986816774427094E+006 peakWS=50.4MB
+[13:37:54.058 + 1995.5s]   ifx-expert: ok t=0.01201s checksum=7.4947514871271467E+005 input=2.9986816774427094E+006 peakWS=50.4MB
+[13:37:56.140 + 1997.6s]   blade-llvm-inputonly: ok t=0.01395s checksum=0.0 input=2998681.67744271 peakWS=50.3MB
+[13:37:58.227 + 1999.7s]   blade-cpp-inputonly: ok t=0.01985s checksum=0.0 input=2998681.67744271 peakWS=51.1MB
+[13:38:00.312 + 2001.8s]   gfortran-natural-inputonly: ok t=0.0176s checksum=0.0000000000000000E+000 input=2.9986816774427094E+006 peakWS=50.8MB
+[13:38:02.403 + 2003.9s]   gfortran-expert-inputonly: ok t=0.01773s checksum=0.0000000000000000E+000 input=2.9986816774427094E+006 peakWS=50.8MB
+[13:38:04.491 + 2006.0s]   ifx-natural-inputonly: ok t=0.01133s checksum=0.0000000000000000E+000 input=2.9986816774427094E+006 peakWS=50.4MB
+[13:38:06.584 + 2008.1s]   ifx-expert-inputonly: ok t=0.01131s checksum=0.0000000000000000E+000 input=2.9986816774427094E+006 peakWS=50.4MB
+[13:38:08.595 + 2010.1s] dot/serial-repro-native: 21 rounds x 12 arms + 2 control(s) (minimum 21 (memory-bound: median warm-up < 50 ms)); ratio reference blade-llvm
+[13:38:37.379 + 2038.9s]   round 1/21: gfortran-natural-inputonly=17.54ms gfortran-expert=20.93ms [compute]=12.77ms [memory]=5.378ms ifx-expert=11.88ms blade-cpp-inputonly=20.05ms blade-cpp=22.95ms gfortran-natural=20ms ifx-natural=13.88ms gfortran-expert-inputonly=17.76ms blade-llvm=18.17ms ifx-natural-inputonly=11.45ms blade-llvm-inputonly=13.6ms ifx-expert-inputonly=11.69ms
+[13:39:06.166 + 2067.6s]   round 2/21: ifx-expert-inputonly=11.39ms ifx-natural-inputonly=11.8ms blade-llvm-inputonly=13.6ms blade-cpp=22.45ms ifx-natural=14.15ms gfortran-expert-inputonly=17.56ms blade-cpp-inputonly=20.06ms [compute]=12.84ms ifx-expert=12.11ms gfortran-expert=20.06ms gfortran-natural=19.88ms blade-llvm=16.97ms gfortran-natural-inputonly=17.87ms [memory]=5.384ms
+[13:39:34.986 + 2096.5s]   round 3/21: ifx-natural=13.99ms blade-llvm=16.93ms ifx-natural-inputonly=12.61ms blade-cpp=23ms blade-llvm-inputonly=13.69ms gfortran-expert=20.07ms ifx-expert-inputonly=11.45ms gfortran-natural=20.26ms blade-cpp-inputonly=20.55ms gfortran-natural-inputonly=17.93ms gfortran-expert-inputonly=17.67ms [compute]=12.85ms [memory]=5.383ms ifx-expert=12.22ms
+[13:40:04.689 + 2126.2s]   round 4/21: ifx-natural=17.57ms [memory]=6.909ms ifx-expert=12.63ms ifx-expert-inputonly=11.93ms blade-llvm=17.41ms gfortran-expert-inputonly=18.67ms blade-cpp-inputonly=20.54ms gfortran-natural-inputonly=17.7ms gfortran-expert=20.19ms ifx-natural-inputonly=11.78ms blade-cpp=22.44ms [compute]=12.79ms gfortran-natural=19.95ms blade-llvm-inputonly=13.79ms
+[13:40:33.612 + 2155.1s]   round 5/21: [compute]=13.13ms blade-llvm=16.94ms blade-llvm-inputonly=13.6ms blade-cpp-inputonly=20.06ms blade-cpp=22.58ms [memory]=5.574ms gfortran-natural=20.2ms ifx-expert-inputonly=11.61ms gfortran-natural-inputonly=17.61ms ifx-expert=12.44ms ifx-natural-inputonly=11.73ms ifx-natural=14.37ms gfortran-expert-inputonly=17.97ms gfortran-expert=19.9ms
+[13:41:02.447 + 2183.9s]   round 6/21: [compute]=13.13ms ifx-expert=12.34ms gfortran-natural-inputonly=17.67ms blade-cpp-inputonly=20.1ms blade-llvm-inputonly=14.09ms blade-llvm=16.72ms blade-cpp=22.42ms gfortran-expert=20.14ms gfortran-expert-inputonly=17.44ms ifx-expert-inputonly=11.93ms ifx-natural-inputonly=11.31ms gfortran-natural=20.04ms ifx-natural=14.48ms [memory]=5.423ms
+[13:41:31.347 + 2212.8s]   round 7/21: blade-llvm-inputonly=13.63ms blade-llvm=17.12ms blade-cpp-inputonly=20.1ms gfortran-natural-inputonly=17.83ms [memory]=6.093ms ifx-expert=12.79ms ifx-expert-inputonly=12.47ms gfortran-natural=22.01ms ifx-natural=14.25ms [compute]=13.47ms gfortran-expert-inputonly=25.41ms ifx-natural-inputonly=17.91ms gfortran-expert=26.19ms blade-cpp=25.06ms
+[13:42:00.235 + 2241.7s]   round 8/21: blade-llvm=17.52ms gfortran-natural-inputonly=21.88ms gfortran-natural=24.64ms ifx-expert-inputonly=12.58ms ifx-expert=13.19ms blade-cpp=25.63ms [compute]=14.61ms [memory]=5.258ms gfortran-expert-inputonly=17.74ms ifx-natural=14.82ms blade-cpp-inputonly=20.64ms ifx-natural-inputonly=12.13ms blade-llvm-inputonly=13.92ms gfortran-expert=20ms
+[13:42:29.145 + 2270.6s]   round 9/21: ifx-expert=12.58ms ifx-natural=14.4ms gfortran-natural=20.4ms gfortran-natural-inputonly=21.73ms [compute]=15.29ms ifx-natural-inputonly=13.45ms blade-llvm-inputonly=15.41ms gfortran-expert=21.48ms [memory]=6.161ms gfortran-expert-inputonly=18.7ms blade-cpp-inputonly=22.9ms blade-cpp=26.04ms ifx-expert-inputonly=12.15ms blade-llvm=17.58ms
+[13:42:58.050 + 2299.5s]   round 10/21: blade-llvm-inputonly=15.1ms ifx-expert=13.93ms gfortran-expert=22.69ms gfortran-natural=23.7ms gfortran-natural-inputonly=20.46ms blade-cpp=22.95ms gfortran-expert-inputonly=17.62ms [compute]=12.97ms ifx-expert-inputonly=11.42ms ifx-natural=14.03ms blade-llvm=16.87ms blade-cpp-inputonly=22.1ms ifx-natural-inputonly=17.46ms [memory]=5.542ms
+[13:43:26.918 + 2328.4s]   round 11/21: gfortran-expert-inputonly=19ms ifx-natural-inputonly=11.37ms blade-cpp=22.08ms blade-llvm=16.94ms ifx-natural=13.68ms ifx-expert-inputonly=11.38ms [memory]=5.39ms blade-cpp-inputonly=20.96ms gfortran-expert=20.2ms gfortran-natural=20.69ms ifx-expert=12.22ms blade-llvm-inputonly=13.46ms gfortran-natural-inputonly=17.3ms [compute]=13.22ms
+[13:43:55.756 + 2357.2s]   round 12/21: ifx-expert-inputonly=11.7ms gfortran-expert-inputonly=18.01ms ifx-expert=11.78ms blade-llvm-inputonly=13.7ms [memory]=5.224ms blade-cpp-inputonly=20.13ms [compute]=12.52ms blade-cpp=22.32ms ifx-natural=13.68ms gfortran-natural=20.25ms gfortran-natural-inputonly=17.76ms blade-llvm=17.36ms gfortran-expert=19.91ms ifx-natural-inputonly=11.43ms
+[13:44:24.665 + 2386.1s]   round 13/21: ifx-expert=12.12ms blade-llvm=17.18ms ifx-natural=14.1ms gfortran-expert=20.23ms blade-llvm-inputonly=14.47ms ifx-expert-inputonly=11.59ms gfortran-expert-inputonly=18.72ms ifx-natural-inputonly=15.6ms [compute]=20.83ms [memory]=7.25ms blade-cpp=24.77ms gfortran-natural-inputonly=19.03ms blade-cpp-inputonly=22.13ms gfortran-natural=20.08ms
+[13:44:53.528 + 2415.0s]   round 14/21: blade-cpp=22.73ms ifx-expert-inputonly=11.63ms gfortran-natural-inputonly=17.57ms [memory]=5.325ms ifx-natural-inputonly=11.52ms gfortran-expert-inputonly=17.51ms ifx-natural=13.79ms gfortran-expert=19.75ms [compute]=12.97ms gfortran-natural=20.06ms blade-cpp-inputonly=19.7ms blade-llvm=16.78ms blade-llvm-inputonly=13.6ms ifx-expert=11.84ms
+[13:45:22.369 + 2443.9s]   round 15/21: ifx-expert-inputonly=11.48ms gfortran-expert=20.02ms blade-llvm-inputonly=13.42ms gfortran-natural=19.89ms blade-cpp-inputonly=19.78ms gfortran-expert-inputonly=17.53ms ifx-natural-inputonly=11.55ms [memory]=6.185ms ifx-natural=18.38ms blade-llvm=20.36ms blade-cpp=22.57ms gfortran-natural-inputonly=17.77ms ifx-expert=11.84ms [compute]=13.1ms
+[13:45:51.241 + 2472.7s]   round 16/21: gfortran-expert-inputonly=17.47ms blade-cpp-inputonly=19.67ms [memory]=5.487ms ifx-natural-inputonly=16.75ms gfortran-expert=26.16ms ifx-expert-inputonly=11.75ms blade-llvm-inputonly=15.01ms ifx-expert=12.81ms blade-cpp=24.29ms ifx-natural=14.79ms [compute]=13.46ms gfortran-natural=20.11ms blade-llvm=16.74ms gfortran-natural-inputonly=17.46ms
+[13:46:20.062 + 2501.5s]   round 17/21: blade-llvm=16.98ms gfortran-natural-inputonly=17.29ms gfortran-natural=20.14ms blade-cpp-inputonly=19.88ms [memory]=5.362ms gfortran-expert-inputonly=17.72ms blade-llvm-inputonly=13.39ms ifx-natural=13.92ms blade-cpp=22.35ms ifx-natural-inputonly=11.63ms ifx-expert=13.07ms gfortran-expert=19.96ms ifx-expert-inputonly=11.33ms [compute]=12.62ms
+[13:46:48.870 + 2530.4s]   round 18/21: ifx-expert-inputonly=11.31ms blade-cpp-inputonly=20.03ms gfortran-natural=19.79ms gfortran-expert-inputonly=17.6ms blade-cpp=22.81ms [memory]=5.288ms [compute]=12.75ms ifx-natural=13.88ms ifx-natural-inputonly=11.34ms gfortran-natural-inputonly=17.89ms gfortran-expert=19.91ms blade-llvm=17.2ms blade-llvm-inputonly=13.42ms ifx-expert=11.69ms
+[13:47:17.738 + 2559.2s]   round 19/21: blade-llvm=17.42ms gfortran-expert-inputonly=17.53ms ifx-natural-inputonly=11.78ms blade-llvm-inputonly=13.79ms blade-cpp-inputonly=20.36ms gfortran-natural=23.84ms ifx-natural=15.23ms gfortran-natural-inputonly=18.65ms [compute]=12.8ms gfortran-expert=21.33ms [memory]=6.337ms blade-cpp=27.34ms ifx-expert=11.97ms ifx-expert-inputonly=11.37ms
+[13:47:46.599 + 2588.1s]   round 20/21: blade-cpp=22.19ms blade-llvm=16.69ms [memory]=5.183ms ifx-natural=13.77ms ifx-natural-inputonly=11.42ms blade-cpp-inputonly=19.9ms blade-llvm-inputonly=13.83ms gfortran-expert=19.83ms gfortran-expert-inputonly=17.73ms ifx-expert-inputonly=12.29ms gfortran-natural-inputonly=17.37ms [compute]=12.69ms ifx-expert=12.7ms gfortran-natural=19.9ms
+[13:48:15.423 + 2616.9s]   round 21/21: [compute]=12.89ms gfortran-expert=19.71ms gfortran-natural-inputonly=17.58ms ifx-expert=11.96ms blade-llvm=16.76ms [memory]=5.663ms blade-cpp-inputonly=20.06ms blade-cpp=22.13ms ifx-natural-inputonly=12.2ms ifx-natural=14.56ms gfortran-natural=20.56ms gfortran-expert-inputonly=17.61ms blade-llvm-inputonly=14.43ms ifx-expert-inputonly=11.24ms
+[13:48:15.742 + 2617.2s] cooldown 10s (between kernels)
+[13:48:25.859 + 2627.3s] build saxpy serial-repro-native full blade-llvm
+[13:48:32.969 + 2634.5s]   -> ok (5.5s)
+[13:48:32.969 + 2634.5s] build saxpy serial-repro-native full blade-cpp
+[13:48:39.809 + 2641.3s]   -> ok (5.3s)
+[13:48:39.809 + 2641.3s] build saxpy serial-repro-native full gfortran-natural
+[13:48:41.151 + 2642.6s]   -> ok (1.3s)
+[13:48:41.151 + 2642.6s] build saxpy serial-repro-native full gfortran-expert
+[13:48:41.866 + 2643.3s]   -> ok (0.6s)
+[13:48:41.866 + 2643.3s] build saxpy serial-repro-native full ifx-natural
+[13:48:44.627 + 2646.1s]   -> ok (2.6s)
+[13:48:44.627 + 2646.1s] build saxpy serial-repro-native full ifx-expert
+[13:48:46.844 + 2648.3s]   -> ok (2.1s)
+[13:48:46.844 + 2648.3s] build saxpy serial-repro-native full blade-llvm-inputonly
+[13:48:50.004 + 2651.5s]   -> ok (1.8s)
+[13:48:50.004 + 2651.5s] build saxpy serial-repro-native full blade-cpp-inputonly
+[13:48:54.043 + 2655.5s]   -> ok (2.6s)
+[13:48:54.043 + 2655.5s] build saxpy serial-repro-native full gfortran-natural-inputonly
+[13:48:54.756 + 2656.2s]   -> ok (0.6s)
+[13:48:54.756 + 2656.2s] build saxpy serial-repro-native full gfortran-expert-inputonly
+[13:48:55.471 + 2657.0s]   -> ok (0.6s)
+[13:48:55.471 + 2657.0s] build saxpy serial-repro-native full ifx-natural-inputonly
+[13:48:57.722 + 2659.2s]   -> ok (2.1s)
+[13:48:57.722 + 2659.2s] build saxpy serial-repro-native full ifx-expert-inputonly
+[13:48:59.957 + 2661.4s]   -> ok (2.1s)
+[13:49:00.037 + 2661.5s]   blade-llvm: ok t=0.01547s checksum=3663229.58366419 input=1998718.33129289 peakWS=49.8MB
+[13:49:02.127 + 2663.6s]   blade-cpp: ok t=0.01868s checksum=3663229.58366419 input=1998718.33129289 peakWS=50.7MB
+[13:49:04.220 + 2665.7s]   gfortran-natural: ok t=0.01725s checksum=3.6632295836641854E+006 input=1.9987183312928942E+006 peakWS=50.8MB
+[13:49:06.313 + 2667.8s]   gfortran-expert: ok t=0.01873s checksum=3.6632295836641854E+006 input=1.9987183312928942E+006 peakWS=50.8MB
+[13:49:08.411 + 2669.9s]   ifx-natural: ok t=0.01314s checksum=3.6632295836641854E+006 input=1.9987183312928942E+006 peakWS=50.4MB
+[13:49:10.507 + 2672.0s]   ifx-expert: ok t=0.009692s checksum=3.6632295836641854E+006 input=1.9987183312928942E+006 peakWS=50.4MB
+[13:49:12.582 + 2674.1s]   blade-llvm-inputonly: ok t=0.008977s checksum=0.0 input=1998718.33129289 peakWS=35.1MB
+[13:49:14.666 + 2676.1s]   blade-cpp-inputonly: ok t=0.01321s checksum=0.0 input=1998718.33129289 peakWS=35.8MB
+[13:49:16.750 + 2678.2s]   gfortran-natural-inputonly: ok t=0.01208s checksum=0.0000000000000000E+000 input=1.9987183312928942E+006 peakWS=35.5MB
+[13:49:18.830 + 2680.3s]   gfortran-expert-inputonly: ok t=0.01181s checksum=0.0000000000000000E+000 input=1.9987183312928942E+006 peakWS=35.5MB
+[13:49:20.920 + 2682.4s]   ifx-natural-inputonly: ok t=0.007905s checksum=0.0000000000000000E+000 input=1.9987183312928942E+006 peakWS=35.1MB
+[13:49:23.028 + 2684.5s]   ifx-expert-inputonly: ok t=0.008246s checksum=0.0000000000000000E+000 input=1.9987183312928942E+006 peakWS=35.1MB
+[13:49:25.044 + 2686.5s] saxpy/serial-repro-native: 21 rounds x 12 arms + 2 control(s) (minimum 21 (memory-bound: median warm-up < 50 ms)); ratio reference blade-llvm
+[13:49:53.819 + 2715.3s]   round 1/21: gfortran-natural=16.51ms ifx-natural=12.79ms blade-llvm=15.94ms ifx-natural-inputonly=7.849ms ifx-expert=9.899ms blade-cpp-inputonly=14.02ms gfortran-expert-inputonly=12.31ms [compute]=12.8ms ifx-expert-inputonly=7.643ms blade-cpp=18.71ms gfortran-expert=15.49ms [memory]=5.49ms blade-llvm-inputonly=9.242ms gfortran-natural-inputonly=12.04ms
+[13:50:22.612 + 2744.1s]   round 2/21: gfortran-expert=16.1ms gfortran-expert-inputonly=11.85ms ifx-natural=13.02ms blade-cpp=18.66ms gfortran-natural=16.62ms [memory]=5.268ms blade-llvm-inputonly=8.981ms [compute]=12.9ms blade-llvm=15.46ms ifx-expert-inputonly=8.03ms ifx-expert=9.586ms ifx-natural-inputonly=8.21ms blade-cpp-inputonly=13.23ms gfortran-natural-inputonly=11.88ms
+[13:50:51.399 + 2772.9s]   round 3/21: gfortran-expert=15.47ms blade-llvm=15.4ms gfortran-expert-inputonly=11.77ms ifx-natural-inputonly=7.691ms blade-cpp-inputonly=13.15ms gfortran-natural=16.48ms ifx-expert-inputonly=7.857ms [memory]=5.383ms gfortran-natural-inputonly=11.72ms blade-cpp=18.24ms ifx-expert=9.919ms [compute]=12.55ms ifx-natural=13.03ms blade-llvm-inputonly=9.225ms
+[13:51:20.230 + 2801.7s]   round 4/21: ifx-natural-inputonly=7.792ms blade-llvm=15.72ms blade-cpp=18.64ms gfortran-expert-inputonly=11.97ms gfortran-expert=16.53ms ifx-expert=9.699ms [compute]=12.71ms gfortran-natural-inputonly=11.73ms ifx-natural=12.89ms gfortran-natural=16.7ms blade-llvm-inputonly=10.18ms ifx-expert-inputonly=7.505ms blade-cpp-inputonly=13.4ms [memory]=5.88ms
+[13:51:49.024 + 2830.5s]   round 5/21: gfortran-expert=15.38ms blade-llvm-inputonly=9.334ms ifx-expert-inputonly=7.727ms blade-cpp=18.41ms ifx-natural=14.06ms gfortran-natural-inputonly=11.97ms blade-llvm=17.09ms gfortran-expert-inputonly=11.86ms gfortran-natural=16.97ms [compute]=12.57ms ifx-expert=9.886ms blade-cpp-inputonly=13.69ms [memory]=5.345ms ifx-natural-inputonly=7.699ms
+[13:52:17.821 + 2859.3s]   round 6/21: blade-cpp-inputonly=13.44ms [memory]=5.869ms gfortran-natural-inputonly=11.89ms blade-llvm=15.63ms gfortran-expert-inputonly=11.82ms ifx-natural=13.15ms [compute]=12.63ms blade-cpp=18.45ms ifx-expert-inputonly=7.778ms ifx-natural-inputonly=7.767ms gfortran-natural=17.02ms gfortran-expert=15.24ms blade-llvm-inputonly=8.896ms ifx-expert=9.959ms
+[13:52:46.600 + 2888.1s]   round 7/21: blade-llvm-inputonly=9.738ms ifx-expert-inputonly=7.764ms blade-cpp-inputonly=13.1ms gfortran-expert-inputonly=11.78ms gfortran-expert=15.3ms ifx-natural=13.23ms [compute]=13.64ms ifx-natural-inputonly=7.595ms gfortran-natural-inputonly=11.82ms gfortran-natural=16.58ms ifx-expert=9.802ms blade-llvm=15.47ms blade-cpp=18.18ms [memory]=5.299ms
+[13:53:15.413 + 2916.9s]   round 8/21: gfortran-natural-inputonly=11.77ms ifx-natural=13.03ms gfortran-natural=16.92ms ifx-expert=9.62ms blade-llvm=15.18ms ifx-natural-inputonly=7.732ms [compute]=13.01ms blade-cpp=19ms blade-llvm-inputonly=8.979ms gfortran-expert-inputonly=11.81ms ifx-expert-inputonly=8.76ms [memory]=5.445ms blade-cpp-inputonly=13.34ms gfortran-expert=15.27ms
+[13:53:44.203 + 2945.7s]   round 9/21: [memory]=5.383ms [compute]=12.69ms gfortran-natural=16.62ms gfortran-natural-inputonly=11.69ms ifx-expert-inputonly=7.644ms blade-cpp=18.4ms ifx-expert=9.666ms blade-llvm=15.41ms blade-llvm-inputonly=9.029ms ifx-natural-inputonly=7.658ms gfortran-expert=15.33ms ifx-natural=13ms blade-cpp-inputonly=13.1ms gfortran-expert-inputonly=11.58ms
+[13:54:13.002 + 2974.5s]   round 10/21: gfortran-natural=16.42ms blade-cpp-inputonly=13.26ms ifx-expert-inputonly=7.475ms blade-llvm=15.33ms gfortran-expert=15.25ms gfortran-natural-inputonly=11.79ms ifx-expert=9.837ms [compute]=12.75ms gfortran-expert-inputonly=11.75ms ifx-natural-inputonly=7.588ms blade-cpp=18.24ms ifx-natural=13.24ms [memory]=5.272ms blade-llvm-inputonly=9.131ms
+[13:54:41.797 + 3003.3s]   round 11/21: blade-llvm-inputonly=8.785ms gfortran-expert-inputonly=11.84ms ifx-expert-inputonly=7.423ms [compute]=12.97ms blade-llvm=15.49ms gfortran-expert=15.25ms ifx-expert=9.455ms gfortran-natural-inputonly=11.92ms ifx-natural=13.62ms blade-cpp-inputonly=13.19ms [memory]=5.454ms gfortran-natural=16.87ms blade-cpp=19.08ms ifx-natural-inputonly=9.493ms
+[13:55:10.594 + 3032.1s]   round 12/21: ifx-natural=12.72ms blade-cpp-inputonly=13.28ms gfortran-natural-inputonly=11.5ms [memory]=5.275ms blade-cpp=18.17ms blade-llvm=15.15ms ifx-expert-inputonly=7.581ms gfortran-expert-inputonly=11.75ms ifx-expert=9.76ms gfortran-natural=16.98ms [compute]=13.28ms blade-llvm-inputonly=9.556ms ifx-natural-inputonly=7.997ms gfortran-expert=16.16ms
+[13:55:39.392 + 3060.9s]   round 13/21: gfortran-expert=15.6ms ifx-natural-inputonly=7.647ms ifx-natural=12.97ms blade-llvm=15.44ms ifx-expert=9.867ms blade-cpp=18.15ms ifx-expert-inputonly=7.946ms gfortran-natural-inputonly=12.24ms gfortran-natural=17.32ms [compute]=12.67ms blade-llvm-inputonly=9.18ms blade-cpp-inputonly=13.2ms gfortran-expert-inputonly=11.87ms [memory]=5.468ms
+[13:56:08.196 + 3089.7s]   round 14/21: gfortran-natural-inputonly=11.8ms blade-llvm-inputonly=8.97ms [memory]=5.27ms gfortran-natural=17.13ms [compute]=12.61ms blade-cpp-inputonly=13.59ms gfortran-expert=15.32ms blade-cpp=18.36ms gfortran-expert-inputonly=11.87ms ifx-expert-inputonly=7.733ms ifx-expert=9.739ms ifx-natural-inputonly=7.824ms blade-llvm=15.49ms ifx-natural=13.32ms
+[13:56:37.015 + 3118.5s]   round 15/21: blade-cpp=18.34ms gfortran-expert-inputonly=11.92ms [compute]=12.62ms gfortran-natural=16.72ms blade-cpp-inputonly=13.17ms ifx-natural=12.99ms [memory]=5.324ms ifx-natural-inputonly=7.866ms gfortran-expert=15.49ms gfortran-natural-inputonly=12.02ms ifx-expert-inputonly=7.603ms ifx-expert=9.528ms blade-llvm-inputonly=9.003ms blade-llvm=15.45ms
+[13:57:05.817 + 3147.3s]   round 16/21: ifx-natural-inputonly=7.933ms blade-llvm-inputonly=9.291ms ifx-natural=13.07ms gfortran-expert=15.24ms blade-llvm=15.38ms [memory]=5.53ms blade-cpp=18.23ms [compute]=12.94ms ifx-expert=10.01ms gfortran-natural=16.79ms gfortran-natural-inputonly=12.15ms ifx-expert-inputonly=7.98ms gfortran-expert-inputonly=11.82ms blade-cpp-inputonly=13.27ms
+[13:57:34.650 + 3176.1s]   round 17/21: [memory]=5.834ms blade-cpp=18.72ms gfortran-natural-inputonly=11.96ms ifx-expert-inputonly=8.132ms ifx-natural-inputonly=7.737ms blade-cpp-inputonly=13.8ms gfortran-expert=15.27ms blade-llvm-inputonly=9.129ms gfortran-expert-inputonly=11.89ms ifx-natural=13.01ms gfortran-natural=16.49ms blade-llvm=15.94ms [compute]=12.76ms ifx-expert=10.08ms
+[13:58:03.459 + 3204.9s]   round 18/21: gfortran-expert=15.56ms gfortran-natural-inputonly=11.72ms gfortran-natural=16.8ms ifx-natural=12.89ms ifx-natural-inputonly=7.617ms blade-llvm-inputonly=10.17ms blade-llvm=15.65ms [compute]=12.59ms [memory]=5.637ms gfortran-expert-inputonly=11.81ms blade-cpp-inputonly=13.32ms ifx-expert-inputonly=8.23ms ifx-expert=9.839ms blade-cpp=18.75ms
+[13:58:32.260 + 3233.7s]   round 19/21: blade-llvm-inputonly=8.933ms blade-cpp-inputonly=13.45ms ifx-expert=9.737ms blade-llvm=15.72ms gfortran-expert=15.76ms [memory]=5.583ms ifx-natural-inputonly=7.569ms gfortran-expert-inputonly=11.88ms gfortran-natural=16.7ms gfortran-natural-inputonly=12.09ms ifx-natural=13.27ms [compute]=12.7ms blade-cpp=18.33ms ifx-expert-inputonly=7.588ms
+[13:59:01.089 + 3262.6s]   round 20/21: gfortran-expert-inputonly=12.11ms ifx-expert-inputonly=7.917ms [compute]=12.65ms ifx-natural=12.91ms blade-cpp=18.45ms ifx-natural-inputonly=7.657ms gfortran-natural=16.94ms blade-llvm-inputonly=8.929ms [memory]=5.537ms ifx-expert=9.97ms gfortran-expert=15.36ms blade-llvm=15.86ms blade-cpp-inputonly=15.31ms gfortran-natural-inputonly=11.84ms
+[13:59:29.925 + 3291.4s]   round 21/21: gfortran-natural=16.35ms gfortran-natural-inputonly=11.74ms blade-cpp-inputonly=13.27ms blade-cpp=18.37ms ifx-expert-inputonly=7.939ms ifx-natural=13.13ms ifx-natural-inputonly=7.646ms blade-llvm=15.93ms blade-llvm-inputonly=9.556ms [compute]=12.65ms gfortran-expert=15.32ms ifx-expert=9.583ms gfortran-expert-inputonly=11.87ms [memory]=5.359ms
+
+# Blade vs Fortran -- bench session 2026-10-18T13:04:38
+
+- host LAPTOP-350H6LDB | AMD Ryzen 7 5800HS with Radeon Graphics | 8C/16T | 15.41 GB | power ac | max processor state AC 100% | boost AC None | Power Scheme GUID: 64a64f24-65b9-4b56-befd-5ec1eaced9b3  (Silent)
+- git fceb895d4e8df71131086a94652b5cab1b120850 | Blade.dll 74b6728036b170d9 | GNU Fortran (Rev4, Built by MSYS2 project) 16.2.0 | Intel(R) Fortran Compiler for applications running on Intel(R) 64, Version 2026.1.0 Build 20260617 | clang version 22.1.8 (https://github.com/msys2/MINGW-packages d34feaaa1d0aff624c870910b6f2589aa40d20de)
+- size `full` | duration 3291.8 s | pins: pins-A.json, pins-B.json
+- PRIMARY estimand: the complete timed region. ratio = median(arm) / median(Blade reference), round-block bootstrap 95% CI (10000 resamples); ratio > 1 = Blade faster. Verdicts (delta 0.1): win / detectable-win / equivalent / detectable-loss / loss / inconclusive; `suppressed` = the block failed a drift, trend or control check. Intervals are pointwise; no suite-wide claim. incremental = median(arm) - median(its own input-only twin), NOT kernel time. Reference: blade-llvm (serial), blade-cpp (mt8, or when the LLVM lane refused). Fresh-process, allocation-inclusive measurements.
+- **FLAG**: fusedchain/serial-repro-native: inference suppressed: trend: blade-llvm first-half vs second-half median moved 5.7%; trend: gfortran-natural first-half vs second-half median moved 9.1%; trend: ifx-expert first-half vs second-half median moved 7.9%; trend: ifx-natural-inputonly first-half vs second-half median moved 6.3%; trend: ifx-expert-inputonly first-half vs second-half median moved 6.9%; trend: control compute moved 14.2% within the block; trend: control memory moved 8.1% within the block
+- **FLAG**: onepass/serial-repro-native: inference suppressed: trend: ifx-expert first-half vs second-half median moved 5.3%; trend: blade-cpp-inputonly first-half vs second-half median moved 5.7%; trend: ifx-natural-inputonly first-half vs second-half median moved 7.3%
+
+## serial-repro-native
+
+Blade reference per kernel: fusedchain=blade-llvm, maskagg=blade-cpp, onepass=blade-llvm, dot=blade-llvm, saxpy=blade-llvm
+
+| kernel | arm | status | n | min (s) | median (s) | IQR (s) | ratio vs ref [95% CI] | verdict | hypothesis | fold form | parallelism | peak WS (MB) | incremental (s) [CI] | incremental ratio [CI] | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| fusedchain | blade-llvm | ok | 21 | 0.006774 | 0.00716 | 0.0006001 | ref |  |  | in-order | serial | 19.8 | 0.002534 [0.00196, 0.002858] | ref |  |
+| fusedchain | blade-cpp | ok | 21 | 0.008159 | 0.008374 | 0.0004274 | 1.170 [1.119, 1.198] | suppressed |  | in-order | serial | 20.6 | 0.001542 [0.001385, 0.001684] | 0.608 [0.516, 0.804] |  |
+| fusedchain | gfortran-natural | ok | 21 | 0.01735 | 0.02008 | 0.003587 | 2.805 [2.597, 3.099] | suppressed | WIN 1.5-2.5x (no temporaries) |  | serial | 66.1 | 0.01328 [0.01183, 0.01503] | 5.241 [4.360, 7.478] |  |
+| fusedchain | gfortran-expert | ok | 21 | 0.008242 | 0.008775 | 0.001155 | 1.226 [1.168, 1.330] | suppressed | parity |  | serial | 20.3 | 0.001983 [0.001624, 0.002671] | 0.782 [0.616, 1.142] |  |
+| fusedchain | ifx-natural | ok | 21 | 0.0134 | 0.01478 | 0.002706 | 2.065 [1.920, 2.206] | suppressed | WIN 1.5-2.5x (no temporaries) |  | serial | 65.6 | 0.01009 [0.009414, 0.011] | 3.982 [3.375, 5.463] |  |
+| fusedchain | ifx-expert | ok | 21 | 0.004878 | 0.005319 | 0.0007485 | 0.743 [0.705, 0.803] | suppressed | parity |  | serial | 19.8 | 0.0006533 [0.0002228, 0.0009868] | 0.258 [0.091, 0.411] |  |
+| fusedchain | blade-llvm-inputonly | ok | 21 | 0.004351 | 0.004625 | 0.0008889 |  |  |  | in-order | serial | 19.8 |  |  |  |
+| fusedchain | blade-cpp-inputonly | ok | 21 | 0.006575 | 0.006833 | 0.0003545 |  |  |  | in-order | serial | 20.6 |  |  |  |
+| fusedchain | gfortran-natural-inputonly | ok | 21 | 0.006547 | 0.006801 | 0.0006178 |  |  |  |  | serial | 20.3 |  |  |  |
+| fusedchain | gfortran-expert-inputonly | ok | 21 | 0.006547 | 0.006792 | 0.000411 |  |  |  |  | serial | 20.3 |  |  |  |
+| fusedchain | ifx-natural-inputonly | ok | 21 | 0.004379 | 0.004692 | 0.0006433 |  |  |  |  | serial | 19.9 |  |  |  |
+| fusedchain | ifx-expert-inputonly | ok | 21 | 0.004379 | 0.004666 | 0.0006159 |  |  |  |  | serial | 19.8 |  |  |  |
+
+> fusedchain serial-repro-native: inference suppressed -- trend: blade-llvm first-half vs second-half median moved 5.7%; trend: gfortran-natural first-half vs second-half median moved 9.1%; trend: ifx-expert first-half vs second-half median moved 7.9%; trend: ifx-natural-inputonly first-half vs second-half median moved 6.3%; trend: ifx-expert-inputonly first-half vs second-half median moved 6.9%; trend: control compute moved 14.2% within the block; trend: control memory moved 8.1% within the block
+
+| maskagg | blade-llvm | fallback | 0 | -- | -- | -- |  |  |  | in-order |  |  |  |  | a compound-index initializer; expected fallback (the LLVM lane refuses `compound` (notes/llvm-acceptance-B.md); blade-cpp is the Blade figure) |
+| maskagg | blade-cpp | ok | 21 | 0.06456 | 0.06886 | 0.003996 | ref |  |  | in-order | serial | 46.5 | 0.06556 [0.06502, 0.06831] | ref |  |
+| maskagg | gfortran-natural | ok | 21 | 0.008172 | 0.008288 | 0.0001849 | 0.120 [0.116, 0.122] | loss | LOSS 1.3-2x |  | serial | 17.4 | 0.004967 [0.004881, 0.005039] | 0.076 [0.072, 0.077] |  |
+| maskagg | gfortran-expert | ok | 21 | 0.004749 | 0.004982 | 0.0003055 | 0.072 [0.067, 0.074] | loss | LOSS 1.3-2x |  | serial | 16.5 | 0.001623 [0.001402, 0.001741] | 0.025 [0.021, 0.027] |  |
+| maskagg | ifx-natural | ok | 21 | 0.01032 | 0.01052 | 0.0002819 | 0.153 [0.147, 0.156] | loss | LOSS 1.3-2x |  | serial | 23.6 | 0.008327 [0.008264, 0.008505] | 0.127 [0.122, 0.130] |  |
+| maskagg | ifx-expert | ok | 21 | 0.003645 | 0.003752 | 0.0001219 | 0.054 [0.052, 0.055] | loss | LOSS 1.3-2x |  | serial | 16.0 | 0.001576 [0.001515, 0.001621] | 0.024 [0.023, 0.025] |  |
+| maskagg | blade-llvm-inputonly | ok | 21 | 0.002146 | 0.002177 | 5.01e-05 |  |  |  | in-order | serial | 12.2 |  |  |  |
+| maskagg | blade-cpp-inputonly | ok | 21 | 0.003235 | 0.003304 | 7.87e-05 |  |  |  | in-order | serial | 12.9 |  |  |  |
+| maskagg | gfortran-natural-inputonly | ok | 21 | 0.003292 | 0.003321 | 7.23e-05 |  |  |  |  | serial | 12.6 |  |  |  |
+| maskagg | gfortran-expert-inputonly | ok | 21 | 0.003281 | 0.003359 | 0.0001282 |  |  |  |  | serial | 12.7 |  |  |  |
+| maskagg | ifx-natural-inputonly | ok | 21 | 0.00215 | 0.002189 | 6.28e-05 |  |  |  |  | serial | 12.2 |  |  |  |
+| maskagg | ifx-expert-inputonly | ok | 21 | 0.002149 | 0.002175 | 3.28e-05 |  |  |  |  | serial | 12.2 |  |  |  |
+| onepass | blade-llvm | ok | 21 | 0.01647 | 0.01716 | 0.0009009 | ref |  |  | in-order | serial | 42.7 | 0.005372 [0.004542, 0.005893] | ref |  |
+| onepass | blade-cpp | ok | 21 | 0.02079 | 0.02109 | 0.001064 | 1.229 [1.210, 1.276] | suppressed |  | in-order | serial | 43.5 | 0.003975 [0.003689, 0.004738] | 0.740 [0.655, 0.941] |  |
+| onepass | gfortran-natural | ok | 21 | 0.03227 | 0.03282 | 0.0009868 | 1.913 [1.883, 1.965] | suppressed | WIN 2-3x (one pass vs four) |  | serial | 43.2 | 0.0157 [0.01512, 0.01632] | 2.923 [2.666, 3.464] |  |
+| onepass | gfortran-expert | ok | 21 | 0.02106 | 0.02167 | 0.000806 | 1.263 [1.243, 1.292] | suppressed | parity |  | serial | 43.2 | 0.004403 [0.003714, 0.004887] | 0.820 [0.676, 0.978] |  |
+| onepass | ifx-natural | ok | 21 | 0.01243 | 0.0135 | 0.001516 | 0.787 [0.754, 0.834] | suppressed | WIN 2-3x (one pass vs four) |  | serial | 42.7 | 0.001251 [0.0007991, 0.002063] | 0.233 [0.141, 0.402] |  |
+| onepass | ifx-expert | ok | 21 | 0.01249 | 0.01321 | 0.0006998 | 0.770 [0.751, 0.793] | suppressed | parity |  | serial | 42.7 | 0.001138 [0.0006175, 0.001534] | 0.212 [0.117, 0.299] |  |
+| onepass | blade-llvm-inputonly | ok | 21 | 0.01116 | 0.01179 | 0.001456 |  |  |  | in-order | serial | 42.7 |  |  |  |
+| onepass | blade-cpp-inputonly | ok | 21 | 0.01655 | 0.01711 | 0.001127 |  |  |  | in-order | serial | 43.5 |  |  |  |
+| onepass | gfortran-natural-inputonly | ok | 21 | 0.01673 | 0.01712 | 0.0009254 |  |  |  |  | serial | 43.2 |  |  |  |
+| onepass | gfortran-expert-inputonly | ok | 21 | 0.01662 | 0.01726 | 0.001334 |  |  |  |  | serial | 43.2 |  |  |  |
+| onepass | ifx-natural-inputonly | ok | 21 | 0.01117 | 0.01225 | 0.0009553 |  |  |  |  | serial | 42.7 |  |  |  |
+| onepass | ifx-expert-inputonly | ok | 21 | 0.01132 | 0.01207 | 0.0008942 |  |  |  |  | serial | 42.7 |  |  |  |
+
+> onepass serial-repro-native: inference suppressed -- trend: ifx-expert first-half vs second-half median moved 5.3%; trend: blade-cpp-inputonly first-half vs second-half median moved 5.7%; trend: ifx-natural-inputonly first-half vs second-half median moved 7.3%
+
+| dot | blade-llvm | ok | 21 | 0.01669 | 0.01698 | 0.000541 | ref |  |  | in-order | serial | 50.3 | 0.003278 [0.003021, 0.003651] | ref |  |
+| dot | blade-cpp | ok | 21 | 0.02208 | 0.02273 | 0.001866 | 1.338 [1.305, 1.356] | win |  | in-order | serial | 51.1 | 0.002632 [0.002219, 0.002907] | 0.803 [0.652, 0.960] |  |
+| dot | gfortran-natural | ok | 21 | 0.01979 | 0.02014 | 0.0005635 | 1.186 [1.160, 1.202] | win | parity |  | serial | 50.8 | 0.002379 [0.002206, 0.002671] | 0.726 [0.628, 0.857] |  |
+| dot | gfortran-expert | ok | 21 | 0.01971 | 0.02007 | 0.001013 | 1.182 [1.156, 1.194] | win | parity |  | serial | 50.8 | 0.002348 [0.002169, 0.002606] | 0.716 [0.622, 0.888] |  |
+| dot | ifx-natural | ok | 21 | 0.01368 | 0.01415 | 0.0006806 | 0.833 [0.813, 0.853] | loss | parity |  | serial | 50.4 | 0.002372 [0.0019, 0.002786] | 0.723 [0.577, 0.867] |  |
+| dot | ifx-expert | ok | 21 | 0.01169 | 0.01222 | 0.0007343 | 0.720 [0.696, 0.744] | loss | parity |  | serial | 50.4 | 0.0006071 [0.0003605, 0.001043] | 0.185 [0.105, 0.328] |  |
+| dot | blade-llvm-inputonly | ok | 21 | 0.01339 | 0.0137 | 0.0004868 |  |  |  | in-order | serial | 50.3 |  |  |  |
+| dot | blade-cpp-inputonly | ok | 21 | 0.01967 | 0.0201 | 0.0005128 |  |  |  | in-order | serial | 51.1 |  |  |  |
+| dot | gfortran-natural-inputonly | ok | 21 | 0.01729 | 0.01776 | 0.0003529 |  |  |  |  | serial | 50.8 |  |  |  |
+| dot | gfortran-expert-inputonly | ok | 21 | 0.01744 | 0.01772 | 0.0004476 |  |  |  |  | serial | 50.8 |  |  |  |
+| dot | ifx-natural-inputonly | ok | 21 | 0.01131 | 0.01178 | 0.001156 |  |  |  |  | serial | 50.4 |  |  |  |
+| dot | ifx-expert-inputonly | ok | 21 | 0.01124 | 0.01161 | 0.0005402 |  |  |  |  | serial | 50.4 |  |  |  |
+| saxpy | blade-llvm | ok | 21 | 0.01515 | 0.01549 | 0.0003152 | ref |  |  | in-order | serial | 49.8 | 0.006356 [0.006183, 0.006631] | ref |  |
+| saxpy | blade-cpp | ok | 21 | 0.01815 | 0.0184 | 0.0004201 | 1.188 [1.171, 1.204] | win |  | in-order | serial | 50.7 | 0.005113 [0.004958, 0.005343] | 0.804 [0.755, 0.837] |  |
+| saxpy | gfortran-natural | ok | 21 | 0.01635 | 0.01672 | 0.0003598 | 1.079 [1.062, 1.093] | detectable-win | parity |  | serial | 50.8 | 0.004875 [0.004736, 0.005098] | 0.767 [0.726, 0.810] |  |
+| saxpy | gfortran-expert | ok | 21 | 0.01524 | 0.01536 | 0.0002874 | 0.992 [0.977, 1.003] | equivalent | parity |  | serial | 50.8 | 0.003516 [0.003454, 0.003669] | 0.553 [0.527, 0.587] |  |
+| saxpy | ifx-natural | ok | 21 | 0.01272 | 0.01303 | 0.0002574 | 0.841 [0.828, 0.849] | loss | parity |  | serial | 50.4 | 0.005294 [0.005188, 0.005483] | 0.833 [0.798, 0.870] |  |
+| saxpy | ifx-expert | ok | 21 | 0.009455 | 0.009802 | 0.0002335 | 0.633 [0.621, 0.639] | loss | parity |  | serial | 50.4 | 0.002038 [0.001822, 0.002194] | 0.321 [0.283, 0.345] |  |
+| saxpy | blade-llvm-inputonly | ok | 21 | 0.008785 | 0.009131 | 0.0003558 |  |  |  | in-order | serial | 35.1 |  |  |  |
+| saxpy | blade-cpp-inputonly | ok | 21 | 0.0131 | 0.01328 | 0.0002484 |  |  |  | in-order | serial | 35.8 |  |  |  |
+| saxpy | gfortran-natural-inputonly | ok | 21 | 0.0115 | 0.01184 | 0.0002356 |  |  |  |  | serial | 35.6 |  |  |  |
+| saxpy | gfortran-expert-inputonly | ok | 21 | 0.01158 | 0.01185 | 7.13e-05 |  |  |  |  | serial | 35.5 |  |  |  |
+| saxpy | ifx-natural-inputonly | ok | 21 | 0.007569 | 0.007732 | 0.0002024 |  |  |  |  | serial | 35.1 |  |  |  |
+| saxpy | ifx-expert-inputonly | ok | 21 | 0.007423 | 0.007764 | 0.0003424 |  |  |  |  | serial | 35.1 |  |  |  |
+
+## Controls
+
+- compute (recur/gfortran-expert/serial-repro-native/full): n=105 median 0.01295 s, baseline 0.01342 s
+- memory (saxpy/gfortran-expert/serial-repro-native/control): n=105 median 0.005438 s, baseline 0.005379 s
+
+[13:59:31.543 + 3293.0s] wrote C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-130438
+[13:59:31.543 + 3293.0s] exit 3: 0 failure(s), 2 flag(s)
+exit 3

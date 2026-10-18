@@ -6,3 +6,46 @@
 10:03:29 START mt8-licensed regimes=mt8-licensed-native kernels=all
 11:12:04 DONE mt8-licensed exit=1
 11:12:04 STOPPED after mt8-licensed: harness exit 1 (failure/abort)
+11:31:48 DRIVER2 STARTED
+11:31:48 COOLDOWN 300s before mt8-licensed-groupA-saxpy
+11:36:51 PRECHECK mt8-licensed-groupA-saxpy BatteryStatus=2 compute-procs=[]
+11:36:51 START mt8-licensed-groupA-saxpy regimes=mt8-licensed-native kernels=gram,comoment3,antisym,pairkernel,saxpy
+12:12:10 DONE mt8-licensed-groupA-saxpy exit=3
+12:12:10 COOLDOWN 300s before serial-licensed-antisym
+12:17:13 PRECHECK serial-licensed-antisym BatteryStatus=2 compute-procs=[]
+12:17:13 START serial-licensed-antisym regimes=serial-licensed-native kernels=antisym
+12:21:03 DONE serial-licensed-antisym exit=0
+12:21:03 COOLDOWN 300s before serial-repro-3a
+12:26:05 PRECHECK serial-repro-3a BatteryStatus=2 compute-procs=[]
+12:26:06 START serial-repro-3a regimes=serial-repro-native kernels=gram,comoment3,antisym,pairkernel,recur,stencil
+12:59:35 DONE serial-repro-3a exit=3
+12:59:35 COOLDOWN 300s before serial-repro-3b
+13:04:38 PRECHECK serial-repro-3b BatteryStatus=2 compute-procs=[]
+13:04:38 START serial-repro-3b regimes=serial-repro-native kernels=fusedchain,onepass,maskagg,dot,saxpy
+13:31:21 DRIVER3 WATCHING for the 3b->mt8-repro boundary
+13:59:31 DONE serial-repro-3b exit=3
+13:59:31 COOLDOWN 300s before mt8-repro
+13:59:36 DRIVER3 took over from driver2 (driver2 killed during its cooldown; no bench was running)
+13:59:36 COOLDOWN 60s before mt8-repro
+14:00:37 PRECHECK mt8-repro BatteryStatus=2 compute-procs=[] config-cooldown-keys=[]
+14:00:37 START mt8-repro regimes=mt8-repro-native kernels=all
+14:25:12 DONE mt8-repro exit=3
+14:25:13 COOLDOWN 60s before serial-fastmath
+14:26:14 PRECHECK serial-fastmath BatteryStatus=2 compute-procs=[] config-cooldown-keys=[]
+14:26:14 START serial-fastmath regimes=serial-fastmath-native kernels=all
+14:40:20 DONE serial-fastmath exit=3
+14:40:20 COOLDOWN 60s before mt8-fastmath
+14:41:21 PRECHECK mt8-fastmath BatteryStatus=2 compute-procs=[] config-cooldown-keys=[]
+14:41:21 START mt8-fastmath regimes=mt8-fastmath-native kernels=all
+14:44:25 DONE mt8-fastmath exit=1
+14:44:25 STOPPED after mt8-fastmath: harness exit 1 (failure/abort)
+14:45:54 DRIVER4 STARTED
+14:45:55 COOLDOWN 60s before mt8-fastmath-rerun
+14:46:56 PRECHECK mt8-fastmath-rerun BatteryStatus=2 compute-procs=[]
+14:46:56 START mt8-fastmath-rerun regimes=mt8-fastmath-native kernels=all
+15:02:41 DONE mt8-fastmath-rerun exit=3
+15:02:41 COOLDOWN 60s before blas
+15:03:42 PRECHECK blas BatteryStatus=2 compute-procs=[]
+15:03:42 START blas regimes=serial-licensed-blas,mt8-licensed-blas kernels=gram
+15:05:47 DONE blas exit=0
+15:05:47 ALL SESSIONS FINISHED

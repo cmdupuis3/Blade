@@ -2,10 +2,33 @@
 
 **Status (2026-10-18):** sessions **1a** (serial x licensed x native: gram, comoment3,
 antisym, pairkernel, recur, stencil; `session-042223/`) and **1b** (serial x licensed x
-native: fusedchain, onepass, maskagg, dot, saxpy + twins; `session-090344/`) are IN —
-the headline regime is complete for all eleven kernels. Pending: mt8 x licensed (next),
-repro (serial, mt8), fastmath, blas. The final summary, headline, and phase-2 worklist
-(§11) are written when the blas session lands.
+native: fusedchain, onepass, maskagg, dot, saxpy + twins; `session-090344/`) are IN — the
+headline regime is complete for all eleven kernels. Session **2** (mt8 x licensed x
+native; `session-100329/`: group B + controls stand; its group-A rows are superseded, kept
+in §5A) and its **re-run 2b** (`session-113651/`: group A under matched parallelism +
+saxpy) are IN — the mt8 regime is complete except maskagg (serial by protocol) and the
+Blade "no parallel form" cells (onepass, recur). The serial-licensed antisym re-measure
+(`session-121713/`, clean, within 1–2% of 1a) is IN (§3.1). Session **3a**
+(serial-repro-native, group A + recur + stencil; `session-122606/`; all six blocks
+indicative) is IN (§6.1): the repro build is 13–17x behind the experts on gram, comoment3
+and antisym — the measured cost of the old default and the strongest G1 evidence.
+Session **3b** (serial-repro-native, group B + controls; `session-130438/`; maskagg, dot
+and saxpy CLEAN, fusedchain and onepass indicative) is IN (§6.2). Session **3c**
+(mt8-repro-native, ten kernels; `session-140038/`; the first session under the D46
+cooldowns — control CV 1.7% / 4.7% against ~9% before; fusedchain, onepass, recur, saxpy
+clean) is IN (§6.3) — the repro regime is complete. Session **5a** (serial-fastmath, six
+kernels; `session-142614/`; antisym, fusedchain, dot clean) is IN (§7.1); session **5b**
+(mt8-fastmath, clean re-run `session-144656/` after the user-caused abort of
+`session-144122/`; all six blocks indicative) is IN (§7.2). Session **4** (gram blas, serial + mt8;
+`session-150343/`; both blocks clean) is IN (§7.3). **The matrix is complete**; §11 is
+the headline, inventory, honesty notes and phase-2 worklist. Consolidated per-session
+tables: `results/full/RUNNER-RECORD.md` (the runner's record, cross-referenced, not
+duplicated here).
+Both §12 decisions are taken (mt8 matched parallelism → group-A mt8 rows superseded and
+re-run; isolated-excursion drop-and-record rule). Resume sequence RUNNING: re-smoke group
+A → mt8-licensed group A + saxpy → serial-licensed antisym (re-measure, §3.1) →
+serial-repro 3a/3b → mt8-repro → serial-fastmath → mt8-fastmath → gram blas. The headline
+(§11) is written when the blas session lands.
 
 Every number below is copied from a session bundle's `summary.md` / `session.json`; a cell
 without a bundle reads `unrun`. The method is `README.md`; kernels `notes/kernel-list.md`
@@ -53,15 +76,27 @@ round; two drift controls per round; whole-round bootstrap; freeze at bench-bran
 
 ## 2. Sessions
 
-| session | date | bundle | regimes x kernels | rounds | duration | failures / DQ / fallbacks | longest run | peak working set | suppressed blocks |
-|---|---|---|---|---|---|---|---|---|---|
-| pilot | 2026-10-17 | `results/2026-10-17-LAPTOP-350H6LDB/session-231651/` | all 11, serial-licensed-native | 3 | — | 0 / 0 / 0 | — | — | 7 of 11 |
-| **1a** | 2026-10-18 | `results/2026-10-18-LAPTOP-350H6LDB/session-042223/` | serial-licensed-native: gram, comoment3, antisym, pairkernel, recur, stencil | 11 (gram, comoment3, antisym, pairkernel), 21 (recur, stencil) | 1975.8 s | 0 / 0 / 0 (`failures: []`) | 0.7728 s (antisym gfortran-natural median; max single run per bundle) | 55.7 MB (gram ifx-natural) | 5 of 6 (antisym clean) |
-| **1b** | 2026-10-18 | `results/2026-10-18-LAPTOP-350H6LDB/session-090344/` | serial-licensed-native: fusedchain, onepass, maskagg, dot, saxpy + twins | 21 each | 3281.9 s | 0 / 0 / 1 expected (maskagg blade-llvm: LLVM lane refuses `compound`; blade-cpp is the reference) | 0.0672 s (maskagg blade-cpp median; all arms < 0.083 s) | **65.9 MB (fusedchain gfortran-natural) and 65.5 MB (ifx-natural) — over the 64 MB rule**; all other arms ≤ 50.9 MB | 4 of 5 (onepass clean) |
-| 2 | — | unrun | mt8 x licensed x native | | | | | | |
-| 3 | — | unrun | repro (serial, mt8) | | | | | | |
-| 4 | — | unrun | blas (gram) | | | | | | |
-| 5 | — | unrun | fastmath | | | | | | |
+Cooldowns (inter-run spacing can change thermal state): every session up to and including
+serial-repro 3b ran with 2 s between runs, 10 s between kernels and ~5 min between
+sessions; from the next session on the relaxed D46 values apply (0.5 s / 3 s / 60 s) — the
+column on the right says which was in force. The 64 MB and 2.5 s caps stayed frozen
+throughout this run (README §7).
+
+| session | date | bundle | regimes x kernels | rounds | duration | failures / DQ / fallbacks | longest run | peak working set | suppressed blocks | cooldowns in force (run / kernel / session) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| pilot | 2026-10-17 | `results/2026-10-17-LAPTOP-350H6LDB/session-231651/` | all 11, serial-licensed-native | 3 | — | 0 / 0 / 0 | — | — | 7 of 11 | 2 s / 10 s / ~5 min |
+| **1a** | 2026-10-18 | `results/2026-10-18-LAPTOP-350H6LDB/session-042223/` | serial-licensed-native: gram, comoment3, antisym, pairkernel, recur, stencil | 11 (gram, comoment3, antisym, pairkernel), 21 (recur, stencil) | 1975.8 s | 0 / 0 / 0 (`failures: []`) | 0.7728 s (antisym gfortran-natural median; max single run per bundle) | 55.7 MB (gram ifx-natural) | 5 of 6 (antisym clean) | 2 s / 10 s / ~5 min |
+| **1b** | 2026-10-18 | `results/2026-10-18-LAPTOP-350H6LDB/session-090344/` | serial-licensed-native: fusedchain, onepass, maskagg, dot, saxpy + twins | 21 each | 3281.9 s | 0 / 0 / 1 expected (maskagg blade-llvm: LLVM lane refuses `compound`; blade-cpp is the reference) | 0.0672 s (maskagg blade-cpp median; all arms < 0.083 s) | **65.9 MB (fusedchain gfortran-natural) and 65.5 MB (ifx-natural) — over the 64 MB rule**; all other arms ≤ 50.9 MB | 4 of 5 (onepass clean) | 2 s / 10 s / ~5 min |
+| **2** (partial) | 2026-10-18 | `results/2026-10-18-LAPTOP-350H6LDB/session-100329/` | mt8-licensed-native: antisym, comoment3, gram, pairkernel, fusedchain, onepass, recur, stencil, dot complete; **saxpy ABORTED (round 7 of 21)**; maskagg not in the regime | 7 (gram, comoment3), 21 (others) | 4113.6 s | 0 / 0 / 0; one ABORT (saxpy blade-cpp-inputonly run 0.043 s = 7.0x its running median 0.006 s, "charter 2.5") | 0.6436 s (gram ifx-natural median) | **66.4 / 68.0 MB (fusedchain gfortran-/ifx-natural) — over the 64 MB rule** | 8 of 9 (antisym clean) | 2 s / 10 s / ~5 min |
+| **2b** (mt8 re-run) | 2026-10-18 | `results/2026-10-18-LAPTOP-350H6LDB/session-113651/` | mt8-licensed-native: gram, comoment3, antisym, pairkernel (matched parallelism, D44) + saxpy | 21 each | 2118.5 s | 0 / 0 / 0; no abort; no excursion dropped | 0.6311 s (gram ifx-natural median) | 58.3 MB (gram ifx-natural) | 5 of 5 (trend/control checks) | 2 s / 10 s / ~5 min |
+| **1a′** (antisym re-measure) | 2026-10-18 | `results/2026-10-18-LAPTOP-350H6LDB/session-121713/` | serial-licensed-native: antisym (after the D44 source change) | 11 | 229.0 s | 0 / 0 / 0; no excursion | 0.7709 s | 32.7 MB | 0 of 1 (clean) | 2 s / 10 s / ~5 min |
+| **3a** | 2026-10-18 | `results/2026-10-18-LAPTOP-350H6LDB/session-122606/` | serial-repro-native: gram, comoment3, antisym, pairkernel, recur, stencil | 11 / 11 / 11 / 11 / 21 / 21 | 2008.6 s | 0 / 0 / 0; no abort; no excursion | 1.228 s (gram blade-llvm warm-up; under the cap) | 55.9 MB (gram ifx-natural) | 6 of 6 (first block's compute control ran high at 16.5 ms; later blocks 12–23% below it) | 2 s / 10 s / ~5 min |
+| **3b** | 2026-10-18 | `results/2026-10-18-LAPTOP-350H6LDB/session-130438/` | serial-repro-native: fusedchain, maskagg, onepass, dot, saxpy + twins | 21 each | 3291.8 s | 0 / 0 / 1 expected (maskagg blade-llvm) ; no abort; no excursion | 0.0689 s (maskagg blade-cpp) | **66.1 / 65.6 MB (fusedchain naturals, over the 64 MB rule)** | 2 of 5 (fusedchain, onepass); maskagg, dot, saxpy clean | 2 s / 10 s / ~5 min (old driver) |
+| **3c** | 2026-10-18 | `results/2026-10-18-LAPTOP-350H6LDB/session-140038/` | mt8-repro-native: ten kernels (maskagg serial by protocol); Blade = threaded maps, serial folds | 7 (antisym, comoment3, gram), 21 (others) | 1474.1 s | 0 / 0 / 0; no abort; no excursion | 0.6986 s (gram gfortran-natural median) | 68.2 / 66.5 MB (fusedchain naturals, over the 64 MB rule) | 6 of 10 (arm trends; fusedchain, onepass, recur, saxpy clean) | **0.5 s / 3 s / 60 s (first D46 session)** |
+| **4** | 2026-10-18 | `results/2026-10-18-LAPTOP-350H6LDB/session-150343/` | gram blas: serial (OPENBLAS_NUM_THREADS=1) + mt8 (=8); blade-cpp auto-routed dsyrk, gfortran/ifx expert explicit dsyrk; blade-llvm no-blas; naturals excluded | 11 (serial), 21 (mt8) | 123.6 s | 0 / 0 / 0; no excursion | 0.0807 s | 51.1 MB | 0 of 2 (both clean) | 0.5 s / 3 s / 60 s |
+| **5a** | 2026-10-18 | `results/2026-10-18-LAPTOP-350H6LDB/session-142614/` | serial-fastmath-native: antisym, comoment3, gram, fusedchain, onepass, dot (+ twins); tolerance 1e-8 | 11 / 11 / 11 / 21 / 21 / 21 | 844.9 s | 0 / 0 / 0; no abort; no excursion; no fallback | 0.4668 s (gram gfortran-natural median) | 66.1 / 65.6 MB (fusedchain naturals) | 3 of 6 (comoment3, gram, onepass); antisym, fusedchain, dot clean | 0.5 s / 3 s / 60 s |
+| 5b (aborted attempt) | 2026-10-18 | `results/2026-10-18-LAPTOP-350H6LDB/session-144122/` | mt8-fastmath-native (attempt) | — | 182.2 s | **ABORTED on a control excursion** (memory control 0.030 s, 5.5x its running median) caused by the user working on the machine at 14:44 (Task Manager open); excluded from every figure | — | — | — | 0.5 s / 3 s / 60 s |
+| **5b** | 2026-10-18 | `results/2026-10-18-LAPTOP-350H6LDB/session-144656/` | mt8-fastmath-native: antisym, comoment3, gram, fusedchain, onepass, dot (+ twins); tolerance 1e-8; onepass blade-cpp no-parallel-form | 21 / 21 / 7 / 21 / 21 / 21 | 943.4 s | 0 / 0 / 0; no abort; no excursion | 0.7068 s (gram gfortran-natural median) | 66.5 / 68.2 MB (fusedchain naturals) | 6 of 6 (arm trends) | 0.5 s / 3 s / 60 s |
 
 ## 3. serial x licensed x native (headline regime) — session 1a
 
@@ -69,16 +104,28 @@ Reference for every kernel in this block: `blade-llvm`. Columns: n, min / median
 ms, ratio vs reference [95% CI], verdict, hypothesis (from the spec), fold form,
 parallelism, peak working set, attribution, notes. Block flags are quoted from the bundle.
 
-### 3.1 antisym — CLEAN block (verdicts stand)
+### 3.1 antisym — CLEAN block (verdicts stand); re-measured in `session-121713/` after the D44 licence change
+
+Re-measure bundle: 11 rounds, 229.0 s, 0 flags, NOT suppressed, no excursion; the D44
+change altered this source's serial emission in its final 1201-term input-sum fold only
+(8 accumulators → one simd reduction, identical at 15 digits, ~1 µs). Every median is
+within 1–2% of session 1a's (record below). Controls in this short quiet session: compute
+12.84 ms, memory 5.453 ms, both on their baselines.
 
 | arm | n | min (ms) | median (ms) | IQR (ms) | ratio [95% CI] | verdict | hypothesis | fold form | parallelism | peak WS (MB) | attribution | notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| blade-llvm | 11 | 73.98 | 74.55 | 1.169 | ref | — | — | reordered (7 reassoc flags) | serial | 17.3 | checksum share ≈ small (A §13) | |
-| blade-cpp | 11 | 108.6 | 109.3 | 0.808 | 1.466 [1.437, 1.481] | win (C++ lane 1.47x slower than LLVM lane) | both lanes reported | reordered (6 SIMD_REDUCTION) | serial | 18.1 | | G26 (single-accumulator simd reduction) + G3b (std::sort canonicalizing read); pilot 1.54 |
-| gfortran-natural | 11 | 770.6 | 772.8 | 3.259 | 10.366 [10.187, 10.406] | **win** | WIN ~2x | — | serial | 23.2 | | dense baseline, both inner products per cell |
-| gfortran-expert | 11 | 30.00 | 31.01 | 0.805 | 0.416 [0.406, 0.418] | **loss** | equivalence to modest loss | — | serial | 32.5 | | G1 |
-| ifx-natural | 11 | 331.3 | 332.2 | 0.922 | 4.456 [4.373, 4.471] | **win** | WIN ~2x | — | serial | 22.8 | | |
-| ifx-expert | 11 | 28.85 | 29.43 | 0.661 | 0.395 [0.388, 0.403] | **loss** | equivalence to modest loss | — | serial | 32.1 | | G1 |
+| blade-llvm | 11 | 73.17 | 73.95 | 0.256 | ref | — | — | reordered (7 reassoc flags) | serial | 17.4 | checksum share ≈ small (A §13) | |
+| blade-cpp | 11 | 107.3 | 107.9 | 1.023 | 1.459 [1.452, 1.471] | win (C++ lane 1.46x slower than LLVM lane) | both lanes reported | reordered (7 SIMD_REDUCTION) | serial | 18.3 | | G26 + G3b; pilot 1.54, session 1a 1.466 |
+| gfortran-natural | 11 | 764.7 | 770.9 | 2.733 | 10.425 [10.371, 10.455] | **win** | WIN ~2x | — | serial | 23.4 | | dense baseline, both inner products per cell |
+| gfortran-expert | 11 | 30.24 | 30.74 | 0.212 | 0.416 [0.414, 0.417] | **loss** | equivalence to modest loss | — | serial | 32.7 | | G1 |
+| ifx-natural | 11 | 330.8 | 332.9 | 2.219 | 4.502 [4.475, 4.516] | **win** | WIN ~2x | — | serial | 22.9 | | |
+| ifx-expert | 11 | 28.75 | 29.54 | 0.739 | 0.400 [0.395, 0.407] | **loss** | equivalence to modest loss | — | serial | 32.2 | | G1 |
+
+Session-1a record (`session-042223/`, superseded by the re-measure, kept for the
+consistency check): blade-llvm 74.55 ms; blade-cpp 109.3 (1.466 [1.437, 1.481]);
+gfortran-natural 772.8 (10.366 [10.187, 10.406]); gfortran-expert 31.01 (0.416 [0.406,
+0.418]); ifx-natural 332.2 (4.456 [4.373, 4.471]); ifx-expert 29.43 (0.395 [0.388,
+0.403]).
 
 Diagnosis. Both hypotheses missed in magnitude, in opposite directions. Against the dense
 baselines Blade wins 10.4x (gfortran) and 4.5x (ifx), not ~2x: the baseline evaluates two
@@ -401,24 +448,956 @@ loops (store y2 under `|> compute`, then the checksum fold) do not take. The IQR
 (2.5–3.8 ms on 12–18 ms medians) are the session's widest: a 48 MB stream on an uncapped
 clock.
 
-## 5. mt8 x licensed x native — session 2
+## 5. mt8 x licensed x native — session 2 (partial) — **group-A rows SUPERSEDED**
 
-`unrun`. Denominator `blade-cpp`; `blade-llvm` rows "serial only (LLVM lane has no
-threads)"; `onepass` and `recur` Blade rows "no parallel form"; `maskagg` serial by
-protocol; parallelism from the per-loop evidence (`fold form:` lines; G25 for chunk
-interiors); unbound threads, team creation inside the region (D42).
+**Two bundles.** Session 2 (`session-100329/`, 4113.6 s) measured the group-A blocks
+with Blade threading only the kernel's level 0 while the Fortran arms threaded input
+generation and the checksum read-back as well; the user's D44 decision (matched
+parallelism) superseded those four blocks, the group-A Blade sources gained `where omp`
+licences on their input maps and checksum nests (blade-A §14), and the **re-run**
+`session-113651/` (2118.5 s; git fceb895d; 21 rounds each; 0 failures; no abort; no
+excursion dropped; 5 of 5 blocks suppressed by trend/control checks) is what §5.1–5.4
+and §5.10 report. The superseded numbers are kept in appendix §5A so the before/after of
+the threading fix is visible. §5.5–5.9 (group B, controls) are from session 2 and stand.
+Reading notes for the re-run (blade-A §14): the Blade arms now show `openmp (4
+constructs)` — input map, kernel level 0, checksum nest, input sum; the threaded checksum
+folds take the **Path B** form, chunks serial within each thread, no simd lanes (**G25**);
+only the fold-kernel licence placement threads (a licence on the checksum's row map is
+silently dropped, **G27**). Serial emissions of gram, comoment3 and pairkernel are
+byte-identical after the change (their §3 rows stand); antisym's differs in its final
+input-sum fold only and its serial block is re-measured (§3.1).
+
+**Before/after at a glance (blade-cpp mt8 medians, ms):** antisym 29.7 → **22.6**;
+comoment3 87.0 → **20.6**; gram 61.5 → **43.8**; pairkernel 56.5 → **16.1**. Ratios vs the
+experts: antisym 0.33/0.35 → **0.46/0.48**; comoment3 0.064/0.048 → **0.24/0.20**; gram
+0.35/0.33 → **0.48/0.46**; pairkernel 0.11/0.11 → **0.39/0.39**. Threading the preparation
+and checksum removed the Amdahl term; what remains is the serial-regime kernel gap under
+threads (G1, G1b, G3a) and the chunked, unvectorized checksum fold (G25).
+
+### 5.1 antisym — indicative (suppressed by drift); re-run, matched parallelism
+
+Bundle flag: "trend: gfortran-expert first-half vs second-half median moved 7.2%; trend:
+control compute moved 22.9% within the block; control memory 8.8%".
+
+| arm | n | min (ms) | median (ms) | IQR (ms) | ratio vs blade-cpp [95% CI] | verdict | hypothesis | fold form / parallelism | peak WS (MB) |
+|---|---|---|---|---|---|---|---|---|---|
+| blade-cpp | 21 | 20.98 | 22.58 | 2.201 | ref | — | — | reordered (6 SIMD_REDUCTION) / openmp (4 constructs) | 18.7 |
+| gfortran-natural | 21 | 109.3 | 116.9 | 3.743 | 5.177 [5.060, 5.273] | indicative | WIN ~2x | openmp runtime linked | 23.8 |
+| gfortran-expert | 21 | 9.466 | 10.38 | 1.237 | 0.460 [0.440, 0.478] | indicative | equivalence to modest loss | same | 33.1 |
+| ifx-natural | 21 | 64.68 | 71.39 | 9.553 | 3.162 [3.009, 3.386] | indicative | WIN ~2x | same | 25.4 |
+| ifx-expert | 21 | 9.988 | 10.90 | 1.045 | 0.483 [0.460, 0.515] | indicative | equivalence to modest loss | same | 34.6 |
+
+Diagnosis (indicative). Before the fix Blade's mt8 total was 29.7 ms with serial
+preparation and checksum; with all four phases threaded it is 22.6 ms (4.8x over its
+109.3 ms serial C++), and the loss to the experts narrows from 3.0x (0.33 / 0.35) to
+2.1–2.2x (0.46 / 0.48) — now the same ratio as in the serial regime (0.42 / 0.40 on the
+LLVM reference, 1.47x larger on the C++ one), i.e. the mt8 gap IS the serial gap: **G1**
+(per-cell operand reloads against the expert's 8x6 register tile) scales with threads on
+both sides. The remaining difference between the serial and mt8 ratios is the Path B
+checksum (**G25**: 8 serial chains where the experts' threaded `simd reduction` runs 8
+vectorized ones). The win over the dense baselines (5.2x / 3.2x) sits between the serial
+10.4x / 4.5x and the superseded 3.8x / 2.4x, as expected once Blade's preparation threads
+too.
+
+### 5.2 comoment3 — indicative (suppressed by drift); re-run, matched parallelism
+
+Bundle flag: "control compute median 0.01292 s moved −8.9% vs the session baseline
+0.01418 s; control memory median 0.005397 s moved −11.0% vs baseline 0.006067 s" (the
+session's first block ran hot; later blocks sit BELOW the baseline — the rolling rule
+fires either way).
+
+| arm | n | min (ms) | median (ms) | IQR (ms) | ratio [95% CI] | verdict | hypothesis | fold form / parallelism | peak WS (MB) | attribution |
+|---|---|---|---|---|---|---|---|---|---|---|
+| blade-cpp | 21 | 20.01 | 20.62 | 0.875 | ref | — | — | reordered (4 SIMD_REDUCTION) / openmp (4 constructs) | 12.6 | checksum share 70% serial (C++, A §13); now threaded, Path B |
+| gfortran-natural | 21 | 83.73 | 91.94 | 4.281 | 4.458 [4.295, 4.526] | indicative | WIN 4–6x | openmp runtime linked | 43.9 | |
+| gfortran-expert | 21 | 4.615 | 4.998 | 0.299 | 0.242 [0.233, 0.248] | indicative | equivalence to modest loss | same | 14.5 | |
+| ifx-natural | 21 | 101.5 | 111.5 | 6.531 | 5.406 [5.257, 5.613] | indicative | WIN 4–6x | same | 45.4 | |
+| ifx-expert | 21 | 3.796 | 4.025 | 0.132 | 0.195 [0.191, 0.199] | indicative | equivalence to modest loss | same | 15.8 | |
+
+Diagnosis (indicative). The largest before/after in the suite: 87.0 → 20.6 ms (the
+superseded figure was 1.26x over the 109.7 ms serial C++; the matched one is 5.3x). The
+loss to the experts goes from 16–21x (0.064 / 0.048) to 4.1–5.1x (0.242 / 0.195) — still
+wider than the serial 3.6x (0.277 / 0.282 on the LLVM reference) because two things do not
+scale on Blade's side: the kernel's inner loop (**G1b**: a multiply plus an FMA per term
+with 3 loads against the expert's hoisted pair product, plus **G1**'s per-cell reloads) and
+the p³ canonicalizing checksum pass, which is now 8 threads of serial `canon_fold` reads
+(**G3a/G3b** under **G25**) against the experts' vectorized threaded sum. The win over the
+dense cubes (4.5x / 5.4x) is now where the hypothesis put it (4–6x, the cell ratio 5.89),
+whereas the superseded 1.1x / 1.4x was the serial checksum.
+
+### 5.3 gram — indicative (suppressed by drift); re-run, matched parallelism
+
+Bundle flag: "trend: blade-cpp first-half vs second-half median moved 10.7%;
+gfortran-natural 8.7%; ifx-expert 5.9%; control compute median −9.5% vs baseline; control
+memory −11.4%".
+
+| arm | n | min (ms) | median (ms) | IQR (ms) | ratio [95% CI] | verdict | hypothesis | fold form / parallelism | peak WS (MB) | notes |
+|---|---|---|---|---|---|---|---|---|---|---|
+| blade-cpp | 21 | 40.06 | 43.75 | 5.286 | ref | — | — | reordered (3 SIMD_REDUCTION) / openmp (4 constructs) | 27.8 | |
+| gfortran-natural | 21 | 508.4 | 614.1 | 98.89 | 14.034 [13.086, 14.946] | indicative | loss or equivalent | openmp runtime linked | 37.3 | `matmul` unannotated: parallel preparation, serial kernel (bundle note) |
+| gfortran-expert | 21 | 19.37 | 21.19 | 0.815 | 0.484 [0.454, 0.515] | indicative | equivalence to modest loss | same | 52.1 | |
+| ifx-natural | 21 | 594.5 | 631.1 | 16.28 | 14.423 [13.507, 15.089] | indicative | loss or equivalent | same | 58.3 | same note |
+| ifx-expert | 21 | 17.91 | 20.02 | 1.131 | 0.458 [0.427, 0.481] | indicative | equivalence to modest loss | same | 53.7 | |
+
+Diagnosis (indicative). 61.5 → 43.8 ms (6.3x over the 275.2 ms serial C++ — the best
+scaling of the four, as gram's serial phases were the smallest share); the loss to the
+experts narrows from 2.8–3.0x to 2.1–2.2x (0.484 / 0.458), again matching the serial
+ratio on the C++ reference (0.52 / 0.47 against the LLVM lane, 1.76x larger on the C++
+one): **G1** under threads, with **G26** (the C++ lane's single-accumulator simd reduction)
+still in the per-cell dot. The `matmul` baselines are unchanged at 614 / 631 ms — the
+intrinsic is unannotated and serial ("parallel preparation, serial kernel", M24) — so the
+14x would-be win is over a serial kernel and is labelled as such; Blade's threaded
+triangle is 14x faster than the runtimes' serial `matmul`, not than a threaded one.
+
+### 5.4 pairkernel — indicative (suppressed by drift); re-run, matched parallelism
+
+Bundle flag: "trend: gfortran-natural first-half vs second-half median moved 7.3%;
+ifx-natural 8.0%; control compute median −7.4% vs baseline, trend 9.9%; control memory
+−11.6%".
+
+| arm | n | min (ms) | median (ms) | IQR (ms) | ratio [95% CI] | verdict | hypothesis | fold form / parallelism | peak WS (MB) | attribution |
+|---|---|---|---|---|---|---|---|---|---|---|
+| blade-cpp | 21 | 14.24 | 16.11 | 2.726 | ref | — | — | reordered (1 SIMD_REDUCTION) / openmp (4 constructs) | 29.8 | checksum share 57% serial (C++); now threaded, Path B |
+| gfortran-natural | 21 | 13.61 | 15.28 | 2.157 | 0.948 [0.877, 1.013] | indicative | WIN ~2x | openmp runtime linked | 53.3 | |
+| gfortran-expert | 21 | 5.746 | 6.262 | 0.323 | 0.389 [0.373, 0.405] | indicative | equivalent | same | 29.5 | |
+| ifx-natural | 21 | 14.76 | 16.43 | 2.150 | 1.019 [0.964, 1.124] | indicative | WIN ~2x | same | 54.8 | |
+| ifx-expert | 21 | 5.802 | 6.209 | 0.388 | 0.385 [0.374, 0.406] | indicative | equivalent | same | 30.9 | |
+
+Diagnosis (indicative). 56.5 → 16.1 ms (4.8x over the 77.3 ms serial C++); the loss to the
+experts from 9x (0.11) to 2.6x (0.39), and the dense baselines from a 3.2–3.4x would-be
+loss to equivalence (0.95 / 1.02). The serial-regime reading (kernel equivalent to the
+expert, the whole gap in the checksum pass — **G3a**) carries over: the kernel's
+transcendental loop scales on both sides, and what keeps Blade at 2.6x behind is the
+6.27M-read logical checksum, now 8 serial chains of out-of-line `canon_fold` reads
+(**G3b** under **G25**) against the experts' vectorized threaded triangle sum. The
+hypothesised ~2x over the dense baselines does not appear under threads: their 2x extra
+`exp` work parallelizes as well as Blade's half, and Blade's checksum pass is the
+difference that remains. The §5.1–5.4 numbers are
+kept here as an APPENDIX RECORD — "superseded: measured with serial preparation and
+checksum; re-run pending" — and are not cited in the headline. §5.5–5.9 (group B and the
+controls) stand as measured; §5.10 (saxpy) is unrun pending the re-run.
+
+Bundle `results/2026-10-18-LAPTOP-350H6LDB/session-100329/` (same host/build header;
+duration 4113.6 s; 0 failures/DQ; one abort, §5.10). Reference `blade-cpp` for every
+kernel (the LLVM lane has no thread runtime: every `blade-llvm` row is `serial-only`, n =
+0, and is omitted from the tables below). `onepass` and `recur` Blade arms are
+`no-parallel-form` (kernel.json; spec), so those two kernels have Fortran mt8 numbers and
+no ratio. `maskagg` is serial by protocol and not in this regime. Threads unbound,
+`OMP_NUM_THREADS=8`, team creation inside the region (D42). The `parallelism` column is the
+bundle's: `openmp (k construct(s))` for Blade = k threaded loops in the emission (the
+kernel's level 0 and, in group B, the input map), `openmp runtime linked` for Fortran.
+**Read §12.1 before comparing these mt8 numbers across languages: the Fortran arms thread
+input generation and the checksum read-back in every kernel, while the group-A Blade
+sources thread only the kernel's level 0 — the serial checksum pass (57–70% of the C++
+lane's serial time on comoment3/pairkernel) is included in every Blade mt8 number
+below.** n = 7 for gram and comoment3 (the mt8 minimum), 21 otherwise.
+
+### 5.5 fusedchain — indicative (suppressed by drift); twins present
+
+Bundle flag: "trend: blade-cpp first-half vs second-half median moved 7.7%;
+gfortran-natural 9.9%; gfortran-expert-inputonly 7.4%; control memory trend 5.3%".
+
+| arm | n | min (ms) | median (ms) | IQR (ms) | ratio [95% CI] | verdict | hypothesis | parallelism | peak WS (MB) | incremental (ms) [CI] | incremental ratio [CI] |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| blade-cpp | 21 | 3.739 | 4.128 | 0.530 | ref | — | — | in-order fold / openmp (2 constructs: input map + fold) | 20.8 | 0.611 [0.239, 0.927] | ref |
+| gfortran-natural | 21 | 11.14 | 12.47 | 1.589 | 3.020 [2.824, 3.239] | indicative | WIN 1.5–2.5x | openmp runtime linked | **66.4** | 8.881 [8.439, 9.459] | 14.54 [9.490, 38.11] |
+| gfortran-expert | 21 | 3.037 | 3.253 | 0.366 | 0.788 [0.738, 0.829] | indicative | equivalent | same | 20.6 | 0.359 [0.065, 0.579] | 0.588 [0.102, 1.551] |
+| ifx-natural | 21 | 11.73 | 12.63 | 0.823 | 3.060 [2.847, 3.186] | indicative | WIN 1.5–2.5x | same | **68.0** | 8.508 [8.014, 8.755] | 13.93 [9.047, 34.76] |
+| ifx-expert | 21 | 3.298 | 3.509 | 0.343 | 0.850 [0.799, 0.916] | indicative | equivalent | same | 22.1 | 0.329 [0.095, 0.542] | 0.539 [0.154, 1.405] |
+| blade-cpp-inputonly | 21 | 3.155 | 3.517 | 0.541 | — | — | — | openmp (1 construct) | 20.8 | | |
+| gfortran-natural-inputonly | 21 | 3.444 | 3.585 | 0.180 | — | — | — | openmp runtime linked | 20.6 | | |
+| gfortran-expert-inputonly | 21 | 2.663 | 2.894 | 0.429 | — | — | — | same | 20.6 | | |
+| ifx-natural-inputonly | 21 | 3.896 | 4.124 | 0.119 | — | — | — | same | 22.1 | | |
+| ifx-expert-inputonly | 21 | 3.057 | 3.180 | 0.256 | — | — | — | same | 22.1 | | |
+
+Diagnosis (indicative). The fused chain keeps its ~3x over the staged baselines (whose
+three temporaries are untouched by threads: 8.5–8.9 ms incremental); against the experts
+Blade's total is 0.79 / 0.85 (would-be detectable loss) with incrementals 0.6 / 0.3 ms on
+intervals that contain 1 — the 3-ms totals are dominated by generation (3.5 vs 2.9–3.2 ms
+twins) and team start-up (0.4–0.9 ms, D42), not by the chain. Note the bundle's fold form
+for the mt8 C++ arm reads `in-order`: under threads the licensed fold takes the Path B
+chunked form, serial within each chunk (**G25**). Working-set breach again on the natural
+arms (66.4 / 68.0 MB).
+
+### 5.6 onepass — Fortran arms only (Blade: no parallel form); indicative
+
+Bundle flag: "trend: ifx-expert first-half vs second-half median moved 6.7%;
+gfortran-natural-inputonly 8.0%; ifx-expert-inputonly 8.7%; control compute trend 7.1%".
+No ratio (no Blade reference in this regime).
+
+| arm | n | min (ms) | median (ms) | IQR (ms) | hypothesis | twin median (ms) | peak WS (MB) |
+|---|---|---|---|---|---|---|---|
+| blade-cpp | 0 | — | — | — | no parallel form (the `<&!>` join has a simd form, no thread form; G7) | — | — |
+| gfortran-natural | 21 | 14.55 | 15.34 | 0.628 | WIN 2–3x (serial) | 9.145 | 43.5 |
+| gfortran-expert | 21 | 7.733 | 9.075 | 0.812 | equivalent (serial) | 7.356 | 43.5 |
+| ifx-natural | 21 | 15.04 | 15.76 | 0.384 | | 9.553 | 45.0 |
+| ifx-expert | 21 | 8.736 | 9.403 | 0.769 | | 7.625 | 45.0 |
+
+Reading: the Fortran experts' 8-thread reduction takes 9.1 / 9.4 ms against Blade's
+SERIAL 11.7 ms (LLVM) / 16.8 ms (C++) from session 1b — the threaded experts win outright
+over a kernel Blade cannot thread; reported as a gap (G7), not hidden.
+
+### 5.7 recur — Fortran arms only (Blade: no parallel form); indicative
+
+Bundle flag: "trend: ifx-natural 10.1%; ifx-expert 17.4%; control compute median +11.1%
+vs baseline; control memory +8.3%".
+
+| arm | n | min (ms) | median (ms) | IQR (ms) | hypothesis | peak WS (MB) |
+|---|---|---|---|---|---|---|
+| blade-cpp | 0 | — | — | — | no parallel form (no licence slot inside a `let rec` step; G5) | — |
+| gfortran-natural | 21 | 71.30 | 73.24 | 2.285 | equivalent (serial) | 51.9 |
+| gfortran-expert | 21 | 6.570 | 7.207 | 1.139 | LOSS 1.5–3x (serial) | 51.3 |
+| ifx-natural | 21 | 15.07 | 16.36 | 2.069 | | 53.4 |
+| ifx-expert | 21 | 6.771 | 7.911 | 1.568 | | 52.8 |
+
+Reading: the threaded experts reach 7.2 / 7.9 ms (from 10.5 / 11.3 serial — the time loop
+limits scaling) against Blade's serial 117 / 134 ms (session 1a): the G6 allocator loss
+compounded by the missing parallel form (G5). gfortran-natural's `workshare` arm got
+SLOWER under threads (19.7 → 73.2 ms) — the Fortran agent's record explains the
+`workshare` lowering; noted, not diagnosed here.
+
+### 5.8 stencil — indicative (suppressed by drift); twins present
+
+Bundle flag (abridged): "trend: blade-cpp 18.9%; gfortran-natural 7.6%; gfortran-expert
+9.0%; ifx-natural 6.5%; ifx-expert 12.4%; blade-cpp-inputonly 10.0%;
+gfortran-natural-inputonly 12.8%; control compute +10.7% vs baseline, trend 9.5%; control
+memory trend 7.6%".
+
+| arm | n | min (ms) | median (ms) | IQR (ms) | ratio [95% CI] | verdict | hypothesis | parallelism | peak WS (MB) | incremental (ms) [CI] | incremental ratio [CI] |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| blade-cpp | 21 | 9.584 | 11.49 | 1.915 | ref | — | — | reordered (3 SIMD_REDUCTION) / openmp (3 constructs: inputs, stencil rows, checksum) | 51.2 | 6.293 [5.562, 7.290] | ref |
+| gfortran-natural | 21 | 8.430 | 9.477 | 0.764 | 0.825 [0.757, 0.894] | indicative | equivalent | openmp runtime linked | 51.2 | 4.899 [4.588, 5.327] | 0.778 [0.650, 0.917] |
+| gfortran-expert | 21 | 7.594 | 8.968 | 1.189 | 0.780 [0.713, 0.833] | indicative | equivalent | same | 51.1 | 4.372 [3.748, 4.718] | 0.695 [0.582, 0.789] |
+| ifx-natural | 21 | 9.775 | 10.19 | 0.887 | 0.887 [0.818, 0.954] | indicative | equivalent | same | 52.7 | 5.049 [4.800, 5.485] | 0.802 [0.701, 0.912] |
+| ifx-expert | 21 | 8.381 | 9.120 | 1.541 | 0.794 [0.730, 0.867] | indicative | equivalent | same | 52.7 | 4.021 [3.618, 5.046] | 0.639 [0.550, 0.797] |
+| blade-cpp-inputonly | 21 | 4.244 | 5.197 | 0.614 | — | — | — | openmp (1 construct) | 28.5 | | |
+| gfortran-natural-inputonly | 21 | 4.179 | 4.578 | 0.661 | — | — | — | openmp runtime linked | 28.3 | | |
+| gfortran-expert-inputonly | 21 | 3.923 | 4.596 | 0.338 | — | — | — | same | 28.3 | | |
+| ifx-natural-inputonly | 21 | 4.793 | 5.141 | 0.291 | — | — | — | same | 29.8 | | |
+| ifx-expert-inputonly | 21 | 4.557 | 5.099 | 0.466 | — | — | — | same | 29.8 | | |
+
+Diagnosis (indicative). The only group-B kernel whose Blade source threads all three
+phases (3 constructs): totals 0.78–0.89 against the Fortran arms (would-be detectable
+losses), incrementals 0.64–0.80 — Blade spends 6.3 ms beyond its twin, Fortran 4.0–5.0 ms.
+Two candidate mechanisms, neither measured here: the chunked `Path B` checksum fold
+(serial within each chunk, G25) versus Fortran's `simd`+threads reduction, and the
+stencil's row-threaded halo nest writing `lap` before a second threaded pass reads it,
+where the experts fuse the checksum into the hot row. A 10–12 ms kernel at 8 threads on an
+uncapped clock: indicative only.
+
+### 5.9 dot — indicative (suppressed by drift); twins present
+
+Bundle flag: "trend: blade-cpp-inputonly 15.4%; gfortran-natural-inputonly 6.4%;
+ifx-expert-inputonly 8.1%".
+
+| arm | n | min (ms) | median (ms) | IQR (ms) | ratio [95% CI] | verdict | hypothesis | parallelism | peak WS (MB) | incremental (ms) [CI] | incremental ratio [CI] |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| blade-cpp | 21 | 10.17 | 12.00 | 0.924 | ref | — | — | in-order fold (Path B chunks) / openmp (2 constructs) | 51.3 | 1.677 [0.969, 2.381] | ref |
+| gfortran-natural | 21 | 10.73 | 11.41 | 0.657 | 0.951 [0.928, 0.989] | indicative | equivalent | openmp runtime linked | 51.1 | 2.595 [2.235, 3.038] | 1.548 [1.081, 2.724] |
+| gfortran-expert | 21 | 9.646 | 10.53 | 0.603 | 0.878 [0.859, 0.905] | indicative | equivalent | same | 51.1 | 2.011 [1.794, 2.308] | 1.200 [0.809, 2.141] |
+| ifx-natural | 21 | 11.30 | 11.83 | 0.373 | 0.986 [0.963, 1.025] | indicative | equivalent | same | 52.7 | 2.403 [1.975, 2.696] | 1.433 [1.019, 2.425] |
+| ifx-expert | 21 | 10.23 | 10.96 | 0.443 | 0.914 [0.888, 0.948] | indicative | equivalent | same | 52.7 | 1.940 [1.710, 2.273] | 1.157 [0.797, 2.049] |
+| blade-cpp-inputonly | 21 | 7.510 | 10.32 | 1.512 | — | — | — | openmp (1 construct) | 51.3 | | |
+| gfortran-natural-inputonly | 21 | 8.162 | 8.814 | 1.058 | — | — | — | openmp runtime linked | 51.1 | | |
+| gfortran-expert-inputonly | 21 | 7.465 | 8.519 | 0.374 | — | — | — | same | 51.1 | | |
+| ifx-natural-inputonly | 21 | 8.582 | 9.429 | 0.778 | — | — | — | same | 52.7 | | |
+| ifx-expert-inputonly | 21 | 7.999 | 9.023 | 0.670 | — | — | — | same | 52.7 | | |
+
+Diagnosis (indicative). Totals 0.88–0.99 (equivalent to would-be detectable loss);
+incrementals favour Blade (1.16–1.55, the gfortran-natural and ifx-natural intervals
+exclude 1): the threaded dot beyond the twin is 1.7 ms in Blade against 1.9–2.6 ms in
+Fortran, while Blade's twin is the slowest generator (10.3 ms, with the block's largest
+within-block trend, 15.4%). A 48 MB stream on 8 threads is bandwidth-bound in every arm;
+nothing here separates the languages beyond generation.
+
+### 5.10 saxpy — indicative (suppressed by drift); from the re-run `session-113651/` (the session-2 block was aborted, §11)
+
+Bundle flag: "trend: blade-cpp first-half vs second-half median moved 6.2%;
+blade-cpp-inputonly 11.6%; gfortran-expert-inputonly 9.6%; control compute median −8.8%
+vs baseline; control memory −10.4%".
+
+| arm | n | min (ms) | median (ms) | IQR (ms) | ratio [95% CI] | verdict | hypothesis | fold form / parallelism | peak WS (MB) | incremental (ms) [CI] | incremental ratio [CI] |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| blade-cpp | 21 | 10.49 | 11.40 | 0.598 | ref | — | — | in-order (Path B) / openmp (3 constructs) | 51.2 | 4.429 [4.113, 4.699] | ref |
+| gfortran-natural | 21 | 9.706 | 10.36 | 0.629 | 0.909 [0.876, 0.942] | indicative | equivalent | openmp runtime linked | 51.3 | 4.351 [3.939, 4.677] | 0.982 [0.877, 1.091] |
+| gfortran-expert | 21 | 8.286 | 8.963 | 0.385 | 0.786 [0.766, 0.808] | indicative | equivalent | same | 51.3 | 3.402 [2.927, 3.622] | 0.768 [0.659, 0.846] |
+| ifx-natural | 21 | 9.888 | 10.59 | 0.678 | 0.929 [0.892, 0.963] | indicative | equivalent | same | 52.9 | 4.279 [3.976, 4.611] | 0.966 [0.871, 1.068] |
+| ifx-expert | 21 | 8.817 | 9.224 | 0.305 | 0.809 [0.792, 0.830] | indicative | equivalent | same | 52.9 | 3.205 [3.045, 3.482] | 0.724 [0.679, 0.795] |
+| blade-cpp-inputonly | 21 | 5.811 | 6.970 | 0.649 | — | — | — | openmp (1 construct) | 36.3 | | |
+| gfortran-natural-inputonly | 21 | 5.430 | 6.012 | 0.445 | — | — | — | openmp runtime linked | 36.0 | | |
+| gfortran-expert-inputonly | 21 | 5.137 | 5.560 | 0.724 | — | — | — | same | 36.0 | | |
+| ifx-natural-inputonly | 21 | 5.915 | 6.312 | 0.510 | — | — | — | same | 37.6 | | |
+| ifx-expert-inputonly | 21 | 5.338 | 6.019 | 0.512 | — | — | — | same | 37.6 | | |
+
+Diagnosis (indicative). The bandwidth control under 8 threads: totals 0.79–0.93 of Blade
+(would-be detectable losses to the experts, equivalence to the baselines); incrementally
+the baselines match Blade (0.98 / 0.97, intervals contain 1) and the experts spend ~1 ms
+less beyond their twins (0.77 / 0.72) — their single store-plus-accumulate loop against
+Blade's store pass followed by a Path B checksum fold (**G25**), the same reading as the
+serial regime's. The block completed without excursion under the new D45 rule (no sample
+dropped).
+
+### 5A. Appendix — the superseded group-A mt8 rows (session-100329, kernel-only threading)
+
+Kept as the record of the before/after of the D44 threading fix; not cited in the headline. Blade threaded only the kernel's level 0 here (`openmp (1 construct)`); the Fortran arms threaded generation, kernel and checksum.
+
+### 5A.1 antisym — superseded record (measured with serial preparation and checksum; re-run pending). Clean block at the time
+
+| arm | n | min (ms) | median (ms) | IQR (ms) | ratio vs blade-cpp [95% CI] | verdict | hypothesis | fold form / parallelism | peak WS (MB) |
+|---|---|---|---|---|---|---|---|---|---|
+| blade-cpp | 21 | 28.97 | 29.68 | 0.701 | ref | — | — | reordered (6 SIMD_REDUCTION) / openmp (1 construct): kernel level 0; inputs, checksum nest, input sum serial | 18.5 |
+| gfortran-natural | 21 | 106.7 | 112.5 | 1.929 | 3.790 [3.731, 3.820] | **win** | WIN ~2x | openmp runtime linked (inputs, kernel, checksum threaded) | 23.7 |
+| gfortran-expert | 21 | 9.104 | 9.765 | 1.022 | 0.329 [0.317, 0.348] | **loss** | equivalence to modest loss | same | 33.0 |
+| ifx-natural | 21 | 61.88 | 70.30 | 5.985 | 2.368 [2.280, 2.467] | **win** | WIN ~2x | same | 25.2 |
+| ifx-expert | 21 | 9.590 | 10.27 | 0.725 | 0.346 [0.331, 0.355] | **loss** | equivalence to modest loss | same | 34.5 |
+
+Diagnosis. Blade's threaded triangle (dynamic schedule on level 0, D-plan `[omp v1]`)
+takes 29.7 ms against its 109.3 ms serial C++ (3.7x on 8 threads); the experts go from
+31.0 / 29.4 ms to 9.8 / 10.3 ms (3.2x / 2.9x), the dense baselines from 773 / 332 to 112 /
+70 ms (6.9x / 4.7x — they also thread generation and checksum). The serial loss to the
+experts widens slightly from 2.4x (serial, 0.416 / 0.395) to 3.0x (0.329 / 0.346): **G1**
+is unchanged by threads, and the serial checksum nest and input sum in Blade's source
+(§12.1) cap its speed-up by Amdahl. The win over the dense baselines narrows from 10.4x /
+4.5x to 3.8x / 2.4x for the same reason (the baselines thread everything).
+
+### 5A.2 comoment3 — superseded record (serial preparation and checksum; re-run pending); was indicative, n = 7
+
+Bundle flag: "trend: ifx-expert first-half vs second-half median moved 16.0%; control
+compute median 0.01513 s moved +18.0% vs baseline 0.01283 s; trend: control compute moved
+22.9% within the block; control memory +9.9%; trend 8.4%".
+
+| arm | n | min (ms) | median (ms) | IQR (ms) | ratio [95% CI] | verdict | hypothesis | parallelism | peak WS (MB) |
+|---|---|---|---|---|---|---|---|---|---|
+| blade-cpp | 7 | 85.93 | 86.98 | 1.226 | ref | — | — | openmp (1 construct): kernel level 0 only | 12.4 |
+| gfortran-natural | 7 | 94.01 | 99.23 | 4.487 | 1.141 [1.086, 1.167] | indicative | WIN 4–6x | openmp runtime linked | 43.7 |
+| gfortran-expert | 7 | 4.848 | 5.536 | 0.730 | 0.064 [0.055, 0.066] | indicative | equivalence to modest loss | same | 14.3 |
+| ifx-natural | 7 | 116.0 | 122.1 | 7.885 | 1.404 [1.342, 1.489] | indicative | WIN 4–6x | same | 45.2 |
+| ifx-expert | 7 | 3.965 | 4.208 | 0.481 | 0.048 [0.047, 0.057] | indicative | equivalence to modest loss | same | 15.6 |
+
+Diagnosis (indicative). The Amdahl case in the clearest form: Blade's mt8 C++ figure
+(87.0 ms) barely improves on its serial C++ (109.7 ms, 1.26x on 8 threads) because the
+checksum pass — 70% of the C++ lane's serial time on this kernel (A §13, G3a/G3b) — and the
+input sum stay serial in the source (§12.1), while the experts thread everything and reach
+4.2–5.5 ms (2.1–2.8x on their 11.5–11.7 ms), putting Blade ~16–21x behind (0.064 / 0.048)
+and only 1.1–1.4x ahead of the dense cubes (which also thread all three phases). With the
+attribution (kernel-only ≈ 30% of 110 ms ≈ 33 ms serial), a threaded kernel alone cannot
+explain 87 ms; the serial 70% does. Attribution column: `kernel-only estimate, informal:
+checksum share 70% (C++), serial in mt8`.
+
+### 5A.3 gram — superseded record (serial preparation and checksum; re-run pending); was indicative, n = 7
+
+Bundle flag: "trend: gfortran-natural first-half vs second-half median moved 7.7%; trend:
+control compute moved 21.3% within the block; control memory 9.0%".
+
+| arm | n | min (ms) | median (ms) | IQR (ms) | ratio [95% CI] | verdict | hypothesis | parallelism | peak WS (MB) | notes |
+|---|---|---|---|---|---|---|---|---|---|---|
+| blade-cpp | 7 | 58.47 | 61.53 | 5.836 | ref | — | — | openmp (1 construct): kernel level 0 only | 27.6 | |
+| gfortran-natural | 7 | 513.4 | 607.7 | 83.26 | 9.876 [8.820, 10.883] | indicative | loss or equivalent | openmp runtime linked | 37.1 | `matmul` unannotated: parallel preparation, serial kernel (bundle note; FORT records whether the runtime threads matmul) |
+| gfortran-expert | 7 | 20.57 | 21.65 | 1.161 | 0.352 [0.322, 0.371] | indicative | equivalence to modest loss | same | 51.9 | |
+| ifx-natural | 7 | 622.0 | 643.6 | 15.49 | 10.460 [9.565, 10.837] | indicative | loss or equivalent | same | 58.1 | same note |
+| ifx-expert | 7 | 20.02 | 20.52 | 0.435 | 0.334 [0.298, 0.344] | indicative | equivalence to modest loss | same | 53.6 | |
+
+Diagnosis (indicative). Blade's threaded triangle: 275 → 61.5 ms (4.5x); the experts: 81.7
+/ 73.2 → 21.7 / 20.5 ms (3.8x / 3.6x); the loss to the experts is 2.8–3.0x (0.352 / 0.334)
+against the serial 1.9–2.1x — **G1** plus the serial checksum/input sum (§12.1; gram's
+checksum share is small, so the widening is smaller than comoment3's). The `matmul`
+baselines did NOT speed up (602 → 608 ms, 576 → 644 ms): the intrinsic is unannotated and
+the runtimes do not thread it — "parallel preparation, serial kernel" (M24) — so the
+would-be 9.9x / 10.5x Blade win here is a win over a serial kernel and is labelled as such.
+
+### 5A.4 pairkernel — superseded record (serial preparation and checksum; re-run pending); was indicative
+
+Bundle flag: "control compute median 0.01457 s moved +13.6% vs baseline 0.01283 s; trend
+5.4%; control memory trend 8.5%".
+
+| arm | n | min (ms) | median (ms) | IQR (ms) | ratio [95% CI] | verdict | hypothesis | parallelism | peak WS (MB) |
+|---|---|---|---|---|---|---|---|---|---|
+| blade-cpp | 21 | 55.19 | 56.52 | 1.326 | ref | — | — | openmp (1 construct): kernel level 0 only | 29.6 |
+| gfortran-natural | 21 | 15.44 | 16.62 | 2.000 | 0.294 [0.285, 0.319] | indicative | WIN ~2x | openmp runtime linked | 53.2 |
+| gfortran-expert | 21 | 5.938 | 6.237 | 0.364 | 0.110 [0.109, 0.115] | indicative | equivalent | same | 29.3 |
+| ifx-natural | 21 | 16.93 | 17.80 | 0.994 | 0.315 [0.307, 0.324] | indicative | WIN ~2x | same | 54.6 |
+| ifx-expert | 21 | 5.850 | 6.318 | 0.441 | 0.112 [0.107, 0.115] | indicative | equivalent | same | 30.8 |
+
+Diagnosis (indicative). The serial-regime picture (kernel equivalent, the whole 1.3–1.4x
+loss in the checksum pass, G3a) turns into a 3.2–3.4x would-be LOSS to the dense baselines
+and a 9x loss to the experts: Blade's kernel threads (77.3 → 56.5 ms total, only 1.37x)
+but its checksum pass — 57% of the C++ serial time, 6.27M canonicalizing reads through the
+out-of-line `canon_fold` (G3b) — stays serial, while every Fortran arm threads kernel,
+generation and checksum. This is the §12.1 asymmetry at its most visible; the number is
+reported as "serial checksum included".
+
 
 ## 6. repro — session 3
 
-`unrun`. serial: the association-reproducible opt-in (single-chain dots in group A; the
-pre-flip hypotheses). mt8: Blade = threaded maps, serial folds; Fortran keeps thread-level
-`reduction(+:)` (regime asymmetry, README §3).
+The association-reproducible opt-in: Blade `BLADE_FP_REPRO=1` (every fold one ascending
+serial chain, no lanes, no `simd reduction`, no `reassoc`; fold form `in-order` in every
+Blade row), Fortran without `BENCH_LICENSED` (no `simd reduction` anywhere). The expert
+Fortran's KERNEL is unchanged between regimes — its register-tiled outer-product order
+keeps each cell's summation order and still vectorizes over i, which needs no reordering
+licence (README §3 matched-loop table, G1) — so only its checksum sums lose their `simd
+reduction`.
 
-## 7. blas (gram) — session 4; fastmath — session 5
+### 6.1 serial x repro x native — session 3a (`session-122606/`)
 
-`unrun`. blas arms: blade-cpp (auto-routed dsyrk), gfortran-expert, ifx-expert; blade-llvm
-"no-blas"; naturals excluded; mt8 = library threads. fastmath label: "vendor fast-math vs
-Blade's reassociation licence — unequal permission sets, accuracy-checked at 1e-8".
+Group A + recur + stencil; 11 rounds (group A), 21 (recur, stencil); 2008.6 s; 0
+failures; no abort; no excursion. **All six blocks suppressed**: the compute control's
+FIRST block ran high (16.5 ms baseline, 31% within-block trend during antisym), so every
+later block sits 12–23% BELOW the baseline and trips the rolling rule downward — the
+flags are a session-baseline artefact, not a within-block instability on the kernels'
+side (their IQRs are the session's tightest), but the rule is the rule and the verdicts are
+indicative. Reference `blade-llvm`.
+
+**The headline of the repro regime.** Blade's serial association is latency-bound: with
+every fold reduced to one dependent chain, blade-llvm takes 508 ms on antisym (74 ms
+licensed), 1219 ms on gram (157), 157 ms on comoment3 (41.5); blade-cpp 411 / 954 / 181
+ms (109 / 275 / 110). The expert Fortran is UNCHANGED (antisym 32.7 vs 30.7 ms, gram 77.8
+vs 81.7, comoment3 11.8 vs 11.5), because its ordering was never a reordering — and so in
+repro the experts are **13–17x faster** (ratios antisym 0.064 / 0.062, gram 0.064 /
+0.058, comoment3 0.075 / 0.075), where the licensed regime had them at 2.1–3.6x. Two
+readings follow. **(a)** This is the measured cost of the OLD Blade default — until
+5f4b33ea every build was this build — and the quantitative justification of the policy
+flip (D40/D43, `docs/plans/plan-fp-default-fastest.md`): the reproducible association
+costs 3.5–8x on the kernels Blade is meant to win. **(b)** It is the strongest evidence
+for **G1**: the expert proves that an i-vectorized, register-tiled outer product is BOTH
+bitwise-reproducible (each cell's sum in ascending s) AND fast; a strict-legal tile of
+that form would make Blade's repro build as fast as its licensed one, with no reordering
+licence needed. The remaining kernels behave as their serial-licensed selves (pairkernel
+0.82 / 0.75: the kernel has no fold; recur 0.12: the allocator, G6; stencil 1.05 / 0.84:
+bandwidth), and the dense baselines — whose nests the compilers never vectorized across
+the sum — are also unchanged, so gram's `matmul` baseline is now FASTER than Blade's
+repro build (0.456 / 0.467).
+
+#### antisym — indicative
+
+| arm | n | min (ms) | median (ms) | IQR (ms) | ratio [95% CI] | verdict | fold form | peak WS (MB) | licensed median (ms, §3.1) |
+|---|---|---|---|---|---|---|---|---|---|
+| blade-llvm | 11 | 504.5 | 508.2 | 4.205 | ref | — | in-order | 17.4 | 73.95 |
+| blade-cpp | 11 | 407.3 | 411.3 | 5.101 | 0.809 [0.802, 0.816] | indicative (C++ lane FASTER than LLVM here) | in-order | 18.3 | 107.9 |
+| gfortran-natural | 11 | 768.0 | 773.9 | 4.098 | 1.523 [1.510, 1.529] | indicative | — | 23.4 | 770.9 |
+| gfortran-expert | 11 | 31.05 | 32.72 | 1.761 | 0.064 [0.062, 0.066] | indicative | — | 32.7 | 30.74 |
+| ifx-natural | 11 | 330.9 | 335.2 | 6.682 | 0.659 [0.652, 0.666] | indicative | — | 23.0 | 332.9 |
+| ifx-expert | 11 | 29.26 | 31.45 | 1.656 | 0.062 [0.059, 0.063] | indicative | — | 32.2 | 29.54 |
+
+Note the lane order flips in repro: the C++ lane's single chain (411 ms) beats the LLVM
+lane's (508 ms) — with no lanes to lose, the LLVM lane's 64x64 cache bricks with a
+per-cell dot (G1 note) cost more than the C++ lane's plain nest; the 1.46x LLVM advantage
+of the licensed regime was its four FMA accumulators.
+
+#### comoment3 — indicative
+
+| arm | n | min (ms) | median (ms) | IQR (ms) | ratio [95% CI] | verdict | fold form | peak WS (MB) | licensed median (ms, §3.2) |
+|---|---|---|---|---|---|---|---|---|---|
+| blade-llvm | 11 | 156.4 | 156.8 | 0.550 | ref | — | in-order | 11.3 | 41.49 |
+| blade-cpp | 11 | 179.6 | 180.6 | 1.100 | 1.152 [1.147, 1.159] | indicative | in-order | 12.2 | 109.7 |
+| gfortran-natural | 11 | 599.6 | 602.6 | 4.986 | 3.842 [3.822, 3.867] | indicative | — | 43.4 | 603.4 |
+| gfortran-expert | 11 | 11.28 | 11.77 | 0.612 | 0.075 [0.073, 0.077] | indicative | — | 12.3 | 11.49 |
+| ifx-natural | 11 | 717.8 | 722.0 | 4.725 | 4.604 [4.582, 4.618] | indicative | — | 43.0 | 723.7 |
+| ifx-expert | 11 | 11.40 | 11.70 | 0.320 | 0.075 [0.074, 0.076] | indicative | — | 11.8 | 11.70 |
+
+#### gram — indicative
+
+| arm | n | min (ms) | median (ms) | IQR (ms) | ratio [95% CI] | verdict | fold form | peak WS (MB) | licensed median (ms, §3.3) |
+|---|---|---|---|---|---|---|---|---|---|
+| blade-llvm | 11 | 1217 | 1219 | 4.434 | ref | — | in-order | 26.6 | 156.7 |
+| blade-cpp | 11 | 949.6 | 953.6 | 4.668 | 0.782 [0.778, 0.786] | indicative (C++ lane faster) | in-order | 27.4 | 275.2 |
+| gfortran-natural | 11 | 498.0 | 556.1 | 98.59 | 0.456 [0.414, 0.507] | indicative — the serial `matmul` runtime now beats Blade | — | 36.8 | 601.6 |
+| gfortran-expert | 11 | 76.76 | 77.84 | 0.835 | 0.064 [0.063, 0.064] | indicative | — | 51.6 | 81.68 |
+| ifx-natural | 11 | 568.2 | 569.0 | 1.298 | 0.467 [0.465, 0.468] | indicative | — | 55.9 | 576.2 |
+| ifx-expert | 11 | 70.19 | 70.65 | 0.338 | 0.058 [0.058, 0.058] | indicative | — | 51.2 | 73.15 |
+
+The longest run of the session (1.228 s, a gram blade-llvm warm-up) stayed under the
+2.5 s cap.
+
+#### pairkernel — indicative
+
+| arm | n | min (ms) | median (ms) | IQR (ms) | ratio [95% CI] | verdict | fold form | peak WS (MB) | licensed median (ms, §3.4) |
+|---|---|---|---|---|---|---|---|---|---|
+| blade-llvm | 11 | 40.99 | 42.78 | 2.025 | ref | — | in-order | 28.5 | 42.59 |
+| blade-cpp | 11 | 73.11 | 77.59 | 5.033 | 1.813 [1.748, 1.883] | indicative | in-order | 29.3 | 77.25 |
+| gfortran-natural | 11 | 60.65 | 62.79 | 2.652 | 1.468 [1.428, 1.514] | indicative | — | 52.9 | 61.92 |
+| gfortran-expert | 11 | 34.23 | 35.22 | 1.041 | 0.823 [0.798, 0.846] | indicative | — | 29.0 | 32.77 |
+| ifx-natural | 11 | 63.73 | 65.05 | 1.358 | 1.520 [1.485, 1.563] | indicative | — | 52.5 | 64.53 |
+| ifx-expert | 11 | 31.64 | 32.00 | 0.677 | 0.748 [0.735, 0.777] | indicative | — | 28.5 | 30.82 |
+
+Unchanged from licensed on the Blade side (the kernel has no fold; the checksum's chain
+was already cheap); the experts lose ~2 ms (their checksum `simd reduction` is off), so
+the ratios move from 0.77 / 0.72 to 0.82 / 0.75.
+
+#### recur — indicative
+
+| arm | n | min (ms) | median (ms) | IQR (ms) | ratio [95% CI] | verdict | fold form | peak WS (MB) | licensed median (ms, §3.5) |
+|---|---|---|---|---|---|---|---|---|---|
+| blade-llvm | 21 | 106.7 | 111.0 | 13.11 | ref | — | in-order | 51.5 | 116.9 |
+| blade-cpp | 21 | 116.0 | 123.5 | 16.66 | 1.113 [1.047, 1.188] | indicative | in-order | 52.5 | 134.1 |
+| gfortran-natural | 21 | 17.41 | 18.06 | 0.696 | 0.163 [0.150, 0.168] | indicative | — | 51.6 | 19.70 |
+| gfortran-expert | 21 | 12.48 | 12.95 | 0.892 | 0.117 [0.109, 0.122] | indicative | — | 51.0 | 10.48 |
+| ifx-natural | 21 | 14.61 | 14.89 | 0.588 | 0.134 [0.123, 0.138] | indicative | — | 51.1 | 16.00 |
+| ifx-expert | 21 | 12.90 | 13.24 | 0.775 | 0.119 [0.112, 0.125] | indicative | — | 50.5 | 11.27 |
+
+The allocator loss (G6) is regime-independent; the experts' 48 MB checksum pass without
+its `simd reduction` costs them ~2 ms (10.5 → 13.0 ms), narrowing the ratio from 0.09 to
+0.12 for the wrong reason.
+
+#### stencil — indicative; twins present
+
+| arm | n | min (ms) | median (ms) | IQR (ms) | ratio [95% CI] | verdict | fold form | peak WS (MB) | incremental (ms) [CI] | incremental ratio [CI] |
+|---|---|---|---|---|---|---|---|---|---|---|
+| blade-llvm | 21 | 15.01 | 15.97 | 1.154 | ref | — | in-order | 49.8 | 8.965 [8.526, 9.281] | ref |
+| blade-cpp | 21 | 17.18 | 17.77 | 0.944 | 1.113 [1.080, 1.162] | indicative | in-order | 50.8 | 7.754 [7.371, 8.308] | 0.865 [0.817, 0.937] |
+| gfortran-natural | 21 | 16.79 | 17.39 | 0.452 | 1.089 [1.062, 1.125] | indicative | — | 50.9 | 7.175 [6.893, 7.433] | 0.800 [0.761, 0.863] |
+| gfortran-expert | 21 | 16.28 | 16.80 | 1.031 | 1.052 [1.032, 1.103] | indicative | — | 50.9 | 6.698 [6.527, 7.532] | 0.747 [0.715, 0.828] |
+| ifx-natural | 21 | 18.18 | 18.70 | 0.506 | 1.171 [1.139, 1.209] | indicative | — | 50.4 | 11.80 [11.55, 11.97] | 1.317 [1.258, 1.396] |
+| ifx-expert | 21 | 13.15 | 13.47 | 0.831 | 0.843 [0.825, 0.881] | indicative | — | 50.4 | 6.606 [6.432, 7.144] | 0.737 [0.705, 0.804] |
+| blade-llvm-inputonly | 21 | 6.857 | 7.008 | 0.189 | — | — | in-order | 27.5 | | |
+| blade-cpp-inputonly | 21 | 9.906 | 10.02 | 0.219 | — | — | in-order | 28.2 | | |
+| gfortran-natural-inputonly | 21 | 9.890 | 10.21 | 0.299 | — | — | — | 28.0 | | |
+| gfortran-expert-inputonly | 21 | 9.893 | 10.10 | 0.294 | — | — | — | 28.0 | | |
+| ifx-natural-inputonly | 21 | 6.625 | 6.896 | 0.176 | — | — | — | 27.5 | | |
+| ifx-expert-inputonly | 21 | 6.453 | 6.865 | 0.381 | — | — | — | 27.5 | | |
+
+Bandwidth-bound as in licensed (totals 0.84–1.17); Blade's incremental rises from 7.3 to
+9.0 ms with its checksum fold now a single chain over 3M cells, so the experts' incremental
+ratios improve from 0.67–0.79 to 0.74–0.75 against it — the one place the repro regime
+touches the control kernels measurably.
+
+### 6.2 serial x repro x native — session 3b (`session-130438/`)
+
+fusedchain, maskagg, onepass, dot, saxpy; 21 rounds each; 3291.8 s; 0 failures; no
+abort; no excursion; the maskagg blade-llvm fallback as expected; cooldowns still 2 s /
+10 s / 300 s (the old driver). 2 of 5 blocks suppressed (fusedchain, onepass — within-
+block trends of 5–9% on individual arms); **maskagg, dot and saxpy are CLEAN** and carry
+verdicts. Reference `blade-llvm` (maskagg: `blade-cpp`). Every Blade row's fold form is
+`in-order` in BOTH lanes — in repro each lane emits one scalar dependent chain per fold
+(no lanes, no `simd reduction`, no `reassoc`), so the lanes differ here only in how they
+lower the loop around the chain and the input generator.
+
+**Lanes in repro.** On dot and saxpy the LLVM lane's TOTAL is the faster one (dot 16.98 vs
+22.73 ms, saxpy 15.49 vs 18.40 — ratios 1.34 / 1.19, "win" by the convention), because its
+input generation is faster (twins 13.7 vs 20.1 ms, 9.1 vs 13.3 ms); INCREMENTALLY the C++
+lane's in-order fold is the cheaper one (dot 2.63 vs 3.28 ms, 0.80 [0.65, 0.96]; saxpy
+5.11 vs 6.36 ms, 0.80 [0.76, 0.84]; fusedchain 1.54 vs 2.53 ms, 0.61; onepass 3.98 vs
+5.37 ms, 0.74) — the same direction as 3a's antisym/gram, where the C++ lane's plain nest
+beat the LLVM lane's 64x64-brick per-cell dot once both were scalar chains. So "the C++
+lane beats the LLVM lane in repro" is true of the FOLDS (incremental) and false of the
+totals on the memory-bound kernels, where generation dominates.
+
+#### fusedchain — indicative (suppressed by drift); twins present
+
+| arm | n | min (ms) | median (ms) | IQR (ms) | ratio [95% CI] | verdict | fold form | peak WS (MB) | incremental (ms) [CI] | incremental ratio [CI] | licensed median (ms, §4.1) |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| blade-llvm | 21 | 6.774 | 7.160 | 0.600 | ref | — | in-order | 19.8 | 2.534 [1.960, 2.858] | ref | 4.571 |
+| blade-cpp | 21 | 8.159 | 8.374 | 0.427 | 1.170 [1.119, 1.198] | indicative | in-order | 20.6 | 1.542 [1.385, 1.684] | 0.608 [0.516, 0.804] | 6.754 |
+| gfortran-natural | 21 | 17.35 | 20.08 | 3.587 | 2.805 [2.597, 3.099] | indicative | — | **66.1** | 13.28 [11.83, 15.03] | 5.241 [4.360, 7.478] | 17.98 |
+| gfortran-expert | 21 | 8.242 | 8.775 | 1.155 | 1.226 [1.168, 1.330] | indicative | — | 20.3 | 1.983 [1.624, 2.671] | 0.782 [0.616, 1.142] | 6.905 |
+| ifx-natural | 21 | 13.40 | 14.78 | 2.706 | 2.065 [1.920, 2.206] | indicative | — | **65.6** | 10.09 [9.414, 11.00] | 3.982 [3.375, 5.463] | 13.45 |
+| ifx-expert | 21 | 4.878 | 5.319 | 0.749 | 0.743 [0.705, 0.803] | indicative | — | 19.8 | 0.653 [0.223, 0.987] | 0.258 [0.091, 0.411] | 4.897 |
+| blade-llvm-inputonly | 21 | 4.351 | 4.625 | 0.889 | — | — | in-order | 19.8 | | | 3.946 |
+| blade-cpp-inputonly | 21 | 6.575 | 6.833 | 0.355 | — | — | in-order | 20.6 | | | 6.084 |
+| gfortran-natural-inputonly | 21 | 6.547 | 6.801 | 0.618 | — | — | — | 20.3 | | | 6.769 |
+| gfortran-expert-inputonly | 21 | 6.547 | 6.792 | 0.411 | — | — | — | 20.3 | | | 6.180 |
+| ifx-natural-inputonly | 21 | 4.379 | 4.692 | 0.643 | — | — | — | 19.9 | | | 4.540 |
+| ifx-expert-inputonly | 21 | 4.379 | 4.666 | 0.616 | — | — | — | 19.8 | | | 3.790 |
+
+Reading (indicative). Blade's fused chain as a scalar in-order fold costs 2.5 ms (LLVM) /
+1.5 ms (C++) beyond its twin, 4x / 2.3x its licensed increment (0.6–0.7 ms); the
+gfortran expert's unlicensed loop costs 2.0 ms (its licensed 0.7), ifx-expert's 0.65 ms
+(unchanged — ifx FUSES the kernel loop with the input-checksum loop, both reading the
+stored input, into one pass, so the full arm adds little over its twin; each reduction
+stays a single in-order chain — Fortran agent, `fortran-notes.md` §8c — which is why
+ifx-expert is now 1.35x FASTER than blade-llvm, 0.743). The win over the staged baselines
+shrinks from 3.9x / 2.9x to 2.8x / 2.1x: the baselines' cost is temporaries, not fold
+association, so they lose nothing in repro while Blade loses its lanes.
+
+#### maskagg — CLEAN block (verdicts stand); reference blade-cpp; blade-llvm fallback
+
+| arm | n | min (ms) | median (ms) | IQR (ms) | ratio vs blade-cpp [95% CI] | verdict | fold form | peak WS (MB) | incremental (ms) [CI] | incremental ratio [CI] | licensed median (ms, §4.3) |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| blade-llvm | 0 | — | — | — | — | fallback | in-order | — | | | fallback |
+| blade-cpp | 21 | 64.56 | 68.86 | 3.996 | ref | — | in-order | 46.5 | 65.56 [65.02, 68.31] | ref | 67.16 |
+| gfortran-natural | 21 | 8.172 | 8.288 | 0.185 | 0.120 [0.116, 0.122] | **loss** | — | 17.4 | 4.967 [4.881, 5.039] | 0.076 [0.072, 0.077] | 8.301 |
+| gfortran-expert | 21 | 4.749 | 4.982 | 0.306 | 0.072 [0.067, 0.074] | **loss** | — | 16.5 | 1.623 [1.402, 1.741] | 0.025 [0.021, 0.027] | 3.993 |
+| ifx-natural | 21 | 10.32 | 10.52 | 0.282 | 0.153 [0.147, 0.156] | **loss** | — | 23.6 | 8.327 [8.264, 8.505] | 0.127 [0.122, 0.130] | 10.56 |
+| ifx-expert | 21 | 3.645 | 3.752 | 0.122 | 0.054 [0.052, 0.055] | **loss** | — | 16.0 | 1.576 [1.515, 1.621] | 0.024 [0.023, 0.025] | 2.919 |
+| blade-llvm-inputonly | 21 | 2.146 | 2.177 | 0.050 | — | — | in-order | 12.2 | | | 1.717 |
+| blade-cpp-inputonly | 21 | 3.235 | 3.304 | 0.079 | — | — | in-order | 12.9 | | | 2.822 |
+| gfortran-natural-inputonly | 21 | 3.292 | 3.321 | 0.072 | — | — | — | 12.6 | | | 3.341 |
+| gfortran-expert-inputonly | 21 | 3.281 | 3.359 | 0.128 | — | — | — | 12.7 | | | 2.906 |
+| ifx-natural-inputonly | 21 | 2.150 | 2.189 | 0.063 | — | — | — | 12.2 | | | 2.181 |
+| ifx-expert-inputonly | 21 | 2.149 | 2.175 | 0.033 | — | — | — | 12.2 | | | 1.726 |
+
+Diagnosis. The first clean maskagg block confirms the session-1b (indicative) picture with
+verdicts: Blade loses to every Fortran arm — 8.3x to `pack`, 6.5x to ifx's `pack`, 14x /
+19x to the experts (0.120 / 0.153 / 0.072 / 0.054). The regime changes nothing on Blade's
+side (68.9 vs 67.2 ms: the hashed `unordered_map` compaction, **G9**, has no fold to
+reorder) and costs the experts ~0.5–0.8 ms (their checksum `simd reduction` off: 4.98 vs
+3.99, 3.75 vs 2.92 ms), which is why the expert ratios are slightly less bad than in
+licensed (0.059 / 0.043). The incrementals say the same: 65.6 ms beyond the twin for Blade
+against 1.6 ms for the experts and 5.0 / 8.3 ms for `pack`.
+
+#### onepass — indicative (suppressed by drift); twins present
+
+| arm | n | min (ms) | median (ms) | IQR (ms) | ratio [95% CI] | verdict | fold form | peak WS (MB) | incremental (ms) [CI] | incremental ratio [CI] | licensed median (ms, §4.2) |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| blade-llvm | 21 | 16.47 | 17.16 | 0.901 | ref | — | in-order | 42.7 | 5.372 [4.542, 5.893] | ref | 11.67 |
+| blade-cpp | 21 | 20.79 | 21.09 | 1.064 | 1.229 [1.210, 1.276] | indicative | in-order | 43.5 | 3.975 [3.689, 4.738] | 0.740 [0.655, 0.941] | 16.77 |
+| gfortran-natural | 21 | 32.27 | 32.82 | 0.987 | 1.913 [1.883, 1.965] | indicative | — | 43.2 | 15.70 [15.12, 16.32] | 2.923 [2.666, 3.464] | 32.87 |
+| gfortran-expert | 21 | 21.06 | 21.67 | 0.806 | 1.263 [1.243, 1.292] | indicative | — | 43.2 | 4.403 [3.714, 4.887] | 0.820 [0.676, 0.978] | 16.83 |
+| ifx-natural | 21 | 12.43 | 13.50 | 1.516 | 0.787 [0.754, 0.834] | indicative | — | 42.7 | 1.251 [0.799, 2.063] | 0.233 [0.141, 0.402] | 12.96 |
+| ifx-expert | 21 | 12.49 | 13.21 | 0.700 | 0.770 [0.751, 0.793] | indicative | — | 42.7 | 1.138 [0.618, 1.534] | 0.212 [0.117, 0.299] | 11.78 |
+| blade-llvm-inputonly | 21 | 11.16 | 11.79 | 1.456 | — | — | in-order | 42.7 | | | 9.495 |
+| blade-cpp-inputonly | 21 | 16.55 | 17.11 | 1.127 | — | — | in-order | 43.5 | | | 14.83 |
+| gfortran-natural-inputonly | 21 | 16.73 | 17.12 | 0.925 | — | — | — | 43.2 | | | 17.15 |
+| gfortran-expert-inputonly | 21 | 16.62 | 17.26 | 1.334 | — | — | — | 43.2 | | | 15.24 |
+| ifx-natural-inputonly | 21 | 11.17 | 12.25 | 0.955 | — | — | — | 42.7 | | | 11.98 |
+| ifx-expert-inputonly | 21 | 11.32 | 12.07 | 0.894 | — | — | — | 42.7 | | | 12.07 |
+
+Reading (indicative). Blade's four accumulators as scalar in-order chains cost 5.4 ms
+(LLVM) / 4.0 ms (C++) beyond the twin against 2.2 / 1.9 ms licensed; gfortran's four `sum`
+intrinsics (15.7 ms) and its expert's single loop (4.4 ms, from 1.6 licensed) move the way
+the association rule predicts, while ifx's `sum`s and expert loop (1.1–1.3 ms) are
+unchanged — ifx fuses the kernel and input-checksum passes into one (each reduction still
+an in-order chain; Fortran agent §8c), so both ifx arms now beat blade-llvm on the total
+(0.79 / 0.77, would-be detectable losses). The gfortran side keeps
+its win (1.9x over the four-pass baseline).
+
+#### dot — CLEAN block (verdicts stand); twins present
+
+| arm | n | min (ms) | median (ms) | IQR (ms) | ratio [95% CI] | verdict | fold form | peak WS (MB) | incremental (ms) [CI] | incremental ratio [CI] | licensed median (ms, §4.4) |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| blade-llvm | 21 | 16.69 | 16.98 | 0.541 | ref | — | in-order | 50.3 | 3.278 [3.021, 3.651] | ref | 13.20 |
+| blade-cpp | 21 | 22.08 | 22.73 | 1.866 | 1.338 [1.305, 1.356] | win (C++ lane total 1.34x slower; its fold increment 0.80x) | in-order | 51.1 | 2.632 [2.219, 2.907] | 0.803 [0.652, 0.960] | 19.28 |
+| gfortran-natural | 21 | 19.79 | 20.14 | 0.564 | 1.186 [1.160, 1.202] | **win** | — | 50.8 | 2.379 [2.206, 2.671] | 0.726 [0.628, 0.857] | 20.28 |
+| gfortran-expert | 21 | 19.71 | 20.07 | 1.013 | 1.182 [1.156, 1.194] | **win** | — | 50.8 | 2.348 [2.169, 2.606] | 0.716 [0.622, 0.888] | 18.44 |
+| ifx-natural | 21 | 13.68 | 14.15 | 0.681 | 0.833 [0.813, 0.853] | **loss** | — | 50.4 | 2.372 [1.900, 2.786] | 0.723 [0.577, 0.867] | 14.04 |
+| ifx-expert | 21 | 11.69 | 12.22 | 0.734 | 0.720 [0.696, 0.744] | **loss** | — | 50.4 | 0.607 [0.361, 1.043] | 0.185 [0.105, 0.328] | 12.67 |
+| blade-llvm-inputonly | 21 | 13.39 | 13.70 | 0.487 | — | — | in-order | 50.3 | | | 11.47 |
+| blade-cpp-inputonly | 21 | 19.67 | 20.10 | 0.513 | — | — | in-order | 51.1 | | | 17.71 |
+| gfortran-natural-inputonly | 21 | 17.29 | 17.76 | 0.353 | — | — | — | 50.8 | | | 18.25 |
+| gfortran-expert-inputonly | 21 | 17.44 | 17.72 | 0.448 | — | — | — | 50.8 | | | 17.32 |
+| ifx-natural-inputonly | 21 | 11.31 | 11.78 | 1.156 | — | — | — | 50.4 | | | 11.78 |
+| ifx-expert-inputonly | 21 | 11.24 | 11.61 | 0.540 | — | — | — | 50.4 | | | 11.10 |
+
+Diagnosis. The first clean dot block, and the verdicts split by compiler: Blade (LLVM
+reference) is faster than both gfortran arms (1.19 / 1.18, win) and slower than both ifx
+arms (0.83 / 0.72, loss). The totals are generation-dominated (twins 11.6–20.1 ms of
+12–23 ms totals), so the split is mostly the generators — LLVM lane and ifx at 11–14 ms,
+the C++ lane and gfortran at 17.7–20.1 ms (D9) — but the incrementals carry a real
+finding: ifx-expert's dot costs 0.6 ms beyond its twin where every other arm's in-order
+chain costs 2.3–3.3 ms (incremental ratio 0.185 [0.105, 0.328]). The Fortran agent
+verified from the archived repro executables (`fortran-notes.md` §8c) that ifx does NOT
+reassociate under the repro flags — every reduction is a single in-order dependent chain
+(`vfmadd231sd` chains unrolled by 8; no packed add/FMA reduction anywhere;
+`BENCH_LICENSED` undefined in the build commands): the small increment comes from ifx
+FUSING the kernel loop with the input-checksum loop (both read the stored inputs) into one
+pass, so the full arm adds little over its input-only twin, while the input fill stays a
+separate, stored, 32-bit-SIMD loop; gfortran keeps separate passes. That is compiler
+loop fusion, permitted under README §1.5 / F7 and recorded per arm; each reduction keeps
+its order and no flag changes. Blade's in-order
+chains (3.3 ms LLVM, 2.6 ms C++) are 4x the licensed 0.8 ms-class folds on the same
+kernel only because the licensed chain was already memory-bound.
+
+#### saxpy — CLEAN block (verdicts stand); twins present
+
+| arm | n | min (ms) | median (ms) | IQR (ms) | ratio [95% CI] | verdict | fold form | peak WS (MB) | incremental (ms) [CI] | incremental ratio [CI] | licensed median (ms, §4.5) |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| blade-llvm | 21 | 15.15 | 15.49 | 0.315 | ref | — | in-order | 49.8 | 6.356 [6.183, 6.631] | ref | 14.28 |
+| blade-cpp | 21 | 18.15 | 18.40 | 0.420 | 1.188 [1.171, 1.204] | win (total; fold increment 0.80x) | in-order | 50.7 | 5.113 [4.958, 5.343] | 0.804 [0.755, 0.837] | 17.89 |
+| gfortran-natural | 21 | 16.35 | 16.72 | 0.360 | 1.079 [1.062, 1.093] | **detectable-win** | — | 50.8 | 4.875 [4.736, 5.098] | 0.767 [0.726, 0.810] | 17.47 |
+| gfortran-expert | 21 | 15.24 | 15.36 | 0.287 | 0.992 [0.977, 1.003] | **equivalent** | — | 50.8 | 3.516 [3.454, 3.669] | 0.553 [0.527, 0.587] | 15.62 |
+| ifx-natural | 21 | 12.72 | 13.03 | 0.257 | 0.841 [0.828, 0.849] | **loss** | — | 50.4 | 5.294 [5.188, 5.483] | 0.833 [0.798, 0.870] | 14.13 |
+| ifx-expert | 21 | 9.455 | 9.802 | 0.234 | 0.633 [0.621, 0.639] | **loss** | — | 50.4 | 2.038 [1.822, 2.194] | 0.321 [0.283, 0.345] | 11.93 |
+| blade-llvm-inputonly | 21 | 8.785 | 9.131 | 0.356 | — | — | in-order | 35.1 | | | 8.194 |
+| blade-cpp-inputonly | 21 | 13.10 | 13.28 | 0.248 | — | — | in-order | 35.8 | | | 12.11 |
+| gfortran-natural-inputonly | 21 | 11.50 | 11.84 | 0.236 | — | — | — | 35.6 | | | 12.36 |
+| gfortran-expert-inputonly | 21 | 11.58 | 11.85 | 0.071 | — | — | — | 35.5 | | | 12.00 |
+| ifx-natural-inputonly | 21 | 7.569 | 7.732 | 0.202 | — | — | — | 35.1 | | | 8.277 |
+| ifx-expert-inputonly | 21 | 7.423 | 7.764 | 0.342 | — | — | — | 35.1 | | | 7.636 |
+
+Diagnosis. Clean: Blade is a detectable win over gfortran-natural (1.08), equivalent to
+gfortran-expert (0.992 [0.977, 1.003] — the suite's tightest equivalence), and loses to
+both ifx arms (0.84 / 0.63). As on dot, the totals follow the generators; the
+incrementals say ifx-expert's store-plus-accumulate loop costs 2.0 ms beyond its twin
+against Blade's 6.4 / 5.1 ms (0.32) and gfortran-expert's 3.5 ms (0.55): the experts' fused
+store-plus-accumulate loop, and — for ifx — the kernel pass fused with the input-checksum
+pass as well (each reduction in order; §8c). Blade's two passes
+(store under `|> compute`, then an in-order checksum chain over 16 MB) are the whole of
+its 6.4 ms.
+
+### 6.3 mt8 x repro x native — session 3c (`session-140038/`)
+
+Ten kernels (maskagg serial by protocol); 7 rounds for antisym/comoment3/gram, 21 for
+the rest; 1474.1 s — the first session under the D46 cooldowns (0.5 s / 3 s / 60 s); 0
+failures; no abort; no excursion. 6 of 10 blocks suppressed by within-block trends of
+individual arms (antisym, comoment3, gram, pairkernel, stencil, dot — 5–23%, mostly the
+dense naturals); fusedchain, onepass, recur and saxpy clean. Reference `blade-cpp`
+(`blade-llvm` serial-only; onepass and recur Blade "no parallel form"). **The regime's
+definition shows in the parallelism column:** every Blade row reads `threaded maps,
+serial folds (BLADE_FP_REPRO)` — `BLADE_FP_REPRO=1` serializes the fold teams, so Blade
+threads its input maps and the kernel's map level but every fold (the inner dots, the
+checksum folds, the input sum) is ONE serial chain on one thread — while the Fortran arms
+keep thread-level `reduction(+:)` (per-thread partials combined, a reordering the regime
+permits them; README §3). The repro-mt8 Blade cells are therefore a definition artefact
+as much as a measurement, and the ratios below are read with that in mind.
+
+| kernel | arm | n | median (ms) | IQR (ms) | ratio vs blade-cpp [95% CI] | verdict | twin median (ms) | incremental (ms) / ratio | licensed-mt8 median (ms, §5) |
+|---|---|---|---|---|---|---|---|---|---|
+| antisym | blade-cpp | 7 | 60.70 | 1.098 | ref | — | — | — | 22.58 |
+| antisym | gfortran-natural | 7 | 106.7 | 5.357 | 1.758 [1.656, 1.809] | indicative | — | — | 116.9 |
+| antisym | gfortran-expert | 7 | 9.358 | 0.287 | 0.154 [0.149, 0.158] | indicative | — | — | 10.38 |
+| antisym | ifx-natural | 7 | 59.18 | 17.48 | 0.975 [0.799, 1.148] | indicative (22% trend) | — | — | 71.39 |
+| antisym | ifx-expert | 7 | 9.841 | 0.366 | 0.162 [0.158, 0.167] | indicative | — | — | 10.90 |
+| comoment3 | blade-cpp | 7 | 92.68 | 1.545 | ref | — | — | — | 20.62 |
+| comoment3 | gfortran-natural | 7 | 93.18 | 9.250 | 1.005 [0.961, 1.060] | indicative | — | — | 91.94 |
+| comoment3 | gfortran-expert | 7 | 5.096 | 0.155 | 0.055 [0.053, 0.056] | indicative | — | — | 4.998 |
+| comoment3 | ifx-natural | 7 | 116.2 | 7.122 | 1.254 [1.173, 1.298] | indicative | — | — | 111.5 |
+| comoment3 | ifx-expert | 7 | 4.021 | 0.299 | 0.043 [0.043, 0.048] | indicative | — | — | 4.025 |
+| gram | blade-cpp | 7 | 138.3 | 5.351 | ref | — | — | — | 43.75 |
+| gram | gfortran-natural | 7 | 698.6 | 153.1 | 5.050 [4.132, 5.385] | indicative (serial `matmul`) | — | — | 614.1 |
+| gram | gfortran-expert | 7 | 20.19 | 0.995 | 0.146 [0.139, 0.151] | indicative | — | — | 21.19 |
+| gram | ifx-natural | 7 | 605.5 | 12.05 | 4.377 [4.090, 4.464] | indicative (serial `matmul`) | — | — | 631.1 |
+| gram | ifx-expert | 7 | 18.57 | 1.041 | 0.134 [0.127, 0.147] | indicative | — | — | 20.02 |
+| pairkernel | blade-cpp | 21 | 56.19 | 2.464 | ref | — | — | — | 16.11 |
+| pairkernel | gfortran-natural | 21 | 14.24 | 2.365 | 0.253 [0.242, 0.268] | indicative | — | — | 15.28 |
+| pairkernel | gfortran-expert | 21 | 6.202 | 0.437 | 0.110 [0.109, 0.115] | indicative | — | — | 6.262 |
+| pairkernel | ifx-natural | 21 | 16.63 | 2.301 | 0.296 [0.276, 0.313] | indicative | — | — | 16.43 |
+| pairkernel | ifx-expert | 21 | 6.213 | 0.349 | 0.111 [0.108, 0.115] | indicative | — | — | 6.209 |
+| fusedchain | blade-cpp | 21 | 5.559 | 0.255 | ref | — | 4.017 | 1.542 [1.444, 1.722] / ref | 4.128 |
+| fusedchain | gfortran-natural | 21 | 11.46 | 0.593 | 2.062 [1.997, 2.105] | **win** | 3.535 | 7.930 / 5.143 [4.594, 5.491] | 12.47 |
+| fusedchain | gfortran-expert | 21 | 4.181 | 0.233 | 0.752 [0.728, 0.776] | **loss** | 3.526 | 0.655 / 0.425 [0.303, 0.518] | 3.253 |
+| fusedchain | ifx-natural | 21 | 11.49 | 0.301 | 2.067 [2.009, 2.095] | **win** | 4.042 | 7.450 / 4.832 [4.349, 5.201] | 12.63 |
+| fusedchain | ifx-expert | 21 | 4.642 | 0.294 | 0.835 [0.809, 0.860] | **loss** | 3.999 | 0.643 / 0.417 [0.337, 0.520] | 3.509 |
+| onepass | blade-cpp | 0 | — | — | no parallel form | — | — | — | — |
+| onepass | gfortran-natural / expert | 21 | 14.94 / 10.94 | 0.577 / 0.371 | — | — | 8.508 / 8.280 | — | 15.34 / 9.075 |
+| onepass | ifx-natural / expert | 21 | 15.35 / 11.41 | 0.325 / 0.243 | — | — | 8.839 / 9.136 | — | 15.76 / 9.403 |
+| recur | blade-cpp | 0 | — | — | no parallel form | — | — | — | — |
+| recur | gfortran-natural / expert | 21 | 71.40 / 6.822 | 2.326 / 0.599 | — | — | — | — | 73.24 / 7.207 |
+| recur | ifx-natural / expert | 21 | 14.79 / 7.337 | 0.625 / 0.235 | — | — | — | — | 16.36 / 7.911 |
+| stencil | blade-cpp | 21 | 12.08 | 1.001 | ref | — | 5.600 | 6.483 [6.212, 6.821] / ref | 11.49 |
+| stencil | gfortran-natural | 21 | 8.628 | 0.417 | 0.714 [0.695, 0.739] | indicative | 4.390 | 4.238 / 0.654 [0.612, 0.701] | 9.477 |
+| stencil | gfortran-expert | 21 | 8.000 | 0.235 | 0.662 [0.639, 0.675] | indicative | 4.357 | 3.642 / 0.562 [0.519, 0.588] | 8.968 |
+| stencil | ifx-natural | 21 | 10.01 | 0.289 | 0.828 [0.807, 0.839] | indicative | 4.790 | 5.217 / 0.805 [0.753, 0.848] | 10.19 |
+| stencil | ifx-expert | 21 | 8.333 | 0.351 | 0.690 [0.665, 0.707] | indicative | 4.777 | 3.556 / 0.549 [0.506, 0.586] | 9.120 |
+| dot | blade-cpp | 21 | 13.54 | 1.746 | ref | — | 11.13 | 2.408 [1.974, 3.924] / ref | 12.00 |
+| dot | gfortran-natural | 21 | 11.19 | 0.421 | 0.827 [0.737, 0.847] | indicative | 8.710 | 2.484 / 1.032 [0.596, 1.265] | 11.41 |
+| dot | gfortran-expert | 21 | 11.07 | 0.293 | 0.818 [0.739, 0.833] | indicative | 8.419 | 2.648 / 1.099 [0.673, 1.345] | 10.53 |
+| dot | ifx-natural | 21 | 11.52 | 0.217 | 0.851 [0.773, 0.871] | indicative | 8.924 | 2.594 / 1.077 [0.659, 1.357] | 11.83 |
+| dot | ifx-expert | 21 | 11.48 | 0.357 | 0.848 [0.768, 0.868] | indicative | 8.936 | 2.540 / 1.055 [0.654, 1.289] | 10.96 |
+| saxpy | blade-cpp | 21 | 12.25 | 0.632 | ref | — | 7.496 | 4.754 [4.309, 5.221] / ref | 11.40 |
+| saxpy | gfortran-natural | 21 | 10.05 | 0.598 | 0.821 [0.782, 0.839] | **loss** | 5.641 | 4.411 / 0.928 [0.817, 1.055] | 10.36 |
+| saxpy | gfortran-expert | 21 | 8.936 | 0.329 | 0.729 [0.702, 0.743] | **loss** | 5.650 | 3.286 / 0.691 [0.568, 0.800] | 8.963 |
+| saxpy | ifx-natural | 21 | 10.14 | 0.334 | 0.827 [0.786, 0.838] | **loss** | 6.225 | 3.911 / 0.823 [0.721, 0.924] | 10.59 |
+| saxpy | ifx-expert | 21 | 9.411 | 0.309 | 0.768 [0.736, 0.782] | **loss** | 6.162 | 3.249 / 0.683 [0.606, 0.781] | 9.224 |
+
+(Minima and the twins' own rows are in the bundle; peak working sets as in §5 — the
+fusedchain naturals again 66.5 / 68.2 MB, over the 64 MB rule.)
+
+Diagnosis. **Group A** (all indicative): with its folds serialized Blade loses 6–7x to the
+experts on antisym and gram (0.154 / 0.162, 0.146 / 0.134), 18–23x on comoment3 (0.055 /
+0.043), 9x on pairkernel (0.110 / 0.111) — against 2.1–5.1x in licensed-mt8 (§5). The
+Blade totals (60.7 / 92.7 / 138 / 56.2 ms) are the licensed-mt8 figures (22.6 / 20.6 /
+43.8 / 16.1) with the fold teams removed: in this regime every inner `prodsum` and every
+checksum fold runs as ONE serial chain on ONE thread, so the kernel's map level threads
+across cells but each cell's dot is latency-bound (G1's single chain) and the whole
+checksum pass is serial again — the same two costs as the serial-repro regime (§6.1),
+now against Fortran arms that keep both their vectorized outer-product kernels and their
+thread-level `reduction(+:)` on the checksum. The dense baselines sit where they did in
+licensed-mt8 (gram's serial `matmul` at 600–700 ms; antisym/comoment3 baselines threaded
+across all phases), so Blade's margins over them shrink to 1.0–1.8x (antisym/comoment3)
+or vanish (pairkernel 0.25 / 0.30). **Group B and controls:** fusedchain (clean) keeps
+its 2.06 / 2.07 win over the staged baselines (their temporaries do not care about fold
+association) and loses to the experts (0.752 / 0.835 — Blade's fold is one serial chain on
+one thread, 1.54 ms beyond its twin, the experts' threaded reductions 0.65 ms); saxpy
+(clean) loses to all four (0.73–0.83; incrementals 0.68–0.93: the serial checksum chain
+over 16 MB against a threaded `reduction`); stencil and dot (indicative) read the same
+way (0.66–0.85), dot's incrementals all containing 1. onepass and recur have no Blade
+cell; their Fortran arms are within a few percent of their licensed-mt8 values (the
+repro flags cost gfortran-expert's onepass 9.1 → 10.9 ms; ifx's `sum`s are unchanged, per
+§8c fusion). The controls were the calmest of any session (CV 1.7% / 4.7%; §8).
+
+## 7. fastmath — session 5; blas (gram) — session 4
+
+### 7.1 serial x fastmath x native — session 5a (`session-142614/`)
+
+**Label (README §3): "vendor fast-math vs Blade's reassociation licence — unequal
+permission sets, accuracy-checked at 1e-8."** gfortran `-O3 -march=native -ffast-math`,
+ifx `/O3 /QxHost /fp:fast`; Blade's arms are its DEFAULT (licensed) build, since Blade has
+no blanket fast-math — so every Blade row here is the same emission as in §3/§4 and its
+medians repeat them within noise. The checksum tolerance for this regime is **1e-8**
+(bundle: `tolerance 1e-08`; 0 disqualifications — every fast-math arm agreed with the
+oracle to better than that). antisym, comoment3, gram, fusedchain, onepass, dot; rounds
+11 / 11 / 11 / 21 / 21 / 21; 844.9 s under the D46 cooldowns; 0 failures; no abort; no
+excursion; no fallback. 3 of 6 blocks suppressed (comoment3, gram, onepass — 5.8–9.2%
+trends on ifx arms); antisym, fusedchain, dot clean. Reference `blade-llvm`. Fusedchain
+naturals 66.1 / 65.6 MB (over the 64 MB rule again).
+
+| kernel | arm | n | median (ms) | IQR (ms) | ratio [95% CI] | verdict | licensed median (ms) | what fast-math bought this arm |
+|---|---|---|---|---|---|---|---|---|
+| antisym | blade-llvm | 11 | 73.76 | 0.559 | ref | — | 73.95 | — (same build) |
+| antisym | blade-cpp | 11 | 108.7 | 1.707 | 1.474 [1.463, 1.491] | win (lane) | 107.9 | — |
+| antisym | gfortran-natural | 11 | 129.9 | 3.497 | 1.761 [1.749, 1.815] | **win** | 770.9 | **5.9x**: the dense per-cell inner products vectorized across the sum |
+| antisym | gfortran-expert | 11 | 30.41 | 0.858 | 0.412 [0.408, 0.422] | **loss** | 30.74 | ~1% (nothing left to reorder) |
+| antisym | ifx-natural | 11 | 84.27 | 2.625 | 1.142 [1.113, 1.158] | **win** (detectable, 1.14) | 332.9 | **4.0x** |
+| antisym | ifx-expert | 11 | 29.25 | 0.339 | 0.397 [0.395, 0.403] | **loss** | 29.54 | ~1% |
+| comoment3 | blade-llvm | 11 | 41.04 | 0.598 | ref | — | 41.49 | — |
+| comoment3 | blade-cpp | 11 | 107.5 | 0.385 | 2.620 [2.607, 2.652] | indicative | 109.7 | — |
+| comoment3 | gfortran-natural | 11 | 144.5 | 0.354 | 3.521 [3.505, 3.563] | indicative | 603.4 | **4.2x** |
+| comoment3 | gfortran-expert | 11 | 11.31 | 0.229 | 0.276 [0.272, 0.279] | indicative | 11.49 | ~2% |
+| comoment3 | ifx-natural | 11 | 79.97 | 7.481 | 1.949 [1.934, 2.138] | indicative | 723.7 | **9.1x** |
+| comoment3 | ifx-expert | 11 | 11.26 | 0.270 | 0.274 [0.272, 0.280] | indicative | 11.70 | ~4% |
+| gram | blade-llvm | 11 | 150.6 | 0.891 | ref | — | 156.7 | — |
+| gram | blade-cpp | 11 | 246.9 | 2.782 | 1.640 [1.623, 1.648] | indicative | 275.2 | — (within the session-to-session spread) |
+| gram | gfortran-natural | 11 | 466.8 | 29.00 | 3.099 [3.021, 3.276] | indicative | 601.6 | 1.3x (libgfortran's `matmul` is a runtime call; `-ffast-math` reaches only the checksum) |
+| gram | gfortran-expert | 11 | 75.85 | 0.376 | 0.504 [0.499, 0.507] | indicative | 81.68 | ~8% |
+| gram | ifx-natural | 11 | 198.0 | 17.43 | 1.315 [1.296, 1.419] | indicative | 576.2 | **2.9x** (the inlined `matmul` vectorized under `/fp:fast`) |
+| gram | ifx-expert | 11 | 69.66 | 0.808 | 0.463 [0.458, 0.466] | indicative | 73.15 | ~5% |
+| fusedchain | blade-llvm | 21 | 4.519 | 0.358 | ref | — | 4.571 | — (incremental 0.84 ms) |
+| fusedchain | blade-cpp | 21 | 6.576 | 0.244 | 1.455 [1.402, 1.526] | win (lane) | 6.754 | — |
+| fusedchain | gfortran-natural | 21 | 15.29 | 0.340 | 3.383 [3.259, 3.521] | **win** | 17.98 | 1.2x (temporaries unchanged; incremental 9.3 vs 11.2 ms) |
+| fusedchain | gfortran-expert | 21 | 6.700 | 0.145 | 1.483 [1.428, 1.560] | **win** (its generation twin 6.0 ms dominates; incremental 0.69 ms, 0.82 [0.67, 1.17] ≈ equal) | 6.905 | ~3% |
+| fusedchain | ifx-natural | 21 | 9.583 | 0.415 | 2.121 [2.043, 2.214] | **win** | 13.45 | 1.4x (twin 2.86 vs 4.54 ms: the generator itself got faster under `/fp:fast`) |
+| fusedchain | ifx-expert | 21 | 3.672 | 0.096 | 0.813 [0.786, 0.845] | **loss** | 4.897 | 1.3x — but its incremental (0.82 ms) equals Blade's (0.84): the gain is the GENERATOR (twin 2.85 vs 3.79 ms), not the chain; the division is now allowed a reciprocal |
+| onepass | blade-llvm | 21 | 11.76 | 0.742 | ref | — | 11.67 | — |
+| onepass | blade-cpp | 21 | 17.06 | 0.843 | 1.450 [1.408, 1.496] | indicative | 16.77 | — |
+| onepass | gfortran-natural | 21 | 20.58 | 0.811 | 1.750 [1.686, 1.798] | indicative | 32.87 | **1.6x** (the four `sum`s vectorized: incremental 5.7 vs 15.7 ms) |
+| onepass | gfortran-expert | 21 | 16.99 | 0.904 | 1.445 [1.392, 1.493] | indicative | 16.83 | ~0 (already one loop with four accumulators; the total is its twin) |
+| onepass | ifx-natural | 21 | 8.199 | 0.497 | 0.697 [0.677, 0.731] | indicative | 12.96 | 1.6x (twin 7.4 vs 12.0 ms — the generator) |
+| onepass | ifx-expert | 21 | 8.435 | 0.648 | 0.717 [0.696, 0.746] | indicative | 11.78 | 1.4x (generator; incremental 0.72 ms vs Blade's 2.0) |
+| dot | blade-llvm | 21 | 13.15 | 0.395 | ref | — | 13.20 | — (incremental 1.82 ms) |
+| dot | blade-cpp | 21 | 19.37 | 0.672 | 1.472 [1.441, 1.512] | win (lane) | 19.28 | — |
+| dot | gfortran-natural | 21 | 18.13 | 0.564 | 1.379 [1.364, 1.428] | **win** | 20.28 | 1.1x (incremental 1.25 vs 2.03 ms: `dot_product` vectorized) |
+| dot | gfortran-expert | 21 | 18.16 | 0.532 | 1.381 [1.368, 1.432] | **win** | 18.44 | ~2% (incremental 1.35 vs 1.13 — unchanged) |
+| dot | ifx-natural | 21 | 12.63 | 0.515 | 0.960 [0.936, 0.985] | **detectable-loss** | 14.04 | 1.1x (twin 8.9 vs 11.8 ms — the generator; its dot increment is 3.7 ms, larger than Blade's) |
+| dot | ifx-expert | 21 | 8.914 | 0.366 | 0.678 [0.667, 0.700] | **loss** | 12.67 | 1.4x — and its incremental is **0.03 ms [−0.32, 0.34]**: beyond its twin the dot costs nothing measurable (kernel fused with the input-sum pass, §8c, now with both reductions reassociated) |
+
+Twins (ms): fusedchain blade-llvm 3.68, blade-cpp 5.91, gfortran 6.00 / 6.01, ifx 2.86 /
+2.85; onepass blade-llvm 9.76, blade-cpp 14.90, gfortran 14.90 / 15.06, ifx 7.39 / 7.71;
+dot blade-llvm 11.33, blade-cpp 17.70, gfortran 16.88 / 16.81, ifx 8.90 / 8.89.
+
+Reading. What vendor fast-math bought the Fortran arms beyond the matched simd
+reductions splits cleanly by tier. The **experts gained almost nothing on the kernels**
+(antisym, comoment3 ~1–4%; gram 5–8%; dot's gfortran-expert increment unchanged):
+their loops were already vectorized in the licensed regime by the i-ordered outer product
+or the matched `simd reduction`, so the extra permissions (reciprocals, finite-math
+assumptions, blanket reassociation) had nothing left to reorder — Blade's expert losses
+are the same as in licensed (antisym 0.41 / 0.40, comoment3 0.28, gram 0.50 / 0.46). The
+**dense baselines gained 4–9x** where their per-cell inner products had been serial
+chains (antisym 5.9x / 4.0x, comoment3 4.2x / 9.1x, ifx's inlined `matmul` 2.9x) and
+1.2–1.6x on the streaming kernels: the licensed regime denied the naturals any `simd
+reduction` by the matched rule (they carry no directives), and fast-math is the blanket
+licence that gives it to them — so Blade's wins over the naturals shrink from 10x / 4.5x
+to 1.8x / 1.1x on antisym and from 14.5x / 17.4x to 3.5x / 1.9x on comoment3, still wins
+(the cell-count advantage survives), while gram's gfortran `matmul` stays a serial
+runtime call. The **ifx arms' generator got faster** under `/fp:fast` (fusedchain and
+onepass twins 2.9 / 7.4 ms against 4.5 / 12.0 ms licensed), which is most of ifx's
+improvement on the group-B totals and is a property of the input loop, not the kernels.
+The one new mechanism is ifx-expert's dot: with its kernel fused into the input-checksum
+pass (§8c) and both reductions now free to reassociate, the dot's cost beyond the twin
+vanishes (0.03 ms, interval across zero). None of this changes the headline regime; it is
+reported under the unequal-permissions label.
+
+### 7.2 mt8 x fastmath x native — session 5b (`session-144656/`)
+
+Same label and 1e-8 tolerance as §7.1. All six kernels; rounds 21 / 21 / 7 (gram) / 21 /
+21 / 21; 943.4 s under the D46 cooldowns; 0 failures; no abort; no excursion; onepass
+blade-cpp `no-parallel-form`. **6 of 6 blocks suppressed** by within-block trends
+(5–18% on individual arms, the Blade arm itself on gram 14.1% and fusedchain 18.0%) — every
+verdict here is indicative. Reference `blade-cpp` (matched parallelism, D44: Blade threads
+inputs, kernel level 0, checksum, input sum; Fortran threads all three phases with
+`reduction(+:)`). An earlier attempt, `session-144122/`, ABORTED after 182 s on a control
+excursion (memory control 0.030 s, 5.5x its running median) caused by the user working on
+the machine at 14:44 (Task Manager open); it is recorded in §2 and excluded from every
+figure. Fusedchain naturals 66.5 / 68.2 MB (over the 64 MB rule).
+
+| kernel | arm | n | median (ms) | IQR (ms) | ratio vs blade-cpp [95% CI] | verdict | licensed-mt8 median (ms, §5) | twin median (ms) | incremental (ms) / ratio |
+|---|---|---|---|---|---|---|---|---|---|
+| antisym | blade-cpp | 21 | 21.03 | 2.408 | ref | — | 22.58 | — | — |
+| antisym | gfortran-natural | 21 | 37.17 | 3.841 | 1.767 [1.660, 1.811] | indicative | 116.9 | — | — |
+| antisym | gfortran-expert | 21 | 9.740 | 0.434 | 0.463 [0.433, 0.476] | indicative | 10.38 | — | — |
+| antisym | ifx-natural | 21 | 20.24 | 3.641 | 0.962 [0.874, 1.051] | indicative | 71.39 | — | — |
+| antisym | ifx-expert | 21 | 10.06 | 1.021 | 0.478 [0.443, 0.493] | indicative | 10.90 | — | — |
+| comoment3 | blade-cpp | 21 | 20.67 | 1.849 | ref | — | 20.62 | — | — |
+| comoment3 | gfortran-natural | 21 | 38.50 | 4.806 | 1.862 [1.746, 1.915] | indicative | 91.94 | — | — |
+| comoment3 | gfortran-expert | 21 | 5.136 | 0.530 | 0.248 [0.236, 0.261] | indicative | 4.998 | — | — |
+| comoment3 | ifx-natural | 21 | 20.72 | 6.106 | 1.002 [0.849, 1.133] | indicative | 111.5 | — | — |
+| comoment3 | ifx-expert | 21 | 4.092 | 0.195 | 0.198 [0.186, 0.201] | indicative | 4.025 | — | — |
+| gram | blade-cpp | 7 | 56.76 | 9.768 | ref | — | 43.75 | — | — |
+| gram | gfortran-natural | 7 | 706.8 | 39.78 | 12.454 [10.354, 13.638] | indicative (serial `matmul`) | 614.1 | — | — |
+| gram | gfortran-expert | 7 | 20.97 | 1.172 | 0.370 [0.325, 0.410] | indicative | 21.19 | — | — |
+| gram | ifx-natural | 7 | 244.5 | 21.62 | 4.308 [3.640, 5.193] | indicative | 631.1 | — | — |
+| gram | ifx-expert | 7 | 19.57 | 0.774 | 0.345 [0.293, 0.380] | indicative | 20.02 | — | — |
+| fusedchain | blade-cpp | 21 | 4.616 | 1.359 | ref | — | 4.128 | 3.881 | 0.735 [−0.365, 0.984] / ref |
+| fusedchain | gfortran-natural | 21 | 11.66 | 1.672 | 2.526 [2.392, 3.284] | indicative | 12.47 | 3.117 | 8.541 / undefined (reference interval includes 0) |
+| fusedchain | gfortran-expert | 21 | 3.534 | 0.926 | 0.766 [0.699, 1.055] | indicative | 3.253 | 2.883 | 0.651 / undefined |
+| fusedchain | ifx-natural | 21 | 12.02 | 1.787 | 2.605 [2.436, 3.391] | indicative | 12.63 | 3.451 | 8.572 / undefined |
+| fusedchain | ifx-expert | 21 | 3.536 | 0.768 | 0.766 [0.721, 0.962] | indicative | 3.509 | 3.242 | 0.294 [−0.120, 0.648] / undefined |
+| onepass | blade-cpp | 0 | — | — | no parallel form | — | — | — | — |
+| onepass | gfortran-natural / expert | 21 | 13.22 / 8.892 | 0.593 / 0.617 | — | — | 15.34 / 9.075 | 6.571 / 6.768 | — |
+| onepass | ifx-natural / expert | 21 | 13.50 / 9.376 | 0.575 / 1.022 | — | — | 15.76 / 9.403 | 7.307 / 7.000 | — |
+| dot | blade-cpp | 21 | 11.19 | 1.658 | ref | — | 12.00 | 9.253 | 1.937 [0.985, 3.106] / ref |
+| dot | gfortran-natural | 21 | 10.36 | 0.634 | 0.925 [0.855, 0.951] | indicative | 11.41 | 8.341 | 2.014 / 1.040 [0.571, 1.828] |
+| dot | gfortran-expert | 21 | 10.22 | 0.835 | 0.913 [0.867, 0.956] | indicative | 10.53 | 8.166 | 2.053 / 1.060 [0.692, 1.744] |
+| dot | ifx-natural | 21 | 10.53 | 0.700 | 0.941 [0.886, 0.982] | indicative | 11.83 | 8.184 | 2.348 / 1.212 [0.763, 2.068] |
+| dot | ifx-expert | 21 | 10.65 | 0.620 | 0.952 [0.903, 0.989] | indicative | 10.96 | 8.162 | 2.489 / 1.285 [0.615, 2.561] |
+
+Reading (all indicative). Under threads the picture of §7.1 repeats: the **experts are
+where they were in licensed-mt8** (antisym 9.7 / 10.1 ms, comoment3 5.1 / 4.1, gram 21.0
+/ 19.6 — fast-math gave their already-vectorized, already-threaded loops nothing), so
+Blade's expert ratios match §5's (antisym 0.46 / 0.48, comoment3 0.25 / 0.20, gram 0.37 /
+0.35 on a 7-round block whose Blade arm trended 14%); the **dense baselines collapse
+toward Blade** once their serial inner products are allowed to vectorize (antisym 117 →
+37 ms gfortran, 71 → 20 ifx; comoment3 92 → 38.5, 112 → 20.7; ifx's inlined `matmul`
+631 → 245), so Blade's would-be wins over them shrink to 1.8x (gfortran) and 1.0x (ifx)
+on antisym and comoment3 — the cell-count advantage (2x, 5.9x) is now offset by Blade's
+own non-vectorized per-cell structure (G1, G1b) and its Path B checksum (G25). gfortran's
+`matmul` stays a serial runtime call (707 ms). On the streaming kernels the fast-math
+arms' totals are within 0.77–0.95 of Blade with wide, zero-straddling incrementals (the
+fusedchain reference's own incremental interval includes 0 at 3–5 ms totals under 8
+threads, so the harness reports the incremental ratios as `undefined` — by the M16 rule,
+not by omission). Nothing here changes a headline; it is all under the unequal-permissions
+label.
+
+### 7.3 blas (gram) — session 4 (`session-150343/`): both blocks CLEAN
+
+Arms: `blade-cpp` with Blade's auto-routed `dsyrk` (`BLADE_BLAS=1`; the plan line reads
+`[blas-routing v1] __v27: applied [Syrk (L3, d); HostBlas: blade_linalg::blade_gram_same_d;
+tier TierOpenBlasDir]`), `gfortran-expert` and `ifx-expert` calling `dsyrk` explicitly
+against the same OpenBLAS; `blade-llvm` recorded `no-blas` ("the exe imports no
+libopenblas.dll"); naturals excluded (no library route). 123.6 s; 0 flags, 0 failures, no
+excursion; serial 11 rounds with `OPENBLAS_NUM_THREADS=1`, mt8 21 rounds with
+`OPENBLAS_NUM_THREADS=8` (library threads on both sides; the Blade arm additionally shows
+`openmp (3 constructs)` for its generator, checksum and input sum). Reference `blade-cpp`.
+
+| regime | arm | n | min (ms) | median (ms) | IQR (ms) | ratio vs blade-cpp [95% CI] | verdict | parallelism | peak WS (MB) |
+|---|---|---|---|---|---|---|---|---|---|
+| serial | blade-cpp (dsyrk) | 11 | 79.82 | 80.71 | 0.895 | ref | — | library threads (1) | 49.0 |
+| serial | gfortran-expert (dsyrk) | 11 | 64.97 | 65.71 | 0.664 | 0.814 [0.805, 0.827] | **loss** | library threads (1) | 34.8 |
+| serial | ifx-expert (dsyrk) | 11 | 62.14 | 62.83 | 0.655 | 0.778 [0.772, 0.786] | **loss** | library threads (1) | 34.6 |
+| mt8 | blade-cpp (dsyrk) | 21 | 23.82 | 28.14 | 2.078 | ref | — | library threads (8) + openmp (3 constructs) | 51.1 |
+| mt8 | gfortran-expert (dsyrk) | 21 | 14.98 | 20.26 | 1.776 | 0.720 [0.684, 0.743] | **loss** | library threads (8) + openmp runtime | 36.6 |
+| mt8 | ifx-expert (dsyrk) | 21 | 16.81 | 19.50 | 1.385 | 0.693 [0.665, 0.728] | **loss** | library threads (8) + openmp runtime | 38.1 |
+
+Diagnosis (clean verdicts). The same `dsyrk` on both sides, and Blade is 19–22% slower
+serial, 28–31% slower threaded. The gap is not in the library call; it is what Blade's
+route does around it, read off the archived plan and emit
+(`build/gram/full/serial-licensed-blas/blade-cpp/generated/gram.cpp`, `src/cpp/blade_linalg.hpp`
+`blade_gram_same_d`): (1) **a dense staging buffer and a repack** — "syrk wants a dense
+square C with a leading dimension, so a full m x m buffer is written and then repacked into
+Blade's left-justified triangle": `std::vector<double> Cfull(m*m)` (1601² x 8 B = 20.5 MB,
+zero-initialized), `cblas_dsyrk(RowMajor, Upper, NoTrans, …)` into it, then a loop copying
+the upper triangle into the packed pool — an extra 20.5 MB write, a 10 MB read and a
+10 MB write that the expert does not do (it calls `dsyrk` straight into its own dense
+array, which is also its checksum's source); the peak working set shows it, 49.0 MB
+against 34.8 / 34.6; (2) **the logical-read checksum** — Blade's per-row nest reads all p²
+logical cells through `canon_fold<2>` (`std::sort` out of line, **G3b**) where the expert
+sums its stored triangle with weight 2; in the licensed serial regime this pass was
+measured at a few ms on gram (A §13); (3) the serial input sum and generation in the
+serial regime (shared with the experts, so not a differentiator). Items (1) and (2) are
+~15 ms serial against the experts' ~63–66 ms `dsyrk`-dominated totals, which is the
+observed 15 ms gap; under 8 library threads the `dsyrk` shrinks to ~15 ms but (1) and (2)
+do not shrink with it (the repack is serial, the checksum nest threaded only at its outer
+level with a Path B fold, **G25**), so the ratio worsens to 0.72 / 0.69. Register entry:
+**G28** (BLAS route stages and repacks; the gate-off packed tile of the phase-2 plan writes
+the triangle directly and would remove it).
 
 ## 8. Controls record
 
@@ -427,6 +1406,15 @@ Blade's reassociation licence — unequal permission sets, accuracy-checked at 1
 | pilot | CV 8.5%, +24% excursion in one block | — | coordinator's pilot note; bundle `session-231651/` |
 | 1a | n = 86 valid rounds, median 13.42 ms, baseline (first block) 12.75 ms; CV 9.3% over the 87 ok samples; min 12.51, max 17.61 ms; 0 invalid | n = 86, median 5.505 ms, baseline 5.246 ms; CV 9.9% over 87 ok samples; min 5.12, max 7.45 ms; 0 invalid | `summary.md` Controls; CVs computed from `session.json` `controls[].samples[].time_s` |
 | 1b | n = 105, median 13.05 ms, baseline 13.12 ms; CV 9.8% over 106 ok samples; min 12.43, max 20.67 ms; 0 invalid | n = 105, median 5.404 ms, baseline 5.398 ms; CV 9.2% over 106 ok samples; min 5.13, max 8.28 ms; 0 invalid | same |
+| 2 (mt8, partial) | n = 168, median 13.43 ms, baseline 12.83 ms; CV 9.5% over 169 ok samples; min 12.45, max 18.05 ms; 0 invalid | n = 168, median 5.474 ms, baseline 5.311 ms; CV 9.0% over 169 ok samples; min 5.09, max 7.87 ms; 0 invalid | same; both controls normal in the aborted saxpy round |
+| 1a′ (antisym re-measure, 229 s) | n = 11, median 12.84 ms = baseline; over the 12 ok samples in `session.json` (warm-up included) CV 9.4%, min 12.66, max 17.37 ms — one 17.4 ms sample, the rest within 12.7–13.3 | n = 11, median 5.453 ms = baseline; CV 3.5% over 12 ok samples, min 5.31, max 5.96 ms | `summary.md` Controls; CVs computed from `session.json` |
+| 3a (serial repro) | n = 86, median 12.98 ms, baseline 16.50 ms (the first block, antisym, ran high — 31% within-block trend; every later block 12–23% below); CV 12.1% over 87 ok samples; min 12.57, max 20.27 ms | n = 86, median 5.46 ms, baseline 6.347 ms; CV 9.5% over 87 ok samples; min 5.15, max 7.42 ms | same |
+| 3b (serial repro, group B) | n = 105, median 12.95 ms, baseline 13.42 ms; CV 9.4% over 106 ok samples; min 12.44, max 20.83 ms | n = 105, median 5.438 ms, baseline 5.379 ms; CV 7.7% over 106 ok samples; min 5.13, max 7.27 ms | same; no rolling-rule trips, the two suppressions are arm trends |
+| **3c (mt8 repro; first session at 0.5 s / 3 s / 60 s)** | n = 168, median 12.73 ms, baseline 12.70 ms; **CV 1.7%** over 169 ok samples; min 12.51, max 13.63 ms | n = 168, median 5.276 ms, baseline 5.268 ms; **CV 4.7%** over 169 ok samples; min 5.05, max 7.41 ms | same |
+| 5a (serial fastmath) | n = 96, median 12.81 ms, baseline 12.71 ms; CV 8.0% over 97 ok samples driven by ONE 20.2 ms sample (min 12.55, max 20.19 ms) | n = 96, median 5.295 ms, baseline 5.271 ms; CV 3.6% over 97 ok samples; min 5.13, max 6.07 ms | same |
+| 5b (mt8 fastmath) | n = 112, median 13.01 ms, baseline 13.09 ms; CV 4.8% over 113 ok samples; min 12.46, max 16.93 ms | n = 112, median 5.397 ms, baseline 5.263 ms; CV 7.0% over 113 ok samples; min 5.08, max 7.02 ms | same; the aborted attempt `session-144122/` tripped on the memory control (0.030 s, 5.5x) while the user worked on the machine |
+| 4 (gram blas) | n = 32, median 12.91 ms, baseline 13.06 ms; CV 5.9%; range 12.51–16.97 ms (runner record) | n = 32, median 5.372 ms, baseline 5.331 ms; CV 5.1%; range 5.16–6.15 ms | `summary.md`; `results/full/RUNNER-RECORD.md` |
+| 2b (mt8 re-run) | n = 105, median 12.98 ms, baseline 14.18 ms (the first block ran hot; later blocks 7–10% BELOW it, tripping the rolling rule downward); CV 9.4% over 106 ok samples; min 12.56, max 18.17 ms | n = 105, median 5.424 ms, baseline 6.067 ms; CV 10.0% over 106 ok samples; min 5.12, max 9.02 ms | same |
 
 The two controls diagnose different things: the compute control tracks core clock and
 thermal state, the stream control memory-subsystem contention (README §6). In session 1a
@@ -436,7 +1424,24 @@ elsewhere (threshold 5%); antisym's block was the only one inside both threshold
 session 1b the controls' medians sat on their baselines (13.05 vs 13.12 ms; 5.40 vs 5.40
 ms) and no block tripped the rolling rule; the four suppressions were within-block
 trends of individual arms (5.6–14.8%) and, in the dot and saxpy blocks, of a control
-(8.3% compute, 5.2% memory). onepass was the clean block.
+(8.3% compute, 5.2% memory). onepass was the clean block. In session 2 (mt8) the compute
+control moved 11–18% above baseline during comoment3, pairkernel, recur and stencil and
+showed 21–23% within-block trends in gram and comoment3 (threaded blocks heat the part
+more than serial ones); antisym was again the clean block.
+
+**Observation on inter-run spacing (sessions 3b vs 3c, stated as an observation, not a
+re-analysis of earlier sessions).** Under the old cooldowns (2 s between runs, 10 s
+between kernels, 300 s between sessions) the compute control's CV was 8.7–12.1% in every
+session (3b: 12.95 ms median, CV 9.4% over 106 samples, max 20.8 ms) and the memory
+control's 7.7–9.9%. In the first session under the D46 spacing (0.5 s / 3 s / 60 s;
+session 3c, 168 control rounds) the compute control's CV fell to **1.7%** (12.73 ms
+median, min 12.51, max 13.63 ms) and the memory control's to **4.7%**. The reading
+consistent with the numbers: on this uncapped chip the long pauses let the part cool and
+re-boost between runs, so consecutive runs sampled different clock states, whereas the
+short spacing keeps it in one steady thermal state. The methodological lesson for this
+host is that SHORTER spacing gives the steadier measurement; it is recorded here with
+both sessions' figures and does not change any earlier session's suppression status or
+numbers.
 
 ## 9. Hypotheses vs outcomes (filled as sessions land)
 
@@ -444,7 +1449,7 @@ trends of individual arms (5.6–14.8%) and, in the dot and saxpy blocks, of a c
 |---|---|---|---|---|
 | gram | loss or equivalent / equivalence to modest loss | 1a indicative: 3.8 & 3.7 (Blade faster) / 0.52 & 0.47 | both sides: baseline slower than assumed, expert loss ~2x | G1, G26; matmul routes recorded |
 | comoment3 | WIN 4–6x / equivalence to modest loss | 1a indicative: 14.5 & 17.4 / 0.28 & 0.28 | both sides | G1b, G3a, G3b |
-| antisym | WIN ~2x / equivalence to modest loss | 1a: 10.4 & 4.46 win / 0.416 & 0.395 loss | both sides | G1, G26, G3b |
+| antisym | WIN ~2x / equivalence to modest loss | 1a′ (clean, re-measured): 10.4 & 4.50 win / 0.416 & 0.400 loss (1a: 10.4 & 4.46 / 0.416 & 0.395) | both sides | G1, G26, G3b |
 | pairkernel | WIN ~2x / equivalent | 1a indicative: 1.45 & 1.52 / 0.77 & 0.72 | both sides, same cause | G3a (checksum pass), G3b |
 | fusedchain | WIN 1.5–2.5x / equivalent | 1b indicative: 3.93 & 2.94 / 1.51 & 1.07 (incremental vs experts: intervals contain 1) | baseline side: larger win (unfused temporaries, 65.9 / 65.5 MB); expert side holds | fusion by deferral confirmed; C++ lane 1.48x is its twin |
 | onepass | WIN 2–3x / equivalent | 1b CLEAN: 2.82 win & 1.11 win / 1.44 win & 1.009 equivalent | ifx side: ifx fused the four `sum`s (1.11, incremental 0.45); gfortran-expert total win is the twin | the join is one pass; G7 partly fixed |
@@ -465,20 +1470,167 @@ trends of individual arms (5.6–14.8%) and, in the dot and saxpy blocks, of a c
 | recur vs experts and baselines (0.09–0.17, indicative) | per-step allocator page faults (eight 160 KB temporaries) | G6, G8 | open |
 | C++ lane vs LLVM lane on every group-A kernel (1.15–2.64) | single-accumulator simd reduction; out-of-line canonicalizing read | G26, G3b | open |
 | maskagg vs both tiers (0.043–0.157, indicative; session 1b) | one `unordered_map` insert per kept cell (~85% of the time), Bool mask pass, `y*y` temporary; LLVM lane refuses `mask`/`compound` | G9, G12 | open |
+| mt8 group A after the D44 fix (session 2b, indicative): antisym 0.46 / 0.48, comoment3 0.24 / 0.20, gram 0.48 / 0.46, pairkernel 0.39 / 0.39 vs experts | the serial-regime kernel gap carried into threads (G1 per-cell reloads; G1b for comoment3) plus the Path B checksum fold — 8 serial chains of canonicalizing reads against the experts' vectorized threaded sums (G3a/G3b under G25). The superseded Amdahl term (serial preparation and checksum: 0.064/0.048, 0.11, 0.35/0.33, 0.33/0.35) is gone | G1, G1b, G3a, G3b, G25 | open |
+| repro serial, group A (session 3a, indicative): antisym 0.064 / 0.062, gram 0.064 / 0.058, comoment3 0.075 / 0.075 vs experts | Blade's reproducible association is ONE dependent chain per cell (latency-bound: 3.5–8x slower than its own licensed build) while the expert's register-tiled outer-product order is bitwise-reproducible AND vectorized over i; the old Blade default paid this on every build | G1 (a strict-legal tile closes it with no reordering licence), G26; policy D40/D43 | open (tile); default already flipped |
+| repro serial, group B (session 3b): dot 0.83 / 0.72 and saxpy 0.84 / 0.63 vs ifx (clean losses); maskagg 0.054–0.153 vs all (clean) | Blade's in-order folds are scalar chains in both lanes (2.6–6.4 ms beyond the twins), as are ifx's (verified: single in-order chains, no packed reduction); ifx's small increments (0.6 / 2.0 / 1.1 ms) come from FUSING the kernel pass with the input-checksum pass, both reading the stored inputs — compiler loop fusion, permitted (README §1.5 / F7); gfortran keeps separate passes; maskagg is regime-independent (G9) | compiler loop-fusion property (ifx), G9; policy D40/D43 | recorded (`fortran-notes.md` §8c) |
+| repro mt8, group A (session 3c, indicative): antisym 0.154 / 0.162, gram 0.146 / 0.134, comoment3 0.055 / 0.043, pairkernel 0.110 / 0.111 vs experts; group B clean losses fusedchain 0.752 / 0.835, saxpy 0.73–0.83 | the regime's definition: `BLADE_FP_REPRO=1` serializes every fold team, so each cell's dot and every checksum fold is one serial chain on one thread, while Fortran keeps its thread-level `reduction(+:)` and vectorized outer-product kernels | regime asymmetry (README §3, D43) on top of G1 / G3a; the repro default is the opt-in, not the headline | recorded |
+| fastmath serial (session 5a; unequal permissions, 1e-8): antisym 0.41 / 0.40 and fusedchain 0.81 / dot 0.68 vs ifx-expert (clean losses), comoment3 0.28, gram 0.50 / 0.46 (indicative) | the experts gained ~nothing from fast-math on the kernels (already vectorized by ordering or matched simd); Blade's losses are the licensed ones; ifx's generator and fused dot+checksum pass got faster | G1, G1b, G3a (unchanged); ifx loop fusion (§8c) | recorded under the label |
+| mt8 onepass and recur: experts 9.1 / 9.4 ms and 7.2 / 7.9 ms vs Blade's serial-only figures | no thread-level form for the join (G7) / no licence slot in a `let rec` step (G5) | G7, G5 | open |
 | C++ lane vs LLVM lane on group B / controls (1.25–1.48, indicative) | mostly INPUT GENERATION (the twins differ by the same factor: 6.1 vs 3.9, 14.8 vs 9.5, 17.7 vs 11.5, 12.1 vs 8.2 ms); the folds' incrementals are equivalent | generator lowering in the C++ lane (not yet a register entry; the kernel folds are G26-free after the flip) | to be entered after the mt8 session |
 
 Fixed before the sessions and reflected in the sources: G19, G20, G21 (5f4b33ea); partly:
 G7, G14.
 
-## 11. Headline, inventory, honesty notes, phase-2 worklist
+## 11. Headline, inventory, honesty notes, phase-2 worklist (final, 2026-10-18)
 
-Headline and final honesty notes are written when the final (blas) session lands. The
-phase-2 worklist is already settled by the planning pair (opus + Codex, no execution):
-**`notes/phase2-microkernel-plan.md`** — 12 ranked items with the deciding emission
-site, the arithmetic contract each may change, and Codex's two attack rounds (its §7).
-Its order and forecast gains, reproduced here; **the "expected after" figures are
-arithmetic FORECASTS from the measured rates of sessions 1a/1b and blade-A §13, not
-measurements — the bench tests them**:
+### 11.1 Headline
+
+Eleven kernels, six arms, four regimes (licensed / repro, serial / mt8), plus fastmath and
+blas, twelve session bundles (two aborted and excluded), 0 checksum disqualifications
+against the independent oracle. Ratio > 1 = Blade faster. Verdict words follow README §6
+(δ = 10%); "indicative" = the block's verdict was suppressed by a drift check.
+
+**Blade vs the dense natural tier (licensed serial, the headline regime):** on the four
+symmetric kernels Blade from one idiomatic source is **4–17x faster** than the literal
+dense transcription — antisym 10.4x / 4.5x (clean), comoment3 14.5x / 17.4x, gram 3.8x /
+3.7x (the serial `matmul` runtime), pairkernel 1.45x / 1.5x (all three indicative) — and
+on the fusion kernels 2.8–3.9x (fusedchain, indicative) and 2.8x / 1.1x (onepass, clean:
+ifx fused its four `sum`s). The dense baselines are what array syntax with dense storage
+costs; the matched-permission rule denies them `simd reduction`, and under vendor
+fast-math (§7) they recover 4–9x and the margins shrink to 1.0–1.9x on antisym/comoment3.
+
+**Blade vs the reviewed expert tier (licensed serial):** **2–4x behind on group A** —
+antisym 0.416 / 0.400 (clean), gram 0.52 / 0.47, comoment3 0.28 / 0.28, pairkernel 0.77 /
+0.72 (indicative) — with the mechanisms measured and registered: the per-cell dot reloads
+its operand rows (2 loads per FMA against the expert's 8x6 register tile at 0.67, **G1**;
+comoment3's un-hoisted pair product, **G1b**), and the logical-read checksum over the
+packed object (**G3a/G3b**; pairkernel's entire loss, its kernel being equivalent). On the
+memory-bound kernels Blade is **equivalent to ahead of gfortran** — onepass 1.44 (clean,
+driven by its generation twin), fusedchain 1.51, dot 1.40, saxpy 1.09, stencil 1.07 (the
+incrementals say equivalent) — and **behind ifx on several** (fusedchain 0.74–0.81, dot
+0.72, saxpy 0.63–0.84, stencil 0.86; ifx's generator is faster and it fuses the kernel
+with the input-checksum pass, §8c). Two controls lose outright as predicted: recur 0.09
+(the per-step allocator, **G6**: ~91k page faults, not arithmetic) and maskagg 0.04–0.15
+(the hashed compound index, **G9**).
+
+**repro (the reproducible-association opt-in, serial):** Blade is **13–17x behind the
+experts on group A** (antisym 0.064 / 0.062, gram 0.064 / 0.058, comoment3 0.075 / 0.075)
+because its reproducible association is one dependent chain per cell while the expert's
+register-tiled outer-product order is both bitwise-reproducible and vectorized — the
+measured cost of the old default and the strongest evidence for G1. Group B: maskagg
+0.04–0.15, dot 1.19 / 1.18 vs gfortran and 0.83 / 0.72 vs ifx, saxpy 1.08 / 0.99 / 0.84 /
+0.63 (clean).
+
+**mt8 (licensed, after the matched-parallelism fix D44):** gram 0.48 / 0.46, antisym 0.46
+/ 0.48, comoment3 0.24 / 0.20, pairkernel 0.39 / 0.39 vs the experts (all indicative) —
+the serial-regime kernel gap carried into threads, plus the Path B checksum fold (serial
+within each chunk, **G25**); fusedchain 2.06 / 2.07 over the naturals and 0.75 / 0.84 vs
+the experts (clean in repro-mt8), saxpy 0.73–0.83 (clean); onepass and recur have no Blade
+thread form (**G7**, **G5**). Before the fix the group-A mt8 Blade figures were 1.3–3.5x
+worse (comoment3 87 → 20.6 ms) because Blade threaded only the kernel's level 0 while
+Fortran threaded everything; both sets are shown (§5, §5A). In repro-mt8 Blade's folds are
+serialized by definition and it is 6–23x behind on group A (§6.3).
+
+**blas (gram, clean):** the same `dsyrk` on both sides and Blade is **19–22% slower serial,
+28–31% slower threaded** — its route stages a dense 20.5 MB buffer and repacks it into the
+packed triangle, then reads p² logical cells for the checksum (**G28**, G3b).
+
+**The lane story.** In licensed regimes the LLVM lane is ahead of the C++ lane on every
+kernel (1.15–2.64x: four ymm FMA accumulators against one `omp simd reduction` accumulator,
+**G26**; inlined canonicalizing reads against `std::sort`, **G3b**; and, on group B, a
+faster input generator). In repro the order flips on the compact kernels (C++ 0.78–0.81 of
+the LLVM time on antisym/gram: once both are scalar chains, the LLVM lane's 64x64 cache
+bricks cost more than the C++ plain nest) and on the folds of the streaming kernels
+(incremental 0.61–0.80), though not on their totals. The LLVM lane has no thread runtime
+(mt8 is C++-only), refuses `compound`/`mask` (maskagg is C++-only) and has no BLAS route.
+
+**Hypotheses vs outcomes (§9):** every group-A hypothesis missed in magnitude on both sides
+— the dense-baseline wins were larger than predicted (the baselines' nests are slower than
+the cell-count ratio alone implies) and the expert losses larger (G1/G1b/G3 were not in the
+pre-measurement model); the control predictions held in direction (recur, maskagg lose;
+dot/saxpy/stencil equivalent) and missed in magnitude where the allocator and the hashed
+index dominate. Nothing was re-thresholded to fit.
+
+### 11.2 Controls record
+
+The consolidated per-session controls table (compute and stream control medians, CVs,
+ranges, excursions dropped, for all twelve sessions) is the runner's
+`results/full/RUNNER-RECORD.md`, section "Control drift per session"; it is not duplicated
+here. §8 above holds the per-session rows used while filling this document and the
+spacing observation: under the old cooldowns (2 s / 10 s / 300 s) the compute control's CV
+was 8.7–12.1% in every multi-block session; under the D46 spacing (0.5 s / 3 s / 60 s) it
+was 1.7% (mt8-repro), 4.8% (mt8-fastmath), 5.9% (blas), 8.1% with one outlier
+(serial-fastmath) — read as the uncapped chip cooling and re-boosting during long pauses;
+an observation, not a re-analysis of the earlier sessions.
+
+### 11.3 Dropped and recast workloads (README §8 inventory)
+
+`band` (closed-form constrained enumeration) — dropped: the domain fold is refused at
+codegen (BL7004) and the `|> compute` form builds a hashed key table (D1, G4). The **pair
+SUM** over a `comm` kernel — recast as the `pairkernel` MATRIX: a fold over compact
+storage is refused (BL3999; D2, G2), and the suite therefore measures materialized
+symmetric objects, not pair sums. The O(1)-per-cell antisymmetric map — recast as the
+angular-momentum tensor (a ~5 ms write under the 64 MB cap; D4). The supported claim is
+about materialized symmetric objects, fused chains and folds, and the listed controls —
+not about pair sums, constrained enumeration, or anything not in the eleven.
+
+### 11.4 Honesty notes
+
+- **Uncapped host, indicative verdicts.** Every session ran at maximum processor state
+  100% ("Silent" scheme) by the user's choice; drift suppression stayed in force and no
+  threshold was loosened. Suppressed (indicative) cells per regime, from the runner's
+  record: serial-licensed 44, mt8-licensed 32, serial-repro 40, mt8-repro 24,
+  serial-fastmath 15, mt8-fastmath 20, blas 0. The clean blocks carrying verdicts are:
+  antisym (serial-licensed, re-measure), onepass (serial-licensed), maskagg, dot and saxpy
+  (serial-repro), fusedchain, onepass, recur and saxpy (mt8-repro), antisym, fusedchain and
+  dot (serial-fastmath), and both blas blocks. An 80%-capped re-run (`harness/README.md`)
+  is the documented route to unsuppressed verdicts on the rest.
+- **n per cell:** 11 rounds for the four compact kernels in serial regimes, 21 for the
+  other seven; 7 for the compact kernels in mt8 (gram and comoment3 in session 2 and
+  mt8-repro; gram in mt8-fastmath), 21 otherwise — the README minimums, never overridden.
+- **Two aborts, both recorded and excluded:** `session-100329` (mt8-licensed) stopped in
+  saxpy's round 7 on a single 43 ms stall of a 6 ms input-only twin under the then
+  always-abort rule (controls normal) — the block was re-run in `session-113651`, and the
+  rule was changed to drop-and-record an isolated excursion (D45); `session-144122`
+  (mt8-fastmath) stopped after 182 s on a memory-control excursion (0.030 s, 5.5x) caused
+  by the user working on the machine at 14:44 (Task Manager open) — re-run clean as
+  `session-144656`.
+- **Provenance caveats.** (i) The serial-licensed rows of gram, comoment3 and pairkernel
+  (`session-042223`) pre-date the D44 change to the group-A Blade sources; their serial
+  emission was proven byte-identical before and after the change (blade-A §14), so the
+  rows stand; antisym's serial emission changed in one input-sum fold and was re-measured
+  (`session-121713`, within 1–2% of the original). (ii) The mt8-licensed regime is drawn
+  from two sessions: group B and the controls from `session-100329`, group A and saxpy
+  from the matched-parallelism re-run `session-113651`; the superseded group-A rows are
+  kept in §5A. (iii) The cooldowns changed between serial-repro 3b and mt8-repro (2 s /
+  10 s / 300 s → 0.5 s / 3 s / 60 s, D46); the sessions table says which was in force,
+  and the control CV fell at the change. (iv) The fusedchain natural arms exceeded the
+  64 MB working-set rule by 2–6% in every session that ran them (65.5–68.2 MB); kept and
+  flagged. (v) The mt8 group-A re-run's threaded checksum folds are Path B (serial within
+  each chunk, G25) and only the fold-kernel licence placement threads (G27) — the
+  parallelism column records what was threaded.
+- **What was not run:** maskagg in any mt8 regime (serial by protocol); onepass and recur
+  Blade cells in mt8 (no parallel form); pairkernel, stencil, recur, maskagg and saxpy in
+  fastmath (no fold under test or no Blade form); the naturals in blas; the `blade-llvm`
+  arm in every mt8 and blas cell and on maskagg. No cell was estimated.
+- **Attribution and incrementals** are labelled evidence, not results: the kernel-only
+  shares come from blade-A §13's phase measurements; incrementals are total-minus-twin,
+  never kernel time; ratios of incrementals are `undefined` where the reference's interval
+  includes 0 (M16).
+- **Reviewed, not optimal.** Every Fortran arm was reviewed (`notes/review-fortran.md`);
+  "expert" means reviewed. The oracle (`validation/pins.json`, numpy) is independent of
+  both languages; 0 disqualifications across all sessions.
+
+### 11.5 Phase-2 worklist
+
+The worklist is the planning pair's **`notes/phase2-microkernel-plan.md`** (12 ranked
+items, Codex attack rounds in its §7); its order and forecast gains are reproduced below.
+**The "forecast" figures are arithmetic forecasts from the measured rates of this suite
+(A §13, B §6, sessions 1a/1b), not measurements** — the bench tests them. Measured
+payoffs to beat, from this document: gram expert ratio 0.52 / 0.47 (G1, G26); antisym
+0.416 / 0.400 (G1); comoment3 0.28 (G1b, G3a/G3b); pairkernel 0.77 / 0.72 (G3a: the kernel
+is equivalent); recur 0.09 (G6); maskagg 0.04–0.15 (G9); blas 0.81 / 0.78 (G28); the
+mt8 chunk-serial checksum (G25) and the missing thread forms (G5, G7).
 
 | # | item (plan §) | effort | forecast (ms, from the session-1a/1b medians) | gap |
 |---|---|---|---|---|
@@ -496,15 +1648,89 @@ measurements — the bench tests them**:
 | 11 | 4.5c pointwise-body fusion of the stage chain | L | recur → ~11–13 | G8 |
 | 12 | 4.6 stencil row scheduling; C++ input-generator investigation | L | low value | — |
 
-Plan-level one-page forecast (its §0): gram ~85–95 both lanes (vs experts 73–82);
+Plan-level one-page forecast (its §0): gram ~85–95 ms both lanes (vs experts 73–82 ms);
 antisym ~33–37 (vs 29–31); comoment3 ~13–16 (vs 11.5–11.7); pairkernel ~32–34 (vs 31–33);
-recur ~20–30 → ~15–25 → ~11–13 (vs 10.5–11.3); stencil unchanged. **Caveat carried from
-the plan (§3):** a tile is PROVEN bitwise-identical to the serial reference only under
-`BLADE_FP_CONTRACT=off` (no operation can be fused); under the default fast contraction
-each compiler may fuse differently, so bitwise agreement must be VERIFIED per compiler
-and mode (disassembly: `vfmadd` counts in the tile and in the serial reference agree) —
-"bitwise by construction" is not claimed for the default build. What the two planners
-agree is still unproven needs the bench, not more planning (plan §7, last section).
+recur ~20–30 → ~15–25 → ~11–13 (vs 10.5–11.3); stencil unchanged. **Caveat carried from the
+plan (§3):** a tile is PROVEN bitwise-identical to the serial reference only under
+`BLADE_FP_CONTRACT=off`; under the default fast contraction each compiler may fuse
+differently, so bitwise agreement must be VERIFIED per compiler and mode (vfmadd counts
+in the tile and in the serial reference agree). Not in the plan but measured here and
+registered: G28 (the BLAS route's staging/repack) and G25 (chunk-interior serial folds
+under mt8).
+
+## 12. Decisions put to the user — BOTH DECIDED (2026-10-18)
+
+**Decisions:** (1) mt8 matched parallelism — option (A) below: every arm threads input
+generation and the checksum read-back where the language allows; the four group-A Blade
+sources gain `where omp` licences on their input maps and checksum nests (blade-A
+applying); the §5.1–5.4 rows are superseded and re-run (D44). (2) The abort rule — option
+(B) below: an isolated single-run excursion with normal controls is dropped and recorded;
+the session aborts on a second excursion in the same block, a control excursion, or AC loss
+(D45). **Resume plan:** re-smoke; re-run mt8-licensed for the four group-A kernels plus
+the saxpy cell; then serial-repro 3a/3b, mt8-repro, serial-fastmath, mt8-fastmath, gram
+blas. The option analyses are kept below as the record of the decision.
+
+### 12.1 mt8 fairness asymmetry — what each arm threads (DECIDED: A)
+
+**Finding.** In the mt8 regime the Fortran arms thread input generation AND the checksum
+read-back in every kernel (`!$omp parallel do` on the generator loops and the checksum
+sums). The group-A Blade sources thread only the kernel's level 0 (`where omp(x: 1)` on the
+`comm` kernel): input generation, the per-row checksum nest and the input sum stay serial
+(blade-A's M24 note); group B threads the input map, but not every checksum. The bundle's
+`openmp (1 construct)` for gram/comoment3/antisym/pairkernel against the Fortran arms'
+threaded three phases is that asymmetry. With the checksum pass measured at 57–70% of the
+C++ lane's serial time on comoment3/pairkernel (A §13), Amdahl explains the mt8 tables:
+comoment3 blade-cpp 110 → 87 ms (1.26x on 8 threads) while the experts reach 4–5 ms;
+pairkernel 77 → 57 ms while the experts reach 6 ms; even antisym (small checksum share)
+widens from a 2.4x to a 3.0x loss.
+
+**The matched-permission rule (README §2/§3) says the two sides should be symmetric.**
+Options:
+
+- **(A) Every arm threads preparation and checksum where the language allows.** Blade: a
+  `where omp` licence on the generator map's outer level and on the checksum fold / nest
+  (README §7.4 spellings; the per-row checksum nest's outer `method_for(range<I>)` takes
+  `omp(i: 1)`, the input sum a licensed fold). Consequences: the four group-A Blade
+  sources change (blade-A), the smoke evidence resets (README §6 gate), and the mt8
+  group-A blocks (and group B where a checksum is unthreaded) are re-run; the serial
+  regimes are unaffected (a threading licence is inert there). This is the option the
+  matched-permission rule implies and the one that makes the mt8 ratios a kernel
+  comparison.
+- **(B) No arm threads preparation or checksum.** Fortran removes the pragmas from the
+  generator and checksum loops (FORT); Blade unchanged. Consequences: Fortran sources
+  change, smoke resets, every mt8 block re-runs; the mt8 numbers then measure the kernel's
+  threading alone, at the cost of Amdahl capping every arm equally (the serial phases are
+  40–60% of the small kernels' regions).
+- **(C) Keep as measured, labelled.** The current tables stand with the "serial checksum
+  included" label and the attribution column; the mt8 group-A ratios are then explicitly
+  NOT a like-for-like threading comparison and the write-up says so wherever they appear.
+
+The architect's recommendation is (A): it is what README §2's rule already says, it
+exercises the compiler's own licence mechanism (the suite's thesis), and it isolates G1 /
+G3 as the remaining mt8 losses instead of hiding them behind Amdahl. Until decided, the
+mt8 group-A numbers are presented under (C).
+
+### 12.2 The 3x-running-median abort on a single isolated excursion (DECIDED: B)
+
+**Finding.** The saxpy mt8 block was lost to one run (blade-cpp-inputonly, 43 ms, 7.0x its
+6 ms running median) in round 7 of 21, with both controls normal and all other runs in the
+round at 5–11 ms. The rule (README §6, charter 2.5) exists to stop a thermal event; this was
+a single-process stall of the smallest binary, and the rule cannot tell the two apart.
+
+Options (the harness owner makes any change):
+
+- **(A) Keep the rule as is** (safest for the host; costs a block per isolated stall; the
+  block is re-run).
+- **(B) Isolated-excursion tolerance:** a single run above 3x the running median, with
+  both controls normal in that round and no second excursion in the same block, is
+  DROPPED AND RECORDED (the sample stays in the bundle, marked, excluded from inference;
+  the planned-cell manifest says so); the block aborts on a second excursion or on any
+  control excursion. Consequences: a `harness/run.py` change, a README §6 sentence, and the
+  bundle schema gains an `excluded_excursion` mark; no source changes.
+
+The architect's recommendation is (B) with the record kept visible: the rule's purpose
+(thermal safety) is served by the control check, and a 43 ms stall of a 6 ms process is
+not a thermal signature. Either way, saxpy mt8 is re-run.
 
 Until the blas session lands:
 

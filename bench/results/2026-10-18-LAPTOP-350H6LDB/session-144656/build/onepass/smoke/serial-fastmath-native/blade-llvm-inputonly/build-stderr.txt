@@ -1,0 +1,3 @@
+[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\onepass_inputonly-f400c91b-23500-e0d0a96a\onepass_inputonly.ll
+[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-144656\build\onepass\smoke\serial-fastmath-native\blade-llvm-inputonly\onepass_inputonly.exe
+[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\onepass_inputonly-f400c91b-23500-e0d0a96a

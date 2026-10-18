@@ -1,0 +1,3 @@
+[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\onepass-feb702be-6060-7ea9b859\onepass.ll
+[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-144656\build\onepass\smoke\serial-fastmath-native\blade-llvm\onepass.exe
+[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\onepass-feb702be-6060-7ea9b859

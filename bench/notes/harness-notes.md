@@ -124,6 +124,33 @@ Harness v2 (after the method review; 2026-10-17 evening):
 
 ## 5. Open items / pending other agents
 
+- 2026-10-18 (user): cooldown floors lowered to 0.5 s / 3 s (defaults = floors) and a 60 s
+  between-session cooldown added (bench waits at start until 60 s after the previous bench
+  session ended). AC check, excursion rule, serial process discipline unchanged; 64 MB and
+  2.5 s kept for the frozen sizes, documented as hygiene limits that may be raised later.
+  Cooldowns live in run.py and are NOT in the smoke-evidence key; a running session keeps the
+  values it started with.
+
+- 2026-10-18: input_checksum agreement is now relative error <= 1e-14 (was equality of the
+  15-digit renderings). Earlier pairkernel passes were genuine but fragile: the pin's double is
+  73.6780804120935499668..., which `%.15g` (Python and ucrt, both correctly rounded) renders
+  ...935, the same text as Blade's sum (6.8e-16 lower, rel err 7.7e-16 in every recorded
+  smoke). A pin or sum one ulp higher would have rendered ...936 and spuriously failed.
+
+- 2026-10-18 (user-approved): the 3x rule now distinguishes isolated excursions. Trigger seen:
+  mt8-licensed saxpy blade-cpp-inputonly ran 43 ms once (7x its 6 ms median; the rest of the
+  round and both controls normal) and aborted the session. Now the first arm excursion in a
+  block is dropped from inference and recorded (`excursion_dropped`, block `excursions`,
+  summary note, session warning); a second one in the block, any control excursion, or AC
+  loss aborts. RoundBootstrap uses the union of rounds so a dropped sample removes only that
+  arm's round. Unit-checked (drop, second-excursion abort, control abort, bootstrap with a
+  missing round).
+- Smoke-evidence keying (answer to the coordinator): per (kernel, regime, arm) on that arm's
+  source hash (+ bench_support.f90 for Fortran, Blade.dll for Blade) + the build-relevant
+  config subset. The group-A Blade source changes stale only those kernels' Blade arms (and
+  Blade twins if `inputonly.blade` changes); Fortran arms and the other kernels stay valid.
+  run.py is not keyed, so this harness change needs no re-smoke.
+
 - FP-default flip (5f4b33ea) applied to config.json: licensed = no Blade fp knob, repro = `BLADE_FP_REPRO=1 BLADE_FP_REASSOC=0`, fastmath = as licensed; repro-mt8 Blade parallelism reads "threaded maps, serial folds"; `plan_fold_form` recorded. Not yet exercised: waiting for the rebuilt Blade.exe (all smoke evidence goes stale with the new Blade.dll hash).
 
 - Runner smoke fixes (2026-10-17): checkpoint replace retried (10 x 50 ms linear backoff) and non-fatal; smoke/check fail on unbuilt arms unless `--allow-unbuilt`; gram blas arms restricted to blade-cpp/blade-llvm/gfortran-expert/ifx-expert; mt8 BLAS arms timed with parallelism "library threads (OPENBLAS_NUM_THREADS=8)"; Fortran blas arms must import libopenblas.dll. Run-time stderr is the only stream the `error` rule reads (compile warnings such as ifx #5474 go to the build record).

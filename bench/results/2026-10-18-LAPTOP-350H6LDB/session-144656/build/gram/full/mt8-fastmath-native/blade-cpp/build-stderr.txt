@@ -1,0 +1,3 @@
+[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\gram-9c31df25-26476-8fe88ecb\gram.cpp
+[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-144656\build\gram\full\mt8-fastmath-native\blade-cpp\gram.exe
+[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\gram-9c31df25-26476-8fe88ecb

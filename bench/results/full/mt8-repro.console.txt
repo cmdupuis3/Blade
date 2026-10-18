@@ -1,0 +1,852 @@
+[14:00:38.313 +    0.0s] bench: 11 kernel(s): antisym, comoment3, gram, pairkernel, fusedchain, maskagg, onepass, recur, stencil, dot, saxpy; size full
+[14:00:38.390 +    0.1s] fingerprinting the machine
+[14:00:40.332 +    2.0s] power: ac, max processor state AC 100%, boost mode AC None, Power Scheme GUID: 64a64f24-65b9-4b56-befd-5ec1eaced9b3  (Silent)
+[14:00:43.014 +    4.7s] control compute: recur/gfortran-expert/serial-repro-native/full
+[14:00:43.855 +    5.6s] control memory: saxpy/gfortran-expert/serial-repro-native/control
+[14:00:44.739 +    6.5s] antisym mt8-repro-native: serial counterpart not run in this session; validating it at smoke size
+[14:00:44.739 +    6.5s] build antisym serial-repro-native smoke blade-llvm
+[14:00:48.302 +   10.0s]   -> ok (2.0s)
+[14:00:48.302 +   10.0s] build antisym serial-repro-native smoke blade-cpp
+[14:00:53.217 +   14.9s]   -> ok (3.2s)
+[14:00:53.217 +   14.9s] build antisym serial-repro-native smoke gfortran-natural
+[14:00:53.999 +   15.7s]   -> ok (0.7s)
+[14:00:53.999 +   15.7s] build antisym serial-repro-native smoke gfortran-expert
+[14:00:54.951 +   16.7s]   -> ok (0.9s)
+[14:00:54.951 +   16.7s] build antisym serial-repro-native smoke ifx-natural
+[14:00:57.439 +   19.2s]   -> ok (2.3s)
+[14:00:57.439 +   19.2s] build antisym serial-repro-native smoke ifx-expert
+[14:01:00.461 +   22.2s]   -> ok (2.9s)
+[14:01:00.508 +   22.2s]   blade-llvm: ok t=9.5e-06s checksum=390.607241954913 input=239.513063936029 peakWS=4.5MB
+[14:01:01.062 +   22.8s]   blade-cpp: ok t=7.5e-06s checksum=390.607241954913 input=239.513063936029 peakWS=5.3MB
+[14:01:01.617 +   23.3s]   gfortran-natural: ok t=1.13e-05s checksum=3.9060724195491298E+002 input=2.3951306393602863E+002 peakWS=5.2MB
+[14:01:02.172 +   23.9s]   gfortran-expert: ok t=1.3e-05s checksum=3.9060724195491275E+002 input=2.3951306393602863E+002 peakWS=5.2MB
+[14:01:02.738 +   24.5s]   ifx-natural: ok t=2.06e-05s checksum=3.9060724195491304E+002 input=2.3951306393602863E+002 peakWS=5.0MB
+[14:01:03.303 +   25.0s]   ifx-expert: ok t=2.99e-05s checksum=3.9060724195491275E+002 input=2.3951306393602863E+002 peakWS=5.0MB
+[14:01:03.809 +   25.5s] build antisym mt8-repro-native full blade-llvm
+[14:01:07.354 +   29.1s]   -> serial-only: LLVM lane has no OpenMP (1.9s)
+[14:01:07.354 +   29.1s] build antisym mt8-repro-native full blade-cpp
+[14:01:11.952 +   33.7s]   -> ok (2.9s)
+[14:01:11.952 +   33.7s] build antisym mt8-repro-native full gfortran-natural
+[14:01:12.748 +   34.5s]   -> ok (0.7s)
+[14:01:12.748 +   34.5s] build antisym mt8-repro-native full gfortran-expert
+[14:01:13.760 +   35.5s]   -> ok (0.9s)
+[14:01:13.760 +   35.5s] build antisym mt8-repro-native full ifx-natural
+[14:01:16.269 +   38.0s]   -> ok (2.3s)
+[14:01:16.269 +   38.0s] build antisym mt8-repro-native full ifx-expert
+[14:01:18.782 +   40.5s]   -> ok (2.4s)
+[14:01:18.899 +   40.6s]   blade-cpp: ok t=0.06324s checksum=57760462.7106089 input=481149.43540513 peakWS=18.7MB
+[14:01:19.567 +   41.3s]   gfortran-natural: ok t=0.1134s checksum=5.7760462710610434E+007 input=4.8114943540512957E+005 peakWS=23.8MB
+[14:01:20.139 +   41.9s]   gfortran-expert: ok t=0.01047s checksum=5.7760462710608676E+007 input=4.8114943540512957E+005 peakWS=33.1MB
+[14:01:20.762 +   42.5s]   ifx-natural: ok t=0.05432s checksum=5.7760462710610464E+007 input=4.8114943540512957E+005 peakWS=25.4MB
+[14:01:21.348 +   43.1s]   ifx-expert: ok t=0.01039s checksum=5.7760462710608676E+007 input=4.8114943540512957E+005 peakWS=34.7MB
+[14:01:21.851 +   43.6s] antisym/mt8-repro-native: 7 rounds x 5 arms + 2 control(s) (minimum 7 (mt8)); ratio reference blade-cpp
+[14:01:25.854 +   47.6s]   round 1/7: [compute]=12.7ms blade-cpp=61.37ms gfortran-natural=104.3ms ifx-expert=9.526ms ifx-natural=77.02ms [memory]=5.779ms gfortran-expert=9.572ms
+[14:01:29.825 +   51.5s]   round 2/7: gfortran-natural=108ms [compute]=12.65ms blade-cpp=60.6ms ifx-natural=48.5ms gfortran-expert=9.358ms [memory]=5.559ms ifx-expert=10.11ms
+[14:01:33.807 +   55.5s]   round 3/7: ifx-expert=9.694ms ifx-natural=48.33ms [compute]=12.73ms blade-cpp=60.7ms [memory]=5.173ms gfortran-expert=9.457ms gfortran-natural=111.2ms
+[14:01:37.810 +   59.5s]   round 4/7: gfortran-expert=9.231ms [compute]=12.69ms ifx-expert=10.03ms [memory]=5.193ms blade-cpp=60.7ms ifx-natural=69.71ms gfortran-natural=109.8ms
+[14:01:41.808 +   63.5s]   round 5/7: [compute]=12.66ms gfortran-natural=102.9ms ifx-expert=9.841ms [memory]=5.268ms gfortran-expert=9.114ms ifx-natural=66.49ms blade-cpp=62.12ms
+[14:01:45.792 +   67.5s]   round 6/7: [compute]=12.76ms [memory]=5.264ms ifx-natural=52.74ms gfortran-natural=106.7ms gfortran-expert=9.226ms blade-cpp=63.65ms ifx-expert=10.52ms
+[14:01:49.773 +   71.5s]   round 7/7: ifx-natural=59.18ms ifx-expert=9.716ms blade-cpp=60.21ms gfortran-expert=9.629ms [compute]=12.75ms [memory]=5.441ms gfortran-natural=101.1ms
+[14:01:52.943 +   74.7s] comoment3 mt8-repro-native: serial counterpart not run in this session; validating it at smoke size
+[14:01:52.943 +   74.7s] build comoment3 serial-repro-native smoke blade-llvm
+[14:01:56.401 +   78.1s]   -> ok (1.9s)
+[14:01:56.401 +   78.1s] build comoment3 serial-repro-native smoke blade-cpp
+[14:02:00.853 +   82.6s]   -> ok (2.9s)
+[14:02:00.853 +   82.6s] build comoment3 serial-repro-native smoke gfortran-natural
+[14:02:01.641 +   83.4s]   -> ok (0.7s)
+[14:02:01.641 +   83.4s] build comoment3 serial-repro-native smoke gfortran-expert
+[14:02:02.564 +   84.3s]   -> ok (0.8s)
+[14:02:02.564 +   84.3s] build comoment3 serial-repro-native smoke ifx-natural
+[14:02:05.024 +   86.7s]   -> ok (2.3s)
+[14:02:05.024 +   86.7s] build comoment3 serial-repro-native smoke ifx-expert
+[14:02:07.557 +   89.3s]   -> ok (2.4s)
+[14:02:07.606 +   89.3s]   blade-llvm: ok t=1.33e-05s checksum=45.0076154756788 input=71.5238295937888 peakWS=4.5MB
+[14:02:08.161 +   89.9s]   blade-cpp: ok t=3.45e-05s checksum=45.0076154756788 input=71.5238295937888 peakWS=5.3MB
+[14:02:08.714 +   90.4s]   gfortran-natural: ok t=1.83e-05s checksum=4.5007615475678719E+001 input=7.1523829593788832E+001 peakWS=5.3MB
+[14:02:09.273 +   91.0s]   gfortran-expert: ok t=1.38e-05s checksum=4.5007615475678826E+001 input=7.1523829593788832E+001 peakWS=5.2MB
+[14:02:09.841 +   91.6s]   ifx-natural: ok t=3.48e-05s checksum=4.5007615475678719E+001 input=7.1523829593788832E+001 peakWS=5.0MB
+[14:02:10.411 +   92.1s]   ifx-expert: ok t=1.94e-05s checksum=4.5007615475678826E+001 input=7.1523829593788832E+001 peakWS=5.0MB
+[14:02:10.919 +   92.6s] build comoment3 mt8-repro-native full blade-llvm
+[14:02:14.362 +   96.1s]   -> serial-only: LLVM lane has no OpenMP (1.9s)
+[14:02:14.362 +   96.1s] build comoment3 mt8-repro-native full blade-cpp
+[14:02:18.843 +  100.6s]   -> ok (2.9s)
+[14:02:18.843 +  100.6s] build comoment3 mt8-repro-native full gfortran-natural
+[14:02:19.616 +  101.3s]   -> ok (0.7s)
+[14:02:19.616 +  101.3s] build comoment3 mt8-repro-native full gfortran-expert
+[14:02:20.540 +  102.3s]   -> ok (0.9s)
+[14:02:20.540 +  102.3s] build comoment3 mt8-repro-native full ifx-natural
+[14:02:22.980 +  104.7s]   -> ok (2.3s)
+[14:02:22.980 +  104.7s] build comoment3 mt8-repro-native full ifx-expert
+[14:02:25.428 +  107.1s]   -> ok (2.3s)
+[14:02:25.576 +  107.3s]   blade-cpp: ok t=0.09217s checksum=80611.4613583875 input=17220.9964465201 peakWS=12.6MB
+[14:02:26.232 +  107.9s]   gfortran-natural: ok t=0.09645s checksum=8.0611461358391098E+004 input=1.7220996446520090E+004 peakWS=43.9MB
+[14:02:26.794 +  108.5s]   gfortran-expert: ok t=0.005012s checksum=8.0611461358387445E+004 input=1.7220996446520090E+004 peakWS=14.5MB
+[14:02:27.511 +  109.2s]   ifx-natural: ok t=0.1343s checksum=8.0611461358391098E+004 input=1.7220996446520090E+004 peakWS=45.4MB
+[14:02:28.088 +  109.8s]   ifx-expert: ok t=0.004501s checksum=8.0611461358387503E+004 input=1.7220996446520090E+004 peakWS=15.6MB
+[14:02:28.593 +  110.3s] comoment3/mt8-repro-native: 7 rounds x 5 arms + 2 control(s) (minimum 7 (mt8)); ratio reference blade-cpp
+[14:02:32.660 +  114.4s]   round 1/7: gfortran-natural=93.18ms gfortran-expert=5.096ms [compute]=12.71ms ifx-natural=119.1ms [memory]=5.375ms ifx-expert=3.933ms blade-cpp=91.74ms
+[14:02:36.703 +  118.4s]   round 2/7: gfortran-expert=5.11ms [memory]=5.193ms blade-cpp=91.58ms [compute]=12.66ms ifx-natural=109.2ms gfortran-natural=88.28ms ifx-expert=3.974ms
+[14:02:40.751 +  122.5s]   round 3/7: gfortran-natural=83.56ms blade-cpp=91.76ms ifx-expert=4.021ms [compute]=12.68ms gfortran-expert=4.92ms [memory]=5.28ms ifx-natural=118.7ms
+[14:02:44.817 +  126.5s]   round 4/7: gfortran-natural=101.5ms ifx-expert=3.976ms [compute]=12.77ms blade-cpp=93.48ms [memory]=5.291ms ifx-natural=116.2ms gfortran-expert=5.269ms
+[14:02:48.904 +  130.6s]   round 5/7: ifx-expert=4.417ms ifx-natural=120.7ms [memory]=5.436ms gfortran-expert=5.11ms blade-cpp=92.68ms gfortran-natural=98.22ms [compute]=12.74ms
+[14:02:52.963 +  134.7s]   round 6/7: blade-cpp=93.89ms ifx-expert=4.914ms ifx-natural=114.4ms [memory]=5.203ms gfortran-expert=4.99ms [compute]=12.72ms gfortran-natural=98ms
+[14:02:57.012 +  138.7s]   round 7/7: gfortran-expert=4.697ms [memory]=5.197ms gfortran-natural=89.44ms ifx-expert=4.13ms [compute]=12.66ms ifx-natural=104.9ms blade-cpp=93.11ms
+[14:03:00.185 +  141.9s] gram mt8-repro-native: serial counterpart not run in this session; validating it at smoke size
+[14:03:00.185 +  141.9s] build gram serial-repro-native smoke blade-llvm
+[14:03:03.871 +  145.6s]   -> ok (2.0s)
+[14:03:03.871 +  145.6s] build gram serial-repro-native smoke blade-cpp
+[14:03:08.475 +  150.2s]   -> ok (2.9s)
+[14:03:08.475 +  150.2s] build gram serial-repro-native smoke gfortran-natural
+[14:03:09.229 +  150.9s]   -> ok (0.7s)
+[14:03:09.229 +  150.9s] build gram serial-repro-native smoke gfortran-expert
+[14:03:10.130 +  151.8s]   -> ok (0.8s)
+[14:03:10.130 +  151.8s] build gram serial-repro-native smoke ifx-natural
+[14:03:12.613 +  154.3s]   -> ok (2.3s)
+[14:03:12.613 +  154.3s] build gram serial-repro-native smoke ifx-expert
+[14:03:15.115 +  156.8s]   -> ok (2.4s)
+[14:03:15.165 +  156.9s]   blade-llvm: ok t=3.05e-05s checksum=237924.717413045 input=952.456307353452 peakWS=4.6MB
+[14:03:15.726 +  157.4s]   blade-cpp: ok t=5.6e-05s checksum=237924.717413045 input=952.456307353452 peakWS=5.3MB
+[14:03:16.282 +  158.0s]   gfortran-natural: ok t=4.92e-05s checksum=2.3792471741304471E+005 input=9.5245630735345185E+002 peakWS=5.3MB
+[14:03:16.840 +  158.6s]   gfortran-expert: ok t=3.82e-05s checksum=2.3792471741304459E+005 input=9.5245630735345185E+002 peakWS=5.2MB
+[14:03:17.407 +  159.1s]   ifx-natural: ok t=7.09e-05s checksum=2.3792471741304474E+005 input=9.5245630735345185E+002 peakWS=5.0MB
+[14:03:17.990 +  159.7s]   ifx-expert: ok t=6.7e-05s checksum=2.3792471741304459E+005 input=9.5245630735345185E+002 peakWS=5.0MB
+[14:03:18.503 +  160.2s] build gram mt8-repro-native full blade-llvm
+[14:03:22.009 +  163.7s]   -> serial-only: LLVM lane has no OpenMP (1.9s)
+[14:03:22.009 +  163.7s] build gram mt8-repro-native full blade-cpp
+[14:03:26.535 +  168.2s]   -> ok (2.9s)
+[14:03:26.535 +  168.2s] build gram mt8-repro-native full gfortran-natural
+[14:03:27.335 +  169.0s]   -> ok (0.7s)
+[14:03:27.335 +  169.0s] build gram mt8-repro-native full gfortran-expert
+[14:03:28.354 +  170.1s]   -> ok (1.0s)
+[14:03:28.354 +  170.1s] build gram mt8-repro-native full ifx-natural
+[14:03:30.854 +  172.6s]   -> ok (2.3s)
+[14:03:30.854 +  172.6s] build gram mt8-repro-native full ifx-expert
+[14:03:33.357 +  175.1s]   -> ok (2.3s)
+[14:03:33.558 +  175.3s]   blade-cpp: ok t=0.1431s checksum=160344246688.889 input=800824.015624528 peakWS=27.7MB
+[14:03:34.655 +  176.4s]   gfortran-natural: ok t=0.539s checksum=1.6034424668890063E+011 input=8.0082401562452829E+005 peakWS=37.3MB
+[14:03:35.233 +  176.9s]   gfortran-expert: ok t=0.01954s checksum=1.6034424668888977E+011 input=8.0082401562452829E+005 peakWS=52.1MB
+[14:03:36.436 +  178.1s]   ifx-natural: ok t=0.6297s checksum=1.6034424668890063E+011 input=8.0082401562452829E+005 peakWS=58.3MB
+[14:03:37.033 +  178.7s]   ifx-expert: ok t=0.0191s checksum=1.6034424668888974E+011 input=8.0082401562452829E+005 peakWS=53.7MB
+[14:03:37.539 +  179.3s] gram/mt8-repro-native: 7 rounds x 5 arms + 2 control(s) (minimum 7 (mt8)); ratio reference blade-cpp
+[14:03:42.852 +  184.6s]   round 1/7: [memory]=5.214ms blade-cpp=139.7ms gfortran-natural=756.6ms [compute]=12.89ms ifx-expert=20.62ms gfortran-expert=22.49ms ifx-natural=614.1ms
+[14:03:47.992 +  189.7s]   round 2/7: ifx-natural=621.6ms blade-cpp=137.6ms [memory]=5.261ms gfortran-natural=568.4ms ifx-expert=18.33ms [compute]=12.72ms gfortran-expert=19.62ms
+[14:03:53.270 +  195.0s]   round 3/7: ifx-expert=18.57ms blade-cpp=145.7ms ifx-natural=586.1ms gfortran-expert=21.03ms [compute]=12.73ms gfortran-natural=752.3ms [memory]=5.793ms
+[14:03:58.518 +  200.2s]   round 4/7: [compute]=13.21ms gfortran-natural=698.6ms [memory]=5.203ms ifx-natural=595.8ms ifx-expert=18.71ms blade-cpp=138.3ms gfortran-expert=19.72ms
+[14:04:03.622 +  205.3s]   round 5/7: gfortran-natural=557.1ms [compute]=12.56ms ifx-expert=18.56ms [memory]=5.187ms blade-cpp=136.6ms gfortran-expert=20.19ms ifx-natural=605.5ms
+[14:04:08.751 +  210.5s]   round 6/7: ifx-natural=609.6ms gfortran-expert=19.52ms ifx-expert=18.55ms [memory]=5.369ms [compute]=12.75ms gfortran-natural=582.5ms blade-cpp=137.1ms
+[14:04:14.007 +  215.7s]   round 7/7: [memory]=5.199ms gfortran-natural=704.7ms gfortran-expert=20.3ms ifx-natural=603.8ms ifx-expert=20.48ms blade-cpp=152.4ms [compute]=13.25ms
+[14:04:17.171 +  218.9s] pairkernel mt8-repro-native: serial counterpart not run in this session; validating it at smoke size
+[14:04:17.171 +  218.9s] build pairkernel serial-repro-native smoke blade-llvm
+[14:04:20.798 +  222.5s]   -> ok (2.0s)
+[14:04:20.798 +  222.5s] build pairkernel serial-repro-native smoke blade-cpp
+[14:04:25.323 +  227.0s]   -> ok (2.9s)
+[14:04:25.323 +  227.0s] build pairkernel serial-repro-native smoke gfortran-natural
+[14:04:26.073 +  227.8s]   -> ok (0.7s)
+[14:04:26.073 +  227.8s] build pairkernel serial-repro-native smoke gfortran-expert
+[14:04:26.823 +  228.5s]   -> ok (0.7s)
+[14:04:26.823 +  228.5s] build pairkernel serial-repro-native smoke ifx-natural
+[14:04:29.376 +  231.1s]   -> ok (2.4s)
+[14:04:29.376 +  231.1s] build pairkernel serial-repro-native smoke ifx-expert
+[14:04:31.755 +  233.5s]   -> ok (2.2s)
+[14:04:31.806 +  233.5s]   blade-llvm: ok t=2.39e-05s checksum=1051.80125396941 input=73.6780804120935 peakWS=4.6MB
+[14:04:32.367 +  234.1s]   blade-cpp: ok t=3.69e-05s checksum=1051.80125396941 input=73.6780804120935 peakWS=5.3MB
+[14:04:32.925 +  234.6s]   gfortran-natural: ok t=3.81e-05s checksum=1.0518012539694084E+003 input=7.3678080412093550E+001 peakWS=5.2MB
+[14:04:33.485 +  235.2s]   gfortran-expert: ok t=2.17e-05s checksum=1.0518012539694091E+003 input=7.3678080412093550E+001 peakWS=5.2MB
+[14:04:34.049 +  235.8s]   ifx-natural: ok t=5.2e-05s checksum=1.0518012539694084E+003 input=7.3678080412093550E+001 peakWS=5.0MB
+[14:04:34.618 +  236.3s]   ifx-expert: ok t=3.13e-05s checksum=1.0518012539694091E+003 input=7.3678080412093550E+001 peakWS=5.0MB
+[14:04:35.134 +  236.8s] build pairkernel mt8-repro-native full blade-llvm
+[14:04:38.618 +  240.3s]   -> serial-only: LLVM lane has no OpenMP (1.9s)
+[14:04:38.619 +  240.3s] build pairkernel mt8-repro-native full blade-cpp
+[14:04:43.115 +  244.8s]   -> ok (2.9s)
+[14:04:43.115 +  244.8s] build pairkernel mt8-repro-native full gfortran-natural
+[14:04:43.913 +  245.6s]   -> ok (0.7s)
+[14:04:43.913 +  245.6s] build pairkernel mt8-repro-native full gfortran-expert
+[14:04:44.739 +  246.5s]   -> ok (0.8s)
+[14:04:44.739 +  246.5s] build pairkernel mt8-repro-native full ifx-natural
+[14:04:47.264 +  249.0s]   -> ok (2.4s)
+[14:04:47.264 +  249.0s] build pairkernel mt8-repro-native full ifx-expert
+[14:04:49.571 +  251.3s]   -> ok (2.1s)
+[14:04:49.686 +  251.4s]   blade-cpp: ok t=0.05729s checksum=2266701.75185472 input=3746.87392394384 peakWS=29.7MB
+[14:04:50.261 +  252.0s]   gfortran-natural: ok t=0.01474s checksum=2.2667017518548477E+006 input=3.7468739239438437E+003 peakWS=53.3MB
+[14:04:50.828 +  252.5s]   gfortran-expert: ok t=0.006403s checksum=2.2667017518547117E+006 input=3.7468739239438437E+003 peakWS=29.5MB
+[14:04:51.424 +  253.1s]   ifx-natural: ok t=0.01782s checksum=2.2667017518548477E+006 input=3.7468739239438437E+003 peakWS=54.8MB
+[14:04:52.008 +  253.7s]   ifx-expert: ok t=0.006992s checksum=2.2667017518547112E+006 input=3.7468739239438437E+003 peakWS=30.9MB
+[14:04:52.516 +  254.2s] pairkernel/mt8-repro-native: 21 rounds x 5 arms + 2 control(s) (minimum 21 (memory-bound: median warm-up < 50 ms)); ratio reference blade-cpp
+[14:04:56.384 +  258.1s]   round 1/21: [compute]=13.41ms [memory]=5.248ms gfortran-natural=15.97ms blade-cpp=56.51ms gfortran-expert=6.898ms ifx-expert=5.925ms ifx-natural=14.99ms
+[14:05:00.265 +  262.0s]   round 2/21: ifx-natural=17.44ms [compute]=12.62ms blade-cpp=62.33ms ifx-expert=6.057ms [memory]=5.44ms gfortran-expert=6.564ms gfortran-natural=14.52ms
+[14:05:04.141 +  265.9s]   round 3/21: [compute]=12.6ms [memory]=5.152ms gfortran-expert=6.143ms ifx-expert=6.005ms gfortran-natural=16.06ms blade-cpp=59.53ms ifx-natural=16.63ms
+[14:05:08.013 +  269.7s]   round 4/21: gfortran-expert=6.564ms ifx-expert=6.125ms [memory]=5.197ms ifx-natural=15.39ms gfortran-natural=18.16ms [compute]=12.69ms blade-cpp=55.74ms
+[14:05:11.886 +  273.6s]   round 5/21: ifx-expert=6.373ms [compute]=12.99ms gfortran-natural=17.94ms [memory]=5.531ms gfortran-expert=5.991ms ifx-natural=17.79ms blade-cpp=54.77ms
+[14:05:15.757 +  277.5s]   round 6/21: gfortran-expert=6.421ms [memory]=5.323ms ifx-natural=15.78ms gfortran-natural=13.72ms [compute]=12.83ms ifx-expert=6.141ms blade-cpp=55.77ms
+[14:05:19.636 +  281.3s]   round 7/21: [compute]=12.73ms gfortran-natural=14.23ms ifx-expert=6.302ms ifx-natural=18.93ms gfortran-expert=6.165ms [memory]=5.166ms blade-cpp=59.32ms
+[14:05:23.506 +  285.2s]   round 8/21: gfortran-natural=16.39ms gfortran-expert=7.067ms ifx-expert=6.213ms [compute]=12.68ms blade-cpp=54.03ms ifx-natural=17.49ms [memory]=5.176ms
+[14:05:27.368 +  289.1s]   round 9/21: blade-cpp=54.95ms ifx-expert=6.613ms gfortran-expert=6.117ms ifx-natural=17.21ms [memory]=5.427ms [compute]=12.72ms gfortran-natural=13.36ms
+[14:05:31.235 +  292.9s]   round 10/21: gfortran-expert=6.177ms [compute]=12.62ms gfortran-natural=13.61ms blade-cpp=55.22ms ifx-expert=6.193ms ifx-natural=15.23ms [memory]=5.135ms
+[14:05:35.104 +  296.8s]   round 11/21: ifx-natural=18.35ms [compute]=12.95ms ifx-expert=5.954ms gfortran-expert=6.322ms [memory]=5.268ms blade-cpp=56.08ms gfortran-natural=13.5ms
+[14:05:39.002 +  300.7s]   round 12/21: blade-cpp=56.82ms [compute]=12.64ms gfortran-natural=14.92ms ifx-natural=15.51ms gfortran-expert=6.114ms ifx-expert=6.236ms [memory]=6.752ms
+[14:05:42.866 +  304.6s]   round 13/21: [compute]=12.54ms ifx-expert=6.069ms [memory]=5.136ms ifx-natural=14.74ms blade-cpp=56.27ms gfortran-expert=6.175ms gfortran-natural=13.48ms
+[14:05:46.735 +  308.4s]   round 14/21: gfortran-expert=6.127ms blade-cpp=54.94ms ifx-expert=6.533ms gfortran-natural=14.24ms [compute]=12.66ms [memory]=5.156ms ifx-natural=15.67ms
+[14:05:50.611 +  312.3s]   round 15/21: gfortran-expert=6.305ms ifx-expert=6.114ms [memory]=5.588ms [compute]=12.79ms blade-cpp=54.29ms gfortran-natural=13.62ms ifx-natural=15.48ms
+[14:05:54.488 +  316.2s]   round 16/21: ifx-natural=16.12ms ifx-expert=6.68ms gfortran-expert=6.022ms blade-cpp=56.19ms [memory]=5.196ms [compute]=12.76ms gfortran-natural=14.03ms
+[14:05:58.357 +  320.1s]   round 17/21: ifx-expert=6.407ms gfortran-natural=14.42ms blade-cpp=54.47ms [memory]=6.036ms ifx-natural=16.75ms [compute]=12.59ms gfortran-expert=6.336ms
+[14:06:02.229 +  323.9s]   round 18/21: gfortran-natural=13.54ms ifx-natural=18.78ms [compute]=12.77ms gfortran-expert=6.202ms ifx-expert=6.418ms [memory]=5.144ms blade-cpp=56.6ms
+[14:06:06.143 +  327.9s]   round 19/21: blade-cpp=74.59ms [memory]=5.245ms ifx-natural=15.33ms gfortran-expert=6.115ms gfortran-natural=14.43ms [compute]=12.75ms ifx-expert=7.182ms
+[14:06:10.019 +  331.7s]   round 20/21: gfortran-expert=7.913ms gfortran-natural=13.51ms blade-cpp=57.41ms ifx-expert=6.066ms [memory]=5.23ms ifx-natural=17.82ms [compute]=13.63ms
+[14:06:13.930 +  335.6s]   round 21/21: [compute]=13.54ms gfortran-natural=20.27ms ifx-expert=7.225ms gfortran-expert=7.371ms blade-cpp=68.68ms ifx-natural=21.32ms [memory]=7.41ms
+[14:06:17.186 +  338.9s] fusedchain mt8-repro-native: serial counterpart not run in this session; validating it at smoke size
+[14:06:17.186 +  338.9s] build fusedchain serial-repro-native smoke blade-llvm
+[14:06:20.608 +  342.3s]   -> ok (1.9s)
+[14:06:20.608 +  342.3s] build fusedchain serial-repro-native smoke blade-cpp
+[14:06:24.885 +  346.6s]   -> ok (2.7s)
+[14:06:24.885 +  346.6s] build fusedchain serial-repro-native smoke gfortran-natural
+[14:06:25.643 +  347.4s]   -> ok (0.7s)
+[14:06:25.643 +  347.4s] build fusedchain serial-repro-native smoke gfortran-expert
+[14:06:26.370 +  348.1s]   -> ok (0.6s)
+[14:06:26.370 +  348.1s] build fusedchain serial-repro-native smoke ifx-natural
+[14:06:28.810 +  350.5s]   -> ok (2.3s)
+[14:06:28.810 +  350.5s] build fusedchain serial-repro-native smoke ifx-expert
+[14:06:31.220 +  352.9s]   -> ok (2.2s)
+[14:06:31.220 +  352.9s] build fusedchain serial-repro-native smoke blade-llvm-inputonly
+[14:06:34.704 +  356.4s]   -> ok (2.0s)
+[14:06:34.704 +  356.4s] build fusedchain serial-repro-native smoke blade-cpp-inputonly
+[14:06:39.055 +  360.8s]   -> ok (2.7s)
+[14:06:39.055 +  360.8s] build fusedchain serial-repro-native smoke gfortran-natural-inputonly
+[14:06:39.807 +  361.5s]   -> ok (0.7s)
+[14:06:39.807 +  361.5s] build fusedchain serial-repro-native smoke gfortran-expert-inputonly
+[14:06:40.533 +  362.2s]   -> ok (0.7s)
+[14:06:40.533 +  362.2s] build fusedchain serial-repro-native smoke ifx-natural-inputonly
+[14:06:43.023 +  364.7s]   -> ok (2.3s)
+[14:06:43.023 +  364.7s] build fusedchain serial-repro-native smoke ifx-expert-inputonly
+[14:06:45.343 +  367.1s]   -> ok (2.2s)
+[14:06:45.406 +  367.1s]   blade-llvm: ok t=0.0001023s checksum=46.304649681954 input=10027.0169770545 peakWS=4.7MB
+[14:06:45.969 +  367.7s]   blade-cpp: ok t=0.0001079s checksum=46.304649681954 input=10027.0169770545 peakWS=5.4MB
+[14:06:46.533 +  368.2s]   gfortran-natural: ok t=0.0002091s checksum=4.6304649681954004E+001 input=1.0027016977054533E+004 peakWS=5.6MB
+[14:06:47.094 +  368.8s]   gfortran-expert: ok t=9.05e-05s checksum=4.6304649681954004E+001 input=1.0027016977054533E+004 peakWS=5.3MB
+[14:06:47.669 +  369.4s]   ifx-natural: ok t=0.0002284s checksum=4.6304649681953990E+001 input=1.0027016977054533E+004 peakWS=5.3MB
+[14:06:48.244 +  370.0s]   ifx-expert: ok t=7.45e-05s checksum=4.6304649681953990E+001 input=1.0027016977054533E+004 peakWS=5.0MB
+[14:06:48.812 +  370.5s]   blade-llvm-inputonly: ok t=5.68e-05s checksum=0.0 input=10027.0169770545 peakWS=4.7MB
+[14:06:49.376 +  371.1s]   blade-cpp-inputonly: ok t=9.32e-05s checksum=0.0 input=10027.0169770545 peakWS=5.4MB
+[14:06:49.939 +  371.7s]   gfortran-natural-inputonly: ok t=7.23e-05s checksum=0.0000000000000000E+000 input=1.0027016977054533E+004 peakWS=5.3MB
+[14:06:50.502 +  372.2s]   gfortran-expert-inputonly: ok t=8.49e-05s checksum=0.0000000000000000E+000 input=1.0027016977054533E+004 peakWS=5.3MB
+[14:06:51.078 +  372.8s]   ifx-natural-inputonly: ok t=7.62e-05s checksum=0.0000000000000000E+000 input=1.0027016977054533E+004 peakWS=5.0MB
+[14:06:51.650 +  373.4s]   ifx-expert-inputonly: ok t=6.62e-05s checksum=0.0000000000000000E+000 input=1.0027016977054533E+004 peakWS=5.0MB
+[14:06:52.169 +  373.9s] build fusedchain mt8-repro-native full blade-llvm
+[14:06:55.606 +  377.3s]   -> serial-only: LLVM lane has no OpenMP (1.9s)
+[14:06:55.606 +  377.3s] build fusedchain mt8-repro-native full blade-cpp
+[14:06:59.737 +  381.5s]   -> ok (2.6s)
+[14:06:59.737 +  381.5s] build fusedchain mt8-repro-native full gfortran-natural
+[14:07:00.534 +  382.2s]   -> ok (0.7s)
+[14:07:00.534 +  382.2s] build fusedchain mt8-repro-native full gfortran-expert
+[14:07:01.288 +  383.0s]   -> ok (0.7s)
+[14:07:01.288 +  383.0s] build fusedchain mt8-repro-native full ifx-natural
+[14:07:03.730 +  385.4s]   -> ok (2.3s)
+[14:07:03.730 +  385.4s] build fusedchain mt8-repro-native full ifx-expert
+[14:07:05.953 +  387.7s]   -> ok (2.1s)
+[14:07:05.953 +  387.7s] build fusedchain mt8-repro-native full blade-llvm-inputonly
+[14:07:09.119 +  390.8s]   -> serial-only: LLVM lane has no OpenMP (1.8s)
+[14:07:09.119 +  390.8s] build fusedchain mt8-repro-native full blade-cpp-inputonly
+[14:07:13.051 +  394.8s]   -> ok (2.5s)
+[14:07:13.051 +  394.8s] build fusedchain mt8-repro-native full gfortran-natural-inputonly
+[14:07:13.772 +  395.5s]   -> ok (0.7s)
+[14:07:13.772 +  395.5s] build fusedchain mt8-repro-native full gfortran-expert-inputonly
+[14:07:14.478 +  396.2s]   -> ok (0.6s)
+[14:07:14.478 +  396.2s] build fusedchain mt8-repro-native full ifx-natural-inputonly
+[14:07:16.764 +  398.5s]   -> ok (2.1s)
+[14:07:16.764 +  398.5s] build fusedchain mt8-repro-native full ifx-expert-inputonly
+[14:07:18.968 +  400.7s]   -> ok (2.0s)
+[14:07:19.031 +  400.7s]   blade-cpp: ok t=0.005597s checksum=4640.89121018634 input=999516.086692066 peakWS=20.9MB
+[14:07:19.606 +  401.3s]   gfortran-natural: ok t=0.0111s checksum=4.6408912101863125E+003 input=9.9951608669206640E+005 peakWS=66.5MB
+[14:07:20.173 +  401.9s]   gfortran-expert: ok t=0.004233s checksum=4.6408912101863125E+003 input=9.9951608669206640E+005 peakWS=20.7MB
+[14:07:20.758 +  402.5s]   ifx-natural: ok t=0.01189s checksum=4.6408912101863116E+003 input=9.9951608669206640E+005 peakWS=68.2MB
+[14:07:21.338 +  403.1s]   ifx-expert: ok t=0.004722s checksum=4.6408912101863116E+003 input=9.9951608669206640E+005 peakWS=22.3MB
+[14:07:21.905 +  403.6s]   blade-cpp-inputonly: ok t=0.003871s checksum=0.0 input=999516.086692066 peakWS=21.0MB
+[14:07:22.474 +  404.2s]   gfortran-natural-inputonly: ok t=0.003687s checksum=0.0000000000000000E+000 input=9.9951608669206640E+005 peakWS=20.7MB
+[14:07:23.042 +  404.8s]   gfortran-expert-inputonly: ok t=0.003414s checksum=0.0000000000000000E+000 input=9.9951608669206640E+005 peakWS=20.7MB
+[14:07:23.623 +  405.3s]   ifx-natural-inputonly: ok t=0.00422s checksum=0.0000000000000000E+000 input=9.9951608669206640E+005 peakWS=22.3MB
+[14:07:24.208 +  405.9s]   ifx-expert-inputonly: ok t=0.005802s checksum=0.0000000000000000E+000 input=9.9951608669206640E+005 peakWS=22.2MB
+[14:07:24.720 +  406.4s] fusedchain/mt8-repro-native: 21 rounds x 10 arms + 2 control(s) (minimum 21 (memory-bound: median warm-up < 50 ms)); ratio reference blade-cpp
+[14:07:31.268 +  413.0s]   round 1/21: ifx-expert-inputonly=4.076ms gfortran-natural=11.46ms gfortran-expert-inputonly=3.526ms blade-cpp-inputonly=3.855ms blade-cpp=6.64ms ifx-expert=5.759ms [compute]=13.57ms ifx-natural=11.71ms gfortran-expert=4.073ms [memory]=5.638ms ifx-natural-inputonly=4.085ms gfortran-natural-inputonly=3.482ms
+[14:07:37.789 +  419.5s]   round 2/21: [compute]=12.64ms gfortran-expert-inputonly=3.714ms gfortran-natural=11.41ms ifx-natural-inputonly=3.809ms blade-cpp-inputonly=4.104ms gfortran-natural-inputonly=3.735ms ifx-expert=4.433ms gfortran-expert=4.478ms blade-cpp=5.887ms ifx-natural=12.31ms ifx-expert-inputonly=4.125ms [memory]=5.187ms
+[14:07:44.313 +  426.0s]   round 3/21: ifx-natural=11.49ms ifx-natural-inputonly=3.933ms [memory]=5.181ms blade-cpp=5.456ms blade-cpp-inputonly=4.071ms gfortran-expert=4.057ms gfortran-natural=11.89ms gfortran-expert-inputonly=3.506ms ifx-expert-inputonly=3.967ms [compute]=13.06ms ifx-expert=4.441ms gfortran-natural-inputonly=3.655ms
+[14:07:50.839 +  432.6s]   round 4/21: gfortran-natural-inputonly=3.861ms gfortran-expert-inputonly=3.685ms [memory]=5.164ms blade-cpp-inputonly=3.978ms gfortran-expert=4.321ms blade-cpp=5.569ms ifx-expert=4.612ms ifx-natural=11.35ms [compute]=12.57ms ifx-expert-inputonly=3.912ms gfortran-natural=11.81ms ifx-natural-inputonly=4.007ms
+[14:07:57.381 +  439.1s]   round 5/21: blade-cpp=5.422ms ifx-expert-inputonly=3.891ms [memory]=5.054ms gfortran-expert=4.267ms blade-cpp-inputonly=4.068ms gfortran-expert-inputonly=3.344ms gfortran-natural-inputonly=3.512ms ifx-natural=11.68ms [compute]=12.65ms ifx-expert=4.642ms gfortran-natural=11.18ms ifx-natural-inputonly=3.972ms
+[14:08:03.903 +  445.6s]   round 6/21: gfortran-expert-inputonly=3.458ms ifx-expert-inputonly=3.952ms [memory]=5.702ms [compute]=12.77ms blade-cpp-inputonly=4.914ms ifx-expert=4.866ms blade-cpp=5.424ms gfortran-natural=11.22ms gfortran-natural-inputonly=4.051ms ifx-natural-inputonly=4.117ms gfortran-expert=4.479ms ifx-natural=11.49ms
+[14:08:10.435 +  452.1s]   round 7/21: gfortran-natural-inputonly=3.735ms ifx-natural-inputonly=3.959ms [compute]=13.13ms [memory]=5.29ms blade-cpp=5.457ms gfortran-natural=11.2ms ifx-natural=11.39ms ifx-expert=5.398ms gfortran-expert=4.7ms ifx-expert-inputonly=4.158ms blade-cpp-inputonly=4.387ms gfortran-expert-inputonly=4.393ms
+[14:08:16.962 +  458.7s]   round 8/21: [memory]=5.255ms gfortran-expert-inputonly=3.915ms gfortran-natural=10.92ms [compute]=12.72ms ifx-natural=11.69ms gfortran-natural-inputonly=3.421ms ifx-expert-inputonly=3.955ms blade-cpp=6.553ms gfortran-expert=4.088ms ifx-expert=4.555ms blade-cpp-inputonly=3.995ms ifx-natural-inputonly=4.147ms
+[14:08:23.497 +  465.2s]   round 9/21: gfortran-natural=11.87ms [memory]=5.282ms ifx-natural-inputonly=3.99ms gfortran-expert-inputonly=3.399ms [compute]=12.6ms ifx-expert-inputonly=3.976ms ifx-expert=4.544ms gfortran-expert=4.131ms ifx-natural=11.64ms gfortran-natural-inputonly=3.383ms blade-cpp=5.559ms blade-cpp-inputonly=4.012ms
+[14:08:30.024 +  471.7s]   round 10/21: gfortran-expert=4.165ms ifx-natural=11.06ms blade-cpp-inputonly=4.891ms gfortran-natural-inputonly=3.633ms ifx-expert-inputonly=3.999ms ifx-natural-inputonly=3.891ms [memory]=5.147ms [compute]=12.64ms blade-cpp=5.575ms gfortran-expert-inputonly=3.704ms ifx-expert=5.142ms gfortran-natural=11.3ms
+[14:08:36.558 +  478.3s]   round 11/21: [memory]=5.541ms gfortran-natural=11.15ms ifx-expert-inputonly=4.115ms blade-cpp-inputonly=4.025ms ifx-natural=13.01ms gfortran-expert=4.067ms ifx-natural-inputonly=5.25ms blade-cpp=5.739ms [compute]=12.88ms ifx-expert=4.837ms gfortran-natural-inputonly=4.22ms gfortran-expert-inputonly=3.465ms
+[14:08:43.092 +  484.8s]   round 12/21: gfortran-expert=4.104ms ifx-natural-inputonly=3.968ms blade-cpp-inputonly=3.984ms blade-cpp=5.539ms ifx-natural=11.53ms ifx-expert-inputonly=3.936ms ifx-expert=4.366ms gfortran-natural=11.66ms [memory]=5.29ms [compute]=12.85ms gfortran-natural-inputonly=3.517ms gfortran-expert-inputonly=3.495ms
+[14:08:49.640 +  491.4s]   round 13/21: [compute]=12.64ms blade-cpp=5.74ms gfortran-expert=4.256ms blade-cpp-inputonly=4.041ms ifx-expert=4.635ms ifx-natural=11.53ms ifx-natural-inputonly=4.228ms [memory]=5.145ms gfortran-natural-inputonly=3.421ms ifx-expert-inputonly=4.284ms gfortran-natural=11.48ms gfortran-expert-inputonly=3.919ms
+[14:08:56.176 +  497.9s]   round 14/21: [compute]=13.12ms gfortran-expert-inputonly=3.5ms ifx-expert=5.662ms ifx-natural-inputonly=4.042ms gfortran-natural-inputonly=3.474ms gfortran-natural=11.5ms blade-cpp-inputonly=4.134ms ifx-natural=11.46ms ifx-expert-inputonly=3.988ms gfortran-expert=4.236ms blade-cpp=5.485ms [memory]=5.143ms
+[14:09:02.705 +  504.4s]   round 15/21: [memory]=5.192ms [compute]=12.73ms gfortran-expert=4.984ms gfortran-natural=11.14ms ifx-natural=11.23ms gfortran-expert-inputonly=3.55ms blade-cpp=5.537ms blade-cpp-inputonly=4.006ms ifx-expert-inputonly=4.175ms ifx-natural-inputonly=4.021ms gfortran-natural-inputonly=3.535ms ifx-expert=4.655ms
+[14:09:09.248 +  511.0s]   round 16/21: blade-cpp-inputonly=4.017ms ifx-expert-inputonly=4.191ms blade-cpp=5.981ms [compute]=12.89ms [memory]=5.355ms ifx-expert=4.684ms gfortran-expert-inputonly=3.433ms gfortran-natural=12.45ms gfortran-expert=4.181ms ifx-natural=11.47ms ifx-natural-inputonly=4.481ms gfortran-natural-inputonly=3.848ms
+[14:09:15.791 +  517.5s]   round 17/21: gfortran-natural=11.91ms gfortran-expert-inputonly=4.536ms [memory]=6.106ms ifx-natural-inputonly=4.128ms blade-cpp-inputonly=3.945ms ifx-expert-inputonly=4.081ms ifx-natural=11.26ms blade-cpp=5.515ms [compute]=13.16ms gfortran-expert=4.049ms gfortran-natural-inputonly=3.551ms ifx-expert=4.39ms
+[14:09:22.362 +  524.1s]   round 18/21: ifx-natural-inputonly=4.051ms gfortran-expert-inputonly=3.921ms ifx-expert=4.764ms blade-cpp=6.498ms gfortran-expert=4.256ms gfortran-natural=16.49ms ifx-expert-inputonly=4.012ms [memory]=5.361ms ifx-natural=15.29ms gfortran-natural-inputonly=3.41ms blade-cpp-inputonly=4.346ms [compute]=13.18ms
+[14:09:28.904 +  530.6s]   round 19/21: blade-cpp=5.583ms gfortran-natural=11.22ms [memory]=5.19ms ifx-natural-inputonly=4.189ms [compute]=12.78ms blade-cpp-inputonly=3.927ms gfortran-expert=4.073ms gfortran-expert-inputonly=3.456ms ifx-expert-inputonly=4.005ms ifx-natural=12.23ms gfortran-natural-inputonly=3.509ms ifx-expert=4.714ms
+[14:09:35.446 +  537.2s]   round 20/21: ifx-expert-inputonly=3.837ms blade-cpp-inputonly=3.965ms gfortran-natural-inputonly=3.493ms [compute]=12.69ms ifx-expert=4.476ms blade-cpp=5.521ms gfortran-expert=4.178ms gfortran-expert-inputonly=3.464ms ifx-natural=11.35ms [memory]=5.246ms ifx-natural-inputonly=3.966ms gfortran-natural=11.36ms
+[14:09:41.990 +  543.7s]   round 21/21: ifx-expert-inputonly=3.85ms ifx-natural=11.42ms blade-cpp-inputonly=3.981ms gfortran-expert-inputonly=3.634ms [memory]=5.366ms ifx-natural-inputonly=4.26ms gfortran-natural=11.56ms blade-cpp=5.415ms [compute]=12.76ms gfortran-natural-inputonly=3.595ms ifx-expert=4.611ms gfortran-expert=4.348ms
+[14:09:48.363 +  550.1s] onepass mt8-repro-native: serial counterpart not run in this session; validating it at smoke size
+[14:09:48.363 +  550.1s] build onepass serial-repro-native smoke blade-llvm
+[14:09:51.606 +  553.3s]   -> ok (1.8s)
+[14:09:51.606 +  553.3s] build onepass serial-repro-native smoke blade-cpp
+[14:09:55.709 +  557.4s]   -> ok (2.6s)
+[14:09:55.709 +  557.4s] build onepass serial-repro-native smoke gfortran-natural
+[14:09:56.444 +  558.2s]   -> ok (0.7s)
+[14:09:56.444 +  558.2s] build onepass serial-repro-native smoke gfortran-expert
+[14:09:57.163 +  558.9s]   -> ok (0.6s)
+[14:09:57.163 +  558.9s] build onepass serial-repro-native smoke ifx-natural
+[14:09:59.531 +  561.2s]   -> ok (2.2s)
+[14:09:59.531 +  561.2s] build onepass serial-repro-native smoke ifx-expert
+[14:10:01.754 +  563.5s]   -> ok (2.1s)
+[14:10:01.754 +  563.5s] build onepass serial-repro-native smoke blade-llvm-inputonly
+[14:10:04.895 +  566.6s]   -> ok (1.7s)
+[14:10:04.895 +  566.6s] build onepass serial-repro-native smoke blade-cpp-inputonly
+[14:10:08.884 +  570.6s]   -> ok (2.5s)
+[14:10:08.884 +  570.6s] build onepass serial-repro-native smoke gfortran-natural-inputonly
+[14:10:09.611 +  571.3s]   -> ok (0.7s)
+[14:10:09.611 +  571.3s] build onepass serial-repro-native smoke gfortran-expert-inputonly
+[14:10:10.312 +  572.0s]   -> ok (0.6s)
+[14:10:10.312 +  572.0s] build onepass serial-repro-native smoke ifx-natural-inputonly
+[14:10:12.578 +  574.3s]   -> ok (2.1s)
+[14:10:12.578 +  574.3s] build onepass serial-repro-native smoke ifx-expert-inputonly
+[14:10:14.796 +  576.5s]   -> ok (2.1s)
+[14:10:14.852 +  576.6s]   blade-llvm: ok t=0.0001715s checksum=1122911.48254068 input=50086.3348209551 peakWS=4.9MB
+[14:10:15.419 +  577.1s]   blade-cpp: ok t=0.0002258s checksum=1122911.48254068 input=50086.3348209551 peakWS=5.7MB
+[14:10:15.984 +  577.7s]   gfortran-natural: ok t=0.0003577s checksum=1.1229114825406771E+006 input=5.0086334820955060E+004 peakWS=5.5MB
+[14:10:16.550 +  578.3s]   gfortran-expert: ok t=0.0002192s checksum=1.1229114825406771E+006 input=5.0086334820955060E+004 peakWS=5.5MB
+[14:10:17.124 +  578.8s]   ifx-natural: ok t=0.0001388s checksum=1.1229114825406771E+006 input=5.0086334820955060E+004 peakWS=5.0MB
+[14:10:17.700 +  579.4s]   ifx-expert: ok t=0.0001504s checksum=1.1229114825406771E+006 input=5.0086334820955060E+004 peakWS=5.0MB
+[14:10:18.263 +  580.0s]   blade-llvm-inputonly: ok t=0.0001335s checksum=0.0 input=50086.3348209551 peakWS=4.9MB
+[14:10:18.829 +  580.5s]   blade-cpp-inputonly: ok t=0.0001966s checksum=0.0 input=50086.3348209551 peakWS=5.7MB
+[14:10:19.393 +  581.1s]   gfortran-natural-inputonly: ok t=0.0001764s checksum=0.0000000000000000E+000 input=5.0086334820955060E+004 peakWS=5.5MB
+[14:10:19.956 +  581.7s]   gfortran-expert-inputonly: ok t=0.0001874s checksum=0.0000000000000000E+000 input=5.0086334820955060E+004 peakWS=5.5MB
+[14:10:20.533 +  582.2s]   ifx-natural-inputonly: ok t=0.0001305s checksum=0.0000000000000000E+000 input=5.0086334820955060E+004 peakWS=5.0MB
+[14:10:21.110 +  582.8s]   ifx-expert-inputonly: ok t=0.0001463s checksum=0.0000000000000000E+000 input=5.0086334820955060E+004 peakWS=5.0MB
+[14:10:21.637 +  583.4s] build onepass mt8-repro-native full blade-llvm
+[14:10:24.890 +  586.6s]   -> serial-only: LLVM lane has no OpenMP (1.8s)
+[14:10:24.890 +  586.6s] build onepass mt8-repro-native full blade-cpp
+[14:10:29.231 +  590.9s]   -> no-parallel-form: kernel.json no_parallel_form (spec: no licensed parallel spelling) (2.8s)
+[14:10:29.231 +  590.9s] build onepass mt8-repro-native full gfortran-natural
+[14:10:30.032 +  591.7s]   -> ok (0.7s)
+[14:10:30.032 +  591.7s] build onepass mt8-repro-native full gfortran-expert
+[14:10:30.768 +  592.5s]   -> ok (0.7s)
+[14:10:30.768 +  592.5s] build onepass mt8-repro-native full ifx-natural
+[14:10:33.260 +  595.0s]   -> ok (2.3s)
+[14:10:33.260 +  595.0s] build onepass mt8-repro-native full ifx-expert
+[14:10:35.562 +  597.3s]   -> ok (2.1s)
+[14:10:35.562 +  597.3s] build onepass mt8-repro-native full blade-llvm-inputonly
+[14:10:38.820 +  600.5s]   -> serial-only: LLVM lane has no OpenMP (1.8s)
+[14:10:38.820 +  600.5s] build onepass mt8-repro-native full blade-cpp-inputonly
+[14:10:43.020 +  604.7s]   -> no-parallel-form: kernel.json no_parallel_form (spec: no licensed parallel spelling) (2.7s)
+[14:10:43.020 +  604.7s] build onepass mt8-repro-native full gfortran-natural-inputonly
+[14:10:43.843 +  605.6s]   -> ok (0.7s)
+[14:10:43.843 +  605.6s] build onepass mt8-repro-native full gfortran-expert-inputonly
+[14:10:44.566 +  606.3s]   -> ok (0.7s)
+[14:10:44.566 +  606.3s] build onepass mt8-repro-native full ifx-natural-inputonly
+[14:10:47.041 +  608.8s]   -> ok (2.3s)
+[14:10:47.041 +  608.8s] build onepass mt8-repro-native full ifx-expert-inputonly
+[14:10:49.305 +  611.0s]   -> ok (2.1s)
+[14:10:49.385 +  611.1s]   gfortran-natural: ok t=0.01564s checksum=1.1225792388879974E+008 input=4.9985704046063777E+006 peakWS=43.6MB
+[14:10:49.963 +  611.7s]   gfortran-expert: ok t=0.0109s checksum=1.1225792388879974E+008 input=4.9985704046063777E+006 peakWS=43.6MB
+[14:10:50.560 +  612.3s]   ifx-natural: ok t=0.01514s checksum=1.1225792388879974E+008 input=4.9985704046063777E+006 peakWS=45.1MB
+[14:10:51.163 +  612.9s]   ifx-expert: ok t=0.01145s checksum=1.1225792388879974E+008 input=4.9985704046063777E+006 peakWS=45.1MB
+[14:10:51.741 +  613.5s]   gfortran-natural-inputonly: ok t=0.008426s checksum=0.0000000000000000E+000 input=4.9985704046063777E+006 peakWS=43.6MB
+[14:10:52.313 +  614.0s]   gfortran-expert-inputonly: ok t=0.00873s checksum=0.0000000000000000E+000 input=4.9985704046063777E+006 peakWS=43.6MB
+[14:10:52.909 +  614.6s]   ifx-natural-inputonly: ok t=0.008956s checksum=0.0000000000000000E+000 input=4.9985704046063777E+006 peakWS=45.1MB
+[14:10:53.505 +  615.2s]   ifx-expert-inputonly: ok t=0.009337s checksum=0.0000000000000000E+000 input=4.9985704046063777E+006 peakWS=45.1MB
+[14:10:54.016 +  615.7s] onepass/mt8-repro-native: 21 rounds x 8 arms + 2 control(s) (minimum 21 (memory-bound: median warm-up < 50 ms)); ratio reference None
+[14:10:59.542 +  621.3s]   round 1/21: ifx-expert=11.35ms [memory]=5.211ms gfortran-expert-inputonly=8.224ms ifx-expert-inputonly=8.865ms ifx-natural-inputonly=8.688ms gfortran-natural=14.53ms gfortran-expert=10.91ms [compute]=13.02ms ifx-natural=16.91ms gfortran-natural-inputonly=9.198ms
+[14:11:05.059 +  626.8s]   round 2/21: [compute]=12.8ms ifx-expert-inputonly=8.797ms ifx-expert=11.77ms gfortran-natural-inputonly=8.565ms gfortran-expert-inputonly=8.095ms [memory]=5.253ms gfortran-expert=11.18ms ifx-natural=15.52ms ifx-natural-inputonly=8.969ms gfortran-natural=15.4ms
+[14:11:10.577 +  632.3s]   round 3/21: ifx-expert-inputonly=8.647ms [compute]=12.64ms ifx-natural-inputonly=8.647ms gfortran-natural=14.75ms ifx-expert=11.35ms [memory]=5.161ms gfortran-expert=10.79ms gfortran-natural-inputonly=8.813ms gfortran-expert-inputonly=9.35ms ifx-natural=15.06ms
+[14:11:16.096 +  637.8s]   round 4/21: ifx-expert-inputonly=8.57ms gfortran-natural-inputonly=8.672ms ifx-natural=16.3ms gfortran-natural=15.47ms gfortran-expert=11.79ms [compute]=12.8ms ifx-expert=11.27ms gfortran-expert-inputonly=8.481ms [memory]=5.446ms ifx-natural-inputonly=8.682ms
+[14:11:21.613 +  643.3s]   round 5/21: [memory]=5.262ms ifx-expert-inputonly=9.203ms gfortran-expert=11.58ms ifx-natural-inputonly=8.888ms gfortran-expert-inputonly=8.238ms ifx-natural=15.36ms ifx-expert=11.09ms gfortran-natural-inputonly=8.508ms gfortran-natural=16.28ms [compute]=12.84ms
+[14:11:27.131 +  648.8s]   round 6/21: gfortran-expert=11.01ms gfortran-natural=14.59ms gfortran-expert-inputonly=8.618ms [memory]=5.388ms ifx-expert=11.31ms ifx-natural=16.03ms ifx-natural-inputonly=8.789ms gfortran-natural-inputonly=8.685ms [compute]=12.71ms ifx-expert-inputonly=9.025ms
+[14:11:32.647 +  654.4s]   round 7/21: gfortran-expert=11.17ms ifx-expert=11.55ms gfortran-natural-inputonly=8.114ms gfortran-expert-inputonly=8.246ms gfortran-natural=14.7ms ifx-expert-inputonly=8.887ms [memory]=5.219ms ifx-natural-inputonly=8.809ms ifx-natural=15.23ms [compute]=12.73ms
+[14:11:38.173 +  659.9s]   round 8/21: ifx-expert-inputonly=8.798ms [compute]=12.8ms gfortran-natural-inputonly=8.395ms [memory]=5.187ms gfortran-expert=11.02ms gfortran-natural=15.22ms gfortran-expert-inputonly=8.28ms ifx-natural-inputonly=9.04ms ifx-expert=11.44ms ifx-natural=15.27ms
+[14:11:43.706 +  665.4s]   round 9/21: ifx-expert=11.75ms gfortran-natural=14.95ms gfortran-expert=10.94ms gfortran-expert-inputonly=8.257ms [memory]=5.233ms ifx-natural-inputonly=9.183ms gfortran-natural-inputonly=9.171ms ifx-expert-inputonly=10.02ms ifx-natural=15.58ms [compute]=13.56ms
+[14:11:49.234 +  670.9s]   round 10/21: ifx-expert=12.01ms [compute]=12.63ms gfortran-natural=14.74ms gfortran-natural-inputonly=8.358ms [memory]=5.282ms ifx-natural=15.99ms gfortran-expert-inputonly=9.69ms gfortran-expert=11.97ms ifx-expert-inputonly=9.268ms ifx-natural-inputonly=11.37ms
+[14:11:54.758 +  676.5s]   round 11/21: [compute]=13.46ms gfortran-natural-inputonly=9.116ms ifx-natural=15.53ms [memory]=5.365ms ifx-expert-inputonly=9.26ms ifx-natural-inputonly=9.244ms ifx-expert=11.55ms gfortran-expert-inputonly=8.258ms gfortran-expert=10.87ms gfortran-natural=16.15ms
+[14:12:00.280 +  682.0s]   round 12/21: [compute]=12.62ms ifx-expert=11.41ms gfortran-natural-inputonly=8.197ms gfortran-expert-inputonly=8.229ms [memory]=5.417ms gfortran-natural=14.94ms gfortran-expert=10.71ms ifx-expert-inputonly=9.265ms ifx-natural=15.18ms ifx-natural-inputonly=8.653ms
+[14:12:05.807 +  687.5s]   round 13/21: gfortran-expert=11.23ms [compute]=12.67ms gfortran-natural-inputonly=8.465ms ifx-natural-inputonly=8.643ms ifx-natural=14.99ms ifx-expert=11.51ms gfortran-expert-inputonly=8.258ms ifx-expert-inputonly=9.881ms [memory]=5.313ms gfortran-natural=14.99ms
+[14:12:11.329 +  693.0s]   round 14/21: gfortran-expert-inputonly=9.01ms ifx-expert-inputonly=9.985ms gfortran-natural=14.84ms ifx-expert=11.18ms gfortran-natural-inputonly=8.232ms ifx-natural=15.11ms ifx-natural-inputonly=8.746ms [compute]=13.22ms gfortran-expert=10.65ms [memory]=5.281ms
+[14:12:16.861 +  698.6s]   round 15/21: ifx-expert-inputonly=9.523ms gfortran-expert=10.8ms ifx-natural-inputonly=9.27ms ifx-expert=11.74ms ifx-natural=15.4ms gfortran-natural-inputonly=8.253ms [compute]=12.78ms gfortran-expert-inputonly=8.861ms [memory]=5.304ms gfortran-natural=14.89ms
+[14:12:22.390 +  704.1s]   round 16/21: ifx-natural-inputonly=8.839ms ifx-natural=15.01ms ifx-expert=11.48ms gfortran-natural=14.85ms gfortran-expert=10.95ms [compute]=12.76ms ifx-expert-inputonly=9.136ms [memory]=5.356ms gfortran-expert-inputonly=8.749ms gfortran-natural-inputonly=8.308ms
+[14:12:27.916 +  709.6s]   round 17/21: ifx-expert=11.39ms gfortran-expert=10.93ms ifx-natural-inputonly=8.862ms gfortran-natural-inputonly=8.409ms [compute]=12.71ms gfortran-expert-inputonly=8.148ms [memory]=5.511ms ifx-natural=15.25ms gfortran-natural=15.11ms ifx-expert-inputonly=9.48ms
+[14:12:33.453 +  715.2s]   round 18/21: [compute]=12.65ms gfortran-natural-inputonly=8.624ms [memory]=5.326ms ifx-expert-inputonly=9.15ms ifx-natural-inputonly=8.627ms gfortran-natural=14.69ms gfortran-expert=10.74ms gfortran-expert-inputonly=8.5ms ifx-natural=15.35ms ifx-expert=11.29ms
+[14:12:38.976 +  720.7s]   round 19/21: gfortran-natural-inputonly=8.854ms [memory]=5.23ms ifx-expert-inputonly=8.728ms gfortran-natural=15.63ms ifx-natural=15.21ms ifx-expert=11.36ms ifx-natural-inputonly=8.719ms [compute]=12.69ms gfortran-expert=11.42ms gfortran-expert-inputonly=8.686ms
+[14:12:44.502 +  726.2s]   round 20/21: [memory]=5.437ms gfortran-expert=10.66ms ifx-natural=15.35ms gfortran-natural-inputonly=8.12ms ifx-expert=11.42ms gfortran-expert-inputonly=8.322ms [compute]=12.69ms ifx-expert-inputonly=8.829ms ifx-natural-inputonly=8.957ms gfortran-natural=14.65ms
+[14:12:50.036 +  731.7s]   round 21/21: ifx-natural-inputonly=9.279ms [memory]=5.309ms ifx-expert=11.23ms gfortran-expert-inputonly=8.275ms ifx-natural=15.21ms gfortran-natural=15.32ms gfortran-expert=10.85ms gfortran-natural-inputonly=8.877ms ifx-expert-inputonly=8.944ms [compute]=12.86ms
+[14:12:53.162 +  734.9s] recur mt8-repro-native: serial counterpart not run in this session; validating it at smoke size
+[14:12:53.163 +  734.9s] build recur serial-repro-native smoke blade-llvm
+[14:12:56.968 +  738.7s]   -> ok (2.1s)
+[14:12:56.968 +  738.7s] build recur serial-repro-native smoke blade-cpp
+[14:13:01.696 +  743.4s]   -> ok (3.0s)
+[14:13:01.696 +  743.4s] build recur serial-repro-native smoke gfortran-natural
+[14:13:02.465 +  744.2s]   -> ok (0.7s)
+[14:13:02.465 +  744.2s] build recur serial-repro-native smoke gfortran-expert
+[14:13:03.186 +  744.9s]   -> ok (0.6s)
+[14:13:03.186 +  744.9s] build recur serial-repro-native smoke ifx-natural
+[14:13:05.591 +  747.3s]   -> ok (2.3s)
+[14:13:05.591 +  747.3s] build recur serial-repro-native smoke ifx-expert
+[14:13:07.829 +  749.5s]   -> ok (2.1s)
+[14:13:07.889 +  749.6s]   blade-llvm: ok t=3.93e-05s checksum=2729.73548315534 input=211.486947577447 peakWS=4.6MB
+[14:13:08.457 +  750.2s]   blade-cpp: ok t=4.37e-05s checksum=2729.73548315534 input=211.486947577447 peakWS=5.3MB
+[14:13:09.024 +  750.7s]   gfortran-natural: ok t=1.39e-05s checksum=2.7297354831553362E+003 input=2.1148694757744670E+002 peakWS=5.2MB
+[14:13:09.594 +  751.3s]   gfortran-expert: ok t=1.03e-05s checksum=2.7297354831553362E+003 input=2.1148694757744670E+002 peakWS=5.2MB
+[14:13:10.177 +  751.9s]   ifx-natural: ok t=1.75e-05s checksum=2.7297354831553362E+003 input=2.1148694757744670E+002 peakWS=5.0MB
+[14:13:10.755 +  752.5s]   ifx-expert: ok t=1.36e-05s checksum=2.7297354831553362E+003 input=2.1148694757744670E+002 peakWS=5.0MB
+[14:13:11.287 +  753.0s] build recur mt8-repro-native full blade-llvm
+[14:13:14.868 +  756.6s]   -> serial-only: LLVM lane has no OpenMP (2.0s)
+[14:13:14.868 +  756.6s] build recur mt8-repro-native full blade-cpp
+[14:13:19.468 +  761.2s]   -> no-parallel-form: kernel.json no_parallel_form (spec: no licensed parallel spelling) (2.9s)
+[14:13:19.468 +  761.2s] build recur mt8-repro-native full gfortran-natural
+[14:13:20.307 +  762.0s]   -> ok (0.8s)
+[14:13:20.307 +  762.0s] build recur mt8-repro-native full gfortran-expert
+[14:13:21.078 +  762.8s]   -> ok (0.7s)
+[14:13:21.078 +  762.8s] build recur mt8-repro-native full ifx-natural
+[14:13:23.551 +  765.3s]   -> ok (2.3s)
+[14:13:23.551 +  765.3s] build recur mt8-repro-native full ifx-expert
+[14:13:25.908 +  767.6s]   -> ok (2.2s)
+[14:13:26.046 +  767.8s]   gfortran-natural: ok t=0.0735s checksum=5.4956376753438096E+006 input=2.0054033954109065E+004 peakWS=52.0MB
+[14:13:26.622 +  768.3s]   gfortran-expert: ok t=0.006744s checksum=5.4956376753438106E+006 input=2.0054033954109065E+004 peakWS=51.4MB
+[14:13:27.224 +  768.9s]   ifx-natural: ok t=0.01509s checksum=5.4956376753438096E+006 input=2.0054033954109065E+004 peakWS=53.5MB
+[14:13:27.815 +  769.5s]   ifx-expert: ok t=0.007768s checksum=5.4956376753438106E+006 input=2.0054033954109065E+004 peakWS=52.9MB
+[14:13:28.329 +  770.0s] recur/mt8-repro-native: 21 rounds x 4 arms + 2 control(s) (minimum 21 (memory-bound: median warm-up < 50 ms)); ratio reference None
+[14:13:31.714 +  773.4s]   round 1/21: gfortran-expert=6.822ms gfortran-natural=69.75ms [memory]=5.466ms ifx-expert=7.741ms ifx-natural=14.97ms [compute]=12.64ms
+[14:13:35.101 +  776.8s]   round 2/21: gfortran-natural=73.9ms gfortran-expert=7.008ms [memory]=5.317ms ifx-expert=7.206ms [compute]=12.65ms ifx-natural=14.73ms
+[14:13:38.482 +  780.2s]   round 3/21: [memory]=5.372ms ifx-natural=14.79ms gfortran-expert=6.25ms [compute]=12.66ms ifx-expert=7.359ms gfortran-natural=70.81ms
+[14:13:41.871 +  783.6s]   round 4/21: gfortran-natural=71.66ms [memory]=5.382ms ifx-expert=7.363ms gfortran-expert=6.715ms ifx-natural=15.89ms [compute]=12.64ms
+[14:13:45.261 +  787.0s]   round 5/21: [compute]=12.91ms ifx-natural=14.5ms gfortran-expert=6.535ms gfortran-natural=73.13ms ifx-expert=7.173ms [memory]=5.3ms
+[14:13:48.650 +  790.4s]   round 6/21: ifx-natural=14.54ms gfortran-expert=6.86ms [compute]=12.71ms ifx-expert=7.402ms [memory]=5.299ms gfortran-natural=71.43ms
+[14:13:52.039 +  793.8s]   round 7/21: ifx-natural=14.79ms gfortran-expert=6.772ms [compute]=12.92ms gfortran-natural=73.12ms ifx-expert=7.441ms [memory]=5.256ms
+[14:13:55.427 +  797.1s]   round 8/21: ifx-natural=14.78ms [memory]=5.235ms ifx-expert=7.46ms gfortran-expert=7.969ms gfortran-natural=71.97ms [compute]=12.56ms
+[14:13:58.811 +  800.5s]   round 9/21: gfortran-natural=72.81ms [compute]=13.44ms ifx-natural=15.02ms ifx-expert=6.968ms gfortran-expert=7.331ms [memory]=5.241ms
+[14:14:02.200 +  803.9s]   round 10/21: gfortran-natural=69.32ms [compute]=12.58ms ifx-expert=8.298ms gfortran-expert=7.156ms [memory]=5.216ms ifx-natural=15.52ms
+[14:14:05.585 +  807.3s]   round 11/21: gfortran-expert=6.659ms gfortran-natural=70.67ms [compute]=12.9ms ifx-expert=7.079ms ifx-natural=14.54ms [memory]=5.298ms
+[14:14:08.979 +  810.7s]   round 12/21: gfortran-natural=70.56ms gfortran-expert=6.516ms ifx-natural=15.91ms [compute]=12.76ms ifx-expert=7.216ms [memory]=5.325ms
+[14:14:12.371 +  814.1s]   round 13/21: [compute]=12.7ms [memory]=5.174ms gfortran-natural=72.08ms gfortran-expert=7.667ms ifx-expert=7.204ms ifx-natural=15.64ms
+[14:14:15.755 +  817.5s]   round 14/21: [compute]=12.64ms gfortran-expert=7.101ms ifx-natural=15.16ms [memory]=5.37ms gfortran-natural=69.81ms ifx-expert=7.337ms
+[14:14:19.142 +  820.9s]   round 15/21: gfortran-expert=6.533ms [compute]=12.83ms [memory]=5.522ms gfortran-natural=69.72ms ifx-natural=15ms ifx-expert=7.353ms
+[14:14:22.529 +  824.2s]   round 16/21: ifx-expert=7.254ms gfortran-expert=6.557ms gfortran-natural=70.01ms [compute]=12.78ms [memory]=5.305ms ifx-natural=14.41ms
+[14:14:25.919 +  827.6s]   round 17/21: [compute]=13.03ms ifx-expert=7.259ms [memory]=5.195ms gfortran-expert=6.868ms ifx-natural=14.92ms gfortran-natural=72.84ms
+[14:14:29.303 +  831.0s]   round 18/21: ifx-expert=7.592ms ifx-natural=14.47ms [memory]=5.313ms gfortran-natural=70.74ms [compute]=12.97ms gfortran-expert=7.314ms
+[14:14:32.679 +  834.4s]   round 19/21: ifx-natural=15.37ms [compute]=12.63ms [memory]=5.593ms gfortran-natural=70.48ms ifx-expert=7.284ms gfortran-expert=6.693ms
+[14:14:36.068 +  837.8s]   round 20/21: [compute]=12.74ms gfortran-expert=7.194ms gfortran-natural=74.49ms ifx-natural=14.62ms [memory]=5.618ms ifx-expert=7.761ms
+[14:14:39.461 +  841.2s]   round 21/21: ifx-expert=7.117ms ifx-natural=13.96ms [memory]=5.219ms [compute]=12.94ms gfortran-natural=71.4ms gfortran-expert=6.522ms
+[14:14:42.586 +  844.3s] stencil mt8-repro-native: serial counterpart not run in this session; validating it at smoke size
+[14:14:42.586 +  844.3s] build stencil serial-repro-native smoke blade-llvm
+[14:14:46.023 +  847.7s]   -> ok (1.9s)
+[14:14:46.023 +  847.7s] build stencil serial-repro-native smoke blade-cpp
+[14:14:50.318 +  852.0s]   -> ok (2.7s)
+[14:14:50.318 +  852.0s] build stencil serial-repro-native smoke gfortran-natural
+[14:14:51.074 +  852.8s]   -> ok (0.7s)
+[14:14:51.074 +  852.8s] build stencil serial-repro-native smoke gfortran-expert
+[14:14:51.817 +  853.5s]   -> ok (0.7s)
+[14:14:51.817 +  853.5s] build stencil serial-repro-native smoke ifx-natural
+[14:14:54.270 +  856.0s]   -> ok (2.3s)
+[14:14:54.270 +  856.0s] build stencil serial-repro-native smoke ifx-expert
+[14:14:56.522 +  858.2s]   -> ok (2.1s)
+[14:14:56.522 +  858.2s] build stencil serial-repro-native smoke blade-llvm-inputonly
+[14:14:59.760 +  861.5s]   -> ok (1.8s)
+[14:14:59.760 +  861.5s] build stencil serial-repro-native smoke blade-cpp-inputonly
+[14:15:03.857 +  865.6s]   -> ok (2.6s)
+[14:15:03.857 +  865.6s] build stencil serial-repro-native smoke gfortran-natural-inputonly
+[14:15:04.566 +  866.3s]   -> ok (0.6s)
+[14:15:04.566 +  866.3s] build stencil serial-repro-native smoke gfortran-expert-inputonly
+[14:15:05.273 +  867.0s]   -> ok (0.6s)
+[14:15:05.273 +  867.0s] build stencil serial-repro-native smoke ifx-natural-inputonly
+[14:15:07.518 +  869.2s]   -> ok (2.1s)
+[14:15:07.518 +  869.2s] build stencil serial-repro-native smoke ifx-expert-inputonly
+[14:15:09.764 +  871.5s]   -> ok (2.1s)
+[14:15:09.833 +  871.5s]   blade-llvm: ok t=1.47e-05s checksum=1832.42048364487 input=636.533457077574 peakWS=4.5MB
+[14:15:10.412 +  872.1s]   blade-cpp: ok t=1e-05s checksum=1832.42048364487 input=636.533457077574 peakWS=5.3MB
+[14:15:10.984 +  872.7s]   gfortran-natural: ok t=1.39e-05s checksum=1.8324204836448716E+003 input=6.3653345707757398E+002 peakWS=5.2MB
+[14:15:11.552 +  873.3s]   gfortran-expert: ok t=1.02e-05s checksum=1.8324204836448716E+003 input=6.3653345707757398E+002 peakWS=5.2MB
+[14:15:12.130 +  873.8s]   ifx-natural: ok t=2.11e-05s checksum=1.8324204836448716E+003 input=6.3653345707757398E+002 peakWS=5.0MB
+[14:15:12.715 +  874.4s]   ifx-expert: ok t=1.79e-05s checksum=1.8324204836448721E+003 input=6.3653345707757398E+002 peakWS=5.0MB
+[14:15:13.282 +  875.0s]   blade-llvm-inputonly: ok t=8.5e-06s checksum=0.0 input=636.533457077574 peakWS=4.5MB
+[14:15:13.852 +  875.6s]   blade-cpp-inputonly: ok t=5.8e-06s checksum=0.0 input=636.533457077574 peakWS=5.3MB
+[14:15:14.419 +  876.1s]   gfortran-natural-inputonly: ok t=3.1e-06s checksum=0.0000000000000000E+000 input=6.3653345707757398E+002 peakWS=5.2MB
+[14:15:14.986 +  876.7s]   gfortran-expert-inputonly: ok t=2.9e-06s checksum=0.0000000000000000E+000 input=6.3653345707757398E+002 peakWS=5.2MB
+[14:15:15.566 +  877.3s]   ifx-natural-inputonly: ok t=1.61e-05s checksum=0.0000000000000000E+000 input=6.3653345707757398E+002 peakWS=5.0MB
+[14:15:16.145 +  877.9s]   ifx-expert-inputonly: ok t=1.6e-05s checksum=0.0000000000000000E+000 input=6.3653345707757398E+002 peakWS=5.0MB
+[14:15:16.678 +  878.4s] build stencil mt8-repro-native full blade-llvm
+[14:15:20.067 +  881.8s]   -> serial-only: LLVM lane has no OpenMP (1.9s)
+[14:15:20.067 +  881.8s] build stencil mt8-repro-native full blade-cpp
+[14:15:24.384 +  886.1s]   -> ok (2.8s)
+[14:15:24.384 +  886.1s] build stencil mt8-repro-native full gfortran-natural
+[14:15:25.180 +  886.9s]   -> ok (0.7s)
+[14:15:25.180 +  886.9s] build stencil mt8-repro-native full gfortran-expert
+[14:15:25.940 +  887.7s]   -> ok (0.7s)
+[14:15:25.940 +  887.7s] build stencil mt8-repro-native full ifx-natural
+[14:15:28.443 +  890.2s]   -> ok (2.3s)
+[14:15:28.443 +  890.2s] build stencil mt8-repro-native full ifx-expert
+[14:15:30.720 +  892.4s]   -> ok (2.1s)
+[14:15:30.720 +  892.4s] build stencil mt8-repro-native full blade-llvm-inputonly
+[14:15:33.986 +  895.7s]   -> serial-only: LLVM lane has no OpenMP (1.8s)
+[14:15:33.986 +  895.7s] build stencil mt8-repro-native full blade-cpp-inputonly
+[14:15:38.097 +  899.8s]   -> ok (2.6s)
+[14:15:38.097 +  899.8s] build stencil mt8-repro-native full gfortran-natural-inputonly
+[14:15:38.850 +  900.6s]   -> ok (0.7s)
+[14:15:38.850 +  900.6s] build stencil mt8-repro-native full gfortran-expert-inputonly
+[14:15:39.640 +  901.4s]   -> ok (0.7s)
+[14:15:39.640 +  901.4s] build stencil mt8-repro-native full ifx-natural-inputonly
+[14:15:41.999 +  903.7s]   -> ok (2.2s)
+[14:15:41.999 +  903.7s] build stencil mt8-repro-native full ifx-expert-inputonly
+[14:15:44.278 +  906.0s]   -> ok (2.1s)
+[14:15:44.357 +  906.1s]   blade-cpp: ok t=0.01249s checksum=4998019.7147317 input=1502700.69948614 peakWS=51.3MB
+[14:15:44.939 +  906.7s]   gfortran-natural: ok t=0.009035s checksum=4.9980197147316961E+006 input=1.5027006994861355E+006 peakWS=51.3MB
+[14:15:45.517 +  907.2s]   gfortran-expert: ok t=0.007742s checksum=4.9980197147316961E+006 input=1.5027006994861355E+006 peakWS=51.3MB
+[14:15:46.110 +  907.8s]   ifx-natural: ok t=0.01003s checksum=4.9980197147316970E+006 input=1.5027006994861355E+006 peakWS=52.9MB
+[14:15:46.705 +  908.4s]   ifx-expert: ok t=0.008309s checksum=4.9980197147316970E+006 input=1.5027006994861355E+006 peakWS=52.8MB
+[14:15:47.283 +  909.0s]   blade-cpp-inputonly: ok t=0.00571s checksum=0.0 input=1502700.69948614 peakWS=28.6MB
+[14:15:47.858 +  909.6s]   gfortran-natural-inputonly: ok t=0.004841s checksum=0.0000000000000000E+000 input=1.5027006994861355E+006 peakWS=28.4MB
+[14:15:48.437 +  910.2s]   gfortran-expert-inputonly: ok t=0.004395s checksum=0.0000000000000000E+000 input=1.5027006994861355E+006 peakWS=28.4MB
+[14:15:49.028 +  910.7s]   ifx-natural-inputonly: ok t=0.005035s checksum=0.0000000000000000E+000 input=1.5027006994861355E+006 peakWS=30.0MB
+[14:15:49.616 +  911.3s]   ifx-expert-inputonly: ok t=0.005684s checksum=0.0000000000000000E+000 input=1.5027006994861355E+006 peakWS=29.9MB
+[14:15:50.135 +  911.8s] stencil/mt8-repro-native: 21 rounds x 10 arms + 2 control(s) (minimum 21 (memory-bound: median warm-up < 50 ms)); ratio reference blade-cpp
+[14:15:56.777 +  918.5s]   round 1/21: gfortran-natural=8.686ms blade-cpp=12.22ms blade-cpp-inputonly=5.484ms ifx-expert-inputonly=4.98ms ifx-expert=8.703ms gfortran-natural-inputonly=4.389ms ifx-natural-inputonly=4.958ms ifx-natural=10.74ms gfortran-expert=7.612ms [compute]=12.77ms [memory]=5.387ms gfortran-expert-inputonly=4.273ms
+[14:16:03.416 +  925.1s]   round 2/21: blade-cpp-inputonly=5.478ms [compute]=12.73ms ifx-natural-inputonly=5.122ms [memory]=5.377ms ifx-natural=9.966ms blade-cpp=11.87ms ifx-expert-inputonly=4.858ms gfortran-expert-inputonly=4.407ms ifx-expert=8.283ms gfortran-expert=7.873ms gfortran-natural-inputonly=4.423ms gfortran-natural=8.571ms
+[14:16:10.068 +  931.8s]   round 3/21: gfortran-natural-inputonly=4.522ms [compute]=12.63ms ifx-expert-inputonly=4.955ms ifx-expert=8.333ms ifx-natural-inputonly=4.982ms gfortran-expert=7.905ms blade-cpp-inputonly=5.4ms gfortran-natural=8.557ms blade-cpp=12.07ms ifx-natural=9.783ms [memory]=5.235ms gfortran-expert-inputonly=4.345ms
+[14:16:16.706 +  938.4s]   round 4/21: gfortran-natural-inputonly=4.338ms ifx-expert=8.931ms gfortran-expert=7.907ms ifx-natural=9.828ms blade-cpp=11.92ms blade-cpp-inputonly=5.389ms [compute]=12.76ms ifx-natural-inputonly=4.609ms [memory]=5.473ms ifx-expert-inputonly=4.777ms gfortran-natural=8.919ms gfortran-expert-inputonly=4.296ms
+[14:16:23.357 +  945.1s]   round 5/21: ifx-expert=8.46ms gfortran-expert=8.088ms [compute]=12.73ms blade-cpp=13.23ms gfortran-expert-inputonly=4.713ms ifx-natural=10.63ms ifx-natural-inputonly=4.898ms [memory]=5.412ms gfortran-natural-inputonly=4.311ms gfortran-natural=8.594ms ifx-expert-inputonly=4.598ms blade-cpp-inputonly=5.694ms
+[14:16:29.995 +  951.7s]   round 6/21: gfortran-expert-inputonly=4.535ms blade-cpp=11.89ms [compute]=12.9ms gfortran-natural-inputonly=4.331ms ifx-expert=8.545ms ifx-natural=9.911ms ifx-expert-inputonly=4.796ms blade-cpp-inputonly=6.039ms [memory]=5.38ms gfortran-natural=8.706ms gfortran-expert=8.147ms ifx-natural-inputonly=4.721ms
+[14:16:36.664 +  958.4s]   round 7/21: ifx-natural=9.98ms gfortran-expert=7.88ms ifx-natural-inputonly=4.731ms ifx-expert-inputonly=4.99ms blade-cpp-inputonly=5.467ms ifx-expert=8.646ms blade-cpp=12.98ms gfortran-natural-inputonly=4.372ms [memory]=5.338ms gfortran-natural=8.974ms [compute]=12.65ms gfortran-expert-inputonly=4.372ms
+[14:16:43.320 +  965.0s]   round 8/21: blade-cpp-inputonly=5.507ms ifx-natural=10.84ms gfortran-expert=8.294ms gfortran-expert-inputonly=4.267ms gfortran-natural=8.628ms ifx-expert-inputonly=4.771ms blade-cpp=12.35ms gfortran-natural-inputonly=5.011ms [memory]=5.276ms ifx-expert=8.53ms [compute]=12.93ms ifx-natural-inputonly=4.637ms
+[14:16:49.951 +  971.7s]   round 9/21: blade-cpp-inputonly=5.721ms ifx-natural-inputonly=5.006ms [compute]=12.93ms gfortran-expert-inputonly=4.227ms [memory]=5.197ms ifx-expert=8.072ms ifx-expert-inputonly=4.723ms gfortran-natural=9.001ms ifx-natural=10.12ms gfortran-expert=8ms gfortran-natural-inputonly=4.632ms blade-cpp=13.3ms
+[14:16:56.620 +  978.3s]   round 10/21: [compute]=12.65ms gfortran-expert=7.988ms [memory]=5.187ms gfortran-natural=8.77ms blade-cpp=12.15ms ifx-expert-inputonly=5.028ms gfortran-natural-inputonly=4.323ms blade-cpp-inputonly=5.737ms ifx-natural=10.01ms ifx-expert=8.194ms ifx-natural-inputonly=4.644ms gfortran-expert-inputonly=4.269ms
+[14:17:03.268 +  985.0s]   round 11/21: gfortran-natural=9.9ms blade-cpp-inputonly=5.546ms ifx-expert=8.228ms gfortran-expert=7.666ms ifx-expert-inputonly=4.944ms [compute]=12.74ms ifx-natural=9.805ms blade-cpp=11.82ms gfortran-natural-inputonly=4.512ms ifx-natural-inputonly=4.677ms [memory]=5.248ms gfortran-expert-inputonly=4.357ms
+[14:17:09.929 +  991.6s]   round 12/21: gfortran-expert-inputonly=4.496ms gfortran-natural=8.54ms ifx-natural=9.72ms blade-cpp-inputonly=5.583ms [compute]=12.74ms ifx-natural-inputonly=4.874ms gfortran-natural-inputonly=4.482ms gfortran-expert=7.571ms blade-cpp=12.89ms ifx-expert-inputonly=4.711ms [memory]=5.325ms ifx-expert=8.265ms
+[14:17:16.572 +  998.3s]   round 13/21: gfortran-natural-inputonly=4.541ms ifx-natural-inputonly=4.662ms gfortran-natural=9.044ms ifx-natural=10.01ms blade-cpp-inputonly=5.864ms blade-cpp=11.83ms [memory]=5.241ms ifx-expert-inputonly=4.77ms gfortran-expert=8.023ms ifx-expert=8.155ms [compute]=12.73ms gfortran-expert-inputonly=4.489ms
+[14:17:23.231 + 1004.9s]   round 14/21: ifx-expert-inputonly=5.007ms gfortran-expert-inputonly=4.832ms [compute]=12.64ms ifx-natural-inputonly=4.91ms gfortran-expert=10.08ms gfortran-natural=8.56ms gfortran-natural-inputonly=4.268ms blade-cpp-inputonly=5.768ms ifx-natural=10.05ms [memory]=5.312ms blade-cpp=11.98ms ifx-expert=8.415ms
+[14:17:29.883 + 1011.6s]   round 15/21: blade-cpp-inputonly=6.793ms ifx-natural=9.74ms [compute]=12.82ms gfortran-expert-inputonly=4.234ms ifx-natural-inputonly=4.73ms ifx-expert=8.179ms ifx-expert-inputonly=4.773ms [memory]=5.653ms blade-cpp=13.58ms gfortran-natural-inputonly=4.912ms gfortran-natural=9.724ms gfortran-expert=8.016ms
+[14:17:36.527 + 1018.2s]   round 16/21: gfortran-expert=7.833ms gfortran-natural-inputonly=4.502ms gfortran-natural=8.485ms [memory]=5.154ms gfortran-expert-inputonly=4.104ms ifx-natural=10.03ms ifx-expert=8.195ms [compute]=12.69ms ifx-expert-inputonly=4.889ms ifx-natural-inputonly=5.326ms blade-cpp-inputonly=5.44ms blade-cpp=11.75ms
+[14:17:43.181 + 1024.9s]   round 17/21: gfortran-natural=8.602ms ifx-expert-inputonly=4.589ms ifx-natural=9.99ms ifx-expert=8.391ms blade-cpp=12.08ms gfortran-expert=8.094ms blade-cpp-inputonly=5.874ms [compute]=12.65ms gfortran-natural-inputonly=4.187ms ifx-natural-inputonly=4.814ms [memory]=5.301ms gfortran-expert-inputonly=4.473ms
+[14:17:49.847 + 1031.6s]   round 18/21: gfortran-expert-inputonly=4.349ms [memory]=5.322ms ifx-expert=8.077ms blade-cpp-inputonly=5.368ms gfortran-expert=8.111ms gfortran-natural=8.534ms gfortran-natural-inputonly=4.526ms [compute]=12.63ms ifx-natural=10.14ms ifx-expert-inputonly=4.438ms blade-cpp=11.99ms ifx-natural-inputonly=4.79ms
+[14:17:56.504 + 1038.2s]   round 19/21: blade-cpp=12.37ms ifx-expert-inputonly=4.646ms gfortran-expert-inputonly=4.891ms ifx-natural-inputonly=5.198ms gfortran-natural-inputonly=4.152ms gfortran-expert=7.837ms blade-cpp-inputonly=5.835ms ifx-expert=8.015ms [compute]=12.69ms gfortran-natural=8.449ms [memory]=5.179ms ifx-natural=10.69ms
+[14:18:03.162 + 1044.9s]   round 20/21: gfortran-expert-inputonly=4.304ms blade-cpp=12.9ms ifx-natural-inputonly=4.626ms ifx-expert-inputonly=5.518ms [memory]=5.516ms gfortran-natural-inputonly=4.39ms blade-cpp-inputonly=5.6ms ifx-expert=8.57ms gfortran-expert=8.108ms [compute]=12.69ms gfortran-natural=8.986ms ifx-natural=9.821ms
+[14:18:09.822 + 1051.5s]   round 21/21: [memory]=5.275ms gfortran-natural-inputonly=4.296ms [compute]=12.51ms ifx-natural=10.02ms blade-cpp=11.83ms blade-cpp-inputonly=6.547ms ifx-expert-inputonly=4.669ms gfortran-natural=8.464ms ifx-expert=8.561ms ifx-natural-inputonly=4.684ms gfortran-expert-inputonly=4.702ms gfortran-expert=8.288ms
+[14:18:13.201 + 1054.9s] dot mt8-repro-native: serial counterpart not run in this session; validating it at smoke size
+[14:18:13.201 + 1054.9s] build dot serial-repro-native smoke blade-llvm
+[14:18:16.498 + 1058.2s]   -> ok (1.8s)
+[14:18:16.498 + 1058.2s] build dot serial-repro-native smoke blade-cpp
+[14:18:20.594 + 1062.3s]   -> ok (2.6s)
+[14:18:20.594 + 1062.3s] build dot serial-repro-native smoke gfortran-natural
+[14:18:21.331 + 1063.0s]   -> ok (0.7s)
+[14:18:21.331 + 1063.0s] build dot serial-repro-native smoke gfortran-expert
+[14:18:22.035 + 1063.7s]   -> ok (0.6s)
+[14:18:22.035 + 1063.7s] build dot serial-repro-native smoke ifx-natural
+[14:18:24.466 + 1066.2s]   -> ok (2.3s)
+[14:18:24.466 + 1066.2s] build dot serial-repro-native smoke ifx-expert
+[14:18:26.679 + 1068.4s]   -> ok (2.1s)
+[14:18:26.679 + 1068.4s] build dot serial-repro-native smoke blade-llvm-inputonly
+[14:18:29.859 + 1071.6s]   -> ok (1.8s)
+[14:18:29.859 + 1071.6s] build dot serial-repro-native smoke blade-cpp-inputonly
+[14:18:33.861 + 1075.6s]   -> ok (2.6s)
+[14:18:33.861 + 1075.6s] build dot serial-repro-native smoke gfortran-natural-inputonly
+[14:18:34.563 + 1076.3s]   -> ok (0.6s)
+[14:18:34.563 + 1076.3s] build dot serial-repro-native smoke gfortran-expert-inputonly
+[14:18:35.268 + 1077.0s]   -> ok (0.6s)
+[14:18:35.268 + 1077.0s] build dot serial-repro-native smoke ifx-natural-inputonly
+[14:18:37.509 + 1079.2s]   -> ok (2.1s)
+[14:18:37.509 + 1079.2s] build dot serial-repro-native smoke ifx-expert-inputonly
+[14:18:39.706 + 1081.4s]   -> ok (2.1s)
+[14:18:39.771 + 1081.5s]   blade-llvm: ok t=0.0001741s checksum=7442.48757101503 input=29915.9891938041 peakWS=5.0MB
+[14:18:40.344 + 1082.1s]   blade-cpp: ok t=0.0002555s checksum=7442.48757101503 input=29915.9891938041 peakWS=5.7MB
+[14:18:40.916 + 1082.6s]   gfortran-natural: ok t=0.0002256s checksum=7.4424875710150345E+003 input=2.9915989193804096E+004 peakWS=5.6MB
+[14:18:41.487 + 1083.2s]   gfortran-expert: ok t=0.0002149s checksum=7.4424875710150345E+003 input=2.9915989193804096E+004 peakWS=5.6MB
+[14:18:42.069 + 1083.8s]   ifx-natural: ok t=0.0001748s checksum=7.4424875710150345E+003 input=2.9915989193804096E+004 peakWS=5.0MB
+[14:18:42.653 + 1084.4s]   ifx-expert: ok t=0.0001634s checksum=7.4424875710150345E+003 input=2.9915989193804096E+004 peakWS=5.0MB
+[14:18:43.223 + 1084.9s]   blade-llvm-inputonly: ok t=0.0001575s checksum=0.0 input=29915.9891938041 peakWS=5.0MB
+[14:18:43.796 + 1085.5s]   blade-cpp-inputonly: ok t=0.0002336s checksum=0.0 input=29915.9891938041 peakWS=5.7MB
+[14:18:44.373 + 1086.1s]   gfortran-natural-inputonly: ok t=0.0002s checksum=0.0000000000000000E+000 input=2.9915989193804096E+004 peakWS=5.6MB
+[14:18:44.944 + 1086.7s]   gfortran-expert-inputonly: ok t=0.0001908s checksum=0.0000000000000000E+000 input=2.9915989193804096E+004 peakWS=5.6MB
+[14:18:45.529 + 1087.2s]   ifx-natural-inputonly: ok t=0.0001593s checksum=0.0000000000000000E+000 input=2.9915989193804096E+004 peakWS=5.0MB
+[14:18:46.111 + 1087.8s]   ifx-expert-inputonly: ok t=0.0001464s checksum=0.0000000000000000E+000 input=2.9915989193804096E+004 peakWS=5.0MB
+[14:18:46.653 + 1088.4s] build dot mt8-repro-native full blade-llvm
+[14:18:49.900 + 1091.6s]   -> serial-only: LLVM lane has no OpenMP (1.8s)
+[14:18:49.900 + 1091.6s] build dot mt8-repro-native full blade-cpp
+[14:18:54.063 + 1095.8s]   -> ok (2.7s)
+[14:18:54.063 + 1095.8s] build dot mt8-repro-native full gfortran-natural
+[14:18:54.801 + 1096.5s]   -> ok (0.7s)
+[14:18:54.801 + 1096.5s] build dot mt8-repro-native full gfortran-expert
+[14:18:55.550 + 1097.3s]   -> ok (0.7s)
+[14:18:55.550 + 1097.3s] build dot mt8-repro-native full ifx-natural
+[14:18:57.974 + 1099.7s]   -> ok (2.3s)
+[14:18:57.974 + 1099.7s] build dot mt8-repro-native full ifx-expert
+[14:19:00.203 + 1101.9s]   -> ok (2.1s)
+[14:19:00.203 + 1101.9s] build dot mt8-repro-native full blade-llvm-inputonly
+[14:19:03.367 + 1105.1s]   -> serial-only: LLVM lane has no OpenMP (1.8s)
+[14:19:03.367 + 1105.1s] build dot mt8-repro-native full blade-cpp-inputonly
+[14:19:07.462 + 1109.2s]   -> ok (2.6s)
+[14:19:07.462 + 1109.2s] build dot mt8-repro-native full gfortran-natural-inputonly
+[14:19:08.187 + 1109.9s]   -> ok (0.7s)
+[14:19:08.187 + 1109.9s] build dot mt8-repro-native full gfortran-expert-inputonly
+[14:19:08.908 + 1110.6s]   -> ok (0.7s)
+[14:19:08.908 + 1110.6s] build dot mt8-repro-native full ifx-natural-inputonly
+[14:19:11.201 + 1112.9s]   -> ok (2.1s)
+[14:19:11.202 + 1112.9s] build dot mt8-repro-native full ifx-expert-inputonly
+[14:19:13.444 + 1115.2s]   -> ok (2.1s)
+[14:19:13.533 + 1115.2s]   blade-cpp: ok t=0.01529s checksum=749475.148712715 input=2998681.67744271 peakWS=51.5MB
+[14:19:14.128 + 1115.8s]   gfortran-natural: ok t=0.01134s checksum=7.4947514871275588E+005 input=2.9986816774427094E+006 peakWS=51.2MB
+[14:19:14.713 + 1116.4s]   gfortran-expert: ok t=0.01125s checksum=7.4947514871275588E+005 input=2.9986816774427094E+006 peakWS=51.2MB
+[14:19:15.313 + 1117.0s]   ifx-natural: ok t=0.01199s checksum=7.4947514871275588E+005 input=2.9986816774427094E+006 peakWS=52.8MB
+[14:19:15.912 + 1117.6s]   ifx-expert: ok t=0.01225s checksum=7.4947514871275588E+005 input=2.9986816774427094E+006 peakWS=52.8MB
+[14:19:16.500 + 1118.2s]   blade-cpp-inputonly: ok t=0.01232s checksum=0.0 input=2998681.67744271 peakWS=51.5MB
+[14:19:17.084 + 1118.8s]   gfortran-natural-inputonly: ok t=0.008807s checksum=0.0000000000000000E+000 input=2.9986816774427094E+006 peakWS=51.2MB
+[14:19:17.668 + 1119.4s]   gfortran-expert-inputonly: ok t=0.008271s checksum=0.0000000000000000E+000 input=2.9986816774427094E+006 peakWS=51.2MB
+[14:19:18.269 + 1120.0s]   ifx-natural-inputonly: ok t=0.009055s checksum=0.0000000000000000E+000 input=2.9986816774427094E+006 peakWS=52.8MB
+[14:19:18.868 + 1120.6s]   ifx-expert-inputonly: ok t=0.008843s checksum=0.0000000000000000E+000 input=2.9986816774427094E+006 peakWS=52.8MB
+[14:19:19.387 + 1121.1s] dot/mt8-repro-native: 21 rounds x 10 arms + 2 control(s) (minimum 21 (memory-bound: median warm-up < 50 ms)); ratio reference blade-cpp
+[14:19:26.110 + 1127.8s]   round 1/21: [compute]=12.78ms [memory]=5.182ms ifx-natural=11.38ms ifx-expert-inputonly=8.918ms ifx-expert=11.54ms blade-cpp-inputonly=10.59ms gfortran-expert=11.07ms gfortran-expert-inputonly=8.229ms ifx-natural-inputonly=9.481ms gfortran-natural-inputonly=8.821ms gfortran-natural=11.35ms blade-cpp=13.3ms
+[14:19:32.827 + 1134.5s]   round 2/21: ifx-expert=12.19ms ifx-natural=11.65ms ifx-expert-inputonly=9.208ms gfortran-natural=11.34ms [memory]=5.259ms blade-cpp-inputonly=11.28ms blade-cpp=14.88ms ifx-natural-inputonly=8.983ms gfortran-expert-inputonly=9.132ms [compute]=12.73ms gfortran-expert=12.21ms gfortran-natural-inputonly=9.857ms
+[14:19:39.544 + 1141.3s]   round 3/21: gfortran-natural-inputonly=8.393ms ifx-expert=11.55ms gfortran-expert=11.21ms ifx-natural=11.57ms gfortran-expert-inputonly=8.634ms blade-cpp-inputonly=10.81ms gfortran-natural=10.72ms ifx-expert-inputonly=8.641ms [memory]=5.196ms [compute]=12.79ms blade-cpp=15.11ms ifx-natural-inputonly=9.133ms
+[14:19:46.263 + 1148.0s]   round 4/21: ifx-natural=11.99ms [memory]=5.267ms gfortran-expert=11.05ms blade-cpp-inputonly=10.69ms [compute]=12.79ms ifx-natural-inputonly=8.924ms blade-cpp=13.76ms gfortran-natural=11.52ms gfortran-expert-inputonly=8.194ms ifx-expert-inputonly=8.683ms ifx-expert=11.61ms gfortran-natural-inputonly=8.955ms
+[14:19:52.993 + 1154.7s]   round 5/21: gfortran-natural=10.93ms ifx-natural=11.58ms [memory]=5.286ms gfortran-natural-inputonly=9.272ms blade-cpp=14.95ms blade-cpp-inputonly=12.54ms ifx-expert-inputonly=9.012ms ifx-natural-inputonly=8.691ms [compute]=12.77ms ifx-expert=11.47ms gfortran-expert=11.09ms gfortran-expert-inputonly=8.299ms
+[14:19:59.731 + 1161.4s]   round 6/21: ifx-natural-inputonly=8.749ms gfortran-natural=10.97ms gfortran-expert=11.22ms ifx-natural=11.71ms ifx-expert-inputonly=8.603ms gfortran-expert-inputonly=8.448ms ifx-expert=11.44ms [compute]=12.76ms blade-cpp-inputonly=12.74ms blade-cpp=15.23ms gfortran-natural-inputonly=9.347ms [memory]=5.44ms
+[14:20:06.459 + 1168.2s]   round 7/21: blade-cpp=14.77ms [compute]=12.69ms ifx-natural-inputonly=9.626ms gfortran-natural-inputonly=9.27ms ifx-natural=11.52ms blade-cpp-inputonly=12.18ms gfortran-expert=10.92ms [memory]=5.22ms ifx-expert-inputonly=8.976ms gfortran-expert-inputonly=8.143ms ifx-expert=11.48ms gfortran-natural=11.04ms
+[14:20:13.166 + 1174.9s]   round 8/21: gfortran-expert-inputonly=8.732ms ifx-natural-inputonly=8.807ms [memory]=5.295ms gfortran-natural-inputonly=8.123ms blade-cpp=13.3ms gfortran-natural=11.07ms blade-cpp-inputonly=11.5ms ifx-expert-inputonly=8.754ms ifx-natural=11.36ms [compute]=13ms ifx-expert=11.31ms gfortran-expert=11.09ms
+[14:20:19.882 + 1181.6s]   round 9/21: blade-cpp=13.2ms ifx-expert=11.37ms gfortran-expert=11ms gfortran-expert-inputonly=8.306ms ifx-natural-inputonly=9.216ms [memory]=5.193ms ifx-natural=11.48ms ifx-expert-inputonly=8.965ms blade-cpp-inputonly=12.42ms [compute]=12.58ms gfortran-natural=10.72ms gfortran-natural-inputonly=8.759ms
+[14:20:26.633 + 1188.3s]   round 10/21: ifx-natural=12.16ms gfortran-natural-inputonly=10.76ms [memory]=5.414ms ifx-expert-inputonly=9.774ms gfortran-expert-inputonly=8.266ms [compute]=13.01ms blade-cpp-inputonly=10.91ms ifx-expert=11.23ms gfortran-expert=10.81ms gfortran-natural=11.35ms blade-cpp=13.15ms ifx-natural-inputonly=8.801ms
+[14:20:33.367 + 1195.1s]   round 11/21: gfortran-expert=10.73ms blade-cpp-inputonly=11.33ms gfortran-expert-inputonly=8.419ms ifx-expert=11.38ms ifx-natural-inputonly=9.429ms ifx-expert-inputonly=9.774ms gfortran-natural-inputonly=8.231ms [memory]=5.219ms gfortran-natural=11.61ms [compute]=13.25ms blade-cpp=14.96ms ifx-natural=11.67ms
+[14:20:40.101 + 1201.8s]   round 12/21: gfortran-expert-inputonly=9.113ms ifx-expert-inputonly=10.34ms blade-cpp=15.73ms gfortran-natural=11.82ms ifx-natural-inputonly=9.483ms blade-cpp-inputonly=10.85ms [compute]=12.95ms gfortran-expert=11.27ms gfortran-natural-inputonly=8.376ms ifx-expert=11.9ms [memory]=5.218ms ifx-natural=11.73ms
+[14:20:46.819 + 1208.5s]   round 13/21: gfortran-natural-inputonly=9.046ms gfortran-expert=10.99ms ifx-expert=10.35ms [compute]=12.56ms ifx-natural-inputonly=8.71ms blade-cpp-inputonly=10.88ms gfortran-expert-inputonly=8.257ms ifx-expert-inputonly=8.772ms blade-cpp=13.04ms gfortran-natural=11.19ms [memory]=5.203ms ifx-natural=11.31ms
+[14:20:53.565 + 1215.3s]   round 14/21: ifx-natural=11.79ms gfortran-expert-inputonly=8.463ms ifx-expert=11.3ms blade-cpp-inputonly=13.19ms blade-cpp=13.1ms gfortran-natural-inputonly=9.354ms ifx-natural-inputonly=8.816ms [memory]=5.353ms ifx-expert-inputonly=9.95ms gfortran-expert=11.61ms [compute]=12.78ms gfortran-natural=10.67ms
+[14:21:00.302 + 1222.0s]   round 15/21: [memory]=5.282ms ifx-expert-inputonly=9.281ms gfortran-expert-inputonly=8.58ms ifx-natural-inputonly=8.696ms ifx-expert=12.01ms gfortran-natural=10.69ms gfortran-expert=10.74ms ifx-natural=11.43ms blade-cpp-inputonly=10.7ms blade-cpp=12.99ms [compute]=12.55ms gfortran-natural-inputonly=8.457ms
+[14:21:07.034 + 1228.7s]   round 16/21: blade-cpp-inputonly=11.42ms gfortran-natural-inputonly=8.379ms ifx-natural-inputonly=8.649ms gfortran-natural=10.93ms gfortran-expert=10.92ms [memory]=5.215ms ifx-natural=11.45ms ifx-expert-inputonly=8.809ms [compute]=12.71ms blade-cpp=14.89ms gfortran-expert-inputonly=9.272ms ifx-expert=11.3ms
+[14:21:13.769 + 1235.5s]   round 17/21: ifx-expert=11.55ms ifx-natural=11.51ms ifx-natural-inputonly=9.068ms gfortran-natural-inputonly=8.242ms blade-cpp=13.43ms gfortran-expert=11.17ms blade-cpp-inputonly=10.95ms gfortran-natural=11.66ms gfortran-expert-inputonly=8.429ms ifx-expert-inputonly=8.806ms [memory]=5.237ms [compute]=12.92ms
+[14:21:20.502 + 1242.2s]   round 18/21: gfortran-natural-inputonly=8.198ms gfortran-natural=11.24ms blade-cpp=13.38ms gfortran-expert=10.97ms ifx-natural-inputonly=9.486ms blade-cpp-inputonly=11.13ms [memory]=5.315ms [compute]=12.7ms ifx-expert-inputonly=9.296ms gfortran-expert-inputonly=8.409ms ifx-expert=11.67ms ifx-natural=10.76ms
+[14:21:27.233 + 1248.9s]   round 19/21: ifx-natural=11.5ms gfortran-expert-inputonly=8.595ms [compute]=12.71ms blade-cpp-inputonly=10.74ms [memory]=5.43ms gfortran-natural=11.25ms gfortran-expert=11.12ms ifx-expert=12.06ms ifx-natural-inputonly=8.862ms ifx-expert-inputonly=8.66ms blade-cpp=13.17ms gfortran-natural-inputonly=8.71ms
+[14:21:33.958 + 1255.7s]   round 20/21: gfortran-natural-inputonly=8.245ms blade-cpp-inputonly=10.76ms ifx-expert=11.29ms ifx-expert-inputonly=8.936ms gfortran-natural=10.84ms [memory]=5.082ms ifx-natural=11.6ms gfortran-expert=11.31ms gfortran-expert-inputonly=8.346ms ifx-natural-inputonly=8.944ms blade-cpp=13.54ms [compute]=12.74ms
+[14:21:40.689 + 1262.4s]   round 21/21: gfortran-natural-inputonly=8.593ms ifx-natural-inputonly=8.769ms gfortran-expert-inputonly=8.17ms [memory]=5.428ms [compute]=12.54ms ifx-expert=11.8ms ifx-natural=11.46ms gfortran-expert=10.91ms gfortran-natural=11.33ms blade-cpp=15.16ms ifx-expert-inputonly=8.724ms blade-cpp-inputonly=11.29ms
+[14:21:44.068 + 1265.8s] saxpy mt8-repro-native: serial counterpart not run in this session; validating it at smoke size
+[14:21:44.068 + 1265.8s] build saxpy serial-repro-native smoke blade-llvm
+[14:21:47.393 + 1269.1s]   -> ok (1.8s)
+[14:21:47.393 + 1269.1s] build saxpy serial-repro-native smoke blade-cpp
+[14:21:51.652 + 1273.4s]   -> ok (2.7s)
+[14:21:51.652 + 1273.4s] build saxpy serial-repro-native smoke gfortran-natural
+[14:21:52.395 + 1274.1s]   -> ok (0.7s)
+[14:21:52.395 + 1274.1s] build saxpy serial-repro-native smoke gfortran-expert
+[14:21:53.107 + 1274.8s]   -> ok (0.6s)
+[14:21:53.107 + 1274.8s] build saxpy serial-repro-native smoke ifx-natural
+[14:21:55.564 + 1277.3s]   -> ok (2.3s)
+[14:21:55.564 + 1277.3s] build saxpy serial-repro-native smoke ifx-expert
+[14:21:57.782 + 1279.5s]   -> ok (2.1s)
+[14:21:57.782 + 1279.5s] build saxpy serial-repro-native smoke blade-llvm-inputonly
+[14:22:00.917 + 1282.6s]   -> ok (1.7s)
+[14:22:00.917 + 1282.6s] build saxpy serial-repro-native smoke blade-cpp-inputonly
+[14:22:04.913 + 1286.6s]   -> ok (2.5s)
+[14:22:04.913 + 1286.6s] build saxpy serial-repro-native smoke gfortran-natural-inputonly
+[14:22:05.616 + 1287.3s]   -> ok (0.6s)
+[14:22:05.616 + 1287.3s] build saxpy serial-repro-native smoke gfortran-expert-inputonly
+[14:22:06.315 + 1288.0s]   -> ok (0.6s)
+[14:22:06.315 + 1288.0s] build saxpy serial-repro-native smoke ifx-natural-inputonly
+[14:22:08.615 + 1290.3s]   -> ok (2.2s)
+[14:22:08.615 + 1290.3s] build saxpy serial-repro-native smoke ifx-expert-inputonly
+[14:22:10.853 + 1292.6s]   -> ok (2.1s)
+[14:22:10.920 + 1292.6s]   blade-llvm: ok t=0.0001586s checksum=36580.3470555598 input=19956.4945518407 peakWS=4.8MB
+[14:22:11.494 + 1293.2s]   blade-cpp: ok t=0.0002296s checksum=36580.3470555598 input=19956.4945518407 peakWS=5.7MB
+[14:22:12.067 + 1293.8s]   gfortran-natural: ok t=0.000209s checksum=3.6580347055559781E+004 input=1.9956494551840704E+004 peakWS=5.6MB
+[14:22:12.644 + 1294.4s]   gfortran-expert: ok t=0.0001818s checksum=3.6580347055559781E+004 input=1.9956494551840704E+004 peakWS=5.6MB
+[14:22:13.238 + 1295.0s]   ifx-natural: ok t=0.0001694s checksum=3.6580347055559781E+004 input=1.9956494551840704E+004 peakWS=5.0MB
+[14:22:13.825 + 1295.5s]   ifx-expert: ok t=0.0001464s checksum=3.6580347055559781E+004 input=1.9956494551840704E+004 peakWS=5.0MB
+[14:22:14.400 + 1296.1s]   blade-llvm-inputonly: ok t=0.0001127s checksum=0.0 input=19956.4945518407 peakWS=4.8MB
+[14:22:14.980 + 1296.7s]   blade-cpp-inputonly: ok t=0.0001652s checksum=0.0 input=19956.4945518407 peakWS=5.6MB
+[14:22:15.556 + 1297.3s]   gfortran-natural-inputonly: ok t=0.0001477s checksum=0.0000000000000000E+000 input=1.9956494551840704E+004 peakWS=5.4MB
+[14:22:16.131 + 1297.8s]   gfortran-expert-inputonly: ok t=0.0001454s checksum=0.0000000000000000E+000 input=1.9956494551840704E+004 peakWS=5.4MB
+[14:22:16.720 + 1298.4s]   ifx-natural-inputonly: ok t=0.0001117s checksum=0.0000000000000000E+000 input=1.9956494551840704E+004 peakWS=5.0MB
+[14:22:17.310 + 1299.0s]   ifx-expert-inputonly: ok t=0.0001134s checksum=0.0000000000000000E+000 input=1.9956494551840704E+004 peakWS=5.0MB
+[14:22:17.856 + 1299.6s] build saxpy mt8-repro-native full blade-llvm
+[14:22:21.113 + 1302.8s]   -> serial-only: LLVM lane has no OpenMP (1.8s)
+[14:22:21.114 + 1302.8s] build saxpy mt8-repro-native full blade-cpp
+[14:22:25.273 + 1307.0s]   -> ok (2.7s)
+[14:22:25.273 + 1307.0s] build saxpy mt8-repro-native full gfortran-natural
+[14:22:26.047 + 1307.8s]   -> ok (0.7s)
+[14:22:26.047 + 1307.8s] build saxpy mt8-repro-native full gfortran-expert
+[14:22:26.793 + 1308.5s]   -> ok (0.7s)
+[14:22:26.793 + 1308.5s] build saxpy mt8-repro-native full ifx-natural
+[14:22:29.213 + 1310.9s]   -> ok (2.3s)
+[14:22:29.213 + 1310.9s] build saxpy mt8-repro-native full ifx-expert
+[14:22:31.441 + 1313.2s]   -> ok (2.1s)
+[14:22:31.441 + 1313.2s] build saxpy mt8-repro-native full blade-llvm-inputonly
+[14:22:34.589 + 1316.3s]   -> serial-only: LLVM lane has no OpenMP (1.7s)
+[14:22:34.589 + 1316.3s] build saxpy mt8-repro-native full blade-cpp-inputonly
+[14:22:38.588 + 1320.3s]   -> ok (2.6s)
+[14:22:38.588 + 1320.3s] build saxpy mt8-repro-native full gfortran-natural-inputonly
+[14:22:39.302 + 1321.0s]   -> ok (0.6s)
+[14:22:39.302 + 1321.0s] build saxpy mt8-repro-native full gfortran-expert-inputonly
+[14:22:40.021 + 1321.7s]   -> ok (0.7s)
+[14:22:40.021 + 1321.7s] build saxpy mt8-repro-native full ifx-natural-inputonly
+[14:22:42.341 + 1324.1s]   -> ok (2.2s)
+[14:22:42.341 + 1324.1s] build saxpy mt8-repro-native full ifx-expert-inputonly
+[14:22:44.607 + 1326.3s]   -> ok (2.1s)
+[14:22:44.692 + 1326.4s]   blade-cpp: ok t=0.01233s checksum=3663229.58366419 input=1998718.33129289 peakWS=51.2MB
+[14:22:45.281 + 1327.0s]   gfortran-natural: ok t=0.01018s checksum=3.6632295836644098E+006 input=1.9987183312928942E+006 peakWS=51.2MB
+[14:22:45.868 + 1327.6s]   gfortran-expert: ok t=0.01047s checksum=3.6632295836644098E+006 input=1.9987183312928942E+006 peakWS=51.2MB
+[14:22:46.475 + 1328.2s]   ifx-natural: ok t=0.009738s checksum=3.6632295836644098E+006 input=1.9987183312928942E+006 peakWS=52.9MB
+[14:22:47.076 + 1328.8s]   ifx-expert: ok t=0.009242s checksum=3.6632295836644098E+006 input=1.9987183312928942E+006 peakWS=52.9MB
+[14:22:47.660 + 1329.4s]   blade-cpp-inputonly: ok t=0.007864s checksum=0.0 input=1998718.33129289 peakWS=36.2MB
+[14:22:48.244 + 1330.0s]   gfortran-natural-inputonly: ok t=0.005343s checksum=0.0000000000000000E+000 input=1.9987183312928942E+006 peakWS=36.0MB
+[14:22:48.829 + 1330.5s]   gfortran-expert-inputonly: ok t=0.005323s checksum=0.0000000000000000E+000 input=1.9987183312928942E+006 peakWS=36.0MB
+[14:22:49.426 + 1331.1s]   ifx-natural-inputonly: ok t=0.006003s checksum=0.0000000000000000E+000 input=1.9987183312928942E+006 peakWS=37.6MB
+[14:22:50.027 + 1331.7s]   ifx-expert-inputonly: ok t=0.006297s checksum=0.0000000000000000E+000 input=1.9987183312928942E+006 peakWS=37.6MB
+[14:22:50.549 + 1332.3s] saxpy/mt8-repro-native: 21 rounds x 10 arms + 2 control(s) (minimum 21 (memory-bound: median warm-up < 50 ms)); ratio reference blade-cpp
+[14:22:57.275 + 1339.0s]   round 1/21: gfortran-expert=9.364ms blade-cpp=11.91ms [memory]=5.244ms gfortran-natural-inputonly=5.529ms gfortran-natural=9.638ms gfortran-expert-inputonly=6.26ms ifx-expert-inputonly=5.918ms blade-cpp-inputonly=7.496ms ifx-natural-inputonly=6.225ms [compute]=12.72ms ifx-natural=9.849ms ifx-expert=9.205ms
+[14:23:04.014 + 1345.7s]   round 2/21: gfortran-expert-inputonly=5.663ms ifx-expert-inputonly=7.284ms ifx-expert=9.045ms [memory]=5.158ms blade-cpp-inputonly=8.521ms ifx-natural-inputonly=6.044ms ifx-natural=9.701ms blade-cpp=13.32ms [compute]=12.76ms gfortran-natural=9.91ms gfortran-expert=9.834ms gfortran-natural-inputonly=5.485ms
+[14:23:10.733 + 1352.4s]   round 3/21: gfortran-natural-inputonly=5.781ms ifx-natural=10.15ms gfortran-expert-inputonly=5.473ms ifx-expert-inputonly=5.743ms [compute]=12.91ms ifx-natural-inputonly=5.95ms [memory]=5.148ms gfortran-expert=8.629ms gfortran-natural=10.18ms blade-cpp-inputonly=7.353ms blade-cpp=12.13ms ifx-expert=9.097ms
+[14:23:17.468 + 1359.2s]   round 4/21: [compute]=12.51ms blade-cpp=12.61ms [memory]=5.154ms ifx-expert-inputonly=6.198ms blade-cpp-inputonly=7.462ms ifx-expert=9.356ms gfortran-expert-inputonly=5.782ms gfortran-natural-inputonly=5.566ms ifx-natural-inputonly=6.633ms gfortran-expert=8.829ms ifx-natural=10.13ms gfortran-natural=10.67ms
+[14:23:24.205 + 1365.9s]   round 5/21: blade-cpp-inputonly=7.306ms gfortran-expert=8.874ms [compute]=12.65ms gfortran-expert-inputonly=6.362ms [memory]=5.445ms gfortran-natural-inputonly=5.743ms ifx-expert-inputonly=6.387ms blade-cpp=12.68ms gfortran-natural=9.781ms ifx-natural=10.52ms ifx-natural-inputonly=6.532ms ifx-expert=9.481ms
+[14:23:30.950 + 1372.7s]   round 6/21: [memory]=5.363ms ifx-expert-inputonly=5.958ms gfortran-expert-inputonly=5.282ms gfortran-natural-inputonly=5.737ms ifx-natural-inputonly=7.865ms gfortran-expert=9.188ms gfortran-natural=9.649ms blade-cpp=12.25ms ifx-expert=9.281ms [compute]=12.6ms ifx-natural=10.31ms blade-cpp-inputonly=8.889ms
+[14:23:37.700 + 1379.4s]   round 7/21: [memory]=5.274ms ifx-natural=10.22ms gfortran-expert-inputonly=6.142ms ifx-expert-inputonly=5.951ms gfortran-natural-inputonly=5.59ms ifx-expert=9.553ms blade-cpp-inputonly=9.038ms ifx-natural-inputonly=5.992ms gfortran-expert=8.874ms gfortran-natural=10.54ms [compute]=12.91ms blade-cpp=12.71ms
+[14:23:44.434 + 1386.1s]   round 8/21: gfortran-expert-inputonly=5.572ms [memory]=5.199ms [compute]=12.69ms ifx-expert-inputonly=5.923ms blade-cpp-inputonly=7.317ms ifx-expert=9.533ms gfortran-expert=8.788ms ifx-natural-inputonly=7.195ms gfortran-natural=10.25ms blade-cpp=12.04ms ifx-natural=9.594ms gfortran-natural-inputonly=5.301ms
+[14:23:51.177 + 1392.9s]   round 9/21: gfortran-expert=8.717ms blade-cpp-inputonly=7.907ms ifx-natural-inputonly=5.878ms [compute]=12.71ms gfortran-natural=9.827ms gfortran-natural-inputonly=5.387ms ifx-natural=10.15ms ifx-expert=9.178ms blade-cpp=12.22ms [memory]=5.145ms gfortran-expert-inputonly=6.218ms ifx-expert-inputonly=6.354ms
+[14:23:57.924 + 1399.6s]   round 10/21: blade-cpp-inputonly=7.9ms ifx-expert-inputonly=6.449ms [memory]=5.526ms blade-cpp=11.98ms ifx-natural=10.16ms ifx-expert=10.25ms [compute]=13.03ms gfortran-expert=8.945ms ifx-natural-inputonly=6.578ms gfortran-expert-inputonly=5.473ms gfortran-natural-inputonly=5.914ms gfortran-natural=10.27ms
+[14:24:04.668 + 1406.4s]   round 11/21: blade-cpp=12.78ms gfortran-expert-inputonly=5.621ms [memory]=5.578ms ifx-natural=10.14ms ifx-expert-inputonly=5.96ms blade-cpp-inputonly=7.678ms gfortran-natural-inputonly=5.906ms [compute]=12.54ms gfortran-natural=10.96ms ifx-expert=9.312ms gfortran-expert=9.065ms ifx-natural-inputonly=6.314ms
+[14:24:11.412 + 1413.1s]   round 12/21: gfortran-expert-inputonly=6.161ms [memory]=5.574ms gfortran-natural-inputonly=5.796ms blade-cpp=13.07ms ifx-expert=9.611ms gfortran-expert=8.93ms blade-cpp-inputonly=7.427ms ifx-natural=9.965ms [compute]=12.87ms gfortran-natural=9.802ms ifx-natural-inputonly=5.796ms ifx-expert-inputonly=6.042ms
+[14:24:18.154 + 1419.9s]   round 13/21: [compute]=12.51ms gfortran-natural-inputonly=5.588ms gfortran-expert=9.186ms ifx-expert-inputonly=6.669ms ifx-natural-inputonly=5.991ms gfortran-expert-inputonly=5.713ms blade-cpp=12.53ms ifx-natural=10.34ms ifx-expert=9.539ms blade-cpp-inputonly=7.21ms [memory]=5.23ms gfortran-natural=10.43ms
+[14:24:24.900 + 1426.6s]   round 14/21: ifx-expert=9.527ms gfortran-natural-inputonly=5.663ms [memory]=5.152ms ifx-natural=10.24ms gfortran-natural=10.05ms blade-cpp=12.07ms [compute]=12.76ms blade-cpp-inputonly=7.307ms ifx-expert-inputonly=6.576ms ifx-natural-inputonly=5.893ms gfortran-expert=9.019ms gfortran-expert-inputonly=5.65ms
+[14:24:31.650 + 1433.4s]   round 15/21: [memory]=5.154ms gfortran-expert-inputonly=5.33ms [compute]=12.64ms gfortran-expert=9.001ms gfortran-natural=9.772ms blade-cpp=12.08ms ifx-expert-inputonly=6.162ms ifx-natural=11.22ms blade-cpp-inputonly=7.272ms ifx-expert=9.354ms ifx-natural-inputonly=6.29ms gfortran-natural-inputonly=5.641ms
+[14:24:38.403 + 1440.1s]   round 16/21: [compute]=12.75ms [memory]=5.211ms ifx-natural-inputonly=6.453ms gfortran-natural-inputonly=5.366ms ifx-natural=10.37ms gfortran-natural=9.862ms gfortran-expert=9.276ms ifx-expert=9.416ms ifx-expert-inputonly=6.492ms blade-cpp=12.11ms gfortran-expert-inputonly=5.347ms blade-cpp-inputonly=9.222ms
+[14:24:45.157 + 1446.9s]   round 17/21: ifx-natural=9.16ms gfortran-expert=10.16ms gfortran-natural=11.15ms blade-cpp-inputonly=8.509ms ifx-natural-inputonly=6.174ms gfortran-expert-inputonly=6.5ms ifx-expert-inputonly=6.94ms ifx-expert=9.411ms [compute]=13.18ms blade-cpp=12.68ms [memory]=5.273ms gfortran-natural-inputonly=5.603ms
+[14:24:51.907 + 1453.6s]   round 18/21: blade-cpp-inputonly=7.17ms gfortran-expert=8.856ms gfortran-expert-inputonly=5.383ms ifx-expert=9.877ms ifx-natural=9.932ms [memory]=5.345ms blade-cpp=12.22ms gfortran-natural-inputonly=5.446ms gfortran-natural=9.839ms ifx-natural-inputonly=6.218ms ifx-expert-inputonly=6.273ms [compute]=13.1ms
+[14:24:58.656 + 1460.4s]   round 19/21: [memory]=5.325ms ifx-natural=9.758ms ifx-expert-inputonly=5.993ms gfortran-natural-inputonly=6.058ms blade-cpp-inputonly=8.318ms gfortran-natural=10.53ms blade-cpp=13.11ms gfortran-expert=8.815ms gfortran-expert-inputonly=6.189ms ifx-natural-inputonly=6.136ms ifx-expert=9.23ms [compute]=12.72ms
+[14:25:05.414 + 1467.1s]   round 20/21: gfortran-natural-inputonly=6.013ms [memory]=5.278ms ifx-expert=9.577ms gfortran-expert-inputonly=5.552ms [compute]=12.84ms blade-cpp=13.6ms ifx-natural-inputonly=6.624ms gfortran-natural=9.944ms ifx-expert-inputonly=5.758ms gfortran-expert=8.907ms ifx-natural=10.08ms blade-cpp-inputonly=7.821ms
+[14:25:12.151 + 1473.9s]   round 21/21: gfortran-expert-inputonly=5.298ms [memory]=5.237ms ifx-natural-inputonly=6.424ms blade-cpp-inputonly=7.158ms ifx-expert=9.101ms [compute]=12.63ms ifx-expert-inputonly=5.781ms gfortran-natural-inputonly=5.862ms gfortran-natural=10.16ms ifx-natural=9.905ms gfortran-expert=8.936ms blade-cpp=11.91ms
+
+# Blade vs Fortran -- bench session 2026-10-18T14:00:38
+
+- host LAPTOP-350H6LDB | AMD Ryzen 7 5800HS with Radeon Graphics | 8C/16T | 15.41 GB | power ac | max processor state AC 100% | boost AC None | Power Scheme GUID: 64a64f24-65b9-4b56-befd-5ec1eaced9b3  (Silent)
+- git fceb895d4e8df71131086a94652b5cab1b120850 | Blade.dll 74b6728036b170d9 | GNU Fortran (Rev4, Built by MSYS2 project) 16.2.0 | Intel(R) Fortran Compiler for applications running on Intel(R) 64, Version 2026.1.0 Build 20260617 | clang version 22.1.8 (https://github.com/msys2/MINGW-packages d34feaaa1d0aff624c870910b6f2589aa40d20de)
+- size `full` | duration 1474.1 s | pins: pins-A.json, pins-B.json
+- PRIMARY estimand: the complete timed region. ratio = median(arm) / median(Blade reference), round-block bootstrap 95% CI (10000 resamples); ratio > 1 = Blade faster. Verdicts (delta 0.1): win / detectable-win / equivalent / detectable-loss / loss / inconclusive; `suppressed` = the block failed a drift, trend or control check. Intervals are pointwise; no suite-wide claim. incremental = median(arm) - median(its own input-only twin), NOT kernel time. Reference: blade-llvm (serial), blade-cpp (mt8, or when the LLVM lane refused). Fresh-process, allocation-inclusive measurements.
+- **FLAG**: antisym/mt8-repro-native: inference suppressed: trend: ifx-natural first-half vs second-half median moved 22.0%; trend: control memory moved 5.2% within the block
+- **FLAG**: comoment3/mt8-repro-native: inference suppressed: trend: gfortran-natural first-half vs second-half median moved 11.0%; trend: ifx-expert first-half vs second-half median moved 11.1%
+- **FLAG**: gram/mt8-repro-native: inference suppressed: trend: gfortran-natural first-half vs second-half median moved 22.6%
+- **FLAG**: pairkernel/mt8-repro-native: inference suppressed: trend: gfortran-natural first-half vs second-half median moved 7.2%; trend: ifx-natural first-half vs second-half median moved 6.1%
+- **FLAG**: stencil/mt8-repro-native: inference suppressed: trend: blade-cpp-inputonly first-half vs second-half median moved 5.6%
+- **FLAG**: dot/mt8-repro-native: inference suppressed: trend: blade-cpp first-half vs second-half median moved 6.1%; trend: gfortran-natural-inputonly first-half vs second-half median moved 7.6%
+
+## mt8-repro-native
+
+Blade reference per kernel: antisym=blade-cpp, comoment3=blade-cpp, gram=blade-cpp, pairkernel=blade-cpp, fusedchain=blade-cpp, onepass=None, recur=None, stencil=blade-cpp, dot=blade-cpp, saxpy=blade-cpp
+
+| kernel | arm | status | n | min (s) | median (s) | IQR (s) | ratio vs ref [95% CI] | verdict | hypothesis | fold form | parallelism | peak WS (MB) | incremental (s) [CI] | incremental ratio [CI] | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| antisym | blade-llvm | serial-only | 0 | -- | -- | -- |  |  |  | in-order |  |  |  |  | LLVM lane has no OpenMP |
+| antisym | blade-cpp | ok | 7 | 0.06021 | 0.0607 | 0.001098 | ref |  |  | in-order | openmp (2 construct(s)); threaded maps, serial folds (BLADE_FP_REPRO) | 18.7 |  |  |  |
+| antisym | gfortran-natural | ok | 7 | 0.1011 | 0.1067 | 0.005357 | 1.758 [1.656, 1.809] | suppressed | WIN ~2x (half the cells, no diagonal) |  | openmp runtime linked | 23.8 |  |  |  |
+| antisym | gfortran-expert | ok | 7 | 0.009114 | 0.009358 | 0.0002865 | 0.154 [0.149, 0.158] | suppressed | parity +-15% |  | openmp runtime linked | 33.1 |  |  |  |
+| antisym | ifx-natural | ok | 7 | 0.04833 | 0.05918 | 0.01748 | 0.975 [0.799, 1.148] | suppressed | WIN ~2x (half the cells, no diagonal) |  | openmp runtime linked | 25.4 |  |  |  |
+| antisym | ifx-expert | ok | 7 | 0.009526 | 0.009841 | 0.0003663 | 0.162 [0.158, 0.167] | suppressed | parity +-15% |  | openmp runtime linked | 34.7 |  |  |  |
+
+> antisym mt8-repro-native: inference suppressed -- trend: ifx-natural first-half vs second-half median moved 22.0%; trend: control memory moved 5.2% within the block
+
+| comoment3 | blade-llvm | serial-only | 0 | -- | -- | -- |  |  |  | in-order |  |  |  |  | LLVM lane has no OpenMP |
+| comoment3 | blade-cpp | ok | 7 | 0.09158 | 0.09268 | 0.001545 | ref |  |  | in-order | openmp (2 construct(s)); threaded maps, serial folds (BLADE_FP_REPRO) | 12.6 |  |  |  |
+| comoment3 | gfortran-natural | ok | 7 | 0.08356 | 0.09318 | 0.00925 | 1.005 [0.961, 1.060] | suppressed | WIN 4-6x (C(p+2,3) vs p^3 cells, minus checksum tax) |  | openmp runtime linked | 43.9 |  |  |  |
+| comoment3 | gfortran-expert | ok | 7 | 0.004697 | 0.005096 | 0.0001546 | 0.055 [0.053, 0.056] | suppressed | parity to 1.3x loss |  | openmp runtime linked | 14.5 |  |  |  |
+| comoment3 | ifx-natural | ok | 7 | 0.1049 | 0.1162 | 0.007122 | 1.254 [1.173, 1.298] | suppressed | WIN 4-6x (C(p+2,3) vs p^3 cells, minus checksum tax) |  | openmp runtime linked | 45.4 |  |  |  |
+| comoment3 | ifx-expert | ok | 7 | 0.003933 | 0.004021 | 0.0002987 | 0.043 [0.043, 0.048] | suppressed | parity to 1.3x loss |  | openmp runtime linked | 15.6 |  |  |  |
+
+> comoment3 mt8-repro-native: inference suppressed -- trend: gfortran-natural first-half vs second-half median moved 11.0%; trend: ifx-expert first-half vs second-half median moved 11.1%
+
+| gram | blade-llvm | serial-only | 0 | -- | -- | -- |  |  |  | in-order |  |  |  |  | LLVM lane has no OpenMP |
+| gram | blade-cpp | ok | 7 | 0.1366 | 0.1383 | 0.005351 | ref |  |  | in-order | openmp (2 construct(s)); threaded maps, serial folds (BLADE_FP_REPRO) | 27.8 |  |  |  |
+| gram | gfortran-natural | ok | 7 | 0.5571 | 0.6986 | 0.1531 | 5.050 [4.132, 5.385] | suppressed | win 1.5-2x if matmul is a naive nest; parity/loss if a blocked runtime kernel |  | openmp runtime linked | 37.3 |  |  | matmul is unannotated: parallel preparation, serial kernel unless the runtime threads matmul (FORT records) |
+| gram | gfortran-expert | ok | 7 | 0.01952 | 0.02019 | 0.0009949 | 0.146 [0.139, 0.151] | suppressed | LOSS 1.5-3x strict; narrows in fast; parity in blas |  | openmp runtime linked | 52.1 |  |  |  |
+| gram | ifx-natural | ok | 7 | 0.5861 | 0.6055 | 0.01205 | 4.377 [4.090, 4.464] | suppressed | win 1.5-2x if matmul is a naive nest; parity/loss if a blocked runtime kernel |  | openmp runtime linked | 58.3 |  |  | matmul is unannotated: parallel preparation, serial kernel unless the runtime threads matmul (FORT records) |
+| gram | ifx-expert | ok | 7 | 0.01833 | 0.01857 | 0.001041 | 0.134 [0.127, 0.147] | suppressed | LOSS 1.5-3x strict; narrows in fast; parity in blas |  | openmp runtime linked | 53.7 |  |  |  |
+
+> gram mt8-repro-native: inference suppressed -- trend: gfortran-natural first-half vs second-half median moved 22.6%
+
+| pairkernel | blade-llvm | serial-only | 0 | -- | -- | -- |  |  |  | in-order |  |  |  |  | LLVM lane has no OpenMP |
+| pairkernel | blade-cpp | ok | 21 | 0.05403 | 0.05619 | 0.002464 | ref |  |  | in-order | openmp (2 construct(s)); threaded maps, serial folds (BLADE_FP_REPRO) | 29.7 |  |  |  |
+| pairkernel | gfortran-natural | ok | 21 | 0.01336 | 0.01424 | 0.002365 | 0.253 [0.242, 0.268] | suppressed | WIN ~2x (half the transcendentals) |  | openmp runtime linked | 53.3 |  |  |  |
+| pairkernel | gfortran-expert | ok | 21 | 0.005991 | 0.006202 | 0.0004373 | 0.110 [0.109, 0.115] | suppressed | parity within 5% |  | openmp runtime linked | 29.5 |  |  |  |
+| pairkernel | ifx-natural | ok | 21 | 0.01474 | 0.01663 | 0.002301 | 0.296 [0.276, 0.313] | suppressed | WIN ~2x (half the transcendentals) |  | openmp runtime linked | 54.8 |  |  |  |
+| pairkernel | ifx-expert | ok | 21 | 0.005925 | 0.006213 | 0.0003489 | 0.111 [0.108, 0.115] | suppressed | parity within 5% |  | openmp runtime linked | 30.9 |  |  |  |
+
+> pairkernel mt8-repro-native: inference suppressed -- trend: gfortran-natural first-half vs second-half median moved 7.2%; trend: ifx-natural first-half vs second-half median moved 6.1%
+
+| fusedchain | blade-llvm | serial-only | 0 | -- | -- | -- |  |  |  | in-order |  |  |  |  | LLVM lane has no OpenMP |
+| fusedchain | blade-cpp | ok | 21 | 0.005415 | 0.005559 | 0.0002549 | ref |  |  | in-order | openmp (1 construct(s)); threaded maps, serial folds (BLADE_FP_REPRO) | 21.0 | 0.001542 [0.001444, 0.001722] | ref |  |
+| fusedchain | gfortran-natural | ok | 21 | 0.01092 | 0.01146 | 0.0005934 | 2.062 [1.997, 2.105] | win | WIN 1.5-2.5x (no temporaries) |  | openmp runtime linked | 66.5 | 0.00793 [0.007667, 0.00814] | 5.143 [4.594, 5.491] |  |
+| fusedchain | gfortran-expert | ok | 21 | 0.004049 | 0.004181 | 0.0002332 | 0.752 [0.728, 0.776] | loss | parity |  | openmp runtime linked | 20.7 | 0.0006551 [0.0004736, 0.0007675] | 0.425 [0.303, 0.518] |  |
+| fusedchain | ifx-natural | ok | 21 | 0.01106 | 0.01149 | 0.0003007 | 2.067 [2.009, 2.095] | win | WIN 1.5-2.5x (no temporaries) |  | openmp runtime linked | 68.2 | 0.00745 [0.007346, 0.007647] | 4.832 [4.349, 5.201] |  |
+| fusedchain | ifx-expert | ok | 21 | 0.004366 | 0.004642 | 0.0002936 | 0.835 [0.809, 0.860] | loss | parity |  | openmp runtime linked | 22.3 | 0.000643 [0.0005362, 0.0007651] | 0.417 [0.337, 0.520] |  |
+| fusedchain | blade-llvm-inputonly | serial-only | 0 | -- | -- | -- |  |  |  | in-order |  |  |  |  | LLVM lane has no OpenMP |
+| fusedchain | blade-cpp-inputonly | ok | 21 | 0.003855 | 0.004017 | 0.0001229 |  |  |  | in-order | openmp (1 construct(s)); threaded maps, serial folds (BLADE_FP_REPRO) | 21.0 |  |  |  |
+| fusedchain | gfortran-natural-inputonly | ok | 21 | 0.003383 | 0.003535 | 0.0002523 |  |  |  |  | openmp runtime linked | 20.7 |  |  |  |
+| fusedchain | gfortran-expert-inputonly | ok | 21 | 0.003344 | 0.003526 | 0.0002505 |  |  |  |  | openmp runtime linked | 20.7 |  |  |  |
+| fusedchain | ifx-natural-inputonly | ok | 21 | 0.003809 | 0.004042 | 0.0001782 |  |  |  |  | openmp runtime linked | 22.3 |  |  |  |
+| fusedchain | ifx-expert-inputonly | ok | 21 | 0.003837 | 0.003999 | 0.0001626 |  |  |  |  | openmp runtime linked | 22.2 |  |  |  |
+| onepass | blade-llvm | serial-only | 0 | -- | -- | -- |  |  |  | in-order |  |  |  |  | LLVM lane has no OpenMP |
+| onepass | blade-cpp | no-parallel-form | 0 | -- | -- | -- |  |  |  | in-order |  |  |  |  | kernel.json no_parallel_form (spec: no licensed parallel spelling) |
+| onepass | gfortran-natural | ok | 21 | 0.01453 | 0.01494 | 0.0005766 |  |  | WIN 2-3x (one pass vs four) |  | openmp runtime linked | 43.6 |  |  |  |
+| onepass | gfortran-expert | ok | 21 | 0.01065 | 0.01094 | 0.0003713 |  |  | parity |  | openmp runtime linked | 43.6 |  |  |  |
+| onepass | ifx-natural | ok | 21 | 0.01499 | 0.01535 | 0.0003249 |  |  | WIN 2-3x (one pass vs four) |  | openmp runtime linked | 45.1 |  |  |  |
+| onepass | ifx-expert | ok | 21 | 0.01109 | 0.01141 | 0.0002429 |  |  | parity |  | openmp runtime linked | 45.1 |  |  |  |
+| onepass | blade-llvm-inputonly | serial-only | 0 | -- | -- | -- |  |  |  | in-order |  |  |  |  | LLVM lane has no OpenMP |
+| onepass | blade-cpp-inputonly | no-parallel-form | 0 | -- | -- | -- |  |  |  | in-order |  |  |  |  | kernel.json no_parallel_form (spec: no licensed parallel spelling) |
+| onepass | gfortran-natural-inputonly | ok | 21 | 0.008115 | 0.008508 | 0.0005057 |  |  |  |  | openmp runtime linked | 43.6 |  |  |  |
+| onepass | gfortran-expert-inputonly | ok | 21 | 0.008095 | 0.00828 | 0.0004396 |  |  |  |  | openmp runtime linked | 43.6 |  |  |  |
+| onepass | ifx-natural-inputonly | ok | 21 | 0.008627 | 0.008839 | 0.0003524 |  |  |  |  | openmp runtime linked | 45.1 |  |  |  |
+| onepass | ifx-expert-inputonly | ok | 21 | 0.00857 | 0.009136 | 0.0004397 |  |  |  |  | openmp runtime linked | 45.1 |  |  |  |
+| recur | blade-llvm | serial-only | 0 | -- | -- | -- |  |  |  | in-order |  |  |  |  | LLVM lane has no OpenMP |
+| recur | blade-cpp | no-parallel-form | 0 | -- | -- | -- |  |  |  | in-order |  |  |  |  | kernel.json no_parallel_form (spec: no licensed parallel spelling) |
+| recur | gfortran-natural | ok | 21 | 0.06932 | 0.0714 | 0.002326 |  |  | parity |  | openmp runtime linked | 52.0 |  |  |  |
+| recur | gfortran-expert | ok | 21 | 0.00625 | 0.006822 | 0.0005991 |  |  | LOSS 1.5-3x |  | openmp runtime linked | 51.4 |  |  |  |
+| recur | ifx-natural | ok | 21 | 0.01396 | 0.01479 | 0.0006251 |  |  | parity |  | openmp runtime linked | 53.5 |  |  |  |
+| recur | ifx-expert | ok | 21 | 0.006968 | 0.007337 | 0.0002349 |  |  | LOSS 1.5-3x |  | openmp runtime linked | 52.9 |  |  |  |
+| stencil | blade-llvm | serial-only | 0 | -- | -- | -- |  |  |  | in-order |  |  |  |  | LLVM lane has no OpenMP |
+| stencil | blade-cpp | ok | 21 | 0.01175 | 0.01208 | 0.001001 | ref |  |  | in-order | openmp (2 construct(s)); threaded maps, serial folds (BLADE_FP_REPRO) | 51.3 | 0.006483 [0.006212, 0.006821] | ref |  |
+| stencil | gfortran-natural | ok | 21 | 0.008449 | 0.008628 | 0.0004169 | 0.714 [0.695, 0.739] | suppressed | parity (bandwidth-bound) |  | openmp runtime linked | 51.3 | 0.004238 [0.004078, 0.004529] | 0.654 [0.612, 0.701] |  |
+| stencil | gfortran-expert | ok | 21 | 0.007571 | 0.008 | 0.0002345 | 0.662 [0.639, 0.675] | suppressed | parity |  | openmp runtime linked | 51.3 | 0.003642 [0.003474, 0.003743] | 0.562 [0.519, 0.588] |  |
+| stencil | ifx-natural | ok | 21 | 0.00972 | 0.01001 | 0.0002891 | 0.828 [0.807, 0.839] | suppressed | parity (bandwidth-bound) |  | openmp runtime linked | 52.9 | 0.005217 [0.005068, 0.005325] | 0.805 [0.753, 0.848] |  |
+| stencil | ifx-expert | ok | 21 | 0.008015 | 0.008333 | 0.0003509 | 0.690 [0.665, 0.707] | suppressed | parity |  | openmp runtime linked | 52.8 | 0.003556 [0.003353, 0.003754] | 0.549 [0.506, 0.586] |  |
+| stencil | blade-llvm-inputonly | serial-only | 0 | -- | -- | -- |  |  |  | in-order |  |  |  |  | LLVM lane has no OpenMP |
+| stencil | blade-cpp-inputonly | ok | 21 | 0.005368 | 0.0056 | 0.0003565 |  |  |  | in-order | openmp (1 construct(s)); threaded maps, serial folds (BLADE_FP_REPRO) | 28.7 |  |  |  |
+| stencil | gfortran-natural-inputonly | ok | 21 | 0.004152 | 0.00439 | 0.0001987 |  |  |  |  | openmp runtime linked | 28.4 |  |  |  |
+| stencil | gfortran-expert-inputonly | ok | 21 | 0.004104 | 0.004357 | 0.0002225 |  |  |  |  | openmp runtime linked | 28.4 |  |  |  |
+| stencil | ifx-natural-inputonly | ok | 21 | 0.004609 | 0.00479 | 0.0002811 |  |  |  |  | openmp runtime linked | 30.0 |  |  |  |
+| stencil | ifx-expert-inputonly | ok | 21 | 0.004438 | 0.004777 | 0.0002441 |  |  |  |  | openmp runtime linked | 29.9 |  |  |  |
+
+> stencil mt8-repro-native: inference suppressed -- trend: blade-cpp-inputonly first-half vs second-half median moved 5.6%
+
+| dot | blade-llvm | serial-only | 0 | -- | -- | -- |  |  |  | in-order |  |  |  |  | LLVM lane has no OpenMP |
+| dot | blade-cpp | ok | 21 | 0.01299 | 0.01354 | 0.001746 | ref |  |  | in-order | openmp (1 construct(s)); threaded maps, serial folds (BLADE_FP_REPRO) | 51.5 | 0.002408 [0.001974, 0.003924] | ref |  |
+| dot | gfortran-natural | ok | 21 | 0.01067 | 0.01119 | 0.0004212 | 0.827 [0.737, 0.847] | suppressed | parity |  | openmp runtime linked | 51.3 | 0.002484 [0.001998, 0.002873] | 1.032 [0.596, 1.265] |  |
+| dot | gfortran-expert | ok | 21 | 0.01073 | 0.01107 | 0.0002932 | 0.818 [0.739, 0.833] | suppressed | parity |  | openmp runtime linked | 51.2 | 0.002648 [0.002491, 0.002777] | 1.099 [0.673, 1.345] |  |
+| dot | ifx-natural | ok | 21 | 0.01076 | 0.01152 | 0.0002168 | 0.851 [0.773, 0.871] | suppressed | parity |  | openmp runtime linked | 52.8 | 0.002594 [0.002371, 0.002791] | 1.077 [0.659, 1.357] |  |
+| dot | ifx-expert | ok | 21 | 0.01035 | 0.01148 | 0.000357 | 0.848 [0.768, 0.868] | suppressed | parity |  | openmp runtime linked | 52.8 | 0.00254 [0.002269, 0.002788] | 1.055 [0.654, 1.289] |  |
+| dot | blade-llvm-inputonly | serial-only | 0 | -- | -- | -- |  |  |  | in-order |  |  |  |  | LLVM lane has no OpenMP |
+| dot | blade-cpp-inputonly | ok | 21 | 0.01059 | 0.01113 | 0.0006875 |  |  |  | in-order | openmp (1 construct(s)); threaded maps, serial folds (BLADE_FP_REPRO) | 51.5 |  |  |  |
+| dot | gfortran-natural-inputonly | ok | 21 | 0.008123 | 0.00871 | 0.0008943 |  |  |  |  | openmp runtime linked | 51.2 |  |  |  |
+| dot | gfortran-expert-inputonly | ok | 21 | 0.008143 | 0.008419 | 0.0003286 |  |  |  |  | openmp runtime linked | 51.2 |  |  |  |
+| dot | ifx-natural-inputonly | ok | 21 | 0.008649 | 0.008924 | 0.0004473 |  |  |  |  | openmp runtime linked | 52.8 |  |  |  |
+| dot | ifx-expert-inputonly | ok | 21 | 0.008603 | 0.008936 | 0.0005278 |  |  |  |  | openmp runtime linked | 52.8 |  |  |  |
+
+> dot mt8-repro-native: inference suppressed -- trend: blade-cpp first-half vs second-half median moved 6.1%; trend: gfortran-natural-inputonly first-half vs second-half median moved 7.6%
+
+| saxpy | blade-llvm | serial-only | 0 | -- | -- | -- |  |  |  | in-order |  |  |  |  | LLVM lane has no OpenMP |
+| saxpy | blade-cpp | ok | 21 | 0.01191 | 0.01225 | 0.0006324 | ref |  |  | in-order | openmp (2 construct(s)); threaded maps, serial folds (BLADE_FP_REPRO) | 51.2 | 0.004754 [0.004309, 0.005221] | ref |  |
+| saxpy | gfortran-natural | ok | 21 | 0.009638 | 0.01005 | 0.0005983 | 0.821 [0.782, 0.839] | loss | parity |  | openmp runtime linked | 51.3 | 0.004411 [0.004125, 0.004677] | 0.928 [0.817, 1.055] |  |
+| saxpy | gfortran-expert | ok | 21 | 0.008629 | 0.008936 | 0.0003292 | 0.729 [0.702, 0.743] | loss | parity |  | openmp runtime linked | 51.3 | 0.003286 [0.002769, 0.003523] | 0.691 [0.568, 0.800] |  |
+| saxpy | ifx-natural | ok | 21 | 0.00916 | 0.01014 | 0.0003338 | 0.827 [0.786, 0.838] | loss | parity |  | openmp runtime linked | 52.9 | 0.003911 [0.003616, 0.00411] | 0.823 [0.721, 0.924] |  |
+| saxpy | ifx-expert | ok | 21 | 0.009045 | 0.009411 | 0.0003086 | 0.768 [0.736, 0.782] | loss | parity |  | openmp runtime linked | 52.9 | 0.003249 [0.002969, 0.003534] | 0.683 [0.606, 0.781] |  |
+| saxpy | blade-llvm-inputonly | serial-only | 0 | -- | -- | -- |  |  |  | in-order |  |  |  |  | LLVM lane has no OpenMP |
+| saxpy | blade-cpp-inputonly | ok | 21 | 0.007158 | 0.007496 | 0.001011 |  |  |  | in-order | openmp (1 construct(s)); threaded maps, serial folds (BLADE_FP_REPRO) | 36.2 |  |  |  |
+| saxpy | gfortran-natural-inputonly | ok | 21 | 0.005301 | 0.005641 | 0.0002674 |  |  |  |  | openmp runtime linked | 36.0 |  |  |  |
+| saxpy | gfortran-expert-inputonly | ok | 21 | 0.005282 | 0.00565 | 0.0006887 |  |  |  |  | openmp runtime linked | 36.0 |  |  |  |
+| saxpy | ifx-natural-inputonly | ok | 21 | 0.005796 | 0.006225 | 0.0005403 |  |  |  |  | openmp runtime linked | 37.6 |  |  |  |
+| saxpy | ifx-expert-inputonly | ok | 21 | 0.005743 | 0.006162 | 0.000498 |  |  |  |  | openmp runtime linked | 37.6 |  |  |  |
+
+## Controls
+
+- compute (recur/gfortran-expert/serial-repro-native/full): n=168 median 0.01273 s, baseline 0.0127 s
+- memory (saxpy/gfortran-expert/serial-repro-native/control): n=168 median 0.005276 s, baseline 0.005268 s
+
+[14:25:12.923 + 1474.6s] wrote C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-140038
+[14:25:12.923 + 1474.6s] exit 3: 0 failure(s), 6 flag(s)
+exit 3

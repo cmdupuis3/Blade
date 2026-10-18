@@ -1,0 +1,3 @@
+[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\onepass-f764f5b9-16044-8cb46fb9\onepass.cpp
+[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-140038\build\onepass\full\mt8-repro-native\blade-cpp\onepass.exe
+[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\onepass-f764f5b9-16044-8cb46fb9

@@ -1,0 +1,3 @@
+[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\pairkernel-481f067f-17240-7a686b12\pairkernel.ll
+[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-140038\build\pairkernel\smoke\serial-repro-native\blade-llvm\pairkernel.exe
+[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\pairkernel-481f067f-17240-7a686b12

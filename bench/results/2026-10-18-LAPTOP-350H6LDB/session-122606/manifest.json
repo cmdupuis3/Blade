@@ -1,0 +1,308 @@
+{
+ "argv": [
+  "bench/harness/run.py",
+  "bench",
+  "--regimes",
+  "serial-repro-native",
+  "--size",
+  "full",
+  "--kernels",
+  "gram,comoment3,antisym,pairkernel,recur,stencil"
+ ],
+ "cells": [
+  {
+   "kernel": "antisym",
+   "regime": "serial-repro-native",
+   "arm": "blade-llvm",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "antisym",
+   "regime": "serial-repro-native",
+   "arm": "blade-cpp",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "antisym",
+   "regime": "serial-repro-native",
+   "arm": "gfortran-natural",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "antisym",
+   "regime": "serial-repro-native",
+   "arm": "gfortran-expert",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "antisym",
+   "regime": "serial-repro-native",
+   "arm": "ifx-natural",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "antisym",
+   "regime": "serial-repro-native",
+   "arm": "ifx-expert",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "comoment3",
+   "regime": "serial-repro-native",
+   "arm": "blade-llvm",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "comoment3",
+   "regime": "serial-repro-native",
+   "arm": "blade-cpp",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "comoment3",
+   "regime": "serial-repro-native",
+   "arm": "gfortran-natural",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "comoment3",
+   "regime": "serial-repro-native",
+   "arm": "gfortran-expert",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "comoment3",
+   "regime": "serial-repro-native",
+   "arm": "ifx-natural",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "comoment3",
+   "regime": "serial-repro-native",
+   "arm": "ifx-expert",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "gram",
+   "regime": "serial-repro-native",
+   "arm": "blade-llvm",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "gram",
+   "regime": "serial-repro-native",
+   "arm": "blade-cpp",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "gram",
+   "regime": "serial-repro-native",
+   "arm": "gfortran-natural",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "gram",
+   "regime": "serial-repro-native",
+   "arm": "gfortran-expert",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "gram",
+   "regime": "serial-repro-native",
+   "arm": "ifx-natural",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "gram",
+   "regime": "serial-repro-native",
+   "arm": "ifx-expert",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "pairkernel",
+   "regime": "serial-repro-native",
+   "arm": "blade-llvm",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "pairkernel",
+   "regime": "serial-repro-native",
+   "arm": "blade-cpp",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "pairkernel",
+   "regime": "serial-repro-native",
+   "arm": "gfortran-natural",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "pairkernel",
+   "regime": "serial-repro-native",
+   "arm": "gfortran-expert",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "pairkernel",
+   "regime": "serial-repro-native",
+   "arm": "ifx-natural",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "pairkernel",
+   "regime": "serial-repro-native",
+   "arm": "ifx-expert",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "recur",
+   "regime": "serial-repro-native",
+   "arm": "blade-llvm",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "recur",
+   "regime": "serial-repro-native",
+   "arm": "blade-cpp",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "recur",
+   "regime": "serial-repro-native",
+   "arm": "gfortran-natural",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "recur",
+   "regime": "serial-repro-native",
+   "arm": "gfortran-expert",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "recur",
+   "regime": "serial-repro-native",
+   "arm": "ifx-natural",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "recur",
+   "regime": "serial-repro-native",
+   "arm": "ifx-expert",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "stencil",
+   "regime": "serial-repro-native",
+   "arm": "blade-llvm",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "stencil",
+   "regime": "serial-repro-native",
+   "arm": "blade-cpp",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "stencil",
+   "regime": "serial-repro-native",
+   "arm": "gfortran-natural",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "stencil",
+   "regime": "serial-repro-native",
+   "arm": "gfortran-expert",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "stencil",
+   "regime": "serial-repro-native",
+   "arm": "ifx-natural",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "stencil",
+   "regime": "serial-repro-native",
+   "arm": "ifx-expert",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "stencil",
+   "regime": "serial-repro-native",
+   "arm": "blade-llvm-inputonly",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "stencil",
+   "regime": "serial-repro-native",
+   "arm": "blade-cpp-inputonly",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "stencil",
+   "regime": "serial-repro-native",
+   "arm": "gfortran-natural-inputonly",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "stencil",
+   "regime": "serial-repro-native",
+   "arm": "gfortran-expert-inputonly",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "stencil",
+   "regime": "serial-repro-native",
+   "arm": "ifx-natural-inputonly",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "stencil",
+   "regime": "serial-repro-native",
+   "arm": "ifx-expert-inputonly",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  }
+ ]
+}

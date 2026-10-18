@@ -562,6 +562,42 @@ checksum within 2.7e-15); dumps natural vs expert cell by cell: gram 5.4e-16, co
 patched arm with array output (gram, comoment3, antisym, maskagg, recur, saxpy, stencil
 experts, both compilers): the production store is present in each.
 
+## 8c. Why ifx-expert's repro incrementals are small on dot / saxpy / onepass (audit 2026-10-18)
+
+Claim checked: "ifx vectorizes its unlicensed reductions under /fp:precise". **False.**
+Read-only audit of session `results/2026-10-18-LAPTOP-350H6LDB/session-130438`,
+serial-repro-native: the archived build commands have no `BENCH_LICENSED`
+(`/O3 /QxHost /fp:precise -mllvm -fp-contract=fast /fpp /Qopenmp-simd`; gfortran likewise
+without `-DBENCH_LICENSED`). The archived sources were re-assembled with the archived flags
+(`/S`), and the resulting loops were found verbatim in `objdump -d` of the archived exes. The
+ifx exes contain NO packed ymm add/FMA reduction at all (the one packed `vaddpd` in onepass is
+the fill's `2*u`).
+
+Mechanism: **ifx FUSES the kernel loop with the input-checksum loop** (both only read the
+stored inputs) into ONE pass, keeping every accumulator a single in-order dependent chain,
+unrolled x8. Exe excerpt (dot, ifx-expert):
+
+```
+vfmadd231sd %xmm5,%xmm3,%xmm0    ; cs = fma(a_k, b_k, cs)   -- one chain, ascending k
+vaddsd      %xmm3,%xmm2,%xmm2    ; sa = sa + a_k            -- one chain
+vaddsd      %xmm5,%xmm1,%xmm1    ; sb = sb + b_k            -- one chain
+vfmadd231sd %xmm6,%xmm4,%xmm0    ; next k ...
+```
+
+onepass: one pass with five scalar chains (s1, s2, s3, `vfmadd231sd` for s4, and ics).
+saxpy: one pass storing y2 (`vmovsd %xmm7,-0x18(%rsi,%r15,1)`), cs as one `vfmadd231sd`
+chain, and the two input sums SLP-packed as the lane pair [sx, sy] in one xmm
+(`vunpcklpd` + `vaddpd`): each sum still in ascending order, so no reassociation. The input
+fill is a SEPARATE loop whose stores are kept (vectorized 4-wide in 32-bit integer SIMD,
+`vpmulld`: exact, because mod 2^31 needs only the low 32 bits). So this is not F7-style
+generation fusion. The input-only twin runs the input-sum pass alone. The full arm does the
+kernel in that same pass, and its extra chains overlap in the out-of-order core, so the
+increment over the twin is small. gfortran-expert keeps separate passes (dot: a
+`vmulpd` + in-order `vaddsd` chain loop, then a separate two-chain input-sum loop), hence its
+larger increment. Not a flag defect: the regime flags hold (no reassociation in any repro
+ifx exe); it is a compiler loop-fusion property, permitted by the revised protocol (F7: compiler
+fusion allowed, sources may not fuse, inputs stored).
+
 ## 9. Open items
 
 - libgomp ignores OMP_PLACES/OMP_PROC_BIND on this platform, and libiomp5's binding causes

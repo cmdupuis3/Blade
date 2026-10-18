@@ -93,6 +93,11 @@ scalar reads above are the spelling. Checksum: per-row nest of README §7.2.
 
 ## Regimes
 
+**mt8 matched parallelism (D44, 2026-10-18):** in mt8 the Blade source threads the
+kernel's level 0 AND the input maps' outer level AND the checksum nest (`where omp`
+licences on each), matching the Fortran arms. Session 2's pairkernel mt8 rows (kernel-only
+threading: 57 ms with a 57%-serial checksum pass) are superseded and re-run.
+
 licensed (serial, mt8), repro (serial, mt8); `fastmath` not run. The kernel itself has no
 fold, but **`licensed` still differs from `repro`** through the checksum: the per-row `(+)`
 folds over the logical cells are reassociation-licensed under the knob (simd-reduction

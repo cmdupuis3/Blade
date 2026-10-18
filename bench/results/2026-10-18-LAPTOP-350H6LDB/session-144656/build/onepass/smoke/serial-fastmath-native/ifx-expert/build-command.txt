@@ -1,0 +1,2 @@
+cmd /c C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\fortran\build_ifx.cmd C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-144656\build\onepass\smoke\serial-fastmath-native\ifx-expert\ifx-expert.exe /O3 /QxHost /fp:fast /fpp /Qopenmp-simd -- C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-144656\build\onepass\smoke\serial-fastmath-native\ifx-expert\src\onepass.f90
+{}

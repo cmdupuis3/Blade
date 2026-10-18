@@ -22,7 +22,7 @@ function matern52(r2: Float64) -> Float64 = {
     (1.0 + a + a * a / 3.0) * exp(-a)
 }
 
-let pts = method_for(range<Pts>, range<Dim>) <@> lambda(i, d) -> lcg(i, 10000019 * (d + 1)) |> compute
+let pts = method_for(range<Pts>, range<Dim>) <@> lambda(i, d) where omp(i: 1) -> lcg(i, 10000019 * (d + 1)) |> compute
 let kmat = method_for(pts, pts) <@> lambda(a: Array<Float64 like Dim>, b: Array<Float64 like Dim>) where comm(a, b), omp(a: 1) -> {
     let dx = a((0 : Dim)) - b((0 : Dim))
     let dy = a((1 : Dim)) - b((1 : Dim))
@@ -30,5 +30,5 @@ let kmat = method_for(pts, pts) <@> lambda(a: Array<Float64 like Dim>, b: Array<
     matern52(dx * dx + dy * dy + dz * dz)
 } |> compute
 let K = method_for(range<Pts>, range<Pts>) <@> lambda(i, j) -> kmat(i, j) |> compute
-let checksum = reduce(method_for(range<Pts>) <@> lambda(i) -> reduce(method_for(range<Pts>) <@> lambda(j) -> kmat(i, j) * kmat(i, j), (+)), (+))
-let input_checksum = reduce(reduce(pts, (+)), (+))
+let checksum = reduce(method_for(range<Pts>) <@> lambda(i) -> reduce(method_for(range<Pts>) <@> lambda(j) -> kmat(i, j) * kmat(i, j), (+)), lambda(u, v) where omp -> u + v, 0.0)
+let input_checksum = reduce(reduce(pts, (+)), lambda(u, v) where omp -> u + v, 0.0)

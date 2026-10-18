@@ -55,6 +55,10 @@ Changes against the charter's candidate list (reasons in `notes/design-decisions
 
 ## Group A — structure the compiler derives
 
+(D44, 2026-10-18: in mt8 every group-A Blade source threads its input map and checksum
+nest as well as the kernel's level 0 — the `**omp.**` lines below describe the kernel
+licence only; the Fortran arms thread generation, kernel and checksum alike.)
+
 ### `gram`
 **Math.** X is a p x n matrix (p variables, n samples). G = X Xᵀ in Blade's orientation
 (G(i,j) = Σ_s X(i,s) X(j,s)), a p x p symmetric matrix. Named output: G. Checksum:

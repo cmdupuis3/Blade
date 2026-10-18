@@ -26,8 +26,14 @@ C:\Python314\python.exe bench\harness\run.py bench --kernels gram,dot --regimes 
 | `smoke` | `check` for every kernel (or `--kernels`) | `.../session-<HHMMSS>-smoke/` |
 | `bench` | the measured protocol | `bench/results/<date>-<host>/session-<HHMMSS>/` + `summary.md` beside it |
 
-`smoke`/`check` record per (kernel, regime, arm) the status and the hashes of the source,
-`bench_support.f90`, Blade.dll and config.json in `bench/.build/smoke-evidence.json`. `bench`
+`smoke`/`check` record per (kernel, regime, arm) the status and the hashes of THAT arm's
+committed source, of `bench_support.f90` (Fortran arms), of Blade.dll (Blade arms) and of the
+build-relevant config subset (fortran_flags, fortran_twin_flags, blade_knobs, run_env,
+tolerance; comments excluded) in `bench/.build/smoke-evidence.json`. Evidence is therefore
+per kernel and per arm: editing one kernel's Blade source stales only that kernel's Blade
+arms (an `inputonly.blade` edit only its Blade twins); a Blade rebuild stales every Blade arm
+and no Fortran arm; a flag/knob/run_env change stales everything. run.py itself is NOT part
+of the key (harness edits to statistics or reporting do not require a re-smoke). `bench`
 REFUSES to start unless every planned cell has passing evidence for the current hashes and
 every kernel has a pin at the bench size (`--skip-smoke-check` / `--allow-unpinned` exist and
 taint the session).
@@ -40,8 +46,8 @@ Options (all verbs): `--kernels-dir`, `--regimes a,b|all`, `--arms a,b` (a base 
 selects its twin), `--build-dir`, `--out-dir`, `--config` (default `harness/config.json`),
 `--validation-dir` (default `bench/validation`), `--run-timeout` (default and bench cap
 7.5 s = 3 x the 2.5 s run limit), `--build-timeout` (600 s), `--allow-unbuilt` (smoke/check only: an arm whose source is missing is a warning instead of a FAILURE; bench always refuses unbuilt planned cells). bench only:
-`--size full|smoke|<name>`, `--rounds N` (below the minimum taints), `--cooldown` (>= 2 s),
-`--kernel-cooldown` (>= 10 s), `--resamples` (default 10000), `--seed`, `--allow-battery`,
+`--size full|smoke|<name>`, `--rounds N` (below the minimum taints), `--cooldown` (>= 0.5 s),
+`--kernel-cooldown` (>= 3 s), `--resamples` (default 10000), `--seed`, `--allow-battery`,
 `--allow-unpinned`, `--skip-smoke-check`.
 
 Exit: `0` clean; `1` any failure (build failure, contract/oracle failure, DQ, unexpected
@@ -104,7 +110,7 @@ LLVM lane (it ignores `--print`). Fails also on a nonzero exit, `error` on stder
 nonpositive or non-finite duration (M14), or a watchdog timeout.
 
 Every run (contract, warm-up, round, control) is validated against the pin (M12):
-`input_checksum` equal after rounding to 15 significant digits; `checksum` within the
+`input_checksum` within 1e-14 relative (was: equal 15-digit renderings, which is fragile at a half-way point); `checksum` within the
 relative tolerance (`config.json tolerance`, kernel.json may override); twins `checksum =
 0.0`. A run longer than 2.5 s is a DQ. ANY failure invalidates that arm for the whole block
 (dropped from later rounds, no ratio uses it). Without a pin, smoke/check cross-check
@@ -122,10 +128,17 @@ against blade-cpp and say so; bench refuses.
    validated at smoke size first); one validated warm-up per arm; then R rounds, each a
    SEEDED RANDOM PERMUTATION of all live arms, twins and controls (M15). R = max(serial 11 /
    mt8 7, 21 when the median full-size warm-up < 50 ms); `--rounds` overrides and taints when
-   lower. Cooldown >= 2 s after every run, >= 10 s between kernels. The session JSON is
+   lower. Cooldown >= 0.5 s after every run, >= 3 s between kernels, 60 s between bench sessions (enforced at session start from `bench/.build/last-bench-session-end.txt`). The session JSON is
    checkpointed after every run.
-5. Abort (M19): any run -- warm-ups and controls included -- > 3x its running median (once
-   that median is >= 5 ms), or AC power lost. The partial bundle is written.
+5. Excursions (charter 2.5 as amended 2026-10-18, user-approved). An arm run more than 3x
+   that arm's running median in the block (once the median is >= 5 ms) is an EXCURSION:
+   - the first one in a block (the round's controls necessarily in bounds, since a control
+     excursion aborts at once) is DROPPED from inference and RECORDED: the sample stays in
+     session.json with `excursion_dropped: true` and its `excursion_ratio`, the block lists it
+     under `excursions`, summary.md prints a note, the round continues. The bootstrap then
+     uses that arm's remaining rounds (each draw takes the arm's samples in the drawn rounds);
+   - a SECOND excursion in the same block, ANY control run more than 3x the control's own
+     running median, or AC power lost ABORTS the session; the partial bundle is written.
 
 ## Statistics
 
@@ -157,7 +170,7 @@ inputonly true                                        -- every arm gets its own 
 inputonly_blade "inputonly.blade", sources {blade, natural, expert}, blas_sources {expert: ...}
 regime_arms {"<regime>": [base arms]}                 -- narrow one regime
 rounds {serial: n, mt8: n}                            -- raise the minimum
-tolerance {licensed|repro|fastmath: rel}, input_tolerance (0 = exact at 15 digits)
+tolerance {licensed|repro|fastmath: rel}, input_tolerance (default 1e-14 relative; a kernel may only widen it)
 expected_llvm "fallback" + expected_llvm_reason       -- a fallback is then not a failure
 no_parallel_form true | ["<mt8 regime>"]              -- Blade has no licensed parallel spelling
 parallel_notes {"<arm>": "parallel preparation, serial kernel ..."}   -- shown in mt8 rows
@@ -208,3 +221,12 @@ the timed rounds), `peak_working_set_max`, `trend`, `ratio`, `ratio_vs_blade_cpp
 `bench/.build/stub-kernels/` (selfcheck, dqprobe, fbprobe) with pins in
 `bench/.build/stub-validation/` and `bench/.build/stub-config.json`:
 `run.py smoke --kernels-dir bench\.build\stub-kernels --validation-dir bench\.build\stub-validation --config bench\.build\stub-config.json`.
+
+## Limits: hygiene, not safety (2026-10-18)
+
+The host-crash history behind the original defensive rules was an integrated-graphics overload
+issue that has since been resolved (user, 2026-10-18). The cooldown floors were lowered to
+0.5 s between runs, 3 s between kernels and 60 s between sessions. The AC check, the excursion
+rule and one-timed-process-at-a-time remain (measurement hygiene). The 64 MB working-set and
+2.5 s run limits stay in force for the current, frozen sizes but are NO LONGER safety limits
+and may be raised in a later session. Cooldowns are not part of the smoke-evidence key.

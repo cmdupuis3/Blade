@@ -1,0 +1,3 @@
+[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\dot_inputonly-41bea390-19756-f9b9ccf6\dot_inputonly.cpp
+[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-144656\build\dot\full\mt8-fastmath-native\blade-cpp-inputonly\dot_inputonly.exe
+[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\dot_inputonly-41bea390-19756-f9b9ccf6

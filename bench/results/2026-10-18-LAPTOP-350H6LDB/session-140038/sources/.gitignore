@@ -1,0 +1,8 @@
+.build/
+__pycache__/
+# session bundles keep sources, logs and generated code; binaries stay local (hashes are in session.json)
+results/**/*.exe
+results/**/*.dll
+results/**/*.obj
+results/**/*.o
+results/**/*.mod

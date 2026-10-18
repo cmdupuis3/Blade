@@ -1,0 +1,4441 @@
+{
+ "schema": 2,
+ "harness_version": "2",
+ "mode": "bench",
+ "argv": [
+  "bench/harness/run.py",
+  "bench",
+  "--regimes",
+  "serial-licensed-native",
+  "--size",
+  "full",
+  "--kernels",
+  "antisym"
+ ],
+ "machine": {
+  "host": "LAPTOP-350H6LDB",
+  "os": "Windows-11-10.0.26300-SP0",
+  "python": "3.14.7",
+  "logical_processors": 16,
+  "cpu": "AMD Ryzen 7 5800HS with Radeon Graphics",
+  "cpu_mhz_nominal": 3194,
+  "physical_cores": 8,
+  "ram_gb": 15.41,
+  "ram_available_gb_at_start": 7.31,
+  "git_sha": "fceb895d4e8df71131086a94652b5cab1b120850",
+  "inherited_env": {
+   "OMP_NUM_THREADS": null,
+   "OPENBLAS_DIR": "C:\\Users\\cdupu\\tools\\OpenBLAS-0.3.34-x64",
+   "OPENBLAS_NUM_THREADS": null,
+   "OMP_PROC_BIND": null,
+   "OMP_PLACES": null
+  },
+  "inherited_blade_knobs": {},
+  "harness_affinity": {
+   "process": "0xffff",
+   "system": "0xffff"
+  },
+  "run_env": {
+   "serial": {
+    "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "OMP_DYNAMIC": "FALSE"
+   },
+   "mt8": {
+    "OMP_NUM_THREADS": "8",
+    "OMP_DYNAMIC": "FALSE",
+    "OPENBLAS_NUM_THREADS": "8",
+    "KMP_AFFINITY": "disabled"
+   }
+  },
+  "serial_affinity_cpu": 2,
+  "mt8_binding": "unbound"
+ },
+ "power": {
+  "PROCTHROTTLEMAX": {
+   "ac": 100,
+   "dc": 70
+  },
+  "PROCTHROTTLEMIN": {
+   "ac": 80,
+   "dc": 5
+  },
+  "PERFBOOSTMODE": {
+   "ac": null,
+   "dc": null
+  },
+  "active_scheme": "Power Scheme GUID: 64a64f24-65b9-4b56-befd-5ec1eaced9b3  (Silent)",
+  "ac_line": "ac",
+  "when": "2026-10-18T12:17:15"
+ },
+ "toolchain": {
+  "blade": {
+   "exe": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bin\\Release\\net10.0\\Blade.exe",
+   "exists": true,
+   "toolchain_json_beside_exe": false,
+   "exe_sha256": "8dea4f9f7f82b0efd3a67cce9ffa452a7e774f9d9c67df8aa535c98bed9bd411",
+   "dll": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bin\\Release\\net10.0\\Blade.dll",
+   "dll_sha256": "74b6728036b170d9e87ed99b5917b9d883acc3a282d9e161cdfa5285fd9cf892",
+   "dll_mtime": "2026-10-17T22:11:49.197555",
+   "version": "Blade Compiler v0.20.0"
+  },
+  "gpp": {
+   "path": "C:\\msys64\\ucrt64\\bin\\g++.exe",
+   "exists": true,
+   "version": "g++.exe (Rev4, Built by MSYS2 project) 16.2.0"
+  },
+  "clang": {
+   "path": "C:\\msys64\\clang64\\bin\\clang.exe",
+   "exists": true,
+   "version": "clang version 22.1.8 (https://github.com/msys2/MINGW-packages d34feaaa1d0aff624c870910b6f2589aa40d20de)"
+  },
+  "gfortran": {
+   "path": "C:\\msys64\\ucrt64\\bin\\gfortran.exe",
+   "exists": true,
+   "version": "GNU Fortran (Rev4, Built by MSYS2 project) 16.2.0"
+  },
+  "ifx": {
+   "wrapper": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\fortran\\build_ifx.cmd",
+   "exists": true,
+   "version": "Intel(R) Fortran Compiler for applications running on Intel(R) 64, Version 2026.1.0 Build 20260617"
+  }
+ },
+ "pins": {
+  "files": {
+   "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\validation\\pins-A.json": "3f5d6e289903ef49952ed16d2d59494fccd2ce70cb4bf4af75461d311646f145",
+   "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\validation\\pins-B.json": "56a49939e7fa1cdaae017fec9e2d0fc2522a51da32a5838484113e30cb6abe05"
+  },
+  "entries": 24
+ },
+ "protocol": {
+  "rounds_override": null,
+  "min_rounds": {
+   "serial": 11,
+   "mt8": 7,
+   "memory_bound": 21
+  },
+  "cooldown_s": 2.0,
+  "kernel_cooldown_s": 10.0,
+  "run_timeout_s": 7.5,
+  "build_timeout_s": 600.0,
+  "bootstrap": "round-block",
+  "resamples": 10000,
+  "seed": 20261017,
+  "order": "seeded random permutation per round (arms, twins, controls)",
+  "thermal_factor": 3.0,
+  "thermal_min_median_s": 0.005,
+  "dq_run_s": 2.5,
+  "trend_limit": 0.05,
+  "control_limit": 0.07,
+  "verdict_delta": 0.1,
+  "memory_bound_s": 0.05,
+  "serial_affinity_mask": "0x4",
+  "config": {
+   "_doc": "Harness configuration (owner: harness agent). REQUIRED (review M3: no silent defaults). See bench/harness/README.md. Keys starting with '_' are comments. Source of the flag table: bench/README.md section 3 (fp axis licensed / repro / fastmath, coordinator 2026-10-17) and bench/notes/fortran-notes.md.",
+   "controls": [
+    {
+     "name": "compute",
+     "kernel": "recur",
+     "arm": "gfortran-expert",
+     "regime": "serial-repro-native",
+     "size": "full",
+     "_why": "README 6 drift control: compute-bound RK4, deterministic"
+    },
+    {
+     "name": "memory",
+     "kernel": "saxpy",
+     "arm": "gfortran-expert",
+     "regime": "serial-repro-native",
+     "size": "control",
+     "_why": "README / coordinator 2026-10-17: memory-bound control, three 5.6 MB streams (saxpy sizes.control n = 700,001); needs a saxpy/control pin"
+    }
+   ],
+   "tolerance": {
+    "licensed": 1e-12,
+    "repro": 1e-12,
+    "fastmath": 1e-08,
+    "_why": "relative checksum tolerance vs the pin; kernel.json `tolerance` may override per kernel"
+   },
+   "verdict_delta": 0.1,
+   "serial_affinity_cpu": 2,
+   "_serial_affinity_why": "review M20: serial arms pinned to logical CPU 2 (first SMT thread of physical core 1). mt8 arms are unbound (no OMP_PLACES/OMP_PROC_BIND, KMP_AFFINITY=disabled).",
+   "run_env": {
+    "serial": {
+     "OMP_NUM_THREADS": "1",
+     "OPENBLAS_NUM_THREADS": "1",
+     "OMP_DYNAMIC": "FALSE"
+    },
+    "mt8": {
+     "OMP_NUM_THREADS": "8",
+     "OMP_DYNAMIC": "FALSE",
+     "OPENBLAS_NUM_THREADS": "8",
+     "KMP_AFFINITY": "disabled",
+     "_why": "fortran-notes.md jitter investigation (coordinator 2026-10-17): all mt8 arms run UNBOUND -- libgomp cannot bind on Windows, libiomp5 binding under OMP_PLACES=cores/OMP_PROC_BIND=close caused 17-48 ms jitter; KMP_AFFINITY=disabled is harmless for libgomp"
+    }
+   },
+   "blade_knobs": {
+    "all": {},
+    "llvm": {
+     "BLADE_FP_CONTRACT": "fast",
+     "_why": "explicit contraction; redundant since 5f4b33ea (the LLVM lane contracts by default) but harmless"
+    },
+    "licensed": {
+     "_why": "FP-default flip (commit 5f4b33ea): the default honours every licence in both lanes; no knob"
+    },
+    "repro": {
+     "BLADE_FP_REPRO": "1",
+     "BLADE_FP_REASSOC": "0",
+     "_why": "repro: no reordered fold anywhere; BLADE_FP_REASSOC=0 is the compatibility spelling; mt8 fold teams are serialized too"
+    },
+    "fastmath": {
+     "_why": "same Blade knobs as licensed; fastmath differs on the Fortran side only"
+    }
+   },
+   "fortran_flags": {
+    "gfortran": {
+     "licensed": [
+      "-O3",
+      "-march=native",
+      "-ffp-contract=fast",
+      "-fno-external-blas",
+      "-fno-external-blas64",
+      "-cpp",
+      "-DBENCH_LICENSED"
+     ],
+     "repro": [
+      "-O3",
+      "-march=native",
+      "-ffp-contract=fast",
+      "-fno-external-blas",
+      "-fno-external-blas64",
+      "-cpp"
+     ],
+     "fastmath": [
+      "-O3",
+      "-march=native",
+      "-ffast-math",
+      "-fno-external-blas",
+      "-fno-external-blas64",
+      "-cpp"
+     ],
+     "serial_extra": [
+      "-fopenmp-simd"
+     ],
+     "mt8_extra": [
+      "-fopenmp"
+     ]
+    },
+    "ifx": {
+     "licensed": [
+      "/O3",
+      "/QxHost",
+      "/fp:precise",
+      "-mllvm",
+      "-fp-contract=fast",
+      "/fpp",
+      "/DBENCH_LICENSED"
+     ],
+     "repro": [
+      "/O3",
+      "/QxHost",
+      "/fp:precise",
+      "-mllvm",
+      "-fp-contract=fast",
+      "/fpp"
+     ],
+     "fastmath": [
+      "/O3",
+      "/QxHost",
+      "/fp:fast",
+      "/fpp"
+     ],
+     "serial_extra": [
+      "/Qopenmp-simd"
+     ],
+     "mt8_extra": [
+      "/Qopenmp"
+     ],
+     "_strict_why": "fortran-notes.md 3: ifx 2026.1 /fp:precise does not contract FMAs; -mllvm -fp-contract=fast enables contraction only"
+    }
+   },
+   "fortran_twin_flags": {
+    "gfortran": [
+     "-cpp",
+     "-DBENCH_INPUTONLY"
+    ],
+    "ifx": [
+     "/fpp",
+     "/DBENCH_INPUTONLY"
+    ]
+   }
+  },
+  "config_sha256": "563b44f5b595658f9c16603776b272b1673befcfc19d9de643a688b7fb53e1b3"
+ },
+ "failures": [],
+ "flags": [],
+ "warnings": [],
+ "blocks": [
+  {
+   "kernel": "antisym",
+   "group": "A",
+   "regime": "serial-licensed-native",
+   "size": "full",
+   "sizes": {
+    "p": 1201,
+    "n": 401
+   },
+   "tolerance": 1e-12,
+   "input_tolerance": 0.0,
+   "hypothesis": {
+    "natural": "WIN ~2x (half the cells, no diagonal)",
+    "expert": "parity +-15%"
+   },
+   "gate_only": false,
+   "started": "2026-10-18T12:17:20",
+   "flags": [],
+   "arms": {
+    "blade-llvm": {
+     "status": "ok",
+     "reason": "",
+     "samples": [
+      {
+       "arm": "blade-llvm",
+       "kind": "warmup",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0736411999969278,
+       "checksum": 57760462.7106089,
+       "input_checksum": 481149.43540513,
+       "checksum_text": "57760462.7106089",
+       "input_checksum_text": "481149.43540513",
+       "name": "antisym",
+       "wall_s": 0.1228,
+       "returncode": 0,
+       "extra_stdout_lines": 2,
+       "stderr_tail": "",
+       "round": null,
+       "position": null,
+       "started": "2026-10-18T12:17:35.322",
+       "peak_working_set": 18276352,
+       "page_faults": 4544,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 8.468338449803945e-16,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 0.0
+       }
+      },
+      {
+       "arm": "blade-llvm",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0740010000008624,
+       "checksum": 57760462.7106089,
+       "input_checksum": 481149.43540513,
+       "checksum_text": "57760462.7106089",
+       "input_checksum_text": "481149.43540513",
+       "name": "antisym",
+       "wall_s": 0.0967,
+       "returncode": 0,
+       "extra_stdout_lines": 2,
+       "stderr_tail": "",
+       "round": 0,
+       "position": 3,
+       "started": "2026-10-18T12:17:55.518",
+       "peak_working_set": 17772544,
+       "page_faults": 4390,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 8.468338449803945e-16,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 0.0
+       }
+      },
+      {
+       "arm": "blade-llvm",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0742638000010629,
+       "checksum": 57760462.7106089,
+       "input_checksum": 481149.43540513,
+       "checksum_text": "57760462.7106089",
+       "input_checksum_text": "481149.43540513",
+       "name": "antisym",
+       "wall_s": 0.0982,
+       "returncode": 0,
+       "extra_stdout_lines": 2,
+       "stderr_tail": "",
+       "round": 1,
+       "position": 5,
+       "started": "2026-10-18T12:18:17.985",
+       "peak_working_set": 17768448,
+       "page_faults": 4389,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 8.468338449803945e-16,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 0.0
+       }
+      },
+      {
+       "arm": "blade-llvm",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0740146000025561,
+       "checksum": 57760462.7106089,
+       "input_checksum": 481149.43540513,
+       "checksum_text": "57760462.7106089",
+       "input_checksum_text": "481149.43540513",
+       "name": "antisym",
+       "wall_s": 0.0955,
+       "returncode": 0,
+       "extra_stdout_lines": 2,
+       "stderr_tail": "",
+       "round": 2,
+       "position": 1,
+       "started": "2026-10-18T12:18:26.328",
+       "peak_working_set": 17768448,
+       "page_faults": 4391,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 8.468338449803945e-16,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 0.0
+       }
+      },
+      {
+       "arm": "blade-llvm",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0739520999995875,
+       "checksum": 57760462.7106089,
+       "input_checksum": 481149.43540513,
+       "checksum_text": "57760462.7106089",
+       "input_checksum_text": "481149.43540513",
+       "name": "antisym",
+       "wall_s": 0.0975,
+       "returncode": 0,
+       "extra_stdout_lines": 2,
+       "stderr_tail": "",
+       "round": 3,
+       "position": 5,
+       "started": "2026-10-18T12:18:52.185",
+       "peak_working_set": 17772544,
+       "page_faults": 4391,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 8.468338449803945e-16,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 0.0
+       }
+      },
+      {
+       "arm": "blade-llvm",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0741880999994464,
+       "checksum": 57760462.7106089,
+       "input_checksum": 481149.43540513,
+       "checksum_text": "57760462.7106089",
+       "input_checksum_text": "481149.43540513",
+       "name": "antisym",
+       "wall_s": 0.0967,
+       "returncode": 0,
+       "extra_stdout_lines": 2,
+       "stderr_tail": "",
+       "round": 4,
+       "position": 6,
+       "started": "2026-10-18T12:19:12.570",
+       "peak_working_set": 17772544,
+       "page_faults": 4389,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 8.468338449803945e-16,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 0.0
+       }
+      },
+      {
+       "arm": "blade-llvm",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0737366000030306,
+       "checksum": 57760462.7106089,
+       "input_checksum": 481149.43540513,
+       "checksum_text": "57760462.7106089",
+       "input_checksum_text": "481149.43540513",
+       "name": "antisym",
+       "wall_s": 0.0969,
+       "returncode": 0,
+       "extra_stdout_lines": 2,
+       "stderr_tail": "",
+       "round": 5,
+       "position": 4,
+       "started": "2026-10-18T12:19:26.269",
+       "peak_working_set": 17768448,
+       "page_faults": 4390,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 8.468338449803945e-16,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 0.0
+       }
+      },
+      {
+       "arm": "blade-llvm",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0739134999967064,
+       "checksum": 57760462.7106089,
+       "input_checksum": 481149.43540513,
+       "checksum_text": "57760462.7106089",
+       "input_checksum_text": "481149.43540513",
+       "name": "antisym",
+       "wall_s": 0.0965,
+       "returncode": 0,
+       "extra_stdout_lines": 2,
+       "stderr_tail": "",
+       "round": 6,
+       "position": 2,
+       "started": "2026-10-18T12:19:39.461",
+       "peak_working_set": 17772544,
+       "page_faults": 4392,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 8.468338449803945e-16,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 0.0
+       }
+      },
+      {
+       "arm": "blade-llvm",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0740577000033227,
+       "checksum": 57760462.7106089,
+       "input_checksum": 481149.43540513,
+       "checksum_text": "57760462.7106089",
+       "input_checksum_text": "481149.43540513",
+       "name": "antisym",
+       "wall_s": 0.0962,
+       "returncode": 0,
+       "extra_stdout_lines": 2,
+       "stderr_tail": "",
+       "round": 7,
+       "position": 2,
+       "started": "2026-10-18T12:19:57.074",
+       "peak_working_set": 17772544,
+       "page_faults": 4388,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 8.468338449803945e-16,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 0.0
+       }
+      },
+      {
+       "arm": "blade-llvm",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0731748000034713,
+       "checksum": 57760462.7106089,
+       "input_checksum": 481149.43540513,
+       "checksum_text": "57760462.7106089",
+       "input_checksum_text": "481149.43540513",
+       "name": "antisym",
+       "wall_s": 0.0951,
+       "returncode": 0,
+       "extra_stdout_lines": 2,
+       "stderr_tail": "",
+       "round": 8,
+       "position": 0,
+       "started": "2026-10-18T12:20:09.820",
+       "peak_working_set": 17772544,
+       "page_faults": 4390,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 8.468338449803945e-16,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 0.0
+       }
+      },
+      {
+       "arm": "blade-llvm",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0738232000003336,
+       "checksum": 57760462.7106089,
+       "input_checksum": 481149.43540513,
+       "checksum_text": "57760462.7106089",
+       "input_checksum_text": "481149.43540513",
+       "name": "antisym",
+       "wall_s": 0.097,
+       "returncode": 0,
+       "extra_stdout_lines": 2,
+       "stderr_tail": "",
+       "round": 9,
+       "position": 5,
+       "started": "2026-10-18T12:20:38.078",
+       "peak_working_set": 17772544,
+       "page_faults": 4389,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 8.468338449803945e-16,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 0.0
+       }
+      },
+      {
+       "arm": "blade-llvm",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0737203999960911,
+       "checksum": 57760462.7106089,
+       "input_checksum": 481149.43540513,
+       "checksum_text": "57760462.7106089",
+       "input_checksum_text": "481149.43540513",
+       "name": "antisym",
+       "wall_s": 0.0998,
+       "returncode": 0,
+       "extra_stdout_lines": 2,
+       "stderr_tail": "",
+       "round": 10,
+       "position": 3,
+       "started": "2026-10-18T12:20:51.274",
+       "peak_working_set": 17772544,
+       "page_faults": 4392,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 8.468338449803945e-16,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 0.0
+       }
+      }
+     ],
+     "build": {
+      "arm": "blade-llvm",
+      "regime": "serial-licensed-native",
+      "size": "full",
+      "status": "ok",
+      "reason": "",
+      "exe": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\blade-llvm\\antisym.exe",
+      "exe_sha256": "1f79e9322ec48a053e4329f1ca331e0d5082f04dada18937711a2b7a1b3eff52",
+      "command": [
+       "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bin\\Release\\net10.0\\Blade.exe",
+       "compile",
+       "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\blade-llvm\\src\\antisym.blade",
+       "-o",
+       "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\blade-llvm\\antisym.exe",
+       "--verbose",
+       "--print",
+       "checksum,input_checksum"
+      ],
+      "cwd": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\blade-llvm",
+      "knobs": {
+       "BLADE_BLAS": "0",
+       "BLADE_EXE_CACHE": "0",
+       "BLADE_LLVM_CLANG": "C:\\msys64\\clang64\\bin\\clang.exe",
+       "BLADE_LLVM": "1",
+       "BLADE_FP_CONTRACT": "fast",
+       "BLADE_OMP_THREADS": "1"
+      },
+      "run_knobs": {
+       "OMP_NUM_THREADS": "1",
+       "OPENBLAS_NUM_THREADS": "1",
+       "OMP_DYNAMIC": "FALSE"
+      },
+      "flags": [
+       "--verbose",
+       "--print",
+       "checksum,input_checksum"
+      ],
+      "compiler": {
+       "blade": {
+        "exe": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bin\\Release\\net10.0\\Blade.exe",
+        "exists": true,
+        "toolchain_json_beside_exe": false,
+        "exe_sha256": "8dea4f9f7f82b0efd3a67cce9ffa452a7e774f9d9c67df8aa535c98bed9bd411",
+        "dll": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bin\\Release\\net10.0\\Blade.dll",
+        "dll_sha256": "74b6728036b170d9e87ed99b5917b9d883acc3a282d9e161cdfa5285fd9cf892",
+        "dll_mtime": "2026-10-17T22:11:49.197555",
+        "version": "Blade Compiler v0.20.0"
+       },
+       "gpp": {
+        "path": "C:\\msys64\\ucrt64\\bin\\g++.exe",
+        "exists": true,
+        "version": "g++.exe (Rev4, Built by MSYS2 project) 16.2.0"
+       },
+       "clang": {
+        "path": "C:\\msys64\\clang64\\bin\\clang.exe",
+        "exists": true,
+        "version": "clang version 22.1.8 (https://github.com/msys2/MINGW-packages d34feaaa1d0aff624c870910b6f2589aa40d20de)"
+       }
+      },
+      "source": {
+       "committed": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\kernels\\antisym\\antisym.blade",
+       "committed_sha256": "2fbffc7240b729b7920c9512fba09192cc99758af884f577039426ef5ac9a7e2",
+       "compiled": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\blade-llvm\\src\\antisym.blade",
+       "compiled_sha256": "2fbffc7240b729b7920c9512fba09192cc99758af884f577039426ef5ac9a7e2",
+       "size_lines": {
+        "p": 9,
+        "n": 10
+       }
+      },
+      "build_wall_s": 2.003,
+      "returncode": 0,
+      "stdout_tail": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\blade-llvm\\antisym.exe",
+      "stderr_tail": "[Emit] C:\\Users\\cdupu\\AppData\\Local\\Temp\\blade-build\\antisym-bdabd5a2-15992-0b7d9c49\\antisym.ll\n[Compile] C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\blade-llvm\\antisym.exe\n[Build] kept C:\\Users\\cdupu\\AppData\\Local\\Temp\\blade-build\\antisym-bdabd5a2-15992-0b7d9c49",
+      "evidence": {
+       "emitted": [
+        "C:\\Users\\cdupu\\AppData\\Local\\Temp\\blade-build\\antisym-bdabd5a2-15992-0b7d9c49\\antisym.ll"
+       ],
+       "kept_dir": "C:\\Users\\cdupu\\AppData\\Local\\Temp\\blade-build\\antisym-bdabd5a2-15992-0b7d9c49",
+       "artifacts": [
+        "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\blade-llvm\\generated\\antisym.ll",
+        "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\blade-llvm\\generated\\blade_llvm_shim.c"
+       ],
+       "runtime_headers_sha256": {},
+       "lane": "llvm",
+       "thread_constructs": 0,
+       "reassoc_flags": 7,
+       "fold_form": "reordered (7 reassoc flags)",
+       "plan_file": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\blade-llvm\\plan.txt",
+       "plan_returncode": 0,
+       "plan_decisions": [
+        "[omp v1] _(checksum,input_checksum): declined -- BLADE_OMP_THREADS=1 -- this build emits no thread-level OpenMP (the omp licence in source is unchanged; omp simd is unaffected) [[omp] requested but emitted serial]",
+        "[symmetric-storage v1] __v34: applied [packed SymAntisymmetric storage over 2 levels (one canonical cell per orbit); operands: z, z]",
+        "[triangular-iteration v1] __v34: applied [triangular levels 1; symcom states: SCNeither, SCCommutative; speedup x2]",
+        "[fold-form v1] _(checksum,input_checksum): applied [fold form: simd-reduction; prodsum]",
+        "[fold-form v1] __v61: applied [fold form: simd-reduction; reduce over a deferred computation (one level)]",
+        "[fold-form v1] _(checksum,input_checksum): applied [fold form: K-lanes(8); reduce in expression position]",
+        "[microkernel v1] __v115: applied [row-fold jam (partial reduce over rows); 6 rows per tile, one accumulator per row (bitwise)]",
+        "[fold-form v1] __v115: applied [fold form: row-fold jam(6 rows, bitwise); reduce over the rows of a row map]",
+        "[fold-form v1] __v94: applied [fold form: simd-reduction; reduce over a materialized array (Path A, thread team suppressed)]",
+        "[fold-form v1] lambda in l: applied [fold form: simd-reduction; prodsum]",
+        "[fold-form v1] __ret1073741824: applied [fold form: simd-reduction; reduce over a deferred computation (one level)]",
+        "[fold-form v1] lambda in isum: applied [fold form: K-lanes(8); reduce in expression position]"
+       ],
+       "plan_omp": [
+        "[omp v1] _(checksum,input_checksum): declined -- BLADE_OMP_THREADS=1 -- this build emits no thread-level OpenMP (the omp licence in source is unchanged; omp simd is unaffected) [[omp] requested but emitted serial]"
+       ],
+       "plan_fold_form": [
+        "[fold-form v1] _(checksum,input_checksum): applied [fold form: simd-reduction; prodsum]",
+        "[fold-form v1] __v61: applied [fold form: simd-reduction; reduce over a deferred computation (one level)]",
+        "[fold-form v1] _(checksum,input_checksum): applied [fold form: K-lanes(8); reduce in expression position]",
+        "[fold-form v1] __v115: applied [fold form: row-fold jam(6 rows, bitwise); reduce over the rows of a row map]",
+        "[fold-form v1] __v94: applied [fold form: simd-reduction; reduce over a materialized array (Path A, thread team suppressed)]",
+        "[fold-form v1] lambda in l: applied [fold form: simd-reduction; prodsum]",
+        "[fold-form v1] __ret1073741824: applied [fold form: simd-reduction; reduce over a deferred computation (one level)]",
+        "[fold-form v1] lambda in isum: applied [fold form: K-lanes(8); reduce in expression position]"
+       ],
+       "blas_routed": false,
+       "parallelism": "serial"
+      },
+      "warnings": [],
+      "pe": {
+       "imports": [
+        "api-ms-win-crt-environment-l1-1-0.dll",
+        "api-ms-win-crt-heap-l1-1-0.dll",
+        "api-ms-win-crt-locale-l1-1-0.dll",
+        "api-ms-win-crt-math-l1-1-0.dll",
+        "api-ms-win-crt-private-l1-1-0.dll",
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "api-ms-win-crt-stdio-l1-1-0.dll",
+        "api-ms-win-crt-string-l1-1-0.dll",
+        "KERNEL32.dll"
+       ],
+       "SizeOfStackReserve": 1048576,
+       "SizeOfStackCommit": 4096,
+       "SizeOfHeapReserve": 1048576,
+       "SizeOfHeapCommit": 4096
+      },
+      "resolved_dlls": {
+       "KERNEL32.dll": {
+        "path": "C:\\WINDOWS\\System32\\KERNEL32.dll",
+        "sha256": "e132eba4166256e2f414b91fe7d5386590bc5ea8626aee5af9c9738383cf2ae1"
+       }
+      },
+      "expect_names": [
+       "antisym"
+      ],
+      "twin": false,
+      "lane": "llvm"
+     },
+     "stats": {
+      "n": 11,
+      "min": 0.0731748000034713,
+      "median": 0.0739520999995875,
+      "q1": 0.07377990000168211,
+      "q3": 0.0740361500029394,
+      "iqr": 0.0002562500012572855,
+      "max": 0.0742638000010629,
+      "mean": 0.073895072727861
+     },
+     "peak_working_set_max": 18276352,
+     "trend": 0.0025859763102940025
+    },
+    "blade-cpp": {
+     "status": "ok",
+     "reason": "",
+     "samples": [
+      {
+       "arm": "blade-cpp",
+       "kind": "warmup",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.1078423,
+       "checksum": 57760462.710609,
+       "input_checksum": 481149.43540513,
+       "checksum_text": "57760462.710609",
+       "input_checksum_text": "481149.43540513",
+       "name": "antisym",
+       "wall_s": 0.1737,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": null,
+       "position": null,
+       "started": "2026-10-18T12:17:37.447",
+       "peak_working_set": 19140608,
+       "page_faults": 4734,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 8.468338449803945e-16,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 1.6768831691201096e-15
+       }
+      },
+      {
+       "arm": "blade-cpp",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.1080432,
+       "checksum": 57760462.710609,
+       "input_checksum": 481149.43540513,
+       "checksum_text": "57760462.710609",
+       "input_checksum_text": "481149.43540513",
+       "name": "antisym",
+       "wall_s": 0.1331,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 0,
+       "position": 5,
+       "started": "2026-10-18T12:18:00.421",
+       "peak_working_set": 19140608,
+       "page_faults": 4733,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 8.468338449803945e-16,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 1.6768831691201096e-15
+       }
+      },
+      {
+       "arm": "blade-cpp",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.1106006,
+       "checksum": 57760462.710609,
+       "input_checksum": 481149.43540513,
+       "checksum_text": "57760462.710609",
+       "input_checksum_text": "481149.43540513",
+       "name": "antisym",
+       "wall_s": 0.1365,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 1,
+       "position": 6,
+       "started": "2026-10-18T12:18:20.086",
+       "peak_working_set": 19140608,
+       "page_faults": 4735,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 8.468338449803945e-16,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 1.6768831691201096e-15
+       }
+      },
+      {
+       "arm": "blade-cpp",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.1073474,
+       "checksum": 57760462.710609,
+       "input_checksum": 481149.43540513,
+       "checksum_text": "57760462.710609",
+       "input_checksum_text": "481149.43540513",
+       "name": "antisym",
+       "wall_s": 0.133,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 2,
+       "position": 3,
+       "started": "2026-10-18T12:18:30.469",
+       "peak_working_set": 19140608,
+       "page_faults": 4734,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 8.468338449803945e-16,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 1.6768831691201096e-15
+       }
+      },
+      {
+       "arm": "blade-cpp",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.1082498,
+       "checksum": 57760462.710609,
+       "input_checksum": 481149.43540513,
+       "checksum_text": "57760462.710609",
+       "input_checksum_text": "481149.43540513",
+       "name": "antisym",
+       "wall_s": 0.1339,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 3,
+       "position": 1,
+       "started": "2026-10-18T12:18:43.908",
+       "peak_working_set": 19144704,
+       "page_faults": 4735,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 8.468338449803945e-16,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 1.6768831691201096e-15
+       }
+      },
+      {
+       "arm": "blade-cpp",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.1079054,
+       "checksum": 57760462.710609,
+       "input_checksum": 481149.43540513,
+       "checksum_text": "57760462.710609",
+       "input_checksum_text": "481149.43540513",
+       "name": "antisym",
+       "wall_s": 0.1324,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 4,
+       "position": 0,
+       "started": "2026-10-18T12:18:59.445",
+       "peak_working_set": 19144704,
+       "page_faults": 4735,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 8.468338449803945e-16,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 1.6768831691201096e-15
+       }
+      },
+      {
+       "arm": "blade-cpp",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.1078685,
+       "checksum": 57760462.710609,
+       "input_checksum": 481149.43540513,
+       "checksum_text": "57760462.710609",
+       "input_checksum_text": "481149.43540513",
+       "name": "antisym",
+       "wall_s": 0.1342,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 5,
+       "position": 7,
+       "started": "2026-10-18T12:19:32.489",
+       "peak_working_set": 19140608,
+       "page_faults": 4735,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 8.468338449803945e-16,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 1.6768831691201096e-15
+       }
+      },
+      {
+       "arm": "blade-cpp",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.1088889,
+       "checksum": 57760462.710609,
+       "input_checksum": 481149.43540513,
+       "checksum_text": "57760462.710609",
+       "input_checksum_text": "481149.43540513",
+       "name": "antisym",
+       "wall_s": 0.1383,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 6,
+       "position": 5,
+       "started": "2026-10-18T12:19:45.977",
+       "peak_working_set": 19140608,
+       "page_faults": 4734,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 8.468338449803945e-16,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 1.6768831691201096e-15
+       }
+      },
+      {
+       "arm": "blade-cpp",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.1074795,
+       "checksum": 57760462.710609,
+       "input_checksum": 481149.43540513,
+       "checksum_text": "57760462.710609",
+       "input_checksum_text": "481149.43540513",
+       "name": "antisym",
+       "wall_s": 0.1327,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 7,
+       "position": 4,
+       "started": "2026-10-18T12:20:01.531",
+       "peak_working_set": 19140608,
+       "page_faults": 4734,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 8.468338449803945e-16,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 1.6768831691201096e-15
+       }
+      },
+      {
+       "arm": "blade-cpp",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.1074304,
+       "checksum": 57760462.710609,
+       "input_checksum": 481149.43540513,
+       "checksum_text": "57760462.710609",
+       "input_checksum_text": "481149.43540513",
+       "name": "antisym",
+       "wall_s": 0.1317,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 8,
+       "position": 1,
+       "started": "2026-10-18T12:20:11.919",
+       "peak_working_set": 19140608,
+       "page_faults": 4735,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 8.468338449803945e-16,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 1.6768831691201096e-15
+       }
+      },
+      {
+       "arm": "blade-cpp",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.1074274,
+       "checksum": 57760462.710609,
+       "input_checksum": 481149.43540513,
+       "checksum_text": "57760462.710609",
+       "input_checksum_text": "481149.43540513",
+       "name": "antisym",
+       "wall_s": 0.1334,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 9,
+       "position": 0,
+       "started": "2026-10-18T12:20:27.416",
+       "peak_working_set": 19140608,
+       "page_faults": 4734,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 8.468338449803945e-16,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 1.6768831691201096e-15
+       }
+      },
+      {
+       "arm": "blade-cpp",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.1087053,
+       "checksum": 57760462.710609,
+       "input_checksum": 481149.43540513,
+       "checksum_text": "57760462.710609",
+       "input_checksum_text": "481149.43540513",
+       "name": "antisym",
+       "wall_s": 0.1338,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 10,
+       "position": 2,
+       "started": "2026-10-18T12:20:49.137",
+       "peak_working_set": 19140608,
+       "page_faults": 4735,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 8.468338449803945e-16,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 1.6768831691201096e-15
+       }
+      }
+     ],
+     "build": {
+      "arm": "blade-cpp",
+      "regime": "serial-licensed-native",
+      "size": "full",
+      "status": "ok",
+      "reason": "",
+      "exe": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\blade-cpp\\antisym.exe",
+      "exe_sha256": "7d3b0a100740d49a9e0c25582b7ef0a3ef6b2ec8a843c7b1e7f17c8214a779a5",
+      "command": [
+       "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bin\\Release\\net10.0\\Blade.exe",
+       "compile",
+       "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\blade-cpp\\src\\antisym.blade",
+       "-o",
+       "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\blade-cpp\\antisym.exe",
+       "--verbose",
+       "--print",
+       "checksum,input_checksum"
+      ],
+      "cwd": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\blade-cpp",
+      "knobs": {
+       "BLADE_BLAS": "0",
+       "BLADE_EXE_CACHE": "0",
+       "BLADE_LLVM_CLANG": "C:\\msys64\\clang64\\bin\\clang.exe",
+       "BLADE_OMP_THREADS": "1"
+      },
+      "run_knobs": {
+       "OMP_NUM_THREADS": "1",
+       "OPENBLAS_NUM_THREADS": "1",
+       "OMP_DYNAMIC": "FALSE"
+      },
+      "flags": [
+       "--verbose",
+       "--print",
+       "checksum,input_checksum"
+      ],
+      "compiler": {
+       "blade": {
+        "exe": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bin\\Release\\net10.0\\Blade.exe",
+        "exists": true,
+        "toolchain_json_beside_exe": false,
+        "exe_sha256": "8dea4f9f7f82b0efd3a67cce9ffa452a7e774f9d9c67df8aa535c98bed9bd411",
+        "dll": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bin\\Release\\net10.0\\Blade.dll",
+        "dll_sha256": "74b6728036b170d9e87ed99b5917b9d883acc3a282d9e161cdfa5285fd9cf892",
+        "dll_mtime": "2026-10-17T22:11:49.197555",
+        "version": "Blade Compiler v0.20.0"
+       },
+       "gpp": {
+        "path": "C:\\msys64\\ucrt64\\bin\\g++.exe",
+        "exists": true,
+        "version": "g++.exe (Rev4, Built by MSYS2 project) 16.2.0"
+       }
+      },
+      "source": {
+       "committed": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\kernels\\antisym\\antisym.blade",
+       "committed_sha256": "2fbffc7240b729b7920c9512fba09192cc99758af884f577039426ef5ac9a7e2",
+       "compiled": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\blade-cpp\\src\\antisym.blade",
+       "compiled_sha256": "2fbffc7240b729b7920c9512fba09192cc99758af884f577039426ef5ac9a7e2",
+       "size_lines": {
+        "p": 9,
+        "n": 10
+       }
+      },
+      "build_wall_s": 3.089,
+      "returncode": 0,
+      "stdout_tail": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\blade-cpp\\antisym.exe",
+      "stderr_tail": "[Emit] C:\\Users\\cdupu\\AppData\\Local\\Temp\\blade-build\\antisym-802d279e-17092-89e03bcf\\antisym.cpp\n[Compile] C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\blade-cpp\\antisym.exe\n[Build] kept C:\\Users\\cdupu\\AppData\\Local\\Temp\\blade-build\\antisym-802d279e-17092-89e03bcf",
+      "evidence": {
+       "emitted": [
+        "C:\\Users\\cdupu\\AppData\\Local\\Temp\\blade-build\\antisym-802d279e-17092-89e03bcf\\antisym.cpp"
+       ],
+       "kept_dir": "C:\\Users\\cdupu\\AppData\\Local\\Temp\\blade-build\\antisym-802d279e-17092-89e03bcf",
+       "artifacts": [
+        "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\blade-cpp\\generated\\antisym.cpp"
+       ],
+       "runtime_headers_sha256": {
+        "blade_dll_panic.hpp": "173638d4c776e919f88ecfdd39e3b21fd3625a4b8ce811109a9ef3468bd046d7",
+        "blade_lapack.hpp": "85bf69cd273c05fb65964943a359c39f1fa804bdaad098724f4407a0d8b7a00a",
+        "blade_linalg.hpp": "74c22476105d417fca9e2917a5d5760502df1fd6c4a0d198af8b02606e0ba27d",
+        "blade_linalg_cuda.hpp": "20d6e91e8202318da08b38480624cdc3cbc29f076f447424bd31ab7120432ab9",
+        "blade_linalg_views.hpp": "35300a1a57e073a6436a7201b075c1e4321573519c5ccb1f76023179c976c9ed",
+        "blade_memcheck.hpp": "22d7012931bbf4de3e19064d6f0fab723595191e8ce0009d943847376799169f",
+        "blade_packed_gemm.hpp": "bc7be0e5653cf7e50c8e4a3fc9aeab7b33ed7c21f9c578ad7ba6e6adc9fc2edf",
+        "blade_portability.hpp": "b831adde94b841d9bd548810e137a2e79377cddaea608a4d3a0462c52f0c98ce",
+        "blade_runtime.hpp": "809d7125ab8609195826735162e67a84ccecc1b0689d892fc67a7f90cf5d2027",
+        "blade_run_record.hpp": "efa77b8d103161f15f1318010bb1e265709ac479d311c306f350117db1a223d8",
+        "blade_tilecache.hpp": "e3eca9085ce4202643cbbb8c852d2d105c65f7f14d83af56071260552f702f79",
+        "index_types.h": "f82e55e37f441da22596992d0127819fa1f6453af582e36a3828d6d85733d537",
+        "linearized_storage.hpp": "ea5e2cd7103423d4c4ca503d0ad585517d6056b5004a6edc43542c56aacfc7d0",
+        "nested_array_types.hpp": "350695e1c2206e4661b6414d6986328248f5a10ed49297e4a63323c80948ac12",
+        "nested_array_utilities.hpp": "43eb97c555b2d3835e8a8787eb85709141dacb77cde96a2a5d717a6df5b1c39a",
+        "orbit_wreath_utilities.hpp": "696222bdad71f60f48d20d50ff963083d50e60f18f31576aeccbac25248838b7",
+        "rand_runtime.hpp": "57216a6be6ebe8bcc59719037ee7d5166537fc5c99f7059ae652435aceb87a70"
+       },
+       "lane": "cpp",
+       "thread_constructs": 0,
+       "simd_reductions": 7,
+       "omp_emitted_serial_markers": 4,
+       "fold_form": "reordered (7 SIMD_REDUCTION)",
+       "plan_file": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\blade-cpp\\plan.txt",
+       "plan_returncode": 0,
+       "plan_decisions": [
+        "[omp v1] _(checksum,input_checksum): declined -- BLADE_OMP_THREADS=1 -- this build emits no thread-level OpenMP (the omp licence in source is unchanged; omp simd is unaffected) [[omp] requested but emitted serial]",
+        "[symmetric-storage v1] __v34: applied [packed SymAntisymmetric storage over 2 levels (one canonical cell per orbit); operands: z, z]",
+        "[triangular-iteration v1] __v34: applied [triangular levels 1; symcom states: SCNeither, SCCommutative; speedup x2]",
+        "[fold-form v1] _(checksum,input_checksum): applied [fold form: simd-reduction; prodsum]",
+        "[fold-form v1] __v61: applied [fold form: simd-reduction; reduce over a deferred computation (one level)]",
+        "[fold-form v1] _(checksum,input_checksum): applied [fold form: K-lanes(8); reduce in expression position]",
+        "[microkernel v1] __v115: applied [row-fold jam (partial reduce over rows); 6 rows per tile, one accumulator per row (bitwise)]",
+        "[fold-form v1] __v115: applied [fold form: row-fold jam(6 rows, bitwise); reduce over the rows of a row map]",
+        "[fold-form v1] __v94: applied [fold form: simd-reduction; reduce over a materialized array (Path A, thread team suppressed)]",
+        "[fold-form v1] lambda in l: applied [fold form: simd-reduction; prodsum]",
+        "[fold-form v1] __ret1073741824: applied [fold form: simd-reduction; reduce over a deferred computation (one level)]",
+        "[fold-form v1] lambda in isum: applied [fold form: K-lanes(8); reduce in expression position]"
+       ],
+       "plan_omp": [
+        "[omp v1] _(checksum,input_checksum): declined -- BLADE_OMP_THREADS=1 -- this build emits no thread-level OpenMP (the omp licence in source is unchanged; omp simd is unaffected) [[omp] requested but emitted serial]"
+       ],
+       "plan_fold_form": [
+        "[fold-form v1] _(checksum,input_checksum): applied [fold form: simd-reduction; prodsum]",
+        "[fold-form v1] __v61: applied [fold form: simd-reduction; reduce over a deferred computation (one level)]",
+        "[fold-form v1] _(checksum,input_checksum): applied [fold form: K-lanes(8); reduce in expression position]",
+        "[fold-form v1] __v115: applied [fold form: row-fold jam(6 rows, bitwise); reduce over the rows of a row map]",
+        "[fold-form v1] __v94: applied [fold form: simd-reduction; reduce over a materialized array (Path A, thread team suppressed)]",
+        "[fold-form v1] lambda in l: applied [fold form: simd-reduction; prodsum]",
+        "[fold-form v1] __ret1073741824: applied [fold form: simd-reduction; reduce over a deferred computation (one level)]",
+        "[fold-form v1] lambda in isum: applied [fold form: K-lanes(8); reduce in expression position]"
+       ],
+       "blas_routed": false,
+       "parallelism": "serial"
+      },
+      "warnings": [],
+      "pe": {
+       "imports": [
+        "api-ms-win-crt-convert-l1-1-0.dll",
+        "api-ms-win-crt-environment-l1-1-0.dll",
+        "api-ms-win-crt-filesystem-l1-1-0.dll",
+        "api-ms-win-crt-heap-l1-1-0.dll",
+        "api-ms-win-crt-locale-l1-1-0.dll",
+        "api-ms-win-crt-math-l1-1-0.dll",
+        "api-ms-win-crt-private-l1-1-0.dll",
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "api-ms-win-crt-stdio-l1-1-0.dll",
+        "api-ms-win-crt-string-l1-1-0.dll",
+        "KERNEL32.dll",
+        "libgcc_s_seh-1.dll",
+        "libstdc++-6.dll"
+       ],
+       "SizeOfStackReserve": 2097152,
+       "SizeOfStackCommit": 4096,
+       "SizeOfHeapReserve": 1048576,
+       "SizeOfHeapCommit": 4096
+      },
+      "resolved_dlls": {
+       "KERNEL32.dll": {
+        "path": "C:\\WINDOWS\\System32\\KERNEL32.dll",
+        "sha256": "e132eba4166256e2f414b91fe7d5386590bc5ea8626aee5af9c9738383cf2ae1"
+       },
+       "libgcc_s_seh-1.dll": {
+        "path": "C:\\msys64\\ucrt64\\bin\\libgcc_s_seh-1.dll",
+        "sha256": "68ca4574b331402879dec403ba4f14491c9b8fc4aa3f4a41432008714b9bc5df"
+       },
+       "libstdc++-6.dll": {
+        "path": "C:\\msys64\\ucrt64\\bin\\libstdc++-6.dll",
+        "sha256": "b30dbd914d903992acb28b38455947153886656beafbd91c465c31aa258f9c45"
+       }
+      },
+      "expect_names": [
+       "antisym"
+      ],
+      "twin": false,
+      "lane": "cpp"
+     },
+     "stats": {
+      "n": 11,
+      "min": 0.1073474,
+      "median": 0.1079054,
+      "q1": 0.10745495,
+      "q3": 0.10847755,
+      "iqr": 0.0010226000000000124,
+      "max": 0.1106006,
+      "mean": 0.10817694545454545
+     },
+     "peak_working_set_max": 19144704,
+     "trend": 0.00521735750144392,
+     "ratio": {
+      "ratio": 1.4591255691265277,
+      "ci95": [
+       1.452139172491484,
+       1.4707096809763294
+      ],
+      "verdict": "win",
+      "rounds": 11,
+      "resamples": 10000,
+      "seed": 1927158822,
+      "method": "round-block bootstrap"
+     }
+    },
+    "gfortran-natural": {
+     "status": "ok",
+     "reason": "",
+     "samples": [
+      {
+       "arm": "gfortran-natural",
+       "kind": "warmup",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.7714612,
+       "checksum": 57760462.710610434,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710610434E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.8272,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": null,
+       "position": null,
+       "started": "2026-10-18T12:17:39.625",
+       "peak_working_set": 24530944,
+       "page_faults": 6110,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.6572148679903275e-14
+       }
+      },
+      {
+       "arm": "gfortran-natural",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.7750785,
+       "checksum": 57760462.710610434,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710610434E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.8013,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 0,
+       "position": 4,
+       "started": "2026-10-18T12:17:57.617",
+       "peak_working_set": 24518656,
+       "page_faults": 6108,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.6572148679903275e-14
+       }
+      },
+      {
+       "arm": "gfortran-natural",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.7721199,
+       "checksum": 57760462.710610434,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710610434E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.7974,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 1,
+       "position": 2,
+       "started": "2026-10-18T12:18:11.061",
+       "peak_working_set": 24518656,
+       "page_faults": 6107,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.6572148679903275e-14
+       }
+      },
+      {
+       "arm": "gfortran-natural",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.7646954,
+       "checksum": 57760462.710610434,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710610434E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.7913,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 2,
+       "position": 7,
+       "started": "2026-10-18T12:18:39.057",
+       "peak_working_set": 24518656,
+       "page_faults": 6107,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.6572148679903275e-14
+       }
+      },
+      {
+       "arm": "gfortran-natural",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.771087,
+       "checksum": 57760462.710610434,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710610434E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.7966,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 3,
+       "position": 6,
+       "started": "2026-10-18T12:18:54.286",
+       "peak_working_set": 24518656,
+       "page_faults": 6106,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.6572148679903275e-14
+       }
+      },
+      {
+       "arm": "gfortran-natural",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.7674353,
+       "checksum": 57760462.710610434,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710610434E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.7924,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 4,
+       "position": 2,
+       "started": "2026-10-18T12:19:03.615",
+       "peak_working_set": 24514560,
+       "page_faults": 6105,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.6572148679903275e-14
+       }
+      },
+      {
+       "arm": "gfortran-natural",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.7665497,
+       "checksum": 57760462.710610434,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710610434E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.7928,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 5,
+       "position": 1,
+       "started": "2026-10-18T12:19:19.067",
+       "peak_working_set": 24518656,
+       "page_faults": 6107,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.6572148679903275e-14
+       }
+      },
+      {
+       "arm": "gfortran-natural",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.7711161,
+       "checksum": 57760462.710610434,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710610434E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.7968,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 6,
+       "position": 0,
+       "started": "2026-10-18T12:19:34.626",
+       "peak_working_set": 24518656,
+       "page_faults": 6106,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.6572148679903275e-14
+       }
+      },
+      {
+       "arm": "gfortran-natural",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.7709492,
+       "checksum": 57760462.710610434,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710610434E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.797,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 7,
+       "position": 1,
+       "started": "2026-10-18T12:19:54.273",
+       "peak_working_set": 24518656,
+       "page_faults": 6108,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.6572148679903275e-14
+       }
+      },
+      {
+       "arm": "gfortran-natural",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.7707728,
+       "checksum": 57760462.710610434,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710610434E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.7962,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 8,
+       "position": 6,
+       "started": "2026-10-18T12:20:22.257",
+       "peak_working_set": 24522752,
+       "page_faults": 6109,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.6572148679903275e-14
+       }
+      },
+      {
+       "arm": "gfortran-natural",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.7701586,
+       "checksum": 57760462.710610434,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710610434E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.7965,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 9,
+       "position": 7,
+       "started": "2026-10-18T12:20:42.218",
+       "peak_working_set": 24518656,
+       "page_faults": 6108,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.6572148679903275e-14
+       }
+      },
+      {
+       "arm": "gfortran-natural",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.7719443,
+       "checksum": 57760462.710610434,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710610434E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.7988,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 10,
+       "position": 5,
+       "started": "2026-10-18T12:20:55.739",
+       "peak_working_set": 24518656,
+       "page_faults": 6108,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.6572148679903275e-14
+       }
+      }
+     ],
+     "build": {
+      "arm": "gfortran-natural",
+      "regime": "serial-licensed-native",
+      "size": "full",
+      "status": "ok",
+      "reason": "",
+      "exe": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\gfortran-natural\\gfortran-natural.exe",
+      "exe_sha256": "b81ad68d0e0d40a8530f960b4068d1e91f0f43f49f300c3e30c3e435b3d59227",
+      "command": [
+       "powershell",
+       "-NoProfile",
+       "-ExecutionPolicy",
+       "Bypass",
+       "-File",
+       "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\fortran\\build_gfortran.ps1",
+       "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\gfortran-natural\\gfortran-natural.exe",
+       "-O3",
+       "-march=native",
+       "-ffp-contract=fast",
+       "-fno-external-blas",
+       "-fno-external-blas64",
+       "-cpp",
+       "-DBENCH_LICENSED",
+       "-fopenmp-simd",
+       "--",
+       "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\gfortran-natural\\src\\antisym.f90"
+      ],
+      "cwd": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\gfortran-natural",
+      "knobs": {},
+      "run_knobs": {
+       "OMP_NUM_THREADS": "1",
+       "OPENBLAS_NUM_THREADS": "1",
+       "OMP_DYNAMIC": "FALSE"
+      },
+      "flags": [
+       "-O3",
+       "-march=native",
+       "-ffp-contract=fast",
+       "-fno-external-blas",
+       "-fno-external-blas64",
+       "-cpp",
+       "-DBENCH_LICENSED",
+       "-fopenmp-simd"
+      ],
+      "compiler": {
+       "gfortran": {
+        "path": "C:\\msys64\\ucrt64\\bin\\gfortran.exe",
+        "exists": true,
+        "version": "GNU Fortran (Rev4, Built by MSYS2 project) 16.2.0"
+       },
+       "wrapper": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\fortran\\build_gfortran.ps1",
+       "wrapper_sha256": "ecf8eaad2ce27e90f83022a5c9fd47ea80e1e93bdecbadb5fb895e81c88159d0"
+      },
+      "source": {
+       "committed": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\kernels\\antisym\\natural.f90",
+       "committed_sha256": "4a775510419f93570ae1a3ca22f6941b5606de31d7c5d87a9a03732baa47d20a",
+       "compiled": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\gfortran-natural\\src\\antisym.f90",
+       "compiled_sha256": "4a775510419f93570ae1a3ca22f6941b5606de31d7c5d87a9a03732baa47d20a",
+       "size_lines": {
+        "p": 15,
+        "n": 16
+       },
+       "bench_support_sha256": "7a63c7b22ab028aa1245151596b507be57520890d82142025542d6e2fd5e424d"
+      },
+      "build_wall_s": 0.692,
+      "returncode": 0,
+      "stdout_tail": "",
+      "stderr_tail": "+ C:\\msys64\\ucrt64\\bin\\gfortran.exe -O3 -march=native -ffp-contract=fast -fno-external-blas -fno-external-blas64 -cpp -DBENCH_LICENSED -fopenmp-simd -cpp -fno-external-blas -fno-external-blas64 -IC:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\fortran -Wl,--stack,268435456 C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\gfortran-natural\\src\\antisym.f90 -o C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\gfortran-natural\\gfortran-natural.exe",
+      "evidence": {
+       "effective_command": "C:\\msys64\\ucrt64\\bin\\gfortran.exe -O3 -march=native -ffp-contract=fast -fno-external-blas -fno-external-blas64 -cpp -DBENCH_LICENSED -fopenmp-simd -cpp -fno-external-blas -fno-external-blas64 -IC:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\fortran -Wl,--stack,268435456 C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\gfortran-natural\\src\\antisym.f90 -o C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\gfortran-natural\\gfortran-natural.exe",
+       "blas_routed": false,
+       "parallelism": "serial"
+      },
+      "warnings": [],
+      "pe": {
+       "imports": [
+        "api-ms-win-crt-environment-l1-1-0.dll",
+        "api-ms-win-crt-heap-l1-1-0.dll",
+        "api-ms-win-crt-locale-l1-1-0.dll",
+        "api-ms-win-crt-math-l1-1-0.dll",
+        "api-ms-win-crt-private-l1-1-0.dll",
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "api-ms-win-crt-stdio-l1-1-0.dll",
+        "api-ms-win-crt-string-l1-1-0.dll",
+        "KERNEL32.dll",
+        "libgfortran-5.dll"
+       ],
+       "SizeOfStackReserve": 268435456,
+       "SizeOfStackCommit": 4096,
+       "SizeOfHeapReserve": 1048576,
+       "SizeOfHeapCommit": 4096
+      },
+      "resolved_dlls": {
+       "KERNEL32.dll": {
+        "path": "C:\\WINDOWS\\System32\\KERNEL32.dll",
+        "sha256": "e132eba4166256e2f414b91fe7d5386590bc5ea8626aee5af9c9738383cf2ae1"
+       },
+       "libgfortran-5.dll": {
+        "path": "C:\\msys64\\ucrt64\\bin\\libgfortran-5.dll",
+        "sha256": "dcc55fa1d5e533462006e4d17a0ee7f1384f3bf5d562a269c4f5b089c898d29a"
+       }
+      },
+      "expect_names": [
+       "antisym"
+      ],
+      "twin": false,
+      "lane": null
+     },
+     "stats": {
+      "n": 11,
+      "min": 0.7646954,
+      "median": 0.7709492,
+      "q1": 0.76879695,
+      "q3": 0.7715301999999999,
+      "iqr": 0.0027332499999999094,
+      "max": 0.7750785,
+      "mean": 0.7701733454545454
+     },
+     "peak_working_set_max": 24530944,
+     "trend": 0.00017870875789627316,
+     "ratio": {
+      "ratio": 10.42498049418881,
+      "ci95": [
+       10.37060715383652,
+       10.455448175916894
+      ],
+      "verdict": "win",
+      "rounds": 11,
+      "resamples": 10000,
+      "seed": 1927158822,
+      "method": "round-block bootstrap"
+     },
+     "ratio_vs_blade_cpp": {
+      "ratio": 7.144676726095265,
+      "ci95": [
+       7.0936384886477475,
+       7.174624687239366
+      ],
+      "verdict": "win",
+      "rounds": 11,
+      "resamples": 10000,
+      "seed": 1927158822,
+      "method": "round-block bootstrap"
+     }
+    },
+    "gfortran-expert": {
+     "status": "ok",
+     "reason": "",
+     "samples": [
+      {
+       "arm": "gfortran-expert",
+       "kind": "warmup",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.032727,
+       "checksum": 57760462.710608885,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710608885E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.0902,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": null,
+       "position": null,
+       "started": "2026-10-18T12:17:42.455",
+       "peak_working_set": 34246656,
+       "page_faults": 8489,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.579820260184784e-16
+       }
+      },
+      {
+       "arm": "gfortran-expert",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0308851,
+       "checksum": 57760462.710608885,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710608885E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.0584,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 0,
+       "position": 7,
+       "started": "2026-10-18T12:18:04.603",
+       "peak_working_set": 34246656,
+       "page_faults": 8486,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.579820260184784e-16
+       }
+      },
+      {
+       "arm": "gfortran-expert",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0307769,
+       "checksum": 57760462.710608885,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710608885E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.0567,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 1,
+       "position": 3,
+       "started": "2026-10-18T12:18:13.861",
+       "peak_working_set": 34246656,
+       "page_faults": 8487,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.579820260184784e-16
+       }
+      },
+      {
+       "arm": "gfortran-expert",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0307438,
+       "checksum": 57760462.710608885,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710608885E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.0576,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 2,
+       "position": 5,
+       "started": "2026-10-18T12:18:34.963",
+       "peak_working_set": 34246656,
+       "page_faults": 8488,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.579820260184784e-16
+       }
+      },
+      {
+       "arm": "gfortran-expert",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0306491,
+       "checksum": 57760462.710608885,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710608885E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.0571,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 3,
+       "position": 2,
+       "started": "2026-10-18T12:18:46.045",
+       "peak_working_set": 34246656,
+       "page_faults": 8487,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.579820260184784e-16
+       }
+      },
+      {
+       "arm": "gfortran-expert",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0306082,
+       "checksum": 57760462.710608885,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710608885E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.0587,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 4,
+       "position": 5,
+       "started": "2026-10-18T12:19:10.508",
+       "peak_working_set": 34246656,
+       "page_faults": 8489,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.579820260184784e-16
+       }
+      },
+      {
+       "arm": "gfortran-expert",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.03064,
+       "checksum": 57760462.710608885,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710608885E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.0573,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 5,
+       "position": 6,
+       "started": "2026-10-18T12:19:30.427",
+       "peak_working_set": 34246656,
+       "page_faults": 8486,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.579820260184784e-16
+       }
+      },
+      {
+       "arm": "gfortran-expert",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0312656,
+       "checksum": 57760462.710608885,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710608885E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.0569,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 6,
+       "position": 6,
+       "started": "2026-10-18T12:19:48.120",
+       "peak_working_set": 34246656,
+       "page_faults": 8487,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.579820260184784e-16
+       }
+      },
+      {
+       "arm": "gfortran-expert",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0309624,
+       "checksum": 57760462.710608885,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710608885E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.0591,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 7,
+       "position": 6,
+       "started": "2026-10-18T12:20:05.722",
+       "peak_working_set": 34250752,
+       "page_faults": 8489,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.579820260184784e-16
+       }
+      },
+      {
+       "arm": "gfortran-expert",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0304818,
+       "checksum": 57760462.710608885,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710608885E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.0567,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 8,
+       "position": 4,
+       "started": "2026-10-18T12:20:18.137",
+       "peak_working_set": 34246656,
+       "page_faults": 8488,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.579820260184784e-16
+       }
+      },
+      {
+       "arm": "gfortran-expert",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0307874,
+       "checksum": 57760462.710608885,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710608885E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.059,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 9,
+       "position": 4,
+       "started": "2026-10-18T12:20:36.015",
+       "peak_working_set": 34246656,
+       "page_faults": 8487,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.579820260184784e-16
+       }
+      },
+      {
+       "arm": "gfortran-expert",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0302385,
+       "checksum": 57760462.710608885,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710608885E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.0566,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 10,
+       "position": 0,
+       "started": "2026-10-18T12:20:45.018",
+       "peak_working_set": 34250752,
+       "page_faults": 8490,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.579820260184784e-16
+       }
+      }
+     ],
+     "build": {
+      "arm": "gfortran-expert",
+      "regime": "serial-licensed-native",
+      "size": "full",
+      "status": "ok",
+      "reason": "",
+      "exe": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\gfortran-expert\\gfortran-expert.exe",
+      "exe_sha256": "7a3427ecfc3883d40bec99e02803a76087292a955442c199bb0146d2d52b86f0",
+      "command": [
+       "powershell",
+       "-NoProfile",
+       "-ExecutionPolicy",
+       "Bypass",
+       "-File",
+       "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\fortran\\build_gfortran.ps1",
+       "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\gfortran-expert\\gfortran-expert.exe",
+       "-O3",
+       "-march=native",
+       "-ffp-contract=fast",
+       "-fno-external-blas",
+       "-fno-external-blas64",
+       "-cpp",
+       "-DBENCH_LICENSED",
+       "-fopenmp-simd",
+       "--",
+       "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\gfortran-expert\\src\\antisym.f90"
+      ],
+      "cwd": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\gfortran-expert",
+      "knobs": {},
+      "run_knobs": {
+       "OMP_NUM_THREADS": "1",
+       "OPENBLAS_NUM_THREADS": "1",
+       "OMP_DYNAMIC": "FALSE"
+      },
+      "flags": [
+       "-O3",
+       "-march=native",
+       "-ffp-contract=fast",
+       "-fno-external-blas",
+       "-fno-external-blas64",
+       "-cpp",
+       "-DBENCH_LICENSED",
+       "-fopenmp-simd"
+      ],
+      "compiler": {
+       "gfortran": {
+        "path": "C:\\msys64\\ucrt64\\bin\\gfortran.exe",
+        "exists": true,
+        "version": "GNU Fortran (Rev4, Built by MSYS2 project) 16.2.0"
+       },
+       "wrapper": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\fortran\\build_gfortran.ps1",
+       "wrapper_sha256": "ecf8eaad2ce27e90f83022a5c9fd47ea80e1e93bdecbadb5fb895e81c88159d0"
+      },
+      "source": {
+       "committed": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\kernels\\antisym\\expert.f90",
+       "committed_sha256": "11ac6ad04120647b8f5b55e42be6097048eac09eccdbb6ec52fa503c6b57eff3",
+       "compiled": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\gfortran-expert\\src\\antisym.f90",
+       "compiled_sha256": "11ac6ad04120647b8f5b55e42be6097048eac09eccdbb6ec52fa503c6b57eff3",
+       "size_lines": {
+        "p": 27,
+        "n": 28
+       },
+       "bench_support_sha256": "7a63c7b22ab028aa1245151596b507be57520890d82142025542d6e2fd5e424d"
+      },
+      "build_wall_s": 0.811,
+      "returncode": 0,
+      "stdout_tail": "",
+      "stderr_tail": "+ C:\\msys64\\ucrt64\\bin\\gfortran.exe -O3 -march=native -ffp-contract=fast -fno-external-blas -fno-external-blas64 -cpp -DBENCH_LICENSED -fopenmp-simd -cpp -fno-external-blas -fno-external-blas64 -IC:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\fortran -Wl,--stack,268435456 C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\gfortran-expert\\src\\antisym.f90 -o C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\gfortran-expert\\gfortran-expert.exe",
+      "evidence": {
+       "effective_command": "C:\\msys64\\ucrt64\\bin\\gfortran.exe -O3 -march=native -ffp-contract=fast -fno-external-blas -fno-external-blas64 -cpp -DBENCH_LICENSED -fopenmp-simd -cpp -fno-external-blas -fno-external-blas64 -IC:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\fortran -Wl,--stack,268435456 C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\gfortran-expert\\src\\antisym.f90 -o C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\gfortran-expert\\gfortran-expert.exe",
+       "blas_routed": false,
+       "parallelism": "serial"
+      },
+      "warnings": [],
+      "pe": {
+       "imports": [
+        "api-ms-win-crt-environment-l1-1-0.dll",
+        "api-ms-win-crt-heap-l1-1-0.dll",
+        "api-ms-win-crt-locale-l1-1-0.dll",
+        "api-ms-win-crt-math-l1-1-0.dll",
+        "api-ms-win-crt-private-l1-1-0.dll",
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "api-ms-win-crt-stdio-l1-1-0.dll",
+        "api-ms-win-crt-string-l1-1-0.dll",
+        "KERNEL32.dll",
+        "libgfortran-5.dll"
+       ],
+       "SizeOfStackReserve": 268435456,
+       "SizeOfStackCommit": 4096,
+       "SizeOfHeapReserve": 1048576,
+       "SizeOfHeapCommit": 4096
+      },
+      "resolved_dlls": {
+       "KERNEL32.dll": {
+        "path": "C:\\WINDOWS\\System32\\KERNEL32.dll",
+        "sha256": "e132eba4166256e2f414b91fe7d5386590bc5ea8626aee5af9c9738383cf2ae1"
+       },
+       "libgfortran-5.dll": {
+        "path": "C:\\msys64\\ucrt64\\bin\\libgfortran-5.dll",
+        "sha256": "dcc55fa1d5e533462006e4d17a0ee7f1384f3bf5d562a269c4f5b089c898d29a"
+       }
+      },
+      "expect_names": [
+       "antisym"
+      ],
+      "twin": false,
+      "lane": null
+     },
+     "stats": {
+      "n": 11,
+      "min": 0.0302385,
+      "median": 0.0307438,
+      "q1": 0.0306241,
+      "q3": 0.03083625,
+      "iqr": 0.00021214999999999776,
+      "max": 0.0312656,
+      "mean": 0.0307308
+     },
+     "peak_working_set_max": 34250752,
+     "trend": 0.0014181721192565444,
+     "ratio": {
+      "ratio": 0.41572585498142023,
+      "ci95": [
+       0.41385433248163106,
+       0.4173605762035657
+      ],
+      "verdict": "loss",
+      "rounds": 11,
+      "resamples": 10000,
+      "seed": 1927158822,
+      "method": "round-block bootstrap"
+     },
+     "ratio_vs_blade_cpp": {
+      "ratio": 0.28491437870579234,
+      "ci95": [
+       0.28264497115867643,
+       0.2864490437711377
+      ],
+      "verdict": "loss",
+      "rounds": 11,
+      "resamples": 10000,
+      "seed": 1927158822,
+      "method": "round-block bootstrap"
+     }
+    },
+    "ifx-natural": {
+     "status": "ok",
+     "reason": "",
+     "samples": [
+      {
+       "arm": "ifx-natural",
+       "kind": "warmup",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.3313309,
+       "checksum": 57760462.710610464,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710610464E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.4089,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": null,
+       "position": null,
+       "started": "2026-10-18T12:17:44.549",
+       "peak_working_set": 24059904,
+       "page_faults": 6067,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.708811273194023e-14
+       }
+      },
+      {
+       "arm": "ifx-natural",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.3371937,
+       "checksum": 57760462.710610464,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710610464E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.3596,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 0,
+       "position": 2,
+       "started": "2026-10-18T12:17:53.153",
+       "peak_working_set": 23560192,
+       "page_faults": 5915,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.708811273194023e-14
+       }
+      },
+      {
+       "arm": "ifx-natural",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.3337651,
+       "checksum": 57760462.710610464,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710610464E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.357,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 1,
+       "position": 0,
+       "started": "2026-10-18T12:18:06.664",
+       "peak_working_set": 23556096,
+       "page_faults": 5915,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.708811273194023e-14
+       }
+      },
+      {
+       "arm": "ifx-natural",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.331147,
+       "checksum": 57760462.710610464,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710610464E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.3541,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 2,
+       "position": 4,
+       "started": "2026-10-18T12:18:32.606",
+       "peak_working_set": 23556096,
+       "page_faults": 5915,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.708811273194023e-14
+       }
+      },
+      {
+       "arm": "ifx-natural",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.3334055,
+       "checksum": 57760462.710610464,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710610464E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.3562,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 3,
+       "position": 7,
+       "started": "2026-10-18T12:18:57.085",
+       "peak_working_set": 23552000,
+       "page_faults": 5914,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.708811273194023e-14
+       }
+      },
+      {
+       "arm": "ifx-natural",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.3328799,
+       "checksum": 57760462.710610464,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710610464E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.3574,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 4,
+       "position": 7,
+       "started": "2026-10-18T12:19:14.670",
+       "peak_working_set": 23556096,
+       "page_faults": 5916,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.708811273194023e-14
+       }
+      },
+      {
+       "arm": "ifx-natural",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.3338808,
+       "checksum": 57760462.710610464,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710610464E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.3576,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 5,
+       "position": 3,
+       "started": "2026-10-18T12:19:23.906",
+       "peak_working_set": 23556096,
+       "page_faults": 5913,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.708811273194023e-14
+       }
+      },
+      {
+       "arm": "ifx-natural",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.3308399,
+       "checksum": 57760462.710610464,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710610464E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.3535,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 6,
+       "position": 4,
+       "started": "2026-10-18T12:19:43.620",
+       "peak_working_set": 23552000,
+       "page_faults": 5914,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.708811273194023e-14
+       }
+      },
+      {
+       "arm": "ifx-natural",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.331178,
+       "checksum": 57760462.710610464,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710610464E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.3542,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 7,
+       "position": 3,
+       "started": "2026-10-18T12:19:59.173",
+       "peak_working_set": 23556096,
+       "page_faults": 5917,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.708811273194023e-14
+       }
+      },
+      {
+       "arm": "ifx-natural",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.3315555,
+       "checksum": 57760462.710610464,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710610464E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.3556,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 8,
+       "position": 7,
+       "started": "2026-10-18T12:20:25.056",
+       "peak_working_set": 23556096,
+       "page_faults": 5915,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.708811273194023e-14
+       }
+      },
+      {
+       "arm": "ifx-natural",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.3329195,
+       "checksum": 57760462.710610464,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710610464E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.3568,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 9,
+       "position": 3,
+       "started": "2026-10-18T12:20:33.655",
+       "peak_working_set": 23556096,
+       "page_faults": 5916,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.708811273194023e-14
+       }
+      },
+      {
+       "arm": "ifx-natural",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.332942,
+       "checksum": 57760462.710610464,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710610464E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.3567,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 10,
+       "position": 4,
+       "started": "2026-10-18T12:20:53.379",
+       "peak_working_set": 23556096,
+       "page_faults": 5915,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.708811273194023e-14
+       }
+      }
+     ],
+     "build": {
+      "arm": "ifx-natural",
+      "regime": "serial-licensed-native",
+      "size": "full",
+      "status": "ok",
+      "reason": "",
+      "exe": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\ifx-natural\\ifx-natural.exe",
+      "exe_sha256": "4d552bf3da7a833f3c3fea6ed3b27b136b0680705852f85d3865bc1d28c484f1",
+      "command": [
+       "cmd",
+       "/c",
+       "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\fortran\\build_ifx.cmd",
+       "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\ifx-natural\\ifx-natural.exe",
+       "/O3",
+       "/QxHost",
+       "/fp:precise",
+       "-mllvm",
+       "-fp-contract=fast",
+       "/fpp",
+       "/DBENCH_LICENSED",
+       "/Qopenmp-simd",
+       "--",
+       "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\ifx-natural\\src\\antisym.f90"
+      ],
+      "cwd": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\ifx-natural",
+      "knobs": {},
+      "run_knobs": {
+       "OMP_NUM_THREADS": "1",
+       "OPENBLAS_NUM_THREADS": "1",
+       "OMP_DYNAMIC": "FALSE"
+      },
+      "flags": [
+       "/O3",
+       "/QxHost",
+       "/fp:precise",
+       "-mllvm",
+       "-fp-contract=fast",
+       "/fpp",
+       "/DBENCH_LICENSED",
+       "/Qopenmp-simd"
+      ],
+      "compiler": {
+       "ifx": {
+        "wrapper": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\fortran\\build_ifx.cmd",
+        "exists": true,
+        "version": "Intel(R) Fortran Compiler for applications running on Intel(R) 64, Version 2026.1.0 Build 20260617"
+       },
+       "wrapper": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\fortran\\build_ifx.cmd",
+       "wrapper_sha256": "407d105816012c3ad3e58cb1ab3af384a586df39664e4261381aff8fb72c8d3e"
+      },
+      "source": {
+       "committed": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\kernels\\antisym\\natural.f90",
+       "committed_sha256": "4a775510419f93570ae1a3ca22f6941b5606de31d7c5d87a9a03732baa47d20a",
+       "compiled": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\ifx-natural\\src\\antisym.f90",
+       "compiled_sha256": "4a775510419f93570ae1a3ca22f6941b5606de31d7c5d87a9a03732baa47d20a",
+       "size_lines": {
+        "p": 15,
+        "n": 16
+       },
+       "bench_support_sha256": "7a63c7b22ab028aa1245151596b507be57520890d82142025542d6e2fd5e424d"
+      },
+      "build_wall_s": 2.271,
+      "returncode": 0,
+      "stdout_tail": "",
+      "stderr_tail": "**********************************************************************\n** Visual Studio 2022 Developer Command Prompt v17.4.3\n** Copyright (c) 2022 Microsoft Corporation\n**********************************************************************\n[vcvarsall.bat] Environment initialized for: 'x64'\n+ ifx /nologo  /O3 /QxHost /fp:precise -mllvm -fp-contract=fast /fpp /DBENCH_LICENSED /Qopenmp-simd /fpp /F268435456 /I\"C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\fortran\\.\" C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\ifx-natural\\src\\antisym.f90  /Fo:\"C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\ifx-natural\\ifx-natural.exe.obj\" /Fe:\"C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\ifx-natural\\ifx-natural.exe\" ",
+      "evidence": {
+       "effective_command": "ifx /nologo  /O3 /QxHost /fp:precise -mllvm -fp-contract=fast /fpp /DBENCH_LICENSED /Qopenmp-simd /fpp /F268435456 /I\"C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\fortran\\.\" C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\ifx-natural\\src\\antisym.f90  /Fo:\"C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\ifx-natural\\ifx-natural.exe.obj\" /Fe:\"C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\ifx-natural\\ifx-natural.exe\"",
+       "blas_routed": false,
+       "parallelism": "serial"
+      },
+      "warnings": [],
+      "pe": {
+       "imports": [
+        "imagehlp.dll",
+        "KERNEL32.dll"
+       ],
+       "SizeOfStackReserve": 268435456,
+       "SizeOfStackCommit": 4096,
+       "SizeOfHeapReserve": 1048576,
+       "SizeOfHeapCommit": 4096
+      },
+      "resolved_dlls": {
+       "imagehlp.dll": {
+        "path": "C:\\WINDOWS\\System32\\imagehlp.dll",
+        "sha256": "58117bbc51c4a56b6c4789e190f33a540b7734e394ada9652e2832e3d2e16588"
+       },
+       "KERNEL32.dll": {
+        "path": "C:\\WINDOWS\\System32\\KERNEL32.dll",
+        "sha256": "e132eba4166256e2f414b91fe7d5386590bc5ea8626aee5af9c9738383cf2ae1"
+       }
+      },
+      "expect_names": [
+       "antisym"
+      ],
+      "twin": false,
+      "lane": null
+     },
+     "stats": {
+      "n": 11,
+      "min": 0.3308399,
+      "median": 0.3329195,
+      "q1": 0.33136675,
+      "q3": 0.3335853,
+      "iqr": 0.002218549999999986,
+      "max": 0.3371937,
+      "mean": 0.33288244545454543
+     },
+     "peak_working_set_max": 24059904,
+     "trend": 0.005548798685084733,
+     "ratio": {
+      "ratio": 4.501826182107837,
+      "ci95": [
+       4.475317901057289,
+       4.5156175802102805
+      ],
+      "verdict": "win",
+      "rounds": 11,
+      "resamples": 10000,
+      "seed": 1927158822,
+      "method": "round-block bootstrap"
+     },
+     "ratio_vs_blade_cpp": {
+      "ratio": 3.0852904488561275,
+      "ci95": [
+       3.0625875647277545,
+       3.098563348921721
+      ],
+      "verdict": "win",
+      "rounds": 11,
+      "resamples": 10000,
+      "seed": 1927158822,
+      "method": "round-block bootstrap"
+     }
+    },
+    "ifx-expert": {
+     "status": "ok",
+     "reason": "",
+     "samples": [
+      {
+       "arm": "ifx-expert",
+       "kind": "warmup",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0300646,
+       "checksum": 57760462.710608885,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710608885E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.0936,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": null,
+       "position": null,
+       "started": "2026-10-18T12:17:46.962",
+       "peak_working_set": 33792000,
+       "page_faults": 8447,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.579820260184784e-16
+       }
+      },
+      {
+       "arm": "ifx-expert",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0293108,
+       "checksum": 57760462.710608885,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710608885E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.0539,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 0,
+       "position": 0,
+       "started": "2026-10-18T12:17:49.059",
+       "peak_working_set": 33275904,
+       "page_faults": 8294,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.579820260184784e-16
+       }
+      },
+      {
+       "arm": "ifx-expert",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0302953,
+       "checksum": 57760462.710608885,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710608885E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.0615,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 1,
+       "position": 4,
+       "started": "2026-10-18T12:18:15.921",
+       "peak_working_set": 33284096,
+       "page_faults": 8293,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.579820260184784e-16
+       }
+      },
+      {
+       "arm": "ifx-expert",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0302697,
+       "checksum": 57760462.710608885,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710608885E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.0554,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 2,
+       "position": 0,
+       "started": "2026-10-18T12:18:24.270",
+       "peak_working_set": 33288192,
+       "page_faults": 8297,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.579820260184784e-16
+       }
+      },
+      {
+       "arm": "ifx-expert",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0295168,
+       "checksum": 57760462.710608885,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710608885E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.0538,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 3,
+       "position": 0,
+       "started": "2026-10-18T12:18:41.851",
+       "peak_working_set": 33284096,
+       "page_faults": 8294,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.579820260184784e-16
+       }
+      },
+      {
+       "arm": "ifx-expert",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0298117,
+       "checksum": 57760462.710608885,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710608885E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.0528,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 4,
+       "position": 3,
+       "started": "2026-10-18T12:19:06.410",
+       "peak_working_set": 33288192,
+       "page_faults": 8296,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.579820260184784e-16
+       }
+      },
+      {
+       "arm": "ifx-expert",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0300664,
+       "checksum": 57760462.710608885,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710608885E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.0544,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 5,
+       "position": 5,
+       "started": "2026-10-18T12:19:28.370",
+       "peak_working_set": 33288192,
+       "page_faults": 8294,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.579820260184784e-16
+       }
+      },
+      {
+       "arm": "ifx-expert",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0299534,
+       "checksum": 57760462.710608885,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710608885E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.0564,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 6,
+       "position": 3,
+       "started": "2026-10-18T12:19:41.561",
+       "peak_working_set": 33288192,
+       "page_faults": 8294,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.579820260184784e-16
+       }
+      },
+      {
+       "arm": "ifx-expert",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0292317,
+       "checksum": 57760462.710608885,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710608885E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.0521,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 7,
+       "position": 5,
+       "started": "2026-10-18T12:20:03.667",
+       "peak_working_set": 33275904,
+       "page_faults": 8293,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.579820260184784e-16
+       }
+      },
+      {
+       "arm": "ifx-expert",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0287502,
+       "checksum": 57760462.710608885,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710608885E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.0564,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 8,
+       "position": 5,
+       "started": "2026-10-18T12:20:20.197",
+       "peak_working_set": 33275904,
+       "page_faults": 8297,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.579820260184784e-16
+       }
+      },
+      {
+       "arm": "ifx-expert",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.0292032,
+       "checksum": 57760462.710608885,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710608885E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.054,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 9,
+       "position": 1,
+       "started": "2026-10-18T12:20:29.553",
+       "peak_working_set": 33271808,
+       "page_faults": 8293,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.579820260184784e-16
+       }
+      },
+      {
+       "arm": "ifx-expert",
+       "kind": "round",
+       "ok": true,
+       "reason": "",
+       "time_s": 0.029544,
+       "checksum": 57760462.710608885,
+       "input_checksum": 481149.43540512957,
+       "checksum_text": "5.7760462710608885E+007",
+       "input_checksum_text": "4.8114943540512957E+005",
+       "name": "antisym",
+       "wall_s": 0.0557,
+       "returncode": 0,
+       "extra_stdout_lines": 0,
+       "stderr_tail": "",
+       "round": 10,
+       "position": 1,
+       "started": "2026-10-18T12:20:47.078",
+       "peak_working_set": 33275904,
+       "page_faults": 8295,
+       "affinity_mask": "0x4",
+       "excursion_dropped": false,
+       "excursion_ratio": null,
+       "validation": {
+        "input_rel_err": 0.0,
+        "reference": "pin pins-A.json",
+        "checksum_rel_err": 2.579820260184784e-16
+       }
+      }
+     ],
+     "build": {
+      "arm": "ifx-expert",
+      "regime": "serial-licensed-native",
+      "size": "full",
+      "status": "ok",
+      "reason": "",
+      "exe": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\ifx-expert\\ifx-expert.exe",
+      "exe_sha256": "825dc105d2175c8b14f77d12cf1e5c3232535e3bce7a2a1dcd4c5e0019d02041",
+      "command": [
+       "cmd",
+       "/c",
+       "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\fortran\\build_ifx.cmd",
+       "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\ifx-expert\\ifx-expert.exe",
+       "/O3",
+       "/QxHost",
+       "/fp:precise",
+       "-mllvm",
+       "-fp-contract=fast",
+       "/fpp",
+       "/DBENCH_LICENSED",
+       "/Qopenmp-simd",
+       "--",
+       "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\ifx-expert\\src\\antisym.f90"
+      ],
+      "cwd": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\ifx-expert",
+      "knobs": {},
+      "run_knobs": {
+       "OMP_NUM_THREADS": "1",
+       "OPENBLAS_NUM_THREADS": "1",
+       "OMP_DYNAMIC": "FALSE"
+      },
+      "flags": [
+       "/O3",
+       "/QxHost",
+       "/fp:precise",
+       "-mllvm",
+       "-fp-contract=fast",
+       "/fpp",
+       "/DBENCH_LICENSED",
+       "/Qopenmp-simd"
+      ],
+      "compiler": {
+       "ifx": {
+        "wrapper": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\fortran\\build_ifx.cmd",
+        "exists": true,
+        "version": "Intel(R) Fortran Compiler for applications running on Intel(R) 64, Version 2026.1.0 Build 20260617"
+       },
+       "wrapper": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\fortran\\build_ifx.cmd",
+       "wrapper_sha256": "407d105816012c3ad3e58cb1ab3af384a586df39664e4261381aff8fb72c8d3e"
+      },
+      "source": {
+       "committed": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\kernels\\antisym\\expert.f90",
+       "committed_sha256": "11ac6ad04120647b8f5b55e42be6097048eac09eccdbb6ec52fa503c6b57eff3",
+       "compiled": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\ifx-expert\\src\\antisym.f90",
+       "compiled_sha256": "11ac6ad04120647b8f5b55e42be6097048eac09eccdbb6ec52fa503c6b57eff3",
+       "size_lines": {
+        "p": 27,
+        "n": 28
+       },
+       "bench_support_sha256": "7a63c7b22ab028aa1245151596b507be57520890d82142025542d6e2fd5e424d"
+      },
+      "build_wall_s": 2.402,
+      "returncode": 0,
+      "stdout_tail": "",
+      "stderr_tail": "**********************************************************************\n** Visual Studio 2022 Developer Command Prompt v17.4.3\n** Copyright (c) 2022 Microsoft Corporation\n**********************************************************************\n[vcvarsall.bat] Environment initialized for: 'x64'\n+ ifx /nologo  /O3 /QxHost /fp:precise -mllvm -fp-contract=fast /fpp /DBENCH_LICENSED /Qopenmp-simd /fpp /F268435456 /I\"C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\fortran\\.\" C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\ifx-expert\\src\\antisym.f90  /Fo:\"C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\ifx-expert\\ifx-expert.exe.obj\" /Fe:\"C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\ifx-expert\\ifx-expert.exe\" ",
+      "evidence": {
+       "effective_command": "ifx /nologo  /O3 /QxHost /fp:precise -mllvm -fp-contract=fast /fpp /DBENCH_LICENSED /Qopenmp-simd /fpp /F268435456 /I\"C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\fortran\\.\" C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\ifx-expert\\src\\antisym.f90  /Fo:\"C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\ifx-expert\\ifx-expert.exe.obj\" /Fe:\"C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\antisym\\full\\serial-licensed-native\\ifx-expert\\ifx-expert.exe\"",
+       "blas_routed": false,
+       "parallelism": "serial"
+      },
+      "warnings": [],
+      "pe": {
+       "imports": [
+        "imagehlp.dll",
+        "KERNEL32.dll"
+       ],
+       "SizeOfStackReserve": 268435456,
+       "SizeOfStackCommit": 4096,
+       "SizeOfHeapReserve": 1048576,
+       "SizeOfHeapCommit": 4096
+      },
+      "resolved_dlls": {
+       "imagehlp.dll": {
+        "path": "C:\\WINDOWS\\System32\\imagehlp.dll",
+        "sha256": "58117bbc51c4a56b6c4789e190f33a540b7734e394ada9652e2832e3d2e16588"
+       },
+       "KERNEL32.dll": {
+        "path": "C:\\WINDOWS\\System32\\KERNEL32.dll",
+        "sha256": "e132eba4166256e2f414b91fe7d5386590bc5ea8626aee5af9c9738383cf2ae1"
+       }
+      },
+      "expect_names": [
+       "antisym"
+      ],
+      "twin": false,
+      "lane": null
+     },
+     "stats": {
+      "n": 11,
+      "min": 0.0287502,
+      "median": 0.029544,
+      "q1": 0.02927125,
+      "q3": 0.0300099,
+      "iqr": 0.0007386500000000004,
+      "max": 0.0302953,
+      "mean": 0.02963210909090909
+     },
+     "peak_working_set_max": 33792000,
+     "trend": 0.01945544869967164,
+     "ratio": {
+      "ratio": 0.39950183970657754,
+      "ci95": [
+       0.3954852631968797,
+       0.40656587169489045
+      ],
+      "verdict": "loss",
+      "rounds": 11,
+      "resamples": 10000,
+      "seed": 1927158822,
+      "method": "round-block bootstrap"
+     },
+     "ratio_vs_blade_cpp": {
+      "ratio": 0.27379538002732023,
+      "ci95": [
+       0.27128778118382274,
+       0.2787319745801601
+      ],
+      "verdict": "loss",
+      "rounds": 11,
+      "resamples": 10000,
+      "seed": 1927158822,
+      "method": "round-block bootstrap"
+     }
+    }
+   },
+   "power": {
+    "PROCTHROTTLEMAX": {
+     "ac": 100,
+     "dc": 70
+    },
+    "PROCTHROTTLEMIN": {
+     "ac": 80,
+     "dc": 5
+    },
+    "PERFBOOSTMODE": {
+     "ac": null,
+     "dc": null
+    },
+    "active_scheme": "Power Scheme GUID: 64a64f24-65b9-4b56-befd-5ec1eaced9b3  (Silent)",
+    "ac_line": "ac",
+    "when": "2026-10-18T12:17:20"
+   },
+   "checksum_reference": "pin pins-A.json",
+   "ratio_reference": "blade-llvm",
+   "rounds": {
+    "n": 11,
+    "rule": "minimum 11 (serial)"
+   },
+   "order_seed": 189493512,
+   "controls": {
+    "compute": {
+     "n": 11,
+     "min": 0.0126624,
+     "median": 0.0128443,
+     "q1": 0.01277195,
+     "q3": 0.01298705,
+     "iqr": 0.00021509999999999932,
+     "max": 0.0134424,
+     "mean": 0.012933072727272727
+    },
+    "memory": {
+     "n": 11,
+     "min": 0.0053119,
+     "median": 0.0054528,
+     "q1": 0.0053656,
+     "q3": 0.0055502,
+     "iqr": 0.00018460000000000004,
+     "max": 0.0058486,
+     "mean": 0.0054802363636363635
+    }
+   },
+   "suppressed": false,
+   "bootstrap": {
+    "rounds": [
+     0,
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10
+    ],
+    "resamples": 10000,
+    "seed": 1927158822
+   },
+   "finished": "2026-10-18T12:21:02"
+  }
+ ],
+ "controls": [
+  {
+   "spec": {
+    "name": "compute",
+    "kernel": "recur",
+    "arm": "gfortran-expert",
+    "regime": "serial-repro-native",
+    "size": "full",
+    "_why": "README 6 drift control: compute-bound RK4, deterministic"
+   },
+   "build": {
+    "arm": "gfortran-expert",
+    "regime": "serial-repro-native",
+    "size": "full",
+    "status": "ok",
+    "reason": "",
+    "exe": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\_controls\\recur\\full\\serial-repro-native\\gfortran-expert\\gfortran-expert.exe",
+    "exe_sha256": "b6eb204a6a8997a17270785ef7309150533b81ba00fa389ab6de94e1da04de7d",
+    "command": [
+     "powershell",
+     "-NoProfile",
+     "-ExecutionPolicy",
+     "Bypass",
+     "-File",
+     "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\fortran\\build_gfortran.ps1",
+     "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\_controls\\recur\\full\\serial-repro-native\\gfortran-expert\\gfortran-expert.exe",
+     "-O3",
+     "-march=native",
+     "-ffp-contract=fast",
+     "-fno-external-blas",
+     "-fno-external-blas64",
+     "-cpp",
+     "-fopenmp-simd",
+     "--",
+     "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\_controls\\recur\\full\\serial-repro-native\\gfortran-expert\\src\\recur.f90"
+    ],
+    "cwd": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\_controls\\recur\\full\\serial-repro-native\\gfortran-expert",
+    "knobs": {},
+    "run_knobs": {
+     "OMP_NUM_THREADS": "1",
+     "OPENBLAS_NUM_THREADS": "1",
+     "OMP_DYNAMIC": "FALSE"
+    },
+    "flags": [
+     "-O3",
+     "-march=native",
+     "-ffp-contract=fast",
+     "-fno-external-blas",
+     "-fno-external-blas64",
+     "-cpp",
+     "-fopenmp-simd"
+    ],
+    "compiler": {
+     "gfortran": {
+      "path": "C:\\msys64\\ucrt64\\bin\\gfortran.exe",
+      "exists": true,
+      "version": "GNU Fortran (Rev4, Built by MSYS2 project) 16.2.0"
+     },
+     "wrapper": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\fortran\\build_gfortran.ps1",
+     "wrapper_sha256": "ecf8eaad2ce27e90f83022a5c9fd47ea80e1e93bdecbadb5fb895e81c88159d0"
+    },
+    "source": {
+     "committed": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\kernels\\recur\\expert.f90",
+     "committed_sha256": "b90aaabd00e2b46e0bcceb86c07066478643e1973e3956b4c2d93980fc241759",
+     "compiled": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\_controls\\recur\\full\\serial-repro-native\\gfortran-expert\\src\\recur.f90",
+     "compiled_sha256": "b90aaabd00e2b46e0bcceb86c07066478643e1973e3956b4c2d93980fc241759",
+     "size_lines": {
+      "nt": 32,
+      "nx": 33
+     },
+     "bench_support_sha256": "7a63c7b22ab028aa1245151596b507be57520890d82142025542d6e2fd5e424d"
+    },
+    "build_wall_s": 0.696,
+    "returncode": 0,
+    "stdout_tail": "",
+    "stderr_tail": "+ C:\\msys64\\ucrt64\\bin\\gfortran.exe -O3 -march=native -ffp-contract=fast -fno-external-blas -fno-external-blas64 -cpp -fopenmp-simd -cpp -fno-external-blas -fno-external-blas64 -IC:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\fortran -Wl,--stack,268435456 C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\_controls\\recur\\full\\serial-repro-native\\gfortran-expert\\src\\recur.f90 -o C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\_controls\\recur\\full\\serial-repro-native\\gfortran-expert\\gfortran-expert.exe",
+    "evidence": {
+     "effective_command": "C:\\msys64\\ucrt64\\bin\\gfortran.exe -O3 -march=native -ffp-contract=fast -fno-external-blas -fno-external-blas64 -cpp -fopenmp-simd -cpp -fno-external-blas -fno-external-blas64 -IC:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\fortran -Wl,--stack,268435456 C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\_controls\\recur\\full\\serial-repro-native\\gfortran-expert\\src\\recur.f90 -o C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\_controls\\recur\\full\\serial-repro-native\\gfortran-expert\\gfortran-expert.exe",
+     "blas_routed": false,
+     "parallelism": "serial"
+    },
+    "warnings": [],
+    "pe": {
+     "imports": [
+      "api-ms-win-crt-environment-l1-1-0.dll",
+      "api-ms-win-crt-heap-l1-1-0.dll",
+      "api-ms-win-crt-locale-l1-1-0.dll",
+      "api-ms-win-crt-math-l1-1-0.dll",
+      "api-ms-win-crt-private-l1-1-0.dll",
+      "api-ms-win-crt-runtime-l1-1-0.dll",
+      "api-ms-win-crt-stdio-l1-1-0.dll",
+      "api-ms-win-crt-string-l1-1-0.dll",
+      "KERNEL32.dll",
+      "libgfortran-5.dll"
+     ],
+     "SizeOfStackReserve": 268435456,
+     "SizeOfStackCommit": 4096,
+     "SizeOfHeapReserve": 1048576,
+     "SizeOfHeapCommit": 4096
+    },
+    "resolved_dlls": {
+     "KERNEL32.dll": {
+      "path": "C:\\WINDOWS\\System32\\KERNEL32.dll",
+      "sha256": "e132eba4166256e2f414b91fe7d5386590bc5ea8626aee5af9c9738383cf2ae1"
+     },
+     "libgfortran-5.dll": {
+      "path": "C:\\msys64\\ucrt64\\bin\\libgfortran-5.dll",
+      "sha256": "dcc55fa1d5e533462006e4d17a0ee7f1384f3bf5d562a269c4f5b089c898d29a"
+     }
+    },
+    "expect_names": [
+     "recur"
+    ],
+    "twin": false,
+    "lane": null
+   },
+   "samples": [
+    {
+     "arm": "gfortran-expert",
+     "kind": "warmup",
+     "ok": true,
+     "reason": "",
+     "time_s": 0.0173739,
+     "checksum": 5495637.675343814,
+     "input_checksum": 20054.033954109065,
+     "checksum_text": "5.4956376753438143E+006",
+     "input_checksum_text": "2.0054033954109065E+004",
+     "name": "recur",
+     "wall_s": 0.0726,
+     "returncode": 0,
+     "extra_stdout_lines": 0,
+     "stderr_tail": "",
+     "round": null,
+     "position": null,
+     "started": "2026-10-18T12:17:19.118",
+     "peak_working_set": 53444608,
+     "page_faults": 13182,
+     "affinity_mask": "0x4",
+     "excursion_dropped": false,
+     "excursion_ratio": null,
+     "validation": {
+      "input_rel_err": 0.0,
+      "reference": "pin pins-B.json",
+      "checksum_rel_err": 8.473289449137625e-16
+     },
+     "block": null
+    },
+    {
+     "arm": "gfortran-expert",
+     "kind": "control",
+     "ok": true,
+     "reason": "",
+     "time_s": 0.0130362,
+     "checksum": 5495637.675343814,
+     "input_checksum": 20054.033954109065,
+     "checksum_text": "5.4956376753438143E+006",
+     "input_checksum_text": "2.0054033954109065E+004",
+     "name": "recur",
+     "wall_s": 0.0427,
+     "returncode": 0,
+     "extra_stdout_lines": 0,
+     "stderr_tail": "",
+     "round": 0,
+     "position": 6,
+     "started": "2026-10-18T12:18:02.557",
+     "peak_working_set": 53444608,
+     "page_faults": 13185,
+     "affinity_mask": "0x4",
+     "excursion_dropped": false,
+     "excursion_ratio": null,
+     "validation": {
+      "input_rel_err": 0.0,
+      "reference": "pin pins-B.json",
+      "checksum_rel_err": 8.473289449137625e-16
+     },
+     "block": "antisym/serial-licensed-native"
+    },
+    {
+     "arm": "gfortran-expert",
+     "kind": "control",
+     "ok": true,
+     "reason": "",
+     "time_s": 0.0127924,
+     "checksum": 5495637.675343814,
+     "input_checksum": 20054.033954109065,
+     "checksum_text": "5.4956376753438143E+006",
+     "input_checksum_text": "2.0054033954109065E+004",
+     "name": "recur",
+     "wall_s": 0.0399,
+     "returncode": 0,
+     "extra_stdout_lines": 0,
+     "stderr_tail": "",
+     "round": 1,
+     "position": 7,
+     "started": "2026-10-18T12:18:22.226",
+     "peak_working_set": 53456896,
+     "page_faults": 13186,
+     "affinity_mask": "0x4",
+     "excursion_dropped": false,
+     "excursion_ratio": null,
+     "validation": {
+      "input_rel_err": 0.0,
+      "reference": "pin pins-B.json",
+      "checksum_rel_err": 8.473289449137625e-16
+     },
+     "block": "antisym/serial-licensed-native"
+    },
+    {
+     "arm": "gfortran-expert",
+     "kind": "control",
+     "ok": true,
+     "reason": "",
+     "time_s": 0.0134424,
+     "checksum": 5495637.675343814,
+     "input_checksum": 20054.033954109065,
+     "checksum_text": "5.4956376753438143E+006",
+     "input_checksum_text": "2.0054033954109065E+004",
+     "name": "recur",
+     "wall_s": 0.0402,
+     "returncode": 0,
+     "extra_stdout_lines": 0,
+     "stderr_tail": "",
+     "round": 2,
+     "position": 2,
+     "started": "2026-10-18T12:18:28.426",
+     "peak_working_set": 53448704,
+     "page_faults": 13187,
+     "affinity_mask": "0x4",
+     "excursion_dropped": false,
+     "excursion_ratio": null,
+     "validation": {
+      "input_rel_err": 0.0,
+      "reference": "pin pins-B.json",
+      "checksum_rel_err": 8.473289449137625e-16
+     },
+     "block": "antisym/serial-licensed-native"
+    },
+    {
+     "arm": "gfortran-expert",
+     "kind": "control",
+     "ok": true,
+     "reason": "",
+     "time_s": 0.0128443,
+     "checksum": 5495637.675343814,
+     "input_checksum": 20054.033954109065,
+     "checksum_text": "5.4956376753438143E+006",
+     "input_checksum_text": "2.0054033954109065E+004",
+     "name": "recur",
+     "wall_s": 0.0406,
+     "returncode": 0,
+     "extra_stdout_lines": 0,
+     "stderr_tail": "",
+     "round": 3,
+     "position": 4,
+     "started": "2026-10-18T12:18:50.138",
+     "peak_working_set": 53444608,
+     "page_faults": 13187,
+     "affinity_mask": "0x4",
+     "excursion_dropped": false,
+     "excursion_ratio": null,
+     "validation": {
+      "input_rel_err": 0.0,
+      "reference": "pin pins-B.json",
+      "checksum_rel_err": 8.473289449137625e-16
+     },
+     "block": "antisym/serial-licensed-native"
+    },
+    {
+     "arm": "gfortran-expert",
+     "kind": "control",
+     "ok": true,
+     "reason": "",
+     "time_s": 0.0129379,
+     "checksum": 5495637.675343814,
+     "input_checksum": 20054.033954109065,
+     "checksum_text": "5.4956376753438143E+006",
+     "input_checksum_text": "2.0054033954109065E+004",
+     "name": "recur",
+     "wall_s": 0.0392,
+     "returncode": 0,
+     "extra_stdout_lines": 0,
+     "stderr_tail": "",
+     "round": 4,
+     "position": 4,
+     "started": "2026-10-18T12:19:08.466",
+     "peak_working_set": 53440512,
+     "page_faults": 13182,
+     "affinity_mask": "0x4",
+     "excursion_dropped": false,
+     "excursion_ratio": null,
+     "validation": {
+      "input_rel_err": 0.0,
+      "reference": "pin pins-B.json",
+      "checksum_rel_err": 8.473289449137625e-16
+     },
+     "block": "antisym/serial-licensed-native"
+    },
+    {
+     "arm": "gfortran-expert",
+     "kind": "control",
+     "ok": true,
+     "reason": "",
+     "time_s": 0.0127486,
+     "checksum": 5495637.675343814,
+     "input_checksum": 20054.033954109065,
+     "checksum_text": "5.4956376753438143E+006",
+     "input_checksum_text": "2.0054033954109065E+004",
+     "name": "recur",
+     "wall_s": 0.0408,
+     "returncode": 0,
+     "extra_stdout_lines": 0,
+     "stderr_tail": "",
+     "round": 5,
+     "position": 2,
+     "started": "2026-10-18T12:19:21.862",
+     "peak_working_set": 53440512,
+     "page_faults": 13183,
+     "affinity_mask": "0x4",
+     "excursion_dropped": false,
+     "excursion_ratio": null,
+     "validation": {
+      "input_rel_err": 0.0,
+      "reference": "pin pins-B.json",
+      "checksum_rel_err": 8.473289449137625e-16
+     },
+     "block": "antisym/serial-licensed-native"
+    },
+    {
+     "arm": "gfortran-expert",
+     "kind": "control",
+     "ok": true,
+     "reason": "",
+     "time_s": 0.0128167,
+     "checksum": 5495637.675343814,
+     "input_checksum": 20054.033954109065,
+     "checksum_text": "5.4956376753438143E+006",
+     "input_checksum_text": "2.0054033954109065E+004",
+     "name": "recur",
+     "wall_s": 0.0411,
+     "returncode": 0,
+     "extra_stdout_lines": 0,
+     "stderr_tail": "",
+     "round": 6,
+     "position": 7,
+     "started": "2026-10-18T12:19:50.180",
+     "peak_working_set": 53444608,
+     "page_faults": 13183,
+     "affinity_mask": "0x4",
+     "excursion_dropped": false,
+     "excursion_ratio": null,
+     "validation": {
+      "input_rel_err": 0.0,
+      "reference": "pin pins-B.json",
+      "checksum_rel_err": 8.473289449137625e-16
+     },
+     "block": "antisym/serial-licensed-native"
+    },
+    {
+     "arm": "gfortran-expert",
+     "kind": "control",
+     "ok": true,
+     "reason": "",
+     "time_s": 0.0132975,
+     "checksum": 5495637.675343814,
+     "input_checksum": 20054.033954109065,
+     "checksum_text": "5.4956376753438143E+006",
+     "input_checksum_text": "2.0054033954109065E+004",
+     "name": "recur",
+     "wall_s": 0.0434,
+     "returncode": 0,
+     "extra_stdout_lines": 0,
+     "stderr_tail": "",
+     "round": 7,
+     "position": 0,
+     "started": "2026-10-18T12:19:52.226",
+     "peak_working_set": 53440512,
+     "page_faults": 13180,
+     "affinity_mask": "0x4",
+     "excursion_dropped": false,
+     "excursion_ratio": null,
+     "validation": {
+      "input_rel_err": 0.0,
+      "reference": "pin pins-B.json",
+      "checksum_rel_err": 8.473289449137625e-16
+     },
+     "block": "antisym/serial-licensed-native"
+    },
+    {
+     "arm": "gfortran-expert",
+     "kind": "control",
+     "ok": true,
+     "reason": "",
+     "time_s": 0.0129339,
+     "checksum": 5495637.675343814,
+     "input_checksum": 20054.033954109065,
+     "checksum_text": "5.4956376753438143E+006",
+     "input_checksum_text": "2.0054033954109065E+004",
+     "name": "recur",
+     "wall_s": 0.0392,
+     "returncode": 0,
+     "extra_stdout_lines": 0,
+     "stderr_tail": "",
+     "round": 8,
+     "position": 3,
+     "started": "2026-10-18T12:20:16.094",
+     "peak_working_set": 53444608,
+     "page_faults": 13183,
+     "affinity_mask": "0x4",
+     "excursion_dropped": false,
+     "excursion_ratio": null,
+     "validation": {
+      "input_rel_err": 0.0,
+      "reference": "pin pins-B.json",
+      "checksum_rel_err": 8.473289449137625e-16
+     },
+     "block": "antisym/serial-licensed-native"
+    },
+    {
+     "arm": "gfortran-expert",
+     "kind": "control",
+     "ok": true,
+     "reason": "",
+     "time_s": 0.0126624,
+     "checksum": 5495637.675343814,
+     "input_checksum": 20054.033954109065,
+     "checksum_text": "5.4956376753438143E+006",
+     "input_checksum_text": "2.0054033954109065E+004",
+     "name": "recur",
+     "wall_s": 0.0389,
+     "returncode": 0,
+     "extra_stdout_lines": 0,
+     "stderr_tail": "",
+     "round": 9,
+     "position": 2,
+     "started": "2026-10-18T12:20:31.612",
+     "peak_working_set": 53440512,
+     "page_faults": 13180,
+     "affinity_mask": "0x4",
+     "excursion_dropped": false,
+     "excursion_ratio": null,
+     "validation": {
+      "input_rel_err": 0.0,
+      "reference": "pin pins-B.json",
+      "checksum_rel_err": 8.473289449137625e-16
+     },
+     "block": "antisym/serial-licensed-native"
+    },
+    {
+     "arm": "gfortran-expert",
+     "kind": "control",
+     "ok": true,
+     "reason": "",
+     "time_s": 0.0127515,
+     "checksum": 5495637.675343814,
+     "input_checksum": 20054.033954109065,
+     "checksum_text": "5.4956376753438143E+006",
+     "input_checksum_text": "2.0054033954109065E+004",
+     "name": "recur",
+     "wall_s": 0.0397,
+     "returncode": 0,
+     "extra_stdout_lines": 0,
+     "stderr_tail": "",
+     "round": 10,
+     "position": 7,
+     "started": "2026-10-18T12:21:00.577",
+     "peak_working_set": 53444608,
+     "page_faults": 13182,
+     "affinity_mask": "0x4",
+     "excursion_dropped": false,
+     "excursion_ratio": null,
+     "validation": {
+      "input_rel_err": 0.0,
+      "reference": "pin pins-B.json",
+      "checksum_rel_err": 8.473289449137625e-16
+     },
+     "block": "antisym/serial-licensed-native"
+    }
+   ],
+   "valid": true,
+   "per_block": {
+    "antisym/serial-licensed-native": {
+     "0": 0.0130362,
+     "1": 0.0127924,
+     "2": 0.0134424,
+     "3": 0.0128443,
+     "4": 0.0129379,
+     "5": 0.0127486,
+     "6": 0.0128167,
+     "7": 0.0132975,
+     "8": 0.0129339,
+     "9": 0.0126624,
+     "10": 0.0127515
+    }
+   },
+   "baseline": 0.0128443
+  },
+  {
+   "spec": {
+    "name": "memory",
+    "kernel": "saxpy",
+    "arm": "gfortran-expert",
+    "regime": "serial-repro-native",
+    "size": "control",
+    "_why": "README / coordinator 2026-10-17: memory-bound control, three 5.6 MB streams (saxpy sizes.control n = 700,001); needs a saxpy/control pin"
+   },
+   "build": {
+    "arm": "gfortran-expert",
+    "regime": "serial-repro-native",
+    "size": "control",
+    "status": "ok",
+    "reason": "",
+    "exe": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\_controls\\saxpy\\control\\serial-repro-native\\gfortran-expert\\gfortran-expert.exe",
+    "exe_sha256": "36d3656c366edf580e3c13e3ad4a4f0ab2bd398ccdfa1a2bba33a6ebcf5dc1c6",
+    "command": [
+     "powershell",
+     "-NoProfile",
+     "-ExecutionPolicy",
+     "Bypass",
+     "-File",
+     "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\fortran\\build_gfortran.ps1",
+     "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\_controls\\saxpy\\control\\serial-repro-native\\gfortran-expert\\gfortran-expert.exe",
+     "-O3",
+     "-march=native",
+     "-ffp-contract=fast",
+     "-fno-external-blas",
+     "-fno-external-blas64",
+     "-cpp",
+     "-fopenmp-simd",
+     "--",
+     "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\_controls\\saxpy\\control\\serial-repro-native\\gfortran-expert\\src\\saxpy.f90"
+    ],
+    "cwd": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\_controls\\saxpy\\control\\serial-repro-native\\gfortran-expert",
+    "knobs": {},
+    "run_knobs": {
+     "OMP_NUM_THREADS": "1",
+     "OPENBLAS_NUM_THREADS": "1",
+     "OMP_DYNAMIC": "FALSE"
+    },
+    "flags": [
+     "-O3",
+     "-march=native",
+     "-ffp-contract=fast",
+     "-fno-external-blas",
+     "-fno-external-blas64",
+     "-cpp",
+     "-fopenmp-simd"
+    ],
+    "compiler": {
+     "gfortran": {
+      "path": "C:\\msys64\\ucrt64\\bin\\gfortran.exe",
+      "exists": true,
+      "version": "GNU Fortran (Rev4, Built by MSYS2 project) 16.2.0"
+     },
+     "wrapper": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\fortran\\build_gfortran.ps1",
+     "wrapper_sha256": "ecf8eaad2ce27e90f83022a5c9fd47ea80e1e93bdecbadb5fb895e81c88159d0"
+    },
+    "source": {
+     "committed": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\kernels\\saxpy\\expert.f90",
+     "committed_sha256": "299b2c4efed3d5c8cb228edcc05c4a21ceee7b7782b12f8fe1c7960deb7c02f5",
+     "compiled": "C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\_controls\\saxpy\\control\\serial-repro-native\\gfortran-expert\\src\\saxpy.f90",
+     "compiled_sha256": "bc21bb0b5dc0cd999027972b5ab8493ad84b1410bf23402766852422ccbb404f",
+     "size_lines": {
+      "n": 18
+     },
+     "bench_support_sha256": "7a63c7b22ab028aa1245151596b507be57520890d82142025542d6e2fd5e424d"
+    },
+    "build_wall_s": 0.679,
+    "returncode": 0,
+    "stdout_tail": "",
+    "stderr_tail": "+ C:\\msys64\\ucrt64\\bin\\gfortran.exe -O3 -march=native -ffp-contract=fast -fno-external-blas -fno-external-blas64 -cpp -fopenmp-simd -cpp -fno-external-blas -fno-external-blas64 -IC:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\fortran -Wl,--stack,268435456 C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\_controls\\saxpy\\control\\serial-repro-native\\gfortran-expert\\src\\saxpy.f90 -o C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\_controls\\saxpy\\control\\serial-repro-native\\gfortran-expert\\gfortran-expert.exe",
+    "evidence": {
+     "effective_command": "C:\\msys64\\ucrt64\\bin\\gfortran.exe -O3 -march=native -ffp-contract=fast -fno-external-blas -fno-external-blas64 -cpp -fopenmp-simd -cpp -fno-external-blas -fno-external-blas64 -IC:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\fortran -Wl,--stack,268435456 C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\_controls\\saxpy\\control\\serial-repro-native\\gfortran-expert\\src\\saxpy.f90 -o C:\\Users\\cdupu\\Documents\\GitHub\\Blade\\.claude\\worktrees\\bench-fortran\\bench\\results\\2026-10-18-LAPTOP-350H6LDB\\session-121713\\build\\_controls\\saxpy\\control\\serial-repro-native\\gfortran-expert\\gfortran-expert.exe",
+     "blas_routed": false,
+     "parallelism": "serial"
+    },
+    "warnings": [],
+    "pe": {
+     "imports": [
+      "api-ms-win-crt-environment-l1-1-0.dll",
+      "api-ms-win-crt-heap-l1-1-0.dll",
+      "api-ms-win-crt-locale-l1-1-0.dll",
+      "api-ms-win-crt-math-l1-1-0.dll",
+      "api-ms-win-crt-private-l1-1-0.dll",
+      "api-ms-win-crt-runtime-l1-1-0.dll",
+      "api-ms-win-crt-stdio-l1-1-0.dll",
+      "api-ms-win-crt-string-l1-1-0.dll",
+      "KERNEL32.dll",
+      "libgfortran-5.dll"
+     ],
+     "SizeOfStackReserve": 268435456,
+     "SizeOfStackCommit": 4096,
+     "SizeOfHeapReserve": 1048576,
+     "SizeOfHeapCommit": 4096
+    },
+    "resolved_dlls": {
+     "KERNEL32.dll": {
+      "path": "C:\\WINDOWS\\System32\\KERNEL32.dll",
+      "sha256": "e132eba4166256e2f414b91fe7d5386590bc5ea8626aee5af9c9738383cf2ae1"
+     },
+     "libgfortran-5.dll": {
+      "path": "C:\\msys64\\ucrt64\\bin\\libgfortran-5.dll",
+      "sha256": "dcc55fa1d5e533462006e4d17a0ee7f1384f3bf5d562a269c4f5b089c898d29a"
+     }
+    },
+    "expect_names": [
+     "saxpy"
+    ],
+    "twin": false,
+    "lane": null
+   },
+   "samples": [
+    {
+     "arm": "gfortran-expert",
+     "kind": "warmup",
+     "ok": true,
+     "reason": "",
+     "time_s": 0.0059562,
+     "checksum": 1282345.8203145976,
+     "input_checksum": 699698.1910344502,
+     "checksum_text": "1.2823458203145976E+006",
+     "input_checksum_text": "6.9969819103445020E+005",
+     "name": "saxpy",
+     "wall_s": 0.0666,
+     "returncode": 0,
+     "extra_stdout_lines": 0,
+     "stderr_tail": "",
+     "round": null,
+     "position": null,
+     "started": "2026-10-18T12:17:19.944",
+     "peak_working_set": 22065152,
+     "page_faults": 5505,
+     "affinity_mask": "0x4",
+     "excursion_dropped": false,
+     "excursion_ratio": null,
+     "validation": {
+      "input_rel_err": 0.0,
+      "reference": "pin pins-B.json",
+      "checksum_rel_err": 2.5782398846777194e-14
+     },
+     "block": null
+    },
+    {
+     "arm": "gfortran-expert",
+     "kind": "control",
+     "ok": true,
+     "reason": "",
+     "time_s": 0.0054115,
+     "checksum": 1282345.8203145976,
+     "input_checksum": 699698.1910344502,
+     "checksum_text": "1.2823458203145976E+006",
+     "input_checksum_text": "6.9969819103445020E+005",
+     "name": "saxpy",
+     "wall_s": 0.0343,
+     "returncode": 0,
+     "extra_stdout_lines": 0,
+     "stderr_tail": "",
+     "round": 0,
+     "position": 1,
+     "started": "2026-10-18T12:17:51.115",
+     "peak_working_set": 22061056,
+     "page_faults": 5506,
+     "affinity_mask": "0x4",
+     "excursion_dropped": false,
+     "excursion_ratio": null,
+     "validation": {
+      "input_rel_err": 0.0,
+      "reference": "pin pins-B.json",
+      "checksum_rel_err": 2.5782398846777194e-14
+     },
+     "block": "antisym/serial-licensed-native"
+    },
+    {
+     "arm": "gfortran-expert",
+     "kind": "control",
+     "ok": true,
+     "reason": "",
+     "time_s": 0.0054845,
+     "checksum": 1282345.8203145976,
+     "input_checksum": 699698.1910344502,
+     "checksum_text": "1.2823458203145976E+006",
+     "input_checksum_text": "6.9969819103445020E+005",
+     "name": "saxpy",
+     "wall_s": 0.032,
+     "returncode": 0,
+     "extra_stdout_lines": 0,
+     "stderr_tail": "",
+     "round": 1,
+     "position": 1,
+     "started": "2026-10-18T12:18:09.025",
+     "peak_working_set": 22061056,
+     "page_faults": 5503,
+     "affinity_mask": "0x4",
+     "excursion_dropped": false,
+     "excursion_ratio": null,
+     "validation": {
+      "input_rel_err": 0.0,
+      "reference": "pin pins-B.json",
+      "checksum_rel_err": 2.5782398846777194e-14
+     },
+     "block": "antisym/serial-licensed-native"
+    },
+    {
+     "arm": "gfortran-expert",
+     "kind": "control",
+     "ok": true,
+     "reason": "",
+     "time_s": 0.005522,
+     "checksum": 1282345.8203145976,
+     "input_checksum": 699698.1910344502,
+     "checksum_text": "1.2823458203145976E+006",
+     "input_checksum_text": "6.9969819103445020E+005",
+     "name": "saxpy",
+     "wall_s": 0.0314,
+     "returncode": 0,
+     "extra_stdout_lines": 0,
+     "stderr_tail": "",
+     "round": 2,
+     "position": 6,
+     "started": "2026-10-18T12:18:37.023",
+     "peak_working_set": 22065152,
+     "page_faults": 5510,
+     "affinity_mask": "0x4",
+     "excursion_dropped": false,
+     "excursion_ratio": null,
+     "validation": {
+      "input_rel_err": 0.0,
+      "reference": "pin pins-B.json",
+      "checksum_rel_err": 2.5782398846777194e-14
+     },
+     "block": "antisym/serial-licensed-native"
+    },
+    {
+     "arm": "gfortran-expert",
+     "kind": "control",
+     "ok": true,
+     "reason": "",
+     "time_s": 0.0055784,
+     "checksum": 1282345.8203145976,
+     "input_checksum": 699698.1910344502,
+     "checksum_text": "1.2823458203145976E+006",
+     "input_checksum_text": "6.9969819103445020E+005",
+     "name": "saxpy",
+     "wall_s": 0.0306,
+     "returncode": 0,
+     "extra_stdout_lines": 0,
+     "stderr_tail": "",
+     "round": 3,
+     "position": 3,
+     "started": "2026-10-18T12:18:48.104",
+     "peak_working_set": 22077440,
+     "page_faults": 5512,
+     "affinity_mask": "0x4",
+     "excursion_dropped": false,
+     "excursion_ratio": null,
+     "validation": {
+      "input_rel_err": 0.0,
+      "reference": "pin pins-B.json",
+      "checksum_rel_err": 2.5782398846777194e-14
+     },
+     "block": "antisym/serial-licensed-native"
+    },
+    {
+     "arm": "gfortran-expert",
+     "kind": "control",
+     "ok": true,
+     "reason": "",
+     "time_s": 0.0054528,
+     "checksum": 1282345.8203145976,
+     "input_checksum": 699698.1910344502,
+     "checksum_text": "1.2823458203145976E+006",
+     "input_checksum_text": "6.9969819103445020E+005",
+     "name": "saxpy",
+     "wall_s": 0.0314,
+     "returncode": 0,
+     "extra_stdout_lines": 0,
+     "stderr_tail": "",
+     "round": 4,
+     "position": 1,
+     "started": "2026-10-18T12:19:01.581",
+     "peak_working_set": 22065152,
+     "page_faults": 5506,
+     "affinity_mask": "0x4",
+     "excursion_dropped": false,
+     "excursion_ratio": null,
+     "validation": {
+      "input_rel_err": 0.0,
+      "reference": "pin pins-B.json",
+      "checksum_rel_err": 2.5782398846777194e-14
+     },
+     "block": "antisym/serial-licensed-native"
+    },
+    {
+     "arm": "gfortran-expert",
+     "kind": "control",
+     "ok": true,
+     "reason": "",
+     "time_s": 0.0053326,
+     "checksum": 1282345.8203145976,
+     "input_checksum": 699698.1910344502,
+     "checksum_text": "1.2823458203145976E+006",
+     "input_checksum_text": "6.9969819103445020E+005",
+     "name": "saxpy",
+     "wall_s": 0.0311,
+     "returncode": 0,
+     "extra_stdout_lines": 0,
+     "stderr_tail": "",
+     "round": 5,
+     "position": 0,
+     "started": "2026-10-18T12:19:17.033",
+     "peak_working_set": 22056960,
+     "page_faults": 5503,
+     "affinity_mask": "0x4",
+     "excursion_dropped": false,
+     "excursion_ratio": null,
+     "validation": {
+      "input_rel_err": 0.0,
+      "reference": "pin pins-B.json",
+      "checksum_rel_err": 2.5782398846777194e-14
+     },
+     "block": "antisym/serial-licensed-native"
+    },
+    {
+     "arm": "gfortran-expert",
+     "kind": "control",
+     "ok": true,
+     "reason": "",
+     "time_s": 0.0056091,
+     "checksum": 1282345.8203145976,
+     "input_checksum": 699698.1910344502,
+     "checksum_text": "1.2823458203145976E+006",
+     "input_checksum_text": "6.9969819103445020E+005",
+     "name": "saxpy",
+     "wall_s": 0.0317,
+     "returncode": 0,
+     "extra_stdout_lines": 0,
+     "stderr_tail": "",
+     "round": 6,
+     "position": 1,
+     "started": "2026-10-18T12:19:37.426",
+     "peak_working_set": 22065152,
+     "page_faults": 5505,
+     "affinity_mask": "0x4",
+     "excursion_dropped": false,
+     "excursion_ratio": null,
+     "validation": {
+      "input_rel_err": 0.0,
+      "reference": "pin pins-B.json",
+      "checksum_rel_err": 2.5782398846777194e-14
+     },
+     "block": "antisym/serial-licensed-native"
+    },
+    {
+     "arm": "gfortran-expert",
+     "kind": "control",
+     "ok": true,
+     "reason": "",
+     "time_s": 0.0053119,
+     "checksum": 1282345.8203145976,
+     "input_checksum": 699698.1910344502,
+     "checksum_text": "1.2823458203145976E+006",
+     "input_checksum_text": "6.9969819103445020E+005",
+     "name": "saxpy",
+     "wall_s": 0.0303,
+     "returncode": 0,
+     "extra_stdout_lines": 0,
+     "stderr_tail": "",
+     "round": 7,
+     "position": 7,
+     "started": "2026-10-18T12:20:07.786",
+     "peak_working_set": 22065152,
+     "page_faults": 5506,
+     "affinity_mask": "0x4",
+     "excursion_dropped": false,
+     "excursion_ratio": null,
+     "validation": {
+      "input_rel_err": 0.0,
+      "reference": "pin pins-B.json",
+      "checksum_rel_err": 2.5782398846777194e-14
+     },
+     "block": "antisym/serial-licensed-native"
+    },
+    {
+     "arm": "gfortran-expert",
+     "kind": "control",
+     "ok": true,
+     "reason": "",
+     "time_s": 0.0058486,
+     "checksum": 1282345.8203145976,
+     "input_checksum": 699698.1910344502,
+     "checksum_text": "1.2823458203145976E+006",
+     "input_checksum_text": "6.9969819103445020E+005",
+     "name": "saxpy",
+     "wall_s": 0.0316,
+     "returncode": 0,
+     "extra_stdout_lines": 0,
+     "stderr_tail": "",
+     "round": 8,
+     "position": 2,
+     "started": "2026-10-18T12:20:14.059",
+     "peak_working_set": 22073344,
+     "page_faults": 5511,
+     "affinity_mask": "0x4",
+     "excursion_dropped": false,
+     "excursion_ratio": null,
+     "validation": {
+      "input_rel_err": 0.0,
+      "reference": "pin pins-B.json",
+      "checksum_rel_err": 2.5782398846777194e-14
+     },
+     "block": "antisym/serial-licensed-native"
+    },
+    {
+     "arm": "gfortran-expert",
+     "kind": "control",
+     "ok": true,
+     "reason": "",
+     "time_s": 0.0053474,
+     "checksum": 1282345.8203145976,
+     "input_checksum": 699698.1910344502,
+     "checksum_text": "1.2823458203145976E+006",
+     "input_checksum_text": "6.9969819103445020E+005",
+     "name": "saxpy",
+     "wall_s": 0.0329,
+     "returncode": 0,
+     "extra_stdout_lines": 0,
+     "stderr_tail": "",
+     "round": 9,
+     "position": 6,
+     "started": "2026-10-18T12:20:40.180",
+     "peak_working_set": 22061056,
+     "page_faults": 5505,
+     "affinity_mask": "0x4",
+     "excursion_dropped": false,
+     "excursion_ratio": null,
+     "validation": {
+      "input_rel_err": 0.0,
+      "reference": "pin pins-B.json",
+      "checksum_rel_err": 2.5782398846777194e-14
+     },
+     "block": "antisym/serial-licensed-native"
+    },
+    {
+     "arm": "gfortran-expert",
+     "kind": "control",
+     "ok": true,
+     "reason": "",
+     "time_s": 0.0053838,
+     "checksum": 1282345.8203145976,
+     "input_checksum": 699698.1910344502,
+     "checksum_text": "1.2823458203145976E+006",
+     "input_checksum_text": "6.9969819103445020E+005",
+     "name": "saxpy",
+     "wall_s": 0.0306,
+     "returncode": 0,
+     "extra_stdout_lines": 0,
+     "stderr_tail": "",
+     "round": 10,
+     "position": 6,
+     "started": "2026-10-18T12:20:58.543",
+     "peak_working_set": 22056960,
+     "page_faults": 5505,
+     "affinity_mask": "0x4",
+     "excursion_dropped": false,
+     "excursion_ratio": null,
+     "validation": {
+      "input_rel_err": 0.0,
+      "reference": "pin pins-B.json",
+      "checksum_rel_err": 2.5782398846777194e-14
+     },
+     "block": "antisym/serial-licensed-native"
+    }
+   ],
+   "valid": true,
+   "per_block": {
+    "antisym/serial-licensed-native": {
+     "0": 0.0054115,
+     "1": 0.0054845,
+     "2": 0.005522,
+     "3": 0.0055784,
+     "4": 0.0054528,
+     "5": 0.0053326,
+     "6": 0.0056091,
+     "7": 0.0053119,
+     "8": 0.0058486,
+     "9": 0.0053474,
+     "10": 0.0053838
+    }
+   },
+   "baseline": 0.0054528
+  }
+ ],
+ "manifest": [
+  {
+   "kernel": "antisym",
+   "regime": "serial-licensed-native",
+   "arm": "blade-llvm",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "antisym",
+   "regime": "serial-licensed-native",
+   "arm": "blade-cpp",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "antisym",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-natural",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "antisym",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-expert",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "antisym",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-natural",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "antisym",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-expert",
+   "status": "measured",
+   "reason": ""
+  }
+ ],
+ "checkpoint": "2026-10-18T12:21:02",
+ "size": "full",
+ "started": "2026-10-18T12:17:13",
+ "finished": "2026-10-18T12:21:02",
+ "duration_s": 229.0,
+ "aborted": null
+}

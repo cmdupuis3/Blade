@@ -19,8 +19,8 @@ function lcg(k: Int64, seed: Int64) -> Float64 = {
     Float64(h5) / 2147483648.0
 }
 
-let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> lcg(i * n + s, 10000019) |> compute
+let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) where omp(i: 1) -> lcg(i * n + s, 10000019) |> compute
 let g = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b), omp(a: 1) -> prodsum(a, b) |> compute
 let G = method_for(range<Var>, range<Var>) <@> lambda(i, j) -> g(i, j) |> compute
-let checksum = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * g(i, j), (+)), (+))
-let input_checksum = reduce(reduce(x, (+)), (+))
+let checksum = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * g(i, j), (+)), lambda(u, v) where omp -> u + v, 0.0)
+let input_checksum = reduce(reduce(x, (+)), lambda(u, v) where omp -> u + v, 0.0)

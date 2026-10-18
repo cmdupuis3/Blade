@@ -907,3 +907,71 @@ that is the C++ lane's whole 1.8x deficit on this kernel (kernels equal: 2.21 vs
   flat pool instead of chasing nested row pointers) -- 4.9x per read vs the LLVM lane; it is
   the C++ lane's whole deficit on pairkernel and most of it on comoment3.
 - **G11 note**: none of the above involves threads; all numbers are serial.
+
+## 14. mt8 threading of preparation and checksum (source change approved 2026-10-18)
+
+Before this change only the kernel's level 0 carried a thread licence; the input generation,
+the checksum nest and the input sum ran serial in the mt8 build, while the expert Fortran
+threads all of them. Change, in all four kernels (and mirrored in the four validation dumps):
+
+- input map: `lambda(i, s) where omp(i: 1) -> lcg(...)` (antisym `lambda(i, c, s)`,
+  pairkernel `lambda(i, d)`), the same depth-1 spelling as the kernel's `omp(a: 1)`;
+- checksum and input sum: the OUTER fold kernel carries the licence,
+  `reduce(<row map>, lambda(u, v) where omp -> u + v, 0.0)`;
+- antisym only: the input sum is bound to its own `let isum` (in expression position the
+  licensed fold over the materialized row-sum array "opens no team").
+
+Spelling note (finding): putting `where omp(i: 1)` on the checksum's ROW MAP instead
+(`reduce(method_for(range<I>) <@> lambda(i) where omp(i: 1) -> ..., (+))`) is accepted but
+the licence is DROPPED with no plan or census line in the mt8 plan -- the fold kernel is
+the only placement that threads (blade-B's earlier observation, G14; the silence is a G11/G24
+style observability gap).
+
+**mt8 plan (C++ lane, full-size sources)** -- every kernel now shows three thread sites:
+
+| kernel | input map | kernel (unchanged) | checksum fold | input-sum fold |
+|---|---|---|---|---|
+| gram | `__v21: BLADE_OMP_PARALLEL_FOR; level 0` | `__v27: ..._DYNAMIC; level 0` | `__v54: omp parallel num_threads(T) + fixed-order combine; ... Path B` (fold form `threaded(Path B chunks, serial within each chunk)`) | `__v81: Path B` |
+| comoment3 | `__v21: PARALLEL_FOR` | `__v29: _DYNAMIC` | `__v88: Path B` | `__v119: Path B` |
+| antisym | `__v26: PARALLEL_FOR` | `__v34: _DYNAMIC` | `__v61: Path B` | `__v94: BLADE_OMP_PARALLEL_FOR_SIMD_REDUCTION(+:__v94) ... (Path A)` |
+| pairkernel | `__v24: PARALLEL_FOR` | `__v33: _DYNAMIC` | `__v60: Path B` | `__v87: Path B` |
+
+(The Path B chunk interiors are serial chains -- G25 -- so the threaded checksum is threads
+without lanes; in the serial build the same folds are simd reductions.)
+
+**Verification (tiny sizes only).** `blade check` clean at full size (all four). Smoke size
+(pins from `pins-A.json`), C++ default build with `OMP_NUM_THREADS=2`, C++ serial
+(`BLADE_OMP_THREADS=1`) and LLVM: identical printed values in all three arms, no LLVM
+refusal:
+
+| kernel | checksum (all arms) | rel. to pin | input_checksum (all arms) | rel. to pin |
+|---|---|---|---|---|
+| gram | 237924.717413045 | 1.3e-15 | 952.456307353452 | 2.1e-16 |
+| comoment3 | 45.0076154756788 | 6.7e-16 | 71.5238295937888 | 4.2e-16 |
+| antisym | 390.607241954913 | 9.2e-16 | 239.513063936029 | 1.5e-15 |
+| pairkernel | 1051.80125396941 | 8.6e-16 | 73.6780804120935 | 6.8e-16 |
+
+All checksums within 1e-12 of the pins. Every input_checksum equals the pin to 15 digits
+except pairkernel's: Blade prints 73.6780804120935 and `%.15g` of the fsum pin is
+73.6780804120936 (pin 73.67808041209355, a half-way case at the 15th digit; Blade's binary sum
+is 6.8e-16 below). That was already the case before this change (section 11); the harness
+should compare input_checksum with a relative tolerance (~1e-14), not by 15-digit text.
+`validate_A.py --lanes cpp,llvm` with `OMP_NUM_THREADS=2`: licensed worst 1.17e-13, repro
+worst 6e-15, exit 0 in both -- identical to section 12.
+
+**Serial emission before vs after** (`blade emit` with `BLADE_OMP_THREADS=1`, full size, same
+source path; normalized for generated-identifier renumbering, the fold lambdas' parameter
+names and the `[omp] requested but emitted serial` census comments; `scratchpad/normdiff.py`):
+
+- gram, comoment3, pairkernel: **identical** (the only remaining line differs by an
+  identifier number the normalizer does not rewrite). Their serial arithmetic, fold forms and
+  loop nests are unchanged; the existing serial results stand.
+- antisym: **differs beyond pragma/comment lines, in the input sum only.** The final
+  1201-term fold of the input checksum changes from the K-lanes(8) form seeded with its first
+  element (`__r = v[0]; __rlo = 1; ...8 lanes...`) to a flat `BLADE_OMP_SIMD_REDUCTION(+:...)`
+  loop seeded with 0.0 (the Path A form a `let`-bound licensed fold takes in a serial build),
+  and two `BLADE_FRAME` names change (`lambda in isum`). Kernel, checksum and input generation
+  are unchanged. Effect: the association of a 1201-term sum (input_checksum identical at 15
+  digits at smoke size) and ~1 microsecond of work in a ~75 ms run. By the rule given
+  ("differs beyond pragma/macro lines"), the serial-licensed antisym cells should be re-run on
+  the new source; gram, comoment3 and pairkernel need no re-run.

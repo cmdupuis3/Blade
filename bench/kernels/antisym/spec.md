@@ -92,6 +92,11 @@ Z]`, `[triangular-iteration v1] applied`, `[omp v1] ... DYNAMIC`.
 
 ## Regimes
 
+**mt8 matched parallelism (D44, 2026-10-18):** in mt8 the Blade source threads the
+kernel's level 0 AND the input map's outer level AND the checksum nest (`where omp`
+licences on each), matching the Fortran arms. Session 2's antisym mt8 rows (kernel-only
+threading) are superseded and re-run.
+
 licensed (serial, mt8), repro (serial, mt8), fastmath. **`licensed` differs from `repro`**
 (blade-A F15): both `prodsum`s are reassociation-licensed folds under the knob — C++ lane
 `BLADE_OMP_SIMD_REDUCTION`, LLVM lane `fadd reassoc` with four ymm FMA accumulators and the

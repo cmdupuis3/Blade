@@ -80,9 +80,19 @@ DEFAULT_SMOKE_REGIME = "serial-licensed-native"
 # Blade prints Float64 with setprecision(15) in both lanes (Fortran prints 17 digits):
 # "exact" input agreement = equal after rounding both to 15 significant digits.
 BLADE_PRINT_DIGITS = 15
+# input_checksum agreement (2026-10-18): relative error <= 1e-14.  Blade prints 15 digits, and
+# a pin whose double sits within an ulp of a 15-digit half-way point can render either way
+# (pairkernel smoke: pin 73.6780804120935499..., Blade's sum 6.8e-16 lower); the inputs are
+# dyadic with exact sums, so a real mismatch is orders of magnitude larger than 1e-14.
+INPUT_REL_TOL = 1e-14
 
-MIN_RUN_COOLDOWN_S = 2.0
-MIN_KERNEL_COOLDOWN_S = 10.0
+# Cooldown floors (user instruction 2026-10-18): the host-crash history behind the old 2 s / 10 s
+# floors was an integrated-graphics overload issue, since resolved, so these are measurement
+# hygiene now, not safety.  Not part of the smoke-evidence key.
+MIN_RUN_COOLDOWN_S = 0.5
+MIN_KERNEL_COOLDOWN_S = 3.0
+SESSION_COOLDOWN_S = 60.0          # between two bench sessions (harness-enforced at start)
+LAST_SESSION_END = BUILD_ROOT / "last-bench-session-end.txt"
 DQ_RUN_S = 2.5                     # README 6: a run longer than 2.5 s disqualifies the arm
 RUN_TIMEOUT_CAP_S = 3 * DQ_RUN_S   # M19: child watchdog = 3x the run cap
 MEMORY_BOUND_S = 0.05              # README 6: < 50 ms full-size -> memory-bound rounds
@@ -1212,6 +1222,8 @@ class Sample:
     peak_working_set: int | None = None
     page_faults: int | None = None
     affinity_mask: str | None = None
+    excursion_dropped: bool = False
+    excursion_ratio: float | None = None
     validation: dict[str, Any] = field(default_factory=dict)
 
 
@@ -1282,8 +1294,8 @@ def run_exe(b: Build, regime: Regime, timeout: float, kind: str, affinity: int |
 def validate(s: Sample, ref: dict[str, Any], *, tol: float, input_tol: float, twin: bool) -> None:
     """Validate BOTH checksums of one sample against the reference (M12); updates ``s``.
 
-    input_checksum: equal after rounding to 15 significant digits (or within an explicit
-    kernel.json input_tolerance).  checksum: relative error <= the regime tolerance; a twin
+    input_checksum: relative error <= INPUT_REL_TOL (1e-14), or a larger explicit
+    kernel.json input_tolerance.  checksum: relative error <= the regime tolerance; a twin
     must print exactly `checksum = 0.0` (M28).
     """
     if not s.ok:
@@ -1291,8 +1303,9 @@ def validate(s: Sample, ref: dict[str, Any], *, tol: float, input_tol: float, tw
     assert s.checksum is not None and s.input_checksum is not None
     problems = []
     ierr = rel_err(s.input_checksum, ref["input_checksum"])
-    if not (round_digits(s.input_checksum) == round_digits(ref["input_checksum"]) or (input_tol > 0 and ierr <= input_tol)):
-        problems.append(f"input_checksum mismatch, rel err {ierr:.3g} (exact at 15 digits)")
+    itol = max(INPUT_REL_TOL, input_tol)
+    if not ierr <= itol:
+        problems.append(f"input_checksum mismatch, rel err {ierr:.3g} (tol {itol:g})")
     s.validation = {"input_rel_err": ierr, "reference": ref.get("_source")}
     if twin:
         if s.checksum != 0.0:
@@ -1350,7 +1363,9 @@ class RoundBootstrap:
 
     def __init__(self, series: dict[str, dict[int, float]], resamples: int, seed: int) -> None:
         self.series = series
-        self.rounds = sorted(set.intersection(*(set(v) for v in series.values()))) if series else []
+        # The union of rounds: an arm may lack a round whose sample was dropped as an isolated
+        # excursion; each draw then uses that arm's samples in the drawn rounds it has.
+        self.rounds = sorted(set().union(*(set(v) for v in series.values()))) if series else []
         rng = random.Random(seed)
         self.draws = [[rng.choice(self.rounds) for _ in self.rounds] for _ in range(resamples)] if self.rounds else []
         self.resamples, self.seed = resamples, seed
@@ -1359,11 +1374,15 @@ class RoundBootstrap:
     def medians(self, arm: str) -> list[float]:
         if arm not in self._med:
             s = self.series[arm]
-            self._med[arm] = [statistics.median([s[r] for r in d]) for d in self.draws]
+            out = []
+            for d in self.draws:
+                vals = [s[r] for r in d if r in s]
+                out.append(statistics.median(vals) if vals else math.nan)
+            self._med[arm] = out
         return self._med[arm]
 
     def point(self, arm: str) -> float:
-        return statistics.median([self.series[arm][r] for r in self.rounds])
+        return statistics.median(list(self.series[arm].values()))
 
     def ratio(self, arm: str, ref: str, delta: float) -> dict[str, Any]:
         """median(arm) / median(ref) with a 95% percentile interval."""
@@ -1559,7 +1578,7 @@ class Session:
         self.data["pins"] = {"files": self.pins.files, "entries": len(self.pins.entries)}
         self.data["protocol"] = {
             "rounds_override": self.opt.rounds, "min_rounds": MIN_ROUNDS, "cooldown_s": self.opt.cooldown,
-            "kernel_cooldown_s": self.opt.kernel_cooldown, "run_timeout_s": self.run_timeout(),
+            "kernel_cooldown_s": self.opt.kernel_cooldown, "session_cooldown_s": SESSION_COOLDOWN_S, "run_timeout_s": self.run_timeout(),
             "build_timeout_s": self.opt.build_timeout, "bootstrap": "round-block", "resamples": self.opt.resamples,
             "seed": self.opt.seed, "order": "seeded random permutation per round (arms, twins, controls)",
             "thermal_factor": THERMAL_FACTOR, "thermal_min_median_s": THERMAL_MIN_MEDIAN_S, "dq_run_s": DQ_RUN_S,
@@ -1596,6 +1615,17 @@ class Session:
         if problems:
             raise HarnessError("pre-session checks failed:\n  " + "\n  ".join(problems[:40])
                                + (f"\n  ... {len(problems) - 40} more" if len(problems) > 40 else ""))
+
+    def session_cooldown(self) -> None:
+        """Wait until SESSION_COOLDOWN_S have passed since the previous bench session ended."""
+        try:
+            last = float(LAST_SESSION_END.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            return
+        wait = SESSION_COOLDOWN_S - (time.time() - last)
+        self.data["session_cooldown_waited_s"] = round(max(0.0, wait), 1)
+        if wait > 0:
+            sleep_logged(wait, "between sessions")
 
     def record_smoke_evidence(self) -> None:
         """After smoke/check: remember which (kernel, regime, arm) passed for which hashes."""
@@ -1825,7 +1855,11 @@ class Session:
         if s.ok and s.time_s is not None and s.time_s > DQ_RUN_S:
             s.ok, s.reason = False, f"DQ: run longer than {DQ_RUN_S} s ({s.time_s:.2f} s)"
         entry = state[a.name]
-        prev = [x["time_s"] for x in entry["samples"] if x["ok"] and x["time_s"] is not None]
+        prev = [x["time_s"] for x in entry["samples"]
+                if x["ok"] and x["time_s"] is not None and not x.get("excursion_dropped")]
+        ratio = self._excursion(s, prev)
+        if ratio is not None:
+            self._arm_excursion(k, regime, a, s, ratio, kind)
         entry["samples"].append(dataclasses.asdict(s))
         if not s.ok:
             entry["status"] = "dq" if s.reason.startswith("DQ") else "invalid"
@@ -1840,17 +1874,42 @@ class Session:
                 + (f" peakWS={s.peak_working_set / 2**20:.1f}MB" if s.peak_working_set else ""))
         if regime.threads == "serial":
             self.serial_valid[(k.name, regime.name, a.name)] = entry["status"]
-        self._thermal(f"{k.name}/{regime.name}/{a.name}", s, prev)
         return s
 
-    def _thermal(self, what: str, s: Sample, prev: list[float]) -> None:
-        """M19: any run (warm-ups and controls included) > 3x its running median aborts."""
+    @staticmethod
+    def _excursion(s: Sample, prev: list[float]) -> float | None:
+        """The run's multiple of its running median when that exceeds THERMAL_FACTOR (once the
+        median is above the timer-noise floor), else None."""
         if not s.ok or s.time_s is None or not prev:
-            return
+            return None
         med = statistics.median(prev)
         if med >= THERMAL_MIN_MEDIAN_S and s.time_s > THERMAL_FACTOR * med:
-            raise SessionAbort(f"{what}: run took {s.time_s:.3f}s, {s.time_s / med:.1f}x its running median "
-                               f"{med:.3f}s -- stopping (charter 2.5)")
+            return s.time_s / med
+        return None
+
+    def _arm_excursion(self, k: Kernel, regime: Regime, a: ArmSpec, s: Sample, ratio: float, kind: str) -> None:
+        """Charter 2.5 as amended 2026-10-18 (user-approved): an ISOLATED arm excursion -- one
+        run > 3x the arm's running median in this block -- is dropped from inference and
+        recorded; a SECOND excursion in the same block aborts the session.  Control
+        excursions always abort (see `_thermal`); a control excursion in this round would
+        already have aborted, so reaching here means the round's controls were in bounds."""
+        blk = self.blocks[-1]
+        what = f"{k.name}/{regime.name}/{a.name} " + (f"round {s.round}" if kind == "round" else kind)
+        prior = blk.setdefault("excursions", [])
+        if prior:
+            raise SessionAbort(f"second excursion in block {k.name}/{regime.name}: {what} took {s.time_s:.3f}s, "
+                               f"{ratio:.1f}x its running median (first: {prior[0]['what']}) -- stopping (charter 2.5)")
+        s.excursion_dropped, s.excursion_ratio = True, round(ratio, 2)
+        prior.append({"what": what, "time_s": s.time_s, "ratio": round(ratio, 2)})
+        self.warnings.append(f"excursion dropped (isolated; recorded): {what}: {s.time_s:.3f}s = {ratio:.1f}x running median")
+        log(f"  EXCURSION (dropped, recorded): {what}: {s.time_s:.3f}s = {ratio:.1f}x running median")
+
+    def _thermal(self, what: str, s: Sample, prev: list[float]) -> None:
+        """Controls: any control run > 3x its own running median aborts the session (M19)."""
+        ratio = self._excursion(s, prev)
+        if ratio is not None:
+            raise SessionAbort(f"{what}: run took {s.time_s:.3f}s, {ratio:.1f}x its running median -- "
+                               f"stopping (charter 2.5)")
 
     def _ratio_reference(self, regime: Regime, live: list[ArmSpec]) -> str | None:
         names = {a.name for a in live}
@@ -1879,7 +1938,9 @@ class Session:
         key = f"{k.name}/{regime.name}"
         series: dict[str, dict[int, float]] = {}
         for name, e in state.items():
-            good = [x for x in e["samples"] if x["ok"] and x["time_s"] is not None]
+            good = [x for x in e["samples"] if x["ok"] and x["time_s"] is not None and not x.get("excursion_dropped")]
+            if any(x.get("excursion_dropped") for x in e["samples"]):
+                e["excursions_dropped"] = sum(1 for x in e["samples"] if x.get("excursion_dropped"))
             timed = [g for g in good if g["kind"] == "round"] if bench else good
             e["stats"] = describe([x["time_s"] for x in timed])
             ws = [x["peak_working_set"] for x in e["samples"] if x.get("peak_working_set")]
@@ -1987,6 +2048,7 @@ class Session:
             self.plan_manifest()
             if self.opt.mode == "bench":
                 self.presession_checks()
+                self.session_cooldown()
             self.checkpoint()
             self.setup_controls()
             for ki, k in enumerate(self.opt.kernels):
@@ -2029,6 +2091,11 @@ class Session:
         write_json_atomic(self.bundle / "manifest.json", {"argv": self.opt.argv, "cells": self.manifest})
         if self.opt.mode == "bench":
             self.archive_sources()
+            try:
+                LAST_SESSION_END.parent.mkdir(parents=True, exist_ok=True)
+                LAST_SESSION_END.write_text(f"{time.time():.3f}\n", encoding="utf-8")
+            except OSError:
+                pass
             (self.bundle.parent / "summary.md").write_text(md, encoding="utf-8")
         print()
         print(md)
@@ -2130,6 +2197,9 @@ def render_summary(data: dict[str, Any]) -> str:
                 lines.append("| " + " | ".join(str(c).replace("|", "/") for c in row) + " |")
             if b.get("flags"):
                 lines.append(f"\n> {b['kernel']} {rg}: inference suppressed -- " + "; ".join(b["flags"]) + "\n")
+            for x in b.get("excursions", []):
+                lines.append(f"\n> {b['kernel']} {rg}: isolated excursion DROPPED from inference (sample kept, "
+                             f"flagged excursion-dropped): {x['what']} {x['time_s']:.4g} s = {x['ratio']}x running median\n")
     if data.get("controls"):
         lines += ["", "## Controls", ""]
         for c in data["controls"]:

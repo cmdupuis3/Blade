@@ -111,6 +111,12 @@ the plan should show the dsyrk route instead.
 
 ## Regimes
 
+**mt8 matched parallelism (D44, 2026-10-18):** in mt8 the Blade source threads the
+kernel's level 0 (`omp(x: 1)` on the `comm` kernel, dynamic schedule) AND the input map's
+outer level AND the checksum nest (`where omp` licences on each), matching the Fortran
+arms, which thread generation, kernel and checksum. Session 2's gram mt8 rows (kernel-only
+threading) are superseded and re-run.
+
 licensed (serial, mt8), repro (serial, mt8), fastmath, blas. **`licensed` differs from
 `repro` here** (blade-A F15, `notes/llvm-acceptance-A.md` §11): the inner `prodsum` has no
 THREADING licence slot but IS a reassociation-licensed fold under `BLADE_FP_REASSOC=1` —

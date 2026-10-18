@@ -1,0 +1,42 @@
+// stencil -- 2-D five-point Laplacian through halo windows (bench/kernels/stencil/spec.md)
+//
+//   lap(i, j) = u(i-1, j) + u(i+1, j) + u(i, j-1) + u(i, j+1) - 4 u(i, j)   on the interior
+//   checksum  = sum over the interior of lap^2
+//
+// The product halo walks the interior only (each slot shrinks its own axis), so the nest
+// has no edge branches; `omp(wr: 1)` licenses the row loop. lap is the named output and is
+// stored. The checksum streams over lap's rows (a per-row prodsum under a licensed fold),
+// so no squared temporary is allocated: `reduce(reduce(lap * lap, (+)), (+))` would
+// materialize a second (ny-2) x (nx-2) array (notes/llvm-acceptance-B.md, stencil).
+
+type Y = Idx<31>   // SIZE ny
+type X = Idx<41>   // SIZE nx
+
+/// README section 5 input generator: five rounds mod 2^31 (affine, quadratic, affine,
+/// middle-square, affine), exact in Int64 (h3 * h3 < 2^62).
+function gen(k: Int64, seed: Int64, lo: Float64, hi: Float64) -> Float64 = {
+    let h1 = ((k + seed) * 1103515245 + 12345) % 2147483648
+    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648
+    let h3 = (h2 * 1103515245 + 12345) % 2147483648
+    let h4 = (h3 * h3 / 65536) % 2147483648
+    let h5 = (h4 * 1103515245 + 12345) % 2147483648
+    lo + (hi - lo) * (Float64(h5) / 2147483648.0)
+}
+
+function inputs() -> Array<Float64 like Y, X> = {
+    let nx = Int64(extents(range<X>))
+    method_for(range<Y, X>) <@> lambda(i, j) where omp(i: 1) ->
+        gen(Int64(i) * nx + Int64(j), 10000019, 0.0, 1.0) |> compute
+}
+
+function kernel(u: Array<Float64 like Y, X>) -> Float64 = {
+    let lap = method_for(range<halo<Y, [-1, 0, 1]>, halo<X, [-1, 0, 1]>>) <@> lambda(wr, wc) where omp(wr: 1) ->
+        u(wr(-1), wc(0)) + u(wr(1), wc(0)) + u(wr(0), wc(-1)) + u(wr(0), wc(1)) - 4.0 * u(wr(0), wc(0)) |> compute
+    let s = reduce(method_for(lap) <@> lambda(row) -> prodsum(row, row), lambda(p, q) where omp -> p + q, 0.0)
+    s
+}
+
+let (checksum, input_checksum) = {
+    let u = inputs()
+    (kernel(u), reduce(reduce(u, (+)), (+)))
+}

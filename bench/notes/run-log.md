@@ -184,3 +184,75 @@ Controls over 168 runs: compute median 13.43 ms CV 9.5% (12.45-18.05 ms); memory
 The mt8-licensed-native session had already finished (it ABORTED at 11:12:04, see entry above) and the driver had already stopped itself; nothing was running when the pause was read and no further session was started.
 Pending sessions NOT run: saxpy mt8-licensed-native cell (block aborted at round 7/21), serial-repro 3a {gram,comoment3,antisym,pairkernel,recur,stencil}, serial-repro 3b {fusedchain,onepass,maskagg,dot,saxpy}, mt8-repro, serial-fastmath, mt8-fastmath, gram blas (serial-licensed-blas + mt8-licensed-blas).
 Runner standing by; awaiting the decision requested in the previous report (re-run saxpy only / relax the 3x abort for mt8 twins / continue).
+
+## 2026-10-18 11:14 -- HOLD confirmed by coordinator (user-requested pause)
+Pause time: 11:13 (runner idle since 11:12:04). Abort line (mt8-licensed-native, session-100329): "saxpy/mt8-licensed-native/blade-cpp-inputonly: run took 0.043s, 7.0x its running median 0.006s -- stopping (charter 2.5)" (round 7 of 21).
+Pending: saxpy mt8-licensed-native; serial-repro 3a/3b; mt8-repro; serial-fastmath; mt8-fastmath; gram blas (serial-licensed-blas + mt8-licensed-blas).
+Awaiting from coordinator: "resume" with decisions on (1) saxpy mt8 re-run, (2) abort rule for single-run stalls, (3) whether group-A Blade sources get mt8 licences on input generation and checksum before the remaining sessions. Nothing will be run until then.
+
+## 2026-10-18 -- RESUME (coordinator)
+Group-A Blade sources (gram, comoment3, antisym, pairkernel) changed (mt8 licences on input generation and checksum); harness now drops-and-records a single excursion (abort only on a second excursion in a block, a control excursion, or AC loss).
+Sequence: (1) smoke --regimes all --kernels gram,comoment3,antisym,pairkernel; (2) bench mt8-licensed-native {gram,comoment3,antisym,pairkernel,saxpy}; (3) bench serial-licensed-native {antisym} (re-measure, serial emission changed); (4) serial-repro 3a/3b; (5) mt8-repro; (6) serial-fastmath; (7) mt8-fastmath; (8) gram blas. Uncapped as before.
+11:25 pre-check: BatteryStatus 2, no compute processes, Blade.dll 74B6728036B170D9 (unchanged). Starting smoke for gram,comoment3,antisym,pairkernel (console bench/results/full/smoke-groupA-rerun.console.txt).
+
+## 2026-10-18 11:25-11:31 -- smoke --regimes all --kernels gram,comoment3,antisym,pairkernel (Blade.dll unchanged 74B6728036B170D9; sources changed)
+Console bench/results/full/smoke-groupA-rerun.console.txt; exit 0, 0 failures, 0 flags (366 s). Group-A blade-cpp mt8 arms now show "openmp (4 construct(s))" (was 1), repro mt8 "openmp (2 construct(s)); threaded maps, serial folds"; gram mt8-blas blade-cpp "openmp (3 construct(s))". Gate acceptance of unchanged kernels is confirmed by the sessions starting without --skip-smoke-check (bench refuses stale evidence).
+Starting driver2 (scratchpad driver2.sh): mt8-licensed {gram,comoment3,antisym,pairkernel,saxpy}; serial-licensed {antisym}; serial-repro 3a/3b; mt8-repro; serial-fastmath; mt8-fastmath; gram blas. 300 s cooldown + AC/process pre-check before each; progress in bench/results/full/progress.txt; stops on harness exit other than 0/3.
+
+## 2026-10-18 11:36-12:12 -- SESSION mt8-licensed-native {gram, comoment3, antisym, pairkernel, saxpy} (group-A sources with mt8 licences), 21 rounds each, full size
+Label: uncapped: max processor state 100% (Silent scheme); verdicts suppressed by drift reported as indicative. Console bench/results/full/mt8-licensed-groupA-saxpy.console.txt (exit 3). Bundle bench/results/2026-10-18-LAPTOP-350H6LDB/session-113651/.
+Wall 2118 s (35 min). 0 failures, no abort, NO excursion dropped (excursion_dropped false in all 908 samples). 5 of 5 blocks suppressed (trend / control checks). Controls (105 runs): compute median 12.98 ms CV 8.9% (12.56-17.59), memory median 5.42 ms CV 9.9% (5.12-9.02).
+Longest run 0.766 s (gram gfortran-natural); peak WS <= 58.3 MB. Blade-cpp mt8 medians (ms): antisym 22.6 (was 29.7), comoment3 20.6 (was 87.0), gram 43.8 (was 61.5), pairkernel 16.1 (was 56.5), saxpy 11.4.
+Ratios vs blade-cpp: expert Fortran still faster on antisym (0.46/0.48), comoment3 (0.24/0.20), gram (0.48/0.46), pairkernel (0.39/0.39); saxpy Blade 0.79-0.93 of Fortran time (Fortran faster 7-21%).
+
+## 2026-10-18 12:17-12:21 -- SESSION serial-licensed-native {antisym} re-measure (changed input-sum fold), 11 rounds
+Console bench/results/full/serial-licensed-antisym.console.txt (exit 0, clean). Bundle bench/results/2026-10-18-LAPTOP-350H6LDB/session-121713/. Wall 229 s. 0 flags, NOT suppressed. Controls (11 each): compute median 12.84 ms CV 1.8%, memory 5.45 ms CV 2.7%.
+antisym medians (ms): blade-llvm 73.95 (was 74.55), blade-cpp 107.9 (was 109.3, fold now 7 SIMD_REDUCTION), gf-natural 771 (772.8), gf-expert 30.74 (31.01), ifx-natural 333 (332), ifx-expert 29.5 (29.4). Ratios vs blade-llvm: blade-cpp 1.459 [1.452,1.471] win, gf-nat 10.43, gf-exp 0.416 [0.414,0.417] loss, ifx-nat 4.50, ifx-exp 0.400 [0.395,0.407] loss. Serial antisym result unchanged within 1-2% by the source change.
+
+## 2026-10-18 12:26-12:59 -- SESSION 3a serial-repro-native {gram, comoment3, antisym, pairkernel, recur, stencil}, README minimum rounds (11/11/11/11/21/21)
+Console bench/results/full/serial-repro-3a.console.txt (exit 3). Bundle bench/results/2026-10-18-LAPTOP-350H6LDB/session-122606/. Wall 2009 s (33.5 min). 0 failures, no abort, no excursion dropped. 6 of 6 blocks suppressed (6 flags; mostly the session-baseline compute control of 16.5 ms being a high first value, plus trend checks).
+Controls (86 runs): compute median 12.98 ms CV 12.1% (12.57-20.27), memory median 5.46 ms CV 9.6%. Peak WS <= 58 MB. Longest run 1.228 s (gram blade-llvm WARM-UP, just under the 1.25 s "2x of cap" mark); no run over the 2.5 s cap.
+Repro medians (ms): blade-llvm antisym 508 (licensed 74), gram 1219 (153), comoment3 157 (42), pairkernel 42.8, recur 111, stencil 16.0; blade-cpp antisym 411, gram 954, comoment3 181, pairkernel 77.6, recur 124, stencil 17.8. Expert Fortran unchanged vs licensed (antisym 32.7/31.5, gram 77.8/70.7, comoment3 11.8/11.7). Ratios vs blade-llvm: expert Fortran antisym 0.064/0.062, gram 0.064/0.058, comoment3 0.075/0.075, pairkernel 0.82/0.75, recur 0.117/0.119, stencil 1.05/0.84.
+
+## 2026-10-18 13:32 -- coordinator: relax cooldowns from the next session boundary (60 s between sessions; config floors 0.5 s / 3 s if present)
+Reason given: crash history was an integrated-graphics overload, not CPU load. Pre-session AC check and stop conditions unchanged.
+Implementation: driver2 (300 s cooldowns, hard-coded) is currently running session 3b; it cannot be edited in place. driver3.sh (scratchpad) waits for driver2's "COOLDOWN 300s before mt8-repro" line (i.e. 3b finished, no bench running), kills driver2 during that idle cooldown, then runs mt8-repro, serial-fastmath, mt8-fastmath, blas with 60 s cooldowns, logging config.json's cooldown keys at each PRECHECK. At 13:32 bench/harness/config.json has NO cooldown keys, so the harness floors in effect are its built-in defaults (>= 2 s per run, >= 10 s between kernels) until the harness agent adds them; sessions proceed with whatever config.json says at their start.
+Status 13:31: session 3b (serial-repro-native, started 13:04:38), block 3 of 5 (onepass, round ~8/21), 26 min elapsed.
+
+## 2026-10-18 ~13:40 -- coordinator clarification on cooldowns
+Harness agent made 0.5 s per run / 3 s per kernel the run.py DEFAULTS (no config key) and `bench` itself waits until 60 s have passed since the previous bench session ended (idempotent with driver3's 60 s gap). Session 3b (already running, old run.py loaded) keeps the old floors (2 s / 10 s). mt8-repro onward run with 0.5 s / 3 s / 60 s; each session paragraph reports this.
+
+## 2026-10-18 13:04-13:59 -- SESSION 3b serial-repro-native {fusedchain, maskagg, onepass, dot, saxpy}, 21 rounds each
+Cooldowns in effect: 2 s per run / 10 s per kernel (old run.py loaded before the relaxation), 300 s since previous session. Console bench/results/full/serial-repro-3b.console.txt (exit 3). Bundle bench/results/2026-10-18-LAPTOP-350H6LDB/session-130438/. Wall 3292 s (55 min).
+0 failures, no abort, no excursion dropped; maskagg blade-llvm fallback (expected). 2 of 5 blocks suppressed (fusedchain, onepass; trend checks); maskagg, dot, saxpy unsuppressed. Controls (105 runs): compute median 12.95 ms CV 8.7% (12.44-20.83), memory 5.44 ms CV 7.7%. Longest run 0.076 s. Peak WS > 64 MB: fusedchain gfortran-natural 66.1, ifx-natural 65.6.
+Unsuppressed verdicts (vs blade-llvm; maskagg vs blade-cpp): maskagg all four Fortran arms loss for Blade (ratios 0.054-0.153); dot blade-cpp win 1.34, gf-natural 1.19, gf-expert 1.18 (Blade faster), ifx-natural 0.83, ifx-expert 0.72 (Blade slower); saxpy blade-cpp 1.19, gf-natural 1.08 detectable-win, gf-expert 0.99 equivalent, ifx-natural 0.84, ifx-expert 0.63 (Blade slower).
+13:59:36 driver3 took over (driver2 killed during its cooldown, no bench running); 60 s cooldown before mt8-repro.
+
+## 2026-10-18 14:00-14:25 -- SESSION mt8-repro-native (10 kernels), rounds 7 (antisym, comoment3, gram) / 21 (the rest)
+Cooldowns in effect: 0.5 s per run, 3 s per kernel (run.py defaults), 60 s since the previous session; config.json carries no cooldown keys. Console bench/results/full/mt8-repro.console.txt (exit 3). Bundle bench/results/2026-10-18-LAPTOP-350H6LDB/session-140038/. Wall 1474 s (24.6 min; was 69 min for mt8-licensed under the old floors).
+0 failures, no abort, no excursion dropped. 6 of 10 blocks suppressed (antisym, comoment3, gram, pairkernel, stencil, dot; trend checks only), 4 unsuppressed (fusedchain, onepass, recur, saxpy). Controls (168 runs): compute median 12.73 ms CV 1.7% (12.51-13.63), memory 5.28 ms CV 4.7% (5.05-7.41): a much calmer machine than earlier sessions. Longest run 0.757 s. Peak WS > 64 MB: fusedchain gfortran-natural 66.5, ifx-natural 68.2.
+Ratios vs blade-cpp (repro mt8): expert Fortran antisym 0.154/0.162, comoment3 0.055/0.043, gram 0.146/0.134, pairkernel 0.110/0.111, stencil 0.66/0.69, dot 0.82/0.85, saxpy 0.73/0.77, fusedchain 0.75/0.84; natural tier: gram 5.05/4.38, fusedchain 2.06/2.07 (Blade faster), comoment3 1.0/1.25, antisym 1.76/0.98. onepass and recur blade-cpp no-parallel-form (as expected).
+
+## 2026-10-18 14:26-14:40 -- SESSION serial-fastmath-native {antisym, comoment3, gram, fusedchain, onepass, dot}, 11/11/11/21/21/21 rounds
+Cooldowns in effect: 0.5 s/run, 3 s/kernel (run.py defaults), 60 s since previous session. Console bench/results/full/serial-fastmath.console.txt (exit 3). Bundle bench/results/2026-10-18-LAPTOP-350H6LDB/session-142614/. Wall 845 s (14 min).
+0 failures, no abort, no excursion dropped, no fallback. 3 of 6 blocks suppressed (comoment3, gram, onepass: trend checks only). Controls (96 runs): compute median 12.81 ms CV 8.1% (12.55-20.19), memory median 5.29 ms CV 3.6%. Longest run 0.498 s (gram gfortran-natural). Peak WS > 64 MB: fusedchain gf-natural 66.1, ifx-natural 65.6.
+Ratios vs blade-llvm: antisym expert 0.412/0.397 (loss), fusedchain gf-expert 1.48 (Blade faster), ifx-expert 0.81; dot gf 1.38 (Blade faster), ifx-natural 0.96 detectable-loss, ifx-expert 0.68; comoment3 expert 0.276/0.274; gram expert 0.504/0.463; onepass ifx 0.70/0.72, gf-expert 1.45.
+
+## 2026-10-18 14:41-14:44 -- SESSION mt8-fastmath-native (all 6 kernels) -- HARNESS ABORT (control excursion), sequence STOPPED
+Cooldowns in effect: 0.5 s/run, 3 s/kernel, 60 s since previous session (PRECHECK 14:41:21: BatteryStatus 2, no compute processes). Console bench/results/full/mt8-fastmath.console.txt (exit 1). Bundle bench/results/2026-10-18-LAPTOP-350H6LDB/session-144122/. Wall 183 s.
+Completed block: antisym (suppressed: ifx-natural trend 11%). Aborted in block 2 (comoment3, round 4 of 21): "ABORTED: control memory: run took 0.030s, 5.5x its running median -- stopping (charter 2.5)". Earlier in the same block one excursion was dropped-and-recorded: comoment3/mt8-fastmath-native/blade-cpp round 1: 0.078s = 3.3x running median (round 2 per the console).
+Context: the rounds before the abort show a general disturbance, not a single stall: blade-cpp 20.5, 78.0, 23.6, 43.2 ms; gfortran-natural 31, 39, 45, 52 ms (rising); compute control 13.7, 18.9, 14.7, 14.1 ms; memory control 5.3, 6.0, 6.9, 5.5, then 30 ms. Cause not identified: Task Manager (Taskmgr) was open, Defender (MsMpEng) present; no compute processes other than the bench; AC (2).
+Pending: comoment3, gram, fusedchain, onepass, dot of mt8-fastmath-native (antisym done, suppressed); gram blas (serial-licensed-blas + mt8-licensed-blas). Not retried per the stop rule.
+
+## 2026-10-18 ~14:55 -- coordinator: PROCEED. Re-run mt8-fastmath-native (all 6 kernels, one bundle; session-144122 kept as the aborted record), then gram serial-licensed-blas + mt8-licensed-blas. Same stop rules; a second abort = stop for good. Consolidated report after blas.
+The 14:44 disturbance: not caused by the coordinator; possibly the user opening Task Manager.
+
+## 2026-10-18 14:46-15:02 -- SESSION mt8-fastmath-native RE-RUN (all 6 kernels; session-144122 stays as the aborted record)
+Cooldowns: 0.5 s/run, 3 s/kernel, 60 s since previous. PRECHECK 14:46:56 BatteryStatus 2, no compute procs. Console bench/results/full/mt8-fastmath-rerun.console.txt (exit 3). Bundle bench/results/2026-10-18-LAPTOP-350H6LDB/session-144656/. Wall 943 s (15.7 min).
+Rounds: antisym 21, comoment3 21, gram 7, fusedchain/onepass/dot 21. 0 failures, no abort, no excursion dropped. 6 of 6 blocks suppressed (trend checks only; antisym/comoment3/gram/fusedchain/onepass/dot). Controls (112 runs): compute median 13.01 ms CV 4.8% (12.46-16.93), memory 5.40 ms CV 7.1% (5.08-7.02). Longest run 0.718 s. Peak WS > 64 MB: fusedchain gf-natural 66.5, ifx-natural 68.2. onepass blade-cpp no-parallel-form (expected).
+
+## 2026-10-18 15:03-15:05 -- SESSION gram blas: serial-licensed-blas + mt8-licensed-blas, 11 / 21 rounds
+Cooldowns: 0.5 s/run, 3 s/kernel, 60 s since previous. Console bench/results/full/blas.console.txt (exit 0, clean). Bundle bench/results/2026-10-18-LAPTOP-350H6LDB/session-150343/. Wall 124 s. 0 flags, 0 suppressed, 0 excursions. Controls (32): compute 12.91 ms CV 5.9%, memory 5.37 ms CV 5.1%.
+serial blas (ref blade-cpp 80.71 ms, routed dsyrk): gfortran-expert (explicit dsyrk) 65.7 ms ratio 0.814 [0.805,0.827] loss; ifx-expert 62.8 ms 0.778 [0.772,0.786] loss. mt8 blas (blade-cpp 28.14 ms): gf-expert 20.3 ms 0.720 [0.684,0.743]; ifx-expert 19.5 ms 0.693 [0.665,0.728]. blade-llvm no-blas (expected) in both.
+## 2026-10-18 15:06 -- ALL PLANNED SESSIONS FINISHED
+Consolidated runner record written: bench/results/full/RUNNER-RECORD.md (per-regime kernel x arm tables assembled verbatim from the session summaries; non-ok/suppressed cell list; control drift per session). Sessions used per cell are named in each regime section. Superseded: session-042223 antisym (-> 121713), session-100329 group-A kernels + saxpy (-> 113651), session-144122 (aborted record).

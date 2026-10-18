@@ -1,0 +1,3 @@
+[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\gram-c0463fb1-19124-e55e7ef6\gram.ll
+[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-122606\build\gram\full\serial-repro-native\blade-llvm\gram.exe
+[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\gram-c0463fb1-19124-e55e7ef6

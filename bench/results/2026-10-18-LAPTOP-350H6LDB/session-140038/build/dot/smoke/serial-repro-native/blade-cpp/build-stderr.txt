@@ -1,0 +1,3 @@
+[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\dot-4f6721a2-20004-b07105c9\dot.cpp
+[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-140038\build\dot\smoke\serial-repro-native\blade-cpp\dot.exe
+[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\dot-4f6721a2-20004-b07105c9

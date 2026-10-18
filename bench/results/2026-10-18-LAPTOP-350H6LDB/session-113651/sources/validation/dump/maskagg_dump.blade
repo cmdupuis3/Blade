@@ -1,0 +1,36 @@
+// maskagg DUMP variant (methodology review M11): bench/kernels/maskagg/maskagg.blade at SMOKE
+// size (n = 30011). The compacted output y has a runtime extent (Array<Float64 like Idx<?>>),
+// and Blade gives such an array NO printed form ("--print: y ... has no printed form",
+// BL7004), so it cannot be dumped cell by cell. This variant prints an ORDER-SENSITIVE
+// FINGERPRINT of y instead, which validate_B.py recomputes from numpy's y:
+//   m          the count
+//   y_first    y(0) and y_last = y(m - 1)
+//   horner_a   left fold a -> 0.5 * a + v   (dominated by the last ~50 cells, in order)
+//   horner_b   left fold a -> 0.999 * a + v (weights every cell; any swap or drop shows)
+//   sum_y, checksum (= sum y^2 + m), input_checksum
+// Run in the C++ lane.
+
+type Ix = Idx<30011>
+
+/// README section 5 input generator: five rounds mod 2^31 (affine, quadratic, affine,
+/// middle-square, affine), exact in Int64 (h3 * h3 < 2^62).
+function gen(k: Int64, seed: Int64, lo: Float64, hi: Float64) -> Float64 = {
+    let h1 = ((k + seed) * 1103515245 + 12345) % 2147483648
+    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648
+    let h3 = (h2 * 1103515245 + 12345) % 2147483648
+    let h4 = (h3 * h3 / 65536) % 2147483648
+    let h5 = (h4 * 1103515245 + 12345) % 2147483648
+    lo + (hi - lo) * (Float64(h5) / 2147483648.0)
+}
+
+let x = method_for(range<Ix>) <@> lambda(i) -> gen(Int64(i), 10000019, 0.0, 2.0) |> compute
+let keep = mask(x, lambda(v) -> v > 1.0)
+let y = compound(x, keep)
+let m = extents(y)
+let y_first = reduce(y, lambda(a, b) -> a)
+let y_last = reduce(y, lambda(a, b) -> b)
+let horner_a = reduce(y, lambda(a, b) -> 0.5 * a + b, 0.0)
+let horner_b = reduce(y, lambda(a, b) -> 0.999 * a + b, 0.0)
+let sum_y = reduce(y, (+))
+let checksum = reduce(y * y, (+)) + Float64(extents(y))
+let input_checksum = reduce(x, (+))

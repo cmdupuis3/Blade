@@ -25,26 +25,32 @@ on either side in the native regime; no inline asm or vendor intrinsics anywhere
 **one** source per kernel, written in the idiomatic style of `CLAUDE.md`'s style guide, with
 no compiler-knob games beyond the regime matrix below.
 
-## 2. Host facts and SAFETY RULES (mandatory, non-negotiable)
+## 2. Host facts and MEASUREMENT-HYGIENE rules (revised 2026-10-18, D46)
 
-Host: AMD Ryzen 7 5800HS laptop, 8 cores / 16 threads, 15.4 GB RAM, hybrid graphics
-(integrated Radeon shares the power budget with the cores). In August 2026 it
-**hard-crashed four-plus times** (DPC_WATCHDOG, VIDEO_TDR, VIDEO_MEMORY_MANAGEMENT bugchecks)
-under sustained concurrent build + AVX benchmark load; the mechanism looked thermal/power
-(spikes faster than the fan controller). Rules that follow:
+Host: AMD Ryzen 7 5800HS laptop, 8 cores / 16 threads, 15.4 GB RAM, hybrid graphics. The
+August 2026 crash history that motivated this section's original "safety rules" (four-plus
+DPC_WATCHDOG / VIDEO_TDR bugchecks under concurrent build + AVX load) has since been traced
+to an integrated-graphics overload and resolved; the rules that remain are about clean
+measurements, not crash protection:
 
-1. **Only the RUNNER agent executes timing runs.** Every other agent may compile and run
-   programs for correctness at **tiny sizes only** (a run must finish in well under 100 ms).
-   Never run a benchmark-sized program outside the runner.
-2. **Never run two heavy processes at once.** No concurrent `dotnet build`, no concurrent
-   benchmark runs, no parallel compile fleets. The orchestrator owns `dotnet build`.
-3. Default working set per kernel **<= 64 MB**, a single timed run **<= ~2 s**, a cooldown
-   sleep **>= 2 s between runs** and **>= 10 s between kernels**. Threaded (8-thread) arms run
-   only after the serial arms of the same kernel verified.
-4. The harness records AC/battery status and the active power plan, and **refuses to run
-   the full suite on battery** (drift and throttling make the numbers meaningless anyway).
-5. If anything looks like thermal trouble (fans screaming, a run 3x slower than the previous
-   round, the machine lagging), stop and report; do not push through.
+1. **One timed process at a time.** Only the RUNNER agent executes timing runs, and no
+   other heavy process (`dotnet build`, a compile fleet, another benchmark) runs
+   concurrently with a session — it would perturb the measurement. Other agents run
+   programs for correctness at tiny sizes only.
+2. **Interleaved rounds and drift controls** (README §6): seeded random permutation of all
+   arms per round, two controls per round, within-block and rolling drift checks; a
+   tripped block is reported as indicative.
+3. **The excursion rule** (README §6, D45): an isolated single-run excursion with normal
+   controls is dropped and recorded; a second excursion in the block, a control excursion,
+   or AC loss aborts the block.
+4. **AC check** (free): the harness records AC/battery and the power plan, refuses the
+   suite on battery, and rechecks per block.
+5. **Cooldowns:** 0.5 s between runs, 3 s between kernels, 60 s between sessions (D46;
+   previously 2 s / 10 s / ~5 min — the values in force per session are in RESULTS.md §2).
+6. The **64 MB working-set cap** and the **2.5 s single-run cap** stay frozen for this run
+   (the sizes were chosen under them) but are no longer safety limits and may be raised in
+   later sessions. Threaded arms still run only after the serial arms of the same kernel
+   verified (correctness gating).
 
 Toolchain facts:
 

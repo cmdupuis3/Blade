@@ -1,0 +1,3 @@
+[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\fusedchain-ca6d5308-16452-85e7b634\fusedchain.ll
+[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-144656\build\fusedchain\smoke\serial-fastmath-native\blade-llvm\fusedchain.exe
+[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\fusedchain-ca6d5308-16452-85e7b634

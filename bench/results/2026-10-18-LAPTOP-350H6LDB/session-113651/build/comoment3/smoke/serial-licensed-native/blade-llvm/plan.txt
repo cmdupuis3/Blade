@@ -1,0 +1,13 @@
+plan: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-113651\build\comoment3\smoke\serial-licensed-native\blade-llvm\src\comoment3.blade -- 11 optimization decision(s)
+  [omp v1] _(checksum,input_checksum): declined -- BLADE_OMP_THREADS=1 -- this build emits no thread-level OpenMP (the omp licence in source is unchanged; omp simd is unaffected) [[omp] requested but emitted serial]
+  [symmetric-storage v1] __v29: applied [packed SymSymmetric storage over 3 levels (one canonical cell per orbit); operands: x, x, x]
+  [triangular-iteration v1] __v29: applied [triangular levels 1, 2; symcom states: SCNeither, SCCommutative, SCCommutative; speedup x6]
+  [fold-form v1] _(checksum,input_checksum): applied [fold form: simd-reduction; prodsum]
+  [fold-form v1] __v88: applied [fold form: simd-reduction; reduce over a deferred computation (one level)]
+  [fold-form v1] _(checksum,input_checksum): applied [fold form: K-lanes(8); reduce in expression position]
+  [fold-form v1] __v119: applied [fold form: simd-reduction; reduce over a deferred computation (one level)]
+  [fold-form v1] lambda in t: applied [fold form: simd-reduction; prodsum]
+  [fold-form v1] __ret1073741824: applied [fold form: simd-reduction; reduce over a deferred computation (one level)]
+  [fold-form v1] __ret1073741826: applied [fold form: simd-reduction; reduce over a deferred computation (one level)]
+  [fold-form v1] lambda in _(checksum,input_checksum): applied [fold form: K-lanes(8); reduce in expression position]
+inputs: 0 (identity policy: `content` = folded at compile time, hashed; `version` = read at run time, size + mtime observed -- BLADE_RUN_RECORD=<path> writes the run record)

@@ -1,0 +1,3 @@
+[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\fusedchain_inputonly-eaa3e74e-7340-d1879fef\fusedchain_inputonly.ll
+[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-130438\build\fusedchain\full\serial-repro-native\blade-llvm-inputonly\fusedchain_inputonly.exe
+[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\fusedchain_inputonly-eaa3e74e-7340-d1879fef

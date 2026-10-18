@@ -132,6 +132,18 @@ The LLVM lane refuses `let (a, b) = f()` (an application in pack position) and t
 ICEs (BL9002) on a deferred map inside a top-level block, so the inputs and the kernel are
 functions and the top-level block holds only calls and the tuple.
 
+**mt8 matched parallelism (DECIDED by the user, 2026-10-18; D44).** In mt8 EVERY arm
+threads input generation and the checksum read-back where the language allows, as well
+as the kernel: Fortran with `!$omp parallel do` on the generator loops and the checksum
+sums (as the session-2 sources already did), Blade with `where omp` licences on the input
+maps' outer level and on the checksum nests / folds in addition to the kernel's level 0.
+The four group-A Blade sources (gram, comoment3, antisym, pairkernel) gain those licences
+(blade-A); the "parallel preparation, serial kernel" / "serial checksum included"
+asymmetries that session 2 exposed (RESULTS.md §12.1) therefore disappear in mt8, the
+smoke evidence resets (§6 gate), and the mt8 group-A blocks are re-run. Serial regimes are
+unaffected (a threading licence is inert there). The parallelism column still reports,
+per loop, what was threaded.
+
 **Parallel baselines are never silently excluded (M5).** Where Blade has no parallel form,
 the Fortran arms still run mt8 and the Blade cells read "no parallel form": `onepass` (the
 `<&!>` join cannot be licensed) and `recur` (the x-trajectories are independent and
@@ -458,8 +470,10 @@ claim is not made by this suite.
   significance first appeared.
 - **Rounds.** Per kernel and regime: one discarded warm-up run per arm, then R rounds. In
   each round every arm — main arms, twins and both controls — runs once in a **seeded random
-  permutation** (recorded), not a cyclic rotation. Cooldowns: >= 2 s between runs, >= 10 s
-  between kernels.
+  permutation** (recorded), not a cyclic rotation. Cooldowns (D46, from the session after
+  serial-repro 3b): 0.5 s between runs, 3 s between kernels, 60 s between sessions; the
+  sessions up to and including 3b ran with 2 s / 10 s / ~5 min, recorded per session in
+  RESULTS.md §2.
 - **Controls (M18).** Two fixed binaries run once per round of every block: the **compute
   control** (`recur`, gfortran-expert, serial x repro: deterministic, ~0.1 s, tracks core
   clock and thermal state; note its region also allocates and writes a 48 MB trajectory —
@@ -497,7 +511,14 @@ claim is not made by this suite.
   nonpositive duration; a run longer than 2.5 s (charter safety rule 3; the child
   watchdog is 3x that, 7.5 s); a thermal excursion — any run, warm-up or control included,
   slower than 3x the block's running median aborts the block and the session pauses (M19);
-  the machine on battery (the whole session is refused).
+  the machine on battery (the whole session is refused). **Excursion rule (DECIDED by the
+  user, 2026-10-18; D45):** an ISOLATED single-run excursion (one run above 3x the block's
+  running median while both controls in that round are normal) is DROPPED AND RECORDED —
+  the sample stays in the bundle, marked, excluded from inference, and the planned-cell
+  manifest says so; the session ABORTS on a second excursion in the same block, on any
+  control excursion, or on AC loss. (Session 2's saxpy mt8 block was lost to a single 43
+  ms stall of a 6 ms input-only twin under the previous always-abort rule; RESULTS.md
+  §12.2.)
 - **Host conditions (M19).** The session records at start and per block: AC state, the
   active power plan and `powercfg /q` processor settings (maximum processor state, boost
   policy), OEM thermal mode where readable. The reference configuration caps the maximum
@@ -516,19 +537,43 @@ claim is not made by this suite.
 - Nothing is extrapolated or estimated in a result table. An unrun cell is reported as
   unrun.
 
-## 7. Host safety rules (mandatory; from the charter, restated)
+## 7. Measurement-hygiene rules (revised 2026-10-18, D46)
 
-1. Only the RUNNER agent executes timing runs; every other agent runs programs for
-   correctness at smoke size only (well under 100 ms).
-2. Never two heavy processes at once: no concurrent `dotnet build`, benchmark run, or
-   compile fleet. The orchestrator owns `dotnet build`.
-3. Working set per kernel <= 64 MB in every arm (the natural tier's dense arrays count), a
-   single timed run <= ~2 s, cooldowns as in §6. Threaded arms only after the serial arms
-   of the same kernel validated.
-4. The harness records AC/battery and the power plan and refuses the full suite on battery;
-   AC state is rechecked per block.
-5. Anything that looks thermal (fans screaming, a run 3x slower than the block's running
-   median, the machine lagging): the harness aborts the block; a human never pushes through.
+History in one sentence: the charter's "safety rules" came from an August 2026 run of
+host crashes that has since been traced to an integrated-graphics overload and resolved,
+so what remains below is measurement hygiene, not crash protection.
+
+1. **One timed process at a time.** Only the RUNNER executes timing runs; no other heavy
+   process (a `dotnet build`, a compile fleet, another benchmark) runs concurrently with a
+   session, because it would perturb the measurement. Other agents run programs for
+   correctness at smoke size only.
+2. **Interleaved rounds and drift controls** (§6): seeded random permutation of all arms
+   per round, two controls per round, within-block and rolling drift checks; a block that
+   trips them is reported as indicative.
+3. **The excursion rule** (§6, D45): an isolated single-run excursion with normal controls
+   is dropped and recorded; a second excursion in the block, a control excursion, or AC
+   loss aborts the block.
+4. **AC check** (free): the harness records AC/battery and the power plan, refuses the
+   suite on battery, and rechecks per block.
+5. **Cooldowns:** 0.5 s between runs, 3 s between kernels, 60 s between sessions (D46;
+   previously 2 s / 10 s and ~5 min between sessions — the values in force for each
+   session are listed in RESULTS.md §2, because inter-run spacing can change thermal state
+   and a reader should see where it changed).
+6. **Frozen for this run, no longer safety limits:** the 64 MB working-set cap (natural
+   dense arrays counted) and the 2.5 s single-run cap stay as the sizes were frozen under
+   them; later sessions may raise them. Threaded arms still run only after the serial arms
+   of the same kernel validated (correctness gating, not safety).
+
+**Resume plan after the session-2 abort (2026-10-18):** re-smoke (the group-A sources
+changed under D44), then re-run mt8-licensed for the four group-A kernels plus the saxpy
+cell, then serial-licensed antisym (its serial emission changed in one input-sum fold —
+re-measured for consistency; gram/comoment3/pairkernel's serial emissions are byte-
+identical and their serial rows stand), then serial-repro (3a: group A + recur + stencil;
+3b: group B + controls), mt8-repro, serial-fastmath, mt8-fastmath, gram blas. Spelling
+facts from the licence work (blade-A §14): a threading licence on a checksum ROW MAP is
+silently dropped — only the fold-kernel placement threads (G27) — and a licensed fold
+inside a result tuple opens no team (bind it to its own `let`); the threaded checksum folds
+are Path B, serial within each chunk (G25).
 
 ## 7.1–7.9 Blade facts every kernel author relies on (probed 2026-10-17, this binary)
 

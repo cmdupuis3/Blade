@@ -98,6 +98,11 @@ than gram's but present).
 
 ## Regimes
 
+**mt8 matched parallelism (D44, 2026-10-18):** in mt8 the Blade source threads the
+kernel's level 0 AND the input map's outer level AND the rank-3 checksum nest (`where omp`
+licences on each), matching the Fortran arms. Session 2's comoment3 mt8 rows (kernel-only
+threading: 87 ms with a 70%-serial checksum pass) are superseded and re-run.
+
 licensed (serial, mt8), repro (serial, mt8), fastmath. **`licensed` differs from `repro`**
 (blade-A F15): the three-operand `prodsum` is a reassociation-licensed fold under the knob
 — C++ lane `BLADE_OMP_SIMD_REDUCTION(+:__ps)` (one 4-lane accumulator), LLVM lane `fadd

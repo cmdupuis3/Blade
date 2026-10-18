@@ -1,0 +1,2 @@
+cmd /c C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\fortran\build_ifx.cmd C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-122606\build\stencil\full\serial-repro-native\ifx-expert\ifx-expert.exe /O3 /QxHost /fp:precise -mllvm -fp-contract=fast /fpp /Qopenmp-simd -- C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-122606\build\stencil\full\serial-repro-native\ifx-expert\src\stencil.f90
+{}

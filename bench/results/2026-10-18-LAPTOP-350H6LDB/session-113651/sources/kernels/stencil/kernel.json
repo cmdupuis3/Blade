@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "name": "stencil",
+  "group": "B",
+  "title": "2-D 5-point Laplacian via halo (control)",
+  "sizes": {
+    "smoke": {
+      "ny": 31,
+      "nx": 41
+    },
+    "full": {
+      "ny": 1501,
+      "nx": 2003
+    }
+  },
+  "regimes": [
+    "serial-licensed-native",
+    "mt8-licensed-native",
+    "serial-repro-native",
+    "mt8-repro-native"
+  ],
+  "inputonly": true,
+  "hypothesis": {
+    "natural": "parity (bandwidth-bound)",
+    "expert": "parity"
+  },
+  "notes": "Control. Input share ~40%.",
+  "arms": [
+    "blade-llvm",
+    "blade-cpp",
+    "gfortran-natural",
+    "gfortran-expert",
+    "ifx-natural",
+    "ifx-expert"
+  ],
+  "source_of_truth": "bench/kernels/stencil/spec.md + bench/notes/kernel-list.md (2026-10-17)"
+}

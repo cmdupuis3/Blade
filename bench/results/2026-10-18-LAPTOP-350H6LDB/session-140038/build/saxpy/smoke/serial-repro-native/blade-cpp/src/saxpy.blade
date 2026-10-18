@@ -1,0 +1,35 @@
+// saxpy -- y2 = 1.5 x + y, the bandwidth control (bench/kernels/saxpy/spec.md)
+//
+//   y2(k) = 1.5 x(k) + y(k)   (named output, stored);   checksum = sum y2^2
+//
+// The co-iteration map carries the thread licence and is forced with |> compute, so the
+// store of y2 is unconditional; the checksum is a licensed fold that streams over y2.
+
+type Ix = Idx<20011>   // SIZE n
+
+/// README section 5 input generator: five rounds mod 2^31 (affine, quadratic, affine,
+/// middle-square, affine), exact in Int64 (h3 * h3 < 2^62).
+function gen(k: Int64, seed: Int64, lo: Float64, hi: Float64) -> Float64 = {
+    let h1 = ((k + seed) * 1103515245 + 12345) % 2147483648
+    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648
+    let h3 = (h2 * 1103515245 + 12345) % 2147483648
+    let h4 = (h3 * h3 / 65536) % 2147483648
+    let h5 = (h4 * 1103515245 + 12345) % 2147483648
+    lo + (hi - lo) * (Float64(h5) / 2147483648.0)
+}
+
+function inputs(seed: Int64) -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) where omp -> gen(Int64(i), seed, 0.0, 1.0) |> compute
+}
+
+function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {
+    let y2 = method_for(zip(x, y)) <@> lambda(u, v) where omp(u: 1) -> 1.5 * u + v |> compute
+    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) where omp -> p + q, 0.0)
+    s
+}
+
+let (checksum, input_checksum) = {
+    let x = inputs(10000019)
+    let y = inputs(20000038)
+    (kernel(x, y), reduce(x, (+)) + reduce(y, (+)))
+}

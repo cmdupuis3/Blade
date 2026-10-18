@@ -3,6 +3,9 @@
 // `where comm(a, b)` on the SAME array in both positions derives packed SymIdx<2, n>
 // storage (C(n+1, 2) cells) and triangular iteration; `omp(a: 1)` licenses threading over
 // the point axis (emitted only when BLADE_OMP_THREADS is unset).
+// Threading (mt8): the input map (`omp(i: 1)`), the kernel's level 0 (`omp(a: 1)`) and the checksum
+// and input-sum folds (`lambda(u, v) where omp -> u + v`) all carry licences; a serial build
+// (BLADE_OMP_THREADS=1) emits none of the thread pragmas.
 let static n = 2503    // SIZE n
 type Pts = Idx<n>
 type Dim = Idx<3>
@@ -26,7 +29,7 @@ function matern52(r2: Float64) -> Float64 = {
 
 let (checksum, input_checksum) = {
     // P(i, d): coordinate d of point i; coordinate array d is input j = d + 1, seed 10000019 * j, k = i
-    let pts = method_for(range<Pts>, range<Dim>) <@> lambda(i, d) -> lcg(i, 10000019 * (d + 1)) |> compute
+    let pts = method_for(range<Pts>, range<Dim>) <@> lambda(i, d) where omp(i: 1) -> lcg(i, 10000019 * (d + 1)) |> compute
     // the point is typed concretely (Array like Dim): on a T^1 parameter even `a((0 : Dim))`
     // keeps a BL8006 literal-bound check per read (notes/llvm-acceptance-A.md F13)
     let kmat = method_for(pts, pts) <@> lambda(a: Array<Float64 like Dim>, b: Array<Float64 like Dim>) where comm(a, b), omp(a: 1) -> {
@@ -35,7 +38,8 @@ let (checksum, input_checksum) = {
         let dz = a((2 : Dim)) - b((2 : Dim))
         matern52(dx * dx + dy * dy + dz * dz)
     } |> compute
-    // the logical sum of squares through the canonicalizing accessor (README 7.2)
-    let ss = reduce(method_for(range<Pts>) <@> lambda(i) -> reduce(method_for(range<Pts>) <@> lambda(j) -> kmat(i, j) * kmat(i, j), (+)), (+))
-    (ss, reduce(reduce(pts, (+)), (+)))
+    // the logical sum of squares through the canonicalizing accessor (README 7.2); the thread
+    // licence sits on the FOLD kernel (an `omp` on the row map feeding `(+)` is dropped)
+    let ss = reduce(method_for(range<Pts>) <@> lambda(i) -> reduce(method_for(range<Pts>) <@> lambda(j) -> kmat(i, j) * kmat(i, j), (+)), lambda(u, v) where omp -> u + v, 0.0)
+    (ss, reduce(reduce(pts, (+)), lambda(u, v) where omp -> u + v, 0.0))
 }

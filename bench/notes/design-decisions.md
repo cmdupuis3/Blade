@@ -374,6 +374,36 @@ FIXED, G7 PARTLY (simd-reduction join form + census line, no thread form), G14 P
 fast form. **Freeze state:** bench branch `worktree-bench-fortran` at 957afd95; Blade.exe
 hash in the session bundle.
 
+**D44 — mt8 matched parallelism (user decision, 2026-10-18).** Session 2 showed the
+Fortran arms threading input generation and the checksum read-back while the group-A
+Blade sources threaded only the kernel's level 0; with the checksum pass at 57–70% of the
+C++ lane's serial time on comoment3/pairkernel, Amdahl made those mt8 numbers a
+comparison of serial checksums, not kernels. Decided: every arm threads preparation and
+checksum where the language allows — Blade's four group-A sources gain `where omp`
+licences on their input maps' outer level and on their checksum nests/folds (blade-A);
+smoke evidence resets; the mt8 group-A blocks are re-run; the superseded numbers stay in
+RESULTS.md §5 as an appendix record. Option (B) (no arm threads preparation) and (C) (keep
+and label) were rejected: (A) is what the matched-permission rule already said.
+
+**D45 — Isolated-excursion rule (user decision, 2026-10-18).** The always-abort 3x rule
+lost the saxpy mt8 block to a single 43 ms stall of a 6 ms input-only twin with both
+controls normal. Decided: an isolated single-run excursion (controls normal in that round)
+is dropped and recorded (sample kept in the bundle, marked, excluded from inference,
+manifest says so); the session aborts on a second excursion in the same block, on any
+control excursion, or on AC loss. The harness owner implements it; README §6/§7 updated.
+Resume plan: re-smoke → mt8-licensed group A + saxpy → serial-repro 3a/3b → mt8-repro →
+serial-fastmath → mt8-fastmath → gram blas.
+
+**D46 — Host rules relaxed to measurement hygiene (user instruction, 2026-10-18).** The
+August 2026 crash history behind charter §2 / README §7 was an integrated-graphics
+overload, since resolved. The remaining rules are hygiene: one timed process at a time,
+interleaved rounds with drift controls, the excursion rule (D45), the free AC check.
+Cooldowns are 0.5 s per run, 3 s per kernel, 60 s per session (were 2 s / 10 s / ~5 min
+up to and including serial-repro 3b; RESULTS.md §2 lists the values in force per session
+because inter-run spacing can change thermal state). The 64 MB working-set and 2.5 s
+run caps stay frozen for this run (sizes were chosen under them) but are no longer safety
+limits and may be raised in later sessions.
+
 **D42 — mt8 arms run UNBOUND (M20 amended).** libgomp cannot bind threads on Windows
 ("Affinity not supported", thread count still 8); libiomp5's binding under
 `OMP_PLACES=cores OMP_PROC_BIND=close` produced 17–48 ms of jitter at smoke size while
