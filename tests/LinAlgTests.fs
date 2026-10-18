@@ -639,6 +639,45 @@ let y = gram_apply(A, A, v)
       // pool, per cell the serial prodsum), its include, the kernel's scalar
       // as the same post-pass the BLAS route applies, and no per-cell nest.
       // `false` = no omp licence on the kernel: the call stays on one thread.
+      // ============ gram(A, A) NODE, BLAS off, above the syrk-tile crossover ============
+      // The node's triangular gram jam gives way to the SAME packed-triangle
+      // tile the comm nest uses (one rule, packedTriWorth; one knob). Rows are
+      // owned exclusively and no sum is split, so the team argument is the
+      // emission knob alone (`true` here: BLADE_OMP_THREADS is pinned unset).
+      ("gate_off_gram_same_above_crossover_emits_the_packed_tile", false,
+       bigCov + "let G = gram(CB, CB)\n",
+       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, G.data, 0, true, (size_t)336);"
+         "gram(A, A): packed-triangle syrk tile"
+         "#include \"blade_packed_gemm.hpp\"" ],
+       [ shimInclude; "blade_linalg::"; "cblas_"; "__gacc" ])
+      // Units erase at codegen: a `Float64<meter>` operand takes the same tile.
+      ("gate_off_gram_same_with_units_takes_the_tile", false,
+       "Unit meter\ntype BV = Idx<20>\ntype BT = Idx<8>\n"
+       + "let m1: Float64<meter> = 1.0\n"
+       + "let CU = method_for(range<BV>, range<BT>) <@> lambda(i, s) -> Float64(i * 8 + s) * m1 |> compute\n"
+       + "let GU = gram(CU, CU)\n",
+       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CU.data, GU.data, 0, true, (size_t)336);" ],
+       [ shimInclude; "blade_linalg::"; "__gacc" ])
+      // gram(A, B) over two arrays is the DENSE m x p product: never the syrk
+      // tile, at any size (its own dense jam).
+      ("gate_off_gram_distinct_never_takes_the_syrk_tile", false,
+       bigCov
+       + "let CD: Array<Float64 like BV, BT> = method_for(range<BV>, range<BT>) <@> lambda(i, s) -> Float64(i + s) |> compute\n"
+       + "let H = gram(CB, CD)\n",
+       [ "__gacc" ],
+       [ "dsyrk_tri"; shimInclude; "blade_linalg::" ])
+      // Float32 keeps the triangular jam (the tile is f64), as does a
+      // same-array gram below the crossover.
+      ("gate_off_gram_same_float32_keeps_the_jam", false,
+       "type BV = Idx<20>\ntype BT = Idx<8>\n"
+       + "let CF: Array<Float32 like BV, BT> = method_for(range<BV>, range<BT>) <@> lambda(i, s) -> Float32(Float64(i * 8 + s)) |> compute\n"
+       + "let GF = gram(CF, CF)\n",
+       [ "__gacc0" ],
+       [ "dsyrk_tri"; shimInclude ])
+      ("gate_off_gram_same_below_crossover_keeps_the_jam", false,
+       realMat + "let G = gram(A, A)\n",
+       [ "__gacc" ],
+       [ "dsyrk_tri"; shimInclude ])
       ("gate_off_syrk_above_crossover_emits_the_packed_tile", false,
        bigCov
        + "let t2 = method_for(CB, CB) <@> " + bigCovKernel "comm(x, y)" "prodsum(x, y) / 8.0",
@@ -737,6 +776,23 @@ let runLinAlgEmissionTests () : BlockResult =
         else
             passed <- passed + 1
             resultLine Pass knobName "the per-cell nest, no tile call")
+    // ...and the gram(A, A) node keeps its triangular gram jam under the knob.
+    let gramKnobName = "syrk_tile_knob_off_keeps_the_gram_jam"
+    let gramKnobSrc =
+        "type BV = Idx<20>\ntype BT = Idx<8>\n"
+        + "let CB: Array<Float64 like BV, BT> = method_for(range<BV>, range<BT>) <@> lambda(i, s) -> Float64(i * 8 + s) * 0.125 |> compute\n"
+        + "let G = gram(CB, CB)\n"
+    (let gramKnobCpp =
+        use _tile = pinEnv "BLADE_SYRK_TILE" "0"
+        cppOf false gramKnobName gramKnobSrc
+     match gramKnobCpp with
+     | Error e -> fail gramKnobName e
+     | Ok cpp ->
+        if cpp.Contains "dsyrk_tri" then fail gramKnobName "BLADE_SYRK_TILE=0 still emitted the tile"
+        elif not (cpp.Contains "__gacc0") then fail gramKnobName "BLADE_SYRK_TILE=0 did not emit the triangular gram jam"
+        else
+            passed <- passed + 1
+            resultLine Pass gramKnobName "the triangular gram jam, no tile call")
 
     // ---- a unit annotation changes NO emitted byte ----
     //
@@ -1423,7 +1479,10 @@ let runSyrkTileTests () : BlockResult =
                         let census =
                             outText.Split('\n') |> Array.tryFind (fun l -> l.StartsWith "tile vs the plain")
                             |> Option.defaultValue ""
-                        pass $"raw-bit contract={mode}" ($"{m.Groups.[1].Value}/{m.Groups.[2].Value} shapes bitwise; {census.Trim()}")
+                        let gramCensus =
+                            outText.Split('\n') |> Array.tryFind (fun l -> l.StartsWith "gram node:")
+                            |> Option.defaultValue ""
+                        pass $"raw-bit contract={mode}" ($"{m.Groups.[1].Value}/{m.Groups.[2].Value} shapes bitwise; {census.Trim()}; {gramCensus.Trim()}")
                     elif m.Success then
                         fail $"raw-bit contract={mode}" ($"{m.Groups.[1].Value}/{m.Groups.[2].Value} passed: {firstFails} {err.Trim()}")
                     else

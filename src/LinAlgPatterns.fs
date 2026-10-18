@@ -1131,6 +1131,14 @@ let private denseBlasArrayOfRank (rank: int) (t: IRArrayType) : Precision option
     elif not (t.IndexTypes |> List.forall isPlainDenseAxis) then None
     else precisionOf t.ElemType
 
+/// A real f64 operand of exactly two ordinary dense axes (non-virtual): the
+/// row skeleton `blade_pgemm::dsyrk_tri` reads (`X.data[i]` = row i, n
+/// contiguous samples). The gram NODE's BLAS-off arm asks this before
+/// handing its operand to the packed-triangle tile; units erase at codegen, so
+/// a `Float64<u>` element answers yes.
+let isDenseRealF64Rank2 (t: IRArrayType) : bool =
+    denseBlasArrayOfRank 2 t = Some PrecD
+
 /// A rank-1 f64 operand that is only ever READ elementwise -- never iterated
 /// as a loop level and never peeled. `IxKIrreps` is admitted HERE and nowhere
 /// else: an irreps axis is block-structured but ordinary contiguous dense, so

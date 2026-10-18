@@ -174,6 +174,94 @@ bool run_case(size_t p, size_t k, size_t S, Data d, bool threaded, size_t kcMax,
     return ok;
 }
 
+// ---- the gram(A, A) NODE route ----------------------------------------------
+// The BLAS-off gram node used to emit the triangular gram jam (CodeGenExpr
+// materializeGramForm): per row i, cells j = i.. in tiles of R = 6 named
+// accumulators, `__gacc_r += A[i][k] * conj_scalar(A[j][k])` for k ascending,
+// then a one-cell remainder. That is reproduced here VERBATIM in arithmetic
+// (conj_scalar is the identity on a real element, as in
+// nested_array_utilities.hpp) so the tile is checked against the exact code it
+// replaced: gated under =off, measured under =fast (where g++ may fuse the
+// jam's and the tile's steps differently, exactly as for the plain loop).
+inline double conj_scalar(double x) { return x; }
+
+__attribute__((noinline))
+void gram_jam_ref(size_t m, size_t n, double* const* A, double* const* G) {
+    const size_t triR = 6;
+    for (size_t gi = 0; gi < m; gi++) {
+        const double* growi = &A[gi][0];
+        const size_t gspan = m - gi;
+        size_t gjr = 0;
+        for (; gjr + triR <= gspan; gjr += triR) {
+            const double* gj[6];
+            for (size_t r = 0; r < 6; r++) gj[r] = &A[gi + gjr + r][0];
+            double a0 = double(), a1 = double(), a2 = double(), a3 = double(), a4 = double(), a5 = double();
+            for (size_t gk = 0; gk < n; gk++) {
+                a0 += growi[gk] * conj_scalar(gj[0][gk]);
+                a1 += growi[gk] * conj_scalar(gj[1][gk]);
+                a2 += growi[gk] * conj_scalar(gj[2][gk]);
+                a3 += growi[gk] * conj_scalar(gj[3][gk]);
+                a4 += growi[gk] * conj_scalar(gj[4][gk]);
+                a5 += growi[gk] * conj_scalar(gj[5][gk]);
+            }
+            G[gi][gjr + 0] = a0; G[gi][gjr + 1] = a1; G[gi][gjr + 2] = a2;
+            G[gi][gjr + 3] = a3; G[gi][gjr + 4] = a4; G[gi][gjr + 5] = a5;
+        }
+        for (; gjr < gspan; gjr++) {
+            const double* growj = &A[gi + gjr][0];
+            double gacc = double();
+            for (size_t gk = 0; gk < n; gk++) gacc += growi[gk] * conj_scalar(growj[gk]);
+            G[gi][gjr] = gacc;
+        }
+    }
+}
+
+long long g_jam_cells = 0, g_jam_diff = 0;
+
+// One gram(A, A) node shape: the call exactly as the node emits it
+// (`dsyrk_tri(m, n, A.data, G.data, 0, threaded, 336)`), every packed cell
+// against the serial chain (gated) and against the jam it replaced (gated
+// under =off).
+bool run_gram_case(size_t m, size_t n, Data d, bool threaded, unsigned long long seed) {
+    Rng r(seed * 7919ULL + m * 31 + n);
+    std::vector<double> pool(m * n + 1);                  // a dense, contiguous pool, as allocate<> builds
+    std::vector<double*> A(m + 1, nullptr);
+    for (size_t i = 0; i < m; i++) {
+        A[i] = pool.data() + i * n;
+        for (size_t t = 0; t < n; t++) A[i][t] = gen(r, d);
+    }
+    const size_t cells = m * (m + 1) / 2;
+    std::vector<double> gt(cells + 1), gj(cells + 1);
+    std::vector<double*> Gt(m + 1, nullptr), Gj(m + 1, nullptr);
+    size_t off = 0;
+    for (size_t i = 0; i < m; i++) { Gt[i] = gt.data() + off; Gj[i] = gj.data() + off; off += m - i; }
+    blade_pgemm::dsyrk_tri(m, n, A.data(), Gt.data(), 0, threaded, 336);
+    gram_jam_ref(m, n, A.data(), Gj.data());
+    bool ok = true;
+    for (size_t i = 0; i < m && ok; i++)
+        for (size_t jr = 0; jr < m - i; jr++) {
+            const double got = Gt[i][jr];
+            const double want = serial_dot(A[i], A[i + jr], n);
+            const double jam = Gj[i][jr];
+            g_jam_cells++;
+            const bool jamSame = std::memcmp(&jam, &got, 8) == 0;
+            if (!jamSame) g_jam_diff++;
+            if (std::memcmp(&want, &got, 8) != 0) {
+                std::printf("  gram cell (%zu, %zu): chain %a tile %a\n", i, i + jr, want, got);
+                ok = false;
+                break;
+            }
+#ifndef BLADE_TEST_FMA_REF
+            if (!jamSame) {
+                std::printf("  gram cell (%zu, %zu): jam %a tile %a\n", i, i + jr, jam, got);
+                ok = false;
+                break;
+            }
+#endif
+        }
+    return ok;
+}
+
 std::string caseName(size_t p, size_t k, size_t S, Data d, bool th, size_t kcMax) {
     char buf[160];
     std::snprintf(buf, sizeof buf, "p=%zu k=%zu S=%zu %s %s kc<=%zu", p, k, S, dataName(d),
@@ -227,6 +315,33 @@ int main() {
         for (size_t p : {2049u, 2057u})
             sweep(p, 3, S, Random, false, KC, 9);
     sweep(2057, 21, 0, Cancel, true, 8, 10);
+    // 7. The gram(A, A) NODE route: the shapes the jam was measured on
+    //    (301 x 257, 61 x 2003, 1003 x 61), the crossover edge (16 x 4, 16 x 5,
+    //    24 x 8), ragged panels and multi-K-block chains, every data class.
+    {
+        struct G { size_t m, n; };
+        const G shapes[] = { {16, 4}, {16, 5}, {17, 7}, {24, 8}, {29, 1001}, {61, 31}, {61, 2003},
+                             {97, 513}, {101, 337}, {301, 257}, {1003, 61} };
+        unsigned long long seed = 100;
+        for (const G& g : shapes)
+            for (Data d : {Random, Cancel, Zeros, Subnormal, NonFinite, Positive}) {
+                if (g.m * g.n > 200000 && d != Random && d != Cancel) continue;
+                for (bool th : {false, true}) {
+                    char buf[128];
+                    std::snprintf(buf, sizeof buf, "gram node m=%zu n=%zu %s %s", g.m, g.n, dataName(d),
+                                  th ? "threaded" : "serial");
+                    check(run_gram_case(g.m, g.n, d, th, seed++), buf);
+                }
+            }
+    }
+    std::printf("gram node: tile vs the triangular gram jam it replaced: %lld of %lld cells differ in bits%s\n",
+                g_jam_diff, g_jam_cells,
+#ifdef BLADE_TEST_FMA_REF
+                " (contract=fast: measured, not gated)"
+#else
+                " (contract=off: gated, must be 0)"
+#endif
+    );
 #ifdef BLADE_TEST_FMA_REF
     std::printf("reference: one std::fma per step (contract=fast)\n");
 #else
