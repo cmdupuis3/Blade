@@ -31,6 +31,7 @@
 #include <cstring>
 #include <cstdint>
 #include <algorithm>
+#include "blade_tiles.h"
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -190,6 +191,137 @@ inline void dgemm_nn(size_t m, size_t k, size_t n,
     }
 }
 
+// ---------------------------------------------------------------------------
+// Packed-triangle SYRK: C(i, j) = sum_s X(i, s) X(j, s) over Blade's packed
+// upper triangle (i + S <= j < p), the BLAS-off arm of the same-array `comm`
+// row contraction (LinAlgPatterns.(|BlasL3|_|), dispatched by
+// CodeGenLoopNest.tryGenSyrkDispatch). The arithmetic is blade_tiles.h's
+// (shared with the LLVM lane's future driver); this is the C++ driver: the
+// blocking, the packing scratch and the thread team.
+//
+// BITWISE the serial per-cell prodsum (`double __ps = 0; for t ascending:
+// __ps += X[i][t] * X[j][t]`) under the same -ffp-contract: each cell is one
+// ascending chain, K blocks store and reload the exact partial, cells are split
+// across threads but sums never are (same bits for every team size). Proven
+// under =off, verified under =fast by cpp/syrk_tile_tests.cpp.
+//
+// Blocking (Zen 3: 32 KB L1d, 512 KB L2, 32 MB L3 per CCD):
+//   KC  the sample block, BALANCED: nkb = ceil(k / TRI_KC_MAX) blocks of
+//       ceil(k / nkb) samples (k = 1001 -> 3 x 334, never 2 x 336 + 329), so the
+//       last block is never a runt. The A micro-panel (6 x KC: 16 KB at 334)
+//       stays in L1 for a whole row panel, beside the B lines streaming through.
+//   NC  the column block packed as B: NC x KC (2048 x 334: 5.5 MB) in L3.
+// ORDER: a row panel (6 rows) is OUTER and the column panels from its diagonal
+// rightward are INNER -- the expert Fortran's order transposed (its column
+// panel outer, row panels inner). It keeps the A micro-panel resident and makes
+// the output traffic six SEQUENTIAL row streams (row i's cells left to right),
+// which the prefetchers follow; the GotoBLAS order (B micro-panel resident, A
+// block streamed from L2) walks 96 rows' output at once and measured ~10-15%
+// slower at 1601 x 1001 (scratch sweep, loaded host). The B panel streams from
+// L3, as the expert's A panels do.
+//
+// WHETHER a shape is worth it is decided at COMPILE time on literal extents by
+// CodeGenExprSupport.packedTriWorth; the header carries no copy of the rule.
+// ---------------------------------------------------------------------------
+
+constexpr size_t TRI_KC_MAX = 336;
+constexpr size_t TRI_NC = 2048;
+
+/// The balanced sample block for k samples under a cap of kcMax.
+inline size_t tri_kc(size_t k, size_t kcMax) {
+    const size_t nkb = (k + kcMax - 1) / kcMax;
+    return (k + nkb - 1) / nkb;
+}
+
+/// C = X X^T over the packed triangle. X: p row pointers, each k contiguous
+/// samples. C: p row pointers, C[i] pointing at cell (i, i + S) (Blade's
+/// left-justified packed rows; C[i][jr] = cell (i, i + S + jr)). `threaded` is
+/// the emitter's thread knob AND the source's omp licence: false keeps the
+/// whole call on the calling thread. kcMax is the sample-block cap (the default
+/// is the tuned value; the tests shrink it to force several K blocks).
+inline void dsyrk_tri(size_t p, size_t k, double* const* X, double* const* C, size_t S,
+                      bool threaded, size_t kcMax = TRI_KC_MAX) {
+    if (p <= S) return;
+    if (k == 0) {
+        // The empty sum: every cell is the seed, +0.0.
+        for (size_t i = 0; i + S < p; i++)
+            for (size_t jr = 0; jr < p - i - S; jr++) C[i][jr] = 0.0;
+        return;
+    }
+    const size_t kcn = tri_kc(k, kcMax == 0 ? TRI_KC_MAX : kcMax);
+    static thread_local Scratch bscratch;
+    // Team: at least ~1M FMAs per thread (dgemm_nn's rule).
+    size_t T = 1;
+#ifdef _OPENMP
+    if (threaded && !omp_in_parallel())
+        T = std::max<size_t>(1, std::min<size_t>((size_t)omp_get_max_threads(), (p * p / 2 * k) >> 20));
+#else
+    (void)threaded;
+    (void)T;
+#endif
+    for (size_t jc = 0; jc < p; jc += TRI_NC) {
+        const size_t nc = std::min(TRI_NC, p - jc);
+        const size_t npad = (nc + NR - 1) / NR * NR;
+        const size_t jEnd = jc + nc;
+        // rows that meet this column block: i + S <= jEnd - 1
+        const size_t iTop = std::min(p, jEnd - S);
+        double* bp = bscratch.get(kcn * npad);
+        for (size_t pc = 0; pc < k; pc += kcn) {      // ascending: the chain order
+            const size_t kc = std::min(kcn, k - pc);
+            const int first = (pc == 0);
+            auto packB = [&](size_t jr) {
+                const double* src[NR];
+                const size_t rows = std::min(NR, nc - jr);
+                for (size_t q = 0; q < rows; q++) src[q] = X[jc + jr + q] + pc;
+                blade_tile_pack_t(src, rows, NR, kc, bp + jr * kc);
+            };
+            // One row panel (6 rows) across the column block, from its diagonal
+            // rightward. `ap` is the executing thread's own A micro-panel.
+            auto rowPanel = [&](size_t i0, double* ap) {
+                const size_t mr = std::min(MR, iTop - i0);
+                const double* src[MR];
+                for (size_t r = 0; r < mr; r++) src[r] = X[i0 + r] + pc;
+                blade_tile_pack_t(src, mr, MR, kc, ap);
+                double* crow[MR];
+                for (size_t r = 0; r < MR; r++) crow[r] = (r < mr) ? C[i0 + r] : nullptr;
+                // first column panel reaching row i0's diagonal (i0 + S)
+                const size_t jlo = (i0 + S > jc) ? (i0 + S - jc) / NR * NR : 0;
+                for (size_t jr = jlo; jr < nc; jr += NR) {
+                    const size_t j0 = jc + jr, nr = std::min(NR, nc - jr);
+                    if (mr == MR && nr == NR && j0 >= i0 + (MR - 1) + S)
+                        blade_tri_tile_full(kc, ap, bp + jr * kc, crow, j0 - i0 - S, first);
+                    else
+                        blade_tri_tile_edge(kc, ap, bp + jr * kc, crow, i0, j0, mr, nr, S, first);
+                }
+            };
+            static thread_local Scratch ascratch;     // private per executing thread
+#ifdef _OPENMP
+            if (T > 1) {
+                // Row panels under a team: dynamic (the triangle makes upper
+                // panels longer). Each cell has ONE owner per K block and the K
+                // blocks are sequential, so the bits never depend on T.
+#pragma omp parallel num_threads((int)T)
+                {
+#pragma omp for schedule(static)
+                    for (size_t jr = 0; jr < nc; jr += NR) packB(jr);
+                    double* ap = ascratch.get(MR * kc);
+#pragma omp for schedule(dynamic, 1)
+                    for (size_t i0 = 0; i0 < iTop; i0 += MR) rowPanel(i0, ap);
+                }
+                continue;
+            }
+#endif
+            // Serial: no OpenMP runtime call at all (an `if(false)` parallel
+            // region still costs ~17 us per K block -- measured to dominate
+            // below ~50^2 x 50).
+            for (size_t jr = 0; jr < nc; jr += NR) packB(jr);
+            double* ap = ascratch.get(MR * kc);
+            for (size_t i0 = 0; i0 < iTop; i0 += MR) rowPanel(i0, ap);
+        }
+    }
+}
+
+
 #else   // not GCC/Clang (cl.exe: the memcheck MSVC fallback, nvcc's host half)
 
 // No vector extensions, but the emitter calls dgemm_nn on the SHAPE, not the
@@ -206,6 +338,20 @@ inline void dgemm_nn(size_t m, size_t k, size_t n,
             for (size_t j = 0; j < n; j++) c[j] += a * b[j];
         }
     }
+}
+
+// The packed-triangle SYRK, likewise the loop it replaces: per cell a +0.0
+// seed then ascending s, the product in source factor order, serial.
+inline void dsyrk_tri(size_t p, size_t k, double* const* X, double* const* C, size_t S,
+                      bool, size_t = 0, size_t = 0) {
+    for (size_t i = 0; i + S < p; i++)
+        for (size_t jr = 0; jr < p - i - S; jr++) {
+            const double* a = X[i];
+            const double* b = X[i + S + jr];
+            double acc = 0;
+            for (size_t s = 0; s < k; s++) acc += a[s] * b[s];
+            C[i][jr] = acc;
+        }
 }
 
 #endif

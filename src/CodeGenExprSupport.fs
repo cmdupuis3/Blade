@@ -1756,6 +1756,44 @@ let packedGemmWorth (m: int64) (k: int64) (n: int64) : bool =
     m >= 18L && k >= 16L && m * n * k >= 32768L
 
 
+/// Is the packed-triangle SYRK tile (blade_packed_gemm.hpp's dsyrk_tri over
+/// blade_tiles.h's 6 x 8 core) worth it for a p x p same-array row contraction
+/// over k samples? THE one statement of the rule, decided at compile time on
+/// the literal extents (the header carries no copy). Measured against the
+/// per-cell dot it replaces (default build, Zen 3, single thread, scratch
+/// sweep 2026-10-18): the tile wins from p = 16 at every k >= 4 (24 x 8 1.3x,
+/// 61 x 31 2.5x, 61 x 257 2.7x, 97 x 513 3.1x, 1601 x 1001 5.9x) and loses
+/// below (13 x 31 0.78x, 9 x 1001 0.56x) -- a 6 x 8 tile is mostly padding on a
+/// 13-row triangle. The serial call makes NO OpenMP runtime call, which is
+/// what moved the crossover down from the plan's first guess (an `if(false)`
+/// parallel region cost ~17 us per K block).
+let packedTriWorth (p: int64) (k: int64) : bool =
+    p >= 16L && k >= 4L
+
+/// The tile's sample-block cap, passed to dsyrk_tri as its `kcMax` so the
+/// plan line and the header cannot disagree: k samples run in
+/// nkb = ceil(k / cap) BALANCED blocks of ceil(k / nkb) (k = 1001: 3 x 334).
+/// 336 keeps the 6 x KC A micro-panel (16 KB) resident in Zen 3's 32 KB L1d
+/// beside the streaming B lines; 256 / 336 / 400 measured within 2% at
+/// 1601 x 1001, 192 ~5% slower (more output reload passes).
+let syrkTileKcMax = 336L
+
+/// The balanced sample block the header derives from `syrkTileKcMax` (stated
+/// here only for the `blade plan` line).
+let syrkTileKc (k: int64) : int64 =
+    if k <= 0L then 0L
+    else
+        let nkb = (k + syrkTileKcMax - 1L) / syrkTileKcMax
+        (k + nkb - 1L) / nkb
+
+/// BLADE_SYRK_TILE: unset / `1` / `on` = the packed-triangle SYRK tile is the
+/// BLAS-off arm of the same-array `comm` row contraction (default); `0` / `off`
+/// keeps the plain per-cell nest, for A/B. A FUNCTION, read per call, so a
+/// harness can pin it mid-process. It changes the emission, so the exe cache
+/// keys on it for free.
+let syrkTileEnabled () : bool = Blade.Toolchain.envFlag "BLADE_SYRK_TILE" true
+
+
 /// Can `A(i1, ..., ik)` -- `consumed` positional subscripts, fewer than A's
 /// records -- be emitted as the sub-view aggregate
 /// `Array<T, R>{ A.data[i1]...[ik], A.extents + k }`? The ONE predicate both

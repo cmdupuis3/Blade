@@ -2525,7 +2525,11 @@ let internal tryGenGemvDispatch
 
 
 /// L3 dispatch at the apply-combinator site: the comm-licensed
-/// packed-covariance nest becomes ONE `blade_gram_same_*` (`?syrk`) call.
+/// packed-covariance nest becomes ONE `blade_gram_same_*` (`?syrk`) call --
+/// or, with the BLAS gate OFF, ONE `blade_pgemm::dsyrk_tri` call (the
+/// packed-triangle 6 x 8 register tile, per cell bitwise the serial prodsum
+/// under -ffp-contract=off) when the literal extents clear `packedTriWorth`
+/// and BLADE_SYRK_TILE is not off; otherwise None and the ordinary nest.
 ///
 /// The twin of `tryGenGemvDispatch` one level up, and it turns the SAME
 /// descriptor kind into text -- `LinAlgPatterns.(|BlasL3|_|)` owns which nests
@@ -2554,9 +2558,11 @@ let internal tryGenSyrkDispatch
         let entryOpt = Blade.LinAlgPatterns.shimEntryPoint Blade.LinAlgPatterns.HostBlas call
         Blade.LinAlgPatterns.recordRoute (decisionSpan ()) codeGen.OutputName call
             (entryOpt |> Option.map (fun e -> (Blade.LinAlgPatterns.HostBlas, e)))
-        match entryOpt with
-        | None -> None
-        | Some entry ->
+        // Gate on or off, the operands, extents and scale tail are derived the
+        // same way; only the final call differs (the BLAS shim, or the
+        // packed-triangle tile below).
+        match () with
+        | () ->
             let aName =
                 call.NestOperands
                 |> List.tryPick (fun (r, src) ->
@@ -2620,6 +2626,8 @@ let internal tryGenSyrkDispatch
                 match scaleLine with
                 | None -> None
                 | Some tail ->
+                match entryOpt with
+                | Some entry ->
                     (linalgUsedCell ()).Value <- true
                     // BLOCK comment, not `//`: an inline-form materialization
                     // space-joins its lines into a single-line IIFE, where a
@@ -2627,6 +2635,57 @@ let internal tryGenSyrkDispatch
                     Some ([ String.replicate indent "    "
                             + $"/* linalg dispatch: syrk C = A * A^T (packed upper, from comm nest) */ {entry}({mExtent}, {nExtent}, {aName}.data, {aCells}, {cName}.data);" ]
                           @ Option.toList tail)
+                | None ->
+                // BLAS GATE OFF: the packed-triangle SYRK tile
+                // (blade_packed_gemm.hpp dsyrk_tri over blade_tiles.h's 6 x 8
+                // core), or -- below the crossover, on non-literal extents, or
+                // under BLADE_SYRK_TILE=0 -- the ordinary nest (None).
+                //
+                // NO LICENCE NEEDED, so this arm is the same in the default and
+                // the BLADE_FP_REPRO=1 build: every cell is still ONE chain,
+                // +0.0 then `acc += X[i][s] * X[j][s]` for s ascending, the
+                // serial prodsum's operation sequence. K blocks store and
+                // reload the exact partial; the tile is vector extensions, so
+                // contraction follows -ffp-contract as the scalar loop's does.
+                // Bitwise the serial prodsum under =off (the differential
+                // gates' mode), the one-fma-per-step chain under =fast --
+                // cpp/syrk_tile_tests.cpp (`blade test syrk-tile`). The
+                // default build's per-cell dot was a REASSOCIATED simd
+                // reduction, so the tile changes the default's bits by ulps
+                // (toward the serial chain) and the repro build's not at all
+                // under =off.
+                //
+                // The kernel's scalar tail, if any, is the SAME post-pass the
+                // BLAS route applies (divide the finished sum).
+                let lit (s: string) = match System.Int64.TryParse s with | true, v -> Some v | _ -> None
+                let declineTile (why: string) (shape: string) =
+                    recordCodegenDecision "microkernel" cName
+                        (Blade.Effects.Declined why) [ "packed syrk tile"; shape ]
+                    None
+                if not (syrkTileEnabled ()) then
+                    declineTile "BLADE_SYRK_TILE=0/off: the plain per-cell nest (A/B knob)" ""
+                else
+                match lit mExtent, lit nExtent with
+                | Some p, Some k when packedTriWorth p k ->
+                    (packedGemmUsedCell ()).Value <- true
+                    let kc = syrkTileKc k
+                    // Threads only where the source licenses them (`omp` on
+                    // the kernel) AND the build emits thread-level OpenMP;
+                    // cells are split across the team, sums never are.
+                    let threadedArg =
+                        if codeGen.OmpRequested && ompThreadEmissionEnabled () then "true" else "false"
+                    recordCodegenDecision "microkernel" cName Blade.Effects.Applied
+                        [ "packed syrk tile (blade_pgemm::dsyrk_tri, 6x8 register tile over the packed triangle)"
+                          $"P={p} K={k} KC={kc}" ]
+                    recordFoldForm cName $"syrk tile 6x8, KC={kc}"
+                        "same-array comm row contraction (one ascending chain per cell; no reorder licence used)"
+                    Some ([ String.replicate indent "    "
+                            + $"/* comm nest: packed-triangle syrk tile (blade_packed_gemm.hpp dsyrk_tri, 6x8, KC={kc}), per cell the serial prodsum */ blade_pgemm::dsyrk_tri((size_t)({mExtent}), (size_t)({nExtent}), {aName}.data, {cName}.data, 0, {threadedArg}, (size_t){syrkTileKcMax});" ]
+                          @ Option.toList tail)
+                | Some p, Some k ->
+                    declineTile "below the syrk-tile crossover (p >= 16, k >= 4): the per-cell nest wins" $"P={p} K={k}"
+                | _ ->
+                    declineTile "non-literal extents: the per-cell nest" "non-literal extents"
             | _ -> None
     | _ -> None
 
@@ -2759,6 +2818,11 @@ let runtimeHeaderNames : string list =
       // INCLUDED only by a program whose matmul arm called it
       // (packedGemmUsedCell); deployed unconditionally like the rest.
       "blade_packed_gemm.hpp"
+      // The pure C99/C++ arithmetic core of the packed-triangle tiles
+      // (blade_tri_tile_*), included by blade_packed_gemm.hpp -- so deployed
+      // beside it, and hashed into the exe cache key with every other name in
+      // this list.
+      "blade_tiles.h"
       // Dense linear-algebra dispatch: blade_gemm / blade_syrk plus the
       // gram/matmul adapters, resolving to cblas under -DBLADE_HAS_BLAS and to
       // native fallbacks otherwise. INCLUDED only by programs that actually

@@ -1058,6 +1058,16 @@ let private planRowFoldSrc =
     + "let s = reduce(M, (+))\n"
 
 /// gram of one array, BLAS off: the triangular native arm and its jam.
+/// The same-array comm row contraction at 20 x 8: above the syrk-tile
+/// crossover (p >= 16, k >= 4), so the BLAS-off arm is the packed tile.
+let private planSyrkSrc (p: int) (n: int) =
+    $"type V = Idx<{p}>\ntype S = Idx<{n}>\n"
+    + "let A: Array<Float64 like V, S> = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64(i * 8 + s) |> compute\n"
+    + "let k = lambda(a: Array<Float64 like S>, b: Array<Float64 like S>) where comm(a, b) -> prodsum(a, b)\n"
+    + "let r = method_for(A, A) <@> k |> compute\n"
+
+let private planSyrkTileSrc = planSyrkSrc 20 8
+
 let private planGramSrc =
     "let A: Array<Float64 like Idx<9>, Idx<5>> = method_for(range<Idx<9>>, range<Idx<5>>) <@> lambda(i, j) -> Float64(i + j) |> compute\n"
     + "let G = gram(A, A)\n"
@@ -1156,7 +1166,47 @@ let private planCases () =
               (fun d -> applied d && evidenceMentioning "row-fold jam" d) "row-fold jam over the rows")
       pinBlas "0" (fun () ->
           planCase "plan_triangular_gram_jam_applied" planGramSrc "microkernel"
-              (fun d -> applied d && evidenceMentioning "triangular gram jam" d) "triangular gram jam") ]
+              (fun d -> applied d && evidenceMentioning "triangular gram jam" d) "triangular gram jam")
+      // The same-array comm row contraction above the syrk-tile crossover:
+      // `blade plan` names the tile and its sample block, in the default AND
+      // the repro build (the tile needs no reorder licence).
+      pinBlas "0" (fun () ->
+       withGate "BLADE_SYRK_TILE" null (fun () ->
+          planCase "plan_syrk_tile_applied" planSyrkTileSrc "microkernel"
+              (fun d -> applied d && evidenceMentioning "packed syrk tile" d && evidenceMentioning "KC=8" d)
+              "packed syrk tile above the crossover"))
+      pinBlas "0" (fun () ->
+       withGate "BLADE_SYRK_TILE" null (fun () ->
+          planCase "plan_syrk_tile_fold_form" planSyrkTileSrc "fold-form"
+              (fun d -> applied d && evidenceMentioning "fold form: syrk tile 6x8, KC=8" d)
+              "fold form: syrk tile 6x8, KC=8"))
+      pinBlas "0" (fun () ->
+       withGate "BLADE_SYRK_TILE" null (fun () ->
+        withGate "BLADE_FP_REPRO" "1" (fun () ->
+          planCase "plan_syrk_tile_applied_in_repro" planSyrkTileSrc "fold-form"
+              (fun d -> applied d && evidenceMentioning "fold form: syrk tile 6x8" d)
+              "the tile is ON under BLADE_FP_REPRO=1")))
+      pinBlas "0" (fun () ->
+       withGate "BLADE_SYRK_TILE" null (fun () ->
+          planCase "plan_syrk_tile_declined_small" planCommSameArraySrc "microkernel"
+              (declinedMentioning "syrk-tile crossover") "syrk tile declined below the crossover"))
+      // The review's route shapes (bench/notes/microkernel-sketches-review.md M5):
+      // ragged triangles and multi-K-block chains tile; a 13-row triangle keeps
+      // the nest.
+      for (p, n, kc) in [ (61, 257, 257); (97, 513, 257); (29, 1001, 334); (61, 31, 31) ] do
+          pinBlas "0" (fun () ->
+           withGate "BLADE_SYRK_TILE" null (fun () ->
+              planCase $"plan_syrk_tile_route_{p}x{n}" (planSyrkSrc p n) "microkernel"
+                  (fun d -> applied d && evidenceMentioning $"P={p} K={n} KC={kc}" d)
+                  $"packed syrk tile at {p} x {n}, KC={kc}"))
+      pinBlas "0" (fun () ->
+       withGate "BLADE_SYRK_TILE" null (fun () ->
+          planCase "plan_syrk_tile_route_13x31_declines" (planSyrkSrc 13 31) "microkernel"
+              (declinedMentioning "syrk-tile crossover") "13 x 31 keeps the per-cell nest"))
+      pinBlas "0" (fun () ->
+       withGate "BLADE_SYRK_TILE" "0" (fun () ->
+          planCase "plan_syrk_tile_declined_knob" planSyrkTileSrc "microkernel"
+              (declinedMentioning "BLADE_SYRK_TILE") "syrk tile declined by BLADE_SYRK_TILE=0")) ]
 
 let private runCase (name: string) (src: string) (wantBreaks: int) (wantAborts: int) =
     match cppOfSource name src with

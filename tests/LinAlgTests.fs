@@ -136,6 +136,13 @@ let private emissionCases : (string * bool * string * string list * string list)
     let covKernel (whereClause: string) (body: string) =
         "lambda(x: Array<Float64 like T>, y: Array<Float64 like T>) where "
         + whereClause + " -> " + body + " |> compute\n"
+    // 20 rows x 8 samples: above the syrk-tile crossover (p >= 16, k >= 4).
+    let bigCov =
+        "type BV = Idx<20>\ntype BT = Idx<8>\n"
+        + "let CB: Array<Float64 like BV, BT> = method_for(range<BV>, range<BT>) <@> lambda(i, s) -> Float64(i * 8 + s) * 0.125 |> compute\n"
+    let bigCovKernel (whereClause: string) (body: string) =
+        "lambda(x: Array<Float64 like BT>, y: Array<Float64 like BT>) where "
+        + whereClause + " -> " + body + " |> compute\n"
     [ // gram(A, A) — the symmetric rank-k update. Blade's result is PACKED
       // upper-triangular storage, which is why the route is its own adapter
       // rather than a bare `blade_syrk` call.
@@ -626,6 +633,27 @@ let y = gram_apply(A, A, v)
        + "let o2 = method_for(CA, CA) <@> " + covKernel "comm(x, y), omp" "prodsum(x, y)",
        [ "#pragma omp parallel for schedule(dynamic)"; "CA____i0" ],
        [ shimInclude; "blade_linalg::" ])
+      // ...and ABOVE the syrk-tile crossover (p >= 16, k >= 4; here 20 x 8)
+      // the gate-off arm is the packed-triangle tile: ONE call into
+      // blade_packed_gemm.hpp's dsyrk_tri (6 x 8 register tile over the packed
+      // pool, per cell the serial prodsum), its include, the kernel's scalar
+      // as the same post-pass the BLAS route applies, and no per-cell nest.
+      // `false` = no omp licence on the kernel: the call stays on one thread.
+      ("gate_off_syrk_above_crossover_emits_the_packed_tile", false,
+       bigCov
+       + "let t2 = method_for(CB, CB) <@> " + bigCovKernel "comm(x, y)" "prodsum(x, y) / 8.0",
+       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, t2.data, 0, false, (size_t)336);"
+         "packed-triangle syrk tile (blade_packed_gemm.hpp dsyrk_tri, 6x8, KC=8)"
+         "#include \"blade_packed_gemm.hpp\""
+         "for (size_t __sy_i = 0; __sy_i < 20; __sy_i++) for (size_t __sy_j = 0; __sy_j < 20 - __sy_i; __sy_j++) t2[__sy_i][__sy_j] /= (8.0);" ],
+       [ shimInclude; "blade_linalg::"; "cblas_"; "CB____i0"; "__i1 < 20 - __i0" ])
+      // The omp licence on the kernel threads the tile (cells split across the
+      // team, sums never) -- `true`, and no per-cell pragma'd nest.
+      ("gate_off_syrk_tile_takes_the_omp_licence", false,
+       bigCov
+       + "let t3 = method_for(CB, CB) <@> " + bigCovKernel "comm(x, y), omp" "prodsum(x, y)",
+       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, t3.data, 0, true, (size_t)336);" ],
+       [ shimInclude; "blade_linalg::"; "CB____i0" ])
 
       // ============ UNITS ARE NOT A PRECISION ============
       // A unit annotation must not cost the route. `Float64<meter>` STORES as a
@@ -666,6 +694,9 @@ let runLinAlgEmissionTests () : BlockResult =
     // delete exactly those pragmas -- turning a precedence assertion into a
     // spurious red. Pinned unset for the block; same use-guard as `pinBlas`.
     use _ompThreads = pinEnv "BLADE_OMP_THREADS" null
+    // The syrk-tile cases pin the DEFAULT (tile on); the knob case below sets
+    // it off in its own scope.
+    use _syrkTile = pinEnv "BLADE_SYRK_TILE" null
     let mutable passed = 0
     let mutable failed = 0
     let mutable failedNames = []
@@ -687,6 +718,25 @@ let runLinAlgEmissionTests () : BlockResult =
                 passed <- passed + 1
                 resultLine Pass name (if blasOn then "routing as expected (gate on)"
                                       else "native emission as expected (gate off)")
+
+    // ---- BLADE_SYRK_TILE=0 keeps the plain per-cell nest (the A/B knob) ----
+    let knobName = "syrk_tile_knob_off_keeps_the_per_cell_nest"
+    let knobSrc =
+        "type BV = Idx<20>\ntype BT = Idx<8>\n"
+        + "let CB: Array<Float64 like BV, BT> = method_for(range<BV>, range<BT>) <@> lambda(i, s) -> Float64(i * 8 + s) * 0.125 |> compute\n"
+        + "let t4 = method_for(CB, CB) <@> lambda(x: Array<Float64 like BT>, y: Array<Float64 like BT>) where comm(x, y) -> prodsum(x, y) |> compute\n"
+    (let knobCpp =
+        use _tile = pinEnv "BLADE_SYRK_TILE" "0"
+        cppOf false knobName knobSrc
+     match knobCpp with
+     | Error e -> fail knobName e
+     | Ok cpp ->
+        if cpp.Contains "dsyrk_tri" then fail knobName "BLADE_SYRK_TILE=0 still emitted the tile"
+        elif not (cpp.Contains "CB____i0" && cpp.Contains "__i1 < 20 - __i0") then
+            fail knobName "BLADE_SYRK_TILE=0 did not emit the triangular per-cell nest"
+        else
+            passed <- passed + 1
+            resultLine Pass knobName "the per-cell nest, no tile call")
 
     // ---- a unit annotation changes NO emitted byte ----
     //
@@ -1292,6 +1342,111 @@ let runLinAlgProbeTests () : BlockResult =
                 printFooter blockName ["FAILED"]
                 { Block = blockName; Passed = pPassed; Failed = max 1 pFailed; Skipped = 0
                   FailedNames = (if failNames.IsEmpty then [$"<exit {rproc.ExitCode}>"] else failNames) }
+
+
+/// RAW-BIT tests of the packed-triangle SYRK tile (cpp/syrk_tile_tests.cpp over
+/// the SHIPPED blade_tiles.h + blade_packed_gemm.hpp): the BLAS-off arm of the
+/// same-array `comm` row contraction must reproduce the per-cell prodsum it
+/// replaces BIT FOR BIT -- no value pin can see a last-ulp drift, and the
+/// differential gates see only the shapes the corpus happens to have.
+///
+/// Two builds of ONE source, because the claim is per contraction mode:
+///   -ffp-contract=off  (the differential gates' mode): the tile vs the emitted
+///                      serial loop, bitwise by construction;
+///   -ffp-contract=fast (the user default, -DBLADE_TEST_FMA_REF): the tile vs
+///                      the one-std::fma-per-step chain -- every step fused.
+/// plus an assembly census of each build: =off must contain NO vfmadd at all,
+/// =fast must contain the tile's packed vfmadd231pd (12 per s step, per
+/// variant). Needs g++; reports Skipped without it.
+let runSyrkTileTests () : BlockResult =
+    let blockName = "Syrk Tile"
+    printHeader "Packed-Triangle SYRK Tile (raw-bit, both contraction modes)"
+    let cppDir = Path.Combine(AppContext.BaseDirectory, "cpp")
+    let testSrc = Path.Combine(cppDir, "syrk_tile_tests.cpp")
+    let caps = capabilities.Value
+    if not caps.HasGpp then
+        printfn "Skipped: g++ not found (cannot compile the C++ tile tests)."
+        { Block = blockName; Passed = 0; Failed = 0; Skipped = 1; FailedNames = [] }
+    elif not (File.Exists testSrc) then
+        eprintfn "syrk_tile_tests.cpp not found at: %s" testSrc
+        { Block = blockName; Passed = 0; Failed = 1; Skipped = 0
+          FailedNames = ["syrk_tile_tests.cpp missing"] }
+    else
+        let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
+        // A private scratch directory: two concurrent suites (other worktrees
+        // share nothing, but two runs from one checkout share cppDir) must not
+        // race on one output path.
+        let work = Path.Combine(Path.GetTempPath(), "blade-syrk-tile-" + Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory(work) |> ignore
+        let runProc (exe: string) (args: string) (timeoutMs: int) =
+            let psi = ProcessStartInfo(exe, args)
+            psi.RedirectStandardOutput <- true
+            psi.RedirectStandardError <- true
+            psi.UseShellExecute <- false
+            psi.CreateNoWindow <- true
+            psi.WorkingDirectory <- cppDir
+            use p = Process.Start(psi)
+            let o = Blade.Runtime.readToEndOffPool p.StandardOutput
+            let e = Blade.Runtime.readToEndOffPool p.StandardError
+            if p.WaitForExit(timeoutMs) then (Some p.ExitCode, o.Result, e.Result)
+            else
+                (try p.Kill(true) with _ -> ())
+                (None, o.Result, e.Result)
+        let mutable passed = 0
+        let mutable failed = 0
+        let mutable names = []
+        let fail (n: string) (detail: string) =
+            failed <- failed + 1
+            names <- names @ [ n ]
+            resultLine Fail n detail
+        let pass (n: string) (detail: string) =
+            passed <- passed + 1
+            resultLine Pass n detail
+        // -march=native and the same -fno-math-errno -fwrapv the program
+        // builds use; -fopenmp so the threaded arm is exercised too.
+        let baseFlags = "-std=c++17 -O3 -march=native -fno-math-errno -fwrapv -fopenmp"
+        for (mode, extra) in [ ("off", ""); ("fast", " -DBLADE_TEST_FMA_REF") ] do
+            let exe = Path.Combine(work, $"syrk_tile_{mode}{exeExt}")
+            let asm = Path.Combine(work, $"syrk_tile_{mode}.s")
+            let flags = $"{baseFlags} -ffp-contract={mode}{extra}"
+            match runProc "g++" $"{flags} -o \"{exe}\" \"{testSrc}\"" 120000 with
+            | Some 0, _, _ ->
+                match runProc exe "" 120000 with
+                | None, _, _ -> fail $"raw-bit contract={mode}" "test binary TIMED OUT (120s)"
+                | Some code, out, err ->
+                    let outText = out.Replace("\r\n", "\n")
+                    let m = System.Text.RegularExpressions.Regex.Match(outText, @"SYRK TILE TESTS:\s*(\d+)/(\d+)\s*passed")
+                    let firstFails =
+                        outText.Split('\n') |> Array.filter (fun l -> l.StartsWith "[FAIL]") |> Array.truncate 5
+                        |> String.concat " | "
+                    if m.Success && code = 0 && m.Groups.[1].Value = m.Groups.[2].Value then
+                        let census =
+                            outText.Split('\n') |> Array.tryFind (fun l -> l.StartsWith "tile vs the plain")
+                            |> Option.defaultValue ""
+                        pass $"raw-bit contract={mode}" ($"{m.Groups.[1].Value}/{m.Groups.[2].Value} shapes bitwise; {census.Trim()}")
+                    elif m.Success then
+                        fail $"raw-bit contract={mode}" ($"{m.Groups.[1].Value}/{m.Groups.[2].Value} passed: {firstFails} {err.Trim()}")
+                    else
+                        fail $"raw-bit contract={mode}" ($"no summary line (exit {code}): {err.Trim()}")
+            | _, o, e -> fail $"raw-bit contract={mode}" ($"compile failed: {(o + e).Trim()}")
+            // The assembly census: contraction is PERMISSION, so confirm what
+            // g++ actually did in this mode.
+            match runProc "g++" $"{flags} -S -o \"{asm}\" \"{testSrc}\"" 120000 with
+            | Some 0, _, _ ->
+                let lines = File.ReadAllLines asm
+                let count (pat: string) = lines |> Array.filter (fun l -> l.Contains pat) |> Array.length
+                let anyFma = count "vfmadd" + count "vfmsub" + count "vfnmadd"
+                let packedFma = count "vfmadd231pd" + count "vfmadd132pd" + count "vfmadd213pd"
+                if mode = "off" then
+                    if anyFma = 0 then pass "vfmadd census contract=off" "0 fused instructions in the TU (mul + add, as the serial loop)"
+                    else fail "vfmadd census contract=off" ($"{anyFma} fused instruction(s) under -ffp-contract=off")
+                else
+                    if packedFma >= 12 then pass "vfmadd census contract=fast" ($"{packedFma} packed vfmadd (tile s loop: 12 per step per variant)")
+                    else fail "vfmadd census contract=fast" ($"only {packedFma} packed vfmadd: the tile did not contract")
+            | _, o, e -> fail $"vfmadd census contract={mode}" ($"-S failed: {(o + e).Trim()}")
+        (try Directory.Delete(work, true) with _ -> ())
+        printFooter blockName [ $"{passed} passed"; $"{failed} failed" ]
+        { Block = blockName; Passed = passed; Failed = failed; Skipped = 0; FailedNames = names }
 
 
 /// The four-tier BLAS/LAPACK resolution (docs/plans/plan-toolchain-packaging.md):
