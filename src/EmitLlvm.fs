@@ -190,6 +190,36 @@ let private contractLicensed () : bool =
             | "" | "fast" | "on" | "1" -> true
             | _ -> false
 
+// The TILE CORE (bench/notes/microkernel-sketches-review.md item M6): the
+// packed-triangle SYRK tile of the C++ lane, reached from this lane through a
+// C translation unit over the SAME arithmetic header (blade_tiles.h), not
+// re-emitted as IR. Deployed beside the `.ll` by `deployShim`, compiled per
+// policy key by `Build.buildLlvmTilesObject`, called by `materialize`.
+
+/// The tile core's C driver (src/cpp/blade_llvm_tiles.c).
+let tilesSourceFileName = "blade_llvm_tiles.c"
+/// The arithmetic core both lanes include.
+let tilesHeaderFileName = "blade_tiles.h"
+/// The core's one entry point (Float64, packed triangle, serial).
+let tilesSymbol = "blade_dsyrk_tri_f64"
+
+/// The `-ffp-contract=` the tile object is compiled with: the C spelling of
+/// THIS lane's per-instruction `contract` policy (`contractLicensed`), so the
+/// tile contracts exactly where the IR it replaces would -- fused under the
+/// default, never under BLADE_FP_CONTRACT=off or the fact kill switch.
+let tilesContractFlag () : string =
+    if contractLicensed () then " -ffp-contract=fast" else " -ffp-contract=off"
+
+/// The scratch the core needs for a p x p triangle in blocks of kc samples,
+/// in doubles: the B panel (kc x min(p, NC) padded to NR = 8) plus the A
+/// micro-panel (MR = 6 x kc). blade_llvm_tiles.c re-derives the same number
+/// and takes its scalar chain if handed less, so a drift here costs speed,
+/// never memory safety.
+let syrkTileScratchCells (p: int64) (kc: int64) : int64 =
+    let nc = min p 2048L
+    let npad = (nc + 7L) / 8L * 8L
+    kc * npad + 6L * kc
+
 // Attribute-group indices. Groups rather than inline attribute lists because
 // every `define` in a Blade module carries the SAME set: one line at the
 // bottom of the module beats the same twelve words on every function, and it
@@ -212,6 +242,7 @@ let private grpShimAlloc = 4          // the pool allocator
 let private grpShimPanic = 5          // the panic path
 let private grpShimFree = 6           // the pool deallocator (obviously not `nofree`)
 let private grpShimArith = 7          // arithmetic-contract helpers: may panic (BL8013/BL8014), so no `willreturn`
+let private grpTileCore = 8           // blade_llvm_tiles.c: pure, serial, argument memory only (M6)
 
 let private attrGroupText (anyFrees: bool) (anyPanics: bool) (g: int) : string =
     // Blade has no exceptions (nounwind: deletes all Windows SEH lowering)
@@ -243,6 +274,12 @@ let private attrGroupText (anyFrees: bool) (anyPanics: bool) (g: int) : string =
     elif g = grpShimPanic then "cold noreturn nounwind"
     elif g = grpShimFree then "nounwind willreturn"
     elif g = grpShimArith then "nofree nounwind"
+    // The tile core's claims are about ITS SYMBOL (blade_llvm_tiles.c states
+    // each one at the top of the file), so no module-wide drop applies: it
+    // reads/writes only memory reachable from its pointer arguments (no
+    // globals, no allocation, no I/O), has no threads or atomics, frees
+    // nothing, and returns from every input (counted loops, no panic arm).
+    elif g = grpTileCore then "mustprogress nofree nosync nounwind willreturn memory(argmem: readwrite)"
     else ""
 
 /// The facts a whole module carries, computed once before any instruction is
@@ -925,9 +962,32 @@ and private Ctx =
       /// lane's `CodeGenState.declPanicArgs` locates its twin, so the two
       /// lanes print the same `  --> file:line`.
       mutable DeclSpan: Blade.Ast.Span
+      /// The NAME of that declaration (the binding or function), the subject
+      /// of this lane's own `blade plan` records (the syrk tile, M6).
+      mutable DeclName: string
       /// Attribute groups actually referenced, so the module's tail lists the
       /// ones it uses and no others.
       UsedAttrGroups: SortedSet<int> }
+
+/// A deferred value the TILE CORE may materialize (M6): a same-array `comm`
+/// row contraction `method_for(X, X) <@> lambda(a, b) where comm(a, b) ->
+/// prodsum(a, b) [/ d | * s]`, matched by the C++ lane's own
+/// `LinAlgPatterns.(|BlasL3|_|)` over the shared loop description. Attached
+/// to the EXACT ArrVal `applyToArr` returned (reference identity, below), so
+/// any view, re-shape or re-wrap of it -- a `{ a with ... }` copy is a new
+/// object -- loses the attachment and takes the ordinary nest.
+type private SyrkCandidate =
+    { /// The contracted operand X (dense p x k, Float64), as emitted once.
+      Operand: ArrVal
+      P: int64
+      K: int64
+      /// The kernel's scalar tail, applied to the finished sums.
+      Scale: Blade.LinAlgPatterns.NestScale option }
+
+/// ArrVal -> its tile-core candidacy, by REFERENCE (ConditionalWeakTable
+/// keys on object identity and never keeps an ArrVal alive).
+let private syrkCandidates =
+    System.Runtime.CompilerServices.ConditionalWeakTable<ArrVal, SyrkCandidate>()
 
 let private newCtx (callables: Map<IRId, IRCallable>) (facts: ModuleFacts) =
     { Globals = ResizeArray()
@@ -943,6 +1003,7 @@ let private newCtx (callables: Map<IRId, IRCallable>) (facts: ModuleFacts) =
       Facts = facts
       FoldFmf = false
       DeclSpan = Blade.Ast.noSpan
+      DeclName = ""
       UsedAttrGroups = SortedSet()
       Slots = Dictionary()
       ArrSlots = Dictionary()
@@ -4243,6 +4304,9 @@ and private materialize (c: Ctx) (a: ArrVal) : ArrVal =
             storeCell c a.Elem (gepCell c a.Elem ptr (storageOffset c a.Groups idxs)) v)
         { a with Src = APool ptr }
     | AVirt _ ->
+        match trySyrkTileCore c a with
+        | Some pooled -> pooled
+        | None ->
         let total = shapeCells a.Groups
         let ptr = allocPool c a.Elem (string total)
         (match soleSimplexR a.Groups with
@@ -4262,6 +4326,89 @@ and private materialize (c: Ctx) (a: ArrVal) : ArrVal =
                  let v = coerce c a.Elem (readCell c a idxs)
                  storeCell c a.Elem (gepCell c a.Elem ptr off.Reg) v))
         { a with Src = APool ptr }
+
+/// THE TILE CORE (bench/notes/microkernel-sketches-review.md item M6): run a
+/// same-array `comm` row contraction (a `SyrkCandidate` applyToArr attached)
+/// into its packed-triangle pool with ONE call to blade_llvm_tiles.c's
+/// `blade_dsyrk_tri_f64` -- the C++ lane's 6 x 8 register tile, the same
+/// blade_tiles.h text, compiled by clang under this lane's contraction
+/// policy -- instead of the 64 x 64 brick nest with a per-cell dot. None
+/// keeps the nest: no candidate, BLADE_SYRK_TILE=0, below the crossover
+/// (`packedTriWorth`, the C++ lane's one statement of it), or a module with a
+/// `where repro` function (this lane does not yet honour per-function repro,
+/// and the tile object is compiled for the BUILD's contraction mode).
+///
+/// NO LICENCE NEEDED, as in the C++ lane: every cell is ONE chain, +0.0 then
+/// `acc += X[i][s] * X[j][s]` for s ascending; K blocks store and reload the
+/// exact partial. Bitwise the serial prodsum under BLADE_FP_CONTRACT=off and
+/// the fma-per-step chain under the default -- the C++ lane's tile bits in
+/// both modes (`blade test llvm-tiles`). The nest's per-cell dot was a
+/// REASSOCIATED chain (`reassoc nsz`) in the default build, so the tile
+/// moves the default's bits by ulps toward the serial chain, the same move
+/// the C++ lane's tile made.
+///
+/// The kernel's scalar tail (`prodsum(a, b) / d`, `* s`) is applied by the
+/// core to the FINISHED triangle, the post-pass the C++ lane applies.
+and private trySyrkTileCore (c: Ctx) (a: ArrVal) : ArrVal option =
+    match syrkCandidates.TryGetValue a with
+    | true, cand ->
+        let p, k = cand.P, cand.K
+        let kc = Blade.CodeGenExprSupport.syrkTileKc k
+        let record (rule: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
+            if Blade.Effects.Decisions.active () then
+                Blade.Effects.Decisions.record
+                    { Rule = rule; Version = 1; Span = c.DeclSpan
+                      Subject = (if c.DeclName = "" then "main" else c.DeclName)
+                      Outcome = outcome; Evidence = evidence }
+        let decline (why: string) =
+            record "microkernel" (Blade.Effects.Declined why)
+                [ "packed syrk tile (shared C core)"; $"P={p} K={k}" ]
+            None
+        if not (Blade.CodeGenExprSupport.syrkTileEnabled ()) then
+            decline "BLADE_SYRK_TILE=0/off: the brick nest with a per-cell dot (A/B knob)"
+        elif not (Blade.CodeGenExprSupport.packedTriWorth p k) then
+            decline "below the syrk-tile crossover (p >= 16, k >= 4): the per-cell nest wins"
+        elif c.Callables |> Map.exists (fun _ cl -> cl.IsRepro) then
+            decline "a `where repro` function in the module (the tile object follows the build's contraction mode, not a function's)"
+        else
+        // The scale, evaluated ONCE, here -- the kernel would evaluate the
+        // same literal / non-parameter variable in this same context per cell.
+        let scaleMode, scaleVal =
+            match cand.Scale with
+            | None -> "0", f64Const 1.0
+            | Some (Blade.LinAlgPatterns.ScaleDiv d) -> "1", (coerce c ScF64 (emitExpr c d)).Reg
+            | Some (Blade.LinAlgPatterns.ScaleMul s) -> "2", (coerce c ScF64 (emitExpr c s)).Reg
+        let x = materialize c cand.Operand
+        let xPtr =
+            match x.Src with
+            | APool ptr -> ptr
+            | _ -> refuse "a tile-core operand that did not materialize to a pool"
+        let total = shapeCells a.Groups
+        let out = allocPool c ScF64 (string total)
+        let scratchCells = syrkTileScratchCells p kc
+        let scratch = allocPool c ScF64 (string scratchCells)
+        // The declaration's attributes are claims about blade_llvm_tiles.c
+        // (stated there): argument memory only, serial, returns. Parameter
+        // facts ride the fact layer's switch like every other declaration.
+        let pa = paramAttr ()
+        let ro, nc =
+            if factEnabled factParamAttrs then " readonly captures(none)", " captures(none)" else "", ""
+        need c ($"declare void @{tilesSymbol}(i64{pa}, i64{pa}, ptr{pa}{ro}, i64{pa}, ptr{pa}{nc}, i64{pa}, i64{pa}, i64{pa}, double{pa}, ptr{pa}{nc}, i64{pa}){(attrRef c grpTileCore)}")
+        ln c ($"; syrk tile (shared C core blade_llvm_tiles.c over blade_tiles.h, 6x8, KC={kc}): per cell the serial prodsum")
+        ln c (renderCall { Dest = None; RetTy = ScVoid; Callee = "@" + tilesSymbol
+                           Args = [ ScI64, string p; ScI64, string k; ScStr, xPtr; ScI64, string k
+                                    ScStr, out; ScI64, "0"
+                                    ScI64, string Blade.CodeGenExprSupport.syrkTileKcMax
+                                    ScI64, scaleMode; ScF64, scaleVal
+                                    ScStr, scratch; ScI64, string scratchCells ] })
+        record "microkernel" Blade.Effects.Applied
+            [ "packed syrk tile (shared C core blade_llvm_tiles.c over blade_tiles.h, 6x8 register tile over the packed triangle)"
+              $"P={p} K={k} KC={kc}" ]
+        record "fold-form" Blade.Effects.Applied
+            [ $"fold form: syrk tile (shared C core) 6x8, KC={kc}"
+              "same-array comm row contraction (one ascending chain per cell; no reorder licence used; LLVM lane, serial)" ]
+        Some { a with Src = APool out; RowOpBytes = 0L }
+    | _ -> None
 
 /// Materialize an array EXPRESSION in place: if it names a binding, the
 /// binding's slot is upgraded to the pool, so later reads share the storage
@@ -4630,6 +4777,44 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
                 Some (shapeCells a.Groups * int64 (poolElemBytes a.Elem))
             | _ -> None)
         |> function [] -> 0L | xs -> List.max xs
+    // TILE-CORE CANDIDACY (M6). The SAME matcher the C++ lane's
+    // tryGenSyrkDispatch asks -- `LinAlgPatterns.(|BlasL3|_|)` over this
+    // nest's shared loop description -- so the two lanes cannot disagree
+    // about what a same-array comm row contraction is. Only the slot NAMES
+    // differ: this lane names operand slots `__a0`, `__a1` even when both
+    // are one array, so the pattern's same-array test is re-stated here on
+    // the IR (the SAME binding id in both slots) and the second slot renamed
+    // onto the first before asking. Whether to TAKE the tile (gates,
+    // crossover) is materialize's call, made where the pool is built.
+    let syrkCandidate : SyrkCandidate option =
+        match info.Arrays, operands, outGroups, elem with
+        | [ IRVar (id0, _); IRVar (id1, _) ], [ Some x; Some _ ], [ GSym (2, p) ], ScF64
+                when id0 = id1 && reynoldsPlan.IsNone ->
+            (match x.Elem, x.Groups with
+             | ScF64, [ GDense p0; GDense k ] when p0 = p ->
+                 let same (s: string) = if s = "__a1" then "__a0" else s
+                 let cgSame =
+                     { cg with
+                         InputArrayNames = cg.InputArrayNames |> List.map same
+                         Bindings =
+                             cg.Bindings |> List.map (fun b ->
+                                 { b with
+                                     ExtentArrayRef = same b.ExtentArrayRef
+                                     Elements = b.Elements |> List.map (fun e -> { e with ArrayName = same e.ArrayName }) }) }
+                 let operandTypes =
+                     info.Arrays |> List.choose (fun a ->
+                         match Blade.IR.stripUnits (typeOf a) with
+                         | ArrayElem t -> Some t
+                         | _ -> None)
+                 match (0, cg.OmpRequested, operandTypes, cgSame) with
+                 | Blade.LinAlgPatterns.BlasL3 _ ->
+                     (match cg.KernelExpr with
+                      | Blade.LinAlgPatterns.ProdSumScaled (_, scale) ->
+                          Some { Operand = x; P = p; K = k; Scale = scale }
+                      | _ -> None)
+                 | _ -> None
+             | _ -> None)
+        | _ -> None
     { Elem = elem; Groups = outGroups
       RowOpBytes = rowOpBytes
       Src = AVirt (fun c2 idxs ->
@@ -4746,6 +4931,11 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
                                        Ty = elem; Lhs = acc.Reg; Rhs = rhs.Reg })
                     acc <- { Reg = d; Ty = elem }
                 acc) }
+    |> fun (produced: ArrVal) ->
+        (match syrkCandidate with
+         | Some cand -> syrkCandidates.AddOrUpdate(produced, cand)
+         | None -> ())
+        produced
 
 /// The RAGGED PEEL: `method_for(r) <@> kernel` over a ragged pair, dispatched
 /// on the OUTPUT type exactly as the C++ lane's tryRaggedPeel dispatches
@@ -5345,6 +5535,7 @@ let private emitFunctionBody (c: Ctx) (cl: IRCallable) (sym: string) : string li
     c.DeclSpan <-
         (let s = Blade.IR.declSpanOf cl.Name
          if s.StartLine > 0 then s else Blade.IR.declSpanOf cl.SourceName)
+    c.DeclName <- (if String.IsNullOrEmpty cl.SourceName then cl.Name else cl.SourceName)
     if not (List.isEmpty cl.Captures) then
         refuse ($"the function '{cl.Name}', which captures enclosing bindings")
     // The module bindings this body can read, rebound to their globals: a
@@ -5880,6 +6071,7 @@ let private emitMain (c: Ctx) (m: IRModule) (programName: string) : string list 
         c.StmtSlots <- Dictionary(c.ArrSlots)
         c.HoistedIds.Clear()
         c.DeclSpan <- Blade.IR.declSpanOf b.Name
+        c.DeclName <- b.Name
         bindNamed c b.Id b.Name b.Type b.Value
         publishBinding c b.Id
     c.StmtStart <- -1
@@ -6138,3 +6330,14 @@ let deployShim (outputDir: string) : unit =
         with _ -> None
     if current <> Some text then
         System.IO.File.WriteAllText(dest, text)
+    // The tile core (M6) and the arithmetic header it shares with the C++
+    // lane ride along: Build.buildLlvmTilesObject compiles them only for a
+    // `.ll` that calls the core, so deploying them is a write, not a compile.
+    for name in [ tilesSourceFileName; tilesHeaderFileName ] do
+        let dest = System.IO.Path.Combine(outputDir, name)
+        let text = Blade.CodeGenLoopNest.readCppRuntimeHeader name
+        let current =
+            try (if System.IO.File.Exists dest then Some (System.IO.File.ReadAllText dest) else None)
+            with _ -> None
+        if current <> Some text then
+            System.IO.File.WriteAllText(dest, text)

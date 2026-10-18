@@ -1,0 +1,27 @@
+// TEST: Syrk Tile Mul Tail At The Crossover
+// The smallest shape the packed-triangle syrk tile takes (p = 16, k = 4: the
+// crossover's own corner, packedTriWorth) with the kernel's `* s` scalar tail.
+// In the LLVM lane this is ONE call to the shared C core (blade_llvm_tiles.c
+// over blade_tiles.h, scale mode 2) instead of the brick nest; in the C++ lane
+// the dsyrk_tri tile then the multiply post-pass. Both apply the scalar to the
+// FINISHED sum, as the per-cell nest does.
+/// X(i, s) = ((7 i + 3 s) mod 5) - 2: small integers, so every product and every
+/// partial sum is an exact integer and ANY association gives the same G; the
+/// scale 0.5 is a power of two, so the scaled values are exact too -- the pins
+/// below are association-invariant (CLAUDE.md fold policy). The route is pinned by
+/// the LLVM fact layer (`blade test llvm facts`) and `blade plan`; the bits by
+/// `blade test llvm tiles` and `blade test syrk-tile`.
+type V = Idx<16>
+type S = Idx<4>
+let (ss, g00, g_mirror, g_edge, tr) = {
+    let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 5) - 2.0 |> compute
+    let g = method_for(x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>) where comm(a, b) -> prodsum(a, b) * 0.5 |> compute
+    let total = reduce(method_for(range<V>) <@> lambda(i) -> reduce(method_for(range<V>) <@> lambda(j) -> g(i, j) * g(i, j), (+)), (+))
+    let trace = reduce(method_for(range<V>) <@> lambda(i) -> g(i, i), (+))
+    (total, g(0, 0), g(15, 1), g(14, 15), trace)
+}
+// EXPECT: ss = 1487.5
+// EXPECT: g00 = 5.0
+// EXPECT: g_mirror = -2.5
+// EXPECT: g_edge = -2.5
+// EXPECT: tr = 65.0

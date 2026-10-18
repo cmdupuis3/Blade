@@ -1353,6 +1353,72 @@ let private llvmExeCacheKey (clang: string) (args: string) (llText: string) (shi
     |> Array.map _.ToString("x2")
     |> String.concat ""
 
+// ---------------------------------------------------------------------------
+// The LLVM lane's TILE CORE object (bench/notes/microkernel-sketches-review.md
+// item M6): blade_llvm_tiles.c over blade_tiles.h -- the same arithmetic core
+// the C++ lane's blade_pgemm::dsyrk_tri includes -- compiled by clang as C.
+//
+// SEPARATE from the print/panic/alloc shim on purpose: the shim is built
+// `-O2` with no target or contraction flags (its job is I/O bytes), while the
+// tile must be built with the lane's NUMERIC policy, so one object per policy.
+// The object is CONTENT-ADDRESSED: its file name carries the key (source +
+// header text, clang stamp, the full flag string, and -- when -march is
+// native -- what native resolved to), so a BLADE_FP_CONTRACT or BLADE_MARCH
+// switch in the same build directory compiles and links a DIFFERENT object
+// instead of reusing a stale one by timestamp. Only programs whose `.ll`
+// calls the core get it compiled or linked at all.
+// ---------------------------------------------------------------------------
+
+/// The clang flags the tile object is built with: the lane's own optimization
+/// flags plus the contraction mode its IR uses (`contract` per instruction
+/// <=> `-ffp-contract=fast`), so the tile contracts exactly where the nest it
+/// replaces would. Re-read per call (env pins).
+let llvmTilesFlags () : string =
+    $"-c -x c -std=c11 {(llvmOptFlags ())}{(EmitLlvm.tilesContractFlag ())}"
+
+/// The tile object's identity key (hex, 16 chars used in the file name).
+let private llvmTilesKey (clang: string) (flags: string) (srcText: string) (hdrText: string) : string =
+    let material =
+        String.concat "\n"
+            [ "blade-llvm-tiles-v1"
+              clangStamp clang
+              flags
+              (if (marchFlag ()).Contains "native" then clangNativeTargetIdentity clang else "")
+              srcText
+              hdrText ]
+    use sha = System.Security.Cryptography.SHA256.Create()
+    sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes material)
+    |> Array.map _.ToString("x2")
+    |> String.concat ""
+
+/// Build (or reuse) the tile-core object in `outputDir` for the CURRENT
+/// policy, returning its path and its key. Expects EmitLlvm.deployShim to have
+/// written blade_llvm_tiles.c and blade_tiles.h beside the `.ll`.
+let buildLlvmTilesObject (clang: string) (outputDir: string) : Result<string * string, string> =
+    let dir = Path.GetFullPath outputDir
+    let src = Path.Combine(dir, EmitLlvm.tilesSourceFileName)
+    let hdr = Path.Combine(dir, EmitLlvm.tilesHeaderFileName)
+    if not (File.Exists src) || not (File.Exists hdr) then
+        Error $"llvm tile core source missing at {src} (EmitLlvm.deployShim should have written it)"
+    else
+        let flags = llvmTilesFlags ()
+        let key = llvmTilesKey clang flags (File.ReadAllText src) (File.ReadAllText hdr)
+        let obj =
+            Path.Combine(dir, Path.GetFileNameWithoutExtension EmitLlvm.tilesSourceFileName
+                              + "-" + key.Substring(0, 16) + Platforms.objExtension)
+        if File.Exists obj then Ok (obj, key)
+        else
+            // Compile to a private name, then move: a concurrent build in the
+            // same directory never links a half-written object.
+            let tmp = obj + "." + Guid.NewGuid().ToString("N") + ".tmp"
+            match runProc clang $"{flags} -I \"{dir}\" -o \"{tmp}\" \"{src}\"" 120000 with
+            | Error e -> Error e
+            | Ok () ->
+                (try File.Move(tmp, obj, true) with _ -> ())
+                if File.Exists obj then Ok (obj, key)
+                elif File.Exists tmp then Ok (tmp, key)
+                else Error $"llvm tile core object vanished after compiling {src}"
+
 /// Compile and link a `.ll` the LLVM lane emitted into an executable.
 ///
 /// ONE clang invocation does the whole back half -- textual IR in, native
@@ -1371,11 +1437,25 @@ let compileLlvmProgram (llFile: string) (outputDir: string) : Result<string, str
         let dir = Path.GetFullPath outputDir
         let llFull = Path.GetFullPath llFile
         let exeFull = Path.Combine(dir, Path.GetFileNameWithoutExtension llFile + Platforms.exeExtension)
+        // The tile core (M6) links only into programs that call it; its key
+        // joins the exe cache key below (the object path in `args` lives in a
+        // per-run directory, so the KEY is what identifies it).
+        let tiles =
+            let usesTiles =
+                try (File.ReadAllText llFull).Contains ("@" + EmitLlvm.tilesSymbol) with _ -> false
+            if usesTiles then buildLlvmTilesObject clang dir |> Result.map Some else Ok None
+        match tiles with
+        | Error e -> Error e
+        | Ok tiles ->
+        let tilesArg, tilesIdentity =
+            match tiles with
+            | Some (obj, key) -> $" \"{obj}\"", $"\ntiles:{key}"
+            | None -> "", ""
         match buildLlvmShim clang dir with
         | Error e -> Error e
         | Ok (shimObj, shimIdentity) ->
             let args =
-                $"{(llvmOptFlags ())} -Wno-override-module -o \"{exeFull}\" \"{llFull}\" \"{shimObj}\""
+                $"{(llvmOptFlags ())} -Wno-override-module -o \"{exeFull}\" \"{llFull}\" \"{shimObj}\"{tilesArg}"
             // Windows-only for the same reason as the g++ arm; a key that
             // cannot be built (unreadable .ll) just skips the cache, never
             // the compile.
@@ -1387,7 +1467,7 @@ let compileLlvmProgram (llFile: string) (outputDir: string) : Result<string, str
                     | Some cdir ->
                         try
                             let llText = File.ReadAllText llFull
-                            Some (cdir, llvmExeCacheKey clang args llText shimIdentity shimObj exeFull llFull)
+                            Some (cdir, llvmExeCacheKey clang args llText (shimIdentity + tilesIdentity) shimObj exeFull llFull)
                         with _ -> None
             match cacheSlot with
             | Some (cdir, key) when tryExeCacheHit cdir key exeFull -> Ok exeFull
