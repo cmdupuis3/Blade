@@ -1,0 +1,50 @@
+// TEST: Recursive Array RK4 Row Temporaries Reused
+// ============================================================================
+// The bench `recur` shape at reduced size: an RK4 step function whose stage
+// temporaries are whole rows, called once per step of a recursive array. Each
+// row is 4001 doubles (32 KB), inside the runtime's retained-block band
+// (16 KB .. 4 MB), so from the second step on every stage temporary is a pool
+// the previous step released (blade_pool in the C++ lane, the shim's cache in
+// the LLVM lane; bench/notes/microkernel-sketches-review.md M1) -- and the
+// trajectory buffer is allocated without its zero fill (formalism 7.5). Both
+// are storage-only: the values below were computed independently (plain
+// double arithmetic in the source's association order) and must not move.
+// ============================================================================
+type T = Idx<31>
+type X = Idx<4001>
+
+function rhs(u: Array<Float64 like X>) -> Array<Float64 like X> = u - u * u * u
+
+function step(u: Array<Float64 like X>) -> Array<Float64 like X> = {
+    let k1 = rhs(u)
+    let k2 = rhs(u + 0.005 * k1)
+    let k3 = rhs(u + 0.005 * k2)
+    let k4 = rhs(u + 0.01 * k3)
+    u + (0.01 / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+}
+
+function kernel(u0: Array<Float64 like X>) -> Float64 = {
+    let rec traj: Array<Float64 like T, X> =
+        match traj with
+        | zero -> zero
+        | zero :: s -> zero :: u0
+        | prefix :: n -> prefix :: step(prefix(n - 1))
+    reduce(method_for(traj) <@> lambda(row) -> prodsum(row, row), (+))
+}
+
+function last_cell(u0: Array<Float64 like X>) -> Float64 = {
+    let rec traj: Array<Float64 like T, X> =
+        match traj with
+        | zero -> zero
+        | zero :: s -> zero :: u0
+        | prefix :: n -> prefix :: step(prefix(n - 1))
+    traj((30 : T), (4000 : X))
+}
+
+let (checksum, final_cell, input_sum) = {
+    let u0 = method_for(range<X>) <@> lambda(i) -> 0.5 + 0.0001 * Float64(i) |> compute
+    (kernel(u0), last_cell(u0), reduce(u0, (+)))
+}
+// EXPECT: checksum = 70665.8347393125
+// EXPECT: final_cell = 0.941248451180571
+// EXPECT: input_sum = 2800.7

@@ -13985,7 +13985,53 @@ and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
         else
         let trailing = trailingOpt |> List.map Option.get
         zeroElem () |> Result.bind (fun zed ->
-        let bufName = $"__rec_{def.Name}"
+        // ZERO-FILL ELISION (formalism 7.5; bench/notes/microkernel-sketches-
+        // review.md M3). The buffer's zero fill exists for exactly two kinds
+        // of read: a WHOLE-array use of `prefix` (which sees the unbuilt rows
+        // as zero) and the freeze epilogue of a `while`-guarded recurrence
+        // (which, stopping at n = 0, copies row 0 before anything wrote it).
+        // Every other read is a row/cell read `prefix(i, ...)`, and the
+        // desugar below routes each one through `guardsFor`: provably inside
+        // the built prefix [0, n) -- a row the seed or an earlier step already
+        // wrote -- or guarded, answering zero (the element zero or a zero
+        // slice) outside it without the buffer's value ever being selected.
+        // The seed writes row 0, the inductive arm row n for every n in
+        // [loopStart, N), so after the recursion every row has been written.
+        // Hence: when there is no `while` guard and EVERY occurrence of the
+        // prefix in the inductive arm is the head of a non-empty application,
+        // no read can observe a cell before its write, and the fill is dead.
+        // The check is syntactic and conservative (shadowing ignored, an
+        // alias `let h = prefix` counts as a whole use; the array's own name
+        // or the buffer's anywhere declines); the implicit-zero semantics of
+        // reads past the built prefix are untouched -- they never read the
+        // buffer. Lowering binds a `__recu_` buffer to IRUninit (no fill) when
+        // its shape is dense and static, else lowers the zero former as before.
+        let elideZeroFill =
+            let ok = ref true
+            let rec walk (e: Expr) =
+                Blade.Unfold.mapExprPre (fun x ->
+                    match x.Kind with
+                    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar p }, args) when p = def.PrefixVar && not args.IsEmpty ->
+                        for a in args do walk a
+                        Some x
+                    | ExprKind.ExprVar v when v = def.PrefixVar || v = def.Name || v.StartsWith "__rec" ->
+                        ok.Value <- false
+                        None
+                    | _ -> None) e |> ignore
+            walk def.SliceExpr
+            // The seed is not rewritten by the guard discipline, so there ANY
+            // mention of the prefix (or the array, or the buffer) declines.
+            (match def.SeedArm with
+             | Some (_, seedExpr) ->
+                 Blade.Unfold.mapExprPre (fun x ->
+                     match x.Kind with
+                     | ExprKind.ExprVar v when v = def.PrefixVar || v = def.Name || v.StartsWith "__rec" ->
+                         ok.Value <- false
+                         None
+                     | _ -> None) seedExpr |> ignore
+             | None -> ())
+            def.Guard.IsNone && ok.Value
+        let bufName = if elideZeroFill then $"{Blade.IR.recUninitBufferPrefix}{def.Name}" else $"__rec_{def.Name}"
         let bufVar = synAt (ExprVar bufName)
         let iLit (v: int64) = synAt (ExprLit (LitInt v))
         // Buffer pre-fill, checked against the DECLARED annotation (keeps

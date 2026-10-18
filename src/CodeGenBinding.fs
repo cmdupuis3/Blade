@@ -116,7 +116,20 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         let code = genArrayLiteral ctx name binding.Name elements arrType
         let ctx' = addVarName binding.Id name ctx
         (code, ctx')
-    
+    | IRUninit _ ->
+        // The let-rec buffer whose zero fill was proved dead (IR.IRUninit):
+        // the extents table and the allocation, registered for freeing like
+        // any materialized pool -- and no fill nest.
+        let matStmts =
+            match materializeInlineForm emptySubst ctx.VarNames name (lazy "") binding.Value with
+            | Some (s, allocs) -> registerMaterializedAllocs allocs; s
+            | None ->
+                raise (Blade.Diagnostics.BladeDiagnosticException
+                        (Blade.Diagnostics.Codes.iceCodegen
+                            "internal: an unfilled recursive-array buffer (IRUninit) of a shape the C++ lane cannot allocate -- the desugar admits only dense, statically shaped buffers"))
+        let ctx' = addVarName binding.Id name ctx
+        (matStmts |> List.map (fun s -> ind + s), ctx')
+
     | IRApplyCombinator info ->
         // Defer: computation not materialized until |> compute or combinator forces it
         let ctx' = addVarName binding.Id name ctx

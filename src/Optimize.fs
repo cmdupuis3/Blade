@@ -688,6 +688,10 @@ let private cseFactsOf (funcs: Map<IRId, IRCallable>) : IRExpr -> CseFacts =
                 repeatable <- false
             | IRDisplayEmit _ | IRDisplayJson _ | IRDisplayNum _ | IRDisplayStr _ ->
                 repeatable <- false
+            // An unfilled let-rec buffer is an IDENTITY (the storage the
+            // recursion writes), never a value two lets could share.
+            | IRUninit _ ->
+                repeatable <- false
             // A callable named anywhere -- a call head, a kernel, a callable
             // passed as an argument -- may run: judge it. (The IRApp arm
             // below leaves a resolvable head to this visit.)
@@ -1122,7 +1126,7 @@ let hoistKernelInvariantsModule (builder: IRBuilder) (programFuncs: IRCallable l
                     (match Map.tryFind id funcs with
                      | Some g -> if not (g.Captures |> List.forall (fun c -> captureIds.Contains c.Id)) then ok <- false
                      | None -> ok <- false)
-                | IRParam _ | IRNth | IRArity _ | IRPolyIndex _ | IRPolyTail _ | IRZero _
+                | IRParam _ | IRNth | IRArity _ | IRPolyIndex _ | IRPolyTail _ | IRZero _ | IRUninit _
                 | IRLet _ | IRMatch _ | IRForRange _ | IRAssign _ | IRBreakIf _ | IRConstraintCheck _ -> ok <- false
                 | _ -> ()) e
         ok

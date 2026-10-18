@@ -462,6 +462,14 @@ let private copyRuntimeDllBesideExe (searchDirs: string list) (exeFullPath: stri
 /// programs, and extra link inputs (nvcc-built device DLLs) -- each needs
 /// its own MSVC link recipe that no current memcheck consumer exercises.
 ///
+/// Every arm passes `-DBLADE_POOL_CACHE_OFF=1` (`/D` for cl): the runtime's
+/// retained-block cache (nested_array_utilities.hpp, `blade_pool`) would turn
+/// a free into a no-op the leak counter cannot see and hide a use-after-free
+/// from ASan. The header also self-disables on `__SANITIZE_ADDRESS__`, but the
+/// define is the contract -- BLADE_MEMCHECK is an environment setting, and an
+/// environment setting is no preprocessor macro until a command line makes it
+/// one.
+///
 /// `srcText` is the generated source the caller just wrote to `cppFile`, when
 /// it still has it in memory; `None` falls back to reading the file back.
 let compileCppMemcheck (srcText: string option) (extraLinkInputs: string list) (cppFile: string) (outputDir: string) : Result<string, string> =
@@ -500,7 +508,7 @@ let compileCppMemcheck (srcText: string option) (extraLinkInputs: string list) (
                 // a memcheck build is a measurement run, not the enforcement
                 // gate the release compile already provides.
                 let args =
-                    $"-std=c++17 -O0 -g -fwrapv -fopenmp -fsanitize=address -fbracket-depth=1024 -Wno-c++20-extensions -o \"{exeFullPath}\" \"{cppFullPath}\""
+                    $"-std=c++17 -O0 -g -fwrapv -fopenmp -fsanitize=address -fbracket-depth=1024 -Wno-c++20-extensions -DBLADE_POOL_CACHE_OFF=1 -o \"{exeFullPath}\" \"{cppFullPath}\""
                 match runProc cxx args 300000 with
                 | Error e -> Error e
                 | Ok () ->
@@ -522,7 +530,7 @@ let compileCppMemcheck (srcText: string option) (extraLinkInputs: string list) (
                 let objPath = Path.ChangeExtension(cppFullPath, ".obj")
                 let fdPath = Path.ChangeExtension(cppFullPath, "_obj.pdb")
                 let args =
-                    $"/nologo /fsanitize=address /Zi /Od /MT /std:c++17 /EHsc /openmp:llvm /Fo\"{objPath}\" /Fd\"{fdPath}\" /Fe\"{exeFullPath}\" \"{cppFullPath}\""
+                    $"/nologo /fsanitize=address /Zi /Od /MT /std:c++17 /EHsc /openmp:llvm /DBLADE_POOL_CACHE_OFF=1 /Fo\"{objPath}\" /Fd\"{fdPath}\" /Fe\"{exeFullPath}\" \"{cppFullPath}\""
                 match runProc "cl" args 300000 with
                 | Error e -> Error e
                 | Ok () ->
@@ -539,7 +547,7 @@ let compileCppMemcheck (srcText: string option) (extraLinkInputs: string list) (
             // the /Od /Zi profile. LeakSanitizer (where the platform has it)
             // comes for free on top of the BLADE-MEMCHECK report line.
             let args =
-                $"-std=c++17 -O0 -g -fwrapv -fopenmp -fsanitize=address -Werror=float-conversion -Werror=narrowing -o \"{exeFullPath}\" \"{cppFullPath}\""
+                $"-std=c++17 -O0 -g -fwrapv -fopenmp -fsanitize=address -Werror=float-conversion -Werror=narrowing -DBLADE_POOL_CACHE_OFF=1 -o \"{exeFullPath}\" \"{cppFullPath}\""
             match runProc "g++" args 300000 with
             | Error e -> Error e
             | Ok () -> Ok exeFullPath
@@ -1200,24 +1208,6 @@ let compileCudaMpiHybrid (cuFile: string) (cppFile: string) (outputDir: string) 
         | Error e -> Error e
         | Ok () -> compileCppWithExtra [dllFull] cppFile outputDir
 
-/// Build the BLADE_LLVM lane's runtime shim into `outputDir`, returning the
-/// object to link. Recompiled only when the `.o` is missing or older than the
-/// `.c` EmitLlvm just deployed, so the per-program cost is one link input, not
-/// a C compile.
-let private buildLlvmShim (clang: string) (outputDir: string) : Result<string, string> =
-    let dir = Path.GetFullPath outputDir
-    let src = Path.Combine(dir, EmitLlvm.shimFileName)
-    let obj = Path.Combine(dir, Path.GetFileNameWithoutExtension EmitLlvm.shimFileName + Platforms.objExtension)
-    if not (File.Exists src) then
-        Error $"llvm shim source missing at {src} (EmitLlvm.deployShim should have written it)"
-    elif File.Exists obj && File.GetLastWriteTimeUtc obj >= File.GetLastWriteTimeUtc src then
-        Ok obj
-    else
-        let args = $"-c -O2 -o \"{obj}\" \"{src}\""
-        match runProc clang args 120000 with
-        | Error e -> Error e
-        | Ok () -> Ok obj
-
 /// Identity stamp for one clang binary without spawning it: path, size,
 /// mtime ticks. A replaced or upgraded clang changes the stamp — the same
 /// stamp-not-hash choice `linkedDllStamp` makes for toolchain binaries.
@@ -1227,6 +1217,62 @@ let private clangStamp (clang: string) : string =
         if fi.Exists then $"{clang}:{fi.Length}:{fi.LastWriteTimeUtc.Ticks}"
         else $"{clang}:missing"
     with _ -> $"{clang}:?"
+
+/// The preprocessor defines the shim is compiled with, beyond `-c -O2`. A
+/// memcheck build (BLADE_MEMCHECK=1) compiles the allocator with its
+/// retained-block cache OFF (`blade_llvm_shim.c`, BLADE_POOL_CACHE_OFF): a
+/// cached free is no free at all to a leak counter, and it hides a
+/// use-after-free. The ENVIRONMENT setting is not a C define by itself; this is
+/// where it becomes one. Read per call, like every environment gate here.
+let private llvmShimDefines () : string =
+    if CodeGen.memcheckEnabled () then " -DBLADE_POOL_CACHE_OFF=1" else ""
+
+/// Build the BLADE_LLVM lane's runtime shim into `outputDir`, returning the
+/// object to link and its IDENTITY (a hash of everything the `clang -c` reads
+/// or is told: the shim source text, the full flag/define string, and the
+/// clang stamp).
+///
+/// The object is NAMED by that identity (`blade_llvm_shim-<hash>.o`) and reused
+/// only when a file of exactly that name exists. It used to be one fixed name
+/// reused by TIMESTAMP alone, so a memcheck build in a directory that already
+/// held a normal build linked the normal object -- the retained-block cache
+/// silently ON under the leak counter (bench/notes/microkernel-sketches-review.md
+/// M0). Now two configurations sharing a directory each link their own object,
+/// and a rebuild in the same configuration is still one link input, not a C
+/// compile. The identity also enters the executable cache key
+/// (`llvmExeCacheKey`), so a cached exe is never one linked against a
+/// differently-configured shim.
+let internal buildLlvmShim (clang: string) (outputDir: string) : Result<string * string, string> =
+    let dir = Path.GetFullPath outputDir
+    let src = Path.Combine(dir, EmitLlvm.shimFileName)
+    if not (File.Exists src) then
+        Error $"llvm shim source missing at {src} (EmitLlvm.deployShim should have written it)"
+    else
+        let flags = "-c -O2" + llvmShimDefines ()
+        let srcText = File.ReadAllText src
+        let identity =
+            use sha = System.Security.Cryptography.SHA256.Create()
+            sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(String.concat "\n" [ "blade-llvm-shim-v1"; clangStamp clang; flags; srcText ]))
+            |> Array.map _.ToString("x2")
+            |> String.concat ""
+        let stem = Path.GetFileNameWithoutExtension EmitLlvm.shimFileName
+        let obj = Path.Combine(dir, $"{stem}-{identity.Substring(0, 16)}{Platforms.objExtension}")
+        if File.Exists obj then Ok (obj, identity)
+        else
+            // Compile beside the final name and move into place, so a compile
+            // killed half way never leaves a truncated object under a name
+            // the next build would trust.
+            let tmp = obj + $".{Environment.ProcessId}.tmp"
+            let args = $"{flags} -o \"{tmp}\" \"{src}\""
+            match runProc clang args 120000 with
+            | Error e ->
+                (try File.Delete tmp with _ -> ())
+                Error e
+            | Ok () ->
+                try
+                    File.Move(tmp, obj, true)
+                    Ok (obj, identity)
+                with ex -> Error $"llvm shim object could not be placed at {obj}: {ex.Message}"
 
 /// What `-march=native` ACTUALLY SELECTED for one clang on this machine,
 /// hashed -- the LLVM lane's twin of `nativeTargetIdentity`, and missing from
@@ -1285,11 +1331,16 @@ let private clangNativeTargetIdentity (clang: string) : string =
 /// clang's own resolution of `native`; and the version tag is its own, so the
 /// two lanes can never collide on a key. v2: v1 keys carried no CPU identity,
 /// so no v1 entry can say which CPU it was built for and none is trusted.
-let private llvmExeCacheKey (clang: string) (args: string) (llText: string) (shimText: string) (exeFullPath: string) (llFullPath: string) : string =
-    let normalizedArgs = args.Replace(exeFullPath, "<EXE>").Replace(llFullPath, "<LL>")
+/// v3: the runtime input is the shim OBJECT's identity (`buildLlvmShim`:
+/// source + flags + defines + clang), not the source text alone, so a
+/// memcheck (cache-off) exe and a normal one can never share an entry; the
+/// object's path is normalized out of the argument text like the exe's.
+let private llvmExeCacheKey (clang: string) (args: string) (llText: string) (shimIdentity: string) (shimObjPath: string) (exeFullPath: string) (llFullPath: string) : string =
+    let normalizedArgs = args.Replace(exeFullPath, "<EXE>").Replace(llFullPath, "<LL>").Replace(shimObjPath, "<SHIM>")
+    let shimText = shimIdentity
     let material =
         String.concat " "
-            [ "blade-llvm-exe-cache-v2"
+            [ "blade-llvm-exe-cache-v3"
               clangStamp clang
               normalizedArgs
               // Only when the flag is `native`, as in `exeCacheKey`: an
@@ -1322,12 +1373,12 @@ let compileLlvmProgram (llFile: string) (outputDir: string) : Result<string, str
         let exeFull = Path.Combine(dir, Path.GetFileNameWithoutExtension llFile + Platforms.exeExtension)
         match buildLlvmShim clang dir with
         | Error e -> Error e
-        | Ok shimObj ->
+        | Ok (shimObj, shimIdentity) ->
             let args =
                 $"{(llvmOptFlags ())} -Wno-override-module -o \"{exeFull}\" \"{llFull}\" \"{shimObj}\""
             // Windows-only for the same reason as the g++ arm; a key that
-            // cannot be built (unreadable .ll/shim source) just skips the
-            // cache, never the compile.
+            // cannot be built (unreadable .ll) just skips the cache, never
+            // the compile.
             let cacheSlot =
                 if Platforms.os <> Platforms.Windows then None
                 else
@@ -1336,8 +1387,7 @@ let compileLlvmProgram (llFile: string) (outputDir: string) : Result<string, str
                     | Some cdir ->
                         try
                             let llText = File.ReadAllText llFull
-                            let shimText = File.ReadAllText (Path.Combine(dir, EmitLlvm.shimFileName))
-                            Some (cdir, llvmExeCacheKey clang args llText shimText exeFull llFull)
+                            Some (cdir, llvmExeCacheKey clang args llText shimIdentity shimObj exeFull llFull)
                         with _ -> None
             match cacheSlot with
             | Some (cdir, key) when tryExeCacheHit cdir key exeFull -> Ok exeFull

@@ -1667,6 +1667,23 @@ Rules, all checked syntactically:
   independently of the storage policy below. The rolling window in
   particular must preserve it — under a K+1-slot buffer an out-of-range lag
   must still read zero, not a recycled slot.
+- **Zero-fill elision** (storage policy; no value changes). The buffer is
+  allocated *without* its up-front zero fill when no read can observe a cell
+  before the recursion writes it, which the desugar decides syntactically:
+  (i) the inductive arm has no `while` guard (§7.5.1: a guard that fails at
+  the first step freezes a row nothing wrote), and (ii) every occurrence of
+  `prefix` in the inductive arm is the head of a non-empty application — a
+  row or cell read. Each such read is either provably inside the built
+  prefix `[0, n)` (a row the seed or an earlier step wrote) or guarded,
+  answering the implicit zero above without selecting the buffer's value;
+  the seed writes row 0 and the inductive arm row `n` for every remaining
+  step, so after the recursion every row has been written. A WHOLE-array use
+  of `prefix` (`reduce(prefix, (+))`, an alias `let h = prefix`, passing
+  `prefix` itself) sees the unbuilt rows, which must read zero, so it keeps
+  the fill; so does a mention of the array's own name. The elision applies
+  to dense, statically shaped buffers (IR `IRUninit`); the interpreter still
+  allocates zeros, which no admitted read can tell apart. Corpus
+  `recursive-arrays/009` (lags amplified by 1e300) and `024` pin both sides.
 - **Sequentiality is derived, not commanded.** The prefix dependence forces
   serial enumeration of the recursion axis; the compiler schedules the
   scheme as one serial sweep. Storage is policy, not semantics: consumers

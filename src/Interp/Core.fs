@@ -1028,6 +1028,20 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
             | IRTIdxTagged _ -> VInt 0L
             | _ -> VFloat 0.0
 
+    // The let-rec buffer whose zero fill the desugar proved dead (IR.IRUninit;
+    // formalism 7.5). The compiled lanes leave it unfilled; zeros here are
+    // what the old fill wrote, and no read can tell them apart -- every cell
+    // is written before it is read, which is the license the node carries.
+    | IRUninit (ArrayElem at) ->
+        let extents =
+            at.IndexTypes
+            |> List.map (fun ix ->
+                match Blade.IRPrint.tryEvalIntIR ix.Extent with
+                | Some n -> n
+                | None -> raise (InterpUnsupported "IRUninit over a runtime extent"))
+            |> Array.ofList
+        VArray (ArrayOps.allocDense at.ElemType at.IndexTypes extents)
+
     | other ->
         // Anything still uninterpreted (compound / group / provider forms, ...):
         // later milestones.

@@ -3720,6 +3720,17 @@ and private emitArr (c: Ctx) (e: IRExpr) : ArrVal =
 
     | IRArrayLit (elems, arrType) -> emitArrayLit c elems arrType
 
+    // The let-rec buffer whose zero fill the desugar proved dead (IR.IRUninit,
+    // formalism 7.5): a tracked pool, allocated and NOT filled --
+    // blade_alloc_cells returns uninitialized storage, and every cell is
+    // written by the recursion before any read. Dense shapes only, as the
+    // desugar admits.
+    | IRUninit ty ->
+        let (elem, groups) = requireArray "an unfilled recursive-array buffer" ty
+        if not (isDenseShape groups) then refuse "an unfilled recursive-array buffer over a non-dense shape"
+        let ptr = allocPool c elem (string (shapeCells groups))
+        { Elem = elem; Groups = groups; Src = APool ptr; RowOpBytes = 0L }
+
     // `range<I>` / `reverse<I>` as a value in their own right. Inside a
     // combinator they never become one -- the nest peels them as induction
     // values (VirtualKind), which is the whole point of a virtual array.
