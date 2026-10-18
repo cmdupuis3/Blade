@@ -15,11 +15,15 @@ optional — "strict"/"fast" below are the retired names, read strict → repro 
 fastmath): every kernel runs `licensed x serial x native` and `repro x serial x native`.
 `mt8` applies to every kernel's Fortran arms except `maskagg` (serial by protocol); Blade
 reads "no parallel form" for `recur` and `onepass`. `fastmath` applies to the fold-bearing
-kernels marked `fast` below. `blas` applies to `gram` only. Licensed-regime hypotheses (corrected by blade-A F15 and Fortran review F2): `licensed`
-differs from `repro` for ALL ELEVEN kernels (every input-checksum fold reassociates under
-the knob; maskagg's output checksum too — its compaction alone stays sequential), and the
-expert's matched `simd reduction` set includes every kernel's input-checksum folds (README
-§3 table). The inner `prodsum` of gram/comoment3/antisym has no
+kernels marked `fast` below. `blas` applies to `gram` only. Licensed-regime hypotheses (corrected by blade-A F15, Fortran review F2, and the compiler
+flip 5f4b33ea = D43): `licensed` is now Blade's DEFAULT (no knob), `repro` is
+`BLADE_FP_REPRO=1`; `licensed` differs from `repro` for ALL ELEVEN kernels (every
+input-checksum fold reassociates by default; maskagg's output checksum too — its
+compaction alone stays sequential); the expert's matched `simd reduction` set includes
+every kernel's input-checksum folds (README §3 table). Since the flip BOTH Blade lanes
+vectorize the deferred folds of dot, fusedchain, onepass and saxpy, so the earlier
+"blade-cpp stays serial (F11)" rows below are history: licensed hypotheses vs expert for
+those four are "both Blade lanes equivalent". The inner `prodsum` of gram/comoment3/antisym has no
 threading slot but IS a reassociation-licensed fold — 4-lane simd reduction in the C++
 lane, 16-lane FMA accumulators in the LLVM lane — so their licensed hypothesis vs expert is
 equivalence to a modest loss (repro: the single-chain loss stands). Deferred folds (dot,
@@ -234,13 +238,13 @@ unforced chain fuses into the checksum and never stores y2). Fortran: `!$omp par
 | comoment3 | A | p=171, n=201 | 0.15–0.4 s | licensed, repro (serial, mt8), fastmath | WIN 4–6x / licensed: equivalence to modest loss; repro: equivalent to 2x loss |
 | antisym | A | p=1201, n=401 | 0.3–0.6 s | licensed, repro (serial, mt8), fastmath | WIN ~2x / licensed: equivalence to modest loss; repro: equivalent to loss |
 | pairkernel | A | n=2503 | 0.1–0.2 s | licensed, repro (serial, mt8; differ in the checksum fold only) | WIN ~2x / equivalent |
-| fusedchain | B | n=2,000,003 | 10–25 ms | licensed, repro (serial, mt8), fastmath | WIN 1.5–2.5x / repro: equivalent; licensed: blade-llvm equivalent, blade-cpp loss (F11) |
-| onepass | B | n=5,000,011 | 10–20 ms | licensed, repro (serial; mt8 Blade "no parallel form"), fastmath | WIN 2–3x / repro: equivalent; licensed: blade-llvm equivalent, blade-cpp loss (join legs reassociate in LLVM only) |
+| fusedchain | B | n=2,000,003 | 10–25 ms | licensed, repro (serial, mt8), fastmath | WIN 1.5–2.5x / equivalent in both regimes (both Blade lanes vectorize the fold since the flip) |
+| onepass | B | n=5,000,011 | 10–20 ms | licensed, repro (serial; mt8 Blade "no parallel form"), fastmath | WIN 2–3x / equivalent in both regimes (both lanes reorder the four legs since the flip) |
 | stencil | B | 1501 x 2003 | 10–20 ms | licensed, repro (serial, mt8; differ in the checksum fold) | equivalent / equivalent |
 | recur | B | nt=301, nx=20011 | 60–150 ms | licensed, repro (serial; mt8 Blade "no parallel form"; differ in the checksum fold) | equivalent / LOSS 1.5–3x |
 | maskagg | B | n=1,000,003 | 3–10 ms | licensed, repro (serial only, by protocol; differ in both checksum sums, 8-lane in licensed) | LOSS / LOSS (2–5x) |
-| dot | C | n=3,000,017 | 3–6 ms incremental | licensed, repro (serial, mt8), fastmath | repro: equivalent / equivalent; licensed: blade-llvm equivalent, blade-cpp LOSS 3–5x (F11) |
-| saxpy | C | n=2,000,003 | 4–8 ms incremental | licensed, repro (serial, mt8) | equivalent / equivalent (licensed: blade-cpp detectable loss at most) |
+| dot | C | n=3,000,017 | 3–6 ms incremental | licensed, repro (serial, mt8), fastmath | equivalent / equivalent in both regimes (both Blade lanes vectorize the zip fold since the flip; natural's `dot_product` loses to expert in licensed) |
+| saxpy | C | n=2,000,003 | 4–8 ms incremental | licensed, repro (serial, mt8) | equivalent / equivalent |
 
 `inputonly` twin required: fusedchain, onepass, stencil, maskagg, dot, saxpy.
 

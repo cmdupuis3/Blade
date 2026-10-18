@@ -1099,6 +1099,9 @@ def _build_blade(b: Build, k: Kernel, arm: ArmSpec, regime: Regime, src: Path, a
             b.status, b.reason = "no-parallel-form", "the mt8 build contains no thread-parallel construct"
             return
         ev["parallelism"] = f"openmp ({ev['thread_constructs']} construct(s))"
+        if regime.fp == "repro":
+            # BLADE_FP_REPRO=1 serializes the mt8 fold teams as well
+            ev["parallelism"] += "; threaded maps, serial folds (BLADE_FP_REPRO)"
     elif regime.blas == "blas" and ev["blas_routed"]:
         ev["parallelism"] = f"library threads (OPENBLAS_NUM_THREADS={b.run_knobs.get('OPENBLAS_NUM_THREADS')})"
     else:
@@ -1116,6 +1119,9 @@ def _blade_plan(b: Build, src: Path, armdir: Path, env: dict[str, str], timeout:
     b.evidence["plan_returncode"] = r.returncode
     b.evidence["plan_decisions"] = [l.strip() for l in lines if re.search(r"\b(applied|declined)\b", l)][:200]
     b.evidence["plan_omp"] = [l.strip() for l in lines if "[omp" in l][:50]
+    # `fold form: ...` per C++ fold site (5f4b33ea); covers the C++ lane only, so the
+    # artifact-derived counts (simd_reductions / reassoc_flags) are kept beside it.
+    b.evidence["plan_fold_form"] = [l.strip() for l in lines if "fold form:" in l][:100]
 
 
 def _build_fortran(b: Build, arm: ArmSpec, regime: Regime, src: Path, armdir: Path, tools: Toolchain,

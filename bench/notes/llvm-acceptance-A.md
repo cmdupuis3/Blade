@@ -710,7 +710,69 @@ representative store per build:
 | pairkernel | cpp-mt8 repro / licensed | `main._omp_fn.0`: `140001ad4: vmovsd %xmm10,(%rsi,%r12,8)` (both) |
 | pairkernel | llvm repro / licensed | `140001831: vmovsd %xmm0,(%rbx,%r13,8)` / `14000185b: vmovsd %xmm0,0x0(%r13,%rdi,8)` |
 
+(Section 12 re-does this audit on the post-flip binary; the addresses are unchanged.)
+
 The section-10 notes on march (znver3 both compilers), `exp` (scalar UCRT import,
 `vsqrtsd` inline, no vector math library), scalar unthreaded generation and M24 placement
 hold unchanged for all 24 builds (the generator change adds two scalar rounds; still no
 packed 64-bit multiply).
+
+## 12. After the FP default flip (Blade.dll 74B67280..., bench merge 957afd95)
+
+Knobs now: `licensed` = NO FP knob (the default honours every licence; the LLVM lane
+contracts by default), `repro` = `BLADE_FP_REPRO=1`. My scripts pass nothing else: in
+particular `BLADE_FP_CONTRACT` is no longer passed to the LLVM lane (dropped, as redundant);
+`BLADE_FP_CONTRACT`, `BLADE_FP_REASSOC` and `BLADE_FP_REPRO` are cleared before every build.
+
+**Validation** (`validate_A.py --lanes cpp,llvm --regime licensed|repro`): every number is
+bit-for-bit the section-11 table (licensed = the old `BLADE_FP_REASSOC=1` results, repro =
+the old knob-off results): worst 1.17e-13 licensed (cpp antisym, the near-zero cell), 6e-15
+repro; exit 0 in both. The default build therefore computes exactly what the old licensed
+build computed.
+
+**Fold forms (smoke, serial; `foldform.ps1`).** `blade plan` now prints one `[fold-form v1]`
+line per C++ fold site (it was silent before, F15):
+
+| kernel | licensed (default) | repro |
+|---|---|---|
+| gram | `lambda in g: applied [fold form: simd-reduction; prodsum]` (the kernel dot) + 3 checksum/input sites `simd-reduction; reduce over a deferred computation (one level)` + 2 `K-lanes(8); reduce in expression position`; C++ `BLADE_OMP_SIMD_REDUCTION` x5, LLVM `fadd reassoc` x5 | every site `declined -- serial (repro) [fold form: serial (repro); ...]`; 0 SIMD_REDUCTION, 0 `fadd reassoc` |
+| comoment3 | `lambda in t: simd-reduction; prodsum` + 4 deferred-fold sites + 2 K-lanes(8); SIMD_REDUCTION x6, reassoc x6 | all serial (repro); 0 / 0 |
+| antisym | `lambda in l: simd-reduction; prodsum` (both dots) + deferred sites + 2 K-lanes(8); the input sum `__v114: applied [fold form: row-fold jam(6 rows, bitwise); reduce over the rows of a row map]`; SIMD_REDUCTION x4, reassoc x7 | all serial (repro) except the bitwise row-fold jam, applied in both; 0 / 0 |
+| pairkernel | no kernel fold; 3 deferred checksum sites simd-reduction + 2 K-lanes(8); SIMD_REDUCTION x3, reassoc x4 | all serial (repro); 0 / 0 |
+
+LLVM `contract` flags are present in BOTH regimes (repro contracts too; it only drops
+reassociation). No LLVM refusal anywhere; smoke checksums unchanged.
+
+**Store audit (24 full-size builds, compile only; `audit3`).**
+
+| kernel | build | packed FMA (ymm) | scalar FMA | vaddpd ymm | SIMD_REDUCTION / `fadd reassoc` | omp_fn / libgomp | store (unchanged from section 11) |
+|---|---|---|---|---|---|---|---|
+| gram | cpp-serial repro / lic | 0 / 0 | 3 / 3 | 0 / 6 | 0 / 5 macros | 0 / 0 | `14000a646` / `14000a8cd` |
+| gram | cpp-mt8 repro / lic | 0 / 0 | 3 / 3 | 0 / 6 | 0 / 5 | 1 / 1 | `140001552` / `140001983` (`main._omp_fn.0`) |
+| gram | llvm repro / lic | 0 / 44 | 56 / 5 | 0 / 41 | 0 / 8 reassoc | - | `140001936` / `140001a3e` (64x64 bricks) |
+| comoment3 | cpp-serial repro / lic | 0 / 0 | 3 / 3 | 0 / 6 | 0 / 6 | 0 / 0 | `14000a99c` / `14000ac9f` |
+| comoment3 | cpp-mt8 repro / lic | 0 / 0 | 3 / 3 | 0 / 6 | 0 / 6 | 1 / 1 | `140001a9a` / `140001adf` |
+| comoment3 | llvm repro / lic | 0 / 16 | 11 / 4 | 0 / 54 | 0 / 6 | - | `140001842` / `1400019cc` |
+| antisym | cpp-serial repro / lic | 0 / 0 | 6 / 6 | 0 / 12 | 0 / 4 | 0 / 0 | `14000aa4d` / `14000ad71` |
+| antisym | cpp-mt8 repro / lic | 0 / 0 | 6 / 6 | 0 / 12 | 0 / 4 | 1 / 1 | `1400015cd` / `140001a74` |
+| antisym | llvm repro / lic | 0 / 42 | 23 / 2 | 0 / 230 | 0 / 7 | - | `14000181b` / `140001bf5` |
+| pairkernel | cpp-serial repro / lic | 0 / 0 | 5 / 5 | 0 / 2 | 0 / 3 | 0 / 0 | `14000a785` / `14000a935` |
+| pairkernel | cpp-mt8 repro / lic | 0 / 0 | 5 / 5 | 0 / 4 | 0 / 3 | 1 / 1 | `140001ad4` (both) |
+| pairkernel | llvm repro / lic | 0 / 4 | 6 / 3 | 0 / 18 | 0 / 4 | - | `140001831` / `14000185b` |
+
+Every production store survives in every build; addresses equal section 11's (one index
+register differs in antisym cpp-serial licensed: `(%r12,%r10,8)` vs `(%r12,%r9,8)`).
+
+**Differences versus section 11.** (1) Spelling only: the default build = the old
+`BLADE_FP_REASSOC=1` build, bit-identical outputs, identical packed-FMA counts (gram 44,
+comoment3 16, antisym 42, pairkernel 4 in LLVM licensed; 0 in C++ licensed, whose
+simd-reduction dot is `vmulpd` + `vaddpd`), identical store addresses. (2) `blade plan` now
+reports every fold site's form, so F15's "the plan is silent" no longer holds -- the
+write-up can cite the plan. (3) antisym's input-sum row-fold jam (bitwise) is now KEPT
+under the default; under the old `BLADE_FP_REASSOC=1` it was replaced by simd-reduction
+accumulators (the plan lost its microkernel line then; now it reads `fold form: row-fold
+jam(6 rows, bitwise)` in both regimes). That fold is the input checksum, not the kernel.
+(4) LLVM `fadd reassoc` counts at full size (gram 8, comoment3 6, antisym 7, pairkernel 4)
+vs the smoke `.ll` (5 for gram): more sites at full size, same mechanism; repro has 0
+everywhere, so the harness's M3 check (match `fadd reassoc`, not the header word) passes
+for repro.

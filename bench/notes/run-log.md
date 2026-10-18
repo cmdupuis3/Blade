@@ -97,3 +97,31 @@ Other regimes (repro/fastmath x blas) are `unsupported` for every kernel (declar
 Pins (bench/validation/pins-A.json gram / pins-B.json dot, smoke): gram checksum 237924.7174130447, input 952.4563073534518; dot checksum 7442.487571015026, input 29915.989193804096.
 - gram: blade-llvm/blade-cpp 237924.717413045 (15 digits, = pin); gfortran-natural ...304471E+5, expert ...304459E+5, ifx-natural ...304474E+5, ifx-expert ...304459E+5 -- all within ~1e-15 relative of the pin; input_checksum 952.45630735345185 in all Fortran arms, 952.456307353452 in Blade = pin. Timings 40-75 us, nothing suspicious. Fold forms: llvm 5 reassoc flags, cpp 5 SIMD_REDUCTION.
 - dot: blade 7442.48757101503, gfortran-natural/ifx-natural ...150345E+3, gfortran-expert ...150218E+3, ifx-expert ...150227E+3 -- all within 1.2e-15 relative of the pin; input 29915.9891938041 / 2.9915989193804096E+4 = pin. All six inputonly twins print checksum 0.0 with the pinned input_checksum. Timings 0.11-0.25 ms; twin ~ total (kernel share negligible at smoke).
+
+## 2026-10-17 ~20:30 -- coordinator: rebuild window
+Coordinator notice: the compiler's FP-default flip is being merged into the bench branch and Blade.exe will be rebuilt. Instruction: run NOTHING (no smoke, no check)
+until the coordinator sends "rebuild done" with the new knob mapping; the harness config will then be flipped and `smoke --regimes all` must be re-run before anything else.
+Runner is idle from this entry. No commands executed after this point until that message.
+
+## 2026-10-17 (after 22:10) -- coordinator: "rebuild done", HOLD continues
+Blade.dll 74B67280... (bench branch merge 957afd95). Flipped config.json knob mapping: licensed = NO Blade fp knob (new compiler default);
+repro = BLADE_FP_REPRO=1 (+ BLADE_FP_REASSOC=0); fastmath = same Blade knobs as licensed. Unbuilt is now a failure by default.
+Hold continues until the coordinator sends "go smoke" (the two Blade validation agents are re-running their checks first). Then: `smoke --regimes all`, report as before.
+Nothing executed since the previous entry.
+
+## 2026-10-17 $(date) -- "go smoke" received
+Coordinator: both Blade validation agents clean on Blade.dll 74B67280... Running `smoke --regimes all` (console -> bench/results/smoke2/smoke-all.console.txt), then check gram, check dot.
+(log entry above timestamp: 2026-10-17 22:22; Blade.dll sha256 prefix 74b6728036b170d9 verified)
+
+## 2026-10-17 22:22-22:46 -- smoke --regimes all on Blade.dll 74B67280 (new FP default; flipped config) -- COMPLETED, exit 0, 0 failures, 0 flags
+Command: `C:\Python314\python.exe -P bench\harness\run.py smoke --regimes all` (1285 s). Console: bench/results/smoke2/smoke-all.console.txt.
+Session: bench\.build\sessions\2026-10-17-LAPTOP-350H6LDB\session-222235-smoke. Follow-ups: `check gram`, `check dot` (bench/results/smoke2/check-*.console.txt), both exit 0.
+Manifest 576 cells: validated 449, unsupported (regime not declared) 76, serial-only 39, no-blas 2, fallback 2, no-parallel-form 8. unbuilt 0, gated 0, DQ 0, build failures 0, compiler-diagnostic notes 0.
+Per regime (arms incl. twins): serial-licensed-native ok 101 + 1 fallback (maskagg llvm, expected); mt8-licensed-native ok 72, serial-only 15, no-parallel-form 3 (onepass cpp + twin, recur cpp);
+serial-repro-native ok 101 + 1 fallback; mt8-repro-native ok 72, serial-only 15, no-parallel-form 3; serial-fastmath-native ok 54; mt8-fastmath-native ok 43, serial-only 9, no-parallel-form 2 (onepass cpp + twin);
+serial-licensed-blas (gram) ok 3 (blade-cpp, gfortran-expert, ifx-expert), no-blas 1 (blade-llvm); mt8-licensed-blas ok 3, no-blas 1. (Naturals no longer in the blas regime; expert_blas.f90 now builds and validates.)
+Changes vs the 20:04 sweep: expert_blas arms now ok (were unbuilt/gated); gram blade-cpp mt8-blas now ok with "library threads (OPENBLAS_NUM_THREADS=8)" (was no-parallel-form); recur blade-cpp mt8 now no-parallel-form in licensed AND repro (as announced); dot ifx-natural #5474 warning GONE;
+repro-mt8 Blade arms read "openmp (1 construct(s)); threaded maps, serial folds (BLADE_FP_REPRO)" with fold form "in-order"; licensed/fastmath Blade arms read "reordered" (reassoc flags / SIMD_REDUCTION), i.e. the flipped default is visible in the artifacts.
+ifx mt8 timings (new unbound env), non-twin+twin n=79: min 1.65 ms, median 1.82 ms, max 2.77 ms; zero runs > 5 ms (old env: median 2.6 ms, max 70 ms, 27+ runs > 5 ms). gfortran mt8 median 0.92 ms (max 3.1, recur natural); blade-cpp mt8 (n=32 incl. blas) median 0.90 ms (OpenBLAS-threaded gram 0.093 ms).
+ifx mt8 still has ~0.9 ms more fixed smoke-size overhead than gfortran (runtime team start-up), no jitter. Smoke-size mt8 times are start-up dominated for every compiler.
+Spot checks (pins: gram 237924.7174130447 / 952.4563073534518; dot 7442.487571015026 / 29915.989193804096): gram all arms within 1.5e-16 rel (ifx-expert 2.3792471741304483E+5 worst); dot all within 1.3e-15 (blade-cpp 7442.48757101502, blade-llvm ...503, Fortran 7.442487571015022E+3..034E+3); input_checksums equal pins; six dot twins print checksum 0.0.

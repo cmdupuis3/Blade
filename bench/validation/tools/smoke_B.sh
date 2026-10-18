@@ -4,7 +4,8 @@
 # runs `blade check`, the C++ lane serial (BLADE_OMP_THREADS=1), the C++ lane with 2 threads and
 # the LLVM lane, all with --print checksum,input_checksum. Compare against
 # bench/validation/pins-B.json (smoke) by eye or with the harness.
-# usage: sh bench/validation/tools/smoke_B.sh <outdir> [kernel ...]
+# usage: sh bench/validation/tools/smoke_B.sh <licensed|repro> <outdir> [kernel ...]
+#   licensed = no FP knob (the default); repro = BLADE_FP_REPRO=1.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../../.." && pwd)
@@ -12,9 +13,13 @@ K=$REPO/bench/kernels
 B=$REPO/bin/Release/net10.0/Blade.exe
 export PATH="/c/msys64/ucrt64/bin:$PATH"
 export BLADE_BLAS=0 BLADE_EXE_CACHE=0
-out=$1
-shift
+unset BLADE_FP_REASSOC BLADE_FP_CONTRACT
+reg=$1
+out=$2
+shift 2
+if [ "$reg" = "repro" ]; then export BLADE_FP_REPRO=1; else unset BLADE_FP_REPRO; fi
 want=${*:-"fusedchain onepass stencil recur maskagg dot saxpy"}
+out=$out/$reg
 mkdir -p "$out"
 for spec in fusedchain:n=20011 onepass:n=50021 stencil:ny=31,nx=41 recur:nt=11,nx=211 \
             maskagg:n=30011 dot:n=30011 saxpy:n=20011; do
@@ -30,7 +35,7 @@ for spec in fusedchain:n=20011 onepass:n=50021 stencil:ny=31,nx=41 recur:nt=11,n
       p=${kv%%=*}; v=${kv#*=}
       sed -i -E "/\/\/ SIZE $p\$/ s/[0-9]+/$v/" "$dst"
     done
-    echo "######## $stem ($sizes)"
+    echo "######## [$reg] $stem ($sizes)"
     "$B" check "$dst" 2>&1 | tail -1
     echo "-- cpp serial";  BLADE_OMP_THREADS=1 "$B" run "$dst" --print checksum,input_checksum 2>&1 | grep -v "completed in"
     echo "-- cpp 2 threads"; OMP_NUM_THREADS=2 "$B" run "$dst" --print checksum,input_checksum 2>&1 | grep -v "completed in"

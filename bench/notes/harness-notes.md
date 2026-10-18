@@ -124,6 +124,8 @@ Harness v2 (after the method review; 2026-10-17 evening):
 
 ## 5. Open items / pending other agents
 
+- FP-default flip (5f4b33ea) applied to config.json: licensed = no Blade fp knob, repro = `BLADE_FP_REPRO=1 BLADE_FP_REASSOC=0`, fastmath = as licensed; repro-mt8 Blade parallelism reads "threaded maps, serial folds"; `plan_fold_form` recorded. Not yet exercised: waiting for the rebuilt Blade.exe (all smoke evidence goes stale with the new Blade.dll hash).
+
 - Runner smoke fixes (2026-10-17): checkpoint replace retried (10 x 50 ms linear backoff) and non-fatal; smoke/check fail on unbuilt arms unless `--allow-unbuilt`; gram blas arms restricted to blade-cpp/blade-llvm/gfortran-expert/ifx-expert; mt8 BLAS arms timed with parallelism "library threads (OPENBLAS_NUM_THREADS=8)"; Fortran blas arms must import libopenblas.dll. Run-time stderr is the only stream the `error` rule reads (compile warnings such as ifx #5474 go to the build record).
 
 - mt8 run env changed (coordinator 2026-10-17): unbound -- OMP_NUM_THREADS=8, OMP_DYNAMIC=FALSE, KMP_AFFINITY=disabled; OMP_PLACES/OMP_PROC_BIND removed. This changes the build-relevant config hash, so mt8 (and all) smoke evidence recorded before it is stale and must be re-recorded.

@@ -79,9 +79,9 @@ per-row `prodsum` under `lambda(p, q) where omp -> p + q`), so under `BENCH_LICE
 expert's checksum accumulation takes `!$omp simd reduction(+:acc)`, and so does the
 input-checksum fold over u (per row where the Blade source sums rows, combined in the
 source's order) — the matched loops for this kernel (README §3 table); the stencil nest
-itself has no reduction and gets nothing. Expect blade-cpp's checksum to stay a serial chain over the row sums
-only (the row `prodsum` is an inline, non-deferred fold — F11 does not apply to it; blade-B
-reports it gets `BLADE_OMP_SIMD_REDUCTION` under the knob).
+itself has no reduction and gets nothing. Both Blade lanes vectorize the checksum in
+`licensed` by default (the row `prodsum` and the outer fold both take the simd-reduction
+form in the C++ lane since the flip).
 
 ## Hypothesis
 

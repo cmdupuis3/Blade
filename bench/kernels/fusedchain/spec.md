@@ -85,10 +85,10 @@ licensed (serial, mt8), repro (serial, mt8), fastmath.
   fuse adjacent array statements itself; if it does, the ifx-natural ratio shrinks and the
   Fortran agent records the optimization report.)
 - vs expert, `repro`: **equivalent** (same single loop; the division dominates per element).
-- vs expert, `licensed`: **blade-llvm equivalent** (both reorder the accumulation);
-  **blade-cpp detectable loss to loss** — the C++ lane's knob does not reach this deferred
-  fold (F11, G20), but the division keeps the serial chain from being the only cost, so the
-  gap is smaller than dot's.
+- vs expert, `licensed`: **both Blade lanes equivalent** — since the flip the C++ lane
+  gives the composed chain's fold `SIMD_REDUCTION` by default and the LLVM lane `reassoc`
+  (before it, the C++ lane kept a serial chain: F11, G20, fixed); the division dominates
+  per element in every arm.
 - fastmath: unequal permission sets (README §3) — GNU/Intel fast-math may replace the
   division by a reciprocal multiply, Blade's licence does not; reported under the fastmath
   label, both Blade lanes.

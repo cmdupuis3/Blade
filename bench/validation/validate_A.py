@@ -8,11 +8,12 @@ Blade.exe, parses the printed arrays, and compares
     reference's canonical cells in Blade's left-justified order (i <= j [<= k]; antisym i < j);
   * checksum and input_checksum against the numpy pins.
 Blade prints 15 significant digits, so agreement is expected at ~1e-15 relative.
+Regimes: `licensed` (default) = no FP knob; `repro` = BLADE_FP_REPRO=1; no other FP knob is
+passed (BLADE_FP_CONTRACT is cleared: the LLVM lane contracts by default since the flip).
 
 Run: C:\\Python314\\python.exe -P validate_A.py [--lanes cpp,llvm] [--regime licensed|repro] [kernel ...]
 The C++ lane honours --print; the LLVM lane prints every top-level binding (also parsed).
-LLVM runs set BLADE_FP_CONTRACT=fast (the suite's LLVM regime, F14). Smoke only: each run
-finishes in milliseconds.
+Smoke only: each run finishes in milliseconds.
 """
 import ast
 import os
@@ -49,13 +50,18 @@ def run_blade(path, names, lane):
     env["PATH"] = UCRT + os.pathsep + env.get("PATH", "")
     env["BLADE_BLAS"] = "0"
     env.pop("BLADE_LLVM", None)
-    env.pop("BLADE_FP_CONTRACT", None)
-    env.pop("BLADE_FP_REASSOC", None)
-    if REGIME == "licensed":
-        env["BLADE_FP_REASSOC"] = "1"
+    # FP knobs (after the 2026-10-17 default flip): `licensed` = no FP knob at all (the default
+    # honours every licence in both lanes and the LLVM lane contracts by default);
+    # `repro` = BLADE_FP_REPRO=1. Every other FP knob is cleared so the defaults govern
+    # (BLADE_FP_CONTRACT is deliberately NOT passed any more).
+    for v in ("BLADE_FP_CONTRACT", "BLADE_FP_REASSOC", "BLADE_FP_REPRO"):
+        env.pop(v, None)
+    if REGIME == "repro":
+        env["BLADE_FP_REPRO"] = "1"
+    elif REGIME != "licensed":
+        raise ValueError("unknown regime %r" % REGIME)
     if lane == "llvm":
         env["BLADE_LLVM"] = "1"
-        env["BLADE_FP_CONTRACT"] = "fast"
     cmd = [str(BLADE), "run", str(path), "--print", ",".join(names), "--no-cache"]
     p = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=600)
     if p.returncode != 0:
@@ -141,7 +147,7 @@ def main(argv):
         else:
             REGIME = argv[1]
         argv = argv[2:]
-    print("regime: %s (licensed = BLADE_FP_REASSOC=1; LLVM always BLADE_FP_CONTRACT=fast)" % REGIME)
+    print("regime: %s (licensed = no FP knob, the default; repro = BLADE_FP_REPRO=1)" % REGIME)
     kernels = argv or list(KERNELS)
     worst = 0.0
     for lane in lanes:

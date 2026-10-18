@@ -1,10 +1,12 @@
 """Cell-by-cell validation of the group-B Blade outputs against the numpy references
 (methodology review M11), at SMOKE size, in the Blade C++ lane.
 
-    C:\\Python314\\python.exe -P bench/validation/validate_B.py [--blade PATH] [--saved DIR]
+    C:\\Python314\\python.exe -P bench/validation/validate_B.py [--regime licensed|repro]
+                                                                [--blade PATH] [--saved DIR]
 
 For each dump variant in bench/validation/dump/ it compiles and runs the program (C++ lane,
-BLADE_BLAS=0, BLADE_OMP_THREADS=1, BLADE_EXE_CACHE=0, ucrt64 first on PATH), parses the
+BLADE_BLAS=0, BLADE_OMP_THREADS=1, BLADE_EXE_CACHE=0, ucrt64 first on PATH; FP regime
+licensed = no FP knob, the default; repro = BLADE_FP_REPRO=1), parses the
 printed bindings, and compares them with ref_<kernel>.py:
 
   * stencil: lap, (ny-2) x (nx-2), every cell;
@@ -43,14 +45,17 @@ DUMPS = {
 }
 
 
-def run_dump(blade, kernel, saved):
+def run_dump(blade, kernel, saved, regime):
     if saved:
         with open(os.path.join(saved, f"{kernel}_dump.out"), encoding="utf-8") as f:
             return f.read()
     env = dict(os.environ)
     env["PATH"] = UCRT + os.pathsep + env.get("PATH", "")
     env.update({"BLADE_BLAS": "0", "BLADE_OMP_THREADS": "1", "BLADE_EXE_CACHE": "0"})
-    env.pop("BLADE_LLVM", None)
+    for v in ("BLADE_LLVM", "BLADE_FP_REASSOC", "BLADE_FP_CONTRACT", "BLADE_FP_REPRO"):
+        env.pop(v, None)
+    if regime == "repro":
+        env["BLADE_FP_REPRO"] = "1"
     src = os.path.join(HERE, "dump", f"{kernel}_dump.blade")
     r = subprocess.run([blade, "run", src, "--print", ",".join(DUMPS[kernel])],
                        capture_output=True, text=True, env=env, timeout=600)
@@ -111,11 +116,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--blade", default=DEFAULT_BLADE)
     ap.add_argument("--saved", default=None, help="directory of saved <kernel>_dump.out files")
+    ap.add_argument("--regime", choices=("licensed", "repro"), default="licensed",
+                    help="licensed = no FP knob (the default); repro = BLADE_FP_REPRO=1")
     args = ap.parse_args()
     rep = Report()
+    rep.lines.append(f"regime: {args.regime}")
     for kernel in DUMPS:
         rep.lines.append(f"{kernel}:")
-        v = parse(run_dump(args.blade, kernel, args.saved))
+        v = parse(run_dump(args.blade, kernel, args.saved, args.regime))
         if kernel == "stencil":
             r = ref_stencil.compute("smoke")
             rep.cmp_array("lap", v["lap"], r["output"])

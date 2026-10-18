@@ -357,6 +357,23 @@ divides by n once per cell; permutation-rounding differences in the dense natura
 permitted, regrouping the canonical product is not. (F9) antisym's two-matmul spelling is
 noted as equally natural and unmeasured.
 
+**D43 — The compiler flip landed; `licensed` is Blade's default, `repro` the opt-in
+(supersedes the knob mechanics of D34, D40, D40a).** Commit 5f4b33ea (plan
+`docs/plans/plan-fp-default-fastest.md`), merged into the bench branch as 957afd95 together
+with master 74b96445. `licensed` = no knob: both lanes honour every source licence (C++
+`omp simd reduction` or K-lane accumulators per fold site, LLVM `reassoc nsz`); the LLVM
+lane contracts by default, so D34's `BLADE_FP_CONTRACT=fast` is redundant and dropped.
+`repro` = `BLADE_FP_REPRO=1` (compatibility spelling `BLADE_FP_REASSOC=0`), which also
+serializes the mt8 fold teams (repro x mt8 Blade = threaded maps, serial folds). The F11
+C++ deferred-fold gap is fixed (dot's zip fold, the composed chain, a checksum over a
+computed map, the 4-leg join all get `SIMD_REDUCTION` by default), so every "blade-cpp
+stays serial" hypothesis in the specs is withdrawn; both Blade lanes are still reported.
+Gap statuses: G20 FIXED, G21 FIXED (`fold form:` per C++ fold site in `blade plan`), G19
+FIXED, G7 PARTLY (simd-reduction join form + census line, no thread form), G14 PARTLY
+(prodsum reassociates by default, no threading slot); G24 lists the shapes still without a
+fast form. **Freeze state:** bench branch `worktree-bench-fortran` at 957afd95; Blade.exe
+hash in the session bundle.
+
 **D42 — mt8 arms run UNBOUND (M20 amended).** libgomp cannot bind threads on Windows
 ("Affinity not supported", thread count still 8); libiomp5's binding under
 `OMP_PLACES=cores OMP_PROC_BIND=close` produced 17–48 ms of jitter at smoke size while

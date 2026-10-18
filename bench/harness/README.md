@@ -61,9 +61,9 @@ from `config.json`:
 
 | | Blade compile knobs | Fortran flags (`fortran_flags.<compiler>.<fp>` + serial/mt8 extra) |
 |---|---|---|
-| licensed (headline) | `BLADE_FP_REASSOC=1` | `-O3 -march=native -ffp-contract=fast -fno-external-blas -fno-external-blas64 -cpp -DBENCH_LICENSED` / `/O3 /QxHost /fp:precise -mllvm -fp-contract=fast /fpp /DBENCH_LICENSED` |
-| repro | (none) | the same without `BENCH_LICENSED` |
-| fastmath | `BLADE_FP_REASSOC=1` | `-ffast-math` / `/fp:fast` |
+| licensed (headline) | (none: the default since 5f4b33ea honours every licence) | `-O3 -march=native -ffp-contract=fast -fno-external-blas -fno-external-blas64 -cpp -DBENCH_LICENSED` / `/O3 /QxHost /fp:precise -mllvm -fp-contract=fast /fpp /DBENCH_LICENSED` |
+| repro | `BLADE_FP_REPRO=1 BLADE_FP_REASSOC=0` (mt8: threaded maps, serial folds) | the same without `BENCH_LICENSED` |
+| fastmath | (as licensed) | `-ffast-math` / `/fp:fast` |
 | every Blade arm | `BLADE_BLAS=0|1`, `BLADE_EXE_CACHE=0`, `BLADE_LLVM_CLANG`; LLVM: `BLADE_LLVM=1 BLADE_FP_CONTRACT=fast`; serial: `BLADE_OMP_THREADS=1` | serial `-fopenmp-simd` / `/Qopenmp-simd`; mt8 `-fopenmp` / `/Qopenmp` |
 
 Run environment (`run_env`): serial `OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 OMP_DYNAMIC=FALSE`,
@@ -92,7 +92,7 @@ Build statuses: `ok`, `failed`, `fallback`, `serial-only`, `no-blas`, `no-parall
   **repro serial** build with either FAILS (review M3).
 - blas regime (gram: arms blade-cpp, blade-llvm, gfortran-expert, ifx-expert via `regime_arms`): the exe must import libopenblas.dll; the C++ lane does, the LLVM lane does not (`no-blas`), a Fortran/C++ arm that does not is a failure. `OPENBLAS_NUM_THREADS` is 1 (serial) / 8 (mt8) for every arm; an mt8 BLAS arm with no OpenMP construct is timed, its parallelism being the library's threads.
 - **parallelism** (table column): `serial`, `openmp (N construct(s))`, `library threads (OPENBLAS_NUM_THREADS=n)` [+ openmp runtime], or for Fortran mt8 `openmp runtime linked`.
-- `blade plan` under the arm's knobs -> `<armdir>/plan.txt`, `plan_decisions`, `plan_omp`.
+- `blade plan` under the arm's knobs -> `<armdir>/plan.txt`, `plan_decisions`, `plan_omp`, `plan_fold_form` (the plan's per-site `fold form:` lines; C++ lane only, so recorded beside the artifact counts).
 - PE imports, stack/heap reserve+commit, and every imported DLL resolved along the run PATH
   and hashed by its resolved path (M25); the Fortran wrappers' `+ <command>` echo.
 

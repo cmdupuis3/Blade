@@ -145,30 +145,37 @@ not because compaction is inherently sequential; it runs serial only in every la
 | axis | regime | Blade (knobs on the one source) | gfortran 16.2 | ifx 2026.1 |
 |---|---|---|---|---|
 | threads | `serial` = **no active thread-level OpenMP** (standalone `simd` is active by design on every side) | `BLADE_OMP_THREADS=1` at compile (threading pragmas removed; `omp simd` hints stay live) | `-fopenmp-simd`, no `-fopenmp` | `/Qopenmp-simd`, no `/Qopenmp` |
-| threads | `mt8` | knob unset; the source's `where omp(...)` licences emit pragmas; `OMP_NUM_THREADS=8`. **C++ lane only: the LLVM lane has no thread runtime** (`src/EmitLlvm.fs:3037`, `:1004-1023`: by documented design an `omp` clause is "a licence to parallelize, not a demand" — the lane emits the serial body and consumes the SAME licence only for fold reassociation, `foldFmfLicensed = BLADE_FP_REASSOC on AND the kernel's fold-reorder licence`, decorating the fold with `reassoc nsz`; the shim says "this lane has no threads"). So in strict regimes the licence has no effect in the LLVM lane, the arm is serial, and the mt8 Blade figure is `blade-cpp`; `blade-llvm` is listed as "serial only (LLVM lane has no threads)". In `fast` the same licence is what makes the LLVM arm reassociate deferred folds (blade-B F11), so both Blade lanes are reported there | `-fopenmp`; author places `!$omp parallel do` as §2 says; `OMP_NUM_THREADS=8` | `/Qopenmp`, same |
-| fp | `licensed` (HEADLINE) | **`BLADE_FP_REASSOC=1`** + **`BLADE_FP_CONTRACT=fast` on every LLVM arm** (F14: the LLVM lane does no contraction by default; the C++ lane's default is `fast`); `BLADE_MARCH` default (`native`). This is Blade's INTENDED default — every source licence honoured, including simd reductions on `where omp` folds; today's compiler has the polarity inverted (the knob opts INTO the licensed forms), so the suite reaches the intended default through the knob. The knob reaches only licensed sites by construction. blade-B F11: in the C++ lane the knob does NOT reach folds over deferred computations (fusedchain, onepass, dot, saxpy) while the LLVM lane does — both Blade lanes are reported in this regime (G20) | `-O3 -march=native -ffp-contract=fast -fopenmp-simd -DBENCH_LICENSED` (NO `-ffast-math`): under `BENCH_LICENSED` the EXPERT tier may place `!$omp simd reduction(...)` on exactly the fold loops whose Blade counterpart carries a fold licence — source-licensed reordering on both sides; natural stays as written | `/O3 /QxHost /fp:precise -mllvm -fp-contract=fast /Qopenmp-simd /DBENCH_LICENSED` (ifx `/fp:precise` does not contract FMAs and `/Qfma` cannot re-enable it — `notes/fortran-notes.md` §3; a bare ifx is `/fp:fast`, so the flag is never omitted); same `BENCH_LICENSED` rule |
-| fp | `repro` (secondary) | `BLADE_FP_REASSOC` unset (knob off); `BLADE_FP_CONTRACT=fast` on LLVM arms as above. No reordering in any serial arm; the M3 acceptance check (no `*_SIMD_REDUCTION` expansion, no `reassoc` in the `.ll`) applies HERE | `-O3 -march=native -ffp-contract=fast -fopenmp-simd` (no `BENCH_LICENSED`: no `simd reduction` anywhere) | `/O3 /QxHost /fp:precise -mllvm -fp-contract=fast /Qopenmp-simd` |
-| fp | `fastmath` (optional, lowest) | `BLADE_FP_REASSOC=1` + the LLVM contraction knob (Blade has no blanket fast-math; its licence set is the `licensed` one) — labelled unequal, below | `-O3 -march=native -ffast-math` | `/O3 /QxHost /fp:fast` |
+| threads | `mt8` | `BLADE_OMP_THREADS` unset; the source's `where omp(...)` licences emit pragmas; `OMP_NUM_THREADS=8`. **C++ lane only: the LLVM lane has no thread runtime** (`src/EmitLlvm.fs:3037`, `:1004-1023`: by documented design an `omp` clause is "a licence to parallelize, not a demand" — the lane emits the serial body and consumes the same licence for fold reassociation (`reassoc nsz`, now by default); the shim says "this lane has no threads"). So the LLVM arm is serial in every threads regime and the mt8 Blade figure is `blade-cpp`; `blade-llvm` is listed as "serial only (LLVM lane has no threads)" | `-fopenmp`; author places `!$omp parallel do` as §2 says; `OMP_NUM_THREADS=8` | `/Qopenmp`, same |
+| fp | `licensed` (HEADLINE) | **Blade's DEFAULT — no knob** (compiler flip 5f4b33ea, merged into the bench branch as 957afd95; `docs/plans/plan-fp-default-fastest.md`): both lanes honour every source licence — C++ lane `omp simd reduction` or K-lane accumulators per fold site, LLVM lane `reassoc nsz`; the LLVM lane now CONTRACTS by default too, so the earlier `BLADE_FP_CONTRACT=fast` on LLVM arms (D34) is redundant and not set. `BLADE_MARCH` default (`native`). Both Blade lanes are reported (they differ in lane width and FMA use, not in which folds are licensed) | `-O3 -march=native -ffp-contract=fast -fopenmp-simd -DBENCH_LICENSED` (NO `-ffast-math`): under `BENCH_LICENSED` the EXPERT tier may place `!$omp simd reduction(...)` on exactly the fold loops whose Blade counterpart carries a fold licence — source-licensed reordering on both sides; natural stays as written | `/O3 /QxHost /fp:precise -mllvm -fp-contract=fast /Qopenmp-simd /DBENCH_LICENSED` (ifx `/fp:precise` does not contract FMAs and `/Qfma` cannot re-enable it — `notes/fortran-notes.md` §3; a bare ifx is `/fp:fast`, so the flag is never omitted); same `BENCH_LICENSED` rule |
+| fp | `repro` (secondary) | **`BLADE_FP_REPRO=1`** (compatibility spelling `BLADE_FP_REASSOC=0`): no reordering in any serial arm — AND, new semantics, repro also serializes the mt8 FOLD TEAMS, so `repro x mt8` Blade = threaded maps, serial folds (Fortran repro-mt8 keeps its thread-level `reduction(+:)`, which reorders across threads: a recorded asymmetry of the regime, not of the suite). The M3 acceptance check (no `*_SIMD_REDUCTION` expansion, no `reassoc` in the `.ll`) applies HERE | `-O3 -march=native -ffp-contract=fast -fopenmp-simd` (no `BENCH_LICENSED`: no `simd reduction` anywhere) | `/O3 /QxHost /fp:precise -mllvm -fp-contract=fast /Qopenmp-simd` |
+| fp | `fastmath` (optional, lowest) | Blade default (Blade has no blanket fast-math; its licence set is the `licensed` one) — labelled unequal, below | `-O3 -march=native -ffast-math` | `/O3 /QxHost /fp:fast` |
 | blas | `native` (headline) | `BLADE_BLAS=0` (explicitly, because `OPENBLAS_DIR` is set on this host) | no user-selected external BLAS: `-fno-external-blas -fno-external-blas64` explicit; `-finline-matmul-limit` left at default and RECORDED (whether `matmul` was inlined or called libgfortran at each size) | no user-selected external BLAS; whether `/Qopt-matmul` is on by default in 2026.1 and where `matmul` routes RECORDED; `/Qparallel` and `/Qpar` absent, verified by the observed thread count |
 | blas | `blas` (gram only) | `blade-cpp` only: `BLADE_BLAS=1` (auto-routed `dsyrk`); `blade-llvm` recorded as "no-blas" (the lane has no BLAS route, G23) | `gfortran-expert` calls OpenBLAS `dsyrk` explicitly, linked against `OPENBLAS_DIR`; the natural arm is EXCLUDED here (no library route; its numbers are in the native regime) | `ifx-expert` same; natural excluded. mt8 in this regime is LIBRARY threading on both sides (`OPENBLAS_NUM_THREADS=8`, no user pragmas), labelled "library threads" in the parallelism column |
 
 **`licensed` differs from `repro` for ALL ELEVEN kernels** (blade-A F15, blade-B F11, and
 the Fortran review's F2: the archived licensed emission of `maskagg` has 8-lane accumulators
 for both its output checksum and its input sum, so the earlier "maskagg is the one
-coincidence" was false — every kernel's input-checksum fold reassociates under the knob): the inner `prodsum` of gram, comoment3 and
-antisym has no threading slot but IS a reassociation-licensed fold (C++ lane
-`BLADE_OMP_SIMD_REDUCTION(+:__ps)` → `vmulpd`+`vaddpd` into one 4-lane accumulator, no FMA
-fused by g++; LLVM lane `fadd reassoc`, four ymm FMA accumulators = 16 lanes; packed FMAs
-licensed vs repro: gram 44/0, comoment3 16/0, antisym 42/0), every `(+)` checksum fold
-becomes a simd-reduction loop, and serial arms are affected too. `blade plan` is identical
-under both settings (antisym loses only its jam line) — the plan is silent about the
-licensed fold form (G21), so every regime record cites the emit. Each spec lists the exact
-Fortran loops on which the expert may place the matched `simd reduction`.
+coincidence" was false — every kernel's input-checksum fold reassociates by default): the
+inner `prodsum` of gram, comoment3 and antisym has no threading slot but IS a
+reassociation-licensed fold (C++ lane `BLADE_OMP_SIMD_REDUCTION(+:__ps)` → `vmulpd`+`vaddpd`
+into one 4-lane accumulator, no FMA fused by g++; LLVM lane `fadd reassoc`, four ymm FMA
+accumulators = 16 lanes; packed FMAs licensed vs repro: gram 44/0, comoment3 16/0, antisym
+42/0), every `(+)` checksum fold becomes a simd-reduction loop, and serial arms are
+affected too. Since the flip, `blade plan` prints a `fold form:` line per C++ fold site
+(G21 fixed), and the regime record cites both the plan and the emit. Each spec lists the
+exact Fortran loops on which the expert may place the matched `simd reduction`.
+
+**History (the polarity question, D40, G20 — fixed by 5f4b33ea).** Until the flip the
+licensed forms were knob-gated behind `BLADE_FP_REASSOC=1` and the C++ lane's knob did not
+reach folds over deferred computations (blade-B F11: dot's zip fold, the composed chain,
+a checksum over a computed map, the 4-leg join), so the two Blade lanes differed in exactly
+the kernels where fusion by deferral is the claim. Both are now default-on in both lanes;
+the user's policy ("always fastest by default, reproducible association as the opt-in") is
+the compiler's behaviour, and `repro` is the opt-in.
 
 **Matched-loop table (reconciled against the committed Blade sources).** The matching rule
-is about the SOURCE licence: a builtin `(+)` fold in the Blade source is reorder-licensed
-even where the C++ lane does not yet honour it (F11 — the LLVM lane marks every such fold
-`reassoc`; the compiler flip in progress makes the C++ lane honour them too). Under
+is about the SOURCE licence: a builtin `(+)` fold in the Blade source is reorder-licensed,
+and since the flip both lanes honour it by default. Under
 `BENCH_LICENSED` the expert's `!$omp simd reduction` therefore stands on exactly: **dot**'s
 fold; **fusedchain**'s fold; **onepass**'s four accumulators; **saxpy**'s checksum fold;
 the checksum sums of **stencil**, **recur** and **pairkernel**; **maskagg**'s output
@@ -563,8 +570,8 @@ claim is not made by this suite.
   checksum is the threaded one — `[blas-routing]`, `[pool-reuse v1]`, and the
   fusion/CSE/hoist decisions.
 - 7.7 The LLVM lane: no thread runtime (an `omp` licence is honoured as fold-FMF
-  reordering under `BLADE_FP_REASSOC=1`, never as threads — G11); no FMA contraction
-  unless `BLADE_FP_CONTRACT=fast` (F14); ignores `--print`/`BLADE_PRINT`; refuses
+  reordering by default, never as threads — G11); contracts FMAs by default since
+  5f4b33ea (G19 fixed; F14 is history); ignores `--print`/`BLADE_PRINT`; refuses
   `compound` (maskagg is `blade-cpp`-only; the fallback honours `--print`); refuses `let
   (a, b) = f()` (application in pack position); refuses a `T^1 -> T^1` row map in value
   position ("IRApplyCombinator in value position"); refuses the tuple-state fold; accepts
@@ -591,7 +598,13 @@ One Markdown table per regime, rows = kernel x arm, columns:
 plus, for kernels with twins, `incremental (s) [CI]` and `incremental ratio [CI] or
 undefined`. `correctness` is `ok (pins)` / `DISQUALIFIED (rel err)`; `parallelism` is
 `kernel threaded` / `parallel preparation, serial kernel` / `no parallel form` / `serial
-only (LLVM lane has no OpenMP)` per the per-loop evidence; `notes` carries `fallback`,
+only (LLVM lane has no OpenMP)` per the per-loop evidence, and for Blade fold cells the
+plan's fold form (`threaded(Path B chunks, serial within each chunk)` in licensed mt8 —
+the chunk interior is a serial chain, G25). Reading the `repro x mt8` fold cells: Blade
+repro-mt8 arms are **threaded maps, serial folds** (`BLADE_FP_REPRO=1` serializes the fold
+teams), while the Fortran repro-mt8 arms keep their thread-level `reduction(+:)` clauses,
+which reorder across threads — an asymmetry of the regime's definition, stated in §3, not a
+defect of an arm; `notes` carries `fallback`,
 `checksum-only computation` (store audit), flag deviations, block flags (within-block
 drift, control excursion), and the session labels ("max processor state capped (~80%)",
 "fresh-process, allocation-inclusive"). Every table names its regime (`licensed`,
@@ -612,7 +625,10 @@ support is therefore about materialized symmetric objects, fused chains and fold
 about pair sums or constrained enumeration.
 
 **Freeze.** Sources, sizes, hypotheses, tier selections and tuning decisions are frozen in
-a tagged commit before the pilot; anything changed after the pilot restarts the pilot. The
+a tagged commit before the pilot; anything changed after the pilot restarts the pilot.
+**Freeze state:** the bench branch `worktree-bench-fortran` at merge commit 957afd95
+(compiler flip 5f4b33ea merged with master 74b96445); the Blade.exe hash is recorded in the
+session bundle. The
 hypotheses are predictions to be tested, not criteria: a control that wins is reported as a
 win and investigated.
 

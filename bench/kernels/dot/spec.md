@@ -63,11 +63,12 @@ licensed (serial, mt8), repro (serial, mt8), fastmath.
 - `repro` serial: **EQUIVALENT** — one FMA chain in every language (≈ 4 cycles per
   element, which at n = 3M is ≈ 3 ms, about the DRAM time for 48 MB) — note the chain, not
   bandwidth, may be the binding constraint (M20).
-- `licensed` serial: **blade-llvm EQUIVALENT to expert** (both reorder: `reassoc nsz` lanes
-  vs `simd reduction`); **blade-cpp LOSS 3–5x** — the C++ lane's knob does not reach a
-  fold over a deferred computation (blade-B F11, G20), so it keeps the serial chain against
-  a vectorized expert. Natural (`dot_product`, no directive) stays a serial chain and is
-  expected to lose to expert in licensed as well.
+- `licensed` serial: **both Blade lanes EQUIVALENT to expert** — since the compiler flip
+  (5f4b33ea) the C++ lane gives this zip fold `SIMD_REDUCTION` by default and the LLVM lane
+  `reassoc nsz` lanes, against the expert's `simd reduction`; the two lanes may differ in
+  lane width / FMA use and are both reported. (Before the flip the C++ lane kept a serial
+  chain here — blade-B F11, G20, now fixed.) Natural (`dot_product`, no directive) stays a
+  serial chain and is expected to lose to expert in licensed.
 - mt8: thread reductions in all; same lane split.
 - The independent explanation is the serial chain; a deviation either way is a codegen
   finding and is investigated.

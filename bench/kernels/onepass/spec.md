@@ -11,9 +11,10 @@ x ∈ [0, 2)ⁿ. The four power sums
 
 Each S_k accumulates in ascending k order in every `repro` arm. The Blade `<&!>` join
 carries no THREADING licence (none can be expressed, README §7.4), but its `(+)` legs are
-builtin-body folds: under `BLADE_FP_REASSOC=1` the LLVM lane decorates them `reassoc`
-(blade-B F11) while the C++ lane leaves the join's accumulation serial — so `licensed`
-differs from `repro` in the LLVM lane only, and both Blade lanes are reported. Matched
+builtin-body folds: since the compiler flip (5f4b33ea) BOTH lanes reorder them by default —
+the C++ lane gives the join the simd-reduction form with one multi-accumulator clause and
+prints a census line (G7 partly fixed), the LLVM lane decorates the legs `reassoc` — so
+`licensed` differs from `repro` in both lanes, and both are reported. Matched
 permission (expert, licensed, behind `BENCH_LICENSED`): `!$omp simd reduction(+:s1, s2,
 s3, s4)` on the single accumulation loop, and on the input-checksum fold over x — the four
 accumulators and the input sum are builtin `(+)` folds in the Blade source,
@@ -77,17 +78,16 @@ reads **"no parallel form"**.
 
 ## Regimes
 
-licensed and repro (differing in the LLVM lane's `reassoc` legs only; the C++ lane's join
-is serial in both), fastmath; mt8 is reported as "no parallel form" for Blade (Fortran arms
-run it).
+licensed and repro (both lanes reorder the four legs in licensed since the flip), fastmath;
+mt8 is still reported as "no parallel form" for Blade (the join has a simd-reduction form
+but no thread-level form; Fortran arms run mt8).
 
 ## Hypothesis
 
 - vs natural (four-pass baseline): **WIN 2–3x** (one DRAM pass vs four).
 - vs expert, `repro`: **equivalent** (same loop, four serial chains each).
-- vs expert, `licensed`: blade-llvm **equivalent** (both vectorize the four accumulators);
-  blade-cpp **detectable loss to loss** (four serial chains against the expert's `simd
-  reduction`; the 40 MB stream limits the gap).
+- vs expert, `licensed`: **both Blade lanes equivalent** (all three vectorize the four
+  accumulators; before the flip the C++ lane kept four serial chains — fixed).
 - mt8: if no parallel form exists, the Blade cell is "no parallel form" and the expert's
   8-thread reduction wins outright — reported as a gap, not hidden.
 

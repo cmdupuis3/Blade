@@ -7,8 +7,8 @@ Control. Directory `bench/kernels/saxpy/`.
 x, y ∈ [0, 1)ⁿ, α = 1.5. `y2(k) = 1.5·x(k) + y(k)` (one multiply-add per element; FMA
 contraction is the regime's business and identical across the arms by the flag table).
 Named output: **y2**, materialized (three streams: read x, read y, write y2). The checksum
-fold `Σ y2²` is a builtin `(+)` fold in the Blade source and therefore reorder-licensed at
-the source (even where the C++ lane does not yet honour it, F11): under `BENCH_LICENSED`
+fold `Σ y2²` is a builtin `(+)` fold in the Blade source and therefore reorder-licensed
+(both lanes honour it by default since the flip): under `BENCH_LICENSED`
 the expert's checksum accumulation loop takes `!$omp simd reduction(+:acc)`, as do the two
 input-checksum folds (x, y — one each, combined in the source's order) — the matched loops
 for this kernel (README §3 table). The saxpy store loop itself has no reduction.
@@ -73,10 +73,10 @@ licensed (serial, mt8), repro (serial, mt8).
 
 ## Hypothesis
 
-**EQUIVALENT** in `repro` (bandwidth: 48 MB streamed + 16 MB read back). In `licensed`, if
-the checksum fold is licensed, blade-llvm and expert vectorize it while blade-cpp keeps a
-serial chain over 16 MB (F11) — a detectable loss for blade-cpp at most, since the three
-streams dominate. The independent explanation is bandwidth; a deviation either way is
+**EQUIVALENT** in both fp regimes (bandwidth: 48 MB streamed + 16 MB read back). In
+`licensed` every arm vectorizes the checksum fold (since the flip the C++ lane too — a
+checksum over a computed map gets `SIMD_REDUCTION` by default); the three streams dominate
+regardless. The independent explanation is bandwidth; a deviation either way is
 investigated.
 
 ## Risks

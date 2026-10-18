@@ -4,9 +4,8 @@
 # disassembles it, and prints a loop summary of the user functions (bench/validation/tools/asmfn.py).
 #
 # usage: sh bench/validation/tools/audit_B.sh <licensed|repro> <outdir> [kernel ...]
-#   licensed = BLADE_FP_REASSOC=1 (LLVM also BLADE_FP_CONTRACT=fast); repro = knob unset.
-#   (After the compiler's FP-default flip, "repro" must set BLADE_FP_REPRO=1 instead; edit the
-#   two export lines below accordingly.)
+#   licensed = no FP knob (the default since the FP-default flip: every licence honoured in both
+#              lanes, the LLVM lane contracts by default); repro = BLADE_FP_REPRO=1.
 # Serial build (BLADE_OMP_THREADS=1), BLADE_BLAS=0, BLADE_EXE_CACHE=0. Needs MSYS2 ucrt64 (g++,
 # objdump) and clang64 (clang). Python: C:\Python314\python.exe.
 set -u
@@ -21,7 +20,8 @@ out=$2
 shift 2
 kernels=${*:-"fusedchain onepass stencil recur maskagg dot saxpy"}
 export BLADE_BLAS=0 BLADE_OMP_THREADS=1 BLADE_EXE_CACHE=0
-if [ "$reg" = "licensed" ]; then export BLADE_FP_REASSOC=1; else unset BLADE_FP_REASSOC; fi
+unset BLADE_FP_REASSOC BLADE_FP_CONTRACT
+if [ "$reg" = "repro" ]; then export BLADE_FP_REPRO=1; else unset BLADE_FP_REPRO; fi
 for k in $kernels; do
   for lane in cpp llvm; do
     d=$out/$reg/$lane
@@ -29,7 +29,7 @@ for k in $kernels; do
     cp "$K/$k/$k.blade" "$d/$k.blade"
     rm -f "$d/$k.exe"
     if [ $lane = llvm ]; then
-      BLADE_LLVM=1 BLADE_LLVM_CLANG=C:/msys64/clang64/bin/clang.exe BLADE_FP_CONTRACT=fast \
+      BLADE_LLVM=1 BLADE_LLVM_CLANG=C:/msys64/clang64/bin/clang.exe \
         "$B" compile "$d/$k.blade" --print checksum,input_checksum > "$d/$k.build.log" 2>&1
     else
       "$B" compile "$d/$k.blade" --print checksum,input_checksum > "$d/$k.build.log" 2>&1

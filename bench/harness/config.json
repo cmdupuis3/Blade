@@ -45,23 +45,18 @@
     "all": {},
     "llvm": {
       "BLADE_FP_CONTRACT": "fast",
-      "_why": "blade-A F14: the LLVM lane does no FMA contraction by default; contraction only, the licence every other arm has"
+      "_why": "explicit contraction; redundant since 5f4b33ea (the LLVM lane contracts by default) but harmless"
     },
     "licensed": {
-      "BLADE_FP_REASSOC": "1"
+      "_why": "FP-default flip (commit 5f4b33ea): the default honours every licence in both lanes; no knob"
     },
-    "repro": {},
+    "repro": {
+      "BLADE_FP_REPRO": "1",
+      "BLADE_FP_REASSOC": "0",
+      "_why": "repro: no reordered fold anywhere; BLADE_FP_REASSOC=0 is the compatibility spelling; mt8 fold teams are serialized too"
+    },
     "fastmath": {
-      "BLADE_FP_REASSOC": "1"
-    },
-    "_flip_after_rebuild": {
-      "_doc": "Pending the FP-default compiler change (coordinator 2026-10-17). When the new Blade.exe is confirmed, replace the licensed/repro/fastmath entries above with these. Until then the current mapping stands.",
-      "licensed": {},
-      "repro": {
-        "BLADE_FP_REPRO": "1",
-        "BLADE_FP_REASSOC": "0"
-      },
-      "fastmath": {}
+      "_why": "same Blade knobs as licensed; fastmath differs on the Fortran side only"
     }
   },
   "fortran_flags": {

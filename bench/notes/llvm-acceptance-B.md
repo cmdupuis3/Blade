@@ -458,3 +458,84 @@ So in the `licensed` headline regime:
 
 In every kernel the `input_checksum` folds stay serial, and the blade-llvm arm has no thread
 form at all (F2).
+
+(Section 4 describes the binary BEFORE the FP-default flip. Section 5 supersedes its F11
+rows and its fold-form table.)
+
+## 5. Re-validation after the FP-default flip (2026-10-17)
+
+Binary: Blade.dll SHA-256 74B67280...CF892, built from bench merge 957afd95 (flip 5f4b33ea +
+master 74b96445 + monotonic clocks).
+- `licensed` = no FP knob, now the default.
+- `repro` = `BLADE_FP_REPRO=1`.
+- Scripts: `bench/validation/tools/` (updated spellings) plus `check_smoke_B.py` (compares
+  a `smoke_B.sh` log with `pins-B.json`).
+
+### Correctness
+
+| check | licensed | repro |
+|---|---|---|
+| `validate_B.py` (dumps, cell by cell) | ALL OK. lap worst 4.9e-15, trajectory 4.8e-15, maskagg fingerprint <= 2.6e-15 | ALL OK, identical numbers |
+| `smoke_B.sh` + `check_smoke_B.py`: 7 kernels + 6 twins x {cpp serial, cpp 2 threads, llvm} vs pins | ALL WITHIN 1e-12. Worst checksum error 4.3e-15 (fusedchain, cpp 2 threads); maskagg llvm = fallback (expected) | ALL WITHIN 1e-12. Worst 6.6e-15 (saxpy: the serial left fold is the least accurate order) |
+
+Under repro, every value is identical across cpp serial, cpp 2 threads and llvm; repro also
+serializes threaded folds (see the plan below). Under licensed, the C++ and LLVM lanes now
+differ in the last digits where their fold forms differ: fusedchain cpp 2.3e-15 vs llvm
+1.5e-16 against the pin.
+
+### Fold form (serial build; `blade plan` `fold form:` lines, `.cpp` macros, `.ll` flags)
+
+| kernel | fold | licensed (default): plan / .cpp / .ll | repro: plan / .cpp / .ll |
+|---|---|---|---|
+| fusedchain | kernel fold over the composed chain | `simd-reduction; reduce over a deferred computation (one level)` / 1 SIMD_REDUCTION / `fadd reassoc` | `serial (repro)` / 0 / 0 of 21 |
+| onepass | the 4-leg `<&!>` join | `simd-reduction; fused fold over 4 leaves (one traversal)` / 1 SIMD_REDUCTION / `reassoc` on all 4 legs | `serial (repro)` / 0 / 0 of 9 |
+| dot | zip-map fold | `simd-reduction; reduce over a deferred computation` / 1 / `reassoc` | `serial (repro)` / 0 / 0 of 5 |
+| saxpy | checksum over the y2 map | `simd-reduction; reduce over a deferred computation` / 1 / `reassoc` | `serial (repro)` / 0 / 0 of 6 |
+| stencil | per-row prodsum + row fold | `simd-reduction; prodsum` + `simd-reduction; ... deferred computation` / 4 / `reassoc` x4 | `serial (repro)` / 0 / 0 of 8 |
+| recur | per-row prodsum + row fold | `simd-reduction; prodsum` + ... / 3 / `reassoc` x3 | `serial (repro)` / 0 / 0 of 11 |
+| maskagg | `y * y` fold, input fold | `K-lanes(8)` x2 / lane folds / (LLVM refused) | `serial (repro)` / 0 / (refused) |
+| all | `input_checksum` folds | `K-lanes(8); reduce in expression position` | `serial (repro)` |
+
+**Changed versus section 4: F11 is FIXED by the flip.** In the C++ lane, the kernel folds of
+fusedchain, onepass, dot and saxpy are now simd reductions by default; before, they were
+serial even under `BLADE_FP_REASSOC=1`. Their blade-cpp `licensed` cells are no longer equal
+to `repro`.
+
+### Threading (mt8 build, `plan_B.sh`)
+
+**licensed:** threaded loops are unchanged from section 4. They are the input maps, plus:
+- fusedchain: kernel fold;
+- stencil: `lap` rows + checksum fold;
+- dot: fold;
+- saxpy: `y2` map + checksum fold.
+
+The plan now says what each threaded fold does, for example `fold form: threaded(Path B
+chunks, serial within each chunk)`. **A threaded fold is NOT also simd within a chunk.**
+Under mt8 the per-thread inner fold is a serial chain, whereas the serial build's fold is
+`simd-reduction`. This matters for the mt8 comparison with Fortran `reduction(+:)` under
+`-O3` (also serial per thread unless fast-math). onepass: the join is
+`simd-reduction`, not threaded (still no parallel form for `<&!>`, F4).
+
+**repro:** every fold licence is dropped, the THREADED ones too: "BLADE_FP_REPRO=1 -- this
+build keeps the serial association of every fold ... [omp] requested but emitted serial".
+So `mt8 x repro` has threaded MAPS but serial FOLDS in Blade. The harness should run mt8 only
+under `licensed`, or report Blade's `mt8 x repro` fold kernels as "no parallel form".
+
+### Store audit (licensed, FULL size, compile only, both lanes)
+
+Every named-output store survives: saxpy `y2`, stencil `lap`, recur trajectory, maskagg `y`.
+The production loops are the same as section 4 except the C++ folds:
+
+| kernel | blade-cpp production loop now | before the flip (section 4) | blade-llvm (unchanged) |
+|---|---|---|---|
+| fusedchain | one 12-insn loop: `vdivpd` + 3 `vfmadd*pd` + 1 `vaddpd` (vector accumulator) | scalar `vaddsd` chain (4 per iteration) | 4x unrolled `vdivpd`/`vfmadd`, `reassoc` lanes |
+| onepass | one 12-insn loop: `vmulpd` x2 + `vfmadd` + 3 `vaddpd` (4 vector accumulators) | 16 scalar `vaddsd` per iteration | 24 packed adds per iteration (unrolled) |
+| dot | 6-insn loop: `vmulpd` + `vaddpd`, ONE vector accumulator, not unrolled | `vmulpd` + 4 scalar `vaddsd` | 16 `vfmadd*pd` per iteration (4 accumulators x 4-wide) |
+| saxpy | y2 store loop unchanged (`vfmadd` + `vmovupd`); checksum 7-insn loop `vmulpd` + `vaddpd`, one vector accumulator | scalar `vaddsd` chain | 16-store FMA loop; 20-FMA unrolled checksum |
+| stencil, recur | unchanged structure; the row prodsums are `omp simd reduction` | same, under REASSOC=1 | unchanged |
+
+The remaining difference between the lanes in `licensed`: blade-cpp's simd folds keep ONE
+4-wide accumulator, so each iteration waits on the previous `vaddpd` (latency ~3-4 cycles per
+4 cells), while clang unrolls into 4 independent accumulators. At the DRAM-resident full
+sizes this is probably hidden by bandwidth; a cache-resident size would expose it. That is
+an expectation, not a measurement.
