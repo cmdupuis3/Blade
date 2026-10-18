@@ -3419,8 +3419,78 @@ and genReduceComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
             peelCompLets nextCtx (accLines @ code) body
         | _ -> (accCtx, accLines, e)
     let (ctx, prelude, compExpr) = peelCompLets ctx [] compExpr
-    let (code, outCtx) = genReduceComputeBindingCore ctx binding builder compExpr kernelExpr seedExpr
-    (prelude @ code, outCtx)
+    // DEFERRED OPERANDS (G12, bench llvm-acceptance-B F5). A leaf map whose
+    // OPERAND is itself a still-deferred map -- `let r = method_for(x) <@>
+    // half` then `reduce(method_for(r) <@> sq, (+))`, at top level or in a
+    // top-level block -- reached the fold nest, which reads every operand BY
+    // NAME, while `r` was only a `// <deferred computation>` comment: g++
+    // rejected the program (BL9002). Materialize each such operand into a
+    // TEMPORARY first and fold over it. Deliberately a temporary, NOT
+    // `forceDeferredArrayInput`'s materialize-under-its-own-name: the
+    // interpreter's twin (Interp/Loops.resolveFusedArraySource) forces the
+    // operand without registering it, so it does not join the auto-print list
+    // and a later consumer still sees it deferred. The operand is restored to
+    // the deferred map after the fold for the same reason. A REDUCTION JOIN
+    // (tuple kernel + tuple seed) is left alone: its legs SHARE a named
+    // deferred operand by design (genReduceJoinCore's join-share leaf), and an
+    // id that is itself a leaf is never forced (it must stay an unforced apply).
+    let isJoin =
+        match kernelExpr, seedExpr with
+        | IRTuple ks, IRTuple ss -> ks.Length = ss.Length && ks.Length >= 2
+        | _ -> false
+    let deferredOperandIds =
+        if isJoin then [] else
+        let rec resolve e =
+            match e with
+            | IRVar (id, _) ->
+                (match Map.tryFind id ctx.DeferredComputations with
+                 | Some d -> resolve d
+                 | None -> e)
+            | _ -> e
+        let rec leaves e =
+            match resolve e with
+            | IRFusion (l, r) -> leaves l @ leaves r
+            | other -> [ other ]
+        leaves compExpr
+        |> List.collect (function
+            | IRApplyCombinator info ->
+                info.Arrays |> List.choose (function
+                    | IRVar (id, _) ->
+                        (match Map.tryFind id ctx.DeferredComputations with
+                         | Some (IRApplyCombinator _ | IRComposeApply _ | IRFunctorMap _) -> Some id
+                         | _ -> None)
+                    | _ -> None)
+            | _ -> [])
+        |> List.distinct
+        |> List.filter (fun id ->
+            // The ids the leaf walk itself passes through stay deferred.
+            let rec onSpine e =
+                match e with
+                | IRVar (vid, _) when vid = id -> true
+                | IRVar (vid, _) ->
+                    (match Map.tryFind vid ctx.DeferredComputations with
+                     | Some d -> onSpine d
+                     | None -> false)
+                | IRFusion (l, r) -> onSpine l || onSpine r
+                | _ -> false
+            not (onSpine compExpr))
+    let (ctxForced, forceLines) =
+        deferredOperandIds |> List.fold (fun (accCtx: CodeGenContext, accLines) id ->
+            let ty = inferExprType accCtx.DeferredComputations.[id]
+            let tmp = $"{bindingCppName binding}__in{id}"
+            let matBinding = { Id = id; Name = tmp; Type = ty; Value = IRCompute (IRVar (id, ty)); IsConst = true; IsMutable = false }
+            let (code, c1) = genBinding accCtx matBinding builder
+            ({ c1 with DeferredComputations = Map.remove id c1.DeferredComputations }, accLines @ code)) (ctx, [])
+    let (code, outCtx) = genReduceComputeBindingCore ctxForced binding builder compExpr kernelExpr seedExpr
+    let outCtx =
+        deferredOperandIds |> List.fold (fun (c: CodeGenContext) id ->
+            { c with
+                DeferredComputations = Map.add id ctx.DeferredComputations.[id] c.DeferredComputations
+                VarNames =
+                    match Map.tryFind id ctx.VarNames with
+                    | Some n -> Map.add id n c.VarNames
+                    | None -> Map.remove id c.VarNames }) outCtx
+    (prelude @ forceLines @ code, outCtx)
 
 and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (compExpr: IRExpr) (kernelExpr: IRExpr) (seedExpr: IRExpr) : string list * CodeGenContext =
     // THE JOIN ENCODING (IR.fs, IRReduceCompute): tuple kernel + tuple seed =

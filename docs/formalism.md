@@ -1312,7 +1312,9 @@ A [+] B  =  method_for(A, B) <@> (+)                             // cross-iterat
 
 `(+)` remains the scalar kernel for combinator use; all three coincide at
 rank 0. Bracketed ops inherit primitive symmetry: `A [*] A` iterates
-triangularly automatically.
+triangularly automatically. Over two COMPACT operands the elementwise result's
+storage class follows the sign-character rule (§8.5): `A * A` of antisymmetric
+operands is symmetric, `A + S` dense.
 
 ### 6.2 Primitive symmetry annotations
 
@@ -1832,6 +1834,54 @@ object_for(k) <@> (A, A, B, B)  // A over Idx<M>; B over Idx<K>; comm within gro
 
 At r = 2, per-dimension product-*structured* storage is recoverable via the
 Cauchy split (§12.5); it does not change cardinality or this typing rule.
+
+### 8.5 Elementwise operators over compact operands: the sign-character rule
+
+A compact class stores one simplex and reconstructs the rest through a mirror
+involution on the VALUE: identity for `SymIdx` (character +1), negation for
+`AntisymIdx` (character −1). An elementwise operator `L op R` over two compact
+operands on ONE index space (same rank, same base) therefore has a result
+class fixed by the characters, not by the operands' class names:
+
+| op | operand characters | result |
+|----|--------------------|--------|
+| `*`, `/` | multiply: (−1)(−1) = +1, (−1)(+1) = −1 | `A * A`, `A / A`, `S * S` symmetric; `A * S`, `S * A`, `A / S` antisymmetric |
+| `+`, `-` | equal characters keep theirs | `A ± A` antisymmetric, `S ± S` symmetric |
+| `+`, `-` | mixed | `A ± S` has no mirror law: DENSE |
+| `%`, `^`, comparisons, logicals | respect no sign law | DENSE |
+
+One exception keeps the diagonal honest: `S / A` is sign-odd, but its diagonal
+is `s / 0` (inf/NaN, BL8013 for integers), which a strict class would store as
+0 — it is DENSE, so the diagonal is computed.
+
+Only `A ± A` and `S ∘ S` keep the operands' record, so only they co-iterate
+the stored cells (§6.1's zip). Every class CHANGE is a gather over the
+result's own range — `range<SymIdx<r, I>>`, `range<AntisymIdx<r, I>>` or the
+dense `range<I, ..., I>` — reading each operand by logical subscript, so each
+read applies its own mirror and the antisymmetric zero diagonal. `R * R` is
+therefore a `SymIdx` array whose diagonal is stored (0 · 0 = 0):
+
+```blade
+let A = [1.0, 2.0, 4.0]
+let R = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> x - y |> compute
+let S = R * R
+let s10 = S(1, 0)
+let total = reduce(reduce(decompact(S, 0), (+)), (+))
+// EXPECT: s10 = 1.0
+// EXPECT: total = 28.0
+```
+
+Before this rule `R * R` zipped the strict cells and kept the antisymmetric
+class, so every mirrored read came back negated (`s10 = -1.0`, `total = 0.0`)
+in all three lanes alike; `A ± A` was refused (BL4015) and `A ∘ S` refused
+(BL3999). A WRITTEN co-iteration over antisymmetric operands,
+`method_for(zip(R, Q)) <@> k`, keeps the strict record, so it is certified by
+the kernel's JOINT sign parity — every operand reads the same mirrored cell, so
+they flip together: `a + b` is jointly odd (accepted), `a * b` jointly even
+(refused BL4015; the result is symmetric). The unary forms (`R + 1.0`,
+`abs(R)`, `R ^ 2.0`) keep their BL4015 refusal: a map's iteration is the
+input's strict simplex, which has no diagonal to write (decompact first).
+Corpus symmetry/096–101 pin each row.
 
 ## 9. Dimensional Currying
 

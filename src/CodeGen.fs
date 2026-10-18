@@ -2801,6 +2801,25 @@ let isDestructureCarrier (b: IRBinding) : bool = b.Name.StartsWith "_("
 let isInternalBindingName (name: string) : bool =
     name.StartsWith "__" && not (System.Text.RegularExpressions.Regex.IsMatch(name, @"^__expr\d+$"))
 
+/// The printed form of a COMPOUND array (G22: its extent is a run-time
+/// cardinality, `Idx<?>`): Some false = one flat run of the present cells in
+/// storage order (the compound record alone, or with two or more trailing
+/// dims), Some true = nested rows (exactly one trailing dim: one row of
+/// `trailing_stride` cells per present compound cell), None = no printed form
+/// (a non-scalar element). The print rank regime with the compound axis
+/// counted as one axis; both lanes read it (Interp/ArrayOps.printCompoundCells).
+let compoundPrintShape (arrType: IRArrayType) : bool option =
+    let scalarElem =
+        match IR.stripUnits arrType.ElemType with
+        | IRTScalar et -> et <> ETUnit
+        | IRTIdxTagged (IRTScalar et, _) -> et <> ETUnit
+        | _ -> false
+    match arrType.IndexTypes with
+    | head :: trailing when head.IxKind = IxKCompound && scalarElem
+                            && trailing |> List.forall (fun ix -> ix.IxKind <> IxKCompound && ix.IxKind <> IxKSparse) ->
+        Some (List.length trailing = 1)
+    | _ -> None
+
 /// Whether a binding that passes the printability gate (not deferred, not a
 /// streamed read, not an unmaterialized loop value) still has NO printed form:
 /// genPrintStatements' arms that emit only a C++ comment, decided from the
@@ -2826,7 +2845,9 @@ let hasNoPrintedForm (modul: IRModule) (b: IRBinding) : bool =
             | IRTNamed _ ->
                 not (arrayRank arrType = 1 && (aggregatePrintOf modul.Types arrType.ElemType).IsSome)
             | _ -> false
-        wreathUnprintable || isCompoundArrayType arrType || isSparseArrayType arrType || elemUnprintable
+        wreathUnprintable
+        || (isCompoundArrayType arrType && (compoundPrintShape arrType).IsNone)
+        || isSparseArrayType arrType || elemUnprintable
     | _ -> true
 
 /// The `--print` refusal for selected bindings with no printed form, one text
@@ -3004,12 +3025,40 @@ let genPrintStatements (modul: IRModule) : string list =
                  | _ ->
                      [$"    // (OrbIdx array '{b.Name}' not auto-printed: a wreath group combined with other index groups has no pool layout)"])
             | ArrayElem arrType when isCompoundArrayType arrType ->
-                // Compound (load_compound) values wrap a compact buffer plus a
-                // compound_index_t pointer; there is no operator<< for
-                // Compound<T,RANK>. Skip auto-print with a diagnostic so the
-                // generated program still compiles -- scalar value-checks via
-                // element access (e.g. data(lead, t)) remain available.
-                [$"    // (compound array '{b.Name}' not auto-printed; Compound<T,RANK> has no operator<<)"]
+                // A compound value (`compound(x, mask)`, a map over one, a
+                // load_compound read) wraps a compact buffer plus a
+                // compound_index_t pointer, and its extent is known only at run
+                // time (`Idx<?>`, G22). It prints its PRESENT cells in storage
+                // (lex rank) order, by the print rank regime with the compound
+                // axis counted as ONE axis: alone (or with two or more trailing
+                // dims) one flat run, with exactly one trailing dim nested rows.
+                // The interpreter's twin is Interp/ArrayOps.printCompoundCells.
+                // A non-scalar element keeps the skip comment (no printed form).
+                match compoundPrintShape arrType with
+                | Some nested ->
+                    let v = sanitizeCppName b.Name
+                    let i, j = printLoopVar 0, printLoopVar 1
+                    if nested then
+                        [ $"    cout << \"{b.Name} = [\";"
+                          $$"""    for (size_t {{i}} = 0; {{i}} < {{v}}.idx->cardinality; {{i}}++) {"""
+                          $"        if ({i}) cout << \", \";"
+                          "        cout << \"[\";"
+                          $$"""        for (size_t {{j}} = 0; {{j}} < {{v}}.trailing_stride; {{j}}++) {"""
+                          $"            if ({j}) cout << \", \";"
+                          $"            cout << {v}.data[{i} * {v}.trailing_stride + {j}];"
+                          "        }"
+                          "        cout << \"]\";"
+                          "    }"
+                          "    cout << \"]\" << endl;" ]
+                    else
+                        [ $"    cout << \"{b.Name} = [\";"
+                          $$"""    for (size_t {{i}} = 0; {{i}} < {{v}}.size(); {{i}}++) {"""
+                          $"        if ({i}) cout << \", \";"
+                          $"        cout << {v}.data[{i}];"
+                          "    }"
+                          "    cout << \"]\" << endl;" ]
+                | None ->
+                    [$"    // (compound array '{b.Name}' not auto-printed; its element type has no printed form)"]
             | ArrayElem arrType when isSparseArrayType arrType ->
                 // Same rationale as the compound arm: Sparse<T,RANK> has no
                 // operator<<; value-checks read cells via full-key access.

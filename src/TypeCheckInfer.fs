@@ -7048,6 +7048,127 @@ and inferBinOpCore env mode op left right : TypeResult<TypedExpr> =
                             && aR.IndexTypes |> List.forall isPlainDenseIx
                             && indexShapesAgree aL.IndexTypes aR.IndexTypes)
                     | _ -> false
+                // THE SIGN-CHARACTER RULE (G16; formalism 8.5). A compact class
+                // reconstructs its unstored triangle through a mirror involution
+                // on the VALUE: identity for SymIdx (character +1), negation for
+                // AntisymIdx (character -1). An elementwise op over two compact
+                // operands on ONE index space therefore has a result class fixed
+                // by the operands' characters:
+                //   *, /    the characters MULTIPLY: A*A and S*S are symmetric,
+                //           A*S and S*A antisymmetric ((-a)(-b) = ab).
+                //   +, -    equal characters keep theirs (A+A antisymmetric,
+                //           S+S symmetric); MIXED characters (A+S) have no
+                //           mirror law at all -- the result is DENSE.
+                //   others  (%, ^, comparisons, logicals) respect no sign law:
+                //           DENSE.
+                // Only A±A and S∘S keep the operands' record, so only they
+                // co-iterate (the zip below). Every class CHANGE is a gather
+                // over the RESULT class's own index range, each cell reading the
+                // operands by logical subscript (their reads apply their own
+                // mirror and the zero antisymmetric diagonal), so the result is
+                // stored in its true class: S = R * R is a SymIdx array with
+                // its (zero) diagonal, and S(1, 0) = S(0, 1). Before this rule
+                // `R * R` zipped the strict cells, kept the antisymmetric class,
+                // and negated every mirrored read (a silent wrong value in all
+                // three lanes).
+                let signRule =
+                    match lRes, rRes with
+                    | ArrayElem aL, ArrayElem aR ->
+                        (match aL.IndexTypes, aR.IndexTypes with
+                         | [ ixL ], [ ixR ]
+                             when ixL.Rank >= 2 && ixL.Rank = ixR.Rank
+                                  && ixL.IxKind = IxKPlain && ixR.IxKind = IxKPlain
+                                  && (ixL.Symmetry = SymAntisymmetric || ixR.Symmetry = SymAntisymmetric)
+                                  && (ixL.Symmetry = SymAntisymmetric || ixL.Symmetry = SymSymmetric)
+                                  && (ixR.Symmetry = SymAntisymmetric || ixR.Symmetry = SymSymmetric) ->
+                             let ch (ix: IRIndexType) = if ix.Symmetry = SymAntisymmetric then -1 else 1
+                             let cL, cR = ch ixL, ch ixR
+                             let result =
+                                 match op with
+                                 // S / A is sign-odd, but its diagonal is s / 0
+                                 // (inf/NaN, or BL8013 for integers), which a
+                                 // strict class would silently store as 0: the
+                                 // result is DENSE so the diagonal is computed.
+                                 // A / A keeps SYMMETRIC: that range has a stored
+                                 // diagonal, computed (0 / 0) like any cell.
+                                 | OpDiv when cR < 0 && cL > 0 -> None
+                                 | OpMul | OpDiv -> Some (if cL * cR < 0 then SymAntisymmetric else SymSymmetric)
+                                 | OpAdd | OpSub when cL = cR -> Some (if cL < 0 then SymAntisymmetric else SymSymmetric)
+                                 | _ -> None
+                             // A ± A keeps the record: the zip's joint-parity
+                             // gate certifies it (buildApplyInfo).
+                             if result = Some SymAntisymmetric && cL < 0 && cR < 0 then None
+                             else Some (ixL, ixR, result)
+                         | _ -> None)
+                    | _ -> None
+                // The base the result's range is spelled over: the operands'
+                // shared named index type, or their shared static extent. A
+                // base this site cannot spell (a runtime extent, two different
+                // bases) leaves the old path, whose gates refuse (BL3999 across
+                // two records; BL4015's joint-parity arm on one record).
+                let signBase =
+                    match signRule with
+                    | Some (ixL, ixR, _) when ixL.Tag = ixR.Tag && ixL.Extent = ixR.Extent ->
+                        let sp = mergeSpan left.Span right.Span
+                        (match ixL.Tag with
+                         | Some t ->
+                             (match lookupTypeDef t env with
+                              | Some (TDIIndexType _) -> Some (mkExpr sp (ExprVar t), TyNamed (t, []))
+                              | _ -> None)
+                         | None ->
+                             (match ixL.Extent with
+                              | IRLit (IRLitInt n) ->
+                                  Some (mkExpr sp (ExprLit (LitInt n)), TyIdx (mkExpr sp (ExprLit (LitInt n))))
+                              | _ -> None))
+                    | _ -> None
+                match signRule, signBase with
+                | Some (ixL, _, result), Some (baseExpr, baseIdxTy) ->
+                    unitRulesForArrayOp "an elementwise array operator" op (elemUnits lRes) (elemUnits rRes) (Some tR)
+                    |> Result.bind (fun resUnits ->
+                        let sp = mergeSpan left.Span right.Span
+                        let synAt k = mkExpr sp k
+                        let uid = env.Builder.FreshId()
+                        let r = ixL.Rank
+                        let pNames = List.init r (fun m -> $"__sg{uid}_{m}")
+                        let pVar m = synAt (ExprVar pNames.[m])
+                        let lit (n: int) = synAt (ExprLit (LitInt (int64 n)))
+                        let add a b = synAt (ExprBinOp (Elementwise, OpAdd, a, b))
+                        // The kernel receives the range's PREFIX OFFSETS
+                        // (loops/170, 173): a SymIdx coordinate is
+                        // p0 + .. + pm, an AntisymIdx one adds the strict step m.
+                        // A dense range hands the coordinates themselves.
+                        let coords =
+                            match result with
+                            | None -> List.init r pVar
+                            | Some cls ->
+                                List.init r (fun m ->
+                                    let prefix = List.init (m + 1) pVar |> List.reduce add
+                                    if cls = SymAntisymmetric && m > 0 then add prefix (lit m) else prefix)
+                        let rangeTy =
+                            match result with
+                            | Some SymSymmetric -> [ TySymIdx (r, SymBaseExtent baseExpr) ]
+                            | Some _ -> [ TyAntisymIdx (r, SymBaseExtent baseExpr) ]
+                            | None -> List.replicate r baseIdxTy
+                        let bindName side = $"__sg{uid}_{side}"
+                        let lSrc = if left.Kind.IsExprVar then left else synAt (ExprVar (bindName "l"))
+                        let rSrc = if right.Kind.IsExprVar then right else synAt (ExprVar (bindName "r"))
+                        let body =
+                            synAt (ExprBinOp (Elementwise, op,
+                                              synAt (ExprApp (lSrc, coords)),
+                                              synAt (ExprApp (rSrc, coords))))
+                        let klam =
+                            synAt (ExprLambda (pNames |> List.map (fun n -> { Name = n; Type = None; Default = None; NameSpan = noSpan }), None, body))
+                        let gather =
+                            synAt (ExprCompute (synAt (ExprBinOp (Elementwise, OpApply,
+                                                                  synAt (ExprMethodFor [ synAt (ExprRange rangeTy) ]), klam))))
+                        let lets =
+                            [ if not left.Kind.IsExprVar then
+                                  yield StmtLet { Mutability = BindLet; Pattern = mkPat sp (PatVar (bindName "l")); Type = None; Value = left }
+                              if not right.Kind.IsExprVar then
+                                  yield StmtLet { Mutability = BindLet; Pattern = mkPat sp (PatVar (bindName "r")); Type = None; Value = right } ]
+                        let synth = if lets.IsEmpty then gather else synAt (ExprBlock (lets, Some gather))
+                        inferExpr env synth |> Result.map (stampElemUnits env resUnits))
+                | _ ->
                 if zipable then
                     match unitRulesForArrayOp "an elementwise array operator" op (elemUnits lRes) (elemUnits rRes) (Some tR) with
                     | Error e -> Error e
@@ -12137,6 +12258,43 @@ and buildApplyInfo (env: TypeEnv)
                     Blade.Deduce.deduceSignParities signResolver lambdaInfo.Params restampedBody
                 let conjCommutes =
                     Blade.Deduce.deduceConjCommutes lambdaInfo.Params restampedBody
+                // CO-ITERATION (zip) asks the JOINT question (G16). Every zip
+                // operand reads the SAME cell of the one shared record, so the
+                // antisymmetric mirror negates them TOGETHER: the output keeps
+                // the strict class iff f(-x, -y, ..) = -f(x, y, ..). The
+                // per-parameter summaries answer a different question --
+                // `x * y` is odd in each argument alone yet jointly EVEN (the
+                // product of two antisymmetric arrays is SYMMETRIC, and keeping
+                // the strict class negated every mirrored read, silently);
+                // `x + y` is odd in neither alone yet jointly ODD (refused
+                // before, wrongly). An outer product keeps the per-parameter
+                // rule: there each record belongs to one parameter only.
+                let jointAntisym =
+                    if List.isEmpty sharedIndexTypes then None
+                    else
+                        let positions =
+                            inheritedClaims
+                            |> List.choose (fun (i, cls, _) -> if cls = SymAntisymmetric then Some i else None)
+                            |> List.distinct
+                        let parms = positions |> List.choose (fun i -> List.tryItem i lambdaInfo.Params)
+                        if parms.IsEmpty || parms.Length <> positions.Length then None
+                        else Some (parms, Blade.Deduce.deduceJointSignParity signResolver parms restampedBody)
+                let jointErr =
+                    match jointAntisym with
+                    | Some (_, Blade.Deduce.SOdd) | None -> None
+                    | Some (parms, verdict) ->
+                        let names = parms |> List.map (_.Name) |> String.concat ", "
+                        let proved =
+                            match verdict with
+                            | Blade.Deduce.SEven ->
+                                "provably sign-EVEN when its co-iterated antisymmetric operands flip sign TOGETHER (f(-x, -y) = f(x, y): the result is SYMMETRIC)"
+                            | _ -> "of UNKNOWN joint sign parity when its co-iterated antisymmetric operands flip sign together"
+                        Some (AntisymMapNotOdd (names, proved))
+                let inheritedClaims =
+                    if jointAntisym.IsSome then
+                        inheritedClaims |> List.filter (fun (_, cls, _) -> cls <> SymAntisymmetric)
+                    else inheritedClaims
+                if jointErr.IsSome then jointErr else
                 inheritedClaims |> List.tryPick (fun (i, cls, lvls) ->
                     let pname =
                         match List.tryItem i lambdaInfo.Params with

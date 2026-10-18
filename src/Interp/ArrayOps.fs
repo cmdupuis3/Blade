@@ -2242,6 +2242,32 @@ let rec private raggedFlatValues (s: Store) : Value list =
     | SNested rows -> rows |> Array.toList |> List.collect raggedFlatValues
     | SRagged (rows, _, _) -> rows |> Array.toList |> List.collect raggedFlatValues
 
+/// Print a COMPOUND binding's present cells (G22) -- the twin of
+/// genPrintStatements' compound arm, byte-identical to it. `nested` (from
+/// CodeGen.compoundPrintShape) prints one row of `TrailingStride` cells per
+/// present compound cell; otherwise the whole compact buffer is one flat run.
+let printCompoundCells (name: string) (cv: CompoundValue) (nested: bool) (sb: StringBuilder) : unit =
+    let et =
+        match elemThrough cv.ElemType with
+        | Some et -> et
+        | None -> raise (ArrayOpUnsupported $"print: compound '{name}' of non-scalar element type")
+    let cells = raggedFlatValues cv.Data |> Array.ofList
+    let cell (k: int64) = if k < int64 cells.Length then formatCell et cells.[int k] else formatCell et (zeroOfElemTy cv.ElemType)
+    sb.Append(name).Append(" = [") |> ignore
+    if nested then
+        for r in 0L .. cv.Cardinality - 1L do
+            if r > 0L then sb.Append(", ") |> ignore
+            sb.Append("[") |> ignore
+            for t in 0L .. cv.TrailingStride - 1L do
+                if t > 0L then sb.Append(", ") |> ignore
+                sb.Append(cell (r * cv.TrailingStride + t)) |> ignore
+            sb.Append("]") |> ignore
+    else
+        for k in 0L .. cv.Cardinality * cv.TrailingStride - 1L do
+            if k > 0L then sb.Append(", ") |> ignore
+            sb.Append(cell k) |> ignore
+    sb.Append("]").Append('\n') |> ignore
+
 /// Print a top-level ARRAY binding to `sb`, byte-matching the compiled binary.
 /// Dense scalar-element arrays (flat 1-3, grid 4, placeholder) via the flat
 /// emitters; symmetric/antisym/Hermitian (rank 2-8) via emitSymAware; ragged

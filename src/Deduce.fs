@@ -648,6 +648,36 @@ let deduceSignParities (resolver: IRId -> SignParity list option)
     let body = flattenBindings body
     parms |> List.map (fun p -> signParityOf resolver p.VarId body)
 
+/// JOINT sign parity: how the body behaves when EVERY parameter in `ids` is
+/// negated at once -- f(-x, -y) against f(x, y). This is the question a
+/// CO-ITERATION (zip) over one antisymmetric record asks: all operands read
+/// the SAME cell, so the mirror involution flips them together, and the
+/// per-parameter summaries answer the wrong question (`x * y` is odd in x
+/// alone and in y alone, yet jointly EVEN -- the G16 silent wrong value;
+/// `x + y` is neither alone, yet jointly ODD). Computed by renaming every
+/// tracked parameter to the first one (capture-free `substVar`, binder ids
+/// being globally unique) and asking the one-parameter rule, which is exact
+/// because the walker only ever compares a variable's id against the tracked
+/// id. A body substVar cannot rebuild answers SUnknown (no claim). Empty
+/// `ids` answers SEven (nothing flips).
+let deduceJointSignParity (resolver: IRId -> SignParity list option)
+                          (parms: TypedParam list) : TypedExpr -> SignParity =
+    fun body ->
+        let body = flattenBindings body
+        match parms with
+        | [] -> SEven
+        | [ p ] -> signParityOf resolver p.VarId body
+        | p0 :: rest ->
+            let repl = { body with Kind = TExprVar (p0.Name, p0.VarId, None); Type = p0.Type }
+            let renamed =
+                rest |> List.fold (fun acc (p: TypedParam) ->
+                    acc |> Option.bind (fun b ->
+                        if not (usesVar p.VarId b) then Some b
+                        else substVar p.VarId repl b)) (Some body)
+            match renamed with
+            | Some b -> signParityOf resolver p0.VarId b
+            | None -> SUnknown
+
 // Conjugation-linearity (the Hermitian twin of the sign summaries)
 
 /// Is this p-free subtree a REAL constant (one conjugation fixes)? Element

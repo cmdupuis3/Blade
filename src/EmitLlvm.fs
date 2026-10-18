@@ -4967,6 +4967,35 @@ and private emitTupleParts (c: Ctx) (e: IRExpr) : ValKind list =
         (match tupleComponent c parent idx isFlat with
          | VTuple ps -> ps
          | single -> [ single ])
+    // A TUPLE-RETURNING CALL (`let (a, b) = f()`, G12). This lane has no
+    // struct-return ABI, so the callee is INLINED, exactly as a capturing
+    // callee is in emitCall: its parameters bind to the arguments, and its
+    // body is walked here as a pack, so the components land as the caller's
+    // own values. A recursive tuple-returning call cannot be inlined and
+    // refuses (the C++ lane takes it).
+    | IRApp (IRVar (fid, _), args, _) when c.Callables.ContainsKey fid ->
+        let cl = c.Callables.[fid]
+        if cl.IsArityPoly then refuse ($"a call to the arity-polymorphic function '{cl.SourceName}'")
+        if cl.IsCudaKernel || cl.IsMpiParallel then
+            refuse ($"a call to '{cl.SourceName}', which carries a cuda/mpi strategy")
+        if List.length cl.Params <> List.length args then
+            refuse ($"a partial application of '{cl.SourceName}' ({(List.length args)} of {(List.length cl.Params)} arguments)")
+        if not (c.Inlining.Add cl.Id) then
+            refuse ($"a recursive call to '{cl.SourceName}', which returns a tuple (inlined in this lane)")
+        try
+            let kargs =
+                List.zip cl.Params args
+                |> List.map (fun (p, a) ->
+                    match arrayShapeOf p.Type with
+                    | Some _ -> KArray (emitArr c a)
+                    | None when (raggedArrShape p.Type).IsSome -> KArray (emitArr c a)
+                    | None -> KScalar (emitExpr c a))
+            List.iter2 (bindKernelParam c) cl.Params kargs
+            framePush c cl.SourceName
+            let parts = emitTupleParts c cl.Body
+            framePop c
+            parts
+        finally c.Inlining.Remove cl.Id |> ignore
     // TERMINATION: the base case must NOT hand a pack-typed node back to
     // `classifyValue`, whose `IRTTuple` arm calls straight back here -- that
     // pair loops forever on any pack shape without an arm above (a
@@ -5456,11 +5485,43 @@ let private emitPrints (c: Ctx) (bindings: IRBinding list) : unit =
         // aggregate arm); a destructuring carrier never does.
         | IRTTuple _ -> true
         | _ -> false
+    // `--print <names>` (BLADE_PRINT, CodeGenState.printSelection), applied
+    // exactly where genPrintStatements applies it (G12): a selection prints
+    // only the named bindings, internal `__` names included; no selection
+    // prints every non-internal one. This pass used to ignore the selection
+    // and echo every binding.
+    let selection = Blade.CodeGenState.printSelection ()
+    let wanted (b: IRBinding) =
+        match selection with
+        | Some names -> Set.contains b.Name names
+        | None -> not (Blade.CodeGen.isInternalBindingName b.Name)
+    let printsHere (b: IRBinding) =
+        (not (deferred.Contains b.Id) || c.Forced.Contains b.Id)
+        && printableValue b.Value && printableType b.Type
+        && (match c.Slots.TryGetValue b.Id with
+            | true, (_, sc) -> sc <> ScVoid
+            | _ ->
+                c.ArrSlots.ContainsKey b.Id
+                || (match c.TupleSlots.TryGetValue b.Id with
+                    // A struct component reaches the print below, which
+                    // refuses it (the C++ lane prints it).
+                    | true, _ -> not (Blade.CodeGen.isDestructureCarrier b)
+                                 && ((Blade.CodeGen.aggregatePrintOf [] b.Type).IsSome
+                                     || Blade.IR.flattenTupleLeaves b.Type
+                                        |> List.exists (fun t -> (Blade.IR.stripUnits t).IsIRTNamed))
+                    | _ -> false))
+    // A selected name this pass would NOT print -- no such binding (a typo),
+    // a function, a deferred loop value, a value with no printed form -- is
+    // the C++ lane's BL7004 refusal, by name, with its exact text: hand the
+    // program over rather than restate (or silently drop) that judgment.
+    match selection with
+    | Some names ->
+        for n in names do
+            if not (bindings |> List.exists (fun b -> b.Name = n && printsHere b)) then
+                refuse ($"the --print selection names '{n}', which this lane does not print (the C++ lane prints it or refuses BL7004)")
+    | None -> ()
     for b in bindings do
-        let visible =
-            not (Blade.CodeGen.isInternalBindingName b.Name)
-            && (not (deferred.Contains b.Id) || c.Forced.Contains b.Id)
-            && printableValue b.Value && printableType b.Type
+        let visible = wanted b && printsHere b
         if visible then
             match c.Slots.TryGetValue b.Id with
             | true, (slot, sc) when sc <> ScVoid ->
