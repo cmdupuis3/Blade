@@ -118,9 +118,12 @@ reduction loop; the output checksum (with multiplicities) is accumulated in the 
   checksum costs more than the triangle read; the single accumulator chain of length 201
   per cell is latency-bound against an expert that jams or uses the outer-product order —
   the gram mechanism at a shorter chain).
-- vs expert, `licensed`: **equivalence to a modest loss** — the chain is replaced by 4
-  (C++) or 16 (LLVM) lanes per cell, so the remaining differences are the per-row re-reads
-  of the simplex operands and the logical-read checksum; both Blade lanes reported.
+- vs expert, `licensed`: **equivalence to a modest loss** was the hypothesis; the pilot
+  (blade-A §13) attributes the observed loss to ~2.3x on the kernel — a multiply plus an FMA
+  per term with 3 loads against the expert's hoisted pair product (one FMA, 0.67 loads;
+  G1b) — plus the measured checksum share (36% of the LLVM time, 70% in C++; G3a). Both
+  Blade lanes reported; the attribution column (README §8) carries the split, the total
+  stays the result.
 - mt8: the dynamic schedule on the outer simplex level should scale like the expert's.
 
 ## Risks

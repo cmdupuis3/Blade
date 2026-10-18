@@ -596,7 +596,13 @@ One Markdown table per regime, rows = kernel x arm, columns:
 `kernel | arm | n | min (s) | median (s) | IQR (s) | denominator | ratio [95% CI] | verdict | hypothesis | correctness | parallelism | notes`
 
 plus, for kernels with twins, `incremental (s) [CI]` and `incremental ratio [CI] or
-undefined`. `correctness` is `ok (pins)` / `DISQUALIFIED (rel err)`; `parallelism` is
+undefined`, and, for the compact kernels (gram, comoment3, antisym, pairkernel), an
+**attribution** column — `kernel-only estimate, informal: checksum share X%` — drawn from
+blade-A's §13 phase measurements. It is labelled an attribution, not a result: the
+protocol's total stays the figure, and the column exists so a reader sees that pairkernel
+is kernel-equivalent (its 1.36x loss is the 6.27M-read checksum pass; kernel alone 8.9–9.0
+ns per cell against the expert's total 9.8 ns) and that comoment3's loss decomposes into
+roughly 2.3x on the kernel plus the checksum (36% of its LLVM time, 70% in C++). `correctness` is `ok (pins)` / `DISQUALIFIED (rel err)`; `parallelism` is
 `kernel threaded` / `parallel preparation, serial kernel` / `no parallel form` / `serial
 only (LLVM lane has no OpenMP)` per the per-loop evidence, and for Blade fold cells the
 plan's fold form (`threaded(Path B chunks, serial within each chunk)` in licensed mt8 —
@@ -626,6 +632,28 @@ about pair sums or constrained enumeration.
 
 **Freeze.** Sources, sizes, hypotheses, tier selections and tuning decisions are frozen in
 a tagged commit before the pilot; anything changed after the pilot restarts the pilot.
+**Pilot facts (blade-B §6, bundle `results/2026-10-17-LAPTOP-350H6LDB/session-231651/`).**
+At n = 3 rounds on the UNCAPPED clock the compute control drifted (CV 8.5%, a +24%
+excursion in one block) and the drift rules suppressed inference on 7 of 11 blocks.
+**Decision (user's choice): the published measurement runs UNCAPPED** (maximum processor
+state 100%, the "Silent" scheme). Drift suppression stays in force; every suppressed
+verdict is reported as **"indicative"** with its medians and intervals shown — never
+hidden, never re-thresholded. An 80%-capped re-run is the documented way to obtain
+unsuppressed verdicts (the `powercfg` recipe is in `harness/README.md`).
+
+**Session 1a (2026-10-18, bundle `results/2026-10-18-LAPTOP-350H6LDB/session-042223/`):**
+serial x licensed x native for gram, comoment3, antisym, pairkernel, recur and stencil at
+11/21 rounds; 0 failures, 0 disqualifications, 0 fallbacks; longest run 0.79 s; peak
+working set 55.7 MB. Controls over 86 runs: compute control median 13.42 ms (CV 9.0%),
+stream control 5.50 ms (CV 9.7%). Five of the six blocks are drift-suppressed
+(indicative); `antisym` is the exception, with verdicts against blade-llvm (74.6 ms):
+blade-cpp 1.47 win, gfortran-natural 10.4 win, ifx-natural 4.46 win, gfortran-expert 0.416
+loss, ifx-expert 0.395 loss. The suppressed blocks' medians agree with the pilot's to a few
+percent. The pilot also produced two diagnoses the tables will cite:
+`recur`'s 11x loss is the per-step allocator (page faults on 8 freed-and-reallocated 160 KB
+temporaries, G6), not the arithmetic, and `maskagg`'s time is ~85% hashed-index inserts
+(G9).
+
 **Freeze state:** the bench branch `worktree-bench-fortran` at merge commit 957afd95
 (compiler flip 5f4b33ea merged with master 74b96445); the Blade.exe hash is recorded in the
 session bundle. The

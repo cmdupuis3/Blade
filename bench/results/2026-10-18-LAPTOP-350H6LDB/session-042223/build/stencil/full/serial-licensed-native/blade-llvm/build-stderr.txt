@@ -1,0 +1,3 @@
+[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\stencil-d53566e6-8368-e1af4bbc\stencil.ll
+[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-042223\build\stencil\full\serial-licensed-native\blade-llvm\stencil.exe
+[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\stencil-d53566e6-8368-e1af4bbc

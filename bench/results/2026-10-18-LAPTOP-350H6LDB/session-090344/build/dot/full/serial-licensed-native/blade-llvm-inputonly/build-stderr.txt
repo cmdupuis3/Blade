@@ -1,0 +1,3 @@
+[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\dot_inputonly-1422a8b0-23164-91b8bcfd\dot_inputonly.ll
+[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-090344\build\dot\full\serial-licensed-native\blade-llvm-inputonly\dot_inputonly.exe
+[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\dot_inputonly-1422a8b0-23164-91b8bcfd

@@ -539,3 +539,115 @@ The remaining difference between the lanes in `licensed`: blade-cpp's simd folds
 4 cells), while clang unrolls into 4 independent accumulators. At the DRAM-resident full
 sizes this is probably hidden by bandwidth; a cache-resident size would expose it. That is
 an expectation, not a measurement.
+
+## 6. Pilot diagnosis: recur (11x loss) and maskagg (2026-10-17)
+
+Inputs:
+- Read-only: the pilot bundle `bench/results/2026-10-17-LAPTOP-350H6LDB/session-231651/build/recur/full/serial-licensed-native/{blade-cpp,blade-llvm}/`, i.e. `generated/recur.cpp`, `generated/recur.ll` and the exes, disassembled with `objdump -d`.
+- Tiny reduced-size runs of SCRATCH copies in `<scratchpad>/rb/` (each under 15 ms). The committed kernel is untouched.
+- Page-fault counts from `GetProcessMemoryInfo` (`<scratchpad>/rb/measure.ps1`, 5 runs, median).
+
+### recur: the 10x is the allocator, not the arithmetic
+
+**What the emit does per time step** (C++ `step()`, `rhs()` inlined by g++; the LLVM `.ll`
+has the same structure through `blade_alloc_cells`/`blade_free`):
+- **8 `new double[20011]`** (160 KB each): 4 `rhs` results, 3 stage inputs
+  (`u + 0.005*k1`, ...) and the step result. G6 said 5-6; the count is 8.
+- **8 `delete[]`**: 7 at the end of `step()`, plus one in `kernel()` after copying the result
+  into the trajectory row.
+- The C++ exe has 13 `operator new[]` call sites in total; the `.ll` has 21
+  `blade_alloc_cells`/`blade_free` call sites.
+
+**The x loops are clean:**
+- Every stage loop is one fused, vectorized pass. For example `rhs`, at 140001b80:
+
+  ```
+  vmovupd (%rbx,%rax,1),%ymm0 ; vmulpd %ymm0,%ymm0,%ymm1 ; vfnmadd132pd %ymm1,%ymm0,%ymm0
+  vmovupd %ymm0,(%rsi,%rax,1) ; add $0x20,%rax ; cmp $0x27140,%rax ; jne 140001b80
+  ```
+  The other 7 loops look the same (7-9 instructions, 1 ymm store).
+- No bounds checks and no `extents[]` loads inside any x loop. The only checks are BL8011
+  co-iteration extent compares (`u` vs `u`) once per call, outside the loops.
+- `prefix(n - 1)` is a direct row view (`{ __v363.data[k-1], __v363.extents + 1 }`), not a
+  per-element accessor.
+- No lambda or `std::function` call per cell.
+- The trajectory copy and the checksum are vectorized too.
+
+**Mechanism.** On this host the UCRT heap returns a freed 160 KB block's pages, so EVERY
+`new[]` of a stage temporary demand-faults all of its ~39 pages again.
+
+- Controlled C++ probe, `<scratchpad>/rb/alloc_probe.cpp` (8 temporaries x 31 steps,
+  nx = 20011, one write per cell):
+  - new/delete per step: **9.7 ms, 7308 page faults** (29.5 per allocation);
+  - the same writes with the 8 buffers allocated ONCE: **1.56 ms, 300 faults**.
+  - At nx = 2011 the per-step pattern still faults 3.2 pages per allocation:
+    14.9 ms vs 1.3 ms.
+- Measured Blade bisection, tiny runs (nt = 31, nx = 20011 unless noted; checksum values in
+  brackets prove identical math):
+
+| scratch variant | blade-cpp median | blade-llvm median | page faults (cpp / llvm) | ns per cell-step |
+|---|---|---|---|---|
+| r_a: spec source (4-stage array lets) | 12.27 ms [657141.310044427] | 11.20 ms | 12038 / 10531 | 20 / 19 |
+| r_b: same, nt = 301, nx = 2011 (16 KB temporaries) | 16.5 ms | 17.5 ms | 10520 / 10185 | 27 / 29 |
+| r_nc: spec source, checksum replaced by one cell | 11.85 ms | 11.35 ms | 12033 / 10536 | no change: the checksum is not the cost |
+| r_e1: 1-stage Euler step (`u + 0.01 * rhs(u)`, 2 temporaries/step) | 4.24 ms | 2.88 ms | 5010 / 3515 | 7 / 5 |
+| **r_k: the same RK4 as ONE scalar block kernel** (`method_for(u) <@> lambda(v) -> { scalar k1..k4 } \|> compute`, 1 temporary/step) | **1.5-2.9 ms [657141.310044427, identical]** | **1.51 ms** | 3840 / 2374 | **2.5** |
+
+Page-fault cost from r_a vs r_k: (12.27 - 1.5) ms / (12038 - 3840) faults ≈ **1.3 µs per
+fault**. Full size, 300 steps x 8 allocations x ~38 pages ≈ 91k faults ≈ **118 ms**. That is
+the whole pilot figure (blade-llvm 118 ms, blade-cpp 135 ms; 19.6 ns per cell-step against
+Fortran's 1.8 ns). The vectorized arithmetic is ~2.5 ns per cell-step (r_k), i.e. Fortran
+expert class.
+- The Fortran natural tier (16-19 ms) also has stage arrays, but it allocates them ONCE
+  outside the time loop. That is why it does not pay the faults.
+- Static vs runtime extents was not a factor: every extent here is static, and nothing in
+  the loops reads an extent.
+
+**Attribution.** About 90% of recur's time is demand-zero page faults from re-allocating
+the stage temporaries every step: 8 alloc/free pairs per step, in both lanes. The lowering
+gives every array-valued `let` (and every `rhs(...)` result) its own pool. Pool reuse
+DECLINES in `step` ("no candidate pool is both dead and unaliased when a pool of the same
+shape is allocated [4 candidate pools, peak live pool bytes 160088]"), and nothing hoists
+the pools out of the `let rec` step.
+
+**Gap register:** this is **G6**, with its mechanism corrected. Not "5-6 extra passes", but
+8 allocations per step, each of which faults ~39 fresh pages on this OS heap. Fix
+directions, any of which removes the 10x:
+- (a) fuse the stage chain of an array-returning function body into one loop (G6/G8);
+- (b) hoist step-temporary pools out of the recursion (allocate once per `let rec`, reuse
+  per step), or teach pool reuse the `step` shape;
+- (c) a size-class free-list in `allocate`/`blade_alloc_cells` that keeps freed pools
+  committed.
+
+The r_k spelling is idiomatic: a block kernel mapped over the field, the style guide's
+`method_for` rung for block kernels. It runs at ~2.5 ns per cell-step but is NOT the spec's
+idiom. Whether the kernel source should change is the architect's call. Changing it would
+turn the recur row into a "spelling" result, not a language result.
+
+### maskagg: the hashed compound index dominates
+
+Scratch copies at n = 100003 (1/10 of full), C++ lane:
+
+| scratch variant | median | page faults |
+|---|---|---|
+| m_full: the kernel (mask + compound + `reduce(y * y)` + count) | 4.61 ms [166957.084856257] | 2572 |
+| m_mask: inputs + `mask` only (Bool array counted) | 0.42 ms | 1600 |
+| m_cond: same checksum as a conditional fold, no compaction | 0.74 ms [166957.084856257, identical] | 1576 |
+
+Isolated probe `<scratchpad>/rb/cidx_probe.cpp`: the real `compound_index_t<1>`
+constructor from `src/cpp/index_types.h`. At 100003 cells (49977 kept):
+- **the index build takes 3.89 ms = 77.8 ns per kept cell**;
+- the mask takes 0.51 ms;
+- gather + fold take 0.15 ms.
+
+At 300007 cells it is 11.6 ms (77.1 ns per kept cell). So of m_full's 4.6 ms, ~85% is the
+hashed index (`enumerate` -> one `std::unordered_map` insert + one `rank_to_tuple`
+push_back per kept cell). The rest is gen + mask + the vector<bool> copy + the `y * y`
+temporary + allocation faults.
+
+At the full n = 1,000,003 (~500k kept) the index build alone is ~39 ms. The `y * y`
+temporary and the other passes add the rest of the pilot's 62 ms incremental. **Gap
+register: G9**, confirmed.
+
+The LLVM lane refuses `mask` on its own as well ("the IR node IRMask in array position -- no
+arm in the llvm lane"), not only `compound`. Add that to G9's lane column.

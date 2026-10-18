@@ -1,0 +1,3 @@
+[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\stencil_inputonly-3fe91d8e-2584-df95b153\stencil_inputonly.ll
+[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-100329\build\stencil\full\mt8-licensed-native\blade-llvm-inputonly\stencil_inputonly.exe
+[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\stencil_inputonly-3fe91d8e-2584-df95b153

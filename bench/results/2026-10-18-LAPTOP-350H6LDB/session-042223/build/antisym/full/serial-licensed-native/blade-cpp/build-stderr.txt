@@ -1,0 +1,3 @@
+[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\antisym-f51b8c12-15584-997e0373\antisym.cpp
+[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-042223\build\antisym\full\serial-licensed-native\blade-cpp\antisym.exe
+[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\antisym-f51b8c12-15584-997e0373

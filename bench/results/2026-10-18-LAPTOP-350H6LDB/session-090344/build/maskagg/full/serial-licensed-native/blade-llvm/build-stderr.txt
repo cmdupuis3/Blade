@@ -1,0 +1,4 @@
+[blade] llvm lane refused: a compound-index initializer; falling back to C++
+[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\maskagg-c74da7bb-3160-a0bfaafb\maskagg.cpp
+[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-090344\build\maskagg\full\serial-licensed-native\blade-llvm\maskagg.exe
+[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\maskagg-c74da7bb-3160-a0bfaafb

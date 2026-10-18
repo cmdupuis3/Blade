@@ -56,7 +56,10 @@ natural arm's dense 64 MB, not by the packed form.
 - **Selection record**: baseline = literal transcription per cell; expert = the Fortran
   agent's reviewed packed-triangle implementation (`notes/fortran-notes.md`,
   `notes/review-fortran.md`). Vector-math routes (scalar `exp` vs SVML) are archived per
-  arm (M23).
+  arm (M23). Pilot note (blade-A §13): EVERY arm calls a scalar UCRT `exp` (~6.6 of ~9 ns
+  per cell; ifx uses its own scalar `exp`, no SVML), and the expert's SoA layout buys
+  nothing measurable — the kernel is transcendental-bound in all arms, and Blade's 1.36x
+  loss is entirely the checksum pass (G3a; attribution column, README §8).
 - **expert**: `j >= i` triangle, packed storage, checksum fused with weight 2 (diagonal is
   exactly 1 and may be written without evaluating the kernel — allowed, it is the spec's own
   value; record it). mt8: `!$omp parallel do schedule(dynamic)` on the outer loop.

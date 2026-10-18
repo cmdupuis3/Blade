@@ -1,0 +1,3 @@
+[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\onepass_inputonly-66eee052-14508-3414d477\onepass_inputonly.ll
+[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-100329\build\onepass\full\mt8-licensed-native\blade-llvm-inputonly\onepass_inputonly.exe
+[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\onepass_inputonly-66eee052-14508-3414d477

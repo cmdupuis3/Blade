@@ -107,9 +107,10 @@ accumulated in the same nest (README §3 table).
 ## Hypothesis
 
 - vs natural (dense baseline): **WIN ~2x** (half the cells, no diagonal, same per-cell work).
-- vs expert, `licensed`: **equivalence to a modest loss** (same cells; 4/16-lane dots in
-  Blade against the expert's vectorized loop; per-row operand re-reads and the
-  logical-read checksum are the residual costs; both Blade lanes reported).
+- vs expert, `licensed`: **equivalence to a modest loss** was the hypothesis; the pilot
+  measured the same load-bound deficit as gram (blade-A §13, G1): antisym LLVM 7.7 G FMA/s,
+  C++ 5.0, experts 16.7–18.6 — per-cell operand reloads (2 loads per FMA) against the
+  expert's 8x6 register tile (0.67); both Blade lanes reported.
 - vs expert, `repro`: **equivalent (±10%) to a loss** (same cells; the single-chain dot is the same
   mechanism as gram's — if gram loses to an outer-product expert, antisym's expert can use
   the same ordering (`do s; do j; do i < j`) and antisym becomes a loss of the same size;

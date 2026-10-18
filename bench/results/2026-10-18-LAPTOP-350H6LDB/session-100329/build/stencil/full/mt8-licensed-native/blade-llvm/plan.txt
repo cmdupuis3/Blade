@@ -1,0 +1,11 @@
+plan: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-100329\build\stencil\full\mt8-licensed-native\blade-llvm\src\stencil.blade -- 9 optimization decision(s)
+  [omp v1] __ret1073741824 @ 26:1: applied [BLADE_OMP_PARALLEL_FOR; loop nest level 0 (__i0)]
+  [omp v1] __v39 @ 32:1: applied [BLADE_OMP_PARALLEL_FOR; loop nest level 0 (__i0)]
+  [fold-form v1] __v48 @ 32:1: applied [fold form: threaded(Path B chunks, serial within each chunk); reduce over a deferred computation]
+  [omp v1] __v48 @ 32:1: applied [omp parallel num_threads(T) + fixed-order combine; comm-licensed parallel fold: outer level chunked per thread (Path B)]
+  [fold-form v1] kernel @ 32:1: applied [fold form: simd-reduction; prodsum]
+  [fold-form v1] _(checksum,input_checksum): applied [fold form: K-lanes(8); reduce in expression position]
+  [fold-form v1] __v73: applied [fold form: simd-reduction; reduce over a deferred computation (one level)]
+  [fold-form v1] lambda in s: applied [fold form: simd-reduction; prodsum]
+  [fold-form v1] lambda in _(checksum,input_checksum): applied [fold form: K-lanes(8); reduce in expression position]
+inputs: 0 (identity policy: `content` = folded at compile time, hashed; `version` = read at run time, size + mtime observed -- BLADE_RUN_RECORD=<path> writes the run record)

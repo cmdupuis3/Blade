@@ -1,0 +1,41 @@
+// pairkernel: the Matern-5/2 kernel matrix of n points in 3-D (bench/kernels/pairkernel/spec.md).
+// K(i, j) = (1 + a + a^2 / 3) exp(-a), a = sqrt(5 r2) / l, l = 0.7, r2 the squared distance.
+// `where comm(a, b)` on the SAME array in both positions derives packed SymIdx<2, n>
+// storage (C(n+1, 2) cells) and triangular iteration; `omp(a: 1)` licenses threading over
+// the point axis (emitted only when BLADE_OMP_THREADS is unset).
+let static n = 53    // SIZE n
+type Pts = Idx<n>
+type Dim = Idx<3>
+
+/// The suite's input generator (bench/README.md section 5, variant D: five rounds): u in [0, 1),
+/// exact in Int64 (h3 * h3 < 2^62).
+function lcg(k: Int64, seed: Int64) -> Float64 = {
+    let h1 = ((k + seed) * 1103515245 + 12345) % 2147483648
+    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648
+    let h3 = (h2 * 1103515245 + 12345) % 2147483648
+    let h4 = (h3 * h3 / 65536) % 2147483648
+    let h5 = (h4 * 1103515245 + 12345) % 2147483648
+    Float64(h5) / 2147483648.0
+}
+
+/// Matern-5/2 covariance of a squared distance, length scale 0.7.
+function matern52(r2: Float64) -> Float64 = {
+    let a = sqrt(5.0 * r2) / 0.7
+    (1.0 + a + a * a / 3.0) * exp(-a)
+}
+
+let (checksum, input_checksum) = {
+    // P(i, d): coordinate d of point i; coordinate array d is input j = d + 1, seed 10000019 * j, k = i
+    let pts = method_for(range<Pts>, range<Dim>) <@> lambda(i, d) -> lcg(i, 10000019 * (d + 1)) |> compute
+    // the point is typed concretely (Array like Dim): on a T^1 parameter even `a((0 : Dim))`
+    // keeps a BL8006 literal-bound check per read (notes/llvm-acceptance-A.md F13)
+    let kmat = method_for(pts, pts) <@> lambda(a: Array<Float64 like Dim>, b: Array<Float64 like Dim>) where comm(a, b), omp(a: 1) -> {
+        let dx = a((0 : Dim)) - b((0 : Dim))
+        let dy = a((1 : Dim)) - b((1 : Dim))
+        let dz = a((2 : Dim)) - b((2 : Dim))
+        matern52(dx * dx + dy * dy + dz * dz)
+    } |> compute
+    // the logical sum of squares through the canonicalizing accessor (README 7.2)
+    let ss = reduce(method_for(range<Pts>) <@> lambda(i) -> reduce(method_for(range<Pts>) <@> lambda(j) -> kmat(i, j) * kmat(i, j), (+)), (+))
+    (ss, reduce(reduce(pts, (+)), (+)))
+}

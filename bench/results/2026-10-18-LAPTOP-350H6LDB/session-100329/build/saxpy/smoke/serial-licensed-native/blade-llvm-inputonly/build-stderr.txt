@@ -1,0 +1,3 @@
+[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\saxpy_inputonly-d84fbd10-8264-c8eac081\saxpy_inputonly.ll
+[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-100329\build\saxpy\smoke\serial-licensed-native\blade-llvm-inputonly\saxpy_inputonly.exe
+[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\saxpy_inputonly-d84fbd10-8264-c8eac081

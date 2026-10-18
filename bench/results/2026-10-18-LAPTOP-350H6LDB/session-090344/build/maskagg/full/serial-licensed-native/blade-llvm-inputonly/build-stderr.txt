@@ -1,0 +1,3 @@
+[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\maskagg_inputonly-a9ad6be6-9192-94bc4bf4\maskagg_inputonly.ll
+[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-090344\build\maskagg\full\serial-licensed-native\blade-llvm-inputonly\maskagg_inputonly.exe
+[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\maskagg_inputonly-a9ad6be6-9192-94bc4bf4

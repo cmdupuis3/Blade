@@ -87,8 +87,11 @@ sequential in every regime (README §3 matched-loop table).
 
 **LOSS, plausibly 2–5x, vs both tiers**: three passes (Bool mask write, count, gather)
 plus a hashed index of ~40 B per kept cell against pack's two passes (gfortran's `pack`
-counts then copies) and the expert's one or two. The independent explanation is the
-compaction's hashed index and the unfused mask (G9); an unexpected win is investigated.
+counts then copies) and the expert's one or two. Pilot confirmation (blade-B §6, G9): ~85%
+of Blade's time is one `std::unordered_map` insert per kept cell (77.8 ns per kept cell,
+≈ 39 ms of the 62 ms incremental at full size), plus the `y * y` temporary. The LLVM lane
+refuses `mask` on its own as well as `compound` ("IRMask in array position"), so
+`blade-cpp` remains the only Blade arm. An unexpected win would be investigated.
 
 ## Risks
 

@@ -1,0 +1,8 @@
+09:03:43 PRECHECK serial-licensed-1b BatteryStatus=2 compute-procs=[]
+09:03:43 START serial-licensed-1b regimes=serial-licensed-native kernels=fusedchain,onepass,maskagg,dot,saxpy
+09:58:26 DONE serial-licensed-1b exit=3
+09:58:26 COOLDOWN 300s before mt8-licensed
+10:03:29 PRECHECK mt8-licensed BatteryStatus=2 compute-procs=[]
+10:03:29 START mt8-licensed regimes=mt8-licensed-native kernels=all
+11:12:04 DONE mt8-licensed exit=1
+11:12:04 STOPPED after mt8-licensed: harness exit 1 (failure/abort)

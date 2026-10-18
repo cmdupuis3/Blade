@@ -1,0 +1,728 @@
+{
+ "argv": [
+  "bench/harness/run.py",
+  "bench",
+  "--regimes",
+  "serial-licensed-native",
+  "--rounds",
+  "3",
+  "--size",
+  "full"
+ ],
+ "cells": [
+  {
+   "kernel": "antisym",
+   "regime": "serial-licensed-native",
+   "arm": "blade-llvm",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "antisym",
+   "regime": "serial-licensed-native",
+   "arm": "blade-cpp",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "antisym",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-natural",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "antisym",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-expert",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "antisym",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-natural",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "antisym",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-expert",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "comoment3",
+   "regime": "serial-licensed-native",
+   "arm": "blade-llvm",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "comoment3",
+   "regime": "serial-licensed-native",
+   "arm": "blade-cpp",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "comoment3",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-natural",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "comoment3",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-expert",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "comoment3",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-natural",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "comoment3",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-expert",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "gram",
+   "regime": "serial-licensed-native",
+   "arm": "blade-llvm",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "gram",
+   "regime": "serial-licensed-native",
+   "arm": "blade-cpp",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "gram",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-natural",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "gram",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-expert",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "gram",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-natural",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "gram",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-expert",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "pairkernel",
+   "regime": "serial-licensed-native",
+   "arm": "blade-llvm",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "pairkernel",
+   "regime": "serial-licensed-native",
+   "arm": "blade-cpp",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "pairkernel",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-natural",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "pairkernel",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-expert",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "pairkernel",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-natural",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "pairkernel",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-expert",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "fusedchain",
+   "regime": "serial-licensed-native",
+   "arm": "blade-llvm",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "fusedchain",
+   "regime": "serial-licensed-native",
+   "arm": "blade-cpp",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "fusedchain",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-natural",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "fusedchain",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-expert",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "fusedchain",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-natural",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "fusedchain",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-expert",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "fusedchain",
+   "regime": "serial-licensed-native",
+   "arm": "blade-llvm-inputonly",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "fusedchain",
+   "regime": "serial-licensed-native",
+   "arm": "blade-cpp-inputonly",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "fusedchain",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-natural-inputonly",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "fusedchain",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-expert-inputonly",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "fusedchain",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-natural-inputonly",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "fusedchain",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-expert-inputonly",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "maskagg",
+   "regime": "serial-licensed-native",
+   "arm": "blade-llvm",
+   "status": "fallback",
+   "reason": "a compound-index initializer"
+  },
+  {
+   "kernel": "maskagg",
+   "regime": "serial-licensed-native",
+   "arm": "blade-cpp",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "maskagg",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-natural",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "maskagg",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-expert",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "maskagg",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-natural",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "maskagg",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-expert",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "maskagg",
+   "regime": "serial-licensed-native",
+   "arm": "blade-llvm-inputonly",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "maskagg",
+   "regime": "serial-licensed-native",
+   "arm": "blade-cpp-inputonly",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "maskagg",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-natural-inputonly",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "maskagg",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-expert-inputonly",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "maskagg",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-natural-inputonly",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "maskagg",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-expert-inputonly",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "onepass",
+   "regime": "serial-licensed-native",
+   "arm": "blade-llvm",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "onepass",
+   "regime": "serial-licensed-native",
+   "arm": "blade-cpp",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "onepass",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-natural",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "onepass",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-expert",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "onepass",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-natural",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "onepass",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-expert",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "onepass",
+   "regime": "serial-licensed-native",
+   "arm": "blade-llvm-inputonly",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "onepass",
+   "regime": "serial-licensed-native",
+   "arm": "blade-cpp-inputonly",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "onepass",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-natural-inputonly",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "onepass",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-expert-inputonly",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "onepass",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-natural-inputonly",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "onepass",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-expert-inputonly",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "recur",
+   "regime": "serial-licensed-native",
+   "arm": "blade-llvm",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "recur",
+   "regime": "serial-licensed-native",
+   "arm": "blade-cpp",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "recur",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-natural",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "recur",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-expert",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "recur",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-natural",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "recur",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-expert",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "stencil",
+   "regime": "serial-licensed-native",
+   "arm": "blade-llvm",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "stencil",
+   "regime": "serial-licensed-native",
+   "arm": "blade-cpp",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "stencil",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-natural",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "stencil",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-expert",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "stencil",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-natural",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "stencil",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-expert",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "stencil",
+   "regime": "serial-licensed-native",
+   "arm": "blade-llvm-inputonly",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "stencil",
+   "regime": "serial-licensed-native",
+   "arm": "blade-cpp-inputonly",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "stencil",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-natural-inputonly",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "stencil",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-expert-inputonly",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "stencil",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-natural-inputonly",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "stencil",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-expert-inputonly",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "dot",
+   "regime": "serial-licensed-native",
+   "arm": "blade-llvm",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "dot",
+   "regime": "serial-licensed-native",
+   "arm": "blade-cpp",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "dot",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-natural",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "dot",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-expert",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "dot",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-natural",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "dot",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-expert",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "dot",
+   "regime": "serial-licensed-native",
+   "arm": "blade-llvm-inputonly",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "dot",
+   "regime": "serial-licensed-native",
+   "arm": "blade-cpp-inputonly",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "dot",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-natural-inputonly",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "dot",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-expert-inputonly",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "dot",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-natural-inputonly",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "dot",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-expert-inputonly",
+   "status": "measured (inference suppressed)",
+   "reason": ""
+  },
+  {
+   "kernel": "saxpy",
+   "regime": "serial-licensed-native",
+   "arm": "blade-llvm",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "saxpy",
+   "regime": "serial-licensed-native",
+   "arm": "blade-cpp",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "saxpy",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-natural",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "saxpy",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-expert",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "saxpy",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-natural",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "saxpy",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-expert",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "saxpy",
+   "regime": "serial-licensed-native",
+   "arm": "blade-llvm-inputonly",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "saxpy",
+   "regime": "serial-licensed-native",
+   "arm": "blade-cpp-inputonly",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "saxpy",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-natural-inputonly",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "saxpy",
+   "regime": "serial-licensed-native",
+   "arm": "gfortran-expert-inputonly",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "saxpy",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-natural-inputonly",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "saxpy",
+   "regime": "serial-licensed-native",
+   "arm": "ifx-expert-inputonly",
+   "status": "measured",
+   "reason": ""
+  }
+ ]
+}

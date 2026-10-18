@@ -1,0 +1,80 @@
+{
+  "antisym": {
+    "full": {
+      "checksum": 57760462.7106089,
+      "input_checksum": 481149.43540512957,
+      "sizes": {
+        "n": 401,
+        "p": 1201
+      }
+    },
+    "smoke": {
+      "checksum": 390.60724195491264,
+      "input_checksum": 239.51306393602863,
+      "sizes": {
+        "n": 11,
+        "p": 23
+      }
+    }
+  },
+  "comoment3": {
+    "full": {
+      "checksum": 80611.46135838749,
+      "input_checksum": 17220.99644652009,
+      "sizes": {
+        "n": 201,
+        "p": 171
+      }
+    },
+    "smoke": {
+      "checksum": 45.00761547567883,
+      "input_checksum": 71.52382959378883,
+      "sizes": {
+        "n": 11,
+        "p": 13
+      }
+    }
+  },
+  "gram": {
+    "full": {
+      "checksum": 160344246688.88895,
+      "input_checksum": 800824.0156245283,
+      "sizes": {
+        "n": 1001,
+        "p": 1601
+      }
+    },
+    "scale": {
+      "checksum": 251075141966.11023,
+      "input_checksum": 1002033.463899814,
+      "sizes": {
+        "n": 1001,
+        "p": 2003
+      }
+    },
+    "smoke": {
+      "checksum": 237924.7174130447,
+      "input_checksum": 952.4563073534518,
+      "sizes": {
+        "n": 31,
+        "p": 61
+      }
+    }
+  },
+  "pairkernel": {
+    "full": {
+      "checksum": 2266701.751854711,
+      "input_checksum": 3746.8739239438437,
+      "sizes": {
+        "n": 2503
+      }
+    },
+    "smoke": {
+      "checksum": 1051.8012539694091,
+      "input_checksum": 73.67808041209355,
+      "sizes": {
+        "n": 53
+      }
+    }
+  }
+}

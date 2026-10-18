@@ -1,0 +1,27 @@
+// VALIDATION ONLY (review M11): antisym at SMOKE size with the full logical output printed.
+// Same generator, kernel and checksum as bench/kernels/antisym/antisym.blade, arrays
+// top-level so the C++ lane can print them. `L` is the dense p x p logical matrix read cell
+// by cell through the strict packed array's sign-tracked accessor (upper triangle as stored,
+// lower triangle negated, diagonal the implicit zero), so a sign or mirror error shows up.
+// Run (C++ lane): BLADE_BLAS=0 blade run antisym_dump.blade --print L,checksum,input_checksum
+// Compared against ref_antisym.py by validate_A.py.
+let static p = 23
+let static n = 11
+type Part = Idx<p>
+type Comp = Idx<2>
+type Obs = Idx<n>
+
+function lcg(k: Int64, seed: Int64) -> Float64 = {
+    let h1 = ((k + seed) * 1103515245 + 12345) % 2147483648
+    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648
+    let h3 = (h2 * 1103515245 + 12345) % 2147483648
+    let h4 = (h3 * h3 / 65536) % 2147483648
+    let h5 = (h4 * 1103515245 + 12345) % 2147483648
+    Float64(h5) / 2147483648.0
+}
+
+let z = method_for(range<Part>, range<Comp>, range<Obs>) <@> lambda(i, c, s) -> lcg(i * n + s, 10000019 * (c + 1)) |> compute
+let l = method_for(z, z) <@> lambda(a: Array<Float64 like Comp, Obs>, b: Array<Float64 like Comp, Obs>) where anticomm(a, b), omp(a: 1) -> prodsum(a((0 : Comp)), b((1 : Comp))) - prodsum(b((0 : Comp)), a((1 : Comp))) |> compute
+let L = method_for(range<Part>, range<Part>) <@> lambda(i, j) -> l(i, j) |> compute
+let checksum = reduce(method_for(range<Part>) <@> lambda(i) -> reduce(method_for(range<Part>) <@> lambda(j) -> l(i, j) * l(i, j), (+)), (+))
+let input_checksum = reduce(reduce(reduce(z, (+)), (+)), (+))

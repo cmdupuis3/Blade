@@ -105,10 +105,14 @@ loop or the stage arithmetic (README §3 matched-loop table).
 
 - vs natural (array-statement baseline): **equivalent** (same stage temporaries;
   L2-resident per step).
-- vs expert: **LOSS 1.5–3x** (allocation + 5–8 extra passes over 160 KB per step plus the
-  zero-fill vs one fused scalar loop). The independent explanation is the per-step
-  temporaries, visible in the emit; the prediction is a hypothesis, not a criterion — if
-  the loss does not appear, the emit and the machine code say why (M26).
+- vs expert: **LOSS 1.5–3x** was the pre-pilot hypothesis; the pilot measured **~11x**
+  (118 ms vs 10–11 ms) and blade-B's diagnosis (G6) is the ALLOCATOR, not the arithmetic:
+  eight 160 KB temporaries freed and re-allocated every step re-take ~38 page faults each
+  (~91k faults ≈ 118 ms), while the stage loops are fully vectorized. The hypothesis's
+  mechanism (per-step temporaries) was right, its magnitude was not; the committed source
+  stays the spec's idiom — this is the language result. Alternative-spelling note, not a
+  result: RK4 written as one block kernel measured informally at near-expert speed with an
+  identical checksum.
 
 ## Drift control
 

@@ -1,0 +1,3 @@
+[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\recur-c67a82ff-20052-ff4b89b3\recur.ll
+[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-17-LAPTOP-350H6LDB\session-231651\build\recur\full\serial-licensed-native\blade-llvm\recur.exe
+[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\recur-c67a82ff-20052-ff4b89b3

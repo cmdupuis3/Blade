@@ -139,7 +139,11 @@ matched-loop table).
   per FMA, ~0.25 FMA/cycle — while the expert's outer-product order (or a manual jam of
   4–8 cells) keeps 4–16 FMAs in flight with no reassociation. Half the flops of natural
   does not begin to compensate. If the measurement confirms it, this is gap G1.
-- vs expert, `licensed` serial (HEADLINE): **equivalence to a modest loss.** Mechanism:
+- vs expert, `licensed` serial (HEADLINE): **equivalence to a modest loss** was the
+  hypothesis; the pilot measured a load-bound deficit (blade-A §13, G1): gram LLVM 8.4 G
+  FMA/s, C++ 4.4, experts 16.3–18.2 — Blade's per-cell dot reloads both operand rows per
+  cell (2 loads per FMA) while the expert's 8x6 register tile does 0.67 loads per FMA; the
+  C++ lane adds the single-accumulator simd reduction (G26). Pre-pilot mechanism statement:
   the licensed dot runs 4 lanes (C++: one vector accumulator, mul + add, no FMA) or 16
   lanes (LLVM: four ymm FMA accumulators) per cell against the expert's i-vectorized
   outer product, which also keeps several vectors in flight and additionally streams

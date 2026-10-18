@@ -776,3 +776,134 @@ jam(6 rows, bitwise)` in both regimes). That fold is the input checksum, not the
 vs the smoke `.ll` (5 for gram): more sites at full size, same mechanism; repro has 0
 everywhere, so the harness's M3 check (match `fadd reassoc`, not the header word) passes
 for repro.
+
+## 13. Pilot diagnosis (serial-licensed, full size; session-231651)
+
+Sources: the pilot's own executables and generated code
+(`bench/results/2026-10-17-LAPTOP-350H6LDB/session-231651/build/<k>/full/serial-licensed-native/`),
+disassembled with ucrt64 `objdump -d`; plus ATTRIBUTION runs I made at reduced size (below).
+Pilot medians are the coordinator's (n = 3, uncapped). Nothing here is a benchmark result.
+
+**Attribution runs (indicative, not results).** Each kernel at a reduced outer extent but its
+FULL inner length, so the kernel : checksum work ratio equals the full-size one (kernel work
+scales as p^2 n or p^3 n, the checksum as p^2 or p^3, both by the same power of p).
+Variants: FULL (the committed source), NOCS (checksum replaced by one cell read; the output is
+still materialized), and for pairkernel NOEXP (`exp(-a)` -> `1 / (1 + a)`). Serial, licensed
+default, `BLADE_BLAS=0`, nine interleaved rounds, minimum shown (each run 1-15 ms):
+
+| kernel (reduced size) | cpp FULL | cpp NOCS | llvm FULL | llvm NOCS | checksum share cpp / llvm |
+|---|---|---|---|---|---|
+| gram p=301, n=1001 | 9.22 | 8.67 | 5.70 | 5.62 | 6% / 1.4% |
+| comoment3 p=91, n=201 | 14.99 | 4.46 | 5.97 | 3.82 | **70% / 36%** |
+| antisym p=301, n=401 | 7.29 | 6.77 | 4.90 | 4.73 | 7% / 3.5% |
+| pairkernel n=701 | 5.09 | 2.21 | 2.78 | 2.19 | **57% / 21%** |
+
+pairkernel NOEXP: cpp 3.49 ms, llvm 1.14 ms, i.e. exp costs ~1.6 ms / 245,350 cells
+= **6.6 ns per cell in both lanes** (59% of the LLVM FULL time, 75% of its kernel-only time).
+
+**Achieved rates** (FMA lanes per second; peak of one Zen 3 core = 8 FMA lanes/cycle =
+25.6-35.2 G/s at 3.2-4.4 GHz; a Blade C++-lane "lane" is a separate mul + add):
+
+| kernel | work | blade-llvm | blade-cpp | expert tier (both compilers, range) |
+|---|---|---|---|---|
+| gram | 1,282,401 cells x 1001 = 1.284e9 FMA | 8.4 G/s (24-33% of peak) | 4.4 G/s (13-17%) | 16.3-18.2 G/s (46-71%) |
+| antisym | 720,600 cells x 802 = 5.78e8 FMA | 7.7 G/s | 5.0 G/s | 16.7 (gf) - 18.6 (ifx) G/s |
+| comoment3 | 848,046 cells x 201 = 1.705e8 terms | 4.0 G terms/s (kernel-only est. 6.8) | 1.6 (kernel-only est. ~5.3) | 14.7-15.4 G terms/s |
+| pairkernel | 3,133,756 cells (1 exp each) | 13.4 ns/cell (kernel-only est. ~10) | 24.6 ns/cell | 9.8-10.4 ns/cell (naturals: 9.7-10.2 ns/cell over n^2 cells) |
+
+### gram and antisym: the single-cell dot vs the 8x6 register tile (G1)
+
+Expert inner loop (gfortran-expert.exe, `tile`, one sample s of an 8 x 6 tile):
+```
+vmovupd (%rdx),%ymm0 ; vmovupd 0x20(%rdx),%ymm14        # A panel: 8 doubles of x(i0..i0+7, s)
+vbroadcastsd -0x30(%rax),%ymm2                          # one x(j, s), then 2 FMAs
+vfmadd231pd %ymm0,%ymm2,%ymm13 ; vfmadd231pd %ymm14,%ymm2,%ymm8
+... (6 broadcasts, 12 vfmadd231pd into 12 ymm accumulators) ...
+```
+= 12 ymm FMAs (48 lanes) per 8 loads: **0.67 loads per FMA, 2.3 bytes per FMA lane, 12
+independent accumulators**, each cell still one chain in ascending s.
+
+blade-llvm (`gram.exe`, the dot of one cell, 64x64 brick tiles around it):
+```
+vmovupd -0xe0(%r14,%r9,8),%ymm11 ...                    # 4 loads of row i
+vfmadd132pd -0xe0(%r10,%r9,8),%ymm7,%ymm11 ...          # 4 FMAs, each with a row-j load
+... x2 per iteration, 4 ymm accumulators, `cmp $0x3fc` (31 iterations of 32 lanes + tail)
+vaddpd ; vaddpd ; vextractf128 ; vaddpd ; vshufpd        # per-cell horizontal reduction
+```
+= **2 loads per FMA, 16 bytes per FMA lane** (both operand rows re-read for every cell), 4
+accumulators. Zen 3 sustains 2 ymm loads/cycle, so this loop is LOAD-bound at 1 ymm FMA per
+cycle = half the FMA peak before any cache effect; the j row streams from L2 (a 64-row brick
+of 8 KB rows is exactly the 512 KB L2). The expert's tile reuses each loaded A vector 6 times
+and each broadcast 2 times. antisym's LLVM loop is the same shape with both dot products
+fused into one loop (8 ymm accumulators, `vfnmsub231sd` at the end), still 2 loads per FMA.
+
+blade-cpp (`gram.exe`, licensed):
+```
+14000a880: vmovupd (%rcx,%rax,1),%ymm1
+           vmulpd  (%rdx,%rax,1),%ymm1,%ymm1
+           add     $0x20,%rax
+           vaddpd  %ymm0,%ymm1,%ymm0                     # the ONE accumulator
+           cmp     $0x1f40,%rax ; jne 14000a880
+```
+**Not unrolled, one ymm accumulator, multiply and add not fused**: the loop-carried `vaddpd`
+(3-cycle latency on Zen 3) limits it to 4 lanes per 3 cycles = 1.33 lanes/cycle, a third of
+the LLVM loop's load bound. That is the C++-lane deficit on gram (attribution: 8.67 vs 5.62 ms
+kernel-only, 1.54x; pilot 291 vs 153 ms, 1.90x) and antisym (two such single-accumulator dots
+per cell; 6.77 vs 4.73 ms, 1.43x; pilot 1.54x). The `BLADE_OMP_SIMD_REDUCTION(+:__ps)` on the
+prodsum is honoured by g++ as exactly one vector accumulator.
+
+### comoment3: 2x the arithmetic, 4.5x the loads, and a rank-3 checksum tax
+
+blade-llvm cell loop (4 accumulators, per 4 lanes): `vmovupd a ; vmulpd b ; vfmadd132pd c`
+= 1 multiply + 1 FMA and 3 loads per term. The expert forms the weighted panel
+W(i, s) = X(i, s) X(j, s) ONCE per (i panel, j) and runs the gram tile over k: 1 FMA per term,
+0.67 loads per FMA. Operation count: Blade 2 x 1.705e8 = 3.41e8 vector-lane ops vs expert
+1.705e8 FMA + C(p+1,2) n = 2.96e6 W multiplies = 1.73e8 -- **ratio 1.97**. Loads per term:
+3 vs 0.67 (**4.5x**). The cell's inner length (n = 201) is short, so the per-cell
+horizontal reduction and the 201 = 12 x 16 + 9 tail weigh more than in gram. Then the
+checksum: 171^3 = 5.0M rank-3 canonicalizing reads = 36% of the LLVM time and 70% of the
+C++ time (attribution); full-size split estimate for blade-llvm: kernel ~25 ms (2.3x the
+expert's 11.1 ms) + checksum ~14-17 ms. In the C++ lane each read is `canon_fold<3>`
+(inversion count + an out-of-line `std::sort`, `call ... __insertion_sort`) +
+`canon_left_justify<3>` + a three-level nested-pointer load; the LLVM lane inlines the
+compare-and-swap (no call): **4.9x cheaper per read** (10.5 vs 2.15 ms). That is most of the
+C++ lane's 2.6x deficit here; its kernel is only 1.17x slower than the LLVM kernel.
+
+### pairkernel: exp is the same in every arm; the 1.3x is the checksum
+
+Both Blade lanes and gfortran-expert call the SAME scalar UCRT `exp`
+(`__imp_exp` from `api-ms-win-crt-math-l1-1-0.dll`) once per cell; ifx links its own static
+scalar `exp` (no SVML import, no packed exp call). sqrt is the inline `vsqrtsd` everywhere.
+exp costs ~6.6 ns of the ~9 ns per cell (75% of the kernel). Blade's kernel-only cost per
+cell (attribution NOCS: 8.9 ns llvm, 9.0 ns cpp) EQUALS the expert's whole per-cell cost
+(9.8 ns incl. its fused checksum) and the natural's (9.7 ns, over all n^2 cells): the SoA
+layout and the skipped diagonal (n of 3.1M cells) buy the expert nothing measurable. The
+**1.36x gap is Blade's separate checksum pass**: n^2 = 6.27M canonicalizing reads over the
+25 MB packed K (21% of LLVM time at n = 701; at full size the reads leave L2, pilot gap
+42.0 - 30.8 = 11.2 ms = 1.8 ns per read), where the expert fuses the checksum per column from
+L1 right after writing it. In the C++ lane the same read costs 4.9x more (57% of its time):
+that is the C++ lane's whole 1.8x deficit on this kernel (kernels equal: 2.21 vs 2.19 ms).
+
+### Gap-register lines (each: the emission change that closes it)
+
+- **G1 (gram, antisym, comoment3 kernel)**: emit a same-array row-contraction under `comm` as
+  a register-tiled outer product over the triangle (MR x NR = 8 x 6 tile, i-vectorized, the
+  sample loop OUTSIDE the tile, packed panels, KC blocking), each cell one ascending FMA chain
+  -- strict-legal, cuts loads from 2 to 0.67 per FMA (gram/antisym ~2x headroom measured
+  against the expert).
+- **G1b (comoment3)**: hoist the pair product of the outer comm levels out of the innermost
+  level (form W = a*b once per (i, j), then FMA against c across k): halves the vector ops and
+  feeds the same G1 tile.
+- **G26 (new, C++ lane; gram, antisym)**: give `prodsum`'s licensed fold the K-lane form
+  the plan already uses for expression-position reduces (`K-lanes(8)`: 4-8 independent ymm
+  accumulators, mul+add contracted) instead of one `omp simd reduction` vector accumulator --
+  closes the C++-vs-LLVM 1.4-1.9x on the dot kernels.
+- **G3a (all four, both lanes; comoment3 and pairkernel worst)**: the checksum tax is now
+  measured, not estimated: 36% (comoment3) / 21% (pairkernel) of the LLVM time; closing it
+  needs G2/G3's canonical-cell fold (read the pool once with orbit weights 1/2 or 1/3/6),
+  or fusion of the fold into the producing nest.
+- **G3b (C++ lane)**: inline the canonicalizing read (`canon_fold<R>` + `canon_left_justify`:
+  replace `std::sort` + inversion count with an inline sorting network / min-max, and read the
+  flat pool instead of chasing nested row pointers) -- 4.9x per read vs the LLVM lane; it is
+  the C++ lane's whole deficit on pairkernel and most of it on comoment3.
+- **G11 note**: none of the above involves threads; all numbers are serial.
