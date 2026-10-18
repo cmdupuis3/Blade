@@ -1,0 +1,32 @@
+// TEST: Orbit-class fold over a strict antisymmetric pool, even and odd kernels
+// AntisymIdx<2, p> stores i < j only: the mirror (j, i) reads -x and the
+// diagonal reads +0. The logical sum of f over all p^2 cells is regrouped as
+// rep(f(0), p) + (S_+ + S_-), S_+ = sum f(x), S_- = sum f(-x) over the pool
+// (src/OrbitFold.fs). An EVEN kernel (a square, abs) has S_- = S_+ bitwise,
+// so the strict class is one accumulator of weight 2; an ODD kernel has
+// S_- = -S_+, so its logical sum cancels to exactly zero; any other kernel
+// accumulates f(x) and f(-x) apart. p = 1 has an EMPTY pool but one logical
+// cell, the diagonal's +0: f(+0) is its sum. Integer-valued cells.
+let static p = 6
+let static n = 3
+type Part = Idx<p>
+type Comp = Idx<2>
+type Obs = Idx<n>
+let z = method_for(range<Part>, range<Comp>, range<Obs>) <@> lambda(i, c, s) -> Float64((i * 5 + c * 3 + s * 7) % 9) - 4.0 |> compute
+let l = method_for(z, z) <@> lambda(a: Array<Float64 like Comp, Obs>, b: Array<Float64 like Comp, Obs>) where anticomm(a, b) -> prodsum(a((0 : Comp)), b((1 : Comp))) - prodsum(b((0 : Comp)), a((1 : Comp))) |> compute
+let even = reduce(method_for(range<Part>) <@> lambda(i) -> reduce(method_for(range<Part>) <@> lambda(j) -> l(i, j) * l(i, j), (+)), lambda(u, v) where omp -> u + v, 0.0)
+let odd = reduce(method_for(range<Part>) <@> lambda(i) -> reduce(method_for(range<Part>) <@> lambda(j) -> l(i, j) * 3.0, (+)), (+))
+let general = reduce(method_for(range<Part>) <@> lambda(i) -> reduce(method_for(range<Part>) <@> lambda(j) -> l(i, j) * l(i, j) * l(i, j) + l(i, j) * l(i, j) + 2.0, (+)), (+))
+let abs_seeded = reduce(method_for(range<Part>) <@> lambda(i) -> reduce(method_for(range<Part>) <@> lambda(j) -> abs(l(j, i)) + 1.0, (+)), (+), 10.0)
+let plain = reduce(l, (+), axes = 2)
+type One = Idx<1>
+let w = method_for(range<One>, range<Comp>) <@> lambda(i, c) -> Float64(i + c) + 1.0 |> compute
+let m = method_for(w, w) <@> lambda(a: Array<Float64 like Comp>, b: Array<Float64 like Comp>) where anticomm(a, b) -> a((0 : Comp)) * b((1 : Comp)) - b((0 : Comp)) * a((1 : Comp)) |> compute
+let lone = reduce(method_for(range<One>) <@> lambda(i) -> reduce(method_for(range<One>) <@> lambda(j) -> m(i, j) * m(i, j) + 1.0, (+)), (+))
+// Off-diagonal squares summed once over the pool give 7371; each mirrors once.
+// EXPECT: even = 14742.0
+// EXPECT: odd = 0.0
+// EXPECT: general = 14814.0
+// EXPECT: abs_seeded = 604.0
+// EXPECT: plain = 0.0
+// EXPECT: lone = 1.0

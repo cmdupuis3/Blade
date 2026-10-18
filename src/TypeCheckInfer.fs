@@ -3217,6 +3217,57 @@ and inferReduceCore (env: TypeEnv) array kernel (init: Expr option) (axes: Expr 
                     | _ -> None
                 leafElem t
     let rk = operandRank ()
+    // ---- FULL fold over a compact group: `reduce(S, op[, init], axes = r)` --
+    // S's index is ONE symmetric/antisymmetric record of logical rank r, so
+    // `axes = r` folds every logical axis: the FULL-DOMAIN fold over the
+    // logical (mirrored) cells, docs/plans/plan-compact-sym-folds.md section
+    // 4.3's recommended meaning -- the value `reduce(decompact(S, 0), op[,
+    // init], axes = r)` already had. (A PARTIAL fold over a compact group
+    // stays the BL3999 refusal: which half of the group it folds is the open
+    // question.) For the builtin `(+)` it is rewritten into the spelling that
+    // names the logical traversal -- r nested folds over `range<I>` reading
+    // `S(i_1, .., i_r)`, the seed on the outermost fold only (the dense
+    // `axes = r` fold seeds once too) -- which the licence turns into the
+    // orbit-class fold (Blade.OrbitFold) in both back ends. That is the dense
+    // fold's multiset of terms in a row-then-total association (the dense
+    // full fold is one flat left fold), so the two spellings agree up to
+    // association: exactly for integers, to rounding for floats. The nested
+    // spelling needs a NAMED array and a NAMED index (`range<I>`); any other
+    // operand, and every other kernel (whose flat dense fold is not a
+    // regrouping of a nested one: `(-)`), takes the decompact form itself.
+    let compactFull =
+        match axisCountOpt, tArrCache.Force() with
+        | Some n, Ok t when n >= 2 ->
+            (match env.Subst.Resolve t.Type with
+             | ArrayElem at when not at.IsVirtual ->
+                 (match at.IndexTypes with
+                  | [ ix ] when ix.Rank = n && (ix.Symmetry = SymSymmetric || ix.Symmetry = SymAntisymmetric) -> Some (ix, n)
+                  | _ -> None)
+             | _ -> None)
+        | _ -> None
+    match compactFull with
+    | Some (ix, n) ->
+        let span = array.Span
+        let mk k = mkExpr span k
+        let viaDecompact () =
+            let dense = List.fold (fun (e: Expr) d -> mk (ExprDecompact (e, d))) array [ 0 .. n - 2 ]
+            inferReduceCore env dense kernel init axes
+        match array.Kind, ix.Tag, kernel.Kind with
+        | ExprKind.ExprVar _, Some tag, ExprKind.ExprSection OpAdd ->
+            let vars = [ for t in 1 .. n -> $"__orbit_i{t}_{span.StartLine}_{span.StartCol}" ]
+            let read = mk (ExprApp (array, vars |> List.map (fun v -> mk (ExprVar v))))
+            let nested =
+                List.foldBack (fun (t: int, v: string) (body: Expr) ->
+                    let loop = mk (ExprMethodFor [ mk (ExprRange [ TyNamed (tag, []) ]) ])
+                    let lam = mk (ExprLambda ([ { Name = v; Type = None; Default = None; NameSpan = noSpan } ], None, body))
+                    let mapped = mk (ExprBinOp (Elementwise, OpApply, loop, lam))
+                    mk (ExprReduce (mapped, kernel, (if t = 1 then init else None), None)))
+                    (List.indexed vars |> List.map (fun (i, v) -> (i + 1, v))) read
+            (match inferExpr env nested with
+             | Ok te -> Ok te
+             | Error _ -> viaDecompact ())
+        | _ -> viaDecompact ()
+    | None ->
     let axisRangeErr =
         match axisCountOpt with
         | Some n when n < 1 ->

@@ -1095,6 +1095,40 @@ let static nn = {n}
 "
     + "let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>, c: Array<Float64 like S>) where comm(a, b, c) -> prodsum(a, b, c) / Float64(nn) |> compute
 "
+/// The orbit-class fold fixtures: a SymIdx<2, 7> pool `g` and a checksum
+/// binding `ss` over it.
+let private planOrbitSrc (ssBody: string) =
+    "type Var = Idx<7>\n"
+    + "type Obs = Idx<3>\n"
+    + "let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 5 + s * 3) % 7) - 2.0 |> compute\n"
+    + "let g = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute\n"
+    + $"let ss = {ssBody}\n"
+
+/// `reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> BODY, INNER), OUTER)`
+let private planOrbitNest (body: string) (inner: string) (outer: string) =
+    $"reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> {body}, {inner}), {outer})"
+
+let private planOrbitSym2Body = planOrbitNest "g(i, j) * g(i, j)" "(+)" "lambda(u, v) where omp -> u + v, 0.0"
+
+let private planOrbitSym3Src =
+    "type Var = Idx<7>\n"
+    + "type Obs = Idx<4>\n"
+    + "let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 3 + s * 5) % 7) - 2.0 |> compute\n"
+    + "let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) |> compute\n"
+    + "let ss = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> reduce(method_for(range<Var>) <@> lambda(k) -> t(i, j, k) * t(i, j, k), (+)), (+)), (+))\n"
+
+let private planOrbitHermitianSrc =
+    "type Two = Idx<2>\n"
+    + "let A: Array<Complex128 like Two, Idx<3>> = [[complex(1.0, 1.0), complex(2.0, 0.0), complex(0.0, 1.0)], [complex(3.0, -1.0), complex(1.0, 2.0), complex(2.0, 0.0)]]\n"
+    + "let H = gram(A, A)\n"
+    + "let ss = reduce(method_for(range<Two>) <@> lambda(i) -> reduce(method_for(range<Two>) <@> lambda(j) -> abs(H(i, j)), (+)), (+))\n"
+
+let private planOrbitAntisymSrc =
+    "type Part = Idx<6>\n"
+    + "type Comp = Idx<2>\n"
+    + "let z = method_for(range<Part>, range<Comp>) <@> lambda(i, c) -> Float64((i * 5 + c * 3) % 9) - 4.0 |> compute\n"
+    + "let l = method_for(z, z) <@> lambda(a: Array<Float64 like Comp>, b: Array<Float64 like Comp>) where anticomm(a, b) -> a((0 : Comp)) * b((1 : Comp)) - b((0 : Comp)) * a((1 : Comp)) |> compute\n"
+    + "let ss = reduce(method_for(range<Part>) <@> lambda(i) -> reduce(method_for(range<Part>) <@> lambda(j) -> l(i, j) * l(i, j), (+)), (+))\n"
 
 let private planGramSrc =
     "let A: Array<Float64 like Idx<9>, Idx<5>> = method_for(range<Idx<9>>, range<Idx<5>>) <@> lambda(i, j) -> Float64(i + j) |> compute\n"
@@ -1284,7 +1318,51 @@ let private planCases () =
                   (declinedMentioning "simplex-tile crossover") $"{p} x {n} keeps the per-cell nest")
       withGate "BLADE_SIMPLEX_TILE" "0" (fun () ->
           planCase "plan_simplex_tile_declined_knob" (planSym3Src 29 67) "microkernel"
-              (declinedMentioning "BLADE_SIMPLEX_TILE") "simplex tile declined by BLADE_SIMPLEX_TILE=0") ]
+              (declinedMentioning "BLADE_SIMPLEX_TILE") "simplex tile declined by BLADE_SIMPLEX_TILE=0")
+      // The orbit-class fold (src/OrbitFold.fs; bench M4): the logical sum
+      // over a compact pool, regrouped by orbit class under the licence.
+      planCase "plan_orbit_fold_sym2_applied" (planOrbitSrc planOrbitSym2Body) "fold-form"
+          (fun d -> applied d && evidenceMentioning "fold form: orbit-class fold (rank 2, 2 classes)" d && evidenceMentioning "weights 1/2" d)
+          "orbit-class fold, rank 2, weights 1/2"
+      planCase "plan_orbit_fold_axes_spelling_applied" (planOrbitSrc "reduce(g, (+), axes = 2)") "fold-form"
+          (fun d -> applied d && evidenceMentioning "orbit-class fold (rank 2" d)
+          "`reduce(g, (+), axes = 2)` is the same orbit-class fold"
+      planCase "plan_orbit_fold_sym3_applied" planOrbitSym3Src "fold-form"
+          (fun d -> applied d && evidenceMentioning "fold form: orbit-class fold (rank 3, 3 classes)" d && evidenceMentioning "weights 1/3/6" d)
+          "orbit-class fold, rank 3, weights 1/3/6"
+      planCase "plan_orbit_fold_antisym_even" planOrbitAntisymSrc "fold-form"
+          (fun d -> applied d && evidenceMentioning "even kernel" d && evidenceMentioning "strict orbits weight 2" d)
+          "strict pool, even kernel, weight 2"
+      withGate "BLADE_FP_REPRO" "1" (fun () ->
+          planCase "plan_orbit_fold_declined_repro" (planOrbitSrc planOrbitSym2Body) "fold-form"
+              (declinedMentioning "BLADE_FP_REPRO=1") "BLADE_FP_REPRO=1 keeps the logical walk")
+      planCase "plan_orbit_fold_declined_non_builtin" (planOrbitSrc (planOrbitNest "g(i, j)" "(+)" "lambda(a, b) -> b + a * 1.0, 0.0")) "fold-form"
+          (declinedMentioning "not the builtin `+`") "a non-builtin outer fold keeps the logical walk"
+      planCase "plan_orbit_fold_declined_inner_seed" (planOrbitSrc (planOrbitNest "g(i, j)" "(+), 1.0" "(+)")) "fold-form"
+          (declinedMentioning "seed is not +0") "a non-zero inner seed keeps the logical walk"
+      planCase "plan_orbit_fold_declined_coordinate" (planOrbitSrc (planOrbitNest "g(i, j) + Float64(i)" "(+)" "(+)")) "fold-form"
+          (declinedMentioning "level coordinate beyond the read") "a coordinate used beyond the read keeps the logical walk"
+      planCase "plan_orbit_fold_declined_fixed_read" (planOrbitSrc (planOrbitNest "g(i, j) + g(0, 0)" "(+)" "(+)")) "fold-form"
+          (declinedMentioning "reads another array") "a second read at a fixed cell keeps the logical walk"
+      planCase "plan_orbit_fold_declined_hermitian" planOrbitHermitianSrc "fold-form"
+          (declinedMentioning "Hermitian storage") "a Hermitian pool (conjugate mirrors) keeps the logical walk"
+      withGate "BLADE_ORBIT_FOLD" "0" (fun () ->
+          planCase "plan_orbit_fold_declined_knob" (planOrbitSrc planOrbitSym2Body) "fold-form"
+              (declinedMentioning "BLADE_ORBIT_FOLD=0") "BLADE_ORBIT_FOLD=0 keeps the logical walk")
+      planCase "plan_orbit_fold_combine_is_additions" planOrbitSym3Src "fold-form" applied "applied (C++ text checked below)"
+      (match cppOfSource "plan_orbit_fold_cpp" planOrbitSym3Src with
+       | Error e -> resultLine Fail "orbit_fold_cpp_addition_combine" e; false
+       | Ok cpp ->
+           // rep(S3, 3) = (S3 + S3) + S3 and rep(S6, 6) = 3 S6 + 3 S6, as additions:
+           let wants = [ "__opool = nested_array_utilities::pool_base(t.data)"
+                         "const double __ot1 = __oa1 + __oa1;"
+                         "const double __ot2 = __ot1 + __oa1;" ]
+           let missing = wants |> List.filter (fun w -> not (cpp.Contains w))
+           let products = [ "3.0 * __oa"; "6.0 * __oa"; "2.0 * __oa" ] |> List.filter cpp.Contains
+           if missing.IsEmpty && products.IsEmpty then
+               resultLine Pass "orbit_fold_cpp_addition_combine" "pool walk + addition-only class combine, no weight products"; true
+           else
+               resultLine Fail "orbit_fold_cpp_addition_combine" ($"missing {missing}; products {products}"); false) ]
 
 let private runCase (name: string) (src: string) (wantBreaks: int) (wantAborts: int) =
     match cppOfSource name src with

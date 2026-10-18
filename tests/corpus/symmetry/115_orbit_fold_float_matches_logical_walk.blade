@@ -1,0 +1,49 @@
+// TEST: Orbit-class fold on float data matches the logical walk
+// Non-integer cells: the orbit-class fold (src/OrbitFold.fs) regroups the
+// logical sum, so it may differ from the serial logical walk in the last
+// bits but not beyond rounding. `logical` is the same walk through a fold
+// kernel that is not the builtin `+` (no reorder licence: it stays the serial
+// logical walk in every build); the two agree to 1e-12 relative. The other
+// spellings are the recogniser's NEGATIVE list -- an inner seed, a kernel that
+// uses a coordinate beyond the read, a second compact array, two coordinate
+// orders, one unlicensed level, a second read at a fixed cell -- each keeps
+// the logical walk, and each value
+// is pinned against its hand-derived relation to the plain sum.
+let static p = 23
+let static n = 5
+type Var = Idx<p>
+type Obs = Idx<n>
+let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 37 + s * 11) % 101) / 7.0 + 0.1 |> compute
+let g = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute
+let h = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) * 0.5 |> compute
+let orbit = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * g(i, j), (+)), (+))
+let logical = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * g(i, j), lambda(a, b) -> b + a * 1.0, 0.0), lambda(a, b) -> b + a * 1.0, 0.0)
+let rel_ok = abs(orbit - logical) <= 1e-12 * logical
+let inner_seed = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * g(i, j), (+), 1.0), (+))
+let seed_ok = abs(inner_seed - (orbit + 23.0)) <= 1e-12 * orbit
+let coord = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * 0.0 + Float64(j), (+)), (+))
+let two_arrays = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * h(i, j), (+)), (+))
+let two_ok = abs(two_arrays - 0.5 * orbit) <= 1e-12 * orbit
+let two_orders = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * g(j, i), (+)), (+))
+let orders_ok = abs(two_orders - orbit) <= 1e-12 * orbit
+let one_unlicensed = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * g(i, j), (+)), lambda(a, b) -> b + a * 1.0, 0.0)
+let unlicensed_ok = abs(one_unlicensed - orbit) <= 1e-12 * orbit
+let total = reduce(g, (+), axes = 2)
+let fixed_read = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) + g(0, 0), (+)), (+))
+let fixed_ok = abs(fixed_read - (total + 529.0 * g(0, 0))) <= 1e-12 * fixed_read
+// EXPECT: orbit = 39685544.603333
+// EXPECT: logical = 39685544.603333
+// EXPECT: rel_ok = true
+// EXPECT: inner_seed = 39685567.603333
+// EXPECT: seed_ok = true
+// 23 rows of 0 + 1 + .. + 22:
+// EXPECT: coord = 5819.0
+// EXPECT: two_arrays = 19842772.3016665
+// EXPECT: two_ok = true
+// EXPECT: two_orders = 39685544.603333
+// EXPECT: orders_ok = true
+// EXPECT: one_unlicensed = 39685544.603333
+// EXPECT: unlicensed_ok = true
+// EXPECT: total = 131944.98877551
+// EXPECT: fixed_read = 172823.193877551
+// EXPECT: fixed_ok = true

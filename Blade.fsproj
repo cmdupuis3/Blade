@@ -395,6 +395,10 @@
          module name and must stay last. -->
     <Compile Include="src/CodeGenState.fs" />
     <Compile Include="src/CodeGenExprSupport.fs" />
+    <!-- The orbit-class fold's recogniser and plan (bench M4): shared by the
+         C++ emitter (CodeGenBinding) and the LLVM lane (EmitLlvm); needs the
+         fold-licence predicates of CodeGenExprSupport. -->
+    <Compile Include="src/OrbitFold.fs" />
     <Compile Include="src/CodeGenExpr.fs" />
     <Compile Include="src/CodeGenLoopNest.fs" />
     <Compile Include="src/CodeGenCuda.fs" />
