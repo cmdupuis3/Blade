@@ -20,7 +20,7 @@ let internal usageTestBlockKeys =
       "ide-serve"; "instance-guards"; "lapack"; "lietables"; "linalg"; "llvm"; "llvm-bench"; "module-resolve"; "mpi"
       "multifile"; "netcdf"; "normalize"; "omp-coverage"; "omp-pragma"; "omp-reduce"; "optimize"
       "oracles"; "orbrank"; "orbwreath"; "permoracle"; "permspec"; "pgoracle"; "pgspec"; "polyoracle"
-      "provider-desugar"; "rand-mirror"; "rep-check"; "rep-differential"; "rep-reject"; "run-record"
+      "provider-desugar"; "rand-mirror"; "rep-check"; "rep-differential"; "rep-reject"; "row-tile"; "run-record"
       "setup"; "shape"; "shapespec"; "spans"; "strict-pins"; "structidx"; "structidxoracle"; "subst"; "syrk-tile"
       "surface"; "surfacing"; "sympower"; "timing"; "treerank"; "type-structure"; "unify"
       "validate-arrow"; "validation-codes"; "zarr" ]

@@ -1,0 +1,28 @@
+// TEST: Simplex Tile Third Moment
+// The raw third-moment tensor T(i, j, k) = (1/n) sum_s X(i,s) X(j,s) X(k,s) over
+// `method_for(x, x, x)` with `where comm(a, b, c)`, packed SymIdx<3, p>, at
+// p = 29 (29 = 4*6 + 5 prefix rows, 3*8 + 5 k lanes) and n = 67. In the C++ lane
+// this is the rank-3 simplex tile (blade_pgemm::dsym3_tri): W = X(i) * X(j) formed
+// once per (i, j) prefix (the serial chain's first product), the 6x8 tile over k,
+// the divide once per finished cell.
+/// X(i, s) = ((7 i + 3 s) mod 5) - 2: small integers, so every triple product and
+/// every partial sum is an exact integer -- ANY association gives the same sum, and
+/// the one division then rounds identically: association-invariant pins. The route
+/// is pinned by `blade plan` (tests/OptimizeTests.fs plan_simplex_tile_*), the bits
+/// by `blade test row-tile` and `blade test interp symmetry`.
+type V = Idx<29>
+type S = Idx<67>
+let static n = 67
+let (ss, t000, t012, t_perm, t_edge, t_last) = {
+    let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 5) - 2.0 |> compute
+    let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>, c: Array<Float64 like S>) where comm(a, b, c) -> prodsum(a, b, c) / Float64(n) |> compute
+    let total = reduce(method_for(range<V>) <@> lambda(i) -> reduce(method_for(range<V>) <@> lambda(j) -> reduce(method_for(range<V>) <@> lambda(k) -> t(i, j, k) * t(i, j, k), (+)), (+)), (+))
+    (total, t(0, 0, 0), t(0, 1, 3), t(3, 1, 0), t(27, 28, 28), t(28, 28, 28))
+}
+// EXPECT: n = 67
+// EXPECT: ss = 29537.3223435063
+// EXPECT: t000 = -0.104477611940299
+// EXPECT: t012 = -0.0597014925373134
+// EXPECT: t_perm = -0.0597014925373134
+// EXPECT: t_edge = 1.0
+// EXPECT: t_last = 0.104477611940299

@@ -773,6 +773,10 @@
       <Link>cpp/syrk_tile_tests.cpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Include="src/cpp/row_contraction_tile_tests.cpp">
+      <Link>cpp/row_contraction_tile_tests.cpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <None Include="src/cpp/blade_linalg.hpp">
       <Link>cpp/blade_linalg.hpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

@@ -1793,6 +1793,49 @@ let syrkTileKc (k: int64) : int64 =
 /// keys on it for free.
 let syrkTileEnabled () : bool = Blade.Toolchain.envFlag "BLADE_SYRK_TILE" true
 
+/// The antisym pair's tile schedule (`LinAlgPatterns.AntiPair`, driver
+/// blade_pgemm::dantisym_tri), read from BLADE_ANTISYM_TILE per call:
+/// unset / `1` / `on` / `6x8` = the SEQUENTIAL 6 x 8 tile (P pass, spill, Q
+/// pass: 12 accumulators, 0.67 loads per FMA -- the reviewed default);
+/// `4x4` / `paired` = the PAIRED 4 x 4 tile (P and Q in one pass: 8
+/// accumulators, 1.25 loads per FMA, no spill -- the measured alternative,
+/// bench/notes/microkernel-sketches-review.md S2); `0` / `off` = the plain
+/// per-cell nest. Anything else is the default. Same bits in every schedule
+/// (each cell's two chains and one subtraction are unchanged).
+type AntisymTileSchedule =
+    | AntiSeq6x8
+    | AntiPaired4x4
+    | AntiOff
+
+let antisymTileSchedule () : AntisymTileSchedule =
+    match System.Environment.GetEnvironmentVariable "BLADE_ANTISYM_TILE" with
+    | null -> AntiSeq6x8
+    | v ->
+        match v.Trim().ToLowerInvariant() with
+        | "0" | "off" | "false" | "no" -> AntiOff
+        | "4x4" | "paired" -> AntiPaired4x4
+        | _ -> AntiSeq6x8
+
+/// BLADE_SIMPLEX_TILE: unset / `1` / `on` = the rank-3 simplex tile with the
+/// hoisted W = X(i) * X(j) panel (`LinAlgPatterns.Sym3`, driver
+/// blade_pgemm::dsym3_tri) is the emission of the same-array 3-way `comm`
+/// prodsum nest (default); `0` / `off` keeps the plain per-cell nest, for A/B.
+let simplexTileEnabled () : bool = Blade.Toolchain.envFlag "BLADE_SIMPLEX_TILE" true
+
+/// Is the antisym pair's tile worth it over the per-cell double dot? The
+/// review's routes: tile at p = 61 x n = 401 / 600, decline at 23 x 11 (a
+/// strict 23-row triangle is a handful of 6 x 8 tiles, mostly padding). One
+/// statement of the rule, decided on the literal extents.
+let packedAntiWorth (p: int64) (n: int64) : bool =
+    p >= 24L && n >= 8L
+
+/// Is the rank-3 simplex tile worth it over the per-cell triple dot? The
+/// review's routes: tile at (29, 67) (29, 201) (61, 11) (61, 201), decline at
+/// (13, 11) (13, 201) -- a 13-wide simplex leaves most of every 6 x 8 tile
+/// below its k >= j edge.
+let packedSym3Worth (p: int64) (n: int64) : bool =
+    p >= 24L && n >= 4L
+
 
 /// Can `A(i1, ..., ik)` -- `consumed` positional subscripts, fewer than A's
 /// records -- be emitted as the sub-view aggregate
