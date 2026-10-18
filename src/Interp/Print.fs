@@ -388,7 +388,17 @@ let printBindingsOnly (progName: string) (lookup: IRId -> Value option) (forcedI
 
     let printArrayBinding (b: IRBinding) (arrType: IRArrayType) : unit =
         let rank = Blade.CodeGen.arrayRank arrType
-        if Blade.CodeGen.isCompoundArrayType arrType || Blade.CodeGen.isSparseArrayType arrType then
+        if Blade.CodeGen.isCompoundArrayType arrType then
+            // G22: a compound prints its present cells (CodeGen's compound arm);
+            // a non-scalar element has no printed form (comment only).
+            match Blade.CodeGen.compoundPrintShape arrType with
+            | Some nested ->
+                match lookup b.Id with
+                | Some (VCompound cv) -> ArrayOps.printCompoundCells b.Name cv nested sb
+                | Some _ -> raise (PrintUnsupported $"compound binding '{b.Name}': value is not a VCompound")
+                | None -> raise (PrintUnsupported $"compound binding '{b.Name}': no evaluated value")
+            | None -> ()
+        elif Blade.CodeGen.isSparseArrayType arrType then
             ()   // CodeGen emits a diagnostic C++ comment only -> zero stdout.
         elif isCompoundRowSubview b then
             ()   // raw trailing-row T* view: not auto-printed.

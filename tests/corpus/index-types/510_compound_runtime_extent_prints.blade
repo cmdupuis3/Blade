@@ -1,0 +1,32 @@
+// TEST: Compound (runtime-extent) arrays print their present cells
+// G22 (bench/notes/gap-register.md): an array whose extent is known only at
+// run time -- the `compound(x, mask)` result, typed `Array<Float64 like
+// Idx<?>>` -- had NO printed form: unselected it printed nothing, and
+// `--print y` refused BL7004 "has no printed form". It now prints its present
+// cells in storage order by the print rank regime, the compound axis counted
+// as ONE axis: alone, a flat run (a rank-2 mask too -- the cells are one
+// compact axis); with exactly one trailing dim, nested rows. Both the
+// compiled lane and the interpreter print it (the llvm lane refuses the
+// compound initializer and falls back).
+let x = [1.0, -2.0, 3.0, -4.0, 5.0]
+let m = mask(x, lambda(v) -> v > 0.0)
+let y = compound(x, m)
+// EXPECT: y = [1.0, 3.0, 5.0]
+let n = extents(y)
+// EXPECT: n = 3
+// A map over a compound keeps the compound type, and prints the same way.
+let z = method_for(y) <@> lambda(v) -> v * 2.0 |> compute
+// EXPECT: z = [2.0, 6.0, 10.0]
+// A rank-2 mask: the present cells in lex (row-major) order.
+let grid = [[1, 2, 3], [4, 5, 6]]
+let gm = mask(grid, lambda(v) -> v % 2 == 0)
+let g = compound(grid, gm)
+// EXPECT: g = [2, 4, 6]
+// One trailing dim: one row per present leading cell.
+type RIdx = Idx<3>
+type CIdx = Idx<2>
+let A: Array<Float64 like RIdx, CIdx> = [[1.0, 2.0], [0.0, 0.0], [5.0, 6.0]]
+let keys: Array<Float64 like RIdx> = [1.0, 0.0, 1.0]
+let km = mask(keys, lambda(k) -> k > 0.5)
+let S = compound(A, km)
+// EXPECT: S = [[1.0, 2.0], [5.0, 6.0]]

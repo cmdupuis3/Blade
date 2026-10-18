@@ -1,0 +1,24 @@
+// TEST: Rank-3 antisym self-product is symmetric over a named base
+// The sign-character rule at rank 3 and over a NAMED index type: R3 is
+// AntisymIdx<3, I>, so R3 * R3 is gathered over range<SymIdx<3, I>> (prefix
+// offsets p0, p0 + p1, p0 + p1 + p2). Every permutation of a strict triple
+// reads the same square, and every tuple with a repeated index is zero.
+type I = Idx<4>
+let B: Array<Float64 like I> = [1.0, 2.0, 4.0, 7.0]
+let R3 = method_for(B, B, B) <@> lambda(x, y, z) where anticomm(x, y, z) -> (x - y) * (y - z) * (x - z) |> compute
+let S3 = R3 * R3
+let a012 = R3(0, 1, 2)
+let a102 = R3(1, 0, 2)
+let s012 = S3(0, 1, 2)
+let s102 = S3(1, 0, 2)
+let s210 = S3(2, 1, 0)
+let s001 = S3(0, 0, 1)
+// EXPECT: a012 = -6.0
+// EXPECT: a102 = 6.0
+// EXPECT: s012 = 36.0
+// EXPECT: s102 = 36.0
+// EXPECT: s210 = 36.0
+// EXPECT: s001 = 0.0
+// 3! orderings of each strict triple: 6 * (36 + 900 + 2916 + 900) = 28512.
+let total = reduce(reduce(reduce(decompact(decompact(S3, 0), 1), (+)), (+)), (+))
+// EXPECT: total = 28512.0

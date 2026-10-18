@@ -1,0 +1,12 @@
+// TEST: Zip of antisym operands with a jointly even kernel (rejects)
+// ERROR: BL4015
+// A written co-iteration keeps the operands' record, so its output is stored
+// over the strict simplex. That is right only for a kernel that is jointly
+// ODD when every co-iterated operand flips sign together; `a * b` is jointly
+// even (the result is symmetric, with a diagonal), and keeping the strict
+// class would negate every mirrored read -- the G16 silent wrong value in its
+// written spelling. The infix `R * R` gathers the symmetric result instead
+// (symmetry/096).
+let A = [1.0, 2.0, 4.0]
+let R = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> x - y |> compute
+let S = method_for(zip(R, R)) <@> lambda(a, b) -> a * b |> compute

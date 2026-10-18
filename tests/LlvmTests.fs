@@ -728,6 +728,26 @@ let runLlvmFactTests () : BlockResult =
          fail name ($"""in shimPanicSymbols but the shim never panics there: {(String.concat ", " stale)}""")
      else pass name ($"{exportedPanickers.Count} panicking exports, {defs.Count} definitions scanned"))
 
+    printSubHeader "the --print selection (G12)"
+    // The print pass honours BLADE_PRINT exactly as genPrintStatements does:
+    // only the selected bindings print. It used to ignore the selection and
+    // echo every binding (bench llvm-acceptance-B F1). A selected name the
+    // lane would not print -- here a typo -- refuses, so the program reaches
+    // the C++ lane, which owns the BL7004 text. The differential cannot see
+    // either half: it never sets the selection.
+    let printSource = "let x = [1.0, 2.0, 3.0]\nlet y = 4.0\nlet s = reduce(x, (+))\n"
+    check "a selection prints only the selected binding" [ "BLADE_PRINT", Some "s" ] printSource
+        [ "c\"s\\00\""; "call void @blade_print_f64(" ]
+        // An array prints through its own `x = [` label.
+        [ "c\"x = [\\00\""; "c\"y\\00\"" ]
+    check "no selection prints every binding" [] printSource
+        [ "c\"s\\00\""; "c\"x = [\\00\""; "c\"y\\00\"" ] []
+    (let name = "a selected name that is no binding refuses to the C++ lane"
+     match emitUnder [ "BLADE_PRINT", Some "nope" ] "facts" printSource with
+     | Error e when e.Contains "the --print selection names 'nope'" -> pass name "refused"
+     | Error e -> fail name ($"refused for another reason: {e}")
+     | Ok _ -> fail name "emitted a module that prints nothing for the selected typo")
+
     printSubHeader "the whole switch"
     // FACTS=off must return the lane to the shape that passed its differential
     // before this layer existed -- the property that makes the switch a usable

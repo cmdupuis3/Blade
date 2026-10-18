@@ -1,0 +1,20 @@
+// TEST: Antisym plus symmetric is dense (no mirror law)
+// MIXED characters under + or - have no mirror law at all: R(j, i) + Y(j, i)
+// = -R(i, j) + Y(i, j), neither the sum nor its negation. The sign-character
+// rule stores the result DENSE (a gather over range<Idx<3>, Idx<3>>), as it
+// does every op that respects no sign law (comparisons, %, ^). The unary
+// broadcast `R + 1.0` keeps its BL4015 refusal: a map's iteration is the
+// input's strict simplex, which has no diagonal to write.
+let A = [1.0, 2.0, 4.0]
+let R = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> x - y |> compute
+let Y = method_for(A, A) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
+let D = R + Y
+// EXPECT: D = [[1.0, 1.0, 1.0], [3.0, 4.0, 6.0], [7.0, 10.0, 16.0]]
+let E = Y - R
+let e01 = E(0, 1)
+let e10 = E(1, 0)
+// EXPECT: e01 = 3.0
+// EXPECT: e10 = 1.0
+let Q = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> x * x - y * y |> compute
+let G = R > Q
+// EXPECT: G = [[false, true, true], [false, false, true], [false, false, false]]

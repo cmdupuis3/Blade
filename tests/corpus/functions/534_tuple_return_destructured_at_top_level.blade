@@ -1,0 +1,26 @@
+// TEST: Tuple-returning call destructured at top level
+// G12 (bench llvm-acceptance-A F7): `let (a, b) = f()` with `f` returning a
+// tuple. The C++ lane always ran it; the llvm lane refused ("the IR node IRApp
+// in pack position") and fell back. It now INLINES the tuple-returning callee
+// (the lane has no struct-return ABI, exactly as it inlines a capturing
+// callee), so `blade test llvm` compares the two lanes on this file.
+type I = Idx<4>
+function run() -> (Float64, Float64) = {
+    let v = method_for(range<I>) <@> lambda(i) -> 0.5 * Float64(i) |> compute
+    (reduce(v, (+)), 1.0)
+}
+let (checksum, input_checksum) = run()
+// EXPECT: checksum = 3.0
+// EXPECT: input_checksum = 1.0
+// With arguments, an array among them, and called twice (each call inlines
+// afresh).
+function stats(xs: Array<Float64 like I>, k: Float64) -> (Float64, Float64) = {
+    (reduce(xs, (+)) * k, xs(3))
+}
+let w: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0]
+let (sum2, last) = stats(w, 2.0)
+let (sum3, last3) = stats(w, 3.0)
+// EXPECT: sum2 = 20.0
+// EXPECT: last = 4.0
+// EXPECT: sum3 = 30.0
+// EXPECT: last3 = 4.0

@@ -1,0 +1,24 @@
+// TEST: Fold over a map of a deferred map (top level and top-level block)
+// G12 (bench llvm-acceptance-B F5): `reduce(method_for(r) <@> sq, (+))` where
+// `r` is itself a DEFERRED map. The fused fold nest reads every operand by
+// name, while `r` was only a `// <deferred computation>` comment, so g++
+// rejected the program (BL9002) -- in a top-level block and at top level
+// alike (inside a function it already worked). The operand is now
+// materialized into a temporary before the fold. Like the interpreter, the
+// temporary does not join the print list: the deferred `r` prints nothing.
+function sq(v: Float64) -> Float64 = { v * v }
+function half(v: Float64) -> Float64 = { 0.5 * v }
+let s = {
+    let x = [1.0, 2.0, 3.0]
+    let r = method_for(x) <@> half
+    reduce(method_for(r) <@> sq, (+))
+}
+// (0.5^2 + 1^2 + 1.5^2) = 3.5
+// EXPECT: s = 3.5
+let y = [2.0, 4.0, 6.0]
+let r2 = method_for(y) <@> half
+let t = reduce(method_for(r2) <@> sq, (+))
+// EXPECT: t = 14.0
+// The same deferred map read again later, by a second fold.
+let u = reduce(method_for(r2) <@> half, (+))
+// EXPECT: u = 3.0

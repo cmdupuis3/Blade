@@ -1,0 +1,28 @@
+// TEST: Antisym plus antisym stays antisymmetric (joint sign parity)
+// A sum of two antisymmetric operands over one record is antisymmetric, and
+// it keeps co-iterating the strict cells. It used to be REFUSED (BL4015,
+// "UNKNOWN sign parity in '__zl'"): the inheritance gate asked whether the
+// kernel `a + b` is odd in `a` ALONE. A zip reads both operands at the SAME
+// mirrored cell, so they flip sign TOGETHER, and `a + b` is jointly odd. The
+// joint question is also what refuses the even self-product zip
+// (symmetry/100).
+let A = [1.0, 2.0, 4.0]
+let R = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> x - y |> compute
+let Q = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> x * x - y * y |> compute
+let S = R + Q
+let s01 = S(0, 1)
+let s10 = S(1, 0)
+let s11 = S(1, 1)
+// EXPECT: S = [[-4.0, -18.0], [-14.0], []]
+// EXPECT: s01 = -4.0
+// EXPECT: s10 = 4.0
+// EXPECT: s11 = 0.0
+let D = R - Q
+let d21 = D(2, 1)
+// EXPECT: d21 = -10.0
+// The written zip co-iteration answers the same joint question.
+let Z = method_for(zip(R, Q)) <@> lambda(a, b) -> 2.0 * a - b |> compute
+let z01 = Z(0, 1)
+let z10 = Z(1, 0)
+// EXPECT: z01 = 1.0
+// EXPECT: z10 = -1.0

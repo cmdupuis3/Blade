@@ -1,0 +1,31 @@
+// TEST: Antisym self-product is symmetric (sign-character rule)
+// G16 (bench/notes/gap-register.md): `R * R` with R antisymmetric used to zip
+// the strict cells and KEEP the AntisymIdx class, so every mirrored read came
+// back negated -- S(1, 0) = -1.0 and total = 0.0 in all three lanes alike. The
+// product of two antisymmetric operands is EVEN under the mirror
+// ((-a)(-b) = ab): the sign-character rule (formalism 8.6) types it SymIdx and
+// gathers it over range<SymIdx<2, 3>>, diagonal included (0 * 0 = 0).
+let A = [1.0, 2.0, 4.0]
+let R = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> x - y |> compute
+let S = R * R
+let s01 = S(0, 1)
+let s10 = S(1, 0)
+let s12 = S(1, 2)
+let s21 = S(2, 1)
+let s11 = S(1, 1)
+// Off-diagonal squares 1, 9, 4, each mirrored once: 2 * (1 + 9 + 4) = 28.
+let total = reduce(reduce(decompact(S, 0), (+)), (+))
+// EXPECT: S = [[0.0, 1.0, 9.0], [0.0, 4.0], [0.0]]
+// EXPECT: s01 = 1.0
+// EXPECT: s10 = 1.0
+// EXPECT: s12 = 4.0
+// EXPECT: s21 = 4.0
+// EXPECT: s11 = 0.0
+// EXPECT: total = 28.0
+// Two DIFFERENT antisymmetric arrays over the same index space: same rule.
+let Q = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> x * x - y * y |> compute
+let P = R * Q
+let p01 = P(0, 1)
+let p10 = P(1, 0)
+// EXPECT: p01 = 3.0
+// EXPECT: p10 = 3.0
