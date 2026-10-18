@@ -2997,6 +2997,63 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                     // pre-jam body verbatim. Complex keeps the plain nest for
                     // the dense arm's reason (a 1.13x ceiling, non-bitwise at
                     // R = 2).
+                    //
+                    // FIRST CHOICE, for a real f64 dense operand above the
+                    // crossover: the packed-triangle SYRK tile
+                    // (blade_pgemm::dsyrk_tri, the same call the BLAS-off
+                    // `comm` row-contraction nest emits; one rule,
+                    // `packedTriWorth`, one knob, BLADE_SYRK_TILE). The
+                    // jam's arithmetic per cell is `__gacc = 0; for k
+                    // ascending: __gacc += A[i][k] * conj_scalar(A[j][k])`, and
+                    // conj_scalar is the identity on a real element, so the
+                    // tile's chain (+0.0, then acc += X[i][s] * X[j][s] for s
+                    // ascending, row i's factor first) is the same operation
+                    // sequence: bitwise under -ffp-contract=off (raw-bit block
+                    // `blade test syrk-tile`), one fma per step under =fast.
+                    // Complex (Hermitian, conjugating), float32 and non-dense
+                    // operands keep the jam below.
+                    let lit (s: string) = match System.Int64.TryParse s with | true, v -> Some v | _ -> None
+                    let tileOperandOk =
+                        not (isComplexElem outElem)
+                        && outElemStr = "double"
+                        && Blade.LinAlgPatterns.isDenseRealF64Rank2 la
+                        && Blade.LinAlgPatterns.isDenseRealF64Rank2 ra
+                    let tileLines =
+                        if not tileOperandOk then None
+                        elif not (syrkTileEnabled ()) then
+                            recordCodegenDecision "microkernel" varName
+                                (Blade.Effects.Declined "BLADE_SYRK_TILE=0/off: the triangular gram jam (A/B knob)")
+                                [ "packed syrk tile" ]
+                            None
+                        else
+                        match lit mExtent, lit nExtent with
+                        | Some p, Some k when packedTriWorth p k ->
+                            (packedGemmUsedCell ()).Value <- true
+                            let kc = syrkTileKc k
+                            // Rows are owned exclusively and no sum is split,
+                            // so the thread team needs no licence (the jam's
+                            // own threading argument); the emission knob
+                            // still decides.
+                            let threadedArg = if ompThreadEmissionEnabled () then "true" else "false"
+                            recordCodegenDecision "microkernel" varName Blade.Effects.Applied
+                                [ "packed syrk tile (blade_pgemm::dsyrk_tri, 6x8 register tile over the packed triangle)"
+                                  $"P={p} K={k} KC={kc}" ]
+                            recordFoldForm varName $"syrk tile 6x8, KC={kc}"
+                                "gram(A, A) node (one ascending chain per cell; no reorder licence used)"
+                            Some [ $"/* gram(A, A): packed-triangle syrk tile (blade_packed_gemm.hpp dsyrk_tri, 6x8, KC={kc}), per cell the serial chain */ blade_pgemm::dsyrk_tri((size_t)({mExtent}), (size_t)({nExtent}), {lName}.data, {varName}.data, 0, {threadedArg}, (size_t){syrkTileKcMax});" ]
+                        | Some p, Some k ->
+                            recordCodegenDecision "microkernel" varName
+                                (Blade.Effects.Declined "below the syrk-tile crossover (p >= 16, k >= 4): the triangular gram jam")
+                                [ "packed syrk tile"; $"P={p} K={k}" ]
+                            None
+                        | _ ->
+                            recordCodegenDecision "microkernel" varName
+                                (Blade.Effects.Declined "non-literal extents: the triangular gram jam")
+                                [ "packed syrk tile"; "non-literal extents" ]
+                            None
+                    match tileLines with
+                    | Some lines -> lines
+                    | None ->
                     let triR = 6
                     let jam =
                         if isComplexElem outElem then

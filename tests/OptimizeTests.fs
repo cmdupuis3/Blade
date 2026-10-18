@@ -1068,6 +1068,11 @@ let private planSyrkSrc (p: int) (n: int) =
 
 let private planSyrkTileSrc = planSyrkSrc 20 8
 
+/// gram(A, A) at 20 x 8: the node's BLAS-off arm takes the syrk tile.
+let private planGramTileSrc =
+    "let A: Array<Float64 like Idx<20>, Idx<8>> = method_for(range<Idx<20>>, range<Idx<8>>) <@> lambda(i, j) -> Float64(i + j) |> compute\n"
+    + "let G = gram(A, A)\n"
+
 let private planGramSrc =
     "let A: Array<Float64 like Idx<9>, Idx<5>> = method_for(range<Idx<9>>, range<Idx<5>>) <@> lambda(i, j) -> Float64(i + j) |> compute\n"
     + "let G = gram(A, A)\n"
@@ -1190,6 +1195,16 @@ let private planCases () =
        withGate "BLADE_SYRK_TILE" null (fun () ->
           planCase "plan_syrk_tile_declined_small" planCommSameArraySrc "microkernel"
               (declinedMentioning "syrk-tile crossover") "syrk tile declined below the crossover"))
+      // The gram(A, A) NODE route takes the same tile, in both builds.
+      for repro in [ null; "1" ] do
+          pinBlas "0" (fun () ->
+           withGate "BLADE_SYRK_TILE" null (fun () ->
+            withGate "BLADE_FP_REPRO" repro (fun () ->
+              planCase (if isNull repro then "plan_gram_node_syrk_tile" else "plan_gram_node_syrk_tile_repro")
+                  planGramTileSrc "fold-form"
+                  (fun d -> applied d && evidenceMentioning "fold form: syrk tile 6x8, KC=8" d
+                            && evidenceMentioning "gram(A, A) node" d)
+                  "gram(A, A): fold form: syrk tile 6x8, KC=8")))
       // The review's route shapes (bench/notes/microkernel-sketches-review.md M5):
       // ragged triangles and multi-K-block chains tile; a 13-row triangle keeps
       // the nest.
