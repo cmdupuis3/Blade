@@ -1465,9 +1465,9 @@ numbers.
 |---|---|---|---|
 | antisym vs both experts (0.416 / 0.395, verdict loss) | per-cell operand reloads, 2 loads/FMA vs 0.67; 7.7 / 5.0 vs 16.7–18.6 G FMA/s | G1 | open |
 | gram vs experts (0.52 / 0.47, indicative) | same; C++ lane adds the single-accumulator simd reduction | G1, G26 | open |
-| comoment3 vs experts (0.28 / 0.28, indicative) | multiply + FMA per term with 3 loads vs hoisted pair product; checksum share 36% / 70% | G1b, G3a, G3b | open |
+| comoment3 vs experts (0.28 / 0.28, indicative) | multiply + FMA per term with 3 loads vs hoisted pair product; checksum share 36% / 70% | G1b, G3a, G3b | G3b FIXED post-matrix (b3272712; scratch: C++ 147 → ~44 ms, not harness-measured); G1b, G3a open |
 | pairkernel vs experts (0.77 / 0.72, indicative) | 6.27M-read logical checksum; kernel equivalent | G3a, G2 | open |
-| recur vs experts and baselines (0.09–0.17, indicative) | per-step allocator page faults (eight 160 KB temporaries) | G6, G8 | open |
+| recur vs experts and baselines (0.09–0.17, indicative) | per-step allocator page faults (eight 160 KB temporaries) | G6, G8 | G6 FIXED post-matrix (b3272712; scratch: 136 → 24 ms, not harness-measured); G8 open |
 | C++ lane vs LLVM lane on every group-A kernel (1.15–2.64) | single-accumulator simd reduction; out-of-line canonicalizing read | G26, G3b | open |
 | maskagg vs both tiers (0.043–0.157, indicative; session 1b) | one `unordered_map` insert per kept cell (~85% of the time), Bool mask pass, `y*y` temporary; LLVM lane refuses `mask`/`compound` | G9, G12 | open |
 | mt8 group A after the D44 fix (session 2b, indicative): antisym 0.46 / 0.48, comoment3 0.24 / 0.20, gram 0.48 / 0.46, pairkernel 0.39 / 0.39 vs experts | the serial-regime kernel gap carried into threads (G1 per-cell reloads; G1b for comoment3) plus the Path B checksum fold — 8 serial chains of canonicalizing reads against the experts' vectorized threaded sums (G3a/G3b under G25). The superseded Amdahl term (serial preparation and checksum: 0.064/0.048, 0.11, 0.35/0.33, 0.33/0.35) is gone | G1, G1b, G3a, G3b, G25 | open |
@@ -1568,7 +1568,11 @@ an observation, not a re-analysis of the earlier sessions.
 `band` (closed-form constrained enumeration) — dropped before measurement: the domain
 fold was refused at codegen (BL7004) and the `|> compute` form built a hashed key table
 (D1, G4); **G4 was fixed after the matrix (agent C, 1ea0ddf3 / 4b1a5224) and `band` is
-restored as a twelfth kernel (`kernels/band/spec.md`), unmeasured in this document**. The **pair
+restored as a twelfth kernel (`kernels/band/spec.md`; sources landed in a879ef1a,
+smoke-verified in both lanes and both FP regimes, full-size plan = the affine nest), still
+unmeasured in this document — it joins the re-measure after the wave-2 merges, with Blade
+"no parallel form" in mt8 (G31) and the C++ lane's scalar inner loop (G30) expected to
+show**. The **pair
 SUM** over a `comm` kernel — recast as the `pairkernel` MATRIX: a fold over compact
 storage is refused (BL3999; D2, G2), and the suite therefore measures materialized
 symmetric objects, not pair sums. The O(1)-per-cell antisymmetric map — recast as the
@@ -1633,6 +1637,20 @@ payoffs to beat, from this document: gram expert ratio 0.52 / 0.47 (G1, G26); an
 0.416 / 0.400 (G1); comoment3 0.28 (G1b, G3a/G3b); pairkernel 0.77 / 0.72 (G3a: the kernel
 is equivalent); recur 0.09 (G6); maskagg 0.04–0.15 (G9); blas 0.81 / 0.78 (G28); the
 mt8 chunk-serial checksum (G25) and the missing thread forms (G5, G7).
+
+**Phase-2 landings so far (post-matrix; NOT harness-measured — every number below is the
+implementing agent's scratch A/B and is superseded by the re-measure after the wave-2
+merges):** (a) agent E's packed-triangle syrk tile in the C++ lane (6cde38bb / c42addd2,
+G1 partly fixed): gram blade-cpp 275 → 93 ms, ratios vs the experts 0.30 → ~1.04 /
+0.27 → ~0.96 on a loaded host, 3 rounds; (b) agent C's domain-enum nest (1ea0ddf3 /
+4b1a5224, G4 fixed) and the restored `band` kernel (a879ef1a), smoke-verified, with two
+new domain gaps (G30: the C++ lane's inner loop is scalar; G31: no thread-level form);
+(c) agent D's M0–M3 (merge b3272712): the retained-block pool cache in both allocators
+and let-rec zero-fill elision (G6 fixed: recur C++ 136.4 → 23.8 ms, LLVM 131.5 → 22.3 ms,
+page faults 107k → 13.6k and 95k → 13.3k, checksum identical, 7 interleaved serial runs)
+and the compare-swap canonical read with bind-once (G3b fixed: comoment3 C++ 147 → ~44 ms;
+the flat-offset read was built, measured slower, and is not emitted); G3a (the logical
+checksum pass itself) stays open pending H's M4.
 
 | # | item (plan §) | effort | forecast (ms, from the session-1a/1b medians) | gap |
 |---|---|---|---|---|

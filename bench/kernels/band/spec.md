@@ -50,7 +50,7 @@ inside double range, relative drift from summation order ~1e-15.
 | variant | n | w | band cells n(2w+1) − w(w+1) | dense visits n² | est. serial (band) | est. serial (dense natural) |
 |---|---|---|---|---|---|---|
 | smoke | 211 | 5 | 2,291 | 44,521 | < 0.1 ms | < 0.1 ms |
-| full | 20011 | 101 | 4,052,131 | 4.00e8 | ~20 ms (~5 ns per cell: one division) | ~0.3–1 s (predicate nest) |
+| full | 20011 | 101 | 4,051,931 (= 4,062,233 − 10,302; numpy and the plan agree) | 4.00e8 | ~20 ms (~5 ns per cell: one division) | ~0.3–1 s (predicate nest) |
 | narrow (optional) | 20011 | 11 | 460,121 | 4.00e8 | ~2–3 ms | same |
 
 n is set by the natural tier: its dense nest with a predicate visits n² cells and must stay
@@ -109,15 +109,40 @@ goes on the fold kernel (`lambda(p, q) where omp -> p + q, 0.0`, README §7.4) a
 domain nest's outer level must then thread — blade-B confirms the pragma lands on the `i`
 level (`[omp v1]` line) or records "no parallel form".
 
+## Status after the sources landed (commit a879ef1a; blade-B `llvm-acceptance-B.md` §7)
+
+- In the suite: `band.blade`, `natural.f90`, `expert.f90`, `kernel.json`, pins-B entry,
+  `ref_band.py`, dump + validate arm; smoke-verified in both lanes and both FP regimes; the
+  full-size plan is the closed-form affine nest with NO key table (G4 fixed). Not yet
+  measured at full size (the re-measure follows the wave-2 merges).
+- The domain fields had to be `Int64<min=0, max=n-1>`: the corpus's `Int<...>` (Int32)
+  spelling typechecks, but then the LLVM lane refuses `phi`'s Int32 parameters (noted under
+  G4).
+- **mt8: Blade "no parallel form"** — `[omp v1] kernel: declined -- a closed-form domain
+  nest has no thread-level form yet` (register G31; `kernel.json no_parallel_form: true`).
+  The Fortran arms run mt8.
+- **G30 (new):** the C++ lane does NOT vectorize the closed-form domain's inner loop —
+  blade-llvm vectorizes it 4-wide unrolled (8 `vdivpd` per iteration); blade-cpp emits a
+  scalar inner loop despite the `omp simd reduction` pragma (2 `vdivsd` per cell, 12
+  instructions); no casts, Int32 fields and an inlined `phi` were all tried and stay scalar,
+  so the blocker is not the BL8006 checks, the frame or the index width (g++'s vectorizer
+  remarks name only the cast check's panic). Expected: blade-llvm equivalent to the expert,
+  blade-cpp losing.
+- The Fortran agent's rejected alternative for the repro expert (a `phi(d)` lookup table)
+  is recorded in `fortran-notes.md`; this spec treats the per-cell division as part of the
+  kernel, so the expert keeps it per cell.
+
 ## Regimes
 
-licensed (serial, mt8), repro (serial, mt8). fastmath not run (one division per cell;
-nothing a blanket licence would change beyond the matched fold). `licensed` differs from
-`repro` in the fold form only.
+licensed (serial, mt8 — Fortran arms only, Blade "no parallel form"), repro (serial, mt8
+likewise). fastmath not run (one division per cell; nothing a blanket licence would change
+beyond the matched fold). `licensed` differs from `repro` in the fold form only.
 
 ## Hypothesis
 
-- vs expert: **equivalent** — both visit exactly the band's 4.05M cells with the same
+- vs expert: **blade-llvm equivalent; blade-cpp a loss** (G30: the C++ lane's scalar inner
+  loop against the expert's and the LLVM lane's 4-wide division) — both visit exactly the
+  band's 4.05M cells with the same
   per-cell arithmetic; the only candidates for a difference are loop overhead at the
   per-row bounds (affine in both) and whether each compiler vectorizes a loop body with a
   division. A loss > 10% would point at the domain nest's lowering (bounds recomputation,
