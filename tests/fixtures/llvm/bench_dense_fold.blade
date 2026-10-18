@@ -14,7 +14,7 @@
 type Ix = Idx<9999991>
 
 function fold_probe() -> Float64 = {
-    let a = method_for(range<Ix>) <@> lambda(i) -> 1.0 + 1.0 * i |> compute
+    let a = method_for(range<Ix>) <@> lambda(i) -> 1.0 + 1.0 * Float64(i) |> compute
     reduce(a, (+))
 }
 

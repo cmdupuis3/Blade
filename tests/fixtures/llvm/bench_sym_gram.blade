@@ -14,7 +14,7 @@ type Sx = Idx<6006>
 type Kx = Idx<402>
 
 function gram_probe() -> Float64 = {
-    let bm = method_for(range<Sx>, range<Kx>) <@> lambda(i, k) -> 1.0 + 0.5 * ((i * 31 + k) % 7) |> compute
+    let bm = method_for(range<Sx>, range<Kx>) <@> lambda(i, k) -> 1.0 + 0.5 * Float64((i * 31 + k) % 7) |> compute
     let s = method_for(bm, bm) <@> lambda(x: T^1, y: T^1) where comm(x, y) -> reduce(x * y, (+)) |> compute
     // A corner, a last-column cell and a diagonal cell -- enough to prove the
     // addressing agrees across arms. These stay INSIDE the function on
