@@ -19,7 +19,7 @@ type Sx = Idx<3001>
 type Kx = Idx<402>
 
 function bm_probe() -> Float64 = {
-    let bm = method_for(range<Sx>, range<Kx>) <@> lambda(i, k) -> 1.0 + 0.5 * ((i * 31 + k) % 7) |> compute
+    let bm = method_for(range<Sx>, range<Kx>) <@> lambda(i, k) -> 1.0 + 0.5 * Float64((i * 31 + k) % 7) |> compute
     bm((0 : Sx), (0 : Kx)) + bm((3000 : Sx), (401 : Kx)) + bm((1500 : Sx), (200 : Kx))
 }
 

@@ -202,8 +202,25 @@ default (§6.2). No value pin changed.
    - joins have no THREAD form at all (G7): the census line says so; a per-accumulator
      `reduction` clause on a parallel loop is the upgrade path.
    - `prodsum` has no threading licence slot (G14); its reassociation is the default now.
-   - the expression-position reduce opens no team (structural; unchanged).
+   - the expression-position reduce opens no team (structural; unchanged) -- except a
+     `where omp` fold left in a top-level binding's result TUPLE, which IRLift now binds
+     to its own let (a statement position), so it opens the same team the let-bound
+     spelling does (G27 note, 2026-10-18).
    - simd inside Path B chunks (each thread's chunk is still a serial chain).
+
+   Census audit (2026-10-18, G7 residue / G27 / G11 / G23), each shape probed in the
+   default, `BLADE_OMP_THREADS=1` and `BLADE_FP_REPRO=1` builds: every listed shape
+   above prints its `[omp] requested but emitted serial` line in `blade plan` in all
+   three. Fixed: `where omp(i: 1)` on the ROW MAP a reorder-licensed fold consumes was
+   accepted and dropped silently (the one-level simd arm never reached the nest's
+   marker) -- it is now HONOURED (the map's level 0 is the level Path B chunks; census
+   line when the plan is dead); a `where omp` fold kernel whose nest Path B cannot
+   chunk, the knob/`where repro`/streamed decline sites that printed the phrase as raw
+   text (C++ comment only, no plan record) now go through `ompSuppressedPhrase`; the
+   LLVM lane (no thread runtime) prints the census for every omp kernel (`.ll` comment,
+   build stderr, plan), and `blade plan` under `BLADE_LLVM=1` re-states the C++-only
+   routes (BLAS, thread constructs, C++ fold forms, microkernels) for the lane that
+   emits, with a `lane:` line.
 2. Row-fold jam vs per-row lane/simd forms. The jam declined under the OLD knob; with
    the knob's forms now the default that would have silently changed every row fold's
    default emission, so it was measured (12 row folds per program, `OMP_NUM_THREADS=1`,

@@ -316,7 +316,37 @@ let private ompReduceCases : (string * string * string list * string list) list 
        "function myAdd(a: Float64, b: Float64) where comm(a, b) = (a + b) * 1.0\n" +
        "let M = [[1.0, 2.0, 3.0, 4.0, 5.0], [4.0, 5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0, 13.0]]\n" +
        "let r = reduce(M, myAdd, 0.0)\n",
-       [], ["[omp]"; "#pragma omp"]) ]
+       [], ["[omp]"; "#pragma omp"])
+      // ---- the licence on the MAP feeding a fold (bench gap G27) ------------
+      // `where omp(a: 1)` on the row map a builtin `(+)` consumes licenses the
+      // outermost level the fold sweeps -- the level Path B chunks -- and `(+)`
+      // is reorder-licensed, so the fold threads. Before, this placement was
+      // accepted and DROPPED with no trace (the one-level simd arm never reached
+      // the nest emitter whose marker would have reported it).
+      ("map_licence_feeding_fold_threads_path_b",
+       "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]\n" +
+       "let s = reduce(method_for(A) <@> lambda(a) where omp(a: 1) -> a * a, (+))\n",
+       ["comm-licensed parallel fold, outer level chunked"
+        "#pragma omp parallel num_threads("
+        "omp_get_"],
+       ["[omp] requested but emitted serial"])
+      // Negative control: the same fold, no clause on the map -- no team.
+      ("map_without_licence_feeding_fold_no_team",
+       "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]\n" +
+       "let s = reduce(method_for(A) <@> lambda(a) -> a * a, (+))\n",
+       [], ["[omp]"; "#pragma omp parallel"; "omp_get_"])
+      // ---- a licensed fold inside a top-level result TUPLE (G27 / G14) ------
+      // A module binding's tuple is a statement position, so the fold is bound
+      // to its own let (IRLift) and takes the same Path A team the let-bound
+      // spelling takes -- not the expression-position decline.
+      ("tuple_component_licensed_fold_opens_team",
+       "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]\n" +
+       "let (a, b) = (reduce(A, (+)), reduce(A, lambda(p, q) where omp -> p + q, 0.0))\n",
+       ["#pragma omp parallel for simd reduction(+:"],
+       // (A fold in a KERNEL BODY keeps the structural decline, pinned above
+       // by reduce_in_kernel_body_marks_dropped_omp: only the statement
+       // position changed.)
+       ["reduce in expression position"]) ]
 
 /// The BL-coded refusal for an UNLICENSED `omp` on a fold kernel. Pinned in the
 /// diagnostics corpus too (049_fold_omp_needs_license.blade); repeated here so
@@ -644,6 +674,14 @@ let private ompThreadsKnobCases : (string * string * string list * string list) 
        "let s = reduce(A, myAdd)\n",
        [ marker; "// reduce: accumulator loop, eager" ],
        [ "#pragma omp"; "omp_get_"; "__rpart_s" ])
+      // The MAP-licensed fold (bench gap G27): the chunk plan the map's
+      // `omp(a: 1)` set is dead in this build, so the fold takes the
+      // vectorized form -- with the census line for the dropped team (block
+      // form: this arm's lines may be space-joined into a kernel-body IIFE).
+      ("knob_map_licensed_fold_simd_and_census",
+       arr + "let s = reduce(method_for(A) <@> lambda(a) where omp(a: 1) -> a * a, (+))\n",
+       [ "/* [omp] requested but emitted serial: BLADE_OMP_THREADS=1"; "BLADE_OMP_SIMD_REDUCTION(+:s)" ],
+       [ "#pragma omp parallel"; "omp_get_"; "outer level chunked" ])
       // `axes = 2` for the reason spelled out at `reduce_over_computation_chunked`:
       // without it this is a partial fold that never had a chunk plan to drop,
       // so the knob arm and its `_control_knob_off` twin both go vacuous.
@@ -1513,6 +1551,12 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
               ("path_b_reduce_over_computation",
                commFn + bDecl + "let s = reduce(method_for(B, B) <@> lambda(x, y) -> x * y, myAdd, 0.0, axes = 2)\n",
                serialFn + bDecl + "let s = reduce(method_for(B, B) <@> lambda(x, y) -> x * y, myAdd, 0.0, axes = 2)\n",
+               true)
+              // The licence on the MAP feeding a builtin fold (bench gap G27):
+              // the map's `omp(x: 1)` covers the level Path B chunks.
+              ("path_b_map_licence_feeding_builtin_fold",
+               arrDecl + "let s = reduce(method_for(A) <@> lambda(x) where omp(x: 1) -> x * x + 0.25, (+))\n",
+               arrDecl + "let s = reduce(method_for(A) <@> lambda(x) -> x * x + 0.25, (+))\n",
                true) ]
 
         for (name, ompSrc, serialSrc, isPathB) in cases do

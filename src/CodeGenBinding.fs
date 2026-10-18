@@ -3084,9 +3084,13 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
     // be invisible -- the same silence `ompSuppressedMarker` exists to prevent
     // in the loop nests. Empty for Path A (which emits its own marker beside the
     // simd form it keeps) and for a kernel that never asked for omp.
-    let pathBSuppressedNote =
+    // A FUNCTION, called only at the arms that splice it: its census phrase is
+    // also the plan's decision record (ompSuppressedPhrase), so it must not be
+    // computed for an arm that emits something else (Path A with the team
+    // suppressed prints its own).
+    let pathBSuppressedNote () =
         if parallelFold.IsSome && not ompThreadsOn
-        then [ $"{ind}// [omp] requested but emitted serial: {(ompThreadsSuppressedReason ())}" ]
+        then [ $"{ind}// {(ompSuppressedPhrase (ompThreadsSuppressedReason ()))}" ]
         else
         // The `where repro` veto: the kernel (or the named function its eta
         // wrapper calls) demands the serial operation sequence, so
@@ -3097,7 +3101,8 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
         // trace in the emitted text.
         match resolveCallable kernelExpr with
         | Some c when c.Params.Length = 2 && c.IsOmpParallel && foldKernelReproVetoed c ->
-            [ $"{ind}// [omp] requested but emitted serial: fold kernel is `where repro` (the operation order is the contract; reorder licence vetoed)" ]
+            let why = "fold kernel is `where repro` (the operation order is the contract; reorder licence vetoed)"
+            [ $"{ind}// {(ompSuppressedPhrase why)}" ]
         // The BUILD-WIDE twin of the veto above: BLADE_FP_REPRO=1 is `where
         // repro` on every fold kernel at once, so an `omp` request it declines
         // gets the same census line, naming the knob.
@@ -3151,7 +3156,9 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                          $"if ({name}__first) {{ {name} = {blk}[__q]; {name}__first = false; }} else ")
                 let ompNote =
                     match resolveCallable kernelExpr with
-                    | Some c when c.IsOmpParallel -> [ $"{ind}// [omp] requested but emitted serial: the operand is streamed from the store in storage order" ]
+                    | Some c when c.IsOmpParallel ->
+                        let why = "the operand is streamed from the store in storage order"
+                        [ $"{ind}// {(ompSuppressedPhrase why)}" ]
                     | _ -> []
                 let rowRead =
                     genRows spec.FilePath spec.VarName streamedKey blk "__lo" "__hi" spec.VarType
@@ -3205,7 +3212,7 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                 recordFoldForm name "simd-reduction" "reduce over a materialized array (Path A, thread team suppressed)"
                 elemErrCode @ guardLines @ [
                     $"{ind}// reduce: comm-licensed reduction (builtin '{(binOpToCpp op)}'), flat sweep"
-                    $"{ind}// [omp] requested but emitted serial: {(ompThreadsSuppressedReason ())}"
+                    $"{ind}// {(ompSuppressedPhrase (ompThreadsSuppressedReason ()))}"
                     $"{ind}const size_t {rnName} = {boundExpr};"
                     $"{ind}{elemStr} {name} = {seedStr};"
                 ]
@@ -3358,7 +3365,7 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                     fpReassocLaneStmts kLanes elemStr "__rlane" "__ri" "__rlo" "__rhi" elemAt
                         (fun acc rhs -> $"{acc} = {wname}({acc}, {rhs});")
                 recordFoldForm name $"K-lanes({kLanes})" "reduce over a materialized array"
-                elemErrCode @ guardLines @ wrapperLines @ pathBSuppressedNote @ [
+                elemErrCode @ guardLines @ wrapperLines @ pathBSuppressedNote () @ [
                     $"{ind}// reduce: accumulator loop, eager ({kLanes}-lane, licensed reorder)"
                     $"{ind}{elemStr} {name} = {seedStr};"
                     $"{ind}{{"
@@ -3381,7 +3388,7 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
             recordFoldForm name
                 (if foldReorderLicensed callable then serialFoldForm () else "serial (no reorder licence)")
                 "reduce over a materialized array"
-            elemErrCode @ guardLines @ wrapperLines @ pathBSuppressedNote @ [
+            elemErrCode @ guardLines @ wrapperLines @ pathBSuppressedNote () @ [
                 $"{ind}// reduce: accumulator loop, eager"
                 $"{ind}{elemStr} {name} = {seedStr};"
                 $$"""{{ind}}for (size_t __ri = {{loopStart}}; __ri < {{boundExpr}}; __ri++) {"""
@@ -3625,8 +3632,27 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                     // different text -- e.g. handing an omp-licensed fold to a
                     // BLAS dispatch it declines today. The knob's invariant is
                     // that route selection is identical in both modes.
+                    // The licence may sit on EITHER kernel (bench gap G27):
+                    //   * the FOLD kernel (`lambda(u, v) where omp -> u + v`), or
+                    //   * the MAP kernel, when its `omp(...)` covers the nest's
+                    //     OUTERMOST level (`method_for(range<I>) <@> lambda(i)
+                    //     where omp(i: 1) -> ..., (+)`). That level is exactly
+                    //     the one Path B chunks, the map's licence says its
+                    //     iterations are independent, and the fold's own reorder
+                    //     licence (a builtin `+`/`*` body, or declared comm) is
+                    //     what makes the per-thread partials sound. Before, this
+                    //     placement was accepted and DROPPED with no trace: the
+                    //     one-level arm below took the simd form and never
+                    //     reached the nest emitter whose marker would have said so.
+                    // A map licence that covers only an INNER level cannot be
+                    // chunked here; the nest emitter's marker reports it.
+                    let mapLicensesOuter =
+                        cg0.OmpRequested
+                        && (match cg0.Bindings with
+                            | head :: _ -> head.IsParallel
+                            | [] -> false)
                     let chunkable =
-                        callable.IsOmpParallel
+                        (callable.IsOmpParallel || mapLicensesOuter)
                         && foldReorderLicensed callable
                         && (match cg0.Bindings with
                             // a closed-form domain head is a whole affine nest
@@ -3657,7 +3683,7 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                         else
                             let facts : Blade.LinAlgPatterns.DotFoldFacts =
                                 { FoldIsBuiltinAdd = (foldKernelBuiltinOp callable = Some IRAdd)
-                                  FoldRequestedOmp = callable.IsOmpParallel }
+                                  FoldRequestedOmp = callable.IsOmpParallel || mapLicensesOuter }
                             match (0, facts, single.ArrayTypes, cg) with
                             | Blade.LinAlgPatterns.BlasL1 call ->
                                 let entry = Blade.LinAlgPatterns.shimEntryPoint Blade.LinAlgPatterns.HostBlas call
@@ -3829,6 +3855,16 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                             let chunkNote =
                                 if cg.FoldChunk.IsSome
                                 then [ $"{ind}/* {(ompSuppressedPhrase (ompThreadsSuppressedReason ()))} */" ]
+                                // The MAP kernel asked for omp but its licence
+                                // covers no level of this one-level nest (e.g.
+                                // `omp(i: 0)`), so no chunk plan exists. This
+                                // arm never reaches the nest emitter, whose
+                                // marker would otherwise report it.
+                                elif cg.OmpRequested then
+                                    let why =
+                                        if ompThreadEmissionEnabled () then "the omp(...) depth licenses no level of this nest"
+                                        else ompThreadsSuppressedReason ()
+                                    [ $"{ind}/* {(ompSuppressedPhrase why)} */" ]
                                 else []
                             // A CLOSED-FORM DOMAIN level (docs/plans/structural/06):
                             // the affine nest over the struct's fields, with the
@@ -3986,7 +4022,22 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                        "serial (closed-form domain: affine nest; the fold kernel has no simd reduction operator, or a real array rides the level)"
                                    else "serial (head level is not a plain rectangular sweep)"
                                recordFoldForm name form "reduce over a deferred computation"
-                               genLoopNest cg ctx.VarNames ctx.Indent)
+                               // A `where omp` FOLD kernel that got no chunk plan
+                               // (`chunkable` declined) reaches the nest with
+                               // nothing that says so: the nest's own marker reads
+                               // the MAP's request, and the FoldChunk lines need a
+                               // plan. Census line for exactly that case.
+                               let unchunkedNote =
+                                   if callable.IsOmpParallel && cg.FoldChunk.IsNone then
+                                       let why =
+                                           if foldKernelReproVetoed callable then
+                                               "fold kernel is `where repro` (the operation order is the contract; reorder licence vetoed)"
+                                           else "the fold's outermost level is not a plain rectangular sweep, so it cannot be chunked per thread (Path B)"
+                                       // BLOCK form: a kernel-body fold's lines are
+                                       // space-joined into a one-line IIFE.
+                                       [ $"{ind}/* {(ompSuppressedPhrase why)} */" ]
+                                   else []
+                               unchunkedNote @ genLoopNest cg ctx.VarNames ctx.Indent)
                     let code =
                         match dotCall with
                         | Some (call, entry) ->

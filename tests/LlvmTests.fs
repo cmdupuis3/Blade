@@ -805,6 +805,33 @@ let runLlvmFactTests () : BlockResult =
          if bad.IsEmpty then pass name "no fact text survives"
          else fail name ($"""fact text survived the kill switch: {(String.concat " | " bad)}"""))
 
+    // ---- the omp census (bench gap G11) -------------------------------------
+    // The lane has no thread runtime, so a `where omp` licence compiles serial
+    // here; the dropped threading half must not be silent. The census phrase is
+    // the C++ lane's, as a module comment naming the kernel; the reordering half
+    // is spent as `reassoc nsz` (absent in the REPRO build, whose census says
+    // so). Negative control: a program with no omp request carries no line.
+    (let src = """
+type Ix = Idx<9>
+let xs: Array<Float like Ix> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+let total = reduce(xs, lambda(a, b) where omp -> a + b, 0.0)
+"""
+     let census = "; [omp] requested but emitted serial: the LLVM lane has no thread-level form"
+     let name = "omp census: a `where omp` fold names its dropped team"
+     match emitUnder [] "facts" src, emitUnder [ ("BLADE_FP_REPRO", Some "1") ] "facts" src,
+           emitUnder [] "facts" licensedFoldSource with
+     | Error e, _, _ | _, Error e, _ | _, _, Error e -> fail name e
+     | Ok ll, Ok repro, Ok noOmp ->
+         if not (ll.Contains (census + "; the licence is honoured as fold reassociation (lambda in total)")) then
+             fail name "default build: no census comment for the dropped thread team"
+         elif not ((instructionsOnly ll).Contains "reassoc nsz") then
+             fail name "default build: the licence's reordering half was not spent (no `reassoc nsz`)"
+         elif not (repro.Contains (census + ", and BLADE_FP_REPRO=1 keeps every fold serial")) then
+             fail name "repro build: the census does not say the fold stays serial"
+         elif noOmp.Contains "[omp]" then
+             fail name "a program with no omp request carries a census line"
+         else pass name "census comment in both builds, none without a request")
+
     printFooter "LLVM Fact Layer"
         [ $"{passed} passed"; $"{failed} failed"; "0 skipped" ]
     { Block = "LLVM Fact Layer"; Passed = passed; Failed = failed; Skipped = 0
