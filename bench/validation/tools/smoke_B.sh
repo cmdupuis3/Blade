@@ -18,11 +18,11 @@ reg=$1
 out=$2
 shift 2
 if [ "$reg" = "repro" ]; then export BLADE_FP_REPRO=1; else unset BLADE_FP_REPRO; fi
-want=${*:-"fusedchain onepass stencil recur maskagg dot saxpy"}
+want=${*:-"fusedchain onepass stencil recur maskagg dot saxpy band"}
 out=$out/$reg
 mkdir -p "$out"
 for spec in fusedchain:n=20011 onepass:n=50021 stencil:ny=31,nx=41 recur:nt=11,nx=211 \
-            maskagg:n=30011 dot:n=30011 saxpy:n=20011; do
+            maskagg:n=30011 dot:n=30011 saxpy:n=20011 band:n=211,w=5; do
   k=${spec%%:*}
   case " $want " in *" $k "*) ;; *) continue ;; esac
   sizes=${spec#*:}

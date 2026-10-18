@@ -15,7 +15,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import benchgen as g  # noqa: E402
 
-KERNELS = ["fusedchain", "onepass", "stencil", "recur", "maskagg", "dot", "saxpy"]
+KERNELS = ["fusedchain", "onepass", "stencil", "recur", "maskagg", "dot", "saxpy", "band"]
 
 
 def num17(x):

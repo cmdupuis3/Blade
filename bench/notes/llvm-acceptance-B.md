@@ -651,3 +651,94 @@ register: G9**, confirmed.
 
 The LLVM lane refuses `mask` on its own as well ("the IR node IRMask in array position -- no
 arm in the llvm lane"), not only `compound`. Add that to G9's lane column.
+
+## 7. band (restored after G4) -- written and verified (2026-10-18)
+
+Binary: Blade.dll E1896D2E... (fixes A/B/C/E merged).
+
+**Files.**
+- `bench/kernels/band/band.blade`: SIZE markers `let static n = 20011 // SIZE n` and
+  `let static w = 101 // SIZE w`; `Idx<n>`, `max=n-1`, `Float64(w + 1)` are derived;
+  generator D; the two-lane block shape.
+- No twin: the spec says the inputs are negligible.
+- `bench/validation/ref_band.py`: smoke, full and narrow; the terms are formed per diagonal
+  and summed exactly; the cell count is asserted.
+- `pins-B.json` gains a band entry with all three sizes. Every older entry is unchanged.
+- `bench/validation/dump/band_dump.blade` plus a `band` arm in `validate_B.py`.
+- `make_pins_B.py` and `tools/smoke_B.sh` now include band.
+
+**Spelling.**
+- Domain fields are `Int64<min=0, max=n-1>`, as in the spec. The `Int<...>` (Int32)
+  spelling of corpus `domains/001` typechecks, but the LLVM lane then refuses `phi` ("parameter
+  'i' of 'phi' has type Int32"), so Int64 is the two-lane spelling.
+- The kernel is `let s = reduce(method_for(range<Band>) <@> lambda(i, j) -> phi(i, j) *
+  x((i : Nx)) * x((j : Nx)), lambda(p, q) where omp -> p + q, 0.0)`. That is the corpus's
+  cast spelling; an uncast `x(i)` gives the BL4003 advisory.
+
+**Verification at smoke size (n = 211, w = 5).**
+- `blade check` OK.
+- licensed: C++ serial, C++ 2-thread and LLVM give checksum 325.099853480187 / .188 against
+  the pin 325.0998534801877 (rel err <= 2.1e-15), and input_checksum 105.743473788723. No
+  fallback.
+- The LLVM lane now prints its census line: "[omp] requested but emitted serial: the LLVM
+  lane has no thread-level form; the licence is honoured as fold reassociation".
+- repro: all three builds print 325.099853480188.
+- `validate_B.py` (both regimes) passes for band:
+  - cells = 2291 (= n(2w+1) - w(w+1));
+  - lexsum = 240795555, the exact cell set;
+  - a lexicographic-order Horner fold matches at 1.0e-15, so the visiting ORDER is
+    (i asc, j asc);
+  - checksum matches at 2.1e-15.
+- The re-run on this binary leaves every other kernel's values unchanged (ALL OK).
+
+**Plan (full size).**
+- `[domain-enum v1] applied [enumeration of Band: closed-form affine nest (2 level(s): i in
+  [0, 20010], j in [max(0, i - 101), min(20010, i + 101)]), 4051931 cell(s); consumer:
+  streamed fold (no array, no key table)]`.
+- licensed: `[fold-form v1] applied [fold form: simd-reduction; reduce over a closed-form
+  domain (Band: affine nest, simd on the innermost field)]`.
+- repro: `serial (repro)`.
+- Threading: `[omp v1] kernel: declined -- a closed-form domain nest has no thread-level
+  form yet` (under repro also "not a plain rectangular sweep, so it cannot be chunked per
+  thread (Path B)"). **mt8 = "no parallel form"** for the kernel; only the input map
+  threads.
+- The cell count, 4,051,931, matches numpy. The spec's size table says 4,052,131, which is
+  off by 200: n(2w+1) - w(w+1) = 4,062,233 - 10,302 = 4,051,931.
+
+**Emit (full-size C++).**
+- No `sparse_index_t`, no `Sparse<`, no key table. The only `unordered_map` hit is the
+  standard `#include`.
+- The nest:
+
+  ```
+  for (int64_t __i0_d0 = 0LL, __i0_e0 = 20010LL; __i0_d0 <= __i0_e0; ++__i0_d0) {
+      const int64_t __i0_e1 = std::min<int64_t>(20010LL, __i0_d0 + 101LL);
+      BLADE_OMP_SIMD_REDUCTION(+:__v51)
+      for (int64_t __i0_d1 = std::max<int64_t>(0LL, __i0_d0 - 101LL); __i0_d1 <= __i0_e1; ++__i0_d1) {
+  ```
+- The casts `(i : Nx)`/`(j : Nx)` carry a BL8006 range check per read in the C++ SOURCE.
+  In the optimized exe the inner loop has no call and no panic branch, so g++ proved the
+  checks away from the loop bounds.
+
+**Store / vectorization audit (full size, compile only, licensed serial).**
+- **blade-llvm:** the inner loop is VECTORIZED, 4-wide and unrolled: 8 `vdivpd`, 8
+  `vfmadd*pd`, 4 `vaddpd` in a 94-instruction body, plus a scalar remainder loop.
+- **blade-cpp:** the inner loop is SCALAR despite the `omp simd reduction` pragma:
+
+  ```
+  vcvtsi2sd ; vdivsd ; vfmadd132sd ; vaddsd ; vdivsd ; vmulsd ; vfmadd231sd (%r8,%rax,8) ; inc ; cmp ; jne
+  ```
+  That is 12 instructions and 2 dependent-latency `vdivsd` per cell.
+- Scratch variants (`<scratchpad>/bandv/`), all still scalar in C++. So the cause is not
+  the checks, the frame, or the index width:
+  - uncast subscripts (no BL8006 in the asm);
+  - Int32 fields;
+  - phi inlined into the kernel lambda, which loses the BLADE_FRAME but turns the kernel
+    into a captured `std::function` in main.
+- g++ `-fopt-info-vec-missed` on the emitted .cpp names the cast-check `blade_rt::panic`
+  ("statement can throw an exception"). Since the uncast variant is scalar too, the
+  remaining blocker is unidentified.
+- **Expect blade-cpp to lose to expert Fortran here** (gfortran vectorizes `do j =
+  max(...), min(...)` with `vdivpd`) and blade-llvm to be at parity. This is a NEW gap
+  entry for the register: the C++ lane does not vectorize the closed-form domain's inner
+  loop. Lane: C++ only; LLVM fine.

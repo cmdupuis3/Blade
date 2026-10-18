@@ -30,6 +30,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import benchgen as g  # noqa: E402,F401
+import ref_band  # noqa: E402
 import ref_maskagg  # noqa: E402
 import ref_recur  # noqa: E402
 import ref_stencil  # noqa: E402
@@ -42,6 +43,7 @@ DUMPS = {
     "stencil": ["lap", "checksum", "input_checksum"],
     "recur": ["traj", "checksum", "input_checksum"],
     "maskagg": ["m", "y_first", "y_last", "horner_a", "horner_b", "sum_y", "checksum", "input_checksum"],
+    "band": ["cells", "lexsum", "horner", "checksum", "input_checksum"],
 }
 
 
@@ -130,6 +132,22 @@ def main():
         elif kernel == "recur":
             r = ref_recur.compute("smoke")
             rep.cmp_array("traj", v["traj"], r["output"])
+        elif kernel == "band":
+            r = ref_band.compute("smoke")
+            n, w = ref_band.SIZES["smoke"]["n"], ref_band.SIZES["smoke"]["w"]
+            x = g.gen_array((n,), 1, 0.0, 1.0)
+            cells = [(i, j) for i in range(n) for j in range(max(0, i - w), min(n, i + w + 1))]
+            good = int(v["cells"]) == len(cells)
+            rep.ok &= good
+            rep.lines.append(f"  cells: blade {v['cells']} ref {len(cells)} {'ok' if good else 'FAIL'}")
+            lex = sum(i * 1000 + j for i, j in cells)
+            good = int(v["lexsum"]) == lex
+            rep.ok &= good
+            rep.lines.append(f"  lexsum: blade {v['lexsum']} ref {lex} {'ok' if good else 'FAIL'}")
+            a = 0.0
+            for i, j in cells:  # lexicographic order: i ascending, j ascending
+                a = 0.999 * a + (ref_band.phi(i - j, w) * float(x[i])) * float(x[j])
+            rep.cmp_scalar("horner (lexicographic order)", float(v["horner"]), a)
         else:
             r = ref_maskagg.compute("smoke")
             y = r["output"]

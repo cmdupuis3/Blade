@@ -468,6 +468,27 @@ with Blade to all 15 printed digits in every arm and regime.
   4-lane `vfmadd231pd` accumulator with the store kept). Input sums `simd reduction(+:sx,
   sy)` under licensed (F3).
 
+### band (restored 2026-10-18: s = x^T B x over the band |i - j| <= w)
+- natural (dense-predicate straw man, per spec): full n x n nest, `if (abs(i - j) <= w)`
+  around the cell, s accumulated in lexicographic (i, j) order; mt8 `parallel do
+  reduction(+:s)` on i.
+- expert: clipped bounds `do j = max(1, i-w), min(n, i+w)`, per-cell phi exactly as the spec
+  writes it, term `phi * x(i) * x(j)` left to right. repro: lexicographic order, one
+  accumulator (mt8: `parallel do reduction(+:s)` on i). **licensed:** the spec's diagonal
+  ordering `do k = -w, w; do i = max(1, 1+k), min(n, n+k)` with phi(k) computed once per
+  diagonal (it is loop-invariant there), inner `!$omp simd reduction(+:sd)`, mt8 `parallel do
+  schedule(static) reduction(+:s)` over the 2w+1 diagonals; input sum `simd reduction`.
+  Alternative considered and NOT used: a phi(d) table in the repro row order (it would turn
+  the per-cell division the spec makes part of the kernel into 2w+1 divisions -- a Toeplitz
+  shortcut Blade's source does not spell; architect may decide otherwise).
+- Informal n = 4001, w = 101 (0.8M cells), serial: expert repro ~0.9 ms, licensed ~0.2-0.25 ms
+  (both compilers). Not results.
+- Verified at smoke (n = 211, w = 5): both compilers x {natural, expert} x {repro, licensed}
+  x {serial, mt8} + twins: contract ok, max relative checksum difference 7.0e-16, input
+  identical; Blade (rebuilt binary) C++ 325.099853480187 (1.75e-15), LLVM 325.099853480188
+  (1.4e-15), input 105.743473788723 15-digit equal. Scalar output: no dump; pins-B.json has
+  no band entry yet.
+
 ## 7. Audits (review items)
 
 - **M10 (stores survive), full-size builds, assembled only, never run:** for every arm with a
