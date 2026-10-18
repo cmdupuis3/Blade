@@ -340,7 +340,10 @@ let private joinShareReadByDirectFold () =
         // One in the lifted kernel body, one in the share's per-iteration const.
         let exps = System.Text.RegularExpressions.Regex.Matches(cpp, @"blade_libm::exp\(").Count
         let shared = cpp.Contains "sharing e per iteration"
-        let legReadsShare = System.Text.RegularExpressions.Regex.IsMatch(cpp, @"_j0\(\w+_0, e\);")
+        // Wrapper call (repro build) or the vectorized join's builtin update
+        // (the 2026-10-17 default): either way the leg reads the share `e`.
+        let legReadsShare =
+            System.Text.RegularExpressions.Regex.IsMatch(cpp, @"_j0\(\w+_0, e\);|(\w+_0) = \1 \+ \(e\);")
         if exps = 2 && shared && legReadsShare then
             resultLine Pass name "2 blade_libm::exp sites (kernel body + share const); the fold leg reads `e`"
             true
@@ -368,7 +371,10 @@ let private outerProductPartialFoldStreams () =
     | Ok cpp ->
         let pools = System.Text.RegularExpressions.Regex.Matches(cpp, @"Array<double, 2>").Count
         let rowMode = cpp.Contains "__pfrow" || cpp.Contains "__pfsrc"
-        let fusedFold = System.Text.RegularExpressions.Regex.IsMatch(cpp, @"= __wrap_\d+_\w+\(\w+, blade_libm::exp\(")
+        // The wrapper form (repro build) or the vectorized fold's builtin
+        // update (the 2026-10-17 default); both fold the exp in the row kernel.
+        let fusedFold =
+            System.Text.RegularExpressions.Regex.IsMatch(cpp, @"= __wrap_\d+_\w+\(\w+, blade_libm::exp\(|(\w+) = \1 \+ blade_libm::exp\(")
         if pools = 0 && not rowMode && fusedFold then
             resultLine Pass name "no rank-2 pool, no row-mode scaffolding; exp folded inside the wrapper"
             true

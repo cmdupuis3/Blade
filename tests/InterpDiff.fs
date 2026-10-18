@@ -196,12 +196,21 @@ let private rejectOnlyCategories = Blade.Tests.Corpus.rejectOnlyCategories
 /// scalar semantics — so the compiled side must be built with contraction
 /// off even though the user-facing default is `fast` (Build.fs). The pin is
 /// scoped to this block and restored on exit.
+///
+/// The same scope ALSO pins `BLADE_FP_REPRO=1` (2026-10-17,
+/// docs/plans/plan-fp-default-fastest.md): the default build now spends every
+/// fold's reorder licence (K lanes, `omp simd reduction`, Path A/B teams), and
+/// the interpreter folds in ascending serial order, so byte identity needs the
+/// REPRO build on the compiled side. This is test policy (b): the twins stay
+/// byte-honest with no pin loosened, while the default suite runs -- and
+/// checks its pins against -- the fast default.
 let private pinFpContractOff () =
-    let prior = System.Environment.GetEnvironmentVariable("BLADE_FP_CONTRACT")
-    System.Environment.SetEnvironmentVariable("BLADE_FP_CONTRACT", "off")
+    let pins = [ "BLADE_FP_CONTRACT", "off"; "BLADE_FP_REPRO", "1" ]
+    let prior = pins |> List.map (fun (k, _) -> (k, System.Environment.GetEnvironmentVariable k))
+    for (k, v) in pins do System.Environment.SetEnvironmentVariable(k, v)
     { new System.IDisposable with
         member _.Dispose() =
-            System.Environment.SetEnvironmentVariable("BLADE_FP_CONTRACT", prior) }
+            for (k, v) in prior do System.Environment.SetEnvironmentVariable(k, v) }
 
 let runInterpDiffTests (categories: string list) : BlockResult =
     printHeader "Interpreter Differential (M0)"

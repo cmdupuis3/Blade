@@ -207,25 +207,49 @@ series on both sides (BL8008 outside `x > 0`).
 **Fast by default; floating-point reproducibility is the opt-in.** The table
 fixes WHICH operations a program performs. How a compiled program ROUNDS a
 chain of them is fast by default and outside the cross-lane contract: user
-builds compile with `-ffp-contract=fast`, so g++ may fuse `a * b + c` into one
-FMA with a single rounding where the interpreter rounds twice, and a licensed
-reorder (`where omp` / `comm` folds, `BLADE_FP_REASSOC`) or a BLAS/LAPACK route
-may differ in the last ulp. Integer arithmetic, the faults (BL8013, BL8014),
-the run-time libm and `fma(a, b, c)` (its own node: one rounding in every
-lane, under any setting) are unaffected. Reproducibility -- the interpreter's
-operation sequence, bit for bit -- is asked for, never assumed:
+builds contract (`-ffp-contract=fast` in the g++ lane, a per-instruction
+`contract` flag in the LLVM lane), so `a * b + c` may become one FMA with a
+single rounding where the interpreter rounds twice, and a BLAS/LAPACK route
+may differ in the last ulp.
+
+*Fold association.* A fold is a left fold in ascending storage order (the
+`reduce` rule); that is its meaning, and the interpreter evaluates exactly that
+chain. A fold whose source carries a REORDER LICENCE -- a recognised builtin
+`+`/`*` body, a declared `comm`, `where omp` on the kernel (which requires one
+of the two, BL4016), and `prodsum` / reduction-join legs over builtin folds --
+is EMITTED in its fastest licensed form by default (since 2026-10-17): an
+`omp simd reduction` or a K-lane multi-accumulator sweep (and, where `omp` asks
+and the build opens teams, per-thread partials), `reassoc nsz` on the
+accumulator in the LLVM lane. `where omp` therefore implies simd: a build that
+opens no team (`BLADE_OMP_THREADS=1`) still vectorizes the licensed fold. The
+result is the serial fold up to reassociation -- deterministic for a fixed
+binary (the lane form for a fixed K; the simd form for the vectorizer's
+width), not bit-reproducible across compilers or flags. A fold with no licence
+is the serial chain in every build. `blade plan` names each fold's form
+(`fold form: simd-reduction | K-lanes(k) | threaded(...) | serial (repro) |
+serial (<why>)`).
+
+Integer arithmetic (exact under any association), the faults (BL8013,
+BL8014), the run-time libm and `fma(a, b, c)` (its own node: one rounding in
+every lane, under any setting) are unaffected. Reproducibility -- the
+interpreter's operation sequence, bit for bit -- is asked for, never assumed:
 
 - per function, `where repro`: the emitted body is compiled without
   contraction, never re-inlined into a contracting caller, and declines
   reordered folds and library routes (features.md, `where repro`);
-- per build, `BLADE_FP_CONTRACT=off` (with no `BLADE_FP_REASSOC` and BLAS
-  routing off, its default without `OPENBLAS_DIR`);
-- in the test gates: the interpreter and oracle differentials pin
-  `BLADE_FP_CONTRACT=off` for their own compiles, which is what makes them
-  byte-exact, and `blade test` clears the reorder and BLAS knobs.
+- per build, `BLADE_FP_REPRO=1` (spelled `BLADE_FP_REASSOC=0` too): every fold
+  keeps the serial association, the threaded fold forms included (each prints
+  the `[omp] requested but emitted serial` census line); add
+  `BLADE_FP_CONTRACT=off` (contraction is its own knob) and BLAS routing off
+  (its default without `OPENBLAS_DIR`) for the interpreter's bits;
+- in the test gates: the interpreter, oracle and optimizer differentials pin
+  `BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off` for their own compiles, which is
+  what makes them byte-exact, while the default suite runs (and pins values
+  against, at 1e-9 relative) the fast default; `blade test` clears every
+  reorder, contraction and BLAS knob from the ambient environment.
 
-The interpreter, the LLVM lane (whose IR carries no `contract` flag) and
-compile-time evaluation never contract.
+The interpreter and compile-time evaluation never contract and never
+reassociate.
 
 **The mixing rule: nothing converts implicitly.** `1` is an Int64 and `1.0`
 a Float64 -- the decimal point is the type, as in F#. An arithmetic operator
@@ -1214,8 +1238,8 @@ in the last bits, or by more under cancellation (`[1.0, 1e16, -1e16]`: the
 cell (0, 1, 2) computes 0.0 and answers the read at (1, 2, 0), where the
 body evaluated in that order gives 1.0; corpus `symmetry/086`). Without a
 `where` clause nothing is stored compactly, so this is a licence the
-declaration grants — the same kind of licence `BLADE_FP_REASSOC` grants a
-reassociated fold — not a deviation from the dense meaning the compiler
+declaration grants — the same kind of licence a builtin or `comm` fold body
+grants a reassociated fold (§2.4, fold association) — not a deviation from the dense meaning the compiler
 takes on its own.
 
 Sections and partial application: operator sections `(+)`, `(*)`, ... as

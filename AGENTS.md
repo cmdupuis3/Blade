@@ -144,9 +144,10 @@ final-newline fixing — these are byte-pinned assets; never auto-reformat them.
 | `BLADE_CUBLAS` | `1`/`on` routes L3 contractions to cuBLAS; strictly opt-in |
 | `BLADE_MEMCHECK` | non-`0` → ASan-instrumented Debug profile (clang64 preferred, MSVC fallback) |
 | `BLADE_OMP_THREADS` | `1`/`0`/`off` **suppresses OMP pragma emission**; runtime thread count is plain `OMP_NUM_THREADS` |
-| `BLADE_FP_REASSOC` | `1`/`on` licenses reassociated (lane-parallel) fold codegen |
+| `BLADE_FP_REPRO` | `1`/`on`: the REPRODUCIBLE build -- every fold keeps the ascending serial association the interpreter evaluates (no K lanes, no `omp simd reduction`, no `reassoc` flag in the LLVM lane, and no thread-level fold form: a `where omp` fold prints `[omp] requested but emitted serial: BLADE_FP_REPRO=1 ...`). Unset = OFF: licensed folds take their fastest form by default (2026-10-17 policy, `docs/plans/plan-fp-default-fastest.md`). Leaves contraction alone; byte identity with the interpreter is `BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off` (what the differential gates pin) |
+| `BLADE_FP_REASSOC` | DEFAULT ON since 2026-10-17 (unset = the licensed fast fold forms; a fold without a source licence is serial in every build). `0`/`off` is the compatibility spelling of `BLADE_FP_REPRO=1`; `BLADE_FP_REPRO=1` wins when both are set. An EXPLICIT `1` additionally lets the Reynolds term merger flatten float `+`/`*` chains (not a source licence, so never on by default; corpus `reynolds/026`) |
 | `BLADE_AD_HALO_GATHER` | reverse-mode rule for a `halo` stencil map: unset/`1` keeps the map and emits the GATHER adjoint (default); `0`/`off` lowers it into the construction loop and scatters. Same function either way; `blade test access` compares the two byte-for-byte |
-| `BLADE_MARCH` / `BLADE_FP_CONTRACT` | g++ `-march=` (default `native`) / `-ffp-contract=` (default `fast`) |
+| `BLADE_MARCH` / `BLADE_FP_CONTRACT` | g++ `-march=` (default `native`) / `-ffp-contract=` (default `fast`); the LLVM lane follows the same default since 2026-10-17 (unset = per-instruction `contract`) |
 | `BLADE_STDLIB` | extra stdlib search root |
 | `BLADE_PRINT` | which top-level bindings the program prints (comma/space separated); unset = all of them, the default every corpus pin reads. Set by `--print a,b` on any verb. Read by BOTH lanes (codegen's print pass and the interpreter's), so a differential run compares like with like; a name that is no binding refuses BL7004. It changes the EMISSION, so the exe cache keys on it for free |
 | `BLADE_TILE_CACHE` | revision reuse (structural/04): unset = OFF; `1`/`on` = `%LOCALAPPDATA%\Blade\tile-cache`, an absolute path = that store. Read by the COMPILER (plans tiled bindings) and by the COMPILED PROGRAM (probe/load/store); `BLADE_TILE_CACHE_VERBOSE=1` prints the planner's admissions and the run's `[tiles]`/`[chunks]` census |
@@ -196,7 +197,9 @@ type EarthArray = Array<Float like LatIdx, LonIdx>
 - `where` clauses carry kernel metadata: `comm(a, b)` / `anticomm(...)` (interchangeable
   args), `omp(x: n)` (parallelism license, depth-capped), `cuda`, `tdim({...})`. A bare
   `omp` on a `reduce` kernel licenses fold reordering and requires commutativity (else
-  BL4016). `reynolds(g)` *manufactures* a commutative kernel by symmetrization when you
+  BL4016), and is emitted vectorized/laned by default (`where omp` implies simd, even
+  under `BLADE_OMP_THREADS=1`); `BLADE_FP_REPRO=1` restores the serial association.
+  `reynolds(g)` *manufactures* a commutative kernel by symmetrization when you
   can't annotate one.
 
 ## Style guide

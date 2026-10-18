@@ -3645,21 +3645,61 @@ and inferReduceCore (env: TypeEnv) array kernel (init: Expr option) (axes: Expr 
             // below), which needs no intermediate array AND can chunk the outer
             // level. Everything else -- including every unannotated rank-k
             // reduce -- is untouched.
-            let deferredWithOmpKernel () =
+            // Does the fold kernel ask for `omp`? Read off the surface kernel
+            // (a lambda's clause, or a named function's), never re-typed.
+            let kernelRequestsOmp () =
+                match inferExpr env kernel with
+                | Ok tk ->
+                   (match (resolveTypedExpr env tk).Kind with
+                    | TExprLambda li ->
+                       li.Parallel |> List.exists _.IsOmp
+                    | TExprVar (_, fnId, _) ->
+                       (match env.FuncParallel.TryGetValue fnId with
+                        | true, (_, s) -> s |> List.exists _.IsOmp
+                        | _ -> false)
+                    | _ -> false)
+                | Error _ -> false
+            let operandIsDeferred () =
                 match (resolveTypedExpr env tArr0).Kind with
-                | TExprApply _ | TExprFusion _ ->
-                    (match inferExpr env kernel with
-                     | Ok tk ->
-                        (match (resolveTypedExpr env tk).Kind with
-                         | TExprLambda li ->
-                            li.Parallel |> List.exists _.IsOmp
-                         | TExprVar (_, fnId, _) ->
-                            (match env.FuncParallel.TryGetValue fnId with
-                             | true, (_, s) -> s |> List.exists _.IsOmp
-                             | _ -> false)
-                         | _ -> false)
-                     | Error _ -> false)
+                | TExprApply _ | TExprFusion _ -> true
                 | _ -> false
+            let deferredWithOmpKernel () = operandIsDeferred () && kernelRequestsOmp ()
+            // The same silent drop for a MATERIALIZED operand (bench gap G10 /
+            // the `reduce(lap * lap, lambda ... where omp ..., 0.0, axes = 2)`
+            // probe): the nest below carries no clause, so the licence vanished
+            // with no census line. Re-spell the operand as the identity map
+            // over its cells, `method_for(A) <@> lambda(c) -> c` -- a DEFERRED
+            // computation, so the re-inferred fold declines this desugar
+            // (`deferredWithOmpKernel`) and reaches the fused reduction
+            // terminal, which threads the outer level (Path B), or says why it
+            // did not. Same cells, same row-major order, no extra pass: the
+            // map is never materialized.
+            // SYNTACTIC omp read (the partial-fold gate's precedent above): no
+            // re-inference of the kernel, so an unchanged program mints the same
+            // ids it always did and its emission stays byte-identical.
+            let kernelAsksOmpSurface () =
+                let isOmp (p: ParallelStrategy) = match p with Omp _ -> true | _ -> false
+                match kernel.Kind with
+                | ExprLambda (_, Some wc, _) -> wc.Parallel |> List.exists isOmp
+                | ExprVar fn ->
+                    (match lookupVar fn env |> Option.map (fun vi -> env.FuncParallel.TryGetValue vi.VarId) with
+                     | Some (true, (_, s)) -> s |> List.exists _.IsOmp
+                     | _ -> false)
+                | _ -> false
+            let ompOverMaterialized () =
+                not (operandIsDeferred ()) && kernelAsksOmpSurface ()
+                && (match axes with Some _ -> true | None -> false)
+            if ompOverMaterialized () then
+                let span = array.Span
+                let synAt k = mkExpr span k
+                let cell = $"__rkc{env.Builder.FreshId()}"
+                let identity =
+                    synAt (ExprLambda ([{ Name = cell; Type = None; Default = None; NameSpan = span }], None,
+                                       synAt (ExprVar cell)))
+                let deferred =
+                    synAt (ExprBinOp (Elementwise, OpApply, synAt (ExprMethodFor [array]), identity))
+                Some (inferReduceCore env deferred kernel init axes)
+            else
             match env.Subst.Resolve tArr0.Type with
             | ArrayElem at when at.IndexTypes.Length >= 2
                                 && at.IndexTypes |> List.forall (fun ix ->

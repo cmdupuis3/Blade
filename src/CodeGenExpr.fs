@@ -346,12 +346,14 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         let serialBound = prodSumBound headTy (List.head argStrs)
         let serialForm =
             $"[&]() {{ {elemStr} __ps = 0; for (size_t __pt = 0; __pt < {serialBound}; __pt++) {{ __ps += {product}; }} return __ps; }}()"
-        if not (fpReassocEnabled ()) then serialForm
+        if not (fpReassocEnabled ()) then
+            recordFoldForm "" "serial (repro)" "prodsum"
+            serialForm
         else
-            // BLADE_FP_REASSOC: the same summation, reassociated. `prodsum`'s
-            // summation IS a builtin `+`, so the licence class is the one
-            // `foldKernelBuiltinOp` grants outright -- what the knob supplies
-            // is the opt-in, which an intrinsic has no where-clause to carry.
+            // The default build (BLADE_FP_REPRO unset): the same summation,
+            // reassociated. `prodsum`'s summation IS a builtin `+`, so the
+            // licence class is the one `foldKernelBuiltinOp` grants outright --
+            // an intrinsic has no where-clause to carry one, and needs none.
             //
             // NO WORKSHARING OpenMP either way: this IIFE routinely sits inside
             // an already-parallel nest (the comm-triangular covariance loop),
@@ -408,6 +410,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             // Path B's chunked fold), which is why the arity-aware count
             // survives the change.
             if simdReducibleElem elemStr then
+                recordFoldForm "" "simd-reduction" "prodsum"
                 let simdStmts = fpReassocSimdStmts "+" "__ps" "__pt" "0" "__pn" [] prodAt
                 let body =
                     aliasDecls
@@ -426,6 +429,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             // rule in `laneCountForStreams` is what reconciles those two
             // measurements; the operand count IS the stream count here.
             let kLanes = laneCountForStreams (List.length argStrs)
+            recordFoldForm "" $"K-lanes({kLanes})" "prodsum"
             let (laneStmts, resultLane) =
                 fpReassocLaneStmts kLanes elemStr "__pl" "__pt" "0" "__pn" prodAt
                     (fun acc rhs -> $"{acc} += {rhs};")
@@ -1433,6 +1437,11 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
                     "return __r;" ]
             $$"""[&]() { {{ompNote}}{{guard}}{{wrapperStr}} {{(String.concat " " stmts)}} }()"""
         let mayLane = fpReassocEnabled () && foldReorderLicensed callable
+        recordFoldForm ""
+            (if mayLane then $"K-lanes({foldLaneCount})"
+             elif foldReorderLicensed callable then serialFoldForm ()
+             else "serial (no reorder licence)")
+            "reduce in expression position"
         match initExpr with
         | Some initE ->
             // 3-arg form: the accumulator seeds from init and the loop covers

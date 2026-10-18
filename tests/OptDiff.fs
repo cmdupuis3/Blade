@@ -133,7 +133,7 @@ let runOptDiffTests (categories: string list) (includeMultiFile: bool) : BlockRe
     let sw = System.Diagnostics.Stopwatch.StartNew()
     // The whole block runs with contraction off (see the header) and with
     // the gates at their defaults on the ON side, whatever the shell carries.
-    withEnv [ ("BLADE_FP_CONTRACT", Some "off") ] (fun () ->
+    withEnv [ ("BLADE_FP_CONTRACT", Some "off"); ("BLADE_FP_REPRO", Some "1") ] (fun () ->
         let programs =
             [ for cat in categories do
                 for (name, src) in category cat do

@@ -332,9 +332,10 @@ let private normalizeLl (s: string) = s.Replace("\r\n", "\n")
 /// afterwards (including back to UNSET, which `null` does).
 ///
 /// Needed by two blocks for two different reasons: the emission pins are
-/// against the DEFAULT numeric policy, so a developer whose shell happens to
-/// carry `BLADE_FP_REASSOC=1` must not see three phantom failures; and the
-/// fact block asserts each knob's effect, which means setting it.
+/// against the DEFAULT numeric policy (the fast regime since 2026-10-17), so a
+/// developer whose shell happens to carry `BLADE_FP_REPRO=1` must not see
+/// three phantom failures; and the fact block asserts each knob's effect,
+/// which means setting it.
 let private withEnv (pins: (string * string option) list) (body: unit -> 'a) : 'a =
     let saved = pins |> List.map (fun (k, _) -> k, Environment.GetEnvironmentVariable k)
     for (k, v) in pins do
@@ -345,7 +346,7 @@ let private withEnv (pins: (string * string option) list) (body: unit -> 'a) : '
 /// The knobs that change emitted text. Pinned OFF around any assertion about
 /// default emission; listed once so a knob added later is added in one place.
 let private numericKnobs =
-    [ "BLADE_FP_REASSOC"; "BLADE_FP_CONTRACT"; "BLADE_LLVM_FACTS"; "BLADE_LLVM_BRICKS" ]
+    [ "BLADE_FP_REASSOC"; "BLADE_FP_REPRO"; "BLADE_FP_CONTRACT"; "BLADE_LLVM_FACTS"; "BLADE_LLVM_BRICKS" ]
 
 let private defaultEmissionEnv = numericKnobs |> List.map (fun k -> k, None)
 
@@ -385,7 +386,7 @@ let runLlvmGoldenTests () : BlockResult =
                         // match what `blade emit` produces for the same file.
                         // The pins record DEFAULT emission, so the numeric
                         // knobs are forced off for the call itself -- an
-                        // inherited BLADE_FP_REASSOC would otherwise fail all
+                        // inherited BLADE_FP_REPRO would otherwise fail all
                         // three pins for a reason that is not a drift.
                         match withEnv defaultEmissionEnv (fun () -> EmitLlvm.tryEmitProgramNamed name ir) with
                         | Error reason ->
@@ -474,7 +475,7 @@ let total = reduce(scaled, (+))
 """
 
 /// An UNLICENSED fold: the kernel is neither a recognized builtin body nor
-/// `comm`-declared, so the knob must not reach it.
+/// `comm`-declared, so no build reassociates it.
 let private unlicensedFoldSource = """
 type Ix = Idx<8>
 function skew(a: Float64, b: Float64) -> Float64 = { a * 0.75 + b }
@@ -615,18 +616,35 @@ let runLlvmFactTests () : BlockResult =
         [ "define i32 @main() {" ] [ "attributes #" ]
 
     printSubHeader "fast-math flags"
-    check "default emission is flag-free" [] licensedFoldSource
-        [ "fadd double"; "fmul double" ] [ "reassoc"; "nsz"; "contract" ]
+    // THE DEFAULT IS THE FAST REGIME (2026-10-17, plan-fp-default-fastest.md):
+    // `reassoc nsz` on the licensed accumulator and `contract` on every
+    // fadd/fmul -- the g++ lane's `-ffp-contract=fast` plus the licensed fold
+    // forms. Byte identity with the interpreter is the opt-in in both lanes,
+    // BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off.
+    check "default emission: licensed accumulator reassociates, everything contracts" [] licensedFoldSource
+        [ "fadd reassoc nsz contract double"; "fmul contract double" ] [ "fmul reassoc" ]
     check "the license reaches exactly the accumulator chain"
-        [ "BLADE_FP_REASSOC", Some "1" ] licensedFoldSource
+        [ "BLADE_FP_REASSOC", Some "1"; "BLADE_FP_CONTRACT", Some "off" ] licensedFoldSource
         // The fold's add is tagged; the map's multiply -- same program, same
         // element type, no license -- is not.
         [ "fadd reassoc nsz double"; "fmul double" ] [ "fmul reassoc" ]
-    check "an unlicensed kernel stays ordered with the knob on"
-        [ "BLADE_FP_REASSOC", Some "1" ] unlicensedFoldSource
+    check "an unlicensed kernel stays ordered in the default build"
+        [ "BLADE_FP_CONTRACT", Some "off" ] unlicensedFoldSource
         [ "fadd double" ] [ "reassoc" ]
-    check "contract is per-instruction and opt-in"
-        [ "BLADE_FP_CONTRACT", Some "fast" ] licensedFoldSource
+    check "BLADE_FP_REPRO=1 strips reassoc and nothing else"
+        [ "BLADE_FP_REPRO", Some "1" ] licensedFoldSource
+        [ "fadd contract double"; "fmul contract double" ] [ "reassoc"; "nsz" ]
+    check "BLADE_FP_REASSOC=0 is the repro spelling"
+        [ "BLADE_FP_REASSOC", Some "0" ] licensedFoldSource
+        [ "fadd contract double" ] [ "reassoc"; "nsz" ]
+    check "BLADE_FP_REPRO=1 outranks BLADE_FP_REASSOC=1"
+        [ "BLADE_FP_REPRO", Some "1"; "BLADE_FP_REASSOC", Some "1" ] licensedFoldSource
+        [ "fadd contract double" ] [ "reassoc" ]
+    check "the byte-identity build is flag-free"
+        [ "BLADE_FP_REPRO", Some "1"; "BLADE_FP_CONTRACT", Some "off" ] licensedFoldSource
+        [ "fadd double"; "fmul double" ] [ "reassoc"; "nsz"; "contract" ]
+    check "contract is per-instruction"
+        [ "BLADE_FP_CONTRACT", Some "fast"; "BLADE_FP_REPRO", Some "1" ] licensedFoldSource
         [ "fmul contract double"; "fadd contract double" ] [ "reassoc" ]
     check "contract=off is off" [ "BLADE_FP_CONTRACT", Some "off" ] licensedFoldSource
         [ "fmul double" ] [ "contract" ]
@@ -662,7 +680,7 @@ let runLlvmFactTests () : BlockResult =
         [ frameStore; "@blade_frame_stack"; "c\"lambda in r\\00\"" ] [ "__BLADE_FRAME" ]
     check "a Float64 division kernel reaches no panic and has no frame" []
         "let xs = [4.0, 2.0, 1.0]\nlet r = reduce(xs, lambda(a, b) -> a / b)\n"
-        [ "fdiv double" ] [ frameStore; "lambda in r"; "__BLADE_FRAME" ]
+        [ "fdiv " ] [ frameStore; "lambda in r"; "__BLADE_FRAME" ]
     check "a caller keeps its frame through a callee that panics" []
         "function divide(x: Int64, y: Int64) -> Int64 = x / y\nfunction twice(x: Int64, y: Int64) -> Int64 = divide(x, y) * 2\nlet z: Int64 = 1\nlet b = twice(4, z)\n"
         [ frameStore; "c\"divide\\00\""; "c\"twice\\00\"" ] [ "__BLADE_FRAME" ]
@@ -1850,12 +1868,12 @@ let private rtShapes =
         Arms = [ armCpp; armLlvm ] }
       { Name = "dense licensed fold, n = 9,999,991"
         Fixture = "bench_dense_fold"
-        Note = "integer-valued cells: exact under any association, so the reassociated arms are value-comparable"
+        Note = "integer-valued cells: exact under any association, so the reassociated (default) and serial (repro) arms are value-comparable"
         Arms =
           [ armCpp
-            { Label = "cpp-reassoc"; Lane = LaneCpp; Pins = [ "BLADE_FP_REASSOC", Some "1" ] }
+            { Label = "cpp-repro"; Lane = LaneCpp; Pins = [ "BLADE_FP_REPRO", Some "1" ] }
             armLlvm
-            { Label = "llvm-reassoc"; Lane = LaneLlvm; Pins = [ "BLADE_FP_REASSOC", Some "1" ] } ] }
+            { Label = "llvm-repro"; Lane = LaneLlvm; Pins = [ "BLADE_FP_REPRO", Some "1" ] } ] }
       { Name = "symmetric map, n = 2003 (C(2004,2) = 2,007,006 cells)"
         Fixture = "bench_sym_map"
         Note = "the shape the brief named; ~3 ms of compute, close to first-touch noise"

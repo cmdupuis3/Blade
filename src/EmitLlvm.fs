@@ -27,14 +27,15 @@
 // extents, ragged/compound/sparse/orbit index types, providers, cuda/mpi,
 // complex, `let rec` (IRForRange), structs and display frames.
 //
-// NUMERIC POLICY (plan section 6): the DEFAULT emission carries no fast-math
-// flag at all. Default LLVM IR contracts nothing and reassociates nothing, so
-// the emitted arithmetic is order-preserving by construction -- the favorable
-// inversion over the g++ lane, which needs `-ffp-contract=off` pinned to get
-// there. Two per-instruction opt-ins exist, both off unless asked: `reassoc
-// nsz` on a fold whose kernel carries the SAME license the C++ lane's K-lane
-// forms spend (`foldReorderLicensed` and `BLADE_FP_REASSOC` together), and
-// `contract` under `BLADE_FP_CONTRACT`. See the fact-layer section below.
+// NUMERIC POLICY (plan section 6, polarity flipped 2026-10-17 --
+// docs/plans/plan-fp-default-fastest.md): the DEFAULT emission is the fastest
+// the source licenses, exactly as in the g++ lane. Two per-instruction flags:
+// `reassoc nsz` on a fold whose kernel carries the SAME license the C++ lane's
+// K-lane / `omp simd reduction` forms spend (`foldReorderLicensed`, in any
+// build but BLADE_FP_REPRO=1), and `contract` on every fmul/fadd/fsub unless
+// `BLADE_FP_CONTRACT` says otherwise (the g++ lane's `-ffp-contract=fast`
+// default). Byte identity with the interpreter is the opt-in, as there:
+// BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off. See the fact-layer section below.
 //
 // The printers this emits call into `src/cpp/blade_llvm_shim.c`, whose output
 // bytes are pinned to the C++ lane's `cout << setprecision(15) << boolalpha`.
@@ -164,23 +165,29 @@ let factEnabled (cls: string) : bool =
 
 /// Does `BLADE_FP_CONTRACT` license contraction (fmul+fadd -> fma)?
 ///
-/// THE POLARITY IS DELIBERATELY OPPOSITE TO THE g++ LANE, and this is the one
-/// favorable inversion the plan calls out (section 5). g++ contracts by
-/// DEFAULT and needs `-ffp-contract=off` pinned to reach byte identity with
-/// the interpreter; LLVM IR contracts only where the `contract` flag is
-/// present, so the default emission is already order- and value-preserving and
-/// `BLADE_FP_CONTRACT` becomes a per-instruction OPT-IN. Unset therefore means
-/// OFF here while it means `fast` there -- `Build.llvmOptFlags` correspondingly
-/// passes no `-ffp-contract` to clang, because the flag would not reach IR that
-/// no C front end produced.
+/// THE SAME POLARITY AS THE g++ LANE (since 2026-10-17;
+/// docs/plans/plan-fp-default-fastest.md). Unset means CONTRACT, the g++
+/// lane's `-ffp-contract=fast`: the two Blade lanes now share one default
+/// regime, and the owner's policy is that the default is the fastest form.
+/// The old polarity (unset = off here, the "favorable inversion" of plan
+/// section 5) existed to make DEFAULT LLVM IR byte-identical to the
+/// interpreter for free; that is now an opt-in in both lanes, spelled the same
+/// way: `BLADE_FP_CONTRACT=off` (plus BLADE_FP_REPRO=1 for the folds).
+/// Measured cost of the old default (bench gap G19, blade-A F14): 0 `vfmadd`
+/// in the gram/comoment3/antisym exes, 23 + 31 with the flag.
+///
+/// Spellings: unset / `fast` / `on` / `1` -> contract; `off` / `0` / any
+/// other value -> no flag. `Build.llvmOptFlags` still passes
+/// no `-ffp-contract` to clang: the flag would not reach IR that no C front
+/// end produced; the per-instruction `contract` flag is the whole mechanism.
 let private contractLicensed () : bool =
     if not (factEnabled factFmf) then false
     else
         match System.Environment.GetEnvironmentVariable "BLADE_FP_CONTRACT" with
-        | null | "" -> false
+        | null -> true
         | v ->
             match v.Trim().ToLowerInvariant() with
-            | "fast" | "on" | "1" -> true
+            | "" | "fast" | "on" | "1" -> true
             | _ -> false
 
 // Attribute-group indices. Groups rather than inline attribute lists because
@@ -981,11 +988,13 @@ let private paramAttr () : string =
 ///
 /// TWO INDEPENDENT LICENSES, and neither is a blanket:
 ///   * `reassoc nsz` -- only inside a fold whose kernel passed
-///     `foldReorderLicensed` while `BLADE_FP_REASSOC` is on. `nsz` rides with
+///     `foldReorderLicensed`, in every build but BLADE_FP_REPRO=1 (the
+///     default since 2026-10-17). `nsz` rides with
 ///     `reassoc` because a reassociated sum's intermediate zeros are exactly
 ///     what the reordering may resign, and LLVM's reduction vectorizer wants
 ///     both before it will split the chain into lanes.
-///   * `contract` -- `BLADE_FP_CONTRACT` (opt-in here; see `contractLicensed`).
+///   * `contract` -- unless `BLADE_FP_CONTRACT` turns it off (the g++ lane's
+///     default; see `contractLicensed`).
 /// Integer instructions get nothing: `nsw`/`nuw` would be a WRAPAROUND claim
 /// this lane has not proved (Blade's Int64 arithmetic wraps -- in the C++
 /// lane because Build.optFlags passes `-fwrapv`, in the interpreter because
@@ -1003,7 +1012,8 @@ let private fmfFor (c: Ctx) (ty: Sc) : string =
 
 /// May a fold through this kernel be reassociated? The SAME two-part gate the
 /// C++ lane spends on its K-lane forms (`CodeGenBinding.fs`): the declared or
-/// derived license, and the environment knob. Sharing the predicate is what
+/// derived license, and the build's polarity (`fpReassocEnabled`: on unless
+/// BLADE_FP_REPRO=1). Sharing the predicate is what
 /// keeps the two lanes' numeric policy one policy -- an answer that reassociates
 /// in one lane and not the other would make the differential gate report
 /// drift that is really a policy split.
@@ -2626,7 +2636,7 @@ and private emitProdSum (c: Ctx) (args: IRExpr list) : Val =
     let acc = allocaOf c (llTy ty)
     // The OUTER accumulation is `+`, which is licensed by construction: the
     // fold kernel is not a user kernel at all here, it is the builtin the
-    // C++ lane's own prodsum IIFE reassociates under the same knob
+    // C++ lane's own prodsum IIFE reassociates in the same builds
     // (`CodeGenExpr.fs`'s `if not (fpReassocEnabled ()) then serialForm`).
     // The per-element PRODUCT chain gets no such flag -- reordering the
     // factors of one element is a different reassociation nobody licensed.
@@ -4753,8 +4763,8 @@ and private emitReduce (c: Ctx) (arrExpr: IRExpr) (kernelExpr: IRExpr) (initExpr
 ///     which is what an unlicensed fold is entitled to.
 ///   * LICENSED (`foldFmfLicensed`: the kernel is `comm`-declared or is a
 ///     recognized commutative builtin -- the same structural predicate the
-///     C++ lane spends on its K-lane forms and its OMP chunking -- AND the
-///     `BLADE_FP_REASSOC` knob is on, because the brick walk reassociates
+///     C++ lane spends on its K-lane forms and its OMP chunking -- in any
+///     build but BLADE_FP_REPRO=1, because the brick walk reassociates
 ///     the RESULT) -- the brick decomposition, with ONE PARTIAL PER BRICK
 ///     combined into the total in ascending-lex block order. Deterministic-but-reassociated: the same
 ///     program always produces the same bits, and those bits may differ from
@@ -4779,10 +4789,10 @@ and private emitCompactFold (c: Ctx) (a: ArrVal) (cl: IRCallable) (accTy: Sc) (i
     let acc = allocaOf c (llTy accTy)
     // The brick decomposition REASSOCIATES THE RESULT (one partial per brick,
     // combined in block order), so it takes the same two-part gate as FMF:
-    // the structural license AND the environment knob. Structure alone must
-    // never brick -- with `BLADE_FP_REASSOC` unset the serial canonical walk
-    // is the only walk, which is what keeps the byte-identity oracles honest
-    // the day BL3999's refusal lifts.
+    // the structural license AND the build's polarity. Structure alone must
+    // never brick in a REPRO build -- under BLADE_FP_REPRO=1 the serial
+    // canonical walk is the only walk, which is what keeps the byte-identity
+    // oracles (which pin that build) honest the day BL3999's refusal lifts.
     let brickable = foldFmfLicensed cl
     let fmf = foldFmfDecorable cl
     let combine (dst: string) (cur: Val) (cell: Val) =
@@ -5671,10 +5681,10 @@ let tryEmitProgramNamed (programName: string) (program: IRProgram) : Result<stri
             let sb = StringBuilder()
             let put (s: string) = sb.Append(s).Append('\n') |> ignore
             put "; Blade -- generated by the BLADE_LLVM lane (src/EmitLlvm.fs)."
-            put "; No target triple: clang supplies the host's. Fast-math flags"
-            put "; appear ONLY on licensed accumulator chains (BLADE_FP_REASSOC)"
-            put "; and, on request, as per-instruction `contract`"
-            put "; (BLADE_FP_CONTRACT); default emission is order-preserving."
+            put "; No target triple: clang supplies the host's. Fast-math flags:"
+            put "; `reassoc nsz` ONLY on licensed accumulator chains (off under"
+            put "; BLADE_FP_REPRO=1), `contract` per instruction unless"
+            put "; BLADE_FP_CONTRACT=off -- the C++ lane's default regime."
             put ""
             for g in c.Globals do put g
             if c.Globals.Count > 0 then put ""

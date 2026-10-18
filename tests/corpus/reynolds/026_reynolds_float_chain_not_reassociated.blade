@@ -4,7 +4,8 @@
 // (x + y) + z, (x + z) + y, (y + z) + x (each twice, by commutativity of the
 // inner +) -- three different roundings. The old key flattened the chain and
 // merged all six into 6 * ((x + y) + z), an unlicensed reassociation
-// (BLADE_FP_REASSOC is the licence, and it is off here).
+// (an EXPLICIT BLADE_FP_REASSOC=1 is the licence -- not a source licence, so
+// the 2026-10-17 fast default does not grant it -- and it is not set here).
 // x = 1e16, y = 1, z = -1e16:
 //   (x + y) + z = 0   (1e16 + 1 rounds to 1e16)
 //   (x + z) + y = 1

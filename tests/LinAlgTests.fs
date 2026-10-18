@@ -344,7 +344,9 @@ let y = gram_apply(A, A, v)
        + "let y: Array<Int64 like Idx<5>> = [2, 3, 4, 5, 6]\n"
        + "let P = method_for(zip(x, y)) <@> lambda(a: Int64, b: Int64) -> a * b\n"
        + "let s = reduce(P, (+))\n",
-       [ "(x____i0 * y____i0)" ],
+       // The licensed fold's default form since 2026-10-17: the vectorized
+       // sweep over restrict aliases of x and y (plan-fp-default-fastest.md).
+       [ "(__rsrc0____i0 * __rsrc1____i0)" ],
        [ "blade_linalg::"; shimInclude; "cblas_" ])
 
       // ================= Phase 5b: L2 gemv =================
@@ -592,10 +594,11 @@ let y = gram_apply(A, A, v)
        [ "blade_pgemm::dgemm_nn((size_t)(18), (size_t)(16), (size_t)(114), (A).data, (B).data, C.data,"
          "#include \"blade_packed_gemm.hpp\"" ],
        [ shimInclude; "blade_linalg::"; "cblas_"; "__mcrow" ])
-      // dot: the fused fold nest, unchanged from before any dispatch existed.
+      // dot: the fused fold nest -- in its default (2026-10-17) form, the
+      // `omp simd reduction` sweep over restrict aliases of x and y.
       ("gate_off_dot_emits_the_fold_nest", false,
        vecX + vecY + deferredProd + "let s = reduce(P, (+))\n",
-       [ "for (size_t __i0"; "(x____i0 * y____i0)" ],
+       [ "for (size_t __i0"; "(__rsrc0____i0 * __rsrc1____i0)" ],
        [ shimInclude; "blade_linalg::" ])
       // gemv: the per-row prodsum, emitted as the row-fold jam (all 3 rows in
       // one tile, one accumulator each) plus its scalar remainder.
