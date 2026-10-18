@@ -385,8 +385,23 @@ either way.
 **Not parallelized (deliberately):** the expression form of `reduce` (an IIFE
 inside a kernel body or arithmetic — it routinely already sits inside a parallel
 region; hoist it to its own `let`), multi-leaf `<&!>` fused fold trees, and
-reduce over compact symmetric/antisymmetric/Hermitian storage (rejected at
-typecheck for all folds — `decompact` first).
+a PARTIAL reduce over compact symmetric/antisymmetric/Hermitian storage
+(rejected at typecheck — `decompact` first).
+
+**The orbit-class fold (logical sums over compact storage).** The FULL fold
+`reduce(S, (+), axes = r)` over a SymIdx/AntisymIdx group of rank r is the
+full-domain sum over the logical (mirrored) cells (it is rewritten into the
+logical walk `reduce(method_for(range<I>) <@> lambda(i) -> .. f(S(i, j, ..)) ..,
+(+))`, which programs also write directly). Under the reorder licence (every
+level a builtin `+`; not `BLADE_FP_REPRO=1`) both back ends fold that walk in
+ONE pass over the packed pool: one accumulator per orbit class (weights 1/2 at
+rank 2, 1/3/6 at rank 3, `r!/prod(m!)` in general; a strict group's mirrors
+evaluate `f(-x)` and its repeated-coordinate cells `f(+0)`), the class sums
+combined by additions only (`(S + S) + S`, never `3.0 * S`, which a
+contracting compiler could fuse into an fma that is no association of the
+logical terms). `blade plan` names it `fold form: orbit-class fold (rank r, k
+classes)`, or the reason it was not taken; `BLADE_ORBIT_FOLD=0` keeps the
+logical walk. Corpus `symmetry/106`-`109`; proof in `src/OrbitFold.fs`.
 
 **`where repro` — the reproducibility demand (named functions only).** The
 inverse of the reorder licence: the function's emitted body must keep the

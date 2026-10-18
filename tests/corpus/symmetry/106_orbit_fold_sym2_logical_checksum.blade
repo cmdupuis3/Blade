@@ -1,0 +1,32 @@
+// TEST: Orbit-class fold over a rank-2 symmetric pool
+// The logical sum over the cells of a packed SymIdx<2, p> array -- the bench
+// suite's checksum spelling, nested builtin (+) folds over range<Var> reading
+// g(i, j) -- is ONE pass over the pool under the fold licence: diagonal class
+// weight 1, off-diagonal class weight 2, combined by additions only
+// (src/OrbitFold.fs; bench M4). `reduce(g, (+), axes = 2)` is the same
+// full-domain fold over the logical cells (it used to be refused), and the
+// decompact spelling keeps its value. Integer-valued cells: every
+// association of these sums is exact, so the pins hold in the licensed and
+// the BLADE_FP_REPRO=1 build alike.
+let static p = 7
+let static n = 3
+type Var = Idx<p>
+type Obs = Idx<n>
+let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 5 + s * 3) % 7) - 2.0 |> compute
+let g = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute
+let ss = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * g(i, j), (+)), lambda(u, v) where omp -> u + v, 0.0)
+let total = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(j, i), (+)), (+))
+let shifted = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * 2.0 - 1.0, (+)), (+))
+let via_axes = reduce(g, (+), axes = 2)
+let seeded = reduce(g, (+), 100.0, axes = 2)
+let via_decompact = reduce(reduce(decompact(g, 0), (+)), (+))
+let xi = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Int64((i * 5 + s * 3) % 7) - 2 |> compute
+let gi = method_for(xi, xi) <@> lambda(a: Array<Int64 like Obs>, b: Array<Int64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute
+let int_total = reduce(gi, (+), axes = 2)
+// EXPECT: ss = 4263.0
+// EXPECT: total = 147.0
+// EXPECT: shifted = 245.0
+// EXPECT: via_axes = 147.0
+// EXPECT: seeded = 247.0
+// EXPECT: via_decompact = 147.0
+// EXPECT: int_total = 147

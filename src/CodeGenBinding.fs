@@ -3499,6 +3499,116 @@ and genReduceComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
                     | None -> Map.remove id c.VarNames }) outCtx
     (prelude @ forceLines @ code, outCtx)
 
+/// The orbit-class fold's C++ (Blade.OrbitFold, whose header carries the
+/// regrouping proof). One pass over the packed pool in storage (lex) order:
+/// the nest splits every level after the first into its EQUAL case (the
+/// coordinate repeats the previous one) and its GREATER loop, so every leaf
+/// has a static equality pattern -- hence a static orbit weight and a
+/// static accumulator -- and the innermost greater case is a contiguous run
+/// of the pool, an `omp simd` reduction into its class accumulator. The
+/// class sums then combine by additions only (`OrbitFold.repSteps`), never a
+/// multiply a contracting compiler could fuse.
+and genOrbitFoldCpp (ctx: CodeGenContext) (ind: string) (name: string) (gName: string) (p: Blade.OrbitFold.OrbitPlan) : string list =
+    let accCpp = primTypeToCpp p.AccTy
+    let elemCpp = primTypeToCpp p.ElemTy
+    let n = p.Extent
+    let r = p.Rank
+    let renderF (xName: string) =
+        let c = { ctx with VarNames = Map.add Blade.OrbitFold.readVarId xName ctx.VarNames }
+        exprToCppCtx c p.Body
+    let accName (k: int) = $"__oa{k}"
+    let weightIndex (mults: int list) =
+        let w = Blade.OrbitFold.orbitWeight mults
+        p.Weights |> List.findIndex ((=) w)
+    let fx = renderF "__ox"
+    let fxn = renderF "__oxn"
+    let cellUpdates (mults: int list) (i2: string) : string list =
+        if p.Strict then
+            [ yield $"{i2}{accName 0} = {accName 0} + ({fx});"
+              if p.AccCount = 2 then
+                  yield $"{i2}{{ const {elemCpp} __oxn = -__ox; {accName 1} = {accName 1} + ({fxn}); }}" ]
+        else
+            let k = weightIndex mults
+            [ $"{i2}{accName k} = {accName k} + ({fx});" ]
+    let single (mults: int list) (i2: string) : string list =
+        [ yield $"{i2}{{"
+          yield $"{i2}    const {elemCpp} __ox = __opool[__oo++];"
+          yield! cellUpdates mults (i2 + "    ")
+          yield $"{i2}}}" ]
+    let run (mults: int list) (prev: string) (i2: string) : string list =
+        let accs = if p.Strict then [ 0 .. p.AccCount - 1 ] else [ weightIndex mults ]
+        let red = accs |> List.map accName |> String.concat ", "
+        [ yield $"{i2}{{"
+          yield $"{i2}    const size_t __olen = (size_t){n} - 1 - {prev};"
+          yield $"{i2}    const {elemCpp}* BLADE_RESTRICT __orow = __opool + __oo;"
+          yield $"{i2}    BLADE_OMP_SIMD_REDUCTION(+:{red})"
+          yield $"{i2}    for (size_t __ok = 0; __ok < __olen; __ok++) {{"
+          yield $"{i2}        const {elemCpp} __ox = __orow[__ok];"
+          yield! cellUpdates mults (i2 + "        ")
+          yield $"{i2}    }}"
+          yield $"{i2}    __oo += __olen;"
+          yield $"{i2}}}" ]
+    let incLast (m: int list) = List.take (m.Length - 1) m @ [ List.last m + 1 ]
+    let rec gen (t: int) (prev: string) (mults: int list) (i2: string) : string list =
+        if t = r then
+            [ if not p.Strict then yield! single (incLast mults) i2
+              yield! run (mults @ [ 1 ]) prev i2 ]
+        else
+            [ if not p.Strict then yield! gen (t + 1) prev (incLast mults) i2
+              yield $"{i2}for (size_t __oc{t} = {prev} + 1; __oc{t} < {n}; __oc{t}++) {{"
+              yield! gen (t + 1) $"__oc{t}" (mults @ [ 1 ]) (i2 + "    ")
+              yield $"{i2}}}" ]
+    let i1 = ind + "    "
+    let combineLines = ResizeArray<string>()
+    let mutable tmp = 0
+    let fresh (value: string) =
+        tmp <- tmp + 1
+        let t = $"__ot{tmp}"
+        combineLines.Add($"{i1}const {accCpp} {t} = {value};")
+        t
+    let rec emitC (e: Blade.OrbitFold.Combine) : string =
+        match e with
+        | Blade.OrbitFold.CAcc k -> accName k
+        | Blade.OrbitFold.CZero -> "__of0"
+        | Blade.OrbitFold.CNeg x -> fresh $"-{emitC x}"
+        | Blade.OrbitFold.CAdd (a, b) ->
+            let a' = emitC a
+            let b' = emitC b
+            fresh $"{a'} + {b'}"
+        | Blade.OrbitFold.CRep (x, w) ->
+            let b = emitC x
+            let mutable acc = b
+            for dbl in Blade.OrbitFold.repSteps w do
+                acc <- fresh (if dbl then $"{acc} + {acc}" else $"{acc} + {b}")
+            acc
+    let total = emitC p.Total
+    let accDecl = [ 0 .. p.AccCount - 1 ] |> List.map (fun k -> $"{accName k} = {accCpp}(0)") |> String.concat ", "
+    let group = if p.Strict then "AntisymIdx" else "SymIdx"
+    // A `where omp` licence on any level's fold is not spent as a thread team
+    // here: the census says so (the dropped-omp-is-never-silent invariant).
+    let ompMarker =
+        if p.Levels |> List.exists (fun l -> l.Fold.IsOmpParallel) then
+            let phrase = ompSuppressedPhrase "the orbit-class fold is one serial pass over the packed pool (the licence is spent as the class regrouping; a threaded class fold is not built yet)"
+            [ $"{i1}// {phrase}" ]
+        else []
+    [ yield $"{ind}{accCpp} {name} = {exprToCppCtx ctx p.OuterSeed};"
+      yield $"{ind}{{"
+      yield $"{i1}// {Blade.OrbitFold.planForm p}: the logical sum over the {group}<{r}, {n}> pool of `{p.SourceName}`, regrouped (licensed); class sums combine by additions only"
+      yield! ompMarker
+      yield $"{i1}{accCpp} {accDecl};"
+      if p.PoolCells > 0L then
+          yield $"{i1}const {elemCpp}* BLADE_RESTRICT __opool = nested_array_utilities::pool_base({gName}.data);"
+          yield $"{i1}size_t __oo = 0;"
+          yield $"{i1}for (size_t __oc1 = 0; __oc1 < {n}; __oc1++) {{"
+          yield! gen 2 "__oc1" [ 1 ] (i1 + "    ")
+          yield $"{i1}}}"
+      if p.Strict && p.ZeroCells > 0L then
+          yield $"{i1}const {elemCpp} __ox = {elemCpp}(0);"
+          yield $"{i1}const {accCpp} __of0 = {fx};"
+      yield! combineLines
+      yield $"{i1}{name} = {name} + {total};"
+      yield $"{ind}}}" ]
+
 and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (compExpr: IRExpr) (kernelExpr: IRExpr) (seedExpr: IRExpr) : string list * CodeGenContext =
     // THE JOIN ENCODING (IR.fs, IRReduceCompute): tuple kernel + tuple seed =
     // one fold per leg. Routed to its own emitter, because everything below
@@ -3527,6 +3637,32 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
         match resolveDeferred e with
         | IRFusion (l, r) -> collectLeaves l @ collectLeaves r
         | other -> [other]
+    // THE ORBIT-CLASS FOLD (Blade.OrbitFold; bench M4): a licensed logical
+    // walk over a compact array's cells becomes one pass over its pool with
+    // orbit-class accumulators. A recognised walk the fold declines leaves a
+    // census line and falls through to the ordinary nest below.
+    let orbitPlan =
+        let sourceName id = Map.tryFind id ctx.VarNames |> Option.defaultValue $"__v{id}"
+        match Blade.OrbitFold.recognise resolveDeferred resolveCallable sourceName compExpr kernelExpr seedExpr with
+        | Blade.OrbitFold.Orbit p ->
+            if ctx.DeferredComputations.ContainsKey p.SourceId then
+                Blade.OrbitFold.recordDeclined name "the compact array is a deferred computation (no pool to walk)"
+                None
+            else
+                match Map.tryFind p.SourceId ctx.VarNames with
+                | Some gName -> Some (p, gName)
+                | None ->
+                    Blade.OrbitFold.recordDeclined name "the compact array has no materialized pool in scope"
+                    None
+        | Blade.OrbitFold.Declined why ->
+            Blade.OrbitFold.recordDeclined name why
+            None
+        | Blade.OrbitFold.NotOrbit -> None
+    match orbitPlan with
+    | Some (p, gName) ->
+        Blade.OrbitFold.recordTaken name p
+        (genOrbitFoldCpp ctx ind name gName p, addVarName binding.Id name ctx)
+    | None ->
     let leaves = collectLeaves compExpr
     let infos = leaves |> List.choose (function IRApplyCombinator i -> Some i | _ -> None)
     let ctx' = addVarName binding.Id name ctx

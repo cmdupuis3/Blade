@@ -5136,11 +5136,131 @@ and private emitCompactFold (c: Ctx) (a: ArrVal) (cl: IRCallable) (accTy: Sc) (i
                 (fun coords _ -> feed part havePart (readCell c a coords))
             loadSlot c acc accTy
 
+/// The ORBIT-CLASS FOLD (Blade.OrbitFold, whose header carries the proof that
+/// it is the logical sum regrouped; the C++ lane's twin is
+/// CodeGenBinding.genOrbitFoldCpp, same nest, same accumulators, same
+/// addition tree). Taken only when the shared recogniser accepts the walk AND
+/// the compact operand answers flat reads in this lane (a pool, or a
+/// cell-congruent producer); anything else falls back to the logical walk.
+and private tryOrbitFold (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExpr) (initExpr: IRExpr) : Val option =
+    let name id = match Map.tryFind id c.ModuleNames with Some n -> n | None -> $"__v{id}"
+    match Blade.OrbitFold.recognise id resolveCallable name compExpr kernelExpr initExpr with
+    | Blade.OrbitFold.Orbit p ->
+        match scalarTyOf (IRTScalar p.AccTy), scalarTyOf (IRTScalar p.ElemTy) with
+        | Some accTy, Some _ when accTy = ScF64 || accTy = ScI64 ->
+            let a = emitArr c p.SourceExpr
+            (match soleSimplexR a.Groups with
+             | Some (r, n, strict) when r = p.Rank && n = p.Extent && strict = p.Strict && hasFlatRead a ->
+                 Some (emitOrbitFold c p a accTy)
+             | _ -> None)
+        | _ -> None
+    | _ -> None
+
+and private emitOrbitFold (c: Ctx) (p: Blade.OrbitFold.OrbitPlan) (a: ArrVal) (accTy: Sc) : Val =
+    let fold = (List.last p.Levels).Fold
+    let licensed = foldFmfDecorable fold
+    let n = p.Extent
+    let r = p.Rank
+    let negBody = Blade.OrbitFold.negatedBody p
+    let formLine = Blade.OrbitFold.planForm p
+    ln c ($"; {formLine}: the logical sum over the pool of `{p.SourceName}`, regrouped (licensed)")
+    // f at a value: bind the read variable to it for the body's emission.
+    let evalAt (body: IRExpr) (v: Val) : Val =
+        let slot = allocaOf c (llTy v.Ty)
+        ln c ($"store {(llTy v.Ty)} {v.Reg}, ptr {slot}")
+        let rv = Blade.OrbitFold.readVarId
+        let saved = match c.Slots.TryGetValue rv with | true, s -> Some s | _ -> None
+        c.Slots.[rv] <- (slot, v.Ty)
+        let res = coerce c accTy (emitExpr c body)
+        (match saved with
+         | Some s -> c.Slots.[rv] <- s
+         | None -> c.Slots.Remove rv |> ignore)
+        res
+    // `x + y` through the fold's own builtin `+`: inside the class loops with
+    // the fold licence's flags (`reassoc nsz`, so the vectorizer may lane the
+    // class sum), in the combine WITHOUT them (an addition tree LLVM must not
+    // re-associate into a product it could then contract).
+    let add (inLoop: bool) (x: Val) (y: Val) : Val =
+        let saved = c.FoldFmf
+        c.FoldFmf <- inLoop && licensed
+        try coerce c accTy (applyKernel c fold [ KScalar x; KScalar y ])
+        finally c.FoldFmf <- saved
+    let zeroAcc = coerce c accTy (emitExpr c (if accTy = ScF64 then IRLit (IRLitFloat 0.0) else IRLit (IRLitInt 0L)))
+    let accs = [ for _ in 1 .. p.AccCount -> allocaOf c (llTy accTy) ]
+    for s in accs do ln c ($"store {(llTy accTy)} {zeroAcc.Reg}, ptr {s}")
+    let bump (k: int) (v: Val) =
+        let cur = loadSlot c accs.[k] accTy
+        let next = add true cur v
+        ln c ($"store {(llTy accTy)} {next.Reg}, ptr {accs.[k]}")
+    let weightIndex (mults: int list) =
+        let w = Blade.OrbitFold.orbitWeight mults
+        p.Weights |> List.findIndex ((=) w)
+    let cell (mults: int list) (x: Val) =
+        if p.Strict then
+            bump 0 (evalAt p.Body x)
+            if p.AccCount = 2 then bump 1 (evalAt negBody x)
+        else bump (weightIndex mults) (evalAt p.Body x)
+    if p.PoolCells > 0L then
+        let oo = allocaOf c "i64"
+        ln c ($"store i64 0, ptr {oo}")
+        let readAt (off: string) = readFlat c a { Reg = off; Ty = ScI64 }
+        let incLast (m: int list) = List.take (m.Length - 1) m @ [ List.last m + 1 ]
+        let single (mults: int list) =
+            let off = (loadSlot c oo ScI64).Reg
+            cell mults (readAt off)
+            let next = i64Bin c "add" off "1"
+            ln c ($"store i64 {next}, ptr {oo}")
+        let run (mults: int list) (prev: string) =
+            let len = i64Bin c "sub" (string (n - 1L)) prev
+            let start = (loadSlot c oo ScI64).Reg
+            emitCountedLoopTo c len (fun k -> cell mults (readAt (i64Bin c "add" start k)))
+            let next = i64Bin c "add" start len
+            ln c ($"store i64 {next}, ptr {oo}")
+        let rec gen (t: int) (prev: string) (mults: int list) =
+            if t = r then
+                if not p.Strict then single (incLast mults)
+                run (mults @ [ 1 ]) prev
+            else
+                if not p.Strict then gen (t + 1) prev (incLast mults)
+                let trips = i64Bin c "sub" (string (n - 1L)) prev
+                emitCountedLoopTo c trips (fun k ->
+                    let coord = i64Bin c "add" (i64Bin c "add" prev "1") k
+                    gen (t + 1) coord (mults @ [ 1 ]))
+        emitCountedLoop c n (fun i -> gen 2 i [ 1 ])
+    let rec combine (e: Blade.OrbitFold.Combine) : Val =
+        match e with
+        | Blade.OrbitFold.CAcc k -> loadSlot c accs.[k] accTy
+        | Blade.OrbitFold.CZero ->
+            let z = emitExpr c (if a.Elem = ScF64 then IRLit (IRLitFloat 0.0) else IRLit (IRLitInt 0L))
+            evalAt p.Body (coerce c a.Elem z)
+        | Blade.OrbitFold.CNeg x ->
+            let v = combine x
+            let d = freshReg c
+            if accTy = ScF64 then ln c ($"{d} = fneg double {v.Reg}")
+            else ln c ($"{d} = sub i64 0, {v.Reg}")
+            { Reg = d; Ty = accTy }
+        | Blade.OrbitFold.CAdd (x, y) ->
+            let x' = combine x
+            let y' = combine y
+            add false x' y'
+        | Blade.OrbitFold.CRep (x, w) ->
+            let b = combine x
+            let mutable acc = b
+            for dbl in Blade.OrbitFold.repSteps w do
+                acc <- add false acc (if dbl then acc else b)
+            acc
+    let total = combine p.Total
+    let seed = coerce c accTy (emitExpr c p.OuterSeed)
+    add false seed total
+
 /// `reduce(<deferred computation>, op, init)` -- the FUSED terminal. One nest,
 /// no materialized array, and one accumulator PER FUSION LEAF: an `<&!>` tree
 /// answers a flat pack of scalars, which is how "several statistics in one
 /// pass" costs one traversal.
 and private emitReduceCompute (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExpr) (initExpr: IRExpr) : Val list =
+    match tryOrbitFold c compExpr kernelExpr initExpr with
+    | Some v -> [ v ]
+    | None ->
     let rec leaves e =
         match e with
         | IRFusion (l, r) -> leaves l @ leaves r

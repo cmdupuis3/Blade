@@ -1,5 +1,16 @@
 # Compact symmetric folds — deciding what `reduce` over triangular storage means
 
+**Status update (2026-10-18): §4.3's full-domain meaning is BUILT for the FULL
+fold.** `reduce(S, op, axes = r)` over one SymIdx/AntisymIdx group of rank r is
+the logical-cell fold (rewritten by the checker into the nested `range<I>` walk
+for `(+)` -- the dense fold's terms, regrouped rows-then-total -- or into
+`decompact` when the array/index is unnamed or the kernel is anything else), and
+under the reorder licence
+the walk is the orbit-class pool fold of §4.4 / bench M4 (`src/OrbitFold.fs`,
+both back ends; the interpreter folds the logical cells directly). Partial folds
+over a compact group, Hermitian/wreath groups and `prodsum` keep the BL3999
+refusal; the canonical-cell fold still has no spelling (§4.4's `pool(A)`).
+
 **Status (2026-08-18): EXPLORATORY.** No code proposed for landing yet. This document
 reproduces the refusal, traces it to six sites, and argues a **semantics decision** (§4)
 that must be made before any of the four lanes is touched. The decision is the

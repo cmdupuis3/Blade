@@ -980,7 +980,11 @@ let internal llvmLaneDecision (d: Blade.Effects.Decision) : Blade.Effects.Decisi
         // (`foldFmfLicensed`): exactly the folds the C++ lane did not leave
         // serial for want of a licence or under the repro build.
         let cppForm = d.Evidence |> List.tryHead |> Option.defaultValue ""
-        if cppForm.StartsWith "fold form: serial (no reorder licence"
+        // The orbit-class fold (Blade.OrbitFold) is BOTH lanes' form: the
+        // LLVM lane runs the same recogniser and the same class nest, so the
+        // record (taken or declined) holds for it as written.
+        if cppForm.StartsWith "fold form: orbit-class fold" then d
+        elif cppForm.StartsWith "fold form: serial (no reorder licence"
            || cppForm.StartsWith "fold form: serial (repro" then
             declined "the fold keeps its serial association in the LLVM lane too" []
         else
