@@ -45,7 +45,7 @@ more of the same; the region as a whole allocates and writes the 48 MB trajector
 
 `u(nx, nt)` (x contiguous within a step). Blade: `Array<Float like T, X>` (x contiguous).
 
-## Tiers (natural = dense baseline; expert = reviewed implementation; README §2)
+## Tiers (natural = dense baseline; expert = reviewed implementation; kernels/README.md §1)
 
 - **natural (array-statement baseline)**: inside `do t = 2, nt`: `k1 = f(u(:,t-1))`, `k2 =
   ...`, ..., `u(:,t) = ...` with k1..k4 (and the stage inputs) as whole-array expressions —
@@ -116,8 +116,8 @@ loop or the stage arithmetic (README §3 matched-loop table).
 
 ## Drift control
 
-`recur/expert.f90`, gfortran, serial x repro, is the suite's **compute control** (README
-§6): compute-bound, deterministic, ~0.1 s; it tracks core clock and thermal state. Its
+`recur/expert.f90`, gfortran, serial x repro, is the suite's **compute control** (harness/README.md
+"Protocol and statistics"): compute-bound, deterministic, ~0.1 s; it tracks core clock and thermal state. Its
 region also allocates and writes the 48 MB trajectory ("L2-resident" describes a step,
 not the region), which is why a second, stream control (`saxpy` at n = 700,001) sits
 beside it.

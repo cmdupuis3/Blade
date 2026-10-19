@@ -3,8 +3,12 @@
 `run.py` is a single-file, standard-library-only Python 3.14 driver (harness version 2). It
 discovers kernels, builds every arm of a kernel/regime up front, validates BOTH checksums of
 EVERY run against independent pins, runs the interleaved timing protocol, and writes an
-immutable session bundle. The protocol is `bench/README.md`, as amended by
-`bench/notes/review-method.md`; this file documents the tool.
+immutable session bundle. The protocol's entry point is `bench/README.md` (fairness,
+regimes, honesty rules) and its kernel-side rules are `bench/kernels/README.md` (tiers,
+output contract, SIZE marker, Blade facts), as amended by `bench/notes/review-method.md`;
+this file documents the tool and, since the 2026-10-18 consolidation, carries the
+protocol's statistics-and-bookkeeping and hygiene text ("Protocol and statistics" and
+"Limits: hygiene, not safety" below, formerly `bench/README.md` §6 and §7).
 
 ```
 C:\Python314\python.exe bench\harness\run.py list
@@ -116,46 +120,135 @@ relative tolerance (`config.json tolerance`, kernel.json may override); twins `c
 (dropped from later rounds, no ratio uses it). Without a pin, smoke/check cross-check
 against blade-cpp and say so; bench refuses.
 
-## Protocol (bench)
+## Protocol and statistics (the measured session)
 
-1. Preflight: fingerprint (CPU, cores, RAM, git SHA, affinity), `powercfg` processor settings
-   (PROCTHROTTLEMAX/MIN, PERFBOOSTMODE) and AC state, toolchain identities; refuse on battery.
-2. Pre-session checks (above); planned-cell manifest.
-3. Controls (`config.json controls`; compute = recur gfortran-expert at full, memory =
-   saxpy gfortran-expert at sizes.control; both serial x repro) built once and validated.
-4. Per kernel x regime block: power + AC re-read (abort on battery); build all arms (mt8 arms
-   only if their own serial arm validated in this session -- otherwise that serial block is
-   validated at smoke size first); one validated warm-up per arm; then R rounds, each a
-   SEEDED RANDOM PERMUTATION of all live arms, twins and controls (M15). R = max(serial 11 /
-   mt8 7, 21 when the median full-size warm-up < 50 ms); `--rounds` overrides and taints when
-   lower. Cooldown >= 0.5 s after every run, >= 3 s between kernels, 60 s between bench sessions (enforced at session start from `bench/.build/last-bench-session-end.txt`). The session JSON is
-   checkpointed after every run.
-5. Excursions (charter 2.5 as amended 2026-10-18, user-approved). An arm run more than 3x
-   that arm's running median in the block (once the median is >= 5 ms) is an EXCURSION:
-   - the first one in a block (the round's controls necessarily in bounds, since a control
-     excursion aborts at once) is DROPPED from inference and RECORDED: the sample stays in
-     session.json with `excursion_dropped: true` and its `excursion_ratio`, the block lists it
-     under `excursions`, summary.md prints a note, the round continues. The bootstrap then
-     uses that arm's remaining rounds (each draw takes the arm's samples in the drawn rounds);
-   - a SECOND excursion in the same block, ANY control run more than 3x the control's own
-     running median, or AC power lost ABORTS the session; the partial bundle is written.
+The protocol's statistics-and-bookkeeping text (formerly `bench/README.md` §6, moved here
+verbatim on 2026-10-18) merged with the driver's implementation of it. Where the two
+disagreed the later, driver rule is kept and marked "driver:"; the bullets without a
+"driver:" sub-item were already identical.
 
-## Statistics
-
-- Primary estimand: the complete timed region. Ratio = median(arm) / median(Blade reference)
-  (> 1 = Blade faster). Reference: blade-llvm in serial regimes, blade-cpp in mt8 or when the
-  LLVM lane fell back; none when neither is valid (no ratios).
-- Round-block bootstrap (M15/M16): rounds are resampled jointly, every statistic of a draw
-  uses the same rounds, 10000 draws, seeded; no draw is ever discarded.
-- Verdict (M17, delta = `verdict_delta` 0.10): `win` (CI > 1 and ratio >= 1.10),
-  `detectable-win` (CI > 1, ratio < 1.10), `equivalent` (CI within [1/1.10, 1.10]),
-  `detectable-loss`, `loss`, `inconclusive`. Intervals are pointwise.
-- Incremental (M9): `median(arm) - median(its own twin)` with its interval; incremental ratio
-  only when the reference's incremental interval excludes 0, else "undefined".
-- Drift (M18): per arm and control, first-half vs second-half median > 5% flags the block;
-  a control's block median more than 7% from its session baseline flags the block; an
-  invalid control run flags the block; flagged blocks keep their numbers but every verdict
-  reads `suppressed` (the unsuppressed one is kept in the JSON).
+- **Session sequence (the driver).** (1) Preflight: fingerprint (CPU, cores, RAM, git SHA,
+  affinity), `powercfg` processor settings (PROCTHROTTLEMAX/MIN, PERFBOOSTMODE) and AC state,
+  toolchain identities; refuse on battery. (2) The pre-session checks above (smoke evidence,
+  pins); the planned-cell manifest. (3) Controls (`config.json controls`) built once and
+  validated. (4) Per kernel x regime block: power + AC re-read (abort on battery); build all
+  arms (mt8 arms only if their own serial arm validated in this session -- otherwise that
+  serial block is validated at smoke size first); one validated warm-up per arm; then R rounds,
+  each a SEEDED RANDOM PERMUTATION of all live arms, twins and controls (M15). Cooldown >= 0.5 s
+  after every run, >= 3 s between kernels, 60 s between bench sessions (enforced at session
+  start from `bench/.build/last-bench-session-end.txt`). The session JSON is checkpointed
+  after every run.
+- **Builds.** Every arm of a kernel is built up front from `harness/config.json`; the
+  harness records the exact command line, compiler version string, flags, environment,
+  SHA-256 of each executable AND of every resolved runtime DLL (GNU, Intel, Clang,
+  OpenBLAS), stack reserve/commit and temporary-placement settings, and for Blade the
+  `blade plan` output (which loops carry `[omp v1]`, which routes) and whether the LLVM
+  lane printed `[blade] llvm lane refused: <reason>; falling back to C++`. A fallback arm is
+  **marked `fallback`** and reported under `blade-cpp` semantics; the `blade-llvm` cell
+  shows "refused: <reason>".
+  - driver: the acceptance statuses and the artifact evidence are "Build acceptance" above.
+- **Smoke first.** `--smoke` runs every arm once at smoke size and checks the contract
+  (three lines, pins agree, no unexpected fallback, no extra output), runs the cell-by-cell
+  validation, and verifies that every required twin exists and prints `checksum = 0.0`. It
+  is a precondition of a session, and the gate ENFORCES that smoke evidence is
+  re-established after every binary or configuration change (the exact source, executable
+  and config hashes are checked). Status: the runner's first all-regime sweep validated
+  448 cells with zero checksum disqualifications (`notes/run-log.md`).
+  - driver: the evidence key (per kernel, per arm; run.py itself excluded) is under "Verbs
+    and exit codes" above.
+- **Pilot and sample size (M15).** A 3-round full-size pilot sets the production round
+  counts against a declared precision target of ±5% on the headline ratio; the defaults
+  below are minimums, enforced (a `--rounds` override below the minimum taints the session
+  and the table says so): serial 11, memory-bound kernels (full-size serial median < 50 ms)
+  21, mt8 7. Thirty to fifty observations per arm across sessions is the working
+  expectation for the short kernels, not a guarantee; measurement never stops because
+  significance first appeared.
+  - driver: R = max(serial 11 / mt8 7, 21 when the median full-size warm-up < 50 ms);
+    `--rounds` overrides and taints when lower.
+- **Rounds.** Per kernel and regime: one discarded warm-up run per arm, then R rounds. In
+  each round every arm — main arms, twins and both controls — runs once in a **seeded random
+  permutation** (recorded), not a cyclic rotation. Cooldowns (D46, from the session after
+  serial-repro 3b): 0.5 s between runs, 3 s between kernels, 60 s between sessions; the
+  sessions up to and including 3b ran with 2 s / 10 s / ~5 min, recorded per session in
+  RESULTS.md §2.
+- **Controls (M18).** Two fixed binaries run once per round of every block: the **compute
+  control** (`recur`, gfortran-expert, serial x repro: deterministic, ~0.1 s, tracks core
+  clock and thermal state; note its region also allocates and writes a 48 MB trajectory —
+  "L2-resident" describes a step, not the region) and the **stream control** (`saxpy`,
+  gfortran-expert, serial x repro, built at n = 700,001 — the `sizes.control` variant of
+  `saxpy/kernel.json`, which the harness builds like any size variant — a 16.8 MB
+  three-stream pass: tracks memory-subsystem contention and background load). BOTH
+  controls are serial x `repro` builds; `harness/config.json` follows this text. Every control run is validated
+  like any other run; an invalid or thermal-excursion control run flags the block. Within
+  a block, a first-half vs second-half median difference above 5% in either control flags
+  the block ("within-block drift"); a rolling control median moving more than 7% against
+  the session's first block flags the session from that block on. Flagged blocks carry the
+  flag in every cell; no result is ever rescaled by a control.
+  - driver: flagged blocks keep their numbers but every verdict prints `suppressed` (the
+    unsuppressed verdict is kept in the JSON); the report calls such blocks "indicative".
+- **Per arm:** n, min, median, IQR. **Headline ratio** = median(arm) / median(blade-llvm)
+  in serial regimes (> 1 means Blade faster); in **mt8 the denominator is `blade-cpp`**
+  (the LLVM lane has no OpenMP); where `blade-llvm` is a fallback or refused, the
+  denominator is `blade-cpp`. The denominator is printed explicitly in every row. Intervals
+  are 95% bootstrap percentile intervals of the ratio of medians obtained by **resampling
+  whole rounds jointly** (10,000 resamples; twins and controls travel with their round, so
+  shared-twin correlations are preserved). Intervals are **pointwise**; the suite makes no
+  simultaneous suite-wide superiority claim and applies no multiplicity correction because
+  it states none.
+  - driver: reference = blade-llvm in serial regimes, blade-cpp in mt8 or when the LLVM lane
+    fell back; none when neither is valid (no ratios). Every statistic of a bootstrap draw uses
+    the same rounds; the draw seed is recorded.
+- **Incremental estimates (M9, M16).** For kernels with twins: the incremental difference
+  `median(total) − median(own twin)` per arm with its joint-round bootstrap interval,
+  always; an incremental RATIO only when the reference arm's incremental interval excludes
+  0, otherwise the cell reads `undefined`. No resample is ever discarded.
+- **Verdicts (M17), practical threshold δ = 10%.** For a ratio r = median(arm)/median(Blade)
+  with interval [lo, hi]: *win*: lo > 1 and median r >= 1.10; *detectable*: lo > 1 and
+  median r < 1.10; *equivalent*: [lo, hi] ⊂ [1/1.10, 1.10] (the interval need not contain
+  1); *loss*: hi < 1 and median r <= 1/1.10; *detectable loss*: hi < 1 and median r >
+  1/1.10; otherwise *inconclusive*. Failure to detect a difference is not equivalence.
+  Verdicts are per arm and per regime, compared with the spec's hypothesis; a mismatch is
+  investigated, never resolved in the hypothesis's favour.
+  - driver spellings: `win`, `detectable-win`, `equivalent`, `detectable-loss`, `loss`,
+    `inconclusive` (`verdict_delta` 0.10 in `config.json`).
+- **Disqualification:** pin mismatch (kernels/README.md §3.4); a missing, duplicate or malformed line; a
+  nonpositive duration; a run longer than 2.5 s (charter safety rule 3; the child
+  watchdog is 3x that, 7.5 s); a thermal excursion — any run, warm-up or control included,
+  slower than 3x the block's running median aborts the block and the session pauses (M19);
+  the machine on battery (the whole session is refused). **Excursion rule (DECIDED by the
+  user, 2026-10-18; D45):** an ISOLATED single-run excursion (one run above 3x the block's
+  running median while both controls in that round are normal) is DROPPED AND RECORDED —
+  the sample stays in the bundle, marked, excluded from inference, and the planned-cell
+  manifest says so; the session ABORTS on a second excursion in the same block, on any
+  control excursion, or on AC loss. (Session 2's saxpy mt8 block was lost to a single 43
+  ms stall of a 6 ms input-only twin under the previous always-abort rule; RESULTS.md
+  §12.2.)
+  - driver: an arm run more than 3x that arm's running median in the block (once the median
+    is >= 5 ms) is an EXCURSION. The first one in a block (the round's controls necessarily in
+    bounds, since a control excursion aborts at once) is DROPPED from inference and RECORDED:
+    the sample stays in session.json with `excursion_dropped: true` and its `excursion_ratio`,
+    the block lists it under `excursions`, summary.md prints a note, the round continues; the
+    bootstrap then uses that arm's remaining rounds. A SECOND excursion in the same block, ANY
+    control run more than 3x the control's own running median, or AC power lost ABORTS the
+    session; the partial bundle is written. The run timeout is 7.5 s (3 x the 2.5 s limit).
+- **Host conditions (M19).** The session records at start and per block: AC state, the
+  active power plan and `powercfg /q` processor settings (maximum processor state, boost
+  policy), OEM thermal mode where readable. The reference configuration caps the maximum
+  processor state at ~80%; every result table is labelled **"max processor state capped
+  (~80%)"** and no number is extrapolated to the uncapped machine — the cap can shift the
+  balance between compute- and memory-bound kernels.
+  - superseded label: after the pilot the user chose to publish UNCAPPED runs (maximum
+    processor state 100%, `bench/README.md` §5); the "capped (~80%)" label applies only to a
+    capped re-run, which remains the documented way to obtain unsuppressed verdicts.
+- **Session bundle (M27)** in `results/<yyyy-mm-dd>-<host>/`, immutable and checkpointed
+  after every run, with raw per-run values including warm-ups, controls and aborted partial
+  blocks, a **planned-cell manifest** marking every cell as run / unrun / unsupported /
+  fallback / no-parallel-form / failed / disqualified, and exact reproduction commands. The
+  layout is the "Session bundle (M27)" section below (owner: harness agent) — the current
+  one; the pre-consolidation protocol's longer contents list (per-session source-tree copies,
+  runtime header copies, build logs) was dropped with commit 5dd4f7ec and is not restated.
+- Nothing is extrapolated or estimated in a result table. An unrun cell is reported as
+  unrun.
 
 ## Schemas
 
@@ -238,9 +331,35 @@ the timed rounds), `peak_working_set_max`, `trend`, `ratio`, `ratio_vs_blade_cpp
 
 ## Limits: hygiene, not safety (2026-10-18)
 
-The host-crash history behind the original defensive rules was an integrated-graphics overload
-issue that has since been resolved (user, 2026-10-18). The cooldown floors were lowered to
-0.5 s between runs, 3 s between kernels and 60 s between sessions. The AC check, the excursion
-rule and one-timed-process-at-a-time remain (measurement hygiene). The 64 MB working-set and
-2.5 s run limits stay in force for the current, frozen sizes but are NO LONGER safety limits
-and may be raised in a later session. Cooldowns are not part of the smoke-evidence key.
+The protocol's measurement-hygiene rules (formerly `bench/README.md` §7, D46; the same text
+the charter's §2 carries), moved here verbatim on 2026-10-18.
+
+History in one sentence: the charter's "safety rules" came from an August 2026 run of
+host crashes that has since been traced to an integrated-graphics overload and resolved,
+so what remains below is measurement hygiene, not crash protection.
+
+1. **One timed process at a time.** Only the RUNNER executes timing runs; no other heavy
+   process (a `dotnet build`, a compile fleet, another benchmark) runs concurrently with a
+   session, because it would perturb the measurement. Other agents run programs for
+   correctness at smoke size only.
+2. **Interleaved rounds and drift controls** (the "Protocol and statistics" section above): seeded random permutation of all arms
+   per round, two controls per round, within-block and rolling drift checks; a block that
+   trips them is reported as indicative.
+3. **The excursion rule** (the "Protocol and statistics" section above, D45): an isolated single-run excursion with normal controls
+   is dropped and recorded; a second excursion in the block, a control excursion, or AC
+   loss aborts the block.
+4. **AC check** (free): the harness records AC/battery and the power plan, refuses the
+   suite on battery, and rechecks per block.
+5. **Cooldowns:** 0.5 s between runs, 3 s between kernels, 60 s between sessions (D46;
+   previously 2 s / 10 s and ~5 min between sessions — the values in force for each
+   session are listed in RESULTS.md §2, because inter-run spacing can change thermal state
+   and a reader should see where it changed).
+6. **Frozen for this run, no longer safety limits:** the 64 MB working-set cap (natural
+   dense arrays counted) and the 2.5 s single-run cap stay as the sizes were frozen under
+   them; later sessions may raise them. Threaded arms still run only after the serial arms
+   of the same kernel validated (correctness gating, not safety).
+
+Cooldowns are not part of the smoke-evidence key. The resume plan after the session-2 abort
+that followed this list in the old protocol document is recorded in `bench/RESULTS.md` §12
+and `bench/notes/design-decisions.md` (D45); its two spelling facts are
+`bench/kernels/README.md` §4.10.

@@ -24,8 +24,8 @@ is the named output (materialized, like `pack`), of length m ≈ n/2. Then
     input_checksum = Σ x
 
 Σy² is permutation-invariant, so the compaction ORDER is not verified by this checksum
-(design-decisions D17); the oracle's comparison of the dump variant at smoke size (README
-§5.4) verifies the order and the count independently — via an order-sensitive fingerprint
+(design-decisions D17); the oracle's comparison of the dump variant at smoke size (kernels/README.md
+§3.4) verifies the order and the count independently — via an order-sensitive fingerprint
 (two Horner folds + count + first/last cell) rather than the cells, because Blade cannot
 print a runtime-extent array (`Idx<?>`: BL7004 "has no printed form"; gap G22).
 
@@ -41,9 +41,9 @@ Blade's `compound` builds a hashed index of ~40 B per kept cell, estimated ~120 
 200–300 ms at the larger n — over the 64 MB cap. At 1,000,003 the Blade arm is estimated
 at ~40 MB peak; the runner measures the peak working set once per kernel at full size and
 the gap is registered (G9). Memory-bound. Input share ≈ 3 ms of ~8 ms (Fortran) ≈ **40% →
-an `inputonly` twin per arm REQUIRED** (README §5.3). R >= 21.
+an `inputonly` twin per arm REQUIRED** (kernels/README.md §3.3). R >= 21.
 
-## Tiers (natural = dense baseline; expert = reviewed implementation; README §2)
+## Tiers (natural = dense baseline; expert = reviewed implementation; kernels/README.md §1)
 
 - **natural (`pack` baseline)**: `y = pack(x, x > 1.0d0)` (allocatable `y`), `m = size(y)`,
   `sum(y**2) + m`. `pack` is appropriate because the subsequence is an output (M1); a masked

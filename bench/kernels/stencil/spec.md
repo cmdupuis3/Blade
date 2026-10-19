@@ -33,11 +33,11 @@ contiguous — the agent picks the orientation whose inner loop is contiguous an
 | full | 1501 | 2003 | 24.1 MB | 24.0 MB | 8–20 ms |
 
 Memory-bound (48 MB streamed; ~6 flops per cell). Input share ≈ 10 ms of ~20 ms ≈ **40%
-→ an `inputonly` twin per arm REQUIRED** (README §5.3). R >= 21. No multi-sweep variant:
+→ an `inputonly` twin per arm REQUIRED** (kernels/README.md §3.3). R >= 21. No multi-sweep variant:
 repeated application would need the full trajectory stored (`let rec` keeps every step) or
 a different algorithm (design-decisions D15).
 
-## Tiers (natural = dense baseline; expert = reviewed implementation; README §2)
+## Tiers (natural = dense baseline; expert = reviewed implementation; kernels/README.md §1)
 
 - **natural (array-section baseline)**: one array-section statement `lap = u(1:ny-2,
   2:nx-1) + u(3:ny, 2:nx-1) + u(2:ny-1, 1:nx-2) + u(2:ny-1, 3:nx) - 4*u(2:ny-1, 2:nx-1)`
@@ -70,7 +70,7 @@ G10):** the earlier spelling `reduce(reduce(lap * lap, (+)), (+))` — and `redu
 (+), axes = 2)` — MATERIALIZES a second (ny−2) x (nx−2) array for `lap * lap` (72 MB
 working set at full size, over the cap), and a `where omp` fold kernel on the `axes = 2`
 form is dropped silently. The per-row `prodsum` streams and threads. The row width is
-derived as `Int64(extents(range<X>))`, never a second literal (README §4).
+derived as `Int64(extents(range<X>))`, never a second literal (kernels/README.md §2).
 
 ## Regimes
 

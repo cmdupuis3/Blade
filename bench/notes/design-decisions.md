@@ -36,7 +36,7 @@ of how much of Blade's region the logical-read checksum occupies; they are NOT m
 components and are NEVER subtracted from a result or a diagnosis. The missing canonical
 fold (G2/G3) is the explanation offered when phase evidence points there, not an
 adjustment. Original reasoning follows. With no canonical fold (D2), Blade reads all p² logical cells through the
-canonicalizing accessor, in the one spelling that streams (README §7.2; the `range<I>,
+canonicalizing accessor, in the one spelling that streams (kernels/README.md §4.2; the `range<I>,
 range<I>` nest allocates a dense p x p — probed; `decompact` allocates dense — read in
 `CodeGenBinding.genDecompactBinding`: "hard (dense alloc + symmetry-expanding scatter)").
 The expert tier reads its triangle once with weight 2. The tax is p² canonicalizing reads
@@ -102,7 +102,7 @@ build still passes `-fopenmp` and removes only the threading pragmas (blade-A/B)
 verification is therefore on the emitted `.cpp`: no `BLADE_OMP_*SIMD_REDUCTION` macro in
 the serial emission. blade-A verified this for every group-A kernel
 (`notes/llvm-acceptance-A.md`); blade-B's fold kernels are checked the same way. The parallel spelling per fold kernel is blade-B's to find
-(README §7.4 lists what the probes showed); if none emits a pragma, the mt8 cell says "no
+(kernels/README.md §4.4 lists what the probes showed); if none emits a pragma, the mt8 cell says "no
 parallel form" and is not faked with a different kernel shape.
 
 **D9 — `inputonly` twins, one PER ARM, are mandatory where the input share exceeds 5%
@@ -131,7 +131,7 @@ L2-resident per step (20011 cells x 8 B), deterministic, ~0.1 s: it tracks core 
 thermal state, which is what drifted in August. Memory-bound candidates (dot, onepass) would
 track memory contention instead; gram is too long to run once per round of every kernel.
 
-**D11 — SIZE marker grammar** (README §4): one marked declaration per parameter, one
+**D11 — SIZE marker grammar** (kernels/README.md §2): one marked declaration per parameter, one
 literal on that line, derived sizes as expressions of the declaration. Probed: `let static n
 = 31` with `type Sx = Idx<n>`-style use and `Int64<min=0, max=n-1>` typecheck (the `Int`
 field type with `max=n-1` does not — Int32/Int64 clash in the desugared bound — so struct
@@ -236,7 +236,7 @@ an application in pack position and the C++ lane ICEs (BL9002) on a deferred map
 top-level block (blade-B). Both are register entries.
 
 **D26 — `onepass` has no parallel Blade form and keeps its idiom.** The `<&!>` join cannot
-be licensed (README §7.4); the tuple-state fold would thread in the C++ lane but the LLVM
+be licensed (kernels/README.md §4.4); the tuple-state fold would thread in the C++ lane but the LLVM
 lane refuses it and it is a worse idiom for four plain sums. The mt8 row reads "no parallel
 form" rather than switching kernels — that is the finding.
 
@@ -390,12 +390,12 @@ lost the saxpy mt8 block to a single 43 ms stall of a 6 ms input-only twin with 
 controls normal. Decided: an isolated single-run excursion (controls normal in that round)
 is dropped and recorded (sample kept in the bundle, marked, excluded from inference,
 manifest says so); the session aborts on a second excursion in the same block, on any
-control excursion, or on AC loss. The harness owner implements it; README §6/§7 updated.
+control excursion, or on AC loss. The harness owner implements it; harness/README.md "Protocol and statistics"/§7 updated.
 Resume plan: re-smoke → mt8-licensed group A + saxpy → serial-repro 3a/3b → mt8-repro →
 serial-fastmath → mt8-fastmath → gram blas.
 
 **D46 — Host rules relaxed to measurement hygiene (user instruction, 2026-10-18).** The
-August 2026 crash history behind charter §2 / README §7 was an integrated-graphics
+August 2026 crash history behind charter §2 / harness/README.md "Limits: hygiene, not safety" was an integrated-graphics
 overload, since resolved. The remaining rules are hygiene: one timed process at a time,
 interleaved rounds with drift controls, the excursion rule (D45), the free AC check.
 Cooldowns are 0.5 s per run, 3 s per kernel, 60 s per session (were 2 s / 10 s / ~5 min
@@ -431,7 +431,7 @@ regenerated from it. D21's bounds gain rounds 4 (< 2^62 before the shift, < 2^46
   /fp:precise -mllvm -fp-contract=fast` (contraction on, reassociation off, verified by two
   probes). ifx with no `/fp:` flag defaults to `/fp:fast`, so the flag is always explicit.
 - O2 SETTLED (D23): the serial build keeps `omp simd`; Fortran serial gets `-fopenmp-simd`.
-- O3 SETTLED for dot/fusedchain (README §7.4, blade-B) and onepass (D26). Per-kernel
+- O3 SETTLED for dot/fusedchain (kernels/README.md §4.4, blade-B) and onepass (D26). Per-kernel
   confirmation of an emitted pragma in the mt8 build remains blade-A/B's acceptance check.
 - O4 SETTLED (blade-A): it does — in the C++ lane every elementwise op on `T^k` kernel
   parameters is materialized per output cell (`reduce(x * y, (+))`, `reduce(x * y * z,

@@ -47,7 +47,7 @@ checks no p² or p³ allocation appears).
 
 Working set (natural dense): 40 MB + X 0.3 MB. Cell ratio 171³ / C(173,3) = 5.89. Inputs:
 34k cells, negligible — **no inputonly twin**. Planning estimate only, never subtracted
-(README §5.4, M13): Blade's logical-read checksum is 5.0M canonicalizing reads of a rank-3
+(kernels/README.md §3.4, M13): Blade's logical-read checksum is 5.0M canonicalizing reads of a rank-3
 index (sort three coordinates + simplex offset) ≈ 25–50 ms, perhaps 10–20% of the packed
 time. The total is the result; the missing canonical fold (G2/G3) is the explanation if the
 diagnosis — from phase evidence, not from this estimate — points there.
@@ -58,7 +58,7 @@ Natural: `t(p, p, p)` dense; loop nest in column-major order (i innermost), samp
 inside or outside as the agent judges natural (record it). Expert: packed simplex, offset
 of (i <= j <= k) by the standard tetrahedral formula, or any bijection; any loop order.
 
-## Tiers (natural = dense baseline; expert = reviewed implementation; README §2)
+## Tiers (natural = dense baseline; expert = reviewed implementation; kernels/README.md §1)
 
 - **natural (dense baseline)**: triple nest over (i, j, k) covering all p³ cells, each with
   its own s-loop (or `sum(x(:,i)*x(:,j)*x(:,k))`), dense cube; `sum(t**2)`. mt8: `!$omp
@@ -127,7 +127,7 @@ reduction loop; the output checksum (with multiplicities) is accumulated in the 
   (blade-A §13) attributes the observed loss to ~2.3x on the kernel — a multiply plus an FMA
   per term with 3 loads against the expert's hoisted pair product (one FMA, 0.67 loads;
   G1b) — plus the measured checksum share (36% of the LLVM time, 70% in C++; G3a). Both
-  Blade lanes reported; the attribution column (README §8) carries the split, the total
+  Blade lanes reported; the attribution column (README §5) carries the split, the total
   stays the result.
 - mt8: the dynamic schedule on the outer simplex level should scale like the expert's.
 

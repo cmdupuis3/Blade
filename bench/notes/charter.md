@@ -1,5 +1,13 @@
 # Charter: the Blade-vs-Fortran benchmark suite (`bench/`)
 
+> **HISTORICAL (2026-10-18).** This is the orchestrator's original brief, kept as written
+> for the record (only §2, the measurement-hygiene rules, was revised in place on
+> 2026-10-18, D46). The living protocol is `bench/README.md` (entry point: goal, fairness,
+> build/run, regimes, reporting, honesty rules), `bench/kernels/README.md` (kernel authoring:
+> tiers, SIZE marker, output contract, Blade facts) and `bench/harness/README.md` (driver:
+> verbs, schemas, statistics, session bundle, limits). Where this file and those disagree,
+> they win; the candidate kernel list of §7 was finalized in `notes/kernel-list.md`.
+
 Orchestrator's brief for every agent on this job. Read it fully before touching anything.
 The protocol document that supersedes the provisional parts of this file is `bench/README.md`
 (written by the architect); until it exists, this file is the protocol.
@@ -37,10 +45,10 @@ measurements, not crash protection:
    other heavy process (`dotnet build`, a compile fleet, another benchmark) runs
    concurrently with a session — it would perturb the measurement. Other agents run
    programs for correctness at tiny sizes only.
-2. **Interleaved rounds and drift controls** (README §6): seeded random permutation of all
+2. **Interleaved rounds and drift controls** (harness/README.md "Protocol and statistics"): seeded random permutation of all
    arms per round, two controls per round, within-block and rolling drift checks; a
    tripped block is reported as indicative.
-3. **The excursion rule** (README §6, D45): an isolated single-run excursion with normal
+3. **The excursion rule** (harness/README.md "Protocol and statistics", D45): an isolated single-run excursion with normal
    controls is dropped and recorded; a second excursion in the block, a control excursion,
    or AC loss aborts the block.
 4. **AC check** (free): the harness records AC/battery and the power plan, refuses the

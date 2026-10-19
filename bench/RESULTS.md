@@ -46,28 +46,29 @@ serial-repro 3a/3b → mt8-repro → serial-fastmath → mt8-fastmath → gram b
 (§11) is written when the blas session lands.
 
 Every number below is copied from a session bundle's `summary.md` / `session.json`; a cell
-without a bundle reads `unrun`. The method is `README.md`; kernels `notes/kernel-list.md`
-and `kernels/<name>/spec.md`; compiler gaps `notes/gap-register.md`; decisions
+without a bundle reads `unrun`. The method is `README.md` (entry point: fairness, regimes,
+reporting), `kernels/README.md` (tiers, output contract, Blade facts) and `harness/README.md`
+(statistics, bundle); kernels `notes/kernel-list.md` and `kernels/<name>/spec.md`; compiler gaps `notes/gap-register.md`; decisions
 `notes/design-decisions.md`.
 
 ## 0. How to read this document
 
 - **Headline estimand:** the complete timed region (allocation + input generation + kernel
-  + both checksums), fresh process, allocation-inclusive (README §5.1).
+  + both checksums), fresh process, allocation-inclusive (kernels/README.md §3.1).
 - **Ratio convention:** ratio = median(arm) / median(Blade reference). **Ratio > 1: Blade
   faster (the arm takes more time); ratio < 1: the arm faster.** Reference: `blade-llvm`
   in serial regimes, `blade-cpp` in mt8 (the LLVM lane has no threads) and wherever the
-  LLVM lane refused. 95% intervals: round-block bootstrap, 10,000 resamples (README §6).
+  LLVM lane refused. 95% intervals: round-block bootstrap, 10,000 resamples (harness/README.md "Protocol and statistics").
 - **Verdicts** (δ = 10%): win / detectable-win / equivalent / detectable-loss / loss /
   inconclusive. **`indicative (suppressed by drift)`**: the block failed a drift, trend or
   control check; medians, intervals and the would-be ratio are shown, no verdict is
-  claimed, nothing is re-thresholded (README §8; the published measurement runs uncapped
+  claimed, nothing is re-thresholded (README §5; the published measurement runs uncapped
   by the user's choice).
 - **Attribution** (compact kernels only): `kernel-only estimate, informal: checksum share
   X%` from `notes/llvm-acceptance-A.md` §13 phase measurements — an attribution, not a
   result; the total is the result.
 - **Incremental** (kernels with twins): median(total) − median(own input-only twin) with
-  its interval, NOT kernel time; an incremental ratio only where defined (README §5.3).
+  its interval, NOT kernel time; an incremental ratio only where defined (kernels/README.md §3.3).
 - **Fold form** is the plan's `fold form:` line for the Blade arms (`reordered (k reassoc
   flags)` LLVM / `reordered (k SIMD_REDUCTION)` C++); **parallelism** per the per-loop
   evidence.
@@ -84,7 +85,7 @@ intrinsics, dense storage, no symmetry exploitation), `expert` = the reviewed im
 (triangular/packed loops, register tiling, fused checksums; `!$omp simd reduction` only on
 the loops the Blade source licenses, README §3 matched-loop table); regimes `licensed`
 (Blade's default) / `repro` (`BLADE_FP_REPRO=1`) / `fastmath`, `serial` / `mt8`, `native` /
-`blas`; bit-identical inputs from the five-round generator (README §5.2); correctness
+`blas`; bit-identical inputs from the five-round generator (kernels/README.md §3.2); correctness
 against the independent numpy oracle on every run; seeded random permutation of arms per
 round; two drift controls per round; whole-round bootstrap; freeze at bench-branch commit
 957afd95 (bundle git 92777698 is the bench branch at run time).
@@ -95,7 +96,7 @@ Cooldowns (inter-run spacing can change thermal state): every session up to and 
 serial-repro 3b ran with 2 s between runs, 10 s between kernels and ~5 min between
 sessions; from the next session on the relaxed D46 values apply (0.5 s / 3 s / 60 s) — the
 column on the right says which was in force. The 64 MB and 2.5 s caps stayed frozen
-throughout this run (README §7).
+throughout this run (harness/README.md "Limits: hygiene, not safety").
 
 | session | date | bundle | regimes x kernels | rounds | duration | failures / DQ / fallbacks | longest run | peak working set | suppressed blocks | cooldowns in force (run / kernel / session) |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -146,7 +147,7 @@ Diagnosis. Both hypotheses missed in magnitude, in opposite directions. Against 
 baselines Blade wins 10.4x (gfortran) and 4.5x (ifx), not ~2x: the baseline evaluates two
 inner products for all p² cells and gfortran's version of that nest runs at a third of
 ifx's speed — the win measures the baseline's dense transcription, not only the halved
-cell count (that is what "dense baseline" means, README §2). Against the experts Blade
+cell count (that is what "dense baseline" means, kernels/README.md §1). Against the experts Blade
 loses 2.4x (ratio 0.416 / 0.395), outside the "equivalence to modest loss" band: the
 mechanism is **G1** — Blade's per-cell dot reloads both operand rows for every cell
 (2 loads per FMA) while the expert's 8x6 register tile does 0.67 loads per FMA; measured
@@ -289,7 +290,7 @@ Diagnosis (indicative). Totals sit within 0.86–1.40 of the LLVM lane — the b
 equivalence the spec predicted, with ifx-expert the fastest total (11.6 ms) and ifx-natural
 the slowest (19.0 ms). The incremental view is more informative than the totals here:
 input generation differs per arm (twins 5.9–10.4 ms — the LLVM lane and ifx generate
-faster than the C++ lane and gfortran, README §5.3), so the incremental estimates say the
+faster than the C++ lane and gfortran, kernels/README.md §3.3), so the incremental estimates say the
 LLVM lane, the C++ lane and gfortran-natural spend the same ~7.2–7.4 ms beyond their
 twins, the two experts 4.8–5.7 ms (their fused checksum saves a pass: incremental ratios
 0.67 / 0.79), and ifx-natural 12.0 ms (its array-section statement is the slow path:
@@ -334,7 +335,7 @@ the kernel; ifx-expert's total is equivalent too, 1.071 [0.986, 1.124]). The C++
 1.48x over the LLVM lane is in its TWIN as well (6.08 vs 3.95 ms): generation, not the
 fold (the C++ twin's fold form is `in-order`; G26 applies to the total's fold). **Rule
 breach to record:** the two natural arms' peak working set (65.9 / 65.5 MB) exceeds the 64
-MB cap (README §7.3) by ~3% — the three temporaries plus the input at n = 2,000,003 were
+MB cap (kernels/README.md §4.3) by ~3% — the three temporaries plus the input at n = 2,000,003 were
 estimated at 64 MB exactly (spec); the overrun is allocator overhead. Kept as measured and
 flagged; a re-run at a smaller n is not required for a 3% breach of a safety budget, but
 the number is stated.
@@ -1432,7 +1433,7 @@ the triangle directly and would remove it).
 | 2b (mt8 re-run) | n = 105, median 12.98 ms, baseline 14.18 ms (the first block ran hot; later blocks 7–10% BELOW it, tripping the rolling rule downward); CV 9.4% over 106 ok samples; min 12.56, max 18.17 ms | n = 105, median 5.424 ms, baseline 6.067 ms; CV 10.0% over 106 ok samples; min 5.12, max 9.02 ms | same |
 
 The two controls diagnose different things: the compute control tracks core clock and
-thermal state, the stream control memory-subsystem contention (README §6). In session 1a
+thermal state, the stream control memory-subsystem contention (harness/README.md "Protocol and statistics"). In session 1a
 both moved 11–16% above the session baseline during the comoment3, gram and pairkernel
 blocks (the rolling-control rule, threshold 7%) and showed 7–19% within-block trends
 elsewhere (threshold 5%); antisym's block was the only one inside both thresholds. In
@@ -1502,7 +1503,7 @@ G7, G14.
 
 Eleven kernels, six arms, four regimes (licensed / repro, serial / mt8), plus fastmath and
 blas, twelve session bundles (two aborted and excluded), 0 checksum disqualifications
-against the independent oracle. Ratio > 1 = Blade faster. Verdict words follow README §6
+against the independent oracle. Ratio > 1 = Blade faster. Verdict words follow harness/README.md "Protocol and statistics"
 (δ = 10%); "indicative" = the block's verdict was suppressed by a drift check.
 
 **Blade vs the dense natural tier (licensed serial, the headline regime):** on the four
@@ -1578,7 +1579,7 @@ was 1.7% (mt8-repro), 4.8% (mt8-fastmath), 5.9% (blas), 8.1% with one outlier
 (serial-fastmath) — read as the uncapped chip cooling and re-boosting during long pauses;
 an observation, not a re-analysis of the earlier sessions.
 
-### 11.3 Dropped and recast workloads (README §8 inventory)
+### 11.3 Dropped and recast workloads (README §5 inventory)
 
 `band` (closed-form constrained enumeration) — dropped before measurement: the domain
 fold was refused at codegen (BL7004) and the `|> compute` form built a hashed key table
@@ -1947,14 +1948,14 @@ comoment3 blade-cpp 110 → 87 ms (1.26x on 8 threads) while the experts reach 4
 pairkernel 77 → 57 ms while the experts reach 6 ms; even antisym (small checksum share)
 widens from a 2.4x to a 3.0x loss.
 
-**The matched-permission rule (README §2/§3) says the two sides should be symmetric.**
+**The matched-permission rule (kernels/README.md §1/§3) says the two sides should be symmetric.**
 Options:
 
 - **(A) Every arm threads preparation and checksum where the language allows.** Blade: a
   `where omp` licence on the generator map's outer level and on the checksum fold / nest
-  (README §7.4 spellings; the per-row checksum nest's outer `method_for(range<I>)` takes
+  (kernels/README.md §4.4 spellings; the per-row checksum nest's outer `method_for(range<I>)` takes
   `omp(i: 1)`, the input sum a licensed fold). Consequences: the four group-A Blade
-  sources change (blade-A), the smoke evidence resets (README §6 gate), and the mt8
+  sources change (blade-A), the smoke evidence resets (harness/README.md "Protocol and statistics" gate), and the mt8
   group-A blocks (and group B where a checksum is unthreaded) are re-run; the serial
   regimes are unaffected (a threading licence is inert there). This is the option the
   matched-permission rule implies and the one that makes the mt8 ratios a kernel
@@ -1968,7 +1969,7 @@ Options:
   included" label and the attribution column; the mt8 group-A ratios are then explicitly
   NOT a like-for-like threading comparison and the write-up says so wherever they appear.
 
-The architect's recommendation is (A): it is what README §2's rule already says, it
+The architect's recommendation is (A): it is what kernels/README.md §1's rule already says, it
 exercises the compiler's own licence mechanism (the suite's thesis), and it isolates G1 /
 G3 as the remaining mt8 losses instead of hiding them behind Amdahl. Until decided, the
 mt8 group-A numbers are presented under (C).
@@ -1977,7 +1978,7 @@ mt8 group-A numbers are presented under (C).
 
 **Finding.** The saxpy mt8 block was lost to one run (blade-cpp-inputonly, 43 ms, 7.0x its
 6 ms running median) in round 7 of 21, with both controls normal and all other runs in the
-round at 5–11 ms. The rule (README §6, charter 2.5) exists to stop a thermal event; this was
+round at 5–11 ms. The rule (harness/README.md "Protocol and statistics", charter 2.5) exists to stop a thermal event; this was
 a single-process stall of the smallest binary, and the rule cannot tell the two apart.
 
 Options (the harness owner makes any change):
@@ -1988,7 +1989,7 @@ Options (the harness owner makes any change):
   both controls normal in that round and no second excursion in the same block, is
   DROPPED AND RECORDED (the sample stays in the bundle, marked, excluded from inference;
   the planned-cell manifest says so); the block aborts on a second excursion or on any
-  control excursion. Consequences: a `harness/run.py` change, a README §6 sentence, and the
+  control excursion. Consequences: a `harness/run.py` change, a harness/README.md "Protocol and statistics" sentence, and the
   bundle schema gains an `excluded_excursion` mark; no source changes.
 
 The architect's recommendation is (B) with the record kept visible: the rule's purpose
@@ -1997,7 +1998,7 @@ not a thermal signature. Either way, saxpy mt8 is re-run.
 
 Until the blas session lands:
 
-- **Dropped and recast workloads** (README §8 inventory): `band` (BL7004 under a deferred
+- **Dropped and recast workloads** (README §5 inventory): `band` (BL7004 under a deferred
   fold; hashed key table under compute; G4); the pair SUM over a `comm` kernel (recast as
   the `pairkernel` matrix; BL3999; G2); the O(1)-per-cell antisymmetric map (recast as the
   angular-momentum tensor). The supported claim is about materialized symmetric objects,
@@ -2014,5 +2015,5 @@ Until the blas session lands:
   Fortran arm was reviewed (`notes/review-fortran.md`); "expert" means reviewed, not
   proven optimal. The oracle is independent of both languages; 0 disqualifications in
   both sessions; one expected fallback (maskagg blade-llvm). **Rule breach:** fusedchain's
-  two natural arms peaked at 65.9 / 65.5 MB, ~3% over the 64 MB working-set rule (README
-  §7.3); kept and flagged, not re-run. Not run yet: sessions 2–5.
+  two natural arms peaked at 65.9 / 65.5 MB, ~3% over the 64 MB working-set rule (kernels/README.md
+  §4.3); kept and flagged, not re-run. Not run yet: sessions 2–5.

@@ -34,11 +34,11 @@ freedom under test (README §1.5).
 | full | 2,000,003 | 16 MB | 48 MB (three n-arrays) | ~30 MF (+ 2M divisions) | 10–25 ms |
 
 Working set: 64 MB in the natural arm (the cap). Memory-bound. Input share ≈ 6–8 ms of
-~20 ms ≈ **35% → an `inputonly` twin per arm REQUIRED** (README §5.3); the incremental
+~20 ms ≈ **35% → an `inputonly` twin per arm REQUIRED** (kernels/README.md §3.3); the incremental
 total-minus-twin estimate is reported beside the total, never as kernel time. R >= 21
-rounds (memory-bound, README §6).
+rounds (memory-bound, harness/README.md "Protocol and statistics").
 
-## Tiers (natural = dense baseline; expert = reviewed implementation; README §2)
+## Tiers (natural = dense baseline; expert = reviewed implementation; kernels/README.md §1)
 
 - **natural (staged baseline)**: `s1 = 1.5d0*a + 0.25d0`, `s2 = s1/(1+abs(s1))`, `s3 =
   s2*s2 - 0.5d0*s2`, `checksum = sum(s3**2)` — three named allocatable arrays, four passes.
@@ -72,7 +72,7 @@ across lets, while an `object_for >>@` chain (now accepted inside functions in b
 a single block kernel, or an inline fold operand fuses into the fold with no temporaries
 (`notes/llvm-acceptance-B.md`; the exact final spelling is blade-B's). `blade plan` / the
 emit must show one loop and no n-sized temporary. mt8: the fold licence on the reduce kernel
-(README §7.4), C++ lane only.
+(kernels/README.md §4.4), C++ lane only.
 
 ## Regimes
 
@@ -100,4 +100,4 @@ licensed (serial, mt8), repro (serial, mt8), fastmath.
   which the style guide ranks higher, is known to materialize per let: that is itself a gap
   (register G8).
 - Input share is large: the total is the primary estimand; the incremental estimate is
-  secondary evidence with its own interval (README §5.3).
+  secondary evidence with its own interval (kernels/README.md §3.3).
