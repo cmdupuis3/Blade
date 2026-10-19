@@ -694,6 +694,41 @@ let y = gram_apply(A, A, v)
        [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, t3.data, 0, true, (size_t)336);" ],
        [ shimInclude; "blade_linalg::"; "CB____i0" ])
 
+      // ============ BLAS ON: the tile PREEMPTS host ?syrk where eligible ============
+      // (`syrkTilePreferredOverBlas`, bench gap G28.) Above the crossover the
+      // gate-on emission is the gate-off emission, byte for byte at the call:
+      // no shim include, no dsyrk staging. The library keeps the rest.
+      ("blas_on_syrk_above_crossover_prefers_the_tile", true,
+       bigCov
+       + "let t2 = method_for(CB, CB) <@> " + bigCovKernel "comm(x, y)" "prodsum(x, y) / 8.0",
+       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, t2.data, 0, false, (size_t)336);"
+         "for (size_t __sy_i = 0; __sy_i < 20; __sy_i++) for (size_t __sy_j = 0; __sy_j < 20 - __sy_i; __sy_j++) t2[__sy_i][__sy_j] /= (8.0);" ],
+       [ shimInclude; "blade_linalg::"; "cblas_"; "CB____i0" ])
+      ("blas_on_syrk_tile_takes_the_omp_licence", true,
+       bigCov
+       + "let t3 = method_for(CB, CB) <@> " + bigCovKernel "comm(x, y), omp" "prodsum(x, y)",
+       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, t3.data, 0, true, (size_t)336);" ],
+       [ shimInclude; "blade_linalg::"; "CB____i0" ])
+      ("blas_on_gram_same_above_crossover_prefers_the_tile", true,
+       bigCov + "let G = gram(CB, CB)\n",
+       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, G.data, 0, true, (size_t)336);"
+         "gram(A, A): packed-triangle syrk tile" ],
+       [ shimInclude; "blade_linalg::"; "cblas_"; "__gacc" ])
+      // The library keeps what the tile does not cover: the distinct gram
+      // (dgemm) and a Float32 same-array gram (ssyrk), at the same size.
+      ("blas_on_gram_distinct_keeps_the_library", true,
+       bigCov
+       + "let CD: Array<Float64 like BV, BT> = method_for(range<BV>, range<BT>) <@> lambda(i, s) -> Float64(i + s) |> compute\n"
+       + "let H = gram(CB, CD)\n",
+       [ shimInclude; "blade_linalg::blade_gram_distinct_d(" ],
+       [ "dsyrk_tri" ])
+      ("blas_on_gram_same_float32_keeps_the_library", true,
+       "type BV = Idx<20>\ntype BT = Idx<8>\n"
+       + "let CF: Array<Float32 like BV, BT> = method_for(range<BV>, range<BT>) <@> lambda(i, s) -> Float32(Float64(i * 8 + s)) |> compute\n"
+       + "let GF = gram(CF, CF)\n",
+       [ shimInclude; "blade_linalg::blade_gram_same_s(" ],
+       [ "dsyrk_tri" ])
+
       // ============ UNITS ARE NOT A PRECISION ============
       // A unit annotation must not cost the route. `Float64<meter>` STORES as a
       // bare `double` -- the wrapper erases entirely at codegen, so the emitted
@@ -793,6 +828,21 @@ let runLinAlgEmissionTests () : BlockResult =
         else
             passed <- passed + 1
             resultLine Pass gramKnobName "the triangular gram jam, no tile call")
+    // ...and with the BLAS gate ON the knob hands the eligible shapes back to
+    // the library: both the comm nest and the gram(A, A) node route to ?syrk.
+    let blasKnobName = "syrk_tile_knob_off_with_blas_on_routes_to_the_library"
+    (let blasKnobCpp =
+        use _tile = pinEnv "BLADE_SYRK_TILE" "0"
+        cppOf true blasKnobName (knobSrc + "let G = gram(CB, CB)\n")
+     match blasKnobCpp with
+     | Error e -> fail blasKnobName e
+     | Ok cpp ->
+        let calls = System.Text.RegularExpressions.Regex.Matches(cpp, @"blade_linalg::blade_gram_same_d\(").Count
+        if cpp.Contains "dsyrk_tri" then fail blasKnobName "BLADE_SYRK_TILE=0 with BLAS on still emitted the tile"
+        elif calls <> 2 then fail blasKnobName ($"expected 2 blade_gram_same_d calls (comm nest + gram node), got {calls}")
+        else
+            passed <- passed + 1
+            resultLine Pass blasKnobName "both shapes route to ?syrk, no tile call")
 
     // ---- a unit annotation changes NO emitted byte ----
     //

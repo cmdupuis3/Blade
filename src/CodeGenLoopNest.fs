@@ -2717,11 +2717,12 @@ let internal tryGenGemvDispatch
 
 
 /// L3 dispatch at the apply-combinator site: the comm-licensed
-/// packed-covariance nest becomes ONE `blade_gram_same_*` (`?syrk`) call --
-/// or, with the BLAS gate OFF, ONE `blade_pgemm::dsyrk_tri` call (the
+/// packed-covariance nest becomes ONE `blade_pgemm::dsyrk_tri` call (the
 /// packed-triangle 6 x 8 register tile, per cell bitwise the serial prodsum
 /// under -ffp-contract=off) when the literal extents clear `packedTriWorth`
-/// and BLADE_SYRK_TILE is not off; otherwise None and the ordinary nest.
+/// and BLADE_SYRK_TILE is not off -- with the BLAS gate on or off
+/// (`syrkTilePreferredOverBlas`) -- else, with the gate on, ONE
+/// `blade_gram_same_*` (`?syrk`) call; otherwise None and the ordinary nest.
 ///
 /// The twin of `tryGenGemvDispatch` one level up, and it turns the SAME
 /// descriptor kind into text -- `LinAlgPatterns.(|BlasL3|_|)` owns which nests
@@ -2747,9 +2748,28 @@ let internal tryGenSyrkDispatch
         (indent: int) : string list option =
     match (Map.count streamed, codeGen.OmpRequested, operandTypes, codeGen) with
     | Blade.LinAlgPatterns.BlasL3 call ->
-        let entryOpt = Blade.LinAlgPatterns.shimEntryPoint Blade.LinAlgPatterns.HostBlas call
-        Blade.LinAlgPatterns.recordRoute (decisionSpan ()) codeGen.OutputName call
-            (entryOpt |> Option.map (fun e -> (Blade.LinAlgPatterns.HostBlas, e)))
+        let libraryEntry = Blade.LinAlgPatterns.shimEntryPoint Blade.LinAlgPatterns.HostBlas call
+        // BLAS-ON PRECEDENCE (`syrkTilePreferredOverBlas`, bench gap G28): a
+        // shape the packed tile takes anyway goes to the tile even with the
+        // gate on. The literal extents are read the same way the arms below
+        // read them (the outer level's bound; A's trailing extent from its
+        // TYPE -- a literal needs no operand name). BlasL3 admits real f64
+        // only, so no precision test is needed here.
+        let tilePreempts =
+            match libraryEntry, codeGen.Bindings, operandTypes with
+            | Some _, b0 :: _, aTy :: _ ->
+                syrkTilePreferredOverBlas
+                    (genLoopBoundExpr (compoundArrayNamesOf codeGen.Bindings) b0)
+                    (literalOrRuntimeExtentOfArray aTy "" 1)
+            | _ -> false
+        let entryOpt = if tilePreempts then None else libraryEntry
+        if tilePreempts then
+            let p = genLoopBoundExpr (compoundArrayNamesOf codeGen.Bindings) (List.head codeGen.Bindings)
+            let k = literalOrRuntimeExtentOfArray (List.head operandTypes) "" 1
+            Blade.LinAlgPatterns.recordTilePreferred (decisionSpan ()) codeGen.OutputName call libraryEntry.Value $"P={p} K={k}"
+        else
+            Blade.LinAlgPatterns.recordRoute (decisionSpan ()) codeGen.OutputName call
+                (entryOpt |> Option.map (fun e -> (Blade.LinAlgPatterns.HostBlas, e)))
         // Gate on or off, the operands, extents and scale tail are derived the
         // same way; only the final call differs (the BLAS shim, or the
         // packed-triangle tile below).
@@ -2847,7 +2867,8 @@ let internal tryGenSyrkDispatch
                             + $"/* linalg dispatch: syrk C = A * A^T (packed upper, from comm nest) */ {entry}({mExtent}, {nExtent}, {aName}.data, {aCells}, {cName}.data, {threadedArg});" ]
                           @ Option.toList tail)
                 | None ->
-                // BLAS GATE OFF: the packed-triangle SYRK tile
+                // BLAS GATE OFF, OR ON WITH THE TILE PREFERRED (`tilePreempts`
+                // above): the packed-triangle SYRK tile
                 // (blade_packed_gemm.hpp dsyrk_tri over blade_tiles.h's 6 x 8
                 // core), or -- below the crossover, on non-literal extents, or
                 // under BLADE_SYRK_TILE=0 -- the ordinary nest (None).
