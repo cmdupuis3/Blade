@@ -1,0 +1,3 @@
+[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\comoment3-d028dfd3-27084-76cbd7bb\comoment3.cpp
+[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-220309\build\comoment3\full\serial-repro-native\blade-cpp\comoment3.exe
+[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\comoment3-d028dfd3-27084-76cbd7bb

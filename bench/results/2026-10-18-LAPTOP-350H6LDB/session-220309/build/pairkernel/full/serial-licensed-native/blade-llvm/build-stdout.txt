@@ -1,0 +1,1 @@
+C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-220309\build\pairkernel\full\serial-licensed-native\blade-llvm\pairkernel.exe
