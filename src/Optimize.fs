@@ -1682,6 +1682,291 @@ let planHotRowFolds (builder: IRBuilder) (modul: IRModule) : unit =
         planChain (chain f.Body)
     planChain (modul.Bindings |> List.map (fun b -> (b.Id, b.Name, b.Value)))
 
+// --- Slice-write fusion: destination passing for a rank-1 row write --------
+//
+// The recursive-array desugar (TypeCheckInfer.inferRecArray) writes every
+// row slice through a materialized temporary:
+//
+//   let s = SLICE in                               -- e.g. step(prefix(n - 1))
+//   for k in 0..E { BUF[i.., k] <- s(k) }          -- the row copy
+//
+// so a step function returning a fresh row costs that row's allocation, a
+// full write of it, the copy's read, and the row write -- and every stage
+// temporary inside `step` (one per `let`, one per pointwise callee) besides.
+// When SLICE is POINTWISE -- cell k of its value depends only on cell k of
+// the arrays it reads -- the copy loop can compute each cell where it is
+// stored: the slice's whole elementwise DAG, with pointwise callees
+// (`step`, `rhs`) inlined, becomes a chain of scalar lets per cell, each
+// let of the source computed ONCE per cell (k1 feeding both the k2 stage
+// and the final combination is one scalar local, never a recomputation), and
+// the last one is stored straight into the destination row. No temporary
+// row, no copy, no stage pools: one pass per step, reading the prefix rows
+// and writing the row being built (bench/notes/phase2-microkernel-plan.md
+// 4.5b(ii) destination passing + 4.5c pointwise-body fusion).
+//
+// Why it is cost-only (charter rule 1):
+//   - every cell's arithmetic is the source's, operation for operation, in
+//     the source's association; only WHERE intermediates live changes (a
+//     register instead of a pool), so a build with contraction off is bitwise
+//     the unfused one (`BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off`, what every
+//     differential pins). Under the default fast contraction the compiler
+//     sees across former statement boundaries, exactly as the elementwise
+//     chain fusion this extends already lets it;
+//   - order of reads vs writes: unfused, all of SLICE is read before any cell
+//     of the row is written; fused, cell k is read after cells 0..k-1 of the
+//     destination were written. Every read of the expansion is at cell k of
+//     its array, and an array that may alias the buffer is admitted only as a
+//     ROW VIEW of it (`let r = BUF(i)`, whose cell k is BUF(i, k)), so the
+//     cells written so far (j < k of the destination row) are never read:
+//     each read sees the value it saw unfused;
+//   - nothing in the region may abort (tileMayAbort over every kernel), and
+//     every operand's extent is the loop's own static extent, so no
+//     co-iteration extent check (BL8011) is dropped and none could fire;
+//   - kernels are plain, pure, capture-free scalar kernels with no calls;
+//     callees are non-static, non-recursive, capture-free functions of array
+//     parameters whose bodies are themselves pointwise.
+// Anything else declines and the copy stays exactly as the desugar wrote it.
+// Gate: BLADE_FUSION (the same escape hatch as the chain fusion it extends;
+// `blade test opt-diff` compares the two).
+let fuseSliceWritesModule (modul: IRModule) (builder: IRBuilder) (programFuncs: IRCallable list) : IRModule =
+    if not (Blade.Toolchain.envFlag "BLADE_FUSION" true) then modul else
+    let callables = System.Collections.Generic.Dictionary<IRId, IRCallable>()
+    for f in programFuncs do callables.[f.Id] <- f
+    for f in modul.Functions do callables.[f.Id] <- f
+    // Callees are inlined only from THIS module: their kernels are spliced
+    // by body, but a body from another module may name that module's
+    // members, which this module's emission does not see under that id.
+    let localFuncs = modul.Functions |> List.map (fun f -> f.Id) |> Set.ofList
+    let staticExtent (at: IRArrayType) : int64 option =
+        match at.IndexTypes with
+        | [ ix ] when ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank = 1 ->
+            (match ix.Extent with IRLit (IRLitInt n) -> Some n | _ -> None)
+        | _ -> None
+    let scalarElem (t: IRType) = match t with IRTScalar _ -> true | _ -> false
+    let rowOfExtent (ext: int64) (t: IRType) =
+        match t with
+        | ArrayElem at -> staticExtent at = Some ext && scalarElem at.ElemType && not at.IsVirtual
+        | _ -> false
+    let mentions (vid: IRId) (e: IRExpr) =
+        let mutable hit = false
+        iterIRExpr (fun n -> match n with IRVar (id, _) when id = vid -> hit <- true | _ -> ()) e
+        hit
+    // A call, or a binder other than `let` (match patterns, loop variables):
+    // only let binders are freshened per splice, and one kernel can be
+    // spliced several times into one body.
+    let hasCall (e: IRExpr) =
+        let mutable hit = false
+        iterIRExpr (fun n -> match n with IRApp _ | IRMatch _ | IRForRange _ -> hit <- true | _ -> ()) e
+        hit
+    // A spliced kernel body's own let binders get fresh ids (the same kernel
+    // is spliced once per inlined call site: `rhs` four times per step).
+    let freshenLets (body: IRExpr) : IRExpr =
+        let binders = System.Collections.Generic.List<IRId>()
+        iterIRExpr (fun e -> match e with IRLet (id, _, _) -> binders.Add id | _ -> ()) body
+        if binders.Count = 0 then body else
+        let mapped = binders |> Seq.distinct |> Seq.map (fun id -> id, builder.FreshId()) |> Map.ofSeq
+        mapIRExpr (fun e ->
+            match e with
+            | IRVar (id, t) -> (match Map.tryFind id mapped with Some n -> IRVar (n, t) | None -> e)
+            | IRLet (id, v, b) -> (match Map.tryFind id mapped with Some n -> IRLet (n, v, b) | None -> e)
+            | _ -> e) body
+    let substParams (m: Map<IRId, IRExpr>) (body: IRExpr) =
+        mapIRExpr (fun e ->
+            match e with
+            | IRVar (id, _) -> (match Map.tryFind id m with Some a -> a | None -> e)
+            | _ -> e) body
+    // The cell expander. `outsideOk x` says whether reading array variable x
+    // at cell k is admissible (not the buffer, or a row view of it). Emits
+    // scalar lets into `prelude` (evaluation order) and returns the cell's
+    // value as an atom (a variable or a literal).
+    let expand (ext: int64) (kVar: IRExpr) (outsideOk: IRId -> bool)
+               (prelude: System.Collections.Generic.List<IRId * IRExpr>) (root: IRExpr) : Result<IRExpr, string> =
+        // The FIRST reason a node is not a cell expression is the decline.
+        let mutable why : string option = None
+        let fail (msg: string) : IRExpr option =
+            (if why.IsNone then why <- Some msg)
+            None
+        let bind (v: IRExpr) (t: IRType) =
+            match v with
+            | IRVar _ | IRLit _ -> v
+            | _ ->
+                let id = builder.FreshId()
+                prelude.Add (id, v)
+                IRVar (id, t)
+        // Outside reads are bound once per cell and shared.
+        let reads = System.Collections.Generic.Dictionary<IRId, IRExpr>()
+        let rec go (env: Map<IRId, IRExpr>) (visiting: Set<IRId>) (e: IRExpr) : IRExpr option =
+            match e with
+            | IRVar (id, t) ->
+                (match Map.tryFind id env with
+                 | Some atom -> Some atom
+                 | None ->
+                    match reads.TryGetValue id with
+                    | true, atom -> Some atom
+                    | _ ->
+                        match t with
+                        | ArrayElem at when rowOfExtent ext t && outsideOk id ->
+                            let atom = bind (IRIndex (e, [ kVar ], None)) at.ElemType
+                            reads.[id] <- atom
+                            Some atom
+                        | ArrayElem _ when rowOfExtent ext t ->
+                            fail "the slice reads an array that may alias the buffer other than as a row view"
+                        | _ -> fail "the slice reads a value that is not a dense row of the loop's static extent")
+            | IRCompute ((IRApplyCombinator _ | IRCompute _) as inner) -> go env visiting inner
+            | IRCompute _ ->
+                // Forcing a deferred VALUE (`dn |> compute`) materializes it
+                // per step; reading it cell by cell instead would make the
+                // emitters materialize the binding itself -- at module level a
+                // new printed value (corpus memfree/007).
+                fail "the slice forces a deferred value"
+            | IRLet (id, v, body) ->
+                (match go env visiting v with
+                 | Some atom -> go (Map.add id atom env) visiting body
+                 | None -> None)
+            | IRApplyCombinator info when IRMono.tilePlainInfo info && rowOfExtent ext info.OutputType ->
+                (match IRMono.tileKernelOf callables info with
+                 | Some k when IRMono.tilePlainKernel k info.Arrays.Length
+                               && k.Captures.IsEmpty && not (hasCall k.Body)
+                               && IRMono.tilePureBody callables Set.empty k.Body
+                               && not (IRMono.tileMayAbort callables Set.empty k.Body)
+                               && scalarElem k.RetType
+                               && info.ArrayTypes |> List.forall (fun at -> staticExtent at = Some ext && scalarElem at.ElemType) ->
+                    let atoms = info.Arrays |> List.map (go env visiting)
+                    if atoms |> List.exists Option.isNone then None else
+                    let m = List.zip (k.Params |> List.map (fun p -> p.VarId)) (atoms |> List.map Option.get) |> Map.ofList
+                    Some (bind (substParams m (freshenLets k.Body)) k.RetType)
+                 | Some k when not k.Captures.IsEmpty ->
+                    fail "an elementwise kernel captures a value computed outside the cell (a fold or another whole-row quantity), so the slice is not pointwise"
+                 | Some k when hasCall k.Body -> fail "an elementwise kernel calls a function or binds names by match or loop"
+                 | Some k when IRMono.tileMayAbort callables Set.empty k.Body ->
+                    fail "an elementwise kernel may abort (fusion never moves an evaluation that may abort)"
+                 | Some _ -> fail "an elementwise kernel is not a plain pure scalar kernel over rows of the loop's extent"
+                 | None -> fail "an elementwise kernel is not a resolvable callable")
+            | IRApp (IRVar (fid, _), args, retT) when localFuncs.Contains fid && not (visiting.Contains fid) && rowOfExtent ext retT ->
+                (match callables.TryGetValue fid with
+                 | true, f when not f.IsStatic && f.Captures.IsEmpty && not f.IsArityPoly
+                                && not f.IsOmpParallel && not f.IsCudaKernel && not f.IsMpiParallel
+                                && f.Params.Length = args.Length
+                                && f.Params |> List.forall (fun p -> rowOfExtent ext p.Type) ->
+                    let atoms = args |> List.map (go env visiting)
+                    if atoms |> List.exists Option.isNone then None else
+                    // The callee sees only its parameters (lexical scope).
+                    let env' = List.zip (f.Params |> List.map (fun p -> p.VarId)) (atoms |> List.map Option.get) |> Map.ofList
+                    go env' (visiting.Add fid) f.Body
+                 | _ -> fail "a callee is not a plain function of dense row parameters (static, capturing, arity-polymorphic, or parallel)")
+            | IRApp _ -> fail "the slice calls a function that is recursive, defined in another module, or not row-valued"
+            | IRApplyCombinator _ -> fail "an operation over the row is not a plain elementwise map of the loop's extent (a fold, a structured index, or a different shape)"
+            | IRIf _ | IRMatch _ -> fail "the slice selects between whole rows (a guarded read or a branch), which is no cell expression"
+            | _ -> fail "the slice is not pointwise (an operation other than elementwise maps, lets and pointwise calls)"
+        match go Map.empty Set.empty root with
+        | Some atom -> Ok atom
+        | None -> Error (defaultArg why "the slice is not pointwise")
+    // The copy loop's shape: `for k in 0..E { let _ = BUF[i.., k] <- s(k) in () }`.
+    let rowCopy (sId: IRId) (loop: IRExpr) =
+        match loop with
+        | IRForRange (kId, IRLit (IRLitInt 0L), IRLit (IRLitInt ext),
+                      IRLet (aId, IRAssign (IRIndex (IRVar (bufId, bufT), idxs, ident), IRIndex (IRVar (s, _), [ IRVar (k1, kT) ], _)), tail))
+                when s = sId && k1 = kId && not idxs.IsEmpty
+                     && (match List.last idxs with IRVar (k2, _) -> k2 = kId | _ -> false)
+                     && not (idxs |> List.take (idxs.Length - 1) |> List.exists (fun i -> mentions kId i || mentions sId i))
+                     && not (mentions sId tail) ->
+            Some (kId, ext, aId, bufId, bufT, idxs, ident, IRVar (k1, kT), tail)
+        | _ -> None
+    let mutable fired = 0
+    let declines = System.Collections.Generic.List<string>()
+    // A DEFERRED value (a loop object or an unforced combinator) is
+    // materialized by its consumers; a cell read would make the emitters
+    // materialize the binding itself instead -- for a module binding, a new
+    // printed value. Such reads are never admitted.
+    let rec isDeferredValue (v: IRExpr) =
+        match v with
+        | IRLet (_, _, b) -> isDeferredValue b
+        | IRApplyCombinator _ | IRFunctorMap _ | IRComposeApply _ | IRMethodFor _ | IRObjectFor _
+        | IRFusion _ | IRParallel _ | IRBind _ | IRCompose _ | IRComposeObj _ | IRComposeMeth _
+        | IRPure _ | IRChoice _ | IRFallback _ -> true
+        | _ -> false
+    let moduleValues = modul.Bindings |> List.map (fun b -> b.Id, b.Value) |> Map.ofList
+    let rec moduleReadable (seen: Set<IRId>) (id: IRId) =
+        match Map.tryFind id moduleValues with
+        | Some (IRVar (y, _)) when not (seen.Contains y) && moduleValues.ContainsKey y -> moduleReadable (seen.Add id) y
+        | Some v -> not (isDeferredValue v)
+        | None -> false
+    let moduleIds = modul.Bindings |> List.map (fun b -> b.Id) |> List.filter (moduleReadable Set.empty) |> Set.ofList
+    let mutable outer = moduleIds
+    // Walk a body keeping the values of enclosing lets (to judge aliases of
+    // the buffer). Only let-chains are walked into; the rewrite is local to
+    // a `let s = SLICE in let w = <copy loop> in rest` triple.
+    let rec rw (scope: Map<IRId, IRExpr>) (e: IRExpr) : IRExpr =
+        match e with
+        | IRLet (sId, slice, IRLet (wId, loop, rest)) when (rowCopy sId loop).IsSome && not (mentions sId rest) ->
+            let kId, ext, aId, bufId, bufT, idxs, ident, kVar, tail = (rowCopy sId loop).Value
+            let rec outsideOk (x: IRId) =
+                if x = bufId then false
+                else
+                    match Map.tryFind x scope with
+                    // A parameter of the enclosing function or a module
+                    // binding cannot alias a buffer local to this body; an
+                    // id bound by any other binder (a match pattern, a
+                    // destructuring) is unknown and declines.
+                    | None -> outer.Contains x
+                    // An alias `let x = y` is judged as y (a lane may bind it
+                    // without a copy).
+                    | Some (IRVar (y, _)) -> y <> x && outsideOk y
+                    | Some v when not (mentions bufId v) -> not (isDeferredValue v)
+                    | Some (IRIndex (IRVar (b, _), rowIdx, _)) when b = bufId ->
+                        // A row view BUF(i): cell k is BUF(i, k).
+                        (match bufT with
+                         | ArrayElem at -> rowIdx.Length = at.IndexTypes.Length - 1
+                         | _ -> false)
+                    | Some _ -> false
+            let prelude = System.Collections.Generic.List<IRId * IRExpr>()
+            match expand ext kVar outsideOk prelude slice with
+            | Ok atom ->
+                fired <- fired + 1
+                let store = IRLet (aId, IRAssign (IRIndex (IRVar (bufId, bufT), idxs, ident), atom), tail)
+                let body = Seq.foldBack (fun (id, v) acc -> IRLet (id, v, acc)) prelude store
+                IRLet (wId, IRForRange (kId, IRLit (IRLitInt 0L), IRLit (IRLitInt ext), body), rw scope rest)
+            | Error why ->
+                // Only a slice that looks fusable (a call or an elementwise
+                // map) is a decision; a literal seed row is just a copy.
+                let mutable looksFusable = false
+                iterIRExpr (fun n -> match n with IRApp _ | IRApplyCombinator _ -> looksFusable <- true | _ -> ()) slice
+                if looksFusable then declines.Add why
+                IRLet (sId, rw scope slice, IRLet (wId, rwInner scope loop, rw (Map.add wId loop (Map.add sId slice scope)) rest))
+        | IRLet (id, v, body) -> IRLet (id, rw scope v, rw (Map.add id v scope) body)
+        | _ -> rwInner scope e
+    and rwInner (scope: Map<IRId, IRExpr>) (e: IRExpr) : IRExpr =
+        match e with
+        | IRForRange (k, lo, hi, body) -> IRForRange (k, lo, hi, rw scope body)
+        | IRLet _ -> rw scope e
+        | ExprShape ([], _) -> e
+        | ExprShape (children, rebuild) -> rebuild (children |> List.map (rw scope))
+    // One record per body: applied (with the count) and/or each decline's
+    // reason -- a body can hold a fused arm and a declined one.
+    let rewriteBody (subject: string) (outerIds: Set<IRId>) (body: IRExpr) =
+        let before = fired
+        declines.Clear ()
+        outer <- outerIds
+        let body' = rw Map.empty body
+        let record outcome evidence =
+            Blade.Effects.Decisions.record
+                { Blade.Effects.Rule = "slice-write-fusion"; Version = 1
+                  Span = Blade.Ast.noSpan; Subject = subject
+                  Outcome = outcome; Evidence = evidence }
+        if fired > before then
+            record Blade.Effects.Applied
+                [ $"{fired - before} row write(s) computed in place: the slice's pointwise DAG (callees inlined) is one scalar let chain per cell, stored straight into the destination row -- no slice temporary, no copy, no stage pools" ]
+        for why in declines do
+            record (Blade.Effects.Declined why) [ "the row is materialized and copied as written" ]
+        body'
+    let newFunctions =
+        modul.Functions |> List.map (fun f ->
+            let outerIds = f.Params |> List.fold (fun s p -> Set.add p.VarId s) moduleIds
+            { f with Body = rewriteBody f.SourceName outerIds f.Body })
+    let newBindings =
+        modul.Bindings |> List.map (fun b -> { b with Value = rewriteBody b.Name moduleIds b.Value })
+    { modul with Functions = newFunctions; Bindings = newBindings }
+
 /// `programFuncs` is every callable of the PROGRAM (all modules): a pass that
 /// judges a callee's effects resolves it there, since a generic defined in
 /// one module and called from another (`from stats import mean`) is not in
@@ -1692,4 +1977,5 @@ let optimizeModule (builder: IRBuilder) (programFuncs: IRCallable list) (modul: 
     modul
     |> foldConstMatchesModule
     |> (fun m -> fuseElementwiseChainsModule m builder programFuncs)
+    |> (fun m -> fuseSliceWritesModule m builder programFuncs)
     |> hoistKernelInvariantsModule builder programFuncs

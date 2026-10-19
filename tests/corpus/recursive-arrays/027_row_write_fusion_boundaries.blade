@@ -1,0 +1,45 @@
+// TEST: Recursive Array Row Write Fusion Boundaries
+// ============================================================================
+// Where slice-write fusion (src/Optimize.fs fuseSliceWritesModule) fires and
+// where it must decline, with the values pinned either way:
+//   a -- the step calls a NON-pointwise function (a fold over the row):
+//        declined, the slice is materialized and copied as before;
+//   b -- a lag-2 read is zero-guarded at n = 1 (formalism 7.5): the guard
+//        selects a whole zero row, which is no cell expression -- declined;
+//   r -- a read of row 0 beside the lag-1 read: fires. Two rows of the buffer
+//        are read and a third written in the same pass; both reads are row
+//        views of the buffer, whose cell k is read before cell k of row n is
+//        written and never after, so every read sees what it saw unfused.
+// Values computed independently (plain doubles, source association order).
+// ============================================================================
+type T = Idx<6>
+type X = Idx<5>
+
+function centered(u: Array<Float64 like X>) -> Array<Float64 like X> = u - reduce(u, (+)) / 5.0
+
+let rec a: Array<Float64 like T, X> =
+    match a with
+    | zero -> zero
+    | zero :: s -> zero :: [1.0, 2.0, 3.0, 4.0, 6.0]
+    | prefix :: n -> prefix :: centered(prefix(n - 1)) * 0.5 + prefix(0)
+
+let rec b: Array<Float64 like T, X> =
+    match b with
+    | zero -> zero
+    | zero :: s -> zero :: [1.0, 2.0, 3.0, 4.0, 6.0]
+    | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + prefix(n - 2) * 0.25
+
+let rec r: Array<Float64 like T, X> =
+    match r with
+    | zero -> zero
+    | zero :: s -> zero :: [1.0, 2.0, 3.0, 4.0, 6.0]
+    | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + prefix(0) * 0.25
+
+let a5 = a((5 : T))
+let b5 = b((5 : T))
+let r5 = r((5 : T))
+let rsum = reduce(method_for(r) <@> lambda(row) -> reduce(row, (+)), (+))
+// EXPECT: a5 = [-1.13125, 0.8374999999999999, 2.80625, 4.775, 8.7125]
+// EXPECT: b5 = [0.25, 0.5, 0.75, 1.0, 1.5]
+// EXPECT: r5 = [0.515625, 1.03125, 1.546875, 2.0625, 3.09375]
+// EXPECT: rsum = 63.75
