@@ -23,14 +23,15 @@ kernels; `session-142614/`; antisym, fusedchain, dot clean) is IN (§7.1); sessi
 `session-150343/`; both blocks clean) is IN (§7.3). **The pre-fix matrix is complete**;
 §11 is its headline, inventory, honesty notes and phase-2 worklist. **§13 is the
 post-fix re-measure** on Blade.dll 79AF7EDC (tip 957c1e0e; eight sessions 201558–214954,
-filled from `results/full/RUNNER-RECORD.md`): gram now beats both experts in every
-regime (serial licensed 1.37 / 1.24 live, repro 1.29 / 1.17 live, mt8 1.28 / 1.22 live),
-comoment3 and antisym beat or match them under threads, pairkernel wins serial licensed
-(1.12 / 1.04 live), recur improved 5–6x and still loses 2x, band (new) loses 3–4x with two
-open items; the antisym and comoment3 SERIAL rows await session 9 on the twin binary
-(30FBBC97…, 2dcc0739) and carry the C++-tiles-only values in footnotes. New open items
-G32 (orbit-class checksum fold serial under mt8) and G33 candidate (band LLVM 3.3 vs 0.8
-ms) are in the register. Consolidated per-session
+filled from `results/full/RUNNER-RECORD.md`): **with session 9 on the twin
+binary (30FBBC97…, 2dcc0739; `session-220309/`), `blade-llvm` beats or matches the reviewed
+experts serially on gram (1.37 / 1.24), antisym (1.13 / 1.07), comoment3 (1.22 / 1.23) and
+pairkernel (1.12 / 1.04) in the licensed default — all live — and on gram (1.29 / 1.17)
+and antisym (1.04 / 1.00) in the reproducible build**; under threads gram 1.28 / 1.22 and
+comoment3 1.46 / 1.22 (live), antisym 1.08 / 1.12 *. Remaining serial losses: comoment3
+repro 0.44 (checksum pass; G34 candidate), pairkernel repro 0.78–0.83, recur 0.49–0.55
+(G8), band 0.25–0.51 (G30/G33). Open items from the re-measure: G32, G33, G34. The final
+gate run is in progress; its totals go here when they arrive. Consolidated per-session
 tables: `results/full/RUNNER-RECORD.md` (the runner's record, cross-referenced, not
 duplicated here).
 Both §12 decisions are taken (mt8 matched parallelism → group-A mt8 rows superseded and
@@ -1738,13 +1739,19 @@ re-measure median. Milliseconds. Verdict words: live (unsuppressed block) or ind
 | kernel | before (ms) | after blade-llvm (ms) | after blade-cpp (ms) | gf-expert / ifx-expert (ms) | ratio gf / ifx [CI] | verdict | vs naturals gf / ifx | gaps closed | remaining |
 |---|---|---|---|---|---|---|---|---|---|
 | gram | 156.7 (cpp 275.2) | **56.1** | 57.96 | 76.75 / 69.36 | **1.368 [1.355, 1.380] / 1.236 [1.227, 1.243]** | **WIN, live** (n = 11) | 9.9x / 10.2x | G1 (E M5/follow-on, G M6), G26 moot | — |
-| antisym | 73.95 (cpp 107.9) | session 9 pending¹ | session 9 pending¹ | 30.28 / 28.99 | session 9 pending¹ | — | — | G1 C++ (F M7), G3b | LLVM twin measured in session 9; K blocking |
-| comoment3 | 41.49 (cpp 109.7) | session 9 pending¹ | session 9 pending¹ | 11.26 / 11.35 | session 9 pending¹ | — | — | G1/G1b C++ (F M8), G3a (H M4), G3b | LLVM twin in session 9 |
+| antisym (session 9, twin binary 30FBBC97) | 73.95 (cpp 107.9) | **27.59** | 28.56 | 31.06 / 29.61 | **1.126 [1.119, 1.138] / 1.073 [1.065, 1.085]** | **WIN (gf) / detectable win (ifx), live** (n = 21) | 28.2x / 12.2x | G1 both lanes (F M7, LLVM twin 2dcc0739), G3b | K blocking |
+| comoment3 (session 9, twin binary) | 41.49 (cpp 109.7) | **9.312** | 9.593 | 11.37 / 11.40 | **1.221 [1.208, 1.235] / 1.225 [1.219, 1.233]** | **WIN, live** (n = 21) | 64.6x / 77.4x | G1/G1b both lanes (F M8, LLVM twin), G3a (H M4), G3b | — |
 | pairkernel | 42.59 (cpp 77.25) | **28.94** | 29.14 | 32.44 / 30.18 | **1.121 [1.118, 1.125] / 1.043 [1.036, 1.047]** | **WIN, live** (n = 21; ifx: detectable) | 2.08x / 2.23x | G3a (H M4), G3b | — |
 | recur | 116.9 (cpp 134.1) | 20.43 | 22.49 | 10.07 / 9.995 | 0.493 [0.457, 0.523] * / 0.489 [0.466, 0.500] * | loss, indicative (was 0.090) | 0.93x / 0.77x | G6 (D M1/M3: ~5.7x faster) | the remaining 2x = per-step temporaries + the 48 MB trajectory copy (D's deferred 4.5b(ii)/4.5c, G8) |
 | band | — (new) | 3.318 | 9.276 | 0.8135 / 1.042 | 0.245 [0.245, 0.246] / 0.314 [0.314, 0.314] | **loss, live** | 62x / 106x | G4 (C) | G30 (C++ scalar inner loop: 9.3 ms), **G33 candidate** (blade-llvm 3.3 vs the experts' 0.8–1.0 ms although its loop vectorizes) |
 
-¹ 79AF7EDC values (C++ tiles only; the LLVM reference without its tiles), serial licensed:
+Session 9 (`session-220309/`, 21 rounds, controls CV 3.3% / 4.7%, 0 excursions; plan
+lines confirmed: blade-llvm `applied [antisym tile (shared C core ... sequential 6x8 ...
+strict packed triangle)]` and `applied [simplex tile (shared C core ... W = X(i)*X(j)
+panel x 6x8 register tile over k, packed SymIdx<3> pool)]` in licensed AND repro) also
+re-ran pairkernel as its control: 29.08 ms, 1.135 * / 1.046 * — unchanged.
+
+¹ Superseded 79AF7EDC values (C++ tiles only; the LLVM reference without its tiles), serial licensed:
 antisym blade-llvm 71.44 / blade-cpp 27.93 ms vs experts 30.28 / 28.99 → ratios vs
 blade-llvm 0.424 [0.420, 0.427] / 0.406 [0.400, 0.411] (live; against blade-cpp the
 experts are ~1.08 / 1.04); comoment3 blade-llvm 25.04 / blade-cpp 9.54 vs 11.26 / 11.35 →
@@ -1768,13 +1775,13 @@ declines.
 | kernel | before (ms, §6.1) | after blade-llvm (ms) | after blade-cpp (ms) | experts (ms) | ratio gf / ifx [CI] | verdict | vs naturals | closed | remaining |
 |---|---|---|---|---|---|---|---|---|---|
 | gram | 1219 (cpp 953.6) | **59.73** | 61.34 | 77.07 / 70.12 | **1.290 [1.230, 1.321] / 1.174 [1.119, 1.186]** | **WIN, live** — the tile keeps each cell one ascending chain, so the reproducible build is now as fast as the licensed one | 9.9x / 9.5x | G1 | — |
-| antisym | 508.2 (cpp 411.3) | session 9 pending² | session 9 pending² | 30.83 / 29.55 | session 9 pending² | — | — | G1 C++ | LLVM twin (session 9) |
-| comoment3 | 156.8 (cpp 180.6) | session 9 pending² | session 9 pending² | 11.42 / 11.50 | session 9 pending² | — | — | G1/G1b C++ | LLVM twin; G3a (orbit fold declines in repro) |
+| antisym (session 9) | 508.2 (cpp 411.3) | **30.47** | 30.65 | 31.77 / 30.46 | **1.043 [1.008, 1.073] / 1.000 [0.975, 1.020]** | **detectable win (gf) / equivalent (ifx), live** — the reproducible build at the experts' speed (from 0.061 / 0.058) | 25.5x / 11.0x | G1 both lanes | — |
+| comoment3 (session 9) | 156.8 (cpp 180.6) | 26.46 | 16.12 | 11.73 / 11.77 | 0.443 [0.417, 0.450] / 0.445 [0.420, 0.461] | loss, live (from 0.073) — the kernel tile is in both lanes; the loss is the CHECKSUM PASS (the orbit fold declines in repro) | 22.9x / 27.6x | G1/G1b both lanes | G3a in repro; **G34 candidate: blade-cpp is 0.61 of blade-llvm here (16.1 vs 26.5 ms)** although both run the simplex tile — the LLVM lane's logical-read checksum is slower than the C++ lane's compare-swap canon reads (D M2), i.e. the LLVM lane lacks M2's read |
 | pairkernel | 42.78 (cpp 77.59) | 40.82 | 37.85 | 34.32 / 31.91 | 0.841 [0.836, 0.852] / 0.782 [0.777, 0.790] | loss, live | 1.49x / 1.57x | G3b | G3a in repro (the logical-read checksum pass is back) |
 | recur | 111.0 (cpp 123.5) | 23.77 | 23.85 | 12.95 / 13.34 | 0.545 [0.538, 0.554] / 0.561 [0.552, 0.571] | loss, live (was 0.117) | 0.75x / 0.63x | G6 | G8, 4.5b(ii) |
 | band | — | 9.277 | 9.289 | 3.111 / 3.718 | 0.335 [0.334, 0.336] / 0.401 [0.399, 0.402] | loss, live | 22x / 38x | G4 | G30; in repro both lanes sit at 9.3 ms (the licensed LLVM 3.3 ms was its lanes) |
 
-² 79AF7EDC values, serial repro (live): antisym blade-llvm 505.9 / blade-cpp 29.78 ms vs
+² Superseded 79AF7EDC values, serial repro (live): antisym blade-llvm 505.9 / blade-cpp 29.78 ms vs
 experts 30.83 / 29.55 → 0.061 / 0.058 against the untiled LLVM reference, i.e. **parity
 for the C++ lane** (29.8 vs 30.8 / 29.6) where the pre-fix repro build was 13–17x behind;
 comoment3 blade-llvm 156.7 / blade-cpp 15.88 vs 11.42 / 11.50 → 0.073 / 0.073 (C++ lane
@@ -1797,11 +1804,11 @@ from the clean re-run 214954)**
 | kernel | after blade-llvm (ms) | after blade-cpp (ms) | experts (ms) | ratio gf / ifx [CI] | verdict | vs naturals |
 |---|---|---|---|---|---|---|
 | gram | 56.63 | 59.56 | 76.70 / 69.96 | 1.354 [1.341, 1.377] * / 1.235 [1.218, 1.261] * | win, indicative | 9.7x / 3.5x (ifx's `matmul` vectorized under /fp:fast) |
-| antisym | session 9 pending³ | session 9 pending³ | 32.75 / 31.77 | session 9 pending³ | — | — |
-| comoment3 | session 9 pending³ | session 9 pending³ | 11.21 / 11.24 | session 9 pending³ | — | — |
+| antisym (session 9) | 27.67 | 28.24 | 31.61 / 30.35 | 1.142 [1.105, 1.167] * / 1.097 [1.064, 1.115] * | win, indicative (gf-natural trend 12%) | 5.8x / 3.1x |
+| comoment3 (session 9) | 9.622 | 10.60 | 11.98 / 11.79 | 1.245 [1.153, 1.300] * / 1.226 [1.154, 1.318] * | win, indicative (Blade arms' trends 5.9% / 7.1%) | 15.7x / 9.4x |
 | band | 3.312 | 9.277 | 1.699 / 1.322 | 0.513 [0.469, 0.517] / 0.399 [0.398, 0.401] | loss, live (clean re-run) | 91x / 100x |
 
-³ 79AF7EDC values, serial fastmath: antisym blade-llvm 81.31 / blade-cpp 29.48 vs 32.75 /
+³ Superseded 79AF7EDC values, serial fastmath: antisym blade-llvm 81.31 / blade-cpp 29.48 vs 32.75 /
 31.77 → 0.403 * / 0.391 * (the session was disturbed by a sibling build, controls CV 31%);
 comoment3 25.04 / 9.595 vs 11.21 / 11.24 → 0.447 / 0.449 (live).
 
@@ -1858,10 +1865,23 @@ look at the emit before it is diagnosed. No Blade mt8 arm (G31; the experts reac
 - **band**: G30 (C++ lane scalar inner loop) and G33 candidate (blade-llvm 3.3 vs 0.8 ms
   with a vectorized loop); G31 (no thread form).
 - **gram blas mt8**: G28's staging repack (18–21%).
-- **Session 9** will replace the antisym and comoment3 serial rows with the twin binary
-  (30FBBC97…, tree 2dcc0739); a final gate run closes the set.
+- **Session 9 landed** (twin binary 30FBBC97…, tree 2dcc0739; `session-220309/`): the
+  antisym and comoment3 serial rows above are its; it adds **G34 candidate** — in
+  serial repro, comoment3 blade-cpp 16.1 ms vs blade-llvm 26.5 ms with both lanes on the
+  simplex tile: the LLVM lane's logical-read checksum (the orbit fold declines in repro)
+  is slower than the C++ lane's compare-swap canonical reads from D's M2, which the LLVM
+  lane does not have. A final gate run closes the set.
 
-### 13.4 Headline of the re-measure (79AF7EDC; antisym/comoment3 serial pending session 9)
+### 13.4 Headline of the re-measure (79AF7EDC + session 9 on the twin binary 30FBBC97)
+
+**With the LLVM twins, `blade-llvm` — the headline arm — beats or matches the reviewed
+expert tier serially on gram, antisym, comoment3 and pairkernel in the licensed default**
+(1.37 / 1.24, 1.13 / 1.07, 1.22 / 1.23, 1.12 / 1.04; all live), **and in the reproducible
+build on gram and antisym** (1.29 / 1.17, 1.04 / 1.00; live). The remaining serial losses
+are comoment3 repro (0.44, the checksum pass — the orbit fold declines in repro, and the
+LLVM lane lacks M2's canonical read: G34 candidate), pairkernel repro (0.78–0.83, the same
+pass), recur (0.49–0.55: G8 remnants) and band (0.25–0.51: G30/G33). Everything uncapped,
+indicative where starred; the pre-fix figures these replace are in §3–§7.
 
 - **gram now beats both reviewed experts in every regime it was measured**: serial
   licensed 1.37 / 1.24 (live), serial repro 1.29 / 1.17 (live — the reproducible build
@@ -1869,14 +1889,15 @@ look at the emit before it is diagnosed. No Blade mt8 arm (G31; the experts reac
   1.28 / 1.22 (live), mt8 repro 1.08 / 1.04 *, fastmath 1.35 / 1.24 * and 1.23 / 1.17 *,
   and blas serial 1.01 / 0.97 (the checksum tax gone; only G28's repack left, visible at mt8
   0.79 / 0.82). From 0.52 / 0.47 before the fixes.
-- **comoment3 beats the experts under threads** (mt8 licensed 1.46 / 1.22, live; mt8
-  fastmath 1.44 / 1.22 *) from 0.24 / 0.20; its serial rows await the LLVM twin (the C++
-  lane already at 9.5 ms vs the experts' 11.3, i.e. ahead; the untiled LLVM reference at
-  25 ms is what the 0.45 * measures).
-- **antisym under threads is at or above the experts** (mt8 licensed 1.08 / 1.12 *, mt8
-  fastmath 1.17 / 1.15 *, mt8 repro 0.93 *) from 0.46 / 0.48; serial rows await the LLVM
-  twin (C++ lane 27.9 vs 30.3 / 29.0 licensed, 29.8 vs 30.8 / 29.6 repro: parity-to-ahead;
-  the untiled LLVM reference at 71 / 506 ms is what the 0.42 and 0.061 measure).
+- **comoment3 beats the experts serially and under threads**: serial licensed 1.22 / 1.23
+  (live, from 0.28 / 0.28; blade-llvm 9.31 ms, blade-cpp 9.59), mt8 licensed 1.46 / 1.22
+  (live, from 0.24 / 0.20), fastmath 1.25 / 1.23 * and 1.44 / 1.22 *; its one remaining
+  loss is serial repro 0.44 (live) — the checksum pass without the orbit fold, where the
+  LLVM lane is also 1.6x slower than the C++ lane (G34 candidate).
+- **antisym matches or beats the experts in every regime**: serial licensed 1.13 / 1.07
+  (live, from 0.42 / 0.40; blade-llvm 27.6 ms), serial repro 1.04 / 1.00 (live, from
+  0.061 / 0.058 — the reproducible build at the experts' speed), mt8 licensed 1.08 /
+  1.12 *, mt8 fastmath 1.17 / 1.15 *, mt8 repro 0.93 *, serial fastmath 1.14 / 1.10 *.
 - **pairkernel wins serial licensed (1.12 / 1.04, live)** from 0.77 / 0.72 — the kernel was
   always equivalent and the orbit fold removed the checksum pass — and regresses under
   threads to 0.82 / 0.79 * (G32) and in repro to 0.84 / 0.78 (the logical pass is back).
@@ -1884,8 +1905,8 @@ look at the emit before it is diagnosed. No Blade mt8 arm (G31; the experts reac
 - **band** (new): loses 4x (LLVM) / 3–4x (C++) to the experts and beats the predicate nest
   62–106x; two open items (G30, G33 candidate), no thread form (G31).
 - Against the dense naturals every symmetric kernel's margin grew: gram 10x / 10x serial
-  and 38x / 39x mt8, comoment3 24x / 29x serial and 28x / 35x mt8, antisym 10.7x / 4.6x
-  serial and 12.8x / 8.2x mt8, band 62x / 106x.
+  and 38x / 39x mt8, comoment3 65x / 77x serial (session 9) and 28x / 35x mt8, antisym 28x /
+  12x serial (session 9) and 12.8x / 8.2x mt8, band 62x / 106x.
 - Correctness: all pins held in both lanes and both regimes on the merged binaries; the
   orbit fold moves checksums ~4e-15 relative (inside 1e-12).
 - Controls per re-measure session (compute / memory CV): 10.4% / 11.3%, 4.5% / 4.4%, 1.9% /
