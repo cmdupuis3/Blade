@@ -166,7 +166,7 @@ POLARITY IS DELIBERATELY OPPOSITE TO THE g++ LANE"), while the C++ lane passes
 has scalar `vfmadd...sd` in its dot loop; the LLVM exe has ZERO fused multiply-adds (gram,
 comoment3, antisym all 0), only `vmulsd`/`vaddsd`. With `BLADE_FP_CONTRACT=fast` the LLVM
 lane marks 7 `fmul/fadd contract` in the gram `.ll` and the exe has 23 `vfmadd...sd` + 31
-`vfmadd...pd`, same checksum to 15 digits. So README section 3's "strict = default
+`vfmadd...pd`, same checksum to 15 digits. So README §3's "strict = default
 `BLADE_FP_CONTRACT`" gives the headline `blade-llvm` arm a DIFFERENT contraction regime from
 blade-cpp, gfortran (`-ffp-contract=fast`) and ifx: it computes every dot product as
 separate multiply and add. Values stay inside 1e-12, but it is a per-FMA latency/throughput
@@ -272,7 +272,7 @@ size, `blade check` (tier full) clean at full size. Shape common to all four:
   kernel `|> compute`d (G / T / L / K are materialized), the per-row logical checksum nest
   (F12), the input sum, then the tuple. No array is a top-level binding.
 - LLVM lane: NO fallback line for any of the four; it does echo the `let static` sizes as
-  extra lines (`p = 61`, `n = 31`), which README section 5 tells the harness to ignore.
+  extra lines (`p = 61`, `n = 31`), which kernels/README.md §3 tells the harness to ignore.
 - C++ lane smoke times are ~1 ms because the default (mt) build starts an OpenMP team; the
   LLVM lane (serial, F1) runs the same smoke in 10-40 us.
 

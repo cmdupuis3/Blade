@@ -1,0 +1,42 @@
+// TEST: Orbit-class fold threaded over the first-coordinate rows
+// `where omp` on the outer fold of a logical checksum walk is spent as a
+// thread team over the OUTERMOST class level (src/OrbitFold.fs
+// `threadedForm`, bench G32): row i of the first coordinate starts at pool
+// offset canon_count(n) - canon_count(n - i), rows are dealt boustrophedon
+// to the team, and per-thread class sums join the class totals in thread
+// order before the addition-only weight combine. More rows than threads
+// (p = 37, 19, 9), so every block of the deal is exercised; rank 2 and 3,
+// symmetric and strict, a general (unknown-parity) strict kernel with its
+// two accumulators, a non-zero outer seed, and an Int64 accumulator.
+// Integer-valued cells: every association is exact, so the pins hold with
+// threads, without (BLADE_OMP_THREADS=1), in the LLVM lane's serial pass and
+// under BLADE_FP_REPRO=1's logical walk.
+let static p = 37
+let static n = 3
+type Var = Idx<p>
+type Obs = Idx<n>
+let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 5 + s * 3) % 7) - 2.0 |> compute
+let g = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute
+let ss = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * g(i, j), (+)), lambda(u, v) where omp -> u + v, 0.0)
+let cube = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * g(i, j) * g(i, j) + 1.0, (+)), lambda(u, v) where omp -> u + v, 5.0)
+let xi = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Int64((i * 5 + s * 3) % 7) - 2 |> compute
+let gi = method_for(xi, xi) <@> lambda(a: Array<Int64 like Obs>, b: Array<Int64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute
+let int_total = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> gi(i, j), (+)), lambda(u, v) where omp -> u + v, 0)
+type Comp = Idx<2>
+let z = method_for(range<Var>, range<Comp>, range<Obs>) <@> lambda(i, c, s) -> Float64((i * 5 + c * 3 + s * 7) % 9) - 4.0 |> compute
+let l = method_for(z, z) <@> lambda(a: Array<Float64 like Comp, Obs>, b: Array<Float64 like Comp, Obs>) where anticomm(a, b) -> prodsum(a((0 : Comp)), b((1 : Comp))) - prodsum(b((0 : Comp)), a((1 : Comp))) |> compute
+let general = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> l(i, j) * l(i, j) * l(i, j) + l(i, j) * l(i, j) + 2.0, (+)), lambda(u, v) where omp -> u + v, 0.0)
+type V3 = Idx<19>
+let y = method_for(range<V3>, range<Obs>) <@> lambda(i, s) -> Float64((i * 3 + s * 5) % 7) - 2.0 |> compute
+let t = method_for(y, y, y) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) |> compute
+let ss3 = reduce(method_for(range<V3>) <@> lambda(i) -> reduce(method_for(range<V3>) <@> lambda(j) -> reduce(method_for(range<V3>) <@> lambda(k) -> t(i, j, k) * t(i, j, k), (+)), (+)), lambda(u, v) where omp -> u + v, 0.0)
+type I9 = Idx<9>
+let B: Array<Float64 like I9> = [1.0, 2.0, 4.0, 7.0, 11.0, 16.0, 22.0, 29.0, 37.0]
+let R3 = method_for(B, B, B) <@> lambda(a, b, c) where anticomm(a, b, c) -> (a - b) * (b - c) * (a - c) |> compute
+let r3gen = reduce(method_for(range<I9>) <@> lambda(i) -> reduce(method_for(range<I9>) <@> lambda(j) -> reduce(method_for(range<I9>) <@> lambda(k) -> R3(i, j, k) * R3(i, j, k) * R3(i, j, k) + R3(i, j, k) * R3(i, j, k) + 1.0, (+)), (+)), lambda(u, v) where omp -> u + v, 0.0)
+// EXPECT: ss = 119324.0
+// EXPECT: cube = 1461086.0
+// EXPECT: int_total = 4202
+// EXPECT: general = 504290.0
+// EXPECT: ss3 = 2609996.0
+// EXPECT: r3gen = 8923886073.0

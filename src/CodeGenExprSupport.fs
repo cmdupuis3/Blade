@@ -272,6 +272,12 @@ let renderUnaryOpTyped (op: IRUnaryOp) (operandTy: IRType) (inner: string) : str
             // The cast's source position rides into the panic's `--> file:line`.
             let at = panicSpanArgs loc.Span
             (if et = ETInt64 then $"blade_rt::f2i64({inner}, {at})" else $"blade_rt::f2i32({inner}, {at})")
+        // Int64 -> Float64: the exact split conversion (blade_runtime.hpp
+        // blade_arith::i64_to_f64), the same double as static_cast<double> but
+        // vectorizable on AVX2, which has no packed int64 -> double (bench gap
+        // G30: `Float64(i - j)` kept a domain fold's cell loop scalar).
+        | IRCast (ETFloat64, _), Some ETInt64 ->
+            $"blade_arith::i64_to_f64({inner})"
         // A transcendental on a REAL operand: blade_libm::, the run-time
         // platform libm (never folded at compile time), whose overloads
         // evaluate a Float32 operand in double and round once to float and
@@ -585,12 +591,41 @@ let genCompoundIndexFromMask (maskName: string) (rank: int) (idxName: string) : 
     let extentsInit = String.concat ", " extentTerms
     let gridExpr = String.concat " * " extentTerms
     let lines =
-        [ $$"""std::array<size_t, {{rank}}> {{idxName}}_extents = { {{extentsInit}} };"""
-          $"size_t {idxName}_grid = {gridExpr};"
-          $"bool* {idxName}_pool = nested_array_utilities::pool_base({maskName}.data);"
-          $"std::vector<bool> {idxName}_maskvec({idxName}_pool, {idxName}_pool + {idxName}_grid);"
-          $"compound_index_t<{rank}>* {idxName} = new compound_index_t<{rank}>(\"{idxName}\", {idxName}_extents, {idxName}_maskvec);" ]
+        if rank = 1 then
+            // RANK-1 COMPACTION (bench gap G9): the specialization
+            // compound_index_t<1> builds its kept-position table straight
+            // from the flat bool pool -- a count pass and one branchless fill,
+            // no std::vector<bool> copy and no hash node per present cell.
+            // Same locals (`_grid`, `_pool`) as the general arm so the
+            // consumers that read them (the CUDA range driver) see one shape.
+            [ $"size_t {idxName}_grid = {gridExpr};"
+              $"bool* {idxName}_pool = nested_array_utilities::pool_base({maskName}.data);"
+              $"compound_index_t<1>* {idxName} = new compound_index_t<1>(\"{idxName}\", {idxName}_grid, {idxName}_pool); // rank-1 compaction: kept positions, no hash" ]
+        else
+            [ $$"""std::array<size_t, {{rank}}> {{idxName}}_extents = { {{extentsInit}} };"""
+              $"size_t {idxName}_grid = {gridExpr};"
+              $"bool* {idxName}_pool = nested_array_utilities::pool_base({maskName}.data);"
+              $"std::vector<bool> {idxName}_maskvec({idxName}_pool, {idxName}_pool + {idxName}_grid);"
+              $"compound_index_t<{rank}>* {idxName} = new compound_index_t<{rank}>(\"{idxName}\", {idxName}_extents, {idxName}_maskvec);" ]
     (lines, idxName)
+
+/// `blade plan`'s line for how a `compound(dense, mask)` binding is
+/// REPRESENTED (rule `compound`): a rank-1 mask takes the compaction
+/// representation (`applied`); a rank-k mask keeps the hashed index
+/// (`declined`, with the reason). Both lanes build the same representation
+/// for everything the LLVM lane accepts (it refuses every compound that is
+/// not a rank-1, trailing-free compaction), so the record holds for either.
+let recordCompoundRepresentation (subject: string) (leadRank: int) (trailingDims: int) : unit =
+    let trail = if trailingDims = 0 then "no trailing dims" else $"{trailingDims} trailing dim(s) per kept cell"
+    if leadRank = 1 then
+        recordCodegenDecision "compound" subject Blade.Effects.Applied
+            [ "representation: rank-1 compaction (count pass + branchless kept-position fill, gather by position; no hash table; keyed reads by binary search over the kept positions)"
+              $"rank-1 mask over one dense axis; {trail}" ]
+    else
+        recordCodegenDecision "compound" subject
+            (Blade.Effects.Declined $"hashed SparseIdx: a rank-{leadRank} mask has no closed-form rank, so compound_index_t<{leadRank}> keeps one tuple->rank hash entry per present cell")
+            [ $"representation: hashed SparseIdx (compound_index_t<{leadRank}>, lex-sorted tuple table + reverse hash)"
+              $"rank-{leadRank} mask; {trail}" ]
 
 /// Emit the construction of a standalone `sparse_index_t<RANK>` -- the sparse
 /// twin of genCompoundIndexFromMask, keyed on the SparseKeysSource branch:
@@ -1744,6 +1779,74 @@ let internal fpReassocSimdOp (callable: IRCallable) (elemStr: string) : string o
     if not (simdReducibleElem elemStr) then None
     else foldKernelBuiltinOp callable |> Option.bind ompReductionOperator
 
+/// Is a domain fold's MAP kernel free of side effects, so that its cells may
+/// be evaluated in another order (the diagonal walk) or on a thread team? The
+/// fold's licence covers only the COMBINE; nothing has vetted the map body the
+/// way BL4005 vets an omp body: a map kernel may assign a captured `let mut`
+/// or print in serial code, and then the cell order (or a team) is observable.
+/// Conservative: no assignment anywhere in the body, and every callee either a
+/// function whose effect summary rules out mutation and output or a lambda
+/// whose body passes the same test.
+let domainMapKernelPure (body: IRExpr) : bool =
+    let visited = System.Collections.Generic.HashSet<IRId>()
+    let rec ok (e: IRExpr) : bool =
+        match e with
+        | IRAssign _ -> false
+        | IRApp (f, _, _) ->
+            let calleeOk =
+                match f with
+                | IRVar _ ->
+                    (match resolveCallable f with
+                     | Some cl when not cl.Effects.Unknown -> not cl.Effects.Mutates && not cl.Effects.EmitsOutput
+                     | Some cl -> (not (visited.Add cl.Id)) || ok cl.Body
+                     | None -> false)
+                | _ -> ok f
+            calleeOk && (childrenOf e |> List.forall ok)
+        | _ -> childrenOf e |> List.forall ok
+    ok body
+
+/// The order a FOLD over a closed-form domain walks its cells.
+type DomainFoldOrder =
+    /// k = i - j outermost, a contiguous run of i inside (Types.domainDiagonal).
+    | DomainDiagonalOrder of Blade.Types.DomainDiagonal
+    /// The plan's lexicographic affine nest, and why the diagonal was declined.
+    | DomainLexOrder of reason: string
+
+/// THE one decision, shared by `blade plan`'s `[domain-enum v1]` line, the C++
+/// domain fold arm (CodeGenBinding) and the LLVM lane's domain folds, so the
+/// lanes walk the same order and the plan says which and why (docs/formalism.md,
+/// "Diagonal order of a licensed band fold"). The diagonal is taken only under
+/// the REORDER LICENCE on a builtin `+`/`*` fold -- a `BLADE_FP_REPRO=1` build,
+/// a `where repro` fold kernel and any other kernel keep the lex order and its
+/// bits -- over a band (two fields, a difference bounded on both sides with
+/// unit slope) whose map kernel subscripts no matrix (a diagonal strides a
+/// matrix by a row). `mapKernelBody` None = unknown, which keeps the lex order.
+let domainFoldOrder (foldCallable: IRCallable option) (mapKernelBody: IRExpr option) (plan: DomainPlan) : DomainFoldOrder =
+    match Blade.Types.domainDiagonal plan with
+    | None -> DomainLexOrder "not a band: no two-field conjunct bounds the difference of the fields from both sides with unit slope"
+    | Some dg ->
+    match foldCallable with
+    | None -> DomainLexOrder "the fold kernel does not resolve to a callable"
+    | Some cl when (foldKernelBuiltinOp cl).IsNone ->
+        DomainLexOrder "the fold kernel is not the builtin + or *: only a builtin reduction may walk the band by diagonal"
+    | Some cl when foldKernelReproVetoed cl -> DomainLexOrder "the fold kernel is `where repro`: the lexicographic order is the contract"
+    | Some _ when not (Blade.CodeGenState.fpReassocEnabled ()) ->
+        DomainLexOrder "BLADE_FP_REPRO=1: a repro fold keeps the lexicographic order"
+    | Some _ when not (Blade.CodeGenState.domainDiagonalEnabled ()) -> DomainLexOrder "BLADE_DOMAIN_DIAGONAL=0"
+    | Some _ when (match mapKernelBody with Some b -> Blade.IR.kernelSubscriptsRank2 b | None -> true) ->
+        DomainLexOrder "the map kernel subscripts a matrix, which a diagonal walk would stride by a row"
+    | Some _ when (match mapKernelBody with Some b -> not (domainMapKernelPure b) | None -> true) ->
+        DomainLexOrder "the map kernel may assign a capture or emit output: its cells' side effects keep the lexicographic order"
+    | Some _ -> DomainDiagonalOrder dg
+
+/// `blade plan`'s rendering of a domain fold's order.
+let domainFoldOrderText (plan: DomainPlan) (order: DomainFoldOrder) : string =
+    match order, plan.Levels with
+    | DomainDiagonalOrder dg, [ l0; l1 ] ->
+        $"order: diagonal (k = {l0.Field} - {l1.Field} outer, k in [{dg.KLo}, {dg.KHi}]; {l0.Field} inner and contiguous) -- a licensed fold over a difference-bounded band: same cells, same per-cell arithmetic, and a term depending only on {l0.Field} - {l1.Field} is invariant in the inner run"
+    | DomainDiagonalOrder _, _ -> "order: diagonal"
+    | DomainLexOrder why, _ -> $"order: lexicographic ({why})"
+
 
 /// Is the packed native matmul kernel (blade_packed_gemm.hpp's dgemm_nn)
 /// worth it for an M x K times K x N product? THE one statement of the rule:
@@ -1786,6 +1889,41 @@ let syrkTileKc (k: int64) : int64 =
         let nkb = (k + syrkTileKcMax - 1L) / syrkTileKcMax
         (k + nkb - 1L) / nkb
 
+/// BLADE_TILE_TUNE: the packed-tile drivers' SPEED-ONLY parameters, for A/B
+/// sweeps -- `key=value` pairs separated by commas or spaces, unknown keys
+/// ignored, a malformed value = the default. No bit depends on any of them
+/// (every cell is one owner's chain in one order whatever the visiting order
+/// or block size), so they need no licence and apply under BLADE_FP_REPRO=1.
+/// Read per call; they change the EMISSION (the driver's arguments), so the
+/// exe cache keys on them for free.
+///   syrk_g   row panels per GROUP in dsyrk_tri / blade_dsyrk_tri_f64 (1..8):
+///            G A micro-panels are packed together and each column panel is
+///            read once from L3 and reused G times from L1 (default 4;
+///            1 = the previous order, every column panel from L3 per row panel)
+///   anti_kc  sample-block cap INSIDE an antisym tile visit (P and Q partials
+///            spilled and reloaded exactly between balanced blocks; 0 = the
+///            whole chain in one block, the default)
+let tileTune (key: string) (dflt: int64) : int64 =
+    match System.Environment.GetEnvironmentVariable "BLADE_TILE_TUNE" with
+    | null -> dflt
+    | v ->
+        v.Split([| ','; ' '; ';' |], System.StringSplitOptions.RemoveEmptyEntries)
+        |> Array.tryPick (fun kv ->
+            match kv.Split('=') with
+            | [| k; x |] when k.Trim().ToLowerInvariant() = key ->
+                match System.Int64.TryParse(x.Trim()) with
+                | true, n -> Some n
+                | _ -> None
+            | _ -> None)
+        |> Option.defaultValue dflt
+
+/// dsyrk_tri's row panels per group (BLADE_TILE_TUNE syrk_g), clamped to the
+/// drivers' TRI_G_MAX = 8.
+let syrkRowGroup () : int64 = max 1L (min 8L (tileTune "syrk_g" 4L))
+
+/// The antisym tile's sample-block cap (BLADE_TILE_TUNE anti_kc); 0 = whole.
+let antisymKcMax () : int64 = max 0L (tileTune "anti_kc" 0L)
+
 /// BLADE_SYRK_TILE: unset / `1` / `on` = the packed-triangle SYRK tile is the
 /// BLAS-off arm of the same-array `comm` row contraction (default); `0` / `off`
 /// keeps the plain per-cell nest, for A/B. A FUNCTION, read per call, so a
@@ -1821,6 +1959,147 @@ let antisymTileSchedule () : AntisymTileSchedule =
 /// blade_pgemm::dsym3_tri) is the emission of the same-array 3-way `comm`
 /// prodsum nest (default); `0` / `off` keeps the plain per-cell nest, for A/B.
 let simplexTileEnabled () : bool = Blade.Toolchain.envFlag "BLADE_SIMPLEX_TILE" true
+
+// ---- The explicit K-lane vector fold form (BLADE_FOLD_LANES; review M9/M14) --
+
+/// BLADE_FOLD_LANES, read per call:
+///   unset / `1` / `on` / `auto` -> the explicit K-lane vector form
+///                                  (blade_fold_lanes.hpp) for every licensed
+///                                  DOT-CLASS fold, K by `foldVecLanes`; and
+///                                  the simd form inside Path B chunks
+///   `4` / `8`                   -> the same, with that K everywhere (A/B)
+///   `0` / `off`                 -> the forms before M9/M14: ONE `omp simd
+///                                  reduction` accumulator, and a serial chain
+///                                  inside each Path B chunk
+/// It changes the emission, so the exe cache keys on it for free. Inert under
+/// BLADE_FP_REPRO=1, which never reaches a reassociated form.
+type FoldLanesMode =
+    | FoldLanesOff
+    | FoldLanesAuto
+    | FoldLanesFixed of int
+
+let foldLanesMode () : FoldLanesMode =
+    match System.Environment.GetEnvironmentVariable "BLADE_FOLD_LANES" with
+    | null -> FoldLanesAuto
+    | v ->
+        match v.Trim().ToLowerInvariant() with
+        | "0" | "off" | "false" | "no" -> FoldLanesOff
+        | "4" -> FoldLanesFixed 4
+        | "8" -> FoldLanesFixed 8
+        | _ -> FoldLanesAuto
+
+/// The vector forms blade_fold_lanes.hpp spells, by the kernel's factor list
+/// (source order; a repeated array is a self-dot): `sum` (one stream),
+/// `dot` (two), `sq` (one stream read once, squared), `dot3` (three, the
+/// product left-nested `(a * b) * c`).
+type FoldVecKind =
+    | VecSum
+    | VecDot
+    | VecSq
+    | VecDot3
+
+/// The form for a factor list of 1..3 array names, with the DISTINCT operand
+/// names in the call's order; None for anything else.
+let foldVecKind (factors: string list) : (FoldVecKind * string list) option =
+    match factors with
+    | [ a ] -> Some (VecSum, [ a ])
+    | [ a; b ] when a = b -> Some (VecSq, [ a ])
+    | [ a; b ] -> Some (VecDot, [ a; b ])
+    | [ a; b; c ] -> Some (VecDot3, [ a; b; c ])
+    | _ -> None
+
+let foldVecKindName (k: FoldVecKind) : string =
+    match k with VecSum -> "sum" | VecDot -> "dot" | VecSq -> "sq" | VecDot3 -> "dot3"
+
+/// The number of distinct memory streams a form reads per element.
+let foldVecStreams (k: FoldVecKind) : int =
+    match k with VecSum -> 1 | VecDot -> 2 | VecSq -> 1 | VecDot3 -> 3
+
+/// K, the number of independent 32-byte vector accumulators. The rule is by
+/// the form's load/FMA ratio on Zen 3 (2 loads + 2 FMAs per cycle, FMA latency
+/// 4): a two-stream dot is load-bound at one vector FMA per cycle, which 4
+/// chains cover; a self-dot or a plain sum issues one load per FMA and can
+/// run both FMA units, which needs 8 chains. 8 is never worse than 4 at any
+/// shape measured (bench/notes/gap-register.md, G26 entry), so 8 is the
+/// default everywhere; `BLADE_FOLD_LANES=4|8` forces either for A/B.
+let foldVecLanes (k: FoldVecKind) : int =
+    match foldLanesMode () with
+    | FoldLanesFixed n -> n
+    | _ -> 8
+
+/// Is `elemStr` an element type blade_fold's vector forms are defined for?
+let foldVecElem (elemStr: string) : bool =
+    elemStr = "double" || elemStr = "float"
+
+/// The C++ call: `blade_fold::<kind><T, K>(p0, p1, .., n)` over raw element
+/// pointers (`.data` of a rank-1 Array, `+ lo` for a chunk) and an element
+/// count. Sets nothing: the caller marks `foldLanesUsedCell` (the include).
+let foldVecCall (elemStr: string) (k: int) (kind: FoldVecKind) (ptrs: string list) (nExpr: string) : string =
+    let args = String.concat ", " (ptrs @ [ nExpr ])
+    $"blade_fold::{(foldVecKindName kind)}<{elemStr}, {k}>({args})"
+
+/// The census / `blade plan` spelling of the form: `simd K-lanes(8) dot`.
+let foldVecLabel (kind: FoldVecKind) (k: int) : string =
+    let word =
+        match kind with VecSum -> "sum" | VecDot -> "dot" | VecSq -> "self-dot" | VecDot3 -> "dot3"
+    $"simd K-lanes({k}) {word}"
+
+/// Is `lvl` a plain rectangular sweep a fold may take a lane / simd / vector
+/// form over -- no bound dependencies, no strict offset, not a fused joint
+/// level, not a tabulated (compound / sparse) axis, no Reynolds body, no MPI
+/// slab, no halo-window slot? ONE predicate for the one-level licensed arm of
+/// `genReduceComputeBinding` and for the Path B chunk plan (M14), so the
+/// serial and the threaded forms admit exactly the same levels.
+let laneableFoldLevel (cg: LoopNestCodeGen) (lvl: LoopIndexBinding) : bool =
+    lvl.BoundDependencies.IsEmpty && lvl.StrictOffset = 0
+    && lvl.FusedRank.IsNone
+    && (match lvl.Extent with
+        | IRCompoundMask _ | IRSparseKeys _ -> false
+        | _ -> true)
+    && not cg.HasReynolds && not cg.MpiSlab
+    && (lvl.Elements
+        |> List.forall (fun e ->
+            match e.SlotTag with
+            | Some t -> not (t.StartsWith "__halowin")
+            | None -> true))
+
+/// The factor list of a DOT-CLASS kernel body over `lvl`'s peels: the body is
+/// a left-nested elementwise product of 1..3 kernel parameters, each bound at
+/// this level to a REAL rank-1 array (not a range / reverse / halo slot) whose
+/// element type `elemOk` accepts, so the body at index i is `A[i] * B[i]
+/// (* C[i])` and the whole fold is one of blade_fold's forms. Returns the
+/// arrays in source factor order (a repeated array appears twice: `x * x`);
+/// None for any other body -- a composed chain, a call, a cast, a scalar
+/// capture in the product -- which keeps the simd form.
+let dotClassFactors (elemOk: IRType -> bool) (body: IRExpr) (kernelParams: IRParam list) (lvl: LoopIndexBinding) : string list option =
+    // A slot's tag is its index type's NAME for a named index (`Ix`); only the
+    // halo-window payload marks a slot that is not a plain element read.
+    let plainSlot (e: ElementBinding) =
+        match e.SlotTag with
+        | Some t -> not (t.StartsWith "__halowin")
+        | None -> true
+    let arrayOfParam (vid: IRId) =
+        lvl.Elements
+        |> List.tryPick (fun e ->
+            if e.ParamVarId = vid && e.Virtual.IsRealArray && e.ArrayRank = 1
+               && plainSlot e && elemOk e.ArrayElemType
+            then Some e.ArrayName else None)
+    let leaf (e: IRExpr) =
+        match e with
+        | IRVar (id, _) -> arrayOfParam id
+        | IRParam (_, idx, _) ->
+            kernelParams |> List.tryFind (fun p -> p.Index = idx) |> Option.bind (fun p -> arrayOfParam p.VarId)
+        | _ -> None
+    match body with
+    | IRBinOp (IRElementwise, IRMul, IRBinOp (IRElementwise, IRMul, a, b, _), c, _) ->
+        (match leaf a, leaf b, leaf c with
+         | Some x, Some y, Some z -> Some [ x; y; z ]
+         | _ -> None)
+    | IRBinOp (IRElementwise, IRMul, a, b, _) ->
+        (match leaf a, leaf b with
+         | Some x, Some y -> Some [ x; y ]
+         | _ -> None)
+    | e -> leaf e |> Option.map (fun x -> [ x ])
 
 /// Is the antisym pair's tile worth it over the per-cell double dot? The
 /// review's routes: tile at p = 61 x n = 401 / 600, decline at 23 x 11 (a

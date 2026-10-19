@@ -218,9 +218,14 @@ chain. A fold whose source carries a REORDER LICENCE -- a recognised builtin
 `+`/`*` body, a declared `comm`, `where omp` on the kernel (which requires one
 of the two, BL4016), and `prodsum` / reduction-join legs over builtin folds --
 is EMITTED in its fastest licensed form by default (since 2026-10-17): an
-`omp simd reduction` or a K-lane multi-accumulator sweep (and, where `omp` asks
-and the build opens teams, per-thread partials), `reassoc nsz` on the
-accumulator in the LLVM lane. `where omp` therefore implies simd: a build that
+`omp simd reduction`, a K-lane multi-accumulator sweep, or -- for a DOT-CLASS
+fold (`prodsum`, and a `(+)` fold whose body is a product of the level's
+rank-1 peels) -- the explicit K-lane VECTOR tree of `blade_fold_lanes.hpp`
+(K = 8 independent 32-byte accumulators in a fixed documented association,
+one fused multiply-add per step under the build's contraction mode; 2026-10-19,
+`BLADE_FOLD_LANES`); and, where `omp` asks and the build opens teams,
+per-thread partials that each take the same fast form inside their chunk;
+`reassoc nsz` on the accumulator in the LLVM lane. `where omp` therefore implies simd: a build that
 opens no team (`BLADE_OMP_THREADS=1`) still vectorizes the licensed fold. The
 result is the serial fold up to reassociation -- deterministic for a fixed
 binary (the lane form for a fixed K; the simd form for the vectorizer's
@@ -230,8 +235,9 @@ kernel or on the MAP the fold consumes: `omp(i: 1)` covering the outermost level
 of a reorder-licensed fold's nest threads that level (per-thread partials).
 The LLVM lane has no thread runtime, so it spends only the reordering half and
 reports the threading half with the census line. `blade plan` names each fold's form
-(`fold form: simd-reduction | K-lanes(k) | threaded(...) | serial (repro) |
-serial (<why>)`).
+(`fold form: simd-reduction | K-lanes(k) | simd K-lanes(k) dot|self-dot|dot3|sum
+| threaded(...) | serial (repro) | serial (<why>)`; a `threaded(Path B chunks,
+...)` form names what runs inside each chunk).
 
 Integer arithmetic (exact under any association), the faults (BL8013,
 BL8014), the run-time libm and `fma(a, b, c)` (its own node: one rounding in
@@ -617,6 +623,22 @@ is what buys contiguous layout and device-friendly slices; per-element hash
 gives O(1) coordinate lookup. Enumeration = exactly the in-bounds mask-true
 tuples, each once, in lex order (proofs.md §Compound).
 
+Representation, by rank of the mask (the compiler's choice, reported by
+`blade plan` as a `[compound v1]` line; the semantics above do not change):
+a **rank-1 mask** over one dense axis is a *compaction* — the valid set is a
+sorted list of kept positions, built by a count pass and one branchless fill
+(`pos[q] = i; q += keep[i]`), the compact buffer a gather by position; a keyed
+read `S(k)` binary-searches the kept positions and a position the mask
+rejected is the out-of-key-set read, BL8006. No hash node is built per kept
+cell (bench gap G9: that node was ~85% of a filter-and-sum's time). Both
+compiled lanes and the interpreter build this; the LLVM lane takes exactly
+these compounds (rank 1, no trailing dims) and hands every other to the C++
+lane. A **rank-k mask (k ≥ 2)** keeps the hashed index (`declined -- hashed
+SparseIdx ...`): the lex-sorted tuple table plus the tuple → rank hash.
+The kept order is the source order in every lane and at every thread count;
+compaction is sequential by construction (a parallel prefix would be a
+different algorithm).
+
 Two construction routes:
 
 ```blade sketch
@@ -687,6 +709,40 @@ count, and whether the consumer streams or fills). Fields may be `Int`
 conjunct is typed as the literal it folds to, a CHECKED conversion — a value
 outside Int32 refuses the declaration (BL4001) with the fix, `Int64<...>`
 fields.
+
+Diagonal order of a licensed band fold (bench gaps G33/G31). The lex order
+above is the order of the SOLUTION SET; a fold may visit it in another order
+only where its kernel licenses reordering. A two-field domain whose inner field
+is held to the outer from both sides with unit slope — `abs(i - j) <= w`,
+`abs(j - i) <= w`, `lo <= i - j <= hi`, any pair of difference conjuncts, which
+project to `j in [max(b, i - hi), min(B, i - lo)]` — is a BAND: its cells are
+the union of the diagonals k = i - j, each a contiguous run of i. A fold over
+its map whose kernel is the builtin `+` or `*` (the reorder licence of
+§2.4), outside `BLADE_FP_REPRO=1` and `where repro`, walks it k-outermost with
+i inner and contiguous (j = i - k): the same cells, each cell's arithmetic
+spelled and evaluated exactly as the source writes it, only the summation order
+moved — the expert's `do k = -w, w; do i`. A kernel term that depends on the
+cell only through i - j is then invariant in the inner run and the back end
+computes it once per diagonal; the emitter never tabulates it. Every other fold
+over the domain (an unlicensed or `where repro` kernel, a repro build, a fused
+join of several folds, a non-unit slope such as `abs(2 * i - j) <= c`, a map
+kernel that subscripts a matrix — a diagonal would stride it by a row — and a
+map kernel that may assign a capture or emit output, whose cells' side effects
+are ordered: the licence covers the combine, not the map) keeps
+the lex nest, and the interpreter keeps the lex walk for every fold, as it does
+for every licensed fold. `blade plan`'s `[domain-enum v1]` line ends with the
+fold's order and its reason (`order: diagonal (k = i - j outer, ...)` or
+`order: lexicographic (<why>)`); both compiled lanes read the same decision.
+`BLADE_DOMAIN_DIAGONAL=0` keeps the lex nest, for A/B. With `where omp` on the
+fold kernel, in a build that emits teams, the C++ lane runs the walk on ONE
+team: the outermost enumerated variable (k, or the first field of a lex nest,
+whose bounds are constants) is cut into contiguous per-thread blocks — each
+innermost run is cut instead when the team outnumbers the outer trips — and
+the per-thread partials combine in thread order, so for a given team size the
+value is a fixed function of the data. `BLADE_OMP_THREADS=1`,
+`BLADE_FP_REPRO=1` and a map kernel with side effects keep the serial pass
+with an `[omp] requested but emitted serial` census line; the LLVM lane has no
+thread-level form.
 
 Tuple indexing with wildcards: a full key is an O(1) hash lookup (a missing
 key is a runtime error); a wildcard/short-prefix partial returns the matching

@@ -10,7 +10,7 @@ x ∈ [0, 2)ⁿ. The four power sums
     checksum = S1 + 2·S2 + 3·S3 + 4·S4
 
 Each S_k accumulates in ascending k order in every `repro` arm. The Blade `<&!>` join
-carries no THREADING licence (none can be expressed, README §7.4), but its `(+)` legs are
+carries no THREADING licence (none can be expressed, kernels/README.md §4.4), but its `(+)` legs are
 builtin-body folds: since the compiler flip (5f4b33ea) BOTH lanes reorder them by default —
 the C++ lane gives the join the simd-reduction form with one multi-accumulator clause and
 prints a census line (G7 partly fixed), the LLVM lane decorates the legs `reassoc` — so
@@ -43,10 +43,10 @@ the number of passes over x.
 | full | 5,000,011 | 40 MB | 8–15 ms / 20–40 ms |
 
 Memory-bound at full size (DRAM-resident). Input share ≈ 15–20 ms of ~30 ms ≈ **50% → an
-`inputonly` twin per arm REQUIRED** (README §5.3; incremental estimate reported beside the
+`inputonly` twin per arm REQUIRED** (kernels/README.md §3.3; incremental estimate reported beside the
 total). R >= 21.
 
-## Tiers (natural = dense baseline; expert = reviewed implementation; README §2)
+## Tiers (natural = dense baseline; expert = reviewed implementation; kernels/README.md §1)
 
 - **natural (four-pass baseline)**: `s1 = sum(x); s2 = sum(x**2); s3 = sum(x**3); s4 =
   sum(x**4)` — four intrinsic passes (gfortran may or may not fuse them; the agent

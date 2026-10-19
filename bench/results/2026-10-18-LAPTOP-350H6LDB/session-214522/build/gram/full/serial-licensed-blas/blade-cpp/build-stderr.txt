@@ -1,3 +1,0 @@
-[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\gram-3e7319bd-18388-29292bc6\gram.cpp
-[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-214522\build\gram\full\serial-licensed-blas\blade-cpp\gram.exe
-[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\gram-3e7319bd-18388-29292bc6

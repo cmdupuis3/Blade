@@ -1,3 +1,0 @@
-[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\stencil_inputonly-700b9e94-16080-902b1a61\stencil_inputonly.ll
-[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-042223\build\stencil\full\serial-licensed-native\blade-llvm-inputonly\stencil_inputonly.exe
-[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\stencil_inputonly-700b9e94-16080-902b1a61

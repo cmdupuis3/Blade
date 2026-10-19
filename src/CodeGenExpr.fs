@@ -443,6 +443,46 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             // `laneCountForStreams` still governs the fallback arm below (and
             // Path B's chunked fold), which is why the arity-aware count
             // survives the change.
+            // THE EXPLICIT K-LANE VECTOR FORM (review item M9, gap register
+            // G26). The simd form below hands GCC ONE accumulator, which it
+            // vectorizes to one ymm and never interleaves, so the loop-carried
+            // add caps the fold at 1.33 lanes/cycle however many FMA units sit
+            // idle. blade_fold_lanes.hpp spells the fold with K independent
+            // vector accumulators in a FIXED, documented tree (the raw-bit
+            // test `blade test fold-lanes` pins it against a scalar model), one
+            // load per element for a self-dot (`prodsum(row, row)`: the two
+            // operand spellings are textually one array). Admitted: 1..3
+            // operands, each a plain rank-1 array (dense or a ragged row --
+            // both carry `.data`; compound / sparse keep their own reads) over
+            // double / float. BLADE_FOLD_LANES=0 keeps the simd form, for A/B.
+            let vecForm =
+                if foldLanesMode () = FoldLanesOff || not (foldVecElem elemStr) then None
+                else
+                    let plainRank1 (ty: IRType) =
+                        match ty with
+                        | ArrayElem at ->
+                            arrayRank at = 1 && not (isCompoundArrayType at) && not (isSparseArrayType at)
+                            && elemTypeToCpp at.ElemType = elemStr
+                        | _ -> false
+                    if not (args |> List.forall (inferExprType >> plainRank1)) then None
+                    else foldVecKind argStrs
+            match vecForm with
+            | Some (kind, ops) ->
+                let k = foldVecLanes kind
+                (foldLanesUsedCell ()).Value <- true
+                recordFoldForm "" (foldVecLabel kind k) "prodsum"
+                // A compound operand expression is bound once (evaluated exactly
+                // once, as every arm here does); a plain name is used as is.
+                let vecNames = if needAlias then ops |> List.mapi (fun i _ -> $"__pa{i}") else ops
+                let vecAliases =
+                    if not needAlias then []
+                    else List.map2 (fun n s -> $"auto&& {n} = {s};") vecNames ops
+                let call =
+                    foldVecCall elemStr k kind (vecNames |> List.map (fun o -> $"{o}.data"))
+                        (prodSumBound headTy (List.head vecNames))
+                if needAlias then $$"""[&]() { {{(String.concat " " vecAliases)}} return {{call}}; }()"""
+                else call
+            | None ->
             if simdReducibleElem elemStr then
                 recordFoldForm "" "simd-reduction" "prodsum"
                 let simdStmts = fpReassocSimdStmts "+" "__ps" "__pt" "0" "__pn" [] prodAt
@@ -3023,7 +3063,14 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                     // SPACE-JOINED into a single-line IIFE at expression
                     // positions, where a line comment would swallow the rest of
                     // the statement.
-                    [ $"/* {dispatchTag} dispatch: gram(A, A) = A * A^T -> packed upper triangle */ {entry}({mExtent}, {nExtent}, {lName}.data, {lCells}, {varName}.data);" ]
+                    //
+                    // The shim's repack (dense staging -> packed rows) runs
+                    // on an OpenMP team when this build emits thread-level
+                    // OpenMP: rows are owned exclusively and no sum is split,
+                    // so it needs no licence (the tile arm's own argument);
+                    // the emission knob still decides. Bench gap G28.
+                    let threadedArg = if ompThreadEmissionEnabled () then "true" else "false"
+                    [ $"/* {dispatchTag} dispatch: gram(A, A) = A * A^T -> packed upper triangle */ {entry}({mExtent}, {nExtent}, {lName}.data, {lCells}, {varName}.data, {threadedArg});" ]
                 | None ->
                     // THREADING (see BLADE_OMP_PARALLEL_FOR_DYNAMIC in
                     // cpp/blade_portability.hpp for the spelling, and the
@@ -3092,17 +3139,29 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                         | Some p, Some k when packedTriWorth p k ->
                             (packedGemmUsedCell ()).Value <- true
                             let kc = syrkTileKc k
+                            let g = syrkRowGroup ()
                             // Rows are owned exclusively and no sum is split,
                             // so the thread team needs no licence (the jam's
                             // own threading argument); the emission knob
-                            // still decides.
+                            // still decides. The omp census is the
+                            // intrinsic-row rule's: the driver's team over
+                            // row groups recorded as applied, or the knob's
+                            // block marker (the jam's own census line).
                             let threadedArg = if ompThreadEmissionEnabled () then "true" else "false"
+                            let censusWhere = "dsyrk_tri row groups (gram node: rows owned exclusively, no licence needed): work units under schedule(dynamic), cells split across the team, sums never"
+                            let censusMarker =
+                                if ompThreadEmissionEnabled () then
+                                    recordOmpConstruct varName "omp parallel num_threads(T) inside the tile driver" censusWhere
+                                    ""
+                                else
+                                    recordCodegenDecision "omp" varName (Blade.Effects.Declined (ompThreadsSuppressedReason ())) [ censusWhere ]
+                                    ompThreadsSuppressedBlockMarker () + " "
                             recordCodegenDecision "microkernel" varName Blade.Effects.Applied
                                 [ "packed syrk tile (blade_pgemm::dsyrk_tri, 6x8 register tile over the packed triangle)"
-                                  $"P={p} K={k} KC={kc}" ]
-                            recordFoldForm varName $"syrk tile 6x8, KC={kc}"
+                                  $"P={p} K={k} KC={kc} G={g}" ]
+                            recordFoldForm varName $"syrk tile 6x8, KC={kc}, row groups of {g}"
                                 "gram(A, A) node (one ascending chain per cell; no reorder licence used)"
-                            Some [ $"/* gram(A, A): packed-triangle syrk tile (blade_packed_gemm.hpp dsyrk_tri, 6x8, KC={kc}), per cell the serial chain */ blade_pgemm::dsyrk_tri((size_t)({mExtent}), (size_t)({nExtent}), {lName}.data, {varName}.data, 0, {threadedArg}, (size_t){syrkTileKcMax});" ]
+                            Some [ $"{censusMarker}/* gram(A, A): packed-triangle syrk tile (blade_packed_gemm.hpp dsyrk_tri, 6x8, KC={kc}), row groups of {g}, per cell the serial chain */ blade_pgemm::dsyrk_tri((size_t)({mExtent}), (size_t)({nExtent}), {lName}.data, {varName}.data, 0, {threadedArg}, (size_t){syrkTileKcMax}, 0, 0.0, (size_t){g});" ]
                         | Some p, Some k ->
                             recordCodegenDecision "microkernel" varName
                                 (Blade.Effects.Declined "below the syrk-tile crossover (p >= 16, k >= 4): the triangular gram jam")

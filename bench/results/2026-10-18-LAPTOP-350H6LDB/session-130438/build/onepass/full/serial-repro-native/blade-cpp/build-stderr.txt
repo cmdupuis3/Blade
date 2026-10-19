@@ -1,3 +1,0 @@
-[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\onepass-ed6082fc-20044-5eade423\onepass.cpp
-[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-130438\build\onepass\full\serial-repro-native\blade-cpp\onepass.exe
-[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\onepass-ed6082fc-20044-5eade423

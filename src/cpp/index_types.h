@@ -324,6 +324,126 @@ private:
 	}
 };
 
+/* RANK-1 COMPOUND INDEX: the compaction representation (bench gap G9).
+ *
+ * A rank-1 mask selects cells of ONE dense axis [0, n), so the valid set is a
+ * SORTED list of positions and nothing more: the rank of a present cell is its
+ * position in that list, and the list IS the mask (a cell is present iff its
+ * position is in it). The generic template above materializes a tuple->rank
+ * unordered_map -- one hash node per present cell, ~40 B and ~78 ns each
+ * (bench/notes/gap-register.md G9: 85% of maskagg's time) -- which a rank-1
+ * index never needs. This specialization keeps:
+ *
+ *   - rank_to_tuple : the kept positions, ascending (== lex order), owned raw
+ *       buffer behind a vector-shaped view (operator[], size(), data()). It
+ *       doubles as the mask: present(t) and linearize(t) are a binary search.
+ *   - extents       : the source axis's extent, as the generic type exposes it.
+ *
+ * Construction is a COUNT pass over the bool array (vectorizes) and ONE
+ * branchless fill (`pos[q] = i; q += keep[i]`, one slot of slack): no hash,
+ * no std::vector<bool> bit copy. The legacy (name, extents, vector<bool>)
+ * constructor is kept for the sites that still hand over a bit vector
+ * (cuda range<CompoundIdx>, alloc_layout_tests) and builds the same table.
+ * A key outside the kept set is BL8006, exactly as the generic linearize.
+ *
+ * The data gather is NOT here: codegen reads rank_to_tuple[q][0] and copies
+ * cell q from the dense pool (EmitCpp.compactScatter, Rank1 arm), so the
+ * compact buffer is written exactly once, in kept order, by position.
+ */
+template<>
+struct compound_index_t<1> : abstract_idx_t<1> {
+	using IDX = std::array<size_t, 1>;
+
+	/* The kept-position table: a vector-shaped view over an owned raw buffer
+	 * (new IDX[] leaves the cells indeterminate instead of zero-filling them,
+	 * which std::vector::resize would -- one whole write pass of the table). */
+	struct positions_t {
+		IDX* p = nullptr;
+		size_t n = 0;
+		positions_t() = default;
+		positions_t(const positions_t&) = delete;
+		positions_t& operator=(const positions_t&) = delete;
+		~positions_t() { delete[] p; }
+		void reset(size_t cap) { delete[] p; p = cap ? new IDX[cap] : nullptr; n = 0; }
+		IDX& operator[](size_t i) { return p[i]; }
+		const IDX& operator[](size_t i) const { return p[i]; }
+		size_t size() const { return n; }
+		IDX* data() { return p; }
+		const IDX* data() const { return p; }
+		const IDX* begin() const { return p; }
+		const IDX* end() const { return p + n; }
+	};
+
+	IDX extents;
+	positions_t rank_to_tuple;
+
+	/* The compaction constructor: `keep` is the flat bool array over [0, n). */
+	compound_index_t(std::string name_in, size_t n, const bool* keep)
+		: abstract_idx_t<1>(std::move(name_in), n), extents{ n } {
+		size_t m = 0;
+		for (size_t i = 0; i < n; i++) m += (size_t)(!!keep[i]);
+		// The unconditional store below lands one past the last kept slot
+		// after the last kept cell, hence the slack cell (never read).
+		rank_to_tuple.reset(m + 1);
+		size_t q = 0;
+		for (size_t i = 0; i < n; i++) { rank_to_tuple.p[q][0] = i; q += (size_t)(!!keep[i]); }
+		rank_to_tuple.n = m;
+		this->cardinality = m;
+	}
+
+	/* The legacy constructor: the same table from a bit vector. */
+	compound_index_t(std::string name_in, IDX extents_in, std::vector<bool> mask_in)
+		: abstract_idx_t<1>(std::move(name_in), extents_in[0]), extents(extents_in) {
+		const size_t n = extents_in[0];
+		size_t m = 0;
+		for (size_t i = 0; i < n; i++) m += (size_t)(mask_in[i]);
+		rank_to_tuple.reset(m + 1);
+		size_t q = 0;
+		for (size_t i = 0; i < n; i++) { rank_to_tuple.p[q][0] = i; q += (size_t)(mask_in[i]); }
+		rank_to_tuple.n = m;
+		this->cardinality = m;
+	}
+
+	// The table is built at construction; nothing to (re)build.
+	void hash() override {}
+
+	IDX unhash(size_t index) override { return rank_to_tuple[index]; }
+
+	// Binary search for a position: the first slot >= key (== size when none).
+	size_t lower_bound(size_t key) const {
+		size_t a = 0, b = rank_to_tuple.n;
+		while (a < b) {
+			size_t mid = a + (b - a) / 2;
+			if (rank_to_tuple.p[mid][0] < key) a = mid + 1; else b = mid;
+		}
+		return a;
+	}
+
+	// tuple -> rank. A position that was not kept is an out-of-domain read:
+	// BL8006, the generic type's (and the interpreter's) contract.
+	size_t linearize(const IDX& tuple) const {
+		size_t r = lower_bound(tuple[0]);
+		if (r >= rank_to_tuple.n || rank_to_tuple.p[r][0] != tuple[0])
+			throw std::out_of_range(BLADE_OUT_OF_KEY_SET);
+		return r;
+	}
+
+	// Presence query for the <|:> allocated-fallback read.
+	bool present(const IDX& t) const {
+		size_t r = lower_bound(t[0]);
+		return r < rank_to_tuple.n && rank_to_tuple.p[r][0] == t[0];
+	}
+
+	// The half-open rank range sharing a leading prefix: the whole table for
+	// an empty prefix, the single kept slot (or an empty range) for a full one.
+	std::pair<size_t, size_t> prefix_range(const IDX& prefix, size_t plen) const {
+		if (plen == 0) return { 0, rank_to_tuple.n };
+		size_t r = lower_bound(prefix[0]);
+		if (r < rank_to_tuple.n && rank_to_tuple.p[r][0] == prefix[0]) return { r, r + 1 };
+		return { r, r };
+	}
+};
+
 /* Sparse index type: an explicit valid-tuple enumeration (formalism 3.5).
  *
  * Models the "arbitrary key set" regime -- edge lists, CG triples: a rank-k

@@ -1,3 +1,0 @@
-[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\dot-13065fee-2140-796303f0\dot.ll
-[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-144656\build\dot\smoke\serial-fastmath-native\blade-llvm\dot.exe
-[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\dot-13065fee-2140-796303f0

@@ -23,7 +23,7 @@ ulp level between regimes and the 1e-12 tolerance covers it. Named output: **G**
 
 Fortran stores `x(n, p)` (column i = variable i, samples contiguous) and computes
 `k = (i-1)*n + (s-1)` from its 1-based loop indices. `(hi − lo) = 1` is a power of two
-(README §5 FMA rule).
+(kernels/README.md §3 FMA rule).
 
 ## Checksum
 
@@ -31,7 +31,7 @@ Fortran stores `x(n, p)` (column i = variable i, samples contiguous) and compute
     input_checksum = Σ_{i, s} X(i, s)
 
 A packed arm computes the checksum as `Σ_i G(i,i)² + 2 Σ_{i<j} G(i,j)²`; Blade reads all
-p² logical cells through its canonicalizing accessor (README §7.2). All terms are
+p² logical cells through its canonicalizing accessor (kernels/README.md §4.2). All terms are
 non-negative.
 
 ## Sizes
@@ -44,7 +44,7 @@ non-negative.
 
 Working set (full, natural dense): X 12.8 MB + G 20.5 MB = 33 MB. Input generation:
 1.6M LCG cells ≈ 5 ms ≈ 1% of the region — **no inputonly twin**. Planning estimate only
-(never subtracted, README §5.4): Blade's logical-read checksum ≈ 2.56M canonicalizing
+(never subtracted, kernels/README.md §3.4): Blade's logical-read checksum ≈ 2.56M canonicalizing
 reads ≈ 5–10 ms ≈ 1–2% of the region.
 
 ## Storage orientation (Fortran)
@@ -52,7 +52,7 @@ reads ≈ 5–10 ms ≈ 1–2% of the region.
 Natural: `x(n, p)`, `g(p, p)` dense. Expert: any orientation; packed upper triangle
 `g_packed(j*(j-1)/2 + i)` (1-based, i <= j) or a dense array written only on one side.
 
-## Tiers (natural = dense baseline; expert = reviewed implementation; README §2)
+## Tiers (natural = dense baseline; expert = reviewed implementation; kernels/README.md §1)
 
 - **natural (dense baseline)**: `g = matmul(transpose(x), x)`, then `sum(g**2)`. The
   intrinsic IS the natural spelling and is kept even if it is fast (M1): it is the runtime
@@ -99,7 +99,7 @@ and checksum).
 fixture spelling `reduce(x * y, (+))` materializes `x * y` as a length-n temporary per
 output cell (allocated and freed per cell); `prodsum` streams in both lanes and is the
 documented contraction intrinsic — equally natural. Checksum: the per-row streaming nest of
-README §7.2. Arrays inside a function returning the scalar; only `checksum` and
+kernels/README.md §4.2. Arrays inside a function returning the scalar; only `checksum` and
 `input_checksum` at top level.
 
 `blade plan` must show, for G: `[symmetric-storage v1] applied [packed SymSymmetric storage
@@ -165,7 +165,7 @@ matched-loop table).
 ## Risks
 
 - The per-cell temporary of `reduce(x * y, (+))` in the C++ lane is a confirmed trap
-  (README §7.8); `prodsum` avoids it. Any other elementwise op on the row parameters would
+  (kernels/README.md §4.8); `prodsum` avoids it. Any other elementwise op on the row parameters would
   reintroduce it.
 - The LLVM lane accepted a `method_for(bm, bm) ... prodsum` shape in a probe emit; blade-A
   confirms at smoke size that no `llvm lane refused` line appears.

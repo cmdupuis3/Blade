@@ -102,6 +102,24 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
     | IRReduce (arrExpr, kernelExpr, initExpr) ->
         genReduceBinding ctx binding builder arrExpr kernelExpr initExpr
     | IRReduceCompute (compExpr, kernelExpr, seedExpr) ->
+        // Hot-row fold scheduling (Blade.Optimize.planHotRowFolds): when the
+        // producer's nest ran this fold's row map behind each produced row,
+        // the row sums sit in a materialized rank-1 array and this binding is
+        // the OUTER combine over them -- the same values, folded in the same
+        // order from the same seed, through the ordinary materialized-array
+        // fold emitter (which applies this build's fold-form policy to it).
+        // A producer whose nest did not admit the epilogue published
+        // nothing, and the two-pass form below is unchanged.
+        match Blade.Optimize.HotRowTable.tryConsumer binding.Id with
+        | Some plan when plan.EmittedCpp.Value.IsSome ->
+            let rsName = plan.EmittedCpp.Value.Value
+            let rsVar = IRVar (plan.RowSumId, plan.RowSumType)
+            let ctxR = { ctx with VarNames = Map.add plan.RowSumId rsName ctx.VarNames }
+            let note =
+                [ $"{ind}// hot-row fold: the row values of `{plan.ProducerName}`'s row map were computed behind each produced row into {rsName} (Blade.Optimize.planHotRowFolds); this is the outer combine over them, same order, same seed" ]
+            let (code, ctx') = genReduceBinding ctxR binding builder rsVar kernelExpr (Some seedExpr)
+            (note @ code, ctx')
+        | _ ->
         genReduceComputeBinding ctx binding builder compExpr kernelExpr seedExpr
     | IRProdSum _ ->
         // Scalar result; the expression renderer emits the fused-loop IIFE.
@@ -829,7 +847,15 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         let (capForceCode, ctx) =
             collectDeferredKernelCaptures ctx info'.Kernel
             |> forceDeferredBindingIds ctx builder ($"{name}__cap")
-        let code = genApplyCombinator ctx name info' builder
+        // Hot-row fold scheduling: hand the plan to the apply emitter by the
+        // output's NAME, for the duration of this one emission (the
+        // function-body twin is CodeGen's IRCompute(IRApplyCombinator) arm).
+        (match Blade.Optimize.HotRowTable.tryProducer binding.Id with
+         | Some plan -> (hotRowPendingCell ()).[name] <- plan
+         | None -> ())
+        let code =
+            try genApplyCombinator ctx name info' builder
+            finally (hotRowPendingCell ()).Remove name |> ignore
         let ctx' = addVarName binding.Id name ctx
         (forceCode @ capForceCode @ code, ctx')
 
@@ -1986,24 +2012,32 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
          let trailTerms =
              [ for d in 0 .. trailingDimCount - 1 -> $"{denseName}.extents[{leadRank + d}]" ]
          let trailExpr = match trailTerms with | [] -> "1" | xs -> String.concat " * " xs
+         // The REPRESENTATION decision, for `blade plan` (rule `compound`):
+         // a rank-1 mask is the compaction (kept-position table, gather by
+         // position, no hash), a rank-k mask keeps the hashed index.
+         let rank1 = (leadRank = 1)
+         recordCompoundRepresentation name leadRank trailingDimCount
          let lines =
              densePre
              @ maskPre
              @ (idxLines |> List.map (fun l -> ind + l))
              @ [ $"{ind}size_t {name}_trail = {trailExpr};"
                  $"{ind}{elemCpp}* {name}_densepool = nested_array_utilities::pool_base({denseName}.data);"
-                 // The `+ 1` is REQUIRED BY the branchless scatter and only by
-                 // it: that form stores unconditionally and lets the cursor sit
-                 // at `cardinality` after the last selected cell, so a trailing
-                 // unselected cell writes one past the logical end. One element
-                 // of slack, never read, is the price of deleting a branch that
-                 // mispredicts once per grid cell.
-                 (if trailTerms.IsEmpty then
+                 // The `+ 1` is REQUIRED BY the rank >= 2 branchless scatter
+                 // and only by it: that form stores unconditionally and lets
+                 // the cursor sit at `cardinality` after the last selected
+                 // cell, so a trailing unselected cell writes one past the
+                 // logical end. One element of slack, never read, is the price
+                 // of deleting a branch that mispredicts once per grid cell.
+                 // The rank-1 gather by position moves exactly `cardinality *
+                 // trail` cells and needs no slack.
+                 (if trailTerms.IsEmpty && not rank1 then
                      $"{ind}{elemCpp}* {name}_compact = new {elemCpp}[{idxName}->cardinality * {name}_trail + 1];"
                   else
                      $"{ind}{elemCpp}* {name}_compact = new {elemCpp}[{idxName}->cardinality * {name}_trail];")
-                 // scatter present leading cells (row-major prefix-popcount)
-                 compactScatter { Ind = ind; Name = name; IdxName = idxName; ScalarTrail = trailTerms.IsEmpty }
+                 // rank 1: gather by kept position; rank >= 2: scatter present
+                 // leading cells (row-major prefix-popcount)
+                 compactScatter { Ind = ind; Name = name; IdxName = idxName; ScalarTrail = trailTerms.IsEmpty; Rank1 = rank1 }
                  $$"""{{ind}}nested_array_utilities::Compound<{{elemCpp}}, {{leadRank}}> {{name}} { {{name}}_compact, {{idxName}}, {{name}}_trail };""" ]
          // Owns BOTH the compact buffer and the freshly built index. (BL6002
          // restricts compound() to top-level lets today, where the empty
@@ -3256,6 +3290,10 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                 // result is the seed alone (which is exactly the serial answer
                 // for an empty range, init form included).
                 (ompApiUsedCell ()).Value <- true
+                // The partition is blade_fold::chunk_lo, the ONE function every
+                // Path B site spells (review M14), so the chunks here, in the
+                // deferred nest and in the threaded vector arm coincide.
+                (foldLanesUsedCell ()).Value <- true
                 recordFoldForm name $"threaded(Path B chunks, K-lanes({foldLaneCount}) per chunk)" "reduce over a materialized array (Path B)"
                 let partName = $"__rpart_{name}"
                 // K independent LANE accumulators inside each chunk. Lane l owns
@@ -3322,8 +3360,8 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                     $"{ind}            const int __rnt = blade_omp_get_num_threads();"
                     $"{ind}            const int __rt = blade_omp_get_thread_num();"
                     $"{ind}            if (__rt == 0) __rTact = __rnt;"
-                    $"{ind}            const size_t __rlo = __rlo0 + (__rcnt * (size_t)__rt) / (size_t)__rnt;"
-                    $"{ind}            const size_t __rhi = __rlo0 + (__rcnt * ((size_t)__rt + 1)) / (size_t)__rnt;"
+                    $"{ind}            const size_t __rlo = __rlo0 + blade_fold::chunk_lo(__rcnt, (size_t)__rt, (size_t)__rnt);"
+                    $"{ind}            const size_t __rhi = __rlo0 + blade_fold::chunk_lo(__rcnt, (size_t)__rt + 1, (size_t)__rnt);"
                 ] @ laneBody @ [
                     $$"""{{ind}}        }"""
                     $"{ind}        for (int __rt = 0; __rt < __rTact; __rt++) {name} = {wname}({name}, {partName}[__rt]);"
@@ -3597,19 +3635,68 @@ and genOrbitFoldCpp (ctx: CodeGenContext) (ind: string) (name: string) (gName: s
     let total = emitC p.Total
     let accDecl = [ 0 .. p.AccCount - 1 ] |> List.map (fun k -> $"{accName k} = {accCpp}(0)") |> String.concat ", "
     let group = if p.Strict then "AntisymIdx" else "SymIdx"
-    // A `where omp` licence on any level's fold is not spent as a thread team
-    // here: the census says so (the dropped-omp-is-never-silent invariant).
+    // THE THREADED FORM (bench G32): a `where omp` licence on any level's
+    // fold is spent as a team over the OUTERMOST class level, decided by
+    // `OrbitFold.threadedForm` (the plan line says the same).
+    let threaded = Blade.OrbitFold.threadedForm p
     let ompMarker =
-        if p.Levels |> List.exists (fun l -> l.Fold.IsOmpParallel) then
-            let phrase = ompSuppressedPhrase "the orbit-class fold is one serial pass over the packed pool (the licence is spent as the class regrouping; a threaded class fold is not built yet)"
-            [ $"{i1}// {phrase}" ]
+        if Blade.OrbitFold.ompRequested p && not threaded then
+            let why =
+                if not (ompThreadEmissionEnabled ()) then ompThreadsSuppressedReason ()
+                else "the orbit-class fold's pool has fewer than two first-coordinate rows (nothing to divide)"
+            [ $"{i1}// {(ompSuppressedPhrase why)}" ]
         else []
+    let strictLit = if p.Strict then "true" else "false"
     [ yield $"{ind}{accCpp} {name} = {exprToCppCtx ctx p.OuterSeed};"
       yield $"{ind}{{"
-      yield $"{i1}// {Blade.OrbitFold.planForm p}: the logical sum over the {group}<{r}, {n}> pool of `{p.SourceName}`, regrouped (licensed); class sums combine by additions only"
+      yield $"{i1}// {Blade.OrbitFold.planFormCpp p}: the logical sum over the {group}<{r}, {n}> pool of `{p.SourceName}`, regrouped (licensed); class sums combine by additions only"
       yield! ompMarker
       yield $"{i1}{accCpp} {accDecl};"
-      if p.PoolCells > 0L then
+      if p.PoolCells > 0L && threaded then
+          // Rows i of the first coordinate are independent work items: row i
+          // starts at pool offset total - canon_count(n - i) and walks its
+          // own equality patterns into its own class accumulators. Rows are
+          // dealt boustrophedon (block b of T rows: thread t takes row
+          // bT + t, reversed on odd blocks), which balances the triangular
+          // row lengths and is a fixed function of the team size; per-thread
+          // class sums then join the totals in thread order. Each class total
+          // is still a sum over its disjoint terms, so the whole is one more
+          // association of the licensed `+` folds -- additions only, as in
+          // the serial pass -- and a fixed OMP_NUM_THREADS reproduces it.
+          (ompApiUsedCell ()).Value <- true
+          let parts = p.AccCount
+          yield $"{i1}const {elemCpp}* BLADE_RESTRICT __opool = nested_array_utilities::pool_base({gName}.data);"
+          yield $"{i1}const size_t __ototal = nested_array_utilities::canon_count({n}, {r}, {strictLit});"
+          yield $"{i1}int __oT = blade_omp_get_max_threads();"
+          yield $"{i1}if ((size_t)__oT > (size_t){n}) __oT = (int){n};"
+          yield $"{i1}if (__oT < 1) __oT = 1;"
+          // num_threads is a request: the split reads the team the region
+          // got, and the combine reads it back (Path B's rule).
+          yield $"{i1}int __oTact = __oT;"
+          yield $"{i1}{accCpp}* __opart = new {accCpp}[(size_t)__oT * {parts}];"
+          yield $"{i1}BLADE_OMP_PARALLEL_NUM_THREADS(__oT)"
+          yield $"{i1}{{"
+          let i2 = i1 + "    "
+          yield $"{i2}const size_t __ont = (size_t)blade_omp_get_num_threads();"
+          yield $"{i2}const size_t __ot = (size_t)blade_omp_get_thread_num();"
+          yield $"{i2}if (__ot == 0) __oTact = (int)__ont;"
+          yield $"{i2}{accCpp} {accDecl};"
+          yield $"{i2}for (size_t __ob = 0; __ob * __ont < (size_t){n}; __ob++) {{"
+          let i3 = i2 + "    "
+          yield $"{i3}const size_t __oc1 = __ob * __ont + ((__ob & 1) ? (__ont - 1 - __ot) : __ot);"
+          yield $"{i3}if (__oc1 >= (size_t){n}) continue;"
+          yield $"{i3}size_t __oo = __ototal - nested_array_utilities::canon_count((size_t){n} - __oc1, {r}, {strictLit});"
+          yield! gen 2 "__oc1" [ 1 ] i3
+          yield $"{i2}}}"
+          for k in 0 .. parts - 1 do
+              yield $"{i2}__opart[__ot * {parts} + {k}] = {accName k};"
+          yield $"{i1}}}"
+          yield $"{i1}for (int __ot = 0; __ot < __oTact; __ot++) {{"
+          for k in 0 .. parts - 1 do
+              yield $"{i1}    {accName k} = {accName k} + __opart[(size_t)__ot * {parts} + {k}];"
+          yield $"{i1}}}"
+          yield $"{i1}delete[] __opart;"
+      elif p.PoolCells > 0L then
           yield $"{i1}const {elemCpp}* BLADE_RESTRICT __opool = nested_array_utilities::pool_base({gName}.data);"
           yield $"{i1}size_t __oo = 0;"
           yield $"{i1}for (size_t __oc1 = 0; __oc1 < {n}; __oc1++) {{"
@@ -3720,9 +3807,16 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                 | Some (IRRange ([ ix ], _)) ->
                     (match ix.Extent with
                      | IRSparseKeys (SkDomain plan) ->
+                         // Which order the fold walks -- the arm below reads the
+                         // SAME decision (domainFoldOrder), as does the LLVM lane.
+                         let order =
+                             if infos.Length <> 1 then DomainLexOrder "a fused join of several folds shares one lexicographic nest"
+                             else
+                                 domainFoldOrder (resolveCallable kernelExpr)
+                                     (resolveCallable info.Kernel |> Option.map _.Body) plan
                          recordDomainEnum name plan.Name true
                              $"closed-form affine nest ({plan.Levels.Length} level(s): {domainPlanSummary plan}), {plan.Card} cell(s)"
-                             "consumer: streamed fold (no array, no key table)"
+                             $"consumer: streamed fold (no array, no key table); {(domainFoldOrderText plan order)}"
                      | IRSparseKeys (SkStatic entries) ->
                          recordDomainEnum name "(table)" false
                              $"table-enumerated domain or SparseIdx range ({entries.Length} baked key(s)): its conjuncts are not linear inequalities, so there is no closed-form nest to stream"
@@ -3809,9 +3903,32 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                             | head :: _ -> head.BoundDependencies.IsEmpty && head.StrictOffset = 0
                                            && (domainPlanOfLevel head).IsNone
                             | [] -> false)
+                    // M14 (gap G25): how the fold runs INSIDE each thread's
+                    // chunk. Decided here, where the kernel is known, and read
+                    // by the nest emitter AND the `blade plan` census so the
+                    // two cannot disagree. A one-level rectangular sweep under
+                    // a builtin `+`/`*` takes the simd reduction per chunk (the
+                    // serial licensed form's own shape, per thread); the
+                    // dot-class one-level case is taken over entirely by the
+                    // threaded vector arm of `laneLines` below and never
+                    // reaches the nest. Everything else keeps the serial chain
+                    // it had, with the reason on record.
+                    let chunkForm =
+                        match cg0.Bindings with
+                        | _ when foldLanesMode () = FoldLanesOff ->
+                            ChunkSerial "BLADE_FOLD_LANES=0/off (A/B knob)"
+                        | _ when ompTestModeEnabled () ->
+                            ChunkSerial "omp test mode: the coverage instrumentation owns the chunk's loop"
+                        | [ lvl ] when not (laneableFoldLevel cg0 lvl) ->
+                            ChunkSerial "the chunked level is not a plain rectangular sweep"
+                        | [ _ ] ->
+                            (match fpReassocSimdOp callable elemStr with
+                             | Some op -> ChunkSimd op
+                             | None -> ChunkSerial "the fold kernel's combine is a call (comm-declared kernel), or its element type has no simd reduction")
+                        | _ -> ChunkSerial "multi-level nest: each chunk runs the inner nest per outer index"
                     let cg =
                         if chunkable then
-                            { cg0 with FoldChunk = Some { ElemCpp = elemStr; Tag = sanitizeCppName name } }
+                            { cg0 with FoldChunk = Some { ElemCpp = elemStr; Tag = sanitizeCppName name; ChunkForm = chunkForm } }
                         else cg0
                     // L1 LinAlg dispatch. `reduce(<unforced zip under *>, (+))`
                     // over two rank-1 f64 pools IS a dot product; the pattern owns
@@ -3888,19 +4005,79 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                     // BLAS-dispatch arm below emits no body at all -- computing it
                     // eagerly would render (and discard) one there.
                     let laneLines () : string list option =
-                        let laneable (lvl: LoopIndexBinding) =
-                            lvl.BoundDependencies.IsEmpty && lvl.StrictOffset = 0
-                            && lvl.FusedRank.IsNone
-                            && (match lvl.Extent with
-                                | IRCompoundMask _ | IRSparseKeys _ -> false
-                                | _ -> true)
-                            && not cg.HasReynolds && not cg.MpiSlab
-                            && (lvl.Elements
-                                |> List.forall (fun e ->
-                                    match e.SlotTag with
-                                    | Some t -> not (t.StartsWith "__halowin")
-                                    | None -> true))
+                        let laneable (lvl: LoopIndexBinding) = laneableFoldLevel cg lvl
+                        // The dot-class recogniser (blade_fold_lanes.hpp's forms):
+                        // a left-nested product of 1..3 rank-1 real-array peels
+                        // of the accumulator's element type. Shared by the
+                        // threaded arm (M14) and the serial arm (M9) below.
+                        let dotClass (lvl: LoopIndexBinding) =
+                            // double / float only (`foldVecElem`): an integer fold
+                            // keeps the simd reduction -- the header has no
+                            // integer vector form, and GCC's own reduction is
+                            // exact there anyway.
+                            if foldLanesMode () = FoldLanesOff || not (foldVecElem elemStr)
+                               || fpReassocSimdOp callable elemStr <> Some "+" then None
+                            else
+                                dotClassFactors (fun t -> irTypeToCpp t = elemStr) cg.KernelExpr cg.KernelParams lvl
+                                |> Option.bind foldVecKind
                         match cg.Bindings with
+                        // M14 / gap G25: a THREADED dot-class fold. The Path B
+                        // team is opened here, and each thread's chunk is ONE
+                        // call of the explicit K-lane vector form over its
+                        // [__rlo, __rhi) -- the same tree the serial build
+                        // takes over the whole sweep, so a chunk's bits are a
+                        // function of its data and length alone. Partition by
+                        // blade_fold::chunk_lo (the one function every Path B
+                        // site spells), partials combined in job order through
+                        // the fold's wrapper, the caller's seed first: the
+                        // threaded value is deterministic for a fixed team. The
+                        // nest emitter is not involved (no loop is emitted), so
+                        // omp test mode -- whose coverage instrumentation needs
+                        // the nest -- stands down to the nest arm.
+                        | [lvl] when fpReassocEnabled () && foldReorderLicensed callable
+                                     && cg.FoldChunk.IsSome && ompThreadEmissionEnabled ()
+                                     && not (ompTestModeEnabled ())
+                                     && laneable lvl
+                                     && (dotClass lvl).IsSome ->
+                            let (kind, ops) = (dotClass lvl).Value
+                            let k = foldVecLanes kind
+                            let label = foldVecLabel kind k
+                            let streamsWord = if foldVecStreams kind = 1 then "1 operand stream" else $"{(foldVecStreams kind)} operand streams"
+                            let boundStr = genLoopBoundExpr (compoundArrayNamesOf cg.Bindings) lvl
+                            let aliasNames = ops |> List.mapi (fun i _ -> $"__rsrc{i}")
+                            let aliasDecls =
+                                List.map2 (fun alias nm -> $"const {elemStr}* BLADE_RESTRICT {alias} = {nm}.data;") aliasNames ops
+                            let call = foldVecCall elemStr k kind (aliasNames |> List.map (fun a -> $"{a} + __rlo")) "__rhi - __rlo"
+                            (ompApiUsedCell ()).Value <- true
+                            (foldLanesUsedCell ()).Value <- true
+                            recordOmpConstruct name "omp parallel num_threads(T) + fixed-order combine"
+                                $"comm-licensed parallel fold: outer level chunked per thread (Path B), {label} per chunk"
+                            recordFoldForm name $"threaded(Path B chunks, {label} per chunk)" "reduce over a deferred computation (one level, Path B)"
+                            Some (
+                                // BLOCK comment: a kernel-body fold's statements
+                                // are space-joined into a one-line IIFE.
+                                [ $"{ind}/* reduce over computation: comm-licensed parallel fold, outer level chunked per thread (Path B); {label} per chunk ({streamsWord}) */"
+                                  $"{ind}{{"
+                                  $"{ind}    const size_t __rn = {boundStr};"
+                                  $"{ind}    int __rT = blade_omp_get_max_threads();"
+                                  $"{ind}    if ((size_t)__rT > __rn) __rT = (int)__rn;"
+                                  $"{ind}    if (__rT < 1) __rT = 1;"
+                                  $$"""{{ind}}    if (__rn > 0) {""" ]
+                                @ (aliasDecls |> List.map (fun d -> $"{ind}        {d}"))
+                                @ [ $"{ind}        {elemStr}* __rpart = new {elemStr}[__rT];"
+                                    $"{ind}        bool* __rhad = new bool[__rT]();"
+                                    $"{ind}        BLADE_OMP_PARALLEL_NUM_THREADS(__rT)"
+                                    $$"""{{ind}}        {"""
+                                    $"{ind}            const int __rnt = blade_omp_get_num_threads();"
+                                    $"{ind}            const int __rt = blade_omp_get_thread_num();"
+                                    $"{ind}            const size_t __rlo = blade_fold::chunk_lo(__rn, (size_t)__rt, (size_t)__rnt);"
+                                    $"{ind}            const size_t __rhi = blade_fold::chunk_lo(__rn, (size_t)__rt + 1, (size_t)__rnt);"
+                                    $$"""{{ind}}            if (__rhi > __rlo) { __rpart[__rt] = {{call}}; __rhad[__rt] = true; }"""
+                                    $$"""{{ind}}        }"""
+                                    $"{ind}        for (int __rt = 0; __rt < __rT; __rt++) if (__rhad[__rt]) {name} = {wname}({name}, __rpart[__rt]);"
+                                    $"{ind}        delete[] __rpart; delete[] __rhad;"
+                                    $$"""{{ind}}    }"""
+                                    $"{ind}}}" ])
                         // `FoldChunk` (an `omp`-licensed fold) keeps Path B's
                         // thread team whenever this build opens teams. When it
                         // does NOT (BLADE_OMP_THREADS=1) the chunk plan is dead
@@ -4030,23 +4207,81 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                 let realOperand = lvl.Elements |> List.exists (_.Virtual.IsRealArray)
                                 match fpReassocSimdOp callable elemStr with
                                 | Some opStr when not realOperand ->
-                                    let (outerOpen, innerDecl, innerHeader, outerClose) = genDomainFoldNest lvl plan
-                                    recordFoldForm name "simd-reduction" $"reduce over a closed-form domain ({plan.Name}: affine nest, simd on the innermost field)"
+                                    // THE ORDER (domainFoldOrder, the decision the
+                                    // plan line and the LLVM lane read): a BAND under
+                                    // the licence walks diagonal by diagonal -- the
+                                    // expert's `do k = -w, w; do i`, same cells, same
+                                    // per-cell arithmetic, the licensed summation
+                                    // order; the inner run is unit-stride in i and in
+                                    // j = i - k, and a term depending only on i - j is
+                                    // invariant in it, which g++ hoists once inlined.
+                                    // Every other domain keeps the lex nest.
+                                    let order = domainFoldOrder (Some callable) (Some cg.KernelExpr) plan
+                                    // THREADS (bench gap G31): a `where omp` fold
+                                    // kernel, in a build that emits teams.
+                                    let mapSafe = domainMapKernelPure cg.KernelExpr
+                                    let threaded = callable.IsOmpParallel && ompThreadEmissionEnabled () && mapSafe
+                                    let walk =
+                                        match order with
+                                        | DomainDiagonalOrder dg ->
+                                            $"band walked by diagonal, k = {(plan.Levels.[0].Field)} - {(plan.Levels.[1].Field)} in [{dg.KLo}, {dg.KHi}], simd on the {(plan.Levels.[0].Field)} run"
+                                        | DomainLexOrder _ -> "affine nest, simd on the innermost field"
+                                    let outerName =
+                                        match order with
+                                        | DomainDiagonalOrder _ -> "the diagonal index k"
+                                        | DomainLexOrder _ -> $"the outermost field {(plan.Levels.[0].Field)}"
+                                    if threaded then
+                                        recordOmpConstruct name "omp parallel num_threads(T) + fixed-order combine"
+                                            $"closed-form domain fold ({plan.Name}): {outerName} cut into fixed per-thread blocks (each innermost run cut instead when the team outnumbers its trips)"
+                                        recordFoldForm name $"threaded(fixed blocks over {outerName}, fixed-order combine; simd within each block)" $"reduce over a closed-form domain ({plan.Name}: {walk})"
+                                    else
+                                        recordFoldForm name "simd-reduction" $"reduce over a closed-form domain ({plan.Name}: {walk})"
+                                    // The licence asked for threads this build does not
+                                    // emit: said in the C++, never silently.
+                                    let ompNote =
+                                        if callable.IsOmpParallel && not threaded then
+                                            let why =
+                                                if not (ompThreadEmissionEnabled ()) then ompThreadsSuppressedReason ()
+                                                else "the domain map's kernel may assign a capture or emit output (or calls something that may), which a thread team would race on"
+                                            [ $"{ind}/* {(ompSuppressedPhrase why)} */" ]
+                                        else []
+                                    let walkNote =
+                                        match order with
+                                        | DomainDiagonalOrder _ -> "band walked by diagonal (k = i - j)"
+                                        | DomainLexOrder _ -> "affine nest"
+                                    let teamNote = if threaded then ", one team, fixed per-thread blocks, fixed-order combine" else ""
                                     Some (
-                                        chunkNote @
-                                        [ $"{ind}/* reduce over computation: closed-form domain {plan.Name} ({plan.Card} cells), affine nest, omp simd reduction on the innermost field (licensed reorder) */"
-                                          $"{ind}{{" ]
-                                        @ (aliasDecls |> List.map (fun s -> ind + "    " + s))
-                                        @ (outerOpen |> Option.map (fun h -> [ $"{ind}    {h}" ]) |> Option.defaultValue [])
-                                        @ [ $"{ind}        {innerDecl}"
-                                            $"{ind}        BLADE_OMP_SIMD_REDUCTION({opStr}:{name})"
-                                            $"{ind}        {innerHeader}" ]
-                                        @ (peels |> List.map (fun s -> $"{ind}            {s}"))
-                                        @ [ $"{ind}            {name} = {name} {opStr} {bodyExpr};"
-                                            $"{ind}        }}" ]
-                                        @ (outerClose |> Option.map (fun c -> [ $"{ind}    {c}" ]) |> Option.defaultValue [])
-                                        @ [ $"{ind}}}" ])
+                                        chunkNote @ ompNote @
+                                        [ $"{ind}/* reduce over computation: closed-form domain {plan.Name} ({plan.Card} cells), {walkNote}, omp simd reduction on the innermost run (licensed reorder){teamNote} */" ]
+                                        @ (genDomainFoldCpp lvl plan order name elemStr opStr threaded aliasDecls peels bodyExpr
+                                           |> List.map (fun s -> ind + s)))
                                 | _ -> None
+                            | None ->
+                            // M9 (gap G26): a DOT-CLASS body takes the explicit
+                            // K-lane vector form -- one call over the restrict
+                            // pool aliases, K independent vector accumulators in
+                            // the fixed tree blade_fold_lanes.hpp documents --
+                            // in place of the one-accumulator simd reduction
+                            // below, which GCC never interleaves. The seed is
+                            // folded in through the wrapper, as every arm here
+                            // does; the call's own chains start at +0.
+                            match dotClass lvl with
+                            | Some (kind, ops) ->
+                                let k = foldVecLanes kind
+                                let label = foldVecLabel kind k
+                                let streamsWord = if foldVecStreams kind = 1 then "1 operand stream" else $"{(foldVecStreams kind)} operand streams"
+                                let ptrs = ops |> List.map (fun nm -> Map.tryFind nm srcAliases |> Option.defaultValue $"{nm}.data")
+                                let call = foldVecCall elemStr k kind ptrs "__rhi"
+                                (foldLanesUsedCell ()).Value <- true
+                                recordFoldForm name label "reduce over a deferred computation (one level)"
+                                Some (
+                                    chunkNote @
+                                    [ $"""{ind}/* reduce over computation: {label} (explicit vector lane tree, licensed reorder, {streamsWord}) */"""
+                                      $"{ind}{{"
+                                      $"{ind}    const size_t __rhi = {boundStr};" ]
+                                    @ (aliasDecls |> List.map (fun s -> ind + "    " + s))
+                                    @ [ $"{ind}    {name} = {wname}({name}, {call});"
+                                        $"{ind}}}" ])
                             | None ->
                             match fpReassocSimdOp callable elemStr with
                             | Some opStr ->
@@ -4142,29 +4377,42 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                     // The fold nest as emitted today, and the lane form when the
                     // knob and the gate above both admit it. Shared by both
                     // non-dispatch arms so they cannot drift.
-                    // A `where omp` fold kernel over a closed-form domain: the
-                    // nest has no thread-level form (never chunked, see
-                    // `chunkable`), so the thread half of the licence is
-                    // declined -- never silently.
-                    let domainOmpNote =
+                    // A `where omp` fold kernel over a closed-form domain whose
+                    // threaded form (genDomainFoldCpp, G31, in the lane arm above)
+                    // declined: the thread half of the licence is dropped -- never
+                    // silently, and exactly once (the Path B note below stays quiet
+                    // for a domain nest, which is never chunked). A FUNCTION:
+                    // ompSuppressedPhrase records the census line as it renders.
+                    let isDomainFold =
                         match cg.Bindings with
-                        | head :: _ when callable.IsOmpParallel && (domainPlanOfLevel head).IsSome ->
-                            [ ind + "/* " + ompSuppressedPhrase "a closed-form domain nest has no thread-level form yet (its licence is spent on the innermost-field simd reduction where the kernel allows one)" + " */" ]
-                        | _ -> []
+                        | head :: _ -> (domainPlanOfLevel head).IsSome
+                        | [] -> false
+                    let domainOmpNote () =
+                        if callable.IsOmpParallel && isDomainFold then
+                            let why =
+                                if foldKernelReproVetoed callable then
+                                    "fold kernel is `where repro` (the operation order is the contract; reorder licence vetoed)"
+                                elif not (fpReassocEnabled ()) then fpReproReason ()
+                                else "a closed-form domain fold has a thread-level form only for a builtin `+`/`*` reduction of a scalar over the domain's own map (this fold's kernel, element type or operands do not qualify)"
+                            [ ind + "/* " + ompSuppressedPhrase why + " */" ]
+                        else []
                     let foldNestLines () =
+                        let lane = laneLines ()
                         wrapperLines
                         @ [$"{ind}{elemStr} {name} = {seedStr};"]
-                        @ domainOmpNote
-                        @ (match laneLines () with
+                        @ (match lane with
                            | Some ls -> ls
                            | None ->
+                               let domainNote = domainOmpNote ()
                                // What the ordinary nest makes of this fold, for
                                // `blade plan` (the lane arm records its own).
                                let form =
                                    if not (foldReorderLicensed callable) then "serial (no reorder licence)"
                                    elif not (fpReassocEnabled ()) then "serial (repro)"
                                    elif cg.FoldChunk.IsSome && ompThreadEmissionEnabled () then
-                                       "threaded(Path B chunks, serial within each chunk)"
+                                       (match cg.FoldChunk.Value.ChunkForm with
+                                        | ChunkSimd _ -> "threaded(Path B chunks, simd-reduction within each chunk)"
+                                        | ChunkSerial why -> $"threaded(Path B chunks, serial within each chunk: {why})")
                                    elif cg.Bindings.Length <> 1 then
                                        "serial (multi-level nest: no lane or simd form for a fold over a nest yet)"
                                    elif (domainPlanOfLevel (List.head cg.Bindings)).IsSome then
@@ -4177,7 +4425,7 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                // the MAP's request, and the FoldChunk lines need a
                                // plan. Census line for exactly that case.
                                let unchunkedNote =
-                                   if callable.IsOmpParallel && cg.FoldChunk.IsNone then
+                                   if callable.IsOmpParallel && cg.FoldChunk.IsNone && not isDomainFold then
                                        let why =
                                            if foldKernelReproVetoed callable then
                                                "fold kernel is `where repro` (the operation order is the contract; reorder licence vetoed)"
@@ -4186,7 +4434,7 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                        // space-joined into a one-line IIFE.
                                        [ $"{ind}/* {(ompSuppressedPhrase why)} */" ]
                                    else []
-                               unchunkedNote @ genLoopNest cg ctx.VarNames ctx.Indent)
+                               domainNote @ unchunkedNote @ genLoopNest cg ctx.VarNames ctx.Indent)
                     let code =
                         match dotCall with
                         | Some (call, entry) ->

@@ -1,3 +1,0 @@
-[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\fusedchain-e3e2be48-5376-efa7a1bd\fusedchain.ll
-[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-17-LAPTOP-350H6LDB\session-231651\build\fusedchain\full\serial-licensed-native\blade-llvm\fusedchain.exe
-[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\fusedchain-e3e2be48-5376-efa7a1bd

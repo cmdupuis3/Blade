@@ -18,7 +18,7 @@ F0. **The charter's original input generator was an affine sawtooth.** Two affin
     out exactly 114.0 in both Blade and Python. A first fix (R3: affine, quadratic, affine)
     still had long-lag correlations, non-geometric runs and higher-order neighbour dependence
     (`bench/notes/generator-check.md`). It was REPLACED on 2026-10-17 by variant D (R5:
-    affine, quadratic, affine, middle-square, affine), now README section 5. Reference values
+    affine, quadratic, affine, middle-square, affine), now kernels/README.md §3. Reference values
     under D (seed 10000019), reproduced in BOTH lanes and in numpy: final states h5 =
     408748897, 189020261, 1945512958 for k = 0, 1, 2. For x(k) = gen(k, 10000019, -1, 1),
     k = 0..9: sum = -3.1010268041864, sum of squares = 3.4272198544854. Every kernel, twin
@@ -47,7 +47,7 @@ F3. **The C++ lane ALWAYS compiles with `-fopenmp`** (`Build.fs` line ~1001; `om
     pragmas from being emitted; every `BLADE_OMP_SIMD` / `BLADE_OMP_PARALLEL_FOR_SIMD` /
     `BLADE_OMP_SIMD_REDUCTION` macro that is emitted is LIVE in the serial arm, and libgomp
     is linked. (The charter's "+ `-fopenmp` when pragmas are emitted" is inaccurate.) For
-    README section 2's "vectorization hints" item: Blade's serial build DOES keep its `omp
+    kernels/README.md §1's "vectorization hints" item: Blade's serial build DOES keep its `omp
     simd` hints active. The one strict-regime hazard: a knob-suppressed "Path A" fold (bare
     `where omp` on a builtin `+`/`*` fold at TOP LEVEL) is re-emitted as
     `BLADE_OMP_SIMD_REDUCTION`, which reassociates in the serial arm. No kernel of mine uses
@@ -172,7 +172,7 @@ region with `blade_now()`, and the prints come after `blade_print_completed`.
 ## 2. Idiomatic spellings that work in both lanes (for the kernels)
 
 - Contract shape: functions hold every array; top level is the block of F6.
-- Generator (README section 5, variant D), exact in Int64. `1103515245 * (k + seed)` stays
+- Generator (kernels/README.md §3.2, variant D), exact in Int64. `1103515245 * (k + seed)` stays
   below 2^56 for k + seed < 2^25, and h3 * h3 < 2^62:
 
   ```
@@ -266,7 +266,7 @@ omp -> p + q, 0.0)`.
   working set to about 72 MB, over the cap. The per-row prodsum spelling streams, threads,
   and is the same rung as README 7.2's per-row checksum nest.
 - The row width is derived as `Int64(extents(range<X>))`, so `nx` is not written as a
-  second literal (README section 4).
+  second literal (kernels/README.md §2).
 - fast: the per-row prodsum gets `BLADE_OMP_SIMD_REDUCTION` (C++).
 
 **recur** (`recur.blade`). The spec's idiom verbatim: `rhs`, `step` (four stage lets), and

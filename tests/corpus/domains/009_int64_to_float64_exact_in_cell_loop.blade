@@ -1,0 +1,40 @@
+// TEST: Closed-Form Domain: Int64 To Float64 Stays Correctly Rounded In A Vectorized Cell Loop
+// `Float64(x)` of an Int64 is ONE correctly rounded conversion in every lane.
+// AVX2 has no packed int64 -> double, so the compiled lanes spell it as an
+// exact split (high word through the packed int32 form, low word through the
+// 2^52 magic exponent, one rounding of the exact sum) that lets a domain
+// fold's cell loop vectorize (bench gap G30/G33: band's `Float64(i - j)`).
+// The terms sit next to 2^53, where a double's spacing is 2 above and 1
+// below: 2^53 + 1 ties to 2^53, 2^53 + 3 ties to 2^53 + 4, -(2^53 + 3) ties
+// to -(2^53 + 4) -- any conversion that is not round-to-nearest-even, or that
+// rounds twice, moves the sums. Every term is an integer-valued double, so the
+// licensed fold reads the same under any association.
+let static n = 37
+let static w = 5
+
+static struct Band {
+    i: Int64<min=0, max=n-1>,
+    j: Int64<min=0, max=n-1>
+} where abs(i - j) <= w
+
+let static K = 9007199254740992
+
+function above(i: Int64, j: Int64) -> Float64 = Float64(K + (i - j)) - 9007199254740992.0
+function below(i: Int64, j: Int64) -> Float64 = Float64(3 * (i - j) - K) + 9007199254740992.0
+
+let cells = reduce(method_for(range<Band>) <@> lambda(i, j) -> 1, (+))
+// EXPECT: cells = 377
+let s_above = reduce(method_for(range<Band>) <@> lambda(i, j) -> above(i, j), lambda(p, q) where omp -> p + q, 0.0)
+// EXPECT: s_above = -34.0
+let s_below = reduce(method_for(range<Band>) <@> lambda(i, j) -> below(i, j), lambda(p, q) where omp -> p + q, 0.0)
+// EXPECT: s_below = -34.0
+let s_ordered = reduce(method_for(range<Band>) <@> lambda(i, j) -> above(i, j) + below(i, j), (+))
+// EXPECT: s_ordered = -68.0
+let tie_up = Float64(K + 1) == 9007199254740992.0
+// EXPECT: tie_up = true
+let tie_neg = Float64(-K - 3) == -9007199254740996.0
+// EXPECT: tie_neg = true
+let top = Float64(9223372036854775807) == 9223372036854775808.0
+// EXPECT: top = true
+let bottom = Float64(-9223372036854775807 - 1) == -9223372036854775808.0
+// EXPECT: bottom = true

@@ -1,3 +1,0 @@
-[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\antisym-ce4e56be-10020-da19e645\antisym.cpp
-[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-100329\build\antisym\full\mt8-licensed-native\blade-cpp\antisym.exe
-[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\antisym-ce4e56be-10020-da19e645

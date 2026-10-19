@@ -122,29 +122,109 @@ let genDomainLoopHeaderWith (withCounter: bool) (level: LoopIndexBinding) (plan:
 let genDomainLoopHeader (level: LoopIndexBinding) (plan: DomainPlan) : string =
     genDomainLoopHeaderWith true level plan
 
-/// The same nest split for a vectorized FOLD: the outer fields' single-line
-/// header (None at rank 1), the innermost field's hoisted upper end, the
-/// innermost header in OpenMP canonical form (no counter), and the outer close.
-/// The caller puts its `omp simd reduction` pragma between the last two.
-let genDomainFoldNest (level: LoopIndexBinding) (plan: DomainPlan)
-        : string option * string * string * string option =
-    let r = plan.Levels.Length
+/// The LICENSED fold over a closed-form domain, as C++ statements (unindented,
+/// one block): the walk `order` chooses (domainFoldOrder) with the licence
+/// spent as `omp simd reduction` on the innermost run, the nest carrying no
+/// cell counter so that run stays in OpenMP canonical form.
+///
+/// `threaded` (bench gap G31: a `where omp` fold kernel, threads emitted, the
+/// licence live) wraps the nest in one explicit team with PRIVATE partials and
+/// a FIXED-ORDER combine, Path B's discipline: the OUTERMOST enumerated
+/// variable (k on a diagonal walk, the first field otherwise) is cut into
+/// contiguous per-thread blocks, and when the team outnumbers its trips the
+/// innermost run of every outer value is cut instead -- so a 3-diagonal band
+/// still splits across 8 threads. Partials combine in thread order after the
+/// region: for a given team size the value is a fixed function of the data,
+/// run to run. The outermost level's bounds are constants by construction
+/// (nothing encloses it), which is what lets it be partitioned up front.
+let genDomainFoldCpp (level: LoopIndexBinding) (plan: DomainPlan) (order: DomainFoldOrder)
+        (name: string) (elemStr: string) (opStr: string) (threaded: bool)
+        (prelude: string list) (peels: string list) (bodyExpr: string) : string list =
     let v = domainFieldVar level
-    let lvls = Array.ofList plan.Levels
-    let outer =
-        if r = 1 then None
+    let plus (c: int64) = if c = 0L then "" elif c < 0L then $" - {-c}LL" else $" + {c}LL"
+    // (variable, lower end, upper end) per nesting level, the outermost's
+    // constant ends, and the statements that open the innermost body.
+    let levels, outerLo, outerHi, innerPost =
+        match order with
+        | DomainDiagonalOrder dg ->
+            let kv = $"{level.IndexName}_k"
+            [ (kv, $"{dg.KLo}LL", $"{dg.KHi}LL")
+              (v 0, $"std::max<int64_t>({dg.ILo}LL, {kv}{plus dg.JLo})", $"std::min<int64_t>({dg.IHi}LL, {kv}{plus dg.JHi})") ],
+            dg.KLo, dg.KHi, [ $"const int64_t {v 1} = {v 0} - {kv};" ]
+        | DomainLexOrder _ ->
+            let lv0 = List.head plan.Levels
+            let zeros = Array.zeroCreate<int64> plan.Levels.Length
+            (plan.Levels |> List.mapi (fun k lvl -> (v k, domainBoundCpp v true lvl.Lo, domainBoundCpp v false lvl.Hi))),
+            Blade.Types.domainLower lv0.Lo zeros, Blade.Types.domainUpper lv0.Hi zeros, []
+    let r = levels.Length
+    let acc = if threaded then "__dacc" else name
+    let pad (d: int) (s: string) = String.replicate d "    " + s
+    let body (d: int) =
+        (innerPost @ peels |> List.map (pad d)) @ [ pad d $"{acc} = {acc} {opStr} {bodyExpr};" ]
+    // The nest from level `k` down, at depth `d`.
+    let rec nest (k: int) (d: int) : string list =
+        let (var, lo, hi) = levels.[k]
+        let e = $"{level.IndexName}_e{k}"
+        let isOuter = k = 0 && threaded
+        if k = r - 1 then
+            let header =
+                if isOuter then
+                    [ pad d $"BLADE_OMP_SIMD_REDUCTION({opStr}:{acc})"
+                      pad d $"for (int64_t {var} = __olo; {var} < __ohi; ++{var}) {{" ]
+                elif threaded then
+                    [ pad d $"int64_t {var}_lo = {lo};"
+                      pad d $"int64_t {e} = {hi};"
+                      pad d $"if (!__byOuter && {e} >= {var}_lo) {{ const int64_t __s = {var}_lo, __len = {e} - __s + 1; {var}_lo = __s + (__len * __rt) / __rnt; {e} = __s + (__len * (__rt + 1)) / __rnt - 1; }}"
+                      pad d $"BLADE_OMP_SIMD_REDUCTION({opStr}:{acc})"
+                      pad d $"for (int64_t {var} = {var}_lo; {var} <= {e}; ++{var}) {{" ]
+                else
+                    [ pad d $"const int64_t {e} = {hi};"
+                      pad d $"BLADE_OMP_SIMD_REDUCTION({opStr}:{acc})"
+                      pad d $"for (int64_t {var} = {lo}; {var} <= {e}; ++{var}) {{" ]
+            header @ body (d + 1) @ [ pad d "}" ]
         else
-            [ 0 .. r - 2 ]
-            |> List.map (fun k ->
-                let e = $"{level.IndexName}_e{k}"
-                $"for (int64_t {v k} = {domainBoundCpp v true lvls.[k].Lo}, {e} = {domainBoundCpp v false lvls.[k].Hi}; {v k} <= {e}; ++{v k})")
-            |> String.concat " "
-            |> fun s -> Some (s + " {")
-    let k = r - 1
-    let e = $"{level.IndexName}_e{k}"
-    let innerDecl = $"const int64_t {e} = {domainBoundCpp v false lvls.[k].Hi};"
-    let innerHeader = $"for (int64_t {v k} = {domainBoundCpp v true lvls.[k].Lo}; {v k} <= {e}; ++{v k}) {{"
-    (outer, innerDecl, innerHeader, (if r = 1 then None else Some "}"))
+            let header =
+                if isOuter then pad d $"for (int64_t {var} = __olo; {var} < __ohi; ++{var}) {{"
+                else pad d $"for (int64_t {var} = {lo}, {e} = {hi}; {var} <= {e}; ++{var}) {{"
+            [ header ] @ nest (k + 1) (d + 1) @ [ pad d "}" ]
+    if not threaded then
+        [ "{" ] @ (prelude |> List.map (pad 1)) @ nest 0 1 @ [ "}" ]
+    else
+        (ompApiUsedCell ()).Value <- true
+        let ident = if opStr = "*" then $"static_cast<{elemStr}>(1)" else $"static_cast<{elemStr}>(0)"
+        [ "{" ]
+        @ (prelude |> List.map (pad 1))
+        @ [ pad 1 $"const int64_t __dlo = {outerLo}LL, __dn = {outerHi - outerLo + 1L}LL;"
+            pad 1 "int __dT = blade_omp_get_max_threads();"
+            pad 1 "if (__dT < 1) __dT = 1;"
+            pad 1 $"{elemStr}* __dpart = new {elemStr}[__dT];"
+            pad 1 $"for (int __t = 0; __t < __dT; ++__t) __dpart[__t] = {ident};"
+            pad 1 "BLADE_OMP_PARALLEL_NUM_THREADS(__dT)"
+            pad 1 "{"
+            pad 2 "const int __rnt = blade_omp_get_num_threads();"
+            pad 2 "const int __rt = blade_omp_get_thread_num();"
+            pad 2 (if r = 1 then "const bool __byOuter = true;" else "const bool __byOuter = __dn >= (int64_t)__rnt;")
+            pad 2 "const int64_t __olo = __byOuter ? __dlo + (__dn * __rt) / __rnt : __dlo;"
+            pad 2 "const int64_t __ohi = __byOuter ? __dlo + (__dn * (__rt + 1)) / __rnt : __dlo + __dn;"
+            // The thread's walk runs in a BY-VALUE closure: inside the outlined
+            // region every captured array is a reference into shared memory, so
+            // g++ re-read `x.data` through it per cell and turned the run's
+            // contiguous loads into emulated gathers (vpextrq + vmovsd; band mt8
+            // 1.9 ms against 0.7 ms serial). A per-thread copy of each captured
+            // Array header (pointer + extents, never the pool) keeps them in
+            // registers. `mutable`: a called wrapper may take an `Array&`. The
+            // fold kernel writes no capture (BL4005 refuses a captured write in
+            // an omp body), so the copies are read-only in effect.
+            pad 2 $"const {elemStr} __dacc = [=]() mutable -> {elemStr} {{"
+            pad 3 $"{elemStr} __dacc = {ident};" ]
+        @ nest 0 3
+        @ [ pad 3 "return __dacc;"
+            pad 2 "}();"
+            pad 2 "if (__rt < __dT) __dpart[__rt] = __dacc;"
+            pad 1 "}"
+            pad 1 $"for (int __t = 0; __t < __dT; ++__t) {name} = {name} {opStr} __dpart[__t];"
+            pad 1 "delete[] __dpart;"
+            "}" ]
 
 /// `blade plan` / comment text for a plan's bounds: `i in [0, 10], j in
 /// [max(0, i - 2), min(10, i + 2)]` in the struct's own field names.
@@ -1485,10 +1565,48 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     // nest, so `depth` advances by 3 before the first loop header.
     match foldChunk with
     | Some plan ->
+        // M14 (gap G25): the form inside each chunk, decided by the producer.
+        let chunkPhrase =
+            match plan.ChunkForm with
+            | ChunkSimd op -> $"omp simd reduction({op}) within each chunk"
+            | ChunkSerial why -> $"serial within each chunk: {why}"
         recordOmpConstruct codeGen.OutputName "omp parallel num_threads(T) + fixed-order combine"
-            "comm-licensed parallel fold: outer level chunked per thread (Path B)"
+            $"comm-licensed parallel fold: outer level chunked per thread (Path B), {chunkPhrase}"
         let outerBound = genLoopBoundExpr compoundArrays (List.head codeGen.Bindings)
         (ompApiUsedCell ()).Value <- true
+        // The partition is blade_fold::chunk_lo (blade_fold_lanes.hpp): the ONE
+        // function every Path B site spells, so this nest's chunks coincide
+        // with the materialized fold's and the threaded vector arm's.
+        (foldLanesUsedCell ()).Value <- true
+        // ChunkSimd: the chunk's rank-1 real-array operands are read through
+        // restrict pool aliases (the vectorizer cannot otherwise prove the
+        // sweep dependence-free behind the Array struct's subscript -- the
+        // same aliases the serial licensed form uses), and the accumulator is
+        // seeded with the operator's identity so the reduction clause has a
+        // private copy to start from. Read-only sharing is permitted under
+        // restrict, `zip(x, x)` included.
+        let simdAliases =
+            match plan.ChunkForm with
+            | ChunkSimd _ ->
+                (List.head codeGen.Bindings).Elements
+                |> List.filter (fun e ->
+                    e.Virtual.IsRealArray && e.ArrayRank = 1
+                    && (match e.SlotTag with Some t -> not (t.StartsWith "__halowin") | None -> true)
+                    && not (Map.containsKey e.ArrayName streamed))
+                |> List.map (fun e -> e.ArrayName)
+                |> List.distinct
+                |> List.mapi (fun i nm -> (nm, $"__rsrc{i}_{plan.Tag}"))
+            | ChunkSerial _ -> []
+        for (nm, alias) in simdAliases do
+            for e in (List.head codeGen.Bindings).Elements do
+                if e.ArrayName = nm && e.Virtual.IsRealArray && e.ArrayRank = 1
+                   && (match e.SlotTag with Some t -> not (t.StartsWith "__halowin") | None -> true) then
+                    currentNames <- Map.add e.ArrayPosition alias currentNames
+        let accSeed =
+            match plan.ChunkForm with
+            | ChunkSimd "*" -> "1"
+            | ChunkSimd _ -> "0"
+            | ChunkSerial _ -> $"{plan.ElemCpp}()"
         lines <- lines @ [
             ind depth + "// reduce over computation: comm-licensed parallel fold, outer level chunked"
             ind depth + "{"
@@ -1503,15 +1621,19 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
             // (num_threads is a request -- see the flat path's note) and skips a
             // chunk whose inner nest contributed nothing.
             ind (depth + 2) + $"bool* {fcHad} = new bool[{fcT}]();"
+        ] @ (simdAliases |> List.map (fun (nm, alias) ->
+                ind (depth + 2) + $"const {plan.ElemCpp}* BLADE_RESTRICT {alias} = {nm}.data;"))
+        @ [
             ind (depth + 2) + $"BLADE_OMP_PARALLEL_NUM_THREADS({fcT})"
             ind (depth + 2) + "{"
             ind (depth + 3) + "const int __rnt = blade_omp_get_num_threads();"
             ind (depth + 3) + "const int __rt = blade_omp_get_thread_num();"
-            ind (depth + 3) + $"const size_t __rlo = ({fcRn} * (size_t)__rt) / (size_t)__rnt;"
-            ind (depth + 3) + $"const size_t __rhi = ({fcRn} * ((size_t)__rt + 1)) / (size_t)__rnt;"
-            // Value-initialized, never READ before __rhas turns true; the
-            // initializer only keeps -Wmaybe-uninitialized quiet.
-            ind (depth + 3) + $"{plan.ElemCpp} {fcAcc} = {plan.ElemCpp}();"
+            ind (depth + 3) + $"const size_t __rlo = blade_fold::chunk_lo({fcRn}, (size_t)__rt, (size_t)__rnt);"
+            ind (depth + 3) + $"const size_t __rhi = blade_fold::chunk_lo({fcRn}, (size_t)__rt + 1, (size_t)__rnt);"
+            // ChunkSerial: value-initialized, never READ before __rhas turns
+            // true (the initializer only keeps -Wmaybe-uninitialized quiet).
+            // ChunkSimd: the operator's identity, the reduction's seed.
+            ind (depth + 3) + $"{plan.ElemCpp} {fcAcc} = {accSeed};"
             ind (depth + 3) + $"bool {fcHas} = false;"
         ]
         depth <- depth + 3
@@ -1612,6 +1734,29 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
         else compactFlatWritePlan codeGen outRowName
     match compactFlat with
     | Some plan -> lines <- lines @ [ind depth + plan.PoolDecl]
+    | None -> ()
+    // HOT-ROW FOLD SCHEDULING (Blade.Optimize.planHotRowFolds): the consumer's
+    // per-row fold runs behind each produced row, inside this nest's
+    // outermost loop. Only the plain materializing nest admits it: no fold
+    // accumulator, no slab / segment / tile substitution of the outer level
+    // (the row sums would cover one rank's rows while Allgatherv restores the
+    // whole array), no streamed source, no shared-value leaf, a hoisted output
+    // row (the rank-2 epilogue reads the row through that restrict pointer),
+    // and no `collapse` pragma spanning level 0 and 1 (OpenMP forbids
+    // intervening code inside a collapsed prefix). A declined site publishes
+    // nothing, and the consumer keeps the two-pass form.
+    let hotRow =
+        match codeGen.RowEpilogue with
+        | Some ep when codeGen.FoldWrapper.IsNone && not codeGen.MpiSlab && codeGen.ShareDecl.IsNone
+                       && Map.isEmpty streamed && List.length codeGen.Bindings >= 2
+                       && outRowDecl.IsSome && compactFlat.IsNone
+                       && not (pragmaLevel = Some 0 && ompLastLevel > 0) ->
+            Some ep
+        | _ -> None
+    match hotRow with
+    | Some ep ->
+        lines <- lines @ [ ind depth + $"// hot-row fold: `{ep.RowSumName}` holds the row fold of each row of `{codeGen.OutputName}`, computed right after the row is produced (Blade.Optimize.planHotRowFolds)" ]
+        for l in ep.Prelude do lines <- lines @ [ind depth + l]
     | None -> ()
     for binding in codeGen.Bindings do
         let levelIdx = bidx
@@ -1721,7 +1866,16 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
                && bidx = lastBindingIdx && bidx > ompLastLevel
             then [ ind depth + "// [ivdep] declined: kernel body contains an inner loop (prodsum/reduce/contains/nested apply), so this header cannot vectorize" ]
             else []
-        lines <- lines @ suppressedMarker @ ivdepSuppressedMarker @ [ind depth + pragmaPrefix + ivdepPrefix + header]
+        // M14: the chunk's own `omp simd reduction` on the chunked outer loop
+        // (a SIMD construct inside the explicit team; it opens no team).
+        let chunkSimdPragma =
+            match foldChunk with
+            | Some plan when isOuter ->
+                (match plan.ChunkForm with
+                 | ChunkSimd op -> [ ind depth + $"BLADE_OMP_SIMD_REDUCTION({op}:{fcAcc})" ]
+                 | ChunkSerial _ -> [])
+            | _ -> []
+        lines <- lines @ suppressedMarker @ ivdepSuppressedMarker @ chunkSimdPragma @ [ind depth + pragmaPrefix + ivdepPrefix + header]
         depth <- depth + 1
         // This level's share of the compact output's pool offset, hoisted here
         // because the term is invariant under every level inside it -- which is
@@ -1975,6 +2129,11 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
         // (the kernel expression can be a large Reynolds sum) and the branch is
         // loop-invariant after the first iteration.
         | Some wname, Some plan ->
+            match plan.ChunkForm with
+            // ChunkSimd: the reduction statement in the `x = x op expr` shape
+            // the clause requires, into the identity-seeded private copy.
+            | ChunkSimd op -> $"{foldAccName} = {foldAccName} {op} {reynoldsResult.Value.CppExpr};"
+            | ChunkSerial _ ->
             sprintf "{ %s __rv = %s; if (%s) %s = %s(%s, __rv); else { %s = __rv; %s = true; } }"
                 plan.ElemCpp reynoldsResult.Value.CppExpr
                 fcHas foldAccName wname foldAccName
@@ -1987,10 +2146,37 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     | Some rw -> for l in rw do lines <- lines @ [ind depth + l]
     | None -> lines <- lines @ [ind depth + assignLine.Value]
 
-    // Close all loops
-    for _ in codeGen.Bindings do
+    // Close all loops. Under the hot-row schedule the inner levels close
+    // first, the row's fold runs on the just-completed slice inside the
+    // outermost loop, then the outermost level closes.
+    match hotRow with
+    | Some ep ->
+        for _ in List.tail codeGen.Bindings do
+            depth <- depth - 1
+            lines <- lines @ [ind depth + "}"]
+        let (elemStr, rank) =
+            match codeGen.OutputType with
+            | ArrayElem at -> (elemTypeToCpp at.ElemType, arrayRank at)
+            | _ -> ("double", 2)
+        let outerIdx = (List.head codeGen.Bindings).IndexName
+        // Rank 2: the slice IS the hoisted output row, read through the
+        // restrict pointer it was written through (any other access path to a
+        // row written through a restrict pointer in the same scope would
+        // violate the qualifier's contract). Rank >= 3: the slice is the
+        // skeleton's leading entry, and the row pointer's scope (the level
+        // r-2 body) has already closed.
+        let viewData = if rank = 2 then outRowName else $"{codeGen.OutputName}.data[{outerIdx}]"
+        lines <- lines @ [ ind depth + "{"
+                           ind depth + $"    Array<{elemStr}, {rank - 1}> {ep.RowViewName} = {{ {viewData}, {codeGen.OutputName}.extents + 1 }};" ]
+        for l in ep.Body () do lines <- lines @ [ind depth + "    " + l]
+        lines <- lines @ [ ind depth + "}" ]
         depth <- depth - 1
         lines <- lines @ [ind depth + "}"]
+        ep.OnEmitted ()
+    | None ->
+        for _ in codeGen.Bindings do
+            depth <- depth - 1
+            lines <- lines @ [ind depth + "}"]
 
     // Path B epilogue: publish this thread's partial, close the region,
     // then combine in THREAD ORDER through the same wrapper -- a fixed order, so
@@ -1999,10 +2185,16 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     // caller's seed -- already in the shared accumulator -- enters the fold first,
     // which is what makes this the serial left fold up to associativity.
     match foldChunk, codeGen.FoldWrapper with
-    | Some _, Some wname ->
+    | Some plan, Some wname ->
+        // ChunkSimd: a one-level chunk contributed exactly when it was
+        // non-empty (the identity seed is never published for an empty one).
+        let hadExpr =
+            match plan.ChunkForm with
+            | ChunkSimd _ -> "(__rhi > __rlo)"
+            | ChunkSerial _ -> fcHas
         lines <- lines @ [
             ind depth + $"{fcPart}[__rt] = {fcAcc};"
-            ind depth + $"{fcHad}[__rt] = {fcHas};"
+            ind depth + $"{fcHad}[__rt] = {hadExpr};"
             ind (depth - 1) + "}"
             ind (depth - 1) + $"for (int __rt = 0; __rt < {fcT}; __rt++) if ({fcHad}[__rt]) {codeGen.OutputName} = {wname}({codeGen.OutputName}, {fcPart}[__rt]);"
             ind (depth - 1) + $"delete[] {fcPart}; delete[] {fcHad};"
@@ -2750,32 +2942,58 @@ let internal tryGenSyrkDispatch
                         Some r.CppExpr
                 // Three answers, hence the nested option: `None` = DECLINE the
                 // whole dispatch (a scale this site cannot spell), `Some None`
-                // = no scale to apply, `Some (Some line)` = the scaling pass.
-                let scaleLine : string option option =
+                // = no scale to apply, `Some (Some (kind, text))` = the scale:
+                // kind 1 = divide, 2 = multiply (blade_tiles.h's
+                // BLADE_TILE_SCALE_* codes), text = the scalar's C++.
+                let scaleArgs : (int * string) option option =
                     match codeGen.KernelExpr with
                     | Blade.LinAlgPatterns.ProdSumScaled (_, None) -> Some None
                     | Blade.LinAlgPatterns.ProdSumScaled (_, Some sc) ->
-                        let (opStr, sExpr) =
+                        let (kind, sExpr) =
                             match sc with
-                            | Blade.LinAlgPatterns.ScaleDiv d -> ("/=", d)
-                            | Blade.LinAlgPatterns.ScaleMul s -> ("*=", s)
+                            | Blade.LinAlgPatterns.ScaleDiv d -> (1, d)
+                            | Blade.LinAlgPatterns.ScaleMul s -> (2, s)
                         match renderScalar sExpr with
                         | None -> None                       // unresolvable -> decline
-                        | Some sTxt ->
-                            Some (Some (String.replicate indent "    "
-                                        + $"/* ... then the kernel's own scalar, over the same packed triangle */ for (size_t __sy_i = 0; __sy_i < {mExtent}; __sy_i++) for (size_t __sy_j = 0; __sy_j < {mExtent} - __sy_i; __sy_j++) {cName}[__sy_i][__sy_j] {opStr} ({sTxt});"))
+                        | Some sTxt -> Some (Some (kind, sTxt))
                     | _ -> None
-                match scaleLine with
+                match scaleArgs with
                 | None -> None
-                | Some tail ->
+                | Some scale ->
+                // The BLAS route's scaling pass (the shim has no tail): the
+                // kernel's own scalar over the same packed triangle, after.
+                let tail =
+                    scale |> Option.map (fun (kind, sTxt) ->
+                        let opStr = if kind = 1 then "/=" else "*="
+                        String.replicate indent "    "
+                        + $"/* ... then the kernel's own scalar, over the same packed triangle */ for (size_t __sy_i = 0; __sy_i < {mExtent}; __sy_i++) for (size_t __sy_j = 0; __sy_j < {mExtent} - __sy_i; __sy_j++) {cName}[__sy_i][__sy_j] {opStr} ({sTxt});")
                 match entryOpt with
                 | Some entry ->
                     (linalgUsedCell ()).Value <- true
+                    // The shim's REPACK (dense staging -> packed triangle,
+                    // blade_linalg.hpp blade_repack_upper) runs inside an
+                    // OpenMP team exactly when the source licensed the nest
+                    // (`omp` on the kernel) AND this build emits thread-level
+                    // OpenMP -- the same rule the packed tile driver follows.
+                    // The syrk itself is the library's (its own threads); the
+                    // census line names the repack as this site's construct.
+                    // Bench gap G28: the serial staging + repack was the whole
+                    // 18-21% loss under 8 library threads.
+                    let threadedArg =
+                        if codeGen.OmpRequested && ompThreadEmissionEnabled () then "true" else "false"
+                    let ompCensus =
+                        if not codeGen.OmpRequested then ""
+                        elif ompThreadEmissionEnabled () then
+                            recordOmpConstruct cName "omp parallel for inside the BLAS shim's repack"
+                                "blade_repack_upper: the dense staging's upper triangle copied into the packed rows, rows split across the team (the syrk itself runs on the library's threads)"
+                            ""
+                        else $"/* {(ompSuppressedPhrase (ompThreadsSuppressedReason ()))} */ "
                     // BLOCK comment, not `//`: an inline-form materialization
                     // space-joins its lines into a single-line IIFE, where a
                     // line comment would swallow the rest of the statement.
                     Some ([ String.replicate indent "    "
-                            + $"/* linalg dispatch: syrk C = A * A^T (packed upper, from comm nest) */ {entry}({mExtent}, {nExtent}, {aName}.data, {aCells}, {cName}.data);" ]
+                            + ompCensus
+                            + $"/* linalg dispatch: syrk C = A * A^T (packed upper, from comm nest) */ {entry}({mExtent}, {nExtent}, {aName}.data, {aCells}, {cName}.data, {threadedArg});" ]
                           @ Option.toList tail)
                 | None ->
                 // BLAS GATE OFF: the packed-triangle SYRK tile
@@ -2797,8 +3015,10 @@ let internal tryGenSyrkDispatch
                 // (toward the serial chain) and the repro build's not at all
                 // under =off.
                 //
-                // The kernel's scalar tail, if any, is the SAME post-pass the
-                // BLAS route applies (divide the finished sum).
+                // The kernel's scalar tail, if any, is the SAME operation the
+                // BLAS route's post-pass applies (divide the finished sum) --
+                // applied by the LAST K block's tile as it stores, so the
+                // triangle is written once and never re-read for it.
                 let lit (s: string) = match System.Int64.TryParse s with | true, v -> Some v | _ -> None
                 let declineTile (why: string) (shape: string) =
                     recordCodegenDecision "microkernel" cName
@@ -2811,19 +3031,35 @@ let internal tryGenSyrkDispatch
                 | Some p, Some k when packedTriWorth p k ->
                     (packedGemmUsedCell ()).Value <- true
                     let kc = syrkTileKc k
+                    let g = syrkRowGroup ()
                     // Threads only where the source licenses them (`omp` on
                     // the kernel) AND the build emits thread-level OpenMP;
-                    // cells are split across the team, sums never are.
+                    // cells are split across the team, sums never are. The
+                    // omp census: the team is the DRIVER's (row groups under
+                    // schedule(dynamic)), recorded as applied; a licence the
+                    // build knob suppresses gets the one census phrase.
                     let threadedArg =
                         if codeGen.OmpRequested && ompThreadEmissionEnabled () then "true" else "false"
+                    let census =
+                        if not codeGen.OmpRequested then ""
+                        elif ompThreadEmissionEnabled () then
+                            recordOmpConstruct cName "omp parallel num_threads(T) inside the tile driver"
+                                "dsyrk_tri row groups: work units under schedule(dynamic), cells split across the team, sums never"
+                            ""
+                        else $"/* {(ompSuppressedPhrase (ompThreadsSuppressedReason ()))} */ "
+                    let (sk, scTxt, scaleNote) =
+                        match scale with
+                        | None -> (0, "0.0", "")
+                        | Some (1, t) -> (1, t, ", then / d per cell (fused into the last block's store)")
+                        | Some (_, t) -> (2, t, ", then * s per cell (fused into the last block's store)")
                     recordCodegenDecision "microkernel" cName Blade.Effects.Applied
                         [ "packed syrk tile (blade_pgemm::dsyrk_tri, 6x8 register tile over the packed triangle)"
-                          $"P={p} K={k} KC={kc}" ]
-                    recordFoldForm cName $"syrk tile 6x8, KC={kc}"
+                          $"P={p} K={k} KC={kc} G={g}" ]
+                    recordFoldForm cName $"syrk tile 6x8, KC={kc}, row groups of {g}{scaleNote}"
                         "same-array comm row contraction (one ascending chain per cell; no reorder licence used)"
-                    Some ([ String.replicate indent "    "
-                            + $"/* comm nest: packed-triangle syrk tile (blade_packed_gemm.hpp dsyrk_tri, 6x8, KC={kc}), per cell the serial prodsum */ blade_pgemm::dsyrk_tri((size_t)({mExtent}), (size_t)({nExtent}), {aName}.data, {cName}.data, 0, {threadedArg}, (size_t){syrkTileKcMax});" ]
-                          @ Option.toList tail)
+                    Some [ String.replicate indent "    "
+                           + census
+                           + $"/* comm nest: packed-triangle syrk tile (blade_packed_gemm.hpp dsyrk_tri, 6x8, KC={kc}), row groups of {g}, per cell the serial prodsum */ blade_pgemm::dsyrk_tri((size_t)({mExtent}), (size_t)({nExtent}), {aName}.data, {cName}.data, 0, {threadedArg}, (size_t){syrkTileKcMax}, {sk}, (double)({scTxt}), (size_t){g});" ]
                 | Some p, Some k ->
                     declineTile "below the syrk-tile crossover (p >= 16, k >= 4): the per-cell nest wins" $"P={p} K={k}"
                 | _ ->
@@ -2901,7 +3137,11 @@ let internal tryGenRowContractionTile
                     $"{driver}: work units under schedule(dynamic), cells split across the team, sums never"
                 ""
             else $"/* {(ompSuppressedPhrase (ompThreadsSuppressedReason ()))} */ "
-        let scaleNote (sk: int) = match sk with 1 -> ", then / d per cell" | 2 -> ", then * s per cell" | _ -> ""
+        let scaleNote (sk: int) =
+            match sk with
+            | 1 -> ", then / d per cell (fused into the last block's store)"
+            | 2 -> ", then * s per cell (fused into the last block's store)"
+            | _ -> ""
         match scaleArgs with
         | None -> declineTile "the kernel's scale is not renderable at this site" ""
         | Some (sk, scTxt) ->
@@ -2928,14 +3168,18 @@ let internal tryGenRowContractionTile
                     match sched with
                     | AntiPaired4x4 -> (1, "paired 4x4 (P and Q in one pass)")
                     | _ -> (0, "sequential 6x8 (P pass, spill, Q pass)")
+                let kcMax = antisymKcMax ()
+                let chainNote =
+                    if kcMax = 0L || kcMax >= n then "whole chain per tile"
+                    else $"whole chain per tile in sample blocks of <= {kcMax}"
                 recordCodegenDecision "microkernel" cName Blade.Effects.Applied
                     [ $"antisym tile (blade_pgemm::dantisym_tri, {form}, strict packed triangle)"
-                      $"P={p} N={n} components=({cx},{cy})" ]
-                recordFoldForm cName $"antisym tile {form}, whole chain per tile{scaleNote sk}"
+                      $"P={p} N={n} components=({cx},{cy}) KC={kcMax}" ]
+                recordFoldForm cName $"antisym tile {form}, {chainNote}{scaleNote sk}"
                     "same-array anticomm row-contraction pair (two ascending chains per cell, one subtraction; no reorder licence used)"
                 Some [ String.replicate indent "    "
                        + ompCensus "dantisym_tri row panels"
-                       + $"/* anticomm nest: antisym pair tile (blade_packed_gemm.hpp dantisym_tri, {form}), per cell the serial prodsum - prodsum */ blade_pgemm::dantisym_tri((size_t)({mExtent}), (size_t)({nExtent}), {aName}.data, (size_t){cx}, (size_t){cy}, nested_array_utilities::pool_base({cName}.data), {sk}, (double)({scTxt}), {threadedArg}, {variant});" ]
+                       + $"/* anticomm nest: antisym pair tile (blade_packed_gemm.hpp dantisym_tri, {form}), per cell the serial prodsum - prodsum */ blade_pgemm::dantisym_tri((size_t)({mExtent}), (size_t)({nExtent}), {aName}.data, (size_t){cx}, (size_t){cy}, nested_array_utilities::pool_base({cName}.data), {sk}, (double)({scTxt}), {threadedArg}, {variant}, 0, (size_t){kcMax});" ]
             | Some p, Some n ->
                 declineTile "below the antisym-tile crossover (p >= 24, n >= 8): the per-cell nest wins" $"P={p} N={n}"
             | _ -> declineTile "non-literal extents: the per-cell nest" "non-literal extents"
@@ -3097,6 +3341,12 @@ let runtimeHeaderNames : string list =
       // beside it, and hashed into the exe cache key with every other name in
       // this list.
       "blade_tiles.h"
+      // The explicit K-lane vector fold forms (blade_fold::dot / sq / dot3 /
+      // sum, review items M9 / M14) and the Path B chunk partition
+      // (blade_fold::chunk_lo). INCLUDED only by a program with a licensed
+      // dot-class fold (foldLanesUsedCell); deployed unconditionally like the
+      // rest.
+      "blade_fold_lanes.hpp"
       // Dense linear-algebra dispatch: blade_gemm / blade_syrk plus the
       // gram/matmul adapters, resolving to cblas under -DBLADE_HAS_BLAS and to
       // native fallbacks otherwise. INCLUDED only by programs that actually

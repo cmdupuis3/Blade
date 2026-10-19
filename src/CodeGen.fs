@@ -340,7 +340,15 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // accumulation form anyway. Routing through genApplyCombinator here
             // mirrors what genBinding does at the module level.
             let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
-            let code = genApplyCombinator bodyCtx varName info builder
+            // Hot-row fold scheduling: hand the plan to the apply emitter by
+            // the output's NAME (it never sees the let id), for the duration
+            // of this one emission.
+            (match Blade.Optimize.HotRowTable.tryProducer id with
+             | Some plan -> (hotRowPendingCell ()).[varName] <- plan
+             | None -> ())
+            let code =
+                try genApplyCombinator bodyCtx varName info builder
+                finally (hotRowPendingCell ()).Remove varName |> ignore
             currentNames <- Map.add id varName currentNames
             code
         | IRCompute (IRComposeApply _) ->
@@ -1208,6 +1216,14 @@ let private callShapedRe =
         @"(?<qual>(?:[A-Za-z_][A-Za-z0-9_]*::)+)?(?<id>[A-Za-z_][A-Za-z0-9_]*)\s*\(|(?<ind>(?:[>)]|(?<!\[&)\])\s*\()",
         System.Text.RegularExpressions.RegexOptions.Compiled)
 
+/// The C++ named casts, through the `(` of their operand. The template
+/// argument may itself be a template (`static_cast<std::complex<double>>(`):
+/// the lazy run stops at the first `>` that a `(` follows.
+let private namedCastRe =
+    System.Text.RegularExpressions.Regex(
+        @"\b(?:static_cast|reinterpret_cast|const_cast)\s*<[^;(){}]*?>\s*\(",
+        System.Text.RegularExpressions.RegexOptions.Compiled)
+
 /// What one emitted body does that bears on whether its frame is observable.
 type private FrameFacts = {
     /// The body itself panics, or the signature admits an indirect call.
@@ -1226,6 +1242,14 @@ type private FrameFacts = {
 /// (`kern(x, y)`, where `kern` is a `std::function` argument) looks exactly
 /// like one and CAN reach a panic in whatever it was bound to.
 let private scanBodyCalls (peers: Set<string>) (body: string) : bool * Set<string> =
+    // A named cast (`static_cast<double>(e)`) ends in the `>(` the functor
+    // alternative reads as a call through a value, which made every body that
+    // converts a number UNKNOWN and kept its frame: phi(i, j) =
+    // `static_cast<double>(i - j) / ...` kept a BLADE_FRAME whose stack store,
+    // inlined into a domain fold's cell loop, was one of the things stopping
+    // g++ from vectorizing it (bench gap G30). A cast calls nothing; its
+    // operand stays in the text and is scanned like any other.
+    let body = namedCastRe.Replace(body, "(")
     let ms = callShapedRe.Matches body
     let mutable unknown = false
     let mutable callees = Set.empty
@@ -3730,6 +3754,9 @@ let private genSelfContainedProgram (modul: IRModule) (testName: string) : strin
     let includes = if (tilesUsedCell ()).Value then includes @ ["#include \"blade_tilecache.hpp\""] else includes
     // blade_packed_gemm.hpp only when the native matmul arm called it.
     let includes = if (packedGemmUsedCell ()).Value then includes @ ["#include \"blade_packed_gemm.hpp\""] else includes
+    // blade_fold_lanes.hpp only when a fold took the explicit K-lane vector
+    // form or the Path B partition called blade_fold::chunk_lo.
+    let includes = if (foldLanesUsedCell ()).Value then includes @ ["#include \"blade_fold_lanes.hpp\""] else includes
     // blade_linalg_cuda.hpp: the DEVICE half of the same collect-then-append
     // shape, its OWN cell and its own build consequence -- Build.fs
     // sniffs THIS line to write the companion `.cu`, build it with nvcc and

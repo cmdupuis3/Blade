@@ -32,10 +32,10 @@ for this kernel (README §3 table). The saxpy store loop itself has no reduction
 | smoke | 20011 | 480 KB | < 0.1 ms | < 0.1 ms |
 | full | 2,000,003 | 48 MB | 4–8 ms (+ checksum read 16 MB) | 10–14 ms |
 
-**An `inputonly` twin per arm is REQUIRED** (README §5.3; the total is the result, the
+**An `inputonly` twin per arm is REQUIRED** (kernels/README.md §3.3; the total is the result, the
 incremental estimate secondary); R >= 21.
 
-## Tiers (natural = dense baseline; expert = reviewed implementation; README §2)
+## Tiers (natural = dense baseline; expert = reviewed implementation; kernels/README.md §1)
 
 - **natural (array-assignment baseline)**: `y2 = 1.5d0*x + y`, `checksum = sum(y2**2)`.
   mt8: `!$omp workshare` / `parallel do` + `reduction`. Fair counterparts (M1), subject to
@@ -45,7 +45,7 @@ incremental estimate secondary); R >= 21.
 - **Selection record**: baseline = the array assignment; expert = the reviewed single loop.
 
 **Stream control.** `saxpy/expert.f90`, gfortran, serial x repro, built at n = 700,001
-(16.8 MB, three streams), is the suite's second drift control (README §6): it tracks
+(16.8 MB, three streams), is the suite's second drift control (harness/README.md "Protocol and statistics"): it tracks
 memory-subsystem contention and background load, where the compute control (`recur`)
 tracks core clock.
 

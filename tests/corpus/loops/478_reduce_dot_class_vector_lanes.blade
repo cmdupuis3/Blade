@@ -1,0 +1,31 @@
+// TEST: Reduce Dot-Class Vector Lanes
+// Review item M9 (bench gap G26), the reduce-over-DEFERRED-COMPUTATION site: a
+// licensed `(+)` fold whose body is a left-nested product of the level's
+// rank-1 peels -- `x * y` (dot), `w * w` (self-dot, one load), `x * y * z`
+// (three streams), `v` (a plain sum) -- takes the explicit K-lane vector form
+// instead of the one-accumulator `omp simd reduction`. A body that is NOT a
+// bare product (`x * y + 1.0`) keeps the simd form; a `*` fold keeps it too.
+// Routes are pinned by `blade test optimize`; this file pins the values.
+//
+// INTEGER-VALUED data (see 110 for why the interpreter differential needs it);
+// n = 37 walks every tail of the K = 8 tree.
+type Ix = Idx<37>
+let a = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 7 - 3) |> compute
+let b = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 5 - 2) |> compute
+let c = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 3 - 1) |> compute
+let dot_ab = reduce(method_for(zip(a, b)) <@> lambda(x, y) -> x * y, (+))
+let dot_seeded = reduce(method_for(zip(a, b)) <@> lambda(x, y) -> x * y, lambda(p, q) -> p + q, 100.0)
+let self_a = reduce(method_for(a) <@> lambda(w) -> w * w, (+))
+let triple = reduce(method_for(zip(a, b, c)) <@> lambda(x, y, z) -> x * y * z, (+))
+let plain = reduce(method_for(a) <@> lambda(v) -> v, (+))
+let not_dot = reduce(method_for(zip(a, b)) <@> lambda(x, y) -> x * y + 1.0, (+))
+let af = method_for(range<Ix>) <@> lambda(i) -> Float32(Int64(i) % 7 - 3) |> compute
+let bf = method_for(range<Ix>) <@> lambda(i) -> Float32(Int64(i) % 5 - 2) |> compute
+let dot_f32 = reduce(method_for(zip(af, bf)) <@> lambda(x, y) -> x * y, (+))
+// EXPECT: dot_ab = 8.0
+// EXPECT: dot_seeded = 108.0
+// EXPECT: self_a = 153.0
+// EXPECT: triple = -35.0
+// EXPECT: plain = -5.0
+// EXPECT: not_dot = 45.0
+// EXPECT: dot_f32 = 8.0

@@ -21,7 +21,7 @@ let internal usageTestBlockKeys =
       "multifile"; "netcdf"; "normalize"; "omp-coverage"; "omp-pragma"; "omp-reduce"; "optimize"
       "oracles"; "orbrank"; "orbwreath"; "permoracle"; "permspec"; "pgoracle"; "pgspec"; "polyoracle"
       "provider-desugar"; "rand-mirror"; "rep-check"; "rep-differential"; "rep-reject"; "row-tile"; "run-record"
-      "setup"; "shape"; "shapespec"; "spans"; "strict-pins"; "structidx"; "structidxoracle"; "subst"; "syrk-tile"
+      "setup"; "shape"; "shapespec"; "spans"; "strict-pins"; "structidx"; "structidxoracle"; "subst"; "syrk-tile"; "fold-lanes"
       "surface"; "surfacing"; "sympower"; "timing"; "treerank"; "type-structure"; "unify"
       "validate-arrow"; "validation-codes"; "zarr" ]
 
@@ -982,8 +982,12 @@ let internal llvmLaneDecision (d: Blade.Effects.Decision) : Blade.Effects.Decisi
         let cppForm = d.Evidence |> List.tryHead |> Option.defaultValue ""
         // The orbit-class fold (Blade.OrbitFold) is BOTH lanes' form: the
         // LLVM lane runs the same recogniser and the same class nest, so the
-        // record (taken or declined) holds for it as written.
-        if cppForm.StartsWith "fold form: orbit-class fold" then d
+        // record (taken or declined) holds for it as written -- except the
+        // C++ lane's thread team (G32), which this lane has no runtime for:
+        // its pass is the serial one.
+        if cppForm.StartsWith "fold form: orbit-class fold" && cppForm.Contains Blade.OrbitFold.threadedSuffix then
+            { d with Evidence = cppForm.Replace(Blade.OrbitFold.threadedSuffix, "; one serial pass (LLVM lane: no thread runtime)") :: List.tail d.Evidence }
+        elif cppForm.StartsWith "fold form: orbit-class fold" then d
         elif cppForm.StartsWith "fold form: serial (no reorder licence"
            || cppForm.StartsWith "fold form: serial (repro" then
             declined "the fold keeps its serial association in the LLVM lane too" []
@@ -994,6 +998,13 @@ let internal llvmLaneDecision (d: Blade.Effects.Decision) : Blade.Effects.Decisi
                              $"C++ lane {cppForm}" ] @ List.tail (if d.Evidence.IsEmpty then [ "" ] else d.Evidence) }
     | "microkernel" | "tile-cache" when d.Outcome = Blade.Effects.Applied ->
         declined $"C++-lane {d.Rule}: the LLVM lane emits its own loop nest" []
+    // The compound REPRESENTATION (rule `compound`, bench gap G9) holds for
+    // both lanes as recorded: the LLVM lane emits exactly the compounds the
+    // C++ lane compacts (a rank-1 mask over one dense axis, no trailing dims
+    // -- the count, the kept-position fill and the gather by position in IR,
+    // keyed reads by binary search) and refuses every other one, so a plan
+    // this lane prints never carries a `compound` record it did not build.
+    | "compound" -> d
     | _ -> d
 
 /// A record the LLVM emitter made ITSELF: the tile cores' (syrk M6, antisym

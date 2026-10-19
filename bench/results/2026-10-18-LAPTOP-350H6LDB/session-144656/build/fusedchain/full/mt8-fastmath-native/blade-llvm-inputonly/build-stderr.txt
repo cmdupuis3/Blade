@@ -1,3 +1,0 @@
-[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\fusedchain_inputonly-28bb4929-6556-2dab7400\fusedchain_inputonly.ll
-[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-144656\build\fusedchain\full\mt8-fastmath-native\blade-llvm-inputonly\fusedchain_inputonly.exe
-[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\fusedchain_inputonly-28bb4929-6556-2dab7400

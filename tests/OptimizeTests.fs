@@ -794,6 +794,62 @@ let private withGate (var: string) (value: string) (f: unit -> 'a) : 'a =
     System.Environment.SetEnvironmentVariable(var, value)
     try f () finally System.Environment.SetEnvironmentVariable(var, prior)
 
+// ---------------------------------------------------------------------------
+// Hot-row fold scheduling (Blade.Optimize.planHotRowFolds; bench review M13).
+// The values are pinned by corpus loops/474-476; these pins read the emission
+// (the row-sum array exists, its store sits INSIDE the producer's outer loop,
+// the consumer folds it) and the decision record of each decline.
+// ---------------------------------------------------------------------------
+
+let private hotRowSrc =
+    "type Y = Idx<9>\n"
+    + "type X = Idx<11>\n"
+    + "let u = method_for(range<Y, X>) <@> lambda(i, j) -> Float64(Int64(i) * Int64(j)) |> compute\n"
+    + "let lap = method_for(range<halo<Y, [-1, 0, 1]>, halo<X, [-1, 0, 1]>>) <@> lambda(wr, wc) where omp(wr: 1) -> u(wr(-1), wc(0)) + u(wr(1), wc(0)) + u(wr(0), wc(-1)) + u(wr(0), wc(1)) - 4.0 * u(wr(0), wc(0)) |> compute\n"
+    + "let ss = reduce(method_for(lap) <@> lambda(row) -> prodsum(row, row), lambda(p, q) where omp -> p + q, 0.0)\n"
+
+/// The schedule emitted: a row-sum array, its per-row store inside the
+/// producer's outer loop (before that loop's closing brace, after the inner
+/// one's), and the consumer's fold over it.
+let private hotRowEmitted () =
+    let name = "hot_row_fold_emitted_inside_producer_loop"
+    match cppOfSource name hotRowSrc with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let store = System.Text.RegularExpressions.Regex.Match(cpp, @"__hr_ss\[__i0\] = ")
+        let outerOpen = cpp.IndexOf "for (size_t __i0 = 0; __i0 < 7; __i0++)"
+        let innerOpen = cpp.IndexOf "for (size_t __i1 = 0; __i1 < 9; __i1++)"
+        let combine = cpp.IndexOf "ss = ss + __hr_ss["
+        if store.Success && outerOpen >= 0 && innerOpen > outerOpen && store.Index > innerOpen
+           && combine > store.Index && cpp.Contains "Array<double, 1> __hr_ss = " then
+            resultLine Pass name "row-sum array allocated, filled behind each produced row, folded by the consumer"
+            true
+        else
+            resultLine Fail name ($"store={store.Success}@{store.Index} outer={outerOpen} inner={innerOpen} combine={combine}")
+            false
+
+/// BLADE_HOT_ROW=0: the two-pass form, and the decision says why.
+let private hotRowGateOff () =
+    let name = "hot_row_gate_off_keeps_two_passes"
+    match withGate "BLADE_HOT_ROW" "0" (fun () -> cppOfSource name hotRowSrc) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        if not (cpp.Contains "__hr_ss") then
+            resultLine Pass name "no row-sum array with the gate off"
+            true
+        else
+            resultLine Fail name "a row-sum array was emitted with BLADE_HOT_ROW=0"
+            false
+
+/// A `where omp` fold over a producer whose outer level carries no licence
+/// keeps its Path B team: declined.
+let private hotRowLostTeamSrc =
+    hotRowSrc.Replace("lambda(wr, wc) where omp(wr: 1) ->", "lambda(wr, wc) ->")
+
+/// A row kernel that reads the producer beyond its own row: declined.
+let private hotRowReadsBeyondSrc =
+    hotRowSrc.Replace("prodsum(row, row), lambda", "prodsum(row, row) + lap(0, 0), lambda")
+
 /// BLADE_CSE=0: the same program keeps both folds in its one body (2 in all),
 /// and the decision says why.
 let private cseGateOffKeepsFolds () =
@@ -1190,6 +1246,13 @@ let private planSyrkSrc (p: int) (n: int) =
 
 let private planSyrkTileSrc = planSyrkSrc 20 8
 
+/// The same shape with the kernel's `/ d` tail (fused into the tile's last
+/// block store on both lanes).
+let private planSyrkScaledSrc =
+    "type V = Idx<20>\ntype S = Idx<8>\n"
+    + "let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64(i + s) |> compute\n"
+    + "let g = method_for(x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>) where comm(a, b) -> prodsum(a, b) / 4.0 |> compute\n"
+
 /// gram(A, A) at 20 x 8: the node's BLAS-off arm takes the syrk tile.
 let private planGramTileSrc =
     "let A: Array<Float64 like Idx<20>, Idx<8>> = method_for(range<Idx<20>>, range<Idx<8>>) <@> lambda(i, j) -> Float64(i + j) |> compute\n"
@@ -1317,6 +1380,38 @@ let private parallelEmissionIsolated () =
                 resultLine Fail name ($"{bad} translation unit(s) with a mismatched packed-gemm include, {lostKernel} with the wrong kernel choice")
                 false))
 
+/// The explicit K-lane vector fold forms (review M9 / M14; BLADE_FOLD_LANES):
+/// a `prodsum` over two rank-1 operands, a self-dot, three operands; the
+/// deferred `reduce(method_for(zip(a, b)) <@> lambda(x, y) -> x * y, (+))`
+/// (the dot kernel); the same under a `where omp` fold (Path B, the threaded
+/// vector arm); a non-dot-class `where omp` body (the simd form per chunk);
+/// and a comm-declared user kernel (the serial chain per chunk, with why).
+let private planFoldLanesProdsumSrc =
+    "type Ix = Idx<37>\n"
+    + "let a = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 7 - 3) |> compute\n"
+    + "let b = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 5 - 2) |> compute\n"
+    + "let c = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 3 - 1) |> compute\n"
+    + "let dot_ab = prodsum(a, b)\n"
+    + "let self_a = prodsum(a, a)\n"
+    + "let triple = prodsum(a, b, c)\n"
+
+let private planFoldLanesDotSrc =
+    "type Ix = Idx<37>\n"
+    + "let a = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 7 - 3) |> compute\n"
+    + "let b = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 5 - 2) |> compute\n"
+    + "let dot_ab = reduce(method_for(zip(a, b)) <@> lambda(x, y) -> x * y, (+))\n"
+    + "let self_a = reduce(method_for(a) <@> lambda(w) -> w * w, (+))\n"
+    + "let not_dot = reduce(method_for(zip(a, b)) <@> lambda(x, y) -> x * y + 1.0, (+))\n"
+
+let private planFoldLanesThreadedSrc =
+    "function myAdd(a: Float64, b: Float64) where comm(a, b), omp = (a + b) * 1.0\n"
+    + "type Ix = Idx<1001>\n"
+    + "let a = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 7 - 3) |> compute\n"
+    + "let b = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 5 - 2) |> compute\n"
+    + "let dot_ab = reduce(method_for(zip(a, b)) <@> lambda(x, y) -> x * y, lambda(p, q) where omp -> p + q, 0.0)\n"
+    + "let chain = reduce(method_for(a) <@> lambda(v) -> (v + 1.0) * v, lambda(p, q) where omp -> p + q, 0.0)\n"
+    + "let comm_kernel = reduce(method_for(zip(a, b)) <@> lambda(x, y) -> x * y, myAdd, 0.0)\n"
+
 let private planCases () =
     let pinBlas (v: string) f =
         withGate "BLADE_BLAS" v (fun () -> withGate "OPENBLAS_DIR" null (fun () -> withGate "BLADE_BLAS_LINK" null f))
@@ -1413,6 +1508,55 @@ let private planCases () =
           planCase "plan_antisym_tile_paired_knob" (planAntiSrc 61 401) "fold-form"
               (fun d -> applied d && evidenceMentioning "fold form: antisym tile paired 4x4" d)
               "BLADE_ANTISYM_TILE=4x4 selects the paired schedule")
+      // BLADE_TILE_TUNE (speed-only driver parameters): the antisym tile's
+      // sample blocks and the syrk tile's row groups are named by the plan;
+      // unset = whole chain / groups of 4.
+      withGate "BLADE_ANTISYM_TILE" null (fun () ->
+       withGate "BLADE_TILE_TUNE" "anti_kc=100" (fun () ->
+          planCase "plan_antisym_tile_sample_blocks_knob" (planAntiSrc 61 401) "fold-form"
+              (fun d -> applied d && evidenceMentioning "fold form: antisym tile sequential 6x8 (P pass, spill, Q pass), whole chain per tile in sample blocks of <= 100" d)
+              "BLADE_TILE_TUNE anti_kc=100 blocks the chain inside the tile visit"))
+      withGate "BLADE_ANTISYM_TILE" null (fun () ->
+       withGate "BLADE_TILE_TUNE" null (fun () ->
+          planCase "plan_antisym_tile_whole_chain_default" (planAntiSrc 61 401) "fold-form"
+              (fun d -> applied d && evidenceMentioning "fold form: antisym tile sequential 6x8 (P pass, spill, Q pass), whole chain per tile" d
+                        && not (evidenceMentioning "sample blocks" d))
+              "unset: the whole chain in one block"))
+      pinBlas "0" (fun () ->
+       withGate "BLADE_SYRK_TILE" null (fun () ->
+        withGate "BLADE_TILE_TUNE" "syrk_g=2, anti_kc=0" (fun () ->
+          planCase "plan_syrk_tile_row_groups_knob" planSyrkTileSrc "fold-form"
+              (fun d -> applied d && evidenceMentioning "fold form: syrk tile 6x8, KC=8, row groups of 2" d)
+              "BLADE_TILE_TUNE syrk_g=2 names the row group")))
+      pinBlas "0" (fun () ->
+       withGate "BLADE_SYRK_TILE" null (fun () ->
+        withGate "BLADE_TILE_TUNE" null (fun () ->
+          planCase "plan_syrk_tile_row_groups_default" planSyrkTileSrc "fold-form"
+              (fun d -> applied d && evidenceMentioning "fold form: syrk tile 6x8, KC=8, row groups of 4" d)
+              "unset: row groups of 4")))
+      // The kernel's `/ d` tail is the last K block's store, not a post-pass:
+      // the plan says so, in the nest arm and the gram node's.
+      pinBlas "0" (fun () ->
+       withGate "BLADE_SYRK_TILE" null (fun () ->
+          planCase "plan_syrk_tile_fused_tail" planSyrkScaledSrc "fold-form"
+              (fun d -> applied d && evidenceMentioning "fold form: syrk tile 6x8, KC=8" d
+                        && evidenceMentioning "then / d per cell (fused into the last block's store)" d)
+              "the syrk tile's `/ d` tail is fused into the last block's store"))
+      // The gram(A, A) node's omp census (gap register G1 remnant): the
+      // driver's team recorded as applied, or the BLADE_OMP_THREADS=1 decline
+      // naming the knob -- never silent.
+      pinBlas "0" (fun () ->
+       withGate "BLADE_SYRK_TILE" null (fun () ->
+        withGate "BLADE_OMP_THREADS" "1" (fun () ->
+          planCase "plan_gram_node_syrk_tile_omp_census_declined" planGramTileSrc "omp"
+              (fun d -> declinedMentioning "BLADE_OMP_THREADS" d && evidenceMentioning "gram node" d)
+              "gram node: the tile driver's team declined by BLADE_OMP_THREADS=1, in the census")))
+      pinBlas "0" (fun () ->
+       withGate "BLADE_SYRK_TILE" null (fun () ->
+        withGate "BLADE_OMP_THREADS" null (fun () ->
+          planCase "plan_gram_node_syrk_tile_omp_census_applied" planGramTileSrc "omp"
+              (fun d -> applied d && evidenceMentioning "inside the tile driver" d && evidenceMentioning "gram node" d)
+              "gram node: the tile driver's team recorded as applied")))
       withGate "BLADE_ANTISYM_TILE" null (fun () ->
        withGate "BLADE_FP_REPRO" "1" (fun () ->
           planCase "plan_antisym_tile_applied_in_repro" (planAntiSrc 61 401) "fold-form"
@@ -1441,6 +1585,78 @@ let private planCases () =
       withGate "BLADE_SIMPLEX_TILE" "0" (fun () ->
           planCase "plan_simplex_tile_declined_knob" (planSym3Src 29 67) "microkernel"
               (declinedMentioning "BLADE_SIMPLEX_TILE") "simplex tile declined by BLADE_SIMPLEX_TILE=0")
+      // The explicit K-lane vector fold forms (review M9 / M14): the plan
+      // names the form and K at every site, in every mode of BLADE_FOLD_LANES,
+      // and the repro build keeps the serial chain.
+      withGate "BLADE_FOLD_LANES" null (fun () ->
+          planCase "plan_fold_lanes_prodsum_dot" planFoldLanesProdsumSrc "fold-form"
+              (fun d -> applied d && d.Subject = "dot_ab" && evidenceMentioning "fold form: simd K-lanes(8) dot" d)
+              "prodsum(a, b): simd K-lanes(8) dot")
+      withGate "BLADE_FOLD_LANES" null (fun () ->
+          planCase "plan_fold_lanes_prodsum_self_dot" planFoldLanesProdsumSrc "fold-form"
+              (fun d -> applied d && d.Subject = "self_a" && evidenceMentioning "fold form: simd K-lanes(8) self-dot" d)
+              "prodsum(a, a): simd K-lanes(8) self-dot (one load per element)")
+      withGate "BLADE_FOLD_LANES" null (fun () ->
+          planCase "plan_fold_lanes_prodsum_dot3" planFoldLanesProdsumSrc "fold-form"
+              (fun d -> applied d && d.Subject = "triple" && evidenceMentioning "fold form: simd K-lanes(8) dot3" d)
+              "prodsum(a, b, c): simd K-lanes(8) dot3")
+      withGate "BLADE_FOLD_LANES" "4" (fun () ->
+          planCase "plan_fold_lanes_prodsum_k4" planFoldLanesProdsumSrc "fold-form"
+              (fun d -> applied d && d.Subject = "dot_ab" && evidenceMentioning "fold form: simd K-lanes(4) dot" d)
+              "BLADE_FOLD_LANES=4 forces K = 4")
+      withGate "BLADE_FOLD_LANES" "0" (fun () ->
+          planCase "plan_fold_lanes_prodsum_knob_off" planFoldLanesProdsumSrc "fold-form"
+              (fun d -> applied d && d.Subject = "dot_ab" && evidenceMentioning "fold form: simd-reduction" d)
+              "BLADE_FOLD_LANES=0 keeps the one-accumulator simd reduction")
+      withGate "BLADE_FP_REPRO" "1" (fun () ->
+          planCase "plan_fold_lanes_prodsum_repro" planFoldLanesProdsumSrc "fold-form"
+              (fun d -> d.Subject = "dot_ab" && declinedMentioning "serial (repro)" d)
+              "BLADE_FP_REPRO=1 keeps the serial chain")
+      pinBlas "0" (fun () ->
+       withGate "BLADE_FOLD_LANES" null (fun () ->
+          planCase "plan_fold_lanes_reduce_dot" planFoldLanesDotSrc "fold-form"
+              (fun d -> applied d && d.Subject = "dot_ab" && evidenceMentioning "fold form: simd K-lanes(8) dot" d)
+              "reduce over zip(a, b) <@> x * y: simd K-lanes(8) dot"))
+      pinBlas "0" (fun () ->
+       withGate "BLADE_FOLD_LANES" null (fun () ->
+          planCase "plan_fold_lanes_reduce_self_dot" planFoldLanesDotSrc "fold-form"
+              (fun d -> applied d && d.Subject = "self_a" && evidenceMentioning "fold form: simd K-lanes(8) self-dot" d)
+              "reduce over a <@> w * w: simd K-lanes(8) self-dot"))
+      pinBlas "0" (fun () ->
+       withGate "BLADE_FOLD_LANES" null (fun () ->
+          planCase "plan_fold_lanes_reduce_not_dot_keeps_simd" planFoldLanesDotSrc "fold-form"
+              (fun d -> applied d && d.Subject = "not_dot" && evidenceMentioning "fold form: simd-reduction" d)
+              "a body that is not a bare product keeps the simd reduction"))
+      pinBlas "0" (fun () ->
+       withGate "BLADE_FOLD_LANES" null (fun () ->
+        withGate "BLADE_OMP_THREADS" null (fun () ->
+          planCase "plan_fold_lanes_threaded_dot" planFoldLanesThreadedSrc "fold-form"
+              (fun d -> applied d && d.Subject = "dot_ab" && evidenceMentioning "fold form: threaded(Path B chunks, simd K-lanes(8) dot per chunk)" d)
+              "a `where omp` dot: Path B chunks, the vector tree per chunk")))
+      pinBlas "0" (fun () ->
+       withGate "BLADE_FOLD_LANES" null (fun () ->
+        withGate "BLADE_OMP_THREADS" null (fun () ->
+          planCase "plan_fold_lanes_threaded_chain_simd_per_chunk" planFoldLanesThreadedSrc "fold-form"
+              (fun d -> applied d && d.Subject = "chain" && evidenceMentioning "fold form: threaded(Path B chunks, simd-reduction within each chunk)" d)
+              "a `where omp` non-dot body: Path B chunks, simd reduction per chunk")))
+      pinBlas "0" (fun () ->
+       withGate "BLADE_FOLD_LANES" null (fun () ->
+        withGate "BLADE_OMP_THREADS" null (fun () ->
+          planCase "plan_fold_lanes_threaded_comm_kernel_serial_per_chunk" planFoldLanesThreadedSrc "fold-form"
+              (fun d -> applied d && d.Subject = "comm_kernel" && evidenceMentioning "serial within each chunk: the fold kernel's combine is a call" d)
+              "a comm-declared kernel: Path B chunks, the serial chain per chunk, with the reason")))
+      pinBlas "0" (fun () ->
+       withGate "BLADE_FOLD_LANES" "0" (fun () ->
+        withGate "BLADE_OMP_THREADS" null (fun () ->
+          planCase "plan_fold_lanes_threaded_knob_off" planFoldLanesThreadedSrc "fold-form"
+              (fun d -> applied d && d.Subject = "dot_ab" && evidenceMentioning "serial within each chunk: BLADE_FOLD_LANES=0/off" d)
+              "BLADE_FOLD_LANES=0: the serial chain per chunk, as before M14")))
+      pinBlas "0" (fun () ->
+       withGate "BLADE_FOLD_LANES" null (fun () ->
+        withGate "BLADE_OMP_THREADS" "1" (fun () ->
+          planCase "plan_fold_lanes_threads_off_dot" planFoldLanesThreadedSrc "fold-form"
+              (fun d -> applied d && d.Subject = "dot_ab" && evidenceMentioning "fold form: simd K-lanes(8) dot" d)
+              "BLADE_OMP_THREADS=1: the serial vector tree over the whole sweep")))
       // The orbit-class fold (src/OrbitFold.fs; bench M4): the logical sum
       // over a compact pool, regrouped by orbit class under the licence.
       planCase "plan_orbit_fold_sym2_applied" (planOrbitSrc planOrbitSym2Body) "fold-form"
@@ -1471,6 +1687,41 @@ let private planCases () =
       withGate "BLADE_ORBIT_FOLD" "0" (fun () ->
           planCase "plan_orbit_fold_declined_knob" (planOrbitSrc planOrbitSym2Body) "fold-form"
               (declinedMentioning "BLADE_ORBIT_FOLD=0") "BLADE_ORBIT_FOLD=0 keeps the logical walk")
+      // THE THREADED FORM (bench G32): `where omp` on the outer fold is spent
+      // as a team over the first-coordinate rows -- in the fold-form line and
+      // as an applied `omp` record -- and BLADE_OMP_THREADS=1 keeps the
+      // serial pass with the census naming the knob.
+      withGate "BLADE_OMP_THREADS" null (fun () ->
+          planCase "plan_orbit_fold_threaded" (planOrbitSrc planOrbitSym2Body) "fold-form"
+              (fun d -> applied d && evidenceMentioning "orbit-class fold (rank 2, 2 classes); thread team over the first-coordinate rows" d)
+              "the omp-licensed orbit fold threads its first-coordinate rows")
+      withGate "BLADE_OMP_THREADS" null (fun () ->
+          planCase "plan_orbit_fold_threaded_omp_record" (planOrbitSrc planOrbitSym2Body) "omp"
+              (fun d -> applied d && evidenceMentioning "orbit-class fold: first-coordinate rows" d)
+              "omp applied: the orbit fold's thread team")
+      withGate "BLADE_OMP_THREADS" "1" (fun () ->
+          planCase "plan_orbit_fold_threads_suppressed" (planOrbitSrc planOrbitSym2Body) "fold-form"
+              (fun d -> applied d && not (evidenceMentioning "thread team" d))
+              "BLADE_OMP_THREADS=1: the serial orbit pass")
+      withGate "BLADE_OMP_THREADS" "1" (fun () ->
+          planCase "plan_orbit_fold_threads_suppressed_census" (planOrbitSrc planOrbitSym2Body) "omp"
+              (declinedMentioning "BLADE_OMP_THREADS") "omp declined, naming BLADE_OMP_THREADS")
+      planCase "plan_orbit_fold_unlicensed_serial" planOrbitSym3Src "fold-form"
+          (fun d -> applied d && not (evidenceMentioning "thread team" d)) "no omp request: the serial orbit pass"
+      (match withGate "BLADE_OMP_THREADS" null (fun () -> cppOfSource "plan_orbit_fold_threaded_cpp" (planOrbitSrc planOrbitSym2Body)) with
+       | Error e -> resultLine Fail "orbit_fold_cpp_threaded_rows" e; false
+       | Ok cpp ->
+           // Each row finds its own pool offset (no running counter across
+           // threads), and the per-thread sums join in thread order.
+           let wants = [ "BLADE_OMP_PARALLEL_NUM_THREADS(__oT)"
+                         "size_t __oo = __ototal - nested_array_utilities::canon_count((size_t)7 - __oc1, 2, false);"
+                         "__oa1 = __oa1 + __opart[(size_t)__ot * 2 + 1];"
+                         "const double __ot1 = __oa1 + __oa1;" ]
+           let missing = wants |> List.filter (fun w -> not (cpp.Contains w))
+           if missing.IsEmpty then
+               resultLine Pass "orbit_fold_cpp_threaded_rows" "closed-form row offsets, thread-order combine, addition-only class combine"; true
+           else
+               resultLine Fail "orbit_fold_cpp_threaded_rows" ($"missing {missing}"); false)
       planCase "plan_orbit_fold_combine_is_additions" planOrbitSym3Src "fold-form" applied "applied (C++ text checked below)"
       (match cppOfSource "plan_orbit_fold_cpp" planOrbitSym3Src with
        | Error e -> resultLine Fail "orbit_fold_cpp_addition_combine" e; false
@@ -1628,6 +1879,18 @@ let runOptimizeTests () =
           // escape-analysis leak the work found.
           poolReuseReturnTakesDeadPool ()
           poolReuseChainSharesRoot ()
+          // Hot-row fold scheduling (bench review M13).
+          hotRowEmitted ()
+          hotRowGateOff ()
+          decisionCase "decision_hot_row_applied" hotRowSrc "hot-row-fold" applied
+              "hot-row-fold applied"
+          withGate "BLADE_HOT_ROW" "0" (fun () ->
+              decisionCase "decision_hot_row_declined_gate" hotRowSrc "hot-row-fold"
+                  (declinedMentioning "disabled by BLADE_HOT_ROW") "declined: disabled by BLADE_HOT_ROW")
+          decisionCase "decision_hot_row_declined_lost_team" hotRowLostTeamSrc "hot-row-fold"
+              (declinedMentioning "lose their team") "declined: the fold would lose its Path B team"
+          decisionCase "decision_hot_row_declined_reads_beyond" hotRowReadsBeyondSrc "hot-row-fold"
+              (declinedMentioning "beyond its own row") "declined: the row kernel reads beyond its row"
           scalarCaptureNoLongerPinsSource ()
           // Partial sparse reads: every let-bound gather freed by its own
           // producer's teardown, the escaping ones spared.

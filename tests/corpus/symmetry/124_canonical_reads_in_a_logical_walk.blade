@@ -1,0 +1,33 @@
+// TEST: Canonicalizing compact reads in logical walks the orbit fold declines
+// A walk the orbit-class fold turns away (two coordinate orders of one
+// array, a level coordinate beyond the read, a second array) reads every
+// logical cell through the canonicalizing accessor. The LLVM lane spells that
+// read as the sorting network plus a pool offset from per-coordinate tables
+// (`SimplexBlocksCore.coordTerm`, bench G34): offset = W0(i0) + W1(i1) + i2
+// at rank 3, W0(i0) + i1 at rank 2. Symmetric rank 3 in permuted orders,
+// strict rank 3 with its signs and repeated-index zeros, symmetric rank 2,
+// and literal subscripts (the table terms fold). Integer-valued cells.
+let static p = 11
+type Var = Idx<p>
+type Obs = Idx<4>
+let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 5 + s * 3) % 7) - 2.0 |> compute
+let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) |> compute
+let perm = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> reduce(method_for(range<Var>) <@> lambda(k) -> t(k, i, j) * t(i, j, k), (+)), (+)), (+))
+let lit = t(2, 0, 1) + t(10, 3, 3) * 2.0
+type I7 = Idx<7>
+let B: Array<Float64 like I7> = [1.0, 3.0, 4.0, 8.0, 9.0, 15.0, 16.0]
+let A3 = method_for(B, B, B) <@> lambda(a, b, c) where anticomm(a, b, c) -> (a - b) * (b - c) * (a - c) |> compute
+let w = method_for(range<I7>) <@> lambda(i) -> Float64(i) |> compute
+let anti = reduce(method_for(range<I7>) <@> lambda(i) -> reduce(method_for(range<I7>) <@> lambda(j) -> reduce(method_for(range<I7>) <@> lambda(k) -> A3(j, k, i) * w(k) * w(i) * w(i), (+)), (+)), (+))
+let anti_a = A3(3, 1, 5)
+let anti_zero = A3(1, 1, 4)
+let anti_b = A3(6, 2, 0)
+let g = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute
+let sym2 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(j, i) * Float64(i + 1), (+)), (+))
+// EXPECT: perm = 684729.0
+// EXPECT: lit = -10.0
+// EXPECT: anti = -258608.0
+// EXPECT: anti_a = 420.0
+// EXPECT: anti_zero = 0.0
+// EXPECT: anti_b = 540.0
+// EXPECT: sym2 = 2564.0

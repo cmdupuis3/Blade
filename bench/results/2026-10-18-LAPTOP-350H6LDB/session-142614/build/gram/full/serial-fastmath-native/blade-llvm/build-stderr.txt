@@ -1,3 +1,0 @@
-[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\gram-7f6080dc-13296-2668191f\gram.ll
-[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-142614\build\gram\full\serial-fastmath-native\blade-llvm\gram.exe
-[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\gram-7f6080dc-13296-2668191f

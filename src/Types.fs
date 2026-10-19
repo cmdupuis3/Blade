@@ -1465,3 +1465,54 @@ let domainCardOf (levels: DomainLevel list) : int64 =
                 v <- v + 1L
             total
     go 0
+
+/// The DIAGONAL schedule of a two-field band: the same cells as the plan, in
+/// (k = i - j, i) order -- k over [KLo, KHi], and for each k the field i over
+/// [max(ILo, JLo + k), min(IHi, JHi + k)] with j = i - k.
+type DomainDiagonal = { KLo: int64; KHi: int64; ILo: int64; IHi: int64; JLo: int64; JHi: int64 }
+
+/// A plan is a BAND when it has two fields, the outer one box-bounded and the
+/// inner one bounded by its box AND by the outer field from both sides with
+/// unit slope (`j >= i + cl`, `j <= i + ch`) -- what `abs(i - j) <= w` (or any
+/// pair of difference conjuncts) projects to. Its cells are then the union of
+/// the diagonals k = i - j in [-ch, -cl], each a contiguous run of i.
+///
+/// A LICENSED fold over a band may walk it diagonal by diagonal: the cells and
+/// each cell's arithmetic are unchanged, only the summation order moves, which
+/// is what the licence permits. It is the order the expert writes for a banded
+/// operator (`do k = -w, w; do i`), and it is faster on its own: the inner run
+/// is ~n long instead of 2w + 1, and a kernel term that depends on the cell
+/// only through i - j (a band's coefficient) is invariant in the inner loop,
+/// so the back end hoists it -- one evaluation per diagonal where the row walk
+/// paid one per cell (bench gap G33, band). The cell count is re-derived from
+/// the diagonals and must equal the plan's, or no diagonal is offered.
+let domainDiagonal (plan: DomainPlan) : DomainDiagonal option =
+    match plan.Levels with
+    | [ l0; l1 ] ->
+        let isConst (f: DomainAffine) = f.Coefs.IsEmpty
+        let unitOnOuter (f: DomainAffine) = f.Coefs = [ (0, 1L) ]
+        let loC, loA = l1.Lo |> List.partition isConst
+        let hiC, hiA = l1.Hi |> List.partition isConst
+        if l0.Lo.IsEmpty || l0.Hi.IsEmpty
+           || not (List.forall isConst l0.Lo && List.forall isConst l0.Hi)
+           || loC.IsEmpty || hiC.IsEmpty || loA.IsEmpty || hiA.IsEmpty
+           || not (List.forall unitOnOuter loA && List.forall unitOnOuter hiA) then None
+        else
+            let iLo = l0.Lo |> List.map _.Const |> List.max
+            let iHi = l0.Hi |> List.map _.Const |> List.min
+            let jLo = loC |> List.map _.Const |> List.max
+            let jHi = hiC |> List.map _.Const |> List.min
+            let cl = loA |> List.map _.Const |> List.max
+            let ch = hiA |> List.map _.Const |> List.min
+            // k = i - j lies in [-ch, -cl]; trimmed to the k whose i run is
+            // non-empty (max(iLo, jLo + k) <= min(iHi, jHi + k)).
+            let kLo = max (-ch) (iLo - jHi)
+            let kHi = min (-cl) (iHi - jLo)
+            if iLo > iHi || kLo > kHi then None
+            else
+                let card =
+                    seq { kLo .. kHi }
+                    |> Seq.sumBy (fun k -> max 0L (min iHi (jHi + k) - max iLo (jLo + k) + 1L))
+                if card <> plan.Card then None
+                else Some { KLo = kLo; KHi = kHi; ILo = iLo; IHi = iHi; JLo = jLo; JHi = jHi }
+    | _ -> None

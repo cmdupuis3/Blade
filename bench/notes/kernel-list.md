@@ -5,7 +5,7 @@ Architect's deliverable 1. Directory names are FINAL; do not rename. Each kernel
 `natural.f90` + `expert.f90` (fortran), `kernel.json` (harness). The per-kernel `spec.md`
 is authoritative where this page and the spec disagree.
 
-Conventions used below: `p`, `n`, ... are the SIZE parameters (see `bench/README.md` §4 for the
+Conventions used below: `p`, `n`, ... are the SIZE parameters (see `bench/kernels/README.md` §2 for the
 `SIZE` marker). "cells" = output cells. Flop and time estimates are back-of-envelope
 (never reported as results). All working sets include the natural tier's dense arrays and
 stay <= 64 MB. No extent is a power of two.
@@ -144,7 +144,7 @@ checksum = Σ s3². No named array output: the stages are intermediates.
 ≈ 10–25 ms, memory-bound; input share ~35% → `inputonly` twin REQUIRED).
 **Tiers.** natural: three array statements into three named arrays, then `sum(s3**2)`.
 expert: one loop, scalar stages, one accumulator.
-**omp.** Blade: a licence on the fold (spelling settled by blade-B; see README §7.4).
+**omp.** Blade: a licence on the fold (spelling settled by blade-B; see kernels/README.md §4.4).
 Fortran: `!$omp parallel do reduction(+:acc)` on the fused loop (expert) / on each array
 statement + the sum (natural, via `!$omp workshare` or a loop).
 **Regimes.** serial, mt8, fast.

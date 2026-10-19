@@ -60,7 +60,7 @@ that the band kernel itself (~20 ms) sits above the fresh-process timing floor; 
 extent is a power of two. Markers: `let static n = 20011   // SIZE n`, `let static w = 101
 // SIZE w`; `Idx<n>`, `max=n-1`, `Float64(w + 1)` are derived.
 
-## Tiers (natural = dense baseline; expert = reviewed implementation; README §2)
+## Tiers (natural = dense baseline; expert = reviewed implementation; kernels/README.md §1)
 
 - **natural (dense-predicate baseline)**: the full n x n nest with `if (abs(i - j) <= w)`
   around the cell (the dense matrix B itself would be 3.2 GB, so the predicate nest IS the
@@ -102,10 +102,10 @@ let s = reduce(method_for(range<Band>) <@> lambda(i, j) -> phi(i, j) * x(i) * x(
 table) and a `fold form:` line for the fold; the emit must show a two-level nest with
 `j` running over `max(0, i-w)..min(n-1, i+w)` and NO `sparse_index_t` / hash build. The
 subscripts `x(i)`, `x(j)` take `Int64` domain coordinates into an `Nx`-tagged array: they
-carry a BL4003 advisory and a run-time check (README §3.10) unless x is held as an
+carry a BL4003 advisory and a run-time check (`docs/formalism.md` §3.10) unless x is held as an
 anonymous array or the coordinates are cast — blade-B picks the spelling the style guide
 ranks highest and records whether the checks survive in the emit. mt8: the fold licence
-goes on the fold kernel (`lambda(p, q) where omp -> p + q, 0.0`, README §7.4) and the
+goes on the fold kernel (`lambda(p, q) where omp -> p + q, 0.0`, kernels/README.md §4.4) and the
 domain nest's outer level must then thread — blade-B confirms the pragma lands on the `i`
 level (`[omp v1]` line) or records "no parallel form".
 

@@ -724,6 +724,14 @@ let fpReproReason () : string =
 /// `fpContractFlag` are functions. Every consultation re-reads.
 let fpReassocEnabled () : bool = not (fpReproEnabled ())
 
+/// `BLADE_DOMAIN_DIAGONAL`: unset/`1`/`on` lets a LICENSED fold over a band
+/// domain walk it by diagonal (`Types.domainDiagonal`; both lanes), `0`/`off`
+/// keeps the row-major affine nest, for A/B. Inert under BLADE_FP_REPRO=1,
+/// whose folds keep the lex order. Changes the emission, so the exe cache keys
+/// on it for free. A function, re-read per call, like every knob here.
+let domainDiagonalEnabled () : bool =
+    Blade.Toolchain.envSwitch "BLADE_DOMAIN_DIAGONAL" <> Blade.Toolchain.SwitchOff
+
 /// The one EXPLICIT spelling `BLADE_FP_REASSOC=1` (unset does not count),
 /// for the single consumer whose reassociation is NOT a source licence: the
 /// Reynolds term merger (`canonicalKey`), which may flatten a float `+`/`*`
@@ -1019,6 +1027,21 @@ let tilesUsedCell () : bool ref =
         fresh
     else v
 
+/// Set when a fold emitted a `blade_fold::` call (the explicit K-lane vector
+/// forms and the Path B chunk partition in blade_fold_lanes.hpp); the assembly
+/// appends that include only then. Same AsyncLocal collect-then-append shape
+/// as tilesUsedCell.
+let internal foldLanesUsedStorage =
+    System.Threading.AsyncLocal<bool ref>()
+
+let foldLanesUsedCell () : bool ref =
+    let v = foldLanesUsedStorage.Value
+    if isNull (box v) then
+        let fresh = ref false
+        foldLanesUsedStorage.Value <- fresh
+        fresh
+    else v
+
 /// Set when the native matmul arm emitted a `blade_pgemm::` call (the packed
 /// kernel in blade_packed_gemm.hpp); the assembly appends that include only
 /// then. Same AsyncLocal collect-then-append shape as tilesUsedCell.
@@ -1030,6 +1053,24 @@ let packedGemmUsedCell () : bool ref =
     if isNull (box v) then
         let fresh = ref false
         packedGemmUsedStorage.Value <- fresh
+        fresh
+    else v
+
+/// Hot-row fold scheduling handoff (Blade.Optimize.planHotRowFolds): the
+/// plan the compute binding being emitted carries, keyed by its C++ output
+/// name. Set by the two statement-form producer sites (CodeGen's
+/// function-body arm, genComputeBinding's top-level arm) around their
+/// `genApplyCombinator` call, because the apply emitter knows the output's
+/// NAME and not its let id; cleared right after. Same AsyncLocal shape as
+/// the cells above.
+let internal hotRowPendingStorage =
+    System.Threading.AsyncLocal<System.Collections.Generic.Dictionary<string, Blade.Optimize.HotRowPlan>>()
+
+let hotRowPendingCell () : System.Collections.Generic.Dictionary<string, Blade.Optimize.HotRowPlan> =
+    let v = hotRowPendingStorage.Value
+    if isNull (box v) then
+        let fresh = System.Collections.Generic.Dictionary<string, Blade.Optimize.HotRowPlan>()
+        hotRowPendingStorage.Value <- fresh
         fresh
     else v
 

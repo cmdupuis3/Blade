@@ -8,7 +8,7 @@ This was a read-only review. I ran no benchmarks and changed no files. Findings 
 
 **M1 — SEVERITY: major — The “natural” tier is sometimes deliberately less natural than its label claims.**
 
-**At issue:** `README.md` §2: “every logical cell computed independently” and “symmetry exploitation of any kind belongs to the expert tier.”
+**At issue:** `kernels/README.md` §1: “every logical cell computed independently” and “symmetry exploitation of any kind belongs to the expert tier.”
 
 A competent programmer can recognize symmetry without writing packed offsets or a microkernel. The restriction is defensible as a **dense, symmetry-unaware baseline**, but not as a general characterization of natural Fortran.
 
@@ -64,7 +64,7 @@ The RK4 trajectories are independent across `x`; ordinary Fortran can paralleliz
 
 **M6 — SEVERITY: major — The generator is neither independent across arrays nor uniform over its integer output space.**
 
-**At issue:** `README.md` §5: seeds `10000019 * j` mean “no two inputs are shifted copies of each other.”
+**At issue:** `kernels/README.md` §3: seeds `10000019 * j` mean “no two inputs are shifted copies of each other.”
 
 Writing the entire generator as \(F(k+s)\) gives exactly
 
@@ -80,7 +80,7 @@ There is also a provable low-bit bias. Over a complete uniformly distributed `h1
 
 **M7 — SEVERITY: minor — Exact input conversion is sound; the integer bound is wrong.**
 
-**At issue:** `README.md` §5 claims “every intermediate below \(2^{56}\).”
+**At issue:** `kernels/README.md` §3 claims “every intermediate below \(2^{56}\).”
 
 The final affine product `h2 * 1103515245 + 12345` can approach \(2.37\times10^{18}\), requiring a bound below \(2^{62}\), not \(2^{56}\). It still fits signed Int64. `bench_support.f90` uses the safer bound.
 
@@ -98,7 +98,7 @@ Compilers may lower these identically, or differ in vectorization, signed arithm
 
 **M9 — SEVERITY: blocker — Difference of medians is not an identified kernel-only time.**
 
-**At issue:** `README.md` §5 and D9 define `net = median(total) − median(inputonly)`; `dot/spec.md` says “the net figure is the result.”
+**At issue:** `kernels/README.md` §3 and D9 define `net = median(total) − median(inputonly)`; `dot/spec.md` says “the net figure is the result.”
 
 The difference includes more than the kernel:
 
@@ -167,7 +167,7 @@ A better design is full validation outside the kernel timer, combined with the o
 
 **M14 — SEVERITY: blocker — The clock contract is contradicted by the acceptance evidence.**
 
-**At issue:** `README.md` §5 promises monotonic timing; `fortran/bench_support.f90` uses QPC. `notes/llvm-acceptance-A.md`, F8 reports Blade C++ using `high_resolution_clock` aliased to system time and LLVM using `timespec_get(TIME_UTC)`.
+**At issue:** `kernels/README.md` §3 promises monotonic timing; `fortran/bench_support.f90` uses QPC. `notes/llvm-acceptance-A.md`, F8 reports Blade C++ using `high_resolution_clock` aliased to system time and LLVM using `timespec_get(TIME_UTC)`.
 
 Resolution is not the same as monotonicity. Wall-clock adjustment can distort a sample. Additionally, `parse_contract` accepts finite negative elapsed times.
 
@@ -177,7 +177,7 @@ QPC is suitable for 5–25 ms measurements; timer resolution is not the principa
 
 **M15 — SEVERITY: major — Rotation and small sample counts do not adequately support narrow performance claims.**
 
-**At issue:** `README.md` §6 specifies 5/7/11 rounds; `run_block` rotates a fixed arm ordering.
+**At issue:** ``bench/harness/README.md` "Protocol and statistics" specifies 5/7/11 rounds; `run_block` rotates a fixed arm ordering.
 
 With six main arms and four twins, eleven rounds are not position-balanced; five or seven rounds can leave substantial imbalance. Cyclic rotation also preserves most predecessor relationships, relevant to residual thermal load. Independent bootstrap resampling discards the round structure introduced to control drift.
 
@@ -232,7 +232,7 @@ The environment requests placement but does not demonstrate it under both OpenMP
 
 **M21 — SEVERITY: major — Matching clock placement requires matching allocation lifetime, not just the start line.**
 
-**At issue:** `README.md` §1.6 and §5 include allocation; Blade arrays live inside functions/blocks, while inspected Fortran `gram` arrays remain allocated after `bench_stop_and_report`.
+**At issue:** `README.md` §1.6 and `kernels/README.md` §3 include allocation; Blade arrays live inside functions/blocks, while inspected Fortran `gram` arrays remain allocated after `bench_stop_and_report`.
 
 Blade may destroy function-local arrays before its stop clock, whereas Fortran can defer cleanup until program exit. Initial zero-fills, temporary allocation, panel packing and first-touch work can also differ. These are legitimate implementation costs only if the measured endpoint is explicit.
 

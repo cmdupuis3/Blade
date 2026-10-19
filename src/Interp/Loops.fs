@@ -1705,10 +1705,22 @@ and private materializeGroupedZipPeel (st: InterpState) (env: Env) (info: ApplyI
 and private tryCompoundValueMap (info: ApplyInfo) : bool =
     let isCompoundIx (ix: IRIndexType) =
         ix.IxKind = IxKCompound || ix.IxKind = IxKCompoundDynamic
-    match info.Arrays, info.ArrayTypes, info.OutputType with
-    | [ IRVar _ ], [ at ], ArrayElem outAt ->
-        (match at.IndexTypes, outAt.IndexTypes with
-         | [ ix ], [ oix ] -> isCompoundIx ix && isCompoundIx oix
+    // One operand (`method_for(y) <@> f`) or several co-iterated over the
+    // same compound (`y * y`, an elementwise binop over compounds): every
+    // operand a named compound with no trailing dims, the output the same.
+    // The compiled lanes key the output on the FIRST operand's index and
+    // read cell r of each operand (CodeGen's shared-idx output; EmitLlvm's
+    // compound value map, which refuses operands of different compounds);
+    // materializeCompoundValueMap checks the masks agree at run time.
+    match info.OutputType with
+    | ArrayElem outAt when not info.Arrays.IsEmpty
+                           && info.Arrays.Length = info.ArrayTypes.Length ->
+        (match outAt.IndexTypes with
+         | [ oix ] when isCompoundIx oix ->
+             List.forall2 (fun a (at: IRArrayType) ->
+                 (match a with IRVar _ -> true | _ -> false)
+                 && (match at.IndexTypes with [ ix ] -> isCompoundIx ix | _ -> false))
+                 info.Arrays info.ArrayTypes
          | _ -> false)
     | _ -> false
 
@@ -1719,27 +1731,35 @@ and private tryCompoundValueMap (info: ApplyInfo) : bool =
 and private materializeCompoundValueMap (st: InterpState) (env: Env) (info: ApplyInfo) (wrappers: IRExpr list) : Value =
     if not (List.isEmpty wrappers) then
         raise (InterpUnsupported "functor-map wrapper over a compound-value map")
-    let cv =
-        match force st env (Core.evalExpr st env info.Arrays.Head) with
-        | VCompound cv -> cv
-        | _ -> raise (InterpUnsupported "compound-value map: operand did not evaluate to a Compound value")
-    if cv.TrailingStride <> 1L then
-        raise (InterpUnsupported "compound-value map with trailing dims (only the rank-1 compact view is interpreted)")
+    let operands =
+        info.Arrays |> List.map (fun a ->
+            match force st env (Core.evalExpr st env a) with
+            | VCompound cv -> cv
+            | _ -> raise (InterpUnsupported "compound-value map: operand did not evaluate to a Compound value"))
+    let cv = List.head operands
+    for o in operands do
+        if o.TrailingStride <> 1L then
+            raise (InterpUnsupported "compound-value map with trailing dims (only the rank-1 compact view is interpreted)")
+        // Co-iterated operands must be cells of ONE compound: the same
+        // present tuples in the same order (a shared index, or an equal mask).
+        if not (obj.ReferenceEquals(o.Table, cv.Table)) && o.Mask <> cv.Mask then
+            raise (InterpUnsupported "compound-value map over operands of different compounds")
     let callable =
         match resolveKernel info.Kernel with
-        | Some rk when rk.Callable.Params.Length = 1 -> rk.Callable
-        | _ -> raise (InterpUnsupported "compound-value map: kernel is not single-parameter")
+        | Some rk when rk.Callable.Params.Length = operands.Length -> rk.Callable
+        | _ -> raise (InterpUnsupported "compound-value map: kernel arity differs from the operand count")
     let outAt =
         match info.OutputType with
         | ArrayElem a -> a
         | _ -> raise (InterpUnsupported "compound-value map: output is not an array type")
     let caps = bindCallCaptures st env callable
-    let dense = A.compoundToDense cv
+    let denses = operands |> List.map A.compoundToDense
     let n = int cv.Cardinality
     st.Cells <- st.Cells + int64 n
     let results =
         Array.init n (fun r ->
-            force st env (Core.evalCall st callable caps [ A.readCell dense [ int64 r ] ]))
+            let args = denses |> List.map (fun d -> A.readCell d [ int64 r ])
+            force st env (Core.evalCall st callable caps args))
     VCompound { cv with ElemType = outAt.ElemType
                         IndexTypes = outAt.IndexTypes
                         Data = A.storeOfValues outAt.ElemType results }

@@ -207,7 +207,7 @@ loops whose Blade counterpart carries a reassociation licence (section 6 lists e
 there a guarded `!$omp simd reduction(+:...)` (or `parallel do simd reduction` in mt8)
 licenses the reordering. `repro` keeps every fold in order (one accumulator per sum,
 ascending). Natural tier identical in every regime. An OpenMP `reduction(+:)` across threads
-reorders a sum in every mt8 regime (allowed, README section 3).
+reorders a sum in every mt8 regime (allowed, README §3).
 
 ### Array temporaries and other codegen-relevant defaults (natural tier)
 
@@ -223,7 +223,7 @@ reorders a sum in every mt8 regime (allowed, README section 3).
   a workshare runs on one thread (gfortran emits `GOMP_single_start`; ifx warns #5474), and
   ifx also serializes some plain array statements (`s1/(1+abs(s1))`, the whole-grid stencil
   section statement, user-elemental calls). So where the natural tier must thread, it uses
-  `!$omp parallel do` per pass/statement (README section 2 allows it), keeping natural's
+  `!$omp parallel do` per pass/statement (kernels/README.md §1 allows it), keeping natural's
   structure (named stage arrays, one pass each). `dot/natural` keeps DOT_PRODUCT in a
   workshare: a serial kernel with parallel preparation (recorded below).
 
@@ -239,7 +239,7 @@ reorders a sum in every mt8 regime (allowed, README section 3).
 - `lin2(i0, j0, n1) = i0*n1 + j0`, `lin3(i0, j0, l0, n1, n2) = (i0*n1 + j0)*n2 + l0`: 0-based
   MATHEMATICAL row-major indices, whatever the Fortran storage orientation.
 - Timer: **QueryPerformanceCounter** via `bind(C)`, integer(8) count and frequency (10 MHz),
-  not `system_clock` (README section 5 still says system_clock; review M14 records QPC for
+  not `system_clock` (kernels/README.md §3 still says system_clock; review M14 records QPC for
   every lane): measured `system_clock` granularity with integer(8) arguments is 1 count at
   rate 1e7 under gfortran, but under **ifx 2026.1 the rate reports 1e6 while the count only
   advances in steps of 1000 (1 ms granularity)**.

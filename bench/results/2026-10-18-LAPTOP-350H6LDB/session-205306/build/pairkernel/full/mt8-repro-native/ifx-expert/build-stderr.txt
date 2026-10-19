@@ -1,6 +1,0 @@
-**********************************************************************
-** Visual Studio 2022 Developer Command Prompt v17.4.3
-** Copyright (c) 2022 Microsoft Corporation
-**********************************************************************
-[vcvarsall.bat] Environment initialized for: 'x64'
-+ ifx /nologo  /O3 /QxHost /fp:precise -mllvm -fp-contract=fast /fpp /Qopenmp /fpp /F268435456 /I"C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\fortran\." C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-205306\build\pairkernel\full\mt8-repro-native\ifx-expert\src\pairkernel.f90  /Fo:"C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-205306\build\pairkernel\full\mt8-repro-native\ifx-expert\ifx-expert.exe.obj" /Fe:"C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-205306\build\pairkernel\full\mt8-repro-native\ifx-expert\ifx-expert.exe" 

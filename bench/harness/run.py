@@ -877,7 +877,9 @@ _RE_CPP_THREADS = re.compile(r"\bBLADE_OMP_PARALLEL\w*|#\s*pragma\s+omp\s+parall
 # Macro INVOCATIONS only (the header comment of every .ll mentions "reassoc"; .cpp comments may
 # name macros): C++ `BLADE_OMP_[PARALLEL_FOR_]SIMD_REDUCTION(`, LLVM a fast-math flag on an
 # instruction with comments stripped.
-_RE_CPP_SIMDRED = re.compile(r"\bBLADE_OMP_(?:PARALLEL_FOR_)?SIMD_REDUCTION\(")
+# ... or a call of the explicit K-lane vector fold forms (blade_fold_lanes.hpp, review M9/M14),
+# which replaced the single-accumulator simd reduction for dot-class folds on 2026-10-19.
+_RE_CPP_SIMDRED = re.compile(r"\bBLADE_OMP_(?:PARALLEL_FOR_)?SIMD_REDUCTION\(|\bblade_fold::(?:sum|dot|sq|dot3)<")
 _RE_CPP_SERIAL_MARK = re.compile(r"\[omp\] requested but emitted serial")
 _RE_LL_THREADS = re.compile(r"__kmpc_fork_call|\bGOMP_parallel\w*|\bomp_get_num_threads\b")
 _RE_LL_REASSOC = re.compile(r"=\s*f(?:add|mul|sub|div|neg)\s+(?:(?:nnan|ninf|nsz|arcp|contract|afn)\s+)*(?:reassoc|fast)\b")
@@ -934,13 +936,15 @@ def prepare_source(kernel: Kernel, arm: ArmSpec, regime: Regime, size_name: str,
             "compiled_sha256": sha256_file(out), "size_lines": lines}
     if arm.family != "blade" and BENCH_SUPPORT.is_file():
         info["bench_support_sha256"] = sha256_file(BENCH_SUPPORT)
-        shutil.copy2(BENCH_SUPPORT, out.parent / "bench_support.f90.copy")
     return out, info
 
 
 def build_arm(kernel: Kernel, arm: ArmSpec, regime: Regime, size_name: str, root: Path,
-              tools: Toolchain, config: dict[str, Any], timeout: float) -> Build:
-    """Build one arm of one kernel in one regime; never raises for a build failure."""
+              tools: Toolchain, config: dict[str, Any], timeout: float, lean: bool = False) -> Build:
+    """Build one arm of one kernel in one regime; never raises for a build failure.
+
+    ``lean`` (session bundles under bench/results): after the build, prune the arm directory
+    to what identifies the build (see :func:`prune_arm_dir`)."""
     b = Build(arm=arm.name, regime=regime.name, size=size_name, run_knobs=run_knobs(regime, config),
               twin=arm.twin, lane=arm.lane)
     armdir = root / kernel.name / size_name / regime.name / arm.name
@@ -968,7 +972,46 @@ def build_arm(kernel: Kernel, arm: ArmSpec, regime: Regime, size_name: str, root
         b.resolved_dlls = resolve_dlls(Path(b.exe), b.pe.get("imports", []), run_env)
     (armdir / "build-command.txt").write_text(subprocess.list2cmdline(b.command) + "\n"
                                               + json.dumps(b.knobs) + "\n", encoding="utf-8")
+    if lean:
+        prune_arm_dir(b, armdir, stem)
     return b
+
+
+_BENIGN_STDERR = re.compile(r"^\s*$|^\+ |^\[(Emit|Compile|Build)\] |^\*{5,}|^\*\* |^\[vcvarsall\.bat\]|^:: ")
+
+
+def _meaningful_stderr(text: str) -> bool:
+    """stderr beyond the known chatter (Blade --verbose lines, the wrappers' `+ cmd` echo,
+    the vcvars / oneAPI banners): a diagnostic, a refusal, anything a reader should see."""
+    return any(not _BENIGN_STDERR.search(l) and re.search(r"warning|error|remark|refused|fatal|note", l, re.I)
+               for l in text.splitlines())
+
+
+def prune_arm_dir(b: Build, armdir: Path, stem: str) -> None:
+    """Lean bundle (2026-10-18): keep build-command.txt, plan.txt, the program's own
+    generated <stem>.cpp/.ll/.cu (and a backend .log if any), the exe and its DLLs (git-
+    ignored); drop the SIZE-substituted src/ copy (sizes are in the manifest and the build
+    record, the committed source is in git with its hash in sources-sha256.json), the runtime
+    header / shim copies (identified by the Blade.dll hash; their hashes stay in
+    evidence.runtime_headers_sha256), and build-stdout/stderr unless the build failed, fell
+    back, or stderr carries a diagnostic."""
+    shutil.rmtree(armdir / "src", ignore_errors=True)
+    for pat in ("*.copy", "*.mod", "*.obj", "*.o"):     # copies and compiler byproducts
+        for f in armdir.rglob(pat):
+            f.unlink(missing_ok=True)
+    gen = armdir / "generated"
+    if gen.is_dir():
+        keep = {f"{stem}.cpp", f"{stem}.ll", f"{stem}.cu", f"{stem}_kernels.cu"}
+        for f in gen.iterdir():
+            if f.name not in keep and f.suffix != ".log":
+                f.unlink(missing_ok=True)
+        b.evidence["artifacts"] = [str(f) for f in sorted(gen.iterdir())]
+    err = armdir / "build-stderr.txt"
+    stderr_text = err.read_text(encoding="utf-8", errors="replace") if err.is_file() else ""
+    if b.status in ("ok", "serial-only", "no-blas", "no-parallel-form") and not _meaningful_stderr(stderr_text):
+        for name in ("build-stdout.txt", "build-stderr.txt"):
+            (armdir / name).unlink(missing_ok=True)
+    b.evidence["bundle_pruned"] = True
 
 
 def _finish(b: Build, r: ProcResult, exe: Path) -> bool:
@@ -1049,7 +1092,7 @@ def _build_blade(b: Build, k: Kernel, arm: ArmSpec, regime: Regime, src: Path, a
                   omp_emitted_serial_markers=len(_RE_CPP_SERIAL_MARK.findall(text)))
     # The arm's ACTUAL fold form, from the artifact (blade plan is silent about it).
     nre = ev.get("simd_reductions", 0) + ev.get("reassoc_flags", 0)
-    ev["fold_form"] = (f"reordered ({ev.get('simd_reductions', 0)} SIMD_REDUCTION)" if ev.get("simd_reductions")
+    ev["fold_form"] = (f"reordered ({ev.get('simd_reductions', 0)} SIMD_REDUCTION/K-lane)" if ev.get("simd_reductions")
                        else f"reordered ({ev.get('reassoc_flags', 0)} reassoc flags)" if ev.get("reassoc_flags")
                        else "in-order") if ev.get("lane") else None
     if not ok:
@@ -1076,7 +1119,7 @@ def _build_blade(b: Build, k: Kernel, arm: ArmSpec, regime: Regime, src: Path, a
     # M3: repro serial acceptance -- no reordered fold may reach a serial repro build.
     if regime.threads == "serial" and regime.fp == "repro":
         if ev.get("simd_reductions", 0) > 0:
-            b.status, b.reason = "failed", f"repro serial build carries {ev['simd_reductions']} SIMD_REDUCTION expansion(s) (M3)"
+            b.status, b.reason = "failed", f"repro serial build carries {ev['simd_reductions']} SIMD_REDUCTION/K-lane fold site(s) (M3)"
             return
         if ev.get("reassoc_flags", 0) > 0:
             b.status, b.reason = "failed", f"repro serial build carries {ev['reassoc_flags']} reassoc FP flag(s) in the .ll (M3)"
@@ -1668,7 +1711,7 @@ class Session:
             regime = Regime.parse(spec["regime"])
             log(f"control {spec['name']}: {k.name}/{spec['arm']}/{regime.name}/{spec['size']}")
             b = build_arm(k, ArmSpec.parse(spec["arm"]), regime, spec["size"], self.build_root / "_controls",
-                          self.tools, self.opt.config, self.opt.build_timeout)
+                          self.tools, self.opt.config, self.opt.build_timeout, lean=self.opt.mode == "bench")
             rec["build"] = dataclasses.asdict(b)
             if b.status != "ok":
                 self.flags.append(f"control {spec['name']}: build {b.status}: {b.reason}")
@@ -1738,7 +1781,8 @@ class Session:
                           twin=a.twin, lane=a.lane)
             else:
                 log(f"build {k.name} {regime.name} {size} {a.name}")
-                b = build_arm(k, a, regime, size, self.build_root, self.tools, opt.config, opt.build_timeout)
+                b = build_arm(k, a, regime, size, self.build_root, self.tools, opt.config, opt.build_timeout,
+                              lean=opt.mode == "bench")
             builds[a.name] = b
             entry["build"] = dataclasses.asdict(b)
             entry["status"], entry["reason"] = b.status, b.reason
@@ -2102,19 +2146,22 @@ class Session:
         log(f"wrote {self.bundle}")
 
     def archive_sources(self) -> None:
-        """M27: freeze every input of the session inside the bundle."""
-        dst = self.bundle / "sources"
+        """M27, lean form (2026-10-18): record the identity of every input of the session in
+        sources-sha256.json -- same keys as the former `sources/` copy (paths relative to the
+        bench tree), hashed IN PLACE; the content itself is in git at machine.git_sha.  No
+        copy of the tree is written."""
         roots = {"kernels": self.opt.kernels[0].dir.parent, "validation": self.opt.validation_dir}
+        skip_dirs, skip_ext = {"__pycache__"}, {".exe", ".obj", ".mod"}
+        hashes: dict[str, str] = {}
         for rel in ("kernels", "fortran", "harness", "validation", "README.md", "notes/charter.md", ".gitignore"):
             src = roots.get(rel, BENCH_DIR / rel)
             if src.is_dir():
-                shutil.copytree(src, dst / rel, dirs_exist_ok=True,
-                                ignore=shutil.ignore_patterns("__pycache__", "*.exe", "*.obj", "*.mod"))
+                for f in sorted(src.rglob("*")):
+                    if f.is_file() and f.suffix.lower() not in skip_ext and not (set(f.relative_to(src).parts) & skip_dirs):
+                        hashes[str(Path(rel) / f.relative_to(src))] = sha256_file(f)
             elif src.is_file():
-                (dst / rel).parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, dst / rel)
-        hashes = {str(p.relative_to(dst)): sha256_file(p) for p in sorted(dst.rglob("*")) if p.is_file()}
-        write_json_atomic(self.bundle / "sources-sha256.json", hashes)
+                hashes[str(Path(rel))] = sha256_file(src)
+        write_json_atomic(self.bundle / "sources-sha256.json", dict(sorted(hashes.items())))
 
 
 # ---------------------------------------------------------------------------

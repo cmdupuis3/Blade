@@ -28,11 +28,11 @@ reduction(+:s)` on its dot loop; mt8 adds the thread-level `reduction`. Output: 
 | smoke | 30011 | 480 KB | < 0.1 ms | < 0.1 ms |
 | full | 3,000,017 | 48 MB | 3–6 ms (latency-bound chain ≈ bandwidth) | 15–20 ms |
 
-**Input generation dominates: an `inputonly` twin per arm is REQUIRED** (README §5.3). The
+**Input generation dominates: an `inputonly` twin per arm is REQUIRED** (kernels/README.md §3.3). The
 total timed region is the result; the incremental total-minus-twin estimate is reported
 beside it with its interval and is NOT kernel time (M9). R >= 21.
 
-## Tiers (natural = dense baseline; expert = reviewed implementation; README §2)
+## Tiers (natural = dense baseline; expert = reviewed implementation; kernels/README.md §1)
 
 - **natural (intrinsic baseline)**: `checksum = dot_product(a, b)`. mt8: `!$omp parallel do
   reduction(+:s)` over an explicit loop (or `workshare`).
@@ -76,7 +76,7 @@ licensed (serial, mt8), repro (serial, mt8), fastmath.
 ## Risks
 
 - The incremental estimate is a difference of two ~20 ms medians; its interval will be
-  wide and its ratio may be `undefined` (README §6). That is the honest state of a
+  wide and its ratio may be `undefined` (harness/README.md "Protocol and statistics"). That is the honest state of a
   bandwidth control under in-region input generation (D9); the total is the result.
 - Store audit: the twin and the total must both keep `a` and `b` materialized (M8/M10);
   the owners inspect the optimized generation loops.

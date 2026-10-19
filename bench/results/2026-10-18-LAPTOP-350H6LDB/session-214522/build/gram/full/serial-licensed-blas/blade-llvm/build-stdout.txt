@@ -1,1 +1,0 @@
-C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-214522\build\gram\full\serial-licensed-blas\blade-llvm\gram.exe

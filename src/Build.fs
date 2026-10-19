@@ -139,6 +139,18 @@ let llvmEnabled () : bool = Toolchain.envFlag "BLADE_LLVM" false
 /// the clang driver still compiles on this lane.
 let llvmOptFlags () = "-O3" + marchFlag () + " -fno-math-errno -fwrapv"
 
+/// Let LLVM's loop vectorizer take an IN-ORDER floating-point reduction: the
+/// loop body (the terms) runs packed and the accumulator still adds them one
+/// at a time in ascending order, so every bit of the serial chain is kept --
+/// this licenses nothing a `reassoc`-free `.ll` does not already say. g++ does
+/// this by default; LLVM does it only with the flag, so without it an
+/// unlicensed or BLADE_FP_REPRO=1 fold stayed wholly scalar in this lane while
+/// the C++ lane vectorized its terms (bench gap G33: band's repro build, two
+/// divisions per cell, 12.1 -> 4.7 ms with the checksum unchanged). The
+/// vectorizer's cost model still decides per loop. Passed on the program's own
+/// `.ll` compile only -- the shim and the tile core are C and keep their flags.
+let llvmOrderedReductionsFlag = " -mllvm -force-ordered-reductions"
+
 type HostPlatform = PWindows | PLinux | PMacOS
 
 /// The environment's toolchain capabilities.
@@ -1006,7 +1018,15 @@ let compileCppWithExtraSource (srcText: string option) (extraLinkInputs: string 
                 let tid = toolchainIdentity (optFlags () + " " + ompFlag)
                 $" -DBLADE_TOOLCHAIN_ID={tid}"
             else ""
-        let args = $"-std=c++17 {optFlags ()}{rrDefines}{tileDefines} {ompFlag} {safetyFlags}{blasCompileFlags} -o \"{exeFullPath}\" \"{cppFullPath}\"{extraFlags}{netcdfFlags}{mpiFlags}{blasLinkFlags}"
+        // The contracted build's name for the runtime headers whose arithmetic
+        // must FUSE DETERMINISTICALLY (blade_fold_lanes.hpp: one fma per lane
+        // step under any mode but `off`), so the fold forms' bits are a
+        // function of the build mode rather than of what the optimizer fused in
+        // each context. On the command line like the RR defines; `off` passes
+        // nothing and the header's step is the plain `acc + x * y`.
+        let contractDefine =
+            if (fpContractFlag ()).Trim() = "-ffp-contract=off" then "" else " -DBLADE_FP_CONTRACT_FAST=1"
+        let args = $"-std=c++17 {optFlags ()}{rrDefines}{tileDefines}{contractDefine} {ompFlag} {safetyFlags}{blasCompileFlags} -o \"{exeFullPath}\" \"{cppFullPath}\"{extraFlags}{netcdfFlags}{mpiFlags}{blasLinkFlags}"
         
         // The executable cache (Stage 4.1, above). v1 scope, deliberately
         // narrow -- every excluded lane is one whose inputs are not fully
@@ -1455,7 +1475,7 @@ let compileLlvmProgram (llFile: string) (outputDir: string) : Result<string, str
         | Error e -> Error e
         | Ok (shimObj, shimIdentity) ->
             let args =
-                $"{(llvmOptFlags ())} -Wno-override-module -o \"{exeFull}\" \"{llFull}\" \"{shimObj}\"{tilesArg}"
+                $"{(llvmOptFlags ())}{llvmOrderedReductionsFlag} -Wno-override-module -o \"{exeFull}\" \"{llFull}\" \"{shimObj}\"{tilesArg}"
             // Windows-only for the same reason as the g++ arm; a key that
             // cannot be built (unreadable .ll) just skips the cache, never
             // the compile.

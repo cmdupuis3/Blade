@@ -1,3 +1,0 @@
-[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\pairkernel-0a4a3c00-4672-5ca11b60\pairkernel.cpp
-[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-17-LAPTOP-350H6LDB\session-231651\build\pairkernel\full\serial-licensed-native\blade-cpp\pairkernel.exe
-[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\pairkernel-0a4a3c00-4672-5ca11b60

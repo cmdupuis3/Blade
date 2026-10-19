@@ -6,3 +6,13 @@ results/**/*.dll
 results/**/*.obj
 results/**/*.o
 results/**/*.mod
+
+# bundle clutter (2026-10-18 cleanup): identities live in session.json / sources-sha256.json
+results/**/sources/
+results/**/build/**/src/
+results/**/generated/*.hpp
+results/**/generated/*.h
+results/**/generated/*.c
+results/**/*.copy
+results/**/build-stdout.txt
+results/**/build-stderr.txt

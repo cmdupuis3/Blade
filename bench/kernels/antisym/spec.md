@@ -22,7 +22,7 @@ dense p x p).
 
 Blade stacks them as one array Z of shape (p, 2, n) with Z(i, 0, s) = X(i, s) and
 Z(i, 1, s) = Y(i, s) (the kernel needs both rows of one particle per operand position and
-symmetric storage is derived only for the SAME array in both positions, README §7.1); the
+symmetric storage is derived only for the SAME array in both positions, kernels/README.md §4.1); the
 mathematical arrays, their linear indices and seeds are unchanged. Fortran: `x(n, p)`,
 `y(n, p)`.
 
@@ -48,7 +48,7 @@ Natural: `l(p, p)` dense, both inner products per cell. Expert: strict upper tri
 packed (`(j-1)*(j-2)/2 + i`, i < j) or one side of a dense array; may compute each
 cell's two dot products jammed over several j.
 
-## Tiers (natural = dense baseline; expert = reviewed implementation; README §2)
+## Tiers (natural = dense baseline; expert = reviewed implementation; kernels/README.md §1)
 
 - **natural (dense baseline)**: full p x p nest, each cell its two `dot_product`s (or `l =
   matmul(transpose(x), y) - matmul(transpose(y), x)`, runtime routes disclosed), dense;
@@ -82,9 +82,9 @@ SymAntisymmetric storage`, a strict triangle (`__i1 < p - __i0 - 1`), and
 `BLADE_OMP_PARALLEL_FOR_DYNAMIC`. Literal row reads on `T^k` parameters carry a BL8006
 bound check per read, and the cast `(0 : Cx)` does NOT remove it (blade-A, F13);
 **concretely typed parameters** (`Array<Float64 like Cx, Nx>`) are checked at the type and
-read without the guard — that is what the kernel uses. Checksum: the per-row nest of README
-§7.2 reading `L(i, j) * L(i, j)` cell by cell (sign-tracked for i > j) — never `L * L` as an
-array expression (README §7.9: the elementwise self-product of an antisymmetric array is
+read without the guard — that is what the kernel uses. Checksum: the per-row nest of kernels/README.md
+§4.2 reading `L(i, j) * L(i, j)` cell by cell (sign-tracked for i > j) — never `L * L` as an
+array expression (kernels/README.md §4.9: the elementwise self-product of an antisymmetric array is
 stored antisymmetric and mirrored reads come back negated, a silent wrong value).
 
 `blade plan`: `[symmetric-storage v1] applied [packed SymAntisymmetric ...; operands: Z,

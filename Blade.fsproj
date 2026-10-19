@@ -773,6 +773,14 @@
       <Link>cpp/blade_tiles.h</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Include="src/cpp/blade_fold_lanes.hpp">
+      <Link>cpp/blade_fold_lanes.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="src/cpp/fold_lanes_tests.cpp">
+      <Link>cpp/fold_lanes_tests.cpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <None Include="src/cpp/syrk_tile_tests.cpp">
       <Link>cpp/syrk_tile_tests.cpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

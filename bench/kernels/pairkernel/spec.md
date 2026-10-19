@@ -46,7 +46,7 @@ twin**. Planning estimate only, never subtracted: Blade's logical-read checksum 
 canonicalizing reads ≈ 10–20 ms, perhaps 10% of the packed time. n is capped by the
 natural arm's dense 64 MB, not by the packed form.
 
-## Tiers (natural = dense baseline; expert = reviewed implementation; README §2)
+## Tiers (natural = dense baseline; expert = reviewed implementation; kernels/README.md §1)
 
 - **natural (dense baseline)**: full n x n double nest, every cell evaluated (no mirror
   copy), dense; `sum(k**2)`. mt8: `!$omp parallel do` on the outer loop. Labelled honestly
@@ -59,7 +59,7 @@ natural arm's dense 64 MB, not by the packed form.
   arm (M23). Pilot note (blade-A §13): EVERY arm calls a scalar UCRT `exp` (~6.6 of ~9 ns
   per cell; ifx uses its own scalar `exp`, no SVML), and the expert's SoA layout buys
   nothing measurable — the kernel is transcendental-bound in all arms, and Blade's 1.36x
-  loss is entirely the checksum pass (G3a; attribution column, README §8).
+  loss is entirely the checksum pass (G3a; attribution column, README §5).
 - **expert**: `j >= i` triangle, packed storage, checksum fused with weight 2 (diagonal is
   exactly 1 and may be written without evaluating the kernel — allowed, it is the spec's own
   value; record it). mt8: `!$omp parallel do schedule(dynamic)` on the outer loop.
@@ -85,8 +85,8 @@ __i0`, dynamic omp. Literal reads on `T^k` parameters carry a BL8006 check per r
 (`Array<Float64 like Dx>`) read without the guard — that is the kernel's spelling. The
 commutativity claim is checked against the body (BL4013 would refuse a non-symmetric body;
 the squared differences are symmetric). Row differences `a - b` as an array expression
-(`prodsum(a - b, a - b)`) allocate a 3-vector per cell in the C++ lane (README §7.8) — the
-scalar reads above are the spelling. Checksum: per-row nest of README §7.2.
+(`prodsum(a - b, a - b)`) allocate a 3-vector per cell in the C++ lane (kernels/README.md §4.8) — the
+scalar reads above are the spelling. Checksum: per-row nest of kernels/README.md §4.2.
 
 `blade plan`: `[symmetric-storage v1] applied [packed SymSymmetric ...; operands: P, P]`,
 `[triangular-iteration v1] applied [... speedup x2]`, `[omp v1] ... DYNAMIC`.

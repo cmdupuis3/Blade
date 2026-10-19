@@ -1,3 +1,0 @@
-[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\comoment3-7dafe09b-2980-dbb5cb13\comoment3.ll
-[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-140038\build\comoment3\full\mt8-repro-native\blade-llvm\comoment3.exe
-[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\comoment3-7dafe09b-2980-dbb5cb13

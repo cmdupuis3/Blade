@@ -1,0 +1,24 @@
+// TEST: Rank-1 compound compaction over a mask of runtime extent
+// The source axis's extent is known only at run time (an anonymous `0..k`
+// range whose bound is a computed value), so the mask's extent and the
+// count pass's trip count are runtime operands: the compaction (G9) reads
+// them off the mask, as the hashed index did. Values are unchanged. (The LLVM
+// lane bakes range extents and hands this program to the C++ lane.)
+let k = reduce([3, 4, 5], (+))
+// EXPECT: k = 12
+let xs = 0..k |> compute
+// EXPECT: xs = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+let odd = mask(xs, lambda(v) -> v % 2 == 1)
+// EXPECT: odd = [false, true, false, true, false, true, false, true, false, true, false, true]
+let odds = compound(xs, odd)
+// EXPECT: odds = [1, 3, 5, 7, 9, 11]
+let odds_n = extents(odds)
+// EXPECT: odds_n = 6
+let odds_sum = reduce(odds, (+))
+// EXPECT: odds_sum = 36
+let odds_k7 = odds(7)
+// EXPECT: odds_k7 = 7
+let big = compound(xs, mask(xs, lambda(v) -> v >= 10))
+// EXPECT: big = [10, 11]
+let big_n = extents(big)
+// EXPECT: big_n = 2

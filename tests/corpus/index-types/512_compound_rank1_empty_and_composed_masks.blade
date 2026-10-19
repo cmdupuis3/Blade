@@ -1,0 +1,36 @@
+// TEST: Rank-1 compound compaction: the all-false mask and composed masks
+// The compaction representation (G9) at its edges: an ALL-FALSE mask gives
+// an empty compound (zero kept positions -- prints `[]`, extents 0; no cell
+// is read, so no fold is attempted), and masks composed with `&&` / `||`
+// reach the constructor as one Bool array over the same axis, whichever way
+// they were spelled. The LLVM lane takes every binding here.
+type I = Idx<6>
+let a: Array<Int64 like I> = [4, -2, 7, 0, -5, 3]
+let none = compound(a, mask(a, lambda(v) -> v > 100))
+// EXPECT: none = []
+let none_n = extents(none)
+// EXPECT: none_n = 0
+let pos = mask(a, lambda(v) -> v > 0)
+// EXPECT: pos = [true, false, true, false, false, true]
+let small = mask(a, lambda(v) -> v < 5)
+// EXPECT: small = [true, true, false, true, true, true]
+let both = compound(a, pos && small)
+// EXPECT: both = [4, 3]
+let both_n = extents(both)
+// EXPECT: both_n = 2
+let both_sum = reduce(both, (+))
+// EXPECT: both_sum = 7
+let either = compound(a, pos || small)
+// EXPECT: either = [4, -2, 7, 0, -5, 3]
+let either_n = extents(either)
+// EXPECT: either_n = 6
+let keep = pos && small
+let named = compound(a, keep)
+// EXPECT: named = [4, 3]
+let named_k5 = named(5)
+// EXPECT: named_k5 = 3
+// an inline mask over a computed source (no let for the source)
+let shifted = compound(a, mask(a + 2, lambda(v) -> v > 4))
+// EXPECT: shifted = [4, 7, 3]
+let shifted_sum = reduce(shifted, (+))
+// EXPECT: shifted_sum = 14

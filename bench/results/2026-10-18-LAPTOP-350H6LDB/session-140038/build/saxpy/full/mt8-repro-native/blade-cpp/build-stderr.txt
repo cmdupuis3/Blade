@@ -1,3 +1,0 @@
-[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\saxpy-590d4dd9-22080-a47dbfba\saxpy.cpp
-[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-140038\build\saxpy\full\mt8-repro-native\blade-cpp\saxpy.exe
-[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\saxpy-590d4dd9-22080-a47dbfba

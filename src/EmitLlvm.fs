@@ -219,13 +219,13 @@ let tilesContractFlag () : string =
 
 /// The scratch the core needs for a p x p triangle in blocks of kc samples,
 /// in doubles: the B panel (kc x min(p, NC) padded to NR = 8) plus the A
-/// micro-panel (MR = 6 x kc). blade_llvm_tiles.c re-derives the same number
-/// and takes its scalar chain if handed less, so a drift here costs speed,
-/// never memory safety.
-let syrkTileScratchCells (p: int64) (kc: int64) : int64 =
+/// scratch (g row panels per group, MR = 6 x kc each). blade_llvm_tiles.c
+/// re-derives the same number and takes its scalar chain if handed less, so
+/// a drift here costs speed, never memory safety.
+let syrkTileScratchCells (p: int64) (kc: int64) (g: int64) : int64 =
     let nc = min p 2048L
     let npad = (nc + 7L) / 8L * 8L
-    kc * npad + 6L * kc
+    kc * npad + (max 1L (min 8L g)) * 6L * kc
 
 /// The antisym core's column block (blade_llvm_tiles.c blade_llvm_anti_nc,
 /// the C++ driver's anti_nc): ~8 MB of B panels, a multiple of the tile's
@@ -275,6 +275,7 @@ let private grpShimPanic = 5          // the panic path
 let private grpShimFree = 6           // the pool deallocator (obviously not `nofree`)
 let private grpShimArith = 7          // arithmetic-contract helpers: may panic (BL8013/BL8014), so no `willreturn`
 let private grpTileCore = 8           // blade_llvm_tiles.c: pure, serial, argument memory only (M6)
+let private grpShimArgRead = 9        // shim lookups that only READ argument memory (blade_compact1_rank)
 
 let private attrGroupText (anyFrees: bool) (anyPanics: bool) (g: int) : string =
     // Blade has no exceptions (nounwind: deletes all Windows SEH lowering)
@@ -312,6 +313,10 @@ let private attrGroupText (anyFrees: bool) (anyPanics: bool) (g: int) : string =
     // globals, no allocation, no I/O), has no threads or atomics, frees
     // nothing, and returns from every input (counted loops, no panic arm).
     elif g = grpTileCore then "mustprogress nofree nosync nounwind willreturn memory(argmem: readwrite)"
+    // A pure lookup over its pointer argument (blade_compact1_rank's binary
+    // search: the shim states the claims above its definition): reads only
+    // argument memory, writes nothing, no globals, no I/O, always returns.
+    elif g = grpShimArgRead then "mustprogress nofree nosync nounwind willreturn memory(argmem: read)"
     else ""
 
 /// The facts a whole module carries, computed once before any instruction is
@@ -685,6 +690,16 @@ type private Grp =
     /// a literal index, a register otherwise -- either way `emitCountedLoopTo`
     /// takes it as-is.
     | GDynDense of len: string
+    /// A RANK-1 COMPOUND (`compound(dense, mask)` over ONE dense axis, no
+    /// trailing dims -- bench gap G9): the compaction representation. Storage
+    /// is `len` cells in kept order, exactly a GDynDense for every flat
+    /// consumer (fold, print, map, extents); `pos` is the kept-position table
+    /// (an i64 pool of `len` ascending source positions, the same table
+    /// compound_index_t<1>::rank_to_tuple holds in the C++ lane), which a
+    /// KEYED read `S(k)` binary-searches -- a key that was not kept is BL8006.
+    /// A map over a compound keeps the same `pos` (identical mask by
+    /// construction), as the C++ lane's shared-index output does.
+    | GCompact of len: string * pos: string
     /// A CLOSED-FORM ENUMERABLE DOMAIN (a static struct with linear
     /// conjuncts): ONE group spanning the struct's fields, coordinates =
     /// field values, cells = the plan's solutions in lex order (see
@@ -710,13 +725,14 @@ type private PubVal =
     | PubScalar of sym: string * ty: Sc
     | PubArray of sym: string * elem: Sc * groups: Grp list
 
-let private grpRank = function GDense _ | GDynDense _ -> 1 | GSym (r, _) -> r | GAnti (r, _) -> r | GRagged _ -> 2 | GDomain p -> p.Levels.Length
+let private grpRank = function GDense _ | GDynDense _ | GCompact _ -> 1 | GSym (r, _) -> r | GAnti (r, _) -> r | GRagged _ -> 2 | GDomain p -> p.Levels.Length
 let private grpExtent =
     function
     | GDense n -> n | GSym (_, n) -> n | GAnti (_, n) -> n
     | GRagged _ -> refuse "a ragged index group where a single static extent is required"
     | GDomain _ -> refuse "an enumerated-domain group where a single static extent is required"
     | GDynDense _ -> refuse "a runtime-extent axis where a static extent is required"
+    | GCompact _ -> refuse "a compound (runtime-cardinality) axis where a static extent is required"
 /// Antisymmetric groups are STRICT (i < j) and store no diagonal.
 let private grpStrict (g: Grp) = g.IsGAnti
 let private grpCompact = function GSym _ | GAnti _ -> true | _ -> false
@@ -750,6 +766,7 @@ let private grpCells (g: Grp) : int64 =
     | GRagged (_, RtDynamic _) -> refuse "a dynamic ragged shape where a static cell count is required"
     | GDomain p -> p.Card
     | GDynDense _ -> refuse "a runtime-extent axis where a static cell count is required"
+    | GCompact _ -> refuse "a compound (runtime-cardinality) axis where a static cell count is required"
 
 let private shapeCells (gs: Grp list) : int64 = gs |> List.fold (fun acc g -> acc * grpCells g) 1L
 
@@ -895,6 +912,9 @@ and private Ctx =
       /// one scope frees.
       mutable AnyFrees: bool
       StringPool: Dictionary<string, string>
+      /// Per-coordinate offset tables of the canonicalizing compact read
+      /// (`coordTableGlobal`), by "strict:n:r:k" -> module constant.
+      CoordTables: Dictionary<string, string>
       /// `declare` lines, deduplicated and sorted so emission is deterministic.
       Externs: SortedSet<string>
       /// Finished function definitions, in emission order.
@@ -938,6 +958,10 @@ and private Ctx =
       /// bindings ITS value names too (the C++ lane's `forceDeferredArrayInput`
       /// recursion), and each of those then prints.
       mutable BindingValues: Map<IRId, IRExpr>
+      /// Each virtual domain map's kernel body, keyed by its AVirt producer
+      /// closure (by reference): what a fold over it hands domainFoldOrder, the
+      /// order decision the C++ lane and `blade plan` share.
+      DomainMapBodies: Dictionary<obj, IRExpr>
       /// Callables currently being inlined (capturing callees), so a
       /// recursive one refuses instead of expanding forever.
       Inlining: HashSet<IRId>
@@ -1044,6 +1068,7 @@ let private newCtx (callables: Map<IRId, IRCallable>) (facts: ModuleFacts) =
       PoolScopes = ResizeArray()
       AnyFrees = false
       StringPool = Dictionary()
+      CoordTables = Dictionary()
       Externs = SortedSet(StringComparer.Ordinal)
       Funcs = ResizeArray()
       Callables = callables
@@ -1064,6 +1089,7 @@ let private newCtx (callables: Map<IRId, IRCallable>) (facts: ModuleFacts) =
       TupleSlots = Dictionary()
       Forced = HashSet()
       BindingValues = Map.empty
+      DomainMapBodies = Dictionary(HashIdentity.Reference)
       Inlining = HashSet()
       ModuleReads = Dictionary()
       PublishWanted = HashSet()
@@ -1207,6 +1233,9 @@ let private shimTable : Map<string, ShimFn> =
           "blade_f2i64", { Ret = "i64"; RetAttrs = ""; Args = [ "double"; "ptr"; "i64" ]; Group = grpShimArith }
           "blade_fpow", io "double" [ "double"; "double" ]
           "blade_fpowi", io "double" [ "double"; "i64" ]
+          // The rank-1 compound's keyed read (G9): the kept ordinal of `key`
+          // in the ascending position table, -1 when it was not kept.
+          "blade_compact1_rank", { Ret = "i64"; RetAttrs = ""; Args = [ "ptr"; "i64"; "i64" ]; Group = grpShimArgRead }
           "blade_out_str", io "void" [ "ptr" ]
           "blade_out_i64", io "void" [ "i64" ]
           "blade_out_f64", io "void" [ "double" ]
@@ -1743,6 +1772,21 @@ let private emitDomainNest (c: Ctx) (plan: DomainPlan) (body: Val list -> Val ->
                 go (k + 1) (xs @ [ v ]))
     go 0 []
 
+/// A band's DIAGONAL walk (Types.domainDiagonal): k over [KLo, KHi], then the
+/// outer field i over [max(ILo, JLo + k), min(IHi, JHi + k)] with j = i - k.
+/// No cell counter: only a licensed fold over the virtual map takes it, and a
+/// fold has no output to address.
+let private emitDomainDiagonalNest (c: Ctx) (dg: DomainDiagonal) (body: Val list -> unit) : unit =
+    emitCountedLoopTo c (string (dg.KHi - dg.KLo + 1L)) (fun t ->
+        let k = if dg.KLo = 0L then t else i64Bin c "add" t (string dg.KLo)
+        let lo = domainBoundReg c true [ { Const = dg.ILo; Coefs = [] }; { Const = dg.JLo; Coefs = [ (0, 1L) ] } ] [| k |]
+        let hi = domainBoundReg c false [ { Const = dg.IHi; Coefs = [] }; { Const = dg.JHi; Coefs = [ (0, 1L) ] } ] [| k |]
+        let trips = i64Bin c "add" (i64Bin c "sub" hi lo) "1"
+        emitCountedLoopTo c trips (fun u ->
+            let i = i64Bin c "add" lo u
+            let j = i64Bin c "sub" i k
+            body [ { Reg = i; Ty = ScI64 }; { Reg = j; Ty = ScI64 } ]))
+
 /// The prefix tables of a plan's lex rank: `firsts.[k].[q]` is the rank, among
 /// the level-(k+1) prefixes, of the first child of level-k prefix q (prefixes
 /// of the OUTER r-1 fields only; rank 1 needs none). Walked at compile time.
@@ -1839,7 +1883,14 @@ let private emitBinomConst (c: Ctx) (x: string) (m: int) : string =
                 acc <- i64Bin c "mul" acc (i64Bin c "sub" x (string j))
             let mutable f = 1L
             for j in 2 .. m do f <- f * int64 j
-            i64Bin c "sdiv" acc (string f)
+            // `exact`: the quotient has no remainder by the identity above, so
+            // LLVM may lower the division to a shift and a multiply by the
+            // modular inverse of the odd part instead of the signed-division
+            // fix-up sequence -- this runs once per level of every canonical
+            // compact read (bench G34).
+            let d = freshReg c
+            ln c (renderBin { Dest = d; Opcode = "sdiv"; Flags = " exact"; Ty = ScI64; Lhs = acc; Rhs = string f })
+            d
 
 /// `SimplexBlocksCore.prefixTerm` emitted: the rank contributed by advancing
 /// coordinate k of a rank-r group from its canonical lower bound `lo` by the
@@ -1885,6 +1936,10 @@ let private grpOffset (c: Ctx) (g: Grp) (idxs: Val list) : string =
     | GDense _, _ -> refuse "a dense axis indexed by more than one coordinate"
     | GDynDense _, [ i ] -> i.Reg
     | GDynDense _, _ -> refuse "a runtime-extent axis indexed by more than one coordinate"
+    // STORAGE coordinates: the kept ordinal. (The keyed read `S(k)` resolves
+    // its key to this ordinal first -- emitRaw's compound arm.)
+    | GCompact _, [ i ] -> i.Reg
+    | GCompact _, _ -> refuse "a compound axis indexed by more than one coordinate"
     // A ragged cell is offsets[row] + element: one table operand and one add,
     // folded outright when the row is a literal against a static table.
     | GRagged (_, table), [ i; j ] -> i64Add c (raggedOffAt c table i.Reg) j.Reg
@@ -2006,6 +2061,61 @@ let private hasFlatRead (a: ArrVal) : bool =
     | APool _ | AVirtFlat _ -> true
     | AVirt _ -> false
 
+/// THE PER-COORDINATE OFFSET TABLES of the canonicalizing read (bench G34).
+/// The pool offset of a SORTED rank-r tuple regroups into one term per
+/// coordinate (`SimplexBlocksCore.coordTerm`, proved equal to the level form
+/// on every canonical cell by the property pins), so for a static extent the
+/// read is r-1 loads from module constants and r-1 adds -- where the level
+/// form spends 2(r-1) runtime binomials (multiplies and divisions) per read.
+/// That arithmetic made the LLVM lane's logical checksum walk
+/// throughput-bound at ~38 integer instructions a cell, against the C++
+/// lane's two row-pointer loads (`canon_fold` + the nested walk). Bounded
+/// so the tables stay cache-resident: (r-1) x n x 8 bytes, 32 KB per table
+/// at the bound.
+let private coordTableMaxExtent = 4096L
+
+/// May this group's canonical reads go through the tables?
+let private coordTabulable (g: Grp) : bool =
+    match g with
+    | GSym (r, n) | GAnti (r, n) -> r >= 2 && n >= 1L && n <= coordTableMaxExtent
+    | _ -> false
+
+/// Table k of a (strict, n, r) group as a module constant, emitted once per
+/// module. `constant`: LLVM knows nothing writes it.
+let private coordTableGlobal (c: Ctx) (strict: bool) (n: int64) (r: int) (k: int) : string =
+    let key = $"{strict}:{n}:{r}:{k}"
+    match c.CoordTables.TryGetValue key with
+    | true, g -> g
+    | _ ->
+        let name = $"@.blade.ctab.{c.CoordTables.Count}"
+        let body =
+            [| for x in 0L .. n - 1L -> "i64 " + string (Blade.SimplexBlocksCore.coordTerm strict n r k x) |]
+            |> String.concat ", "
+        c.Globals.Add($"{name} = private unnamed_addr constant [{n} x i64] [{body}], align 64")
+        c.CoordTables.[key] <- name
+        name
+
+/// A compact group's pool offset from its SORTED absolute coordinates:
+/// sum_{k < r-1} table_k[i_k] + i_(r-1). A literal coordinate folds.
+let private coordTableOffset (c: Ctx) (g: Grp) (sorted: string[]) : string =
+    let r = grpRank g
+    let n = grpExtent g
+    let strict = grpStrict g
+    let mutable acc = sorted.[r - 1]
+    for k in 0 .. r - 2 do
+        let term =
+            match tryLitI64 sorted.[k] with
+            | Some x -> string (Blade.SimplexBlocksCore.coordTerm strict n r k x)
+            | None ->
+                let tab = coordTableGlobal c strict n r k
+                let p = freshReg c
+                ln c ($"{p} = getelementptr inbounds [{n} x i64], ptr {tab}, i64 0, i64 {sorted.[k]}")
+                let v = freshReg c
+                ln c ($"{v} = load i64, ptr {p}")
+                v
+        acc <- i64Add c acc term
+    acc
+
 /// Total stored cells of a shape, as an OPERAND: a literal for every static
 /// shape (including a static-table ragged pair, whose offsets[rows] folds),
 /// one load for a dynamic-table ragged pair.
@@ -2013,6 +2123,7 @@ let private shapeCellsOp (c: Ctx) (gs: Grp list) : string =
     match gs with
     | [ GRagged (rows, table) ] -> raggedOffAt c table rows
     | [ GDynDense len ] -> len
+    | [ GCompact (len, _) ] -> len
     | _ -> string (shapeCells gs)
 
 /// The single extent of a rank-1 shape, as an OPERAND: a literal for a dense
@@ -2022,7 +2133,14 @@ let private soleExtentOp (a: ArrVal) : string =
     match a.Groups with
     | [ GDense n ] -> string n
     | [ GDynDense len ] -> len
+    | [ GCompact (len, _) ] -> len
     | _ -> refuse "a rank-1 operand with no single extent"
+
+/// The rank-1 compound's kept-position table, when `a` is one.
+let private compactPosOf (a: ArrVal) : (string * string) option =
+    match a.Groups with
+    | [ GCompact (len, pos) ] -> Some (len, pos)
+    | _ -> None
 
 /// Read at ABSOLUTE coordinates -- the ones a user writes in `S(2)(1)`. For a
 /// dense shape this IS `readCell` (identical emission, so the dense goldens do
@@ -2052,13 +2170,22 @@ let private canonRead (c: Ctx) (a: ArrVal) (idxs: Val list) : Val =
     let mutable rest = idxs
     let mutable diags : string list = []
     let mutable swaps : string list = []
+    // THE TABLE FORM (G34, `coordTableOffset`): a flat-readable source whose
+    // every compact group tabulates reads at ONE pool offset computed from
+    // the sorted coordinates, never the storage coordinates below.
+    let useTables =
+        (match a.Src with APool _ | AVirtFlat _ -> true | AVirt _ -> false)
+        && a.Groups |> List.forall (fun g -> match g with GDense _ -> true | _ -> coordTabulable g)
+    let sortedParts = ResizeArray<Grp * string[]>()
     let storage =
         [ for g in a.Groups do
             let r = grpRank g
             let mine = rest |> List.truncate r
             rest <- rest |> List.skip r
             match g, mine with
-            | GDense _, [ i ] -> yield i
+            | GDense _, [ i ] ->
+                sortedParts.Add((g, [| i.Reg |]))
+                if not useTables then yield i
             | _ when grpCompact g && List.length mine = r ->
                 // CANONICALIZE BY SORTING NETWORK, at any rank. A bubble pass
                 // over r coordinates is r(r-1)/2 compare-exchanges, each a
@@ -2095,19 +2222,33 @@ let private canonRead (c: Ctx) (a: ArrVal) (idxs: Val list) : Val =
                         ln c (renderCmp { Dest = eq; Kind = "icmp"; Pred = "eq"; Ty = ScI64; Lhs = arr.[q]; Rhs = arr.[q + 1] })
                         diags <- eq :: diags
                     swaps <- swapFlags @ swaps
+                sortedParts.Add((g, Array.copy arr))
                 // Sorted ABSOLUTE coordinates -> STORAGE coordinates:
                 // s_0 = i_0, s_k = i_k - i_{k-1} - strict. On a strict repeat
                 // some s_k is negative, which is a dead select arm: the whole
                 // tuple is REDIRECTED to cell 0 below before any address is
                 // computed.
-                let sInc = if grpStrict g then 1L else 0L
-                for q in 0 .. r - 1 do
-                    if q = 0 then yield { Reg = arr.[0]; Ty = ScI64 }
-                    else
-                        let d = i64Bin c "sub" arr.[q] arr.[q - 1]
-                        yield { Reg = (if sInc = 0L then d else i64Bin c "sub" d (string sInc)); Ty = ScI64 }
+                if not useTables then
+                    let sInc = if grpStrict g then 1L else 0L
+                    for q in 0 .. r - 1 do
+                        if q = 0 then yield { Reg = arr.[0]; Ty = ScI64 }
+                        else
+                            let d = i64Bin c "sub" arr.[q] arr.[q - 1]
+                            yield { Reg = (if sInc = 0L then d else i64Bin c "sub" d (string sInc)); Ty = ScI64 }
             | _ -> refuse "an absolute read of an index group this lane cannot canonicalize" ]
+    // The table form's flat offset: the Horner chain over groups
+    // (`storageOffset`'s), each compact group's own offset from its sorted
+    // coordinates.
+    let flatOffset () =
+        let groupOff (g: Grp, sorted: string[]) = if grpCompact g then coordTableOffset c g sorted else sorted.[0]
+        let parts = List.ofSeq sortedParts
+        let mutable acc = groupOff parts.Head
+        for (g, sorted) in parts.Tail do
+            let m = i64Bin c "mul" acc (string (grpCells g))
+            acc <- i64Bin c "add" m (groupOff (g, sorted))
+        acc
     match diags with
+    | [] when useTables -> readFlat c a { Reg = flatOffset (); Ty = ScI64 }
     | [] -> readCell c a storage
     | _ ->
         let fold1 (op: string) (regs: string list) =
@@ -2133,12 +2274,19 @@ let private canonRead (c: Ctx) (a: ArrVal) (idxs: Val list) : Val =
         // antisym mirror-read loop (CantVectorizeInstruction, 2026-08-18
         // census); the select chain if-converts, and the sym mirror fold that
         // uses only selects vectorizes under the reassoc license.
-        let redirected =
-            storage |> List.map (fun v ->
+        let v =
+            if useTables then
+                let off = flatOffset ()
                 let r = freshReg c
-                ln c ($"{r} = select i1 {eqAny}, i64 0, i64 {v.Reg}")
-                { Reg = r; Ty = ScI64 })
-        let v = coerce c ety (readCell c a redirected)
+                ln c ($"{r} = select i1 {eqAny}, i64 0, i64 {off}")
+                coerce c ety (readFlat c a { Reg = r; Ty = ScI64 })
+            else
+            let redirected =
+                storage |> List.map (fun v ->
+                    let r = freshReg c
+                    ln c ($"{r} = select i1 {eqAny}, i64 0, i64 {v.Reg}")
+                    { Reg = r; Ty = ScI64 })
+            coerce c ety (readCell c a redirected)
         let negated =
             match ety with
             | ScF64 ->
@@ -2177,6 +2325,7 @@ let private rowView (c: Ctx) (a: ArrVal) (idxs: Val list) : ArrVal =
     // must never see this shape -- half of a ragged group is not a static
     // shape, and splitGroupsAt says so.
     match a.Groups, idxs with
+    | [ GCompact _ ], _ -> refuse "a partial index into a rank-1 compound (it has one axis)"
     | [ GRagged (_, table) ], [ i ] ->
         let off = raggedOffAt c table i.Reg
         let len = raggedLenAt c table i.Reg
@@ -2673,6 +2822,35 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
          | _ -> refuse "a keyed read of a non-domain array")
     | IRIndex (arrExpr, idxExprs, _) ->
         let a = consumeArrOperand c arrExpr
+        // The KEYED read of a rank-1 compound, `S(k)` (the C++ lane's
+        // compoundRead normalizes the scalar spelling to the 1-tuple read
+        // `S((k))`; both spellings arrive here): the key is a SOURCE
+        // position, resolved to its kept ordinal by binary search over the
+        // kept-position table -- `compound_index_t<1>::linearize`'s exact
+        // algorithm -- and a key that was not kept is BL8006 with that lane's
+        // text and no location line (its throw carries none).
+        match compactPosOf a, idxExprs with
+        | Some (len, pos), ([ key ] | [ IRTuple [ key ] ]) ->
+            let k = coerce c ScI64 (emitExpr c key)
+            needShim c "blade_compact1_rank"
+            let q = freshReg c
+            ln c (renderCall { Dest = Some q; RetTy = ScI64; Callee = "@blade_compact1_rank"
+                               Args = [ ScStr, pos; ScI64, len; ScI64, k.Reg ] })
+            let missing = freshReg c
+            ln c (renderCmp { Dest = missing; Kind = "icmp"; Pred = "slt"; Ty = ScI64; Lhs = q; Rhs = "0" })
+            let lBad = freshLbl c "ckey.bad"
+            let lOk = freshLbl c "ckey.ok"
+            ln c (renderBr { Cond = missing; IfTrue = lBad; IfFalse = lOk })
+            lbl c lBad
+            needShim c "blade_panic_at"
+            let m = stringGlobal c "error[BL8006]: index out of bounds: a key outside the sparse key set"
+            ln c (renderCall { Dest = None; RetTy = ScVoid; Callee = "@blade_panic_at"
+                               Args = [ ScStr, m; ScStr, "null"; ScI64, "0" ] })
+            ln c "unreachable"
+            lbl c lOk
+            readCell c a [ { Reg = q; Ty = ScI64 } ]
+        | Some _, _ -> refuse "a rank-1 compound read with other than one key"
+        | None, _ ->
         let idxs = idxExprs |> List.map (fun ix -> coerce c ScI64 (emitExpr c ix))
         if List.length idxs <> a.Rank then
             refuse ($"a partial index ({(List.length idxs)} of {a.Rank}) in value position")
@@ -2693,7 +2871,9 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
          | None ->
              let a = emitArr c arrExpr
              (match a.Groups, dim with
-              | [ GDynDense len ], 0 -> { Reg = len; Ty = ScI64 }
+              // A rank-1 compound's extent is its cardinality (the C++
+              // lane's `.idx->cardinality`, the interpreter's Cardinality).
+              | [ GDynDense len ], 0 | [ GCompact (len, _) ], 0 -> { Reg = len; Ty = ScI64 }
               | groups, d ->
                   let extents = axisExtents groups
                   if d < 0 || d >= List.length extents then
@@ -3103,7 +3283,12 @@ and private emitBinOp (c: Ctx) (op: IRBinOp) (l: IRExpr) (r: IRExpr) (loc: SrcLo
     | IRMath2 name -> refuse ($"the binary math intrinsic '{name}'")
     | _ ->
         let a0 = emitExpr c l
-        let b0 = emitExpr c r
+        // BIND ONCE, the C++ lane's M2 rule (CodeGenExpr.isBindOnceCompactRead,
+        // shared): the same canonicalizing compact read on both sides
+        // (`t(i, j, k) * t(i, j, k)`) is one network, one offset and one load
+        // -- explicitly, not left to GVN. Pure read of one cell: no value or
+        // order changes.
+        let b0 = if l = r && Blade.CodeGenExpr.isBindOnceCompactRead typeOf l then a0 else emitExpr c r
         let common = promote a0.Ty b0.Ty
         let a = coerce c common a0
         let b = coerce c common b0
@@ -3197,7 +3382,9 @@ and private emitUnary (c: Ctx) (op: IRUnaryOp) (x: IRExpr) : Val =
     // covers the Float64/Int64 targets; the widths this lane has no scalar
     // for (Float32/Int32/complex) refuse like every other Float32/complex
     // program does.
-    | IRCast (ETFloat64, _) -> coerce c ScF64 (emitExpr c x)
+    | IRCast (ETFloat64, _) ->
+        let v = emitExpr c x
+        if v.Ty = ScI64 then emitI64ToF64 c v else coerce c ScF64 v
     // Float -> Int64 is the checked conversion of the arithmetic contract:
     // NaN / out of range panics BL8014 (blade_f2i64), where fptosi is poison.
     | IRCast (ETInt64, loc) ->
@@ -3205,6 +3392,32 @@ and private emitUnary (c: Ctx) (op: IRUnaryOp) (x: IRExpr) : Val =
         if v.Ty = ScF64 then callShim c "blade_f2i64" ScI64 ([ ScF64, v.Reg ] @ faultLocArgs c loc)
         else coerce c ScI64 v
     | IRCast (et, _) -> refuse ($"a numeric cast to {(Blade.Types.castNameOf et)}")
+
+/// `Float64(x)` of an Int64: the exact split conversion, the twin of the C++
+/// lane's blade_arith::i64_to_f64 (blade_runtime.hpp, which carries the
+/// exactness argument). A plain `sitofp i64` has no AVX2 packed form, so a
+/// vectorized loop holding one SCALARIZES it -- per 4 lanes four extracts, four
+/// vcvtsi2sd and the re-inserts, which was most of blade-llvm's band cell loop
+/// (bench gap G33). Here the high word converts through `sitofp i32` and the
+/// low word through the 2^52 magic exponent, both packed. Only `contract` may
+/// ride the arithmetic (an fma of the last two steps rounds the same exact
+/// value once); `reassoc` would regroup it around the magic constant, so a
+/// fold kernel's FoldFmf is deliberately NOT applied.
+and private emitI64ToF64 (c: Ctx) (v: Val) : Val =
+    let fl = if factEnabled factFmf && contractLicensed () then " contract" else ""
+    let step (rhs: string) =
+        let d = freshReg c
+        ln c ($"{d} = {rhs}")
+        d
+    let hi = step ($"lshr i64 {v.Reg}, 32")
+    let hi32 = step ($"trunc i64 {hi} to i32")
+    let hiD = step ($"sitofp i32 {hi32} to double")
+    let lo = step ($"and i64 {v.Reg}, 4294967295")
+    let loBits = step ($"or i64 {lo}, 4841369599423283200")
+    let loMagic = step ($"bitcast i64 {loBits} to double")
+    let loD = step ($"fsub{fl} double {loMagic}, {(f64Const 4503599627370496.0)}")
+    let hiScaled = step ($"fmul{fl} double {hiD}, {(f64Const 4294967296.0)}")
+    { Reg = step ($"fadd{fl} double {hiScaled}, {loD}"); Ty = ScF64 }
 
 and private callLibm1 (c: Ctx) (fn: string) (arg: Val) : Val =
     need c ($"declare double @{fn}(double{(paramAttr ())}){(attrRef c grpExternReturns)}")
@@ -3700,6 +3913,7 @@ and private bindLetIn (c: Ctx) (id: IRId) (value: IRExpr) (scope: IRExpr) : unit
 /// to share, and copying it would materialize -- and therefore PRINT -- a
 /// computation the program never forced.
 and private bindNamed (c: Ctx) (id: IRId) (name: string) (declTy: IRType) (value: IRExpr) : unit =
+    let rec peelCompute (e: IRExpr) = match e with IRCompute i -> peelCompute i | e -> e
     match value with
     | IRGroupKeys keys ->
         // A module-scope grouping carries its regime on the binding record;
@@ -3707,6 +3921,22 @@ and private bindNamed (c: Ctx) (id: IRId) (name: string) (declTy: IRType) (value
         (match declTy with
          | IRTGroupKeys _ -> emitGroupKeysBinding c id keys declTy
          | _ -> refuse "a group_keys binding whose regime type is unavailable")
+    // Hot-row fold scheduling (Blade.Optimize.planHotRowFolds): the planned
+    // PRODUCER fills its pool row by row and runs the consumer's row map on
+    // each row as it completes; the planned CONSUMER folds those row sums.
+    // Both arms fall through to the ordinary paths when the lane cannot
+    // take the schedule (the producer then publishes no row-sum slot).
+    | IRCompute _ when (match peelCompute value with
+                        | IRApplyCombinator pinfo ->
+                            (match Blade.Optimize.HotRowTable.tryProducer id with
+                             | Some plan -> tryBindHotRowProducer c id name plan pinfo
+                             | None -> false)
+                        | _ -> false) -> ()
+    | IRReduceCompute (_, k, seed) when (match Blade.Optimize.HotRowTable.tryConsumer id with
+                                         | Some plan -> c.ArrSlots.ContainsKey plan.RowSumId
+                                         | None -> false) ->
+        let plan = (Blade.Optimize.HotRowTable.tryConsumer id).Value
+        emitHotRowConsumer c id name declTy plan k seed
     | _ ->
     match classifyValue c value with
     | VArray a ->
@@ -3759,6 +3989,84 @@ and private publishBinding (c: Ctx) (id: IRId) : unit =
 
 and private bindLet (c: Ctx) (id: IRId) (value: IRExpr) : unit =
     bindNamed c id "" (typeOf value) value
+
+/// The hot-row PRODUCER (plan M13; the C++ lane's RowEpilogue twin): the
+/// dense producer is filled one leading-axis slice at a time -- the same
+/// cells, in the same storage order, from the same per-cell closure the
+/// ordinary materialize runs -- and right after each slice the consumer's
+/// row map (an ordinary virtual row map over the producer's POOL, so its
+/// kernel reads the slice just written) is evaluated at that row and stored
+/// into a rank-1 row-sum pool bound to the plan's RowSumId. The slot for the
+/// producer is bound BEFORE the fill so the row map resolves its operand.
+/// False when the shape is not a dense rank >= 2 producer: the caller then
+/// takes the ordinary path and the consumer keeps the two-pass fold.
+and private tryBindHotRowProducer (c: Ctx) (id: IRId) (name: string) (plan: Blade.Optimize.HotRowPlan) (pinfo: ApplyInfo) : bool =
+    let record (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
+        if Blade.Effects.Decisions.active () then
+            Blade.Effects.Decisions.record
+                { Rule = "hot-row-fold"; Version = 1; Span = c.DeclSpan
+                  Subject = plan.ConsumerName
+                  Outcome = outcome; Evidence = evidence }
+    let a = applyToArr c pinfo
+    match a.Src with
+    | (AVirt _ | AVirtFlat _) when isDenseShape a.Groups && List.length a.Extents >= 2 ->
+        let total = shapeCells a.Groups
+        let ptr = allocPool c a.Elem (string total)
+        let pooled = { a with Src = APool ptr }
+        bindArray c id name pooled
+        let cons = emitArr c (IRApplyCombinator plan.RowMap)
+        let accTy =
+            match resolveCallable plan.FoldKernel |> Option.bind (fun cl -> scalarTyOf cl.RetType) with
+            | Some t when t <> ScVoid -> t
+            | _ -> cons.Elem
+        let rows = List.head a.Extents
+        let inner = List.tail a.Extents
+        let rsPtr = allocPool c accTy (string rows)
+        emitCountedLoop c rows (fun i ->
+            let iv = { Reg = i; Ty = ScI64 }
+            emitNest c inner (fun rest ->
+                let idxs = iv :: rest
+                let v = coerce c a.Elem (readCell c a idxs)
+                storeCell c a.Elem (gepCell c a.Elem ptr (storageOffset c a.Groups idxs)) v)
+            let rv = coerce c accTy (readCell c cons [ iv ])
+            storeCell c accTy (gepCell c accTy rsPtr i) rv)
+        c.ArrSlots.[plan.RowSumId] <- { Elem = accTy; Groups = [ GDense rows ]; Src = APool rsPtr; RowOpBytes = 0L }
+        true
+    | _ ->
+        record (Blade.Effects.Declined "the llvm lane keeps the two-pass form: the producer is not a dense rank >= 2 pool it fills row by row")
+            [ $"row fold of `{plan.ProducerName}`" ]
+        false
+
+/// The hot-row CONSUMER: the outer combine over the row-sum pool -- the same
+/// seeded chain emitReduceCompute's one-level nest runs over the deferred
+/// row map (seed, then `kernel(acc, cell)` per row ascending, the licensed
+/// fold flags on the kernel application only), now over stored values.
+and private emitHotRowConsumer (c: Ctx) (id: IRId) (name: string) (declTy: IRType)
+                               (plan: Blade.Optimize.HotRowPlan) (kernelExpr: IRExpr) (seedExpr: IRExpr) : unit =
+    let a = c.ArrSlots.[plan.RowSumId]
+    let cl =
+        match resolveCallable kernelExpr with
+        | Some cl when cl.Params.Length = 2 -> cl
+        | _ -> refuse "a hot-row fold whose kernel does not resolve to a two-parameter callable"
+    let ty =
+        match scalarTyOf cl.RetType with
+        | Some t when t <> ScVoid -> t
+        | _ -> a.Elem
+    let rows = match a.Groups with [ GDense n ] -> n | _ -> refuse "a hot-row row-sum pool that is not rank-1 dense"
+    let slot = allocaOf c (llTy ty)
+    let seed = coerce c ty (emitExpr c seedExpr)
+    ln c ($"store {(llTy ty)} {seed.Reg}, ptr {slot}")
+    let licensed = foldFmfDecorable cl
+    emitCountedLoop c rows (fun i ->
+        let cur = loadSlot c slot ty
+        let cell = readCell c a [ { Reg = i; Ty = ScI64 } ]
+        let next =
+            withFoldFmf c licensed (fun () ->
+                coerce c ty (applyKernel c cl [ KScalar cur; KScalar cell ]))
+        ln c ($"store {(llTy ty)} {next.Reg}, ptr {slot}"))
+    let v = loadSlot c slot ty
+    let target = match scalarTyOf declTy with Some t when t <> ScVoid -> t | _ -> v.Ty
+    bindScalar c id name (coerce c target v)
 
 and private copyArr (c: Ctx) (a: ArrVal) : ArrVal =
     match a.Src with
@@ -4191,6 +4499,27 @@ and private emitArr (c: Ctx) (e: IRExpr) : ArrVal =
 
     | IRZip _ -> refuse "zip(...) outside a method_for (a bare zip has no materialized shape)"
 
+    // mask(A, pred): the Bool PRESENCE array over A's own index space --
+    // m[i] = pred(A[i]), same shape, no compaction (that is compound's job).
+    // EAGER, as the C++ lane's genMaskBinding (`// mask: count + compact`)
+    // makes it: a bound mask prints, and a compound reads it as a pool.
+    // Dense static shapes and the two rank-1 operand-extent shapes; a mask
+    // over compact/ragged storage refuses (the C++ lane's materializeMaskForm
+    // has no form for those either).
+    | IRMask (arrExpr, predExpr) ->
+        let a = consumeArrOperand c arrExpr
+        let cl =
+            match resolveCallable predExpr with
+            | Some cl when cl.Params.Length = 1 -> cl
+            | Some cl -> refuse ($"a mask predicate '{cl.Name}' of {cl.Params.Length} parameters")
+            | None -> refuse "a mask whose predicate does not resolve to a callable"
+        if not (a.Groups |> List.forall (function GDense _ | GDynDense _ | GCompact _ -> true | _ -> false)) then
+            refuse "mask over compact, ragged, or domain storage"
+        materialize c
+            { Elem = ScBool; Groups = a.Groups; RowOpBytes = 0L
+              Src = AVirt (fun c2 idxs ->
+                        coerce c2 ScBool (applyKernel c2 cl [ KScalar (readCell c2 a idxs) ])) }
+
     // decompact(A, d): value-equivalent group FISSION. The logical axes and
     // their order are unchanged -- only the grouping is -- so cell
     // (i1, ..., ik) of the result, in whatever groups the checker gave it, is
@@ -4338,9 +4667,10 @@ and private materialize (c: Ctx) (a: ArrVal) : ArrVal =
              { a with Src = APool ptr }
          | _ -> refuse "a coordinate producer over a mixed ragged shape")
     // A rank-1 producer whose extent is an OPERAND (a peel over a
-    // runtime-counted grouping): one counted loop, the bound taken as-is.
-    | AVirt _ when (match a.Groups with [ GDynDense _ ] -> true | _ -> false) ->
-        let len = match a.Groups with [ GDynDense l ] -> l | _ -> refuse "unreachable"
+    // runtime-counted grouping, a map over a rank-1 compound): one counted
+    // loop, the bound taken as-is.
+    | AVirt _ when (match a.Groups with [ GDynDense _ ] | [ GCompact _ ] -> true | _ -> false) ->
+        let len = match a.Groups with [ GDynDense l ] | [ GCompact (l, _) ] -> l | _ -> refuse "unreachable"
         let ptr = allocPool c a.Elem len
         emitCountedLoopTo c len (fun k ->
             let v = coerce c a.Elem (readCell c a [ { Reg = k; Ty = ScI64 } ])
@@ -4438,27 +4768,34 @@ and private trySyrkTileCore (c: Ctx) (a: ArrVal) : ArrVal option =
             | _ -> refuse "a tile-core operand that did not materialize to a pool"
         let total = shapeCells a.Groups
         let out = allocPool c ScF64 (string total)
-        let scratchCells = syrkTileScratchCells p kc
+        let g = Blade.CodeGenExprSupport.syrkRowGroup ()
+        let scratchCells = syrkTileScratchCells p kc g
         let scratch = allocPool c ScF64 (string scratchCells)
+        let scaleNote =
+            match cand.Scale with
+            | Some (Blade.LinAlgPatterns.ScaleDiv _) -> ", then / d per cell (fused into the last block's store)"
+            | Some (Blade.LinAlgPatterns.ScaleMul _) -> ", then * s per cell (fused into the last block's store)"
+            | None -> ""
         // The declaration's attributes are claims about blade_llvm_tiles.c
         // (stated there): argument memory only, serial, returns. Parameter
         // facts ride the fact layer's switch like every other declaration.
         let pa = paramAttr ()
         let ro, nc =
             if factEnabled factParamAttrs then " readonly captures(none)", " captures(none)" else "", ""
-        need c ($"declare void @{tilesSymbol}(i64{pa}, i64{pa}, ptr{pa}{ro}, i64{pa}, ptr{pa}{nc}, i64{pa}, i64{pa}, i64{pa}, double{pa}, ptr{pa}{nc}, i64{pa}){(attrRef c grpTileCore)}")
-        ln c ($"; syrk tile (shared C core blade_llvm_tiles.c over blade_tiles.h, 6x8, KC={kc}): per cell the serial prodsum")
+        need c ($"declare void @{tilesSymbol}(i64{pa}, i64{pa}, ptr{pa}{ro}, i64{pa}, ptr{pa}{nc}, i64{pa}, i64{pa}, i64{pa}, i64{pa}, double{pa}, ptr{pa}{nc}, i64{pa}){(attrRef c grpTileCore)}")
+        ln c ($"; syrk tile (shared C core blade_llvm_tiles.c over blade_tiles.h, 6x8, KC={kc}, row groups of {g}): per cell the serial prodsum")
         ln c (renderCall { Dest = None; RetTy = ScVoid; Callee = "@" + tilesSymbol
                            Args = [ ScI64, string p; ScI64, string k; ScStr, xPtr; ScI64, string k
                                     ScStr, out; ScI64, "0"
                                     ScI64, string Blade.CodeGenExprSupport.syrkTileKcMax
+                                    ScI64, string g
                                     ScI64, scaleMode; ScF64, scaleVal
                                     ScStr, scratch; ScI64, string scratchCells ] })
         record "microkernel" Blade.Effects.Applied
             [ "packed syrk tile (shared C core blade_llvm_tiles.c over blade_tiles.h, 6x8 register tile over the packed triangle)"
-              $"P={p} K={k} KC={kc}" ]
+              $"P={p} K={k} KC={kc} G={g}" ]
         record "fold-form" Blade.Effects.Applied
-            [ $"fold form: syrk tile (shared C core) 6x8, KC={kc}"
+            [ $"fold form: syrk tile (shared C core) 6x8, KC={kc}, row groups of {g}{scaleNote}"
               "same-array comm row contraction (one ascending chain per cell; no reorder licence used; LLVM lane, serial)" ]
         Some { a with Src = APool out; RowOpBytes = 0L }
     | _ -> None
@@ -4513,8 +4850,8 @@ and private tryRowTileCore (c: Ctx) (a: ArrVal) : ArrVal option =
             | Some (Blade.LinAlgPatterns.ScaleMul s) -> "2", (coerce c ScF64 (emitExpr c s)).Reg
         let scaleNote =
             match cand.Scale with
-            | Some (Blade.LinAlgPatterns.ScaleDiv _) -> ", then / d per cell"
-            | Some (Blade.LinAlgPatterns.ScaleMul _) -> ", then * s per cell"
+            | Some (Blade.LinAlgPatterns.ScaleDiv _) -> ", then / d per cell (fused into the last block's store)"
+            | Some (Blade.LinAlgPatterns.ScaleMul _) -> ", then * s per cell (fused into the last block's store)"
             | None -> ""
         let operandPtr () =
             let x = materialize c cand.Operand
@@ -4548,20 +4885,25 @@ and private tryRowTileCore (c: Ctx) (a: ArrVal) : ArrVal option =
             let out = allocPool c ScF64 (string (shapeCells a.Groups))
             let scratchCells = antisymTileScratchCells p n paired
             let scratch = allocPool c ScF64 (string scratchCells)
-            need c ($"declare void @{antisymTileSymbol}(i64{pa}, i64{pa}, ptr{pa}{ro}, i64{pa}, i64{pa}, i64{pa}, i64{pa}, ptr{pa}{ncap}, i64{pa}, i64{pa}, i64{pa}, double{pa}, ptr{pa}{ncap}, i64{pa}){(attrRef c grpTileCore)}")
+            let kcMax = Blade.CodeGenExprSupport.antisymKcMax ()
+            let chainNote =
+                if kcMax = 0L || kcMax >= n then "whole chain per tile"
+                else $"whole chain per tile in sample blocks of <= {kcMax}"
+            need c ($"declare void @{antisymTileSymbol}(i64{pa}, i64{pa}, ptr{pa}{ro}, i64{pa}, i64{pa}, i64{pa}, i64{pa}, ptr{pa}{ncap}, i64{pa}, i64{pa}, i64{pa}, i64{pa}, double{pa}, ptr{pa}{ncap}, i64{pa}){(attrRef c grpTileCore)}")
             ln c ($"; antisym tile (shared C core blade_llvm_tiles.c over blade_tiles.h, {form}): per cell the serial prodsum - prodsum")
             ln c (renderCall { Dest = None; RetTy = ScVoid; Callee = "@" + antisymTileSymbol
                                Args = [ ScI64, string p; ScI64, string n; ScStr, zPtr
                                         ScI64, string (cand.Comps * n); ScI64, string n
                                         ScI64, string cx; ScI64, string cy
                                         ScStr, out; ScI64, (if paired then "1" else "0"); ScI64, "0"
+                                        ScI64, string kcMax
                                         ScI64, scaleMode; ScF64, scaleVal
                                         ScStr, scratch; ScI64, string scratchCells ] })
             record "microkernel" Blade.Effects.Applied
                 [ $"antisym tile (shared C core blade_llvm_tiles.c over blade_tiles.h, {form}, strict packed triangle)"
-                  shapeEv ]
+                  $"{shapeEv} KC={kcMax}" ]
             record "fold-form" Blade.Effects.Applied
-                [ $"fold form: antisym tile (shared C core) {form}, whole chain per tile{scaleNote}"
+                [ $"fold form: antisym tile (shared C core) {form}, {chainNote}{scaleNote}"
                   "same-array anticomm row-contraction pair (two ascending chains per cell, one subtraction; no reorder licence used; LLVM lane, serial)" ]
             Some { a with Src = APool out; RowOpBytes = 0L }
         | Blade.LinAlgPatterns.Sym3 ->
@@ -4788,8 +5130,9 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
                 match Blade.IR.stripUnits info.OutputType with
                 | ArrayElem arr -> requireScalar "a domain map's element" arr.ElemType
                 | t -> requireScalar "a domain map's result" t
-        { Elem = elem; Groups = [ GDomain plan ]; RowOpBytes = 0L
-          Src = AVirt (fun c2 xs -> coerce c2 elem (applyKernel c2 cl (xs |> List.map KScalar))) }
+        let produce = fun c2 xs -> coerce c2 elem (applyKernel c2 cl (xs |> List.map KScalar))
+        c.DomainMapBodies.[box produce] <- cl.Body
+        { Elem = elem; Groups = [ GDomain plan ]; RowOpBytes = 0L; Src = AVirt produce }
     // Every OTHER tabulated range -- a table-enumerated static struct (its
     // conjuncts are not linear, so there is no affine nest) or a SparseIdx key
     // list -- iterates a runtime key index this lane does not build.
@@ -4828,6 +5171,58 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
     if List.isEmpty cg.Bindings then refuse "a combinator that produced no loop levels"
     for b in cg.Bindings do
         if b.FusedRank.IsSome then refuse "a fused joint loop level (compound index domain)"
+    // THE COMPOUND VALUE MAP (G9): `y * y`, `method_for(y) <@> f` over a
+    // rank-1 compound. ONE level whose extent is the compound's cardinality
+    // (`IRCompoundMask`), every operand a real array of the SAME compound
+    // (same kept-position table -- `compound(a, m)` and a map over it share
+    // one mask by construction, which is what the C++ lane's shared-index
+    // output `Compound { new T[card], y.idx, stride }` records). Cell k of
+    // the result is the kernel of cell k of each operand, so this is the
+    // cell-congruent producer over the same GCompact shape: no coordinates,
+    // no storage until `|> compute` or a fold consumes it. Anything else
+    // over a compound level -- a virtual source, two different compounds, a
+    // Reynolds body, a row kernel -- refuses to the C++ lane.
+    let compoundLevel =
+        cg.Bindings |> List.exists (fun b -> match b.Extent with IRCompoundMask _ -> true | _ -> false)
+    if compoundLevel then
+        if cg.Bindings.Length <> 1 || cg.HasReynolds then
+            refuse "a compound level inside a multi-level or Reynolds nest"
+        let b = List.head cg.Bindings
+        let operands =
+            info.Arrays |> List.map (fun a ->
+                match a with
+                | IRRange _ | IRVirtualReverse _ -> refuse "a virtual source at a compound level"
+                | _ -> emitArr c a)
+        let shape =
+            match operands with
+            | first :: _ -> compactPosOf first
+            | [] -> None
+        let (len, pos) =
+            match shape with
+            | Some lp -> lp
+            | None -> refuse "a compound level over an operand that is not a rank-1 compound"
+        if not (operands |> List.forall (fun o -> compactPosOf o = Some (len, pos))) then
+            refuse "a compound level over operands of different compounds"
+        if b.Elements |> List.exists (fun el -> el.Virtual <> RealArray) then
+            refuse "a compound level with a virtual element"
+        let elem =
+            match scalarTyOf rk.Callable.RetType with
+            | Some s when s <> ScVoid -> s
+            | _ ->
+                match Blade.IR.stripUnits info.OutputType with
+                | ArrayElem arr -> requireScalar "a compound map's element" arr.ElemType
+                | t -> requireScalar "a compound map's result" t
+        let outGroups = [ GCompact (len, pos) ]
+        let paramOf (varId: IRId) = cg.KernelParams |> List.tryFind (fun p -> p.VarId = varId)
+        { Elem = elem; Groups = outGroups; RowOpBytes = 0L
+          Src = AVirtFlat (fun c2 k ->
+            for el in b.Elements do
+                let a = List.item el.ArrayPosition operands
+                match paramOf el.ParamVarId with
+                | Some p -> bindKernelParam c2 p (KScalar (readFlat c2 a k))
+                | None -> refuse "a compound level with no kernel parameter"
+            coerce c2 elem (emitExpr c2 cg.KernelExpr)) }
+    else
     let extents =
         cg.Bindings |> List.map (fun b ->
             match Blade.IRPrint.tryEvalIntIR b.Extent with
@@ -5360,6 +5755,26 @@ and private emitReduce (c: Ctx) (arrExpr: IRExpr) (kernelExpr: IRExpr) (initExpr
         let seededLit = if seeded then "true" else "false"
         ln c ($"store i1 {seededLit}, ptr {have}")
         let licensed = foldFmfDecorable cl
+        // THE ORDER: the C++ lane's decision (CodeGenExprSupport.domainFoldOrder),
+        // so a band under the licence walks by diagonal in both lanes. A seeded
+        // fold over the VIRTUAL map only (a pool folds in pool order).
+        let diagonal =
+            match a.Src with
+            | AVirt produce when seeded && licensed ->
+                let body = match c.DomainMapBodies.TryGetValue (box produce) with | true, b -> Some b | _ -> None
+                (match Blade.CodeGenExprSupport.domainFoldOrder (Some cl) body plan with
+                 | Blade.CodeGenExprSupport.DomainDiagonalOrder dg -> Some dg
+                 | Blade.CodeGenExprSupport.DomainLexOrder _ -> None)
+            | _ -> None
+        match diagonal with
+        | Some dg ->
+            emitDomainDiagonalNest c dg (fun idxs ->
+                let cell = readCell c a idxs
+                let cur = loadSlot c acc accTy
+                let next = withFoldFmf c licensed (fun () -> coerce c accTy (applyKernel c cl [ KScalar cur; KScalar cell ]))
+                ln c ($"store {(llTy accTy)} {next.Reg}, ptr {acc}"))
+            loadSlot c acc accTy
+        | None ->
         emitDomainNest c plan (fun idxs off ->
             let cell =
                 match a.Src with
@@ -5741,6 +6156,32 @@ and private emitReduceCompute (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExpr) (
         | [ (a, cl, ty, _, _) ] -> [ emitCompactFold c a cl ty (Some (List.head seeds)) ]
         | _ -> refuse "a fused reduction join over compact (symmetric/antisymmetric) storage"
     else
+    // THE ORDER: the C++ lane's decision (CodeGenExprSupport.domainFoldOrder).
+    // ONE leg only, as there: a fused join of several folds keeps the lex nest
+    // (lade plan says so), so the lanes never walk different orders.
+    let diagonal =
+        match domainShape, plans with
+        | Some plan, [ (a, cl, _, _, licensed) ] when licensed && kernels.Length = 1 ->
+            (match a.Src with
+             | AVirt produce ->
+                 let body = match c.DomainMapBodies.TryGetValue (box produce) with | true, b -> Some b | _ -> None
+                 (match Blade.CodeGenExprSupport.domainFoldOrder (Some cl) body plan with
+                  | Blade.CodeGenExprSupport.DomainDiagonalOrder dg -> Some dg
+                  | Blade.CodeGenExprSupport.DomainLexOrder _ -> None)
+             | _ -> None)
+        | _ -> None
+    match domainShape, diagonal with
+    | Some _, Some dg ->
+        emitDomainDiagonalNest c dg (fun idxs ->
+            for (a, cl, ty, slot, licensed) in plans do
+                let cur = loadSlot c slot ty
+                let cell = readCell c a idxs
+                let next =
+                    withFoldFmf c licensed (fun () ->
+                        coerce c ty (applyKernel c cl [ KScalar cur; KScalar cell ]))
+                ln c ($"store {(llTy ty)} {next.Reg}, ptr {slot}"))
+        plans |> List.map (fun (_, _, ty, slot, _) -> loadSlot c slot ty)
+    | _ ->
     // A CLOSED-FORM DOMAIN: the fold streams the affine nest -- no pool, no
     // key table -- accumulating in lex order exactly as the serial C++ nest
     // and the interpreter do.
@@ -6049,7 +6490,8 @@ let private checkModuleScope (m: IRModule) : unit =
     if not (Map.isEmpty m.ProviderReads) then refuse "a provider read (netcdf/zarr/csv/sql)"
     if not (Map.isEmpty m.ProviderWrites) then refuse "a provider write (netcdf/zarr/csv/sql)"
     if not (Map.isEmpty m.RandomInits) then refuse "a random-fill initializer"
-    if not (Map.isEmpty m.CompoundInits) then refuse "a compound-index initializer"
+    // A compound-index initializer is emitted per binding (emitCompoundInit:
+    // the rank-1 compaction) and refuses there for every other shape.
     if not (Map.isEmpty m.SparseInits) then refuse "a sparse-index initializer"
     for td in m.Types do
         match td with
@@ -6196,7 +6638,9 @@ let private emitArrayPrintFramed (c: Ctx) (pre: string) (post: string) (a: ArrVa
                 outVal c (readCell c a [ { Reg = i; Ty = ScI64 }; { Reg = j; Ty = ScI64 } ]))
             outStr c "]")
         outStr c post
-    | [ GDynDense len ] ->
+    // A rank-1 compound prints its kept cells in storage order as one flat
+    // run (G22: the C++ lane's genPrintStatements compound arm).
+    | [ GDynDense len ] | [ GCompact (len, _) ] ->
         outStr c pre
         let flag = allocaOf c "i1"
         ln c ($"store i1 true, ptr {flag}")
@@ -6397,6 +6841,92 @@ let private emitPrints (c: Ctx) (bindings: IRBinding list) : unit =
                         | None -> ()
                     | _ -> ()
 
+/// `let S = compound(dense, mask)` -- THE RANK-1 COMPACTION (bench gap G9),
+/// the twin of the C++ lane's genCompoundInitBinding over compound_index_t<1>
+/// and of the interpreter's buildCompound, in IR:
+///
+///   1. the mask is a stored Bool pool over ONE dense axis of n cells (the
+///      binding's type says so: a single IxKCompound slot of rank 1 and no
+///      trailing dims; the mask's shape says the axis is dense);
+///   2. COUNT: m = sum of the mask bytes (one counted loop, an i64 accumulator
+///      the vectorizer folds);
+///   3. FILL: the kept-position table, `pos[q] = i; q += keep[i]` over i
+///      ascending -- the branchless form, one slot of slack; kept order IS
+///      source order, so every lane agrees on it;
+///   4. GATHER: dst[q] = src[pos[q]] for q in [0, m) -- exactly m cells
+///      moved, monotone reads, no predicate read.
+///
+/// The value is `GCompact (m, pos)` over the dst pool: every flat consumer
+/// (fold, print, extents, a map) treats it as a runtime-extent rank-1 array;
+/// the keyed read `S(k)` binary-searches `pos` (emitRaw). The hashed index
+/// stays the C++ lane's: a rank >= 2 mask, trailing dims, a mask over anything
+/// but a dense axis, or a non-scalar element refuse here by name. Serial in
+/// every build -- a parallel prefix would be a different algorithm, and the
+/// kernel protocol (bench maskagg spec, M5) keeps compaction sequential.
+let private emitCompoundInit (c: Ctx) (b: IRBinding) (denseExpr: IRExpr) (maskExpr: IRExpr) : unit =
+    let arrTy =
+        match Blade.IR.stripUnits b.Type with
+        | ArrayElem arrTy -> arrTy
+        | _ -> refuse "a compound-index initializer whose binding is not an array"
+    (match arrTy.IndexTypes with
+     | [ ix ] when ix.IxKind = IxKCompound && ix.Rank = 1 -> ()
+     | [ ix ] when ix.IxKind = IxKCompound ->
+         refuse ($"a rank-{ix.Rank} compound-index initializer (the hashed index is the C++ lane's)")
+     | _ :: _ :: _ -> refuse "a compound-index initializer with trailing dims (the C++ lane's)"
+     | _ -> refuse "a compound-index initializer of an unexpected shape")
+    let elem =
+        match scalarTyOf arrTy.ElemType with
+        | Some (ScI64 | ScF64 | ScBool as e) -> e
+        | _ -> refuse "a compound-index initializer over a non-Int64/Float64/Bool element"
+    // The mask and the dense source, both STORED (a deferred source is forced
+    // under its own name, as the C++ lane's forceDeferredArrayInput does).
+    let keep = materialize c (consumeArrOperand c maskExpr)
+    let src = materialize c (consumeArrOperand c denseExpr)
+    if keep.Elem <> ScBool then refuse "a compound mask that is not a Bool array"
+    let n =
+        match keep.Groups with
+        | [ GDense n ] -> string n
+        | [ GDynDense len ] -> len
+        | [ GCompact _ ] -> refuse "a compound of a compound (a mask over a compound's cells)"
+        | _ -> refuse "a compound mask over other than one dense axis"
+    if src.Groups <> keep.Groups then refuse "a compound whose dense operand and mask differ in shape"
+    if src.Elem <> elem then refuse "a compound whose dense operand's element differs from its type"
+    let keepPool, srcPool =
+        match keep.Src, src.Src with
+        | APool k, APool s -> k, s
+        | _ -> refuse "unreachable: compound operands not materialized"
+    // 2. COUNT.
+    let acc = allocaOf c "i64"
+    ln c ($"store i64 0, ptr {acc}")
+    emitCountedLoopTo c n (fun i ->
+        let bit = loadCell c ScBool (gepCell c ScBool keepPool i)
+        let w = freshReg c
+        ln c ($"{w} = zext i1 {bit.Reg} to i64")
+        let cur = loadSlot c acc ScI64
+        let next = i64Add c cur.Reg w
+        ln c ($"store i64 {next}, ptr {acc}"))
+    let m = (loadSlot c acc ScI64).Reg
+    // 3. FILL: the kept positions, one slack slot for the unconditional store.
+    let mSlack = i64Add c m "1"
+    let pos = allocPool c ScI64 mSlack
+    let cursor = allocaOf c "i64"
+    ln c ($"store i64 0, ptr {cursor}")
+    emitCountedLoopTo c n (fun i ->
+        let q = loadSlot c cursor ScI64
+        storeCell c ScI64 (gepCell c ScI64 pos q.Reg) { Reg = i; Ty = ScI64 }
+        let bit = loadCell c ScBool (gepCell c ScBool keepPool i)
+        let w = freshReg c
+        ln c ($"{w} = zext i1 {bit.Reg} to i64")
+        let next = i64Add c q.Reg w
+        ln c ($"store i64 {next}, ptr {cursor}"))
+    // 4. GATHER by kept position into the exactly-sized compact pool.
+    let dst = allocPool c elem m
+    emitCountedLoopTo c m (fun q ->
+        let p = loadCell c ScI64 (gepCell c ScI64 pos q)
+        let v = loadCell c elem (gepCell c elem srcPool p.Reg)
+        storeCell c elem (gepCell c elem dst q) v)
+    bindArray c b.Id b.Name { Elem = elem; Groups = [ GCompact (m, pos) ]; Src = APool dst; RowOpBytes = 0L }
+
 /// Emit `main`: bindings in declaration order, the `<name> completed in <t>s`
 /// timing line, then the auto-print pass -- the exact statement order
 /// `genMainWrapper` assembles for the C++ lane, which is what makes the two
@@ -6419,7 +6949,9 @@ let private emitMain (c: Ctx) (m: IRModule) (programName: string) : string list 
         c.HoistedIds.Clear()
         c.DeclSpan <- Blade.IR.declSpanOf b.Name
         c.DeclName <- b.Name
-        bindNamed c b.Id b.Name b.Type b.Value
+        (match Map.tryFind b.Id m.CompoundInits with
+         | Some (denseExpr, maskExpr) -> emitCompoundInit c b denseExpr maskExpr
+         | None -> bindNamed c b.Id b.Name b.Type b.Value)
         publishBinding c b.Id
     c.StmtStart <- -1
     let t1 = freshReg c
