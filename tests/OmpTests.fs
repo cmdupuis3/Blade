@@ -712,7 +712,8 @@ let private ompThreadsKnobCases : (string * string * string list * string list) 
       // form: this arm's lines may be space-joined into a kernel-body IIFE).
       ("knob_map_licensed_fold_simd_and_census",
        arr + "let s = reduce(method_for(A) <@> lambda(a) where omp(a: 1) -> a * a, (+))\n",
-       [ "/* [omp] requested but emitted serial: BLADE_OMP_THREADS=1"; "BLADE_OMP_SIMD_REDUCTION(+:s)" ],
+       // A self-dot body: the vector form since M9; the census line stays.
+       [ "/* [omp] requested but emitted serial: BLADE_OMP_THREADS=1"; "blade_fold::sq<double, 8>(" ],
        [ "#pragma omp parallel"; "omp_get_"; "outer level chunked" ])
       // `axes = 2` for the reason spelled out at `reduce_over_computation_chunked`:
       // without it this is a partial fold that never had a chunk plan to drop,
@@ -1944,19 +1945,24 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
               // bandwidth-bound / 1.90x cache-resident over the simd form).
               ("builtin_reduce_lanes",
                fprSrcReduce (laneLit 17 awkward), "lanes")
-              // prodsum's fiber IIFE -> simd (2.60x on the gemv fiber and 3.36x
-              // at three streams, where the lanes gave 0.96x and 1.80x).
-              ("prodsum_simd",
-               fprSrcProdsum (laneLit 17 awkward) (laneLit 17 (fun i -> awkward (i + 3))), "simd")
-              ("prodsum3_simd",
+              // prodsum's fiber IIFE -> the explicit K-lane VECTOR form since
+              // M9 (2026-10-19; blade_fold_lanes.hpp): K = 8 independent 32-byte
+              // accumulators in a fixed tree, replacing the one-accumulator
+              // simd reduction the site chose on 2026-10-17 (2.60x on the gemv
+              // fiber and 3.36x at three streams over the scalar lanes). Neither
+              // the macro nor the scalar lanes may appear: the vector call IS
+              // the form.
+              ("prodsum_vector",
+               fprSrcProdsum (laneLit 17 awkward) (laneLit 17 (fun i -> awkward (i + 3))), "vector")
+              ("prodsum3_vector",
                fprSrcProdsum3 (laneLit 17 awkward)
                               (laneLit 17 (fun i -> awkward (i + 3)))
-                              (laneLit 17 (fun i -> awkward (i + 7))), "simd")
-              // reduce-over-deferred-computation (the dot shape) -> simd (1.64x
-              // bandwidth-bound / 3.81x cache-resident; the lanes were at
-              // PARITY with the serial chain in both regimes).
-              ("dot_reduce_over_computation_simd",
-               fprSrcDot (laneLit 17 awkward) (laneLit 17 (fun i -> awkward (i + 3))), "simd")
+                              (laneLit 17 (fun i -> awkward (i + 7))), "vector")
+              // reduce-over-deferred-computation (the dot shape) -> the same
+              // vector form (M9); a non-dot-class body keeps the simd form (the
+              // `_simd` pins below).
+              ("dot_reduce_over_computation_vector",
+               fprSrcDot (laneLit 17 awkward) (laneLit 17 (fun i -> awkward (i + 3))), "vector")
               // A `comm`-declared kernel is licensed but its combine is a CALL,
               // so no reduction clause can name it: BOTH sites fall back to the
               // lanes. This is the arm that keeps `fpReassocLaneStmts` live at
@@ -2000,10 +2006,18 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                 // the macro -- so a raw pragma appearing here would itself be
                 // the regression.
                 let hasSimd (s: string) = s.Contains "BLADE_OMP_SIMD_REDUCTION"
-                if hasLanes offCpp || hasSimd offCpp then
+                // The explicit K-lane vector form (blade_fold_lanes.hpp, M9).
+                let hasVector (s: string) = s.Contains "blade_fold::dot<" || s.Contains "blade_fold::sq<" || s.Contains "blade_fold::dot3<" || s.Contains "blade_fold::sum<"
+                if hasLanes offCpp || hasSimd offCpp || hasVector offCpp then
                     fail name "BLADE_FP_REASSOC=0 (the repro build) emitted a reassociated form (it must never reassociate)"
                 else
                     match expectForm with
+                    | "vector" when not (hasVector onCpp) ->
+                        fail name "knob ON emitted no blade_fold:: vector call (the gate never fired, or the site fell back to simd / lanes)"
+                    | "vector" when hasSimd onCpp || hasLanes onCpp ->
+                        fail name "knob ON emitted a simd clause or scalar lanes beside the vector call"
+                    | "simd" when hasVector onCpp ->
+                        fail name "knob ON emitted the vector form at a simd site (the body is not dot-class)"
                     | "lanes" when not (hasLanes onCpp) ->
                         fail name "knob ON emitted no lane accumulators (the gate never fired, or the site swapped to simd)"
                     | "lanes" when hasSimd onCpp ->
@@ -2016,6 +2030,7 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                         fail name "unlicensed kernel: knob ON changed the emission (the knob is not a licence)"
                     | "lanes" -> pass name "K-lane form, only with the knob on"
                     | "simd" -> pass name "omp simd reduction form, only with the knob on"
+                    | "vector" -> pass name "explicit K-lane vector form (blade_fold::), only with the knob on"
                     | "unchanged" -> pass name "byte-identical with the knob on (unlicensed, stays serial)"
                     | other -> fail name ($"test bug: unknown expected form {other}")
 
@@ -2024,10 +2039,15 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
         // (`BLADE_OMP_THREADS=1`) drops at its consumer. The fold used to fall to
         // the plain serial chain there (bench gap G20 / F11 -- the dot, composed
         // chain and checksum shapes); it now takes the vectorized form, with the
-        // census line for the dropped team. Three builds of one source:
-        //   threads on (default)        -> the Path B team, no simd clause
-        //   BLADE_OMP_THREADS=1         -> BLADE_OMP_SIMD_REDUCTION + the census line
+        // census line for the dropped team. Three builds of one source (a
+        // dot-class body, so the fast form is the explicit K-lane vector tree
+        // since M9 / M14, 2026-10-19):
+        //   threads on (default)        -> the Path B team, one blade_fold::dot call per chunk
+        //   BLADE_OMP_THREADS=1         -> one blade_fold::dot call over the sweep + the census line
         //   ... + BLADE_FP_REASSOC=0    -> neither (the repro build)
+        // The CENSUS INVARIANT is the point: a `where omp` fold emitted in its
+        // vector form under BLADE_OMP_THREADS=1 still prints the line naming
+        // the knob (bench register G7 / G27: a dropped omp is never silent).
         (let name = "fp_reassoc_emission_omp_deferred_fold_serial_build_simd"
          let src =
              $"let x = [{(laneLit 17 awkward)}]\n"
@@ -2039,19 +2059,20 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
              try f ()
              finally System.Environment.SetEnvironmentVariable("BLADE_OMP_THREADS", prior)
          let hasSimd (s: string) = s.Contains "BLADE_OMP_SIMD_REDUCTION("
+         let hasVector (s: string) = s.Contains "blade_fold::dot<double, 8>("
          let hasTeam (s: string) = s.Contains "BLADE_OMP_PARALLEL_NUM_THREADS("
          let census (s: string) = s.Contains "[omp] requested but emitted serial: BLADE_OMP_THREADS="
          match withReassoc true (fun () -> withBlasOff (fun () -> withThreads null (fun () -> emitOnly name src))),
                withReassoc true (fun () -> withBlasOff (fun () -> withThreads "1" (fun () -> emitOnly name src))),
                withReassoc false (fun () -> withBlasOff (fun () -> withThreads "1" (fun () -> emitOnly name src))) with
          | Ok team, Ok serial, Ok repro ->
-             if not (hasTeam team) || hasSimd team then
-                 fail name "threads on: expected the Path B team and no simd clause"
-             elif not (hasSimd serial) || not (census serial) || hasTeam serial then
-                 fail name "BLADE_OMP_THREADS=1: expected BLADE_OMP_SIMD_REDUCTION and the census line, no team"
-             elif hasSimd repro || hasTeam repro then
+             if not (hasTeam team) || hasSimd team || not (team.Contains "blade_fold::dot<double, 8>(__rsrc0 + __rlo, __rsrc1 + __rlo, __rhi - __rlo)") then
+                 fail name "threads on: expected the Path B team with one blade_fold::dot call per chunk and no simd clause"
+             elif not (hasVector serial) || not (census serial) || hasTeam serial || hasSimd serial then
+                 fail name "BLADE_OMP_THREADS=1: expected one blade_fold::dot call over the sweep and the census line, no team, no simd clause"
+             elif hasSimd repro || hasTeam repro || hasVector repro then
                  fail name "repro build: expected the serial chain"
-             else pass name "team / vectorized + census / serial, as each build should"
+             else pass name "team of vector chunks / vector + census / serial, as each build should"
          | Error e, _, _ | _, Error e, _ | _, _, Error e -> fail name ($"emit: {e}"))
 
         // ---- The lane COUNT is a function of the operand-stream count -------

@@ -3921,7 +3921,12 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                         // of the accumulator's element type. Shared by the
                         // threaded arm (M14) and the serial arm (M9) below.
                         let dotClass (lvl: LoopIndexBinding) =
-                            if foldLanesMode () = FoldLanesOff || fpReassocSimdOp callable elemStr <> Some "+" then None
+                            // double / float only (`foldVecElem`): an integer fold
+                            // keeps the simd reduction -- the header has no
+                            // integer vector form, and GCC's own reduction is
+                            // exact there anyway.
+                            if foldLanesMode () = FoldLanesOff || not (foldVecElem elemStr)
+                               || fpReassocSimdOp callable elemStr <> Some "+" then None
                             else
                                 dotClassFactors (fun t -> irTypeToCpp t = elemStr) cg.KernelExpr cg.KernelParams lvl
                                 |> Option.bind foldVecKind

@@ -383,7 +383,8 @@ let y = gram_apply(A, A, v)
       ("gemv_declines_on_per_row_self_dot", true,
        matA
        + "let rowsums = method_for(A) <@> lambda(er: Array<Float64 like N>) -> prodsum(er, er) |> compute\n",
-       [ "__ps = 0" ],
+       // The native per-row self-dot: the explicit K-lane vector form (M9).
+       [ "blade_fold::sq<double, 8>(" ],
        [ "blade_linalg::"; shimInclude ])
       // ARGUMENT ORDER is not cosmetic: `IRProdSum` takes its loop bound from
       // its FIRST operand, so `prodsum(xv, row)` is bounded by the VECTOR's
@@ -489,7 +490,7 @@ let y = gram_apply(A, A, v)
        covMat
        + "let CB: Array<Float64 like Idx<2>, T> = [[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 1.0, 0.0]]\n"
        + "let d1 = method_for(CA, CB) <@> lambda(x: Array<Float64 like T>, y: Array<Float64 like T>) -> prodsum(x, y) |> compute\n",
-       [ "__ps = 0"; "CB____i1" ],
+       [ "blade_fold::dot<double, 8>("; "CB____i1" ],
        [ "blade_linalg::"; shimInclude; "cblas_" ])
       // SAME ARRAY BUT NO `comm`: a full rectangular sweep into a DENSE
       // rank-2 output. syrk computes a triangle into packed storage, so the
@@ -497,7 +498,7 @@ let y = gram_apply(A, A, v)
       ("syrk_declines_without_the_comm_licence", true,
        covMat
        + "let d2 = method_for(CA, CA) <@> lambda(x: Array<Float64 like T>, y: Array<Float64 like T>) -> prodsum(x, y) |> compute\n",
-       [ "__ps = 0"; "for (size_t __i1 = 0; __i1 < 3;" ],
+       [ "blade_fold::dot<double, 8>("; "for (size_t __i1 = 0; __i1 < 3;" ],
        [ "blade_linalg::"; shimInclude; "cblas_" ])
       // INTEGER elements: `precisionOf` answers None, so there is no routine
       // family and no letter — the same decline every other route makes.
@@ -529,7 +530,8 @@ let y = gram_apply(A, A, v)
        "type T = Idx<4>\n"
        + "let CF: Array<Float32 like Idx<3>, T> = [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]]\n"
        + "let d6 = method_for(CF, CF) <@> lambda(x: Array<Float32 like T>, y: Array<Float32 like T>) where comm(x, y) -> prodsum(x, y) |> compute\n",
-       [ "__ps = 0" ],
+       // Float32 has its own vector lanes (8 per 32-byte accumulator).
+       [ "blade_fold::dot<float, 8>(" ],
        [ "blade_linalg::blade_gram_same_"; shimInclude ])
       // REYNOLDS reads PERMUTED coordinates, so the cell value is a SUM over
       // the orbit and not the contraction at all (`2 * prodsum` here). The
@@ -537,7 +539,7 @@ let y = gram_apply(A, A, v)
       ("syrk_declines_under_a_reynolds_wrapper", true,
        covMat
        + "let d5 = method_for(CA, CA) <@> reynolds(lambda(x: Array<Float64 like T>, y: Array<Float64 like T>) where comm(x, y) -> prodsum(x, y)) |> compute\n",
-       [ "Reynolds:"; "__ps = 0" ],
+       [ "Reynolds:"; "blade_fold::dot<double, 8>(" ],
        [ "blade_linalg::"; shimInclude; "cblas_" ])
 
       // ============ Phase 5c: the GATE-OFF side (the default build) ============
@@ -601,11 +603,12 @@ let y = gram_apply(A, A, v)
        [ "blade_pgemm::dgemm_nn((size_t)(18), (size_t)(16), (size_t)(114), (A).data, (B).data, C.data,"
          "#include \"blade_packed_gemm.hpp\"" ],
        [ shimInclude; "blade_linalg::"; "cblas_"; "__mcrow" ])
-      // dot: the fused fold nest -- in its default (2026-10-17) form, the
-      // `omp simd reduction` sweep over restrict aliases of x and y.
+      // dot: the fused fold -- in its default form since M9 (2026-10-19), ONE
+      // call of the explicit K-lane vector tree over restrict aliases of x
+      // and y (blade_fold_lanes.hpp); no loop is emitted at this site.
       ("gate_off_dot_emits_the_fold_nest", false,
        vecX + vecY + deferredProd + "let s = reduce(P, (+))\n",
-       [ "for (size_t __i0"; "(__rsrc0____i0 * __rsrc1____i0)" ],
+       [ "const double* BLADE_RESTRICT __rsrc0 = x.data;"; "blade_fold::dot<double, 8>(__rsrc0, __rsrc1, __rhi)" ],
        [ shimInclude; "blade_linalg::" ])
       // gemv: the per-row prodsum, emitted as the row-fold jam (all 3 rows in
       // one tile, one accumulator each) plus its scalar remainder.
@@ -622,7 +625,7 @@ let y = gram_apply(A, A, v)
       ("gate_off_syrk_emits_the_triangular_comm_nest", false,
        covMat
        + "let c2 = method_for(CA, CA) <@> " + covKernel "comm(x, y)" "prodsum(x, y) / 4.0",
-       [ "CA____i0"; "for (size_t __i1 = 0; __i1 < 3 - __i0"; "__ps = 0"; "/ 4.0)" ],
+       [ "CA____i0"; "for (size_t __i1 = 0; __i1 < 3 - __i0"; "blade_fold::dot<double, 8>("; "/ 4.0)" ],
        [ shimInclude; "blade_linalg::"; "__sy_i" ])
       // ...and with the gate off the `omp` request keeps its pragma, because
       // there is no route to hand the parallelism to. The gate is the ONLY
@@ -1205,7 +1208,9 @@ let runLinAlgEmissionTests () : BlockResult =
            + "let A: Array<Float64 like M, N> = [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]]\n"
            + "let xv: Array<Float64 like N> = [1.0, 2.0, 3.0, 4.0]\n"
            + "let yv = method_for(A) <@> lambda(row: Array<Float64 like N>) -> prodsum(row, xv) |> compute\n",
-           [ "__ps" ],
+           // Blade's own arithmetic: the row-fold jam's per-row chains plus the
+           // lifted kernel's prodsum (the explicit K-lane vector form since M9).
+           [ "blade_fold::dot<double, 8>(" ],
            [ cudaShimInclude; "blade_cuda_"; shimInclude; "blade_linalg::" ])
 
           // ---- THE FALLBACK CHAIN, which is the reason `resolveNodeRoute`
