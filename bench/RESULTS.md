@@ -20,8 +20,12 @@ clean) is IN (§6.3) — the repro regime is complete. Session **5a** (serial-fa
 kernels; `session-142614/`; antisym, fusedchain, dot clean) is IN (§7.1); session **5b**
 (mt8-fastmath, clean re-run `session-144656/` after the user-caused abort of
 `session-144122/`; all six blocks indicative) is IN (§7.2). Session **4** (gram blas, serial + mt8;
-`session-150343/`; both blocks clean) is IN (§7.3). **The matrix is complete**; §11 is
-the headline, inventory, honesty notes and phase-2 worklist. Consolidated per-session
+`session-150343/`; both blocks clean) is IN (§7.3). **The pre-fix matrix is complete**;
+§11 is its headline, inventory, honesty notes and phase-2 worklist. **§13 is the
+post-fix re-measure** (wave-2 tiles, orbit fold, pool cache; twelve kernels including the
+restored `band`): structure prepared, numbers PENDING the coordinator's final table and
+the session-9 / gate run; a new open item G32 (the orbit-class checksum fold runs serial
+under mt8) is already recorded. Consolidated per-session
 tables: `results/full/RUNNER-RECORD.md` (the runner's record, cross-referenced, not
 duplicated here).
 Both §12 decisions are taken (mt8 matched parallelism → group-A mt8 rows superseded and
@@ -1694,6 +1698,108 @@ differently, so bitwise agreement must be VERIFIED per compiler and mode (vfmadd
 in the tile and in the serial reference agree). Not in the plan but measured here and
 registered: G28 (the BLAS route's staging/repack) and G25 (chunk-interior serial folds
 under mt8).
+
+## 13. Phase-2 re-measure (post-fix) — STRUCTURE PREPARED, NUMBERS PENDING
+
+This section holds the harness re-measure of the twelve kernels on the post-wave-2
+binaries. It is filled from the coordinator's final table and the session bundles
+(`results/<date>-<host>/session-*/summary.md`) and reads `pending` until then. Nothing in
+§3–§7 changes: those are the pre-fix matrix. The re-measure is uncapped and indicative
+under the same drift rules; verdicts marked `live` are from unsuppressed blocks.
+
+Binaries: pre-twin tip 957c1e0e (DLL 79AF7EDC…: C++ tiles for gram/antisym/comoment3, LLVM
+gram tile, orbit-class fold, pool cache, canon network, domain nest) and the twin binary
+(2dcc0739: LLVM antisym/simplex tiles) for a final session 9 on the antisym/comoment3
+serial cells; a final gate run closes the set.
+
+### 13.1 Before / after / expert, per regime
+
+Columns: kernel | Blade before (ms, the pre-fix matrix median; lane) | Blade after (ms;
+lane) | gfortran-expert / ifx-expert after (ms) | ratio after, gf / ifx [CI] (> 1 Blade
+faster) | verdict (live / indicative) | gaps closed | gaps remaining.
+
+**serial x licensed (ref blade-llvm)**
+
+| kernel | before (ms) | after (ms) | experts (ms) | ratio gf / ifx | verdict | closed | remaining |
+|---|---|---|---|---|---|---|---|
+| gram | 156.7 llvm / 275.2 cpp | pending | pending | pending | pending | G1 (E M5 + follow-on, G M6), G26 moot | — |
+| antisym | 73.95 llvm / 107.9 cpp | pending | pending | pending | pending | G1 (F M7; LLVM twin 2dcc0739), G3b | antisym K blocking |
+| comoment3 | 41.49 llvm / 109.7 cpp | pending | pending | pending | pending | G1/G1b (F M8; LLVM twin), G3a (H M4), G3b (D M2) | — |
+| pairkernel | 42.59 llvm / 77.25 cpp | pending | pending | pending | pending | G3a (H M4), G3b | — |
+| recur | 116.9 llvm / 134.1 cpp | pending | pending | pending | pending | G6 (D M1/M3) | G8 stage fusion, 4.5b(ii) |
+| band | — (new) | pending | pending | pending | pending | G4 (C) | G30 (C++ inner loop scalar), G31 |
+| stencil, fusedchain, onepass, dot, saxpy, maskagg | §3/§4 values | unchanged by design (no fix targets them) | | | | | G9 (maskagg), G7/G5 |
+
+**mt8 x licensed (ref blade-cpp)**
+
+| kernel | before (ms, §5) | after (ms) | experts (ms) | ratio gf / ifx | verdict | closed | remaining |
+|---|---|---|---|---|---|---|---|
+| gram | 43.75 | pending | pending | pending | pending | G1 | — |
+| antisym | 22.58 | pending | pending | pending | pending | G1 | K blocking |
+| comoment3 | 20.62 | pending | pending | pending | pending | G1/G1b, G3a | — |
+| pairkernel | 16.11 | pending | pending | pending | pending | G3a (serial form) | **G32: the orbit-class checksum fold is one serial pass under mt8 (regression vs the threaded logical walk)** |
+| band / recur | no Blade mt8 arm | — | pending | — | — | — | G31 / G5 |
+
+**serial x repro (ref blade-llvm)** — the tiles apply under `BLADE_FP_REPRO=1` (no reorder
+licence needed), the orbit fold declines.
+
+| kernel | before (ms, §6.1) | after (ms) | experts (ms) | ratio gf / ifx | verdict | closed | remaining |
+|---|---|---|---|---|---|---|---|
+| gram | 1219 llvm / 953.6 cpp | pending | pending | pending | pending | G1 (tile keeps each cell one chain) | — |
+| antisym | 508.2 / 411.3 | pending | pending | pending | pending | G1 | — |
+| comoment3 | 156.8 / 180.6 | pending | pending | pending | pending | G1/G1b | G3a (orbit fold declines in repro) |
+| pairkernel | 42.78 / 77.59 | pending | pending | pending | pending | G3b | G3a in repro |
+| recur | 111.0 / 123.5 | pending | pending | pending | pending | G6 | G8 |
+| band | — | pending | pending | pending | pending | G4 | G30 |
+
+**mt8 x repro (ref blade-cpp)**
+
+| kernel | before (ms, §6.3) | after (ms) | experts (ms) | ratio gf / ifx | verdict | remaining |
+|---|---|---|---|---|---|---|
+| gram | 138.3 | pending | pending | pending | pending | — |
+| antisym | 60.70 | pending | pending | pending | pending | — |
+| comoment3 | 92.68 | pending | pending | pending | pending | repro serializes the fold teams (D43) |
+| pairkernel | 56.19 | pending | pending | pending | pending | same (threaded logical walk in repro) |
+
+**serial x fastmath (ref blade-llvm; unequal-permissions label)** — gram, antisym,
+comoment3, band: pending. **mt8 x fastmath**: pending (first attempt aborted on a
+sibling-build excursion; re-running). **blas (gram)**: pending (the gate-off tile does not
+touch the BLAS route; G28 stands unless the route changed).
+
+### 13.2 The band story (new kernel, first measured here)
+
+`band` is the closed-form-enumeration kernel restored after G4. Its per-cell work is one
+division (`phi(i, j) = (2 + d/(w+1)) / (1 + d²)`, kept per cell in every arm — the
+Fortran agent's table alternative was rejected by the spec), so the comparison is between
+loop nests that each visit exactly the 4,051,931 band cells. Expectation on record before
+the numbers: blade-llvm equivalent to the experts (its inner loop vectorizes 4-wide, 8
+`vdivpd` per iteration); **blade-cpp a loss (G30: the C++ lane's inner loop stays scalar
+despite the `omp simd reduction` pragma, 2 `vdivsd` per cell)**; the predicate-nest
+baselines ~50–100x slower (the straw man by construction); no Blade mt8 arm (G31). Numbers:
+pending (serial licensed / repro / fastmath; the fastmath block's first run was disturbed
+and is re-run).
+
+### 13.3 New open item from the re-measure: G32
+
+The orbit-class checksum fold (H, M4) fixed G3a in the serial licensed build — the p² / p³
+logical-read pass became one orbit-weighted pool walk — but under mt8 that walk is ONE
+serial pass where the old logical walk was threaded, so a compact kernel whose checksum
+pass is a large share of its region regresses under threads. H flagged the risk at
+hand-over; the pre-twin re-measure showed it on pairkernel mt8 (indicative). Recorded as
+**G32** in the register with the direction (thread the orbit pass across its outermost
+class level); gram and comoment3 are not materially affected (small checksum share; the
+simplex tile dominates).
+
+### 13.4 Headline of the re-measure
+
+Pending the final table. The questions it answers, stated before the numbers: (a) does
+Blade from one idiomatic source now reach the reviewed experts on gram, antisym and
+comoment3 in the headline regime, in BOTH lanes; (b) does the repro build — the old
+default — now sit near the experts too (the tiles need no reorder licence); (c) which
+remnants remain (G32 under mt8, G30/G31 on band, G8 on recur, G9 on maskagg, G26 on the
+dot-class folds); (d) whether any fix moved a checksum beyond 1e-12 (the orbit fold's
+~4e-15 is the only known drift). Every claim here will carry the same labels as §3–§7
+(uncapped, indicative where suppressed, n per cell, the bundle path).
 
 ## 12. Decisions put to the user — BOTH DECIDED (2026-10-18)
 
