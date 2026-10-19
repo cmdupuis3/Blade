@@ -1018,7 +1018,15 @@ let compileCppWithExtraSource (srcText: string option) (extraLinkInputs: string 
                 let tid = toolchainIdentity (optFlags () + " " + ompFlag)
                 $" -DBLADE_TOOLCHAIN_ID={tid}"
             else ""
-        let args = $"-std=c++17 {optFlags ()}{rrDefines}{tileDefines} {ompFlag} {safetyFlags}{blasCompileFlags} -o \"{exeFullPath}\" \"{cppFullPath}\"{extraFlags}{netcdfFlags}{mpiFlags}{blasLinkFlags}"
+        // The contracted build's name for the runtime headers whose arithmetic
+        // must FUSE DETERMINISTICALLY (blade_fold_lanes.hpp: one fma per lane
+        // step under any mode but `off`), so the fold forms' bits are a
+        // function of the build mode rather than of what the optimizer fused in
+        // each context. On the command line like the RR defines; `off` passes
+        // nothing and the header's step is the plain `acc + x * y`.
+        let contractDefine =
+            if (fpContractFlag ()).Trim() = "-ffp-contract=off" then "" else " -DBLADE_FP_CONTRACT_FAST=1"
+        let args = $"-std=c++17 {optFlags ()}{rrDefines}{tileDefines}{contractDefine} {ompFlag} {safetyFlags}{blasCompileFlags} -o \"{exeFullPath}\" \"{cppFullPath}\"{extraFlags}{netcdfFlags}{mpiFlags}{blasLinkFlags}"
         
         // The executable cache (Stage 4.1, above). v1 scope, deliberately
         // narrow -- every excluded lane is one whose inputs are not fully

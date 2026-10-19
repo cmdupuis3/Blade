@@ -97,7 +97,23 @@ type FoldChunkPlan = {
     ElemCpp: string
     /// Uniquifying suffix for the generated locals (the fold binding's name).
     Tag: string
+    /// How the fold runs INSIDE each thread's chunk (review item M14, gap
+    /// G25): decided by the producer, where the kernel is known, and read by
+    /// the nest emitter and the `blade plan` census alike so the two cannot
+    /// disagree.
+    ChunkForm: ChunkFoldForm
 }
+
+/// The fold's form within one Path B chunk.
+and ChunkFoldForm =
+    /// The serial chain seeded from the chunk's first value -- the form every
+    /// chunk had before M14 -- with the reason the fast form was declined.
+    | ChunkSerial of string
+    /// `omp simd reduction(<op>:acc)` over the chunk's one-level sweep: the
+    /// accumulator seeded with the operator's identity, the body written
+    /// straight into the vectorized loop (the serial licensed form's shape,
+    /// per thread). `op` is `+` or `*`.
+    | ChunkSimd of string
 
 /// Hot-row fold scheduling (Blade.Optimize.planHotRowFolds, bench review
 /// item M13): what the producer's nest places around and inside its

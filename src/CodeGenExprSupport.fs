@@ -1960,6 +1960,147 @@ let antisymTileSchedule () : AntisymTileSchedule =
 /// prodsum nest (default); `0` / `off` keeps the plain per-cell nest, for A/B.
 let simplexTileEnabled () : bool = Blade.Toolchain.envFlag "BLADE_SIMPLEX_TILE" true
 
+// ---- The explicit K-lane vector fold form (BLADE_FOLD_LANES; review M9/M14) --
+
+/// BLADE_FOLD_LANES, read per call:
+///   unset / `1` / `on` / `auto` -> the explicit K-lane vector form
+///                                  (blade_fold_lanes.hpp) for every licensed
+///                                  DOT-CLASS fold, K by `foldVecLanes`; and
+///                                  the simd form inside Path B chunks
+///   `4` / `8`                   -> the same, with that K everywhere (A/B)
+///   `0` / `off`                 -> the forms before M9/M14: ONE `omp simd
+///                                  reduction` accumulator, and a serial chain
+///                                  inside each Path B chunk
+/// It changes the emission, so the exe cache keys on it for free. Inert under
+/// BLADE_FP_REPRO=1, which never reaches a reassociated form.
+type FoldLanesMode =
+    | FoldLanesOff
+    | FoldLanesAuto
+    | FoldLanesFixed of int
+
+let foldLanesMode () : FoldLanesMode =
+    match System.Environment.GetEnvironmentVariable "BLADE_FOLD_LANES" with
+    | null -> FoldLanesAuto
+    | v ->
+        match v.Trim().ToLowerInvariant() with
+        | "0" | "off" | "false" | "no" -> FoldLanesOff
+        | "4" -> FoldLanesFixed 4
+        | "8" -> FoldLanesFixed 8
+        | _ -> FoldLanesAuto
+
+/// The vector forms blade_fold_lanes.hpp spells, by the kernel's factor list
+/// (source order; a repeated array is a self-dot): `sum` (one stream),
+/// `dot` (two), `sq` (one stream read once, squared), `dot3` (three, the
+/// product left-nested `(a * b) * c`).
+type FoldVecKind =
+    | VecSum
+    | VecDot
+    | VecSq
+    | VecDot3
+
+/// The form for a factor list of 1..3 array names, with the DISTINCT operand
+/// names in the call's order; None for anything else.
+let foldVecKind (factors: string list) : (FoldVecKind * string list) option =
+    match factors with
+    | [ a ] -> Some (VecSum, [ a ])
+    | [ a; b ] when a = b -> Some (VecSq, [ a ])
+    | [ a; b ] -> Some (VecDot, [ a; b ])
+    | [ a; b; c ] -> Some (VecDot3, [ a; b; c ])
+    | _ -> None
+
+let foldVecKindName (k: FoldVecKind) : string =
+    match k with VecSum -> "sum" | VecDot -> "dot" | VecSq -> "sq" | VecDot3 -> "dot3"
+
+/// The number of distinct memory streams a form reads per element.
+let foldVecStreams (k: FoldVecKind) : int =
+    match k with VecSum -> 1 | VecDot -> 2 | VecSq -> 1 | VecDot3 -> 3
+
+/// K, the number of independent 32-byte vector accumulators. The rule is by
+/// the form's load/FMA ratio on Zen 3 (2 loads + 2 FMAs per cycle, FMA latency
+/// 4): a two-stream dot is load-bound at one vector FMA per cycle, which 4
+/// chains cover; a self-dot or a plain sum issues one load per FMA and can
+/// run both FMA units, which needs 8 chains. 8 is never worse than 4 at any
+/// shape measured (bench/notes/gap-register.md, G26 entry), so 8 is the
+/// default everywhere; `BLADE_FOLD_LANES=4|8` forces either for A/B.
+let foldVecLanes (k: FoldVecKind) : int =
+    match foldLanesMode () with
+    | FoldLanesFixed n -> n
+    | _ -> 8
+
+/// Is `elemStr` an element type blade_fold's vector forms are defined for?
+let foldVecElem (elemStr: string) : bool =
+    elemStr = "double" || elemStr = "float"
+
+/// The C++ call: `blade_fold::<kind><T, K>(p0, p1, .., n)` over raw element
+/// pointers (`.data` of a rank-1 Array, `+ lo` for a chunk) and an element
+/// count. Sets nothing: the caller marks `foldLanesUsedCell` (the include).
+let foldVecCall (elemStr: string) (k: int) (kind: FoldVecKind) (ptrs: string list) (nExpr: string) : string =
+    let args = String.concat ", " (ptrs @ [ nExpr ])
+    $"blade_fold::{(foldVecKindName kind)}<{elemStr}, {k}>({args})"
+
+/// The census / `blade plan` spelling of the form: `simd K-lanes(8) dot`.
+let foldVecLabel (kind: FoldVecKind) (k: int) : string =
+    let word =
+        match kind with VecSum -> "sum" | VecDot -> "dot" | VecSq -> "self-dot" | VecDot3 -> "dot3"
+    $"simd K-lanes({k}) {word}"
+
+/// Is `lvl` a plain rectangular sweep a fold may take a lane / simd / vector
+/// form over -- no bound dependencies, no strict offset, not a fused joint
+/// level, not a tabulated (compound / sparse) axis, no Reynolds body, no MPI
+/// slab, no halo-window slot? ONE predicate for the one-level licensed arm of
+/// `genReduceComputeBinding` and for the Path B chunk plan (M14), so the
+/// serial and the threaded forms admit exactly the same levels.
+let laneableFoldLevel (cg: LoopNestCodeGen) (lvl: LoopIndexBinding) : bool =
+    lvl.BoundDependencies.IsEmpty && lvl.StrictOffset = 0
+    && lvl.FusedRank.IsNone
+    && (match lvl.Extent with
+        | IRCompoundMask _ | IRSparseKeys _ -> false
+        | _ -> true)
+    && not cg.HasReynolds && not cg.MpiSlab
+    && (lvl.Elements
+        |> List.forall (fun e ->
+            match e.SlotTag with
+            | Some t -> not (t.StartsWith "__halowin")
+            | None -> true))
+
+/// The factor list of a DOT-CLASS kernel body over `lvl`'s peels: the body is
+/// a left-nested elementwise product of 1..3 kernel parameters, each bound at
+/// this level to a REAL rank-1 array (not a range / reverse / halo slot) whose
+/// element type `elemOk` accepts, so the body at index i is `A[i] * B[i]
+/// (* C[i])` and the whole fold is one of blade_fold's forms. Returns the
+/// arrays in source factor order (a repeated array appears twice: `x * x`);
+/// None for any other body -- a composed chain, a call, a cast, a scalar
+/// capture in the product -- which keeps the simd form.
+let dotClassFactors (elemOk: IRType -> bool) (body: IRExpr) (kernelParams: IRParam list) (lvl: LoopIndexBinding) : string list option =
+    // A slot's tag is its index type's NAME for a named index (`Ix`); only the
+    // halo-window payload marks a slot that is not a plain element read.
+    let plainSlot (e: ElementBinding) =
+        match e.SlotTag with
+        | Some t -> not (t.StartsWith "__halowin")
+        | None -> true
+    let arrayOfParam (vid: IRId) =
+        lvl.Elements
+        |> List.tryPick (fun e ->
+            if e.ParamVarId = vid && e.Virtual.IsRealArray && e.ArrayRank = 1
+               && plainSlot e && elemOk e.ArrayElemType
+            then Some e.ArrayName else None)
+    let leaf (e: IRExpr) =
+        match e with
+        | IRVar (id, _) -> arrayOfParam id
+        | IRParam (_, idx, _) ->
+            kernelParams |> List.tryFind (fun p -> p.Index = idx) |> Option.bind (fun p -> arrayOfParam p.VarId)
+        | _ -> None
+    match body with
+    | IRBinOp (IRElementwise, IRMul, IRBinOp (IRElementwise, IRMul, a, b, _), c, _) ->
+        (match leaf a, leaf b, leaf c with
+         | Some x, Some y, Some z -> Some [ x; y; z ]
+         | _ -> None)
+    | IRBinOp (IRElementwise, IRMul, a, b, _) ->
+        (match leaf a, leaf b with
+         | Some x, Some y -> Some [ x; y ]
+         | _ -> None)
+    | e -> leaf e |> Option.map (fun x -> [ x ])
+
 /// Is the antisym pair's tile worth it over the per-cell double dot? The
 /// review's routes: tile at p = 61 x n = 401 / 600, decline at 23 x 11 (a
 /// strict 23-row triangle is a handful of 6 x 8 tiles, mostly padding). One

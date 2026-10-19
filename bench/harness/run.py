@@ -877,7 +877,9 @@ _RE_CPP_THREADS = re.compile(r"\bBLADE_OMP_PARALLEL\w*|#\s*pragma\s+omp\s+parall
 # Macro INVOCATIONS only (the header comment of every .ll mentions "reassoc"; .cpp comments may
 # name macros): C++ `BLADE_OMP_[PARALLEL_FOR_]SIMD_REDUCTION(`, LLVM a fast-math flag on an
 # instruction with comments stripped.
-_RE_CPP_SIMDRED = re.compile(r"\bBLADE_OMP_(?:PARALLEL_FOR_)?SIMD_REDUCTION\(")
+# ... or a call of the explicit K-lane vector fold forms (blade_fold_lanes.hpp, review M9/M14),
+# which replaced the single-accumulator simd reduction for dot-class folds on 2026-10-19.
+_RE_CPP_SIMDRED = re.compile(r"\bBLADE_OMP_(?:PARALLEL_FOR_)?SIMD_REDUCTION\(|\bblade_fold::(?:sum|dot|sq|dot3)<")
 _RE_CPP_SERIAL_MARK = re.compile(r"\[omp\] requested but emitted serial")
 _RE_LL_THREADS = re.compile(r"__kmpc_fork_call|\bGOMP_parallel\w*|\bomp_get_num_threads\b")
 _RE_LL_REASSOC = re.compile(r"=\s*f(?:add|mul|sub|div|neg)\s+(?:(?:nnan|ninf|nsz|arcp|contract|afn)\s+)*(?:reassoc|fast)\b")
@@ -1090,7 +1092,7 @@ def _build_blade(b: Build, k: Kernel, arm: ArmSpec, regime: Regime, src: Path, a
                   omp_emitted_serial_markers=len(_RE_CPP_SERIAL_MARK.findall(text)))
     # The arm's ACTUAL fold form, from the artifact (blade plan is silent about it).
     nre = ev.get("simd_reductions", 0) + ev.get("reassoc_flags", 0)
-    ev["fold_form"] = (f"reordered ({ev.get('simd_reductions', 0)} SIMD_REDUCTION)" if ev.get("simd_reductions")
+    ev["fold_form"] = (f"reordered ({ev.get('simd_reductions', 0)} SIMD_REDUCTION/K-lane)" if ev.get("simd_reductions")
                        else f"reordered ({ev.get('reassoc_flags', 0)} reassoc flags)" if ev.get("reassoc_flags")
                        else "in-order") if ev.get("lane") else None
     if not ok:
@@ -1117,7 +1119,7 @@ def _build_blade(b: Build, k: Kernel, arm: ArmSpec, regime: Regime, src: Path, a
     # M3: repro serial acceptance -- no reordered fold may reach a serial repro build.
     if regime.threads == "serial" and regime.fp == "repro":
         if ev.get("simd_reductions", 0) > 0:
-            b.status, b.reason = "failed", f"repro serial build carries {ev['simd_reductions']} SIMD_REDUCTION expansion(s) (M3)"
+            b.status, b.reason = "failed", f"repro serial build carries {ev['simd_reductions']} SIMD_REDUCTION/K-lane fold site(s) (M3)"
             return
         if ev.get("reassoc_flags", 0) > 0:
             b.status, b.reason = "failed", f"repro serial build carries {ev['reassoc_flags']} reassoc FP flag(s) in the .ll (M3)"

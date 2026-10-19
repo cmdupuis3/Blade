@@ -383,7 +383,8 @@ let y = gram_apply(A, A, v)
       ("gemv_declines_on_per_row_self_dot", true,
        matA
        + "let rowsums = method_for(A) <@> lambda(er: Array<Float64 like N>) -> prodsum(er, er) |> compute\n",
-       [ "__ps = 0" ],
+       // The native per-row self-dot: the explicit K-lane vector form (M9).
+       [ "blade_fold::sq<double, 8>(" ],
        [ "blade_linalg::"; shimInclude ])
       // ARGUMENT ORDER is not cosmetic: `IRProdSum` takes its loop bound from
       // its FIRST operand, so `prodsum(xv, row)` is bounded by the VECTOR's
@@ -489,7 +490,7 @@ let y = gram_apply(A, A, v)
        covMat
        + "let CB: Array<Float64 like Idx<2>, T> = [[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 1.0, 0.0]]\n"
        + "let d1 = method_for(CA, CB) <@> lambda(x: Array<Float64 like T>, y: Array<Float64 like T>) -> prodsum(x, y) |> compute\n",
-       [ "__ps = 0"; "CB____i1" ],
+       [ "blade_fold::dot<double, 8>("; "CB____i1" ],
        [ "blade_linalg::"; shimInclude; "cblas_" ])
       // SAME ARRAY BUT NO `comm`: a full rectangular sweep into a DENSE
       // rank-2 output. syrk computes a triangle into packed storage, so the
@@ -497,7 +498,7 @@ let y = gram_apply(A, A, v)
       ("syrk_declines_without_the_comm_licence", true,
        covMat
        + "let d2 = method_for(CA, CA) <@> lambda(x: Array<Float64 like T>, y: Array<Float64 like T>) -> prodsum(x, y) |> compute\n",
-       [ "__ps = 0"; "for (size_t __i1 = 0; __i1 < 3;" ],
+       [ "blade_fold::dot<double, 8>("; "for (size_t __i1 = 0; __i1 < 3;" ],
        [ "blade_linalg::"; shimInclude; "cblas_" ])
       // INTEGER elements: `precisionOf` answers None, so there is no routine
       // family and no letter — the same decline every other route makes.
@@ -529,7 +530,8 @@ let y = gram_apply(A, A, v)
        "type T = Idx<4>\n"
        + "let CF: Array<Float32 like Idx<3>, T> = [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]]\n"
        + "let d6 = method_for(CF, CF) <@> lambda(x: Array<Float32 like T>, y: Array<Float32 like T>) where comm(x, y) -> prodsum(x, y) |> compute\n",
-       [ "__ps = 0" ],
+       // Float32 has its own vector lanes (8 per 32-byte accumulator).
+       [ "blade_fold::dot<float, 8>(" ],
        [ "blade_linalg::blade_gram_same_"; shimInclude ])
       // REYNOLDS reads PERMUTED coordinates, so the cell value is a SUM over
       // the orbit and not the contraction at all (`2 * prodsum` here). The
@@ -537,7 +539,7 @@ let y = gram_apply(A, A, v)
       ("syrk_declines_under_a_reynolds_wrapper", true,
        covMat
        + "let d5 = method_for(CA, CA) <@> reynolds(lambda(x: Array<Float64 like T>, y: Array<Float64 like T>) where comm(x, y) -> prodsum(x, y)) |> compute\n",
-       [ "Reynolds:"; "__ps = 0" ],
+       [ "Reynolds:"; "blade_fold::dot<double, 8>(" ],
        [ "blade_linalg::"; shimInclude; "cblas_" ])
 
       // ============ Phase 5c: the GATE-OFF side (the default build) ============
@@ -601,11 +603,12 @@ let y = gram_apply(A, A, v)
        [ "blade_pgemm::dgemm_nn((size_t)(18), (size_t)(16), (size_t)(114), (A).data, (B).data, C.data,"
          "#include \"blade_packed_gemm.hpp\"" ],
        [ shimInclude; "blade_linalg::"; "cblas_"; "__mcrow" ])
-      // dot: the fused fold nest -- in its default (2026-10-17) form, the
-      // `omp simd reduction` sweep over restrict aliases of x and y.
+      // dot: the fused fold -- in its default form since M9 (2026-10-19), ONE
+      // call of the explicit K-lane vector tree over restrict aliases of x
+      // and y (blade_fold_lanes.hpp); no loop is emitted at this site.
       ("gate_off_dot_emits_the_fold_nest", false,
        vecX + vecY + deferredProd + "let s = reduce(P, (+))\n",
-       [ "for (size_t __i0"; "(__rsrc0____i0 * __rsrc1____i0)" ],
+       [ "const double* BLADE_RESTRICT __rsrc0 = x.data;"; "blade_fold::dot<double, 8>(__rsrc0, __rsrc1, __rhi)" ],
        [ shimInclude; "blade_linalg::" ])
       // gemv: the per-row prodsum, emitted as the row-fold jam (all 3 rows in
       // one tile, one accumulator each) plus its scalar remainder.
@@ -622,7 +625,7 @@ let y = gram_apply(A, A, v)
       ("gate_off_syrk_emits_the_triangular_comm_nest", false,
        covMat
        + "let c2 = method_for(CA, CA) <@> " + covKernel "comm(x, y)" "prodsum(x, y) / 4.0",
-       [ "CA____i0"; "for (size_t __i1 = 0; __i1 < 3 - __i0"; "__ps = 0"; "/ 4.0)" ],
+       [ "CA____i0"; "for (size_t __i1 = 0; __i1 < 3 - __i0"; "blade_fold::dot<double, 8>("; "/ 4.0)" ],
        [ shimInclude; "blade_linalg::"; "__sy_i" ])
       // ...and with the gate off the `omp` request keeps its pragma, because
       // there is no route to hand the parallelism to. The gate is the ONLY
@@ -1209,7 +1212,9 @@ let runLinAlgEmissionTests () : BlockResult =
            + "let A: Array<Float64 like M, N> = [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]]\n"
            + "let xv: Array<Float64 like N> = [1.0, 2.0, 3.0, 4.0]\n"
            + "let yv = method_for(A) <@> lambda(row: Array<Float64 like N>) -> prodsum(row, xv) |> compute\n",
-           [ "__ps" ],
+           // Blade's own arithmetic: the row-fold jam's per-row chains plus the
+           // lifted kernel's prodsum (the explicit K-lane vector form since M9).
+           [ "blade_fold::dot<double, 8>(" ],
            [ cudaShimInclude; "blade_cuda_"; shimInclude; "blade_linalg::" ])
 
           // ---- THE FALLBACK CHAIN, which is the reason `resolveNodeRoute`
@@ -1506,6 +1511,107 @@ let runSyrkTileTests () : BlockResult =
                 else
                     if packedFma >= 12 then pass "vfmadd census contract=fast" ($"{packedFma} packed vfmadd (tile s loop: 12 per step per variant)")
                     else fail "vfmadd census contract=fast" ($"only {packedFma} packed vfmadd: the tile did not contract")
+            | _, o, e -> fail $"vfmadd census contract={mode}" ($"-S failed: {(o + e).Trim()}")
+        (try Directory.Delete(work, true) with _ -> ())
+        printFooter blockName [ $"{passed} passed"; $"{failed} failed" ]
+        { Block = blockName; Passed = passed; Failed = failed; Skipped = 0; FailedNames = names }
+
+
+/// RAW-BIT tests of the explicit K-lane vector fold forms (cpp/fold_lanes_tests.cpp
+/// over the SHIPPED blade_fold_lanes.hpp; review items M9 / M14): every form
+/// (sum / dot / sq / dot3, K = 4 and 8, double and float) against the scalar
+/// model of the lane tree the header documents, at n = 0..35 / 777 / 20011,
+/// unaligned starts, same-pointer operands, and the Path B partition threaded
+/// against its serial-within-chunk twin.
+///
+/// Two builds of ONE source, as Build.fs builds programs:
+///   -ffp-contract=off                          (the differential gates' mode)
+///   -ffp-contract=fast -DBLADE_FP_CONTRACT_FAST=1 (the user default)
+/// plus an assembly census of each: =off must contain NO vfmadd at all, =fast
+/// must contain the forms' packed vfmadd (pd and ps). Needs g++; reports
+/// Skipped without it.
+let runFoldLanesTests () : BlockResult =
+    let blockName = "Fold Lanes"
+    printHeader "Explicit K-Lane Vector Folds (raw-bit vs the lane-tree model, both contraction modes)"
+    let cppDir = Path.Combine(AppContext.BaseDirectory, "cpp")
+    let testSrc = Path.Combine(cppDir, "fold_lanes_tests.cpp")
+    let caps = capabilities.Value
+    if not caps.HasGpp then
+        printfn "Skipped: g++ not found (cannot compile the C++ fold tests)."
+        { Block = blockName; Passed = 0; Failed = 0; Skipped = 1; FailedNames = [] }
+    elif not (File.Exists testSrc) then
+        eprintfn "fold_lanes_tests.cpp not found at: %s" testSrc
+        { Block = blockName; Passed = 0; Failed = 1; Skipped = 0
+          FailedNames = ["fold_lanes_tests.cpp missing"] }
+    else
+        let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
+        let work = Path.Combine(Path.GetTempPath(), "blade-fold-lanes-" + Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory(work) |> ignore
+        let runProc (exe: string) (args: string) (timeoutMs: int) =
+            let psi = ProcessStartInfo(exe, args)
+            psi.RedirectStandardOutput <- true
+            psi.RedirectStandardError <- true
+            psi.UseShellExecute <- false
+            psi.CreateNoWindow <- true
+            psi.WorkingDirectory <- cppDir
+            use p = Process.Start(psi)
+            let o = Blade.Runtime.readToEndOffPool p.StandardOutput
+            let e = Blade.Runtime.readToEndOffPool p.StandardError
+            if p.WaitForExit(timeoutMs) then (Some p.ExitCode, o.Result, e.Result)
+            else
+                (try p.Kill(true) with _ -> ())
+                (None, o.Result, e.Result)
+        let mutable passed = 0
+        let mutable failed = 0
+        let mutable names = []
+        let fail (n: string) (detail: string) =
+            failed <- failed + 1
+            names <- names @ [ n ]
+            resultLine Fail n detail
+        let pass (n: string) (detail: string) =
+            passed <- passed + 1
+            resultLine Pass n detail
+        let baseFlags = "-std=c++17 -O3 -march=native -fno-math-errno -fwrapv -fopenmp"
+        for (mode, extra) in [ ("off", ""); ("fast", " -DBLADE_FP_CONTRACT_FAST=1") ] do
+            let exe = Path.Combine(work, $"fold_lanes_{mode}{exeExt}")
+            let asm = Path.Combine(work, $"fold_lanes_{mode}.s")
+            let flags = $"{baseFlags} -ffp-contract={mode}{extra}"
+            match runProc "g++" $"{flags} -o \"{exe}\" \"{testSrc}\"" 180000 with
+            | Some 0, _, _ ->
+                match runProc exe "" 180000 with
+                | None, _, _ -> fail $"raw-bit contract={mode}" "test binary TIMED OUT (180s)"
+                | Some code, out, err ->
+                    let outText = out.Replace("\r\n", "\n")
+                    let m = System.Text.RegularExpressions.Regex.Match(outText, @"FOLD LANES TESTS:\s*(\d+)/(\d+)\s*passed")
+                    let firstFails =
+                        outText.Split('\n') |> Array.filter (fun l -> l.StartsWith "[FAIL]") |> Array.truncate 5
+                        |> String.concat " | "
+                    if m.Success && code = 0 && m.Groups.[1].Value = m.Groups.[2].Value then
+                        let step =
+                            outText.Split('\n') |> Array.tryFind (fun l -> l.StartsWith "vector extensions")
+                            |> Option.defaultValue ""
+                        pass $"raw-bit contract={mode}" ($"{m.Groups.[1].Value}/{m.Groups.[2].Value} cases bitwise; {step.Trim()}")
+                    elif m.Success then
+                        fail $"raw-bit contract={mode}" ($"{m.Groups.[1].Value}/{m.Groups.[2].Value} passed: {firstFails} {err.Trim()}")
+                    else
+                        fail $"raw-bit contract={mode}" ($"no summary line (exit {code}): {err.Trim()}")
+            | _, o, e -> fail $"raw-bit contract={mode}" ($"compile failed: {(o + e).Trim()}")
+            // The assembly census: the step rule is the BUILD's, so confirm the
+            // build did what the define says.
+            match runProc "g++" $"{flags} -S -o \"{asm}\" \"{testSrc}\"" 180000 with
+            | Some 0, _, _ ->
+                let lines = File.ReadAllLines asm
+                let count (pat: string) = lines |> Array.filter (fun l -> l.Contains pat) |> Array.length
+                let anyFma = count "vfmadd" + count "vfmsub" + count "vfnmadd"
+                let packedPd = count "vfmadd231pd" + count "vfmadd132pd" + count "vfmadd213pd"
+                let packedPs = count "vfmadd231ps" + count "vfmadd132ps" + count "vfmadd213ps"
+                if mode = "off" then
+                    if anyFma = 0 then pass "vfmadd census contract=off" "0 fused instructions in the TU (acc + x * y, two roundings)"
+                    else fail "vfmadd census contract=off" ($"{anyFma} fused instruction(s) under -ffp-contract=off")
+                else
+                    // 8 lanes x (block + remainder) per double form, 3 forms with a product, 2 K values: well past 16 each.
+                    if packedPd >= 16 && packedPs >= 16 then pass "vfmadd census contract=fast" ($"{packedPd} packed vfmadd pd, {packedPs} ps (one fma per lane step)")
+                    else fail "vfmadd census contract=fast" ($"only {packedPd} pd / {packedPs} ps packed vfmadd: the forms did not fuse")
             | _, o, e -> fail $"vfmadd census contract={mode}" ($"-S failed: {(o + e).Trim()}")
         (try Directory.Delete(work, true) with _ -> ())
         printFooter blockName [ $"{passed} passed"; $"{failed} failed" ]

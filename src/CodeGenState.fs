@@ -1027,6 +1027,21 @@ let tilesUsedCell () : bool ref =
         fresh
     else v
 
+/// Set when a fold emitted a `blade_fold::` call (the explicit K-lane vector
+/// forms and the Path B chunk partition in blade_fold_lanes.hpp); the assembly
+/// appends that include only then. Same AsyncLocal collect-then-append shape
+/// as tilesUsedCell.
+let internal foldLanesUsedStorage =
+    System.Threading.AsyncLocal<bool ref>()
+
+let foldLanesUsedCell () : bool ref =
+    let v = foldLanesUsedStorage.Value
+    if isNull (box v) then
+        let fresh = ref false
+        foldLanesUsedStorage.Value <- fresh
+        fresh
+    else v
+
 /// Set when the native matmul arm emitted a `blade_pgemm::` call (the packed
 /// kernel in blade_packed_gemm.hpp); the assembly appends that include only
 /// then. Same AsyncLocal collect-then-append shape as tilesUsedCell.
