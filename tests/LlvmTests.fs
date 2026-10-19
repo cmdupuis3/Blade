@@ -850,12 +850,13 @@ let g = method_for(x, {ys}) <@> lambda(a: Array<Float64 like S>, b: Array<Float6
 let t = reduce(method_for(range<V>) <@> lambda(i) -> g(i, i), (+))
 """
     let tileSym = "@" + EmitLlvm.tilesSymbol
-    let scratch6131 = EmitLlvm.syrkTileScratchCells 61L (Blade.CodeGenExprSupport.syrkTileKc 31L)
+    let rowG = Blade.CodeGenExprSupport.syrkRowGroup ()
+    let scratch6131 = EmitLlvm.syrkTileScratchCells 61L (Blade.CodeGenExprSupport.syrkTileKc 31L) rowG
     check "syrk tile: gram's shape (61 x 31) calls the core with the emitter's recipe"
         [ "BLADE_SYRK_TILE", None ] (gramSrc 61 31 "" "x")
         [ $"call void {tileSym}(i64 61, i64 31, ptr "
           ", i64 31, ptr "
-          $", i64 0, i64 {Blade.CodeGenExprSupport.syrkTileKcMax}, i64 0, double 0x3FF0000000000000, ptr "
+          $", i64 0, i64 {Blade.CodeGenExprSupport.syrkTileKcMax}, i64 {rowG}, i64 0, double 0x3FF0000000000000, ptr "
           $", i64 {scratch6131})"
           $"declare void {tileSym}(i64 noundef, i64 noundef, ptr noundef readonly captures(none), i64 noundef, ptr noundef captures(none),"
           "mustprogress nofree nosync nounwind willreturn memory(argmem: readwrite)" ]
@@ -878,7 +879,7 @@ let t = reduce(method_for(range<V>) <@> lambda(i) -> g(i, i), (+))
         [ "BLADE_SYRK_TILE", None ] (gramSrc 61 31 "" "y") [] [ tileSym ]
     check "syrk tile: the fact kill switch strips the declaration's attributes"
         [ "BLADE_SYRK_TILE", None; "BLADE_LLVM_FACTS", Some "off" ] (gramSrc 61 31 "" "x")
-        [ $"declare void {tileSym}(i64, i64, ptr, i64, ptr, i64, i64, i64, double, ptr, i64)" ]
+        [ $"declare void {tileSym}(i64, i64, ptr, i64, ptr, i64, i64, i64, i64, double, ptr, i64)" ]
         [ "captures(none)"; "memory(argmem" ]
 
     // ---- the antisym pair and rank-3 simplex tile cores (M7 / M8) ---------
@@ -915,14 +916,14 @@ let u = reduce(method_for(range<V>) <@> lambda(k) -> t(0, 0, k), (+))
         antiOff (antiSrc 61 401 "" "")
         [ $"call void {antiSym}(i64 61, i64 401, ptr "
           ", i64 802, i64 401, i64 0, i64 1, ptr "
-          ", i64 0, i64 0, i64 0, double 0x3FF0000000000000, ptr "
+          $", i64 0, i64 0, i64 {Blade.CodeGenExprSupport.antisymKcMax ()}, i64 0, double 0x3FF0000000000000, ptr "
           $", i64 {EmitLlvm.antisymTileScratchCells 61L 401L false})"
           $"declare void {antiSym}(i64 noundef, i64 noundef, ptr noundef readonly captures(none), i64 noundef,"
           "mustprogress nofree nosync nounwind willreturn memory(argmem: readwrite)" ]
         []
     check "antisym tile: BLADE_ANTISYM_TILE=4x4 passes the paired schedule"
         [ "BLADE_ANTISYM_TILE", Some "4x4"; "BLADE_FP_REPRO", None ] (antiSrc 61 401 "" "")
-        [ $"call void {antiSym}(i64 61, i64 401, ptr "; ", i64 1, i64 0, i64 0, double "
+        [ $"call void {antiSym}(i64 61, i64 401, ptr "; $", i64 1, i64 0, i64 {Blade.CodeGenExprSupport.antisymKcMax ()}, i64 0, double "
           $", i64 {EmitLlvm.antisymTileScratchCells 61L 401L true})" ]
         []
     check "antisym tile: the `/ d` tail rides the call as mode 1 and the divisor"
@@ -1020,31 +1021,37 @@ let runLlvmTilesRawBitTests () : BlockResult =
     // crossover itself, ragged row (p mod 6) and column (p mod 8) panels,
     // several K blocks (k > 336, and a cap of 7), a second NC column block
     // (p = 2057), both scale tails, and the core's scalar fallback.
+    // (p, k, cap, row panels per group, mode, scale, data, short scratch?):
+    // the group (BLADE_TILE_TUNE syrk_g) is the driver's visiting order and
+    // sizes the A scratch; every group size the drivers accept (1..8) appears,
+    // with groups straddling the ragged last row panel and the top-aligned
+    // ragged first column panel.
     let cases =
-        [ 16, 4, 336, 0, 1.0, 0, false
-          17, 5, 336, 0, 1.0, 1, false
-          23, 31, 336, 0, 1.0, 2, false
-          24, 8, 336, 2, 0.37, 0, false
-          29, 1001, 336, 0, 1.0, 1, false
-          61, 31, 336, 0, 1.0, 1, false      // the bench's smoke size
-          61, 257, 336, 1, 4.0, 0, false
-          61, 701, 336, 0, 1.0, 2, false
-          97, 257, 336, 1, 3.0, 1, false
-          97, 513, 336, 2, 0.1, 3, false
-          130, 337, 336, 0, 1.0, 4, false
-          29, 50, 7, 0, 1.0, 0, false
-          31, 23, 5, 1, 7.0, 2, false
-          2057, 5, 336, 0, 1.0, 0, false
-          40, 20, 336, 0, 1.0, 2, true ]
+        [ 16, 4, 336, 1, 0, 1.0, 0, false
+          17, 5, 336, 4, 0, 1.0, 1, false
+          23, 31, 336, 2, 0, 1.0, 2, false
+          24, 8, 336, 4, 2, 0.37, 0, false
+          29, 1001, 336, 4, 0, 1.0, 1, false
+          61, 31, 336, 4, 0, 1.0, 1, false      // the bench's smoke size
+          61, 257, 336, 4, 1, 4.0, 0, false
+          61, 701, 336, 8, 0, 1.0, 2, false
+          97, 257, 336, 1, 1, 3.0, 1, false
+          97, 513, 336, 4, 2, 0.1, 3, false
+          130, 337, 336, 5, 0, 1.0, 4, false
+          29, 50, 7, 4, 0, 1.0, 0, false
+          31, 23, 5, 2, 1, 7.0, 2, false
+          31, 23, 5, 3, 1, 0.0, 0, false        // divide by zero, three K blocks: the tail waits for the last
+          2057, 5, 336, 4, 0, 1.0, 0, false
+          40, 20, 336, 4, 0, 1.0, 2, true ]
     let caseLines =
-        cases |> List.map (fun (p, k, cap, mode, scale, data, short) ->
+        cases |> List.map (fun (p, k, cap, g, mode, scale, data, short) ->
             let kc =
                 if cap = 336 then Blade.CodeGenExprSupport.syrkTileKc (int64 k)
                 else balancedKc (int64 k) (int64 cap)
-            let scratch = if short then 0L else EmitLlvm.syrkTileScratchCells (int64 p) kc
+            let scratch = if short then 0L else EmitLlvm.syrkTileScratchCells (int64 p) kc (int64 g)
             let sc = scale.ToString("R", Globalization.CultureInfo.InvariantCulture)
             let sc = if sc.Contains "." || sc.Contains "E" then sc else sc + ".0"
-            $"    {{ {p}, {k}, {cap}, {scratch}, {mode}, {sc}, {data} }},")
+            $"    {{ {p}, {k}, {cap}, {g}, {scratch}, {mode}, {sc}, {data} }},")
     if Blade.CodeGenExprSupport.syrkTileKcMax <> 336L then
         fail "kc cap" $"the cases assume the emitter's cap 336; syrkTileKcMax is {Blade.CodeGenExprSupport.syrkTileKcMax}"
     let fmtScale (scale: float) =
@@ -1058,36 +1065,43 @@ let runLlvmTilesRawBitTests () : BlockResult =
     // (0,1) (1,0) (2,0) (1,1), both scale tails incl. a divide by zero, long
     // chains around the simplex's KC and the bench's own shape, every data
     // class, both schedules, and the core's scalar fallback.
+    // ... and the sample-block cap inside a tile visit (BLADE_TILE_TUNE
+    // anti_kc; 0 = the whole chain in one block): forced small (5, 7, 16:
+    // ragged chains of several blocks, the P / Q partials spilled and
+    // reloaded exactly), the tuned sizes over the bench chain, a cap above n.
     let antiCases =
         [ for v in [ 0; 1 ] do
             for p in 0 .. 30 do
                 for n in [ 0; 1; 2; 3; 5; 8; 13; 17 ] do
-                    yield p, n, 2, 0, 1, v, 0, 0, 1.0, (if (p + n) % 2 = 0 then 0 else 2), false
+                    yield p, n, 2, 0, 1, v, 0, 0, 0, 1.0, (if (p + n) % 2 = 0 then 0 else 2), false
+                    yield p, n, 2, 0, 1, v, 0, 7, 0, 1.0, 2, false
             for n in 0 .. 17 do
                 for d in [ 0; 3; 4; 5 ] do
-                    yield 9 + n, n, 2, 0, 1, v, 0, 0, 1.0, d, false
-                    yield 9 + n, n, 2, 1, 0, v, 0, 0, 1.0, d, false
-            yield 37, 23, 3, 2, 0, v, 0, 0, 1.0, 2, false
-            yield 37, 23, 3, 1, 1, v, 0, 0, 1.0, 2, false
+                    yield 9 + n, n, 2, 0, 1, v, 0, 0, 0, 1.0, d, false
+                    yield 9 + n, n, 2, 1, 0, v, 0, 5, 0, 1.0, d, false
+            yield 37, 23, 3, 2, 0, v, 0, 0, 0, 1.0, 2, false
+            yield 37, 23, 3, 1, 1, v, 0, 7, 0, 1.0, 2, false
             for p in [ 1; 2; 13; 29; 61 ] do
-                yield p, 41, 2, 0, 1, v, 0, 1, 401.0, 0, false
-                yield p, 41, 2, 0, 1, v, 0, 2, 0.25, 2, false
-                yield p, 41, 2, 0, 1, v, 0, 1, 0.0, 0, false
-                yield p, 0, 2, 0, 1, v, 0, 1, 0.0, 0, false      // (+0 - +0) / 0
+                yield p, 41, 2, 0, 1, v, 0, 0, 1, 401.0, 0, false
+                yield p, 41, 2, 0, 1, v, 0, 16, 2, 0.25, 2, false
+                yield p, 41, 2, 0, 1, v, 0, 0, 1, 0.0, 0, false
+                yield p, 0, 2, 0, 1, v, 0, 7, 1, 0.0, 0, false      // (+0 - +0) / 0
             for p in 24 .. 71 do
-                yield p, 19, 2, 0, 1, v, 0, 0, 1.0, 2, false
-                yield p, 33, 2, 0, 1, v, 16, 0, 1.0, 0, false    // several column blocks
+                yield p, 19, 2, 0, 1, v, 0, 0, 0, 1.0, 2, false
+                yield p, 33, 2, 0, 1, v, 16, 16, 0, 1.0, 0, false    // several column blocks AND sample blocks
             for p in [ 101; 193 ] do
                 for n in [ 335; 337; 401; 600 ] do
-                    yield p, n, 2, 0, 1, v, 0, 0, 1.0, 2, false
-            yield 24, 8, 2, 0, 1, v, 0, 0, 1.0, 1, false          // the crossover
-            yield 40, 20, 2, 0, 1, v, 0, 0, 1.0, 2, true          // short scratch: the scalar chain
-            yield 61, 401, 2, 0, 1, v, 0, 1, 7.0, 0, true
-          yield 1201, 401, 2, 0, 1, 0, 0, 0, 1.0, 1, false ]      // the bench's full shape
+                    for kc in [ 0; 100; 128 ] do
+                        yield p, n, 2, 0, 1, v, 0, kc, 0, 1.0, 2, false
+            yield 24, 8, 2, 0, 1, v, 0, 0, 0, 1.0, 1, false          // the crossover
+            yield 40, 20, 2, 0, 1, v, 0, 7, 0, 1.0, 2, true          // short scratch: the scalar chain
+            yield 61, 401, 2, 0, 1, v, 0, 0, 1, 7.0, 0, true
+          yield 1201, 401, 2, 0, 1, 0, 0, 0, 0, 1.0, 1, false        // the bench's full shape
+          yield 1201, 401, 2, 0, 1, 0, 0, 128, 0, 1.0, 1, false ]    // ... in blocks of 101
     let antiLines =
-        antiCases |> List.map (fun (p, n, comps, cx, cy, v, ncmax, mode, scale, data, short) ->
+        antiCases |> List.map (fun (p, n, comps, cx, cy, v, ncmax, kcmax, mode, scale, data, short) ->
             let scratch = if short then 0L else EmitLlvm.antisymTileScratchCells (int64 p) (int64 n) (v = 1)
-            $"    {{ {p}, {n}, {comps}, {cx}, {cy}, {v}, {ncmax}, {scratch}, {mode}, {fmtScale scale}, {data} }},")
+            $"    {{ {p}, {n}, {comps}, {cx}, {cy}, {v}, {ncmax}, {kcmax}, {scratch}, {mode}, {fmtScale scale}, {data} }},")
     // THE RANK-3 SIMPLEX (M8): (p, n, kc cap, mode, scale, data, short?).
     // Every p from 0 to 30 (the short rows near k = p; every equality
     // stratum i = j = k, i = j < k, i < j = k, i < j < k), every p mod 24 with

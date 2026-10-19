@@ -1,0 +1,33 @@
+// TEST: Simplex Tile Top Aligned Ragged Panel
+// The raw third-moment tensor T(i, j, k) = (1/n) sum_s X(i,s) X(j,s) X(k,s) over
+// `method_for(x, x, x)` with `where comm(a, b, c)`, packed SymIdx<3, p>, at
+// p = 27 (27 = 3*8 + 3: the ragged 3-lane k panel is the FIRST, top-aligned --
+// k < 3 -- so every (i, j) prefix with j >= 3 skips it instead of every prefix
+// paying a 3-of-8 panel at the top; 27 = 4*6 + 3 prefix rows) and n = 11, ONE K
+// block, so the divide is applied by that block's tile as it stores each
+// finished cell (no pass over the simplex). Above the crossover (p >= 24,
+// n >= 4): both lanes run the simplex tile (blade_pgemm::dsym3_tri /
+// blade_dsym3_tri_f64).
+/// X(i, s) = ((7 i + 3 s) mod 5) - 2: small integers, so every triple product and
+/// every partial sum is an exact integer -- ANY association gives the same sum, and
+/// the one division then rounds identically: association-invariant pins. The route
+/// is pinned by `blade plan` (tests/OptimizeTests.fs plan_simplex_tile_*), the bits
+/// by `blade test row-tile` and `blade test llvm tiles`.
+type V = Idx<27>
+type S = Idx<11>
+let static n = 11
+let (ss, t000, t001, t149, t_perm, t333, t_edge, t_last) = {
+    let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 5) - 2.0 |> compute
+    let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>, c: Array<Float64 like S>) where comm(a, b, c) -> prodsum(a, b, c) / Float64(n) |> compute
+    let total = reduce(method_for(range<V>) <@> lambda(i) -> reduce(method_for(range<V>) <@> lambda(j) -> reduce(method_for(range<V>) <@> lambda(k) -> t(i, j, k) * t(i, j, k), (+)), (+)), (+))
+    (total, t(0, 0, 0), t(0, 0, 1), t(1, 4, 9), t(9, 4, 1), t(3, 3, 3), t(25, 26, 26), t(26, 26, 26))
+}
+// EXPECT: n = 11
+// EXPECT: ss = 24855.0743801653
+// EXPECT: t000 = -0.727272727272727
+// EXPECT: t001 = -0.909090909090909
+// EXPECT: t149 = 1.81818181818182
+// EXPECT: t_perm = 1.81818181818182
+// EXPECT: t333 = -0.0909090909090909
+// EXPECT: t_edge = 0.909090909090909
+// EXPECT: t_last = 0.0

@@ -136,7 +136,7 @@ bool guardsOk(const std::vector<double>& pool, size_t cells) {
 
 // ---- antisym ----
 bool run_anti(size_t p, size_t n, size_t cx, size_t cy, int sk, double sc, Data d, bool th,
-              int variant, size_t ncMax, unsigned long long seed) {
+              int variant, size_t ncMax, unsigned long long seed, size_t kcMax = 0) {
     Rng r(seed * 1000003ULL + p * 131 + n * 7 + cx * 3 + cy);
     const size_t C = 3;
     std::vector<std::vector<double>> rows(p * C, std::vector<double>(n + 1));
@@ -152,7 +152,7 @@ bool run_anti(size_t p, size_t n, size_t cx, size_t cy, int sk, double sc, Data 
     const size_t cells = (p > 1) ? p * (p - 1) / 2 : 0;
     std::vector<double> pool(cells + 2 * PAD);
     for (auto& v : pool) std::memcpy(&v, &GUARD, 8);
-    blade_pgemm::dantisym_tri(p, n, Z.data(), cx, cy, pool.data() + PAD, sk, sc, th, variant, ncMax);
+    blade_pgemm::dantisym_tri(p, n, Z.data(), cx, cy, pool.data() + PAD, sk, sc, th, variant, ncMax, kcMax);
     bool ok = true;
     size_t off = 0;
     for (size_t i = 0; i + 1 < p && ok; i++)
@@ -171,12 +171,12 @@ bool run_anti(size_t p, size_t n, size_t cx, size_t cy, int sk, double sc, Data 
 }
 
 void anti(size_t p, size_t n, size_t cx, size_t cy, int sk, double sc, Data d, bool th, int variant,
-          size_t ncMax, unsigned long long seed) {
+          size_t ncMax, unsigned long long seed, size_t kcMax = 0) {
     char buf[200];
-    std::snprintf(buf, sizeof buf, "antisym %s p=%zu n=%zu c=(%zu,%zu) scale=%d/%g %s %s nc<=%zu",
+    std::snprintf(buf, sizeof buf, "antisym %s p=%zu n=%zu c=(%zu,%zu) scale=%d/%g %s %s nc<=%zu kc<=%zu",
                   variant == 1 ? "4x4" : "6x8", p, n, cx, cy, sk, sc, dataName(d),
-                  th ? "threaded" : "serial", ncMax);
-    check(run_anti(p, n, cx, cy, sk, sc, d, th, variant, ncMax, seed), buf);
+                  th ? "threaded" : "serial", ncMax, kcMax);
+    check(run_anti(p, n, cx, cy, sk, sc, d, th, variant, ncMax, seed, kcMax), buf);
 }
 
 // ---- simplex ----
@@ -263,6 +263,30 @@ int main() {
             anti(p, 300, 0, 1, 0, 0.0, Cancel, true, v, 0, 9);
             anti(p, 41, 0, 1, 1, 7.0, Random, true, v, 24, 10);
         }
+        // 7. SAMPLE BLOCKS inside a tile visit (kcMax): the P and Q partials
+        //    spilled and reloaded exactly between balanced blocks -- forced
+        //    small (7: ragged chains of 2-3 blocks), the tuned sizes (128,
+        //    168) over the bench chain (401 = 4 x 101 balanced), a cap above n
+        //    (one block), every data class, scales, several column blocks,
+        //    threaded.
+        for (size_t p = 0; p <= 30; p++)
+            for (size_t n : {0u, 1u, 7u, 8u, 13u, 17u, 29u})
+                anti(p, n, 0, 1, 0, 0.0, Cancel, false, v, 0, 30, 7);
+        for (size_t n = 0; n <= 17; n++)
+            for (Data d : {Random, Zeros, Subnormal, NonFinite})
+                anti(9 + n, n, 1, 0, 0, 0.0, d, false, v, 0, 31, 5);
+        for (size_t p = 24; p < 72; p++) {
+            anti(p, 19, 0, 1, 1, 3.0, Cancel, false, v, 0, 32, 7);
+            anti(p, 33, 0, 1, 2, 0.25, Random, false, v, 16, 33, 16);
+        }
+        for (size_t p : {61u, 101u, 193u})
+            for (size_t n : {127u, 128u, 129u, 401u, 600u})
+                for (size_t kc : {100u, 128u, 168u, 1000u})
+                    anti(p, n, 0, 1, 0, 0.0, Cancel, false, v, 0, 34, kc);
+        for (size_t p : {61u, 401u}) {
+            anti(p, 401, 0, 1, 0, 0.0, Cancel, true, v, 0, 35, 128);
+            anti(p, 300, 0, 1, 1, 7.0, Random, true, v, 24, 36, 100);
+        }
     }
     // ===== simplex =====
     // 1. Small p: short rows near k = p, every equality stratum.
@@ -297,6 +321,16 @@ int main() {
         sym3(p, 201, 1, 201.0, Cancel, true, KC, 18);
         sym3(p, 41, 2, 0.5, Random, true, 16, 19);
     }
+    // 7. The top-aligned k panels (the ragged panel is k < p mod 8, skipped by
+    //    every prefix past it) with the scale FUSED into the one block's
+    //    store: every p mod 8 twice over, one K block, both tails, and the
+    //    bench shape with a divide by zero.
+    for (size_t p = 24; p < 41; p++) {
+        sym3(p, 11, 1, 11.0, Cancel, false, KC, 40);
+        sym3(p, 12, 2, 0.5, Random, false, KC, 41);
+    }
+    sym3(171, 201, 1, 0.0, Random, false, KC, 42);
+    sym3(171, 201, 1, 201.0, Cancel, true, KC, 43);
 #ifdef BLADE_TEST_FMA_REF
     std::printf("reference: one std::fma per step (contract=fast)\n");
 #else

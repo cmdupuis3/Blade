@@ -43,12 +43,19 @@
  * row i starting at cell row_base(i) = i(2p - i + 1)/2 - i S, row-major
  * left-justified (cell (i, j) at row_base(i) + j - i - S). X is a dense
  * row-major p x k pool with row stride ldx. Every cell is ONE chain, +0.0
- * then `acc += X(i, s) * X(j, s)` for s ascending, then -- after the whole
- * triangle -- the kernel's scalar tail, if any, applied to the FINISHED sum
- * exactly as the per-cell nest applies it (`/ d` or `* s`; never a
- * reciprocal). Bitwise the per-cell serial prodsum under -ffp-contract=off;
- * the one-fma-per-step chain under =fast, the same bits as the C++ lane's
- * tile (`blade test llvm-tiles`).
+ * then `acc += X(i, s) * X(j, s)` for s ascending, then the kernel's scalar
+ * tail, if any, applied to the FINISHED sum exactly as the per-cell nest
+ * applies it (`/ d` or `* s`; never a reciprocal) -- by the last K block's
+ * tile as it stores the cell (blade_tiles.h), so the triangle is written
+ * once. Bitwise the per-cell serial prodsum under -ffp-contract=off; the
+ * one-fma-per-step chain under =fast, the same bits as the C++ lane's tile
+ * (`blade test llvm-tiles`).
+ *
+ * SPEED-ONLY ARGUMENTS (no bit depends on them; BLADE_TILE_TUNE): the syrk
+ * core's `row_group` (row panels visited together against each column panel,
+ * the C++ driver's rowGroup) and the antisym core's `kc_max` (the sample
+ * block inside a tile visit). Column / k panels are top-aligned in every
+ * core (blade_tiles.h "PANEL ALIGNMENT").
  */
 #include <stddef.h>
 #include <stdint.h>
@@ -70,18 +77,30 @@ static size_t blade_llvm_tri_row(size_t p, size_t i, size_t S) {
     return i * (2 * p - i + 1) / 2 - i * S;
 }
 
+/* Row panels per GROUP, cap (the C++ driver's TRI_G_MAX): the A scratch
+ * holds G micro-panels. */
+#define BLADE_LLVM_TRI_G_MAX 8
+
+static size_t blade_llvm_tri_group(int64_t g) {
+    if (g < 1) return 1;
+    if (g > BLADE_LLVM_TRI_G_MAX) return BLADE_LLVM_TRI_G_MAX;
+    return (size_t)g;
+}
+
 /* Scratch the tile needs, in doubles: the B panel (KC x NC padded to NR) plus
- * the A micro-panel (MR x KC). The emitter computes the SAME number from the
- * literal extents (EmitLlvm.syrkTileScratchCells) and passes the capacity it
- * allocated; this is the check, not the source of truth. */
-static size_t blade_llvm_tri_scratch(size_t p, size_t kcn) {
+ * the A scratch (G micro-panels of MR x KC). The emitter computes the SAME
+ * number from the literal extents (EmitLlvm.syrkTileScratchCells) and passes
+ * the capacity it allocated; this is the check, not the source of truth. */
+static size_t blade_llvm_tri_scratch(size_t p, size_t kcn, size_t G) {
     const size_t nc = p < BLADE_LLVM_TRI_NC ? p : BLADE_LLVM_TRI_NC;
     const size_t npad = (nc + BLADE_TILE_NR - 1) / BLADE_TILE_NR * BLADE_TILE_NR;
-    return kcn * npad + BLADE_TILE_MR * kcn;
+    return kcn * npad + G * BLADE_TILE_MR * kcn;
 }
 
 /* The scalar tail over the finished triangle. mode 0: none; 1: divide by s;
- * 2: multiply by s. Cell order is irrelevant (each cell is independent). */
+ * 2: multiply by s. Cell order is irrelevant (each cell is independent).
+ * Used by the empty-sum and scalar-chain arms; the tile arms apply the same
+ * operation in the last K block's store (blade_tiles.h). */
 static void blade_llvm_tri_scale(double* c, size_t cells, int64_t mode, double s) {
     size_t t;
     if (mode == 1) {
@@ -91,8 +110,11 @@ static void blade_llvm_tri_scale(double* c, size_t cells, int64_t mode, double s
     }
 }
 
+/* row_group: row panels visited together against each column panel (the C++
+ * driver's rowGroup; G A micro-panels in the scratch, each column panel read
+ * once from L3 and G times from L1). Speed only: no bit depends on it. */
 void blade_dsyrk_tri_f64(int64_t p_, int64_t k_, const double* x, int64_t ldx_,
-                         double* c, int64_t strict, int64_t kc_max_,
+                         double* c, int64_t strict, int64_t kc_max_, int64_t row_group,
                          int64_t scale_mode, double scale,
                          double* scratch, int64_t scratch_cells) {
     const size_t p = p_ > 0 ? (size_t)p_ : 0;
@@ -100,6 +122,8 @@ void blade_dsyrk_tri_f64(int64_t p_, int64_t k_, const double* x, int64_t ldx_,
     const size_t ldx = ldx_ > 0 ? (size_t)ldx_ : 0;
     const size_t S = strict != 0 ? 1 : 0;
     const size_t kc_max = kc_max_ > 0 ? (size_t)kc_max_ : 336;
+    const size_t G = blade_llvm_tri_group(row_group);
+    const int sk = (int)scale_mode;
     size_t cells, i, jc, pc;
     if (p <= S) return;
     cells = blade_llvm_tri_row(p, p - S, S);   /* = C(p + 1 - S, 2) */
@@ -113,54 +137,72 @@ void blade_dsyrk_tri_f64(int64_t p_, int64_t k_, const double* x, int64_t ldx_,
     {
         const size_t kcn = blade_llvm_tri_kc(k, kc_max);
         if (scratch != NULL && scratch_cells >= 0
-            && (size_t)scratch_cells >= blade_llvm_tri_scratch(p, kcn)) {
+            && (size_t)scratch_cells >= blade_llvm_tri_scratch(p, kcn, G)) {
             for (jc = 0; jc < p; jc += BLADE_LLVM_TRI_NC) {
                 const size_t nc = (p - jc) < BLADE_LLVM_TRI_NC ? (p - jc) : BLADE_LLVM_TRI_NC;
-                const size_t npad = (nc + BLADE_TILE_NR - 1) / BLADE_TILE_NR * BLADE_TILE_NR;
+                const size_t nq = blade_tile_npanels(nc, BLADE_TILE_NR);   /* the ragged panel FIRST */
                 const size_t jEnd = jc + nc;
                 const size_t iTop = (jEnd - S) < p ? (jEnd - S) : p;
                 double* bp = scratch;
-                double* ap = scratch + kcn * npad;
+                double* ap = scratch + kcn * nq * BLADE_TILE_NR;
                 for (pc = 0; pc < k; pc += kcn) {          /* ascending: the chain order */
                     const size_t kc = (k - pc) < kcn ? (k - pc) : kcn;
                     const int first = (pc == 0);
-                    size_t jr, i0, r, q;
-                    for (jr = 0; jr < nc; jr += BLADE_TILE_NR) {
+                    const int skb = (pc + kc >= k) ? sk : BLADE_TILE_SCALE_NONE;   /* the tail: last block */
+                    size_t q, i0g, r, t;
+                    for (q = 0; q < nq; q++) {
                         const double* src[BLADE_TILE_NR];
-                        const size_t rows = (nc - jr) < BLADE_TILE_NR ? (nc - jr) : BLADE_TILE_NR;
-                        for (q = 0; q < rows; q++) src[q] = x + (jc + jr + q) * ldx + pc;
-                        blade_tile_pack_t(src, rows, BLADE_TILE_NR, kc, bp + jr * kc);
+                        const size_t lo = blade_tile_panel_lo(jc, nc, BLADE_TILE_NR, q);
+                        const size_t rows = blade_tile_panel_hi(jc, nc, BLADE_TILE_NR, q) - lo;
+                        for (t = 0; t < rows; t++) src[t] = x + (lo + t) * ldx + pc;
+                        blade_tile_pack_t(src, rows, BLADE_TILE_NR, kc, bp + q * BLADE_TILE_NR * kc);
                     }
-                    for (i0 = 0; i0 < iTop; i0 += BLADE_TILE_MR) {
-                        const size_t mr = (iTop - i0) < BLADE_TILE_MR ? (iTop - i0) : BLADE_TILE_MR;
-                        const double* src[BLADE_TILE_MR];
-                        double* crow[BLADE_TILE_MR];
-                        size_t jlo;
-                        for (r = 0; r < mr; r++) src[r] = x + (i0 + r) * ldx + pc;
-                        blade_tile_pack_t(src, mr, BLADE_TILE_MR, kc, ap);
-                        /* row pointers at cell (i, i + S); never formed past the
-                         * triangle (rows >= mr stay NULL and are never read) */
-                        for (r = 0; r < BLADE_TILE_MR; r++)
-                            crow[r] = (r < mr) ? c + blade_llvm_tri_row(p, i0 + r, S) : NULL;
-                        jlo = (i0 + S > jc) ? (i0 + S - jc) / BLADE_TILE_NR * BLADE_TILE_NR : 0;
-                        for (jr = jlo; jr < nc; jr += BLADE_TILE_NR) {
-                            const size_t j0 = jc + jr;
-                            const size_t nr = (nc - jr) < BLADE_TILE_NR ? (nc - jr) : BLADE_TILE_NR;
-                            if (mr == BLADE_TILE_MR && nr == BLADE_TILE_NR
-                                && j0 >= i0 + (BLADE_TILE_MR - 1) + S)
-                                blade_tri_tile_full(kc, ap, bp + jr * kc, crow, j0 - i0 - S, first);
-                            else
-                                blade_tri_tile_edge(kc, ap, bp + jr * kc, crow, i0, j0, mr, nr, S, first);
+                    /* One group of up to G row panels against each column panel
+                     * from the group's first diagonal rightward. */
+                    for (i0g = 0; i0g < iTop; i0g += G * BLADE_TILE_MR) {
+                        const size_t rem = (iTop - i0g + BLADE_TILE_MR - 1) / BLADE_TILE_MR;
+                        const size_t ng = rem < G ? rem : G;
+                        double* crow[BLADE_LLVM_TRI_G_MAX][BLADE_TILE_MR];
+                        size_t mrs[BLADE_LLVM_TRI_G_MAX];
+                        size_t g, q0;
+                        for (g = 0; g < ng; g++) {
+                            const size_t i0 = i0g + g * BLADE_TILE_MR;
+                            const size_t mr = (iTop - i0) < BLADE_TILE_MR ? (iTop - i0) : BLADE_TILE_MR;
+                            const double* src[BLADE_TILE_MR];
+                            for (r = 0; r < mr; r++) src[r] = x + (i0 + r) * ldx + pc;
+                            blade_tile_pack_t(src, mr, BLADE_TILE_MR, kc, ap + g * BLADE_TILE_MR * kc);
+                            /* row pointers at cell (i, i + S); never formed past the
+                             * triangle (rows >= mr stay NULL and are never read) */
+                            for (r = 0; r < BLADE_TILE_MR; r++)
+                                crow[g][r] = (r < mr) ? c + blade_llvm_tri_row(p, i0 + r, S) : NULL;
+                            mrs[g] = mr;
+                        }
+                        q0 = blade_tile_panel_first(jc, nc, BLADE_TILE_NR, i0g + S);
+                        for (q = q0; q < nq; q++) {
+                            const size_t j0 = blade_tile_panel_lo(jc, nc, BLADE_TILE_NR, q);
+                            const size_t jhi = blade_tile_panel_hi(jc, nc, BLADE_TILE_NR, q);
+                            const size_t nr = jhi - j0;
+                            const double* bq = bp + q * BLADE_TILE_NR * kc;
+                            for (g = 0; g < ng; g++) {
+                                const size_t i0 = i0g + g * BLADE_TILE_MR, mr = mrs[g];
+                                if (jhi <= i0 + S) continue;       /* wholly left of this row panel's diagonal */
+                                if (mr == BLADE_TILE_MR && nr == BLADE_TILE_NR
+                                    && j0 >= i0 + (BLADE_TILE_MR - 1) + S)
+                                    blade_tri_tile_full(kc, ap + g * BLADE_TILE_MR * kc, bq, crow[g],
+                                                        j0 - i0 - S, first, skb, scale);
+                                else
+                                    blade_tri_tile_edge(kc, ap + g * BLADE_TILE_MR * kc, bq, crow[g],
+                                                        i0, j0, mr, nr, S, first, skb, scale);
+                            }
                         }
                     }
                 }
             }
-            blade_llvm_tri_scale(c, cells, scale_mode, scale);
             return;
         }
     }
 #else
-    (void)kc_max; (void)scratch; (void)scratch_cells; (void)jc; (void)pc;
+    (void)kc_max; (void)scratch; (void)scratch_cells; (void)jc; (void)pc; (void)G; (void)sk;
 #endif
     /* No vector extensions, or a scratch too small: the per-cell loop the
      * tile replaces, verbatim in arithmetic (a +0.0 seed, s ascending, the
@@ -234,9 +276,11 @@ static double blade_llvm_scale1(double v, int64_t mode, double s) {
     return mode == 1 ? v / s : mode == 2 ? v * s : v;
 }
 
+/* kc_max: the sample-block cap inside a tile visit (blade_tiles.h
+ * blade_anti_kc; 0 = the whole chain in one block). Speed only. */
 void blade_dantisym_tri_f64(int64_t p_, int64_t n_, const double* z, int64_t ldi_, int64_t ldc_,
                             int64_t cx_, int64_t cy_, double* c, int64_t variant, int64_t nc_max_,
-                            int64_t scale_mode, double scale,
+                            int64_t kc_max_, int64_t scale_mode, double scale,
                             double* scratch, int64_t scratch_cells) {
     const size_t p = p_ > 0 ? (size_t)p_ : 0;
     const size_t n = n_ > 0 ? (size_t)n_ : 0;
@@ -244,6 +288,7 @@ void blade_dantisym_tri_f64(int64_t p_, int64_t n_, const double* z, int64_t ldi
     const size_t ldc = ldc_ > 0 ? (size_t)ldc_ : 0;
     const size_t cx = cx_ > 0 ? (size_t)cx_ : 0;
     const size_t cy = cy_ > 0 ? (size_t)cy_ : 0;
+    const size_t kc_max = kc_max_ > 0 ? (size_t)kc_max_ : 0;
     size_t i, j, off;
     if (p <= 1) return;                       /* the strict triangle is empty */
 #if defined(BLADE_TILES_VECTOR)
@@ -269,26 +314,28 @@ void blade_dantisym_tri_f64(int64_t p_, int64_t n_, const double* z, int64_t ldi
             size_t jc;
             for (jc = 0; jc < p; jc += NCb) {
                 const size_t nc = (p - jc) < NCb ? (p - jc) : NCb;
+                const size_t nq = blade_tile_npanels(nc, RN);          /* the ragged panel FIRST */
                 const size_t jEnd = jc + nc;
                 const size_t iTop = (jEnd - 1) < p ? (jEnd - 1) : p;   /* rows meeting the block */
-                size_t jr, i0, q, r;
-                for (jr = 0; jr < nc; jr += RN) {
+                size_t q, i0, t, r;
+                for (q = 0; q < nq; q++) {
                     const double* sx[BLADE_TILE_NR];
                     const double* sy[BLADE_TILE_NR];
-                    const size_t rows = (nc - jr) < RN ? (nc - jr) : RN;
-                    for (q = 0; q < rows; q++) {
-                        sx[q] = z + (jc + jr + q) * ldi + cx * ldc;
-                        sy[q] = z + (jc + jr + q) * ldi + cy * ldc;
+                    const size_t lo = blade_tile_panel_lo(jc, nc, RN, q);
+                    const size_t rows = blade_tile_panel_hi(jc, nc, RN, q) - lo;
+                    for (t = 0; t < rows; t++) {
+                        sx[t] = z + (lo + t) * ldi + cx * ldc;
+                        sy[t] = z + (lo + t) * ldi + cy * ldc;
                     }
-                    blade_tile_pack_t(sx, rows, RN, n, bxp + jr * n);
-                    blade_tile_pack_t(sy, rows, RN, n, byp + jr * n);
+                    blade_tile_pack_t(sx, rows, RN, n, bxp + q * RN * n);
+                    blade_tile_pack_t(sy, rows, RN, n, byp + q * RN * n);
                 }
                 for (i0 = 0; i0 < iTop; i0 += RM) {
                     const size_t mr = (iTop - i0) < RM ? (iTop - i0) : RM;
                     const double* sx[BLADE_TILE_MR];
                     const double* sy[BLADE_TILE_MR];
                     double* crow[BLADE_TILE_MR];
-                    size_t jlo;
+                    size_t q0;
                     for (r = 0; r < mr; r++) {
                         sx[r] = z + (i0 + r) * ldi + cx * ldc;
                         sy[r] = z + (i0 + r) * ldi + cy * ldc;
@@ -298,16 +345,16 @@ void blade_dantisym_tri_f64(int64_t p_, int64_t n_, const double* z, int64_t ldi
                     for (r = 0; r < BLADE_TILE_MR; r++)
                         crow[r] = (r < mr) ? c + blade_llvm_anti_row(p, i0 + r) : NULL;
                     /* first column panel reaching row i0's first cell (i0 + 1) */
-                    jlo = (i0 + 1 > jc) ? (i0 + 1 - jc) / RN * RN : 0;
-                    for (jr = jlo; jr < nc; jr += RN) {
-                        const size_t j0 = jc + jr;
-                        const size_t nr = (nc - jr) < RN ? (nc - jr) : RN;
+                    q0 = blade_tile_panel_first(jc, nc, RN, i0 + 1);
+                    for (q = q0; q < nq; q++) {
+                        const size_t j0 = blade_tile_panel_lo(jc, nc, RN, q);
+                        const size_t nr = blade_tile_panel_hi(jc, nc, RN, q) - j0;
                         if (paired)
-                            blade_anti_tile_4x4(n, axp, ayp, bxp + jr * n, byp + jr * n,
-                                                crow, i0, j0, mr, nr, sk, scale);
+                            blade_anti_tile_4x4(n, axp, ayp, bxp + q * RN * n, byp + q * RN * n,
+                                                crow, i0, j0, mr, nr, sk, scale, kc_max);
                         else
-                            blade_anti_tile_6x8(n, axp, ayp, bxp + jr * n, byp + jr * n,
-                                                crow, i0, j0, mr, nr, sk, scale);
+                            blade_anti_tile_6x8(n, axp, ayp, bxp + q * RN * n, byp + q * RN * n,
+                                                crow, i0, j0, mr, nr, sk, scale, kc_max);
                     }
                 }
             }
@@ -315,7 +362,7 @@ void blade_dantisym_tri_f64(int64_t p_, int64_t n_, const double* z, int64_t ldi
         }
     }
 #else
-    (void)variant; (void)nc_max_; (void)scratch; (void)scratch_cells;
+    (void)variant; (void)nc_max_; (void)kc_max; (void)scratch; (void)scratch_cells;
 #endif
     /* No vector extensions, or a scratch too small: the per-cell loop the
      * tile replaces, verbatim in arithmetic -- P then Q, each a +0.0 seed and
@@ -390,24 +437,26 @@ void blade_dsym3_tri_f64(int64_t p_, int64_t n_, const double* x, int64_t ldx_,
 #if defined(BLADE_TILES_VECTOR)
     {
         const size_t kcn = blade_llvm_tri_kc(n, kc_max);
-        const size_t nq = (p + BLADE_TILE_NR - 1) / BLADE_TILE_NR;   /* k panels */
+        const size_t nq = blade_tile_npanels(p, BLADE_TILE_NR);   /* k panels, the ragged one FIRST */
         const int sk = (int)scale_mode;
         if (scratch != NULL && scratch_cells >= 0
             && (size_t)scratch_cells >= blade_llvm_sym3_scratch(p, n, kcn)) {
             double* xk = scratch;
             double* w = scratch + nq * BLADE_TILE_NR * n;
-            size_t q, j0, pc, r, t;
+            size_t q, j0, pc, r;
             for (q = 0; q < nq; q++) {                 /* panel q: n x NR, s-major */
                 const double* src[BLADE_TILE_NR];
-                const size_t rows = (p - q * BLADE_TILE_NR) < BLADE_TILE_NR ? (p - q * BLADE_TILE_NR) : BLADE_TILE_NR;
-                for (r = 0; r < rows; r++) src[r] = x + (q * BLADE_TILE_NR + r) * ldx;
+                const size_t lo = blade_tile_panel_lo(0, p, BLADE_TILE_NR, q);
+                const size_t rows = blade_tile_panel_hi(0, p, BLADE_TILE_NR, q) - lo;
+                for (r = 0; r < rows; r++) src[r] = x + (lo + r) * ldx;
                 blade_tile_pack_t(src, rows, BLADE_TILE_NR, n, xk + q * BLADE_TILE_NR * n);
             }
-            /* One i: its whole sub-simplex, prefix blocks of MR j rows. */
+            /* One i: its whole sub-simplex, prefix blocks of MR j rows. The
+             * scale is the last K block's tile store. */
             for (i = 0; i < p; i++) {
                 for (j0 = i; j0 < p; j0 += BLADE_TILE_MR) {
                     const size_t mr = (p - j0) < BLADE_TILE_MR ? (p - j0) : BLADE_TILE_MR;
-                    const size_t qlo = j0 / BLADE_TILE_NR;
+                    const size_t qlo = blade_tile_panel_first(0, p, BLADE_TILE_NR, j0);
                     double* crow[BLADE_TILE_MR];
                     const double* xj[BLADE_TILE_MR];
                     for (r = 0; r < BLADE_TILE_MR; r++)
@@ -415,22 +464,19 @@ void blade_dsym3_tri_f64(int64_t p_, int64_t n_, const double* x, int64_t ldx_,
                     for (pc = 0; pc < n; pc += kcn) {          /* ascending: the chain order */
                         const size_t kc = (n - pc) < kcn ? (n - pc) : kcn;
                         const int first = (pc == 0);
+                        const int skb = (pc + kc >= n) ? sk : BLADE_TILE_SCALE_NONE;
                         for (r = 0; r < mr; r++) xj[r] = x + (j0 + r) * ldx + pc;
                         blade_sym3_pack_w(x + i * ldx + pc, xj, mr, kc, w);
                         for (q = qlo; q < nq; q++) {
-                            const size_t k0 = q * BLADE_TILE_NR;
-                            const size_t nr = (p - k0) < BLADE_TILE_NR ? (p - k0) : BLADE_TILE_NR;
+                            const size_t k0 = blade_tile_panel_lo(0, p, BLADE_TILE_NR, q);
+                            const size_t nr = blade_tile_panel_hi(0, p, BLADE_TILE_NR, q) - k0;
                             const double* bp = xk + q * BLADE_TILE_NR * n + pc * BLADE_TILE_NR;
                             if (mr == BLADE_TILE_MR && nr == BLADE_TILE_NR && k0 >= j0 + (BLADE_TILE_MR - 1))
-                                blade_tri_tile_full(kc, w, bp, crow, k0 - j0, first);
+                                blade_tri_tile_full(kc, w, bp, crow, k0 - j0, first, skb, scale);
                             else
-                                blade_tri_tile_edge(kc, w, bp, crow, j0, k0, mr, nr, 0, first);
+                                blade_tri_tile_edge(kc, w, bp, crow, j0, k0, mr, nr, 0, first, skb, scale);
                         }
                     }
-                    if (sk != BLADE_TILE_SCALE_NONE)
-                        for (r = 0; r < mr; r++)
-                            for (t = 0; t < p - (j0 + r); t++)
-                                crow[r][t] = blade_tile_scale1(crow[r][t], sk, scale);
                 }
             }
             return;

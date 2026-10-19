@@ -124,8 +124,16 @@ double g_plain_maxrel = 0.0;
 
 const unsigned long long GUARD = 0x7FF4DEADBEEF1234ULL;   // a signalling-NaN pattern
 
+__attribute__((noinline)) double scaled(double v, int sk, double sc) {
+    return sk == 1 ? v / sc : sk == 2 ? v * sc : v;
+}
+
+// G = row panels per group (dsyrk_tri's rowGroup: the driver's visiting
+// order, never a bit); sk / sc = the kernel's scalar tail fused into the
+// last K block's store (the reference applies the same one operation to the
+// finished serial chain).
 bool run_case(size_t p, size_t k, size_t S, Data d, bool threaded, size_t kcMax,
-              unsigned long long seed) {
+              unsigned long long seed, size_t G = 1, int sk = 0, double sc = 0.0) {
     Rng r(seed * 1000003ULL + p * 131 + k * 7 + S);
     // X: p rows, each k samples, separately allocated (a row skeleton, as Blade's).
     std::vector<std::vector<double>> rows(p, std::vector<double>(k + 1));
@@ -142,13 +150,13 @@ bool run_case(size_t p, size_t k, size_t S, Data d, bool threaded, size_t kcMax,
     std::vector<double*> C(p + 1, nullptr);
     size_t off = 0;
     for (size_t i = 0; i + S < p; i++) { C[i] = pool.data() + pad + off; off += p - i - S; }
-    blade_pgemm::dsyrk_tri(p, k, X.data(), C.data(), S, threaded, kcMax);
+    blade_pgemm::dsyrk_tri(p, k, X.data(), C.data(), S, threaded, kcMax, sk, sc, G);
     bool ok = true;
     for (size_t i = 0; i + S < p && ok; i++)
         for (size_t j = i + S; j < p; j++) {
-            const double want = serial_dot(X[i], X[j], k);
+            const double want = scaled(serial_dot(X[i], X[j], k), sk, sc);
             const double got = C[i][j - i - S];
-            const double plain = plain_dot(X[i], X[j], k);
+            const double plain = scaled(plain_dot(X[i], X[j], k), sk, sc);
             if (std::isfinite(plain) && std::isfinite(got)) {
                 g_plain_cells++;
                 if (std::memcmp(&plain, &got, 8) != 0) {
@@ -222,7 +230,7 @@ long long g_jam_cells = 0, g_jam_diff = 0;
 // (`dsyrk_tri(m, n, A.data, G.data, 0, threaded, 336)`), every packed cell
 // against the serial chain (gated) and against the jam it replaced (gated
 // under =off).
-bool run_gram_case(size_t m, size_t n, Data d, bool threaded, unsigned long long seed) {
+bool run_gram_case(size_t m, size_t n, Data d, bool threaded, unsigned long long seed, size_t G = 1) {
     Rng r(seed * 7919ULL + m * 31 + n);
     std::vector<double> pool(m * n + 1);                  // a dense, contiguous pool, as allocate<> builds
     std::vector<double*> A(m + 1, nullptr);
@@ -235,7 +243,7 @@ bool run_gram_case(size_t m, size_t n, Data d, bool threaded, unsigned long long
     std::vector<double*> Gt(m + 1, nullptr), Gj(m + 1, nullptr);
     size_t off = 0;
     for (size_t i = 0; i < m; i++) { Gt[i] = gt.data() + off; Gj[i] = gj.data() + off; off += m - i; }
-    blade_pgemm::dsyrk_tri(m, n, A.data(), Gt.data(), 0, threaded, 336);
+    blade_pgemm::dsyrk_tri(m, n, A.data(), Gt.data(), 0, threaded, 336, 0, 0.0, G);
     gram_jam_ref(m, n, A.data(), Gj.data());
     bool ok = true;
     for (size_t i = 0; i < m && ok; i++)
@@ -262,21 +270,56 @@ bool run_gram_case(size_t m, size_t n, Data d, bool threaded, unsigned long long
     return ok;
 }
 
-std::string caseName(size_t p, size_t k, size_t S, Data d, bool th, size_t kcMax) {
-    char buf[160];
-    std::snprintf(buf, sizeof buf, "p=%zu k=%zu S=%zu %s %s kc<=%zu", p, k, S, dataName(d),
-                  th ? "threaded" : "serial", kcMax);
+std::string caseName(size_t p, size_t k, size_t S, Data d, bool th, size_t kcMax, size_t G, int sk, double sc) {
+    char buf[200];
+    std::snprintf(buf, sizeof buf, "p=%zu k=%zu S=%zu %s %s kc<=%zu G=%zu scale=%d/%g", p, k, S, dataName(d),
+                  th ? "threaded" : "serial", kcMax, G, sk, sc);
     return buf;
 }
 
 void sweep(size_t p, size_t k, size_t S, Data d, bool th, size_t kcMax, unsigned long long seed) {
-    check(run_case(p, k, S, d, th, kcMax, seed), caseName(p, k, S, d, th, kcMax));
+    check(run_case(p, k, S, d, th, kcMax, seed), caseName(p, k, S, d, th, kcMax, 1, 0, 0.0));
+}
+
+void sweepG(size_t p, size_t k, size_t S, Data d, bool th, size_t kcMax, unsigned long long seed, size_t G,
+            int sk, double sc) {
+    check(run_case(p, k, S, d, th, kcMax, seed, G, sk, sc), caseName(p, k, S, d, th, kcMax, G, sk, sc));
 }
 
 }  // namespace
 
 int main() {
     const size_t KC = blade_pgemm::TRI_KC_MAX;
+    // 0. Row-panel GROUPS (rowGroup = 2, 4, 5, 8) and the FUSED scalar tail:
+    //    the driver's visiting order and the last block's store, against the
+    //    scaled serial chain. Every p mod 24 (a group straddles the ragged last
+    //    row panel and the top-aligned ragged first column panel), p below one
+    //    group, several K blocks (the tail must wait for the last), both S,
+    //    divide / multiply / divide by zero, threaded groups, the NC edge.
+    for (size_t S = 0; S <= 1; S++) {
+        for (size_t G : {2u, 4u, 5u, 8u})
+            for (size_t p = 0; p <= 30; p++)
+                for (size_t k : {0u, 3u, 17u})
+                    sweepG(p, k, S, Cancel, false, KC, 20, G, 0, 0.0);
+        for (size_t p = 24; p < 72; p++) {
+            sweepG(p, 19, S, Cancel, false, 7, 21, 4, 1, 3.0);     // 3 K blocks, divide once at the end
+            sweepG(p, 33, S, Random, false, 16, 22, 2, 2, 0.25);   // 3 blocks, multiply
+            sweepG(p, 11, S, Zeros, false, KC, 23, 8, 1, 0.0);     // divide by zero (must still divide)
+        }
+        for (size_t p : {16u, 29u, 61u, 97u}) {
+            sweepG(p, 701, S, Cancel, false, KC, 24, 4, 1, 401.0);
+            sweepG(p, 4, S, Random, false, KC, 24, 4, 2, 0.5);
+            sweepG(p, 0, S, Random, false, KC, 24, 4, 1, 0.0);     // the empty sum: +0 / 0
+        }
+        for (size_t p : {101u, 193u, 200u})
+            sweepG(p, 257, S, Random, false, KC, 25, 8, 0, 0.0);
+        for (size_t p : {61u, 193u, 401u}) {
+            sweepG(p, 300, S, Cancel, true, KC, 26, 4, 1, 7.0);
+            sweepG(p, 41, S, Random, true, 16, 27, 3, 0, 0.0);
+        }
+        sweepG(2057, 3, S, Random, false, KC, 28, 4, 0, 0.0);
+        sweepG(2057, 21, S, Cancel, true, 8, 29, 4, 2, 0.125);
+    }
     // 1. Small p, small k, both S, every data class, serial: every edge shape
     //    of a 6 x 8 tile against a ragged triangle.
     for (size_t S = 0; S <= 1; S++)
@@ -326,12 +369,13 @@ int main() {
         for (const G& g : shapes)
             for (Data d : {Random, Cancel, Zeros, Subnormal, NonFinite, Positive}) {
                 if (g.m * g.n > 200000 && d != Random && d != Cancel) continue;
-                for (bool th : {false, true}) {
-                    char buf[128];
-                    std::snprintf(buf, sizeof buf, "gram node m=%zu n=%zu %s %s", g.m, g.n, dataName(d),
-                                  th ? "threaded" : "serial");
-                    check(run_gram_case(g.m, g.n, d, th, seed++), buf);
-                }
+                for (bool th : {false, true})
+                    for (size_t G : {1u, 4u}) {
+                        char buf[128];
+                        std::snprintf(buf, sizeof buf, "gram node m=%zu n=%zu %s %s G=%zu", g.m, g.n, dataName(d),
+                                      th ? "threaded" : "serial", G);
+                        check(run_gram_case(g.m, g.n, d, th, seed++, G), buf);
+                    }
             }
     }
     std::printf("gram node: tile vs the triangular gram jam it replaced: %lld of %lld cells differ in bits%s\n",

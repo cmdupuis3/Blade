@@ -3099,17 +3099,29 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                         | Some p, Some k when packedTriWorth p k ->
                             (packedGemmUsedCell ()).Value <- true
                             let kc = syrkTileKc k
+                            let g = syrkRowGroup ()
                             // Rows are owned exclusively and no sum is split,
                             // so the thread team needs no licence (the jam's
                             // own threading argument); the emission knob
-                            // still decides.
+                            // still decides. The omp census is the
+                            // intrinsic-row rule's: the driver's team over
+                            // row groups recorded as applied, or the knob's
+                            // block marker (the jam's own census line).
                             let threadedArg = if ompThreadEmissionEnabled () then "true" else "false"
+                            let censusWhere = "dsyrk_tri row groups (gram node: rows owned exclusively, no licence needed): work units under schedule(dynamic), cells split across the team, sums never"
+                            let censusMarker =
+                                if ompThreadEmissionEnabled () then
+                                    recordOmpConstruct varName "omp parallel num_threads(T) inside the tile driver" censusWhere
+                                    ""
+                                else
+                                    recordCodegenDecision "omp" varName (Blade.Effects.Declined (ompThreadsSuppressedReason ())) [ censusWhere ]
+                                    ompThreadsSuppressedBlockMarker () + " "
                             recordCodegenDecision "microkernel" varName Blade.Effects.Applied
                                 [ "packed syrk tile (blade_pgemm::dsyrk_tri, 6x8 register tile over the packed triangle)"
-                                  $"P={p} K={k} KC={kc}" ]
-                            recordFoldForm varName $"syrk tile 6x8, KC={kc}"
+                                  $"P={p} K={k} KC={kc} G={g}" ]
+                            recordFoldForm varName $"syrk tile 6x8, KC={kc}, row groups of {g}"
                                 "gram(A, A) node (one ascending chain per cell; no reorder licence used)"
-                            Some [ $"/* gram(A, A): packed-triangle syrk tile (blade_packed_gemm.hpp dsyrk_tri, 6x8, KC={kc}), per cell the serial chain */ blade_pgemm::dsyrk_tri((size_t)({mExtent}), (size_t)({nExtent}), {lName}.data, {varName}.data, 0, {threadedArg}, (size_t){syrkTileKcMax});" ]
+                            Some [ $"{censusMarker}/* gram(A, A): packed-triangle syrk tile (blade_packed_gemm.hpp dsyrk_tri, 6x8, KC={kc}), row groups of {g}, per cell the serial chain */ blade_pgemm::dsyrk_tri((size_t)({mExtent}), (size_t)({nExtent}), {lName}.data, {varName}.data, 0, {threadedArg}, (size_t){syrkTileKcMax}, 0, 0.0, (size_t){g});" ]
                         | Some p, Some k ->
                             recordCodegenDecision "microkernel" varName
                                 (Blade.Effects.Declined "below the syrk-tile crossover (p >= 16, k >= 4): the triangular gram jam")

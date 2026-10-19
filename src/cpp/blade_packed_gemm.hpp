@@ -211,14 +211,21 @@ inline void dgemm_nn(size_t m, size_t k, size_t n,
 //       last block is never a runt. The A micro-panel (6 x KC: 16 KB at 334)
 //       stays in L1 for a whole row panel, beside the B lines streaming through.
 //   NC  the column block packed as B: NC x KC (2048 x 334: 5.5 MB) in L3.
-// ORDER: a row panel (6 rows) is OUTER and the column panels from its diagonal
-// rightward are INNER -- the expert Fortran's order transposed (its column
-// panel outer, row panels inner). It keeps the A micro-panel resident and makes
-// the output traffic six SEQUENTIAL row streams (row i's cells left to right),
-// which the prefetchers follow; the GotoBLAS order (B micro-panel resident, A
-// block streamed from L2) walks 96 rows' output at once and measured ~10-15%
-// slower at 1601 x 1001 (scratch sweep, loaded host). The B panel streams from
-// L3, as the expert's A panels do.
+// ORDER: a GROUP of G row panels (6 rows each; G = the emitter's rowGroup,
+// BLADE_TILE_TUNE syrk_g) is OUTER and the column panels from the group's
+// first diagonal rightward are INNER, each column panel visited by every row
+// panel of the group that reaches it -- the expert Fortran's order transposed
+// (its column panel outer, row panels inner) and widened. G = 1 keeps the A
+// micro-panel L1-resident and makes the output six SEQUENTIAL row streams,
+// but every column panel (kc x 8 = 21 KB) streams from L3 once PER ROW PANEL;
+// G = 4 packs 4 A micro-panels (64 KB, L2: the broadcasts come from L2, 48 B
+// per 12 FMAs) and reads each column panel from L3 once and from L1 three
+// more times, 24 output row streams. The full GotoBLAS order (B micro-panel
+// resident, a 96-row A block streamed from L2) walked 96 rows' output at once
+// and measured ~10-15% slower at 1601 x 1001 (scratch sweep, loaded host); the
+// group size is the dial between the two.
+// COLUMN PANELS are top-aligned (blade_tiles.h "PANEL ALIGNMENT"): the ragged
+// panel is the first of each column block, under every diagonal but row 0's.
 //
 // WHETHER a shape is worth it is decided at COMPILE time on literal extents by
 // CodeGenExprSupport.packedTriWorth; the header carries no copy of the rule.
@@ -226,6 +233,7 @@ inline void dgemm_nn(size_t m, size_t k, size_t n,
 
 constexpr size_t TRI_KC_MAX = 336;
 constexpr size_t TRI_NC = 2048;
+constexpr size_t TRI_G_MAX = 8;     // row panels per group, cap (bounds the A scratch)
 
 /// The balanced sample block for k samples under a cap of kcMax.
 inline size_t tri_kc(size_t k, size_t kcMax) {
@@ -239,16 +247,31 @@ inline size_t tri_kc(size_t k, size_t kcMax) {
 /// the emitter's thread knob AND the source's omp licence: false keeps the
 /// whole call on the calling thread. kcMax is the sample-block cap (the default
 /// is the tuned value; the tests shrink it to force several K blocks).
+///
+/// sk / sc: the kernel's scalar tail (`/ d`, `* s`; blade_tiles.h's
+/// BLADE_TILE_SCALE_* codes), applied by the LAST K block's tile to the
+/// finished sum as it is stored -- the same one operation the separate
+/// post-pass applied, without the pass.
+///
+/// rowGroup (G): row panels visited TOGETHER against each column panel --
+/// G A micro-panels are packed (G x 6 x KC: 64 KB at G = 4, L2), and the
+/// column panels from the group's first diagonal rightward are each loaded
+/// ONCE from L3 and reused G times from L1 (21 KB at KC = 334), instead of
+/// once per row panel. G = 1 is the previous order (every B byte from L3 per
+/// row panel). The output is G x 6 sequential row streams. Each cell is still
+/// one owner's chain in one order: no bit depends on G.
 inline void dsyrk_tri(size_t p, size_t k, double* const* X, double* const* C, size_t S,
-                      bool threaded, size_t kcMax = TRI_KC_MAX) {
+                      bool threaded, size_t kcMax = TRI_KC_MAX,
+                      int sk = BLADE_TILE_SCALE_NONE, double sc = 0.0, size_t rowGroup = 1) {
     if (p <= S) return;
     if (k == 0) {
-        // The empty sum: every cell is the seed, +0.0.
+        // The empty sum: every cell is the seed, +0.0 (then the tail).
         for (size_t i = 0; i + S < p; i++)
-            for (size_t jr = 0; jr < p - i - S; jr++) C[i][jr] = 0.0;
+            for (size_t jr = 0; jr < p - i - S; jr++) C[i][jr] = blade_tile_scale1(0.0, sk, sc);
         return;
     }
     const size_t kcn = tri_kc(k, kcMax == 0 ? TRI_KC_MAX : kcMax);
+    const size_t G = std::max<size_t>(1, std::min<size_t>(rowGroup, TRI_G_MAX));
     static thread_local Scratch bscratch;
     // Team: at least ~1M FMAs per thread (dgemm_nn's rule).
     size_t T = 1;
@@ -261,52 +284,69 @@ inline void dsyrk_tri(size_t p, size_t k, double* const* X, double* const* C, si
 #endif
     for (size_t jc = 0; jc < p; jc += TRI_NC) {
         const size_t nc = std::min(TRI_NC, p - jc);
-        const size_t npad = (nc + NR - 1) / NR * NR;
+        const size_t nq = blade_tile_npanels(nc, NR);     // column panels, the ragged one FIRST
         const size_t jEnd = jc + nc;
         // rows that meet this column block: i + S <= jEnd - 1
         const size_t iTop = std::min(p, jEnd - S);
-        double* bp = bscratch.get(kcn * npad);
+        double* bp = bscratch.get(kcn * nq * NR);
         for (size_t pc = 0; pc < k; pc += kcn) {      // ascending: the chain order
             const size_t kc = std::min(kcn, k - pc);
             const int first = (pc == 0);
-            auto packB = [&](size_t jr) {
+            const int skb = (pc + kc >= k) ? sk : BLADE_TILE_SCALE_NONE;   // the tail: last block only
+            auto packB = [&](size_t q) {
                 const double* src[NR];
-                const size_t rows = std::min(NR, nc - jr);
-                for (size_t q = 0; q < rows; q++) src[q] = X[jc + jr + q] + pc;
-                blade_tile_pack_t(src, rows, NR, kc, bp + jr * kc);
+                const size_t lo = blade_tile_panel_lo(jc, nc, NR, q);
+                const size_t rows = blade_tile_panel_hi(jc, nc, NR, q) - lo;
+                for (size_t t = 0; t < rows; t++) src[t] = X[lo + t] + pc;
+                blade_tile_pack_t(src, rows, NR, kc, bp + q * NR * kc);
             };
-            // One row panel (6 rows) across the column block, from its diagonal
-            // rightward. `ap` is the executing thread's own A micro-panel.
-            auto rowPanel = [&](size_t i0, double* ap) {
-                const size_t mr = std::min(MR, iTop - i0);
-                const double* src[MR];
-                for (size_t r = 0; r < mr; r++) src[r] = X[i0 + r] + pc;
-                blade_tile_pack_t(src, mr, MR, kc, ap);
-                double* crow[MR];
-                for (size_t r = 0; r < MR; r++) crow[r] = (r < mr) ? C[i0 + r] : nullptr;
-                // first column panel reaching row i0's diagonal (i0 + S)
-                const size_t jlo = (i0 + S > jc) ? (i0 + S - jc) / NR * NR : 0;
-                for (size_t jr = jlo; jr < nc; jr += NR) {
-                    const size_t j0 = jc + jr, nr = std::min(NR, nc - jr);
-                    if (mr == MR && nr == NR && j0 >= i0 + (MR - 1) + S)
-                        blade_tri_tile_full(kc, ap, bp + jr * kc, crow, j0 - i0 - S, first);
-                    else
-                        blade_tri_tile_edge(kc, ap, bp + jr * kc, crow, i0, j0, mr, nr, S, first);
+            // One GROUP of up to G row panels (6 rows each) across the column
+            // block, from the group's first diagonal rightward: each column
+            // panel against every row panel of the group that reaches it.
+            // `ap` is the executing thread's own A scratch (G micro-panels).
+            auto rowGroupVisit = [&](size_t i0g, double* ap) {
+                const size_t ng = std::min(G, (iTop - i0g + MR - 1) / MR);
+                double* crow[TRI_G_MAX][MR];
+                size_t mrs[TRI_G_MAX];
+                for (size_t g = 0; g < ng; g++) {
+                    const size_t i0 = i0g + g * MR;
+                    const size_t mr = std::min(MR, iTop - i0);
+                    const double* src[MR];
+                    for (size_t r = 0; r < mr; r++) src[r] = X[i0 + r] + pc;
+                    blade_tile_pack_t(src, mr, MR, kc, ap + g * MR * kc);
+                    for (size_t r = 0; r < MR; r++) crow[g][r] = (r < mr) ? C[i0 + r] : nullptr;
+                    mrs[g] = mr;
+                }
+                // first column panel reaching the group's first diagonal (i0g + S)
+                const size_t q0 = blade_tile_panel_first(jc, nc, NR, i0g + S);
+                for (size_t q = q0; q < nq; q++) {
+                    const size_t j0 = blade_tile_panel_lo(jc, nc, NR, q);
+                    const size_t jhi = blade_tile_panel_hi(jc, nc, NR, q);
+                    const size_t nr = jhi - j0;
+                    const double* bq = bp + q * NR * kc;
+                    for (size_t g = 0; g < ng; g++) {
+                        const size_t i0 = i0g + g * MR, mr = mrs[g];
+                        if (jhi <= i0 + S) continue;          // wholly left of this row panel's diagonal
+                        if (mr == MR && nr == NR && j0 >= i0 + (MR - 1) + S)
+                            blade_tri_tile_full(kc, ap + g * MR * kc, bq, crow[g], j0 - i0 - S, first, skb, sc);
+                        else
+                            blade_tri_tile_edge(kc, ap + g * MR * kc, bq, crow[g], i0, j0, mr, nr, S, first, skb, sc);
+                    }
                 }
             };
             static thread_local Scratch ascratch;     // private per executing thread
 #ifdef _OPENMP
             if (T > 1) {
-                // Row panels under a team: dynamic (the triangle makes upper
-                // panels longer). Each cell has ONE owner per K block and the K
+                // Row groups under a team: dynamic (the triangle makes upper
+                // groups longer). Each cell has ONE owner per K block and the K
                 // blocks are sequential, so the bits never depend on T.
 #pragma omp parallel num_threads((int)T)
                 {
 #pragma omp for schedule(static)
-                    for (size_t jr = 0; jr < nc; jr += NR) packB(jr);
-                    double* ap = ascratch.get(MR * kc);
+                    for (size_t q = 0; q < nq; q++) packB(q);
+                    double* ap = ascratch.get(G * MR * kc);
 #pragma omp for schedule(dynamic, 1)
-                    for (size_t i0 = 0; i0 < iTop; i0 += MR) rowPanel(i0, ap);
+                    for (size_t i0g = 0; i0g < iTop; i0g += G * MR) rowGroupVisit(i0g, ap);
                 }
                 continue;
             }
@@ -314,9 +354,9 @@ inline void dsyrk_tri(size_t p, size_t k, double* const* X, double* const* C, si
             // Serial: no OpenMP runtime call at all (an `if(false)` parallel
             // region still costs ~17 us per K block -- measured to dominate
             // below ~50^2 x 50).
-            for (size_t jr = 0; jr < nc; jr += NR) packB(jr);
-            double* ap = ascratch.get(MR * kc);
-            for (size_t i0 = 0; i0 < iTop; i0 += MR) rowPanel(i0, ap);
+            for (size_t q = 0; q < nq; q++) packB(q);
+            double* ap = ascratch.get(G * MR * kc);
+            for (size_t i0g = 0; i0g < iTop; i0g += G * MR) rowGroupVisit(i0g, ap);
         }
     }
 }
@@ -353,9 +393,12 @@ inline size_t anti_nc(size_t n, size_t W) {
     return std::max(W, std::min<size_t>(nc, 4096));
 }
 
+/// kcMax: the sample-block cap INSIDE a tile visit (blade_anti_kc: balanced
+/// blocks, P and Q partials in the tile's own spill, never the pool); 0 = the
+/// whole chain in one block. Speed only: no bit depends on it.
 inline void dantisym_tri(size_t p, size_t n, double* const* const* Z, size_t cx, size_t cy,
                          double* pool, int sk, double sc, bool threaded, int variant,
-                         size_t ncMax = 0) {
+                         size_t ncMax = 0, size_t kcMax = 0) {
     if (p <= 1) return;                       // the strict triangle is empty
     const bool paired = (variant == 1);
     const size_t RM = paired ? (size_t)BLADE_ANTI4_MR : MR;
@@ -374,18 +417,19 @@ inline void dantisym_tri(size_t p, size_t n, double* const* const* Z, size_t cx,
     auto rowStart = [&](size_t i) { return pool + i * (2 * p - i - 1) / 2; };
     for (size_t jc = 0; jc < p; jc += NCb) {
         const size_t nc = std::min(NCb, p - jc);
-        const size_t npad = (nc + RN - 1) / RN * RN;
+        const size_t nq = blade_tile_npanels(nc, RN);     // column panels, the ragged one FIRST
         const size_t jEnd = jc + nc;
         const size_t iTop = std::min(p, jEnd - 1);    // rows meeting the block: i + 1 <= jEnd - 1
-        double* bxp = bxs.get(n * npad + 1);
-        double* byp = bys.get(n * npad + 1);
-        auto packB = [&](size_t jr) {
+        double* bxp = bxs.get(n * nq * RN + 1);
+        double* byp = bys.get(n * nq * RN + 1);
+        auto packB = [&](size_t q) {
             const double* sx[NR];
             const double* sy[NR];
-            const size_t rows = std::min(RN, nc - jr);
-            for (size_t q = 0; q < rows; q++) { sx[q] = Z[jc + jr + q][cx]; sy[q] = Z[jc + jr + q][cy]; }
-            blade_tile_pack_t(sx, rows, RN, n, bxp + jr * n);
-            blade_tile_pack_t(sy, rows, RN, n, byp + jr * n);
+            const size_t lo = blade_tile_panel_lo(jc, nc, RN, q);
+            const size_t rows = blade_tile_panel_hi(jc, nc, RN, q) - lo;
+            for (size_t t = 0; t < rows; t++) { sx[t] = Z[lo + t][cx]; sy[t] = Z[lo + t][cy]; }
+            blade_tile_pack_t(sx, rows, RN, n, bxp + q * RN * n);
+            blade_tile_pack_t(sy, rows, RN, n, byp + q * RN * n);
         };
         auto rowPanel = [&](size_t i0, double* axp, double* ayp) {
             const size_t mr = std::min(RM, iTop - i0);
@@ -397,13 +441,14 @@ inline void dantisym_tri(size_t p, size_t n, double* const* const* Z, size_t cx,
             double* crow[MR];
             for (size_t r = 0; r < MR; r++) crow[r] = (r < mr) ? rowStart(i0 + r) : nullptr;
             // first column panel reaching row i0's first cell (i0 + 1)
-            const size_t jlo = (i0 + 1 > jc) ? (i0 + 1 - jc) / RN * RN : 0;
-            for (size_t jr = jlo; jr < nc; jr += RN) {
-                const size_t j0 = jc + jr, nr = std::min(RN, nc - jr);
+            const size_t q0 = blade_tile_panel_first(jc, nc, RN, i0 + 1);
+            for (size_t q = q0; q < nq; q++) {
+                const size_t j0 = blade_tile_panel_lo(jc, nc, RN, q);
+                const size_t nr = blade_tile_panel_hi(jc, nc, RN, q) - j0;
                 if (paired)
-                    blade_anti_tile_4x4(n, axp, ayp, bxp + jr * n, byp + jr * n, crow, i0, j0, mr, nr, sk, sc);
+                    blade_anti_tile_4x4(n, axp, ayp, bxp + q * RN * n, byp + q * RN * n, crow, i0, j0, mr, nr, sk, sc, kcMax);
                 else
-                    blade_anti_tile_6x8(n, axp, ayp, bxp + jr * n, byp + jr * n, crow, i0, j0, mr, nr, sk, sc);
+                    blade_anti_tile_6x8(n, axp, ayp, bxp + q * RN * n, byp + q * RN * n, crow, i0, j0, mr, nr, sk, sc, kcMax);
             }
         };
         static thread_local Scratch axs, ays;      // private per executing thread
@@ -412,7 +457,7 @@ inline void dantisym_tri(size_t p, size_t n, double* const* const* Z, size_t cx,
 #pragma omp parallel num_threads((int)T)
             {
 #pragma omp for schedule(static)
-                for (size_t jr = 0; jr < nc; jr += RN) packB(jr);
+                for (size_t q = 0; q < nq; q++) packB(q);
                 double* axp = axs.get(RM * n + 1);
                 double* ayp = ays.get(RM * n + 1);
 #pragma omp for schedule(dynamic, 1)
@@ -421,7 +466,7 @@ inline void dantisym_tri(size_t p, size_t n, double* const* const* Z, size_t cx,
             continue;
         }
 #endif
-        for (size_t jr = 0; jr < nc; jr += RN) packB(jr);
+        for (size_t q = 0; q < nq; q++) packB(q);
         double* axp = axs.get(RM * n + 1);
         double* ayp = ays.get(RM * n + 1);
         for (size_t i0 = 0; i0 < iTop; i0 += RM) rowPanel(i0, axp, ayp);
@@ -460,7 +505,7 @@ inline void dsym3_tri(size_t p, size_t n, double* const* X, double* pool, int sk
                       bool threaded, size_t kcMax = TRI_KC_MAX) {
     if (p == 0) return;
     const size_t kcn = (n == 0) ? 0 : tri_kc(n, kcMax == 0 ? TRI_KC_MAX : kcMax);
-    const size_t nq = (p + NR - 1) / NR;               // k panels
+    const size_t nq = blade_tile_npanels(p, NR);       // k panels, the ragged one FIRST (k < p mod 8)
     static thread_local Scratch xks;
     double* xk = xks.get(nq * NR * n + 1);             // panel q: n x NR, s-major
     size_t T = 1;
@@ -473,40 +518,41 @@ inline void dsym3_tri(size_t p, size_t n, double* const* X, double* pool, int sk
 #endif
     auto packK = [&](size_t q) {
         const double* src[NR];
-        const size_t rows = std::min(NR, p - q * NR);
-        for (size_t l = 0; l < rows; l++) src[l] = X[q * NR + l];
+        const size_t lo = blade_tile_panel_lo(0, p, NR, q);
+        const size_t rows = blade_tile_panel_hi(0, p, NR, q) - lo;
+        for (size_t l = 0; l < rows; l++) src[l] = X[lo + l];
         blade_tile_pack_t(src, rows, NR, n, xk + q * NR * n);
     };
-    // One i: its whole sub-simplex, prefix blocks of MR j rows.
+    // One i: its whole sub-simplex, prefix blocks of MR j rows. The scale is
+    // the last K block's tile store (no pass over the finished rows).
     auto doI = [&](size_t i, double* w) {
         for (size_t j0 = i; j0 < p; j0 += MR) {
             const size_t mr = std::min(MR, p - j0);
             double* crow[MR];
             const double* xj[MR];
             for (size_t r = 0; r < MR; r++) crow[r] = (r < mr) ? pool + sym3_row_base(p, i, j0 + r) : nullptr;
-            const size_t qlo = j0 / NR;
+            const size_t qlo = blade_tile_panel_first(0, p, NR, j0);
             if (n == 0) {
-                // The empty sum: every cell is the seed +0.0 (then the scale).
+                // The empty sum: every cell is the seed +0.0, then the scale.
                 for (size_t r = 0; r < mr; r++)
-                    for (size_t t = 0; t < p - (j0 + r); t++) crow[r][t] = 0.0;
+                    for (size_t t = 0; t < p - (j0 + r); t++) crow[r][t] = blade_tile_scale1(0.0, sk, sc);
             }
             for (size_t pc = 0; pc < n; pc += kcn) {     // ascending: the chain order
                 const size_t kc = std::min(kcn, n - pc);
                 const int first = (pc == 0);
+                const int skb = (pc + kc >= n) ? sk : BLADE_TILE_SCALE_NONE;
                 for (size_t r = 0; r < mr; r++) xj[r] = X[j0 + r] + pc;
                 blade_sym3_pack_w(X[i] + pc, xj, mr, kc, w);
                 for (size_t q = qlo; q < nq; q++) {
-                    const size_t k0 = q * NR, nr = std::min(NR, p - k0);
+                    const size_t k0 = blade_tile_panel_lo(0, p, NR, q);
+                    const size_t nr = blade_tile_panel_hi(0, p, NR, q) - k0;
                     const double* bp = xk + q * NR * n + pc * NR;
                     if (mr == MR && nr == NR && k0 >= j0 + (MR - 1))
-                        blade_tri_tile_full(kc, w, bp, crow, k0 - j0, first);
+                        blade_tri_tile_full(kc, w, bp, crow, k0 - j0, first, skb, sc);
                     else
-                        blade_tri_tile_edge(kc, w, bp, crow, j0, k0, mr, nr, 0, first);
+                        blade_tri_tile_edge(kc, w, bp, crow, j0, k0, mr, nr, 0, first, skb, sc);
                 }
             }
-            if (sk != BLADE_TILE_SCALE_NONE)
-                for (size_t r = 0; r < mr; r++)
-                    for (size_t t = 0; t < p - (j0 + r); t++) crow[r][t] = blade_tile_scale1(crow[r][t], sk, sc);
         }
     };
     static thread_local Scratch wscratch;
@@ -549,25 +595,25 @@ inline void dgemm_nn(size_t m, size_t k, size_t n,
 
 // The packed-triangle SYRK, likewise the loop it replaces: per cell a +0.0
 // seed then ascending s, the product in source factor order, serial.
+inline double tile_scale1(double v, int sk, double sc) {
+    return sk == 1 ? v / sc : sk == 2 ? v * sc : v;
+}
+
 inline void dsyrk_tri(size_t p, size_t k, double* const* X, double* const* C, size_t S,
-                      bool, size_t = 0, size_t = 0) {
+                      bool, size_t = 0, int sk = 0, double sc = 0.0, size_t = 0) {
     for (size_t i = 0; i + S < p; i++)
         for (size_t jr = 0; jr < p - i - S; jr++) {
             const double* a = X[i];
             const double* b = X[i + S + jr];
             double acc = 0;
             for (size_t s = 0; s < k; s++) acc += a[s] * b[s];
-            C[i][jr] = acc;
+            C[i][jr] = tile_scale1(acc, sk, sc);
         }
 }
 
 // The antisym pair and the rank-3 simplex, likewise the loops they replace.
-inline double tile_scale1(double v, int sk, double sc) {
-    return sk == 1 ? v / sc : sk == 2 ? v * sc : v;
-}
-
 inline void dantisym_tri(size_t p, size_t n, double* const* const* Z, size_t cx, size_t cy,
-                         double* pool, int sk, double sc, bool, int, size_t = 0) {
+                         double* pool, int sk, double sc, bool, int, size_t = 0, size_t = 0) {
     size_t off = 0;
     for (size_t i = 0; i + 1 < p; i++)
         for (size_t j = i + 1; j < p; j++) {

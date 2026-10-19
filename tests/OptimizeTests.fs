@@ -1212,6 +1212,13 @@ let private planSyrkSrc (p: int) (n: int) =
 
 let private planSyrkTileSrc = planSyrkSrc 20 8
 
+/// The same shape with the kernel's `/ d` tail (fused into the tile's last
+/// block store on both lanes).
+let private planSyrkScaledSrc =
+    "type V = Idx<20>\ntype S = Idx<8>\n"
+    + "let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64(i + s) |> compute\n"
+    + "let g = method_for(x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>) where comm(a, b) -> prodsum(a, b) / 4.0 |> compute\n"
+
 /// gram(A, A) at 20 x 8: the node's BLAS-off arm takes the syrk tile.
 let private planGramTileSrc =
     "let A: Array<Float64 like Idx<20>, Idx<8>> = method_for(range<Idx<20>>, range<Idx<8>>) <@> lambda(i, j) -> Float64(i + j) |> compute\n"
@@ -1435,6 +1442,55 @@ let private planCases () =
           planCase "plan_antisym_tile_paired_knob" (planAntiSrc 61 401) "fold-form"
               (fun d -> applied d && evidenceMentioning "fold form: antisym tile paired 4x4" d)
               "BLADE_ANTISYM_TILE=4x4 selects the paired schedule")
+      // BLADE_TILE_TUNE (speed-only driver parameters): the antisym tile's
+      // sample blocks and the syrk tile's row groups are named by the plan;
+      // unset = whole chain / groups of 4.
+      withGate "BLADE_ANTISYM_TILE" null (fun () ->
+       withGate "BLADE_TILE_TUNE" "anti_kc=100" (fun () ->
+          planCase "plan_antisym_tile_sample_blocks_knob" (planAntiSrc 61 401) "fold-form"
+              (fun d -> applied d && evidenceMentioning "fold form: antisym tile sequential 6x8 (P pass, spill, Q pass), whole chain per tile in sample blocks of <= 100" d)
+              "BLADE_TILE_TUNE anti_kc=100 blocks the chain inside the tile visit"))
+      withGate "BLADE_ANTISYM_TILE" null (fun () ->
+       withGate "BLADE_TILE_TUNE" null (fun () ->
+          planCase "plan_antisym_tile_whole_chain_default" (planAntiSrc 61 401) "fold-form"
+              (fun d -> applied d && evidenceMentioning "fold form: antisym tile sequential 6x8 (P pass, spill, Q pass), whole chain per tile" d
+                        && not (evidenceMentioning "sample blocks" d))
+              "unset: the whole chain in one block"))
+      pinBlas "0" (fun () ->
+       withGate "BLADE_SYRK_TILE" null (fun () ->
+        withGate "BLADE_TILE_TUNE" "syrk_g=2, anti_kc=0" (fun () ->
+          planCase "plan_syrk_tile_row_groups_knob" planSyrkTileSrc "fold-form"
+              (fun d -> applied d && evidenceMentioning "fold form: syrk tile 6x8, KC=8, row groups of 2" d)
+              "BLADE_TILE_TUNE syrk_g=2 names the row group")))
+      pinBlas "0" (fun () ->
+       withGate "BLADE_SYRK_TILE" null (fun () ->
+        withGate "BLADE_TILE_TUNE" null (fun () ->
+          planCase "plan_syrk_tile_row_groups_default" planSyrkTileSrc "fold-form"
+              (fun d -> applied d && evidenceMentioning "fold form: syrk tile 6x8, KC=8, row groups of 4" d)
+              "unset: row groups of 4")))
+      // The kernel's `/ d` tail is the last K block's store, not a post-pass:
+      // the plan says so, in the nest arm and the gram node's.
+      pinBlas "0" (fun () ->
+       withGate "BLADE_SYRK_TILE" null (fun () ->
+          planCase "plan_syrk_tile_fused_tail" planSyrkScaledSrc "fold-form"
+              (fun d -> applied d && evidenceMentioning "fold form: syrk tile 6x8, KC=8" d
+                        && evidenceMentioning "then / d per cell (fused into the last block's store)" d)
+              "the syrk tile's `/ d` tail is fused into the last block's store"))
+      // The gram(A, A) node's omp census (gap register G1 remnant): the
+      // driver's team recorded as applied, or the BLADE_OMP_THREADS=1 decline
+      // naming the knob -- never silent.
+      pinBlas "0" (fun () ->
+       withGate "BLADE_SYRK_TILE" null (fun () ->
+        withGate "BLADE_OMP_THREADS" "1" (fun () ->
+          planCase "plan_gram_node_syrk_tile_omp_census_declined" planGramTileSrc "omp"
+              (fun d -> declinedMentioning "BLADE_OMP_THREADS" d && evidenceMentioning "gram node" d)
+              "gram node: the tile driver's team declined by BLADE_OMP_THREADS=1, in the census")))
+      pinBlas "0" (fun () ->
+       withGate "BLADE_SYRK_TILE" null (fun () ->
+        withGate "BLADE_OMP_THREADS" null (fun () ->
+          planCase "plan_gram_node_syrk_tile_omp_census_applied" planGramTileSrc "omp"
+              (fun d -> applied d && evidenceMentioning "inside the tile driver" d && evidenceMentioning "gram node" d)
+              "gram node: the tile driver's team recorded as applied")))
       withGate "BLADE_ANTISYM_TILE" null (fun () ->
        withGate "BLADE_FP_REPRO" "1" (fun () ->
           planCase "plan_antisym_tile_applied_in_repro" (planAntiSrc 61 401) "fold-form"
