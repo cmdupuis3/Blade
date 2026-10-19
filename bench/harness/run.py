@@ -1133,8 +1133,20 @@ def _build_blade(b: Build, k: Kernel, arm: ArmSpec, regime: Regime, src: Path, a
             # lane computes natively and links no OpenBLAS.  Not a blas measurement.
             b.status, b.reason = "no-blas", "LLVM lane does not route to BLAS (the exe imports no libopenblas.dll)"
             return
-        b.status, b.reason = "failed", "blas regime: the executable imports no libopenblas.dll (nothing was routed)"
-        return
+        # Since 37d97506 Blade's packed syrk tile preempts host ?syrk where eligible (D-entry
+        # in notes/design-decisions.md).  Valid ONLY when the plan says so for the very
+        # contraction the library route would have taken; otherwise this is a silently
+        # unrouted build and stays a refusal.
+        plan_file = b.evidence.get("plan_file")
+        plan_text = Path(plan_file).read_text(encoding="utf-8", errors="replace") if plan_file and Path(plan_file).is_file() else ""
+        pre = native_preempt(plan_text)
+        if pre is None:
+            b.status, b.reason = "failed", "blas regime: the executable imports no libopenblas.dll (nothing was routed)"
+            return
+        ev["blas_route"] = "native-preempt"
+        ev["blas_preempt"] = pre
+    elif regime.blas == "blas":
+        ev["blas_route"] = "library"
     if regime.threads == "mt8":
         if arm.lane == "llvm":
             # The LLVM lane has no OpenMP: a licence compiles serial with no refusal line.
@@ -1160,6 +1172,32 @@ def _build_blade(b: Build, k: Kernel, arm: ArmSpec, regime: Regime, src: Path, a
     else:
         ev["parallelism"] = "serial"
     b.status = "ok"
+
+
+_RE_PLAN_BLAS_DECLINED = re.compile(r"^\[blas-routing v\d+\] (\S+): declined\b")
+_RE_PLAN_NATIVE_TILE = re.compile(
+    r"^\[microkernel v\d+\] (\S+): applied \[packed syrk tile\b"
+    r"|^\[fold-form v\d+\] (\S+): applied \[fold form: syrk tile\b")
+
+
+def native_preempt(plan_text: str) -> dict[str, Any] | None:
+    """The plan lines proving that a native kernel preempted the BLAS route, or None.
+
+    Accepted only when ONE subject (the contraction, e.g. `__v27`) carries both a
+    `[blas-routing vN] S: declined ...` decision and a `[microkernel vN] S: applied [packed
+    syrk tile ...` or `[fold-form vN] S: applied [fold form: syrk tile ...` line -- a
+    structural match on the plan's decision lines, never free text."""
+    lines = [l.strip() for l in plan_text.splitlines()]
+    # a decline because the BLAS gate is OFF is not a preemption (the library was never available)
+    declined = {m.group(1): l for l in lines
+                if (m := _RE_PLAN_BLAS_DECLINED.match(l)) and "BLAS gate off" not in l}
+    for l in lines:
+        m = _RE_PLAN_NATIVE_TILE.match(l)
+        if m:
+            subject = m.group(1) or m.group(2)
+            if subject in declined:
+                return {"subject": subject, "blas_routing_line": declined[subject], "native_line": l}
+    return None
 
 
 def _blade_plan(b: Build, src: Path, armdir: Path, env: dict[str, str], timeout: float) -> None:
@@ -1790,6 +1828,9 @@ class Session:
                 self.serial_valid[(k.name, regime.name, a.name)] = b.status
             if mt8 and a.name in k.parallel_notes:
                 entry["note"] = k.parallel_notes[a.name]
+            if b.evidence.get("blas_route") == "native-preempt":
+                entry["note"] = (entry.get("note", "") + "; " if entry.get("note") else "") + \
+                    f"native tile preempted the library ({b.evidence['blas_preempt']['native_line'][:90]})"
             log(f"  -> {b.status}" + (f": {b.reason}" if b.reason else "") + f" ({b.build_wall_s:.1f}s)"
                 + "".join(f"\n     note: {w}" for w in b.warnings))
             if b.status == "failed":

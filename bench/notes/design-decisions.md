@@ -404,6 +404,20 @@ because inter-run spacing can change thermal state). The 64 MB working-set and 2
 run caps stay frozen for this run (sizes were chosen under them) but are no longer safety
 limits and may be raised in later sessions.
 
+**D47 — The blas regime measures Blade's default with the library available (user decision,
+2026-10-19).** Since 37d97506 Blade's packed syrk tile preempts host `?syrk` where eligible
+(`blade plan`: `[blas-routing v1] S: declined -- Blade's packed syrk tile preferred ...` and
+`[microkernel v1] S: applied [packed syrk tile ...` / `[fold-form v1] S: applied [fold form:
+syrk tile ...` for the same subject S). In the blas regimes a Blade build that imports no
+BLAS library is therefore VALID when its own plan records that native preemption for the
+contraction (harness: `evidence.blas_route = "native-preempt"` with the matched lines; table
+note "native tile preempted the library"); without such lines it stays a refusal, so a
+silently unrouted build is still caught. The blas regime thus measures what Blade does by
+default when OpenBLAS is available -- which may be a native kernel when the compiler judges
+it faster -- not the library itself. The library route is measured explicitly, as a
+diagnostic A/B, with `BLADE_SYRK_TILE=0` (or the coming BLAS-preference knob). The LLVM
+lane's `no-blas` status is unchanged.
+
 **D42 — mt8 arms run UNBOUND (M20 amended).** libgomp cannot bind threads on Windows
 ("Affinity not supported", thread count still 8); libiomp5's binding under
 `OMP_PLACES=cores OMP_PROC_BIND=close` produced 17–48 ms of jitter at smoke size while

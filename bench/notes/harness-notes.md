@@ -124,6 +124,17 @@ Harness v2 (after the method review; 2026-10-17 evening):
 
 ## 5. Open items / pending other agents
 
+- 2026-10-19 (user decision, design-decisions D47): blas-regime Blade C++ builds that import
+  no BLAS DLL are accepted when plan.txt shows a native preemption for the contraction
+  (`native_preempt()`: one subject with a non-gate-off `[blas-routing] declined` line AND a
+  `[microkernel] ... packed syrk tile` or `[fold-form] ... fold form: syrk tile` line).
+  Unit-checked on bench/.build/gram/full/serial-licensed-blas/blade-cpp/plan.txt (accepted,
+  subject __v27), the native-regime plan (gate off -> refused), a library-routed plan, free
+  text, and a tile line without a routing decision (all refused). `check gram --size smoke
+  --regimes serial-licensed-blas --arms blade-cpp`: ok, blas_route native-preempt (the tile
+  applies already at P=61). run.py was replaced atomically (temp file + os.replace) while the
+  runner was active.
+
 - 2026-10-18 (user: de-clutter bench/results): lean bundles. No `sources/` tree copy
   (sources-sha256.json, same keys, hashed in place), no SIZE-substituted `src/` copies, no
   `*.copy` / `*.mod` / `*.obj`, no runtime header or shim copies in `generated/` (only
