@@ -1,0 +1,3 @@
+[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\antisym-1baf366a-7204-262a9ae3\antisym.cpp
+[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-211831\build\antisym\full\mt8-fastmath-native\blade-cpp\antisym.exe
+[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\antisym-1baf366a-7204-262a9ae3

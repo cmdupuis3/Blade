@@ -1,0 +1,3 @@
+[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\comoment3-a7a63c64-22464-c8c3075b\comoment3.cpp
+[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-213323\build\comoment3\smoke\serial-fastmath-native\blade-cpp\comoment3.exe
+[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\comoment3-a7a63c64-22464-c8c3075b

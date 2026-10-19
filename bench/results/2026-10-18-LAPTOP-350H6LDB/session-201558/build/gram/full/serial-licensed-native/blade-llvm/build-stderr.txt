@@ -1,0 +1,4 @@
+[blade] llvm lane: [omp] requested but emitted serial: the LLVM lane has no thread-level form; the licence is honoured as fold reassociation (lambda in x, lambda in g, lambda in ss, lambda in _(checksum,input_checksum))
+[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\gram-2a2421d0-25212-bdd8a76c\gram.ll
+[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-201558\build\gram\full\serial-licensed-native\blade-llvm\gram.exe
+[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\gram-2a2421d0-25212-bdd8a76c

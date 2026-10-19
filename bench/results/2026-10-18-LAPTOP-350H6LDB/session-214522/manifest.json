@@ -1,0 +1,70 @@
+{
+ "argv": [
+  "bench/harness/run.py",
+  "bench",
+  "--regimes",
+  "serial-licensed-blas,mt8-licensed-blas",
+  "--size",
+  "full",
+  "--kernels",
+  "gram"
+ ],
+ "cells": [
+  {
+   "kernel": "gram",
+   "regime": "serial-licensed-blas",
+   "arm": "blade-llvm",
+   "status": "no-blas",
+   "reason": "LLVM lane does not route to BLAS (the exe imports no libopenblas.dll)"
+  },
+  {
+   "kernel": "gram",
+   "regime": "serial-licensed-blas",
+   "arm": "blade-cpp",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "gram",
+   "regime": "serial-licensed-blas",
+   "arm": "gfortran-expert",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "gram",
+   "regime": "serial-licensed-blas",
+   "arm": "ifx-expert",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "gram",
+   "regime": "mt8-licensed-blas",
+   "arm": "blade-llvm",
+   "status": "no-blas",
+   "reason": "LLVM lane does not route to BLAS (the exe imports no libopenblas.dll)"
+  },
+  {
+   "kernel": "gram",
+   "regime": "mt8-licensed-blas",
+   "arm": "blade-cpp",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "gram",
+   "regime": "mt8-licensed-blas",
+   "arm": "gfortran-expert",
+   "status": "measured",
+   "reason": ""
+  },
+  {
+   "kernel": "gram",
+   "regime": "mt8-licensed-blas",
+   "arm": "ifx-expert",
+   "status": "measured",
+   "reason": ""
+  }
+ ]
+}

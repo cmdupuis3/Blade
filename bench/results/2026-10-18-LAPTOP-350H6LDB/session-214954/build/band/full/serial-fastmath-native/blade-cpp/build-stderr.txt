@@ -1,0 +1,3 @@
+[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\band-354ccfbd-24272-955a623f\band.cpp
+[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-214954\build\band\full\serial-fastmath-native\blade-cpp\band.exe
+[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\band-354ccfbd-24272-955a623f

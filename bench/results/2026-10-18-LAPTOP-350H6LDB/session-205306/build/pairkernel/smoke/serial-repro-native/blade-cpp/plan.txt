@@ -1,0 +1,11 @@
+plan: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-205306\build\pairkernel\smoke\serial-repro-native\blade-cpp\src\pairkernel.blade -- 9 optimization decision(s)
+  [omp v1] _(checksum,input_checksum): declined -- BLADE_OMP_THREADS=1 -- this build emits no thread-level OpenMP (the omp licence in source is unchanged; omp simd is unaffected) [[omp] requested but emitted serial]
+  [symmetric-storage v1] __v33: applied [packed SymSymmetric storage over 2 levels (one canonical cell per orbit); operands: pts, pts]
+  [triangular-iteration v1] __v33: applied [triangular levels 1; symcom states: SCNeither, SCCommutative; speedup x2]
+  [fold-form v1] __v60: declined -- orbit-class fold not taken: BLADE_FP_REPRO=1 keeps the logical walk's serial association [fold form: orbit-class fold not taken -- the logical walk is kept; BLADE_FP_REPRO=1 keeps the logical walk's serial association]
+  [fold-form v1] __v60: declined -- serial (repro) [fold form: serial (repro); reduce over a deferred computation]
+  [fold-form v1] __v87: declined -- serial (repro) [fold form: serial (repro); reduce over a deferred computation]
+  [fold-form v1] _(checksum,input_checksum): declined -- serial (repro) [fold form: serial (repro); reduce in expression position]
+  [fold-form v1] __ret1073741824: declined -- serial (repro) [fold form: serial (repro); reduce over a deferred computation]
+  [fold-form v1] lambda in _(checksum,input_checksum): declined -- serial (repro) [fold form: serial (repro); reduce in expression position]
+inputs: 0 (identity policy: `content` = folded at compile time, hashed; `version` = read at run time, size + mtime observed -- BLADE_RUN_RECORD=<path> writes the run record)

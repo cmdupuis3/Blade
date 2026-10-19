@@ -1,0 +1,50 @@
+// band -- a banded quadratic form over a closed-form domain (bench/kernels/band/spec.md)
+//
+//   s = x^T B x = sum over |i - j| <= w of phi(i, j) x_i x_j,
+//   phi(i, j) = (2 + d / (w + 1)) / (1 + d^2),  d = i - j   (not symmetric in (i, j))
+//
+// The band is a `static struct` domain with one linear conjunct, so `range<Band>` enumerates
+// in closed form: an affine nest with j in [max(0, i - w), min(n - 1, i + w)] per row, only
+// the band's cells visited, no key table (`[domain-enum v1]`). The map over the domain is
+// read only by its fold, so it is never materialized. The fold carries the licence.
+
+let static n = 211   // SIZE n
+let static w = 5     // SIZE w
+type Nx = Idx<n>
+
+static struct Band {
+    i: Int64<min=0, max=n-1>,
+    j: Int64<min=0, max=n-1>
+} where abs(i - j) <= w
+
+/// README section 5 input generator: five rounds mod 2^31 (affine, quadratic, affine,
+/// middle-square, affine), exact in Int64 (h3 * h3 < 2^62).
+function gen(k: Int64, seed: Int64, lo: Float64, hi: Float64) -> Float64 = {
+    let h1 = ((k + seed) * 1103515245 + 12345) % 2147483648
+    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648
+    let h3 = (h2 * 1103515245 + 12345) % 2147483648
+    let h4 = (h3 * h3 / 65536) % 2147483648
+    let h5 = (h4 * 1103515245 + 12345) % 2147483648
+    lo + (hi - lo) * (Float64(h5) / 2147483648.0)
+}
+
+function inputs() -> Array<Float64 like Nx> = {
+    method_for(range<Nx>) <@> lambda(i) where omp -> gen(Int64(i), 10000019, 0.0, 1.0) |> compute
+}
+
+/// The band's coefficient at offset d = i - j, evaluated exactly as the spec writes it.
+function phi(i: Int64, j: Int64) -> Float64 = {
+    let d = Float64(i - j)
+    (2.0 + d / Float64(w + 1)) / (1.0 + d * d)
+}
+
+function kernel(x: Array<Float64 like Nx>) -> Float64 = {
+    let s = reduce(method_for(range<Band>) <@> lambda(i, j) -> phi(i, j) * x((i : Nx)) * x((j : Nx)),
+                   lambda(p, q) where omp -> p + q, 0.0)
+    s
+}
+
+let (checksum, input_checksum) = {
+    let x = inputs()
+    (kernel(x), reduce(x, (+)))
+}

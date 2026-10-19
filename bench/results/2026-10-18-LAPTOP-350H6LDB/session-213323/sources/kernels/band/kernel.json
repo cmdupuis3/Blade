@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "name": "band",
+  "group": "A",
+  "title": "banded quadratic form s = x^T B x over a closed-form `static struct` domain (restored after G4)",
+  "sizes": {
+    "smoke": {
+      "n": 211,
+      "w": 5
+    },
+    "full": {
+      "n": 20011,
+      "w": 101
+    },
+    "narrow": {
+      "n": 20011,
+      "w": 11
+    }
+  },
+  "regimes": [
+    "serial-licensed-native",
+    "mt8-licensed-native",
+    "serial-repro-native",
+    "mt8-repro-native",
+    "serial-fastmath-native",
+    "mt8-fastmath-native"
+  ],
+  "hypothesis": {
+    "natural": "win 10x+ (the natural tier is the n^2 predicate nest, a straw man by construction)",
+    "expert": "parity on blade-llvm (vectorized inner loop); LOSS on blade-cpp (inner loop scalar, G30)"
+  },
+  "notes": "Scalar output; no inputonly twin (input ~0%). Full-size cell count is 4,051,931. mt8: the closed-form domain nest has no thread-level form yet ([omp v1] kernel: declined, G31), so Blade cells read 'no parallel form'; Fortran arms thread the outer loop.",
+  "arms": [
+    "blade-llvm",
+    "blade-cpp",
+    "gfortran-natural",
+    "gfortran-expert",
+    "ifx-natural",
+    "ifx-expert"
+  ],
+  "source_of_truth": "bench/kernels/band/spec.md + bench/notes/kernel-list.md (2026-10-18)",
+  "no_parallel_form": true
+}

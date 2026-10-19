@@ -1,0 +1,34 @@
+// VALIDATION ONLY (review M11): pairkernel at SMOKE size with the full logical output printed.
+// Same generator, kernel and checksum as bench/kernels/pairkernel/pairkernel.blade, arrays
+// top-level so the C++ lane can print them. `K` is the dense n x n logical matrix read cell
+// by cell through the packed array's canonicalizing accessor (both triangles).
+// Run (C++ lane): BLADE_BLAS=0 blade run pairkernel_dump.blade --print K,checksum,input_checksum
+// Compared against ref_pairkernel.py by validate_A.py.
+let static n = 53
+type Pts = Idx<n>
+type Dim = Idx<3>
+
+function lcg(k: Int64, seed: Int64) -> Float64 = {
+    let h1 = ((k + seed) * 1103515245 + 12345) % 2147483648
+    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648
+    let h3 = (h2 * 1103515245 + 12345) % 2147483648
+    let h4 = (h3 * h3 / 65536) % 2147483648
+    let h5 = (h4 * 1103515245 + 12345) % 2147483648
+    Float64(h5) / 2147483648.0
+}
+
+function matern52(r2: Float64) -> Float64 = {
+    let a = sqrt(5.0 * r2) / 0.7
+    (1.0 + a + a * a / 3.0) * exp(-a)
+}
+
+let pts = method_for(range<Pts>, range<Dim>) <@> lambda(i, d) where omp(i: 1) -> lcg(i, 10000019 * (d + 1)) |> compute
+let kmat = method_for(pts, pts) <@> lambda(a: Array<Float64 like Dim>, b: Array<Float64 like Dim>) where comm(a, b), omp(a: 1) -> {
+    let dx = a((0 : Dim)) - b((0 : Dim))
+    let dy = a((1 : Dim)) - b((1 : Dim))
+    let dz = a((2 : Dim)) - b((2 : Dim))
+    matern52(dx * dx + dy * dy + dz * dz)
+} |> compute
+let K = method_for(range<Pts>, range<Pts>) <@> lambda(i, j) -> kmat(i, j) |> compute
+let checksum = reduce(method_for(range<Pts>) <@> lambda(i) -> reduce(method_for(range<Pts>) <@> lambda(j) -> kmat(i, j) * kmat(i, j), (+)), lambda(u, v) where omp -> u + v, 0.0)
+let input_checksum = reduce(reduce(pts, (+)), lambda(u, v) where omp -> u + v, 0.0)

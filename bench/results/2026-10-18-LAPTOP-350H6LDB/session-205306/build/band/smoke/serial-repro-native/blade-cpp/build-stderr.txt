@@ -1,0 +1,3 @@
+[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\band-8ee2cf08-25112-2fca6a88\band.cpp
+[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-205306\build\band\smoke\serial-repro-native\blade-cpp\band.exe
+[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\band-8ee2cf08-25112-2fca6a88

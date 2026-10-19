@@ -1,0 +1,2 @@
+cmd /c C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\fortran\build_ifx.cmd C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-205306\build\antisym\full\mt8-repro-native\ifx-natural\ifx-natural.exe /O3 /QxHost /fp:precise -mllvm -fp-contract=fast /fpp /Qopenmp -- C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-205306\build\antisym\full\mt8-repro-native\ifx-natural\src\antisym.f90
+{}

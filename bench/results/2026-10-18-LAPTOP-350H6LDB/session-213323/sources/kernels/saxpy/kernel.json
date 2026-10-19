@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "name": "saxpy",
+  "group": "C",
+  "title": "y2 = alpha x + y, stored (bandwidth parity control)",
+  "sizes": {
+    "smoke": {
+      "n": 20011
+    },
+    "full": {
+      "n": 2000003
+    },
+    "control": {
+      "n": 700001
+    }
+  },
+  "regimes": [
+    "serial-licensed-native",
+    "mt8-licensed-native",
+    "serial-repro-native",
+    "mt8-repro-native"
+  ],
+  "inputonly": true,
+  "hypothesis": {
+    "natural": "parity",
+    "expert": "parity"
+  },
+  "notes": "Input share large: net figure is the result. sizes.control (n = 700,001, three 5.6 MB streams) is the memory-bound session control (README; gfortran-expert serial-repro-native).",
+  "arms": [
+    "blade-llvm",
+    "blade-cpp",
+    "gfortran-natural",
+    "gfortran-expert",
+    "ifx-natural",
+    "ifx-expert"
+  ],
+  "source_of_truth": "bench/kernels/saxpy/spec.md + bench/notes/kernel-list.md (2026-10-17)"
+}
