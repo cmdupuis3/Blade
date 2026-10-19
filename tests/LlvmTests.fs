@@ -879,7 +879,7 @@ let t = reduce(method_for(range<V>) <@> lambda(i) -> g(i, i), (+))
         [ "BLADE_SYRK_TILE", None ] (gramSrc 61 31 "" "y") [] [ tileSym ]
     check "syrk tile: the fact kill switch strips the declaration's attributes"
         [ "BLADE_SYRK_TILE", None; "BLADE_LLVM_FACTS", Some "off" ] (gramSrc 61 31 "" "x")
-        [ $"declare void {tileSym}(i64, i64, ptr, i64, ptr, i64, i64, i64, double, ptr, i64)" ]
+        [ $"declare void {tileSym}(i64, i64, ptr, i64, ptr, i64, i64, i64, i64, double, ptr, i64)" ]
         [ "captures(none)"; "memory(argmem" ]
 
     // ---- the antisym pair and rank-3 simplex tile cores (M7 / M8) ---------

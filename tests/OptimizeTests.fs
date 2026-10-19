@@ -1304,12 +1304,12 @@ let private planCases () =
       withGate "BLADE_ANTISYM_TILE" null (fun () ->
        withGate "BLADE_TILE_TUNE" "anti_kc=100" (fun () ->
           planCase "plan_antisym_tile_sample_blocks_knob" (planAntiSrc 61 401) "fold-form"
-              (fun d -> applied d && evidenceMentioning "fold form: antisym tile sequential 6x8, whole chain per tile in sample blocks of <= 100" d)
+              (fun d -> applied d && evidenceMentioning "fold form: antisym tile sequential 6x8 (P pass, spill, Q pass), whole chain per tile in sample blocks of <= 100" d)
               "BLADE_TILE_TUNE anti_kc=100 blocks the chain inside the tile visit"))
       withGate "BLADE_ANTISYM_TILE" null (fun () ->
        withGate "BLADE_TILE_TUNE" null (fun () ->
           planCase "plan_antisym_tile_whole_chain_default" (planAntiSrc 61 401) "fold-form"
-              (fun d -> applied d && evidenceMentioning "fold form: antisym tile sequential 6x8, whole chain per tile" d
+              (fun d -> applied d && evidenceMentioning "fold form: antisym tile sequential 6x8 (P pass, spill, Q pass), whole chain per tile" d
                         && not (evidenceMentioning "sample blocks" d))
               "unset: the whole chain in one block"))
       pinBlas "0" (fun () ->
