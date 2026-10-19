@@ -1208,6 +1208,14 @@ let private callShapedRe =
         @"(?<qual>(?:[A-Za-z_][A-Za-z0-9_]*::)+)?(?<id>[A-Za-z_][A-Za-z0-9_]*)\s*\(|(?<ind>(?:[>)]|(?<!\[&)\])\s*\()",
         System.Text.RegularExpressions.RegexOptions.Compiled)
 
+/// The C++ named casts, through the `(` of their operand. The template
+/// argument may itself be a template (`static_cast<std::complex<double>>(`):
+/// the lazy run stops at the first `>` that a `(` follows.
+let private namedCastRe =
+    System.Text.RegularExpressions.Regex(
+        @"\b(?:static_cast|reinterpret_cast|const_cast)\s*<[^;(){}]*?>\s*\(",
+        System.Text.RegularExpressions.RegexOptions.Compiled)
+
 /// What one emitted body does that bears on whether its frame is observable.
 type private FrameFacts = {
     /// The body itself panics, or the signature admits an indirect call.
@@ -1226,6 +1234,14 @@ type private FrameFacts = {
 /// (`kern(x, y)`, where `kern` is a `std::function` argument) looks exactly
 /// like one and CAN reach a panic in whatever it was bound to.
 let private scanBodyCalls (peers: Set<string>) (body: string) : bool * Set<string> =
+    // A named cast (`static_cast<double>(e)`) ends in the `>(` the functor
+    // alternative reads as a call through a value, which made every body that
+    // converts a number UNKNOWN and kept its frame: phi(i, j) =
+    // `static_cast<double>(i - j) / ...` kept a BLADE_FRAME whose stack store,
+    // inlined into a domain fold's cell loop, was one of the things stopping
+    // g++ from vectorizing it (bench gap G30). A cast calls nothing; its
+    // operand stays in the text and is scanned like any other.
+    let body = namedCastRe.Replace(body, "(")
     let ms = callShapedRe.Matches body
     let mutable unknown = false
     let mutable callees = Set.empty

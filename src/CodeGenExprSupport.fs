@@ -272,6 +272,12 @@ let renderUnaryOpTyped (op: IRUnaryOp) (operandTy: IRType) (inner: string) : str
             // The cast's source position rides into the panic's `--> file:line`.
             let at = panicSpanArgs loc.Span
             (if et = ETInt64 then $"blade_rt::f2i64({inner}, {at})" else $"blade_rt::f2i32({inner}, {at})")
+        // Int64 -> Float64: the exact split conversion (blade_runtime.hpp
+        // blade_arith::i64_to_f64), the same double as static_cast<double> but
+        // vectorizable on AVX2, which has no packed int64 -> double (bench gap
+        // G30: `Float64(i - j)` kept a domain fold's cell loop scalar).
+        | IRCast (ETFloat64, _), Some ETInt64 ->
+            $"blade_arith::i64_to_f64({inner})"
         // A transcendental on a REAL operand: blade_libm::, the run-time
         // platform libm (never folded at compile time), whose overloads
         // evaluate a Float32 operand in double and round once to float and
@@ -1743,6 +1749,46 @@ let internal fpReassocSimdStmts
 let internal fpReassocSimdOp (callable: IRCallable) (elemStr: string) : string option =
     if not (simdReducibleElem elemStr) then None
     else foldKernelBuiltinOp callable |> Option.bind ompReductionOperator
+
+/// The order a FOLD over a closed-form domain walks its cells.
+type DomainFoldOrder =
+    /// k = i - j outermost, a contiguous run of i inside (Types.domainDiagonal).
+    | DomainDiagonalOrder of Blade.Types.DomainDiagonal
+    /// The plan's lexicographic affine nest, and why the diagonal was declined.
+    | DomainLexOrder of reason: string
+
+/// THE one decision, shared by `blade plan`'s `[domain-enum v1]` line, the C++
+/// domain fold arm (CodeGenBinding) and the LLVM lane's domain folds, so the
+/// lanes walk the same order and the plan says which and why (docs/formalism.md,
+/// "Diagonal order of a licensed band fold"). The diagonal is taken only under
+/// the REORDER LICENCE on a builtin `+`/`*` fold -- a `BLADE_FP_REPRO=1` build,
+/// a `where repro` fold kernel and any other kernel keep the lex order and its
+/// bits -- over a band (two fields, a difference bounded on both sides with
+/// unit slope) whose map kernel subscripts no matrix (a diagonal strides a
+/// matrix by a row). `mapKernelBody` None = unknown, which keeps the lex order.
+let domainFoldOrder (foldCallable: IRCallable option) (mapKernelBody: IRExpr option) (plan: DomainPlan) : DomainFoldOrder =
+    match Blade.Types.domainDiagonal plan with
+    | None -> DomainLexOrder "not a band: no two-field conjunct bounds the difference of the fields from both sides with unit slope"
+    | Some dg ->
+    match foldCallable with
+    | None -> DomainLexOrder "the fold kernel does not resolve to a callable"
+    | Some cl when (foldKernelBuiltinOp cl).IsNone ->
+        DomainLexOrder "the fold kernel is not the builtin + or *: only a builtin reduction may walk the band by diagonal"
+    | Some cl when foldKernelReproVetoed cl -> DomainLexOrder "the fold kernel is `where repro`: the lexicographic order is the contract"
+    | Some _ when not (Blade.CodeGenState.fpReassocEnabled ()) ->
+        DomainLexOrder "BLADE_FP_REPRO=1: a repro fold keeps the lexicographic order"
+    | Some _ when not (Blade.CodeGenState.domainDiagonalEnabled ()) -> DomainLexOrder "BLADE_DOMAIN_DIAGONAL=0"
+    | Some _ when (match mapKernelBody with Some b -> Blade.IR.kernelSubscriptsRank2 b | None -> true) ->
+        DomainLexOrder "the map kernel subscripts a matrix, which a diagonal walk would stride by a row"
+    | Some _ -> DomainDiagonalOrder dg
+
+/// `blade plan`'s rendering of a domain fold's order.
+let domainFoldOrderText (plan: DomainPlan) (order: DomainFoldOrder) : string =
+    match order, plan.Levels with
+    | DomainDiagonalOrder dg, [ l0; l1 ] ->
+        $"order: diagonal (k = {l0.Field} - {l1.Field} outer, k in [{dg.KLo}, {dg.KHi}]; {l0.Field} inner and contiguous) -- a licensed fold over a difference-bounded band: same cells, same per-cell arithmetic, and a term depending only on {l0.Field} - {l1.Field} is invariant in the inner run"
+    | DomainDiagonalOrder _, _ -> "order: diagonal"
+    | DomainLexOrder why, _ -> $"order: lexicographic ({why})"
 
 
 /// Is the packed native matmul kernel (blade_packed_gemm.hpp's dgemm_nn)

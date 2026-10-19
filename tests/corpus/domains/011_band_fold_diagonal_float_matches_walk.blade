@@ -1,0 +1,36 @@
+// TEST: Closed-Form Domain: A Diagonal Band Fold On Float Data Matches The Serial Walk
+// Non-integer cells (bench band's coefficient on 1 / (1 + i)): the licensed
+// fold walks the band by diagonal (and, with `where omp` in a build that
+// emits teams, splits the diagonals over one team with a fixed-order
+// combine), so it may differ from the serial lexicographic walk in the last
+// bits but not beyond rounding. `walk` is the same fold through a kernel that
+// is not the builtin `+` -- no reorder licence, so it is the serial lex walk
+// in every build; `lic` and `thr` agree with it to 1e-12 relative. Under
+// BLADE_FP_REPRO=1 (what `blade test interp` pins) every fold keeps the lex
+// order, so there all three are bit-identical to the interpreter's walk.
+let static n = 301
+let static w = 7
+type Pts = Idx<n>
+
+static struct Band {
+    i: Int64<min=0, max=n-1>,
+    j: Int64<min=0, max=n-1>
+} where abs(i - j) <= w
+
+let x = 1.0 / (1.0 + Float64(0..n))
+
+function phi(i: Int64, j: Int64) -> Float64 = {
+    let d = Float64(i - j)
+    (2.0 + d / Float64(w + 1)) / (1.0 + d * d)
+}
+
+let lic = reduce(method_for(range<Band>) <@> lambda(i, j) -> phi(i, j) * x((i : Pts)) * x((j : Pts)), (+))
+let thr = reduce(method_for(range<Band>) <@> lambda(i, j) -> phi(i, j) * x((i : Pts)) * x((j : Pts)), lambda(p, q) where omp -> p + q, 0.0)
+let walk = reduce(method_for(range<Band>) <@> lambda(i, j) -> phi(i, j) * x((i : Pts)) * x((j : Pts)), lambda(p, q) -> q + p * 1.0, 0.0)
+let lic_ok = abs(lic - walk) <= 1e-12 * walk
+let thr_ok = abs(thr - walk) <= 1e-12 * walk
+// EXPECT: lic = 6.38169038092111
+// EXPECT: thr = 6.38169038092111
+// EXPECT: walk = 6.38169038092111
+// EXPECT: lic_ok = true
+// EXPECT: thr_ok = true

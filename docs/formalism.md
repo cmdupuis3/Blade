@@ -688,6 +688,37 @@ conjunct is typed as the literal it folds to, a CHECKED conversion — a value
 outside Int32 refuses the declaration (BL4001) with the fix, `Int64<...>`
 fields.
 
+Diagonal order of a licensed band fold (bench gaps G33/G31). The lex order
+above is the order of the SOLUTION SET; a fold may visit it in another order
+only where its kernel licenses reordering. A two-field domain whose inner field
+is held to the outer from both sides with unit slope — `abs(i - j) <= w`,
+`abs(j - i) <= w`, `lo <= i - j <= hi`, any pair of difference conjuncts, which
+project to `j in [max(b, i - hi), min(B, i - lo)]` — is a BAND: its cells are
+the union of the diagonals k = i - j, each a contiguous run of i. A fold over
+its map whose kernel is the builtin `+` or `*` (the reorder licence of
+§2.4), outside `BLADE_FP_REPRO=1` and `where repro`, walks it k-outermost with
+i inner and contiguous (j = i - k): the same cells, each cell's arithmetic
+spelled and evaluated exactly as the source writes it, only the summation order
+moved — the expert's `do k = -w, w; do i`. A kernel term that depends on the
+cell only through i - j is then invariant in the inner run and the back end
+computes it once per diagonal; the emitter never tabulates it. Every other fold
+over the domain (an unlicensed or `where repro` kernel, a repro build, a fused
+join of several folds, a non-unit slope such as `abs(2 * i - j) <= c`, a map
+kernel that subscripts a matrix — a diagonal would stride it by a row) keeps
+the lex nest, and the interpreter keeps the lex walk for every fold, as it does
+for every licensed fold. `blade plan`'s `[domain-enum v1]` line ends with the
+fold's order and its reason (`order: diagonal (k = i - j outer, ...)` or
+`order: lexicographic (<why>)`); both compiled lanes read the same decision.
+`BLADE_DOMAIN_DIAGONAL=0` keeps the lex nest, for A/B. With `where omp` on the
+fold kernel, in a build that emits teams, the C++ lane runs the walk on ONE
+team: the outermost enumerated variable (k, or the first field of a lex nest,
+whose bounds are constants) is cut into contiguous per-thread blocks — each
+innermost run is cut instead when the team outnumbers the outer trips — and
+the per-thread partials combine in thread order, so for a given team size the
+value is a fixed function of the data. `BLADE_OMP_THREADS=1` and
+`BLADE_FP_REPRO=1` keep the serial pass with an `[omp] requested but emitted
+serial` census line; the LLVM lane has no thread-level form.
+
 Tuple indexing with wildcards: a full key is an O(1) hash lookup (a missing
 key is a runtime error); a wildcard/short-prefix partial returns the matching
 entries **by gather** — with no sorted table there is no contiguous-window

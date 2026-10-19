@@ -2424,6 +2424,18 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
 /// Immediate expression children of a node, in canonical order.
 let childrenOf (ExprShape (children, _)) : IRExpr list = children
 
+/// Does `e` subscript an array with two or more indices anywhere? The guard a
+/// band fold's diagonal walk (Types.domainDiagonal) takes: along a diagonal a
+/// rank-1 read `x(i)` / `x(j)` stays unit-stride, a matrix read `A(i, j)`
+/// strides by a row, so a kernel that reads one keeps the row walk. Reads
+/// inside a called function are not followed -- the walk is a cost choice,
+/// never a correctness one.
+let rec kernelSubscriptsRank2 (e: IRExpr) : bool =
+    match e with
+    | IRIndex (_, idxs, _) when idxs.Length >= 2 -> true
+    | IRIndex (IRIndex _, _, _) -> true   // curried A(i)(j)
+    | _ -> childrenOf e |> List.exists kernelSubscriptsRank2
+
 /// Rebuild a node around replacement children (same count/order as
 /// childrenOf handed out).
 let rebuildWith (expr: IRExpr) (children: IRExpr list) : IRExpr =

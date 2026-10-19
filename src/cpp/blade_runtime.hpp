@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <atomic>
 #include <type_traits>
 #include <locale>
@@ -199,6 +200,29 @@ namespace blade_libm {
 // `blade_arith::` in panicFreeNamespaces, so a kernel that calls only these
 // keeps its shadow frame elided. The faulting forms live in blade_rt below.
 namespace blade_arith {
+  // Float64(x) of an Int64: the correctly rounded conversion, spelled so a
+  // vectorizer can widen it. AVX2 has no packed int64 -> double instruction
+  // (that is AVX-512DQ's vcvtqq2pd), and g++ will not vectorize a loop that
+  // holds one -- it does not narrow by value range either -- so a domain fold
+  // computing `Float64(i - j)` per cell stayed scalar (bench gap G30). Split
+  // v = hi * 2^32 + lo with hi the signed high word and lo the unsigned low
+  // word: hi converts through the packed int32 form, lo through the 2^52
+  // magic-exponent bit pattern (exact: lo < 2^32 < 2^52), hi * 2^32 is exact,
+  // so the one addition (or the fma a contracting build makes of it) rounds the
+  // exact value v once -- bit for bit what cvtsi2sd returns, in every rounding
+  // mode. With AVX-512DQ the plain conversion vectorizes and is used as is.
+  inline double i64_to_f64(int64_t v) {
+#if defined(__AVX512DQ__)
+    return static_cast<double>(v);
+#else
+    const uint64_t u = static_cast<uint64_t>(v);
+    const double hi = static_cast<double>(static_cast<int32_t>(static_cast<uint32_t>(u >> 32)));
+    const uint64_t lo_bits = (u & 0xFFFFFFFFull) | 0x4330000000000000ull;
+    double lo;
+    std::memcpy(&lo, &lo_bits, sizeof lo);
+    return hi * 4294967296.0 + (lo - 4503599627370496.0);
+#endif
+  }
   // b^e for e >= 0, exact modulo 2^w: square-and-multiply in the UNSIGNED
   // type, whose wraparound is defined, then back to T -- the two's-complement
   // residue every lane computes (any multiplication order gives the same

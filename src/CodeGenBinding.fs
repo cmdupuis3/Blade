@@ -3720,9 +3720,16 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                 | Some (IRRange ([ ix ], _)) ->
                     (match ix.Extent with
                      | IRSparseKeys (SkDomain plan) ->
+                         // Which order the fold walks -- the arm below reads the
+                         // SAME decision (domainFoldOrder), as does the LLVM lane.
+                         let order =
+                             if infos.Length <> 1 then DomainLexOrder "a fused join of several folds shares one lexicographic nest"
+                             else
+                                 domainFoldOrder (resolveCallable kernelExpr)
+                                     (resolveCallable info.Kernel |> Option.map _.Body) plan
                          recordDomainEnum name plan.Name true
                              $"closed-form affine nest ({plan.Levels.Length} level(s): {domainPlanSummary plan}), {plan.Card} cell(s)"
-                             "consumer: streamed fold (no array, no key table)"
+                             $"consumer: streamed fold (no array, no key table); {(domainFoldOrderText plan order)}"
                      | IRSparseKeys (SkStatic entries) ->
                          recordDomainEnum name "(table)" false
                              $"table-enumerated domain or SparseIdx range ({entries.Length} baked key(s)): its conjuncts are not linear inequalities, so there is no closed-form nest to stream"
@@ -4030,22 +4037,50 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                 let realOperand = lvl.Elements |> List.exists (_.Virtual.IsRealArray)
                                 match fpReassocSimdOp callable elemStr with
                                 | Some opStr when not realOperand ->
-                                    let (outerOpen, innerDecl, innerHeader, outerClose) = genDomainFoldNest lvl plan
-                                    recordFoldForm name "simd-reduction" $"reduce over a closed-form domain ({plan.Name}: affine nest, simd on the innermost field)"
+                                    // THE ORDER (domainFoldOrder, the decision the
+                                    // plan line and the LLVM lane read): a BAND under
+                                    // the licence walks diagonal by diagonal -- the
+                                    // expert's `do k = -w, w; do i`, same cells, same
+                                    // per-cell arithmetic, the licensed summation
+                                    // order; the inner run is unit-stride in i and in
+                                    // j = i - k, and a term depending only on i - j is
+                                    // invariant in it, which g++ hoists once inlined.
+                                    // Every other domain keeps the lex nest.
+                                    let order = domainFoldOrder (Some callable) (Some cg.KernelExpr) plan
+                                    // THREADS (bench gap G31): a `where omp` fold
+                                    // kernel, in a build that emits teams.
+                                    let threaded = callable.IsOmpParallel && ompThreadEmissionEnabled ()
+                                    let walk =
+                                        match order with
+                                        | DomainDiagonalOrder dg ->
+                                            $"band walked by diagonal, k = {(plan.Levels.[0].Field)} - {(plan.Levels.[1].Field)} in [{dg.KLo}, {dg.KHi}], simd on the {(plan.Levels.[0].Field)} run"
+                                        | DomainLexOrder _ -> "affine nest, simd on the innermost field"
+                                    let outerName =
+                                        match order with
+                                        | DomainDiagonalOrder _ -> "the diagonal index k"
+                                        | DomainLexOrder _ -> $"the outermost field {(plan.Levels.[0].Field)}"
+                                    if threaded then
+                                        recordOmpConstruct name "omp parallel num_threads(T) + fixed-order combine"
+                                            $"closed-form domain fold ({plan.Name}): {outerName} cut into fixed per-thread blocks (each innermost run cut instead when the team outnumbers its trips)"
+                                        recordFoldForm name $"threaded(fixed blocks over {outerName}, fixed-order combine; simd within each block)" $"reduce over a closed-form domain ({plan.Name}: {walk})"
+                                    else
+                                        recordFoldForm name "simd-reduction" $"reduce over a closed-form domain ({plan.Name}: {walk})"
+                                    // The licence asked for threads this build does not
+                                    // emit: said in the C++, never silently.
+                                    let ompNote =
+                                        if callable.IsOmpParallel && not threaded
+                                        then [ $"{ind}/* {(ompSuppressedPhrase (ompThreadsSuppressedReason ()))} */" ]
+                                        else []
+                                    let walkNote =
+                                        match order with
+                                        | DomainDiagonalOrder _ -> "band walked by diagonal (k = i - j)"
+                                        | DomainLexOrder _ -> "affine nest"
+                                    let teamNote = if threaded then ", one team, fixed per-thread blocks, fixed-order combine" else ""
                                     Some (
-                                        chunkNote @
-                                        [ $"{ind}/* reduce over computation: closed-form domain {plan.Name} ({plan.Card} cells), affine nest, omp simd reduction on the innermost field (licensed reorder) */"
-                                          $"{ind}{{" ]
-                                        @ (aliasDecls |> List.map (fun s -> ind + "    " + s))
-                                        @ (outerOpen |> Option.map (fun h -> [ $"{ind}    {h}" ]) |> Option.defaultValue [])
-                                        @ [ $"{ind}        {innerDecl}"
-                                            $"{ind}        BLADE_OMP_SIMD_REDUCTION({opStr}:{name})"
-                                            $"{ind}        {innerHeader}" ]
-                                        @ (peels |> List.map (fun s -> $"{ind}            {s}"))
-                                        @ [ $"{ind}            {name} = {name} {opStr} {bodyExpr};"
-                                            $"{ind}        }}" ]
-                                        @ (outerClose |> Option.map (fun c -> [ $"{ind}    {c}" ]) |> Option.defaultValue [])
-                                        @ [ $"{ind}}}" ])
+                                        chunkNote @ ompNote @
+                                        [ $"{ind}/* reduce over computation: closed-form domain {plan.Name} ({plan.Card} cells), {walkNote}, omp simd reduction on the innermost run (licensed reorder){teamNote} */" ]
+                                        @ (genDomainFoldCpp lvl plan order name elemStr opStr threaded aliasDecls peels bodyExpr
+                                           |> List.map (fun s -> ind + s)))
                                 | _ -> None
                             | None ->
                             match fpReassocSimdOp callable elemStr with
@@ -4142,22 +4177,33 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                     // The fold nest as emitted today, and the lane form when the
                     // knob and the gate above both admit it. Shared by both
                     // non-dispatch arms so they cannot drift.
-                    // A `where omp` fold kernel over a closed-form domain: the
-                    // nest has no thread-level form (never chunked, see
-                    // `chunkable`), so the thread half of the licence is
-                    // declined -- never silently.
-                    let domainOmpNote =
+                    // A `where omp` fold kernel over a closed-form domain whose
+                    // threaded form (genDomainFoldCpp, G31, in the lane arm above)
+                    // declined: the thread half of the licence is dropped -- never
+                    // silently, and exactly once (the Path B note below stays quiet
+                    // for a domain nest, which is never chunked). A FUNCTION:
+                    // ompSuppressedPhrase records the census line as it renders.
+                    let isDomainFold =
                         match cg.Bindings with
-                        | head :: _ when callable.IsOmpParallel && (domainPlanOfLevel head).IsSome ->
-                            [ ind + "/* " + ompSuppressedPhrase "a closed-form domain nest has no thread-level form yet (its licence is spent on the innermost-field simd reduction where the kernel allows one)" + " */" ]
-                        | _ -> []
+                        | head :: _ -> (domainPlanOfLevel head).IsSome
+                        | [] -> false
+                    let domainOmpNote () =
+                        if callable.IsOmpParallel && isDomainFold then
+                            let why =
+                                if foldKernelReproVetoed callable then
+                                    "fold kernel is `where repro` (the operation order is the contract; reorder licence vetoed)"
+                                elif not (fpReassocEnabled ()) then fpReproReason ()
+                                else "a closed-form domain fold has a thread-level form only for a builtin `+`/`*` reduction of a scalar over the domain's own map (this fold's kernel, element type or operands do not qualify)"
+                            [ ind + "/* " + ompSuppressedPhrase why + " */" ]
+                        else []
                     let foldNestLines () =
+                        let lane = laneLines ()
                         wrapperLines
                         @ [$"{ind}{elemStr} {name} = {seedStr};"]
-                        @ domainOmpNote
-                        @ (match laneLines () with
+                        @ (match lane with
                            | Some ls -> ls
                            | None ->
+                               let domainNote = domainOmpNote ()
                                // What the ordinary nest makes of this fold, for
                                // `blade plan` (the lane arm records its own).
                                let form =
@@ -4177,7 +4223,7 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                // the MAP's request, and the FoldChunk lines need a
                                // plan. Census line for exactly that case.
                                let unchunkedNote =
-                                   if callable.IsOmpParallel && cg.FoldChunk.IsNone then
+                                   if callable.IsOmpParallel && cg.FoldChunk.IsNone && not isDomainFold then
                                        let why =
                                            if foldKernelReproVetoed callable then
                                                "fold kernel is `where repro` (the operation order is the contract; reorder licence vetoed)"
@@ -4186,7 +4232,7 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                        // space-joined into a one-line IIFE.
                                        [ $"{ind}/* {(ompSuppressedPhrase why)} */" ]
                                    else []
-                               unchunkedNote @ genLoopNest cg ctx.VarNames ctx.Indent)
+                               domainNote @ unchunkedNote @ genLoopNest cg ctx.VarNames ctx.Indent)
                     let code =
                         match dotCall with
                         | Some (call, entry) ->
