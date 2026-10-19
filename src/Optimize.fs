@@ -1967,6 +1967,253 @@ let fuseSliceWritesModule (modul: IRModule) (builder: IRBuilder) (programFuncs: 
         modul.Bindings |> List.map (fun b -> { b with Value = rewriteBody b.Name moduleIds b.Value })
     { modul with Functions = newFunctions; Bindings = newBindings }
 
+// --- Row-fold fusion: consume each recursive-array row while it is hot ----
+//
+// A recursion whose only consumer is a row-wise fold,
+//
+//   let T = (let BUF = <fresh> in SEED; for n in L..N { ..row n.. }; BUF) in
+//   reduce(method_for(T) <@> lambda(row) -> K(row), F)       -- seed I
+//
+// re-reads the whole trajectory after the recursion (recur: 48 MB from DRAM,
+// ~3 ms of a ~12 ms kernel), while every row was in cache the moment it was
+// written. The fold is moved INTO the recursion: an accumulator seeded with
+// I, updated `acc <- F(acc, K(BUF(n)))` right after row n is final -- once
+// after the seed statements (row 0) and once at the end of each step.
+//
+// Why it is cost-only (charter rule 1):
+//   - `reduce` is a LEFT fold in ascending order (formalism; CLAUDE.md): the
+//     rewrite evaluates exactly F(..F(F(I, K(row 0)), K(row 1)).., K(row N-1))
+//     with K's own body on each row -- the serial association every build
+//     without a reorder licence already uses (BLADE_FP_REPRO=1: bitwise the
+//     unfused program). A licensed build gives up only the lane split of an
+//     N-term outer sum; each row's K keeps its own (licensed) form;
+//   - a row is FINAL when it is folded: the loop writes only row n (every
+//     buffer store's leading index is the step variable), the statements
+//     before it write only row 0, nothing follows the loop (no `while`
+//     freeze epilogue, no break), and every call in the region is repeatable
+//     (no `mut` parameter writes a row after it was folded);
+//   - K and F are pure and capture-free, so evaluating them earlier
+//     (interleaved with the steps) changes no value. Each is evaluated once
+//     per row, unconditionally, as before, so an abort is never added or
+//     removed; when K (a row prodsum's extent check) and a LATER step would
+//     both abort, which one is reported first can change -- the residual the
+//     elementwise fusion already accepts;
+//   - T has no other use, and the fold is the let's whole body (or the value
+//     of its first let): nothing observes the buffer after the recursion.
+// Gate: BLADE_FUSION. Plan rule `row-fold-fusion`.
+let fuseRowFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: IRCallable list) : IRModule =
+    if not (Blade.Toolchain.envFlag "BLADE_FUSION" true) then modul else
+    let callables = System.Collections.Generic.Dictionary<IRId, IRCallable>()
+    for f in programFuncs do callables.[f.Id] <- f
+    for f in modul.Functions do callables.[f.Id] <- f
+    let mentions (vid: IRId) (e: IRExpr) =
+        let mutable hit = false
+        iterIRExpr (fun n -> match n with IRVar (id, _) when id = vid -> hit <- true | _ -> ()) e
+        hit
+    let count (vid: IRId) (e: IRExpr) =
+        let mutable n = 0
+        iterIRExpr (fun x -> match x with IRVar (id, _) when id = vid -> n <- n + 1 | _ -> ()) e
+        n
+    // A pure, capture-free scalar kernel. It MAY abort (a row `prodsum` or
+    // `reduce` carries extent checks): every row is still folded exactly
+    // once, unconditionally, so an abort still happens -- only WHICH abort is
+    // reported first can change when a later step would also have aborted,
+    // the residual elementwise fusion already accepts (IRMono.
+    // occursOnlyUnconditionally). Nothing observable can run in between:
+    // every call in the region is repeatable (no output, no writes).
+    let plainScalarKernel (arity: int) (k: IRCallable) =
+        k.Params.Length = arity && k.Captures.IsEmpty && not k.IsStatic
+        && not k.IsOmpParallel && not k.IsCudaKernel && not k.IsMpiParallel && not k.IsArityPoly
+        && (match k.RetType with IRTScalar _ -> true | _ -> false)
+        && IRMono.tilePureBody callables Set.empty k.Body
+    let resolve (e: IRExpr) =
+        match e with
+        | IRVar (kid, _) -> (match callables.TryGetValue kid with | true, k -> Some k | _ -> None)
+        | _ -> None
+    // Every call in a region is repeatable: no assignment through a `mut`
+    // parameter (which could rewrite a row already folded), no output.
+    let callsRepeatable (e: IRExpr) =
+        let mutable ok = true
+        iterIRExpr (fun n ->
+            match n with
+            | IRApp (IRVar (fid, _), _, _) ->
+                (match callables.TryGetValue fid with
+                 | true, c ->
+                    if c.IsStatic then ok <- false
+                    elif Blade.Effects.isRepeatable c.Effects then ()
+                    elif not c.Effects.Unknown then ok <- false
+                    elif not (IRMono.tilePureBody callables Set.empty c.Body) then ok <- false
+                 | _ -> ok <- false)
+            | IRApp _ | IRBreakIf _ | IRDisplayEmit _ -> ok <- false
+            | _ -> ()) e
+        ok
+    // Every mention of the buffer in a region is a read through a subscript
+    // (a row view or a cell) or a store whose leading index is `rowOk`.
+    let bufferUseOk (bufId: IRId) (rowOk: IRExpr -> bool) (e: IRExpr) =
+        let mutable ok = true
+        let rec walk (x: IRExpr) =
+            match x with
+            | IRAssign (IRIndex (IRVar (b, _), i0 :: rest, _), v) when b = bufId ->
+                if not (rowOk i0) then ok <- false
+                rest |> List.iter walk
+                walk v
+            | IRAssign (IRVar (b, _), _) when b = bufId -> ok <- false
+            | IRIndex (IRVar (b, _), idxs, _) when b = bufId -> idxs |> List.iter walk
+            | IRVar (b, _) when b = bufId -> ok <- false
+            | ExprShape (children, _) -> children |> List.iter walk
+        walk e
+        ok
+    let rec chainOf (e: IRExpr) : (IRId * IRExpr) list * IRExpr =
+        match e with
+        | IRLet (id, v, b) -> let s, fin = chainOf b in (id, v) :: s, fin
+        | _ -> [], e
+    let rebuild (stmts: (IRId * IRExpr) list) (fin: IRExpr) =
+        List.foldBack (fun (id, v) acc -> IRLet (id, v, acc)) stmts fin
+    // `acc <- F(acc, K(BUF(row)))` as statements ending in `tail`.
+    let foldUpdate (accId: IRId) (accT: IRType) (bufId: IRId) (bufT: IRType)
+                   (k: IRCallable) (f: IRCallable) (row: IRExpr) (tail: IRExpr) =
+        let rowId = builder.FreshId ()
+        let pId = builder.FreshId ()
+        let kParam = k.Params.Head
+        let subst (m: Map<IRId, IRExpr>) (body: IRExpr) =
+            mapIRExpr (fun x -> match x with IRVar (id, _) -> (match Map.tryFind id m with Some a -> a | None -> x) | _ -> x) body
+        let freshenLets (body: IRExpr) =
+            let binders = System.Collections.Generic.List<IRId>()
+            iterIRExpr (fun x -> match x with IRLet (id, _, _) -> binders.Add id | _ -> ()) body
+            let mapped = binders |> Seq.distinct |> Seq.map (fun id -> id, builder.FreshId ()) |> Map.ofSeq
+            mapIRExpr (fun x ->
+                match x with
+                | IRVar (id, t) -> (match Map.tryFind id mapped with Some n -> IRVar (n, t) | None -> x)
+                | IRLet (id, v, b) -> (match Map.tryFind id mapped with Some n -> IRLet (n, v, b) | None -> x)
+                | _ -> x) body
+        let kBody = subst (Map.ofList [ kParam.VarId, IRVar (rowId, kParam.Type) ]) (freshenLets k.Body)
+        let fBody =
+            subst (Map.ofList [ f.Params.[0].VarId, IRVar (accId, accT); f.Params.[1].VarId, IRVar (pId, k.RetType) ])
+                  (freshenLets f.Body)
+        IRLet (rowId, IRIndex (IRVar (bufId, bufT), [ row ], None),
+            IRLet (pId, kBody,
+                IRLet (builder.FreshId (), IRAssign (IRVar (accId, accT), fBody), tail)))
+    let record (subject: string) outcome evidence =
+        Blade.Effects.Decisions.record
+            { Blade.Effects.Rule = "row-fold-fusion"; Version = 1
+              Span = Blade.Ast.noSpan; Subject = subject
+              Outcome = outcome; Evidence = evidence }
+    let mutable subject = ""
+    // Try the rewrite at `let T = BLOCK in E`. Error = decline reason (only
+    // reported when E really is a row fold over T).
+    let tryAt (tId: IRId) (block: IRExpr) (e: IRExpr) : Result<IRExpr, string> option =
+        // The consumer: E is the fold, or E's first let binds it.
+        let consumer, rebuildE =
+            match e with
+            | IRReduceCompute _ -> Some e, (fun (acc: IRExpr) -> acc)
+            | IRLet (x, (IRReduceCompute _ as r), rest) when not (mentions tId rest) ->
+                Some r, (fun acc -> IRLet (x, acc, rest))
+            | _ -> None, id
+        match consumer with
+        | Some (IRReduceCompute (IRApplyCombinator info, foldK, init)) when
+                (match info.Arrays with [ IRVar (a, _) ] -> a = tId | _ -> false) ->
+            if count tId e <> count tId (IRReduceCompute (IRApplyCombinator info, foldK, init)) then Some (Error "the recursion's result has another use beside the fold") else
+            match block with
+            | IRLet (bufId, (IRUninit _ | IRCompute _), chain) ->
+                let stmts, fin = chainOf chain
+                let bufT =
+                    match block with
+                    | IRLet (_, IRUninit t, _) -> Some t
+                    | _ -> (match fin with IRVar (b, t) when b = bufId -> Some t | _ -> None)
+                match fin, bufT, List.tryLast stmts with
+                | IRVar (b, _), Some bufT, Some (loopId, IRForRange (nId, IRLit (IRLitInt lo), IRLit (IRLitInt hi), body)) when b = bufId ->
+                    let pre = stmts |> List.take (stmts.Length - 1)
+                    let leading =
+                        match bufT with
+                        | ArrayElem at ->
+                            (match at.IndexTypes with
+                             | ix :: _ :: _ -> (match ix.Extent with IRLit (IRLitInt n) -> Some n | _ -> None)
+                             | _ -> None)
+                        | _ -> None
+                    let rowKernel = resolve info.Kernel
+                    let foldKernel = resolve foldK
+                    let isN (i: IRExpr) = match i with IRVar (v, _) -> v = nId | _ -> false
+                    let isZero (i: IRExpr) = match i with IRLit (IRLitInt 0L) -> true | _ -> false
+                    let rec unitTail (x: IRExpr) =
+                        match x with
+                        | IRLet (_, _, b) -> unitTail b
+                        | IRLit IRLitUnit -> true
+                        | _ -> false
+                    if leading <> Some hi then Some (Error "the recursion loop does not end at the buffer's leading extent")
+                    elif not (lo = 0L || lo = 1L) then Some (Error "the recursion loop starts past row 1")
+                    elif info.KernelOutputRank <> 0 || info.HasReynolds || info.IsCoIteration then
+                        Some (Error "the fold's map is not a plain per-row map")
+                    elif not (match info.OutputType with ArrayElem at -> at.IndexTypes.Length = 1 | _ -> false) then Some (Error "the fold does not reduce the rows to one scalar") else
+                    match rowKernel, foldKernel with
+                    | Some k, Some f when plainScalarKernel 1 k && plainScalarKernel 2 f ->
+                        let preOk = pre |> List.forall (fun (_, s) -> bufferUseOk bufId isZero s && callsRepeatable s)
+                        let seedWrites = pre |> List.exists (fun (_, s) -> mentions bufId s)
+                        if not (bufferUseOk bufId isN body && callsRepeatable body && unitTail body) then
+                            Some (Error "a step writes a row other than its own, calls something that is not repeatable, or may stop early")
+                        elif not preOk then Some (Error "a statement before the recursion writes a row other than the seed row")
+                        elif lo = 1L && not seedWrites then Some (Error "no seed statement writes row 0")
+                        elif lo = 0L && seedWrites then Some (Error "a statement before a seedless recursion writes the buffer") else
+                        let accId = builder.FreshId ()
+                        let accT = f.RetType
+                        // The step variable as the body uses it (a named
+                        // recursion axis types it as that index).
+                        let nVar =
+                            let mutable found = None
+                            iterIRExpr (fun x -> match x with IRVar (v, t) when v = nId && found.IsNone -> found <- Some (IRVar (v, t)) | _ -> ()) body
+                            defaultArg found (IRVar (nId, IRTScalar ETInt64))
+                        // The step body: its unit tail becomes the fold update.
+                        let rec withUpdate (x: IRExpr) =
+                            match x with
+                            | IRLet (id, v, b) -> IRLet (id, v, withUpdate b)
+                            | _ -> foldUpdate accId accT bufId bufT k f nVar x
+                        let loop' =
+                            match snd (List.last stmts) with
+                            | IRForRange (nv, l, h, _) -> IRForRange (nv, l, h, withUpdate body)
+                            | other -> other
+                        let preStmts =
+                            if lo = 1L then
+                                let u = builder.FreshId ()
+                                pre @ [ u, foldUpdate accId accT bufId bufT k f (IRLit (IRLitInt 0L)) (IRLit IRLitUnit) ]
+                            else pre
+                        let block' = IRLet (bufId, (match block with IRLet (_, v, _) -> v | _ -> block),
+                                            rebuild (preStmts @ [ loopId, loop' ]) fin)
+                        Some (Ok (IRLet (accId, init, IRLet (tId, block', rebuildE (IRVar (accId, accT))))))
+                    | _ -> Some (Error "the per-row kernel or the fold operator is not a plain pure capture-free scalar kernel")
+                | _ when stmts |> List.exists (fun (_, s) -> match s with IRForRange _ -> true | _ -> false) ->
+                    Some (Error "the recursion's statements are not a seed followed by one step loop ending the block (a `while` freeze epilogue, or another statement after the loop)")
+                | _ -> None
+            | _ -> None
+        | _ -> None
+    let rec rw (e: IRExpr) : IRExpr =
+        match e with
+        | IRLet (tId, block, body) ->
+            (match tryAt tId block body with
+             | Some (Ok e') ->
+                record subject Blade.Effects.Applied
+                    [ "the row-wise fold over the recursion's result is accumulated inside the recursion: each row folded right after it is written (seed row after the seed), ascending, the fold's own left association; the trajectory is not re-read" ]
+                (match e' with
+                 | IRLet (a, i, IRLet (t, b, rest)) -> IRLet (a, i, IRLet (t, rwInner b, rw rest))
+                 | _ -> e')
+             | Some (Error why) ->
+                record subject (Blade.Effects.Declined why) [ "the fold re-reads the trajectory after the recursion" ]
+                IRLet (tId, rw block, rw body)
+             | None -> IRLet (tId, rw block, rw body))
+        | _ -> rwInner e
+    and rwInner (e: IRExpr) =
+        match e with
+        | IRLet _ -> rw e
+        | ExprShape ([], _) -> e
+        | ExprShape (children, rebuild) -> rebuild (children |> List.map rw)
+    let newFunctions =
+        modul.Functions |> List.map (fun f ->
+            subject <- f.SourceName
+            { f with Body = rw f.Body })
+    let newBindings =
+        modul.Bindings |> List.map (fun b ->
+            subject <- b.Name
+            { b with Value = rw b.Value })
+    { modul with Functions = newFunctions; Bindings = newBindings }
+
 /// `programFuncs` is every callable of the PROGRAM (all modules): a pass that
 /// judges a callee's effects resolves it there, since a generic defined in
 /// one module and called from another (`from stats import mean`) is not in
@@ -1978,4 +2225,5 @@ let optimizeModule (builder: IRBuilder) (programFuncs: IRCallable list) (modul: 
     |> foldConstMatchesModule
     |> (fun m -> fuseElementwiseChainsModule m builder programFuncs)
     |> (fun m -> fuseSliceWritesModule m builder programFuncs)
+    |> (fun m -> fuseRowFoldsModule m builder programFuncs)
     |> hoistKernelInvariantsModule builder programFuncs

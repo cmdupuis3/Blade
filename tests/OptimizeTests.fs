@@ -258,6 +258,40 @@ let private sliceWriteDeferredSrc =
     + "        start + 0.1 * forced\n"
     + "      }\n"
 
+/// Row-fold fusion (Optimize.fuseRowFoldsModule) must DECLINE a `while`-
+/// guarded recursion: its freeze epilogue rewrites rows after the loop, so a
+/// row is not final when its step ends.
+let private rowFoldWhileSrc =
+    "type Sweep = Idx<6>\n"
+    + "type Col = Idx<2>\n"
+    + "function settle(u0: Array<Float64 like Col>) -> Float64 = {\n"
+    + "    let rec f: Array<Float64 like Sweep, Col> =\n"
+    + "        match f with\n"
+    + "        | zero -> zero\n"
+    + "        | zero :: s -> zero :: u0\n"
+    + "        | prefix :: n while prefix(n - 1, 0) > 1.0 -> prefix :: prefix(n - 1) * 0.5\n"
+    + "    reduce(method_for(f) <@> lambda(row) -> prodsum(row, row), (+))\n"
+    + "}\n"
+    + "let u0: Array<Float64 like Col> = [8.0, 4.0]\n"
+    + "let v = settle(u0)\n"
+
+/// The fold half of the recur emission: no fold loop over the trajectory
+/// remains after the recursion (each row is folded inside it).
+let private rowFoldRk4Emission () =
+    let name = "row_fold_rk4_no_post_recursion_fold"
+    match cppOfSource name sliceWriteRk4Src with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let start = cpp.IndexOf "double kernel(Array<double, 1> u0) {"
+        let body = if start < 0 then "" else cpp.Substring(start, cpp.IndexOf("\n}\n", start) - start)
+        let postFold = body.Contains "reduce over computation"
+        if start >= 0 && not postFold then
+            resultLine Pass name "kernel: the row checksum is accumulated inside the recursion; no fold over the trajectory after it"
+            true
+        else
+            resultLine Fail name ($"expected no post-recursion fold in kernel; got found={start >= 0} postFold={postFold}")
+            false
+
 /// The emission half of the pin: in the fused kernel no call to `step`, no
 /// slice copy and no per-step free remain -- one scalar chain per cell
 /// stored into the trajectory row.
@@ -1825,6 +1859,12 @@ let runOptimizeTests () =
           decisionCase "decision_slice_write_declined_deferred" sliceWriteDeferredSrc "slice-write-fusion"
               (declinedMentioning "deferred") "declined: the step forces a deferred module binding"
           sliceWriteRk4Emission ()
+          // Row-fold fusion: the trajectory's row checksum folded in place.
+          decisionCase "decision_row_fold_applied" sliceWriteRk4Src "row-fold-fusion" applied
+              "row-fold-fusion applied (prodsum checksum of the RK4 trajectory)"
+          decisionCase "decision_row_fold_declined_while" rowFoldWhileSrc "row-fold-fusion"
+              (declinedMentioning "freeze") "declined: a while-guarded recursion rewrites rows after the loop"
+          rowFoldRk4Emission ()
           // Reverse-mode AD of an additive recurrence is O(n): loop count pin.
           recarrayGradEmission ()
           recarrayGradNonlinearEmission ()
