@@ -36,7 +36,9 @@ tree 2dcc0739 (DLL 30FBBC97; consoles `results/gates/final-*.txt`): `blade test`
 opt-diff` 1976 passed (1838 optimizer-inert), 0 failed, 915 skipped; `test llvm` 722
 passed, 0 failed, 677 skipped (lane refusals); `test docs` 131 passed, 0 failed, 78
 sketch skips.** The branch `worktree-bench-fortran` remains unmerged to master by the
-user's choice. This document is closed. Consolidated per-session
+user's choice. §13 is closed as the phase-2 record; **§14 (follow-up round, 2026-10-19)
+is open** — its structure is in place, its numbers pending the runner's quiet-window A/Bs
+and the final re-measure. Consolidated per-session
 tables: `results/full/RUNNER-RECORD.md` (the runner's record, cross-referenced, not
 duplicated here).
 Both §12 decisions are taken (mt8 matched parallelism → group-A mt8 rows superseded and
@@ -1921,6 +1923,234 @@ indicative where starred; the pre-fix figures these replace are in §3–§7.
   per re-measure session"); two aborted mt8-fastmath attempts (a second excursion during a
   sibling `dotnet build`; a 92 ms memory-control excursion) are kept as records. Everything
   uncapped; indicative where starred.
+
+## 14. Follow-up round (2026-10-19) — structure prepared; numbers pending the runner's quiet-window A/Bs and the final re-measure
+
+Seven branches came out of the §13.3 open items and the §11.5 worklist. Four are merged
+into `worktree-bench-fortran` (checksum-pass 2ebc490f, band 8c66dcb0, blas-repack
+5d568404, maskagg 54c98afe); three are test-complete or nearly and unmerged at the time of
+writing (tri-tiles dc54e1bf, fold-simd 68d344af, recur f36d5503). §13 stays the closed
+phase-2 record; this section is filled the same way (every table number from a session
+bundle's `summary.md` / `session.json`, else `pending`). The figures quoted in the "what
+changed" paragraphs are the branch sessions' OWN single runs or scratch A/Bs — they are
+diagnoses, never results, and are superseded by the table the moment it is filled.
+
+Conventions as in §13: milliseconds, medians; "before" = the §13 state (the 79AF7EDC /
+30FBBC97 re-measure) where the kernel was re-measured there, else the pre-fix matrix
+(§3–§7, named per row); ratio = expert median / Blade median, **> 1 Blade faster**;
+reference `blade-llvm` in serial regimes, `blade-cpp` in mt8 and blas; `*` = verdict
+suppressed by drift (indicative). Runner's test totals per branch: pending (the
+coordinator sends them; recorded verbatim in the "Tests" line of each item). Corpus
+numbering: blas-repack's and fold-simd's `loops/474-476` collide and tri-tiles'
+`symmetry/125` is provisional — the final numbers are written here when the merge settles.
+
+### 14.1 checksum-pass (branch 2ebc490f, merged) — G32, G34
+
+**What changed.** G32: the orbit-class checksum fold (H M4) now opens a thread team over
+the first-coordinate rows in mt8 — row `i` starts at `canon_count(n) − canon_count(n − i)`,
+rows are dealt boustrophedon so the triangle's uneven row lengths balance, each thread
+keeps per-class sums, the thread partials are combined in thread order and the
+addition-only weight combine follows; `blade plan` prints `fold-form ...; thread team over
+the first-coordinate rows`. The LLVM lane stays serial (no thread runtime, G11). G34: the
+diagnosis was CORRECTED — both lanes already used the compare-swap canonicalization
+network and clang already bound the repeated read; the LLVM repro walk was bound by
+per-read binomial offset arithmetic (2(r − 1) runtime binomials, ~38 integer ops per cell
+at rank 3). Fix: the packed offset is regrouped into one `coordTerm` per coordinate
+(`SimplexBlocksCore.coordTerm`, property-pinned equal to `packedOffsetR` for ranks 2–5),
+module-constant tables for static extents ≤ 4096, the remaining divisions marked `sdiv
+exact`, and an explicit bind-once of the read. Both lanes are byte-identical under repro.
+Corpus `symmetry/123-124`.
+
+**Tests.** pending (runner's totals).
+
+| regime | kernel | before blade-llvm / blade-cpp (ms) | after blade-llvm / blade-cpp (ms) | gf-expert / ifx-expert (ms) | ratio before → after (gf / ifx) | verdict |
+|---|---|---|---|---|---|---|
+| mt8 x licensed (ref cpp; §13 session 202815) | pairkernel | — / 7.67 | pending / pending | 6.27 / 6.03 | 0.82 * / 0.79 * → pending | pending |
+| mt8 x licensed | gram | — / 15.58 | pending / pending | 19.87 / 19.06 | 1.28 / 1.22 (live) → pending | pending (control: expected unchanged) |
+| mt8 x licensed | comoment3 | — / 3.311 | pending / pending | 4.839 / 4.03 | 1.46 / 1.22 (live) → pending | pending (control) |
+| mt8 x licensed | antisym | — / 8.79 | pending / pending | 9.50 / 9.82 | 1.08 * / 1.12 * → pending | pending (control) |
+| serial x repro (ref llvm; §13 session 9) | comoment3 | 26.46 / 16.12 | pending / pending | 11.73 / 11.77 | 0.44 / 0.45 (live) → pending | pending |
+| serial x repro | pairkernel | 40.82 / 37.85 | pending / pending | 34.32 / 31.91 | 0.84 / 0.78 (live) → pending | pending |
+| serial x repro | antisym | 30.47 / 30.65 | pending / pending | 31.77 / 30.46 | 1.04 / 1.00 (live) → pending | pending (control) |
+| mt8 x repro (ref cpp; §13 session 3c-equivalent) | comoment3 | — / 9.91 | pending / pending | 4.861 / 4.101 | 0.49 * / 0.41 * → pending | pending |
+| mt8 x repro | pairkernel | — / 17.34 | pending / pending | 6.217 / 6.472 | 0.36 * / 0.37 * → pending | pending |
+
+**Register items it closes (provisional, pending measure):** G32 (threaded orbit pass,
+C++ lane), G34 (candidate → diagnosed and fixed in the LLVM lane: offset arithmetic, not
+the canonical read).
+
+### 14.2 band (branch 8c66dcb0, merged) — G30, G31, G33
+
+**What changed.** G33 was the enumeration ORDER, not vectorization: the licensed fold over
+a difference-bounded two-field domain now enumerates by diagonal (`k = i − j` outer; knob
+`BLADE_DOMAIN_DIAGONAL`; a general planner rule, licensed-only — repro keeps the
+lexicographic order bit-identical), and the expert's licensed arm does the same (`phi`
+hoisted per diagonal); the per-cell-division floor is ~2 ms on this Zen 3. G30's real
+blockers in the C++ lane were an int64→double conversion with no AVX2 form, a mutable
+global `w`, and a frame-scan bug that kept `phi`'s `BLADE_FRAME` because
+`static_cast<double>(` read as a functor call; the repro lanes now vectorize the terms with
+an in-order sum. G31: a thread-level form for closed-form domain nests — one team, `k` in
+fixed per-thread blocks, fixed-order combine (a follow-up fixed a captured-reference gather
+inside the OpenMP region); map kernels that assign a captured `let mut` keep lexicographic
+order and the serial pass. `kernel.json` is no longer `no_parallel_form`. The branch
+session's own single runs (NOT results): serial licensed blade-llvm 0.40 / blade-cpp 0.68
+ms against the experts' 0.81 / 1.04; repro 3.8–4.2 ms, both lanes bit-identical; mt8
+licensed blade-cpp 1.07 ms. Corpus `domains/009-012`.
+
+**Tests.** pending (runner's totals).
+
+| regime | kernel | before blade-llvm / blade-cpp (ms) | after blade-llvm / blade-cpp (ms) | gf-expert / ifx-expert (ms) | ratio before → after (gf / ifx) | verdict |
+|---|---|---|---|---|---|---|
+| serial x licensed (ref llvm; §13 session 201558) | band | 3.318 / 9.276 | pending / pending | 0.8135 / 1.042 → pending (the expert's licensed arm changed too) | 0.245 / 0.314 (live) → pending | pending |
+| serial x repro (ref llvm) | band | 9.277 / 9.289 | pending / pending | 3.111 / 3.718 | 0.335 / 0.401 (live) → pending | pending |
+| mt8 x licensed (ref cpp) | band | no Blade arm (G31) | pending | 0.9909 / 1.705 → pending | — → pending | pending |
+| mt8 x repro (ref cpp) | band | no Blade arm (G31) | pending | pending | — → pending | pending |
+| serial x fastmath (ref llvm) | band | 3.312 / 9.277 | pending / pending | 1.699 / 1.322 | 0.513 / 0.399 (live) → pending | pending |
+
+**Register items it closes (provisional, pending measure):** G30 (C++ lane vectorizes the
+domain inner loop), G31 (thread form for closed-form domain nests), G33 (candidate →
+diagnosed: enumeration order; fixed on both sides). The expert sources did NOT change on
+this item: the Fortran agent's licensed expert already walked the band by diagonal under
+`BENCH_LICENSED` (the per-cell order is its repro arm), which is what the session found
+when it read the assembly; only `kernel.json` changed (no_parallel_form dropped).
+
+### 14.3 blas-repack (branch 5d568404, merged) — G28, M13 hot-row fold
+
+**What changed.** G28: the BLAS-on `dsyrk` route gained a threaded repack argument (the
+serial dense staging + repack that cost 18–21% under 8 library threads in §13). M13: the
+hot-row fold (`BLADE_HOT_ROW` gate in `optimizerGates`, plan line `[hot-row-fold v1]`)
+schedules the consumer fold inside the producer loop for stencil-shaped halo maps — the
+checksum of a halo map no longer materializes the second output-sized array (the G10
+mechanism). Corpus `loops/474-476` (to be renumbered if fold-simd's collide). Tests all
+green on the branch; the A/B is pending; the G28 diagnosis paragraph comes from the
+session.
+
+**Tests.** pending (runner's totals).
+
+| regime | kernel | before blade-llvm / blade-cpp (ms) | after blade-llvm / blade-cpp (ms) | gf-expert / ifx-expert (ms) | ratio before → after (gf / ifx) | verdict |
+|---|---|---|---|---|---|---|
+| blas x mt8 (ref cpp; §13 session 214522) | gram | — / 24.46 | pending | 19.27 / 19.98 | 0.788 / 0.817 (live) → pending | pending |
+| blas x serial (ref cpp) | gram | — / 64.53 | pending | 65.39 / 62.48 | 1.013 / 0.968 (live) → pending | pending (control) |
+| serial x licensed (ref llvm; pre-fix §3.6) | stencil | 13.51 / 16.34 | pending / pending | 14.46 / 11.64 | 1.070 * / 0.861 * → pending | pending |
+| mt8 x licensed (ref cpp; pre-fix §5.8) | stencil | — / 11.49 | pending | 8.968 / 9.120 | 0.780 * / 0.794 * → pending | pending |
+| serial x repro (ref llvm; pre-fix §6.1) | stencil | 15.97 / 17.77 | pending / pending | 16.80 / 13.47 | 1.052 * / 0.843 * → pending | pending |
+
+**Register items it closes (provisional, pending measure):** G28 (staging repack
+threaded), G10 (checksum over a halo map streams through the hot-row fold — the
+materialized second array is gone where the pass applies).
+
+### 14.4 maskagg (branch 54c98afe, merged) — G9 / M12
+
+**What changed.** Rank-1 `compound` is a prefix-count compaction: `compound_index_t<1>` is
+a template specialization holding the ascending kept positions (a count pass + one
+branchless fill), BL8006 on a non-kept key; the hashed `SparseIdx` representation is kept
+for rank ≥ 2, wildcard and partial reads. The LLVM lane now accepts rank-1 compounds (new
+shim symbol `blade_compact1_rank`, attribute group `memory(argmem: read)`), so maskagg's
+`blade-llvm` arm is a real lane figure: `kernel.json` flipped to `expected_llvm "lane"`.
+The interpreter twin gained the N-operand apply over compounds. The branch session's own
+single runs (NOT results): licensed blade-llvm 7.1 ms, blade-cpp 14.1 ms (from 65 ms /
+fallback); repro 7.7 / 8.1 ms; experts 3.6–5.0 ms. Corpus `index-types/511-514`.
+
+**Tests.** pending (runner's totals).
+
+| regime | kernel | before blade-llvm / blade-cpp (ms) | after blade-llvm / blade-cpp (ms) | gf-expert / ifx-expert (ms) | ratio before → after (gf / ifx) | verdict |
+|---|---|---|---|---|---|---|
+| serial x licensed (ref: blade-cpp before, blade-llvm after; pre-fix §4.3) | maskagg | fallback / 67.16 | pending / pending | 3.993 / 2.919 | 0.059 * / 0.043 * → pending | pending |
+| serial x repro (pre-fix §6.2) | maskagg | fallback / 68.86 | pending / pending | 4.982 / 3.752 | 0.072 / 0.054 (live) → pending | pending |
+| mt8 | maskagg | serial by protocol (D-rule, kernels/README.md §1) | — | — | — | — |
+
+**Register items it closes (provisional, pending measure):** G9 (hashed compound index →
+compaction; now merged and in BOTH lanes — the register's "scratch figures" note is
+superseded by the A/B), and the maskagg half of G12/G22's history (the LLVM fallback is
+gone). The reference arm changes from `blade-cpp` to `blade-llvm` for this kernel once
+the lane arm validates; the before/after ratio therefore reads against two different
+references and the table says so.
+
+### 14.5 tri-tiles (branch dc54e1bf, test-complete, unmerged) — M15 + G1 remnants
+
+**What changed.** The register-tile family (E/F/G, §13) gets top-aligned column and k
+panels; the scale tail is fused into the last K block's tile store (no post-pass); the
+syrk route gains row-panel groups (`BLADE_TILE_TUNE syrk_g`, default 4) and antisym gains
+sample blocks (`anti_kc`, default 0 = whole chain); the gram-node dispatch prints an omp
+census line. 120 program x mode runs are bit-identical to master; raw-bit blocks syrk
+2729/2729, row 3177/3177, cross-lane 1660/1660. Corpus `symmetry/125` (renumber pending).
+Tuning points T1–T7 are pending the A/B (the defaults above are provisional).
+
+**Tests.** pending (runner's totals).
+
+| regime | kernel | before blade-llvm / blade-cpp (ms) | after blade-llvm / blade-cpp (ms) | gf-expert / ifx-expert (ms) | ratio before → after (gf / ifx) | verdict |
+|---|---|---|---|---|---|---|
+| serial x licensed (ref llvm; §13) | gram | 56.1 / 57.96 | pending / pending | 76.75 / 69.36 | 1.368 / 1.236 (live) → pending | pending |
+| serial x licensed | antisym | 27.59 / 28.56 | pending / pending | 31.06 / 29.61 | 1.126 / 1.073 (live) → pending | pending |
+| serial x licensed | comoment3 | 9.312 / 9.593 | pending / pending | 11.37 / 11.40 | 1.221 / 1.225 (live) → pending | pending |
+| serial x repro (ref llvm; §13) | gram | 59.73 / 61.34 | pending / pending | 77.07 / 70.12 | 1.290 / 1.174 (live) → pending | pending |
+| serial x repro | antisym | 30.47 / 30.65 | pending / pending | 31.77 / 30.46 | 1.043 / 1.000 (live) → pending | pending |
+| serial x repro | comoment3 | 26.46 / 16.12 | pending / pending | 11.73 / 11.77 | 0.443 / 0.445 (live) → pending (the checksum pass is 14.1's) | pending |
+| mt8 x licensed (ref cpp; §13) | gram | — / 15.58 | pending | 19.87 / 19.06 | 1.276 / 1.223 (live) → pending | pending |
+| mt8 x licensed | antisym | — / 8.79 | pending | 9.50 / 9.82 | 1.081 * / 1.117 * → pending | pending |
+| mt8 x licensed | comoment3 | — / 3.311 | pending | 4.839 / 4.03 | 1.462 / 1.217 (live) → pending | pending |
+
+**Register items it closes (provisional, pending measure):** the G1 remnants named in
+§13.1 ("K blocking" on antisym mt8; the scale post-pass; panel alignment) — G1 itself was
+already FIXED and measured; this item is tuning, reported as such.
+
+### 14.6 fold-simd (branch 68d344af, test-complete, unmerged) — M9, M14 / G25, G26
+
+**What changed.** Dot-class licensed folds take a K-lane vector form (`BLADE_FOLD_LANES`
+knob, default 8 pending measurement; `src/cpp/blade_fold_lanes.hpp`; raw-bit block `Fold
+Lanes` 38168/38168 in both modes); SIMD lanes now run INSIDE the Path B chunks under mt8
+(G25: threads and lanes compose); double and float only (Int64 keeps the simd nest); the
+census line is kept under `BLADE_OMP_THREADS=1`. The harness's fold-form evidence now
+reads `SIMD_REDUCTION/K-lane`. Corpus `loops/474-476` (collides with blas-repack's; to be
+renumbered).
+
+**Tests.** pending (runner's totals).
+
+| regime | kernel | before blade-llvm / blade-cpp (ms) | after blade-llvm / blade-cpp (ms) | gf-expert / ifx-expert (ms) | ratio before → after (gf / ifx) | verdict |
+|---|---|---|---|---|---|---|
+| serial x licensed (ref llvm; pre-fix §4) | dot | 13.20 / 19.28 | pending / pending | 18.44 / 12.67 | 1.397 * / 0.960 * → pending | pending |
+| serial x licensed | saxpy | 14.28 / 17.89 | pending / pending | 15.62 / 11.93 | 1.094 * / 0.836 * → pending | pending |
+| serial x licensed | fusedchain | 4.571 / 6.754 | pending / pending | 6.905 / 4.897 | 1.511 * / 1.071 * → pending | pending |
+| serial x licensed | onepass | 11.67 / 16.77 | pending / pending | 16.83 / 11.78 | 1.442 / 1.009 (live) → pending | pending |
+| mt8 x licensed (ref cpp; pre-fix §5) | dot | — / 12.00 | pending | 10.53 / 10.96 | 0.878 * / 0.914 * → pending | pending |
+| mt8 x licensed | saxpy | — / 11.40 | pending | 8.963 / 9.224 | 0.786 * / 0.809 * → pending | pending |
+| mt8 x licensed | fusedchain | — / 4.128 | pending | 3.253 / 3.509 | 0.788 * / 0.850 * → pending | pending |
+| mt8 x licensed | stencil | — / 11.49 | pending | 8.968 / 9.120 | 0.780 * / 0.794 * → pending | pending (shared with 14.3) |
+
+The incremental (total − twin) columns of §4/§5 are carried for these kernels when the
+table is filled: the K-lane form touches the fold, not the generator, so the incremental
+difference is the quantity expected to move.
+
+**Register items it closes (provisional, pending measure):** G26 (dot-class folds were
+"still open" after the tiles; the K-lane form is the K-way unrolled reduction the expert
+writes), G25 (lanes inside Path B chunks — the two licensed forms compose).
+
+### 14.7 recur (branch f36d5503, test-complete, unmerged) — G8 / M10–M11
+
+**What changed.** The inductive arm's elementwise chain is fused and written in place into
+the trajectory row (slice-write fusion under `BLADE_FUSION`): the per-step temporaries and
+the per-step copy into the 48 MB trajectory — the "remaining 2x" of §13.3 — are gone where
+the pass applies. The branch session's own numbers (NOT results): licensed blade-llvm 22.5
+→ 12.4 ms, blade-cpp 24.3 → 15.7, repro ~27 → 17.3, experts ~10. Corpus
+`recursive-arrays/026-027`.
+
+**Tests.** pending (runner's totals).
+
+| regime | kernel | before blade-llvm / blade-cpp (ms) | after blade-llvm / blade-cpp (ms) | gf-expert / ifx-expert (ms) | ratio before → after (gf / ifx) | verdict |
+|---|---|---|---|---|---|---|
+| serial x licensed (ref llvm; §13 session 201558) | recur | 20.43 / 22.49 | pending / pending | 10.07 / 9.995 | 0.493 * / 0.489 * → pending | pending |
+| serial x repro (ref llvm; §13) | recur | 23.77 / 23.85 | pending / pending | 12.95 / 13.34 | 0.545 / 0.561 (live) → pending | pending |
+| mt8 | recur | no Blade arm (G5, unchanged) | — | 6.815 / 7.486 | — | — |
+
+**Register items it closes (provisional, pending measure):** G8 for the `let rec` step
+(the lifted-let materialization in the inductive arm; the fusedchain/saxpy half of G8 is
+fold-simd's and blas-repack's territory, not this branch's). G5 (no thread form inside a
+`let rec` step) is untouched.
+
+### 14.8 Headline of the follow-up round
+
+pending — written when every table above is filled from the final re-measure. The
+pre-round headline is §13.4; the pre-fix headline §11.1.
 
 ## 12. Decisions put to the user — BOTH DECIDED (2026-10-18)
 
