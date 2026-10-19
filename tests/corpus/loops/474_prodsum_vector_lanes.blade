@@ -1,0 +1,43 @@
+// TEST: Prodsum Vector Lanes
+// Review item M9 (bench gap G26): a licensed `prodsum` over rank-1 double /
+// float operands takes the EXPLICIT K-lane vector form (blade_fold_lanes.hpp:
+// K independent 32-byte accumulators in a fixed, documented tree) in place of
+// the one-accumulator `omp simd reduction`. The route is pinned by
+// `blade test optimize` (plan lines) and the bits by `blade test fold-lanes`
+// (raw-bit vs the scalar model); this file pins the VALUES, over lengths that
+// exercise every tail of the tree: n = 37 (one block of 32, one vector of 4,
+// one scalar), n = 3 (scalar tail only, i.e. the serial chain), float n = 37
+// (8 lanes per vector: one block of 64 does not fit, so four vectors + 5).
+//
+// INTEGER-VALUED data on purpose: the interpreter differential folds serially
+// and requires byte-identical output, and small-integer sums are exact under
+// every association. Self-dot (`prodsum(a, a)`) is the one-load form; three
+// operands is the `(a * b) * c` form.
+type Ix = Idx<37>
+type Short = Idx<3>
+let a = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 7 - 3) |> compute
+let b = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 5 - 2) |> compute
+let c = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 3 - 1) |> compute
+let dot_ab = prodsum(a, b)
+let self_a = prodsum(a, a)
+let triple = prodsum(a, b, c)
+let s3 = method_for(range<Short>) <@> lambda(i) -> Float64(Int64(i) + 1) |> compute
+let short_dot = prodsum(s3, s3)
+let af = method_for(range<Ix>) <@> lambda(i) -> Float32(Int64(i) % 7 - 3) |> compute
+let bf = method_for(range<Ix>) <@> lambda(i) -> Float32(Int64(i) % 5 - 2) |> compute
+let dot_f32 = prodsum(af, bf)
+let self_f32 = prodsum(af, af)
+// Row kernels: the fiber shape the moment formers emit (one prodsum per row).
+type Y = Idx<2>
+let A2: Array<Float64 like Y, Short> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let B2: Array<Float64 like Y, Short> = [[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]]
+let rows = method_for(zip(A2, B2)) <@> lambda(ra: Array<Float64 like Short>, rb: Array<Float64 like Short>) -> prodsum(ra, rb) |> compute
+let self_rows = method_for(A2) <@> lambda(ra: Array<Float64 like Short>) -> prodsum(ra, ra) |> compute
+// EXPECT: dot_ab = 8.0
+// EXPECT: self_a = 153.0
+// EXPECT: triple = -35.0
+// EXPECT: short_dot = 14.0
+// EXPECT: dot_f32 = 8.0
+// EXPECT: self_f32 = 153.0
+// EXPECT: rows = [140.0, 770.0]
+// EXPECT: self_rows = [14.0, 77.0]

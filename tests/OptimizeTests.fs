@@ -1195,6 +1195,38 @@ let private parallelEmissionIsolated () =
                 resultLine Fail name ($"{bad} translation unit(s) with a mismatched packed-gemm include, {lostKernel} with the wrong kernel choice")
                 false))
 
+/// The explicit K-lane vector fold forms (review M9 / M14; BLADE_FOLD_LANES):
+/// a `prodsum` over two rank-1 operands, a self-dot, three operands; the
+/// deferred `reduce(method_for(zip(a, b)) <@> lambda(x, y) -> x * y, (+))`
+/// (the dot kernel); the same under a `where omp` fold (Path B, the threaded
+/// vector arm); a non-dot-class `where omp` body (the simd form per chunk);
+/// and a comm-declared user kernel (the serial chain per chunk, with why).
+let private planFoldLanesProdsumSrc =
+    "type Ix = Idx<37>\n"
+    + "let a = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 7 - 3) |> compute\n"
+    + "let b = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 5 - 2) |> compute\n"
+    + "let c = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 3 - 1) |> compute\n"
+    + "let dot_ab = prodsum(a, b)\n"
+    + "let self_a = prodsum(a, a)\n"
+    + "let triple = prodsum(a, b, c)\n"
+
+let private planFoldLanesDotSrc =
+    "type Ix = Idx<37>\n"
+    + "let a = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 7 - 3) |> compute\n"
+    + "let b = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 5 - 2) |> compute\n"
+    + "let dot_ab = reduce(method_for(zip(a, b)) <@> lambda(x, y) -> x * y, (+))\n"
+    + "let self_a = reduce(method_for(a) <@> lambda(w) -> w * w, (+))\n"
+    + "let not_dot = reduce(method_for(zip(a, b)) <@> lambda(x, y) -> x * y + 1.0, (+))\n"
+
+let private planFoldLanesThreadedSrc =
+    "function myAdd(a: Float64, b: Float64) where comm(a, b), omp = (a + b) * 1.0\n"
+    + "type Ix = Idx<1001>\n"
+    + "let a = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 7 - 3) |> compute\n"
+    + "let b = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 5 - 2) |> compute\n"
+    + "let dot_ab = reduce(method_for(zip(a, b)) <@> lambda(x, y) -> x * y, lambda(p, q) where omp -> p + q, 0.0)\n"
+    + "let chain = reduce(method_for(a) <@> lambda(v) -> (v + 1.0) * v, lambda(p, q) where omp -> p + q, 0.0)\n"
+    + "let comm_kernel = reduce(method_for(zip(a, b)) <@> lambda(x, y) -> x * y, myAdd, 0.0)\n"
+
 let private planCases () =
     let pinBlas (v: string) f =
         withGate "BLADE_BLAS" v (fun () -> withGate "OPENBLAS_DIR" null (fun () -> withGate "BLADE_BLAS_LINK" null f))
@@ -1319,6 +1351,78 @@ let private planCases () =
       withGate "BLADE_SIMPLEX_TILE" "0" (fun () ->
           planCase "plan_simplex_tile_declined_knob" (planSym3Src 29 67) "microkernel"
               (declinedMentioning "BLADE_SIMPLEX_TILE") "simplex tile declined by BLADE_SIMPLEX_TILE=0")
+      // The explicit K-lane vector fold forms (review M9 / M14): the plan
+      // names the form and K at every site, in every mode of BLADE_FOLD_LANES,
+      // and the repro build keeps the serial chain.
+      withGate "BLADE_FOLD_LANES" null (fun () ->
+          planCase "plan_fold_lanes_prodsum_dot" planFoldLanesProdsumSrc "fold-form"
+              (fun d -> applied d && d.Subject = "dot_ab" && evidenceMentioning "fold form: simd K-lanes(8) dot" d)
+              "prodsum(a, b): simd K-lanes(8) dot")
+      withGate "BLADE_FOLD_LANES" null (fun () ->
+          planCase "plan_fold_lanes_prodsum_self_dot" planFoldLanesProdsumSrc "fold-form"
+              (fun d -> applied d && d.Subject = "self_a" && evidenceMentioning "fold form: simd K-lanes(8) self-dot" d)
+              "prodsum(a, a): simd K-lanes(8) self-dot (one load per element)")
+      withGate "BLADE_FOLD_LANES" null (fun () ->
+          planCase "plan_fold_lanes_prodsum_dot3" planFoldLanesProdsumSrc "fold-form"
+              (fun d -> applied d && d.Subject = "triple" && evidenceMentioning "fold form: simd K-lanes(8) dot3" d)
+              "prodsum(a, b, c): simd K-lanes(8) dot3")
+      withGate "BLADE_FOLD_LANES" "4" (fun () ->
+          planCase "plan_fold_lanes_prodsum_k4" planFoldLanesProdsumSrc "fold-form"
+              (fun d -> applied d && d.Subject = "dot_ab" && evidenceMentioning "fold form: simd K-lanes(4) dot" d)
+              "BLADE_FOLD_LANES=4 forces K = 4")
+      withGate "BLADE_FOLD_LANES" "0" (fun () ->
+          planCase "plan_fold_lanes_prodsum_knob_off" planFoldLanesProdsumSrc "fold-form"
+              (fun d -> applied d && d.Subject = "dot_ab" && evidenceMentioning "fold form: simd-reduction" d)
+              "BLADE_FOLD_LANES=0 keeps the one-accumulator simd reduction")
+      withGate "BLADE_FP_REPRO" "1" (fun () ->
+          planCase "plan_fold_lanes_prodsum_repro" planFoldLanesProdsumSrc "fold-form"
+              (fun d -> d.Subject = "dot_ab" && declinedMentioning "serial (repro)" d)
+              "BLADE_FP_REPRO=1 keeps the serial chain")
+      pinBlas "0" (fun () ->
+       withGate "BLADE_FOLD_LANES" null (fun () ->
+          planCase "plan_fold_lanes_reduce_dot" planFoldLanesDotSrc "fold-form"
+              (fun d -> applied d && d.Subject = "dot_ab" && evidenceMentioning "fold form: simd K-lanes(8) dot" d)
+              "reduce over zip(a, b) <@> x * y: simd K-lanes(8) dot"))
+      pinBlas "0" (fun () ->
+       withGate "BLADE_FOLD_LANES" null (fun () ->
+          planCase "plan_fold_lanes_reduce_self_dot" planFoldLanesDotSrc "fold-form"
+              (fun d -> applied d && d.Subject = "self_a" && evidenceMentioning "fold form: simd K-lanes(8) self-dot" d)
+              "reduce over a <@> w * w: simd K-lanes(8) self-dot"))
+      pinBlas "0" (fun () ->
+       withGate "BLADE_FOLD_LANES" null (fun () ->
+          planCase "plan_fold_lanes_reduce_not_dot_keeps_simd" planFoldLanesDotSrc "fold-form"
+              (fun d -> applied d && d.Subject = "not_dot" && evidenceMentioning "fold form: simd-reduction" d)
+              "a body that is not a bare product keeps the simd reduction"))
+      pinBlas "0" (fun () ->
+       withGate "BLADE_FOLD_LANES" null (fun () ->
+        withGate "BLADE_OMP_THREADS" null (fun () ->
+          planCase "plan_fold_lanes_threaded_dot" planFoldLanesThreadedSrc "fold-form"
+              (fun d -> applied d && d.Subject = "dot_ab" && evidenceMentioning "fold form: threaded(Path B chunks, simd K-lanes(8) dot per chunk)" d)
+              "a `where omp` dot: Path B chunks, the vector tree per chunk")))
+      pinBlas "0" (fun () ->
+       withGate "BLADE_FOLD_LANES" null (fun () ->
+        withGate "BLADE_OMP_THREADS" null (fun () ->
+          planCase "plan_fold_lanes_threaded_chain_simd_per_chunk" planFoldLanesThreadedSrc "fold-form"
+              (fun d -> applied d && d.Subject = "chain" && evidenceMentioning "fold form: threaded(Path B chunks, simd-reduction within each chunk)" d)
+              "a `where omp` non-dot body: Path B chunks, simd reduction per chunk")))
+      pinBlas "0" (fun () ->
+       withGate "BLADE_FOLD_LANES" null (fun () ->
+        withGate "BLADE_OMP_THREADS" null (fun () ->
+          planCase "plan_fold_lanes_threaded_comm_kernel_serial_per_chunk" planFoldLanesThreadedSrc "fold-form"
+              (fun d -> applied d && d.Subject = "comm_kernel" && evidenceMentioning "serial within each chunk: the fold kernel's combine is a call" d)
+              "a comm-declared kernel: Path B chunks, the serial chain per chunk, with the reason")))
+      pinBlas "0" (fun () ->
+       withGate "BLADE_FOLD_LANES" "0" (fun () ->
+        withGate "BLADE_OMP_THREADS" null (fun () ->
+          planCase "plan_fold_lanes_threaded_knob_off" planFoldLanesThreadedSrc "fold-form"
+              (fun d -> applied d && d.Subject = "dot_ab" && evidenceMentioning "serial within each chunk: BLADE_FOLD_LANES=0/off" d)
+              "BLADE_FOLD_LANES=0: the serial chain per chunk, as before M14")))
+      pinBlas "0" (fun () ->
+       withGate "BLADE_FOLD_LANES" null (fun () ->
+        withGate "BLADE_OMP_THREADS" "1" (fun () ->
+          planCase "plan_fold_lanes_threads_off_dot" planFoldLanesThreadedSrc "fold-form"
+              (fun d -> applied d && d.Subject = "dot_ab" && evidenceMentioning "fold form: simd K-lanes(8) dot" d)
+              "BLADE_OMP_THREADS=1: the serial vector tree over the whole sweep")))
       // The orbit-class fold (src/OrbitFold.fs; bench M4): the logical sum
       // over a compact pool, regrouped by orbit class under the licence.
       planCase "plan_orbit_fold_sym2_applied" (planOrbitSrc planOrbitSym2Body) "fold-form"

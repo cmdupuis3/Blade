@@ -90,7 +90,8 @@ let internal suiteClearedKnobs =
       "BLADE_TILE_CACHE"; "BLADE_TILE_CACHE_VERBOSE"
       "BLADE_LLVM"; "BLADE_LLVM_BRICKS"; "BLADE_LLVM_FACTS"
       "BLADE_AD_HALO_GATHER"; "BLADE_SHAPE_SPEC_CAP"; "BLADE_RUN_RECORD"
-      "BLADE_SYRK_TILE"; "BLADE_ANTISYM_TILE"; "BLADE_SIMPLEX_TILE"; "BLADE_ORBIT_FOLD" ]
+      "BLADE_SYRK_TILE"; "BLADE_ANTISYM_TILE"; "BLADE_SIMPLEX_TILE"; "BLADE_ORBIT_FOLD"
+      "BLADE_FOLD_LANES" ]
     @ Blade.Optimize.optimizerGates
 
 /// Knobs `blade test` SETS (after the clear above) rather than leaves unset,
@@ -3892,6 +3893,12 @@ and internal dispatchTestClean (rest: string list) : int =
         // The packed-triangle SYRK tile alone: raw-bit vs the serial prodsum
         // (contract=off) and the one-fma chain (contract=fast), vfmadd census.
         let failed = (Blade.Tests.LinAlgTests.runSyrkTileTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "fold-lanes" ] | [ "foldlanes" ] ->
+        // The explicit K-lane vector fold forms (review M9/M14): raw-bit vs
+        // the scalar model of the lane tree in both contraction modes, the
+        // Path B partition threaded vs serial-within-chunk, vfmadd census.
+        let failed = (Blade.Tests.LinAlgTests.runFoldLanesTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "doctor" ] ->
         // Structural pins for the doctor's rows and JSON shape; the probes

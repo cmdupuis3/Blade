@@ -443,6 +443,46 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             // `laneCountForStreams` still governs the fallback arm below (and
             // Path B's chunked fold), which is why the arity-aware count
             // survives the change.
+            // THE EXPLICIT K-LANE VECTOR FORM (review item M9, gap register
+            // G26). The simd form below hands GCC ONE accumulator, which it
+            // vectorizes to one ymm and never interleaves, so the loop-carried
+            // add caps the fold at 1.33 lanes/cycle however many FMA units sit
+            // idle. blade_fold_lanes.hpp spells the fold with K independent
+            // vector accumulators in a FIXED, documented tree (the raw-bit
+            // test `blade test fold-lanes` pins it against a scalar model), one
+            // load per element for a self-dot (`prodsum(row, row)`: the two
+            // operand spellings are textually one array). Admitted: 1..3
+            // operands, each a plain rank-1 array (dense or a ragged row --
+            // both carry `.data`; compound / sparse keep their own reads) over
+            // double / float. BLADE_FOLD_LANES=0 keeps the simd form, for A/B.
+            let vecForm =
+                if foldLanesMode () = FoldLanesOff || not (foldVecElem elemStr) then None
+                else
+                    let plainRank1 (ty: IRType) =
+                        match ty with
+                        | ArrayElem at ->
+                            arrayRank at = 1 && not (isCompoundArrayType at) && not (isSparseArrayType at)
+                            && elemTypeToCpp at.ElemType = elemStr
+                        | _ -> false
+                    if not (args |> List.forall (inferExprType >> plainRank1)) then None
+                    else foldVecKind argStrs
+            match vecForm with
+            | Some (kind, ops) ->
+                let k = foldVecLanes kind
+                (foldLanesUsedCell ()).Value <- true
+                recordFoldForm "" (foldVecLabel kind k) "prodsum"
+                // A compound operand expression is bound once (evaluated exactly
+                // once, as every arm here does); a plain name is used as is.
+                let vecNames = if needAlias then ops |> List.mapi (fun i _ -> $"__pa{i}") else ops
+                let vecAliases =
+                    if not needAlias then []
+                    else List.map2 (fun n s -> $"auto&& {n} = {s};") vecNames ops
+                let call =
+                    foldVecCall elemStr k kind (vecNames |> List.map (fun o -> $"{o}.data"))
+                        (prodSumBound headTy (List.head vecNames))
+                if needAlias then $$"""[&]() { {{(String.concat " " vecAliases)}} return {{call}}; }()"""
+                else call
+            | None ->
             if simdReducibleElem elemStr then
                 recordFoldForm "" "simd-reduction" "prodsum"
                 let simdStmts = fpReassocSimdStmts "+" "__ps" "__pt" "0" "__pn" [] prodAt

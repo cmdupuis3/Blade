@@ -335,6 +335,38 @@ let private ompReduceCases : (string * string * string list * string list) list 
        "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]\n" +
        "let s = reduce(method_for(A) <@> lambda(a) -> a * a, (+))\n",
        [], ["[omp]"; "#pragma omp parallel"; "omp_get_"])
+      // ---- M14 (gap G25): the fast form INSIDE each Path B chunk ------------
+      // A `where omp` builtin-`+` fold over a dot-class body: the team is
+      // opened and each thread's chunk is ONE call of the explicit K-lane
+      // vector form over [__rlo, __rhi) -- no loop nest at all; partition by
+      // blade_fold::chunk_lo, partials combined in job order.
+      ("path_b_dot_class_vector_per_chunk",
+       "type Ix = Idx<1001>\n" +
+       "let a = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 7 - 3) |> compute\n" +
+       "let b = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 5 - 2) |> compute\n" +
+       "let s = reduce(method_for(zip(a, b)) <@> lambda(x, y) -> x * y, lambda(p, q) where omp -> p + q, 0.0)\n",
+       ["BLADE_OMP_PARALLEL_NUM_THREADS("
+        "blade_fold::chunk_lo(__rn, (size_t)__rt, (size_t)__rnt)"
+        "blade_fold::dot<double, 8>(__rsrc0 + __rlo, __rsrc1 + __rlo, __rhi - __rlo)"
+        "#include \"blade_fold_lanes.hpp\""],
+       ["for (size_t __i0 = __rlo"; "SIMD_REDUCTION"])
+      // A `where omp` builtin-`+` fold whose body is NOT a bare product: the
+      // nest is kept, chunked per thread, and the chunk's loop carries its own
+      // `omp simd reduction` into an identity-seeded accumulator read through
+      // restrict pool aliases.
+      ("path_b_simd_reduction_per_chunk",
+       "type Ix = Idx<1001>\n" +
+       "let a = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 7 - 3) |> compute\n" +
+       "let s = reduce(method_for(a) <@> lambda(v) -> (v + 1.0) * v, lambda(p, q) where omp -> p + q, 0.0)\n",
+       ["BLADE_OMP_PARALLEL_NUM_THREADS("
+        "blade_fold::chunk_lo(__rn_"
+        "BLADE_OMP_SIMD_REDUCTION(+:__racc_"
+        "for (size_t __i0 = __rlo; __i0 < __rhi; __i0++)"
+        "__rhad_"],
+       ["blade_fold::dot<"])
+      // BLADE_FOLD_LANES=0 is the A/B knob: both chunk forms revert to the
+      // serial chain seeded from the chunk's first value (checked by the
+      // knob-off case in the optimize block's plan pins; here the SHAPE).
       // ---- a licensed fold inside a top-level result TUPLE (G27 / G14) ------
       // A module binding's tuple is a statement position, so the fold is bound
       // to its own let (IRLift) and takes the same Path A team the let-bound

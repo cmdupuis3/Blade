@@ -3730,6 +3730,9 @@ let private genSelfContainedProgram (modul: IRModule) (testName: string) : strin
     let includes = if (tilesUsedCell ()).Value then includes @ ["#include \"blade_tilecache.hpp\""] else includes
     // blade_packed_gemm.hpp only when the native matmul arm called it.
     let includes = if (packedGemmUsedCell ()).Value then includes @ ["#include \"blade_packed_gemm.hpp\""] else includes
+    // blade_fold_lanes.hpp only when a fold took the explicit K-lane vector
+    // form or the Path B partition called blade_fold::chunk_lo.
+    let includes = if (foldLanesUsedCell ()).Value then includes @ ["#include \"blade_fold_lanes.hpp\""] else includes
     // blade_linalg_cuda.hpp: the DEVICE half of the same collect-then-append
     // shape, its OWN cell and its own build consequence -- Build.fs
     // sniffs THIS line to write the companion `.cu`, build it with nvcc and

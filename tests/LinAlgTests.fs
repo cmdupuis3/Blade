@@ -1508,6 +1508,107 @@ let runSyrkTileTests () : BlockResult =
         { Block = blockName; Passed = passed; Failed = failed; Skipped = 0; FailedNames = names }
 
 
+/// RAW-BIT tests of the explicit K-lane vector fold forms (cpp/fold_lanes_tests.cpp
+/// over the SHIPPED blade_fold_lanes.hpp; review items M9 / M14): every form
+/// (sum / dot / sq / dot3, K = 4 and 8, double and float) against the scalar
+/// model of the lane tree the header documents, at n = 0..35 / 777 / 20011,
+/// unaligned starts, same-pointer operands, and the Path B partition threaded
+/// against its serial-within-chunk twin.
+///
+/// Two builds of ONE source, as Build.fs builds programs:
+///   -ffp-contract=off                          (the differential gates' mode)
+///   -ffp-contract=fast -DBLADE_FP_CONTRACT_FAST=1 (the user default)
+/// plus an assembly census of each: =off must contain NO vfmadd at all, =fast
+/// must contain the forms' packed vfmadd (pd and ps). Needs g++; reports
+/// Skipped without it.
+let runFoldLanesTests () : BlockResult =
+    let blockName = "Fold Lanes"
+    printHeader "Explicit K-Lane Vector Folds (raw-bit vs the lane-tree model, both contraction modes)"
+    let cppDir = Path.Combine(AppContext.BaseDirectory, "cpp")
+    let testSrc = Path.Combine(cppDir, "fold_lanes_tests.cpp")
+    let caps = capabilities.Value
+    if not caps.HasGpp then
+        printfn "Skipped: g++ not found (cannot compile the C++ fold tests)."
+        { Block = blockName; Passed = 0; Failed = 0; Skipped = 1; FailedNames = [] }
+    elif not (File.Exists testSrc) then
+        eprintfn "fold_lanes_tests.cpp not found at: %s" testSrc
+        { Block = blockName; Passed = 0; Failed = 1; Skipped = 0
+          FailedNames = ["fold_lanes_tests.cpp missing"] }
+    else
+        let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
+        let work = Path.Combine(Path.GetTempPath(), "blade-fold-lanes-" + Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory(work) |> ignore
+        let runProc (exe: string) (args: string) (timeoutMs: int) =
+            let psi = ProcessStartInfo(exe, args)
+            psi.RedirectStandardOutput <- true
+            psi.RedirectStandardError <- true
+            psi.UseShellExecute <- false
+            psi.CreateNoWindow <- true
+            psi.WorkingDirectory <- cppDir
+            use p = Process.Start(psi)
+            let o = Blade.Runtime.readToEndOffPool p.StandardOutput
+            let e = Blade.Runtime.readToEndOffPool p.StandardError
+            if p.WaitForExit(timeoutMs) then (Some p.ExitCode, o.Result, e.Result)
+            else
+                (try p.Kill(true) with _ -> ())
+                (None, o.Result, e.Result)
+        let mutable passed = 0
+        let mutable failed = 0
+        let mutable names = []
+        let fail (n: string) (detail: string) =
+            failed <- failed + 1
+            names <- names @ [ n ]
+            resultLine Fail n detail
+        let pass (n: string) (detail: string) =
+            passed <- passed + 1
+            resultLine Pass n detail
+        let baseFlags = "-std=c++17 -O3 -march=native -fno-math-errno -fwrapv -fopenmp"
+        for (mode, extra) in [ ("off", ""); ("fast", " -DBLADE_FP_CONTRACT_FAST=1") ] do
+            let exe = Path.Combine(work, $"fold_lanes_{mode}{exeExt}")
+            let asm = Path.Combine(work, $"fold_lanes_{mode}.s")
+            let flags = $"{baseFlags} -ffp-contract={mode}{extra}"
+            match runProc "g++" $"{flags} -o \"{exe}\" \"{testSrc}\"" 180000 with
+            | Some 0, _, _ ->
+                match runProc exe "" 180000 with
+                | None, _, _ -> fail $"raw-bit contract={mode}" "test binary TIMED OUT (180s)"
+                | Some code, out, err ->
+                    let outText = out.Replace("\r\n", "\n")
+                    let m = System.Text.RegularExpressions.Regex.Match(outText, @"FOLD LANES TESTS:\s*(\d+)/(\d+)\s*passed")
+                    let firstFails =
+                        outText.Split('\n') |> Array.filter (fun l -> l.StartsWith "[FAIL]") |> Array.truncate 5
+                        |> String.concat " | "
+                    if m.Success && code = 0 && m.Groups.[1].Value = m.Groups.[2].Value then
+                        let step =
+                            outText.Split('\n') |> Array.tryFind (fun l -> l.StartsWith "vector extensions")
+                            |> Option.defaultValue ""
+                        pass $"raw-bit contract={mode}" ($"{m.Groups.[1].Value}/{m.Groups.[2].Value} cases bitwise; {step.Trim()}")
+                    elif m.Success then
+                        fail $"raw-bit contract={mode}" ($"{m.Groups.[1].Value}/{m.Groups.[2].Value} passed: {firstFails} {err.Trim()}")
+                    else
+                        fail $"raw-bit contract={mode}" ($"no summary line (exit {code}): {err.Trim()}")
+            | _, o, e -> fail $"raw-bit contract={mode}" ($"compile failed: {(o + e).Trim()}")
+            // The assembly census: the step rule is the BUILD's, so confirm the
+            // build did what the define says.
+            match runProc "g++" $"{flags} -S -o \"{asm}\" \"{testSrc}\"" 180000 with
+            | Some 0, _, _ ->
+                let lines = File.ReadAllLines asm
+                let count (pat: string) = lines |> Array.filter (fun l -> l.Contains pat) |> Array.length
+                let anyFma = count "vfmadd" + count "vfmsub" + count "vfnmadd"
+                let packedPd = count "vfmadd231pd" + count "vfmadd132pd" + count "vfmadd213pd"
+                let packedPs = count "vfmadd231ps" + count "vfmadd132ps" + count "vfmadd213ps"
+                if mode = "off" then
+                    if anyFma = 0 then pass "vfmadd census contract=off" "0 fused instructions in the TU (acc + x * y, two roundings)"
+                    else fail "vfmadd census contract=off" ($"{anyFma} fused instruction(s) under -ffp-contract=off")
+                else
+                    // 8 lanes x (block + remainder) per double form, 3 forms with a product, 2 K values: well past 16 each.
+                    if packedPd >= 16 && packedPs >= 16 then pass "vfmadd census contract=fast" ($"{packedPd} packed vfmadd pd, {packedPs} ps (one fma per lane step)")
+                    else fail "vfmadd census contract=fast" ($"only {packedPd} pd / {packedPs} ps packed vfmadd: the forms did not fuse")
+            | _, o, e -> fail $"vfmadd census contract={mode}" ($"-S failed: {(o + e).Trim()}")
+        (try Directory.Delete(work, true) with _ -> ())
+        printFooter blockName [ $"{passed} passed"; $"{failed} failed" ]
+        { Block = blockName; Passed = passed; Failed = failed; Skipped = 0; FailedNames = names }
+
+
 /// The antisym-pair tile (review item M7) and the rank-3 simplex tile (M8):
 /// ROUTING pins on the emitted text (pure codegen: the tile call, its schedule
 /// knob, the crossovers, the spellings that must decline), then the RAW-BIT

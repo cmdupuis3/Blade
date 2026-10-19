@@ -1485,10 +1485,48 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     // nest, so `depth` advances by 3 before the first loop header.
     match foldChunk with
     | Some plan ->
+        // M14 (gap G25): the form inside each chunk, decided by the producer.
+        let chunkPhrase =
+            match plan.ChunkForm with
+            | ChunkSimd op -> $"omp simd reduction({op}) within each chunk"
+            | ChunkSerial why -> $"serial within each chunk: {why}"
         recordOmpConstruct codeGen.OutputName "omp parallel num_threads(T) + fixed-order combine"
-            "comm-licensed parallel fold: outer level chunked per thread (Path B)"
+            $"comm-licensed parallel fold: outer level chunked per thread (Path B), {chunkPhrase}"
         let outerBound = genLoopBoundExpr compoundArrays (List.head codeGen.Bindings)
         (ompApiUsedCell ()).Value <- true
+        // The partition is blade_fold::chunk_lo (blade_fold_lanes.hpp): the ONE
+        // function every Path B site spells, so this nest's chunks coincide
+        // with the materialized fold's and the threaded vector arm's.
+        (foldLanesUsedCell ()).Value <- true
+        // ChunkSimd: the chunk's rank-1 real-array operands are read through
+        // restrict pool aliases (the vectorizer cannot otherwise prove the
+        // sweep dependence-free behind the Array struct's subscript -- the
+        // same aliases the serial licensed form uses), and the accumulator is
+        // seeded with the operator's identity so the reduction clause has a
+        // private copy to start from. Read-only sharing is permitted under
+        // restrict, `zip(x, x)` included.
+        let simdAliases =
+            match plan.ChunkForm with
+            | ChunkSimd _ ->
+                (List.head codeGen.Bindings).Elements
+                |> List.filter (fun e ->
+                    e.Virtual.IsRealArray && e.ArrayRank = 1
+                    && (match e.SlotTag with Some t -> not (t.StartsWith "__halowin") | None -> true)
+                    && not (Map.containsKey e.ArrayName streamed))
+                |> List.map (fun e -> e.ArrayName)
+                |> List.distinct
+                |> List.mapi (fun i nm -> (nm, $"__rsrc{i}_{plan.Tag}"))
+            | ChunkSerial _ -> []
+        for (nm, alias) in simdAliases do
+            for e in (List.head codeGen.Bindings).Elements do
+                if e.ArrayName = nm && e.Virtual.IsRealArray && e.ArrayRank = 1
+                   && (match e.SlotTag with Some t -> not (t.StartsWith "__halowin") | None -> true) then
+                    currentNames <- Map.add e.ArrayPosition alias currentNames
+        let accSeed =
+            match plan.ChunkForm with
+            | ChunkSimd "*" -> "1"
+            | ChunkSimd _ -> "0"
+            | ChunkSerial _ -> $"{plan.ElemCpp}()"
         lines <- lines @ [
             ind depth + "// reduce over computation: comm-licensed parallel fold, outer level chunked"
             ind depth + "{"
@@ -1503,15 +1541,19 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
             // (num_threads is a request -- see the flat path's note) and skips a
             // chunk whose inner nest contributed nothing.
             ind (depth + 2) + $"bool* {fcHad} = new bool[{fcT}]();"
+        ] @ (simdAliases |> List.map (fun (nm, alias) ->
+                ind (depth + 2) + $"const {plan.ElemCpp}* BLADE_RESTRICT {alias} = {nm}.data;"))
+        @ [
             ind (depth + 2) + $"BLADE_OMP_PARALLEL_NUM_THREADS({fcT})"
             ind (depth + 2) + "{"
             ind (depth + 3) + "const int __rnt = blade_omp_get_num_threads();"
             ind (depth + 3) + "const int __rt = blade_omp_get_thread_num();"
-            ind (depth + 3) + $"const size_t __rlo = ({fcRn} * (size_t)__rt) / (size_t)__rnt;"
-            ind (depth + 3) + $"const size_t __rhi = ({fcRn} * ((size_t)__rt + 1)) / (size_t)__rnt;"
-            // Value-initialized, never READ before __rhas turns true; the
-            // initializer only keeps -Wmaybe-uninitialized quiet.
-            ind (depth + 3) + $"{plan.ElemCpp} {fcAcc} = {plan.ElemCpp}();"
+            ind (depth + 3) + $"const size_t __rlo = blade_fold::chunk_lo({fcRn}, (size_t)__rt, (size_t)__rnt);"
+            ind (depth + 3) + $"const size_t __rhi = blade_fold::chunk_lo({fcRn}, (size_t)__rt + 1, (size_t)__rnt);"
+            // ChunkSerial: value-initialized, never READ before __rhas turns
+            // true (the initializer only keeps -Wmaybe-uninitialized quiet).
+            // ChunkSimd: the operator's identity, the reduction's seed.
+            ind (depth + 3) + $"{plan.ElemCpp} {fcAcc} = {accSeed};"
             ind (depth + 3) + $"bool {fcHas} = false;"
         ]
         depth <- depth + 3
@@ -1721,7 +1763,16 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
                && bidx = lastBindingIdx && bidx > ompLastLevel
             then [ ind depth + "// [ivdep] declined: kernel body contains an inner loop (prodsum/reduce/contains/nested apply), so this header cannot vectorize" ]
             else []
-        lines <- lines @ suppressedMarker @ ivdepSuppressedMarker @ [ind depth + pragmaPrefix + ivdepPrefix + header]
+        // M14: the chunk's own `omp simd reduction` on the chunked outer loop
+        // (a SIMD construct inside the explicit team; it opens no team).
+        let chunkSimdPragma =
+            match foldChunk with
+            | Some plan when isOuter ->
+                (match plan.ChunkForm with
+                 | ChunkSimd op -> [ ind depth + $"BLADE_OMP_SIMD_REDUCTION({op}:{fcAcc})" ]
+                 | ChunkSerial _ -> [])
+            | _ -> []
+        lines <- lines @ suppressedMarker @ ivdepSuppressedMarker @ chunkSimdPragma @ [ind depth + pragmaPrefix + ivdepPrefix + header]
         depth <- depth + 1
         // This level's share of the compact output's pool offset, hoisted here
         // because the term is invariant under every level inside it -- which is
@@ -1975,6 +2026,11 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
         // (the kernel expression can be a large Reynolds sum) and the branch is
         // loop-invariant after the first iteration.
         | Some wname, Some plan ->
+            match plan.ChunkForm with
+            // ChunkSimd: the reduction statement in the `x = x op expr` shape
+            // the clause requires, into the identity-seeded private copy.
+            | ChunkSimd op -> $"{foldAccName} = {foldAccName} {op} {reynoldsResult.Value.CppExpr};"
+            | ChunkSerial _ ->
             sprintf "{ %s __rv = %s; if (%s) %s = %s(%s, __rv); else { %s = __rv; %s = true; } }"
                 plan.ElemCpp reynoldsResult.Value.CppExpr
                 fcHas foldAccName wname foldAccName
@@ -1999,10 +2055,16 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     // caller's seed -- already in the shared accumulator -- enters the fold first,
     // which is what makes this the serial left fold up to associativity.
     match foldChunk, codeGen.FoldWrapper with
-    | Some _, Some wname ->
+    | Some plan, Some wname ->
+        // ChunkSimd: a one-level chunk contributed exactly when it was
+        // non-empty (the identity seed is never published for an empty one).
+        let hadExpr =
+            match plan.ChunkForm with
+            | ChunkSimd _ -> "(__rhi > __rlo)"
+            | ChunkSerial _ -> fcHas
         lines <- lines @ [
             ind depth + $"{fcPart}[__rt] = {fcAcc};"
-            ind depth + $"{fcHad}[__rt] = {fcHas};"
+            ind depth + $"{fcHad}[__rt] = {hadExpr};"
             ind (depth - 1) + "}"
             ind (depth - 1) + $"for (int __rt = 0; __rt < {fcT}; __rt++) if ({fcHad}[__rt]) {codeGen.OutputName} = {wname}({codeGen.OutputName}, {fcPart}[__rt]);"
             ind (depth - 1) + $"delete[] {fcPart}; delete[] {fcHad};"
@@ -3097,6 +3159,12 @@ let runtimeHeaderNames : string list =
       // beside it, and hashed into the exe cache key with every other name in
       // this list.
       "blade_tiles.h"
+      // The explicit K-lane vector fold forms (blade_fold::dot / sq / dot3 /
+      // sum, review items M9 / M14) and the Path B chunk partition
+      // (blade_fold::chunk_lo). INCLUDED only by a program with a licensed
+      // dot-class fold (foldLanesUsedCell); deployed unconditionally like the
+      // rest.
+      "blade_fold_lanes.hpp"
       // Dense linear-algebra dispatch: blade_gemm / blade_syrk plus the
       // gram/matmul adapters, resolving to cblas under -DBLADE_HAS_BLAS and to
       // native fallbacks otherwise. INCLUDED only by programs that actually
