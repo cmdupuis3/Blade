@@ -1573,11 +1573,11 @@ let runSyrkTileTests () : BlockResult =
 /// unaligned starts, same-pointer operands, and the Path B partition threaded
 /// against its serial-within-chunk twin.
 ///
-/// Two builds of ONE source, as Build.fs builds programs:
-///   -ffp-contract=off                          (the differential gates' mode)
-///   -ffp-contract=fast -DBLADE_FP_CONTRACT_FAST=1 (the user default)
-/// plus an assembly census of each: =off must contain NO vfmadd at all, =fast
-/// must contain the forms' packed vfmadd (pd and ps). Needs g++; reports
+/// Two builds of ONE source, -ffp-contract=off (the differential gates' mode)
+/// and =fast (the user default): the forms round every product before its add
+/// in BOTH, so both builds are bitwise the model. Plus an assembly census of
+/// each: no vfmadd in any blade_fold function (the barrier held), and packed
+/// vaddpd / vaddps present there (the forms vectorized). Needs g++; reports
 /// Skipped without it.
 let runFoldLanesTests () : BlockResult =
     let blockName = "Fold Lanes"
@@ -1621,7 +1621,7 @@ let runFoldLanesTests () : BlockResult =
             passed <- passed + 1
             resultLine Pass n detail
         let baseFlags = "-std=c++17 -O3 -march=native -fno-math-errno -fwrapv -fopenmp"
-        for (mode, extra) in [ ("off", ""); ("fast", " -DBLADE_FP_CONTRACT_FAST=1") ] do
+        for (mode, extra) in [ ("off", ""); ("fast", "") ] do
             let exe = Path.Combine(work, $"fold_lanes_{mode}{exeExt}")
             let asm = Path.Combine(work, $"fold_lanes_{mode}.s")
             let flags = $"{baseFlags} -ffp-contract={mode}{extra}"
@@ -1645,22 +1645,30 @@ let runFoldLanesTests () : BlockResult =
                     else
                         fail $"raw-bit contract={mode}" ($"no summary line (exit {code}): {err.Trim()}")
             | _, o, e -> fail $"raw-bit contract={mode}" ($"compile failed: {(o + e).Trim()}")
-            // The assembly census: the step rule is the BUILD's, so confirm the
-            // build did what the define says.
+            // The assembly census, PER FUNCTION: only the blade_fold:: bodies
+            // (mangled `10blade_fold`) are under contract -- the harness's own
+            // generator code may fuse freely under =fast.
             match runProc "g++" $"{flags} -S -o \"{asm}\" \"{testSrc}\"" 180000 with
             | Some 0, _, _ ->
                 let lines = File.ReadAllLines asm
-                let count (pat: string) = lines |> Array.filter (fun l -> l.Contains pat) |> Array.length
-                let anyFma = count "vfmadd" + count "vfmsub" + count "vfnmadd"
-                let packedPd = count "vfmadd231pd" + count "vfmadd132pd" + count "vfmadd213pd"
-                let packedPs = count "vfmadd231ps" + count "vfmadd132ps" + count "vfmadd213ps"
-                if mode = "off" then
-                    if anyFma = 0 then pass "vfmadd census contract=off" "0 fused instructions in the TU (acc + x * y, two roundings)"
-                    else fail "vfmadd census contract=off" ($"{anyFma} fused instruction(s) under -ffp-contract=off")
+                let labelRx = System.Text.RegularExpressions.Regex(@"^([A-Za-z_][\w.$]*):")
+                let mutable current = ""
+                let mutable fmaIn = 0
+                let mutable addPd = 0
+                let mutable addPs = 0
+                for l in lines do
+                    let m = labelRx.Match l
+                    if m.Success && not (m.Groups.[1].Value.StartsWith ".L") then current <- m.Groups.[1].Value
+                    elif current.Contains "10blade_fold" then
+                        if l.Contains "vfmadd" || l.Contains "vfmsub" || l.Contains "vfnmadd" then fmaIn <- fmaIn + 1
+                        if l.Contains "vaddpd" then addPd <- addPd + 1
+                        if l.Contains "vaddps" then addPs <- addPs + 1
+                if fmaIn <> 0 then
+                    fail $"vfmadd census contract={mode}" ($"{fmaIn} fused instruction(s) inside blade_fold functions (a product was fused into its add)")
+                elif addPd < 8 || addPs < 8 then
+                    fail $"vfmadd census contract={mode}" ($"only {addPd} vaddpd / {addPs} vaddps inside blade_fold functions: the forms did not vectorize")
                 else
-                    // 8 lanes x (block + remainder) per double form, 3 forms with a product, 2 K values: well past 16 each.
-                    if packedPd >= 16 && packedPs >= 16 then pass "vfmadd census contract=fast" ($"{packedPd} packed vfmadd pd, {packedPs} ps (one fma per lane step)")
-                    else fail "vfmadd census contract=fast" ($"only {packedPd} pd / {packedPs} ps packed vfmadd: the forms did not fuse")
+                    pass $"vfmadd census contract={mode}" ($"0 fused instructions in blade_fold functions; {addPd} vaddpd, {addPs} vaddps (rounded product, then add)")
             | _, o, e -> fail $"vfmadd census contract={mode}" ($"-S failed: {(o + e).Trim()}")
         (try Directory.Delete(work, true) with _ -> ())
         printFooter blockName [ $"{passed} passed"; $"{failed} failed" ]

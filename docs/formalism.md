@@ -222,7 +222,7 @@ is EMITTED in its fastest licensed form by default (since 2026-10-17): an
 fold (`prodsum`, and a `(+)` fold whose body is a product of the level's
 rank-1 peels) -- the explicit K-lane VECTOR tree of `blade_fold_lanes.hpp`
 (K = 8 independent 32-byte accumulators in a fixed documented association,
-one fused multiply-add per step under the build's contraction mode; 2026-10-19,
+each product rounded before its add in every build mode; 2026-10-19,
 `BLADE_FOLD_LANES`); and, where `omp` asks and the build opens teams,
 per-thread partials that each take the same fast form inside their chunk;
 `reassoc nsz` on the accumulator in the LLVM lane. `where omp` therefore implies simd: a build that
