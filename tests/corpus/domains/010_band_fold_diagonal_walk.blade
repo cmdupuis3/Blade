@@ -1,0 +1,35 @@
+// TEST: Closed-Form Domain: A Licensed Band Fold Walks By Diagonal
+// A LICENSED fold over a band -- two fields, the inner one held to the outer
+// from both sides with unit slope -- walks the band diagonal by diagonal,
+// k = i - j outermost and a contiguous run of i inside (`blade plan`: `fold
+// form: simd-reduction; ... band walked by diagonal, k = i - j in [-5, 2]`):
+// the expert's `do k; do i` for a banded operator (bench gap G33). The cells
+// and each cell's arithmetic are the row walk's; only the summation order
+// moves, which the licence permits, so every pin here sums integer-valued
+// terms and reads the same under any order. The band is asymmetric
+// (-2 <= j - i <= 5) and its box is not square (i in [0, 10], j in [2, 15]),
+// which is what the diagonal bounds max(0, 2 + k) .. min(10, 15 + k) must get
+// right: 78 cells. A kernel that reads a MATRIX at (i, j) keeps the row walk
+// (a diagonal strides it by a row); its value is the same either way.
+let static n = 9
+type Nx = Idx<n>
+
+static struct Skew {
+    i: Int64<min=0, max=10>,
+    j: Int64<min=2, max=15>
+} where j - i <= 5 && i - j <= 2
+
+static struct Band {
+    i: Int64<min=0, max=n-1>,
+    j: Int64<min=0, max=n-1>
+} where abs(i - j) <= 2
+
+let cells = reduce(method_for(range<Skew>) <@> lambda(i, j) -> 1.0, lambda(p, q) where omp -> p + q, 0.0)
+// EXPECT: cells = 78.0
+let lex = reduce(method_for(range<Skew>) <@> lambda(i, j) -> Float64(i * 100 + j), lambda(p, q) where omp -> p + q, 0.0)
+// EXPECT: lex = 43572.0
+let offs = reduce(method_for(range<Skew>) <@> lambda(i, j) -> Float64(i - j) * Float64(i - j + 1), lambda(p, q) where omp -> p + q, 0.0)
+// EXPECT: offs = 498.0
+let A = method_for(range<Nx>, range<Nx>) <@> lambda(r, c) -> Float64(r * n + c) |> compute
+let mat = reduce(method_for(range<Band>) <@> lambda(i, j) -> A((i : Nx), (j : Nx)), lambda(p, q) where omp -> p + q, 0.0)
+// EXPECT: mat = 1560.0

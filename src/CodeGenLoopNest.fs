@@ -122,29 +122,97 @@ let genDomainLoopHeaderWith (withCounter: bool) (level: LoopIndexBinding) (plan:
 let genDomainLoopHeader (level: LoopIndexBinding) (plan: DomainPlan) : string =
     genDomainLoopHeaderWith true level plan
 
-/// The same nest split for a vectorized FOLD: the outer fields' single-line
-/// header (None at rank 1), the innermost field's hoisted upper end, the
-/// innermost header in OpenMP canonical form (no counter), and the outer close.
-/// The caller puts its `omp simd reduction` pragma between the last two.
-let genDomainFoldNest (level: LoopIndexBinding) (plan: DomainPlan)
-        : string option * string * string * string option =
-    let r = plan.Levels.Length
+/// The LICENSED fold over a closed-form domain, as C++ statements (unindented,
+/// one block): the walk `order` chooses (domainFoldOrder) with the licence
+/// spent as `omp simd reduction` on the innermost run, the nest carrying no
+/// cell counter so that run stays in OpenMP canonical form.
+///
+/// `threaded` (bench gap G31: a `where omp` fold kernel, threads emitted, the
+/// licence live) wraps the nest in one explicit team with PRIVATE partials and
+/// a FIXED-ORDER combine, Path B's discipline: the OUTERMOST enumerated
+/// variable (k on a diagonal walk, the first field otherwise) is cut into
+/// contiguous per-thread blocks, and when the team outnumbers its trips the
+/// innermost run of every outer value is cut instead -- so a 3-diagonal band
+/// still splits across 8 threads. Partials combine in thread order after the
+/// region: for a given team size the value is a fixed function of the data,
+/// run to run. The outermost level's bounds are constants by construction
+/// (nothing encloses it), which is what lets it be partitioned up front.
+let genDomainFoldCpp (level: LoopIndexBinding) (plan: DomainPlan) (order: DomainFoldOrder)
+        (name: string) (elemStr: string) (opStr: string) (threaded: bool)
+        (prelude: string list) (peels: string list) (bodyExpr: string) : string list =
     let v = domainFieldVar level
-    let lvls = Array.ofList plan.Levels
-    let outer =
-        if r = 1 then None
+    let plus (c: int64) = if c = 0L then "" elif c < 0L then $" - {-c}LL" else $" + {c}LL"
+    // (variable, lower end, upper end) per nesting level, the outermost's
+    // constant ends, and the statements that open the innermost body.
+    let levels, outerLo, outerHi, innerPost =
+        match order with
+        | DomainDiagonalOrder dg ->
+            let kv = $"{level.IndexName}_k"
+            [ (kv, $"{dg.KLo}LL", $"{dg.KHi}LL")
+              (v 0, $"std::max<int64_t>({dg.ILo}LL, {kv}{plus dg.JLo})", $"std::min<int64_t>({dg.IHi}LL, {kv}{plus dg.JHi})") ],
+            dg.KLo, dg.KHi, [ $"const int64_t {v 1} = {v 0} - {kv};" ]
+        | DomainLexOrder _ ->
+            let lv0 = List.head plan.Levels
+            let zeros = Array.zeroCreate<int64> plan.Levels.Length
+            (plan.Levels |> List.mapi (fun k lvl -> (v k, domainBoundCpp v true lvl.Lo, domainBoundCpp v false lvl.Hi))),
+            Blade.Types.domainLower lv0.Lo zeros, Blade.Types.domainUpper lv0.Hi zeros, []
+    let r = levels.Length
+    let acc = if threaded then "__dacc" else name
+    let pad (d: int) (s: string) = String.replicate d "    " + s
+    let body (d: int) =
+        (innerPost @ peels |> List.map (pad d)) @ [ pad d $"{acc} = {acc} {opStr} {bodyExpr};" ]
+    // The nest from level `k` down, at depth `d`.
+    let rec nest (k: int) (d: int) : string list =
+        let (var, lo, hi) = levels.[k]
+        let e = $"{level.IndexName}_e{k}"
+        let isOuter = k = 0 && threaded
+        if k = r - 1 then
+            let header =
+                if isOuter then
+                    [ pad d $"BLADE_OMP_SIMD_REDUCTION({opStr}:{acc})"
+                      pad d $"for (int64_t {var} = __olo; {var} < __ohi; ++{var}) {{" ]
+                elif threaded then
+                    [ pad d $"int64_t {var}_lo = {lo};"
+                      pad d $"int64_t {e} = {hi};"
+                      pad d $"if (!__byOuter && {e} >= {var}_lo) {{ const int64_t __s = {var}_lo, __len = {e} - __s + 1; {var}_lo = __s + (__len * __rt) / __rnt; {e} = __s + (__len * (__rt + 1)) / __rnt - 1; }}"
+                      pad d $"BLADE_OMP_SIMD_REDUCTION({opStr}:{acc})"
+                      pad d $"for (int64_t {var} = {var}_lo; {var} <= {e}; ++{var}) {{" ]
+                else
+                    [ pad d $"const int64_t {e} = {hi};"
+                      pad d $"BLADE_OMP_SIMD_REDUCTION({opStr}:{acc})"
+                      pad d $"for (int64_t {var} = {lo}; {var} <= {e}; ++{var}) {{" ]
+            header @ body (d + 1) @ [ pad d "}" ]
         else
-            [ 0 .. r - 2 ]
-            |> List.map (fun k ->
-                let e = $"{level.IndexName}_e{k}"
-                $"for (int64_t {v k} = {domainBoundCpp v true lvls.[k].Lo}, {e} = {domainBoundCpp v false lvls.[k].Hi}; {v k} <= {e}; ++{v k})")
-            |> String.concat " "
-            |> fun s -> Some (s + " {")
-    let k = r - 1
-    let e = $"{level.IndexName}_e{k}"
-    let innerDecl = $"const int64_t {e} = {domainBoundCpp v false lvls.[k].Hi};"
-    let innerHeader = $"for (int64_t {v k} = {domainBoundCpp v true lvls.[k].Lo}; {v k} <= {e}; ++{v k}) {{"
-    (outer, innerDecl, innerHeader, (if r = 1 then None else Some "}"))
+            let header =
+                if isOuter then pad d $"for (int64_t {var} = __olo; {var} < __ohi; ++{var}) {{"
+                else pad d $"for (int64_t {var} = {lo}, {e} = {hi}; {var} <= {e}; ++{var}) {{"
+            [ header ] @ nest (k + 1) (d + 1) @ [ pad d "}" ]
+    if not threaded then
+        [ "{" ] @ (prelude |> List.map (pad 1)) @ nest 0 1 @ [ "}" ]
+    else
+        (ompApiUsedCell ()).Value <- true
+        let ident = if opStr = "*" then $"static_cast<{elemStr}>(1)" else $"static_cast<{elemStr}>(0)"
+        [ "{" ]
+        @ (prelude |> List.map (pad 1))
+        @ [ pad 1 $"const int64_t __dlo = {outerLo}LL, __dn = {outerHi - outerLo + 1L}LL;"
+            pad 1 "int __dT = blade_omp_get_max_threads();"
+            pad 1 "if (__dT < 1) __dT = 1;"
+            pad 1 $"{elemStr}* __dpart = new {elemStr}[__dT];"
+            pad 1 $"for (int __t = 0; __t < __dT; ++__t) __dpart[__t] = {ident};"
+            pad 1 "BLADE_OMP_PARALLEL_NUM_THREADS(__dT)"
+            pad 1 "{"
+            pad 2 "const int __rnt = blade_omp_get_num_threads();"
+            pad 2 "const int __rt = blade_omp_get_thread_num();"
+            pad 2 (if r = 1 then "const bool __byOuter = true;" else "const bool __byOuter = __dn >= (int64_t)__rnt;")
+            pad 2 "const int64_t __olo = __byOuter ? __dlo + (__dn * __rt) / __rnt : __dlo;"
+            pad 2 "const int64_t __ohi = __byOuter ? __dlo + (__dn * (__rt + 1)) / __rnt : __dlo + __dn;"
+            pad 2 $"{elemStr} __dacc = {ident};" ]
+        @ nest 0 2
+        @ [ pad 2 "if (__rt < __dT) __dpart[__rt] = __dacc;"
+            pad 1 "}"
+            pad 1 $"for (int __t = 0; __t < __dT; ++__t) {name} = {name} {opStr} __dpart[__t];"
+            pad 1 "delete[] __dpart;"
+            "}" ]
 
 /// `blade plan` / comment text for a plan's bounds: `i in [0, 10], j in
 /// [max(0, i - 2), min(10, i + 2)]` in the struct's own field names.

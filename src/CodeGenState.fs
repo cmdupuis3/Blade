@@ -724,6 +724,14 @@ let fpReproReason () : string =
 /// `fpContractFlag` are functions. Every consultation re-reads.
 let fpReassocEnabled () : bool = not (fpReproEnabled ())
 
+/// `BLADE_DOMAIN_DIAGONAL`: unset/`1`/`on` lets a LICENSED fold over a band
+/// domain walk it by diagonal (`Types.domainDiagonal`; both lanes), `0`/`off`
+/// keeps the row-major affine nest, for A/B. Inert under BLADE_FP_REPRO=1,
+/// whose folds keep the lex order. Changes the emission, so the exe cache keys
+/// on it for free. A function, re-read per call, like every knob here.
+let domainDiagonalEnabled () : bool =
+    Blade.Toolchain.envSwitch "BLADE_DOMAIN_DIAGONAL" <> Blade.Toolchain.SwitchOff
+
 /// The one EXPLICIT spelling `BLADE_FP_REASSOC=1` (unset does not count),
 /// for the single consumer whose reassociation is NOT a source licence: the
 /// Reynolds term merger (`canonicalKey`), which may flatten a float `+`/`*`

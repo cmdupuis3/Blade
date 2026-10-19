@@ -27,9 +27,9 @@
   ],
   "hypothesis": {
     "natural": "win 10x+ (the natural tier is the n^2 predicate nest, a straw man by construction)",
-    "expert": "parity on blade-llvm (vectorized inner loop); LOSS on blade-cpp (inner loop scalar, G30)"
+    "expert": "parity in both lanes: licensed folds walk the band by diagonal (k = i - j outer) as the licensed expert does, with phi hoisted per diagonal by the back end (G33); repro keeps the lex order with the terms vectorized and summed in order (G30)"
   },
-  "notes": "Scalar output; no inputonly twin (input ~0%). Full-size cell count is 4,051,931. mt8: the closed-form domain nest has no thread-level form yet ([omp v1] kernel: declined, G31), so Blade cells read 'no parallel form'; Fortran arms thread the outer loop.",
+  "notes": "Scalar output; no inputonly twin (input ~0%). Full-size cell count is 4,051,931. mt8: blade-cpp threads the domain fold on one team, the diagonal index k cut into fixed per-thread blocks with a fixed-order combine (G31); blade-llvm has no thread-level form; Fortran arms thread the outer loop.",
   "arms": [
     "blade-llvm",
     "blade-cpp",
@@ -38,6 +38,5 @@
     "ifx-natural",
     "ifx-expert"
   ],
-  "source_of_truth": "bench/kernels/band/spec.md + bench/notes/kernel-list.md (2026-10-18)",
-  "no_parallel_form": true
+  "source_of_truth": "bench/kernels/band/spec.md + bench/notes/kernel-list.md (2026-10-18)"
 }

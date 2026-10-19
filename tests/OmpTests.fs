@@ -1522,6 +1522,14 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
         // Compound (masked) operand: reduce walks the flat `.data` buffer of
         // present cells, which is the OTHER contiguous 1-D sweep Path A covers.
         let maskDecl = "let m = mask(A, lambda(x) -> x > 1.0)\nlet C = compound(A, m)\n"
+        // A fold over a closed-form domain of n x n with conjunct `conj`, its
+        // kernel the bench band's coefficient on non-integer data.
+        let domainSrc (n: int) (w: int) (conj: string) (foldKernel: string) =
+            $"let static n = {n}\nlet static w = {w}\ntype Pts = Idx<n>\n"
+            + "static struct D {\n    i: Int64<min=0, max=n-1>,\n    j: Int64<min=0, max=n-1>\n} where " + conj + "\n"
+            + "let x = 1.0 / (1.0 + Float64(0..n))\n"
+            + "function phi(i: Int64, j: Int64) -> Float64 = {\n    let d = Float64(i - j)\n    (2.0 + d / Float64(w + 1)) / (1.0 + d * d)\n}\n"
+            + $"let s = reduce(method_for(range<D>) <@> lambda(i, j) -> phi(i, j) * x((i : Pts)) * x((j : Pts)), {foldKernel}, 0.0)\n"
 
         // The orbit-fold programs, parameterized by the OUTER fold kernel.
         let orbitSym2 (outer: string) =
@@ -1579,7 +1587,25 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
               ("orbit_fold_threaded_sym2",
                orbitSym2 "lambda(u, v) where omp -> u + v", orbitSym2 "(+)", true)
               ("orbit_fold_threaded_antisym3_general",
-               orbitAnti3 "lambda(u, v) where omp -> u + v", orbitAnti3 "(+)", true) ]
+               orbitAnti3 "lambda(u, v) where omp -> u + v", orbitAnti3 "(+)", true)
+              // A CLOSED-FORM DOMAIN fold (bench gap G31): one team, the
+              // outermost enumerated variable in fixed per-thread blocks, a
+              // fixed-order combine -- deterministic like Path B. The band walks
+              // by diagonal (k outer); w = 1 gives 3 diagonals, fewer than the
+              // 4-thread team, so each diagonal's run is the thing cut; the
+              // triangle is not a band and threads its lex nest's first field.
+              ("domain_band_diagonal_threaded",
+               domainSrc 997 13 "abs(i - j) <= w" "lambda(p, q) where omp -> p + q",
+               domainSrc 997 13 "abs(i - j) <= w" "lambda(p, q) -> p + q",
+               true)
+              ("domain_band_fewer_diagonals_than_team",
+               domainSrc 997 1 "abs(i - j) <= w" "lambda(p, q) where omp -> p + q",
+               domainSrc 997 1 "abs(i - j) <= w" "lambda(p, q) -> p + q",
+               true)
+              ("domain_triangle_lex_threaded",
+               domainSrc 401 0 "i < j" "lambda(p, q) where omp -> p + q",
+               domainSrc 401 0 "i < j" "lambda(p, q) -> p + q",
+               true) ]
 
         for (name, ompSrc, serialSrc, isPathB) in cases do
             match compileProgram outputDir (name + "_omp") ompSrc,

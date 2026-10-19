@@ -941,6 +941,10 @@ and private Ctx =
       /// bindings ITS value names too (the C++ lane's `forceDeferredArrayInput`
       /// recursion), and each of those then prints.
       mutable BindingValues: Map<IRId, IRExpr>
+      /// Each virtual domain map's kernel body, keyed by its AVirt producer
+      /// closure (by reference): what a fold over it hands domainFoldOrder, the
+      /// order decision the C++ lane and `blade plan` share.
+      DomainMapBodies: Dictionary<obj, IRExpr>
       /// Callables currently being inlined (capturing callees), so a
       /// recursive one refuses instead of expanding forever.
       Inlining: HashSet<IRId>
@@ -1068,6 +1072,7 @@ let private newCtx (callables: Map<IRId, IRCallable>) (facts: ModuleFacts) =
       TupleSlots = Dictionary()
       Forced = HashSet()
       BindingValues = Map.empty
+      DomainMapBodies = Dictionary(HashIdentity.Reference)
       Inlining = HashSet()
       ModuleReads = Dictionary()
       PublishWanted = HashSet()
@@ -1746,6 +1751,21 @@ let private emitDomainNest (c: Ctx) (plan: DomainPlan) (body: Val list -> Val ->
                 let v = match tryLitI64 lo with Some 0L -> t | _ -> i64Bin c "add" lo t
                 go (k + 1) (xs @ [ v ]))
     go 0 []
+
+/// A band's DIAGONAL walk (Types.domainDiagonal): k over [KLo, KHi], then the
+/// outer field i over [max(ILo, JLo + k), min(IHi, JHi + k)] with j = i - k.
+/// No cell counter: only a licensed fold over the virtual map takes it, and a
+/// fold has no output to address.
+let private emitDomainDiagonalNest (c: Ctx) (dg: DomainDiagonal) (body: Val list -> unit) : unit =
+    emitCountedLoopTo c (string (dg.KHi - dg.KLo + 1L)) (fun t ->
+        let k = if dg.KLo = 0L then t else i64Bin c "add" t (string dg.KLo)
+        let lo = domainBoundReg c true [ { Const = dg.ILo; Coefs = [] }; { Const = dg.JLo; Coefs = [ (0, 1L) ] } ] [| k |]
+        let hi = domainBoundReg c false [ { Const = dg.IHi; Coefs = [] }; { Const = dg.JHi; Coefs = [ (0, 1L) ] } ] [| k |]
+        let trips = i64Bin c "add" (i64Bin c "sub" hi lo) "1"
+        emitCountedLoopTo c trips (fun u ->
+            let i = i64Bin c "add" lo u
+            let j = i64Bin c "sub" i k
+            body [ { Reg = i; Ty = ScI64 }; { Reg = j; Ty = ScI64 } ]))
 
 /// The prefix tables of a plan's lex rank: `firsts.[k].[q]` is the rank, among
 /// the level-(k+1) prefixes, of the first child of level-k prefix q (prefixes
@@ -3298,7 +3318,9 @@ and private emitUnary (c: Ctx) (op: IRUnaryOp) (x: IRExpr) : Val =
     // covers the Float64/Int64 targets; the widths this lane has no scalar
     // for (Float32/Int32/complex) refuse like every other Float32/complex
     // program does.
-    | IRCast (ETFloat64, _) -> coerce c ScF64 (emitExpr c x)
+    | IRCast (ETFloat64, _) ->
+        let v = emitExpr c x
+        if v.Ty = ScI64 then emitI64ToF64 c v else coerce c ScF64 v
     // Float -> Int64 is the checked conversion of the arithmetic contract:
     // NaN / out of range panics BL8014 (blade_f2i64), where fptosi is poison.
     | IRCast (ETInt64, loc) ->
@@ -3306,6 +3328,32 @@ and private emitUnary (c: Ctx) (op: IRUnaryOp) (x: IRExpr) : Val =
         if v.Ty = ScF64 then callShim c "blade_f2i64" ScI64 ([ ScF64, v.Reg ] @ faultLocArgs c loc)
         else coerce c ScI64 v
     | IRCast (et, _) -> refuse ($"a numeric cast to {(Blade.Types.castNameOf et)}")
+
+/// `Float64(x)` of an Int64: the exact split conversion, the twin of the C++
+/// lane's blade_arith::i64_to_f64 (blade_runtime.hpp, which carries the
+/// exactness argument). A plain `sitofp i64` has no AVX2 packed form, so a
+/// vectorized loop holding one SCALARIZES it -- per 4 lanes four extracts, four
+/// vcvtsi2sd and the re-inserts, which was most of blade-llvm's band cell loop
+/// (bench gap G33). Here the high word converts through `sitofp i32` and the
+/// low word through the 2^52 magic exponent, both packed. Only `contract` may
+/// ride the arithmetic (an fma of the last two steps rounds the same exact
+/// value once); `reassoc` would regroup it around the magic constant, so a
+/// fold kernel's FoldFmf is deliberately NOT applied.
+and private emitI64ToF64 (c: Ctx) (v: Val) : Val =
+    let fl = if factEnabled factFmf && contractLicensed () then " contract" else ""
+    let step (rhs: string) =
+        let d = freshReg c
+        ln c ($"{d} = {rhs}")
+        d
+    let hi = step ($"lshr i64 {v.Reg}, 32")
+    let hi32 = step ($"trunc i64 {hi} to i32")
+    let hiD = step ($"sitofp i32 {hi32} to double")
+    let lo = step ($"and i64 {v.Reg}, 4294967295")
+    let loBits = step ($"or i64 {lo}, 4841369599423283200")
+    let loMagic = step ($"bitcast i64 {loBits} to double")
+    let loD = step ($"fsub{fl} double {loMagic}, {(f64Const 4503599627370496.0)}")
+    let hiScaled = step ($"fmul{fl} double {hiD}, {(f64Const 4294967296.0)}")
+    { Reg = step ($"fadd{fl} double {hiScaled}, {loD}"); Ty = ScF64 }
 
 and private callLibm1 (c: Ctx) (fn: string) (arg: Val) : Val =
     need c ($"declare double @{fn}(double{(paramAttr ())}){(attrRef c grpExternReturns)}")
@@ -4889,8 +4937,9 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
                 match Blade.IR.stripUnits info.OutputType with
                 | ArrayElem arr -> requireScalar "a domain map's element" arr.ElemType
                 | t -> requireScalar "a domain map's result" t
-        { Elem = elem; Groups = [ GDomain plan ]; RowOpBytes = 0L
-          Src = AVirt (fun c2 xs -> coerce c2 elem (applyKernel c2 cl (xs |> List.map KScalar))) }
+        let produce = fun c2 xs -> coerce c2 elem (applyKernel c2 cl (xs |> List.map KScalar))
+        c.DomainMapBodies.[box produce] <- cl.Body
+        { Elem = elem; Groups = [ GDomain plan ]; RowOpBytes = 0L; Src = AVirt produce }
     // Every OTHER tabulated range -- a table-enumerated static struct (its
     // conjuncts are not linear, so there is no affine nest) or a SparseIdx key
     // list -- iterates a runtime key index this lane does not build.
@@ -5461,6 +5510,26 @@ and private emitReduce (c: Ctx) (arrExpr: IRExpr) (kernelExpr: IRExpr) (initExpr
         let seededLit = if seeded then "true" else "false"
         ln c ($"store i1 {seededLit}, ptr {have}")
         let licensed = foldFmfDecorable cl
+        // THE ORDER: the C++ lane's decision (CodeGenExprSupport.domainFoldOrder),
+        // so a band under the licence walks by diagonal in both lanes. A seeded
+        // fold over the VIRTUAL map only (a pool folds in pool order).
+        let diagonal =
+            match a.Src with
+            | AVirt produce when seeded && licensed ->
+                let body = match c.DomainMapBodies.TryGetValue (box produce) with | true, b -> Some b | _ -> None
+                (match Blade.CodeGenExprSupport.domainFoldOrder (Some cl) body plan with
+                 | Blade.CodeGenExprSupport.DomainDiagonalOrder dg -> Some dg
+                 | Blade.CodeGenExprSupport.DomainLexOrder _ -> None)
+            | _ -> None
+        match diagonal with
+        | Some dg ->
+            emitDomainDiagonalNest c dg (fun idxs ->
+                let cell = readCell c a idxs
+                let cur = loadSlot c acc accTy
+                let next = withFoldFmf c licensed (fun () -> coerce c accTy (applyKernel c cl [ KScalar cur; KScalar cell ]))
+                ln c ($"store {(llTy accTy)} {next.Reg}, ptr {acc}"))
+            loadSlot c acc accTy
+        | None ->
         emitDomainNest c plan (fun idxs off ->
             let cell =
                 match a.Src with
@@ -5842,6 +5911,32 @@ and private emitReduceCompute (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExpr) (
         | [ (a, cl, ty, _, _) ] -> [ emitCompactFold c a cl ty (Some (List.head seeds)) ]
         | _ -> refuse "a fused reduction join over compact (symmetric/antisymmetric) storage"
     else
+    // THE ORDER: the C++ lane's decision (CodeGenExprSupport.domainFoldOrder).
+    // ONE leg only, as there: a fused join of several folds keeps the lex nest
+    // (lade plan says so), so the lanes never walk different orders.
+    let diagonal =
+        match domainShape, plans with
+        | Some plan, [ (a, cl, _, _, licensed) ] when licensed && kernels.Length = 1 ->
+            (match a.Src with
+             | AVirt produce ->
+                 let body = match c.DomainMapBodies.TryGetValue (box produce) with | true, b -> Some b | _ -> None
+                 (match Blade.CodeGenExprSupport.domainFoldOrder (Some cl) body plan with
+                  | Blade.CodeGenExprSupport.DomainDiagonalOrder dg -> Some dg
+                  | Blade.CodeGenExprSupport.DomainLexOrder _ -> None)
+             | _ -> None)
+        | _ -> None
+    match domainShape, diagonal with
+    | Some _, Some dg ->
+        emitDomainDiagonalNest c dg (fun idxs ->
+            for (a, cl, ty, slot, licensed) in plans do
+                let cur = loadSlot c slot ty
+                let cell = readCell c a idxs
+                let next =
+                    withFoldFmf c licensed (fun () ->
+                        coerce c ty (applyKernel c cl [ KScalar cur; KScalar cell ]))
+                ln c ($"store {(llTy ty)} {next.Reg}, ptr {slot}"))
+        plans |> List.map (fun (_, _, ty, slot, _) -> loadSlot c slot ty)
+    | _ ->
     // A CLOSED-FORM DOMAIN: the fold streams the affine nest -- no pool, no
     // key table -- accumulating in lex order exactly as the serial C++ nest
     // and the interpreter do.
