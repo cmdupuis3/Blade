@@ -2114,7 +2114,11 @@ let fuseRowFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: IRC
                 (match info.Arrays with [ IRVar (a, _) ] -> a = tId | _ -> false) ->
             if count tId e <> count tId (IRReduceCompute (IRApplyCombinator info, foldK, init)) then Some (Error "the recursion's result has another use beside the fold") else
             match block with
-            | IRLet (bufId, (IRUninit _ | IRCompute _), chain) ->
+            // The buffer is FRESH: the unfilled pool of a proved recursion,
+            // the zero former of a large one, or the nested zero literal the
+            // desugar writes for a small one (<= 4096 cells, e.g. every small
+            // `while`-guarded recursion, whose fill the freeze needs).
+            | IRLet (bufId, (IRUninit _ | IRCompute _ | IRArrayLit _), chain) ->
                 let stmts, fin = chainOf chain
                 let bufT =
                     match block with
