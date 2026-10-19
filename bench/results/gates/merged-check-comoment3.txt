@@ -1,0 +1,126 @@
+[20:08:44.028 +    0.0s] check: 1 kernel(s): comoment3; size full
+[20:08:44.078 +    0.1s] fingerprinting the machine
+[20:08:45.644 +    1.6s] power: ac, max processor state AC 100%, boost mode AC None, Power Scheme GUID: 64a64f24-65b9-4b56-befd-5ec1eaced9b3  (Silent)
+[20:08:48.111 +    4.1s] build comoment3 serial-licensed-native full blade-llvm
+[20:08:51.965 +    7.9s]   -> ok (2.0s)
+[20:08:51.965 +    8.0s] build comoment3 serial-licensed-native full blade-cpp
+[20:08:57.015 +   13.0s]   -> ok (3.4s)
+[20:08:57.015 +   13.0s] build comoment3 serial-licensed-native full gfortran-natural
+[20:08:57.764 +   13.7s]   -> ok (0.7s)
+[20:08:57.764 +   13.7s] build comoment3 serial-licensed-native full gfortran-expert
+[20:08:58.741 +   14.7s]   -> ok (0.9s)
+[20:08:58.741 +   14.7s] build comoment3 serial-licensed-native full ifx-natural
+[20:09:01.079 +   17.1s]   -> ok (2.2s)
+[20:09:01.079 +   17.1s] build comoment3 serial-licensed-native full ifx-expert
+[20:09:03.723 +   19.7s]   -> ok (2.5s)
+[20:09:03.811 +   19.8s]   blade-llvm: ok t=0.02752s checksum=80611.4613583867 input=17220.9964465201 peakWS=11.3MB
+[20:09:03.880 +   19.9s]   blade-cpp: ok t=0.009629s checksum=80611.4613583876 input=17220.9964465201 peakWS=12.6MB
+[20:09:04.566 +   20.6s]   gfortran-natural: ok t=0.6325s checksum=8.0611461358391098E+004 input=1.7220996446520090E+004 peakWS=43.5MB
+[20:09:04.646 +   20.6s]   gfortran-expert: ok t=0.01201s checksum=8.0611461358386892E+004 input=1.7220996446520090E+004 peakWS=12.3MB
+[20:09:05.469 +   21.5s]   ifx-natural: ok t=0.7456s checksum=8.0611461358391098E+004 input=1.7220996446520090E+004 peakWS=43.1MB
+[20:09:05.543 +   21.5s]   ifx-expert: ok t=0.0114s checksum=8.0611461358386892E+004 input=1.7220996446520090E+004 peakWS=11.9MB
+[20:09:05.546 +   21.5s] build comoment3 mt8-licensed-native full blade-llvm
+[20:09:09.572 +   25.6s]   -> serial-only: LLVM lane has no OpenMP (2.1s)
+[20:09:09.572 +   25.6s] build comoment3 mt8-licensed-native full blade-cpp
+[20:09:14.720 +   30.7s]   -> ok (3.5s)
+[20:09:14.720 +   30.7s] build comoment3 mt8-licensed-native full gfortran-natural
+[20:09:15.495 +   31.5s]   -> ok (0.7s)
+[20:09:15.495 +   31.5s] build comoment3 mt8-licensed-native full gfortran-expert
+[20:09:16.412 +   32.4s]   -> ok (0.8s)
+[20:09:16.412 +   32.4s] build comoment3 mt8-licensed-native full ifx-natural
+[20:09:18.907 +   34.9s]   -> ok (2.3s)
+[20:09:18.907 +   34.9s] build comoment3 mt8-licensed-native full ifx-expert
+[20:09:21.500 +   37.5s]   -> ok (2.4s)
+[20:09:21.562 +   37.5s]   blade-cpp: ok t=0.004062s checksum=80611.4613583876 input=17220.9964465201 peakWS=13.1MB
+[20:09:21.738 +   37.7s]   gfortran-natural: ok t=0.1187s checksum=8.0611461358391098E+004 input=1.7220996446520090E+004 peakWS=43.9MB
+[20:09:21.809 +   37.8s]   gfortran-expert: ok t=0.006828s checksum=8.0611461358387474E+004 input=1.7220996446520090E+004 peakWS=14.5MB
+[20:09:22.049 +   38.0s]   ifx-natural: ok t=0.1527s checksum=8.0611461358391098E+004 input=1.7220996446520090E+004 peakWS=45.5MB
+[20:09:22.122 +   38.1s]   ifx-expert: ok t=0.004515s checksum=8.0611461358387518E+004 input=1.7220996446520090E+004 peakWS=15.9MB
+[20:09:22.127 +   38.1s] build comoment3 serial-repro-native full blade-llvm
+[20:09:25.969 +   42.0s]   -> ok (2.1s)
+[20:09:25.969 +   42.0s] build comoment3 serial-repro-native full blade-cpp
+[20:09:30.832 +   46.8s]   -> ok (3.2s)
+[20:09:30.832 +   46.8s] build comoment3 serial-repro-native full gfortran-natural
+[20:09:31.565 +   47.6s]   -> ok (0.7s)
+[20:09:31.565 +   47.6s] build comoment3 serial-repro-native full gfortran-expert
+[20:09:32.459 +   48.4s]   -> ok (0.8s)
+[20:09:32.459 +   48.4s] build comoment3 serial-repro-native full ifx-natural
+[20:09:34.793 +   50.8s]   -> ok (2.2s)
+[20:09:34.793 +   50.8s] build comoment3 serial-repro-native full ifx-expert
+[20:09:37.385 +   53.4s]   -> ok (2.4s)
+[20:09:37.591 +   53.6s]   blade-llvm: ok t=0.1566s checksum=80611.4613583875 input=17220.9964465201 peakWS=11.3MB
+[20:09:37.663 +   53.6s]   blade-cpp: ok t=0.01556s checksum=80611.4613583875 input=17220.9964465201 peakWS=12.6MB
+[20:09:38.316 +   54.3s]   gfortran-natural: ok t=0.6009s checksum=8.0611461358391098E+004 input=1.7220996446520090E+004 peakWS=43.5MB
+[20:09:38.381 +   54.4s]   gfortran-expert: ok t=0.01143s checksum=8.0611461358386907E+004 input=1.7220996446520090E+004 peakWS=12.3MB
+[20:09:39.164 +   55.1s]   ifx-natural: ok t=0.7192s checksum=8.0611461358391098E+004 input=1.7220996446520090E+004 peakWS=43.1MB
+[20:09:39.240 +   55.2s]   ifx-expert: ok t=0.01144s checksum=8.0611461358386907E+004 input=1.7220996446520090E+004 peakWS=11.9MB
+
+# Blade vs Fortran -- check session 2026-10-18T20:08:44
+
+- host LAPTOP-350H6LDB | AMD Ryzen 7 5800HS with Radeon Graphics | 8C/16T | 15.41 GB | power ac | max processor state AC 100% | boost AC None | Power Scheme GUID: 64a64f24-65b9-4b56-befd-5ec1eaced9b3  (Silent)
+- git 71d98e7084fa6d5b51b4622db6b97ea3049ff3d4 | Blade.dll 79af7edce32999db | GNU Fortran (Rev4, Built by MSYS2 project) 16.2.0 | Intel(R) Fortran Compiler for applications running on Intel(R) 64, Version 2026.1.0 Build 20260617 | clang version 22.1.8 (https://github.com/msys2/MINGW-packages d34feaaa1d0aff624c870910b6f2589aa40d20de)
+- size `full` | duration 55.2 s | pins: pins-A.json, pins-B.json
+
+## serial-licensed-native
+
+Blade reference per kernel: comoment3=blade-llvm
+
+| kernel | arm | status | n | min (s) | median (s) | IQR (s) | ratio vs ref [95% CI] | verdict | hypothesis | fold form | parallelism | peak WS (MB) | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| comoment3 | blade-llvm | ok | 1 | 0.02752 | 0.02752 | 0 |  |  |  | reordered (7 reassoc flags) | serial | 11.3 |  |
+| comoment3 | blade-cpp | ok | 1 | 0.009629 | 0.009629 | 0 |  |  |  | reordered (6 SIMD_REDUCTION) | serial | 12.6 |  |
+| comoment3 | gfortran-natural | ok | 1 | 0.6325 | 0.6325 | 0 |  |  | WIN 4-6x (C(p+2,3) vs p^3 cells, minus checksum tax) |  | serial | 43.5 |  |
+| comoment3 | gfortran-expert | ok | 1 | 0.01201 | 0.01201 | 0 |  |  | parity to 1.3x loss |  | serial | 12.3 |  |
+| comoment3 | ifx-natural | ok | 1 | 0.7456 | 0.7456 | 0 |  |  | WIN 4-6x (C(p+2,3) vs p^3 cells, minus checksum tax) |  | serial | 43.1 |  |
+| comoment3 | ifx-expert | ok | 1 | 0.0114 | 0.0114 | 0 |  |  | parity to 1.3x loss |  | serial | 11.9 |  |
+
+## mt8-licensed-native
+
+Blade reference per kernel: comoment3=blade-cpp
+
+| kernel | arm | status | n | min (s) | median (s) | IQR (s) | ratio vs ref [95% CI] | verdict | hypothesis | fold form | parallelism | peak WS (MB) | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| comoment3 | blade-llvm | serial-only | 0 | -- | -- | -- |  |  |  | reordered (7 reassoc flags) |  |  | LLVM lane has no OpenMP |
+| comoment3 | blade-cpp | ok | 1 | 0.004062 | 0.004062 | 0 |  |  |  | reordered (5 SIMD_REDUCTION) | openmp (2 construct(s)) | 13.1 |  |
+| comoment3 | gfortran-natural | ok | 1 | 0.1187 | 0.1187 | 0 |  |  | WIN 4-6x (C(p+2,3) vs p^3 cells, minus checksum tax) |  | openmp runtime linked | 43.9 |  |
+| comoment3 | gfortran-expert | ok | 1 | 0.006828 | 0.006828 | 0 |  |  | parity to 1.3x loss |  | openmp runtime linked | 14.5 |  |
+| comoment3 | ifx-natural | ok | 1 | 0.1527 | 0.1527 | 0 |  |  | WIN 4-6x (C(p+2,3) vs p^3 cells, minus checksum tax) |  | openmp runtime linked | 45.5 |  |
+| comoment3 | ifx-expert | ok | 1 | 0.004515 | 0.004515 | 0 |  |  | parity to 1.3x loss |  | openmp runtime linked | 15.9 |  |
+
+## serial-repro-native
+
+Blade reference per kernel: comoment3=blade-llvm
+
+| kernel | arm | status | n | min (s) | median (s) | IQR (s) | ratio vs ref [95% CI] | verdict | hypothesis | fold form | parallelism | peak WS (MB) | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| comoment3 | blade-llvm | ok | 1 | 0.1566 | 0.1566 | 0 |  |  |  | in-order | serial | 11.3 |  |
+| comoment3 | blade-cpp | ok | 1 | 0.01556 | 0.01556 | 0 |  |  |  | in-order | serial | 12.6 |  |
+| comoment3 | gfortran-natural | ok | 1 | 0.6009 | 0.6009 | 0 |  |  | WIN 4-6x (C(p+2,3) vs p^3 cells, minus checksum tax) |  | serial | 43.5 |  |
+| comoment3 | gfortran-expert | ok | 1 | 0.01143 | 0.01143 | 0 |  |  | parity to 1.3x loss |  | serial | 12.3 |  |
+| comoment3 | ifx-natural | ok | 1 | 0.7192 | 0.7192 | 0 |  |  | WIN 4-6x (C(p+2,3) vs p^3 cells, minus checksum tax) |  | serial | 43.1 |  |
+| comoment3 | ifx-expert | ok | 1 | 0.01144 | 0.01144 | 0 |  |  | parity to 1.3x loss |  | serial | 11.9 |  |
+
+[20:09:39.251 +   55.2s] wrote C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\.build\sessions\2026-10-18-LAPTOP-350H6LDB\session-200844-check
+comoment3 serial-licensed-native size=full {'p': 171, 'n': 201} reference=pin pins-A.json
+  blade-llvm                   ok               checksum=80611.4613583867  input_checksum=17220.9964465201  t=0.0275192999979481
+  blade-cpp                    ok               checksum=80611.4613583876  input_checksum=17220.9964465201  t=0.0096289
+  gfortran-natural             ok               checksum=8.0611461358391098E+004  input_checksum=1.7220996446520090E+004  t=0.6325339
+  gfortran-expert              ok               checksum=8.0611461358386892E+004  input_checksum=1.7220996446520090E+004  t=0.0120108
+  ifx-natural                  ok               checksum=8.0611461358391098E+004  input_checksum=1.7220996446520090E+004  t=0.7456379
+  ifx-expert                   ok               checksum=8.0611461358386892E+004  input_checksum=1.7220996446520090E+004  t=0.0114017
+comoment3 mt8-licensed-native size=full {'p': 171, 'n': 201} reference=pin pins-A.json
+  blade-llvm                   serial-only      checksum=None  input_checksum=None  t=None  [LLVM lane has no OpenMP]
+  blade-cpp                    ok               checksum=80611.4613583876  input_checksum=17220.9964465201  t=0.004062
+  gfortran-natural             ok               checksum=8.0611461358391098E+004  input_checksum=1.7220996446520090E+004  t=0.1187035
+  gfortran-expert              ok               checksum=8.0611461358387474E+004  input_checksum=1.7220996446520090E+004  t=0.0068275
+  ifx-natural                  ok               checksum=8.0611461358391098E+004  input_checksum=1.7220996446520090E+004  t=0.1527416
+  ifx-expert                   ok               checksum=8.0611461358387518E+004  input_checksum=1.7220996446520090E+004  t=0.0045146
+comoment3 serial-repro-native size=full {'p': 171, 'n': 201} reference=pin pins-A.json
+  blade-llvm                   ok               checksum=80611.4613583875  input_checksum=17220.9964465201  t=0.156583399992087
+  blade-cpp                    ok               checksum=80611.4613583875  input_checksum=17220.9964465201  t=0.0155612
+  gfortran-natural             ok               checksum=8.0611461358391098E+004  input_checksum=1.7220996446520090E+004  t=0.6009104
+  gfortran-expert              ok               checksum=8.0611461358386907E+004  input_checksum=1.7220996446520090E+004  t=0.0114279
+  ifx-natural                  ok               checksum=8.0611461358391098E+004  input_checksum=1.7220996446520090E+004  t=0.7191534
+  ifx-expert                   ok               checksum=8.0611461358386907E+004  input_checksum=1.7220996446520090E+004  t=0.011442
+[20:09:39.263 +   55.2s] exit 0: 0 failure(s), 0 flag(s)
+exit 0

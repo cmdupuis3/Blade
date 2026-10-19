@@ -1,0 +1,126 @@
+[20:07:38.896 +    0.0s] check: 1 kernel(s): antisym; size full
+[20:07:38.945 +    0.1s] fingerprinting the machine
+[20:07:40.491 +    1.6s] power: ac, max processor state AC 100%, boost mode AC None, Power Scheme GUID: 64a64f24-65b9-4b56-befd-5ec1eaced9b3  (Silent)
+[20:07:42.956 +    4.1s] build antisym serial-licensed-native full blade-llvm
+[20:07:46.896 +    8.0s]   -> ok (2.1s)
+[20:07:46.896 +    8.0s] build antisym serial-licensed-native full blade-cpp
+[20:07:52.018 +   13.1s]   -> ok (3.4s)
+[20:07:52.018 +   13.1s] build antisym serial-licensed-native full gfortran-natural
+[20:07:52.780 +   13.9s]   -> ok (0.7s)
+[20:07:52.780 +   13.9s] build antisym serial-licensed-native full gfortran-expert
+[20:07:53.680 +   14.8s]   -> ok (0.8s)
+[20:07:53.680 +   14.8s] build antisym serial-licensed-native full ifx-natural
+[20:07:56.111 +   17.2s]   -> ok (2.3s)
+[20:07:56.111 +   17.2s] build antisym serial-licensed-native full ifx-expert
+[20:07:58.654 +   19.8s]   -> ok (2.4s)
+[20:07:58.776 +   19.9s]   blade-llvm: ok t=0.07252s checksum=57760462.7106086 input=481149.43540513 peakWS=17.5MB
+[20:07:58.861 +   20.0s]   blade-cpp: ok t=0.02844s checksum=57760462.7106087 input=481149.43540513 peakWS=25.7MB
+[20:07:59.685 +   20.8s]   gfortran-natural: ok t=0.7736s checksum=5.7760462710610434E+007 input=4.8114943540512957E+005 peakWS=23.5MB
+[20:07:59.770 +   20.9s]   gfortran-expert: ok t=0.03109s checksum=5.7760462710608885E+007 input=4.8114943540512957E+005 peakWS=32.7MB
+[20:08:00.172 +   21.3s]   ifx-natural: ok t=0.3395s checksum=5.7760462710610464E+007 input=4.8114943540512957E+005 peakWS=23.0MB
+[20:08:00.266 +   21.4s]   ifx-expert: ok t=0.02924s checksum=5.7760462710608885E+007 input=4.8114943540512957E+005 peakWS=32.3MB
+[20:08:00.270 +   21.4s] build antisym mt8-licensed-native full blade-llvm
+[20:08:04.192 +   25.3s]   -> serial-only: LLVM lane has no OpenMP (2.1s)
+[20:08:04.192 +   25.3s] build antisym mt8-licensed-native full blade-cpp
+[20:08:09.281 +   30.4s]   -> ok (3.4s)
+[20:08:09.281 +   30.4s] build antisym mt8-licensed-native full gfortran-natural
+[20:08:10.101 +   31.2s]   -> ok (0.7s)
+[20:08:10.101 +   31.2s] build antisym mt8-licensed-native full gfortran-expert
+[20:08:11.082 +   32.2s]   -> ok (0.9s)
+[20:08:11.082 +   32.2s] build antisym mt8-licensed-native full ifx-natural
+[20:08:13.490 +   34.6s]   -> ok (2.3s)
+[20:08:13.490 +   34.6s] build antisym mt8-licensed-native full ifx-expert
+[20:08:15.962 +   37.1s]   -> ok (2.3s)
+[20:08:16.033 +   37.2s]   blade-cpp: ok t=0.009038s checksum=57760462.7106087 input=481149.43540513 peakWS=26.3MB
+[20:08:16.200 +   37.3s]   gfortran-natural: ok t=0.1142s checksum=5.7760462710610434E+007 input=4.8114943540512957E+005 peakWS=23.9MB
+[20:08:16.261 +   37.4s]   gfortran-expert: ok t=0.008981s checksum=5.7760462710608907E+007 input=4.8114943540512957E+005 peakWS=33.2MB
+[20:08:16.407 +   37.5s]   ifx-natural: ok t=0.07375s checksum=5.7760462710610464E+007 input=4.8114943540512957E+005 peakWS=25.4MB
+[20:08:16.487 +   37.6s]   ifx-expert: ok t=0.009876s checksum=5.7760462710608900E+007 input=4.8114943540512957E+005 peakWS=34.7MB
+[20:08:16.492 +   37.6s] build antisym serial-repro-native full blade-llvm
+[20:08:20.223 +   41.3s]   -> ok (2.0s)
+[20:08:20.223 +   41.3s] build antisym serial-repro-native full blade-cpp
+[20:08:25.076 +   46.2s]   -> ok (3.2s)
+[20:08:25.076 +   46.2s] build antisym serial-repro-native full gfortran-natural
+[20:08:25.815 +   46.9s]   -> ok (0.7s)
+[20:08:25.815 +   46.9s] build antisym serial-repro-native full gfortran-expert
+[20:08:26.674 +   47.8s]   -> ok (0.8s)
+[20:08:26.675 +   47.8s] build antisym serial-repro-native full ifx-natural
+[20:08:29.016 +   50.1s]   -> ok (2.2s)
+[20:08:29.016 +   50.1s] build antisym serial-repro-native full ifx-expert
+[20:08:31.545 +   52.7s]   -> ok (2.4s)
+[20:08:32.104 +   53.2s]   blade-llvm: ok t=0.5072s checksum=57760462.7106089 input=481149.43540513 peakWS=17.5MB
+[20:08:32.190 +   53.3s]   blade-cpp: ok t=0.02961s checksum=57760462.7106089 input=481149.43540513 peakWS=25.7MB
+[20:08:33.015 +   54.1s]   gfortran-natural: ok t=0.7711s checksum=5.7760462710610434E+007 input=4.8114943540512957E+005 peakWS=23.5MB
+[20:08:33.103 +   54.2s]   gfortran-expert: ok t=0.03186s checksum=5.7760462710608520E+007 input=4.8114943540512957E+005 peakWS=32.7MB
+[20:08:33.513 +   54.6s]   ifx-natural: ok t=0.347s checksum=5.7760462710610464E+007 input=4.8114943540512957E+005 peakWS=23.0MB
+[20:08:33.610 +   54.7s]   ifx-expert: ok t=0.03041s checksum=5.7760462710608520E+007 input=4.8114943540512957E+005 peakWS=32.3MB
+
+# Blade vs Fortran -- check session 2026-10-18T20:07:38
+
+- host LAPTOP-350H6LDB | AMD Ryzen 7 5800HS with Radeon Graphics | 8C/16T | 15.41 GB | power ac | max processor state AC 100% | boost AC None | Power Scheme GUID: 64a64f24-65b9-4b56-befd-5ec1eaced9b3  (Silent)
+- git 71d98e7084fa6d5b51b4622db6b97ea3049ff3d4 | Blade.dll 79af7edce32999db | GNU Fortran (Rev4, Built by MSYS2 project) 16.2.0 | Intel(R) Fortran Compiler for applications running on Intel(R) 64, Version 2026.1.0 Build 20260617 | clang version 22.1.8 (https://github.com/msys2/MINGW-packages d34feaaa1d0aff624c870910b6f2589aa40d20de)
+- size `full` | duration 54.7 s | pins: pins-A.json, pins-B.json
+
+## serial-licensed-native
+
+Blade reference per kernel: antisym=blade-llvm
+
+| kernel | arm | status | n | min (s) | median (s) | IQR (s) | ratio vs ref [95% CI] | verdict | hypothesis | fold form | parallelism | peak WS (MB) | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| antisym | blade-llvm | ok | 1 | 0.07252 | 0.07252 | 0 |  |  |  | reordered (6 reassoc flags) | serial | 17.5 |  |
+| antisym | blade-cpp | ok | 1 | 0.02844 | 0.02844 | 0 |  |  |  | reordered (5 SIMD_REDUCTION) | serial | 25.7 |  |
+| antisym | gfortran-natural | ok | 1 | 0.7736 | 0.7736 | 0 |  |  | WIN ~2x (half the cells, no diagonal) |  | serial | 23.5 |  |
+| antisym | gfortran-expert | ok | 1 | 0.03109 | 0.03109 | 0 |  |  | parity +-15% |  | serial | 32.7 |  |
+| antisym | ifx-natural | ok | 1 | 0.3395 | 0.3395 | 0 |  |  | WIN ~2x (half the cells, no diagonal) |  | serial | 23.0 |  |
+| antisym | ifx-expert | ok | 1 | 0.02924 | 0.02924 | 0 |  |  | parity +-15% |  | serial | 32.3 |  |
+
+## mt8-licensed-native
+
+Blade reference per kernel: antisym=blade-cpp
+
+| kernel | arm | status | n | min (s) | median (s) | IQR (s) | ratio vs ref [95% CI] | verdict | hypothesis | fold form | parallelism | peak WS (MB) | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| antisym | blade-llvm | serial-only | 0 | -- | -- | -- |  |  |  | reordered (6 reassoc flags) |  |  | LLVM lane has no OpenMP |
+| antisym | blade-cpp | ok | 1 | 0.009038 | 0.009038 | 0 |  |  |  | reordered (5 SIMD_REDUCTION) | openmp (2 construct(s)) | 26.3 |  |
+| antisym | gfortran-natural | ok | 1 | 0.1142 | 0.1142 | 0 |  |  | WIN ~2x (half the cells, no diagonal) |  | openmp runtime linked | 23.9 |  |
+| antisym | gfortran-expert | ok | 1 | 0.008981 | 0.008981 | 0 |  |  | parity +-15% |  | openmp runtime linked | 33.2 |  |
+| antisym | ifx-natural | ok | 1 | 0.07375 | 0.07375 | 0 |  |  | WIN ~2x (half the cells, no diagonal) |  | openmp runtime linked | 25.4 |  |
+| antisym | ifx-expert | ok | 1 | 0.009876 | 0.009876 | 0 |  |  | parity +-15% |  | openmp runtime linked | 34.7 |  |
+
+## serial-repro-native
+
+Blade reference per kernel: antisym=blade-llvm
+
+| kernel | arm | status | n | min (s) | median (s) | IQR (s) | ratio vs ref [95% CI] | verdict | hypothesis | fold form | parallelism | peak WS (MB) | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| antisym | blade-llvm | ok | 1 | 0.5072 | 0.5072 | 0 |  |  |  | in-order | serial | 17.5 |  |
+| antisym | blade-cpp | ok | 1 | 0.02961 | 0.02961 | 0 |  |  |  | in-order | serial | 25.7 |  |
+| antisym | gfortran-natural | ok | 1 | 0.7711 | 0.7711 | 0 |  |  | WIN ~2x (half the cells, no diagonal) |  | serial | 23.5 |  |
+| antisym | gfortran-expert | ok | 1 | 0.03186 | 0.03186 | 0 |  |  | parity +-15% |  | serial | 32.7 |  |
+| antisym | ifx-natural | ok | 1 | 0.347 | 0.347 | 0 |  |  | WIN ~2x (half the cells, no diagonal) |  | serial | 23.0 |  |
+| antisym | ifx-expert | ok | 1 | 0.03041 | 0.03041 | 0 |  |  | parity +-15% |  | serial | 32.3 |  |
+
+[20:08:33.623 +   54.7s] wrote C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\.build\sessions\2026-10-18-LAPTOP-350H6LDB\session-200738-check
+antisym serial-licensed-native size=full {'p': 1201, 'n': 401} reference=pin pins-A.json
+  blade-llvm                   ok               checksum=57760462.7106086  input_checksum=481149.43540513  t=0.0725234999990789
+  blade-cpp                    ok               checksum=57760462.7106087  input_checksum=481149.43540513  t=0.0284383
+  gfortran-natural             ok               checksum=5.7760462710610434E+007  input_checksum=4.8114943540512957E+005  t=0.773624
+  gfortran-expert              ok               checksum=5.7760462710608885E+007  input_checksum=4.8114943540512957E+005  t=0.0310913
+  ifx-natural                  ok               checksum=5.7760462710610464E+007  input_checksum=4.8114943540512957E+005  t=0.3395102
+  ifx-expert                   ok               checksum=5.7760462710608885E+007  input_checksum=4.8114943540512957E+005  t=0.0292441
+antisym mt8-licensed-native size=full {'p': 1201, 'n': 401} reference=pin pins-A.json
+  blade-llvm                   serial-only      checksum=None  input_checksum=None  t=None  [LLVM lane has no OpenMP]
+  blade-cpp                    ok               checksum=57760462.7106087  input_checksum=481149.43540513  t=0.0090379
+  gfortran-natural             ok               checksum=5.7760462710610434E+007  input_checksum=4.8114943540512957E+005  t=0.1141885
+  gfortran-expert              ok               checksum=5.7760462710608907E+007  input_checksum=4.8114943540512957E+005  t=0.0089812
+  ifx-natural                  ok               checksum=5.7760462710610464E+007  input_checksum=4.8114943540512957E+005  t=0.073749
+  ifx-expert                   ok               checksum=5.7760462710608900E+007  input_checksum=4.8114943540512957E+005  t=0.0098765
+antisym serial-repro-native size=full {'p': 1201, 'n': 401} reference=pin pins-A.json
+  blade-llvm                   ok               checksum=57760462.7106089  input_checksum=481149.43540513  t=0.507211200005258
+  blade-cpp                    ok               checksum=57760462.7106089  input_checksum=481149.43540513  t=0.029612
+  gfortran-natural             ok               checksum=5.7760462710610434E+007  input_checksum=4.8114943540512957E+005  t=0.7710952
+  gfortran-expert              ok               checksum=5.7760462710608520E+007  input_checksum=4.8114943540512957E+005  t=0.0318619
+  ifx-natural                  ok               checksum=5.7760462710610464E+007  input_checksum=4.8114943540512957E+005  t=0.3469898
+  ifx-expert                   ok               checksum=5.7760462710608520E+007  input_checksum=4.8114943540512957E+005  t=0.0304127
+[20:08:33.636 +   54.8s] exit 0: 0 failure(s), 0 flag(s)
+exit 0

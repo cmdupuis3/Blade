@@ -1,0 +1,125 @@
+[20:11:51.702 +    0.0s] check: 1 kernel(s): band; size full
+[20:11:51.753 +    0.1s] fingerprinting the machine
+[20:11:53.331 +    1.6s] power: ac, max processor state AC 100%, boost mode AC None, Power Scheme GUID: 64a64f24-65b9-4b56-befd-5ec1eaced9b3  (Silent)
+[20:11:55.807 +    4.1s] build band serial-licensed-native full blade-llvm
+[20:11:59.726 +    8.0s]   -> ok (2.1s)
+[20:11:59.726 +    8.0s] build band serial-licensed-native full blade-cpp
+[20:12:04.393 +   12.7s]   -> ok (2.9s)
+[20:12:04.393 +   12.7s] build band serial-licensed-native full gfortran-natural
+[20:12:05.177 +   13.5s]   -> ok (0.7s)
+[20:12:05.178 +   13.5s] build band serial-licensed-native full gfortran-expert
+[20:12:05.949 +   14.3s]   -> ok (0.7s)
+[20:12:05.949 +   14.3s] build band serial-licensed-native full ifx-natural
+[20:12:08.323 +   16.6s]   -> ok (2.2s)
+[20:12:08.323 +   16.6s] build band serial-licensed-native full ifx-expert
+[20:12:10.641 +   19.0s]   -> ok (2.2s)
+[20:12:10.698 +   19.0s]   blade-llvm: ok t=0.003296s checksum=34804.5070206005 input=10027.0169770545 peakWS=4.8MB
+[20:12:10.762 +   19.1s]   blade-cpp: ok t=0.009277s checksum=34804.5070206003 input=10027.0169770545 peakWS=5.5MB
+[20:12:11.024 +   19.3s]   gfortran-natural: ok t=0.2071s checksum=3.4804507020602949E+004 input=1.0027016977054533E+004 peakWS=5.4MB
+[20:12:11.079 +   19.4s]   gfortran-expert: ok t=0.0008144s checksum=3.4804507020600402E+004 input=1.0027016977054533E+004 peakWS=5.3MB
+[20:12:11.492 +   19.8s]   ifx-natural: ok t=0.3502s checksum=3.4804507020602949E+004 input=1.0027016977054533E+004 peakWS=5.1MB
+[20:12:11.563 +   19.9s]   ifx-expert: ok t=0.001065s checksum=3.4804507020600402E+004 input=1.0027016977054533E+004 peakWS=5.0MB
+[20:12:11.567 +   19.9s] build band mt8-licensed-native full blade-llvm
+[20:12:15.489 +   23.8s]   -> serial-only: LLVM lane has no OpenMP (2.1s)
+[20:12:15.489 +   23.8s] build band mt8-licensed-native full blade-cpp
+[20:12:20.260 +   28.6s]   -> no-parallel-form: kernel.json no_parallel_form (spec: no licensed parallel spelling) (3.0s)
+[20:12:20.260 +   28.6s] build band mt8-licensed-native full gfortran-natural
+[20:12:21.039 +   29.4s]   -> ok (0.7s)
+[20:12:21.039 +   29.4s] build band mt8-licensed-native full gfortran-expert
+[20:12:21.833 +   30.1s]   -> ok (0.7s)
+[20:12:21.834 +   30.1s] build band mt8-licensed-native full ifx-natural
+[20:12:24.221 +   32.5s]   -> ok (2.2s)
+[20:12:24.221 +   32.5s] build band mt8-licensed-native full ifx-expert
+[20:12:26.657 +   35.0s]   -> ok (2.3s)
+[20:12:26.754 +   35.1s]   gfortran-natural: ok t=0.04392s checksum=3.4804507020600664E+004 input=1.0027016977054533E+004 peakWS=5.8MB
+[20:12:26.808 +   35.1s]   gfortran-expert: ok t=0.0009739s checksum=3.4804507020600431E+004 input=1.0027016977054533E+004 peakWS=5.8MB
+[20:12:26.911 +   35.2s]   ifx-natural: ok t=0.03369s checksum=3.4804507020600620E+004 input=1.0027016977054533E+004 peakWS=7.4MB
+[20:12:26.986 +   35.3s]   ifx-expert: ok t=0.00205s checksum=3.4804507020600438E+004 input=1.0027016977054533E+004 peakWS=7.4MB
+[20:12:26.990 +   35.3s] build band serial-repro-native full blade-llvm
+[20:12:30.901 +   39.2s]   -> ok (2.1s)
+[20:12:30.901 +   39.2s] build band serial-repro-native full blade-cpp
+[20:12:35.651 +   44.0s]   -> ok (2.9s)
+[20:12:35.651 +   44.0s] build band serial-repro-native full gfortran-natural
+[20:12:36.399 +   44.7s]   -> ok (0.7s)
+[20:12:36.400 +   44.7s] build band serial-repro-native full gfortran-expert
+[20:12:37.149 +   45.5s]   -> ok (0.7s)
+[20:12:37.149 +   45.5s] build band serial-repro-native full ifx-natural
+[20:12:39.482 +   47.8s]   -> ok (2.2s)
+[20:12:39.482 +   47.8s] build band serial-repro-native full ifx-expert
+[20:12:41.797 +   50.1s]   -> ok (2.2s)
+[20:12:41.853 +   50.2s]   blade-llvm: ok t=0.009253s checksum=34804.5070206029 input=10027.0169770545 peakWS=4.8MB
+[20:12:41.915 +   50.2s]   blade-cpp: ok t=0.009298s checksum=34804.5070206029 input=10027.0169770545 peakWS=5.5MB
+[20:12:42.179 +   50.5s]   gfortran-natural: ok t=0.2086s checksum=3.4804507020602949E+004 input=1.0027016977054533E+004 peakWS=5.5MB
+[20:12:42.233 +   50.5s]   gfortran-expert: ok t=0.003131s checksum=3.4804507020602949E+004 input=1.0027016977054533E+004 peakWS=5.4MB
+[20:12:42.648 +   51.0s]   ifx-natural: ok t=0.3513s checksum=3.4804507020602949E+004 input=1.0027016977054533E+004 peakWS=5.1MB
+[20:12:42.715 +   51.0s]   ifx-expert: ok t=0.00377s checksum=3.4804507020602949E+004 input=1.0027016977054533E+004 peakWS=5.0MB
+
+# Blade vs Fortran -- check session 2026-10-18T20:11:51
+
+- host LAPTOP-350H6LDB | AMD Ryzen 7 5800HS with Radeon Graphics | 8C/16T | 15.41 GB | power ac | max processor state AC 100% | boost AC None | Power Scheme GUID: 64a64f24-65b9-4b56-befd-5ec1eaced9b3  (Silent)
+- git 71d98e7084fa6d5b51b4622db6b97ea3049ff3d4 | Blade.dll 79af7edce32999db | GNU Fortran (Rev4, Built by MSYS2 project) 16.2.0 | Intel(R) Fortran Compiler for applications running on Intel(R) 64, Version 2026.1.0 Build 20260617 | clang version 22.1.8 (https://github.com/msys2/MINGW-packages d34feaaa1d0aff624c870910b6f2589aa40d20de)
+- size `full` | duration 51.0 s | pins: pins-A.json, pins-B.json
+
+## serial-licensed-native
+
+Blade reference per kernel: band=blade-llvm
+
+| kernel | arm | status | n | min (s) | median (s) | IQR (s) | ratio vs ref [95% CI] | verdict | hypothesis | fold form | parallelism | peak WS (MB) | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| band | blade-llvm | ok | 1 | 0.003296 | 0.003296 | 0 |  |  |  | reordered (2 reassoc flags) | serial | 4.8 |  |
+| band | blade-cpp | ok | 1 | 0.009277 | 0.009277 | 0 |  |  |  | reordered (1 SIMD_REDUCTION) | serial | 5.5 |  |
+| band | gfortran-natural | ok | 1 | 0.2071 | 0.2071 | 0 |  |  | win 10x+ (the natural tier is the n^2 predicate nest, a straw man by construction) |  | serial | 5.4 |  |
+| band | gfortran-expert | ok | 1 | 0.0008144 | 0.0008144 | 0 |  |  | parity on blade-llvm (vectorized inner loop); LOSS on blade-cpp (inner loop scalar, G30) |  | serial | 5.3 |  |
+| band | ifx-natural | ok | 1 | 0.3502 | 0.3502 | 0 |  |  | win 10x+ (the natural tier is the n^2 predicate nest, a straw man by construction) |  | serial | 5.1 |  |
+| band | ifx-expert | ok | 1 | 0.001065 | 0.001065 | 0 |  |  | parity on blade-llvm (vectorized inner loop); LOSS on blade-cpp (inner loop scalar, G30) |  | serial | 5.0 |  |
+
+## mt8-licensed-native
+
+Blade reference per kernel: band=None
+
+| kernel | arm | status | n | min (s) | median (s) | IQR (s) | ratio vs ref [95% CI] | verdict | hypothesis | fold form | parallelism | peak WS (MB) | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| band | blade-llvm | serial-only | 0 | -- | -- | -- |  |  |  | reordered (2 reassoc flags) |  |  | LLVM lane has no OpenMP |
+| band | blade-cpp | no-parallel-form | 0 | -- | -- | -- |  |  |  | reordered (1 SIMD_REDUCTION) |  |  | kernel.json no_parallel_form (spec: no licensed parallel spelling) |
+| band | gfortran-natural | ok | 1 | 0.04392 | 0.04392 | 0 |  |  | win 10x+ (the natural tier is the n^2 predicate nest, a straw man by construction) |  | openmp runtime linked | 5.8 |  |
+| band | gfortran-expert | ok | 1 | 0.0009739 | 0.0009739 | 0 |  |  | parity on blade-llvm (vectorized inner loop); LOSS on blade-cpp (inner loop scalar, G30) |  | openmp runtime linked | 5.8 |  |
+| band | ifx-natural | ok | 1 | 0.03369 | 0.03369 | 0 |  |  | win 10x+ (the natural tier is the n^2 predicate nest, a straw man by construction) |  | openmp runtime linked | 7.4 |  |
+| band | ifx-expert | ok | 1 | 0.00205 | 0.00205 | 0 |  |  | parity on blade-llvm (vectorized inner loop); LOSS on blade-cpp (inner loop scalar, G30) |  | openmp runtime linked | 7.4 |  |
+
+## serial-repro-native
+
+Blade reference per kernel: band=blade-llvm
+
+| kernel | arm | status | n | min (s) | median (s) | IQR (s) | ratio vs ref [95% CI] | verdict | hypothesis | fold form | parallelism | peak WS (MB) | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| band | blade-llvm | ok | 1 | 0.009253 | 0.009253 | 0 |  |  |  | in-order | serial | 4.8 |  |
+| band | blade-cpp | ok | 1 | 0.009298 | 0.009298 | 0 |  |  |  | in-order | serial | 5.5 |  |
+| band | gfortran-natural | ok | 1 | 0.2086 | 0.2086 | 0 |  |  | win 10x+ (the natural tier is the n^2 predicate nest, a straw man by construction) |  | serial | 5.5 |  |
+| band | gfortran-expert | ok | 1 | 0.003131 | 0.003131 | 0 |  |  | parity on blade-llvm (vectorized inner loop); LOSS on blade-cpp (inner loop scalar, G30) |  | serial | 5.4 |  |
+| band | ifx-natural | ok | 1 | 0.3513 | 0.3513 | 0 |  |  | win 10x+ (the natural tier is the n^2 predicate nest, a straw man by construction) |  | serial | 5.1 |  |
+| band | ifx-expert | ok | 1 | 0.00377 | 0.00377 | 0 |  |  | parity on blade-llvm (vectorized inner loop); LOSS on blade-cpp (inner loop scalar, G30) |  | serial | 5.0 |  |
+
+[20:12:42.726 +   51.0s] wrote C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\.build\sessions\2026-10-18-LAPTOP-350H6LDB\session-201151-check
+band serial-licensed-native size=full {'n': 20011, 'w': 101} reference=pin pins-B.json
+  blade-llvm                   ok               checksum=34804.5070206005  input_checksum=10027.0169770545  t=0.00329579999379348
+  blade-cpp                    ok               checksum=34804.5070206003  input_checksum=10027.0169770545  t=0.0092767
+  gfortran-natural             ok               checksum=3.4804507020602949E+004  input_checksum=1.0027016977054533E+004  t=0.2071025
+  gfortran-expert              ok               checksum=3.4804507020600402E+004  input_checksum=1.0027016977054533E+004  t=0.0008144
+  ifx-natural                  ok               checksum=3.4804507020602949E+004  input_checksum=1.0027016977054533E+004  t=0.3502442
+  ifx-expert                   ok               checksum=3.4804507020600402E+004  input_checksum=1.0027016977054533E+004  t=0.0010652
+band mt8-licensed-native size=full {'n': 20011, 'w': 101} reference=pin pins-B.json
+  blade-llvm                   serial-only      checksum=None  input_checksum=None  t=None  [LLVM lane has no OpenMP]
+  blade-cpp                    no-parallel-form checksum=None  input_checksum=None  t=None  [kernel.json no_parallel_form (spec: no licensed parallel spelling)]
+  gfortran-natural             ok               checksum=3.4804507020600664E+004  input_checksum=1.0027016977054533E+004  t=0.0439183
+  gfortran-expert              ok               checksum=3.4804507020600431E+004  input_checksum=1.0027016977054533E+004  t=0.0009739
+  ifx-natural                  ok               checksum=3.4804507020600620E+004  input_checksum=1.0027016977054533E+004  t=0.0336927
+  ifx-expert                   ok               checksum=3.4804507020600438E+004  input_checksum=1.0027016977054533E+004  t=0.0020503
+band serial-repro-native size=full {'n': 20011, 'w': 101} reference=pin pins-B.json
+  blade-llvm                   ok               checksum=34804.5070206029  input_checksum=10027.0169770545  t=0.00925309999729507
+  blade-cpp                    ok               checksum=34804.5070206029  input_checksum=10027.0169770545  t=0.0092977
+  gfortran-natural             ok               checksum=3.4804507020602949E+004  input_checksum=1.0027016977054533E+004  t=0.2086486
+  gfortran-expert              ok               checksum=3.4804507020602949E+004  input_checksum=1.0027016977054533E+004  t=0.0031308
+  ifx-natural                  ok               checksum=3.4804507020602949E+004  input_checksum=1.0027016977054533E+004  t=0.3512933
+  ifx-expert                   ok               checksum=3.4804507020602949E+004  input_checksum=1.0027016977054533E+004  t=0.00377
+[20:12:42.739 +   51.1s] exit 0: 0 failure(s), 0 flag(s)
+exit 0

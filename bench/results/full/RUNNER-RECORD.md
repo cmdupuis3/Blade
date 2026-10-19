@@ -809,3 +809,27 @@ Statuses other than ok (fallback, serial-only, no-parallel-form, no-blas, unrun)
 | session-144122 | mt8-fastmath (ABORTED, control excursion) | 182 | 2 | 1 | 12.96 | 9.1% | 12.59-18.93 | 5.38 | 73.0% | 5.15-29.74 | 1 |
 | session-144656 | mt8-fastmath re-run | 943 | 6 | 6 | 13.01 | 4.8% | 12.46-16.93 | 5.40 | 7.1% | 5.08-7.02 | 0 |
 | session-150343 | gram blas serial+mt8 | 124 | 2 | 0 | 12.91 | 5.9% | 12.51-16.97 | 5.37 | 5.1% | 5.16-6.15 | 0 |
+
+## Merged gate run (2026-10-18, 18:24-20:13)
+
+- Commit: worktree-bench-fortran 957c1e0e (phase-2 branches D, E, F, G, H merged). Binary built by the coordinator, not by the runner.
+- Blade.dll SHA-256: 79AF7EDCE32999DBDA279BD11D7BF254EC194711BD19F4945677270AF64219E7 (verified before the run, built 18:23:30). Host: AC, no other compute processes, ucrt64 g++ 16.2.0 first on PATH, uncapped (Silent, max state 100%).
+- Consoles: `bench/results/gates/merged-<gate>.txt`, progress and per-step wall times in `bench/results/gates/progress.txt`. Each gate was run once; no gate failed, so nothing was rerun.
+
+| gate | TOTAL line (verbatim) | wall | skip explanation (from the output) |
+|---|---|---|---|
+| `blade test` | `TOTAL: 6686 passed, 0 failed` | 838 s | no skipped suffix |
+| `blade test interp` | `Interp Diff: 2882 passed, 0 failed, 2 skip-unsupported, 0 skipped` | 2802 s | the 2 are `Fill Random Symmetric` / `Fill Random Antisymmetric`: `SKIP-UNSUPPORTED: fill_random(mod) (C rand()%mod is nondeterministic)` |
+| `blade test opt-diff` | `Opt Diff: 1969 passed (1831 optimizer-inert), 0 failed, 915 skipped, 103s` | 104 s | skips are not itemized in the output; per `tests/OptDiff.fs:160` they are reject probes / programs both the OFF and ON compiles refuse alike (nothing to compare) |
+| `blade test llvm` | `TOTAL: 700 passed, 0 failed, 677 skipped` | 952 s | all 677 are `LLVM Differential` programs the LLVM lane refuses (`[SKIP]: <name> -- llvm lane refused: <reason>`, e.g. Int32 parameters, String operands, IRStructLit in value position); the new `LLVM Runtime Shim` (4/4), `LLVM Tiles Raw-Bit` (8/8), `LLVM Blocked Simplex` (15/15) blocks pass |
+| `blade test docs` | `Docs (executable code blocks): 131 passed, 0 failed, 78 skipped` | 30 s | 78 `sketch` blocks (by design); 30 checked, 90 run, 10 rejects; link check over 59 pages passed |
+
+### Harness evidence on the same binary
+- `run.py smoke --regimes all` (every kernel including the new `band`): `exit 0: 0 failure(s), 0 flag(s)`, 1386 s; console `bench/results/gates/merged-smoke.txt`; session `bench/.build/sessions/2026-10-18-LAPTOP-350H6LDB/session-194325-smoke`. Only the expected statuses (maskagg blade-llvm fallback, blade-llvm serial-only in mt8, no-parallel-form per kernel.json incl. `band` blade-cpp in mt8, gram blade-llvm no-blas); no failure, DQ or unbuilt cell.
+- `run.py check <k> --size full --regimes serial-licensed-native,serial-repro-native,mt8-licensed-native`, all `exit 0: 0 failure(s), 0 flag(s)` (50-58 s each): gram, antisym, comoment3, pairkernel, recur, band. Consoles `bench/results/gates/merged-check-<k>.txt`. Every arm validated against the full-size pins. These are single runs per arm (indicative, not measurements). Blade medians in ms (serial-licensed llvm / cpp; serial-repro llvm / cpp; mt8-licensed cpp) against the earlier bench sessions:
+  - gram 55.6 / 58.5; 58.9 / 60.3; 15.7 (before: 156.7 / 275.2; 1219 / 954; 43.8). Expert Fortran serial 78.9 / 70.1 ms.
+  - antisym 72.5 / 28.4; 507 / 29.6; 9.0 (before: 74.0 / 107.9; 508 / 411; 22.6). Expert 31.1 / 29.2 ms.
+  - comoment3 27.5 / 9.6; 156.6 / 15.6; 4.1 (before: 41.5 / 109.7; 156.8 / 180.6; 20.6). Expert 12.0 / 11.4 ms.
+  - pairkernel 29.2 / 30.7; 40.9 / 37.3; 7.5 (before: 42.6 / 77.3; 42.8 / 77.6; 16.1). Expert 32.7 / 30.4 ms.
+  - recur 19.7 / 20.7; 23.5 / 24.0; blade-cpp no-parallel-form (before: 116.9 / 134.1; 111 / 123.5). Expert 9.1 / 9.8 ms.
+  - band (new) 3.3 / 9.3; 9.25 / 9.30; blade-cpp mt8 no-parallel-form. Expert 0.81 / 1.07 ms (natural 207 / 350 ms).
