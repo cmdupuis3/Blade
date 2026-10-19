@@ -1750,6 +1750,32 @@ let internal fpReassocSimdOp (callable: IRCallable) (elemStr: string) : string o
     if not (simdReducibleElem elemStr) then None
     else foldKernelBuiltinOp callable |> Option.bind ompReductionOperator
 
+/// Is a domain fold's MAP kernel free of side effects, so that its cells may
+/// be evaluated in another order (the diagonal walk) or on a thread team? The
+/// fold's licence covers only the COMBINE; nothing has vetted the map body the
+/// way BL4005 vets an omp body: a map kernel may assign a captured `let mut`
+/// or print in serial code, and then the cell order (or a team) is observable.
+/// Conservative: no assignment anywhere in the body, and every callee either a
+/// function whose effect summary rules out mutation and output or a lambda
+/// whose body passes the same test.
+let domainMapKernelPure (body: IRExpr) : bool =
+    let visited = System.Collections.Generic.HashSet<IRId>()
+    let rec ok (e: IRExpr) : bool =
+        match e with
+        | IRAssign _ -> false
+        | IRApp (f, _, _) ->
+            let calleeOk =
+                match f with
+                | IRVar _ ->
+                    (match resolveCallable f with
+                     | Some cl when not cl.Effects.Unknown -> not cl.Effects.Mutates && not cl.Effects.EmitsOutput
+                     | Some cl -> (not (visited.Add cl.Id)) || ok cl.Body
+                     | None -> false)
+                | _ -> ok f
+            calleeOk && (childrenOf e |> List.forall ok)
+        | _ -> childrenOf e |> List.forall ok
+    ok body
+
 /// The order a FOLD over a closed-form domain walks its cells.
 type DomainFoldOrder =
     /// k = i - j outermost, a contiguous run of i inside (Types.domainDiagonal).
@@ -1780,6 +1806,8 @@ let domainFoldOrder (foldCallable: IRCallable option) (mapKernelBody: IRExpr opt
     | Some _ when not (Blade.CodeGenState.domainDiagonalEnabled ()) -> DomainLexOrder "BLADE_DOMAIN_DIAGONAL=0"
     | Some _ when (match mapKernelBody with Some b -> Blade.IR.kernelSubscriptsRank2 b | None -> true) ->
         DomainLexOrder "the map kernel subscripts a matrix, which a diagonal walk would stride by a row"
+    | Some _ when (match mapKernelBody with Some b -> not (domainMapKernelPure b) | None -> true) ->
+        DomainLexOrder "the map kernel may assign a capture or emit output: its cells' side effects keep the lexicographic order"
     | Some _ -> DomainDiagonalOrder dg
 
 /// `blade plan`'s rendering of a domain fold's order.

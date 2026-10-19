@@ -704,7 +704,9 @@ cell only through i - j is then invariant in the inner run and the back end
 computes it once per diagonal; the emitter never tabulates it. Every other fold
 over the domain (an unlicensed or `where repro` kernel, a repro build, a fused
 join of several folds, a non-unit slope such as `abs(2 * i - j) <= c`, a map
-kernel that subscripts a matrix — a diagonal would stride it by a row) keeps
+kernel that subscripts a matrix — a diagonal would stride it by a row — and a
+map kernel that may assign a capture or emit output, whose cells' side effects
+are ordered: the licence covers the combine, not the map) keeps
 the lex nest, and the interpreter keeps the lex walk for every fold, as it does
 for every licensed fold. `blade plan`'s `[domain-enum v1]` line ends with the
 fold's order and its reason (`order: diagonal (k = i - j outer, ...)` or
@@ -715,9 +717,10 @@ team: the outermost enumerated variable (k, or the first field of a lex nest,
 whose bounds are constants) is cut into contiguous per-thread blocks — each
 innermost run is cut instead when the team outnumbers the outer trips — and
 the per-thread partials combine in thread order, so for a given team size the
-value is a fixed function of the data. `BLADE_OMP_THREADS=1` and
-`BLADE_FP_REPRO=1` keep the serial pass with an `[omp] requested but emitted
-serial` census line; the LLVM lane has no thread-level form.
+value is a fixed function of the data. `BLADE_OMP_THREADS=1`,
+`BLADE_FP_REPRO=1` and a map kernel with side effects keep the serial pass
+with an `[omp] requested but emitted serial` census line; the LLVM lane has no
+thread-level form.
 
 Tuple indexing with wildcards: a full key is an O(1) hash lookup (a missing
 key is a runtime error); a wildcard/short-prefix partial returns the matching

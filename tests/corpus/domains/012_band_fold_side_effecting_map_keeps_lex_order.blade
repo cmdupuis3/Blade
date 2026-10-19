@@ -1,0 +1,25 @@
+// TEST: Closed-Form Domain: A Band Fold Whose Map Has Side Effects Keeps The Lex Order
+// The fold's reorder licence covers its COMBINE, not the map's cells: a map
+// kernel that assigns a captured `let mut` sees its cells in walk order, so
+// here each term (`hits * (i + 1)`, `hits` counting cells as they are
+// evaluated) depends on that order. Such a fold never takes the band's
+// diagonal walk, nor a thread team for its `where omp` (`blade plan`:
+// `order: lexicographic (the map kernel may assign a capture or emit
+// output ...)` and an `[omp] requested but emitted serial` line): every lane
+// evaluates the cells in lex order, which is what pins `s`. Integer-valued
+// terms, so the licensed combine's own order cannot move it.
+let static n = 13
+let static w = 3
+
+static struct Band {
+    i: Int64<min=0, max=n-1>,
+    j: Int64<min=0, max=n-1>
+} where abs(i - j) <= w
+
+let mut hits = 0
+let s = reduce(method_for(range<Band>) <@> lambda(i, j) -> {
+    hits = hits + 1
+    Float64(hits * (i + 1))
+}, lambda(p, q) where omp -> p + q, 0.0)
+// EXPECT: s = 28262.0
+// EXPECT: hits = 79
