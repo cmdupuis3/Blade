@@ -193,16 +193,30 @@ it must equal kernel.json's, which catches a stale pin.
 {licensed, repro, fastmath, serial_extra, mt8_extra}`, `fortran_twin_flags`. Keys starting
 with `_` are comments.
 
-## Session bundle (M27)
+## Session bundle (M27, lean form since 2026-10-18)
 
-`bench/results/<date>-<host>/session-<HHMMSS>/`: `session.json` (checkpointed after every
-run; os.replace retried 10x with backoff on a sharing violation, a failed checkpoint is logged in `checkpoint_failures` and the session continues), `summary.md`, `manifest.json` (argv + every planned cell with its final status:
-measured, validated, unsupported, unrun, fallback, serial-only, no-blas, no-parallel-form,
-gated, failed, invalid, dq, unbuilt), `sources/` (kernels, fortran, harness, validation,
-README, charter) + `sources-sha256.json`, `build/<kernel>/<size>/<regime>/<arm>/` (the
-size-substituted source, generated .ll/.cpp + runtime headers, plan.txt, build command, full
-build stdout/stderr) and `build/_controls/`. Executables and DLLs stay in the bundle on disk
-but are git-ignored (`bench/.gitignore`); their hashes are in session.json.
+`bench/results/<date>-<host>/session-<HHMMSS>/` holds:
+
+- `session.json` (checkpointed after every run; `os.replace` retried 10x with backoff on a
+  sharing violation, a failed checkpoint is logged in `checkpoint_failures` and the session
+  continues), `summary.md`, `manifest.json` (argv + every planned cell with its final status:
+  measured, validated, unsupported, unrun, fallback, serial-only, no-blas, no-parallel-form,
+  gated, failed, invalid, dq, unbuilt);
+- `sources-sha256.json`: the SHA-256 of every input (kernels, fortran, harness, validation,
+  README, charter, .gitignore), keyed by path relative to the bench tree and hashed in place;
+  the content itself is in git at `machine.git_sha` (no `sources/` copy is written);
+- `build/<kernel>/<size>/<regime>/<arm>/` and `build/_controls/...`: `build-command.txt` and
+  `plan.txt` (always), `generated/<kernel>.cpp` / `.ll` (the program's own translation unit
+  only), `build-stdout.txt` / `build-stderr.txt` only when the build failed or fell back or
+  stderr carries a diagnostic, and the executable and copied DLLs (git-ignored, hashes in
+  session.json).
+
+Not written: the SIZE-substituted `src/` copies (the sizes are in the manifest and each build
+record's `source.size_lines`; `source.compiled_sha256` keeps the identity of the rewritten
+file), `*.copy` files, and the runtime header / LLVM shim copies (identified by the Blade.dll
+hash; their per-file hashes stay in `evidence.runtime_headers_sha256`). Smoke and check
+sessions write only `session.json`, `summary.md` and `manifest.json` (their builds live in
+the git-ignored `bench/.build/`, unpruned).
 
 session.json top level: `schema`, `harness_version`, `mode`, `argv`, `size`, `started`,
 `finished`, `duration_s`, `aborted`, `machine`, `power`, `toolchain`, `pins`, `protocol`,

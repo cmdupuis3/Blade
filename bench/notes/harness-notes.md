@@ -124,6 +124,15 @@ Harness v2 (after the method review; 2026-10-17 evening):
 
 ## 5. Open items / pending other agents
 
+- 2026-10-18 (user: de-clutter bench/results): lean bundles. No `sources/` tree copy
+  (sources-sha256.json, same keys, hashed in place), no SIZE-substituted `src/` copies, no
+  `*.copy` / `*.mod` / `*.obj`, no runtime header or shim copies in `generated/` (only
+  `<kernel>.cpp`/`.ll`), build stdout/stderr kept only on failure, fallback or a diagnostic.
+  Nothing read the pruned copies back: evidence (lane, fold form, thread constructs) is taken
+  from the artifacts BEFORE pruning, the fallback line from the compile's stderr in memory,
+  smoke evidence hashes the committed sources, `check` prints samples. Test: a 1-round smoke-
+  size bench of dot (3 arms + twins) produced a 0.51 MB bundle of 27 files.
+
 - 2026-10-18 (user): cooldown floors lowered to 0.5 s / 3 s (defaults = floors) and a 60 s
   between-session cooldown added (bench waits at start until 60 s after the previous bench
   session ended). AC check, excursion rule, serial process discipline unchanged; 64 MB and
