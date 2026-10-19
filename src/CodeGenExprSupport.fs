@@ -1931,6 +1931,27 @@ let antisymKcMax () : int64 = max 0L (tileTune "anti_kc" 0L)
 /// keys on it for free.
 let syrkTileEnabled () : bool = Blade.Toolchain.envFlag "BLADE_SYRK_TILE" true
 
+/// BLAS-ON PRECEDENCE (bench gap G28, 2026-10-19): with the BLAS gate on, a
+/// real f64 same-array `comm` row contraction or `gram(A, A)` node that the
+/// tile would take ANYWAY (literal extents above `packedTriWorth`, knob on)
+/// goes to the tile, not to host `?syrk`. Measured at the bench's gram shape
+/// (p = 1601, k = 1001, Zen 3): the tile 57.96 ms serial / 15.58 ms at 8
+/// threads against an explicit `dsyrk` caller's 62.5-65.4 / 19.3-20.0 ms --
+/// and the BLAS route additionally stages a dense p x p buffer and repacks
+/// it (blade_linalg.hpp). The library keeps everything the tile does not
+/// cover: complex (herk), float32, runtime extents, small shapes -- and an
+/// explicit device route (BLADE_CUBLAS) is never preempted. BLADE_SYRK_TILE=0
+/// hands the eligible shapes back to `?syrk`. The values move from the
+/// library's blocked association to the serial chain per cell (ulps; the
+/// bench pins hold at their tolerance -- re-validated with `run.py check
+/// gram` in the blas regime).
+let syrkTilePreferredOverBlas (p: string) (k: string) : bool =
+    let lit (s: string) = match System.Int64.TryParse s with | true, v -> Some v | _ -> None
+    syrkTileEnabled ()
+    && (match lit p, lit k with
+        | Some p, Some k -> packedTriWorth p k
+        | _ -> false)
+
 /// The antisym pair's tile schedule (`LinAlgPatterns.AntiPair`, driver
 /// blade_pgemm::dantisym_tri), read from BLADE_ANTISYM_TILE per call:
 /// unset / `1` / `on` / `6x8` = the SEQUENTIAL 6 x 8 tile (P pass, spill, Q

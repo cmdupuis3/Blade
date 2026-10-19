@@ -812,6 +812,17 @@ let recordRoute (span: Blade.Ast.Span) (subject: string) (call: LinAlgCall) (res
             { Rule = "blas-routing"; Version = 1; Span = span
               Subject = subject; Outcome = outcome; Evidence = evidence }
 
+/// A route the library COULD take that Blade's own packed tile preempts
+/// (`CodeGenExprSupport.syrkTilePreferredOverBlas`): recorded as a declined
+/// route naming the entry point it passed over, so `blade plan` shows the
+/// choice and BLADE_SYRK_TILE=0 is the way back.
+let recordTilePreferred (span: Blade.Ast.Span) (subject: string) (call: LinAlgCall) (entry: string) (shape: string) : unit =
+    if Blade.Effects.Decisions.active () then
+        Blade.Effects.Decisions.record
+            { Rule = "blas-routing"; Version = 1; Span = span; Subject = subject
+              Outcome = Blade.Effects.Declined "Blade's packed syrk tile preferred over host ?syrk (faster at this shape and needs no dense staging; BLADE_SYRK_TILE=0 routes it back to the library)"
+              Evidence = [ $"{call.Routine} ({call.Level}, {precisionLetter call.Precision})"; $"passed over: {entry}"; shape ] }
+
 /// A shape that is NOT a BLAS route at all (mixed precisions, a non-dense
 /// layout): recorded as a declined route so the plan says why the loop ran.
 let recordUnroutable (span: Blade.Ast.Span) (subject: string) (what: string) (why: string) : unit =

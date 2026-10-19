@@ -3017,10 +3017,26 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
         // list (skeleton + pool capacity per operand, same order); only the
         // entry NAME and include line differ.
         let linalgCall = Blade.LinAlgPatterns.classify (IRGram (lExpr, rExpr, sameArray))
-        let resolved = linalgCall |> Option.bind Blade.LinAlgPatterns.resolveNodeRoute
-        (match linalgCall with
-         | Some call -> Blade.LinAlgPatterns.recordRoute (decisionSpan ()) varName call resolved
-         | None -> Blade.LinAlgPatterns.recordUnroutable (decisionSpan ()) varName "gram" "the operands are not one BLAS precision over dense rows (mixed element types, or a non-dense layout): Blade's own loops")
+        let resolved0 = linalgCall |> Option.bind Blade.LinAlgPatterns.resolveNodeRoute
+        // BLAS-ON PRECEDENCE (`syrkTilePreferredOverBlas`, bench gap G28): a
+        // real f64 same-array gram the packed tile takes anyway (the SAME
+        // operand test the tile arm below applies, `tileOperandOk`) goes to
+        // the tile, not to HOST ?syrk. A device route (BLADE_CUBLAS, strictly
+        // opt-in) is never preempted.
+        let tilePreempts =
+            sameArray
+            && (match resolved0 with Some (Blade.LinAlgPatterns.HostBlas, _) -> true | _ -> false)
+            && not (isComplexElem outElem)
+            && outElemStr = "double"
+            && Blade.LinAlgPatterns.isDenseRealF64Rank2 la
+            && Blade.LinAlgPatterns.isDenseRealF64Rank2 ra
+            && syrkTilePreferredOverBlas mExtent nExtent
+        let resolved = if tilePreempts then None else resolved0
+        (match linalgCall, resolved0 with
+         | Some call, Some (_, entry) when tilePreempts ->
+             Blade.LinAlgPatterns.recordTilePreferred (decisionSpan ()) varName call entry $"P={mExtent} K={nExtent}"
+         | Some call, _ -> Blade.LinAlgPatterns.recordRoute (decisionSpan ()) varName call resolved
+         | None, _ -> Blade.LinAlgPatterns.recordUnroutable (decisionSpan ()) varName "gram" "the operands are not one BLAS precision over dense rows (mixed element types, or a non-dense layout): Blade's own loops")
         let shimEntry = resolved |> Option.map snd
         let useShim = shimEntry.IsSome
         // Pool capacities for the shim's contiguity probe. See
