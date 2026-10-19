@@ -585,12 +585,41 @@ let genCompoundIndexFromMask (maskName: string) (rank: int) (idxName: string) : 
     let extentsInit = String.concat ", " extentTerms
     let gridExpr = String.concat " * " extentTerms
     let lines =
-        [ $$"""std::array<size_t, {{rank}}> {{idxName}}_extents = { {{extentsInit}} };"""
-          $"size_t {idxName}_grid = {gridExpr};"
-          $"bool* {idxName}_pool = nested_array_utilities::pool_base({maskName}.data);"
-          $"std::vector<bool> {idxName}_maskvec({idxName}_pool, {idxName}_pool + {idxName}_grid);"
-          $"compound_index_t<{rank}>* {idxName} = new compound_index_t<{rank}>(\"{idxName}\", {idxName}_extents, {idxName}_maskvec);" ]
+        if rank = 1 then
+            // RANK-1 COMPACTION (bench gap G9): the specialization
+            // compound_index_t<1> builds its kept-position table straight
+            // from the flat bool pool -- a count pass and one branchless fill,
+            // no std::vector<bool> copy and no hash node per present cell.
+            // Same locals (`_grid`, `_pool`) as the general arm so the
+            // consumers that read them (the CUDA range driver) see one shape.
+            [ $"size_t {idxName}_grid = {gridExpr};"
+              $"bool* {idxName}_pool = nested_array_utilities::pool_base({maskName}.data);"
+              $"compound_index_t<1>* {idxName} = new compound_index_t<1>(\"{idxName}\", {idxName}_grid, {idxName}_pool); // rank-1 compaction: kept positions, no hash" ]
+        else
+            [ $$"""std::array<size_t, {{rank}}> {{idxName}}_extents = { {{extentsInit}} };"""
+              $"size_t {idxName}_grid = {gridExpr};"
+              $"bool* {idxName}_pool = nested_array_utilities::pool_base({maskName}.data);"
+              $"std::vector<bool> {idxName}_maskvec({idxName}_pool, {idxName}_pool + {idxName}_grid);"
+              $"compound_index_t<{rank}>* {idxName} = new compound_index_t<{rank}>(\"{idxName}\", {idxName}_extents, {idxName}_maskvec);" ]
     (lines, idxName)
+
+/// `blade plan`'s line for how a `compound(dense, mask)` binding is
+/// REPRESENTED (rule `compound`): a rank-1 mask takes the compaction
+/// representation (`applied`); a rank-k mask keeps the hashed index
+/// (`declined`, with the reason). Both lanes build the same representation
+/// for everything the LLVM lane accepts (it refuses every compound that is
+/// not a rank-1, trailing-free compaction), so the record holds for either.
+let recordCompoundRepresentation (subject: string) (leadRank: int) (trailingDims: int) : unit =
+    let trail = if trailingDims = 0 then "no trailing dims" else $"{trailingDims} trailing dim(s) per kept cell"
+    if leadRank = 1 then
+        recordCodegenDecision "compound" subject Blade.Effects.Applied
+            [ "representation: rank-1 compaction (count pass + branchless kept-position fill, gather by position; no hash table; keyed reads by binary search over the kept positions)"
+              $"rank-1 mask over one dense axis; {trail}" ]
+    else
+        recordCodegenDecision "compound" subject
+            (Blade.Effects.Declined $"hashed SparseIdx: a rank-{leadRank} mask has no closed-form rank, so compound_index_t<{leadRank}> keeps one tuple->rank hash entry per present cell")
+            [ $"representation: hashed SparseIdx (compound_index_t<{leadRank}>, lex-sorted tuple table + reverse hash)"
+              $"rank-{leadRank} mask; {trail}" ]
 
 /// Emit the construction of a standalone `sparse_index_t<RANK>` -- the sparse
 /// twin of genCompoundIndexFromMask, keyed on the SparseKeysSource branch:

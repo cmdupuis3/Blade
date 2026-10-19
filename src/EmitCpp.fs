@@ -69,13 +69,39 @@ type CompactScatter = {
     /// is one element per grid cell and the BRANCHLESS form is emitted -- see
     /// the note below for why that is gated on this and not emitted always.
     ScalarTrail: bool
+    /// Is the compound index RANK 1 (the compaction representation,
+    /// compound_index_t<1>)? Then the index already holds the kept positions
+    /// and the copy is a GATHER BY POSITION: exactly `cardinality * trail`
+    /// cells moved, no predicate read, no slack cell -- see the Rank1 arm.
+    Rank1: bool
 }
 
 let compactScatter (s: CompactScatter) : string =
     let n = s.Name
+    if s.Rank1 then
+        // GATHER BY KEPT POSITION (bench gap G9). compound_index_t<1>'s
+        // constructor has already counted and filled the ascending kept
+        // positions (one branchless pass), so cell q of the compact buffer is
+        // the dense cell at rank_to_tuple[q]: a straight loop over the
+        // cardinality, monotone reads, sequential writes, no branch on the
+        // predicate and no over-store -- the destination is sized exactly.
+        // With trailing dims each kept cell drags its contiguous block.
+        if s.ScalarTrail then
+            s.Ind
+            + $$"""{ const size_t {{n}}_m = {{s.IdxName}}->cardinality; """
+            + $$"""for (size_t {{n}}_q = 0; {{n}}_q < {{n}}_m; {{n}}_q++) { """
+            + $"{n}_compact[{n}_q] = {n}_densepool[{s.IdxName}->rank_to_tuple[{n}_q][0]]; }} }}"
+        else
+            s.Ind
+            + $$"""{ const size_t {{n}}_m = {{s.IdxName}}->cardinality; """
+            + $$"""for (size_t {{n}}_q = 0; {{n}}_q < {{n}}_m; {{n}}_q++) { """
+            + $"const size_t {n}_c = {s.IdxName}->rank_to_tuple[{n}_q][0]; "
+            + $"for (size_t {n}_t = 0; {n}_t < {n}_trail; {n}_t++) "
+            + $"{n}_compact[{n}_q * {n}_trail + {n}_t] = {n}_densepool[{n}_c * {n}_trail + {n}_t]; }} }}"
+    else
     // Assembled from small pieces rather than one 21-slot format string --
     // miscounting THAT argument list is precisely the bug class this layer
-    // exists to kill.
+    // exists to kill. (Rank >= 2 only from here: the rank-1 arm above.)
     if s.ScalarTrail then
         // BRANCHLESS COMPACTION. `mask()` produces a data-dependent predicate,
         // so the branchy form below mispredicts once per grid cell: measured at

@@ -994,6 +994,13 @@ let internal llvmLaneDecision (d: Blade.Effects.Decision) : Blade.Effects.Decisi
                              $"C++ lane {cppForm}" ] @ List.tail (if d.Evidence.IsEmpty then [ "" ] else d.Evidence) }
     | "microkernel" | "tile-cache" when d.Outcome = Blade.Effects.Applied ->
         declined $"C++-lane {d.Rule}: the LLVM lane emits its own loop nest" []
+    // The compound REPRESENTATION (rule `compound`, bench gap G9) holds for
+    // both lanes as recorded: the LLVM lane emits exactly the compounds the
+    // C++ lane compacts (a rank-1 mask over one dense axis, no trailing dims
+    // -- the count, the kept-position fill and the gather by position in IR,
+    // keyed reads by binary search) and refuses every other one, so a plan
+    // this lane prints never carries a `compound` record it did not build.
+    | "compound" -> d
     | _ -> d
 
 /// A record the LLVM emitter made ITSELF: the tile cores' (syrk M6, antisym

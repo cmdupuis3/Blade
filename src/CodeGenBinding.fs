@@ -1986,24 +1986,32 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
          let trailTerms =
              [ for d in 0 .. trailingDimCount - 1 -> $"{denseName}.extents[{leadRank + d}]" ]
          let trailExpr = match trailTerms with | [] -> "1" | xs -> String.concat " * " xs
+         // The REPRESENTATION decision, for `blade plan` (rule `compound`):
+         // a rank-1 mask is the compaction (kept-position table, gather by
+         // position, no hash), a rank-k mask keeps the hashed index.
+         let rank1 = (leadRank = 1)
+         recordCompoundRepresentation name leadRank trailingDimCount
          let lines =
              densePre
              @ maskPre
              @ (idxLines |> List.map (fun l -> ind + l))
              @ [ $"{ind}size_t {name}_trail = {trailExpr};"
                  $"{ind}{elemCpp}* {name}_densepool = nested_array_utilities::pool_base({denseName}.data);"
-                 // The `+ 1` is REQUIRED BY the branchless scatter and only by
-                 // it: that form stores unconditionally and lets the cursor sit
-                 // at `cardinality` after the last selected cell, so a trailing
-                 // unselected cell writes one past the logical end. One element
-                 // of slack, never read, is the price of deleting a branch that
-                 // mispredicts once per grid cell.
-                 (if trailTerms.IsEmpty then
+                 // The `+ 1` is REQUIRED BY the rank >= 2 branchless scatter
+                 // and only by it: that form stores unconditionally and lets
+                 // the cursor sit at `cardinality` after the last selected
+                 // cell, so a trailing unselected cell writes one past the
+                 // logical end. One element of slack, never read, is the price
+                 // of deleting a branch that mispredicts once per grid cell.
+                 // The rank-1 gather by position moves exactly `cardinality *
+                 // trail` cells and needs no slack.
+                 (if trailTerms.IsEmpty && not rank1 then
                      $"{ind}{elemCpp}* {name}_compact = new {elemCpp}[{idxName}->cardinality * {name}_trail + 1];"
                   else
                      $"{ind}{elemCpp}* {name}_compact = new {elemCpp}[{idxName}->cardinality * {name}_trail];")
-                 // scatter present leading cells (row-major prefix-popcount)
-                 compactScatter { Ind = ind; Name = name; IdxName = idxName; ScalarTrail = trailTerms.IsEmpty }
+                 // rank 1: gather by kept position; rank >= 2: scatter present
+                 // leading cells (row-major prefix-popcount)
+                 compactScatter { Ind = ind; Name = name; IdxName = idxName; ScalarTrail = trailTerms.IsEmpty; Rank1 = rank1 }
                  $$"""{{ind}}nested_array_utilities::Compound<{{elemCpp}}, {{leadRank}}> {{name}} { {{name}}_compact, {{idxName}}, {{name}}_trail };""" ]
          // Owns BOTH the compact buffer and the freshly built index. (BL6002
          // restricts compound() to top-level lets today, where the empty

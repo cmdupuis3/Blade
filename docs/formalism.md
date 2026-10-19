@@ -617,6 +617,22 @@ is what buys contiguous layout and device-friendly slices; per-element hash
 gives O(1) coordinate lookup. Enumeration = exactly the in-bounds mask-true
 tuples, each once, in lex order (proofs.md §Compound).
 
+Representation, by rank of the mask (the compiler's choice, reported by
+`blade plan` as a `[compound v1]` line; the semantics above do not change):
+a **rank-1 mask** over one dense axis is a *compaction* — the valid set is a
+sorted list of kept positions, built by a count pass and one branchless fill
+(`pos[q] = i; q += keep[i]`), the compact buffer a gather by position; a keyed
+read `S(k)` binary-searches the kept positions and a position the mask
+rejected is the out-of-key-set read, BL8006. No hash node is built per kept
+cell (bench gap G9: that node was ~85% of a filter-and-sum's time). Both
+compiled lanes and the interpreter build this; the LLVM lane takes exactly
+these compounds (rank 1, no trailing dims) and hands every other to the C++
+lane. A **rank-k mask (k ≥ 2)** keeps the hashed index (`declined -- hashed
+SparseIdx ...`): the lex-sorted tuple table plus the tuple → rank hash.
+The kept order is the source order in every lane and at every thread count;
+compaction is sequential by construction (a parallel prefix would be a
+different algorithm).
+
 Two construction routes:
 
 ```blade sketch
