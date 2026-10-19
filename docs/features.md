@@ -313,8 +313,12 @@ compile*, and never the values of a MAP: a suppressed map nest is byte-identical
 to the same program with the clause deleted. A licensed FOLD keeps spending its
 reorder licence in the vector half (`where omp` implies simd: Path A drops to
 `omp simd reduction`, a Path B fold over a one-level deferred computation takes
-the `omp simd reduction` / K-lane form), so its last bits may differ from the
-threaded build's -- both are the serial fold up to the licensed reassociation;
+the `omp simd reduction` / K-lane form, a dot-class one the explicit K-lane
+vector tree of `blade_fold_lanes.hpp`), so its last bits may differ from the
+threaded build's -- both are the serial fold up to the licensed reassociation
+(and since 2026-10-19 the threaded build runs the same fast form INSIDE each
+chunk: the vector tree per chunk for a dot-class body, `omp simd reduction` per
+chunk for any other builtin `+`/`*` body, `BLADE_FOLD_LANES`);
 `BLADE_FP_REPRO=1` is the build that keeps the serial association. Each decline
 leaves a
 `// [omp] requested but emitted serial: BLADE_OMP_THREADS=…` line in the

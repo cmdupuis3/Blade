@@ -218,9 +218,14 @@ chain. A fold whose source carries a REORDER LICENCE -- a recognised builtin
 `+`/`*` body, a declared `comm`, `where omp` on the kernel (which requires one
 of the two, BL4016), and `prodsum` / reduction-join legs over builtin folds --
 is EMITTED in its fastest licensed form by default (since 2026-10-17): an
-`omp simd reduction` or a K-lane multi-accumulator sweep (and, where `omp` asks
-and the build opens teams, per-thread partials), `reassoc nsz` on the
-accumulator in the LLVM lane. `where omp` therefore implies simd: a build that
+`omp simd reduction`, a K-lane multi-accumulator sweep, or -- for a DOT-CLASS
+fold (`prodsum`, and a `(+)` fold whose body is a product of the level's
+rank-1 peels) -- the explicit K-lane VECTOR tree of `blade_fold_lanes.hpp`
+(K = 8 independent 32-byte accumulators in a fixed documented association,
+one fused multiply-add per step under the build's contraction mode; 2026-10-19,
+`BLADE_FOLD_LANES`); and, where `omp` asks and the build opens teams,
+per-thread partials that each take the same fast form inside their chunk;
+`reassoc nsz` on the accumulator in the LLVM lane. `where omp` therefore implies simd: a build that
 opens no team (`BLADE_OMP_THREADS=1`) still vectorizes the licensed fold. The
 result is the serial fold up to reassociation -- deterministic for a fixed
 binary (the lane form for a fixed K; the simd form for the vectorizer's
@@ -230,8 +235,9 @@ kernel or on the MAP the fold consumes: `omp(i: 1)` covering the outermost level
 of a reorder-licensed fold's nest threads that level (per-thread partials).
 The LLVM lane has no thread runtime, so it spends only the reordering half and
 reports the threading half with the census line. `blade plan` names each fold's form
-(`fold form: simd-reduction | K-lanes(k) | threaded(...) | serial (repro) |
-serial (<why>)`).
+(`fold form: simd-reduction | K-lanes(k) | simd K-lanes(k) dot|self-dot|dot3|sum
+| threaded(...) | serial (repro) | serial (<why>)`; a `threaded(Path B chunks,
+...)` form names what runs inside each chunk).
 
 Integer arithmetic (exact under any association), the faults (BL8013,
 BL8014), the run-time libm and `fma(a, b, c)` (its own node: one rounding in
