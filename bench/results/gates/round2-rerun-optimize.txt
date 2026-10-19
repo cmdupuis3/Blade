@@ -1,0 +1,167 @@
+﻿Blade.exe : test: ignoring ambient OPENBLAS_DIR=C:\Users\cdupu\tools\OpenBLAS-0.3.34-x64 for this run (the suites 
+assume the default emission; blocks that exercise a knob set it themselves)
+At line:1 char:459
++ ... imize') { $o = & .\bin\Release\net10.0\Blade.exe test $k 2>&1; $o | O ...
++                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (test: ignoring ... it themselves):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+
+======================================================================
+  Blade-DSL: Optimization Layer Tests (v0.20.0)
+======================================================================
+
+  [PASS]: freeze_idiom_break_no_abort -- 1 guard break(s), 0 abort(s)
+  [PASS]: while_spelling_break_and_abort -- 1 guard break(s), 1 abort(s)
+  [PASS]: ordinal_guard_declines -- 0 guard break(s), 0 abort(s)
+  [PASS]: effectful_guard_declines -- 0 guard break(s), 0 abort(s)
+  [PASS]: transitive_effectful_guard_declines -- 0 guard break(s), 0 abort(s)
+  [PASS]: pure_helper_guard_recognized -- 1 guard break(s), 0 abort(s)
+  [PASS]: transitive_pure_guard_recognized -- 1 guard break(s), 0 abort(s)
+  [PASS]: shadowed_intrinsic_pure_recognized -- 1 guard break(s), 0 abort(s)
+  [PASS]: decision_freeze_applied -- 1 `freeze-recognition` decision(s); freeze-recognition applied
+  [PASS]: decision_freeze_declined_effectful -- 1 `freeze-recognition` decision(s); declined naming `tick`
+  [PASS]: decision_freeze_declined_ordinal -- 1 `freeze-recognition` decision(s); declined for the step ordinal
+  [PASS]: decision_fusion_applied -- 2 `elementwise-fusion` decision(s); elementwise-fusion applied
+  [PASS]: decision_fusion_declined_conditional_abort -- 1 `elementwise-fusion` decision(s); declined: the inner kernel may abort under a branch
+  [PASS]: decision_fusion_applied_unconditional_abort -- 1 `elementwise-fusion` decision(s); elementwise-fusion applied (inner read on every cell)
+  [PASS]: fusion_repeated_param_binds_inner_once -- the fused nest evaluates exp once per cell
+  [PASS]: decision_fusion_applied_repeated_param -- 2 `elementwise-fusion` decision(s); elementwise-fusion applied (inner value bound once per cell)
+  [PASS]: decision_slice_write_applied -- 1 `slice-write-fusion` decision(s); slice-write-fusion applied (pointwise RK4 step)
+  [PASS]: decision_slice_write_declined_fold -- 1 `slice-write-fusion` decision(s); declined: the step folds over its row (not pointwise)
+  [PASS]: decision_slice_write_declined_may_abort -- 1 `slice-write-fusion` decision(s); declined: integer division may abort
+  [PASS]: decision_slice_write_declined_deferred -- 1 `slice-write-fusion` decision(s); declined: the step forces a deferred module binding
+  [PASS]: slice_write_rk4_no_step_call_no_copy -- kernel: no step call, no rank-1 temporary freed, cells stored straight into the trajectory row
+  [PASS]: decision_row_fold_applied -- 1 `row-fold-fusion` decision(s); row-fold-fusion applied (prodsum checksum of the RK4 trajectory)
+  [FAIL]: decision_row_fold_declined_while -- wanted declined: a while-guarded recursion rewrites rows after the loop; saw: no decisions
+  [PASS]: row_fold_rk4_no_post_recursion_fold -- kernel: the row checksum is accumulated inside the recursion; no fold over the trajectory after it
+  [PASS]: recarray_grad_linear_emission -- 3 counted loops (primal, replay, descending adjoint); no triangular ordinals
+  [PASS]: recarray_grad_nonlinear_emission -- 3 counted loops (primal, replay, descending adjoint); no triangular ordinals
+  [PASS]: halo_dense_source_reads_direct -- no carousel; direct a[w + k] reads over the 7-cell interior
+  [PASS]: join_share_read_by_direct_fold -- 2 blade_libm::exp sites (kernel body + share const); the fold leg reads `e`
+  [PASS]: outer_product_partial_fold_streams -- no rank-2 pool, no row-mode scaffolding; exp folded inside the wrapper
+  [PASS]: pool_reuse_return_takes_dead_pool -- the specialized body's return aliases the dead pool; one reuse in the program
+  [PASS]: pool_reuse_chain_shares_root -- two reusers in the body take the root's pool
+  [PASS]: hot_row_fold_emitted_inside_producer_loop -- row-sum array allocated, filled behind each produced row, folded by the consumer
+  [PASS]: hot_row_gate_off_keeps_two_passes -- no row-sum array with the gate off
+  [PASS]: decision_hot_row_applied -- 1 `hot-row-fold` decision(s); hot-row-fold applied
+  [PASS]: decision_hot_row_declined_gate -- 1 `hot-row-fold` decision(s); declined: disabled by BLADE_HOT_ROW
+  [PASS]: decision_hot_row_declined_lost_team -- 1 `hot-row-fold` decision(s); declined: the fold would lose its Path B team
+  [PASS]: decision_hot_row_declined_reads_beyond -- 1 `hot-row-fold` decision(s); declined: the row kernel reads beyond its row
+  [PASS]: scalar_capture_no_longer_pins_source -- 2 frees for 3 allocations (module pool excepted); no reuse
+  [PASS]: sparse_gather_teardowns -- 4 function-body gathers freed once by their producer's teardown (incl. _dense_trail); the alias- and view-returned gathers and the module gather spared
+  [PASS]: inline_sparse_gather_bound_once -- 3 sites (rec arm, function return, module fold): each gathers once and frees once
+  [PASS]: inline_sparse_gather_every_scalar_position -- 4 sites (contains, subscript, call argument, top level): 7 gathers, each freed
+  [PASS]: decision_pool_reuse_applied -- 1 `pool-reuse` decision(s); pool-reuse applied
+  [PASS]: cse_drops_repeated_fold -- one scalar fold in the specialized body; the duplicate was dropped
+  [PASS]: decision_cse_applied -- 1 `cse` decision(s); cse applied
+  [PASS]: decision_cse_identical_lambdas_applied -- 1 `cse` decision(s); cse applied to two folds with identical lambda kernels
+  [PASS]: decision_cse_across_pure_call_applied -- 1 `cse` decision(s); cse applied across a call that writes nothing
+  [PASS]: cse_twin_of_mutated_array -- the let mut twin is written through a mut argument
+  [PASS]: cse_barrier_lambda_alias_kernel -- the kernel is a local alias the judge cannot see through
+  [PASS]: cse_barrier_mut_param_call -- a call writing the array through a mut parameter sits between the folds
+  [PASS]: cse_barrier_global_write_call -- a call writing a module-level let mut sits between the folds
+  [PASS]: cse_float_literal_identity -- 0.1 and 0.10000000001 are different kernels
+  [PASS]: cse_signed_zero_identity -- 0.0 and -0.0 are different kernels
+  [PASS]: cse_gate_off_keeps_both_folds -- two scalar folds in the body with BLADE_CSE=0
+  [PASS]: decision_cse_disabled -- 1 `cse` decision(s); cse declined, disabled by BLADE_CSE
+  [PASS]: pool_reuse_gate_off_emits_no_alias -- no pool alias with BLADE_POOL_REUSE=0
+  [PASS]: decision_pool_reuse_disabled -- 1 `pool-reuse` decision(s); pool-reuse declined, disabled by BLADE_POOL_REUSE
+  [PASS]: hoist_moves_invariant_call_out_of_nest -- no `avg` call in a nest; bound once before it (1 let(s))
+  [PASS]: hoist_guards_on_non_empty_nest -- two guarded lets (`<non-empty> ? avg(..) : 0.0`), no `avg` call in the nest
+  [PASS]: decision_hoist_applied -- 1 `invariant-hoist` decision(s); invariant-hoist applied
+  [PASS]: decision_hoist_guarded -- 1 `invariant-hoist` decision(s); applied, bound under the nest's non-emptiness
+  [PASS]: hoist_declines_writing_callee -- the call writes through a mut parameter: once per cell, as written
+  [PASS]: hoist_declines_conditional_may_abort -- the may-abort call is read only under the kernel's branch
+  [PASS]: hoist_gate_off_keeps_per_cell_call -- 2 per-cell `avg` call(s) with BLADE_HOIST=0
+  [PASS]: late_broadcast_guarded_on_non_empty_nest -- one guarded let (`<non-empty> ? lmean(v) : 0.0`), no unconditional one, no `lmean` call in the nest
+  [PASS]: late_broadcast_embeds_scalar_in_kernel -- 1 per-cell `lmean` call(s), no `let` in front of the map, with BLADE_HOIST=0
+  [PASS]: decision_hoist_late_broadcast_guarded -- 1 `invariant-hoist` decision(s); applied to the late broadcast, bound under the nest's non-emptiness
+  [PASS]: decision_hoist_disabled -- 1 `invariant-hoist` decision(s); invariant-hoist declined, disabled by BLADE_HOIST
+  [PASS]: decision_gram_apply_advisory -- 1 `gram-apply-advisory` decision(s); advisory names gram_apply(A, A, v)
+  [PASS]: plan_symmetric_storage_applied -- 1 `symmetric-storage` decision(s); packed storage for the comm covariance of one array
+  [PASS]: plan_triangular_iteration_applied -- 1 `triangular-iteration` decision(s); triangular iteration over the commuting levels
+  [PASS]: plan_symmetric_storage_declined_distinct -- 1 `symmetric-storage` decision(s); declined: the commuting positions hold different arrays
+  [PASS]: plan_omp_placement_applied -- 1 `omp` decision(s); omp applied, the placed construct in the evidence
+  [PASS]: plan_omp_drop_declined -- 1 `omp` decision(s); omp declined, naming the BLADE_OMP_THREADS knob
+  [PASS]: plan_blas_route_declined_gate_off -- 1 `blas-routing` decision(s); matmul declined: BLAS gate off
+  [PASS]: plan_blas_route_applied_gate_on -- 1 `blas-routing` decision(s); matmul routed to blade_matmul_d
+  [PASS]: plan_packed_gemm_applied -- 1 `microkernel` decision(s); packed gemm above the crossover
+  [PASS]: plan_packed_gemm_declined_small -- 1 `microkernel` decision(s); packed gemm declined below the crossover
+  [PASS]: plan_row_fold_jam_applied -- 1 `microkernel` decision(s); row-fold jam over the rows
+  [PASS]: plan_triangular_gram_jam_applied -- 2 `microkernel` decision(s); triangular gram jam
+  [PASS]: plan_syrk_tile_applied -- 1 `microkernel` decision(s); packed syrk tile above the crossover
+  [PASS]: plan_syrk_tile_fold_form -- 3 `fold-form` decision(s); fold form: syrk tile 6x8, KC=8
+  [PASS]: plan_syrk_tile_applied_in_repro -- 3 `fold-form` decision(s); the tile is ON under BLADE_FP_REPRO=1
+  [PASS]: plan_syrk_tile_declined_small -- 1 `microkernel` decision(s); syrk tile declined below the crossover
+  [PASS]: plan_gram_node_syrk_tile -- 1 `fold-form` decision(s); gram(A, A): fold form: syrk tile 6x8, KC=8
+  [PASS]: plan_gram_node_syrk_tile_repro -- 1 `fold-form` decision(s); gram(A, A): fold form: syrk tile 6x8, KC=8
+  [PASS]: plan_syrk_tile_route_61x257 -- 1 `microkernel` decision(s); packed syrk tile at 61 x 257, KC=257
+  [PASS]: plan_syrk_tile_route_97x513 -- 1 `microkernel` decision(s); packed syrk tile at 97 x 513, KC=257
+  [PASS]: plan_syrk_tile_route_29x1001 -- 1 `microkernel` decision(s); packed syrk tile at 29 x 1001, KC=334
+  [PASS]: plan_syrk_tile_route_61x31 -- 1 `microkernel` decision(s); packed syrk tile at 61 x 31, KC=31
+  [PASS]: plan_syrk_tile_route_13x31_declines -- 1 `microkernel` decision(s); 13 x 31 keeps the per-cell nest
+  [PASS]: plan_syrk_tile_declined_knob -- 1 `microkernel` decision(s); syrk tile declined by BLADE_SYRK_TILE=0
+  [PASS]: plan_antisym_tile_route_61x401 -- 2 `fold-form` decision(s); antisym tile at 61 x 401
+  [PASS]: plan_antisym_tile_route_61x600 -- 2 `fold-form` decision(s); antisym tile at 61 x 600
+  [PASS]: plan_antisym_tile_paired_knob -- 2 `fold-form` decision(s); BLADE_ANTISYM_TILE=4x4 selects the paired schedule
+  [PASS]: plan_antisym_tile_sample_blocks_knob -- 2 `fold-form` decision(s); BLADE_TILE_TUNE anti_kc=100 blocks the chain inside the tile visit
+  [PASS]: plan_antisym_tile_whole_chain_default -- 2 `fold-form` decision(s); unset: the whole chain in one block
+  [PASS]: plan_syrk_tile_row_groups_knob -- 3 `fold-form` decision(s); BLADE_TILE_TUNE syrk_g=2 names the row group
+  [PASS]: plan_syrk_tile_row_groups_default -- 3 `fold-form` decision(s); unset: row groups of 4
+  [PASS]: plan_syrk_tile_fused_tail -- 2 `fold-form` decision(s); the syrk tile's `/ d` tail is fused into the last block's store
+  [PASS]: plan_gram_node_syrk_tile_omp_census_declined -- 1 `omp` decision(s); gram node: the tile driver's team declined by BLADE_OMP_THREADS=1, in the census
+  [PASS]: plan_gram_node_syrk_tile_omp_census_applied -- 1 `omp` decision(s); gram node: the tile driver's team recorded as applied
+  [PASS]: plan_antisym_tile_applied_in_repro -- 2 `fold-form` decision(s); the antisym tile is ON under BLADE_FP_REPRO=1
+  [PASS]: plan_antisym_tile_route_23x11_declines -- 1 `microkernel` decision(s); 23 x 11 keeps the per-cell nest
+  [PASS]: plan_antisym_tile_declined_knob -- 1 `microkernel` decision(s); antisym tile declined by BLADE_ANTISYM_TILE=0
+  [PASS]: plan_simplex_tile_route_29x67 -- 2 `fold-form` decision(s); simplex tile at 29 x 67, KC=67
+  [PASS]: plan_simplex_tile_route_29x201 -- 2 `fold-form` decision(s); simplex tile at 29 x 201, KC=201
+  [PASS]: plan_simplex_tile_route_61x11 -- 2 `fold-form` decision(s); simplex tile at 61 x 11, KC=11
+  [PASS]: plan_simplex_tile_route_61x201 -- 2 `fold-form` decision(s); simplex tile at 61 x 201, KC=201
+  [PASS]: plan_simplex_tile_route_29x700 -- 2 `fold-form` decision(s); simplex tile at 29 x 700, KC=234
+  [PASS]: plan_simplex_tile_applied_in_repro -- 2 `fold-form` decision(s); the simplex tile is ON under BLADE_FP_REPRO=1
+  [PASS]: plan_simplex_tile_route_13x11_declines -- 1 `microkernel` decision(s); 13 x 11 keeps the per-cell nest
+  [PASS]: plan_simplex_tile_route_13x201_declines -- 1 `microkernel` decision(s); 13 x 201 keeps the per-cell nest
+  [PASS]: plan_simplex_tile_declined_knob -- 1 `microkernel` decision(s); simplex tile declined by BLADE_SIMPLEX_TILE=0
+  [PASS]: plan_fold_lanes_prodsum_dot -- 3 `fold-form` decision(s); prodsum(a, b): simd K-lanes(8) dot
+  [PASS]: plan_fold_lanes_prodsum_self_dot -- 3 `fold-form` decision(s); prodsum(a, a): simd K-lanes(8) self-dot (one load per element)
+  [PASS]: plan_fold_lanes_prodsum_dot3 -- 3 `fold-form` decision(s); prodsum(a, b, c): simd K-lanes(8) dot3
+  [PASS]: plan_fold_lanes_prodsum_k4 -- 3 `fold-form` decision(s); BLADE_FOLD_LANES=4 forces K = 4
+  [PASS]: plan_fold_lanes_prodsum_knob_off -- 3 `fold-form` decision(s); BLADE_FOLD_LANES=0 keeps the one-accumulator simd reduction
+  [PASS]: plan_fold_lanes_prodsum_repro -- 3 `fold-form` decision(s); BLADE_FP_REPRO=1 keeps the serial chain
+  [PASS]: plan_fold_lanes_reduce_dot -- 3 `fold-form` decision(s); reduce over zip(a, b) <@> x * y: simd K-lanes(8) dot
+  [PASS]: plan_fold_lanes_reduce_self_dot -- 3 `fold-form` decision(s); reduce over a <@> w * w: simd K-lanes(8) self-dot
+  [PASS]: plan_fold_lanes_reduce_not_dot_keeps_simd -- 3 `fold-form` decision(s); a body that is not a bare product keeps the simd reduction
+  [PASS]: plan_fold_lanes_threaded_dot -- 3 `fold-form` decision(s); a `where omp` dot: Path B chunks, the vector tree per chunk
+  [PASS]: plan_fold_lanes_threaded_chain_simd_per_chunk -- 3 `fold-form` decision(s); a `where omp` non-dot body: Path B chunks, simd reduction per chunk
+  [PASS]: plan_fold_lanes_threaded_comm_kernel_serial_per_chunk -- 3 `fold-form` decision(s); a comm-declared kernel: Path B chunks, the serial chain per chunk, with the reason
+  [PASS]: plan_fold_lanes_threaded_knob_off -- 3 `fold-form` decision(s); BLADE_FOLD_LANES=0: the serial chain per chunk, as before M14
+  [PASS]: plan_fold_lanes_threads_off_dot -- 3 `fold-form` decision(s); BLADE_OMP_THREADS=1: the serial vector tree over the whole sweep
+  [PASS]: plan_orbit_fold_sym2_applied -- 4 `fold-form` decision(s); orbit-class fold, rank 2, weights 1/2
+  [PASS]: plan_orbit_fold_axes_spelling_applied -- 4 `fold-form` decision(s); `reduce(g, (+), axes = 2)` is the same orbit-class fold
+  [PASS]: plan_orbit_fold_sym3_applied -- 5 `fold-form` decision(s); orbit-class fold, rank 3, weights 1/3/6
+  [PASS]: plan_orbit_fold_antisym_even -- 2 `fold-form` decision(s); strict pool, even kernel, weight 2
+  [PASS]: plan_orbit_fold_declined_repro -- 5 `fold-form` decision(s); BLADE_FP_REPRO=1 keeps the logical walk
+  [PASS]: plan_orbit_fold_declined_non_builtin -- 5 `fold-form` decision(s); a non-builtin outer fold keeps the logical walk
+  [PASS]: plan_orbit_fold_declined_inner_seed -- 5 `fold-form` decision(s); a non-zero inner seed keeps the logical walk
+  [PASS]: plan_orbit_fold_declined_coordinate -- 5 `fold-form` decision(s); a coordinate used beyond the read keeps the logical walk
+  [PASS]: plan_orbit_fold_declined_fixed_read -- 5 `fold-form` decision(s); a second read at a fixed cell keeps the logical walk
+  [PASS]: plan_orbit_fold_declined_hermitian -- 3 `fold-form` decision(s); a Hermitian pool (conjugate mirrors) keeps the logical walk
+  [PASS]: plan_orbit_fold_declined_knob -- 5 `fold-form` decision(s); BLADE_ORBIT_FOLD=0 keeps the logical walk
+  [PASS]: plan_orbit_fold_threaded -- 4 `fold-form` decision(s); the omp-licensed orbit fold threads its first-coordinate rows
+  [PASS]: plan_orbit_fold_threaded_omp_record -- 1 `omp` decision(s); omp applied: the orbit fold's thread team
+  [PASS]: plan_orbit_fold_threads_suppressed -- 4 `fold-form` decision(s); BLADE_OMP_THREADS=1: the serial orbit pass
+  [PASS]: plan_orbit_fold_threads_suppressed_census -- 1 `omp` decision(s); omp declined, naming BLADE_OMP_THREADS
+  [PASS]: plan_orbit_fold_unlicensed_serial -- 5 `fold-form` decision(s); no omp request: the serial orbit pass
+  [PASS]: orbit_fold_cpp_threaded_rows -- closed-form row offsets, thread-order combine, addition-only class combine
+  [PASS]: plan_orbit_fold_combine_is_additions -- 5 `fold-form` decision(s); applied (C++ text checked below)
+  [PASS]: orbit_fold_cpp_addition_combine -- pool walk + addition-only class combine, no weight products
+  [PASS]: parallel_emission_cells_isolated -- 64 concurrent assemblies: every include set matches its own program
+  [PASS]: decl_span_reset_installs_fresh_ref -- a child flow's lowering starts its own span table; the parent's survives
+  [PASS]: validate_clean_program -- the program validates
+  [PASS]: validate_dangling_under_gram -- refused: dangling VarId reference: v999999
+  [PASS]: validate_forward_binding_reference -- refused: dangling VarId reference
+  [PASS]: validate_empty_match_in_function -- refused: empty match expression
+----------------------------------------------------------------------
+Optimization Layer: 151 passed, 1 failed

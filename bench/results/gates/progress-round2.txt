@@ -1,0 +1,13 @@
+08:15:25 PHASE1 START hash=2373dfb3b604ac188fcc52b1bbd6c2b6fd218ef58d9d063b9f6d008bb4f36afa
+08:15:25 START gate default: test
+08:31:32 DONE gate default rc=1 wall=967s fails=5
+08:31:33 START gate interp: test interp
+09:20:08 DONE gate interp rc=0 wall=2916s fails=0
+09:20:08 START gate opt-diff: test opt-diff
+09:22:25 DONE gate opt-diff rc=0 wall=137s fails=0
+09:22:25 START gate llvm: test llvm
+09:45:49 DONE gate llvm rc=0 wall=1404s fails=0
+09:45:49 START gate docs: test docs
+09:46:20 DONE gate docs rc=0 wall=31s fails=0
+09:46:20 GATES DONE total [FAIL] lines = 5
+09:46:20 GATE FAILURE: stopping after the five gates (no steps 2-3, no timing phases)
