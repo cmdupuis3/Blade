@@ -206,9 +206,21 @@ let genDomainFoldCpp (level: LoopIndexBinding) (plan: DomainPlan) (order: Domain
             pad 2 (if r = 1 then "const bool __byOuter = true;" else "const bool __byOuter = __dn >= (int64_t)__rnt;")
             pad 2 "const int64_t __olo = __byOuter ? __dlo + (__dn * __rt) / __rnt : __dlo;"
             pad 2 "const int64_t __ohi = __byOuter ? __dlo + (__dn * (__rt + 1)) / __rnt : __dlo + __dn;"
-            pad 2 $"{elemStr} __dacc = {ident};" ]
-        @ nest 0 2
-        @ [ pad 2 "if (__rt < __dT) __dpart[__rt] = __dacc;"
+            // The thread's walk runs in a BY-VALUE closure: inside the outlined
+            // region every captured array is a reference into shared memory, so
+            // g++ re-read `x.data` through it per cell and turned the run's
+            // contiguous loads into emulated gathers (vpextrq + vmovsd; band mt8
+            // 1.9 ms against 0.7 ms serial). A per-thread copy of each captured
+            // Array header (pointer + extents, never the pool) keeps them in
+            // registers. `mutable`: a called wrapper may take an `Array&`. The
+            // fold kernel writes no capture (BL4005 refuses a captured write in
+            // an omp body), so the copies are read-only in effect.
+            pad 2 $"const {elemStr} __dacc = [=]() mutable -> {elemStr} {{"
+            pad 3 $"{elemStr} __dacc = {ident};" ]
+        @ nest 0 3
+        @ [ pad 3 "return __dacc;"
+            pad 2 "}();"
+            pad 2 "if (__rt < __dT) __dpart[__rt] = __dacc;"
             pad 1 "}"
             pad 1 $"for (int __t = 0; __t < __dT; ++__t) {name} = {name} {opStr} __dpart[__t];"
             pad 1 "delete[] __dpart;"

@@ -4049,7 +4049,8 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                     let order = domainFoldOrder (Some callable) (Some cg.KernelExpr) plan
                                     // THREADS (bench gap G31): a `where omp` fold
                                     // kernel, in a build that emits teams.
-                                    let threaded = callable.IsOmpParallel && ompThreadEmissionEnabled ()
+                                    let mapSafe = domainMapKernelPure cg.KernelExpr
+                                    let threaded = callable.IsOmpParallel && ompThreadEmissionEnabled () && mapSafe
                                     let walk =
                                         match order with
                                         | DomainDiagonalOrder dg ->
@@ -4068,8 +4069,11 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                     // The licence asked for threads this build does not
                                     // emit: said in the C++, never silently.
                                     let ompNote =
-                                        if callable.IsOmpParallel && not threaded
-                                        then [ $"{ind}/* {(ompSuppressedPhrase (ompThreadsSuppressedReason ()))} */" ]
+                                        if callable.IsOmpParallel && not threaded then
+                                            let why =
+                                                if not (ompThreadEmissionEnabled ()) then ompThreadsSuppressedReason ()
+                                                else "the domain map's kernel may assign a capture or emit output (or calls something that may), which a thread team would race on"
+                                            [ $"{ind}/* {(ompSuppressedPhrase why)} */" ]
                                         else []
                                     let walkNote =
                                         match order with
