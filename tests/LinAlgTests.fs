@@ -708,17 +708,16 @@ let y = gram_apply(A, A, v)
       ("blas_on_syrk_above_crossover_prefers_the_tile", true,
        bigCov
        + "let t2 = method_for(CB, CB) <@> " + bigCovKernel "comm(x, y)" "prodsum(x, y) / 8.0",
-       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, t2.data, 0, false, (size_t)336);"
-         "for (size_t __sy_i = 0; __sy_i < 20; __sy_i++) for (size_t __sy_j = 0; __sy_j < 20 - __sy_i; __sy_j++) t2[__sy_i][__sy_j] /= (8.0);" ],
-       [ shimInclude; "blade_linalg::"; "cblas_"; "CB____i0" ])
+       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, t2.data, 0, false, (size_t)336, 1, (double)(8.0), (size_t)4);" ],
+       [ shimInclude; "blade_linalg::"; "cblas_"; "CB____i0"; "__sy_i" ])
       ("blas_on_syrk_tile_takes_the_omp_licence", true,
        bigCov
        + "let t3 = method_for(CB, CB) <@> " + bigCovKernel "comm(x, y), omp" "prodsum(x, y)",
-       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, t3.data, 0, true, (size_t)336);" ],
+       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, t3.data, 0, true, (size_t)336, 0, (double)(0.0), (size_t)4);" ],
        [ shimInclude; "blade_linalg::"; "CB____i0" ])
       ("blas_on_gram_same_above_crossover_prefers_the_tile", true,
        bigCov + "let G = gram(CB, CB)\n",
-       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, G.data, 0, true, (size_t)336);"
+       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, G.data, 0, true, (size_t)336, 0, 0.0, (size_t)4);"
          "gram(A, A): packed-triangle syrk tile" ],
        [ shimInclude; "blade_linalg::"; "cblas_"; "__gacc" ])
       // The library keeps what the tile does not cover: the distinct gram
