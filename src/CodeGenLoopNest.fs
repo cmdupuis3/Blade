@@ -2750,24 +2750,31 @@ let internal tryGenSyrkDispatch
                         Some r.CppExpr
                 // Three answers, hence the nested option: `None` = DECLINE the
                 // whole dispatch (a scale this site cannot spell), `Some None`
-                // = no scale to apply, `Some (Some line)` = the scaling pass.
-                let scaleLine : string option option =
+                // = no scale to apply, `Some (Some (kind, text))` = the scale:
+                // kind 1 = divide, 2 = multiply (blade_tiles.h's
+                // BLADE_TILE_SCALE_* codes), text = the scalar's C++.
+                let scaleArgs : (int * string) option option =
                     match codeGen.KernelExpr with
                     | Blade.LinAlgPatterns.ProdSumScaled (_, None) -> Some None
                     | Blade.LinAlgPatterns.ProdSumScaled (_, Some sc) ->
-                        let (opStr, sExpr) =
+                        let (kind, sExpr) =
                             match sc with
-                            | Blade.LinAlgPatterns.ScaleDiv d -> ("/=", d)
-                            | Blade.LinAlgPatterns.ScaleMul s -> ("*=", s)
+                            | Blade.LinAlgPatterns.ScaleDiv d -> (1, d)
+                            | Blade.LinAlgPatterns.ScaleMul s -> (2, s)
                         match renderScalar sExpr with
                         | None -> None                       // unresolvable -> decline
-                        | Some sTxt ->
-                            Some (Some (String.replicate indent "    "
-                                        + $"/* ... then the kernel's own scalar, over the same packed triangle */ for (size_t __sy_i = 0; __sy_i < {mExtent}; __sy_i++) for (size_t __sy_j = 0; __sy_j < {mExtent} - __sy_i; __sy_j++) {cName}[__sy_i][__sy_j] {opStr} ({sTxt});"))
+                        | Some sTxt -> Some (Some (kind, sTxt))
                     | _ -> None
-                match scaleLine with
+                match scaleArgs with
                 | None -> None
-                | Some tail ->
+                | Some scale ->
+                // The BLAS route's scaling pass (the shim has no tail): the
+                // kernel's own scalar over the same packed triangle, after.
+                let tail =
+                    scale |> Option.map (fun (kind, sTxt) ->
+                        let opStr = if kind = 1 then "/=" else "*="
+                        String.replicate indent "    "
+                        + $"/* ... then the kernel's own scalar, over the same packed triangle */ for (size_t __sy_i = 0; __sy_i < {mExtent}; __sy_i++) for (size_t __sy_j = 0; __sy_j < {mExtent} - __sy_i; __sy_j++) {cName}[__sy_i][__sy_j] {opStr} ({sTxt});")
                 match entryOpt with
                 | Some entry ->
                     (linalgUsedCell ()).Value <- true
@@ -2797,8 +2804,10 @@ let internal tryGenSyrkDispatch
                 // (toward the serial chain) and the repro build's not at all
                 // under =off.
                 //
-                // The kernel's scalar tail, if any, is the SAME post-pass the
-                // BLAS route applies (divide the finished sum).
+                // The kernel's scalar tail, if any, is the SAME operation the
+                // BLAS route's post-pass applies (divide the finished sum) --
+                // applied by the LAST K block's tile as it stores, so the
+                // triangle is written once and never re-read for it.
                 let lit (s: string) = match System.Int64.TryParse s with | true, v -> Some v | _ -> None
                 let declineTile (why: string) (shape: string) =
                     recordCodegenDecision "microkernel" cName
@@ -2811,19 +2820,35 @@ let internal tryGenSyrkDispatch
                 | Some p, Some k when packedTriWorth p k ->
                     (packedGemmUsedCell ()).Value <- true
                     let kc = syrkTileKc k
+                    let g = syrkRowGroup ()
                     // Threads only where the source licenses them (`omp` on
                     // the kernel) AND the build emits thread-level OpenMP;
-                    // cells are split across the team, sums never are.
+                    // cells are split across the team, sums never are. The
+                    // omp census: the team is the DRIVER's (row groups under
+                    // schedule(dynamic)), recorded as applied; a licence the
+                    // build knob suppresses gets the one census phrase.
                     let threadedArg =
                         if codeGen.OmpRequested && ompThreadEmissionEnabled () then "true" else "false"
+                    let census =
+                        if not codeGen.OmpRequested then ""
+                        elif ompThreadEmissionEnabled () then
+                            recordOmpConstruct cName "omp parallel num_threads(T) inside the tile driver"
+                                "dsyrk_tri row groups: work units under schedule(dynamic), cells split across the team, sums never"
+                            ""
+                        else $"/* {(ompSuppressedPhrase (ompThreadsSuppressedReason ()))} */ "
+                    let (sk, scTxt, scaleNote) =
+                        match scale with
+                        | None -> (0, "0.0", "")
+                        | Some (1, t) -> (1, t, ", then / d per cell (fused into the last block's store)")
+                        | Some (_, t) -> (2, t, ", then * s per cell (fused into the last block's store)")
                     recordCodegenDecision "microkernel" cName Blade.Effects.Applied
                         [ "packed syrk tile (blade_pgemm::dsyrk_tri, 6x8 register tile over the packed triangle)"
-                          $"P={p} K={k} KC={kc}" ]
-                    recordFoldForm cName $"syrk tile 6x8, KC={kc}"
+                          $"P={p} K={k} KC={kc} G={g}" ]
+                    recordFoldForm cName $"syrk tile 6x8, KC={kc}, row groups of {g}{scaleNote}"
                         "same-array comm row contraction (one ascending chain per cell; no reorder licence used)"
-                    Some ([ String.replicate indent "    "
-                            + $"/* comm nest: packed-triangle syrk tile (blade_packed_gemm.hpp dsyrk_tri, 6x8, KC={kc}), per cell the serial prodsum */ blade_pgemm::dsyrk_tri((size_t)({mExtent}), (size_t)({nExtent}), {aName}.data, {cName}.data, 0, {threadedArg}, (size_t){syrkTileKcMax});" ]
-                          @ Option.toList tail)
+                    Some [ String.replicate indent "    "
+                           + census
+                           + $"/* comm nest: packed-triangle syrk tile (blade_packed_gemm.hpp dsyrk_tri, 6x8, KC={kc}), row groups of {g}, per cell the serial prodsum */ blade_pgemm::dsyrk_tri((size_t)({mExtent}), (size_t)({nExtent}), {aName}.data, {cName}.data, 0, {threadedArg}, (size_t){syrkTileKcMax}, {sk}, (double)({scTxt}), (size_t){g});" ]
                 | Some p, Some k ->
                     declineTile "below the syrk-tile crossover (p >= 16, k >= 4): the per-cell nest wins" $"P={p} K={k}"
                 | _ ->
@@ -2901,7 +2926,11 @@ let internal tryGenRowContractionTile
                     $"{driver}: work units under schedule(dynamic), cells split across the team, sums never"
                 ""
             else $"/* {(ompSuppressedPhrase (ompThreadsSuppressedReason ()))} */ "
-        let scaleNote (sk: int) = match sk with 1 -> ", then / d per cell" | 2 -> ", then * s per cell" | _ -> ""
+        let scaleNote (sk: int) =
+            match sk with
+            | 1 -> ", then / d per cell (fused into the last block's store)"
+            | 2 -> ", then * s per cell (fused into the last block's store)"
+            | _ -> ""
         match scaleArgs with
         | None -> declineTile "the kernel's scale is not renderable at this site" ""
         | Some (sk, scTxt) ->
@@ -2928,14 +2957,18 @@ let internal tryGenRowContractionTile
                     match sched with
                     | AntiPaired4x4 -> (1, "paired 4x4 (P and Q in one pass)")
                     | _ -> (0, "sequential 6x8 (P pass, spill, Q pass)")
+                let kcMax = antisymKcMax ()
+                let chainNote =
+                    if kcMax = 0L || kcMax >= n then "whole chain per tile"
+                    else $"whole chain per tile in sample blocks of <= {kcMax}"
                 recordCodegenDecision "microkernel" cName Blade.Effects.Applied
                     [ $"antisym tile (blade_pgemm::dantisym_tri, {form}, strict packed triangle)"
-                      $"P={p} N={n} components=({cx},{cy})" ]
-                recordFoldForm cName $"antisym tile {form}, whole chain per tile{scaleNote sk}"
+                      $"P={p} N={n} components=({cx},{cy}) KC={kcMax}" ]
+                recordFoldForm cName $"antisym tile {form}, {chainNote}{scaleNote sk}"
                     "same-array anticomm row-contraction pair (two ascending chains per cell, one subtraction; no reorder licence used)"
                 Some [ String.replicate indent "    "
                        + ompCensus "dantisym_tri row panels"
-                       + $"/* anticomm nest: antisym pair tile (blade_packed_gemm.hpp dantisym_tri, {form}), per cell the serial prodsum - prodsum */ blade_pgemm::dantisym_tri((size_t)({mExtent}), (size_t)({nExtent}), {aName}.data, (size_t){cx}, (size_t){cy}, nested_array_utilities::pool_base({cName}.data), {sk}, (double)({scTxt}), {threadedArg}, {variant});" ]
+                       + $"/* anticomm nest: antisym pair tile (blade_packed_gemm.hpp dantisym_tri, {form}), per cell the serial prodsum - prodsum */ blade_pgemm::dantisym_tri((size_t)({mExtent}), (size_t)({nExtent}), {aName}.data, (size_t){cx}, (size_t){cy}, nested_array_utilities::pool_base({cName}.data), {sk}, (double)({scTxt}), {threadedArg}, {variant}, 0, (size_t){kcMax});" ]
             | Some p, Some n ->
                 declineTile "below the antisym-tile crossover (p >= 24, n >= 8): the per-cell nest wins" $"P={p} N={n}"
             | _ -> declineTile "non-literal extents: the per-cell nest" "non-literal extents"

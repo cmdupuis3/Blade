@@ -1786,6 +1786,41 @@ let syrkTileKc (k: int64) : int64 =
         let nkb = (k + syrkTileKcMax - 1L) / syrkTileKcMax
         (k + nkb - 1L) / nkb
 
+/// BLADE_TILE_TUNE: the packed-tile drivers' SPEED-ONLY parameters, for A/B
+/// sweeps -- `key=value` pairs separated by commas or spaces, unknown keys
+/// ignored, a malformed value = the default. No bit depends on any of them
+/// (every cell is one owner's chain in one order whatever the visiting order
+/// or block size), so they need no licence and apply under BLADE_FP_REPRO=1.
+/// Read per call; they change the EMISSION (the driver's arguments), so the
+/// exe cache keys on them for free.
+///   syrk_g   row panels per GROUP in dsyrk_tri / blade_dsyrk_tri_f64 (1..8):
+///            G A micro-panels are packed together and each column panel is
+///            read once from L3 and reused G times from L1 (default 4;
+///            1 = the previous order, every column panel from L3 per row panel)
+///   anti_kc  sample-block cap INSIDE an antisym tile visit (P and Q partials
+///            spilled and reloaded exactly between balanced blocks; 0 = the
+///            whole chain in one block, the default)
+let tileTune (key: string) (dflt: int64) : int64 =
+    match System.Environment.GetEnvironmentVariable "BLADE_TILE_TUNE" with
+    | null -> dflt
+    | v ->
+        v.Split([| ','; ' '; ';' |], System.StringSplitOptions.RemoveEmptyEntries)
+        |> Array.tryPick (fun kv ->
+            match kv.Split('=') with
+            | [| k; x |] when k.Trim().ToLowerInvariant() = key ->
+                match System.Int64.TryParse(x.Trim()) with
+                | true, n -> Some n
+                | _ -> None
+            | _ -> None)
+        |> Option.defaultValue dflt
+
+/// dsyrk_tri's row panels per group (BLADE_TILE_TUNE syrk_g), clamped to the
+/// drivers' TRI_G_MAX = 8.
+let syrkRowGroup () : int64 = max 1L (min 8L (tileTune "syrk_g" 4L))
+
+/// The antisym tile's sample-block cap (BLADE_TILE_TUNE anti_kc); 0 = whole.
+let antisymKcMax () : int64 = max 0L (tileTune "anti_kc" 0L)
+
 /// BLADE_SYRK_TILE: unset / `1` / `on` = the packed-triangle SYRK tile is the
 /// BLAS-off arm of the same-array `comm` row contraction (default); `0` / `off`
 /// keeps the plain per-cell nest, for A/B. A FUNCTION, read per call, so a

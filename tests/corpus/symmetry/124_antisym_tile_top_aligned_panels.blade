@@ -1,0 +1,29 @@
+// TEST: Antisym Tile Top Aligned Panels
+// The antisym pair L = X Y^T - Y X^T over `method_for(z, z)` with
+// `where anticomm(a, b)` (strict AntisymIdx<2, p>, no diagonal) at p = 27 (27 =
+// 3*8 + 3: the ragged 3-lane column panel is the FIRST, top-aligned -- cells
+// (0, 1), (0, 2), (1, 2) -- and only rows 0 and 1 visit it; 27 = 4*6 + 3 row
+// panels, the last ragged) and n = 11 samples, with a `* 0.5` tail. Above the
+// crossover (p >= 24, n >= 8), so both lanes run the sequential 6x8 antisym tile
+// (blade_pgemm::dantisym_tri / blade_dantisym_tri_f64).
+/// Z(i, c, s) = ((5 i + 3 c + s) mod 7) - 3: small integers, so every product and
+/// every partial sum is an exact integer and ANY association gives the same P and
+/// Q; the scale 0.5 is a power of two, so every stored value is exact --
+/// association-invariant pins. The route is pinned by `blade plan`
+/// (tests/OptimizeTests.fs plan_antisym_tile_*), the bits by `blade test row-tile`
+/// and `blade test llvm tiles`.
+type P = Idx<27>
+type C = Idx<2>
+type S = Idx<11>
+let (ss, l01, l_mirror, l_edge, l_first_panel, l_diag) = {
+    let z = method_for(range<P>, range<C>, range<S>) <@> lambda(i, c, s) -> Float64((i * 5 + c * 3 + s) % 7) - 3.0 |> compute
+    let l = method_for(z, z) <@> lambda(a: Array<Float64 like C, S>, b: Array<Float64 like C, S>) where anticomm(a, b) -> (prodsum(a((0 : C)), b((1 : C))) - prodsum(b((0 : C)), a((1 : C)))) * 0.5 |> compute
+    let total = reduce(method_for(range<P>) <@> lambda(i) -> reduce(method_for(range<P>) <@> lambda(j) -> l(i, j) * l(i, j), (+)), (+))
+    (total, l(0, 1), l(26, 3), l(25, 26), l(1, 2), l(5, 5))
+}
+// EXPECT: ss = 94416.0
+// EXPECT: l01 = 15.5
+// EXPECT: l_mirror = 18.0
+// EXPECT: l_edge = 8.5
+// EXPECT: l_first_panel = 8.5
+// EXPECT: l_diag = 0.0

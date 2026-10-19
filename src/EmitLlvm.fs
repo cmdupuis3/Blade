@@ -219,13 +219,13 @@ let tilesContractFlag () : string =
 
 /// The scratch the core needs for a p x p triangle in blocks of kc samples,
 /// in doubles: the B panel (kc x min(p, NC) padded to NR = 8) plus the A
-/// micro-panel (MR = 6 x kc). blade_llvm_tiles.c re-derives the same number
-/// and takes its scalar chain if handed less, so a drift here costs speed,
-/// never memory safety.
-let syrkTileScratchCells (p: int64) (kc: int64) : int64 =
+/// scratch (g row panels per group, MR = 6 x kc each). blade_llvm_tiles.c
+/// re-derives the same number and takes its scalar chain if handed less, so
+/// a drift here costs speed, never memory safety.
+let syrkTileScratchCells (p: int64) (kc: int64) (g: int64) : int64 =
     let nc = min p 2048L
     let npad = (nc + 7L) / 8L * 8L
-    kc * npad + 6L * kc
+    kc * npad + (max 1L (min 8L g)) * 6L * kc
 
 /// The antisym core's column block (blade_llvm_tiles.c blade_llvm_anti_nc,
 /// the C++ driver's anti_nc): ~8 MB of B panels, a multiple of the tile's
@@ -4438,27 +4438,34 @@ and private trySyrkTileCore (c: Ctx) (a: ArrVal) : ArrVal option =
             | _ -> refuse "a tile-core operand that did not materialize to a pool"
         let total = shapeCells a.Groups
         let out = allocPool c ScF64 (string total)
-        let scratchCells = syrkTileScratchCells p kc
+        let g = Blade.CodeGenExprSupport.syrkRowGroup ()
+        let scratchCells = syrkTileScratchCells p kc g
         let scratch = allocPool c ScF64 (string scratchCells)
+        let scaleNote =
+            match cand.Scale with
+            | Some (Blade.LinAlgPatterns.ScaleDiv _) -> ", then / d per cell (fused into the last block's store)"
+            | Some (Blade.LinAlgPatterns.ScaleMul _) -> ", then * s per cell (fused into the last block's store)"
+            | None -> ""
         // The declaration's attributes are claims about blade_llvm_tiles.c
         // (stated there): argument memory only, serial, returns. Parameter
         // facts ride the fact layer's switch like every other declaration.
         let pa = paramAttr ()
         let ro, nc =
             if factEnabled factParamAttrs then " readonly captures(none)", " captures(none)" else "", ""
-        need c ($"declare void @{tilesSymbol}(i64{pa}, i64{pa}, ptr{pa}{ro}, i64{pa}, ptr{pa}{nc}, i64{pa}, i64{pa}, i64{pa}, double{pa}, ptr{pa}{nc}, i64{pa}){(attrRef c grpTileCore)}")
-        ln c ($"; syrk tile (shared C core blade_llvm_tiles.c over blade_tiles.h, 6x8, KC={kc}): per cell the serial prodsum")
+        need c ($"declare void @{tilesSymbol}(i64{pa}, i64{pa}, ptr{pa}{ro}, i64{pa}, ptr{pa}{nc}, i64{pa}, i64{pa}, i64{pa}, i64{pa}, double{pa}, ptr{pa}{nc}, i64{pa}){(attrRef c grpTileCore)}")
+        ln c ($"; syrk tile (shared C core blade_llvm_tiles.c over blade_tiles.h, 6x8, KC={kc}, row groups of {g}): per cell the serial prodsum")
         ln c (renderCall { Dest = None; RetTy = ScVoid; Callee = "@" + tilesSymbol
                            Args = [ ScI64, string p; ScI64, string k; ScStr, xPtr; ScI64, string k
                                     ScStr, out; ScI64, "0"
                                     ScI64, string Blade.CodeGenExprSupport.syrkTileKcMax
+                                    ScI64, string g
                                     ScI64, scaleMode; ScF64, scaleVal
                                     ScStr, scratch; ScI64, string scratchCells ] })
         record "microkernel" Blade.Effects.Applied
             [ "packed syrk tile (shared C core blade_llvm_tiles.c over blade_tiles.h, 6x8 register tile over the packed triangle)"
-              $"P={p} K={k} KC={kc}" ]
+              $"P={p} K={k} KC={kc} G={g}" ]
         record "fold-form" Blade.Effects.Applied
-            [ $"fold form: syrk tile (shared C core) 6x8, KC={kc}"
+            [ $"fold form: syrk tile (shared C core) 6x8, KC={kc}, row groups of {g}{scaleNote}"
               "same-array comm row contraction (one ascending chain per cell; no reorder licence used; LLVM lane, serial)" ]
         Some { a with Src = APool out; RowOpBytes = 0L }
     | _ -> None
@@ -4513,8 +4520,8 @@ and private tryRowTileCore (c: Ctx) (a: ArrVal) : ArrVal option =
             | Some (Blade.LinAlgPatterns.ScaleMul s) -> "2", (coerce c ScF64 (emitExpr c s)).Reg
         let scaleNote =
             match cand.Scale with
-            | Some (Blade.LinAlgPatterns.ScaleDiv _) -> ", then / d per cell"
-            | Some (Blade.LinAlgPatterns.ScaleMul _) -> ", then * s per cell"
+            | Some (Blade.LinAlgPatterns.ScaleDiv _) -> ", then / d per cell (fused into the last block's store)"
+            | Some (Blade.LinAlgPatterns.ScaleMul _) -> ", then * s per cell (fused into the last block's store)"
             | None -> ""
         let operandPtr () =
             let x = materialize c cand.Operand
@@ -4548,20 +4555,25 @@ and private tryRowTileCore (c: Ctx) (a: ArrVal) : ArrVal option =
             let out = allocPool c ScF64 (string (shapeCells a.Groups))
             let scratchCells = antisymTileScratchCells p n paired
             let scratch = allocPool c ScF64 (string scratchCells)
-            need c ($"declare void @{antisymTileSymbol}(i64{pa}, i64{pa}, ptr{pa}{ro}, i64{pa}, i64{pa}, i64{pa}, i64{pa}, ptr{pa}{ncap}, i64{pa}, i64{pa}, i64{pa}, double{pa}, ptr{pa}{ncap}, i64{pa}){(attrRef c grpTileCore)}")
+            let kcMax = Blade.CodeGenExprSupport.antisymKcMax ()
+            let chainNote =
+                if kcMax = 0L || kcMax >= n then "whole chain per tile"
+                else $"whole chain per tile in sample blocks of <= {kcMax}"
+            need c ($"declare void @{antisymTileSymbol}(i64{pa}, i64{pa}, ptr{pa}{ro}, i64{pa}, i64{pa}, i64{pa}, i64{pa}, ptr{pa}{ncap}, i64{pa}, i64{pa}, i64{pa}, i64{pa}, double{pa}, ptr{pa}{ncap}, i64{pa}){(attrRef c grpTileCore)}")
             ln c ($"; antisym tile (shared C core blade_llvm_tiles.c over blade_tiles.h, {form}): per cell the serial prodsum - prodsum")
             ln c (renderCall { Dest = None; RetTy = ScVoid; Callee = "@" + antisymTileSymbol
                                Args = [ ScI64, string p; ScI64, string n; ScStr, zPtr
                                         ScI64, string (cand.Comps * n); ScI64, string n
                                         ScI64, string cx; ScI64, string cy
                                         ScStr, out; ScI64, (if paired then "1" else "0"); ScI64, "0"
+                                        ScI64, string kcMax
                                         ScI64, scaleMode; ScF64, scaleVal
                                         ScStr, scratch; ScI64, string scratchCells ] })
             record "microkernel" Blade.Effects.Applied
                 [ $"antisym tile (shared C core blade_llvm_tiles.c over blade_tiles.h, {form}, strict packed triangle)"
-                  shapeEv ]
+                  $"{shapeEv} KC={kcMax}" ]
             record "fold-form" Blade.Effects.Applied
-                [ $"fold form: antisym tile (shared C core) {form}, whole chain per tile{scaleNote}"
+                [ $"fold form: antisym tile (shared C core) {form}, {chainNote}{scaleNote}"
                   "same-array anticomm row-contraction pair (two ascending chains per cell, one subtraction; no reorder licence used; LLVM lane, serial)" ]
             Some { a with Src = APool out; RowOpBytes = 0L }
         | Blade.LinAlgPatterns.Sym3 ->
