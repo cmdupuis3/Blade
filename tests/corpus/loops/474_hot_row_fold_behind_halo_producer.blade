@@ -1,0 +1,21 @@
+// TEST: Hot-Row Fold Behind A 2-D Halo Producer
+// Bench review item M13 (Blade.Optimize.planHotRowFolds): a dense map whose
+// rows a later ROW FOLD consumes is scheduled hot -- each row's fold runs right
+// after the row is produced, into a row-sum array the fold then combines in
+// the same order from the same seed. Strict-legal (no reorder licence), so the
+// values are the two-pass form's bit for bit; `blade plan` says
+// `[hot-row-fold v1] ss: applied`. The SECOND consumer of the same producer is
+// not scheduled (one plan per producer) and reads the stored array as before.
+// u(i, j) = i^2 + 2 j: the five-point Laplacian is 2 on every interior cell
+// (4 x 7 of them), integer-valued, exact under every association.
+type Y = Idx<6>
+type X = Idx<9>
+let u = method_for(range<Y, X>) <@> lambda(i, j) -> Float64(Int64(i) * Int64(i) + 2 * Int64(j)) |> compute
+let lap = method_for(range<halo<Y, [-1, 0, 1]>, halo<X, [-1, 0, 1]>>) <@> lambda(wr, wc) ->
+    u(wr(-1), wc(0)) + u(wr(1), wc(0)) + u(wr(0), wc(-1)) + u(wr(0), wc(1)) - 4.0 * u(wr(0), wc(0)) |> compute
+let ss = reduce(method_for(lap) <@> lambda(row) -> prodsum(row, row), (+))
+// EXPECT: ss = 112.0
+let rsum = reduce(method_for(lap) <@> lambda(row) -> reduce(row, (+)), lambda(p, q) -> p + q, 10.0)
+// EXPECT: rsum = 66.0
+let corner = lap(0, 0) + lap(3, 6)
+// EXPECT: corner = 4.0

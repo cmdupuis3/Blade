@@ -63,12 +63,18 @@ let poolReuseEnabled () = gateOn "BLADE_POOL_REUSE"
 /// BLADE_HOIST") with the values it would have moved out of the nest.
 let hoistEnabled () = gateOn "BLADE_HOIST"
 
+/// BLADE_HOT_ROW=0|off disables hot-row fold scheduling (`planHotRowFolds`):
+/// the analysis still runs, and a producer/row-fold pair it would have
+/// scheduled records `hot-row-fold` DECLINED ("disabled by BLADE_HOT_ROW");
+/// nothing reaches the side table, so both emitters keep the two-pass form.
+let hotRowEnabled () = gateOn "BLADE_HOT_ROW"
+
 /// Every gate of this layer (charter rule 3), in one place: the optimizer
 /// differential (`blade test opt-diff`, tests/OptDiff.fs) turns ALL of them
 /// off for its reference lane, so a new pass's gate belongs in this list the
 /// day the pass lands -- a gate missing here is a pass the differential
 /// cannot see.
-let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_HOIST" ]
+let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_HOIST"; "BLADE_HOT_ROW" ]
 
 // --- Freeze-idiom recognition (plan-match-statements.md section 5, R7/B) ---
 //
@@ -1445,6 +1451,236 @@ let private recordGramApplyAdvisory (modul: IRModule) : unit =
                  | _ -> ())
              | _ -> ())
         | _ -> ()
+
+// --- Hot-row fold scheduling (bench review item M13, Codex sketch S13) -----
+//
+// A dense map whose rows a later ROW FOLD consumes,
+//
+//     let lap = method_for(range<halo<Y, ..>, halo<X, ..>>) <@> k |> compute
+//     let s = reduce(method_for(lap) <@> lambda(row) -> f(row), op, seed)
+//
+// is emitted as two passes over `lap` today: the nest fills every row, then
+// the fold reads every row back -- at the stencil benchmark's size a 24 MB
+// image that has left every cache between the two passes. The schedule this
+// pass plans keeps each row's fold BEHIND the row that produced it, inside
+// the producer's own outer loop (and, when that loop is threaded, inside its
+// team): row i is produced, `f(row i)` is stored into a rank-1 ROW-SUM array,
+// and `s` becomes a fold over that array -- the same per-row values, combined
+// in the same order, by the same kernel, from the same seed.
+//
+// STRICT-LEGAL, under no licence: the per-row fold keeps its own operation
+// order (the same code on the same row, run earlier), and the outer combine
+// is the same chain over the same values. The interpreter never sees the
+// plan -- it is a SIDE TABLE both emitters consult (`HotRowTable`, the
+// Types.PoolReuseTable pattern), and the values are unchanged by
+// construction, so the differential gates hold. The gate is BLADE_HOT_ROW
+// (`blade test opt-diff` compares the two-pass form against this one).
+//
+// What may NOT move, and the checks that say so:
+//   * the row kernel reads only its row: it must neither capture nor
+//     reference the producer (row i's fold would otherwise read rows not yet
+//     produced), and it must be REPEATABLE in the CSE judge's sense (no
+//     assignment, no display, calls only to repeatable callees) -- an effect
+//     reordered against the producer's later rows would be observable;
+//   * nothing between the producer and the fold may assign, nor reference
+//     the producer or any of the row kernel's captures (a `mut` call in
+//     between could change what the row kernel reads);
+//   * the fold must not LOSE its threads: a `where omp` fold over a producer
+//     whose outer level carries no omp licence is threaded today (Path B
+//     over the rows) and would run serially behind a serial producer --
+//     declined. The build knob is deliberately not consulted: route
+//     selection is identical in both emission modes;
+//   * the shapes are the plain ones: a dense rank >= 2 producer with scalar
+//     cells and no cuda/mpi strategy; the consumer a ROW map (kernel
+//     parameter of rank r - 1) over exactly that pool, folded by a
+//     two-parameter kernel from a seed, one leaf, no join.
+// A row kernel that may ABORT (an unseeded `reduce` over a runtime extent)
+// is admitted: it still aborts with the same code on the same row, only
+// before later rows are produced rather than after -- the review's
+// "BL8009 / BL8003 preserved" item (the halo extent check stays ahead of the
+// nest, and the empty-reduce check stays in the row kernel).
+
+/// One scheduled producer / row-fold pair.
+type HotRowPlan = {
+    ProducerId: IRId
+    ConsumerId: IRId
+    /// The row-sum array: a FRESH id both emitters bind to a rank-1 pool of
+    /// the fold kernel's accumulator type over the producer's leading axis.
+    /// Never appears in the IR tree; the table is its only home.
+    RowSumId: IRId
+    RowSumType: IRType
+    /// The consumer's row map (`method_for(P) <@> rowKernel`), its one leaf.
+    RowMap: ApplyInfo
+    FoldKernel: IRExpr
+    Seed: IRExpr
+    ProducerName: string
+    ConsumerName: string
+    /// The C++ lane's handshake: the row-sum array's emitted name, written by
+    /// the nest emitter when it actually placed the epilogue (a dispatched,
+    /// flat, sliced or collapse-pragma nest never does), read by the
+    /// consumer's emission to choose between the row-sum fold and the
+    /// two-pass form. Lives on the plan so it resets with the table.
+    EmittedCpp: string option ref
+}
+
+/// The plan, keyed both ways (the producer's emission binds the row-sum
+/// array; the consumer's emission folds it). AsyncLocal like
+/// Types.PoolReuseTable; reset once per program in `lowerTypedProgram`,
+/// because let ids restart per compile.
+module HotRowTable =
+    open System.Threading
+    type State = { ByProducer: Map<IRId, HotRowPlan>; ByConsumer: Map<IRId, HotRowPlan> }
+    let private empty = { ByProducer = Map.empty; ByConsumer = Map.empty }
+    let private cell = new AsyncLocal<State>()
+    let private get () = match box cell.Value with null -> empty | _ -> cell.Value
+    let reset () = cell.Value <- empty
+    let record (p: HotRowPlan) =
+        let s = get ()
+        cell.Value <- { ByProducer = Map.add p.ProducerId p s.ByProducer
+                        ByConsumer = Map.add p.ConsumerId p s.ByConsumer }
+    let tryProducer (id: IRId) : HotRowPlan option = Map.tryFind id (get ()).ByProducer
+    let tryConsumer (id: IRId) : HotRowPlan option = Map.tryFind id (get ()).ByConsumer
+
+/// Plan the hot-row schedule over one module: function-body let chains and
+/// the top-level binding sequence alike. Records into `HotRowTable` and the
+/// decision collector (`hot-row-fold`); the IR is untouched.
+let planHotRowFolds (builder: IRBuilder) (modul: IRModule) : unit =
+    let funcs = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+    let facts = cseFactsOf funcs
+    let decide (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
+        Blade.Effects.Decisions.record
+            { Blade.Effects.Rule = "hot-row-fold"; Version = 1
+              Span = Blade.Ast.noSpan; Subject = subject
+              Outcome = outcome; Evidence = evidence }
+    let rec collapse (e: IRExpr) = match e with IRCompute i -> collapse i | e -> e
+    let flatRank (at: IRArrayType) = at.IndexTypes |> List.sumBy (fun ix -> ix.Rank)
+    // A dense, plain, rank >= 2 pool of scalar cells with no device / rank
+    // strategy on its kernel: the shape whose outer level completes one
+    // contiguous row per iteration.
+    let producerShape (info: ApplyInfo) : (IRArrayType * IRCallable) option =
+        match stripUnits info.OutputType, resolveCallableIn funcs (fst (peelReynolds info.Kernel)) with
+        | ArrayElem at, Some pk
+            when not at.IsVirtual
+                 && at.IndexTypes.Length >= 2
+                 && at.IndexTypes |> List.forall (fun ix -> ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank = 1)
+                 && info.KernelOutputRank = 0
+                 && not pk.IsCudaKernel && not pk.IsMpiParallel ->
+            Some (at, pk)
+        | _ -> None
+    // `method_for(P) <@> rowKernel`: one operand, the producer by name; a
+    // one-parameter kernel over a slice of rank r - 1.
+    let rowMapOf (pId: IRId) (rank: int) (info: ApplyInfo) : IRCallable option =
+        match info.Arrays, resolveCallableIn funcs (fst (peelReynolds info.Kernel)) with
+        | [ IRVar (a, _) ], Some ck when a = pId && not info.HasReynolds && info.KernelOutputRank = 0 ->
+            (match ck.Params with
+             | [ p ] ->
+                let paramRank =
+                    match stripUnits p.Type with
+                    | ArrayElem a -> Some (flatRank a)
+                    | _ -> None
+                if paramRank = Some (rank - 1) || info.KernelInputRanks = [ rank - 1 ] then Some ck else None
+             | _ -> None)
+        | _ -> None
+    // Does the producer's omp licence cover the nest's OUTERMOST level? Param 0
+    // contributes the leading S-dims of an outer product; under co-iteration
+    // every param peels at level 0. A bare `where omp` (no depths) licenses
+    // level 0 (IRStorage.buildLoopNestCodeGen's `licenseUnresolved` rule).
+    let outerLicensed (info: ApplyInfo) (pk: IRCallable) =
+        pk.IsOmpParallel
+        && (List.isEmpty pk.Parallelism
+            || pk.Parallelism |> List.exists (fun (pi, d) -> d >= 1 && (pi = 0 || info.IsCoIteration)))
+    let refs (e: IRExpr) = collectVarRefsIR e
+    let planChain (items: (IRId * string * IRExpr) list) =
+        let arr = List.toArray items
+        for pi in 0 .. arr.Length - 1 do
+            let (pId, pName, pVal) = arr.[pi]
+            match collapse pVal with
+            | IRApplyCombinator pinfo when (match pVal with IRCompute _ -> true | _ -> false) ->
+                match producerShape pinfo with
+                | None -> ()
+                | Some (pAt, pk) ->
+                    let rank = flatRank pAt
+                    let consumer =
+                        [ pi + 1 .. arr.Length - 1 ]
+                        |> List.tryPick (fun ci ->
+                            let (cId, cName, cVal) = arr.[ci]
+                            match cVal with
+                            | IRReduceCompute (IRApplyCombinator cinfo, k, seed) ->
+                                (match rowMapOf pId rank cinfo with
+                                 | Some ck -> Some (ci, cId, cName, cinfo, ck, k, seed)
+                                 | None -> None)
+                            | _ -> None)
+                    match consumer with
+                    | None -> ()
+                    | Some (ci, cId, cName, cinfo, ck, k, seed) ->
+                        let what = $"row fold of `{pName}`"
+                        let declined (why: string) = decide cName (Blade.Effects.Declined why) [ what ]
+                        let captureIds = ck.Captures |> List.map (fun c -> c.Id) |> Set.ofList
+                        let kernelRefs = refs ck.Body
+                        let between = [ pi + 1 .. ci - 1 ] |> List.map (fun i -> arr.[i])
+                        let offending =
+                            between |> List.tryPick (fun (iId, iName, iVal) ->
+                                let r = refs iVal
+                                if Set.contains pId r then Some $"`{iName}` reads `{pName}` between the producer and the fold"
+                                elif not (Set.isEmpty (Set.intersect r captureIds)) then Some $"`{iName}` references a binding the row kernel captures"
+                                elif not (facts iVal).Repeatable then Some $"`{iName}` is not repeatable (an assignment, display output, or a call the module cannot judge) between the producer and the fold"
+                                else None)
+                        match resolveCallableIn funcs (fst (peelReynolds k)) with
+                        | None -> declined "the fold kernel does not resolve to a callable"
+                        | Some fk when fk.Params.Length <> 2 -> declined "the fold kernel is not a two-parameter callable"
+                        | Some fk when fk.IsCudaKernel || fk.IsMpiParallel -> declined "the fold kernel carries a cuda/mpi strategy"
+                        | Some fk ->
+                        if Set.contains pId captureIds || Set.contains pId kernelRefs then
+                            declined $"the row kernel reads `{pName}` beyond its own row (a capture or a direct reference), so it cannot run before the whole array exists"
+                        elif not (facts cinfo.Kernel).Repeatable then
+                            declined "the row kernel is not repeatable (an assignment, display output, or a call the module cannot judge), so running it behind each row could reorder an observable effect"
+                        elif fk.IsOmpParallel && not (outerLicensed pinfo pk) then
+                            declined "the fold's `where omp` threads it over the rows today (Path B) while the producer's outer level carries no omp licence; behind a serial producer the row folds would lose their team"
+                        else
+                        match offending with
+                        | Some why -> declined why
+                        | None ->
+                        let accTy =
+                            match stripUnits fk.RetType with
+                            | IRTScalar _ as t -> Some t
+                            | _ -> None
+                        match accTy with
+                        | None -> declined "the fold kernel's result is not a scalar"
+                        | Some accTy ->
+                        let rowsTxt =
+                            match (List.head pAt.IndexTypes).Extent with
+                            | IRLit (IRLitInt n) -> $"{n} rows"
+                            | _ -> "a runtime row count"
+                        let team =
+                            if outerLicensed pinfo pk then "; the producer's outer level is omp-licensed, so the row folds run inside its team"
+                            else ""
+                        let evidence =
+                            [ $"`{cName}` = fold of the row map over `{pName}` ({rowsTxt}): each row's value is computed right after that row is produced and stored into a rank-1 row-sum array; the outer combine folds the row sums in the same order from the same seed{team}"
+                              "strict-legal: no reorder licence used (the per-row fold keeps its operation order; the outer chain is the same values in the same order)" ]
+                        if not (hotRowEnabled ()) then
+                            decide cName (Blade.Effects.Declined "disabled by BLADE_HOT_ROW") evidence
+                        else
+                            let rsId = builder.FreshId()
+                            let rsTy =
+                                mkArrayLike { ElemType = accTy
+                                              IndexTypes = [ List.head pAt.IndexTypes ]
+                                              IsVirtual = false
+                                              Identity = None }
+                            HotRowTable.record
+                                { ProducerId = pId; ConsumerId = cId
+                                  RowSumId = rsId; RowSumType = rsTy
+                                  RowMap = cinfo; FoldKernel = k; Seed = seed
+                                  ProducerName = pName; ConsumerName = cName
+                                  EmittedCpp = ref None }
+                            decide cName Blade.Effects.Applied evidence
+            | _ -> ()
+    let rec chain (e: IRExpr) : (IRId * string * IRExpr) list =
+        match e with
+        | IRLet (id, v, body) -> (id, $"__v{id}", v) :: chain body
+        | _ -> []
+    for f in modul.Functions do
+        planChain (chain f.Body)
+    planChain (modul.Bindings |> List.map (fun b -> (b.Id, b.Name, b.Value)))
 
 /// `programFuncs` is every callable of the PROGRAM (all modules): a pass that
 /// judges a callee's effects resolves it there, since a generic defined in

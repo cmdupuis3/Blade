@@ -1994,6 +1994,51 @@ let private recordApplyStructure (name: string) (info: ApplyInfo) : unit =
                 (Blade.Effects.Declined $"every level iterates the full box (symcom states: {states})")
                 [ $"operands: {operands}" ]
 
+/// Hot-row fold scheduling (Blade.Optimize.planHotRowFolds, bench review item
+/// M13): the producer nest's RowEpilogue, built from the plan. The consumer's
+/// row map is rendered as ONE statement over the just-produced slice --
+/// the same kernel expression, bound to the same single row parameter, that
+/// genReduceComputeBindingCore's one-level arm renders for the two-pass fold
+/// (S2 call routing included), so the per-row double is the same double --
+/// plus the row-sum array's extents table and allocation ahead of the nest.
+/// None when the row map does not build as a single level over the producer
+/// (the consumer then keeps the two-pass form, and publishes nothing).
+let buildRowEpilogue (plan: Blade.Optimize.HotRowPlan) (producer: LoopNestCodeGen)
+                     (names: Map<IRId, string>) (builder: IRBuilder) : RowEpilogue option =
+    let cinfo = plan.RowMap
+    let pName = producer.OutputName
+    let cg = routeKernelBodyThroughCall cinfo (buildLoopNestCodeGen cinfo [ pName ] "__hr" builder)
+    match cg.Bindings, producer.Bindings, plan.RowSumType with
+    | [ lvl ], pHead :: _, ArrayElem rsAt
+        when not cg.HasReynolds && lvl.Elements.Length = 1
+             && lvl.IndexName = pHead.IndexName
+             && lvl.BoundDependencies.IsEmpty && lvl.StrictOffset = 0 && lvl.FusedRank.IsNone ->
+        let elem = lvl.Elements.Head
+        let rowView = $"{pName}__hr{lvl.IndexName}"
+        let paramFinalNames = Map.ofList [ (elem.ParamVarId, rowView) ]
+        let nameMap =
+            paramFinalNames
+            |> Map.fold (fun acc k v -> Map.add k v acc) names
+            |> withCaptureNames EnclosingNamesWin cg.Captures
+        let bodyExpr () =
+            (genKernelExprWithReynolds cg.KernelExpr cg.KernelParams false false nameMap paramFinalNames).CppExpr
+        let rsName = $"__hr_{(sanitizeCppName plan.ConsumerName)}"
+        let extentsName = $"{rsName}_extents"
+        let accCpp = elemTypeToCpp rsAt.ElemType
+        let bound = genLoopBoundExpr (compoundArrayNamesOf producer.Bindings) pHead
+        let isLit = fst (System.Int64.TryParse bound)
+        let (extentDecls, ownedExtents) = emitExtentsTable "" extentsName 1 [ (bound, isLit) ]
+        let allocDecl =
+            $"Array<{accCpp}, 1> {rsName} = {{ allocate<typename promote<{accCpp}, 1>::type, nullptr>({extentsName}), {extentsName} }};"
+        Some { Prelude = extentDecls @ [ allocDecl ]
+               RowViewName = rowView
+               Body = (fun () -> [ $"{rsName}[{lvl.IndexName}] = {bodyExpr ()};" ])
+               RowSumName = rsName
+               OnEmitted = (fun () ->
+                   registerPoolAlloc (classifyOutputStorage plan.RowSumType) accCpp 1 "nullptr" extentsName rsName ownedExtents
+                   plan.EmittedCpp.Value <- Some rsName) }
+    | _ -> None
+
 let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (builder: IRBuilder) : string list =
     let ind = indentStr ctx
     recordApplyStructure name info
@@ -3500,6 +3545,13 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
             // slab substitution the MPI slab and the segment run use.
             let tilePlan = Map.tryFind name ctx.TilePlans
             let codeGen = if mpiDense || segmentRun.IsSome || tilePlan.IsSome then { codeGen with MpiSlab = true } else codeGen
+            // Hot-row fold scheduling: the plan the producer site handed over
+            // by name (hotRowPendingCell) becomes this nest's RowEpilogue;
+            // genLoopNestStreamed decides whether its form admits it.
+            let codeGen =
+                match (hotRowPendingCell ()).TryGetValue name with
+                | true, plan -> { codeGen with RowEpilogue = buildRowEpilogue plan codeGen tempCtx.VarNames builder }
+                | _ -> codeGen
 
             // Generate loop nest. The LinAlg dispatch is tried first: a
             // recognised BLAS shape is a strictly stronger rewrite than a flat

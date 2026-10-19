@@ -672,6 +672,62 @@ let private withGate (var: string) (value: string) (f: unit -> 'a) : 'a =
     System.Environment.SetEnvironmentVariable(var, value)
     try f () finally System.Environment.SetEnvironmentVariable(var, prior)
 
+// ---------------------------------------------------------------------------
+// Hot-row fold scheduling (Blade.Optimize.planHotRowFolds; bench review M13).
+// The values are pinned by corpus loops/474-476; these pins read the emission
+// (the row-sum array exists, its store sits INSIDE the producer's outer loop,
+// the consumer folds it) and the decision record of each decline.
+// ---------------------------------------------------------------------------
+
+let private hotRowSrc =
+    "type Y = Idx<9>\n"
+    + "type X = Idx<11>\n"
+    + "let u = method_for(range<Y, X>) <@> lambda(i, j) -> Float64(Int64(i) * Int64(j)) |> compute\n"
+    + "let lap = method_for(range<halo<Y, [-1, 0, 1]>, halo<X, [-1, 0, 1]>>) <@> lambda(wr, wc) where omp(wr: 1) -> u(wr(-1), wc(0)) + u(wr(1), wc(0)) + u(wr(0), wc(-1)) + u(wr(0), wc(1)) - 4.0 * u(wr(0), wc(0)) |> compute\n"
+    + "let ss = reduce(method_for(lap) <@> lambda(row) -> prodsum(row, row), lambda(p, q) where omp -> p + q, 0.0)\n"
+
+/// The schedule emitted: a row-sum array, its per-row store inside the
+/// producer's outer loop (before that loop's closing brace, after the inner
+/// one's), and the consumer's fold over it.
+let private hotRowEmitted () =
+    let name = "hot_row_fold_emitted_inside_producer_loop"
+    match cppOfSource name hotRowSrc with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let store = System.Text.RegularExpressions.Regex.Match(cpp, @"__hr_ss\[__i0\] = ")
+        let outerOpen = cpp.IndexOf "for (size_t __i0 = 0; __i0 < 7; __i0++)"
+        let innerOpen = cpp.IndexOf "for (size_t __i1 = 0; __i1 < 9; __i1++)"
+        let combine = cpp.IndexOf "ss = ss + __hr_ss["
+        if store.Success && outerOpen >= 0 && innerOpen > outerOpen && store.Index > innerOpen
+           && combine > store.Index && cpp.Contains "Array<double, 1> __hr_ss = " then
+            resultLine Pass name "row-sum array allocated, filled behind each produced row, folded by the consumer"
+            true
+        else
+            resultLine Fail name ($"store={store.Success}@{store.Index} outer={outerOpen} inner={innerOpen} combine={combine}")
+            false
+
+/// BLADE_HOT_ROW=0: the two-pass form, and the decision says why.
+let private hotRowGateOff () =
+    let name = "hot_row_gate_off_keeps_two_passes"
+    match withGate "BLADE_HOT_ROW" "0" (fun () -> cppOfSource name hotRowSrc) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        if not (cpp.Contains "__hr_ss") then
+            resultLine Pass name "no row-sum array with the gate off"
+            true
+        else
+            resultLine Fail name "a row-sum array was emitted with BLADE_HOT_ROW=0"
+            false
+
+/// A `where omp` fold over a producer whose outer level carries no licence
+/// keeps its Path B team: declined.
+let private hotRowLostTeamSrc =
+    hotRowSrc.Replace("lambda(wr, wc) where omp(wr: 1) ->", "lambda(wr, wc) ->")
+
+/// A row kernel that reads the producer beyond its own row: declined.
+let private hotRowReadsBeyondSrc =
+    hotRowSrc.Replace("prodsum(row, row), lambda", "prodsum(row, row) + lap(0, 0), lambda")
+
 /// BLADE_CSE=0: the same program keeps both folds in its one body (2 in all),
 /// and the decision says why.
 let private cseGateOffKeepsFolds () =
@@ -1490,6 +1546,18 @@ let runOptimizeTests () =
           // escape-analysis leak the work found.
           poolReuseReturnTakesDeadPool ()
           poolReuseChainSharesRoot ()
+          // Hot-row fold scheduling (bench review M13).
+          hotRowEmitted ()
+          hotRowGateOff ()
+          decisionCase "decision_hot_row_applied" hotRowSrc "hot-row-fold" applied
+              "hot-row-fold applied"
+          withGate "BLADE_HOT_ROW" "0" (fun () ->
+              decisionCase "decision_hot_row_declined_gate" hotRowSrc "hot-row-fold"
+                  (declinedMentioning "disabled by BLADE_HOT_ROW") "declined: disabled by BLADE_HOT_ROW")
+          decisionCase "decision_hot_row_declined_lost_team" hotRowLostTeamSrc "hot-row-fold"
+              (declinedMentioning "lose their team") "declined: the fold would lose its Path B team"
+          decisionCase "decision_hot_row_declined_reads_beyond" hotRowReadsBeyondSrc "hot-row-fold"
+              (declinedMentioning "beyond its own row") "declined: the row kernel reads beyond its row"
           scalarCaptureNoLongerPinsSource ()
           // Partial sparse reads: every let-bound gather freed by its own
           // producer's teardown, the escaping ones spared.

@@ -3700,6 +3700,7 @@ and private bindLetIn (c: Ctx) (id: IRId) (value: IRExpr) (scope: IRExpr) : unit
 /// to share, and copying it would materialize -- and therefore PRINT -- a
 /// computation the program never forced.
 and private bindNamed (c: Ctx) (id: IRId) (name: string) (declTy: IRType) (value: IRExpr) : unit =
+    let rec peelCompute (e: IRExpr) = match e with IRCompute i -> peelCompute i | e -> e
     match value with
     | IRGroupKeys keys ->
         // A module-scope grouping carries its regime on the binding record;
@@ -3707,6 +3708,22 @@ and private bindNamed (c: Ctx) (id: IRId) (name: string) (declTy: IRType) (value
         (match declTy with
          | IRTGroupKeys _ -> emitGroupKeysBinding c id keys declTy
          | _ -> refuse "a group_keys binding whose regime type is unavailable")
+    // Hot-row fold scheduling (Blade.Optimize.planHotRowFolds): the planned
+    // PRODUCER fills its pool row by row and runs the consumer's row map on
+    // each row as it completes; the planned CONSUMER folds those row sums.
+    // Both arms fall through to the ordinary paths when the lane cannot
+    // take the schedule (the producer then publishes no row-sum slot).
+    | IRCompute _ when (match peelCompute value with
+                        | IRApplyCombinator pinfo ->
+                            (match Blade.Optimize.HotRowTable.tryProducer id with
+                             | Some plan -> tryBindHotRowProducer c id name plan pinfo
+                             | None -> false)
+                        | _ -> false) -> ()
+    | IRReduceCompute (_, k, seed) when (match Blade.Optimize.HotRowTable.tryConsumer id with
+                                         | Some plan -> c.ArrSlots.ContainsKey plan.RowSumId
+                                         | None -> false) ->
+        let plan = (Blade.Optimize.HotRowTable.tryConsumer id).Value
+        emitHotRowConsumer c id name declTy plan k seed
     | _ ->
     match classifyValue c value with
     | VArray a ->
@@ -3759,6 +3776,84 @@ and private publishBinding (c: Ctx) (id: IRId) : unit =
 
 and private bindLet (c: Ctx) (id: IRId) (value: IRExpr) : unit =
     bindNamed c id "" (typeOf value) value
+
+/// The hot-row PRODUCER (plan M13; the C++ lane's RowEpilogue twin): the
+/// dense producer is filled one leading-axis slice at a time -- the same
+/// cells, in the same storage order, from the same per-cell closure the
+/// ordinary materialize runs -- and right after each slice the consumer's
+/// row map (an ordinary virtual row map over the producer's POOL, so its
+/// kernel reads the slice just written) is evaluated at that row and stored
+/// into a rank-1 row-sum pool bound to the plan's RowSumId. The slot for the
+/// producer is bound BEFORE the fill so the row map resolves its operand.
+/// False when the shape is not a dense rank >= 2 producer: the caller then
+/// takes the ordinary path and the consumer keeps the two-pass fold.
+and private tryBindHotRowProducer (c: Ctx) (id: IRId) (name: string) (plan: Blade.Optimize.HotRowPlan) (pinfo: ApplyInfo) : bool =
+    let record (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
+        if Blade.Effects.Decisions.active () then
+            Blade.Effects.Decisions.record
+                { Rule = "hot-row-fold"; Version = 1; Span = c.DeclSpan
+                  Subject = plan.ConsumerName
+                  Outcome = outcome; Evidence = evidence }
+    let a = applyToArr c pinfo
+    match a.Src with
+    | (AVirt _ | AVirtFlat _) when isDenseShape a.Groups && List.length a.Extents >= 2 ->
+        let total = shapeCells a.Groups
+        let ptr = allocPool c a.Elem (string total)
+        let pooled = { a with Src = APool ptr }
+        bindArray c id name pooled
+        let cons = emitArr c (IRApplyCombinator plan.RowMap)
+        let accTy =
+            match resolveCallable plan.FoldKernel |> Option.bind (fun cl -> scalarTyOf cl.RetType) with
+            | Some t when t <> ScVoid -> t
+            | _ -> cons.Elem
+        let rows = List.head a.Extents
+        let inner = List.tail a.Extents
+        let rsPtr = allocPool c accTy (string rows)
+        emitCountedLoop c rows (fun i ->
+            let iv = { Reg = i; Ty = ScI64 }
+            emitNest c inner (fun rest ->
+                let idxs = iv :: rest
+                let v = coerce c a.Elem (readCell c a idxs)
+                storeCell c a.Elem (gepCell c a.Elem ptr (storageOffset c a.Groups idxs)) v)
+            let rv = coerce c accTy (readCell c cons [ iv ])
+            storeCell c accTy (gepCell c accTy rsPtr i) rv)
+        c.ArrSlots.[plan.RowSumId] <- { Elem = accTy; Groups = [ GDense rows ]; Src = APool rsPtr; RowOpBytes = 0L }
+        true
+    | _ ->
+        record (Blade.Effects.Declined "the llvm lane keeps the two-pass form: the producer is not a dense rank >= 2 pool it fills row by row")
+            [ $"row fold of `{plan.ProducerName}`" ]
+        false
+
+/// The hot-row CONSUMER: the outer combine over the row-sum pool -- the same
+/// seeded chain emitReduceCompute's one-level nest runs over the deferred
+/// row map (seed, then `kernel(acc, cell)` per row ascending, the licensed
+/// fold flags on the kernel application only), now over stored values.
+and private emitHotRowConsumer (c: Ctx) (id: IRId) (name: string) (declTy: IRType)
+                               (plan: Blade.Optimize.HotRowPlan) (kernelExpr: IRExpr) (seedExpr: IRExpr) : unit =
+    let a = c.ArrSlots.[plan.RowSumId]
+    let cl =
+        match resolveCallable kernelExpr with
+        | Some cl when cl.Params.Length = 2 -> cl
+        | _ -> refuse "a hot-row fold whose kernel does not resolve to a two-parameter callable"
+    let ty =
+        match scalarTyOf cl.RetType with
+        | Some t when t <> ScVoid -> t
+        | _ -> a.Elem
+    let rows = match a.Groups with [ GDense n ] -> n | _ -> refuse "a hot-row row-sum pool that is not rank-1 dense"
+    let slot = allocaOf c (llTy ty)
+    let seed = coerce c ty (emitExpr c seedExpr)
+    ln c ($"store {(llTy ty)} {seed.Reg}, ptr {slot}")
+    let licensed = foldFmfDecorable cl
+    emitCountedLoop c rows (fun i ->
+        let cur = loadSlot c slot ty
+        let cell = readCell c a [ { Reg = i; Ty = ScI64 } ]
+        let next =
+            withFoldFmf c licensed (fun () ->
+                coerce c ty (applyKernel c cl [ KScalar cur; KScalar cell ]))
+        ln c ($"store {(llTy ty)} {next.Reg}, ptr {slot}"))
+    let v = loadSlot c slot ty
+    let target = match scalarTyOf declTy with Some t when t <> ScVoid -> t | _ -> v.Ty
+    bindScalar c id name (coerce c target v)
 
 and private copyArr (c: Ctx) (a: ArrVal) : ArrVal =
     match a.Src with
