@@ -1,2 +1,0 @@
-cmd /c C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\fortran\build_ifx.cmd C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-213323\build\gram\smoke\serial-fastmath-native\ifx-natural\ifx-natural.exe /O3 /QxHost /fp:fast /fpp /Qopenmp-simd -- C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-213323\build\gram\smoke\serial-fastmath-native\ifx-natural\src\gram.f90
-{}

@@ -1,8 +1,0 @@
-plan: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-205306\build\band\full\mt8-repro-native\blade-cpp\src\band.blade -- 6 optimization decision(s)
-  [omp v1] __ret1073741824 @ 31:1: applied [BLADE_OMP_PARALLEL_FOR; loop nest level 0 (__i0)]
-  [domain-enum v1] __v51 @ 41:1: applied [enumeration of Band: closed-form affine nest (2 level(s): i in [0, 20010], j in [max(0, i - 101), min(20010, i + 101)]), 4051931 cell(s); consumer: streamed fold (no array, no key table)]
-  [omp v1] kernel @ 41:1: declined -- a closed-form domain nest has no thread-level form yet (its licence is spent on the innermost-field simd reduction where the kernel allows one) [[omp] requested but emitted serial]
-  [fold-form v1] __v51 @ 41:1: declined -- serial (repro) [fold form: serial (repro); reduce over a deferred computation]
-  [omp v1] kernel @ 41:1: declined -- the fold's outermost level is not a plain rectangular sweep, so it cannot be chunked per thread (Path B) [[omp] requested but emitted serial]
-  [fold-form v1] _(checksum,input_checksum): declined -- serial (repro) [fold form: serial (repro); reduce in expression position]
-inputs: 0 (identity policy: `content` = folded at compile time, hashed; `version` = read at run time, size + mtime observed -- BLADE_RUN_RECORD=<path> writes the run record)

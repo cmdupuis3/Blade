@@ -1,4 +1,0 @@
-plan: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-140038\build\onepass\full\mt8-repro-native\blade-cpp-inputonly\src\onepass_inputonly.blade -- 2 optimization decision(s)
-  [omp v1] __ret1073741824 @ 17:1: applied [BLADE_OMP_PARALLEL_FOR; loop nest level 0 (__i0)]
-  [fold-form v1] _(checksum,input_checksum): declined -- serial (repro) [fold form: serial (repro); reduce in expression position]
-inputs: 0 (identity policy: `content` = folded at compile time, hashed; `version` = read at run time, size + mtime observed -- BLADE_RUN_RECORD=<path> writes the run record)

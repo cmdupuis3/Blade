@@ -1,3 +1,0 @@
-plan: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-130438\build\maskagg\full\serial-repro-native\blade-cpp-inputonly\src\maskagg_inputonly.blade -- 1 optimization decision(s)
-  [fold-form v1] _(checksum,input_checksum): declined -- serial (repro) [fold form: serial (repro); reduce in expression position]
-inputs: 0 (identity policy: `content` = folded at compile time, hashed; `version` = read at run time, size + mtime observed -- BLADE_RUN_RECORD=<path> writes the run record)

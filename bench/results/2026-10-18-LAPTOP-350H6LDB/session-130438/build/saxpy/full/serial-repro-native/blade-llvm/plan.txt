@@ -1,6 +1,0 @@
-plan: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-130438\build\saxpy\full\serial-repro-native\blade-llvm\src\saxpy.blade -- 4 optimization decision(s)
-  [omp v1] inputs @ 21:1: declined -- BLADE_OMP_THREADS=1 -- this build emits no thread-level OpenMP (the omp licence in source is unchanged; omp simd is unaffected) [[omp] requested but emitted serial]
-  [omp v1] __v29 @ 25:1: applied [BLADE_OMP_SIMD; flat elementwise sweep over the whole pool]
-  [fold-form v1] __v36 @ 25:1: declined -- serial (repro) [fold form: serial (repro); reduce over a deferred computation]
-  [fold-form v1] _(checksum,input_checksum): declined -- serial (repro) [fold form: serial (repro); reduce in expression position]
-inputs: 0 (identity policy: `content` = folded at compile time, hashed; `version` = read at run time, size + mtime observed -- BLADE_RUN_RECORD=<path> writes the run record)

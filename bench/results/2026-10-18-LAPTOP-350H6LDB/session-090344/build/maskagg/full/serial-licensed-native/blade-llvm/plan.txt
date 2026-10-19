@@ -1,4 +1,0 @@
-plan: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-090344\build\maskagg\full\serial-licensed-native\blade-llvm\src\maskagg.blade -- 2 optimization decision(s)
-  [fold-form v1] checksum @ 28:1: applied [fold form: K-lanes(8); reduce in expression position]
-  [fold-form v1] input_checksum @ 29:1: applied [fold form: K-lanes(8); reduce over a materialized array]
-inputs: 0 (identity policy: `content` = folded at compile time, hashed; `version` = read at run time, size + mtime observed -- BLADE_RUN_RECORD=<path> writes the run record)
