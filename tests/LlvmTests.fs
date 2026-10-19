@@ -1612,7 +1612,9 @@ let s = method_for(v, v) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
     (match emitBrick None "blocks" smallSym,
            emitBrick None "blocks" (smallSym + "let t = s * 3.0\n") with
      | Ok bare, Ok mapped ->
-         let d = countOf "sdiv i64" (instructionsOnly mapped) - countOf "sdiv i64" (instructionsOnly bare)
+         // "sdiv " matches both spellings: the binomial row bases are
+         // `sdiv exact` (exact by construction, bench G34).
+         let d = countOf "sdiv " (instructionsOnly mapped) - countOf "sdiv " (instructionsOnly bare)
          check "an elementwise map over a packed pool costs no coordinate math" (d = 1)
              ($"row-base divisions added by `s * 3.0`: {d} (1 = its printer's, 0 = the map's)")
      | a, b ->
