@@ -1,0 +1,65 @@
+// TEST: Recursive Array Row Fold Fused Into Recursion
+// ============================================================================
+// Row-fold fusion (src/Optimize.fs fuseRowFoldsModule, BLADE_FUSION): when a
+// recursion's only consumer is a row-wise fold, each row is folded right
+// after it is written instead of re-reading the trajectory afterwards. The
+// fold is a LEFT fold in ascending row order from its seed, so a
+// non-commutative fold kernel pins the order and the seed:
+//   weighted -- acc <- acc * 0.5 + rowsum, seed 100.0, rows summing to
+//               7, 6.5, 6.25, 6.125, 6.0625, 6.03125 -> 13.5625 (any other
+//               order or seed placement gives another value);
+//   seedless -- no seed arm: the loop writes row 0 itself (zero history),
+//               rows 1, 1.5, 1.75, ... per cell, prodsum checksum;
+//   scaled   -- the fold is bound by a `let` and used afterwards;
+//   twice    -- the trajectory is ALSO read after the fold: not fused, the
+//               trajectory is kept and re-read.
+// All values are exact in binary and computed by hand.
+// ============================================================================
+type T = Idx<6>
+type X = Idx<3>
+
+function weighted(u0: Array<Float64 like X>) -> Float64 = {
+    let rec traj: Array<Float64 like T, X> =
+        match traj with
+        | zero -> zero
+        | zero :: s -> zero :: u0
+        | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + 1.0
+    reduce(method_for(traj) <@> lambda(row) -> reduce(row, (+)), lambda(a, b) -> a * 0.5 + b, 100.0)
+}
+
+function seedless() -> Float64 = {
+    let rec g: Array<Float64 like T, X> =
+        match g with
+        | zero -> zero
+        | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + 1.0
+    reduce(method_for(g) <@> lambda(row) -> prodsum(row, row), (+))
+}
+
+function scaled(u0: Array<Float64 like X>) -> Float64 = {
+    let rec h: Array<Float64 like T, X> =
+        match h with
+        | zero -> zero
+        | zero :: s -> zero :: u0
+        | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + 1.0
+    let total = reduce(method_for(h) <@> lambda(row) -> reduce(row, (+)), (+))
+    total * 2.0
+}
+
+function twice(u0: Array<Float64 like X>) -> Float64 = {
+    let rec q: Array<Float64 like T, X> =
+        match q with
+        | zero -> zero
+        | zero :: s -> zero :: u0
+        | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + 1.0
+    reduce(method_for(q) <@> lambda(row) -> reduce(row, (+)), (+)) + q((5 : T), (2 : X))
+}
+
+let u0: Array<Float64 like X> = [1.0, 2.0, 4.0]
+let w = weighted(u0)
+let z = seedless()
+let s = scaled(u0)
+let t = twice(u0)
+// EXPECT: w = 13.5625
+// EXPECT: z = 52.3740234375
+// EXPECT: s = 75.9375
+// EXPECT: t = 40.03125
