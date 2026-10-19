@@ -16,8 +16,8 @@
     "serial-repro-native"
   ],
   "inputonly": true,
-  "expected_llvm": "fallback",
-  "expected_llvm_reason": "the LLVM lane refuses `compound` (notes/llvm-acceptance-B.md); blade-cpp is the Blade figure",
+  "expected_llvm": "lane",
+  "expected_llvm_reason": "rank-1 `compound` is a prefix-count compaction accepted by the LLVM lane since M12 (2026-10-19); blade-llvm is the Blade figure",
   "hypothesis": {
     "natural": "LOSS 1.3-2x",
     "expert": "LOSS 1.3-2x"
