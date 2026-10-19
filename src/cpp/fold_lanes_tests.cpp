@@ -1,13 +1,12 @@
 // fold_lanes_tests.cpp -- RAW-BIT tests of the explicit K-lane vector fold
 // forms (blade_fold_lanes.hpp: sum / dot / sq / dot3, K = 4 and 8, double and
 // float) against the scalar model of the lane tree the header documents,
-// compiled in the SAME translation unit and the SAME -ffp-contract mode (the
-// runner, tests/LinAlgTests.fs runFoldLanesTests, builds this file twice, as
-// Build.fs builds programs: -ffp-contract=off, where the model's step is
-// `acc + a * b`, and -ffp-contract=fast -DBLADE_FP_CONTRACT_FAST=1, where the
-// model's step is the explicit std::fma(a, b, acc) every step of the vector
-// form takes through the packed intrinsic -- so both modes are bitwise by
-// construction, and the runner's vfmadd census says which one each build is).
+// compiled in the SAME translation unit (the runner, tests/LinAlgTests.fs
+// runFoldLanesTests, builds this file twice: -ffp-contract=off and =fast, the
+// user default). The contract is the SAME in both: every product is rounded
+// before its add, so the forms equal the model -- and each other across the
+// two builds -- bit for bit, and the runner's census checks that no vfmadd
+// appears in any blade_fold function of either build.
 //
 // Covered:
 //   n = 0..35 (every block / vector / scalar tail combination for K = 4 and 8
@@ -108,11 +107,15 @@ template <typename T, int K> __attribute__((noinline)) T ref_dot(const T* a, con
 template <typename T, int K> __attribute__((noinline)) T ref_sq(const T* a, size_t n) { return blade_fold::model::sq<T, K>(a, n); }
 template <typename T, int K> __attribute__((noinline)) T ref_dot3(const T* a, const T* b, const T* c, size_t n) { return blade_fold::model::dot3<T, K>(a, b, c, n); }
 
-// The serial chain the forms replace (the repro form) under the same step
-// rule: for n < W the vector form must reproduce it bit for bit.
+// The sum of MATERIALIZED products: what `reduce(a * b, (+))` computes once
+// `a * b` is stored (a generic function instance's lowering; corpus
+// functions/168). For n < W the vector form must reproduce it bit for bit.
 template <typename T> __attribute__((noinline)) T serial_dot(const T* a, const T* b, size_t n) {
     T s = 0;
-    for (size_t t = 0; t < n; t++) s = BLADE_FOLD_MADD(a[t], b[t], s);
+    std::vector<T> p(n);
+    for (size_t t = 0; t < n; t++) p[t] = a[t] * b[t];
+    volatile T sink = 0; (void)sink;
+    for (size_t t = 0; t < n; t++) { T v = p[t]; BLADE_FOLD_ROUND(v); s = s + v; }
     return s;
 }
 
@@ -256,8 +259,7 @@ int main() {
     std::printf("lane tree vs the serial chain in this build: %lld of %lld random n=20011 dots differ in bits (expected: most -- the licence reassociates)\n",
                 g_vec_vs_serial_differ, g_vec_vs_serial_cells);
 #ifdef BLADE_FOLD_LANES_VECTOR
-    std::printf("vector extensions: ON (blade_fold:: is the vector form, model:: the scalar tree); step: %s\n",
-                BLADE_FOLD_FUSED ? "one fma per step (BLADE_FP_CONTRACT_FAST)" : "acc + x * y, two roundings");
+    std::printf("vector extensions: ON (blade_fold:: is the vector form, model:: the scalar tree); step: rounded product, then add (no fma)\n");
 #else
     std::printf("vector extensions: OFF (blade_fold:: IS the scalar model; the comparison is a self-check)\n");
 #endif

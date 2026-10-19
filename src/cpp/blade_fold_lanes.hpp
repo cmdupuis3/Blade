@@ -29,18 +29,22 @@
 //   where e(i) is the element term: a[i] * b[i] (dot), a[i] * a[i] (self-dot,
 //   ONE load per element), (a[i] * b[i]) * c[i] (three streams, source factor
 //   order), or a[i] (a plain sum).
-//   CONTRACTION is decided by the BUILD, not by the optimizer's context: under
-//   a contracting build (Build.fs passes -DBLADE_FP_CONTRACT_FAST=1 whenever
-//   BLADE_FP_CONTRACT is not `off`, i.e. by default) every `acc + x * y` step
-//   is ONE fused multiply-add (std::fma / the packed FMA intrinsic; dot3's
-//   first product is rounded, its second fused with the add); under =off (the
-//   differential gates' mode) every step is the plain `acc + x * y`, two
-//   roundings, and no FMA instruction exists in the build. Written as the
-//   bare expression, g++ 16 fused the main block loop and left the vector
-//   remainder and the scalar tail UNFUSED (vmulpd + vaddpd) -- "contract as
-//   the build allows" was not one tree -- hence the explicit step.
+//   NO PRODUCT IS EVER FUSED INTO ITS ADD, in any build: each step is
+//   `p = e(i)` ROUNDED, then `acc + p` (BLADE_FOLD_ROUND, an empty asm barrier
+//   on p -- no instruction, it only makes p opaque so no FMA can absorb it).
+//   That is exactly the arithmetic of the same fold over a MATERIALIZED
+//   product (`reduce(a * b, (+))` once `a * b` is stored, the shape a generic
+//   function instance lowers to) and of the repro chain under
+//   -ffp-contract=off, so the tree's bits are one function of (data, T, K, n)
+//   under every BLADE_FP_CONTRACT mode. Two earlier spellings failed that:
+//   the bare `acc + x * y` (g++ 16 fused the block loop but not the vector
+//   remainder or the scalar tail, and inlined copies differently per call
+//   site), and an explicit fma per step under the contracting build (a
+//   generic instance folding its stored `a * b` then disagreed with the same
+//   spelling at top level: corpus functions/168, Float32 n = 3).
 //   For n < W there is no vector at all and the result IS the serial chain
-//   from +0 under the same step rule, bit for bit.
+//   from +0 of rounded products -- for n >= 1 the plain left fold
+//   ((p0 + p1) + p2) ..., bit for bit.
 //
 // The scalar model of that tree is `blade_fold::model::` (B scalar chains, the
 // same combine order, the same step rule); the vector forms are
@@ -67,20 +71,29 @@
 #include <cstring>
 #include <cmath>
 
-// The contracted build's step. BLADE_FP_CONTRACT_FAST comes from Build.fs
-// (every mode but `off`); the packed intrinsic additionally needs the target
-// to have FMA (`__FMA__`, i.e. -march=native on any FMA-capable x86). Without
-// it std::fma is a libm call per step -- correct and slow, reachable only by a
-// contracting build without -march, which Blade never produces.
-#if defined(BLADE_FP_CONTRACT_FAST) && BLADE_FP_CONTRACT_FAST
-#define BLADE_FOLD_FUSED 1
-#define BLADE_FOLD_MADD(x, y, acc) std::fma((x), (y), (acc))
+// BLADE_FOLD_ROUND(v): force `v` (a scalar or a 32-byte vector) to be a
+// finished, rounded value, so no FMA can absorb the multiply that produced it.
+// Only needed where the target HAS fused multiply-add (`__FMA__`, which also
+// implies the AVX registers the "x" constraint names for a 32-byte vector);
+// without FMA nothing can fuse and the barrier is a no-op. GCC and clang only
+// (MSVC does not contract by default).
+#if (defined(__GNUC__) || defined(__clang__)) && defined(__FMA__) && (defined(__x86_64__) || defined(__i386__))
+#define BLADE_FOLD_ROUND(v) __asm__("" : "+x"(v))
 #else
-#define BLADE_FOLD_FUSED 0
-#define BLADE_FOLD_MADD(x, y, acc) ((acc) + (x) * (y))
+#define BLADE_FOLD_ROUND(v) ((void)0)
 #endif
 
+// One step `acc + x * y` with the product rounded first (see the contract).
+#define BLADE_FOLD_MADD(x, y, acc) (::blade_fold::rmadd((x), (y), (acc)))
+
 namespace blade_fold {
+
+template <typename T>
+__attribute__((always_inline)) inline T rmadd(T x, T y, T acc) {
+    T p = x * y;
+    BLADE_FOLD_ROUND(p);
+    return acc + p;
+}
 
 /// Thread t's chunk start in a cnt-element sweep split over nt threads:
 /// (cnt * t) / nt. Thread t's chunk is [chunk_lo(cnt, t, nt), chunk_lo(cnt,
@@ -100,8 +113,8 @@ namespace model {
 template <typename T> struct width { static constexpr int value = (int)(32 / sizeof(T)); };
 
 // `step(acc, i)` returns the chain's next value from its current one
-// (BLADE_FOLD_MADD: the plain `acc + x * y` or one std::fma, by build); the
-// skeleton itself never multiplies.
+// (BLADE_FOLD_MADD: the rounded product, then the add); the skeleton itself
+// never multiplies.
 template <typename T, int K, typename Step>
 inline T fold(size_t n, const Step& step) {
     constexpr int W = width<T>::value;
@@ -158,9 +171,6 @@ inline T dot3(const T* a, const T* b, const T* c, size_t n) {
 // raw-bit test compare it with a model at all. One call per fold is noise
 // against a 100+-element sweep.
 #define BLADE_FOLD_NOINLINE __attribute__((noinline))
-#if BLADE_FOLD_FUSED && defined(__FMA__)
-#include <immintrin.h>
-#endif
 
 namespace detail {
 
@@ -183,20 +193,14 @@ __attribute__((always_inline)) inline typename vec<T>::type zero() {
     return v;
 }
 
-/// One lane-wise step `acc + x * y`: the packed FMA under the contracted build
-/// (the intrinsic, so the remainder loop fuses exactly as the block loop
-/// does), the plain product-then-add otherwise.
-#if BLADE_FOLD_FUSED && defined(__FMA__)
-__attribute__((always_inline)) inline vec<double>::type madd(vec<double>::type x, vec<double>::type y, vec<double>::type acc) {
-    return (vec<double>::type)_mm256_fmadd_pd((__m256d)x, (__m256d)y, (__m256d)acc);
-}
-__attribute__((always_inline)) inline vec<float>::type madd(vec<float>::type x, vec<float>::type y, vec<float>::type acc) {
-    return (vec<float>::type)_mm256_fmadd_ps((__m256)x, (__m256)y, (__m256)acc);
-}
-#else
+/// One lane-wise step `acc + x * y`, the product rounded first (the contract):
+/// vmulp* then vaddp*, never a vfmadd, whatever -ffp-contract says.
 template <typename V>
-__attribute__((always_inline)) inline V madd(V x, V y, V acc) { return acc + x * y; }
-#endif
+__attribute__((always_inline)) inline V madd(V x, V y, V acc) {
+    V p = x * y;
+    BLADE_FOLD_ROUND(p);
+    return acc + p;
+}
 
 /// The lane-tree skeleton. `vstep(acc, i)` is one vector step (acc + e(i ..
 /// i + W - 1) as the build contracts it), `sstep(acc, i)` the scalar step for
