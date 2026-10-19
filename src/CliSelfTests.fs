@@ -609,6 +609,40 @@ let runCliSmokeTests () : TH.BlockResult =
                     (code = 0 && out.Contains "declined -- BLADE_SIMPLEX_TILE=0/off: the plain per-cell nest"
                      && not (out.Contains "fold form: simplex tile (shared C core)"))
                     (out + err)
+                // THE COMPOUND REPRESENTATION (G9): a rank-1 `compound(dense,
+                // mask)` is the compaction in both lanes (the plan line passes
+                // through unchanged under BLADE_LLVM=1, which emits exactly
+                // these compounds); a rank-2 mask keeps the hashed index.
+                File.WriteAllText(Path.Combine(dir, "compound1.blade"),
+                    "type I = Idx<9>\n"
+                    + "let a: Array<Int64 like I> = [5, -1, 4, -2, 3, -3, 2, -4, 1]\n"
+                    + "let keep = mask(a, lambda(v) -> v > 0)\n"
+                    + "let y = compound(a, keep)\n"
+                    + "let s = reduce(y, (+))\n")
+                File.WriteAllText(Path.Combine(dir, "compound2.blade"),
+                    "type R = Idx<2>\ntype C = Idx<3>\n"
+                    + "let g: Array<Int64 like R, C> = [[1, 2, 3], [4, 5, 6]]\n"
+                    + "let h = compound(g, mask(g, lambda(v) -> v % 2 == 0))\n")
+                let compoundEnv llvm = [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", llvm); ("BLADE_FP_REPRO", null) ]
+                let compactionLine =
+                    ": applied [representation: rank-1 compaction (count pass + branchless kept-position fill, gather by position; no hash table; keyed reads by binary search over the kept positions)"
+                let hashedLine =
+                    "declined -- hashed SparseIdx: a rank-2 mask has no closed-form rank, so compound_index_t<2> keeps one tuple->rank hash entry per present cell"
+                for llvm in [ null; "1" ] do
+                    let lane = if isNull llvm then "C++ lane" else "BLADE_LLVM=1"
+                    let (code, out, err) = spawnWith (compoundEnv llvm) dir [ "plan"; "compound1.blade" ]
+                    recordCase $"cli: `plan` ({lane}) reports the rank-1 compound as the compaction"
+                        (code = 0 && out.Contains "[compound v1] y @ " && out.Contains compactionLine
+                         && (isNull llvm || out.Contains "lane: LLVM (BLADE_LLVM=1)"))
+                        (out + err)
+                    // The rank-2 compound stays hashed; under BLADE_LLVM=1 the
+                    // lane refuses the program (the plan is the C++ lane's,
+                    // which is the executable that will run).
+                    let (code, out, err) = spawnWith (compoundEnv llvm) dir [ "plan"; "compound2.blade" ]
+                    recordCase $"cli: `plan` ({lane}) reports the rank-2 compound as the hashed index"
+                        (code = 0 && out.Contains "[compound v1] h @ " && out.Contains hashedLine
+                         && not (out.Contains compactionLine))
+                        (out + err)
         finally
             try Directory.Delete(dir, true) with _ -> ()
     if not capabilities.Value.HasGpp || selfExe.IsNone then

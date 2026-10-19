@@ -6,8 +6,9 @@
 // cells in storage order by the print rank regime, the compound axis counted
 // as ONE axis: alone, a flat run (a rank-2 mask too -- the cells are one
 // compact axis); with exactly one trailing dim, nested rows. Both the
-// compiled lane and the interpreter print it (the llvm lane refuses the
-// compound initializer and falls back).
+// compiled lane and the interpreter print it (the llvm lane takes a rank-1,
+// trailing-free compound -- G9's compaction -- and falls back to C++ for the
+// rank-2 mask and the trailing-dim compound below).
 let x = [1.0, -2.0, 3.0, -4.0, 5.0]
 let m = mask(x, lambda(v) -> v > 0.0)
 let y = compound(x, m)

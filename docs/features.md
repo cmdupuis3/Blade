@@ -191,7 +191,7 @@ Full semantics in [features/sql.md](features/sql.md). All implemented and tested
 | Operation | SQL analogue | One-liner |
 |-----------|--------------|-----------|
 | `mask(A, pred)` | WHERE predicate | Bool presence array over A's own index space; combine with `&&`/`\|\|`; rank 1, or rank k over a plain dense array (the whole index space; `compound(A, m)` compacts every dimension -- tests/corpus/sql-masks/013_rank2_mask_compound.blade) |
-| `compound(A, m)` | WHERE materialization | Compact CompoundIdx view; coordinate-based reads; cardinality = pass count; prints its present cells in storage order (one flat run, nested rows with exactly one trailing dim -- G22; the interpreter twins it) |
+| `compound(A, m)` | WHERE materialization | Compact CompoundIdx view; coordinate-based reads; cardinality = pass count; prints its present cells in storage order (one flat run, nested rows with exactly one trailing dim -- G22; the interpreter twins it). REPRESENTATION (`blade plan`'s `[compound v1]` line, bench gap G9): a rank-1 mask is the COMPACTION -- a count pass, a branchless kept-position fill and a gather by position, no hash node per kept cell; a keyed read `S(k)` binary-searches the kept positions and a key that was not kept aborts BL8006 (corpus `index-types/511-514`). Both compiled lanes build it (the LLVM lane takes a rank-1, trailing-free compound and refuses every other); a rank-k mask keeps the hashed index (`declined -- hashed SparseIdx ...`) |
 | `intersect(A, B)` | INTERSECT | Value-based, dedups, first-occurrence order from A |
 | `union(A, B)` | UNION | Dedups both sides, A's occurrences first |
 | `unique(A)` | DISTINCT | First-occurrence dedup |

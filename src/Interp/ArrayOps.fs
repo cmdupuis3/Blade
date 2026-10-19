@@ -1631,12 +1631,15 @@ let private compactCell (data: Store) (i: int) : Value =
     | _ -> raise (InterpPanic ("BL8003", "compound read: unexpected backing store", None, 0))
 
 /// linearize(tuple) -> compact rank via the reverse map (compound_index_t::
-/// linearize = tuple_to_rank.at). A tuple that is not present is a program
-/// error (C++ .at() throws); the corpus only ever reads present cells.
+/// linearize: the reverse hash at rank >= 2, a binary search over the kept
+/// positions at rank 1). A tuple that is not present is the out-of-key-set
+/// read, BL8006 with the runtime header's exact text (BLADE_OUT_OF_KEY_SET,
+/// index_types.h) -- the same code and message the sparse twin raises, so a
+/// `// ABORT:` pin holds in every lane (corpus index-types/514).
 let compoundLinearize (cv: CompoundValue) (coords: int64[]) : int =
     match cv.RankOf.TryGetValue(compoundMaskOffset cv.LeadExtents coords) with
     | true, r -> r
-    | _ -> raise (InterpPanic ("BL8003", "compound read: coordinate not present in mask", None, 0))
+    | _ -> raise (InterpPanic ("BL8006", "index out of bounds: a key outside the sparse key set", None, 0))
 
 /// Build a Compound VALUE from a dense array + a bool mask array (the compound()
 /// / load_compound constructor). `arrType` is the compound view type (its

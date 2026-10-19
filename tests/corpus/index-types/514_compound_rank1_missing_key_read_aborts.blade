@@ -1,0 +1,14 @@
+// TEST: Rank-1 compound: reading a key that was not kept aborts (aborts)
+// A keyed read `S(k)` of a rank-1 compound resolves the SOURCE position k to
+// its kept ordinal (a binary search over the kept positions in the compaction
+// representation, G9). A position the mask rejected has no cell: every lane
+// aborts BL8006 with the runtime header's text -- the compiled C++ lane
+// (compound_index_t<1>::linearize), the LLVM lane (blade_compact1_rank)
+// and the interpreter (compoundLinearize, which used to say BL8003).
+type I = Idx<5>
+let a: Array<Int64 like I> = [10, 20, 30, 40, 50]
+let evens = compound(a, mask(a, lambda(v) -> v % 20 == 0))
+let ok = evens(3)
+let bad = evens(2)
+// ABORT: BL8006
+// ABORT: a key outside the sparse key set

@@ -488,3 +488,25 @@ void blade_print_completed(const char *name, double seconds) {
     blade_fmt_f64(buf, sizeof buf, seconds);
     printf("%s completed in %ss\n", name, buf);
 }
+
+/* ---- the rank-1 compound's keyed read (bench gap G9) --------------------- */
+
+/* The kept ORDINAL of source position `key` in the ascending kept-position
+ * table `pos[0, m)` that `compound(dense, mask)` built (EmitLlvm's
+ * emitCompoundInit), or -1 when the position was not kept: the twin of
+ * compound_index_t<1>::linearize (src/cpp/index_types.h), the same binary
+ * search over the same table, so both lanes resolve a key identically and
+ * the emitter raises the same BL8006 on -1.
+ *
+ * Claims the emitter's declaration makes about this symbol (EmitLlvm
+ * grpShimArgRead): it reads only memory reachable from `pos`, writes nothing,
+ * touches no global, does no I/O, allocates and frees nothing, has no threads
+ * or atomics, and returns on every input (a bounded bisection). */
+long long blade_compact1_rank(const long long *pos, long long m, long long key) {
+    long long a = 0, b = m;
+    while (a < b) {
+        long long mid = a + (b - a) / 2;
+        if (pos[mid] < key) a = mid + 1; else b = mid;
+    }
+    return (a < m && pos[a] == key) ? a : -1;
+}

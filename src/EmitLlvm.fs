@@ -275,6 +275,7 @@ let private grpShimPanic = 5          // the panic path
 let private grpShimFree = 6           // the pool deallocator (obviously not `nofree`)
 let private grpShimArith = 7          // arithmetic-contract helpers: may panic (BL8013/BL8014), so no `willreturn`
 let private grpTileCore = 8           // blade_llvm_tiles.c: pure, serial, argument memory only (M6)
+let private grpShimArgRead = 9        // shim lookups that only READ argument memory (blade_compact1_rank)
 
 let private attrGroupText (anyFrees: bool) (anyPanics: bool) (g: int) : string =
     // Blade has no exceptions (nounwind: deletes all Windows SEH lowering)
@@ -312,6 +313,10 @@ let private attrGroupText (anyFrees: bool) (anyPanics: bool) (g: int) : string =
     // globals, no allocation, no I/O), has no threads or atomics, frees
     // nothing, and returns from every input (counted loops, no panic arm).
     elif g = grpTileCore then "mustprogress nofree nosync nounwind willreturn memory(argmem: readwrite)"
+    // A pure lookup over its pointer argument (blade_compact1_rank's binary
+    // search: the shim states the claims above its definition): reads only
+    // argument memory, writes nothing, no globals, no I/O, always returns.
+    elif g = grpShimArgRead then "mustprogress nofree nosync nounwind willreturn memory(argmem: read)"
     else ""
 
 /// The facts a whole module carries, computed once before any instruction is
@@ -685,6 +690,16 @@ type private Grp =
     /// a literal index, a register otherwise -- either way `emitCountedLoopTo`
     /// takes it as-is.
     | GDynDense of len: string
+    /// A RANK-1 COMPOUND (`compound(dense, mask)` over ONE dense axis, no
+    /// trailing dims -- bench gap G9): the compaction representation. Storage
+    /// is `len` cells in kept order, exactly a GDynDense for every flat
+    /// consumer (fold, print, map, extents); `pos` is the kept-position table
+    /// (an i64 pool of `len` ascending source positions, the same table
+    /// compound_index_t<1>::rank_to_tuple holds in the C++ lane), which a
+    /// KEYED read `S(k)` binary-searches -- a key that was not kept is BL8006.
+    /// A map over a compound keeps the same `pos` (identical mask by
+    /// construction), as the C++ lane's shared-index output does.
+    | GCompact of len: string * pos: string
     /// A CLOSED-FORM ENUMERABLE DOMAIN (a static struct with linear
     /// conjuncts): ONE group spanning the struct's fields, coordinates =
     /// field values, cells = the plan's solutions in lex order (see
@@ -710,13 +725,14 @@ type private PubVal =
     | PubScalar of sym: string * ty: Sc
     | PubArray of sym: string * elem: Sc * groups: Grp list
 
-let private grpRank = function GDense _ | GDynDense _ -> 1 | GSym (r, _) -> r | GAnti (r, _) -> r | GRagged _ -> 2 | GDomain p -> p.Levels.Length
+let private grpRank = function GDense _ | GDynDense _ | GCompact _ -> 1 | GSym (r, _) -> r | GAnti (r, _) -> r | GRagged _ -> 2 | GDomain p -> p.Levels.Length
 let private grpExtent =
     function
     | GDense n -> n | GSym (_, n) -> n | GAnti (_, n) -> n
     | GRagged _ -> refuse "a ragged index group where a single static extent is required"
     | GDomain _ -> refuse "an enumerated-domain group where a single static extent is required"
     | GDynDense _ -> refuse "a runtime-extent axis where a static extent is required"
+    | GCompact _ -> refuse "a compound (runtime-cardinality) axis where a static extent is required"
 /// Antisymmetric groups are STRICT (i < j) and store no diagonal.
 let private grpStrict (g: Grp) = g.IsGAnti
 let private grpCompact = function GSym _ | GAnti _ -> true | _ -> false
@@ -750,6 +766,7 @@ let private grpCells (g: Grp) : int64 =
     | GRagged (_, RtDynamic _) -> refuse "a dynamic ragged shape where a static cell count is required"
     | GDomain p -> p.Card
     | GDynDense _ -> refuse "a runtime-extent axis where a static cell count is required"
+    | GCompact _ -> refuse "a compound (runtime-cardinality) axis where a static cell count is required"
 
 let private shapeCells (gs: Grp list) : int64 = gs |> List.fold (fun acc g -> acc * grpCells g) 1L
 
@@ -1216,6 +1233,9 @@ let private shimTable : Map<string, ShimFn> =
           "blade_f2i64", { Ret = "i64"; RetAttrs = ""; Args = [ "double"; "ptr"; "i64" ]; Group = grpShimArith }
           "blade_fpow", io "double" [ "double"; "double" ]
           "blade_fpowi", io "double" [ "double"; "i64" ]
+          // The rank-1 compound's keyed read (G9): the kept ordinal of `key`
+          // in the ascending position table, -1 when it was not kept.
+          "blade_compact1_rank", { Ret = "i64"; RetAttrs = ""; Args = [ "ptr"; "i64"; "i64" ]; Group = grpShimArgRead }
           "blade_out_str", io "void" [ "ptr" ]
           "blade_out_i64", io "void" [ "i64" ]
           "blade_out_f64", io "void" [ "double" ]
@@ -1916,6 +1936,10 @@ let private grpOffset (c: Ctx) (g: Grp) (idxs: Val list) : string =
     | GDense _, _ -> refuse "a dense axis indexed by more than one coordinate"
     | GDynDense _, [ i ] -> i.Reg
     | GDynDense _, _ -> refuse "a runtime-extent axis indexed by more than one coordinate"
+    // STORAGE coordinates: the kept ordinal. (The keyed read `S(k)` resolves
+    // its key to this ordinal first -- emitRaw's compound arm.)
+    | GCompact _, [ i ] -> i.Reg
+    | GCompact _, _ -> refuse "a compound axis indexed by more than one coordinate"
     // A ragged cell is offsets[row] + element: one table operand and one add,
     // folded outright when the row is a literal against a static table.
     | GRagged (_, table), [ i; j ] -> i64Add c (raggedOffAt c table i.Reg) j.Reg
@@ -2099,6 +2123,7 @@ let private shapeCellsOp (c: Ctx) (gs: Grp list) : string =
     match gs with
     | [ GRagged (rows, table) ] -> raggedOffAt c table rows
     | [ GDynDense len ] -> len
+    | [ GCompact (len, _) ] -> len
     | _ -> string (shapeCells gs)
 
 /// The single extent of a rank-1 shape, as an OPERAND: a literal for a dense
@@ -2108,7 +2133,14 @@ let private soleExtentOp (a: ArrVal) : string =
     match a.Groups with
     | [ GDense n ] -> string n
     | [ GDynDense len ] -> len
+    | [ GCompact (len, _) ] -> len
     | _ -> refuse "a rank-1 operand with no single extent"
+
+/// The rank-1 compound's kept-position table, when `a` is one.
+let private compactPosOf (a: ArrVal) : (string * string) option =
+    match a.Groups with
+    | [ GCompact (len, pos) ] -> Some (len, pos)
+    | _ -> None
 
 /// Read at ABSOLUTE coordinates -- the ones a user writes in `S(2)(1)`. For a
 /// dense shape this IS `readCell` (identical emission, so the dense goldens do
@@ -2293,6 +2325,7 @@ let private rowView (c: Ctx) (a: ArrVal) (idxs: Val list) : ArrVal =
     // must never see this shape -- half of a ragged group is not a static
     // shape, and splitGroupsAt says so.
     match a.Groups, idxs with
+    | [ GCompact _ ], _ -> refuse "a partial index into a rank-1 compound (it has one axis)"
     | [ GRagged (_, table) ], [ i ] ->
         let off = raggedOffAt c table i.Reg
         let len = raggedLenAt c table i.Reg
@@ -2789,6 +2822,35 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
          | _ -> refuse "a keyed read of a non-domain array")
     | IRIndex (arrExpr, idxExprs, _) ->
         let a = consumeArrOperand c arrExpr
+        // The KEYED read of a rank-1 compound, `S(k)` (the C++ lane's
+        // compoundRead normalizes the scalar spelling to the 1-tuple read
+        // `S((k))`; both spellings arrive here): the key is a SOURCE
+        // position, resolved to its kept ordinal by binary search over the
+        // kept-position table -- `compound_index_t<1>::linearize`'s exact
+        // algorithm -- and a key that was not kept is BL8006 with that lane's
+        // text and no location line (its throw carries none).
+        match compactPosOf a, idxExprs with
+        | Some (len, pos), ([ key ] | [ IRTuple [ key ] ]) ->
+            let k = coerce c ScI64 (emitExpr c key)
+            needShim c "blade_compact1_rank"
+            let q = freshReg c
+            ln c (renderCall { Dest = Some q; RetTy = ScI64; Callee = "@blade_compact1_rank"
+                               Args = [ ScStr, pos; ScI64, len; ScI64, k.Reg ] })
+            let missing = freshReg c
+            ln c (renderCmp { Dest = missing; Kind = "icmp"; Pred = "slt"; Ty = ScI64; Lhs = q; Rhs = "0" })
+            let lBad = freshLbl c "ckey.bad"
+            let lOk = freshLbl c "ckey.ok"
+            ln c (renderBr { Cond = missing; IfTrue = lBad; IfFalse = lOk })
+            lbl c lBad
+            needShim c "blade_panic_at"
+            let m = stringGlobal c "error[BL8006]: index out of bounds: a key outside the sparse key set"
+            ln c (renderCall { Dest = None; RetTy = ScVoid; Callee = "@blade_panic_at"
+                               Args = [ ScStr, m; ScStr, "null"; ScI64, "0" ] })
+            ln c "unreachable"
+            lbl c lOk
+            readCell c a [ { Reg = q; Ty = ScI64 } ]
+        | Some _, _ -> refuse "a rank-1 compound read with other than one key"
+        | None, _ ->
         let idxs = idxExprs |> List.map (fun ix -> coerce c ScI64 (emitExpr c ix))
         if List.length idxs <> a.Rank then
             refuse ($"a partial index ({(List.length idxs)} of {a.Rank}) in value position")
@@ -2809,7 +2871,9 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
          | None ->
              let a = emitArr c arrExpr
              (match a.Groups, dim with
-              | [ GDynDense len ], 0 -> { Reg = len; Ty = ScI64 }
+              // A rank-1 compound's extent is its cardinality (the C++
+              // lane's `.idx->cardinality`, the interpreter's Cardinality).
+              | [ GDynDense len ], 0 | [ GCompact (len, _) ], 0 -> { Reg = len; Ty = ScI64 }
               | groups, d ->
                   let extents = axisExtents groups
                   if d < 0 || d >= List.length extents then
@@ -4435,6 +4499,27 @@ and private emitArr (c: Ctx) (e: IRExpr) : ArrVal =
 
     | IRZip _ -> refuse "zip(...) outside a method_for (a bare zip has no materialized shape)"
 
+    // mask(A, pred): the Bool PRESENCE array over A's own index space --
+    // m[i] = pred(A[i]), same shape, no compaction (that is compound's job).
+    // EAGER, as the C++ lane's genMaskBinding (`// mask: count + compact`)
+    // makes it: a bound mask prints, and a compound reads it as a pool.
+    // Dense static shapes and the two rank-1 operand-extent shapes; a mask
+    // over compact/ragged storage refuses (the C++ lane's materializeMaskForm
+    // has no form for those either).
+    | IRMask (arrExpr, predExpr) ->
+        let a = consumeArrOperand c arrExpr
+        let cl =
+            match resolveCallable predExpr with
+            | Some cl when cl.Params.Length = 1 -> cl
+            | Some cl -> refuse ($"a mask predicate '{cl.Name}' of {cl.Params.Length} parameters")
+            | None -> refuse "a mask whose predicate does not resolve to a callable"
+        if not (a.Groups |> List.forall (function GDense _ | GDynDense _ | GCompact _ -> true | _ -> false)) then
+            refuse "mask over compact, ragged, or domain storage"
+        materialize c
+            { Elem = ScBool; Groups = a.Groups; RowOpBytes = 0L
+              Src = AVirt (fun c2 idxs ->
+                        coerce c2 ScBool (applyKernel c2 cl [ KScalar (readCell c2 a idxs) ])) }
+
     // decompact(A, d): value-equivalent group FISSION. The logical axes and
     // their order are unchanged -- only the grouping is -- so cell
     // (i1, ..., ik) of the result, in whatever groups the checker gave it, is
@@ -4582,9 +4667,10 @@ and private materialize (c: Ctx) (a: ArrVal) : ArrVal =
              { a with Src = APool ptr }
          | _ -> refuse "a coordinate producer over a mixed ragged shape")
     // A rank-1 producer whose extent is an OPERAND (a peel over a
-    // runtime-counted grouping): one counted loop, the bound taken as-is.
-    | AVirt _ when (match a.Groups with [ GDynDense _ ] -> true | _ -> false) ->
-        let len = match a.Groups with [ GDynDense l ] -> l | _ -> refuse "unreachable"
+    // runtime-counted grouping, a map over a rank-1 compound): one counted
+    // loop, the bound taken as-is.
+    | AVirt _ when (match a.Groups with [ GDynDense _ ] | [ GCompact _ ] -> true | _ -> false) ->
+        let len = match a.Groups with [ GDynDense l ] | [ GCompact (l, _) ] -> l | _ -> refuse "unreachable"
         let ptr = allocPool c a.Elem len
         emitCountedLoopTo c len (fun k ->
             let v = coerce c a.Elem (readCell c a [ { Reg = k; Ty = ScI64 } ])
@@ -5073,6 +5159,58 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
     if List.isEmpty cg.Bindings then refuse "a combinator that produced no loop levels"
     for b in cg.Bindings do
         if b.FusedRank.IsSome then refuse "a fused joint loop level (compound index domain)"
+    // THE COMPOUND VALUE MAP (G9): `y * y`, `method_for(y) <@> f` over a
+    // rank-1 compound. ONE level whose extent is the compound's cardinality
+    // (`IRCompoundMask`), every operand a real array of the SAME compound
+    // (same kept-position table -- `compound(a, m)` and a map over it share
+    // one mask by construction, which is what the C++ lane's shared-index
+    // output `Compound { new T[card], y.idx, stride }` records). Cell k of
+    // the result is the kernel of cell k of each operand, so this is the
+    // cell-congruent producer over the same GCompact shape: no coordinates,
+    // no storage until `|> compute` or a fold consumes it. Anything else
+    // over a compound level -- a virtual source, two different compounds, a
+    // Reynolds body, a row kernel -- refuses to the C++ lane.
+    let compoundLevel =
+        cg.Bindings |> List.exists (fun b -> match b.Extent with IRCompoundMask _ -> true | _ -> false)
+    if compoundLevel then
+        if cg.Bindings.Length <> 1 || cg.HasReynolds then
+            refuse "a compound level inside a multi-level or Reynolds nest"
+        let b = List.head cg.Bindings
+        let operands =
+            info.Arrays |> List.map (fun a ->
+                match a with
+                | IRRange _ | IRVirtualReverse _ -> refuse "a virtual source at a compound level"
+                | _ -> emitArr c a)
+        let shape =
+            match operands with
+            | first :: _ -> compactPosOf first
+            | [] -> None
+        let (len, pos) =
+            match shape with
+            | Some lp -> lp
+            | None -> refuse "a compound level over an operand that is not a rank-1 compound"
+        if not (operands |> List.forall (fun o -> compactPosOf o = Some (len, pos))) then
+            refuse "a compound level over operands of different compounds"
+        if b.Elements |> List.exists (fun el -> el.Virtual <> RealArray) then
+            refuse "a compound level with a virtual element"
+        let elem =
+            match scalarTyOf rk.Callable.RetType with
+            | Some s when s <> ScVoid -> s
+            | _ ->
+                match Blade.IR.stripUnits info.OutputType with
+                | ArrayElem arr -> requireScalar "a compound map's element" arr.ElemType
+                | t -> requireScalar "a compound map's result" t
+        let outGroups = [ GCompact (len, pos) ]
+        let paramOf (varId: IRId) = cg.KernelParams |> List.tryFind (fun p -> p.VarId = varId)
+        { Elem = elem; Groups = outGroups; RowOpBytes = 0L
+          Src = AVirtFlat (fun c2 k ->
+            for el in b.Elements do
+                let a = List.item el.ArrayPosition operands
+                match paramOf el.ParamVarId with
+                | Some p -> bindKernelParam c2 p (KScalar (readFlat c2 a k))
+                | None -> refuse "a compound level with no kernel parameter"
+            coerce c2 elem (emitExpr c2 cg.KernelExpr)) }
+    else
     let extents =
         cg.Bindings |> List.map (fun b ->
             match Blade.IRPrint.tryEvalIntIR b.Extent with
@@ -6340,7 +6478,8 @@ let private checkModuleScope (m: IRModule) : unit =
     if not (Map.isEmpty m.ProviderReads) then refuse "a provider read (netcdf/zarr/csv/sql)"
     if not (Map.isEmpty m.ProviderWrites) then refuse "a provider write (netcdf/zarr/csv/sql)"
     if not (Map.isEmpty m.RandomInits) then refuse "a random-fill initializer"
-    if not (Map.isEmpty m.CompoundInits) then refuse "a compound-index initializer"
+    // A compound-index initializer is emitted per binding (emitCompoundInit:
+    // the rank-1 compaction) and refuses there for every other shape.
     if not (Map.isEmpty m.SparseInits) then refuse "a sparse-index initializer"
     for td in m.Types do
         match td with
@@ -6487,7 +6626,9 @@ let private emitArrayPrintFramed (c: Ctx) (pre: string) (post: string) (a: ArrVa
                 outVal c (readCell c a [ { Reg = i; Ty = ScI64 }; { Reg = j; Ty = ScI64 } ]))
             outStr c "]")
         outStr c post
-    | [ GDynDense len ] ->
+    // A rank-1 compound prints its kept cells in storage order as one flat
+    // run (G22: the C++ lane's genPrintStatements compound arm).
+    | [ GDynDense len ] | [ GCompact (len, _) ] ->
         outStr c pre
         let flag = allocaOf c "i1"
         ln c ($"store i1 true, ptr {flag}")
@@ -6688,6 +6829,92 @@ let private emitPrints (c: Ctx) (bindings: IRBinding list) : unit =
                         | None -> ()
                     | _ -> ()
 
+/// `let S = compound(dense, mask)` -- THE RANK-1 COMPACTION (bench gap G9),
+/// the twin of the C++ lane's genCompoundInitBinding over compound_index_t<1>
+/// and of the interpreter's buildCompound, in IR:
+///
+///   1. the mask is a stored Bool pool over ONE dense axis of n cells (the
+///      binding's type says so: a single IxKCompound slot of rank 1 and no
+///      trailing dims; the mask's shape says the axis is dense);
+///   2. COUNT: m = sum of the mask bytes (one counted loop, an i64 accumulator
+///      the vectorizer folds);
+///   3. FILL: the kept-position table, `pos[q] = i; q += keep[i]` over i
+///      ascending -- the branchless form, one slot of slack; kept order IS
+///      source order, so every lane agrees on it;
+///   4. GATHER: dst[q] = src[pos[q]] for q in [0, m) -- exactly m cells
+///      moved, monotone reads, no predicate read.
+///
+/// The value is `GCompact (m, pos)` over the dst pool: every flat consumer
+/// (fold, print, extents, a map) treats it as a runtime-extent rank-1 array;
+/// the keyed read `S(k)` binary-searches `pos` (emitRaw). The hashed index
+/// stays the C++ lane's: a rank >= 2 mask, trailing dims, a mask over anything
+/// but a dense axis, or a non-scalar element refuse here by name. Serial in
+/// every build -- a parallel prefix would be a different algorithm, and the
+/// kernel protocol (bench maskagg spec, M5) keeps compaction sequential.
+let private emitCompoundInit (c: Ctx) (b: IRBinding) (denseExpr: IRExpr) (maskExpr: IRExpr) : unit =
+    let arrTy =
+        match Blade.IR.stripUnits b.Type with
+        | ArrayElem arrTy -> arrTy
+        | _ -> refuse "a compound-index initializer whose binding is not an array"
+    (match arrTy.IndexTypes with
+     | [ ix ] when ix.IxKind = IxKCompound && ix.Rank = 1 -> ()
+     | [ ix ] when ix.IxKind = IxKCompound ->
+         refuse ($"a rank-{ix.Rank} compound-index initializer (the hashed index is the C++ lane's)")
+     | _ :: _ :: _ -> refuse "a compound-index initializer with trailing dims (the C++ lane's)"
+     | _ -> refuse "a compound-index initializer of an unexpected shape")
+    let elem =
+        match scalarTyOf arrTy.ElemType with
+        | Some (ScI64 | ScF64 | ScBool as e) -> e
+        | _ -> refuse "a compound-index initializer over a non-Int64/Float64/Bool element"
+    // The mask and the dense source, both STORED (a deferred source is forced
+    // under its own name, as the C++ lane's forceDeferredArrayInput does).
+    let keep = materialize c (consumeArrOperand c maskExpr)
+    let src = materialize c (consumeArrOperand c denseExpr)
+    if keep.Elem <> ScBool then refuse "a compound mask that is not a Bool array"
+    let n =
+        match keep.Groups with
+        | [ GDense n ] -> string n
+        | [ GDynDense len ] -> len
+        | [ GCompact _ ] -> refuse "a compound of a compound (a mask over a compound's cells)"
+        | _ -> refuse "a compound mask over other than one dense axis"
+    if src.Groups <> keep.Groups then refuse "a compound whose dense operand and mask differ in shape"
+    if src.Elem <> elem then refuse "a compound whose dense operand's element differs from its type"
+    let keepPool, srcPool =
+        match keep.Src, src.Src with
+        | APool k, APool s -> k, s
+        | _ -> refuse "unreachable: compound operands not materialized"
+    // 2. COUNT.
+    let acc = allocaOf c "i64"
+    ln c ($"store i64 0, ptr {acc}")
+    emitCountedLoopTo c n (fun i ->
+        let bit = loadCell c ScBool (gepCell c ScBool keepPool i)
+        let w = freshReg c
+        ln c ($"{w} = zext i1 {bit.Reg} to i64")
+        let cur = loadSlot c acc ScI64
+        let next = i64Add c cur.Reg w
+        ln c ($"store i64 {next}, ptr {acc}"))
+    let m = (loadSlot c acc ScI64).Reg
+    // 3. FILL: the kept positions, one slack slot for the unconditional store.
+    let mSlack = i64Add c m "1"
+    let pos = allocPool c ScI64 mSlack
+    let cursor = allocaOf c "i64"
+    ln c ($"store i64 0, ptr {cursor}")
+    emitCountedLoopTo c n (fun i ->
+        let q = loadSlot c cursor ScI64
+        storeCell c ScI64 (gepCell c ScI64 pos q.Reg) { Reg = i; Ty = ScI64 }
+        let bit = loadCell c ScBool (gepCell c ScBool keepPool i)
+        let w = freshReg c
+        ln c ($"{w} = zext i1 {bit.Reg} to i64")
+        let next = i64Add c q.Reg w
+        ln c ($"store i64 {next}, ptr {cursor}"))
+    // 4. GATHER by kept position into the exactly-sized compact pool.
+    let dst = allocPool c elem m
+    emitCountedLoopTo c m (fun q ->
+        let p = loadCell c ScI64 (gepCell c ScI64 pos q)
+        let v = loadCell c elem (gepCell c elem srcPool p.Reg)
+        storeCell c elem (gepCell c elem dst q) v)
+    bindArray c b.Id b.Name { Elem = elem; Groups = [ GCompact (m, pos) ]; Src = APool dst; RowOpBytes = 0L }
+
 /// Emit `main`: bindings in declaration order, the `<name> completed in <t>s`
 /// timing line, then the auto-print pass -- the exact statement order
 /// `genMainWrapper` assembles for the C++ lane, which is what makes the two
@@ -6710,7 +6937,9 @@ let private emitMain (c: Ctx) (m: IRModule) (programName: string) : string list 
         c.HoistedIds.Clear()
         c.DeclSpan <- Blade.IR.declSpanOf b.Name
         c.DeclName <- b.Name
-        bindNamed c b.Id b.Name b.Type b.Value
+        (match Map.tryFind b.Id m.CompoundInits with
+         | Some (denseExpr, maskExpr) -> emitCompoundInit c b denseExpr maskExpr
+         | None -> bindNamed c b.Id b.Name b.Type b.Value)
         publishBinding c b.Id
     c.StmtStart <- -1
     let t1 = freshReg c
