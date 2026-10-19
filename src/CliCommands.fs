@@ -996,27 +996,47 @@ let internal llvmLaneDecision (d: Blade.Effects.Decision) : Blade.Effects.Decisi
         declined $"C++-lane {d.Rule}: the LLVM lane emits its own loop nest" []
     | _ -> d
 
-/// A record the LLVM emitter made ITSELF: the syrk tile core's (M6), tagged
-/// `(shared C core)` in its evidence.
+/// A record the LLVM emitter made ITSELF: the tile cores' (syrk M6, antisym
+/// pair M7, rank-3 simplex M8), tagged `(shared C core)` in its evidence.
 let internal isLlvmTileRecord (d: Blade.Effects.Decision) : bool =
     (d.Rule = "microkernel" || d.Rule = "fold-form")
     && d.Evidence |> List.exists (fun e -> e.Contains "(shared C core")
 
+/// The tile a record is about, from its evidence: "syrk tile", "antisym
+/// tile" or "simplex tile" (both lanes' records name it), else None.
+let private tileKindOf (d: Blade.Effects.Decision) : string option =
+    [ "syrk tile"; "antisym tile"; "simplex tile" ]
+    |> List.tryFind (fun k -> d.Evidence |> List.exists (fun e -> e.Contains k))
+
 /// The LLVM lane's plan: every C++ record `ds` re-stated by
 /// `llvmLaneDecision`, EXCEPT that the lane's own tile-core records `own`
-/// (M6) take the place of the C++ records for the SAME contraction -- same
-/// rule, same declaration span, evidence naming the syrk tile. The C++
-/// verdict is kept as trailing evidence and its subject (the C++ name the
-/// rest of the plan uses) is adopted. A tile record with no C++ counterpart
-/// -- the C++ lane routed the contraction to BLAS, which records no fold
-/// form -- is appended under the BLAS record's subject.
+/// (M6 / M7 / M8) take the place of the C++ records for the SAME contraction
+/// -- same rule, evidence naming the same tile, and the same declaration
+/// span; failing a span match (a contraction inside a block, where the C++
+/// lane names the block-local binding and this lane the enclosing
+/// declaration), the next unclaimed record of that rule and tile in emission
+/// order, which both lanes walk identically. The C++ verdict is kept as
+/// trailing evidence and its subject (the C++ name the rest of the plan
+/// uses) is adopted. A tile record with no C++ counterpart -- the C++ lane
+/// routed the contraction to BLAS, which records no fold form -- is appended
+/// under the BLAS record's subject.
 let internal mergeLlvmTileRecords (ds: Blade.Effects.Decision list) (own: Blade.Effects.Decision list) : Blade.Effects.Decision list =
-    let mentionsSyrk (d: Blade.Effects.Decision) =
-        d.Evidence |> List.exists (fun e -> e.Contains "syrk tile")
     let pending = System.Collections.Generic.List<Blade.Effects.Decision>(own)
+    let claim (d: Blade.Effects.Decision) =
+        match tileKindOf d with
+        | None -> None
+        | Some kind ->
+            let sameTile (o: Blade.Effects.Decision) = o.Rule = d.Rule && tileKindOf o = Some kind
+            match pending |> Seq.tryFindIndex (fun o -> sameTile o && o.Span = d.Span) with
+            | Some ix -> Some ix
+            | None ->
+                // Only an own record no C++ record claims by span.
+                let spanPartnered (o: Blade.Effects.Decision) =
+                    ds |> List.exists (fun d2 -> d2.Rule = o.Rule && tileKindOf d2 = Some kind && d2.Span = o.Span)
+                pending |> Seq.tryFindIndex (fun o -> sameTile o && not (spanPartnered o))
     let merged =
         ds |> List.map (fun d ->
-            match (if mentionsSyrk d then pending |> Seq.tryFindIndex (fun o -> o.Rule = d.Rule && o.Span = d.Span) else None) with
+            match claim d with
             | Some ix ->
                 let o = pending.[ix]
                 pending.RemoveAt ix

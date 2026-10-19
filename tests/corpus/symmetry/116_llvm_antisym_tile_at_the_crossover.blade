@@ -1,0 +1,27 @@
+// TEST: Llvm Antisym Tile At The Crossover
+// The antisym pair `prodsum(a(0), b(1)) - prodsum(b(0), a(1))` under
+// `where anticomm(a, b)` at EXACTLY the tile crossover, p = 24 and n = 8: in
+// both lanes the smallest shape the antisym tile takes (C++:
+// blade_pgemm::dantisym_tri; LLVM: the shared C core blade_dantisym_tri_f64 over
+// the same blade_tiles.h). 24 = 4*6 rows and a strict 23-wide first row: every
+// tile straddles the diagonal, the last row panel holds rows 18..22 only.
+/// Z(i, c, s) = ((5 i + 3 c + s) mod 7) - 3: small integers, so every product and
+/// partial sum is an exact integer and ANY association gives the same L -- the pins
+/// are association-invariant; the route is pinned by `blade test llvm facts` (the
+/// LLVM call) and `blade test row-tile` (the C++ call), the bits across the lanes
+/// by `blade test llvm tiles`.
+type P = Idx<24>
+type C = Idx<2>
+type S = Idx<8>
+let (ss, l01, l10, l_last, row0) = {
+    let z = method_for(range<P>, range<C>, range<S>) <@> lambda(i, c, s) -> Float64((i * 5 + c * 3 + s) % 7) - 3.0 |> compute
+    let l = method_for(z, z) <@> lambda(a: Array<Float64 like C, S>, b: Array<Float64 like C, S>) where anticomm(a, b) -> prodsum(a((0 : C)), b((1 : C))) - prodsum(b((0 : C)), a((1 : C))) |> compute
+    let total = reduce(method_for(range<P>) <@> lambda(i) -> reduce(method_for(range<P>) <@> lambda(j) -> l(i, j) * l(i, j), (+)), (+))
+    let r0 = reduce(method_for(range<P>) <@> lambda(j) -> l(0, j), (+))
+    (total, l(0, 1), l(1, 0), l(22, 23), r0)
+}
+// EXPECT: ss = 169972.0
+// EXPECT: l01 = 20.0
+// EXPECT: l10 = -20.0
+// EXPECT: l_last = 20.0
+// EXPECT: row0 = -10.0

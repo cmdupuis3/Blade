@@ -569,6 +569,45 @@ let runCliSmokeTests () : TH.BlockResult =
                     (code = 0 && out.Contains "declined -- BLADE_SYRK_TILE=0/off: the brick nest"
                      && not (out.Contains "fold form: syrk tile (shared C core)"))
                     (out + err)
+                // THE ROW-CONTRACTION TILE CORES (M7 / M8): the antisym pair
+                // and the rank-3 simplex through the same shared C core, in
+                // the default AND the repro build (no reorder licence used),
+                // declined by their knobs -- in this lane's words.
+                File.WriteAllText(Path.Combine(dir, "anti.blade"),
+                    "type P = Idx<61>\ntype C = Idx<2>\ntype S = Idx<401>\n"
+                    + "let z = method_for(range<P>, range<C>, range<S>) <@> lambda(i, c, s) -> Float64(i * 3 + c + s) |> compute\n"
+                    + "let l = method_for(z, z) <@> lambda(a: Array<Float64 like C, S>, b: Array<Float64 like C, S>) where anticomm(a, b) -> prodsum(a((0 : C)), b((1 : C))) - prodsum(b((0 : C)), a((1 : C))) |> compute\n")
+                File.WriteAllText(Path.Combine(dir, "sym3.blade"),
+                    "type V = Idx<29>\ntype S = Idx<67>\nlet static n = 67\n"
+                    + "let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 5) - 2.0 |> compute\n"
+                    + "let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>, c: Array<Float64 like S>) where comm(a, b, c) -> prodsum(a, b, c) / Float64(n) |> compute\n")
+                let rowEnv (knob: string) (value: string) (repro: string) =
+                    [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", "1"); ("BLADE_FP_REPRO", repro)
+                      ("BLADE_ANTISYM_TILE", null); ("BLADE_SIMPLEX_TILE", null); (knob, value) ]
+                for repro in [ null; "1" ] do
+                    let build = if isNull repro then "default" else "BLADE_FP_REPRO=1"
+                    let (code, out, err) = spawnWith (rowEnv "BLADE_ANTISYM_TILE" null repro) dir [ "plan"; "anti.blade" ]
+                    recordCase $"cli: `plan` under BLADE_LLVM=1 ({build}) reports the antisym tile through the shared C core"
+                        (code = 0 && out.Contains "fold form: antisym tile (shared C core) sequential 6x8"
+                         && out.Contains "[microkernel v1] l @ "
+                         && out.Contains ": applied [antisym tile (shared C core")
+                        (out + err)
+                    let (code, out, err) = spawnWith (rowEnv "BLADE_SIMPLEX_TILE" null repro) dir [ "plan"; "sym3.blade" ]
+                    recordCase $"cli: `plan` under BLADE_LLVM=1 ({build}) reports the simplex tile through the shared C core"
+                        (code = 0 && out.Contains "fold form: simplex tile (shared C core) 6x8 with W panel, KC=67, then / d per cell"
+                         && out.Contains "[microkernel v1] t @ "
+                         && out.Contains ": applied [simplex tile (shared C core")
+                        (out + err)
+                let (code, out, err) = spawnWith (rowEnv "BLADE_ANTISYM_TILE" "0" null) dir [ "plan"; "anti.blade" ]
+                recordCase "cli: `plan` under BLADE_LLVM=1, BLADE_ANTISYM_TILE=0 reports the tile declined"
+                    (code = 0 && out.Contains "declined -- BLADE_ANTISYM_TILE=0/off: the plain per-cell nest"
+                     && not (out.Contains "fold form: antisym tile (shared C core)"))
+                    (out + err)
+                let (code, out, err) = spawnWith (rowEnv "BLADE_SIMPLEX_TILE" "0" null) dir [ "plan"; "sym3.blade" ]
+                recordCase "cli: `plan` under BLADE_LLVM=1, BLADE_SIMPLEX_TILE=0 reports the tile declined"
+                    (code = 0 && out.Contains "declined -- BLADE_SIMPLEX_TILE=0/off: the plain per-cell nest"
+                     && not (out.Contains "fold form: simplex tile (shared C core)"))
+                    (out + err)
         finally
             try Directory.Delete(dir, true) with _ -> ()
     if not capabilities.Value.HasGpp || selfExe.IsNone then

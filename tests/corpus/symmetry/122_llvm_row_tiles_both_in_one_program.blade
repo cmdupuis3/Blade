@@ -1,0 +1,33 @@
+// TEST: Llvm Row Tiles Both In One Program
+// Both row-contraction tiles in ONE program, the bench's two shapes in
+// miniature (bench/kernels/antisym, bench/kernels/comoment3): the antisym pair
+// at p = 41 x n = 97 and the third moment at p = 26 x n = 61 with its
+// `/ Float64(n)` cast divisor. The LLVM lane links ONE tile object for both
+// entry points. Neither tile uses a reorder licence (each cell keeps its
+// ascending chains), so both stay ON under BLADE_FP_REPRO=1 in both lanes --
+// the reproducible build is where the tiles matter most -- and these values are
+// what that build prints too (`blade test llvm facts` pins the repro routes).
+/// Small-integer data: every sum is an exact integer, so each simplex cell is ONE
+/// correctly rounded division of it -- the same bits in every lane and every
+/// association. A checksum over those non-integer cells would not be, so `tsum`
+/// multiplies each cell back by n and rounds to the integer sum it came from.
+type P = Idx<41>
+type C = Idx<2>
+type S = Idx<97>
+type V = Idx<26>
+type N = Idx<61>
+let static n = 61
+let (lss, l_edge, tsum, t000) = {
+    let z = method_for(range<P>, range<C>, range<S>) <@> lambda(i, c, s) -> Float64((i * 5 + c * 3 + s) % 7) - 3.0 |> compute
+    let l = method_for(z, z) <@> lambda(a: Array<Float64 like C, S>, b: Array<Float64 like C, S>) where anticomm(a, b) -> prodsum(a((0 : C)), b((1 : C))) - prodsum(b((0 : C)), a((1 : C))) |> compute
+    let x = method_for(range<V>, range<N>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 5) - 2.0 |> compute
+    let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like N>, b: Array<Float64 like N>, c: Array<Float64 like N>) where comm(a, b, c) -> prodsum(a, b, c) / Float64(n) |> compute
+    let la = reduce(method_for(range<P>) <@> lambda(i) -> reduce(method_for(range<P>) <@> lambda(j) -> l(i, j) * l(i, j), (+)), (+))
+    let ts = reduce(method_for(range<V>) <@> lambda(i) -> reduce(method_for(range<V>) <@> lambda(j) -> reduce(method_for(range<V>) <@> lambda(k) -> Float64(Int64(floor(t(i, j, k) * Float64(n) + 0.5))), (+)), (+)), (+))
+    (la, l(39, 40), ts, t(0, 0, 0))
+}
+// EXPECT: n = 61
+// EXPECT: lss = 63213696.0
+// EXPECT: l_edge = 190.0
+// EXPECT: tsum = -8.0
+// EXPECT: t000 = -0.131147540983607

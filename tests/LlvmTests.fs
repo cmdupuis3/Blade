@@ -881,6 +881,86 @@ let t = reduce(method_for(range<V>) <@> lambda(i) -> g(i, i), (+))
         [ $"declare void {tileSym}(i64, i64, ptr, i64, ptr, i64, i64, i64, double, ptr, i64)" ]
         [ "captures(none)"; "memory(argmem" ]
 
+    // ---- the antisym pair and rank-3 simplex tile cores (M7 / M8) ---------
+    // The C++ lane's `(|RowContraction|_|)` shapes at or above their
+    // crossovers (antisym p >= 24, n >= 8; simplex p >= 24, n >= 4)
+    // materialize through ONE call each, with the emitter's recipe: extents,
+    // the operand pool and its leading dims, the output pool, the schedule /
+    // kc cap, the scale mode + value, the scratch and its capacity. ON under
+    // BLADE_FP_REPRO=1 (no reorder licence used); off by knob, below the
+    // crossover, and in a module with a `where repro` function.
+    printSubHeader "the antisym and simplex tile cores (M7 / M8)"
+    let antiSrc (p: int) (n: int) (tail: string) (extra: string) = $"""
+type P = Idx<{p}>
+type C = Idx<2>
+type S = Idx<{n}>
+{extra}
+let z = method_for(range<P>, range<C>, range<S>) <@> lambda(i, c, s) -> Float64((i * 5 + c * 3 + s) %% 7) - 3.0 |> compute
+let l = method_for(z, z) <@> lambda(a: Array<Float64 like C, S>, b: Array<Float64 like C, S>) where anticomm(a, b) -> (prodsum(a((0 : C)), b((1 : C))) - prodsum(b((0 : C)), a((1 : C)))){tail} |> compute
+let t = reduce(method_for(range<P>) <@> lambda(j) -> l(0, j), (+))
+"""
+    let sym3Src (p: int) (n: int) (tail: string) = $"""
+type V = Idx<{p}>
+type S = Idx<{n}>
+let static nn = {n}
+let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) %% 5) - 2.0 |> compute
+let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>, c: Array<Float64 like S>) where comm(a, b, c) -> prodsum(a, b, c){tail} |> compute
+let u = reduce(method_for(range<V>) <@> lambda(k) -> t(0, 0, k), (+))
+"""
+    let antiSym = "@" + EmitLlvm.antisymTileSymbol
+    let sym3Sym = "@" + EmitLlvm.simplexTileSymbol
+    let antiOff = [ "BLADE_ANTISYM_TILE", None; "BLADE_FP_REPRO", None ]
+    let sym3Off = [ "BLADE_SIMPLEX_TILE", None; "BLADE_FP_REPRO", None ]
+    check "antisym tile: 61 x 401 calls the core with the emitter's recipe"
+        antiOff (antiSrc 61 401 "" "")
+        [ $"call void {antiSym}(i64 61, i64 401, ptr "
+          ", i64 802, i64 401, i64 0, i64 1, ptr "
+          ", i64 0, i64 0, i64 0, double 0x3FF0000000000000, ptr "
+          $", i64 {EmitLlvm.antisymTileScratchCells 61L 401L false})"
+          $"declare void {antiSym}(i64 noundef, i64 noundef, ptr noundef readonly captures(none), i64 noundef,"
+          "mustprogress nofree nosync nounwind willreturn memory(argmem: readwrite)" ]
+        []
+    check "antisym tile: BLADE_ANTISYM_TILE=4x4 passes the paired schedule"
+        [ "BLADE_ANTISYM_TILE", Some "4x4"; "BLADE_FP_REPRO", None ] (antiSrc 61 401 "" "")
+        [ $"call void {antiSym}(i64 61, i64 401, ptr "; ", i64 1, i64 0, i64 0, double "
+          $", i64 {EmitLlvm.antisymTileScratchCells 61L 401L true})" ]
+        []
+    check "antisym tile: the `/ d` tail rides the call as mode 1 and the divisor"
+        antiOff (antiSrc 29 11 " / 4.0" "")
+        [ $"call void {antiSym}(i64 29, i64 11, ptr "; ", i64 1, double 0x4010000000000000, ptr " ]
+        []
+    check "antisym tile: ON under BLADE_FP_REPRO=1 (no reorder licence used)"
+        [ "BLADE_ANTISYM_TILE", None; "BLADE_FP_REPRO", Some "1" ] (antiSrc 61 401 "" "")
+        [ $"call void {antiSym}(i64 61, i64 401, ptr " ] []
+    check "antisym tile: below the crossover (23 x 11) keeps the nest"
+        antiOff (antiSrc 23 11 "" "") [] [ antiSym ]
+    check "antisym tile: BLADE_ANTISYM_TILE=0 keeps the nest (the A/B knob)"
+        [ "BLADE_ANTISYM_TILE", Some "0"; "BLADE_FP_REPRO", None ] (antiSrc 61 401 "" "") [] [ antiSym ]
+    check "antisym tile: a `where repro` function in the module keeps the nest"
+        antiOff (antiSrc 61 401 "" "function axpy1(a: Float64, b: Float64) where repro = 1.0 + a * b\nlet w = axpy1(1.0, 2.0)\n") [] [ antiSym ]
+    check "simplex tile: 29 x 67 / Float64(n) calls the core with the emitter's recipe"
+        sym3Off (sym3Src 29 67 " / Float64(nn)")
+        [ $"call void {sym3Sym}(i64 29, i64 67, ptr "
+          $", i64 67, ptr "
+          $", i64 {Blade.CodeGenExprSupport.syrkTileKcMax}, i64 1, double "
+          $", i64 {EmitLlvm.sym3TileScratchCells 29L 67L 67L})"
+          $"declare void {sym3Sym}(i64 noundef, i64 noundef, ptr noundef readonly captures(none), i64 noundef, ptr noundef captures(none)," ]
+        []
+    check "simplex tile: three K blocks (29 x 700) size the scratch at KC = 234"
+        sym3Off (sym3Src 29 700 "")
+        [ $"call void {sym3Sym}(i64 29, i64 700, ptr "; ", i64 0, double 0x3FF0000000000000, ptr "
+          $", i64 {EmitLlvm.sym3TileScratchCells 29L 700L 234L})" ]
+        []
+    check "simplex tile: ON under BLADE_FP_REPRO=1 (no reorder licence used)"
+        [ "BLADE_SIMPLEX_TILE", None; "BLADE_FP_REPRO", Some "1" ] (sym3Src 29 67 "")
+        [ $"call void {sym3Sym}(i64 29, i64 67, ptr " ] []
+    check "simplex tile: below the crossover (13 x 201) keeps the nest"
+        sym3Off (sym3Src 13 201 "") [] [ sym3Sym ]
+    check "simplex tile: BLADE_SIMPLEX_TILE=0 keeps the nest (the A/B knob)"
+        [ "BLADE_SIMPLEX_TILE", Some "0"; "BLADE_FP_REPRO", None ] (sym3Src 29 67 "") [] [ sym3Sym ]
+    check "simplex tile: the inner level first (`prodsum(c, a, b)`) declines"
+        sym3Off ((sym3Src 29 67 "").Replace("prodsum(a, b, c)", "prodsum(c, a, b)")) [] [ sym3Sym ]
+
     printFooter "LLVM Fact Layer"
         [ $"{passed} passed"; $"{failed} failed"; "0 skipped" ]
     { Block = "LLVM Fact Layer"; Passed = passed; Failed = failed; Skipped = 0
@@ -967,8 +1047,89 @@ let runLlvmTilesRawBitTests () : BlockResult =
             $"    {{ {p}, {k}, {cap}, {scratch}, {mode}, {sc}, {data} }},")
     if Blade.CodeGenExprSupport.syrkTileKcMax <> 336L then
         fail "kc cap" $"the cases assume the emitter's cap 336; syrkTileKcMax is {Blade.CodeGenExprSupport.syrkTileKcMax}"
+    let fmtScale (scale: float) =
+        let sc = scale.ToString("R", Globalization.CultureInfo.InvariantCulture)
+        if sc.Contains "." || sc.Contains "E" then sc else sc + ".0"
+    // THE ANTISYM PAIR (M7): (p, n, comps, cx, cy, variant, nc cap, mode,
+    // scale, data, short scratch?). Every p from 0 to 30 over short chains
+    // (the strict triangle's empty last row; p = 0 / 1 empty pools), every
+    // p mod 24 over two periods (ragged row panels mod 6 / 4, column panels
+    // mod 8 / 4), several column blocks (nc cap 16), the component pairs
+    // (0,1) (1,0) (2,0) (1,1), both scale tails incl. a divide by zero, long
+    // chains around the simplex's KC and the bench's own shape, every data
+    // class, both schedules, and the core's scalar fallback.
+    let antiCases =
+        [ for v in [ 0; 1 ] do
+            for p in 0 .. 30 do
+                for n in [ 0; 1; 2; 3; 5; 8; 13; 17 ] do
+                    yield p, n, 2, 0, 1, v, 0, 0, 1.0, (if (p + n) % 2 = 0 then 0 else 2), false
+            for n in 0 .. 17 do
+                for d in [ 0; 3; 4; 5 ] do
+                    yield 9 + n, n, 2, 0, 1, v, 0, 0, 1.0, d, false
+                    yield 9 + n, n, 2, 1, 0, v, 0, 0, 1.0, d, false
+            yield 37, 23, 3, 2, 0, v, 0, 0, 1.0, 2, false
+            yield 37, 23, 3, 1, 1, v, 0, 0, 1.0, 2, false
+            for p in [ 1; 2; 13; 29; 61 ] do
+                yield p, 41, 2, 0, 1, v, 0, 1, 401.0, 0, false
+                yield p, 41, 2, 0, 1, v, 0, 2, 0.25, 2, false
+                yield p, 41, 2, 0, 1, v, 0, 1, 0.0, 0, false
+                yield p, 0, 2, 0, 1, v, 0, 1, 0.0, 0, false      // (+0 - +0) / 0
+            for p in 24 .. 71 do
+                yield p, 19, 2, 0, 1, v, 0, 0, 1.0, 2, false
+                yield p, 33, 2, 0, 1, v, 16, 0, 1.0, 0, false    // several column blocks
+            for p in [ 101; 193 ] do
+                for n in [ 335; 337; 401; 600 ] do
+                    yield p, n, 2, 0, 1, v, 0, 0, 1.0, 2, false
+            yield 24, 8, 2, 0, 1, v, 0, 0, 1.0, 1, false          // the crossover
+            yield 40, 20, 2, 0, 1, v, 0, 0, 1.0, 2, true          // short scratch: the scalar chain
+            yield 61, 401, 2, 0, 1, v, 0, 1, 7.0, 0, true
+          yield 1201, 401, 2, 0, 1, 0, 0, 0, 1.0, 1, false ]      // the bench's full shape
+    let antiLines =
+        antiCases |> List.map (fun (p, n, comps, cx, cy, v, ncmax, mode, scale, data, short) ->
+            let scratch = if short then 0L else EmitLlvm.antisymTileScratchCells (int64 p) (int64 n) (v = 1)
+            $"    {{ {p}, {n}, {comps}, {cx}, {cy}, {v}, {ncmax}, {scratch}, {mode}, {fmtScale scale}, {data} }},")
+    // THE RANK-3 SIMPLEX (M8): (p, n, kc cap, mode, scale, data, short?).
+    // Every p from 0 to 30 (the short rows near k = p; every equality
+    // stratum i = j = k, i = j < k, i < j = k, i < j < k), every p mod 24 with
+    // FORCED K blocks (caps 7 and 16: the stored unscaled partial reloaded,
+    // then the scale once), KC - 1 / KC / KC + 1 / 2 KC + 1 around the
+    // emitter's cap, both tails incl. a divide by zero, every data class
+    // (6 = subnormal TRIPLE products), the bench shape, the scalar fallback.
+    let sym3Cases =
+        [ for p in 0 .. 30 do
+            for n in [ 0; 1; 2; 3; 5; 8; 13; 17 ] do
+                yield p, n, 336, 0, 1.0, (if (p + n) % 2 = 0 then 0 else 2), false
+          for n in 0 .. 17 do
+            for d in [ 0; 3; 6; 5 ] do
+                yield 9 + n, n, 336, 0, 1.0, d, false
+          for p in [ 1; 2; 13; 29; 61 ] do
+            yield p, 67, 336, 1, 201.0, 0, false
+            yield p, 67, 336, 2, 0.125, 2, false
+            yield p, 67, 336, 1, 0.0, 0, false
+            yield p, 0, 336, 1, 0.0, 0, false                     // +0 / 0
+          for p in 24 .. 71 do
+            yield p, 19, 7, 1, 3.0, 2, false                      // 3 K blocks of 7 / 6 / 6
+            yield p, 33, 16, 0, 1.0, 0, false                     // 3 blocks of 11
+          for n in [ 335; 336; 337; 673 ] do
+            for p in [ 29; 37 ] do
+                yield p, n, 336, 1, 201.0, 2, false
+          for p in [ 97; 101; 171 ] do
+            yield p, 201, 336, 1, 201.0, 1, false                 // 171 x 201: the bench shape
+          yield 24, 4, 336, 0, 1.0, 1, false                      // the crossover
+          yield 29, 67, 336, 1, 67.0, 0, true                     // short scratch: the scalar chain
+          yield 61, 201, 336, 0, 1.0, 2, true ]
+    let sym3Lines =
+        sym3Cases |> List.map (fun (p, n, cap, mode, scale, data, short) ->
+            let kc =
+                if cap = 336 then Blade.CodeGenExprSupport.syrkTileKc (int64 n)
+                else balancedKc (int64 n) (int64 cap)
+            let scratch = if short then 0L else EmitLlvm.sym3TileScratchCells (int64 p) (int64 n) kc
+            $"    {{ {p}, {n}, {cap}, {scratch}, {mode}, {fmtScale scale}, {data} }},")
+    let totalCases = cases.Length + antiCases.Length + sym3Cases.Length
     File.WriteAllText(Path.Combine(work, "llvm_tiles_cases.h"),
-                      "static const tile_case tile_cases[] = {\n" + String.concat "\n" caseLines + "\n};\n")
+                      "static const tile_case tile_cases[] = {\n" + String.concat "\n" caseLines + "\n};\n"
+                      + "static const anti_case anti_cases[] = {\n" + String.concat "\n" antiLines + "\n};\n"
+                      + "static const sym3_case sym3_cases[] = {\n" + String.concat "\n" sym3Lines + "\n};\n")
     File.Copy(testSrc, Path.Combine(work, "llvm_tiles_rawbit.c"), true)
     EmitLlvm.deployShim work
     let exeExt = if Platforms.os = Platforms.Windows then ".exe" else ".out"
@@ -1019,8 +1180,11 @@ let runLlvmTilesRawBitTests () : BlockResult =
                     (if cc = Some 0 then pass $"C++ tile vs its serial chain, contract={mode}" (summary co)
                      else fail $"C++ tile vs its serial chain, contract={mode}" (firstFails co + " " + summary co))
                     let lh, ch = caseHashes lo, caseHashes co
-                    if lh.IsEmpty || lh.Length <> cases.Length then
-                        fail $"cross-lane bits, contract={mode}" $"the llvm build printed {lh.Length} case hashes, expected {cases.Length}"
+                    let subtotal (o: string) =
+                        o.Split('\n') |> Array.tryFind (fun l -> l.StartsWith "SUBTOTALS") |> Option.defaultValue ""
+                    printfn "      %s | %s" (subtotal lo) (subtotal co)
+                    if lh.IsEmpty || lh.Length <> totalCases then
+                        fail $"cross-lane bits, contract={mode}" $"the llvm build printed {lh.Length} case hashes, expected {totalCases}"
                     elif lh = ch then
                         modeHashes.Add lh
                         pass $"cross-lane bits, contract={mode}" $"{lh.Length} cases: every packed pool byte-identical"
@@ -1030,6 +1194,37 @@ let runLlvmTilesRawBitTests () : BlockResult =
                             (diffs |> List.map (fun (a, b) -> $"llvm `{a}` vs cpp `{b}`") |> String.concat " | ")
                 | (code, _, err), (Some 0, _, _) -> fail $"llvm driver build, contract={mode}" ($"exit {code}: " + err.Trim())
                 | _, (code, _, err) -> fail $"C++ driver build, contract={mode}" ($"exit {code}: " + err.Trim()))
+    for (mode, contract) in [ "off", Some "off"; "fast", None ] do
+        withEnv [ "BLADE_FP_CONTRACT", contract; "BLADE_LLVM_FACTS", None ] (fun () ->
+            // THE VFMADD CENSUS of the tile object, per entry point: clang -S
+            // of blade_llvm_tiles.c with the object's own flags. =off must
+            // fuse nothing (mul + add, as the serial loop); =fast must fuse
+            // in every core (the tile s loops: 12 packed fma per step).
+            let asmOut = Path.Combine(work, $"tiles_{mode}.s")
+            let sFlags = (Build.llvmTilesFlags ()).Replace("-c ", "-S ")
+            match runText clang ($"""{sFlags} -I "{work}" -o "{asmOut}" "{Path.Combine(work, EmitLlvm.tilesSourceFileName)}" """) with
+            | (Some 0, _, _) when File.Exists asmOut ->
+                let lines = File.ReadAllLines asmOut
+                let census =
+                    EmitLlvm.tilesSymbols |> List.map (fun sym ->
+                        let start = lines |> Array.tryFindIndex (fun l -> l.StartsWith (sym + ":"))
+                        match start with
+                        | None -> sym, -1
+                        | Some s ->
+                            let body =
+                                lines |> Array.skip (s + 1)
+                                |> Array.takeWhile (fun l -> not (l.Contains "-- End function"))
+                            sym, body |> Array.filter (fun l -> l.Contains "vfmadd" || l.Contains "vfmsub" || l.Contains "vfnmadd") |> Array.length)
+                let txt = census |> List.map (fun (s, k) -> $"{s} {k}") |> String.concat ", "
+                if census |> List.exists (fun (_, k) -> k < 0) then
+                    fail $"vfmadd census contract={mode}" $"an entry point is missing from the assembly: {txt}"
+                elif mode = "off" then
+                    if census |> List.forall (fun (_, k) -> k = 0) then pass "vfmadd census contract=off" txt
+                    else fail "vfmadd census contract=off" ($"fused instructions under -ffp-contract=off: {txt}")
+                else
+                    if census |> List.forall (fun (_, k) -> k >= 12) then pass "vfmadd census contract=fast" txt
+                    else fail "vfmadd census contract=fast" ($"a core did not contract: {txt}")
+            | (code, o, e) -> fail $"vfmadd census contract={mode}" ($"clang -S exit {code}: {(o + e).Trim()}"))
     // The test has teeth only if the two modes give DIFFERENT bits somewhere
     // (else a tile that never contracted would pass the fma reference too).
     if modeHashes.Count = 2 then

@@ -1442,7 +1442,7 @@ let compileLlvmProgram (llFile: string) (outputDir: string) : Result<string, str
         // per-run directory, so the KEY is what identifies it).
         let tiles =
             let usesTiles =
-                try (File.ReadAllText llFull).Contains ("@" + EmitLlvm.tilesSymbol) with _ -> false
+                try (let t = File.ReadAllText llFull in EmitLlvm.tilesSymbols |> List.exists (fun s -> t.Contains ("@" + s))) with _ -> false
             if usesTiles then buildLlvmTilesObject clang dir |> Result.map Some else Ok None
         match tiles with
         | Error e -> Error e

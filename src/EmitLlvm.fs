@@ -200,8 +200,15 @@ let private contractLicensed () : bool =
 let tilesSourceFileName = "blade_llvm_tiles.c"
 /// The arithmetic core both lanes include.
 let tilesHeaderFileName = "blade_tiles.h"
-/// The core's one entry point (Float64, packed triangle, serial).
+/// The core's SYRK entry point (Float64, packed triangle, serial; M6).
 let tilesSymbol = "blade_dsyrk_tri_f64"
+/// The antisym pair's entry point (Float64, STRICT packed triangle; M7).
+let antisymTileSymbol = "blade_dantisym_tri_f64"
+/// The rank-3 simplex's entry point (Float64, packed SymIdx<3>; M8).
+let simplexTileSymbol = "blade_dsym3_tri_f64"
+/// Every entry point of the core: a `.ll` calling any of them links the
+/// object (Build.compileLlvmProgram).
+let tilesSymbols = [ tilesSymbol; antisymTileSymbol; simplexTileSymbol ]
 
 /// The `-ffp-contract=` the tile object is compiled with: the C spelling of
 /// THIS lane's per-instruction `contract` policy (`contractLicensed`), so the
@@ -219,6 +226,31 @@ let syrkTileScratchCells (p: int64) (kc: int64) : int64 =
     let nc = min p 2048L
     let npad = (nc + 7L) / 8L * 8L
     kc * npad + 6L * kc
+
+/// The antisym core's column block (blade_llvm_tiles.c blade_llvm_anti_nc,
+/// the C++ driver's anti_nc): ~8 MB of B panels, a multiple of the tile's
+/// NR = `w`, clamped to [w, 4096].
+let private antisymTileNc (n: int64) (w: int64) : int64 =
+    let cap = (8L <<< 20) / 8L / 2L
+    let nc = if n = 0L then 4096L else cap / n
+    max w (min (nc / w * w) 4096L)
+
+/// The scratch the antisym core needs, in doubles: the X(j) and Y(j) panels
+/// over the whole sample range, n x min(NCb, p padded to NR) each, plus the
+/// X(i) and Y(i) row panels, MR x n each. `paired` = the 4 x 4 schedule
+/// (MR = NR = 4), else the sequential 6 x 8. The core re-derives the same
+/// number and takes its scalar chain if handed less.
+let antisymTileScratchCells (p: int64) (n: int64) (paired: bool) : int64 =
+    let rm, rn = if paired then 4L, 4L else 6L, 8L
+    let ppad = (p + rn - 1L) / rn * rn
+    let w = min (antisymTileNc n rn) ppad
+    2L * n * w + 2L * rm * n
+
+/// The scratch the simplex core needs, in doubles: every X(k) row packed once
+/// into NR = 8-wide s-major panels (ceil(p / 8) * 8 * n) plus the W panel
+/// (MR = 6 x kc). Re-derived by the core, as above.
+let sym3TileScratchCells (p: int64) (n: int64) (kc: int64) : int64 =
+    (p + 7L) / 8L * 8L * n + 6L * kc
 
 // Attribute-group indices. Groups rather than inline attribute lists because
 // every `define` in a Blade module carries the SAME set: one line at the
@@ -988,6 +1020,24 @@ type private SyrkCandidate =
 /// keys on object identity and never keeps an ArrVal alive).
 let private syrkCandidates =
     System.Runtime.CompilerServices.ConditionalWeakTable<ArrVal, SyrkCandidate>()
+
+/// A deferred value the antisym or simplex TILE CORE may materialize (M7 /
+/// M8): the C++ lane's `LinAlgPatterns.(|RowContraction|_|)` matched this
+/// nest's shared loop description (the same matcher, so the lanes cannot
+/// disagree about the shape). Attached by reference identity, as above.
+type private RowTileCandidate =
+    { /// The one input array: Z (p x c x n) for the pair, X (p x n) for the simplex.
+      Operand: ArrVal
+      Shape: Blade.LinAlgPatterns.RowContractionShape
+      P: int64
+      /// The component extent c (the pair only; 0 for the simplex).
+      Comps: int64
+      /// The sample extent n.
+      N: int64
+      Scale: Blade.LinAlgPatterns.NestScale option }
+
+let private rowTileCandidates =
+    System.Runtime.CompilerServices.ConditionalWeakTable<ArrVal, RowTileCandidate>()
 
 let private newCtx (callables: Map<IRId, IRCallable>) (facts: ModuleFacts) =
     { Globals = ResizeArray()
@@ -4307,6 +4357,9 @@ and private materialize (c: Ctx) (a: ArrVal) : ArrVal =
         match trySyrkTileCore c a with
         | Some pooled -> pooled
         | None ->
+        match tryRowTileCore c a with
+        | Some pooled -> pooled
+        | None ->
         let total = shapeCells a.Groups
         let ptr = allocPool c a.Elem (string total)
         (match soleSimplexR a.Groups with
@@ -4408,6 +4461,137 @@ and private trySyrkTileCore (c: Ctx) (a: ArrVal) : ArrVal option =
             [ $"fold form: syrk tile (shared C core) 6x8, KC={kc}"
               "same-array comm row contraction (one ascending chain per cell; no reorder licence used; LLVM lane, serial)" ]
         Some { a with Src = APool out; RowOpBytes = 0L }
+    | _ -> None
+
+/// THE ROW-CONTRACTION TILE CORES (review items M7 / M8): the antisym pair
+/// and the rank-3 simplex (a `RowTileCandidate` applyToArr attached) run into
+/// their packed pools with ONE call each to blade_llvm_tiles.c --
+/// `blade_dantisym_tri_f64` (the C++ lane's blade_pgemm::dantisym_tri:
+/// sequential 6 x 8 or, under BLADE_ANTISYM_TILE=4x4, paired 4 x 4) or
+/// `blade_dsym3_tri_f64` (blade_pgemm::dsym3_tri: the W = X(i) * X(j) panel
+/// and the 6 x 8 tile over k) -- the same blade_tiles.h text, compiled by
+/// clang under this lane's contraction policy. None keeps the nest: no
+/// candidate, the knob off, below the crossover (`packedAntiWorth` /
+/// `packedSym3Worth`, the C++ lane's statements of it), a component
+/// subscript outside the literal component extent, or a module with a
+/// `where repro` function (the object follows the BUILD's contraction mode).
+///
+/// NO LICENCE NEEDED, so the tiles are ON under BLADE_FP_REPRO=1: every cell
+/// keeps its operation sequence (the pair: two ascending chains in source
+/// factor order, then ONE subtraction; the simplex: one ascending `(a*b)*c`
+/// chain, K blocks storing and reloading the exact unscaled partial), then
+/// the kernel's scalar once on the finished value. Bitwise the serial form
+/// under BLADE_FP_CONTRACT=off and the one-fma-per-step chains under the
+/// default -- the C++ lane's tile bits in both modes (`blade test llvm tiles`).
+and private tryRowTileCore (c: Ctx) (a: ArrVal) : ArrVal option =
+    match rowTileCandidates.TryGetValue a with
+    | true, cand ->
+        let p, n = cand.P, cand.N
+        let record (rule: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
+            if Blade.Effects.Decisions.active () then
+                Blade.Effects.Decisions.record
+                    { Rule = rule; Version = 1; Span = c.DeclSpan
+                      Subject = (if c.DeclName = "" then "main" else c.DeclName)
+                      Outcome = outcome; Evidence = evidence }
+        let tileName, shapeEv =
+            match cand.Shape with
+            | Blade.LinAlgPatterns.AntiPair (cx, cy) ->
+                "antisym tile (shared C core)", $"P={p} N={n} components=({cx},{cy})"
+            | Blade.LinAlgPatterns.Sym3 -> "simplex tile (shared C core)", $"P={p} N={n}"
+        let decline (why: string) =
+            record "microkernel" (Blade.Effects.Declined why) [ tileName; shapeEv ]
+            None
+        let reproFn = c.Callables |> Map.exists (fun _ cl -> cl.IsRepro)
+        let reproWhy =
+            "a `where repro` function in the module (the tile object follows the build's contraction mode, not a function's)"
+        // The scale, evaluated ONCE, here -- the kernel would evaluate the
+        // same literal / non-parameter variable in this same context per cell.
+        let scaleArgs () =
+            match cand.Scale with
+            | None -> "0", f64Const 1.0
+            | Some (Blade.LinAlgPatterns.ScaleDiv d) -> "1", (coerce c ScF64 (emitExpr c d)).Reg
+            | Some (Blade.LinAlgPatterns.ScaleMul s) -> "2", (coerce c ScF64 (emitExpr c s)).Reg
+        let scaleNote =
+            match cand.Scale with
+            | Some (Blade.LinAlgPatterns.ScaleDiv _) -> ", then / d per cell"
+            | Some (Blade.LinAlgPatterns.ScaleMul _) -> ", then * s per cell"
+            | None -> ""
+        let operandPtr () =
+            let x = materialize c cand.Operand
+            match x.Src with
+            | APool ptr -> ptr
+            | _ -> refuse "a tile-core operand that did not materialize to a pool"
+        // The declaration's attributes are claims about blade_llvm_tiles.c
+        // (stated there), the syrk core's: argument memory only, serial,
+        // returns. Parameter facts ride the fact layer's switch.
+        let pa = paramAttr ()
+        let ro, ncap =
+            if factEnabled factParamAttrs then " readonly captures(none)", " captures(none)" else "", ""
+        match cand.Shape with
+        | Blade.LinAlgPatterns.AntiPair (cx, cy) ->
+            match Blade.CodeGenExprSupport.antisymTileSchedule () with
+            | Blade.CodeGenExprSupport.AntiOff ->
+                decline "BLADE_ANTISYM_TILE=0/off: the plain per-cell nest (A/B knob)"
+            | sched ->
+            if not (cx < cand.Comps && cy < cand.Comps) then
+                decline "component subscripts not proven inside the literal component extent"
+            elif not (Blade.CodeGenExprSupport.packedAntiWorth p n) then
+                decline "below the antisym-tile crossover (p >= 24, n >= 8): the per-cell nest wins"
+            elif reproFn then decline reproWhy
+            else
+            let paired = (sched = Blade.CodeGenExprSupport.AntiPaired4x4)
+            let form =
+                if paired then "paired 4x4 (P and Q in one pass)"
+                else "sequential 6x8 (P pass, spill, Q pass)"
+            let scaleMode, scaleVal = scaleArgs ()
+            let zPtr = operandPtr ()
+            let out = allocPool c ScF64 (string (shapeCells a.Groups))
+            let scratchCells = antisymTileScratchCells p n paired
+            let scratch = allocPool c ScF64 (string scratchCells)
+            need c ($"declare void @{antisymTileSymbol}(i64{pa}, i64{pa}, ptr{pa}{ro}, i64{pa}, i64{pa}, i64{pa}, i64{pa}, ptr{pa}{ncap}, i64{pa}, i64{pa}, i64{pa}, double{pa}, ptr{pa}{ncap}, i64{pa}){(attrRef c grpTileCore)}")
+            ln c ($"; antisym tile (shared C core blade_llvm_tiles.c over blade_tiles.h, {form}): per cell the serial prodsum - prodsum")
+            ln c (renderCall { Dest = None; RetTy = ScVoid; Callee = "@" + antisymTileSymbol
+                               Args = [ ScI64, string p; ScI64, string n; ScStr, zPtr
+                                        ScI64, string (cand.Comps * n); ScI64, string n
+                                        ScI64, string cx; ScI64, string cy
+                                        ScStr, out; ScI64, (if paired then "1" else "0"); ScI64, "0"
+                                        ScI64, scaleMode; ScF64, scaleVal
+                                        ScStr, scratch; ScI64, string scratchCells ] })
+            record "microkernel" Blade.Effects.Applied
+                [ $"antisym tile (shared C core blade_llvm_tiles.c over blade_tiles.h, {form}, strict packed triangle)"
+                  shapeEv ]
+            record "fold-form" Blade.Effects.Applied
+                [ $"fold form: antisym tile (shared C core) {form}, whole chain per tile{scaleNote}"
+                  "same-array anticomm row-contraction pair (two ascending chains per cell, one subtraction; no reorder licence used; LLVM lane, serial)" ]
+            Some { a with Src = APool out; RowOpBytes = 0L }
+        | Blade.LinAlgPatterns.Sym3 ->
+            if not (Blade.CodeGenExprSupport.simplexTileEnabled ()) then
+                decline "BLADE_SIMPLEX_TILE=0/off: the plain per-cell nest (A/B knob)"
+            elif not (Blade.CodeGenExprSupport.packedSym3Worth p n) then
+                decline "below the simplex-tile crossover (p >= 24, n >= 4): the per-cell nest wins"
+            elif reproFn then decline reproWhy
+            else
+            let kc = Blade.CodeGenExprSupport.syrkTileKc n
+            let scaleMode, scaleVal = scaleArgs ()
+            let xPtr = operandPtr ()
+            let out = allocPool c ScF64 (string (shapeCells a.Groups))
+            let scratchCells = sym3TileScratchCells p n kc
+            let scratch = allocPool c ScF64 (string scratchCells)
+            need c ($"declare void @{simplexTileSymbol}(i64{pa}, i64{pa}, ptr{pa}{ro}, i64{pa}, ptr{pa}{ncap}, i64{pa}, i64{pa}, double{pa}, ptr{pa}{ncap}, i64{pa}){(attrRef c grpTileCore)}")
+            ln c ($"; simplex tile (shared C core blade_llvm_tiles.c over blade_tiles.h, W panel + 6x8, KC={kc}): per cell the serial prodsum")
+            ln c (renderCall { Dest = None; RetTy = ScVoid; Callee = "@" + simplexTileSymbol
+                               Args = [ ScI64, string p; ScI64, string n; ScStr, xPtr; ScI64, string n
+                                        ScStr, out
+                                        ScI64, string Blade.CodeGenExprSupport.syrkTileKcMax
+                                        ScI64, scaleMode; ScF64, scaleVal
+                                        ScStr, scratch; ScI64, string scratchCells ] })
+            record "microkernel" Blade.Effects.Applied
+                [ "simplex tile (shared C core blade_llvm_tiles.c over blade_tiles.h, W = X(i) * X(j) panel x 6x8 register tile over k, packed SymIdx<3> pool)"
+                  $"P={p} N={n} KC={kc}" ]
+            record "fold-form" Blade.Effects.Applied
+                [ $"fold form: simplex tile (shared C core) 6x8 with W panel, KC={kc}{scaleNote}"
+                  "same-array 3-way comm row contraction (one ascending (a*b)*c chain per cell; no reorder licence used; LLVM lane, serial)" ]
+            Some { a with Src = APool out; RowOpBytes = 0L }
     | _ -> None
 
 /// Materialize an array EXPRESSION in place: if it names a binding, the
@@ -4815,6 +4999,46 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
                  | _ -> None
              | _ -> None)
         | _ -> None
+    // ROW-CONTRACTION TILE CANDIDACY (M7 / M8): the antisym pair and the
+    // rank-3 simplex, by the C++ lane's own `(|RowContraction|_|)` over this
+    // nest's shared loop description -- the slot names folded onto `__a0`
+    // exactly as for syrk, since every slot names the one operand. Whether to
+    // TAKE the tile (knob, crossover, component proof) is materialize's call.
+    let rowTileCandidate : RowTileCandidate option =
+        let ids = info.Arrays |> List.map (function IRVar (id, _) -> Some id | _ -> None)
+        let sameArray =
+            match ids with
+            | Some id0 :: rest when not rest.IsEmpty -> rest |> List.forall ((=) (Some id0))
+            | _ -> false
+        let firstOperand = match operands with Some x :: _ -> Some x | _ -> None
+        match firstOperand, outGroups, elem with
+        | Some x, ([ GAnti (2, _) ] | [ GSym (3, _) ]), ScF64
+                when sameArray && reynoldsPlan.IsNone && x.Elem = ScF64
+                     && operands |> List.forall Option.isSome ->
+            let same (s: string) = if s.StartsWith "__a" && s <> "__a0" then "__a0" else s
+            let cgSame =
+                { cg with
+                    InputArrayNames = cg.InputArrayNames |> List.map same
+                    Bindings =
+                        cg.Bindings |> List.map (fun b ->
+                            { b with
+                                ExtentArrayRef = same b.ExtentArrayRef
+                                Elements = b.Elements |> List.map (fun e -> { e with ArrayName = same e.ArrayName }) }) }
+            let operandTypes =
+                info.Arrays |> List.choose (fun a ->
+                    match Blade.IR.stripUnits (typeOf a) with
+                    | ArrayElem t -> Some t
+                    | _ -> None)
+            match (0, operandTypes, cgSame) with
+            | Blade.LinAlgPatterns.RowContraction rc ->
+                (match rc.Shape, outGroups, x.Groups with
+                 | Blade.LinAlgPatterns.AntiPair _, [ GAnti (2, p) ], [ GDense p0; GDense comps; GDense n ] when p0 = p ->
+                     Some { Operand = x; Shape = rc.Shape; P = p; Comps = comps; N = n; Scale = rc.Scale }
+                 | Blade.LinAlgPatterns.Sym3, [ GSym (3, p) ], [ GDense p0; GDense n ] when p0 = p ->
+                     Some { Operand = x; Shape = rc.Shape; P = p; Comps = 0L; N = n; Scale = rc.Scale }
+                 | _ -> None)
+            | _ -> None
+        | _ -> None
     { Elem = elem; Groups = outGroups
       RowOpBytes = rowOpBytes
       Src = AVirt (fun c2 idxs ->
@@ -4934,6 +5158,9 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
     |> fun (produced: ArrVal) ->
         (match syrkCandidate with
          | Some cand -> syrkCandidates.AddOrUpdate(produced, cand)
+         | None -> ())
+        (match rowTileCandidate with
+         | Some cand -> rowTileCandidates.AddOrUpdate(produced, cand)
          | None -> ())
         produced
 
