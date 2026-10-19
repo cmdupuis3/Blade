@@ -1349,6 +1349,41 @@ let private planCases () =
       withGate "BLADE_ORBIT_FOLD" "0" (fun () ->
           planCase "plan_orbit_fold_declined_knob" (planOrbitSrc planOrbitSym2Body) "fold-form"
               (declinedMentioning "BLADE_ORBIT_FOLD=0") "BLADE_ORBIT_FOLD=0 keeps the logical walk")
+      // THE THREADED FORM (bench G32): `where omp` on the outer fold is spent
+      // as a team over the first-coordinate rows -- in the fold-form line and
+      // as an applied `omp` record -- and BLADE_OMP_THREADS=1 keeps the
+      // serial pass with the census naming the knob.
+      withGate "BLADE_OMP_THREADS" null (fun () ->
+          planCase "plan_orbit_fold_threaded" (planOrbitSrc planOrbitSym2Body) "fold-form"
+              (fun d -> applied d && evidenceMentioning "orbit-class fold (rank 2, 2 classes); thread team over the first-coordinate rows" d)
+              "the omp-licensed orbit fold threads its first-coordinate rows")
+      withGate "BLADE_OMP_THREADS" null (fun () ->
+          planCase "plan_orbit_fold_threaded_omp_record" (planOrbitSrc planOrbitSym2Body) "omp"
+              (fun d -> applied d && evidenceMentioning "orbit-class fold: first-coordinate rows" d)
+              "omp applied: the orbit fold's thread team")
+      withGate "BLADE_OMP_THREADS" "1" (fun () ->
+          planCase "plan_orbit_fold_threads_suppressed" (planOrbitSrc planOrbitSym2Body) "fold-form"
+              (fun d -> applied d && not (evidenceMentioning "thread team" d))
+              "BLADE_OMP_THREADS=1: the serial orbit pass")
+      withGate "BLADE_OMP_THREADS" "1" (fun () ->
+          planCase "plan_orbit_fold_threads_suppressed_census" (planOrbitSrc planOrbitSym2Body) "omp"
+              (declinedMentioning "BLADE_OMP_THREADS") "omp declined, naming BLADE_OMP_THREADS")
+      planCase "plan_orbit_fold_unlicensed_serial" planOrbitSym3Src "fold-form"
+          (fun d -> applied d && not (evidenceMentioning "thread team" d)) "no omp request: the serial orbit pass"
+      (match withGate "BLADE_OMP_THREADS" null (fun () -> cppOfSource "plan_orbit_fold_threaded_cpp" (planOrbitSrc planOrbitSym2Body)) with
+       | Error e -> resultLine Fail "orbit_fold_cpp_threaded_rows" e; false
+       | Ok cpp ->
+           // Each row finds its own pool offset (no running counter across
+           // threads), and the per-thread sums join in thread order.
+           let wants = [ "BLADE_OMP_PARALLEL_NUM_THREADS(__oT)"
+                         "size_t __oo = __ototal - nested_array_utilities::canon_count((size_t)7 - __oc1, 2, false);"
+                         "__oa1 = __oa1 + __opart[(size_t)__ot * 2 + 1];"
+                         "const double __ot1 = __oa1 + __oa1;" ]
+           let missing = wants |> List.filter (fun w -> not (cpp.Contains w))
+           if missing.IsEmpty then
+               resultLine Pass "orbit_fold_cpp_threaded_rows" "closed-form row offsets, thread-order combine, addition-only class combine"; true
+           else
+               resultLine Fail "orbit_fold_cpp_threaded_rows" ($"missing {missing}"); false)
       planCase "plan_orbit_fold_combine_is_additions" planOrbitSym3Src "fold-form" applied "applied (C++ text checked below)"
       (match cppOfSource "plan_orbit_fold_cpp" planOrbitSym3Src with
        | Error e -> resultLine Fail "orbit_fold_cpp_addition_combine" e; false

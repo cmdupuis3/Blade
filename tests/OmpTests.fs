@@ -1523,6 +1523,17 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
         // present cells, which is the OTHER contiguous 1-D sweep Path A covers.
         let maskDecl = "let m = mask(A, lambda(x) -> x > 1.0)\nlet C = compound(A, m)\n"
 
+        // The orbit-fold programs, parameterized by the OUTER fold kernel.
+        let orbitSym2 (outer: string) =
+            "type Var = Idx<43>\ntype Obs = Idx<3>\n"
+            + "let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 11) * 0.37 + 0.1 / Float64(i + 1) |> compute\n"
+            + "let g = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute\n"
+            + $"let s = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * g(i, j) + 0.5, (+)), {outer}, 0.25)\n"
+        let orbitAnti3 (outer: string) =
+            "type I = Idx<43>\n"
+            + "let w = method_for(range<I>) <@> lambda(i) -> Float64((i * 7) % 13) * 0.31 + 0.2 / Float64(i + 1) |> compute\n"
+            + "let R = method_for(w, w, w) <@> lambda(a, b, c) where anticomm(a, b, c) -> (a - b) * (b - c) * (a - c) |> compute\n"
+            + $"let s = reduce(method_for(range<I>) <@> lambda(i) -> reduce(method_for(range<I>) <@> lambda(j) -> reduce(method_for(range<I>) <@> lambda(k) -> R(i, j, k) * R(i, j, k) * R(i, j, k) + R(i, j, k) * R(i, j, k), (+)), (+)), {outer}, 0.0)\n"
         // (name, ompSource, serialSource, pathB?)
         let cases : (string * string * string * bool) list =
             [ ("path_a_builtin_sum_dense",
@@ -1557,7 +1568,18 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
               ("path_b_map_licence_feeding_builtin_fold",
                arrDecl + "let s = reduce(method_for(A) <@> lambda(x) where omp(x: 1) -> x * x + 0.25, (+))\n",
                arrDecl + "let s = reduce(method_for(A) <@> lambda(x) -> x * x + 0.25, (+))\n",
-               true) ]
+               true)
+              // THE THREADED ORBIT-CLASS FOLD (bench G32): `where omp` on the
+              // outer fold of a logical walk over a packed pool deals the
+              // first-coordinate rows to the team; the twin without `omp` is
+              // the serial orbit pass. 43 rows over 4 threads: several
+              // boustrophedon blocks and a ragged last one. Rank 2 symmetric
+              // and rank 3 strict with a general kernel (two accumulators).
+              // Fixed-team determinism is checked like Path B's.
+              ("orbit_fold_threaded_sym2",
+               orbitSym2 "lambda(u, v) where omp -> u + v", orbitSym2 "(+)", true)
+              ("orbit_fold_threaded_antisym3_general",
+               orbitAnti3 "lambda(u, v) where omp -> u + v", orbitAnti3 "(+)", true) ]
 
         for (name, ompSrc, serialSrc, isPathB) in cases do
             match compileProgram outputDir (name + "_omp") ompSrc,

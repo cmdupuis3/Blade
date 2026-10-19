@@ -895,6 +895,9 @@ and private Ctx =
       /// one scope frees.
       mutable AnyFrees: bool
       StringPool: Dictionary<string, string>
+      /// Per-coordinate offset tables of the canonicalizing compact read
+      /// (`coordTableGlobal`), by "strict:n:r:k" -> module constant.
+      CoordTables: Dictionary<string, string>
       /// `declare` lines, deduplicated and sorted so emission is deterministic.
       Externs: SortedSet<string>
       /// Finished function definitions, in emission order.
@@ -1044,6 +1047,7 @@ let private newCtx (callables: Map<IRId, IRCallable>) (facts: ModuleFacts) =
       PoolScopes = ResizeArray()
       AnyFrees = false
       StringPool = Dictionary()
+      CoordTables = Dictionary()
       Externs = SortedSet(StringComparer.Ordinal)
       Funcs = ResizeArray()
       Callables = callables
@@ -1839,7 +1843,14 @@ let private emitBinomConst (c: Ctx) (x: string) (m: int) : string =
                 acc <- i64Bin c "mul" acc (i64Bin c "sub" x (string j))
             let mutable f = 1L
             for j in 2 .. m do f <- f * int64 j
-            i64Bin c "sdiv" acc (string f)
+            // `exact`: the quotient has no remainder by the identity above, so
+            // LLVM may lower the division to a shift and a multiply by the
+            // modular inverse of the odd part instead of the signed-division
+            // fix-up sequence -- this runs once per level of every canonical
+            // compact read (bench G34).
+            let d = freshReg c
+            ln c (renderBin { Dest = d; Opcode = "sdiv"; Flags = " exact"; Ty = ScI64; Lhs = acc; Rhs = string f })
+            d
 
 /// `SimplexBlocksCore.prefixTerm` emitted: the rank contributed by advancing
 /// coordinate k of a rank-r group from its canonical lower bound `lo` by the
@@ -2006,6 +2017,61 @@ let private hasFlatRead (a: ArrVal) : bool =
     | APool _ | AVirtFlat _ -> true
     | AVirt _ -> false
 
+/// THE PER-COORDINATE OFFSET TABLES of the canonicalizing read (bench G34).
+/// The pool offset of a SORTED rank-r tuple regroups into one term per
+/// coordinate (`SimplexBlocksCore.coordTerm`, proved equal to the level form
+/// on every canonical cell by the property pins), so for a static extent the
+/// read is r-1 loads from module constants and r-1 adds -- where the level
+/// form spends 2(r-1) runtime binomials (multiplies and divisions) per read.
+/// That arithmetic made the LLVM lane's logical checksum walk
+/// throughput-bound at ~38 integer instructions a cell, against the C++
+/// lane's two row-pointer loads (`canon_fold` + the nested walk). Bounded
+/// so the tables stay cache-resident: (r-1) x n x 8 bytes, 32 KB per table
+/// at the bound.
+let private coordTableMaxExtent = 4096L
+
+/// May this group's canonical reads go through the tables?
+let private coordTabulable (g: Grp) : bool =
+    match g with
+    | GSym (r, n) | GAnti (r, n) -> r >= 2 && n >= 1L && n <= coordTableMaxExtent
+    | _ -> false
+
+/// Table k of a (strict, n, r) group as a module constant, emitted once per
+/// module. `constant`: LLVM knows nothing writes it.
+let private coordTableGlobal (c: Ctx) (strict: bool) (n: int64) (r: int) (k: int) : string =
+    let key = $"{strict}:{n}:{r}:{k}"
+    match c.CoordTables.TryGetValue key with
+    | true, g -> g
+    | _ ->
+        let name = $"@.blade.ctab.{c.CoordTables.Count}"
+        let body =
+            [| for x in 0L .. n - 1L -> "i64 " + string (Blade.SimplexBlocksCore.coordTerm strict n r k x) |]
+            |> String.concat ", "
+        c.Globals.Add($"{name} = private unnamed_addr constant [{n} x i64] [{body}], align 64")
+        c.CoordTables.[key] <- name
+        name
+
+/// A compact group's pool offset from its SORTED absolute coordinates:
+/// sum_{k < r-1} table_k[i_k] + i_(r-1). A literal coordinate folds.
+let private coordTableOffset (c: Ctx) (g: Grp) (sorted: string[]) : string =
+    let r = grpRank g
+    let n = grpExtent g
+    let strict = grpStrict g
+    let mutable acc = sorted.[r - 1]
+    for k in 0 .. r - 2 do
+        let term =
+            match tryLitI64 sorted.[k] with
+            | Some x -> string (Blade.SimplexBlocksCore.coordTerm strict n r k x)
+            | None ->
+                let tab = coordTableGlobal c strict n r k
+                let p = freshReg c
+                ln c ($"{p} = getelementptr inbounds [{n} x i64], ptr {tab}, i64 0, i64 {sorted.[k]}")
+                let v = freshReg c
+                ln c ($"{v} = load i64, ptr {p}")
+                v
+        acc <- i64Add c acc term
+    acc
+
 /// Total stored cells of a shape, as an OPERAND: a literal for every static
 /// shape (including a static-table ragged pair, whose offsets[rows] folds),
 /// one load for a dynamic-table ragged pair.
@@ -2052,13 +2118,22 @@ let private canonRead (c: Ctx) (a: ArrVal) (idxs: Val list) : Val =
     let mutable rest = idxs
     let mutable diags : string list = []
     let mutable swaps : string list = []
+    // THE TABLE FORM (G34, `coordTableOffset`): a flat-readable source whose
+    // every compact group tabulates reads at ONE pool offset computed from
+    // the sorted coordinates, never the storage coordinates below.
+    let useTables =
+        (match a.Src with APool _ | AVirtFlat _ -> true | AVirt _ -> false)
+        && a.Groups |> List.forall (fun g -> match g with GDense _ -> true | _ -> coordTabulable g)
+    let sortedParts = ResizeArray<Grp * string[]>()
     let storage =
         [ for g in a.Groups do
             let r = grpRank g
             let mine = rest |> List.truncate r
             rest <- rest |> List.skip r
             match g, mine with
-            | GDense _, [ i ] -> yield i
+            | GDense _, [ i ] ->
+                sortedParts.Add((g, [| i.Reg |]))
+                if not useTables then yield i
             | _ when grpCompact g && List.length mine = r ->
                 // CANONICALIZE BY SORTING NETWORK, at any rank. A bubble pass
                 // over r coordinates is r(r-1)/2 compare-exchanges, each a
@@ -2095,19 +2170,33 @@ let private canonRead (c: Ctx) (a: ArrVal) (idxs: Val list) : Val =
                         ln c (renderCmp { Dest = eq; Kind = "icmp"; Pred = "eq"; Ty = ScI64; Lhs = arr.[q]; Rhs = arr.[q + 1] })
                         diags <- eq :: diags
                     swaps <- swapFlags @ swaps
+                sortedParts.Add((g, Array.copy arr))
                 // Sorted ABSOLUTE coordinates -> STORAGE coordinates:
                 // s_0 = i_0, s_k = i_k - i_{k-1} - strict. On a strict repeat
                 // some s_k is negative, which is a dead select arm: the whole
                 // tuple is REDIRECTED to cell 0 below before any address is
                 // computed.
-                let sInc = if grpStrict g then 1L else 0L
-                for q in 0 .. r - 1 do
-                    if q = 0 then yield { Reg = arr.[0]; Ty = ScI64 }
-                    else
-                        let d = i64Bin c "sub" arr.[q] arr.[q - 1]
-                        yield { Reg = (if sInc = 0L then d else i64Bin c "sub" d (string sInc)); Ty = ScI64 }
+                if not useTables then
+                    let sInc = if grpStrict g then 1L else 0L
+                    for q in 0 .. r - 1 do
+                        if q = 0 then yield { Reg = arr.[0]; Ty = ScI64 }
+                        else
+                            let d = i64Bin c "sub" arr.[q] arr.[q - 1]
+                            yield { Reg = (if sInc = 0L then d else i64Bin c "sub" d (string sInc)); Ty = ScI64 }
             | _ -> refuse "an absolute read of an index group this lane cannot canonicalize" ]
+    // The table form's flat offset: the Horner chain over groups
+    // (`storageOffset`'s), each compact group's own offset from its sorted
+    // coordinates.
+    let flatOffset () =
+        let groupOff (g: Grp, sorted: string[]) = if grpCompact g then coordTableOffset c g sorted else sorted.[0]
+        let parts = List.ofSeq sortedParts
+        let mutable acc = groupOff parts.Head
+        for (g, sorted) in parts.Tail do
+            let m = i64Bin c "mul" acc (string (grpCells g))
+            acc <- i64Bin c "add" m (groupOff (g, sorted))
+        acc
     match diags with
+    | [] when useTables -> readFlat c a { Reg = flatOffset (); Ty = ScI64 }
     | [] -> readCell c a storage
     | _ ->
         let fold1 (op: string) (regs: string list) =
@@ -2133,12 +2222,19 @@ let private canonRead (c: Ctx) (a: ArrVal) (idxs: Val list) : Val =
         // antisym mirror-read loop (CantVectorizeInstruction, 2026-08-18
         // census); the select chain if-converts, and the sym mirror fold that
         // uses only selects vectorizes under the reassoc license.
-        let redirected =
-            storage |> List.map (fun v ->
+        let v =
+            if useTables then
+                let off = flatOffset ()
                 let r = freshReg c
-                ln c ($"{r} = select i1 {eqAny}, i64 0, i64 {v.Reg}")
-                { Reg = r; Ty = ScI64 })
-        let v = coerce c ety (readCell c a redirected)
+                ln c ($"{r} = select i1 {eqAny}, i64 0, i64 {off}")
+                coerce c ety (readFlat c a { Reg = r; Ty = ScI64 })
+            else
+            let redirected =
+                storage |> List.map (fun v ->
+                    let r = freshReg c
+                    ln c ($"{r} = select i1 {eqAny}, i64 0, i64 {v.Reg}")
+                    { Reg = r; Ty = ScI64 })
+            coerce c ety (readCell c a redirected)
         let negated =
             match ety with
             | ScF64 ->
@@ -3103,7 +3199,12 @@ and private emitBinOp (c: Ctx) (op: IRBinOp) (l: IRExpr) (r: IRExpr) (loc: SrcLo
     | IRMath2 name -> refuse ($"the binary math intrinsic '{name}'")
     | _ ->
         let a0 = emitExpr c l
-        let b0 = emitExpr c r
+        // BIND ONCE, the C++ lane's M2 rule (CodeGenExpr.isBindOnceCompactRead,
+        // shared): the same canonicalizing compact read on both sides
+        // (`t(i, j, k) * t(i, j, k)`) is one network, one offset and one load
+        // -- explicitly, not left to GVN. Pure read of one cell: no value or
+        // order changes.
+        let b0 = if l = r && Blade.CodeGenExpr.isBindOnceCompactRead typeOf l then a0 else emitExpr c r
         let common = promote a0.Ty b0.Ty
         let a = coerce c common a0
         let b = coerce c common b0

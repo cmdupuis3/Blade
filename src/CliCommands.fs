@@ -982,8 +982,12 @@ let internal llvmLaneDecision (d: Blade.Effects.Decision) : Blade.Effects.Decisi
         let cppForm = d.Evidence |> List.tryHead |> Option.defaultValue ""
         // The orbit-class fold (Blade.OrbitFold) is BOTH lanes' form: the
         // LLVM lane runs the same recogniser and the same class nest, so the
-        // record (taken or declined) holds for it as written.
-        if cppForm.StartsWith "fold form: orbit-class fold" then d
+        // record (taken or declined) holds for it as written -- except the
+        // C++ lane's thread team (G32), which this lane has no runtime for:
+        // its pass is the serial one.
+        if cppForm.StartsWith "fold form: orbit-class fold" && cppForm.Contains Blade.OrbitFold.threadedSuffix then
+            { d with Evidence = cppForm.Replace(Blade.OrbitFold.threadedSuffix, "; one serial pass (LLVM lane: no thread runtime)") :: List.tail d.Evidence }
+        elif cppForm.StartsWith "fold form: orbit-class fold" then d
         elif cppForm.StartsWith "fold form: serial (no reorder licence"
            || cppForm.StartsWith "fold form: serial (repro" then
             declined "the fold keeps its serial association in the LLVM lane too" []
