@@ -1,0 +1,52 @@
+// TEST: Recursive Array RK4 Row Write Fused
+// ============================================================================
+// Slice-write fusion (src/Optimize.fs fuseSliceWritesModule, BLADE_FUSION):
+// the inductive arm `prefix :: step(prefix(n - 1), c)` is POINTWISE -- step
+// and its callee f are elementwise over X, every `let` a row -- so each cell
+// of row n is computed where it is stored: step and f inlined into one scalar
+// let chain per cell (k1 feeds both the k2 stage and the final combination,
+// one local), no slice temporary, no copy, no stage pools. The seed
+// `u0 * 0.5 + 0.25` is pointwise too and is written into row 0 directly.
+// Covered here beyond the bench shape: a callee of TWO array parameters (one
+// of them a parameter of the enclosing function, `c`), a computed seed, and
+// the same recursion at top level (module binding operands) and inside a
+// function. Values computed independently (plain doubles, source
+// association order, no FMA).
+// ============================================================================
+type T = Idx<9>
+type X = Idx<7>
+
+function f(u: Array<Float64 like X>, c: Array<Float64 like X>) -> Array<Float64 like X> = c * u - u * u * u
+
+function step(u: Array<Float64 like X>, c: Array<Float64 like X>) -> Array<Float64 like X> = {
+    let k1 = f(u, c)
+    let k2 = f(u + 0.05 * k1, c)
+    let k3 = f(u + 0.05 * k2, c)
+    let k4 = f(u + 0.1 * k3, c)
+    u + (0.1 / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+}
+
+function total_of(u0: Array<Float64 like X>, c: Array<Float64 like X>) -> Float64 = {
+    let rec traj: Array<Float64 like T, X> =
+        match traj with
+        | zero -> zero
+        | zero :: s -> zero :: u0 * 0.5 + 0.25
+        | prefix :: n -> prefix :: step(prefix(n - 1), c)
+    reduce(method_for(traj) <@> lambda(row) -> reduce(row, (+)), (+))
+}
+
+let u0 = method_for(range<X>) <@> lambda(i) -> 0.1 * Float64(Int64(i) + 1) |> compute
+let c = method_for(range<X>) <@> lambda(i) -> 1.0 + 0.25 * Float64(i) |> compute
+
+let rec top: Array<Float64 like T, X> =
+    match top with
+    | zero -> zero
+    | zero :: s -> zero :: u0 * 0.5 + 0.25
+    | prefix :: n -> prefix :: step(prefix(n - 1), c)
+
+let total = total_of(u0, c)
+let row1 = top((1 : T))
+let last = top((8 : T))
+// EXPECT: total = 48.839190999958504
+// EXPECT: row1 = [0.3282965323020451, 0.3911949089885646, 0.4562973984820368, 0.5235174315781512, 0.592751684822649, 0.6638803453059104, 0.7367677204739653]
+// EXPECT: last = [0.5734073466431319, 0.7460792385445877, 0.923246979065045, 1.0930542166176984, 1.2473920650776318, 1.3832374658394226, 1.5014689123209437]

@@ -190,6 +190,94 @@ let private fusionMayAbortUnconditional =
     + "let y = (method_for(zip(c, ((method_for(x) <@> lambda(v) -> lgamma(v)) |> compute))) <@> lambda(k, g) -> k + g) |> compute
 "
 
+/// Slice-write fusion (Optimize.fuseSliceWritesModule): the bench `recur`
+/// shape at toy size. The inductive arm's slice is pointwise (step and rhs
+/// elementwise over X), so the row is computed where it is stored.
+let private sliceWriteRk4Src =
+    "type T = Idx<5>\n"
+    + "type X = Idx<7>\n"
+    + "function rhs(u: Array<Float64 like X>) -> Array<Float64 like X> = u - u * u * u\n"
+    + "function step(u: Array<Float64 like X>) -> Array<Float64 like X> = {\n"
+    + "    let k1 = rhs(u)\n"
+    + "    let k2 = rhs(u + 0.005 * k1)\n"
+    + "    let k3 = rhs(u + 0.005 * k2)\n"
+    + "    let k4 = rhs(u + 0.01 * k3)\n"
+    + "    u + (0.01 / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)\n"
+    + "}\n"
+    + "function kernel(u0: Array<Float64 like X>) -> Float64 = {\n"
+    + "    let rec traj: Array<Float64 like T, X> =\n"
+    + "        match traj with\n"
+    + "        | zero -> zero\n"
+    + "        | zero :: s -> zero :: u0\n"
+    + "        | prefix :: n -> prefix :: step(prefix(n - 1))\n"
+    + "    reduce(method_for(traj) <@> lambda(row) -> prodsum(row, row), (+))\n"
+    + "}\n"
+    + "let u0 = method_for(range<X>) <@> lambda(i) -> 0.5 + 0.01 * Float64(i) |> compute\n"
+    + "let checksum = kernel(u0)\n"
+
+/// A step that folds over its row is not pointwise: declined, and the
+/// record says why.
+let private sliceWriteFoldSrc =
+    "type T = Idx<4>\n"
+    + "type X = Idx<5>\n"
+    + "function centered(u: Array<Float64 like X>) -> Array<Float64 like X> = u - reduce(u, (+)) / 5.0\n"
+    + "let rec a: Array<Float64 like T, X> =\n"
+    + "    match a with\n"
+    + "    | zero -> zero\n"
+    + "    | zero :: s -> zero :: [1.0, 2.0, 3.0, 4.0, 6.0]\n"
+    + "    | prefix :: n -> prefix :: centered(prefix(n - 1)) * 0.5\n"
+
+/// Integer `/` by a value read from the prefix may panic (BL8013 on a zero
+/// divisor): the arm is declined, never fused. (By a nonzero LITERAL it
+/// cannot, and fuses: corpus recursive-arrays/028 `h`.)
+let private sliceWriteIntDivSrc =
+    "type T = Idx<4>\n"
+    + "type X = Idx<3>\n"
+    + "let rec d: Array<Int64 like T, X> =\n"
+    + "    match d with\n"
+    + "    | zero -> zero\n"
+    + "    | zero :: s -> zero :: [1, 2, 3]\n"
+    + "    | prefix :: n -> prefix :: prefix(n - 1) / prefix(0) + 7\n"
+
+/// A step that forces a module-level DEFERRED binding (corpus memfree/007):
+/// reading it cell by cell would make the emitters materialize the binding
+/// itself, which the print pass then shows -- an observable change. Declined.
+let private sliceWriteDeferredSrc =
+    "type C = Idx<4>\n"
+    + "type Steps = Idx<3>\n"
+    + "let ll = method_for(range<C>) <@> lambda(m) -> Float64(m)\n"
+    + "let neg = lambda(x) -> 0.0 - x\n"
+    + "let dn = neg <$> ll\n"
+    + "let rec traj: Array<Float like Steps, C> =\n"
+    + "    match traj with\n"
+    + "    | zero -> zero\n"
+    + "    | zero :: s -> zero :: [1.0, 2.0, 3.0, 4.0]\n"
+    + "    | prefix :: n -> prefix :: {\n"
+    + "        let start = prefix(n - 1)\n"
+    + "        let forced = dn |> compute\n"
+    + "        start + 0.1 * forced\n"
+    + "      }\n"
+
+/// The emission half of the pin: in the fused kernel no call to `step`, no
+/// slice copy and no per-step free remain -- one scalar chain per cell
+/// stored into the trajectory row.
+let private sliceWriteRk4Emission () =
+    let name = "slice_write_rk4_no_step_call_no_copy"
+    match cppOfSource name sliceWriteRk4Src with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let start = cpp.IndexOf "double kernel(Array<double, 1> u0) {"
+        let body = if start < 0 then "" else cpp.Substring(start, cpp.IndexOf("\n}\n", start) - start)
+        let stepCalls = System.Text.RegularExpressions.Regex.Matches(body, @"\bstep\(").Count
+        let rowDeallocs = System.Text.RegularExpressions.Regex.Matches(body, @"deallocate<typename promote<double, 1>").Count
+        let rowStore = System.Text.RegularExpressions.Regex.IsMatch(body, @"__v\d+\[__k\d+\]\[__k\d+\] = __v\d+;")
+        if start >= 0 && stepCalls = 0 && rowDeallocs = 0 && rowStore then
+            resultLine Pass name "kernel: no step call, no rank-1 temporary freed, cells stored straight into the trajectory row"
+            true
+        else
+            resultLine Fail name ($"expected no step call / no rank-1 frees / a direct row store in kernel; got found={start >= 0} stepCalls={stepCalls} rowDeallocs={rowDeallocs} rowStore={rowStore}")
+            false
+
 // ---------------------------------------------------------------------------
 
 /// The decision record for a source: install a collector, lower, drain.
@@ -1476,6 +1564,16 @@ let runOptimizeTests () =
           fusionRepeatedParamBoundOnce ()
           decisionCase "decision_fusion_applied_repeated_param" fusionRepeatedParamSrc "elementwise-fusion" applied
               "elementwise-fusion applied (inner value bound once per cell)"
+          // Slice-write fusion: the recursion's row computed in place.
+          decisionCase "decision_slice_write_applied" sliceWriteRk4Src "slice-write-fusion" applied
+              "slice-write-fusion applied (pointwise RK4 step)"
+          decisionCase "decision_slice_write_declined_fold" sliceWriteFoldSrc "slice-write-fusion"
+              (declinedMentioning "not pointwise") "declined: the step folds over its row (not pointwise)"
+          decisionCase "decision_slice_write_declined_may_abort" sliceWriteIntDivSrc "slice-write-fusion"
+              (declinedMentioning "may abort") "declined: integer division may abort"
+          decisionCase "decision_slice_write_declined_deferred" sliceWriteDeferredSrc "slice-write-fusion"
+              (declinedMentioning "deferred") "declined: the step forces a deferred module binding"
+          sliceWriteRk4Emission ()
           // Reverse-mode AD of an additive recurrence is O(n): loop count pin.
           recarrayGradEmission ()
           recarrayGradNonlinearEmission ()

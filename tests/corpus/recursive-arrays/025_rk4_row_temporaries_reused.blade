@@ -9,6 +9,10 @@
 // trajectory buffer is allocated without its zero fill (formalism 7.5). Both
 // are storage-only: the values below were computed independently (plain
 // double arithmetic in the source's association order) and must not move.
+// Since slice-write fusion (src/Optimize.fs, BLADE_FUSION) the default build
+// has no row temporaries here at all -- step is pointwise, so each row is
+// computed in place (026) -- and the pool path above is what the optimizer-
+// off lane (`blade test opt-diff`, BLADE_FUSION=0) runs; same values.
 // ============================================================================
 type T = Idx<31>
 type X = Idx<4001>

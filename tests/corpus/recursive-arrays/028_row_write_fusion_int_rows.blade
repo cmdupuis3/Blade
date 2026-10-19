@@ -1,0 +1,45 @@
+// TEST: Recursive Array Row Write Fusion Int Rows
+// ============================================================================
+// Integer rows through slice-write fusion (src/Optimize.fs
+// fuseSliceWritesModule). Integer `*` and `+` cannot abort (they wrap,
+// formalism 2.4), and neither can `/` by a nonzero literal, so `m`, `w` and
+// `h` fuse into the row write. `/` by a value read from the prefix may panic
+// (BL8013 on a zero divisor), so `d`'s arm is DECLINED -- fusion never moves
+// an evaluation that may abort -- and keeps the materialized slice. All four
+// print the same values in every lane; `w` pins the wrap.
+// ============================================================================
+type T = Idx<5>
+type X = Idx<4>
+
+let rec m: Array<Int64 like T, X> =
+    match m with
+    | zero -> zero
+    | zero :: s -> zero :: [1, 2, 3, 4]
+    | prefix :: n -> prefix :: prefix(n - 1) * 3 + 1
+
+let rec h: Array<Int64 like T, X> =
+    match h with
+    | zero -> zero
+    | zero :: s -> zero :: [1, 2, 3, 4]
+    | prefix :: n -> prefix :: prefix(n - 1) / 2 + 7
+
+let rec d: Array<Int64 like T, X> =
+    match d with
+    | zero -> zero
+    | zero :: s -> zero :: [1, 2, 3, 4]
+    | prefix :: n -> prefix :: prefix(n - 1) / prefix(0) + 7
+
+let rec w: Array<Int64 like T, X> =
+    match w with
+    | zero -> zero
+    | zero :: s -> zero :: [3, 5, 7, 9]
+    | prefix :: n -> prefix :: prefix(n - 1) * 6148914691236517205 + 1
+
+let m4 = m((4 : T))
+let h4 = h((4 : T))
+let d4 = d((4 : T))
+let w4 = w((4 : T))
+// EXPECT: m4 = [121, 202, 283, 364]
+// EXPECT: h4 = [13, 13, 13, 13]
+// EXPECT: d4 = [29, 13, 10, 9]
+// EXPECT: w4 = [-2049638230412172401, 4327014041981252849, -7743077759334873517, -1366425486941448267]
