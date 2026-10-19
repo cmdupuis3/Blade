@@ -56,8 +56,13 @@
 #endif
 
 #include <cstddef>
+#include <cstring>
+#include <memory>
 #include <vector>
 #include <complex>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 // CBLAS header flavor. `-DBLADE_BLAS_MKL` is emitted by Build.fs when BLADE_BLAS_FLAVOR=mkl (the define is added by
 // LinAlgPatterns.blasBuildFlags). MKL implements the standard CBLAS interface -- same functions, same enums, same
 // semantics, so nothing below changes -- but ships it under its own header names rather than the netlib ones.
@@ -266,56 +271,83 @@ namespace blade_linalg {
     // m x m buffer is written and then repacked into Blade's left-justified triangle. The gate-off path never gets
     // here -- it writes the packed triangle directly from materializeGramForm's own loops, with no staging at all.
     //
+    // THE STAGING IS NOT ZERO-FILLED AND THE REPACK IS THREADED (bench gap G28). The staging buffer used to be a
+    // value-initialized `std::vector` -- a serial 8 m^2-byte memset that also took every first-touch page fault of
+    // the buffer on the calling thread -- and the repack was a serial pass. Neither step is in the library's thread
+    // team, so under OPENBLAS_NUM_THREADS=8 they were the whole of the measured 18-21% loss to an explicit `dsyrk`
+    // caller (gram, p = 1601: a 20.5 MB fill plus a 10 MB + 10 MB copy, all serial, next to a ~12 ms syrk). Now:
+    //   * the buffer is `new T[m * m]`, uninitialized: beta = 0 means syrk/herk OVERWRITE the upper triangle without
+    //     reading it -- the BLAS contract itself ("when BETA is supplied as zero then C need not be set on input",
+    //     reference ?SYRK/?HERK), checked against OpenBLAS 0.3.34 with a NaN-prefilled C for all four routines at
+    //     1 and 8 library threads (bench/notes/gap-register.md G28) -- so the fill was dead work, and the first
+    //     touch of the triangle now happens inside the library's own threads, exactly where an explicit caller's
+    //     output array is first touched. The lower triangle is never read.
+    //   * the repack is p row copies -- in row-major Upper storage row i's valid entries `i..m-1` are CONTIGUOUS at
+    //     `Cfull + i*m + i`, and Blade's packed row i is contiguous too, so each row is ONE memcpy -- split across
+    //     an OpenMP team when the call site passes `threaded` (the emitter's `omp` licence under thread emission;
+    //     the knob's serial build passes false, so the header never opens a team the generated code did not
+    //     license). Rows are disjoint; nothing is summed; the result is the same for every team size.
+    // The library routine, its arguments and the association of every cell are untouched, so the values are
+    // bit-for-bit what the previous staging produced (bench/validation pins-A.json, blas regime).
+    //
     // `Acells` is A's allocated pool leaf count. C needs none: the packed triangle is written through `Crows[i][jr]`
     // with jr < m-i, the packed row's own length, so C never goes through a view.
 
+    template <typename T>
+    inline void blade_repack_upper(size_t m, const T* Cfull, T** Crows, bool threaded) {
+#ifdef _OPENMP
+        if (threaded && m >= 64 && !omp_in_parallel()) {
+            #pragma omp parallel for schedule(static)
+            for (long long i = 0; i < (long long)m; i++)
+                std::memcpy(Crows[i], Cfull + (size_t)i * m + (size_t)i, (m - (size_t)i) * sizeof(T));
+            return;
+        }
+#else
+        (void)threaded;
+#endif
+        for (size_t i = 0; i < m; i++)
+            std::memcpy(Crows[i], Cfull + i * m + i, (m - i) * sizeof(T));
+    }
+
     inline void blade_gram_same_s(size_t m, size_t n, float** Arows, size_t Acells,
-                                  float** Crows) {
+                                  float** Crows, bool threaded = false) {
         in_view<float> A(Arows, m, n, Acells);
-        std::vector<float> Cfull(m * m);
+        std::unique_ptr<float[]> Cfull(new float[m * m]);
         cblas_ssyrk(CblasRowMajor, CblasUpper, CblasNoTrans,
                     (blasint)m, (blasint)n, 1.0f, A.p, (blasint)n,
-                    0.0f, Cfull.data(), (blasint)m);
-        for (size_t i = 0; i < m; i++)
-            for (size_t jr = 0; jr < m - i; jr++)
-                Crows[i][jr] = Cfull[i * m + i + jr];
+                    0.0f, Cfull.get(), (blasint)m);
+        blade_repack_upper<float>(m, Cfull.get(), Crows, threaded);
     }
 
     inline void blade_gram_same_d(size_t m, size_t n, double** Arows, size_t Acells,
-                                  double** Crows) {
+                                  double** Crows, bool threaded = false) {
         in_view<double> A(Arows, m, n, Acells);
-        std::vector<double> Cfull(m * m);
+        std::unique_ptr<double[]> Cfull(new double[m * m]);
         cblas_dsyrk(CblasRowMajor, CblasUpper, CblasNoTrans,
                     (blasint)m, (blasint)n, 1.0, A.p, (blasint)n,
-                    0.0, Cfull.data(), (blasint)m);
-        for (size_t i = 0; i < m; i++)
-            for (size_t jr = 0; jr < m - i; jr++)
-                Crows[i][jr] = Cfull[i * m + i + jr];
+                    0.0, Cfull.get(), (blasint)m);
+        blade_repack_upper<double>(m, Cfull.get(), Crows, threaded);
     }
 
     inline void blade_gram_same_c(size_t m, size_t n, std::complex<float>** Arows,
-                                  size_t Acells, std::complex<float>** Crows) {
+                                  size_t Acells, std::complex<float>** Crows, bool threaded = false) {
         in_view<std::complex<float>> A(Arows, m, n, Acells);
-        std::vector<std::complex<float>> Cfull(m * m);
+        std::unique_ptr<std::complex<float>[]> Cfull(new std::complex<float>[m * m]);
         // cherk: REAL alpha/beta -- a Hermitian update cannot scale by a complex number and stay Hermitian.
         cblas_cherk(CblasRowMajor, CblasUpper, CblasNoTrans,
                     (blasint)m, (blasint)n, 1.0f, A.p, (blasint)n,
-                    0.0f, Cfull.data(), (blasint)m);
-        for (size_t i = 0; i < m; i++)
-            for (size_t jr = 0; jr < m - i; jr++)
-                Crows[i][jr] = Cfull[i * m + i + jr];
+                    0.0f, Cfull.get(), (blasint)m);
+        blade_repack_upper<std::complex<float>>(m, Cfull.get(), Crows, threaded);
     }
 
     inline void blade_gram_same_z(size_t m, size_t n, std::complex<double>** Arows,
-                                  size_t Acells, std::complex<double>** Crows) {
+                                  size_t Acells, std::complex<double>** Crows, bool threaded = false) {
         in_view<std::complex<double>> A(Arows, m, n, Acells);
-        std::vector<std::complex<double>> Cfull(m * m);
+        std::unique_ptr<std::complex<double>[]> Cfull(new std::complex<double>[m * m]);
         cblas_zherk(CblasRowMajor, CblasUpper, CblasNoTrans,
                     (blasint)m, (blasint)n, 1.0, A.p, (blasint)n,
-                    0.0, Cfull.data(), (blasint)m);
-        for (size_t i = 0; i < m; i++)
-            for (size_t jr = 0; jr < m - i; jr++)
-                Crows[i][jr] = Cfull[i * m + i + jr];
+                    0.0, Cfull.get(), (blasint)m);
+        blade_repack_upper<std::complex<double>>(m, Cfull.get(), Crows, threaded);
     }
 
     // L3 -- gram(A, B), distinct.  A is m x n, B is p x n, C dense m x p

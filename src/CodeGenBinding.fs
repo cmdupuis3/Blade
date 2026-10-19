@@ -102,6 +102,24 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
     | IRReduce (arrExpr, kernelExpr, initExpr) ->
         genReduceBinding ctx binding builder arrExpr kernelExpr initExpr
     | IRReduceCompute (compExpr, kernelExpr, seedExpr) ->
+        // Hot-row fold scheduling (Blade.Optimize.planHotRowFolds): when the
+        // producer's nest ran this fold's row map behind each produced row,
+        // the row sums sit in a materialized rank-1 array and this binding is
+        // the OUTER combine over them -- the same values, folded in the same
+        // order from the same seed, through the ordinary materialized-array
+        // fold emitter (which applies this build's fold-form policy to it).
+        // A producer whose nest did not admit the epilogue published
+        // nothing, and the two-pass form below is unchanged.
+        match Blade.Optimize.HotRowTable.tryConsumer binding.Id with
+        | Some plan when plan.EmittedCpp.Value.IsSome ->
+            let rsName = plan.EmittedCpp.Value.Value
+            let rsVar = IRVar (plan.RowSumId, plan.RowSumType)
+            let ctxR = { ctx with VarNames = Map.add plan.RowSumId rsName ctx.VarNames }
+            let note =
+                [ $"{ind}// hot-row fold: the row values of `{plan.ProducerName}`'s row map were computed behind each produced row into {rsName} (Blade.Optimize.planHotRowFolds); this is the outer combine over them, same order, same seed" ]
+            let (code, ctx') = genReduceBinding ctxR binding builder rsVar kernelExpr (Some seedExpr)
+            (note @ code, ctx')
+        | _ ->
         genReduceComputeBinding ctx binding builder compExpr kernelExpr seedExpr
     | IRProdSum _ ->
         // Scalar result; the expression renderer emits the fused-loop IIFE.
@@ -829,7 +847,15 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         let (capForceCode, ctx) =
             collectDeferredKernelCaptures ctx info'.Kernel
             |> forceDeferredBindingIds ctx builder ($"{name}__cap")
-        let code = genApplyCombinator ctx name info' builder
+        // Hot-row fold scheduling: hand the plan to the apply emitter by the
+        // output's NAME, for the duration of this one emission (the
+        // function-body twin is CodeGen's IRCompute(IRApplyCombinator) arm).
+        (match Blade.Optimize.HotRowTable.tryProducer binding.Id with
+         | Some plan -> (hotRowPendingCell ()).[name] <- plan
+         | None -> ())
+        let code =
+            try genApplyCombinator ctx name info' builder
+            finally (hotRowPendingCell ()).Remove name |> ignore
         let ctx' = addVarName binding.Id name ctx
         (forceCode @ capForceCode @ code, ctx')
 

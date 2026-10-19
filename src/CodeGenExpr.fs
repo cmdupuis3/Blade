@@ -3023,7 +3023,14 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                     // SPACE-JOINED into a single-line IIFE at expression
                     // positions, where a line comment would swallow the rest of
                     // the statement.
-                    [ $"/* {dispatchTag} dispatch: gram(A, A) = A * A^T -> packed upper triangle */ {entry}({mExtent}, {nExtent}, {lName}.data, {lCells}, {varName}.data);" ]
+                    //
+                    // The shim's repack (dense staging -> packed rows) runs
+                    // on an OpenMP team when this build emits thread-level
+                    // OpenMP: rows are owned exclusively and no sum is split,
+                    // so it needs no licence (the tile arm's own argument);
+                    // the emission knob still decides. Bench gap G28.
+                    let threadedArg = if ompThreadEmissionEnabled () then "true" else "false"
+                    [ $"/* {dispatchTag} dispatch: gram(A, A) = A * A^T -> packed upper triangle */ {entry}({mExtent}, {nExtent}, {lName}.data, {lCells}, {varName}.data, {threadedArg});" ]
                 | None ->
                     // THREADING (see BLADE_OMP_PARALLEL_FOR_DYNAMIC in
                     // cpp/blade_portability.hpp for the spelling, and the

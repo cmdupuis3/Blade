@@ -1041,6 +1041,24 @@ let packedGemmUsedCell () : bool ref =
         fresh
     else v
 
+/// Hot-row fold scheduling handoff (Blade.Optimize.planHotRowFolds): the
+/// plan the compute binding being emitted carries, keyed by its C++ output
+/// name. Set by the two statement-form producer sites (CodeGen's
+/// function-body arm, genComputeBinding's top-level arm) around their
+/// `genApplyCombinator` call, because the apply emitter knows the output's
+/// NAME and not its let id; cleared right after. Same AsyncLocal shape as
+/// the cells above.
+let internal hotRowPendingStorage =
+    System.Threading.AsyncLocal<System.Collections.Generic.Dictionary<string, Blade.Optimize.HotRowPlan>>()
+
+let hotRowPendingCell () : System.Collections.Generic.Dictionary<string, Blade.Optimize.HotRowPlan> =
+    let v = hotRowPendingStorage.Value
+    if isNull (box v) then
+        let fresh = System.Collections.Generic.Dictionary<string, Blade.Optimize.HotRowPlan>()
+        hotRowPendingStorage.Value <- fresh
+        fresh
+    else v
+
 /// The probe emitted at the FIRST input read of a hoisted tile plan: every
 /// input's need/done masks, the tile hit table, and the need of each unhit
 /// tile's chunks. Emitted before the phase-1 read of that input (unindented).

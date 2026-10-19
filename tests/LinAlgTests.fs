@@ -450,7 +450,7 @@ let y = gram_apply(A, A, v)
        + "let m2 = method_for(CA, CA) <@> " + covKernel "comm(x, y)" "prodsum(x, y)",
        [ shimInclude; "blade_linalg::blade_gram_same_d("
          "linalg dispatch: syrk C = A * A^T (packed upper, from comm nest)"
-         "blade_linalg::blade_gram_same_d(3, 4, CA.data, (CA.extents[0] * CA.extents[1]), m2.data);" ],
+         "blade_linalg::blade_gram_same_d(3, 4, CA.data, (CA.extents[0] * CA.extents[1]), m2.data, false);" ],
        // The NEST is gone: no row peel, no triangular inner bound, no scale
        // pass. (The lifted kernel lambda survives as a now-unused function
        // carrying its own prodsum IIFE — it always did — so `__ps` is not a
@@ -465,7 +465,7 @@ let y = gram_apply(A, A, v)
       ("syrk_scaled_nest_applies_the_kernel_scalar_after_the_call", true,
        covMat
        + "let c2 = method_for(CA, CA) <@> " + covKernel "comm(x, y)" "prodsum(x, y) / 4.0",
-       [ "blade_linalg::blade_gram_same_d(3, 4, CA.data, (CA.extents[0] * CA.extents[1]), c2.data);"
+       [ "blade_linalg::blade_gram_same_d(3, 4, CA.data, (CA.extents[0] * CA.extents[1]), c2.data, false);"
          "for (size_t __sy_i = 0; __sy_i < 3; __sy_i++) for (size_t __sy_j = 0; __sy_j < 3 - __sy_i; __sy_j++) c2[__sy_i][__sy_j] /= (4.0);" ],
        [ "cblas_"; "CA____i0"; "__i1 < 3 - __i0" ])
       // ***PRECEDENCE, AND IT IS THE OPPOSITE OF L1/L2's.*** An `omp` request

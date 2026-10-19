@@ -1693,6 +1693,29 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     match compactFlat with
     | Some plan -> lines <- lines @ [ind depth + plan.PoolDecl]
     | None -> ()
+    // HOT-ROW FOLD SCHEDULING (Blade.Optimize.planHotRowFolds): the consumer's
+    // per-row fold runs behind each produced row, inside this nest's
+    // outermost loop. Only the plain materializing nest admits it: no fold
+    // accumulator, no slab / segment / tile substitution of the outer level
+    // (the row sums would cover one rank's rows while Allgatherv restores the
+    // whole array), no streamed source, no shared-value leaf, a hoisted output
+    // row (the rank-2 epilogue reads the row through that restrict pointer),
+    // and no `collapse` pragma spanning level 0 and 1 (OpenMP forbids
+    // intervening code inside a collapsed prefix). A declined site publishes
+    // nothing, and the consumer keeps the two-pass form.
+    let hotRow =
+        match codeGen.RowEpilogue with
+        | Some ep when codeGen.FoldWrapper.IsNone && not codeGen.MpiSlab && codeGen.ShareDecl.IsNone
+                       && Map.isEmpty streamed && List.length codeGen.Bindings >= 2
+                       && outRowDecl.IsSome && compactFlat.IsNone
+                       && not (pragmaLevel = Some 0 && ompLastLevel > 0) ->
+            Some ep
+        | _ -> None
+    match hotRow with
+    | Some ep ->
+        lines <- lines @ [ ind depth + $"// hot-row fold: `{ep.RowSumName}` holds the row fold of each row of `{codeGen.OutputName}`, computed right after the row is produced (Blade.Optimize.planHotRowFolds)" ]
+        for l in ep.Prelude do lines <- lines @ [ind depth + l]
+    | None -> ()
     for binding in codeGen.Bindings do
         let levelIdx = bidx
         // Generate the loop header (pragma only on the outermost loop).
@@ -2067,10 +2090,37 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     | Some rw -> for l in rw do lines <- lines @ [ind depth + l]
     | None -> lines <- lines @ [ind depth + assignLine.Value]
 
-    // Close all loops
-    for _ in codeGen.Bindings do
+    // Close all loops. Under the hot-row schedule the inner levels close
+    // first, the row's fold runs on the just-completed slice inside the
+    // outermost loop, then the outermost level closes.
+    match hotRow with
+    | Some ep ->
+        for _ in List.tail codeGen.Bindings do
+            depth <- depth - 1
+            lines <- lines @ [ind depth + "}"]
+        let (elemStr, rank) =
+            match codeGen.OutputType with
+            | ArrayElem at -> (elemTypeToCpp at.ElemType, arrayRank at)
+            | _ -> ("double", 2)
+        let outerIdx = (List.head codeGen.Bindings).IndexName
+        // Rank 2: the slice IS the hoisted output row, read through the
+        // restrict pointer it was written through (any other access path to a
+        // row written through a restrict pointer in the same scope would
+        // violate the qualifier's contract). Rank >= 3: the slice is the
+        // skeleton's leading entry, and the row pointer's scope (the level
+        // r-2 body) has already closed.
+        let viewData = if rank = 2 then outRowName else $"{codeGen.OutputName}.data[{outerIdx}]"
+        lines <- lines @ [ ind depth + "{"
+                           ind depth + $"    Array<{elemStr}, {rank - 1}> {ep.RowViewName} = {{ {viewData}, {codeGen.OutputName}.extents + 1 }};" ]
+        for l in ep.Body () do lines <- lines @ [ind depth + "    " + l]
+        lines <- lines @ [ ind depth + "}" ]
         depth <- depth - 1
         lines <- lines @ [ind depth + "}"]
+        ep.OnEmitted ()
+    | None ->
+        for _ in codeGen.Bindings do
+            depth <- depth - 1
+            lines <- lines @ [ind depth + "}"]
 
     // Path B epilogue: publish this thread's partial, close the region,
     // then combine in THREAD ORDER through the same wrapper -- a fixed order, so
@@ -2851,11 +2901,30 @@ let internal tryGenSyrkDispatch
                 match entryOpt with
                 | Some entry ->
                     (linalgUsedCell ()).Value <- true
+                    // The shim's REPACK (dense staging -> packed triangle,
+                    // blade_linalg.hpp blade_repack_upper) runs inside an
+                    // OpenMP team exactly when the source licensed the nest
+                    // (`omp` on the kernel) AND this build emits thread-level
+                    // OpenMP -- the same rule the packed tile driver follows.
+                    // The syrk itself is the library's (its own threads); the
+                    // census line names the repack as this site's construct.
+                    // Bench gap G28: the serial staging + repack was the whole
+                    // 18-21% loss under 8 library threads.
+                    let threadedArg =
+                        if codeGen.OmpRequested && ompThreadEmissionEnabled () then "true" else "false"
+                    let ompCensus =
+                        if not codeGen.OmpRequested then ""
+                        elif ompThreadEmissionEnabled () then
+                            recordOmpConstruct cName "omp parallel for inside the BLAS shim's repack"
+                                "blade_repack_upper: the dense staging's upper triangle copied into the packed rows, rows split across the team (the syrk itself runs on the library's threads)"
+                            ""
+                        else $"/* {(ompSuppressedPhrase (ompThreadsSuppressedReason ()))} */ "
                     // BLOCK comment, not `//`: an inline-form materialization
                     // space-joins its lines into a single-line IIFE, where a
                     // line comment would swallow the rest of the statement.
                     Some ([ String.replicate indent "    "
-                            + $"/* linalg dispatch: syrk C = A * A^T (packed upper, from comm nest) */ {entry}({mExtent}, {nExtent}, {aName}.data, {aCells}, {cName}.data);" ]
+                            + ompCensus
+                            + $"/* linalg dispatch: syrk C = A * A^T (packed upper, from comm nest) */ {entry}({mExtent}, {nExtent}, {aName}.data, {aCells}, {cName}.data, {threadedArg});" ]
                           @ Option.toList tail)
                 | None ->
                 // BLAS GATE OFF: the packed-triangle SYRK tile

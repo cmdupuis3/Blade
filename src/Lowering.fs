@@ -2712,6 +2712,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     // compile, so a stale plan from an earlier program in this flow (the test
     // harness compiles hundreds) must never reach this one.
     Blade.Types.PoolReuseTable.reset ()
+    Optimize.HotRowTable.reset ()
     // The raw decl list callers hand us is the program they PARSED, not the
     // one `TypeCheck.typeCheck` desugared inside itself -- so the icechunk
     // checkout rewrite is applied again here, ahead of Phase 0's
@@ -2904,6 +2905,10 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // BLADE_CSE, BLADE_POOL_REUSE (Optimize.cseEnabled/poolReuseEnabled).
         let irModule = Optimize.cseModule irModule
         Optimize.planPoolReuse irModule
+        // Hot-row fold scheduling (Blade.Optimize.planHotRowFolds): a side
+        // table like the scratch-reuse plan, read by both emitters; the
+        // interpreter runs the tree as written. Gate: BLADE_HOT_ROW.
+        Optimize.planHotRowFolds env.Builder irModule
         // mask+contains fusion always runs a linear scan; the semijoin
         // hash-set is a separate, not-yet-implemented optimization.
         irModule)

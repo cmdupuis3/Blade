@@ -99,6 +99,33 @@ type FoldChunkPlan = {
     Tag: string
 }
 
+/// Hot-row fold scheduling (Blade.Optimize.planHotRowFolds, bench review
+/// item M13): what the producer's nest places around and inside its
+/// OUTERMOST loop so the consumer's per-row fold runs behind each produced
+/// row. Built by the apply emitter from the plan, consumed by
+/// `genLoopNestStreamed`; every other nest form ignores it.
+type RowEpilogue = {
+    /// Declarations before the nest, unindented: the row-sum array's extents
+    /// table and allocation.
+    Prelude: string list
+    /// The C++ name the epilogue's body reads the just-produced slice through
+    /// (the nest declares it as an `Array<T, r-1>` view of the output's row).
+    RowViewName: string
+    /// Statements after the outermost level's inner nest has closed, still
+    /// inside the outermost loop, unindented: the row's fold stored into the
+    /// row-sum array. A FUNCTION, rendered only when the nest places the
+    /// epilogue: kernel rendering is not free of side effects (a refusal
+    /// leaves the expression sentinel behind), so a declined site must not
+    /// render it.
+    Body: unit -> string list
+    /// The row-sum array's name, published to the consumer once emitted.
+    RowSumName: string
+    /// Called exactly when the nest emitted the prelude and the body: it
+    /// registers the row-sum pool for the scope's frees and publishes the
+    /// name to the plan.
+    OnEmitted: unit -> unit
+}
+
 type LoopNestCodeGen = {
     /// All loop index bindings, in nesting order (outermost first)
     Bindings: LoopIndexBinding list
@@ -152,6 +179,10 @@ type LoopNestCodeGen = {
     /// materialized into an array). Meaningful only inside a merged nest, and
     /// only for leaves ordered BEFORE their consumers; None everywhere else.
     ShareDecl: string option
+    /// Hot-row fold scheduling: the consumer's per-row fold to run behind
+    /// each produced row (see RowEpilogue). None everywhere but a planned
+    /// producer's statement-form materialization.
+    RowEpilogue: RowEpilogue option
 }
 
 /// One dimension GROUP of a device buffer. Mirrors a single IRIndexType:
@@ -1168,4 +1199,5 @@ let buildLoopNestCodeGen
         OmpRequested = kernelRequestedOmp
         FoldChunk = None
         ShareDecl = None
+        RowEpilogue = None
     }

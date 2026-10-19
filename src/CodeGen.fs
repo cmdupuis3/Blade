@@ -340,7 +340,15 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // accumulation form anyway. Routing through genApplyCombinator here
             // mirrors what genBinding does at the module level.
             let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
-            let code = genApplyCombinator bodyCtx varName info builder
+            // Hot-row fold scheduling: hand the plan to the apply emitter by
+            // the output's NAME (it never sees the let id), for the duration
+            // of this one emission.
+            (match Blade.Optimize.HotRowTable.tryProducer id with
+             | Some plan -> (hotRowPendingCell ()).[varName] <- plan
+             | None -> ())
+            let code =
+                try genApplyCombinator bodyCtx varName info builder
+                finally (hotRowPendingCell ()).Remove varName |> ignore
             currentNames <- Map.add id varName currentNames
             code
         | IRCompute (IRComposeApply _) ->
