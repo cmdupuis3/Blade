@@ -275,7 +275,7 @@ let private setupPersistCurrent () : int =
     let keys =
         [ "OPENBLAS_DIR"; "NETCDF_DIR"; "MSMPI_BIN"; "BLADE_BLAS"
           "BLADE_BLAS_LINK"; "BLADE_BLAS_INCLUDE"; "BLADE_LAPACK_LINK"
-          "BLADE_LAPACK_INCLUDE"; "BLADE_BLAS_FLAVOR" ]
+          "BLADE_LAPACK_INCLUDE"; "BLADE_BLAS_FLAVOR"; "BLADE_BLAS_PREFER" ]
     let fromEnv =
         keys
         |> List.choose (fun k ->
@@ -298,7 +298,7 @@ let private setupNone () : int =
         writeToolchain
             [ "BLADE_BLAS", None; "BLADE_BLAS_LINK", None; "BLADE_BLAS_INCLUDE", None
               "BLADE_LAPACK_LINK", None; "BLADE_LAPACK_INCLUDE", None
-              "BLADE_BLAS_FLAVOR", None; "OPENBLAS_DIR", None ]
+              "BLADE_BLAS_FLAVOR", None; "BLADE_BLAS_PREFER", None; "OPENBLAS_DIR", None ]
     printfn "BLAS keys removed from %s (tier falls to off; Blade emits its own loops)" path
     0
 

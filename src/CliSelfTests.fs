@@ -82,7 +82,7 @@ open Blade.CliCommands
 /// MSMPI_BIN) and BLADE_INTERP_TIMEOUT_MS (a harness diagnostic).
 let internal suiteClearedKnobs =
     [ "OPENBLAS_DIR"; "BLADE_BLAS"; "BLADE_CUBLAS"
-      "BLADE_BLAS_LINK"; "BLADE_BLAS_INCLUDE"; "BLADE_BLAS_FLAVOR"
+      "BLADE_BLAS_LINK"; "BLADE_BLAS_INCLUDE"; "BLADE_BLAS_FLAVOR"; "BLADE_BLAS_PREFER"
       "BLADE_LAPACK_LINK"; "BLADE_LAPACK_INCLUDE"
       "BLADE_PRINT"
       "BLADE_FP_REASSOC"; "BLADE_FP_REPRO"; "BLADE_FP_CONTRACT"; "BLADE_MARCH"
@@ -96,8 +96,12 @@ let internal suiteClearedKnobs =
 
 /// Knobs `blade test` SETS (after the clear above) rather than leaves unset,
 /// because unset falls back to blade.toolchain.json. Blocks that test BLAS set
-/// BLADE_BLAS themselves, which overrides this in their scope.
-let internal suitePinnedKnobs = [ "BLADE_BLAS", "off" ]
+/// BLADE_BLAS themselves, which overrides this in their scope. The BLAS
+/// preference is pinned to `native` (today's default) for the same reason: a
+/// machine whose toolchain file says `library` -- or `BLADE_BLAS_FLAVOR=mkl`,
+/// under which `auto` resolves to `library` -- would otherwise flip every
+/// BLAS-on dispatch pin. The preference's own cases set it in their scope.
+let internal suitePinnedKnobs = [ "BLADE_BLAS", "off"; "BLADE_BLAS_PREFER", "native" ]
 
 /// Run `f` in the suite's pristine environment: every `suiteClearedKnobs`
 /// variable unset, every `suitePinnedKnobs` variable pinned, the caller's

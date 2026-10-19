@@ -1945,12 +1945,22 @@ let syrkTileEnabled () : bool = Blade.Toolchain.envFlag "BLADE_SYRK_TILE" true
 /// library's blocked association to the serial chain per cell (ulps; the
 /// bench pins hold at their tolerance -- re-validated with `run.py check
 /// gram` in the blas regime).
-let syrkTilePreferredOverBlas (p: string) (k: string) : bool =
+///
+/// WHICH SIDE wins at an eligible shape is `LinAlgPatterns.blasPreference`
+/// (BLADE_BLAS_PREFER, env or blade.toolchain.json): `native` (and `auto`
+/// unless the library is identified as MKL) takes the tile; `library` keeps
+/// `?syrk`. `syrkTileEligibleShape` is the shape half alone, so a site can
+/// say in the plan that it skipped an eligible tile for the library.
+let syrkTileEligibleShape (p: string) (k: string) : bool =
     let lit (s: string) = match System.Int64.TryParse s with | true, v -> Some v | _ -> None
     syrkTileEnabled ()
     && (match lit p, lit k with
         | Some p, Some k -> packedTriWorth p k
         | _ -> false)
+
+let syrkTilePreferredOverBlas (p: string) (k: string) : bool =
+    syrkTileEligibleShape p k
+    && (Blade.LinAlgPatterns.blasPreference ()).Prefer = Blade.LinAlgPatterns.PreferNative
 
 /// The antisym pair's tile schedule (`LinAlgPatterns.AntiPair`, driver
 /// blade_pgemm::dantisym_tri), read from BLADE_ANTISYM_TILE per call:

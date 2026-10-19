@@ -58,6 +58,15 @@ Header flavor: `BLADE_BLAS_FLAVOR=mkl` adds `-DBLADE_BLAS_MKL`, under which
 `blade_linalg.hpp`/`blade_lapack.hpp` include `mkl_cblas.h`/`mkl_lapacke.h`
 (MKL implements the standard interfaces but not the netlib header names).
 
+Library vs native preference: `BLADE_BLAS_PREFER` (same key in the file)
+decides, with the gate on, who serves a shape both a native Blade kernel and
+the library can serve (today the packed syrk tile vs `?syrk`). `auto` (unset)
+is native unless the flavor identifies the library as MKL, then library;
+`native` / `library` are explicit. `LinAlgPatterns.blasPreference`; the
+`blade plan` syrk route line names the setting and its source. A machine
+with a faster library sets `"BLADE_BLAS_PREFER": "library"` once (bare
+`blade setup` persists an env-supplied value).
+
 The tier's expansion into compile/link halves is
 `LinAlgPatterns.blasBuildFlags` — one gate, one expansion, consumed by
 `Build.compileCppWithExtra`. Tests: `blade test linalg` → "BLAS Tier
