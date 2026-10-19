@@ -3597,19 +3597,68 @@ and genOrbitFoldCpp (ctx: CodeGenContext) (ind: string) (name: string) (gName: s
     let total = emitC p.Total
     let accDecl = [ 0 .. p.AccCount - 1 ] |> List.map (fun k -> $"{accName k} = {accCpp}(0)") |> String.concat ", "
     let group = if p.Strict then "AntisymIdx" else "SymIdx"
-    // A `where omp` licence on any level's fold is not spent as a thread team
-    // here: the census says so (the dropped-omp-is-never-silent invariant).
+    // THE THREADED FORM (bench G32): a `where omp` licence on any level's
+    // fold is spent as a team over the OUTERMOST class level, decided by
+    // `OrbitFold.threadedForm` (the plan line says the same).
+    let threaded = Blade.OrbitFold.threadedForm p
     let ompMarker =
-        if p.Levels |> List.exists (fun l -> l.Fold.IsOmpParallel) then
-            let phrase = ompSuppressedPhrase "the orbit-class fold is one serial pass over the packed pool (the licence is spent as the class regrouping; a threaded class fold is not built yet)"
-            [ $"{i1}// {phrase}" ]
+        if Blade.OrbitFold.ompRequested p && not threaded then
+            let why =
+                if not (ompThreadEmissionEnabled ()) then ompThreadsSuppressedReason ()
+                else "the orbit-class fold's pool has fewer than two first-coordinate rows (nothing to divide)"
+            [ $"{i1}// {(ompSuppressedPhrase why)}" ]
         else []
+    let strictLit = if p.Strict then "true" else "false"
     [ yield $"{ind}{accCpp} {name} = {exprToCppCtx ctx p.OuterSeed};"
       yield $"{ind}{{"
-      yield $"{i1}// {Blade.OrbitFold.planForm p}: the logical sum over the {group}<{r}, {n}> pool of `{p.SourceName}`, regrouped (licensed); class sums combine by additions only"
+      yield $"{i1}// {Blade.OrbitFold.planFormCpp p}: the logical sum over the {group}<{r}, {n}> pool of `{p.SourceName}`, regrouped (licensed); class sums combine by additions only"
       yield! ompMarker
       yield $"{i1}{accCpp} {accDecl};"
-      if p.PoolCells > 0L then
+      if p.PoolCells > 0L && threaded then
+          // Rows i of the first coordinate are independent work items: row i
+          // starts at pool offset total - canon_count(n - i) and walks its
+          // own equality patterns into its own class accumulators. Rows are
+          // dealt boustrophedon (block b of T rows: thread t takes row
+          // bT + t, reversed on odd blocks), which balances the triangular
+          // row lengths and is a fixed function of the team size; per-thread
+          // class sums then join the totals in thread order. Each class total
+          // is still a sum over its disjoint terms, so the whole is one more
+          // association of the licensed `+` folds -- additions only, as in
+          // the serial pass -- and a fixed OMP_NUM_THREADS reproduces it.
+          (ompApiUsedCell ()).Value <- true
+          let parts = p.AccCount
+          yield $"{i1}const {elemCpp}* BLADE_RESTRICT __opool = nested_array_utilities::pool_base({gName}.data);"
+          yield $"{i1}const size_t __ototal = nested_array_utilities::canon_count({n}, {r}, {strictLit});"
+          yield $"{i1}int __oT = blade_omp_get_max_threads();"
+          yield $"{i1}if ((size_t)__oT > (size_t){n}) __oT = (int){n};"
+          yield $"{i1}if (__oT < 1) __oT = 1;"
+          // num_threads is a request: the split reads the team the region
+          // got, and the combine reads it back (Path B's rule).
+          yield $"{i1}int __oTact = __oT;"
+          yield $"{i1}{accCpp}* __opart = new {accCpp}[(size_t)__oT * {parts}];"
+          yield $"{i1}BLADE_OMP_PARALLEL_NUM_THREADS(__oT)"
+          yield $"{i1}{{"
+          let i2 = i1 + "    "
+          yield $"{i2}const size_t __ont = (size_t)blade_omp_get_num_threads();"
+          yield $"{i2}const size_t __ot = (size_t)blade_omp_get_thread_num();"
+          yield $"{i2}if (__ot == 0) __oTact = (int)__ont;"
+          yield $"{i2}{accCpp} {accDecl};"
+          yield $"{i2}for (size_t __ob = 0; __ob * __ont < (size_t){n}; __ob++) {{"
+          let i3 = i2 + "    "
+          yield $"{i3}const size_t __oc1 = __ob * __ont + ((__ob & 1) ? (__ont - 1 - __ot) : __ot);"
+          yield $"{i3}if (__oc1 >= (size_t){n}) continue;"
+          yield $"{i3}size_t __oo = __ototal - nested_array_utilities::canon_count((size_t){n} - __oc1, {r}, {strictLit});"
+          yield! gen 2 "__oc1" [ 1 ] i3
+          yield $"{i2}}}"
+          for k in 0 .. parts - 1 do
+              yield $"{i2}__opart[__ot * {parts} + {k}] = {accName k};"
+          yield $"{i1}}}"
+          yield $"{i1}for (int __ot = 0; __ot < __oTact; __ot++) {{"
+          for k in 0 .. parts - 1 do
+              yield $"{i1}    {accName k} = {accName k} + __opart[(size_t)__ot * {parts} + {k}];"
+          yield $"{i1}}}"
+          yield $"{i1}delete[] __opart;"
+      elif p.PoolCells > 0L then
           yield $"{i1}const {elemCpp}* BLADE_RESTRICT __opool = nested_array_utilities::pool_base({gName}.data);"
           yield $"{i1}size_t __oo = 0;"
           yield $"{i1}for (size_t __oc1 = 0; __oc1 < {n}; __oc1++) {{"

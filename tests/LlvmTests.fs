@@ -1412,11 +1412,16 @@ let runSimplexAgreementTests () : BlockResult =
                     let closed = SimplexBlocksCore.packedOffsetR strict n coords
                     if closed <> k then
                         offRBad <- sprintf "strict=%b r=%d n=%d rank=%d -> %d" strict r n k closed :: offRBad
+                    // the per-coordinate split the canonical read tabulates (G34)
+                    if r >= 2 then
+                        let split = SimplexBlocksCore.packedOffsetSplit strict n coords
+                        if split <> k then
+                            offRBad <- sprintf "split strict=%b r=%d n=%d rank=%d -> %d" strict r n k split :: offRBad
                     if not (seen.Add closed) then
                         offRBad <- sprintf "collision strict=%b r=%d n=%d at %d" strict r n k :: offRBad
                 if int64 seen.Count <> cells then
                     offRBad <- sprintf "coverage strict=%b r=%d n=%d: %d of %d" strict r n seen.Count cells :: offRBad
-    check "packedOffsetR = rankOfCoords, and partitions the pool (ranks 1-5)" offRBad.IsEmpty
+    check "packedOffsetR = packedOffsetSplit = rankOfCoords, and partitions the pool (ranks 1-5)" offRBad.IsEmpty
         (if offRBad.IsEmpty then "every canonical cell, ranks 1-5, sym and antisym" else $"{offRBad.Length} failures, first: {(List.head (List.rev offRBad))}")
 
     // The bricks themselves: they cover the domain exactly once, an

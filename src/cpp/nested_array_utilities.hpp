@@ -965,6 +965,19 @@ namespace nested_array_utilities {
         else                  return canon_off3_incl(a, b, c, n);
     }
 
+    // canon_count(m, r, strict): canonical r-tuples over m values -- C(m, r) strict, C(m + r - 1, r) inclusive -- the
+    // size of a packed pool, and (as total - canon_count(n - i, ...)) the pool offset where the canonical tuples with
+    // leading coordinate i begin, which is how the threaded orbit-class fold (src/OrbitFold.fs, bench G32) hands each
+    // thread its rows without walking the rows before them. Step k leaves c = C(top - r + k, k) exactly (so C(top, r)
+    // at k = r), and the intermediate product is at most r times the final count.
+    inline size_t canon_count(size_t m, size_t r, bool strict) {
+        const size_t top = strict ? m : m + r - 1;
+        if (top < r) return 0;
+        size_t c = 1;
+        for (size_t k = 1; k <= r; k++) c = c * (top - r + k) / k;
+        return c;
+    }
+
     // Left-justify a sorted R-tuple to storage coords. strict -> extra -k.
     template<size_t R>
     inline std::array<size_t, R> canon_left_justify(const std::array<size_t, R>& p, bool strict) {

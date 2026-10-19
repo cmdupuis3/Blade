@@ -479,8 +479,32 @@ let negatedBody (p: OrbitPlan) : IRExpr =
             if kids.IsEmpty then e else rebuild (kids |> List.map go)
     go p.Body
 
+/// Did any level's fold ask for `omp`?
+let ompRequested (p: OrbitPlan) : bool = p.Levels |> List.exists (fun l -> l.Fold.IsOmpParallel)
+
+/// THE THREADED FORM (bench G32), the C++ lane's: an `omp` request on any
+/// level's fold is spent as a thread team over the OUTERMOST class level --
+/// the rows of the first coordinate, each an independent run of the pool
+/// with its own equality patterns, summed into per-thread class
+/// accumulators that join the class totals in thread order. Still
+/// additions only and still one association of the licensed `+` folds
+/// (every class total is a sum of disjoint sub-multisets); deterministic for
+/// a fixed team size. Not under BLADE_OMP_THREADS (no thread construct is
+/// emitted), nor for a pool with fewer than two rows. The LLVM lane has no
+/// thread runtime and keeps the serial pass.
+let threadedForm (p: OrbitPlan) : bool =
+    ompRequested p && ompThreadEmissionEnabled () && p.PoolCells > 0L && p.Extent >= 2L
+
 /// `blade plan`'s form and evidence for a taken orbit fold.
 let planForm (p: OrbitPlan) : string = $"orbit-class fold (rank {p.Rank}, {p.ClassCount} classes)"
+
+/// The suffix the C++ lane's form carries when it threads (`threadedForm`);
+/// CliCommands.llvmLaneDecision strips it for the serial LLVM lane.
+let threadedSuffix = "; thread team over the first-coordinate rows, per-thread class sums combined in thread order"
+
+/// The C++ lane's form line: `planForm`, plus `threadedSuffix` when threaded.
+let planFormCpp (p: OrbitPlan) : string =
+    if threadedForm p then planForm p + threadedSuffix else planForm p
 
 let planEvidence (p: OrbitPlan) : string =
     let group = if p.Strict then $"AntisymIdx<{p.Rank}, {p.Extent}>" else $"SymIdx<{p.Rank}, {p.Extent}>"
@@ -497,9 +521,13 @@ let planEvidence (p: OrbitPlan) : string =
             $"weights {ws}"
     $"one pass over the {p.PoolCells}-cell {group} pool of `{p.SourceName}` instead of {p.Extent}^{p.Rank} logical reads; {classes}; addition-only combine (licensed regrouping of the logical sum)"
 
-/// Record the decision for `blade plan` (rule `fold-form`).
+/// Record the decision for `blade plan` (rule `fold-form`; the C++ lane's
+/// form, threaded or not -- and, when threaded, the `omp` construct).
 let recordTaken (subject: string) (p: OrbitPlan) : unit =
-    recordFoldForm subject (planForm p) (planEvidence p)
+    recordFoldForm subject (planFormCpp p) (planEvidence p)
+    if threadedForm p then
+        recordOmpConstruct subject "omp parallel num_threads(T) + fixed-order combine"
+            "orbit-class fold: first-coordinate rows dealt boustrophedon to the team, per-thread class sums combined in thread order"
 
 let recordDeclined (subject: string) (why: string) : unit =
     recordCodegenDecision "fold-form" subject (Blade.Effects.Declined $"orbit-class fold not taken: {why}")
