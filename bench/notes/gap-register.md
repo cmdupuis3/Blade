@@ -1,5 +1,15 @@
 # Compiler gap register — what expert Fortran does by hand that Blade could derive, and does not
 
+**State at close (2026-10-18, tree 2dcc0739, DLL 30FBBC97; branch `worktree-bench-fortran`,
+unmerged to master by the user's choice).** Final gate run (`bench/results/gates/final-*.txt`):
+`blade test` TOTAL 6699 passed, 0 failed; `test interp` 2889 passed, 0 failed, 2
+skip-unsupported; `test opt-diff` 1976 passed (1838 optimizer-inert), 0 failed, 915 skipped;
+`test llvm` 722 passed, 0 failed, 677 skipped (lane refusals); `test docs` 131 passed, 0
+failed, 78 sketch skips. Fixed since the pre-fix matrix: G1 (both lanes, measured), G1b, G3a
+(licensed), G3b, G4, G6, G12, G16, G19, G20, G21, G22; partly: G2, G7, G14; new and open: G28
+(blas repack), G29, G30, G31, G32, G33 (candidate), G34 (candidate); measured results in
+`bench/RESULTS.md` §13.
+
 Architect's bridge from this suite to the next phase. One entry per gap; factual; evidence is
 a `blade emit`/`blade plan` excerpt, a diagnostic code, or a `src/` location found cheaply.
 "Direction" is one line, not a plan. Lane column: whether the C++ and LLVM lanes differ.

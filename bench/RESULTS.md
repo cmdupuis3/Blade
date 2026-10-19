@@ -30,8 +30,13 @@ pairkernel (1.12 / 1.04) in the licensed default — all live — and on gram (1
 and antisym (1.04 / 1.00) in the reproducible build**; under threads gram 1.28 / 1.22 and
 comoment3 1.46 / 1.22 (live), antisym 1.08 / 1.12 *. Remaining serial losses: comoment3
 repro 0.44 (checksum pass; G34 candidate), pairkernel repro 0.78–0.83, recur 0.49–0.55
-(G8), band 0.25–0.51 (G30/G33). Open items from the re-measure: G32, G33, G34. The final
-gate run is in progress; its totals go here when they arrive. Consolidated per-session
+(G8), band 0.25–0.51 (G30/G33). Open items from the re-measure: G32, G33, G34. **Final gate run on
+tree 2dcc0739 (DLL 30FBBC97; consoles `results/gates/final-*.txt`): `blade test` TOTAL
+6699 passed, 0 failed; `test interp` 2889 passed, 0 failed, 2 skip-unsupported; `test
+opt-diff` 1976 passed (1838 optimizer-inert), 0 failed, 915 skipped; `test llvm` 722
+passed, 0 failed, 677 skipped (lane refusals); `test docs` 131 passed, 0 failed, 78
+sketch skips.** The branch `worktree-bench-fortran` remains unmerged to master by the
+user's choice. This document is closed. Consolidated per-session
 tables: `results/full/RUNNER-RECORD.md` (the runner's record, cross-referenced, not
 duplicated here).
 Both §12 decisions are taken (mt8 matched parallelism → group-A mt8 rows superseded and
