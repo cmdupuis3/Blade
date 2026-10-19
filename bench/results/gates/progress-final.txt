@@ -1,0 +1,12 @@
+22:23:26 FINAL GATES START hash=30fbbc9775f694f5
+22:23:26 START gate default: Blade.exe test
+22:28:48 DONE gate default rc=0 wall=322s
+22:28:49 START gate interp: Blade.exe test interp
+22:32:50 DONE gate interp rc=0 wall=241s
+22:32:50 START gate opt-diff: Blade.exe test opt-diff
+22:34:03 DONE gate opt-diff rc=0 wall=73s
+22:34:03 START gate llvm: Blade.exe test llvm
+22:36:02 DONE gate llvm rc=0 wall=119s
+22:36:02 START gate docs: Blade.exe test docs
+22:36:10 DONE gate docs rc=0 wall=8s
+22:36:10 FINAL GATES ALL DONE (runner-window deleted)

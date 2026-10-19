@@ -1,0 +1,216 @@
+test: ignoring ambient OPENBLAS_DIR=C:\Users\cdupu\tools\OpenBLAS-0.3.34-x64 for this run (the suites assume the default emission; blocks that exercise a knob set it themselves)
+
+======================================================================
+  Optimizer Differential (all gates OFF vs ON) (v0.20.0)
+======================================================================
+
+gates: BLADE_FUSION, BLADE_FREEZE_IDIOM, BLADE_CSE, BLADE_POOL_REUSE, BLADE_HOIST
+  (ad emitted)
+  (ad-jvp emitted)
+  (ad-jvp-comb emitted)
+  (anon-ranges emitted)
+  (arity emitted)
+  (basic emitted)
+  (bracketed emitted)
+  (casts emitted)
+  (deferred-concrete emitted)
+  (diagnostics emitted)
+  (display emitted)
+  (display-errors emitted)
+  (domains emitted)
+  (fallback emitted)
+  (func-arrays emitted)
+  (functions emitted)
+  (guard-combinators emitted)
+  (guards emitted)
+  (index-types emitted)
+  (inference-probes emitted)
+  (interfaces emitted)
+  (intrinsics emitted)
+  (loops emitted)
+  (math emitted)
+  (memfree emitted)
+  (memfree-stress emitted)
+  (ml-e2e emitted)
+  (ml-equiv emitted)
+  (ml-ops emitted)
+  (modules emitted)
+  (mutability emitted)
+  (mutability-errors emitted)
+  (ppl emitted)
+  (rand emitted)
+  (recursive-arrays emitted)
+  (replicate emitted)
+  (reynolds emitted)
+  (segments emitted)
+  (sequence-combinators emitted)
+  (sgs emitted)
+  (spectra emitted)
+  (sql-combined emitted)
+  (sql-extents emitted)
+  (sql-extents-multi-rank emitted)
+  (sql-foreign-keys emitted)
+  (sql-group-by emitted)
+  (sql-masks emitted)
+  (sql-reduce emitted)
+  (sql-regressions emitted)
+  (sql-semijoins emitted)
+  (sql-set-ops emitted)
+  (sql-sort emitted)
+  (sql-unique-contains emitted)
+  (sql-v24d-probes emitted)
+  (stack-join emitted)
+  (static emitted)
+  (struct-aborts emitted)
+  (struct-mutual emitted)
+  (structs emitted)
+  (sum-types emitted)
+  (symmetry emitted)
+  (trees emitted)
+  (tuple-views emitted)
+  (tuples emitted)
+  (unit-errors emitted)
+  (units emitted)
+  (zero-combinators emitted)
+  (multifile emitted)
+emitted 2891 programs in 45.5s: 1838 with identical C++ (optimizer inert), 138 to compile and run both ways
+  [PASS]: AD Recursive Array Carry, Trajectory Loss At 127 -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: AD Recursive Array Carry, Final-Element Loss At 257 -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: AD Recursive Array Carry, Trajectory Loss At 509 -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: AD Same-Name Let Rebinding Differentiates Each Binding -- C++ differs (BLADE_POOL_REUSE), output identical
+  [PASS]: JVP Rank-1 Kernel, Centered Product (Row Variance) -- C++ differs (BLADE_FUSION+BLADE_HOIST), output identical
+  [PASS]: JVP Covariance Matrix -- Rank-1 Kernel Calling A Rank-1 Helper -- C++ differs (BLADE_FUSION+BLADE_HOIST), output identical
+  [PASS]: JVP Route A -- Rank-1 Pack Comoment (the covariance matrix) -- C++ differs (BLADE_FUSION+BLADE_HOIST), output identical
+  [PASS]: JVP Covariance -- Rank-1 Kernel Calling A Helper That Calls A Helper -- C++ differs (BLADE_FUSION+BLADE_HOIST), output identical
+  [PASS]: C2-Reverse -- Zip Co-Iteration Reached Through Named Bindings -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: C2-Reverse -- Multi-Slot Map Is The Outer Product, Both Spellings -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: C2-Reverse -- Reverse Mode Through The Moment-Former Shape -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: gram_apply grad + jvp: the adjoint action is itself a gram_apply -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Matrix-free linearization: array-valued jvp and the seeded vjp -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Anon Range Linspace -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Anon Range Function Body -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Anon Range Flat Elementwise -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Anon Range Static Bound -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Anon Range Runtime Bound -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: comoment_prod - recursive centered product over a pack of arrays -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: Covariance matrix - object_for(comoment) over 2D data -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: comoment_prod with a scalar-literal identity base (| 0 -> 1) -- C++ differs (BLADE_FUSION+BLADE_HOIST), output identical
+  [PASS]: Deferred former - bare object_for(named poly kernel), let-bound then applied -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: One recursive poly kernel specialized at multiple arities - no C++ redefinition -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: Covariance matrix with COMPACTED symmetric storage (arity-poly + comm) -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: comoment generator over stdlib mean, one loop object at three arities -- C++ differs (BLADE_FUSION+BLADE_HOIST), output identical
+  [PASS]: method_for(A, A) with a named Poly kernel -- C++ differs (BLADE_FUSION+BLADE_HOIST), output identical
+  [PASS]: a cons-destructured pack head keeps the declared rank at every arity -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: Fused Elementwise Chain -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Fused Scalar Broadcast Chain -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Fused Chain Under Reduce -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Fused Units Chain -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Fusion keeps fusing an unconditional inner read -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: the mixing rule admits explicit conversions and literal adaptation -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: a generic cast converts the element only and keeps the shape -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: a cast of a unit-carrying array keeps its unit -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: the power operator's exponent rules under the mixing rule -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Closed-Form Domain: A Band Fold Streams The Affine Nest -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Closed-Form Domain: The Strict Triangle i < j -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Closed-Form Domain: A Licensed Fold Kernel Vectorizes The Inner Field -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Broadcast Computed Scalar Capture -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: Unannotated Covariance Direct -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: Unannotated Covariance Former -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: Loop Array Return -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: Pinned Covariance SymIdx -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: Prodsum Reduce Broadcast Operand -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: prodsum() Over Abstract-Rank (`T^1`) Parameters -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: Module Let Captured From File Scope -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: Array Intermediate Over Caret Param -- C++ differs (BLADE_FUSION+BLADE_HOIST), output identical
+  [PASS]: Function-Body Grouped Pipeline With Generic Callees -- C++ differs (BLADE_FUSION+BLADE_HOIST), output identical
+  [PASS]: stdlib stats module (mean / variance / stddev) -- C++ differs (BLADE_FUSION+BLADE_HOIST), output identical
+  [PASS]: A bare reference to an UNAPPLIED generic function -- C++ differs (BLADE_FUSION+BLADE_HOIST), output identical
+  [PASS]: Functions CSE Of Repeated Repeatable Values -- C++ differs (BLADE_CSE), output identical
+  [PASS]: Functions CSE Across Pure Call -- C++ differs (BLADE_CSE), output identical
+  [PASS]: stdlib stats over integer and Float32 rows -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Invariant Scalar Hoisted Out Of A Lifted Map -- C++ differs (BLADE_FUSION+BLADE_HOIST), output identical
+  [PASS]: Hoisted Invariant Still Aborts (aborts) -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: Late Broadcast Over An Empty Array -- C++ differs (BLADE_FUSION+BLADE_HOIST), output identical
+  [PASS]: Late Broadcast Scalar Still Aborts (aborts) -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: Folded Extent Let Captured By A Kernel -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: Main-Local Kernel Called By Name -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: Generic Body Scalar Construction Broadcast -- C++ differs (BLADE_CSE+BLADE_HOIST), output identical
+  [PASS]: Shared Type Variable Keeps Each Extent -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: Shared Type Variable Empty Second Argument Aborts (aborts) -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: Inline Set Operation As A Generic Argument -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: A generic parameter beside a real scalar keeps the parameter's type -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: A generic elementwise result survives a kernel use of its function -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Chained Positional Elementwise Binop -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Implicit Object For Named Kernel Left -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: Kernel Body Array Let Call Form -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Kernel Body Unannotated Param Broadcast -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Array Valued Kernel Return -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: Grouped Row Array Result -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: Grouped Dense Result Mapped -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: Array Valued Kernel Result Is Iterable -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: Kernel Body Unforced Let -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Leading Axis Fold Returned Group Grid -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: Rank-raising row kernel declared with an ABSTRACT T^1 return -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: object_for with a row-returning comm kernel over the SAME array (SymIdx) -- C++ differs (BLADE_FUSION+BLADE_HOIST), output identical
+  [PASS]: object_for with a row-returning comm kernel over DIFFERENT arrays (dense) -- C++ differs (BLADE_FUSION+BLADE_HOIST), output identical
+  [PASS]: Pipeline In Function Body -- C++ differs (BLADE_POOL_REUSE), output identical
+  [PASS]: Kernel-Body Row View As An Elementwise-Map Operand -- C++ differs (BLADE_FUSION+BLADE_HOIST), output identical
+  [PASS]: Deferred Outer Product Under The Default Partial Fold Streams -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: Row maps returning a row, in the natural spellings -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: Pipeline Block Row Map Stages -- C++ differs (BLADE_FUSION+BLADE_HOIST), output identical
+  [PASS]: Row Map In Generic Function Body -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: CoIter Param Shared Index Tag -- C++ differs (BLADE_FUSION+BLADE_HOIST), output identical
+  [PASS]: Row Lambda Return Extent From Param -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: A Row Kernel's Returned Row Can Take Its Extent From A Captured Array -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: A Row Kernel's Returned Row Can Take Its Extent Through A Unit-Carrying Caret Parameter -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: A Unit-Carrying Caret Row Takes Its Returned Extent From The Row Itself -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: A Row Return Through A Unit-Carrying Caret Return Annotation Has No Known Length (rejects) -- C++ differs (BLADE_HOIST); both refused by a codegen #error (Compilation failed (exit 1):)
+  [PASS]: Math eig: rotation matrix, complex conjugate pair -- C++ differs (BLADE_POOL_REUSE), output identical
+  [PASS]: Memfree Iteration Temp Freed -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Memfree Alias Of Iteration Temp -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Memfree View Of Temp Parent Ordering -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Memfree Function Returning Param -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Memfree Fresh Array Through Nested Calls -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Memfree Deferred Forced Inside Steps -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Memfree Nested Recursion Temps -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Memfree Function Chained Intermediates -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Memfree ObjectFor Function Temps -- C++ differs (BLADE_FUSION+BLADE_POOL_REUSE+BLADE_HOIST), output identical
+  [PASS]: Memfree Sort Mask Unique Function Temps -- C++ differs (BLADE_POOL_REUSE), output identical
+  [PASS]: Memfree Compound Data And Mask Temps -- C++ differs (BLADE_POOL_REUSE), output identical
+  [PASS]: Memfree Scratch Reuse Of Dead Pools -- C++ differs (BLADE_FUSION+BLADE_POOL_REUSE), output identical
+  [PASS]: ML E2E Invariant Regression Training -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: ML E2E Ops Elaboration Training -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: ML Equiv Derive Training -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: ML Perm Certified -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: ML Equiv Suggest Silence -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: ML Ops derive_perm_linear / derive_perm_bias Values -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: whole-array assignment of an array literal or an elementwise expression -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: PPL Central Formers At A Large Mean (No Raw-Moment Cancellation) -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Rand Categorical Search Skips Zero-Weight Runs -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Rand Indexed Families Share Uniforms At One Address By Design -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Rand Indexed: an addressed draw is allowed inside a function body -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Rand Indexed: a body-local categorical weights array and a draw inside a kernel -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Recursive Array RK4 Litmus -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Recursive Array Inline Lagged Slice Arithmetic -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Freeze Idiom Recognized -- C++ differs (BLADE_FREEZE_IDIOM), output identical
+  [PASS]: Freeze Idiom Is Best-Effort -- C++ differs (BLADE_FREEZE_IDIOM), output identical
+  [PASS]: Freeze Idiom Recognized Through A Pure Helper -- C++ differs (BLADE_FREEZE_IDIOM), output identical
+  [PASS]: Recursive Array RK4 Row Temporaries Reused -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: An Exact Division And A Whole-Axis Segment -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Segments Of A Value Read Its Declared Chunked Slots -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: SGS Closure A Priori Training -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: SGS Burgers LES A Posteriori -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Reduce Captured In Kernel -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: Reduce Over a Product of Two COMPOUND Operands -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Per-dimension read of a compound symmetric output -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: Per-dimension coordinate guarded at run time (aborts) -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: Full reads of a compound symmetric output with a trailing axis -- C++ differs (BLADE_HOIST), output identical
+  [PASS]: a non-adjacent repeat under comm stays dense in operand order -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: a non-adjacent repeat with a different middle extent reads in operand order -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: a comm pair on non-adjacent parameters over one array stays dense -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Nested Map Capture Unit Cancels -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Generic Return Carries Arg Unit -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Lifted Binding Chain Typechecks In Linear Time -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Cross-module GENERIC function -- C++ differs (BLADE_HOIST), output identical
+----------------------------------------------------------------------
+Opt Diff: 1976 passed (1838 optimizer-inert), 0 failed, 915 skipped, 73s

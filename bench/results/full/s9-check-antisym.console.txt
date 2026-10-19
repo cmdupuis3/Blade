@@ -1,0 +1,49 @@
+[22:00:44.209 +    0.0s] check: 1 kernel(s): antisym; size full
+[22:00:44.262 +    0.1s] fingerprinting the machine
+[22:00:45.849 +    1.7s] power: ac, max processor state AC 100%, boost mode AC None, Power Scheme GUID: 64a64f24-65b9-4b56-befd-5ec1eaced9b3  (Silent)
+[22:00:48.479 +    4.3s] build antisym serial-licensed-native full blade-llvm
+[22:00:53.401 +    9.2s]   -> ok (2.9s)
+[22:00:53.401 +    9.2s] build antisym serial-licensed-native full blade-cpp
+[22:00:58.566 +   14.4s]   -> ok (3.4s)
+[22:00:58.644 +   14.4s]   blade-llvm: ok t=0.02764s checksum=57760462.7106086 input=481149.43540513 peakWS=24.9MB
+[22:00:58.729 +   14.5s]   blade-cpp: ok t=0.02818s checksum=57760462.7106087 input=481149.43540513 peakWS=25.7MB
+[22:00:58.732 +   14.5s] build antisym serial-repro-native full blade-llvm
+[22:01:03.270 +   19.1s]   -> ok (2.7s)
+[22:01:03.270 +   19.1s] build antisym serial-repro-native full blade-cpp
+[22:01:08.265 +   24.1s]   -> ok (3.3s)
+[22:01:08.345 +   24.2s]   blade-llvm: ok t=0.03015s checksum=57760462.7106089 input=481149.43540513 peakWS=24.9MB
+[22:01:08.433 +   24.2s]   blade-cpp: ok t=0.031s checksum=57760462.7106089 input=481149.43540513 peakWS=25.7MB
+
+# Blade vs Fortran -- check session 2026-10-18T22:00:44
+
+- host LAPTOP-350H6LDB | AMD Ryzen 7 5800HS with Radeon Graphics | 8C/16T | 15.41 GB | power ac | max processor state AC 100% | boost AC None | Power Scheme GUID: 64a64f24-65b9-4b56-befd-5ec1eaced9b3  (Silent)
+- git 99a8f915a9c2396f551346d7b4d0ae159221e071 | Blade.dll 30fbbc9775f694f5 | GNU Fortran (Rev4, Built by MSYS2 project) 16.2.0 | Intel(R) Fortran Compiler for applications running on Intel(R) 64, Version 2026.1.0 Build 20260617 | clang version 22.1.8 (https://github.com/msys2/MINGW-packages d34feaaa1d0aff624c870910b6f2589aa40d20de)
+- size `full` | duration 24.2 s | pins: pins-A.json, pins-B.json
+
+## serial-licensed-native
+
+Blade reference per kernel: antisym=blade-llvm
+
+| kernel | arm | status | n | min (s) | median (s) | IQR (s) | ratio vs ref [95% CI] | verdict | hypothesis | fold form | parallelism | peak WS (MB) | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| antisym | blade-llvm | ok | 1 | 0.02764 | 0.02764 | 0 |  |  |  | reordered (4 reassoc flags) | serial | 24.9 |  |
+| antisym | blade-cpp | ok | 1 | 0.02818 | 0.02818 | 0 |  |  |  | reordered (5 SIMD_REDUCTION) | serial | 25.7 |  |
+
+## serial-repro-native
+
+Blade reference per kernel: antisym=blade-llvm
+
+| kernel | arm | status | n | min (s) | median (s) | IQR (s) | ratio vs ref [95% CI] | verdict | hypothesis | fold form | parallelism | peak WS (MB) | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| antisym | blade-llvm | ok | 1 | 0.03015 | 0.03015 | 0 |  |  |  | in-order | serial | 24.9 |  |
+| antisym | blade-cpp | ok | 1 | 0.031 | 0.031 | 0 |  |  |  | in-order | serial | 25.7 |  |
+
+[22:01:08.440 +   24.2s] wrote C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\.build\sessions\2026-10-18-LAPTOP-350H6LDB\session-220044-check
+antisym serial-licensed-native size=full {'p': 1201, 'n': 401} reference=pin pins-A.json
+  blade-llvm                   ok               checksum=57760462.7106086  input_checksum=481149.43540513  t=0.0276402000017697
+  blade-cpp                    ok               checksum=57760462.7106087  input_checksum=481149.43540513  t=0.028178
+antisym serial-repro-native size=full {'p': 1201, 'n': 401} reference=pin pins-A.json
+  blade-llvm                   ok               checksum=57760462.7106089  input_checksum=481149.43540513  t=0.0301486999960616
+  blade-cpp                    ok               checksum=57760462.7106089  input_checksum=481149.43540513  t=0.0309955
+[22:01:08.453 +   24.3s] exit 0: 0 failure(s), 0 flag(s)
+exit 0

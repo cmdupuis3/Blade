@@ -950,3 +950,113 @@ Sessions: serial-licensed 201558; mt8-licensed 202815; serial-repro 204141; mt8-
 - Window 1 (21:33:15-21:42:01, mt8-fastmath): announced 21:26; neither twin-busy nor twin-idle existed for the 5-minute wait (opened by timeout); twin-idle first written 21:42:09; the coordinator reports the sibling A/B ran 21:30-21:36, so the first ~3 minutes overlapped it. Controls stayed calm (compute CV 2.7%); not honoured / not confirmed.
 - Window 2 (21:45:16-21:47:27, gram blas): announced 21:43; twin-idle present, twin-busy absent at open; session clean (controls compute CV 1.8%). Honoured as far as can be observed.
 - Window 3 (21:49:48-21:52:02, band serial-fastmath): announced 21:47; twin-idle present at open; session clean (compute CV 1.9%). Honoured as far as can be observed.
+
+## UPDATED FINAL TABLE on the final binary (Blade.dll 30FBBC97; antisym and comoment3 serial rows from session 9, everything else from sessions 1-8 on Blade.dll 79AF7EDC)
+
+Label: **uncapped: max processor state 100% (Silent scheme); verdicts suppressed by drift reported as indicative.** Ratio = expert median / Blade median; **< 1 = Fortran faster**; reference blade-llvm (serial) / blade-cpp (mt8, blas); `*` = suppressed (indicative); `-` = no Blade arm / not declared. Blocks marked [S9] are session 9 (bundle session-220309, Blade.dll 30FBBC97; antisym and comoment3 blade-llvm now use the shared-C-core tiles); pairkernel serial rows were also re-measured in session 9 as the unchanged-emission control and agree with the earlier rows (licensed 1.135 / 1.046 vs 1.121 / 1.043; repro 0.834 / 0.772 vs 0.841 / 0.782).
+
+
+### serial-licensed-native
+
+| kernel | Blade ref | Blade median (ms) | other Blade lane (ms) | gf-expert (ms) | ratio gf-expert/Blade [95% CI] | ifx-expert (ms) | ratio ifx-expert/Blade [95% CI] | natural gf / ifx ratio | block |
+|---|---|---|---|---|---|---|---|---|---|
+| gram | blade-llvm | 56.1 | cpp 57.96 | 76.75 | 1.368 [1.355, 1.380] | 69.36 | 1.236 [1.227, 1.243] | 9.896 / 10.172 | 201558 n=11 |
+| antisym | blade-llvm | 27.59 | cpp 28.56 | 31.06 | 1.126 [1.119, 1.138] | 29.61 | 1.073 [1.065, 1.085] | 28.226 / 12.173 | 220309 n=21 [S9] |
+| comoment3 | blade-llvm | 9.312 | cpp 9.593 | 11.37 | 1.221 [1.208, 1.235] | 11.4 | 1.225 [1.219, 1.233] | 64.555 / 77.363 | 220309 n=21 [S9] |
+| pairkernel | blade-llvm | 28.94 | cpp 29.14 | 32.44 | 1.121 [1.118, 1.125] | 30.18 | 1.043 [1.036, 1.047] | 2.082 / 2.230 | 201558 n=21 |
+| recur | blade-llvm | 20.43 | cpp 22.49 | 10.07 | 0.493 [0.457, 0.523] * | 9.995 | 0.489 [0.466, 0.500] * | 0.929 / 0.770 | 201558 n=21, suppressed |
+| band | blade-llvm | 3.318 | cpp 9.276 | 0.8135 | 0.245 [0.245, 0.246] | 1.042 | 0.314 [0.314, 0.314] | 62.375 / 105.554 | 201558 n=21 |
+
+### mt8-licensed-native
+
+| kernel | Blade ref | Blade median (ms) | other Blade lane (ms) | gf-expert (ms) | ratio gf-expert/Blade [95% CI] | ifx-expert (ms) | ratio ifx-expert/Blade [95% CI] | natural gf / ifx ratio | block |
+|---|---|---|---|---|---|---|---|---|---|
+| gram | blade-cpp | 15.58 | llvm serial-only | 19.87 | 1.276 [1.221, 1.322] | 19.06 | 1.223 [1.176, 1.258] | 37.560 / 39.420 | 202815 n=21 |
+| antisym | blade-cpp | 8.79 | llvm serial-only | 9.5 | 1.081 [1.054, 1.114] * | 9.82 | 1.117 [1.080, 1.150] * | 12.788 / 8.206 | 202815 n=21, suppressed |
+| comoment3 | blade-cpp | 3.311 | llvm serial-only | 4.839 | 1.462 [1.434, 1.502] | 4.03 | 1.217 [1.184, 1.271] | 28.356 / 35.423 | 202815 n=21 |
+| pairkernel | blade-cpp | 7.67 | llvm serial-only | 6.27 | 0.817 [0.772, 0.840] * | 6.03 | 0.786 [0.744, 0.804] * | 1.980 / 2.187 | 202815 n=21, suppressed |
+| recur | none | - | blade-cpp no-parallel-form; blade-llvm serial-only | 6.815 | - | 7.486 | - | - / - | 202815 n=21 |
+| band | none | - | blade-cpp no-parallel-form; blade-llvm serial-only | 0.9909 | - | 1.705 | - | - / - | 202815 n=21, suppressed |
+
+### serial-repro-native
+
+| kernel | Blade ref | Blade median (ms) | other Blade lane (ms) | gf-expert (ms) | ratio gf-expert/Blade [95% CI] | ifx-expert (ms) | ratio ifx-expert/Blade [95% CI] | natural gf / ifx ratio | block |
+|---|---|---|---|---|---|---|---|---|---|
+| gram | blade-llvm | 59.73 | cpp 61.34 | 77.07 | 1.290 [1.230, 1.321] | 70.12 | 1.174 [1.119, 1.186] | 9.935 / 9.515 | 204141 n=11 |
+| antisym | blade-llvm | 30.47 | cpp 30.65 | 31.77 | 1.043 [1.008, 1.073] | 30.46 | 1.000 [0.975, 1.020] | 25.507 / 11.011 | 220309 n=21 [S9] |
+| comoment3 | blade-llvm | 26.46 | cpp 16.12 | 11.73 | 0.443 [0.417, 0.450] | 11.77 | 0.445 [0.420, 0.461] | 22.924 / 27.602 | 220309 n=21 [S9] |
+| pairkernel | blade-llvm | 40.82 | cpp 37.85 | 34.32 | 0.841 [0.836, 0.852] | 31.91 | 0.782 [0.777, 0.790] | 1.489 / 1.565 | 204141 n=21 |
+| recur | blade-llvm | 23.77 | cpp 23.85 | 12.95 | 0.545 [0.538, 0.554] | 13.34 | 0.561 [0.552, 0.571] | 0.748 / 0.626 | 204141 n=21 |
+| band | blade-llvm | 9.277 | cpp 9.289 | 3.111 | 0.335 [0.334, 0.336] | 3.718 | 0.401 [0.399, 0.402] | 22.304 / 37.841 | 204141 n=21 |
+
+### mt8-repro-native
+
+| kernel | Blade ref | Blade median (ms) | other Blade lane (ms) | gf-expert (ms) | ratio gf-expert/Blade [95% CI] | ifx-expert (ms) | ratio ifx-expert/Blade [95% CI] | natural gf / ifx ratio | block |
+|---|---|---|---|---|---|---|---|---|---|
+| gram | blade-cpp | 19.14 | llvm serial-only | 20.66 | 1.080 [1.048, 1.124] * | 19.81 | 1.035 [1.002, 1.075] * | 28.891 / 32.206 | 205306 n=21, suppressed |
+| antisym | blade-cpp | 10.88 | llvm serial-only | 10.1 | 0.929 [0.878, 0.983] * | 10.11 | 0.929 [0.903, 0.989] * | 10.400 / 6.644 | 205306 n=21, suppressed |
+| comoment3 | blade-cpp | 9.91 | llvm serial-only | 4.861 | 0.490 [0.466, 0.521] * | 4.101 | 0.414 [0.391, 0.434] * | 9.669 / 12.172 | 205306 n=21, suppressed |
+| pairkernel | blade-cpp | 17.34 | llvm serial-only | 6.217 | 0.359 [0.351, 0.378] * | 6.472 | 0.373 [0.354, 0.380] * | 0.897 / 0.978 | 205306 n=21, suppressed |
+| recur | none | - | blade-cpp no-parallel-form; blade-llvm serial-only | 7.407 | - | 7.795 | - | - / - | 205306 n=21, suppressed |
+| band | none | - | blade-cpp no-parallel-form; blade-llvm serial-only | 1.33 | - | 2.344 | - | - / - | 205306 n=21, suppressed |
+
+### serial-fastmath-native
+
+| kernel | Blade ref | Blade median (ms) | other Blade lane (ms) | gf-expert (ms) | ratio gf-expert/Blade [95% CI] | ifx-expert (ms) | ratio ifx-expert/Blade [95% CI] | natural gf / ifx ratio | block |
+|---|---|---|---|---|---|---|---|---|---|
+| gram | blade-llvm | 56.63 | cpp 59.56 | 76.7 | 1.354 [1.341, 1.377] * | 69.96 | 1.235 [1.218, 1.261] * | 9.725 / 3.529 | 210636 n=11, suppressed |
+| antisym | blade-llvm | 27.67 | cpp 28.24 | 31.61 | 1.142 [1.105, 1.167] * | 30.35 | 1.097 [1.064, 1.115] * | 5.772 / 3.058 | 220309 n=21, suppressed [S9] |
+| comoment3 | blade-llvm | 9.622 | cpp 10.6 | 11.98 | 1.245 [1.153, 1.300] * | 11.79 | 1.226 [1.154, 1.318] * | 15.714 / 9.433 | 220309 n=21, suppressed [S9] |
+| pairkernel | - | - | - | - | - | - | - | - | not declared in this regime |
+| recur | - | - | - | - | - | - | - | - | not declared in this regime |
+| band | blade-llvm | 3.312 | cpp 9.277 | 1.699 | 0.513 [0.469, 0.517] | 1.322 | 0.399 [0.398, 0.401] | 91.102 / 100.087 | 214954 n=21 |
+
+### mt8-fastmath-native
+
+| kernel | Blade ref | Blade median (ms) | other Blade lane (ms) | gf-expert (ms) | ratio gf-expert/Blade [95% CI] | ifx-expert (ms) | ratio ifx-expert/Blade [95% CI] | natural gf / ifx ratio | block |
+|---|---|---|---|---|---|---|---|---|---|
+| gram | blade-cpp | 17.01 | llvm serial-only | 20.96 | 1.232 [1.173, 1.282] * | 19.83 | 1.166 [1.112, 1.202] * | 38.433 / 13.835 | 213323 n=21, suppressed |
+| antisym | blade-cpp | 9.009 | llvm serial-only | 10.51 | 1.167 [1.109, 1.227] * | 10.36 | 1.150 [1.106, 1.211] * | 4.270 / 2.698 | 213323 n=21, suppressed |
+| comoment3 | blade-cpp | 3.632 | llvm serial-only | 5.232 | 1.441 [1.368, 1.594] * | 4.419 | 1.217 [1.113, 1.355] * | 9.867 / 5.898 | 213323 n=21, suppressed |
+| pairkernel | - | - | - | - | - | - | - | - | not declared in this regime |
+| recur | - | - | - | - | - | - | - | - | not declared in this regime |
+| band | none | - | blade-cpp no-parallel-form; blade-llvm serial-only | 1.179 | - | 1.914 | - | - / - | 213323 n=21, suppressed |
+
+### serial-licensed-blas
+
+| kernel | Blade ref | Blade median (ms) | other Blade lane (ms) | gf-expert (ms) | ratio gf-expert/Blade [95% CI] | ifx-expert (ms) | ratio ifx-expert/Blade [95% CI] | natural gf / ifx ratio | block |
+|---|---|---|---|---|---|---|---|---|---|
+| gram | blade-cpp | 64.53 | llvm no-blas | 65.39 | 1.013 [1.005, 1.023] | 62.48 | 0.968 [0.963, 0.983] | - / - | 214522 n=11 |
+| antisym | - | - | - | - | - | - | - | - | not declared in this regime |
+| comoment3 | - | - | - | - | - | - | - | - | not declared in this regime |
+| pairkernel | - | - | - | - | - | - | - | - | not declared in this regime |
+| recur | - | - | - | - | - | - | - | - | not declared in this regime |
+| band | - | - | - | - | - | - | - | - | not declared in this regime |
+
+### mt8-licensed-blas
+
+| kernel | Blade ref | Blade median (ms) | other Blade lane (ms) | gf-expert (ms) | ratio gf-expert/Blade [95% CI] | ifx-expert (ms) | ratio ifx-expert/Blade [95% CI] | natural gf / ifx ratio | block |
+|---|---|---|---|---|---|---|---|---|---|
+| gram | blade-cpp | 24.46 | llvm no-blas | 19.27 | 0.788 [0.731, 0.869] | 19.98 | 0.817 [0.776, 0.897] | - / - | 214522 n=21 |
+| antisym | - | - | - | - | - | - | - | - | not declared in this regime |
+| comoment3 | - | - | - | - | - | - | - | - | not declared in this regime |
+| pairkernel | - | - | - | - | - | - | - | - | not declared in this regime |
+| recur | - | - | - | - | - | - | - | - | not declared in this regime |
+| band | - | - | - | - | - | - | - | - | not declared in this regime |
+
+Session 9 (session-220309, serial-licensed + serial-repro + serial-fastmath; antisym, comoment3, pairkernel; 21 rounds): wall 1046 s, exit 3 (flags only), 8 blocks, 3 suppressed, excursions dropped 0, no abort. Controls: compute median 12.99 ms CV 3.3% (range 12.50-15.43), memory median 5.43 ms CV 4.7% (range 5.10-6.57). Window A (21:56-22:20): sibling idle flag present and busy flag absent at open; announced 21:54.
+Smoke refresh for antisym, comoment3, pairkernel (--regimes all): exit 0, 0 failures, 0 flags, 259 s (`bench/results/full/s9-smoke.console.txt`); `check <k> --size full --regimes serial-licensed-native,serial-repro-native --arms blade-llvm,blade-cpp`: all three exit 0, 0 flags. blade-llvm plan.txt (bench/.build/<k>/full/<regime>/blade-llvm/plan.txt): antisym `[microkernel v1] ... applied [antisym tile (shared C core blade_llvm_tiles.c over blade_tiles.h, sequential 6x8 (P pass, spill, Q pass), strict packed triangle); P=1201 N=401 ...]`; comoment3 `applied [simplex tile (shared C core blade_llvm_tiles.c over blade_tiles.h, W = X(i) * X(j) panel x 6x8 register tile over k, packed SymIdx<3> pool); P=171 N=201 KC=201 ...]`; pairkernel: no tile line.
+
+## Final gate run (2026-10-18, 22:23-22:36)
+
+- Binary: Blade.dll SHA-256 30FBBC9775F694F513F632BE8EF4B24489EB98C3DFB512857CE747E3BFEC58C7 (verified 21:53, built by the coordinator, tree 2dcc0739 plus docs commits to 99b7056f; no rebuild by the runner). Run from the bench worktree root, ucrt64 first on PATH, sibling session idle (window B, announced 22:21, opened 22:23 with twin-idle present), uncapped. Consoles `bench/results/gates/final-<gate>.txt`, per-gate wall times in `bench/results/gates/progress-final.txt`. No gate failed ([FAIL] count 0 in all five), so nothing was rerun.
+
+| gate | TOTAL line (verbatim) | wall | skip explanation |
+|---|---|---|---|
+| `blade test` | `TOTAL: 6699 passed, 0 failed` | 322 s | no skipped suffix |
+| `blade test interp` | `Interp Diff: 2889 passed, 0 failed, 2 skip-unsupported, 0 skipped` | 241 s | the same 2 as before (Fill Random Symmetric / Antisymmetric, nondeterministic C rand()%mod) |
+| `blade test opt-diff` | `Opt Diff: 1976 passed (1838 optimizer-inert), 0 failed, 915 skipped, 73s` | 73 s | reject probes / programs both compiles refuse alike (tests/OptDiff.fs:160); count unchanged from the merged run |
+| `blade test llvm` | `TOTAL: 722 passed, 0 failed, 677 skipped` | 119 s | the same 677 LLVM-lane refusals in `LLVM Differential` (591 passed); blocks `LLVM Tiles Raw-Bit` 10, `LLVM Blocked Simplex` 15, `LLVM Runtime Shim` 4 all pass |
+| `blade test docs` | `Docs (executable code blocks): 131 passed, 0 failed, 78 skipped` | 8 s | 78 sketch blocks (by design) |
+
+Versus the merged run (79AF7EDC): default 6686 -> 6699 passed, interp 2882 -> 2889, opt-diff 1969 -> 1976, llvm 700 -> 722 passed (skips unchanged), docs unchanged; zero failures throughout. The wall times are 3-8x shorter than the merged run's (838 / 2802 / 104 / 952 / 30 s) for the same corpus; the cause is not established from the output (the machine was otherwise idle for this run; a warm executable cache from the earlier run is a candidate).

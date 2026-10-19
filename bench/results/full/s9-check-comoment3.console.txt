@@ -1,0 +1,49 @@
+[22:01:13.825 +    0.0s] check: 1 kernel(s): comoment3; size full
+[22:01:13.869 +    0.1s] fingerprinting the machine
+[22:01:15.405 +    1.6s] power: ac, max processor state AC 100%, boost mode AC None, Power Scheme GUID: 64a64f24-65b9-4b56-befd-5ec1eaced9b3  (Silent)
+[22:01:17.911 +    4.1s] build comoment3 serial-licensed-native full blade-llvm
+[22:01:22.498 +    8.7s]   -> ok (2.8s)
+[22:01:22.498 +    8.7s] build comoment3 serial-licensed-native full blade-cpp
+[22:01:27.700 +   13.9s]   -> ok (3.5s)
+[22:01:27.760 +   13.9s]   blade-llvm: ok t=0.009281s checksum=80611.4613583867 input=17220.9964465201 peakWS=11.6MB
+[22:01:27.825 +   14.0s]   blade-cpp: ok t=0.009667s checksum=80611.4613583876 input=17220.9964465201 peakWS=12.6MB
+[22:01:27.828 +   14.0s] build comoment3 serial-repro-native full blade-llvm
+[22:01:32.352 +   18.5s]   -> ok (2.7s)
+[22:01:32.352 +   18.5s] build comoment3 serial-repro-native full blade-cpp
+[22:01:37.342 +   23.5s]   -> ok (3.3s)
+[22:01:37.417 +   23.6s]   blade-llvm: ok t=0.02554s checksum=80611.4613583875 input=17220.9964465201 peakWS=11.6MB
+[22:01:37.487 +   23.7s]   blade-cpp: ok t=0.01577s checksum=80611.4613583875 input=17220.9964465201 peakWS=12.6MB
+
+# Blade vs Fortran -- check session 2026-10-18T22:01:13
+
+- host LAPTOP-350H6LDB | AMD Ryzen 7 5800HS with Radeon Graphics | 8C/16T | 15.41 GB | power ac | max processor state AC 100% | boost AC None | Power Scheme GUID: 64a64f24-65b9-4b56-befd-5ec1eaced9b3  (Silent)
+- git 99a8f915a9c2396f551346d7b4d0ae159221e071 | Blade.dll 30fbbc9775f694f5 | GNU Fortran (Rev4, Built by MSYS2 project) 16.2.0 | Intel(R) Fortran Compiler for applications running on Intel(R) 64, Version 2026.1.0 Build 20260617 | clang version 22.1.8 (https://github.com/msys2/MINGW-packages d34feaaa1d0aff624c870910b6f2589aa40d20de)
+- size `full` | duration 23.7 s | pins: pins-A.json, pins-B.json
+
+## serial-licensed-native
+
+Blade reference per kernel: comoment3=blade-llvm
+
+| kernel | arm | status | n | min (s) | median (s) | IQR (s) | ratio vs ref [95% CI] | verdict | hypothesis | fold form | parallelism | peak WS (MB) | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| comoment3 | blade-llvm | ok | 1 | 0.009281 | 0.009281 | 0 |  |  |  | reordered (6 reassoc flags) | serial | 11.6 |  |
+| comoment3 | blade-cpp | ok | 1 | 0.009667 | 0.009667 | 0 |  |  |  | reordered (6 SIMD_REDUCTION) | serial | 12.6 |  |
+
+## serial-repro-native
+
+Blade reference per kernel: comoment3=blade-llvm
+
+| kernel | arm | status | n | min (s) | median (s) | IQR (s) | ratio vs ref [95% CI] | verdict | hypothesis | fold form | parallelism | peak WS (MB) | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| comoment3 | blade-llvm | ok | 1 | 0.02554 | 0.02554 | 0 |  |  |  | in-order | serial | 11.6 |  |
+| comoment3 | blade-cpp | ok | 1 | 0.01577 | 0.01577 | 0 |  |  |  | in-order | serial | 12.6 |  |
+
+[22:01:37.495 +   23.7s] wrote C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\.build\sessions\2026-10-18-LAPTOP-350H6LDB\session-220113-check
+comoment3 serial-licensed-native size=full {'p': 171, 'n': 201} reference=pin pins-A.json
+  blade-llvm                   ok               checksum=80611.4613583867  input_checksum=17220.9964465201  t=0.00928050000220537
+  blade-cpp                    ok               checksum=80611.4613583876  input_checksum=17220.9964465201  t=0.0096673
+comoment3 serial-repro-native size=full {'p': 171, 'n': 201} reference=pin pins-A.json
+  blade-llvm                   ok               checksum=80611.4613583875  input_checksum=17220.9964465201  t=0.0255409000092186
+  blade-cpp                    ok               checksum=80611.4613583875  input_checksum=17220.9964465201  t=0.0157732
+[22:01:37.509 +   23.7s] exit 0: 0 failure(s), 0 flag(s)
+exit 0

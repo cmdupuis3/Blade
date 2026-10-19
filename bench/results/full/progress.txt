@@ -89,3 +89,12 @@
 21:49:48 WINDOW OPEN after waiting 0s: sibling idle; est 4 min
 21:49:54 START rm5-serialfm-band regimes=serial-fastmath-native kernels=band BatteryStatus=2
 21:52:02 DONE rm5-serialfm-band exit=0 (runner-window deleted)
+21:56:19 WINDOW OPEN after waiting 0s: sibling idle; est 30 min
+21:56:24 S9 START hash=30fbbc9775f694f5
+22:00:43 S9 smoke rc=0 wall=259s
+22:01:08 S9 check antisym rc=0 wall=25s
+22:01:37 S9 check comoment3 rc=0 wall=24s
+22:02:04 S9 check pairkernel rc=0 wall=22s
+22:03:09 S9 START bench
+22:20:36 S9 DONE bench rc=3 wall=1047s (runner-window deleted)
+22:23:18 WINDOW OPEN after waiting 0s: sibling idle; est 100 min
