@@ -1,3 +1,0 @@
-[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\band-157674ae-17236-44c4edd0\band.cpp
-[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-211831\build\band\full\mt8-fastmath-native\blade-cpp\band.exe
-[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\band-157674ae-17236-44c4edd0

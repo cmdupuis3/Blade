@@ -1,3 +1,0 @@
-[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\maskagg-6926d8df-14840-f28ce160\maskagg.cpp
-[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-090344\build\maskagg\full\serial-licensed-native\blade-cpp\maskagg.exe
-[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\maskagg-6926d8df-14840-f28ce160

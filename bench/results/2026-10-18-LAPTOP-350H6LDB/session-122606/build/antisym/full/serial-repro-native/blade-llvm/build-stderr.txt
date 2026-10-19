@@ -1,3 +1,0 @@
-[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\antisym-f522777f-15632-c2da28a8\antisym.ll
-[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-122606\build\antisym\full\serial-repro-native\blade-llvm\antisym.exe
-[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\antisym-f522777f-15632-c2da28a8

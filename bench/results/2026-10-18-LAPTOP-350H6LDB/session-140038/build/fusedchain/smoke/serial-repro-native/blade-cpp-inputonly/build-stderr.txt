@@ -1,3 +1,0 @@
-[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\fusedchain_inputonly-e04a0852-5776-57df2b2a\fusedchain_inputonly.cpp
-[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-140038\build\fusedchain\smoke\serial-repro-native\blade-cpp-inputonly\fusedchain_inputonly.exe
-[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\fusedchain_inputonly-e04a0852-5776-57df2b2a

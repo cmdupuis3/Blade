@@ -1,3 +1,0 @@
-[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\fusedchain-a777fc80-4756-07109ef2\fusedchain.cpp
-[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-100329\build\fusedchain\smoke\serial-licensed-native\blade-cpp\fusedchain.exe
-[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\fusedchain-a777fc80-4756-07109ef2

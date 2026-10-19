@@ -1,4 +1,0 @@
-[blade] llvm lane: [omp] requested but emitted serial: the LLVM lane has no thread-level form; the licence is honoured as fold reassociation (lambda in z, lambda in l, lambda in ss, lambda in isum)
-[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\antisym-ce9c7a0b-23820-b9b645b8\antisym.ll
-[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-220309\build\antisym\full\serial-licensed-native\blade-llvm\antisym.exe
-[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\antisym-ce9c7a0b-23820-b9b645b8

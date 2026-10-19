@@ -1,3 +1,0 @@
-[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\dot-843ae51f-9968-5b2aa631\dot.ll
-[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-140038\build\dot\full\mt8-repro-native\blade-llvm\dot.exe
-[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\dot-843ae51f-9968-5b2aa631

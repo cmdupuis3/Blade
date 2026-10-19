@@ -1,3 +1,0 @@
-[Emit] C:\Users\cdupu\AppData\Local\Temp\blade-build\onepass_inputonly-0ddbbe15-19676-9a8c9ce4\onepass_inputonly.cpp
-[Compile] C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-142614\build\onepass\full\serial-fastmath-native\blade-cpp-inputonly\onepass_inputonly.exe
-[Build] kept C:\Users\cdupu\AppData\Local\Temp\blade-build\onepass_inputonly-0ddbbe15-19676-9a8c9ce4

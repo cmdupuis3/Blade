@@ -1,1 +1,0 @@
-C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-211831\build\band\full\mt8-fastmath-native\blade-llvm\band.exe

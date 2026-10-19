@@ -1,6 +1,0 @@
-**********************************************************************
-** Visual Studio 2022 Developer Command Prompt v17.4.3
-** Copyright (c) 2022 Microsoft Corporation
-**********************************************************************
-[vcvarsall.bat] Environment initialized for: 'x64'
-+ ifx /nologo  /O3 /QxHost /fp:fast /fpp /Qopenmp-simd /fpp /F268435456 /I"C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\fortran\." C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-210636\build\comoment3\full\serial-fastmath-native\ifx-natural\src\comoment3.f90  /Fo:"C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-210636\build\comoment3\full\serial-fastmath-native\ifx-natural\ifx-natural.exe.obj" /Fe:"C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-18-LAPTOP-350H6LDB\session-210636\build\comoment3\full\serial-fastmath-native\ifx-natural\ifx-natural.exe" 
