@@ -3384,7 +3384,7 @@ and private emitUnary (c: Ctx) (op: IRUnaryOp) (x: IRExpr) : Val =
     // program does.
     | IRCast (ETFloat64, _) ->
         let v = emitExpr c x
-        if v.Ty = ScI64 then emitI64ToF64 c v else coerce c ScF64 v
+        if v.Ty = ScI64 && Blade.CodeGenExprSupport.i64SplitInScope () then emitI64ToF64 c v else coerce c ScF64 v
     // Float -> Int64 is the checked conversion of the arithmetic contract:
     // NaN / out of range panics BL8014 (blade_f2i64), where fptosi is poison.
     | IRCast (ETInt64, loc) ->
@@ -3403,6 +3403,9 @@ and private emitUnary (c: Ctx) (op: IRUnaryOp) (x: IRExpr) : Val =
 /// ride the arithmetic (an fma of the last two steps rounds the same exact
 /// value once); `reassoc` would regroup it around the magic constant, so a
 /// fold kernel's FoldFmf is deliberately NOT applied.
+/// Taken only in a closed-form domain's cell code (CodeGenExprSupport's split
+/// scope, the C++ lane's rule): elsewhere the plain `sitofp` -- the same
+/// double, one instruction where the split is nine in scalar code.
 and private emitI64ToF64 (c: Ctx) (v: Val) : Val =
     let fl = if factEnabled factFmf && contractLicensed () then " contract" else ""
     let step (rhs: string) =
@@ -5130,7 +5133,8 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
                 match Blade.IR.stripUnits info.OutputType with
                 | ArrayElem arr -> requireScalar "a domain map's element" arr.ElemType
                 | t -> requireScalar "a domain map's result" t
-        let produce = fun c2 xs -> coerce c2 elem (applyKernel c2 cl (xs |> List.map KScalar))
+        // The cell code of a closed-form domain: in Int64 -> Float64 split scope.
+        let produce = fun c2 xs -> Blade.CodeGenExprSupport.withI64SplitScope true (fun () -> coerce c2 elem (applyKernel c2 cl (xs |> List.map KScalar)))
         c.DomainMapBodies.[box produce] <- cl.Body
         { Elem = elem; Groups = [ GDomain plan ]; RowOpBytes = 0L; Src = AVirt produce }
     // Every OTHER tabulated range -- a table-enumerated static struct (its
@@ -7126,6 +7130,9 @@ let tryEmitProgramNamed (programName: string) (program: IRProgram) : Result<stri
                     eprintfn "[llvm ir-dump] callable %d (%s):" cid cl.Name
                     eprintfn "%s" (Blade.IRPrint.ppIRExprWithNames names 1 cl.Body)
             let c = newCtx callables (computeModuleFacts m callables)
+            // Which bodies take the Int64 -> Float64 split: the C++ lane's set
+            // (CodeGenExprSupport, "WHERE `Float64(x)`"), read per body below.
+            Blade.CodeGenExprSupport.setI64SplitReach (Blade.CodeGenExprSupport.i64SplitReachOf m)
             let (moduleReads, publishWanted) = computeModuleReads m callables
             c.ModuleReads <- moduleReads
             c.PublishWanted <- publishWanted
@@ -7135,11 +7142,11 @@ let tryEmitProgramNamed (programName: string) (program: IRProgram) : Result<stri
             // (a static function already folded away, say) never has to be
             // supported, which is the difference between refusing a program
             // and refusing a declaration nothing calls.
-            let mainLines = emitMain c m programName
+            let mainLines = Blade.CodeGenExprSupport.withI64SplitScope false (fun () -> emitMain c m programName)
             while c.Pending.Count > 0 do
                 let cl = c.Pending.Dequeue()
                 let sym = c.Emitted.[cl.Id]
-                c.Funcs.Add(emitFunctionBody c cl sym)
+                c.Funcs.Add(Blade.CodeGenExprSupport.withI64SplitScope (Blade.CodeGenExprSupport.i64SplitReaches cl.Id) (fun () -> emitFunctionBody c cl sym))
             let mainLines, funcs =
                 match resolveFrames c (mainLines :: List.ofSeq c.Funcs) with
                 | m :: fs -> m, fs

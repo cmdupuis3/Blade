@@ -1,0 +1,65 @@
+// TEST: Closed-Form Domain: Int64 To Float64 Is The Same Double In Cell Code And Scalar Code
+// `Float64(x)` of an Int64 has two compiled spellings of ONE value: in a
+// closed-form domain's cell code (the domain map kernel and what it calls)
+// the vectorizable exact split (high word via packed int32, low word via the
+// 2^52 magic exponent, one rounding); everywhere else the plain conversion,
+// one instruction in scalar code. Both are the double nearest the integer,
+// ties to even. This pins that bit for bit, by exact `==` against literal
+// doubles, at the signed-32 boundary (2^31 - 1, 2^31, -2^31, -2^31 - 1), the
+// split's own word boundary (2^32 - 1, 2^32, 2^32 + 1, -2^32), the ties next
+// to 2^53 (2^53 + 1 -> 2^53, -(2^53 + 3) -> -(2^53 + 4)) and the Int64
+// extremes, through all three routes: inline in a domain kernel, in a
+// function the domain kernel calls, and in a plain (non-domain) range map.
+// Every lane (and the interpreter) must count zero mismatches.
+let static m = 14
+type Case = Idx<m>
+
+static struct K {
+    k: Int64<min=0, max=m-1>,
+    z: Int64<min=0, max=0>
+} where z <= k
+
+function val(k: Int64) -> Int64 =
+    match k with
+    | 0 -> 2147483647
+    | 1 -> 2147483648
+    | 2 -> -2147483648
+    | 3 -> -2147483649
+    | 4 -> 4294967295
+    | 5 -> 4294967296
+    | 6 -> 4294967297
+    | 7 -> -4294967296
+    | 8 -> 9007199254740993
+    | 9 -> -9007199254740995
+    | 10 -> 9223372036854775807
+    | 11 -> -9223372036854775807 - 1
+    | 12 -> -1
+    | _ -> 0
+
+function want(k: Int64) -> Float64 =
+    match k with
+    | 0 -> 2147483647.0
+    | 1 -> 2147483648.0
+    | 2 -> -2147483648.0
+    | 3 -> -2147483649.0
+    | 4 -> 4294967295.0
+    | 5 -> 4294967296.0
+    | 6 -> 4294967297.0
+    | 7 -> -4294967296.0
+    | 8 -> 9007199254740992.0
+    | 9 -> -9007199254740996.0
+    | 10 -> 9223372036854775808.0
+    | 11 -> -9223372036854775808.0
+    | 12 -> -1.0
+    | _ -> 0.0
+
+function conv(k: Int64) -> Float64 = Float64(val(k))
+
+let cells = reduce(method_for(range<K>) <@> lambda(k, z) -> 1, (+))
+// EXPECT: cells = 14
+let miss_inline = reduce(method_for(range<K>) <@> lambda(k, z) -> if Float64(val(k)) == want(k) then 0 else 1, (+))
+// EXPECT: miss_inline = 0
+let miss_callee = reduce(method_for(range<K>) <@> lambda(k, z) -> if conv(k) == want(k) then 0 else 1, (+))
+// EXPECT: miss_callee = 0
+let miss_scalar = reduce(method_for(range<Case>) <@> lambda(c) -> if Float64(val(Int64(c))) == want(Int64(c)) then 0 else 1, (+))
+// EXPECT: miss_scalar = 0

@@ -243,6 +243,85 @@ let complexLibmRuntimeNames : Set<string> =
 let private isComplexElem (et: ElemType) =
     match et with ETComplex64 | ETComplex128 -> true | _ -> false
 
+// ---------------------------------------------------------------------------
+// WHERE `Float64(x)` of an Int64 takes the split conversion (both lanes)
+//
+// Two spellings of ONE value: the plain conversion (`static_cast<double>` /
+// `sitofp i64`) and the exact split (blade_arith::i64_to_f64 / EmitLlvm's
+// emitI64ToF64: high word through the packed int32 convert, low word through
+// the 2^52 magic exponent, the exact sum rounded once). Each is the double
+// nearest the integer, ties to even, bit for bit -- so choosing between them
+// moves no value and no pin, in any lane or build. They differ only in COST:
+// AVX2 has no packed int64 -> double, so a loop holding the plain form does
+// not vectorize (g++ refuses it; LLVM scalarizes it per lane, bench gaps
+// G30/G33), while in SCALAR code the split is ~6 instructions where the plain
+// form is one -- +27% on the bench's serial input generators, a scalar
+// recurrence of integer ops around one `Float64(h)` per cell (bench
+// loose-ends item 1).
+//
+// So the split is taken only in the code the cell loops of a CLOSED-FORM
+// DOMAIN run: the domain map kernel itself (rendered inline in the nest) and
+// every callable it reaches (band's `phi`, inlined into the run by the back
+// end). Everywhere else the plain conversion stands. The set is a property of
+// the whole module, computed once per emission (`i64SplitReachOf`) and read
+// at each function's emission; the inline kernel sets the scope itself.
+// ---------------------------------------------------------------------------
+
+/// The map kernels of every `method_for(range<R>) <@> k` over a closed-form
+/// domain in `e`, as callables.
+let private domainMapKernelsIn (e: IRExpr) : IRCallable list =
+    let acc = ResizeArray<IRCallable>()
+    let rec walk (x: IRExpr) =
+        (match x with
+         | IRApplyCombinator info
+             when info.Arrays |> List.exists (function
+                      | IRRange ([ ix ], _) -> (match ix.Extent with IRSparseKeys (SkDomain _) -> true | _ -> false)
+                      | _ -> false) ->
+             (match resolveCallable info.Kernel with Some cl -> acc.Add cl | None -> ())
+         | _ -> ())
+        childrenOf x |> List.iter walk
+    walk e
+    List.ofSeq acc
+
+/// The ids of every domain map kernel in the module and of every callable it
+/// reaches through calls -- the bodies that take the split.
+let i64SplitReachOf (modul: IRModule) : Set<IRId> =
+    let roots =
+        (modul.Bindings |> List.collect (fun b -> domainMapKernelsIn b.Value))
+        @ (modul.Functions |> List.collect (fun f -> domainMapKernelsIn f.Body))
+    let seen = System.Collections.Generic.HashSet<IRId>()
+    let rec visit (cl: IRCallable) =
+        if seen.Add cl.Id then
+            let rec calls (x: IRExpr) =
+                (match x with
+                 | IRApp (f, _, _) -> (match resolveCallable f with Some callee -> visit callee | None -> ())
+                 | _ -> ())
+                childrenOf x |> List.iter calls
+            calls cl.Body
+    roots |> List.iter visit
+    Set.ofSeq seen
+
+let private i64SplitReachStorage = System.Threading.AsyncLocal<Set<IRId>>()
+let private i64SplitScopeStorage = System.Threading.AsyncLocal<bool>()
+
+/// Install the module's split set (i64SplitReachOf); emission entry points
+/// call it once, before any body is rendered.
+let setI64SplitReach (ids: Set<IRId>) : unit = i64SplitReachStorage.Value <- ids
+
+/// Does this callable's body take the split?
+let i64SplitReaches (id: IRId) : bool =
+    let s = i64SplitReachStorage.Value
+    not (isNull (box s)) && Set.contains id s
+
+/// Is the code being rendered right now in split scope?
+let i64SplitInScope () : bool = i64SplitScopeStorage.Value
+
+/// Render `f` with the split scope set to `on`, restoring it after.
+let withI64SplitScope (on: bool) (f: unit -> 'a) : 'a =
+    let saved = i64SplitScopeStorage.Value
+    i64SplitScopeStorage.Value <- on
+    try f () finally i64SplitScopeStorage.Value <- saved
+
 /// Render a function-call unary op, choosing the spelling by operand type and
 /// active dialect. Host rendering is unaryOpToCpp verbatim. In the CUDA device
 /// dialect: complex operands use thrust:: (thrust has no free real()/imag(), so
@@ -272,11 +351,11 @@ let renderUnaryOpTyped (op: IRUnaryOp) (operandTy: IRType) (inner: string) : str
             // The cast's source position rides into the panic's `--> file:line`.
             let at = panicSpanArgs loc.Span
             (if et = ETInt64 then $"blade_rt::f2i64({inner}, {at})" else $"blade_rt::f2i32({inner}, {at})")
-        // Int64 -> Float64: the exact split conversion (blade_runtime.hpp
-        // blade_arith::i64_to_f64), the same double as static_cast<double> but
-        // vectorizable on AVX2, which has no packed int64 -> double (bench gap
-        // G30: `Float64(i - j)` kept a domain fold's cell loop scalar).
-        | IRCast (ETFloat64, _), Some ETInt64 ->
+        // Int64 -> Float64 in a closed-form domain's cell code: the exact
+        // split (blade_arith::i64_to_f64), which vectorizes on AVX2 (bench gap
+        // G30). Elsewhere the plain static_cast below -- the same double (see
+        // "WHERE `Float64(x)` of an Int64 takes the split" above).
+        | IRCast (ETFloat64, _), Some ETInt64 when i64SplitInScope () ->
             $"blade_arith::i64_to_f64({inner})"
         // A transcendental on a REAL operand: blade_libm::, the run-time
         // platform libm (never folded at compile time), whose overloads

@@ -211,6 +211,11 @@ namespace blade_arith {
   // so the one addition (or the fma a contracting build makes of it) rounds the
   // exact value v once -- bit for bit what cvtsi2sd returns, in every rounding
   // mode. With AVX-512DQ the plain conversion vectorizes and is used as is.
+  // Codegen calls it ONLY in a closed-form domain's cell code (the domain map
+  // kernel and what it calls; CodeGenExprSupport, "WHERE Float64(x)"): in
+  // scalar code the split costs ~6 instructions over one cvtsi2sd for the same
+  // double (+27% on an integer generator loop), so everywhere else codegen
+  // keeps static_cast<double>.
   inline double i64_to_f64(int64_t v) {
 #if defined(__AVX512DQ__)
     return static_cast<double>(v);

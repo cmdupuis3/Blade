@@ -952,6 +952,52 @@ let runCliSmokeTests () : TH.BlockResult =
                  && out.Contains "[domain-enum v1] s @ 7:1: applied [enumeration of Band: closed-form affine nest (2 level(s): i in [0, 12], j in [max(0, i - 3), min(12, i + 3)]), 79 cell(s); consumer: streamed fold"
                  && out.Contains "[domain-enum v1] R @ 8:1: applied [enumeration of Band: closed-form affine nest"
                  && out.Contains "consumer: map (the fill streams the nest") (out + err)
+            // WHERE `Float64(x)` of an Int64 takes the split (CodeGenExprSupport):
+            // only the closed-form domain's cell code -- the band kernel's callee
+            // `phi` -- gets the vectorizable split; the scalar generator `gen`
+            // keeps the one-instruction plain conversion (bench loose-ends item
+            // 1: the split everywhere cost the input generators +27%). The two
+            // spellings are the same double, so only the emission is pinned.
+            File.WriteAllText(Path.Combine(dir, "c.blade"),
+                "let static n = 13\n"
+                + "let static w = 3\n"
+                + "type Nx = Idx<n>\n"
+                + "static struct Band {\n"
+                + "    i: Int64<min=0, max=n-1>,\n"
+                + "    j: Int64<min=0, max=n-1>\n"
+                + "} where abs(i - j) <= w\n"
+                + "function gen(k: Int64) -> Float64 = Float64((k * 1103515245 + 12345) % 2147483648) / 2147483648.0\n"
+                + "function phi(i: Int64, j: Int64) -> Float64 = Float64(i - j) / Float64(w + 1)\n"
+                + "let x = method_for(range<Nx>) <@> lambda(k) -> gen(Int64(k)) |> compute\n"
+                + "let s = reduce(method_for(range<Band>) <@> lambda(i, j) -> phi(i, j) * x((i : Nx)), (+))\n")
+            let (code, out, err) = spawn dir [ "emit"; "c.blade" ]
+            // A function's body follows its definition line: a file-scope
+            // `double gen(...) {`, or -- for one that reads a module binding,
+            // like `phi` reading `w` -- a main-local `... phi = [&](...) -> double {`.
+            let cppLine (fn: string) =
+                let lines = out.Split('\n')
+                lines
+                |> Array.tryFindIndex (fun l ->
+                    let t = l.Trim()
+                    t.EndsWith "{" && (t.StartsWith $"double {fn}(" || t.Contains $" {fn} = [&]("))
+                |> Option.map (fun i -> lines.[i + 1 .. min (lines.Length - 1) (i + 4)] |> String.concat "\n")
+                |> Option.defaultValue ""
+            let phiCpp, genCpp = cppLine "phi", cppLine "gen"
+            expectCase "conversion: C++ splits Float64(Int64) only in domain cell code (phi), plain cast in the scalar generator"
+                (code = 0
+                 && phiCpp.Contains "blade_arith::i64_to_f64(" && not (phiCpp.Contains "static_cast<double>(")
+                 && genCpp.Contains "static_cast<double>(" && not (genCpp.Contains "i64_to_f64")) (out + err)
+            let (code, out, err) = spawnWith [ ("BLADE_LLVM", "1") ] dir [ "emit"; "c.blade" ]
+            let llBody (fn: string) =
+                out.Split("\ndefine ")
+                |> Array.tryFind (fun d -> d.Split('\n').[0].Contains $"@bl_{fn}_")
+                |> Option.map (fun d -> d.Split("\n}").[0])
+                |> Option.defaultValue ""
+            let phiLl, genLl = llBody "phi", llBody "gen"
+            expectCase "conversion: LLVM splits Float64(Int64) only in domain cell code (phi), plain sitofp in the scalar generator"
+                (code = 0
+                 && phiLl.Contains "lshr i64" && phiLl.Contains "sitofp i32" && not (phiLl.Contains "sitofp i64")
+                 && genLl.Contains "sitofp i64" && not (genLl.Contains "lshr i64")) (out + err)
         finally
             try Directory.Delete(dir, true) with _ -> ()
     // The editor payload and the REPL: the instance is the same declaration,

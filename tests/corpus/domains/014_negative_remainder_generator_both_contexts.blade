@@ -1,0 +1,36 @@
+// TEST: Closed-Form Domain: A Negative-Remainder Generator Converts Alike In Scalar And Cell Code
+// The bench's input generator shape -- integer rounds ending in `% 2^31`, then
+// one `Float64(h)` -- with a NEGATIVE seed, so every remainder is negative
+// (Blade's `%` truncates toward zero in every lane). `gen_scalar` fills `g`
+// from a plain range map: scalar code, the plain conversion. `gen_cell` is
+// the same body called from a closed-form domain kernel: cell code, the
+// vectorizable split. They must agree bit for bit at every cell (`miss`),
+// and `g` pins the values a C-semantics reference gives.
+let static n = 37
+let static w = 3
+type Nx = Idx<n>
+
+static struct Band {
+    i: Int64<min=0, max=n-1>,
+    j: Int64<min=0, max=n-1>
+} where abs(i - j) <= w
+
+function gen_scalar(k: Int64, seed: Int64) -> Float64 = {
+    let h = ((k + seed) * 1103515245 + 12345) % 2147483648
+    Float64(h) / 2147483648.0
+}
+
+function gen_cell(k: Int64, seed: Int64) -> Float64 = {
+    let h = ((k + seed) * 1103515245 + 12345) % 2147483648
+    Float64(h) / 2147483648.0
+}
+
+let g = method_for(range<Nx>) <@> lambda(k) -> gen_scalar(Int64(k), -1000003) |> compute
+let negatives = reduce(method_for(range<Nx>) <@> lambda(k) -> if g(k) < 0.0 then 1 else 0, (+))
+// EXPECT: negatives = 37
+let g_sum = reduce(g, (+))
+// EXPECT: g_sum = -18.9984497670084
+let miss = reduce(method_for(range<Band>) <@> lambda(i, j) -> if gen_cell(i, -1000003) == g((i : Nx)) then 0 else 1, (+))
+// EXPECT: miss = 0
+let quad = reduce(method_for(range<Band>) <@> lambda(i, j) -> g((i : Nx)) * g((j : Nx)), (+))
+// EXPECT: quad = 65.9761971186334

@@ -1391,7 +1391,13 @@ let private captureParamDecls (caps: CaptureInfo list) : (string * string) list 
         | _ -> ($"{(irTypeToCpp cap.Type)}&", cap.Name)
     (caps |> List.map one) @ gkSidecarParams caps
 
-let genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) : string list * CodeGenContext =
+let rec genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) : string list * CodeGenContext =
+    // A body the closed-form domain cell loops reach renders `Float64(x)` of
+    // an Int64 as the vectorizable split; every other body the plain cast
+    // (CodeGenExprSupport, "WHERE `Float64(x)` of an Int64 takes the split").
+    withI64SplitScope (i64SplitReaches funcDef.Id) (fun () -> genFuncDefCore ctx builder funcDef)
+
+and private genFuncDefCore (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) : string list * CodeGenContext =
     let ind = indentStr ctx
     let bodyInd = ind + "    "
 
@@ -1539,7 +1545,11 @@ let genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) :
     (code, ctx')
 
 /// Generate a function as a C++ lambda (for functions that capture module-level bindings)
-let genFuncDefAsLambda (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) : string list * CodeGenContext =
+let rec genFuncDefAsLambda (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) : string list * CodeGenContext =
+    // Same split scope as genFuncDef.
+    withI64SplitScope (i64SplitReaches funcDef.Id) (fun () -> genFuncDefAsLambdaCore ctx builder funcDef)
+
+and private genFuncDefAsLambdaCore (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) : string list * CodeGenContext =
     let ind = indentStr ctx
 
     // Array params are wrappers; same approach as genFuncDef.
@@ -2035,6 +2045,8 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
     // arm can walk them with parameter substitution.
     let callables = IRPrint.buildCallablesTableForModule modul
     IR.setCallablesContext callables |> ignore
+    // The bodies that take the Int64 -> Float64 split (needs the table above).
+    setI64SplitReach (i64SplitReachOf modul)
 
     // Deterministic deallocation: the fresh-return fixpoint resolves callees
     // through the table installed above, so it must run AFTER it. The stack reset
@@ -2167,6 +2179,8 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
     setCodegenStructFieldsCache modul.Types
     let callables = IRPrint.buildCallablesTableForModule modul
     IR.setCallablesContext callables |> ignore
+    // The bodies that take the Int64 -> Float64 split (needs the table above).
+    setI64SplitReach (i64SplitReachOf modul)
     // Same install as genModule -- split-timing mode goes through this entry point
     // instead, and a missing install here would silently demote every callee to
     // NotFresh (leaks only, but a divergence between the two modes).

@@ -4163,9 +4163,12 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                 |> Map.fold (fun acc k v -> Map.add k v acc) ctx.VarNames
                             let nameMap =
                                 withCaptureNames EnclosingNamesWin cg.Captures nameMap
+                            // A closed-form domain's cell code renders `Float64(Int64)` as the
+                            // vectorizable split (CodeGenExprSupport, "WHERE `Float64(x)`").
                             let bodyExpr =
-                                (genKernelExprWithReynolds cg.KernelExpr cg.KernelParams
-                                     false false nameMap paramFinalNames).CppExpr
+                                withI64SplitScope (domainPlanOfLevel lvl).IsSome (fun () ->
+                                    (genKernelExprWithReynolds cg.KernelExpr cg.KernelParams
+                                         false false nameMap paramFinalNames).CppExpr)
                             // OPERAND STREAMS the body reads: the distinct real
                             // arrays peeled at this level (a dot reads two; a
                             // self-dot `zip(x, x)` reads one pointer and counts as
@@ -4434,7 +4437,8 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                        // space-joined into a one-line IIFE.
                                        [ $"{ind}/* {(ompSuppressedPhrase why)} */" ]
                                    else []
-                               domainNote @ unchunkedNote @ genLoopNest cg ctx.VarNames ctx.Indent)
+                               domainNote @ unchunkedNote
+                               @ withI64SplitScope isDomainFold (fun () -> genLoopNest cg ctx.VarNames ctx.Indent))
                     let code =
                         match dotCall with
                         | Some (call, entry) ->
