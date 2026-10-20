@@ -621,6 +621,254 @@ below parity. Then RESULTS.md section 15 and the gap register.
   effect; loops/486-491 numbered on both branches. Sent to W2-F with the instruction to merge
   the integration tip d332f700 (wave 1 + W2-D + W2-E) into its branch now (git only) and
   reconcile, building after RESUME.
+- **WAVE-1 A/B MEASURED** (runner `w1-ab.md`; OLD 4136f0b5 vs NEW 6b3e5293; 20 sessions,
+  05:13-08:15 file clock, quiet box 3-5% load, AC/Silent/uncapped; harness defaults, 21
+  rounds; no failure/abort/excursion; controls within 0.95-1.04). Expert ratios
+  (gf / ifx, > 1 Blade faster) OLD -> NEW: comoment3 mt8 repro **0.497/0.436 -> 1.080/0.950**
+  (G35; NEW/OLD 0.458 live); pairkernel mt8 repro **0.383/0.372 -> 0.687/0.678** (G35; 0.546);
+  pairkernel mt8 licensed **0.797/0.791 -> 1.020/0.967** (B3; 0.801; indicative both sides);
+  maskagg serial licensed **0.856/0.619 -> 1.062/0.788**, repro 0.893/0.688 -> 1.062/0.813
+  (B4); recur serial repro **0.993/1.016 -> 1.337/1.369** (B2r; 0.745); stencil serial repro
+  1.229/0.986 -> 1.416/1.134 (B2r); saxpy serial repro 1.062/0.667 -> 1.375/0.878, serial
+  licensed 1.255/0.925 -> 1.377/0.972, mt8 licensed 0.824/0.840 -> 0.938/0.970 (ind) (B1);
+  dot serial repro **1.213/0.739 -> 1.696/1.012**, fastmath 1.395/0.671 -> 1.631/0.782,
+  licensed 1.455/0.971 -> 1.642/1.090, mt8 repro 0.814/0.859 -> 1.163/1.182 (C); onepass
+  serial repro **1.348/0.803 -> 1.714/1.044**, fastmath 1.477/0.745 -> 1.664/0.820, licensed
+  1.449/1.005 -> 1.635/1.119 (C); fusedchain serial repro **1.393/0.823 -> 1.852/1.093**,
+  fastmath 1.479/0.808 -> 1.688/0.941 (ind), mt8 repro 0.731/0.827 -> 1.017/1.128 (ind) (C).
+  Controls unchanged: gram mt8 1.284/1.217 -> 1.267/1.218; comoment3 serial licensed
+  1.300/1.305 -> 1.303/1.323; recur serial licensed 1.116/1.166 -> 1.075/1.114 (NEW/OLD 1.032
+  [0.993, 1.053], not beyond CI); stencil licensed flat. **No Blade arm slower than OLD beyond
+  its CI.** Remaining losses after wave 1: pairkernel serial repro 0.932/0.879 and comoment3
+  serial repro 0.770/0.780 (the SCATTER's targets, wave 2); pairkernel mt8 repro 0.687/0.678;
+  stencil mt8 repro 0.822/0.875 and mt8 licensed 0.903/0.970 (both ind); saxpy mt8 repro
+  0.811/0.871 (control cell, moved anyway: twins moved); fastmath ifx dot/onepass 0.78/0.82.
+  Twins: C's rule joins the input-only twins too (dot repro twin 0.849, saxpy repro 0.889);
+  nets reported separately in `w1-ab.md` 2b.
+- W2-A MERGED (763cbc3a; one CLAUDE.md two-row conflict three-way merged). Build clean
+  (Blade.dll F1690954...); 18 post-merge blocks green on 12ec4734 (`postmerge-W2A.md`:
+  optimize 257, orbit-scatter 17, omp-pragma 109, omp-reduce 117, symmetry 137, cli 132,
+  loops 253, sibling-folds 18, index-types 380, cell-epilogue 56, tiles/llvm all 0 failed);
+  harness checks onepass / pairkernel repro / comoment3 repro clean. W2-A's own last blocks on
+  52d0c4aa green (cli 130, corpus-wiring 14, interp symmetry 137, llvm symmetry 81/0/55).
+  W2-F REPORTED (merge d63293e6 of d332f700 + fix commit 29cb3506 for findings 9-11: rebinding
+  provenance joins initializer with every later assignment (all three lanes alias on a whole-array
+  rebind; loops/498, mutability-errors/022), deferred wrappers (choice/fallback/guard/sequence,
+  tuple projections, unresolved function-typed kernel name = write; 023, 024), every LLVM fold
+  entry sets FoldOperandWrites + a per-program let table for captured named deferred values;
+  W2-E's writing-join tests re-pinned as refusals (021, g7RefusedCases), joinEffectAudit before
+  joinThreadAudit gates both the serial simd form and the team; 25 blocks green on its tree;
+  not run: full suite / whole-corpus differentials). Codex re-re-review launched
+  (`prompt-diff-W2F-3.txt`, task-mvgom18i-yxuqht, read-only) in parallel with the merge: W2-F
+  MERGED into the integration tree as **ea73698f** (conflicts: CLAUDE.md rows ROW_SLOTS +
+  ORBIT_SCATTER from W2-A / JOIN_THREADS from W2-F; gap-register rows ordered G41-G45;
+  OmpTests `row_slots_declined_outer_kernel_write` takes W2-F's G41 predicate followed by W2-A's
+  scatter cases, and now also forbids `blade_scatter::` -- the scatter's `strictWalk` refuses any
+  form outside its closed whitelist and any non-scalar capture, so a writing kernel never reaches
+  it). Deletions vs parents: 56 vs ours (W2-F's edits), 27 vs theirs (W2-A's rows / recognise
+  signature / LLVM own-records) -- all accounted. Build clean (Blade.dll 7DE2D603...); 27 blocks
+  green on ea73698f (`postmerge-W2F.md`: omp-pragma 121, omp-reduce 121, loops 259,
+  mutability-errors 24, tuples 33, functions 324, diagnostics 108, llvm goldens 23/3/64/19, the
+  rest unchanged); harness checks clean. Codex re-re-review (`codex-diff-W2F-3.md`): DO NOT
+  MERGE on four NEW pre-existing holes of the G41 class -- 12 HIGH partial-view provenance,
+  13 BLOCKER LLVM orbit-class fold ignores FoldOperandWrites (3 canonical cells for 4 logical
+  reads of a writing map), 14 BLOCKER hot-row scheduling moves a consumer read across the
+  producer's writes (12 vs 9), 15 HIGH flat-epilogue / flat materializer `BLADE_IVDEP` on a
+  writing producer; 9 and merge requirements (a), (c)-(f) CLOSED; the scatter needs no
+  FoldOperandWrites read. DECISION: the merge stays (fixes real wrong answers, regresses
+  nothing); 12-15 returned to W2-F as ONE fix commit on top of a merge of 62b87c31 into its
+  branch (RESUME sent 09:15), to be merged before the wave-2 gates; G41's row must stop
+  claiming "every entry" until then. Both records committed (62b87c31). Meanwhile the w1
+  mirror (6b3e5293 binary + wave-2 bench) was made and smoked (all benched pairs, 0 failures,
+  Blade.dll 3061E900...).
+- W2-F FIXED 12-15 as **bd34627b** (one commit on a fast-forward of 62b87c31; 9 files, +198/-12):
+  13 tryOrbitFold declines before emitting when FoldOperandWrites or the source may write
+  (8/3 -> 10/4); 14 planHotRowFolds declines a MayWrite producer kernel (9 -> 12, all lanes,
+  repro too); 15 exprMayWrite gates ivdep in the general nest, the plain flat loop and the
+  flat-epilogue nest (pure producers keep it); 12 the chase follows array views (partial index,
+  slice, shift, reverse, curry) and IRApp(IRObjectFor) counts as deferred, `|> compute` the
+  boundary. Tests: llvm goldens G41-12/G41-13 with controls, finding-11 goldens identify the
+  accumulator structurally, optimize hot-row decline (+repro), omp-pragma ivdep declined x3 +
+  kept x2, loops/499, mutability-errors/025. Blocks green (optimize 259, omp-pragma 126,
+  loops 260, llvm goldens 66 fact layer, interp loops 261, opt-diff loops 230). Open: the probe's
+  writing virtual source is BL9002 in the C++ lane (pre-existing, in G41); compact-row-classes
+  planner not re-audited for a class-partial body reading producer-written storage. Integration
+  branch FAST-FORWARDED to bd34627b = THE WAVE-2 TIP. Build + five gates launched
+  (`gates/w2/gates.ps1`, consoles `gates/w2/gate-*.txt`); Codex review of bd34627b launched in
+  parallel (`prompt-diff-W2F-4.txt`, task-mvgqeu1g-3nn44i).
+- FIVE GATES GREEN on bd34627b (Blade.dll 28EA3E0A...; consoles `gates/w2/gate-*.txt`, timing
+  `gate-timing.txt`): default **7135 passed, 0 failed** (no skip; 14.5 min), opt-diff 2058/0/928
+  sk (3.6 min), docs 131/0/78 (0.5), llvm 809/0/681 (16.6), interp 2983/0/3 skip-unsupported
+  (39.9). Build: 2 FS0046 warnings (`pure` identifier in tests/LlvmTests.fs:871/876, W2-F's test).
+- Codex on bd34627b (`codex-diff-W2F-4.md`): 13 CLOSED (8/3 right for the materialized writer);
+  12/14/15 NOT CLOSED via four more same-class holes: **16 BLOCKER compact row classes (W1-C's
+  B3!) never check the producer** (consumer reads a capture the `comm` producer writes: 12 vs 9);
+  17 BLOCKER hot-row with a writing OUTER kernel / seed (1 vs 0); 18 HIGH producer SIMD /
+  team emitted on a writing producer the lexical BL4005 check misses (local row view alias)
+  -- `allParallel` wins before `producerWrites`; 19 HIGH the tuple chase's live filter omits
+  views. (e): no new decline on the bench kernels. RESUME sent 11:05 with the instruction to
+  close the CLASS (every admission reads the shared write analysis for producer, consumer,
+  outer kernel, seed, intervening bindings; a per-pass table in the G41 row), plus test
+  strengthening (f) and the `pure` rename.
+- W2-F FIXED 16-19 as 843cb654 on its branch, CHERRY-PICKED onto the integration branch as
+  **b161cf10** (14 files, +290/-29; diff --check clean; 0 build warnings). The class closed in one
+  place: `Optimize.scheduleMayWrite` / `scheduleMayWriteIn` (shared writeAnalyzer over a module:
+  callees through functions and let aliases, named deferred values through every let, `let mut`
+  deep copies) consulted by every moving pass for producer / consumer / outer kernel / seed /
+  intervening (matrix in the G41 row; cseFactsOf only where it already was). 16: 9/3 -> 12/3
+  both lanes (loops/500; pairkernel still `[compact-row-classes v1] applied`; index-types 380,
+  symmetry 137); 17: 0.0 -> 1.0 (loops/501); 18: refused in Lowering by provenance (BL4005,
+  mutability-errors/027-028) + the flat path's write veto overrides SIMD/team routes with a
+  census line + buildFlatEpilogue declines a writing producer; 19: tuple components chased with
+  views (026; llvm goldens G41-19). ivdep negatives ban every directive spelling + producer SIMD
+  pragmas with required-path markers (the bare word `ivdep` appears in emitted comments, so not
+  banned). Blocks green (optimize 262, loops 262, mutability-errors 28, llvm goldens 67 fact
+  layer, interp loops 263 / symmetry 138, opt-diff loops 232 / symmetry 99). Limits: no
+  cross-module test of scheduleMayWrite (a cross-module call = possible write = decline: speed
+  only). Build + five gates RE-RUN launched on b161cf10 (`gates/w2/gate-*.txt`; the bd34627b
+  consoles archived in `gates/w2/run1-bd34627b/`); Codex review of 843cb654 launched
+  (`prompt-diff-W2F-5.txt`, task-mvgu1x42-jnlqro).
+- FIVE GATES GREEN on b161cf10 (Blade.dll DCDCDE0C...; `w2-gates-b161cf10.md`, consoles in
+  `gates/w2/run2-b161cf10/`): default 7143/0, opt-diff 2060/0/931, docs 131/0/78, llvm
+  812/0/681, interp 2988/0/3 -- 17 min total thanks to exe-cache hits.
+- Codex on 843cb654 (`codex-diff-W2F-5.md`): 16/17/19 CLOSED; 18 NOT CLOSED via **20 HIGH**
+  (an unresolved CALLBACK -- a function-valued parameter called inside a `where omp` kernel --
+  escapes the lexical check and the walk (UnknownIsWrite=false); the general nest has no
+  producer-write veto: threads-on races) and **21 MEDIUM regression** (the new Lowering refusal
+  passes the body with EMPTY parameter maps, so a legal write to the function's OWN mut
+  parameter is refused). (a): matrix admissions present, but domain diagonal / hoisting / CSE /
+  sibling sharing keep their own older guards (not the new view-aware closure); (e): no bench
+  kernel loses a form; an IMPORTED pure cell producer can newly decline the epilogue
+  (module-local scheduleMayWrite); backend CopiedLet=false can reject a private copy. RESUME
+  sent 11:50 for 20-21 (+ program-wide functions where cheap, extra pragma spellings in the
+  negatives, CopiedLet note).
+- W2-F FIXED 20-21 as d9289387, CHERRY-PICKED as **8e5764ac** (12 files, +254/-22): callbacks
+  judged through every call site's argument (worst stands in; unresolved = write in a parallel
+  body; writing/unresolvable callback BL4005, pure keeps the team; backend
+  `programCallbackArgsCell`); general nest's team route takes the producer-write veto with a
+  census line; own mut parameters kept apart from captured storage
+  (`callableWriteSummaryWith`); AND a regression of 843cb654 caught by a 181-program rescan:
+  examples/mandelbrot.bladenb was BL4005 because a self-recursive pure helper was summarized
+  from the pessimistic start -- recursion is now a least fixpoint from "writes nothing" (8
+  rounds, pessimistic fallback); loops/502-504, mutability-errors/029, omp-pragma x2.
+  Planners take programFuncs (cross-module callees resolve); more pragma spellings banned;
+  G41 row lists the other reordering passes with their own admissions. NEW OPEN **G46**: a
+  kernel-body `let mut c = G` aliases G in the C++ lane but is copied by the interpreter
+  (pre-existing lane divergence; no race because the team is dropped). Blocks green (loops
+  265, mutability-errors 29, omp-pragma 128, interp loops 266 / functions 325, opt-diff loops
+  235). Build + gates RUN 3 + an examples/notebooks `blade check` sweep launched
+  (`examples-check.ps1`); Codex #6 launched (`prompt-diff-W2F-6.txt`).
+- GATES RUN 3 GREEN on 8e5764ac (`w2-gates-8e5764ac.md`, consoles `run3-8e5764ac/`): default
+  7149/0, opt-diff 2063/0/932, docs 131/0/78, llvm 814/0/682, interp 2992/0/3. Examples sweep
+  (`blade check` of 68 examples/*.blade|bladenb): 6 non-zero exits -- 4 zarr stores absent at
+  compile time (BL2008, data not in the repo), tools/check_cod_shells.blade BL4003,
+  station_temps.bladenb BL3999 -- ALL SIX IDENTICAL on the master 4136f0b5 and wave-1 6b3e5293
+  binaries (same codes, same exits): pre-existing, not regressions (the zarr ones are absent
+  data; BL4003 / BL3999 are old diagnostics on old examples -- follow-up card).
+- Codex #6 on d9289387 (`codex-diff-W2F-6.md`): 21 CLOSED; 20 NOT CLOSED via **22 HIGH**
+  (both callback resolvers pick ONE candidate -- the first the plain resolver calls writing --
+  which can turn out pure and hide a later writer; fix: join the SET of candidates' effects)
+  and **23 HIGH** (the recursion cutoff is per callable, its fallback is not top (External =
+  false) and summaries under the unfinished approximation stay cached; fix: SCC fixpoint,
+  widen to top on budget, invalidate dependents). (e): pure-program emission CAN change
+  (pure callbacks newly admit SIMD/teams/ivdep; programFuncs admits imported producers) --
+  bench byte identity not established by review; the A/B measures the final tip anyway, and an
+  emission diff of the bench kernels between bd34627b and the final tip will say whether the
+  audit fixes are inert on them. RESUME sent 12:45 for 22-23 (+ the own-parameter per-cell
+  race negative, the loops/504 pragma positive). Then: Codex #7, gates run 4, mirrors + smoke
+  + A/B.
+- BENCH EMISSION IDENTITY (`gates/w2/emit-identity.ps1`, result `emit-identity.txt`): `blade
+  emit` of all 12 bench kernels x {cpp, llvm} x {licensed, repro} (harness-like env: BLADE_*
+  and OPENBLAS_DIR cleared, lane/regime knobs set) with a fresh build of bd34627b
+  (C:\bt_r2emit, detached worktree) vs the 8e5764ac build: **48 same, 0 differ, 0 failed** --
+  W2-F's audit fixes 12-21 are byte-inert on the bench. Re-run against the final tip before
+  the A/B. (PowerShell trap: `$K` and the loop variable `$k` are the SAME variable.)
+- W2-F FIXED 22-23 as 463c3fee, CHERRY-PICKED as **ba585a28** (11 files, +208/-81): callbacks
+  judged over EVERY candidate (`WriteFacts.Callbacks`: parameter -> every call site's
+  argument; joined; unresolvable = write; only function-valued parameters count --
+  `isFunctionValuedType`, after an intermediate build mistook index-arrow array parameters for
+  callbacks and refused 9 accepted programs); recursion iterates to 64 rounds then widens to
+  TOP (External + every storage parameter), unfinished summaries recomputed.
+  mutability-errors/030-034, loops/505, omp-pragma team positives x2. (c): the front end
+  already refuses a write to an own mut parameter INSIDE a `where omp` kernel (same-cell and
+  per-cell-disjoint alike; conservative, in G41). Rescan of 187 programs: only the intended
+  refusals. Blocks green (loops 266, mutability-errors 34, omp-pragma 130, interp loops 267).
+  Build + GATES RUN 4 + examples sweep + emission identity vs bd34627b launched on ba585a28;
+  Codex #7 launched (`prompt-diff-W2F-7.txt`). POLICY: #7 is the last review round -- any
+  further finding that is neither a wrong answer nor a regression of an accepted program
+  becomes a G-row + follow-up card, not another fix cycle; the A/B runs on the tip #7 gates.
+- GATES RUN 4 GREEN on ba585a28 (Blade.dll 3796F2FD...; `w2-gates-ba585a28.md`): default
+  7157/0, opt-diff 2064/0/937, docs 131/0/78, llvm 814/0/683, interp 2998/0/3; examples sweep
+  the same 6 pre-existing; emission identity vs bd34627b 48/48.
+- Codex #7 on 463c3fee (`codex-diff-W2F-7.md`): 23 CLOSED; 22 NOT CLOSED via **25 HIGH**
+  (second-order callback propagation: `via(launch, bump)` never feeds launch.f, so a writing
+  callback races); **24 BLOCKER = REGRESSION**: `isFunctionValuedType` excludes NULLARY
+  functions (`() -> Float64` has no SVal slot), so `f()` in a pure `where omp` kernel is newly
+  refused BL4005 (no checked-in program hits it; (d) none newly refused in examples / stdlib
+  / bench). RESUME sent 13:35: fix 24 (one-liner) + 25 (callback-argument graph to a fixpoint,
+  one shared collector) + a > 65-parameter widening regression, ONE commit -- the last fix
+  round; then a short Codex #8 in parallel with gates run 5, mirrors + smoke + A/B.
+- W2-F FIXED 24-25 as 804516d1 (Opus trailer -- the builder's session attribution; kept, with
+  the Fable landing line appended), CHERRY-PICKED as **1cf90428** (13 files, +312/-44):
+  `isFunctionValuedType` accepts empty or SVal-bearing slots (loops/506, mutability-errors/035);
+  ONE shared `Optimize.callbackTable` (fixpoint over indirect calls, actuals propagated into
+  every candidate's slots, escaping owners taint = unknown = write) used by Lowering and
+  both emitters (036-038 refusals, loops/507-508 + omp-pragma team controls; 036-038 compiled
+  with propagation off); 039 exercises the round-64 TOP branch (68-parameter rotation). Rescan
+  195 programs: only intended refusals. Blocks green (loops 269, mutability-errors 39,
+  omp-pragma 133, interp loops 270). Build + GATES RUN 5 + examples + emission identity
+  launched on 1cf90428; Codex #8 (last) launched (`prompt-diff-W2F-8.txt`).
+- GATES RUN 5 GREEN on 1cf90428 (Blade.dll 2293124A...; `w2-gates-1cf90428.md`): default
+  7168/0, opt-diff 2067/0/942, docs 131/0/78, llvm 814/0/686, interp 3006/0/3; examples sweep
+  the same 6 pre-existing; emission identity vs bd34627b 48/48.
+- Codex #8 on 804516d1 (`codex-diff-W2F-8.md`): 24 CLOSED; 25 NOT CLOSED via 27 HIGH (a local
+  alias `let k = h` of a callback parameter hides the edge); **26 BLOCKER** (a MODULE-level
+  alias `let run = launch` is taken as an escape: a pure program newly BL4005) and **28
+  BLOCKER** (a not-yet-populated slot is treated as unknown during discovery and the taint is
+  never withdrawn: an all-pure third-order program newly refused by declaration order) --
+  both regressions of accepted pure programs introduced by the new collector, so one more fix
+  round (RESUME 14:12, 26-28 + the 1000-round budget widening to top). Review policy amended:
+  Codex #9 scoped to "regressions of pure programs and the three fixes" only; anything else
+  becomes a G-row. MEANWHILE (overlap, correctness only): mirrors w2/w2a/w2b built from the
+  1cf90428 binary and smoked now; the A/B will run on that binary IF the final tip's bench
+  emission is byte-identical to 1cf90428's (emit-identity against it) and src/cpp is untouched
+  -- then "measured on 1cf90428, bench-identical to the final tip" is the recorded claim;
+  otherwise re-mirror + re-smoke on the final tip.
+- MIRRORS w2 / w2a / w2b MADE from the 1cf90428 build (Blade.dll 2293124A...) and SMOKED (all
+  benched pairs, 0 failures; w2a bundles show `declined -- ordered orbit scatter not taken:
+  disabled by BLADE_ORBIT_SCATTER=0` both lanes). PowerShell trap: `-File` passes
+  `-Mirrors w2,w2a,w2b` as ONE string (a bogus `C:\bt_r2ab\w2,w2a,w2b` mirror was made and
+  removed); use `-Command "& 'script' -Mirrors w2,w2a,w2b"`.
+- W2-F FIXED 26-28 as 362470f8, CHERRY-PICKED as **f1910060** (12 files, +345/-84): the
+  callback table REWRITTEN as a monotone least-fixpoint abstract interpretation (tracked
+  names = callback params, local lets, module bindings; value = callable set + unknown bit +
+  tuple components; empty start; unknown only from real sources / escapes; aliases evaluated;
+  budget 10000 -> widen to empty = all unknown); loops/509-513 (+ five omp-pragma team
+  cases), mutability-errors/040-041; rescan 202 programs clean; src/cpp untouched since
+  1cf90428. Build + GATES RUN 6 + examples + emission identity vs the w2 mirror binary
+  launched; Codex #9 (scoped: closure of 26-28 + regressions of accepted programs only)
+  launched (`prompt-diff-W2F-9.txt`, task-mvh0s9v0-buob0y).
+- **GATES RUN 6 GREEN on f1910060 = THE WAVE-2 TIP** (Blade.dll C7B14497...;
+  `w2-gates-summary.md`): default **7180/0**, opt-diff 2072/0/944, docs 131/0/78, llvm
+  814/0/691, interp 3013/0/3; examples sweep the same 6 pre-existing; emission identity vs the
+  w2 mirror binary (1cf90428) **48/48**, src/cpp untouched -> the A/B on the 1cf90428 mirrors
+  measures the final tip's bench programs bit for bit.
+- Codex #9 (`codex-diff-W2F-9.md`): 26, 27, 28 and the budget CLOSED; **29 = a precision
+  regression of the new escape rule**: returning a local alias of a callback parameter
+  (`passthrough(h) = { let k = h; k }` then `passthrough(launch)(ident)`) or passing a
+  tuple that holds a callable to a function that reads only its scalar component poisons
+  launch.f, so a PURE higher-order program is refused BL4005 that master accepted; no
+  checked-in program (examples, physics, stdlib, bench) hits it; out-of-scope holes: none.
+  DECISION (orchestrator): ship the wave with 29 recorded as OPEN gap **G47** (conservative
+  side -- a refusal, never a wrong answer; the fully precise rule needs return-flow and
+  tuple-parameter tracking in the callback lattice) + a follow-up card. The effect-analysis
+  track consumed nine review rounds; the lattice rewrite is the right base for the follow-up.
+- **WAVE-2 A/B LAUNCHED 14:55** (`driver.ps1`, progress `ab-progress.txt`, consoles
+  `bench-<kernel>-<regime>-<mirror>.txt`; 21 sessions; box quiet: W2-F and Codex idle).
+  Wave-2 A/B scripts
+  drafted in `gates/w2/` (mirrors.ps1: w1 = 6b3e5293 binary + wave-2 bench, w2 = tip, w2a =
+  BLADE_ORBIT_SCATTER=0, w2b = anti_g=0,tri_edge=0 + BLADE_JOIN_THREADS=0; smoke.ps1 only
+  the benched pairs; driver.ps1 12 cells x 2-3 mirrors = 21 sessions; analyze.py).
 
 ## 6. Decisions taken by the orchestrator
 
@@ -848,3 +1096,13 @@ experiments). Corrections carried into the builder briefs:
    request and licence are separate axes; C must not manufacture a request.
 4. **Scatter v1.1** rejected -> dropped; no arbitration needed.
 5. (B disagreements: filled after its review.)
+- **WAVE-2 A/B MEASURED** (16:22; `w2-ab.md`, 23 sessions, zero failures, no Blade arm slower
+  beyond its CI): ordered scatter pairkernel serial repro 37.05 -> 29.49 ms (0.796; expert
+  0.929/0.859 -> **1.163/1.079** win), comoment3 14.87 -> 8.93 ms (0.600; 0.770/0.775 ->
+  **1.288/1.299** win), knob-off restores w1; mt8 repro unchanged (G35 owns it). G7 join team:
+  onepass mt8 0.858 (expert 0.924/0.980 -> 1.135/1.166, the NEW arm), dot 0.867 (-> 1.053/1.127
+  live), fusedchain 0.926 (-> 0.997/1.151); knob-off 1.10-1.15x slower -> Codex item 7 does not
+  fire. Simplex edge k-loops: 2% serially (w2b/w2 1.021 [1.010, 1.033]). anti_g 1 vs auto: within
+  noise serially, auto 0.954 [0.904, 0.996] mt8 (indicative) -- DEFAULT KEPT AT 1, re-measure
+  in a quiet session (follow-up). gram control 0.998/0.987. RESULTS 15.3b filled, G44 CLOSED
+  (cc07b403). ROUND 2 CLOSED on the integration branch; master fast-forward = the user's call.
