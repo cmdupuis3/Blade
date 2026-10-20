@@ -1587,6 +1587,26 @@ let genPackedPoolCopy (arrTy: IRArrayType) (arrayCpp: string) (flatBase: string)
         [ $$"""{ auto* __pc_pool = nested_array_utilities::pool_base({{arrayCpp}}.data);"""
           $$"""  for (size_t __pc_i = 0; __pc_i < {{total}}; __pc_i++) { __pc_pool[__pc_i] = {{flatBase}}_flat[__pc_i]; } }""" ]
 
+/// A fold operand naming a still-deferred value-keyed WRAPPER -- `let q = A <|>
+/// B` (or `<|:>`), directly or through deferred aliases. The reduce emitters
+/// fold a deferred map inline (resolveComputation), but no fold form reads a
+/// choice / fallback cell by cell, so the operand is spelled BY NAME and must
+/// be materialized first (gap G48: `reduce(q, (+))` at top level or in a
+/// top-level block was BL9002 "'q' was not declared"). The interpreter forces
+/// the same read (Loops.force: a module binding materialized under its own
+/// name joins the print list); the LLVM lane already stores a folded named
+/// choice and prints it.
+let isDeferredWrapperOperand (ctx: CodeGenContext) (e: IRExpr) : bool =
+    let rec go (seen: Set<IRId>) (e: IRExpr) =
+        match e with
+        | IRVar (id, _) when not (Set.contains id seen) ->
+            (match Map.tryFind id ctx.DeferredComputations with
+             | Some (IRChoice _ | IRFallback _) -> true
+             | Some (IRVar _ as inner) -> go (Set.add id seen) inner
+             | _ -> false)
+        | _ -> false
+    go Set.empty e
+
 /// Collect the DISTINCT ids of deferred-computation bindings that `root` reads
 /// POSITIONALLY (base of an IRIndex/IRExtent/IRContains) or WHOLE (a
 /// function-call argument, or assignment RHS) anywhere in the tree. Such reads
@@ -1660,7 +1680,12 @@ let collectDeferredPositionalReads (ctx: CodeGenContext) (root: IRExpr) : IRId l
             walk s
             cases |> List.iter (fun c -> Option.iter walk c.Guard; walk c.Body)
         // Rearrangement / reduction inputs (their array operands render by name).
-        | IRReduce (a, k, initOpt) -> walk a; walk k; Option.iter walk initOpt
+        // A fold over a named deferred WRAPPER (gap G48) renders it by name:
+        // the reduce emitters resolve a deferred MAP inline, but a choice /
+        // fallback has no fold form, so it is forced like a positional read.
+        | IRReduce (a, k, initOpt) ->
+            if isDeferredWrapperOperand ctx a then note a
+            walk a; walk k; Option.iter walk initOpt
         | IRReduceCompute (comp, k, init) -> walk comp; walk k; walk init
         | _ -> ()
     walk root

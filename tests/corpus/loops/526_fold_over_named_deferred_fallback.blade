@@ -1,0 +1,21 @@
+// TEST: Fold Over Named Deferred Fallback
+// Gap G48's fallback twin (see loops/525): a fold whose operand NAMES a
+// deferred allocation-keyed fallback `A <|:> B` at module level and in a
+// top-level block. The C++ lane spelled the operand by name while it was only
+// a `// <deferred fallback>` comment; now the fold materializes it first, as
+// the interpreter forces it (a module binding forced that way prints). The
+// LLVM lane refuses `<|:>` (no arm), so this file runs in C++ and the
+// interpreter only.
+//   fq, rfq : every cell of x is allocated, so the fallback reads x
+//   rfb     : the same in a top-level block, folded twice
+let x = [1.0, 2.0, 3.0]
+let y = [5.0, 6.0, 7.0]
+let fq = x <|:> y
+let rfq = reduce(fq, (+))
+let rfb = {
+    let fb = x <|:> y
+    reduce(fb, (+)) + reduce(fb, (+), 1.0)
+}
+// EXPECT: fq = [1.0, 2.0, 3.0]
+// EXPECT: rfq = 6.0
+// EXPECT: rfb = 13.0

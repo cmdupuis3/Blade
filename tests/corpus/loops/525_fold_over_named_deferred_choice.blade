@@ -1,0 +1,46 @@
+// TEST: Fold Over Named Deferred Choice
+// Gap G48: a fold whose operand NAMES a deferred value-keyed wrapper -- `let q
+// = A <|> B`, or `A <|:> B` -- at module level or in a top-level block. The
+// reduce emitters fold a deferred MAP inline, but a choice has no fold form,
+// so the C++ lane spelled the operand by name while `q` was only a
+// `// <deferred choice>` comment: g++ refused the program (BL9002 "'q' was not
+// declared", "'__v6' was not declared" in a block), pure or writing. Now the
+// fold materializes the wrapper first, as the interpreter forces it, and a
+// module binding forced that way joins the print list in every lane.
+//   q  : choice of [-1, 0, 1] (left, value-keyed) and [10, 20, 30]: the zero
+//        cell takes the right side
+//   r1, r2, rsum : two folds of the same named choice, and a sum of two
+//   rb : the same in a top-level block (its own choice, never printed)
+//   rf : the same in a function body (forced at its let there)
+//   rw, seen : a WRITING left side at module level -- the forced binding is
+//        stored once, so both folds read it and the counter is 3
+let x = [1.0, 2.0, 3.0]
+let q = (method_for(x) <@> lambda(v) -> v - 2.0) <|> (method_for(x) <@> lambda(v) -> v * 10.0)
+let r1 = reduce(q, (+))
+let r2 = reduce(q, (+), 1.0)
+let rsum = reduce(q, (+)) + reduce(q, (+))
+let rb = {
+    let qb = (method_for(x) <@> lambda(v) -> v - 2.0) <|> (method_for(x) <@> lambda(v) -> v * 10.0)
+    reduce(qb, (+)) + reduce(qb, (+), 1.0)
+}
+function f(s: Float64) -> Float64 = {
+    let qf = (method_for(x) <@> lambda(v) -> v - s) <|> (method_for(x) <@> lambda(v) -> v * 10.0)
+    reduce(qf, (+)) + reduce(qf, (+), 1.0)
+}
+let rf = f(2.0)
+let mut counter = 0
+let w = (method_for(x) <@> lambda(v) -> {
+    counter = counter + 1
+    v * 2.0
+}) <|> (method_for(x) <@> lambda(v) -> v)
+let rw = reduce(w, (+)) + reduce(w, (+), 1.0)
+let seen = counter
+// EXPECT: q = [-1.0, 20.0, 1.0]
+// EXPECT: r1 = 20.0
+// EXPECT: r2 = 21.0
+// EXPECT: rsum = 40.0
+// EXPECT: rb = 41.0
+// EXPECT: rf = 41.0
+// EXPECT: w = [2.0, 4.0, 6.0]
+// EXPECT: rw = 25.0
+// EXPECT: seen = 3

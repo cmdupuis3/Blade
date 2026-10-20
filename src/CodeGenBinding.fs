@@ -262,6 +262,12 @@ and genBindingDispatch (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
         genLuBinding ctx binding builder
     | IRLuSolve _ ->
         genLuSolveBinding ctx binding builder
+    | IRReduce (arrExpr, kernelExpr, initExpr) when isDeferredWrapperOperand ctx arrExpr ->
+        // A named deferred choice / fallback as the fold operand (gap G48):
+        // genReduceBinding spells it by name, so materialize it first.
+        let (forceCode, ctx, arrExpr') = forceDeferredArrayInput ctx builder ($"{bindingCppName binding}__arr") arrExpr
+        let (code, ctx') = genReduceBinding ctx binding builder arrExpr' kernelExpr initExpr
+        (forceCode @ code, ctx')
     | IRReduce (arrExpr, kernelExpr, initExpr) ->
         genReduceBinding ctx binding builder arrExpr kernelExpr initExpr
     | IRReduceCompute (compExpr, kernelExpr, seedExpr) ->

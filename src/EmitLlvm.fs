@@ -6445,6 +6445,17 @@ and private tryOrbitFold (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExpr) (initE
             let a = emitArr c p.SourceExpr
             (match soleSimplexR a.Groups with
              | Some (r, n, strict) when r = p.Rank && n = p.Extent && strict = p.Strict && hasFlatRead a ->
+                 // The walk this replaces reads the source through IRIndex,
+                 // whose operand rule (consumeArrOperand) marks a MODULE
+                 // binding forced, so a deferred source still prints -- as
+                 // the interpreter forces it and the C++ lane materializes
+                 // it under its own name. The regrouped fold reads the same
+                 // cells, so it keeps that printability fact (gap G49: a
+                 // pure deferred map over a symmetric array, read only by a
+                 // nested kernel's fold, was left off this lane's print list).
+                 (match p.SourceExpr with
+                  | IRVar (sid, _) when c.BindingValues.ContainsKey sid -> markForced c sid
+                  | _ -> ())
                  Some (emitOrbitFold c p a accTy)
              | _ -> None)
         | _ -> None
