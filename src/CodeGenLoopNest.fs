@@ -2891,24 +2891,27 @@ let internal tryGenSyrkDispatch
     match (Map.count streamed, codeGen.OmpRequested, operandTypes, codeGen) with
     | Blade.LinAlgPatterns.BlasL3 call ->
         let libraryEntry = Blade.LinAlgPatterns.shimEntryPoint Blade.LinAlgPatterns.HostBlas call
-        // BLAS-ON PRECEDENCE (`syrkTilePreferredOverBlas`, bench gap G28): a
-        // shape the packed tile takes anyway goes to the tile even with the
-        // gate on. The literal extents are read the same way the arms below
+        // BLAS-ON PRECEDENCE (bench gap G28; BLADE_BLAS_PREFER): at a shape
+        // the packed tile takes anyway, `LinAlgPatterns.blasPreference` picks
+        // the side -- the tile under `native` (the default), the library under
+        // `library`. The literal extents are read the same way the arms below
         // read them (the outer level's bound; A's trailing extent from its
         // TYPE -- a literal needs no operand name). BlasL3 admits real f64
         // only, so no precision test is needed here.
-        let tilePreempts =
+        let (eligibleShape, shapeTxt) =
             match libraryEntry, codeGen.Bindings, operandTypes with
             | Some _, b0 :: _, aTy :: _ ->
-                syrkTilePreferredOverBlas
-                    (genLoopBoundExpr (compoundArrayNamesOf codeGen.Bindings) b0)
-                    (literalOrRuntimeExtentOfArray aTy "" 1)
-            | _ -> false
+                let p = genLoopBoundExpr (compoundArrayNamesOf codeGen.Bindings) b0
+                let k = literalOrRuntimeExtentOfArray aTy "" 1
+                (syrkTileEligibleShape p k, $"P={p} K={k}")
+            | _ -> (false, "")
+        let pref = Blade.LinAlgPatterns.blasPreference ()
+        let tilePreempts = eligibleShape && pref.Prefer = Blade.LinAlgPatterns.PreferNative
         let entryOpt = if tilePreempts then None else libraryEntry
         if tilePreempts then
-            let p = genLoopBoundExpr (compoundArrayNamesOf codeGen.Bindings) (List.head codeGen.Bindings)
-            let k = literalOrRuntimeExtentOfArray (List.head operandTypes) "" 1
-            Blade.LinAlgPatterns.recordTilePreferred (decisionSpan ()) codeGen.OutputName call libraryEntry.Value $"P={p} K={k}"
+            Blade.LinAlgPatterns.recordTilePreferred (decisionSpan ()) codeGen.OutputName call libraryEntry.Value shapeTxt pref
+        elif eligibleShape then
+            Blade.LinAlgPatterns.recordLibraryPreferred (decisionSpan ()) codeGen.OutputName call libraryEntry.Value shapeTxt pref
         else
             Blade.LinAlgPatterns.recordRoute (decisionSpan ()) codeGen.OutputName call
                 (entryOpt |> Option.map (fun e -> (Blade.LinAlgPatterns.HostBlas, e)))

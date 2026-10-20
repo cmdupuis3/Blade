@@ -777,6 +777,10 @@ let runLinAlgEmissionTests () : BlockResult =
     // The syrk-tile cases pin the DEFAULT (tile on); the knob case below sets
     // it off in its own scope.
     use _syrkTile = pinEnv "BLADE_SYRK_TILE" null
+    // The case table pins today's default side explicitly (the suite pins it
+    // too); the BLADE_BLAS_PREFER cases below set it per case.
+    use _blasPrefer = pinEnv "BLADE_BLAS_PREFER" "native"
+    use _blasFlavor = pinEnv "BLADE_BLAS_FLAVOR" null
     let mutable passed = 0
     let mutable failed = 0
     let mutable failedNames = []
@@ -849,6 +853,96 @@ let runLinAlgEmissionTests () : BlockResult =
         else
             passed <- passed + 1
             resultLine Pass blasKnobName "both shapes route to ?syrk, no tile call")
+
+    // ---- BLADE_BLAS_PREFER: who serves a shape BOTH the tile and ?syrk can ----
+    //
+    // `knobSrc` + a gram node: two eligible shapes (20 x 8, above the tile's
+    // crossover), so every case counts TWO calls of one kind and none of the
+    // other. Counted, not spelled: the tile's argument list is the tri-tiles
+    // ABI's business (6016b4f7), and these cases are about the route.
+    // The toolchain file is pointed at a path that does not exist (and the
+    // flavor cleared) unless a case says otherwise, so "default" really is
+    // the default whatever the machine's blade.toolchain.json holds.
+    let prefSrc = knobSrc + "let G = gram(CB, CB)\n"
+    let missingToolchain = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"blade-no-toolchain-{System.Guid.NewGuid():N}.json")
+    let countOf (cpp: string) (pat: string) = System.Text.RegularExpressions.Regex.Matches(cpp, pat).Count
+    let tiles (cpp: string) = countOf cpp @"blade_pgemm::dsyrk_tri\("
+    let shims (cpp: string) = countOf cpp @"blade_linalg::blade_gram_same_d\("
+    // Emit `prefSrc` under a preference setting (None = unset), a flavor, a
+    // toolchain file and the BLAS gate; also return the decisions recorded.
+    let emitPref (name: string) (pref: string option) (flavor: string option) (toolchainFile: string) (blasOn: bool) =
+        use _pref = pinEnv "BLADE_BLAS_PREFER" (Option.toObj pref)
+        use _flavor = pinEnv "BLADE_BLAS_FLAVOR" (Option.toObj flavor)
+        use _file = pinEnv "BLADE_TOOLCHAIN_FILE" toolchainFile
+        Blade.Toolchain.refresh ()
+        Blade.Effects.Decisions.start ()
+        let r = cppOf blasOn name prefSrc
+        let ds = Blade.Effects.Decisions.drain ()
+        Blade.Toolchain.refresh ()
+        (r, ds)
+    let expectRoute (name: string) (pref: string option) (flavor: string option) (toolchainFile: string) (blasOn: bool) (wantTiles: int) (wantShims: int) =
+        match emitPref name pref flavor toolchainFile blasOn with
+        | Error e, _ -> fail name e
+        | Ok cpp, _ ->
+            let t, s = tiles cpp, shims cpp
+            if t = wantTiles && s = wantShims then
+                passed <- passed + 1
+                resultLine Pass name ($"{t} tile call(s), {s} ?syrk call(s)")
+            else
+                fail name ($"expected {wantTiles} tile / {wantShims} ?syrk calls, got {t} / {s}")
+    // Every value, gate ON: native, auto (OpenBLAS / unidentified) and a
+    // stray spelling take the tile; library keeps ?syrk.
+    expectRoute "blas_prefer_native_blas_on_takes_the_tile" (Some "native") None missingToolchain true 2 0
+    expectRoute "blas_prefer_auto_blas_on_takes_the_tile" (Some "auto") None missingToolchain true 2 0
+    expectRoute "blas_prefer_unset_blas_on_takes_the_tile" None None missingToolchain true 2 0
+    expectRoute "blas_prefer_stray_value_reads_as_auto" (Some "fastest") None missingToolchain true 2 0
+    expectRoute "blas_prefer_library_blas_on_keeps_syrk" (Some "library") None missingToolchain true 0 2
+    expectRoute "blas_prefer_blas_spelling_keeps_syrk" (Some "BLAS") None missingToolchain true 0 2
+    // auto with the library IDENTIFIED as MKL prefers the library.
+    expectRoute "blas_prefer_auto_with_mkl_flavor_keeps_syrk" (Some "auto") (Some "mkl") missingToolchain true 0 2
+    // ...and an explicit `native` wins over that identity.
+    expectRoute "blas_prefer_native_beats_mkl_identity" (Some "native") (Some "mkl") missingToolchain true 2 0
+    // Every value, gate OFF: the preference is moot -- the tile is the only arm.
+    for v in [ "native"; "auto"; "library" ] do
+        expectRoute $"blas_prefer_{v}_blas_off_takes_the_tile" (Some v) None missingToolchain false 2 0
+    // BLADE_SYRK_TILE=0 is a separate switch: under `native` it still hands
+    // the eligible shapes to the library with the gate on.
+    let tileOffCase () =
+        use _tile = pinEnv "BLADE_SYRK_TILE" "0"
+        expectRoute "blas_prefer_native_with_tile_off_keeps_syrk" (Some "native") None missingToolchain true 0 2
+    tileOffCase ()
+
+    // The plan names the preference and its SOURCE, one case per source.
+    let planCase (name: string) (pref: string option) (toolchainFile: string) (wantRoute: string) (wantNeedle: string) (wantTileDecline: bool) =
+        match emitPref name pref None toolchainFile true with
+        | Error e, _ -> fail name e
+        | Ok _, ds ->
+            let lines = ds |> List.map Blade.Effects.Decisions.render
+            let routeLines = lines |> List.filter (fun l -> l.Contains "blas-routing" && l.Contains wantNeedle)
+            let tileDecline = lines |> List.exists (fun l -> l.Contains "microkernel" && l.Contains "packed syrk tile skipped for the library")
+            if routeLines.Length = 2 && routeLines |> List.forall (fun l -> l.Contains wantRoute) && tileDecline = wantTileDecline then
+                passed <- passed + 1
+                resultLine Pass name ($"both syrk route lines name `{wantNeedle}`")
+            else
+                let shown = lines |> List.filter (fun l -> l.Contains "blas-routing" || l.Contains "microkernel") |> String.concat " | "
+                fail name ($"wanted 2 blas-routing lines with `{wantRoute}` and `{wantNeedle}` (tile decline: {wantTileDecline}); saw: {shown}")
+    planCase "blas_prefer_plan_names_the_default" None missingToolchain
+        "declined" "BLADE_BLAS_PREFER=auto (default) -> native: the library is not identified as MKL" false
+    planCase "blas_prefer_plan_names_the_env" (Some "library") missingToolchain
+        "applied" "BLADE_BLAS_PREFER=library (env BLADE_BLAS_PREFER) -> library" true
+    // The TOOLCHAIN FILE path: no env var, the key spelled the same in
+    // blade.toolchain.json -- the per-machine setting `blade setup` persists.
+    let toolchainFile = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"blade-prefer-{System.Guid.NewGuid():N}.json")
+    try
+        System.IO.File.WriteAllText(toolchainFile, "{ \"BLADE_BLAS_PREFER\": \"library\" }")
+        planCase "blas_prefer_plan_names_the_toolchain_file" None toolchainFile
+            "applied" "BLADE_BLAS_PREFER=library (blade.toolchain.json) -> library" true
+        expectRoute "blas_prefer_toolchain_file_keeps_syrk" None None toolchainFile true 0 2
+        // The env var outranks the file.
+        expectRoute "blas_prefer_env_outranks_toolchain_file" (Some "native") None toolchainFile true 2 0
+    finally
+        try System.IO.File.Delete toolchainFile with _ -> ()
+        Blade.Toolchain.refresh ()
 
     // ---- a unit annotation changes NO emitted byte ----
     //

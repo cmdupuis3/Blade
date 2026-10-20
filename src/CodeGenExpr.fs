@@ -3018,23 +3018,28 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
         // entry NAME and include line differ.
         let linalgCall = Blade.LinAlgPatterns.classify (IRGram (lExpr, rExpr, sameArray))
         let resolved0 = linalgCall |> Option.bind Blade.LinAlgPatterns.resolveNodeRoute
-        // BLAS-ON PRECEDENCE (`syrkTilePreferredOverBlas`, bench gap G28): a
-        // real f64 same-array gram the packed tile takes anyway (the SAME
-        // operand test the tile arm below applies, `tileOperandOk`) goes to
-        // the tile, not to HOST ?syrk. A device route (BLADE_CUBLAS, strictly
-        // opt-in) is never preempted.
-        let tilePreempts =
+        // BLAS-ON PRECEDENCE (bench gap G28; BLADE_BLAS_PREFER): a real f64
+        // same-array gram the packed tile takes anyway (the SAME operand test
+        // the tile arm below applies, `tileOperandOk`) goes to the side
+        // `LinAlgPatterns.blasPreference` names -- the tile under `native`
+        // (the default), HOST ?syrk under `library`. A device route
+        // (BLADE_CUBLAS, strictly opt-in) is never preempted.
+        let eligibleShape =
             sameArray
             && (match resolved0 with Some (Blade.LinAlgPatterns.HostBlas, _) -> true | _ -> false)
             && not (isComplexElem outElem)
             && outElemStr = "double"
             && Blade.LinAlgPatterns.isDenseRealF64Rank2 la
             && Blade.LinAlgPatterns.isDenseRealF64Rank2 ra
-            && syrkTilePreferredOverBlas mExtent nExtent
+            && syrkTileEligibleShape mExtent nExtent
+        let pref = Blade.LinAlgPatterns.blasPreference ()
+        let tilePreempts = eligibleShape && pref.Prefer = Blade.LinAlgPatterns.PreferNative
         let resolved = if tilePreempts then None else resolved0
         (match linalgCall, resolved0 with
          | Some call, Some (_, entry) when tilePreempts ->
-             Blade.LinAlgPatterns.recordTilePreferred (decisionSpan ()) varName call entry $"P={mExtent} K={nExtent}"
+             Blade.LinAlgPatterns.recordTilePreferred (decisionSpan ()) varName call entry $"P={mExtent} K={nExtent}" pref
+         | Some call, Some (_, entry) when eligibleShape ->
+             Blade.LinAlgPatterns.recordLibraryPreferred (decisionSpan ()) varName call entry $"P={mExtent} K={nExtent}" pref
          | Some call, _ -> Blade.LinAlgPatterns.recordRoute (decisionSpan ()) varName call resolved
          | None, _ -> Blade.LinAlgPatterns.recordUnroutable (decisionSpan ()) varName "gram" "the operands are not one BLAS precision over dense rows (mixed element types, or a non-dense layout): Blade's own loops")
         let shimEntry = resolved |> Option.map snd

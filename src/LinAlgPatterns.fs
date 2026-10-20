@@ -73,6 +73,72 @@ let blasFlavor () : BlasFlavor =
         | "openblas" -> FlavorOpenBlas
         | _ -> FlavorGeneric
 
+/// BLADE_BLAS_PREFER: who serves a contraction that BOTH a native Blade
+/// kernel and the configured BLAS library can serve, when the BLAS gate is
+/// on. Today that is the same-array `comm` row contraction and the
+/// `gram(A, A)` node at shapes the packed syrk tile takes (real f64, literal
+/// extents above `packedTriWorth`) -- no other native kernel preempts a
+/// library route. Read through `Toolchain.getWithOrigin`, so the env var wins
+/// and `blade.toolchain.json` (key spelled the same) is the per-machine
+/// setting `blade setup` persists:
+///
+///   unset / `auto`  -> `native`, unless the library is IDENTIFIED as MKL
+///                      (BLADE_BLAS_FLAVOR=mkl -- the setting an MKL build
+///                      already needs for its headers, so the identity is
+///                      reliable), then `library`. No other library is
+///                      identified: OPENBLAS_DIR / BLADE_BLAS_LINK name a
+///                      path, not a vendor, and guessing from it would not be
+///                      honest. Not a measured rule -- the bench measured
+///                      OpenBLAS only (the tile beat it, bench gap G28).
+///   `native`        -> the native kernel where it is eligible (the default).
+///   `library`       -> the library for every shape it serves, even where a
+///                      native kernel exists (`blas` is accepted as a spelling).
+///   anything else   -> read as `auto`, and the plan line says so.
+///
+/// With the gate off the preference is moot: the native kernel (or Blade's
+/// loops) is the only arm. Separate from BLADE_SYRK_TILE, which turns the
+/// tile itself on and off (`0` sends eligible shapes to the library with the
+/// gate on, and to the per-cell nest with it off). A FUNCTION, read per call;
+/// it changes the emission, so the exe cache keys on it for free.
+type BlasPreference =
+    | PreferNative
+    | PreferLibrary
+
+/// The resolved preference, with what `blade plan` reports: the setting as
+/// normalized, its source, and how `auto` (or a stray spelling) resolved.
+type BlasPreferenceDecision =
+    { Prefer: BlasPreference
+      /// "auto" | "native" | "library"
+      Setting: string
+      /// "env BLADE_BLAS_PREFER" | "blade.toolchain.json" | "default"
+      Source: string
+      /// Why `auto` resolved as it did, or the stray spelling read as auto.
+      Detail: string }
+
+let blasPreference () : BlasPreferenceDecision =
+    let (raw, source) =
+        match Toolchain.getWithOrigin "BLADE_BLAS_PREFER" with
+        | Some (v, Toolchain.FromEnv) -> (Some v, "env BLADE_BLAS_PREFER")
+        | Some (v, Toolchain.FromFile) -> (Some v, "blade.toolchain.json")
+        | None -> (None, "default")
+    let decide (prefer: BlasPreference) (setting: string) (detail: string) : BlasPreferenceDecision =
+        { Prefer = prefer; Setting = setting; Source = source; Detail = detail }
+    let resolveAuto (note: string) : BlasPreferenceDecision =
+        match blasFlavor () with
+        | FlavorMkl -> decide PreferLibrary "auto" (note + "the library is identified as MKL (BLADE_BLAS_FLAVOR=mkl): library preferred")
+        | _ -> decide PreferNative "auto" (note + "the library is not identified as MKL: native kernels preferred where eligible")
+    match raw |> Option.map (fun v -> v.Trim().ToLowerInvariant()) with
+    | None | Some "" | Some "auto" -> resolveAuto ""
+    | Some "native" -> decide PreferNative "native" ""
+    | Some ("library" | "blas") -> decide PreferLibrary "library" ""
+    | Some other -> resolveAuto $"unrecognized value '{other}' read as auto; "
+
+/// One line for `blade plan`: `BLADE_BLAS_PREFER=<setting> (<source>) -> <side>[: detail]`.
+let describeBlasPreference (d: BlasPreferenceDecision) : string =
+    let side = match d.Prefer with PreferNative -> "native" | PreferLibrary -> "library"
+    let detail = if d.Detail = "" then "" else $": {d.Detail}"
+    $"BLADE_BLAS_PREFER={d.Setting} ({d.Source}) -> {side}{detail}"
+
 /// Resolve the tier. Deliberately CHEAP -- a handful of env/file lookups and
 /// no filesystem probing -- because the gates below are consulted from
 /// codegen's per-node routing decisions. The filesystem half (locating the
@@ -813,15 +879,35 @@ let recordRoute (span: Blade.Ast.Span) (subject: string) (call: LinAlgCall) (res
               Subject = subject; Outcome = outcome; Evidence = evidence }
 
 /// A route the library COULD take that Blade's own packed tile preempts
-/// (`CodeGenExprSupport.syrkTilePreferredOverBlas`): recorded as a declined
-/// route naming the entry point it passed over, so `blade plan` shows the
-/// choice and BLADE_SYRK_TILE=0 is the way back.
-let recordTilePreferred (span: Blade.Ast.Span) (subject: string) (call: LinAlgCall) (entry: string) (shape: string) : unit =
+/// (`CodeGenExprSupport.syrkTilePreferredOverBlas`, under the native
+/// `blasPreference`): recorded as a declined route naming the entry point it
+/// passed over and the preference with its source, so `blade plan` shows the
+/// choice and the two ways back (BLADE_BLAS_PREFER=library keeps the tile
+/// available for the gate-off build; BLADE_SYRK_TILE=0 turns it off).
+let recordTilePreferred (span: Blade.Ast.Span) (subject: string) (call: LinAlgCall) (entry: string) (shape: string) (pref: BlasPreferenceDecision) : unit =
     if Blade.Effects.Decisions.active () then
         Blade.Effects.Decisions.record
             { Rule = "blas-routing"; Version = 1; Span = span; Subject = subject
-              Outcome = Blade.Effects.Declined "Blade's packed syrk tile preferred over host ?syrk (faster at this shape and needs no dense staging; BLADE_SYRK_TILE=0 routes it back to the library)"
-              Evidence = [ $"{call.Routine} ({call.Level}, {precisionLetter call.Precision})"; $"passed over: {entry}"; shape ] }
+              Outcome = Blade.Effects.Declined "Blade's packed syrk tile preferred over host ?syrk (no dense staging; BLADE_BLAS_PREFER=library or BLADE_SYRK_TILE=0 routes it to the library)"
+              Evidence = [ $"{call.Routine} ({call.Level}, {precisionLetter call.Precision})"; $"passed over: {entry}"; shape
+                           describeBlasPreference pref ] }
+
+/// The converse: a shape the packed tile WOULD take, routed to the library
+/// because the preference says so. Two records -- the route, applied, with
+/// the preference as evidence; and the tile, declined, saying why -- so the
+/// plan reads the same from either rule.
+let recordLibraryPreferred (span: Blade.Ast.Span) (subject: string) (call: LinAlgCall) (entry: string) (shape: string) (pref: BlasPreferenceDecision) : unit =
+    if Blade.Effects.Decisions.active () then
+        let why = describeBlasPreference pref
+        Blade.Effects.Decisions.record
+            { Rule = "blas-routing"; Version = 1; Span = span; Subject = subject
+              Outcome = Blade.Effects.Applied
+              Evidence = [ $"{call.Routine} ({call.Level}, {precisionLetter call.Precision})"; $"HostBlas: {entry}"
+                           $"tier {resolveBlasTier ()}"; why ] }
+        Blade.Effects.Decisions.record
+            { Rule = "microkernel"; Version = 1; Span = span; Subject = subject
+              Outcome = Blade.Effects.Declined $"packed syrk tile skipped for the library: {why}"
+              Evidence = [ "packed syrk tile"; shape ] }
 
 /// A shape that is NOT a BLAS route at all (mixed precisions, a non-dense
 /// layout): recorded as a declined route so the plan says why the loop ran.
