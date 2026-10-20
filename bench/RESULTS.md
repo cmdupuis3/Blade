@@ -1,6 +1,6 @@
 # Blade vs gfortran / ifx — results
 
-**Status (2026-10-18):** sessions **1a** (serial x licensed x native: gram, comoment3,
+**Status (2026-10-19):** sessions **1a** (serial x licensed x native: gram, comoment3,
 antisym, pairkernel, recur, stencil; `session-042223/`) and **1b** (serial x licensed x
 native: fusedchain, onepass, maskagg, dot, saxpy + twins; `session-090344/`) are IN — the
 headline regime is complete for all eleven kernels. Session **2** (mt8 x licensed x
@@ -36,9 +36,9 @@ tree 2dcc0739 (DLL 30FBBC97; consoles `results/gates/final-*.txt`): `blade test`
 opt-diff` 1976 passed (1838 optimizer-inert), 0 failed, 915 skipped; `test llvm` 722
 passed, 0 failed, 677 skipped (lane refusals); `test docs` 131 passed, 0 failed, 78
 sketch skips.** The branch `worktree-bench-fortran` remains unmerged to master by the
-user's choice. §13 is closed as the phase-2 record; **§14 (follow-up round, 2026-10-19)
-is open** — its structure is in place, its numbers pending the runner's quiet-window A/Bs
-and the final re-measure. Consolidated per-session
+user's choice. §13 is closed as the phase-2 record; **§14 measured on the final tree
+d3d5722b (2026-10-19); not yet merged to master** (the follow-up round; round-3 gates
+all green). Consolidated per-session
 tables: `results/full/RUNNER-RECORD.md` (the runner's record, cross-referenced, not
 duplicated here).
 Both §12 decisions are taken (mt8 matched parallelism → group-A mt8 rows superseded and
@@ -1924,25 +1924,78 @@ indicative where starred; the pre-fix figures these replace are in §3–§7.
   sibling `dotnet build`; a 92 ms memory-control excursion) are kept as records. Everything
   uncapped; indicative where starred.
 
-## 14. Follow-up round (2026-10-19) — structure prepared; numbers pending the runner's quiet-window A/Bs and the final re-measure
+## 14. Follow-up round (2026-10-19) — measured on the final tree d3d5722b (round 3)
 
-Seven branches came out of the §13.3 open items and the §11.5 worklist. Four are merged
-into `worktree-bench-fortran` (checksum-pass 2ebc490f, band 8c66dcb0, blas-repack
-5d568404, maskagg 54c98afe); three are test-complete or nearly and unmerged at the time of
-writing (tri-tiles dc54e1bf, fold-simd 68d344af, recur f36d5503). §13 stays the closed
-phase-2 record; this section is filled the same way (every table number from a session
-bundle's `summary.md` / `session.json`, else `pending`). The figures quoted in the "what
-changed" paragraphs are the branch sessions' OWN single runs or scratch A/Bs — they are
-diagnoses, never results, and are superseded by the table the moment it is filled.
+Seven branches came out of the §13.3 open items and the §11.5 worklist; all seven are
+merged into `worktree-bench-fortran`: checksum-pass 2ebc490f, band 8c66dcb0, blas-repack
+5d568404 + 37d97506, maskagg 54c98afe, tri-tiles dc54e1bf, fold-simd 68d344af + fix
+4e49f46a, recur f36d5503 + S13 9ebc530f (merged through 7a601446) + fix 9d03e588, with the
+integration fix 6016b4f7. The measured tree is d3d5722b (Blade.dll BB52A4C2…); the branch
+is not merged to master. §13 stays the closed phase-2 record.
+
+**Source.** `results/full/RUNNER-RECORD.md`, section "Round 3: protocol re-measure of ALL
+12 kernels on the FINAL tree d3d5722b" — full intervals and the control drift per session
+are there and are not duplicated; bundles
+`results/2026-10-19-LAPTOP-350H6LDB/session-{132026 (serial-licensed A), 133604
+(serial-licensed B), 135344 (mt8-licensed), 142502 (serial-repro A), 144145 (serial-repro
+B), 145930 (mt8-repro), 153107 (serial-fastmath), 155001 (mt8-fastmath), 161102 (gram
+blas)}/`; the incremental (total − input-only twin) figures quoted in 14.4, 14.6 and 14.8
+are from those bundles' `summary.md`. All twelve kernels in every regime each
+`kernel.json` declares, full size, README minimum rounds, interleaved randomized rounds,
+both drift controls, D46 cooldowns, the excursion rule; no session aborted, one excursion
+dropped (serial-fastmath, onepass ifx-expert-inputonly, round 16); control compute CV
+2.2–8.2%, memory CV 5.7–9.3%; 40 of 62 blocks suppressed (37 of them with a Blade
+reference; the other three are no-Blade-arm rows). Label as everywhere: **uncapped: max
+processor state 100% (Silent scheme); verdicts suppressed by drift are indicative** (`*`).
+**Harness evidence caveat:** the bundles' fold-form column does not recognise the scalar
+K-lane tree (`__rlane0..7`) still emitted for expression-position / materialized reduces
+and reports it as `in-order` (e.g. maskagg blade-cpp and its twin in session 133604, whose
+plans say K-lanes(8)); a harness fix is in progress. The medians are unaffected.
+
+**Second opinion.** A Codex audit (`notes/loose-ends-codex.md`) re-checked all 62 final-table
+rows against the runner record (no transcription error) and supplied diagnoses used below:
+the serial C++ input-twin regression (§1 there), the repro-legality boundary for threaded
+folds (§3), the ifx assembly (§4) and small tuning decisions (§7). Its timings are short
+diagnostic single-run A/Bs without the protocol's drift controls — causes, not verdicts;
+every round-3 number below is unchanged by them.
+
+**Within-session A/Bs ("phase 2", items a–h).** Knob and binary A/Bs run in the same
+window as the re-measure, 3 rounds unless stated, scratch bundles under the runner's
+scratchpad (not committed); medians in ms as pass 1 / pass 2, binary A/Bs as old1 / new1 /
+new2 / old2. NEW = d3d5722b (Blade.dll BB52A4C2…), OLD = master's compiler (sources
+identical to f2315642, Blade.dll F9BA95CD…). They are the evidence that a CHANGE moved a
+kernel; the before/after tables compare sessions a day apart, in which the experts drift
+too.
+
+**Gates on the final tree d3d5722b (round 3; consoles `results/gates/round3-*.txt`):**
+`blade test` TOTAL 6780 passed, 0 failed; `test interp` 2912 passed, 0 failed, 2
+skip-unsupported; `test opt-diff` 1999 passed (1851 optimizer-inert), 0 failed, 915
+skipped; `test llvm` 745 passed, 0 failed, 677 skipped; `test docs` 131 passed, 0 failed,
+78 skipped. Round 2 (merged tree 2124edc4, `results/gates/round2-*.txt`) had 5 failures in
+`blade test` (TOTAL 6775 passed, 5 failed), all fixed before round 3: functions/168
+(fold-simd's K-lane tail took an FMA where the generic instance added rounded products;
+4e49f46a rounds every product before the add, in all contraction modes); three BLAS-on
+syrk-tile needles in LinAlg Dispatch (blas-repack 37d97506 predated the tri-tiles
+`dsyrk_tri` ABI; 6016b4f7); `decision_row_fold_declined_while` (recur S13 did not
+recognise the small-buffer `IRArrayLit` zero fill; 9d03e588). Round-3 phase 1 also ran the
+fold-lanes, syrk-tile, row-tile and llvm-tiles blocks (green), `run.py check` recur (ok)
+and gram (exit 1 under the old blas acceptance rule, expected after 37d97506), and the
+smoke `--regimes all` (one failure, the same old rule; the gram-blas re-smoke passed after
+39a8a869).
 
 Conventions as in §13: milliseconds, medians; "before" = the §13 state (the 79AF7EDC /
 30FBBC97 re-measure) where the kernel was re-measured there, else the pre-fix matrix
-(§3–§7, named per row); ratio = expert median / Blade median, **> 1 Blade faster**;
-reference `blade-llvm` in serial regimes, `blade-cpp` in mt8 and blas; `*` = verdict
-suppressed by drift (indicative). Runner's test totals per branch: pending (the
-coordinator sends them; recorded verbatim in the "Tests" line of each item). Corpus
-numbering: blas-repack's and fold-simd's `loops/474-476` collide and tri-tiles'
-`symmetry/125` is provisional — the final numbers are written here when the merge settles.
+(§3–§7, named per row); "after" = round 3; expert columns read before → after (the experts
+were re-run in the same sessions); ratio = expert median / Blade median, **> 1 Blade
+faster**; reference `blade-llvm` in serial regimes, `blade-cpp` in mt8 and blas; ratio
+cells carry the gfortran-expert 95% CI; `*` = verdict suppressed by drift (indicative).
+Corpus numbering on the merged tree: checksum-pass `symmetry/123-124`, band
+`domains/009-012`, blas-repack `loops/474-476`, maskagg `index-types/511-514`, tri-tiles
+`symmetry/125-127`, fold-simd `loops/477-479`, recur `recursive-arrays/026-029`. The
+figures quoted in the "What changed" paragraphs are the branch sessions' own single runs —
+diagnoses, superseded by the tables. Every "Tests." line records the runner's outcome per
+branch commit as the run log has it (outcome and failure names; the per-block TOTAL lines
+went to the coordinator and are quoted only where the run log carries them).
 
 ### 14.1 checksum-pass (branch 2ebc490f, merged) — G32, G34
 
@@ -1961,23 +2014,43 @@ module-constant tables for static extents ≤ 4096, the remaining divisions mark
 exact`, and an explicit bind-once of the read. Both lanes are byte-identical under repro.
 Corpus `symmetry/123-124`.
 
-**Tests.** pending (runner's totals).
+**Tests.** d008770d: 1 regression (Simplex Blocks Agreement 'elementwise map over a packed
+pool costs no coordinate math' failed on bench-g32-g34, passed 19/19 on the bench binary);
+the branch's own A/B aborted x4 on control excursions (machine shared). Follow-up 2ebc490f
+(llvm simplex / symmetry / facts): green. Final-tree gates: §14 header (round 3, all
+green).
+
+**Within-session A/B (item h, OLD vs NEW, old1 / new1 / new2 / old2).** Serial-repro
+comoment3 blade-llvm 25.26 / 15.35 / 14.80 / 25.19 (blade-cpp control 15.69 / 15.76 /
+15.02 / 15.91): G34 removes the whole ~10 ms LLVM-lane excess of §13, and the two lanes
+now sit level. Serial-repro pairkernel blade-llvm 42.37 / 38.71 / 37.01 / 40.38 (blade-cpp
+control unchanged). Mt8-licensed blade-cpp comoment3 3.291 / 3.849 * / 2.894 / 3.188
+(* disturbed control), pairkernel 7.641 / 8.222 / 7.599 / 7.491: **G32's thread team did
+NOT move pairkernel mt8** — the ~6 ms target is not reproduced. The final mt8 emission
+already threads both the packed producer and the orbit checksum (Codex audit §2, from the
+135344 plan and C++); a diagnostic phase timing puts ~5.4 ms in the triangular kernel and
+~1.5 ms in the checksum, so the old "serial orbit pass" explanation is retired: what the
+expert has and Blade lacks is producer-local checksum scheduling (each column re-read for
+the checksum inside the same team) and team reuse.
 
 | regime | kernel | before blade-llvm / blade-cpp (ms) | after blade-llvm / blade-cpp (ms) | gf-expert / ifx-expert (ms) | ratio before → after (gf / ifx) | verdict |
 |---|---|---|---|---|---|---|
-| mt8 x licensed (ref cpp; §13 session 202815) | pairkernel | — / 7.67 | pending / pending | 6.27 / 6.03 | 0.82 * / 0.79 * → pending | pending |
-| mt8 x licensed | gram | — / 15.58 | pending / pending | 19.87 / 19.06 | 1.28 / 1.22 (live) → pending | pending (control: expected unchanged) |
-| mt8 x licensed | comoment3 | — / 3.311 | pending / pending | 4.839 / 4.03 | 1.46 / 1.22 (live) → pending | pending (control) |
-| mt8 x licensed | antisym | — / 8.79 | pending / pending | 9.50 / 9.82 | 1.08 * / 1.12 * → pending | pending (control) |
-| serial x repro (ref llvm; §13 session 9) | comoment3 | 26.46 / 16.12 | pending / pending | 11.73 / 11.77 | 0.44 / 0.45 (live) → pending | pending |
-| serial x repro | pairkernel | 40.82 / 37.85 | pending / pending | 34.32 / 31.91 | 0.84 / 0.78 (live) → pending | pending |
-| serial x repro | antisym | 30.47 / 30.65 | pending / pending | 31.77 / 30.46 | 1.04 / 1.00 (live) → pending | pending (control) |
-| mt8 x repro (ref cpp; §13 session 3c-equivalent) | comoment3 | — / 9.91 | pending / pending | 4.861 / 4.101 | 0.49 * / 0.41 * → pending | pending |
-| mt8 x repro | pairkernel | — / 17.34 | pending / pending | 6.217 / 6.472 | 0.36 * / 0.37 * → pending | pending |
+| mt8 x licensed (ref cpp; §13 session 202815) | pairkernel | — / 7.67 | — / 7.541 | 6.27 / 6.03 → 6.032 / 6.014 | 0.82 * / 0.79 * → 0.800 [0.768, 0.829] * / 0.798 * | loss, indicative (135344); unchanged |
+| mt8 x licensed | gram | — / 15.58 | — / 13.96 | 19.87 / 19.06 → 19.44 / 18.59 | 1.28 / 1.22 (live) → 1.393 [1.309, 1.441] * / 1.332 * | win, indicative (135344; control) |
+| mt8 x licensed | comoment3 | — / 3.311 | — / 2.973 | 4.839 / 4.03 → 4.932 / 4.082 | 1.46 / 1.22 (live) → 1.659 [1.598, 1.716] * / 1.373 * | win, indicative (135344; control) |
+| mt8 x licensed | antisym | — / 8.79 | — / 9.026 | 9.50 / 9.82 → 10.65 / 10.65 | 1.08 * / 1.12 * → 1.179 [1.139, 1.268] * / 1.180 * | win, indicative (135344; control) |
+| serial x repro (ref llvm; §13 session 9) | comoment3 | 26.46 / 16.12 | 15.3 / 15.54 | 11.73 / 11.77 → 11.82 / 11.93 | 0.44 / 0.45 (live) → 0.773 [0.754, 0.783] / 0.780 | loss narrowed, live (142502) |
+| serial x repro | pairkernel | 40.82 / 37.85 | 38.22 / 38.64 | 34.32 / 31.91 → 34.5 / 32.11 | 0.84 / 0.78 (live) → 0.903 [0.898, 0.913] / 0.840 | loss narrowed, live (142502) |
+| serial x repro | antisym | 30.47 / 30.65 | 31.12 / 31.62 | 31.77 / 30.46 → 32.5 / 31.28 | 1.04 / 1.00 (live) → 1.045 [1.020, 1.079] / 1.005 | win / parity, live (142502; control) |
+| mt8 x repro (ref cpp; §13 session 205306) | comoment3 | — / 9.91 | — / 10.82 | 4.861 / 4.101 → 5.171 / 4.615 | 0.49 * / 0.41 * → 0.478 [0.464, 0.525] / 0.427 | loss, live (145930); unchanged (G35) |
+| mt8 x repro | pairkernel | — / 17.34 | — / 18.16 | 6.217 / 6.472 → 6.72 / 6.515 | 0.36 * / 0.37 * → 0.370 [0.354, 0.381] / 0.359 | loss, live (145930); unchanged (G35) |
 
-**Register items it closes (provisional, pending measure):** G32 (threaded orbit pass,
-C++ lane), G34 (candidate → diagnosed and fixed in the LLVM lane: offset arithmetic, not
-the canonical read).
+**Register outcome (measured, round 3):** G34 FIXED (measured) — serial repro comoment3
+blade-llvm 26.46 → 15.30 ms, level with blade-cpp (15.54), ratio 0.44 / 0.45 → 0.77 / 0.78
+(live). What G34 fixed is the ~10 ms LLVM-lane EXCESS; the residual loss (0.77 / 0.78) is
+common to both lanes and is not G34's. Pairkernel repro 0.84 / 0.78 → 0.90 / 0.84. G32
+threaded as designed, **no measured gain on pairkernel mt8 (0.80)**; open (producer-local
+checksum scheduling, above).
 
 ### 14.2 band (branch 8c66dcb0, merged) — G30, G31, G33
 
@@ -1997,47 +2070,96 @@ session's own single runs (NOT results): serial licensed blade-llvm 0.40 / blade
 ms against the experts' 0.81 / 1.04; repro 3.8–4.2 ms, both lanes bit-identical; mt8
 licensed blade-cpp 1.07 ms. Corpus `domains/009-012`.
 
-**Tests.** pending (runner's totals).
+**Tests.** b08a9aef (tests 1–14, validate_B x2, checks 17–18): green. Follow-up 8c66dcb0:
+run, no failure recorded in the run log. Final-tree gates: §14 header (round 3, all
+green).
+
+**Within-session A/B (item f; serial licensed, blade-cpp / blade-llvm, ms).** Full band:
+NEW 0.707 / 0.412, `BLADE_DOMAIN_DIAGONAL=0` 2.974 / 2.852 (the per-cell-division floor),
+OLD 9.273 / 3.316. Narrow band: NEW 0.158 / 0.100, `BLADE_DOMAIN_DIAGONAL=0` 0.758 /
+0.595, OLD 1.123 / 0.613. G30 is the OLD → `DIAGONAL=0` step in the C++ lane (9.27 → 2.97
+ms); G33 is the `DIAGONAL=0` → NEW step in both lanes (4–7x).
 
 | regime | kernel | before blade-llvm / blade-cpp (ms) | after blade-llvm / blade-cpp (ms) | gf-expert / ifx-expert (ms) | ratio before → after (gf / ifx) | verdict |
 |---|---|---|---|---|---|---|
-| serial x licensed (ref llvm; §13 session 201558) | band | 3.318 / 9.276 | pending / pending | 0.8135 / 1.042 → pending (the expert's licensed arm changed too) | 0.245 / 0.314 (live) → pending | pending |
-| serial x repro (ref llvm) | band | 9.277 / 9.289 | pending / pending | 3.111 / 3.718 | 0.335 / 0.401 (live) → pending | pending |
-| mt8 x licensed (ref cpp) | band | no Blade arm (G31) | pending | 0.9909 / 1.705 → pending | — → pending | pending |
-| mt8 x repro (ref cpp) | band | no Blade arm (G31) | pending | pending | — → pending | pending |
-| serial x fastmath (ref llvm) | band | 3.312 / 9.277 | pending / pending | 1.699 / 1.322 | 0.513 / 0.399 (live) → pending | pending |
+| serial x licensed (ref llvm; §13 session 201558) | band | 3.318 / 9.276 | 0.4158 / 0.6335 | 0.8135 / 1.042 → 0.8159 / 1.044 (expert sources unchanged) | 0.245 / 0.314 (live) → 1.962 [1.908, 1.995] / 2.511 | **win, live** (132026) |
+| serial x repro (ref llvm; §13 session 204141) | band | 9.277 / 9.289 | 3.685 / 3.959 | 3.111 / 3.718 → 3.111 / 3.716 | 0.335 / 0.401 (live) → 0.844 [0.843, 0.847] * / 1.008 * | loss (gf) / parity (ifx), indicative (142502) |
+| mt8 x licensed (ref cpp; §13 session 202815) | band | no Blade arm (G31) | — / 1.07 | 0.9909 / 1.705 → 1.04 / 1.78 | — → 0.972 [0.844, 1.053] * / 1.663 * | parity (gf) / win (ifx), indicative (135344) |
+| mt8 x repro (ref cpp; §13 session 205306) | band | no Blade arm (G31) | — / 4.678 | 1.33 / 2.344 → 1.411 / 2.431 | — → 0.302 [0.276, 0.331] * / 0.520 * | loss, indicative (145930; G35) |
+| serial x fastmath (ref llvm; §13 session 214954) | band | 3.312 / 9.277 | 0.4278 / 0.6455 | 1.699 / 1.322 → 1.695 / 1.325 | 0.513 / 0.399 (live) → 3.961 [3.638, 4.069] / 3.098 | **win, live** (153107) |
+| mt8 x fastmath (ref cpp; §13 session 213323) | band | no Blade arm (G31) | — / 1.112 | 1.179 / 1.914 → 1.161 / 1.97 | — → 1.044 [0.971, 1.149] * / 1.773 * | parity (gf) / win (ifx), indicative (155001) |
 
-**Register items it closes (provisional, pending measure):** G30 (C++ lane vectorizes the
-domain inner loop), G31 (thread form for closed-form domain nests), G33 (candidate →
-diagnosed: enumeration order; fixed on both sides). The expert sources did NOT change on
-this item: the Fortran agent's licensed expert already walked the band by diagonal under
-`BENCH_LICENSED` (the per-cell order is its repro arm), which is what the session found
-when it read the assembly; only `kernel.json` changed (no_parallel_form dropped).
+**Register outcome (measured, round 3):** G30 FIXED (measured) — blade-cpp 9.276 → 0.6335
+ms serial licensed, 9.289 → 3.959 ms repro; G33 FIXED (measured) — blade-llvm 3.318 →
+0.4158 ms, 0.245 / 0.314 → 1.96 / 2.51 (live), fastmath 0.51 / 0.40 → 3.96 / 3.10 (live);
+G31 FIXED (measured, licensed) — mt8 0.97 * / 1.66 *, mt8 fastmath 1.04 * / 1.77 *; the
+mt8 repro cell (0.30 * / 0.52 *) is the reproducible threaded fold, serial by design
+(G35). The expert sources did NOT change on this item: the Fortran agent's licensed expert
+already walked the band by diagonal under `BENCH_LICENSED` (the per-cell order is its repro
+arm), which is what the session found when it read the assembly; only `kernel.json`
+changed (no_parallel_form dropped). The measured expert medians confirm it (0.8135 →
+0.8159 ms).
 
-### 14.3 blas-repack (branch 5d568404, merged) — G28, M13 hot-row fold
+### 14.3 blas-repack (branch 5d568404 + 37d97506, merged) — G28, M13 hot-row fold
 
 **What changed.** G28: the BLAS-on `dsyrk` route gained a threaded repack argument (the
 serial dense staging + repack that cost 18–21% under 8 library threads in §13). M13: the
 hot-row fold (`BLADE_HOT_ROW` gate in `optimizerGates`, plan line `[hot-row-fold v1]`)
 schedules the consumer fold inside the producer loop for stencil-shaped halo maps — the
 checksum of a halo map no longer materializes the second output-sized array (the G10
-mechanism). Corpus `loops/474-476` (to be renumbered if fold-simd's collide). Tests all
-green on the branch; the A/B is pending; the G28 diagnosis paragraph comes from the
-session.
+mechanism). Corpus `loops/474-476`.
 
-**Tests.** pending (runner's totals).
+**Late additions.** 37d97506 (merged through 571dfb05): **the packed syrk tile preempts
+host `?syrk` where eligible**, so in the blas regime blade-cpp's gram runs Blade's native
+tile, not the library. The user decided that a native kernel that beats the library is a
+valid blas-regime cell: harness rule **D47** (`notes/design-decisions.md`, committed
+39a8a869) accepts such a build only when its own plan records that the library declined and
+the syrk tile applied for the same subject; a silently unrouted build is still refused; the
+cell's evidence reads `blas_route: native-preempt`. The opt-in **`BLADE_BLAS_PREFER`**
+(`auto|native|library`; the env var over the `blade.toolchain.json` key; `auto` with MKL
+prefers the library) is on branch blas-repack 5d1a3814, tested green, **NOT merged into
+the bench branch** — the round-3 blas cells ran the default, which has no such knob.
+
+**Tests.** 5d568404: green. 37d97506 was first tested in round 2 on the merged tree: three
+LinAlg Dispatch failures (the BLAS-on syrk-tile needles predated the tri-tiles
+`dsyrk_tri` ABI), fixed in 6016b4f7 (TEST RESULT bench-merge 6016b4f7: linalg Dispatch
+136/0, probe 21/21, Syrk Tile 4/0, Row Contraction Tiles 19/0, BLAS Tier 19/0). 5d1a3814
+(`BLADE_BLAS_PREFER`, unmerged): linalg Dispatch 153/0 (17 new `blas_prefer_*` cases),
+syrk-tile 4/0, optimize 152/0, cli 101/0, corpus-wiring 14/0, docs 131/0/78. Final-tree
+gates: §14 header (round 3, all green).
+
+**Within-session A/B (item c; gram blas, blade-cpp).** Tile (the default) vs
+`BLADE_SYRK_TILE=0` (the library route): serial 61.6 / 62.9 vs 67.4 / 67.2 ms (gf-expert
+~67, ifx-expert ~64.5); mt8 18.4 / 18.8 vs 24.3 / 28.0 ms (gf ~25, ifx ~24.5) — the tile is
+~7% faster than the library serially and ~29% under 8 threads. G28 staging microbench (ms),
+1 thread: zero_fill 3.15, dsyrk_prefault 54.0, dsyrk_fresh 56.3, repack serial 1.50 / omp
+1.49, whole route OLD 61.3 vs NEW 59.6; 8 threads: zero_fill 3.58, dsyrk_prefault 16.9,
+dsyrk_fresh 18.8, repack serial 1.37 / omp 1.18, whole route OLD 22.5 vs NEW 19.7 — G28
+saves ~3% of the library route serially and ~12% at 8 threads.
+
+**Within-session A/B (item d; stencil, `BLADE_HOT_ROW` on vs 0).** Serial blade-cpp 17.3 /
+17.75 vs 18.7 / 19.2, blade-llvm 11.6 / 11.35 vs 12.5 / 12.3; mt8 blade-cpp 8.56 / 8.35 vs
+9.7 / 10.7 — the hot-row fold is worth 6–8% serially and 15–20% under 8 threads.
 
 | regime | kernel | before blade-llvm / blade-cpp (ms) | after blade-llvm / blade-cpp (ms) | gf-expert / ifx-expert (ms) | ratio before → after (gf / ifx) | verdict |
 |---|---|---|---|---|---|---|
-| blas x mt8 (ref cpp; §13 session 214522) | gram | — / 24.46 | pending | 19.27 / 19.98 | 0.788 / 0.817 (live) → pending | pending |
-| blas x serial (ref cpp) | gram | — / 64.53 | pending | 65.39 / 62.48 | 1.013 / 0.968 (live) → pending | pending (control) |
-| serial x licensed (ref llvm; pre-fix §3.6) | stencil | 13.51 / 16.34 | pending / pending | 14.46 / 11.64 | 1.070 * / 0.861 * → pending | pending |
-| mt8 x licensed (ref cpp; pre-fix §5.8) | stencil | — / 11.49 | pending | 8.968 / 9.120 | 0.780 * / 0.794 * → pending | pending |
-| serial x repro (ref llvm; pre-fix §6.1) | stencil | 15.97 / 17.77 | pending / pending | 16.80 / 13.47 | 1.052 * / 0.843 * → pending | pending |
+| blas x mt8 (ref cpp; §13 session 214522) | gram | — / 24.46 | — / 17.97 (native-preempt) | 19.27 / 19.98 → 21.45 / 22.44 | 0.788 / 0.817 (live) → 1.194 [1.144, 1.346] / 1.249 | **win, live** (161102) |
+| blas x serial (ref cpp) | gram | — / 64.53 | — / 61.84 (native-preempt) | 65.39 / 62.48 → 67.37 / 64.43 | 1.013 / 0.968 (live) → 1.089 [1.074, 1.126] / 1.042 | win, live (161102) |
+| serial x licensed (ref llvm; pre-fix §3.6) | stencil | 13.51 / 16.34 | 10.71 / 17.25 | 14.46 / 11.64 → 14.72 / 11.65 | 1.070 * / 0.861 * → 1.375 [1.302, 1.404] * / 1.089 * | win, indicative (132026) |
+| mt8 x licensed (ref cpp; pre-fix §5.8) | stencil | — / 11.49 | — / 9.579 | 8.968 / 9.120 → 8.481 / 8.868 | 0.780 * / 0.794 * → 0.885 [0.828, 0.970] * / 0.926 * | loss narrowed, indicative (135344) |
+| serial x repro (ref llvm; pre-fix §6.1) | stencil | 15.97 / 17.77 | 14.28 / 21.02 | 16.80 / 13.47 → 17.48 / 14.29 | 1.052 * / 0.843 * → 1.224 [1.210, 1.238] * / 1.001 * | win (gf) / parity (ifx), indicative (142502) |
 
-**Register items it closes (provisional, pending measure):** G28 (staging repack
-threaded), G10 (checksum over a halo map streams through the hot-row fold — the
-materialized second array is gone where the pass applies).
+The blade-cpp serial stencil medians read slower than pre-fix (16.34 → 17.25 licensed,
+17.77 → 21.02 repro) across sessions a day apart, while the in-session A/B shows the
+hot-row fold making the same lane 6–8% faster; the cross-session drift is not this
+change's (G37's input-conversion cause was confirmed on the dot and saxpy twins only, so
+stencil's share of it is unmeasured).
+
+**Register outcome (measured, round 3):** G28 FIXED (measured) — the library route's
+staging gains ~12% at 8 threads in-session, and the default blas cell is now the native
+tile (D47): blas mt8 0.79 / 0.82 → 1.19 / 1.25, serial 1.01 / 0.97 → 1.09 / 1.04 (both
+live). G10 FIXED (measured where the pass applies) — hot-row fold 6–8% serial, 15–20% mt8
+in-session; stencil mt8 is still a loss (0.89 * / 0.93 *).
 
 ### 14.4 maskagg (branch 54c98afe, merged) — G9 / M12
 
@@ -2051,106 +2173,403 @@ The interpreter twin gained the N-operand apply over compounds. The branch sessi
 single runs (NOT results): licensed blade-llvm 7.1 ms, blade-cpp 14.1 ms (from 65 ms /
 fallback); repro 7.7 / 8.1 ms; experts 3.6–5.0 ms. Corpus `index-types/511-514`.
 
-**Tests.** pending (runner's totals).
+**Tests.** 24f3435d: 1 failure (interp: index-types 511 not in `interpExpectedUnsupported`).
+Follow-up 54c98afe (build + 4 interp keys): run, no failure recorded in the run log.
+Final-tree gates: §14 header (round 3, all green).
+
+**Within-session A/B (item h, OLD vs NEW, old1 / new1 / new2 / old2).** Serial-licensed
+blade-cpp 61.11 / 6.98 / 7.22 / 77.58, blade-llvm OLD fallback / NEW 4.85 / 5.74;
+serial-repro blade-cpp 60.12 / 7.71 / 8.40 / 68.87, blade-llvm NEW 5.44 / 5.40. **Open
+item:** maskagg's input-only blade-cpp twin rose from ~2.85 to ~3.85 ms (record: 2.822 →
+3.774 licensed, 3.304 → 4.282 repro). maskagg uses the same input generator as the dot /
+saxpy twins in which G37's cause was identified (band-vec's split Int64→Float64
+conversion, §14.8); it will be re-measured after the context-aware fix (G38).
 
 | regime | kernel | before blade-llvm / blade-cpp (ms) | after blade-llvm / blade-cpp (ms) | gf-expert / ifx-expert (ms) | ratio before → after (gf / ifx) | verdict |
 |---|---|---|---|---|---|---|
-| serial x licensed (ref: blade-cpp before, blade-llvm after; pre-fix §4.3) | maskagg | fallback / 67.16 | pending / pending | 3.993 / 2.919 | 0.059 * / 0.043 * → pending | pending |
-| serial x repro (pre-fix §6.2) | maskagg | fallback / 68.86 | pending / pending | 4.982 / 3.752 | 0.072 / 0.054 (live) → pending | pending |
+| serial x licensed (ref: blade-cpp before, blade-llvm after; pre-fix §4.3) | maskagg | fallback / 67.16 | 4.68 / 7.054 | 3.993 / 2.919 → 4.074 / 2.939 | 0.059 * / 0.043 * → 0.871 [0.835, 0.891] * / 0.628 * (vs blade-cpp: 0.58 / 0.42) | loss, indicative (133604) |
+| serial x repro (pre-fix §6.2) | maskagg | fallback / 68.86 | 5.942 / 8.265 | 4.982 / 3.752 → 4.982 / 4.02 | 0.072 / 0.054 (live) → 0.839 [0.806, 0.895] * / 0.676 * (vs blade-cpp: 0.60 / 0.49) | loss, indicative (144145) |
 | mt8 | maskagg | serial by protocol (D-rule, kernels/README.md §1) | — | — | — | — |
 
-**Register items it closes (provisional, pending measure):** G9 (hashed compound index →
-compaction; now merged and in BOTH lanes — the register's "scratch figures" note is
-superseded by the A/B), and the maskagg half of G12/G22's history (the LLVM fallback is
-gone). The reference arm changes from `blade-cpp` to `blade-llvm` for this kernel once
-the lane arm validates; the before/after ratio therefore reads against two different
-references and the table says so.
+The "vs blade-cpp" ratios are expert median / blade-cpp median computed from the table's
+medians (no CI). Incremental (total minus input-only twin, a difference of medians, not a
+separately timed kernel phase; bundle `summary.md`): serial licensed blade-llvm 3.036 ms, blade-cpp 3.280, experts 1.164 / 1.188
+(ratio 0.383 / 0.391); repro 3.758 / 3.983 vs 1.466 / 1.568 (0.390 / 0.417); before, the
+blade-cpp increment was 64.34 ms licensed. The residual loss is the compaction itself
+(~3.0 ms against the experts' ~1.2 ms pack); the input generation is at or below the
+experts' (blade-llvm twin 1.643 ms vs 2.91 / 1.751).
 
-### 14.5 tri-tiles (branch dc54e1bf, test-complete, unmerged) — M15 + G1 remnants
+**Register outcome (measured, round 3):** G9 FIXED (measured) — blade-cpp 67.16 → 7.05 ms
+(9.5x; in-session OLD 61–78 → NEW 7.0–7.2), blade-llvm a lane arm at 4.68 ms; ratio vs the
+new reference 0.87 * / 0.63 * — **maskagg is the remaining serial-licensed loss to both
+experts** (repro 0.84 * / 0.68 *). The maskagg half
+of G12/G22's history is closed (the LLVM fallback is gone). The reference arm changed from
+`blade-cpp` to `blade-llvm` for this kernel; the before/after ratio therefore reads against
+two different references and the table says so.
+
+### 14.5 tri-tiles (branch dc54e1bf, merged) — M15 + G1 remnants
 
 **What changed.** The register-tile family (E/F/G, §13) gets top-aligned column and k
 panels; the scale tail is fused into the last K block's tile store (no post-pass); the
 syrk route gains row-panel groups (`BLADE_TILE_TUNE syrk_g`, default 4) and antisym gains
 sample blocks (`anti_kc`, default 0 = whole chain); the gram-node dispatch prints an omp
 census line. 120 program x mode runs are bit-identical to master; raw-bit blocks syrk
-2729/2729, row 3177/3177, cross-lane 1660/1660. Corpus `symmetry/125` (renumber pending).
-Tuning points T1–T7 are pending the A/B (the defaults above are provisional).
+2729/2729, row 3177/3177, cross-lane 1660/1660. Corpus `symmetry/125-127`.
 
-**Tests.** pending (runner's totals).
+**Tests.** 8520a22a: 8 needle failures (row-tile/linalg x5+4, optimize x2, llvm facts x1;
+raw-bit suites pass). Follow-up dc54e1bf: run, no failure recorded in the run log. Final-tree
+gates: §14 header (round 3, all green).
+
+**Within-session A/B (items a, b; serial licensed).** `BLADE_TILE_TUNE syrk_g` on gram:
+blade-llvm g1 61.1 / 58.8, g2 57.2 / 58.0, **g4 (default) 57.3 / 57.4**, g8 60.5 / 60.2;
+blade-cpp g1 59.1 / 60.7, g2 60.4 / 61.3, g4 60.1 / 61.4, g8 64.0 / 64.0 → the default 4
+is kept. `anti_kc` on antisym: blade-llvm default (0) 27.6 / 27.5, 128 26.9 / 35.2 (second
+pass disturbed), 200 26.8 / 26.7; blade-cpp 30.4 / 30.5, 29.4 / 33.8, 29.2 / 29.1 → 200 is a
+small directional improvement (~3% llvm, ~4% cpp), insufficient evidence to change the
+default (one shape, 3 rounds; 200 stays a tuning candidate). Only these two of the tuning
+points T1–T7 were A/B'd in round 3.
 
 | regime | kernel | before blade-llvm / blade-cpp (ms) | after blade-llvm / blade-cpp (ms) | gf-expert / ifx-expert (ms) | ratio before → after (gf / ifx) | verdict |
 |---|---|---|---|---|---|---|
-| serial x licensed (ref llvm; §13) | gram | 56.1 / 57.96 | pending / pending | 76.75 / 69.36 | 1.368 / 1.236 (live) → pending | pending |
-| serial x licensed | antisym | 27.59 / 28.56 | pending / pending | 31.06 / 29.61 | 1.126 / 1.073 (live) → pending | pending |
-| serial x licensed | comoment3 | 9.312 / 9.593 | pending / pending | 11.37 / 11.40 | 1.221 / 1.225 (live) → pending | pending |
-| serial x repro (ref llvm; §13) | gram | 59.73 / 61.34 | pending / pending | 77.07 / 70.12 | 1.290 / 1.174 (live) → pending | pending |
-| serial x repro | antisym | 30.47 / 30.65 | pending / pending | 31.77 / 30.46 | 1.043 / 1.000 (live) → pending | pending |
-| serial x repro | comoment3 | 26.46 / 16.12 | pending / pending | 11.73 / 11.77 | 0.443 / 0.445 (live) → pending (the checksum pass is 14.1's) | pending |
-| mt8 x licensed (ref cpp; §13) | gram | — / 15.58 | pending | 19.87 / 19.06 | 1.276 / 1.223 (live) → pending | pending |
-| mt8 x licensed | antisym | — / 8.79 | pending | 9.50 / 9.82 | 1.081 * / 1.117 * → pending | pending |
-| mt8 x licensed | comoment3 | — / 3.311 | pending | 4.839 / 4.03 | 1.462 / 1.217 (live) → pending | pending |
+| serial x licensed (ref llvm; §13) | gram | 56.1 / 57.96 | 58.11 / 61.88 | 76.75 / 69.36 → 78.53 / 71.62 | 1.368 / 1.236 (live) → 1.351 [1.327, 1.386] * / 1.233 * | win, indicative (132026); unchanged |
+| serial x licensed | antisym | 27.59 / 28.56 | 28.01 / 29.97 | 31.06 / 29.61 → 31.19 / 30.1 | 1.126 / 1.073 (live) → 1.113 [1.099, 1.152] / 1.075 | **win, live** (132026); unchanged |
+| serial x licensed | comoment3 | 9.312 / 9.593 | 8.726 / 8.945 | 11.37 / 11.40 → 11.56 / 11.68 | 1.221 / 1.225 (live) → 1.325 [1.310, 1.335] / 1.338 | **win, live** (132026) |
+| serial x repro (ref llvm; §13) | gram | 59.73 / 61.34 | 62.89 / 65.38 | 77.07 / 70.12 → 79.77 / 72.88 | 1.290 / 1.174 (live) → 1.268 [1.221, 1.310] / 1.159 | **win, live** (142502); unchanged |
+| serial x repro | antisym | 30.47 / 30.65 | 31.12 / 31.62 | 31.77 / 30.46 → 32.5 / 31.28 | 1.043 / 1.000 (live) → 1.045 [1.020, 1.079] / 1.005 | win / parity, live (142502) |
+| serial x repro | comoment3 | 26.46 / 16.12 | 15.3 / 15.54 | 11.73 / 11.77 → 11.82 / 11.93 | 0.443 / 0.445 (live) → 0.773 [0.754, 0.783] / 0.780 (the checksum pass is 14.1's) | loss, live (142502) |
+| mt8 x licensed (ref cpp; §13) | gram | — / 15.58 | — / 13.96 | 19.87 / 19.06 → 19.44 / 18.59 | 1.276 / 1.223 (live) → 1.393 [1.309, 1.441] * / 1.332 * | win, indicative (135344) |
+| mt8 x licensed | antisym | — / 8.79 | — / 9.026 | 9.50 / 9.82 → 10.65 / 10.65 | 1.081 * / 1.117 * → 1.179 [1.139, 1.268] * / 1.180 * | win, indicative (135344) |
+| mt8 x licensed | comoment3 | — / 3.311 | — / 2.973 | 4.839 / 4.03 → 4.932 / 4.082 | 1.462 / 1.217 (live) → 1.659 [1.598, 1.716] * / 1.373 * | win, indicative (135344) |
 
-**Register items it closes (provisional, pending measure):** the G1 remnants named in
-§13.1 ("K blocking" on antisym mt8; the scale post-pass; panel alignment) — G1 itself was
-already FIXED and measured; this item is tuning, reported as such.
+**Register outcome (measured, round 3):** tuning, reported as such — the defaults are kept
+(`syrk_g` 4, `anti_kc` 0); serial gram and antisym hold their §13 ratios within drift,
+comoment3 serial licensed moves 1.22 → 1.33 (live) and the mt8 group-A ratios read higher
+(indicative). G1 itself was already FIXED and measured; the "K blocking" remnant on
+antisym is answered by `anti_kc` (a small directional improvement at 200, ~3% llvm / ~4%
+cpp, insufficient evidence to change the default 0), the scale post-pass and panel
+alignment are gone, the gram-node omp census line is printed.
 
-### 14.6 fold-simd (branch 68d344af, test-complete, unmerged) — M9, M14 / G25, G26
+### 14.6 fold-simd (branch 68d344af + 4e49f46a, merged) — M9, M14 / G25, G26
 
 **What changed.** Dot-class licensed folds take a K-lane vector form (`BLADE_FOLD_LANES`
-knob, default 8 pending measurement; `src/cpp/blade_fold_lanes.hpp`; raw-bit block `Fold
-Lanes` 38168/38168 in both modes); SIMD lanes now run INSIDE the Path B chunks under mt8
-(G25: threads and lanes compose); double and float only (Int64 keeps the simd nest); the
-census line is kept under `BLADE_OMP_THREADS=1`. The harness's fold-form evidence now
-reads `SIMD_REDUCTION/K-lane`. Corpus `loops/474-476` (collides with blas-repack's; to be
-renumbered).
+knob; `src/cpp/blade_fold_lanes.hpp`; raw-bit block `Fold Lanes` 38168/38168 in both
+modes); SIMD lanes now run INSIDE the Path B chunks under mt8 (G25: threads and lanes
+compose); double and float only (Int64 keeps the simd nest); the census line is kept under
+`BLADE_OMP_THREADS=1`. The harness's fold-form evidence now reads `SIMD_REDUCTION/K-lane`
+for the vector helpers, but under-reports the scalar K-lane tree as `in-order` (§14 header;
+harness fix in progress, medians unaffected). The shipped default is K = 8 (unset → Auto →
+8 in `CodeGenExprSupport.foldVecLanes`).
+4e49f46a (round-2 fix): the K-lane tail never fuses a product into its add — every product
+is rounded before the add, in all contraction modes (functions/168, Float32). Corpus
+`loops/477-479`.
 
-**Tests.** pending (runner's totals).
+**Tests.** 134cec69: linalg dispatch x10, omp-reduce x4, omp-pragma x1 failures; checks 0
+failures; ab_build 30 built / 0 '!!'. Follow-up 68d344af: run, no failure recorded in the
+run log. Round 2 (merged tree): functions/168 failed; fix 4e49f46a: functions 324/0, loops
+238/0, linalg 130/0, omp-reduce 85/0, omp-pragma 76/0, fold-lanes 4/0, fresh ab_build 30
+built / 0 '!!'. Final-tree gates: §14 header (round 3, all green).
+
+**Within-session A/B (item g; `BLADE_FOLD_LANES` default / off / 4 / 8, blade-cpp, ms).**
+Serial: dot 24.04 / 24.53 / 25.49 / 25.02, stencil 16.85 / 17.42 / 17.66 / 17.80,
+fusedchain 8.70 / 8.52 / 8.96 / 8.78; mt8: dot 10.40 / 10.68 / 11.77 / 11.07, stencil 8.33
+/ 8.22 / 8.72 / 8.30, fusedchain 3.68 / 3.46 / 3.99 / 3.69 (fusedchain is
+input-generation dominated). Default and 8 are the SAME algorithm (default K = 8), so their
+differences are measurement variation, not a policy arm. `ab_time` (the corrected script's
+output, `fold-ab_time-fixed.txt`; process-wall timings from a small diagnostic run, not
+verdicts) is broadly neutral but NOT within 1–3% everywhere: off/K8 0.952 on mt8 stencil and
+1.057 on mt8 onepass, off/K4 1.038 on mt8 fusedchain. Microbench, v4/simd and v8/simd as the microbench reports them: dot 3000017
+0.93–1.04 / 0.94–1.00, gemv fiber 0.96–1.11 / 0.98–1.19, com2 201x10007 1.22–1.27 /
+1.15–1.27, com3 61x2003 1.03–1.05 / 1.04–1.06, sq rows 1499x2001 1.01–1.64 / 1.20–1.32,
+f32 dot 0.97–1.02 / 0.98–1.10. On the whole-program kernels the K-lane form is a wash
+(within ±3% of lanes off in item g; no robust whole-program gain); the shapes that move
+are the compute-bound microbench rows, which do not show K8 beating K4 everywhere. Default
+K = 8 is kept.
 
 | regime | kernel | before blade-llvm / blade-cpp (ms) | after blade-llvm / blade-cpp (ms) | gf-expert / ifx-expert (ms) | ratio before → after (gf / ifx) | verdict |
 |---|---|---|---|---|---|---|
-| serial x licensed (ref llvm; pre-fix §4) | dot | 13.20 / 19.28 | pending / pending | 18.44 / 12.67 | 1.397 * / 0.960 * → pending | pending |
-| serial x licensed | saxpy | 14.28 / 17.89 | pending / pending | 15.62 / 11.93 | 1.094 * / 0.836 * → pending | pending |
-| serial x licensed | fusedchain | 4.571 / 6.754 | pending / pending | 6.905 / 4.897 | 1.511 * / 1.071 * → pending | pending |
-| serial x licensed | onepass | 11.67 / 16.77 | pending / pending | 16.83 / 11.78 | 1.442 / 1.009 (live) → pending | pending |
-| mt8 x licensed (ref cpp; pre-fix §5) | dot | — / 12.00 | pending | 10.53 / 10.96 | 0.878 * / 0.914 * → pending | pending |
-| mt8 x licensed | saxpy | — / 11.40 | pending | 8.963 / 9.224 | 0.786 * / 0.809 * → pending | pending |
-| mt8 x licensed | fusedchain | — / 4.128 | pending | 3.253 / 3.509 | 0.788 * / 0.850 * → pending | pending |
-| mt8 x licensed | stencil | — / 11.49 | pending | 8.968 / 9.120 | 0.780 * / 0.794 * → pending | pending (shared with 14.3) |
+| serial x licensed (ref llvm; pre-fix §4) | dot | 13.20 / 19.28 | 13.49 / 24.56 | 18.44 / 12.67 → 19.1 / 13.04 | 1.397 * / 0.960 * → 1.416 [1.356, 1.511] * / 0.967 * | win (gf) / parity (ifx), indicative (133604) |
+| serial x licensed | saxpy | 14.28 / 17.89 | 12.44 / 20.67 | 15.62 / 11.93 → 15.48 / 11.23 | 1.094 * / 0.836 * → 1.244 [1.194, 1.283] * / 0.903 * | win (gf) / loss (ifx), indicative (133604) |
+| serial x licensed | fusedchain | 4.571 / 6.754 | 4.382 / 8.522 | 6.905 / 4.897 → 6.866 / 4.483 | 1.511 * / 1.071 * → 1.567 [1.530, 1.602] * / 1.023 * | win (gf) / parity (ifx), indicative (133604) |
+| serial x licensed | onepass | 11.67 / 16.77 | 10.94 / 21.03 | 16.83 / 11.78 → 16.69 / 11.29 | 1.442 / 1.009 (live) → 1.525 [1.502, 1.534] / 1.031 | win (gf) / parity (ifx), live (133604) |
+| mt8 x licensed (ref cpp; pre-fix §5) | dot | — / 12.00 | — / 11.94 | 10.53 / 10.96 → 11.48 / 11.49 | 0.878 * / 0.914 * → 0.962 [0.869, 1.018] * / 0.962 * | parity, indicative (135344) |
+| mt8 x licensed | saxpy | — / 11.40 | — / 11.76 | 8.963 / 9.224 → 9.646 / 10.08 | 0.786 * / 0.809 * → 0.821 [0.792, 0.857] * / 0.858 * | loss, indicative (135344) |
+| mt8 x licensed | fusedchain | — / 4.128 | — / 3.177 | 3.253 / 3.509 → 3.245 / 3.508 | 0.788 * / 0.850 * → 1.021 [0.955, 1.101] * / 1.104 * | parity (gf) / win (ifx), indicative (135344) |
+| mt8 x licensed | stencil | — / 11.49 | — / 9.579 | 8.968 / 9.120 → 8.481 / 8.868 | 0.780 * / 0.794 * → 0.885 [0.828, 0.970] * / 0.926 * | loss, indicative (135344; shared with 14.3) |
 
-The incremental (total − twin) columns of §4/§5 are carried for these kernels when the
-table is filled: the K-lane form touches the fold, not the generator, so the incremental
-difference is the quantity expected to move.
+**Incremental (total − input-only twin, ms; before = pre-fix §4/§5, after = bundles
+133604 / 135344 `summary.md`).** The K-lane form touches the fold, not the generator, so
+this is the quantity expected to move; the intervals are wide.
 
-**Register items it closes (provisional, pending measure):** G26 (dot-class folds were
-"still open" after the tiles; the K-lane form is the K-way unrolled reduction the expert
-writes), G25 (lanes inside Path B chunks — the two licensed forms compose).
+| regime | kernel | Blade ref | other lane | gf-expert / ifx-expert | incremental ratio gf / ifx |
+|---|---|---|---|---|---|
+| serial x licensed (ref llvm) | dot | 1.731 → 1.856 | cpp 1.571 → 1.465 | 1.125 / 1.569 → 1.293 / 1.672 | 0.650 / 0.906 → 0.697 [0.394, 1.607] / 0.901 |
+| serial x licensed | saxpy | 6.083 → 4.887 | cpp 5.777 → 5.038 | 3.622 / 4.293 → 3.502 / 3.626 | 0.595 / 0.706 → 0.716 [0.619, 0.831] / 0.742 |
+| serial x licensed | fusedchain | 0.625 → 0.861 | cpp 0.670 → 0.756 | 0.725 / 1.107 → 0.740 / 0.750 | 1.159 / 1.769 → 0.860 [0.731, 1.199] / 0.872 |
+| serial x licensed | onepass | 2.178 → 1.791 | cpp 1.941 → 1.680 | 1.593 / 1.928 → 1.817 / 1.787 | 0.732 / 0.885 → 1.015 [0.910, 1.079] / 0.998 |
+| mt8 x licensed (ref cpp) | dot | 1.677 → 2.157 | — | 2.011 / 1.940 → 2.154 / 1.733 | 1.200 / 1.157 → 0.999 [0.550, 1.619] / 0.804 |
+| mt8 x licensed | saxpy | 4.429 → 4.793 | — | 3.402 / 3.205 → 3.185 / 3.311 | 0.768 / 0.724 → 0.665 [0.543, 0.910] / 0.691 |
+| mt8 x licensed | fusedchain | 0.611 → 0.294 | — | 0.359 / 0.329 → 0.536 / 0.233 | 0.588 / 0.539 → 1.823 [1.046, 3.346] / 0.792 |
 
-### 14.7 recur (branch f36d5503, test-complete, unmerged) — G8 / M10–M11
+The blade-cpp serial **totals** rose against pre-fix (dot 19.28 → 24.56, saxpy 17.89 →
+20.67, fusedchain 6.754 → 8.522, onepass 16.77 → 21.03 ms) while its **increments** fell
+or held (dot 1.571 → 1.465, onepass 1.941 → 1.680 ms): the rise is in the input-only twin
+(dot 17.71 → 23.09 ms; the blade-llvm twin 11.47 → 11.63), not in the fold this branch
+changed. Its cause is band-vec b08a9aef's unconditional split Int64→Float64 conversion in
+the serial generator loop, not fold-simd — G37 (§14.8).
+
+**Register outcome (measured, round 3):** G25 FIXED as a form, no measured gain — lanes
+inside the Path B chunks are emitted, and mt8 lanes on / off is within noise in-session;
+mt8 dot 0.88 * / 0.91 * → 0.96 * / 0.96 *, saxpy 0.79 * / 0.81 * → 0.82 * / 0.86 *. G26
+PARTLY — the K-lane form is emitted and is a wash on the memory-bound dot-class kernels;
+the C++ lane's deficit against blade-llvm on them is not in the fold (G37).
+
+### 14.7 recur (branch f36d5503 + 9ebc530f / 9d03e588, merged) — G8 / M10–M11, S13
 
 **What changed.** The inductive arm's elementwise chain is fused and written in place into
 the trajectory row (slice-write fusion under `BLADE_FUSION`): the per-step temporaries and
 the per-step copy into the 48 MB trajectory — the "remaining 2x" of §13.3 — are gone where
 the pass applies. The branch session's own numbers (NOT results): licensed blade-llvm 22.5
-→ 12.4 ms, blade-cpp 24.3 → 15.7, repro ~27 → 17.3, experts ~10. Corpus
-`recursive-arrays/026-027`.
+→ 12.4 ms, blade-cpp 24.3 → 15.7, repro ~27 → 17.3, experts ~10.
 
-**Tests.** pending (runner's totals).
+**Late addition (S13 row-fold fusion, 9ebc530f merged through 7a601446; fix 9d03e588).** A
+fold over a `let rec`'s rows is absorbed into the recursion (gate `BLADE_FUSION`; plan rule
+`row-fold-fusion`), so recur's checksum no longer re-walks the trajectory after the loop; a
+while-guarded recursion, which rewrites rows after the loop, records the decline
+(`decision_row_fold_declined_while`). Corpus `recursive-arrays/026-029`.
+
+**Tests.** f36d5503: run, no failure recorded in the run log. S13 was first tested in round
+2 on the merged tree: `decision_row_fold_declined_while` failed (S13 did not recognise the
+small-buffer `IRArrayLit` zero fill); fix 9d03e588 (TEST RESULT recur 9d03e588, Blade.dll
+437E49E3…): optimize 152/0, recursive-arrays 28/0/0, interp 29/0, opt-diff 26/0/2.
+Final-tree gates: §14 header (round 3, all green).
+
+**Within-session A/B (item e, 11 rounds; NEW / `BLADE_FUSION=0` / OLD, ms).**
+Serial-licensed blade-llvm 9.62 / 9.69, 40.1 / 40.6, 20.9 / 21.8; blade-cpp 11.47 / 11.41,
+40.3 / 40.3, 22.4 / 22.5 (gf-expert ~10.0, ifx-expert ~10.6). Serial-repro blade-llvm
+13.62 / 13.85, 42.8 / 42.6, 24.8 / 24.5; blade-cpp 15.63 / 15.38, 43.0 / 43.3, 24.6 / 24.3
+(gf 13.65, ifx 14.0). NEW is 2.2x / 1.8x faster than OLD in the LLVM lane (licensed /
+repro), 2.0x / 1.6x in the C++ lane. Caveat:
+`BLADE_FUSION=0` also disables master's elementwise fusion, so the FUSION=0 arm is not a
+like-for-like regression signal against OLD. Page faults ~12.9–13.7k in every arm (a
+whole-process figure; not diagnostic).
 
 | regime | kernel | before blade-llvm / blade-cpp (ms) | after blade-llvm / blade-cpp (ms) | gf-expert / ifx-expert (ms) | ratio before → after (gf / ifx) | verdict |
 |---|---|---|---|---|---|---|
-| serial x licensed (ref llvm; §13 session 201558) | recur | 20.43 / 22.49 | pending / pending | 10.07 / 9.995 | 0.493 * / 0.489 * → pending | pending |
-| serial x repro (ref llvm; §13) | recur | 23.77 / 23.85 | pending / pending | 12.95 / 13.34 | 0.545 / 0.561 (live) → pending | pending |
-| mt8 | recur | no Blade arm (G5, unchanged) | — | 6.815 / 7.486 | — | — |
+| serial x licensed (ref llvm; §13 session 201558) | recur | 20.43 / 22.49 | 9.159 / 11.27 | 10.07 / 9.995 → 10.2 / 10.3 | 0.493 * / 0.489 * → 1.114 [1.029, 1.159] * / 1.125 * | win, indicative (132026) |
+| serial x repro (ref llvm; §13 session 204141) | recur | 23.77 / 23.85 | 13.83 / 15.74 | 12.95 / 13.34 → 13.63 / 14.07 | 0.545 / 0.561 (live) → 0.985 [0.964, 1.003] * / 1.017 * | parity, indicative (142502) |
+| mt8 x licensed | recur | no Blade arm (G5, unchanged) | — | 6.815 / 7.486 → 7.077 / 7.951 | — | — (135344) |
+| mt8 x repro | recur | no Blade arm (G5, unchanged) | — | 7.407 / 7.795 → 8.005 / 8.117 | — | — (145930) |
 
-**Register items it closes (provisional, pending measure):** G8 for the `let rec` step
-(the lifted-let materialization in the inductive arm; the fusedchain/saxpy half of G8 is
-fold-simd's and blas-repack's territory, not this branch's). G5 (no thread form inside a
-`let rec` step) is untouched.
+**Register outcome (measured, round 3):** G8 FIXED (measured) for the `let rec` step —
+recur serial licensed 0.49 * / 0.49 * → 1.11 * / 1.13 *, repro 0.55 / 0.56 → 0.99 * /
+1.02 *; in-session NEW 9.6–9.7 vs OLD 20.9–21.8 ms (blade-llvm). The lifted-let half of G8
+(fusedchain, saxpy) is not this branch's. G5 (no thread form inside a `let rec` step) is
+untouched: recur still has no Blade mt8 arm.
 
-### 14.8 Headline of the follow-up round
+### 14.8 Headline of the follow-up round (round 3, final tree d3d5722b)
 
-pending — written when every table above is filled from the final re-measure. The
-pre-round headline is §13.4; the pre-fix headline §11.1.
+**Serial, licensed default (`blade-llvm`): Blade beats both reviewed experts on gram
+(1.35 * / 1.23 *), antisym (1.11 / 1.08), comoment3 (1.33 / 1.34), pairkernel (1.12 /
+1.05), recur (1.11 * / 1.13 *, from 0.49), band (1.96 / 2.51, from 0.25 / 0.31) and
+stencil (1.38 * / 1.09 *); it beats gfortran-expert and matches ifx-expert on fusedchain
+(1.57 * / 1.02 *), onepass (1.53 / 1.03) and dot (1.42 * / 0.97 *); saxpy wins against
+gfortran and loses to ifx (1.24 * / 0.90 *).** The remaining serial-licensed loss to both
+experts is **maskagg (0.87 * / 0.63 *)**, now 14x faster than its pre-fix C++ figure (67.2
+→ 4.68 ms) but still behind the experts' pack (incremental, total minus input-only twin,
+0.38 / 0.39). Fastmath keeps the same shape (gram 1.33 * / 1.23
+*, antisym 1.13 / 1.11, comoment3 1.34 * / 1.33 *, band 3.96 / 3.10; fusedchain / onepass /
+dot 1.50 * / 1.50 * / 1.37 against gfortran). The reproducible build holds gram (1.27 /
+1.16) and antisym (1.05 / 1.01), reaches parity on recur (0.99 * / 1.02 *) and, against
+ifx, on band (1.01 *; 0.84 * against gfortran), and wins against gfortran on fusedchain,
+onepass, dot, saxpy and stencil (1.38 *, 1.35, 1.22, 1.08 *, 1.22 *). Under threads (`blade-cpp`, licensed): gram
+1.39 * / 1.33 *, antisym 1.18 * / 1.18 *, comoment3 1.66 * / 1.37 *, band 0.97 * / 1.66 *,
+fusedchain 1.02 * / 1.10 *, dot 0.96 * / 0.96 *; blas gram 1.09 / 1.04 serial and **1.19 /
+1.25 mt8 (live; the native tile preempting `?syrk`, D47)**.
+
+**What moved since §13 (headline cells):** band 0.25 / 0.31 → 1.96 / 2.51 (G30, G33);
+recur 0.49 → 1.11 * (G8, S13); maskagg 0.06 → 0.87 * (G9); blas mt8 gram 0.79 / 0.82 →
+1.19 / 1.25 (G28 + 37d97506); serial-repro comoment3 0.44 → 0.77 (G34); comoment3 serial
+licensed 1.22 → 1.33. Unchanged within drift: gram, antisym, pairkernel serial; pairkernel
+mt8 (G32 did not move it).
+
+**The losses that remain, plainly:**
+
+- **mt8 pairkernel:** 0.80 * / 0.80 * licensed, 0.37 / 0.36 repro (live). G32's threaded
+  orbit pass is in place and measured no gain (in-session NEW ≈ OLD).
+- **maskagg (serial):** 0.871 * / 0.628 * licensed, 0.839 * / 0.676 * repro — the
+  compaction pipeline itself (incremental ~3.0 ms against the experts' ~1.2 ms pack).
+- **Reproducible threads (mt8 x repro):** comoment3 0.48 / 0.43 (live), pairkernel 0.37 /
+  0.36 (live), band 0.30 * / 0.52 *, saxpy 0.77 * / 0.75 *, stencil 0.82 * / 0.89 *, dot
+  0.83 * / 0.84 *, fusedchain 0.75 * / 0.83 *. **Blade's reproducible threaded folds are
+  serial by design: one ordered chain per fold.** The legality boundary for a follow-up
+  (G35): evaluating independent COMPLETE per-cell or per-row inner folds in parallel into
+  indexed slots, then running the original outer chain serially in ascending order with its
+  seed, is repro-safe — the shape the tiles already have (gram 1.12 * / 1.04 *, antisym
+  0.99 / 1.00 here), and the one stencil's hot-row path already uses in mt8 repro (its row
+  folds run inside the producer's team). Chunking ONE global reduction across threads is not
+  repro-safe even with a fixed partition. That can help pairkernel and comoment3 (their
+  logical checksum rows), not band / dot / saxpy / fusedchain, whose checksum is one global
+  chain. The experts' repro arms use OpenMP `reduction(+:…)` over global sums (and
+  multiplicity-weighted packed checksums on comoment3 / pairkernel): they are not
+  byte-identity equivalents of Blade's repro contract, so these cells compare different
+  reproducibility constraints.
+- **Serial repro:** comoment3 0.77 / 0.78 and pairkernel 0.90 / 0.84 (live) — both narrowed
+  (from 0.44 and 0.84 / 0.78), both lanes now level; band 0.844 * against gfortran (parity
+  with ifx, 1.008 *).
+- **ifx-expert on the memory-bound group B in repro and fastmath:** fusedchain / onepass /
+  dot / saxpy 0.84 * / 0.82 / 0.76 / 0.69 * (repro), fusedchain / onepass / dot 0.79 * /
+  0.72 * / 0.71 (fastmath) — 0.69–0.84. The fusion is assembly-confirmed on the round-3
+  ifx executables (Codex audit §4): in repro (144145) dot, onepass and saxpy update the
+  kernel and the input-checksum chains in one loop, and fusedchain uses 64-element block
+  scheduling (input sum, vector terms into a buffer, ordered consume); in fastmath (153107)
+  dot, onepass and fusedchain also fuse the input GENERATOR into that loop, which is why
+  ifx's fastmath arm speeds up sharply (dot 13.0 ms licensed → 9.9 ms fastmath). ifx's repro
+  flags still permit contraction (`/fp:precise -mllvm -fp-contract=fast`). Blade's licensed
+  and fastmath configurations are intentionally identical (`bench/harness/config.json`,
+  `blade_knobs.fastmath`: same knobs, fastmath differs on the Fortran side only), so
+  blade-llvm not moving (13.5 → 13.9 ms) is policy, not a failed switch. Incremental (total
+  minus input-only twin), ifx-expert's repro dot is 0.59 ms against blade-llvm's 2.82 ms —
+  a difference of medians, not an isolated kernel time, since the fused program schedules
+  the work differently (G36). In the licensed default the same kernels are at parity with
+  ifx except saxpy (0.90 *).
+- **Threads, licensed:** saxpy 0.82 * / 0.86 * and stencil 0.89 * / 0.93 * (mt8); mt8
+  fastmath dot 0.91 * against gfortran (0.99 * against ifx, parity); mt8 fastmath
+  fusedchain 0.91 * / 0.93 * has intervals straddling 1 (indicative parity), as do mt8
+  licensed dot and band against gfortran.
+- **blade-cpp trails blade-llvm 1.5–1.9x on the memory-bound kernels** (serial licensed dot
+  24.56 vs 13.49 ms, fusedchain 8.522 vs 4.382, onepass 21.03 vs 10.94, saxpy 20.67 vs
+  12.44, stencil 17.25 vs 10.71, maskagg 7.054 vs 4.68, band 0.6335 vs 0.4158; 1.4–1.6x in
+  repro). For dot, saxpy, fusedchain, onepass and maskagg the gap is in the input-only twin,
+  not in the incremental (dot twin 23.09 vs 11.63 ms; incremental 1.465 vs 1.856 ms); stencil
+  and band were not part of that twin diagnosis, so their lane gap is not explained by it.
+  The serial blade-cpp twins are 28–34% slower than in the pre-fix sessions while the
+  blade-llvm twins and the mt8 blade-cpp twins are flat (dot 17.71 → 23.09 vs 11.47 → 11.63
+  and 10.32 → 9.78 ms). **Cause identified** (Codex audit §1, on the emitted
+  `dot/inputonly.blade` and `saxpy/inputonly.blade` twins): band-vec b08a9aef's
+  unconditional replacement of `static_cast<double>` on Int64 by the split conversion
+  `blade_arith::i64_to_f64` in the serial generator loop — not fold-simd. The emitted twins
+  fall into two byte-identical groups (OLD = g32-g34 = maskagg = tri-tiles = fold-simd; NEW
+  = band-vec = blas-repack = recur, both carrying the band change), differing only in that
+  cast and a removed frame; a diagnostic single-run A/B (5 interleaved runs, no protocol
+  controls) gives NEW / OLD +27.3% dot, +27.8% saxpy, and restoring ONLY that cast recovers
+  it (dot 17.99 vs OLD 18.03 ms). A context-aware fix (exact conversion where the range is
+  proven, the direct scalar cast elsewhere, the split only where packed vectorization
+  benefits, keeping band's gain) is in progress; the twins, maskagg (G38) and band will be
+  re-measured. The round-3 numbers above are published unchanged (G37).
+- **No Blade mt8 arm:** onepass (G7: a join has no thread-level form) and recur (G5: no
+  thread form inside a `let rec` step); the experts thread them (onepass 9.0 / 9.5 ms, recur
+  7.1 / 8.0 ms licensed). maskagg is serial by protocol.
+
+All of it uncapped (Silent scheme, 100%), 40 of 62 blocks indicative; the within-session
+A/Bs of 14.1–14.7 are the evidence for each change. The pre-round headline is §13.4; the
+pre-fix headline §11.1. Gate totals on the measured tree: §14 header.
+
+**Final table (round 3, every regime; copied from the runner record, RESULTS
+convention).** Ratio = expert median / Blade median, > 1 Blade faster; `§13 gf / ifx` =
+the §13.1 ratio for the same cell (group A and band; group B was not re-run in §13);
+"verdict" = live or indicative (the block's drift check).
+
+**serial x licensed (ref blade-llvm; sessions 132026 A, 133604 B)**
+
+| kernel | Blade ref (ms) | other lane (ms) | gf-expert / ifx-expert (ms) | ratio gf [95% CI] | ratio ifx [95% CI] | §13 gf / ifx | verdict | block |
+|---|---|---|---|---|---|---|---|---|
+| gram | 58.11 | cpp 61.88 | 78.53 / 71.62 | 1.351 [1.327, 1.386] * | 1.233 [1.207, 1.260] * | 1.368/1.236 | indicative | 132026 n=11 (suppressed) |
+| antisym | 28.01 | cpp 29.97 | 31.19 / 30.1 | 1.113 [1.099, 1.152] | 1.075 [1.052, 1.115] | 1.126/1.073 | live | 132026 n=21 |
+| comoment3 | 8.726 | cpp 8.945 | 11.56 / 11.68 | 1.325 [1.310, 1.335] | 1.338 [1.322, 1.377] | 1.221/1.225 | live | 132026 n=21 |
+| pairkernel | 29.15 | cpp 29.52 | 32.7 / 30.52 | 1.122 [1.114, 1.128] | 1.047 [1.039, 1.056] | 1.121/1.043 | live | 132026 n=21 |
+| recur | 9.159 | cpp 11.27 | 10.2 / 10.3 | 1.114 [1.029, 1.159] * | 1.125 [1.028, 1.175] * | 0.493/0.489 | indicative | 132026 n=21 (suppressed) |
+| band | 0.4158 | cpp 0.6335 | 0.8159 / 1.044 | 1.962 [1.908, 1.995] | 2.511 [2.441, 2.552] | 0.245/0.314 | live | 132026 n=21 |
+| fusedchain | 4.382 | cpp 8.522 | 6.866 / 4.483 | 1.567 [1.530, 1.602] * | 1.023 [0.997, 1.054] * | — | indicative | 133604 n=21 (suppressed) |
+| maskagg | 4.68 | cpp 7.054 | 4.074 / 2.939 | 0.871 [0.835, 0.891] * | 0.628 [0.608, 0.649] * | — | indicative | 133604 n=21 (suppressed) |
+| onepass | 10.94 | cpp 21.03 | 16.69 / 11.29 | 1.525 [1.502, 1.534] | 1.031 [1.017, 1.040] | — | live | 133604 n=21 |
+| dot | 13.49 | cpp 24.56 | 19.1 / 13.04 | 1.416 [1.356, 1.511] * | 0.967 [0.908, 1.050] * | — | indicative | 133604 n=21 (suppressed) |
+| saxpy | 12.44 | cpp 20.67 | 15.48 / 11.23 | 1.244 [1.194, 1.283] * | 0.903 [0.858, 0.951] * | — | indicative | 133604 n=21 (suppressed) |
+| stencil | 10.71 | cpp 17.25 | 14.72 / 11.65 | 1.375 [1.302, 1.404] * | 1.089 [1.019, 1.115] * | — | indicative | 132026 n=21 (suppressed) |
+
+**mt8 x licensed (ref blade-cpp; session 135344)**
+
+| kernel | Blade ref (ms) | other lane (ms) | gf-expert / ifx-expert (ms) | ratio gf [95% CI] | ratio ifx [95% CI] | §13 gf / ifx | verdict | block |
+|---|---|---|---|---|---|---|---|---|
+| gram | 13.96 | llvm serial-only | 19.44 / 18.59 | 1.393 [1.309, 1.441] * | 1.332 [1.238, 1.361] * | 1.276/1.223 | indicative | 135344 n=21 (suppressed) |
+| antisym | 9.026 | llvm serial-only | 10.65 / 10.65 | 1.179 [1.139, 1.268] * | 1.180 [1.128, 1.246] * | 1.081/1.117 | indicative | 135344 n=21 (suppressed) |
+| comoment3 | 2.973 | llvm serial-only | 4.932 / 4.082 | 1.659 [1.598, 1.716] * | 1.373 [1.299, 1.406] * | 1.462/1.217 | indicative | 135344 n=21 (suppressed) |
+| pairkernel | 7.541 | llvm serial-only | 6.032 / 6.014 | 0.800 [0.768, 0.829] * | 0.798 [0.770, 0.816] * | 0.817/0.786 | indicative | 135344 n=21 (suppressed) |
+| recur | — | blade-cpp no-parallel-form; blade-llvm serial-only | 7.077 / 7.951 | — | — | — | no Blade arm | 135344 n=21 |
+| band | 1.07 | llvm serial-only | 1.04 / 1.78 | 0.972 [0.844, 1.053] * | 1.663 [1.503, 1.803] * | — | indicative | 135344 n=21 (suppressed) |
+| fusedchain | 3.177 | llvm serial-only | 3.245 / 3.508 | 1.021 [0.955, 1.101] * | 1.104 [1.063, 1.151] * | — | indicative | 135344 n=21 (suppressed) |
+| onepass | — | blade-cpp no-parallel-form; blade-llvm serial-only | 9.014 / 9.522 | — | — | — | no Blade arm | 135344 n=21 |
+| dot | 11.94 | llvm serial-only | 11.48 / 11.49 | 0.962 [0.869, 1.018] * | 0.962 [0.908, 1.067] * | — | indicative | 135344 n=21 (suppressed) |
+| saxpy | 11.76 | llvm serial-only | 9.646 / 10.08 | 0.821 [0.792, 0.857] * | 0.858 [0.814, 0.897] * | — | indicative | 135344 n=21 (suppressed) |
+| stencil | 9.579 | llvm serial-only | 8.481 / 8.868 | 0.885 [0.828, 0.970] * | 0.926 [0.865, 0.998] * | — | indicative | 135344 n=21 (suppressed) |
+
+**serial x repro (ref blade-llvm; sessions 142502 A, 144145 B)**
+
+| kernel | Blade ref (ms) | other lane (ms) | gf-expert / ifx-expert (ms) | ratio gf [95% CI] | ratio ifx [95% CI] | §13 gf / ifx | verdict | block |
+|---|---|---|---|---|---|---|---|---|
+| gram | 62.89 | cpp 65.38 | 79.77 / 72.88 | 1.268 [1.221, 1.310] | 1.159 [1.116, 1.186] | 1.290/1.174 | live | 142502 n=11 |
+| antisym | 31.12 | cpp 31.62 | 32.5 / 31.28 | 1.045 [1.020, 1.079] | 1.005 [0.989, 1.056] | 1.043/1.000 | live | 142502 n=21 |
+| comoment3 | 15.3 | cpp 15.54 | 11.82 / 11.93 | 0.773 [0.754, 0.783] | 0.780 [0.765, 0.792] | 0.443/0.445 | live | 142502 n=21 |
+| pairkernel | 38.22 | cpp 38.64 | 34.5 / 32.11 | 0.903 [0.898, 0.913] | 0.840 [0.833, 0.849] | 0.841/0.782 | live | 142502 n=21 |
+| recur | 13.83 | cpp 15.74 | 13.63 / 14.07 | 0.985 [0.964, 1.003] * | 1.017 [1.008, 1.033] * | 0.545/0.561 | indicative | 142502 n=21 (suppressed) |
+| band | 3.685 | cpp 3.959 | 3.111 / 3.716 | 0.844 [0.843, 0.847] * | 1.008 [1.007, 1.013] * | 0.335/0.401 | indicative | 142502 n=21 (suppressed) |
+| fusedchain | 6.227 | cpp 10.23 | 8.6 / 5.227 | 1.381 [1.321, 1.418] * | 0.839 [0.783, 0.866] * | — | indicative | 144145 n=21 (suppressed) |
+| maskagg | 5.942 | cpp 8.265 | 4.982 / 4.02 | 0.839 [0.806, 0.895] * | 0.676 [0.637, 0.722] * | — | indicative | 144145 n=21 (suppressed) |
+| onepass | 16.36 | cpp 26.31 | 22.16 / 13.42 | 1.354 [1.332, 1.365] | 0.820 [0.803, 0.847] | — | live | 144145 n=21 |
+| dot | 17.33 | cpp 28.49 | 21.13 / 13.08 | 1.219 [1.207, 1.242] | 0.755 [0.737, 0.770] | — | live | 144145 n=21 |
+| saxpy | 15.2 | cpp 23 | 16.44 / 10.43 | 1.082 [1.043, 1.112] * | 0.686 [0.668, 0.706] * | — | indicative | 144145 n=21 (suppressed) |
+| stencil | 14.28 | cpp 21.02 | 17.48 / 14.29 | 1.224 [1.210, 1.238] * | 1.001 [0.985, 1.023] * | — | indicative | 142502 n=21 (suppressed) |
+
+**mt8 x repro (ref blade-cpp; session 145930)**
+
+| kernel | Blade ref (ms) | other lane (ms) | gf-expert / ifx-expert (ms) | ratio gf [95% CI] | ratio ifx [95% CI] | §13 gf / ifx | verdict | block |
+|---|---|---|---|---|---|---|---|---|
+| gram | 22.03 | llvm serial-only | 24.64 / 22.83 | 1.119 [1.070, 1.161] * | 1.036 [0.989, 1.058] * | 1.080/1.035 | indicative | 145930 n=21 (suppressed) |
+| antisym | 11.22 | llvm serial-only | 11.15 / 11.22 | 0.993 [0.959, 1.049] | 1.000 [0.951, 1.049] | 0.929/0.929 | live | 145930 n=21 |
+| comoment3 | 10.82 | llvm serial-only | 5.171 / 4.615 | 0.478 [0.464, 0.525] | 0.427 [0.412, 0.446] | 0.490/0.414 | live | 145930 n=21 |
+| pairkernel | 18.16 | llvm serial-only | 6.72 / 6.515 | 0.370 [0.354, 0.381] | 0.359 [0.348, 0.365] | 0.359/0.373 | live | 145930 n=21 |
+| recur | — | blade-cpp no-parallel-form; blade-llvm serial-only | 8.005 / 8.117 | — | — | — | no Blade arm | 145930 n=21 (suppressed) |
+| band | 4.678 | llvm serial-only | 1.411 / 2.431 | 0.302 [0.276, 0.331] * | 0.520 [0.504, 0.541] * | — | indicative | 145930 n=21 (suppressed) |
+| fusedchain | 5.856 | llvm serial-only | 4.407 / 4.828 | 0.753 [0.701, 0.827] * | 0.825 [0.776, 0.918] * | — | indicative | 145930 n=21 (suppressed) |
+| onepass | — | blade-cpp no-parallel-form; blade-llvm serial-only | 11.89 / 11.91 | — | — | — | no Blade arm | 145930 n=21 (suppressed) |
+| dot | 14.82 | llvm serial-only | 12.33 / 12.48 | 0.832 [0.768, 0.851] * | 0.842 [0.805, 0.874] * | — | indicative | 145930 n=21 (suppressed) |
+| saxpy | 13.53 | llvm serial-only | 10.35 / 10.13 | 0.765 [0.718, 0.817] * | 0.748 [0.725, 0.834] * | — | indicative | 145930 n=21 (suppressed) |
+| stencil | 10.43 | llvm serial-only | 8.492 / 9.284 | 0.815 [0.738, 0.864] * | 0.891 [0.854, 0.918] * | — | indicative | 145930 n=21 (suppressed) |
+
+**serial x fastmath (ref blade-llvm; session 153107)**
+
+| kernel | Blade ref (ms) | other lane (ms) | gf-expert / ifx-expert (ms) | ratio gf [95% CI] | ratio ifx [95% CI] | §13 gf / ifx | verdict | block |
+|---|---|---|---|---|---|---|---|---|
+| gram | 58.85 | cpp 62.68 | 78.46 / 72.46 | 1.333 [1.289, 1.355] * | 1.231 [1.192, 1.251] * | 1.354/1.235 | indicative | 153107 n=11 (suppressed) |
+| antisym | 28.2 | cpp 30.1 | 31.73 / 31.19 | 1.125 [1.106, 1.134] | 1.106 [1.074, 1.112] | 1.142/1.097 | live | 153107 n=21 |
+| comoment3 | 8.768 | cpp 9.036 | 11.74 / 11.7 | 1.339 [1.312, 1.347] * | 1.334 [1.312, 1.350] * | 1.245/1.226 | indicative | 153107 n=21 (suppressed) |
+| band | 0.4278 | cpp 0.6455 | 1.695 / 1.325 | 3.961 [3.638, 4.069] | 3.098 [2.988, 3.210] | 0.513/0.399 | live | 153107 n=21 |
+| fusedchain | 4.895 | cpp 8.655 | 7.324 / 3.857 | 1.496 [1.374, 1.688] * | 0.788 [0.705, 0.872] * | — | indicative | 153107 n=21 (suppressed) |
+| onepass | 12.07 | cpp 22.12 | 18.12 / 8.728 | 1.502 [1.443, 1.524] * | 0.723 [0.689, 0.752] * | — | indicative | 153107 n=21 (suppressed) |
+| dot | 13.9 | cpp 24.96 | 19.02 / 9.888 | 1.369 [1.348, 1.450] | 0.712 [0.671, 0.737] | — | live | 153107 n=21 |
+
+**mt8 x fastmath (ref blade-cpp; session 155001)**
+
+| kernel | Blade ref (ms) | other lane (ms) | gf-expert / ifx-expert (ms) | ratio gf [95% CI] | ratio ifx [95% CI] | §13 gf / ifx | verdict | block |
+|---|---|---|---|---|---|---|---|---|
+| gram | 20.06 | llvm serial-only | 25.05 / 24.48 | 1.249 [1.198, 1.338] * | 1.220 [1.184, 1.307] * | 1.232/1.166 | indicative | 155001 n=21 (suppressed) |
+| antisym | 9.57 | llvm serial-only | 11.33 / 11.62 | 1.184 [1.145, 1.231] * | 1.214 [1.161, 1.260] * | 1.167/1.150 | indicative | 155001 n=21 (suppressed) |
+| comoment3 | 3.573 | llvm serial-only | 5.275 / 4.561 | 1.477 [1.428, 1.556] | 1.277 [1.225, 1.354] | 1.441/1.217 | live | 155001 n=21 |
+| band | 1.112 | llvm serial-only | 1.161 / 1.97 | 1.044 [0.971, 1.149] * | 1.773 [1.643, 1.847] * | — | indicative | 155001 n=21 (suppressed) |
+| fusedchain | 3.686 | llvm serial-only | 3.35 / 3.422 | 0.909 [0.822, 1.073] * | 0.928 [0.835, 1.147] * | — | indicative | 155001 n=21 (suppressed) |
+| onepass | — | blade-cpp no-parallel-form; blade-llvm serial-only | 9.43 / 9.602 | — | — | — | no Blade arm | 155001 n=21 (suppressed) |
+| dot | 11.8 | llvm serial-only | 10.75 / 11.72 | 0.911 [0.883, 0.978] * | 0.992 [0.954, 1.063] * | — | indicative | 155001 n=21 (suppressed) |
+
+**blas x serial (ref blade-cpp, `blas_route: native-preempt`; session 161102)**
+
+| kernel | Blade ref (ms) | other lane (ms) | gf-expert / ifx-expert (ms) | ratio gf [95% CI] | ratio ifx [95% CI] | §13 gf / ifx | verdict | block |
+|---|---|---|---|---|---|---|---|---|
+| gram | 61.84 | llvm no-blas | 67.37 / 64.43 | 1.089 [1.074, 1.126] | 1.042 [1.031, 1.063] | 1.013/0.968 | live | 161102 n=11 |
+
+**blas x mt8 (ref blade-cpp, `blas_route: native-preempt`; session 161102)**
+
+| kernel | Blade ref (ms) | other lane (ms) | gf-expert / ifx-expert (ms) | ratio gf [95% CI] | ratio ifx [95% CI] | §13 gf / ifx | verdict | block |
+|---|---|---|---|---|---|---|---|---|
+| gram | 17.97 | llvm no-blas | 21.45 / 22.44 | 1.194 [1.144, 1.346] | 1.249 [1.204, 1.341] | 0.788/0.817 | live | 161102 n=21 |
 
 ## 12. Decisions put to the user — BOTH DECIDED (2026-10-18)
 
