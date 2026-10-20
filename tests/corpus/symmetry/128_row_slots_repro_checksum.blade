@@ -1,0 +1,32 @@
+// TEST: Threaded complete-row checksum folds (repro row slots)
+// The bench checksum shape (bench/kernels/pairkernel, comoment3): a `where omp`
+// outer fold whose value at each first coordinate i is ONE complete inner fold
+// over a logical walk of a packed pool. Under BLADE_FP_REPRO=1 with threads on
+// (`blade test interp`'s C++ lane) the C++ lane runs each row's fold whole on
+// one thread into a slot and the outer chain serially from its seed (bench gap
+// G35, ChunkRowSlots); the default build takes the orbit-class fold; the
+// interpreter and BLADE_OMP_THREADS=1 walk serially. The extents clear the
+// row-slot work gate (521 x 521 and 67 x 67 x 67 inner steps >= 262144), so the
+// slots are really taken. Integer-valued cells: every association is exact, so
+// the pins hold in every one of those builds. The pools are block-local so the
+// program prints only the checksums.
+type Var = Idx<521>
+type Obs = Idx<3>
+type V3 = Idx<67>
+let (ss, cube, int_total, ss3) = {
+    let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 5 + s * 3) % 7) - 2.0 |> compute
+    let g = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute
+    let xi = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Int64((i * 5 + s * 3) % 7) - 2 |> compute
+    let gi = method_for(xi, xi) <@> lambda(a: Array<Int64 like Obs>, b: Array<Int64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute
+    let y = method_for(range<V3>, range<Obs>) <@> lambda(i, s) -> Float64((i * 3 + s * 5) % 7) - 2.0 |> compute
+    let t = method_for(y, y, y) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) |> compute
+    let s2 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * g(i, j), (+)), lambda(u, v) where omp -> u + v, 0.0)
+    let c2 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * g(i, j) * g(i, j) + 1.0, (+)), lambda(u, v) where omp -> u + v, 5.0)
+    let n2 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> gi(i, j), (+)), lambda(u, v) where omp -> u + v, 0)
+    let s3 = reduce(method_for(range<V3>) <@> lambda(i) -> reduce(method_for(range<V3>) <@> lambda(j) -> reduce(method_for(range<V3>) <@> lambda(k) -> t(i, j, k) * t(i, j, k), (+)), (+)), lambda(u, v) where omp -> u + v, 0.0)
+    (s2, c2, n2, s3)
+}
+// EXPECT: ss = 23604126.0
+// EXPECT: cube = 281677376.0
+// EXPECT: int_total = 817460
+// EXPECT: ss3 = 114056268.0

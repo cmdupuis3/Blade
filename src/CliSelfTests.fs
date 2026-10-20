@@ -91,7 +91,7 @@ let internal suiteClearedKnobs =
       "BLADE_LLVM"; "BLADE_LLVM_BRICKS"; "BLADE_LLVM_FACTS"
       "BLADE_AD_HALO_GATHER"; "BLADE_SHAPE_SPEC_CAP"; "BLADE_RUN_RECORD"
       "BLADE_SYRK_TILE"; "BLADE_ANTISYM_TILE"; "BLADE_SIMPLEX_TILE"; "BLADE_ORBIT_FOLD"
-      "BLADE_DOMAIN_DIAGONAL"; "BLADE_TILE_TUNE"; "BLADE_FOLD_LANES" ]
+      "BLADE_DOMAIN_DIAGONAL"; "BLADE_TILE_TUNE"; "BLADE_FOLD_LANES"; "BLADE_FOLD_ROW_SLOTS" ]
     @ Blade.Optimize.optimizerGates
 
 /// Knobs `blade test` SETS (after the clear above) rather than leaves unset,
@@ -554,6 +554,26 @@ let runCliSmokeTests () : TH.BlockResult =
                 let (code, out, err) = spawnWith (laneEnv "1") dir [ "plan"; "lane.blade"; "--json" ]
                 recordCase "cli: `plan --json` under BLADE_LLVM=1 names the lane"
                     (code = 0 && out.Contains "\"lane\":\"llvm\"") (out + err)
+                // THE ROW-SLOT FORM (G35) is the C++ lane's thread team; the
+                // LLVM lane runs the same rows serially, and its plan says so
+                // in its own words -- never the generic `reassoc nsz` line a
+                // fold form it does not know would get. C++ twin as control.
+                File.WriteAllText(Path.Combine(dir, "rowslots.blade"),
+                    "type Var = Idx<521>\ntype Obs = Idx<3>\n"
+                    + "let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 11) * 0.37 |> compute\n"
+                    + "let g = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute\n"
+                    + "let s = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * g(i, j), (+)), lambda(u, v) where omp -> u + v, 0.0)\n")
+                let slotEnv llvm = [ ("BLADE_LLVM", llvm); ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", null); ("BLADE_FOLD_ROW_SLOTS", null) ]
+                let (code, out, err) = spawnWith (slotEnv null) dir [ "plan"; "rowslots.blade" ]
+                recordCase "cli: `plan` (C++ lane, BLADE_FP_REPRO=1) reports the threaded complete-row form applied"
+                    (code = 0 && out.Contains ": applied [fold form: threaded complete rows (repro): 521 row folds")
+                    (out + err)
+                let (code, out, err) = spawnWith (slotEnv "1") dir [ "plan"; "rowslots.blade" ]
+                recordCase "cli: `plan` under BLADE_LLVM=1 restates the row-slot form as the LLVM lane's serial walk"
+                    (code = 0 && out.Contains "declined -- the LLVM lane has no thread runtime: it runs the serial walk"
+                     && out.Contains "C++ lane: applied"
+                     && not (out.Contains "fold form: one accumulator chain with `reassoc nsz` (LLVM lane; the vectorizer picks the lanes); C++ lane fold form: threaded complete rows"))
+                    (out + err)
                 // THE TILE CORE (M6): a gram above the crossover, BLAS off,
                 // materializes through the shared C core in the LLVM lane, and
                 // the plan says so in this lane's words (not the C++ lane's

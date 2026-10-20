@@ -2003,6 +2003,25 @@ let syrkRowGroup () : int64 = max 1L (min 8L (tileTune "syrk_g" 4L))
 /// The antisym tile's sample-block cap (BLADE_TILE_TUNE anti_kc); 0 = whole.
 let antisymKcMax () : int64 = max 0L (tileTune "anti_kc" 0L)
 
+/// The row-slot form's STATIC WORK GATE (BLADE_TILE_TUNE rowslots_min,
+/// bench gap G35): the total number of inner fold steps (outer rows x each
+/// row's fold cells) below which a threaded complete-row fold is declined
+/// and the serial walk kept -- a team plus a slot array is not free, and a
+/// row of a handful of adds does not pay for it. Default 2^18 = 262144 is
+/// PROVISIONAL: chosen on operation counts alone (it declines the bench's
+/// input-checksum rows and admits its logical-walk checksums), with no
+/// timing behind it yet. Speed-only: no bit depends on it.
+let rowSlotsMin () : int64 = max 0L (tileTune "rowslots_min" 262144L)
+
+/// BLADE_FOLD_ROW_SLOTS: unset / `1` / `on` = under BLADE_FP_REPRO=1 (or
+/// BLADE_FP_REASSOC=0) a `where omp` fold whose outer level's value is one
+/// complete scalar fold per index runs those row folds on the thread team
+/// into indexed slots, then the outer chain serially (G35); `0` / `off` =
+/// the serial walk, for A/B. Emission-only (C++ lane; the LLVM lane has no
+/// thread runtime). A FUNCTION, read per call.
+let foldRowSlotsEnabled () : bool =
+    Blade.Toolchain.envSwitch "BLADE_FOLD_ROW_SLOTS" <> Blade.Toolchain.SwitchOff
+
 /// BLADE_SYRK_TILE: unset / `1` / `on` = the packed-triangle SYRK tile is the
 /// BLAS-off arm of the same-array `comm` row contraction (default); `0` / `off`
 /// keeps the plain per-cell nest, for A/B. A FUNCTION, read per call, so a

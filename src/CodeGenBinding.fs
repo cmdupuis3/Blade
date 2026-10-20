@@ -21,6 +21,282 @@ open Blade.CodeGenLoopNest
 open Blade.CodeGenCuda
 open Blade.CodeGenFusion
 
+// ---- G35: threaded complete-row folds under the repro build --------------
+//
+// Under BLADE_FP_REPRO=1 every Path B chunk form is dead (its per-thread
+// partials reassociate the fold). What the `where omp` request can still buy
+// without touching any chain is CONCURRENT EVALUATION OF INDEPENDENT COMPLETE
+// ROWS: when the outer level's value at index i is ONE complete scalar fold
+// (its own seed, its own serial chain), thread t evaluates the rows it owns
+// whole into `__rslot[i]`, and the outer chain then runs serially, ascending
+// from its seed, over the slots. Every chain is the serial walk's own; the
+// licence's reorder half stays unspent (ChunkRowSlots in IRStorage.fs).
+//
+// THE ADMISSION is a CLOSED whitelist, because the threads evaluate rows
+// concurrently: `blade_rt::panic` is first-arriving-thread-wins
+// (blade_runtime.hpp), so a body that can panic would report a racy failing
+// coordinate, and a body that writes anything would race outright. Admitted:
+// literals; level coordinates; immutable scalar and array reads; float
+// `+ - * /` (IEEE, total) and integer `+ - *` (wrapping, total, formalism
+// section 2.4); comparisons and `&&`/`||`; negation; libm intrinsics other
+// than lgamma/digamma; `atan2`/`log_base`; casts other than float -> int;
+// `if`, `let`, fma; subscripts PROVEN in range (every coordinate a level
+// coordinate of exactly the subscripted index type -- a compact pool's group
+// or a dense dimension); nested folds over `range<I>` sweeps of static extent;
+// calls of resolved callables whose bodies pass the same whitelist. Anything
+// else -- integer `/` `%`, a possibly negative integer `^`, a float -> int
+// cast, lgamma/digamma, an unproven subscript, a write, an unresolved call,
+// any array-level form -- declines with its name.
+
+/// The element type of a scalar (possibly index-tagged) IR type.
+let rec private rowSlotScalarElem (t: IRType) : ElemType option =
+    match t with
+    | IRTScalar et -> Some et
+    | IRTIdxTagged (inner, _) -> rowSlotScalarElem inner
+    | IRTUnitAnnotated (inner, _) -> rowSlotScalarElem inner
+    | _ -> None
+
+let private rowSlotIsFloat (et: ElemType) = (et = ETFloat64 || et = ETFloat32)
+let private rowSlotIsInt (et: ElemType) = (et = ETInt64 || et = ETInt32)
+let private rowSlotIsReal (et: ElemType) = rowSlotIsFloat et || rowSlotIsInt et
+
+/// The unary math intrinsics audited TOTAL on real operands (libm in every
+/// lane: a NaN or an infinity, never a panic). lgamma / digamma are refused
+/// before this set is consulted; a name not listed declines.
+let private rowSlotTotalMath : Set<string> =
+    Set.ofList [ "exp"; "log"; "log10"; "sqrt"; "sin"; "cos"; "tan"; "sinh"; "cosh"; "tanh"
+                 "asin"; "acos"; "atan"; "floor"; "ceil"; "abs" ]
+
+/// Two index records name the same index space: equal tags (or the same
+/// anonymous record) and the same static extent.
+let private rowSlotSameIndex (a: IRIndexType) (b: IRIndexType) : bool =
+    let tagsAgree =
+        match a.Tag, b.Tag with
+        | Some x, Some y -> x = y
+        | None, None -> a.Id = b.Id
+        | _ -> false
+    tagsAgree
+    && (match tryEvalIntIR a.Extent, tryEvalIntIR b.Extent with
+        | Some x, Some y -> x = y
+        | _ -> false)
+
+/// One plain `range<I>` operand of static extent: its index record.
+let private rowSlotRangeIx (arr: IRExpr) : IRIndexType option =
+    match arr with
+    | IRRange ([ ix ], None) when ix.Rank = 1 && ix.Symmetry = SymNone && ix.IxKind = IxKPlain
+                                  && (tryEvalIntIR ix.Extent).IsSome -> Some ix
+    | _ -> None
+
+/// Saturating add/mul for the work count (a gate, never an exact census).
+let private rowSlotSat (x: int64) = if x < 0L || x > (System.Int64.MaxValue / 4L) then System.Int64.MaxValue / 4L else x
+let private rowSlotAdd (a: int64) (b: int64) = rowSlotSat (a + b)
+let private rowSlotMul (a: int64) (b: int64) =
+    if a = 0L || b = 0L then 0L
+    elif a > (System.Int64.MaxValue / 4L) / b then System.Int64.MaxValue / 4L
+    else rowSlotSat (a * b)
+
+/// The whitelist walk: Ok (inner fold steps) or Error (first refusal).
+/// `levels` maps a level coordinate (by VarId, and by parameter name for the
+/// positional `IRParam` spelling) to its index record; `bound` are let-bound
+/// and callee-parameter scalars; `visiting` guards recursion through calls.
+/// `internal` so the omp-pragma block can drive it on hand-built IR (names
+/// the front end never produces must decline too).
+let rec internal rowSlotWalk(deferred: Map<IRId, IRExpr>) (levels: Map<IRId, IRIndexType>) (levelNames: Map<string, IRIndexType>)
+                            (bound: Set<IRId>) (boundNames: Set<string>) (visiting: Set<IRId>) (e: IRExpr) : Result<int64, string> =
+    let go = rowSlotWalk deferred levels levelNames bound boundNames visiting
+    let all (xs: IRExpr list) =
+        xs |> List.fold (fun acc x ->
+            match acc with
+            | Error _ -> acc
+            | Ok n -> (match go x with Ok m -> Ok (rowSlotAdd n m) | Error why -> Error why)) (Ok 0L)
+    let levelOf (x: IRExpr) =
+        match x with
+        | IRVar (id, _) -> Map.tryFind id levels
+        | IRParam (nm, _, _) -> Map.tryFind nm levelNames
+        | _ -> None
+    let elemOf (x: IRExpr) = try rowSlotScalarElem (typeOf x) with _ -> None
+    match e with
+    | IRLit _ -> Ok 0L
+    | IRVar (id, _) when levels.ContainsKey id || bound.Contains id -> Ok 0L
+    | IRVar (id, _) when deferred.ContainsKey id -> Error "the body reads a deferred computation (its evaluation is not audited)"
+    | IRVar (_, ty) ->
+        (match rowSlotScalarElem ty, ty with
+         | Some _, _ -> Ok 0L
+         | None, ArrayElem _ -> Ok 0L
+         | _ -> Error "the body reads a value that is neither a scalar nor an array")
+    | IRParam (nm, _, _) when levelNames.ContainsKey nm || boundNames.Contains nm -> Ok 0L
+    | IRParam _ -> Error "the body reads a parameter the row-slot form cannot place"
+    | IRBinOp (_, op, a, b, _) ->
+        (match elemOf a, elemOf b with
+         | Some ea, Some eb ->
+             let refuse why = Error $"body may panic ({why})"
+             let ok () = all [ a; b ]
+             (match op with
+              | IRAdd | IRSub | IRMul when (rowSlotIsFloat ea && rowSlotIsFloat eb) || (rowSlotIsInt ea && rowSlotIsInt eb) -> ok ()
+              | IRDiv when rowSlotIsFloat ea && rowSlotIsFloat eb -> ok ()
+              | IRDiv -> refuse "integer /"
+              | IRMod -> refuse "%"
+              | IRCaret when rowSlotIsReal ea && rowSlotIsReal eb ->
+                  (match b with
+                   | IRLit (IRLitFloat _ | IRLitFloat32 _) -> ok ()
+                   | IRLit (IRLitInt n) when n >= 0L -> ok ()
+                   | _ when rowSlotIsFloat eb -> ok ()
+                   | _ -> refuse "integer ^ with a possibly negative exponent")
+              | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe | IRAnd | IROr -> ok ()
+              // the binary math NAMES are enumerated: only these two are audited total
+              | IRMath2 ("atan2" | "log_base") when rowSlotIsReal ea && rowSlotIsReal eb -> ok ()
+              | _ -> Error $"the body applies `{(operatorFunctionName op)}` outside the row-slot whitelist")
+         | _ -> Error "the body has array-level arithmetic (only scalar arithmetic is admitted)")
+    | IRUnaryOp (op, a) ->
+        // Every admitted constructor ENUMERATED, each on a real scalar
+        // operand (bool for `!`); anything else -- complex accessors,
+        // unaudited names, a non-scalar operand -- declines.
+        let operand = elemOf a
+        let real = (match operand with Some et -> rowSlotIsReal et | None -> false)
+        let refuseOp () = Error $"the body applies `{(unaryFunctionName op)}` outside the row-slot whitelist"
+        (match op with
+         | IRMath ("lgamma" | "digamma" as f) -> Error $"body may panic ({f})"
+         | IRCast ((ETInt64 | ETInt32), _) when (match operand with Some et -> not (rowSlotIsInt et) | None -> true) ->
+             Error "body may panic (float -> int cast)"
+         | IRNeg when real -> go a
+         | IRNot when operand = Some ETBool -> go a
+         | IRMath f when real && rowSlotTotalMath.Contains f -> go a
+         | IRCast ((ETFloat64 | ETFloat32 | ETInt64 | ETInt32), _) when real -> go a
+         | _ -> refuseOp ())
+    | IRIf (c, a, b) -> all [ c; a; b ]
+    | IRFma (a, b, c) -> all [ a; b; c ]
+    | IRLet (id, v, body) ->
+        (match go v with
+         | Error why -> Error why
+         | Ok n ->
+             match rowSlotWalk deferred levels levelNames (bound.Add id) boundNames visiting body with
+             | Ok m -> Ok (rowSlotAdd n m)
+             | Error why -> Error why)
+    | IRIndex (IRVar (g, gty), idxs, _) when not (deferred.ContainsKey g) ->
+        let proven =
+            match gty with
+            | ArrayElem at when not at.IsVirtual ->
+                (match at.IndexTypes with
+                 // a compact pool: every coordinate a level of the group's index space
+                 | [ gix ] when gix.Rank >= 2 ->
+                     idxs.Length = gix.Rank
+                     && idxs |> List.forall (fun x ->
+                         match levelOf x with
+                         | Some lix -> rowSlotSameIndex gix lix
+                         | None -> false)
+                 // a dense array: a FULL subscript, dimension by dimension
+                 | ixs when ixs.Length = idxs.Length && ixs |> List.forall (fun ix -> ix.Rank = 1) ->
+                     List.forall2 (fun (ix: IRIndexType) x ->
+                         match levelOf x with
+                         | Some lix -> rowSlotSameIndex ix lix
+                         | None -> false) ixs idxs
+                 | _ -> false)
+            | _ -> false
+        if proven then Ok 0L
+        else Error "body may panic (a subscript not proven in range: BL8006)"
+    | IRReduceCompute (comp, kernel, seed) ->
+        (match kernel, seed with
+         | IRTuple _, _ | _, IRTuple _ -> Error "the body joins several folds (a tuple fold is outside the row-slot whitelist)"
+         | _ ->
+         let comp' =
+             match comp with
+             | IRVar (id, _) -> Map.tryFind id deferred |> Option.defaultValue comp
+             | _ -> comp
+         match comp' with
+         | IRApplyCombinator inf when not inf.HasReynolds && inf.KernelOutputRank = 0 ->
+             let ixs = inf.Arrays |> List.map rowSlotRangeIx
+             if ixs |> List.exists Option.isNone || ixs.IsEmpty then
+                 Error "an inner fold is not over plain range<I> sweeps of static extent"
+             else
+             let ixs = ixs |> List.map Option.get
+             match resolveCallable inf.Kernel, resolveCallable kernel with
+             | Some mapCl, Some foldCl when mapCl.Params.Length = ixs.Length && foldCl.Params.Length = 2 ->
+                 if visiting.Contains mapCl.Id || visiting.Contains foldCl.Id then
+                     Error "the body recurses (a recursive callee is outside the row-slot whitelist)"
+                 else
+                 let cells =
+                     ixs |> List.fold (fun acc ix -> rowSlotMul acc (defaultArg (tryEvalIntIR ix.Extent) 0L)) 1L
+                 let levels' = List.fold2 (fun (m: Map<IRId, IRIndexType>) (p: IRParam) ix -> Map.add p.VarId ix m) levels mapCl.Params ixs
+                 let names' = List.fold2 (fun (m: Map<string, IRIndexType>) (p: IRParam) ix -> Map.add p.Name ix m) levelNames mapCl.Params ixs
+                 let visiting' = visiting.Add mapCl.Id
+                 match rowSlotWalk deferred levels' names' bound boundNames visiting' mapCl.Body with
+                 | Error why -> Error why
+                 | Ok inner ->
+                     let foldBound = foldCl.Params |> List.fold (fun (s: Set<IRId>) p -> s.Add p.VarId) bound
+                     let foldNames = foldCl.Params |> List.fold (fun (s: Set<string>) p -> s.Add p.Name) boundNames
+                     match rowSlotWalk deferred levels levelNames foldBound foldNames (visiting.Add foldCl.Id) foldCl.Body, go seed with
+                     | Error why, _ | _, Error why -> Error why
+                     | Ok _, Ok s -> Ok (rowSlotAdd (rowSlotMul cells (max 1L inner)) s)
+             | _ -> Error "an inner fold's map or fold kernel is not a resolved callable"
+         | _ -> Error "an inner fold is not over an unforced method_for(range<I>) application")
+    | IRApp (f, args, _) ->
+        (match resolveCallable f with
+         | Some cl when visiting.Contains cl.Id -> Error "the body recurses (a recursive callee is outside the row-slot whitelist)"
+         | Some cl when cl.Params.Length = args.Length ->
+             (match all args with
+              | Error why -> Error why
+              | Ok n ->
+                  let cb = cl.Params |> List.fold (fun (s: Set<IRId>) p -> s.Add p.VarId) bound
+                  let cn = cl.Params |> List.fold (fun (s: Set<string>) p -> s.Add p.Name) boundNames
+                  match rowSlotWalk deferred levels levelNames cb cn (visiting.Add cl.Id) cl.Body with
+                  | Ok m -> Ok (rowSlotAdd n m)
+                  | Error why -> Error why)
+         | _ -> Error "the body calls a function that does not resolve to a callable")
+    | other -> Error $"the body contains a form outside the row-slot whitelist ({other.GetType().Name})"
+
+/// G35 admission for the single-leaf Path B fold nest: Ok (rows, cells) or
+/// Error (the first failed condition, for the `fold-form` decline record).
+/// Called only for a `chunkable` plan in a repro build.
+let private rowSlotAdmission (deferred: Map<IRId, IRExpr>) (info: ApplyInfo) (foldCl: IRCallable) (bindings: LoopIndexBinding list) : Result<int64 * int64, string> =
+    if not (foldRowSlotsEnabled ()) then Error "disabled by BLADE_FOLD_ROW_SLOTS=0"
+    elif not (ompThreadEmissionEnabled ()) then Error (ompThreadsSuppressedReason ())
+    elif bindings.Length <> 1 then
+        Error "not one complete fold per outer index (a multi-level nest continues ONE chain across the rows)"
+    else
+    match info.Arrays |> List.map rowSlotRangeIx with
+    | [ Some outerIx ] when not info.HasReynolds && not info.IsCoIteration ->
+        (match resolveCallable info.Kernel with
+         | Some rowCl when rowCl.Params.Length = 1 ->
+             let rec spine (e: IRExpr) =
+                 match e with
+                 | IRLet (_, _, b) -> spine b
+                 | other -> other
+             let isCompleteFold =
+                 match spine rowCl.Body with
+                 | IRReduceCompute (_, k, s) -> (match k, s with IRTuple _, _ | _, IRTuple _ -> false | _ -> true)
+                 | _ -> false
+             match rowSlotScalarElem rowCl.RetType with
+             | None -> Error "not one complete fold per outer index (the row value is not a scalar)"
+             | Some _ when not isCompleteFold ->
+                 Error "not one complete fold per outer index (the row value is not a fold)"
+             | Some _ ->
+                 let p = rowCl.Params.Head
+                 let levels = Map.ofList [ p.VarId, outerIx ]
+                 let names = Map.ofList [ p.Name, outerIx ]
+                 // THE OUTER FOLD KERNEL, audited by the same closed whitelist
+                 // (its two parameters bound as plain values): the slots move
+                 // EVERY row evaluation before EVERY outer-kernel application,
+                 // so a kernel that writes anything a row reads (a captured
+                 // array cell; a `comm`-declared serial kernel may, the front
+                 // end's write ban covers only parallel bodies) or that has an
+                 // unaudited effect would change the operands. A reorder
+                 // licence is not a purity certificate.
+                 let foldBound = foldCl.Params |> List.map (fun q -> q.VarId) |> Set.ofList
+                 let foldNames = foldCl.Params |> List.map (fun q -> q.Name) |> Set.ofList
+                 match rowSlotWalk deferred levels names Set.empty Set.empty (Set.singleton rowCl.Id) rowCl.Body,
+                       rowSlotWalk deferred Map.empty Map.empty foldBound foldNames (Set.singleton foldCl.Id) foldCl.Body with
+                 | Error why, _ -> Error why
+                 | _, Error why -> Error $"the outer fold kernel is outside the row-slot whitelist ({why}): its applications cannot move behind every row"
+                 | Ok perRow, Ok _ ->
+                     let rows = defaultArg (tryEvalIntIR outerIx.Extent) 0L
+                     let cells = rowSlotMul rows perRow
+                     let gate = rowSlotsMin ()
+                     if cells < gate then
+                         Error $"{rows} row(s) x {perRow} fold step(s) = {cells} below rowslots_min = {gate} (BLADE_TILE_TUNE; provisional gate)"
+                     else Ok (rows, cells)
+         | _ -> Error "the row kernel is not a resolved one-parameter callable")
+    | _ -> Error "the outer level is not a plain range<I> sweep of static extent (v1 slots range-driven rows)"
+
 let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
     let ind = indentStr ctx
     let name = bindingCppName binding
@@ -3741,23 +4017,29 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
     // walk over a compact array's cells becomes one pass over its pool with
     // orbit-class accumulators. A recognised walk the fold declines leaves a
     // census line and falls through to the ordinary nest below.
-    let orbitPlan =
+    // `orbitWhy`: the orbit fold's decline reason when this IS a logical walk
+    // over a compact array it turned away (BLADE_FP_REPRO=1, BLADE_ORBIT_FOLD=0,
+    // ...) -- the G35 row-slot record below names it, because what that form
+    // threads is then the logical walk's own rows.
+    let orbitPlan, orbitWhy =
         let sourceName id = Map.tryFind id ctx.VarNames |> Option.defaultValue $"__v{id}"
         match Blade.OrbitFold.recognise resolveDeferred resolveCallable sourceName compExpr kernelExpr seedExpr with
         | Blade.OrbitFold.Orbit p ->
             if ctx.DeferredComputations.ContainsKey p.SourceId then
-                Blade.OrbitFold.recordDeclined name "the compact array is a deferred computation (no pool to walk)"
-                None
+                let why = "the compact array is a deferred computation (no pool to walk)"
+                Blade.OrbitFold.recordDeclined name why
+                None, Some why
             else
                 match Map.tryFind p.SourceId ctx.VarNames with
-                | Some gName -> Some (p, gName)
+                | Some gName -> Some (p, gName), None
                 | None ->
-                    Blade.OrbitFold.recordDeclined name "the compact array has no materialized pool in scope"
-                    None
+                    let why = "the compact array has no materialized pool in scope"
+                    Blade.OrbitFold.recordDeclined name why
+                    None, Some why
         | Blade.OrbitFold.Declined why ->
             Blade.OrbitFold.recordDeclined name why
-            None
-        | Blade.OrbitFold.NotOrbit -> None
+            None, Some why
+        | Blade.OrbitFold.NotOrbit -> None, None
     match orbitPlan with
     | Some (p, gName) ->
         Blade.OrbitFold.recordTaken name p
@@ -3913,8 +4195,27 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                     // threaded vector arm of `laneLines` below and never
                     // reaches the nest. Everything else keeps the serial chain
                     // it had, with the reason on record.
+                    // G35: the REPRO build's one chunk form -- threaded
+                    // complete rows (ChunkRowSlots). Considered only where a
+                    // chunk plan exists and every other form is dead at its
+                    // consumer (fpReassocEnabled false); a decline is
+                    // recorded with the first failed condition. The plan the
+                    // producer builds still reads only source facts, except
+                    // that this one form also asks whether the build opens
+                    // teams at all: a slot array with no team is pure cost.
+                    let rowSlots =
+                        if not chunkable || fpReassocEnabled () then None
+                        else
+                            match rowSlotAdmission ctx.DeferredComputations single callable cg0.Bindings with
+                            | Ok rc -> Some rc
+                            | Error why ->
+                                recordCodegenDecision "fold-form" name (Blade.Effects.Declined $"row-slot form: {why}")
+                                    [ "fold form: serial (repro; the threaded complete-row form declined)"
+                                      "reduce over a deferred computation (threaded complete rows, G35)" ]
+                                None
                     let chunkForm =
                         match cg0.Bindings with
+                        | _ when rowSlots.IsSome -> ChunkRowSlots rowSlots.Value
                         | _ when foldLanesMode () = FoldLanesOff ->
                             ChunkSerial "BLADE_FOLD_LANES=0/off (A/B knob)"
                         | _ when ompTestModeEnabled () ->
@@ -4409,19 +4710,40 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                let domainNote = domainOmpNote ()
                                // What the ordinary nest makes of this fold, for
                                // `blade plan` (the lane arm records its own).
+                               let rowSlotsForm =
+                                   match cg.FoldChunk with
+                                   | Some { ChunkForm = ChunkRowSlots (rows, _) } when ompThreadEmissionEnabled () ->
+                                       Some $"threaded complete rows (repro): {rows} row folds into indexed slots, the outer chain serial in ascending order from its seed"
+                                   | _ -> None
                                let form =
                                    if not (foldReorderLicensed callable) then "serial (no reorder licence)"
+                                   elif rowSlotsForm.IsSome then rowSlotsForm.Value
                                    elif not (fpReassocEnabled ()) then "serial (repro)"
                                    elif cg.FoldChunk.IsSome && ompThreadEmissionEnabled () then
                                        (match cg.FoldChunk.Value.ChunkForm with
                                         | ChunkSimd _ -> "threaded(Path B chunks, simd-reduction within each chunk)"
-                                        | ChunkSerial why -> $"threaded(Path B chunks, serial within each chunk: {why})")
+                                        | ChunkSerial why -> $"threaded(Path B chunks, serial within each chunk: {why})"
+                                        // unreachable: the producer plans rows only in a repro build
+                                        | ChunkRowSlots _ -> "threaded complete rows")
                                    elif cg.Bindings.Length <> 1 then
                                        "serial (multi-level nest: no lane or simd form for a fold over a nest yet)"
                                    elif (domainPlanOfLevel (List.head cg.Bindings)).IsSome then
                                        "serial (closed-form domain: affine nest; the fold kernel has no simd reduction operator, or a real array rides the level)"
                                    else "serial (head level is not a plain rectangular sweep)"
-                               recordFoldForm name form "reduce over a deferred computation"
+                               let formWhere =
+                                   match rowSlotsForm, cg.FoldChunk with
+                                   | Some _, Some { ChunkForm = ChunkRowSlots (_, cells) } ->
+                                       // The orbit fold's own decline, when this is a
+                                       // logical walk over a compact array: the rows
+                                       // threaded here are that walk's (BLADE_ORBIT_FOLD=0
+                                       // keeps the walk; it does not keep it serial).
+                                       let walk =
+                                           match orbitWhy with
+                                           | Some why -> $"; rows of the logical walk (orbit-class fold not taken: {why})"
+                                           | None -> ""
+                                       $"reduce over a deferred computation (one level, Path B partition; {cells} inner fold steps; each row's fold is its own serial chain on one thread{walk})"
+                                   | _ -> "reduce over a deferred computation"
+                               recordFoldForm name form formWhere
                                // A `where omp` FOLD kernel that got no chunk plan
                                // (`chunkable` declined) reaches the nest with
                                // nothing that says so: the nest's own marker reads

@@ -407,6 +407,22 @@ logical terms). `blade plan` names it `fold form: orbit-class fold (rank r, k
 classes)`, or the reason it was not taken; `BLADE_ORBIT_FOLD=0` keeps the
 logical walk. Corpus `symmetry/112`-`115`; proof in `src/OrbitFold.fs`.
 
+**Threaded complete rows under `BLADE_FP_REPRO=1` (C++ lane).** The repro
+build keeps every fold's serial association, so Path B's per-thread partials
+are off; what a `where omp` request can still buy is concurrent evaluation of
+INDEPENDENT COMPLETE ROWS. When a fold's one outer level's value is one
+complete scalar fold per index (the logical-walk checksum above, with the
+licence on the outer fold kernel), each row's fold runs whole on one thread
+into a slot and the outer chain runs serially, ascending from its seed: the
+serial walk's value, bitwise under `BLADE_FP_CONTRACT=off`. Admitted only for
+row bodies AND outer fold kernels on a closed total/pure whitelist (no integer
+`/` `%`, no float -> int cast, proven subscripts, no writes, ...: a panic in a
+team would be a race, and a kernel write would be reordered past rows) above a
+static work gate (`BLADE_TILE_TUNE rowslots_min`, provisional). `blade plan`
+names it `fold form: threaded complete rows (repro)`; `BLADE_FOLD_ROW_SLOTS=0`
+keeps the serial walk. The LLVM lane runs the serial walk. Corpus
+`symmetry/128`; `blade test omp-pragma` / `omp-reduce`.
+
 **`where repro` — the reproducibility demand (named functions only).** The
 inverse of the reorder licence: the function's emitted body must keep the
 interpreter's operation sequence. Discharged as (a) `BLADE_REPRO_FN` on the

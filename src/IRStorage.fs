@@ -114,6 +114,18 @@ and ChunkFoldForm =
     /// straight into the vectorized loop (the serial licensed form's shape,
     /// per thread). `op` is `+` or `*`.
     | ChunkSimd of string
+    /// THREADED COMPLETE ROWS (bench gap G35), the REPRO build's only chunk
+    /// form: each outer index's value is ONE complete scalar fold (its own
+    /// seed, its own serial chain), evaluated whole by the thread that owns
+    /// the index under the same `blade_fold::chunk_lo` partition and stored
+    /// into its slot `__rslot[i]`; after the region the OUTER chain runs
+    /// serially, ascending from the caller's seed, through the fold wrapper.
+    /// No chain is split and nothing is reassociated (no partial combine), so
+    /// the value is the serial walk's, bitwise under BLADE_FP_CONTRACT=off.
+    /// Chosen by the producer only when the build is repro, threads are
+    /// emitted, the row body passed the totality/purity whitelist and the
+    /// static work gate (`rows` outer indices, `cells` inner fold steps in all).
+    | ChunkRowSlots of rows: int64 * cells: int64
 
 /// Hot-row fold scheduling (Blade.Optimize.planHotRowFolds, bench review
 /// item M13): what the producer's nest places around and inside its

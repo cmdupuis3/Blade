@@ -988,6 +988,12 @@ let internal llvmLaneDecision (d: Blade.Effects.Decision) : Blade.Effects.Decisi
         if cppForm.StartsWith "fold form: orbit-class fold" && cppForm.Contains Blade.OrbitFold.threadedSuffix then
             { d with Evidence = cppForm.Replace(Blade.OrbitFold.threadedSuffix, "; one serial pass (LLVM lane: no thread runtime)") :: List.tail d.Evidence }
         elif cppForm.StartsWith "fold form: orbit-class fold" then d
+        // The C++ lane's threaded complete-row form (G35) is that lane's
+        // thread team; this lane has no thread runtime and runs the same rows
+        // serially -- every row chain, then the outer chain ascending from its
+        // seed: the same association, which is the only one a repro build has.
+        elif cppForm.StartsWith "fold form: threaded complete rows (repro)" then
+            declined "the LLVM lane has no thread runtime: it runs the serial walk (each row's fold, then the outer chain ascending from its seed -- the same association as the C++ lane's row slots)" []
         elif cppForm.StartsWith "fold form: serial (no reorder licence"
            || cppForm.StartsWith "fold form: serial (repro" then
             declined "the fold keeps its serial association in the LLVM lane too" []

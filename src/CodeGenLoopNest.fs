@@ -1517,7 +1517,18 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     // The REPRO build (BLADE_FP_REPRO=1) drops the chunk plan too: Path B's
     // per-thread partials reassociate the fold, and that build keeps the serial
     // association of every fold. Same consumer-side drop as the threads knob.
-    let foldChunkLive = codeGen.FoldChunk.IsSome && ompThreadEmissionEnabled () && fpReassocEnabled ()
+    // EXCEPT the threaded complete-row form (ChunkRowSlots, bench gap G35),
+    // the one chunk form that splits no chain: each outer index's whole fold
+    // runs on one thread into its slot, and the outer chain runs serially
+    // after the region. It is planned ONLY in the repro build, so it is exempt
+    // from the last conjunct (and still dies with the threads knob).
+    let rowSlots =
+        match codeGen.FoldChunk with
+        | Some { ChunkForm = ChunkRowSlots (rows, cells) } -> Some (rows, cells)
+        | _ -> None
+    let foldChunkLive =
+        codeGen.FoldChunk.IsSome && ompThreadEmissionEnabled ()
+        && (fpReassocEnabled () || rowSlots.IsSome)
     let outerIsParallel =
         pragmaLevel.IsSome || foldChunkLive
     // Path B: a comm-licensed fold nest. `pragmaLevel` stays None on
@@ -1542,6 +1553,8 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     let fcHad = $"__rhad_{fcTag}"
     let fcAcc = $"__racc_{fcTag}"
     let fcHas = $"__rhas_{fcTag}"
+    let fcSlot = $"__rslot_{fcTag}"
+    let rowSlotsLive = foldChunk.IsSome && rowSlots.IsSome
     // The accumulator the nest body writes: the thread-private one under Path B,
     // the caller-declared shared scalar otherwise.
     let foldAccName = if foldChunk.IsSome then fcAcc else codeGen.OutputName
@@ -1564,12 +1577,42 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     // empty guard / parallel region) and are closed by the epilogue after the
     // nest, so `depth` advances by 3 before the first loop header.
     match foldChunk with
+    // G35 prologue: the same team sizing and the same partition as Path B,
+    // but no private accumulator -- one slot per outer index, written by the
+    // index's owner. Three scopes open (block / non-empty guard / parallel
+    // region), closed by the epilogue, exactly like Path B's. BLOCK comments:
+    // nothing here may swallow a following statement if the lines are joined.
+    | Some plan when rowSlotsLive ->
+        let (rows, cells) = rowSlots.Value
+        recordOmpConstruct codeGen.OutputName "omp parallel num_threads(T) + serial ascending outer chain"
+            $"threaded complete rows (repro): {rows} outer indices partitioned per thread (Path B partition), each index's whole fold on one thread into its slot; the outer chain serial afterwards ({cells} inner fold steps)"
+        let outerBound = genLoopBoundExpr compoundArrays (List.head codeGen.Bindings)
+        (ompApiUsedCell ()).Value <- true
+        (foldLanesUsedCell ()).Value <- true
+        lines <- lines @ [
+            ind depth + "/* reduce over computation: threaded complete rows (repro) -- each row's fold on one thread into its slot, the outer chain serial after the region */"
+            ind depth + "{"
+            ind (depth + 1) + $"const size_t {fcRn} = {outerBound};"
+            ind (depth + 1) + $"int {fcT} = blade_omp_get_max_threads();"
+            ind (depth + 1) + $"if ((size_t){fcT} > {fcRn}) {fcT} = (int){fcRn};"
+            ind (depth + 1) + $"if ({fcT} < 1) {fcT} = 1;"
+            ind (depth + 1) + $$"""if ({{fcRn}} > 0) {"""
+            ind (depth + 2) + $"{plan.ElemCpp}* {fcSlot} = new {plan.ElemCpp}[{fcRn}];"
+            ind (depth + 2) + $"BLADE_OMP_PARALLEL_NUM_THREADS({fcT})"
+            ind (depth + 2) + "{"
+            ind (depth + 3) + "const int __rnt = blade_omp_get_num_threads();"
+            ind (depth + 3) + "const int __rt = blade_omp_get_thread_num();"
+            ind (depth + 3) + $"const size_t __rlo = blade_fold::chunk_lo({fcRn}, (size_t)__rt, (size_t)__rnt);"
+            ind (depth + 3) + $"const size_t __rhi = blade_fold::chunk_lo({fcRn}, (size_t)__rt + 1, (size_t)__rnt);"
+        ]
+        depth <- depth + 3
     | Some plan ->
         // M14 (gap G25): the form inside each chunk, decided by the producer.
         let chunkPhrase =
             match plan.ChunkForm with
             | ChunkSimd op -> $"omp simd reduction({op}) within each chunk"
             | ChunkSerial why -> $"serial within each chunk: {why}"
+            | ChunkRowSlots _ -> "threaded complete rows"
         recordOmpConstruct codeGen.OutputName "omp parallel num_threads(T) + fixed-order combine"
             $"comm-licensed parallel fold: outer level chunked per thread (Path B), {chunkPhrase}"
         let outerBound = genLoopBoundExpr compoundArrays (List.head codeGen.Bindings)
@@ -1596,7 +1639,7 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
                 |> List.map (fun e -> e.ArrayName)
                 |> List.distinct
                 |> List.mapi (fun i nm -> (nm, $"__rsrc{i}_{plan.Tag}"))
-            | ChunkSerial _ -> []
+            | ChunkSerial _ | ChunkRowSlots _ -> []
         for (nm, alias) in simdAliases do
             for e in (List.head codeGen.Bindings).Elements do
                 if e.ArrayName = nm && e.Virtual.IsRealArray && e.ArrayRank = 1
@@ -1606,7 +1649,7 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
             match plan.ChunkForm with
             | ChunkSimd "*" -> "1"
             | ChunkSimd _ -> "0"
-            | ChunkSerial _ -> $"{plan.ElemCpp}()"
+            | ChunkSerial _ | ChunkRowSlots _ -> $"{plan.ElemCpp}()"
         lines <- lines @ [
             ind depth + "// reduce over computation: comm-licensed parallel fold, outer level chunked"
             ind depth + "{"
@@ -1805,7 +1848,9 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
                 // trace. This is the census line for exactly that case.
                 @ (if codeGen.FoldChunk.IsSome && not (ompThreadEmissionEnabled ())
                    then [ ind depth + $"// {(ompSuppressedPhrase (ompThreadsSuppressedReason ()))}" ]
-                   elif codeGen.FoldChunk.IsSome && not (fpReassocEnabled ())
+                   // The row-slot form SPENDS the request (a live team), so
+                   // a repro build that took it has no drop to report.
+                   elif codeGen.FoldChunk.IsSome && not (fpReassocEnabled ()) && not rowSlotsLive
                    then [ ind depth + $"// {(ompSuppressedPhrase (fpReproReason ()))}" ]
                    else [])
             else []
@@ -1873,7 +1918,7 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
             | Some plan when isOuter ->
                 (match plan.ChunkForm with
                  | ChunkSimd op -> [ ind depth + $"BLADE_OMP_SIMD_REDUCTION({op}:{fcAcc})" ]
-                 | ChunkSerial _ -> [])
+                 | ChunkSerial _ | ChunkRowSlots _ -> [])
             | _ -> []
         lines <- lines @ suppressedMarker @ ivdepSuppressedMarker @ chunkSimdPragma @ [ind depth + pragmaPrefix + ivdepPrefix + header]
         depth <- depth + 1
@@ -2130,6 +2175,11 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
         // loop-invariant after the first iteration.
         | Some wname, Some plan ->
             match plan.ChunkForm with
+            // G35: the row's complete value into its own slot, indexed by the
+            // outer level's loop counter (the nest is one level: the row
+            // kernel's body is the whole fold, rendered as it is serially).
+            | ChunkRowSlots _ ->
+                $"{fcSlot}[{(List.head codeGen.Bindings).IndexName}] = {reynoldsResult.Value.CppExpr};"
             // ChunkSimd: the reduction statement in the `x = x op expr` shape
             // the clause requires, into the identity-seeded private copy.
             | ChunkSimd op -> $"{foldAccName} = {foldAccName} {op} {reynoldsResult.Value.CppExpr};"
@@ -2185,13 +2235,26 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     // caller's seed -- already in the shared accumulator -- enters the fold first,
     // which is what makes this the serial left fold up to associativity.
     match foldChunk, codeGen.FoldWrapper with
+    // G35 epilogue: close the region, then the OUTER chain exactly as the
+    // serial walk runs it -- the caller's seed (already in the accumulator)
+    // first, every slot in ascending index order through the same wrapper.
+    // No partial combine: nothing here is a reassociation.
+    | Some _, Some wname when rowSlotsLive ->
+        lines <- lines @ [
+            ind (depth - 1) + "}"
+            ind (depth - 1) + $"for (size_t __ri = 0; __ri < {fcRn}; __ri++) {codeGen.OutputName} = {wname}({codeGen.OutputName}, {fcSlot}[__ri]);"
+            ind (depth - 1) + $"delete[] {fcSlot};"
+            ind (depth - 2) + "}"
+            ind (depth - 3) + "}"
+        ]
+        depth <- depth - 3
     | Some plan, Some wname ->
         // ChunkSimd: a one-level chunk contributed exactly when it was
         // non-empty (the identity seed is never published for an empty one).
         let hadExpr =
             match plan.ChunkForm with
             | ChunkSimd _ -> "(__rhi > __rlo)"
-            | ChunkSerial _ -> fcHas
+            | ChunkSerial _ | ChunkRowSlots _ -> fcHas
         lines <- lines @ [
             ind depth + $"{fcPart}[__rt] = {fcAcc};"
             ind depth + $"{fcHad}[__rt] = {hadExpr};"
