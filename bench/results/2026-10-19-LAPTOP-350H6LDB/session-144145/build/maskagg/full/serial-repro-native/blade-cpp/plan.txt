@@ -1,0 +1,5 @@
+plan: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-19-LAPTOP-350H6LDB\session-144145\build\maskagg\full\serial-repro-native\blade-cpp\src\maskagg.blade -- 3 optimization decision(s)
+  [compound v1] y @ 27:1: applied [representation: rank-1 compaction (count pass + branchless kept-position fill, gather by position; no hash table; keyed reads by binary search over the kept positions); rank-1 mask over one dense axis; no trailing dims]
+  [fold-form v1] checksum @ 28:1: declined -- serial (repro) [fold form: serial (repro); reduce in expression position]
+  [fold-form v1] input_checksum @ 29:1: declined -- serial (repro) [fold form: serial (repro); reduce over a materialized array]
+inputs: 0 (identity policy: `content` = folded at compile time, hashed; `version` = read at run time, size + mtime observed -- BLADE_RUN_RECORD=<path> writes the run record)

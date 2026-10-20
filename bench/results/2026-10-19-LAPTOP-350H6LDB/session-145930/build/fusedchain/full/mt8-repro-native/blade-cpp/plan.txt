@@ -1,0 +1,6 @@
+plan: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-19-LAPTOP-350H6LDB\session-145930\build\fusedchain\full\mt8-repro-native\blade-cpp\src\fusedchain.blade -- 4 optimization decision(s)
+  [omp v1] __ret1073741824 @ 23:1: applied [BLADE_OMP_PARALLEL_FOR; loop nest level 0 (__i0)]
+  [fold-form v1] __v40 @ 34:1: declined -- serial (repro) [fold form: serial (repro); reduce over a deferred computation]
+  [omp v1] kernel @ 34:1: declined -- BLADE_FP_REPRO=1 -- this build keeps the serial association of every fold (the reorder licence in source is unchanged) [[omp] requested but emitted serial]
+  [fold-form v1] _(checksum,input_checksum): declined -- serial (repro) [fold form: serial (repro); reduce in expression position]
+inputs: 0 (identity policy: `content` = folded at compile time, hashed; `version` = read at run time, size + mtime observed -- BLADE_RUN_RECORD=<path> writes the run record)

@@ -1,0 +1,25 @@
+13:20:10 PHASE3 START hash=bb52a4c2a008d1985c4df89a69a3ed54327bb25f1301bde0fecfa2adc5c3bf45
+13:20:11 START fold ab_time (fixed copy; the original clobbers $Exe with $exe)
+13:20:25 DONE fold ab_time (fixed)
+13:20:25 START r3-serial-licensed-A regimes=serial-licensed-native kernels=gram,comoment3,antisym,pairkernel,recur,stencil,band BatteryStatus=2
+13:36:03 DONE r3-serial-licensed-A exit=3
+13:36:04 START r3-serial-licensed-B regimes=serial-licensed-native kernels=fusedchain,onepass,maskagg,dot,saxpy BatteryStatus=2
+13:53:44 DONE r3-serial-licensed-B exit=3
+13:53:44 START r3-mt8-licensed regimes=mt8-licensed-native kernels=all BatteryStatus=2
+14:25:00 DONE r3-mt8-licensed exit=3
+14:25:01 START r3-serial-repro-A regimes=serial-repro-native kernels=gram,comoment3,antisym,pairkernel,recur,stencil,band BatteryStatus=2
+14:41:44 DONE r3-serial-repro-A exit=3
+14:41:45 START r3-serial-repro-B regimes=serial-repro-native kernels=fusedchain,onepass,maskagg,dot,saxpy BatteryStatus=2
+14:59:29 DONE r3-serial-repro-B exit=3
+14:59:30 START r3-mt8-repro regimes=mt8-repro-native kernels=all BatteryStatus=2
+15:31:06 DONE r3-mt8-repro exit=3
+15:31:07 START r3-serial-fastmath regimes=serial-fastmath-native kernels=all BatteryStatus=2
+15:50:01 DONE r3-serial-fastmath exit=3
+15:50:01 START r3-mt8-fastmath regimes=mt8-fastmath-native kernels=all BatteryStatus=2
+16:10:29 DONE r3-mt8-fastmath exit=3
+16:10:30 START smoke refresh for gram blas (new blas acceptance rule)
+16:11:02 DONE smoke refresh gram blas exit 0
+16:11:02 START r3-blas regimes=serial-licensed-blas,mt8-licensed-blas kernels=gram BatteryStatus=2
+16:13:32 DONE r3-blas exit=0
+16:13:32 PHASE3 ALL DONE
+16:13:32 runner-window deleted

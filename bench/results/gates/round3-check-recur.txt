@@ -1,0 +1,49 @@
+[11:32:00.973 +    0.0s] check: 1 kernel(s): recur; size full
+[11:32:01.022 +    0.1s] fingerprinting the machine
+[11:32:02.606 +    1.6s] power: ac, max processor state AC 100%, boost mode AC None, Power Scheme GUID: 64a64f24-65b9-4b56-befd-5ec1eaced9b3  (Silent)
+[11:32:05.074 +    4.1s] build recur serial-licensed-native full blade-llvm
+[11:32:08.930 +    8.0s]   -> ok (2.0s)
+[11:32:08.931 +    8.0s] build recur serial-licensed-native full blade-cpp
+[11:32:14.036 +   13.1s]   -> ok (3.3s)
+[11:32:14.098 +   13.1s]   blade-llvm: ok t=0.008563s checksum=5495637.67534381 input=20054.0339541091 peakWS=50.7MB
+[11:32:14.165 +   13.2s]   blade-cpp: ok t=0.01017s checksum=5495637.67534381 input=20054.0339541091 peakWS=51.1MB
+[11:32:14.168 +   13.2s] build recur serial-repro-native full blade-llvm
+[11:32:18.085 +   17.1s]   -> ok (2.1s)
+[11:32:18.085 +   17.1s] build recur serial-repro-native full blade-cpp
+[11:32:23.099 +   22.1s]   -> ok (3.2s)
+[11:32:23.163 +   22.2s]   blade-llvm: ok t=0.01258s checksum=5495637.67534381 input=20054.0339541091 peakWS=50.7MB
+[11:32:23.231 +   22.3s]   blade-cpp: ok t=0.01472s checksum=5495637.67534381 input=20054.0339541091 peakWS=51.1MB
+
+# Blade vs Fortran -- check session 2026-10-19T11:32:00
+
+- host LAPTOP-350H6LDB | AMD Ryzen 7 5800HS with Radeon Graphics | 8C/16T | 15.41 GB | power ac | max processor state AC 100% | boost AC None | Power Scheme GUID: 64a64f24-65b9-4b56-befd-5ec1eaced9b3  (Silent)
+- git 7e170c6c99ca685a70f10161dd9a5eb36b617071 | Blade.dll bb52a4c2a008d198 | GNU Fortran (Rev4, Built by MSYS2 project) 16.2.0 | Intel(R) Fortran Compiler for applications running on Intel(R) 64, Version 2026.1.0 Build 20260617 | clang version 22.1.8 (https://github.com/msys2/MINGW-packages d34feaaa1d0aff624c870910b6f2589aa40d20de)
+- size `full` | duration 22.3 s | pins: pins-A.json, pins-B.json
+
+## serial-licensed-native
+
+Blade reference per kernel: recur=blade-llvm
+
+| kernel | arm | status | n | min (s) | median (s) | IQR (s) | ratio vs ref [95% CI] | verdict | hypothesis | fold form | parallelism | peak WS (MB) | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| recur | blade-llvm | ok | 1 | 0.008563 | 0.008563 | 0 |  |  |  | reordered (3 reassoc flags) | serial | 50.7 |  |
+| recur | blade-cpp | ok | 1 | 0.01017 | 0.01017 | 0 |  |  |  | reordered (3 SIMD_REDUCTION/K-lane) | serial | 51.1 |  |
+
+## serial-repro-native
+
+Blade reference per kernel: recur=blade-llvm
+
+| kernel | arm | status | n | min (s) | median (s) | IQR (s) | ratio vs ref [95% CI] | verdict | hypothesis | fold form | parallelism | peak WS (MB) | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| recur | blade-llvm | ok | 1 | 0.01258 | 0.01258 | 0 |  |  |  | in-order | serial | 50.7 |  |
+| recur | blade-cpp | ok | 1 | 0.01472 | 0.01472 | 0 |  |  |  | in-order | serial | 51.1 |  |
+
+[11:32:23.239 +   22.3s] wrote C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\.build\sessions\2026-10-19-LAPTOP-350H6LDB\session-113200-check
+recur serial-licensed-native size=full {'nt': 301, 'nx': 20011} reference=pin pins-B.json
+  blade-llvm                   ok               checksum=5495637.67534381  input_checksum=20054.0339541091  t=0.00856310001108795
+  blade-cpp                    ok               checksum=5495637.67534381  input_checksum=20054.0339541091  t=0.0101671
+recur serial-repro-native size=full {'nt': 301, 'nx': 20011} reference=pin pins-B.json
+  blade-llvm                   ok               checksum=5495637.67534381  input_checksum=20054.0339541091  t=0.0125814999919385
+  blade-cpp                    ok               checksum=5495637.67534381  input_checksum=20054.0339541091  t=0.0147234
+[11:32:23.252 +   22.3s] exit 0: 0 failure(s), 0 flag(s)
+exit 0

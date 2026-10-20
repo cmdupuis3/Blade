@@ -1,0 +1,15 @@
+plan: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-19-LAPTOP-350H6LDB\session-155001\build\antisym\smoke\serial-fastmath-native\blade-cpp\src\antisym.blade -- 13 optimization decision(s)
+  [omp v1] _(checksum,input_checksum): declined -- BLADE_OMP_THREADS=1 -- this build emits no thread-level OpenMP (the omp licence in source is unchanged; omp simd is unaffected) [[omp] requested but emitted serial]
+  [symmetric-storage v1] __v34: applied [packed SymAntisymmetric storage over 2 levels (one canonical cell per orbit); operands: z, z]
+  [triangular-iteration v1] __v34: applied [triangular levels 1; symcom states: SCNeither, SCCommutative; speedup x2]
+  [microkernel v1] __v34: declined -- below the antisym-tile crossover (p >= 24, n >= 8): the per-cell nest wins [antisym tile; P=23 N=11]
+  [fold-form v1] _(checksum,input_checksum): applied [fold form: simd K-lanes(8) dot; prodsum]
+  [fold-form v1] __v61: applied [fold form: orbit-class fold (rank 2, 2 classes); one pass over the 253-cell AntisymIdx<2, 23> pool of `__v34` instead of 23^2 logical reads; strict orbits weight 2 (even kernel: f(-x) = f(x), one accumulator); 23 repeated-coordinate cell(s) add f(+0); addition-only combine (licensed regrouping of the logical sum)]
+  [fold-form v1] _(checksum,input_checksum): applied [fold form: K-lanes(8); reduce in expression position]
+  [microkernel v1] __v115: applied [row-fold jam (partial reduce over rows); 6 rows per tile, one accumulator per row (bitwise)]
+  [fold-form v1] __v115: applied [fold form: row-fold jam(6 rows, bitwise); reduce over the rows of a row map]
+  [fold-form v1] __v94: applied [fold form: simd-reduction; reduce over a materialized array (Path A, thread team suppressed)]
+  [fold-form v1] lambda in l: applied [fold form: simd K-lanes(8) dot; prodsum]
+  [fold-form v1] __ret1073741824: applied [fold form: simd-reduction; reduce over a deferred computation (one level)]
+  [fold-form v1] lambda in isum: applied [fold form: K-lanes(8); reduce in expression position]
+inputs: 0 (identity policy: `content` = folded at compile time, hashed; `version` = read at run time, size + mtime observed -- BLADE_RUN_RECORD=<path> writes the run record)

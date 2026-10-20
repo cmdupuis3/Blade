@@ -1,0 +1,95 @@
+test: ignoring ambient OPENBLAS_DIR=C:\Users\cdupu\tools\OpenBLAS-0.3.34-x64 for this run (the suites assume the default emission; blocks that exercise a knob set it themselves)
+
+======================================================================
+  LLVM Fact Layer (v0.20.0)
+======================================================================
+
+
+--- the kill switch ---
+
+  [PASS]: unset licenses every class -- as declared
+  [PASS]: a bare off kills every class -- as declared
+  [PASS]: 0 is a spelling of off -- as declared
+  [PASS]: class:off kills exactly one class -- as declared
+  [PASS]: two classes at once -- as declared
+  [PASS]: an unrecognized token disables nothing -- as declared
+
+--- closed-form enumerable domains (structural/06, bench G4) ---
+
+  [PASS]: a band fold streams the affine nest (no pool, no table) -- 3 asserted, 2 denied
+  [PASS]: a keyed read ranks through a per-row prefix table -- 2 asserted, 0 denied
+
+--- function and parameter attributes ---
+
+  [PASS]: a non-recursive module claims termination -- 2 asserted, 2 denied
+  [PASS]: the allocator's return is the one noalias -- 1 asserted, 0 denied
+  [PASS]: recursion costs the module its termination claim -- 3 asserted, 1 denied
+  [PASS]: an element write anywhere denies every readonly -- 1 asserted, 1 denied
+  [PASS]: paramattrs:off strips the parameter facts -- 2 asserted, 3 denied
+  [PASS]: fnattrs:off strips the groups -- 1 asserted, 1 denied
+
+--- fast-math flags ---
+
+  [PASS]: default emission: licensed accumulator reassociates, everything contracts -- 2 asserted, 1 denied
+  [PASS]: the license reaches exactly the accumulator chain -- 2 asserted, 1 denied
+  [PASS]: an unlicensed kernel stays ordered in the default build -- 1 asserted, 1 denied
+  [PASS]: BLADE_FP_REPRO=1 strips reassoc and nothing else -- 2 asserted, 2 denied
+  [PASS]: BLADE_FP_REASSOC=0 is the repro spelling -- 1 asserted, 2 denied
+  [PASS]: BLADE_FP_REPRO=1 outranks BLADE_FP_REASSOC=1 -- 1 asserted, 1 denied
+  [PASS]: the byte-identity build is flag-free -- 2 asserted, 3 denied
+  [PASS]: contract is per-instruction -- 2 asserted, 1 denied
+  [PASS]: contract=off is off -- 1 asserted, 1 denied
+  [PASS]: both licenses compose on the accumulator -- 2 asserted, 0 denied
+  [PASS]: fmf:off outranks the numeric knobs -- 1 asserted, 2 denied
+
+--- the arithmetic contract: `^` by exponent kind ---
+
+  [PASS]: float ^ int squares in the shim, float ^ float is libm -- 3 asserted, 2 denied
+
+--- shadow frames: kept where a panic is reachable, dropped elsewhere ---
+
+  [PASS]: an Int64 division kernel keeps its frame, named as its binding -- 3 asserted, 1 denied
+  [PASS]: a Float64 division kernel reaches no panic and has no frame -- 1 asserted, 3 denied
+  [PASS]: a caller keeps its frame through a callee that panics -- 3 asserted, 1 denied
+  [PASS]: a literal nonzero divisor cannot fault, so no frame -- 1 asserted, 3 denied
+  [PASS]: every shim export that can panic is in shimPanicSymbols -- 9 panicking exports, 32 definitions scanned
+
+--- the --print selection (G12) ---
+
+  [PASS]: a selection prints only the selected binding -- 2 asserted, 2 denied
+  [PASS]: no selection prints every binding -- 3 asserted, 0 denied
+  [PASS]: a selected name that is no binding refuses to the C++ lane -- refused
+
+--- the whole switch ---
+
+  [PASS]: FACTS=off emits the pre-fact module -- no fact text survives
+  [PASS]: omp census: a `where omp` fold names its dropped team -- census comment in both builds, none without a request
+
+--- the syrk tile core (M6) ---
+
+  [PASS]: syrk tile: gram's shape (61 x 31) calls the core with the emitter's recipe -- 6 asserted, 1 denied
+  [PASS]: syrk tile: the `/ d` tail rides the call as mode 1 and the divisor -- 2 asserted, 0 denied
+  [PASS]: syrk tile: the `* s` tail rides the call as mode 2 -- 2 asserted, 0 denied
+  [PASS]: syrk tile: below the crossover (13 x 31) keeps the nest -- 0 asserted, 1 denied
+  [PASS]: syrk tile: k below the crossover (61 x 3) keeps the nest -- 0 asserted, 1 denied
+  [PASS]: syrk tile: BLADE_SYRK_TILE=0 keeps the nest (the A/B knob) -- 0 asserted, 1 denied
+  [PASS]: syrk tile: two DIFFERENT arrays are not a same-array contraction -- 0 asserted, 1 denied
+  [PASS]: syrk tile: the fact kill switch strips the declaration's attributes -- 1 asserted, 2 denied
+
+--- the antisym and simplex tile cores (M7 / M8) ---
+
+  [PASS]: antisym tile: 61 x 401 calls the core with the emitter's recipe -- 6 asserted, 0 denied
+  [PASS]: antisym tile: BLADE_ANTISYM_TILE=4x4 passes the paired schedule -- 3 asserted, 0 denied
+  [PASS]: antisym tile: the `/ d` tail rides the call as mode 1 and the divisor -- 2 asserted, 0 denied
+  [PASS]: antisym tile: ON under BLADE_FP_REPRO=1 (no reorder licence used) -- 1 asserted, 0 denied
+  [PASS]: antisym tile: below the crossover (23 x 11) keeps the nest -- 0 asserted, 1 denied
+  [PASS]: antisym tile: BLADE_ANTISYM_TILE=0 keeps the nest (the A/B knob) -- 0 asserted, 1 denied
+  [PASS]: antisym tile: a `where repro` function in the module keeps the nest -- 0 asserted, 1 denied
+  [PASS]: simplex tile: 29 x 67 / Float64(n) calls the core with the emitter's recipe -- 5 asserted, 0 denied
+  [PASS]: simplex tile: three K blocks (29 x 700) size the scratch at KC = 234 -- 3 asserted, 0 denied
+  [PASS]: simplex tile: ON under BLADE_FP_REPRO=1 (no reorder licence used) -- 1 asserted, 0 denied
+  [PASS]: simplex tile: below the crossover (13 x 201) keeps the nest -- 0 asserted, 1 denied
+  [PASS]: simplex tile: BLADE_SIMPLEX_TILE=0 keeps the nest (the A/B knob) -- 0 asserted, 1 denied
+  [PASS]: simplex tile: the inner level first (`prodsum(c, a, b)`) declines -- 0 asserted, 1 denied
+----------------------------------------------------------------------
+LLVM Fact Layer: 57 passed, 0 failed, 0 skipped

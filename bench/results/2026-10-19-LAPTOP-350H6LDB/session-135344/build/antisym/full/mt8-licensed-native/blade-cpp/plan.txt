@@ -1,0 +1,18 @@
+plan: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-19-LAPTOP-350H6LDB\session-135344\build\antisym\full\mt8-licensed-native\blade-cpp\src\antisym.blade -- 16 optimization decision(s)
+  [omp v1] __v26: applied [BLADE_OMP_PARALLEL_FOR; loop nest level 0 (__i0)]
+  [symmetric-storage v1] __v34: applied [packed SymAntisymmetric storage over 2 levels (one canonical cell per orbit); operands: z, z]
+  [triangular-iteration v1] __v34: applied [triangular levels 1; symcom states: SCNeither, SCCommutative; speedup x2]
+  [microkernel v1] __v34: applied [antisym tile (blade_pgemm::dantisym_tri, sequential 6x8 (P pass, spill, Q pass), strict packed triangle); P=1201 N=401 components=(0,1) KC=0]
+  [fold-form v1] __v34: applied [fold form: antisym tile sequential 6x8 (P pass, spill, Q pass), whole chain per tile; same-array anticomm row-contraction pair (two ascending chains per cell, one subtraction; no reorder licence used)]
+  [omp v1] __v34: applied [omp parallel num_threads(T) inside the tile driver; dantisym_tri row panels: work units under schedule(dynamic), cells split across the team, sums never]
+  [fold-form v1] __v61: applied [fold form: orbit-class fold (rank 2, 2 classes); thread team over the first-coordinate rows, per-thread class sums combined in thread order; one pass over the 720600-cell AntisymIdx<2, 1201> pool of `__v34` instead of 1201^2 logical reads; strict orbits weight 2 (even kernel: f(-x) = f(x), one accumulator); 1201 repeated-coordinate cell(s) add f(+0); addition-only combine (licensed regrouping of the logical sum)]
+  [omp v1] __v61: applied [omp parallel num_threads(T) + fixed-order combine; orbit-class fold: first-coordinate rows dealt boustrophedon to the team, per-thread class sums combined in thread order]
+  [fold-form v1] _(checksum,input_checksum): applied [fold form: K-lanes(8); reduce in expression position]
+  [microkernel v1] __v115: applied [row-fold jam (partial reduce over rows); 6 rows per tile, one accumulator per row (bitwise)]
+  [fold-form v1] __v115: applied [fold form: row-fold jam(6 rows, bitwise); reduce over the rows of a row map]
+  [omp v1] __v94: applied [BLADE_OMP_PARALLEL_FOR_SIMD_REDUCTION(+:__v94); licensed fold with a builtin operator: OpenMP reduction over the flat sweep (Path A)]
+  [fold-form v1] __v94: applied [fold form: threaded(parallel for simd reduction); reduce over a materialized array (Path A)]
+  [fold-form v1] lambda in l: applied [fold form: simd K-lanes(8) dot; prodsum]
+  [fold-form v1] __ret1073741824: applied [fold form: simd-reduction; reduce over a deferred computation (one level)]
+  [fold-form v1] lambda in isum: applied [fold form: K-lanes(8); reduce in expression position]
+inputs: 0 (identity policy: `content` = folded at compile time, hashed; `version` = read at run time, size + mtime observed -- BLADE_RUN_RECORD=<path> writes the run record)

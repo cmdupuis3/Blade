@@ -1,0 +1,586 @@
+test: ignoring ambient OPENBLAS_DIR=C:\Users\cdupu\tools\OpenBLAS-0.3.34-x64 for this run (the suites assume the default emission; blocks that exercise a knob set it themselves)
+
+======================================================================
+  Blade-DSL: Loops Tests (Full C++ Pipeline) (v0.20.0)
+======================================================================
+
+g++ found and working. Will compile and run generated C++.
+
+Running 241 tests...
+
+[1/241] Method For... ok
+[2/241] Object For... ok
+[3/241] Apply Combinator... ok
+[4/241] Loop Object Reuse... ok
+[5/241] Object For With Arrays... ok
+[6/241] Combinators... ok
+[7/241] Compute... ok
+[8/241] Pure and Bind... ok
+[9/241] Object For Apply... ok
+[10/241] Object For Commutative... ok
+[11/241] Range Basic... ok
+[12/241] Reverse Basic... ok
+[13/241] Range With Array... ok
+[14/241] CoIter Basic... ok
+[15/241] CoIter 3-Way... ok
+[16/241] Compose Basic... ok
+[17/241] Compose Chain... ok
+[18/241] Parallel Basic... ok
+[19/241] Fusion Basic... ok
+[20/241] Parallel 3-Way... ok
+[21/241] Fusion 3-Way... ok
+[22/241] Array Product Basic... ok
+[23/241] Array Product Symmetric... ok
+[24/241] Array Product 3-Way... ok
+[25/241] Object For Parallel... ok
+[26/241] Object For Fusion... ok
+[27/241] Object For Array Product... ok
+[28/241] Object For Comb Parallel... ok
+[29/241] Object For Comb Fusion... ok
+[30/241] Object For Comb Apply... ok
+[31/241] Object For Comb Apply 3-Way... ok
+[32/241] Pipe Apply Basic... ok
+[33/241] Pipe Apply Chain... ok
+[34/241] Functor Map Basic... ok
+[35/241] Functor Map Chain... ok
+[36/241] Functor Map Deferred... ok
+[37/241] Object For Functor Map... ok
+[38/241] Choice Scalar... ok
+[39/241] Choice Kernel... ok
+[40/241] Choice Computation... ok
+[41/241] Choice Rank2... ok
+[42/241] Object For Choice... ok
+[43/241] Compose Obj Basic... ok
+[44/241] Compose Meth Basic... ok
+[45/241] Duality Theorem... ok
+[46/241] ComposeApply In Parallel... ok
+[47/241] ComposeApply In Fusion... ok
+[48/241] ComposeApply In MethCompose... ok
+[49/241] Bind Computation... ok
+[50/241] Bind Chained... ok
+[51/241] Zip Basic... ok
+[52/241] Zip Three-Way... ok
+[53/241] Zip Product... ok
+[54/241] Zip Indirect... ok
+[55/241] Zip ObjectFor... ok
+[56/241] Zip ObjectFor Product... ok
+[57/241] Zip ObjectFor Three-Way... ok
+[58/241] Pipe Precedence Inline... ok
+[59/241] Pipe Precedence Multiline... ok
+[60/241] Reduce Fused Pool... ok
+[61/241] Fusion Staggered Arity... ok
+[62/241] Parallel Merged Fusion... ok
+[63/241] Fusion Different Arrays... ok
+[64/241] Parallel Mismatched Extents... ok
+[65/241] Fusion Mismatched Extents (rejects)... compile fail
+[66/241] Negative Int64 Mixed Arithmetic... ok
+[67/241] Range Multi Index Basic... ok
+[68/241] Range Multi Index With Array... ok
+[69/241] Coiter Non-Virtual In Clause (rejects)... IR fail
+[70/241] Kernel Returns Tuple... ok
+[71/241] Chained Positional Elementwise Binop... ok
+[72/241] Halo Central Difference... ok
+[73/241] Halo Forward and Backward Difference... ok
+[74/241] Halo Symmetric 3-Point Sum... ok
+[75/241] Halo Non-Static Offsets (rejects)... IR fail
+[76/241] Halo 2-D Separable... ok
+[77/241] Halo Over Compound (present cells)... ok
+[78/241] Halo Lag-Stats Pool... ok
+[79/241] Halo Nested Per-Axis Offsets... ok
+[80/241] Halo Delay Embedding... ok
+[81/241] Mut Array Copy Semantics... ok
+[82/241] Mut Array Copy In Function Body... ok
+[83/241] Zip Rank-2 Row Prodsum... ok
+[84/241] Zip Rank-2 Elementwise Kernel Body... ok
+[85/241] Zip Complex Accessor Elementwise... ok
+[86/241] Coiter Multi Axis Basic... ok
+[87/241] Coiter Multi Axis 3-Way... ok
+[88/241] Binop Multi Axis Elementwise... ok
+[89/241] Binop Multi Axis Chain... ok
+[90/241] Binop Multi Axis Shape Mismatch (rejects)... IR fail
+[91/241] Binop Mixed Dense Packed (rejects)... IR fail
+[92/241] Coiter Index Params... ok
+[93/241] Deferred Binding Forced On Read... ok
+[94/241] Compose Obj Let-Bound Objects... ok
+[95/241] Compose Obj Let-Bound Composition... ok
+[96/241] method_for with a named top-level function as its kernel... ok
+[97/241] object_for with a named top-level function as its kernel... ok
+[98/241] method_for with a named BINARY function kernel (multi-param eta-expansion)... ok
+[99/241] Implicit Method For Tuple... ok
+[100/241] Implicit Method For Single Array... ok
+[101/241] Implicit Method For Comm SymIdx... ok
+[102/241] Implicit Object For Letbound Kernel... ok
+[103/241] Implicit Method For Named Function Kernel... ok
+[104/241] Implicit Zip Co-iteration... ok
+[105/241] Implicit Former Undecidable (rejects)... IR fail
+[106/241] Implicit Object For Named Kernel Left... ok
+[107/241] Implicit Object For Poly Kernel Left... ok
+[108/241] Reduce Omp Builtin... ok
+[109/241] Reduce Omp Comm Kernel... ok
+[110/241] Flat Elementwise Dense... ok
+[111/241] Flat Elementwise Crossindex Fallback... ok
+[112/241] Compute Elementwise In Function Body... ok
+[113/241] Omp Licences External S-Dims (misconception warns)... ok
+[114/241] Omp Licence Correct Spellings (no diagnostic)... ok
+[115/241] Deferred Let Forced By Positional Read... ok
+[116/241] Array Returning Kernel Call Body... ok
+[117/241] Kernel Body Array Let Call Form... ok
+[118/241] Kernel Body Unannotated Param Broadcast... ok
+[119/241] Array Valued Kernel Return... ok
+[120/241] Grouped Row Array Result... ok
+[121/241] Grouped Dense Result Mapped... ok
+[122/241] Array Valued Kernel Result Is Iterable... ok
+[123/241] Kernel Body Array Intermediate... ok
+[124/241] Kernel Body Nested Map... ok
+[125/241] Kernel Body Nested Capture Depth 2... ok
+[126/241] Kernel Body Unforced Let... ok
+[127/241] Deferred Binding Captured By Kernel... ok
+[128/241] Generic Function Body Nested Map... ok
+[129/241] Generic Function Body Zip Co-Iteration... ok
+[130/241] Complex Row Map Named Kernel... ok
+[131/241] Row Slice As Value... ok
+[132/241] Leading Axis Fold... ok
+[133/241] Leading Axis Fold Group Grid... ok
+[134/241] Leading Axis Fold Axes Clash (rejects)... IR fail
+[135/241] Leading Axis Fold Slice Rank Mismatch (rejects)... IR fail
+[136/241] Leading Axis Fold Omp Kernel (rejects)... IR fail
+[137/241] Reduction Join Two Legs Four Ways... ok
+[138/241] Reduction Join Four Legs Four Ways... ok
+[139/241] Reduction Join Shared Deferred Operand... ok
+[140/241] Reduction Join In A Kernel Body... ok
+[141/241] Reduction Join WOSA Kernel Shape... ok
+[142/241] Reduction Join Heterogeneous Folds... ok
+[143/241] Reduction Join One Leg Is The Identity... ok
+[144/241] Reduction Join Extent Mismatch (rejects)... IR fail
+[145/241] Reduction Join Non-Reduction Leg (rejects)... IR fail
+[146/241] Reduction Join Leg Needs Init (rejects)... IR fail
+[147/241] Reduction Join Fold Operand Not A Leg List (rejects)... IR fail
+[148/241] Leading Axis Fold Returned Group Grid... ok
+[149/241] Row Map Returning An Array Literal Of Constants... ok
+[150/241] Row Map Returning An Array Literal Of Param Expressions... ok
+[151/241] Grouped Row Map Returning A Join Result Vector... ok
+[152/241] Row Map Returning A Literal Of Whole Rows (rejects)... compile fail
+[153/241] Fold And Index A Grid Returned From A Function... ok
+[154/241] Fold A Grid Returned From An Abstract-Parameter Function... ok
+[155/241] Partial Index On A Deduced-Return Function Result... ok
+[156/241] Halo Map With Block Kernel Returning An Array Literal... ok
+[157/241] Half-Cell Window Composition End To End... ok
+[158/241] Grouped Row Map Bare Apply With Block Array Literal Kernel... ok
+[159/241] Halo Static Extent Mismatch (rejects)... IR fail
+[160/241] Halo Runtime Extent Oversized (aborts)... ok
+[161/241] Halo Runtime Extent Undersized (aborts)... ok
+[162/241] Static Arithmetic Extent In Halo And Range... ok
+[163/241] Ragged Literal Row Map With Block Array Literal Kernel... ok
+[164/241] Chained Map Materializes Its Intermediate... ok
+[165/241] Rank-raising row kernel declared with an ABSTRACT T^1 return... ok
+[166/241] object_for with a row-returning comm kernel over the SAME array (SymIdx)... ok
+[167/241] object_for with a row-returning comm kernel over DIFFERENT arrays (dense)... ok
+[168/241] Range SymIdx Prefix Offsets (r=2)... ok
+[169/241] Range SymIdx Prefix Offsets (r=3)... ok
+[170/241] Range SymIdx Prefix Sum Symmetric Gram... ok
+[171/241] Range AntisymIdx Prefix Offsets... ok
+[172/241] Range SymIdx Tagged Slot Warns... ok
+[173/241] Range SymIdx Named Alias Carries The Component Tag... ok
+[174/241] Pipeline Three Stages... ok
+[175/241] Pipeline Multi Operand... ok
+[176/241] Pipeline In Function Body... ok
+[177/241] Pipeline Fusion Declines... ok
+[178/241] Pipeline Carries Omp Licence... ok
+[179/241] Kernel-Body Row View As An Elementwise-Map Operand... ok
+[180/241] A Tuple-Destructured Kernel Name Shadows The Module One... ok
+[181/241] A Pipeline Stage May Not Forward-Reference Its Kernel (rejects)... IR fail
+[182/241] Pipeline Three Stage Decline (rejects)... compile fail
+[183/241] Row View Pair Elementwise... ok
+[184/241] Prodsum Inline Deferred Operand... ok
+[185/241] Deferred Binding Sole-Read By A Fold Still Prints... ok
+[186/241] Reduce Over Deferred Computation In Expression Position... ok
+[187/241] CoIter Abstract Param Agree... ok
+[188/241] Pipeline Named Kernel Capture Hygiene... ok
+[189/241] Pipeline Second Stage Annotation (rejects)... IR fail
+[190/241] Pipeline Block Kernels Stage Types... ok
+[191/241] Pipeline Block Kernels Rank 2... ok
+[192/241] Per-Row Reduction Join Streams The Pairwise Normalization... ok
+[193/241] Tuple-State Online Fold Matches The Two-Pass Join... ok
+[194/241] Halo offset outside the declared set rejected (rejects)... IR fail
+[195/241] Halo compound-inner offset outside the declared window rejected (rejects)... IR fail
+[196/241] Halo compound-inner non-literal offset rejected (rejects)... IR fail
+[197/241] Reduction Join Share Read By A Direct Fold Leg... ok
+[198/241] Deferred Outer Product Under The Default Partial Fold Streams... ok
+[199/241] row folds and row-map prodsums at a row count the jammed tile reaches... ok
+[200/241] Pipe Compute After If Kernel... ok
+[201/241] Row maps returning a row, in the natural spellings... ok
+[202/241] Co-iteration kernel with the index parameters first (rejects)... IR fail
+[203/241] Halo Over Symmetric Source... ok
+[204/241] Pipeline Block Row Map Stages... ok
+[205/241] Row Map In Generic Function Body... ok
+[206/241] CoIter Param Shared Index Tag... ok
+[207/241] Row Lambda Return Extent From Param... ok
+[208/241] A Row Parameter Forwarded Into A Tuple Argument Stays A Row... ok
+[209/241] A Row Kernel's Returned Row Can Take Its Extent From A Captured Array... ok
+[210/241] Prodsum Takes An Inline Array Literal Operand... ok
+[211/241] A Row Kernel's Returned Row Can Take Its Extent Through A Unit-Carrying Caret Parameter... ok
+[212/241] A Unit-Carrying Caret Row Takes Its Returned Extent From The Row Itself... ok
+[213/241] A Generic Row Map Over A Unit-Carrying Caret Parameter Reads Its Extent At Run Time... ok
+[214/241] A Row Return Traced Through A Unit-Carrying Caret Still Meets Its Declared Extent (rejects)... IR fail
+[215/241] A Row Return Through A Unit-Carrying Caret Return Annotation Has No Known Length (rejects)... compile fail
+[216/241] A Halo Window Passed To A Function That Applies It Is Refused (rejects)... IR fail
+[217/241] A Named Function Over A Halo Window Is Refused As Its Kernel (rejects)... IR fail
+[218/241] A Halo Window Passed To A Lambda That Applies It Is Refused (rejects)... IR fail
+[219/241] Halo Neighbour Values Passed To A Function... ok
+[220/241] a named function as the kernel over range<I> takes the index as an integer... ok
+[221/241] a named Int64 kernel over Float64 elements (rejects)... IR fail
+[222/241] A Halo Window Read Is A Position Of Its Index... ok
+[223/241] A Halo Window Itself Is Not A Position (rejects)... IR fail
+[224/241] A Call Refused Inside A Kernel Body Is Located At Its Argument (rejects)... IR fail
+[225/241] A Kernel Index Passed To Another Index Type's Parameter Is Refused (rejects)... IR fail
+[226/241] A Subscript Refused Inside A Kernel Body Is Located At Its Index (rejects)... IR fail
+[227/241] Kernel Body Bare Sort... ok
+[228/241] Kernel Body Array Literal... ok
+[229/241] Kernel Branch Reduce Of Product... ok
+[230/241] a lambda handing a Float64 element to an Int64 parameter (rejects)... IR fail
+[231/241] a lambda's open parameter passed to a concrete parameter takes what the row brings... ok
+[232/241] A Hoisted Force After A Loop-Body Force In The Same Statement... ok
+[233/241] a function-body let mut copy of a local array stays a copy when the local is read afterwards... ok
+[234/241] Fold over a map of a deferred map (top level and top-level block)... ok
+[235/241] Omp Map Licence Feeding Fold... ok
+[236/241] Hot-Row Fold Behind A 2-D Halo Producer... ok
+[237/241] Hot-Row Fold Licensed Inside A Function... ok
+[238/241] Hot-Row Fold Declines (Kernel Reads Beyond Its Row) And The Minimum Halo... ok
+[239/241] Prodsum Vector Lanes... ok
+[240/241] Reduce Dot-Class Vector Lanes... ok
+[241/241] Reduce Dot-Class Threaded Lanes... ok
+
+  [PASS]: Method For -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Object For -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Apply Combinator -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Loop Object Reuse -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Object For With Arrays -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Combinators -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Compute -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Pure and Bind -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Object For Apply -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Object For Commutative -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Range Basic -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Reverse Basic -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Range With Array -- (IR,Gen,Compile,Run,Val)
+  [PASS]: CoIter Basic -- (IR,Gen,Compile,Run,Val)
+  [PASS]: CoIter 3-Way -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Compose Basic -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Compose Chain -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Parallel Basic -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Fusion Basic -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Parallel 3-Way -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Fusion 3-Way -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Array Product Basic -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Array Product Symmetric -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Array Product 3-Way -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Object For Parallel -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Object For Fusion -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Object For Array Product -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Object For Comb Parallel -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Object For Comb Fusion -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Object For Comb Apply -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Object For Comb Apply 3-Way -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Pipe Apply Basic -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Pipe Apply Chain -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Functor Map Basic -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Functor Map Chain -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Functor Map Deferred -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Object For Functor Map -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Choice Scalar -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Choice Kernel -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Choice Computation -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Choice Rank2 -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Object For Choice -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Compose Obj Basic -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Compose Meth Basic -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Duality Theorem -- (IR,Gen,Compile,Run,Val)
+  [PASS]: ComposeApply In Parallel -- (IR,Gen,Compile,Run,Val)
+  [PASS]: ComposeApply In Fusion -- (IR,Gen,Compile,Run,Val)
+  [PASS]: ComposeApply In MethCompose -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Bind Computation -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Bind Chained -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Zip Basic -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Zip Three-Way -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Zip Product -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Zip Indirect -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Zip ObjectFor -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Zip ObjectFor Product -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Zip ObjectFor Three-Way -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Pipe Precedence Inline -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Pipe Precedence Multiline -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Reduce Fused Pool -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Fusion Staggered Arity -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Parallel Merged Fusion -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Fusion Different Arrays -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Parallel Mismatched Extents -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Fusion Mismatched Extents (rejects) -- correctly rejected by the emitted #error guard (pinned reason matched)
+    Compile Error:
+Compilation failed (exit 1):
+C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\generated_cpp_tests\Fusion_Mismatched_Extents_rejects.cpp:217:6: error: #error "Blade codegen: <&!> cannot fuse these computations into one loop nest: loop level 0 of '__tup_10_1' does not match '__tup_10_0' (extent or triangular structure differs) (use <&> to allow independent loops)"
+  217 |     #error "Blade codegen: <&!> cannot fuse these computations into one loop nest: loop level 0 of '__tup_10_1' does not match '__tup_10_0' (extent or triangular structure differs) (use <&> to allow independent loops)"
+      |      ^~~~~
+C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\generated_cpp_tests\Fusion_Mismatched_Extents_rejects.cpp: In function 'int main()':
+C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\generated_cpp_tests\Fusion_Mismatched_Extents_rejects.cpp:219:38: error: '__tup_10' was not declared in this scope
+  219 |     Array<double, 1> u = std::get<0>(__tup_10);
+      |                                      ^~~~~~~~
+
+Command: g++ -std=c++17 -O3 -march=native -ffp-contract=fast -fno-math-errno -fwrapv -DBLADE_RR_MARCH=native -DBLADE_RR_FPC=fast -DBLADE_RR_REASSOC=1 -DBLADE_RR_BLAS=0 -DBLADE_RR_LAPACK=0 -DBLADE_RR_CUBLAS=0 -fopenmp -Werror=float-conversion -Werror=narrowing -o "C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\generated_cpp_tests\Fusion_Mismatched_Extents_rejects.exe" "C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\generated_cpp_tests\Fusion_Mismatched_Extents_rejects.cpp"
+    Generated: ./generated_cpp_tests\Fusion_Mismatched_Extents_rejects.cpp
+  [PASS]: Negative Int64 Mixed Arithmetic -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Range Multi Index Basic -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Range Multi Index With Array -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Coiter Non-Virtual In Clause (rejects) -- correctly rejected during lowering (pinned reason matched)
+    IR Error: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\__corpus_entry__.blade:8:32: the `in` clause of `for (...) in <source>` must be a virtual array (range<...>, reverse<...>, or blocked<...>) -- it supplies the shared iteration index; got Array<Float64 like TimeIdx>. Drop the `in` clause to co-iterate stored arrays (for (A, B) == method_for(A, B)), or use method_for(zip(A, B)) to zip them.
+  [PASS]: Kernel Returns Tuple -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Chained Positional Elementwise Binop -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Halo Central Difference -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Halo Forward and Backward Difference -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Halo Symmetric 3-Point Sum -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Halo Non-Static Offsets (rejects) -- correctly rejected during lowering (pinned reason matched)
+    IR Error: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\__corpus_entry__.blade:6:22: halo<...>: offsets must be a compile-time int array (Static evaluation: undefined variable 'offs')
+  [PASS]: Halo 2-D Separable -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Halo Over Compound (present cells) -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Halo Lag-Stats Pool -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Halo Nested Per-Axis Offsets -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Halo Delay Embedding -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Mut Array Copy Semantics -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Mut Array Copy In Function Body -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Zip Rank-2 Row Prodsum -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Zip Rank-2 Elementwise Kernel Body -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Zip Complex Accessor Elementwise -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Coiter Multi Axis Basic -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Coiter Multi Axis 3-Way -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Binop Multi Axis Elementwise -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Binop Multi Axis Chain -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Binop Multi Axis Shape Mismatch (rejects) -- correctly rejected during lowering (pinned reason matched)
+    IR Error: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\__corpus_entry__.blade:9:15: elementwise operators on multi-axis arrays require both operands to have matching plain-dense index shapes (same axis tags and extents); mixed dense/packed or mismatched shapes are not zip-able: they first differ at index record 1 of 2 -- the left operand has 'Lat' and the right operand has 'Lon', extents 2 vs 3.
+  [PASS]: Binop Mixed Dense Packed (rejects) -- correctly rejected during lowering (pinned reason matched)
+    IR Error: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\__corpus_entry__.blade:9:19: elementwise operators on multi-axis arrays require both operands to have matching plain-dense index shapes (same axis tags and extents); mixed dense/packed or mismatched shapes are not zip-able
+  [PASS]: Coiter Index Params -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Deferred Binding Forced On Read -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Compose Obj Let-Bound Objects -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Compose Obj Let-Bound Composition -- (IR,Gen,Compile,Run,Val)
+  [PASS]: method_for with a named top-level function as its kernel -- (IR,Gen,Compile,Run,Val)
+  [PASS]: object_for with a named top-level function as its kernel -- (IR,Gen,Compile,Run,Val)
+  [PASS]: method_for with a named BINARY function kernel (multi-param eta-expansion) -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Implicit Method For Tuple -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Implicit Method For Single Array -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Implicit Method For Comm SymIdx -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Implicit Object For Letbound Kernel -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Implicit Method For Named Function Kernel -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Implicit Zip Co-iteration -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Implicit Former Undecidable (rejects) -- correctly rejected during lowering (pinned reason matched)
+    IR Error: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\__corpus_entry__.blade:8:14: cannot infer the roles of the <@> operands: the left side is ArrayLit and the right side is ArrayLit, so the arrays/kernel roles are ambiguous. A former is implicit only when one side is decisive: a kernel (lambda, operator section, named function, reynolds(...), zero) or a former. Write it explicitly: method_for(arrays) <@> kernel, or object_for(kernel) <@> (arrays).
+  [PASS]: Implicit Object For Named Kernel Left -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Implicit Object For Poly Kernel Left -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Reduce Omp Builtin -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Reduce Omp Comm Kernel -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Flat Elementwise Dense -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Flat Elementwise Crossindex Fallback -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Compute Elementwise In Function Body -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Omp Licences External S-Dims (misconception warns) -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Omp Licence Correct Spellings (no diagnostic) -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Deferred Let Forced By Positional Read -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Array Returning Kernel Call Body -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Kernel Body Array Let Call Form -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Kernel Body Unannotated Param Broadcast -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Array Valued Kernel Return -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Grouped Row Array Result -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Grouped Dense Result Mapped -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Array Valued Kernel Result Is Iterable -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Kernel Body Array Intermediate -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Kernel Body Nested Map -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Kernel Body Nested Capture Depth 2 -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Kernel Body Unforced Let -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Deferred Binding Captured By Kernel -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Generic Function Body Nested Map -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Generic Function Body Zip Co-Iteration -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Complex Row Map Named Kernel -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Row Slice As Value -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Leading Axis Fold -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Leading Axis Fold Group Grid -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Leading Axis Fold Axes Clash (rejects) -- correctly rejected during lowering (pinned reason matched)
+    IR Error: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\__corpus_entry__.blade:8:16: reduce: an array-valued kernel folds the LEADING axis (its elements are whole slices), so `axes = n` -- which counts INNERMOST axes -- cannot combine with it. Drop the axes argument, or fold cells with a scalar kernel.
+  [PASS]: Leading Axis Fold Slice Rank Mismatch (rejects) -- correctly rejected during lowering (pinned reason matched)
+    IR Error: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\__corpus_entry__.blade:7:16: reduce: this kernel combines rank-2 slices, but a rank-2 operand's leading-axis slices have rank 1. Only the leading-axis fold (slice rank = rank(A) - 1) is supported; peel or reshape for anything deeper.
+  [PASS]: Leading Axis Fold Omp Kernel (rejects) -- correctly rejected during lowering (pinned reason matched)
+    IR Error: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\__corpus_entry__.blade:9:16: reduce: the leading-axis fold is sequential by construction (each step consumes the previous accumulator), so a `where omp/cuda/mpi` clause on its kernel licenses nothing and would be dropped silently. Remove the clause; the per-step slice combine is an ordinary elementwise apply and may carry its own licence inside the kernel body.
+  [PASS]: Reduction Join Two Legs Four Ways -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Reduction Join Four Legs Four Ways -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Reduction Join Shared Deferred Operand -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Reduction Join In A Kernel Body -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Reduction Join WOSA Kernel Shape -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Reduction Join Heterogeneous Folds -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Reduction Join One Leg Is The Identity -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Reduction Join Extent Mismatch (rejects) -- correctly rejected during lowering (pinned reason matched)
+    IR Error: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\__corpus_entry__.blade:9:60: reduction-join legs do not share an index space: axis 0 has extent 5 in leg 1 and 3 in leg 2. Every leg of a join folds the SAME cell grid.
+  [PASS]: Reduction Join Non-Reduction Leg (rejects) -- correctly rejected during lowering (pinned reason matched)
+    IR Error: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\__corpus_entry__.blade:9:12: a reduction-join leg must be a REDUCTION: `prodsum(...)` or `reduce(...)`. `<&!>` joins the traversals of reductions into one loop; an expression that is not a reduction has no accumulator to join.
+  [PASS]: Reduction Join Leg Needs Init (rejects) -- correctly rejected during lowering (pinned reason matched)
+    IR Error: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\__corpus_entry__.blade:9:79: reduction-join leg 2 needs an explicit init (`reduce(x, op, init)`) for a lambda or named fold kernel -- a joined fold cannot seed from its first element.
+  [PASS]: Reduction Join Fold Operand Not A Leg List (rejects) -- correctly rejected during lowering (pinned reason matched)
+    IR Error: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\__corpus_entry__.blade:8:12: reduce(..., (<&!>)) folds a LIST OF LEGS into one traversal, so its operand must be an array literal of reductions -- written inline, `reduce([prodsum(a, b), reduce(c, (+))], (<&!>))`, or bound to a name by a literal. Use `object_for(<&!>) <@> (r1, r2, ...)` for the pack spelling.
+  [PASS]: Leading Axis Fold Returned Group Grid -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Row Map Returning An Array Literal Of Constants -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Row Map Returning An Array Literal Of Param Expressions -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Grouped Row Map Returning A Join Result Vector -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Row Map Returning A Literal Of Whole Rows (rejects) -- correctly rejected by the emitted #error guard (pinned reason matched)
+    Compile Error:
+Compilation failed (exit 1):
+C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\generated_cpp_tests\Row_Map_Returning_A_Literal_Of_Whole_Rows_rejects.cpp:313:2: error: #error "Blade codegen: unsupported IR node: IRArrayLit"
+  313 | #error "Blade codegen: unsupported IR node: IRArrayLit"
+      |  ^~~~~
+C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\generated_cpp_tests\Row_Map_Returning_A_Literal_Of_Whole_Rows_rejects.cpp: In function 'int main()':
+C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\generated_cpp_tests\Row_Map_Returning_A_Literal_Of_Whole_Rows_rejects.cpp:258:27: error: 'BLADE_CODEGEN_ERROR_UNSUPPORTED_IR_NODE_IRARRAYLIT' was not declared in this scope
+  258 |             auto __rowv = BLADE_CODEGEN_ERROR_UNSUPPORTED_IR_NODE_IRARRAYLIT;
+      |                           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Command: g++ -std=c++17 -O3 -march=native -ffp-contract=fast -fno-math-errno -fwrapv -DBLADE_RR_MARCH=native -DBLADE_RR_FPC=fast -DBLADE_RR_REASSOC=1 -DBLADE_RR_BLAS=0 -DBLADE_RR_LAPACK=0 -DBLADE_RR_CUBLAS=0 -fopenmp -Werror=float-conversion -Werror=narrowing -o "C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\generated_cpp_tests\Row_Map_Returning_A_Literal_Of_Whole_Rows_rejects.exe" "C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\generated_cpp_tests\Row_Map_Returning_A_Literal_Of_Whole_Rows_rejects.cpp"
+    Generated: ./generated_cpp_tests\Row_Map_Returning_A_Literal_Of_Whole_Rows_rejects.cpp
+  [PASS]: Fold And Index A Grid Returned From A Function -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Fold A Grid Returned From An Abstract-Parameter Function -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Partial Index On A Deduced-Return Function Result -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Halo Map With Block Kernel Returning An Array Literal -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Half-Cell Window Composition End To End -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Grouped Row Map Bare Apply With Block Array Literal Kernel -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Halo Static Extent Mismatch (rejects) -- correctly rejected during lowering (pinned reason matched)
+    IR Error: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\__corpus_entry__.blade:11:20: halo extent mismatch: the halo declares an inner extent of 8, but 'a' (read through the window at index slot 1) has extent 6. The window walk is bounded by the DECLARED extent, so an oversized halo reads past 'a''s allocation and an undersized one silently emits fewer windows. Make the halo's inner index match the array it windows over.
+  [PASS]: Halo Runtime Extent Oversized (aborts) -- aborted as expected (exit 1)
+    Run exited with code 1
+    Output: 
+    Value Error: Exit code 1
+  [PASS]: Halo Runtime Extent Undersized (aborts) -- aborted as expected (exit 1)
+    Run exited with code 1
+    Output: 
+    Value Error: Exit code 1
+  [PASS]: Static Arithmetic Extent In Halo And Range -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Ragged Literal Row Map With Block Array Literal Kernel -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Chained Map Materializes Its Intermediate -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Rank-raising row kernel declared with an ABSTRACT T^1 return -- (IR,Gen,Compile,Run,Val)
+  [PASS]: object_for with a row-returning comm kernel over the SAME array (SymIdx) -- (IR,Gen,Compile,Run,Val)
+  [PASS]: object_for with a row-returning comm kernel over DIFFERENT arrays (dense) -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Range SymIdx Prefix Offsets (r=2) -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Range SymIdx Prefix Offsets (r=3) -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Range SymIdx Prefix Sum Symmetric Gram -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Range AntisymIdx Prefix Offsets -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Range SymIdx Tagged Slot Warns -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Range SymIdx Named Alias Carries The Component Tag -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Pipeline Three Stages -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Pipeline Multi Operand -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Pipeline In Function Body -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Pipeline Fusion Declines -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Pipeline Carries Omp Licence -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Kernel-Body Row View As An Elementwise-Map Operand -- (IR,Gen,Compile,Run,Val)
+  [PASS]: A Tuple-Destructured Kernel Name Shadows The Module One -- (IR,Gen,Compile,Run,Val)
+  [PASS]: A Pipeline Stage May Not Forward-Reference Its Kernel (rejects) -- correctly rejected during lowering (pinned reason matched)
+    IR Error: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\__corpus_entry__.blade:12:21: Unbound variable: inc
+  [PASS]: Pipeline Three Stage Decline (rejects) -- correctly rejected by the emitted #error guard (pinned reason matched)
+    Compile Error:
+Compilation failed (exit 1):
+C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\generated_cpp_tests\Pipeline_Three_Stage_Decline_rejects.cpp:212:6: error: #error "Blade codegen: a pipeline stage with a block-bodied kernel cannot fuse, and staged emission supports two stages (v1) -- this `>>@` chain has more than two, so one stage reaches the emitter as a composition rather than a kernel. Split the chain and force the halves (`let s = (o1 >>@ o2) <@> A |> compute` then `object_for(k3) <@> s |> compute`), or give every stage an expression-bodied kernel so the whole pipeline fuses into one loop"
+  212 |     #error "Blade codegen: a pipeline stage with a block-bodied kernel cannot fuse, and staged emission supports two stages (v1) -- this `>>@` chain has more than two, so one stage reaches the emitter as a composition rather than a kernel. Split the chain and force the halves (`let s = (o1 >>@ o2) <@> A |> compute` then `object_for(k3) <@> s |> compute`), or give every stage an expression-bodied kernel so the whole pipeline fuses into one loop"
+      |      ^~~~~
+C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\generated_cpp_tests\Pipeline_Three_Stage_Decline_rejects.cpp: In function 'int main()':
+C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\generated_cpp_tests\Pipeline_Three_Stage_Decline_rejects.cpp:230:36: error: 'r' was not declared in this scope
+  230 |     for (size_t __pr0 = 0; __pr0 < r.extents[0]; __pr0++) {
+      |                                    ^
+
+Command: g++ -std=c++17 -O3 -march=native -ffp-contract=fast -fno-math-errno -fwrapv -DBLADE_RR_MARCH=native -DBLADE_RR_FPC=fast -DBLADE_RR_REASSOC=1 -DBLADE_RR_BLAS=0 -DBLADE_RR_LAPACK=0 -DBLADE_RR_CUBLAS=0 -fopenmp -Werror=float-conversion -Werror=narrowing -o "C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\generated_cpp_tests\Pipeline_Three_Stage_Decline_rejects.exe" "C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\generated_cpp_tests\Pipeline_Three_Stage_Decline_rejects.cpp"
+    Generated: ./generated_cpp_tests\Pipeline_Three_Stage_Decline_rejects.cpp
+  [PASS]: Row View Pair Elementwise -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Prodsum Inline Deferred Operand -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Deferred Binding Sole-Read By A Fold Still Prints -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Reduce Over Deferred Computation In Expression Position -- (IR,Gen,Compile,Run,Val)
+  [PASS]: CoIter Abstract Param Agree -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Pipeline Named Kernel Capture Hygiene -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Pipeline Second Stage Annotation (rejects) -- correctly rejected during lowering (pinned reason matched)
+    IR Error: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\__corpus_entry__.blade:10:26: Type mismatch: expected Bool, got Int64
+  [PASS]: Pipeline Block Kernels Stage Types -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Pipeline Block Kernels Rank 2 -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Per-Row Reduction Join Streams The Pairwise Normalization -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Tuple-State Online Fold Matches The Two-Pass Join -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Halo offset outside the declared set rejected (rejects) -- correctly rejected during lowering (pinned reason matched)
+    IR Error: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\__corpus_entry__.blade:13:20: halo offset outside the declared set: 'a' is read at window offset 2, but the halo declares the offsets [-1, 0, 1], whose reach is -1..1. The interior is shrunk for that reach only, so this read lands past the array's allocation at the boundary. Add 2 to the halo's offset list (which widens the reach), or read within it.
+  [PASS]: Halo compound-inner offset outside the declared window rejected (rejects) -- correctly rejected during lowering (pinned reason matched)
+    IR Error: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\__corpus_entry__.blade:14:20: halo offset outside the declared set: 'dense' is read at window offset 3, but the halo declares the offsets [0, 1], whose reach is 0..1. The interior is shrunk for that reach only, so this read lands past the array's allocation at the boundary. Add 3 to the halo's offset list (which widens the reach), or read within it.
+  [PASS]: Halo compound-inner non-literal offset rejected (rejects) -- correctly rejected during lowering (pinned reason matched)
+    IR Error: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\__corpus_entry__.blade:16:50: halo window read over a masked domain: the offset must be an integer literal (one of [0, 1], e.g. w(0)). Over a CompoundIdx inner the window walks the PRESENT cells, so the neighbor's coordinate is looked up in the rank table -- a runtime offset cannot be shown to stay inside the interior the way a dense ordinal can.
+  [PASS]: Reduction Join Share Read By A Direct Fold Leg -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Deferred Outer Product Under The Default Partial Fold Streams -- (IR,Gen,Compile,Run,Val)
+  [PASS]: row folds and row-map prodsums at a row count the jammed tile reaches -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Pipe Compute After If Kernel -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Row maps returning a row, in the natural spellings -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Co-iteration kernel with the index parameters first (rejects) -- correctly rejected during lowering (pinned reason matched)
+    IR Error: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\__corpus_entry__.blade:12:28: a value of type Nat<M> is applied to arguments, but only functions and arrays take arguments. (A co-iteration kernel receives each operand's cell, already indexed, and then the loop indices: `for (A, B) in range<I, J> <@> lambda(a, b, i, j) -> a * b`.)
+  [PASS]: Halo Over Symmetric Source -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Pipeline Block Row Map Stages -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Row Map In Generic Function Body -- (IR,Gen,Compile,Run,Val)
+  [PASS]: CoIter Param Shared Index Tag -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Row Lambda Return Extent From Param -- (IR,Gen,Compile,Run,Val)
+  [PASS]: A Row Parameter Forwarded Into A Tuple Argument Stays A Row -- (IR,Gen,Compile,Run,Val)
+  [PASS]: A Row Kernel's Returned Row Can Take Its Extent From A Captured Array -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Prodsum Takes An Inline Array Literal Operand -- (IR,Gen,Compile,Run,Val)
+  [PASS]: A Row Kernel's Returned Row Can Take Its Extent Through A Unit-Carrying Caret Parameter -- (IR,Gen,Compile,Run,Val)
+  [PASS]: A Unit-Carrying Caret Row Takes Its Returned Extent From The Row Itself -- (IR,Gen,Compile,Run,Val)
+  [PASS]: A Generic Row Map Over A Unit-Carrying Caret Parameter Reads Its Extent At Run Time -- (IR,Gen,Compile,Run,Val)
+  [PASS]: A Row Return Traced Through A Unit-Carrying Caret Still Meets Its Declared Extent (rejects) -- correctly rejected during lowering (pinned reason matched)
+    IR Error: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\__corpus_entry__.blade:11:59: this value, against its declared type: extent mismatch on index slot 2 -- 3 expected, 4 found. A LITERAL extent is baked into the emitted copies, loop bounds and subscripts, so the value would be read at the wrong length (past its allocation, or short of it) rather than merely disagreeing. Make the extents match, or annotate over a symbolic extent.
+  [PASS]: A Row Return Through A Unit-Carrying Caret Return Annotation Has No Known Length (rejects) -- correctly rejected by the emitted #error guard (pinned reason matched)
+    Compile Error:
+Compilation failed (exit 1):
+C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\generated_cpp_tests\A_Row_Return_Through_A_Unit-Carrying_Caret_Return_Annotation_Has_No_Known_Length_rejects.cpp:248:2: error: #error "Blade codegen: the row kernel returns an array whose length cannot be known before the loop runs: its axis is an abstract annotation axis (T<u>^k) that no operand of the loop carries, such as a callee's declared return type V<u>^1, which names a rank and a unit but no length. Drop that return annotation (the length is then traced to the argument it comes from) or declare it over a concrete index type (Array<Float64<u> like I>)"
+  248 | #error "Blade codegen: the row kernel returns an array whose length cannot be known before the loop runs: its axis is an abstract annotation axis (T<u>^k) that no operand of the loop carries, such as a callee's declared return type V<u>^1, which names a rank and a unit but no length. Drop that return annotation (the length is then traced to the argument it comes from) or declare it over a concrete index type (Array<Float64<u> like I>)"
+      |  ^~~~~
+
+Command: g++ -std=c++17 -O3 -march=native -ffp-contract=fast -fno-math-errno -fwrapv -DBLADE_RR_MARCH=native -DBLADE_RR_FPC=fast -DBLADE_RR_REASSOC=1 -DBLADE_RR_BLAS=0 -DBLADE_RR_LAPACK=0 -DBLADE_RR_CUBLAS=0 -fopenmp -Werror=float-conversion -Werror=narrowing -o "C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\generated_cpp_tests\A_Row_Return_Through_A_Unit-Carrying_Caret_Return_Annotation_Has_No_Known_Length_rejects.exe" "C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\generated_cpp_tests\A_Row_Return_Through_A_Unit-Carrying_Caret_Return_Annotation_Has_No_Known_Length_rejects.cpp"
+    Generated: ./generated_cpp_tests\A_Row_Return_Through_A_Unit-Carrying_Caret_Return_Annotation_Has_No_Known_Length_rejects.cpp
+  [PASS]: A Halo Window Passed To A Function That Applies It Is Refused (rejects) -- correctly rejected during lowering (pinned reason matched)
+    IR Error: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\__corpus_entry__.blade:13:60: a halo window is passed to a function whose body applies it, but a window is read (`w(o)`) only in the body of the halo kernel that binds it: it is neither an array nor a function, the only values an applied parameter takes. Read the neighbours in the kernel and pass the values (`lambda(w) -> f(A(w(-1)), A(w(1)))`), or write the kernel as a lambda over the window (`<@> lambda(w) -> A(w(1)) - A(w(-1))`).
+  [PASS]: A Named Function Over A Halo Window Is Refused As Its Kernel (rejects) -- correctly rejected during lowering (pinned reason matched)
+    IR Error: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\__corpus_entry__.blade:11:45: a halo window is passed to a function whose body applies it, but a window is read (`w(o)`) only in the body of the halo kernel that binds it: it is neither an array nor a function, the only values an applied parameter takes. Read the neighbours in the kernel and pass the values (`lambda(w) -> f(A(w(-1)), A(w(1)))`), or write the kernel as a lambda over the window (`<@> lambda(w) -> A(w(1)) - A(w(-1))`).
+  [PASS]: A Halo Window Passed To A Lambda That Applies It Is Refused (rejects) -- correctly rejected during lowering (pinned reason matched)
+    IR Error: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\__corpus_entry__.blade:13:60: a halo window is passed to a function whose body applies it, but a window is read (`w(o)`) only in the body of the halo kernel that binds it: it is neither an array nor a function, the only values an applied parameter takes. Read the neighbours in the kernel and pass the values (`lambda(w) -> f(A(w(-1)), A(w(1)))`), or write the kernel as a lambda over the window (`<@> lambda(w) -> A(w(1)) - A(w(-1))`).
+  [PASS]: Halo Neighbour Values Passed To A Function -- (IR,Gen,Compile,Run,Val)
+  [PASS]: a named function as the kernel over range<I> takes the index as an integer -- (IR,Gen,Compile,Run,Val)
+  [PASS]: a named Int64 kernel over Float64 elements (rejects) -- correctly rejected during lowering (pinned reason matched)
+    IR Error: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\__corpus_entry__.blade:5:26: Type mismatch: expected Int64, got Float64
+  [PASS]: A Halo Window Read Is A Position Of Its Index -- (IR,Gen,Compile,Run,Val)
+  [PASS]: A Halo Window Itself Is Not A Position (rejects) -- correctly rejected during lowering (pinned reason matched)
+    IR Error: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\__corpus_entry__.blade:12:61: argument 1 of 'at': type mismatch: the parameter is declared Nat<I> but the argument is halo<I, [-1, 0, 1]> window. A call site performs no conversion between these -- pass a value of the declared type, or change the parameter's declared type.
+  [PASS]: A Call Refused Inside A Kernel Body Is Located At Its Argument (rejects) -- correctly rejected during lowering (pinned reason matched)
+    IR Error: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\__corpus_entry__.blade:13:52: argument 2 of 'h': type mismatch: the parameter is declared Float64 but the argument is Bool. A call site performs no conversion between these -- pass a value of the declared type, or change the parameter's declared type.
+  [PASS]: A Kernel Index Passed To Another Index Type's Parameter Is Refused (rejects) -- correctly rejected during lowering (pinned reason matched)
+    IR Error: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\__corpus_entry__.blade:15:52: argument 2 of 'k': type mismatch: the parameter is declared Nat<J> but the argument is Nat<I>. A call site performs no conversion between these -- pass a value of the declared type, or change the parameter's declared type.
+  [PASS]: A Subscript Refused Inside A Kernel Body Is Located At Its Index (rejects) -- correctly rejected during lowering (pinned reason matched)
+    IR Error: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\__corpus_entry__.blade:12:56: Array index tag mismatch: slot expects 'J' but argument has type 'I'.
+  [PASS]: Kernel Body Bare Sort -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Kernel Body Array Literal -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Kernel Branch Reduce Of Product -- (IR,Gen,Compile,Run,Val)
+  [PASS]: a lambda handing a Float64 element to an Int64 parameter (rejects) -- correctly rejected during lowering (pinned reason matched)
+    IR Error: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\__corpus_entry__.blade:8:51: argument 1 of 'g': type mismatch: the parameter is declared Int64 but the argument is Float64. A call site performs no conversion between these -- pass a value of the declared type, or change the parameter's declared type.
+  [PASS]: a lambda's open parameter passed to a concrete parameter takes what the row brings -- (IR,Gen,Compile,Run,Val)
+  [PASS]: A Hoisted Force After A Loop-Body Force In The Same Statement -- (IR,Gen,Compile,Run,Val)
+  [PASS]: a function-body let mut copy of a local array stays a copy when the local is read afterwards -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Fold over a map of a deferred map (top level and top-level block) -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Omp Map Licence Feeding Fold -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Hot-Row Fold Behind A 2-D Halo Producer -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Hot-Row Fold Licensed Inside A Function -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Hot-Row Fold Declines (Kernel Reads Beyond Its Row) And The Minimum Halo -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Prodsum Vector Lanes -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Reduce Dot-Class Vector Lanes -- (IR,Gen,Compile,Run,Val)
+  [PASS]: Reduce Dot-Class Threaded Lanes -- (IR,Gen,Compile,Run,Val)
+
+======================================================================
+  Test Summary (v0.20.0)
+======================================================================
+
+Environment:  Windows | g++:true nvcc:true cl:false gpu:true
+IR Lowering:  212 lowered, 29 rejected (29 expected, 0 unexpected)
+Probes:       33 reject (29 lower, 4 codegen), 2 abort
+C++ Generated: 212 / 241  (CUDA backend: 0)
+Compiled:     208 / 241
+Full Pass:    206 / 241 (IR + Compile + Run)
+Value Check:  206 / 206
+Verdict:      241 passed, 0 failed, 0 skipped
+Total Tests:  241

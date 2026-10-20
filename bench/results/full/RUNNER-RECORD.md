@@ -1060,3 +1060,144 @@ Smoke refresh for antisym, comoment3, pairkernel (--regimes all): exit 0, 0 fail
 | `blade test docs` | `Docs (executable code blocks): 131 passed, 0 failed, 78 skipped` | 8 s | 78 sketch blocks (by design) |
 
 Versus the merged run (79AF7EDC): default 6686 -> 6699 passed, interp 2882 -> 2889, opt-diff 1969 -> 1976, llvm 700 -> 722 passed (skips unchanged), docs unchanged; zero failures throughout. The wall times are 3-8x shorter than the merged run's (838 / 2802 / 104 / 952 / 30 s) for the same corpus; the cause is not established from the output (the machine was otherwise idle for this run; a warm executable cache from the earlier run is a candidate).
+
+## Round 2, phase 1 (2026-10-19 08:15-09:46): five gates on the merged tree 2124edc4 -- GATE FAILURE, phases 2-3 NOT run
+Binary NEW = bench-fortran bin, Blade.dll SHA-256 2373DFB3B604AC188FCC52B1BBD6C2B6FD218EF58D9D063B9F6D008BB4F36AFA (verified); OLD = master compiler (f2315642 sources) Blade.dll F9BA95CDAAE63EFED006465602FC8B7A2E891AD11A79DC02E86C18BCDD14F5CD. Uncapped, AC, sessions frozen, flag protocol honoured (twin-idle set, no twin-busy). Consoles `bench/results/gates/round2-<gate>.txt`.
+
+| gate | TOTAL line | wall |
+|---|---|---|
+| `blade test` | `TOTAL: 6775 passed, 5 failed` | 967 s |
+| `blade test interp` | `Interp Diff: 2912 passed, 0 failed, 2 skip-unsupported, 0 skipped` | 2916 s |
+| `blade test opt-diff` | `Opt Diff: 1999 passed (1851 optimizer-inert), 0 failed, 915 skipped, 137s` | 137 s |
+| `blade test llvm` | `TOTAL: 745 passed, 0 failed, 677 skipped` | 1404 s |
+| `blade test docs` | `Docs (executable code blocks): 131 passed, 0 failed, 78 skipped` | 31 s |
+
+Failures in `blade test` (rerun once per failing key: all reproduced, deterministic):
+1. [All / `blade test functions`: `Verdict: 323 passed, 1 failed`] `A generic body's elementwise binop computes in each instance's element type -- Val failed` / `Value Error: r32_same: expected true, got false` (tests/corpus/functions/168_generic_deferred_binop_kernel_per_instance.blade). The OLD binary passes it (`functions` 324/0): a REGRESSION of the merged tree.
+2-4. [LinAlg Dispatch: `133 passed, 3 failed`] blas_on_syrk_above_crossover_prefers_the_tile, blas_on_syrk_tile_takes_the_omp_licence, blas_on_gram_same_above_crossover_prefers_the_tile -- `generated C++ lacks: blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, t2.data, 0, false, (size_t)336); | for (size_t __sy_i = 0; ...` (t3.data / G.data variants; the new BLAS-on preemption pins from blas-repack 37d97506 do not match the emitted call).
+5. [Optimization Layer: `151 passed, 1 failed`] decision_row_fold_declined_while -- `wanted declined: a while-guarded recursion rewrites rows after the loop; saw: no decisions` (recur S13 7a601446).
+Everything else green; per the instruction the run stopped after the five gates (steps 2-3, phases 2 and 3 not started).
+
+## Round 3: protocol re-measure of ALL 12 kernels on the FINAL tree d3d5722b (2026-10-19)
+
+Label: **uncapped: max processor state 100% (Silent scheme); verdicts suppressed by drift reported as indicative.** NEW = bench-fortran bin, Blade.dll SHA-256 BB52A4C2A008D1985C4DF89A69A3ED54327BB25F1301BDE0FECFA2ADC5C3BF45 (verified); OLD (phase-2 A/Bs only) = master compiler, Blade.dll F9BA95CDAAE63EFED006465602FC8B7A2E891AD11A79DC02E86C18BCDD14F5CD. Full size, README minimum rounds, interleaved randomized rounds, both drift controls, cooldowns 0.5 s/run, 3 s/kernel, 60 s/session, excursion rule (drop-and-record; abort on a second excursion or a control excursion). Nothing committed.
+Ratio = expert median / Blade median (RESULTS convention); **> 1 Blade faster, < 1 the expert faster**; reference blade-llvm in serial regimes, blade-cpp in mt8 and blas regimes. `*` = verdict suppressed by drift (indicative). `§13` = the gf/ifx ratios RESULTS.md §13.1 recorded for the same cell (where §13 has one: gram, antisym, comoment3, pairkernel, recur, band; group B was not re-run there). `-` = no Blade arm (no-parallel-form) in that regime.
+
+
+### serial-licensed-native
+
+| kernel | ref | Blade (ms) | other lane (ms) | gf-expert (ms) | gf ratio [95% CI] | ifx-expert (ms) | ifx ratio [95% CI] | §13 gf / ifx | block |
+|---|---|---|---|---|---|---|---|---|---|
+| gram | blade-llvm | 58.11 | cpp 61.88 | 78.53 | 1.351 [1.327, 1.386] * | 71.62 | 1.233 [1.207, 1.260] * | 1.368/1.236 | 132026 n=11, suppressed |
+| antisym | blade-llvm | 28.01 | cpp 29.97 | 31.19 | 1.113 [1.099, 1.152] | 30.1 | 1.075 [1.052, 1.115] | 1.126/1.073 | 132026 n=21 |
+| comoment3 | blade-llvm | 8.726 | cpp 8.945 | 11.56 | 1.325 [1.310, 1.335] | 11.68 | 1.338 [1.322, 1.377] | 1.221/1.225 | 132026 n=21 |
+| pairkernel | blade-llvm | 29.15 | cpp 29.52 | 32.7 | 1.122 [1.114, 1.128] | 30.52 | 1.047 [1.039, 1.056] | 1.121/1.043 | 132026 n=21 |
+| recur | blade-llvm | 9.159 | cpp 11.27 | 10.2 | 1.114 [1.029, 1.159] * | 10.3 | 1.125 [1.028, 1.175] * | 0.493/0.489 | 132026 n=21, suppressed |
+| band | blade-llvm | 0.4158 | cpp 0.6335 | 0.8159 | 1.962 [1.908, 1.995] | 1.044 | 2.511 [2.441, 2.552] | 0.245/0.314 | 132026 n=21 |
+| fusedchain | blade-llvm | 4.382 | cpp 8.522 | 6.866 | 1.567 [1.530, 1.602] * | 4.483 | 1.023 [0.997, 1.054] * |  | 133604 n=21, suppressed |
+| maskagg | blade-llvm | 4.68 | cpp 7.054 | 4.074 | 0.871 [0.835, 0.891] * | 2.939 | 0.628 [0.608, 0.649] * |  | 133604 n=21, suppressed |
+| onepass | blade-llvm | 10.94 | cpp 21.03 | 16.69 | 1.525 [1.502, 1.534] | 11.29 | 1.031 [1.017, 1.040] |  | 133604 n=21 |
+| dot | blade-llvm | 13.49 | cpp 24.56 | 19.1 | 1.416 [1.356, 1.511] * | 13.04 | 0.967 [0.908, 1.050] * |  | 133604 n=21, suppressed |
+| saxpy | blade-llvm | 12.44 | cpp 20.67 | 15.48 | 1.244 [1.194, 1.283] * | 11.23 | 0.903 [0.858, 0.951] * |  | 133604 n=21, suppressed |
+| stencil | blade-llvm | 10.71 | cpp 17.25 | 14.72 | 1.375 [1.302, 1.404] * | 11.65 | 1.089 [1.019, 1.115] * |  | 132026 n=21, suppressed |
+
+### mt8-licensed-native
+
+| kernel | ref | Blade (ms) | other lane (ms) | gf-expert (ms) | gf ratio [95% CI] | ifx-expert (ms) | ifx ratio [95% CI] | §13 gf / ifx | block |
+|---|---|---|---|---|---|---|---|---|---|
+| gram | blade-cpp | 13.96 | llvm serial-only | 19.44 | 1.393 [1.309, 1.441] * | 18.59 | 1.332 [1.238, 1.361] * | 1.276/1.223 | 135344 n=21, suppressed |
+| antisym | blade-cpp | 9.026 | llvm serial-only | 10.65 | 1.179 [1.139, 1.268] * | 10.65 | 1.180 [1.128, 1.246] * | 1.081/1.117 | 135344 n=21, suppressed |
+| comoment3 | blade-cpp | 2.973 | llvm serial-only | 4.932 | 1.659 [1.598, 1.716] * | 4.082 | 1.373 [1.299, 1.406] * | 1.462/1.217 | 135344 n=21, suppressed |
+| pairkernel | blade-cpp | 7.541 | llvm serial-only | 6.032 | 0.800 [0.768, 0.829] * | 6.014 | 0.798 [0.770, 0.816] * | 0.817/0.786 | 135344 n=21, suppressed |
+| recur | none | - | cpp no-parallel-form; llvm serial-only | 7.077 | - | 7.951 | - |  | 135344 n=21 |
+| band | blade-cpp | 1.07 | llvm serial-only | 1.04 | 0.972 [0.844, 1.053] * | 1.78 | 1.663 [1.503, 1.803] * |  | 135344 n=21, suppressed |
+| fusedchain | blade-cpp | 3.177 | llvm serial-only | 3.245 | 1.021 [0.955, 1.101] * | 3.508 | 1.104 [1.063, 1.151] * |  | 135344 n=21, suppressed |
+| onepass | none | - | cpp no-parallel-form; llvm serial-only | 9.014 | - | 9.522 | - |  | 135344 n=21 |
+| dot | blade-cpp | 11.94 | llvm serial-only | 11.48 | 0.962 [0.869, 1.018] * | 11.49 | 0.962 [0.908, 1.067] * |  | 135344 n=21, suppressed |
+| saxpy | blade-cpp | 11.76 | llvm serial-only | 9.646 | 0.821 [0.792, 0.857] * | 10.08 | 0.858 [0.814, 0.897] * |  | 135344 n=21, suppressed |
+| stencil | blade-cpp | 9.579 | llvm serial-only | 8.481 | 0.885 [0.828, 0.970] * | 8.868 | 0.926 [0.865, 0.998] * |  | 135344 n=21, suppressed |
+
+### serial-repro-native
+
+| kernel | ref | Blade (ms) | other lane (ms) | gf-expert (ms) | gf ratio [95% CI] | ifx-expert (ms) | ifx ratio [95% CI] | §13 gf / ifx | block |
+|---|---|---|---|---|---|---|---|---|---|
+| gram | blade-llvm | 62.89 | cpp 65.38 | 79.77 | 1.268 [1.221, 1.310] | 72.88 | 1.159 [1.116, 1.186] | 1.290/1.174 | 142502 n=11 |
+| antisym | blade-llvm | 31.12 | cpp 31.62 | 32.5 | 1.045 [1.020, 1.079] | 31.28 | 1.005 [0.989, 1.056] | 1.043/1.000 | 142502 n=21 |
+| comoment3 | blade-llvm | 15.3 | cpp 15.54 | 11.82 | 0.773 [0.754, 0.783] | 11.93 | 0.780 [0.765, 0.792] | 0.443/0.445 | 142502 n=21 |
+| pairkernel | blade-llvm | 38.22 | cpp 38.64 | 34.5 | 0.903 [0.898, 0.913] | 32.11 | 0.840 [0.833, 0.849] | 0.841/0.782 | 142502 n=21 |
+| recur | blade-llvm | 13.83 | cpp 15.74 | 13.63 | 0.985 [0.964, 1.003] * | 14.07 | 1.017 [1.008, 1.033] * | 0.545/0.561 | 142502 n=21, suppressed |
+| band | blade-llvm | 3.685 | cpp 3.959 | 3.111 | 0.844 [0.843, 0.847] * | 3.716 | 1.008 [1.007, 1.013] * | 0.335/0.401 | 142502 n=21, suppressed |
+| fusedchain | blade-llvm | 6.227 | cpp 10.23 | 8.6 | 1.381 [1.321, 1.418] * | 5.227 | 0.839 [0.783, 0.866] * |  | 144145 n=21, suppressed |
+| maskagg | blade-llvm | 5.942 | cpp 8.265 | 4.982 | 0.839 [0.806, 0.895] * | 4.02 | 0.676 [0.637, 0.722] * |  | 144145 n=21, suppressed |
+| onepass | blade-llvm | 16.36 | cpp 26.31 | 22.16 | 1.354 [1.332, 1.365] | 13.42 | 0.820 [0.803, 0.847] |  | 144145 n=21 |
+| dot | blade-llvm | 17.33 | cpp 28.49 | 21.13 | 1.219 [1.207, 1.242] | 13.08 | 0.755 [0.737, 0.770] |  | 144145 n=21 |
+| saxpy | blade-llvm | 15.2 | cpp 23 | 16.44 | 1.082 [1.043, 1.112] * | 10.43 | 0.686 [0.668, 0.706] * |  | 144145 n=21, suppressed |
+| stencil | blade-llvm | 14.28 | cpp 21.02 | 17.48 | 1.224 [1.210, 1.238] * | 14.29 | 1.001 [0.985, 1.023] * |  | 142502 n=21, suppressed |
+
+### mt8-repro-native
+
+| kernel | ref | Blade (ms) | other lane (ms) | gf-expert (ms) | gf ratio [95% CI] | ifx-expert (ms) | ifx ratio [95% CI] | §13 gf / ifx | block |
+|---|---|---|---|---|---|---|---|---|---|
+| gram | blade-cpp | 22.03 | llvm serial-only | 24.64 | 1.119 [1.070, 1.161] * | 22.83 | 1.036 [0.989, 1.058] * | 1.080/1.035 | 145930 n=21, suppressed |
+| antisym | blade-cpp | 11.22 | llvm serial-only | 11.15 | 0.993 [0.959, 1.049] | 11.22 | 1.000 [0.951, 1.049] | 0.929/0.929 | 145930 n=21 |
+| comoment3 | blade-cpp | 10.82 | llvm serial-only | 5.171 | 0.478 [0.464, 0.525] | 4.615 | 0.427 [0.412, 0.446] | 0.490/0.414 | 145930 n=21 |
+| pairkernel | blade-cpp | 18.16 | llvm serial-only | 6.72 | 0.370 [0.354, 0.381] | 6.515 | 0.359 [0.348, 0.365] | 0.359/0.373 | 145930 n=21 |
+| recur | none | - | cpp no-parallel-form; llvm serial-only | 8.005 | - | 8.117 | - |  | 145930 n=21, suppressed |
+| band | blade-cpp | 4.678 | llvm serial-only | 1.411 | 0.302 [0.276, 0.331] * | 2.431 | 0.520 [0.504, 0.541] * |  | 145930 n=21, suppressed |
+| fusedchain | blade-cpp | 5.856 | llvm serial-only | 4.407 | 0.753 [0.701, 0.827] * | 4.828 | 0.825 [0.776, 0.918] * |  | 145930 n=21, suppressed |
+| onepass | none | - | cpp no-parallel-form; llvm serial-only | 11.89 | - | 11.91 | - |  | 145930 n=21, suppressed |
+| dot | blade-cpp | 14.82 | llvm serial-only | 12.33 | 0.832 [0.768, 0.851] * | 12.48 | 0.842 [0.805, 0.874] * |  | 145930 n=21, suppressed |
+| saxpy | blade-cpp | 13.53 | llvm serial-only | 10.35 | 0.765 [0.718, 0.817] * | 10.13 | 0.748 [0.725, 0.834] * |  | 145930 n=21, suppressed |
+| stencil | blade-cpp | 10.43 | llvm serial-only | 8.492 | 0.815 [0.738, 0.864] * | 9.284 | 0.891 [0.854, 0.918] * |  | 145930 n=21, suppressed |
+
+### serial-fastmath-native
+
+| kernel | ref | Blade (ms) | other lane (ms) | gf-expert (ms) | gf ratio [95% CI] | ifx-expert (ms) | ifx ratio [95% CI] | §13 gf / ifx | block |
+|---|---|---|---|---|---|---|---|---|---|
+| gram | blade-llvm | 58.85 | cpp 62.68 | 78.46 | 1.333 [1.289, 1.355] * | 72.46 | 1.231 [1.192, 1.251] * | 1.354/1.235 | 153107 n=11, suppressed |
+| antisym | blade-llvm | 28.2 | cpp 30.1 | 31.73 | 1.125 [1.106, 1.134] | 31.19 | 1.106 [1.074, 1.112] | 1.142/1.097 | 153107 n=21 |
+| comoment3 | blade-llvm | 8.768 | cpp 9.036 | 11.74 | 1.339 [1.312, 1.347] * | 11.7 | 1.334 [1.312, 1.350] * | 1.245/1.226 | 153107 n=21, suppressed |
+| band | blade-llvm | 0.4278 | cpp 0.6455 | 1.695 | 3.961 [3.638, 4.069] | 1.325 | 3.098 [2.988, 3.210] | 0.513/0.399 | 153107 n=21 |
+| fusedchain | blade-llvm | 4.895 | cpp 8.655 | 7.324 | 1.496 [1.374, 1.688] * | 3.857 | 0.788 [0.705, 0.872] * |  | 153107 n=21, suppressed |
+| onepass | blade-llvm | 12.07 | cpp 22.12 | 18.12 | 1.502 [1.443, 1.524] * | 8.728 | 0.723 [0.689, 0.752] * |  | 153107 n=21, suppressed |
+| dot | blade-llvm | 13.9 | cpp 24.96 | 19.02 | 1.369 [1.348, 1.450] | 9.888 | 0.712 [0.671, 0.737] |  | 153107 n=21 |
+
+### mt8-fastmath-native
+
+| kernel | ref | Blade (ms) | other lane (ms) | gf-expert (ms) | gf ratio [95% CI] | ifx-expert (ms) | ifx ratio [95% CI] | §13 gf / ifx | block |
+|---|---|---|---|---|---|---|---|---|---|
+| gram | blade-cpp | 20.06 | llvm serial-only | 25.05 | 1.249 [1.198, 1.338] * | 24.48 | 1.220 [1.184, 1.307] * | 1.232/1.166 | 155001 n=21, suppressed |
+| antisym | blade-cpp | 9.57 | llvm serial-only | 11.33 | 1.184 [1.145, 1.231] * | 11.62 | 1.214 [1.161, 1.260] * | 1.167/1.150 | 155001 n=21, suppressed |
+| comoment3 | blade-cpp | 3.573 | llvm serial-only | 5.275 | 1.477 [1.428, 1.556] | 4.561 | 1.277 [1.225, 1.354] | 1.441/1.217 | 155001 n=21 |
+| band | blade-cpp | 1.112 | llvm serial-only | 1.161 | 1.044 [0.971, 1.149] * | 1.97 | 1.773 [1.643, 1.847] * |  | 155001 n=21, suppressed |
+| fusedchain | blade-cpp | 3.686 | llvm serial-only | 3.35 | 0.909 [0.822, 1.073] * | 3.422 | 0.928 [0.835, 1.147] * |  | 155001 n=21, suppressed |
+| onepass | none | - | cpp no-parallel-form; llvm serial-only | 9.43 | - | 9.602 | - |  | 155001 n=21, suppressed |
+| dot | blade-cpp | 11.8 | llvm serial-only | 10.75 | 0.911 [0.883, 0.978] * | 11.72 | 0.992 [0.954, 1.063] * |  | 155001 n=21, suppressed |
+
+### serial-licensed-blas
+
+| kernel | ref | Blade (ms) | other lane (ms) | gf-expert (ms) | gf ratio [95% CI] | ifx-expert (ms) | ifx ratio [95% CI] | §13 gf / ifx | block |
+|---|---|---|---|---|---|---|---|---|---|
+| gram | blade-cpp | 61.84 | llvm no-blas | 67.37 | 1.089 [1.074, 1.126] | 64.43 | 1.042 [1.031, 1.063] | 1.013/0.968 | 161102 n=11 |
+
+### mt8-licensed-blas
+
+| kernel | ref | Blade (ms) | other lane (ms) | gf-expert (ms) | gf ratio [95% CI] | ifx-expert (ms) | ifx ratio [95% CI] | §13 gf / ifx | block |
+|---|---|---|---|---|---|---|---|---|---|
+| gram | blade-cpp | 17.97 | llvm no-blas | 21.45 | 1.194 [1.144, 1.346] | 22.44 | 1.249 [1.204, 1.341] | 0.788/0.817 | 161102 n=21 |
+
+### Control drift per session
+
+| session | label | wall (s) | blocks | suppressed | compute median ms | CV | max ms | memory median ms | CV | max ms | excursions dropped | aborted |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| session-132026 | serial-licensed A | 938 | 7 | 3 | 13.47 | 3.6% | 14.5 | 5.44 | 5.7% | 6.4 | 0 | no |
+| session-133604 | serial-licensed B | 1059 | 5 | 4 | 12.86 | 3.9% | 14.5 | 5.34 | 6.2% | 6.4 | 0 | no |
+| session-135344 | mt8-licensed | 1875 | 11 | 9 | 13.12 | 5.2% | 19.4 | 5.42 | 7.6% | 7.9 | 0 | no |
+| session-142502 | serial-repro A | 1002 | 7 | 3 | 13.69 | 4.2% | 18.0 | 5.55 | 7.1% | 7.5 | 0 | no |
+| session-144145 | serial-repro B | 1064 | 5 | 3 | 13.66 | 2.6% | 15.1 | 5.55 | 6.5% | 7.3 | 0 | no |
+| session-145930 | mt8-repro | 1896 | 11 | 8 | 13.60 | 2.2% | 14.3 | 5.56 | 6.0% | 6.7 | 0 | no |
+| session-153107 | serial-fastmath | 1133 | 7 | 4 | 13.64 | 3.5% | 16.8 | 5.54 | 7.3% | 7.5 | 1 | no |
+| session-155001 | mt8-fastmath | 1228 | 7 | 6 | 13.67 | 8.2% | 20.1 | 5.64 | 9.3% | 8.4 | 0 | no |
+| session-161102 | gram blas | 149 | 2 | 0 | 13.74 | 3.7% | 15.6 | 5.51 | 7.4% | 7.0 | 0 | no |
+
+Gram blas cells ran on the default config; blade-cpp is `blas_route: native-preempt` (the packed syrk tile preempts the host ?syrk; run.py acceptance rule 39a8a869); blade-llvm is no-blas as designed. Phase 2 (knob / binary A/Bs, scratch bundles under the scratchpad, not committed) results were reported item by item in the run log and to the coordinator.

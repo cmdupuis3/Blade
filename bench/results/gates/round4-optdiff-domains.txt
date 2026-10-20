@@ -1,0 +1,15 @@
+test: ignoring ambient OPENBLAS_DIR=C:\Users\cdupu\tools\OpenBLAS-0.3.34-x64 for this run (the suites assume the default emission; blocks that exercise a knob set it themselves)
+
+======================================================================
+  Optimizer Differential (all gates OFF vs ON) (v0.20.0)
+======================================================================
+
+gates: BLADE_FUSION, BLADE_FREEZE_IDIOM, BLADE_CSE, BLADE_POOL_REUSE, BLADE_HOIST, BLADE_HOT_ROW
+  (domains emitted)
+emitted 14 programs in 11.4s: 9 with identical C++ (optimizer inert), 4 to compile and run both ways
+  [PASS]: Closed-Form Domain: A Band Fold Streams The Affine Nest -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Closed-Form Domain: The Strict Triangle i < j -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Closed-Form Domain: A Licensed Fold Kernel Vectorizes The Inner Field -- C++ differs (BLADE_FUSION), output identical
+  [PASS]: Closed-Form Domain: A Diagonal Band Fold On Float Data Matches The Serial Walk -- C++ differs (BLADE_FUSION), output identical
+----------------------------------------------------------------------
+Opt Diff: 13 passed (9 optimizer-inert), 0 failed, 1 skipped, 41s

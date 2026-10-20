@@ -1,0 +1,100 @@
+[16:11:02.967 +    0.0s] bench: 1 kernel(s): gram; size full
+[16:11:03.019 +    0.1s] fingerprinting the machine
+[16:11:04.594 +    1.6s] power: ac, max processor state AC 100%, boost mode AC None, Power Scheme GUID: 64a64f24-65b9-4b56-befd-5ec1eaced9b3  (Silent)
+[16:11:07.096 +    4.1s] cooldown 22s (between sessions)
+[16:11:29.591 +   26.6s] control compute: recur/gfortran-expert/serial-repro-native/full
+[16:11:30.492 +   27.5s] control memory: saxpy/gfortran-expert/serial-repro-native/control
+[16:11:31.527 +   28.6s] build gram serial-licensed-blas full blade-llvm
+[16:11:36.396 +   33.4s]   -> no-blas: LLVM lane does not route to BLAS (the exe imports no libopenblas.dll) (3.0s)
+[16:11:36.401 +   33.4s] build gram serial-licensed-blas full blade-cpp
+[16:11:41.639 +   38.7s]   -> ok (3.4s)
+[16:11:41.639 +   38.7s] build gram serial-licensed-blas full gfortran-expert
+[16:11:42.457 +   39.5s]   -> ok (0.7s)
+[16:11:42.458 +   39.5s] build gram serial-licensed-blas full ifx-expert
+[16:11:45.116 +   42.2s]   -> ok (2.5s)
+[16:11:45.245 +   42.3s]   blade-cpp: ok t=0.06197s checksum=160344246688.889 input=800824.015624528 peakWS=31.5MB
+[16:11:45.880 +   42.9s]   gfortran-expert: ok t=0.06901s checksum=1.6034424668888913E+011 input=8.0082401562452829E+005 peakWS=34.9MB
+[16:11:46.540 +   43.6s]   ifx-expert: ok t=0.06629s checksum=1.6034424668888913E+011 input=8.0082401562452829E+005 peakWS=34.6MB
+[16:11:47.042 +   44.1s] gram/serial-licensed-blas: 11 rounds x 3 arms + 2 control(s) (minimum 11 (serial)); ratio reference blade-cpp
+[16:11:49.924 +   47.0s]   round 1/11: gfortran-expert=73.38ms [memory]=5.273ms blade-cpp=61.29ms ifx-expert=63.46ms [compute]=13.73ms
+[16:11:52.804 +   49.9s]   round 2/11: gfortran-expert=67.79ms blade-cpp=61.25ms [compute]=12.98ms [memory]=5.673ms ifx-expert=67.79ms
+[16:11:55.670 +   52.7s]   round 3/11: gfortran-expert=66.9ms [compute]=13.58ms [memory]=5.954ms blade-cpp=62.58ms ifx-expert=63.73ms
+[16:11:58.551 +   55.6s]   round 4/11: blade-cpp=62.47ms [compute]=14.74ms ifx-expert=67.07ms [memory]=5.823ms gfortran-expert=68.13ms
+[16:12:01.422 +   58.5s]   round 5/11: ifx-expert=63.68ms gfortran-expert=67.08ms [memory]=5.686ms blade-cpp=60.29ms [compute]=13.7ms
+[16:12:04.291 +   61.3s]   round 6/11: ifx-expert=65.21ms [compute]=13.81ms blade-cpp=61.34ms [memory]=6.359ms gfortran-expert=69.05ms
+[16:12:07.159 +   64.2s]   round 7/11: [memory]=5.276ms [compute]=13.34ms ifx-expert=64.76ms blade-cpp=64.08ms gfortran-expert=66.75ms
+[16:12:10.030 +   67.1s]   round 8/11: ifx-expert=64.34ms [memory]=6.323ms blade-cpp=61.4ms gfortran-expert=71.5ms [compute]=13.49ms
+[16:12:12.900 +   69.9s]   round 9/11: [compute]=13.86ms gfortran-expert=66.84ms blade-cpp=62.07ms [memory]=6.997ms ifx-expert=63.98ms
+[16:12:15.765 +   72.8s]   round 10/11: ifx-expert=65.34ms [compute]=13.89ms blade-cpp=61.84ms gfortran-expert=67.37ms [memory]=5.503ms
+[16:12:18.639 +   75.7s]   round 11/11: gfortran-expert=66.83ms blade-cpp=61.89ms ifx-expert=64.43ms [compute]=12.88ms [memory]=5.483ms
+[16:12:18.805 +   75.9s] build gram mt8-licensed-blas full blade-llvm
+[16:12:23.672 +   80.7s]   -> no-blas: LLVM lane does not route to BLAS (the exe imports no libopenblas.dll) (3.0s)
+[16:12:23.672 +   80.7s] build gram mt8-licensed-blas full blade-cpp
+[16:12:28.973 +   86.0s]   -> ok (3.5s)
+[16:12:28.973 +   86.0s] build gram mt8-licensed-blas full gfortran-expert
+[16:12:29.825 +   86.9s]   -> ok (0.8s)
+[16:12:29.825 +   86.9s] build gram mt8-licensed-blas full ifx-expert
+[16:12:32.535 +   89.6s]   -> ok (2.5s)
+[16:12:32.612 +   89.7s]   blade-cpp: ok t=0.01693s checksum=160344246688.889 input=800824.015624528 peakWS=32.3MB
+[16:12:33.191 +   90.2s]   gfortran-expert: ok t=0.02124s checksum=1.6034424668888895E+011 input=8.0082401562452829E+005 peakWS=36.7MB
+[16:12:33.792 +   90.8s]   ifx-expert: ok t=0.0222s checksum=1.6034424668888895E+011 input=8.0082401562452829E+005 peakWS=38.1MB
+[16:12:34.295 +   91.3s] gram/mt8-licensed-blas: 21 rounds x 3 arms + 2 control(s) (minimum 21 (memory-bound: median warm-up < 50 ms)); ratio reference blade-cpp
+[16:12:37.036 +   94.1s]   round 1/21: gfortran-expert=17.67ms [memory]=5.818ms [compute]=13.58ms ifx-expert=24.93ms blade-cpp=17.16ms
+[16:12:39.778 +   96.8s]   round 2/21: [compute]=13.54ms gfortran-expert=25.91ms blade-cpp=18.4ms [memory]=5.272ms ifx-expert=21.94ms
+[16:12:42.518 +   99.6s]   round 3/21: ifx-expert=21.93ms [memory]=6.216ms [compute]=13.42ms gfortran-expert=24.52ms blade-cpp=17.56ms
+[16:12:45.260 +  102.3s]   round 4/21: blade-cpp=18.51ms ifx-expert=24.29ms [compute]=13.67ms [memory]=5.76ms gfortran-expert=24.75ms
+[16:12:48.021 +  105.1s]   round 5/21: gfortran-expert=26.57ms [compute]=13.16ms blade-cpp=22.24ms [memory]=6.099ms ifx-expert=23.36ms
+[16:12:50.757 +  107.8s]   round 6/21: ifx-expert=25.05ms [memory]=5.449ms [compute]=13.47ms blade-cpp=16.19ms gfortran-expert=20.84ms
+[16:12:53.488 +  110.5s]   round 7/21: blade-cpp=16.73ms ifx-expert=21.1ms [memory]=5.211ms [compute]=13.78ms gfortran-expert=20.53ms
+[16:12:56.224 +  113.3s]   round 8/21: blade-cpp=18.13ms gfortran-expert=20.53ms ifx-expert=21.84ms [memory]=5.685ms [compute]=13.51ms
+[16:12:58.957 +  116.0s]   round 9/21: blade-cpp=17.76ms ifx-expert=23.22ms [compute]=13.91ms [memory]=5.418ms gfortran-expert=17.29ms
+[16:13:01.693 +  118.7s]   round 10/21: [compute]=13.9ms ifx-expert=21.78ms blade-cpp=18.22ms [memory]=5.365ms gfortran-expert=21.79ms
+[16:13:04.431 +  121.5s]   round 11/21: [memory]=5.439ms blade-cpp=17.15ms [compute]=13.76ms gfortran-expert=25.14ms ifx-expert=21.5ms
+[16:13:07.191 +  124.2s]   round 12/21: ifx-expert=26.53ms gfortran-expert=22.54ms [compute]=15.62ms blade-cpp=18.67ms [memory]=5.56ms
+[16:13:09.952 +  127.0s]   round 13/21: ifx-expert=30.13ms blade-cpp=20.32ms gfortran-expert=19.69ms [memory]=5.421ms [compute]=14.34ms
+[16:13:12.730 +  129.8s]   round 14/21: ifx-expert=21.56ms [compute]=14.79ms gfortran-expert=25.44ms [memory]=5.261ms blade-cpp=23.77ms
+[16:13:15.468 +  132.5s]   round 15/21: blade-cpp=17.97ms ifx-expert=24.58ms gfortran-expert=20.55ms [memory]=5.191ms [compute]=13.86ms
+[16:13:18.211 +  135.3s]   round 16/21: gfortran-expert=17.5ms blade-cpp=16.26ms [compute]=13.96ms ifx-expert=21.58ms [memory]=5.487ms
+[16:13:20.953 +  138.0s]   round 17/21: [compute]=13.67ms gfortran-expert=20.83ms blade-cpp=18.11ms ifx-expert=23.82ms [memory]=5.323ms
+[16:13:23.694 +  140.7s]   round 18/21: blade-cpp=17.67ms [memory]=5.161ms [compute]=13.8ms gfortran-expert=24.18ms ifx-expert=22.82ms
+[16:13:26.432 +  143.5s]   round 19/21: [memory]=6.305ms gfortran-expert=20.95ms ifx-expert=21.94ms blade-cpp=17.11ms [compute]=13.76ms
+[16:13:29.181 +  146.2s]   round 20/21: blade-cpp=19.11ms ifx-expert=22.35ms [memory]=5.909ms gfortran-expert=21.45ms [compute]=13.38ms
+[16:13:31.920 +  149.0s]   round 21/21: gfortran-expert=22.99ms [memory]=5.519ms blade-cpp=16.55ms [compute]=13.82ms ifx-expert=22.44ms
+
+# Blade vs Fortran -- bench session 2026-10-19T16:11:02
+
+- host LAPTOP-350H6LDB | AMD Ryzen 7 5800HS with Radeon Graphics | 8C/16T | 15.41 GB | power ac | max processor state AC 100% | boost AC None | Power Scheme GUID: 64a64f24-65b9-4b56-befd-5ec1eaced9b3  (Silent)
+- git 39a8a869ff410c79edbe599a98257d4012241702 | Blade.dll bb52a4c2a008d198 | GNU Fortran (Rev4, Built by MSYS2 project) 16.2.0 | Intel(R) Fortran Compiler for applications running on Intel(R) 64, Version 2026.1.0 Build 20260617 | clang version 22.1.8 (https://github.com/msys2/MINGW-packages d34feaaa1d0aff624c870910b6f2589aa40d20de)
+- size `full` | duration 149.1 s | pins: pins-A.json, pins-B.json
+- PRIMARY estimand: the complete timed region. ratio = median(arm) / median(Blade reference), round-block bootstrap 95% CI (10000 resamples); ratio > 1 = Blade faster. Verdicts (delta 0.1): win / detectable-win / equivalent / detectable-loss / loss / inconclusive; `suppressed` = the block failed a drift, trend or control check. Intervals are pointwise; no suite-wide claim. incremental = median(arm) - median(its own input-only twin), NOT kernel time. Reference: blade-llvm (serial), blade-cpp (mt8, or when the LLVM lane refused). Fresh-process, allocation-inclusive measurements.
+
+## serial-licensed-blas
+
+Blade reference per kernel: gram=blade-cpp
+
+| kernel | arm | status | n | min (s) | median (s) | IQR (s) | ratio vs ref [95% CI] | verdict | hypothesis | fold form | parallelism | peak WS (MB) | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| gram | blade-llvm | no-blas | 0 | -- | -- | -- |  |  |  | reordered (4 reassoc flags) |  |  | LLVM lane does not route to BLAS (the exe imports no libopenblas.dll) |
+| gram | blade-cpp | ok | 11 | 0.06029 | 0.06184 | 0.0009542 | ref |  |  | reordered (4 SIMD_REDUCTION/K-lane) | serial | 31.5 | native tile preempted the library ([microkernel v1] __v27: applied [packed syrk tile (blade_pgemm::dsyrk_tri, 6x8 register ti) |
+| gram | gfortran-expert | ok | 11 | 0.06675 | 0.06737 | 0.00172 | 1.089 [1.074, 1.126] | detectable-win | LOSS 1.5-3x strict; narrows in fast; parity in blas |  | library threads (OPENBLAS_NUM_THREADS=1) | 34.9 |  |
+| gram | ifx-expert | ok | 11 | 0.06346 | 0.06443 | 0.001421 | 1.042 [1.031, 1.063] | detectable-win | LOSS 1.5-3x strict; narrows in fast; parity in blas |  | library threads (OPENBLAS_NUM_THREADS=1) | 34.6 |  |
+
+## mt8-licensed-blas
+
+Blade reference per kernel: gram=blade-cpp
+
+| kernel | arm | status | n | min (s) | median (s) | IQR (s) | ratio vs ref [95% CI] | verdict | hypothesis | fold form | parallelism | peak WS (MB) | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| gram | blade-llvm | no-blas | 0 | -- | -- | -- |  |  |  | reordered (4 reassoc flags) |  |  | LLVM lane does not route to BLAS (the exe imports no libopenblas.dll) |
+| gram | blade-cpp | ok | 21 | 0.01619 | 0.01797 | 0.00136 | ref |  |  | reordered (4 SIMD_REDUCTION/K-lane) | openmp (3 construct(s)) | 32.3 | native tile preempted the library ([microkernel v1] __v27: applied [packed syrk tile (blade_pgemm::dsyrk_tri, 6x8 register ti) |
+| gram | gfortran-expert | ok | 21 | 0.01729 | 0.02145 | 0.003983 | 1.194 [1.144, 1.346] | win | LOSS 1.5-3x strict; narrows in fast; parity in blas |  | library threads (OPENBLAS_NUM_THREADS=8) + openmp runtime | 36.7 |  |
+| gram | ifx-expert | ok | 21 | 0.0211 | 0.02244 | 0.002451 | 1.249 [1.204, 1.341] | win | LOSS 1.5-3x strict; narrows in fast; parity in blas |  | library threads (OPENBLAS_NUM_THREADS=8) + openmp runtime | 38.1 |  |
+
+## Controls
+
+- compute (recur/gfortran-expert/serial-repro-native/full): n=32 median 0.01374 s, baseline 0.0137 s
+- memory (saxpy/gfortran-expert/serial-repro-native/control): n=32 median 0.005511 s, baseline 0.005686 s
+
+[16:13:32.110 +  149.2s] wrote C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-19-LAPTOP-350H6LDB\session-161102
+[16:13:32.110 +  149.2s] exit 0: 0 failure(s), 0 flag(s)
+exit 0

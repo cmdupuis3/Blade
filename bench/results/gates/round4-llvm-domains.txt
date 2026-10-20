@@ -1,0 +1,34 @@
+test: ignoring ambient OPENBLAS_DIR=C:\Users\cdupu\tools\OpenBLAS-0.3.34-x64 for this run (the suites assume the default emission; blocks that exercise a knob set it themselves)
+
+======================================================================
+  LLVM Differential (llvm lane vs C++ lane) (v0.20.0)
+======================================================================
+
+clang: C:\msys64\clang64\bin\clang.exe
+categories: domains
+
+
+--- domains (14 files) ---
+
+  [PASS]: Closed-Form Domain: A Band Fold Streams The Affine Nest
+  [PASS]: Closed-Form Domain: A Band Fold Inside A Function Streams Too
+  [PASS]: Closed-Form Domain: A Materialized Band Fills By The Nest, Reads By Key
+  [PASS]: Closed-Form Domain: The Strict Triangle i < j
+  [PASS]: Closed-Form Domain: Selection Rules i + j <= n And a + b + c == L
+  [SKIP]: Closed-Form Domain: A Non-Linear Conjunct Has No Nest To Stream (rejects) -- a reject probe (nothing to compare)
+  [SKIP]: Closed-Form Domain: A Static Bound Past Int32 Needs An Int64 Field (rejects) -- a reject probe (nothing to compare)
+  [PASS]: Closed-Form Domain: A Licensed Fold Kernel Vectorizes The Inner Field
+  [PASS]: Closed-Form Domain: Int64 To Float64 Stays Correctly Rounded In A Vectorized Cell Loop
+  [PASS]: Closed-Form Domain: A Licensed Band Fold Walks By Diagonal
+  [PASS]: Closed-Form Domain: A Diagonal Band Fold On Float Data Matches The Serial Walk
+  [PASS]: Closed-Form Domain: A Band Fold Whose Map Has Side Effects Keeps The Lex Order
+  [PASS]: Closed-Form Domain: Int64 To Float64 Is The Same Double In Cell Code And Scalar Code
+  [PASS]: Closed-Form Domain: A Negative-Remainder Generator Converts Alike In Scalar And Cell Code
+
+  Skip reasons (2 skipped, by frequency):
+       2  a reject probe (nothing to compare)
+
+  Lane coverage: 12 of 12 comparable programs emitted by the llvm lane (100.0%)
+    0 refused by the lane (the histogram above is the worklist); 2 skipped for reasons that are not the lane's
+----------------------------------------------------------------------
+LLVM Differential: 12 passed, 0 failed, 2 skipped

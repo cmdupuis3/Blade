@@ -1,0 +1,20 @@
+test: ignoring ambient OPENBLAS_DIR=C:\Users\cdupu\tools\OpenBLAS-0.3.34-x64 for this run (the suites assume the default emission; blocks that exercise a knob set it themselves)
+
+======================================================================
+  LLVM Tile Core vs C++ Tile (raw bits, both contraction modes) (v0.20.0)
+======================================================================
+
+  [PASS]: llvm tile core vs its serial chain, contract=off -- LLVM TILES RAWBIT (llvm): 2038/2038 passed
+  [PASS]: C++ tile vs its serial chain, contract=off -- LLVM TILES RAWBIT (cpp): 2038/2038 passed
+      SUBTOTALS (llvm): syrk 16/16, antisym 1572/1572, simplex 450/450 | SUBTOTALS (cpp): syrk 16/16, antisym 1572/1572, simplex 450/450
+  [PASS]: cross-lane bits, contract=off -- 2038 cases: every packed pool byte-identical
+  [PASS]: llvm tile core vs its serial chain, contract=fast -- LLVM TILES RAWBIT (llvm): 2038/2038 passed
+  [PASS]: C++ tile vs its serial chain, contract=fast -- LLVM TILES RAWBIT (cpp): 2038/2038 passed
+      SUBTOTALS (llvm): syrk 16/16, antisym 1572/1572, simplex 450/450 | SUBTOTALS (cpp): syrk 16/16, antisym 1572/1572, simplex 450/450
+  [PASS]: cross-lane bits, contract=fast -- 2038 cases: every packed pool byte-identical
+  [PASS]: vfmadd census contract=off -- blade_dsyrk_tri_f64 0, blade_dantisym_tri_f64 0, blade_dsym3_tri_f64 0
+  [PASS]: vfmadd census contract=fast -- blade_dsyrk_tri_f64 81, blade_dantisym_tri_f64 132, blade_dsym3_tri_f64 99
+  [PASS]: the two contraction modes are distinguishable -- 1468/2038 cases differ between =off and =fast
+  [PASS]: policy keying: =off and =fast build distinct tile objects in one directory -- blade_llvm_tiles-dfd554985c6936e5.obj / blade_llvm_tiles-af0bdffe9c24e475.obj
+----------------------------------------------------------------------
+LLVM Tiles Raw-Bit: 10 passed, 0 failed, 0 skipped

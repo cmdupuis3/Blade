@@ -1,0 +1,29 @@
+10:08:11 PHASE1 START hash=bb52a4c2a008d1985c4df89a69a3ed54327bb25f1301bde0fecfa2adc5c3bf45
+10:08:11 START gate default: test
+10:23:29 DONE gate default rc=0 wall=918s fails=0
+10:23:29 START gate interp: test interp
+11:11:59 DONE gate interp rc=0 wall=2910s fails=0
+11:11:59 START gate opt-diff: test opt-diff
+11:14:23 DONE gate opt-diff rc=0 wall=144s fails=0
+11:14:23 START gate llvm: test llvm
+11:29:41 DONE gate llvm rc=0 wall=918s fails=0
+11:29:41 START gate docs: test docs
+11:30:09 DONE gate docs rc=0 wall=28s fails=0
+11:30:09 GATES DONE total [FAIL] lines = 0
+11:30:09 START gate fold-lanes: test fold-lanes
+11:30:20 DONE gate fold-lanes rc=0 wall=11s fails=0
+11:30:20 START gate syrk-tile: test syrk-tile
+11:30:36 DONE gate syrk-tile rc=0 wall=16s fails=0
+11:30:36 START gate row-tile: test row-tile
+11:30:54 DONE gate row-tile rc=0 wall=18s fails=0
+11:30:54 START gate llvm-tiles: test llvm tiles
+11:31:09 DONE gate llvm-tiles rc=0 wall=15s fails=0
+11:31:09 START check gram
+11:32:00 DONE check gram wall=51s exit 1
+11:32:00 START check recur
+11:32:23 DONE check recur wall=23s exit 0
+11:32:23 START smoke --regimes all
+11:55:55 DONE smoke wall=1412s exit 1
+11:55:55 PHASE1 ALL DONE
+12:21:53 RESUME: gram blas re-smoke
+12:22:27 DONE gram blas re-smoke: exit 0

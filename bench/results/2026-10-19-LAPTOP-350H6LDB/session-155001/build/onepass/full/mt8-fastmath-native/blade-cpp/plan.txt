@@ -1,0 +1,5 @@
+plan: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-19-LAPTOP-350H6LDB\session-155001\build\onepass\full\mt8-fastmath-native\blade-cpp\src\onepass.blade -- 3 optimization decision(s)
+  [omp v1] __ret1073741824 @ 25:1: applied [BLADE_OMP_PARALLEL_FOR; loop nest level 0 (__i0)]
+  [fold-form v1] __v39 @ 29:1: applied [fold form: simd-reduction; fused fold over 4 leaves (one traversal)]
+  [fold-form v1] _(checksum,input_checksum): applied [fold form: K-lanes(8); reduce in expression position]
+inputs: 0 (identity policy: `content` = folded at compile time, hashed; `version` = read at run time, size + mtime observed -- BLADE_RUN_RECORD=<path> writes the run record)
