@@ -265,7 +265,7 @@ regime_arms {"<regime>": [base arms]}                 -- narrow one regime
 rounds {serial: n, mt8: n}                            -- raise the minimum
 tolerance {licensed|repro|fastmath: rel}, input_tolerance (default 1e-14 relative; a kernel may only widen it)
 expected_llvm "fallback" + expected_llvm_reason       -- a fallback is then not a failure
-no_parallel_form true | ["<mt8 regime>"]              -- Blade has no licensed parallel spelling
+no_parallel_form true | false | ["<mt8 regime>"]      -- Blade has no licensed parallel spelling (false / [] = it has one)
 parallel_notes {"<arm>": "parallel preparation, serial kernel ..."}   -- shown in mt8 rows
 size_exempt {"<file>": [params]}
 ```

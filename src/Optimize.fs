@@ -3167,8 +3167,12 @@ let fuseRowFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: IRC
 //     `fusedFoldSimdPlan` intersects licences and names one operator);
 //   * a THREAD GATE: in a build that emits thread-level OpenMP and reorders,
 //     a leg whose fold kernel requests omp under a licence (or whose map
-//     kernel requests omp) declines the group -- a reduction join has no
-//     thread-level form (G7). Request-only, so it may over-decline.
+//     kernel requests omp) joins only when EVERY leg carries its own reorder
+//     licence and BLADE_JOIN_THREADS is on -- the policy of the threaded
+//     reduction join (G7), under which the synthesized join (each leg keeping
+//     its OWN request; none is manufactured) opens one team over the shared
+//     traversal. Otherwise the group declines, so the requesting leg keeps
+//     its own team. Request-only, so it may over-decline.
 //   * an UNSEEDED builtin `(+)` / `(*)` leg over a literal extent >= 1 is
 //     seeded with its exact identity (`sfIdentitySeed`); any other unseeded
 //     kernel declines.
@@ -3213,6 +3217,11 @@ type private SfLeg =
       Licensed: bool
       Op: IRBinOp option
       Threads: bool
+      /// The leg's map kernel against the C++ threaded join's OWN purity /
+      /// totality admission (Blade.IRTotality, the predicate
+      /// `joinedFoldThreadPlan`'s audit applies): Ok for a synthesized
+      /// identity / product leaf.
+      Audit: Result<unit, string>
       ResultType: IRType }
 
 type private SfMember =
@@ -3791,10 +3800,10 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                      | None -> n)
                 | _ -> floatBitsLit n) e
 
-        let mkLeg (leafF: unit -> IRExpr) (k: IRExpr) (c: IRCallable) (seed: IRExpr) (note: (string * string) option) (leafOmp: bool) (resTy: IRType) =
+        let mkLeg (leafF: unit -> IRExpr) (k: IRExpr) (c: IRCallable) (seed: IRExpr) (note: (string * string) option) (leafOmp: bool) (audit: Result<unit, string>) (resTy: IRType) =
             let lic = licensed c
             { Build = (fun () -> (leafF (), k, seed)); SeedNote = note; Licensed = lic; Op = builtinOp c
-              Threads = (c.IsOmpParallel && lic) || leafOmp; ResultType = resTy }
+              Threads = (c.IsOmpParallel && lic) || leafOmp; Audit = audit; ResultType = resTy }
 
         // Member admission.
         let admit (ui: int) (ord: int) (node: IRExpr) : Result<SfMember, string> =
@@ -3844,7 +3853,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                                     | IRTArrow (slots, _, id2) -> IRTArrow (slots, elemTy, id2)
                                     | t -> t
                                 mapOneArrayApply arr at (IRVar (lam.Id, mkFuncArrow [ elemTy ] elemTy)) outTy
-                            let leg = mkLeg leafF k c seed note false (typeOf node)
+                            let leg = mkLeg leafF k c seed note false (Ok ()) (typeOf node)
                             Ok (baseM [ leg ] n ix [ aid ] (Some (canon node)) desc None))
                  | _ -> Error $"{desc}: the operand is not a stored array named by a variable")
             | IRProdSum args ->
@@ -3904,7 +3913,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                         let leaf = leafF ()
                         let add = addLam () |> mint origin
                         (leaf, IRVar (add.Id, mkFuncArrow [ f64; f64 ] f64), IRLit (IRLitFloat 0.0)))
-                      SeedNote = None; Licensed = true; Op = Some IRAdd; Threads = false; ResultType = f64 }
+                      SeedNote = None; Licensed = true; Op = Some IRAdd; Threads = false; Audit = Ok (); ResultType = f64 }
                 Ok (baseM [ leg ] n0 ix0 (typed |> List.map (fun (id, _, _, _) -> id)) (Some (canon node)) desc None)
             | IRReduceCompute (comp, k, s) ->
                 let leaves = leavesOf comp
@@ -3976,7 +3985,10 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                     List.zip3 infos (List.zip ks (kcs |> List.map Option.get)) (List.zip ss pls)
                     |> List.map (fun (info, (kx, c), (sx, (_, _, _, leafK))) ->
                         let resTy = if isJoin then typeOf sx else typeOf node
-                        mkLeg (fun () -> IRApplyCombinator info) kx c sx None leafK.IsOmpParallel resTy)
+                        let audit =
+                            Blade.IRTotality.auditApply (resolveCallableIn funcs) (fun _ -> None)
+                                (fun id -> deferred.Contains id || deferred.Contains (resolveAlias 64 id)) info
+                        mkLeg (fun () -> IRApplyCombinator info) kx c sx None leafK.IsOmpParallel audit resTy)
                 Ok (baseM legs n0 ix0 ids (if isJoin then None else Some (canon node)) desc join)
             | _ -> Error "not a fold"
 
@@ -4023,8 +4035,35 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
         // Decide each group.
         let decideGroup (g: SfMember list) : Result<unit, string> =
             let legs = g |> List.collect (fun m -> m.Legs)
-            if threadsBuild && legs |> List.exists (fun l -> l.Threads) then
-                Error "a leg requests threads in this build; a reduction join has no thread-level form (G7)"
+            // THE THREAD GATE, relaxed to the threaded join's own policy (G7):
+            // in a threading licensed build a requesting leg may join only when
+            // EVERY leg carries its own licence and the threaded join is on --
+            // then the synthesized join keeps each leg's own request (none is
+            // manufactured) and threads under the joined Path B form.
+            // Otherwise the requesting leg would lose its team: decline.
+            // The synthesized traversal must pass the threaded join's ACTUAL
+            // admission (the same knob, licence, operator and purity predicates
+            // `joinedFoldThreadPlan` applies; the dense literal-extent shape is
+            // this pass's own admission) BEFORE it replaces a requesting fold:
+            // a join the emitter would then refuse would serialize a fold
+            // that threads on its own today. On any failure the originals stay.
+            let threadedJoinRefusal () : string option =
+                let ops = legs |> List.map (fun l -> l.Op) |> List.distinct
+                if not (Blade.Toolchain.joinThreadsEnabled ()) then
+                    Some "a leg requests threads in this build and BLADE_JOIN_THREADS=0 keeps a reduction join serial; the leg keeps its own team"
+                elif not (legs |> List.forall (fun l -> l.Licensed)) then
+                    Some "a leg requests threads in this build but not every leg carries its own reorder licence; the threaded join (G7) needs every leg licensed, so the requesting leg keeps its own team"
+                elif not (ops = [ Some IRAdd ] || ops = [ Some IRMul ]) then
+                    Some "a leg requests threads in this build but the legs do not all fold with ONE builtin `+` or `*`; the threaded join (G7) has no form for that, so the requesting leg keeps its own team"
+                else
+                    match legs |> List.tryPick (fun l -> match l.Audit with Error why -> Some why | Ok () -> None) with
+                    | Some why ->
+                        Some $"a leg requests threads in this build but a leg's map kernel is outside the threaded join's purity/totality whitelist ({why}); the joined team would be refused, so the requesting leg keeps its own team"
+                    | None -> None
+            let threadRefusal =
+                if threadsBuild && legs |> List.exists (fun l -> l.Threads) then threadedJoinRefusal () else None
+            if threadRefusal.IsSome then
+                Error threadRefusal.Value
             elif reorderingBuild && (legs |> List.exists (fun l -> l.Licensed)) && (legs |> List.exists (fun l -> not l.Licensed)) then
                 let nl = legs |> List.filter (fun l -> l.Licensed) |> List.length
                 Error $"legs disagree on the reorder licence in a reordering build ({nl} licensed, {legs.Length - nl} unlicensed); one traversal has one order, so the join would serialize the licensed legs"

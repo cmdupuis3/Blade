@@ -48,201 +48,22 @@ open Blade.CodeGenFusion
 // cast, lgamma/digamma, an unproven subscript, a write, an unresolved call,
 // any array-level form -- declines with its name.
 
-/// The element type of a scalar (possibly index-tagged) IR type.
-let rec private rowSlotScalarElem (t: IRType) : ElemType option =
-    match t with
-    | IRTScalar et -> Some et
-    | IRTIdxTagged (inner, _) -> rowSlotScalarElem inner
-    | IRTUnitAnnotated (inner, _) -> rowSlotScalarElem inner
-    | _ -> None
+// The whitelist itself lives in Blade.IRTotality (lane-neutral), so the
+// optimizer's sibling-fold pass applies the SAME predicate before it builds a
+// join whose team this emitter would otherwise refuse (G7). The aliases keep
+// this file's spelling.
+let private rowSlotScalarElem = Blade.IRTotality.scalarElem
+let private rowSlotRangeIx = Blade.IRTotality.rangeIx
+let private rowSlotMul = Blade.IRTotality.mulSat
 
-let private rowSlotIsFloat (et: ElemType) = (et = ETFloat64 || et = ETFloat32)
-let private rowSlotIsInt (et: ElemType) = (et = ETInt64 || et = ETInt32)
-let private rowSlotIsReal (et: ElemType) = rowSlotIsFloat et || rowSlotIsInt et
-
-/// The unary math intrinsics audited TOTAL on real operands (libm in every
-/// lane: a NaN or an infinity, never a panic). lgamma / digamma are refused
-/// before this set is consulted; a name not listed declines.
-let private rowSlotTotalMath : Set<string> =
-    Set.ofList [ "exp"; "log"; "log10"; "sqrt"; "sin"; "cos"; "tan"; "sinh"; "cosh"; "tanh"
-                 "asin"; "acos"; "atan"; "floor"; "ceil"; "abs" ]
-
-/// Two index records name the same index space: equal tags (or the same
-/// anonymous record) and the same static extent.
-let private rowSlotSameIndex (a: IRIndexType) (b: IRIndexType) : bool =
-    let tagsAgree =
-        match a.Tag, b.Tag with
-        | Some x, Some y -> x = y
-        | None, None -> a.Id = b.Id
-        | _ -> false
-    tagsAgree
-    && (match tryEvalIntIR a.Extent, tryEvalIntIR b.Extent with
-        | Some x, Some y -> x = y
-        | _ -> false)
-
-/// One plain `range<I>` operand of static extent: its index record.
-let private rowSlotRangeIx (arr: IRExpr) : IRIndexType option =
-    match arr with
-    | IRRange ([ ix ], None) when ix.Rank = 1 && ix.Symmetry = SymNone && ix.IxKind = IxKPlain
-                                  && (tryEvalIntIR ix.Extent).IsSome -> Some ix
-    | _ -> None
-
-/// Saturating add/mul for the work count (a gate, never an exact census).
-let private rowSlotSat (x: int64) = if x < 0L || x > (System.Int64.MaxValue / 4L) then System.Int64.MaxValue / 4L else x
-let private rowSlotAdd (a: int64) (b: int64) = rowSlotSat (a + b)
-let private rowSlotMul (a: int64) (b: int64) =
-    if a = 0L || b = 0L then 0L
-    elif a > (System.Int64.MaxValue / 4L) / b then System.Int64.MaxValue / 4L
-    else rowSlotSat (a * b)
-
-/// The whitelist walk: Ok (inner fold steps) or Error (first refusal).
-/// `levels` maps a level coordinate (by VarId, and by parameter name for the
-/// positional `IRParam` spelling) to its index record; `bound` are let-bound
-/// and callee-parameter scalars; `visiting` guards recursion through calls.
+/// The whitelist walk (Blade.IRTotality.walk) with this lane's resolver and
+/// deferred-computation table: Ok (inner fold steps) or Error (first refusal).
 /// `internal` so the omp-pragma block can drive it on hand-built IR (names
 /// the front end never produces must decline too).
-let rec internal rowSlotWalk(deferred: Map<IRId, IRExpr>) (levels: Map<IRId, IRIndexType>) (levelNames: Map<string, IRIndexType>)
-                            (bound: Set<IRId>) (boundNames: Set<string>) (visiting: Set<IRId>) (e: IRExpr) : Result<int64, string> =
-    let go = rowSlotWalk deferred levels levelNames bound boundNames visiting
-    let all (xs: IRExpr list) =
-        xs |> List.fold (fun acc x ->
-            match acc with
-            | Error _ -> acc
-            | Ok n -> (match go x with Ok m -> Ok (rowSlotAdd n m) | Error why -> Error why)) (Ok 0L)
-    let levelOf (x: IRExpr) =
-        match x with
-        | IRVar (id, _) -> Map.tryFind id levels
-        | IRParam (nm, _, _) -> Map.tryFind nm levelNames
-        | _ -> None
-    let elemOf (x: IRExpr) = try rowSlotScalarElem (typeOf x) with _ -> None
-    match e with
-    | IRLit _ -> Ok 0L
-    | IRVar (id, _) when levels.ContainsKey id || bound.Contains id -> Ok 0L
-    | IRVar (id, _) when deferred.ContainsKey id -> Error "the body reads a deferred computation (its evaluation is not audited)"
-    | IRVar (_, ty) ->
-        (match rowSlotScalarElem ty, ty with
-         | Some _, _ -> Ok 0L
-         | None, ArrayElem _ -> Ok 0L
-         | _ -> Error "the body reads a value that is neither a scalar nor an array")
-    | IRParam (nm, _, _) when levelNames.ContainsKey nm || boundNames.Contains nm -> Ok 0L
-    | IRParam _ -> Error "the body reads a parameter the row-slot form cannot place"
-    | IRBinOp (_, op, a, b, _) ->
-        (match elemOf a, elemOf b with
-         | Some ea, Some eb ->
-             let refuse why = Error $"body may panic ({why})"
-             let ok () = all [ a; b ]
-             (match op with
-              | IRAdd | IRSub | IRMul when (rowSlotIsFloat ea && rowSlotIsFloat eb) || (rowSlotIsInt ea && rowSlotIsInt eb) -> ok ()
-              | IRDiv when rowSlotIsFloat ea && rowSlotIsFloat eb -> ok ()
-              | IRDiv -> refuse "integer /"
-              | IRMod -> refuse "%"
-              | IRCaret when rowSlotIsReal ea && rowSlotIsReal eb ->
-                  (match b with
-                   | IRLit (IRLitFloat _ | IRLitFloat32 _) -> ok ()
-                   | IRLit (IRLitInt n) when n >= 0L -> ok ()
-                   | _ when rowSlotIsFloat eb -> ok ()
-                   | _ -> refuse "integer ^ with a possibly negative exponent")
-              | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe | IRAnd | IROr -> ok ()
-              // the binary math NAMES are enumerated: only these two are audited total
-              | IRMath2 ("atan2" | "log_base") when rowSlotIsReal ea && rowSlotIsReal eb -> ok ()
-              | _ -> Error $"the body applies `{(operatorFunctionName op)}` outside the row-slot whitelist")
-         | _ -> Error "the body has array-level arithmetic (only scalar arithmetic is admitted)")
-    | IRUnaryOp (op, a) ->
-        // Every admitted constructor ENUMERATED, each on a real scalar
-        // operand (bool for `!`); anything else -- complex accessors,
-        // unaudited names, a non-scalar operand -- declines.
-        let operand = elemOf a
-        let real = (match operand with Some et -> rowSlotIsReal et | None -> false)
-        let refuseOp () = Error $"the body applies `{(unaryFunctionName op)}` outside the row-slot whitelist"
-        (match op with
-         | IRMath ("lgamma" | "digamma" as f) -> Error $"body may panic ({f})"
-         | IRCast ((ETInt64 | ETInt32), _) when (match operand with Some et -> not (rowSlotIsInt et) | None -> true) ->
-             Error "body may panic (float -> int cast)"
-         | IRNeg when real -> go a
-         | IRNot when operand = Some ETBool -> go a
-         | IRMath f when real && rowSlotTotalMath.Contains f -> go a
-         | IRCast ((ETFloat64 | ETFloat32 | ETInt64 | ETInt32), _) when real -> go a
-         | _ -> refuseOp ())
-    | IRIf (c, a, b) -> all [ c; a; b ]
-    | IRFma (a, b, c) -> all [ a; b; c ]
-    | IRLet (id, v, body) ->
-        (match go v with
-         | Error why -> Error why
-         | Ok n ->
-             match rowSlotWalk deferred levels levelNames (bound.Add id) boundNames visiting body with
-             | Ok m -> Ok (rowSlotAdd n m)
-             | Error why -> Error why)
-    | IRIndex (IRVar (g, gty), idxs, _) when not (deferred.ContainsKey g) ->
-        let proven =
-            match gty with
-            | ArrayElem at when not at.IsVirtual ->
-                (match at.IndexTypes with
-                 // a compact pool: every coordinate a level of the group's index space
-                 | [ gix ] when gix.Rank >= 2 ->
-                     idxs.Length = gix.Rank
-                     && idxs |> List.forall (fun x ->
-                         match levelOf x with
-                         | Some lix -> rowSlotSameIndex gix lix
-                         | None -> false)
-                 // a dense array: a FULL subscript, dimension by dimension
-                 | ixs when ixs.Length = idxs.Length && ixs |> List.forall (fun ix -> ix.Rank = 1) ->
-                     List.forall2 (fun (ix: IRIndexType) x ->
-                         match levelOf x with
-                         | Some lix -> rowSlotSameIndex ix lix
-                         | None -> false) ixs idxs
-                 | _ -> false)
-            | _ -> false
-        if proven then Ok 0L
-        else Error "body may panic (a subscript not proven in range: BL8006)"
-    | IRReduceCompute (comp, kernel, seed) ->
-        (match kernel, seed with
-         | IRTuple _, _ | _, IRTuple _ -> Error "the body joins several folds (a tuple fold is outside the row-slot whitelist)"
-         | _ ->
-         let comp' =
-             match comp with
-             | IRVar (id, _) -> Map.tryFind id deferred |> Option.defaultValue comp
-             | _ -> comp
-         match comp' with
-         | IRApplyCombinator inf when not inf.HasReynolds && inf.KernelOutputRank = 0 ->
-             let ixs = inf.Arrays |> List.map rowSlotRangeIx
-             if ixs |> List.exists Option.isNone || ixs.IsEmpty then
-                 Error "an inner fold is not over plain range<I> sweeps of static extent"
-             else
-             let ixs = ixs |> List.map Option.get
-             match resolveCallable inf.Kernel, resolveCallable kernel with
-             | Some mapCl, Some foldCl when mapCl.Params.Length = ixs.Length && foldCl.Params.Length = 2 ->
-                 if visiting.Contains mapCl.Id || visiting.Contains foldCl.Id then
-                     Error "the body recurses (a recursive callee is outside the row-slot whitelist)"
-                 else
-                 let cells =
-                     ixs |> List.fold (fun acc ix -> rowSlotMul acc (defaultArg (tryEvalIntIR ix.Extent) 0L)) 1L
-                 let levels' = List.fold2 (fun (m: Map<IRId, IRIndexType>) (p: IRParam) ix -> Map.add p.VarId ix m) levels mapCl.Params ixs
-                 let names' = List.fold2 (fun (m: Map<string, IRIndexType>) (p: IRParam) ix -> Map.add p.Name ix m) levelNames mapCl.Params ixs
-                 let visiting' = visiting.Add mapCl.Id
-                 match rowSlotWalk deferred levels' names' bound boundNames visiting' mapCl.Body with
-                 | Error why -> Error why
-                 | Ok inner ->
-                     let foldBound = foldCl.Params |> List.fold (fun (s: Set<IRId>) p -> s.Add p.VarId) bound
-                     let foldNames = foldCl.Params |> List.fold (fun (s: Set<string>) p -> s.Add p.Name) boundNames
-                     match rowSlotWalk deferred levels levelNames foldBound foldNames (visiting.Add foldCl.Id) foldCl.Body, go seed with
-                     | Error why, _ | _, Error why -> Error why
-                     | Ok _, Ok s -> Ok (rowSlotAdd (rowSlotMul cells (max 1L inner)) s)
-             | _ -> Error "an inner fold's map or fold kernel is not a resolved callable"
-         | _ -> Error "an inner fold is not over an unforced method_for(range<I>) application")
-    | IRApp (f, args, _) ->
-        (match resolveCallable f with
-         | Some cl when visiting.Contains cl.Id -> Error "the body recurses (a recursive callee is outside the row-slot whitelist)"
-         | Some cl when cl.Params.Length = args.Length ->
-             (match all args with
-              | Error why -> Error why
-              | Ok n ->
-                  let cb = cl.Params |> List.fold (fun (s: Set<IRId>) p -> s.Add p.VarId) bound
-                  let cn = cl.Params |> List.fold (fun (s: Set<string>) p -> s.Add p.Name) boundNames
-                  match rowSlotWalk deferred levels levelNames cb cn (visiting.Add cl.Id) cl.Body with
-                  | Ok m -> Ok (rowSlotAdd n m)
-                  | Error why -> Error why)
-         | _ -> Error "the body calls a function that does not resolve to a callable")
-    | other -> Error $"the body contains a form outside the row-slot whitelist ({other.GetType().Name})"
+let internal rowSlotWalk (deferred: Map<IRId, IRExpr>) (levels: Map<IRId, IRIndexType>) (levelNames: Map<string, IRIndexType>)
+                         (bound: Set<IRId>) (boundNames: Set<string>) (visiting: Set<IRId>) (e: IRExpr) : Result<int64, string> =
+    Blade.IRTotality.walk resolveCallable (fun id -> Map.tryFind id deferred) (fun id -> Map.containsKey id deferred)
+        levels levelNames bound boundNames visiting e
 
 /// G35 admission for the single-leaf Path B fold nest: Ok (rows, cells) or
 /// Error (the first failed condition, for the `fold-form` decline record).
@@ -296,6 +117,33 @@ let private rowSlotAdmission (deferred: Map<IRId, IRExpr>) (info: ApplyInfo) (fo
                      else Ok (rows, cells)
          | _ -> Error "the row kernel is not a resolved one-parameter callable")
     | _ -> Error "the outer level is not a plain range<I> sweep of static extent (v1 slots range-driven rows)"
+
+/// G7 (the threaded reduction join): the shared traversal's bodies -- every
+/// leaf map kernel, every shared-producer kernel, every fold kernel -- audited
+/// by the SAME closed purity/totality whitelist the row-slot form uses
+/// (`rowSlotWalk`, each callable's parameters bound as plain values). A team
+/// moves every cell's evaluation onto some worker and changes which failure
+/// arrives first, so an effect (a captured write: the front end's write ban
+/// covers only PARALLEL bodies, and a serial map beside an omp fold kernel is
+/// not one), a possible panic, an unaudited call or a subscript not proven in
+/// range declines the team; the serial join keeps today's semantics. A
+/// request is not a purity certificate. Ok () or the first failure.
+let private joinThreadAudit (deferred: Map<IRId, IRExpr>) (maps: (string * ApplyInfo) list) (folds: (string * IRCallable) list) : Result<unit, string> =
+    // THE SAME predicate the sibling-fold pass applies before it synthesizes a
+    // threaded join (Blade.IRTotality.auditApply / auditCallable): a map
+    // kernel's parameters bound to a plain `range<I>` operand carry that index
+    // type, so a subscript by them into that index space is proven in range.
+    let res = resolveCallable
+    let dOf (id: IRId) = Map.tryFind id deferred
+    let isD (id: IRId) = Map.containsKey id deferred
+    let wrap (what: string) (r: Result<unit, string>) =
+        match r with
+        | Ok () -> Ok ()
+        | Error why -> Error $"{what} is outside the closed purity/totality whitelist a team requires ({why}); the serial join keeps its semantics"
+    let checks =
+        (maps |> List.map (fun (what, info) () -> wrap what (Blade.IRTotality.auditApply res dOf isD info)))
+        @ (folds |> List.map (fun (what, cl) () -> wrap what (Blade.IRTotality.auditCallable res dOf isD cl [])))
+    checks |> List.fold (fun acc f -> match acc with Ok () -> f () | e -> e) (Ok ())
 
 let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
     let ind = indentStr ctx
@@ -5078,19 +4926,38 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                         let (simdFold, form) =
                             match simdPlan with
                             | Ok p -> (Some p, "simd-reduction")
+                            | Error _ when not (fpReassocEnabled ()) ->
+                                (None, $"serial (repro): {leafNames.Length} ascending original chains")
                             | Error why -> (None, why)
-                        recordFoldForm name form $"fused fold over {leafNames.Length} leaves (one traversal)"
-                        // A `where omp` on the shared kernel: no fused fold opens
-                        // a team (several accumulators, one traversal), so the
-                        // thread half is declined -- never silently.
+                        // THE THREADED JOIN (G7): the request is the shared fold
+                        // kernel's `where omp`, or a leaf map's `omp(...)` that
+                        // covers the outer level (it selects the traversal; it
+                        // licenses no leg). Each leg's licence is the shared
+                        // kernel's own, checked per leg all the same.
+                        let request =
+                            if callable.IsOmpParallel then Some "the join's fold kernel (`where omp`)"
+                            elif leafCgs |> List.exists (fun cg -> cg.OmpRequested && (match cg.Bindings with h :: _ -> h.IsParallel | [] -> false)) then
+                                Some "a leaf map's `omp(...)` covering the outer level (it selects the traversal; it licenses no leg)"
+                            else None
+                        let joinThread =
+                            joinedFoldThreadPlan (sanitizeCppName name) request simdPlan
+                                (leafNames |> List.map (fun ln -> (ln, callable, elemStr, seedStr, wname)))
+                                (fun () ->
+                                    joinThreadAudit ctx.DeferredComputations
+                                        (infos |> List.mapi (fun i info -> ($"leaf {i}'s map kernel", info)))
+                                        [ ("the join's fold kernel", callable) ])
+                        (match joinThread with
+                         | Some (Ok plan) -> recordFoldForm name (joinedFoldForm plan) $"fused fold over {leafNames.Length} leaves (one traversal, one team)"
+                         | _ -> recordFoldForm name form $"fused fold over {leafNames.Length} leaves (one traversal)")
+                        // A `where omp` on the shared kernel that did not get the
+                        // team: the thread half is declined -- never silently --
+                        // with the first failed condition.
                         let ompNote =
-                            if callable.IsOmpParallel then
-                                [ ind + "/* " + ompSuppressedPhrase
-                                    (if simdFold.IsSome
-                                     then "a fused fold keeps several accumulators in one traversal and has no thread-level form yet (its reorder licence is spent on the vectorized form)"
-                                     else $"a fused fold keeps several accumulators in one traversal and has no thread-level form yet ({form})") + " */" ]
-                            else []
-                        let loopCode = sp @ ompNote @ genFusedLoopNestStreamedWith simdFold sm leafCgs ctx.VarNames ctx.Indent false None
+                            match joinThread with
+                            | Some (Error why) when callable.IsOmpParallel ->
+                                [ ind + "/* " + ompSuppressedPhrase why + " */" ]
+                            | _ -> []
+                        let loopCode = sp @ ompNote @ genFusedLoopNestStreamedJoined simdFold joinThread sm leafCgs ctx.VarNames ctx.Indent false None
                         let tupleLine = $"""{ind}auto {name} = std::make_tuple({(leafNames |> String.concat ", ")});"""
                         // Destructure sub-bindings resolve through TupleChildren
                         // straight to the accumulator names (the fusion-tree
@@ -5340,9 +5207,12 @@ and genReduceJoinCore (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                 match cb.RetType with
                 | IRTScalar et -> primTypeToCpp et
                 | t -> irTypeToCpp t)
+        // Each leg's ORIGINAL seed, rendered once and evaluated once, in leg
+        // order, before the traversal (and before any team).
+        let seedStrs = seedExprs |> List.map (exprToCppCtx ctx)
         let declCode =
             List.mapi (fun i ln ->
-                $"{ind}{elemStrs.[i]} {ln} = {(exprToCppCtx ctx seedExprs.[i])};") leafNames
+                $"{ind}{elemStrs.[i]} {ln} = {seedStrs.[i]};") leafNames
         let allCgs = shareCgs @ leafCgs
         let (sm, sp, sNew) = streamedNestSetup ctx.StreamedArrays ind allCgs
         registerStreamBufDecls sNew
@@ -5354,19 +5224,41 @@ and genReduceJoinCore (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         let (simdFold, form) =
             match simdPlan with
             | Ok p -> (Some p, "simd-reduction")
+            | Error _ when not (fpReassocEnabled ()) ->
+                (None, $"serial (repro): {leafNames.Length} ascending original chains")
             | Error why -> (None, why)
-        recordFoldForm name form $"reduction join of {leafNames.Length} legs (one traversal)"
-        // `where omp` on a leg's fold kernel: a join opens no team, so the
-        // request's thread half is declined -- with the census line, never
-        // silently (bench gap G7 / F4).
+        // THE THREADED JOIN (G7): the request is a leg's fold kernel `where
+        // omp`, or a leaf map's (a leg's or a shared producer's) `omp(...)`
+        // covering the outer level -- which selects the traversal and licenses
+        // no leg. Every leg's licence is its OWN (`joinedFoldThreadPlan`).
+        let request =
+            match callables |> List.tryFindIndex (_.IsOmpParallel) with
+            | Some i -> Some $"leg {i}'s fold kernel (`where omp`)"
+            | None ->
+                if allCgs |> List.exists (fun cg -> cg.OmpRequested && (match cg.Bindings with h :: _ -> h.IsParallel | [] -> false)) then
+                    Some "a leaf map's `omp(...)` covering the outer level (it selects the traversal; it licenses no leg)"
+                else None
+        let joinThread =
+            joinedFoldThreadPlan (sanitizeCppName name) request simdPlan
+                (List.init leafNames.Length (fun i ->
+                    (leafNames.[i], callables.[i], elemStrs.[i], seedStrs.[i], wnames.[i])))
+                (fun () ->
+                    joinThreadAudit ctx.DeferredComputations
+                        ((infos |> List.mapi (fun i info -> ($"leg {i}'s map kernel", info)))
+                         @ (sharedIds |> List.map (fun (id, di) -> ($"shared producer '{sharedName id}'", di))))
+                        (callables |> List.mapi (fun i cb -> ($"leg {i}'s fold kernel", cb))))
+        (match joinThread with
+         | Some (Ok plan) -> recordFoldForm name (joinedFoldForm plan) $"reduction join of {leafNames.Length} legs (one traversal, one team)"
+         | _ -> recordFoldForm name form $"reduction join of {leafNames.Length} legs (one traversal)")
+        // `where omp` on a leg's fold kernel that did not get the team: the
+        // request's thread half is declined -- with the census line and the
+        // first failed condition, never silently (bench gap G7 / F4).
         let ompNote =
-            if callables |> List.exists (_.IsOmpParallel) then
-                [ ind + "/* " + ompSuppressedPhrase
-                    (if simdFold.IsSome
-                     then "a reduction join keeps several accumulators in one traversal and has no thread-level form yet (its legs' reorder licence is spent on the vectorized form)"
-                     else $"a reduction join keeps several accumulators in one traversal and has no thread-level form yet ({form})") + " */" ]
-            else []
-        let loopCode = sp @ ompNote @ genFusedLoopNestStreamedWith simdFold sm allCgs ctx.VarNames ctx.Indent false None
+            match joinThread with
+            | Some (Error why) when callables |> List.exists (_.IsOmpParallel) ->
+                [ ind + "/* " + ompSuppressedPhrase why + " */" ]
+            | _ -> []
+        let loopCode = sp @ ompNote @ genFusedLoopNestStreamedJoined simdFold joinThread sm allCgs ctx.VarNames ctx.Indent false None
         let tupleLine = $"""{ind}auto {name} = std::make_tuple({(leafNames |> String.concat ", ")});"""
         let shareNote =
             if sharedIds.IsEmpty then []

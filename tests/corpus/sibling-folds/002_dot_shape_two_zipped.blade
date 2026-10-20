@@ -3,11 +3,12 @@
 // bench/kernels/dot at Idx<1009>: `kernel(a, b)` holds a `where omp` fold over
 // the zip of a and b; beside it the binding sums each input. The sibling-fold
 // pass inlines `kernel` one level (pure-total, scalar return) and joins the
-// three folds into one traversal of a and b -- in a build that does not emit
-// threads or that keeps folds serial (BLADE_OMP_THREADS=1, BLADE_FP_REPRO=1).
-// In the default threaded build it DECLINES (a reduction join has no
-// thread-level form, G7) and the kernel keeps its Path B team. The values are
-// the same either way: integer-valued data, association-invariant.
+// three folds into one traversal of a and b in every build: with every leg
+// licensed, the default threaded build's join keeps the kernel's own
+// `where omp` request and threads the one traversal (G7); with
+// BLADE_JOIN_THREADS=0 the pass DECLINES and the kernel keeps its Path B
+// team. The values are the same either way: integer-valued data,
+// association-invariant.
 // ============================================================================
 type Ix = Idx<1009>
 

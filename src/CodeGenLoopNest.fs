@@ -825,6 +825,53 @@ let ompSuppressedMarker (requested: bool) (pragmaEmitted: bool) (reason: string)
         [ markerIndent + "// " + ompSuppressedPhrase reason ]
     else []
 
+/// THE PATH B TEAM PROLOGUE, shared by every chunked fold region (the
+/// single-fold chunk plan and its row-slot form in `genLoopNestStreamed`, and
+/// the threaded reduction join in `CodeGenFusion.genFusedLoopNestStreamedWith`,
+/// bench gap G7), so the partition, team sizing and empty-range rules cannot
+/// drift between them:
+///   * the outermost extent `bound` hoisted once into `rn`;
+///   * the requested team `tVar` = omp_get_max_threads, bounded by the extent
+///     (never more threads than indices) and by 1 from below;
+///   * an empty range opens NO region (the caller's seeded accumulators are
+///     the value);
+///   * the range partitioned with the ACTUAL team size the runtime handed back
+///     (`num_threads` is a request) through `blade_fold::chunk_lo` -- the ONE
+///     function every Path B site spells.
+/// Opens three scopes (block / non-empty guard / parallel region); the body
+/// continues at `depth + 3`. `beforeRegion` lands inside the non-empty guard
+/// (shared allocations), `inRegion` after the chunk bounds (private state).
+/// `pathBTeamClose` closes the three scopes.
+let pathBTeamOpen (depth: int) (rn: string) (tVar: string) (bound: string)
+                  (beforeRegion: string list) (inRegion: string list) : string list =
+    let ind n = String.replicate n "    "
+    [ ind depth + "{"
+      ind (depth + 1) + $"const size_t {rn} = {bound};"
+      ind (depth + 1) + $"int {tVar} = blade_omp_get_max_threads();"
+      ind (depth + 1) + $"if ((size_t){tVar} > {rn}) {tVar} = (int){rn};"
+      ind (depth + 1) + $"if ({tVar} < 1) {tVar} = 1;"
+      ind (depth + 1) + $$"""if ({{rn}} > 0) {""" ]
+    @ (beforeRegion |> List.map (fun s -> ind (depth + 2) + s))
+    @ [ ind (depth + 2) + $"BLADE_OMP_PARALLEL_NUM_THREADS({tVar})"
+        ind (depth + 2) + "{"
+        ind (depth + 3) + "const int __rnt = blade_omp_get_num_threads();"
+        ind (depth + 3) + "const int __rt = blade_omp_get_thread_num();"
+        ind (depth + 3) + $"const size_t __rlo = blade_fold::chunk_lo({rn}, (size_t)__rt, (size_t)__rnt);"
+        ind (depth + 3) + $"const size_t __rhi = blade_fold::chunk_lo({rn}, (size_t)__rt + 1, (size_t)__rnt);" ]
+    @ (inRegion |> List.map (fun s -> ind (depth + 3) + s))
+
+/// The epilogue matching `pathBTeamOpen`, called with the REGION BODY's depth:
+/// `inRegionTail` (each worker publishing its partials) at that depth, the
+/// region closed, `afterRegion` (the fixed ascending-chunk combine, frees)
+/// inside the non-empty guard, then the guard and the block closed.
+let pathBTeamClose (depth: int) (inRegionTail: string list) (afterRegion: string list) : string list =
+    let ind n = String.replicate n "    "
+    (inRegionTail |> List.map (fun s -> ind depth + s))
+    @ [ ind (depth - 1) + "}" ]
+    @ (afterRegion |> List.map (fun s -> ind (depth - 1) + s))
+    @ [ ind (depth - 2) + "}"
+        ind (depth - 3) + "}" ]
+
 /// Pragma (or decline marker) for the ROW LOOP of the ragged / grouped peels --
 /// `tryRaggedPeel` and `tryGroupedZipPeel` in `genApplyCombinator`.
 ///
@@ -1590,21 +1637,9 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
         (ompApiUsedCell ()).Value <- true
         (foldLanesUsedCell ()).Value <- true
         lines <- lines @ [
-            ind depth + "/* reduce over computation: threaded complete rows (repro) -- each row's fold on one thread into its slot, the outer chain serial after the region */"
-            ind depth + "{"
-            ind (depth + 1) + $"const size_t {fcRn} = {outerBound};"
-            ind (depth + 1) + $"int {fcT} = blade_omp_get_max_threads();"
-            ind (depth + 1) + $"if ((size_t){fcT} > {fcRn}) {fcT} = (int){fcRn};"
-            ind (depth + 1) + $"if ({fcT} < 1) {fcT} = 1;"
-            ind (depth + 1) + $$"""if ({{fcRn}} > 0) {"""
-            ind (depth + 2) + $"{plan.ElemCpp}* {fcSlot} = new {plan.ElemCpp}[{fcRn}];"
-            ind (depth + 2) + $"BLADE_OMP_PARALLEL_NUM_THREADS({fcT})"
-            ind (depth + 2) + "{"
-            ind (depth + 3) + "const int __rnt = blade_omp_get_num_threads();"
-            ind (depth + 3) + "const int __rt = blade_omp_get_thread_num();"
-            ind (depth + 3) + $"const size_t __rlo = blade_fold::chunk_lo({fcRn}, (size_t)__rt, (size_t)__rnt);"
-            ind (depth + 3) + $"const size_t __rhi = blade_fold::chunk_lo({fcRn}, (size_t)__rt + 1, (size_t)__rnt);"
-        ]
+            ind depth + "/* reduce over computation: threaded complete rows (repro) -- each row's fold on one thread into its slot, the outer chain serial after the region */" ]
+            @ pathBTeamOpen depth fcRn fcT outerBound
+                [ $"{plan.ElemCpp}* {fcSlot} = new {plan.ElemCpp}[{fcRn}];" ] []
         depth <- depth + 3
     | Some plan ->
         // M14 (gap G25): the form inside each chunk, decided by the producer.
@@ -1651,34 +1686,21 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
             | ChunkSimd _ -> "0"
             | ChunkSerial _ | ChunkRowSlots _ -> $"{plan.ElemCpp}()"
         lines <- lines @ [
-            ind depth + "// reduce over computation: comm-licensed parallel fold, outer level chunked"
-            ind depth + "{"
-            ind (depth + 1) + $"const size_t {fcRn} = {outerBound};"
-            ind (depth + 1) + $"int {fcT} = blade_omp_get_max_threads();"
-            ind (depth + 1) + $"if ((size_t){fcT} > {fcRn}) {fcT} = (int){fcRn};"
-            ind (depth + 1) + $"if ({fcT} < 1) {fcT} = 1;"
-            ind (depth + 1) + $$"""if ({{fcRn}} > 0) {"""
-            ind (depth + 2) + $"{plan.ElemCpp}* {fcPart} = new {plan.ElemCpp}[{fcT}];"
-            // Zero-initialized: it marks which slots a thread actually wrote, so
-            // the combine is correct for ANY team size the runtime hands back
-            // (num_threads is a request -- see the flat path's note) and skips a
-            // chunk whose inner nest contributed nothing.
-            ind (depth + 2) + $"bool* {fcHad} = new bool[{fcT}]();"
-        ] @ (simdAliases |> List.map (fun (nm, alias) ->
-                ind (depth + 2) + $"const {plan.ElemCpp}* BLADE_RESTRICT {alias} = {nm}.data;"))
-        @ [
-            ind (depth + 2) + $"BLADE_OMP_PARALLEL_NUM_THREADS({fcT})"
-            ind (depth + 2) + "{"
-            ind (depth + 3) + "const int __rnt = blade_omp_get_num_threads();"
-            ind (depth + 3) + "const int __rt = blade_omp_get_thread_num();"
-            ind (depth + 3) + $"const size_t __rlo = blade_fold::chunk_lo({fcRn}, (size_t)__rt, (size_t)__rnt);"
-            ind (depth + 3) + $"const size_t __rhi = blade_fold::chunk_lo({fcRn}, (size_t)__rt + 1, (size_t)__rnt);"
-            // ChunkSerial: value-initialized, never READ before __rhas turns
-            // true (the initializer only keeps -Wmaybe-uninitialized quiet).
-            // ChunkSimd: the operator's identity, the reduction's seed.
-            ind (depth + 3) + $"{plan.ElemCpp} {fcAcc} = {accSeed};"
-            ind (depth + 3) + $"bool {fcHas} = false;"
-        ]
+            ind depth + "// reduce over computation: comm-licensed parallel fold, outer level chunked" ]
+            @ pathBTeamOpen depth fcRn fcT outerBound
+                ([ $"{plan.ElemCpp}* {fcPart} = new {plan.ElemCpp}[{fcT}];"
+                   // Zero-initialized: it marks which slots a thread actually wrote, so
+                   // the combine is correct for ANY team size the runtime hands back
+                   // (num_threads is a request -- see the flat path's note) and skips a
+                   // chunk whose inner nest contributed nothing.
+                   $"bool* {fcHad} = new bool[{fcT}]();" ]
+                 @ (simdAliases |> List.map (fun (nm, alias) ->
+                        $"const {plan.ElemCpp}* BLADE_RESTRICT {alias} = {nm}.data;")))
+                // ChunkSerial: value-initialized, never READ before __rhas turns
+                // true (the initializer only keeps -Wmaybe-uninitialized quiet).
+                // ChunkSimd: the operator's identity, the reduction's seed.
+                [ $"{plan.ElemCpp} {fcAcc} = {accSeed};"
+                  $"bool {fcHas} = false;" ]
         depth <- depth + 3
     | None -> ()
     // Which rank-1 input peels may drop the Array<T,1> wrapper for a
@@ -2338,13 +2360,9 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     // first, every slot in ascending index order through the same wrapper.
     // No partial combine: nothing here is a reassociation.
     | Some _, Some wname when rowSlotsLive ->
-        lines <- lines @ [
-            ind (depth - 1) + "}"
-            ind (depth - 1) + $"for (size_t __ri = 0; __ri < {fcRn}; __ri++) {codeGen.OutputName} = {wname}({codeGen.OutputName}, {fcSlot}[__ri]);"
-            ind (depth - 1) + $"delete[] {fcSlot};"
-            ind (depth - 2) + "}"
-            ind (depth - 3) + "}"
-        ]
+        lines <- lines @ pathBTeamClose depth []
+            [ $"for (size_t __ri = 0; __ri < {fcRn}; __ri++) {codeGen.OutputName} = {wname}({codeGen.OutputName}, {fcSlot}[__ri]);"
+              $"delete[] {fcSlot};" ]
         depth <- depth - 3
     | Some plan, Some wname ->
         // ChunkSimd: a one-level chunk contributed exactly when it was
@@ -2353,15 +2371,11 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
             match plan.ChunkForm with
             | ChunkSimd _ -> "(__rhi > __rlo)"
             | ChunkSerial _ | ChunkRowSlots _ -> fcHas
-        lines <- lines @ [
-            ind depth + $"{fcPart}[__rt] = {fcAcc};"
-            ind depth + $"{fcHad}[__rt] = {hadExpr};"
-            ind (depth - 1) + "}"
-            ind (depth - 1) + $"for (int __rt = 0; __rt < {fcT}; __rt++) if ({fcHad}[__rt]) {codeGen.OutputName} = {wname}({codeGen.OutputName}, {fcPart}[__rt]);"
-            ind (depth - 1) + $"delete[] {fcPart}; delete[] {fcHad};"
-            ind (depth - 2) + "}"
-            ind (depth - 3) + "}"
-        ]
+        lines <- lines @ pathBTeamClose depth
+            [ $"{fcPart}[__rt] = {fcAcc};"
+              $"{fcHad}[__rt] = {hadExpr};" ]
+            [ $"for (int __rt = 0; __rt < {fcT}; __rt++) if ({fcHad}[__rt]) {codeGen.OutputName} = {wname}({codeGen.OutputName}, {fcPart}[__rt]);"
+              $"delete[] {fcPart}; delete[] {fcHad};" ]
         depth <- depth - 3
     | _ -> ()
 

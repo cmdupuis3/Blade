@@ -4,7 +4,8 @@
 // whose squash stage divides, `v / (1.0 + abs(v))`. A FLOAT division by a
 // computed divisor cannot panic (only integer `/` and `%` do), so the
 // sibling-fold judge discharges it and the kernel's fold joins the input sum
-// (in a build that does not thread the kernel's `where omp` fold). Dyadic data
+// (in the default threaded build the join threads under the kernel's own
+// `where omp`, G7). Dyadic data
 // keeps every value exact.
 // ============================================================================
 type Ix = Idx<4>

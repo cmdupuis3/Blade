@@ -1,0 +1,18 @@
+// TEST: Threaded Reduction Join One Repro Leg Stays Serial
+// Bench gap G7: a four-leg join whose first leg's fold kernel requests omp,
+// but whose last leg folds through a `where repro` function. The repro leg's
+// order is the contract, ONE traversal has one order, and the other legs'
+// licences never transfer to it -- so the join opens no team and takes no
+// vectorized form: every leg is its ascending serial chain from its seed
+// (the census line names leg 3). The values are those chains' exact results.
+function rsum(a: Float64, b: Float64) where repro -> Float64 = a + b
+
+let (a, b, c, d) = {
+    let x = [1.0, 2.0, 3.0]
+    object_for(<&!>) <@> (reduce(x, lambda(p, q) where omp -> p + q, 10.0), prodsum(x, x),
+        reduce(x, (+), 30.0), reduce(x, rsum, 0.5))
+}
+// EXPECT: a = 16.0
+// EXPECT: b = 14.0
+// EXPECT: c = 36.0
+// EXPECT: d = 6.5

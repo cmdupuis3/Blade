@@ -139,6 +139,15 @@ let fpReproEnabled () : bool =
     envFlag "BLADE_FP_REPRO" false
     || envSwitch "BLADE_FP_REASSOC" = SwitchOff
 
+/// The threaded reduction join (bench gap G7, `CodeGenFusion.joinedFoldThreadPlan`):
+/// `BLADE_JOIN_THREADS` unset / `1` / `on` = an explicitly requested, fully
+/// licensed `<&!>` join opens one Path B team over its shared traversal;
+/// `0` / `off` = today's serial (vectorized) join, for A/B. Emission-only.
+/// Lives here so the sibling-fold pass (which compiles before the emitters)
+/// reads the SAME predicate. Per call, never cached.
+let joinThreadsEnabled () : bool =
+    envFlag "BLADE_JOIN_THREADS" true
+
 /// Does this build emit thread-level OpenMP constructs? `BLADE_OMP_THREADS`
 /// is a THREAD COUNT with off-words: `1` (one thread) suppresses exactly as
 /// `0` / `off` / `false` do, while `on` / `true` are no count at all and

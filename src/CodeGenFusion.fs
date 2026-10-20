@@ -184,11 +184,33 @@ let checkJoinCompatible (leafCgs: LoopNestCodeGen list) : Result<LoopNestCodeGen
 /// wrapper computes (the caller only passes this when every leg's kernel IS
 /// that builtin op, `fpReassocSimdOp`). The CALLER owns the gate: one level,
 /// no streamed sources, no team, no MPI slab, a plain rectangular head.
-let genFusedLoopNestStreamedWith (simdFold: (string * string list) option) (streamed: Map<string, ProviderReadSpec>) (leafCgs: LoopNestCodeGen list) (outerNames: Map<int, string>) (indent: int) (hostParallel: bool) (mpiSlabVar: string option) : string list =
+///
+/// `joinThread`: the THREADED REDUCTION JOIN decision (bench gap G7,
+/// `joinedFoldThreadPlan`). `Some (Ok plan)` wraps the ONE shared traversal in
+/// one Path B team (`pathBTeamOpen`/`pathBTeamClose`): the single level walks
+/// the worker's chunk [__rlo, __rhi), every fold leaf accumulates into its
+/// PRIVATE identity-seeded accumulator under one simd reduction clause over
+/// them all, share leaves stay per-iteration consts inside the worker's sweep
+/// (one evaluation per coordinate), and after the region each leg's partials
+/// combine in ascending chunk order onto its seeded accumulator. `Some (Error
+/// why)` is a declined request: a leaf map's own request reports `why`. None:
+/// no request (today's form, today's markers).
+let genFusedLoopNestStreamedJoined (simdFold: (string * string list) option) (joinThread: Result<JoinedFoldChunkPlan, string> option) (streamed: Map<string, ProviderReadSpec>) (leafCgs: LoopNestCodeGen list) (outerNames: Map<int, string>) (indent: int) (hostParallel: bool) (mpiSlabVar: string option) : string list =
     let ind n = String.replicate n "    "
     let primary = leafCgs |> List.maxBy (_.Bindings.Length)
     let staggered = leafCgs |> List.exists (fun cg -> cg.Bindings.Length <> primary.Bindings.Length)
     let emitOuterOmp = hostParallel && primary.FoldWrapper.IsNone
+    let joined =
+        match joinThread with
+        | Some (Ok p) when primary.Bindings.Length = 1 && not staggered && mpiSlabVar.IsNone -> Some p
+        | _ -> None
+    let joinDeclined = match joinThread with Some (Error why) -> Some why | _ -> None
+    // Per fold leaf (by its accumulator name): the worker-private accumulator.
+    let privOf : Map<string, string> =
+        match joined with
+        | Some p -> p.Legs |> List.mapi (fun i l -> (l.AccName, $"__jp{i}_{p.Tag}")) |> Map.ofList
+        | None -> Map.empty
+    let ompInstrument = ompTestModeEnabled ()
     // Streamed fiber reads share per-source handles and per-argument
     // buffers -- not thread-safe under a host-parallel outer loop.
     //
@@ -215,6 +237,63 @@ let genFusedLoopNestStreamedWith (simdFold: (string * string list) option) (stre
 
     let compoundArrays = compoundArrayNamesOf primary.Bindings
     let mutable atOuterLevel = true
+
+    // G7 prologue: ONE team around the whole shared traversal. Rank-1 real
+    // operands of the swept level are read through per-worker restrict pool
+    // aliases (the same aliases Path B's ChunkSimd form uses; inside the
+    // outlined region g++ would otherwise re-read `x.data` through the shared
+    // reference), and every fold leg gets a private accumulator seeded with the
+    // operator's identity -- never the caller's seed, which is already in the
+    // shared accumulator and enters the combine exactly once.
+    match joined with
+    | Some plan ->
+        let lvl0 = primary.Bindings.Head
+        let aliasable (e: ElementBinding) =
+            e.Virtual.IsRealArray && e.ArrayRank = 1
+            && (match e.SlotTag with Some t -> not (t.StartsWith "__halowin") | None -> true)
+            && not (Map.containsKey e.ArrayName streamed)
+        let aliases =
+            leafCgs
+            |> List.collect (fun cg -> cg.Bindings.Head.Elements |> List.filter aliasable |> List.map (fun e -> (e.ArrayName, elemTypeToCpp e.ArrayElemType)))
+            |> List.distinctBy fst
+            |> List.mapi (fun k (nm, ty) -> (nm, ty, $"__jsrc{k}_{plan.Tag}"))
+        leafCgs |> List.iteri (fun li cg ->
+            for e in cg.Bindings.Head.Elements do
+                if aliasable e then
+                    match aliases |> List.tryFind (fun (nm, _, _) -> nm = e.ArrayName) with
+                    | Some (_, _, alias) -> currentNames <- Map.add (li, e.ArrayPosition) alias currentNames
+                    | None -> ())
+        let jn = $"__jn_{plan.Tag}"
+        let jT = $"__jT_{plan.Tag}"
+        let jHad = $"__jhad_{plan.Tag}"
+        let ident = if plan.Op = "*" then "1" else "0"
+        let chunkPhrase =
+            if plan.ChunkSimd then $"one omp simd reduction({plan.Op}) over the {plan.Legs.Length} private accumulators within each chunk"
+            else "a scalar private chain per leg within each chunk (BLADE_FOLD_LANES=0/off)"
+        recordOmpConstruct plan.Tag "omp parallel num_threads(T) + fixed-order combine"
+            $"threaded reduction join (Path B joined chunks, G7): one team over the shared traversal, {chunkPhrase}; each leg's partials combined in ascending chunk order onto its own seed; requested by {plan.Provenance}"
+        (ompApiUsedCell ()).Value <- true
+        (foldLanesUsedCell ()).Value <- true
+        let coverageOpen =
+            if ompInstrument then
+                [ "// [omp-coverage] thread observation (test mode)"
+                  "int __omp_maxth = blade_omp_get_max_threads();"
+                  "bool* __omp_seen = new bool[__omp_maxth]();"
+                  "int* __omp_team = new int[__omp_maxth]();" ]
+            else []
+        lines <- lines @ [
+            ind depth + $"/* reduction join: threaded (Path B joined chunks, G7) -- one team over the shared traversal, {plan.Legs.Length} private accumulators per chunk, fixed ascending-chunk combine onto each leg's seed */" ]
+            @ pathBTeamOpen depth jn jT (genLoopBoundExpr compoundArrays lvl0)
+                ((plan.Legs |> List.mapi (fun i l -> $"{l.ElemCpp}* __jpart{i}_{plan.Tag} = new {l.ElemCpp}[{jT}];"))
+                 @ [ $"bool* {jHad} = new bool[{jT}]();" ]
+                 @ coverageOpen)
+                ((aliases |> List.map (fun (nm, ty, alias) -> $"const {ty}* BLADE_RESTRICT {alias} = {nm}.data;"))
+                 @ (plan.Legs |> List.mapi (fun i l -> $"{l.ElemCpp} __jp{i}_{plan.Tag} = {ident};"))
+                 @ (if ompInstrument
+                    then [ "{ int __tn = blade_omp_get_thread_num(); __omp_team[__tn] = __rnt; if (__rhi > __rlo) __omp_seen[__tn] = true; }" ]
+                    else []))
+        depth <- depth + 3
+    | None -> ()
 
     // Restrict row peels, per leaf. Extra cross-leaf obligation on top
     // of restrictPeelSites' own: leaves SHARE `declaredNames`, and a RealArray
@@ -267,12 +346,18 @@ let genFusedLoopNestStreamedWith (simdFold: (string * string list) option) (stre
                 let reason =
                     // BUILD KNOB first -- see the same rule in genLoopNestStreamed.
                     if not (ompThreadEmissionEnabled ()) then ompThreadsSuppressedReason ()
-                    elif primary.FoldWrapper.IsSome then
+                    else
+                    match joinDeclined with
+                    // a declined threaded join: the first failed condition
+                    | Some why -> why
+                    | None ->
+                    if primary.FoldWrapper.IsSome then
                         "fold accumulates into a shared scalar, which is not race-safe"
                     else "the fused nest's joined backend decision is not host-parallel"
                 ompSuppressedMarker
                     (leafCgs |> List.exists (_.OmpRequested))
-                    (pragmaPrefix <> "") reason (ind depth)
+                    // the threaded join's team spends every request
+                    (pragmaPrefix <> "" || joined.IsSome) reason (ind depth)
             else []
         atOuterLevel <- false
         // MPI co-fusion: the outer shared level iterates this rank's row slab.
@@ -280,10 +365,18 @@ let genFusedLoopNestStreamedWith (simdFold: (string * string list) option) (stre
             match mpiSlabVar with
             | Some sv when j = 0 ->
                 $"for (size_t {pBinding.IndexName} = __blade_mpi_lo_{sv}; {pBinding.IndexName} < __blade_mpi_hi_{sv}; {pBinding.IndexName}++) {{"
+            | _ when j = 0 && joined.IsSome ->
+                // G7: the worker's chunk of the one shared level
+                $"for (size_t {pBinding.IndexName} = __rlo; {pBinding.IndexName} < __rhi; {pBinding.IndexName}++) {{"
             | _ -> genForLoopHeader compoundArrays pBinding
         let simdLine =
-            match simdFold with
-            | Some (opStr, accs) when j = 0 ->
+            match joined, simdFold with
+            | Some plan, _ when j = 0 ->
+                if plan.ChunkSimd then
+                    let privs = plan.Legs |> List.mapi (fun i _ -> $"__jp{i}_{plan.Tag}")
+                    [ ind depth + $"""BLADE_OMP_SIMD_REDUCTION({plan.Op}:{(String.concat ", " privs)})""" ]
+                else []
+            | None, Some (opStr, accs) when j = 0 ->
                 [ ind depth + $"""BLADE_OMP_SIMD_REDUCTION({opStr}:{(String.concat ", " accs)})""" ]
             | _ -> []
         lines <- lines @ suppressedMarker @ simdLine @ [ind depth + pragmaPrefix + header]
@@ -371,6 +464,10 @@ let genFusedLoopNestStreamedWith (simdFold: (string * string list) option) (stre
                     | Some elemCpp -> $"const {elemCpp} {cg.OutputName} = {rr.CppExpr};"
                     | None ->
                     match cg.FoldWrapper, simdFold with
+                    // G7: the worker-private accumulator, the reduction-statement shape
+                    | Some _, _ when privOf.ContainsKey cg.OutputName ->
+                        let p = privOf.[cg.OutputName]
+                        $"{p} = {p} {joined.Value.Op} ({rr.CppExpr});"
                     | Some _, Some (opStr, _) -> $"{cg.OutputName} = {cg.OutputName} {opStr} ({rr.CppExpr});"
                     | Some wname, None -> $"{cg.OutputName} = {wname}({cg.OutputName}, {rr.CppExpr});"
                     | None, _ ->
@@ -384,7 +481,43 @@ let genFusedLoopNestStreamedWith (simdFold: (string * string list) option) (stre
         depth <- depth - 1
         lines <- lines @ [ind depth + "}"]
 
+    // G7 epilogue: each worker publishes its partials (a chunk that swept
+    // nothing publishes none), the region closes, and every leg folds its
+    // partials in ASCENDING CHUNK ORDER through its own wrapper onto the
+    // accumulator that already holds its seed -- a fixed order, so a fixed
+    // team reproduces bit for bit.
+    match joined with
+    | Some plan ->
+        let jT = $"__jT_{plan.Tag}"
+        let jHad = $"__jhad_{plan.Tag}"
+        let combine =
+            plan.Legs |> List.mapi (fun i l -> $"{l.AccName} = {l.Wrapper}({l.AccName}, __jpart{i}_{plan.Tag}[__rt]);")
+            |> String.concat " "
+        let coverageClose =
+            if ompInstrument then
+                [ "{ int __omp_distinct = 0; int __omp_teamsz = 0;"
+                  "  for (int __t = 0; __t < __omp_maxth; __t++) {"
+                  "    if (__omp_seen[__t]) __omp_distinct++;"
+                  "    if (__omp_team[__t] > __omp_teamsz) __omp_teamsz = __omp_team[__t];"
+                  "  }"
+                  $"  std::cout << \"[omp-coverage] region={plan.Tag} teamsz=\" << __omp_teamsz << \" distinct=\" << __omp_distinct << \" maxth=\" << __omp_maxth << std::endl;"
+                  "  delete[] __omp_seen; delete[] __omp_team; }" ]
+            else []
+        lines <- lines @ pathBTeamClose depth
+            ((plan.Legs |> List.mapi (fun i _ -> $"__jpart{i}_{plan.Tag}[__rt] = __jp{i}_{plan.Tag};"))
+             @ [ $"{jHad}[__rt] = (__rhi > __rlo);" ])
+            ([ $"for (int __rt = 0; __rt < {jT}; __rt++) if ({jHad}[__rt]) {{ {combine} }}" ]
+             @ [ (plan.Legs |> List.mapi (fun i _ -> $"delete[] __jpart{i}_{plan.Tag};") |> String.concat " ") + $" delete[] {jHad};" ]
+             @ coverageClose)
+        depth <- depth - 3
+    | None -> ()
+
     lines
+
+/// The fused-nest emitter with no threaded-join decision (every caller but the
+/// two reduction-join entry paths).
+let genFusedLoopNestStreamedWith (simdFold: (string * string list) option) (streamed: Map<string, ProviderReadSpec>) (leafCgs: LoopNestCodeGen list) (outerNames: Map<int, string>) (indent: int) (hostParallel: bool) (mpiSlabVar: string option) : string list =
+    genFusedLoopNestStreamedJoined simdFold None streamed leafCgs outerNames indent hostParallel mpiSlabVar
 
 /// The fused-nest emitter in its ordinary (non-vectorized-fold) form.
 let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs: LoopNestCodeGen list) (outerNames: Map<int, string>) (indent: int) (hostParallel: bool) (mpiSlabVar: string option) : string list =
@@ -432,6 +565,74 @@ let fusedFoldSimdPlan (streamed: Map<string, ProviderReadSpec>) (allCgs: LoopNes
             match ops |> List.choose id |> List.distinct with
             | [ op ] -> Ok (op, legs |> List.map (fun (acc, _, _) -> acc))
             | _ -> Error "serial (legs fold with different operators: one reduction clause names one)"
+
+/// THE THREADED REDUCTION JOIN decision (bench gap G7; round-2 arbitration Q2),
+/// shared by both join entry shapes (`genReduceComputeBindingCore`'s fused
+/// tree and `genReduceJoinCore`'s per-leg packs). The policy, exactly:
+///   (a) an EXPLICIT request: `request` is Some provenance when `where omp`
+///       sits on the join's common fold kernel or on a leg's fold kernel, or a
+///       leaf map's `omp(...)` covers the outer level (the existing Path B
+///       rule -- it selects the traversal, it grants no leg a licence). None:
+///       no team and nothing to report (a builtin-`+` join opens no team, as a
+///       single `reduce(a, (+))` opens none) -> None;
+///   (b) EVERY leg independently admits reassociation (`foldReorderLicensed`:
+///       builtin body or declared comm, no `where repro`), checked leg by leg
+///       and never OR-ed across legs, in a build that reorders;
+///   (c) the shared traversal has the chunkable vectorized shape (`simdPlan`
+///       Ok: one plain rectangular level, no streamed source, no halo /
+///       compound / Reynolds / MPI head, ONE builtin `+`/`*` operator over
+///       scalars -- a custom kernel has no identity to seed a partial with and
+///       declines in v1), and `audit` (the caller's closed purity/totality
+///       whitelist over the map, share-producer and fold bodies) passes.
+/// Some (Error why) names the FIRST failed condition, in that order after the
+/// two build knobs. `legs`: (accumulator, fold callable, accumulator C++
+/// type, rendered original seed, wrapper name), in leg order.
+let joinedFoldThreadPlan (tag: string) (request: string option)
+                         (simdPlan: Result<string * string list, string>)
+                         (legs: (string * IRCallable * string * string * string) list)
+                         (audit: unit -> Result<unit, string>) : Result<JoinedFoldChunkPlan, string> option =
+    match request with
+    | None -> None
+    | Some provenance ->
+        let firstUnlicensed =
+            legs |> List.mapi (fun i l -> (i, l)) |> List.tryFind (fun (_, (_, c, _, _, _)) -> not (foldReorderLicensed c))
+        let decided =
+            if not (ompThreadEmissionEnabled ()) then Error (ompThreadsSuppressedReason ())
+            elif not (Blade.Toolchain.joinThreadsEnabled ()) then
+                Error "BLADE_JOIN_THREADS=0 -- the threaded reduction join is disabled (A/B knob; the join keeps its serial vectorized form)"
+            elif not (fpReassocEnabled ()) then Error (fpReproReason ())
+            else
+            match firstUnlicensed with
+            | Some (i, (_, c, _, _, _)) ->
+                if foldKernelReproVetoed c then
+                    Error $"leg {i}'s fold kernel is `where repro` (its order is the contract), so the joined traversal cannot be split across threads; the other legs' licences do not transfer"
+                else
+                    Error $"leg {i}'s fold kernel has no reorder licence (no builtin body, no comm), so the joined traversal cannot be split across threads; the other legs' licences do not transfer"
+            | None ->
+            match simdPlan with
+            | Error why -> Error $"the joined traversal has no chunked form: {why}"
+            | Ok (op, _) ->
+            match audit () with
+            | Error why -> Error why
+            | Ok () ->
+                let licenceOf (c: IRCallable) =
+                    match foldKernelBuiltinOp c with
+                    | Some _ -> $"builtin {op}"
+                    | None -> "declared comm"
+                Ok { Tag = tag
+                     Op = op
+                     Legs = legs |> List.map (fun (acc, c, elemCpp, seed, wrapper) ->
+                                { AccName = acc; ElemCpp = elemCpp; Seed = seed; Wrapper = wrapper; Licence = licenceOf c })
+                     ChunkSimd = foldLanesMode () <> FoldLanesOff
+                     Provenance = provenance }
+        Some decided
+
+/// `blade plan`'s fold form for a threaded join.
+let joinedFoldForm (plan: JoinedFoldChunkPlan) : string =
+    if plan.ChunkSimd then
+        $"threaded(Path B joined chunks, {plan.Legs.Length} builtin {plan.Op} legs, simd-reduction within each chunk)"
+    else
+        $"threaded(Path B joined chunks, {plan.Legs.Length} builtin {plan.Op} legs, serial within each chunk: BLADE_FOLD_LANES=0/off (A/B knob))"
 
 /// The ordinary (no streamed sources) fused-nest emitter.
 let genFusedLoopNest (leafCgs: LoopNestCodeGen list) (outerNames: Map<int, string>) (indent: int) (hostParallel: bool) (mpiSlabVar: string option) : string list =

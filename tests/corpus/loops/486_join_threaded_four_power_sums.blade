@@ -1,0 +1,21 @@
+// TEST: Threaded Reduction Join Four Power Sums
+// Bench gap G7 (the onepass shape): four power sums of x in ONE traversal via
+// the <&!> fused fold, the join's fold kernel carrying an explicit `where omp`
+// request and every leg's licence its own builtin `+`. The C++ lane threads the
+// one sweep (generalized Path B: one team, four identity-seeded private
+// accumulators per chunk, a fixed ascending-chunk combine onto each leg's
+// seed); BLADE_OMP_THREADS=1, BLADE_FP_REPRO=1, the LLVM lane and the
+// interpreter keep the one serial sweep. Integer-valued data: every value is
+// exact under any association, so the pins are the same in every build.
+// Powers keep their source parenthesization ((v * v) * v, never (v*v)*(v*v)).
+let x = [1.0, 2.0, 3.0]
+let l = method_for(x)
+let (s1, s2, s3, s4) = reduce((l <@> lambda(v) -> v) <&!> (l <@> lambda(v) -> v * v)
+    <&!> (l <@> lambda(v) -> v * v * v) <&!> (l <@> lambda(v) -> v * v * v * v),
+    lambda(u, v) where omp -> u + v, 0.0)
+let checksum = s1 + 2.0 * s2 + 3.0 * s3 + 4.0 * s4
+// EXPECT: s1 = 6.0
+// EXPECT: s2 = 14.0
+// EXPECT: s3 = 36.0
+// EXPECT: s4 = 98.0
+// EXPECT: checksum = 534.0

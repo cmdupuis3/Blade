@@ -371,9 +371,13 @@ let private ompReduceCases : (string * string * string list * string list) list 
       // A module binding's tuple is a statement position, so the fold is bound
       // to its own let (IRLift) and takes the same Path A team the let-bound
       // spelling takes -- not the expression-position decline.
+      // (The sibling component is a plain read, not a second fold of A: two
+      // licensed folds of A beside each other are joined by the sibling-fold
+      // pass and threaded as ONE join (G7) -- pinned in omp-reduce's g7_*
+      // cases -- which is not this case's subject.)
       ("tuple_component_licensed_fold_opens_team",
        "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]\n" +
-       "let (a, b) = (reduce(A, (+)), reduce(A, lambda(p, q) where omp -> p + q, 0.0))\n",
+       "let (a, b) = (A(0), reduce(A, lambda(p, q) where omp -> p + q, 0.0))\n",
        ["#pragma omp parallel for simd reduction(+:"],
        // (A fold in a KERNEL BODY keeps the structural decline, pinned above
        // by reduce_in_kernel_body_marks_dropped_omp: only the statement
@@ -1295,6 +1299,42 @@ let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
         | None, Error why -> fail name ($"expected admitted, got: {why}")
         | Some needle, Error why -> fail name ($"expected a refusal naming `{needle}`, got: {why}")
         | Some needle, Ok _ -> fail name ($"expected a refusal naming `{needle}`, but it was admitted")
+    // ---- G7 / G35: the subscript proof is INDEX IDENTITY, not extent. The
+    // front end refuses `y(i)` with `i: Nat<Ix>` into `y` over `Jx` (BL4003),
+    // so the audit boundary is pinned on hand-built IR: a coordinate bound to
+    // the level `Ix` subscripting an array over the SAME-EXTENT `Jx` must be
+    // refused by the shared whitelist (Blade.IRTotality, the predicate both
+    // the emitter and the sibling-fold pass apply); bound to `Jx` it is proven.
+    (let name = "g7_audit_same_extent_different_index_refused"
+     let src =
+         "type Ix = Idx<1009>\ntype Jx = Idx<1009>\n"
+         + "let x = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i)) |> compute\n"
+         + "let y = method_for(range<Jx>) <@> lambda(j) -> Float64(Int64(j)) |> compute\n"
+     match lower src with
+     | Error e -> fail name ($"lower: {e}")
+     | Ok ir ->
+         let find (n: string) : IRBinding option =
+             ir.Modules |> List.collect (fun m -> m.Bindings) |> List.tryFind (fun (b: IRBinding) -> b.Name = n)
+         let ixOf (b: IRBinding) =
+             match b.Type with
+             | ArrayElem at -> List.tryHead at.IndexTypes
+             | _ -> None
+         match find "x", find "y" with
+         | Some bx, Some by ->
+             match ixOf bx, ixOf by with
+             | Some ixX, Some ixY ->
+                 let coord = IRVar (987654321, IRTScalar ETInt64)
+                 let read = IRIndex (IRVar (by.Id, by.Type), [ coord ], None)
+                 let walk (lvl: IRIndexType) =
+                     Blade.IRTotality.walk resolveCallable (fun _ -> None) (fun _ -> false)
+                         (Map.ofList [ (987654321, lvl) ]) Map.empty Set.empty Set.empty Set.empty read
+                 match walk ixX, walk ixY with
+                 | Error why, Ok _ when why.Contains "not proven in range" ->
+                     passed <- passed + 1
+                     resultLine Pass name "Ix coordinate into a Jx array (equal extent): refused; a Jx coordinate: proven"
+                 | a, b -> fail name ($"expected refused / proven, got {a} / {b}")
+             | _ -> fail name "x / y carry no index records"
+         | _ -> fail name "bindings x / y not found")
     printFooter "OpenMP Pragma" [$"{passed} passed"; $"{failed} failed"]
     { Block = "OpenMP Pragma"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }
 
@@ -1614,6 +1654,112 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
                 failedNames <- failedNames @ [name]
 
         // -------------------------------------------------------------------
+        // G7: THE THREADED REDUCTION JOIN'S TEAM IS OBSERVED. Generated in the
+        // default licensed build with test mode on (the coverage lines sit
+        // outside the chunk's simd loop, so the form is the shipped one), run
+        // with OMP_DYNAMIC=false and no thread limit at T = 1, 3 and 8: the
+        // team must be exactly min(T, n) and, for T > 1, more than one worker
+        // must have swept a chunk; every run's sums equal the T = 1 run's
+        // (integer-valued cells: exact). n = 2 pins the clamp T = min(T, n).
+        // -------------------------------------------------------------------
+        let g7CoverageSrc (n: int) =
+            $"type Ix = Idx<{n}>\n"
+            + "let x = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 7) - 2.0 |> compute\n"
+            + "let l = method_for(x)\n"
+            + "let (s1, s2, s3, s4) = reduce((l <@> lambda(v) -> v) <&!> (l <@> lambda(v) -> v * v) <&!> (l <@> lambda(v) -> v * v * v) <&!> (l <@> lambda(v) -> v * v * v * v), lambda(u, v) where omp -> u + v, 0.0)\n"
+        for (name, n) in [ ("join_threaded_team_1009", 1009); ("join_threaded_team_clamped_n2", 2) ] do
+            setOmpTestMode true
+            let gen =
+                use _r = pinEnv "BLADE_FP_REPRO" null
+                use _j = pinEnv "BLADE_JOIN_THREADS" null
+                use _p = pinEnv "BLADE_PRINT" "s1,s2,s3,s4"
+                try
+                    match lower (g7CoverageSrc n) with
+                    | Error e -> Error ($"lower failed: {e}")
+                    | Ok ir ->
+                        let (cpp, _) = CodeGen.genSelfContainedProgramFromIR ir name
+                        let srcAbs = Path.GetFullPath(Path.Combine(outputDir, sanitizeFileName name + ".cpp"))
+                        File.WriteAllText(srcAbs, cpp)
+                        Ok (srcAbs, cpp)
+                with ex -> Error ($"codegen failed: {ex.Message}")
+            setOmpTestMode false
+            let outcome : Result<string, string> =
+                match gen with
+                | Error e -> Error e
+                | Ok (_, cpp) when not (cpp.Contains "BLADE_OMP_SIMD_REDUCTION(+:__jp0_") ->
+                    Error "the generated C++ has no threaded-join chunk sweep (the case would not test the form)"
+                | Ok (srcAbs, _) ->
+                    let exeAbs = Path.ChangeExtension(srcAbs, (if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"))
+                    let cpsi = ProcessStartInfo("g++", $"-std=c++17 {(optFlags ())} -fopenmp -o \"{exeAbs}\" \"{srcAbs}\"")
+                    cpsi.RedirectStandardError <- true
+                    cpsi.UseShellExecute <- false
+                    use cproc = Process.Start(cpsi)
+                    let cerr = Blade.Runtime.readToEndOffPool cproc.StandardError
+                    if not (cproc.WaitForExit(120000)) then
+                        (try cproc.Kill(true) with _ -> ())
+                        Error "compile timed out (120s)"
+                    elif cproc.ExitCode <> 0 then Error ($"compile: {cerr.Result}")
+                    else
+                    let runLimited (threads: int) (limit: int option) =
+                        let rpsi = ProcessStartInfo(exeAbs)
+                        rpsi.RedirectStandardOutput <- true
+                        rpsi.RedirectStandardError <- true
+                        rpsi.UseShellExecute <- false
+                        rpsi.WorkingDirectory <- Path.GetDirectoryName(exeAbs)
+                        rpsi.Environment.["OMP_NUM_THREADS"] <- string threads
+                        rpsi.Environment.["OMP_DYNAMIC"] <- "false"
+                        (match limit with
+                         | Some l -> rpsi.Environment.["OMP_THREAD_LIMIT"] <- string l
+                         | None -> rpsi.Environment.Remove("OMP_THREAD_LIMIT") |> ignore)
+                        use rproc = Process.Start(rpsi)
+                        let rout = Blade.Runtime.readToEndOffPool rproc.StandardOutput
+                        if not (rproc.WaitForExit(60000)) then
+                            (try rproc.Kill(true) with _ -> ())
+                            Error "run timed out (60s)"
+                        elif rproc.ExitCode <> 0 then Error ($"exit {rproc.ExitCode}")
+                        else
+                            let out = rout.Result
+                            let field (k: string) =
+                                let m = System.Text.RegularExpressions.Regex.Match(out, k + "=(\\d+)")
+                                if m.Success then Some (int m.Groups.[1].Value) else None
+                            let sums =
+                                out.Split('\n') |> Array.map (_.Trim()) |> Array.filter (fun l -> l.StartsWith "s") |> String.concat " "
+                            Ok (field "teamsz", field "distinct", field "maxth", sums)
+                    let runAt (threads: int) = runLimited threads None
+                    // OMP_NUM_THREADS=8 under OMP_THREAD_LIMIT=3: the REQUESTED team
+                    // (8, sized from omp_get_max_threads) exceeds the ACTUAL one
+                    // (3): the partition must use the actual size, and the five
+                    // unused partial slots (never published, `__jhad` false) must
+                    // never enter the combine -- the sums must not move.
+                    match runAt 1, runAt 3, runAt 8, runLimited 8 (Some 3) with
+                    | Error e, _, _, _ | _, Error e, _, _ | _, _, Error e, _ | _, _, _, Error e -> Error e
+                    | Ok (tz1, _, _, s1), Ok (tz3, d3, mx3, s3), Ok (tz8, d8, mx8, s8), Ok (tzL, dL, mxL, sL) ->
+                        if s1 = "" || not (s1.Contains "s1 = ") then Error "no `s1 = ` line in the output"
+                        elif s3 <> s1 || s8 <> s1 || sL <> s1 then Error ($"sums depend on the team: T=1 [{s1}] T=3 [{s3}] T=8 [{s8}] T=8/limit 3 [{sL}]")
+                        else
+                            match tz1, tz3, d3, mx3, tz8, d8, mx8, tzL, dL with
+                            | Some tz1, Some tz3, Some d3, Some mx3, Some tz8, Some d8, Some mx8, Some tzL, Some dL ->
+                                let want t = min t n
+                                if mx3 <= 1 || mx8 <= 1 then Ok ($"single-core: maxth={mx3}/{mx8}, cannot test parallelism")
+                                elif tz1 <> 1 then Error ($"T=1 team = {tz1}")
+                                elif tz3 <> want 3 || tz8 <> want 8 then
+                                    Error ($"team != min(T, n = {n}): T=3 teamsz={tz3}, T=8 teamsz={tz8}")
+                                elif d3 <> want 3 || d8 <> want 8 then
+                                    Error ($"not every worker swept a chunk: T=3 distinct={d3}, T=8 distinct={d8}")
+                                elif tzL <> want 3 || dL <> want 3 then
+                                    Error ($"OMP_THREAD_LIMIT=3: expected an actual team of {want 3} that all swept chunks, got teamsz={tzL} distinct={dL}")
+                                else Ok ($"T=1/3/8 teamsz={tz1}/{tz3}/{tz8} distinct={d3}/{d8}; T=8 under OMP_THREAD_LIMIT=3: requested (max_threads) {(defaultArg mxL 0)}, teamsz={tzL} distinct={dL}; [{s1}] at every T")
+                            | _ -> Error "unparseable or missing [omp-coverage] line"
+            match outcome with
+            | Ok detail ->
+                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass name detail
+                passed <- passed + 1
+            | Error detail ->
+                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail name detail
+                errors <- errors + 1
+                failedNames <- failedNames @ [name]
+
+        // -------------------------------------------------------------------
         // VALUE CORRECTNESS UNDER FORCED MULTI-THREADING (#2)
         // -------------------------------------------------------------------
         // The coverage checks above confirm a parallel region forms, but NOT
@@ -1837,6 +1983,237 @@ let private scalarBindings (stdout: string) : Map<string, float> =
             | _ -> None
         else None)
     |> Map.ofArray
+
+// ============================================================================
+// G7: THE THREADED REDUCTION JOIN (generalized Path B over one shared sweep)
+// ============================================================================
+// Policy (round-2 arbitration Q2): a team iff an EXPLICIT request (the join's
+// fold kernel, a leg's fold kernel, or a leaf map covering the outer level)
+// AND every leg's OWN reorder licence AND the shared-traversal shape/purity
+// checks. Integer-valued x(i) = (i mod 7) - 2 over a non-power-of-two 1009:
+// every sum is exact under any association, so the threaded and serial
+// values are compared EXACTLY.
+
+/// The onepass shape: four power sums through the fused tree (common kernel).
+let private g7FusedSrc (foldKernel: string) =
+    "type Ix = Idx<1009>\n"
+    + "let x = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 7) - 2.0 |> compute\n"
+    + "let l = method_for(x)\n"
+    + "let (s1, s2, s3, s4) = reduce((l <@> lambda(v) -> v) <&!> (l <@> lambda(v) -> v * v) <&!> (l <@> lambda(v) -> v * v * v) <&!> (l <@> lambda(v) -> v * v * v * v), "
+    + foldKernel + ", 0.0)\n"
+    + "let checksum = s1 + 2.0 * s2 + 3.0 * s3 + 4.0 * s4\n"
+
+/// The per-leg pack shape with a SHARED deferred producer `e` (spelled by two
+/// legs) and per-leg seeds 10 / 0 / 30. `leg0` is the first leg's fold kernel.
+let private g7PackSrc (leg0: string) (extraLeg: string) =
+    "type Ix = Idx<1009>\n"
+    + "let x = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 7) - 2.0 |> compute\n"
+    + "let e = method_for(x) <@> lambda(v) -> v * 0.5 + 1.0\n"
+    + (if extraLeg = "" then "let (a, b, c) = object_for(<&!>) <@> (reduce(e, " + leg0 + ", 10.0), prodsum(e, x), reduce(x, (+), 30.0))\n"
+       else "let (a, b, c, d) = object_for(<&!>) <@> (reduce(e, " + leg0 + ", 10.0), prodsum(e, x), reduce(x, (+), 30.0), " + extraLeg + ")\n")
+
+/// PRODUCT legs with non-identity caller seeds: x(i) = 2^((i mod 3) - 1) over
+/// 1009 cells (0.5, 1, 2 repeating; exact in binary), so prod x = 0.5 and
+/// prod x^2 = 0.25 exactly under any association.
+let private g7ProductPrelude =
+    "type Ix = Idx<1009>\n"
+    + "let x = method_for(range<Ix>) <@> lambda(i) -> Float64(2 ^ (Int64(i) % 3)) * 0.5 |> compute\n"
+let private g7ProductPackSrc =
+    g7ProductPrelude
+    + "let e = method_for(x) <@> lambda(v) -> v * v\n"
+    + "let (p1, p2) = object_for(<&!>) <@> (reduce(x, lambda(p, q) where omp -> p * q, 2.0), reduce(e, (*), 3.0))\n"
+let private g7ProductFusedSrc =
+    g7ProductPrelude
+    + "let l = method_for(x)\n"
+    + "let (f1, f2) = reduce((l <@> lambda(v) -> v) <&!> (l <@> lambda(v) -> v * v), lambda(u, v) where omp -> u * v, 2.0)\n"
+/// A ZERO-extent seeded join: no team opens, every leg is its seed.
+let private g7ZeroSrc =
+    "type Z = Idx<0>\n"
+    + "let x = method_for(range<Z>) <@> lambda(i) -> Float64(Int64(i)) + 1.0 |> compute\n"
+    + "let l = method_for(x)\n"
+    + "let (z1, z2) = reduce((l <@> lambda(v) -> v) <&!> (l <@> lambda(v) -> v * v), lambda(u, v) where omp -> u + v, 10.0)\n"
+    + "let (y1, y2) = object_for(<&!>) <@> (reduce(x, lambda(p, q) where omp -> p + q, 20.0), reduce(x, (+), 30.0))\n"
+
+let private g7Count (needle: string) (s: string) =
+    let mutable n = 0
+    let mutable i = s.IndexOf(needle, StringComparison.Ordinal)
+    while i >= 0 do
+        n <- n + 1
+        i <- s.IndexOf(needle, i + needle.Length, StringComparison.Ordinal)
+    n
+
+let private g7Rx (pattern: string) (s: string) =
+    System.Text.RegularExpressions.Regex.Matches(s, pattern).Count
+
+/// The emission + record cases. (name, pins, source, check over (decisions, C++)).
+let private g7EmitCases : (string * (string * string) list * string * (Blade.Effects.Decision list -> string -> Result<string, string>)) list =
+    let team = "BLADE_OMP_PARALLEL_NUM_THREADS("
+    let omp = "lambda(u, v) where omp -> u + v"
+    let appliedOmp (ds: Blade.Effects.Decision list) (prov: string) =
+        ds |> List.exists (fun d ->
+            d.Rule = "omp" && d.Outcome = Blade.Effects.Applied
+            && d.Evidence |> List.exists (fun ev -> ev.Contains "Path B joined chunks, G7" && ev.Contains prov))
+    let foldForm (ds: Blade.Effects.Decision list) (form: string) =
+        ds |> List.exists (fun d -> d.Rule = "fold-form" && d.Evidence |> List.exists (fun ev -> ev.Contains form))
+    let declinedOmp (ds: Blade.Effects.Decision list) (why: string) =
+        ds |> List.exists (fun d ->
+            d.Rule = "omp" && (match d.Outcome with Blade.Effects.Declined r -> r.Contains why | _ -> false))
+    let noDotCalls (cpp: string) =
+        not (cpp.Contains "blade_fold::dot<" || cpp.Contains "blade_fold::sq<" || cpp.Contains "blade_fold::sum<" || cpp.Contains "blade_fold::dot3<")
+    // Threads on, licensed (the default): ONE team, ONE sweep, one load per
+    // coordinate, four identity-seeded privates under ONE simd clause, the
+    // chunk_lo partition at the ACTUAL team size, the fixed combine, source-
+    // order products, no K-lane dot call.
+    let fusedTeam (ds: Blade.Effects.Decision list) (cpp: string) =
+        let checks =
+            [ g7Count team cpp = 1, $"teams = {g7Count team cpp}, expected 1"
+              g7Rx @"for \(size_t __i0 = __rlo; __i0 < __rhi; __i0\+\+\)" cpp = 1, "expected exactly one chunk sweep"
+              g7Rx @"= __jsrc0_\w+\[__i0\];" cpp = 1, "expected one load of x per coordinate"
+              g7Rx @"double __jp\d_\w+ = 0;" cpp = 4, "expected exactly 4 identity-seeded private accumulators"
+              g7Rx @"BLADE_OMP_SIMD_REDUCTION\(\+:__jp0_\w+, __jp1_\w+, __jp2_\w+, __jp3_\w+\)" cpp = 1, "expected ONE simd clause over the four privates"
+              g7Count "blade_fold::chunk_lo(" cpp = 2, "expected the chunk_lo partition (lo, hi)"
+              cpp.Contains "const int __rnt = blade_omp_get_num_threads();", "expected the actual team size"
+              g7Rx @"if \(__jhad_\w+\[__rt\]\) \{ \w+_0 = \w+\(\w+_0, __jpart0_\w+\[__rt\]\); \w+_1 = \w+\(\w+_1, __jpart1_\w+\[__rt\]\); \w+_2 = \w+\(\w+_2, __jpart2_\w+\[__rt\]\); \w+_3 = \w+\(\w+_3, __jpart3_\w+\[__rt\]\); \}" cpp = 1,
+                  "expected the fixed ascending-chunk combine of legs 0..3 onto their seeded accumulators"
+              g7Rx @"__jp3_\w+ = __jp3_\w+ \+ \(\(\(\((\w+) \* \1\) \* \1\) \* \1\)\);" cpp = 1, "expected v*v*v*v in source order ((v*v)*v)*v"
+              noDotCalls cpp, "a K-lane dot call appeared in the joined kernel"
+              foldForm ds "threaded(Path B joined chunks, 4 builtin + legs, simd-reduction within each chunk)", "expected the threaded fold-form record"
+              appliedOmp ds "the join's fold kernel", "expected one applied omp record naming the fold-kernel request"
+              not (cpp.Contains "requested but emitted serial"), "a census line remained beside the applied team" ]
+        match checks |> List.tryFind (fst >> not) with
+        | Some (_, why) -> Error why
+        | None -> Ok "one team, one sweep, one load/coordinate, 4 privates, one simd clause, chunk_lo + actual team, fixed combine, source-order powers, no K-lane call"
+    let packTeam (ds: Blade.Effects.Decision list) (cpp: string) =
+        let region = let k = cpp.IndexOf "for (size_t __i0 = __rlo" in if k < 0 then "" else cpp.Substring k
+        let checks =
+            [ g7Count team cpp = 1, "expected one team"
+              g7Count "const double e = " cpp = 1, "expected exactly one evaluation of the shared producer per coordinate"
+              region.Contains "const double e = ", "the shared producer is not evaluated inside the worker's sweep"
+              g7Rx @"= __jsrc0_\w+\[__i0\];" cpp = 1, "expected one load of x per coordinate"
+              g7Rx @"double __jp\d_\w+ = 0;" cpp = 3, "expected 3 private accumulators"
+              cpp.Contains "_0 = 10.0;" && cpp.Contains "_2 = 30.0;", "the original seeds are not the accumulators' initializers"
+              not (g7Rx @"__jp\d_\w+ = 10\.0" cpp > 0 || g7Rx @"__jp\d_\w+ = 30\.0" cpp > 0), "a caller seed entered a private partial"
+              appliedOmp ds "leg 0's fold kernel", "expected the applied omp record naming leg 0's request" ]
+        match checks |> List.tryFind (fst >> not) with
+        | Some (_, why) -> Error why
+        | None -> Ok "one team, the shared producer once per coordinate inside the sweep, seeds outside the partials"
+    // No team, the census line naming `why`, and (when `simd`) the one-sweep
+    // vectorized join kept; (when not) no simd clause either.
+    let declined (why: string) (simd: bool) (ds: Blade.Effects.Decision list) (cpp: string) =
+        if cpp.Contains team then Error "a team was emitted"
+        elif not (cpp.Contains ("[omp] requested but emitted serial: " + why) || cpp.Contains why) then Error ($"no census line naming `{why}`")
+        elif not (declinedOmp ds why) then Error ($"no declined omp record naming `{why}`")
+        elif simd && not (cpp.Contains "BLADE_OMP_SIMD_REDUCTION(") then Error "the serial join lost its vectorized form"
+        elif not simd && cpp.Contains "BLADE_OMP_SIMD_REDUCTION(" then Error "a simd clause appeared (the serial chains must stay ordered)"
+        else Ok ($"no team; census + record name `{why}`")
+    [ ("g7_fused_join_team_shape", [], g7FusedSrc omp, fusedTeam)
+      ("g7_pack_join_team_shared_producer", [], g7PackSrc "lambda(p, q) where omp -> p + q" "", packTeam)
+      ("g7_fused_join_threads_off_census", [ ("BLADE_OMP_THREADS", "1") ], g7FusedSrc omp, declined "BLADE_OMP_THREADS=1" true)
+      ("g7_pack_join_threads_off_census", [ ("BLADE_OMP_THREADS", "1") ], g7PackSrc "lambda(p, q) where omp -> p + q" "", declined "BLADE_OMP_THREADS=1" true)
+      ("g7_fused_join_repro_census", [ ("BLADE_FP_REPRO", "1") ], g7FusedSrc omp, declined "BLADE_FP_REPRO=1" false)
+      ("g7_pack_join_repro_census", [ ("BLADE_FP_REPRO", "1") ], g7PackSrc "lambda(p, q) where omp -> p + q" "", declined "BLADE_FP_REPRO=1" false)
+      ("g7_fused_join_knob_off_census", [ ("BLADE_JOIN_THREADS", "0") ], g7FusedSrc omp, declined "BLADE_JOIN_THREADS=0" true)
+      // one leg unlicensed: never borrows the others' licences
+      ("g7_pack_join_unlicensed_leg_declines", [], g7PackSrc "lambda(p, q) where omp -> p + q" "reduce(x, lambda(p, q) -> p + 2.0 * q, 0.0)",
+       declined "leg 3's fold kernel has no reorder licence" false)
+      // one leg repro-vetoed (`where repro` named function)
+      ("g7_pack_join_repro_leg_declines", [],
+       "function rsum(a: Float64, b: Float64) where repro -> Float64 = a + b\n" + g7PackSrc "lambda(p, q) where omp -> p + q" "reduce(x, rsum, 0.5)",
+       declined "leg 3's fold kernel is `where repro`" false)
+      // no request: the builtin-+ join stays serial (policy), no census line
+      ("g7_fused_join_no_request_stays_serial", [], g7FusedSrc "(+)",
+       (fun ds cpp ->
+            if cpp.Contains team then Error "a builtin-+ join without a request opened a team"
+            elif cpp.Contains "requested but emitted serial" then Error "a census line without a request"
+            elif not (cpp.Contains "BLADE_OMP_SIMD_REDUCTION(") then Error "the serial vectorized join was lost"
+            else Ok "no request: one vectorized sweep, no team, no census"))
+      // a leaf map's request covering the outer level selects the traversal
+      ("g7_fused_join_leaf_map_request", [],
+       "type Ix = Idx<1009>\n"
+       + "let x = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 7) - 2.0 |> compute\n"
+       + "let l = method_for(x)\n"
+       + "let (s1, s2) = reduce((l <@> lambda(v) where omp -> v) <&!> (l <@> lambda(v) -> v * v), (+))\n",
+       (fun ds cpp ->
+            if g7Count team cpp <> 1 then Error "expected one team"
+            elif not (appliedOmp ds "a leaf map's `omp(...)` covering the outer level") then Error "expected the applied record naming the leaf-map request"
+            elif cpp.Contains "requested but emitted serial" then Error "a census line beside the applied team"
+            else Ok "the leaf map's outer-level request threads the join"))
+      // ---- the PURITY / SHAPE refusal boundary, both entry shapes --------
+      // A serial captured write in a leg's map (corpus loops/489): the team
+      // is refused on the effect, the serial vectorized join keeps it.
+      ("g7_fused_join_serial_captured_write_declines", [],
+       "let mut counter = 0\nlet x = [1.0, 2.0, 3.0]\nlet l = method_for(x)\n"
+       + "let (s1, s2) = reduce((l <@> lambda(v) -> {\n    counter = counter + 1\n    v\n}) <&!> (l <@> lambda(v) -> v * v), " + omp + ", 0.0)\n",
+       declined "outside the closed purity/totality whitelist a team requires (the body contains a form outside the row-slot whitelist (IRAssign))" true)
+      // A WRITING SHARED PRODUCER through a transitive helper (per-leg pack):
+      // `e` is spelled by two legs, its kernel calls `bump`, which writes.
+      ("g7_pack_join_writing_shared_producer_declines", [],
+       "let mut counter = 0\nfunction bump(v: Float64) -> Float64 = {\n    counter = counter + 1\n    v\n}\n"
+       + "type Ix = Idx<1009>\n"
+       + "let x = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 7) |> compute\n"
+       + "let e = method_for(x) <@> lambda(v) -> bump(v)\n"
+       + "let (a, b, c) = object_for(<&!>) <@> (reduce(e, lambda(p, q) where omp -> p + q, 10.0), prodsum(e, x), reduce(x, (+), 30.0))\n",
+       declined "(IRAssign)" true)
+      // An UNPROVEN subscript (an arithmetic coordinate, BL8006 at run time):
+      // a team would race the failing coordinate -- refused.
+      ("g7_fused_join_unproven_subscript_declines", [],
+       "type Ix = Idx<1009>\n"
+       + "let x = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 7) |> compute\n"
+       + "let r = method_for(range<Ix>)\n"
+       + "let (s1, s2) = reduce((r <@> lambda(i) -> x(Int64(i) + 1)) <&!> (r <@> lambda(i) -> x(i) * x(i)), " + omp + ", 0.0)\n",
+       declined "a subscript not proven in range: BL8006" true)
+      // A comm-declared WRITING custom fold beside a requesting leg: licensed
+      // by comm, but its combine is a call, so the builtin-shape gate refuses
+      // the team BEFORE purity (no identity to seed a partial with).
+      ("g7_pack_join_comm_writing_custom_fold_declines", [],
+       "let mut counter = 0\nlet x = [1.0, 2.0, 3.0]\n"
+       + "let (a, b) = object_for(<&!>) <@> (reduce(x, lambda(p, q) where omp -> p + q, 0.0), reduce(x, lambda(p, q) where comm(p, q) -> {\n    counter = counter + 1\n    p + q\n}, 0.0))\n",
+       declined "the joined traversal has no chunked form" false)
+      // PRODUCT legs: the private partials start from the identity 1, the
+      // caller seeds 2.0 / 3.0 enter only the shared accumulators.
+      ("g7_pack_join_product_legs_identity_one", [], g7ProductPackSrc,
+       (fun ds cpp ->
+            if g7Count team cpp <> 1 then Error "expected one team"
+            elif g7Rx @"double __jp\d_\w+ = 1;" cpp <> 2 then Error "expected two private partials seeded with the identity 1"
+            elif g7Rx @"BLADE_OMP_SIMD_REDUCTION\(\*:__jp0_\w+, __jp1_\w+\)" cpp <> 1 then Error "expected one `*` simd clause over the privates"
+            elif not (cpp.Contains "_0 = 2.0;" && cpp.Contains "_1 = 3.0;") then Error "the caller seeds are not the shared accumulators' initializers"
+            elif g7Rx @"__jp\d_\w+ = [23]\.0" cpp > 0 then Error "a caller seed entered a private partial"
+            elif not (foldForm ds "threaded(Path B joined chunks, 2 builtin * legs") then Error "expected the threaded product join"
+            else Ok "product legs: privates from 1, seeds 2.0 / 3.0 once, one `*` clause"))
+      // A range-driven join whose legs subscript a captured array by the
+      // range's own index: the subscript is PROVEN in range (the audit binds
+      // the parameter to its `range<Ix>` level), so the purity/totality
+      // whitelist admits it and the join threads.
+      ("g7_range_driven_join_proven_subscript", [],
+       "type Ix = Idx<1009>\n"
+       + "let x = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 7) - 2.0 |> compute\n"
+       + "let r = method_for(range<Ix>)\n"
+       + "let (s1, s2) = reduce((r <@> lambda(i) -> x(i)) <&!> (r <@> lambda(i) -> x(i) * x(i)), lambda(u, v) where omp -> u + v, 0.0)\n",
+       (fun ds cpp ->
+            if g7Count team cpp <> 1 then Error "expected one team"
+            elif not (foldForm ds "threaded(Path B joined chunks, 2 builtin + legs") then Error "expected the threaded two-leg join"
+            elif cpp.Contains "requested but emitted serial" then Error "a census line beside the applied team"
+            else Ok "proven subscripts admitted; one team"))
+      // Two licensed sibling folds of one array in a top-level tuple, one of
+      // them requesting omp: the sibling-fold pass joins them (every leg is
+      // licensed) and the join threads under the requesting leg's own clause.
+      ("g7_sibling_tuple_components_join_and_thread", [],
+       "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]\n"
+       + "let (a, b) = (reduce(A, (+)), reduce(A, lambda(p, q) where omp -> p + q, 0.0))\n",
+       (fun ds cpp ->
+            if g7Count team cpp <> 1 then Error "expected one team for the joined pair"
+            elif not (foldForm ds "threaded(Path B joined chunks, 2 builtin + legs") then Error "expected the threaded two-leg join"
+            elif not (appliedOmp ds "leg 1's fold kernel") then Error "expected the applied record naming leg 1's own request"
+            elif cpp.Contains "requested but emitted serial" then Error "a census line beside the applied team"
+            else Ok "joined by the sibling-fold pass; one team under leg 1's own request"))
+      // BLADE_FOLD_LANES=off: a scalar private chain per chunk, the team kept
+      ("g7_fused_join_fold_lanes_off_keeps_team", [ ("BLADE_FOLD_LANES", "off") ], g7FusedSrc omp,
+       (fun ds cpp ->
+            if g7Count team cpp <> 1 then Error "BLADE_FOLD_LANES=off suppressed the team"
+            elif cpp.Contains "BLADE_OMP_SIMD_REDUCTION(" then Error "a simd clause under BLADE_FOLD_LANES=off"
+            elif g7Rx @"__jp3_\w+ = __jp3_\w+ \+ \(\(\(\((\w+) \* \1\) \* \1\) \* \1\)\);" cpp <> 1 then Error "the powers' parenthesization changed"
+            elif not (foldForm ds "serial within each chunk: BLADE_FOLD_LANES=0/off") then Error "expected the knob's fold-form record"
+            else Ok "team kept, scalar private chains, source-order powers")) ]
 
 /// Comm-licensed parallel reduction VALUE tests. Requires g++; skips otherwise.
 let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
@@ -2712,6 +3089,60 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                      fail name ($"expected the serial walk's s = 70710120.0, got: {stripTiming onOut}")
                  else
                      pass name "declined; knob on == knob off == the serial walk (s = 70710120.0)")
+
+        // ---- G7: the threaded reduction join -------------------------------
+        // Emission + record shape per build (both entry shapes), then the
+        // values: the threaded binary at T = 1 / 3 / 8 against the serial
+        // (BLADE_OMP_THREADS=1) build, EXACT (integer-valued cells).
+        for (name, pins, src, check) in g7EmitCases do
+            let disposables =
+                ([ "BLADE_FP_REPRO"; "BLADE_FP_REASSOC"; "BLADE_OMP_THREADS"; "BLADE_JOIN_THREADS"; "BLADE_FOLD_LANES"; "BLADE_SIBLING_FOLDS" ]
+                 |> List.filter (fun k -> not (pins |> List.exists (fun (p, _) -> p = k)))
+                 |> List.map (fun k -> pinEnv k null))
+                @ (pins |> List.map (fun (k, v) -> pinEnv k v))
+            try
+                match planAndCppOf name src with
+                | Error e -> fail name e
+                | Ok (ds, cpp) ->
+                    match check ds cpp with
+                    | Ok detail -> pass name detail
+                    | Error why -> fail name why
+            finally
+                for d in List.rev disposables do d.Dispose()
+        let g7Values (name: string) (src: string) (expected: string list) =
+            let build (threads: string) (tag: string) =
+                use _r = pinEnv "BLADE_FP_REPRO" null
+                use _t = pinEnv "BLADE_OMP_THREADS" threads
+                use _j = pinEnv "BLADE_JOIN_THREADS" null
+                compileProgram outputDir (name + tag) src
+            match build null "_team", build "1" "_serial" with
+            | Error e, _ -> fail name ($"threaded build: {e}")
+            | _, Error e -> fail name ($"serial build: {e}")
+            | Ok teamExe, Ok serExe ->
+                if not ((File.ReadAllText(Path.ChangeExtension(teamExe, ".cpp"))).Contains "BLADE_OMP_PARALLEL_NUM_THREADS(") then
+                    fail name "the threaded build has no team (the comparison would not test the form)"
+                else
+                match runProgram serExe "1", runProgram teamExe "1", runProgram teamExe "3", runProgram teamExe "8" with
+                | Error e, _, _, _ -> fail name ($"serial run: {e}")
+                | _, Error e, _, _ | _, _, Error e, _ | _, _, _, Error e -> fail name ($"threaded run: {e}")
+                | Ok ser, Ok t1, Ok t3, Ok t8 ->
+                    let s = stripTiming ser
+                    let missing = expected |> List.filter (fun e -> not (s.Contains e))
+                    if not missing.IsEmpty then
+                        fail name ($"""serial build lacks {(String.concat " | " missing)}""")
+                    elif stripTiming t1 <> s || stripTiming t3 <> s || stripTiming t8 <> s then
+                        fail name "the threaded join's output differs from the serial build at some team size"
+                    else
+                        pass name ($"""threaded T = 1 / 3 / 8 identical to the serial build: {(String.concat ", " expected)}""")
+        g7Values "g7_fused_join_values" (g7FusedSrc "lambda(u, v) where omp -> u + v")
+            [ "s1 = 1006.0"; "s2 = 5044.0"; "s3 = 13096.0"; "s4 = 53440.0"; "checksum = 264142.0" ]
+        g7Values "g7_pack_join_values" (g7PackSrc "lambda(p, q) where omp -> p + q" "")
+            [ "a = 1522.0"; "b = 3528.0"; "c = 1036.0" ]
+        // product legs, non-identity caller seeds (privates from 1): both shapes
+        g7Values "g7_pack_join_product_values" g7ProductPackSrc [ "p1 = 1.0"; "p2 = 0.75" ]
+        g7Values "g7_fused_join_product_values" g7ProductFusedSrc [ "f1 = 1.0"; "f2 = 0.5" ]
+        // zero extent: no team opens, every leg is exactly its seed, both shapes
+        g7Values "g7_zero_extent_seeded_joins" g7ZeroSrc [ "z1 = 10.0"; "z2 = 10.0"; "y1 = 20.0"; "y2 = 30.0" ]
 
         printFooter "OpenMP Reduce" [$"{passed} passed"; $"{failed} failed"]
         { Block = "OpenMP Reduce"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

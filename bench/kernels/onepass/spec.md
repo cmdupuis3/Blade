@@ -63,24 +63,35 @@ total). R >= 21.
 ```blade sketch
 let L = method_for(x)
 let (s1, s2, s3, s4) = reduce((L <@> lambda(v) -> v) <&!> (L <@> lambda(v) -> v * v)
-                          <&!> (L <@> lambda(v) -> v * v * v) <&!> (L <@> lambda(v) -> v * v * v * v), (+))
+                          <&!> (L <@> lambda(v) -> v * v * v) <&!> (L <@> lambda(v) -> v * v * v * v),
+                          lambda(u, v) where omp -> u + v, 0.0)
 let checksum = s1 + 2.0 * s2 + 3.0 * s3 + 4.0 * s4
 ```
 
 (examples/03 (b), the fused-pool shape.) Probed: one loop over x with four accumulators,
-no pool allocated. **mt8 (settled by blade-B):** there is NO licensed parallel spelling of
-a `<&!>` join — `omp` on a leg is emitted serial with the census note "fold accumulates into
-a shared scalar, which is not race-safe" (`src/CodeGenFusion.fs:263`,
-`src/CodeGenLoopNest.fs:1505`), and `omp` on the join's fold kernel is dropped silently (a
-finding against the "dropped omp is never silent" invariant). A tuple-state fold threads in
-the C++ lane but the LLVM lane refuses it. Decision: keep the `<&!>` idiom; the mt8 row
-reads **"no parallel form"**.
+no pool allocated. **mt8 (round 2, gap G7):** the join's fold kernel carries the thread
+REQUEST (`where omp` -- the spelling G7 named, and the same request the expert's
+`!$omp parallel do reduction` makes); each leg's reorder licence is its own builtin `+`
+(the policy: explicit request AND every leg's own licence, never OR-ed across legs; a
+builtin-`(+)` join with no request opens no team, exactly as a single `reduce(a, (+))`
+opens none). The C++ lane then threads the ONE sweep as a generalized Path B form: each
+leg's original seed evaluated once before the team, the extent partitioned at the actual
+team size (`blade_fold::chunk_lo`), four identity-seeded private accumulators per chunk
+under ONE `omp simd reduction`, partials combined in ascending chunk order onto each seed
+(`blade plan`: `fold form: threaded(Path B joined chunks, ...)` plus an applied `omp`
+record). The explicit `, 0.0` seed is what the surface `(+)` seeds with (a lambda fold
+kernel over a fused tree needs it spelled). The sibling-fold pass also joins the input
+checksum into the same threaded traversal (every leg licensed). Earlier rounds: there was
+no thread-level form and `omp` on the join's fold kernel was first dropped silently, then
+(5f4b33ea) declined with a census line.
 
 ## Regimes
 
 licensed and repro (both lanes reorder the four legs in licensed since the flip), fastmath;
-mt8 is still reported as "no parallel form" for Blade (the join has a simd-reduction form
-but no thread-level form; Fortran arms run mt8).
+mt8: blade-cpp threads the join (licensed, fastmath); repro keeps the four ascending
+original chains (`serial (repro): k ascending original chains`) with only the input map
+threaded; blade-llvm has no OpenMP (serial-only). The serial arms' `fold form:` lines are
+unchanged by the `where omp` clause (it implies the simd form the join already took).
 
 ## Hypothesis
 
@@ -88,8 +99,8 @@ but no thread-level form; Fortran arms run mt8).
 - vs expert, `repro`: **equivalent** (same loop, four serial chains each).
 - vs expert, `licensed`: **both Blade lanes equivalent** (all three vectorize the four
   accumulators; before the flip the C++ lane kept four serial chains — fixed).
-- mt8: if no parallel form exists, the Blade cell is "no parallel form" and the expert's
-  8-thread reduction wins outright — reported as a gap, not hidden.
+- mt8 (licensed): blade-cpp's threaded join vs the expert's 8-thread reduction -- same
+  one-team, one-sweep shape; measured by the runner (no forecast here).
 
 ## Risks
 

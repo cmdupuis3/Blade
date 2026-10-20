@@ -24,7 +24,7 @@
     "natural": "WIN 2-3x (one pass vs four)",
     "expert": "parity"
   },
-  "notes": "mt8: Blade has no parallel form (<&!> leg licence emitted serial; the input generator is parallel -- review M24); Fortran arms run it. Input share ~50%.",
+  "notes": "mt8: blade-cpp threads the <&!> join (round 2, G7: `where omp` on the join's fold kernel is the request, each leg's builtin + its own licence; one generalized Path B team over the one sweep, fixed ascending-chunk combine); repro keeps the four ascending chains (only the input map threads); blade-llvm has no OpenMP. Input share ~50%.",
   "arms": [
     "blade-llvm",
     "blade-cpp",
@@ -34,5 +34,5 @@
     "ifx-expert"
   ],
   "source_of_truth": "bench/kernels/onepass/spec.md + bench/notes/kernel-list.md (2026-10-17)",
-  "no_parallel_form": true
+  "no_parallel_form": false
 }

@@ -550,9 +550,15 @@ def load_kernel(kdir: Path) -> Kernel:
     tol = {fp: float(v) for fp, v in raw.get("tolerance", {}).items()}   # overrides of config.json
     sources = {"blade": f"{name}.blade", "natural": "natural.f90", "expert": "expert.f90"}
     sources.update(raw.get("sources", {}))
+    # `true` = every regime, `false` (or absent) = none, else a list of regime names.
+    # `false` used to reach `list(False)` and crash the load.
     npf = raw.get("no_parallel_form", [])
     if npf is True:
         npf = ["all"]
+    elif npf is False or npf is None:
+        npf = []
+    elif not isinstance(npf, list):
+        raise HarnessError(f"{path}: no_parallel_form must be true, false or a list of regime names")
     return Kernel(name=name, dir=kdir, group=str(raw.get("group", "?")), sizes=sizes, arms=arms,
                   regimes=list(regimes), tolerance=tol,
                   input_tolerance=float(raw.get("input_tolerance", 0.0)),

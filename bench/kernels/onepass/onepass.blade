@@ -4,10 +4,13 @@
 //   S1 = sum x,  S2 = sum x^2,  S3 = sum x^3,  S4 = sum x^4  (powers by repeated multiplication)
 //   checksum = S1 + 2 S2 + 3 S3 + 4 S4
 //
-// One loop object over x, one kernel per statistic, <&!>-fused and folded by (+): the chain
-// compiles to one sweep filling four accumulators. There is no licensed parallel spelling of
-// a <&!> join today (notes/llvm-acceptance-B.md F4), so the source carries no fold licence;
-// the mt8 row reads "no parallel form". The input map carries its own licence.
+// One loop object over x, one kernel per statistic, <&!>-fused and folded by one builtin `+`:
+// the chain compiles to one sweep filling four accumulators. The join's fold kernel carries
+// the thread REQUEST (`where omp`, gap G7; the expert's `!$omp parallel do reduction` is the
+// same request); each leg's licence is its own builtin `+`. In the C++ lane the mt8 build
+// threads the ONE sweep (generalized Path B: four private accumulators per chunk, a fixed
+// ascending-chunk combine onto each seed); serial and repro builds are unchanged by the
+// clause. The input map carries its own licence.
 
 type Ix = Idx<5000011>   // SIZE n
 
@@ -29,7 +32,8 @@ function inputs() -> Array<Float64 like Ix> = {
 function kernel(x: Array<Float64 like Ix>) -> Float64 = {
     let l = method_for(x)
     let (s1, s2, s3, s4) = reduce((l <@> lambda(v) -> v) <&!> (l <@> lambda(v) -> v * v)
-        <&!> (l <@> lambda(v) -> v * v * v) <&!> (l <@> lambda(v) -> v * v * v * v), (+))
+        <&!> (l <@> lambda(v) -> v * v * v) <&!> (l <@> lambda(v) -> v * v * v * v),
+        lambda(u, v) where omp -> u + v, 0.0)
     s1 + 2.0 * s2 + 3.0 * s3 + 4.0 * s4
 }
 

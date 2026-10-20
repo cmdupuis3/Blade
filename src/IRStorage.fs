@@ -127,6 +127,56 @@ and ChunkFoldForm =
     /// static work gate (`rows` outer indices, `cells` inner fold steps in all).
     | ChunkRowSlots of rows: int64 * cells: int64
 
+/// THREADED REDUCTION JOIN (bench gap G7): the generalized Path B form of a
+/// `<&!>` join / fused fold -- ONE team over the join's ONE shared traversal,
+/// never one team per leg. Built by `CodeGenFusion.joinedFoldThreadPlan` (the
+/// decision: an explicit `where omp` request on the join's fold kernel, on a
+/// leg's fold kernel, or a leaf map request covering the outer level; EVERY
+/// leg's own reorder licence, never OR-ed across legs; the shared-traversal
+/// purity/shape checks), consumed by `genFusedLoopNestStreamedWith`.
+///
+/// The schedule is the builtin `+`/`*` specialization of the FoldChunkPlan
+/// contract (ChunkSimd): the caller has already declared every leg's
+/// accumulator and seeded it with the leg's ORIGINAL seed (evaluated once,
+/// before the team); the extent is hoisted, the requested team bounded by it
+/// and the range partitioned with the ACTUAL team size through
+/// `blade_fold::chunk_lo`; each worker seeds one private accumulator per leg
+/// with the operator's identity (a nonzero caller seed never enters a
+/// partial), runs the shared sweep (shared leaves evaluated once per
+/// coordinate, one load per operand) under ONE
+/// `BLADE_OMP_SIMD_REDUCTION(op: p1, .., pk)`, and publishes its partials when
+/// its chunk was non-empty; after the region every leg combines its partials
+/// in ascending chunk order onto its seeded accumulator.
+type JoinedFoldChunkPlan = {
+    /// Uniquifying suffix for the generated locals (the join binding's name).
+    Tag: string
+    /// The ONE builtin operator every leg folds with (`+` or `*`).
+    Op: string
+    /// One descriptor per fold leg, in leg order.
+    Legs: JoinedFoldLeg list
+    /// true: one `BLADE_OMP_SIMD_REDUCTION` over the private accumulators
+    /// inside each chunk; false (`BLADE_FOLD_LANES=off`): a scalar private
+    /// chain per leg per chunk (the team is kept).
+    ChunkSimd: bool
+    /// Where the thread request came from, for the applied `omp` record.
+    Provenance: string
+}
+
+/// One leg of a threaded reduction join.
+and JoinedFoldLeg = {
+    /// The caller-declared accumulator (seeded with the leg's original seed).
+    AccName: string
+    /// Its C++ type.
+    ElemCpp: string
+    /// The leg's ORIGINAL seed as rendered C++ (documentation: it enters the
+    /// fold once, as the accumulator's initializer, never a partial).
+    Seed: string
+    /// The leg's fold-kernel wrapper (the serial form's combine).
+    Wrapper: string
+    /// The leg's own licence fact, for the record (`builtin +`, ...).
+    Licence: string
+}
+
 /// Hot-row fold scheduling (Blade.Optimize.planHotRowFolds, bench review
 /// item M13): what the producer's nest places around and inside its
 /// OUTERMOST loop so the consumer's per-row fold runs behind each produced

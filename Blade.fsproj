@@ -138,6 +138,10 @@
     <Compile Include="src/IRAccess.fs" />
     <Compile Include="src/IRLift.fs" />
     <Compile Include="src/IRMono.fs" />
+    <!-- The closed purity/totality whitelist (G35 row slots, G7 threaded
+         joins), lane-neutral so the optimizer's sibling-fold pass and the C++
+         emitters apply ONE predicate. Before Optimize, after IR. -->
+    <Compile Include="src/IRTotality.fs" />
     <Compile Include="src/Optimize.fs" />
     <Compile Include="src/IRPrint.fs" />
     <Compile Include="src/IRValidate.fs" />

@@ -91,7 +91,8 @@ let internal suiteClearedKnobs =
       "BLADE_LLVM"; "BLADE_LLVM_BRICKS"; "BLADE_LLVM_FACTS"
       "BLADE_AD_HALO_GATHER"; "BLADE_SHAPE_SPEC_CAP"; "BLADE_RUN_RECORD"
       "BLADE_SYRK_TILE"; "BLADE_ANTISYM_TILE"; "BLADE_SIMPLEX_TILE"; "BLADE_ORBIT_FOLD"
-      "BLADE_DOMAIN_DIAGONAL"; "BLADE_TILE_TUNE"; "BLADE_FOLD_LANES"; "BLADE_FOLD_ROW_SLOTS" ]
+      "BLADE_DOMAIN_DIAGONAL"; "BLADE_TILE_TUNE"; "BLADE_FOLD_LANES"; "BLADE_FOLD_ROW_SLOTS"
+      "BLADE_JOIN_THREADS" ]
     @ Blade.Optimize.optimizerGates
 
 /// Knobs `blade test` SETS (after the clear above) rather than leaves unset,

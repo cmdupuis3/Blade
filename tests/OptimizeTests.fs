@@ -2580,22 +2580,100 @@ let private siblingPlanCase (name: string) (pins: (string * string) list) (src: 
                             (want: Blade.Effects.Decision -> bool) (describe: string) =
     withGates pins (fun () -> planCase name src "sibling-folds" want describe)
 
-/// Threads on, licensed: declined on the thread gate, and the kernel's Path B
-/// team is still planned.
+/// Threads on, licensed, BLADE_JOIN_THREADS=0: declined on the thread gate,
+/// and the kernel's Path B team is still planned.
 let private siblingThreadGate () =
     let name = "sibling_folds_thread_gate_keeps_path_b"
-    let pins = [ ("BLADE_OMP_THREADS", null); ("BLADE_FP_REPRO", null); ("BLADE_SIBLING_FOLDS", null) ]
+    let pins = [ ("BLADE_OMP_THREADS", null); ("BLADE_FP_REPRO", null); ("BLADE_SIBLING_FOLDS", null); ("BLADE_JOIN_THREADS", "0") ]
     match withGates pins (fun () -> planDecisionsOf siblingDotSrc) with
     | Error e -> resultLine Fail name e; false
     | Ok ds ->
-        let gate = ds |> List.exists (fun d -> d.Rule = "sibling-folds" && declinedMentioning "a leg requests threads in this build" d)
+        let gate = ds |> List.exists (fun d -> d.Rule = "sibling-folds" && declinedMentioning "a leg requests threads in this build and BLADE_JOIN_THREADS=0" d)
         let pathB = ds |> List.exists (fun d -> d.Rule = "omp" && applied d && evidenceMentioning "Path B" d)
         if gate && pathB then
-            resultLine Pass name "declined (a leg requests threads; no thread-level join form, G7); the Path B team is kept"
+            resultLine Pass name "BLADE_JOIN_THREADS=0: declined (a leg requests threads; the join would stay serial); the Path B team is kept"
             true
         else
             let seen = ds |> List.map Blade.Effects.Decisions.render |> String.concat " | "
             resultLine Fail name ($"gate={gate} pathB={pathB}; the record: {seen}")
+            false
+
+/// Threads on, licensed, the threaded join on (the default): the requesting
+/// leg AND the two builtin input sums carry their own licences, so the group
+/// joins (G7 policy: a request on some leg, every leg licensed) and the
+/// synthesized join opens ONE team over the shared traversal -- the leg's own
+/// `where omp` request carried, none manufactured.
+let private siblingThreadedJoin () =
+    let name = "sibling_folds_joins_and_threads_under_g7_policy"
+    let pins = [ ("BLADE_OMP_THREADS", null); ("BLADE_FP_REPRO", null); ("BLADE_SIBLING_FOLDS", null); ("BLADE_JOIN_THREADS", null) ]
+    match withGates pins (fun () -> planDecisionsOf siblingDotSrc) with
+    | Error e -> resultLine Fail name e; false
+    | Ok ds ->
+        let joined = ds |> List.exists (fun d -> d.Rule = "sibling-folds" && applied d)
+        let team = ds |> List.exists (fun d -> d.Rule = "omp" && applied d && evidenceMentioning "Path B joined chunks, G7" d && evidenceMentioning "leg 0's fold kernel" d)
+        if joined && team then
+            resultLine Pass name "applied: the kernel fold and both input sums join, and the join threads (requested by leg 0's own `where omp`)"
+            true
+        else
+            let seen = ds |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+            resultLine Fail name ($"joined={joined} team={team}; the record: {seen}")
+            false
+
+/// THE NO-LOST-TEAM INVARIANT (Codex W2-E finding 1): in a threaded licensed
+/// build, an APPLIED sibling rewrite of a group with a requesting leg implies
+/// an APPLIED joined team; otherwise the rewrite declines and the requesting
+/// fold's own Path B team survives. The dot shape with a negative integer
+/// power in the summand: `sfTotal` alone would admit it (Float^Int negative
+/// is a reciprocal, total), but the threaded join's whitelist refuses it, so
+/// the pass must decline (the SAME predicate, Blade.IRTotality).
+let private siblingNegPowSrc =
+    siblingDotSrc.Replace("lambda(x, y) -> x * y,", "lambda(x, y) -> (x * y) ^ -1,")
+
+let private siblingNoLostTeam (label: string) (src: string) (wantJoined: bool) () =
+    let name = $"sibling_folds_no_lost_team_{label}"
+    let pins = [ ("BLADE_OMP_THREADS", null); ("BLADE_FP_REPRO", null); ("BLADE_SIBLING_FOLDS", null); ("BLADE_JOIN_THREADS", null) ]
+    if not (src.Contains "where omp") || (label = "negative_power" && not (src.Contains "^ -1")) then
+        resultLine Fail name "test bug: the source lost its request or its negative power"
+        false
+    else
+    match withGates pins (fun () -> planDecisionsOf src) with
+    | Error e -> resultLine Fail name e; false
+    | Ok ds ->
+        let joined = ds |> List.exists (fun d -> d.Rule = "sibling-folds" && applied d)
+        let joinedTeam = ds |> List.exists (fun d -> d.Rule = "omp" && applied d && evidenceMentioning "Path B joined chunks, G7" d)
+        let ownTeam = ds |> List.exists (fun d -> d.Rule = "omp" && applied d && evidenceMentioning "outer level chunked per thread (Path B)" d)
+        let ok = (if joined then joinedTeam else ownTeam) && joined = wantJoined
+        let seen = ds |> List.filter (fun d -> d.Rule = "sibling-folds" || d.Rule = "omp") |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+        if ok then
+            resultLine Pass name (if joined then "applied rewrite => applied joined team" else "declined => the requesting fold keeps its own Path B team")
+            true
+        else
+            resultLine Fail name ($"joined={joined} (wanted {wantJoined}) joinedTeam={joinedTeam} ownTeam={ownTeam}; the record: {seen}")
+            false
+
+/// Threads on, licensed: a requesting leg beside an UNLICENSED leg declines
+/// the group (the threaded join needs every leg licensed), so the requesting
+/// fold keeps its own team.
+let private siblingThreadGateUnlicensedSrc =
+    "type R = Idx<1009>\n"
+    + "let (s, t) = {\n"
+    + "    let x = method_for(range<R>) <@> lambda(i) -> Float64(Int64(i) % 5) |> compute\n"
+    + "    (reduce(x, lambda(p, q) where omp -> p + q, 0.0), reduce(x, lambda(p, q) -> p + 2.0 * q, 0.0))\n"
+    + "}\n"
+
+let private siblingThreadGateUnlicensed () =
+    let name = "sibling_folds_thread_gate_unlicensed_leg_declines"
+    let pins = [ ("BLADE_OMP_THREADS", null); ("BLADE_FP_REPRO", null); ("BLADE_SIBLING_FOLDS", null); ("BLADE_JOIN_THREADS", null) ]
+    match withGates pins (fun () -> planDecisionsOf siblingThreadGateUnlicensedSrc) with
+    | Error e -> resultLine Fail name e; false
+    | Ok ds ->
+        let gate = ds |> List.exists (fun d -> d.Rule = "sibling-folds" && declinedMentioning "not every leg carries its own reorder licence" d)
+        if gate then
+            resultLine Pass name "declined: a requesting leg beside an unlicensed leg (no licence is borrowed)"
+            true
+        else
+            let seen = ds |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+            resultLine Fail name ($"gate={gate}; the record: {seen}")
             false
 
 /// Licence mismatch: a builtin (+) leg beside an unlicensed lambda leg, in a
@@ -2814,6 +2892,10 @@ let private siblingCases () =
                     && evidenceMentioning "unseeded (+) legs seeded -0.0: bit-exact for every reachable value" d)
           "applied: 3 folds over {a, b}, kernel(a, b) inlined, unseeded legs seeded -0.0"
       siblingThreadGate ()
+      siblingThreadedJoin ()
+      siblingThreadGateUnlicensed ()
+      siblingNoLostTeam "dot_shape" siblingDotSrc true ()
+      siblingNoLostTeam "negative_power" siblingNegPowSrc false ()
       siblingPlanCase "decision_sibling_folds_disabled" (siblingSerialPins @ [ ("BLADE_SIBLING_FOLDS", "0") ]) siblingDotSrc
           (declinedMentioning "disabled by BLADE_SIBLING_FOLDS") "declined: disabled by BLADE_SIBLING_FOLDS"
       siblingConvergence "repro" siblingSerialPins 0 ()

@@ -1,0 +1,18 @@
+// TEST: Threaded Reduction Join Declines A Serial Captured Write
+// Bench gap G7: the join's fold kernel requests omp, but one leg's MAP kernel
+// assigns a captured `let mut` (legal: that map is not itself a parallel
+// body, so the front end's write ban does not apply). A team would race on
+// the counter, so the threaded join DECLINES on the effect (the closed
+// purity/totality whitelist) with the census line, and the serial join keeps
+// the serial semantics: the counter is bumped once per cell, in order.
+let mut counter = 0
+let x = [1.0, 2.0, 3.0]
+let l = method_for(x)
+let (s1, s2) = reduce((l <@> lambda(v) -> {
+    counter = counter + 1
+    v
+}) <&!> (l <@> lambda(v) -> v * v), lambda(u, v) where omp -> u + v, 0.0)
+let seen = counter
+// EXPECT: seen = 3
+// EXPECT: s1 = 6.0
+// EXPECT: s2 = 14.0
