@@ -540,6 +540,87 @@ below parity. Then RESULTS.md section 15 and the gap register.
   Confirmed: the G41 predicate fixes the serial failure too; G42's path offsets work for
   arbitrary nesting; FoldOmpDecline per nest; provider writes are a side table. Bug 3 policy
   ACCEPTED. Sent to W2-F.
+- Gate consoles decoded (UTF-16): **default TOTAL 7024 passed, 0 failed** (baseline 6800);
+  **llvm 780/0/680**; **opt-diff 2037/0/915**; **docs 131/0/78**; interp still running
+  (runner summary pending). NEW harness mirror + smoke evidence being staged from the
+  6b3e5293 binary.
+- W2-E fixes landed (178973e9 shared admission; ca494bac tests): new `src/IRTotality.fs`
+  (after IRMono, before Optimize) holds the closed purity/totality whitelist used by
+  rowSlotWalk, the joined emitter AND the sibling pass; a requesting group joins only if the
+  knob is on, every leg licensed, one builtin op, every map passes the audit (the `(x*y)^-1`
+  reproducer now declines with the reason and keeps its Path B team); refusal-boundary cases
+  in both entry shapes, product legs (identity 1 partials), zero-extent seeded joins,
+  index-identity rejection on hand-built IR, OMP_THREAD_LIMIT=3 observed (team 3 of 8
+  requested, five slots unpublished). omp-pragma 103/0, omp-reduce 117/0, omp-coverage 10/0,
+  optimize 238/0, loops 253/0, sibling-folds 18/0, cli 126/0, corpus-wiring 14/0, interp loops
+  254/0, opt-diff loops 223/0/30, symmetry 131/0. READY TO MERGE after W2-D. W2-A asked to
+  merge W2-E's branch into its own and adopt IRTotality (it had moved the same whitelist into
+  CodeGenExprSupport) before it reports. Wave-2 merge order: W2-D -> W2-E -> W2-F -> W2-A.
+- **WAVE-1 GATES ALL GREEN on 6b3e5293** (runner `w1-gates-summary.md`): `blade test` TOTAL
+  7024 passed, 0 failed, 0 skipped (18.5 min; baseline 6800/0/1 -- the docs skip gone);
+  opt-diff 2037 passed (1845 inert), 0 failed, 915 skipped (5.5 min; baseline 1999);
+  docs 131/0/78; llvm 780/0/680 (24.3 min; baseline 745/0/677); interp 2949/0/3
+  skip-unsupported (48.6 min; baseline 2912/0/2 -- the new skip is the compaction
+  mutated-compound fixture, no interpreter compound element store). No BL9002, no Value
+  Error. Box was loaded (builders + an unrelated `blade ide serve`), wall times not
+  timing-grade.
+- W2-D merged (e33daa84) and W2-E merged (clean, no conflicts) into `worktree-bench-fortran`;
+  building. Wave-1 harness A/B next: OLD mirror (4136f0b5) vs NEW mirror (6b3e5293 copy,
+  smoke evidence being generated), with W2-A/W2-F idle.
+- Merged tree (W2-D + W2-E) built clean (Blade.dll 64E4DD2C); post-merge blocks all green:
+  optimize 246/0, omp 103/117/10, linalg 24/19, syrk-tile 4/0, row-tile 24/0, llvm tiles
+  12/0, llvm facts 60/0, loops 253/0, sibling-folds 18/0, symmetry 132/0, index-types 380/0,
+  cell-epilogue 56/0, fold-lanes 4/0, cli 128/0, corpus-wiring 14/0; `run.py check onepass`
+  (serial + mt8 regimes) 0 failures, the new mt8 blade-cpp arm ok with 3 OpenMP constructs.
+- NEW mirror staged (bin copy of 6b3e5293, hash 3061E900; bench content identical to OLD
+  except gap-register + round2 notes); NEW smoke exit 0, 536 cells 484/42/8/2 = OLD, 0
+  wave-1 regressions. **WAVE-1 A/B STARTED** (OLD 4136f0b5 vs NEW 6b3e5293, quiet-box check
+  first); W2-A and W2-F asked to IDLE.
+- W2-A fixes landed (50f18be4: LLVM gate takes `APool` only with regressions incl. the
+  first-error order; `where repro` kernels excluded from the inline-add shortcut -- the bug
+  was CONFIRMED first: old C++ scatter printed 5.55e-17 where the walk prints 0.0 under the
+  default contracting build; symmetry/136 pins `"0.0"` at contract=fast in both lanes; LLVM
+  emitter records its own scatter decisions merged by span, G35 marker no longer claims the
+  scatter, cli cases for G35 / unforced source / Float32; `scatterThreadRequests` collects
+  every level's requests for the census; row renumbered G44, timings labelled cross-binary)
+  and W2-E MERGED IN (52d0c4aa: `planStrict` judges totality with `IRTotality.walk` /
+  `auditCallable`, duplicate helpers deleted; CodeGenBinding = W2-E's file + 130 scatter
+  lines). Post-merge: optimize 249/0, symmetry 136/0, orbit-scatter 17/0, omp 109/117/10,
+  loops 253/0, sibling-folds 18/0; cli / corpus-wiring / interp symmetry still to run on
+  RESUME. **Pre-existing bug found (card):** a logical walk reading an UNFORCED
+  `method_for(g) <@> lambda(v) -> ...` map over a compact pool fails BL9002 in the C++ lane
+  (`'h2' was not declared`), integration binary too, scatter knob off too -- the
+  unforced-source regressions are LLVM-only for now. W2-A idle.
+- W2-F fixes landed (e69b9f83 G41: storage-provenance write analysis -- local only when the
+  storage is proved fresh in the body: literal / `|> compute` / let-rec buffer / scalar /
+  `let mut` deep copy / alias-view-projection of such; views of captured arrays, call results
+  and unproved = external; argument-aware callee summaries; deferred producers followed to a
+  materialization boundary; unresolved head = write; loops/489 (row-view write) old
+  138996548 + three mt8 values -> new 141149320 everywhere; LLVM `FoldOperandWrites`
+  suppresses fold fast-math when the operand writes, loops/490 + llvm goldens; omp-reduce
+  g41 runtime cases 486/487/489 at T=1 and 5x T=8. 85a02d76 G43: refusal checks every
+  IRReduceCompute with 2+ leaves or a tuple kernel incl. the shared scalar kernel, callables
+  through let aliases, deferred aliases via the let table, unresolved callee = write;
+  mutability-errors/017-020; 014-020 pin message + span; G45 OPENED (36 vs 20
+  scope-dependent evaluation; loops/491) and the "68 vs 20" report recorded open; policy
+  wording. 03e88cb4 G42 follow-up: a function-body alias of a flat join tuple (BL9002 old and
+  new) now routes through genBinding; tuples/033.) 25 blocks green on the final binary.
+  Declared limits: codegen-side analysis cannot see `let mut` deep copies (conservative
+  decline); `foldReorderLicensed` does not follow deferred maps a fold KERNEL reads; a
+  possible checker bug with a local `let mut s` shadowing the fold's own `s` (renamed in the
+  test). Codex RE-REVIEW launched (read-only during the A/B window). W2-F idle.
+- Codex re-review of W2-F: DO NOT MERGE yet -- 2/5/6/7/8 closed; NEW blocker 9: provenance
+  frozen at the initializer (a local rebound to a captured view `t = G(0)` keeps "fresh");
+  NEW high 10: the deferred closure stops at IRChoice/IRFallback/IRGuard/IRSequence wrappers
+  (a named choice of a writing map escapes the join refusal) and an unresolved IRVar in a
+  KERNEL slot falls through as pure; NEW blocker 11: ordinary IRReduce (e.g. over a choice)
+  bypasses LLVM's FoldOperandWrites, and a fold kernel reading a writing deferred map gets
+  `reassoc` on its inner fold. Merge hazards: W2-E's tests (loops/489, three g7 decline cases)
+  encode the OLD acceptance policy and must become BL4005 refusals under G43; joined-team
+  admission must intersect write-aware foldReorderLicensed with every leaf/shared-producer
+  effect; loops/486-491 numbered on both branches. Sent to W2-F with the instruction to merge
+  the integration tip d332f700 (wave 1 + W2-D + W2-E) into its branch now (git only) and
+  reconcile, building after RESUME.
 
 ## 6. Decisions taken by the orchestrator
 
