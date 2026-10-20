@@ -1,0 +1,27 @@
+// TEST: Parallel Callback Tuple Parameter Reads Scalar All Pure
+// Gap G47 (Codex review W2F-9 finding 29, second probe): a tuple holding the
+// callable `k` (an alias of launch) is passed to `tag`, which reads only its
+// scalar component. A parameter that may hold a function -- a function type
+// or a TUPLE with a function component -- is tracked component-wise, so the
+// call is not an escape and launch's `f` stays {ident}: the pure `where omp`
+// kernel keeps its team (omp-pragma pins the pragma). f1910060 escaped the
+// tuple at the untracked parameter and refused this write-free program
+// BL4005; mutability-errors/043 is the twin whose tuple parameter CALLS the
+// callable with a writer.
+type I = Idx<2>
+type F = (Float64) -> Float64
+type R = Array<Float64 like I>
+type H = (F) -> R
+function ident(v: Float64) -> Float64 = v
+function launch(f: F) -> R = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute
+function tag(p: (H, Int64)) -> Int64 = p[1]
+function via(h: H, f: F) -> R = {
+    let k = h
+    let t = (k, 0)
+    let n = tag(t)
+    h(f) + Float64(n)
+}
+let a = launch(ident)
+let b = via(launch, ident)
+// EXPECT: a = [0.0, 1.0]
+// EXPECT: b = [0.0, 1.0]

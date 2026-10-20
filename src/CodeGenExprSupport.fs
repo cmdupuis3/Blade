@@ -1703,6 +1703,41 @@ let programCallbackArgsCell () : Map<IRId, IRExpr list> ref =
         fresh
     else v
 
+let internal programMutableArrayLetsStorage =
+    System.Threading.AsyncLocal<Set<IRId> ref>()
+
+/// The module's ASSIGNABLE array lets (IRModule.MutableArrayLets: every block
+/// array `let`, since a plain block let is assignable in its scope, and every
+/// `let mut`), installed beside programLetValuesCell by each emitter's program
+/// entry. A dense one initialized from an existing array DEEP-COPIES it in
+/// every lane (gap G46): genVarAliasBinding for a binding-level let, the
+/// expression emitter's kernel-body copy (CodeGenExpr.kernelLetCopy) for a let
+/// inside an IIFE kernel body -- the interpreter's IRLet arm copies both.
+let programMutableArrayLetsCell () : Set<IRId> ref =
+    let v = programMutableArrayLetsStorage.Value
+    if isNull (box v) then
+        let fresh = ref Set.empty
+        programMutableArrayLetsStorage.Value <- fresh
+        fresh
+    else v
+
+/// The dense, plain-index array shapes whose assignable let deep-copies its
+/// initializer (the shapes genVarAliasBinding / the interpreter copy; a
+/// compound / ragged / dependent-index store keeps the historical alias).
+let isDenseCopyLetType (t: IRType) : bool =
+    match t with
+    | ArrayElem at -> at.IndexTypes |> List.forall (fun ix -> ix.IxKind = IxKPlain && ix.Symmetry = SymNone)
+    | _ -> false
+
+/// `let x = Z` (Z an existing dense array) whose x is assignable: x holds a
+/// private copy, so a write through x writes nothing Z's other names see.
+/// The same rule Lowering's write facts use (its `copied`).
+let isCopiedArrayLet (id: IRId) : bool =
+    Set.contains id (programMutableArrayLetsCell ()).Value
+    && (match Map.tryFind id (programLetValuesCell ()).Value with
+        | Some (IRVar (_, ty)) -> isDenseCopyLetType (stripUnits ty)
+        | _ -> false)
+
 let computeProgramCallbackArgs (modul: IRModule) : Map<IRId, IRExpr list> =
     // the SAME collector Lowering uses (Optimize.callbackTable)
     Blade.Optimize.callbackTable resolveCallable modul.Functions (modul.Bindings |> List.map (fun b -> (b.Id, b.Value)))
@@ -1713,9 +1748,9 @@ let private codegenWriteFacts (deferred: Map<IRId, IRExpr>) : Blade.Optimize.Wri
           match Map.tryFind id deferred with
           | Some v -> Some v
           | None -> Map.tryFind id (programLetValuesCell ()).Value)
-      // codegen does not know which lets deep-copy here: an alias of a
-      // captured array counts as the captured array (a decline, never wrong)
-      CopiedLet = (fun _ -> false)
+      // an assignable dense `let x = Z` deep-copies Z in every lane (gap G46:
+      // the C++ kernel-body let copies too now), so a write through x is local
+      CopiedLet = isCopiedArrayLet
       UnknownIsWrite = true
       // a callback joins EVERY argument its call sites pass (Codex finding 22)
       Callbacks = (fun id ->

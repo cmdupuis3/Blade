@@ -1641,6 +1641,86 @@ and bindInlineGathers (subst: SubstMap) (names: Map<IRId, string>) (operands: IR
         if binds |> List.forall (fun (n, _, _) -> not (inner.Contains n)) then inner
         else $$"""([&]() { {{decls}} auto __gres = {{inner}}; {{frees}} return __gres; }())"""
 
+/// GAP G46 -- a let INSIDE a kernel body (rendered here, in an IIFE) that the
+/// module records as an ASSIGNABLE array let (IRModule.MutableArrayLets) and
+/// whose value is an existing DENSE array deep-copies it, exactly as the
+/// binding-level let does (genVarAliasBinding) and as the interpreter's IRLet
+/// arm does: `let mut c = G; c(0) = ...` writes the copy, never G. (The
+/// kernel-body `auto __v = G;` bound the Array wrapper by value, sharing G's
+/// pool: r = [0, 2, 4] / G = [2, 0] against the interpreter's [0, 1, 2] /
+/// [0, 0].) Returns the copy statements and the statements that free the
+/// copy at the end of its scope, or None to keep the plain binding.
+///
+/// The copy is ELIDED when it is unobservable: the scope assigns nothing,
+/// calls nothing, names no callable (a kernel could write), and yields a
+/// value that holds no storage -- the alias then reads exactly what a copy
+/// would, and a read-only `let row = X` in a kernel costs no allocation per
+/// cell. The copy is FREED at the scope's end only when it provably dies
+/// there: the scope's value holds no storage and every use of the name is a
+/// full element read / write or an extent (no view, no call argument, no
+/// rebinding). Otherwise it is left to the IIFE leak convention
+/// (materializeInlineForm's expression-position consumers): never a
+/// dangling read.
+and kernelLetCopy (subst: SubstMap) (names: Map<IRId, string>) (id: IRId) (value: IRExpr) (body: IRExpr) : (string list * string list) option =
+    match value with
+    | IRVar _ when Set.contains id (programMutableArrayLetsCell ()).Value ->
+        let vty = stripUnits (inferExprType value)
+        // the shapes genVarAliasBinding copies (and the interpreter's
+        // isDenseCopyableArray): every store but compound / sparse, ragged
+        // and dependent-index ones -- symmetric and antisymmetric pools too
+        let copyable =
+            match vty with
+            | ArrayElem at ->
+                not (isCompoundArrayType at) && not (isSparseArrayType at)
+                && not (isRaggedArrayType at) && not (isDepIdxArrayType at)
+                && at.IndexTypes |> List.forall (fun ix -> ix.IxKind <> IxKCompoundDynamic)
+                // a pool the copy form can allocate (no wreath class)
+                && (match classifyOutputStorage vty with
+                    | AllocWreath _ | AllocUnsupported _ -> false
+                    | _ -> true)
+            | _ -> false
+        if not copyable then None
+        else
+            let noStorage (e: IRExpr) =
+                isUnitExpr e || (try Blade.Optimize.holdsNoStorage (inferExprType e) with _ -> false)
+            let mutable effectful = false
+            iterIRExpr (fun n ->
+                match n with
+                | IRAssign _ | IRApp _ -> effectful <- true
+                | IRVar (_, t) when Blade.Optimize.isFunctionValuedType t || (resolveCallable n).IsSome -> effectful <- true
+                | IRParam (_, _, t) when Blade.Optimize.isFunctionValuedType t -> effectful <- true
+                | _ -> ()) body
+            let scalarBody = noStorage body
+            if not effectful && scalarBody then None
+            else
+                match vty with
+                | ArrayElem at ->
+                    match materializeArrayCopyForm subst names ($"__v{id}") (elemTypeToCpp at.ElemType) value with
+                    | Some (stmts, allocs) ->
+                        // every use a FULL element access or an extent
+                        let rec elementOnly (e: IRExpr) =
+                            match e with
+                            | IRIndex (IRVar (j, _), ix, _) when j = id -> noStorage e && ix |> List.forall elementOnly
+                            | IRExtent (IRVar (j, _), _) when j = id -> true
+                            | IRVar (j, _) when j = id -> false
+                            | ExprShape (children, _) -> children |> List.forall elementOnly
+                        let frees =
+                            if scalarBody && elementOnly body then
+                                allocs |> List.collect (fun m ->
+                                    match m with
+                                    | MatPoolSpec (n, spec, elem, rank, symm, extentsName, ownedExtents) ->
+                                        (match deallocArgsFor spec elem rank symm extentsName with
+                                         | Ok (routine, args) ->
+                                             [ $"{routine}<{args}>({n}.data, {n}.extents);" ]
+                                             @ (match ownedExtents with Some ex -> [ $"delete[] {ex};" ] | None -> [])
+                                         | Error _ -> [])
+                                    | _ -> [])
+                            else []
+                        Some (stmts, frees)
+                    | None -> None
+                | _ -> None
+    | _ -> None
+
 and renderLetExpr (subst: SubstMap) (names: Map<IRId, string>) id value body : string =
     // For inline let expressions, we need statement context
     let names' = Map.add id ($"__v{id}") names
@@ -1691,6 +1771,18 @@ and renderLetExpr (subst: SubstMap) (names: Map<IRId, string>) id value body : s
                 else exprToCppCore subst names' body
             let prelude = preludeStmts |> String.concat " "
             $$"""([&]() { {{prelude}} return {{bodyStr}}; }())"""
+        | None ->
+        match kernelLetCopy subst names id value body with
+        | Some (copyStmts, frees) ->
+            // G46: a private deep copy of an existing dense array
+            let prelude = copyStmts |> String.concat " "
+            let fr = frees |> String.concat " "
+            if isUnitExpr body then
+                $$"""([&]() { {{prelude}} {{(renderUnitStmts subst names' body)}} {{fr}} }())"""
+            elif frees.IsEmpty then
+                $$"""([&]() { {{prelude}} return {{(exprToCppCore subst names' body)}}; }())"""
+            else
+                $$"""([&]() { {{prelude}} auto __r{{id}} = {{(exprToCppCore subst names' body)}}; {{fr}} return __r{{id}}; }())"""
         | None ->
             let valStr = exprToCppCore subst names value
             match body with
@@ -1744,18 +1836,22 @@ and renderUnitStmts (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) 
         // forms (mask/sort/...) get their multi-statement materialization,
         // mirroring renderLetExpr's expression-position handling.
         let names' = Map.add letId ($"__v{letId}") names
-        let valueStmt =
+        let (valueStmt, frees) =
             if isUnitExpr value then
-                renderUnitStmts subst names value
+                (renderUnitStmts subst names value, "")
             else
                 // Lazy for the same reason as renderLetExpr's site above: this
                 // arm sees every statement-position let value, inline form or not.
                 match materializeInlineForm subst names ($"__v{letId}") (lazy (inferInlineElemTypeStr "statement-position let" value)) value with
                 // Inline statement TEXT for an enclosing IIFE -- same
                 // no-scope-exit situation as renderLetExpr above; drop.
-                | Some (prelude, _) -> prelude |> String.concat " "
-                | None -> $"auto __v{letId} = {(exprToCppCore subst names value)};"
-        [valueStmt; renderUnitStmts subst names' body]
+                | Some (prelude, _) -> (prelude |> String.concat " ", "")
+                | None ->
+                    // G46: an assignable let of an existing dense array copies
+                    match kernelLetCopy subst names letId value body with
+                    | Some (copyStmts, fr) -> (copyStmts |> String.concat " ", fr |> String.concat " ")
+                    | None -> ($"auto __v{letId} = {(exprToCppCore subst names value)};", "")
+        [valueStmt; renderUnitStmts subst names' body; frees]
         |> List.filter (fun s -> s <> "")
         |> String.concat " "
     | IRSequence elems ->

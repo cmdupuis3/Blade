@@ -2707,6 +2707,63 @@ let private refuseUncountableStorage (modules: IRModule list) : unit =
             for p in f.Params do check f.Name $"parameter '{p.Name}' of '{f.SourceName}'" p.Type
             check f.Name $"the result of '{f.SourceName}'" f.RetType
 
+/// ONE EVALUATION CONTRACT FOR AN EFFECTFUL NAMED DEFERRED MAP (gap G45;
+/// formalism §10.2's closing paragraph). A `let` bound to a bare map
+/// (`method_for(..) <@> k`, an `object_for` application) whose evaluation
+/// WRITES -- its kernel, a callee, or a named deferred producer it reads
+/// assigns storage outside itself -- is evaluated ONCE, COMPLETELY, at its
+/// definition, in ascending storage order, exactly as `|> compute` would:
+/// every later read (two folds, a print, a partial view) reads the stored
+/// array. That was already the rule in a FUNCTION or LAMBDA body, where S2
+/// (forceBareCombinatorLets) forces every body-local map at its let for want
+/// of a downstream forcing site; at MODULE level and in a top-level block the
+/// map stayed deferred and ran once per READ, so the same two folds printed
+/// 36 / counter 8 in a block and 20 / counter 4 once the block was extracted
+/// into a function. A pure map keeps the deferred protocol everywhere (its
+/// evaluation count is unobservable, and fusion depends on it).
+///
+/// The exemption is S2's own, so the two scopes keep ONE rule: a map read
+/// ONLY as the operands of reduction joins stays deferred (sharing by naming:
+/// the join inlines it per joint cell, and the C++ reduction-join emitter
+/// needs the leg unforced), so a writing one is refused by the join rule
+/// (refuseWritingJoinLegs, BL4005, which runs AFTER this pass) in a function
+/// body and at module level alike. A writing map with any other reader -- an
+/// alias, a view, a tuple, a plain fold -- is forced, and a join that reaches
+/// it through that reader reads the stored array: no writing leg. (An unread
+/// closed-form domain map, S2's second exemption, is never left unread when
+/// it writes: the fold splice declines a named writing producer --
+/// tryInferReduceCompute's namedWritingProducer -- so the fold reads it.)
+/// Only bare maps are forced; a writing deferred WRAPPER (choice, fallback,
+/// guard, sequence) keeps the deferred protocol in every scope, and a join
+/// over one is refused. The write judgment is the shared scheduling
+/// predicate (an unresolvable callee counts as a write: forcing a map that
+/// does not write changes no value, only its schedule).
+let private forceEffectfulModuleLets (programFuncs: IRCallable list) (m: IRModule) : IRModule =
+    let writes = Optimize.scheduleMayWriteIn programFuncs m
+    let exempt = joinDeferrableIdsMany (m.Bindings |> List.map _.Value)
+    let isBareMap (v: IRExpr) =
+        match v with
+        | IRApplyCombinator _ | IRComposeApply _ -> true
+        | _ -> false
+    // the statement spine of a top-level block, as S2 walks a body
+    let rec spine (e: IRExpr) : IRExpr =
+        match e with
+        | IRLet (id, value, body) ->
+            let value' =
+                if isBareMap value && not (exempt.Contains id) && writes value then IRCompute value
+                else spine value
+            IRLet (id, value', spine body)
+        | IRIf (c, t, f) -> IRIf (c, spine t, spine f)
+        | IRForRange (vid, lo, hi, body) -> IRForRange (vid, lo, hi, spine body)
+        | IRMatch (scrut, cases) -> IRMatch (scrut, cases |> List.map (fun c -> { c with Body = spine c.Body }))
+        | _ -> e
+    let bindings =
+        m.Bindings |> List.map (fun b ->
+            if isBareMap b.Value then
+                if not (exempt.Contains b.Id) && writes b.Value then { b with Value = IRCompute b.Value } else b
+            else { b with Value = spine b.Value })
+    { m with Bindings = bindings }
+
 /// A JOIN WHOSE LEG WRITES (gap G43, BL4005). A join -- a `<&!>` / `<&>`
 /// tree, or a reduction join `object_for(<&!>) <@> (reduce(..), ..)` -- runs
 /// its legs side by side, one joint cell at a time, and legs naming the same
@@ -2980,6 +3037,11 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     // builder mints exactly the same ids in exactly the same order as before.
     let irModules = IRMono.shapeMonomorphizeModules irModules env.Builder
     refuseUncountableStorage irModules
+    // G45: an effectful named map runs once, at its definition, in every
+    // scope (before the join refusal: a join over a stored map writes nothing)
+    let irModules =
+        let allFuncs = irModules |> List.collect (fun m -> m.Functions)
+        irModules |> List.map (forceEffectfulModuleLets allFuncs)
     refuseWritingJoinLegs irModules
 
     // Every struct the program declares, for `zero` at a struct type

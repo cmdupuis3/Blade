@@ -1470,8 +1470,16 @@ and private genFuncDefCore (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: 
                 { c with GroupedArrays = Map.add cap.Name $"__gk{gkId}" c.GroupedArrays }
             | None -> c)
             // The body's parameters, for the co-iteration extent guard
-            // (CodeGenContext.ParamIds).
-            { ctx with ParamIds = funcDef.Params |> List.map (fun p -> p.VarId) |> Set.ofList }
+            // (CodeGenContext.ParamIds). A CAPTURE arrives as a parameter the
+            // caller materialized (every call site forces a deferred capture
+            // before forwarding it by name), so inside the body it is a stored
+            // array, not the module's deferred computation: a fold in the body
+            // must read it, never re-force it into a temporary of the body's
+            // own (which would spell the producer's module-level inputs).
+            { ctx with
+                ParamIds = funcDef.Params |> List.map (fun p -> p.VarId) |> Set.ofList
+                DeferredComputations =
+                    funcDef.Captures |> List.fold (fun d cap -> Map.remove cap.Id d) ctx.DeferredComputations }
     // A captured GROUPING (`group_keys` / `segments` / `tiles` ...) is refused
     // rather than emitted into g++'s "was not declared in this scope". The
     // binding is an opaque `void*` sentinel whose state lives in locals named
@@ -2075,6 +2083,7 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
     freshCell copyInPlaceMutsStorage (computeCopyInPlaceMuts modul)
     freshCell programLetValuesStorage (computeProgramLetValues modul)
     freshCell programCallbackArgsStorage (computeProgramCallbackArgs modul)
+    freshCell programMutableArrayLetsStorage modul.MutableArrayLets
     freshCell groupedCaptureFactsStorage (computeGroupedCaptureFacts modul)
     freshCell reboundVarIdsStorage (computeReboundVarIds modul)
     // Also after the callables table: kernel bodies are resolved through it.
@@ -2209,6 +2218,7 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
     freshCell copyInPlaceMutsStorage (computeCopyInPlaceMuts modul)
     freshCell programLetValuesStorage (computeProgramLetValues modul)
     freshCell programCallbackArgsStorage (computeProgramCallbackArgs modul)
+    freshCell programMutableArrayLetsStorage modul.MutableArrayLets
     freshCell groupedCaptureFactsStorage (computeGroupedCaptureFacts modul)
     freshCell reboundVarIdsStorage (computeReboundVarIds modul)
     // Also after the callables table: kernel bodies are resolved through it.

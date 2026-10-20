@@ -1,0 +1,17 @@
+// TEST: Reduction Join Over Alias Of Named Writing Map
+// Gap G45 (was mutability-errors/018 under G43). The legs name `alias`, a
+// let alias of the writing map `m`. `m` has a reader other than the join's
+// operand slots (the alias), so -- as S2 already did in a function body --
+// it is evaluated once at its definition and the join reads the stored cells
+// 1..4: s = t = 10, G = 4. A map read ONLY as join operands stays deferred and
+// is refused (mutability-errors/014, in a block and in a function body alike).
+type I = Idx<4>
+let mut G = [0]
+let r = {
+    let m = method_for(range<I>) <@> lambda(i) -> { G(0) = G(0) + 1; G(0) }
+    let alias = m
+    let (s, t) = object_for(<&!>) <@> (reduce(alias, (+)), reduce(alias, (+)))
+    s * 1000 + t
+}
+// EXPECT: r = 10010
+// EXPECT: G = [4]

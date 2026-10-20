@@ -659,10 +659,33 @@ let private emissionShapeCases : (string * string * string list * string list) l
       ("omp_pure_callback_third_order_reversed_keeps_team",
        "type I = Idx<2>\ntype F = (Float64) -> Float64\ntype R = Array<Float64 like I>\ntype H = (F) -> R\ntype Q = (H, F) -> R\ntype D = (Q, F) -> R\nfunction ident(v: Float64) -> Float64 = v\nfunction launch(f: F) -> R = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute\nfunction via(h: H, f: F) -> R = h(f)\nfunction relay(h: D, f: F) -> R = h(via, f)\nfunction bridge(q: Q, f: F) -> R = q(launch, f)\nlet b = relay(bridge, ident)\nlet a = launch(ident)\n",
        [ "BLADE_OMP_PARALLEL_FOR" ], [ "requested but emitted serial" ])
-      ("omp_nest_write_veto_census",
+      // Gap G46: a kernel-body `let mut c = G` DEEP-COPIES G in the C++ lane
+      // too (it used to alias G's pool; the interpreter always copied), so
+      // the backend write analysis reads the copy as LOCAL storage
+      // (CopiedLet) and the `where omp` kernel keeps its team. This was the
+      // census case of the nest's write veto (`omp_nest_write_veto_census`);
+      // every other shape that writes captured storage from a parallel body
+      // is refused BL4005 before the emitter (Lowering's provenance and
+      // callback checks), so the veto stays a backstop. corpus loops/517
+      // pins the values in every lane.
+      ("omp_nest_kernel_let_mut_copy_keeps_team",
        "type K = Idx<2>\ntype I = Idx<3>\nlet G = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute\nlet r = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> {\n    let mut c = G\n    c((0 : K)) = Float64(i)\n    c((0 : K)) + G((0 : K))\n} |> compute\n",
-       [ "[omp] requested but emitted serial: the kernel may write storage outside itself" ],
-       [ "BLADE_OMP_PARALLEL_FOR"; "BLADE_OMP_SIMD\n" ])
+       [ "BLADE_OMP_PARALLEL_FOR"; "std::copy_n(pool_base(G.data)" ],
+       [ "[omp] requested but emitted serial" ])
+      // Gap G47 (Codex review W2F-9 finding 29): RETURN FLOW in the callback
+      // table -- a returned local alias of a callback parameter, a tuple
+      // PARAMETER read only for its scalar, and the further return shapes of
+      // loops/516 -- keeps a pure kernel's team (each was refused BL4005 at
+      // f1910060; the writing twins are mutability-errors/042-047).
+      ("omp_pure_callback_returned_through_local_alias_keeps_team",
+       "type I = Idx<2>\ntype F = (Float64) -> Float64\ntype R = Array<Float64 like I>\ntype H = (F) -> R\nfunction ident(v: Float64) -> Float64 = v\nfunction launch(f: F) -> R = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute\nfunction passthrough(h: H) -> H = {\n    let k = h\n    k\n}\nlet a = launch(ident)\nlet b = passthrough(launch)(ident)\n",
+       [ "BLADE_OMP_PARALLEL_FOR" ], [ "requested but emitted serial" ])
+      ("omp_pure_callback_tuple_parameter_reads_scalar_keeps_team",
+       "type I = Idx<2>\ntype F = (Float64) -> Float64\ntype R = Array<Float64 like I>\ntype H = (F) -> R\nfunction ident(v: Float64) -> Float64 = v\nfunction launch(f: F) -> R = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute\nfunction tag(p: (H, Int64)) -> Int64 = p[1]\nfunction via(h: H, f: F) -> R = {\n    let k = h\n    let t = (k, 0)\n    let n = tag(t)\n    h(f) + Float64(n)\n}\nlet a = launch(ident)\nlet b = via(launch, ident)\n",
+       [ "BLADE_OMP_PARALLEL_FOR" ], [ "requested but emitted serial" ])
+      ("omp_pure_callback_return_flow_shapes_keep_team",
+       "type I = Idx<2>\ntype F = (Float64) -> Float64\ntype R = Array<Float64 like I>\ntype H = (F) -> R\nfunction ident(v: Float64) -> Float64 = v\nfunction launch(f: F) -> R = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute\nfunction first(p: (H, Int64)) -> H = p[0]\nfunction rec_ret(n: Int64, h: H) -> H = if n <= 0 then h else rec_ret(n - 1, h)\nfunction pair(h: H) -> (H, Int64) = (h, 1)\nfunction mk() -> H = launch\nfunction pick(c: Bool, h: H) -> H = if c then h else launch\nlet a = launch(ident)\nlet b = first((launch, 0))(ident)\nlet c = rec_ret(3, launch)(ident)\nlet d = pair(launch)[0](ident)\nlet e = pick(true, mk())(ident)\n",
+       [ "BLADE_OMP_PARALLEL_FOR" ], [ "requested but emitted serial" ])
       ("ivdep_kept_on_pure_nest_producer",
        "type I = Idx<3>\ntype J = Idx<4>\nlet p = method_for(range<I>, range<J>) <@> lambda(i, j) -> Float64(i * 4 + j) * 0.5 |> compute\n",
        [ "BLADE_IVDEP" ], [])      // ---- the threaded triangular outer level runs ASCENDING ----------------

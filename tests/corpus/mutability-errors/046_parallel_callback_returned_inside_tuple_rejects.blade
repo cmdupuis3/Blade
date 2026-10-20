@@ -1,0 +1,19 @@
+// TEST: parallel callback returned inside a tuple (rejects)
+// ERROR: BL4005 @ 15:1
+// ERROR-CONTAINS: a parallel kernel (`where omp` / cuda) writes storage captured from outside it
+// Gap G47, writing twin of loops/516 (pair): the returned TUPLE keeps its
+// components, so pair(launch)[0] is launch and bump reaches launch's f.
+type I = Idx<2>
+type F = (Float64) -> Float64
+type R = Array<Float64 like I>
+type H = (F) -> R
+let mut G = [0.0]
+function ident(v: Float64) -> Float64 = v
+function bump(v: Float64) -> Float64 = {
+    G(0) = G(0) + 1.0
+    G(0)
+}
+function launch(f: F) -> R = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute
+function pair(h: H) -> (H, Int64) = (h, 1)
+let a = launch(ident)
+let b = pair(launch)[0](bump)

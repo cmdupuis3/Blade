@@ -1,0 +1,15 @@
+// TEST: Join Over Partial View Of Named Writing Map
+// Gap G45 (was mutability-errors/025 under G43). `row` is a named partial
+// VIEW of the writing map `m`. The named writing map is evaluated once, at
+// its definition, over all six cells (G = 6.0), and the view reads the stored
+// first row 1, 2, 3; the join folds it twice and writes nothing.
+type I = Idx<2>
+type J = Idx<3>
+let mut G = [0.0]
+let m = method_for(range<I>, range<J>) <@> lambda(i, j) -> { G(0) = G(0) + 1.0; G(0) }
+let row = m((0 : I))
+let r = object_for(<&!>) <@> (reduce(row, (+)), reduce(row, (+)))
+// EXPECT: r = (6.0, 6.0)
+// EXPECT: G = [6.0]
+// EXPECT: m = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+// EXPECT: row = [1.0, 2.0, 3.0]

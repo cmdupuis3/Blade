@@ -2721,7 +2721,25 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
                         isRaggedFamilyKind ix.IxKind || ix.IxKind = IxKDepInner
                         || ix.IxKind = IxKGroupOuter || ix.IxKind = IxKCompound))
             | _ -> false)
-    if alreadyMaterializedLet () then None else
+    // ---- Don't splice a NAMED producer that WRITES (gap G45) ---------------
+    // An effectful named map is evaluated ONCE, at its definition (Lowering's
+    // forceEffectfulModuleLets, S2 in a body; formalism 10.2): every read,
+    // this fold included, reads the stored array. Splicing a copy of the
+    // producer into the fold would run its writes again per fold (a block
+    // with two folds counted 3x). Declines to the ordinary `IRReduce` over
+    // the named array. A written-out `reduce(A <@> k, op)` has no name and
+    // still fuses; a `<&!>` tree over a writing leg is the join rule's.
+    let namedWritingProducer () =
+        match tArr.Kind with
+        | TExprVar _ ->
+            (match (resolveTypedExpr env tArr).Kind with
+             | TExprApply info when not info.IsComposeApply ->
+                let r = resolveTypedExpr env tArr
+                not (outerWritesOfBody env env r).IsEmpty
+                || (parallelCalleeWriteError env [] r).IsSome
+             | _ -> false)
+        | _ -> false
+    if alreadyMaterializedLet () || namedWritingProducer () then None else
     match collect tArr with
     | None -> None
     | Some leavesR when anonymousUnwrap

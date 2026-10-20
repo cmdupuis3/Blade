@@ -1,0 +1,26 @@
+// TEST: parallel callback called through a tuple parameter (rejects)
+// ERROR: BL4005 @ 17:1
+// ERROR-CONTAINS: a parallel kernel (`where omp` / cuda) writes storage captured from outside it
+// Gap G47, writing twin of loops/515: the tuple PARAMETER p is tracked
+// component-wise, so p[0] is launch and call0 feeds bump into launch's f.
+// (Tracking the parameter instead of escaping the tuple at it must still
+// see a callable component that the callee CALLS.)
+type I = Idx<2>
+type F = (Float64) -> Float64
+type R = Array<Float64 like I>
+type H = (F) -> R
+let mut G = [0.0]
+function ident(v: Float64) -> Float64 = v
+function bump(v: Float64) -> Float64 = {
+    G(0) = G(0) + 1.0
+    G(0)
+}
+function launch(f: F) -> R = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute
+function call0(p: (H, Int64), f: F) -> R = p[0](f)
+function via(h: H, f: F) -> R = {
+    let k = h
+    let t = (k, 0)
+    call0(t, f)
+}
+let a = launch(ident)
+let b = via(launch, bump)

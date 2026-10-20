@@ -8003,6 +8003,8 @@ let tryEmitProgramNamed (programName: string) (program: IRProgram) : Result<stri
             // lane's genModule).
             (Blade.CodeGenExprSupport.programLetValuesCell ()).Value <- Blade.CodeGenExprSupport.computeProgramLetValues m
             (Blade.CodeGenExprSupport.programCallbackArgsCell ()).Value <- Blade.CodeGenExprSupport.computeProgramCallbackArgs m
+            // G46: which lets deep-copy (the write facts' CopiedLet)
+            (Blade.CodeGenExprSupport.programMutableArrayLetsCell ()).Value <- m.MutableArrayLets
             try
             // The fact pass runs BEFORE any instruction: `main`'s own attribute
             // group depends on whether a function emitted much later recurses,

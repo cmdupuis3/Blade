@@ -844,7 +844,9 @@ let private writeNone : WriteProvenance = { External = false; Params = Set.empty
 let private writeJoin (a: WriteProvenance) (b: WriteProvenance) =
     { External = a.External || b.External; Params = Set.union a.Params b.Params }
 
-let private holdsNoStorage (t: IRType) : bool =
+/// A value of this type holds no array storage (scalars, units, index tags,
+/// tuples of those). Public for the C++ kernel-body copy (gap G46).
+let holdsNoStorage (t: IRType) : bool =
     let rec go (t: IRType) =
         match stripUnits t with
         | IRTScalar _ | IRTIdxTagged _ | IRTUnit | IRTNat _ -> true
@@ -1172,17 +1174,32 @@ let rec private fvLeaves (v: FnVal) : FnVal =
 ///     an indirect `h(f)` (h itself a callback, or an alias of one: aliases
 ///     are evaluated, not matched by name, finding 27) feeds each candidate's
 ///     slots, known targets kept even beside an unknown one;
+///   * RETURN FLOW (gap G47): every analyzed callable has a RETURN value, the
+///     value of its body, and a call evaluates to the join of the return
+///     values of every target its head may denote (a parameter's value is
+///     the join over all call sites, so the substitution is context-
+///     insensitive and sound). A function's result therefore flows to its
+///     KNOWN callers instead of escaping: `passthrough(launch)(ident)` feeds
+///     ident into launch's `f`. A partial application, a call through an
+///     unknown head, and a callable the table did not analyze still return
+///     TOP;
+///   * PARAMETERS that may hold a function -- a function type, or a TUPLE with
+///     a function component (G47) -- are tracked, the tuple ones component-
+///     wise, so passing a tuple holding a callable to a function that reads
+///     only its scalar component is not an escape;
 ///   * TOP arises only from a genuine unknown: an untracked name (a binder the
-///     table does not model, a builtin head), the function a call returns, a
-///     tuple read through an untracked tuple;
+///     table does not model, a builtin head), the function an unknown or
+///     partial call returns, a tuple read through an untracked tuple;
 ///   * a function value that ESCAPES -- reaches a position the table does not
-///     follow: returned, stored in a struct, used as a kernel, handed to an
-///     unknown call or to a non-callback parameter -- makes every callback
-///     parameter of every callable it may denote TOP (an unknown caller may
-///     then pass it anything). Tuples are followed component-wise (a
-///     structural projection reads its component; a flat one any leaf), so a
-///     callable stored in a tuple escapes only when the tuple does. An alias
-///     INITIALIZER is not an escape; the alias's USES are classified.
+///     follow: stored in a struct, used as a kernel, handed to an unknown call
+///     or to an untracked parameter -- makes every tracked parameter of every
+///     callable it may denote TOP (an unknown caller may then pass it
+///     anything), and escapes that callable's RETURN value too (the unknown
+///     caller may call it and keep what it returns). Tuples are followed
+///     component-wise (a structural projection reads its component; a flat one
+///     any leaf), so a callable stored in a tuple escapes only when the tuple
+///     does. An alias INITIALIZER is not an escape; the alias's USES are
+///     classified.
 /// The lattice is finite, so the iteration converges; should it ever exceed
 /// its budget it widens to TOP -- the EMPTY table, every callback unknown
 /// (the rule the write summaries follow). `resolve` is the caller's callable
@@ -1190,10 +1207,13 @@ let rec private fvLeaves (v: FnVal) : FnVal =
 let callbackTable (resolve: IRExpr -> IRCallable option) (funcs: IRCallable list) (bindings: (IRId * IRExpr) list) : Map<IRId, IRExpr list> =
     let callables = System.Collections.Generic.Dictionary<IRId, IRCallable>()
     for f in funcs do callables.[f.Id] <- f
+    // TRACKED parameters: a function type, or a tuple with a function leaf
+    // (G47: tracked component-wise; only the function-typed ones are exported)
     let isCbParam = System.Collections.Generic.HashSet<IRId>()
     for f in funcs do
         for p in f.Params do
-            if isFunctionTyped p.Type then isCbParam.Add p.VarId |> ignore
+            if (try mayHoldFunction p.Type with _ -> false) then isCbParam.Add p.VarId |> ignore
+    let analyzed = System.Collections.Generic.HashSet<IRId>(funcs |> Seq.map (fun f -> f.Id))
     // ---- one scan: call sites, alias definitions, escaping expressions ----
     let calls = ResizeArray<IRExpr * IRExpr list>()
     let defs = ResizeArray<IRId * IRExpr>()
@@ -1234,10 +1254,13 @@ let callbackTable (resolve: IRExpr -> IRCallable option) (funcs: IRCallable list
         defs.Add (id, v)
         defined.Add id |> ignore
         scan false v
-    // a function's result is returned to a caller the table does not follow
-    for f in funcs do scan true f.Body
+    // a function's result flows to its callers (RETURN FLOW, G47): the body's
+    // value is the callable's return value, which each call evaluates to and
+    // which escapes with the callable itself -- the tail is not an escape
+    for f in funcs do scan false f.Body
     // ---- the abstract values ----
     let env = System.Collections.Generic.Dictionary<IRId, FnVal>()
+    let ret = System.Collections.Generic.Dictionary<IRId, FnVal>()
     let repr = System.Collections.Generic.Dictionary<IRId, IRExpr>()
     let single (e: IRExpr) (c: IRCallable) =
         if not (callables.ContainsKey c.Id) then callables.[c.Id] <- c
@@ -1264,6 +1287,21 @@ let callbackTable (resolve: IRExpr -> IRCallable option) (funcs: IRCallable list
                 if flat then fvLeaves tv
                 else match Map.tryFind i tv.Comps with Some c -> c | None -> fvBot
             if tv.Top then fvJoin sub fvTop else sub
+        | IRApp (h, args, _) when (match resolve e with Some _ -> false | None -> true) ->
+            // RETURN FLOW (G47): the join of every target's return value; a
+            // result that cannot hold a function carries nothing
+            if not (try mayHoldFunction (typeOf e) with _ -> true) then fvBot
+            else
+                let hv = eval h
+                let fromTargets =
+                    hv.Fns |> Seq.fold (fun acc cid ->
+                        match callables.TryGetValue cid with
+                        | true, c when analyzed.Contains cid && args.Length = c.Params.Length ->
+                            fvJoin acc (match ret.TryGetValue cid with | true, r -> r | _ -> fvBot)
+                        // a partial (or over-) application, or a callable whose
+                        // body the table did not analyze: an unknown function
+                        | _ -> fvJoin acc fvTop) fvBot
+                if hv.Top then fvJoin fromTargets fvTop else fromTargets
         | _ ->
             match resolve e with
             | Some c -> single e c
@@ -1277,14 +1315,31 @@ let callbackTable (resolve: IRExpr -> IRCallable option) (funcs: IRCallable list
         if nv <> old then
             env.[id] <- nv
             changed <- true
-    let rec escapeVal (v: FnVal) =
-        for cid in v.Fns do
-            match callables.TryGetValue cid with
-            | true, c ->
-                for p in c.Params do
-                    if isCbParam.Contains p.VarId then setVar p.VarId fvTop
-            | _ -> ()
-        for KeyValue (_, cv) in v.Comps do escapeVal cv
+    let setRet (id: IRId) (v: FnVal) =
+        let old = match ret.TryGetValue id with | true, o -> o | _ -> fvBot
+        let nv = fvJoin old v
+        if nv <> old then
+            ret.[id] <- nv
+            changed <- true
+    // An escaping callable: an unknown caller may fill its tracked parameters
+    // with anything AND keep whatever it returns (G47), so its return value
+    // escapes too (each callable visited once per escape: a callable may
+    // return itself).
+    let escapeVal (v: FnVal) =
+        let seen = System.Collections.Generic.HashSet<IRId>()
+        let rec go (v: FnVal) =
+            for cid in v.Fns do
+                if seen.Add cid then
+                    match callables.TryGetValue cid with
+                    | true, c ->
+                        for p in c.Params do
+                            if isCbParam.Contains p.VarId then setVar p.VarId fvTop
+                    | _ -> ()
+                    match ret.TryGetValue cid with
+                    | true, r -> go r
+                    | _ -> ()
+            for KeyValue (_, cv) in v.Comps do go cv
+        go v
     let budget = 10000
     let mutable rounds = 0
     changed <- true
@@ -1292,6 +1347,7 @@ let callbackTable (resolve: IRExpr -> IRCallable option) (funcs: IRCallable list
         changed <- false
         rounds <- rounds + 1
         for (x, v) in defs do setVar x (eval v)
+        for f in funcs do setRet f.Id (eval f.Body)
         for (h, args) in calls do
             let hv = eval h
             for cid in hv.Fns do

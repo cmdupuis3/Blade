@@ -375,6 +375,12 @@ Over `ArrayExpr` (results are `ArrayExpr`):
 | `let mut x = e` | yes | yes |
 
 All parameters pass by reference; `mut` on a parameter permits callee mutation.
+A `let` (either spelling: both are assignable in their scope) whose value is
+an existing array holds a private DEEP COPY of it, with the source's storage
+class -- an element write through the new name never reaches the source --
+in every scope and lane, a kernel body included (gap G46: the C++ lane's
+kernel-body let used to alias the source's pool). Compound, sparse, ragged and
+dependent-index stores keep the alias.
 
 ### 2.8 Tuples and argument packs
 
@@ -2072,11 +2078,34 @@ joint cell; the name is the declaration, whether it stands in an operand slot
 folds the shared cell, not a second evaluation. (The once-per-cell count is the
 join's VALUE semantics. It was never stated for effects, and since gap G43 the
 language refuses a leg that writes observable storage (§5.2) rather than
-specify an order for its writes -- a new restriction, not restored semantics.) One leg is the identity (a scalar, not
+specify an order for its writes -- a new restriction, not restored semantics;
+a NAMED writing map is not such a leg when it has another reader, see the next
+paragraph.) One leg is the identity (a scalar, not
 a 1-tuple); zero legs has no index space and is refused. Both spellings are
 pinned in `tests/corpus/`; note that `object_for(<&!>) <@> (c₁, …, c_k)`
 over deferred MAPS keeps its existing reading (n-ary map fusion answering k
 arrays) — the legs, not the operator, say which join is meant.
+
+**Effectful named computations (gap G45).** A `let` bound to a map
+(`L <@> k`, an `object_for` application) whose evaluation WRITES observable
+storage (§5.2: its kernel, a callee, or a named deferred producer it reads
+assigns outside itself) is evaluated ONCE, COMPLETELY, at its definition, in
+ascending storage order -- exactly as `|> compute` would evaluate it -- in
+every scope: module level, a top-level block, a function body, a lambda body.
+Every later read (each of several folds, a view, a print, a join leg through
+an alias) reads the stored cells, so the number and order of the writes do not
+depend on where the program puts the `let` (extracting a block into a function
+changes nothing), on how many consumers read it, or on which lane runs it. A
+map whose evaluation writes nothing keeps the deferred reading (it runs where
+it is read, fused into its consumer): its evaluation count is unobservable.
+The one exception is the join's sharing declaration above: a writing map whose
+ONLY readers are the operand slots of reduction joins stays deferred, and the
+join refuses it (BL4005) -- write `|> compute` to share the stored cells. A
+deferred WRAPPER (`<|>` choice, fallback, guard, sequence) is outside this
+contract: it is not forced, so a writing side runs where the wrapper is read
+(once per read -- force it with `|> compute` for one evaluation), and a join
+over a writing one is refused the same way. Pinned by `loops/494`, `497`,
+`518`-`524` in every lane.
 - `<*>` concatenates array lists: `method_for(A) <*> method_for(B) ≡
   method_for(A, B)`; identity `method_for()`; commutative up to index
   reordering; associative. It is proved to be exactly shape concatenation with

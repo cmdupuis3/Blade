@@ -1,0 +1,21 @@
+// TEST: parallel callback returned by a nullary function through a conditional (rejects)
+// ERROR: BL4005 @ 16:1
+// ERROR-CONTAINS: a parallel kernel (`where omp` / cuda) writes storage captured from outside it
+// Gap G47, writing twin of loops/516 (pick / mk): mk() returns launch, pick
+// returns either its argument or launch, and the outer call feeds bump into
+// launch's f.
+type I = Idx<2>
+type F = (Float64) -> Float64
+type R = Array<Float64 like I>
+type H = (F) -> R
+let mut G = [0.0]
+function ident(v: Float64) -> Float64 = v
+function bump(v: Float64) -> Float64 = {
+    G(0) = G(0) + 1.0
+    G(0)
+}
+function launch(f: F) -> R = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute
+function mk() -> H = launch
+function pick(c: Bool, h: H) -> H = if c then h else launch
+let a = launch(ident)
+let b = pick(true, mk())(bump)

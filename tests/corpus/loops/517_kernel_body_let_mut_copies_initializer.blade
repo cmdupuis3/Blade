@@ -1,0 +1,65 @@
+// TEST: Kernel Body Let Mut Copies Initializer
+// Gap G46: an assignable array `let` INSIDE a kernel body, initialized from
+// an existing dense array, holds a private DEEP COPY in every lane -- as the
+// binding-level `let mut` does (formalism 2.7; genVarAliasBinding) and as the
+// interpreter always did. The C++ lane used to bind the Array wrapper by
+// value, sharing G's pool: r = [0.0, 2.0, 4.0] and G = [2.0, 0.0] against the
+// interpreter's [0.0, 1.0, 2.0] / [0.0, 0.0]. The copy is local storage, so a
+// `where omp` kernel writing it is race-free and keeps its team (omp-pragma
+// pins the pragma; the census line the emitter's write veto printed for this
+// shape is gone).
+//   r  : write through the copy, then read the copy and G
+//   rp : the same body under `where omp`
+//   r1 : the copy passed to a `mut` parameter (the callee writes the copy)
+//   r2 : a plain `let c = Gm` read AFTER the kernel writes Gm (the copy keeps
+//        the old cell: copy semantics are observable without writing c)
+//   r3 : a read-only alias in a pure body (the copy is unobservable)
+//   rs : a SYMMETRIC (comm, packed) initializer -- copied with its storage
+//        class, as the binding-level copy and the interpreter do
+type K = Idx<2>
+type I = Idx<3>
+let G = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute
+let r = method_for(range<I>) <@> lambda(i) -> {
+    let mut c = G
+    c((0 : K)) = Float64(i)
+    c((0 : K)) + G((0 : K))
+} |> compute
+let rp = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> {
+    let mut c = G
+    c((0 : K)) = Float64(i)
+    c((0 : K)) + G((0 : K))
+} |> compute
+let mut Gm = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute
+function fill(buf: mut Array<Float64 like K>, v: Float64) -> Float64 = {
+    buf((0 : K)) = v
+    v
+}
+let r1 = method_for(range<I>) <@> lambda(i) -> {
+    let mut c = Gm
+    fill(c, Float64(i) + 1.0) + Gm((0 : K))
+} |> compute
+let r2 = method_for(range<I>) <@> lambda(i) -> {
+    let c = Gm
+    Gm((1 : K)) = Gm((1 : K)) + 1.0
+    c((1 : K))
+} |> compute
+let r3 = method_for(range<I>) <@> lambda(i) -> {
+    let c = Gm
+    c((0 : K)) + c((1 : K))
+} |> compute
+let x = method_for(range<K>) <@> lambda(k) -> Float64(k) |> compute
+let S = method_for(x, x) <@> lambda(a: Float64, b: Float64) where comm(a, b) -> a + b |> compute
+let rs = method_for(range<I>) <@> lambda(i) -> {
+    let mut c = S
+    c((0 : K), (1 : K)) = Float64(i)
+    c((0 : K), (1 : K)) + S((0 : K), (1 : K))
+} |> compute
+// EXPECT: G = [0.0, 0.0]
+// EXPECT: S = [[0.0, 1.0], [2.0]]
+// EXPECT: rs = [1.0, 2.0, 3.0]
+// EXPECT: r = [0.0, 1.0, 2.0]
+// EXPECT: rp = [0.0, 1.0, 2.0]
+// EXPECT: Gm = [0.0, 3.0]
+// EXPECT: r1 = [1.0, 2.0, 3.0]
+// EXPECT: r2 = [0.0, 1.0, 2.0]
+// EXPECT: r3 = [3.0, 3.0, 3.0]

@@ -3885,6 +3885,55 @@ and genReduceComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
                 | IRFusion (l, r) -> onSpine l || onSpine r
                 | _ -> false
             not (onSpine compExpr))
+    // DEFERRED CAPTURES (the G41 row's nested-kernel probe, Codex W2F-3
+    // finding 13): a leaf's map kernel -- or the fold kernel -- that CLOSES
+    // OVER a still-deferred binding gets it forwarded BY NAME at every call
+    // site, exactly like an operand. `reduce(method_for(range<I>) <@>
+    // lambda(i) -> reduce(method_for(range<I>) <@> lambda(j) -> g(j), ..), ..)`
+    // over a deferred `g` passed `g` to the outer kernel while `g` was only a
+    // `// <deferred computation>` comment (BL9002 "'g' was not declared").
+    // genComputeBinding forces its kernel's deferred captures for the same
+    // reason (collectDeferredKernelCaptures), and the same way: UNDER THE
+    // BINDING'S OWN NAME (forceDeferredBindingIds), not as a temporary -- the
+    // interpreter materializes a captured deferred binding into the scope, so
+    // it joins the auto-print list there, and must here too.
+    let deferredCaptureIds =
+        let rec resolve e =
+            match e with
+            | IRVar (id, _) ->
+                (match Map.tryFind id ctx.DeferredComputations with
+                 | Some d -> resolve d
+                 | None -> e)
+            | _ -> e
+        let rec leaves e =
+            match resolve e with
+            | IRFusion (l, r) -> leaves l @ leaves r
+            | other -> [ other ]
+        let rec onSpine (id: IRId) e =
+            match e with
+            | IRVar (vid, _) when vid = id -> true
+            | IRVar (vid, _) ->
+                (match Map.tryFind vid ctx.DeferredComputations with
+                 | Some d -> onSpine id d
+                 | None -> false)
+            | IRFusion (l, r) -> onSpine id l || onSpine id r
+            | _ -> false
+        let leafKernels =
+            leaves compExpr |> List.collect (function
+                | IRApplyCombinator info -> [ info.Kernel ]
+                | _ -> [])
+        let foldKernels = match kernelExpr with IRTuple ks -> ks | k -> [ k ]
+        (leafKernels @ foldKernels)
+        |> List.collect (collectDeferredKernelCaptures ctx)
+        |> List.distinct
+        |> List.filter (fun id ->
+            not (List.contains id deferredOperandIds)
+            && not (onSpine id compExpr)
+            && (match Map.tryFind id ctx.DeferredComputations with
+                | Some (IRApplyCombinator _ | IRComposeApply _ | IRFunctorMap _) -> true
+                | _ -> false))
+    let (capForceLines, ctx) = deferredCaptureIds |> forceDeferredBindingIds ctx builder ($"{bindingCppName binding}__cap")
+    let prelude = prelude @ capForceLines
     let (ctxForced, forceLines) =
         deferredOperandIds |> List.fold (fun (accCtx: CodeGenContext, accLines) id ->
             let ty = inferExprType accCtx.DeferredComputations.[id]

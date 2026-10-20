@@ -1,0 +1,23 @@
+// TEST: Writing Deferred Map Parallel Fold Kernel Once
+// Gaps G45 / G43 (the round-1 "68 vs 20" report, reproduced and closed). In
+// a function body S2 forced the writing map at its let, but a fold whose
+// kernel carries `where omp` kept the typechecker's FUSED terminal, which
+// splices a COPY of the named producer into the fold: two such folds ran the
+// writer twice more -- r = 68 (cells 5..8 and 9..12), counter 12, in both
+// compiled lanes of f1910060. The splice now declines a NAMED writing
+// producer, so both folds read the cells stored at the let: 20, counter 4.
+// (The licensed fold of stored cells is a plain fold; nothing about the
+// effect moves into the reordered form.)
+type I = Idx<4>
+let mut G = [0]
+function twice() -> Int64 = {
+    let m = method_for(range<I>) <@> lambda(i) -> { G(0) = G(0) + 1; G(0) }
+    let s = reduce(m, lambda(a: Int64, b: Int64) where omp -> a + b, 0)
+    let t = reduce(m, lambda(a: Int64, b: Int64) where omp -> a + b, 0)
+    s + t
+}
+let r = twice()
+let seen = G(0)
+// EXPECT: r = 20
+// EXPECT: seen = 4
+// EXPECT: G = [4]

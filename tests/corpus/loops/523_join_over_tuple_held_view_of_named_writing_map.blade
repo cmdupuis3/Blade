@@ -1,0 +1,15 @@
+// TEST: Join Over Tuple Held View Of Named Writing Map
+// Gap G45 (was mutability-errors/026 under G43). The view of the writing
+// map `m` is held inside a named tuple and projected back out. The named
+// writing map is evaluated once at its definition (G = 6.0), so the
+// projected row reads stored cells and the join writes nothing.
+type I = Idx<2>
+type J = Idx<3>
+let mut G = [0.0]
+let m = method_for(range<I>, range<J>) <@> lambda(i, j) -> { G(0) = G(0) + 1.0; G(0) }
+let pair = (m((0 : I)), 0.0)
+let row = pair[0]
+let r = object_for(<&!>) <@> (reduce(row, (+)), reduce(row, (+)))
+// EXPECT: r = (6.0, 6.0)
+// EXPECT: G = [6.0]
+// EXPECT: row = [1.0, 2.0, 3.0]

@@ -1,0 +1,20 @@
+// TEST: parallel callback returned through a self-recursive function (rejects)
+// ERROR: BL4005 @ 16:1
+// ERROR-CONTAINS: a parallel kernel (`where omp` / cuda) writes storage captured from outside it
+// Gap G47, writing twin of loops/516 (rec_ret): the recursive function's
+// return value is the least fixpoint of its two branches, {launch}, so the
+// outer call feeds bump into launch's f.
+type I = Idx<2>
+type F = (Float64) -> Float64
+type R = Array<Float64 like I>
+type H = (F) -> R
+let mut G = [0.0]
+function ident(v: Float64) -> Float64 = v
+function bump(v: Float64) -> Float64 = {
+    G(0) = G(0) + 1.0
+    G(0)
+}
+function launch(f: F) -> R = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute
+function rec_ret(n: Int64, h: H) -> H = if n <= 0 then h else rec_ret(n - 1, h)
+let a = launch(ident)
+let b = rec_ret(3, launch)(bump)

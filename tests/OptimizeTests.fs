@@ -2888,9 +2888,12 @@ let private siblingStructuralProjSrc =
     + "let x: Array<Float64 like R> = [1.0, 2.0, 3.0]\n"
     + "let r = shared(x)\n"
 
-/// A DEFERRED map whose kernel writes (through another callable), read via an
-/// ALIAS between two folds: the write closure follows alias -> deferred value
-/// -> kernel -> callee.
+/// A map whose kernel writes (through another callable), DEFINED between two
+/// folds of the array it writes and read via an ALIAS: the write closure
+/// follows alias -> map -> kernel -> callee. (Gap G45: a NAMED writing map is
+/// evaluated once at its definition, so the write happens at `w`'s let --
+/// before G45 this fixture defined `w` ahead of all three folds and relied on
+/// the map running at its READ; there the folds now legitimately share.)
 let private siblingDeferredAliasWriteSrc =
     "type R = Idx<4>\n"
     + "function bump(a: mut Array<Float64 like R>) -> Float64 = {\n"
@@ -2900,9 +2903,9 @@ let private siblingDeferredAliasWriteSrc =
     + "function poke(a: mut Array<Float64 like R>) -> Float64 = bump(a)\n"
     + "let mut vv: Array<Float64 like R> = [2.0, 4.0, 6.0, 8.0]\n"
     + "let (ra, rz, rb) = {\n"
+    + "    let a = reduce(vv, (+))\n"
     + "    let w = method_for(range<R>) <@> lambda(i) -> poke(vv)\n"
     + "    let w2 = w\n"
-    + "    let a = reduce(vv, (+))\n"
     + "    let z = reduce(w2, (+), 0.0)\n"
     + "    let b = reduce(vv, (+), 0.0)\n"
     + "    (a, z, b)\n"
@@ -3034,9 +3037,12 @@ let private siblingCases () =
           (declinedMentioning "stats(xm) not inlined: its statement may write") "declined: a writing call earlier in the statement keeps stats a call"
       siblingPlanCase "decision_sibling_folds_declined_structural_projection" siblingSerialPins siblingStructuralProjSrc
           (declinedMentioning "structural (nested-pair) projection") "declined: a shared tree read by t[1]"
+      // G45: the writer runs at its own let, BETWEEN `a` and the other two
+      // folds -- so `a` (before the write) must stay out of any join, while
+      // the alias fold and `b` (both after it) may share one traversal.
       siblingPlanCase "decision_sibling_folds_declined_deferred_alias_write" siblingSerialPins siblingDeferredAliasWriteSrc
-          (fun d -> match d.Outcome with Blade.Effects.Declined _ -> true | _ -> false)
-          "declined: a deferred writer read through an alias sits between the folds"
+          (fun d -> evidenceMentioning "a statement between reduce(vv, ..) and it may write (a call or an assignment)" d)
+          "declined for the fold before the writer: a map writing vv, read through an alias, is defined between the folds"
       siblingPlanCase "decision_sibling_folds_not_epilogue_joins" siblingSerialPins siblingNotEpilogueSrc
           (fun d -> applied d && evidenceMentioning "2 folds over" d) "applied: a plain fold over a fresh map is no epilogue's"
       siblingPlanCase "decision_sibling_folds_saxpy_left_for_epilogue" siblingSerialPins siblingSaxpySrc

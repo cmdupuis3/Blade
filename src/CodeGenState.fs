@@ -521,6 +521,37 @@ deduced wreath OUTPUT of a comm-tied apply has an emitter (a flat orb_cell_count
     | AllocUnsupported reason ->
         Error ($"Blade codegen: unsupported antisymmetric output storage -- {reason}")
 
+/// The free-side mirror of emitAllocRhs (above), case for case, reusing
+/// hoistSymmDecl with the identical `%s_anti` / `%s_strict` names keyed off
+/// extentsName (the hoist collector is idempotent per distinct decl, so
+/// re-hoisting the same mask is safe). Returns (routine, templateArgs); an
+/// AllocUnsupported spec returns Error and the caller skips registration
+/// entirely -- that allocation site emitted a `#error`, so there is nothing valid
+/// to free. (Lives here, beside its allocation twin, so the expression emitter
+/// can free a kernel-body `let mut` copy at its IIFE's end -- gap G46.)
+let deallocArgsFor
+        (spec: AllocSpec)
+        (elemType: string) (rank: int) (symmArg: string) (extentsName: string)
+        : Result<string * string, string> =
+    match spec with
+    | AllocAntisymmetric ->
+        let allOnes = List.replicate rank 1
+        let maskName = hoistSymmDecl ($"{extentsName}_anti") allOnes
+        Ok ("deallocate", $"typename promote<{elemType}, {rank}>::type, {maskName}, false")
+    | AllocDense | AllocSymmetric ->
+        Ok ("deallocate", $"typename promote<{elemType}, {rank}>::type, {symmArg}")
+    | AllocPerGroupStrict strictVec ->
+        let strictName = hoistSymmDecl ($"{extentsName}_strict") strictVec
+        Ok ("deallocate_strict", $"typename promote<{elemType}, {rank}>::type, {symmArg}, {strictName}")
+    | AllocWreath _ ->
+        // The wreath pool is a plain `new T[cells]`, freed by its own
+        // `delete[]` registration (registerRawArrayData at the emit site), not
+        // by `deallocate`'s skeleton walk -- there is no skeleton to walk.
+        Error "Blade codegen: an OrbIdx (iterated-wreath) pool is a flat new[] buffer; it is freed by \
+delete[] at its emit site, not through the skeleton deallocator"
+    | AllocUnsupported reason ->
+        Error ($"Blade codegen: unsupported storage has no representable free -- {reason}")
+
 /// The `orb_level<...>` template-argument list for an OrbIdx class, in the
 /// header's public (doc) order: OUTERMOST LAST, exactly as `IROrbitClass`
 /// carries it. ONE spelling, shared by every wreath emitter -- the traversal

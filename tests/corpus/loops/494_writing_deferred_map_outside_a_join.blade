@@ -1,20 +1,19 @@
 // TEST: Writing Deferred Map Outside A Join
-// Gap G43. A deferred map whose kernel WRITES a captured `let mut` (legal:
-// formalism 5.2, a serial body's write is an ordered side effect) has one
-// meaning wherever its evaluations are ordered: each separate consumer is one
-// traversal in ascending cell order, so two folds of the named map advance
-// the counter through cells 1..4 then 5..8, in every lane -- at top level and
-// in a block. (NOT in a function body, where lowering forces a body let at its
-// definition and the same two folds read one evaluation: OPEN gap G45, pinned
-// by loops/497.) Inside a JOIN the
-// legs run side by side and the write has no single order: refused (BL4005,
-// mutability-errors/014-021). The join spelling that is legal forces the map
-// first -- one evaluation, stored -- and joins over the stored cells.
+// Gaps G43 / G45. A deferred map whose kernel WRITES a captured `let mut`
+// (legal: formalism 5.2, a serial body's write is an ordered side effect)
+// that is NAMED is evaluated once, completely, at its definition, in every
+// scope (formalism 10.2, last paragraph; G45): two folds of it -- in a block
+// or at top level -- read the stored cells 1..4. (Before G45 a block or the
+// top level ran the map once per fold, 36 / counter 8, while a function body
+// forced it at its let, 20 / counter 4.) A map read ONLY by a join stays
+// deferred for sharing and its writing legs are refused (BL4005,
+// mutability-errors/014); forcing it first is the explicit spelling and joins
+// over the stored cells.
 type I = Idx<4>
 let mut G1 = [0]
 let mut G2 = [0]
 let mut G3 = [0]
-// Two separate folds: two traversals, cells 1..4 then 5..8.
+// Two folds of a named writing map: one evaluation, at its let.
 let r1 = {
     let m = method_for(range<I>) <@> lambda(i) -> { G1(0) = G1(0) + 1; G1(0) }
     let s = reduce(m, (+))
@@ -29,9 +28,10 @@ let r3 = {
     let (s, t) = object_for(<&!>) <@> (reduce(m, (+)), reduce(m, (+)))
     s * 1000 + t
 }
-// EXPECT: r1 = 36
-// EXPECT: r2 = 36
+// EXPECT: r1 = 20
+// EXPECT: r2 = 20
 // EXPECT: r3 = 10010
-// EXPECT: G1 = [8]
-// EXPECT: G2 = [8]
+// EXPECT: G1 = [4]
+// EXPECT: G2 = [4]
 // EXPECT: G3 = [4]
+// EXPECT: m2 = [1, 2, 3, 4]

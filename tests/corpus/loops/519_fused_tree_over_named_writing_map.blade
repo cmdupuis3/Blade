@@ -1,0 +1,18 @@
+// TEST: Fused Tree Over Named Writing Map
+// Gap G45 (was mutability-errors/015 under G43). The named map `m` writes
+// the captured `G`. A NAMED writing map is evaluated once, at its
+// definition, in every scope (formalism 10.2, last paragraph), and a fused
+// tree is not a reduction join's sharing operand, so the leaves read the
+// stored cells 1..4: s = 10, t = 20, G = 4 in every lane -- the answer a
+// function body already gave (S2 forced the let there). G43 refused this at
+// top level when the lanes ran the writer inside the tree (C++ 30 / G 4,
+// LLVM 56 / G 8, interpreter 62 / G 8); there is no write left in the tree.
+type I = Idx<4>
+let mut G = [0]
+let r = {
+    let m = method_for(range<I>) <@> lambda(i) -> { G(0) = G(0) + 1; G(0) }
+    let (s, t) = reduce((m <@> lambda(v) -> v) <&!> (m <@> lambda(v) -> 2 * v), (+))
+    s + t
+}
+// EXPECT: r = 30
+// EXPECT: G = [4]

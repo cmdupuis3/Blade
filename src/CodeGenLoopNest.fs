@@ -4635,35 +4635,7 @@ let popAllocScope () : AllocScope option =
     | top :: rest -> cell.Value <- rest; Some top
     | [] -> None
 
-/// The free-side mirror of emitAllocRhs (217-247), case for case, reusing
-/// hoistSymmDecl with the identical `%s_anti` / `%s_strict` names keyed off
-/// extentsName (the hoist collector is idempotent per distinct decl, so
-/// re-hoisting the same mask is safe). Returns (routine, templateArgs); an
-/// AllocUnsupported spec returns Error and the caller skips registration
-/// entirely -- that allocation site emitted a `#error`, so there is nothing valid
-/// to free.
-let deallocArgsFor
-        (spec: AllocSpec)
-        (elemType: string) (rank: int) (symmArg: string) (extentsName: string)
-        : Result<string * string, string> =
-    match spec with
-    | AllocAntisymmetric ->
-        let allOnes = List.replicate rank 1
-        let maskName = hoistSymmDecl ($"{extentsName}_anti") allOnes
-        Ok ("deallocate", $"typename promote<{elemType}, {rank}>::type, {maskName}, false")
-    | AllocDense | AllocSymmetric ->
-        Ok ("deallocate", $"typename promote<{elemType}, {rank}>::type, {symmArg}")
-    | AllocPerGroupStrict strictVec ->
-        let strictName = hoistSymmDecl ($"{extentsName}_strict") strictVec
-        Ok ("deallocate_strict", $"typename promote<{elemType}, {rank}>::type, {symmArg}, {strictName}")
-    | AllocWreath _ ->
-        // The wreath pool is a plain `new T[cells]`, freed by its own
-        // `delete[]` registration (registerRawArrayData at the emit site), not
-        // by `deallocate`'s skeleton walk -- there is no skeleton to walk.
-        Error "Blade codegen: an OrbIdx (iterated-wreath) pool is a flat new[] buffer; it is freed by \
-delete[] at its emit site, not through the skeleton deallocator"
-    | AllocUnsupported reason ->
-        Error ($"Blade codegen: unsupported storage has no representable free -- {reason}")
+// deallocArgsFor (the free-side mirror of emitAllocRhs) lives in CodeGenState.
 
 /// Record an allocation against the innermost live scope. An EMPTY stack (main's
 /// top level) is a silent no-op -- that single rule is what keeps module bindings

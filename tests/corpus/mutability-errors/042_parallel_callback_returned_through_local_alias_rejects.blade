@@ -1,0 +1,25 @@
+// TEST: parallel callback returned through a local alias of a callback parameter (rejects)
+// ERROR: BL4005 @ 18:1
+// ERROR-CONTAINS: a parallel kernel (`where omp` / cuda) writes storage captured from outside it
+// Gap G47 (Codex review W2F-9 finding 29), writing twin of loops/514: the
+// callback table follows RETURN FLOW, so passthrough(launch) evaluates to
+// launch and the outer call feeds bump into launch's f -- refused. The
+// returned alias is no longer an escape, so the precision gained on the pure
+// twin must not lose this writer.
+type I = Idx<2>
+type F = (Float64) -> Float64
+type R = Array<Float64 like I>
+type H = (F) -> R
+let mut G = [0.0]
+function ident(v: Float64) -> Float64 = v
+function bump(v: Float64) -> Float64 = {
+    G(0) = G(0) + 1.0
+    G(0)
+}
+function launch(f: F) -> R = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute
+function passthrough(h: H) -> H = {
+    let k = h
+    k
+}
+let a = launch(ident)
+let b = passthrough(launch)(bump)

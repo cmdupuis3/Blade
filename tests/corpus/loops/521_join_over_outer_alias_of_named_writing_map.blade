@@ -1,0 +1,18 @@
+// TEST: Join Over Outer Alias Of Named Writing Map
+// Gap G45 (was mutability-errors/024 under G43). The writing map `m` is
+// defined at top level and aliased there; the join inside `twice` reads the
+// alias. The named writing map is evaluated once at its definition (cells
+// 1..4, G = 4), so the join folds stored cells and writes nothing.
+type I = Idx<4>
+let mut G = [0]
+let m = method_for(range<I>) <@> lambda(i) -> { G(0) = G(0) + 1; G(0) }
+let alias = m
+function twice() -> Int64 = {
+    let (s, t) = object_for(<&!>) <@> (reduce(alias, (+)), reduce(alias, (+)))
+    s * 1000 + t
+}
+let r = twice()
+// EXPECT: r = 10010
+// EXPECT: G = [4]
+// EXPECT: m = [1, 2, 3, 4]
+// EXPECT: alias = [1, 2, 3, 4]

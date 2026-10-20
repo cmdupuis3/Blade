@@ -1,0 +1,29 @@
+// TEST: Parallel Callback Return Flow Shapes All Pure
+// Gap G47: the return-flow lattice beyond the two Codex probes -- a callable
+// returned as a tuple PROJECTION of a tuple parameter (`first`), through a
+// self-recursive function (`rec_ret`, solved to its least fixpoint), inside
+// a returned TUPLE (`pair`), and through a conditional over a nullary
+// function's result (`pick(true, mk())`). Every value reaching launch's `f`
+// is ident, so the pure `where omp` kernel keeps its team; the writing twins
+// are mutability-errors/044-047.
+type I = Idx<2>
+type F = (Float64) -> Float64
+type R = Array<Float64 like I>
+type H = (F) -> R
+function ident(v: Float64) -> Float64 = v
+function launch(f: F) -> R = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute
+function first(p: (H, Int64)) -> H = p[0]
+function rec_ret(n: Int64, h: H) -> H = if n <= 0 then h else rec_ret(n - 1, h)
+function pair(h: H) -> (H, Int64) = (h, 1)
+function mk() -> H = launch
+function pick(c: Bool, h: H) -> H = if c then h else launch
+let a = launch(ident)
+let b = first((launch, 0))(ident)
+let c = rec_ret(3, launch)(ident)
+let d = pair(launch)[0](ident)
+let e = pick(true, mk())(ident)
+// EXPECT: a = [0.0, 1.0]
+// EXPECT: b = [0.0, 1.0]
+// EXPECT: c = [0.0, 1.0]
+// EXPECT: d = [0.0, 1.0]
+// EXPECT: e = [0.0, 1.0]

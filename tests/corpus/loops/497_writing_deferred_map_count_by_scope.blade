@@ -1,0 +1,29 @@
+// TEST: Writing Deferred Map Count By Scope
+// Gap G45 (closed): an EFFECTFUL named map -- its kernel writes a captured
+// `let mut` -- is evaluated ONCE, completely, at its definition, in every
+// scope (formalism 10.2, last paragraph): both folds read the stored cells
+// 1..4, so a block and the same body extracted into a function print the
+// same value and leave the same counter. Before, a block kept the map
+// deferred and ran it once per fold (r_block = 36, counter 8) while a
+// function body forced it at its let (r_fn = 20, counter 4); every lane
+// agreed, so no differential saw the scope dependence.
+type I = Idx<4>
+let mut GB = [0]
+let mut GF = [0]
+let r_block = {
+    let m = method_for(range<I>) <@> lambda(i) -> { GB(0) = GB(0) + 1; GB(0) }
+    let s = reduce(m, (+))
+    let t = reduce(m, (+))
+    s + t
+}
+function twice() -> Int64 = {
+    let m = method_for(range<I>) <@> lambda(i) -> { GF(0) = GF(0) + 1; GF(0) }
+    let s = reduce(m, (+))
+    let t = reduce(m, (+))
+    s + t
+}
+let r_fn = twice()
+// EXPECT: r_block = 20
+// EXPECT: GB = [4]
+// EXPECT: r_fn = 20
+// EXPECT: GF = [4]
