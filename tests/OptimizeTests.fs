@@ -2431,6 +2431,378 @@ let private validatorPins () =
                           else fn) }))
           (Some "empty match expression") ]
 
+// ---------------------------------------------------------------------------
+// Sibling-fold traversal sharing (Blade.Optimize.shareSiblingFoldsModule,
+// rule `sibling-folds` v1, BLADE_SIBLING_FOLDS). The corpus
+// (tests/corpus/sibling-folds) pins the VALUES; these pins read the emission
+// (one loop over a and b in `main`, per-leg seeds) and each decision record.
+// ---------------------------------------------------------------------------
+
+/// The bench dot shape (bench/kernels/dot) at Idx<1009>.
+let private siblingDotSrc =
+    "type Ix = Idx<1009>\n"
+    + "function inputs(scale: Float64) -> Array<Float64 like Ix> = {\n"
+    + "    method_for(range<Ix>) <@> lambda(i) -> scale * Float64(i) + 1.0 |> compute\n"
+    + "}\n"
+    + "function kernel(a: Array<Float64 like Ix>, b: Array<Float64 like Ix>) -> Float64 = {\n"
+    + "    let s = reduce(method_for(zip(a, b)) <@> lambda(x, y) -> x * y, lambda(p, q) where omp -> p + q, 0.0)\n"
+    + "    s\n"
+    + "}\n"
+    + "let (checksum, input_checksum) = {\n"
+    + "    let a = inputs(1.0)\n"
+    + "    let b = inputs(2.0)\n"
+    + "    (kernel(a, b), reduce(a, (+)) + reduce(b, (+)))\n"
+    + "}\n"
+
+/// The hand-written explicit join of the same program (round-2 C/dot_joined).
+let private siblingDotJoinedSrc =
+    "type Ix = Idx<1009>\n"
+    + "function inputs(scale: Float64) -> Array<Float64 like Ix> = {\n"
+    + "    method_for(range<Ix>) <@> lambda(i) -> scale * Float64(i) + 1.0 |> compute\n"
+    + "}\n"
+    + "let (checksum, input_checksum) = {\n"
+    + "    let a = inputs(1.0)\n"
+    + "    let b = inputs(2.0)\n"
+    + "    let (s, sa, sb) = object_for(<&!>) <@> (\n"
+    + "        reduce(method_for(zip(a, b)) <@> lambda(x, y) -> x * y, lambda(p, q) where omp -> p + q, 0.0),\n"
+    + "        reduce(a, (+), -0.0),\n"
+    + "        reduce(b, (+), -0.0))\n"
+    + "    (s, sa + sb)\n"
+    + "}\n"
+
+let private withGates (pins: (string * string) list) (f: unit -> 'a) : 'a =
+    List.foldBack (fun (var, value) (g: unit -> 'a) -> (fun () -> withGate var value g)) pins f ()
+
+let private mainOf (cpp: string) =
+    let i = cpp.IndexOf "int main"
+    if i < 0 then "" else cpp.Substring i
+
+/// The joined program's loop structure in `main`: loops over the axis, the
+/// accumulator seeds in declaration order, and the simd-reduction clause arity
+/// (0 = no clause).
+let private siblingShape (cpp: string) =
+    let m = mainOf cpp
+    let loops = System.Text.RegularExpressions.Regex.Matches(m, @"for \(size_t __i0 = 0; __i0 < 1009;").Count
+    let seeds =
+        System.Text.RegularExpressions.Regex.Matches(m, @"double __v\d+_\d+ = ([^;]+);")
+        |> Seq.map (fun x -> x.Groups.[1].Value) |> List.ofSeq
+    let clause = System.Text.RegularExpressions.Regex.Match(m, @"BLADE_OMP_SIMD_REDUCTION\(\+:([^)]*)\)")
+    let arity = if clause.Success then clause.Groups.[1].Value.Split(',').Length else 0
+    (loops, seeds, arity)
+
+let private siblingSerialPins = [ ("BLADE_OMP_THREADS", "1"); ("BLADE_FP_REPRO", "1"); ("BLADE_SIBLING_FOLDS", null) ]
+
+/// OMP_THREADS=1 + FP_REPRO=1: ONE loop over a and b in main, three
+/// accumulators seeded 0.0 (the kernel's own seed), -(0.0), -(0.0).
+let private siblingDotOneLoop () =
+    let name = "sibling_folds_dot_one_loop_per_leg_seeds"
+    match withGates siblingSerialPins (fun () -> cppOfSource name siblingDotSrc) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let (loops, seeds, _) = siblingShape cpp
+        if loops = 1 && seeds = [ "0.0"; "-(0.0)"; "-(0.0)" ] then
+            resultLine Pass name "one loop over the axis in main; seeds 0.0, -(0.0), -(0.0)"
+            true
+        else
+            resultLine Fail name ($"""loops={loops} seeds=[{String.concat "; " seeds}]""")
+            false
+
+/// The natural spelling and the hand-written join emit the same structure
+/// (loop count, accumulator seeds, simd clause arity), serial-repro and
+/// serial-licensed -- and each matches the EXPECTED structure on its own (one
+/// loop; seeds 0.0, -(0.0), -(0.0); clause arity 0 in repro, 3 licensed), so
+/// the two cannot agree while both are wrong.
+let private siblingConvergence (label: string) (pins: (string * string) list) (wantArity: int) () =
+    let name = $"sibling_folds_converges_on_the_explicit_join_{label}"
+    match withGates pins (fun () -> cppOfSource name siblingDotSrc, cppOfSource name siblingDotJoinedSrc) with
+    | Ok a, Ok b ->
+        let sa = siblingShape a
+        let sb = siblingShape b
+        let (l, s, k) = sa
+        if sa = sb && l = 1 && s = [ "0.0"; "-(0.0)"; "-(0.0)" ] && k = wantArity then
+            resultLine Pass name ($"""both: {l} loop, seeds [{String.concat "; " s}], simd clause arity {k}""")
+            true
+        else
+            let show (l, s: string list, k) = $"""loops={l} seeds=[{String.concat "; " s}] arity={k}"""
+            resultLine Fail name ($"natural {show sa} vs explicit {show sb}; wanted 1 loop, seeds [0.0; -(0.0); -(0.0)], arity {wantArity}")
+            false
+    | Error e, _ | _, Error e -> resultLine Fail name e; false
+
+let private siblingPlanCase (name: string) (pins: (string * string) list) (src: string)
+                            (want: Blade.Effects.Decision -> bool) (describe: string) =
+    withGates pins (fun () -> planCase name src "sibling-folds" want describe)
+
+/// Threads on, licensed: declined on the thread gate, and the kernel's Path B
+/// team is still planned.
+let private siblingThreadGate () =
+    let name = "sibling_folds_thread_gate_keeps_path_b"
+    let pins = [ ("BLADE_OMP_THREADS", null); ("BLADE_FP_REPRO", null); ("BLADE_SIBLING_FOLDS", null) ]
+    match withGates pins (fun () -> planDecisionsOf siblingDotSrc) with
+    | Error e -> resultLine Fail name e; false
+    | Ok ds ->
+        let gate = ds |> List.exists (fun d -> d.Rule = "sibling-folds" && declinedMentioning "a leg requests threads in this build" d)
+        let pathB = ds |> List.exists (fun d -> d.Rule = "omp" && applied d && evidenceMentioning "Path B" d)
+        if gate && pathB then
+            resultLine Pass name "declined (a leg requests threads; no thread-level join form, G7); the Path B team is kept"
+            true
+        else
+            let seen = ds |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+            resultLine Fail name ($"gate={gate} pathB={pathB}; the record: {seen}")
+            false
+
+/// Licence mismatch: a builtin (+) leg beside an unlicensed lambda leg, in a
+/// reordering build.
+let private siblingLicenceMismatchSrc =
+    "type R = Idx<5>\n"
+    + "let (s, t) = {\n"
+    + "    let x: Array<Float64 like R> = [1.0, 2.0, 3.0, 4.0, 5.0]\n"
+    + "    (reduce(x, (+)), reduce(x, lambda(p, q) -> p + 2.0 * q, 0.0))\n"
+    + "}\n"
+
+/// An unseeded non-builtin (max) leg has no identity seed.
+let private siblingUnseededMaxSrc =
+    "type R = Idx<5>\n"
+    + "let (s, m) = {\n"
+    + "    let x: Array<Float64 like R> = [1.0, 7.0, 3.0, 4.0, 5.0]\n"
+    + "    (reduce(x, (+)), reduce(x, lambda(a, b) -> if a > b then a else b))\n"
+    + "}\n"
+
+/// A `where repro` callee is not inlined (its per-function veto would be lost).
+let private siblingReproCalleeSrc =
+    "type R = Idx<5>\n"
+    + "function kern(a: Array<Float64 like R>) where repro -> Float64 = {\n"
+    + "    reduce(a, lambda(p, q) -> p + q, 0.0)\n"
+    + "}\n"
+    + "let (k, s) = {\n"
+    + "    let x: Array<Float64 like R> = [1.0, 2.0, 3.0, 4.0, 5.0]\n"
+    + "    (kern(x), reduce(x, (+)))\n"
+    + "}\n"
+
+/// An element write between the folds (tests/corpus/sibling-folds/006).
+let private siblingMutationSrc =
+    "type R = Idx<4>\n"
+    + "function direct(x: Array<Float64 like R>) -> Float64 = {\n"
+    + "    let mut v = x * 1.0\n"
+    + "    let a = reduce(v, (+))\n"
+    + "    v((2 : R)) = 7.0\n"
+    + "    let b = reduce(v, (+), 0.0)\n"
+    + "    100.0 * a + b\n"
+    + "}\n"
+    + "let x: Array<Float64 like R> = [1.0, 2.0, 3.0, 4.0]\n"
+    + "let d = direct(x)\n"
+
+/// A call writing the array through a `mut` parameter between the folds.
+let private siblingInterveningCallSrc =
+    "type R = Idx<4>\n"
+    + "function bump(a: mut Array<Float64 like R>) -> Float64 = {\n"
+    + "    a((0 : R)) = 50.0\n"
+    + "    0.0\n"
+    + "}\n"
+    + "function through_call(x: Array<Float64 like R>) -> Float64 = {\n"
+    + "    let mut v = x * 2.0\n"
+    + "    let a = reduce(v, (+))\n"
+    + "    let z = bump(v)\n"
+    + "    let b = reduce(v, (+), 0.0)\n"
+    + "    100.0 * a + b + z\n"
+    + "}\n"
+    + "let x: Array<Float64 like R> = [1.0, 2.0, 3.0, 4.0]\n"
+    + "let c = through_call(x)\n"
+
+/// Licensed legs folding with different builtin operators.
+let private siblingMixedOpsSrc =
+    "type R = Idx<5>\n"
+    + "let (s, p) = {\n"
+    + "    let x: Array<Float64 like R> = [1.0, 2.0, 3.0, 4.0, 5.0]\n"
+    + "    (reduce(x, (+)), reduce(x, (*)))\n"
+    + "}\n"
+
+/// A writing call EARLIER IN THE SAME STATEMENT than a pure multi-fold callee
+/// (tests/corpus/sibling-folds/013): the callee is not inlined.
+let private siblingWriteBeforeCalleeSrc =
+    "type R = Idx<3>\n"
+    + "function bump(a: mut Array<Float64 like R>) -> Float64 = {\n"
+    + "    a((0 : R)) = 50.0\n"
+    + "    0.0\n"
+    + "}\n"
+    + "function stats(x: Array<Float64 like R>) -> Float64 = {\n"
+    + "    let s = reduce(x, (+))\n"
+    + "    let p = prodsum(x, x)\n"
+    + "    s + p\n"
+    + "}\n"
+    + "let mut xm: Array<Float64 like R> = [1.0, 2.0, 3.0]\n"
+    + "let answer = bump(xm) + stats(xm)\n"
+
+/// A shared-fold tree read by a structural projection (`t[1]` of the nested
+/// pairs ((s1, s2), s3) is s3, not leg 1): declined.
+let private siblingStructuralProjSrc =
+    "type R = Idx<3>\n"
+    + "function shared(x: Array<Float64 like R>) -> Float64 = {\n"
+    + "    let l = method_for(x)\n"
+    + "    let t = reduce((l <@> lambda(v) -> v) <&!> (l <@> lambda(v) -> 2.0 * v) <&!> (l <@> lambda(v) -> 3.0 * v), (+))\n"
+    + "    t[1] + reduce(x, (+), 10.0)\n"
+    + "}\n"
+    + "let x: Array<Float64 like R> = [1.0, 2.0, 3.0]\n"
+    + "let r = shared(x)\n"
+
+/// A DEFERRED map whose kernel writes (through another callable), read via an
+/// ALIAS between two folds: the write closure follows alias -> deferred value
+/// -> kernel -> callee.
+let private siblingDeferredAliasWriteSrc =
+    "type R = Idx<4>\n"
+    + "function bump(a: mut Array<Float64 like R>) -> Float64 = {\n"
+    + "    a((0 : R)) = 50.0\n"
+    + "    0.0\n"
+    + "}\n"
+    + "function poke(a: mut Array<Float64 like R>) -> Float64 = bump(a)\n"
+    + "let mut vv: Array<Float64 like R> = [2.0, 4.0, 6.0, 8.0]\n"
+    + "let (ra, rz, rb) = {\n"
+    + "    let w = method_for(range<R>) <@> lambda(i) -> poke(vv)\n"
+    + "    let w2 = w\n"
+    + "    let a = reduce(vv, (+))\n"
+    + "    let z = reduce(w2, (+), 0.0)\n"
+    + "    let b = reduce(vv, (+), 0.0)\n"
+    + "    (a, z, b)\n"
+    + "}\n"
+
+/// A fold over a fresh compute map that is NOT the producer-epilogue shape
+/// (a plain `reduce(y, (+))` in the return tuple, not a let-bound fold of a
+/// cell map): an ordinary candidate, so it joins.
+let private siblingNotEpilogueSrc =
+    "type R = Idx<4>\n"
+    + "let x: Array<Float64 like R> = [1.0, 2.0, 3.0, 4.0]\n"
+    + "let (ey, ex) = {\n"
+    + "    let y = x * 2.0 |> compute\n"
+    + "    (reduce(y, (+)), reduce(x, (+)))\n"
+    + "}\n"
+
+/// The saxpy shape (bench/kernels/saxpy): the kernel's `w * w` fold over the
+/// fresh y2 IS the producer-epilogue shape.
+let private siblingSaxpySrc =
+    "type Ix = Idx<1009>\n"
+    + "function inputs(scale: Float64) -> Array<Float64 like Ix> = {\n"
+    + "    method_for(range<Ix>) <@> lambda(i) -> scale * Float64(i) + 1.0 |> compute\n"
+    + "}\n"
+    + "function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {\n"
+    + "    let y2 = method_for(zip(x, y)) <@> lambda(a, b) -> 1.5 * a + b |> compute\n"
+    + "    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)\n"
+    + "    s\n"
+    + "}\n"
+    + "let (checksum, input_checksum) = {\n"
+    + "    let x = inputs(1.0)\n"
+    + "    let y = inputs(2.0)\n"
+    + "    (kernel(x, y), reduce(x, (+)) + reduce(y, (+)))\n"
+    + "}\n"
+
+/// Repro-kernel legs (tests/corpus/sibling-folds/015): unlicensed in every
+/// lane, so the join applies in the default build.
+let private siblingReproKernelSrc =
+    "type R = Idx<3>\n"
+    + "function radd(p: Float64, q: Float64) where repro -> Float64 = p + q\n"
+    + "let (n_neg, pos, mixed) = {\n"
+    + "    let zs: Array<Float64 like R> = [-0.0, -0.0, -0.0]\n"
+    + "    let mz: Array<Float64 like R> = [0.0, -0.0, -0.0]\n"
+    + "    (reduce(zs, radd, -0.0), reduce(zs, radd, 0.0), reduce(mz, radd, -0.0))\n"
+    + "}\n"
+
+/// The surface join's implicit seed for an unseeded (+) leg the USER wrote is
+/// +0.0 (TypeCheckInfer's rule, untouched by the sibling-fold pass, which
+/// seeds the legs IT builds with -0.0): the join's accumulators are declared
+/// `= 0.0` (leg 0) and `= 0.0` (prodsum).
+let private siblingSurfaceJoinSeed () =
+    let name = "sibling_folds_surface_join_keeps_plus_zero_seed"
+    let src =
+        "type R = Idx<3>\n"
+        + "let z: Array<Float64 like R> = [-0.0, -0.0, -0.0]\n"
+        + "let (j_surface, j_other) = object_for(<&!>) <@> (reduce(z, (+)), prodsum(z, z))\n"
+    match withGates siblingSerialPins (fun () -> cppOfSource name src) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let seeds =
+            System.Text.RegularExpressions.Regex.Matches(mainOf cpp, @"double __(?:v|tup_)\d+_\d+ = ([^;]+);")
+            |> Seq.map (fun x -> x.Groups.[1].Value) |> List.ofSeq
+        if seeds = [ "0.0"; "0.0" ] then
+            resultLine Pass name "the user-written join's unseeded (+) leg keeps its +0.0 seed"
+            true
+        else
+            resultLine Fail name ($"""seeds=[{String.concat "; " seeds}]""")
+            false
+
+/// A callee that may fail (integer `/`) beside a sibling fold is NOT inlined:
+/// its division stays inside `risky`'s own emitted body, under its
+/// BLADE_FRAME, carrying the division's source line (3 here), and `main`
+/// calls it -- so a panic names the original site and frame.
+let private siblingFailingCalleeSite () =
+    let name = "sibling_folds_failing_callee_keeps_site_and_frame"
+    let src =
+        "type R = Idx<4>\n"
+        + "function risky(v: Array<Int64 like R>) -> Int64 = {\n"
+        + "    let s = reduce(method_for(v) <@> lambda(e) -> 100 / e, (+), 0)\n"
+        + "    s\n"
+        + "}\n"
+        + "let (k, t) = {\n"
+        + "    let iv: Array<Int64 like R> = [1, 2, 0, 4]\n"
+        + "    (risky(iv), reduce(iv, (+)))\n"
+        + "}\n"
+    match withGates siblingSerialPins (fun () -> cppOfSource name src) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let fnStart = cpp.IndexOf "int64_t risky(Array<int64_t, 1> v) {"
+        let frame = if fnStart >= 0 then cpp.IndexOf("BLADE_FRAME(\"risky\"", fnStart) else -1
+        let site = if fnStart >= 0 then System.Text.RegularExpressions.Regex.Match(cpp.Substring fnStart, @"idiv64\(100L, [^,]+, [^,]+, 3\)") else System.Text.RegularExpressions.Match.Empty
+        let called = (mainOf cpp).Contains "risky(__v"
+        if fnStart >= 0 && frame > fnStart && site.Success && called then
+            resultLine Pass name "the division stays in risky's body (line 3, under BLADE_FRAME(\"risky\")); main calls risky"
+            true
+        else
+            resultLine Fail name ($"fn={fnStart} frame={frame} site={site.Success} called={called}")
+            false
+
+let private siblingCases () =
+    let serialLicensed = [ ("BLADE_OMP_THREADS", "1"); ("BLADE_FP_REPRO", null); ("BLADE_SIBLING_FOLDS", null) ]
+    [ siblingDotOneLoop ()
+      siblingPlanCase "decision_sibling_folds_applied" siblingSerialPins siblingDotSrc
+          (fun d -> applied d && evidenceMentioning "3 folds over {a, b} share one traversal (Ix: 1009 cells)" d
+                    && evidenceMentioning "kernel(a, b) inlined (pure-total, scalar return)" d
+                    && evidenceMentioning "unseeded (+) legs seeded -0.0: bit-exact for every reachable value" d)
+          "applied: 3 folds over {a, b}, kernel(a, b) inlined, unseeded legs seeded -0.0"
+      siblingThreadGate ()
+      siblingPlanCase "decision_sibling_folds_disabled" (siblingSerialPins @ [ ("BLADE_SIBLING_FOLDS", "0") ]) siblingDotSrc
+          (declinedMentioning "disabled by BLADE_SIBLING_FOLDS") "declined: disabled by BLADE_SIBLING_FOLDS"
+      siblingConvergence "repro" siblingSerialPins 0 ()
+      siblingConvergence "licensed" serialLicensed 3 ()
+      siblingPlanCase "decision_sibling_folds_declined_licence" serialLicensed siblingLicenceMismatchSrc
+          (declinedMentioning "legs disagree on the reorder licence") "declined: legs disagree on the reorder licence"
+      siblingPlanCase "decision_sibling_folds_declined_unseeded_max" siblingSerialPins siblingUnseededMaxSrc
+          (declinedMentioning "unseeded with a non-builtin kernel (no identity)") "declined: an unseeded max leg has no identity"
+      siblingPlanCase "decision_sibling_folds_declined_repro_callee" siblingSerialPins siblingReproCalleeSrc
+          (declinedMentioning "not inlined: a `where repro` callee") "declined: a `where repro` callee is not inlined"
+      siblingPlanCase "decision_sibling_folds_declined_mutation" siblingSerialPins siblingMutationSrc
+          (declinedMentioning "the region assigns or loops imperatively") "declined: the region assigns between the folds"
+      siblingPlanCase "decision_sibling_folds_declined_intervening_call" siblingSerialPins siblingInterveningCallSrc
+          (declinedMentioning "may write (a call or an assignment)") "declined: a call that may write sits between the folds"
+      siblingPlanCase "decision_sibling_folds_declined_mixed_operators" serialLicensed siblingMixedOpsSrc
+          (declinedMentioning "different or non-builtin operators") "declined: licensed legs fold with (+) and (*)"
+      siblingPlanCase "decision_sibling_folds_declined_write_before_callee" siblingSerialPins siblingWriteBeforeCalleeSrc
+          (declinedMentioning "stats(xm) not inlined: its statement may write") "declined: a writing call earlier in the statement keeps stats a call"
+      siblingPlanCase "decision_sibling_folds_declined_structural_projection" siblingSerialPins siblingStructuralProjSrc
+          (declinedMentioning "structural (nested-pair) projection") "declined: a shared tree read by t[1]"
+      siblingPlanCase "decision_sibling_folds_declined_deferred_alias_write" siblingSerialPins siblingDeferredAliasWriteSrc
+          (fun d -> match d.Outcome with Blade.Effects.Declined _ -> true | _ -> false)
+          "declined: a deferred writer read through an alias sits between the folds"
+      siblingPlanCase "decision_sibling_folds_not_epilogue_joins" siblingSerialPins siblingNotEpilogueSrc
+          (fun d -> applied d && evidenceMentioning "2 folds over" d) "applied: a plain fold over a fresh map is no epilogue's"
+      siblingPlanCase "decision_sibling_folds_saxpy_left_for_epilogue" siblingSerialPins siblingSaxpySrc
+          (fun d -> applied d && evidenceMentioning "2 folds over" d && evidenceMentioning "left for the producer epilogue" d)
+          "applied to the input sums; the w * w fold over y2 left for the producer epilogue"
+      siblingPlanCase "decision_sibling_folds_saxpy_epilogue_off_joins_all" (siblingSerialPins @ [ ("BLADE_CELL_EPILOGUE", "0") ]) siblingSaxpySrc
+          (fun d -> applied d && evidenceMentioning "3 folds over" d && evidenceMentioning "kernel(x, y) inlined" d)
+          "applied: with the epilogue off, the kernel's fold joins the input sums"
+      siblingPlanCase "decision_sibling_folds_repro_kernels_applied_default" [ ("BLADE_OMP_THREADS", null); ("BLADE_FP_REPRO", null); ("BLADE_SIBLING_FOLDS", null) ] siblingReproKernelSrc
+          (fun d -> applied d && evidenceMentioning "per-leg licences kept: unlicensed, unlicensed, unlicensed" d)
+          "applied in the default build: three serial-in-every-lane legs"
+      siblingSurfaceJoinSeed ()
+      siblingFailingCalleeSite () ]
+
 let runOptimizeTests () =
     printHeader "Blade-DSL: Optimization Layer Tests"
     let results =
@@ -2575,8 +2947,12 @@ let runOptimizeTests () =
           decisionCase "decision_cse_applied" cseSrc "cse" applied "cse applied"
           decisionCase "decision_cse_identical_lambdas_applied" cseIdenticalLambdasSrc "cse" applied
               "cse applied to two folds with identical lambda kernels"
-          decisionCase "decision_cse_across_pure_call_applied" cseAcrossPureCallSrc "cse" applied
-              "cse applied across a call that writes nothing"
+          // With sibling-fold sharing on, the pure `sumsq` is inlined and the
+          // two identical sums become ONE join leg before CSE runs (the pass
+          // dedupes its legs); the CSE property is pinned with it off.
+          withGate "BLADE_SIBLING_FOLDS" "0" (fun () ->
+              decisionCase "decision_cse_across_pure_call_applied" cseAcrossPureCallSrc "cse" applied
+                  "cse applied across a call that writes nothing")
           // Legality: a write between the two evaluations is a barrier, a
           // let the write names is never merged, and callable identity is
           // structural (never a `%A` rendering).
@@ -2629,6 +3005,7 @@ let runOptimizeTests () =
           decisionCase "decision_gram_apply_advisory" gramAdvisorySrc "gram-apply-advisory"
               (declinedMentioning "gram_apply(A, A, v)") "advisory names gram_apply(A, A, v)" ]
         @ planCases ()
+        @ siblingCases ()
         @ [ parallelEmissionIsolated (); declSpanResetIsolated () ]
         @ validatorPins ()
     let passed = results |> List.filter id |> List.length

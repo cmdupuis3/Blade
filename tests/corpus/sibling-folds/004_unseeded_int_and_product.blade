@@ -1,0 +1,33 @@
+// TEST: Unseeded Int64 sums and Float64 products join with their identities
+// ============================================================================
+// Integer (+) legs take the seed 0 and (*) legs 1 (wrapping is irrelevant: the
+// identity is exact); unseeded Float64 (*) legs take 1.0. Each group folds
+// with ONE operator, so it fires in every build (a licensed C++ join names one
+// reduction operator). Ints print bare, floats with a decimal point.
+// ============================================================================
+type K = Idx<6>
+type F = Idx<5>
+
+let (isum, isum_seeded, icount) = {
+    let iz: Array<Int64 like K> = [3, -1, 4, 1, -5, 9]
+    let ones: Array<Int64 like K> = [1, 1, 1, 1, 1, 1]
+    (reduce(iz, (+)), reduce(iz, (+), 100), reduce(ones, (+)))
+}
+
+let (iprod, iprod2) = {
+    let ip: Array<Int64 like F> = [2, 3, 1, 4, 5]
+    let iq: Array<Int64 like F> = [1, -1, 2, -2, 3]
+    (reduce(ip, (*)), reduce(iq, (*)))
+}
+
+let (fprod, fprod_seeded) = {
+    let fp: Array<Float64 like F> = [1.5, 2.0, 4.0, 0.5, 3.0]
+    (reduce(fp, (*)), reduce(fp, (*), 2.0))
+}
+// EXPECT: isum = 11
+// EXPECT: isum_seeded = 111
+// EXPECT: icount = 6
+// EXPECT: iprod = 120
+// EXPECT: iprod2 = 12
+// EXPECT: fprod = 18.0
+// EXPECT: fprod_seeded = 36.0

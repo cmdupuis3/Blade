@@ -1,0 +1,21 @@
+// TEST: Seeded folds over an empty axis join and answer their seeds
+// ============================================================================
+// An UNSEEDED fold over a statically empty axis is refused at compile time
+// (BL3007), so the sibling-fold pass never meets one; it still seeds unseeded
+// legs only over a literal extent >= 1. SEEDED folds over an empty axis are
+// total -- each answers its own seed -- and join: the shared traversal runs no
+// cell and every leg keeps its own seed. (Nonzero seeds: the SIGN of a zero
+// result is outside a licensed fold's contract -- see 003.)
+// ============================================================================
+type E = Idx<0>
+
+function empty() -> Array<Float64 like E> = {
+    method_for(range<E>) <@> lambda(i) -> Float64(i) |> compute
+}
+
+let (five, seven) = {
+    let e = empty()
+    (reduce(e, (+), 5.0), reduce(e, (+), 7.0))
+}
+// EXPECT: five = "5.0"
+// EXPECT: seven = "7.0"

@@ -1651,9 +1651,10 @@ let s = method_for(v, v) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
 /// `recursive-arrays` joined with the IRForRange arm (the ordered serial
 /// loop: `let rec` and whole-rank folds); `sql-group-by` with the group_by
 /// port (2026-10), so the CSR build and its BL8006 aborts stay gated; `domains`
-/// with the closed-form domain nest (structural/06, bench G4). Every
-/// other category is reachable standalone with `blade test llvm <category>`.
-let defaultCategories = [ "basic"; "functions"; "loops"; "symmetry"; "index-types"; "reynolds"; "recursive-arrays"; "sql-group-by"; "domains" ]
+/// with the closed-form domain nest (structural/06, bench G4); `sibling-folds`
+/// with the sibling-fold rewrite (round 2), whose joins every lane consumes.
+/// Every other category is reachable standalone with `blade test llvm <category>`.
+let defaultCategories = [ "basic"; "functions"; "loops"; "symmetry"; "index-types"; "reynolds"; "recursive-arrays"; "sql-group-by"; "domains"; "sibling-folds" ]
 
 /// What happened to one file. `Matched` carries a note so an agreement that
 /// asserts NOTHING -- both lanes printed no values at all -- is visible in the

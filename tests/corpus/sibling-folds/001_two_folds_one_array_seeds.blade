@@ -1,0 +1,35 @@
+// TEST: Sibling folds over one array share a traversal, every leg its own seed
+// ============================================================================
+// Three scalar folds over the same stored array -- an UNSEEDED builtin sum, a
+// sum seeded at 10.0 through a user lambda, and prodsum(x, x) -- in one
+// function body and in one module binding's block. The optimizer's
+// sibling-fold pass (Optimize.shareSiblingFoldsModule, BLADE_SIBLING_FOLDS)
+// rewrites each region into ONE reduction join: one loop, three accumulators,
+// each leg keeping its own seed (-0.0 for the unseeded sum, 10.0, +0.0 for
+// prodsum) and its own ascending chain. Integer-valued data: the pins are
+// association-invariant.
+// ============================================================================
+type R = Idx<5>
+
+function stats(x: Array<Float64 like R>) -> Float64 = {
+    let s = reduce(x, (+))
+    let t = reduce(x, lambda(p, q) -> p + q, 10.0)
+    let u = prodsum(x, x)
+    s + 100.0 * t + 10000.0 * u
+}
+
+let x: Array<Float64 like R> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let combined = stats(x)
+
+// A plain scalar binding is a region too (its value becomes a block).
+let w = reduce(x, (+)) + 10.0 * prodsum(x, x)
+
+let (s, t, u) = {
+    let y: Array<Float64 like R> = [2.0, 4.0, 6.0, 8.0, 10.0]
+    (reduce(y, (+)), reduce(y, lambda(p, q) -> p + q, 10.0), prodsum(y, y))
+}
+// EXPECT: combined = 552515.0
+// EXPECT: w = 565.0
+// EXPECT: s = 30.0
+// EXPECT: t = 40.0
+// EXPECT: u = 220.0

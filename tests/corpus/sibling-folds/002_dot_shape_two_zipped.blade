@@ -1,0 +1,29 @@
+// TEST: The bench dot shape joins its kernel fold and the input sums
+// ============================================================================
+// bench/kernels/dot at Idx<1009>: `kernel(a, b)` holds a `where omp` fold over
+// the zip of a and b; beside it the binding sums each input. The sibling-fold
+// pass inlines `kernel` one level (pure-total, scalar return) and joins the
+// three folds into one traversal of a and b -- in a build that does not emit
+// threads or that keeps folds serial (BLADE_OMP_THREADS=1, BLADE_FP_REPRO=1).
+// In the default threaded build it DECLINES (a reduction join has no
+// thread-level form, G7) and the kernel keeps its Path B team. The values are
+// the same either way: integer-valued data, association-invariant.
+// ============================================================================
+type Ix = Idx<1009>
+
+function inputs(scale: Float64) -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> scale * Float64(i) + 1.0 |> compute
+}
+
+function kernel(a: Array<Float64 like Ix>, b: Array<Float64 like Ix>) -> Float64 = {
+    let s = reduce(method_for(zip(a, b)) <@> lambda(x, y) -> x * y, lambda(p, q) where omp -> p + q, 0.0)
+    s
+}
+
+let (checksum, input_checksum) = {
+    let a = inputs(1.0)
+    let b = inputs(2.0)
+    (kernel(a, b), reduce(a, (+)) + reduce(b, (+)))
+}
+// EXPECT: checksum = 685338025.0
+// EXPECT: input_checksum = 1527626.0

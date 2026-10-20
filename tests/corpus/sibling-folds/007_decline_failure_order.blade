@@ -1,0 +1,20 @@
+// TEST: Folds that may fail are not joined, so the first failure stays first (aborts)
+// ============================================================================
+// Fold A divides by an integer cell (zero at cell 5: BL8013); the later fold B
+// casts a float cell to an integer (NaN at cell 2: BL8014). Interleaved in one
+// traversal, B's cell 2 would fail before A's cell 5 and the program would
+// report BL8014. The sibling-fold judge admits pure-TOTAL legs only (integer
+// `/` and a float->int cast may fail), so both folds keep their own loops and
+// the program fails as written: BL8013 from A.
+// ============================================================================
+type R = Idx<7>
+
+let fzero = 0.0
+
+let (a, b) = {
+    let iv: Array<Int64 like R> = [1, 2, 4, 5, 10, 0, 20]
+    let fv: Array<Float64 like R> = [1.0, 2.0, fzero / fzero, 4.0, 5.0, 6.0, 7.0]
+    (reduce(method_for(iv) <@> lambda(v) -> 100 / v, (+), 0),
+     reduce(method_for(fv) <@> lambda(v) -> Int64(floor(v)), (+), 0))
+}
+// ABORT: BL8013

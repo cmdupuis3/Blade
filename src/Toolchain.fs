@@ -128,3 +128,27 @@ let envFlag (name: string) (defaultOn: bool) : bool =
     | SwitchOn -> true
     | SwitchOff -> false
     | SwitchUnset | SwitchOther _ -> defaultOn
+
+/// Does THIS BUILD keep the serial association of every fold
+/// (`BLADE_FP_REPRO=1|on`, or the compatibility spelling `BLADE_FP_REASSOC=0|off`)?
+/// The canonical predicate; `Blade.CodeGenState.fpReproEnabled` re-exports it
+/// (its doc comment states the policy). It lives here so the optimizer
+/// (which compiles before the emitters) reads the SAME predicate. Per call,
+/// never cached.
+let fpReproEnabled () : bool =
+    envFlag "BLADE_FP_REPRO" false
+    || envSwitch "BLADE_FP_REASSOC" = SwitchOff
+
+/// Does this build emit thread-level OpenMP constructs? `BLADE_OMP_THREADS`
+/// is a THREAD COUNT with off-words: `1` (one thread) suppresses exactly as
+/// `0` / `off` / `false` do, while `on` / `true` are no count at all and
+/// leave emission on; unset = on. The canonical predicate;
+/// `Blade.CodeGenState.ompThreadEmissionEnabled` re-exports it (its doc
+/// comment states the policy). Per call, never cached.
+let ompThreadEmissionEnabled () : bool =
+    match envSwitch "BLADE_OMP_THREADS" with
+    | SwitchOff -> false
+    | SwitchOn ->
+        // `1` reads as SwitchOn in the shared grammar; here it is the count 1.
+        (Environment.GetEnvironmentVariable "BLADE_OMP_THREADS").Trim() <> "1"
+    | _ -> true

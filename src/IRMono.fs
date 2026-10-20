@@ -1833,6 +1833,64 @@ let adaptFloatLiteralsModule (modul: IRModule) : IRModule =
 /// `programFuncs` is every callable of the program: a name the scalar operand
 /// reads is a CAPTURE of the synthesized kernel unless it is a callable, and
 /// a callable may live in another module.
+/// The array identity a co-iteration/map operand carries: one per distinct
+/// operand variable, so codegen's symmetry deduction treats `A_0 + A_1` as two
+/// different arrays (and `A_0 + A_0` as the same array).
+let internal coIterIdentityOf (e: IRExpr) : ArrayIdentity =
+    match e with
+    | IRVar (id, _) -> AIDVariable $"__coi{id}"
+    | _ -> AIDVariable "__coi"
+
+/// `method_for(arr) <@> kernel` over ONE array with a scalar kernel, as the
+/// bare (deferred, unforced) combinator node. `lowerArrayBinOpsModule` wraps
+/// it in `IRCompute`; Optimize's sibling-fold pass uses it bare as a join leaf.
+let internal mapOneArrayApply (arr: IRExpr) (la: IRArrayType) (kernel: IRExpr) (outputType: IRType) : IRExpr =
+    let ident = coIterIdentityOf arr
+    let sdims = la.IndexTypes.Length
+    let mfInfo : MethodForInfo =
+        { Arrays = [arr]; Identities = [ident]; ArrayTypes = [la]
+          SDimsPerArray = [sdims]; TotalSDims = sdims; SharedIndexTypes = [] }
+    let applyInfo : ApplyInfo =
+        { Loop = IRMethodFor mfInfo
+          Kernel = kernel
+          Arrays = [arr]; Identities = [ident]; ArrayTypes = [la]
+          SharedIndexTypes = []; SymcomStates = [SCNeither]; TriangularLevels = [false]
+          SDimsPerArray = [sdims]; KernelInputRanks = [0]; KernelOutputRank = 0
+          KernelTDims = []; SpeedupFactor = 1L; ReynoldsSpeedup = 1L; HasReynolds = false
+          OutputType = outputType; IsCoIteration = false }
+    IRApplyCombinator applyInfo
+
+/// Clone a callable's parameters with fresh ids (the same callable can be
+/// spliced or inlined at more than one site; ids must stay unique), renaming
+/// them `__fz<id>` for hygiene, and rewrite its body onto the fresh ids. The
+/// body's own `let` binders are freshened too: a kernel that was itself fused
+/// binds a repeated inner value once, and splicing that kernel twice must not
+/// mint one binder twice.
+let internal freshenCallable (builder: IRBuilder) (ik: IRCallable) : IRParam list * IRExpr =
+    let mapping = ik.Params |> List.map (fun p -> p.VarId, builder.FreshId())
+    let letBinders =
+        let acc = System.Collections.Generic.List<IRId>()
+        iterIRExpr (fun e -> match e with IRLet (id, _, _) -> acc.Add id | _ -> ()) ik.Body
+        acc |> Seq.distinct |> Seq.map (fun id -> id, builder.FreshId()) |> List.ofSeq
+    let mapped = Map.ofList (mapping @ letBinders)
+    let params' =
+        ik.Params |> List.map (fun p ->
+            let nid = mapped.[p.VarId]
+            { p with VarId = nid; Name = $"__fz{nid}" })
+    let body' =
+        mapIRExpr (fun e ->
+            match e with
+            | IRVar (id, t) ->
+                (match Map.tryFind id mapped with
+                 | Some nid -> IRVar (nid, t)
+                 | None -> e)
+            | IRLet (id, v, b) ->
+                (match Map.tryFind id mapped with
+                 | Some nid -> IRLet (nid, v, b)
+                 | None -> e)
+            | _ -> e) ik.Body
+    params', body'
+
 let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: IRCallable list) : IRModule =
     let newLambdas = System.Collections.Generic.List<IRCallable>()
     // The function or binding being rewritten: an operator kernel minted here
@@ -1845,10 +1903,7 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs:
     // Distinct identity per distinct operand var so codegen's symmetry
     // deduction treats `A_0 + A_1` as two different arrays (and `A_0 + A_0` as
     // the same array -- correct commutative collapse).
-    let identityOf e =
-        match e with
-        | IRVar (id, _) -> AIDVariable $"__coi{id}"
-        | _ -> AIDVariable "__coi"
+    let identityOf e = coIterIdentityOf e
     // Operand type, seeing through a `|> compute` wrapper so a *nested* array
     // binop -- whose inner rewrite already produced `IRCompute(IRApplyCombinator)`
     // (an array-typed, but not CarriedType-tagged, node) -- is still recognized
@@ -1997,20 +2052,7 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs:
     // `method_for(arr) <@> kernel |> compute` over ONE array with a scalar
     // kernel: the map both broadcast rewrites below build.
     let mapOneArray (arr: IRExpr) (la: IRArrayType) (kernel: IRExpr) (outputType: IRType) : IRExpr =
-        let ident = identityOf arr
-        let sdims = la.IndexTypes.Length
-        let mfInfo : MethodForInfo =
-            { Arrays = [arr]; Identities = [ident]; ArrayTypes = [la]
-              SDimsPerArray = [sdims]; TotalSDims = sdims; SharedIndexTypes = [] }
-        let applyInfo : ApplyInfo =
-            { Loop = IRMethodFor mfInfo
-              Kernel = kernel
-              Arrays = [arr]; Identities = [ident]; ArrayTypes = [la]
-              SharedIndexTypes = []; SymcomStates = [SCNeither]; TriangularLevels = [false]
-              SDimsPerArray = [sdims]; KernelInputRanks = [0]; KernelOutputRank = 0
-              KernelTDims = []; SpeedupFactor = 1L; ReynoldsSpeedup = 1L; HasReynolds = false
-              OutputType = outputType; IsCoIteration = false }
-        IRCompute (IRApplyCombinator applyInfo)
+        IRCompute (mapOneArrayApply arr la kernel outputType)
     // Broadcast a scalar against an array (`arr op scalar` / `scalar op
     // arr`): value-space twin of TypeCheck.inferBinOp's array-scalar path,
     // for operands whose types only resolve post-monomorphization (a pack
@@ -2599,34 +2641,8 @@ let fuseElementwiseChainsModule (modul: IRModule) (builder: IRBuilder) (programF
 
     // Clone an inner kernel's parameters with fresh ids (the same callable
     // can be spliced at more than one site; ids must stay unique), renaming
-    // for hygiene, and rewrite its body onto the fresh ids.
-    let freshen (ik: IRCallable) : IRParam list * IRExpr =
-        let mapping = ik.Params |> List.map (fun p -> p.VarId, builder.FreshId())
-        // A spliced body's own `let` binders are freshened too: a kernel that
-        // was itself fused binds a repeated inner value once (see the splice
-        // below), and splicing that kernel twice must not mint one binder twice.
-        let letBinders =
-            let acc = System.Collections.Generic.List<IRId>()
-            iterIRExpr (fun e -> match e with IRLet (id, _, _) -> acc.Add id | _ -> ()) ik.Body
-            acc |> Seq.distinct |> Seq.map (fun id -> id, builder.FreshId()) |> List.ofSeq
-        let mapped = Map.ofList (mapping @ letBinders)
-        let params' =
-            ik.Params |> List.map (fun p ->
-                let nid = mapped.[p.VarId]
-                { p with VarId = nid; Name = $"__fz{nid}" })
-        let body' =
-            mapIRExpr (fun e ->
-                match e with
-                | IRVar (id, t) ->
-                    (match Map.tryFind id mapped with
-                     | Some nid -> IRVar (nid, t)
-                     | None -> e)
-                | IRLet (id, v, b) ->
-                    (match Map.tryFind id mapped with
-                     | Some nid -> IRLet (nid, v, b)
-                     | None -> e)
-                | _ -> e) ik.Body
-        params', body'
+    // for hygiene, and rewrite its body onto the fresh ids (see freshenCallable).
+    let freshen (ik: IRCallable) : IRParam list * IRExpr = freshenCallable builder ik
 
     // `Error why` is the DECLINE reason, recorded by `rewrite` when the host
     // had a fusable-looking operand (a `compute`d inner map) -- the shape a

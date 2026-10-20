@@ -1,0 +1,30 @@
+// TEST: A typed floating division in a summand is total, so the fold joins
+// ============================================================================
+// bench/kernels/fusedchain in miniature: the kernel folds a composed chain
+// whose squash stage divides, `v / (1.0 + abs(v))`. A FLOAT division by a
+// computed divisor cannot panic (only integer `/` and `%` do), so the
+// sibling-fold judge discharges it and the kernel's fold joins the input sum
+// (in a build that does not thread the kernel's `where omp` fold). Dyadic data
+// keeps every value exact.
+// ============================================================================
+type Ix = Idx<4>
+
+let affine = lambda(v) -> 2.0 * v + 1.0
+let squash = lambda(v) -> v / (1.0 + abs(v))
+let chain = object_for(affine) >>@ object_for(squash)
+
+function kernel(a: Array<Float64 like Ix>) -> Float64 = {
+    let s = reduce(chain <@> a, lambda(p, q) where omp -> p + q, 0.0)
+    s
+}
+
+function inputs() -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> Float64(2 ^ Int64(i)) - 1.0 |> compute
+}
+
+let (checksum, input_checksum) = {
+    let a = inputs()
+    (kernel(a), reduce(a, (+)))
+}
+// EXPECT: checksum = 3.0625
+// EXPECT: input_checksum = 11.0

@@ -630,9 +630,9 @@ let splitTimingModeEnabled () : bool =
 /// what the differential harnesses pin).
 ///
 /// A FUNCTION, per call, never cached -- see `fpReassocEnabled` below.
-let fpReproEnabled () : bool =
-    Blade.Toolchain.envFlag "BLADE_FP_REPRO" false
-    || Blade.Toolchain.envSwitch "BLADE_FP_REASSOC" = Blade.Toolchain.SwitchOff
+/// The predicate itself lives in Blade.Toolchain (so the optimizer reads the
+/// same one); this is its re-export.
+let fpReproEnabled () : bool = Blade.Toolchain.fpReproEnabled ()
 
 /// Which spelling selected the repro build, for the census markers and the
 /// `blade plan` fold-form lines (one phrase, so a grep finds every site).
@@ -895,17 +895,13 @@ let internal laneCountForStreams (s: int) : int =
 /// `fpReassocEnabled`: a module-level binding freezes the environment read at
 /// first touch and would make a mid-process pin (a test's scoped guard)
 /// silently ineffective. Every consultation re-reads.
-let ompThreadEmissionEnabled () : bool =
-    // Not a plain switch but a THREAD COUNT with off-words: `1` (one thread)
-    // suppresses exactly as `0` / `off` / `false` do, while `on` / `true` are
-    // no count at all and leave emission on. Trimmed and case-insensitive,
-    // like Toolchain.parseSwitch.
-    match Blade.Toolchain.envSwitch "BLADE_OMP_THREADS" with
-    | Blade.Toolchain.SwitchOff -> false
-    | Blade.Toolchain.SwitchOn ->
-        // `1` reads as SwitchOn in the shared grammar; here it is the count 1.
-        (System.Environment.GetEnvironmentVariable "BLADE_OMP_THREADS").Trim() <> "1"
-    | _ -> true
+///
+/// Not a plain switch but a THREAD COUNT with off-words: `1` (one thread)
+/// suppresses exactly as `0` / `off` / `false` do, while `on` / `true` are no
+/// count at all and leave emission on. Trimmed and case-insensitive, like
+/// Toolchain.parseSwitch. The predicate itself lives in Blade.Toolchain (so the
+/// optimizer reads the same one); this is its re-export.
+let ompThreadEmissionEnabled () : bool = Blade.Toolchain.ompThreadEmissionEnabled ()
 
 /// The reason string every site hands to the emitted-C++ marker when this knob
 /// is what suppressed a thread construct. ONE spelling, so a census over

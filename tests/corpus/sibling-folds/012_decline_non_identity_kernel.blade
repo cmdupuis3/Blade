@@ -1,0 +1,16 @@
+// TEST: An unseeded fold with no identity stays unjoined and keeps its left fold
+// ============================================================================
+// `reduce(xs, lambda(a, b) -> a - b)` is a LEFT fold from the first element:
+// ((1 - 2) - 3) - 4 = -8. Subtraction has no identity seed, so the
+// sibling-fold pass cannot make it a join leg ("unseeded with a non-builtin
+// kernel (no identity)"); with only one other fold over the axis, nothing
+// joins, and both values are as written.
+// ============================================================================
+type R = Idx<4>
+
+let (diff, total) = {
+    let xs: Array<Int64 like R> = [1, 2, 3, 4]
+    (reduce(xs, lambda(a, b) -> a - b), reduce(xs, (+)))
+}
+// EXPECT: diff = -8
+// EXPECT: total = 10

@@ -1,0 +1,25 @@
+// TEST: A callee that may fail is not inlined, and fails at its own site and frame (aborts)
+// ============================================================================
+// `risky` folds `100 / e` (integer division: BL8013 on the zero cell) beside a
+// sibling sum in the caller. Only a pure-TOTAL callee is inlined, so `risky`
+// stays a call: the panic names the division's own line and the `risky`
+// frame, exactly as without the pass. (The pins here read the message and
+// the frame; the exact site -- the division's line, emitted inside `risky`'s
+// body under its BLADE_FRAME -- is pinned by
+// sibling_folds_failing_callee_keeps_site_and_frame in tests/OptimizeTests.fs,
+// where the source's line numbers are fixed.)
+// ============================================================================
+type R = Idx<4>
+
+function risky(v: Array<Int64 like R>) -> Int64 = {
+    let s = reduce(method_for(v) <@> lambda(e) -> 100 / e, (+), 0)
+    s
+}
+
+let (k, t) = {
+    let iv: Array<Int64 like R> = [1, 2, 0, 4]
+    (risky(iv), reduce(iv, (+)))
+}
+// ABORT: error[BL8013]: integer division by zero
+// ABORT: -->
+// ABORT: at risky

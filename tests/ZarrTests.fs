@@ -1140,6 +1140,69 @@ let sizes = extents(seg)
     streamedFoldE2E ()
 
     // ---------------------------------------------------------------
+    // 10f'. Sibling folds over a STREAMED variable are not joined
+    // (Optimize.shareSiblingFoldsModule): a `.stream` read has an ordinary
+    // dense array type but no storage a reduction join could share (each fold
+    // walks the store block by block), and a provider read is not a pure
+    // value. Two folds of it in one binding block keep their own streamed
+    // fold route; the sibling-fold record says why.
+    // ---------------------------------------------------------------
+    printfn "\n--- streamed fold siblings: not joined ---"
+    let streamedSiblingsE2E () =
+        let segStore = fixStore "zarr_segments"    // 10 cells 1..10, chunked at 4
+        let src = sprintf """
+import zarr as z
+
+let sample = z.load("%s")
+type CX = Chunked<sample.index.x, store>
+let A: Array<Float like CX> = sample.vars.A |> z.stream
+let (p, q) = {
+    let s = reduce(A, (+))
+    let t = reduce(A, (+), 1.0)
+    (s, t)
+}
+"""
+                            segStore
+        let prior = System.Environment.GetEnvironmentVariable "BLADE_FP_REPRO"
+        try
+            // Repro, so the decline cannot come from a licence disagreement.
+            System.Environment.SetEnvironmentVariable("BLADE_FP_REPRO", "1")
+            Blade.Effects.Decisions.start ()
+            match lower src with
+            | Ok ir ->
+                let decisions = Blade.Effects.Decisions.drain ()
+                let sib = decisions |> List.filter (fun d -> d.Rule = "sibling-folds")
+                check "streamed siblings: sibling-folds declines on the streamed operand"
+                    (sib |> List.exists (fun d ->
+                        match d.Outcome with
+                        | Blade.Effects.Declined why -> why.Contains "streamed provider read" || d.Evidence |> List.exists (fun e -> e.Contains "streamed provider read")
+                        | _ -> false)
+                     && not (sib |> List.exists (fun d -> d.Outcome = Blade.Effects.Applied)))
+                    (sprintf "%A" (sib |> List.map Blade.Effects.Decisions.render))
+                let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir "zarr_streamed_siblings"
+                check "streamed siblings: each fold keeps its streamed route, no join"
+                    (cppCode.Contains "STREAMED fold" && not (cppCode.Contains "reduction join")) ""
+                CodeGen.deployRuntimeHeaders e2eDir
+                let cppFile = Path.Combine(e2eDir, "zarr_streamed_siblings.cpp")
+                File.WriteAllText(cppFile, cppCode)
+                (match compileCpp cppFile e2eDir with
+                 | Ok exePath ->
+                     (match runExecutable exePath with
+                      | Ok (0, runOut) ->
+                          check "streamed siblings: p = 55, q = 56" (runOut.Contains "p = 55.0" && runOut.Contains "q = 56.0") runOut
+                      | Ok (code, out) -> check "streamed siblings: runs" false ($"exit {code}: {out}")
+                      | Error e -> check "streamed siblings: runs" false e)
+                 | Error e ->
+                     if isSkipError e then printfn "  SKIP streamed siblings (compile skipped): %s" e
+                     else check "streamed siblings: compiles" false e)
+            | Error e ->
+                Blade.Effects.Decisions.drain () |> ignore
+                check "streamed siblings: lowers" false e
+        with ex -> check "streamed siblings" false ex.Message
+        System.Environment.SetEnvironmentVariable("BLADE_FP_REPRO", prior)
+    streamedSiblingsE2E ()
+
+    // ---------------------------------------------------------------
     // 10g. STENCIL OVER SEGMENTS (docs/plans/structural/07 §2.3): a halo map
     // over a streamed rank-1 variable on a `Chunked` axis runs one segment at
     // a time, reading each run plus the ghost cells its reach demands. The

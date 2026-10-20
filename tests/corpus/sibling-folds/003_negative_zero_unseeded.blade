@@ -1,0 +1,57 @@
+// TEST: An unseeded leg keeps its bits: the identity seed is -0.0, not +0.0
+// ============================================================================
+// An unseeded `reduce(z, (+))` copies z(0) and folds the rest, so an
+// all-negative-zero array sums to -0.0. Joined, the leg needs a seed; the
+// sibling-fold pass seeds an unseeded builtin (+) leg with -0.0 and a (*) leg
+// with 1.0 -- the exact identities under round-to-nearest (docs/formalism.md
+// 2.4: bit-exact for every value a program can produce; signalling-NaN state
+// is outside the contract) -- so each leg's serial chain is unchanged bit for
+// bit. A +0.0 seed would turn s_neg into 0.0. The pins are QUOTED (they
+// compare the printed text: a numeric `-0.0` pin accepts either zero);
+// 1.0 / s_neg pins the sign.
+//
+// The (+) group carries one UNLICENSED sibling (`p + 2.0 * v` is no builtin
+// fold), so in a reordering build the group DECLINES (legs disagree on the
+// licence) and every fold keeps today's form; in the repro build -- the build
+// the identity claim is about, and the one `blade test interp` and `blade test
+// opt-diff` run -- it fires, and opt-diff compares the joined -0.0 chain with
+// the unseeded one. The (*) group is all licensed and fires everywhere: a
+// product's simd lanes start at 1.0 and keep the sign.
+//
+// What is NOT here, and why: the sign of a zero LICENSED sum belongs to the
+// licensed form (a C++ join's `omp simd reduction` lanes start at +0.0; the
+// LLVM lane's `nsz` may drop a +0.0 addend), so the two lanes legitimately
+// print opposite zeros for, e.g., an unseeded sum of [0.0, -0.0, -0.0] in the
+// default build -- and `blade test llvm` compares their output text. That
+// mixed case, and the seeded +0.0 / -0.0 ones, are pinned on serial-in-every-
+// lane `where repro` kernels in tests/corpus/sibling-folds/015.
+// ============================================================================
+type R = Idx<3>
+type P = Idx<4>
+
+let fzero = 0.0
+
+let (s_neg, s_inf, s_nan, q, twice) = {
+    let z: Array<Float64 like R> = [-0.0, -0.0, -0.0]
+    let fz: Array<Float64 like R> = [-1.0 / fzero, 1.0, 1.0]
+    let nz: Array<Float64 like R> = [fzero / fzero, 1.0, 1.0]
+    (reduce(z, (+)), reduce(fz, (+)), reduce(nz, (+)), reduce(z * z, (+)),
+     reduce(fz, lambda(p, v) -> p + 2.0 * v, 0.0))
+}
+let inv_neg = 1.0 / s_neg
+
+let (p_neg, p_four) = {
+    let pz: Array<Float64 like P> = [-0.0, 2.0, 1.0, 3.0]
+    let pw: Array<Float64 like P> = [1.0, 2.0, 3.0, 4.0]
+    (reduce(pz, (*)), reduce(pw, (*)))
+}
+let inv_p = 1.0 / p_neg
+// EXPECT: s_neg = "-0.0"
+// EXPECT: inv_neg = "-inf"
+// EXPECT: s_inf = "-inf"
+// EXPECT: s_nan = "nan"
+// EXPECT: q = "0.0"
+// EXPECT: twice = "-inf"
+// EXPECT: p_neg = "-0.0"
+// EXPECT: inv_p = "-inf"
+// EXPECT: p_four = "24.0"

@@ -1,0 +1,19 @@
+// TEST: Folds whose kernels read different captures are different legs
+// ============================================================================
+// `lambda(p, q) -> p + q * c1` and `lambda(p, q) -> p + q * c2` have the same
+// operator shape but read DIFFERENT captured scalars: the sibling-fold pass
+// dedupes only structurally identical legs (captures and callees keep their
+// identity), so both folds stay separate legs of the join and each reads its
+// own scale. A wrong merge would print 1414.0 (c1 twice) or 2121.0 (c2 twice).
+// ============================================================================
+type R = Idx<4>
+
+function caps(x: Array<Float64 like R>, c1: Float64, c2: Float64) -> Float64 = {
+    let s1 = reduce(x, lambda(p, q) -> p + q * c1, 0.0)
+    let s2 = reduce(x, lambda(p, q) -> p + q * c2, 0.0)
+    s1 + 100.0 * s2
+}
+
+let base: Array<Float64 like R> = [1.5, -0.5, 2.0, 4.0]
+let cap = caps(base, 2.0, 3.0)
+// EXPECT: cap = 2114.0

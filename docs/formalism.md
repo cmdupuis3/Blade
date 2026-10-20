@@ -164,6 +164,14 @@ may differ from the other lanes where the C++ compiler fuses `a * b + c`
 | `sqrt` `floor` `ceil` `abs` `fma` (real operand) | IEEE correctly rounded (so a compile-time fold is the run-time value); Float32 operands use the float operation |
 | integer literals | exact, including array-literal leaves (never routed through a double) |
 
+NaN payloads and signalling state are outside the contract. Every lane prints
+every NaN as `nan`; the provider boundary refuses a NaN in both directions
+(BL8015); no Blade operation or intrinsic distinguishes a signalling NaN from a
+quiet one, and none can construct one. A compiler rewrite may therefore insert
+an identity operation on a fold's chain (`-0.0 + x`, `1.0 * x`), which is
+bit-exact for every finite, infinite, signed-zero and quiet-NaN value and would
+only quiet a signalling NaN.
+
 A panic is an ordinary runtime failure (`error[BL8013]: ...`, exit 1) that
 names the faulting operator's source position (`  --> file:line`) and the
 call stack; nothing in the table is undefined behavior in any lane. The

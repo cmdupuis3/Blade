@@ -324,6 +324,222 @@ below parity. Then RESULTS.md section 15 and the gap register.
   solve sums, functions/056/137/198/199 statistics shapes. Conflicts W1-D x W1-B/W1-C:
   Optimize.fs gate declarations + the optimizerGates line, CLAUDE.md row, features.md row;
   OptimizeTests hunks disjoint. Sent to W1-D.
+- ~04:00: **W1-B fixes landed** (53d9ca67 planner: capture dominance + non-failing row kernel
+  -- blocker 1 was a PRE-EXISTING compile failure on OLD too (`'w2' was not declared`); corpus
+  loops/484 (late capture, shadowed name) and 485 (ABORT order); 428b549c decision records
+  unified under `cell-epilogue` in both lanes, constructs recorded after the form is chosen;
+  47aa8ddb cell-epilogue block 56 cases: no silent LLVM skips, actual team asserted (3, 8, and
+  2 under OMP_THREAD_LIMIT=2), licensed T=3 fast, recur buffer hashed, licensed LLVM on/off at
+  1e-9; f8b41405 docs qualified). optimize 190/0, cell-epilogue 56/0, loops 247/0,
+  recursive-arrays 29/0, math 78/0, symmetry 127/0, sgs 15/0, spectra 42/0, interp loops
+  248/0, interp recursive-arrays 30/0, opt-diff loops 218/0/29, opt-diff recursive-arrays
+  27/0/2. **MERGED** into `worktree-bench-fortran` as e5e24e17 (conflicts: CLAUDE.md
+  TILE_TUNE row -- both clauses kept; CodeGenExprSupport.fs adjacent knob helpers -- both
+  kept). Post-merge sanity running.
+- ~04:20: **W1-C B3 fixes landed** (10d76944): planner records `DominatingIds` (earlier lets,
+  function params, module bindings ahead of the top-level binding) and `bodyDominated` is
+  checked at emission in both lanes; the consumer's own evaluation (seed + walk) declines when
+  it may write (`symmetry/131` pins both: a scalar computed between producer and fold, and a
+  `poke(kw)` seed writing a producer cell -> sw = 2002.0 = OLD); cli determinism case builds
+  with omp-coverage instrumentation and observed teams 1/3/8 with identical full output;
+  LLVM runtime gates (symmetric + strict unknown-parity, outer seed 0.37, n=101 tails;
+  pairkernel p=2503 gate off/on within 1e-12; C++ vs LLVM within 1e-12); B4 fold-only LLVM
+  `fmul` pinned undecorated in the default build; docs qualified. optimize 175/0, cli 124/0,
+  corpus-wiring 14/0, symmetry 130/0, index-types 380/0, interp symmetry 131/0, opt-diff
+  symmetry 92/0/38. Awaiting the W1-B post-merge build before merging.
+- ~04:45: post-merge sanity of e5e24e17 (W1-B) green: build clean (Blade.dll 3089A028),
+  optimize 190/0, cell-epilogue 56/0, fold-lanes 4/0, loops 247/0, recursive-arrays 29/0,
+  symmetry 128/0, linalg 19/0, cli 105/0, corpus-wiring 14/0, omp 102/93/8.
+  **W1-C MERGED** as 10b7903f: eight conflicts resolved by script -- CLAUDE.md optimizer-gates
+  row three-way merged (both clauses), CodeGenBinding orbit dispatch keeps W1-A's
+  `(plan, why)` tuple arms + W1-C's `compactRows` block, CodeGenCuda keeps both epilogue
+  builders and W1-C's `CompactRowEpilogue` rebinding before W1-B's `flatEpiDeclined`,
+  CodeGenLoopNest keeps `cellBlock` then `compactRow`, IRStorage keeps both
+  `FlatEpilogue`/`CompactRowEpilogue` fields, Lowering resets all three tables,
+  `optimizerGates` = union (CELL_EPILOGUE, COMPACTION_FUSION, COMPACT_ROW_CLASSES),
+  OptimizeTests keeps both test families minus a duplicate `countOf` (identical semantics).
+  First post-merge build FAILED (FS0001 at OptimizeTests.fs:1080): git had split a W1-B helper
+  (the `true/else/false` tail landed after W1-C's inserted block); restored in acd8501e.
+  Second build failure (FS0001 at :1262): the SAME six-line tail belongs to BOTH W1-B's llvm
+  helper and W1-C's `codegenDecisionCase`; git emitted the common tail once, so both
+  functions need it -- restored in 46007b87. Lesson for the W1-D merge: after a scripted
+  resolution, diff each conflicted file against BOTH parents, and watch for shared text that
+  git folds into one copy. Rebuilt clean (0/0) on 46007b87; blocks running.
+- ~05:30: **W1-D fixes landed** (f1eed467: Optimize.fs fixes + tests -- a PowerShell quoting
+  mishap folded the compiler change into the test commit, message describes the tests only;
+  5f5d3248 docs + gap-register G40). Per finding: (1) a call is not inlined out of a statement
+  that may write (transitive closure; `bump(xm) + stats(xm)` = 2568.0 in every lane); (2)
+  shared `<&!>` trees with 3+ leaves and any structural projection DECLINE; (3) streamed
+  provider operands refused in admission, the totality proof and call arguments, plus
+  operands bound outside the region/module; (4) cycle-safe write closure over deferred
+  producers, aliases, callable captures, nested callables; (5) epilogue reservation mirrors
+  W1-B's rank-1 eligibility textually (`let y = x * 2.0 |> compute` now joins; saxpy reserves
+  with the gate on, joins all three with `BLADE_CELL_EPILOGUE=0`); (6) licensed-sign cases
+  moved to corpus 015 on `where repro` kernels, the surface +0.0 rule became a needle,
+  `sibling-folds` added to `LlvmTests.defaultCategories`, G40 registered; (7) record wording
+  qualified; convergence needle asserts seeds + simd arity; corpus 016 (Float32/Int32; LLVM
+  skips Float32), 017 (different captures not deduped), 018 (failing callee refused, frame
+  pinned by needle); streamed regression in ZarrTests 10f'. optimize 173/0, sibling-folds
+  18/0, interp 19/0, opt-diff 18/0, llvm sibling-folds 17/0/1, loops 241/0, functions 324/0,
+  cli 103/0, corpus-wiring 14/0, math 78/0, spectra 42/0, sql-reduce 30/0, rand 33/0, ppl
+  140/0, zarr 355/0. NEW-vs-OLD identity NOT re-run after the fixes (the wave-end A/B
+  covers it). **Pre-existing bugs found (NOT this branch, follow-up cards):** (a) C++ lane:
+  `t[1]` of a THREE-leaf shared `<&!>` tree prints 28 where LLVM prints 34 (structural
+  projection mapped as flat in the C++ join emitter), and `t[0][1]` is a BL9002 g++
+  rejection; (b) a deferred map whose kernel WRITES, bound in a binding block, prints 68 in
+  C++ vs 20 in LLVM (gate off too).
+- ~05:50: post-merge blocks on 46007b87 (A+B+C): optimize 213/0, cell-epilogue 56/0,
+  fold-lanes 4/0, index-types 380/0, symmetry 131/0, loops 247/0, recursive-arrays 29/0,
+  linalg 153/21/4/19/19 all 0 failed, cli 126/0, corpus-wiring 14/0, omp-reduce 93/0,
+  omp-coverage 8/0, omp-pragma 101/1 -- the one failure a stale W1-A pin
+  (`row_slots_not_in_default_build` expected the orbit-class fold; B3's compact row classes
+  now take that shape in the licensed build; the guard "no __rslot" still holds) -> pin
+  accepts either licensed form (9e46be03). Merging W1-D.
+- ~06:05: **W1-D MERGED**: three conflicts (CLAUDE.md gates row three-way merged -- all four
+  clauses; features.md both rows kept; Optimize.fs gate declarations both kept, gate list =
+  union incl. `BLADE_SIBLING_FOLDS`); deletions vs both parents inspected -- only the other
+  side's own edits of the same rows/functions, no spliced bodies. Building the four-way tree.
+- ~06:15: **WAVE 1 INTEGRATED** at 6b3e5293 (build 0/0, Blade.dll 3061E900). Runner started
+  the five gates from `C:\bt_r2w1` (default, opt-diff, docs, llvm, interp). **WAVE 2 started**
+  in fresh worktrees reset to 6b3e5293: W2-A ordered scatter rank 2 + 3 (both lanes,
+  `BLADE_ORBIT_SCATTER`, `scatter_g/scatter_b`, `blade test orbit-scatter`); W2-D antisym row
+  groups (`anti_g`, both drivers, scratch-aware LLVM emitter, route assertion) + simplex edge
+  kloops with the CORRECTED L0/L1 formula (`tri_edge`); W2-E G7 thread-level `<&!>` join
+  (generalized Path B, explicit-request policy, `BLADE_JOIN_THREADS`, onepass.blade gains
+  `where omp` on its fold kernel, harness `load_kernel` false fix, the sibling-fold thread
+  gate relaxed to the same policy); W2-F the three pre-existing correctness bugs (Path B
+  comm-fold captured-write race; C++ structural projection of a three-leaf shared tree;
+  writing deferred-map lane divergence) with pins and gap-register rows. Builders will be
+  asked to IDLE during the harness A/B window after the gates.
+- ~07:10: **W2-D done** on `worktree-agent-a062057a5ec063b98` (ec65b6b7 tiles; d6e7a3b3 docs +
+  corpus symmetry/132): D2 `anti_g` row groups in both drivers (auto = largest of 4/2/1 under
+  the 256 KiB active-pair budget: G=4 up to n=512, 2 up to 819 for 6x8; LLVM scratch
+  G-aware; llvm tiles route assertion watches the scratch, 2538 tile-route + 28 scalar-route
+  checks); D3b `tri_edge` live kloops with the corrected per-half formula -- finding: under
+  contract=fast g++ (Zen `avoid-fma-max-bits=256`) does not contract a single-chain loop, so
+  the (1,0)/(0,1) edge variants run the (1,1) variant to keep per-step contraction identical
+  (caught by a 1-ulp row-tile mismatch at p=1..3). syrk-tile 4/0, row-tile 23/0, llvm tiles
+  12/0, linalg 153/4/23/19 0 failed, optimize 240/0, cli 126/0, corpus-wiring 14/0, symmetry
+  132/0; checksums identical to the integration binary in all 12 configurations.
+  Directional timing (shared box): `tri_edge=1` ~2-3% on the simplex tile in both lanes
+  (gram control within +-1.2%); `anti_g` auto G=4 is 5-7.5% SLOWER serially on a quiet box
+  and faster only under load (micro-bench G4/G1 0.79-0.92 at load 19-26%, 1.05-1.06 at
+  19-60%); default kept at auto pending the runner's quiet A/B (flip = `antisymRowGroup`
+  default 0 -> 1 plus four needles). Codex diff review launched.
+- ~07:35: Codex review of W2-D: MERGE AFTER FIXES -- should-fix: unset `anti_g` must default to
+  1 (auto G=4 is an unearned serial regression by the plan's own rule; auto stays as
+  `anti_g=0` for the A/B); nits: "fetched once per group" is a cache-model assumption; "largest
+  fitting G in {4,2}, otherwise 1" (G=1 itself exceeds the budget at n=1201); the tested
+  anti_g set is {1,2,3,4,8}, not 1..8. Geometry/alias/tail/scheduling invariants, budget
+  thresholds, LLVM sizing + route oracle, D3b families and dispatch, ABI threading, corpus
+  132 pins (independently recomputed), line endings all confirmed. Sent to W2-D.
+- ~07:50: **W2-E done** on `worktree-agent-a0ba97387e51a733f` (0984a259 compiler; c91e21ec
+  tests/docs; 9933063f bench; a93a9e91 purity audit binds range<I> params): G7 threaded
+  `<&!>` join under the explicit-request policy (request on the join's fold kernel / a leg's
+  fold kernel / a covering leaf-map omp; per-leg licence; shape via fusedFoldSimdPlan; purity
+  via rowSlotWalk); generalized Path B (`JoinedFoldChunkPlan`, `genFusedLoopNestStreamedJoined`,
+  `pathBTeamOpen/Close` shared with Path B and row slots, emitted C++ unchanged there); knob
+  `BLADE_JOIN_THREADS`; sibling pass relaxed to the same policy; onepass.blade fold kernel
+  `lambda(u, v) where omp -> u + v, 0.0`, `no_parallel_form: false`, run.py false fix; corpus
+  loops/486-491. omp-pragma 102/0, omp-reduce 109/0 (17 g7 cases), omp-coverage 10/0 (teams
+  1/3/8 observed at n=1009), optimize 236/0, loops 253/0, sibling-folds 18/0, cli 126/0,
+  corpus-wiring 14/0, interp loops 254/0, opt-diff loops 223/0/30, `run.py check onepass
+  --regimes all` 0 failures (mt8 blade-cpp `openmp (3 constructs)`). onepass full-size
+  identity: serial licensed/repro both lanes identical to OLD; mt8 licensed 9e-15 rel of
+  serial. **Side effects to measure:** dot and fusedchain now JOIN AND THREAD in the default
+  build (the kernel's dot leg loses its K-lane `blade_fold::dot` form inside the joined team
+  -> mt8 licensed dot at risk; the A/B must include NEW+BLADE_JOIN_THREADS=0); repro
+  fold-form text now `serial (repro): k ascending original chains`. Codex review launched.
+- ~08:05: **W2-A done** on `worktree-agent-ad47b0fa7031a085a` (7 commits 215933c9..fce70b45):
+  OrbitFold split (`recogniseWalk` / `planLicensed` / `planStrict`), shared total whitelist in
+  CodeGenExprSupport (rowSlotWalk reuses it), C++ `blade_orbit_scatter.hpp` (`tri<G,B,VADD,
+  THIRD>`, `scatter2`, `scatter3` slices + same-Z third event + retained H), LLVM
+  `emitOrbitScatter` (scalar independent chains + explicit `<4 x double>` row chains,
+  `scatter_vrow`), precedence orbit -> compact rows -> G35 -> scatter -> walk with explicit
+  `BLADE_ORBIT_FOLD=0` handling, honest `llvmLaneDecision`; knobs `BLADE_ORBIT_SCATTER`,
+  `scatter_g`=4, `scatter_b`=64; new default-suite block `blade test orbit-scatter` (52
+  cases x 8 builds, mutation-checked), corpus symmetry/132-135, G41. optimize 245/0, symmetry
+  135/0, orbit-scatter 8/0, llvm symmetry 80/0/55, omp 105/93, cli 127/0, corpus-wiring 14/0,
+  interp symmetry 136/0. Identity vs integration binary under REPRO+off both lanes:
+  byte-identical. **Directional timing (shared box, whole program, repro serial):** pairkernel
+  walk 41.2 -> scatter 31.0 ms C++, 39.5 -> 31.3 LLVM; comoment3 17.3 -> 10.3 C++, 17.7 ->
+  10.4 LLVM; LLVM vector vs scalar row chains no consistent winner. Deviations: capture
+  dominance = "in scope at the consumer" (nothing moves to the producer); f total always.
+  Codex review launched. NOTE numbering: W2-A added G41, W2-F will add G41+ -- renumber at
+  merge (W2-E's G39 pre-existed: the onepass/recur mt8-availability row).
+- ~08:15: W2-D fixes landed (cb332d35): `anti_g` unset = G=1 (plan line says so; `anti_g=0` =
+  cache-budget groups), cache-policy tests pass `anti_g=0` explicitly, seven LinAlgTests
+  needles G=4 -> G=1, a cli twin runs symmetry/132 under default and `anti_g=0` in both lanes
+  (equal, NumPy-checked); comment wording fixed; tested set {1,2,3,4,8} stated; two
+  pre-existing `llvm facts` needle failures from its first commit removed. syrk-tile 4/0,
+  row-tile 24/0, llvm tiles 12/0, llvm facts 60/0, linalg 153/4/24/19, optimize 242/0, cli
+  128/0, corpus-wiring 14/0, symmetry 132/0. READY TO MERGE (after the wave-1 gates release
+  the integration tree).
+- ~08:20: Codex review of W2-E: MERGE AFTER FIXES -- should-fix (1) the sibling pass's purity
+  language (`sfTotal`: accepts float ^ negative int) is broader than the joined emitter's
+  (`rowSlotWalk` rejects it): a synthesized join the emitter then refuses LOSES the requesting
+  fold's standalone Path B team (reproducer: sibling-folds/002 with `(x * y) ^ -1`) -> share
+  one pre-codegen purity/shape predicate, preserve the original folds on failure, regression
+  "applied rewrite implies applied joined team"; (2) missing refusal-boundary assertions
+  (no-team/census for captured-write map, writing shared producer, unproven subscript;
+  product legs with non-identity seeds; zero-extent seeded join; observed OMP_THREAD_LIMIT=3
+  run). Policy/seed/emission/refactor/harness audit clean; item 7 recommendation (a): accept
+  and let the A/B decide (OLD vs NEW vs NEW+BLADE_JOIN_THREADS=0, plus OLD with the new
+  onepass spelling); if mt8 dot materially regresses choose (b) in sibling admission. Sent to
+  W2-E.
+- (file clock 04:30) **W2-F done** on `worktree-agent-af3ca5e161323786d` (2a0d2878 bug 1;
+  973e7e92 bug 2; 9bf284b0 bug 3). Bug 1 (fix a, formalism 5.2: a serial body's captured
+  write is an ordered side effect; a comm kernel is not a parallel body): `foldReorderLicensed`
+  now requires `not (callableMayWrite callable)` -- one predicate gating Path B, row slots, K
+  lanes, simd and the LLVM flags; a writing map body blocks every reordered form through
+  `licensedFold`; reproduced on the integration binary: loops/486 printed 138996548 at
+  THREADS=1 (a SERIAL failure too: K lanes evaluated rows before the kernel's writes) and
+  five different mt8 values vs 141149320; mirror loops/487 (a `where omp` fold kernel let
+  Path B chunk a writing map body); census lines + `LoopNestCodeGen.FoldOmpDecline`; G41. Bug 2:
+  `flatTupleIdsCell` + `flatTupleProjection` translate structural projections of a flat C++
+  join tuple (inline renders of `t[1]` printed the second leg; `t[0][k]` was BL9002); pins
+  tuples/031-032 all lanes; G42. Bug 3: the reproducible class is a JOIN whose legs WRITE --
+  three lanes, three schedules (10010 / 16020 / 10026), the interpreter contradicting formalism
+  10.2 -> REFUSED in every lane (BL4005 via `Lowering.refuseWritingJoinLegs`, proven writes
+  only); legal spellings pinned loops/488, refusals mutability-errors/014-016; formalism 5.2 /
+  10.2 sentences; G43 (also records: a named deferred map consumed twice runs twice at top
+  level but once in a function body -- all lanes agree; left as a language decision). 23
+  blocks green (omp 104/93/8, loops 250/0, tuples 32/0, mutability-errors 16/0, diagnostics
+  108/0, docs 131/0/78, interp loops/tuples/mutability-errors/sibling-folds, llvm loops/tuples,
+  opt-diff loops/tuples). Codex review launched. Merge notes: W2-E's joined form must keep
+  reading `foldReorderLicensed` / `exprMayWrite`; G41 collides with W2-A's G41 -> renumber.
+- Gate consoles (file clock): default 03:25, docs/opt-diff 03:31, llvm 03:56, interp still
+  running 04:23+ (UTF-16 consoles; the runner reports the TOTAL lines). Log times above
+  marked "~hh:mm" are approximate session times, not the file clock.
+- Codex review of W2-A: MERGE AFTER FIXES -- blockers (1) the LLVM stored-pool gate accepts
+  `hasFlatRead` incl. `AVirtFlat`: an UNFORCED map over a symmetric pool enters the grouped
+  schedule and `readFlat` executes the unaudited producer, bypassing forcing/printing rules
+  -> require `APool` in v1; (2) the plain-add shortcut inlines a NAMED `where repro` callable
+  (`BLADE_REPRO_FN`), removing the contraction boundary the attribute exists for -> keep the
+  callable for repro-vetoed kernels + a contract=fast regression (x = 1+2^-27, seed
+  -(1+2^-26)). Should-fix: `llvmLaneDecision` marks LLVM Applied from a C++-side marker
+  (Float32 / deferred sources refused by LLVM would be misreported); inner-level `where omp`
+  requests on an admitted walk vanish from the census. Nit: timing was cross-binary (OLD =
+  bench-fortran binary), not same-binary as G41 says; G41 -> G44. Schedule, rank 3, admission
+  (the shared whitelist preserves rowSlotWalk semantics), dispatch, tests, hygiene confirmed;
+  both deviations ACCEPTED; parity with the repro experts "plausible in both lanes pending
+  the runner A/B". Sent to W2-A.
+- Codex review of W2-F: DO NOT MERGE yet -- blockers (1) locality decided by initializer
+  SYNTAX: `let t = G(0); t(0) = ...` (a view), `let t = get_G()`, projections, returned aliases
+  escape the write detector -> classify storage provenance (views/fields/projections/alias
+  chains; deep-copied `let t = G` and fresh scratch ARE local); (2) the SHARED scalar fold
+  kernel of a fusion tree (`reduce(f <&!> g, writer, 0.0)`) is never inspected; (3)
+  `legWrites` / callable resolution ignore let aliases and unknown heads (`let alias = m`
+  evades 014; `unknownWrites=false` admits unresolved writers) -> reuse W1-D's effect closure,
+  unresolved heads decline. Should-fix: the map-write gate is C++-only (LLVM still decorates
+  `fadd reassoc` after executing a writing deferred map); runtime T=1/8 checks of 486/487 in
+  omp-reduce + join-specific message/span pins + final-binary re-runs; the scope-dependent
+  evaluation count (36 at top level vs 20 in a function body) is an OPEN semantic defect ->
+  own gap row G45, and the original "68 vs 20" plain-fold report stays OPEN; G43 is a
+  policy CHANGE (new restriction), not restored semantics; BL4005 JSON text; CLAUDE.md lead.
+  Confirmed: the G41 predicate fixes the serial failure too; G42's path offsets work for
+  arbitrary nesting; FoldOmpDecline per nest; provider writes are a side table. Bug 3 policy
+  ACCEPTED. Sent to W2-F.
 
 ## 6. Decisions taken by the orchestrator
 
