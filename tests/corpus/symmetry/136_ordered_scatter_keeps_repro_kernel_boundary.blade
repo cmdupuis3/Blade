@@ -1,0 +1,25 @@
+// TEST: Ordered orbit scatter: a where-repro fold kernel keeps its call boundary
+// `radd` is a `where repro` function: its body runs with contraction off and
+// is never inlined into a contracting caller, so the fold adds the ROUNDED
+// term. With x = 1 + 2^-27 the square is 1 + 2^-26 + 2^-54, which rounds to
+// 1 + 2^-26; the inner seed -(1 + 2^-26) then cancels it exactly: 0.0. A
+// fused `seed + x * x` would keep the 2^-54 (5.55e-17). The scatter calls
+// `radd` as the walk does (it inlines only a plain `+` WITHOUT a repro
+// demand), so the default (contracting) build prints 0.0 in every lane.
+// Rank 2 and rank 3 (one-cell pools: the scatter's tail path), plus a
+// two-row rank-2 pool (its diagonal block and a column).
+type One = Idx<1>
+type Two = Idx<2>
+function radd(a: Float64, b: Float64) where repro -> Float64 = a + b
+let v1 = method_for(range<One>) <@> lambda(i) -> 1.0 + 7.450580596923828125e-9 |> compute
+let g1 = method_for(v1, v1) <@> lambda(a: Float64, b: Float64) where comm(a, b) -> if a > b then a else b |> compute
+let t1 = method_for(v1, v1, v1) <@> lambda(a: Float64, b: Float64, c: Float64) where comm(a, b, c) -> if a > b then (if a > c then a else c) else (if b > c then b else c) |> compute
+let v2 = method_for(range<Two>) <@> lambda(i) -> 1.0 + 7.450580596923828125e-9 |> compute
+let g2 = method_for(v2, v2) <@> lambda(a: Float64, b: Float64) where comm(a, b) -> if a > b then a else b |> compute
+let s2 = reduce(method_for(range<One>) <@> lambda(i) -> reduce(method_for(range<One>) <@> lambda(j) -> g1(i, j) * g1(i, j), radd, -1.0 - 1.4901161193847656e-8), radd, 0.0)
+let s3 = reduce(method_for(range<One>) <@> lambda(i) -> reduce(method_for(range<One>) <@> lambda(j) -> reduce(method_for(range<One>) <@> lambda(k) -> t1(i, j, k) * t1(i, j, k), radd, -1.0 - 1.4901161193847656e-8), radd, 0.0), radd, 0.0)
+let s22 = reduce(method_for(range<Two>) <@> lambda(i) -> reduce(method_for(range<Two>) <@> lambda(j) -> g2(i, j) * g2(i, j), radd, -1.0 - 1.4901161193847656e-8), radd, 0.0)
+let r2 = s2 * 18014398509481984.0
+let r3 = s3 * 18014398509481984.0
+// EXPECT: r2 = "0.0"
+// EXPECT: r3 = "0.0"

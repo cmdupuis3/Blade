@@ -2102,6 +2102,24 @@ let cellEpiBlock (laneBlock: int64) : int64 =
 /// only: the chain visits the same cells in the same order either way.
 let cellEpiBlockR () : int64 = max 0L (tileTune "epi_blk_r" 0L)
 
+/// The ordered orbit scatter's row GROUP (BLADE_TILE_TUNE scatter_g; default
+/// 4, clamped to 1..8): canonical rows fed together, so the group's row chains
+/// take one column per step and each column chain takes G terms in row order.
+/// Speed only: every chain receives its source sequence for any G (the group
+/// order proof in OrbitFold.planStrict's header), so no bit depends on it.
+let scatterRowGroup () : int = int (max 1L (min 8L (tileTune "scatter_g" 4L)))
+
+/// The ordered orbit scatter's column BLOCK (BLADE_TILE_TUNE scatter_b;
+/// default 64, clamped to 8..1024): columns whose G terms are formed into the
+/// term buffer before the column and row chains consume them. Speed only.
+let scatterColBlock () : int = int (max 8L (min 1024L (tileTune "scatter_b" 64L)))
+
+/// The LLVM lane's scatter row chains for a builtin `+` on double at G % 4 = 0
+/// (BLADE_TILE_TUNE scatter_vrow): default 1 = explicit `<4 x double>` adds (one
+/// vertical add per column per 4 chains, the C++ lane's v4d), 0 = scalar chains.
+/// Speed only (each lane is one chain either way); measured within noise.
+let scatterVectorRows () : bool = tileTune "scatter_vrow" 1L <> 0L
+
 /// BLADE_SYRK_TILE: unset / `1` / `on` = the packed-triangle SYRK tile is the
 /// BLAS-off arm of the same-array `comm` row contraction (default); `0` / `off`
 /// keeps the plain per-cell nest, for A/B. A FUNCTION, read per call, so a

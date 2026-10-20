@@ -1,0 +1,29 @@
+// TEST: Ordered orbit scatter: NaN and signed-zero chains
+// The scatter keeps each chain's seed and operand order, so IEEE special
+// values come out as the walk's: a NaN canonical cell makes the checksum NaN
+// (rank 2 and rank 3), and folds of all -0.0 terms from -0.0 seeds stay -0.0
+// at every level -- pinned through the reciprocal's sign (`-inf`), because a
+// numeric `-0.0` pin also accepts +0.0. A +0.0 outer seed gives +0.0.
+let static p = 6
+type Var = Idx<p>
+type Obs = Idx<3>
+function radd(a: Float64, b: Float64) where repro -> Float64 = a + b
+let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 11) * 0.37 + 0.1 / Float64(i + 1) + (if i == 2 then sqrt(Float64(s) - 5.0) else 0.0) |> compute
+let g = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute
+let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) |> compute
+let w = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 5 + s * 3) % 7) - 2.5 |> compute
+let h = method_for(w, w) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute
+let r = method_for(w, w, w) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) |> compute
+let nan2 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * g(i, j), radd, 0.0), radd, 0.0)
+let nan3 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> reduce(method_for(range<Var>) <@> lambda(k) -> t(i, j, k), radd, 0.0), radd, 0.0), radd, 0.0)
+let nz2 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> -0.0 * abs(h(i, j)), radd, -0.0), radd, -0.0)
+let nz3 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> reduce(method_for(range<Var>) <@> lambda(k) -> -0.0 * abs(r(i, j, k)), radd, -0.0), radd, -0.0), radd, -0.0)
+let pz2 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> -0.0 * abs(h(i, j)), radd, -0.0), radd, 0.0)
+let inv2 = 1.0 / nz2
+let inv3 = 1.0 / nz3
+let invp = 1.0 / pz2
+// EXPECT: nan2 = "nan"
+// EXPECT: nan3 = "nan"
+// EXPECT: inv2 = "-inf"
+// EXPECT: inv3 = "-inf"
+// EXPECT: invp = "inf"

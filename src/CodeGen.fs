@@ -3776,6 +3776,8 @@ let private genSelfContainedProgram (modul: IRModule) (testName: string) : strin
     // blade_fold_lanes.hpp only when a fold took the explicit K-lane vector
     // form or the Path B partition called blade_fold::chunk_lo.
     let includes = if (foldLanesUsedCell ()).Value then includes @ ["#include \"blade_fold_lanes.hpp\""] else includes
+    // blade_orbit_scatter.hpp only when a fold took the ordered orbit scatter.
+    let includes = if (orbitScatterUsedCell ()).Value then includes @ ["#include \"blade_orbit_scatter.hpp\""] else includes
     // blade_linalg_cuda.hpp: the DEVICE half of the same collect-then-append
     // shape, its OWN cell and its own build consequence -- Build.fs
     // sniffs THIS line to write the companion `.cu`, build it with nvcc and

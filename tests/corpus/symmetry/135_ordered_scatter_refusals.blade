@@ -1,0 +1,30 @@
+// TEST: Ordered orbit scatter: refusals keep the walk
+// Each of these strict logical walks is outside the scatter's v1 admission
+// (src/OrbitFold.fs planStrict; `blade plan` names the first failed
+// condition) and keeps the serial walk, with the walk's value: an
+// AntisymIdx pool (mirror cells read -x, the diagonal reads +0), a body that
+// uses a level coordinate beyond the read, an inner seed that mentions the
+// outer coordinate, a fold kernel that may panic (integer `/`), and a rank-4
+// pool.
+let static p = 5
+type Var = Idx<p>
+type Obs = Idx<3>
+function radd(a: Float64, b: Float64) where repro -> Float64 = a + b
+function ihalf(a: Int64, b: Int64) where repro -> Int64 = a + b / 2
+let v = method_for(range<Var>) <@> lambda(i) -> Float64((i * 7) % 5) * 0.5 + 0.25 * Float64(i) |> compute
+let anti = method_for(v, v) <@> lambda(a: Float64, b: Float64) where anticomm(a, b) -> a - b |> compute
+let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 11) * 0.37 + 0.1 / Float64(i + 1) |> compute
+let g = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute
+let xi = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Int64((i * 5 + s * 3) % 7) - 2 |> compute
+let gi = method_for(xi, xi) <@> lambda(a: Array<Int64 like Obs>, b: Array<Int64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute
+let q = method_for(x, x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>, d: Array<Float64 like Obs>) where comm(a, b, c, d) -> prodsum(a, b, c, d) |> compute
+let s_anti = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> anti(i, j) * 3.0 + 1.0, radd, 0.0), radd, 0.0)
+let s_coord = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * Float64(j + 1), radd, 0.0), radd, 0.0)
+let s_seed = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j), radd, Float64(i) * 0.5), radd, 0.0)
+let s_partial = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> gi(i, j), ihalf, 0), ihalf, 0)
+let s_rank4 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> reduce(method_for(range<Var>) <@> lambda(k) -> reduce(method_for(range<Var>) <@> lambda(l) -> q(i, j, k, l), radd, 0.0), radd, 0.0), radd, 0.0), radd, 0.0)
+// EXPECT: s_anti = 25.0
+// EXPECT: s_coord = 948.29545
+// EXPECT: s_seed = 306.679275
+// EXPECT: s_partial = 26
+// EXPECT: s_rank4 = 31706.4923304093

@@ -440,8 +440,36 @@ row bodies AND outer fold kernels on a closed total/pure whitelist (no integer
 team would be a race, and a kernel write would be reordered past rows) above a
 static work gate (`BLADE_TILE_TUNE rowslots_min`, provisional). `blade plan`
 names it `fold form: threaded complete rows (repro)`; `BLADE_FOLD_ROW_SLOTS=0`
-keeps the serial walk. The LLVM lane runs the serial walk. Corpus
+keeps the serial walk. The LLVM lane runs the serial walk -- or, where the
+ordered orbit scatter below admits the walk, that scatter. Corpus
 `symmetry/128`; `blade test omp-pragma` / `omp-reduce`.
+
+**The ordered orbit scatter (strict logical sums over symmetric storage; both
+lanes).** The same logical walk over a packed SymIdx<2, n> or SymIdx<3, n> pool, in a
+build where EVERY level's fold is strict (`BLADE_FP_REPRO=1`, or no level
+carries a reorder licence -- a `where repro` kernel), is ONE pass over the
+pool that feeds every chain of the source exactly its source operand
+sequence: a canonical cell's term `f(x)` goes to row chain R[i] and, off the
+diagonal, to R[j], in an order (G-row groups: the diagonal block, then per
+column the G row chains and the column chain in row order) under which every
+chain receives its logical row in column order, from its own seed, through its
+own kernel applied accumulator-first; the outer chain runs serially over the
+completed rows. Rank 3 keeps ONE leaf chain per unordered pair (the same
+operation tree for (i, j) and (j, i)): per first coordinate, the slice
+scatter feeds H row i and the third event H[j, k] <- i from the same term,
+then the middle and outer folds run over H. Nothing is reassociated, so no
+licence is consumed and any pure TOTAL kernel (`b - a * 0.5`, an `if`-max)
+and any coordinate-free seed (`-0.0`, `0.75`) qualify; the result is bitwise
+the walk under `BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off` (`blade test
+orbit-scatter`; under contraction the two forms may fuse differently). Taken
+only where the licensed orbit-class fold declines, and behind a taken
+threaded complete-row form; declined (with the reason in `blade plan`) for
+AntisymIdx pools, rank >= 4, a mixed licensed/strict nest, a body / kernel /
+seed outside the closed total whitelist, a seed that mentions a coordinate.
+`blade plan` names it `fold form: ordered orbit scatter (rank r, extent n, row
+groups of G)`; `BLADE_ORBIT_SCATTER=0` keeps the walk (`BLADE_ORBIT_FOLD=0`
+does not: it disables only the licensed regrouping). Corpus
+`symmetry/132`-`135`.
 
 **`where repro` — the reproducibility demand (named functions only).** The
 inverse of the reorder licence: the function's emitted body must keep the

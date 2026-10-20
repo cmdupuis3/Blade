@@ -957,6 +957,54 @@ let private rowSlotCases : (string * (string * string) list * string * (Blade.Ef
        rowSlotOuterWriteSrc,
        declined "the outer fold kernel is outside the row-slot whitelist", "row-slot form declined: the outer kernel writes",
        [ reproCensus ], [ "__rslot" ])
+      // G35 PRECEDENCE over the ordered orbit scatter (round 2): this walk is
+      // one the scatter admits; the taken row-slot form wins under the omp
+      // request, and the scatter records that it yielded.
+      ("row_slots_precede_orbit_scatter", repro,
+       rowSlotSym2 521 rowSlotOmpOuter "g(i, j) * g(i, j)",
+       (fun d -> d.Rule = "fold-form"
+                 && (match d.Outcome with
+                     | Blade.Effects.Declined why -> why.StartsWith "ordered orbit scatter not taken: the threaded complete-row form (G35) is taken under the omp request"
+                     | _ -> false)
+                 && d.Evidence |> List.exists (fun e -> e.StartsWith "fold form: ordered orbit scatter (rank 2, extent 521")),
+       "the ordered orbit scatter yields to the taken row-slot form (record names its form)",
+       [ "__rslot_s[__i0] = " ], [ "blade_scatter::" ])
+      // ...and with threads off (or below the gate) the same walk is the
+      // serial ordered orbit scatter, the census naming why the request was
+      // not spent.
+      ("orbit_scatter_when_threads_suppressed", repro @ [ ("BLADE_OMP_THREADS", "1") ],
+       rowSlotSym2 521 rowSlotOmpOuter "g(i, j) * g(i, j)",
+       (fun d -> d.Rule = "fold-form" && d.Outcome = Blade.Effects.Applied
+                 && d.Evidence |> List.exists (fun e -> e.StartsWith "fold form: ordered orbit scatter (rank 2, extent 521, row groups of 4)")),
+       "fold-form applied: ordered orbit scatter (threads off)",
+       [ "blade_scatter::scatter2<4, 64, true>("; "[omp] requested but emitted serial: BLADE_OMP_THREADS=1" ], [ "__rslot" ])
+      ("orbit_scatter_below_row_slot_gate", repro,
+       rowSlotSym2 43 rowSlotOmpOuter "g(i, j) * g(i, j)",
+       (fun d -> d.Rule = "fold-form" && d.Outcome = Blade.Effects.Applied
+                 && d.Evidence |> List.exists (fun e -> e.StartsWith "fold form: ordered orbit scatter (rank 2, extent 43")),
+       "fold-form applied: ordered orbit scatter (G35 below its gate)",
+       [ "blade_scatter::scatter2<"; "the ordered orbit scatter runs serially"; reproCensus ], [ "__rslot" ])
+      // EVERY level's thread request reaches the scatter's census (Codex diff
+      // review of W2-A, finding 4): an INNER fold's `where omp`, and mixed
+      // placements, threads on and off -- no licence moves between levels.
+      ("orbit_scatter_inner_fold_request", repro,
+       (rowSlotSym2 43 "(+)" "g(i, j) * g(i, j)").Replace("g(i, j) * g(i, j), (+))", "g(i, j) * g(i, j), lambda(a, b) where omp -> a + b, 0.0)"),
+       (fun d -> d.Rule = "fold-form" && d.Outcome = Blade.Effects.Applied
+                 && d.Evidence |> List.exists (fun e -> e.StartsWith "fold form: ordered orbit scatter (rank 2, extent 43")),
+       "fold-form applied: ordered orbit scatter (inner-fold request only)",
+       [ "blade_scatter::scatter2<"; reproCensus; "requested at: level 2's fold)" ], [ "__rslot" ])
+      ("orbit_scatter_inner_fold_request_threads_off", repro @ [ ("BLADE_OMP_THREADS", "1") ],
+       (rowSlotSym2 43 "(+)" "g(i, j) * g(i, j)").Replace("g(i, j) * g(i, j), (+))", "g(i, j) * g(i, j), lambda(a, b) where omp -> a + b, 0.0)"),
+       (fun d -> d.Rule = "fold-form" && d.Outcome = Blade.Effects.Applied
+                 && d.Evidence |> List.exists (fun e -> e.StartsWith "fold form: ordered orbit scatter (rank 2, extent 43")),
+       "fold-form applied: ordered orbit scatter (inner-fold request, threads off)",
+       [ "[omp] requested but emitted serial: BLADE_OMP_THREADS=1"; "(requested at: level 2's fold)" ], [ "__rslot" ])
+      ("orbit_scatter_mixed_requests", repro,
+       (rowSlotSym2 43 rowSlotOmpOuter "g(i, j) * g(i, j)").Replace("lambda(j) -> g(i, j)", "lambda(j) where omp(j: 1) -> g(i, j)"),
+       (fun d -> d.Rule = "fold-form" && d.Outcome = Blade.Effects.Applied
+                 && d.Evidence |> List.exists (fun e -> e.StartsWith "fold form: ordered orbit scatter (rank 2, extent 43")),
+       "fold-form applied: ordered orbit scatter (outer fold + inner map requests)",
+       [ "blade_scatter::scatter2<"; reproCensus; "requested at: level 1's fold, level 2's map)" ], [ "__rslot" ])
       ("row_slots_knob_off", repro @ [ ("BLADE_FOLD_ROW_SLOTS", "0") ],
        rowSlotSym2 521 rowSlotOmpOuter "g(i, j) * g(i, j)",
        declined "disabled by BLADE_FOLD_ROW_SLOTS=0", "row-slot form declined by its knob",

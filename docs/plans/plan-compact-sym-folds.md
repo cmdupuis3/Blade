@@ -419,6 +419,46 @@ boundary), which is silent on float data and loud on neither lane without the pi
 
 ---
 
+### 5.7 The strict execution schedule -- the ordered orbit scatter (round 2, 2026-10-20)
+
+Section 5.6's partial reuse needs the reorder licence. A STRICT build (`BLADE_FP_REPRO=1`, or
+folds that carry no licence -- a `where repro` kernel) must keep every chain of the logical
+walk: each row's fold over its logical cells in column order from its own seed, the outer
+fold over the rows in order. That still does not require the logical traversal. Symmetric
+storage makes f(S(i, j)) and f(S(j, i)) the SAME term (one stored cell, f pure), so the
+schedule only has to decide WHERE each chain's next term comes from:
+
+* Visit canonical cells (i <= j) and append z = f(x) to row chain R[i] and, off the
+  diagonal, to R[j]. In canonical row order, R[j] first receives column j's terms from rows
+  0..j-1 (ascending) and then its own row's terms (ascending): exactly logical row j. Rows
+  complete in ascending order, so the outer chain is unchanged.
+* G-row groups (BLADE_TILE_TUNE `scatter_g`) make it vectorize without splitting a chain:
+  the G x G diagonal block in block-lex order, then per column the G row chains (one
+  application each; vector lanes = DISTINCT chains) and the column chain R[j] (the G terms in
+  row order; lanes across j). Any group sizes keep every sequence (independent symbolic
+  checks n = 1..19, G = 1..9; a tail group is the G = 1 form).
+* Rank 3: the leaf chain of (a, b) depends only on the unordered pair, so one state per pair
+  (packed C(n+1, 2) H) is common-subexpression elimination, not regrouping. Per first
+  coordinate i the slice {i <= j <= k} is a packed triangle: its group scatter serves
+  H[i, j] <- k and H[i, k] <- j, and the third event H[j, k] <- i (j > i) is fed from the
+  SAME term (no second pool pass: C(p+2, 3) reads, C(p+1, 2) p leaf applications). Then H
+  is a packed SymIdx<2, n> pool and the middle / outer folds are the rank-2 scatter over it
+  with f = identity.
+
+No licence is consumed, so the kernel need not be `+` and the seeds need not be +0: any
+pure TOTAL kernel (the closed whitelist shared with the G35 row-slot form) and any
+coordinate-free seed qualify. With a total f the walk's first-failure question does not
+arise (and at G = 1 the first failing f would be the same cell: a sorted tuple is its
+lex-least permutation). Bitwise the walk under `BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off`
+(`blade test orbit-scatter`, both lanes, every G); contraction may fuse the two forms
+differently. `src/OrbitFold.fs` splits the recogniser into `recogniseWalk` (shared
+shape) / `planLicensed` (the orbit-class fold, unchanged) / `planStrict` (the scatter);
+C++ `blade_orbit_scatter.hpp`, LLVM `EmitLlvm.emitOrbitScatter`. v1 declines AntisymIdx
+(mirror -x and +0 events), rank >= 4, mixed licensed/strict nests and coordinate-dependent
+seeds; the knob is `BLADE_ORBIT_SCATTER`. Threading: the column chains make it a
+wavefront, so the threaded strict form is G35 (complete rows on threads), which wins when
+taken.
+
 ## 6. Corpus and diagnostics
 
 ### 6.1 Existing pins that would need updating

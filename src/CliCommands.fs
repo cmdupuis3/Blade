@@ -18,7 +18,7 @@ let internal usageTestBlockKeys =
       "docs"; "doctor"
       "flatpath"; "gr-render"; "hybrid"; "icechunk"; "ide-cells"; "ide-eval"; "ide-references"
       "ide-serve"; "instance-guards"; "lapack"; "lietables"; "linalg"; "llvm"; "llvm-bench"; "module-resolve"; "mpi"
-      "multifile"; "netcdf"; "normalize"; "omp-coverage"; "omp-pragma"; "omp-reduce"; "optimize"
+      "multifile"; "netcdf"; "normalize"; "omp-coverage"; "omp-pragma"; "omp-reduce"; "optimize"; "orbit-scatter"
       "oracles"; "orbrank"; "orbwreath"; "permoracle"; "permspec"; "pgoracle"; "pgspec"; "polyoracle"
       "provider-desugar"; "rand-mirror"; "rep-check"; "rep-differential"; "rep-reject"; "row-tile"; "run-record"
       "setup"; "shape"; "shapespec"; "spans"; "strict-pins"; "structidx"; "structidxoracle"; "subst"; "syrk-tile"; "fold-lanes"
@@ -988,12 +988,34 @@ let internal llvmLaneDecision (d: Blade.Effects.Decision) : Blade.Effects.Decisi
         if cppForm.StartsWith "fold form: orbit-class fold" && cppForm.Contains Blade.OrbitFold.threadedSuffix then
             { d with Evidence = cppForm.Replace(Blade.OrbitFold.threadedSuffix, "; one serial pass (LLVM lane: no thread runtime)") :: List.tail d.Evidence }
         elif cppForm.StartsWith "fold form: orbit-class fold" then d
+        // The ORDERED ORBIT SCATTER: the LLVM lane's version of every scatter
+        // record is its EMITTER's own (EmitLlvm.tryOrbitScatter, merged in by
+        // mergeLlvmScatterRecords before this function sees the rest); such a
+        // record, and a shared-plan decline the merge passed through, holds
+        // as written.
+        elif d.Evidence |> List.contains Blade.OrbitFold.llvmScatterRecordTag then d
+        elif (match d.Outcome with
+              | Blade.Effects.Declined why -> why.Contains Blade.OrbitFold.scatterG35Precedence
+              | _ -> false) then
+            declined "the LLVM lane's emitter recorded no ordered-scatter decision for this walk (the C++ lane yielded it to its thread team)" []
+        elif cppForm.StartsWith "fold form: ordered orbit scatter not taken" then d
+        // A C++ scatter record the LLVM emitter recorded nothing about (it was
+        // merged as unpartnered): never claimed for this lane.
+        elif Blade.OrbitFold.isScatterRecord d then
+            declined "the LLVM lane's emitter recorded no ordered-scatter decision for this walk" []
         // The C++ lane's threaded complete-row form (G35) is that lane's
         // thread team; this lane has no thread runtime and runs the same rows
-        // serially -- every row chain, then the outer chain ascending from its
-        // seed: the same association, which is the only one a repro build has.
+        // serially, in the same association. When the strict scatter admitted
+        // the walk in the C++ plan, whether this lane SCATTERS is its emitter's
+        // own record (the scatter line for the same walk), not this marker.
+        elif cppForm.StartsWith "fold form: threaded complete rows (repro)"
+             && d.Evidence |> List.exists (fun e -> e.Contains Blade.OrbitFold.scatterServesSerialMarker) then
+            declined "the LLVM lane has no thread runtime: it runs this walk serially in the same association -- the ordered orbit scatter where its own record for this walk says applied, else the serial walk" []
         elif cppForm.StartsWith "fold form: threaded complete rows (repro)" then
             declined "the LLVM lane has no thread runtime: it runs the serial walk (each row's fold, then the outer chain ascending from its seed -- the same association as the C++ lane's row slots)" []
+        // A row-slot decline whose walk the C++ plan scatters.
+        elif cppForm.StartsWith "fold form: ordered orbit scatter (repro; the threaded complete-row form declined)" then
+            declined "the LLVM lane has no thread runtime (no threaded complete-row form); this lane's scatter record for the walk says which form it runs" []
         elif cppForm.StartsWith "fold form: serial (no reorder licence"
            || cppForm.StartsWith "fold form: serial (repro" then
             declined "the fold keeps its serial association in the LLVM lane too" []
@@ -1012,6 +1034,33 @@ let internal llvmLaneDecision (d: Blade.Effects.Decision) : Blade.Effects.Decisi
     // this lane prints never carries a `compound` record it did not build.
     | "compound" -> d
     | _ -> d
+
+/// The LLVM lane's ordered-scatter records are its EMITTER's own
+/// (EmitLlvm.tryOrbitScatter, tagged OrbitFold.llvmScatterRecordTag): each C++
+/// scatter record (taken, yielded to G35, or declined) is replaced by the
+/// emitter's record for the same declaration span, in emission order (both
+/// lanes walk the folds of a declaration in the same order), keeping the C++
+/// verdict as trailing evidence and the C++ subject. A C++ record with no
+/// partner stays (llvmLaneDecision re-states it: a shared-plan decline holds;
+/// a taken / yielded scatter becomes "no LLVM decision recorded"); an emitter
+/// record with no C++ partner is appended.
+let internal mergeLlvmScatterRecords (ds: Blade.Effects.Decision list) (own: Blade.Effects.Decision list) : Blade.Effects.Decision list =
+    let pending = System.Collections.Generic.List<Blade.Effects.Decision>(own)
+    let merged =
+        ds |> List.map (fun d ->
+            if not (Blade.OrbitFold.isScatterRecord d) then d
+            else
+                match pending |> Seq.tryFindIndex (fun o -> o.Span = d.Span) with
+                | Some ix ->
+                    let o = pending.[ix]
+                    pending.RemoveAt ix
+                    let cppVerdict =
+                        match d.Outcome with
+                        | Blade.Effects.Applied -> "C++ lane: applied"
+                        | Blade.Effects.Declined why -> $"C++ lane: declined -- {why}"
+                    { o with Subject = d.Subject; Evidence = o.Evidence @ [ cppVerdict ] }
+                | None -> d)
+    merged @ List.ofSeq pending
 
 /// A record the LLVM emitter made ITSELF: the tile cores' (syrk M6, antisym
 /// pair M7, rank-3 simplex M8), tagged `(shared C core)` in its evidence.
@@ -1135,9 +1184,12 @@ let planFile (filePath: string) (json: bool) : int =
                     // decisions (M6) are plan material; anything a shared
                     // layer recorded while it ran is a duplicate of the C++
                     // pass above and is dropped.
-                    let llvmOwn = Blade.Effects.Decisions.drain () |> List.filter isLlvmTileRecord
+                    let drained = Blade.Effects.Decisions.drain ()
+                    let llvmOwn = drained |> List.filter isLlvmTileRecord
+                    // ...and its own ordered-scatter decisions (taken or refused).
+                    let llvmScatter = drained |> List.filter (fun d -> d.Evidence |> List.contains Blade.OrbitFold.llvmScatterRecordTag)
                     match verdict with
-                    | Ok _ -> Some ("llvm", "LLVM (BLADE_LLVM=1): C++-only routes below are reported for this lane"), mergeLlvmTileRecords ds llvmOwn
+                    | Ok _ -> Some ("llvm", "LLVM (BLADE_LLVM=1): C++-only routes below are reported for this lane"), mergeLlvmTileRecords (mergeLlvmScatterRecords ds llvmScatter) llvmOwn
                     | Error reason -> Some ("cpp", $"C++ (BLADE_LLVM=1, but the LLVM lane refused: {reason})"), ds
             if json then
                 let js = Blade.Effects.Decisions.renderJson filePath ds

@@ -3679,6 +3679,10 @@ let runtimeHeaderNames : string list =
       // dot-class fold (foldLanesUsedCell); deployed unconditionally like the
       // rest.
       "blade_fold_lanes.hpp"
+      // The ordered orbit scatter (blade_scatter::scatter2 / scatter3,
+      // OrbitFold.planStrict). INCLUDED only by a program whose fold took it
+      // (orbitScatterUsedCell); deployed unconditionally like the rest.
+      "blade_orbit_scatter.hpp"
       // Dense linear-algebra dispatch: blade_gemm / blade_syrk plus the
       // gram/matmul adapters, resolving to cblas under -DBLADE_HAS_BLAS and to
       // native fallbacks otherwise. INCLUDED only by programs that actually

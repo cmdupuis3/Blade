@@ -1,0 +1,29 @@
+// TEST: Ordered orbit scatter: strict rank-3 checksums
+// The three-level logical walk over a packed SymIdx<3, p> pool with strict
+// folds is the rank-3 ordered scatter: per first coordinate, the slice's
+// group scatter feeds the shared pair chains H[i, j] (one leaf fold per
+// unordered pair -- the same operation tree for (i, j) and (j, i)) and the
+// third event H[j, k] <- i from the same term; then the middle and outer
+// folds run over the retained pairs in source order. Three distinct level
+// seeds, a permuted read (t(k, i, j)), and a NON-commutative kernel
+// (`b - a * 0.5`: any change of operand order would show) with explicit
+// seeds -- all print the walk's values.
+let static p = 5
+let static q = 7
+type Var = Idx<p>
+type Wide = Idx<q>
+type Obs = Idx<3>
+function radd(a: Float64, b: Float64) where repro -> Float64 = a + b
+function rhalf(a: Float64, b: Float64) where repro -> Float64 = b - a * 0.5
+let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 11) * 0.37 + 0.1 / Float64(i + 1) |> compute
+let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) |> compute
+let y = method_for(range<Wide>, range<Obs>) <@> lambda(i, s) -> Float64((i * 5 + s * 2) % 9) * 0.29 - 0.7 / Float64(i + 2) |> compute
+let u = method_for(y, y, y) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) |> compute
+let s1 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> reduce(method_for(range<Var>) <@> lambda(k) -> t(i, j, k) * t(i, j, k), radd, 0.5), radd, -0.0), radd, 1.0)
+let s2 = reduce(method_for(range<Wide>) <@> lambda(i) -> reduce(method_for(range<Wide>) <@> lambda(j) -> reduce(method_for(range<Wide>) <@> lambda(k) -> u(k, i, j) - 0.25, radd, 0.75), radd, 0.5), radd, -1.25)
+let s3 = reduce(method_for(range<Wide>) <@> lambda(i) -> reduce(method_for(range<Wide>) <@> lambda(j) -> reduce(method_for(range<Wide>) <@> lambda(k) -> abs(u(i, j, k)), rhalf, 0.5), rhalf, -0.0), rhalf, 1.0)
+let s4 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> reduce(method_for(range<Var>) <@> lambda(k) -> t(j, k, i), rhalf, 0.25), radd, 0.5), rhalf, 2.0)
+// EXPECT: s1 = 101406.415484153
+// EXPECT: s2 = 739.690587078125
+// EXPECT: s3 = 13.1910103233452
+// EXPECT: s4 = 113.927611432075

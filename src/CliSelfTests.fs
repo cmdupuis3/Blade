@@ -92,7 +92,7 @@ let internal suiteClearedKnobs =
       "BLADE_AD_HALO_GATHER"; "BLADE_SHAPE_SPEC_CAP"; "BLADE_RUN_RECORD"
       "BLADE_SYRK_TILE"; "BLADE_ANTISYM_TILE"; "BLADE_SIMPLEX_TILE"; "BLADE_ORBIT_FOLD"
       "BLADE_DOMAIN_DIAGONAL"; "BLADE_TILE_TUNE"; "BLADE_FOLD_LANES"; "BLADE_FOLD_ROW_SLOTS"
-      "BLADE_JOIN_THREADS" ]
+      "BLADE_ORBIT_SCATTER"; "BLADE_JOIN_THREADS" ]
     @ Blade.Optimize.optimizerGates
 
 /// Knobs `blade test` SETS (after the clear above) rather than leaves unset,
@@ -567,15 +567,64 @@ let runCliSmokeTests () : TH.BlockResult =
                 let slotEnv llvm = [ ("BLADE_LLVM", llvm); ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", null); ("BLADE_FOLD_ROW_SLOTS", null) ]
                 let (code, out, err) = spawnWith (slotEnv null) dir [ "plan"; "rowslots.blade" ]
                 recordCase "cli: `plan` (C++ lane, BLADE_FP_REPRO=1) reports the threaded complete-row form applied"
-                    (code = 0 && out.Contains ": applied [fold form: threaded complete rows (repro): 521 row folds")
+                    (code = 0 && out.Contains ": applied [fold form: threaded complete rows (repro): 521 row folds"
+                     // G35 PRECEDENCE: the scatter the same walk admits is recorded as yielded
+                     && out.Contains "declined -- ordered orbit scatter not taken: the threaded complete-row form (G35) is taken under the omp request")
                     (out + err)
                 let (code, out, err) = spawnWith (slotEnv "1") dir [ "plan"; "rowslots.blade" ]
-                recordCase "cli: `plan` under BLADE_LLVM=1 restates the row-slot form as the LLVM lane's serial walk"
+                // The walk is one the ordered orbit scatter admits: the serial
+                // LLVM lane takes the scatter (both records say so).
+                recordCase "cli: `plan` under BLADE_LLVM=1 restates the row-slot form, and the LLVM emitter's own record says it scatters"
+                    (code = 0 && out.Contains "declined -- the LLVM lane has no thread runtime: it runs this walk serially in the same association"
+                     && out.Contains "applied [fold form: ordered orbit scatter (rank 2, extent 521, row groups of 4)"
+                     && out.Contains "(recorded by the LLVM lane's emitter); C++ lane: declined -- ordered orbit scatter not taken: the threaded complete-row form (G35)"
+                     && out.Contains "C++ lane: applied"
+                     && not (out.Contains "fold form: one accumulator chain with `reassoc nsz` (LLVM lane; the vectorizer picks the lanes); C++ lane fold form: threaded complete rows"))
+                    (out + err)
+                // A walk the scatter declines (the body reads the mirror cell
+                // too): the LLVM lane's form is the serial walk.
+                File.WriteAllText(Path.Combine(dir, "rowslots_walk.blade"),
+                    File.ReadAllText(Path.Combine(dir, "rowslots.blade")).Replace("g(i, j) * g(i, j)", "g(i, j) * g(j, i)"))
+                let (code, out, err) = spawnWith (slotEnv "1") dir [ "plan"; "rowslots_walk.blade" ]
+                recordCase "cli: `plan` under BLADE_LLVM=1 restates the row-slot form as the LLVM lane's serial walk (scatter declined)"
                     (code = 0 && out.Contains "declined -- the LLVM lane has no thread runtime: it runs the serial walk"
                      && out.Contains "C++ lane: applied"
                      && not (out.Contains "fold form: one accumulator chain with `reassoc nsz` (LLVM lane; the vectorizer picks the lanes); C++ lane fold form: threaded complete rows"))
                     (out + err)
-                // THE TILE CORE (M6): a gram above the crossover, BLAS off,
+                // THE LLVM SCATTER RECORD IS THE EMITTER'S OWN: an unforced map
+                // over a stored pool (C++: a deferred computation; LLVM: a
+                // producer it would have to execute) is declined by each lane
+                // in its own words, never translated into a taken scatter; a
+                // Float32 strict walk the C++ lane scatters is not claimed for
+                // a lane that cannot emit it.
+                File.WriteAllText(Path.Combine(dir, "scatter_unforced.blade"),
+                    "type Var = Idx<5>\ntype Obs = Idx<3>\n"
+                    + "function radd(a: Float64, b: Float64) where repro -> Float64 = a + b\n"
+                    + "let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 11) * 0.37 |> compute\n"
+                    + "let g = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute\n"
+                    + "let h = method_for(g) <@> lambda(v: Float64) -> v * 0.25 + 1.0\n"
+                    + "let s = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> h(i, j), radd, 0.5), radd, 0.0)\n")
+                let (code, out, err) = spawnWith [ ("BLADE_LLVM", "1"); ("BLADE_FP_REPRO", "1") ] dir [ "plan"; "scatter_unforced.blade" ]
+                recordCase "cli: `plan` under BLADE_LLVM=1 reports the LLVM emitter's own scatter refusal for an unforced source"
+                    (code = 0 && out.Contains "lane: LLVM"
+                     && out.Contains "ordered orbit scatter not taken: the compact array is an unforced computation, not a stored pool (LLVM lane"
+                     && not (out.Contains "applied [fold form: ordered orbit scatter"))
+                    (out + err)
+                File.WriteAllText(Path.Combine(dir, "scatter_f32.blade"),
+                    "type Var = Idx<5>\ntype Obs = Idx<3>\n"
+                    + "let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float32(Float64((i * 7 + s * 3) % 11) * 0.37) |> compute\n"
+                    + "let g = method_for(x, x) <@> lambda(a: Array<Float32 like Obs>, b: Array<Float32 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute\n"
+                    + "let s = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * g(i, j), (+)), (+))\n")
+                let (code, out, err) = spawnWith [ ("BLADE_LLVM", null); ("BLADE_FP_REPRO", "1") ] dir [ "plan"; "scatter_f32.blade" ]
+                recordCase "cli: `plan` (C++ lane) scatters a Float32 strict walk"
+                    (code = 0 && out.Contains "applied [fold form: ordered orbit scatter (rank 2, extent 5") (out + err)
+                let (code, out, err) = spawnWith [ ("BLADE_LLVM", "1"); ("BLADE_FP_REPRO", "1") ] dir [ "plan"; "scatter_f32.blade" ]
+                recordCase "cli: `plan` under BLADE_LLVM=1 does not claim a Float32 scatter for the LLVM lane"
+                    (code = 0
+                     && (out.Contains "but the LLVM lane refused"
+                         || out.Contains "ordered orbit scatter not taken: the accumulator or element type is not Float64 / Int64 (LLVM lane)")
+                     && not (out.Contains "(recorded by the LLVM lane's emitter); C++ lane: applied"))
+                    (out + err)                // THE TILE CORE (M6): a gram above the crossover, BLAS off,
                 // materializes through the shared C core in the LLVM lane, and
                 // the plan says so in this lane's words (not the C++ lane's
                 // dsyrk_tri, which this executable does not contain).
@@ -4340,6 +4389,13 @@ and internal dispatchTestClean (rest: string list) : int =
         // by raw bits, NEW vs BLADE_CELL_EPILOGUE=0, both contraction modes,
         // fixed team sizes; the LLVM lane's parity under the identity regime.
         let failed = (Blade.Tests.CellEpilogueTests.runCellEpilogueTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "orbit-scatter" ] | [ "orbitscatter" ] ->
+        // The ordered orbit scatter executed in both lanes against walk-forced
+        // twins under BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off: finite-value
+        // identity, signed zero, NaN-equivalence, at every scatter_g and with
+        // the knob off.
+        let failed = (Blade.Tests.OrbitScatterTests.runOrbitScatterTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "optimize" ] ->
         // The semantic-equivalence layer's emission pins: freeze-idiom

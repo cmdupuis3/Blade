@@ -1,0 +1,38 @@
+// TEST: Ordered orbit scatter: strict rank-2 checksums
+// The logical walk over a packed SymIdx<2, p> pool whose folds carry NO
+// reorder licence (`radd` is a `where repro` kernel) is the ordered orbit
+// scatter (src/OrbitFold.fs planStrict): one pass over the pool, every row's
+// fold fed its own terms in its own order from its own seed, the outer fold
+// serial from its seed -- the walk's values exactly, any seed (-0.0, 0.75)
+// and any read order (h(j, i)). The cancellation design `m` makes the
+// association visible: the nested row folds print 2.0, a flattened fold of
+// the same cells prints 0.0 (1e16 + 1 rounds to 1e16). The licensed `(+)`
+// twin over integer-valued cells takes the orbit-class fold; every
+// association of it is exact, so it equals its strict twin.
+let static p = 5
+let static q = 7
+type Var = Idx<p>
+type Wide = Idx<q>
+type Three = Idx<3>
+type Obs = Idx<3>
+function radd(a: Float64, b: Float64) where repro -> Float64 = a + b
+let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 11) * 0.37 + 0.1 / Float64(i + 1) |> compute
+let g = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute
+let y = method_for(range<Wide>, range<Obs>) <@> lambda(i, s) -> Float64((i * 5 + s * 2) % 9) * 0.29 - 0.7 / Float64(i + 2) |> compute
+let h = method_for(y, y) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute
+let s1 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * g(i, j), radd, -0.0), radd, 0.0)
+let s2 = reduce(method_for(range<Wide>) <@> lambda(i) -> reduce(method_for(range<Wide>) <@> lambda(j) -> h(j, i) - 0.5, radd, 0.75), radd, -1.25)
+let v = method_for(range<Three>) <@> lambda(i) -> Float64(i) |> compute
+let m = method_for(v, v) <@> lambda(a: Float64, b: Float64) where comm(a, b) -> if a + b == 0.0 then 1.0e16 else if a + b == 4.0 then -1.0e16 else if a + b == 3.0 then 1.0 else if a == b then 1.0 else 0.0 |> compute
+let nested = reduce(method_for(range<Three>) <@> lambda(i) -> reduce(method_for(range<Three>) <@> lambda(j) -> m(i, j), radd, 0.0), radd, 0.0)
+let flat = reduce(method_for(range<Three>, range<Three>) <@> lambda(i, j) -> m(i, j), radd, 0.0, axes = 2)
+let xi = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 5 + s * 3) % 7) - 2.0 |> compute
+let gi = method_for(xi, xi) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute
+let lic = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> gi(i, j) * gi(i, j), (+)), (+))
+let strict_twin = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> gi(i, j) * gi(i, j), radd, 0.0), radd, 0.0)
+// EXPECT: s1 = 4194.10088414507
+// EXPECT: s2 = 101.16911875
+// EXPECT: nested = 2.0
+// EXPECT: flat = 0.0
+// EXPECT: lic = 2848.0
+// EXPECT: strict_twin = 2848.0

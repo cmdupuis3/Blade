@@ -4076,6 +4076,58 @@ and genCompactRowCombineCpp (ctx: CodeGenContext) (ind: string) (name: string) (
       yield $"{i1}{name} = {name} + {total};"
       yield $"{ind}}}" ]
 
+/// THE ORDERED ORBIT SCATTER's C++ (Blade.OrbitFold.planStrict, whose header
+/// carries the order proof; the runtime is blade_orbit_scatter.hpp). `f` is
+/// rendered ONCE as a lambda of the cell value; each level's fold kernel is
+/// the builtin `acc + z` when it is exactly `p0 + p1`, else the callable's
+/// own wrapper (so a `where repro` kernel keeps its BLADE_REPRO_FN body);
+/// seeds are evaluated once, outer first (they are total and
+/// coordinate-free). Every statement is one line with BLOCK comments only:
+/// a kernel-body fold's lines may be space-joined. `ompNote`: the census
+/// marker when a level asked for threads (never silent).
+and genOrbitScatterCpp (ctx: CodeGenContext) (ind: string) (name: string) (gName: string)
+                       (sp: Blade.OrbitFold.StrictPlan) (orbitWhy: string option) (ompNote: string option) : string list =
+    let s = sp.Shape
+    let accCpp = primTypeToCpp s.AccTy
+    let elemCpp = primTypeToCpp s.ElemTy
+    let n = s.Extent
+    let tag = sanitizeCppName name
+    let fLambda =
+        let c = { ctx with VarNames = Map.add Blade.OrbitFold.readVarId "__sx" ctx.VarNames }
+        $"[&]({elemCpp} __sx) -> {accCpp} {{ return {(exprToCppCtx c s.Body)}; }}"
+    let kernels =
+        s.Levels |> List.mapi (fun k (l: Blade.OrbitFold.OrbitLevel) ->
+            if sp.LevelAdd.[k] then
+                ([ $"auto __sk{k}_{tag} = []({accCpp} __a, {accCpp} __b) -> {accCpp} {{ return __a + __b; }};" ], $"__sk{k}_{tag}")
+            else
+                genCallableWrapper ctx.VarNames $"{name}__sc{k}" l.Fold)
+    let kName k = snd kernels.[k]
+    let seed k = exprToCppCtx ctx s.Levels.[k].Seed
+    let g = sp.RowGroup
+    let b = sp.ColBlock
+    let vadd k = sp.LevelAdd.[k] && s.AccTy = ETFloat64 && g % 4 = 0
+    let lit (x: bool) = if x then "true" else "false"
+    (orbitScatterUsedCell ()).Value <- true
+    Blade.OrbitFold.recordScatterTaken name sp orbitWhy
+    let i1 = ind + "    "
+    let call =
+        if s.Rank = 2 then
+            $"{name} = blade_scatter::scatter2<{g}, {b}, {lit (vadd 1)}>(__spool_{tag}, (size_t){n}, {accCpp}({seed 1}), {name}, __sf_{tag}, {kName 1}, {kName 0});"
+        else
+            $"{name} = blade_scatter::scatter3<{g}, {b}, {lit (vadd 2)}, {lit (vadd 1)}>(__spool_{tag}, (size_t){n}, {accCpp}({seed 2}), {accCpp}({seed 1}), {name}, __sf_{tag}, {kName 2}, {kName 1}, {kName 0});"
+    [ yield $"{ind}{accCpp} {name} = {seed 0};"
+      yield $"{ind}{{"
+      yield $"{i1}/* {Blade.OrbitFold.scatterForm sp} (strict: no licence consumed) */"
+      match ompNote with
+      | Some why -> yield $"{i1}/* {(ompSuppressedPhrase why)} */"
+      | None -> ()
+      for (code, _) in kernels do
+          for line in code do yield i1 + line
+      yield $"{i1}auto __sf_{tag} = {fLambda};"
+      yield $"{i1}const {elemCpp}* __spool_{tag} = nested_array_utilities::pool_base({gName}.data);"
+      yield i1 + call
+      yield $"{ind}}}" ]
+
 and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (compExpr: IRExpr) (kernelExpr: IRExpr) (seedExpr: IRExpr) : string list * CodeGenContext =
     // THE JOIN ENCODING (IR.fs, IRReduceCompute): tuple kernel + tuple seed =
     // one fold per leg. Routed to its own emitter, because everything below
@@ -4131,6 +4183,38 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
             Blade.OrbitFold.recordDeclined name why
             None, Some why
         | Blade.OrbitFold.NotOrbit -> None, None
+    // THE ORDERED ORBIT SCATTER (Blade.OrbitFold.planStrict): the same walk in
+    // a build where every level is strict -- one pass over the pool, every
+    // chain fed its source sequence. Planned only where the orbit-class fold
+    // DECLINED the walk (its licensed form wins when it applies; BLADE_ORBIT_FOLD=0
+    // declines only that form, so the scatter still serves a repro build).
+    // Taken below, after the G35 row-slot decision (which wins when it
+    // applies): `(plan, pool name)`.
+    let scatterPlan =
+        match orbitWhy with
+        | None -> None
+        | Some _ ->
+            let sourceName id = Map.tryFind id ctx.VarNames |> Option.defaultValue $"__v{id}"
+            match Blade.OrbitFold.recogniseStrict resolveDeferred resolveCallable sourceName compExpr kernelExpr seedExpr with
+            | Blade.OrbitFold.StrictNotWalk -> None
+            | Blade.OrbitFold.StrictDeclined why ->
+                Blade.OrbitFold.recordScatterDeclined name why
+                None
+            | Blade.OrbitFold.StrictScatter sp ->
+                let src = sp.Shape.SourceId
+                let undominated =
+                    sp.FreeIds |> Seq.tryFind (fun id -> not (ctx.VarNames.ContainsKey id) || ctx.DeferredComputations.ContainsKey id)
+                if ctx.DeferredComputations.ContainsKey src then
+                    Blade.OrbitFold.recordScatterDeclined name "the compact array is a deferred computation (no pool to walk)"
+                    None
+                elif not (ctx.VarNames.ContainsKey src) then
+                    Blade.OrbitFold.recordScatterDeclined name "the compact array has no materialized pool in scope"
+                    None
+                elif undominated.IsSome then
+                    Blade.OrbitFold.recordScatterDeclined name
+                        "a free scalar of the cell function, a fold kernel or a seed is not a materialized binding in scope at the fold (capture dominance)"
+                    None
+                else Some (sp, ctx.VarNames.[src])
     // Compact row classes (Blade.Optimize.planCompactRowClasses): when the
     // producer's nest stored each packed row's class partials (it published
     // their arrays), the orbit pass becomes the row combine. A producer that
@@ -4312,16 +4396,32 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                     // producer builds still reads only source facts, except
                     // that this one form also asks whether the build opens
                     // teams at all: a slot array with no team is pure cost.
+                    let mutable rowSlotWhy = None
                     let rowSlots =
                         if not chunkable || fpReassocEnabled () then None
                         else
                             match rowSlotAdmission ctx.DeferredComputations single callable cg0.Bindings with
                             | Ok rc -> Some rc
                             | Error why ->
+                                rowSlotWhy <- Some why
+                                let form =
+                                    if scatterPlan.IsSome then "fold form: ordered orbit scatter (repro; the threaded complete-row form declined)"
+                                    else "fold form: serial (repro; the threaded complete-row form declined)"
                                 recordCodegenDecision "fold-form" name (Blade.Effects.Declined $"row-slot form: {why}")
-                                    [ "fold form: serial (repro; the threaded complete-row form declined)"
+                                    [ form
                                       "reduce over a deferred computation (threaded complete rows, G35)" ]
                                 None
+                    // G35 PRECEDENCE over the ordered orbit scatter: a taken
+                    // row-slot form (omp requested, threads on, repro, its gate
+                    // passed) threads the walk's rows and wins; the scatter is
+                    // the form of every other strict cell (and of the serial
+                    // LLVM lane, which has no threads).
+                    let scatterTaken =
+                        match scatterPlan with
+                        | Some (sp, _) when rowSlots.IsSome ->
+                            Blade.OrbitFold.recordScatterYieldedToRows name sp
+                            None
+                        | other -> other
                     let chunkForm =
                         match cg0.Bindings with
                         | _ when rowSlots.IsSome -> ChunkRowSlots rowSlots.Value
@@ -4850,7 +4950,8 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                            match orbitWhy with
                                            | Some why -> $"; rows of the logical walk (orbit-class fold not taken: {why})"
                                            | None -> ""
-                                       $"reduce over a deferred computation (one level, Path B partition; {cells} inner fold steps; each row's fold is its own serial chain on one thread{walk})"
+                                       let serialLanes = if scatterPlan.IsSome then Blade.OrbitFold.scatterServesSerialMarker else ""
+                                       $"reduce over a deferred computation (one level, Path B partition; {cells} inner fold steps; each row's fold is its own serial chain on one thread{walk}){serialLanes}"
                                    | _ -> "reduce over a deferred computation"
                                recordFoldForm name form formWhere
                                // A `where omp` FOLD kernel that got no chunk plan
@@ -4870,6 +4971,33 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                    else []
                                domainNote @ unchunkedNote
                                @ withI64SplitScope isDomainFold (fun () -> genLoopNest cg ctx.VarNames ctx.Indent))
+                    match scatterTaken with
+                    | Some (sp, gName) ->
+                        // A thread request on the walk's fold or map is not
+                        // spent by the scatter (its chains thread only as a
+                        // wavefront): the census marker says why.
+                        // EVERY level's request (fold and map kernels, outer
+                        // and inner): the nested walk this replaces is where an
+                        // inner request would have been reported.
+                        let requests =
+                            let rs = Blade.OrbitFold.scatterThreadRequests sp
+                            if mapLicensesOuter && not (rs |> List.contains "level 1's map") then "level 1's map" :: rs else rs
+                        let requestedAt = $"""requested at: {String.concat ", " requests}"""
+                        let ompNote =
+                            if requests.IsEmpty then None
+                            elif not (ompThreadEmissionEnabled ()) then Some $"{ompThreadsSuppressedReason ()} ({requestedAt})"
+                            else
+                                let g35 =
+                                    match rowSlotWhy with
+                                    | Some why -> $"the threaded complete-row form declined: {why}"
+                                    | None -> "no threaded complete-row form applies"
+                                let build =
+                                    if fpReproEnabled () then fpReproReason ()
+                                    else "the walk's folds carry no reorder licence"
+                                let g35 = if callable.IsOmpParallel || mapLicensesOuter then g35 else "no outer-level request for the threaded complete-row form"
+                                Some $"{build}; the ordered orbit scatter runs serially (its chains thread only as a wavefront; {g35}; {requestedAt})"
+                        (genOrbitScatterCpp ctx ind name gName sp orbitWhy ompNote, ctx')
+                    | None ->
                     let code =
                         match dotCall with
                         | Some (call, entry) ->

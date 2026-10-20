@@ -595,6 +595,9 @@
     <!-- Round-2 cell epilogues: the licensed / threaded forms by raw bits
          (NEW vs BLADE_CELL_EPILOGUE=0), plus the LLVM lane's parity. g++. -->
     <Compile Include="tests/CellEpilogueTests.fs" />
+    <!-- Round-2 ordered orbit scatter: both lanes executed against the
+         walk-forced twins (REPRO + contract=off), every scatter_g. g++/clang. -->
+    <Compile Include="tests/OrbitScatterTests.fs" />
     <!-- The interpreter's RNG mirror against Random123's Philox4x32-10
          known-answer vectors, plus the address identities (chunk / order /
          subrange invariance) on the generator alone. No toolchain. -->
@@ -782,6 +785,10 @@
     </None>
     <None Include="src/cpp/blade_fold_lanes.hpp">
       <Link>cpp/blade_fold_lanes.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="src/cpp/blade_orbit_scatter.hpp">
+      <Link>cpp/blade_orbit_scatter.hpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <None Include="src/cpp/fold_lanes_tests.cpp">

@@ -6546,12 +6546,301 @@ and private orbitCombineLlvm (c: Ctx) (p: Blade.OrbitFold.OrbitPlan) (elem: Sc) 
     let seed = coerce c accTy (emitExpr c p.OuterSeed)
     add seed total
 
+/// THE ORDERED ORBIT SCATTER (Blade.OrbitFold.planStrict, whose header carries
+/// the order proof; the C++ lane's twin is blade_orbit_scatter.hpp through
+/// CodeGenBinding.genOrbitScatterCpp, same schedule). Taken when the orbit-
+/// class fold is not: the shared strict plan admits the walk, the pool answers
+/// flat reads in this lane, and every free scalar the cell function, a kernel
+/// or a seed reads is bound here. This lane has no threads, so a G35-shaped
+/// request still takes the scatter here (the plan translation says so).
+and private tryOrbitScatter (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExpr) (initExpr: IRExpr) : Val option =
+    let name id = match Map.tryFind id c.ModuleNames with Some n -> n | None -> $"__v{id}"
+    // This lane's OWN record of the decision (the plan's LLVM half: CliCommands
+    // puts it in place of the C++ lane's scatter record, so the plan reports
+    // what THIS emitter did, including its refusals).
+    let record (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
+        if Blade.Effects.Decisions.active () then
+            Blade.Effects.Decisions.record
+                { Rule = "fold-form"; Version = 1; Span = c.DeclSpan
+                  Subject = (if c.DeclName = "" then "main" else c.DeclName)
+                  Outcome = outcome; Evidence = evidence @ [ Blade.OrbitFold.llvmScatterRecordTag ] }
+    let decline (why: string) =
+        record (Blade.Effects.Declined $"ordered orbit scatter not taken: {why}")
+            [ "fold form: ordered orbit scatter not taken -- the logical walk is kept"; why ]
+        None
+    match Blade.OrbitFold.recogniseStrict id resolveCallable name compExpr kernelExpr initExpr with
+    | Blade.OrbitFold.StrictScatter sp ->
+        let s = sp.Shape
+        match scalarTyOf (IRTScalar s.AccTy), scalarTyOf (IRTScalar s.ElemTy) with
+        | Some accTy, Some elemTy when (accTy = ScF64 || accTy = ScI64) && (elemTy = ScF64 || elemTy = ScI64) ->
+            if not (sp.FreeIds |> Set.forall (fun v -> c.Slots.ContainsKey v)) then
+                decline "a free scalar of the cell function, a fold kernel or a seed is not a scalar slot at the fold (LLVM lane)"
+            else
+            match c.ArrSlots.TryGetValue s.SourceId with
+            // A STORED pool only (v1): a flat-addressable PRODUCER (AVirtFlat)
+            // would be EXECUTED by the scatter's reads -- a map planStrict never
+            // audited, in the grouped order -- and would skip the ordinary
+            // operand rule's forcing; it keeps the walk.
+            | true, a ->
+                (match a.Src, soleSimplexR a.Groups with
+                 | APool _, Some (r, n, strict) when r = s.Rank && n = s.Extent && not strict ->
+                     record Blade.Effects.Applied
+                         [ "fold form: " + Blade.OrbitFold.scatterForm sp; Blade.OrbitFold.scatterEvidence sp ]
+                     Some (emitOrbitScatter c sp a accTy)
+                 | APool _, _ -> decline "the pool's storage groups are not one symmetric simplex of the walk's rank and extent (LLVM lane)"
+                 | _ -> decline "the compact array is an unforced computation, not a stored pool (LLVM lane: its producer would run inside the scatter)")
+            | _ -> decline "the compact array is not a materialized array in scope (LLVM lane)"
+        | _ -> decline "the accumulator or element type is not Float64 / Int64 (LLVM lane)"
+    | _ -> None
+
+and private emitOrbitScatter (c: Ctx) (sp: Blade.OrbitFold.StrictPlan) (a: ArrVal) (accTy: Sc) : Val =
+    let s = sp.Shape
+    let n = s.Extent
+    let g = sp.RowGroup
+    let blk = sp.ColBlock
+    let ety = poolTy accTy
+    ln c ($"; {(Blade.OrbitFold.scatterForm sp)} (strict: no licence consumed)")
+    // Every arithmetic instruction below is born WITHOUT `reassoc nsz`: no
+    // chain is reassociated (lanes are distinct chains); `contract` follows
+    // the build as everywhere (`fmfFor`).
+    let savedFmf = c.FoldFmf
+    c.FoldFmf <- false
+    let evalF (body: IRExpr) (v: Val) : Val =
+        let slot = allocaOf c (llTy v.Ty)
+        ln c ($"store {(llTy v.Ty)} {v.Reg}, ptr {slot}")
+        let rv = Blade.OrbitFold.readVarId
+        let saved = match c.Slots.TryGetValue rv with | true, sl -> Some sl | _ -> None
+        c.Slots.[rv] <- (slot, v.Ty)
+        let res = coerce c accTy (emitExpr c body)
+        (match saved with
+         | Some sl -> c.Slots.[rv] <- sl
+         | None -> c.Slots.Remove rv |> ignore)
+        res
+    let kern (k: int) (x: Val) (y: Val) : Val =
+        coerce c accTy (applyKernel c s.Levels.[k].Fold [ KScalar x; KScalar y ])
+    let gep (basePtr: string) (off: string) = gepCell c accTy basePtr off
+    let ld (basePtr: string) (off: string) : Val = loadCell c accTy (gep basePtr off)
+    let st (basePtr: string) (off: string) (v: Val) = storeCell c accTy (gep basePtr off) v
+    let alloc (cells: string) : string =
+        needShim c "blade_alloc_cells"
+        let p = freshReg c
+        ln c (renderCall { Dest = Some p; RetTy = ScStr; Callee = "@blade_alloc_cells"
+                           Args = [ ScI64, cells; ScI64, string (poolElemBytes accTy) ] })
+        p
+    let free (p: string) =
+        needShim c "blade_free"
+        c.AnyFrees <- true
+        ln c ($"call void @blade_free(ptr {p})")
+    let ifThen (cond: string) (body: unit -> unit) =
+        let lT = freshLbl c "sc.then"
+        let lE = freshLbl c "sc.end"
+        ln c (renderBr { Cond = cond; IfTrue = lT; IfFalse = lE })
+        lbl c lT
+        body ()
+        ln c (sprintf "br label %%%s" lE)
+        lbl c lE
+    let icmp (pred: string) (lhs: string) (rhs: string) =
+        let d = freshReg c
+        ln c (renderCmp { Dest = d; Kind = "icmp"; Pred = pred; Ty = ScI64; Lhs = lhs; Rhs = rhs })
+        d
+    let imin (x: string) (y: string) =
+        let lt = icmp "slt" x y
+        let d = freshReg c
+        ln c ($"{d} = select i1 {lt}, i64 {x}, i64 {y}")
+        d
+    // first pool cell of row r of a packed SymIdx<2, m> triangle:
+    // r*m - r*(r-1)/2 (r*(r-1) is even and >= 0)
+    let triRow (m: string) (r: string) =
+        let t1 = i64Bin c "mul" r m
+        let t3 = i64Bin c "mul" r (i64Bin c "sub" r "1")
+        i64Bin c "sub" t1 (i64Bin c "lshr" t3 "1")
+    let zbuf = allocaOf c $"[{g * blk} x {ety}]"
+    let vaddAt (k: int) = sp.LevelAdd.[k] && accTy = ScF64 && g % 4 = 0 && Blade.CodeGenExprSupport.scatterVectorRows ()
+    let fill (p: string) (cells: string) (v: Val) =
+        emitCountedLoopTo c cells (fun i -> st p i v)
+    // THE GROUP SCATTER over one packed triangle of extent `m` (row r at pool
+    // offset base + triRow(m, r)) into chains R[0 .. m); `third`: (H, hRow0,
+    // hn) -- every term of a row r >= 1 also feeds H's chain (hRow0 + r,
+    // hRow0 + c). Same schedule as blade_scatter::tri.
+    let tri (read: string -> Val) (f: Val -> Val) (kk: Val -> Val -> Val) (vadd: bool) (m: string) (rPtr: string)
+            (third: (string * string * string) option) =
+        let groups = i64Bin c "udiv" m (string g)
+        emitCountedLoopTo c groups (fun gi ->
+            let i0 = i64Bin c "mul" gi (string g)
+            let rs = [| for q in 0 .. g - 1 -> triRow m (i64Add c i0 (string q)) |]
+            let hrs =
+                match third with
+                | Some (_, h0, hn) -> [| for q in 0 .. g - 1 -> triRow hn (i64Add c h0 (i64Add c i0 (string q))) |]
+                | None -> [||]
+            // `i0 + q >= 1` holds for every q >= 1; for q = 0 it is a test
+            let thirdGuard (q: int) (body: unit -> unit) =
+                match third with
+                | None -> ()
+                | Some _ when q >= 1 -> body ()
+                | Some _ -> ifThen (icmp "sge" i0 "1") body
+            let hPtr = match third with Some (h, _, _) -> h | None -> ""
+            // (1) the diagonal block, block-lex
+            for q in 0 .. g - 1 do
+                for q2 in q .. g - 1 do
+                    let z = f (read (i64Add c rs.[q] (string (q2 - q))))
+                    let ra = i64Add c i0 (string q)
+                    st rPtr ra (kk (ld rPtr ra) z)
+                    if q2 <> q then
+                        let rb = i64Add c i0 (string q2)
+                        st rPtr rb (kk (ld rPtr rb) z)
+                    thirdGuard q (fun () ->
+                        let off = i64Add c hrs.[q] (string (q2 - q))
+                        st hPtr off (kk (ld hPtr off) z))
+            // the group's row chains, held across the column blocks: G scalar
+            // slots, or (VADD: the builtin `+` on double, G % 4 = 0) G / 4
+            // `<4 x double>` slots whose lane m is chain R[i0 + 4v + m] -- one
+            // vertical `fadd` per column per 4 chains, no `reassoc`, no
+            // reduction (the C++ lane's v4d row chains)
+            let nv = g / 4
+            let rc = if vadd then [||] else [| for q in 0 .. g - 1 -> allocaOf c ety |]
+            let rcv = if vadd then [| for _ in 0 .. nv - 1 -> allocaOf c "<4 x double>" |] else [||]
+            if vadd then
+                for v in 0 .. nv - 1 do
+                    let x = freshReg c
+                    ln c ($"{x} = load <4 x double>, ptr {(gep rPtr (i64Add c i0 (string (4 * v))))}, align 8")
+                    ln c ($"store <4 x double> {x}, ptr {rcv.[v]}")
+            else
+                for q in 0 .. g - 1 do
+                    let v = ld rPtr (i64Add c i0 (string q))
+                    ln c ($"store {ety} {v.Reg}, ptr {rc.[q]}")
+            let c0 = i64Add c i0 (string g)
+            let ncols = i64Bin c "sub" m c0
+            let nblocks = i64Bin c "udiv" (i64Bin c "add" ncols (string (blk - 1))) (string blk)
+            emitCountedLoopTo c nblocks (fun bi ->
+                let jb = i64Add c c0 (i64Bin c "mul" bi (string blk))
+                let len = imin (string blk) (i64Bin c "sub" m jb)
+                // (2a) the term map: G contiguous runs of the pool
+                for q in 0 .. g - 1 do
+                    let rowOff = i64Add c rs.[q] (i64Bin c "sub" jb (i64Add c i0 (string q)))
+                    emitCountedLoopTo c len (fun jj ->
+                        let z = f (read (i64Add c rowOff jj))
+                        st zbuf (i64Add c (string (q * blk)) jj) z)
+                // (2b) the column chains (lane jj = distinct chain R[jb + jj])
+                emitCountedLoopTo c len (fun jj ->
+                    let col = i64Add c jb jj
+                    let mutable acc = ld rPtr col
+                    for q in 0 .. g - 1 do
+                        acc <- kk acc (ld zbuf (i64Add c (string (q * blk)) jj))
+                    st rPtr col acc)
+                // (2c) the row chains: one application per chain per column
+                if vadd then
+                    let flags = fmfFor c ScF64
+                    emitCountedLoopTo c len (fun jj ->
+                        for v in 0 .. nv - 1 do
+                            let acc = freshReg c
+                            ln c ($"{acc} = load <4 x double>, ptr {rcv.[v]}")
+                            let mutable vec = "poison"
+                            for m in 0 .. 3 do
+                                let z = ld zbuf (i64Add c (string ((4 * v + m) * blk)) jj)
+                                let nx = freshReg c
+                                ln c ($"{nx} = insertelement <4 x double> {vec}, double {z.Reg}, i32 {m}")
+                                vec <- nx
+                            let sum = freshReg c
+                            ln c ($"{sum} = fadd{flags} <4 x double> {acc}, {vec}")
+                            ln c ($"store <4 x double> {sum}, ptr {rcv.[v]}"))
+                else
+                    emitCountedLoopTo c len (fun jj ->
+                        for q in 0 .. g - 1 do
+                            let cur = loadSlot c rc.[q] accTy
+                            let next = kk cur (ld zbuf (i64Add c (string (q * blk)) jj))
+                            ln c ($"store {ety} {next.Reg}, ptr {rc.[q]}"))
+                // (2d) the third event, from the same term block
+                for q in 0 .. g - 1 do
+                    thirdGuard q (fun () ->
+                        let hOff = i64Add c hrs.[q] (i64Bin c "sub" jb (i64Add c i0 (string q)))
+                        emitCountedLoopTo c len (fun jj ->
+                            let off = i64Add c hOff jj
+                            st hPtr off (kk (ld hPtr off) (ld zbuf (i64Add c (string (q * blk)) jj))))))
+            if vadd then
+                for v in 0 .. nv - 1 do
+                    let x = freshReg c
+                    ln c ($"{x} = load <4 x double>, ptr {rcv.[v]}")
+                    ln c ($"store <4 x double> {x}, ptr {(gep rPtr (i64Add c i0 (string (4 * v))))}, align 8")
+            else
+                for q in 0 .. g - 1 do
+                    st rPtr (i64Add c i0 (string q)) (loadSlot c rc.[q] accTy))
+        // the tail rows, one at a time: the diagonal cell, then the columns
+        let done0 = i64Bin c "mul" groups (string g)
+        emitCountedLoopTo c (i64Bin c "sub" m done0) (fun t ->
+            let i0 = i64Add c done0 t
+            let row = triRow m i0
+            let hrow =
+                match third with
+                | Some (_, h0, hn) -> triRow hn (i64Add c h0 i0)
+                | None -> ""
+            let thirdAt (jj: string) (z: Val) =
+                match third with
+                | Some (h, _, _) ->
+                    ifThen (icmp "sge" i0 "1") (fun () ->
+                        let off = i64Add c hrow jj
+                        st h off (kk (ld h off) z))
+                | None -> ()
+            let zd = f (read row)
+            st rPtr i0 (kk (ld rPtr i0) zd)
+            thirdAt "0" zd
+            emitCountedLoopTo c (i64Bin c "sub" (i64Bin c "sub" m i0) "1") (fun t2 ->
+                let jj = i64Add c t2 "1"
+                let z = f (read (i64Add c row jj))
+                st rPtr i0 (kk (ld rPtr i0) z)
+                let j = i64Add c i0 jj
+                st rPtr j (kk (ld rPtr j) z)
+                thirdAt jj z))
+    let poolRead (baseOff: string) (off: string) : Val = readFlat c a { Reg = i64Add c baseOff off; Ty = ScI64 }
+    let fCell (v: Val) = evalF s.Body v
+    let seedVal (k: int) = coerce c accTy (emitExpr c s.Levels.[k].Seed)
+    // the outer seed first (the walk's order), then the hoisted inner seeds
+    let outSeed = seedVal 0
+    let outSlot = allocaOf c ety
+    ln c ($"store {ety} {outSeed.Reg}, ptr {outSlot}")
+    let rows (hPtr: string option) (midSeed: Val) (midK: int) =
+        // the rank-2 scatter's chains over `n` rows, then the outer chain
+        let rPtr = alloc (string n)
+        fill rPtr (string n) midSeed
+        (match hPtr with
+         | None -> tri (poolRead "0") fCell (kern 1) (vaddAt 1) (string n) rPtr None
+         | Some h -> tri (fun off -> ld h off) id (kern midK) (vaddAt midK) (string n) rPtr None)
+        emitCountedLoop c n (fun i ->
+            let cur = loadSlot c outSlot accTy
+            let next = kern 0 cur (ld rPtr i)
+            ln c ($"store {ety} {next.Reg}, ptr {outSlot}"))
+        free rPtr
+    if s.Rank = 2 then
+        rows None (seedVal 1) 1
+    else
+        let leafSeed = seedVal 2
+        let midSeed = seedVal 1
+        let hc = n * (n + 1L) / 2L
+        let h = alloc (string hc)
+        fill h (string hc) leafSeed
+        let sliceSlot = allocaOf c "i64"
+        ln c ($"store i64 0, ptr {sliceSlot}")
+        emitCountedLoop c n (fun i ->
+            let m = i64Bin c "sub" (string n) i
+            let sliceStart = (loadSlot c sliceSlot ScI64).Reg
+            let rPtr = gep h (triRow (string n) i)
+            tri (poolRead sliceStart) fCell (kern 2) (vaddAt 2) m rPtr (Some (h, i, string n))
+            let cells = i64Bin c "lshr" (i64Bin c "mul" m (i64Bin c "add" m "1")) "1"
+            let next = i64Bin c "add" sliceStart cells
+            ln c ($"store i64 {next}, ptr {sliceSlot}"))
+        rows (Some h) midSeed 1
+        free h
+    c.FoldFmf <- savedFmf
+    loadSlot c outSlot accTy
+
 /// `reduce(<deferred computation>, op, init)` -- the FUSED terminal. One nest,
 /// no materialized array, and one accumulator PER FUSION LEAF: an `<&!>` tree
 /// answers a flat pack of scalars, which is how "several statistics in one
 /// pass" costs one traversal.
 and private emitReduceCompute (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExpr) (initExpr: IRExpr) : Val list =
     match tryOrbitFold c compExpr kernelExpr initExpr with
+    | Some v -> [ v ]
+    | None ->
+    match tryOrbitScatter c compExpr kernelExpr initExpr with
     | Some v -> [ v ]
     | None ->
     let rec leaves e =

@@ -1038,6 +1038,19 @@ let foldLanesUsedCell () : bool ref =
         fresh
     else v
 
+/// Set when a fold took the ordered orbit scatter (a `blade_scatter::` call,
+/// blade_orbit_scatter.hpp); the assembly appends that include only then.
+let internal orbitScatterUsedStorage =
+    System.Threading.AsyncLocal<bool ref>()
+
+let orbitScatterUsedCell () : bool ref =
+    let v = orbitScatterUsedStorage.Value
+    if isNull (box v) then
+        let fresh = ref false
+        orbitScatterUsedStorage.Value <- fresh
+        fresh
+    else v
+
 /// Set when the native matmul arm emitted a `blade_pgemm::` call (the packed
 /// kernel in blade_packed_gemm.hpp); the assembly appends that include only
 /// then. Same AsyncLocal collect-then-append shape as tilesUsedCell.
@@ -1584,6 +1597,7 @@ let resetProgramStateCells () : unit =
     freshCell linalgUsedStorage false
     freshCell tilesUsedStorage false
     freshCell packedGemmUsedStorage false
+    freshCell orbitScatterUsedStorage false
     freshCell cudaLinalgUsedStorage false
     freshCell lapackUsedStorage false
     freshCell ompApiUsedStorage false

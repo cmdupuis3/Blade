@@ -1927,6 +1927,39 @@ let private planOrbitAntisymSrc =
     + "let l = method_for(z, z) <@> lambda(a: Array<Float64 like Comp>, b: Array<Float64 like Comp>) where anticomm(a, b) -> a((0 : Comp)) * b((1 : Comp)) - b((0 : Comp)) * a((1 : Comp)) |> compute\n"
     + "let ss = reduce(method_for(range<Part>) <@> lambda(i) -> reduce(method_for(range<Part>) <@> lambda(j) -> l(i, j) * l(i, j), (+)), (+))\n"
 
+/// A `where repro` `+`: a fold kernel with NO reorder licence (the ordered
+/// orbit scatter's default-build domain).
+let private planScatterRadd = "function radd(a: Float64, b: Float64) where repro -> Float64 = a + b\n"
+
+/// The rank-2 walk with strict (`radd`) folds at both levels.
+let private planScatterStrictSrc =
+    planScatterRadd + planOrbitSrc (planOrbitNest "g(i, j) * g(i, j)" "radd, -0.0" "radd, 0.75")
+
+/// An Int64 pool folded by a kernel that may panic (integer `/`).
+let private planScatterPartialSrc =
+    "type Var = Idx<7>\n"
+    + "type Obs = Idx<3>\n"
+    + "function ihalf(a: Int64, b: Int64) where repro -> Int64 = a + b / 2\n"
+    + "let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Int64((i * 5 + s * 3) % 7) - 2 |> compute\n"
+    + "let g = method_for(x, x) <@> lambda(a: Array<Int64 like Obs>, b: Array<Int64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute\n"
+    + "let ss = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j), ihalf, 0), ihalf, 0)\n"
+
+/// The orbit fold's repro decline and THEN the scatter's applied record, for
+/// the same binding, in that order.
+let private planOrbitDeclineThenScatter (name: string) (src: string) =
+    match planDecisionsOf src with
+    | Error e -> resultLine Fail name e; false
+    | Ok ds ->
+        let folds = ds |> List.filter (fun d -> d.Rule = "fold-form" && d.Subject = "ss")
+        let orbitAt = folds |> List.tryFindIndex (declinedMentioning "orbit-class fold not taken: BLADE_FP_REPRO=1")
+        let scatterAt = folds |> List.tryFindIndex (fun d -> applied d && evidenceMentioning "fold form: ordered orbit scatter (rank 2" d)
+        match orbitAt, scatterAt with
+        | Some o, Some s when o < s ->
+            resultLine Pass name "the orbit-class fold's repro decline, then the ordered orbit scatter applied"; true
+        | _ ->
+            let seen = folds |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+            resultLine Fail name ($"wanted the orbit decline followed by the scatter record; the fold-form record: {seen}"); false
+
 let private planGramSrc =
     "let A: Array<Float64 like Idx<9>, Idx<5>> = method_for(range<Idx<9>>, range<Idx<5>>) <@> lambda(i, j) -> Float64(i + j) |> compute\n"
     + "let G = gram(A, A)\n"
@@ -2352,6 +2385,51 @@ let private planCases () =
       withGate "BLADE_ORBIT_FOLD" "0" (fun () ->
           planCase "plan_orbit_fold_declined_knob" (planOrbitSrc planOrbitSym2Body) "fold-form"
               (declinedMentioning "BLADE_ORBIT_FOLD=0") "BLADE_ORBIT_FOLD=0 keeps the logical walk")
+      // THE ORDERED ORBIT SCATTER (OrbitFold.planStrict): the strict build's
+      // form of the same walk -- applied under repro (the orbit fold's repro
+      // decline is FOLLOWED by it), and in the default build where no level is
+      // licensed; declined with the first failed condition.
+      withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () ->
+          planCase "plan_orbit_scatter_sym2_applied_repro" (planOrbitSrc planOrbitSym2Body) "fold-form"
+              (fun d -> applied d && evidenceMentioning "fold form: ordered orbit scatter (rank 2, extent 7, row groups of 4)" d
+                        && evidenceMentioning "one pass over the 28-cell SymIdx<2, 7> pool" d)
+              "ordered orbit scatter, rank 2, row groups of 4"))
+      withGate "BLADE_FP_REPRO" "1" (fun () ->
+          planOrbitDeclineThenScatter "plan_orbit_fold_declined_repro_then_scatter" (planOrbitSrc planOrbitSym2Body))
+      withGate "BLADE_FP_REPRO" "1" (fun () ->
+          planCase "plan_orbit_scatter_sym3_applied_repro" planOrbitSym3Src "fold-form"
+              (fun d -> applied d && evidenceMentioning "(rank 3, extent 7, row groups of 4, shared pair chains 28 of 49)" d)
+              "ordered orbit scatter, rank 3, 28 shared pair chains of 49")
+      withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_TILE_TUNE" "scatter_g=3,scatter_b=32" (fun () ->
+          planCase "plan_orbit_scatter_tune" (planOrbitSrc planOrbitSym2Body) "fold-form"
+              (fun d -> applied d && evidenceMentioning "row groups of 3" d && evidenceMentioning "column block 32" d)
+              "BLADE_TILE_TUNE scatter_g / scatter_b reach the form"))
+      planCase "plan_orbit_scatter_unlicensed_default" planScatterStrictSrc "fold-form"
+          (fun d -> applied d && evidenceMentioning "ordered orbit scatter (rank 2" d && evidenceMentioning "no level's fold carries a reorder licence" d)
+          "the default build: no level licensed -> the scatter"
+      withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_ORBIT_FOLD" "0" (fun () ->
+          planCase "plan_orbit_scatter_orbit_fold_knob_off" (planOrbitSrc planOrbitSym2Body) "fold-form"
+              (fun d -> applied d && evidenceMentioning "ordered orbit scatter (rank 2" d
+                        && evidenceMentioning "BLADE_ORBIT_FOLD=0 disables the licensed orbit-class fold only" d)
+              "BLADE_ORBIT_FOLD=0 under repro: the scatter still applies, and says why"))
+      withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_ORBIT_SCATTER" "0" (fun () ->
+          planCase "plan_orbit_scatter_declined_knob" (planOrbitSrc planOrbitSym2Body) "fold-form"
+              (declinedMentioning "ordered orbit scatter not taken: disabled by BLADE_ORBIT_SCATTER=0")
+              "BLADE_ORBIT_SCATTER=0 keeps the walk"))
+      withGate "BLADE_FP_REPRO" "1" (fun () ->
+          planCase "plan_orbit_scatter_declined_antisym" planOrbitAntisymSrc "fold-form"
+              (declinedMentioning "ordered orbit scatter not taken: antisymmetric storage")
+              "an AntisymIdx pool keeps the walk (census line)")
+      planCase "plan_orbit_scatter_declined_mixed_licence" (planScatterRadd + planOrbitSrc (planOrbitNest "g(i, j) * g(i, j)" "(+)" "radd, 0.0")) "fold-form"
+          (declinedMentioning "ordered orbit scatter not taken: a mixed nest: level 2's fold carries a reorder licence and level 1's does not")
+          "a licensed inner level under a strict outer one keeps the walk in v1"
+      planCase "plan_orbit_scatter_declined_partial_kernel" planScatterPartialSrc "fold-form"
+          (declinedMentioning "level 1's fold kernel is outside the scatter's total whitelist (body may panic (integer /))")
+          "a fold kernel that may panic keeps the walk"
+      withGate "BLADE_FP_REPRO" "1" (fun () ->
+          planCase "plan_orbit_scatter_declined_seed_coordinate" (planOrbitSrc (planOrbitNest "g(i, j)" "(+), Float64(i)" "(+)")) "fold-form"
+              (declinedMentioning "level 2's seed is outside the scatter's admission (it mentions a level coordinate")
+              "an inner seed mentioning the outer coordinate keeps the walk")
       // THE THREADED FORM (bench G32): `where omp` on the outer fold is spent
       // as a team over the first-coordinate rows -- in the fold-form line and
       // as an applied `omp` record -- and BLADE_OMP_THREADS=1 keeps the
