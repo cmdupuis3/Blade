@@ -283,8 +283,8 @@ BLADE_FOLD_NOINLINE T sq(const T* a, size_t n) {
         [&](T acc, size_t i) { const T x = a[i]; return BLADE_FOLD_MADD(x, x, acc); });
 }
 
-/// sum_t (a[t] * b[t]) * c[t], source factor order: the first product rounded,
-/// the second fused with the add under the contracted build
+/// sum_t (a[t] * b[t]) * c[t], source factor order: both products rounded,
+/// the second by madd before its add, under every contraction mode
 template <typename T, int K>
 BLADE_FOLD_NOINLINE T dot3(const T* a, const T* b, const T* c, size_t n) {
     typedef typename detail::vec<T>::type V;

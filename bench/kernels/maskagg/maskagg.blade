@@ -5,9 +5,9 @@
 //
 // The WHERE idiom of examples/01: `mask` builds the presence vector, `compound` compacts,
 // `reduce` / `extents` consume. `compound(dense, mask)` is valid only as a top-level let
-// (BL6002 inside a function), so this one kernel keeps its arrays at top level. The LLVM lane
-// refuses `compound` ("a compound-index initializer") and falls back to C++, which honours
-// `--print checksum,input_checksum`; blade-cpp is the measurable Blade arm. Serial only.
+// (BL6002 inside a function), so this one kernel keeps its arrays at top level. Since M12
+// (2026-10-19) a rank-1 `compound` is a prefix-count compaction that BOTH lanes compile, so
+// blade-llvm is the measured Blade arm (kernel.json expected_llvm "lane"). Serial only.
 
 type Ix = Idx<1000003>   // SIZE n
 
