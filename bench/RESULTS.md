@@ -2700,6 +2700,51 @@ the relational whole-region track (membership hoisting, hash equijoin, aggregate
 grouping); the N01-N10 benchmark workloads; D1 persistent syrk team (instrument first);
 scatter v1.1 contraction invariance REJECTED (do not revisit without a new argument).
 
+## 16. Wave 3 (2026-10-20) -- recur step threading, the stencil attribution, D1 / B2l / anti_g
+
+Record: `bench/notes/wave3/` (README indexes the brief, both Codex reviews, the two attribution
+notes, the scripts). Base: `worktree-bench-fortran` at ccde7e4e (the wave-2 tip f1910060 plus
+notes). Honesty rules as in 14-15: `MEASURED` names the command; a block the harness flagged
+is `indicative`; no Blade arm may be slower than its OLD binary beyond its CI without the row
+saying so.
+
+### 16.1 What landed
+
+| item | mechanism | knob | gate / proof |
+|---|---|---|---|
+| E-G5 threaded `let rec` step (recur mt8; gap G5) | `where omp(v: 1)` on the inductive arm's FINAL map is the request; slice-write fusion keeps it (a nested stage map with one still declines) and admits the step only with the proof the barrier-free team needs: a fresh rank-2 trajectory stored at `BUF[n][k]`, every trajectory read a row view `prefix(n - c)` with a literal `1 <= c <= lo` or a seed row `0 <= r < lo`, read at the cell being written; no write outside the buffer (the shared `scheduleMayWrite` predicate over the slice and the whole time-loop body, the buffer bound locally); no `where repro` callee spliced; one requesting slice per recursion. C++: the time loop inside ONE team, contiguous x ownership fixed for every step (`blade_fold::chunk_lo`), NO per-step synchronization -- MEASURED on the box: a team entry or a barrier is ~40 us (libgomp, Windows; wait-policy knobs change nothing), so brief E's per-step team (300 of them) is 12 ms against a 7 ms expert. A licensed `prodsum(row, row)` fold rides the team as per-worker chunk partials (the self-dot's K-lane form at the configured lane count), combined ascending per row, the time chain in order; otherwise a strict post-pass after the team folds COMPLETE rows (in parallel into slots only under the OUTER fold kernel's own `where omp`, G35's gate; else serially) -- bitwise the serial program for every team size. Fail-closed shape re-check at emission; threads suppressed prints the census at the time loop; a request the fused loop cannot honour leaves the slice UNFUSED (the map keeps its per-step team); an entry no emitter decided prints its census at the end of the unit; the LLVM lane runs the sequential loop and records so (G11) | `BLADE_REC_STEP_OMP` (optimizer gate; off = the pre-wave-3 emission) | corpus recursive-arrays/031-032, mutability-errors/042; 15 optimize decision / emission cases; `blade test rec-step` (threads-on vs threads-off by raw bits -- trajectory, scalar, observed team -- T = 1 / 3 / 8 and a thread-limited team; licensed 1e-12, repro bitwise); two Codex attack reviews (`codex-review-E-G5.md`: 19 objections, all folded in; `codex-diff-E-G5.md`: two findings, fixed) |
+| stencil read-back licence (item 2) | `stencil.blade`'s input checksum carries `where omp` on its outer fold kernel (the mt8 read-back licence every Fortran arm has, section 12 / D44): a licensed build threads it (Path B over the rows), a repro build keeps it serial (G48: the row-slot recognizer takes a nested `range` fold, not a row-view fold) | -- | values identical to the original source (repro bitwise); smoke in the A/B |
+
+Not built, on the numbers: **B2l** (brief B's optional licensed-lanes arm: E-G5's in-team
+partials serve its mt8 target; serial ceiling <= 3.5%, below what the harness resolves here;
+`lanes` stays reserved) and **D1** (instrumented: gram's three regions cost 236-257 us per
+call, ~1.8% of an mt8 gram, and the persistent-team shape is no cheaper on this libgomp --
+299-376 us; dropped on brief D's own rule).
+
+### 16.2 Attribution (MEASURED, single-process phase timers, directional; `recur-mt8-attribution.md`, `stencil-mt8-attribution.md`)
+
+- **recur mt8 licensed.** E-G5's region is at parity with the gfortran expert's region
+  (trajectory pre-touched: expert 5.4 ms, Blade 5.9-6.3 ms at T=8; both on the box's
+  ~4.6 ms write-bandwidth floor -- raw 48 MB row-stream writes run 10.4 GB/s at one thread
+  and 6.9 at eight; page faults add ~1.6 ms to each). The whole remaining gap to the expert's
+  7.5 ms program is the 48 MB teardown INSIDE Blade's timed region: 1.7 ms serial, 4-5 ms
+  after a threaded fill (TLB shootdowns across the cores that touched the pages); the experts
+  free after their stop line (README item 6's recorded asymmetry; now quantified, G49). The
+  retained-block pool cache stops at 4 MB; a larger retention is a footprint-policy decision
+  left to the user.
+- **stencil mt8 licensed.** Of the ~2 ms gap to the expert's region (4.25 ms at T=8), 1.0 ms
+  is the 24 MB `lap` teardown inside the timer (G49); the rest sits in the DRAM-bound read
+  phases (input checksum 1.5-1.9 ms, producer 3.2-3.4 ms). The read-back licence is kept as
+  the fair spelling; measured flat (a 24 MB read does not scale with threads here).
+
+### 16.3 Measured: wave-3 A/B -- (filled below when the harness sessions complete)
+
+### 16.4 Gates: GREEN on b4a21003 (Blade.dll 2B9E12AC...; `bench/notes/wave3/w3-gates-summary.md`)
+
+default **7234 / 0** (no skips), opt-diff 2074 / 0 / 945, docs 131 / 0 / 78, llvm 816 / 0 / 691,
+interp 3016 / 0 / 3 -- run 17:57-18:38 from `C:\bt_w3` (tests/docs junctions), the hash unchanged
+after every gate; the deltas against the wave-2 finals are the wave-3 tests.
+
 ## 12. Decisions put to the user — BOTH DECIDED (2026-10-18)
 
 **Decisions:** (1) mt8 matched parallelism — option (A) below: every arm threads input

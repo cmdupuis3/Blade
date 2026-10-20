@@ -20,6 +20,19 @@ is the 48 MB teardown INSIDE Blade's timed region: 1.7 ms serial, 4-5 ms after a
 line (README item 6's recorded asymmetry, now quantified). The retained-block pool cache stops
 at 4 MB; a larger retention is a footprint-policy decision left to the user.
 
+## 16.2b Items 2-4 (MEASURED, directional; `stencil-mt8-attribution.md`)
+
+- stencil mt8-licensed: of the ~2 ms gap to the expert's region, 1.0 ms is the 24 MB `lap`
+  teardown inside the timed region (G49); the rest sits in DRAM-bound read phases. The input
+  checksum now carries the read-back licence every Fortran arm has (`where omp` on its outer
+  fold kernel): threaded under licensed (Path B), measured flat (a 24 MB read does not scale
+  on this box), serial under repro (G48: the row-slot recognizer misses a row-view fold).
+- B2l: not built -- E-G5's in-team partials serve its mt8 target; serial ceiling <= 3.5%
+  (brief B), below what the harness resolves here. `lanes` stays reserved.
+- D1: instrumented (gram's 3 regions = 236-257 us per call, ~1.8% of mt8 gram; the persistent
+  shape is no cheaper on this libgomp): DROPPED on the instrument, no code.
+- anti_g: re-measured in the A/B below (3 interleaved sessions per arm, serial + mt8).
+
 ## 16.3 Harness A/B -- TBD
 
 ## 16.4 Gates -- TBD
