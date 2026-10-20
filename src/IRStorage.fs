@@ -216,6 +216,24 @@ type FlatEpilogue = {
     OnEmitted: unit -> unit
 }
 
+/// Compact row-class scheduling (Blade.Optimize.planCompactRowClasses, round
+/// 2 item B3): what a COMPACT rank-2 producer's plain nest places inside its
+/// outermost loop, after the packed row is stored -- the orbit fold's per-row
+/// class partials. Built by the apply emitter, consumed by
+/// `genLoopNestStreamed` only for the compact flat-write form.
+type CompactRowEpilogue = {
+    /// Declarations before the nest, unindented: the class arrays.
+    Prelude: string list
+    /// Statements inside the outermost loop after its inner nest closed,
+    /// unindented, given (packed row pointer, outer index name). Rendered only
+    /// when the nest places the epilogue.
+    Body: string -> string -> string list
+    /// Called exactly when the nest emitted the prelude and the body.
+    OnEmitted: unit -> unit
+    /// Called when the nest's form declined the epilogue (it records why).
+    OnDeclined: unit -> unit
+}
+
 type LoopNestCodeGen = {
     /// All loop index bindings, in nesting order (outermost first)
     Bindings: LoopIndexBinding list
@@ -278,6 +296,10 @@ type LoopNestCodeGen = {
     /// producer's statement-form materialization; only the flat
     /// elementwise emitter honours it.
     FlatEpilogue: FlatEpilogue option
+    /// Compact row-class scheduling: the orbit fold's class partials behind
+    /// each packed row (see CompactRowEpilogue). None everywhere but a
+    /// planned compact producer's statement-form materialization.
+    CompactRowEpilogue: CompactRowEpilogue option
 }
 
 /// One dimension GROUP of a device buffer. Mirrors a single IRIndexType:
@@ -1296,4 +1318,5 @@ let buildLoopNestCodeGen
         ShareDecl = None
         RowEpilogue = None
         FlatEpilogue = None
+        CompactRowEpilogue = None
     }

@@ -59,7 +59,11 @@ let interpExcluded : (string * string) list =
 /// The corpus-wiring block checks that every entry still names a corpus test.
 let interpExpectedUnsupported : (string * string) list =
     [ "Fill Random Symmetric", "fill_random(mod)"        // C rand() % mod is nondeterministic
-      "Fill Random Antisymmetric", "fill_random(mod)" ]
+      "Fill Random Antisymmetric", "fill_random(mod)"
+      // A keyed element write into a compound through a `mut` parameter: the
+      // compiled lanes' write-barrier regression for compaction fusion
+      // (index-types/520); the interpreter has no compound element store.
+      "Compaction fusion declines across writes: a mutated compound keeps the as-written values", "IRAssign to non-array index target" ]
 
 /// The slice the `test interp` arm (and `blade test --interp`) runs: EVERY
 /// corpus category on disk -- single-file and multi-file, DISCOVERED -- minus

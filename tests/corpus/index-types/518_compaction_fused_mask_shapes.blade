@@ -1,0 +1,49 @@
+// TEST: Compaction fusion over mask shapes: all-false, all-true, kept-early, kept-late, alternating
+// The fused pass (`v = x[i]; y[q] = v; pos[q] = i; q += keep[i]`, m + 1 cells
+// in both buffers) at its edges, n = 1003 over four 256-cell blocks: an
+// all-false mask (m = 0: only the slack cell is ever written, `[]` prints),
+// all-true (m = n, the slack never written), the last kept cell in the FIRST
+// block (every later store lands on the slack), the first kept cell in the
+// LAST block (under BLADE_FP_REPRO=1 the in-pass chain starts there), and an
+// alternating mask. Integer-valued data: every sum exact.
+type Ix = Idx<1003>
+let r = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i)) |> compute
+let alt = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 2) + 1.0 |> compute
+// all-false
+let k_none = mask(r, lambda(v) -> v < -1.0)
+let none = compound(r, k_none)
+// EXPECT: none = []
+let none_n = extents(none)
+// EXPECT: none_n = 0
+// all-true: m = n
+let k_all = mask(r, lambda(v) -> v > -1.0)
+let all = compound(r, k_all)
+let all_n = extents(all)
+// EXPECT: all_n = 1003
+let all_sq = reduce(all * all, (+))
+// EXPECT: all_sq = 335839505.0
+let all_k1002 = all(1002)
+// EXPECT: all_k1002 = 1002.0
+// kept early: positions 0, 1, 2 only
+let k_early = mask(r, lambda(v) -> v < 2.5)
+let early = compound(r, k_early)
+// EXPECT: early = [0.0, 1.0, 2.0]
+let early_sq = reduce(early * early, (+))
+// EXPECT: early_sq = 5.0
+// kept late: positions 1000, 1001, 1002 (all in the last block)
+let k_late = mask(r, lambda(v) -> v > 999.5)
+let late = compound(r, k_late)
+// EXPECT: late = [1000.0, 1001.0, 1002.0]
+let late_sq = reduce(late * late, (+)) + Float64(extents(late))
+// EXPECT: late_sq = 3006008.0
+let late_k1001 = late(1001)
+// EXPECT: late_k1001 = 1001.0
+// alternating: the odd positions (value 2.0) kept
+let k_alt = mask(alt, lambda(v) -> v > 1.5)
+let odd = compound(alt, k_alt)
+let odd_n = extents(odd)
+// EXPECT: odd_n = 501
+let odd_sq = reduce(odd * odd, (+))
+// EXPECT: odd_sq = 2004.0
+let odd_k5 = odd(5)
+// EXPECT: odd_k5 = 2.0

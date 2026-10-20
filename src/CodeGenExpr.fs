@@ -1340,12 +1340,51 @@ and renderMatchExpr (subst: SubstMap) (names: Map<IRId, string>) scrutinee cases
     genCase cases
 
 
+/// The fused fold `reduce(y * y, (+))` of compaction fusion
+/// (Blade.Optimize.planCompactionFusion, B4a/c), as an IIFE: the BL8003 empty
+/// check of the unseeded fold at the fold's own declaration, then
+///
+///   * the accumulator the compaction pass fed (B4c), when it published one;
+///   * licensed: `blade_fold::sq<double, K>` over `y.data`'s m cells -- the
+///     K-lane self-dot tree, no square pool;
+///   * otherwise the unseeded serial chain from the first kept square, in
+///     kept order, each product rounded before its add (a stored product is).
+///
+/// Shared by the expression form (renderReduceExpr) and the statement form
+/// (genReduceBinding), which differ only in where the value lands.
+and renderCompactionFold (names: Map<IRId, string>) (plan: Blade.Optimize.CompactionFoldPlan) (kernelExpr: IRExpr) : string =
+    let y = Map.tryFind plan.CompoundId names |> Option.defaultValue plan.CompoundName
+    let m = $"{y}.idx->cardinality"
+    let guard = $"if ({m} == 0) {{ blade_rt::panic(\"BL8003\", \"reduce: empty array, no reduction possible\", {(declPanicArgs ())}); }} "
+    match resolveCallable kernelExpr with
+    | Some callable when callable.Params.Length = 2 ->
+        let where = $"reduce over `{y}`'s compact buffer (compaction fusion: no `{y} * {y}` pool)"
+        match plan.EmittedCpp.Value with
+        | Some acc ->
+            recordFoldForm "" (serialFoldForm ()) $"{where}; the chain was fed inside `{y}`'s compaction pass"
+            $"[&]() {{ {guard}return {acc}; }}()"
+        | None ->
+        (foldLanesUsedCell ()).Value <- true
+        if fpReassocEnabled () && foldReorderLicensed callable then
+            let k = foldVecLanes VecSq
+            recordFoldForm "" (foldVecLabel VecSq k) where
+            let call = foldVecCall "double" k VecSq [ y + ".data" ] m
+            $"[&]() {{ {guard}return {call}; }}()"
+        else
+            recordFoldForm "" (if foldReorderLicensed callable then serialFoldForm () else "serial (no reorder licence)") where
+            let (wrapperCode, wname) = genCallableWrapper names "" callable
+            let wrapperStr = wrapperCode |> String.concat " "
+            $"[&]() {{ {guard}{wrapperStr} const size_t __rn = {m}; double __r = {y}.data[0] * {y}.data[0]; BLADE_FOLD_ROUND(__r); for (size_t __ri = 1; __ri < __rn; __ri++) {{ double __t = {y}.data[__ri] * {y}.data[__ri]; BLADE_FOLD_ROUND(__t); __r = {wname}(__r, __t); }} return __r; }}()"
+    | _ -> "/* reduce: non-callable kernel (typechecker or IR bug) */"
+
 and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernelExpr (initExpr: IRExpr option) : string =
     // An inline partial sparse read as the operand (`reduce(S((k, _)), (+))`):
     // the fold below spells its operand at every element read, the extent
     // test and the guard, so the gather used to run -- and leak -- once per
     // access, O(n * cardinality). Bind it once, fold the binding, free it.
     match arrExpr with
+    | IRVar (mid, _) when initExpr.IsNone && (Blade.Optimize.CompactionTable.tryFoldMap mid).IsSome ->
+        renderCompactionFold names (Blade.Optimize.CompactionTable.tryFoldMap mid).Value kernelExpr
     | GatherTeardown _ ->
         bindInlineGathers subst names [ arrExpr ] (fun ops -> renderReduceExpr subst names (List.head ops) kernelExpr initExpr)
     | _ ->
@@ -1994,6 +2033,17 @@ and materializeRangeForm (subst: SubstMap) (names: Map<IRId, string>) (varName: 
 
 
 and materializeMaskForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (arrExpr: IRExpr) (predExpr: IRExpr) : (string list * MaterializedAlloc list) option =
+    materializeMaskFormCounted subst names varName elemTypeStr arrExpr predExpr None
+    |> Option.map (fun (stmts, allocs, _) -> (stmts, allocs))
+
+/// `materializeMaskForm` that may also COUNT the kept cells in the same pass
+/// (compaction fusion, Blade.Optimize.planCompactionFusion): with
+/// `countVar = Some c`, the rank-1 callable arm declares `size_t c = 0` and
+/// adds each stored bit to it. The third component says whether it counted
+/// (only that arm does; every other arm answers false and the compound keeps
+/// its own count).
+and materializeMaskFormCounted (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (arrExpr: IRExpr) (predExpr: IRExpr) (countVar: string option) : (string list * MaterializedAlloc list * bool) option =
+    let uncounted (r: (string list * MaterializedAlloc list) option) = r |> Option.map (fun (s, a) -> (s, a, false))
     // mask(A, pred) -> the Bool PRESENCE array over A's own index space,
     // m[i] = pred(A[i]). One pass, no value copying: compaction belongs
     // to compound(A, m); iteration to range<CompoundIdx<m>>. A contains(B, x)
@@ -2037,7 +2087,7 @@ and materializeMaskForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
             let (extDecl, owned) = emitExtentsTable "" ($"{varName}_extents") maskRank dims
             let total = dims |> List.map (fun (e, _) -> $"(size_t)({e})") |> String.concat " * "
             let srcElemStr = elemTypeToCpp a.ElemType
-            Some (
+            uncounted (Some (
                 wrapperCode @ extDecl @ [
                     $"Array<bool, {maskRank}> {varName} = {{ allocate<typename promote<bool, {maskRank}>::type, nullptr>({varName}_extents), {varName}_extents }};"
                     $"{{ bool* __mp = nested_array_utilities::pool_base({varName}.data);"
@@ -2045,11 +2095,11 @@ and materializeMaskForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                     $"  for (size_t __mi = 0; __mi < {total}; __mi++) __mp[__mi] = {wname}(__ms[__mi]); }}"
                 ],
                 [MatPool (varName, "bool", maskRank, "nullptr", None, owned)]
-            )
+            ))
         | _ ->
-            Some ([refusalErrorLine "" ($"Blade codegen: mask over a rank-{maskRank} array needs a one-parameter predicate")], [])
+            uncounted (Some ([refusalErrorLine "" ($"Blade codegen: mask over a rank-{maskRank} array needs a one-parameter predicate")], []))
     elif maskRank <> 1 then
-        Some ([refusalErrorLine "" ($"Blade codegen: mask over a rank-{maskRank} array is supported over plain dense arrays only (packed, ragged, compound and sparse sources have no row-major pool)")], [])
+        uncounted (Some ([refusalErrorLine "" ($"Blade codegen: mask over a rank-{maskRank} array is supported over plain dense arrays only (packed, ragged, compound and sparse sources have no row-major pool)")], []))
     else
     match resolveCallable predExpr with
     | Some callable when callable.Params.Length = 1 ->
@@ -2063,27 +2113,41 @@ and materializeMaskForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
             match inferExprType arrExpr with
             | ArrayElem a -> elemTypeToCpp a.ElemType
             | _ -> "double"
+        let loop =
+            match countVar with
+            | None ->
+                [ $$"""for (size_t __mi = 0; __mi < {{srcBound}}; __mi++) {"""
+                  $"    {srcElemStr} {predParamName} = {arrName}[__mi];"
+                  $"    {varName}[__mi] = {wname}({predParamName});"
+                  "}" ]
+            | Some c ->
+                // The compaction's count, taken in this pass: the bit as
+                // stored, so the count is exactly the kept cells.
+                [ $"size_t {c} = 0;"
+                  $$"""for (size_t __mi = 0; __mi < {{srcBound}}; __mi++) {"""
+                  $"    {srcElemStr} {predParamName} = {arrName}[__mi];"
+                  $"    const bool __{varName}_k = {wname}({predParamName});"
+                  $"    {varName}[__mi] = __{varName}_k;"
+                  $"    {c} += (size_t)__{varName}_k;"
+                  "}" ]
         Some (
             wrapperCode @ extentsDecl @ [
-                $$"""Array<bool, 1> {{varName}} = { new bool[{{srcBound}}], {{varName}}_extents };"""
-                $$"""for (size_t __mi = 0; __mi < {{srcBound}}; __mi++) {"""
-                $"    {srcElemStr} {predParamName} = {arrName}[__mi];"
-                $"    {varName}[__mi] = {wname}({predParamName});"
-                "}"
-            ],
+                $$"""Array<bool, 1> {{varName}} = { new bool[{{srcBound}}], {{varName}}_extents };""" ]
+            @ loop,
             // Raw `new bool[n]` backing plus whatever `<varName>_extents` turned
             // out to own. A downstream compound() copies the bits into a
             // std::vector<bool> at construction (genCompoundIndexFromMask), so
             // nothing outlives this scope by pointing INTO the mask.
-            [MatRawData (varName, ownedExtents)]
+            [MatRawData (varName, ownedExtents)],
+            countVar.IsSome
         )
     | _ ->
         // Degenerate (unresolved predicate): all-true mask; #error would be
         // kinder but this mirrors the prior fallback's shape.
-        Some (extentsDecl @ [
+        uncounted (Some (extentsDecl @ [
             $$"""Array<bool, 1> {{varName}} = { new bool[{{srcBound}}], {{varName}}_extents };"""
             $"for (size_t __mi = 0; __mi < {srcBound}; __mi++) {varName}[__mi] = true;"
-        ], [MatRawData (varName, ownedExtents)])
+        ], [MatRawData (varName, ownedExtents)]))
 
 
 

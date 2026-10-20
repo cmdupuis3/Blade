@@ -1825,6 +1825,27 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
         match hotRow, cellStep with
         | Some ep, Some _ when ep.ChainBlock > 0L -> Some ep.ChainBlock
         | _ -> None
+    // COMPACT ROW CLASSES (Blade.Optimize.planCompactRowClasses): the orbit
+    // fold's per-row class partials behind each packed row. The compact
+    // flat-write twin of the hot-row admission above: a rank-2 compact pool
+    // written through the hoisted row pointer (`compactFlat`), and none of
+    // the forms that would split or reorder the outer level. A declined site
+    // publishes nothing; the consumer keeps the orbit-class pass.
+    let compactRow =
+        match codeGen.CompactRowEpilogue with
+        | Some ep when hotRow.IsNone && codeGen.FoldWrapper.IsNone && not codeGen.MpiSlab && codeGen.ShareDecl.IsNone
+                       && Map.isEmpty streamed && List.length codeGen.Bindings = 2
+                       && compactFlat.IsSome
+                       && not (pragmaLevel = Some 0 && ompLastLevel > 0) ->
+            Some ep
+        | Some ep ->
+            recordCodegenDecision "compact-row-classes" "" (Blade.Effects.Declined "the producer is not emitted by the plain compact row nest (sliced, streamed, fused-fold or collapsed form)") [ $"orbit fold of `{codeGen.OutputName}`" ]
+            ep.OnDeclined ()
+            None
+        | None -> None
+    match compactRow with
+    | Some ep -> for l in ep.Prelude do lines <- lines @ [ind depth + l]
+    | None -> ()
     for binding in codeGen.Bindings do
         let levelIdx = bidx
         // Generate the loop header (pragma only on the outermost loop).
@@ -2286,9 +2307,24 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
         lines <- lines @ [ind depth + "}"]
         ep.OnEmitted ()
     | None ->
-        for _ in codeGen.Bindings do
+        match compactRow with
+        | Some ep ->
+            // Compact row classes: the packed row is complete once the inner
+            // level closes; its class partials run on it through the row
+            // pointer it was written through, still inside the outermost loop
+            // (each row by the one thread that produced it).
+            for _ in List.tail codeGen.Bindings do
+                depth <- depth - 1
+                lines <- lines @ [ind depth + "}"]
+            let outerIdx = (List.head codeGen.Bindings).IndexName
+            for l in ep.Body outRowName outerIdx do lines <- lines @ [ind depth + l]
             depth <- depth - 1
             lines <- lines @ [ind depth + "}"]
+            ep.OnEmitted ()
+        | None ->
+            for _ in codeGen.Bindings do
+                depth <- depth - 1
+                lines <- lines @ [ind depth + "}"]
 
     // Path B epilogue: publish this thread's partial, close the region,
     // then combine in THREAD ORDER through the same wrapper -- a fixed order, so

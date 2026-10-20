@@ -2184,6 +2184,92 @@ let buildFlatEpilogue (plan: Blade.Optimize.HotRowPlan) (producer: LoopNestCodeG
                     decline "the fold's seed is not a literal: the chain would evaluate it ahead of the producer (a failure could move; the seed stays at the consumer)"
         | _ -> decline "the consumer's cell map is not one plain level over the producer"
     | _ -> decline "the fold kernel does not resolve to a two-parameter callable, or the cell kernel has no recognized term"
+/// A row's class partial, from ZERO, in a FIXED per-row scheme: the K-lane
+/// self-dot / sum tree (`blade_fold::sq|sum`, a fixed function of the data and
+/// K) for the dot-class bodies `x * x` and `x` over Float64, else eight
+/// scalar lanes over the row combined by a fixed tree. `target` receives it;
+/// `renderF` renders the cell body with the read bound to a name.
+let compactRowPartialLines (elemCpp: string) (accCpp: string) (body: IRExpr) (renderF: IRExpr -> string -> string)
+                           (target: string) (ptr: string) (cnt: string) : string list =
+    let rv = Blade.OrbitFold.readVarId
+    let isRead (e: IRExpr) = match e with IRVar (id, _) -> id = rv | _ -> false
+    let f64 = elemCpp = "double" && accCpp = "double"
+    match body with
+    | IRBinOp (_, IRMul, a, b, _) when f64 && isRead a && isRead b ->
+        (foldLanesUsedCell ()).Value <- true
+        [ $"{target} = blade_fold::sq<double, 8>({ptr}, {cnt});" ]
+    | e when f64 && isRead e ->
+        (foldLanesUsedCell ()).Value <- true
+        [ $"{target} = blade_fold::sum<double, 8>({ptr}, {cnt});" ]
+    | _ ->
+        let fx = renderF body "__crx"
+        let lanes = [ 0 .. 7 ]
+        [ yield "{"
+          yield $"    {accCpp} " + (lanes |> List.map (fun l -> $"__crl{l} = {accCpp}(0)") |> String.concat ", ") + ";"
+          yield $"    const {elemCpp}* BLADE_RESTRICT __crp = {ptr};"
+          yield $"    const size_t __crn = {cnt};"
+          yield "    size_t __crk = 0;"
+          yield "    for (; __crk + 8 <= __crn; __crk += 8) {"
+          for l in lanes do
+              yield $"        {{ const {elemCpp} __crx = __crp[__crk + {l}]; __crl{l} = __crl{l} + ({fx}); }}"
+          yield "    }"
+          yield $"    for (; __crk < __crn; __crk++) {{ const {elemCpp} __crx = __crp[__crk]; __crl0 = __crl0 + ({fx}); }}"
+          yield $"    {target} = ((__crl0 + __crl1) + (__crl2 + __crl3)) + ((__crl4 + __crl5) + (__crl6 + __crl7));"
+          yield "}" ]
+
+/// Compact row-class scheduling (Blade.Optimize.planCompactRowClasses, B3):
+/// the producer nest's CompactRowEpilogue. The orbit plan is resolved HERE,
+/// from the consumer's fold with the recogniser the consumer's orbit dispatch
+/// uses, so both sites see the same plan; None (with a decline record when
+/// the walk is a recognised one) when the plan is not the rank-2 one this
+/// producer feeds, or its body may abort.
+let buildCompactRowEpilogue (plan: Blade.Optimize.CompactRowPlan) (producer: LoopNestCodeGen)
+                            (names: Map<IRId, string>) : CompactRowEpilogue option =
+    let decline (why: string) =
+        recordCodegenDecision "compact-row-classes" "" (Blade.Effects.Declined why) [ $"orbit fold of `{plan.ProducerName}`" ]
+        plan.DeclinedCpp.Value <- true
+        None
+    let sourceName id = Map.tryFind id names |> Option.defaultValue $"__v{id}"
+    match Blade.OrbitFold.recognise id resolveCallable sourceName plan.ConsumerComp plan.ConsumerKernel plan.ConsumerSeed with
+    | Blade.OrbitFold.NotOrbit -> decline "the consumer is not an orbit-class walk over the producer"
+    | Blade.OrbitFold.Declined why when why.StartsWith "BLADE_FP_REPRO" ->
+        decline "compact row classes: repro build keeps the ordered walk"
+    | Blade.OrbitFold.Declined why -> decline $"compact row classes: the orbit-class fold is not taken ({why})"
+    | Blade.OrbitFold.Orbit p ->
+    if p.SourceId <> plan.ProducerId || p.Rank <> 2 then decline "the orbit fold walks another array"
+    elif Blade.Optimize.CompactRowTable.bodyMayFail p.Body then
+        decline "the cell body may abort (an abort would move ahead of later produced rows)"
+    elif not (Blade.Optimize.CompactRowTable.bodyDominated plan Blade.OrbitFold.readVarId p.Body) then
+        decline "the cell body reads a value that is not bound before the producer (the epilogue runs at the producer)"
+    else
+    match producer.Bindings with
+    | [ _; _ ] ->
+        let accCpp = primTypeToCpp p.AccTy
+        let elemCpp = primTypeToCpp p.ElemTy
+        let n = p.Extent
+        let tag = sanitizeCppName producer.OutputName
+        let arrName k = $"__crc{k}_{tag}"
+        let renderF (body: IRExpr) (xName: string) =
+            exprToCpp (Map.add Blade.OrbitFold.readVarId xName names) body
+        let negBody = Blade.OrbitFold.negatedBody p
+        let body (row: string) (i: string) : string list =
+            if p.Strict then
+                let len = $"(size_t){n} - 1 - {i}"
+                [ yield! compactRowPartialLines elemCpp accCpp p.Body renderF $"{arrName 0}[{i}]" row len
+                  if p.AccCount = 2 then
+                      yield! compactRowPartialLines elemCpp accCpp negBody renderF $"{arrName 1}[{i}]" row len ]
+            else
+                // weights [1; 2]: class 0 the diagonal cell, class 1 the rest
+                let fd = renderF p.Body "__crx"
+                [ yield $"{{ const {elemCpp} __crx = {row}[0]; {arrName 0}[{i}] = ({fd}); }}"
+                  yield! compactRowPartialLines elemCpp accCpp p.Body renderF $"{arrName 1}[{i}]" $"{row} + 1" $"(size_t){n} - 1 - {i}" ]
+        let names = [ for k in 0 .. p.AccCount - 1 -> arrName k ]
+        Some { Prelude = [ $"// compact row classes (Blade.Optimize.planCompactRowClasses): the orbit fold's {p.AccCount} class partial(s) of each packed row of `{plan.ProducerName}`, computed from zero right after the row is stored" ]
+                         @ (names |> List.map (fun a -> $"{accCpp}* {a} = new {accCpp}[{n}];"))
+               Body = body
+               OnEmitted = (fun () -> plan.EmittedCpp.Value <- Some names)
+               OnDeclined = (fun () -> plan.DeclinedCpp.Value <- true) }
+    | _ -> decline "the producer is not a rank-2 nest"
 
 let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (builder: IRBuilder) : string list =
     let ind = indentStr ctx
@@ -3703,6 +3789,11 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                 // (recorded below) and the consumer keeps the two-pass fold.
                 | true, plan when (match plan.Form with Blade.Optimize.ChunkFold -> true | _ -> false) ->
                     { codeGen with FlatEpilogue = buildFlatEpilogue plan codeGen tempCtx.VarNames builder }
+                | _ -> codeGen
+            // Compact row classes: the same hand-over for a compact producer.
+            let codeGen =
+                match (compactRowPendingCell ()).TryGetValue name with
+                | true, plan -> { codeGen with CompactRowEpilogue = buildCompactRowEpilogue plan codeGen tempCtx.VarNames }
                 | _ -> codeGen
             let flatEpiDeclined () =
                 match (hotRowPendingCell ()).TryGetValue name, codeGen.FlatEpilogue with

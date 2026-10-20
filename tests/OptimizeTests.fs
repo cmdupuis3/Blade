@@ -794,6 +794,11 @@ let private withGate (var: string) (value: string) (f: unit -> 'a) : 'a =
     System.Environment.SetEnvironmentVariable(var, value)
     try f () finally System.Environment.SetEnvironmentVariable(var, prior)
 
+/// The rank-2 orbit-class PASS itself, for the pins that read it: compact
+/// row classes (BLADE_COMPACT_ROW_CLASSES) would otherwise replace it behind
+/// the producer.
+let private orbitPass (f: unit -> 'a) : 'a = withGate "BLADE_COMPACT_ROW_CLASSES" "0" f
+
 // ---------------------------------------------------------------------------
 // Hot-row fold scheduling (Blade.Optimize.planHotRowFolds; bench review M13).
 // The values are pinned by corpus loops/474-476; these pins read the emission
@@ -1081,6 +1086,188 @@ let private cepLlvmDecisionCase (name: string) (src: string) (want: Blade.Effect
             resultLine Fail name ($"wanted {describe}; saw: {shown}")
             false
 
+// Compaction fusion (Blade.Optimize.planCompactionFusion; round 2 item B4,
+// bench maskagg). Values are pinned by corpus index-types/515-518; these pins
+// read the emission (the count in the mask pass, ONE fill+gather pass, no
+// `y * y` pool, the fold form per build) and the decision record of each
+// decline. The licensed form is invisible to the repro-pinned differentials,
+// so it is pinned here.
+// ---------------------------------------------------------------------------
+
+let private compactionSrc =
+    "type Ix = Idx<1003>\n"
+    + "let x = method_for(range<Ix>) <@> lambda(i) -> Float64((Int64(i) * 37) % 11) - 4.0 |> compute\n"
+    + "let keep = mask(x, lambda(v) -> v > 1.0)\n"
+    + "let y = compound(x, keep)\n"
+    + "let checksum = reduce(y * y, (+)) + Float64(extents(y))\n"
+
+/// Licensed (the suite's default build): the mask pass counts, one fused
+/// fill+gather pass, the index adopts the filled table, no square pool, and
+/// the fold is the K-lane self-dot over `y.data`.
+let private compactionFusedLicensed () =
+    let name = "compaction_fusion_one_pass_licensed_sq_over_buffer"
+    match cppOfSource name compactionSrc with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let checks =
+            [ "no y*y pool", not (cpp.Contains "new double[y.idx->cardinality")
+              "count in the mask pass", cpp.Contains "keep__count += (size_t)__keep_k;"
+              "exactly one fill+gather pass", countOf "y_q += (size_t)y_idx_pool[y_i];" cpp = 1
+              "no gather by position", not (cpp.Contains "rank_to_tuple[y_q]")
+              "no counting constructor", not (cpp.Contains "new compound_index_t<1>(\"y_idx\", y_idx_grid, y_idx_pool)")
+              "m + 1 cells in both buffers", cpp.Contains "new compound_index_t<1>::IDX[keep__count + 1]" && cpp.Contains "new double[keep__count + 1]"
+              "adopting constructor", cpp.Contains "new compound_index_t<1>(\"y_idx\", y_idx_grid, keep__count, y_pos)"
+              "K-lane self-dot over y.data", cpp.Contains "blade_fold::sq<double, 8>(y.data, y.idx->cardinality)"
+              "BL8003 guard at the fold", cpp.Contains "if (y.idx->cardinality == 0) { blade_rt::panic(\"BL8003\"" ]
+        match checks |> List.filter (snd >> not) with
+        | [] -> resultLine Pass name "count in the mask pass, one fused pass, no square pool, sq<double, 8> over y.data"; true
+        | bad -> resultLine Fail name ("missing: " + (bad |> List.map fst |> String.concat ", ")); false
+
+/// BLADE_FP_REPRO=1: the serial chain is fed inside the compaction pass (peel
+/// the first kept square, then the chain over completed cells); the fold's
+/// site keeps the empty check and returns the accumulator.
+let private compactionFusedRepro () =
+    let name = "compaction_fusion_repro_chain_fed_in_pass"
+    match withGate "BLADE_FP_REPRO" "1" (fun () -> cppOfSource name compactionSrc) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let pass = cpp.IndexOf "y_q += (size_t)y_idx_pool[y_i];"
+        let peel = cpp.IndexOf "y__fold0 = __t;"
+        let step = cpp.IndexOf "y__fold0 = __wrap_"
+        let ret = cpp.IndexOf "return y__fold0;"
+        let checks =
+            [ "no y*y pool", not (cpp.Contains "new double[y.idx->cardinality")
+              "one fused pass", countOf "y_q += (size_t)y_idx_pool[y_i];" cpp = 1
+              "chain only over completed cells", cpp.Contains "for (; y_f < y_q; y_f++)"
+              "peel, then the chain, inside the pass, before the fold reads it", pass >= 0 && peel > pass && step > peel && ret > step
+              "products rounded before the add", countOf "BLADE_FOLD_ROUND(__t);" cpp = 2
+              "no K-lane form", not (cpp.Contains "blade_fold::sq<double")
+              "BL8003 guard at the fold", cpp.Contains "if (y.idx->cardinality == 0) { blade_rt::panic(\"BL8003\"" ]
+        match checks |> List.filter (snd >> not) with
+        | [] -> resultLine Pass name "peeled chain fed per block inside the fused pass; the fold returns it behind the empty check"; true
+        | bad -> resultLine Fail name ("missing: " + (bad |> List.map fst |> String.concat ", ")); false
+
+/// BLADE_COMPACTION_FUSION=0: the old passes (count in the constructor, the
+/// gather by position, the `y * y` pool).
+let private compactionGateOff () =
+    let name = "compaction_fusion_gate_off_keeps_old_passes"
+    match withGate "BLADE_COMPACTION_FUSION" "0" (fun () -> cppOfSource name compactionSrc) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        if cpp.Contains "new double[y.idx->cardinality" && cpp.Contains "rank_to_tuple[y_q]"
+           && cpp.Contains "new compound_index_t<1>(\"y_idx\", y_idx_grid, y_idx_pool)"
+           && not (cpp.Contains "keep__count") then
+            resultLine Pass name "counting constructor, gather by position and the square pool, as before"
+            true
+        else
+            resultLine Fail name "the gate-off emission is not the old pass structure"
+            false
+
+/// Declines: the mask read between the mask and the compound; a predicate the
+/// planner cannot judge total; a rank-2 mask; a fold kernel that asks for a
+/// thread team (Path B); a map that is not the self-product.
+let private compactionMaskReadBetweenSrc =
+    compactionSrc.Replace("let y = compound(x, keep)\n", "let k0 = keep(0)\nlet y = compound(x, keep)\n")
+let private compactionIntrinsicPredSrc =
+    compactionSrc.Replace("lambda(v) -> v > 1.0", "lambda(v) -> sqrt(v + 4.0) > 2.0")
+let private compactionRank2Src =
+    "type R = Idx<3>\n"
+    + "type C = Idx<4>\n"
+    + "let a = method_for(range<R, C>) <@> lambda(i, j) -> Float64(Int64(i) + Int64(j)) |> compute\n"
+    + "let km = mask(a, lambda(v) -> v > 2.0)\n"
+    + "let z = compound(a, km)\n"
+let private compactionOmpFoldSrc =
+    compactionSrc.Replace("reduce(y * y, (+))", "reduce(y * y, lambda(p, q) where omp -> p + q)")
+let private compactionNotSquareSrc =
+    compactionSrc.Replace("reduce(y * y, (+))", "reduce(y * 2.0, (+))")
+
+/// Writes: a named map materialized, then a mutating call on y, then the
+/// fold of the map (B4a must keep the snapshot); and a write through an alias
+/// between the compaction and the fold (B4c must not feed the chain early).
+let private compactionMutatedSnapshotSrc =
+    "type Ix = Idx<9>\n"
+    + "let x = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i)) |> compute\n"
+    + "let keep = mask(x, lambda(v) -> v > 1.5)\n"
+    + "let mut y = compound(x, keep)\n"
+    + "function overwrite(a: mut Array<Float64 like CompoundIdx<keep>>) -> Int64 = {\n"
+    + "    a(2) = 50.0\n"
+    + "    1\n"
+    + "}\n"
+    + "let s = {\n"
+    + "    let yy = y * y |> compute\n"
+    + "    let changed = overwrite(y)\n"
+    + "    reduce(yy, (+))\n"
+    + "}\n"
+let private compactionAliasWriteSrc =
+    "type Ix = Idx<9>\n"
+    + "let x = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i)) |> compute\n"
+    + "let keep = mask(x, lambda(v) -> v > 1.5)\n"
+    + "let y = compound(x, keep)\n"
+    + "function overwrite(a: mut Array<Float64 like CompoundIdx<keep>>) -> Int64 = {\n"
+    + "    a(2) = 50.0\n"
+    + "    1\n"
+    + "}\n"
+    + "let mut alias = y\n"
+    + "let changed = overwrite(alias)\n"
+    + "let s = reduce(y * y, (+))\n"
+
+let private compactionAliasWriteNoInPass () =
+    let name = "compaction_fusion_alias_write_keeps_fold_at_its_site"
+    match withGate "BLADE_FP_REPRO" "1" (fun () -> cppOfSource name compactionAliasWriteSrc) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        if not (cpp.Contains "y__fold0") && countOf "y_q += (size_t)y_idx_pool[y_i];" cpp = 1
+           && not (cpp.Contains "new double[y.idx->cardinality") then
+            resultLine Pass name "fused compaction, no in-pass chain, the fold reads y at its own site"
+            true
+        else
+            resultLine Fail name "an in-pass chain (or the square pool) survived a write through an alias"
+            false
+
+// ---------------------------------------------------------------------------
+// Compact row classes (Blade.Optimize.planCompactRowClasses; round 2 item B3,
+// bench pairkernel). Values are pinned by corpus symmetry/129-130; the
+// team-size determinism by the cli block. These pins read the emission and
+// the decision record (codegen half included).
+// ---------------------------------------------------------------------------
+
+let private compactRowSrc =
+    "type Pts = Idx<37>\n"
+    + "type Dim = Idx<3>\n"
+    + "let pts = method_for(range<Pts>, range<Dim>) <@> lambda(i, d) -> Float64((Int64(i) * 7 + Int64(d) * 3) % 11) - 5.0 |> compute\n"
+    + "let k = method_for(pts, pts) <@> lambda(a: Array<Float64 like Dim>, b: Array<Float64 like Dim>) where comm(a, b), omp(a: 1) -> {\n"
+    + "    let dx = a((0 : Dim)) - b((0 : Dim))\n"
+    + "    dx * dx + a((2 : Dim)) * b((2 : Dim))\n"
+    + "} |> compute\n"
+    + "let ss = reduce(method_for(range<Pts>) <@> lambda(i) -> reduce(method_for(range<Pts>) <@> lambda(j) -> k(i, j) * k(i, j), (+)), lambda(u, v) where omp -> u + v, 0.0)\n"
+
+/// Decisions of lowering AND C++ emission (the compact row-class outcome is
+/// an emission decision: the orbit plan resolves there).
+let private codegenDecisionsOf (src: string) : Result<Blade.Effects.Decision list, string> =
+    Blade.Effects.Decisions.start ()
+    let r =
+        match lower src with
+        | Error e -> Error ($"lower: {e}")
+        | Ok ir ->
+            CodeGen.genSelfContainedProgramFromIR ir "decisions" |> ignore
+            Ok (Blade.Effects.Decisions.drain ())
+    Blade.Effects.Decisions.drain () |> ignore
+    r
+
+let private codegenDecisionCase (name: string) (src: string) (rule: string) (want: Blade.Effects.Decision -> bool) (describe: string) =
+    match codegenDecisionsOf src with
+    | Error e -> resultLine Fail name e; false
+    | Ok ds ->
+        let mine = ds |> List.filter (fun d -> d.Rule = rule)
+        if mine |> List.exists want then
+            resultLine Pass name ($"{mine.Length} `{rule}` decision(s); {describe}")
+            true
+        else
+            let seen = mine |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+            let shown = if seen = "" then "no decisions" else seen
+            resultLine Fail name ($"wanted {describe}; saw: {shown}")
+            false
+
 /// A row kernel reading a binding made between the producer and the fold
 /// (here: a function body; the nested-block twin is corpus loops/484).
 let private hotRowLateCaptureSrc =
@@ -1210,6 +1397,70 @@ let private cepDecisionCases () =
       withGate "BLADE_FP_REPRO" "1" (fun () ->
         cepLlvmDecisionCase "decision_cell_epilogue_llvm_recursion_applied" cepRecurSrc
             (fun d -> applied d && d.Evidence |> List.exists (fun e -> e.Contains "llvm lane: row chain interleave")) "applied: the llvm recursion chain") ]
+/// The licensed threaded build: the class partials are written inside the
+/// producer's row loop, and there is no orbit pass (no per-thread `__opart`,
+/// no second team region).
+let private compactRowEmitted () =
+    let name = "compact_row_classes_partials_behind_each_row"
+    match cppOfSource name compactRowSrc with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let loop = cpp.IndexOf "for (size_t __i0 = 0; __i0 < 37; __i0++)"
+        let inner = cpp.IndexOf("__orow_k[__i1] =", max loop 0)
+        let d = cpp.IndexOf "__crc0_k[__i0] ="
+        let o = cpp.IndexOf "__crc1_k[__i0] = blade_fold::sq<double, 8>(__orow_k + 1, (size_t)37 - 1 - __i0);"
+        let combine = cpp.IndexOf "__oa1 = __oa1 + __crc1_k[__ori];"
+        let checks =
+            [ "partials inside the producer row loop, after the row", loop >= 0 && inner > loop && d > inner && o > d
+              "row-order combine after the producer", combine > o
+              "no per-thread orbit partials", not (cpp.Contains "__opart")
+              "no orbit team region", not (cpp.Contains "BLADE_OMP_PARALLEL_NUM_THREADS(__oT)")
+              "producer team kept", cpp.Contains "BLADE_OMP_PARALLEL_FOR_DYNAMIC"
+              "addition-only combine", cpp.Contains "const double __ot1 = __oa1 + __oa1;" ]
+        match checks |> List.filter (snd >> not) with
+        | [] -> resultLine Pass name "per-row diagonal/off-diagonal partials in the producer loop; row-order combine; no orbit pass"; true
+        | bad -> resultLine Fail name ("missing: " + (bad |> List.map fst |> String.concat ", ")); false
+
+/// BLADE_FP_REPRO=1: declined, the orbit walk keeps its order (no partials).
+let private compactRowReproDeclined () =
+    let name = "compact_row_classes_repro_keeps_the_ordered_walk"
+    match withGate "BLADE_FP_REPRO" "1" (fun () -> cppOfSource name compactRowSrc) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        if not (cpp.Contains "__crc0_k") then resultLine Pass name "no class partials under BLADE_FP_REPRO=1"; true
+        else resultLine Fail name "class partials emitted under BLADE_FP_REPRO=1"; false
+
+let private compactRowReaderBetweenSrc =
+    compactRowSrc.Replace("let ss = ", "let probe = k(3, 5)\nlet ss = ")
+
+/// A scalar bound between the producer and the fold, read by the cell body:
+/// the epilogue would read it before its binding -- declined at emission.
+let private compactRowLateScalarSrc =
+    compactRowSrc
+        .Replace("let ss = ", "let scale = reduce(reduce(pts, (+)), (+)) / 4.0\nlet ss = ")
+        .Replace("k(i, j) * k(i, j)", "scale * k(i, j)")
+
+/// A seed that writes the producer through a `mut` parameter: declined.
+let private compactRowWritingSeedSrc =
+    compactRowSrc
+        .Replace("let k = ", "let mut k = ")
+        .Replace("let ss = ", "function poke(a: mut Array<Float64 like SymIdx<2, Pts>>) -> Float64 = {\n    a(0, 1) = 1000.0\n    0.0\n}\nlet ss = ")
+        .Replace("lambda(u, v) where omp -> u + v, 0.0)", "lambda(u, v) where omp -> u + v, poke(k))")
+
+/// Path B refusal keeps the square pool (the materialized route owns the omp
+/// census); serial admission is compactionFusedLicensed above.
+let private compactionOmpFoldKeepsPool () =
+    let name = "compaction_fusion_path_b_fold_keeps_materialized_route"
+    match cppOfSource name compactionOmpFoldSrc with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        if cpp.Contains "new double[" && not (cpp.Contains "blade_fold::sq<double, 8>(y.data")
+           && countOf "y_q += (size_t)y_idx_pool[y_i];" cpp = 1 then
+            resultLine Pass name "the compaction is fused, the omp fold keeps its materialized operand"
+            true
+        else
+            resultLine Fail name "expected a fused compaction with the omp fold over a materialized `y * y`"
+            false
 
 /// BLADE_CSE=0: the same program keeps both folds in its one body (2 in all),
 /// and the decision says why.
@@ -2020,18 +2271,23 @@ let private planCases () =
               "BLADE_OMP_THREADS=1: the serial vector tree over the whole sweep")))
       // The orbit-class fold (src/OrbitFold.fs; bench M4): the logical sum
       // over a compact pool, regrouped by orbit class under the licence.
+      // (the rank-2 orbit pass itself: compact row classes, which would
+      // replace it behind the producer, is held off for these pins)
+      orbitPass (fun () ->
       planCase "plan_orbit_fold_sym2_applied" (planOrbitSrc planOrbitSym2Body) "fold-form"
           (fun d -> applied d && evidenceMentioning "fold form: orbit-class fold (rank 2, 2 classes)" d && evidenceMentioning "weights 1/2" d)
-          "orbit-class fold, rank 2, weights 1/2"
+          "orbit-class fold, rank 2, weights 1/2")
+      orbitPass (fun () ->
       planCase "plan_orbit_fold_axes_spelling_applied" (planOrbitSrc "reduce(g, (+), axes = 2)") "fold-form"
           (fun d -> applied d && evidenceMentioning "orbit-class fold (rank 2" d)
-          "`reduce(g, (+), axes = 2)` is the same orbit-class fold"
+          "`reduce(g, (+), axes = 2)` is the same orbit-class fold")
       planCase "plan_orbit_fold_sym3_applied" planOrbitSym3Src "fold-form"
           (fun d -> applied d && evidenceMentioning "fold form: orbit-class fold (rank 3, 3 classes)" d && evidenceMentioning "weights 1/3/6" d)
           "orbit-class fold, rank 3, weights 1/3/6"
+      orbitPass (fun () ->
       planCase "plan_orbit_fold_antisym_even" planOrbitAntisymSrc "fold-form"
           (fun d -> applied d && evidenceMentioning "even kernel" d && evidenceMentioning "strict orbits weight 2" d)
-          "strict pool, even kernel, weight 2"
+          "strict pool, even kernel, weight 2")
       withGate "BLADE_FP_REPRO" "1" (fun () ->
           planCase "plan_orbit_fold_declined_repro" (planOrbitSrc planOrbitSym2Body) "fold-form"
               (declinedMentioning "BLADE_FP_REPRO=1") "BLADE_FP_REPRO=1 keeps the logical walk")
@@ -2052,24 +2308,24 @@ let private planCases () =
       // as a team over the first-coordinate rows -- in the fold-form line and
       // as an applied `omp` record -- and BLADE_OMP_THREADS=1 keeps the
       // serial pass with the census naming the knob.
-      withGate "BLADE_OMP_THREADS" null (fun () ->
+      orbitPass (fun () -> withGate "BLADE_OMP_THREADS" null (fun () ->
           planCase "plan_orbit_fold_threaded" (planOrbitSrc planOrbitSym2Body) "fold-form"
               (fun d -> applied d && evidenceMentioning "orbit-class fold (rank 2, 2 classes); thread team over the first-coordinate rows" d)
-              "the omp-licensed orbit fold threads its first-coordinate rows")
-      withGate "BLADE_OMP_THREADS" null (fun () ->
+              "the omp-licensed orbit fold threads its first-coordinate rows"))
+      orbitPass (fun () -> withGate "BLADE_OMP_THREADS" null (fun () ->
           planCase "plan_orbit_fold_threaded_omp_record" (planOrbitSrc planOrbitSym2Body) "omp"
               (fun d -> applied d && evidenceMentioning "orbit-class fold: first-coordinate rows" d)
-              "omp applied: the orbit fold's thread team")
-      withGate "BLADE_OMP_THREADS" "1" (fun () ->
+              "omp applied: the orbit fold's thread team"))
+      orbitPass (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () ->
           planCase "plan_orbit_fold_threads_suppressed" (planOrbitSrc planOrbitSym2Body) "fold-form"
               (fun d -> applied d && not (evidenceMentioning "thread team" d))
-              "BLADE_OMP_THREADS=1: the serial orbit pass")
-      withGate "BLADE_OMP_THREADS" "1" (fun () ->
+              "BLADE_OMP_THREADS=1: the serial orbit pass"))
+      orbitPass (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () ->
           planCase "plan_orbit_fold_threads_suppressed_census" (planOrbitSrc planOrbitSym2Body) "omp"
-              (declinedMentioning "BLADE_OMP_THREADS") "omp declined, naming BLADE_OMP_THREADS")
+              (declinedMentioning "BLADE_OMP_THREADS") "omp declined, naming BLADE_OMP_THREADS"))
       planCase "plan_orbit_fold_unlicensed_serial" planOrbitSym3Src "fold-form"
           (fun d -> applied d && not (evidenceMentioning "thread team" d)) "no omp request: the serial orbit pass"
-      (match withGate "BLADE_OMP_THREADS" null (fun () -> cppOfSource "plan_orbit_fold_threaded_cpp" (planOrbitSrc planOrbitSym2Body)) with
+      (match orbitPass (fun () -> withGate "BLADE_OMP_THREADS" null (fun () -> cppOfSource "plan_orbit_fold_threaded_cpp" (planOrbitSrc planOrbitSym2Body))) with
        | Error e -> resultLine Fail "orbit_fold_cpp_threaded_rows" e; false
        | Ok cpp ->
            // Each row finds its own pool offset (no running counter across
@@ -2260,6 +2516,52 @@ let runOptimizeTests () =
           cepRecurRepro ()
           cepGateOff ()
           yield! cepDecisionCases ()
+          // Compaction fusion (round 2 item B4).
+          compactionFusedLicensed ()
+          compactionFusedRepro ()
+          compactionGateOff ()
+          compactionOmpFoldKeepsPool ()
+          compactionAliasWriteNoInPass ()
+          // Compact row classes (round 2 item B3).
+          compactRowEmitted ()
+          compactRowReproDeclined ()
+          codegenDecisionCase "decision_compact_row_classes_applied" compactRowSrc "compact-row-classes"
+              (fun d -> applied d && d.Evidence |> List.exists (fun e -> e.Contains "compact row classes (2 classes), per-row partials, combined in row order"))
+              "applied: compact row classes (2 classes)"
+          withGate "BLADE_FP_REPRO" "1" (fun () ->
+              codegenDecisionCase "decision_compact_row_classes_declined_repro" compactRowSrc "compact-row-classes"
+                  (declinedMentioning "repro build keeps the ordered walk") "declined: repro build keeps the ordered walk")
+          withGate "BLADE_COMPACT_ROW_CLASSES" "0" (fun () ->
+              decisionCase "decision_compact_row_classes_declined_gate" compactRowSrc "compact-row-classes"
+                  (declinedMentioning "disabled by BLADE_COMPACT_ROW_CLASSES") "declined: disabled by BLADE_COMPACT_ROW_CLASSES")
+          decisionCase "decision_compact_row_classes_declined_reader" compactRowReaderBetweenSrc "compact-row-classes"
+              (declinedMentioning "between the producer and the fold") "declined: the producer is read before the fold"
+          codegenDecisionCase "decision_compact_row_classes_declined_late_scalar" compactRowLateScalarSrc "compact-row-classes"
+              (declinedMentioning "not bound before the producer") "declined: the cell body reads a scalar bound after the producer"
+          decisionCase "decision_compact_row_classes_declined_writing_seed" compactRowWritingSeedSrc "compact-row-classes"
+              (declinedMentioning "the fold itself may write") "declined: the fold's seed writes the producer"
+          decisionCase "decision_compaction_fold_declined_write_after_map" compactionMutatedSnapshotSrc "compaction-fusion"
+              (fun d -> d.Subject = "s" && declinedMentioning "may write" d) "fold declined: a write between the map and the fold"
+          decisionCase "decision_compaction_fold_alias_write_not_fed" compactionAliasWriteSrc "compaction-fusion"
+              (fun d -> d.Subject = "s" && applied d && d.Evidence |> List.exists (fun e -> e.Contains "does not feed it"))
+              "fold applied at its site, not fed in the compaction pass"
+          decisionCase "decision_compaction_applied" compactionSrc "compaction-fusion"
+              (fun d -> applied d && d.Subject = "y") "compaction-fusion applied to y"
+          decisionCase "decision_compaction_fold_applied" compactionSrc "compaction-fusion"
+              (fun d -> applied d && d.Subject = "checksum") "compaction-fusion applied to the checksum fold"
+          withGate "BLADE_COMPACTION_FUSION" "0" (fun () ->
+              decisionCase "decision_compaction_declined_gate" compactionSrc "compaction-fusion"
+                  (declinedMentioning "disabled by BLADE_COMPACTION_FUSION") "declined: disabled by BLADE_COMPACTION_FUSION")
+          decisionCase "decision_compaction_declined_mask_read_between" compactionMaskReadBetweenSrc "compaction-fusion"
+              (declinedMentioning "between the mask and the compound") "declined: the mask is read between mask and compound"
+          decisionCase "decision_compaction_declined_predicate" compactionIntrinsicPredSrc "compaction-fusion"
+              (declinedMentioning "not a pure, total scalar function") "declined: the predicate is not judged pure and total"
+          decisionCase "decision_compaction_declined_rank2" compactionRank2Src "compaction-fusion"
+              (declinedMentioning "rank-1 compaction only") "declined: a rank-2 mask"
+          decisionCase "decision_compaction_fold_declined_path_b" compactionOmpFoldSrc "compaction-fusion"
+              (fun d -> d.Subject = "checksum" && declinedMentioning "thread team" d) "fold declined: a `where omp` fold kernel (Path B)"
+          decisionCase "decision_compaction_fold_declined_not_square" compactionNotSquareSrc "compaction-fusion"
+              (fun d -> d.Subject = "checksum" && declinedMentioning "self-product" d) "fold declined: the map is not the self-product"
           scalarCaptureNoLongerPinsSource ()
           // Partial sparse reads: every let-bound gather freed by its own
           // producer's teardown, the escaping ones spared.

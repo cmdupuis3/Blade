@@ -1,0 +1,15 @@
+// TEST: Compaction fusion keeps the kept positions: a non-kept key aborts (aborts)
+// Under compaction fusion the kept-position table is filled by the same pass
+// that gathers the values (compound_index_t<1>'s adopting constructor), and
+// positions are ALWAYS built: a keyed read `y(k)` is still a binary search
+// over the source positions, and a position the mask rejected is BL8006 in
+// every lane -- after the fused fold has run.
+type Ix = Idx<1003>
+let x = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i)) |> compute
+let keep = mask(x, lambda(v) -> v > 499.5)
+let y = compound(x, keep)
+let checksum = reduce(y * y, (+)) + Float64(extents(y))
+let ok = y(700)
+let bad = y(400)
+// ABORT: BL8006
+// ABORT: a key outside the sparse key set

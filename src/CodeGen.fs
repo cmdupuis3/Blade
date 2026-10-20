@@ -346,9 +346,14 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             (match Blade.Optimize.HotRowTable.tryProducer id with
              | Some plan -> (hotRowPendingCell ()).[varName] <- plan
              | None -> ())
+            (match Blade.Optimize.CompactRowTable.tryProducer id with
+             | Some plan -> plan.EmittedCpp.Value <- None; plan.DeclinedCpp.Value <- false; (compactRowPendingCell ()).[varName] <- plan
+             | None -> ())
             let code =
                 try genApplyCombinator bodyCtx varName info builder
-                finally (hotRowPendingCell ()).Remove varName |> ignore
+                finally
+                    (hotRowPendingCell ()).Remove varName |> ignore
+                    (compactRowPendingCell ()).Remove varName |> ignore
             currentNames <- Map.add id varName currentNames
             code
         | IRCompute (IRComposeApply _) ->

@@ -3980,6 +3980,36 @@ and private bindNamed (c: Ctx) (id: IRId) (name: string) (declTy: IRType) (value
         (match declTy with
          | IRTGroupKeys _ -> emitGroupKeysBinding c id keys declTy
          | _ -> refuse "a group_keys binding whose regime type is unavailable")
+    // Compaction fusion (Blade.Optimize.planCompactionFusion): a planned mask
+    // counts its kept cells in its own pass (B4b; emitCompoundInit then skips
+    // the count pass), and the lifted `y * y` of a planned fold stays a
+    // PRODUCER (B4a): its one reader, the fold, runs the self-product over
+    // `y`'s pool cell by cell -- no square pool.
+    | IRMask (arrExpr, predExpr) when (match Blade.Optimize.CompactionTable.tryMask id with
+                                       | Some plan -> tryBindCountedMask c id name plan arrExpr predExpr
+                                       | None -> false) -> ()
+    | IRCompute _ when (Blade.Optimize.CompactionTable.tryFoldMap id).IsSome
+                       && (match peelCompute value with IRApplyCombinator _ -> true | _ -> false) ->
+        bindNamed c id name declTy (peelCompute value)
+    // Compact row classes (Blade.Optimize.planCompactRowClasses): the planned
+    // compact PRODUCER fills its pool row by row and stores each packed row's
+    // orbit-class partials right behind it; the planned CONSUMER combines
+    // them in row order. Both fall through when the lane cannot take it.
+    | IRCompute _ when (match peelCompute value with
+                        | IRApplyCombinator pinfo ->
+                            (match Blade.Optimize.CompactRowTable.tryProducer id with
+                             | Some plan -> tryBindCompactRowProducer c id name plan pinfo
+                             | None -> false)
+                        | _ -> false) -> ()
+    | IRReduceCompute _ when (match Blade.Optimize.CompactRowTable.tryConsumer id with
+                              | Some plan -> plan.EmittedLlvm.Value.IsSome
+                              | None -> false) ->
+        let plan = (Blade.Optimize.CompactRowTable.tryConsumer id).Value
+        match compactRowConsumer c plan with
+        | Some v ->
+            let target = match scalarTyOf declTy with Some t when t <> ScVoid -> t | _ -> v.Ty
+            bindScalar c id name (coerce c target v)
+        | None -> refuse "compact row classes: the consumer's orbit plan no longer matches its producer"
     // Hot-row fold scheduling (Blade.Optimize.planHotRowFolds): the planned
     // PRODUCER fills its pool row by row and runs the consumer's row map on
     // each row as it completes; the planned CONSUMER folds those row sums.
@@ -4073,6 +4103,134 @@ and private publishBinding (c: Ctx) (id: IRId) : unit =
 
 and private bindLet (c: Ctx) (id: IRId) (value: IRExpr) : unit =
     bindNamed c id "" (typeOf value) value
+
+/// The compact row-class PRODUCER (Blade.Optimize.planCompactRowClasses, B3;
+/// the C++ lane's CompactRowEpilogue twin): the rank-2 compact pool is filled
+/// one packed row at a time -- the serial triangle's cells, in pool order,
+/// from the same per-cell closure the ordinary materialize runs -- and right
+/// after each row its orbit-class partials are computed from zero (the fold's
+/// `+`, with its licence flags) and stored into one rank-1 pool per class.
+/// The orbit plan is the one the consumer's fold yields (same recogniser,
+/// same inputs). False -- nothing emitted, nothing published -- for a walk
+/// the orbit fold does not take, a body that may abort, a tile-dispatched
+/// producer, or a shape other than the rank-2 group.
+and private tryBindCompactRowProducer (c: Ctx) (id: IRId) (name: string) (plan: Blade.Optimize.CompactRowPlan) (pinfo: ApplyInfo) : bool =
+    plan.EmittedLlvm.Value <- None
+    let srcName i = match Map.tryFind i c.ModuleNames with Some n -> n | None -> $"__v{i}"
+    match Blade.OrbitFold.recognise (fun e -> e) resolveCallable srcName plan.ConsumerComp plan.ConsumerKernel plan.ConsumerSeed with
+    | Blade.OrbitFold.Orbit p when p.SourceId = id && p.Rank = 2 && not (Blade.Optimize.CompactRowTable.bodyMayFail p.Body)
+                                   && Blade.Optimize.CompactRowTable.bodyDominated plan Blade.OrbitFold.readVarId p.Body ->
+        (match scalarTyOf (IRTScalar p.AccTy) with
+         | Some accTy when accTy = ScF64 || accTy = ScI64 ->
+             let a = applyToArr c pinfo
+             let tiled = (match syrkCandidates.TryGetValue a with | true, _ -> true | _ -> false) || (match rowTileCandidates.TryGetValue a with | true, _ -> true | _ -> false)
+             (match a.Src, soleSimplexR a.Groups with
+              | (AVirt _ | AVirtFlat _), Some (2, n, strict) when not tiled && n = p.Extent && strict = p.Strict ->
+                  let fold = (List.last p.Levels).Fold
+                  let licensed = foldFmfDecorable fold
+                  let negBody = Blade.OrbitFold.negatedBody p
+                  let ptr = allocPool c a.Elem (string (shapeCells a.Groups))
+                  let parts = [ for _ in 1 .. p.AccCount -> allocPool c accTy (string n) ]
+                  let evalAt (body: IRExpr) (v: Val) : Val =
+                      let slot = allocaOf c (llTy v.Ty)
+                      ln c ($"store {(llTy v.Ty)} {v.Reg}, ptr {slot}")
+                      let rv = Blade.OrbitFold.readVarId
+                      let saved = match c.Slots.TryGetValue rv with | true, s -> Some s | _ -> None
+                      c.Slots.[rv] <- (slot, v.Ty)
+                      let res = coerce c accTy (emitExpr c body)
+                      (match saved with
+                       | Some s -> c.Slots.[rv] <- s
+                       | None -> c.Slots.Remove rv |> ignore)
+                      res
+                  let zero = coerce c accTy (emitExpr c (if accTy = ScF64 then IRLit (IRLitFloat 0.0) else IRLit (IRLitInt 0L)))
+                  let s = if strict then 1L else 0L
+                  emitCountedLoop c n (fun i ->
+                      let rb = emitRowBase2 c n strict i
+                      let len = i64Bin c "sub" (string (n - s)) i
+                      emitCountedLoopTo c len (fun q ->
+                          let v = coerce c a.Elem (readCell c a [ { Reg = i; Ty = ScI64 }; { Reg = q; Ty = ScI64 } ])
+                          storeCell c a.Elem (gepCell c a.Elem ptr (i64Add c rb q)) v)
+                      // The row's partial over cells [from, len), from zero.
+                      let rowSum (body: IRExpr) (from: string) (dst: string) =
+                          let acc = allocaOf c (llTy accTy)
+                          ln c ($"store {(llTy accTy)} {zero.Reg}, ptr {acc}")
+                          let trips = if from = "0" then len else i64Bin c "sub" len from
+                          emitCountedLoopTo c trips (fun k ->
+                              let x = loadCell c a.Elem (gepCell c a.Elem ptr (i64Add c rb (i64Add c from k)))
+                              let f = evalAt body x
+                              let cur = loadSlot c acc accTy
+                              let next = withFoldFmf c licensed (fun () -> coerce c accTy (applyKernel c fold [ KScalar cur; KScalar f ]))
+                              ln c ($"store {(llTy accTy)} {next.Reg}, ptr {acc}"))
+                          storeCell c accTy (gepCell c accTy dst i) (loadSlot c acc accTy)
+                      if strict then
+                          rowSum p.Body "0" parts.[0]
+                          if p.AccCount = 2 then rowSum negBody "0" parts.[1]
+                      else
+                          let d = loadCell c a.Elem (gepCell c a.Elem ptr rb)
+                          storeCell c accTy (gepCell c accTy parts.[0] i) (evalAt p.Body d)
+                          rowSum p.Body "1" parts.[1])
+                  bindArray c id name { a with Src = APool ptr }
+                  plan.EmittedLlvm.Value <- Some parts
+                  true
+              | _ -> false)
+         | _ -> false)
+    | _ -> false
+
+/// The compact row-class CONSUMER: each class total is its rank-1 pool of row
+/// partials summed in ASCENDING ROW ORDER from zero (no licence flags), then
+/// the orbit plan's addition-only combine and outer seed (orbitCombineLlvm).
+and private compactRowConsumer (c: Ctx) (plan: Blade.Optimize.CompactRowPlan) : Val option =
+    let srcName i = match Map.tryFind i c.ModuleNames with Some n -> n | None -> $"__v{i}"
+    match Blade.OrbitFold.recognise (fun e -> e) resolveCallable srcName plan.ConsumerComp plan.ConsumerKernel plan.ConsumerSeed, plan.EmittedLlvm.Value with
+    | Blade.OrbitFold.Orbit p, Some parts when p.SourceId = plan.ProducerId && parts.Length = p.AccCount ->
+        (match scalarTyOf (IRTScalar p.AccTy), scalarTyOf (IRTScalar p.ElemTy) with
+         | Some accTy, Some elem ->
+             let fold = (List.last p.Levels).Fold
+             let zero = coerce c accTy (emitExpr c (if accTy = ScF64 then IRLit (IRLitFloat 0.0) else IRLit (IRLitInt 0L)))
+             let totals =
+                 parts |> List.map (fun pool ->
+                     let acc = allocaOf c (llTy accTy)
+                     ln c ($"store {(llTy accTy)} {zero.Reg}, ptr {acc}")
+                     emitCountedLoop c p.Extent (fun i ->
+                         let x = loadCell c accTy (gepCell c accTy pool i)
+                         let cur = loadSlot c acc accTy
+                         let next = withFoldFmf c false (fun () -> coerce c accTy (applyKernel c fold [ KScalar cur; KScalar x ]))
+                         ln c ($"store {(llTy accTy)} {next.Reg}, ptr {acc}"))
+                     loadSlot c acc accTy)
+             Some (orbitCombineLlvm c p elem accTy totals)
+         | _ -> None)
+    | _ -> None
+
+/// A planned mask (compaction fusion, B4b): the Bool presence pool exactly as
+/// the IRMask arm of emitArr materializes it -- one pass, pred(x[i]) stored --
+/// plus the count of kept cells taken in that same pass into an i64 slot the
+/// compound's emission reads (`CountLlvm`). False (nothing emitted, nothing
+/// published) for a source that is not one dense axis; the ordinary path
+/// then runs.
+and private tryBindCountedMask (c: Ctx) (id: IRId) (name: string) (plan: Blade.Optimize.CompactionPlan) (arrExpr: IRExpr) (predExpr: IRExpr) : bool =
+    plan.CountLlvm.Value <- None
+    match resolveCallable predExpr with
+    | Some cl when cl.Params.Length = 1 ->
+        let a = consumeArrOperand c arrExpr
+        (match a.Groups with
+         | [ GDense _ ] | [ GDynDense _ ] ->
+             let n = soleExtentOp a
+             let pool = allocPool c ScBool n
+             let cnt = allocaOf c "i64"
+             ln c ($"store i64 0, ptr {cnt}")
+             emitCountedLoopTo c n (fun i ->
+                 let bit = coerce c ScBool (applyKernel c cl [ KScalar (readCell c a [ { Reg = i; Ty = ScI64 } ]) ])
+                 storeCell c ScBool (gepCell c ScBool pool i) bit
+                 let w = freshReg c
+                 ln c ($"{w} = zext i1 {bit.Reg} to i64")
+                 let cur = loadSlot c cnt ScI64
+                 let next = i64Add c cur.Reg w
+                 ln c ($"store i64 {next}, ptr {cnt}"))
+             bindArray c id name { Elem = ScBool; Groups = a.Groups; Src = APool pool; RowOpBytes = 0L }
+             plan.CountLlvm.Value <- Some cnt
+             true
+         | _ -> refuse "mask over compact, ragged, or domain storage")
+    | _ -> false
 
 /// The hot-row PRODUCER (plan M13; the C++ lane's RowEpilogue twin): the
 /// dense producer is filled one leading-axis slice at a time -- the same
@@ -5902,8 +6060,65 @@ and private emitReduce (c: Ctx) (arrExpr: IRExpr) (kernelExpr: IRExpr) (initExpr
     // a named producer lazily here would re-run its kernel once per
     // consumer -- the units/065 double-pass, reintroduced backwards. `IRVar`
     // is the naming boundary, so it is the guard.
+    //
+    // COMPACTION FUSION (Blade.Optimize.planCompactionFusion): the fold of a
+    // planned `y * y` whose chain the compaction pass already fed (B4c) is
+    // the empty check at this declaration plus that accumulator; one it did
+    // not feed consumes the map let as a producer (B4a, bound unforced by
+    // bindNamed) -- the fold below then reads `y`'s pool through the map.
+    match arrExpr, initExpr with
+    | IRVar (mid, _), None when (match Blade.Optimize.CompactionTable.tryFoldMap mid with
+                                 | Some p ->
+                                     (match c.ArrSlots.TryGetValue p.CompoundId with
+                                      | true, { Src = APool _; Elem = ScF64; Groups = [ GCompact _ ] } -> true
+                                      | _ -> false)
+                                 | None -> false) ->
+        let p = (Blade.Optimize.CompactionTable.tryFoldMap mid).Value
+        let y = c.ArrSlots.[p.CompoundId]
+        let len = soleExtentOp y
+        let isEmpty = freshReg c
+        ln c ($"{isEmpty} = icmp eq i64 {len}, 0")
+        let lEmpty = freshLbl c "reduce.empty"
+        let lOk = freshLbl c "reduce.ok"
+        ln c (renderBr { Cond = isEmpty; IfTrue = lEmpty; IfFalse = lOk })
+        lbl c lEmpty
+        needShim c "blade_panic_at"
+        let msg = stringGlobal c "error[BL8003]: reduce: empty array, no reduction possible"
+        ln c (renderCall { Dest = None; RetTy = ScVoid; Callee = "@blade_panic_at"; Args = [ ScStr, msg ] @ declLocArgs c })
+        ln c "unreachable"
+        lbl c lOk
+        match p.EmittedLlvm.Value with
+        | Some acc -> loadSlot c acc ScF64
+        | None ->
+        // B4a alone: the unseeded fold over y's pool, the self-product
+        // emitted with NO fast-math flag -- it keeps the rounding a stored
+        // `y * y` cell had (the materialized map's store was a contraction
+        // boundary; an undecorated `fmul` cannot fuse into the add either).
+        // The fold's own `+` carries this build's licence flags, as before.
+        let cl =
+            match resolveCallable kernelExpr with
+            | Some cl when cl.Params.Length = 2 -> cl
+            | _ -> refuse "a compaction fold whose kernel does not resolve to a two-parameter callable"
+        let pool = match y.Src with APool ptr -> ptr | _ -> refuse "unreachable: compound not stored"
+        let square (j: string) : Val =
+            let v = loadCell c ScF64 (gepCell c ScF64 pool j)
+            let r = freshReg c
+            ln c (renderBin { Dest = r; Opcode = "fmul"; Flags = ""; Ty = ScF64; Lhs = v.Reg; Rhs = v.Reg })
+            { Reg = r; Ty = ScF64 }
+        let acc = allocaOf c (llTy ScF64)
+        let v0 = square "0"
+        ln c ($"store double {v0.Reg}, ptr {acc}")
+        let licensed = foldFmfDecorable cl
+        emitCountedLoopTo c (i64Bin c "sub" len "1") (fun k ->
+            let p1 = square (i64Add c k "1")
+            let cur = loadSlot c acc ScF64
+            let next = withFoldFmf c licensed (fun () -> coerce c ScF64 (applyKernel c cl [ KScalar cur; KScalar p1 ]))
+            ln c ($"store double {next.Reg}, ptr {acc}"))
+        loadSlot c acc ScF64
+    | _ ->
     let a =
         match arrExpr with
+        | IRVar (id, _) when (Blade.Optimize.CompactionTable.tryFoldMap id).IsSome -> emitArr c arrExpr
         // A name read MORE than once must force: `materializeExpr` upgrades
         // the slot so every reader shares one pool. A SOLE-READ name -- the
         // IRLift hoist that gives a kernel-body operand its buffer name,
@@ -6270,12 +6485,36 @@ and private emitOrbitFold (c: Ctx) (p: Blade.OrbitFold.OrbitPlan) (a: ArrVal) (a
                     let coord = i64Bin c "add" (i64Bin c "add" prev "1") k
                     gen (t + 1) coord (mults @ [ 1 ]))
         emitCountedLoop c n (fun i -> gen 2 i [ 1 ])
+    orbitCombineLlvm c p a.Elem accTy (accs |> List.map (fun s -> loadSlot c s accTy))
+
+/// The orbit plan's ADDITION-ONLY combine of the class totals `accVals` into
+/// `seed + total` (no `reassoc`, so LLVM may not rewrite `rep(S, w)` into a
+/// product it could contract). Shared by the orbit-class pass and the compact
+/// row-class consumer.
+and private orbitCombineLlvm (c: Ctx) (p: Blade.OrbitFold.OrbitPlan) (elem: Sc) (accTy: Sc) (accVals: Val list) : Val =
+    let fold = (List.last p.Levels).Fold
+    let evalAt (body: IRExpr) (v: Val) : Val =
+        let slot = allocaOf c (llTy v.Ty)
+        ln c ($"store {(llTy v.Ty)} {v.Reg}, ptr {slot}")
+        let rv = Blade.OrbitFold.readVarId
+        let saved = match c.Slots.TryGetValue rv with | true, s -> Some s | _ -> None
+        c.Slots.[rv] <- (slot, v.Ty)
+        let res = coerce c accTy (emitExpr c body)
+        (match saved with
+         | Some s -> c.Slots.[rv] <- s
+         | None -> c.Slots.Remove rv |> ignore)
+        res
+    let add (x: Val) (y: Val) : Val =
+        let saved = c.FoldFmf
+        c.FoldFmf <- false
+        try coerce c accTy (applyKernel c fold [ KScalar x; KScalar y ])
+        finally c.FoldFmf <- saved
     let rec combine (e: Blade.OrbitFold.Combine) : Val =
         match e with
-        | Blade.OrbitFold.CAcc k -> loadSlot c accs.[k] accTy
+        | Blade.OrbitFold.CAcc k -> accVals.[k]
         | Blade.OrbitFold.CZero ->
-            let z = emitExpr c (if a.Elem = ScF64 then IRLit (IRLitFloat 0.0) else IRLit (IRLitInt 0L))
-            evalAt p.Body (coerce c a.Elem z)
+            let z = emitExpr c (if elem = ScF64 then IRLit (IRLitFloat 0.0) else IRLit (IRLitInt 0L))
+            evalAt p.Body (coerce c elem z)
         | Blade.OrbitFold.CNeg x ->
             let v = combine x
             let d = freshReg c
@@ -6285,16 +6524,16 @@ and private emitOrbitFold (c: Ctx) (p: Blade.OrbitFold.OrbitPlan) (a: ArrVal) (a
         | Blade.OrbitFold.CAdd (x, y) ->
             let x' = combine x
             let y' = combine y
-            add false x' y'
+            add x' y'
         | Blade.OrbitFold.CRep (x, w) ->
             let b = combine x
             let mutable acc = b
             for dbl in Blade.OrbitFold.repSteps w do
-                acc <- add false acc (if dbl then acc else b)
+                acc <- add acc (if dbl then acc else b)
             acc
     let total = combine p.Total
     let seed = coerce c accTy (emitExpr c p.OuterSeed)
-    add false seed total
+    add seed total
 
 /// `reduce(<deferred computation>, op, init)` -- the FUSED terminal. One nest,
 /// no materialized array, and one accumulator PER FUSION LEAF: an `<&!>` tree
@@ -7063,6 +7302,105 @@ let private emitPrints (c: Ctx) (bindings: IRBinding list) : unit =
 /// but a dense axis, or a non-scalar element refuse here by name. Serial in
 /// every build -- a parallel prefix would be a different algorithm, and the
 /// kernel protocol (bench maskagg spec, M5) keeps compaction sequential.
+/// The FUSED rank-1 compaction (Blade.Optimize.planCompactionFusion, B4b/c;
+/// the C++ lane's genFusedCompaction): m (counted by the mask's own pass,
+/// tryBindCountedMask) sizes both pools at m + 1, and ONE pass over i
+/// ascending gathers `dst[q] = src[i]`, fills `pos[q] = i` and advances
+/// `q += keep[i]` -- branchless, stable; the last cell is the slack the
+/// unconditional stores need, never exposed (the value is `GCompact (m,
+/// pos)`, m cells).
+///
+/// B4c: a planned fold over `y * y` this lane would NOT decorate (the serial
+/// chain: BLADE_FP_REPRO=1, or no licence) is fed inside the pass after every
+/// 256-cell block, over completed cells only (index < q): the first kept
+/// square peeled as the chain's start, then `acc = k(acc, v * v)` in kept
+/// order. The product carries NO fast-math flag, so it cannot contract into
+/// the add -- the rounding a stored `y * y` cell has, under every contraction
+/// mode. The fold's own site keeps the BL8003 empty check (emitReduce).
+let private emitFusedCompaction (c: Ctx) (b: IRBinding) (elem: Sc) (n: string) (keepPool: string) (srcPool: string) (cntSlot: string) (folds: Blade.Optimize.CompactionFoldPlan list) : unit =
+    let m = (loadSlot c cntSlot ScI64).Reg
+    let mSlack = i64Add c m "1"
+    let pos = allocPool c ScI64 mSlack
+    let dst = allocPool c elem mSlack
+    let cursor = allocaOf c "i64"
+    ln c ($"store i64 0, ptr {cursor}")
+    let feeds =
+        if elem <> ScF64 then []
+        else
+            folds |> List.choose (fun f ->
+                if not f.InPass then None
+                else
+                match resolveCallable f.FoldKernel with
+                | Some cl when cl.Params.Length = 2 && not (foldFmfDecorable cl) ->
+                    let acc = allocaOf c (llTy ScF64)
+                    ln c ($"store double 0x0000000000000000, ptr {acc}")
+                    Some (f, cl, acc)
+                | _ -> None)
+    let step (i: string) =
+        let q = loadSlot c cursor ScI64
+        let v = loadCell c elem (gepCell c elem srcPool i)
+        storeCell c elem (gepCell c elem dst q.Reg) v
+        storeCell c ScI64 (gepCell c ScI64 pos q.Reg) { Reg = i; Ty = ScI64 }
+        let bit = loadCell c ScBool (gepCell c ScBool keepPool i)
+        let w = freshReg c
+        ln c ($"{w} = zext i1 {bit.Reg} to i64")
+        let next = i64Add c q.Reg w
+        ln c ($"store i64 {next}, ptr {cursor}")
+    if feeds.IsEmpty then
+        emitCountedLoopTo c n step
+    else
+        let fSlot = allocaOf c "i64"
+        ln c ($"store i64 0, ptr {fSlot}")
+        let square (j: string) : Val =
+            let v = loadCell c ScF64 (gepCell c ScF64 dst j)
+            let p = freshReg c
+            ln c (renderBin { Dest = p; Opcode = "fmul"; Flags = ""; Ty = ScF64; Lhs = v.Reg; Rhs = v.Reg })
+            { Reg = p; Ty = ScF64 }
+        let nb = i64Bin c "udiv" (i64Add c n "255") "256"
+        emitCountedLoopTo c nb (fun bi ->
+            let lo = i64Bin c "mul" bi "256"
+            let hiRaw = i64Add c lo "256"
+            let lt = freshReg c
+            ln c (renderCmp { Dest = lt; Kind = "icmp"; Pred = "slt"; Ty = ScI64; Lhs = hiRaw; Rhs = n })
+            let hi = freshReg c
+            ln c ($"{hi} = select i1 {lt}, i64 {hiRaw}, i64 {n}")
+            let trips = i64Bin c "sub" hi lo
+            emitCountedLoopTo c trips (fun k -> step (i64Add c lo k))
+            // The chain over the cells this block completed (index < q).
+            let f0 = loadSlot c fSlot ScI64
+            let q = loadSlot c cursor ScI64
+            let anyNew = freshReg c
+            ln c (renderCmp { Dest = anyNew; Kind = "icmp"; Pred = "ult"; Ty = ScI64; Lhs = f0.Reg; Rhs = q.Reg })
+            let lFeed = freshLbl c "cfuse.feed"
+            let lPeel = freshLbl c "cfuse.peel"
+            let lChain = freshLbl c "cfuse.chain"
+            let lDone = freshLbl c "cfuse.done"
+            ln c (renderBr { Cond = anyNew; IfTrue = lFeed; IfFalse = lDone })
+            lbl c lFeed
+            let first = freshReg c
+            ln c (renderCmp { Dest = first; Kind = "icmp"; Pred = "eq"; Ty = ScI64; Lhs = f0.Reg; Rhs = "0" })
+            ln c (renderBr { Cond = first; IfTrue = lPeel; IfFalse = lChain })
+            lbl c lPeel
+            let p0 = square "0"
+            for (_, _, acc) in feeds do ln c ($"store double {p0.Reg}, ptr {acc}")
+            ln c ($"store i64 1, ptr {fSlot}")
+            ln c (sprintf "br label %%%s" lChain)
+            lbl c lChain
+            let f1 = loadSlot c fSlot ScI64
+            let trips2 = i64Bin c "sub" q.Reg f1.Reg
+            emitCountedLoopTo c trips2 (fun k ->
+                let j = i64Add c f1.Reg k
+                let p = square j
+                for (_, cl, acc) in feeds do
+                    let cur = loadSlot c acc ScF64
+                    let next = withFoldFmf c false (fun () -> coerce c ScF64 (applyKernel c cl [ KScalar cur; KScalar p ]))
+                    ln c ($"store double {next.Reg}, ptr {acc}"))
+            ln c ($"store i64 {q.Reg}, ptr {fSlot}")
+            ln c (sprintf "br label %%%s" lDone)
+            lbl c lDone)
+        for (f, _, acc) in feeds do f.EmittedLlvm.Value <- Some acc
+    bindArray c b.Id b.Name { Elem = elem; Groups = [ GCompact (m, pos) ]; Src = APool dst; RowOpBytes = 0L }
+
 let private emitCompoundInit (c: Ctx) (b: IRBinding) (denseExpr: IRExpr) (maskExpr: IRExpr) : unit =
     let arrTy =
         match Blade.IR.stripUnits b.Type with
@@ -7095,6 +7433,20 @@ let private emitCompoundInit (c: Ctx) (b: IRBinding) (denseExpr: IRExpr) (maskEx
         match keep.Src, src.Src with
         | APool k, APool s -> k, s
         | _ -> refuse "unreachable: compound operands not materialized"
+    // COMPACTION FUSION (Blade.Optimize.planCompactionFusion, B4b/c): the
+    // mask's own pass counted (tryBindCountedMask published the slot), so the
+    // fill and the gather are ONE pass; the twin of the C++ lane's
+    // genFusedCompaction. Every planned fold over this compound resets its
+    // handshake first.
+    let folds = Blade.Optimize.CompactionTable.foldsOf b.Id
+    for f in folds do f.EmittedLlvm.Value <- None
+    let fusedCount =
+        match Blade.Optimize.CompactionTable.tryCompound b.Id, maskExpr with
+        | Some p, IRVar (mId, _) when mId = p.MaskId -> p.CountLlvm.Value
+        | _ -> None
+    match fusedCount with
+    | Some cntSlot -> emitFusedCompaction c b elem n keepPool srcPool cntSlot folds
+    | None ->
     // 2. COUNT.
     let acc = allocaOf c "i64"
     ln c ($"store i64 0, ptr {acc}")

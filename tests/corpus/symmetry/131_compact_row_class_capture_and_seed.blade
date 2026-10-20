@@ -1,0 +1,30 @@
+// TEST: Compact row classes decline a later scalar in the cell body and a writing seed
+// The row-class epilogue evaluates the fold's cell body right after each
+// packed row of the producer, so (1) every value the body reads must already
+// be bound there: a scalar computed BETWEEN the producer and the fold
+// declines the schedule (top-level and block spellings), and (2) nothing the
+// fold itself evaluates may write: a seed that writes a cell of the producer
+// through a `mut` parameter declines it; the fold sees the written cell, in
+// source order. Same values with the gate off. Integer-valued cells.
+type Pts = Idx<19>
+type Dim = Idx<2>
+let pts = method_for(range<Pts>, range<Dim>) <@> lambda(i, d) -> Float64((Int64(i) * 5 + Int64(d) * 3) % 7) - 3.0 |> compute
+let k = method_for(pts, pts) <@> lambda(a: Array<Float64 like Dim>, b: Array<Float64 like Dim>) where comm(a, b) -> a((0 : Dim)) * b((0 : Dim)) + a((1 : Dim)) + b((1 : Dim)) |> compute
+let scale = reduce(reduce(pts, (+)), (+)) / 4.0
+let s = reduce(method_for(range<Pts>) <@> lambda(i) -> reduce(method_for(range<Pts>) <@> lambda(j) -> scale * k(i, j), (+)), (+))
+// EXPECT: s = 9.5
+let (s_block, tag) = {
+    let k2 = method_for(pts, pts) <@> lambda(a: Array<Float64 like Dim>, b: Array<Float64 like Dim>) where comm(a, b) -> a((1 : Dim)) * b((1 : Dim)) |> compute
+    let shift = reduce(reduce(pts, (+)), (+)) / 8.0
+    let t = reduce(method_for(range<Pts>) <@> lambda(i) -> reduce(method_for(range<Pts>) <@> lambda(j) -> k2(i, j) + shift, (+)), (+))
+    (t, 1)
+}
+// EXPECT: s_block = 46.125
+// EXPECT: tag = 1
+let mut kw = method_for(pts, pts) <@> lambda(a: Array<Float64 like Dim>, b: Array<Float64 like Dim>) where comm(a, b) -> a((0 : Dim)) + b((0 : Dim)) |> compute
+function poke(a: mut Array<Float64 like SymIdx<2, Pts>>) -> Float64 = {
+    a(0, 1) = 1000.0
+    0.0
+}
+let sw = reduce(method_for(range<Pts>) <@> lambda(i) -> reduce(method_for(range<Pts>) <@> lambda(j) -> kw(i, j), (+)), (+), poke(kw))
+// EXPECT: sw = 2002.0

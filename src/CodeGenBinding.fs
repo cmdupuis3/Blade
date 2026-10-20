@@ -314,6 +314,13 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         genCompoundInitBinding ctx binding builder
     | _ when Map.containsKey binding.Id ctx.SparseInits ->
         genSparseInitBinding ctx binding
+    // Compaction fusion (Blade.Optimize.planCompactionFusion, B4a): the lifted
+    // `y * y` whose one reader is a planned fold is never materialized -- the
+    // fold (renderCompactionFold) reads `y`'s compact buffer itself.
+    | IRCompute (IRApplyCombinator _) when (Blade.Optimize.CompactionTable.tryFoldMap binding.Id).IsSome ->
+        let plan = (Blade.Optimize.CompactionTable.tryFoldMap binding.Id).Value
+        ([ $"{ind}// {name}: `{plan.CompoundName} * {plan.CompoundName}` is folded straight over `{plan.CompoundName}`'s compact buffer by `{plan.HostName}` (compaction fusion) -- no square pool" ],
+         addVarName binding.Id name ctx)
     | IRMask (arrExpr, predExpr) ->
         genMaskBinding ctx binding builder arrExpr predExpr
     | IRIntersect (aExpr, bExpr) ->
@@ -1185,9 +1192,15 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         (match Blade.Optimize.HotRowTable.tryProducer binding.Id with
          | Some plan -> (hotRowPendingCell ()).[name] <- plan
          | None -> ())
+        // Compact row classes (planCompactRowClasses): the same hand-over.
+        (match Blade.Optimize.CompactRowTable.tryProducer binding.Id with
+         | Some plan -> plan.EmittedCpp.Value <- None; plan.DeclinedCpp.Value <- false; (compactRowPendingCell ()).[name] <- plan
+         | None -> ())
         let code =
             try genApplyCombinator ctx name info' builder
-            finally (hotRowPendingCell ()).Remove name |> ignore
+            finally
+                (hotRowPendingCell ()).Remove name |> ignore
+                (compactRowPendingCell ()).Remove name |> ignore
         let ctx' = addVarName binding.Id name ctx
         (forceCode @ capForceCode @ code, ctx')
 
@@ -2348,6 +2361,24 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
          // a rank-1 mask is the compaction (kept-position table, gather by
          // position, no hash), a rank-k mask keeps the hashed index.
          let rank1 = (leadRank = 1)
+         // Compaction fusion (Blade.Optimize.planCompactionFusion): the mask
+         // pass counted (its emitter published the count's name), so the
+         // position fill and the value gather are ONE pass here. Every fold
+         // planned over this compound resets its handshake first, so a fold
+         // reads an accumulator only when THIS emission fed it.
+         let folds = Blade.Optimize.CompactionTable.foldsOf binding.Id
+         for f in folds do f.EmittedCpp.Value <- None
+         let fusedCount =
+             match Blade.Optimize.CompactionTable.tryCompound binding.Id, maskExpr with
+             | Some p, IRVar (mId, _) when mId = p.MaskId && rank1 && trailingDimCount = 0 && maskPre.IsEmpty ->
+                 p.CountCpp.Value
+             | _ -> None
+         match fusedCount with
+         | Some cnt ->
+             let lines = genFusedCompaction ctx ind name elemCpp denseName maskName cnt folds
+             registerShapedAlloc name "deallocate_compound" name
+             (densePre @ lines, addVarName binding.Id name ctx)
+         | None ->
          recordCompoundRepresentation name leadRank trailingDimCount
          let lines =
              densePre
@@ -2380,6 +2411,97 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
          (lines, addVarName binding.Id name ctx)
      | _ ->
          ([refusalErrorLine ind ($"compound() binding '{name}' is not a CompoundIdx array type")], addVarName binding.Id name ctx))
+
+/// The FUSED rank-1 compaction (Blade.Optimize.planCompactionFusion, B4b/c):
+/// `cnt` (the mask pass's count) sizes both buffers at m + 1 -- the last cell
+/// is the slack the unconditional store needs after the last kept cell, never
+/// exposed -- and ONE branchless pass `v = x[i]; y[q] = v; pos[q] = i;
+/// q += keep[i]` gathers the values and fills the kept positions, ascending
+/// and stable. The index adopts the filled table (dense extent n, cardinality
+/// m, the kept positions), so keyed reads, `unhash`, `present` and
+/// `prefix_range` see the table the counting constructor built.
+///
+/// B4c: a planned fold over `y * y` whose form here is the SERIAL chain
+/// (BLADE_FP_REPRO=1, or no reorder licence) is fed inside the pass: after
+/// every 256-cell block of x, the chain advances over the newly completed
+/// cells (index < q -- never the slack cell), the first kept square peeled
+/// as the chain's start. Same terms, same order, same operations as the fold
+/// over a materialized `y * y` (each product rounded before its add, as a
+/// stored product is); the fold's empty check stays at its own declaration.
+/// The licensed lane form is not fed here (the fold reads `y.data` at its
+/// site); its streaming twin is the cell-epilogue lane state's follow-up.
+and genFusedCompaction (ctx: CodeGenContext) (ind: string) (name: string) (elemCpp: string) (denseName: string) (maskName: string) (cnt: string) (folds: Blade.Optimize.CompactionFoldPlan list) : string list =
+    let idxName = $"{name}_idx"
+    let feeds =
+        folds |> List.choose (fun f ->
+            if not f.InPass then None
+            else
+            match resolveCallable f.FoldKernel with
+            | Some cl when cl.Params.Length = 2 && not (fpReassocEnabled () && foldReorderLicensed cl) ->
+                Some (f, cl)
+            | _ -> None)
+        |> List.mapi (fun k (f, cl) ->
+            let (wrapperCode, wname) = genCallableWrapper ctx.VarNames $"{name}__fold{k}" cl
+            (f, $"{name}__fold{k}", wrapperCode, wname))
+    if not feeds.IsEmpty then (foldLanesUsedCell ()).Value <- true
+    let i1 = ind + "    "
+    let i2 = i1 + "    "
+    let i3 = i2 + "    "
+    let gather (body: string) =
+        [ $"{body}const {elemCpp} {name}_v = {name}_densepool[{name}_i];"
+          $"{body}{name}_compact[{name}_q] = {name}_v;"
+          $"{body}{name}_pos[{name}_q][0] = {name}_i;"
+          $"{body}{name}_q += (size_t){idxName}_pool[{name}_i];" ]
+    let pass =
+        if feeds.IsEmpty then
+            [ $"{i1}for (size_t {name}_i = 0; {name}_i < {idxName}_grid; {name}_i++) {{" ]
+            @ gather i2
+            @ [ $"{i1}}}" ]
+        else
+            let peel =
+                feeds |> List.map (fun (_, acc, _, _) ->
+                    $"{i3}    {{ {elemCpp} __t = {name}_compact[0] * {name}_compact[0]; BLADE_FOLD_ROUND(__t); {acc} = __t; }}")
+            let step =
+                feeds |> List.map (fun (_, acc, _, wname) ->
+                    $"{i3}    {{ {elemCpp} __t = {name}_compact[{name}_f] * {name}_compact[{name}_f]; BLADE_FOLD_ROUND(__t); {acc} = {wname}({acc}, __t); }}")
+            [ $"{i1}size_t {name}_f = 0;"
+              $"{i1}for (size_t {name}_b = 0; {name}_b < {idxName}_grid; {name}_b += 256) {{"
+              $"{i2}const size_t {name}_e = ({idxName}_grid - {name}_b < 256) ? {idxName}_grid : {name}_b + 256;"
+              $"{i2}for (size_t {name}_i = {name}_b; {name}_i < {name}_e; {name}_i++) {{" ]
+            @ gather i3
+            @ [ $"{i2}}}"
+                $"{i2}// the chain over the cells this block completed (index < q; the slack cell is never read)"
+                $"{i2}if ({name}_f < {name}_q) {{"
+                $"{i3}if ({name}_f == 0) {{" ]
+            @ peel
+            @ [ $"{i3}    {name}_f = 1;"
+                $"{i3}}}"
+                $"{i3}for (; {name}_f < {name}_q; {name}_f++) {{" ]
+            @ step
+            @ [ $"{i3}}}"
+                $"{i2}}}"
+                $"{i1}}}" ]
+    for (f, acc, _, _) in feeds do f.EmittedCpp.Value <- Some acc
+    let feedNote =
+        if feeds.IsEmpty then "" else $"; the serial chain of {feeds.Length} fold(s) over `{name} * {name}` fed per 256-cell block"
+    recordCodegenDecision "compound" name Blade.Effects.Applied
+        [ "representation: rank-1 compaction (kept positions counted in the mask pass and filled in the gather pass -- compaction fusion; no hash table; keyed reads by binary search over the kept positions)"
+          $"rank-1 mask over one dense axis; no trailing dims; one fill+gather pass{feedNote}" ]
+    [ $"{ind}// compaction fusion (Blade.Optimize.planCompactionFusion): `{maskName}` was counted in its own mask pass; ONE branchless pass gathers the values and fills the kept positions (m + 1 cells each, the slack never exposed)"
+      $"{ind}size_t {idxName}_grid = {maskName}.extents[0];"
+      $"{ind}bool* {idxName}_pool = nested_array_utilities::pool_base({maskName}.data);"
+      $"{ind}size_t {name}_trail = 1;"
+      $"{ind}{elemCpp}* {name}_densepool = nested_array_utilities::pool_base({denseName}.data);"
+      $"{ind}compound_index_t<1>::IDX* {name}_pos = new compound_index_t<1>::IDX[{cnt} + 1];"
+      $"{ind}{elemCpp}* {name}_compact = new {elemCpp}[{cnt} + 1];" ]
+    @ (feeds |> List.collect (fun (_, acc, wrapperCode, _) ->
+        (wrapperCode |> List.map (fun s -> ind + s)) @ [ $"{ind}{elemCpp} {acc} = {elemCpp}(0);" ]))
+    @ [ $"{ind}{{"
+        $"{i1}size_t {name}_q = 0;" ]
+    @ pass
+    @ [ $"{ind}}}"
+        $"{ind}compound_index_t<1>* {idxName} = new compound_index_t<1>(\"{idxName}\", {idxName}_grid, {cnt}, {name}_pos); // rank-1 compaction, fused: the table this pass filled"
+        $$"""{{ind}}nested_array_utilities::Compound<{{elemCpp}}, 1> {{name}} { {{name}}_compact, {{idxName}}, {{name}}_trail };""" ]
 
 and genSparseInitBinding (ctx: CodeGenContext) (binding: IRBinding) : string list * CodeGenContext =
     let ind = indentStr ctx
@@ -2519,9 +2641,20 @@ and genMaskBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         match resolveCallable predExpr with
         | Some callable when callable.Params.Length = 1 -> []
         | _ -> codegenError ctx ind "mask: predicate must resolve to a single-parameter callable; got something else (typechecker or IR bug)"
+    // Compaction fusion (Blade.Optimize.planCompactionFusion): a planned mask
+    // also COUNTS its kept cells in this pass, and publishes the count's name
+    // for the compound that consumes it (which then skips its count pass).
+    let plan = Blade.Optimize.CompactionTable.tryMask binding.Id
+    plan |> Option.iter (fun p -> p.CountCpp.Value <- None)
+    let countVar = plan |> Option.map (fun _ -> $"{name}__count")
     let matStmts =
-        match materializeInlineForm emptySubst ctx.VarNames name (lazy elemStr) (IRMask (arrExpr, predExpr)) with
-        | Some (s, allocs) -> registerMaterializedAllocs allocs; s
+        match materializeMaskFormCounted emptySubst ctx.VarNames name elemStr arrExpr predExpr countVar with
+        | Some (s, allocs, counted) ->
+            registerMaterializedAllocs allocs
+            (match plan, countVar with
+             | Some p, Some c when counted -> p.CountCpp.Value <- Some c
+             | _ -> ())
+            s
         | None -> []  // Unreachable: helper supports IRMask
     let code = forceCode @ elemErrCode @ predErrCode @ [$"{ind}// mask: count + compact"] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
@@ -3326,6 +3459,14 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
         let (lines, ctx') =
             genReduceBinding ctx binding builder (IRParam (gname, 0, inferExprType arrExpr)) kernelExpr initExpr
         ([ gatherLine ] @ lines @ [ $"{ind}nested_array_utilities::{routine}({gname});" ], ctx')
+    // Compaction fusion (B4a/c): the fold of a planned `y * y` reads `y`'s
+    // compact buffer (CodeGenExpr.renderCompactionFold); its map let emitted
+    // only a comment.
+    | IRVar (mid, _) when initExpr.IsNone && (Blade.Optimize.CompactionTable.tryFoldMap mid).IsSome ->
+        let ind = indentStr ctx
+        let name = bindingCppName binding
+        let plan = (Blade.Optimize.CompactionTable.tryFoldMap mid).Value
+        ([ $"{ind}double {name} = {(renderCompactionFold ctx.VarNames plan kernelExpr)};" ], addVarName binding.Id name ctx)
     | _ ->
     let ind = indentStr ctx
     let name = bindingCppName binding
@@ -3942,29 +4083,7 @@ and genOrbitFoldCpp (ctx: CodeGenContext) (ind: string) (name: string) (gName: s
               yield! gen (t + 1) $"__oc{t}" (mults @ [ 1 ]) (i2 + "    ")
               yield $"{i2}}}" ]
     let i1 = ind + "    "
-    let combineLines = ResizeArray<string>()
-    let mutable tmp = 0
-    let fresh (value: string) =
-        tmp <- tmp + 1
-        let t = $"__ot{tmp}"
-        combineLines.Add($"{i1}const {accCpp} {t} = {value};")
-        t
-    let rec emitC (e: Blade.OrbitFold.Combine) : string =
-        match e with
-        | Blade.OrbitFold.CAcc k -> accName k
-        | Blade.OrbitFold.CZero -> "__of0"
-        | Blade.OrbitFold.CNeg x -> fresh $"-{emitC x}"
-        | Blade.OrbitFold.CAdd (a, b) ->
-            let a' = emitC a
-            let b' = emitC b
-            fresh $"{a'} + {b'}"
-        | Blade.OrbitFold.CRep (x, w) ->
-            let b = emitC x
-            let mutable acc = b
-            for dbl in Blade.OrbitFold.repSteps w do
-                acc <- fresh (if dbl then $"{acc} + {acc}" else $"{acc} + {b}")
-            acc
-    let total = emitC p.Total
+    let (combineLines, total) = genOrbitTotalCpp ctx i1 p
     let accDecl = [ 0 .. p.AccCount - 1 ] |> List.map (fun k -> $"{accName k} = {accCpp}(0)") |> String.concat ", "
     let group = if p.Strict then "AntisymIdx" else "SymIdx"
     // THE THREADED FORM (bench G32): a `where omp` licence on any level's
@@ -4034,9 +4153,77 @@ and genOrbitFoldCpp (ctx: CodeGenContext) (ind: string) (name: string) (gName: s
           yield $"{i1}for (size_t __oc1 = 0; __oc1 < {n}; __oc1++) {{"
           yield! gen 2 "__oc1" [ 1 ] (i1 + "    ")
           yield $"{i1}}}"
-      if p.Strict && p.ZeroCells > 0L then
-          yield $"{i1}const {elemCpp} __ox = {elemCpp}(0);"
-          yield $"{i1}const {accCpp} __of0 = {fx};"
+      yield! combineLines
+      yield $"{i1}{name} = {name} + {total};"
+      yield $"{ind}}}" ]
+
+/// The orbit plan's ADDITION-ONLY combine of its class accumulators
+/// `__oa<k>` into the logical total (`rep(S, w)` as doubling / adding
+/// steps, never a multiply a compiler could contract), plus the strict
+/// group's `f(+0)` zero-class value: the lines (at indent `i1`) and the
+/// total's name. Shared by the orbit-class pass and the compact row-class
+/// consumer, so both combine the same way.
+and genOrbitTotalCpp (ctx: CodeGenContext) (i1: string) (p: Blade.OrbitFold.OrbitPlan) : string list * string =
+    let accCpp = primTypeToCpp p.AccTy
+    let elemCpp = primTypeToCpp p.ElemTy
+    let combineLines = ResizeArray<string>()
+    if p.Strict && p.ZeroCells > 0L then
+        let c = { ctx with VarNames = Map.add Blade.OrbitFold.readVarId "__ox" ctx.VarNames }
+        combineLines.Add($"{i1}const {elemCpp} __ox = {elemCpp}(0);")
+        combineLines.Add($"{i1}const {accCpp} __of0 = {(exprToCppCtx c p.Body)};")
+    let mutable tmp = 0
+    let fresh (value: string) =
+        tmp <- tmp + 1
+        let t = $"__ot{tmp}"
+        combineLines.Add($"{i1}const {accCpp} {t} = {value};")
+        t
+    let rec emitC (e: Blade.OrbitFold.Combine) : string =
+        match e with
+        | Blade.OrbitFold.CAcc k -> $"__oa{k}"
+        | Blade.OrbitFold.CZero -> "__of0"
+        | Blade.OrbitFold.CNeg x -> fresh $"-{emitC x}"
+        | Blade.OrbitFold.CAdd (a, b) ->
+            let a' = emitC a
+            let b' = emitC b
+            fresh $"{a'} + {b'}"
+        | Blade.OrbitFold.CRep (x, w) ->
+            let b = emitC x
+            let mutable acc = b
+            for dbl in Blade.OrbitFold.repSteps w do
+                acc <- fresh (if dbl then $"{acc} + {acc}" else $"{acc} + {b}")
+            acc
+    let total = emitC p.Total
+    (List.ofSeq combineLines, total)
+
+/// The compact row-class CONSUMER (Blade.Optimize.planCompactRowClasses, B3):
+/// the producer's nest stored each packed row's class partials into
+/// `parts` (one rank-1 array per accumulator, `n` rows); each class total is
+/// their sum in ASCENDING ROW ORDER from +0, then the orbit plan's own
+/// addition-only combine and outer seed -- the same multiset, regrouped by
+/// rows (licensed, as the orbit pass is), and a function of the data alone.
+and genCompactRowCombineCpp (ctx: CodeGenContext) (ind: string) (name: string) (p: Blade.OrbitFold.OrbitPlan) (parts: string list) : string list =
+    let accCpp = primTypeToCpp p.AccTy
+    let i1 = ind + "    "
+    let (combineLines, total) = genOrbitTotalCpp ctx i1 p
+    let classes = parts.Length
+    recordCodegenDecision "compact-row-classes" "" Blade.Effects.Applied
+        [ $"compact row classes ({classes} classes), per-row partials, combined in row order"
+          $"`{p.SourceName}`'s packed rows each stored their class partials as they were produced; no second pass over the {p.PoolCells}-cell pool; addition-only combine (licensed regrouping); bits independent of team size" ]
+    recordFoldForm "" $"compact row classes (rank {p.Rank}, {p.ClassCount} classes)"
+        $"the orbit-class sums of `{p.SourceName}` (rank {p.Rank}, extent {p.Extent}) taken per packed row behind the producer, combined in row order by additions only (licensed regrouping); no pass over the pool"
+    let ompMarker =
+        if Blade.OrbitFold.ompRequested p then
+            let phrase = ompSuppressedPhrase "compact row classes: the fold's terms were summed per row inside the producer's nest (its team, when it has one); the row combine is a serial pass over the row partials"
+            [ $"{i1}// {phrase}" ]
+        else []
+    [ yield $"{ind}{accCpp} {name} = {exprToCppCtx ctx p.OuterSeed};"
+      yield $"{ind}{{"
+      yield $"{i1}// compact row classes: the class partials of each packed row of `{p.SourceName}` were stored as the row was produced; each class sums them in ascending row order, then the orbit plan's addition-only combine"
+      yield! ompMarker
+      for k in 0 .. classes - 1 do
+          yield $"{i1}{accCpp} __oa{k} = {accCpp}(0);"
+          yield $"{i1}for (size_t __ori = 0; __ori < (size_t){p.Extent}; __ori++) __oa{k} = __oa{k} + {parts.[k]}[__ori];"
+          yield $"{i1}delete[] {parts.[k]};"
       yield! combineLines
       yield $"{i1}{name} = {name} + {total};"
       yield $"{ind}}}" ]
@@ -4096,6 +4283,24 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
             Blade.OrbitFold.recordDeclined name why
             None, Some why
         | Blade.OrbitFold.NotOrbit -> None, None
+    // Compact row classes (Blade.Optimize.planCompactRowClasses): when the
+    // producer's nest stored each packed row's class partials (it published
+    // their arrays), the orbit pass becomes the row combine. A producer that
+    // placed nothing leaves the orbit pass as it was.
+    let compactRows =
+        match Blade.Optimize.CompactRowTable.tryConsumer binding.Id, orbitPlan with
+        | Some plan, Some (p, _) when p.SourceId = plan.ProducerId ->
+            (match plan.EmittedCpp.Value with
+             | Some parts when parts.Length = p.AccCount -> Some parts
+             | _ ->
+                 if not plan.DeclinedCpp.Value then
+                     recordCodegenDecision "compact-row-classes" "" (Blade.Effects.Declined "the producer's nest did not place the per-row epilogue (a tile, dispatched or non-plain nest form)") [ $"orbit fold of `{plan.ProducerName}`" ]
+                 None)
+        | _ -> None
+    match orbitPlan, compactRows with
+    | Some (p, _), Some parts ->
+        (genCompactRowCombineCpp ctx ind name p parts, addVarName binding.Id name ctx)
+    | _ ->
     match orbitPlan with
     | Some (p, gName) ->
         Blade.OrbitFold.recordTaken name p

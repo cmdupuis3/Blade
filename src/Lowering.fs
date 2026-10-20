@@ -2714,6 +2714,8 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     Blade.Types.PoolReuseTable.reset ()
     Optimize.HotRowTable.reset ()
     Optimize.CellFoldTable.reset ()
+    Optimize.CompactionTable.reset ()
+    Optimize.CompactRowTable.reset ()
     // The raw decl list callers hand us is the program they PARSED, not the
     // one `TypeCheck.typeCheck` desugared inside itself -- so the icechunk
     // checkout rewrite is applied again here, ahead of Phase 0's
@@ -2910,6 +2912,16 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // table like the scratch-reuse plan, read by both emitters; the
         // interpreter runs the tree as written. Gate: BLADE_HOT_ROW.
         Optimize.planHotRowFolds env.Builder irModule
+        // Compaction fusion (Blade.Optimize.planCompactionFusion): the
+        // mask -> compound -> fold chain's side table, read by both emitters;
+        // the interpreter runs the tree as written. Gate:
+        // BLADE_COMPACTION_FUSION.
+        Optimize.planCompactionFusion irModule
+        // Compact row classes (Blade.Optimize.planCompactRowClasses): a
+        // compact rank-2 producer's orbit-fold class partials computed behind
+        // each packed row; side table, both emitters. Gate:
+        // BLADE_COMPACT_ROW_CLASSES.
+        Optimize.planCompactRowClasses irModule
         // mask+contains fusion always runs a linear scan; the semijoin
         // hash-set is a separate, not-yet-implemented optimization.
         irModule)

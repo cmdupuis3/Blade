@@ -1074,6 +1074,21 @@ let hotRowPendingCell () : System.Collections.Generic.Dictionary<string, Blade.O
         fresh
     else v
 
+/// Compact row-class scheduling's twin of `hotRowPendingCell`: the
+/// Blade.Optimize.CompactRowPlan of the compact producer being emitted, keyed
+/// by its C++ output name, set around the statement-form `genApplyCombinator`
+/// call and cleared right after.
+let internal compactRowPendingStorage =
+    System.Threading.AsyncLocal<System.Collections.Generic.Dictionary<string, Blade.Optimize.CompactRowPlan>>()
+
+let compactRowPendingCell () : System.Collections.Generic.Dictionary<string, Blade.Optimize.CompactRowPlan> =
+    let v = compactRowPendingStorage.Value
+    if isNull (box v) then
+        let fresh = System.Collections.Generic.Dictionary<string, Blade.Optimize.CompactRowPlan>()
+        compactRowPendingStorage.Value <- fresh
+        fresh
+    else v
+
 /// The probe emitted at the FIRST input read of a hoisted tile plan: every
 /// input's need/done masks, the tile hit table, and the need of each unhit
 /// tile's chunks. Emitted before the phase-1 read of that input (unindented).

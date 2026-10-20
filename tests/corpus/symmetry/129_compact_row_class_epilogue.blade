@@ -1,0 +1,35 @@
+// TEST: Compact row classes: the orbit fold's class sums computed behind each packed row
+// A `comm` pair kernel over the SAME array stores SymIdx<2, 37> (C(38, 2)
+// cells); the logical sum of squares over it is an orbit-class fold. With
+// compact row classes (`blade plan`: `[compact-row-classes v1] ... applied
+// [compact row classes (2 classes), per-row partials, combined in row order]`)
+// each packed row's diagonal and off-diagonal partials are stored right after
+// the row is produced -- inside the producer's `omp` team -- and the fold
+// combines them in row order: no second pass over the pool, and a result that
+// does not depend on the team size. The top-level spelling and the block
+// spelling (pairkernel's) both take it. Integer-valued cells: every sum exact.
+type Pts = Idx<37>
+type Dim = Idx<3>
+let pts = method_for(range<Pts>, range<Dim>) <@> lambda(i, d) -> Float64((Int64(i) * 7 + Int64(d) * 3) % 11) - 5.0 |> compute
+let k = method_for(pts, pts) <@> lambda(a: Array<Float64 like Dim>, b: Array<Float64 like Dim>) where comm(a, b), omp(a: 1) -> {
+    let dx = a((0 : Dim)) - b((0 : Dim))
+    let dy = a((1 : Dim)) - b((1 : Dim))
+    dx * dy + a((2 : Dim)) * b((2 : Dim))
+} |> compute
+let ss = reduce(method_for(range<Pts>) <@> lambda(i) -> reduce(method_for(range<Pts>) <@> lambda(j) -> k(i, j) * k(i, j), (+)), lambda(u, v) where omp -> u + v, 0.0)
+// EXPECT: ss = 615390.0
+let diag = k(4, 4)
+// EXPECT: diag = 16.0
+let off = k(30, 2)
+// EXPECT: off = 12.0
+let (ss2, n2) = {
+    let k2 = method_for(pts, pts) <@> lambda(a: Array<Float64 like Dim>, b: Array<Float64 like Dim>) where comm(a, b) -> {
+        let dz = a((2 : Dim)) - b((2 : Dim))
+        dz * dz + a((0 : Dim))
+            + b((0 : Dim))
+    } |> compute
+    let s = reduce(method_for(range<Pts>) <@> lambda(i) -> reduce(method_for(range<Pts>) <@> lambda(j) -> k2(i, j), (+)), (+), 1.0)
+    (s, 37)
+}
+// EXPECT: ss2 = 26337.0
+// EXPECT: n2 = 37

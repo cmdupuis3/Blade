@@ -1,0 +1,13 @@
+// TEST: Compaction fusion: the unseeded fold over an empty compound aborts (aborts)
+// An all-false mask leaves m = 0 kept cells. The fused compaction still runs
+// (both buffers get their one slack cell; nothing is exposed and the chain is
+// never started -- there is no +0 seed), and the unseeded `reduce(y * y, (+))`
+// raises BL8003 at its own declaration, after the compaction, exactly as the
+// materialized fold did (its source line is pinned by the cli block: the interpreter names none).
+type Ix = Idx<1003>
+let x = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i)) |> compute
+let keep = mask(x, lambda(v) -> v > 5000.0)
+let y = compound(x, keep)
+let checksum = reduce(y * y, (+)) + Float64(extents(y))
+// ABORT: BL8003
+// ABORT: reduce: empty array

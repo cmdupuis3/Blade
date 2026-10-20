@@ -96,13 +96,26 @@ let cellEpilogueMode () : CellEpilogueMode =
         | _ -> CellEpilogueOn
 
 let cellEpilogueEnabled () = cellEpilogueMode () <> CellEpilogueOff
+/// BLADE_COMPACTION_FUSION=0|off disables compaction fusion
+/// (`planCompactionFusion`): the analysis still runs, and a mask -> compound
+/// -> fold chain it would have fused records `compaction-fusion` DECLINED
+/// ("disabled by BLADE_COMPACTION_FUSION"); nothing reaches the side table,
+/// so both emitters keep the separate count / fill / gather / pool passes.
+let compactionFusionEnabled () = gateOn "BLADE_COMPACTION_FUSION"
+
+/// BLADE_COMPACT_ROW_CLASSES=0|off disables compact row-class scheduling
+/// (`planCompactRowClasses`): a compact rank-2 producer / orbit-fold pair it
+/// would have scheduled records `compact-row-classes` DECLINED ("disabled by
+/// BLADE_COMPACT_ROW_CLASSES"); nothing reaches the side table, so both
+/// emitters keep the producer nest plus the separate orbit-class pass.
+let compactRowClassesEnabled () = gateOn "BLADE_COMPACT_ROW_CLASSES"
 
 /// Every gate of this layer (charter rule 3), in one place: the optimizer
 /// differential (`blade test opt-diff`, tests/OptDiff.fs) turns ALL of them
 /// off for its reference lane, so a new pass's gate belongs in this list the
 /// day the pass lands -- a gate missing here is a pass the differential
 /// cannot see.
-let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_HOIST"; "BLADE_HOT_ROW"; "BLADE_CELL_EPILOGUE" ]
+let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_HOIST"; "BLADE_HOT_ROW"; "BLADE_CELL_EPILOGUE"; "BLADE_COMPACTION_FUSION"; "BLADE_COMPACT_ROW_CLASSES" ]
 
 /// The decline reason for a LICENSED row prodsum (B2r applies only where
 /// the build keeps the serial association). `lanes` RESERVES the opt-in
@@ -1987,6 +2000,536 @@ let planHotRowFolds (builder: IRBuilder) (modul: IRModule) : unit =
         match b.Value with
         | IRLet _ -> planChain (chain b.Value)
         | _ -> ()
+
+// --- Compaction fusion: mask -> compound -> fold (round 2 item B4) ----------
+//
+// The WHERE idiom of examples/01 at its smallest:
+//
+//   let keep = mask(x, lambda(v) -> v > 1.0)
+//   let y = compound(x, keep)
+//   let checksum = reduce(y * y, (+)) + Float64(extents(y))
+//
+// emits SIX sweeps in both lanes: the mask, a count of the mask, the
+// branchless kept-position fill, the gather by position, a `y * y` compound
+// pool (the elementwise operand forced because the fused fold terminal has
+// no compound arm), and the fold over that pool. The plan below removes four
+// of them without touching what any binding MEANS -- every named store stays
+// (`keep`, `y`, its index with its kept positions), and the IR the
+// interpreter runs is untouched (a side table, the HotRowTable pattern):
+//
+//   * B4b, the COMPACTION plan (`CompactionPlan`): the count of `keep` is
+//     taken inside its own mask pass, and the position fill and the value
+//     gather are one branchless pass `v = x[i]; y[q] = v; pos[q] = i;
+//     q += keep[i]` (m + 1 cells in BOTH buffers, the last the slack the
+//     unconditional store needs, never exposed). The index is then built
+//     from the table the pass filled (compound_index_t<1>'s adopting
+//     constructor): dense extent n, cardinality m, the ascending kept
+//     positions -- the table the old constructor built. Stable, ascending,
+//     serial, exactly as before.
+//   * B4a, the FOLD plan (`CompactionFoldPlan`): the self-product's fold
+//     reads `y`'s compact buffer directly (`y.data`, m contiguous cells), no
+//     square pool. The fold form is the emitter's: the licensed K-lane tree
+//     (`blade_fold::sq`) in the C++ lane, the reassociable chain in the LLVM
+//     lane; under BLADE_FP_REPRO=1 the unseeded serial chain from the first
+//     kept square, in kept order. BL8003 on an empty `y` stays at the fold's
+//     own declaration, after the compaction, as before.
+//   * B4c: under the serial (repro) form, when the compaction itself is
+//     fused, the chain is FED INSIDE the compaction pass, block by block,
+//     from cells already written (index < q, never the slack cell). Its
+//     value is the same chain in the same order -- the map is the pure
+//     self-product of `y`'s own cells, the fold a builtin `+`, `y` is never
+//     assigned -- and the empty check still runs at the fold's own site.
+//
+// Positions are always built (B4d, eliding them, needs an index-demand
+// census across aliases and is deferred). Gate: BLADE_COMPACTION_FUSION.
+
+/// The fused compaction of one `let y = compound(x, keep)` over a let-bound
+/// rank-1 `keep = mask(x, pred)`.
+type CompactionPlan = {
+    MaskId: IRId
+    MaskName: string
+    CompoundId: IRId
+    CompoundName: string
+    SourceId: IRId
+    /// The C++ lane's handshake: the mask emitter's count variable, written
+    /// when it actually counted (its rank-1 callable arm), read by the
+    /// compound's emission to choose the fused pass. Reset by the mask's
+    /// emission, so a second emission of the same program starts clean.
+    CountCpp: string option ref
+    /// The LLVM lane's twin: the alloca slot holding the count.
+    CountLlvm: string option ref
+}
+
+/// The fused fold `reduce(y * y, (+))` of one compound `y`: the lifted map
+/// let (`MapId`, the anonymous `y * y` the fold forces today) is never
+/// materialized; the fold reads `y`'s buffer.
+type CompactionFoldPlan = {
+    MapId: IRId
+    CompoundId: IRId
+    CompoundName: string
+    /// The binding hosting the fold (`checksum`).
+    HostName: string
+    FoldKernel: IRExpr
+    /// The compaction of `y` is fused and `y` is never assigned, so the
+    /// compaction pass MAY feed the serial chain (B4c); whether it does is
+    /// the emitter's call (the serial form only), published below.
+    InPass: bool
+    /// Each lane's handshake: the accumulator the compaction pass fed the
+    /// chain into (B4c), when it did. Reset by the compound's emission.
+    EmittedCpp: string option ref
+    EmittedLlvm: string option ref
+}
+
+/// AsyncLocal like HotRowTable; reset once per program in
+/// `lowerTypedProgram`, because let ids restart per compile.
+module CompactionTable =
+    open System.Threading
+    type State =
+        { ByMask: Map<IRId, CompactionPlan>
+          ByCompound: Map<IRId, CompactionPlan>
+          FoldByMap: Map<IRId, CompactionFoldPlan>
+          FoldsByCompound: Map<IRId, CompactionFoldPlan list> }
+    let private empty = { ByMask = Map.empty; ByCompound = Map.empty; FoldByMap = Map.empty; FoldsByCompound = Map.empty }
+    let private cell = new AsyncLocal<State>()
+    let private get () = match box cell.Value with null -> empty | _ -> cell.Value
+    let reset () = cell.Value <- empty
+    let record (p: CompactionPlan) =
+        let s = get ()
+        cell.Value <- { s with ByMask = Map.add p.MaskId p s.ByMask; ByCompound = Map.add p.CompoundId p s.ByCompound }
+    let recordFold (f: CompactionFoldPlan) =
+        let s = get ()
+        let prev = Map.tryFind f.CompoundId s.FoldsByCompound |> Option.defaultValue []
+        cell.Value <- { s with FoldByMap = Map.add f.MapId f s.FoldByMap
+                               FoldsByCompound = Map.add f.CompoundId (prev @ [ f ]) s.FoldsByCompound }
+    let tryMask (id: IRId) : CompactionPlan option = Map.tryFind id (get ()).ByMask
+    let tryCompound (id: IRId) : CompactionPlan option = Map.tryFind id (get ()).ByCompound
+    let tryFoldMap (id: IRId) : CompactionFoldPlan option = Map.tryFind id (get ()).FoldByMap
+    let foldsOf (compoundId: IRId) : CompactionFoldPlan list =
+        Map.tryFind compoundId (get ()).FoldsByCompound |> Option.defaultValue []
+
+/// Plan compaction fusion over the module's top-level bindings (`compound`
+/// is top-level only, BL6002). Records into `CompactionTable` and the
+/// decision collector (`compaction-fusion`); the IR is untouched.
+let planCompactionFusion (modul: IRModule) : unit =
+    let funcs = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+    let facts = cseFactsOf funcs
+    let enabled = compactionFusionEnabled ()
+    let decide (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
+        Blade.Effects.Decisions.record
+            { Blade.Effects.Rule = "compaction-fusion"; Version = 1
+              Span = declSpanOf subject; Subject = subject
+              Outcome = outcome; Evidence = evidence }
+    let arr = List.toArray modul.Bindings
+    let indexOf (id: IRId) = arr |> Array.tryFindIndex (fun b -> b.Id = id)
+    let refs (e: IRExpr) = collectVarRefsIR e
+    // `id` is the target of an assignment somewhere in `e` (`y = ..`, `y(k) = ..`).
+    let assignsTo (id: IRId) (e: IRExpr) =
+        let mutable hit = false
+        iterIRExpr (fun n ->
+            match n with
+            | IRAssign (target, _) when Set.contains id (refs target) -> hit <- true
+            | _ -> ()) e
+        hit
+    let assignedAnywhere (id: IRId) =
+        (arr |> Array.exists (fun b -> assignsTo id b.Value))
+        || (modul.Functions |> List.exists (fun f -> assignsTo id f.Body))
+    let isParamRef (p: IRParam) (e: IRExpr) =
+        match e with
+        | IRVar (v, _) -> v = p.VarId
+        | IRParam (_, i, _) -> i = p.Index
+        | _ -> false
+    let isFloatTy (t: IRType) =
+        match stripUnits t with
+        | IRTScalar (ETFloat64 | ETFloat32) -> true
+        | _ -> false
+    // A PURE, TOTAL scalar body over its one parameter: literals, the
+    // parameter, arithmetic that cannot trap (no integer `/` `%` `^`, no
+    // float->int cast), comparisons, logic, `if`. Anything else -- a call, a
+    // capture, an intrinsic that may be domain-checked -- is not judged.
+    let rec totalScalar (p: IRParam) (e: IRExpr) =
+        match e with
+        | _ when isParamRef p e -> true
+        | IRLit _ -> true
+        | IRBinOp (_, op, l, r, _) ->
+            let opOk =
+                match op with
+                | IRAdd | IRSub | IRMul | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe | IRAnd | IROr -> true
+                | IRDiv -> isFloatTy (typeOf l) && isFloatTy (typeOf r)
+                | _ -> false
+            opOk && totalScalar p l && totalScalar p r
+        | IRUnaryOp ((IRNeg | IRNot), x) -> totalScalar p x
+        | IRIf (c, t, f) -> totalScalar p c && totalScalar p t && totalScalar p f
+        | _ -> false
+    let squareMap (info: ApplyInfo) (yId: IRId) : bool =
+        let overY = info.Arrays |> List.forall (function IRVar (a, _) -> a = yId | _ -> false)
+        let shapeOk =
+            not info.Arrays.IsEmpty && overY && not info.HasReynolds && info.KernelOutputRank = 0
+            && (info.Arrays.Length = 1 || info.IsCoIteration)
+        shapeOk
+        && (match resolveCallableIn funcs (fst (peelReynolds info.Kernel)) with
+            | Some k when k.Captures.IsEmpty && not k.IsCudaKernel && not k.IsMpiParallel ->
+                (match k.Params, k.Body with
+                 | [ p ], IRBinOp (IRElementwise, IRMul, a, b, _) -> isParamRef p a && isParamRef p b
+                 | [ p0; p1 ], IRBinOp (IRElementwise, IRMul, a, b, _) when info.Arrays.Length = 2 ->
+                    (isParamRef p0 a || isParamRef p1 a) && (isParamRef p0 b || isParamRef p1 b)
+                 | _ -> false)
+            | _ -> false)
+    let builtinAdd (k: IRCallable) =
+        match k.Params, k.Body with
+        | [ p0; p1 ], IRBinOp (_, IRAdd, l, r, _) ->
+            (isParamRef p0 l && isParamRef p1 r) || (isParamRef p1 l && isParamRef p0 r)
+        | _ -> false
+    // The lifted `let m = <map over y>` whose ONE reader is `reduce(m, k, init)`
+    // inside a host binding's value.
+    let foldSites (yId: IRId) (hostValue: IRExpr) : (IRId * ApplyInfo * IRExpr * IRExpr option) list =
+        let found = ResizeArray()
+        iterIRExpr (fun n ->
+            match n with
+            | IRLet (mid, IRCompute (IRApplyCombinator info), body)
+                when info.Arrays |> List.exists (function IRVar (a, _) -> a = yId | _ -> false) ->
+                let mutable count = 0
+                let mutable site = None
+                iterIRExpr (fun m ->
+                    match m with
+                    | IRVar (v, _) when v = mid -> count <- count + 1
+                    | IRReduce (IRVar (v, _), k, init) when v = mid -> site <- Some (k, init)
+                    | _ -> ()) body
+                (match site with
+                 | Some (k, init) when count = 1 -> found.Add((mid, info, k, init))
+                 | _ -> ())
+            | _ -> ()) hostValue
+        List.ofSeq found
+    for KeyValue (yId, (denseExpr, maskExpr)) in modul.CompoundInits do
+        match indexOf yId with
+        | None -> ()
+        | Some yi ->
+        let yb = arr.[yi]
+        let yName = yb.Name
+        match stripUnits yb.Type with
+        | ArrayElem at when at.IndexTypes |> List.exists (fun ix -> ix.IxKind = IxKCompound) ->
+            let rank1 =
+                at.IndexTypes.Length = 1
+                && (List.head at.IndexTypes).IxKind = IxKCompound && (List.head at.IndexTypes).Rank = 1
+            if not rank1 then
+                decide yName (Blade.Effects.Declined "v1 fuses the rank-1 compaction only: a rank-k mask (hashed index) or trailing dims keep the separate passes") []
+            else
+            // ---- B4b: the compaction ------------------------------------
+            let compactionDecision : Result<CompactionPlan * string list, string> =
+                match denseExpr, maskExpr with
+                | IRVar (xId, _), IRVar (kId, _) ->
+                    (match indexOf kId with
+                     | Some ki when ki < yi ->
+                        let kb = arr.[ki]
+                        (match kb.Value with
+                         | IRMask (IRVar (srcId, _), pred) when srcId = xId ->
+                            let predOk =
+                                match resolveCallableIn funcs pred with
+                                | Some pc ->
+                                    (match pc.Params with
+                                     | [ p ] -> pc.Captures.IsEmpty && totalScalar p pc.Body
+                                     | _ -> false)
+                                | None -> false
+                            let between = [ ki + 1 .. yi - 1 ] |> List.map (fun i -> arr.[i])
+                            let offending =
+                                between |> List.tryPick (fun b ->
+                                    if Set.contains kId (refs b.Value) then Some $"`{b.Name}` reads `{kb.Name}` between the mask and the compound"
+                                    elif (facts b.Value).MayWrite then Some $"`{b.Name}` may write (an assignment or a mutating call) between the mask and the compound"
+                                    else None)
+                            // (IsMutable is no evidence either way: every
+                            // non-static binding is assignable in its own
+                            // scope; an actual assignment is.)
+                            if assignedAnywhere kId then Error $"`{kb.Name}` is assigned"
+                            elif not predOk then Error $"the mask predicate of `{kb.Name}` is not a pure, total scalar function of the cell (v1 judges literal arithmetic, comparisons and logic over the one parameter)"
+                            else
+                            match offending with
+                            | Some why -> Error why
+                            | None ->
+                                Ok ({ MaskId = kId; MaskName = kb.Name; CompoundId = yId; CompoundName = yName
+                                      SourceId = xId; CountCpp = ref None; CountLlvm = ref None },
+                                    [ $"`{kb.Name}`'s count is taken in its own mask pass (no count pass); the kept-position fill and the value gather are ONE branchless pass `v = x[i]; {yName}[q] = v; pos[q] = i; q += {kb.Name}[i]` (m + 1 cells in both buffers, the slack never exposed)"
+                                      $"`{yName}`'s index: dense extent n, cardinality m, the ascending kept positions (keyed reads, BL8006 unchanged); positions always built (B4d deferred); `{kb.Name}` stays stored"
+                                      "stable, ascending, serial: the same compaction in fewer sweeps" ])
+                         | IRMask _ -> Error "the mask's source is not the compound's dense operand"
+                         | _ -> Error "the compound's mask is not a let-bound `mask(x, pred)`")
+                     | _ -> Error "the compound's mask is not a let-bound `mask(x, pred)` ahead of it")
+                | _ -> Error "the mask or the dense operand is written in place (v1 fuses a let-bound mask over a stored array)"
+            let compaction =
+                match compactionDecision with
+                | Error why ->
+                    decide yName (Blade.Effects.Declined why) []
+                    None
+                | Ok (plan, evidence) ->
+                    if not enabled then
+                        decide yName (Blade.Effects.Declined "disabled by BLADE_COMPACTION_FUSION") evidence
+                        None
+                    else
+                        CompactionTable.record plan
+                        decide yName Blade.Effects.Applied evidence
+                        Some plan
+            // ---- B4a (+ B4c): the folds over y's self-product -----------
+            for hi in yi + 1 .. arr.Length - 1 do
+                let hb = arr.[hi]
+                for (mid, info, k, init) in foldSites yId hb.Value do
+                    let what = $"fold of `{yName} * {yName}`"
+                    let declined (why: string) = decide hb.Name (Blade.Effects.Declined why) [ what ]
+                    let fk = resolveCallableIn funcs (fst (peelReynolds k))
+                    let elemOk =
+                        match stripUnits at.ElemType with
+                        | IRTScalar ETFloat64 -> true
+                        | _ -> false
+                    if init.IsSome then declined "a seeded fold (v1 fuses the unseeded `reduce(y * y, op)`)"
+                    elif not (squareMap info yId) then declined $"the folded map is not the self-product `{yName} * {yName}` of `{yName}`'s own cells (v1 fuses only it: no outer product, no co-iteration with another array, no capture)"
+                    elif not elemOk then declined "the compound's element is not Float64"
+                    // The SNAPSHOT proof: the map materialized `y * y` at its
+                    // let; the fold reads `y` itself at the reduce. Equal only
+                    // if nothing writes between them -- and the map and the
+                    // reduce both sit inside `hb`'s value, so no write in that
+                    // value at all is the proof (a mutating call through a
+                    // `mut` parameter or an alias writes without naming `y`).
+                    elif (facts hb.Value).MayWrite then
+                        declined $"`{hb.Name}` may write (an assignment or a mutating call) between the map's materialization and the fold, so the map's snapshot could differ from `{yName}` at the fold"
+                    else
+                    match fk with
+                    | None -> declined "the fold kernel does not resolve to a callable"
+                    | Some f when f.IsOmpParallel || f.IsCudaKernel || f.IsMpiParallel ->
+                        declined "the fold kernel requests a thread team or a device (`where omp` / cuda / mpi): v1 keeps the materialized route, which owns that census"
+                    | Some f when not (builtinAdd f) -> declined "the fold kernel is not the builtin `+` (v1 fuses `reduce(y * y, (+))`)"
+                    | Some _ ->
+                        // Feeding the chain inside the compaction pass moves
+                        // its evaluation from `hb` up to `y`: sound when no
+                        // one can change `y`'s cells in between. Without an
+                        // alias analysis (a `let mut alias = y` shares the
+                        // storage; a call through a `mut` parameter writes
+                        // without naming `y`), the proof is NO write at all
+                        // from `y` through `hb`, and no assignment to `y`.
+                        let inPass =
+                            compaction.IsSome && not (assignedAnywhere yId)
+                            && ([ yi + 1 .. hi ] |> List.forall (fun i -> not (facts arr.[i].Value).MayWrite))
+                        let evidence =
+                            [ $"`{hb.Name}` = {what}: folded straight over `{yName}`'s compact buffer (m contiguous cells), no square pool; licensed: the lane form, repro: the unseeded serial chain from the first kept square, in kept order; every product rounded before its add in both lanes (C++ an asm rounding barrier, LLVM an undecorated fmul), as the stored product was; no write between the map and the fold"
+                              (if inPass then $"under the serial (repro) form the chain is fed inside `{yName}`'s compaction pass, block by block, from completed cells only; the empty check (BL8003) stays at `{hb.Name}`"
+                               else $"the fold runs at `{hb.Name}` (the compaction pass does not feed it)")
+                              $"`{yName}` and every named binding stay stored" ]
+                        if not enabled then
+                            decide hb.Name (Blade.Effects.Declined "disabled by BLADE_COMPACTION_FUSION") evidence
+                        else
+                            CompactionTable.recordFold
+                                { MapId = mid; CompoundId = yId; CompoundName = yName; HostName = hb.Name
+                                  FoldKernel = k; InPass = inPass
+                                  EmittedCpp = ref None; EmittedLlvm = ref None }
+                            decide hb.Name Blade.Effects.Applied evidence
+        | _ -> ()
+
+// --- Compact row classes: the orbit fold's class sums behind each row (B3) --
+//
+// The pairkernel shape: a compact rank-2 producer (SymIdx<2, n> inclusive or
+// AntisymIdx<2, n> strict, the plain compact nest writing one packed row per
+// outer iteration) followed by a logical walk the orbit-class fold
+// (Blade.OrbitFold) takes. Today the orbit fold re-reads the whole packed pool
+// in a second pass (threaded, under a fold `omp`, by its own team with a
+// boustrophedon row deal). Scheduled here, each packed row's CLASS partials --
+// symmetric: d[i] = f(K(i, i)) (weight 1) and o[i] = sum_{j>i} f(K(i, j))
+// (weight 2); strict: o[i] = sum f(K(i, j)), plus o-[i] = sum f(-K(i, j)) for
+// a kernel of unknown parity -- are computed right after the row is stored,
+// FROM ZERO in a fixed per-row scheme, into rank-1 arrays; the consumer sums
+// each array in ascending row order and applies the orbit plan's existing
+// addition-only `Total` combine and outer seed.
+//
+// LICENSED ONLY. It is one more association of the licensed `+` folds over
+// the same multiset (each class split into disjoint per-row subsets, combined
+// in row order) -- OrbitFold.fs's header argument, unchanged -- so it is taken
+// exactly where the orbit fold itself is (every level a licensed builtin `+`,
+// inner seeds +0, not under BLADE_FP_REPRO=1). Bits change relative to the
+// per-thread orbit tree and become a function of the data alone: no
+// accumulator is carried across rows, so team size and schedule do not enter.
+//
+// This planner records only IR-level facts (it compiles before OrbitFold):
+// the producer, the consumer and the consumer's fold. The orbit plan is
+// resolved by each emitter at the producer (with the same recogniser and the
+// same inputs the consumer's orbit dispatch uses); a lane that cannot place
+// the epilogue publishes nothing and the consumer keeps the orbit pass.
+
+/// One scheduled compact producer / orbit-fold consumer pair.
+type CompactRowPlan = {
+    ProducerId: IRId
+    ProducerName: string
+    ConsumerId: IRId
+    ConsumerName: string
+    /// The consumer's `IRReduceCompute (comp, kernel, seed)` -- the input the
+    /// emitters hand OrbitFold.recognise at the producer.
+    ConsumerComp: IRExpr
+    ConsumerKernel: IRExpr
+    ConsumerSeed: IRExpr
+    /// The bindings that DOMINATE the producer (bound before it in its own
+    /// chain, the enclosing function's parameters, the module bindings ahead
+    /// of the enclosing top-level binding). The epilogue evaluates the cell
+    /// body at the producer, so every free variable of that body must be one
+    /// of these (`CompactRowTable.bodyDominated`, checked at emission).
+    DominatingIds: Set<IRId>
+    /// The C++ lane's handshake: the per-row class arrays' names (accumulator
+    /// order), written when the nest placed the epilogue; read by the consumer.
+    EmittedCpp: string list option ref
+    /// The LLVM lane's twin: the class pools' pointer registers.
+    EmittedLlvm: string list option ref
+    /// Set by the C++ producer side when it recorded its own decline, so the
+    /// consumer does not add a second, vaguer one.
+    DeclinedCpp: bool ref
+}
+
+module CompactRowTable =
+    open System.Threading
+    type State = { ByProducer: Map<IRId, CompactRowPlan>; ByConsumer: Map<IRId, CompactRowPlan> }
+    let private empty = { ByProducer = Map.empty; ByConsumer = Map.empty }
+    let private cell = new AsyncLocal<State>()
+    let private get () = match box cell.Value with null -> empty | _ -> cell.Value
+    let reset () = cell.Value <- empty
+    let record (p: CompactRowPlan) =
+        let s = get ()
+        cell.Value <- { ByProducer = Map.add p.ProducerId p s.ByProducer
+                        ByConsumer = Map.add p.ConsumerId p s.ByConsumer }
+    let tryProducer (id: IRId) : CompactRowPlan option = Map.tryFind id (get ()).ByProducer
+    let tryConsumer (id: IRId) : CompactRowPlan option = Map.tryFind id (get ()).ByConsumer
+
+    /// May evaluating the orbit plan's cell body ABORT? (integer `/` `%` `^`,
+    /// a cast to an integer type, a domain-checked intrinsic, a call, a read.)
+    /// Moving the body behind each produced row would reorder such an abort
+    /// against the producer's later rows, so a body that may fail declines.
+    let bodyMayFail (body: IRExpr) : bool =
+        let intTy (t: IRType) =
+            match stripUnits t with
+            | IRTScalar (ETInt64 | ETInt32) -> true
+            | _ -> false
+        let mutable fails = false
+        iterIRExpr (fun n ->
+            match n with
+            | IRBinOp (_, (IRDiv | IRMod | IRCaret), l, r, _) when intTy (typeOf l) || intTy (typeOf r) -> fails <- true
+            | IRUnaryOp (IRCast (et, _), _) when (match et with ETInt64 | ETInt32 -> true | _ -> false) -> fails <- true
+            | IRUnaryOp (IRMath m, _) when m.Contains "gamma" -> fails <- true
+            | IRIndex _ | IRApp _ | IRMatch _ | IRRandAt _ -> fails <- true
+            | _ -> ()) body
+        fails
+
+    /// Does every FREE variable of the resolved cell body (the read variable
+    /// `readVarId` and the body's own let binders excluded) dominate the
+    /// producer? The epilogue evaluates the body right after each packed row,
+    /// so a scalar bound between the producer and the fold -- or anything the
+    /// plan cannot place -- declines.
+    let bodyDominated (plan: CompactRowPlan) (readVarId: IRId) (body: IRExpr) : bool =
+        let binders = System.Collections.Generic.HashSet<IRId>()
+        let used = System.Collections.Generic.HashSet<IRId>()
+        iterIRExpr (fun n ->
+            match n with
+            | IRLet (id, _, _) -> binders.Add id |> ignore
+            | IRVar (id, _) -> used.Add id |> ignore
+            | _ -> ()) body
+        used |> Seq.forall (fun id -> id = readVarId || binders.Contains id || plan.DominatingIds.Contains id)
+
+/// Plan the compact row-class schedule: function-body let chains, the
+/// top-level binding sequence, and the let chain nested inside a top-level
+/// binding's value (pairkernel's `let (checksum, ..) = { let kmat ..; let ss .. }`).
+/// Records into `CompactRowTable` and the decision collector
+/// (`compact-row-classes`, its declines; the emitter records the outcome).
+let planCompactRowClasses (modul: IRModule) : unit =
+    let funcs = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+    let facts = cseFactsOf funcs
+    let decide (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
+        Blade.Effects.Decisions.record
+            { Blade.Effects.Rule = "compact-row-classes"; Version = 1
+              Span = declSpanOf subject; Subject = subject
+              Outcome = outcome; Evidence = evidence }
+    let refs (e: IRExpr) = collectVarRefsIR e
+    // Does `e` read `pId`, directly or through a callable it names (a lifted
+    // kernel lambda reads its array by id inside its own body)?
+    let readsTransitively (pId: IRId) (e: IRExpr) =
+        let visited = System.Collections.Generic.HashSet<IRId>()
+        let rec go (e: IRExpr) =
+            let r = refs e
+            Set.contains pId r
+            || (r |> Set.exists (fun id ->
+                    match Map.tryFind id funcs with
+                    | Some cl when visited.Add id -> go cl.Body
+                    | _ -> false))
+        go e
+    let compactRank2 (info: ApplyInfo) =
+        match stripUnits info.OutputType, resolveCallableIn funcs (fst (peelReynolds info.Kernel)) with
+        | ArrayElem at, Some pk
+            when not at.IsVirtual && info.KernelOutputRank = 0
+                 && not pk.IsCudaKernel && not pk.IsMpiParallel ->
+            (match at.IndexTypes with
+             | [ ix ] when ix.Rank = 2 && (ix.Symmetry = SymSymmetric || ix.Symmetry = SymAntisymmetric) ->
+                 Some (ix, info.HasReynolds)
+             | _ -> None)
+        | _ -> None
+    // `outer`: the ids that dominate the whole chain (the enclosing function's
+    // parameters, or the module bindings ahead of the enclosing binding).
+    let planChain (outer: Set<IRId>) (items: (IRId * string * IRExpr) list) =
+        let arr = List.toArray items
+        for pi in 0 .. arr.Length - 1 do
+            let (pId, pName, pVal) = arr.[pi]
+            match pVal with
+            | IRCompute (IRApplyCombinator pinfo) ->
+                match compactRank2 pinfo with
+                | None -> ()
+                | Some (_, hasReynolds) ->
+                    let consumer =
+                        [ pi + 1 .. arr.Length - 1 ] |> List.tryPick (fun ci ->
+                            let (cId, cName, cVal) = arr.[ci]
+                            match cVal with
+                            | IRReduceCompute ((IRApplyCombinator oinfo as comp), k, seed) ->
+                                (match oinfo.Arrays, resolveCallableIn funcs oinfo.Kernel with
+                                 | [ IRRange ([ _ ], None) ], Some ocl
+                                     when ocl.Params.Length = 1 && readsTransitively pId ocl.Body ->
+                                     Some (ci, cId, cName, comp, k, seed)
+                                 | _ -> None)
+                            | _ -> None)
+                    match consumer with
+                    | None -> ()
+                    | Some (ci, cId, cName, comp, k, seed) ->
+                        let what = $"orbit fold of `{pName}`"
+                        let declined (why: string) = decide cName (Blade.Effects.Declined why) [ what ]
+                        let between = [ pi + 1 .. ci - 1 ] |> List.map (fun i -> arr.[i])
+                        let offending =
+                            between |> List.tryPick (fun (_, iName, iVal) ->
+                                if readsTransitively pId iVal then Some $"`{iName}` reads `{pName}` between the producer and the fold"
+                                elif (facts iVal).MayWrite then Some $"`{iName}` may write (an assignment or a mutating call) between the producer and the fold"
+                                else None)
+                        let (_, _, cVal) = arr.[ci]
+                        if hasReynolds then declined "a Reynolds kernel (v1 schedules the plain compact nest only)"
+                        // The consumer's OWN evaluation (its outer seed, the
+                        // walk) runs after the producer's rows are summed: a
+                        // write there could change the cells first.
+                        elif (facts cVal).MayWrite then
+                            declined "the fold itself may write (its seed or walk calls something that assigns or mutates), so the producer's rows could change before the fold reads them"
+                        else
+                        match offending with
+                        | Some why -> declined why
+                        | None ->
+                            let evidence =
+                                [ $"`{cName}` = {what}: each packed row's class partials (diagonal / off-diagonal; strict: the orbit class, and its mirror for a kernel of unknown parity) are computed from zero right after the row is stored, into rank-1 arrays; the consumer sums each in ascending row order and applies the orbit plan's addition-only combine"
+                                  "licensed regrouping (taken only where the orbit-class fold is: every level a licensed builtin `+`, not under BLADE_FP_REPRO=1); bits independent of team size" ]
+                            if not (compactRowClassesEnabled ()) then
+                                decide cName (Blade.Effects.Declined "disabled by BLADE_COMPACT_ROW_CLASSES") evidence
+                            else
+                                CompactRowTable.record
+                                    { ProducerId = pId; ProducerName = pName
+                                      ConsumerId = cId; ConsumerName = cName
+                                      ConsumerComp = comp; ConsumerKernel = k; ConsumerSeed = seed
+                                      DominatingIds = Set.union outer (set [ for i in 0 .. pi - 1 -> (let (id, _, _) = arr.[i] in id) ])
+                                      EmittedCpp = ref None; EmittedLlvm = ref None; DeclinedCpp = ref false }
+            | _ -> ()
+    let rec chain (e: IRExpr) : (IRId * string * IRExpr) list =
+        match e with
+        | IRLet (id, v, body) -> (id, $"__v{id}", v) :: chain body
+        | _ -> []
+    for f in modul.Functions do
+        planChain (f.Params |> List.map (fun p -> p.VarId) |> Set.ofList) (chain f.Body)
+    planChain Set.empty (modul.Bindings |> List.map (fun b -> (b.Id, b.Name, b.Value)))
+    modul.Bindings |> List.iteri (fun bi b ->
+        match b.Value with
+        | IRLet _ ->
+            let ahead = modul.Bindings |> List.take bi |> List.map (fun x -> x.Id) |> Set.ofList
+            planChain ahead (chain b.Value)
+        | _ -> ())
 
 // --- Slice-write fusion: destination passing for a rank-1 row write --------
 //

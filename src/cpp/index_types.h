@@ -345,6 +345,9 @@ private:
  * constructor is kept for the sites that still hand over a bit vector
  * (cuda range<CompoundIdx>, alloc_layout_tests) and builds the same table.
  * A key outside the kept set is BL8006, exactly as the generic linearize.
+ * Under compaction fusion the emitter counts in the mask pass and fills the
+ * table in its value-gather pass, and hands it over to the ADOPTING
+ * (name, n, m, pos) constructor: the same table, built without a pass here.
  *
  * The data gather is NOT here: codegen reads rank_to_tuple[q][0] and copies
  * cell q from the dense pool (EmitCpp.compactScatter, Rank1 arm), so the
@@ -365,6 +368,9 @@ struct compound_index_t<1> : abstract_idx_t<1> {
 		positions_t& operator=(const positions_t&) = delete;
 		~positions_t() { delete[] p; }
 		void reset(size_t cap) { delete[] p; p = cap ? new IDX[cap] : nullptr; n = 0; }
+		// Take ownership of a caller-built `new IDX[]` buffer holding `count`
+		// table cells (plus whatever slack the caller allocated).
+		void adopt(IDX* buf, size_t count) { delete[] p; p = buf; n = count; }
 		IDX& operator[](size_t i) { return p[i]; }
 		const IDX& operator[](size_t i) const { return p[i]; }
 		size_t size() const { return n; }
@@ -388,6 +394,20 @@ struct compound_index_t<1> : abstract_idx_t<1> {
 		size_t q = 0;
 		for (size_t i = 0; i < n; i++) { rank_to_tuple.p[q][0] = i; q += (size_t)(!!keep[i]); }
 		rank_to_tuple.n = m;
+		this->cardinality = m;
+	}
+
+	/* The ADOPTING constructor (compaction fusion, Blade.Optimize
+	 * planCompactionFusion): the caller already counted m (in its mask pass)
+	 * and filled `pos` -- a `new IDX[m + 1]` buffer whose first m cells are
+	 * the ascending kept positions, the last one the branchless fill's slack
+	 * -- in the same pass that gathered the values. No count, no fill here;
+	 * the table is the one the compaction constructor would have built
+	 * (dense extent n, cardinality m, rank_to_tuple.n = m), and it is owned
+	 * and freed exactly as that one is. */
+	compound_index_t(std::string name_in, size_t n, size_t m, IDX* pos)
+		: abstract_idx_t<1>(std::move(name_in), n), extents{ n } {
+		rank_to_tuple.adopt(pos, m);
 		this->cardinality = m;
 	}
 

@@ -1,0 +1,15 @@
+// TEST: Compaction fusion keeps the abort order: an intervening failure comes before the empty fold (aborts)
+// The fused compaction runs at `y`; under BLADE_FP_REPRO=1 its pass also
+// feeds the fold's chain. The fold's own empty check (BL8003) stays at the
+// fold's declaration, so a failure written BETWEEN the compaction and the
+// fold -- here an integer division by the empty compound's extent, BL8013 --
+// is the one every lane reports, as before (line 10 once the harness drops the TEST line).
+type Ix = Idx<1003>
+let x = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i)) |> compute
+let keep = mask(x, lambda(v) -> v > 5000.0)
+let y = compound(x, keep)
+let boom = 10 / extents(y)
+let checksum = reduce(y * y, (+)) + Float64(extents(y))
+// ABORT: BL8013
+// ABORT: -->
+// ABORT: .blade:10

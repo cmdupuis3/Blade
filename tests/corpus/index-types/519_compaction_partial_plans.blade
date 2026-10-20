@@ -1,0 +1,29 @@
+// TEST: Compaction fusion's partial plans: fold without fused compaction, and the reverse
+// The two halves of compaction fusion are planned separately (`blade plan`,
+// rule `compaction-fusion`): when the mask is read between the mask and the
+// compound, the compaction keeps its count/fill/gather passes but the
+// `y * y` fold still reads y's buffer with no square pool; when the fold
+// asks for a thread team (`where omp`, Path B) or folds something other than
+// the self-product, the fold keeps its materialized operand while the
+// compaction is still fused. Same values either way. Integer-valued data.
+type Ix = Idx<103>
+let x = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 7) |> compute
+// (a) the mask is read before the compound: compaction declined, fold fused
+let keep_a = mask(x, lambda(v) -> v > 2.5)
+let k0 = keep_a(3)
+// EXPECT: k0 = true
+let ya = compound(x, keep_a)
+let sa = reduce(ya * ya, (+)) + Float64(extents(ya))
+// EXPECT: sa = 1287.0
+// (b) a `where omp` fold kernel: compaction fused, fold materialized
+let keep_b = mask(x, lambda(v) -> v > 2.5)
+let yb = compound(x, keep_b)
+let sb = reduce(yb * yb, lambda(p, q) where omp -> p + q)
+// EXPECT: sb = 1229.0
+// (c) not the self-product: compaction fused, fold materialized
+let keep_c = mask(x, lambda(v) -> v > 2.5)
+let yc = compound(x, keep_c)
+let sc = reduce(yc * 2.0, (+))
+// EXPECT: sc = 518.0
+let nc = extents(yc)
+// EXPECT: nc = 58

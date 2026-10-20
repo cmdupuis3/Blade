@@ -1,0 +1,39 @@
+// TEST: Compaction fusion declines across writes: a mutated compound keeps the as-written values
+// Compaction fusion's two motions need a write-free path (`blade plan`, rule
+// `compaction-fusion`): the fold over y's buffer replaces a map that was
+// MATERIALIZED earlier (its snapshot), and the in-pass chain (BLADE_FP_REPRO=1)
+// moves the fold up to the compaction. A write to a kept cell through a `mut`
+// parameter -- on `y` itself inside the fold's block, or through an alias
+// (`let mut alias = y2`, which names no `y2` at the call) -- declines each
+// motion it crosses, so every lane folds the values the program wrote.
+type Ix = Idx<9>
+let x = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i)) |> compute
+// (a) a named map, then a write to y, then the fold of the map: the fold
+// reads the squares as they were when the map was materialized
+let keep = mask(x, lambda(v) -> v > 1.5)
+let mut y = compound(x, keep)
+function overwrite(a: mut Array<Float64 like CompoundIdx<keep>>) -> Int64 = {
+    a(2) = 50.0
+    1
+}
+let s = {
+    let yy = y * y |> compute
+    let changed = overwrite(y)
+    reduce(yy, (+))
+}
+// EXPECT: s = 203.0
+let after = y(2)
+// EXPECT: after = 50.0
+// (b) a write through an alias between the compaction and the fold: the
+// fold sees the written cell
+let keep2 = mask(x, lambda(v) -> v > 1.5)
+let y2 = compound(x, keep2)
+function overwrite2(a: mut Array<Float64 like CompoundIdx<keep2>>) -> Int64 = {
+    a(2) = 50.0
+    1
+}
+let mut alias = y2
+let changed2 = overwrite2(alias)
+// EXPECT: changed2 = 1
+let s2 = reduce(y2 * y2, (+))
+// EXPECT: s2 = 2699.0

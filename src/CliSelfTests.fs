@@ -648,8 +648,12 @@ let runCliSmokeTests () : TH.BlockResult =
                     + "let g: Array<Int64 like R, C> = [[1, 2, 3], [4, 5, 6]]\n"
                     + "let h = compound(g, mask(g, lambda(v) -> v % 2 == 0))\n")
                 let compoundEnv llvm = [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", llvm); ("BLADE_FP_REPRO", null) ]
+                // compound1's let-bound mask takes compaction fusion
+                // (Blade.Optimize.planCompactionFusion): the same
+                // representation, its table counted in the mask pass and
+                // filled in the gather pass.
                 let compactionLine =
-                    ": applied [representation: rank-1 compaction (count pass + branchless kept-position fill, gather by position; no hash table; keyed reads by binary search over the kept positions)"
+                    ": applied [representation: rank-1 compaction (kept positions counted in the mask pass and filled in the gather pass -- compaction fusion; no hash table; keyed reads by binary search over the kept positions)"
                 let hashedLine =
                     "declined -- hashed SparseIdx: a rank-2 mask has no closed-form rank, so compound_index_t<2> keeps one tuple->rank hash entry per present cell"
                 for llvm in [ null; "1" ] do
@@ -667,6 +671,245 @@ let runCliSmokeTests () : TH.BlockResult =
                         (code = 0 && out.Contains "[compound v1] h @ " && out.Contains hashedLine
                          && not (out.Contains compactionLine))
                         (out + err)
+        finally
+            try Directory.Delete(dir, true) with _ -> ()
+    // --- COMPACTION FUSION, run (Blade.Optimize.planCompactionFusion) ---
+    // The licensed fold form and the LLVM lane's arithmetic are invisible to
+    // the repro-pinned differentials, so the knob is compared here, at run
+    // time, over NON-DYADIC data (n = 1003: four 256-cell blocks and a tail):
+    // full fusion, and the fold alone (B4a: a mask read between the mask and
+    // the compound declines the compaction), in both lanes. Identity regime
+    // (BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off): gate off and on print the SAME
+    // checksum AND the same residual `checksum - floor(checksum)`, whose 15
+    // printed digits resolve every bit of the checksum (the subtraction is
+    // exact). Default build: within 1e-12 relative.
+    if not capabilities.Value.HasGpp || selfExe.IsNone then
+        record "compaction fusion: gate off vs on at run time" TH.Skip "requires g++ and the Blade executable"
+    else
+        let dir = Path.Combine(Path.GetTempPath(), "blade_cli_cfuse_" + Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory dir |> ignore
+        try
+            let body (between: string) =
+                "type Ix = Idx<1003>\n"
+                + "function gen(k: Int64) -> Float64 = {\n"
+                + "    let h1 = ((k + 10000019) * 1103515245 + 12345) % 2147483648\n"
+                + "    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648\n"
+                + "    2.0 * (Float64(h2) / 2147483648.0)\n"
+                + "}\n"
+                + "let x = method_for(range<Ix>) <@> lambda(i) -> gen(Int64(i)) |> compute\n"
+                + "let keep = mask(x, lambda(v) -> v > 1.0)\n"
+                + between
+                + "let y = compound(x, keep)\n"
+                + "let checksum = reduce(y * y, (+))\n"
+                + "let resid = checksum - floor(checksum)\n"
+            File.WriteAllText(Path.Combine(dir, "full.blade"), body "")
+            File.WriteAllText(Path.Combine(dir, "b4a.blade"), body "let k0 = keep(3)\n")
+            let valueOf (key: string) (out: string) =
+                out.Split('\n') |> Array.tryPick (fun l ->
+                    let t = l.Trim()
+                    if t.StartsWith(key + " = ") then Some (t.Substring(key.Length + 3)) else None)
+            for llvm in [ null; "1" ] do
+                for prog in [ "full"; "b4a" ] do
+                    let lane = if isNull llvm then "C++" else "LLVM"
+                    let runWith (gate: string) (repro: bool) =
+                        let env =
+                            [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", llvm); ("BLADE_COMPACTION_FUSION", gate)
+                              ("BLADE_FP_REPRO", (if repro then "1" else null))
+                              ("BLADE_FP_CONTRACT", (if repro then "off" else null)) ]
+                        spawnWith env dir [ "run"; $"{prog}.blade"; "--print"; "checksum,resid"; "--verbose" ]
+                    let (c1, o1, e1) = runWith "0" true
+                    let (c2, o2, e2) = runWith "1" true
+                    // `--verbose` names the emitted file on stderr: `.ll` is the LLVM lane.
+                    let laneOk (o: string) = isNull llvm || o.Contains ".ll"
+                    let (k1, r1, k2, r2) = (valueOf "checksum" o1, valueOf "resid" o1, valueOf "checksum" o2, valueOf "resid" o2)
+                    let same = c1 = 0 && c2 = 0 && laneOk (o2 + e2) && k1 = k2 && r1 = r2 && r1.IsSome
+                    recordCase $"cli: compaction fusion ({lane}, {prog}) identity regime: gate off == on, every bit"
+                        same ($"off: {k1} / {r1}; on: {k2} / {r2} {e1}{e2}")
+                    let (c3, o3, e3) = runWith "0" false
+                    let (c4, o4, e4) = runWith "1" false
+                    let (k3, k4) = (valueOf "checksum" o3, valueOf "checksum" o4)
+                    let close =
+                        match k3, k4 with
+                        | Some a, Some b when c3 = 0 && c4 = 0 && laneOk (o4 + e4) ->
+                            let (fa, fb) = (Double.Parse a, Double.Parse b)
+                            abs (fa - fb) <= 1e-12 * abs fa
+                        | _ -> false
+                    recordCase $"cli: compaction fusion ({lane}, {prog}) default build: gate off vs on within 1e-12"
+                        close ($"off: {k3}; on: {k4} {e3}{e4}")
+            // The empty unseeded fold aborts BL8003 at the FOLD's own line (5),
+            // after the fused compaction (line 4), gate on and off, both
+            // lanes, both builds (under repro the chain was fed in the pass).
+            File.WriteAllText(Path.Combine(dir, "empty.blade"),
+                "type Ix = Idx<1003>\n"
+                + "let x = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i)) |> compute\n"
+                + "let keep = mask(x, lambda(v) -> v > 5000.0)\n"
+                + "let y = compound(x, keep)\n"
+                + "let checksum = reduce(y * y, (+)) + Float64(extents(y))\n")
+            for llvm in [ null; "1" ] do
+                for repro in [ false; true ] do
+                    let lane = if isNull llvm then "C++" else "LLVM"
+                    let build = if repro then "repro" else "default"
+                    let ok =
+                        [ "0"; "1" ] |> List.forall (fun gate ->
+                            let env =
+                                [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", llvm); ("BLADE_COMPACTION_FUSION", gate)
+                                  ("BLADE_FP_REPRO", (if repro then "1" else null)) ]
+                            let (code, out, err) = spawnWith env dir [ "run"; "empty.blade" ]
+                            let all = out + err
+                            code <> 0 && all.Contains "error[BL8003]" && all.Contains "empty.blade:5")
+                    recordCase $"cli: compaction fusion ({lane}, {build}): the empty fold aborts BL8003 at its own line, gate off and on" ok ""
+            // COMPACT ROW CLASSES (Blade.Optimize.planCompactRowClasses): the
+            // licensed checksum of a compact producer's orbit fold is summed
+            // per packed row and combined in row order, so its bits do not
+            // depend on the team: OMP_NUM_THREADS 1 / 3 / 8 and the serial
+            // build (BLADE_OMP_THREADS=1) print the same checksum AND exact
+            // residual. Non-dyadic cells (exp); within 1e-12 of the gate-off
+            // orbit pass.
+            File.WriteAllText(Path.Combine(dir, "rows.blade"),
+                "type Pts = Idx<101>\n"
+                + "type Dim = Idx<2>\n"
+                + "let pts = method_for(range<Pts>, range<Dim>) <@> lambda(i, d) -> Float64((Int64(i) * 37 + Int64(d) * 11) % 97) / 97.0 |> compute\n"
+                + "let k = method_for(pts, pts) <@> lambda(a: Array<Float64 like Dim>, b: Array<Float64 like Dim>) where comm(a, b), omp(a: 1) -> {\n"
+                + "    let dx = a((0 : Dim)) - b((0 : Dim))\n"
+                + "    let dy = a((1 : Dim)) - b((1 : Dim))\n"
+                + "    exp(-(dx * dx + dy * dy))\n"
+                + "} |> compute\n"
+                + "let ss = reduce(method_for(range<Pts>) <@> lambda(i) -> reduce(method_for(range<Pts>) <@> lambda(j) -> k(i, j) * k(i, j), (+)), lambda(u, v) where omp -> u + v, 0.0)\n"
+                + "let resid = ss - floor(ss)\n")
+            let rowsRun (env: (string * string) list) =
+                let (code, out, err) = spawnWith ([ ("BLADE_BLAS", "off"); ("BLADE_FP_REPRO", null); ("BLADE_LLVM", null) ] @ env) dir [ "run"; "rows.blade"; "--print"; "ss,resid" ]
+                (code, valueOf "ss" out, valueOf "resid" out, err)
+            // OBSERVED teams: the omp-coverage instrumentation (codegen test
+            // mode) prints each parallel region's actual team size; the
+            // program prints every binding, so the stored producer cells are
+            // compared too, not only the checksum. OMP_DYNAMIC=false and no
+            // thread limit; a team the host cannot give is reported as such.
+            let instrumented =
+                CodeGen.setOmpTestMode true
+                try compileToExe (Path.Combine(dir, "rows.blade")) (Some (Path.Combine(dir, "rows_instr.exe"))) false false
+                finally CodeGen.setOmpTestMode false
+            match instrumented with
+            | Error e -> recordCase "cli: compact row classes: observed teams 1 / 3 / 8 give identical output" false e
+            | Ok exe ->
+                let envKeys = [ "OMP_NUM_THREADS"; "OMP_DYNAMIC"; "OMP_THREAD_LIMIT"; "BLADE_COMPACT_ROW_CLASSES" ]
+                let prior = envKeys |> List.map (fun k -> (k, Environment.GetEnvironmentVariable k))
+                let runT (t: string) =
+                    Environment.SetEnvironmentVariable("OMP_NUM_THREADS", t)
+                    Environment.SetEnvironmentVariable("OMP_DYNAMIC", "false")
+                    Environment.SetEnvironmentVariable("OMP_THREAD_LIMIT", null)
+                    match runExecutable exe with
+                    | Ok (0, out) ->
+                        let lines = out.Replace("\r\n", "\n").Split('\n')
+                        let team =
+                            lines |> Array.tryPick (fun l ->
+                                let m = Text.RegularExpressions.Regex.Match(l, @"^\[omp-coverage\] region=k teamsz=(\d+)")
+                                if m.Success then Some (int m.Groups.[1].Value) else None)
+                        let values =
+                            lines |> Array.filter (fun l -> not (l.StartsWith "[omp-coverage]") && not (l.Contains " completed in "))
+                            |> String.concat "\n"
+                        Some (team, values)
+                    | _ -> None
+                let runs =
+                    try [ for t in [ 1; 3; 8 ] -> (t, runT (string t)) ]
+                    finally for (k, v) in prior do Environment.SetEnvironmentVariable(k, v)
+                let teamOf (r: (int option * string) option) = match r with Some (Some n, _) -> string n | _ -> "unobserved"
+                let observed = runs |> List.map (fun (t, r) -> $"T={t}: team {teamOf r}") |> String.concat ", "
+                let available = runs |> List.filter (fun (t, r) -> match r with Some (Some n, _) -> n = t | _ -> false)
+                match runs with
+                | (_, Some (Some 1, v1)) :: _ when available.Length = 3 ->
+                    let same = runs |> List.forall (fun (_, r) -> match r with Some (_, v) -> v = v1 | None -> false)
+                    recordCase "cli: compact row classes: observed teams 1 / 3 / 8 print identical output (stored cells and checksum)" same observed
+                | _ when available.Length >= 2 ->
+                    let vs = available |> List.choose (fun (_, r) -> match r with Some (_, v) -> Some v | None -> None)
+                    record "cli: compact row classes: observed teams 1 / 3 / 8 print identical output (stored cells and checksum)"
+                        (if vs |> List.forall ((=) vs.Head) then TH.Skip else TH.Fail) $"not every team was available ({observed}); the available ones agree: {(vs |> List.forall ((=) vs.Head))}"
+                | _ ->
+                    record "cli: compact row classes: observed teams 1 / 3 / 8 print identical output (stored cells and checksum)" TH.Skip $"teams unavailable on this host: {observed}"
+            // The uninstrumented binary, requested teams and the serial build.
+            let teams =
+                [ for t in [ "1"; "3"; "8" ] -> rowsRun [ ("OMP_NUM_THREADS", t); ("OMP_DYNAMIC", "false"); ("BLADE_OMP_THREADS", null); ("BLADE_COMPACT_ROW_CLASSES", null) ] ]
+                @ [ rowsRun [ ("OMP_NUM_THREADS", null); ("BLADE_OMP_THREADS", "1"); ("BLADE_COMPACT_ROW_CLASSES", null) ] ]
+            let (_, s0, r0, _) = teams.Head
+            let identical = teams |> List.forall (fun (c, s, r, _) -> c = 0 && s.IsSome && r.IsSome && s = s0 && r = r0)
+            let shown = teams |> List.map (fun (c, s, r, e) -> $"{c}:{s}/{r} {e}") |> String.concat "; "
+            recordCase "cli: compact row classes: T = 1 / 3 / 8 and the serial build print identical bits" identical shown
+            let (c9, s9, _, e9) = rowsRun [ ("OMP_NUM_THREADS", "8"); ("BLADE_OMP_THREADS", null); ("BLADE_COMPACT_ROW_CLASSES", "0") ]
+            let close =
+                match s0, s9 with
+                | Some a, Some b when c9 = 0 -> abs (Double.Parse a - Double.Parse b) <= 1e-12 * abs (Double.Parse a)
+                | _ -> false
+            recordCase "cli: compact row classes: within 1e-12 of the gate-off orbit pass" close ($"on: {s0}; off: {s9} {e9}")
+            // BOTH LANES, gate off vs on (<= 1e-12 within each lane), and C++
+            // vs LLVM at the same tolerance (their per-row trees differ: the
+            // C++ lane's sq/sum<8> or eight lanes, the LLVM vectorizer's
+            // own). Non-dyadic symmetric data with a NONZERO outer seed, and a
+            // strict pool with a kernel of unknown parity (two classes plus
+            // the zero class; the last row's class is empty); n = 101 leaves
+            // row tails of every length.
+            File.WriteAllText(Path.Combine(dir, "rows2.blade"),
+                "type Pts = Idx<101>\n"
+                + "type Dim = Idx<2>\n"
+                + "let pts = method_for(range<Pts>, range<Dim>) <@> lambda(i, d) -> Float64((Int64(i) * 37 + Int64(d) * 11) % 97) / 97.0 |> compute\n"
+                + "let k = method_for(pts, pts) <@> lambda(a: Array<Float64 like Dim>, b: Array<Float64 like Dim>) where comm(a, b) -> exp(-(a((0 : Dim)) - b((0 : Dim))) * (a((0 : Dim)) - b((0 : Dim))) - a((1 : Dim)) * b((1 : Dim))) |> compute\n"
+                + "let ss = reduce(method_for(range<Pts>) <@> lambda(i) -> reduce(method_for(range<Pts>) <@> lambda(j) -> k(i, j) * k(i, j), (+)), (+), 0.37)\n"
+                + "let w = method_for(pts, pts) <@> lambda(a: Array<Float64 like Dim>, b: Array<Float64 like Dim>) where anticomm(a, b) -> a((0 : Dim)) * b((1 : Dim)) - b((0 : Dim)) * a((1 : Dim)) |> compute\n"
+                + "let sa = reduce(method_for(range<Pts>) <@> lambda(i) -> reduce(method_for(range<Pts>) <@> lambda(j) -> w(i, j) * w(i, j) + w(i, j), (+)), (+))\n")
+            let runLane (llvm: string) (gate: string) =
+                let (code, out, err) =
+                    spawnWith [ ("BLADE_BLAS", "off"); ("BLADE_FP_REPRO", null); ("BLADE_LLVM", llvm); ("BLADE_COMPACT_ROW_CLASSES", gate) ]
+                        dir [ "run"; "rows2.blade"; "--print"; "ss,sa"; "--verbose" ]
+                let laneOk = isNull llvm || err.Contains ".ll" || out.Contains ".ll"
+                (code = 0 && laneOk, valueOf "ss" out, valueOf "sa" out)
+            let near (a: string option) (b: string option) =
+                match a, b with
+                | Some x, Some y -> let (fx, fy) = (Double.Parse x, Double.Parse y) in abs (fx - fy) <= 1e-12 * max (abs fx) 1.0
+                | _ -> false
+            let cOn = runLane null "1"
+            let cOff = runLane null "0"
+            let lOn = runLane "1" "1"
+            let lOff = runLane "1" "0"
+            let show ((ok, a, b): bool * string option * string option) = $"{ok}:{a}/{b}"
+            for (lane, (okOn, ssOn, saOn), (okOff, ssOff, saOff)) in [ ("C++", cOn, cOff); ("LLVM", lOn, lOff) ] do
+                recordCase $"cli: compact row classes ({lane}): gate off vs on within 1e-12 (symmetric + seed, strict unknown parity)"
+                    (okOn && okOff && near ssOn ssOff && near saOn saOff)
+                    ($"on {show (okOn, ssOn, saOn)}; off {show (okOff, ssOff, saOff)}")
+            let (_, cSs, cSa) = cOn
+            let (_, lSs, lSa) = lOn
+            recordCase "cli: compact row classes: C++ vs LLVM within 1e-12" (near cSs lSs && near cSa lSa)
+                ($"C++ {cSs}/{cSa}; LLVM {lSs}/{lSa}")
+            // The bench shape itself (p = 2503), when the checkout is beside
+            // the binary: gate off vs on within 1e-12 in both lanes.
+            let pairSrc =
+                let root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", ".."))
+                Path.Combine(root, "bench", "kernels", "pairkernel", "pairkernel.blade")
+            if not (File.Exists pairSrc) then
+                record "cli: compact row classes: pairkernel p=2503 gate off vs on within 1e-12" TH.Skip "bench/kernels/pairkernel/pairkernel.blade is not beside the binary"
+            else
+                File.Copy(pairSrc, Path.Combine(dir, "pairkernel.blade"), true)
+                let runPk (llvm: string) (gate: string) =
+                    let (code, out, err) =
+                        spawnWith [ ("BLADE_BLAS", "off"); ("BLADE_FP_REPRO", null); ("BLADE_LLVM", llvm); ("BLADE_COMPACT_ROW_CLASSES", gate) ]
+                            dir [ "run"; "pairkernel.blade"; "--print"; "checksum"; "--verbose" ]
+                    let laneOk = isNull llvm || err.Contains ".ll" || out.Contains ".ll"
+                    (code = 0 && laneOk, valueOf "checksum" out)
+                for llvm in [ null; "1" ] do
+                    let lane = if isNull llvm then "C++" else "LLVM"
+                    let (ok1, v1) = runPk llvm "1"
+                    let (ok0, v0) = runPk llvm "0"
+                    recordCase $"cli: compact row classes ({lane}): pairkernel p=2503 gate off vs on within 1e-12" (ok1 && ok0 && near v1 v0) ($"on {v1}; off {v0}")
+            // B4's fold-only LLVM product stays UNDECORATED in the default
+            // build (no `contract`, so it cannot fuse into the add); with the
+            // gate off the materialized map keeps its ordinary flags.
+            let emitLl (gate: string) =
+                let (code, out, _) =
+                    spawnWith [ ("BLADE_BLAS", "off"); ("BLADE_FP_REPRO", null); ("BLADE_FP_CONTRACT", null); ("BLADE_LLVM", "1"); ("BLADE_COMPACTION_FUSION", gate) ]
+                        dir [ "emit"; "b4a.blade" ]
+                (code, out)
+            let (eOn, llOn) = emitLl "1"
+            let (eOff, llOff) = emitLl "0"
+            let bare (ll: string) = Text.RegularExpressions.Regex.IsMatch(ll, @"= fmul double %")
+            recordCase "cli: compaction fusion (LLVM, b4a) default build: the fold's self-product is an undecorated fmul"
+                (eOn = 0 && eOff = 0 && bare llOn && not (bare llOff)) ""
         finally
             try Directory.Delete(dir, true) with _ -> ()
     if not capabilities.Value.HasGpp || selfExe.IsNone then

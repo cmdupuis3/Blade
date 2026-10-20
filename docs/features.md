@@ -191,7 +191,7 @@ Full semantics in [features/sql.md](features/sql.md). All implemented and tested
 | Operation | SQL analogue | One-liner |
 |-----------|--------------|-----------|
 | `mask(A, pred)` | WHERE predicate | Bool presence array over A's own index space; combine with `&&`/`\|\|`; rank 1, or rank k over a plain dense array (the whole index space; `compound(A, m)` compacts every dimension -- tests/corpus/sql-masks/013_rank2_mask_compound.blade) |
-| `compound(A, m)` | WHERE materialization | Compact CompoundIdx view; coordinate-based reads; cardinality = pass count; prints its present cells in storage order (one flat run, nested rows with exactly one trailing dim -- G22; the interpreter twins it). REPRESENTATION (`blade plan`'s `[compound v1]` line, bench gap G9): a rank-1 mask is the COMPACTION -- a count pass, a branchless kept-position fill and a gather by position, no hash node per kept cell; a keyed read `S(k)` binary-searches the kept positions and a key that was not kept aborts BL8006 (corpus `index-types/511-514`). Both compiled lanes build it (the LLVM lane takes a rank-1, trailing-free compound and refuses every other); a rank-k mask keeps the hashed index (`declined -- hashed SparseIdx ...`) |
+| `compound(A, m)` | WHERE materialization | Compact CompoundIdx view; coordinate-based reads; cardinality = pass count; prints its present cells in storage order (one flat run, nested rows with exactly one trailing dim -- G22; the interpreter twins it). REPRESENTATION (`blade plan`'s `[compound v1]` line, bench gap G9): a rank-1 mask is the COMPACTION -- a count pass, a branchless kept-position fill and a gather by position, no hash node per kept cell; a keyed read `S(k)` binary-searches the kept positions and a key that was not kept aborts BL8006 (corpus `index-types/511-514`). Both compiled lanes build it (the LLVM lane takes a rank-1, trailing-free compound and refuses every other); a rank-k mask keeps the hashed index (`declined -- hashed SparseIdx ...`). COMPACTION FUSION (`[compaction-fusion v1]`, gate `BLADE_COMPACTION_FUSION`, both lanes): a let-bound rank-1 `keep = mask(x, p)` with a pure, total predicate is counted in its own pass, the position fill and the gather become one branchless pass (same table, same BL8006 keyed reads), and `reduce(y * y, (+))` folds `y`'s compact buffer with no `y * y` pool -- the K-lane self-dot licensed, the unseeded serial chain (fed inside the compaction pass) under `BLADE_FP_REPRO=1`, BL8003 at the fold's line on an empty `y`; the LLVM lane emits the self-product with no fast-math flag in every form, so it never contracts into the add (the stored product's rounding); the fold motion and the in-pass feed each decline across any write between their two ends -- a mutating call, a write through an alias (corpus `index-types/515-521`) |
 | `intersect(A, B)` | INTERSECT | Value-based, dedups, first-occurrence order from A |
 | `union(A, B)` | UNION | Dedups both sides, A's occurrences first |
 | `unique(A)` | DISTINCT | First-occurrence dedup |
@@ -407,6 +407,23 @@ contracting compiler could fuse into an fma that is no association of the
 logical terms). `blade plan` names it `fold form: orbit-class fold (rank r, k
 classes)`, or the reason it was not taken; `BLADE_ORBIT_FOLD=0` keeps the
 logical walk. Corpus `symmetry/112`-`115`; proof in `src/OrbitFold.fs`.
+COMPACT ROW CLASSES (`[compact-row-classes v1]`, gate `BLADE_COMPACT_ROW_CLASSES`,
+both lanes): when the compact pool is a rank-2 map produced by the plain compact
+nest right before the walk (nothing reading it or writing in between, the cell
+body unable to abort), each packed row's class partials -- diagonal and
+off-diagonal; strict: the orbit class and, for a kernel of unknown parity, its
+mirror -- are computed from zero right after the row is stored (inside the
+producer's `omp` team), and the fold sums them in ascending row order before
+the same addition-only combine: no second pass over the pool. Licensed only
+(repro keeps the ordered walk), and it CHANGES licensed bits relative to the old
+orbit pass (a different regrouping of the same terms); within one lane and build
+the result no longer depends on the team size. The LLVM lane is serial and sums
+each row with its vectorizer's own tree, not the C++ lane's fixed
+`blade_fold::sq`/`sum<8>` tree, so the lanes agree to tolerance, not bits.
+Declines when the cell body reads a value bound after the producer, when the
+fold itself (its seed or walk) may write, or when anything between producer and
+fold reads or writes. (The bench expert folds packed COLUMNS: this shares its
+locality and one-team principle, not its schedule.) Corpus `symmetry/129`-`131`.
 
 **Threaded complete rows under `BLADE_FP_REPRO=1` (C++ lane).** The repro
 build keeps every fold's serial association, so Path B's per-thread partials
