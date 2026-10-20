@@ -1,0 +1,12 @@
+// TEST: Parallel Callback Through A Module Alias
+// Gap G41, Codex review W2F-8 finding 26: `let run = launch` at MODULE level
+// is an alias, not an escape -- the callback table keeps the binding's
+// identity, and only the alias's USES are classified (804516d1 scanned the
+// binding value as a bare `launch`, tainted launch's `f` and refused this pure
+// program BL4005). The kernel keeps its team (omp-pragma pins the pragma).
+type I = Idx<2>
+function ident(v: Float64) -> Float64 = v
+function launch(f: (Float64) -> Float64) -> Array<Float64 like I> = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute
+let run = launch
+let r = run(ident)
+// EXPECT: r = [0.0, 1.0]

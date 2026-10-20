@@ -1,0 +1,14 @@
+// TEST: Parallel Kernel Calls A Self Recursive Pure Function
+// Gap G41, found while auditing examples/mandelbrot.bladenb (Codex review
+// W2F-5 round): the write analysis summarized a self-recursive function from
+// a PESSIMISTIC seed ("writes every array parameter"), so a pure recursive
+// helper that forwards a captured array looked like a writer, and the
+// parallel-body refusal (843cb654) rejected the `where omp` kernel calling it
+// (BL4005). Recursion is now the least fixpoint from "writes nothing": the
+// kernel compiles and keeps its team.
+type I = Idx<3>
+let a: Array<Float64 like I> = [1.0, 2.0, 3.0]
+function walk(v: Array<Float64 like I>, k: Int64, acc: Float64) -> Float64 =
+    if k >= 3 then acc else walk(v, k + 1, acc + v((k : I)))
+let r = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> walk(a, 0, Float64(i)) |> compute
+// EXPECT: r = [6.0, 7.0, 8.0]

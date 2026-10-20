@@ -1,0 +1,28 @@
+// TEST: recursion rotating ten mut parameters reaches a captured array (rejects)
+// ERROR: BL4005 @ 15:1
+// ERROR-CONTAINS: a parallel kernel (`where omp` / cuda) writes storage captured from outside it
+// Gap G41, Codex review W2F-6 finding 23: `f` writes its first parameter at
+// n = 0 and otherwise rotates its ten `mut` parameters, feeding the captured G
+// in at the end. Called with ten fresh scratch arrays and n = 10, the write
+// lands on G. The recursion's summary is a true fixpoint now (the old budget
+// stopped after 8 rounds with External = false: old binary compiled it).
+type K = Idx<2>
+let mut G: Array<Float64 like K> = [0.0, 0.0]
+function f(a0: mut Array<Float64 like K>, a1: mut Array<Float64 like K>, a2: mut Array<Float64 like K>, a3: mut Array<Float64 like K>, a4: mut Array<Float64 like K>, a5: mut Array<Float64 like K>, a6: mut Array<Float64 like K>, a7: mut Array<Float64 like K>, a8: mut Array<Float64 like K>, a9: mut Array<Float64 like K>, n: Int64) -> Float64 =
+    if n == 0 then {
+        a0((0 : K)) = 1.0
+        0.0
+    } else f(a1, a2, a3, a4, a5, a6, a7, a8, a9, G, n - 1)
+let r = method_for(0..2) <@> lambda(i) where omp(i: 1) -> {
+    let mut s0: Array<Float64 like K> = [0.0, 0.0]
+    let mut s1: Array<Float64 like K> = [0.0, 0.0]
+    let mut s2: Array<Float64 like K> = [0.0, 0.0]
+    let mut s3: Array<Float64 like K> = [0.0, 0.0]
+    let mut s4: Array<Float64 like K> = [0.0, 0.0]
+    let mut s5: Array<Float64 like K> = [0.0, 0.0]
+    let mut s6: Array<Float64 like K> = [0.0, 0.0]
+    let mut s7: Array<Float64 like K> = [0.0, 0.0]
+    let mut s8: Array<Float64 like K> = [0.0, 0.0]
+    let mut s9: Array<Float64 like K> = [0.0, 0.0]
+    f(s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, 10)
+} |> compute

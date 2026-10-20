@@ -1,0 +1,17 @@
+// TEST: parallel kernel writes one cell of an enclosing mut parameter (rejects)
+// ERROR: BL4005 @ 12:26
+// ERROR-CONTAINS: Cannot assign to 'a'
+// Gap G41, Codex review W2F-6 (c): every cell of the `where omp` map writes
+// the SAME cell of `fill`'s `mut` parameter `a` -- a race. The front end
+// refuses it: inside the kernel `a` is bound outside the parallel body. (It
+// refuses the per-cell-disjoint variant `a(j) = ...` the same way today: an
+// own-parameter write is only legal in the function's own, non-kernel body,
+// loops/502.)
+type I = Idx<2>
+type J = Idx<4>
+function fill(a: mut Array<Float64 like I>) -> Array<Float64 like J> = method_for(range<J>) <@> lambda(j) where omp(j: 1) -> {
+    a((0 : I)) = Float64(j)
+    0.0
+} |> compute
+let mut g: Array<Float64 like I> = [0.0, 0.0]
+let r = fill(g)

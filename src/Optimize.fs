@@ -729,8 +729,16 @@ type private CseFacts = {
 /// reads as the worst case -- pessimistic, so a cycle can only decline.
 let private isFunctionTyped (t: IRType) : bool =
     match stripUnits t with
-    | IRTArrow (slots, _, _) -> slots |> List.exists (function SVal _ -> true | _ -> false)
+    // a NULLARY function is `IRTArrow([], ret, None)` (Types / IR reserve the
+    // empty-slot arrow for it): a function; an arrow whose slots are ALL index
+    // slots is an array typed as its index function, not a callable value
+    | IRTArrow (slots, _, _) -> slots.IsEmpty || slots |> List.exists (function SVal _ -> true | _ -> false)
     | _ -> false
+
+/// Public twin of isFunctionTyped: a FUNCTION-valued type (an arrow with a
+/// value slot, or the nullary empty-slot arrow), not an array typed as an
+/// index arrow. The callback tables key only these parameters.
+let isFunctionValuedType (t: IRType) : bool = isFunctionTyped t
 
 let private cseFactsOf (funcs: Map<IRId, IRCallable>) : IRExpr -> CseFacts =
     let worst = { MayWrite = true; Repeatable = false }
@@ -820,6 +828,13 @@ type WriteFacts = {
     /// parallel-body refusal, which refuses what it can SEE (the front end
     /// already judges a parallel body's calls).
     UnknownIsWrite: bool
+    /// A CALLBACK -- a function-valued parameter, by id -- to the argument
+    /// expressions every call site passes for it (None: not a known
+    /// callback). The analysis JOINS every candidate's effects at each
+    /// application (Codex finding 22: never one candidate chosen on a
+    /// boolean); a candidate it cannot resolve contributes top under
+    /// UnknownIsWrite.
+    Callbacks: IRId -> IRExpr list option
 }
 
 /// The summary of one callable: does a call write storage the caller can
@@ -890,14 +905,45 @@ let private writeAnalyzer (facts: WriteFacts) =
         match summaries.TryGetValue c.Id with
         | true, s -> s
         | _ ->
-            let pessimistic =
-                { External = false
-                  Params = c.Params |> List.indexed |> List.filter (fun (_, p) -> not (holdsNoStorage p.Type)) |> List.map fst |> Set.ofList }
-            summaries.[c.Id] <- pessimistic
+            // RECURSION: the least fixpoint, from "writes nothing" up (a may
+            // analysis: a recursive call adds only what the body itself
+            // does). The previous pessimistic seed -- "writes every array
+            // parameter" -- polluted every self-recursive pure function that
+            // forwards an array (examples/mandelbrot.bladenb's `esc_pert`),
+            // and through argument-aware calls turned a captured operand into
+            // a refused parallel write. Summaries computed DURING an iteration
+            // may depend on this one's current value, so they are dropped and
+            // recomputed on the next iteration; the last iteration's stay.
             let paramIdx =
                 c.Params |> List.indexed |> List.collect (fun (i, p) -> [ (p.VarId, i) ]) |> Map.ofList
             let paramNames = c.Params |> List.indexed |> List.map (fun (i, p) -> (p.Name, i)) |> Map.ofList
-            let s = walkBody paramIdx paramNames c.Body
+            let allStorage =
+                { External = false
+                  Params = c.Params |> List.indexed |> List.filter (fun (_, p) -> not (holdsNoStorage p.Type)) |> List.map fst |> Set.ofList }
+            // TOP: writes outside AND every storage parameter (Codex finding
+            // 23: the old budget fallback kept External = false and never
+            // re-ran the transfer, so a long parameter-rotating recursion
+            // that reaches a capture on its last step was missed).
+            let top = { allStorage with External = true }
+            let rec iterate (current: WriteProvenance) (round: int) =
+                summaries.[c.Id] <- current
+                let before = System.Collections.Generic.HashSet<IRId>(summaries.Keys)
+                let s = writeJoin current (walkBody paramIdx paramNames c.Body)
+                // summaries first computed during this round read `current`;
+                // drop them unless `current` is the final answer
+                let dropNew () =
+                    for k in List.ofSeq summaries.Keys do
+                        if k <> c.Id && not (before.Contains k) then summaries.Remove k |> ignore
+                if s = current then s
+                elif round >= 64 then
+                    // not converging within the budget: widen to TOP; the
+                    // summaries built on the unfinished value are recomputed
+                    dropNew ()
+                    top
+                else
+                    dropNew ()
+                    iterate s (round + 1)
+            let s = iterate writeNone 0
             summaries.[c.Id] <- s
             s
     /// The writes of one body, as a provenance summary over its parameters.
@@ -981,28 +1027,51 @@ let private writeAnalyzer (facts: WriteFacts) =
                     visitChildren target
                     visit value
                 | IRApp (f, args, _) ->
-                    (match facts.Resolve f with
-                     | Some c ->
-                         let s = summaryOf c
-                         if s.External then add s
-                         for k in s.Params do
-                             if k < args.Length then add (prov Set.empty args.[k])
-                             else add { writeNone with External = true }
-                     | None ->
-                         match f with
-                         // a combinator / loop-object head: its kernels are
-                         // visited as references below
-                         | IRObjectFor _ | IRMethodFor _ | IRCompose _ | IRComposeObj _ | IRComposeMeth _ -> visit f
-                         | _ -> if facts.UnknownIsWrite then add { writeNone with External = true })
+                    // The application of `h` to THIS call's `args`; a callback
+                    // head applies EVERY candidate, effects joined.
+                    let rec callAt (seenCb: Set<IRId>) (h: IRExpr) =
+                        match facts.Resolve h with
+                        | Some c ->
+                            let s = summaryOf c
+                            if s.External then add { writeNone with External = true }
+                            for k in s.Params do
+                                if k < args.Length then add (prov Set.empty args.[k])
+                                else add { writeNone with External = true }
+                        | None ->
+                            match h with
+                            | IRVar (cid, _) when (facts.Callbacks cid).IsSome ->
+                                // a cycle among callbacks adds nothing new: the
+                                // other candidates of the cycle are joined too
+                                if not (seenCb.Contains cid) then
+                                    for cand in (facts.Callbacks cid).Value do callAt (seenCb.Add cid) cand
+                            // a combinator / loop-object head: its kernels are
+                            // visited as references below
+                            | IRObjectFor _ | IRMethodFor _ | IRCompose _ | IRComposeObj _ | IRComposeMeth _ -> visit h
+                            | _ -> if facts.UnknownIsWrite then add { writeNone with External = true }
+                    callAt Set.empty f
                     args |> List.iter visit
                 | IRVar (id, vty) ->
-                    (match facts.Resolve e with
-                     | Some c ->
-                         // a kernel reference: its parameters are cells of its
-                         // operands, so a parameter write is observable too
-                         let s = summaryOf c
-                         if s.External || not s.Params.IsEmpty then add { writeNone with External = true }
-                     | None ->
+                    // A callable REFERENCE (a kernel slot, a callable passed
+                    // on): its parameters are cells of its operands, so a
+                    // parameter write is observable too. A callback joins all
+                    // of its candidates. true = judged as a callable.
+                    let rec kernelRef (seenCb: Set<IRId>) (h: IRExpr) : bool =
+                        match facts.Resolve h with
+                        | Some c ->
+                            let s = summaryOf c
+                            if s.External || not s.Params.IsEmpty then add { writeNone with External = true }
+                            true
+                        | None ->
+                            match h with
+                            | IRVar (cid, _) when (facts.Callbacks cid).IsSome ->
+                                if not (seenCb.Contains cid) then
+                                    for cand in (facts.Callbacks cid).Value do
+                                        if not (kernelRef (seenCb.Add cid) cand) then
+                                            if facts.UnknownIsWrite then add { writeNone with External = true }
+                                true
+                            | _ -> false
+                    if kernelRef Set.empty e then ()
+                    else
                          // an unresolved FUNCTION-typed name (a higher-order
                          // parameter or value in a kernel slot) may do anything
                          if isFunctionTyped vty then
@@ -1036,7 +1105,7 @@ let private writeAnalyzer (facts: WriteFacts) =
                                  | _ -> None
                              match facts.OuterLet id |> Option.bind (chase (Set.singleton id)) with
                              | Some deferred -> visit deferred
-                             | None -> ())
+                             | None -> ()
                 | IRParam (_, _, t) when isFunctionTyped t -> if facts.UnknownIsWrite then add { writeNone with External = true }
                 | other -> visitChildren other
         and visitChildren (e: IRExpr) =
@@ -1053,6 +1122,207 @@ let exprMayWriteWith (facts: WriteFacts) (root: IRExpr) : bool =
 
 /// The analysis over a CALLABLE's applications (a kernel's): a write to its
 /// own parameters counts too (they are its operands' cells).
+/// The summary itself: writes to storage outside the callable (`External`)
+/// kept apart from writes to its own parameters (`Params`), for a judgment
+/// that treats the two differently (Lowering's parallel-body refusal: a
+/// `mut` parameter is the caller's to grant, a capture is a race).
+let callableWriteSummaryWith (facts: WriteFacts) (c: IRCallable) : WriteProvenance =
+    let (summaryOf, _) = writeAnalyzer facts
+    summaryOf c
+
+/// An ABSTRACT FUNCTION VALUE for the callback table: the callables an
+/// expression may denote (`Fns`, by callable id), whether it may denote
+/// ANYTHING (`Top`: an unknown function -- a value from an untracked name, a
+/// function returned by a call, a parameter an unknown caller may fill), and,
+/// for a tuple, the value of each component. Known targets are kept beside
+/// `Top`: a call through `{launch} + Top` still feeds launch's parameters.
+type private FnVal = { Fns: Set<IRId>; Top: bool; Comps: Map<int, FnVal> }
+let private fvBot : FnVal = { Fns = Set.empty; Top = false; Comps = Map.empty }
+let private fvTop : FnVal = { fvBot with Top = true }
+let rec private fvJoin (a: FnVal) (b: FnVal) : FnVal =
+    { Fns = Set.union a.Fns b.Fns
+      Top = a.Top || b.Top
+      Comps =
+        b.Comps |> Map.fold (fun acc k v ->
+            Map.add k (match Map.tryFind k acc with Some w -> fvJoin w v | None -> v) acc) a.Comps }
+/// A type whose values may carry a function: a function type, or a tuple
+/// with such a component.
+let rec private mayHoldFunction (t: IRType) : bool =
+    match stripUnits t with
+    | IRTTuple ts -> ts |> List.exists mayHoldFunction
+    | t -> isFunctionTyped t
+/// Every leaf of a (nested) tuple value joined: a FLAT projection may read any.
+let rec private fvLeaves (v: FnVal) : FnVal =
+    v.Comps |> Map.fold (fun acc _ c -> fvJoin acc (fvLeaves c)) { v with Comps = Map.empty }
+
+/// THE CALLBACK-ARGUMENT TABLE (gap G41; Codex findings 22 / 25 / 26-28),
+/// shared by Lowering's parallel-body refusal and both emitters' write facts:
+/// for each function-valued parameter -- and each let / module-binding alias
+/// of a function value -- the CLOSED set of callables it may hold, or no entry
+/// when it may hold an unknown one (the walker then counts its applications
+/// as unknown, i.e. a write).
+///
+/// A monotone abstract interpretation solved to its LEAST FIXPOINT, so the
+/// answer does not depend on declaration or discovery order (finding 28):
+///   * every tracked name -- a callback parameter, a `let` (local or MODULE
+///     level: binding identity is kept, finding 26) -- starts at BOTTOM
+///     (undiscovered), never at unknown, and grows by joins: a `let`
+///     takes its initializer's value; a parameter the value of every argument
+///     any call passes it, through EVERY target the call's head may denote --
+///     an indirect `h(f)` (h itself a callback, or an alias of one: aliases
+///     are evaluated, not matched by name, finding 27) feeds each candidate's
+///     slots, known targets kept even beside an unknown one;
+///   * TOP arises only from a genuine unknown: an untracked name (a binder the
+///     table does not model, a builtin head), the function a call returns, a
+///     tuple read through an untracked tuple;
+///   * a function value that ESCAPES -- reaches a position the table does not
+///     follow: returned, stored in a struct, used as a kernel, handed to an
+///     unknown call or to a non-callback parameter -- makes every callback
+///     parameter of every callable it may denote TOP (an unknown caller may
+///     then pass it anything). Tuples are followed component-wise (a
+///     structural projection reads its component; a flat one any leaf), so a
+///     callable stored in a tuple escapes only when the tuple does. An alias
+///     INITIALIZER is not an escape; the alias's USES are classified.
+/// The lattice is finite, so the iteration converges; should it ever exceed
+/// its budget it widens to TOP -- the EMPTY table, every callback unknown
+/// (the rule the write summaries follow). `resolve` is the caller's callable
+/// resolver (let aliases of named callables included where it chases them).
+let callbackTable (resolve: IRExpr -> IRCallable option) (funcs: IRCallable list) (bindings: (IRId * IRExpr) list) : Map<IRId, IRExpr list> =
+    let callables = System.Collections.Generic.Dictionary<IRId, IRCallable>()
+    for f in funcs do callables.[f.Id] <- f
+    let isCbParam = System.Collections.Generic.HashSet<IRId>()
+    for f in funcs do
+        for p in f.Params do
+            if isFunctionTyped p.Type then isCbParam.Add p.VarId |> ignore
+    // ---- one scan: call sites, alias definitions, escaping expressions ----
+    let calls = ResizeArray<IRExpr * IRExpr list>()
+    let defs = ResizeArray<IRId * IRExpr>()
+    let defined = System.Collections.Generic.HashSet<IRId>()
+    let escapes = ResizeArray<IRExpr>()
+    // `escape`: the value of `e` flows somewhere the table does not follow
+    let rec scan (escape: bool) (e: IRExpr) =
+        match e with
+        | IRApp (h, args, _) ->
+            calls.Add (h, args)
+            if escape then escapes.Add e
+            scan false h
+            args |> List.iter (scan false)
+        | IRLet (x, v, b) ->
+            defs.Add (x, v)
+            defined.Add x |> ignore
+            scan false v
+            scan escape b
+        | IRTuple es -> es |> List.iter (scan escape)
+        | IRTupleProj (t, _, _) ->
+            if escape then escapes.Add e
+            scan false t
+        | IRIf (c, a, b) ->
+            scan false c
+            scan escape a
+            scan escape b
+        | IRSequence es ->
+            // a discarded statement's value goes nowhere
+            es |> List.iteri (fun i x -> scan (escape && i = es.Length - 1) x)
+        | IRVar _ -> if escape then escapes.Add e
+        // a REASSIGNED tracked name joins the new value (an untracked target
+        // stays unknown: its value escapes through the generic arm)
+        | IRAssign (IRVar (x, _), v) when defined.Contains x || isCbParam.Contains x ->
+            defs.Add (x, v)
+            scan false v
+        | ExprShape (children, _) -> children |> List.iter (scan true)
+    for (id, v) in bindings do
+        defs.Add (id, v)
+        defined.Add id |> ignore
+        scan false v
+    // a function's result is returned to a caller the table does not follow
+    for f in funcs do scan true f.Body
+    // ---- the abstract values ----
+    let env = System.Collections.Generic.Dictionary<IRId, FnVal>()
+    let repr = System.Collections.Generic.Dictionary<IRId, IRExpr>()
+    let single (e: IRExpr) (c: IRCallable) =
+        if not (callables.ContainsKey c.Id) then callables.[c.Id] <- c
+        if not (repr.ContainsKey c.Id) then repr.[c.Id] <- e
+        { fvBot with Fns = Set.singleton c.Id }
+    let rec eval (e: IRExpr) : FnVal =
+        match e with
+        | IRVar (id, _) ->
+            match resolve e with
+            | Some c -> single e c
+            | None ->
+                match env.TryGetValue id with
+                | true, v -> v
+                | _ ->
+                    // tracked but undiscovered: bottom; untracked: unknown
+                    if defined.Contains id || isCbParam.Contains id then fvBot else fvTop
+        | IRLet (_, _, b) -> eval b
+        | IRIf (_, a, b) -> fvJoin (eval a) (eval b)
+        | IRSequence es -> (match List.tryLast es with Some l -> eval l | None -> fvBot)
+        | IRTuple es -> { fvBot with Comps = es |> List.mapi (fun i x -> (i, eval x)) |> Map.ofList }
+        | IRTupleProj (t, i, flat) ->
+            let tv = eval t
+            let sub =
+                if flat then fvLeaves tv
+                else match Map.tryFind i tv.Comps with Some c -> c | None -> fvBot
+            if tv.Top then fvJoin sub fvTop else sub
+        | _ ->
+            match resolve e with
+            | Some c -> single e c
+            // an untracked value that may HOLD a function (a function, or a
+            // tuple with a function leaf -- a call's result, a field read)
+            | None -> if (try mayHoldFunction (typeOf e) with _ -> true) then fvTop else fvBot
+    let mutable changed = false
+    let setVar (id: IRId) (v: FnVal) =
+        let old = match env.TryGetValue id with | true, o -> o | _ -> fvBot
+        let nv = fvJoin old v
+        if nv <> old then
+            env.[id] <- nv
+            changed <- true
+    let rec escapeVal (v: FnVal) =
+        for cid in v.Fns do
+            match callables.TryGetValue cid with
+            | true, c ->
+                for p in c.Params do
+                    if isCbParam.Contains p.VarId then setVar p.VarId fvTop
+            | _ -> ()
+        for KeyValue (_, cv) in v.Comps do escapeVal cv
+    let budget = 10000
+    let mutable rounds = 0
+    changed <- true
+    while changed && rounds < budget do
+        changed <- false
+        rounds <- rounds + 1
+        for (x, v) in defs do setVar x (eval v)
+        for (h, args) in calls do
+            let hv = eval h
+            for cid in hv.Fns do
+                match callables.TryGetValue cid with
+                | true, c ->
+                    args |> List.iteri (fun i a ->
+                        if i < c.Params.Length && isCbParam.Contains c.Params.[i].VarId then setVar c.Params.[i].VarId (eval a)
+                        else escapeVal (eval a))
+                    // a PARTIAL application: an unknown caller supplies the rest
+                    for p in List.skip (min args.Length c.Params.Length) c.Params do
+                        if isCbParam.Contains p.VarId then setVar p.VarId fvTop
+                | _ -> ()
+            // an unknown target: every function-valued argument escapes
+            if hv.Top then
+                for a in args do escapeVal (eval a)
+        for e in escapes do escapeVal (eval e)
+    if changed then
+        // over budget: widen to TOP -- every callback unknown
+        Map.empty
+    else
+        let reprOf (cid: IRId) =
+            match repr.TryGetValue cid with
+            | true, e -> e
+            | _ -> IRVar (cid, IRTUnit)
+        env
+        |> Seq.choose (fun kv ->
+            let v = kv.Value
+            if v.Top || v.Fns.IsEmpty || not v.Comps.IsEmpty then None
+            else Some (kv.Key, v.Fns |> Set.toList |> List.map reprOf))
+        |> Map.ofSeq
+
 let callableMayWriteWith (facts: WriteFacts) (c: IRCallable) : bool =
     let (summaryOf, _) = writeAnalyzer facts
     let s = summaryOf c
@@ -1102,7 +1372,8 @@ let scheduleMayWriteIn (programFuncs: IRCallable list) (modul: IRModule) : IRExp
         { Resolve = resolve
           OuterLet = (fun id -> match lets.TryGetValue id with | true, v -> Some v | _ -> None)
           CopiedLet = copied
-          UnknownIsWrite = true }
+          UnknownIsWrite = true
+          Callbacks = (fun _ -> None) }
     fun (e: IRExpr) -> exprMayWriteWith facts e
 
 let scheduleMayWrite (modul: IRModule) : IRExpr -> bool = scheduleMayWriteIn [] modul
@@ -2050,10 +2321,10 @@ let cellKernelCellTerm (ck: IRCallable) : CellTerm option =
 /// Plan the hot-row schedule over one module: function-body let chains and
 /// the top-level binding sequence alike. Records into `HotRowTable` and the
 /// decision collector (`hot-row-fold`); the IR is untouched.
-let planHotRowFolds (builder: IRBuilder) (modul: IRModule) : unit =
+let planHotRowFolds (builder: IRBuilder) (programFuncs: IRCallable list) (modul: IRModule) : unit =
     let funcs = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     let facts = cseFactsOf funcs
-    let writes = scheduleMayWrite modul
+    let writes = scheduleMayWriteIn programFuncs modul
     let decide (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
         Blade.Effects.Decisions.record
             { Blade.Effects.Rule = "hot-row-fold"; Version = 1
@@ -2448,10 +2719,10 @@ module CompactionTable =
 /// Plan compaction fusion over the module's top-level bindings (`compound`
 /// is top-level only, BL6002). Records into `CompactionTable` and the
 /// decision collector (`compaction-fusion`); the IR is untouched.
-let planCompactionFusion (modul: IRModule) : unit =
+let planCompactionFusion (programFuncs: IRCallable list) (modul: IRModule) : unit =
     let funcs = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     let facts = cseFactsOf funcs
-    let writes = scheduleMayWrite modul
+    let writes = scheduleMayWriteIn programFuncs modul
     let enabled = compactionFusionEnabled ()
     let decide (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
         Blade.Effects.Decisions.record
@@ -2768,10 +3039,10 @@ module CompactRowTable =
 /// binding's value (pairkernel's `let (checksum, ..) = { let kmat ..; let ss .. }`).
 /// Records into `CompactRowTable` and the decision collector
 /// (`compact-row-classes`, its declines; the emitter records the outcome).
-let planCompactRowClasses (modul: IRModule) : unit =
+let planCompactRowClasses (programFuncs: IRCallable list) (modul: IRModule) : unit =
     let funcs = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     let facts = cseFactsOf funcs
-    let writes = scheduleMayWrite modul
+    let writes = scheduleMayWriteIn programFuncs modul
     let decide (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
         Blade.Effects.Decisions.record
             { Blade.Effects.Rule = "compact-row-classes"; Version = 1

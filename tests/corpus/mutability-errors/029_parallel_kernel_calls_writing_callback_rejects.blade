@@ -1,0 +1,15 @@
+// TEST: parallel kernel calls a writing callback (rejects)
+// ERROR: BL4005 @ 13:1
+// ERROR-CONTAINS: a parallel kernel (`where omp` / cuda) writes storage captured from outside it
+// Gap G41, Codex review W2F-5 finding 20: the `where omp` kernel calls the
+// function-valued parameter `f`, and the call site passes `bump`, which writes
+// the module-level G -- the cells would race (threads on; with threads off
+// the program is refused all the same). The callback is judged through every
+// call site's argument; one that cannot be resolved is refused too.
+let mut G = [0.0]
+function bump(v: Float64) -> Float64 = {
+    G(0) = G(0) + v
+    G(0)
+}
+function launch(f: (Float64) -> Float64) = method_for(0..2) <@> lambda(i) where omp(i: 1) -> f(Float64(i) + 1.0) |> compute
+let r = launch(bump)

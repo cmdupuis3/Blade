@@ -1,0 +1,13 @@
+// TEST: Parallel Callback Via Second Order Pure Lambda
+// Gap G41, Codex review W2F-7 finding 25 lambda-argument control
+// (mutability-errors/038 is the writing twin): the indirect call's argument
+// is a PURE lambda; it reaches launch's `f` and the kernel keeps its team
+// (the omp-pragma block pins the pragma).
+type I = Idx<2>
+function ident(v: Float64) -> Float64 = v
+function launch(f: (Float64) -> Float64) -> Array<Float64 like I> = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute
+function via(h: ((Float64) -> Float64) -> Array<Float64 like I>, f: (Float64) -> Float64) -> Array<Float64 like I> = h(f)
+let a = launch(ident)
+let b = via(launch, lambda(v) -> v + 10.0)
+// EXPECT: a = [0.0, 1.0]
+// EXPECT: b = [10.0, 11.0]

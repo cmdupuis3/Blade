@@ -1548,8 +1548,14 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     // pragma, `ompLastLevel = -1` so `BLADE_IVDEP` lands where it would have
     // without the clause, and no coverage instrumentation (there is no team to
     // observe). The dropped clause is reported by the marker below.
+    // G41 (Codex findings 18 / 20): a kernel that may write storage outside
+    // itself (an unresolved callback, a view of a captured array) gets no
+    // team: its cells would race. Lowering refuses what it can prove; this is
+    // the emitter's own veto, reported by the census marker below.
+    let nestKernelWrites =
+        codeGen.OmpRequested && codeGen.FoldWrapper.IsNone && exprMayWrite codeGen.KernelExpr
     let pragmaLevel =
-        if codeGen.FoldWrapper.IsSome || not (ompThreadEmissionEnabled ()) then None
+        if codeGen.FoldWrapper.IsSome || not (ompThreadEmissionEnabled ()) || nestKernelWrites then None
         else pragmaLevelOf codeGen.Bindings
     // "This nest runs inside a parallel team", which gates the thread-coverage
     // instrumentation. A Path B fold nest qualifies without carrying a `for`
@@ -1903,6 +1909,8 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
                         codeGen.FoldOmpDecline.Value
                     elif codeGen.FoldWrapper.IsSome then
                         "fold accumulates into a shared scalar, which is not race-safe"
+                    elif nestKernelWrites then
+                        "the kernel may write storage outside itself (G41: a writing producer keeps an ordered loop)"
                     elif codeGen.Bindings |> List.exists (fun b -> (domainPlanOfLevel b).IsSome) then
                         "a closed-form domain nest carries one sequential cell counter and has no thread-level form yet"
                     else "the omp(...) depth licenses no level of this nest"

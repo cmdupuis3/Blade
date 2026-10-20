@@ -1,0 +1,87 @@
+// TEST: recursion rotating 68 mut parameters reaches a captured array past the fixpoint budget (rejects)
+// ERROR: BL4005 @ 16:1
+// ERROR-CONTAINS: a parallel kernel (`where omp` / cuda) writes storage captured from outside it
+// Gap G41, Codex review W2F-7 (b): mutability-errors/032 widened past the
+// summary fixpoint's 64-round budget. Each round of the least fixpoint adds
+// one parameter of the 68-way rotation, so it is still climbing at round 64
+// and WIDENS TO TOP (External = true, every storage parameter) -- the branch
+// this pins. The true fixpoint also reaches G, so the refusal is exact; the
+// pre-W2F-6 budget fallback kept External = false and compiled it.
+type K = Idx<2>
+let mut G: Array<Float64 like K> = [0.0, 0.0]
+function f(a0: mut Array<Float64 like K>, a1: mut Array<Float64 like K>, a2: mut Array<Float64 like K>, a3: mut Array<Float64 like K>, a4: mut Array<Float64 like K>, a5: mut Array<Float64 like K>, a6: mut Array<Float64 like K>, a7: mut Array<Float64 like K>, a8: mut Array<Float64 like K>, a9: mut Array<Float64 like K>, a10: mut Array<Float64 like K>, a11: mut Array<Float64 like K>, a12: mut Array<Float64 like K>, a13: mut Array<Float64 like K>, a14: mut Array<Float64 like K>, a15: mut Array<Float64 like K>, a16: mut Array<Float64 like K>, a17: mut Array<Float64 like K>, a18: mut Array<Float64 like K>, a19: mut Array<Float64 like K>, a20: mut Array<Float64 like K>, a21: mut Array<Float64 like K>, a22: mut Array<Float64 like K>, a23: mut Array<Float64 like K>, a24: mut Array<Float64 like K>, a25: mut Array<Float64 like K>, a26: mut Array<Float64 like K>, a27: mut Array<Float64 like K>, a28: mut Array<Float64 like K>, a29: mut Array<Float64 like K>, a30: mut Array<Float64 like K>, a31: mut Array<Float64 like K>, a32: mut Array<Float64 like K>, a33: mut Array<Float64 like K>, a34: mut Array<Float64 like K>, a35: mut Array<Float64 like K>, a36: mut Array<Float64 like K>, a37: mut Array<Float64 like K>, a38: mut Array<Float64 like K>, a39: mut Array<Float64 like K>, a40: mut Array<Float64 like K>, a41: mut Array<Float64 like K>, a42: mut Array<Float64 like K>, a43: mut Array<Float64 like K>, a44: mut Array<Float64 like K>, a45: mut Array<Float64 like K>, a46: mut Array<Float64 like K>, a47: mut Array<Float64 like K>, a48: mut Array<Float64 like K>, a49: mut Array<Float64 like K>, a50: mut Array<Float64 like K>, a51: mut Array<Float64 like K>, a52: mut Array<Float64 like K>, a53: mut Array<Float64 like K>, a54: mut Array<Float64 like K>, a55: mut Array<Float64 like K>, a56: mut Array<Float64 like K>, a57: mut Array<Float64 like K>, a58: mut Array<Float64 like K>, a59: mut Array<Float64 like K>, a60: mut Array<Float64 like K>, a61: mut Array<Float64 like K>, a62: mut Array<Float64 like K>, a63: mut Array<Float64 like K>, a64: mut Array<Float64 like K>, a65: mut Array<Float64 like K>, a66: mut Array<Float64 like K>, a67: mut Array<Float64 like K>, n: Int64) -> Float64 =
+    if n == 0 then {
+        a0((0 : K)) = 1.0
+        0.0
+    } else f(a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, a25, a26, a27, a28, a29, a30, a31, a32, a33, a34, a35, a36, a37, a38, a39, a40, a41, a42, a43, a44, a45, a46, a47, a48, a49, a50, a51, a52, a53, a54, a55, a56, a57, a58, a59, a60, a61, a62, a63, a64, a65, a66, a67, G, n - 1)
+let r = method_for(0..2) <@> lambda(i) where omp(i: 1) -> {
+    let mut s0: Array<Float64 like K> = [0.0, 0.0]
+    let mut s1: Array<Float64 like K> = [0.0, 0.0]
+    let mut s2: Array<Float64 like K> = [0.0, 0.0]
+    let mut s3: Array<Float64 like K> = [0.0, 0.0]
+    let mut s4: Array<Float64 like K> = [0.0, 0.0]
+    let mut s5: Array<Float64 like K> = [0.0, 0.0]
+    let mut s6: Array<Float64 like K> = [0.0, 0.0]
+    let mut s7: Array<Float64 like K> = [0.0, 0.0]
+    let mut s8: Array<Float64 like K> = [0.0, 0.0]
+    let mut s9: Array<Float64 like K> = [0.0, 0.0]
+    let mut s10: Array<Float64 like K> = [0.0, 0.0]
+    let mut s11: Array<Float64 like K> = [0.0, 0.0]
+    let mut s12: Array<Float64 like K> = [0.0, 0.0]
+    let mut s13: Array<Float64 like K> = [0.0, 0.0]
+    let mut s14: Array<Float64 like K> = [0.0, 0.0]
+    let mut s15: Array<Float64 like K> = [0.0, 0.0]
+    let mut s16: Array<Float64 like K> = [0.0, 0.0]
+    let mut s17: Array<Float64 like K> = [0.0, 0.0]
+    let mut s18: Array<Float64 like K> = [0.0, 0.0]
+    let mut s19: Array<Float64 like K> = [0.0, 0.0]
+    let mut s20: Array<Float64 like K> = [0.0, 0.0]
+    let mut s21: Array<Float64 like K> = [0.0, 0.0]
+    let mut s22: Array<Float64 like K> = [0.0, 0.0]
+    let mut s23: Array<Float64 like K> = [0.0, 0.0]
+    let mut s24: Array<Float64 like K> = [0.0, 0.0]
+    let mut s25: Array<Float64 like K> = [0.0, 0.0]
+    let mut s26: Array<Float64 like K> = [0.0, 0.0]
+    let mut s27: Array<Float64 like K> = [0.0, 0.0]
+    let mut s28: Array<Float64 like K> = [0.0, 0.0]
+    let mut s29: Array<Float64 like K> = [0.0, 0.0]
+    let mut s30: Array<Float64 like K> = [0.0, 0.0]
+    let mut s31: Array<Float64 like K> = [0.0, 0.0]
+    let mut s32: Array<Float64 like K> = [0.0, 0.0]
+    let mut s33: Array<Float64 like K> = [0.0, 0.0]
+    let mut s34: Array<Float64 like K> = [0.0, 0.0]
+    let mut s35: Array<Float64 like K> = [0.0, 0.0]
+    let mut s36: Array<Float64 like K> = [0.0, 0.0]
+    let mut s37: Array<Float64 like K> = [0.0, 0.0]
+    let mut s38: Array<Float64 like K> = [0.0, 0.0]
+    let mut s39: Array<Float64 like K> = [0.0, 0.0]
+    let mut s40: Array<Float64 like K> = [0.0, 0.0]
+    let mut s41: Array<Float64 like K> = [0.0, 0.0]
+    let mut s42: Array<Float64 like K> = [0.0, 0.0]
+    let mut s43: Array<Float64 like K> = [0.0, 0.0]
+    let mut s44: Array<Float64 like K> = [0.0, 0.0]
+    let mut s45: Array<Float64 like K> = [0.0, 0.0]
+    let mut s46: Array<Float64 like K> = [0.0, 0.0]
+    let mut s47: Array<Float64 like K> = [0.0, 0.0]
+    let mut s48: Array<Float64 like K> = [0.0, 0.0]
+    let mut s49: Array<Float64 like K> = [0.0, 0.0]
+    let mut s50: Array<Float64 like K> = [0.0, 0.0]
+    let mut s51: Array<Float64 like K> = [0.0, 0.0]
+    let mut s52: Array<Float64 like K> = [0.0, 0.0]
+    let mut s53: Array<Float64 like K> = [0.0, 0.0]
+    let mut s54: Array<Float64 like K> = [0.0, 0.0]
+    let mut s55: Array<Float64 like K> = [0.0, 0.0]
+    let mut s56: Array<Float64 like K> = [0.0, 0.0]
+    let mut s57: Array<Float64 like K> = [0.0, 0.0]
+    let mut s58: Array<Float64 like K> = [0.0, 0.0]
+    let mut s59: Array<Float64 like K> = [0.0, 0.0]
+    let mut s60: Array<Float64 like K> = [0.0, 0.0]
+    let mut s61: Array<Float64 like K> = [0.0, 0.0]
+    let mut s62: Array<Float64 like K> = [0.0, 0.0]
+    let mut s63: Array<Float64 like K> = [0.0, 0.0]
+    let mut s64: Array<Float64 like K> = [0.0, 0.0]
+    let mut s65: Array<Float64 like K> = [0.0, 0.0]
+    let mut s66: Array<Float64 like K> = [0.0, 0.0]
+    let mut s67: Array<Float64 like K> = [0.0, 0.0]
+    f(s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15, s16, s17, s18, s19, s20, s21, s22, s23, s24, s25, s26, s27, s28, s29, s30, s31, s32, s33, s34, s35, s36, s37, s38, s39, s40, s41, s42, s43, s44, s45, s46, s47, s48, s49, s50, s51, s52, s53, s54, s55, s56, s57, s58, s59, s60, s61, s62, s63, s64, s65, s66, s67, 68)
+} |> compute

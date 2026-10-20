@@ -8002,6 +8002,7 @@ let tryEmitProgramNamed (programName: string) (program: IRProgram) : Result<stri
             // through this module's lets (installed per program, like the C++
             // lane's genModule).
             (Blade.CodeGenExprSupport.programLetValuesCell ()).Value <- Blade.CodeGenExprSupport.computeProgramLetValues m
+            (Blade.CodeGenExprSupport.programCallbackArgsCell ()).Value <- Blade.CodeGenExprSupport.computeProgramCallbackArgs m
             try
             // The fact pass runs BEFORE any instruction: `main`'s own attribute
             // group depends on whether a function emitted much later recurses,

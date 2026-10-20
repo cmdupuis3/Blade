@@ -1,0 +1,20 @@
+// TEST: Parallel Callback Via Local Alias All Pure
+// Gap G41, Codex review W2F-8 finding 27 control (mutability-errors/040 is
+// the writing twin): every function reaching launch's `f` through the alias
+// `k` is pure, so the kernel keeps its team (omp-pragma pins the pragma).
+type I = Idx<2>
+let mut G = [0.0]
+function ident(v: Float64) -> Float64 = v
+function bump(v: Float64) -> Float64 = {
+    G(0) = G(0) + 1.0
+    G(0)
+}
+function launch(f: (Float64) -> Float64) -> Array<Float64 like I> = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute
+function via(h: ((Float64) -> Float64) -> Array<Float64 like I>, f: (Float64) -> Float64) -> Array<Float64 like I> = {
+    let k = h
+    k(f)
+}
+let a = launch(ident)
+let b = via(launch, ident)
+// EXPECT: a = [0.0, 1.0]
+// EXPECT: b = [0.0, 1.0]

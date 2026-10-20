@@ -1,0 +1,11 @@
+// TEST: Parallel Kernel Calls A Pure Nullary Callback
+// Gap G41, Codex review W2F-7 finding 24: a NULLARY function type is the
+// empty-slot arrow `() -> Float64`, which has no value slot; the callback
+// table must still key it (it once skipped it, so `f()` read as an unknown
+// callee and this pure kernel was refused BL4005). The only candidate is
+// pure: the kernel keeps its team (the omp-pragma block pins the pragma).
+// mutability-errors/035 is the writing twin.
+function one() -> Float64 = 1.0
+function launch(f: () -> Float64) = method_for(0..2) <@> lambda(i) where omp(i: 1) -> f() + Float64(i) |> compute
+let r = launch(one)
+// EXPECT: r = [1.0, 2.0]

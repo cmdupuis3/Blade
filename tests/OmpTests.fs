@@ -229,7 +229,10 @@ let private g41NoTeam = ["BLADE_OMP_PARALLEL_NUM_THREADS("; "blade_fold::chunk_l
 /// (`GCC ivdep`, `#pragma ivdep`, `_Pragma("ivdep")`), and the omp producer
 /// SIMD / team routes. (The bare word `ivdep` is not banned: the emitted
 /// program's own explanatory comments mention it.)
-let private g41WriterBans = [ "BLADE_IVDEP"; "GCC ivdep"; "pragma ivdep"; "_Pragma(\"ivdep"; "BLADE_OMP_SIMD\n"; "BLADE_OMP_PARALLEL_FOR_SIMD"; "BLADE_OMP_PARALLEL_FOR\n" ]
+let private g41WriterBans =
+    [ "BLADE_IVDEP"; "GCC ivdep"; "pragma ivdep"; "_Pragma(\"ivdep"
+      "BLADE_OMP_SIMD\n"; "#pragma omp simd"; "BLADE_OMP_PARALLEL_FOR_SIMD"; "BLADE_OMP_PARALLEL_FOR\n"
+      "BLADE_OMP_PARALLEL_FOR_COLLAPSE"; "BLADE_OMP_PARALLEL_FOR_DYNAMIC" ]
 let private ompReduceCases : (string * string * string list * string list) list =
     // (name, source, mustContain, mustNotContain)
     let arr = "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]\n"
@@ -604,6 +607,62 @@ let private emissionShapeCases : (string * string * string list * string list) l
        "type I = Idx<3>\ntype J = Idx<4>\nlet mut G = [0.0]\nlet p = method_for(range<I>, range<J>) <@> lambda(i, j) -> {\n    G(0) = G(0) + 1.0\n    G(0)\n} |> compute\n",
        // the path taken: the general two-level nest
        [ "for (size_t __i0 = 0; __i0 < 3; __i0++) {"; "for (size_t __i1 = 0; __i1 < 4; __i1++) {" ], g41WriterBans)
+      // ---- G41 (Codex review W2F-5, finding 20): a parallel kernel that
+      // calls a CALLBACK is judged through every call site's argument. A
+      // pure callback keeps the team (corpus loops/503); a writing one is
+      // refused at lowering (mutability-errors/029). Where the emitter's own,
+      // more conservative analysis still sees a possible write (here: a
+      // kernel-body `let mut c = G`, which the C++ lane aliases -- gap G46),
+      // the general nest drops the team WITH the census line.
+      ("omp_pure_callback_keeps_team",
+       "function twice(v: Float64) -> Float64 = v * 2.0\nfunction launch(f: (Float64) -> Float64) = method_for(0..2) <@> lambda(i) where omp(i: 1) -> f(Float64(i) + 1.0) |> compute\nlet r = launch(twice)\n",
+       [ "BLADE_OMP_PARALLEL_FOR" ], [ "requested but emitted serial" ])
+      // Codex review W2F-6 (f): a pure SELF-RECURSIVE helper forwarding an
+      // array (corpus loops/504) and a pure callback forwarded through one
+      // (loops/505) keep the team.
+      ("omp_recursive_pure_helper_keeps_team",
+       "type I = Idx<3>\nlet a: Array<Float64 like I> = [1.0, 2.0, 3.0]\nfunction walk(v: Array<Float64 like I>, k: Int64, acc: Float64) -> Float64 =\n    if k >= 3 then acc else walk(v, k + 1, acc + v((k : I)))\nlet r = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> walk(a, 0, Float64(i)) |> compute\n",
+       [ "BLADE_OMP_PARALLEL_FOR" ], [ "requested but emitted serial" ])
+      ("omp_pure_callback_through_recursion_keeps_team",
+       "function scale(v: Int64) -> Float64 = Float64(v) * 2.0\nfunction recur(f: (Int64) -> Float64, n: Int64) -> Float64 = if n == 0 then f(0) else recur(f, n - 1)\nfunction launch(g: (Int64) -> Float64) = method_for(0..2) <@> lambda(i) where omp(i: 1) -> recur(g, 3) + Float64(i) |> compute\nlet r = launch(scale)\n",
+       [ "BLADE_OMP_PARALLEL_FOR" ], [ "requested but emitted serial" ])
+      // Codex review W2F-7 finding 24: a pure NULLARY callback (the
+      // empty-slot arrow; corpus loops/506) keeps the team.
+      ("omp_pure_nullary_callback_keeps_team",
+       "function one() -> Float64 = 1.0\nfunction launch(f: () -> Float64) = method_for(0..2) <@> lambda(i) where omp(i: 1) -> f() + Float64(i) |> compute\nlet r = launch(one)\n",
+       [ "BLADE_OMP_PARALLEL_FOR" ], [ "requested but emitted serial" ])
+      // Codex review W2F-7 finding 25 controls: every candidate reaching
+      // launch's `f` -- directly and through via's indirect `h(f)` -- is pure,
+      // named (loops/507) or a lambda (loops/508): the team is kept.
+      ("omp_second_order_pure_callbacks_keep_team",
+       "type I = Idx<2>\nfunction ident(v: Float64) -> Float64 = v\nfunction twice(v: Float64) -> Float64 = v * 2.0\nfunction launch(f: (Float64) -> Float64) -> Array<Float64 like I> = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute\nfunction via(h: ((Float64) -> Float64) -> Array<Float64 like I>, f: (Float64) -> Float64) -> Array<Float64 like I> = h(f)\nlet a = launch(ident)\nlet b = via(launch, twice)\n",
+       [ "BLADE_OMP_PARALLEL_FOR" ], [ "requested but emitted serial" ])
+      ("omp_second_order_pure_lambda_keeps_team",
+       "type I = Idx<2>\nfunction ident(v: Float64) -> Float64 = v\nfunction launch(f: (Float64) -> Float64) -> Array<Float64 like I> = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute\nfunction via(h: ((Float64) -> Float64) -> Array<Float64 like I>, f: (Float64) -> Float64) -> Array<Float64 like I> = h(f)\nlet a = launch(ident)\nlet b = via(launch, lambda(v) -> v + 10.0)\n",
+       [ "BLADE_OMP_PARALLEL_FOR" ], [ "requested but emitted serial" ])
+      // Codex review W2F-8: a MODULE alias of the launcher (26, loops/509),
+      // a local alias of a callback parameter called directly or through a
+      // tuple (27, loops/510-511), and a third-order chain in both discovery
+      // orders (28, loops/512-513) -- all pure: the team is kept.
+      ("omp_pure_callback_through_module_alias_keeps_team",
+       "type I = Idx<2>\nfunction ident(v: Float64) -> Float64 = v\nfunction launch(f: (Float64) -> Float64) -> Array<Float64 like I> = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute\nlet run = launch\nlet r = run(ident)\n",
+       [ "BLADE_OMP_PARALLEL_FOR" ], [ "requested but emitted serial" ])
+      ("omp_pure_callback_via_local_alias_keeps_team",
+       "type I = Idx<2>\nfunction ident(v: Float64) -> Float64 = v\nfunction launch(f: (Float64) -> Float64) -> Array<Float64 like I> = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute\nfunction via(h: ((Float64) -> Float64) -> Array<Float64 like I>, f: (Float64) -> Float64) -> Array<Float64 like I> = {\n    let k = h\n    k(f)\n}\nlet a = launch(ident)\nlet b = via(launch, ident)\n",
+       [ "BLADE_OMP_PARALLEL_FOR" ], [ "requested but emitted serial" ])
+      ("omp_pure_callback_via_tuple_held_alias_keeps_team",
+       "type I = Idx<2>\nfunction ident(v: Float64) -> Float64 = v\nfunction launch(f: (Float64) -> Float64) -> Array<Float64 like I> = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute\nfunction via(h: ((Float64) -> Float64) -> Array<Float64 like I>, f: (Float64) -> Float64) -> Array<Float64 like I> = {\n    let k = h\n    let t = (k, 0)\n    t[0](f)\n}\nlet a = launch(ident)\nlet b = via(launch, ident)\n",
+       [ "BLADE_OMP_PARALLEL_FOR" ], [ "requested but emitted serial" ])
+      ("omp_pure_callback_third_order_keeps_team",
+       "type I = Idx<2>\ntype F = (Float64) -> Float64\ntype R = Array<Float64 like I>\ntype H = (F) -> R\ntype Q = (H, F) -> R\ntype D = (Q, F) -> R\nfunction ident(v: Float64) -> Float64 = v\nfunction launch(f: F) -> R = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute\nfunction via(h: H, f: F) -> R = h(f)\nfunction bridge(q: Q, f: F) -> R = q(launch, f)\nfunction relay(h: D, f: F) -> R = h(via, f)\nlet a = launch(ident)\nlet b = relay(bridge, ident)\n",
+       [ "BLADE_OMP_PARALLEL_FOR" ], [ "requested but emitted serial" ])
+      ("omp_pure_callback_third_order_reversed_keeps_team",
+       "type I = Idx<2>\ntype F = (Float64) -> Float64\ntype R = Array<Float64 like I>\ntype H = (F) -> R\ntype Q = (H, F) -> R\ntype D = (Q, F) -> R\nfunction ident(v: Float64) -> Float64 = v\nfunction launch(f: F) -> R = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute\nfunction via(h: H, f: F) -> R = h(f)\nfunction relay(h: D, f: F) -> R = h(via, f)\nfunction bridge(q: Q, f: F) -> R = q(launch, f)\nlet b = relay(bridge, ident)\nlet a = launch(ident)\n",
+       [ "BLADE_OMP_PARALLEL_FOR" ], [ "requested but emitted serial" ])
+      ("omp_nest_write_veto_census",
+       "type K = Idx<2>\ntype I = Idx<3>\nlet G = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute\nlet r = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> {\n    let mut c = G\n    c((0 : K)) = Float64(i)\n    c((0 : K)) + G((0 : K))\n} |> compute\n",
+       [ "[omp] requested but emitted serial: the kernel may write storage outside itself" ],
+       [ "BLADE_OMP_PARALLEL_FOR"; "BLADE_OMP_SIMD\n" ])
       ("ivdep_kept_on_pure_nest_producer",
        "type I = Idx<3>\ntype J = Idx<4>\nlet p = method_for(range<I>, range<J>) <@> lambda(i, j) -> Float64(i * 4 + j) * 0.5 |> compute\n",
        [ "BLADE_IVDEP" ], [])      // ---- the threaded triangular outer level runs ASCENDING ----------------

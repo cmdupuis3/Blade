@@ -1,0 +1,22 @@
+// TEST: Parallel Callback Via Tuple Held Alias All Pure
+// Gap G41, Codex review W2F-8 finding 27 control (mutability-errors/041 is
+// the writing twin): the alias travels in a tuple the table follows
+// component-wise, so nothing escapes and the pure kernel keeps its team
+// (omp-pragma pins the pragma).
+type I = Idx<2>
+let mut G = [0.0]
+function ident(v: Float64) -> Float64 = v
+function bump(v: Float64) -> Float64 = {
+    G(0) = G(0) + 1.0
+    G(0)
+}
+function launch(f: (Float64) -> Float64) -> Array<Float64 like I> = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute
+function via(h: ((Float64) -> Float64) -> Array<Float64 like I>, f: (Float64) -> Float64) -> Array<Float64 like I> = {
+    let k = h
+    let t = (k, 0)
+    t[0](f)
+}
+let a = launch(ident)
+let b = via(launch, ident)
+// EXPECT: a = [0.0, 1.0]
+// EXPECT: b = [0.0, 1.0]

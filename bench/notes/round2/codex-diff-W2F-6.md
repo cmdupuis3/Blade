@@ -1,0 +1,29 @@
+﻿VERDICT: DO NOT MERGE
+20. NOT CLOSED — the original single-callback witness and general-nest veto are addressed, but choosing one candidate instead of joining callback effects still hides writers (22).
+21. CLOSED — src/Lowering.fs:2892 now uses a parameter-aware External summary, restoring the legal direct put(g) call; loops/502 pins its result and mutation. This does not establish disjointness of parallel applications (c).
+
+Reviewed 843cb654..d9289387; Lowering, Optimize, CodeGenExprSupport, CodeGenLoopNest and OmpTests are identical to their versions at 8e5764ac. Source/git review only; no builds, emits, tests, or witness execution. Reported green totals are unverified.
+
+22. HIGH — src/Lowering.fs:2871; src/CodeGenExprSupport.fs:1742. A boolean “may write” does not order callable summaries. Both resolvers select the FIRST candidate considered writing by the plain resolver, then analyze only that candidate with the callback-aware resolver. That candidate can become pure, hiding a later real writer. Source-derived witness:
+
+```blade
+let mut G = [0.0]
+function twice(v: Float64) -> Float64 = v * 2.0
+function invoke(cb: (Float64) -> Float64, v: Float64) -> Float64 = cb(v)
+function forward(v: Float64) -> Float64 = invoke(twice, v)
+function bump(v: Float64) -> Float64 = { G(0) = G(0) + v; G(0) }
+function launch(f: (Float64) -> Float64) = method_for(0..2) <@> lambda(i) where omp(i: 1) -> f(Float64(i) + 1.0) |> compute
+let a = launch(forward)
+let b = launch(bump)
+```
+
+The probe calls forward writing because invoke's cb is unresolved; it chooses forward before bump. The final analysis resolves cb to twice, concludes forward is pure, and never incorporates bump. Lowering permits the kernel and the backend's new veto sees the same false purity. Independently, two genuinely writing candidates can write different parameter positions, or one can write only a fresh argument while another writes a capture. Exact fix: resolve a SET of candidates and join every candidate's External/Params effects at each application, using the SAME callback/deferred facts; unknown candidates contribute top. Never substitute one callable based on a boolean. Add the witness, reversed call-site order, and differing-parameter/captured-write candidates as refusals and backend veto checks.
+
+23. HIGH — src/Optimize.fs:905-919, especially 913. The cutoff is per callable, not per SCC, and its “pessimistic” fallback is not top: allStorage has External=false. Counterexample schema: ten mut array parameters a0..a9 and a captured mutable G; f(a0,..,a9,n) writes a0(0) at n=0, otherwise calls f(a1,..,a9,G,n-1). A parallel cell supplies ten distinct fresh scratch arrays and n=10. The real call writes G. Iterations 0..8 discover Params={0} through {0..8}; the cutoff adds parameter 9 but returns External=false WITHOUT evaluating the transfer at that widened summary. The next evaluation would discover the captured G. Fresh actual arguments erase every returned parameter effect, so both refusal and backend veto can miss the write. Summaries computed under the unfinished approximation also remain cached at the cutoff. Exact fix: iterate the recursive dependency SCC to a fixed point; if retaining a budget, widen to External=true plus all storage parameters and invalidate/recompute dependent cached summaries. Add a >9-step captured-storage propagation regression and an indirect cycle through a callback/alias. Raising the constant alone is insufficient.
+
+(a) Bottom is a valid starting point for this may-analysis; the joined iterates cannot oscillate. Newly computed callees are discarded when the enclosing summary grows, so indirect recursion is revisited too. The failure is the non-conservative cutoff and retained dependencies, not the bottom seed.
+(b) Named two-level forwarding is chased. A lifted lambda's body is inspected; an IRVar kernel reference resolves. Tuple projections/non-IRVar callable wrappers surviving lowering fail closed rather than resolving. Lowering scans all modules; both emitters merge modules before building callback facts. None of these facts repairs 22.
+(c) Own parameters are merely exempted by the frontend (TypeCheckSupport.fs:7315,7998); its mut permission/no-alias checks are not a per-cell ownership proof. C++ general/flat nests independently veto observable parameter writes (CodeGenLoopNest.fs:1557,2832). loops/502 is a direct call, not concurrent cells sharing an operand; add that negative beside a genuinely disjoint operand case before claiming ownership-policy coverage.
+(d) G46 is pre-existing: CodeGenExpr.fs:1698-1709 and 1759 bind the Array wrapper with auto; Interp/Core.fs:622 deep-copies MutableArrayLets; CodeGenBinding.fs:5684-5706 handles the separate binding path. These files are unchanged by this commit. OmpTests.fs:621 deliberately relies on the kernel-local alias to trigger the backend veto and pins no values; loops/502-504 do not exercise that copy/alias shape.
+(f) loops/502-504 pin values but add no explicit threads-off / threads-on execution matrix; OmpTests.fs:1293 checks emission only. 029 pins BL4005, message, and @13:1 (the function launch line after the harness removes TEST). The census case has one requested omp kernel and requires its exact write-suppression line while banning team/SIMD macros, so it does establish requested-and-dropped. 504's claimed retained team has no new dedicated pragma assertion.
+(e) YES, pure-program emission can change: resolving pure callbacks can newly admit flat SIMD/teams or ivdep (CodeGenLoopNest.fs:2832,1778), and programFuncs can newly admit imported pure producers; 504/mandelbrot's pure recursion changes rejection to acceptance. No default gate polarity changes, but byte identity for bench/kernels/*/*.blade and examples/*.blade is NOT established by this diff review; a blanket “no-writes programs are unchanged” premise is false.

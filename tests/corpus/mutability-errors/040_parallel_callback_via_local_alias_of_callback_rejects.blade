@@ -1,0 +1,22 @@
+// TEST: parallel callback reached through a local alias of a callback parameter (rejects)
+// ERROR: BL4005 @ 15:1
+// ERROR-CONTAINS: a parallel kernel (`where omp` / cuda) writes storage captured from outside it
+// Gap G41, Codex review W2F-8 finding 27: mutability-errors/036 with via's
+// body calling its callback through `let k = h`. The table EVALUATES the
+// alias (k holds h's candidates, {launch}), so `k(f)` feeds bump into
+// launch's `f` (804516d1 matched the head by name, found neither a callable
+// nor a callback, and lost the edge: it compiled).
+type I = Idx<2>
+let mut G = [0.0]
+function ident(v: Float64) -> Float64 = v
+function bump(v: Float64) -> Float64 = {
+    G(0) = G(0) + 1.0
+    G(0)
+}
+function launch(f: (Float64) -> Float64) -> Array<Float64 like I> = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute
+function via(h: ((Float64) -> Float64) -> Array<Float64 like I>, f: (Float64) -> Float64) -> Array<Float64 like I> = {
+    let k = h
+    k(f)
+}
+let a = launch(ident)
+let b = via(launch, bump)

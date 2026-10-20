@@ -1688,6 +1688,25 @@ let computeProgramLetValues (modul: IRModule) : Map<IRId, IRExpr> =
     for f in modul.Functions do note f.Body
     acc |> Seq.map (fun kv -> (kv.Key, kv.Value)) |> Map.ofSeq
 
+let internal programCallbackArgsStorage =
+    System.Threading.AsyncLocal<Map<IRId, IRExpr list> ref>()
+
+/// Every argument a call site of the module passes for a FUNCTION-VALUED
+/// parameter, keyed by that parameter's id (gap G41, Codex finding 20): a
+/// kernel that calls a callback is judged through what the callback can be.
+/// Installed beside programLetValuesCell (after the callables table).
+let programCallbackArgsCell () : Map<IRId, IRExpr list> ref =
+    let v = programCallbackArgsStorage.Value
+    if isNull (box v) then
+        let fresh = ref Map.empty
+        programCallbackArgsStorage.Value <- fresh
+        fresh
+    else v
+
+let computeProgramCallbackArgs (modul: IRModule) : Map<IRId, IRExpr list> =
+    // the SAME collector Lowering uses (Optimize.callbackTable)
+    Blade.Optimize.callbackTable resolveCallable modul.Functions (modul.Bindings |> List.map (fun b -> (b.Id, b.Value)))
+
 let private codegenWriteFacts (deferred: Map<IRId, IRExpr>) : Blade.Optimize.WriteFacts =
     { Resolve = resolveCallable
       OuterLet = (fun id ->
@@ -1697,8 +1716,12 @@ let private codegenWriteFacts (deferred: Map<IRId, IRExpr>) : Blade.Optimize.Wri
       // codegen does not know which lets deep-copy here: an alias of a
       // captured array counts as the captured array (a decline, never wrong)
       CopiedLet = (fun _ -> false)
-      UnknownIsWrite = true }
-
+      UnknownIsWrite = true
+      // a callback joins EVERY argument its call sites pass (Codex finding 22)
+      Callbacks = (fun id ->
+          match Map.tryFind id (programCallbackArgsCell ()).Value with
+          | Some args when not args.IsEmpty -> Some args
+          | _ -> None) }
 let callableMayWrite (callable: IRCallable) : bool =
     Blade.Optimize.callableMayWriteWith (codegenWriteFacts Map.empty) callable
 

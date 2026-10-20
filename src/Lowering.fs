@@ -2761,7 +2761,8 @@ let private refuseWritingJoinLegs (modules: IRModule list) : unit =
         { Resolve = resolve
           OuterLet = (fun id -> match lets.TryGetValue id with | true, v -> Some v | _ -> None)
           CopiedLet = copied
-          UnknownIsWrite = true }
+          UnknownIsWrite = true
+          Callbacks = (fun _ -> None) }
     // An unresolved call head counts as a write here too: a joined evaluation
     // must be PROVED free of observable writes, not merely not seen writing.
     let writes (e: IRExpr) = Optimize.exprMayWriteWith facts e
@@ -2822,20 +2823,53 @@ let private refuseWritingJoinLegs (modules: IRModule list) : unit =
     // same storage-provenance analysis, refusing only what it can see (calls
     // are the front end's to judge, so an unresolved head is not assumed to
     // write here). Located at the declaration that applies the kernel.
-    let visible = { facts with UnknownIsWrite = false }
+    // CALLBACKS (Codex finding 20): a parallel kernel that calls a
+    // function-valued parameter of its enclosing function is judged through
+    // the ARGUMENTS every call site passes for that parameter: each must
+    // resolve to a callable, and the worst of them stands in for the callback.
+    // An argument that does not resolve leaves the callback unresolved, which
+    // a parallel body may not have (UnknownIsWrite: proof required).
+    let allFuncs = modules |> List.collect (fun m -> m.Functions)
+    // ONE shared collector (Optimize.callbackTable): the least fixpoint of the
+    // function values every callback parameter and alias may hold -- module
+    // bindings keep their identity, indirect calls feed every target, and
+    // only a genuine escape makes a callback unknown.
+    let callbackArgs =
+        Optimize.callbackTable resolve allFuncs (modules |> List.collect (fun m -> m.Bindings |> List.map (fun b -> (b.Id, b.Value))))
+    // Every candidate is joined at each application (Codex finding 22): the
+    // walker applies EACH argument a call site passes for the callback.
+    let parallelFacts =
+        { facts with
+            Callbacks = (fun id ->
+                let key =
+                    match chaseAlias Set.empty (IRVar (id, IRTUnit)) with
+                    | IRVar (j, _) -> j
+                    | _ -> id
+                match Map.tryFind key callbackArgs with
+                | Some l when not l.IsEmpty -> Some l
+                | _ -> None)
+            UnknownIsWrite = true }
     let users =
         modules |> List.collect (fun m -> m.Bindings)
         |> List.map (fun b -> (b, collectVarRefsIR b.Value))
     for m in modules do
         for f in m.Functions do
-            if (f.IsOmpParallel || f.IsCudaKernel) && Optimize.exprMayWriteWith visible f.Body then
+            // PARAMETER-AWARE (Codex finding 21): a write to the kernel's own
+            // parameter -- a `mut` array parameter, the caller's to grant --
+            // is judged by the front end's mut-parameter policy, not here; only
+            // writes to storage captured from OUTSIDE the body are a race.
+            if (f.IsOmpParallel || f.IsCudaKernel) && (Optimize.callableWriteSummaryWith parallelFacts f).External then
                 let span =
                     match users |> List.tryFind (fun (_, refs) -> Set.contains f.Id refs) with
                     | Some (b, _) -> spanOf b.Name (Some b.Id)
-                    | None -> IR.declSpanOf f.Name
+                    | None ->
+                        // a kernel lifted out of a FUNCTION: locate it at that function
+                        match allFuncs |> List.tryFind (fun g -> g.Id <> f.Id && Set.contains f.Id (collectVarRefsIR g.Body)) with
+                        | Some g when IR.declSpanOf g.Name <> Blade.Ast.noSpan -> IR.declSpanOf g.Name
+                        | _ -> IR.declSpanOf f.Name
                 raise (Blade.Diagnostics.BladeDiagnosticException
                         (Blade.Diagnostics.mkError "BL4005" Blade.Diagnostics.PhConstraints span
-                            "a parallel kernel (`where omp` / cuda) writes storage captured from outside it through a local view or alias (a `let` bound to a slice or element view of a captured array, or rebound to one): its cells run concurrently, so the store is a data race. Write through a fresh local array, or return the value and fold it."))
+                            "a parallel kernel (`where omp` / cuda) writes storage captured from outside it -- through a local view or alias (a `let` bound to, or rebound to, a slice or element view of a captured array) or through a callback it calls (a function-valued parameter whose argument writes, or one that cannot be resolved): its cells run concurrently, so the store is a data race. Write through a fresh local array, pass a callback that writes nothing outside itself, or return the value and fold it."))
 let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (builder: IRBuilder) : IRProgram =
     // The scratch-reuse plan is keyed by let id and let ids restart per
     // compile, so a stale plan from an earlier program in this flow (the test
@@ -3041,17 +3075,17 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // Hot-row fold scheduling (Blade.Optimize.planHotRowFolds): a side
         // table like the scratch-reuse plan, read by both emitters; the
         // interpreter runs the tree as written. Gate: BLADE_HOT_ROW.
-        Optimize.planHotRowFolds env.Builder irModule
+        Optimize.planHotRowFolds env.Builder programFuncs irModule
         // Compaction fusion (Blade.Optimize.planCompactionFusion): the
         // mask -> compound -> fold chain's side table, read by both emitters;
         // the interpreter runs the tree as written. Gate:
         // BLADE_COMPACTION_FUSION.
-        Optimize.planCompactionFusion irModule
+        Optimize.planCompactionFusion programFuncs irModule
         // Compact row classes (Blade.Optimize.planCompactRowClasses): a
         // compact rank-2 producer's orbit-fold class partials computed behind
         // each packed row; side table, both emitters. Gate:
         // BLADE_COMPACT_ROW_CLASSES.
-        Optimize.planCompactRowClasses irModule
+        Optimize.planCompactRowClasses programFuncs irModule
         // mask+contains fusion always runs a linear scan; the semijoin
         // hash-set is a separate, not-yet-implemented optimization.
         irModule)

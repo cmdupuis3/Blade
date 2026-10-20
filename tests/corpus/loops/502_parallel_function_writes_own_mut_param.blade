@@ -1,0 +1,17 @@
+// TEST: Parallel Function Writes Its Own Mut Parameter
+// Gap G41, Codex review W2F-5 finding 21 (a regression of 843cb654, fixed):
+// a `where omp` function may write its OWN `mut` array parameter -- the
+// caller grants that storage (formalism 5.2; the front end's mut-parameter
+// policy). Only writes to storage captured from outside the body are a race,
+// so the parallel-body refusal keeps parameters apart from captures.
+type I = Idx<2>
+function put(a: mut Array<Float64 like I>) where omp(a: 1) -> Float64 = {
+    a((0 : I)) = 1.0
+    a((0 : I))
+}
+let mut g: Array<Float64 like I> = [0.0, 0.0]
+let r = put(g)
+let g0 = g((0 : I))
+// EXPECT: r = 1.0
+// EXPECT: g0 = 1.0
+// EXPECT: g = [1.0, 0.0]

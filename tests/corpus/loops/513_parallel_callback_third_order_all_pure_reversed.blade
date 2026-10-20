@@ -1,0 +1,20 @@
+// TEST: Parallel Callback Third Order All Pure Reversed
+// Gap G41, Codex review W2F-8 finding 28: loops/512 with relay declared
+// before bridge and the two top-level calls swapped -- the least fixpoint is
+// the same in every discovery order. The kernel keeps its team (omp-pragma
+// pins the pragma).
+type I = Idx<2>
+type F = (Float64) -> Float64
+type R = Array<Float64 like I>
+type H = (F) -> R
+type Q = (H, F) -> R
+type D = (Q, F) -> R
+function ident(v: Float64) -> Float64 = v
+function launch(f: F) -> R = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute
+function via(h: H, f: F) -> R = h(f)
+function relay(h: D, f: F) -> R = h(via, f)
+function bridge(q: Q, f: F) -> R = q(launch, f)
+let b = relay(bridge, ident)
+let a = launch(ident)
+// EXPECT: b = [0.0, 1.0]
+// EXPECT: a = [0.0, 1.0]

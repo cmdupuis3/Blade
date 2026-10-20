@@ -1,0 +1,22 @@
+// TEST: parallel callback reached through a tuple holding an alias of a callback parameter (rejects)
+// ERROR: BL4005 @ 14:1
+// ERROR-CONTAINS: a parallel kernel (`where omp` / cuda) writes storage captured from outside it
+// Gap G41, Codex review W2F-8 finding 27, tuple-head variant: the alias is
+// stored in a tuple and called through a structural projection `t[0](f)`.
+// Tuples are followed component-wise, so the head is {launch} and bump
+// reaches launch's `f` (804516d1 compiled it).
+type I = Idx<2>
+let mut G = [0.0]
+function ident(v: Float64) -> Float64 = v
+function bump(v: Float64) -> Float64 = {
+    G(0) = G(0) + 1.0
+    G(0)
+}
+function launch(f: (Float64) -> Float64) -> Array<Float64 like I> = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute
+function via(h: ((Float64) -> Float64) -> Array<Float64 like I>, f: (Float64) -> Float64) -> Array<Float64 like I> = {
+    let k = h
+    let t = (k, 0)
+    t[0](f)
+}
+let a = launch(ident)
+let b = via(launch, bump)

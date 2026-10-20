@@ -1,0 +1,19 @@
+// TEST: parallel callback joins every candidate -- pure one first (rejects)
+// ERROR: BL4005 @ 16:1
+// ERROR-CONTAINS: a parallel kernel (`where omp` / cuda) writes storage captured from outside it
+// Gap G41, Codex review W2F-6 finding 22: `launch` is called with `forward`
+// (pure: it forwards `twice` through `invoke`'s callback) and with `bump`
+// (writes the module-level G). The old resolver chose ONE candidate -- forward,
+// which a first probe thought writing -- found it pure, and admitted the kernel
+// (old binary: compiled). Every candidate's effects are joined now.
+let mut G = [0.0]
+function twice(v: Float64) -> Float64 = v * 2.0
+function invoke(cb: (Float64) -> Float64, v: Float64) -> Float64 = cb(v)
+function forward(v: Float64) -> Float64 = invoke(twice, v)
+function bump(v: Float64) -> Float64 = {
+    G(0) = G(0) + v
+    G(0)
+}
+function launch(f: (Float64) -> Float64) = method_for(0..2) <@> lambda(i) where omp(i: 1) -> f(Float64(i) + 1.0) |> compute
+let a = launch(forward)
+let b = launch(bump)

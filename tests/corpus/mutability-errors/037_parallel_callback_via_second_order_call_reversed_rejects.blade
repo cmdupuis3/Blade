@@ -1,0 +1,17 @@
+// TEST: parallel callback supplied through a second-order call, reversed order (rejects)
+// ERROR: BL4005 @ 13:1
+// ERROR-CONTAINS: a parallel kernel (`where omp` / cuda) writes storage captured from outside it
+// Gap G41, Codex review W2F-7 finding 25: mutability-errors/036 with the two
+// calls swapped -- the indirect writer comes first, the direct pure call
+// second. The fixpoint does not depend on the order the sites are met.
+type I = Idx<2>
+let mut G = [0.0]
+function ident(v: Float64) -> Float64 = v
+function bump(v: Float64) -> Float64 = {
+    G(0) = G(0) + 1.0
+    G(0)
+}
+function launch(f: (Float64) -> Float64) -> Array<Float64 like I> = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute
+function via(h: ((Float64) -> Float64) -> Array<Float64 like I>, f: (Float64) -> Float64) -> Array<Float64 like I> = h(f)
+let b = via(launch, bump)
+let a = launch(ident)
