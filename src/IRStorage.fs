@@ -152,6 +152,68 @@ type RowEpilogue = {
     /// registers the row-sum pool for the scope's frees and publishes the
     /// name to the plan.
     OnEmitted: unit -> unit
+    /// B2r (round-2 cell epilogues): the row's fold advanced PER CELL inside
+    /// the inner level instead of on the finished row. `Some step` makes the
+    /// nest declare `<ChainElem> <ChainName> = 0;` at the top of each outer
+    /// iteration, bind each produced cell to a local `c` that it stores and
+    /// then hands to `step c` (the chain's `+=`), and store the chain into
+    /// the row-sum array (`ChainBody`) instead of rendering `Body`. None =
+    /// the row-kernel call on the finished row (`Body`).
+    CellStep: (string -> string) option
+    /// The chain's accumulator name and element type (meaningful with CellStep).
+    ChainName: string
+    ChainElem: string
+    /// The epilogue statements under CellStep: the chain stored as the row's value.
+    ChainBody: unit -> string list
+    /// The cell loop's mini-block (BLADE_TILE_TUNE epi_blk_r): 0 = one fused
+    /// loop; n > 0 strip-mines it into n-cell blocks (same cells, same order).
+    ChainBlock: int64
+    /// Called (with the reason) when the nest emitted the row epilogue but
+    /// could not take the CellStep form: the decision is recorded and the
+    /// ordinary `Body` is rendered (the fallback is atomic with the consumer).
+    OnCellStepDeclined: string -> unit
+    /// The consumer's name (the `cell-epilogue` decision's subject).
+    Subject: string
+}
+
+/// B1 (round-2 cell epilogues): the form a rank-1 flat producer's epilogue
+/// takes in THIS build (decided by the apply emitter from the plan).
+type FlatEpilogueForm =
+    /// P1: the blade_fold lane state fed behind each epi_blk-cell block of the
+    /// whole sweep (serial licensed); the partial is `PartName`.
+    | FlatLanesSerial
+    /// P1 per Path B chunk: the producer sweep runs in the fold's team,
+    /// thread t producing [chunk_lo(n, t, T), chunk_lo(n, t + 1, T)) and
+    /// feeding its own lane state; partials in `PartName[t]` / `HadName[t]`,
+    /// team size in `TeamName` (mt8 licensed).
+    | FlatLanesChunks
+    /// P2: the fold's ordered chain advanced per cell right behind its store
+    /// (register-consume), serial; the accumulator is `PartName`.
+    | FlatChain
+
+/// What the flat elementwise emitter fuses into its sweep (B1).
+type FlatEpilogue = {
+    Form: FlatEpilogueForm
+    /// The cell / accumulator C++ element type.
+    ElemCpp: string
+    /// K lanes and the lane block B = K * 32 / sizeof(T) (P1 forms).
+    K: int
+    LaneBlock: int64
+    /// `feed_sq` / `finish_sq` (c * c) vs `feed_sum` / `finish_sum` (c).
+    Square: bool
+    /// P1: the producer block (BLADE_TILE_TUNE epi_blk, a multiple of
+    /// LaneBlock); P2: the mini-block (epi_blk_r, 0 = one fused loop).
+    Block: int64
+    PartName: string
+    HadName: string
+    TeamName: string
+    /// P2: declarations before the producer (the fold wrapper, the
+    /// accumulator from the seed), unindented.
+    ChainPrelude: string list
+    /// P2: the chain's statement for a cell named by the argument.
+    ChainStep: string -> string
+    /// Called when the flat emitter placed the form (publishes to the plan).
+    OnEmitted: unit -> unit
 }
 
 type LoopNestCodeGen = {
@@ -211,6 +273,11 @@ type LoopNestCodeGen = {
     /// each produced row (see RowEpilogue). None everywhere but a planned
     /// producer's statement-form materialization.
     RowEpilogue: RowEpilogue option
+    /// B1 (round-2 cell epilogues): the consumer fold fed behind a rank-1
+    /// flat producer's stores. None everywhere but a planned ChunkFold
+    /// producer's statement-form materialization; only the flat
+    /// elementwise emitter honours it.
+    FlatEpilogue: FlatEpilogue option
 }
 
 /// One dimension GROUP of a device buffer. Mirrors a single IRIndexType:
@@ -1228,4 +1295,5 @@ let buildLoopNestCodeGen
         FoldChunk = None
         ShareDecl = None
         RowEpilogue = None
+        FlatEpilogue = None
     }

@@ -387,7 +387,63 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         // A producer whose nest did not admit the epilogue published
         // nothing, and the two-pass form below is unchanged.
         match Blade.Optimize.HotRowTable.tryConsumer binding.Id with
-        | Some plan when plan.EmittedCpp.Value.IsSome ->
+        // B1 (round-2 cell epilogues): the producer's flat sweep already fed
+        // this fold (CodeGenLoopNest.tryGenFlatEpilogueNest published the
+        // form). What remains is the CONSUMER's own part, at the consumer's
+        // own site: the seed (evaluated HERE, as before -- a P1 partial is
+        // seed-independent) and the combine through the fold's wrapper,
+        //   lanes   seed, then F(acc, partial)               (OLD serial K-lane arm)
+        //   chunks  seed, then F(acc, part[t]) for each non-empty chunk in
+        //           thread order, then the partial arrays freed (OLD Path B)
+        //   chain   the accumulator the chain carried (P2: the seed is a
+        //           literal the producer evaluated; same chain, same order)
+        | Some plan when (match plan.Form with Blade.Optimize.ChunkFold -> true | _ -> false)
+                         && plan.EmittedCpp.Value.IsSome ->
+            let published = plan.EmittedCpp.Value.Value
+            // One consumption per publication: a re-emission of the producer
+            // publishes again; a stale tag must never reach a later emission.
+            plan.EmittedCpp.Value <- None
+            let tag = published.Substring(published.IndexOf ':' + 1)
+            let formKey = published.Substring(0, published.IndexOf ':')
+            let name = bindingCppName binding
+            match resolveCallable kernelExpr with
+            | Some callable when callable.Params.Length = 2 ->
+                let elemStr =
+                    match callable.RetType with
+                    | IRTScalar et -> primTypeToCpp et
+                    | t -> irTypeToCpp t
+                let part = $"__cep_part_{tag}"
+                let code =
+                    match formKey with
+                    | "chain" ->
+                        recordFoldForm name "serial (repro or unlicensed) chain interleaved into the producer's sweep (cell epilogue)" "reduce over a deferred computation (rank-1 producer epilogue)"
+                        [ $"{ind}// cell epilogue: `{name}`'s ordered chain ran inside `{plan.ProducerName}`'s sweep, one step per cell behind its store (Blade.Optimize.planHotRowFolds, rank-1 arm)"
+                          $"{ind}{elemStr} {name} = __cep_acc_{tag};" ]
+                    | _ ->
+                        let (wrapperCode, wname) = genCallableWrapper ctx.VarNames name callable
+                        let seedStr = exprToCppCtx ctx seedExpr
+                        let decl = (wrapperCode |> List.map (fun s -> ind + s)) @ [ $"{ind}{elemStr} {name} = {seedStr};" ]
+                        let kind = match plan.CellChain with Some Blade.Optimize.Square -> VecSq | _ -> VecSum
+                        let label = foldVecLabel kind (foldVecLanes kind)
+                        if formKey = "chunks" then
+                            recordFoldForm name $"threaded(Path B chunks, {label} per chunk, fed behind the producer's stores)" "reduce over a deferred computation (rank-1 producer epilogue)"
+                            decl
+                            @ [ $"{ind}// cell epilogue: each Path B chunk's lane-tree partial was fed behind `{plan.ProducerName}`'s stores by the thread that produced it; combined here in thread order, seed first, empty chunks skipped"
+                                $"{ind}for (int __rt = 0; __rt < __cep_T_{tag}; __rt++) if (__cep_had_{tag}[__rt]) {name} = {wname}({name}, {part}[__rt]);"
+                                $"{ind}delete[] {part}; delete[] __cep_had_{tag};" ]
+                        else
+                            recordFoldForm name $"{label} stream fed behind the producer's stores (cell epilogue)" "reduce over a deferred computation (rank-1 producer epilogue)"
+                            decl
+                            @ [ $"{ind}// cell epilogue: the lane-tree partial was fed behind `{plan.ProducerName}`'s stores; the seed and the combine stay here"
+                                $"{ind}{name} = {wname}({name}, {part});" ]
+                (code, addVarName binding.Id name ctx)
+            | _ ->
+                // Unreachable (buildFlatEpilogue resolved the same kernel);
+                // loud rather than a silent two-pass over consumed partials.
+                raise (Blade.Diagnostics.BladeDiagnosticException
+                        (Blade.Diagnostics.Codes.iceCodegen "internal: a cell-epilogue consumer whose fold kernel no longer resolves"))
+        | Some plan when (match plan.Form with Blade.Optimize.RowFold -> true | _ -> false)
+                         && plan.EmittedCpp.Value.IsSome ->
             let rsName = plan.EmittedCpp.Value.Value
             let rsVar = IRVar (plan.RowSumId, plan.RowSumType)
             let ctxR = { ctx with VarNames = Map.add plan.RowSumId rsName ctx.VarNames }
@@ -5602,6 +5658,35 @@ and genForRangeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
     // on the top frame, so the frees emitted at the bottom of the body can only
     // name storage THIS iteration allocated -- structurally, with no id analysis.
     let escapes = computeScopeEscapes ctx LoopScope bodyLets
+    // B2r for a recursion (round-2 cell epilogues; Blade.Optimize.CellFoldTable):
+    // this loop is a row-fold-fusion step's slice-write-fused CELL loop whose
+    // row is folded by `prodsum(row, row)` right after it. When the build
+    // renders that prodsum as the serial IIFE (`T __ps = 0; __ps += r[t] *
+    // r[t]`, CodeGenExpr's IRProdSum arm, !fpReassocEnabled), the same chain
+    // advances here, one `+=` per cell right behind the cell's store
+    // (register-consume: the stored local itself), and the fold let then binds
+    // the chain instead of re-reading the row. The licensed build's prodsum is
+    // the K-lane tree, which this chain does not reproduce: declined.
+    let cellChain =
+        match Blade.Optimize.CellFoldTable.tryLoop vid with
+        | None -> None
+        | Some entry ->
+            let declined (why: string) =
+                Blade.Optimize.recordCellEpilogue entry.Subject (Blade.Effects.Declined why)
+                    [ "the row's prodsum runs on the finished row after the step" ]
+                None
+            if fpReassocEnabled () then
+                declined (Blade.Optimize.cellEpilogueLicensedRowDecline "the finished row")
+            else
+                match List.tryLast bodyLets, _bodyFinal with
+                | Some (_, IRAssign (IRIndex (IRVar (b, bufT), [ _; IRVar (k2, _) ], _), IRVar (sv, _))), IRLit IRLitUnit
+                    when b = entry.BufferId && k2 = vid && sv = entry.StoredVar ->
+                    (match bufT with
+                     | ArrayElem at -> Some (entry, elemTypeToCpp at.ElemType)
+                     | _ -> declined "the trajectory buffer's type is not an array")
+                | _ -> declined "the cell loop's shape changed after planning (its last statement is not the planned store)"
+    let cfcName = match cellChain with Some (e, _) -> $"__cfc_{e.FoldLetId}" | None -> ""
+    let chainBlock = match cellChain with Some _ -> cellEpiBlockR () | None -> 0L
     let allocDepth = allocScopeDepth ()
     pushAllocScope SLoop escapes
     let (bodyCode, frees) =
@@ -5612,22 +5697,65 @@ and genForRangeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
                     // while it renders, sub-temporaries included.
                     setAllocOwner (Some id)
                     let tempName = $"__v{id}"
+                    // B2r, the fold-let half: a planned prodsum whose cell loop
+                    // (emitted just above, in this body) carried the chain.
+                    match Blade.Optimize.CellFoldTable.tryFoldLet id with
+                    | Some entry when entry.EmittedCpp.Value.IsSome ->
+                        let acc = entry.EmittedCpp.Value.Value
+                        entry.EmittedCpp.Value <- None
+                        let elem =
+                            match inferExprType value with
+                            | IRTScalar et -> primTypeToCpp et
+                            | t -> irTypeToCpp t
+                        let line = $"{ind}    {elem} {tempName} = {acc};   // cell epilogue: the row's prodsum chain ran inside the cell loop"
+                        (accCode @ [ line ], addVarName id tempName accCtx)
+                    | _ ->
                     let tempBinding = {
                         Id = id; Name = tempName; Type = inferExprType value
                         Value = value; IsConst = true; IsMutable = false
                     }
                     let (code, ctx') = genBinding { accCtx with Indent = ctx.Indent + 1 } tempBinding builder
-                    (accCode @ code, { ctx' with Indent = ctx.Indent })
+                    // B2r, the cell-loop half: right behind the planned store.
+                    let chainLine =
+                        match cellChain, value with
+                        | Some (entry, _), IRAssign _ when (List.last bodyLets |> fst) = id ->
+                            let sv = Map.tryFind entry.StoredVar ctx'.VarNames |> Option.defaultValue $"__v{entry.StoredVar}"
+                            let step =
+                                match entry.Term with
+                                | Blade.Optimize.Square -> $"{cfcName} += {sv} * {sv};"
+                                | Blade.Optimize.Plain -> $"{cfcName} += {sv};"
+                            [ $"{ind}    {step}" ]
+                        | _ -> []
+                    (accCode @ code @ chainLine, { ctx' with Indent = ctx.Indent })
                 ) ([], innerCtx)
             setAllocOwner None
             (code, popAllocScopeFrees (ind + "    "))
         finally truncateAllocScopeStack allocDepth
+    let (chainHead, loopHead, loopTail) =
+        match cellChain with
+        | Some (entry, elem) ->
+            entry.EmittedCpp.Value <- Some cfcName
+            let blocks = if chainBlock > 0L then $"mini-blocks of {chainBlock}" else "one fused loop"
+            Blade.Optimize.recordCellEpilogue entry.Subject Blade.Effects.Applied
+                [ $"row chain interleave ({blocks}): the step's prodsum(row, row) chain advances on each cell right behind its store (register-consume) into `{cfcName}`; the fold let binds the chain instead of re-reading the row"
+                  "strict-legal: the same products of the same stored values added in the same ascending order to the same +0; the recursion and the outer fold are unchanged" ]
+            let head = [ $"{ind}{elem} {cfcName} = 0;   // cell epilogue: this row's prodsum chain (Blade.Optimize.CellFoldTable)" ]
+            if chainBlock > 0L then
+                (head,
+                 [ $"{ind}for (int64_t __cbk = {loStr}; __cbk < {hiStr}; __cbk += {chainBlock}L) {{"
+                   $"{ind}const int64_t __cbe = __cbk + {chainBlock}L < {hiStr} ? __cbk + {chainBlock}L : {hiStr};"
+                   forLoopFrom ind varName "__cbk" "__cbe" ],
+                 [ $"{ind}}}" ])
+            else (head, [ forLoopFrom ind varName loStr hiStr ], [])
+        | None -> ([], [ forLoopFrom ind varName loStr hiStr ], [])
     let code =
         forceCode
-        @ [forLoopFrom ind varName loStr hiStr]
+        @ chainHead
+        @ loopHead
         @ bodyCode
         @ frees
         @ [$"{ind}}}"]
+        @ loopTail
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
 

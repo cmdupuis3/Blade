@@ -20,7 +20,10 @@
 //     its serial twin (the same chunks walked by one thread, combined in the
 //     same job order) for team sizes 1..16 around cnt = 0, 1, nt-1, nt, nt+1;
 //   data: random signed, heavy cancellation, signed zeros, subnormal products,
-//     Inf/NaN, positive.
+//     Inf/NaN, positive;
+//   the P1 streaming state (lane_state, feed_sq/feed_sum, finish_sq/finish_sum)
+//     against the one-shot forms and the model for n = 0..70, 255..257,
+//     287..289, 1001, 2001, 20011 under five feed schedules (run_stream).
 // Output: one `[FAIL]: <name>` line per failure, a census line, then
 //   FOLD LANES TESTS: <passed>/<total> passed
 #include "blade_fold_lanes.hpp"
@@ -188,6 +191,91 @@ void run_forms(const char* tname) {
     }
 }
 
+// P1 STREAMING STATE: lane_state + feed_sq/feed_sum (whole blocks of B) +
+// finish_sq/finish_sum (ANY remainder) against the one-shot sq/sum and the
+// scalar model, bit for bit, under several feed schedules per n:
+//   s0  no feed at all, finish(n)
+//   s1  one feed of every whole block, finish(n mod B)
+//   sE  a "producer" writes E = m * B cells then feeds them (m = 1, 2, 3, 8),
+//       finish on the rest, which may hold WHOLE blocks (n = 289 after 256
+//       with B = 32: 33 = one block + 1) -- the residual-block rule
+//   sI  irregular feeds of 1, 2, 1, 3, 1, 2, ... blocks
+// The cells are written right before they are fed (the epilogue's order), the
+// cells past n are NaN (an over-read poisons the result), the data is
+// non-dyadic.
+template <typename T, int K>
+void run_stream(const char* tname) {
+    constexpr size_t B = blade_fold::lane_block<T, K>::value;
+    const size_t cap = 20011 + 64;
+    Buf<T> A(cap);
+    std::vector<size_t> ns;
+    for (size_t n = 0; n <= 70; n++) ns.push_back(n);
+    for (size_t n : { 255, 256, 257, 287, 288, 289, 1001, 2001, 20011 }) ns.push_back(n);
+    const Data datas[] = { Random, Cancel, Positive, Zeros };
+    for (Data d : datas) {
+        Rng r(0x5EEDULL + (unsigned)d * 104729ULL + K * 17ULL + sizeof(T));
+        for (size_t off = 0; off < 4; off++) {
+            for (size_t n : ns) {
+                for (size_t i = 0; i < cap; i++) A.base[i] = std::numeric_limits<T>::quiet_NaN();
+                T* a = A.base + off;
+                std::vector<T> src(n);
+                for (size_t i = 0; i < n; i++) src[i] = gen<T>(r, d);
+                // The reference values on the finished array.
+                for (size_t i = 0; i < n; i++) a[i] = src[i];
+                const T oneSq = blade_fold::sq<T, K>(a, n), oneSum = blade_fold::sum<T, K>(a, n);
+                const T modSq = ref_sq<T, K>(a, n), modSum = ref_sum<T, K>(a, n);
+                char tag[200];
+                std::snprintf(tag, sizeof tag, "%s K=%d B=%zu %s off=%zu n=%zu", tname, K, B, dataName(d), off, n);
+                check(bits_equal(oneSq, modSq) && bits_equal(oneSum, modSum), std::string("stream: one-shot == model ") + tag);
+                // Model streaming == model one-shot.
+                {
+                    auto ms = blade_fold::model::lane_init<T, K>();
+                    auto mu = blade_fold::model::lane_init<T, K>();
+                    const size_t nb = n / B;
+                    blade_fold::model::feed_sq<T, K>(ms, a, nb);
+                    blade_fold::model::feed_sum<T, K>(mu, a, nb);
+                    check(bits_equal(blade_fold::model::finish_sq<T, K>(ms, a + nb * B, n - nb * B), modSq)
+                          && bits_equal(blade_fold::model::finish_sum<T, K>(mu, a + nb * B, n - nb * B), modSum),
+                          std::string("stream: model feed/finish == model ") + tag);
+                }
+                // The schedules, each re-producing the cells right before its feeds.
+                std::vector<std::pair<std::string, std::vector<size_t>>> scheds;   // name, block counts per feed
+                scheds.push_back({ "s0", {} });
+                scheds.push_back({ "s1", { n / B } });
+                for (size_t m : { 1, 2, 3, 8 }) {
+                    std::vector<size_t> f;
+                    for (size_t done = 0; done + m * B <= n; done += m * B) f.push_back(m);
+                    scheds.push_back({ "s" + std::to_string(m * B), f });
+                }
+                {
+                    std::vector<size_t> f;
+                    const size_t pat[] = { 1, 2, 1, 3 };
+                    size_t done = 0;
+                    for (size_t k = 0;; k++) { const size_t m = pat[k % 4]; if (done + m * B > n) break; f.push_back(m); done += m * B; }
+                    scheds.push_back({ "sI", f });
+                }
+                for (auto& sc : scheds) {
+                    for (size_t i = 0; i < n; i++) a[i] = std::numeric_limits<T>::quiet_NaN();
+                    auto sq_s = blade_fold::lane_init<T, K>();
+                    auto su_s = blade_fold::lane_init<T, K>();
+                    size_t done = 0;
+                    for (size_t m : sc.second) {
+                        for (size_t i = done; i < done + m * B; i++) a[i] = src[i];   // the producer's block
+                        blade_fold::feed_sq<T, K>(sq_s, a + done, m);
+                        blade_fold::feed_sum<T, K>(su_s, a + done, m);
+                        done += m * B;
+                    }
+                    for (size_t i = done; i < n; i++) a[i] = src[i];
+                    const T fs = blade_fold::finish_sq<T, K>(sq_s, a + done, n - done);
+                    const T fu = blade_fold::finish_sum<T, K>(su_s, a + done, n - done);
+                    check(bits_equal(fs, oneSq), std::string("stream sq ") + sc.first + " " + tag);
+                    check(bits_equal(fu, oneSum), std::string("stream sum ") + sc.first + " " + tag);
+                }
+            }
+        }
+    }
+}
+
 // Path B partition: the threaded fold over chunk_lo chunks against its serial
 // twin, bit for bit, for every team size the runtime may hand back.
 template <int K>
@@ -254,6 +342,10 @@ int main() {
     run_forms<double, 8>("f64");
     run_forms<float, 4>("f32");
     run_forms<float, 8>("f32");
+    run_stream<double, 4>("f64");
+    run_stream<double, 8>("f64");
+    run_stream<float, 4>("f32");
+    run_stream<float, 8>("f32");
     run_partition<4>();
     run_partition<8>();
     std::printf("lane tree vs the serial chain in this build: %lld of %lld random n=20011 dots differ in bits (expected: most -- the licence reassociates)\n",

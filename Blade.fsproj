@@ -588,6 +588,9 @@
          Parity pins: the anonymous range must decide as `range<I>` does. -->
     <Compile Include="tests/FlatPathTests.fs" />
     <Compile Include="tests/OptimizeTests.fs" />
+    <!-- Round-2 cell epilogues: the licensed / threaded forms by raw bits
+         (NEW vs BLADE_CELL_EPILOGUE=0), plus the LLVM lane's parity. g++. -->
+    <Compile Include="tests/CellEpilogueTests.fs" />
     <!-- The interpreter's RNG mirror against Random123's Philox4x32-10
          known-answer vectors, plus the address identities (chunk / order /
          subrange invariance) on the generator alone. No toolchain. -->

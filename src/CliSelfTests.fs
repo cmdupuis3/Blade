@@ -4062,6 +4062,12 @@ and internal dispatchTestClean (rest: string list) : int =
         // published known-answer vectors, and the `_at` address identities.
         let failed = (Blade.Tests.RandMirrorTests.runRandMirrorTests ()).Failed
         if failed = 0 then 0 else 1
+    | [ "cell-epilogue" ] | [ "cellepilogue" ] ->
+        // Round-2 cell epilogues (B1 / B2r): the licensed and threaded forms
+        // by raw bits, NEW vs BLADE_CELL_EPILOGUE=0, both contraction modes,
+        // fixed team sizes; the LLVM lane's parity under the identity regime.
+        let failed = (Blade.Tests.CellEpilogueTests.runCellEpilogueTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "optimize" ] ->
         // The semantic-equivalence layer's emission pins: freeze-idiom
         // recognition derives the break without the abort, `while` keeps

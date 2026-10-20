@@ -69,12 +69,59 @@ let hoistEnabled () = gateOn "BLADE_HOIST"
 /// nothing reaches the side table, so both emitters keep the two-pass form.
 let hotRowEnabled () = gateOn "BLADE_HOT_ROW"
 
+/// BLADE_CELL_EPILOGUE (round-2 cell epilogues, plan rule `cell-epilogue`):
+/// a scalar consumer fold runs INSIDE its producer's cell loop instead of
+/// re-reading the stored output afterwards -- the rank-1 producer epilogue
+/// (B1: P1 streaming lane state licensed, P2 chain interleave repro) and the
+/// per-row cell chain of a hot-row / row-fold-fusion row fold (B2r).
+///   unset / `1` / `on` -> on
+///   `lanes`            -> RESERVED for the opt-in licensed row arm (B2l),
+///                         which is not built in v1: today `on` plus a
+///                         recorded B2l decline at every licensed row fold
+///   `0` / `off`        -> nothing reaches the side tables; every decision
+///                         records `declined -- disabled by BLADE_CELL_EPILOGUE`
+/// Read per call.
+type CellEpilogueMode =
+    | CellEpilogueOff
+    | CellEpilogueOn
+    | CellEpilogueLanes
+
+let cellEpilogueMode () : CellEpilogueMode =
+    match System.Environment.GetEnvironmentVariable "BLADE_CELL_EPILOGUE" with
+    | null -> CellEpilogueOn
+    | v ->
+        match v.Trim().ToLowerInvariant() with
+        | "0" | "off" | "false" | "no" -> CellEpilogueOff
+        | "lanes" -> CellEpilogueLanes
+        | _ -> CellEpilogueOn
+
+let cellEpilogueEnabled () = cellEpilogueMode () <> CellEpilogueOff
+
 /// Every gate of this layer (charter rule 3), in one place: the optimizer
 /// differential (`blade test opt-diff`, tests/OptDiff.fs) turns ALL of them
 /// off for its reference lane, so a new pass's gate belongs in this list the
 /// day the pass lands -- a gate missing here is a pass the differential
 /// cannot see.
-let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_HOIST"; "BLADE_HOT_ROW" ]
+let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_HOIST"; "BLADE_HOT_ROW"; "BLADE_CELL_EPILOGUE" ]
+
+/// The decline reason for a LICENSED row prodsum (B2r applies only where
+/// the build keeps the serial association). `lanes` RESERVES the opt-in
+/// licensed arm (B2l), which is not built in v1: the mode is `on` plus this
+/// decline, worded so `blade plan` says the request was seen.
+let cellEpilogueLicensedRowDecline (where: string) : string =
+    match cellEpilogueMode () with
+    | CellEpilogueLanes ->
+        $"BLADE_CELL_EPILOGUE=lanes requests the licensed row arm (B2l), which is reserved and not built in v1: the licensed row prodsum stays the K-lane form on {where}"
+    | _ ->
+        $"licensed build: the row's prodsum takes the K-lane form on {where}, which a per-cell chain does not reproduce (the opt-in B2l arm, `lanes`, is reserved and not built in v1)"
+
+/// One `cell-epilogue` v1 decision record (the planner's source-level
+/// declines; the emitters record the per-mode applied / declined outcome).
+let recordCellEpilogue (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
+    Blade.Effects.Decisions.record
+        { Blade.Effects.Rule = "cell-epilogue"; Version = 1
+          Span = Blade.Ast.noSpan; Subject = subject
+          Outcome = outcome; Evidence = evidence }
 
 // --- Freeze-idiom recognition (plan-match-statements.md section 5, R7/B) ---
 //
@@ -1500,8 +1547,71 @@ let private recordGramApplyAdvisory (modul: IRModule) : unit =
 // "BL8009 / BL8003 preserved" item (the halo extent check stays ahead of the
 // nest, and the empty-reduce check stays in the row kernel).
 
+// --- Round-2 cell epilogues: the planner types (LANE-NEUTRAL) ---------------
+//
+// These records hold IR-level facts only: no emitter type (OrbitFold,
+// CodeGenExprSupport, EmitLlvm) appears here, because this file compiles
+// before every emitter. Each lane resolves its own form at emission (which
+// licence the fold carries in THIS build, whether the producer is threaded)
+// and records the applied / declined outcome under `cell-epilogue` v1.
+
+/// The per-cell term of a cell chain: the fold of `c * c` (a self-dot:
+/// `prodsum(row, row)`, `lambda(w) -> w * w`) or of `c` itself. Seed +0 in
+/// both (the IIFE's `T __ps = 0`, blade_fold's zero lanes).
+type CellTerm =
+    | Square
+    | Plain
+
+/// The compact (orbit-class) producer kinds a row-class epilogue serves.
+type CompactKind =
+    | CompactSym       // SymIdx: inclusive simplex, weight-1 diagonal class
+    | CompactAntisym   // AntisymIdx: strict simplex, no stored diagonal
+
+/// B3's candidate (compact rank-2 producer whose logical walk the orbit-class
+/// fold would take): recorded by the planner, RESOLVED at emission -- each
+/// lane calls its own orbit recognizer on `ConsumerValue` (the C++ lane:
+/// Blade.OrbitFold.recognise) and declines when it does not answer `Orbit`.
+/// Facts only; no OrbitPlan (OrbitFold compiles after this file).
+type CompactRowsCandidate = {
+    /// The compact producer's let id.
+    ProducerId: IRId
+    Kind: CompactKind
+    /// The compact group's rank (2 in v1).
+    Rank: int
+    /// The consumer folds' let ids (outermost first).
+    ConsumerIds: IRId list
+    /// The consumer's whole value (the nested logical walk), for the
+    /// emission-time recognizer.
+    ConsumerValue: IRExpr
+    /// The fold levels' seeds (outermost first), as IR.
+    Seeds: IRExpr list
+}
+
+/// Which schedule a hot-row plan is.
+type HotRowForm =
+    /// A rank >= 2 producer whose ROW map a later fold consumes (M13): the
+    /// row's fold behind each produced row, into a rank-1 row-sum array.
+    | RowFold
+    /// A rank-1 flat producer whose CELL map a later fold consumes (B1): the
+    /// fold's lane state (licensed, P1) or ordered chain (repro, P2) fed
+    /// behind the producer's own stores -- per Path B chunk when both the
+    /// producer and the fold are threaded. `RowMap` is then the cell map
+    /// `method_for(P) <@> g`, `CellChain` g's term.
+    | ChunkFold
+    /// A compact rank-2 producer's per-row orbit-class partials (B3; the
+    /// recognition is W1-C's, at emission).
+    | CompactClassRows of CompactRowsCandidate
+
 /// One scheduled producer / row-fold pair.
 type HotRowPlan = {
+    /// The schedule (RowFold for every pre-round-2 plan).
+    Form: HotRowForm
+    /// The row kernel's / cell kernel's term when it is a +0-seeded
+    /// dot-class fold of the row's own cells (`prodsum(row, row)`, `w * w`,
+    /// `w`) AND BLADE_CELL_EPILOGUE is on: the emitters may then advance the
+    /// fold per cell inside the producer (B2r chain interleave, B1). None =
+    /// the row's fold stays one call on the finished row.
+    CellChain: CellTerm option
     ProducerId: IRId
     ConsumerId: IRId
     /// The row-sum array: a FRESH id both emitters bind to a rank-1 pool of
@@ -1540,6 +1650,71 @@ module HotRowTable =
                         ByConsumer = Map.add p.ConsumerId p s.ByConsumer }
     let tryProducer (id: IRId) : HotRowPlan option = Map.tryFind id (get ()).ByProducer
     let tryConsumer (id: IRId) : HotRowPlan option = Map.tryFind id (get ()).ByConsumer
+
+/// B2r for a recursion (round-2 cell epilogues): a row-fold-fusion step whose
+/// per-row fold is `prodsum(row, row)` and whose row is written by ONE
+/// slice-write-fused cell loop. The IR is unchanged (the interpreter keeps
+/// the spec); an emitter that recognizes the loop advances the row's chain
+/// per cell inside it -- the same `+=` of the same products in the same
+/// ascending order from the same +0 -- and binds the fold let to the chain.
+type CellFoldEntry = {
+    /// The cell loop's IRForRange variable (the table key).
+    CellLoopVar: IRId
+    /// The trajectory buffer; the loop's final statement stores
+    /// `Buffer[StepVar][CellLoopVar] = StoredVar`.
+    BufferId: IRId
+    StepVar: IRId
+    /// The let the loop body stores (the cell's value, one scalar local).
+    StoredVar: IRId
+    /// The fold let `FoldLetId = prodsum(row, row)` the chain replaces, and
+    /// the row-view let before it.
+    FoldLetId: IRId
+    RowLetId: IRId
+    Term: CellTerm
+    Subject: string
+    /// Emission handshake (C++): the chain accumulator's name, set by the
+    /// cell loop when it emitted the chain, read and CLEARED by the fold let.
+    /// A loop that did not emit the chain leaves it None, and the fold let
+    /// renders its prodsum unchanged (the fallback is atomic).
+    EmittedCpp: string option ref
+    /// The LLVM lane's twin of the handshake (the chain's SSA accumulator).
+    EmittedLlvm: string option ref
+}
+
+module CellFoldTable =
+    open System.Threading
+    type State = { ByLoop: Map<IRId, CellFoldEntry>; ByFoldLet: Map<IRId, CellFoldEntry> }
+    let private empty = { ByLoop = Map.empty; ByFoldLet = Map.empty }
+    let private cell = new AsyncLocal<State>()
+    let private get () = match box cell.Value with null -> empty | _ -> cell.Value
+    let reset () = cell.Value <- empty
+    let record (e: CellFoldEntry) =
+        let s = get ()
+        cell.Value <- { ByLoop = Map.add e.CellLoopVar e s.ByLoop
+                        ByFoldLet = Map.add e.FoldLetId e s.ByFoldLet }
+    let tryLoop (id: IRId) : CellFoldEntry option = Map.tryFind id (get ()).ByLoop
+    let tryFoldLet (id: IRId) : CellFoldEntry option = Map.tryFind id (get ()).ByFoldLet
+
+/// The cell term of a ROW kernel `lambda(row) -> prodsum(row, row)`.
+let rowKernelCellTerm (ck: IRCallable) : CellTerm option =
+    match ck.Params, ck.Body with
+    | [ p ], IRProdSum [ IRVar (a, _); IRVar (b, _) ] when a = p.VarId && b = p.VarId -> Some Square
+    | _ -> None
+
+/// The cell term of a CELL kernel `lambda(w) -> w * w` / `lambda(w) -> w`.
+let cellKernelCellTerm (ck: IRCallable) : CellTerm option =
+    match ck.Params with
+    | [ p ] ->
+        let isP (e: IRExpr) =
+            match e with
+            | IRVar (id, _) -> id = p.VarId
+            | IRParam (_, idx, _) -> idx = p.Index
+            | _ -> false
+        (match ck.Body with
+         | IRBinOp (IRElementwise, IRMul, a, b, _) when isP a && isP b -> Some Square
+         | e when isP e -> Some Plain
+         | _ -> None)
+    | _ -> None
 
 /// Plan the hot-row schedule over one module: function-body let chains and
 /// the top-level binding sequence alike. Records into `HotRowTable` and the
@@ -1590,14 +1765,14 @@ let planHotRowFolds (builder: IRBuilder) (modul: IRModule) : unit =
         && (List.isEmpty pk.Parallelism
             || pk.Parallelism |> List.exists (fun (pi, d) -> d >= 1 && (pi = 0 || info.IsCoIteration)))
     let refs (e: IRExpr) = collectVarRefsIR e
-    let planChain (items: (IRId * string * IRExpr) list) =
+    let rec planChain (items: (IRId * string * IRExpr) list) =
         let arr = List.toArray items
         for pi in 0 .. arr.Length - 1 do
             let (pId, pName, pVal) = arr.[pi]
             match collapse pVal with
             | IRApplyCombinator pinfo when (match pVal with IRCompute _ -> true | _ -> false) ->
                 match producerShape pinfo with
-                | None -> ()
+                | None -> planRank1 arr pi pId pName pinfo
                 | Some (pAt, pk) ->
                     let rank = flatRank pAt
                     let consumer =
@@ -1618,12 +1793,30 @@ let planHotRowFolds (builder: IRBuilder) (modul: IRModule) : unit =
                         let captureIds = ck.Captures |> List.map (fun c -> c.Id) |> Set.ofList
                         let kernelRefs = refs ck.Body
                         let between = [ pi + 1 .. ci - 1 ] |> List.map (fun i -> arr.[i])
+                        // Is the row kernel MOVABLE (cannot fail)? Proved
+                        // only for the whitelisted self-prodsum
+                        // `prodsum(row, row)`: one operand, so no extent
+                        // check, and `*` / `+` never trap. Any other row
+                        // kernel may fail, and running it at the producer
+                        // would move that failure ahead of whatever sits
+                        // between the producer and the fold.
+                        let kernelMovable = (rowKernelCellTerm ck).IsSome
                         let offending =
                             between |> List.tryPick (fun (iId, iName, iVal) ->
                                 let r = refs iVal
-                                if Set.contains pId r then Some $"`{iName}` reads `{pName}` between the producer and the fold"
+                                // DOMINANCE: the row kernel runs at the
+                                // producer, so every value it reads must be
+                                // bound before the producer -- a capture or
+                                // free reference bound in between would be
+                                // read before its declaration (or a shadowed
+                                // outer name would be read instead).
+                                if Set.contains iId captureIds || Set.contains iId kernelRefs then
+                                    Some $"the row kernel reads `{iName}`, which is bound between the producer and the fold (the row kernel would run before it exists)"
+                                elif Set.contains pId r then Some $"`{iName}` reads `{pName}` between the producer and the fold"
                                 elif not (Set.isEmpty (Set.intersect r captureIds)) then Some $"`{iName}` references a binding the row kernel captures"
                                 elif not (facts iVal).Repeatable then Some $"`{iName}` is not repeatable (an assignment, display output, or a call the module cannot judge) between the producer and the fold"
+                                elif not kernelMovable then
+                                    Some $"the row kernel may fail (only `prodsum(row, row)` is proved non-failing) and `{iName}` sits between the producer and the fold: running the row kernel at the producer could move its failure ahead of `{iName}`'s"
                                 else None)
                         match resolveCallableIn funcs (fst (peelReynolds k)) with
                         | None -> declined "the fold kernel does not resolve to a callable"
@@ -1666,14 +1859,123 @@ let planHotRowFolds (builder: IRBuilder) (modul: IRModule) : unit =
                                               IndexTypes = [ List.head pAt.IndexTypes ]
                                               IsVirtual = false
                                               Identity = None }
+                            // B2r: the row kernel's cell term, when the cell
+                            // epilogue may advance the row's chain per cell.
+                            let cellChain =
+                                match rowKernelCellTerm ck with
+                                | Some t when cellEpilogueEnabled () -> Some t
+                                | Some _ ->
+                                    recordCellEpilogue cName (Blade.Effects.Declined "disabled by BLADE_CELL_EPILOGUE")
+                                        [ $"`{cName}`'s row kernel `prodsum(row, row)` keeps one fold call per finished row of `{pName}`" ]
+                                    None
+                                | None ->
+                                    recordCellEpilogue cName (Blade.Effects.Declined "the row kernel is not a +0-seeded dot-class fold of the row's own cells (v1: `prodsum(row, row)`)")
+                                        [ $"the hot-row fold of `{pName}` keeps one row-kernel call per finished row" ]
+                                    None
                             HotRowTable.record
-                                { ProducerId = pId; ConsumerId = cId
+                                { Form = RowFold; CellChain = cellChain
+                                  ProducerId = pId; ConsumerId = cId
                                   RowSumId = rsId; RowSumType = rsTy
                                   RowMap = cinfo; FoldKernel = k; Seed = seed
                                   ProducerName = pName; ConsumerName = cName
                                   EmittedCpp = ref None }
                             decide cName Blade.Effects.Applied evidence
             | _ -> ()
+    // B1 (round-2 cell epilogues): a DENSE RANK-1 flat producer whose CELL map
+    // a later fold consumes,
+    //     let y2 = method_for(zip(x, y)) <@> k |> compute
+    //     let s  = reduce(method_for(y2) <@> lambda(w) -> w * w, F, seed)
+    // A separate arm from the rank >= 2 row schedule above (whose guard is
+    // NOT weakened): the plan says only that the fold's chain may be fed
+    // behind the producer's stores; which form (P1 lane state, Path B
+    // chunks, P2 ordered chain) is decided per build by each emitter, which
+    // records the outcome. The source-level refusals are recorded here.
+    and planRank1 (arr: (IRId * string * IRExpr) array) (pi: int) (pId: IRId) (pName: string) (pinfo: ApplyInfo) =
+        let rank1Shape =
+            match stripUnits pinfo.OutputType, resolveCallableIn funcs (fst (peelReynolds pinfo.Kernel)) with
+            | ArrayElem at, Some pk
+                when not at.IsVirtual && at.IndexTypes.Length = 1
+                     && (let ix = at.IndexTypes.Head in ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank = 1)
+                     && info0Scalar pinfo ->
+                Some (at, pk)
+            | _ -> None
+        match rank1Shape with
+        | None -> ()
+        | Some (pAt, pk) ->
+        // The consumer: the FIRST later fold of a one-operand cell map over
+        // the producer.
+        let consumer =
+            [ pi + 1 .. arr.Length - 1 ]
+            |> List.tryPick (fun ci ->
+                let (cId, cName, cVal) = arr.[ci]
+                match cVal with
+                | IRReduceCompute (IRApplyCombinator cinfo, k, seed) ->
+                    (match cinfo.Arrays, resolveCallableIn funcs (fst (peelReynolds cinfo.Kernel)) with
+                     | [ IRVar (a, _) ], Some ck when a = pId && ck.Params.Length = 1 && cinfo.KernelOutputRank = 0
+                                                     && (match stripUnits ck.Params.Head.Type with IRTScalar _ -> true | _ -> false) ->
+                        Some (ci, cId, cName, cinfo, ck, k, seed)
+                     | _ -> None)
+                | _ -> None)
+        match consumer with
+        | None -> ()
+        | Some (ci, cId, cName, cinfo, ck, k, seed) ->
+        let declined (why: string) =
+            recordCellEpilogue cName (Blade.Effects.Declined why)
+                [ $"`{cName}` folds the cells of `{pName}` after the producer has stored them all (two passes)" ]
+        let captureIds = ck.Captures |> List.map (fun c -> c.Id) |> Set.ofList
+        let between = [ pi + 1 .. ci - 1 ] |> List.map (fun i -> arr.[i])
+        let offending =
+            between |> List.tryPick (fun (iId, iName, iVal) ->
+                let r = refs iVal
+                // Dominance: the cell kernel runs at the producer, so nothing
+                // it reads may be bound in between.
+                if Set.contains iId captureIds || Set.contains iId (refs ck.Body) then
+                    Some $"the cell kernel reads `{iName}`, which is bound between the producer and the fold (it would run before `{iName}` exists)"
+                elif Set.contains pId r then Some $"`{iName}` reads `{pName}` between the producer and the fold"
+                elif not (Set.isEmpty (Set.intersect r captureIds)) then Some $"`{iName}` references a binding the cell kernel captures"
+                elif not (facts iVal).Repeatable then Some $"`{iName}` is not repeatable (an assignment, display output, or a call the module cannot judge) between the producer and the fold"
+                else None)
+        let extentLit =
+            match (List.head pAt.IndexTypes).Extent with
+            | IRLit (IRLitInt n) when n > 0L -> Some n
+            | _ -> None
+        if pk.IsCudaKernel || pk.IsMpiParallel then declined "the producer carries a cuda/mpi strategy"
+        elif pinfo.HasReynolds || cinfo.HasReynolds then declined "a Reynolds body (the producer's or the cell kernel's)"
+        elif extentLit.IsNone then declined "the producer's extent is not a literal (the flat producer path needs one)"
+        elif Set.contains pId captureIds || Set.contains pId (refs ck.Body) then
+            declined $"the cell kernel reads `{pName}` beyond its own cell (a capture or a direct reference)"
+        else
+        match resolveCallableIn funcs (fst (peelReynolds k)) with
+        | None -> declined "the fold kernel does not resolve to a callable"
+        | Some fk when fk.Params.Length <> 2 -> declined "the fold kernel is not a two-parameter callable"
+        | Some fk when fk.IsCudaKernel || fk.IsMpiParallel -> declined "the fold kernel carries a cuda/mpi strategy"
+        | Some fk ->
+        match offending with
+        | Some why -> declined why
+        | None ->
+        match cellKernelCellTerm ck with
+        | None -> declined "the cell kernel is not `w * w` or `w` of its own cell (v1 recognizes those two cell terms; anything else may abort or read more than the cell)"
+        | Some term ->
+        match stripUnits fk.RetType with
+        | IRTScalar _ as accTy ->
+            if not (cellEpilogueEnabled ()) then
+                declined "disabled by BLADE_CELL_EPILOGUE"
+            else
+                HotRowTable.record
+                    { Form = ChunkFold; CellChain = Some term
+                      ProducerId = pId; ConsumerId = cId
+                      // No row-sum array: the plan carries the accumulator
+                      // type in RowSumType for the emitters' declarations.
+                      RowSumId = builder.FreshId(); RowSumType = accTy
+                      RowMap = cinfo; FoldKernel = k; Seed = seed
+                      ProducerName = pName; ConsumerName = cName
+                      EmittedCpp = ref None }
+        | _ -> declined "the fold kernel's result is not a scalar"
+    and info0Scalar (info: ApplyInfo) = info.KernelOutputRank = 0
+    // Let chains: a function body, the top-level binding sequence, and the
+    // chain NESTED inside a top-level binding's value (`let (a, b) = { let
+    // k = ..; let s = ..; (..) }` -- pairkernel's shape; the C++ lane names
+    // those lets `__v<id>` exactly as a function body's).
     let rec chain (e: IRExpr) : (IRId * string * IRExpr) list =
         match e with
         | IRLet (id, v, body) -> (id, $"__v{id}", v) :: chain body
@@ -1681,6 +1983,10 @@ let planHotRowFolds (builder: IRBuilder) (modul: IRModule) : unit =
     for f in modul.Functions do
         planChain (chain f.Body)
     planChain (modul.Bindings |> List.map (fun b -> (b.Id, b.Name, b.Value)))
+    for b in modul.Bindings do
+        match b.Value with
+        | IRLet _ -> planChain (chain b.Value)
+        | _ -> ()
 
 // --- Slice-write fusion: destination passing for a rank-1 row write --------
 //
@@ -2069,11 +2375,15 @@ let fuseRowFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: IRC
         | _ -> [], e
     let rebuild (stmts: (IRId * IRExpr) list) (fin: IRExpr) =
         List.foldBack (fun (id, v) acc -> IRLet (id, v, acc)) stmts fin
+    // The (row view, fold) let ids of the LAST foldUpdate built (B2r's
+    // CellFoldTable entry names the step's pair).
+    let mutable lastFoldIds : (IRId * IRId) option = None
     // `acc <- F(acc, K(BUF(row)))` as statements ending in `tail`.
     let foldUpdate (accId: IRId) (accT: IRType) (bufId: IRId) (bufT: IRType)
                    (k: IRCallable) (f: IRCallable) (row: IRExpr) (tail: IRExpr) =
         let rowId = builder.FreshId ()
         let pId = builder.FreshId ()
+        lastFoldIds <- Some (rowId, pId)
         let kParam = k.Params.Head
         let subst (m: Map<IRId, IRExpr>) (body: IRExpr) =
             mapIRExpr (fun x -> match x with IRVar (id, _) -> (match Map.tryFind id m with Some a -> a | None -> x) | _ -> x) body
@@ -2174,6 +2484,46 @@ let fuseRowFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: IRC
                             match snd (List.last stmts) with
                             | IRForRange (nv, l, h, _) -> IRForRange (nv, l, h, withUpdate body)
                             | other -> other
+                        let stepFoldIds = lastFoldIds
+                        // B2r (round-2 cell epilogues): the step's row is
+                        // written by ONE slice-write-fused cell loop whose
+                        // last statement stores a scalar local into
+                        // BUF[n][k], and the row kernel is prodsum(row, row):
+                        // record the loop so an emitter may advance the
+                        // row's chain per cell (the IR is unchanged).
+                        (match rowKernelCellTerm k, stepFoldIds with
+                         | Some term, Some (rowId, pId) ->
+                            let stepStmts, _ = chainOf body
+                            let writers =
+                                stepStmts |> List.filter (fun (_, s) -> mentions bufId s && (match s with IRForRange _ -> true | _ -> false))
+                            let cellLoop =
+                                match writers with
+                                | [ (_, IRForRange (kv, IRLit (IRLitInt 0L), IRLit (IRLitInt _), cb)) ] ->
+                                    let cstmts, cfin = chainOf cb
+                                    (match List.tryLast cstmts, cfin with
+                                     | Some (_, IRAssign (IRIndex (IRVar (b, _), [ i0; IRVar (k2, _) ], _), IRVar (sv, _))), IRLit IRLitUnit
+                                        when b = bufId && isN i0 && k2 = kv
+                                             && cstmts |> List.exists (fun (id, _) -> id = sv) ->
+                                        Ok (kv, sv)
+                                     | _ -> Error "the step's cell loop does not end in one store of a scalar local into its own row")
+                                | [] -> Error "the step's row is not written by a slice-write-fused cell loop"
+                                | _ -> Error "the step's row is written by more than one loop"
+                            match cellLoop with
+                            | Error why ->
+                                recordCellEpilogue subject (Blade.Effects.Declined why)
+                                    [ "the row's prodsum runs on the finished row after the step" ]
+                            | Ok _ when not (cellEpilogueEnabled ()) ->
+                                recordCellEpilogue subject (Blade.Effects.Declined "disabled by BLADE_CELL_EPILOGUE")
+                                    [ "the row's prodsum runs on the finished row after the step" ]
+                            | Ok (kv, sv) ->
+                                CellFoldTable.record
+                                    { CellLoopVar = kv; BufferId = bufId; StepVar = nId; StoredVar = sv
+                                      FoldLetId = pId; RowLetId = rowId; Term = term; Subject = subject
+                                      EmittedCpp = ref None; EmittedLlvm = ref None }
+                         | None, _ ->
+                            recordCellEpilogue subject (Blade.Effects.Declined "the row kernel is not a +0-seeded dot-class fold of the row's own cells (v1: `prodsum(row, row)`)")
+                                [ "the row's fold runs on the finished row after the step" ]
+                         | _ -> ())
                         let preStmts =
                             if lo = 1L then
                                 let u = builder.FreshId ()

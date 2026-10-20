@@ -1,0 +1,20 @@
+// TEST: Hot-Row Fold Keeps The Original Failure Order (aborts)
+// A let chain nested inside a top-level binding: the producer `p` (Int64, zero
+// in each row's first cell), then `bad = 7 / d` with d = 0 at run time, then a
+// row fold whose kernel `1 % row(0)` also fails. The original program reports
+// the DIVISION (`bad` runs before the fold). Running the row kernel behind
+// each produced row would report the modulo instead, so the hot-row schedule
+// is declined: only `prodsum(row, row)` is proved non-failing, and a row
+// kernel that may fail never moves ahead of a binding between the producer
+// and the fold (`blade plan`: "the row kernel may fail").
+// ABORT: integer division by zero
+type R = Idx<5>
+type C = Idx<6>
+let (s, q) = {
+    let zs = method_for(range<C>) <@> lambda(j) -> Int64(j) * 0 |> compute
+    let d = reduce(zs, (+))
+    let p = method_for(range<R, C>) <@> lambda(i, j) -> Int64(i) * Int64(j) |> compute
+    let bad = 7 / d
+    let t = reduce(method_for(p) <@> lambda(row: Array<Int64 like C>) -> 1 % row((0 : C)), (+))
+    (t, bad)
+}

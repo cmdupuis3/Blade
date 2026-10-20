@@ -1,0 +1,40 @@
+// TEST: Recursive Array Row Fold With A Per-Cell Chain
+// Round-2 cell epilogues, B2r for a recursion (Blade.Optimize.CellFoldTable):
+// row-fold fusion folds each trajectory row right after the step writes it;
+// with a `prodsum(row, row)` row kernel and a build that keeps the serial
+// association (BLADE_FP_REPRO=1), the row's chain advances on each cell right
+// behind its store inside the slice-write-fused cell loop, and the fold
+// binds the chain instead of re-reading the row. Same products, same order,
+// same +0 seed: the value is the two-pass form's bit for bit.
+//   total -- 8 rows x 1003 cells, u0(x) = x mod 4, step prefix * 0.5 + 1.0
+//   row1  -- the same recursion over 2 rows minus the seed row's prodsum:
+//            the one step row's sum alone
+// Every cell is dyadic with few bits, so every sum is exact.
+type T = Idx<8>
+type T2 = Idx<2>
+type X = Idx<1003>
+
+function total(u0: Array<Float64 like X>) -> Float64 = {
+    let rec traj: Array<Float64 like T, X> =
+        match traj with
+        | zero -> zero
+        | zero :: s -> zero :: u0
+        | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + 1.0
+    reduce(method_for(traj) <@> lambda(row) -> prodsum(row, row), (+))
+}
+
+function two(u0: Array<Float64 like X>) -> Float64 = {
+    let rec traj: Array<Float64 like T2, X> =
+        match traj with
+        | zero -> zero
+        | zero :: s -> zero :: u0
+        | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + 1.0
+    reduce(method_for(traj) <@> lambda(row) -> prodsum(row, row), (+))
+}
+
+let (tot, row1) = {
+    let u0 = method_for(range<X>) <@> lambda(i) -> Float64(Int64(i) % 4) |> compute
+    (total(u0), two(u0) - prodsum(u0, u0))
+}
+// EXPECT: tot = 30094.35479736328
+// EXPECT: row1 = 3382.25

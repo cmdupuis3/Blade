@@ -2984,6 +2984,41 @@ and private emitForRange (c: Ctx) (vid: IRId) (lo: IRExpr) (hi: IRExpr) (body: I
     let trips = if loV.Reg = "0" then hiV.Reg else i64Bin c "sub" hiV.Reg loV.Reg
     let slot = ensureSlot c vid ScI64
     forceLoopBodyProducers c body
+    // B2r for a recursion (round-2 cell epilogues; Blade.Optimize.CellFoldTable):
+    // this loop is a step's slice-write-fused CELL loop whose row the step
+    // then folds with `prodsum(row, row)`. In a build that keeps the serial
+    // association that prodsum is emitProdSum's ordered chain from +0, and
+    // the same chain -- `fmul` of the cell by itself, `fadd` into the
+    // accumulator, the same flags -- advances here once per trip on the
+    // value the trip just stored; the fold let then loads the chain. The
+    // licensed prodsum carries `reassoc` (the vectorizer's tree): declined.
+    let cellChain =
+        let declined (entry: Blade.Optimize.CellFoldEntry) (why: string) =
+            if Blade.Effects.Decisions.active () then
+                Blade.Effects.Decisions.record
+                    { Rule = "cell-epilogue"; Version = 1; Span = c.DeclSpan
+                      Subject = entry.Subject; Outcome = Blade.Effects.Declined ("llvm lane: " + why)
+                      Evidence = [ "the row's prodsum runs on the finished row after the step" ] }
+            None
+        match Blade.Optimize.CellFoldTable.tryLoop vid with
+        | Some entry when Blade.CodeGenState.fpReassocEnabled () ->
+            declined entry (Blade.Optimize.cellEpilogueLicensedRowDecline "the finished row")
+        | Some entry ->
+            let rec lastStmt (e: IRExpr) =
+                match e with
+                | IRLet (_, _, (IRLet _ as rest)) -> lastStmt rest
+                | IRLet (_, v, IRLit IRLitUnit) -> Some v
+                | _ -> None
+            (match lastStmt body with
+             | Some (IRAssign (IRIndex (IRVar (b, ArrayElem at), [ _; IRVar (k2, _) ], _), IRVar (sv, svT)))
+                when b = entry.BufferId && k2 = vid && sv = entry.StoredVar ->
+                 if scalarTyOf at.ElemType <> Some ScF64 then declined entry "the trajectory is not Float64 (v1)"
+                 else
+                 let acc = allocaOf c "double"
+                 ln c ($"store double {(f64Const 0.0)}, ptr {acc}")
+                 Some (entry, acc, IRVar (sv, svT))
+             | _ -> declined entry "the cell loop's shape changed after planning (its last statement is not the planned store)")
+        | None -> None
     let before = arrSlotSnapshot c
     // The exit an IRBreakIf (`while` guard) leaves through. The label is
     // minted and emitted only when a break uses it, so an unguarded `let rec`
@@ -3000,9 +3035,30 @@ and private emitForRange (c: Ctx) (vid: IRId) (lo: IRExpr) (hi: IRExpr) (body: I
         // their slot via `keepPool` and survive.
         pushPoolScope c
         emitExpr c body |> ignore
+        (match cellChain with
+         | Some (_, acc, stored) ->
+            let x = coerce c ScF64 (emitExpr c stored)
+            let prod = freshReg c
+            ln c (renderBin { Dest = prod; Opcode = "fmul"; Flags = fmfFor c ScF64; Ty = ScF64; Lhs = x.Reg; Rhs = x.Reg })
+            let accFlags = withFoldFmf c (Blade.CodeGenState.fpReassocEnabled ()) (fun () -> fmfFor c ScF64)
+            let cur = loadSlot c acc ScF64
+            let s = freshReg c
+            ln c (renderBin { Dest = s; Opcode = "fadd"; Flags = accFlags; Ty = ScF64; Lhs = cur.Reg; Rhs = prod })
+            ln c ($"store double {s}, ptr {acc}")
+         | None -> ())
         popPoolScope c None true
     try emitCountedLoopTo c trips trip
     finally c.BreakTargets.Pop() |> ignore
+    (match cellChain with
+     | Some (entry, acc, _) ->
+        entry.EmittedLlvm.Value <- Some acc
+        if Blade.Effects.Decisions.active () then
+            Blade.Effects.Decisions.record
+                { Rule = "cell-epilogue"; Version = 1; Span = c.DeclSpan
+                  Subject = entry.Subject
+                  Outcome = Blade.Effects.Applied
+                  Evidence = [ "llvm lane: row chain interleave: the step's prodsum(row, row) chain advances on each cell right behind its store, same ops and flags as the prodsum; the fold let loads the chain" ] }
+     | None -> ())
     if lExit.Value <> "" then
         ln c (sprintf "br label %%%s" lExit.Value)
         lbl c lExit.Value
@@ -3932,14 +3988,39 @@ and private bindNamed (c: Ctx) (id: IRId) (name: string) (declTy: IRType) (value
     | IRCompute _ when (match peelCompute value with
                         | IRApplyCombinator pinfo ->
                             (match Blade.Optimize.HotRowTable.tryProducer id with
-                             | Some plan -> tryBindHotRowProducer c id name plan pinfo
-                             | None -> false)
+                             | Some plan when (match plan.Form with Blade.Optimize.RowFold -> true | _ -> false) ->
+                                tryBindHotRowProducer c id name plan pinfo
+                             | Some plan when (match plan.Form with Blade.Optimize.ChunkFold -> true | _ -> false) ->
+                                tryBindFlatEpilogueProducer c id name plan pinfo
+                             | _ -> false)
                         | _ -> false) -> ()
     | IRReduceCompute (_, k, seed) when (match Blade.Optimize.HotRowTable.tryConsumer id with
                                          | Some plan -> c.ArrSlots.ContainsKey plan.RowSumId
                                          | None -> false) ->
         let plan = (Blade.Optimize.HotRowTable.tryConsumer id).Value
         emitHotRowConsumer c id name declTy plan k seed
+    // B1 (round-2 cell epilogues): the producer's fused loop already folded
+    // this binding's cells into the published accumulator.
+    | IRReduceCompute _ when (match Blade.Optimize.HotRowTable.tryConsumer id with
+                              | Some plan -> (match plan.Form with Blade.Optimize.ChunkFold -> true | _ -> false)
+                                             && c.Slots.ContainsKey plan.RowSumId
+                              | None -> false) ->
+        let plan = (Blade.Optimize.HotRowTable.tryConsumer id).Value
+        let (slot, ty) = c.Slots.[plan.RowSumId]
+        c.Slots.Remove plan.RowSumId |> ignore
+        let v = loadSlot c slot ty
+        let target = match scalarTyOf declTy with Some t when t <> ScVoid -> t | _ -> v.Ty
+        bindScalar c id name (coerce c target v)
+    // B2r for a recursion: the step's cell loop carried this prodsum's chain.
+    | IRProdSum _ when (match Blade.Optimize.CellFoldTable.tryFoldLet id with
+                        | Some e -> e.EmittedLlvm.Value.IsSome
+                        | None -> false) ->
+        let e = (Blade.Optimize.CellFoldTable.tryFoldLet id).Value
+        let slot = e.EmittedLlvm.Value.Value
+        e.EmittedLlvm.Value <- None
+        let v = loadSlot c slot ScF64
+        let target = match scalarTyOf declTy with Some t when t <> ScVoid -> t | _ -> v.Ty
+        bindScalar c id name (coerce c target v)
     | _ ->
     match classifyValue c value with
     | VArray a ->
@@ -4025,20 +4106,135 @@ and private tryBindHotRowProducer (c: Ctx) (id: IRId) (name: string) (plan: Blad
         let rows = List.head a.Extents
         let inner = List.tail a.Extents
         let rsPtr = allocPool c accTy (string rows)
+        // B2r (round-2 cell epilogues): `prodsum(row, row)` in a build that
+        // keeps the serial association is emitProdSum's ordered chain from
+        // +0 over the finished row; the same chain (`fmul` of the cell by
+        // itself, `fadd` into the accumulator, the same flags) advances on
+        // each cell right behind its store, and the row's value is the chain.
+        let cepRecord (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
+            if Blade.Effects.Decisions.active () then
+                Blade.Effects.Decisions.record
+                    { Rule = "cell-epilogue"; Version = 1; Span = c.DeclSpan
+                      Subject = plan.ConsumerName; Outcome = outcome; Evidence = evidence }
+        let cellChain =
+            match plan.CellChain with
+            | Some Blade.Optimize.Square ->
+                let why =
+                    if Blade.CodeGenState.fpReassocEnabled () then
+                        Some (Blade.Optimize.cellEpilogueLicensedRowDecline "the hot row")
+                    elif List.length inner <> 1 then Some "the producer is not one cell loop per row"
+                    elif a.Elem <> ScF64 || accTy <> ScF64 then Some "the row or the fold is not Float64 (v1)"
+                    else None
+                match why with
+                | Some w ->
+                    cepRecord (Blade.Effects.Declined ("llvm lane: " + w))
+                        [ $"the hot-row fold of `{plan.ProducerName}` runs its row kernel on each finished row" ]
+                    false
+                | None -> true
+            | _ -> false
+        let chainAcc = if cellChain then Some (allocaOf c "double") else None
         emitCountedLoop c rows (fun i ->
             let iv = { Reg = i; Ty = ScI64 }
+            (match chainAcc with
+             | Some acc -> ln c ($"store double {(f64Const 0.0)}, ptr {acc}")
+             | None -> ())
             emitNest c inner (fun rest ->
                 let idxs = iv :: rest
                 let v = coerce c a.Elem (readCell c a idxs)
-                storeCell c a.Elem (gepCell c a.Elem ptr (storageOffset c a.Groups idxs)) v)
-            let rv = coerce c accTy (readCell c cons [ iv ])
+                storeCell c a.Elem (gepCell c a.Elem ptr (storageOffset c a.Groups idxs)) v
+                match chainAcc with
+                | Some acc ->
+                    let prod = freshReg c
+                    ln c (renderBin { Dest = prod; Opcode = "fmul"; Flags = fmfFor c ScF64; Ty = ScF64; Lhs = v.Reg; Rhs = v.Reg })
+                    let accFlags = withFoldFmf c (Blade.CodeGenState.fpReassocEnabled ()) (fun () -> fmfFor c ScF64)
+                    let cur = loadSlot c acc ScF64
+                    let s = freshReg c
+                    ln c (renderBin { Dest = s; Opcode = "fadd"; Flags = accFlags; Ty = ScF64; Lhs = cur.Reg; Rhs = prod })
+                    ln c ($"store double {s}, ptr {acc}")
+                | None -> ())
+            let rv =
+                match chainAcc with
+                | Some acc -> loadSlot c acc ScF64
+                | None -> coerce c accTy (readCell c cons [ iv ])
             storeCell c accTy (gepCell c accTy rsPtr i) rv)
+        if cellChain then
+            cepRecord Blade.Effects.Applied
+                [ $"llvm lane: row chain interleave: each row's prodsum(row, row) chain advances on each cell of `{plan.ProducerName}` right behind its store (same ops, same flags, same +0)" ]
         c.ArrSlots.[plan.RowSumId] <- { Elem = accTy; Groups = [ GDense rows ]; Src = APool rsPtr; RowOpBytes = 0L }
         true
     | _ ->
         record (Blade.Effects.Declined "the llvm lane keeps the two-pass form: the producer is not a dense rank >= 2 pool it fills row by row")
             [ $"row fold of `{plan.ProducerName}`" ]
+        if plan.CellChain.IsSome && Blade.Effects.Decisions.active () then
+            Blade.Effects.Decisions.record
+                { Rule = "cell-epilogue"; Version = 1; Span = c.DeclSpan
+                  Subject = plan.ConsumerName
+                  Outcome = Blade.Effects.Declined "llvm lane: the hot-row schedule itself was not taken (the producer is not a dense rank >= 2 pool it fills row by row)"
+                  Evidence = [ $"the hot-row fold of `{plan.ProducerName}` runs its row kernel on each finished row" ] }
         false
+
+/// B1 (round-2 cell epilogues) in the LLVM lane: the rank-1 flat producer
+/// with its consumer's chain fed behind the stores. False = the ordinary
+/// materialize and the two-pass fold (recorded).
+and private tryBindFlatEpilogueProducer (c: Ctx) (id: IRId) (name: string) (plan: Blade.Optimize.HotRowPlan) (pinfo: ApplyInfo) : bool =
+    // ONE fused loop (this lane is serial): each cell produced, stored, and
+    // folded into the consumer's accumulator -- the SAME ops the two-pass
+    // consumer (emitReduceCompute's one-level nest) runs, `F(acc, g(cell))`
+    // from the same seed, in the same order, with the same flags
+    // (foldFmfDecorable: reassoc only on a licensed builtin combine). The
+    // cell's read-back is a load of the value just stored at the same
+    // address, which GVN forwards. Under the licence the vectorizer then
+    // folds the stream in its own lane tree, as it does the two-pass loop
+    // (within the lanes' usual tolerance); without it the chain is the
+    // ordered one, bit for bit. The seed and the kernel are evaluated
+    // ahead of the producer, so both must be unable to fail: a literal seed
+    // and a builtin combine. Anything else declines (recorded) and the
+    // consumer keeps the two-pass fold.
+    let record (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
+        if Blade.Effects.Decisions.active () then
+            Blade.Effects.Decisions.record
+                { Rule = "cell-epilogue"; Version = 1; Span = c.DeclSpan
+                  Subject = plan.ConsumerName
+                  Outcome = outcome; Evidence = evidence }
+    let declined (why: string) =
+        record (Blade.Effects.Declined ("llvm lane: " + why))
+            [ $"`{plan.ConsumerName}` folds the cells of `{plan.ProducerName}` after the producer has stored them all (two passes)" ]
+        false
+    match plan.Seed, resolveCallable plan.FoldKernel with
+    | IRLit _, Some cl when cl.Params.Length = 2 && (Blade.CodeGenExprSupport.foldKernelBuiltinOp cl).IsSome ->
+        let a = applyToArr c pinfo
+        match a.Src with
+        | (AVirt _ | AVirtFlat _) when isDenseShape a.Groups && List.length a.Extents = 1 ->
+            let total = shapeCells a.Groups
+            let ptr = allocPool c a.Elem (string total)
+            let pooled = { a with Src = APool ptr }
+            bindArray c id name pooled
+            let cons = emitArr c (IRApplyCombinator plan.RowMap)
+            let ty =
+                match scalarTyOf cl.RetType with
+                | Some t when t <> ScVoid -> t
+                | _ -> cons.Elem
+            let slot = allocaOf c (llTy ty)
+            let seed = coerce c ty (emitExpr c plan.Seed)
+            ln c ($"store {(llTy ty)} {seed.Reg}, ptr {slot}")
+            let licensed = foldFmfDecorable cl
+            emitCountedLoop c total (fun i ->
+                let iv = { Reg = i; Ty = ScI64 }
+                let v = coerce c a.Elem (readCell c a [ iv ])
+                storeCell c a.Elem (gepCell c a.Elem ptr (storageOffset c a.Groups [ iv ])) v
+                let cur = loadSlot c slot ty
+                let cell = readCell c cons [ iv ]
+                let next =
+                    withFoldFmf c licensed (fun () ->
+                        coerce c ty (applyKernel c cl [ KScalar cur; KScalar cell ]))
+                ln c ($"store {(llTy ty)} {next.Reg}, ptr {slot}"))
+            c.Slots.[plan.RowSumId] <- (slot, ty)
+            record Blade.Effects.Applied
+                [ $"""llvm lane: rank-1 producer: one fused loop -- each cell of `{plan.ProducerName}` produced, stored and folded into `{plan.ConsumerName}` ({(if licensed then "licensed: the vectorizer's reduction tree over the stream" else "the ordered chain")})""" ]
+            true
+        | _ -> declined "the producer is not a dense rank-1 pool it fills cell by cell"
+    | IRLit _, _ -> declined "the fold kernel is not a builtin `+` / `*` (evaluated inside the producer, a failure could move)"
+    | _ -> declined "the fold's seed is not a literal (evaluated ahead of the producer, a failure could move)"
 
 /// The hot-row CONSUMER: the outer combine over the row-sum pool -- the same
 /// seeded chain emitReduceCompute's one-level nest runs over the deferred

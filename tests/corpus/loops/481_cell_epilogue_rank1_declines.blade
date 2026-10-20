@@ -1,0 +1,44 @@
+// TEST: Cell Epilogue Rank-1 Producer Declines
+// Round-2 cell epilogues, B1's refusals (each recorded under `cell-epilogue`
+// v1 in `blade plan`; the decisions are pinned by `blade test optimize`); the
+// values are the same either way:
+//   lost    -- the fold carries `where omp` but the producer does not: with
+//              threads on the fold is threaded (Path B) and the producer is
+//              serial, so fusing would cost the fold its team -- declined
+//              (a serial build has no team to lose and takes the epilogue);
+//   beyond  -- the cell kernel also reads y2(1), a cell beyond its own:
+//              declined at planning;
+//   between -- a reader of y2 sits between the producer and the fold:
+//              declined at planning.
+// Same data as loops/480: exact, association-invariant sums.
+type Ix = Idx<1003>
+
+function lost(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {
+    let y2 = method_for(zip(x, y)) <@> lambda(u, v) -> 1.5 * u + v |> compute
+    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) where omp -> p + q, 0.0)
+    s
+}
+
+function beyond(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {
+    let y2 = method_for(zip(x, y)) <@> lambda(u, v) where omp(u: 1) -> 1.5 * u + v |> compute
+    let s = reduce(method_for(y2) <@> lambda(w) -> w * w + y2((1 : Ix)), lambda(p, q) where omp -> p + q, 0.0)
+    s
+}
+
+function between(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {
+    let y2 = method_for(zip(x, y)) <@> lambda(u, v) where omp(u: 1) -> 1.5 * u + v |> compute
+    let m = y2((3 : Ix))
+    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) where omp -> p + q, 0.0)
+    s + m
+}
+
+function inputs(m: Int64) -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute
+}
+
+let a = lost(inputs(7), inputs(5))
+let b = beyond(inputs(7), inputs(5))
+let c = between(inputs(7), inputs(5))
+// EXPECT: a = 53289.5
+// EXPECT: b = 55797.0
+// EXPECT: c = 53297.0

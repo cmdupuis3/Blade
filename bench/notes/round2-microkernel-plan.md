@@ -158,7 +158,172 @@ below parity. Then RESULTS.md section 15 and the gap register.
   W1-C (B4 now, B3 later) started. ~00:10: fable ruling in; W1-D told to keep -0.0 seeding and
   add the formalism paragraph + quoted pins. The runner is staging the OLD/NEW harness mirror
   (`C:\bt_r2ab\`) and the gate cwd (`C:\bt_r2w1\`). Plan + record committed on
-  `worktree-bench-fortran` as a1e93bb7 / a322ccd0.
+  `worktree-bench-fortran` as a1e93bb7 / a322ccd0 / 141addd3.
+- ~00:34: OLD mirror smoke clean (536 cells, 0 failures, ifx reachable; evidence keyed on
+  462b9d92).
+- ~00:45: **W1-A done** on `worktree-agent-a4bbab15b9c78bcf9` (1fec5666 + 1f043139): G35 row
+  slots in the C++ lane (`ChunkRowSlots`, closed admission whitelist, consumer gate exempts
+  the row-slot case, serial ascending epilogue from the seed, `BLADE_FOLD_ROW_SLOTS`,
+  `rowslots_min`); omp-pragma 87/0, omp-reduce 91/0, optimize 152/0, symmetry 128/0, linalg
+  153/0, cli 105/0, corpus-wiring 14/0, interp symmetry 129/0; pairkernel/comoment3 repro
+  checksums identical threaded vs serial; raw-bit case T=1/4/7 vs serial identical.
+  **Scatter prototype MEASURED (box loaded, directional):** rank 2 n=2503 S/W = 0.124-0.138
+  (W 12-17 ms, S 1.7-2.2 ms), rank 3 p=171 S/W = 0.07-0.10, raw-bit W==S 21/21 under both
+  contraction modes -> both ranks KEEP for wave 2 (bars 0.59/0.33 and 0.47/0.49). No G35
+  timing yet (wave-end A/B). Codex diff review of W1-A launched (task-mvg6yixz).
+- ~00:58: Codex diff review of W1-A: DO NOT MERGE yet -- one blocker (the OUTER fold kernel
+  is never audited: a `where comm` fold kernel may carry a captured write, and hoisting all
+  rows before the outer applications changes operands; fix = audit the outer callable with
+  the same closed whitelist + decline fixture), two should-fix (whitelist has default-accept
+  arms `IRMath2 _` / unary `_`; thread tests request but do not observe team sizes -> add an
+  omp-coverage case, rn=0 and small-rn cases), one nit (name the identity case
+  finite-value/low-bit + signed-zero + NaN-equivalence; assert the NaN output). Chains,
+  consumer gate, census, knob, LLVM translation, docs and the scatter harness were confirmed
+  sound (harness nit: return code ignores mismatches). Sent back to W1-A.
+- ~01:10: **W1-C B4 done** on `worktree-agent-a9c504d47b6322e78` (1e8a864c + 53c84312 +
+  975d849d): maskagg 6 passes -> 2 (count in the mask pass; fused branchless fill+gather with
+  m+1 slack; no `y*y` pool; repro chain fed per 256-cell block from indices < q, first kept
+  square peeled, BL8003 at the fold's line), gate `BLADE_COMPACTION_FUSION`; B4c licensed
+  in-pass feed deferred to P1; B4d not done; `keep` stored. optimize 164/0, index-types
+  378/0, cli 103/0, corpus-wiring 14/0, symmetry 127/0, interp index-types 377/0/2,
+  opt-diff index-types 243/0/135 (7 "C++ differs, output identical"). Repro raw bits OLD ==
+  NEW == gate-off (`0x1.9651090932898p+20`); licensed 2.8e-16 rel (sq<8> vs OLD's
+  eight-scalar-lane fold); gate-off C++ byte-identical to 4136f0b5. Drop experiment
+  (directional, kernel-segment medians): B4a -0.5..-1.0 ms, B4b -0.3..-0.9 ms, B4c ~0 ..
+  -0.3 ms; b+c beyond a 0.6-0.95 ms (at the 0.6 bar in the quiet run). Codex diff review
+  launched (task-mvg7p471); W1-C started B3 with its own side table.
+- ~01:20: W1-A review fixes landed (fe43edfe: outer fold kernel audited with the closed
+  whitelist, whitelist arms enumerated -- 16 libm names, atan2/log_base, lgamma/digamma/erf/
+  hypot refused; omp-coverage observes teamsz/distinct = T at 521, clamp to 3 rows, 0 rows =
+  seed; identity cases renamed, rank-3 runtime identity added). omp-pragma 102/0, omp-reduce
+  93/0, omp-coverage 8/0, optimize 152/0, symmetry 128/0, cli 105/0, corpus-wiring 14/0.
+  **MERGED** into `worktree-bench-fortran` as 6c096060; post-merge sanity blocks running.
+  **Pre-existing race found (NOT this branch):** under the default licensed build with
+  threads, old Path B threads a fold whose kernel is `where comm` (no `omp`) but WRITES a
+  captured `let mut` (`G((0 : I)) = G((0 : I)) + 1.0; a + b`), reached through the map's
+  `omp(i: 1)` licence: five mt8 runs printed five different values (70699503 .. 70700344 vs
+  serial 70710120). The front-end write ban is conditional on a parallel body and `chunkable`
+  does not inspect the fold kernel for writes. Follow-up item (own card): make `chunkable`
+  (CodeGenBinding.fs ~:3892-3905) refuse a fold kernel with transitive writes, or extend the
+  BL4005 ban to comm-licensed fold kernels reached by a map licence; corpus pin of the
+  counterexample once fixed.
+- ~01:40: Codex diff review of W1-C B4: MERGE AFTER FIXES -- blockers: (1) B4a admits a
+  named local `let yy = y * y |> compute` with a mutating call between it and the reduce
+  (OLD folds the pre-write snapshot, NEW reads post-write y) -> admit only the immediate
+  compiler-lifted pair / decline across any MayWrite; (2) B4c's write barrier
+  (`MayWrite && refs.Contains(yId)`) misses aliases and indirect writes (`let mut alias = y;
+  overwrite(alias)`) -> reject in-pass on ANY MayWrite between construction and consumer.
+  Should-fix: LLVM gate-off/on runtime cases (B4a-only lets `fmul contract` reach `fadd
+  contract` across the former store boundary; identity regime still holds), licensed
+  tolerance check vs sq<8>, pin the empty fold's source line; drop write-up must separate the
+  MEASURED licensed c (streamed state) from the SHIPPED licensed b (post-pass sq<8>):
+  shipped-arm savings licensed 1.709/0.833 ms, repro 1.943/1.237 ms. Index invariants, slack
+  handling, ascending branchless fill, admission narrowness, gate placement, 515-518 mask
+  shapes, ABORT pins all confirmed. Sent to W1-C (working B3 concurrently).
+- ~01:50: post-merge sanity of 6c096060 (W1-A) green: build 0 warnings (Blade.dll 127A15E6),
+  optimize 152/0, linalg 19/0, cli 105/0, corpus-wiring 14/0, symmetry 128/0, omp-pragma
+  102/0, omp-reduce 93/0, omp-coverage 8/0.
+- ~02:00: **W1-B done** on `worktree-agent-af7b4bee750b29e49` (de0a404b P1; a9fae4c4 planner
+  types; 42e4426c C++ B1+B2r; 4dc86f7a tests; fdca9e55 LLVM; 23b8cdab docs; 23 files, +2192).
+  Drop experiments (directional, kernel-internal ms): recur repro gap 3.9 ms, register-consume
+  recovers 2.98 (77%) fast / 2.14 (56%) off (store/reload only 1.3-2.0); stencil gap 2.0,
+  recovers 1.61 (82%); saxpy licensed P1 4.33 -> 3.68, repro 5.06 -> 3.36. All survive. Form
+  chosen: REGISTER-CONSUME (producer stays SIMD, chain is an in-order fold-left), `epi_blk_r`
+  default 0 (one fused loop; 8-64 made no difference), P1 state stays in ymm1-8. B2l not
+  built (`lanes` records a decline). Gate-off C++ byte-identical to OLD (6 cells); raw bits
+  NEW == OLD for saxpy licensed T=1/3/8, saxpy repro, stencil repro serial+mt8, recur repro
+  (both contraction modes); printed checksums identical everywhere incl. LLVM. New default-
+  suite block `blade test cell-epilogue` 44/0 (non-dyadic n=2003, NEW vs gate-off raw bits).
+  fold-lanes 4/0 (120088 raw-bit cases), optimize 177/0, loops 245/0, recursive-arrays
+  29/0, omp 76/90/5 all 0 failed, cli 103/0, corpus-wiring 14/0, interp loops 246/0,
+  interp recursive-arrays 30/0, opt-diff loops 216/0/29, opt-diff recursive-arrays 27/0/2.
+  LLVM whole-program directional: saxpy repro 15.04 -> 13.13 ms, stencil repro 13.80 ->
+  12.31, recur repro 13.05 -> 10.04. Codex diff review launched (task-mvg9glpd).
+- ~02:25: Codex diff review of W1-B: MERGE AFTER FIXES -- blockers (both in the new global
+  nested-let-chain walk): (1) a row kernel's capture bound by an intervening let is
+  scheduled before its declaration (the between-check tests references in the intervening
+  value, not whether the binder is captured); (2) failure reordering: admission requires
+  Repeatable (permits MayFail), so a failing row kernel (`1 % row(0)`) can run during P's fill
+  ahead of an intervening `7 / d` -- require captures to dominate the producer and a movable
+  (non-failing) row kernel. Should-fix: LLVM test programs must not turn refusals/exceptions
+  into skips; add licensed T=3 fast, actual-team assertions, LLVM licensed on/off at lane
+  tolerance, recur buffer hash; record B2r under `cell-epilogue` in both lanes and record
+  constructs after the form is chosen; docs over-claim (identity only under repro+off;
+  licensed C++ conditioned on identical producer values + teams; `lanes` reserved;
+  epi_blk_r=0 "chosen simple default" not "measured best"). P1 contract, B1 partition/combine,
+  seed-at-consumer, chains, recur lookup, line endings confirmed. Sent to W1-B.
+- ~02:50: **W1-C B4 fixes + B3 done** (db042d9f, 5ad7d280, b6921568, 76fd75d2). Both B4
+  blockers reproduced then fixed (snapshot case NEW 2699 vs OLD 203 -> 203; alias case NEW 203
+  vs OLD 2699 -> 2699); LLVM fold-only form emits an unflagged `fmul` so it cannot contract;
+  cli runtime cases n=1003 non-dyadic, both forms, both lanes, repro+off identical bits,
+  default within 1e-12; corpus index-types/520 (interp-unsupported: no compound element
+  store), 521 (intervening BL8013 before the empty fold); drop write-up corrected (shipped
+  licensed arm b: 1.709/0.833 ms; repro arm c: 1.943/1.237 ms; run 2 misses the 0.6 bar for b
+  beyond a). B3: `planCompactRowClasses` (IR facts, gate `BLADE_COMPACT_ROW_CLASSES`), orbit
+  plan resolved at emission, licensed only; C++ producer writes `d[i]` from the stored cell
+  and `o[i] = sq<8>(row+1, n-1-i)` inside the dynamic team, consumer sums each class
+  ascending then the factored `genOrbitTotalCpp`; LLVM via `orbitCombineLlvm`. pairkernel mt8
+  licensed: no `__opart`, no second team; NEW identical at T=1/3/8 + serial
+  (residual 0.751854705624282) where OLD varied with T; NEW vs OLD ~8e-16 rel; repro
+  byte-identical (declined path). optimize 173/0, cli 117/0, corpus-wiring 14/0, index-types
+  380/0, symmetry 129/0, omp 76/90/5, interp index-types 378/0/3, interp symmetry 130/0,
+  opt-diff index-types 245/0/135, opt-diff symmetry 91/0/38. Codex review of the four new
+  commits launched. Attribution note: all three builders keep their own `Co-Authored-By:
+  Claude Opus 5.5` trailer (their session-level instruction); merge commits carry the Fable
+  line.
+- ~03:05: **W1-D done** on `worktree-agent-a8d2474c563b1365c` (3d2aa4c3 IRMono lifts;
+  a89f148a Toolchain predicates; eec6daad the pass + formalism 2.4 paragraph; 958870f4 corpus
+  sibling-folds/001-012 + needles; b1d51902 docs). Seed function `sfIdentitySeed`. Plan lines:
+  dot/fusedchain applied under THREADS=1 and REPRO, declined (thread gate) in the default;
+  onepass applied in ALL regimes; saxpy input sums joined, kernel fold left for the producer
+  epilogue; inputonly joined in all regimes (twins move). NEW vs OLD identical under
+  REPRO+off+THREADS=1 in both lanes (dot 749475.148712715 / 2998681.67744271; onepass;
+  fusedchain; inputonly). optimize 163/0, sibling-folds 12/0, loops 241/0, corpus-wiring
+  14/0, cli 103/0, functions 324/0, interp sibling-folds 13/0, opt-diff sibling-folds 12/0
+  (5 inert). **Finding:** the licensed C++ join starts `omp simd reduction` lanes at +0.0, so
+  an all-negative-zero licensed sum prints 0.0 (pre-existing join behaviour, also for a
+  user-written -0.0 seed; LLVM licensed drops it via nsz) -- the rewrite extends it to legs
+  that used to be standalone K-lanes folds; documented as outside the licensed fold contract
+  (CLAUDE.md, features.md, corpus 003/011). Unseeded empty axis is BL3007 at compile time (no
+  test possible). The "mutable module binding" refusal was removed (top-level arrays are
+  IsMutable; calls/assignments are the barriers) -- flagged for the Codex review. The pass
+  also rewrites top-level scalar bindings corpus-wide: whole-corpus gates are the real check.
+  Codex diff review launched.
+- ~03:15: Codex review of W1-C's four new commits: MERGE AFTER FIXES -- B4 blockers CLOSED
+  (whole-host write barrier; transitive effect summaries fail closed; 520/521 pin both
+  counterexamples; LLVM fold-only `fmul` undecorated; drop write-up corrected). B3 blockers:
+  (1) capture dominance -- a scalar bound between producer and consumer (`scale`) is read by
+  the epilogue before its binding (OrbitFold.pureScalarBody admits scalar IRVars); (2) the
+  write barrier ends before the consumer's OUTER SEED: a seed call mutating K through an alias
+  is admitted. Should-fix: determinism case must observe actual teams; licensed B3 has no LLVM
+  runtime gate (rowsRun hardcodes BLADE_LLVM=null) -> lane loop with 0/1, non-dyadic, strict
+  unknown parity, nonzero outer seed, p=2503 assertion; pin the B4 `fmul` as undecorated in the
+  default build. Nit: docs wording (bits change vs OLD; team independence per lane/build;
+  LLVM per-row tree differs; expert folds columns). Merge preview W1-B x W1-C: textual
+  conflicts in Optimize.fs gates, Lowering.fs resets, CodeGenCuda.fs epilogue builders,
+  CodeGenLoopNest hot-row/compactRow setup, IRStorage LoopNestCodeGen fields, CLAUDE.md row,
+  OptimizeTests; CodeGenBinding auto-merges but needs semantic review; W1-B's unused
+  `CompactRowsCandidate`/`CompactClassRows` scaffold duplicates B3's `CompactRowTable` ->
+  keep B3's table, remove the scaffold in a follow-up. Sent to W1-C.
+- ~03:35: Codex review of W1-D: MERGE AFTER FIXES -- blockers: (1) the inliner inserts a
+  callee's spine before its containing statement, hoisting the callee's folds across an
+  earlier writing call in the SAME expression (`bump(x) + stats(x)`: 2568 -> 20); (2) a
+  shared-kernel fusion tree's STRUCTURAL projections (`t[1]` on a nested-pair tuple) are
+  remapped as flat leg indices (wrong leg); (3) streamed provider operands pass the
+  stored-array admission (IsVirtual=false does not prove materialization; reaches BL7004 in
+  streamedNestSetup). Should-fix: one-hop deferred facts; "left for the producer epilogue"
+  reserves shapes B1 cannot consume; the signed-zero corpus (003/011) would FAIL `blade test
+  llvm` (lane comparator rejects opposite zero spellings) and sibling-folds is missing from
+  the llvm default list; applied record over-claims identity, convergence needle must
+  assert seeds + simd arity. Audit confirmed: totality judge (float / discharged), interval
+  barriers, thread/licence gates, dedupe keeps capture ids, seeds per arbitration, IRMono /
+  Toolchain lifts exact, no fsproj change. Licensed zero sign: acceptable under the
+  fastest-default policy's explicit `reassoc nsz`; the join emitter's +0 private accumulators
+  override a user -0.0 seed too (pre-existing; gap note). Pin-risk suspects for the
+  whole-corpus gates: spectra/062 Parseval boolean, loops/205 non-dyadic residuals, math/086
+  solve sums, functions/056/137/198/199 statistics shapes. Conflicts W1-D x W1-B/W1-C:
+  Optimize.fs gate declarations + the optimizerGates line, CLAUDE.md row, features.md row;
+  OptimizeTests hunks disjoint. Sent to W1-D.
 
 ## 6. Decisions taken by the orchestrator
 

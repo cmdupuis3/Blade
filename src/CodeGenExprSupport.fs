@@ -1982,6 +1982,10 @@ let syrkTileKc (k: int64) : int64 =
 ///   anti_kc  sample-block cap INSIDE an antisym tile visit (P and Q partials
 ///            spilled and reloaded exactly between balanced blocks; 0 = the
 ///            whole chain in one block, the default)
+///   epi_blk  the cell epilogue's producer block between lane-state feeds
+///            (`cellEpiBlock`: default 256, a multiple of the lane block)
+///   epi_blk_r  the cell-chain mini-block (`cellEpiBlockR`: default 0 = one
+///            fused loop)
 let tileTune (key: string) (dflt: int64) : int64 =
     match System.Environment.GetEnvironmentVariable "BLADE_TILE_TUNE" with
     | null -> dflt
@@ -2021,6 +2025,23 @@ let rowSlotsMin () : int64 = max 0L (tileTune "rowslots_min" 262144L)
 /// thread runtime). A FUNCTION, read per call.
 let foldRowSlotsEnabled () : bool =
     Blade.Toolchain.envSwitch "BLADE_FOLD_ROW_SLOTS" <> Blade.Toolchain.SwitchOff
+
+/// B1's producer block between lane-state feeds (BLADE_TILE_TUNE epi_blk,
+/// round-2 cell epilogues): cells per block, default 256 (2 KB of double).
+/// It MUST be a positive multiple of the lane block B = K * 32 / sizeof(T)
+/// (a feed consumes whole blocks only); any other value is ignored and the
+/// default is used (256 is a multiple of every B: 16 / 32 / 64). Speed only:
+/// the lane tree is fixed by B, not by the block, so no bit depends on it.
+let cellEpiBlock (laneBlock: int64) : int64 =
+    let v = tileTune "epi_blk" 256L
+    if v > 0L && laneBlock > 0L && v % laneBlock = 0L then v else 256L
+
+/// B1-repro / B2r's cell-loop mini-block (BLADE_TILE_TUNE epi_blk_r): 0 (the
+/// default: a chosen simple competitive value -- the round-2 drop sweep over
+/// 8-64 showed no consistent winner, without paired uncertainty) =
+/// one fused loop; n > 0 strip-mines the cell loop into n-cell blocks. Speed
+/// only: the chain visits the same cells in the same order either way.
+let cellEpiBlockR () : int64 = max 0L (tileTune "epi_blk_r" 0L)
 
 /// BLADE_SYRK_TILE: unset / `1` / `on` = the packed-triangle SYRK tile is the
 /// BLAS-off arm of the same-array `comm` row contraction (default); `0` / `off`

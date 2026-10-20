@@ -2030,14 +2030,160 @@ let buildRowEpilogue (plan: Blade.Optimize.HotRowPlan) (producer: LoopNestCodeGe
         let (extentDecls, ownedExtents) = emitExtentsTable "" extentsName 1 [ (bound, isLit) ]
         let allocDecl =
             $"Array<{accCpp}, 1> {rsName} = {{ allocate<typename promote<{accCpp}, 1>::type, nullptr>({extentsName}), {extentsName} }};"
+        // B2r (round-2 cell epilogues): `prodsum(row, row)` advanced per cell.
+        // The row's fold renders as the serial IIFE exactly when the build
+        // keeps the serial association (CodeGenExpr's IRProdSum arm reads the
+        // same `fpReassocEnabled`), and that chain -- `T __ps = 0; __ps +=
+        // r[t] * r[t]` ascending -- is what the per-cell step reproduces: the
+        // same products of the same (stored) values, added in the same order
+        // to the same +0. The licensed build's row fold is the K-lane tree on
+        // the hot row, which the chain would NOT reproduce: declined (the
+        // `lanes` arm, B2l, is the opt-in for it).
+        let chainName = $"__hrc_{(sanitizeCppName plan.ConsumerName)}"
+        let rowElem = match producer.OutputType with ArrayElem pat -> elemTypeToCpp pat.ElemType | _ -> accCpp
+        let cellStep =
+            let decline (why: string) =
+                Blade.Optimize.recordCellEpilogue plan.ConsumerName (Blade.Effects.Declined why)
+                    [ $"the hot-row fold of `{pName}` runs its row kernel on each finished row" ]
+                None
+            match plan.CellChain with
+            | None -> None
+            | Some _ when fpReassocEnabled () ->
+                decline (Blade.Optimize.cellEpilogueLicensedRowDecline "the hot row")
+            | Some _ when rowElem <> accCpp -> decline "the row's element type differs from the fold's accumulator type"
+            | Some _ when producer.Bindings.Length <> 2 -> decline "the producer is not rank 2 (one cell loop per row)"
+            | Some Blade.Optimize.Square -> Some (fun (c: string) -> $"{chainName} += {c} * {c};")
+            | Some Blade.Optimize.Plain -> Some (fun (c: string) -> $"{chainName} += {c};")
         Some { Prelude = extentDecls @ [ allocDecl ]
                RowViewName = rowView
                Body = (fun () -> [ $"{rsName}[{lvl.IndexName}] = {bodyExpr ()};" ])
                RowSumName = rsName
                OnEmitted = (fun () ->
                    registerPoolAlloc (classifyOutputStorage plan.RowSumType) accCpp 1 "nullptr" extentsName rsName ownedExtents
-                   plan.EmittedCpp.Value <- Some rsName) }
+                   plan.EmittedCpp.Value <- Some rsName)
+               CellStep = cellStep
+               ChainName = chainName
+               ChainElem = accCpp
+               ChainBody = (fun () -> [ $"{rsName}[{lvl.IndexName}] = {chainName};" ])
+               ChainBlock = cellEpiBlockR ()
+               OnCellStepDeclined = (fun why ->
+                   Blade.Optimize.recordCellEpilogue plan.ConsumerName (Blade.Effects.Declined why)
+                       [ $"the hot-row fold of `{pName}` runs its row kernel on each finished row" ])
+               Subject = plan.ConsumerName }
     | _ -> None
+
+/// B1 (round-2 cell epilogues): the producer's FlatEpilogue for a ChunkFold
+/// plan, in the form THIS build's consumer fold would take -- decided from the
+/// very predicates genReduceComputeBindingCore reads for the same fold
+/// (fpReassocEnabled, foldReorderLicensed, the Path B `chunkable` facts, the
+/// dot-class K-lane recogniser, ompThreadEmissionEnabled), so the fused form
+/// computes the SAME tree as the two-pass form it replaces:
+///   * licensed K-lane self-dot / sum, fold serial and producer serial
+///       -> FlatLanesSerial (P1 over the sweep; = sq<T, K>(y2, n) bit for bit)
+///   * licensed K-lane fold threaded (Path B) and producer threaded
+///       -> FlatLanesChunks (P1 per chunk_lo chunk; = the per-chunk sq calls)
+///   * the serial chain (repro build or unlicensed fold), producer serial
+///       -> FlatChain (P2, register-consume: the same `acc = F(acc, g(c))`)
+/// Every other combination declines with its reason (recorded): the
+/// producer threaded but the fold serial or ordered (fusing would serialize
+/// the producer), the fold threaded but the producer serial (the fold would
+/// lose its team; the map licence is never transferred to the fold), a
+/// licensed fold in a form P1 does not reproduce, a seed or fold kernel
+/// that could fail when moved ahead of the producer (P2 evaluates both
+/// there; a seed must be a literal and the kernel a builtin `+` / `*`).
+let buildFlatEpilogue (plan: Blade.Optimize.HotRowPlan) (producer: LoopNestCodeGen)
+                      (names: Map<IRId, string>) (builder: IRBuilder) : FlatEpilogue option =
+    let evidence = [ $"`{plan.ConsumerName}` folds the cells of `{plan.ProducerName}` after the producer has stored them all (two passes)" ]
+    let decline (why: string) =
+        Blade.Optimize.recordCellEpilogue plan.ConsumerName (Blade.Effects.Declined why) evidence
+        None
+    let tag = sanitizeCppName plan.ConsumerName
+    match resolveCallable plan.FoldKernel, plan.CellChain with
+    | Some callable, Some term when callable.Params.Length = 2 ->
+        let elemStr =
+            match callable.RetType with
+            | IRTScalar et -> primTypeToCpp et
+            | t -> irTypeToCpp t
+        let cellElem =
+            match producer.OutputType with
+            | ArrayElem at -> elemTypeToCpp at.ElemType
+            | t -> irTypeToCpp t
+        let cg0 = routeKernelBodyThroughCall plan.RowMap (buildLoopNestCodeGen plan.RowMap [ producer.OutputName ] "__cep" builder)
+        match cg0.Bindings with
+        | [ head ] ->
+            let mapLicensesOuter = cg0.OmpRequested && head.IsParallel
+            let reorder = foldReorderLicensed callable
+            let rect = head.BoundDependencies.IsEmpty && head.StrictOffset = 0 && (domainPlanOfLevel head).IsNone
+            let chunkable = (callable.IsOmpParallel || mapLicensesOuter) && reorder && rect
+            let threadsOn = ompThreadEmissionEnabled ()
+            let licensed = fpReassocEnabled () && reorder
+            let producerThreaded =
+                threadsOn && producer.OmpRequested && (producer.Bindings |> List.forall (_.IsParallel))
+            let foldThreaded = licensed && chunkable && threadsOn
+            let lanesOk =
+                licensed && foldVecElem elemStr && foldLanesMode () <> FoldLanesOff
+                && fpReassocSimdOp callable elemStr = Some "+" && laneableFoldLevel cg0 head
+            let kind = if term = Blade.Optimize.Square then VecSq else VecSum
+            let k = foldVecLanes kind
+            let laneBlock = int64 k * (if elemStr = "float" then 8L else 4L)
+            if cellElem <> elemStr then decline "the producer's cell type differs from the fold's accumulator type"
+            // The L1 BLAS dispatch takes an un-requested fold when the gate is
+            // on (it declines on a `where omp` request: FoldRequestedOmp).
+            elif Blade.LinAlgPatterns.blasAvailable () && not (callable.IsOmpParallel || mapLicensesOuter) then
+                decline "the BLAS gate is on and the fold carries no omp request (the L1 dispatch may own this fold)"
+            elif ompTestModeEnabled () then decline "omp test mode: the coverage instrumentation owns the fold's nest"
+            elif licensed then
+                if not lanesOk then
+                    decline "the licensed fold takes a form the lane state does not reproduce (not a K-lane self-dot or sum: non-real element, BLADE_FOLD_LANES=off, or a non-`+` combine)"
+                elif foldThreaded && not producerThreaded then
+                    decline "the fold is threaded (Path B) but the producer's sweep is serial in this build: fused, the fold would lose its team (the map licence is never transferred to the fold)"
+                elif producerThreaded && not foldThreaded then
+                    decline "the producer is threaded but the fold is serial in this build: fusing would serialize the producer"
+                else
+                    let form = if foldThreaded then FlatLanesChunks else FlatLanesSerial
+                    let block = cellEpiBlock laneBlock
+                    Some { Form = form; ElemCpp = elemStr; K = k; LaneBlock = laneBlock
+                           Square = (term = Blade.Optimize.Square); Block = block
+                           PartName = $"__cep_part_{tag}"; HadName = $"__cep_had_{tag}"; TeamName = $"__cep_T_{tag}"
+                           ChainPrelude = []; ChainStep = (fun _ -> "")
+                           OnEmitted = (fun () ->
+                               let label = foldVecLabel kind k
+                               let formText =
+                                   match form with
+                                   | FlatLanesChunks -> $"rank-1 producer: {label} stream per Path B chunk, fed behind the producer's stores in blocks of {block} cells"
+                                   | _ -> $"rank-1 producer: {label} stream fed behind the producer's stores in blocks of {block} cells"
+                               Blade.Optimize.recordCellEpilogue plan.ConsumerName Blade.Effects.Applied
+                                   [ formText
+                                     "the same lane tree as the two-pass fold (blade_fold::finish(feed(..)) == the one-shot form bit for bit); the re-read of the stored output and its loop are gone" ]
+                               plan.EmittedCpp.Value <- Some ((if form = FlatLanesChunks then "chunks:" else "lanes:") + tag)) }
+            elif producerThreaded then
+                decline "the fold keeps its serial ordered chain in this build (repro, or no reorder licence) while the producer is threaded: one ordered chain behind a threaded producer would serialize it"
+            else
+                match plan.Seed, foldKernelBuiltinOp callable with
+                | IRLit _, Some _ ->
+                    let (wrapperCode, wname) = genCallableWrapper names $"cep_{tag}" callable
+                    let acc = $"__cep_acc_{tag}"
+                    let seedStr = exprToCpp names plan.Seed
+                    let block = cellEpiBlockR ()
+                    Some { Form = FlatChain; ElemCpp = elemStr; K = 0; LaneBlock = 1L
+                           Square = (term = Blade.Optimize.Square); Block = block
+                           PartName = acc; HadName = ""; TeamName = ""
+                           ChainPrelude = wrapperCode @ [ $"{elemStr} {acc} = {seedStr};" ]
+                           ChainStep = (fun c ->
+                               let cellTerm = if term = Blade.Optimize.Square then $"({c} * {c})" else c
+                               $"{acc} = {wname}({acc}, {cellTerm});")
+                           OnEmitted = (fun () ->
+                               let blocks = if block > 0L then $"mini-blocks of {block}" else "one fused loop"
+                               Blade.Optimize.recordCellEpilogue plan.ConsumerName Blade.Effects.Applied
+                                   [ $"rank-1 producer: chain interleave ({blocks}): the fold's ordered chain advances on each cell right behind its store (register-consume), same seed, same order, same operations"
+                                     "strict-legal: no reorder licence used; the stored output is unchanged" ]
+                               plan.EmittedCpp.Value <- Some ("chain:" + tag)) }
+                | IRLit _, None ->
+                    decline "the fold kernel is not a builtin `+` / `*`: the chain would evaluate it inside the producer, ahead of anything between producer and fold (a failure could move)"
+                | _ ->
+                    decline "the fold's seed is not a literal: the chain would evaluate it ahead of the producer (a failure could move; the seed stays at the consumer)"
+        | _ -> decline "the consumer's cell map is not one plain level over the producer"
+    | _ -> decline "the fold kernel does not resolve to a two-parameter callable, or the cell kernel has no recognized term"
 
 let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (builder: IRBuilder) : string list =
     let ind = indentStr ctx
@@ -3550,8 +3696,31 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
             // genLoopNestStreamed decides whether its form admits it.
             let codeGen =
                 match (hotRowPendingCell ()).TryGetValue name with
-                | true, plan -> { codeGen with RowEpilogue = buildRowEpilogue plan codeGen tempCtx.VarNames builder }
+                | true, plan when (match plan.Form with Blade.Optimize.RowFold -> true | _ -> false) ->
+                    { codeGen with RowEpilogue = buildRowEpilogue plan codeGen tempCtx.VarNames builder }
+                // B1: the rank-1 producer's cell epilogue -- only the flat
+                // elementwise emitter honours it; any other route declines
+                // (recorded below) and the consumer keeps the two-pass fold.
+                | true, plan when (match plan.Form with Blade.Optimize.ChunkFold -> true | _ -> false) ->
+                    { codeGen with FlatEpilogue = buildFlatEpilogue plan codeGen tempCtx.VarNames builder }
                 | _ -> codeGen
+            let flatEpiDeclined () =
+                match (hotRowPendingCell ()).TryGetValue name, codeGen.FlatEpilogue with
+                | (true, plan), Some _ when plan.EmittedCpp.Value.IsNone ->
+                    Blade.Optimize.recordCellEpilogue plan.ConsumerName
+                        (Blade.Effects.Declined "the producer did not take the flat elementwise path (a dispatched, sliced, tiled or segmented nest, or a flat-path gate)")
+                        [ $"`{plan.ConsumerName}` folds the cells of `{plan.ProducerName}` after the producer has stored them all (two passes)" ]
+                | _ -> ()
+                // B2r: a row epilogue that OFFERED the per-cell chain, on a
+                // nest that never placed the row epilogue at all (a
+                // dispatched route, or genLoopNestStreamed's admission --
+                // e.g. a collapse pragma spanning the row and cell levels):
+                // the decision says so (the nest itself records the
+                // refusals it makes after admitting the epilogue).
+                match (hotRowPendingCell ()).TryGetValue name, codeGen.RowEpilogue with
+                | (true, plan), Some ep when ep.CellStep.IsSome && plan.EmittedCpp.Value.IsNone ->
+                    ep.OnCellStepDeclined "the producer's nest did not admit the hot-row schedule (a dispatched route, or a nest form -- collapse pragma across the row and cell levels, fold, slab, streamed source -- that places no row epilogue)"
+                | _ -> ()
 
             // Generate loop nest. The LinAlg dispatch is tried first: a
             // recognised BLAS shape is a strictly stronger rewrite than a flat
@@ -3584,6 +3753,7 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                        else tryGenFlatElementwiseNest streamedMap info.ArrayTypes codeGen tempCtx.VarNames tempCtx.Indent) with
                 | Some flat -> flat
                 | None -> genLoopNestStreamed streamedMap codeGen tempCtx.VarNames tempCtx.Indent
+            flatEpiDeclined ()
 
             // Per-rank slab bounds. Balanced split: q = n/P with the first
             // n%P ranks taking one extra row; P > n degenerates to empty

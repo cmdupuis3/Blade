@@ -1,0 +1,37 @@
+// TEST: Hot-Row Fold Declines A Row Kernel Reading A Later Binding
+// Blade.Optimize.planHotRowFolds runs the row kernel behind each produced row,
+// i.e. at the PRODUCER -- so every value the kernel reads must be bound before
+// the producer. Here the kernel reads a binding made BETWEEN the producer and
+// the fold (`w2`, `scale`): the schedule is declined (`blade plan`: "bound
+// between the producer and the fold") and the two-pass form stays. Before the
+// dominance check the emitted epilogue read the binding before its
+// declaration: an undeclared identifier in a function body (`f`), and in a
+// let chain nested inside a top-level binding (`(a, b)`) the OUTER `scale`
+// shadowed by the block's own -- the wrong value, silently.
+// u(i, j) = i^2 + 2 j^2: integer-valued, every sum exact.
+type Y = Idx<7>
+type X = Idx<9>
+let scale = 100.0
+
+function f() -> Float64 = {
+    let u = method_for(range<Y, X>) <@> lambda(i, j) -> Float64(Int64(i) * Int64(i) + 2 * Int64(j) * Int64(j)) |> compute
+    let lap = method_for(range<halo<Y, [-1, 0, 1]>, halo<X, [-1, 0, 1]>>) <@> lambda(wr, wc) ->
+        u(wr(-1), wc(0)) + u(wr(0), wc(1)) - 2.0 * u(wr(0), wc(0)) |> compute
+    let w2 = reduce(method_for(range<X>) <@> lambda(j) -> 0.5, (+))
+    let s = reduce(method_for(lap) <@> lambda(row) -> prodsum(row, row) * w2, (+))
+    s
+}
+
+let (a, b) = {
+    let u = method_for(range<Y, X>) <@> lambda(i, j) -> Float64(Int64(i) * Int64(i) + 2 * Int64(j) * Int64(j)) |> compute
+    let lap = method_for(range<halo<Y, [-1, 0, 1]>, halo<X, [-1, 0, 1]>>) <@> lambda(wr, wc) ->
+        u(wr(-1), wc(0)) + u(wr(0), wc(1)) - 2.0 * u(wr(0), wc(0)) |> compute
+    let scale = reduce(method_for(range<X>) <@> lambda(j) -> 0.5, (+))
+    let s = reduce(method_for(lap) <@> lambda(row) -> prodsum(row, row) * scale, (+))
+    (s, scale)
+}
+let c = f()
+// EXPECT: scale = 100.0
+// EXPECT: a = 37957.5
+// EXPECT: b = 4.5
+// EXPECT: c = 37957.5

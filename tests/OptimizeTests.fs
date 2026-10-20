@@ -850,6 +850,367 @@ let private hotRowLostTeamSrc =
 let private hotRowReadsBeyondSrc =
     hotRowSrc.Replace("prodsum(row, row), lambda", "prodsum(row, row) + lap(0, 0), lambda")
 
+// ---------------------------------------------------------------------------
+// Round-2 cell epilogues (B1 rank-1 producer epilogue, B2r row chain
+// interleave). The values are pinned by corpus loops/480-483 and
+// recursive-arrays/030, the licensed bits by `blade test cell-epilogue`;
+// these pins read the emission (which form fired, where the chain sits) and
+// the `cell-epilogue` decision of every refusal -- most of which are made at
+// EMISSION, so the decisions are collected across lowering AND codegen.
+// ---------------------------------------------------------------------------
+
+let private cepInputs =
+    "type Ix = Idx<1003>\n"
+    + "function inputs(m: Int64) -> Array<Float64 like Ix> = {\n"
+    + "    method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute\n"
+    + "}\n"
+
+/// The saxpy shape in a function body (the bench kernel's).
+let private cepSaxpySrc =
+    cepInputs
+    + "function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {\n"
+    + "    let y2 = method_for(zip(x, y)) <@> lambda(u, v) where omp(u: 1) -> 1.5 * u + v |> compute\n"
+    + "    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) where omp -> p + q, 0.0)\n"
+    + "    s\n"
+    + "}\n"
+    + "let r = kernel(inputs(7), inputs(5))\n"
+
+let private cepDecisionsOf (src: string) : Result<Blade.Effects.Decision list, string> =
+    Blade.Effects.Decisions.start ()
+    let r =
+        try
+            match lower src with
+            | Error e -> Error ($"lower: {e}")
+            | Ok ir ->
+                CodeGen.genSelfContainedProgramFromIR ir "cep_decisions" |> ignore
+                CodeGen.takeUnhandledIRNodeDiagnostics () |> ignore
+                Ok (Blade.Effects.Decisions.drain ())
+        with ex -> Error ($"codegen raised: {ex.Message}")
+    Blade.Effects.Decisions.drain () |> ignore
+    r
+
+/// A `cell-epilogue` decision over lowering + codegen.
+let private cepDecisionCase (name: string) (src: string) (want: Blade.Effects.Decision -> bool) (describe: string) =
+    match cepDecisionsOf src with
+    | Error e -> resultLine Fail name e; false
+    | Ok ds ->
+        let mine = ds |> List.filter (fun d -> d.Rule = "cell-epilogue")
+        if mine |> List.exists want then
+            resultLine Pass name ($"{mine.Length} `cell-epilogue` decision(s); {describe}")
+            true
+        else
+            let seen = mine |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+            let shown = if seen = "" then "no decisions" else seen
+            resultLine Fail name ($"wanted {describe}; saw: {shown}")
+            false
+
+let private kernelBody (cpp: string) =
+    let at = cpp.IndexOf "double kernel(Array<double, 1> x, Array<double, 1> y) {"
+    if at < 0 then "" else
+    let rest = cpp.Substring at
+    let close = rest.IndexOf "\n}\n"
+    if close < 0 then rest else rest.Substring(0, close)
+
+let private countOf (needle: string) (s: string) =
+    System.Text.RegularExpressions.Regex.Matches(s, System.Text.RegularExpressions.Regex.Escape needle).Count
+
+/// Serial licensed: the P1 lane state fed in the producer's block loop, and
+/// no second pass over the stored output.
+let private cepSaxpySerialLicensed () =
+    let name = "cell_epilogue_saxpy_serial_licensed_streams_lane_state"
+    match withGate "BLADE_OMP_THREADS" "1" (fun () -> cppOfSource name cepSaxpySrc) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let k = kernelBody cpp
+        let feed = k.IndexOf "blade_fold::feed_sq<double, 8>(__cep_ls, __fp___v"
+        let produce = k.IndexOf "[__fk] = ((1.5 * __fp_x[__fk]) + __fp_y[__fk]);"
+        if feed > produce && produce >= 0 && k.Contains "blade_fold::finish_sq<double, 8>(__cep_ls"
+           && not (k.Contains "sq<double, 8>(__rsrc0") then
+            resultLine Pass name "feed_sq behind each producer block, finish_sq on the tail, no sq<double, 8>(__rsrc0 re-read"
+            true
+        else
+            resultLine Fail name ($"""feed={feed} produce={produce} finish={k.Contains "finish_sq"} reread={k.Contains "sq<double, 8>(__rsrc0"}""")
+            false
+
+/// mt8 licensed: ONE team (the producer runs in the fold's Path B region).
+let private cepSaxpyThreadedLicensed () =
+    let name = "cell_epilogue_saxpy_threaded_one_team"
+    match withGate "BLADE_OMP_THREADS" null (fun () -> cppOfSource name cepSaxpySrc) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let k = kernelBody cpp
+        let teams = countOf "BLADE_OMP_PARALLEL_NUM_THREADS" k
+        let forSimd = countOf "BLADE_OMP_PARALLEL_FOR_SIMD" k
+        if teams = 1 && forSimd = 0 && k.Contains "blade_fold::chunk_lo(__fp_cells" && k.Contains "feed_sq<double, 8>"
+           && not (k.Contains "__rpart") then
+            resultLine Pass name "exactly one BLADE_OMP_PARALLEL_NUM_THREADS; chunk_lo chunks produce and feed; no second Path B team"
+            true
+        else
+            resultLine Fail name ($"""teams={teams} parallel-for-simd={forSimd} chunk_lo={k.Contains "chunk_lo"} rpart={k.Contains "__rpart"}""")
+            false
+
+/// Repro serial: the chain statement sits INSIDE the producer loop, right
+/// behind the store, and no reload loop follows.
+let private cepSaxpyRepro () =
+    let name = "cell_epilogue_saxpy_repro_chain_inside_producer"
+    match withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () -> cppOfSource name cepSaxpySrc)) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let k = kernelBody cpp
+        let store = k.IndexOf "[__fk] = __c;"
+        let chain = k.IndexOf "__cep_acc___v"
+        let step = System.Text.RegularExpressions.Regex.Match(k, @"__cep_acc___v\d+ = __wrap_\d+_cep___v\d+\(__cep_acc___v\d+, \(__c \* __c\)\);")
+        if store >= 0 && step.Success && step.Index > store && chain >= 0
+           && not (k.Contains "for (size_t __i0 = 0; __i0 < 1003; __i0++)") then
+            resultLine Pass name "the chain's `acc = F(acc, c * c)` right behind the cell's store; no standalone reload loop"
+            true
+        else
+            resultLine Fail name ($"""store={store} step={step.Success}@{step.Index} reload={k.Contains "for (size_t __i0 = 0; __i0 < 1003; __i0++)"}""")
+            false
+
+/// BLADE_CELL_EPILOGUE=0: the two-pass forms.
+let private cepGateOff () =
+    let name = "cell_epilogue_gate_off_keeps_two_passes"
+    let off f = withGate "BLADE_CELL_EPILOGUE" "0" f
+    match off (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () -> cppOfSource name cepSaxpySrc)),
+          off (fun () -> withGate "BLADE_FP_REPRO" "1" (fun () -> cppOfSource name hotRowSrc)) with
+    | Error e, _ | _, Error e -> resultLine Fail name e; false
+    | Ok saxpy, Ok stencil ->
+        let k = kernelBody saxpy
+        if k.Contains "sq<double, 8>(__rsrc0" && not (k.Contains "feed_sq") && not (stencil.Contains "__hrc_")
+           && stencil.Contains "__hr_ss[__i0] = [&]()" then
+            resultLine Pass name "saxpy re-reads y2 with sq<double, 8>(__rsrc0; the stencil's row fold is the IIFE on the finished row"
+            true
+        else
+            resultLine Fail name ($"""saxpy reread={k.Contains "sq<double, 8>(__rsrc0"} feed={k.Contains "feed_sq"} stencil chain={stencil.Contains "__hrc_"}""")
+            false
+
+/// B2r stencil under repro: the row chain declared in the outer body, the
+/// `+=` inside the inner loop right behind the store, the epilogue storing
+/// the chain (no IIFE over the finished row).
+let private cepStencilRepro () =
+    let name = "cell_epilogue_hot_row_repro_chain_in_cell_loop"
+    match withGate "BLADE_FP_REPRO" "1" (fun () -> cppOfSource name hotRowSrc) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let decl = cpp.IndexOf "double __hrc_ss = 0;"
+        let inner = cpp.IndexOf "for (size_t __i1 = 0; __i1 < 9; __i1++)"
+        let step = cpp.IndexOf "__orow_lap[__i1] = __c; __hrc_ss += __c * __c; }"
+        let store = cpp.IndexOf "__hr_ss[__i0] = __hrc_ss;"
+        if decl >= 0 && inner > decl && step > inner && store > step && not (cpp.Contains "__hr_ss[__i0] = [&]()") then
+            resultLine Pass name "chain seeded +0 per row, advanced per cell behind the store, stored as the row's value"
+            true
+        else
+            resultLine Fail name ($"decl={decl} inner={inner} step={step} store={store}")
+            false
+
+let private cepRecurSrc =
+    "type T = Idx<7>\n"
+    + "type X = Idx<101>\n"
+    + "function total(u0: Array<Float64 like X>) -> Float64 = {\n"
+    + "    let rec traj: Array<Float64 like T, X> =\n"
+    + "        match traj with\n"
+    + "        | zero -> zero\n"
+    + "        | zero :: s -> zero :: u0\n"
+    + "        | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + 1.0\n"
+    + "    reduce(method_for(traj) <@> lambda(row) -> prodsum(row, row), (+))\n"
+    + "}\n"
+    + "let u0: Array<Float64 like X> = method_for(range<X>) <@> lambda(i) -> Float64(Int64(i) % 3) |> compute\n"
+    + "let tot = total(u0)\n"
+
+/// B2r recursion under repro: the step's cell loop carries the chain, the
+/// fold let binds it; only the SEED row keeps its prodsum IIFE.
+let private cepRecurRepro () =
+    let name = "cell_epilogue_recursion_repro_chain_in_cell_loop"
+    match withGate "BLADE_FP_REPRO" "1" (fun () -> cppOfSource name cepRecurSrc) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let at = cpp.IndexOf "double total(Array<double, 1> u0) {"
+        let body = if at < 0 then "" else cpp.Substring(at, (cpp.IndexOf("\n}\n", at) - at))
+        let decl = System.Text.RegularExpressions.Regex.Match(body, @"double (__cfc_\d+) = 0;")
+        let acc = if decl.Success then decl.Groups.[1].Value else "__cfc_?"
+        let step = System.Text.RegularExpressions.Regex.Match(body, System.Text.RegularExpressions.Regex.Escape acc + @" \+= (__v\d+) \* \1;")
+        let bind = body.Contains $" = {acc};"
+        let iifes = countOf "__ps += " body
+        if decl.Success && step.Success && bind && iifes = 1 then
+            resultLine Pass name ($"`{acc}` seeded +0 per step, `+=` behind the cell's store, bound by the fold let; one IIFE left (the seed row)")
+            true
+        else
+            resultLine Fail name ($"decl={decl.Success} step={step.Success} bind={bind} iifes={iifes}")
+            false
+
+let private cepLostTeamSrc = cepSaxpySrc.Replace("lambda(u, v) where omp(u: 1) ->", "lambda(u, v) ->")
+let private cepSerialFoldSrc = cepSaxpySrc.Replace("lambda(p, q) where omp -> p + q", "lambda(p, q) -> p + q")
+let private cepBeyondSrc = cepSaxpySrc.Replace("lambda(w) -> w * w", "lambda(w) -> w * w + y2((1 : Ix))")
+let private cepBetweenSrc =
+    cepSaxpySrc.Replace("    let s = reduce(", "    let m = y2((3 : Ix))\n    let s = reduce(").Replace("    s\n}", "    s + m\n}")
+let private cepTermSrc = cepSaxpySrc.Replace("lambda(w) -> w * w", "lambda(w) -> w * 2.0")
+let private cepSeedSrc = cepSaxpySrc.Replace("p + q, 0.0)", "p + q, Float64(extents(x)))")
+let private cepKernelSrc = cepSaxpySrc.Replace("lambda(p, q) where omp -> p + q", "lambda(p, q) -> p + q * 1.0")
+let private cepProductSrc = cepSaxpySrc.Replace("lambda(p, q) where omp -> p + q", "lambda(p, q) where omp -> p * q")
+let private cepRowKernelSrc = hotRowSrc.Replace("prodsum(row, row)", "reduce(row, (+), 0.0)")
+let private cepFlatGateSrc =
+    // A PARTIAL omp licence over a rank-1 sweep is fine; a rank-1 producer
+    // whose kernel reads two cells is not elementwise: the flat path refuses.
+    cepSaxpySrc.Replace("let y2 = method_for(zip(x, y)) <@> lambda(u, v) where omp(u: 1) -> 1.5 * u + v |> compute",
+                        "let y2 = method_for(range<Ix>) <@> lambda(i) where omp(i: 1) -> 1.5 * x(i) + y(i) |> compute")
+
+/// `cell-epilogue` decisions recorded while the LLVM lane emits the program.
+let private cepLlvmDecisionCase (name: string) (src: string) (want: Blade.Effects.Decision -> bool) (describe: string) =
+    Blade.Effects.Decisions.start ()
+    let r =
+        try
+            match lower src with
+            | Error e -> Error ($"lower: {e}")
+            | Ok ir ->
+                match EmitLlvm.tryEmitProgramNamed "cep_llvm_decisions" ir with
+                | Error why -> Error ($"the llvm lane refused: {why}")
+                | Ok _ -> Ok (Blade.Effects.Decisions.drain ())
+        with ex -> Error ($"llvm emission raised: {ex.Message}")
+    Blade.Effects.Decisions.drain () |> ignore
+    match r with
+    | Error e -> resultLine Fail name e; false
+    | Ok ds ->
+        let mine = ds |> List.filter (fun d -> d.Rule = "cell-epilogue")
+        if mine |> List.exists want then
+            resultLine Pass name ($"{mine.Length} llvm `cell-epilogue` decision(s); {describe}")
+            true
+        else
+            let seen = mine |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+            let shown = if seen = "" then "no decisions" else seen
+            resultLine Fail name ($"wanted {describe}; saw: {shown}")
+            false
+
+/// A row kernel reading a binding made between the producer and the fold
+/// (here: a function body; the nested-block twin is corpus loops/484).
+let private hotRowLateCaptureSrc =
+    "type Y = Idx<7>\n"
+    + "type X = Idx<9>\n"
+    + "function f() -> Float64 = {\n"
+    + "    let u = method_for(range<Y, X>) <@> lambda(i, j) -> Float64(Int64(i) * Int64(j)) |> compute\n"
+    + "    let lap = method_for(range<halo<Y, [-1, 0, 1]>, halo<X, [-1, 0, 1]>>) <@> lambda(wr, wc) -> u(wr(-1), wc(0)) + u(wr(0), wc(1)) - 2.0 * u(wr(0), wc(0)) |> compute\n"
+    + "    let w2 = reduce(method_for(range<X>) <@> lambda(j) -> 0.5, (+))\n"
+    + "    let s = reduce(method_for(lap) <@> lambda(row) -> prodsum(row, row) * w2, (+))\n"
+    + "    s\n"
+    + "}\n"
+    + "let c = f()\n"
+
+/// A row kernel that may fail, with a binding between producer and fold
+/// (the corpus twin is loops/485).
+let private hotRowMayFailSrc =
+    "type R = Idx<5>\n"
+    + "type C = Idx<6>\n"
+    + "let (s, q) = {\n"
+    + "    let zs = method_for(range<C>) <@> lambda(j) -> Int64(j) * 0 |> compute\n"
+    + "    let d = reduce(zs, (+))\n"
+    + "    let p = method_for(range<R, C>) <@> lambda(i, j) -> Int64(i) * Int64(j) |> compute\n"
+    + "    let bad = 7 / d\n"
+    + "    let t = reduce(method_for(p) <@> lambda(row: Array<Int64 like C>) -> 1 % row((0 : C)), (+))\n"
+    + "    (t, bad)\n"
+    + "}\n"
+
+/// A collapse pragma across the row and cell levels: the nest places no row
+/// epilogue, so the offered cell chain is declined by the post-check.
+let private cepCollapsedSrc = hotRowSrc.Replace("lambda(wr, wc) where omp(wr: 1) ->", "lambda(wr, wc) where omp(wr: 1, wc: 1) ->")
+/// The cell level threaded (`omp(wc: 1)`), the fold unthreaded.
+let private cepThreadedCellSrc =
+    hotRowSrc.Replace("lambda(wr, wc) where omp(wr: 1) ->", "lambda(wr, wc) where omp(wc: 1) ->")
+             .Replace("lambda(p, q) where omp -> p + q", "lambda(p, q) -> p + q")
+
+/// One decision per refusal reason (and the applied forms).
+let private cepDecisionCases () =
+    [ withGate "BLADE_OMP_THREADS" "1" (fun () ->
+        cepDecisionCase "decision_cell_epilogue_applied_lanes" cepSaxpySrc
+            (fun d -> applied d && d.Evidence |> List.exists (fun e -> e.Contains "K-lanes(8) self-dot stream fed behind")) "applied: the serial P1 lane state")
+      withGate "BLADE_OMP_THREADS" null (fun () ->
+        cepDecisionCase "decision_cell_epilogue_applied_chunks" cepSaxpySrc
+            (fun d -> applied d && d.Evidence |> List.exists (fun e -> e.Contains "per Path B chunk")) "applied: P1 per Path B chunk")
+      withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () ->
+        cepDecisionCase "decision_cell_epilogue_applied_chain" cepSaxpySrc
+            (fun d -> applied d && d.Evidence |> List.exists (fun e -> e.Contains "chain interleave")) "applied: the P2 chain"))
+      withGate "BLADE_OMP_THREADS" null (fun () ->
+        cepDecisionCase "decision_cell_epilogue_declined_lost_team" cepLostTeamSrc
+            (declinedMentioning "would lose its team") "declined: the fold would lose its Path B team")
+      withGate "BLADE_OMP_THREADS" null (fun () ->
+        cepDecisionCase "decision_cell_epilogue_declined_serializes_producer" cepSerialFoldSrc
+            (declinedMentioning "would serialize the producer") "declined: the producer is threaded, the fold serial")
+      withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" null (fun () ->
+        cepDecisionCase "decision_cell_epilogue_declined_mt8_repro" cepSaxpySrc
+            (declinedMentioning "one ordered chain behind a threaded producer") "declined: mt8 repro"))
+      cepDecisionCase "decision_cell_epilogue_declined_beyond_cell" cepBeyondSrc
+          (declinedMentioning "beyond its own cell") "declined: the cell kernel reads beyond its cell"
+      cepDecisionCase "decision_cell_epilogue_declined_between" cepBetweenSrc
+          (declinedMentioning "between the producer and the fold") "declined: a reader between producer and fold"
+      cepDecisionCase "decision_cell_epilogue_declined_cell_term" cepTermSrc
+          (declinedMentioning "not `w * w` or `w`") "declined: the cell term is neither w * w nor w"
+      withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () ->
+        cepDecisionCase "decision_cell_epilogue_declined_seed" cepSeedSrc
+            (declinedMentioning "seed is not a literal") "declined: P2 with a non-literal seed"))
+      withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () ->
+        cepDecisionCase "decision_cell_epilogue_declined_fold_kernel" cepKernelSrc
+            (declinedMentioning "not a builtin") "declined: P2 with a non-builtin fold kernel"))
+      withGate "BLADE_OMP_THREADS" "1" (fun () ->
+        cepDecisionCase "decision_cell_epilogue_declined_licensed_form" cepProductSrc
+            (declinedMentioning "does not reproduce") "declined: a licensed fold P1 does not reproduce")
+      withGate "BLADE_OMP_THREADS" "1" (fun () ->
+        cepDecisionCase "decision_cell_epilogue_declined_not_flat" cepFlatGateSrc
+            (declinedMentioning "did not take the flat elementwise path") "declined: the producer took another route")
+      withGate "BLADE_CELL_EPILOGUE" "0" (fun () ->
+        cepDecisionCase "decision_cell_epilogue_declined_gate" cepSaxpySrc
+            (declinedMentioning "disabled by BLADE_CELL_EPILOGUE") "declined: disabled by BLADE_CELL_EPILOGUE")
+      // B2r's refusals.
+      cepDecisionCase "decision_cell_epilogue_hot_row_licensed" hotRowSrc
+          (declinedMentioning "K-lane form on the hot row") "declined: licensed hot-row prodsum (B2l not built)"
+      cepDecisionCase "decision_cell_epilogue_recursion_licensed" cepRecurSrc
+          (declinedMentioning "K-lane form on the finished row") "declined: licensed recursion prodsum"
+      cepDecisionCase "decision_cell_epilogue_row_kernel_not_dot_class" cepRowKernelSrc
+          (declinedMentioning "not a +0-seeded dot-class fold") "declined: the row kernel is not prodsum(row, row)"
+      withGate "BLADE_FP_REPRO" "1" (fun () ->
+        cepDecisionCase "decision_cell_epilogue_hot_row_applied" hotRowSrc
+            (fun d -> applied d && d.Evidence |> List.exists (fun e -> e.Contains "row chain interleave")) "applied: the hot-row chain")
+      withGate "BLADE_FP_REPRO" "1" (fun () ->
+        cepDecisionCase "decision_cell_epilogue_recursion_applied" cepRecurSrc
+            (fun d -> applied d && d.Evidence |> List.exists (fun e -> e.Contains "row chain interleave")) "applied: the recursion chain")
+      // The hot-row planner's admission (Codex W1-B review, blockers 1-2).
+      decisionCase "decision_hot_row_declined_late_capture" hotRowLateCaptureSrc "hot-row-fold"
+          (declinedMentioning "bound between the producer and the fold") "declined: the row kernel reads a binding made after the producer"
+      decisionCase "decision_hot_row_declined_may_fail" hotRowMayFailSrc "hot-row-fold"
+          (declinedMentioning "the row kernel may fail") "declined: a failing row kernel would move ahead of an intervening binding"
+      // Outer-route and nest refusals of the offered chain.
+      withGate "BLADE_FP_REPRO" "1" (fun () ->
+        cepDecisionCase "decision_cell_epilogue_collapsed_nest" cepCollapsedSrc
+            (declinedMentioning "did not admit the hot-row schedule") "declined: a collapse pragma places no row epilogue")
+      withGate "BLADE_FP_REPRO" "1" (fun () ->
+        cepDecisionCase "decision_cell_epilogue_threaded_cell_loop" cepThreadedCellSrc
+            (declinedMentioning "cell loop is threaded") "declined: the cell loop is threaded")
+      withGate "BLADE_BLAS" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () ->
+        cepDecisionCase "decision_cell_epilogue_declined_blas" cepSerialFoldSrc
+            (declinedMentioning "BLAS gate is on") "declined: the BLAS L1 dispatch may own the fold"))
+      (CodeGen.setOmpTestMode true
+       try
+         cepDecisionCase "decision_cell_epilogue_declined_omp_test_mode" cepSaxpySrc
+             (declinedMentioning "omp test mode") "declined: omp test mode"
+       finally CodeGen.setOmpTestMode false)
+      withGate "BLADE_CELL_EPILOGUE" "lanes" (fun () ->
+        cepDecisionCase "decision_cell_epilogue_lanes_reserved" hotRowSrc
+            (declinedMentioning "BLADE_CELL_EPILOGUE=lanes requests the licensed row arm (B2l), which is reserved") "declined: `lanes` names the reserved B2l arm")
+      // The LLVM lane's own records.
+      withGate "BLADE_OMP_THREADS" "1" (fun () ->
+        cepLlvmDecisionCase "decision_cell_epilogue_llvm_applied_b1" cepSaxpySrc
+            (fun d -> applied d && d.Evidence |> List.exists (fun e -> e.Contains "llvm lane: rank-1 producer")) "applied: the llvm fused loop")
+      cepLlvmDecisionCase "decision_cell_epilogue_llvm_declined_seed" cepSeedSrc
+          (declinedMentioning "llvm lane: the fold's seed is not a literal") "declined: llvm B1 with a non-literal seed"
+      cepLlvmDecisionCase "decision_cell_epilogue_llvm_hot_row_licensed" hotRowSrc
+          (declinedMentioning "llvm lane: licensed build") "declined: llvm licensed hot-row prodsum"
+      cepLlvmDecisionCase "decision_cell_epilogue_llvm_recursion_licensed" cepRecurSrc
+          (declinedMentioning "llvm lane: licensed build") "declined: llvm licensed recursion prodsum"
+      withGate "BLADE_FP_REPRO" "1" (fun () ->
+        cepLlvmDecisionCase "decision_cell_epilogue_llvm_hot_row_applied" hotRowSrc
+            (fun d -> applied d && d.Evidence |> List.exists (fun e -> e.Contains "llvm lane: row chain interleave")) "applied: the llvm hot-row chain")
+      withGate "BLADE_FP_REPRO" "1" (fun () ->
+        cepLlvmDecisionCase "decision_cell_epilogue_llvm_recursion_applied" cepRecurSrc
+            (fun d -> applied d && d.Evidence |> List.exists (fun e -> e.Contains "llvm lane: row chain interleave")) "applied: the llvm recursion chain") ]
+
 /// BLADE_CSE=0: the same program keeps both folds in its one body (2 in all),
 /// and the decision says why.
 let private cseGateOffKeepsFolds () =
@@ -1891,6 +2252,14 @@ let runOptimizeTests () =
               (declinedMentioning "lose their team") "declined: the fold would lose its Path B team"
           decisionCase "decision_hot_row_declined_reads_beyond" hotRowReadsBeyondSrc "hot-row-fold"
               (declinedMentioning "beyond its own row") "declined: the row kernel reads beyond its row"
+          // Round-2 cell epilogues (B1 / B2r).
+          cepSaxpySerialLicensed ()
+          cepSaxpyThreadedLicensed ()
+          cepSaxpyRepro ()
+          cepStencilRepro ()
+          cepRecurRepro ()
+          cepGateOff ()
+          yield! cepDecisionCases ()
           scalarCaptureNoLongerPinsSource ()
           // Partial sparse reads: every let-bound gather freed by its own
           // producer's teardown, the escaping ones spared.

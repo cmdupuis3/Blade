@@ -1,0 +1,45 @@
+// TEST: Cell Epilogue Rank-1 Producer Checksum
+// Round-2 cell epilogues, B1 (Blade.Optimize.planHotRowFolds rank-1 arm,
+// CodeGenLoopNest.tryGenFlatEpilogueNest): a dense rank-1 producer forced with
+// |> compute, then a fold of its cells. The fold's state is fed behind the
+// producer's own stores in the form this build's fold takes: the K-lane lane
+// state (serial licensed, P1), the same state per Path B chunk inside the
+// producer's team (threads on, both kernels licensed), or the ordered chain
+// (BLADE_FP_REPRO=1, P2). `y2` stays stored and is read afterwards.
+//   sq    -- w * w per cell (feed_sq), seed 0.0
+//   plain -- w per cell (feed_sum), plus one stored cell read after the fold
+//   bs/bt -- the same shapes in a let chain NESTED inside a top-level
+//            binding (the planner walks those chains too)
+// x(i) = i mod 7, y(i) = i mod 5: every y2 cell is a multiple of 0.5 and every
+// sum is exact, so the values are association-invariant.
+type Ix = Idx<1003>
+
+function sq(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {
+    let y2 = method_for(zip(x, y)) <@> lambda(u, v) where omp(u: 1) -> 1.5 * u + v |> compute
+    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) where omp -> p + q, 0.0)
+    s
+}
+
+function plain(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {
+    let y2 = method_for(zip(x, y)) <@> lambda(u, v) where omp(u: 1) -> 1.5 * u + v |> compute
+    let t = reduce(method_for(y2) <@> lambda(w) -> w, lambda(p, q) where omp -> p + q, 0.0)
+    t + y2((17 : Ix))
+}
+
+function inputs(m: Int64) -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute
+}
+
+let s = sq(inputs(7), inputs(5))
+let t = plain(inputs(7), inputs(5))
+let (bs, bt) = {
+    let xb = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 9) |> compute
+    let yb = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 4 + 1) |> compute
+    let y2b = method_for(zip(xb, yb)) <@> lambda(u, v) where omp(u: 1) -> 1.5 * u + v |> compute
+    let s2 = reduce(method_for(y2b) <@> lambda(w) -> w * w, lambda(p, q) where omp -> p + q, 0.0)
+    (s2, reduce(y2b, (+)))
+}
+// EXPECT: s = 53289.5
+// EXPECT: t = 6515.5
+// EXPECT: bs = 88476.5
+// EXPECT: bt = 8509.0

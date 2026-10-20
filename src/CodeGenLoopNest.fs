@@ -1796,11 +1796,35 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
                        && not (pragmaLevel = Some 0 && ompLastLevel > 0) ->
             Some ep
         | _ -> None
+    // B2r (round-2 cell epilogues): the row's fold advanced per cell inside
+    // the inner level (CellStep), when the epilogue offers it and this nest's
+    // form admits it: exactly one cell loop per row (rank 2), a plain
+    // rectangular inner level, and that loop NOT threaded (a threaded cell
+    // loop must finish the row before its ordered chain runs). A refusal is
+    // recorded and the epilogue's ordinary Body is rendered instead.
+    let cellStep =
+        match hotRow with
+        | Some ep when ep.CellStep.IsSome ->
+            let inner = List.last codeGen.Bindings
+            if List.length codeGen.Bindings <> 2 then
+                ep.OnCellStepDeclined "the producer nest is not one cell loop per row"; None
+            elif ompLastLevel >= 1 || pragmaLevel = Some 1 then
+                ep.OnCellStepDeclined "the cell loop is threaded (its row must finish before the ordered chain runs)"; None
+            elif not inner.BoundDependencies.IsEmpty || inner.StrictOffset <> 0 || (domainPlanOfLevel inner).IsSome then
+                ep.OnCellStepDeclined "the cell loop is not a plain rectangular sweep"; None
+            else ep.CellStep
+        | _ -> None
     match hotRow with
     | Some ep ->
         lines <- lines @ [ ind depth + $"// hot-row fold: `{ep.RowSumName}` holds the row fold of each row of `{codeGen.OutputName}`, computed right after the row is produced (Blade.Optimize.planHotRowFolds)" ]
+        if cellStep.IsSome then
+            lines <- lines @ [ ind depth + $"// cell epilogue: each row's fold advances on each cell right behind its store (`{ep.ChainName}`, register-consume), same +0 seed, same ascending order, same products" ]
         for l in ep.Prelude do lines <- lines @ [ind depth + l]
     | None -> ()
+    let cellBlock =
+        match hotRow, cellStep with
+        | Some ep, Some _ when ep.ChainBlock > 0L -> Some ep.ChainBlock
+        | _ -> None
     for binding in codeGen.Bindings do
         let levelIdx = bidx
         // Generate the loop header (pragma only on the outermost loop).
@@ -1876,6 +1900,10 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
             // runs exactly as it would serially for each outer index owned here.
             elif isOuter && foldChunk.IsSome then
                 $"for (size_t {binding.IndexName} = __rlo; {binding.IndexName} < __rhi; {binding.IndexName}++) {{"
+            // B2r mini-blocks (epi_blk_r > 0): the cell loop walks the block
+            // [__cbk, __cbe) that the strip-mine loop opened just above it.
+            elif bidx = lastBindingIdx && cellBlock.IsSome then
+                $"for (size_t {binding.IndexName} = __cbk; {binding.IndexName} < __cbe; {binding.IndexName}++) {{"
             else genForLoopHeader compoundArrays binding
         // Output row hoist: just outside the innermost header, re-taken per
         // outer iteration. The
@@ -1888,6 +1916,20 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
             | Some plan, _ -> lines <- lines @ [ind depth + plan.RowDecl]
             | None, Some d -> lines <- lines @ [ind depth + d]
             | None, None -> ()
+            // B2r: the row's chain, seeded +0 like the IIFE's `T __ps = 0`,
+            // declared in the outer body (thread-private under a threaded
+            // outer level), then the strip-mine loop when epi_blk_r > 0.
+            match hotRow, cellStep with
+            | Some ep, Some _ ->
+                lines <- lines @ [ ind depth + $"{ep.ChainElem} {ep.ChainName} = 0;" ]
+                match cellBlock with
+                | Some r ->
+                    let bound = genLoopBoundExpr compoundArrays binding
+                    lines <- lines @ [ ind depth + $"for (size_t __cbk = 0; __cbk < (size_t)({bound}); __cbk += {r}) {{"
+                                       ind (depth + 1) + $"const size_t __cbe = __cbk + {r} < (size_t)({bound}) ? __cbk + {r} : (size_t)({bound});" ]
+                    depth <- depth + 1
+                | None -> ()
+            | _ -> ()
         // `BLADE_IVDEP` must be the LAST thing before the `for`, and only
         // on a header the OpenMP construct does not own (see ompLastLevel).
         // It is the portable spelling -- cpp/blade_portability.hpp expands it
@@ -1896,8 +1938,10 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
         // `#pragma` because a `#pragma` line cannot come out of a macro, and
         // the emission site cannot `#ifdef` it: nothing may sit between the
         // annotation and its `for`.
+        // Not under the B2r cell step: the loop then carries the row's ordered
+        // chain, and `ivdep` is no place to make claims about a reduction.
         let ivdepPrefix =
-            if ivdepEligible && bidx = lastBindingIdx && bidx > ompLastLevel
+            if ivdepEligible && bidx = lastBindingIdx && bidx > ompLastLevel && cellStep.IsNone
             then $"BLADE_IVDEP\n{(ind depth)}" else ""
         // Say IN THE GENERATED C++ that the vectorization annotation was
         // declined and why -- same rationale as `ompSuppressedMarker`, and the
@@ -2191,7 +2235,15 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
         // Fused fold: accumulate the kernel value through the fold-kernel
         // wrapper into the caller-declared scalar accumulator.
         | Some wname, None -> $"{codeGen.OutputName} = {wname}({codeGen.OutputName}, {reynoldsResult.Value.CppExpr});"
-        | None, _ -> $"{writeTarget}{writeIdx} {assignOp} {reynoldsResult.Value.CppExpr};")
+        | None, _ ->
+            match cellStep with
+            // B2r register-consume: the cell bound once (its own element
+            // type), stored, then handed to the row's chain.
+            | Some step ->
+                let cellElem = match codeGen.OutputType with ArrayElem at -> elemTypeToCpp at.ElemType | _ -> "double"
+                let stepText = step "__c"
+                $"{{ const {cellElem} __c = {reynoldsResult.Value.CppExpr}; {writeTarget}{writeIdx} {assignOp} __c; {stepText} }}"
+            | None -> $"{writeTarget}{writeIdx} {assignOp} {reynoldsResult.Value.CppExpr};")
     match rowWriteLines with
     | Some rw -> for l in rw do lines <- lines @ [ind depth + l]
     | None -> lines <- lines @ [ind depth + assignLine.Value]
@@ -2202,6 +2254,10 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     match hotRow with
     | Some ep ->
         for _ in List.tail codeGen.Bindings do
+            depth <- depth - 1
+            lines <- lines @ [ind depth + "}"]
+        // B2r mini-blocks: close the strip-mine loop around the cell loop.
+        if cellBlock.IsSome then
             depth <- depth - 1
             lines <- lines @ [ind depth + "}"]
         let (elemStr, rank) =
@@ -2218,7 +2274,13 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
         let viewData = if rank = 2 then outRowName else $"{codeGen.OutputName}.data[{outerIdx}]"
         lines <- lines @ [ ind depth + "{"
                            ind depth + $"    Array<{elemStr}, {rank - 1}> {ep.RowViewName} = {{ {viewData}, {codeGen.OutputName}.extents + 1 }};" ]
-        for l in ep.Body () do lines <- lines @ [ind depth + "    " + l]
+        let epBody = if cellStep.IsSome then ep.ChainBody () else ep.Body ()
+        for l in epBody do lines <- lines @ [ind depth + "    " + l]
+        if cellStep.IsSome then
+            let blocks = match cellBlock with Some r -> $"mini-blocks of {r}" | None -> "one fused loop"
+            Blade.Optimize.recordCellEpilogue ep.Subject Blade.Effects.Applied
+                [ $"row chain interleave ({blocks}): each row's prodsum(row, row) chain advances on each cell right behind its store (register-consume) into `{ep.ChainName}`, stored as the row's value"
+                  "strict-legal: the same products of the same stored values added in the same ascending order to the same +0; the outer combine is unchanged" ]
         lines <- lines @ [ ind depth + "}" ]
         depth <- depth - 1
         lines <- lines @ [ind depth + "}"]
@@ -2426,6 +2488,119 @@ let internal flatNestMatchesSignature (sg: FlatGroup list) (bindings: LoopIndexB
             && b.StrictOffset = strict)
         (expected |> List.mapi (fun i (n, d, s) -> (i, n, d, s))) bindings
 
+/// B1 (round-2 cell epilogues): the rank-1 flat producer with its consumer's
+/// fold fused behind the stores, in the form `ep` names (decided per build by
+/// CodeGenCuda.buildFlatEpilogue). `head` is the flat block's opening lines
+/// (comment, `{`, the pool pointers, `__fp_cells`); the producer statement is
+/// the SAME text the plain flat loop writes. That makes the stored cells the
+/// same values under -ffp-contract=off (and in practice under fast, which
+/// `blade test cell-epilogue` checks by raw bits), but it is not a proof
+/// under fast contraction: strip-mining changes the context g++ contracts
+/// in. Identical producer values are a PRECONDITION of the licensed forms'
+/// bit identity, not a consequence of it. None = the plain flat
+/// loop (the caller records nothing; the apply emitter's post-check records
+/// the decline, so the consumer keeps the two-pass fold atomically).
+///   FlatLanesSerial  P1: produce E cells, feed them (E / B whole blocks) from
+///                    L1, ..., produce the tail, finish -> PartName
+///   FlatLanesChunks  P1 per Path B chunk inside one team: thread t produces
+///                    and feeds [chunk_lo(n,t,T), chunk_lo(n,t+1,T)); partials
+///                    PartName[t] / HadName[t] for the consumer's thread-order
+///                    combine (seed first, empty chunks skipped)
+///   FlatChain        P2: one loop, each cell bound once, stored, then handed
+///                    to the fold's ordered chain (no simd pragma: the chain is
+///                    an in-order reduction; g++ vectorizes it as a fold-left)
+let tryGenFlatEpilogueNest (ep: FlatEpilogue) (outName: string) (outPool: string) (outElem: string) (cellExpr: string) (cells: int64)
+                           (allParallel: bool) (threadsOn: bool) (pragmaMarker: string list)
+                           (head: string list) (indent: int) : string list option =
+    let ind n = String.replicate n "    "
+    let i1 = ind (indent + 1)
+    let i2 = ind (indent + 2)
+    let i3 = ind (indent + 3)
+    let simdPragma = if allParallel then "BLADE_OMP_SIMD" else "BLADE_IVDEP"
+    let feed = if ep.Square then "feed_sq" else "feed_sum"
+    let finish = if ep.Square then "finish_sq" else "finish_sum"
+    let st = $"blade_fold::lane_state<{ep.ElemCpp}, {ep.K}>"
+    let nb = ep.Block / ep.LaneBlock
+    let produceLoop (i: string) (lo: string) (hi: string) =
+        [ i + simdPragma
+          i + $"for (size_t __fk = {lo}; __fk < {hi}; __fk++)"
+          i + $"    {outPool}[__fk] = {cellExpr};" ]
+    match ep.Form with
+    | FlatLanesSerial when not (allParallel && threadsOn) && ep.Block % ep.LaneBlock = 0L ->
+        (foldLanesUsedCell ()).Value <- true
+        if allParallel then
+            recordOmpConstruct outName simdPragma "cell epilogue: the flat producer's blocks (omp simd), each fed into the fold's lane state"
+        Some (
+            [ ind indent + $"{ep.ElemCpp} {ep.PartName};   // cell epilogue: the fold's lane-tree partial, fed behind the stores below" ]
+            @ head
+            @ pragmaMarker
+            @ [ i1 + $"{st} __cep_ls = blade_fold::lane_init<{ep.ElemCpp}, {ep.K}>();"
+                i1 + "size_t __cep_b = 0;"
+                i1 + $"for (; __cep_b + {ep.Block} <= __fp_cells; __cep_b += {ep.Block}) {{" ]
+            @ produceLoop i2 "__cep_b" $"__cep_b + {ep.Block}"
+            @ [ i2 + $"blade_fold::{feed}<{ep.ElemCpp}, {ep.K}>(__cep_ls, {outPool} + __cep_b, {nb});"
+                i1 + "}" ]
+            @ produceLoop i1 "__cep_b" "__fp_cells"
+            @ [ i1 + $"{ep.PartName} = blade_fold::{finish}<{ep.ElemCpp}, {ep.K}>(__cep_ls, {outPool} + __cep_b, __fp_cells - __cep_b);"
+                ind indent + "}" ])
+    | FlatLanesChunks when allParallel && threadsOn && ep.Block % ep.LaneBlock = 0L ->
+        (foldLanesUsedCell ()).Value <- true
+        (ompApiUsedCell ()).Value <- true
+        // The OLD fold's team sizing, verbatim (laneLines' threaded arm):
+        // max threads, clamped to the sweep, at least one.
+        let teamDecls =
+            [ ind indent + $"int {ep.TeamName} = blade_omp_get_max_threads();   // cell epilogue: the fold's Path B team runs the producer"
+              ind indent + $"if ((size_t){ep.TeamName} > (size_t){cells}UL) {ep.TeamName} = (int){cells}UL;"
+              ind indent + $"if ({ep.TeamName} < 1) {ep.TeamName} = 1;"
+              ind indent + $"{ep.ElemCpp}* {ep.PartName} = new {ep.ElemCpp}[{ep.TeamName}];"
+              ind indent + $"bool* {ep.HadName} = new bool[{ep.TeamName}]();" ]
+        recordOmpConstruct outName "omp parallel num_threads(T) + fixed-order combine"
+            "cell epilogue: the fold's Path B team produces and folds its chunk_lo chunk of the flat sweep"
+        Some (
+            teamDecls
+            @ head
+            @ [ i1 + $"BLADE_OMP_PARALLEL_NUM_THREADS({ep.TeamName})"
+                i1 + "{"
+                i2 + "const int __rnt = blade_omp_get_num_threads();"
+                i2 + "const int __rt = blade_omp_get_thread_num();"
+                i2 + "const size_t __rlo = blade_fold::chunk_lo(__fp_cells, (size_t)__rt, (size_t)__rnt);"
+                i2 + "const size_t __rhi = blade_fold::chunk_lo(__fp_cells, (size_t)__rt + 1, (size_t)__rnt);"
+                i2 + $"{st} __cep_ls = blade_fold::lane_init<{ep.ElemCpp}, {ep.K}>();"
+                i2 + "size_t __cep_b = __rlo;"
+                i2 + $"for (; __cep_b + {ep.Block} <= __rhi; __cep_b += {ep.Block}) {{" ]
+            @ produceLoop i3 "__cep_b" $"__cep_b + {ep.Block}"
+            @ [ i3 + $"blade_fold::{feed}<{ep.ElemCpp}, {ep.K}>(__cep_ls, {outPool} + __cep_b, {nb});"
+                i2 + "}" ]
+            @ produceLoop i2 "__cep_b" "__rhi"
+            @ [ i2 + $"if (__rhi > __rlo) {{ {ep.PartName}[__rt] = blade_fold::{finish}<{ep.ElemCpp}, {ep.K}>(__cep_ls, {outPool} + __cep_b, __rhi - __cep_b); {ep.HadName}[__rt] = true; }}"
+                i1 + "}"
+                ind indent + "}" ])
+    | FlatChain when not (allParallel && threadsOn) ->
+        let stepText = ep.ChainStep "__c"
+        let cellStmt (i: string) =
+            [ i + "for (size_t __fk = __cep_b; __fk < __cep_e; __fk++) {"
+              i + $"    const {outElem} __c = {cellExpr};"
+              i + $"    {outPool}[__fk] = __c;"
+              i + $"    {stepText}"
+              i + "}" ]
+        let loop =
+            if ep.Block > 0L then
+                [ i1 + $"for (size_t __cep_b = 0; __cep_b < __fp_cells; __cep_b += {ep.Block}) {{"
+                  i2 + $"const size_t __cep_e = __cep_b + {ep.Block} < __fp_cells ? __cep_b + {ep.Block} : __fp_cells;" ]
+                @ cellStmt i2
+                @ [ i1 + "}" ]
+            else
+                [ i1 + "const size_t __cep_b = 0, __cep_e = __fp_cells;" ]
+                @ cellStmt i1
+        Some (
+            (ep.ChainPrelude |> List.map (fun l -> ind indent + l))
+            @ head
+            @ pragmaMarker
+            @ [ i1 + "// cell epilogue: the fold's ordered chain advances on each cell right behind its store (no simd pragma: an in-order reduction)" ]
+            @ loop
+            @ [ ind indent + "}" ])
+    | _ -> None
+
 /// Flat elementwise-nest detection + emission. Returns the flat loop's lines,
 /// or None to fall through to `genLoopNestStreamed` unchanged.
 ///
@@ -2587,8 +2762,8 @@ let tryGenFlatElementwiseNest
                 if allParallel && threadsOn then "BLADE_OMP_PARALLEL_FOR_SIMD"
                 elif allParallel then "BLADE_OMP_SIMD"
                 else "BLADE_IVDEP"
-            if allParallel then
-                recordOmpConstruct codeGen.OutputName pragma "flat elementwise sweep over the whole pool"
+            // (The OpenMP construct is recorded once the FORM is chosen below:
+            // the cell-epilogue forms spend the licence differently.)
             // Census line, so a licensed-but-serialized flat loop is not silent.
             // It sits BEFORE the pragma: nothing may come between an OpenMP
             // construct and the `for` it governs.
@@ -2605,16 +2780,31 @@ let tryGenFlatElementwiseNest
                     | SymAntisymmetric -> $"antisym<{g.GRank},{g.GExtent}>"
                     | s -> sprintf "%A" s)
                 |> String.concat " x "
-            Some (
+            let outPool = poolOf codeGen.OutputName
+            let head =
                 [ ind indent + $"// flat elementwise: {cells} cells [{shapeNote}] (pool DFS order == nest order)"
                   ind indent + "{" ]
-                @ [ ind (indent + 1) + $"{outElem}* BLADE_RESTRICT {(poolOf codeGen.OutputName)} = nested_array_utilities::pool_base({codeGen.OutputName}.data);" ]
+                @ [ ind (indent + 1) + $"{outElem}* BLADE_RESTRICT {outPool} = nested_array_utilities::pool_base({codeGen.OutputName}.data);" ]
                 @ (operandDecls |> List.map (fun d -> ind (indent + 1) + d))
                 @ [ ind (indent + 1) + $"const size_t __fp_cells = {cells}UL;" ]
+            let epilogue =
+                match codeGen.FlatEpilogue with
+                | Some ep when depth = 1 && allDense ->
+                    (match tryGenFlatEpilogueNest ep codeGen.OutputName outPool outElem body.CppExpr cells allParallel threadsOn pragmaMarker head indent with
+                     | Some ls -> ep.OnEmitted (); Some ls
+                     | None -> None)
+                | _ -> None
+            match epilogue with
+            | Some lines -> Some lines
+            | None ->
+            if allParallel then
+                recordOmpConstruct codeGen.OutputName pragma "flat elementwise sweep over the whole pool"
+            Some (
+                head
                 @ pragmaMarker
                 @ [ ind (indent + 1) + pragma
                     ind (indent + 1) + "for (size_t __fk = 0; __fk < __fp_cells; __fk++)"
-                    ind (indent + 2) + $"{(poolOf codeGen.OutputName)}[__fk] = {body.CppExpr};"
+                    ind (indent + 2) + $"{outPool}[__fk] = {body.CppExpr};"
                     ind indent + "}" ])
         | Some _ -> None
     | _ -> None

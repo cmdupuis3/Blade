@@ -2713,6 +2713,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     // harness compiles hundreds) must never reach this one.
     Blade.Types.PoolReuseTable.reset ()
     Optimize.HotRowTable.reset ()
+    Optimize.CellFoldTable.reset ()
     // The raw decl list callers hand us is the program they PARSED, not the
     // one `TypeCheck.typeCheck` desugared inside itself -- so the icechunk
     // checkout rewrite is applied again here, ahead of Phase 0's
