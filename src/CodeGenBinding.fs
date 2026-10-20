@@ -145,7 +145,39 @@ let private joinThreadAudit (deferred: Map<IRId, IRExpr>) (maps: (string * Apply
         @ (folds |> List.map (fun (what, cl) () -> wrap what (Blade.IRTotality.auditCallable res dOf isD cl [])))
     checks |> List.fold (fun acc f -> match acc with Ok () -> f () | e -> e) (Ok ())
 
+/// Gaps G41 / G43 at the BACKEND: the observable-write gate of a joined
+/// traversal, applied to its vectorized (serial simd) form AND its team. A
+/// leaf map, a shared producer or a fold kernel that writes storage outside
+/// itself gives the join no form but the ordered serial chains -- lowering
+/// already refuses such a join (BL4005, Lowering.refuseWritingJoinLegs); this
+/// keeps the emitter sound on its own (and for synthesized joins), and the
+/// totality audit (joinThreadAudit) is additional evidence, not a substitute.
+let private joinEffectAudit (deferred: Map<IRId, IRExpr>) (maps: (string * ApplyInfo) list) (folds: (string * IRCallable) list) : Result<unit, string> =
+    match maps |> List.tryFind (fun (_, info) -> exprMayWriteIn deferred (IRApplyCombinator info)) with
+    | Some (what, _) ->
+        Error $"{what} writes a captured binding: a joined traversal never reorders, threads or vectorizes an observable write (gaps G41 / G43)"
+    | None ->
+    match folds |> List.tryFind (fun (_, cl) -> callableMayWrite cl) with
+    | Some (what, _) ->
+        Error $"{what} writes a captured binding: a joined traversal never reorders, threads or vectorizes an observable write (gaps G41 / G43)"
+    | None -> Ok ()
 let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
+    let (code, ctx') = genBindingDispatch ctx binding builder
+    // Gap G42: a binding whose own C++ name gained TupleChildren holds a FLAT
+    // tuple (every emitter that registers children for its own name builds
+    // `std::make_tuple(<leaves>)` or aliases one). Record its id so an inline
+    // projection of it (a function's return, a nested `t[0][1]`) renders by
+    // flat leaf position, not by walking the nested IR type.
+    (match IR.stripUnits binding.Type with
+     | IRTTuple _ as tt when (match Map.tryFind (bindingCppName binding) ctx'.TupleChildren with
+                              | Some leaves -> leaves.Length = (IR.flattenTupleLeaves tt).Length
+                              | None -> false) ->
+         let cell = flatTupleIdsCell ()
+         cell.Value <- Set.add binding.Id cell.Value
+     | _ -> ())
+    (code, ctx')
+
+and genBindingDispatch (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
     let ind = indentStr ctx
     let name = bindingCppName binding
 
@@ -3758,7 +3790,7 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                 ]
             | None, None ->
             recordFoldForm name
-                (if foldReorderLicensed callable then serialFoldForm () else "serial (no reorder licence)")
+                (if foldReorderLicensed callable then serialFoldForm () else unlicensedFoldForm callable)
                 "reduce over a materialized array"
             elemErrCode @ guardLines @ wrapperLines @ pathBSuppressedNote () @ [
                 $"{ind}// reduce: accumulator loop, eager"
@@ -4324,7 +4356,14 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                 let foldCg (info: ApplyInfo) (accName: string) =
                     // S2 routing, same rule as the single-kernel site.
                     let cg = routeKernelBodyThroughCall info (buildLoopNestCodeGen info (arrayNamesOf info) accName builder)
-                    { cg with OutputType = callable.RetType; FoldWrapper = Some wname }
+                    // G41: a WRITING fold kernel is never reorder-licensed
+                    // (foldReorderLicensed), so no Path B plan is made; the
+                    // nest's marker names that, not the generic reason.
+                    let writes =
+                        if callableMayWrite callable then
+                            Some "the fold kernel writes a captured binding; a map licence does not make the fold race-safe (its applications are ordered side effects)"
+                        else None
+                    { cg with OutputType = callable.RetType; FoldWrapper = Some wname; FoldOmpDecline = writes }
                 match infos with
                 | [single] ->
                     let cg0 = foldCg single name
@@ -4369,9 +4408,20 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                         && (match cg0.Bindings with
                             | head :: _ -> head.IsParallel
                             | [] -> false)
+                    // G41, the mirror case: a `where omp` (or builtin) FOLD
+                    // licenses the fold's reassociation, not the MAP body's
+                    // concurrency. Path B runs the map body on a team, and the
+                    // simd arm asserts `omp simd` over it with read-only
+                    // restrict operands; a body that WRITES (legal: the BL4005
+                    // ban covers a parallel body, and this map need carry no
+                    // omp) would race or vectorize across its own stores. Such
+                    // a fold keeps the serial chain: every reordered form below
+                    // reads `licensedFold`, never `foldReorderLicensed` alone.
+                    let mapBodyWrites = exprMayWriteIn ctx.DeferredComputations cg0.KernelExpr
+                    let licensedFold = foldReorderLicensed callable && not mapBodyWrites
                     let chunkable =
                         (callable.IsOmpParallel || mapLicensesOuter)
-                        && foldReorderLicensed callable
+                        && licensedFold
                         && (match cg0.Bindings with
                             // a closed-form domain head is a whole affine nest
                             // over its fields, not a [0, extent) sweep to split
@@ -4544,7 +4594,7 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                         // nest emitter is not involved (no loop is emitted), so
                         // omp test mode -- whose coverage instrumentation needs
                         // the nest -- stands down to the nest arm.
-                        | [lvl] when fpReassocEnabled () && foldReorderLicensed callable
+                        | [lvl] when fpReassocEnabled () && licensedFold
                                      && cg.FoldChunk.IsSome && ompThreadEmissionEnabled ()
                                      && not (ompTestModeEnabled ())
                                      && laneable lvl
@@ -4599,7 +4649,7 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                         // bench gap G20). The census line for the dropped team
                         // is emitted below (`chunkNote`), because this arm never
                         // reaches genLoopNest, where it used to be printed.
-                        | [lvl] when fpReassocEnabled () && foldReorderLicensed callable
+                        | [lvl] when fpReassocEnabled () && licensedFold
                                      && (cg.FoldChunk.IsNone || not (ompThreadEmissionEnabled ()))
                                      && (laneable lvl || (domainPlanOfLevel lvl).IsSome) ->
                             // The nest's own element peels and kernel expression,
@@ -4925,7 +4975,7 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                        Some $"threaded complete rows (repro): {rows} row folds into indexed slots, the outer chain serial in ascending order from its seed"
                                    | _ -> None
                                let form =
-                                   if not (foldReorderLicensed callable) then "serial (no reorder licence)"
+                                   if mapBodyWrites then "serial (the map kernel writes a captured binding: its evaluations are ordered side effects; no lane, simd or thread form)" elif not (foldReorderLicensed callable) then unlicensedFoldForm callable
                                    elif rowSlotsForm.IsSome then rowSlotsForm.Value
                                    elif not (fpReassocEnabled ()) then "serial (repro)"
                                    elif cg.FoldChunk.IsSome && ompThreadEmissionEnabled () then
@@ -4964,6 +5014,8 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                        let why =
                                            if foldKernelReproVetoed callable then
                                                "fold kernel is `where repro` (the operation order is the contract; reorder licence vetoed)"
+                                           elif mapBodyWrites then
+                                               "the map kernel writes a captured binding; a fold licence does not make the map's body race-safe (Path B would run it on a team)"
                                            else "the fold's outermost level is not a plain rectangular sweep, so it cannot be chunked per thread (Path B)"
                                        // BLOCK form: a kernel-body fold's lines are
                                        // space-joined into a one-line IIFE.
@@ -5049,8 +5101,14 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                         // VECTORIZED FOLD form ("omp implies simd", 2026-10-17):
                         // the shared kernel's licence, spent as ONE
                         // `omp simd reduction` over every leaf's accumulator.
+                        let effects () =
+                            joinEffectAudit ctx.DeferredComputations
+                                (infos |> List.mapi (fun i info -> ($"leaf {i}'s map kernel", info)))
+                                [ ("the join's fold kernel", callable) ]
                         let simdPlan =
-                            fusedFoldSimdPlan sm leafCgs (leafNames |> List.map (fun ln -> (ln, callable, elemStr)))
+                            match effects () with
+                            | Error why -> Error why
+                            | Ok () -> fusedFoldSimdPlan sm leafCgs (leafNames |> List.map (fun ln -> (ln, callable, elemStr)))
                         let (simdFold, form) =
                             match simdPlan with
                             | Ok p -> (Some p, "simd-reduction")
@@ -5071,6 +5129,9 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                             joinedFoldThreadPlan (sanitizeCppName name) request simdPlan
                                 (leafNames |> List.map (fun ln -> (ln, callable, elemStr, seedStr, wname)))
                                 (fun () ->
+                                    match effects () with
+                                    | Error why -> Error why
+                                    | Ok () ->
                                     joinThreadAudit ctx.DeferredComputations
                                         (infos |> List.mapi (fun i info -> ($"leaf {i}'s map kernel", info)))
                                         [ ("the join's fold kernel", callable) ])
@@ -5347,8 +5408,15 @@ and genReduceJoinCore (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         // VECTORIZED FOLD form for the join ("omp implies simd", 2026-10-17):
         // every leg's licence, spent as ONE `omp simd reduction` clause over
         // all the accumulators (gate: `fusedFoldSimdPlan`).
+        let effects () =
+            joinEffectAudit ctx.DeferredComputations
+                ((infos |> List.mapi (fun i info -> ($"leg {i}'s map kernel", info)))
+                 @ (sharedIds |> List.map (fun (id, di) -> ($"shared producer '{sharedName id}'", di))))
+                (callables |> List.mapi (fun i cb -> ($"leg {i}'s fold kernel", cb)))
         let simdPlan =
-            fusedFoldSimdPlan sm allCgs (List.zip3 leafNames callables elemStrs)
+            match effects () with
+            | Error why -> Error why
+            | Ok () -> fusedFoldSimdPlan sm allCgs (List.zip3 leafNames callables elemStrs)
         let (simdFold, form) =
             match simdPlan with
             | Ok p -> (Some p, "simd-reduction")
@@ -5371,6 +5439,9 @@ and genReduceJoinCore (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                 (List.init leafNames.Length (fun i ->
                     (leafNames.[i], callables.[i], elemStrs.[i], seedStrs.[i], wnames.[i])))
                 (fun () ->
+                    match effects () with
+                    | Error why -> Error why
+                    | Ok () ->
                     joinThreadAudit ctx.DeferredComputations
                         ((infos |> List.mapi (fun i info -> ($"leg {i}'s map kernel", info)))
                          @ (sharedIds |> List.map (fun (id, di) -> ($"shared producer '{sharedName id}'", di))))

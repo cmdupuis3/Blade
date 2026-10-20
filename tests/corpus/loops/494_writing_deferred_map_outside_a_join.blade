@@ -1,0 +1,37 @@
+// TEST: Writing Deferred Map Outside A Join
+// Gap G43. A deferred map whose kernel WRITES a captured `let mut` (legal:
+// formalism 5.2, a serial body's write is an ordered side effect) has one
+// meaning wherever its evaluations are ordered: each separate consumer is one
+// traversal in ascending cell order, so two folds of the named map advance
+// the counter through cells 1..4 then 5..8, in every lane -- at top level and
+// in a block. (NOT in a function body, where lowering forces a body let at its
+// definition and the same two folds read one evaluation: OPEN gap G45, pinned
+// by loops/497.) Inside a JOIN the
+// legs run side by side and the write has no single order: refused (BL4005,
+// mutability-errors/014-021). The join spelling that is legal forces the map
+// first -- one evaluation, stored -- and joins over the stored cells.
+type I = Idx<4>
+let mut G1 = [0]
+let mut G2 = [0]
+let mut G3 = [0]
+// Two separate folds: two traversals, cells 1..4 then 5..8.
+let r1 = {
+    let m = method_for(range<I>) <@> lambda(i) -> { G1(0) = G1(0) + 1; G1(0) }
+    let s = reduce(m, (+))
+    let t = reduce(m, (+))
+    s + t
+}
+let m2 = method_for(range<I>) <@> lambda(i) -> { G2(0) = G2(0) + 1; G2(0) }
+let r2 = reduce(m2, (+)) + reduce(m2, (+))
+// Forced first, then joined: one evaluation of the writing map.
+let r3 = {
+    let m = method_for(range<I>) <@> lambda(i) -> { G3(0) = G3(0) + 1; G3(0) } |> compute
+    let (s, t) = object_for(<&!>) <@> (reduce(m, (+)), reduce(m, (+)))
+    s * 1000 + t
+}
+// EXPECT: r1 = 36
+// EXPECT: r2 = 36
+// EXPECT: r3 = 10010
+// EXPECT: G1 = [8]
+// EXPECT: G2 = [8]
+// EXPECT: G3 = [4]

@@ -1615,6 +1615,101 @@ let foldKernelBuiltinOp (callable: IRCallable) : IRBinOp option =
          | _ -> None)
     | _ -> None
 
+/// Gap G42: a projection chain (`t[1]`, `t[0][1]`, flat or structural steps)
+/// rooted at a binding the C++ lane holds as a FLAT tuple (flatTupleIdsCell)
+/// -> (root, the flat position of the selected part's first leaf, the selected
+/// part's IR type). None when the root is not such a binding, or a step does
+/// not fit the type (the ordinary render then reports it).
+let flatTupleProjection (e: IRExpr) : (IRExpr * int * IRType) option =
+    let rec peel (x: IRExpr) (steps: (int * bool) list) =
+        match x with
+        | IRTupleProj (inner, i, fl) -> peel inner ((i, fl) :: steps)
+        | root -> (root, steps)
+    match peel e [] with
+    | (IRVar (id, rootTy) as root), steps when not steps.IsEmpty && (flatTupleIdsCell ()).Value.Contains id ->
+        let step (state: (IRType * int) option) (i: int, isFlat: bool) =
+            match state with
+            | None -> None
+            | Some (ty, off) ->
+                match stripUnits ty with
+                | IRTTuple ts when not isFlat && i >= 0 && i < ts.Length ->
+                    let before = ts |> List.take i |> List.sumBy (fun t -> (IR.flattenTupleLeaves t).Length)
+                    Some (ts.[i], off + before)
+                | IRTTuple _ as tt when isFlat ->
+                    let leaves = IR.flattenTupleLeaves tt
+                    if i >= 0 && i < leaves.Length then Some (leaves.[i], off + i) else None
+                | _ -> None
+        steps |> List.fold step (Some (rootTy, 0))
+        |> Option.map (fun (ty, off) -> (root, off, ty))
+    | _ -> None
+
+/// Does evaluating this callable WRITE something another evaluation could
+/// observe -- transitively, through every callable its body names (calls,
+/// kernels of inner folds and maps, lifted lambdas)? An assignment is LOCAL
+/// (not a write) when its target's root is a `let` bound inside the walked
+/// body itself -- a local accumulator, a local scratch array, a let-rec
+/// buffer -- the typechecker's own notion of "a binding outside the body"
+/// (formalism §5.2), except that a local bound directly to another NAME
+/// (`let t = G`) may alias it and counts. Every other assignment counts, and
+/// so does a call through a head that does not resolve to a callable (a
+/// function-typed value: may do anything). Conservative: a "may".
+///
+/// Read by `foldReorderLicensed`: formalism §5.2 accepts a serial body's
+/// write to a captured `let mut` as an ORDERED side effect, and a `comm`
+/// clause says the kernel's VALUE is symmetric -- not that its applications
+/// may be reordered, chunked across threads, or interleaved with the
+/// element evaluations they used to follow (gap G41).
+/// The walk itself is Blade.Optimize.exprMayWriteWith, shared with
+/// Lowering's join-leg refusal (gap G43); here it resolves callees through
+/// the codegen callable table.
+let internal programLetValuesStorage =
+    System.Threading.AsyncLocal<Map<IRId, IRExpr> ref>()
+
+/// Every let-bound value of the module being emitted (module bindings and the
+/// lets inside every function body; ids are unique per program), installed by
+/// each emitter's program entry (CodeGen.genModule*, EmitLlvm) so the write
+/// analysis can follow a NAMED deferred computation that a kernel or a fold
+/// operand reads to the kernels that run when it is read (gaps G41 / G43).
+/// Stored values (`|> compute`, calls) are never followed: only deferred forms.
+let programLetValuesCell () : Map<IRId, IRExpr> ref =
+    let v = programLetValuesStorage.Value
+    if isNull (box v) then
+        let fresh = ref Map.empty
+        programLetValuesStorage.Value <- fresh
+        fresh
+    else v
+
+let computeProgramLetValues (modul: IRModule) : Map<IRId, IRExpr> =
+    let acc = System.Collections.Generic.Dictionary<IRId, IRExpr>()
+    let note (e: IRExpr) = iterIRExpr (fun n -> match n with IRLet (id, v, _) -> acc.[id] <- v | _ -> ()) e
+    for b in modul.Bindings do
+        acc.[b.Id] <- b.Value
+        note b.Value
+    for f in modul.Functions do note f.Body
+    acc |> Seq.map (fun kv -> (kv.Key, kv.Value)) |> Map.ofSeq
+
+let private codegenWriteFacts (deferred: Map<IRId, IRExpr>) : Blade.Optimize.WriteFacts =
+    { Resolve = resolveCallable
+      OuterLet = (fun id ->
+          match Map.tryFind id deferred with
+          | Some v -> Some v
+          | None -> Map.tryFind id (programLetValuesCell ()).Value)
+      // codegen does not know which lets deep-copy here: an alias of a
+      // captured array counts as the captured array (a decline, never wrong)
+      CopiedLet = (fun _ -> false) }
+
+let callableMayWrite (callable: IRCallable) : bool =
+    Blade.Optimize.callableMayWriteWith (codegenWriteFacts Map.empty) callable
+
+/// `callableMayWrite`'s rule over a bare kernel BODY (a loop nest's
+/// `KernelExpr`), every callable it names judged transitively; `deferred`
+/// (ctx.DeferredComputations) lets it follow a named unforced computation the
+/// body reads to the kernels that run when it is read.
+let exprMayWriteIn (deferred: Map<IRId, IRExpr>) (body: IRExpr) : bool =
+    Blade.Optimize.exprMayWriteWith (codegenWriteFacts deferred) body
+
+let exprMayWrite (body: IRExpr) : bool = exprMayWriteIn Map.empty body
+
 /// Does this fold kernel demand REPRODUCIBLE evaluation? True when the
 /// callable itself is a `where repro` function, or when it is the
 /// eta-expanded wrapper around one (`lambda(a, b) -> f(a, b)` -- the shape a
@@ -1641,11 +1736,27 @@ let foldKernelReproVetoed (callable: IRCallable) : bool =
 /// this predicate at each site, because the predicate is also read as a FACT
 /// about the kernel, e.g. by the Path B chunk plan, whose route selection must
 /// not depend on a build knob.)
+///
+/// A kernel that WRITES (`callableMayWrite`) is never licensed, whatever its
+/// clauses: its applications are ordered side effects (formalism §5.2), so
+/// every reordered form -- a Path B team reached through the MAP's
+/// `omp(i: 1)`, K lanes that evaluate eight elements before combining them,
+/// the LLVM fast-math flags -- would change what the program does, not just
+/// its rounding (gap G41). The front end's BL4005 ban covers only a PARALLEL
+/// body, and a `comm` fold kernel is not one.
 let foldReorderLicensed (callable: IRCallable) : bool =
     not (foldKernelReproVetoed callable)
+    && not (callableMayWrite callable)
     && (callable.IsCommutative
         || not (List.isEmpty callable.CommGroups)
         || (foldKernelBuiltinOp callable).IsSome)
+
+/// The `blade plan` fold-form text of a fold `foldReorderLicensed` refuses,
+/// naming the write when that is the reason.
+let unlicensedFoldForm (callable: IRCallable) : string =
+    if callableMayWrite callable then
+        "serial (the fold kernel writes a captured binding: its applications are ordered side effects; no licence -- comm, omp on the fold or the map -- reorders or threads them)"
+    else "serial (no reorder licence)"
 
 /// An operand's extent along `dim`, as a C++ expression: the LITERAL when the
 /// operand's own index record carries one, else the runtime `.extents[dim]`

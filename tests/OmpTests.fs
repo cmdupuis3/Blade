@@ -213,6 +213,17 @@ let private ompDepthCases : (string * string * string) list =
 /// paths differ in reassociation guarantees (Path A's combine order is
 /// unspecified; Path B's is fixed by chunk index), so a kernel silently
 /// switching paths changes a property tests downstream rely on.
+/// Gap G41 fixtures for the provenance cases below: a map-licensed fold whose
+/// `comm` kernel body is the argument.
+let private g41Pre1 = "type I = Idx<37>\ntype K = Idx<2>\nlet mut G: Array<Float64 like K> = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute\n"
+let private g41Pre2 = "type I = Idx<37>\ntype K = Idx<2>\nlet mut G: Array<Float64 like K, K> = method_for(range<K>, range<K>) <@> lambda(k, l) -> 0.0 |> compute\n"
+let private g41Fold (body: string) =
+    "let s = reduce(method_for(range<I>) <@> lambda(i) where omp(i: 1) -> Float64(i) + G((0 : K), (0 : K)), lambda(a, b) where comm(a, b) -> " + body + ", 0.0)\n"
+let private g41Fold1 (body: string) =
+    "let s = reduce(method_for(range<I>) <@> lambda(i) where omp(i: 1) -> Float64(i) + G((0 : K)), lambda(a, b) where comm(a, b) -> " + body + ", 0.0)\n"
+let private g41WriteCensus = "[omp] requested but emitted serial: the fold kernel writes a captured binding; a map licence does not make the fold race-safe"
+let private g41Team = "comm-licensed parallel fold, outer level chunked"
+let private g41NoTeam = ["BLADE_OMP_PARALLEL_NUM_THREADS("; "blade_fold::chunk_lo"]
 let private ompReduceCases : (string * string * string list * string list) list =
     // (name, source, mustContain, mustNotContain)
     let arr = "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]\n"
@@ -335,7 +346,68 @@ let private ompReduceCases : (string * string * string list * string list) list 
        "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]\n" +
        "let s = reduce(method_for(A) <@> lambda(a) -> a * a, (+))\n",
        [], ["[omp]"; "#pragma omp parallel"; "omp_get_"])
-      // ---- M14 (gap G25): the fast form INSIDE each Path B chunk ------------
+      // ---- gap G41: a licence never makes a WRITING kernel race-safe --------
+      // The map's `omp(i: 1)` reaches the fold's level, but the `comm` fold
+      // kernel writes a captured `let mut` (legal: BL4005 covers parallel
+      // bodies only): its applications are ordered side effects, so it is not
+      // reorder-licensed -- no Path B team, no lanes, the serial chain, and the
+      // dropped map licence says why. Corpus loops/492 pins the values.
+      ("map_licence_writing_comm_fold_kernel_stays_serial",
+       "type I = Idx<37>\ntype K = Idx<2>\n"
+       + "let mut G: Array<Float64 like K> = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute\n"
+       + "let s = reduce(method_for(range<I>) <@> lambda(i) where omp(i: 1) -> Float64(i) + G((0 : K)), lambda(a, b) where comm(a, b) -> { G((0 : K)) = G((0 : K)) + 1.0; a + b }, 0.0)\n",
+       ["[omp] requested but emitted serial: the fold kernel writes a captured binding; a map licence does not make the fold race-safe"],
+       ["BLADE_OMP_PARALLEL_NUM_THREADS("; "omp_get_"; "blade_fold::chunk_lo"; "__rlane"; "SIMD_REDUCTION"])
+      // The mirror: a `where omp` FOLD over a map whose body writes (the map
+      // carries no omp). The fold's licence covers reassociating the fold,
+      // not running the map body on a team or under `omp simd`. Corpus
+      // loops/493 pins the values.
+      ("omp_fold_over_writing_map_body_stays_serial",
+       "type I = Idx<37>\ntype K = Idx<2>\n"
+       + "let mut G: Array<Float64 like K> = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute\n"
+       + "let s = reduce(method_for(range<I>) <@> lambda(i) -> { G((0 : K)) = G((0 : K)) + 1.0; G((0 : K)) + Float64(i) }, lambda(a, b) where omp -> a + b, 0.0)\n",
+       ["[omp] requested but emitted serial: the map kernel writes a captured binding; a fold licence does not make the map's body race-safe"],
+       ["BLADE_OMP_PARALLEL_NUM_THREADS("; "omp_get_"; "blade_fold::chunk_lo"; "__rlane"; "SIMD_REDUCTION"])
+      // Storage PROVENANCE, not initializer syntax (Codex review of W2-F,
+      // blocker 1): a store through a ROW VIEW of the captured G, or through an
+      // array a call returned, is a write to G; corpus loops/495 pins values.
+      ("map_licence_fold_kernel_writes_through_view_stays_serial",
+       g41Pre2 + g41Fold "{ let t = G((0 : K)); t((0 : K)) = t((0 : K)) + 1.0; a + b }",
+       [g41WriteCensus], g41NoTeam)
+      ("map_licence_fold_kernel_writes_returned_alias_stays_serial",
+       g41Pre1 + "function getG() -> Array<Float64 like K> = G\n" + g41Fold1 "{ let t = getG(); t((0 : K)) = t((0 : K)) + 1.0; a + b }",
+       [g41WriteCensus], g41NoTeam)
+      // ...and storage the kernel makes itself is LOCAL: these still thread.
+      ("map_licence_fold_kernel_local_scalar_threads",
+       g41Pre1 + g41Fold1 "{ let mut q = a; q = q + b; q }",
+       [g41Team], [g41WriteCensus])
+      ("map_licence_fold_kernel_fresh_scratch_threads",
+       g41Pre1 + g41Fold1 "{ let mut s = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute; s((0 : K)) = a; s((1 : K)) = b; s((0 : K)) + s((1 : K)) }",
+       [g41Team], [g41WriteCensus])
+      ("map_licence_fold_kernel_local_alias_threads",
+       g41Pre1 + g41Fold1 "{ let mut s = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute; let u = s; u((0 : K)) = a + b; s((0 : K)) }",
+       [g41Team], [g41WriteCensus])
+      ("map_licence_fold_kernel_callee_fills_fresh_scratch_threads",
+       g41Pre1 + "function fill(buf: mut Array<Float64 like K>, v: Float64) -> Float64 = {\n    buf((0 : K)) = v\n    v\n}\n"
+       + g41Fold1 "{\n    let mut scratch = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute\n    fill(scratch, a + b)\n}",
+       [g41Team], [g41WriteCensus])
+      // REBINDING (Codex re-review, finding 9): `t` starts as fresh scratch,
+      // then is rebound to a row VIEW of G -- every later store through `t`
+      // writes G. A fresh-to-fresh rebind stays local.
+      ("map_licence_fold_kernel_rebound_to_view_stays_serial",
+       g41Pre2 + g41Fold "{\n    let mut t = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute\n    t = G((0 : K))\n    t((0 : K)) = t((0 : K)) + 1.0\n    a + b\n}",
+       [g41WriteCensus], g41NoTeam)
+      ("map_licence_fold_kernel_rebound_fresh_to_fresh_threads",
+       g41Pre1 + g41Fold1 "{\n    let mut t = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute\n    t = method_for(range<K>) <@> lambda(k) -> 1.0 |> compute\n    t((0 : K)) = a + b\n    t((0 : K))\n}",
+       [g41Team], [g41WriteCensus])
+      ("map_licence_fold_kernel_callee_local_let_rec_threads",
+       g41Pre1 + "function tri(v: Float64) -> Float64 = {\n    let rec r: Array<Float64 like K> =\n        match r with\n        | zero -> zero\n        | zero :: s -> zero :: v\n        | prefix :: n -> prefix :: prefix(n - 1) + v\n    reduce(r, (+))\n}\n"
+       + g41Fold1 "tri(a + b)",
+       [g41Team], [g41WriteCensus])
+      ("map_licence_fold_kernel_callee_fills_captured_stays_serial",
+       g41Pre1 + "function fill(buf: mut Array<Float64 like K>, v: Float64) -> Float64 = {\n    buf((0 : K)) = v\n    v\n}\n"
+       + g41Fold1 "{ fill(G, a + b) }",
+       [g41WriteCensus], g41NoTeam)      // ---- M14 (gap G25): the fast form INSIDE each Path B chunk ------------
       // A `where omp` builtin-`+` fold over a dot-class body: the team is
       // opened and each thread's chunk is ONE call of the explicit K-lane
       // vector form over [__rlo, __rhi) -- no loop nest at all; partition by
@@ -952,11 +1024,19 @@ let private rowSlotCases : (string * (string * string) list * string * (Blade.Ef
       // THE OUTER FOLD KERNEL is audited too (Codex diff review, blocker 1):
       // a `comm`-declared serial kernel may write a captured array the rows
       // read (the front end bans writes only in parallel bodies); moving every
-      // row before every kernel application would change the operands.
+      // row before every kernel application would change the operands. Since
+      // gap G41 a WRITING fold kernel is not reorder-licensed at all, so the
+      // fold never reaches the row-slot admission: no chunk plan, the serial
+      // chain, and the census names the write.
       ("row_slots_declined_outer_kernel_write", repro,
        rowSlotOuterWriteSrc,
-       declined "the outer fold kernel is outside the row-slot whitelist", "row-slot form declined: the outer kernel writes",
-       [ reproCensus ], [ "__rslot" ])
+       (fun d -> d.Rule = "fold-form"
+                 && (match d.Outcome with
+                     | Blade.Effects.Declined why -> why.Contains "the fold kernel writes a captured binding"
+                     | _ -> false)),
+       "fold-form declined: the fold kernel writes (not reorder-licensed; G41)",
+       [ "[omp] requested but emitted serial: the fold kernel writes a captured binding; a map licence does not make the fold race-safe" ],
+       [ "__rslot"; "BLADE_OMP_PARALLEL_NUM_THREADS"; "blade_scatter::" ])
       // G35 PRECEDENCE over the ordered orbit scatter (round 2): this walk is
       // one the scatter admits; the taken row-slot form wins under the omp
       // request, and the scatter records that it yielded.
@@ -2093,6 +2173,27 @@ let private g7Count (needle: string) (s: string) =
 let private g7Rx (pattern: string) (s: string) =
     System.Text.RegularExpressions.Regex.Matches(s, pattern).Count
 
+/// Gap G43 (W2-F), re-pinning three W2-E cases that encoded the OLD policy (a
+/// writing join leg declined to the serial join): a join defines no order for
+/// a leg's observable write, so lowering REFUSES it in every lane (BL4005),
+/// before any backend gate runs. (name, source).
+let private g7RefusedCases : (string * string) list =
+    let omp = "lambda(u, v) where omp -> u + v"
+    [ // a serial captured write in a leg's map (corpus mutability-errors/021)
+      ("g7_fused_join_serial_captured_write_refused",
+       "let mut counter = 0\nlet x = [1.0, 2.0, 3.0]\nlet l = method_for(x)\n"
+       + "let (s1, s2) = reduce((l <@> lambda(v) -> {\n    counter = counter + 1\n    v\n}) <&!> (l <@> lambda(v) -> v * v), " + omp + ", 0.0)\n")
+      // a WRITING SHARED PRODUCER through a transitive helper (per-leg pack)
+      ("g7_pack_join_writing_shared_producer_refused",
+       "let mut counter = 0\nfunction bump(v: Float64) -> Float64 = {\n    counter = counter + 1\n    v\n}\n"
+       + "type Ix = Idx<1009>\n"
+       + "let x = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 7) |> compute\n"
+       + "let e = method_for(x) <@> lambda(v) -> bump(v)\n"
+       + "let (a, b, c) = object_for(<&!>) <@> (reduce(e, lambda(p, q) where omp -> p + q, 10.0), prodsum(e, x), reduce(x, (+), 30.0))\n")
+      // a comm-declared WRITING custom fold beside a requesting leg
+      ("g7_pack_join_comm_writing_custom_fold_refused",
+       "let mut counter = 0\nlet x = [1.0, 2.0, 3.0]\n"
+       + "let (a, b) = object_for(<&!>) <@> (reduce(x, lambda(p, q) where omp -> p + q, 0.0), reduce(x, lambda(p, q) where comm(p, q) -> {\n    counter = counter + 1\n    p + q\n}, 0.0))\n") ]
 /// The emission + record cases. (name, pins, source, check over (decisions, C++)).
 let private g7EmitCases : (string * (string * string) list * string * (Blade.Effects.Decision list -> string -> Result<string, string>)) list =
     let team = "BLADE_OMP_PARALLEL_NUM_THREADS("
@@ -2187,21 +2288,9 @@ let private g7EmitCases : (string * (string * string) list * string * (Blade.Eff
             elif cpp.Contains "requested but emitted serial" then Error "a census line beside the applied team"
             else Ok "the leaf map's outer-level request threads the join"))
       // ---- the PURITY / SHAPE refusal boundary, both entry shapes --------
-      // A serial captured write in a leg's map (corpus loops/489): the team
-      // is refused on the effect, the serial vectorized join keeps it.
-      ("g7_fused_join_serial_captured_write_declines", [],
-       "let mut counter = 0\nlet x = [1.0, 2.0, 3.0]\nlet l = method_for(x)\n"
-       + "let (s1, s2) = reduce((l <@> lambda(v) -> {\n    counter = counter + 1\n    v\n}) <&!> (l <@> lambda(v) -> v * v), " + omp + ", 0.0)\n",
-       declined "outside the closed purity/totality whitelist a team requires (the body contains a form outside the row-slot whitelist (IRAssign))" true)
-      // A WRITING SHARED PRODUCER through a transitive helper (per-leg pack):
-      // `e` is spelled by two legs, its kernel calls `bump`, which writes.
-      ("g7_pack_join_writing_shared_producer_declines", [],
-       "let mut counter = 0\nfunction bump(v: Float64) -> Float64 = {\n    counter = counter + 1\n    v\n}\n"
-       + "type Ix = Idx<1009>\n"
-       + "let x = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 7) |> compute\n"
-       + "let e = method_for(x) <@> lambda(v) -> bump(v)\n"
-       + "let (a, b, c) = object_for(<&!>) <@> (reduce(e, lambda(p, q) where omp -> p + q, 10.0), prodsum(e, x), reduce(x, (+), 30.0))\n",
-       declined "(IRAssign)" true)
+      // (A WRITING leg -- map, shared producer, or fold kernel -- is no longer a
+      // backend decline: since gap G43 lowering refuses it, BL4005; see
+      // g7RefusedCases.)
       // An UNPROVEN subscript (an arithmetic coordinate, BL8006 at run time):
       // a team would race the failing coordinate -- refused.
       ("g7_fused_join_unproven_subscript_declines", [],
@@ -2210,13 +2299,6 @@ let private g7EmitCases : (string * (string * string) list * string * (Blade.Eff
        + "let r = method_for(range<Ix>)\n"
        + "let (s1, s2) = reduce((r <@> lambda(i) -> x(Int64(i) + 1)) <&!> (r <@> lambda(i) -> x(i) * x(i)), " + omp + ", 0.0)\n",
        declined "a subscript not proven in range: BL8006" true)
-      // A comm-declared WRITING custom fold beside a requesting leg: licensed
-      // by comm, but its combine is a call, so the builtin-shape gate refuses
-      // the team BEFORE purity (no identity to seed a partial with).
-      ("g7_pack_join_comm_writing_custom_fold_declines", [],
-       "let mut counter = 0\nlet x = [1.0, 2.0, 3.0]\n"
-       + "let (a, b) = object_for(<&!>) <@> (reduce(x, lambda(p, q) where omp -> p + q, 0.0), reduce(x, lambda(p, q) where comm(p, q) -> {\n    counter = counter + 1\n    p + q\n}, 0.0))\n",
-       declined "the joined traversal has no chunked form" false)
       // PRODUCT legs: the private partials start from the identity 1, the
       // caller seeds 2.0 / 3.0 enter only the shared accumulators.
       ("g7_pack_join_product_legs_identity_one", [], g7ProductPackSrc,
@@ -3138,6 +3220,58 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                  else
                      pass name "declined; knob on == knob off == the serial walk (s = 70710120.0)")
 
+        // ---- gap G41, RUN: writing fold kernels / map bodies stay ordered ---
+        // Corpus loops/492 (a `comm` fold kernel writing G, reached through the
+        // map's omp(i: 1)), 495 (the same write through a ROW VIEW of G) and 493
+        // (a `where omp` fold over a map body that writes). Before the fix the
+        // licensed build threaded or laned them: five mt8 runs, five totals.
+        // Every build and team size must print the serial total AND counter.
+        let g41Cases =
+            let pre = "type I = Idx<521>\ntype K = Idx<2>\n"
+            [ ("g41_comm_fold_kernel_write",
+               pre + "let mut G: Array<Float64 like K> = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute\n"
+               + "let total = reduce(method_for(range<I>) <@> lambda(i) where omp(i: 1) -> reduce(method_for(range<I>) <@> lambda(j) -> G((0 : K)) + Float64(i), (+)), lambda(a, b) where comm(a, b) -> { G((0 : K)) = G((0 : K)) + 1.0; a + b }, 0.0)\n"
+               + "let g0 = G((0 : K))\n",
+               141149320.0, 521.0)
+              ("g41_comm_fold_kernel_write_through_view",
+               pre + "let mut G: Array<Float64 like K, K> = method_for(range<K>, range<K>) <@> lambda(k, l) -> 0.0 |> compute\n"
+               + "let total = reduce(method_for(range<I>) <@> lambda(i) where omp(i: 1) -> reduce(method_for(range<I>) <@> lambda(j) -> G((0 : K), (0 : K)) + Float64(i), (+)), lambda(a, b) where comm(a, b) -> {\n    let t = G((0 : K))\n    t((0 : K)) = t((0 : K)) + 1.0\n    a + b\n}, 0.0)\n"
+               + "let g0 = G((0 : K), (0 : K))\n",
+               141149320.0, 521.0)
+              ("g41_comm_fold_kernel_write_through_rebound_local",
+               pre + "let mut G: Array<Float64 like K, K> = method_for(range<K>, range<K>) <@> lambda(k, l) -> 0.0 |> compute\n"
+               + "let total = reduce(method_for(range<I>) <@> lambda(i) where omp(i: 1) -> reduce(method_for(range<I>) <@> lambda(j) -> G((0 : K), (0 : K)) + Float64(i), (+)), lambda(a, b) where comm(a, b) -> {\n    let mut t = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute\n    t = G((0 : K))\n    t((0 : K)) = t((0 : K)) + 1.0\n    a + b\n}, 0.0)\n"
+               + "let g0 = G((0 : K), (0 : K))\n",
+               141149320.0, 521.0)
+              ("g41_omp_fold_over_writing_map",
+               pre + "let mut G: Array<Float64 like K> = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute\n"
+               + "let total = reduce(method_for(range<I>) <@> lambda(i) -> { G((0 : K)) = G((0 : K)) + 1.0; G((0 : K)) + Float64(i) }, lambda(a, b) where omp -> a + b, 0.0)\n"
+               + "let g0 = G((0 : K))\n",
+               271441.0, 521.0) ]
+        for (name, src, expTotal, expG0) in g41Cases do
+            let build (threads: string) (tag: string) =
+                use _p = pinEnv "BLADE_PRINT" "total,g0"
+                use _t = pinEnv "BLADE_OMP_THREADS" threads
+                compileProgram outputDir (name + tag) src
+            match build "1" "_serial", build null "_threads_on" with
+            | Error e, _ | _, Error e -> fail name ($"build: {e}")
+            | Ok serExe, Ok thrExe ->
+                let runs =
+                    [ ("BLADE_OMP_THREADS=1", runProgram serExe "1")
+                      ("emission on, OMP_NUM_THREADS=1", runProgram thrExe "1") ]
+                    @ [ for k in 1 .. 5 -> ($"emission on, OMP_NUM_THREADS=8 (run {k})", runProgram thrExe "8") ]
+                let bad =
+                    runs |> List.choose (fun (what, r) ->
+                        match r with
+                        | Error e -> Some ($"{what}: {e}")
+                        | Ok out ->
+                            let vals = scalarBindings out
+                            match Map.tryFind "total" vals, Map.tryFind "g0" vals with
+                            | Some t, Some g when t = expTotal && g = expG0 -> None
+                            | t, g -> Some ($"{what}: total = {t}, g0 = {g}"))
+                if bad.IsEmpty then pass name ($"total = {expTotal}, g0 = {expG0} in all 7 runs (serial build; threads on at T = 1 and 5x T = 8)")
+                else fail name (String.concat " | " bad)
+
         // ---- G7: the threaded reduction join -------------------------------
         // Emission + record shape per build (both entry shapes), then the
         // values: the threaded binary at T = 1 / 3 / 8 against the serial
@@ -3157,6 +3291,12 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                     | Error why -> fail name why
             finally
                 for d in List.rev disposables do d.Dispose()
+        for (name, src) in g7RefusedCases do
+            match planAndCppOf name src with
+            | Ok _ -> fail name "the writing join lowered (G43: it must be refused, BL4005)"
+            | Error e when e.Contains "a leg of this join writes a captured binding" ->
+                pass name "refused at lowering: BL4005, a leg of this join writes a captured binding"
+            | Error e -> fail name ($"refused for another reason: {e}")
         let g7Values (name: string) (src: string) (expected: string list) =
             let build (threads: string) (tag: string) =
                 use _r = pinEnv "BLADE_FP_REPRO" null

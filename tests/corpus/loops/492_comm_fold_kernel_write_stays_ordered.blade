@@ -1,0 +1,23 @@
+// TEST: Comm Fold Kernel Write Stays Ordered
+// Gap G41. A `comm` fold kernel that WRITES a captured `let mut` is legal
+// (formalism 5.2: a serial body's write is an ordered side effect; the BL4005
+// ban covers PARALLEL bodies only, and a `comm` kernel is not one). Its
+// applications are therefore part of the program's meaning: row i of the map
+// must read G(0) after exactly i kernel applications. Before the fix the MAP's
+// `omp(i: 1)` licence reached the fold through Path B and ran the kernel on a
+// team (five mt8 runs printed five totals, 119268405 .. 122800110), and the
+// licensed threads-off build's K lanes evaluated eight rows before combining
+// them (138996548 instead of 141149320). A writing fold kernel is never
+// reorder-licensed now: every lane keeps the serial chain, threads or not.
+// Integer-valued doubles: the one correct answer is exact.
+//   row i = sum over j of (G(0) + i) with G(0) = i  ->  521 * 2i
+//   total = 1042 * (0 + 1 + ... + 520) = 1042 * 135460 = 141149320
+type I = Idx<521>
+type K = Idx<2>
+let mut G: Array<Float64 like K> = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute
+let total = reduce(method_for(range<I>) <@> lambda(i) where omp(i: 1) -> reduce(method_for(range<I>) <@> lambda(j) -> G((0 : K)) + Float64(i), (+)),
+                   lambda(a, b) where comm(a, b) -> { G((0 : K)) = G((0 : K)) + 1.0; a + b }, 0.0)
+let g0 = G((0 : K))
+// EXPECT: total = 141149320.0
+// EXPECT: g0 = 521.0
+// EXPECT: G = [521.0, 0.0]

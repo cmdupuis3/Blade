@@ -1,0 +1,19 @@
+// TEST: Writing Map Fold Keeps Serial Association
+// Gap G41, the association half. The map's kernel writes a captured counter,
+// so its fold keeps the SERIAL chain in every build and lane -- no K lanes,
+// no `omp simd`, no LLVM fold fast-math -- not only the serial order of the
+// writes. The cells are chosen so association is visible: 1e16, seven 1.0s,
+// then -1e16. Serially each 1.0 is absorbed by 1e16 (its ulp is 2), so the
+// sum is exactly 0.0; any reassociated form adds the 1.0s together first and
+// keeps some of them. Before the fix this fold was emitted as an
+// `omp simd reduction` (C++) and with `fadd reassoc nsz` (LLVM); GCC and LLVM
+// happened not to vectorize it, so the value was already 0.0 -- the emission is pinned by
+// `blade test llvm goldens` (G41 case) and the plan's fold-form record.
+type Ix = Idx<9>
+let mut G = [0.0]
+let total = reduce(method_for(range<Ix>) <@> lambda(i) -> {
+    G(0) = G(0) + 1.0
+    if G(0) == 1.0 then 1.0e16 else if G(0) == 9.0 then -1.0e16 else 1.0
+}, (+))
+// EXPECT: total = 0.0
+// EXPECT: G = [9.0]

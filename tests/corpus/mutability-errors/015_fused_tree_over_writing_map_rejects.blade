@@ -1,0 +1,15 @@
+// TEST: fused reduction tree over a writing deferred map (rejects)
+// ERROR: BL4005 @ 10:1
+// ERROR-CONTAINS: a leg of this join writes a captured binding
+// Gap G43. The shared `<&!>` tree reads the deferred map `m` in both leaves;
+// its kernel writes the captured `G`. The C++ lane evaluated each cell once
+// for both leaves (s + t = 30, G = 4), the LLVM lane once per leaf per cell
+// (56, G = 8), the interpreter one leaf after the other (62, G = 8). Refused:
+// a joined traversal gives a write no single order.
+type I = Idx<4>
+let mut G = [0]
+let r = {
+    let m = method_for(range<I>) <@> lambda(i) -> { G(0) = G(0) + 1; G(0) }
+    let (s, t) = reduce((m <@> lambda(v) -> v) <&!> (m <@> lambda(v) -> 2 * v), (+))
+    s + t
+}

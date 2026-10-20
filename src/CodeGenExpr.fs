@@ -243,6 +243,21 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             | IRTScalar ETFloat32 -> complexCppTypeName ETComplex64
             | _ -> complexCppTypeName ETComplex128  // Float64 default
         $"{cppType}({(exprToCppCore subst names re)}, {(exprToCppCore subst names im)})"
+    | IRTupleProj _ when (flatTupleProjection expr).IsSome ->
+        // Gap G42: the chain is rooted at a binding held as a FLAT C++ tuple
+        // under a left-nested IR type. Render by flat leaf position.
+        let (root, offset, sub) = (flatTupleProjection expr).Value
+        let rootStr = exprToCppCore subst names root
+        let rec build (ty: IRType) (k: int) : string * int =
+            match IR.stripUnits ty with
+            | IRTTuple ts ->
+                let (parts, k') =
+                    ts |> List.fold (fun (acc, k) t ->
+                        let (s, k') = build t k
+                        (acc @ [s], k')) ([], k)
+                ($"""std::make_tuple({(parts |> String.concat ", ")})""", k')
+            | _ -> ($"std::get<{k}>({rootStr})", k + 1)
+        fst (build sub offset)
     | IRTupleProj (e, i, isFlat) ->
         if not isFlat then
             $"std::get<{i}>({(exprToCppCore subst names e)})"
@@ -1371,7 +1386,7 @@ and renderCompactionFold (names: Map<IRId, string>) (plan: Blade.Optimize.Compac
             let call = foldVecCall "double" k VecSq [ y + ".data" ] m
             $"[&]() {{ {guard}return {call}; }}()"
         else
-            recordFoldForm "" (if foldReorderLicensed callable then serialFoldForm () else "serial (no reorder licence)") where
+            recordFoldForm "" (if foldReorderLicensed callable then serialFoldForm () else unlicensedFoldForm callable) where
             let (wrapperCode, wname) = genCallableWrapper names "" callable
             let wrapperStr = wrapperCode |> String.concat " "
             $"[&]() {{ {guard}{wrapperStr} const size_t __rn = {m}; double __r = {y}.data[0] * {y}.data[0]; BLADE_FOLD_ROUND(__r); for (size_t __ri = 1; __ri < __rn; __ri++) {{ double __t = {y}.data[__ri] * {y}.data[__ri]; BLADE_FOLD_ROUND(__t); __r = {wname}(__r, __t); }} return __r; }}()"
@@ -1563,7 +1578,7 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
         recordFoldForm ""
             (if mayLane then $"K-lanes({foldLaneCount})"
              elif foldReorderLicensed callable then serialFoldForm ()
-             else "serial (no reorder licence)")
+             else unlicensedFoldForm callable)
             "reduce in expression position"
         match initExpr with
         | Some initE ->

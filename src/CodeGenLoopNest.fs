@@ -1894,6 +1894,8 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
                     // and naming the knob is what tells a reader that the same
                     // source built without it WOULD be threaded.
                     if not (ompThreadEmissionEnabled ()) then ompThreadsSuppressedReason ()
+                    elif codeGen.FoldWrapper.IsSome && codeGen.FoldOmpDecline.IsSome then
+                        codeGen.FoldOmpDecline.Value
                     elif codeGen.FoldWrapper.IsSome then
                         "fold accumulates into a shared scalar, which is not race-safe"
                     elif codeGen.Bindings |> List.exists (fun b -> (domainPlanOfLevel b).IsSome) then

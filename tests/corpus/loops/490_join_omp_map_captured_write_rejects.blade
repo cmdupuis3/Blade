@@ -1,6 +1,6 @@
 // TEST: Threaded Reduction Join Omp Map Captured Write (rejects)
 // ERROR: BL4005
-// Bench gap G7's counterpart to loops/489: when the leg's MAP kernel itself
+// Bench gap G7's counterpart to mutability-errors/021: when the leg's MAP kernel itself
 // carries `where omp`, its body is a parallel body and the captured write is
 // a data race the front end refuses outright -- in every build, before any
 // emitter decides whether the join threads.

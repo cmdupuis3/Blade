@@ -1,0 +1,18 @@
+// TEST: reduction join whose legs share a writing deferred map (rejects)
+// ERROR: BL4005 @ 13:1
+// ERROR-CONTAINS: a leg of this join writes a captured binding
+// Gap G43. Both legs name the deferred map `m`, whose kernel writes the
+// captured `G`. A join runs its legs side by side, one joint cell at a time,
+// and evaluates a computation its legs share once per cell (formalism 10.2);
+// the lanes gave the writes three different schedules (C++ shared the cell:
+// r = 10010, G = 4; the LLVM lane interleaved one evaluation per leg:
+// 16020, G = 8; the interpreter ran the legs one after another: 10026,
+// G = 8). A write has no single order inside a join, so it is refused, like a
+// write in a parallel body. Force the map first, or fold the legs separately.
+type I = Idx<4>
+let mut G = [0]
+let r = {
+    let m = method_for(range<I>) <@> lambda(i) -> { G(0) = G(0) + 1; G(0) }
+    let (s, t) = object_for(<&!>) <@> (reduce(m, (+)), reduce(m, (+)))
+    s * 1000 + t
+}

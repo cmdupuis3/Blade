@@ -1,0 +1,16 @@
+// TEST: reduction join over a map whose write hides behind a call (rejects)
+// ERROR: BL4005 @ 11:1
+// ERROR-CONTAINS: a leg of this join writes a captured binding
+// Gap G43 (Codex review of W2-F, blocker 3): the shared map's kernel writes
+// nothing itself; it calls `bump`, which writes the module-level `G`.
+type I = Idx<4>
+let mut G = [0]
+function bump() -> Int64 = {
+    G(0) = G(0) + 1
+    G(0)
+}
+let r = {
+    let m = method_for(range<I>) <@> lambda(i) -> bump()
+    let (s, t) = object_for(<&!>) <@> (reduce(m, (+)), reduce(m, (+)))
+    s * 1000 + t
+}

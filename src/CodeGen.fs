@@ -473,6 +473,20 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             currentTupleChildren <- ctxAfter.TupleChildren
             currentNames <- Map.add id varName currentNames
             code
+        | IRVar (srcId, _) when (flatTupleIdsCell ()).Value.Contains srcId ->
+            // Gap G42: an alias of a FLAT join tuple (`let u = t`). Route
+            // through genBinding (genVarAliasBinding: `auto&` plus the source's
+            // TupleChildren) so the alias is registered flat too and an inline
+            // `u[0][1]` reads the flat leaf, as `t[0][1]` does.
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
+            let tempBinding = {
+                Id = id; Name = varName; Type = inferExprType value
+                Value = value; IsConst = true; IsMutable = false
+            }
+            let (code, ctxAfter) = genBinding bodyCtx tempBinding builder
+            currentTupleChildren <- ctxAfter.TupleChildren
+            currentNames <- Map.add id varName currentNames
+            code
         | IRVar _ when Set.contains id ctx.MutableArrayLets ->
             // Function-body `let mut a = Z` over an array: route through
             // genBinding so genVarAliasBinding's mut-copy path runs (fresh
@@ -2059,6 +2073,7 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
     // mid-emission must not leave a frame active for this one's bindings.
     freshCell freshReturnFactsStorage (computeFreshReturnFacts modul)
     freshCell copyInPlaceMutsStorage (computeCopyInPlaceMuts modul)
+    freshCell programLetValuesStorage (computeProgramLetValues modul)
     freshCell groupedCaptureFactsStorage (computeGroupedCaptureFacts modul)
     freshCell reboundVarIdsStorage (computeReboundVarIds modul)
     // Also after the callables table: kernel bodies are resolved through it.
@@ -2191,6 +2206,7 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
     // NotFresh (leaks only, but a divergence between the two modes).
     freshCell freshReturnFactsStorage (computeFreshReturnFacts modul)
     freshCell copyInPlaceMutsStorage (computeCopyInPlaceMuts modul)
+    freshCell programLetValuesStorage (computeProgramLetValues modul)
     freshCell groupedCaptureFactsStorage (computeGroupedCaptureFacts modul)
     freshCell reboundVarIdsStorage (computeReboundVarIds modul)
     // Also after the callables table: kernel bodies are resolved through it.

@@ -1013,6 +1013,10 @@ and private Ctx =
       /// order-preserving. Scoped rather than global because the same kernel
       /// text appears in map position too, where no license exists.
       mutable FoldFmf: bool
+      /// Set while emitting a fold whose deferred OPERAND writes a captured
+      /// binding (gap G41): its accumulator keeps the serial association --
+      /// no fold FMF -- exactly as the C++ lane's `licensedFold` declines.
+      mutable FoldOperandWrites: bool
       /// The span of the declaration being emitted -- the top-level binding
       /// main is binding, or the function whose body is open. A runtime GUARD
       /// panic with no expression span of its own (non-exhaustive match,
@@ -1079,6 +1083,7 @@ let private newCtx (callables: Map<IRId, IRCallable>) (facts: ModuleFacts) =
       Counter = 0
       Facts = facts
       FoldFmf = false
+      FoldOperandWrites = false
       DeclSpan = Blade.Ast.noSpan
       DeclName = ""
       UsedAttrGroups = SortedSet()
@@ -1163,8 +1168,9 @@ let private fmfFor (c: Ctx) (ty: Sc) : string =
 /// keeps the two lanes' numeric policy one policy -- an answer that reassociates
 /// in one lane and not the other would make the differential gate report
 /// drift that is really a policy split.
-let private foldFmfLicensed (cl: IRCallable) : bool =
+let private foldFmfLicensed (c: Ctx) (cl: IRCallable) : bool =
     Blade.CodeGenState.fpReassocEnabled () && Blade.CodeGenExprSupport.foldReorderLicensed cl
+    && not c.FoldOperandWrites
 
 /// May FMF DECORATE the kernel application? Only when that application IS the
 /// combining instruction -- a recognized builtin op, where `applyKernel` emits
@@ -1175,8 +1181,8 @@ let private foldFmfLicensed (cl: IRCallable) : bool =
 /// of one application. Such kernels still fold correctly; they just carry no
 /// flags (the C++ lane's K-lane forms reassociate structurally for the same
 /// reason).
-let private foldFmfDecorable (cl: IRCallable) : bool =
-    foldFmfLicensed cl && (Blade.CodeGenExprSupport.foldKernelBuiltinOp cl).IsSome
+let private foldFmfDecorable (c: Ctx) (cl: IRCallable) : bool =
+    foldFmfLicensed c cl && (Blade.CodeGenExprSupport.foldKernelBuiltinOp cl).IsSome
 
 /// Emit `f` with the licensed-fold flag scope open. Wrapped around the KERNEL
 /// APPLICATION only, never around the element read that feeds it: on a
@@ -4129,7 +4135,7 @@ and private tryBindCompactRowProducer (c: Ctx) (id: IRId) (name: string) (plan: 
              (match a.Src, soleSimplexR a.Groups with
               | (AVirt _ | AVirtFlat _), Some (2, n, strict) when not tiled && n = p.Extent && strict = p.Strict ->
                   let fold = (List.last p.Levels).Fold
-                  let licensed = foldFmfDecorable fold
+                  let licensed = foldFmfDecorable c fold
                   let negBody = Blade.OrbitFold.negatedBody p
                   let ptr = allocPool c a.Elem (string (shapeCells a.Groups))
                   let parts = [ for _ in 1 .. p.AccCount -> allocPool c accTy (string n) ]
@@ -4377,7 +4383,7 @@ and private tryBindFlatEpilogueProducer (c: Ctx) (id: IRId) (name: string) (plan
             let slot = allocaOf c (llTy ty)
             let seed = coerce c ty (emitExpr c plan.Seed)
             ln c ($"store {(llTy ty)} {seed.Reg}, ptr {slot}")
-            let licensed = foldFmfDecorable cl
+            let licensed = foldFmfDecorable c cl
             emitCountedLoop c total (fun i ->
                 let iv = { Reg = i; Ty = ScI64 }
                 let v = coerce c a.Elem (readCell c a [ iv ])
@@ -4415,7 +4421,7 @@ and private emitHotRowConsumer (c: Ctx) (id: IRId) (name: string) (declTy: IRTyp
     let slot = allocaOf c (llTy ty)
     let seed = coerce c ty (emitExpr c seedExpr)
     ln c ($"store {(llTy ty)} {seed.Reg}, ptr {slot}")
-    let licensed = foldFmfDecorable cl
+    let licensed = foldFmfDecorable c cl
     emitCountedLoop c rows (fun i ->
         let cur = loadSlot c slot ty
         let cell = readCell c a [ { Reg = i; Ty = ScI64 } ]
@@ -6058,6 +6064,16 @@ and private objectForApply (c: Ctx) (objInfo: ObjectForInfo) (args: IRExpr list)
 /// compares against. No reassociation, licensed or not: FMF arrives with the
 /// fact layer, not here.
 and private emitReduce (c: Ctx) (arrExpr: IRExpr) (kernelExpr: IRExpr) (initExpr: IRExpr option) : Val =
+    // G41: an ordinary fold consumes its operand too -- a virtual producer
+    // (a choice / guard over a writing map, a named deferred map read inside
+    // an inlined kernel) runs inside this fold, so its writes keep the fold's
+    // serial association here exactly as in emitReduceCompute.
+    let saved = c.FoldOperandWrites
+    c.FoldOperandWrites <- saved || Blade.CodeGenExprSupport.exprMayWriteIn c.BindingValues arrExpr
+    try emitReduceCore c arrExpr kernelExpr initExpr
+    finally c.FoldOperandWrites <- saved
+
+and private emitReduceCore (c: Ctx) (arrExpr: IRExpr) (kernelExpr: IRExpr) (initExpr: IRExpr option) : Val =
     // The operand is CONSUMED, not forced. `readCell` runs a producer
     // natively -- the header's contract, "reduce over an unforced computation
     // is run the producer inside the fold with no array in between" -- and
@@ -6119,7 +6135,7 @@ and private emitReduce (c: Ctx) (arrExpr: IRExpr) (kernelExpr: IRExpr) (initExpr
         let acc = allocaOf c (llTy ScF64)
         let v0 = square "0"
         ln c ($"store double {v0.Reg}, ptr {acc}")
-        let licensed = foldFmfDecorable cl
+        let licensed = foldFmfDecorable c cl
         emitCountedLoopTo c (i64Bin c "sub" len "1") (fun k ->
             let p1 = square (i64Add c k "1")
             let cur = loadSlot c acc ScF64
@@ -6180,7 +6196,7 @@ and private emitReduce (c: Ctx) (arrExpr: IRExpr) (kernelExpr: IRExpr) (initExpr
         let have = allocaOf c "i1"
         let seededLit = if seeded then "true" else "false"
         ln c ($"store i1 {seededLit}, ptr {have}")
-        let licensed = foldFmfDecorable cl
+        let licensed = foldFmfDecorable c cl
         // THE ORDER: the C++ lane's decision (CodeGenExprSupport.domainFoldOrder),
         // so a band under the licence walks by diagonal in both lanes. A seeded
         // fold over the VIRTUAL map only (a pool folds in pool order).
@@ -6265,7 +6281,7 @@ and private emitReduce (c: Ctx) (arrExpr: IRExpr) (kernelExpr: IRExpr) (initExpr
             let v0 = coerce c accTy (readCell c a [ { Reg = "0"; Ty = ScI64 } ])
             ln c ($"store {(llTy accTy)} {v0.Reg}, ptr {acc}")
             1L
-    let licensed = foldFmfDecorable cl
+    let licensed = foldFmfDecorable c cl
     let trips =
         if start = 0L then bound
         else
@@ -6326,8 +6342,8 @@ and private emitCompactFold (c: Ctx) (a: ArrVal) (cl: IRCallable) (accTy: Sc) (i
     // never brick in a REPRO build -- under BLADE_FP_REPRO=1 the serial
     // canonical walk is the only walk, which is what keeps the byte-identity
     // oracles (which pin that build) honest the day BL3999's refusal lifts.
-    let brickable = foldFmfLicensed cl
-    let fmf = foldFmfDecorable cl
+    let brickable = foldFmfLicensed c cl
+    let fmf = foldFmfDecorable c cl
     let combine (dst: string) (cur: Val) (cell: Val) =
         let next = withFoldFmf c fmf (fun () -> coerce c accTy (applyKernel c cl [ KScalar cur; KScalar cell ]))
         ln c ($"store {(llTy accTy)} {next.Reg}, ptr {dst}")
@@ -6427,7 +6443,7 @@ and private tryOrbitFold (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExpr) (initE
 
 and private emitOrbitFold (c: Ctx) (p: Blade.OrbitFold.OrbitPlan) (a: ArrVal) (accTy: Sc) : Val =
     let fold = (List.last p.Levels).Fold
-    let licensed = foldFmfDecorable fold
+    let licensed = foldFmfDecorable c fold
     let n = p.Extent
     let r = p.Rank
     let negBody = Blade.OrbitFold.negatedBody p
@@ -6837,6 +6853,14 @@ and private emitOrbitScatter (c: Ctx) (sp: Blade.OrbitFold.StrictPlan) (a: ArrVa
 /// answers a flat pack of scalars, which is how "several statistics in one
 /// pass" costs one traversal.
 and private emitReduceCompute (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExpr) (initExpr: IRExpr) : Val list =
+    // G41: a fold over a deferred computation whose kernels WRITE keeps its
+    // serial chain in this lane too (no fold FMF), as the C++ lane does.
+    let saved = c.FoldOperandWrites
+    c.FoldOperandWrites <- saved || Blade.CodeGenExprSupport.exprMayWriteIn c.BindingValues compExpr
+    try emitReduceComputeCore c compExpr kernelExpr initExpr
+    finally c.FoldOperandWrites <- saved
+
+and private emitReduceComputeCore (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExpr) (initExpr: IRExpr) : Val list =
     match tryOrbitFold c compExpr kernelExpr initExpr with
     | Some v -> [ v ]
     | None ->
@@ -6884,7 +6908,7 @@ and private emitReduceCompute (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExpr) (
             // PER LEG: one leg of a join may be a `comm`-declared kernel and
             // its neighbour an arbitrary one, and they share a nest without
             // sharing a license.
-            (a, cl, ty, slot, foldFmfDecorable cl)) arrs kernels seeds
+            (a, cl, ty, slot, foldFmfDecorable c cl)) arrs kernels seeds
     // A COMPACT domain goes through the blocked-simplex fold, one leg at a
     // time: a fused join shares ONE nest by construction, and the bricked nest
     // is a different nest per leg's licence, so mixing them would either
@@ -7631,7 +7655,7 @@ let private emitFusedCompaction (c: Ctx) (b: IRBinding) (elem: Sc) (n: string) (
                 if not f.InPass then None
                 else
                 match resolveCallable f.FoldKernel with
-                | Some cl when cl.Params.Length = 2 && not (foldFmfDecorable cl) ->
+                | Some cl when cl.Params.Length = 2 && not (foldFmfDecorable c cl) ->
                     let acc = allocaOf c (llTy ScF64)
                     ln c ($"store double 0x0000000000000000, ptr {acc}")
                     Some (f, cl, acc)
@@ -7929,7 +7953,7 @@ let private resolveFrames (c: Ctx) (bodies: string list list) : string list list
 /// The reason half of the lane's census line, for the current build.
 let ompCensusReason () : string =
     if Blade.CodeGenState.fpReassocEnabled () then
-        "the LLVM lane has no thread-level form; the licence is honoured as fold reassociation"
+        "the LLVM lane has no thread-level form; a licensed fold is reassociated instead (one whose kernel or deferred map writes keeps its serial chain)"
     else
         "the LLVM lane has no thread-level form, and BLADE_FP_REPRO=1 keeps every fold serial (no reassociation either)"
 
@@ -7965,6 +7989,10 @@ let tryEmitProgramNamed (programName: string) (program: IRProgram) : Result<stri
             // analysis context -- without this the loop builder resolves every
             // kernel to None and silently emits an empty nest.
             let prevCtx = Blade.IR.setCallablesContext callables
+            // G41 / G43: the write analysis follows named deferred values
+            // through this module's lets (installed per program, like the C++
+            // lane's genModule).
+            (Blade.CodeGenExprSupport.programLetValuesCell ()).Value <- Blade.CodeGenExprSupport.computeProgramLetValues m
             try
             // The fact pass runs BEFORE any instruction: `main`'s own attribute
             // group depends on whether a function emitted much later recurses,

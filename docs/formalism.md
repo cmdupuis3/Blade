@@ -1268,7 +1268,18 @@ binding captured from outside it -- its cells run concurrently, so the store
 would be a data race (BL4005). A serial body's write to a captured `let mut`
 (or a named function's write to a module-level one) is still accepted as an
 ordered side effect; the optimizer treats such calls as barriers (CSE never
-merges across them).
+merges across them), and no licence reorders it: a fold whose kernel or map
+body writes keeps its serial chain in every build -- `comm`, a map's `omp`,
+or a fold's `omp` chunks or lanes only a fold whose evaluations are free of
+writes. A JOIN is the one serial context that refuses a write, by a deliberate
+restriction (gap G43, an acceptance-policy change -- not a consequence of the
+race rule): a leg of a `<&!>` / `<&>` tree or of a reduction join (§10.2)
+whose map kernel, fold kernel (a fused tree's shared one included), or a named
+deferred computation it reads writes storage observable outside it is refused
+(BL4005), because the join defines no order for those writes (the lanes had
+three). A write to storage the leg makes itself (a local scalar, a fresh
+scratch array, a let-rec buffer) is not observable and stays legal. Force the
+writing map first (`|> compute`) or fold the legs separately.
 
 A lambda is a value that may outlive the scope that made it: returned from a
 function (`function mk(i) = lambda(j) -> i * 10 + j`), stored in a tuple, array
@@ -2058,7 +2069,10 @@ writes no cells and so has no output shape to reconcile.
 Legs referring to the same **named deferred** computation evaluate it once per
 joint cell; the name is the declaration, whether it stands in an operand slot
 (`prodsum(e, v)`) or is a leg's own traversal (`reduce(e, (+))`) -- the leg
-folds the shared cell, not a second evaluation. One leg is the identity (a scalar, not
+folds the shared cell, not a second evaluation. (The once-per-cell count is the
+join's VALUE semantics. It was never stated for effects, and since gap G43 the
+language refuses a leg that writes observable storage (§5.2) rather than
+specify an order for its writes -- a new restriction, not restored semantics.) One leg is the identity (a scalar, not
 a 1-tuple); zero legs has no index space and is refused. Both spellings are
 pinned in `tests/corpus/`; note that `object_for(<&!>) <@> (c₁, …, c_k)`
 over deferred MAPS keeps its existing reading (n-ary map fusion answering k

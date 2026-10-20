@@ -1,0 +1,18 @@
+// TEST: Omp Fold Over Writing Map Stays Ordered
+// Gap G41, the mirror case. A `where omp` FOLD kernel licenses reassociating
+// the fold, not running the MAP's body concurrently: the map below carries no
+// omp, so its write to a captured `let mut` is legal (BL4005 covers parallel
+// bodies only) and ordered -- cell i reads G(0) after i + 1 increments. Before
+// the fix Path B chunked the map's level across a team (an mt8 run printed
+// total 241801, G(0) = 456). Such a fold keeps the serial chain now: no team,
+// no simd form over a body that stores.
+//   cell i = (i + 1) + i = 2i + 1;  total = 521 * 521 = 271441
+type I = Idx<521>
+type K = Idx<2>
+let mut G: Array<Float64 like K> = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute
+let total = reduce(method_for(range<I>) <@> lambda(i) -> { G((0 : K)) = G((0 : K)) + 1.0; G((0 : K)) + Float64(i) },
+                   lambda(a, b) where omp -> a + b, 0.0)
+let g0 = G((0 : K))
+// EXPECT: total = 271441.0
+// EXPECT: g0 = 521.0
+// EXPECT: G = [521.0, 0.0]

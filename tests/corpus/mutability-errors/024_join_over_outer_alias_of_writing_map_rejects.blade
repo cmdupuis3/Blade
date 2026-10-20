@@ -1,0 +1,14 @@
+// TEST: join over an outer-scope alias of a writing map read in a function (rejects)
+// ERROR: BL4005 @ 9:1
+// ERROR-CONTAINS: a leg of this join writes a captured binding
+// Gap G43 (Codex re-review, finding 10): the writing map is named at module
+// scope and aliased there; the join inside `twice` reads the alias.
+type I = Idx<4>
+let mut G = [0]
+let m = method_for(range<I>) <@> lambda(i) -> { G(0) = G(0) + 1; G(0) }
+let alias = m
+function twice() -> Int64 = {
+    let (s, t) = object_for(<&!>) <@> (reduce(alias, (+)), reduce(alias, (+)))
+    s * 1000 + t
+}
+let r = twice()

@@ -822,7 +822,7 @@ let total = reduce(xs, lambda(a, b) where omp -> a + b, 0.0)
            emitUnder [] "facts" licensedFoldSource with
      | Error e, _, _ | _, Error e, _ | _, _, Error e -> fail name e
      | Ok ll, Ok repro, Ok noOmp ->
-         if not (ll.Contains (census + "; the licence is honoured as fold reassociation (lambda in total)")) then
+         if not (ll.Contains (census + "; a licensed fold is reassociated instead (one whose kernel or deferred map writes keeps its serial chain) (lambda in total)")) then
              fail name "default build: no census comment for the dropped thread team"
          elif not ((instructionsOnly ll).Contains "reassoc nsz") then
              fail name "default build: the licence's reordering half was not spent (no `reassoc nsz`)"
@@ -832,7 +832,82 @@ let total = reduce(xs, lambda(a, b) where omp -> a + b, 0.0)
              fail name "a program with no omp request carries a census line"
          else pass name "census comment in both builds, none without a request")
 
-    // ---- the syrk tile core (microkernel review item M6) --------------------
+    // ---- gap G41: a fold over a WRITING deferred map keeps its serial chain --
+    // The map kernel writes a captured counter, so the accumulator's `fadd`
+    // carries no fold fast-math (the C++ lane's `licensedFold` declines the
+    // same fold to its serial chain); the pure twin keeps `reassoc nsz`.
+    (let writing = """
+type Ix = Idx<9>
+let mut G = [0.0]
+let total = reduce(method_for(range<Ix>) <@> lambda(i) -> {
+    G(0) = G(0) + 1.0
+    G(0) * 1.5
+}, (+))
+"""
+     let pure = """
+type Ix = Idx<9>
+let total = reduce(method_for(range<Ix>) <@> lambda(i) -> Float64(i) * 1.5, (+))
+"""
+     let name = "G41: a writing deferred map's fold carries no fold FMF; the pure twin does"
+     match emitUnder [] "g41w" writing, emitUnder [] "g41p" pure with
+     | Error e, _ | _, Error e -> fail name e
+     | Ok w, Ok p ->
+         if (instructionsOnly w).Contains "reassoc" then fail name "writing map: the fold accumulator still carries `reassoc`"
+         elif not ((instructionsOnly p).Contains "reassoc nsz") then fail name "pure twin: no `reassoc nsz` (the control is vacuous)"
+         else pass name "no `reassoc` over the writing map; `reassoc nsz` over the pure one")
+
+    // ---- G41 (Codex re-review, finding 11): EVERY fold entry, not only the
+    // fused terminal. An ordinary `reduce` over a CHOICE whose left map writes
+    // (lowered as IRReduce; the choice stays a virtual producer), and a fold
+    // KERNEL whose inner `reduce` reads a named writing map: neither
+    // accumulator may carry fold fast-math; the pure twins keep it. The
+    // accumulator's instruction is pinned exactly.
+    (let choice (body: string) = $"""
+type Ix = Idx<9>
+let mut G = [0.0]
+let x = method_for(range<Ix>) <@> lambda(i) -> Float64(i) * 0.5 |> compute
+let total = reduce((method_for(x) <@> lambda(v) -> {body}) <|> (method_for(x) <@> lambda(v) -> v), (+))
+"""
+     let kernel (body: string) = $"""
+type Ix = Idx<3>
+let mut G = [0.0]
+let m = method_for(range<Ix>) <@> lambda(i) -> {body}
+let k = lambda(a: Float64, b: Float64) where comm(a, b) -> {{
+    let z = reduce(m, (+))
+    a + b + z
+}}
+let total = reduce(method_for(range<Ix>) <@> lambda(i) -> Float64(i), k, 0.0)
+"""
+     let writing = "{\n    G(0) = G(0) + 1.0\n    v * 1.5\n}"
+     let writingI = "{\n    G(0) = G(0) + 1.0\n    G(0) * 1.5\n}"
+     for (name, w, p) in [ ("G41: ordinary reduce over a writing choice keeps the serial chain", choice writing, choice "v * 1.5")
+                           ("G41: a fold kernel's inner reduce over a named writing map keeps the serial chain", kernel writingI, kernel "Float64(i) * 1.5") ] do
+         match emitUnder [] "g41c" w, emitUnder [] "g41cp" p with
+         | Error e, _ | _, Error e -> fail name e
+         | Ok wl, Ok pl ->
+             let wi = instructionsOnly wl
+             if wi.Contains "reassoc" then fail name "writing producer: a fold still carries `reassoc`"
+             elif not (wi.Contains "fadd contract double") then fail name "writing producer: no plain `fadd contract double` accumulator"
+             elif not ((instructionsOnly pl).Contains "reassoc nsz") then fail name "pure twin: no `reassoc nsz` (the control is vacuous)"
+             else pass name "serial `fadd contract double` over the writing producer; `reassoc nsz` over the pure twin")
+
+    // ---- gap G42: the three-leaf join projections run NATIVELY here ---------
+    // corpus tuples/032's shape must be emitted by this lane, not handed back
+    // to C++ (its `blade test llvm tuples` pass would otherwise compare the C++
+    // lane against itself).
+    (let src = """
+let x = [1.0, 2.0, 3.0]
+let l = method_for(x)
+let t = reduce((l <@> lambda(v) -> v) <&!> (l <@> lambda(v) -> 2.0 * v) <&!> (l <@> lambda(v) -> 3.0 * v), (+))
+let q1 = t[1]
+let q01 = t[0][1]
+let ((n0, n1), n2) = t
+let (m0, m1, m2) = t
+"""
+     let name = "G42: tuples/032's three-leaf projections emit natively"
+     match emitUnder [] "g42" src with
+     | Error e -> fail name ($"the lane refused it: {e}")
+     | Ok ll -> if ll.Contains "define" then pass name "native module emitted" else fail name "no function emitted")    // ---- the syrk tile core (microkernel review item M6) --------------------
     // A same-array comm row contraction at or above the crossover (p >= 16,
     // k >= 4) materializes through ONE call to blade_llvm_tiles.c, with the
     // emitter's argument recipe: p, k, the operand pool, ldx = k, the output

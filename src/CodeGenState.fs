@@ -309,6 +309,25 @@ let moduleTupleChildrenCell () : Map<string, string list> ref =
         fresh
     else v
 
+/// The bindings (by IRId, unique per program) whose C++ value is a FLAT tuple
+/// -- a fusion / join emitter's `std::make_tuple(t_0, t_1, t_2)`, an alias or
+/// a sub-tuple projection of one -- while their IR type is the left-nested
+/// pair tree. Read by the INLINE tuple-projection render (exprToCpp's
+/// IRTupleProj arm), which has no ctx.TupleChildren: a projection chain rooted
+/// at one of these ids is translated to flat leaf positions (`t[1]` of
+/// ((a, b), c) is `std::get<2>(t)`) instead of walking the nested type against
+/// a flat value (gap G42). Registered by genBinding wherever the binding's own
+/// C++ name gained TupleChildren. Reset per program assembly.
+let internal flatTupleIdsStorage =
+    System.Threading.AsyncLocal<Set<IRId> ref>()
+
+let flatTupleIdsCell () : Set<IRId> ref =
+    let v = flatTupleIdsStorage.Value
+    if isNull (box v) then
+        let fresh = ref Set.empty
+        flatTupleIdsStorage.Value <- fresh
+        fresh
+    else v
 /// Append-only, insertion-ordered line collector for the emission-side cells
 /// below. Replaces the `string list ref` they used to be: every contribution
 /// was `cell.Value <- cell.Value @ lines` (an O(n) list copy per append) and the
@@ -1591,6 +1610,7 @@ let resetProgramStateCells () : unit =
     freshCell declShownNamesStorage Map.empty
     freshCell forcedDeferredIdsStorage Set.empty
     freshCell moduleTupleChildrenStorage Map.empty
+    freshCell flatTupleIdsStorage Set.empty
     cudaKernelDefsStorage.Value <- DeclCollector()
     symmDeclsStorage.Value <- DeclCollector()
     moduleGlobalDeclsStorage.Value <- DeclCollector()

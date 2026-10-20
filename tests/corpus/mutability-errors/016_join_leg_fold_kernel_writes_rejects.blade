@@ -1,0 +1,14 @@
+// TEST: fold kernel of a reduction join leg writes (rejects)
+// ERROR: BL4005 @ 10:1
+// ERROR-CONTAINS: a leg of this join writes a captured binding
+// Gap G43. One leg's FOLD kernel writes the captured `G` and the other leg's
+// map reads it: the legs fold side by side, so what the reader sees depends on
+// the join's internal schedule: the compiled lanes interleaved the legs per
+// cell (r = 612.0), the interpreter ran them one after another (r = 615.0).
+// Refused like a writing map leg.
+let mut G = [0.0]
+let x = [1.0, 2.0, 3.0]
+let r = {
+    let (s, t) = object_for(<&!>) <@> (reduce(x, lambda(a, b) -> { G(0) = G(0) + 1.0; a + b }, 0.0), reduce(method_for(x) <@> lambda(v) -> v + G(0), (+)))
+    s * 100.0 + t
+}

@@ -1,0 +1,36 @@
+// TEST: Join Projection Controls
+// Gap G42 controls (Codex review of W2-F): the flat-leaf translation must hold
+// for a FOUR-leaf join (type (((F, F), F), F)), through an ALIAS of the join,
+// for a returned nested SUB-tuple, and must leave a genuine nested USER tuple
+// (held nested in C++) alone. Leaves sum to 6, 12, 18, 24 over [1, 2, 3].
+function four(x: Float64^1) -> Float64 = {
+    let l = method_for(x)
+    let t = reduce((l <@> lambda(v) -> v) <&!> (l <@> lambda(v) -> 2.0 * v) <&!> (l <@> lambda(v) -> 3.0 * v) <&!> (l <@> lambda(v) -> 4.0 * v), (+))
+    t[1] * 1000.0 + t[0][1] * 100.0 + t[0][0][1] * 10.0 + t[0][0][0]
+}
+function aliased(x: Float64^1) -> Float64 = {
+    let l = method_for(x)
+    let t = reduce((l <@> lambda(v) -> v) <&!> (l <@> lambda(v) -> 2.0 * v) <&!> (l <@> lambda(v) -> 3.0 * v), (+))
+    let u = t
+    u[1] * 100.0 + u[0][1]
+}
+function sub(x: Float64^1) -> ((Float64, Float64), Float64) = {
+    let l = method_for(x)
+    let t = reduce((l <@> lambda(v) -> v) <&!> (l <@> lambda(v) -> 2.0 * v) <&!> (l <@> lambda(v) -> 3.0 * v) <&!> (l <@> lambda(v) -> 4.0 * v), (+))
+    t[0]
+}
+function user(y: Float64) -> Float64 = {
+    let nt = ((y, 2.0 * y), 3.0 * y)
+    nt[1] * 100.0 + nt[0][1] * 10.0 + nt[0][0]
+}
+let x = [1.0, 2.0, 3.0]
+let a = four(x)
+let b = aliased(x)
+let ((s0, s1), s2) = sub(x)
+let c = user(1.0)
+// EXPECT: a = 25926.0
+// EXPECT: b = 1812.0
+// EXPECT: s0 = 6.0
+// EXPECT: s1 = 12.0
+// EXPECT: s2 = 18.0
+// EXPECT: c = 321.0

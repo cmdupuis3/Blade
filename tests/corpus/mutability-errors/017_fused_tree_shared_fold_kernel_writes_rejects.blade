@@ -1,0 +1,12 @@
+// TEST: fused tree whose SHARED fold kernel writes (rejects)
+// ERROR: BL4005 @ 11:1
+// ERROR-CONTAINS: a leg of this join writes a captured binding
+// Gap G43 (Codex review of W2-F, blocker 2). Both maps are pure; the ONE
+// scalar fold kernel the fused tree applies per leaf writes the captured `F`,
+// once per leaf per cell in the merged nest. The second leaf names the loop
+// object through an alias. Refused like any writing join leg.
+let mut F = [0.0]
+let x = [1.0, 2.0, 3.0]
+let L = method_for(x)
+let L2 = L
+let r = reduce((L <@> lambda(v) -> v) <&!> (L2 <@> lambda(v) -> 2.0 * v), lambda(a, b) -> { F(0) = F(0) + 1.0; a + b }, 0.0)

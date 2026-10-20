@@ -1,0 +1,16 @@
+// TEST: join leg map stores through a local rebound to a captured view (rejects)
+// ERROR: BL4005 @ 10:1
+// ERROR-CONTAINS: a leg of this join writes a captured binding
+// Gap G43 (Codex re-review, finding 9): `t` starts as fresh scratch but is
+// REBOUND to a row view of the captured `G` before the store, so the leg
+// writes G. Provenance joins every value a local comes to hold.
+type K = Idx<2>
+let mut G: Array<Float64 like K, K> = method_for(range<K>, range<K>) <@> lambda(k, l) -> 0.0 |> compute
+let x = [1.0, 2.0, 3.0]
+let l = method_for(x)
+let r = reduce((l <@> lambda(v) -> {
+    let mut t = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute
+    t = G((0 : K))
+    t((0 : K)) = t((0 : K)) + v
+    v
+}) <&!> (l <@> lambda(v) -> v * v), (+))

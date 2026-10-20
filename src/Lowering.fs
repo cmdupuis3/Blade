@@ -2707,6 +2707,113 @@ let private refuseUncountableStorage (modules: IRModule list) : unit =
             for p in f.Params do check f.Name $"parameter '{p.Name}' of '{f.SourceName}'" p.Type
             check f.Name $"the result of '{f.SourceName}'" f.RetType
 
+/// A JOIN WHOSE LEG WRITES (gap G43, BL4005). A join -- a `<&!>` / `<&>`
+/// tree, or a reduction join `object_for(<&!>) <@> (reduce(..), ..)` -- runs
+/// its legs side by side, one joint cell at a time, and legs naming the same
+/// named deferred computation evaluate it ONCE per joint cell (formalism
+/// §10.2). That schedule is the join's meaning for values; it was never a
+/// promise about effects, and the lanes kept three different ones (the C++
+/// lane shared the cell, the LLVM lane interleaved one evaluation per leg,
+/// the interpreter ran the legs one after another), so a leg whose map kernel
+/// or fold kernel WRITES a captured binding printed three different answers.
+/// A serial write is an ordered side effect (§5.2), and a join has no single
+/// order to give it: refused, like a write in a parallel body. The fix is to
+/// force the writing map first (`|> compute`: one evaluation, stored) or fold
+/// the legs separately. A joined evaluation must be PROVED free of observable
+/// writes: an unresolvable callee or function-typed kernel counts as a write
+/// (Optimize.exprMayWriteWith). Spanned at the enclosing declaration.
+let private refuseWritingJoinLegs (modules: IRModule list) : unit =
+    let funcs =
+        modules |> List.collect (fun m -> m.Functions) |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+    // Every let-bound value in the program (ids are unique per program): a leg
+    // that NAMES a deferred computation, an alias of one, or an alias of a
+    // callable resolves through it.
+    let lets = System.Collections.Generic.Dictionary<IRId, IRExpr>()
+    let noteLets (e: IRExpr) =
+        iterIRExpr (fun n -> match n with IRLet (id, v, _) -> lets.[id] <- v | _ -> ()) e
+    for m in modules do
+        for b in m.Bindings do
+            lets.[b.Id] <- b.Value
+            noteLets b.Value
+        for f in m.Functions do noteLets f.Body
+    let mutableLets = modules |> List.fold (fun acc m -> Set.union acc m.MutableArrayLets) Set.empty
+    let rec chaseAlias (seen: Set<IRId>) (e: IRExpr) : IRExpr =
+        match e with
+        | IRVar (id, _) when not (funcs.ContainsKey id) && not (seen.Contains id) ->
+            (match lets.TryGetValue id with
+             | true, (IRVar _ as v) -> chaseAlias (seen.Add id) v
+             | _ -> e)
+        | _ -> e
+    let resolve (e: IRExpr) =
+        match chaseAlias Set.empty e with
+        | IRVar (id, _) -> Map.tryFind id funcs
+        | _ -> None
+    // `let mut a = Z` over a dense array deep-copies Z in every lane.
+    let copied (id: IRId) =
+        mutableLets.Contains id
+        && (match lets.TryGetValue id with
+            | true, (IRVar (_, ty)) ->
+                (match stripUnits ty with
+                 | ArrayElem at -> at.IndexTypes |> List.forall (fun ix -> ix.IxKind = IxKPlain && ix.Symmetry = SymNone)
+                 | _ -> false)
+            | _ -> false)
+    let facts : Optimize.WriteFacts =
+        { Resolve = resolve
+          OuterLet = (fun id -> match lets.TryGetValue id with | true, v -> Some v | _ -> None)
+          CopiedLet = copied }
+    // An unresolved call head counts as a write here too: a joined evaluation
+    // must be PROVED free of observable writes, not merely not seen writing.
+    let writes (e: IRExpr) = Optimize.exprMayWriteWith facts e
+    // The joint computation, through let aliases of a named tree.
+    let rec resolveComp (seen: Set<IRId>) (e: IRExpr) : IRExpr =
+        match e with
+        | IRVar (id, _) when not (seen.Contains id) ->
+            (match lets.TryGetValue id with
+             | true, ((IRVar _ | IRFusion _ | IRParallel _) as v) -> resolveComp (seen.Add id) v
+             | _ -> e)
+        | _ -> e
+    let rec leavesOf (e: IRExpr) : IRExpr list =
+        match e with
+        | IRFusion (l, r) | IRParallel (l, r, _) -> leavesOf l @ leavesOf r
+        | other -> [ other ]
+    // A destructuring `let (a, b) = <join>` binds a hidden tuple whose name has
+    // no surface span: locate it at the first name the pattern binds.
+    let projSpans =
+        modules |> List.collect (fun m -> m.Bindings)
+        |> List.choose (fun b ->
+            match b.Value with
+            | IRTupleProj (IRVar (src, _), _, _) -> Some (src, b.Name)
+            | _ -> None)
+    let spanOf (owner: string) (ownerId: IRId option) =
+        let s = IR.declSpanOf owner
+        if s <> Blade.Ast.noSpan then s
+        else
+            match ownerId |> Option.bind (fun id -> projSpans |> List.tryFind (fun (src, _) -> src = id)) with
+            | Some (_, n) -> IR.declSpanOf n
+            | None -> s
+    let refuse (owner: string) (ownerId: IRId option) =
+        raise (Blade.Diagnostics.BladeDiagnosticException
+                (Blade.Diagnostics.mkError "BL4005" Blade.Diagnostics.PhConstraints (spanOf owner ownerId)
+                    "a leg of this join writes a captured binding: a join (`<&!>`, `<&>`, or a reduction join) runs its legs side by side, one joint cell at a time, and evaluates a named computation its legs share once per cell (formalism 10.2), so the order and count of the leg's writes have no single meaning. Force the writing map first (`|> compute`: one evaluation, stored, in order) or fold the legs separately."))
+    let check (owner: string) (ownerId: IRId option) (root: IRExpr) =
+        iterIRExpr (fun n ->
+            match n with
+            | IRFusion _ | IRParallel _ ->
+                if leavesOf n |> List.exists writes then refuse owner ownerId
+            | IRReduceCompute (comp, kernel, _) ->
+                let leaves = leavesOf (resolveComp Set.empty comp)
+                let joined =
+                    leaves.Length >= 2
+                    || (match kernel with IRTuple ks -> ks.Length >= 2 | _ -> false)
+                if joined then
+                    // the per-leg fold kernels of a reduction join, or the ONE
+                    // scalar kernel a fused tree applies per leaf, and every leaf
+                    let kernels = match kernel with IRTuple ks -> ks | k -> [ k ]
+                    if kernels |> List.exists writes || leaves |> List.exists writes then refuse owner ownerId
+            | _ -> ()) root
+    for m in modules do
+        for b in m.Bindings do check b.Name (Some b.Id) b.Value
+        for f in m.Functions do check f.Name None f.Body
 let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (builder: IRBuilder) : IRProgram =
     // The scratch-reuse plan is keyed by let id and let ids restart per
     // compile, so a stale plan from an earlier program in this flow (the test
@@ -2817,6 +2924,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     // builder mints exactly the same ids in exactly the same order as before.
     let irModules = IRMono.shapeMonomorphizeModules irModules env.Builder
     refuseUncountableStorage irModules
+    refuseWritingJoinLegs irModules
 
     // Every struct the program declares, for `zero` at a struct type
     // (IRMono.resolveTypedZerosModule): the struct may live in another module

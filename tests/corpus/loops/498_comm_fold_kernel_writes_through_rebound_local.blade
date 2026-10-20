@@ -1,0 +1,22 @@
+// TEST: Comm Fold Kernel Writes Through A Rebound Local
+// Gap G41, the rebinding case (Codex re-review of W2-F, finding 9). The fold
+// kernel's `t` starts as fresh scratch, then is REBOUND to a row view of the
+// captured rank-2 `G` (`t = G(0)`: an ordinary assignment, so `t` shares G's
+// row in every lane), and the store through it writes G. Provenance joins
+// every value a local comes to hold, so the kernel is not reorder-licensed:
+// the map's `omp(i: 1)` opens no team and no lane form is taken.
+//   row i = sum over j of (G(0, 0) + i) with G(0, 0) = i  ->  521 * 2i
+//   total = 1042 * (0 + 1 + ... + 520) = 141149320
+type I = Idx<521>
+type K = Idx<2>
+let mut G: Array<Float64 like K, K> = method_for(range<K>, range<K>) <@> lambda(k, l) -> 0.0 |> compute
+let total = reduce(method_for(range<I>) <@> lambda(i) where omp(i: 1) -> reduce(method_for(range<I>) <@> lambda(j) -> G((0 : K), (0 : K)) + Float64(i), (+)),
+                   lambda(a, b) where comm(a, b) -> {
+                       let mut t = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute
+                       t = G((0 : K))
+                       t((0 : K)) = t((0 : K)) + 1.0
+                       a + b
+                   }, 0.0)
+let g00 = G((0 : K), (0 : K))
+// EXPECT: total = 141149320.0
+// EXPECT: g00 = 521.0

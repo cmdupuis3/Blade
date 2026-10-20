@@ -794,6 +794,252 @@ let private cseFactsOf (funcs: Map<IRId, IRCallable>) : IRExpr -> CseFacts =
         { MayWrite = mayWrite; Repeatable = repeatable }
     ofExpr
 
+/// Where an array value's STORAGE comes from, as far as a write through it is
+/// concerned: storage made inside the walked body (`Fresh` -- a store into it
+/// is invisible outside), the storage of some of the walked callable's
+/// parameters (`Params`, by index -- the CALLER decides what that is), or
+/// anything else (`External`: a captured or module binding, a view of one, a
+/// call's array result, a form not proved fresh).
+type WriteProvenance = { External: bool; Params: Set<int> }
+
+/// The facts the write analysis reads from its context (gaps G41 / G43).
+type WriteFacts = {
+    /// A callee or kernel reference -> its callable (aliases already chased).
+    Resolve: IRExpr -> IRCallable option
+    /// An OUTER let's initializer (one not bound inside the walked body): the
+    /// analysis follows deferred computations through it -- a named unforced
+    /// map runs where it is read -- and stops at a materialization boundary
+    /// (`|> compute`, a stored value).
+    OuterLet: IRId -> IRExpr option
+    /// `let mut a = Z` over a dense array deep-copies Z (genVarAliasBinding /
+    /// Interp.Core): such a let owns fresh storage.
+    CopiedLet: IRId -> bool
+}
+
+/// The summary of one callable: does a call write storage the caller can
+/// observe regardless of its arguments (`External`), and which of its
+/// parameters' storage does it write (`Params`)?
+let private writeNone : WriteProvenance = { External = false; Params = Set.empty }
+let private writeJoin (a: WriteProvenance) (b: WriteProvenance) =
+    { External = a.External || b.External; Params = Set.union a.Params b.Params }
+
+let private holdsNoStorage (t: IRType) : bool =
+    let rec go (t: IRType) =
+        match stripUnits t with
+        | IRTScalar _ | IRTIdxTagged _ | IRTUnit | IRTNat _ -> true
+        | IRTTuple ts -> ts |> List.forall go
+        | _ -> false
+    go t
+
+let private isDeferredForm (e: IRExpr) : bool =
+    match e with
+    | IRApplyCombinator _ | IRComposeApply _ | IRFusion _ | IRParallel _
+    | IRComposeObj _ | IRComposeMeth _ | IRBind _ | IRFunctorMap _ | IRZip _
+    | IRMethodFor _ | IRObjectFor _
+    // wrappers codegen keeps deferred too (CodeGenBinding's deferred
+    // registration; EmitLlvm's virtual choice / guard producers): their
+    // operands run where the wrapper is read
+    | IRChoice _ | IRFallback _ | IRGuard _ | IRSequence _ -> true
+    | _ -> false
+
+/// THE WRITE ANALYSIS (gaps G41 / G43; exprMayWriteWith / callableMayWriteWith): does evaluating `root` write storage
+/// that another evaluation can observe? Shared by codegen's reorder licence
+/// (CodeGenExprSupport.callableMayWrite / exprMayWrite: a writing kernel or
+/// map body is never reordered) and Lowering's join-leg refusal. One policy:
+///   * STORAGE PROVENANCE, not initializer syntax: an assignment is local only
+///     when its target's storage is proved fresh inside the walked body -- an
+///     array literal, a materialized map, a let-rec buffer, a scalar, a
+///     `let mut` deep copy, or an alias chain / view / field / tuple
+///     projection of such a local. A view of a captured array (`let t = G(0)`),
+///     a call's array result (`let t = get_G()`), anything not proved fresh is
+///     external.
+///   * ARGUMENT-AWARE calls: a callee's summary says which parameters it
+///     writes; the write lands on the provenance of the caller's argument, so
+///     a callee filling the caller's fresh scratch writes nothing observable.
+///   * a callable named as a KERNEL (map, fold, inner reduce) writes
+///     observably when it writes anything outside its own body, its
+///     parameters included (a kernel's parameters are its operands' cells).
+///   * FLOW-INSENSITIVE over rebinding: a local's (or parameter's) provenance
+///     is the join of its initializer and EVERY value later assigned to it or
+///     stored into one of its fields / elements (`t = G(0)` makes `t` a view
+///     of G for every store through it), so a `let` initializer is never
+///     taken as lifetime ownership.
+///   * a named DEFERRED computation read here is evaluated here: followed
+///     through `OuterLet`, let aliases, tuple projections and every deferred
+///     wrapper (choice, fallback, guard, sequence included), until a
+///     materialization boundary (`|> compute`, a stored value).
+///   * an UNRESOLVED call head (a function-typed value, a curried result) or
+///     an unresolved function-typed name in a KERNEL slot may do anything:
+///     counted as a write (a decline declines, a refusal refuses an
+///     unproved-pure evaluation).
+/// Cycles: a callable met again while its own summary is computed answers
+/// "writes every array parameter" (sound: its own direct writes are found on
+/// the first visit); a deferred let is walked once.
+let private writeAnalyzer (facts: WriteFacts) =
+    let summaries = System.Collections.Generic.Dictionary<IRId, WriteProvenance>()
+    let rec summaryOf (c: IRCallable) : WriteProvenance =
+        match summaries.TryGetValue c.Id with
+        | true, s -> s
+        | _ ->
+            let pessimistic =
+                { External = false
+                  Params = c.Params |> List.indexed |> List.filter (fun (_, p) -> not (holdsNoStorage p.Type)) |> List.map fst |> Set.ofList }
+            summaries.[c.Id] <- pessimistic
+            let paramIdx =
+                c.Params |> List.indexed |> List.collect (fun (i, p) -> [ (p.VarId, i) ]) |> Map.ofList
+            let paramNames = c.Params |> List.indexed |> List.map (fun (i, p) -> (p.Name, i)) |> Map.ofList
+            let s = walkBody paramIdx paramNames c.Body
+            summaries.[c.Id] <- s
+            s
+    /// The writes of one body, as a provenance summary over its parameters.
+    and walkBody (paramIdx: Map<IRId, int>) (paramNames: Map<string, int>) (body: IRExpr) : WriteProvenance =
+        let locals = System.Collections.Generic.Dictionary<IRId, IRExpr>()
+        let walkedLets = System.Collections.Generic.HashSet<IRId>()
+        iterIRExpr (fun n -> match n with IRLet (id, v, _) -> locals.[id] <- v | _ -> ()) body
+        // Every value a local or parameter can come to hold: its initializer
+        // plus each later whole rebinding, and each storage-bearing value
+        // stored into one of its fields / elements (a reference stored in an
+        // aggregate is projected back out later).
+        let rebinds = System.Collections.Generic.Dictionary<IRId, ResizeArray<IRExpr>>()
+        let rec rootVar (t: IRExpr) =
+            match t with
+            | IRIndex (b, _, _) | IRFieldAccess (b, _) | IRTupleProj (b, _, _) -> rootVar b
+            | IRVar (id, _) -> Some id
+            | _ -> None
+        iterIRExpr (fun n ->
+            match n with
+            | IRAssign (target, v) ->
+                (match rootVar target with
+                 | Some id when locals.ContainsKey id || paramIdx.ContainsKey id ->
+                     let whole = (match target with IRVar _ -> true | _ -> false)
+                     let carries = whole || not (try holdsNoStorage (typeOf v) with _ -> false)
+                     if carries then
+                         (match rebinds.TryGetValue id with
+                          | true, l -> l.Add v
+                          | _ -> rebinds.[id] <- ResizeArray [ v ])
+                 | _ -> ())
+            | _ -> ()) body
+        let rec prov (seen: Set<IRId>) (e: IRExpr) : WriteProvenance =
+            let scalarTyped = try holdsNoStorage (typeOf e) with _ -> false
+            let rebound (seen: Set<IRId>) (id: IRId) =
+                match rebinds.TryGetValue id with
+                | true, vs -> vs |> Seq.map (prov (seen.Add id)) |> Seq.fold writeJoin writeNone
+                | _ -> writeNone
+            match e with
+            | IRVar (id, _) when paramIdx.ContainsKey id ->
+                if seen.Contains id then writeNone
+                else writeJoin { writeNone with Params = Set.singleton paramIdx.[id] } (rebound seen id)
+            | IRParam (nm, _, _) when paramNames.ContainsKey nm -> { writeNone with Params = Set.singleton paramNames.[nm] }
+            | IRVar (id, _) when locals.ContainsKey id ->
+                if seen.Contains id then writeNone
+                else
+                    let init = locals.[id]
+                    let fromInit =
+                        match init with
+                        | IRVar _ when facts.CopiedLet id -> writeNone
+                        | _ -> prov (seen.Add id) init
+                    writeJoin fromInit (rebound seen id)
+            | _ when scalarTyped -> writeNone
+            | IRVar _ | IRParam _ -> { writeNone with External = true }
+            | IRIndex (b, _, _) | IRFieldAccess (b, _) | IRSlice (b, _, _, _) | IRShift (b, _, _, _)
+            | IRReverse (b, _) | IRCurry (b, _, _) -> prov seen b
+            | IRTupleProj (IRTuple es, i, false) when i >= 0 && i < es.Length -> prov seen es.[i]
+            | IRTupleProj (b, _, _) -> prov seen b
+            | IRTuple es -> es |> List.map (prov seen) |> List.fold writeJoin writeNone
+            | IRIf (_, a, b) -> writeJoin (prov seen a) (prov seen b)
+            | IRMatch (_, cases) -> cases |> List.map (fun c -> prov seen c.Body) |> List.fold writeJoin writeNone
+            | IRLet (_, _, b) -> prov seen b
+            | _ when isFreshPoolFormWith (fun _ -> false) e -> writeNone
+            | _ -> { writeNone with External = true }
+        // The storage an assignment target writes: strip the element / field /
+        // projection steps down to the base expression.
+        let rec targetBase (t: IRExpr) =
+            match t with
+            | IRIndex (b, _, _) | IRFieldAccess (b, _) | IRTupleProj (b, _, _) -> targetBase b
+            | other -> other
+        let mutable acc = writeNone
+        let add (p: WriteProvenance) = acc <- writeJoin acc p
+        let rec visit (e: IRExpr) =
+            if not acc.External then
+                match e with
+                | IRAssign (target, value) ->
+                    (match target with
+                     // Rebinding a name: local when the name is the body's own
+                     // (a let or a parameter), an observable write otherwise.
+                     | IRVar (id, _) when locals.ContainsKey id || paramIdx.ContainsKey id -> ()
+                     | IRVar _ | IRParam _ -> add { writeNone with External = true }
+                     | _ -> add (prov Set.empty (targetBase target)))
+                    visitChildren target
+                    visit value
+                | IRApp (f, args, _) ->
+                    (match facts.Resolve f with
+                     | Some c ->
+                         let s = summaryOf c
+                         if s.External then add s
+                         for k in s.Params do
+                             if k < args.Length then add (prov Set.empty args.[k])
+                             else add { writeNone with External = true }
+                     | None ->
+                         match f with
+                         // a combinator / loop-object head: its kernels are
+                         // visited as references below
+                         | IRObjectFor _ | IRMethodFor _ | IRCompose _ | IRComposeObj _ | IRComposeMeth _ -> visit f
+                         | _ -> add { writeNone with External = true })
+                    args |> List.iter visit
+                | IRVar (id, vty) ->
+                    (match facts.Resolve e with
+                     | Some c ->
+                         // a kernel reference: its parameters are cells of its
+                         // operands, so a parameter write is observable too
+                         let s = summaryOf c
+                         if s.External || not s.Params.IsEmpty then add { writeNone with External = true }
+                     | None ->
+                         // an unresolved FUNCTION-typed name (a higher-order
+                         // parameter or value in a kernel slot) may do anything
+                         if isFunctionTyped vty then
+                             add { writeNone with External = true }
+                         elif not (locals.ContainsKey id) && not (paramIdx.ContainsKey id) && walkedLets.Add id then
+                             // a named deferred computation runs where it is read
+                             let rec chase (seen: Set<IRId>) (x: IRExpr) =
+                                 match x with
+                                 | IRVar (j, _) when not (seen.Contains j) ->
+                                     (match facts.OuterLet j with
+                                      | Some v -> chase (seen.Add j) v
+                                      | None -> None)
+                                 // a projection of a deferred pack runs the pack
+                                 | IRTupleProj (b, _, _) -> chase seen b
+                                 | IRTuple es ->
+                                     // only the components that are themselves
+                                     // named or deferred (a stored component
+                                     // was evaluated at its let)
+                                     let live = es |> List.filter (fun x -> match x with IRVar _ | IRTupleProj _ | IRTuple _ -> true | v -> isDeferredForm v)
+                                     if live.IsEmpty then None else Some (IRTuple live)
+                                 | v when isDeferredForm v -> Some v
+                                 | _ -> None
+                             match facts.OuterLet id |> Option.bind (chase (Set.singleton id)) with
+                             | Some deferred -> visit deferred
+                             | None -> ())
+                | IRParam (_, _, t) when isFunctionTyped t -> add { writeNone with External = true }
+                | other -> visitChildren other
+        and visitChildren (e: IRExpr) =
+            let (ExprShape (children, _)) = e
+            children |> List.iter visit
+        visit body
+        acc
+    (summaryOf, walkBody)
+
+let exprMayWriteWith (facts: WriteFacts) (root: IRExpr) : bool =
+    let (_, walkBody) = writeAnalyzer facts
+    let s = walkBody Map.empty Map.empty root
+    s.External || not s.Params.IsEmpty
+
+/// The analysis over a CALLABLE's applications (a kernel's): a write to its
+/// own parameters counts too (they are its operands' cells).
+let callableMayWriteWith (facts: WriteFacts) (c: IRCallable) : bool =
+    let (summaryOf, _) = writeAnalyzer facts
+    let s = summaryOf c
+    s.External || not s.Params.IsEmpty
+
 /// A float literal as its bit pattern, for identity only: structural `=` on
 /// floats is IEEE equality, which calls `0.0` and `-0.0` the same value.
 let private floatBitsLit (n: IRExpr) : IRExpr =

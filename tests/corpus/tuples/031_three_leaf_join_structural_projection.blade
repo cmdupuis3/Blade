@@ -1,0 +1,39 @@
+// TEST: Three Leaf Join Structural Projection In Functions
+// Gap G42. A three-leaf shared `<&!>` reduction join has the LEFT-NESTED pair
+// type ((Float64, Float64), Float64): `t[1]` is the THIRD leaf's sum and
+// `t[0]` the pair of the first two. The C++ lane holds the join as ONE FLAT
+// `std::make_tuple(t_0, t_1, t_2)` and rendered an inline structural
+// projection against it as if it were nested: `t[1]` in a function's return
+// printed the SECOND leg (12.0, and 28.0 for `g`), and `t[0][1]` was a g++
+// rejection (BL9002). Leaves sum to 6, 12, 18 over [1, 2, 3].
+function f(x: Float64^1) -> Float64 = {
+    let l = method_for(x)
+    let t = reduce((l <@> lambda(v) -> v) <&!> (l <@> lambda(v) -> 2.0 * v) <&!> (l <@> lambda(v) -> 3.0 * v), (+))
+    t[1]
+}
+function g(x: Float64^1) -> Float64 = {
+    let l = method_for(x)
+    let t = reduce((l <@> lambda(v) -> v) <&!> (l <@> lambda(v) -> 2.0 * v) <&!> (l <@> lambda(v) -> 3.0 * v), (+))
+    let s = reduce(x, (+), 10.0)
+    t[1] + s
+}
+function h(x: Float64^1) -> Float64 = {
+    let l = method_for(x)
+    let t = reduce((l <@> lambda(v) -> v) <&!> (l <@> lambda(v) -> 2.0 * v) <&!> (l <@> lambda(v) -> 3.0 * v), (+))
+    t[0][1] * 100.0 + t[0][0] * 10.0 + t[1]
+}
+function pair(x: Float64^1) -> (Float64, Float64) = {
+    let l = method_for(x)
+    let t = reduce((l <@> lambda(v) -> v) <&!> (l <@> lambda(v) -> 2.0 * v) <&!> (l <@> lambda(v) -> 3.0 * v), (+))
+    t[0]
+}
+let x = [1.0, 2.0, 3.0]
+let a = f(x)
+let b = g(x)
+let c = h(x)
+let (p0, p1) = pair(x)
+// EXPECT: a = 18.0
+// EXPECT: b = 34.0
+// EXPECT: c = 1278.0
+// EXPECT: p0 = 6.0
+// EXPECT: p1 = 12.0

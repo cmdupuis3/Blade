@@ -1,0 +1,30 @@
+// TEST: Three Leaf Join Structural Projection At Top Level
+// Gap G42, the top-level and block-local spellings of 031 (no array-taking
+// function, so the LLVM lane runs it too): `t[0][0]` / `t[0][1]` were a g++
+// rejection (BL9002) in the C++ lane, which holds the three-leaf join as one
+// FLAT tuple under the left-nested type ((Float64, Float64), Float64). Both
+// destructurings are legal: the nested pattern binds the type's structure,
+// the flat one its leaves in order.
+let x = [1.0, 2.0, 3.0]
+let l = method_for(x)
+let t = reduce((l <@> lambda(v) -> v) <&!> (l <@> lambda(v) -> 2.0 * v) <&!> (l <@> lambda(v) -> 3.0 * v), (+))
+let q1 = t[1]
+let q00 = t[0][0]
+let q01 = t[0][1]
+let ((n0, n1), n2) = t
+let (m0, m1, m2) = t
+let blk = {
+    let u = reduce((l <@> lambda(v) -> v) <&!> (l <@> lambda(v) -> 2.0 * v) <&!> (l <@> lambda(v) -> 3.0 * v), (+))
+    u[0][1] + u[1] * 10.0
+}
+// EXPECT: q1 = 18.0
+// EXPECT: q00 = 6.0
+// EXPECT: q01 = 12.0
+// EXPECT: n0 = 6.0
+// EXPECT: n1 = 12.0
+// EXPECT: n2 = 18.0
+// EXPECT: m0 = 6.0
+// EXPECT: m1 = 12.0
+// EXPECT: m2 = 18.0
+// EXPECT: blk = 192.0
+// EXPECT: t = ((6.0, 12.0), 18.0)

@@ -1,0 +1,10 @@
+// TEST: reduction join over a named choice with a writing side (rejects)
+// ERROR: BL4005 @ 9:1
+// ERROR-CONTAINS: a leg of this join writes a captured binding
+// Gap G43 (Codex re-review, finding 10): `q` is a CHOICE, a deferred wrapper
+// whose left map writes `G`; both legs read q, so the writing map runs inside
+// the join. Every deferred wrapper is followed, not only maps.
+let x = [1.0, 2.0, 3.0]
+let mut G = [0.0]
+let q = (method_for(x) <@> lambda(v) -> { G(0) = G(0) + 1.0; G(0) }) <|> (method_for(x) <@> lambda(v) -> v)
+let r = object_for(<&!>) <@> (reduce(q, (+)), reduce(q, (+)))

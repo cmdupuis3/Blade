@@ -1,0 +1,30 @@
+// TEST: Writing Deferred Map Count By Scope Open
+// OPEN gap G45 -- a regression TARGET, not a blessed answer. The same named
+// writing map consumed by two folds evaluates TWICE in a block (r_block = 36,
+// counter 8: cells 1..4 then 5..8) but ONCE in a function body (r_fn = 20,
+// counter 4), because lowering (S2) forces a function-body let at its
+// definition while a block keeps it deferred. Every lane agrees, which is why
+// the differential gates never saw it; extracting a block into a function
+// still changes an ordered side effect. These pins record today's behaviour:
+// when G45 is decided (one evaluation contract, or a refusal of the effectful
+// shape), one of them changes, deliberately, with this file.
+type I = Idx<4>
+let mut GB = [0]
+let mut GF = [0]
+let r_block = {
+    let m = method_for(range<I>) <@> lambda(i) -> { GB(0) = GB(0) + 1; GB(0) }
+    let s = reduce(m, (+))
+    let t = reduce(m, (+))
+    s + t
+}
+function twice() -> Int64 = {
+    let m = method_for(range<I>) <@> lambda(i) -> { GF(0) = GF(0) + 1; GF(0) }
+    let s = reduce(m, (+))
+    let t = reduce(m, (+))
+    s + t
+}
+let r_fn = twice()
+// EXPECT: r_block = 36
+// EXPECT: GB = [8]
+// EXPECT: r_fn = 20
+// EXPECT: GF = [4]

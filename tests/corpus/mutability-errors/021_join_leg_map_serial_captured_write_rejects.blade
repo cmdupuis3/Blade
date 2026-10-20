@@ -1,0 +1,15 @@
+// TEST: threaded reduction join over a serial captured write (rejects)
+// ERROR: BL4005 @ 11:1
+// ERROR-CONTAINS: a leg of this join writes a captured binding
+// Bench gap G7's former value test (W2-E: the join's team declined on the
+// effect and the serial join counted 3), re-pinned under gap G43: one leg's
+// MAP kernel assigns a captured `let mut` inside a fused `<&!>` tree, and a
+// join defines no order for that write -- refused in every lane (BL4005),
+// with or without the `where omp` request on the fold kernel.
+let mut counter = 0
+let x = [1.0, 2.0, 3.0]
+let l = method_for(x)
+let (s1, s2) = reduce((l <@> lambda(v) -> {
+    counter = counter + 1
+    v
+}) <&!> (l <@> lambda(v) -> v * v), lambda(u, v) where omp -> u + v, 0.0)

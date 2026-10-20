@@ -350,6 +350,11 @@ type LoopNestCodeGen = {
     /// each packed row (see CompactRowEpilogue). None everywhere but a
     /// planned compact producer's statement-form materialization.
     CompactRowEpilogue: CompactRowEpilogue option
+    /// Why a fold over this nest has no thread-level form, when that is more
+    /// specific than the generic shared-scalar reason the nest's suppressed
+    /// marker gives (today: the fold kernel WRITES, gap G41). Meaningful only
+    /// together with FoldWrapper; None everywhere else.
+    FoldOmpDecline: string option
 }
 
 /// One dimension GROUP of a device buffer. Mirrors a single IRIndexType:
@@ -1369,4 +1374,5 @@ let buildLoopNestCodeGen
         RowEpilogue = None
         FlatEpilogue = None
         CompactRowEpilogue = None
+        FoldOmpDecline = None
     }
