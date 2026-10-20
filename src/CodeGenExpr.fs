@@ -3244,9 +3244,10 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                             recordCodegenDecision "microkernel" varName Blade.Effects.Applied
                                 [ "packed syrk tile (blade_pgemm::dsyrk_tri, 6x8 register tile over the packed triangle)"
                                   $"P={p} K={k} KC={kc} G={g}" ]
-                            recordFoldForm varName $"syrk tile 6x8, KC={kc}, row groups of {g}"
+                            let edge = triTileEdge ()
+                            recordFoldForm varName $"syrk tile 6x8, KC={kc}, row groups of {g}{triEdgeNote edge}"
                                 "gram(A, A) node (one ascending chain per cell; no reorder licence used)"
-                            Some [ $"{censusMarker}/* gram(A, A): packed-triangle syrk tile (blade_packed_gemm.hpp dsyrk_tri, 6x8, KC={kc}), row groups of {g}, per cell the serial chain */ blade_pgemm::dsyrk_tri((size_t)({mExtent}), (size_t)({nExtent}), {lName}.data, {varName}.data, 0, {threadedArg}, (size_t){syrkTileKcMax}, 0, 0.0, (size_t){g});" ]
+                            Some [ $"{censusMarker}/* gram(A, A): packed-triangle syrk tile (blade_packed_gemm.hpp dsyrk_tri, 6x8, KC={kc}), row groups of {g}, per cell the serial chain */ blade_pgemm::dsyrk_tri((size_t)({mExtent}), (size_t)({nExtent}), {lName}.data, {varName}.data, 0, {threadedArg}, (size_t){syrkTileKcMax}, 0, 0.0, (size_t){g}, {edge});" ]
                         | Some p, Some k ->
                             recordCodegenDecision "microkernel" varName
                                 (Blade.Effects.Declined "below the syrk-tile crossover (p >= 16, k >= 4): the triangular gram jam")

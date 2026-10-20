@@ -651,7 +651,7 @@ let y = gram_apply(A, A, v)
       // emission knob alone (`true` here: BLADE_OMP_THREADS is pinned unset).
       ("gate_off_gram_same_above_crossover_emits_the_packed_tile", false,
        bigCov + "let G = gram(CB, CB)\n",
-       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, G.data, 0, true, (size_t)336, 0, 0.0, (size_t)4);"
+       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, G.data, 0, true, (size_t)336, 0, 0.0, (size_t)4, 1);"
          "gram(A, A): packed-triangle syrk tile"
          "#include \"blade_packed_gemm.hpp\"" ],
        [ shimInclude; "blade_linalg::"; "cblas_"; "__gacc" ])
@@ -661,7 +661,7 @@ let y = gram_apply(A, A, v)
        + "let m1: Float64<meter> = 1.0\n"
        + "let CU = method_for(range<BV>, range<BT>) <@> lambda(i, s) -> Float64(i * 8 + s) * m1 |> compute\n"
        + "let GU = gram(CU, CU)\n",
-       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CU.data, GU.data, 0, true, (size_t)336, 0, 0.0, (size_t)4);" ],
+       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CU.data, GU.data, 0, true, (size_t)336, 0, 0.0, (size_t)4, 1);" ],
        [ shimInclude; "blade_linalg::"; "__gacc" ])
       // gram(A, B) over two arrays is the DENSE m x p product: never the syrk
       // tile, at any size (its own dense jam).
@@ -689,7 +689,7 @@ let y = gram_apply(A, A, v)
        // The kernel's `/ 8.0` rides the call (mode 1, the divisor) and is
        // applied by the tile of the last K block as it stores: no post-pass
        // over the triangle (`__sy_i` is the BLAS arm's scaling loop).
-       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, t2.data, 0, false, (size_t)336, 1, (double)(8.0), (size_t)4);"
+       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, t2.data, 0, false, (size_t)336, 1, (double)(8.0), (size_t)4, 1);"
          "packed-triangle syrk tile (blade_packed_gemm.hpp dsyrk_tri, 6x8, KC=8)"
          "#include \"blade_packed_gemm.hpp\"" ],
        [ shimInclude; "blade_linalg::"; "cblas_"; "CB____i0"; "__i1 < 20 - __i0"; "__sy_i" ])
@@ -698,7 +698,7 @@ let y = gram_apply(A, A, v)
       ("gate_off_syrk_tile_takes_the_omp_licence", false,
        bigCov
        + "let t3 = method_for(CB, CB) <@> " + bigCovKernel "comm(x, y), omp" "prodsum(x, y)",
-       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, t3.data, 0, true, (size_t)336, 0, (double)(0.0), (size_t)4);" ],
+       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, t3.data, 0, true, (size_t)336, 0, (double)(0.0), (size_t)4, 1);" ],
        [ shimInclude; "blade_linalg::"; "CB____i0" ])
 
       // ============ BLAS ON: the tile PREEMPTS host ?syrk where eligible ============
@@ -708,16 +708,16 @@ let y = gram_apply(A, A, v)
       ("blas_on_syrk_above_crossover_prefers_the_tile", true,
        bigCov
        + "let t2 = method_for(CB, CB) <@> " + bigCovKernel "comm(x, y)" "prodsum(x, y) / 8.0",
-       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, t2.data, 0, false, (size_t)336, 1, (double)(8.0), (size_t)4);" ],
+       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, t2.data, 0, false, (size_t)336, 1, (double)(8.0), (size_t)4, 1);" ],
        [ shimInclude; "blade_linalg::"; "cblas_"; "CB____i0"; "__sy_i" ])
       ("blas_on_syrk_tile_takes_the_omp_licence", true,
        bigCov
        + "let t3 = method_for(CB, CB) <@> " + bigCovKernel "comm(x, y), omp" "prodsum(x, y)",
-       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, t3.data, 0, true, (size_t)336, 0, (double)(0.0), (size_t)4);" ],
+       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, t3.data, 0, true, (size_t)336, 0, (double)(0.0), (size_t)4, 1);" ],
        [ shimInclude; "blade_linalg::"; "CB____i0" ])
       ("blas_on_gram_same_above_crossover_prefers_the_tile", true,
        bigCov + "let G = gram(CB, CB)\n",
-       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, G.data, 0, true, (size_t)336, 0, 0.0, (size_t)4);"
+       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, G.data, 0, true, (size_t)336, 0, 0.0, (size_t)4, 1);"
          "gram(A, A): packed-triangle syrk tile" ],
        [ shimInclude; "blade_linalg::"; "cblas_"; "__gacc" ])
       // The library keeps what the tile does not cover: the distinct gram
@@ -1806,30 +1806,46 @@ let runRowContractionTileTests () : BlockResult =
     let cases : (string * (string * string) list * string * string list * string list) list =
         [ ("antisym_tile_sequential_6x8_by_default", [],
            antiSrc 29 11 "anticomm(a, b)" antiBody,
-           [ "blade_pgemm::dantisym_tri((size_t)(29), (size_t)(11), z.data, (size_t)0, (size_t)1, nested_array_utilities::pool_base(l.data), 0, (double)(0.0), false, 0, 0, (size_t)0);"
+           [ "blade_pgemm::dantisym_tri((size_t)(29), (size_t)(11), z.data, (size_t)0, (size_t)1, nested_array_utilities::pool_base(l.data), 0, (double)(0.0), false, 0, 0, (size_t)0, (size_t)1);"
              "#include \"blade_packed_gemm.hpp\"" ],
            [ "z____i0" ])
           ("antisym_tile_paired_4x4_under_the_knob", [ ("BLADE_ANTISYM_TILE", "4x4") ],
            antiSrc 29 11 "anticomm(a, b)" antiBody,
-           [ "dantisym_tri((size_t)(29), (size_t)(11), z.data, (size_t)0, (size_t)1, nested_array_utilities::pool_base(l.data), 0, (double)(0.0), false, 1, 0, (size_t)0);" ],
+           [ "dantisym_tri((size_t)(29), (size_t)(11), z.data, (size_t)0, (size_t)1, nested_array_utilities::pool_base(l.data), 0, (double)(0.0), false, 1, 0, (size_t)0, (size_t)1);" ],
            [ "z____i0" ])
           ("antisym_tile_knob_off_keeps_the_nest", [ ("BLADE_ANTISYM_TILE", "0") ],
            antiSrc 29 11 "anticomm(a, b)" antiBody,
            [ "z____i0"; "__i1 < 29 - __i0 - 1" ], [ "dantisym_tri" ])
           ("antisym_tile_takes_the_omp_licence", [],
            antiSrc 29 11 "anticomm(a, b), omp(a: 1)" antiBody,
-           [ "nested_array_utilities::pool_base(l.data), 0, (double)(0.0), true, 0, 0, (size_t)0);" ], [ "z____i0" ])
+           [ "nested_array_utilities::pool_base(l.data), 0, (double)(0.0), true, 0, 0, (size_t)0, (size_t)1);" ], [ "z____i0" ])
           ("antisym_tile_census_under_serial_emission", [ ("BLADE_OMP_THREADS", "1") ],
            antiSrc 29 11 "anticomm(a, b), omp(a: 1)" antiBody,
-           [ "[omp] requested but emitted serial"; "(double)(0.0), false, 0, 0, (size_t)0);" ], [ "z____i0" ])
+           [ "[omp] requested but emitted serial"; "(double)(0.0), false, 0, 0, (size_t)0, (size_t)1);" ], [ "z____i0" ])
           ("antisym_tile_scale_divides_the_finished_cell", [],
            antiSrc 29 11 "anticomm(a, b)" ("(" + antiBody + ") / 4.0"),
-           [ "pool_base(l.data), 1, (double)(4.0), false, 0, 0, (size_t)0);" ], [ "z____i0" ])
+           [ "pool_base(l.data), 1, (double)(4.0), false, 0, 0, (size_t)0, (size_t)1);" ], [ "z____i0" ])
           // BLADE_TILE_TUNE anti_kc: the sample-block cap rides the call
           // (speed only; the bits are pinned by `blade test row-tile`).
           ("antisym_tile_sample_blocks_under_the_tune_knob", [ ("BLADE_TILE_TUNE", "anti_kc=100") ],
            antiSrc 29 11 "anticomm(a, b)" antiBody,
-           [ "pool_base(l.data), 0, (double)(0.0), false, 0, 0, (size_t)100);" ], [ "z____i0" ])
+           [ "pool_base(l.data), 0, (double)(0.0), false, 0, 0, (size_t)100, (size_t)1);" ], [ "z____i0" ])
+          // Row-panel groups (BLADE_TILE_TUNE anti_g; unset = 1, the default;
+          // 0 = the compile-time cache budget: n = 11 -> 4, n = 1001 -> 1) ride
+          // the call as its last argument (speed only; the bits are pinned by
+          // `blade test row-tile`).
+          ("antisym_tile_row_groups_cache_budget_policy", [ ("BLADE_TILE_TUNE", "anti_g=0") ],
+           antiSrc 29 11 "anticomm(a, b)" antiBody,
+           [ "pool_base(l.data), 0, (double)(0.0), false, 0, 0, (size_t)0, (size_t)4);"; "row groups of 4, per cell" ], [ "z____i0" ])
+          ("antisym_tile_row_groups_under_the_tune_knob", [ ("BLADE_TILE_TUNE", "anti_g=2") ],
+           antiSrc 29 11 "anticomm(a, b)" antiBody,
+           [ "pool_base(l.data), 0, (double)(0.0), false, 0, 0, (size_t)0, (size_t)2);"; "row groups of 2, per cell" ], [ "z____i0" ])
+          ("antisym_tile_row_groups_fall_to_one_on_a_long_chain", [ ("BLADE_TILE_TUNE", "anti_g=0") ],
+           antiSrc 29 1001 "anticomm(a, b)" antiBody,
+           [ "pool_base(l.data), 0, (double)(0.0), false, 0, 0, (size_t)0, (size_t)1);" ], [ "z____i0" ])
+          ("antisym_tile_paired_row_groups", [ ("BLADE_ANTISYM_TILE", "4x4"); ("BLADE_TILE_TUNE", "anti_g=8") ],
+           antiSrc 29 11 "anticomm(a, b)" antiBody,
+           [ "false, 1, 0, (size_t)0, (size_t)8);" ], [ "z____i0" ])
           ("antisym_below_crossover_keeps_the_nest", [],
            antiSrc 23 11 "anticomm(a, b)" antiBody, [ "z____i0" ], [ "dantisym_tri" ])
           ("antisym_reversed_q_operands_decline", [],
@@ -1841,12 +1857,17 @@ let runRowContractionTileTests () : BlockResult =
           ("simplex_tile_with_the_cast_divisor", [],
            sym3Src 29 67 "comm(a, b, c)" "prodsum(a, b, c) / Float64(nn)",
            [ "blade_pgemm::dsym3_tri((size_t)(29), (size_t)(67), x.data, nested_array_utilities::pool_base(t.data), 1, (double)("
-             "false, (size_t)336);"; "#include \"blade_packed_gemm.hpp\"" ],
+             "false, (size_t)336, 1);"; "#include \"blade_packed_gemm.hpp\"" ],
            [ "x____i0" ])
           ("simplex_tile_takes_the_omp_licence", [],
            sym3Src 61 11 "comm(a, b, c), omp(a: 1)" "prodsum(a, b, c)",
-           [ "dsym3_tri((size_t)(61), (size_t)(11), x.data, nested_array_utilities::pool_base(t.data), 0, (double)(0.0), true, (size_t)336);" ],
+           [ "dsym3_tri((size_t)(61), (size_t)(11), x.data, nested_array_utilities::pool_base(t.data), 0, (double)(0.0), true, (size_t)336, 1);" ],
            [ "x____i0" ])
+          // The edge tiles' kloop (BLADE_TILE_TUNE tri_edge: 1 = live
+          // accumulators, the default; 0 = the full 6 x 8) rides the call.
+          ("simplex_tile_full_kloop_edges_under_the_tune_knob", [ ("BLADE_TILE_TUNE", "tri_edge=0") ],
+           sym3Src 29 67 "comm(a, b, c)" "prodsum(a, b, c)",
+           [ "false, (size_t)336, 0);" ], [ "x____i0" ])
           ("simplex_tile_knob_off_keeps_the_nest", [ ("BLADE_SIMPLEX_TILE", "0") ],
            sym3Src 29 67 "comm(a, b, c)" "prodsum(a, b, c)", [ "x____i0" ], [ "dsym3_tri" ])
           ("simplex_below_crossover_keeps_the_nest", [],

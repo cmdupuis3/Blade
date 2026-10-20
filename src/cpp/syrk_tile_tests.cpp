@@ -150,8 +150,22 @@ bool run_case(size_t p, size_t k, size_t S, Data d, bool threaded, size_t kcMax,
     std::vector<double*> C(p + 1, nullptr);
     size_t off = 0;
     for (size_t i = 0; i + S < p; i++) { C[i] = pool.data() + pad + off; off += p - i - S; }
-    blade_pgemm::dsyrk_tri(p, k, X.data(), C.data(), S, threaded, kcMax, sk, sc, G);
+    blade_pgemm::dsyrk_tri(p, k, X.data(), C.data(), S, threaded, kcMax, sk, sc, G, 0);
     bool ok = true;
+    // The LIVE-ACCUMULATOR edge kloops (edge = 1): the same stored bytes as
+    // the full kloop's, guards included.
+    {
+        std::vector<double> pool1(cells + 2 * pad);
+        for (auto& v : pool1) std::memcpy(&v, &GUARD, 8);
+        std::vector<double*> C1(p + 1, nullptr);
+        size_t off1 = 0;
+        for (size_t i = 0; i + S < p; i++) { C1[i] = pool1.data() + pad + off1; off1 += p - i - S; }
+        blade_pgemm::dsyrk_tri(p, k, X.data(), C1.data(), S, threaded, kcMax, sk, sc, G, 1);
+        if (std::memcmp(pool.data(), pool1.data(), pool.size() * sizeof(double)) != 0) {
+            std::printf("  edge=1: the pool differs from edge=0's\n");
+            ok = false;
+        }
+    }
     for (size_t i = 0; i + S < p && ok; i++)
         for (size_t j = i + S; j < p; j++) {
             const double want = scaled(serial_dot(X[i], X[j], k), sk, sc);
@@ -243,9 +257,20 @@ bool run_gram_case(size_t m, size_t n, Data d, bool threaded, unsigned long long
     std::vector<double*> Gt(m + 1, nullptr), Gj(m + 1, nullptr);
     size_t off = 0;
     for (size_t i = 0; i < m; i++) { Gt[i] = gt.data() + off; Gj[i] = gj.data() + off; off += m - i; }
-    blade_pgemm::dsyrk_tri(m, n, A.data(), Gt.data(), 0, threaded, 336, 0, 0.0, G);
+    blade_pgemm::dsyrk_tri(m, n, A.data(), Gt.data(), 0, threaded, 336, 0, 0.0, G, 1);   // the node's default edge
     gram_jam_ref(m, n, A.data(), Gj.data());
     bool ok = true;
+    {
+        std::vector<double> g0(cells + 1);
+        std::vector<double*> G0(m + 1, nullptr);
+        size_t o0 = 0;
+        for (size_t i = 0; i < m; i++) { G0[i] = g0.data() + o0; o0 += m - i; }
+        blade_pgemm::dsyrk_tri(m, n, A.data(), G0.data(), 0, threaded, 336, 0, 0.0, G, 0);
+        if (std::memcmp(g0.data(), gt.data(), cells * sizeof(double)) != 0) {
+            std::printf("  gram node: edge=1 differs from edge=0\n");
+            ok = false;
+        }
+    }
     for (size_t i = 0; i < m && ok; i++)
         for (size_t jr = 0; jr < m - i; jr++) {
             const double got = Gt[i][jr];
@@ -270,6 +295,90 @@ bool run_gram_case(size_t m, size_t n, Data d, bool threaded, unsigned long long
     return ok;
 }
 
+// ---- the EDGE TILE directly (blade_tiles.h blade_tri_tile_edge) -------------
+// Every (mr = 1..6, nr = 1..8, S) explicitly -- nr = 1..4 is the LEFT-ONLY
+// family the live kloop must not drop (review D3b objection 6) -- at every
+// diagonal offset d = j0 - i0 in [-9, 9] (wholly below, straddling, wholly
+// above), first block and reloaded partial, with and without the tail:
+//   - blade_tri_live_rows must equal the brute-force count of leading rows
+//     with a real lane in each half (and those rows must be a prefix);
+//   - edge = 1 must store exactly edge = 0's bytes, and touch nothing else;
+//   - every real lane must be the serial chain from its seed (+0.0, or the
+//     reloaded partial) in this build's contraction mode, then the tail.
+double chain_step(double acc, double a, double b) {
+#ifdef BLADE_TEST_FMA_REF
+    return std::fma(a, b, acc);
+#else
+    return acc + a * b;
+#endif
+}
+
+bool run_edge_core(size_t mr, size_t nr, size_t S, unsigned long long seed) {
+    const size_t W = 40, i0 = 16;
+    Rng r(seed * 7919ULL + mr * 131 + nr * 17 + S);
+    bool ok = true;
+    for (long d = -9; d <= 9 && ok; d++)
+        for (int first : {1, 0})
+            for (int sk : {0, 1})
+                for (size_t kc : {1u, 7u}) {
+                    const size_t j0 = (size_t)((long)i0 + d);
+                    // brute-force live rows per half vs the header's count
+                    for (size_t h = 0; h < 2; h++) {
+                        size_t L = 0;
+                        bool prefix = true;
+                        for (size_t rr = 0; rr < mr; rr++) {
+                            bool live = false;
+                            for (size_t q = 4 * h; q < 4 * h + 4 && q < nr; q++)
+                                if (j0 + q >= i0 + rr + S) live = true;
+                            if (live) { if (L != rr) prefix = false; L = rr + 1; }
+                        }
+                        const size_t got = blade_tri_live_rows(i0, j0, mr, nr, S, h);
+                        if (!prefix || got != L) {
+                            std::printf("  live rows mr=%zu nr=%zu S=%zu d=%ld h=%zu: header %zu, brute force %zu%s\n",
+                                        mr, nr, S, d, h, got, L, prefix ? "" : " (not a prefix)");
+                            ok = false;
+                        }
+                    }
+                    std::vector<double> ap(kc * BLADE_TILE_MR + 1), bp(kc * BLADE_TILE_NR + 1);
+                    for (size_t s = 0; s < kc; s++) {
+                        for (size_t q = 0; q < BLADE_TILE_MR; q++) ap[s * BLADE_TILE_MR + q] = q < mr ? gen(r, Cancel) : 0.0;
+                        for (size_t q = 0; q < BLADE_TILE_NR; q++) bp[s * BLADE_TILE_NR + q] = q < nr ? gen(r, Cancel) : 0.0;
+                    }
+                    std::vector<double> init(BLADE_TILE_MR * W);
+                    for (auto& v : init) v = gen(r, Random);
+                    std::vector<double> rows0 = init, rows1 = init;
+                    double* c0[BLADE_TILE_MR];
+                    double* c1[BLADE_TILE_MR];
+                    for (size_t rr = 0; rr < BLADE_TILE_MR; rr++) {
+                        c0[rr] = rr < mr ? rows0.data() + rr * W : nullptr;
+                        c1[rr] = rr < mr ? rows1.data() + rr * W : nullptr;
+                    }
+                    blade_tri_tile_edge(kc, ap.data(), bp.data(), c0, i0, j0, mr, nr, S, first, sk, 3.0, 0);
+                    blade_tri_tile_edge(kc, ap.data(), bp.data(), c1, i0, j0, mr, nr, S, first, sk, 3.0, 1);
+                    if (std::memcmp(rows0.data(), rows1.data(), rows0.size() * sizeof(double)) != 0) {
+                        std::printf("  edge core mr=%zu nr=%zu S=%zu d=%ld first=%d sk=%d kc=%zu: edge=1 differs from edge=0\n",
+                                    mr, nr, S, d, first, sk, kc);
+                        ok = false;
+                    }
+                    for (size_t rr = 0; rr < mr && ok; rr++)
+                        for (size_t q = 0; q < nr; q++) {
+                            if (j0 + q < i0 + rr + S) continue;     // not a real lane
+                            const size_t at = rr * W + (j0 + q - (i0 + rr) - S);
+                            double acc = first ? 0.0 : init[at];
+                            for (size_t s = 0; s < kc; s++)
+                                acc = chain_step(acc, ap[s * BLADE_TILE_MR + rr], bp[s * BLADE_TILE_NR + q]);
+                            const double want = scaled(acc, sk, 3.0);
+                            if (std::memcmp(&want, &rows1[at], 8) != 0) {
+                                std::printf("  edge core mr=%zu nr=%zu S=%zu d=%ld first=%d sk=%d kc=%zu lane (%zu, %zu): want %a got %a\n",
+                                            mr, nr, S, d, first, sk, kc, rr, q, want, rows1[at]);
+                                ok = false;
+                                break;
+                            }
+                        }
+                }
+    return ok;
+}
+
 std::string caseName(size_t p, size_t k, size_t S, Data d, bool th, size_t kcMax, size_t G, int sk, double sc) {
     char buf[200];
     std::snprintf(buf, sizeof buf, "p=%zu k=%zu S=%zu %s %s kc<=%zu G=%zu scale=%d/%g", p, k, S, dataName(d),
@@ -290,6 +399,21 @@ void sweepG(size_t p, size_t k, size_t S, Data d, bool th, size_t kcMax, unsigne
 
 int main() {
     const size_t KC = blade_pgemm::TRI_KC_MAX;
+    // E. The edge tile directly, every (mr, nr, S) -- nr = 1..4 pinned
+    //    explicitly (the left-only family) -- edge kloop 1 vs 0 vs the chain.
+    for (size_t S = 0; S <= 1; S++)
+        for (size_t mr = 1; mr <= 6; mr++)
+            for (size_t nr = 1; nr <= 8; nr++) {
+                char buf[96];
+                std::snprintf(buf, sizeof buf, "edge core mr=%zu nr=%zu S=%zu (live kloop vs full vs chain)", mr, nr, S);
+                check(run_edge_core(mr, nr, S, 50 + mr * 8 + nr), buf);
+            }
+    // E2. The driver over every p mod 8 / p mod 6 at small p with K blocks
+    //     (every run_case also compares edge 1 against edge 0).
+    for (size_t S = 0; S <= 1; S++)
+        for (size_t p = 13; p <= 30; p++)
+            for (size_t G : {1u, 4u})
+                sweepG(p, 9, S, Random, false, 4, 51, G, 2, 0.5);
     // 0. Row-panel GROUPS (rowGroup = 2, 4, 5, 8) and the FUSED scalar tail:
     //    the driver's visiting order and the last block's store, against the
     //    scaled serial chain. Every p mod 24 (a group straddles the ragged last

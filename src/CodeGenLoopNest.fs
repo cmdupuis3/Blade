@@ -3345,6 +3345,7 @@ let internal tryGenSyrkDispatch
                     (packedGemmUsedCell ()).Value <- true
                     let kc = syrkTileKc k
                     let g = syrkRowGroup ()
+                    let edge = triTileEdge ()
                     // Threads only where the source licenses them (`omp` on
                     // the kernel) AND the build emits thread-level OpenMP;
                     // cells are split across the team, sums never are. The
@@ -3368,11 +3369,11 @@ let internal tryGenSyrkDispatch
                     recordCodegenDecision "microkernel" cName Blade.Effects.Applied
                         [ "packed syrk tile (blade_pgemm::dsyrk_tri, 6x8 register tile over the packed triangle)"
                           $"P={p} K={k} KC={kc} G={g}" ]
-                    recordFoldForm cName $"syrk tile 6x8, KC={kc}, row groups of {g}{scaleNote}"
+                    recordFoldForm cName $"syrk tile 6x8, KC={kc}, row groups of {g}{triEdgeNote edge}{scaleNote}"
                         "same-array comm row contraction (one ascending chain per cell; no reorder licence used)"
                     Some [ String.replicate indent "    "
                            + census
-                           + $"/* comm nest: packed-triangle syrk tile (blade_packed_gemm.hpp dsyrk_tri, 6x8, KC={kc}), row groups of {g}, per cell the serial prodsum */ blade_pgemm::dsyrk_tri((size_t)({mExtent}), (size_t)({nExtent}), {aName}.data, {cName}.data, 0, {threadedArg}, (size_t){syrkTileKcMax}, {sk}, (double)({scTxt}), (size_t){g});" ]
+                           + $"/* comm nest: packed-triangle syrk tile (blade_packed_gemm.hpp dsyrk_tri, 6x8, KC={kc}), row groups of {g}, per cell the serial prodsum */ blade_pgemm::dsyrk_tri((size_t)({mExtent}), (size_t)({nExtent}), {aName}.data, {cName}.data, 0, {threadedArg}, (size_t){syrkTileKcMax}, {sk}, (double)({scTxt}), (size_t){g}, {edge});" ]
                 | Some p, Some k ->
                     declineTile "below the syrk-tile crossover (p >= 16, k >= 4): the per-cell nest wins" $"P={p} K={k}"
                 | _ ->
@@ -3485,14 +3486,17 @@ let internal tryGenRowContractionTile
                 let chainNote =
                     if kcMax = 0L || kcMax >= n then "whole chain per tile"
                     else $"whole chain per tile in sample blocks of <= {kcMax}"
+                // Row-panel groups (BLADE_TILE_TUNE anti_g; 1 by default, 0 =
+                // the cache budget): the visiting order only, never a bit.
+                let (g, groupNote) = antisymRowGroup p n (variant = 1)
                 recordCodegenDecision "microkernel" cName Blade.Effects.Applied
                     [ $"antisym tile (blade_pgemm::dantisym_tri, {form}, strict packed triangle)"
-                      $"P={p} N={n} components=({cx},{cy}) KC={kcMax}" ]
-                recordFoldForm cName $"antisym tile {form}, {chainNote}{scaleNote sk}"
+                      $"P={p} N={n} components=({cx},{cy}) KC={kcMax} G={g}" ]
+                recordFoldForm cName $"antisym tile {form}, {chainNote}, {groupNote}{scaleNote sk}"
                     "same-array anticomm row-contraction pair (two ascending chains per cell, one subtraction; no reorder licence used)"
                 Some [ String.replicate indent "    "
-                       + ompCensus "dantisym_tri row panels"
-                       + $"/* anticomm nest: antisym pair tile (blade_packed_gemm.hpp dantisym_tri, {form}), per cell the serial prodsum - prodsum */ blade_pgemm::dantisym_tri((size_t)({mExtent}), (size_t)({nExtent}), {aName}.data, (size_t){cx}, (size_t){cy}, nested_array_utilities::pool_base({cName}.data), {sk}, (double)({scTxt}), {threadedArg}, {variant}, 0, (size_t){kcMax});" ]
+                       + ompCensus "dantisym_tri row groups"
+                       + $"/* anticomm nest: antisym pair tile (blade_packed_gemm.hpp dantisym_tri, {form}), row groups of {g}, per cell the serial prodsum - prodsum */ blade_pgemm::dantisym_tri((size_t)({mExtent}), (size_t)({nExtent}), {aName}.data, (size_t){cx}, (size_t){cy}, nested_array_utilities::pool_base({cName}.data), {sk}, (double)({scTxt}), {threadedArg}, {variant}, 0, (size_t){kcMax}, (size_t){g});" ]
             | Some p, Some n ->
                 declineTile "below the antisym-tile crossover (p >= 24, n >= 8): the per-cell nest wins" $"P={p} N={n}"
             | _ -> declineTile "non-literal extents: the per-cell nest" "non-literal extents"
@@ -3504,14 +3508,15 @@ let internal tryGenRowContractionTile
             | Some p, Some n when packedSym3Worth p n ->
                 (packedGemmUsedCell ()).Value <- true
                 let kc = syrkTileKc n
+                let edge = triTileEdge ()
                 recordCodegenDecision "microkernel" cName Blade.Effects.Applied
                     [ "simplex tile (blade_pgemm::dsym3_tri, W = X(i) * X(j) panel x 6x8 register tile over k, packed SymIdx<3> pool)"
                       $"P={p} N={n} KC={kc}" ]
-                recordFoldForm cName $"simplex tile 6x8 with W panel, KC={kc}{scaleNote sk}"
+                recordFoldForm cName $"simplex tile 6x8 with W panel, KC={kc}{triEdgeNote edge}{scaleNote sk}"
                     "same-array 3-way comm row contraction (one ascending (a*b)*c chain per cell; no reorder licence used)"
                 Some [ String.replicate indent "    "
                        + ompCensus "dsym3_tri i sub-simplices"
-                       + $"/* comm nest: rank-3 simplex tile (blade_packed_gemm.hpp dsym3_tri, W panel + 6x8, KC={kc}), per cell the serial prodsum */ blade_pgemm::dsym3_tri((size_t)({mExtent}), (size_t)({nExtent}), {aName}.data, nested_array_utilities::pool_base({cName}.data), {sk}, (double)({scTxt}), {threadedArg}, (size_t){syrkTileKcMax});" ]
+                       + $"/* comm nest: rank-3 simplex tile (blade_packed_gemm.hpp dsym3_tri, W panel + 6x8, KC={kc}), per cell the serial prodsum */ blade_pgemm::dsym3_tri((size_t)({mExtent}), (size_t)({nExtent}), {aName}.data, nested_array_utilities::pool_base({cName}.data), {sk}, (double)({scTxt}), {threadedArg}, (size_t){syrkTileKcMax}, {edge});" ]
             | Some p, Some n ->
                 declineTile "below the simplex-tile crossover (p >= 24, n >= 4): the per-cell nest wins" $"P={p} N={n}"
             | _ -> declineTile "non-literal extents: the per-cell nest" "non-literal extents"

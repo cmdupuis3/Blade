@@ -25,6 +25,10 @@
 //            p = 97/101/171, scales as above, serial and threaded;
 //   data: random signed, heavy cancellation, signed zeros, subnormal
 //   products, Inf.
+// Every antisym case runs under row groups G = 1, 2, 3, 4, 8 (rowGroup, the
+// driver's visiting order: each G's pool must equal the reference AND G = 1's,
+// byte for byte, guards included) and every simplex case under both edge
+// kloops (edge 0 = full 6 x 8, 1 = live accumulators only; likewise).
 // Output: one `[FAIL]: <name>` line per failure, then
 //   ROW TILE TESTS: <passed>/<total> passed
 #include "blade_packed_gemm.hpp"
@@ -150,24 +154,48 @@ bool run_anti(size_t p, size_t n, size_t cx, size_t cy, int sk, double sc, Data 
         Z[i] = mid[i].data();
     }
     const size_t cells = (p > 1) ? p * (p - 1) / 2 : 0;
-    std::vector<double> pool(cells + 2 * PAD);
-    for (auto& v : pool) std::memcpy(&v, &GUARD, 8);
-    blade_pgemm::dantisym_tri(p, n, Z.data(), cx, cy, pool.data() + PAD, sk, sc, th, variant, ncMax, kcMax);
-    bool ok = true;
-    size_t off = 0;
-    for (size_t i = 0; i + 1 < p && ok; i++)
-        for (size_t j = i + 1; j < p; j++, off++) {
-            const double P = dot2(Z[i][cx], Z[j][cy], n);
-            const double Q = dot2(Z[j][cx], Z[i][cy], n);
-            const double want = scaled(P - Q, sk, sc);
-            const double got = pool[PAD + off];
-            if (std::memcmp(&want, &got, 8) != 0) {
-                std::printf("  cell (%zu, %zu): want %a got %a\n", i, j, want, got);
-                ok = false;
-                break;
+    // The reference pool: the serial forms, once.
+    std::vector<double> ref(cells + 1);
+    {
+        size_t off = 0;
+        for (size_t i = 0; i + 1 < p; i++)
+            for (size_t j = i + 1; j < p; j++, off++) {
+                const double P = dot2(Z[i][cx], Z[j][cy], n);
+                const double Q = dot2(Z[j][cx], Z[i][cy], n);
+                ref[off] = scaled(P - Q, sk, sc);
             }
+    }
+    // ROW GROUPS (rowGroup = G): the same tile calls in another global order,
+    // so every G must give the reference's bytes -- and therefore each
+    // other's (G = 1 is the previous order; 3 is no divisor of anything; 8 is
+    // the cap).
+    bool ok = true;
+    std::vector<double> first;
+    for (size_t G : {1u, 2u, 3u, 4u, 8u}) {
+        std::vector<double> pool(cells + 2 * PAD);
+        for (auto& v : pool) std::memcpy(&v, &GUARD, 8);
+        blade_pgemm::dantisym_tri(p, n, Z.data(), cx, cy, pool.data() + PAD, sk, sc, th, variant, ncMax, kcMax, G);
+        size_t off = 0;
+        bool okG = true;
+        for (size_t i = 0; i + 1 < p && okG; i++)
+            for (size_t j = i + 1; j < p; j++, off++) {
+                const double want = ref[off];
+                const double got = pool[PAD + off];
+                if (std::memcmp(&want, &got, 8) != 0) {
+                    std::printf("  G=%zu cell (%zu, %zu): want %a got %a\n", G, i, j, want, got);
+                    okG = false;
+                    break;
+                }
+            }
+        okG = okG && guardsOk(pool, cells);
+        if (first.empty()) first = pool;
+        else if (std::memcmp(first.data(), pool.data(), pool.size() * sizeof(double)) != 0) {
+            std::printf("  G=%zu: the pool differs from G=1's\n", G);
+            okG = false;
         }
-    return ok && guardsOk(pool, cells);
+        ok = ok && okG;
+    }
+    return ok;
 }
 
 void anti(size_t p, size_t n, size_t cx, size_t cy, int sk, double sc, Data d, bool th, int variant,
@@ -190,30 +218,43 @@ bool run_sym3(size_t p, size_t n, int sk, double sc, Data d, bool th, size_t kcM
         X[i] = rows[i].data();
     }
     const size_t cells = p * (p + 1) * (p + 2) / 6;
-    std::vector<double> pool(cells + 2 * PAD);
-    for (auto& v : pool) std::memcpy(&v, &GUARD, 8);
-    blade_pgemm::dsym3_tri(p, n, X.data(), pool.data() + PAD, sk, sc, th, kcMax);
+    // The reference pool (the DFS order is the packed order), once.
+    std::vector<double> ref(cells + 1);
     bool ok = true;
-    size_t off = 0;
-    for (size_t i = 0; i < p && ok; i++)
-        for (size_t j = i; j < p && ok; j++) {
-            if (blade_pgemm::sym3_row_base(p, i, j) != off) {
-                std::printf("  row base (%zu, %zu) = %zu, DFS offset %zu\n", i, j,
-                            blade_pgemm::sym3_row_base(p, i, j), off);
-                ok = false;
-                break;
-            }
-            for (size_t k = j; k < p; k++, off++) {
-                const double want = scaled(dot3(X[i], X[j], X[k], n), sk, sc);
-                const double got = pool[PAD + off];
-                if (std::memcmp(&want, &got, 8) != 0) {
-                    std::printf("  cell (%zu, %zu, %zu): want %a got %a\n", i, j, k, want, got);
+    {
+        size_t off = 0;
+        for (size_t i = 0; i < p && ok; i++)
+            for (size_t j = i; j < p && ok; j++) {
+                if (blade_pgemm::sym3_row_base(p, i, j) != off) {
+                    std::printf("  row base (%zu, %zu) = %zu, DFS offset %zu\n", i, j,
+                                blade_pgemm::sym3_row_base(p, i, j), off);
                     ok = false;
                     break;
                 }
+                for (size_t k = j; k < p; k++, off++) ref[off] = scaled(dot3(X[i], X[j], X[k], n), sk, sc);
             }
+    }
+    // EDGE KLOOPS (edge 0 = the full 6 x 8, 1 = live accumulators only): the
+    // same stored bits, the reference's and each other's.
+    std::vector<double> first;
+    for (int edge : {0, 1}) {
+        std::vector<double> pool(cells + 2 * PAD);
+        for (auto& v : pool) std::memcpy(&v, &GUARD, 8);
+        blade_pgemm::dsym3_tri(p, n, X.data(), pool.data() + PAD, sk, sc, th, kcMax, edge);
+        for (size_t t = 0; t < cells; t++)
+            if (std::memcmp(&ref[t], &pool[PAD + t], 8) != 0) {
+                std::printf("  edge=%d cell #%zu: want %a got %a\n", edge, t, ref[t], pool[PAD + t]);
+                ok = false;
+                break;
+            }
+        ok = ok && guardsOk(pool, cells);
+        if (first.empty()) first = pool;
+        else if (std::memcmp(first.data(), pool.data(), pool.size() * sizeof(double)) != 0) {
+            std::printf("  edge=%d: the pool differs from edge=0's\n", edge);
+            ok = false;
         }
-    return ok && guardsOk(pool, cells);
+    }
+    return ok;
 }
 
 void sym3(size_t p, size_t n, int sk, double sc, Data d, bool th, size_t kcMax, unsigned long long seed) {
@@ -331,6 +372,17 @@ int main() {
     }
     sym3(171, 201, 1, 0.0, Random, false, KC, 42);
     sym3(171, 201, 1, 201.0, Cancel, true, KC, 43);
+    // 8. The edge kloops (every case above runs edge 0 AND 1): p = 13..30
+    //    (p mod 8 = 0..7 puts nr = 1..8 lanes in the top-aligned first k
+    //    panel -- nr = 1..4 the left-only family; p mod 6 = 0..5 the mr tails)
+    //    with forced K blocks (the live kloop over a RELOADED partial), and the
+    //    bench's p = 171 (a 3-lane first panel) and p = 61 likewise.
+    for (size_t p = 13; p <= 30; p++) {
+        sym3(p, 9, 2, 0.5, Random, false, 4, 44);             // 3 K blocks of 3
+        sym3(p, 23, 0, 0.0, Zeros, true, 8, 45);
+    }
+    sym3(61, 31, 1, 31.0, Cancel, false, 11, 46);
+    sym3(171, 23, 0, 0.0, Random, false, 8, 47);
 #ifdef BLADE_TEST_FMA_REF
     std::printf("reference: one std::fma per step (contract=fast)\n");
 #else

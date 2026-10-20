@@ -2134,6 +2134,41 @@ let private planCases () =
               (fun d -> applied d && evidenceMentioning "fold form: antisym tile sequential 6x8 (P pass, spill, Q pass), whole chain per tile" d
                         && not (evidenceMentioning "sample blocks" d))
               "unset: the whole chain in one block"))
+      // Row-panel groups (BLADE_TILE_TUNE anti_g): forced, and the default
+      // compile-time cache budget -- n = 401 fits 4 groups' A pairs plus the
+      // active B pair in 256 KiB, a long chain (n = 1201) does not fit 2.
+      withGate "BLADE_ANTISYM_TILE" null (fun () ->
+       withGate "BLADE_TILE_TUNE" "anti_g=2" (fun () ->
+          planCase "plan_antisym_tile_row_groups_knob" (planAntiSrc 61 401) "fold-form"
+              (fun d -> applied d && evidenceMentioning "whole chain per tile, row groups of 2 (BLADE_TILE_TUNE anti_g=2)" d)
+              "BLADE_TILE_TUNE anti_g=2 names the row group"))
+      // The DEFAULT (unset) is G = 1, the previous order, until an A/B
+      // promotes the policy; anti_g=0 selects the cache-budget policy.
+      withGate "BLADE_ANTISYM_TILE" null (fun () ->
+       withGate "BLADE_TILE_TUNE" null (fun () ->
+          planCase "plan_antisym_tile_row_groups_default" (planAntiSrc 61 401) "fold-form"
+              (fun d -> applied d && evidenceMentioning "fold form: antisym tile sequential 6x8 (P pass, spill, Q pass), whole chain per tile, row groups of 1 (the default; BLADE_TILE_TUNE anti_g=0 selects the cache-budget groups)" d)
+              "unset: row groups of 1, the default named"))
+      withGate "BLADE_ANTISYM_TILE" null (fun () ->
+       withGate "BLADE_TILE_TUNE" "anti_g=0" (fun () ->
+          planCase "plan_antisym_tile_budget_auto" (planAntiSrc 61 401) "fold-form"
+              (fun d -> applied d && evidenceMentioning "fold form: antisym tile sequential 6x8 (P pass, spill, Q pass), whole chain per tile, row groups of 4 (cache budget 200 KiB of 256 KiB)" d)
+              "anti_g=0, n = 401: row groups of 4 by the cache budget"))
+      withGate "BLADE_ANTISYM_TILE" null (fun () ->
+       withGate "BLADE_TILE_TUNE" "anti_g=0" (fun () ->
+          planCase "plan_antisym_tile_budget_auto_long_chain" (planAntiSrc 29 1201) "fold-form"
+              (fun d -> applied d && evidenceMentioning "row groups of 1 -- cache budget: B pair + 2 row panels = 376 KiB > 256 KiB" d)
+              "anti_g=0, n = 1201: row groups of 1, the budget named"))
+      withGate "BLADE_ANTISYM_TILE" null (fun () ->
+       withGate "BLADE_TILE_TUNE" "anti_g=0" (fun () ->
+          planCase "plan_antisym_tile_budget_micro_records_g" (planAntiSrc 61 401) "microkernel"
+              (fun d -> applied d && evidenceMentioning "P=61 N=401 components=(0,1) KC=0 G=4" d)
+              "anti_g=0: the microkernel record carries G=4"))
+      withGate "BLADE_ANTISYM_TILE" null (fun () ->
+       withGate "BLADE_TILE_TUNE" null (fun () ->
+          planCase "plan_antisym_tile_default_micro_records_g1" (planAntiSrc 61 401) "microkernel"
+              (fun d -> applied d && evidenceMentioning "P=61 N=401 components=(0,1) KC=0 G=1" d)
+              "unset: the microkernel record carries G=1"))
       pinBlas "0" (fun () ->
        withGate "BLADE_SYRK_TILE" null (fun () ->
         withGate "BLADE_TILE_TUNE" "syrk_g=2, anti_kc=0" (fun () ->
@@ -2183,8 +2218,21 @@ let private planCases () =
       for (p, n, kc) in [ (29, 67, 67); (29, 201, 201); (61, 11, 11); (61, 201, 201); (29, 700, 234) ] do
           withGate "BLADE_SIMPLEX_TILE" null (fun () ->
               planCase $"plan_simplex_tile_route_{p}x{n}" (planSym3Src p n) "fold-form"
-                  (fun d -> applied d && evidenceMentioning $"fold form: simplex tile 6x8 with W panel, KC={kc}, then / d per cell" d)
+                  (fun d -> applied d && evidenceMentioning $"fold form: simplex tile 6x8 with W panel, KC={kc}, live-accumulator edges, then / d per cell" d)
                   $"simplex tile at {p} x {n}, KC={kc}")
+      // The edge tiles' kloop (BLADE_TILE_TUNE tri_edge): the plan names it
+      // in both settings, in the simplex and the syrk arms.
+      withGate "BLADE_SIMPLEX_TILE" null (fun () ->
+       withGate "BLADE_TILE_TUNE" "tri_edge=0" (fun () ->
+          planCase "plan_simplex_tile_full_kloop_edges_knob" (planSym3Src 29 67) "fold-form"
+              (fun d -> applied d && evidenceMentioning "fold form: simplex tile 6x8 with W panel, KC=67, full-kloop edges (BLADE_TILE_TUNE tri_edge=0)" d)
+              "BLADE_TILE_TUNE tri_edge=0 names the full kloop"))
+      pinBlas "0" (fun () ->
+       withGate "BLADE_SYRK_TILE" null (fun () ->
+        withGate "BLADE_TILE_TUNE" null (fun () ->
+          planCase "plan_syrk_tile_live_edges_default" planSyrkTileSrc "fold-form"
+              (fun d -> applied d && evidenceMentioning "fold form: syrk tile 6x8, KC=8, row groups of 4, live-accumulator edges" d)
+              "unset: live-accumulator edges")))
       withGate "BLADE_SIMPLEX_TILE" null (fun () ->
        withGate "BLADE_FP_REPRO" "1" (fun () ->
           planCase "plan_simplex_tile_applied_in_repro" (planSym3Src 29 67) "fold-form"

@@ -25,8 +25,23 @@
  * EMITTER's own numbers (CodeGenExprSupport.syrkTileKc,
  * EmitLlvm.syrkTileScratchCells / antisymTileScratchCells /
  * sym3TileScratchCells), so the C side is driven exactly as an emitted call
- * would drive it -- plus deliberately short scratches (0) to exercise each
- * core's scalar fallback, which must give the same bits.
+ * would drive it -- plus deliberately short scratches (0, or one cell short of
+ * the core's need) to exercise each core's scalar fallback, which must give
+ * the same bits.
+ *
+ * THE ROUTE (llvm build only). A core handed too little scratch SILENTLY
+ * takes its scalar chain -- the same bits, so a byte check alone cannot see an
+ * emitter/core scratch mismatch. Each case therefore carries the route it
+ * must take (1 = the tile, 0 = the scalar chain, -1 = unobservable: an empty
+ * triangle or chain touches no scratch either way); the scratch is filled
+ * with a guard pattern and fenced by guard cells, and after the call the tile
+ * route must have WRITTEN scratch (its packed panels), the scalar route must
+ * have left it untouched, and no route may write past it (an exact-size
+ * scratch the core overruns fails here).
+ *
+ * The speed-only arguments ride the cases too and are printed in the hash
+ * lines: the syrk and antisym cores' row group `g` (antisym: BLADE_TILE_TUNE
+ * anti_g) and the syrk and simplex cores' edge kloop `edge` (tri_edge).
  *
  * Output: `[FAIL]: <case> ...` lines, `CASE <id> ... <hash>` lines (syrk:
  * `CASE <n>`, antisym: `CASE A<n>`, simplex: `CASE S<n>`), then
@@ -45,27 +60,30 @@
 #define LANE "llvm"
 void blade_dsyrk_tri_f64(int64_t p, int64_t k, const double* x, int64_t ldx,
                          double* c, int64_t strict, int64_t kc_max, int64_t row_group,
-                         int64_t scale_mode, double scale,
+                         int64_t edge, int64_t scale_mode, double scale,
                          double* scratch, int64_t scratch_cells);
 void blade_dantisym_tri_f64(int64_t p, int64_t n, const double* z, int64_t ldi, int64_t ldc,
                             int64_t cx, int64_t cy, double* c, int64_t variant, int64_t nc_max,
-                            int64_t kc_max, int64_t scale_mode, double scale,
+                            int64_t kc_max, int64_t row_group, int64_t scale_mode, double scale,
                             double* scratch, int64_t scratch_cells);
 void blade_dsym3_tri_f64(int64_t p, int64_t n, const double* x, int64_t ldx,
-                         double* c, int64_t kc_max,
+                         double* c, int64_t kc_max, int64_t edge,
                          int64_t scale_mode, double scale,
                          double* scratch, int64_t scratch_cells);
 #endif
 
-/* syrk: { p, k, kc cap, row panels per group, scratch cells (emitter's),
- * scale mode, scale, data kind } */
-typedef struct { long long p, k, cap, g, scratch, mode; double scale; int data; } tile_case;
+/* syrk: { p, k, kc cap, row panels per group, edge kloop, scratch cells
+ * (emitter's, or short), route (1 tile, 0 scalar, -1 unobservable), scale
+ * mode, scale, data kind } */
+typedef struct { long long p, k, cap, g, edge, scratch, route, mode; double scale; int data; } tile_case;
 /* antisym: { p, n, components, cx, cy, variant (0 = 6x8, 1 = 4x4), nc cap
- * (0 = the driver's), kc cap inside a tile visit (0 = whole chain), scratch
- * cells (emitter's), scale mode, scale, data } */
-typedef struct { long long p, n, comps, cx, cy, variant, ncmax, kcmax, scratch, mode; double scale; int data; } anti_case;
-/* simplex: { p, n, kc cap, scratch cells (emitter's), scale mode, scale, data } */
-typedef struct { long long p, n, cap, scratch, mode; double scale; int data; } sym3_case;
+ * (0 = the driver's), kc cap inside a tile visit (0 = whole chain), row
+ * panels per group, scratch cells (emitter's, or short), route, scale mode,
+ * scale, data } */
+typedef struct { long long p, n, comps, cx, cy, variant, ncmax, kcmax, g, scratch, route, mode; double scale; int data; } anti_case;
+/* simplex: { p, n, kc cap, edge kloop, scratch cells (emitter's, or short),
+ * route, scale mode, scale, data } */
+typedef struct { long long p, n, cap, edge, scratch, route, mode; double scale; int data; } sym3_case;
 #include "llvm_tiles_cases.h"
 
 static unsigned long long g_s;
@@ -151,6 +169,43 @@ static size_t guard_damage(const double* buf, size_t cells) {
     }
     return bad;
 }
+#ifndef __cplusplus
+/* THE ROUTE CHECK (see the header): a guarded scratch -- cells + 2 PAD guard
+ * cells, all the guard pattern; NULL for a zero-cell scratch. */
+static int g_routes_tile = 0, g_routes_scalar = 0;
+static double* scratch_alloc(long long cells) {
+    return cells > 0 ? guarded((size_t)cells) : NULL;
+}
+/* After the call: failures (printed), 0 = the expected route was taken. */
+static size_t route_check(const char* what, int ci, const double* buf, long long cells, long long route) {
+    size_t t, written = 0, bad = 0;
+    if (buf != NULL) {
+        for (t = 0; t < (size_t)cells; t++)
+            if (memcmp(&buf[PAD + t], &GUARD, 8) != 0) written++;
+        bad = guard_damage(buf, (size_t)cells);
+        if (bad != 0)
+            printf("[FAIL]: %s case %d: the core wrote %zu guard cells past its %lld-cell scratch\n",
+                   what, ci, bad, cells);
+    }
+    if (route == 1) {
+        g_routes_tile++;
+        if (written == 0) {
+            printf("[FAIL]: %s case %d: the core took its scalar chain (scratch of %lld cells untouched) where the tile was expected\n",
+                   what, ci, cells);
+            bad++;
+        }
+    } else if (route == 0) {
+        g_routes_scalar++;
+        if (written != 0) {
+            printf("[FAIL]: %s case %d: the core wrote its scratch (%zu cells) where the scalar chain was expected\n",
+                   what, ci, written);
+            bad++;
+        }
+    }
+    return bad;
+}
+#endif
+
 static unsigned long long fnv(const double* c, size_t cells) {
     unsigned long long h = 1469598103934665603ULL;
     size_t t;
@@ -183,25 +238,28 @@ static int run_syrk(size_t ci) {
         double** cr = (double**)malloc((p + 1) * sizeof(double*));
         for (i = 0; i < p; i++) { xr[i] = x + i * k; cr[i] = c + row_base(p, i); }
         /* the emitter's call: the scale fused into the last block's store */
-        blade_pgemm::dsyrk_tri(p, k, xr, cr, 0, false, (size_t)tc.cap, (int)tc.mode, tc.scale, (size_t)tc.g);
+        blade_pgemm::dsyrk_tri(p, k, xr, cr, 0, false, (size_t)tc.cap, (int)tc.mode, tc.scale, (size_t)tc.g,
+                               (int)tc.edge);
         free(xr); free(cr);
     }
 #else
     {
-        double* scratch = tc.scratch > 0 ? (double*)malloc((size_t)tc.scratch * sizeof(double)) : NULL;
+        double* sbuf = scratch_alloc(tc.scratch);
         blade_dsyrk_tri_f64((int64_t)p, (int64_t)k, x, (int64_t)k, c, 0, (int64_t)tc.cap, (int64_t)tc.g,
-                            (int64_t)tc.mode, tc.scale, scratch, (int64_t)tc.scratch);
-        free(scratch);
+                            (int64_t)tc.edge, (int64_t)tc.mode, tc.scale,
+                            sbuf != NULL ? sbuf + PAD : NULL, (int64_t)tc.scratch);
+        bad += route_check("syrk", (int)ci, sbuf, tc.scratch, tc.route);
+        free(sbuf);
     }
 #endif
     for (t = 0; t < cells; t++)
         if (memcmp(&c[t], &ref[t], sizeof(double)) != 0) bad++;
     if (c[cells] != 12345.0 || c[cells + 1] != 12345.0) bad++;
     if (bad != 0)
-        printf("[FAIL]: syrk case %d (p=%lld k=%lld cap=%lld g=%lld mode=%lld data=%d): %zu cells differ from the serial chain\n",
-               (int)ci, tc.p, tc.k, tc.cap, tc.g, tc.mode, tc.data, bad);
-    printf("CASE %d p=%lld k=%lld cap=%lld g=%lld mode=%lld data=%d %016llx\n",
-           (int)ci, tc.p, tc.k, tc.cap, tc.g, tc.mode, tc.data, fnv(c, cells));
+        printf("[FAIL]: syrk case %d (p=%lld k=%lld cap=%lld g=%lld edge=%lld mode=%lld data=%d): %zu cells/routes differ\n",
+               (int)ci, tc.p, tc.k, tc.cap, tc.g, tc.edge, tc.mode, tc.data, bad);
+    printf("CASE %d p=%lld k=%lld cap=%lld g=%lld edge=%lld mode=%lld data=%d %016llx\n",
+           (int)ci, tc.p, tc.k, tc.cap, tc.g, tc.edge, tc.mode, tc.data, fnv(c, cells));
     free(x); free(c); free(ref);
     return bad == 0;
 }
@@ -233,26 +291,28 @@ static int run_anti(size_t ci) {
             Z[i] = mid + i * C;
         }
         blade_pgemm::dantisym_tri(p, n, Z, cx, cy, out, (int)tc.mode, tc.scale, false,
-                                  (int)tc.variant, (size_t)tc.ncmax, (size_t)tc.kcmax);
+                                  (int)tc.variant, (size_t)tc.ncmax, (size_t)tc.kcmax, (size_t)tc.g);
         free(mid); free(Z);
     }
 #else
     {
-        double* scratch = tc.scratch > 0 ? (double*)malloc((size_t)tc.scratch * sizeof(double)) : NULL;
+        double* sbuf = scratch_alloc(tc.scratch);
         blade_dantisym_tri_f64((int64_t)p, (int64_t)n, z, (int64_t)(C * n), (int64_t)n,
                                (int64_t)cx, (int64_t)cy, out, (int64_t)tc.variant, (int64_t)tc.ncmax,
-                               (int64_t)tc.kcmax, (int64_t)tc.mode, tc.scale, scratch, (int64_t)tc.scratch);
-        free(scratch);
+                               (int64_t)tc.kcmax, (int64_t)tc.g, (int64_t)tc.mode, tc.scale,
+                               sbuf != NULL ? sbuf + PAD : NULL, (int64_t)tc.scratch);
+        bad += route_check("antisym", (int)ci, sbuf, tc.scratch, tc.route);
+        free(sbuf);
     }
 #endif
     for (t = 0; t < cells; t++)
         if (memcmp(&out[t], &ref[t], sizeof(double)) != 0) bad++;
     bad += guard_damage(buf, cells);
     if (bad != 0)
-        printf("[FAIL]: antisym case A%d (p=%lld n=%lld c=(%lld,%lld) v=%lld nc<=%lld kc<=%lld scratch=%lld mode=%lld data=%d): %zu cells/guards differ\n",
-               (int)ci, tc.p, tc.n, tc.cx, tc.cy, tc.variant, tc.ncmax, tc.kcmax, tc.scratch, tc.mode, tc.data, bad);
-    printf("CASE A%d p=%lld n=%lld c=(%lld,%lld) v=%lld nc=%lld kc=%lld mode=%lld data=%d %016llx\n",
-           (int)ci, tc.p, tc.n, tc.cx, tc.cy, tc.variant, tc.ncmax, tc.kcmax, tc.mode, tc.data, fnv(out, cells));
+        printf("[FAIL]: antisym case A%d (p=%lld n=%lld c=(%lld,%lld) v=%lld nc<=%lld kc<=%lld g=%lld scratch=%lld mode=%lld data=%d): %zu cells/guards/routes differ\n",
+               (int)ci, tc.p, tc.n, tc.cx, tc.cy, tc.variant, tc.ncmax, tc.kcmax, tc.g, tc.scratch, tc.mode, tc.data, bad);
+    printf("CASE A%d p=%lld n=%lld c=(%lld,%lld) v=%lld nc=%lld kc=%lld g=%lld mode=%lld data=%d %016llx\n",
+           (int)ci, tc.p, tc.n, tc.cx, tc.cy, tc.variant, tc.ncmax, tc.kcmax, tc.g, tc.mode, tc.data, fnv(out, cells));
     free(z); free(buf); free(ref);
     return bad == 0;
 }
@@ -277,25 +337,26 @@ static int run_sym3(size_t ci) {
     {
         double** xr = (double**)malloc((p + 1) * sizeof(double*));
         for (i = 0; i < p; i++) xr[i] = x + i * n;
-        blade_pgemm::dsym3_tri(p, n, xr, out, (int)tc.mode, tc.scale, false, (size_t)tc.cap);
+        blade_pgemm::dsym3_tri(p, n, xr, out, (int)tc.mode, tc.scale, false, (size_t)tc.cap, (int)tc.edge);
         free(xr);
     }
 #else
     {
-        double* scratch = tc.scratch > 0 ? (double*)malloc((size_t)tc.scratch * sizeof(double)) : NULL;
-        blade_dsym3_tri_f64((int64_t)p, (int64_t)n, x, (int64_t)n, out, (int64_t)tc.cap,
-                            (int64_t)tc.mode, tc.scale, scratch, (int64_t)tc.scratch);
-        free(scratch);
+        double* sbuf = scratch_alloc(tc.scratch);
+        blade_dsym3_tri_f64((int64_t)p, (int64_t)n, x, (int64_t)n, out, (int64_t)tc.cap, (int64_t)tc.edge,
+                            (int64_t)tc.mode, tc.scale, sbuf != NULL ? sbuf + PAD : NULL, (int64_t)tc.scratch);
+        bad += route_check("simplex", (int)ci, sbuf, tc.scratch, tc.route);
+        free(sbuf);
     }
 #endif
     for (t = 0; t < cells; t++)
         if (memcmp(&out[t], &ref[t], sizeof(double)) != 0) bad++;
     bad += guard_damage(buf, cells);
     if (bad != 0)
-        printf("[FAIL]: simplex case S%d (p=%lld n=%lld cap=%lld scratch=%lld mode=%lld data=%d): %zu cells/guards differ\n",
-               (int)ci, tc.p, tc.n, tc.cap, tc.scratch, tc.mode, tc.data, bad);
-    printf("CASE S%d p=%lld n=%lld cap=%lld mode=%lld data=%d %016llx\n",
-           (int)ci, tc.p, tc.n, tc.cap, tc.mode, tc.data, fnv(out, cells));
+        printf("[FAIL]: simplex case S%d (p=%lld n=%lld cap=%lld edge=%lld scratch=%lld mode=%lld data=%d): %zu cells/guards/routes differ\n",
+               (int)ci, tc.p, tc.n, tc.cap, tc.edge, tc.scratch, tc.mode, tc.data, bad);
+    printf("CASE S%d p=%lld n=%lld cap=%lld edge=%lld mode=%lld data=%d %016llx\n",
+           (int)ci, tc.p, tc.n, tc.cap, tc.edge, tc.mode, tc.data, fnv(out, cells));
     free(x); free(buf); free(ref);
     return bad == 0;
 }
@@ -312,6 +373,10 @@ int main(void) {
     for (ci = 0; ci < n3; ci++) { int ok = run_sym3(ci); p3 += ok; passed += ok; total++; }
     printf("SUBTOTALS (%s): syrk %d/%d, antisym %d/%d, simplex %d/%d\n",
            LANE, ps, (int)ns, pa, (int)na, p3, (int)n3);
+#ifndef __cplusplus
+    printf("ROUTES (%s): tile route asserted on %d cases, scalar route on %d\n",
+           LANE, g_routes_tile, g_routes_scalar);
+#endif
     printf("LLVM TILES RAWBIT (%s): %d/%d passed\n", LANE, passed, total);
     return passed == total ? 0 : 1;
 }

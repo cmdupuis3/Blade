@@ -1982,6 +1982,12 @@ let syrkTileKc (k: int64) : int64 =
 ///   anti_kc  sample-block cap INSIDE an antisym tile visit (P and Q partials
 ///            spilled and reloaded exactly between balanced blocks; 0 = the
 ///            whole chain in one block, the default)
+///   anti_g   row panels per GROUP in dantisym_tri / blade_dantisym_tri_f64:
+///            unset = 1 (the previous order, the default), 0 = the
+///            compile-time cache budget (`antisymRowGroup`), 1..8 = forced
+///   tri_edge the syrk / simplex EDGE tiles' kloop (blade_tiles.h
+///            blade_tri_tile_edge): 1 = only the accumulators with a real lane
+///            (the default), 0 = the full 6 x 8 kloop
 ///   epi_blk  the cell epilogue's producer block between lane-state feeds
 ///            (`cellEpiBlock`: default 256, a multiple of the lane block)
 ///   epi_blk_r  the cell-chain mini-block (`cellEpiBlockR`: default 0 = one
@@ -2006,6 +2012,59 @@ let syrkRowGroup () : int64 = max 1L (min 8L (tileTune "syrk_g" 4L))
 
 /// The antisym tile's sample-block cap (BLADE_TILE_TUNE anti_kc); 0 = whole.
 let antisymKcMax () : int64 = max 0L (tileTune "anti_kc" 0L)
+
+/// The L2 budget the antisym row-panel groups are sized against: half of Zen
+/// 3's 512 KiB per-core L2, the rest left to the output lines, the P / Q
+/// spills, the packing stream and the other data the visit touches.
+let antisymRowGroupBudgetBytes = 256L * 1024L
+
+/// dantisym_tri's row panels per group and the plan phrase that states why
+/// (BLADE_TILE_TUNE anti_g; the C++ driver's and the LLVM core's rowGroup).
+/// A GROUP packs G row panels' X(i) / Y(i) pairs (G x 2 x RM x n doubles per
+/// thread) and visits each column panel's X(j) / Y(j) pair (2 x RN x n
+/// doubles) with every member in turn: each member rereads the pair; the
+/// modeled lower-cache traffic assumes one fetch per group and residency
+/// across its visits (a model, not a measured fetch count).
+/// DEFAULT (anti_g unset): G = 1, the previous order -- the round-2
+/// directional A/B did not show the auto policy winning (serial G = 4 was
+/// 5-7.5% slower on a quiet box), so it is not promoted until the runner's
+/// A/B says so. anti_g = 0: the cache-budget policy, the largest fitting G in
+/// {4, 2}, otherwise 1, with
+///     G * 2 * RM * n * 8 + 2 * RN * n * 8 <= 256 KiB,
+/// decided at COMPILE time on the literal n (the header carries no copy of
+/// the rule). The budget covers the ACTIVE B pair -- the one column panel the
+/// group is visiting -- not the whole packed B (n = 401: 4 groups' A pairs
+/// 150.4 KiB + the B pair 50.1 KiB = 200.5 KiB, G = 4; n = 1001: G = 2 needs
+/// 312.8 KiB, G = 1). The fallback G = 1 need not fit either (6x8 at n = 1201
+/// needs 269,024 B): it is simply the previous order. 1..8 forces G. No bit
+/// depends on G: the group visits the same (i0, j0) tile calls with the same
+/// arguments, in another order.
+/// `paired` = the 4 x 4 schedule (RM = RN = 4), else the sequential 6 x 8.
+let antisymRowGroup (p: int64) (n: int64) (paired: bool) : int64 * string =
+    ignore p
+    let rm, rn = if paired then 4L, 4L else 6L, 8L
+    let bytes (g: int64) = g * 2L * rm * n * 8L + 2L * rn * n * 8L
+    match tileTune "anti_g" -1L with
+    | v when v >= 1L ->
+        let g = min 8L v
+        g, $"row groups of {g} (BLADE_TILE_TUNE anti_g={g})"
+    | v when v < 0L ->
+        1L, "row groups of 1 (the default; BLADE_TILE_TUNE anti_g=0 selects the cache-budget groups)"
+    | _ ->
+        let budget = antisymRowGroupBudgetBytes
+        match [ 4L; 2L ] |> List.tryFind (fun g -> bytes g <= budget) with
+        | Some g -> g, $"row groups of {g} (cache budget {bytes g / 1024L} KiB of {budget / 1024L} KiB)"
+        | None ->
+            let over = (bytes 2L + 1023L) / 1024L
+            1L, $"row groups of 1 -- cache budget: B pair + 2 row panels = {over} KiB > {budget / 1024L} KiB"
+
+/// The syrk / simplex edge tiles' kloop (BLADE_TILE_TUNE tri_edge): 1 = the
+/// live-accumulator variants (default), 0 = the full 6 x 8 kloop. Speed only.
+let triTileEdge () : int64 = if tileTune "tri_edge" 1L = 0L then 0L else 1L
+
+/// The fold-form phrase for `triTileEdge` (both lanes' plan lines).
+let triEdgeNote (edge: int64) : string =
+    if edge <> 0L then ", live-accumulator edges" else ", full-kloop edges (BLADE_TILE_TUNE tri_edge=0)"
 
 /// The row-slot form's STATIC WORK GATE (BLADE_TILE_TUNE rowslots_min,
 /// bench gap G35): the total number of inner fold steps (outer rows x each

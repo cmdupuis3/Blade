@@ -614,12 +614,13 @@ let runCliSmokeTests () : TH.BlockResult =
                     let (code, out, err) = spawnWith (rowEnv "BLADE_ANTISYM_TILE" null repro) dir [ "plan"; "anti.blade" ]
                     recordCase $"cli: `plan` under BLADE_LLVM=1 ({build}) reports the antisym tile through the shared C core"
                         (code = 0 && out.Contains "fold form: antisym tile (shared C core) sequential 6x8"
+                         && out.Contains "whole chain per tile, row groups of 1 (the default; BLADE_TILE_TUNE anti_g=0 selects the cache-budget groups)"
                          && out.Contains "[microkernel v1] l @ "
                          && out.Contains ": applied [antisym tile (shared C core")
                         (out + err)
                     let (code, out, err) = spawnWith (rowEnv "BLADE_SIMPLEX_TILE" null repro) dir [ "plan"; "sym3.blade" ]
                     recordCase $"cli: `plan` under BLADE_LLVM=1 ({build}) reports the simplex tile through the shared C core"
-                        (code = 0 && out.Contains "fold form: simplex tile (shared C core) 6x8 with W panel, KC=67, then / d per cell"
+                        (code = 0 && out.Contains "fold form: simplex tile (shared C core) 6x8 with W panel, KC=67, live-accumulator edges, then / d per cell"
                          && out.Contains "[microkernel v1] t @ "
                          && out.Contains ": applied [simplex tile (shared C core")
                         (out + err)
@@ -628,6 +629,34 @@ let runCliSmokeTests () : TH.BlockResult =
                     (code = 0 && out.Contains "declined -- BLADE_ANTISYM_TILE=0/off: the plain per-cell nest"
                      && not (out.Contains "fold form: antisym tile (shared C core)"))
                     (out + err)
+                // THE ANTISYM ROW GROUPS, EXECUTED (corpus symmetry/132's
+                // program -- which the corpus runs under the default G = 1 --
+                // under the cache-budget policy, anti_g=0: row groups of 4, 4
+                // and a ragged 2 at p = 61, n = 401): the same printed values
+                // as the default build, and the NumPy-checked pins, both lanes.
+                File.WriteAllText(Path.Combine(dir, "anti132.blade"),
+                    "type P = Idx<61>\ntype C = Idx<2>\ntype S = Idx<401>\n"
+                    + "let (ss, l02, l0_last, l_g0_cross, l_g1_mid, l_g2_far) = {\n"
+                    + "    let z = method_for(range<P>, range<C>, range<S>) <@> lambda(i, c, s) -> Float64((i * 5 + c * 3 + s) % 7) - 3.0 |> compute\n"
+                    + "    let l = method_for(z, z) <@> lambda(a: Array<Float64 like C, S>, b: Array<Float64 like C, S>) where anticomm(a, b) -> (prodsum(a((0 : C)), b((1 : C))) - prodsum(b((0 : C)), a((1 : C)))) * 0.5 |> compute\n"
+                    + "    let total = reduce(method_for(range<P>) <@> lambda(i) -> reduce(method_for(range<P>) <@> lambda(j) -> l(i, j) * l(i, j), (+)), (+))\n"
+                    + "    (total, l(0, 2), l(0, 60), l(23, 26), l(36, 41), l(47, 59))\n"
+                    + "}\n")
+                let values (out: string) =
+                    out.Replace("\r\n", "\n").Split('\n') |> Array.filter (fun l -> l.Contains " = ") |> String.concat "; "
+                for lane in [ null; "1" ] do
+                    let laneName = if isNull lane then "C++" else "LLVM"
+                    let env (tune: string) =
+                        [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", lane); ("BLADE_FP_REPRO", null)
+                          ("BLADE_ANTISYM_TILE", null); ("BLADE_TILE_TUNE", tune); ("BLADE_EXE_CACHE", "0") ]
+                    let (c0, o0, e0) = spawnWith (env null) dir [ "run"; "anti132.blade" ]
+                    let (c1, o1, e1) = spawnWith (env "anti_g=0") dir [ "run"; "anti132.blade" ]
+                    let v0, v1 = values o0, values o1
+                    recordCase $"cli: antisym row groups of 4 (anti_g=0) print the default build's values ({laneName} lane)"
+                        (c0 = 0 && c1 = 0 && v0 = v1
+                         && v1.Contains "ss = 598045803.5" && v1.Contains "l02 = -600.5" && v1.Contains "l0_last = 202.5"
+                         && v1.Contains "l_g0_cross = -199.0" && v1.Contains "l_g1_mid = 604.0" && v1.Contains "l_g2_far = 597.0")
+                        ($"default: {v0} | anti_g=0: {v1} | " + e0 + e1)
                 let (code, out, err) = spawnWith (rowEnv "BLADE_SIMPLEX_TILE" "0" null) dir [ "plan"; "sym3.blade" ]
                 recordCase "cli: `plan` under BLADE_LLVM=1, BLADE_SIMPLEX_TILE=0 reports the tile declined"
                     (code = 0 && out.Contains "declined -- BLADE_SIMPLEX_TILE=0/off: the plain per-cell nest"
