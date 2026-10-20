@@ -957,12 +957,16 @@ let private rowSlotCases : (string * (string * string) list * string * (Blade.Ef
        rowSlotSym2 521 rowSlotOmpOuter "g(i, j) * g(i, j)",
        declined "disabled by BLADE_FOLD_ROW_SLOTS=0", "row-slot form declined by its knob",
        [ reproCensus ], [ "__rslot" ])
-      // The default (licensed) build never takes it: the orbit-class fold does.
+      // The default (licensed) build never takes it: a licensed compact form does --
+      // the orbit-class fold, or (since round-2 B3, when the producer is the plain
+      // compact nest) the compact row classes taken behind each packed row.
       ("row_slots_not_in_default_build", [],
        rowSlotSym2 521 rowSlotOmpOuter "g(i, j) * g(i, j)",
        (fun d -> d.Rule = "fold-form" && d.Outcome = Blade.Effects.Applied
-                 && d.Evidence |> List.exists (fun e -> e.StartsWith "fold form: orbit-class fold")),
-       "orbit-class fold applied (no row slots)",
+                 && d.Evidence |> List.exists (fun e ->
+                        e.StartsWith "fold form: orbit-class fold"
+                        || e.StartsWith "fold form: compact row classes")),
+       "a licensed compact form applied (orbit-class fold or compact row classes; no row slots)",
        [], [ "__rslot" ]) ]
 
 /// Assert that `omp` reaches codegen as a pragma for every spelling of a
