@@ -8,6 +8,10 @@
 // stored. The checksum streams over lap's rows (a per-row prodsum under a licensed fold),
 // so no squared temporary is allocated: `reduce(reduce(lap * lap, (+)), (+))` would
 // materialize a second (ny-2) x (nx-2) array (notes/llvm-acceptance-B.md, stencil).
+// The input checksum carries `where omp` on its outer fold kernel (the mt8 read-back
+// licence every Fortran arm has, RESULTS section 12 / D44; wave 3 attribution: the serial
+// read-back was ~1.5 ms of the mt8-licensed gap). A licensed build threads it (Path B);
+// a repro build keeps it serial (the row-slot form does not recognise a row-view fold).
 
 type Y = Idx<1501>   // SIZE ny
 type X = Idx<2003>   // SIZE nx
@@ -38,5 +42,5 @@ function kernel(u: Array<Float64 like Y, X>) -> Float64 = {
 
 let (checksum, input_checksum) = {
     let u = inputs()
-    (kernel(u), reduce(reduce(u, (+)), (+)))
+    (kernel(u), reduce(method_for(range<Y>) <@> lambda(i) -> reduce(u(i), (+)), lambda(p, q) where omp -> p + q, 0.0))
 }
