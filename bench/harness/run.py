@@ -880,6 +880,13 @@ _RE_CPP_THREADS = re.compile(r"\bBLADE_OMP_PARALLEL\w*|#\s*pragma\s+omp\s+parall
 # ... or a call of the explicit K-lane vector fold forms (blade_fold_lanes.hpp, review M9/M14),
 # which replaced the single-accumulator simd reduction for dot-class folds on 2026-10-19.
 _RE_CPP_SIMDRED = re.compile(r"\bBLADE_OMP_(?:PARALLEL_FOR_)?SIMD_REDUCTION\(|\bblade_fold::(?:sum|dot|sq|dot3)<")
+# The SCALAR K-lane tree (CodeGenExprSupport.fpReassocLaneStmts, used by expression /
+# materialized reduces and the prodsum fallback): K separately named locals seeded as
+# `<elem> <prefix>0 = ...; <elem> <prefix>1 = ...` (prefix `__rlane` for reduces, `__pl` for
+# prodsum).  One TREE = one typed declaration of lane 0, counted in the whole text (the
+# emitter often puts a whole fold lambda on one line, so lines are not the unit).
+_RE_CPP_LANE_TREE = re.compile(
+    r"\b(?:double|float|int32_t|int64_t|auto|std::complex<(?:double|float)>)\s+(?:__rlane|__pl)0\s*=(?!=)")
 _RE_CPP_SERIAL_MARK = re.compile(r"\[omp\] requested but emitted serial")
 _RE_LL_THREADS = re.compile(r"__kmpc_fork_call|\bGOMP_parallel\w*|\bomp_get_num_threads\b")
 _RE_LL_REASSOC = re.compile(r"=\s*f(?:add|mul|sub|div|neg)\s+(?:(?:nnan|ninf|nsz|arcp|contract|afn)\s+)*(?:reassoc|fast)\b")
@@ -1088,7 +1095,8 @@ def _build_blade(b: Build, k: Kernel, arm: ArmSpec, regime: Regime, src: Path, a
     elif cpps:
         text = cpps[0].read_text(encoding="utf-8", errors="replace")
         ev.update(lane="cpp", thread_constructs=len(_RE_CPP_THREADS.findall(text)),
-                  simd_reductions=len(_RE_CPP_SIMDRED.findall(text)),
+                  lane_trees=len(_RE_CPP_LANE_TREE.findall(text)),
+                  simd_reductions=len(_RE_CPP_SIMDRED.findall(text)) + len(_RE_CPP_LANE_TREE.findall(text)),
                   omp_emitted_serial_markers=len(_RE_CPP_SERIAL_MARK.findall(text)))
     # The arm's ACTUAL fold form, from the artifact (blade plan is silent about it).
     nre = ev.get("simd_reductions", 0) + ev.get("reassoc_flags", 0)

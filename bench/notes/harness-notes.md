@@ -124,6 +124,19 @@ Harness v2 (after the method review; 2026-10-17 evening):
 
 ## 5. Open items / pending other agents
 
+- 2026-10-19 (user-approved): the C++ fold-form classifier now also counts the SCALAR K-lane
+  tree (`fpReassocLaneStmts`: typed seed declarations `<elem> __rlane0 = ...` for reduces,
+  `__pl0` for the prodsum fallback; counted per tree in the whole text, since a fold lambda
+  is often one long line). Before, maskagg blade-cpp and its twin (session-133604) read
+  `in-order` despite two / one lane trees; they now read `reordered (2 SIMD_REDUCTION/K-lane)`
+  / `(1 ...)`. The repro-serial check (M3) uses the same count, so a stray lane tree in a
+  repro build now fails it; all 34 recorded serial-repro C++ artifacts scan clean (0).
+  Unit-checked on maskagg licensed (2), its twin (1), maskagg repro (0), dot licensed
+  (1 blade_fold + 2 trees), gram licensed / mt8 (4 + 2), and three other repro kernels (0).
+  `evidence.lane_trees` records the tree count separately. The scratchpad timing log
+  `p2r3/fold-ab_time.txt` is cited only by notes/loose-ends-codex.md, which already names
+  it as the broken output and points at `p2r3/fold-ab_time-fixed.txt`; no harness file cites it.
+
 - 2026-10-19 (user decision, design-decisions D47): blas-regime Blade C++ builds that import
   no BLAS DLL are accepted when plan.txt shows a native preemption for the contraction
   (`native_preempt()`: one subject with a non-gate-off `[blas-routing] declined` line AND a
