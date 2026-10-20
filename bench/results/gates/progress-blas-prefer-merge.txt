@@ -1,0 +1,14 @@
+22:20:33 START dll=996a5ff4320cbba98620448d5ba88ebe785f42f886ec1d6b198945866363eeb7
+22:20:33 START linalg: linalg
+22:21:20 DONE linalg rc=0 wall=47s fails=0
+22:21:20 START syrk-tile: syrk-tile
+22:21:40 DONE syrk-tile rc=0 wall=20s fails=0
+22:21:40 START cli: cli
+22:22:47 DONE cli rc=0 wall=67s fails=0
+22:22:47 START domains: domains
+22:22:58 DONE domains rc=0 wall=11s fails=0
+22:22:58 START corpus-wiring: corpus-wiring
+22:23:02 DONE corpus-wiring rc=0 wall=4s fails=0
+22:23:02 START docs: docs
+22:23:10 DONE docs rc=0 wall=7s fails=0
+22:23:10 ALL DONE
