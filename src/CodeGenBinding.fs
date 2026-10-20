@@ -5989,9 +5989,13 @@ and genForRangeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
     // for-range is nested inside a block, genLetChainBinding already forced it
     // (dropped from DeferredComputations) and the collector finds nothing.
     let (forceCode, ctx) = forceDeferredPositionalReads ctx builder ($"{name}__def") body
-    // Imperative for-range loop
-    let loStr = exprToCppCtx ctx lo
-    let hiStr = exprToCppCtx ctx hi
+    // Imperative for-range loop. E-G5 (Blade.Optimize.RecStepTable): the
+    // CELL loop of a threaded step runs the worker's chunk, whose bounds the
+    // time loop's region handed over through the entry.
+    let (loStr, hiStr) =
+        match Blade.Optimize.RecStepTable.tryLoop vid with
+        | Some entry when entry.ChunkBounds.Value.IsSome -> entry.ChunkBounds.Value.Value
+        | _ -> (exprToCppCtx ctx lo, exprToCppCtx ctx hi)
     let varName = $"__k{vid}"
     let innerCtx = addVarName vid varName ctx
     // Unroll the body IRLet chain into statements
@@ -6003,6 +6007,16 @@ and genForRangeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
         bodyLets |> List.collect (fun (id, v) ->
             let (hv, v') = hoistFreshPoolCallArgs builder v
             hv @ [(id, v')])
+    // E-G5: the TIME loop of a threaded `let rec` step -- one persistent team
+    // (or the plain loop behind a census line).
+    let recStep =
+        match Blade.Optimize.RecStepTable.tryStep vid with
+        | Some entry -> genRecStepTimeLoop ctx binding builder entry vid loStr hiStr bodyLets _bodyFinal forceCode
+        | None -> Error []
+    match recStep with
+    | Ok result -> result
+    | Error censusLines ->
+    let forceCode = forceCode @ censusLines
     // Deterministic deallocation: ONE loop-body frame, pushed AFTER
     // forceDeferredPositionalReads above (whose materializations belong to the
     // OUTER scope and must not be freed per iteration). Registrations always land
@@ -6026,7 +6040,16 @@ and genForRangeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
                 Blade.Optimize.recordCellEpilogue entry.Subject (Blade.Effects.Declined why)
                     [ "the row's prodsum runs on the finished row after the step" ]
                 None
-            if fpReassocEnabled () then
+            // E-G5: inside a threaded step's team the row chain cannot
+            // advance per cell across workers (the time loop's region folds
+            // the row its own way); the serial fallbacks keep the chain.
+            let threaded =
+                match Blade.Optimize.RecStepTable.tryLoop vid with
+                | Some e -> e.ChunkBounds.Value.IsSome
+                | None -> false
+            if threaded then
+                declined "the step is threaded (rec-step-parallel): the row chain cannot advance per cell across workers; the row is folded per worker chunk inside the team or on complete rows after it"
+            elif fpReassocEnabled () then
                 declined (Blade.Optimize.cellEpilogueLicensedRowDecline "the finished row")
             else
                 match List.tryLast bodyLets, _bodyFinal with
@@ -6109,6 +6132,251 @@ and genForRangeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
         @ loopTail
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
+
+
+
+/// Wave 3, E-G5 (bench gap G5; `Blade.Optimize.RecStepTable`): the TIME loop
+/// of a `let rec` whose step's final map carried `where omp` -- the loop
+/// whose body is `[lag row views; the slice-write-fused cell loop; (row view;
+/// p = K(row); acc <- F(acc, p))?]`. Emitted as ONE team over all the steps
+/// with contiguous x ownership fixed for the whole loop and NO per-step
+/// synchronization: a worker writes only its own cells of row n and reads
+/// only its own cells of strictly earlier rows (the optimizer's proof), so
+/// its own program order is the only ordering the cells need; row 0 was
+/// written before the team. A team entry or a barrier costs ~40 us on the
+/// bench box (libgomp, Windows): 300 of either would be the whole budget.
+///
+/// The fused row fold, when present:
+///   * licensed build AND K = prodsum(row, row): each worker folds its own
+///     chunk of the row it just wrote (L1-hot) with the self-dot's K-lane
+///     form into `part[n][t]`; after the team each row's partials are
+///     combined ascending from +0 (the Path B discipline, deterministic for a
+///     fixed team) and the time chain `acc <- F(acc, p_n)` runs ascending from
+///     its seed -- the licence is the row's own builtin `+`;
+///   * otherwise (BLADE_FP_REPRO=1, `where repro`, any other K): a strict
+///     post-pass -- K applied to each COMPLETE row into an indexed slot, rows
+///     in parallel, each row's chain whole and in K's own text -- then the
+///     time chain over the slots in order: byte-identical to the serial
+///     program for every team size (G35's row-slot discipline).
+/// Ok = the emission; Error = the census lines to put before the plain loop
+/// (threads suppressed, a shape the planner did not see).
+and genRecStepTimeLoop (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (entry: Blade.Optimize.RecStepEntry)
+                       (vid: IRId) (loStr: string) (hiStr: string) (bodyLets: (IRId * IRExpr) list) (bodyFinal: IRExpr)
+                       (forceCode: string list) : Result<string list * CodeGenContext, string list> =
+    let ind = indentStr ctx
+    let name = bindingCppName binding
+    let subject = entry.Subject
+    let serial = "the recursion's steps run on the plain serial time loop"
+    entry.Decided.Value <- true
+    let declined (why: string) (census: string option) =
+        recordCodegenDecision "rec-step-parallel" subject (Blade.Effects.Declined why) [ serial ]
+        Error (match census with Some c -> [ $"{ind}// {c}" ] | None -> [])
+    if not (ompThreadEmissionEnabled ()) then
+        // The request was inlined away with the map: the census line is this
+        // loop's (the invariant: a dropped omp is never silent).
+        declined (ompThreadsSuppressedReason ()) (Some (ompSuppressedPhrase (ompThreadsSuppressedReason ())))
+    else
+    // The body's shape, re-verified here (fail closed): a leading run of
+    // trajectory row views, the cell loop, then the fold triple or nothing.
+    let isRowView (v: IRExpr) =
+        match v with
+        | IRIndex (IRVar (b, _), [ _ ], _) when b = entry.BufferId -> true
+        | _ -> false
+    let rec splitLags acc (ls: (IRId * IRExpr) list) =
+        match ls with
+        | (id, v) :: t when isRowView v -> splitLags ((id, v) :: acc) t
+        | _ -> (List.rev acc, ls)
+    let lagLets, afterLags = splitLags [] bodyLets
+    // The cell loop's body: scalar lets (every worker private is a scalar),
+    // ending in the one store `BUF[n][k] = local` (Codex objection 7).
+    let cellBodyOk (cellBody: IRExpr) =
+        let (lets, fin) = unrollLetChain cellBody
+        match List.tryLast lets, fin with
+        | Some (_, IRAssign (IRIndex (IRVar (b, _), [ IRVar (n, _); IRVar (k2, _) ], _), IRVar (sv, _))), IRLit IRLitUnit
+            when b = entry.BufferId && n = vid && k2 = entry.CellLoopVar && lets |> List.exists (fun (id, _) -> id = sv) ->
+            lets |> List.take (lets.Length - 1)
+            |> List.forall (fun (_, v) -> match inferExprType v with IRTScalar _ -> true | _ -> false)
+        | _ -> false
+    let shape =
+        match afterLags, bodyFinal with
+        | (wId, (IRForRange (kv, IRLit (IRLitInt 0L), IRLit (IRLitInt cells), cellBody) as cellLoop)) :: tail, IRLit IRLitUnit
+            when kv = entry.CellLoopVar && cells = entry.Cells ->
+            if not (cellBodyOk cellBody) then Error "the cell loop's body is not scalar lets ending in the planned row store" else
+            (match entry.Fold.Value, tail with
+             | None, [] -> Ok ((wId, cellLoop), None)
+             | Some f, [ (r, rv); (p, pv); (a, av) ] when r = f.RowLetId && p = f.FoldLetId && a = f.AssignLetId && isRowView rv ->
+                Ok ((wId, cellLoop), Some (f, (r, rv), (p, pv), (a, av)))
+             | _ -> Error "the time loop's statements after the cell loop are not the planned row fold")
+        | _ -> Error "the time loop's statements are not the planned lag views, cell loop and row fold"
+    match shape with
+    | Error why -> declined ("the loop's shape changed after planning: " + why) (Some (ompSuppressedPhrase ("rec-step-parallel: " + why)))
+    | Ok ((wId, cellLoop), fold) ->
+    let bufName = Map.tryFind entry.BufferId ctx.VarNames |> Option.defaultValue $"__v{entry.BufferId}"
+    let elem =
+        match fold with
+        | Some (_, (_, rv), _, _) ->
+            (match inferExprType rv with
+             | ArrayElem at -> elemTypeToCpp at.ElemType
+             | _ -> "double")
+        | None -> "double"
+    let strict = not (fpReassocEnabled ()) || (Blade.LinAlgPatterns.reproScopeDepth ()).Value > 0
+    // The in-team partial is the self-dot's K-lane form over the worker's
+    // chunk: a licensed build, a Float64 / Float32 row, lanes not turned off
+    // (BLADE_FOLD_LANES), and neither K nor F `where repro` (objection 11).
+    let licensedSquare =
+        match fold with
+        | Some (f, _, _, _) ->
+            not strict && not f.StrictOnly && f.Term = Some Blade.Optimize.Square
+            && foldVecElem elem && foldLanesMode () <> FoldLanesOff
+        | None -> false
+    // The strict post-pass runs rows in PARALLEL only under the outer fold
+    // kernel's own `where omp` (the row-slot gate, G35): the step's spatial
+    // request never licenses the row axis (objection 10).
+    let parallelRows =
+        match fold with
+        | Some (f, _, _, _) -> f.OuterRequest && f.Term = Some Blade.Optimize.Square
+        | None -> false
+    let nVar = $"__k{vid}"
+    let t = $"__rsT_{vid}"
+    let rn = $"__rsn_{vid}"
+    let part = $"__rspart_{vid}"
+    let nt = $"__rsnt_{vid}"
+    let slot = $"__rsslot_{vid}"
+    let i1 = ind + "    "
+    let i2 = i1 + "    "
+    let i3 = i2 + "    "
+    (ompApiUsedCell ()).Value <- true
+    (foldLanesUsedCell ()).Value <- true
+    // Render a let chain at `indent` with the loop variable bound; a let in
+    // `overrides` is bound to that C++ name instead of rendered.
+    let renderLets (ctx0: CodeGenContext) (indent: int) (lets: (IRId * IRExpr) list) (overrides: Map<IRId, string>) =
+        let (code, ctx') =
+            lets |> List.fold (fun (accCode, accCtx) (id, value) ->
+                match Map.tryFind id overrides with
+                | Some nm -> (accCode, addVarName id nm accCtx)
+                | None ->
+                    setAllocOwner (Some id)
+                    let tempName = $"__v{id}"
+                    let tempBinding = { Id = id; Name = tempName; Type = inferExprType value; Value = value; IsConst = true; IsMutable = false }
+                    let (code, ctx') = genBinding { accCtx with Indent = indent } tempBinding builder
+                    (accCode @ code, { ctx' with Indent = ctx0.Indent })) ([], ctx0)
+        setAllocOwner None
+        (code, ctx')
+    // One loop-body frame per rendered loop body, as the plain loop keeps
+    // (the bodies here allocate nothing: views, scalars, the cell loop's own
+    // frame); the frees are emitted where the plain loop would emit them.
+    let withLoopFrame (lets: (IRId * IRExpr) list) (indent: string) (render: unit -> string list) =
+        let escapes = computeScopeEscapes ctx LoopScope lets
+        let allocDepth = allocScopeDepth ()
+        pushAllocScope SLoop escapes
+        try
+            let code = render ()
+            (code, popAllocScopeFrees indent)
+        finally truncateAllocScopeStack allocDepth
+    let innerCtx = addVarName vid nVar ctx
+    // The region's loop body: lag views, the cell loop over the chunk, the
+    // licensed partial.
+    let (regionBody, regionFrees) =
+        withLoopFrame (lagLets @ [ (wId, cellLoop) ]) i3 (fun () ->
+            let (lagCode, ctx1) = renderLets innerCtx (ctx.Indent + 3) lagLets Map.empty
+            entry.ChunkBounds.Value <- Some ("(int64_t)__rlo", "(int64_t)__rhi")
+            let (cellCode, _) =
+                try renderLets ctx1 (ctx.Indent + 3) [ (wId, cellLoop) ] Map.empty
+                finally entry.ChunkBounds.Value <- None
+            let partial =
+                if licensedSquare then
+                    // The configured lane count (BLADE_FOLD_LANES=4|8), as the
+                    // prodsum emitter's own self-dot takes it.
+                    let lanes = foldVecLanes VecSq
+                    [ i3 + $"{part}[(size_t){nVar} * (size_t){t} + (size_t)__rt] = __rhi > __rlo ? blade_fold::sq<{elem}, {lanes}>({bufName}.data[{nVar}] + __rlo, __rhi - __rlo) : ({elem})0;   // this worker's chunk of the row it just wrote" ]
+                else []
+            lagCode @ cellCode @ partial)
+    let region =
+        [ ind + $"{{   // rec-step-parallel v1: one persistent team over the recursion's steps -- fixed contiguous x ownership, no per-step synchronization (a worker reads only its own cells of earlier rows)"
+          i1 + $"const size_t {rn} = (size_t){entry.Cells}L;"
+          i1 + $"int {t} = blade_omp_get_max_threads();"
+          i1 + $"if ((size_t){t} > {rn}) {t} = (int){rn};"
+          i1 + $"if ({t} < 1) {t} = 1;" ]
+        @ (if licensedSquare then
+               [ i1 + $"{elem}* {part} = new {elem}[(size_t)({hiStr}) * (size_t){t}]();   // per-row, per-worker partials of the row self-dot"
+                 i1 + $"int {nt} = 1;" ]
+           else [])
+        @ [ i1 + $"BLADE_OMP_PARALLEL_NUM_THREADS({t})"
+            i1 + "{"
+            i2 + "const int __rnt = blade_omp_get_num_threads();"
+            i2 + "const int __rt = blade_omp_get_thread_num();"
+            i2 + $"const size_t __rlo = blade_fold::chunk_lo({rn}, (size_t)__rt, (size_t)__rnt);"
+            i2 + $"const size_t __rhi = blade_fold::chunk_lo({rn}, (size_t)__rt + 1, (size_t)__rnt);" ]
+        @ (if licensedSquare then [ i2 + $"if (__rt == 0) {nt} = __rnt;" ] else [])
+        @ [ forLoopFrom i2 nVar loStr hiStr ]
+        @ regionBody
+        @ regionFrees
+        @ [ i2 + "}"
+            i1 + "}" ]
+    // After the team: the row fold's combine.
+    let post =
+        match fold with
+        | None -> []
+        | Some (f, (r, rv), (p, pv), (a, av)) ->
+            let pName = $"__v{p}"
+            if licensedSquare then
+                let (combine, combineFrees) =
+                    withLoopFrame [ (a, av) ] i2 (fun () ->
+                        let (code, _) = renderLets (addVarName p pName innerCtx) (ctx.Indent + 2) [ (a, av) ] Map.empty
+                        code)
+                [ i1 + "// the row partials combined ascending from +0 per row, then the time chain ascending from its seed"
+                  forLoopFrom i1 nVar loStr hiStr
+                  i2 + $"{elem} {pName} = ({elem})0;"
+                  i2 + $"for (int __rsi = 0; __rsi < {nt}; __rsi++) {pName} = {pName} + {part}[(size_t){nVar} * (size_t){t} + (size_t)__rsi];" ]
+                @ combine @ combineFrees
+                @ [ i1 + "}"
+                    i1 + $"delete[] {part};" ]
+            elif parallelRows then
+                // K on each COMPLETE row into its slot, rows in parallel
+                // under F's own request (each row's chain whole, in K's own
+                // text), then the time chain over the slots in order.
+                let (slotBody, slotFrees) =
+                    withLoopFrame [ (r, rv); (p, pv) ] i2 (fun () ->
+                        let (code, _) = renderLets innerCtx (ctx.Indent + 2) [ (r, rv); (p, pv) ] Map.empty
+                        code @ [ i2 + $"{slot}[{nVar}] = {pName};" ])
+                let (combine, combineFrees) =
+                    withLoopFrame [ (a, av) ] i2 (fun () ->
+                        let (code, _) = renderLets (addVarName p pName innerCtx) (ctx.Indent + 2) [ (a, av) ] Map.empty
+                        code)
+                recordOmpConstruct subject "BLADE_OMP_PARALLEL_FOR" "rec-step-parallel: the row kernel on complete rows into indexed slots, rows in parallel under the outer fold kernel's `where omp` (each row's chain whole); the time chain over the slots in order"
+                [ i1 + "// strict: the row kernel on each COMPLETE row into its slot (rows in parallel under the outer fold kernel's own `where omp`; each chain whole), then the time chain over the slots in order"
+                  i1 + $"{elem}* {slot} = new {elem}[(size_t)({hiStr})]();"
+                  i1 + "BLADE_OMP_PARALLEL_FOR"
+                  forLoopFrom i1 nVar loStr hiStr ]
+                @ slotBody @ slotFrees
+                @ [ i1 + "}"
+                    forLoopFrom i1 nVar loStr hiStr
+                    i2 + $"const {elem} {pName} = {slot}[{nVar}];" ]
+                @ combine @ combineFrees
+                @ [ i1 + "}"
+                    i1 + $"delete[] {slot};" ]
+            else
+                // Serial: K on each complete row, then F -- the fused fold's
+                // own statements, after the team instead of between the steps.
+                let (body, frees) =
+                    withLoopFrame [ (r, rv); (p, pv); (a, av) ] i2 (fun () ->
+                        let (code, _) = renderLets innerCtx (ctx.Indent + 2) [ (r, rv); (p, pv); (a, av) ] Map.empty
+                        code)
+                [ i1 + "// the row fold after the team, serial: the row kernel on each complete row, then the time chain, in order"
+                  forLoopFrom i1 nVar loStr hiStr ]
+                @ body @ frees
+                @ [ i1 + "}" ]
+    let form =
+        match fold with
+        | None -> "persistent team; no row fold"
+        | Some _ when licensedSquare -> "persistent team; licensed row partials per worker chunk (self-dot K-lanes), combined ascending per row; time chain in order"
+        | Some _ when parallelRows -> "persistent team; strict post-pass: complete-row slots in parallel under the outer fold kernel's `where omp`, time chain in order"
+        | Some _ -> "persistent team; strict post-pass: complete rows serially, time chain in order"
+    recordCodegenDecision "rec-step-parallel" subject Blade.Effects.Applied
+        [ $"applied -- {form}"; $"the `where omp` request of `{entry.KernelName}` (the step's final map)" ]
+    recordOmpConstruct subject $"BLADE_OMP_PARALLEL_NUM_THREADS({t})" "rec-step-parallel: the recursion's time loop inside one team, each worker owning a contiguous x chunk for every step"
+    let code = forceCode @ region @ post @ [ ind + "}" ]
+    Ok (code, addVarName binding.Id name ctx)
 
 
 

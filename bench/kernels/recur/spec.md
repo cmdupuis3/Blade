@@ -55,9 +55,16 @@ more of the same; the region as a whole allocates and writes the 48 MB trajector
   `u(x,t)` and the checksum accumulation in the same loop. mt8: `!$omp parallel do` over x
   inside the time loop (each trajectory's arithmetic order preserved; `reduction(+:)` on
   the checksum).
-- **mt8 applies to the Fortran arms (M5).** The x-trajectories are independent and
-  ordinary Fortran threads them; Blade's `let rec` step has no licence slot for the
-  non-recursion axis (gap register G5), so the Blade cells read **"no parallel form"**.
+- **mt8 applies to the Fortran arms (M5) and, since wave 3 (E-G5), to the Blade C++ arm.**
+  The x-trajectories are independent and ordinary Fortran threads them. Blade's licence slot
+  is the `where omp(v: 1)` on the step's FINAL map (gap register G5): the compiler proves the
+  step reads only its own cell of strictly earlier rows and runs the whole time loop on one
+  persistent team with fixed contiguous x ownership and no per-step synchronization -- the
+  expert's own schedule. Licensed: each worker folds its chunk of the row it just wrote
+  (the checksum's `prodsum(row, row)` is a builtin `+`), chunks combined ascending per row,
+  the time chain in order; repro: complete rows into slots in parallel under the checksum's
+  own `where omp` (the row-slot gate), each row's chain whole, then the time chain in order
+  (bitwise the serial program). The LLVM lane stays serial-only (G11).
 - **Selection record**: baseline = RK4 as array statements per stage; expert = the Fortran
   agent's reviewed scalar-stage loop.
 
@@ -72,7 +79,8 @@ function step(u: Array<Float like X>) -> Array<Float like X> = {
     let k2 = rhs(u + 0.005 * k1)
     let k3 = rhs(u + 0.005 * k2)
     let k4 = rhs(u + 0.01 * k3)
-    u + (0.01 / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+    method_for(zip(u, k1, k2, k3, k4)) <@> lambda(v, a1, a2, a3, a4) where omp(v: 1) ->
+        v + (0.01 / 6.0) * (a1 + 2.0 * a2 + 2.0 * a3 + a4) |> compute
 }
 let rec traj: Array<Float like T, X> =
     match traj with
@@ -81,9 +89,11 @@ let rec traj: Array<Float like T, X> =
     | prefix :: n -> prefix :: step(prefix(n - 1))
 ```
 
-Checksum: `reduce(method_for(traj) <@> lambda(row) -> prodsum(row, row), (+))` — the
-per-row `prodsum` (blade-B); `reduce(reduce(traj * traj, (+)), (+))` would materialize a
-second 48 MB trajectory (over the cap; G10).
+Checksum: `reduce(method_for(traj) <@> lambda(row) -> prodsum(row, row), lambda(p, q) where omp -> p + q, 0.0)`
+— the per-row `prodsum` (blade-B), the outer kernel's `where omp` being the request the
+strict build reads to fold complete rows in parallel (wave 3, E-G5; the licensed build folds
+each worker's chunk inside the team); `reduce(reduce(traj * traj, (+)), (+))` would
+materialize a second 48 MB trajectory (over the cap; G10).
 
 (corpus recursive-arrays/007, the RK4 litmus.) Probed inside a function: typechecks; the
 emit shows per step about eight row-sized allocate/free pairs (one per stage expression)
@@ -93,7 +103,8 @@ zero-fill. The LLVM lane accepted the shape (no `IRForRange` refusal).
 
 ## Regimes
 
-licensed and repro, serial (all arms) and mt8 (Fortran arms; Blade "no parallel form").
+licensed and repro, serial (all arms) and mt8 (Fortran arms and, since wave 3, the Blade C++
+arm; the Blade LLVM arm is serial-only).
 The checksum fold `reduce(..., (+))` over the per-row `prodsum`s is a builtin-body fold and
 therefore reassociation-licensed under the knob (the row `prodsum` likewise), so `licensed`
 differs from `repro` in the checksum pass only; the RK4 stages carry no fold. Matched

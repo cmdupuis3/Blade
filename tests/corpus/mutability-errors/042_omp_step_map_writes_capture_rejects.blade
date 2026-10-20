@@ -1,0 +1,30 @@
+// TEST: a let-rec step's requesting map writes a captured binding (rejects)
+// ERROR: BL4005 @ 14:23
+// ERROR-CONTAINS: bound outside this parallel kernel's body
+// Wave 3 (E-G5): the `where omp` on a step's final map is the step-threading
+// request; a kernel that writes a captured `let mut` is refused by the front
+// end as every parallel body is (the admission never sees it, and no knob --
+// BLADE_OMP_THREADS=1 included -- legalizes it: the refusal is the type
+// checker's, before any build knob is read).
+type T = Idx<4>
+type X = Idx<3>
+let mut hits = 0.0
+
+function step(u: Array<Float64 like X>) -> Array<Float64 like X> = {
+    method_for(u) <@> lambda(v) where omp(v: 1) -> {
+        hits = hits + v
+        v * 0.5 + 1.0
+    } |> compute
+}
+
+function total(u0: Array<Float64 like X>) -> Float64 = {
+    let rec traj: Array<Float64 like T, X> =
+        match traj with
+        | zero -> zero
+        | zero :: s -> zero :: u0
+        | prefix :: n -> prefix :: step(prefix(n - 1))
+    reduce(method_for(traj) <@> lambda(row) -> prodsum(row, row), (+))
+}
+
+let u0: Array<Float64 like X> = [1.0, 2.0, 4.0]
+let t = total(u0)

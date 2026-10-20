@@ -2955,6 +2955,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     Blade.Types.PoolReuseTable.reset ()
     Optimize.HotRowTable.reset ()
     Optimize.CellFoldTable.reset ()
+    Optimize.RecStepTable.reset ()
     Optimize.CompactionTable.reset ()
     Optimize.CompactRowTable.reset ()
     // The raw decl list callers hand us is the program they PARSED, not the

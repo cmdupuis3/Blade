@@ -2992,6 +2992,18 @@ and private emitForRange (c: Ctx) (vid: IRId) (lo: IRExpr) (hi: IRExpr) (body: I
     let trips = if loV.Reg = "0" then hiV.Reg else i64Bin c "sub" hiV.Reg loV.Reg
     let slot = ensureSlot c vid ScI64
     forceLoopBodyProducers c body
+    // Wave 3 (E-G5; Blade.Optimize.RecStepTable): the time loop of a threaded
+    // `let rec` step. This lane has no thread runtime (G11): the sequential
+    // loop IS the emission, and the record says so (the request was inlined
+    // away with the step's final map, so this is its census).
+    (match Blade.Optimize.RecStepTable.tryStep vid with
+     | Some entry when Blade.Effects.Decisions.active () ->
+        Blade.Effects.Decisions.record
+            { Rule = "rec-step-parallel"; Version = 1; Span = c.DeclSpan
+              Subject = entry.Subject
+              Outcome = Blade.Effects.Declined $"llvm lane: the LLVM lane has no thread-level form; the `where omp` request of `{entry.KernelName}` (the step's final map) runs the recursion's steps serially"
+              Evidence = [ "the sequential time loop" ] }
+     | _ -> ())
     // B2r for a recursion (round-2 cell epilogues; Blade.Optimize.CellFoldTable):
     // this loop is a step's slice-write-fused CELL loop whose row the step
     // then folds with `prodsum(row, row)`. In a build that keeps the serial

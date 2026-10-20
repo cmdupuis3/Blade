@@ -23,7 +23,7 @@
     "natural": "parity",
     "expert": "LOSS 1.5-3x"
   },
-  "notes": "mt8 runs the Fortran arms only (threads over x inside the time loop); Blade cells read 'no parallel form' (review M5). recur/expert.f90 (gfortran, serial-licensed-native, full) is the compute drift control.",
+  "notes": "mt8: the Fortran arms thread over x inside the time loop; since wave 3 (E-G5, gap G5) the Blade C++ arm threads too -- `where omp(v: 1)` on the step's final map runs the whole time loop on one persistent team with fixed x ownership (no per-step synchronization; licensed: per-worker row partials of the checksum; repro: complete rows into slots under the checksum's own `where omp`, then the time chain in order); the LLVM lane stays serial-only (G11). recur/expert.f90 (gfortran, serial-licensed-native, full) is the compute drift control.",
   "arms": [
     "blade-llvm",
     "blade-cpp",
@@ -33,5 +33,5 @@
     "ifx-expert"
   ],
   "source_of_truth": "bench/kernels/recur/spec.md + bench/notes/kernel-list.md (2026-10-17)",
-  "no_parallel_form": true
+  "no_parallel_form": false
 }

@@ -3914,4 +3914,17 @@ let genSelfContainedProgramFromIR (program: IRProgram) (testName: string) : stri
                 sentinels
                 |> List.map (fun m -> sprintf "#error \"Blade codegen: %s\"" (m.Replace("\"", "'")))
             code + "\n" + (directives |> String.concat "\n") + "\n"
+    // Wave 3 (E-G5): a threaded-step entry no time-loop emitter DECIDED (the
+    // recursion reached an emitter without the hook -- an expression-position
+    // loop, a cloned owner): its `where omp` request was inlined away with
+    // the step's map, so the census is printed here, never nowhere.
+    let code =
+        match Blade.Optimize.RecStepTable.undecided () with
+        | [] -> code
+        | lost ->
+            let lines =
+                lost |> List.map (fun e ->
+                    let why = $"rec-step-parallel: the planned time loop of `{e.Subject}` never reached the C++ time-loop emitter (the `where omp` request of `{e.KernelName}` was fused into the step and the recursion's steps run serially)"
+                    "// " + Blade.CodeGenState.ompSuppressedPhrase why)
+            code + "\n" + (lines |> String.concat "\n") + "\n"
     (code, cell.Value)

@@ -3057,6 +3057,111 @@ let private siblingCases () =
       siblingSurfaceJoinSeed ()
       siblingFailingCalleeSite () ]
 
+// ---------------------------------------------------------------------------
+// Wave 3, E-G5: the threaded `let rec` step (Blade.Optimize.RecStepTable;
+// BLADE_REC_STEP_OMP). The request is the `where omp` on the step's FINAL
+// map; corpus recursive-arrays/031-032 pin the values, these pin the
+// decisions and the C++ emission's forms.
+let private recStepSrcWith (outerKernel: string) (rhsDecl: string) =
+    "type T = Idx<4>\ntype X = Idx<3>\n"
+    + rhsDecl
+    + "function step(u: Array<Float64 like X>) -> Array<Float64 like X> = {\n"
+    + "    let k1 = rhs(u)\n"
+    + "    method_for(zip(u, k1)) <@> lambda(v, a) where omp(v: 1) -> a + 1.0 |> compute\n"
+    + "}\n"
+    + "function square(u0: Array<Float64 like X>) -> Float64 = {\n"
+    + "    let rec traj: Array<Float64 like T, X> =\n"
+    + "        match traj with\n"
+    + "        | zero -> zero\n"
+    + "        | zero :: s -> zero :: u0\n"
+    + "        | prefix :: n -> prefix :: step(prefix(n - 1))\n"
+    + "    reduce(method_for(traj) <@> lambda(row) -> prodsum(row, row), " + outerKernel + ")\n"
+    + "}\n"
+    + "let u0: Array<Float64 like X> = [1.0, 2.0, 4.0]\nlet q = square(u0)\n"
+let private recStepRhs = "function rhs(u: Array<Float64 like X>) -> Array<Float64 like X> = u * 0.5\n"
+let private recStepRhsRepro = "function rhs(u: Array<Float64 like X>) where repro -> Array<Float64 like X> = u * 0.5\n"
+let private recStepSrc = recStepSrcWith "(+)" recStepRhs
+let private recStepOuterSrc = recStepSrcWith "lambda(p, q) where omp -> p + q, 0.0" recStepRhs
+let private recStepReproCalleeSrc = recStepSrcWith "(+)" recStepRhsRepro
+/// A `where repro` OUTER fold kernel with the request: never spliced by the
+/// new admission (its BLADE_REPRO_FN boundary would be lost), so row-fold
+/// fusion declines it exactly as before (Codex diff review, finding 1).
+let private recStepReproOuterSrc =
+    recStepSrcWith "addr, 0.0" (recStepRhs + "function addr(a: Float64, b: Float64) where omp, repro -> Float64 = a + b\n")
+
+/// The C++ emission under `pins`: every needle in `must` present, none of
+/// `mustNot`.
+let private recStepEmissionCase (name: string) (src: string) (pins: (string * string) list)
+                                (must: string list) (mustNot: string list) =
+    match withGates pins (fun () -> cppOfSource name src) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let missing = must |> List.filter (fun n -> not (cpp.Contains n))
+        let present = mustNot |> List.filter (fun n -> cpp.Contains n)
+        if missing.IsEmpty && present.IsEmpty then
+            resultLine Pass name ($"{must.Length} needle(s) present, {mustNot.Length} absent")
+            true
+        else
+            let missingTxt = String.concat "; " missing
+            let presentTxt = String.concat "; " present
+            resultLine Fail name ($"missing: [{missingTxt}]; unexpected: [{presentTxt}]")
+            false
+
+let private recStepCases () : bool list =
+    let region = "BLADE_OMP_PARALLEL_NUM_THREADS(__rsT_"
+    let chunk = "blade_fold::chunk_lo(__rsn_"
+    let threadsOff = "[omp] requested but emitted serial: BLADE_OMP_THREADS=1"
+    [ // The planner's admission (lowering-level decisions).
+      decisionCase "decision_rec_step_applied" recStepSrc "rec-step-parallel"
+          (fun d -> applied d && d.Evidence |> List.exists (fun e -> e.Contains "names the fused cell loop"))
+          "applied: the final map's request names the fused cell loop"
+      decisionCase "decision_rec_step_fold_attached" recStepSrc "rec-step-parallel"
+          (fun d -> applied d && d.Evidence |> List.exists (fun e -> e.Contains "the fused row fold rides the team"))
+          "applied: the fused self-dot row fold rides the team"
+      decisionCase "decision_rec_step_fold_outer_request" recStepOuterSrc "rec-step-parallel"
+          (fun d -> applied d && d.Evidence |> List.exists (fun e -> e.Contains "rows in parallel under the outer fold kernel's own `where omp`"))
+          "applied: the outer kernel's request licenses the parallel row post-pass"
+      withGate "BLADE_REC_STEP_OMP" "0" (fun () ->
+        decisionCase "decision_rec_step_declined_gate" recStepSrc "rec-step-parallel"
+            (declinedMentioning "disabled by BLADE_REC_STEP_OMP") "declined: disabled by BLADE_REC_STEP_OMP")
+      decisionCase "decision_rec_step_declined_repro_callee" recStepReproCalleeSrc "rec-step-parallel"
+          (declinedMentioning "`where repro`") "declined: a spliced callee is `where repro`"
+      // The slice stays UNFUSED when the request cannot be honoured (the map
+      // keeps its own team): the slice-write record names the step's request.
+      decisionCase "decision_rec_step_repro_callee_keeps_request" recStepReproCalleeSrc "slice-write-fusion"
+          (declinedMentioning "the step's final map asks for omp, which the fused cell loop cannot honour")
+          "slice-write fusion declined so the request keeps its per-step team"
+      // The C++ forms.
+      recStepEmissionCase "rec_step_emission_licensed_partials" recStepSrc []
+          [ region; chunk; "__rspart_"; "blade_fold::sq<double, 8>("; "the row partials combined ascending" ]
+          [ "__rsslot_"; threadsOff; "the row fold after the team, serial" ]
+      recStepEmissionCase "rec_step_emission_threads_off" recStepSrc [ ("BLADE_OMP_THREADS", "1") ]
+          [ threadsOff ]
+          [ region; "__rspart_"; "__rsslot_" ]
+      recStepEmissionCase "rec_step_emission_repro_serial_rows" recStepSrc [ ("BLADE_FP_REPRO", "1") ]
+          [ region; chunk; "the row fold after the team, serial" ]
+          [ "__rspart_"; "__rsslot_"; "BLADE_OMP_PARALLEL_FOR\n" ]
+      recStepEmissionCase "rec_step_emission_repro_parallel_rows" recStepOuterSrc [ ("BLADE_FP_REPRO", "1") ]
+          [ region; chunk; "__rsslot_"; "BLADE_OMP_PARALLEL_FOR" ]
+          [ "__rspart_"; "the row fold after the team, serial" ]
+      recStepEmissionCase "rec_step_emission_lanes_off_serial_rows" recStepSrc [ ("BLADE_FOLD_LANES", "0") ]
+          [ region; "the row fold after the team, serial" ]
+          [ "__rspart_" ]
+      // BLADE_FOLD_LANES=4: the in-team partial takes the configured count.
+      recStepEmissionCase "rec_step_emission_lanes_4_partials" recStepSrc [ ("BLADE_FOLD_LANES", "4") ]
+          [ region; "__rspart_"; "blade_fold::sq<double, 4>(" ]
+          [ "blade_fold::sq<double, 8>(" ]
+      // A `where repro` outer kernel with the request: row-fold fusion
+      // declines (the fold keeps its boundary), the step still threads.
+      decisionCase "decision_rec_step_repro_outer_kernel_not_fused" recStepReproOuterSrc "row-fold-fusion"
+          (declinedMentioning "not a plain pure capture-free scalar kernel") "declined: a `where repro` outer kernel is not spliced"
+      recStepEmissionCase "rec_step_emission_repro_outer_kernel_keeps_boundary" recStepReproOuterSrc []
+          [ region; "rec-step-parallel v1: one persistent team"; "BLADE_REPRO_FN " ]
+          [ "__rspart_"; "__rsslot_"; "the row fold after the team, serial" ]
+      recStepEmissionCase "rec_step_emission_gate_off_restores_step_call" recStepSrc [ ("BLADE_REC_STEP_OMP", "0") ]
+          [ "step("; "BLADE_OMP_PARALLEL_FOR_SIMD" ]
+          [ region; "__rspart_" ] ]
+
 let runOptimizeTests () =
     printHeader "Blade-DSL: Optimization Layer Tests"
     let results =
@@ -3108,6 +3213,8 @@ let runOptimizeTests () =
           decisionCase "decision_row_fold_declined_while" rowFoldWhileSrc "row-fold-fusion"
               (declinedMentioning "freeze") "declined: a while-guarded recursion rewrites rows after the loop"
           rowFoldRk4Emission ()
+          // Wave 3, E-G5: the threaded `let rec` step's admission and forms.
+          yield! recStepCases ()
           // Reverse-mode AD of an additive recurrence is O(n): loop count pin.
           recarrayGradEmission ()
           recarrayGradNonlinearEmission ()

@@ -4390,6 +4390,12 @@ and internal dispatchTestClean (rest: string list) : int =
         // fixed team sizes; the LLVM lane's parity under the identity regime.
         let failed = (Blade.Tests.CellEpilogueTests.runCellEpilogueTests ()).Failed
         if failed = 0 then 0 else 1
+    | [ "rec-step" ] | [ "recstep" ] ->
+        // Wave 3 (E-G5): the threaded `let rec` step -- the threaded build
+        // vs the threads-off build by raw bits (trajectory, scalar, observed
+        // team) at fixed team sizes, licensed and repro.
+        let failed = (Blade.Tests.RecStepTests.runRecStepTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "orbit-scatter" ] | [ "orbitscatter" ] ->
         // The ordered orbit scatter executed in both lanes against walk-forced
         // twins under BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off: finite-value

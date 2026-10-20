@@ -3,8 +3,12 @@
 // The trajectory U(t, x) IS the array: row 0 is the initial field u0, row t is one RK4 step
 // (h = 0.01) of row t - 1. Sequentiality in t is derived from the prefix dependence; each
 // step is a whole rank-1 field computed by a pseudo-native step function whose elementwise
-// expressions are the function body. No imperative loop, no double buffer. Serial only:
-// there is no licence slot for x-parallelism inside a let rec step.
+// expressions are the function body. No imperative loop, no double buffer. The `where omp`
+// on the step's FINAL map is the x-parallelism request (wave 3, E-G5 / gap G5): the compiler
+// proves the step reads only its own cell of the previous row and runs the whole time loop
+// on one team with fixed x ownership and no per-step synchronization (the experts' mt8
+// schedule); the `where omp` on the checksum's outer fold is the request the strict
+// (repro) build reads to fold complete rows in parallel. Serial builds are unchanged.
 
 type T = Idx<301>     // SIZE nt
 type X = Idx<20011>   // SIZE nx
@@ -33,7 +37,10 @@ function step(u: Array<Float64 like X>) -> Array<Float64 like X> = {
     let k2 = rhs(u + 0.005 * k1)
     let k3 = rhs(u + 0.005 * k2)
     let k4 = rhs(u + 0.01 * k3)
-    u + (0.01 / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+    method_for(zip(u, k1, k2, k3, k4))
+        <@> lambda(v, a1, a2, a3, a4) where omp(v: 1) ->
+            v + (0.01 / 6.0) * (a1 + 2.0 * a2 + 2.0 * a3 + a4)
+        |> compute
 }
 
 function kernel(u0: Array<Float64 like X>) -> Float64 = {
@@ -42,7 +49,7 @@ function kernel(u0: Array<Float64 like X>) -> Float64 = {
         | zero -> zero
         | zero :: s -> zero :: u0
         | prefix :: n -> prefix :: step(prefix(n - 1))
-    reduce(method_for(traj) <@> lambda(row) -> prodsum(row, row), (+))
+    reduce(method_for(traj) <@> lambda(row) -> prodsum(row, row), lambda(p, q) where omp -> p + q, 0.0)
 }
 
 let (checksum, input_checksum) = {

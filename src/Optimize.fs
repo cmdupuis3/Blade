@@ -114,13 +114,19 @@ let compactRowClassesEnabled () = gateOn "BLADE_COMPACT_ROW_CLASSES"
 /// have joined records `sibling-folds` DECLINED ("disabled by
 /// BLADE_SIBLING_FOLDS") with what it would have joined.
 let siblingFoldsEnabled () = gateOn "BLADE_SIBLING_FOLDS"
+/// BLADE_REC_STEP_OMP=0|off keeps a `where omp` request on a `let rec` step's
+/// FINAL map out of slice-write fusion (wave 3, E-G5): the requesting map
+/// then runs as its own per-step team and the row is copied, exactly as
+/// before; the pass records `rec-step-parallel` DECLINED ("disabled by
+/// BLADE_REC_STEP_OMP") for the step it would have admitted. Unset = on.
+let recStepOmpEnabled () = gateOn "BLADE_REC_STEP_OMP"
 
 /// Every gate of this layer (charter rule 3), in one place: the optimizer
 /// differential (`blade test opt-diff`, tests/OptDiff.fs) turns ALL of them
 /// off for its reference lane, so a new pass's gate belongs in this list the
 /// day the pass lands -- a gate missing here is a pass the differential
 /// cannot see.
-let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_HOIST"; "BLADE_HOT_ROW"; "BLADE_CELL_EPILOGUE"; "BLADE_COMPACTION_FUSION"; "BLADE_COMPACT_ROW_CLASSES"; "BLADE_SIBLING_FOLDS" ]
+let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_HOIST"; "BLADE_HOT_ROW"; "BLADE_CELL_EPILOGUE"; "BLADE_COMPACTION_FUSION"; "BLADE_COMPACT_ROW_CLASSES"; "BLADE_SIBLING_FOLDS"; "BLADE_REC_STEP_OMP" ]
 
 /// The decline reason for a LICENSED row prodsum (B2r applies only where
 /// the build keeps the serial association). `lanes` RESERVES the opt-in
@@ -2353,6 +2359,93 @@ module CellFoldTable =
     let tryLoop (id: IRId) : CellFoldEntry option = Map.tryFind id (get ()).ByLoop
     let tryFoldLet (id: IRId) : CellFoldEntry option = Map.tryFind id (get ()).ByFoldLet
 
+/// The row fold a threaded step carries (attached by row-fold fusion when it
+/// fuses the recursion's row consumer): the row-view let, the fold let
+/// `FoldLetId = K(row)`, the accumulator the time chain updates, the let
+/// holding that update `acc <- F(acc, p)`, and K's cell term when K is the
+/// self-dot (`prodsum(row, row)` -- the only row kernel whose licensed form
+/// a per-worker chunk partial reproduces; any other K folds complete rows).
+type RecStepFold = {
+    RowLetId: IRId
+    FoldLetId: IRId
+    AccId: IRId
+    AssignLetId: IRId
+    Term: CellTerm option
+    /// The OUTER fold kernel F carries its own `where omp`: the request that
+    /// licenses evaluating K on complete rows in PARALLEL after the team
+    /// (G35's row-slot gate); without it the post-pass folds rows serially.
+    OuterRequest: bool
+    /// K or F demands reproducible evaluation (`where repro`): the licensed
+    /// partial form is never taken for this fold.
+    StrictOnly: bool
+}
+
+/// Wave 3 (E-G5, bench gap G5): a slice-write-fused CELL loop whose root map
+/// carried a `where omp` request over the row, with the facts a persistent
+/// team over the recursion's steps needs -- the time loop's variable and
+/// start, the buffer, the row extent -- proved by `fuseSliceWritesModule`
+/// (every trajectory read is the cell being written, of a strictly earlier
+/// row). The IR is the ordinary sequential loop (the interpreter and the
+/// LLVM lane run it as is); the C++ lane's `genForRangeBinding` emits the
+/// time loop as ONE team with fixed contiguous x ownership and no per-step
+/// synchronization when it finds the entry under the time loop's variable.
+type RecStepEntry = {
+    /// The cell loop's IRForRange variable (one table key).
+    CellLoopVar: IRId
+    /// The enclosing time loop's variable (the other key) and its start.
+    StepVar: IRId
+    StepLo: int64
+    BufferId: IRId
+    /// The row extent (the cell loop runs 0..Cells).
+    Cells: int64
+    Subject: string
+    /// The requesting kernel, by the name the program wrote (for the census).
+    KernelName: string
+    /// Set by row-fold fusion when the recursion's row consumer is fused
+    /// into the loop; None = the trajectory is only stored.
+    Fold: RecStepFold option ref
+    /// Emission handshake (C++): the chunk bounds the time loop's region
+    /// hands the cell loop (`__rlo`, `__rhi`), set around the body's
+    /// rendering and cleared after; None = the plain 0..Cells loop.
+    ChunkBounds: (string * string) option ref
+    /// Set by the C++ time-loop emitter when it DECIDED the loop (threaded or
+    /// declined with its census line); an entry still unset when the program
+    /// is assembled names a request the emitters never saw (the loop reached
+    /// an emitter without the hook), and the assembly prints its census.
+    Decided: bool ref
+}
+
+module RecStepTable =
+    open System.Threading
+    type State = { ByLoop: Map<IRId, RecStepEntry>; ByStep: Map<IRId, RecStepEntry> }
+    let private empty = { ByLoop = Map.empty; ByStep = Map.empty }
+    let private cell = new AsyncLocal<State>()
+    let private get () = match box cell.Value with null -> empty | _ -> cell.Value
+    let reset () = cell.Value <- empty
+    /// False when a time loop or a cell loop already has an entry (a second
+    /// requesting slice under one time loop): the caller then declines.
+    let record (e: RecStepEntry) : bool =
+        let s = get ()
+        if s.ByStep.ContainsKey e.StepVar || s.ByLoop.ContainsKey e.CellLoopVar then false
+        else
+            cell.Value <- { ByLoop = Map.add e.CellLoopVar e s.ByLoop
+                            ByStep = Map.add e.StepVar e s.ByStep }
+            true
+    let tryLoop (id: IRId) : RecStepEntry option = Map.tryFind id (get ()).ByLoop
+    let tryStep (id: IRId) : RecStepEntry option = Map.tryFind id (get ()).ByStep
+    /// The entries no emitter decided (see `Decided`).
+    let undecided () : RecStepEntry list =
+        (get ()).ByStep |> Map.toList |> List.map snd |> List.filter (fun e -> not e.Decided.Value)
+
+/// One `rec-step-parallel` v1 decision record (the planner's admission and
+/// its declines; the C++ emitter records the per-build applied / declined
+/// outcome under the same rule).
+let recordRecStep (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
+    Blade.Effects.Decisions.record
+        { Blade.Effects.Rule = "rec-step-parallel"; Version = 1
+          Span = Blade.Ast.noSpan; Subject = subject
+          Outcome = outcome; Evidence = evidence }
+
 /// The cell term of a ROW kernel `lambda(row) -> prodsum(row, row)`.
 let rowKernelCellTerm (ck: IRCallable) : CellTerm option =
     match ck.Params, ck.Body with
@@ -3265,6 +3358,23 @@ let fuseSliceWritesModule (modul: IRModule) (builder: IRBuilder) (programFuncs: 
     // by body, but a body from another module may name that module's
     // members, which this module's emission does not see under that id.
     let localFuncs = modul.Functions |> List.map (fun f -> f.Id) |> Set.ofList
+    // Wave 3 (E-G5): the write predicate for the step-threading admission --
+    // the slice and the whole time-loop body (producer and the bindings in
+    // between), the G41 rule.
+    let writes = scheduleMayWriteIn programFuncs modul
+    // The kernel shape slice-write fusion admits MINUS the omp request: a
+    // `where omp` on the slice's ROOT map (the step's final map) is the
+    // step-threading request, kept by a RecStepTable entry and honoured by
+    // the C++ lane's time-loop emitter. Nested stage maps keep declining.
+    let recStepKernelShape (k: IRCallable) (arity: int) =
+        not k.IsCommutative && k.CommGroups.IsEmpty && k.AntisymGroups.IsEmpty
+        && not k.IsCudaKernel && not k.IsMpiParallel && not k.IsArityPoly && not k.IsStatic
+        && k.Params.Length = arity
+        && k.IsOmpParallel && not k.Parallelism.IsEmpty
+        // `omp(v: 1)`: depth exactly one over a rank-1 row names its one axis.
+        && k.Parallelism |> List.forall (fun (idx, dims) -> dims = 1 && idx >= 0 && idx < arity)
+    let recStepKernel (k: IRCallable) (arity: int) = recStepOmpEnabled () && recStepKernelShape k arity
+    let kernelName (k: IRCallable) = if System.String.IsNullOrEmpty k.SourceName then k.Name else k.SourceName
     let staticExtent (at: IRArrayType) : int64 option =
         match at.IndexTypes with
         | [ ix ] when ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank = 1 ->
@@ -3307,10 +3417,19 @@ let fuseSliceWritesModule (modul: IRModule) (builder: IRBuilder) (programFuncs: 
     // at cell k is admissible (not the buffer, or a row view of it). Emits
     // scalar lets into `prelude` (evaluation order) and returns the cell's
     // value as an atom (a variable or a literal).
+    // The requesting ROOT kernels the knob kept out of the fusion (recorded
+    // per body as `rec-step-parallel` declines).
+    let knobDeclines = System.Collections.Generic.List<string>()
     let expand (ext: int64) (kVar: IRExpr) (outsideOk: IRId -> bool)
-               (prelude: System.Collections.Generic.List<IRId * IRExpr>) (root: IRExpr) : Result<IRExpr, string> =
+               (prelude: System.Collections.Generic.List<IRId * IRExpr>) (root: IRExpr) : Result<IRExpr * IRCallable option * bool, string> =
         // The FIRST reason a node is not a cell expression is the decline.
         let mutable why : string option = None
+        // The slice's root map when it carried the step-threading request.
+        let mutable ompRoot : IRCallable option = None
+        // A spliced kernel or callee was `where repro` (its demand does not
+        // survive the splice -- the pre-existing fusion behaviour; the
+        // step-threading admission declines on it).
+        let mutable sawRepro = false
         let fail (msg: string) : IRExpr option =
             (if why.IsNone then why <- Some msg)
             None
@@ -3323,7 +3442,10 @@ let fuseSliceWritesModule (modul: IRModule) (builder: IRBuilder) (programFuncs: 
                 IRVar (id, t)
         // Outside reads are bound once per cell and shared.
         let reads = System.Collections.Generic.Dictionary<IRId, IRExpr>()
-        let rec go (env: Map<IRId, IRExpr>) (visiting: Set<IRId>) (e: IRExpr) : IRExpr option =
+        // `atRoot`: this node's value IS the slice (the slice itself, a let's
+        // body, an inlined callee's body) -- the one position whose map may
+        // carry the step-threading request; an operand never is.
+        let rec go (env: Map<IRId, IRExpr>) (visiting: Set<IRId>) (atRoot: bool) (e: IRExpr) : IRExpr option =
             match e with
             | IRVar (id, t) ->
                 (match Map.tryFind id env with
@@ -3340,7 +3462,7 @@ let fuseSliceWritesModule (modul: IRModule) (builder: IRBuilder) (programFuncs: 
                         | ArrayElem _ when rowOfExtent ext t ->
                             fail "the slice reads an array that may alias the buffer other than as a row view"
                         | _ -> fail "the slice reads a value that is not a dense row of the loop's static extent")
-            | IRCompute ((IRApplyCombinator _ | IRCompute _) as inner) -> go env visiting inner
+            | IRCompute ((IRApplyCombinator _ | IRCompute _) as inner) -> go env visiting atRoot inner
             | IRCompute _ ->
                 // Forcing a deferred VALUE (`dn |> compute`) materializes it
                 // per step; reading it cell by cell instead would make the
@@ -3348,21 +3470,29 @@ let fuseSliceWritesModule (modul: IRModule) (builder: IRBuilder) (programFuncs: 
                 // new printed value (corpus memfree/007).
                 fail "the slice forces a deferred value"
             | IRLet (id, v, body) ->
-                (match go env visiting v with
-                 | Some atom -> go (Map.add id atom env) visiting body
+                (match go env visiting false v with
+                 | Some atom -> go (Map.add id atom env) visiting atRoot body
                  | None -> None)
             | IRApplyCombinator info when IRMono.tilePlainInfo info && rowOfExtent ext info.OutputType ->
                 (match IRMono.tileKernelOf callables info with
-                 | Some k when IRMono.tilePlainKernel k info.Arrays.Length
+                 | Some k when (IRMono.tilePlainKernel k info.Arrays.Length || (atRoot && recStepKernel k info.Arrays.Length))
                                && k.Captures.IsEmpty && not (hasCall k.Body)
                                && IRMono.tilePureBody callables Set.empty k.Body
                                && not (IRMono.tileMayAbort callables Set.empty k.Body)
                                && scalarElem k.RetType
                                && info.ArrayTypes |> List.forall (fun at -> staticExtent at = Some ext && scalarElem at.ElemType) ->
-                    let atoms = info.Arrays |> List.map (go env visiting)
+                    if not (IRMono.tilePlainKernel k info.Arrays.Length) then ompRoot <- Some k
+                    if k.IsRepro then sawRepro <- true
+                    let atoms = info.Arrays |> List.map (go env visiting false)
                     if atoms |> List.exists Option.isNone then None else
                     let m = List.zip (k.Params |> List.map (fun p -> p.VarId)) (atoms |> List.map Option.get) |> Map.ofList
                     Some (bind (substParams m (freshenLets k.Body)) k.RetType)
+                 | Some k when atRoot && not (recStepOmpEnabled ()) && recStepKernelShape k info.Arrays.Length ->
+                    // The knob keeps the request out of the fusion: the map
+                    // runs as its own per-step team and the row is copied,
+                    // the pre-wave-3 emission (the A/B's knob-off arm).
+                    knobDeclines.Add (kernelName k)
+                    fail "an elementwise kernel is not a plain pure scalar kernel over rows of the loop's extent"
                  | Some k when not k.Captures.IsEmpty ->
                     fail "an elementwise kernel captures a value computed outside the cell (a fold or another whole-row quantity), so the slice is not pointwise"
                  | Some k when hasCall k.Body -> fail "an elementwise kernel calls a function or binds names by match or loop"
@@ -3376,18 +3506,19 @@ let fuseSliceWritesModule (modul: IRModule) (builder: IRBuilder) (programFuncs: 
                                 && not f.IsOmpParallel && not f.IsCudaKernel && not f.IsMpiParallel
                                 && f.Params.Length = args.Length
                                 && f.Params |> List.forall (fun p -> rowOfExtent ext p.Type) ->
-                    let atoms = args |> List.map (go env visiting)
+                    let atoms = args |> List.map (go env visiting false)
                     if atoms |> List.exists Option.isNone then None else
+                    if f.IsRepro then sawRepro <- true
                     // The callee sees only its parameters (lexical scope).
                     let env' = List.zip (f.Params |> List.map (fun p -> p.VarId)) (atoms |> List.map Option.get) |> Map.ofList
-                    go env' (visiting.Add fid) f.Body
+                    go env' (visiting.Add fid) atRoot f.Body
                  | _ -> fail "a callee is not a plain function of dense row parameters (static, capturing, arity-polymorphic, or parallel)")
             | IRApp _ -> fail "the slice calls a function that is recursive, defined in another module, or not row-valued"
             | IRApplyCombinator _ -> fail "an operation over the row is not a plain elementwise map of the loop's extent (a fold, a structured index, or a different shape)"
             | IRIf _ | IRMatch _ -> fail "the slice selects between whole rows (a guarded read or a branch), which is no cell expression"
             | _ -> fail "the slice is not pointwise (an operation other than elementwise maps, lets and pointwise calls)"
-        match go Map.empty Set.empty root with
-        | Some atom -> Ok atom
+        match go Map.empty Set.empty true root with
+        | Some atom -> Ok (atom, ompRoot, sawRepro)
         | None -> Error (defaultArg why "the slice is not pointwise")
     // The copy loop's shape: `for k in 0..E { let _ = BUF[i.., k] <- s(k) in () }`.
     let rowCopy (sId: IRId) (loop: IRExpr) =
@@ -3421,13 +3552,39 @@ let fuseSliceWritesModule (modul: IRModule) (builder: IRBuilder) (programFuncs: 
         | None -> false
     let moduleIds = modul.Bindings |> List.map (fun b -> b.Id) |> List.filter (moduleReadable Set.empty) |> Set.ofList
     let mutable outer = moduleIds
+    let mutable subjectName = ""
     // Walk a body keeping the values of enclosing lets (to judge aliases of
     // the buffer). Only let-chains are walked into; the rewrite is local to
-    // a `let s = SLICE in let w = <copy loop> in rest` triple.
-    let rec rw (scope: Map<IRId, IRExpr>) (e: IRExpr) : IRExpr =
+    // a `let s = SLICE in let w = <copy loop> in rest` triple. `enclosing`
+    // is the innermost counted loop around the triple -- (variable, literal
+    // start, body) -- the time loop a threaded step runs under.
+    let rec rw (enclosing: (IRId * int64 * IRExpr) option) (scope: Map<IRId, IRExpr>) (e: IRExpr) : IRExpr =
         match e with
         | IRLet (sId, slice, IRLet (wId, loop, rest)) when (rowCopy sId loop).IsSome && not (mentions sId rest) ->
             let kId, ext, aId, bufId, bufT, idxs, ident, kVar, tail = (rowCopy sId loop).Value
+            // The row views of the buffer the slice reads (their indices),
+            // for the step-threading proof below.
+            let rowReads = System.Collections.Generic.List<IRExpr list>()
+            // Every id in scope whose value may hold the buffer (mentions it,
+            // or mentions such an id): a read through one is a buffer read of
+            // unknown row, never an "outside" value.
+            let aliases =
+                let mutable s = Set.empty
+                let mutable grow = true
+                while grow do
+                    grow <- false
+                    for KeyValue (x, v) in scope do
+                        if not (s.Contains x) then
+                            let mutable hit = false
+                            iterIRExpr (fun n -> match n with IRVar (id, _) when id = bufId || s.Contains id -> hit <- true | _ -> ()) v
+                            if hit then
+                                s <- s.Add x
+                                grow <- true
+                s
+            let mentionsAlias (v: IRExpr) =
+                let mutable hit = false
+                iterIRExpr (fun n -> match n with IRVar (id, _) when aliases.Contains id -> hit <- true | _ -> ()) v
+                hit
             let rec outsideOk (x: IRId) =
                 if x = bufId then false
                 else
@@ -3440,42 +3597,123 @@ let fuseSliceWritesModule (modul: IRModule) (builder: IRBuilder) (programFuncs: 
                     // An alias `let x = y` is judged as y (a lane may bind it
                     // without a copy).
                     | Some (IRVar (y, _)) -> y <> x && outsideOk y
-                    | Some v when not (mentions bufId v) -> not (isDeferredValue v)
+                    | Some v when not (mentions bufId v) && not (mentionsAlias v) -> not (isDeferredValue v)
                     | Some (IRIndex (IRVar (b, _), rowIdx, _)) when b = bufId ->
                         // A row view BUF(i): cell k is BUF(i, k).
                         (match bufT with
-                         | ArrayElem at -> rowIdx.Length = at.IndexTypes.Length - 1
+                         | ArrayElem at when rowIdx.Length = at.IndexTypes.Length - 1 ->
+                            rowReads.Add rowIdx
+                            true
                          | _ -> false)
                     | Some _ -> false
             let prelude = System.Collections.Generic.List<IRId * IRExpr>()
-            match expand ext kVar outsideOk prelude slice with
+            // Wave 3 (E-G5): the step-threading proof for a slice whose root
+            // map carried the request (Codex review, wave3/codex-review-E-G5
+            // objections 1-3, 5-8). Ok = a RecStepTable entry; Error = the
+            // reason, and the slice stays UNFUSED (the request is then
+            // honoured by the map's own per-step team, never dropped).
+            let proveStep (k: IRCallable) (sawRepro: bool) : Result<unit, string> =
+                match enclosing with
+                | None -> Error "the row write is not inside a counted time loop with a literal start"
+                | Some (nId, lo, loopBody) ->
+                    let isN (e: IRExpr) = match e with IRVar (v, _) -> v = nId | _ -> false
+                    // A row the region may read without synchronization: an
+                    // earlier row this worker wrote (`n - c`, 1 <= c <= lo,
+                    // so never before row 0), or a seed row written before
+                    // the loop (0 <= r < lo).
+                    let earlierRow (r: IRExpr) =
+                        match r with
+                        | IRBinOp (_, IRSub, IRVar (v, _), IRLit (IRLitInt c), _) -> v = nId && c >= 1L && c <= lo
+                        | IRLit (IRLitInt r) -> r >= 0L && r < lo
+                        | _ -> false
+                    // Every mention of the buffer in the time loop's body: a
+                    // store to the CURRENT row, or a read of an admissible
+                    // earlier row (a row view, or a cell of one).
+                    let bodyUseOk =
+                        let mutable ok = true
+                        let rec walk (x: IRExpr) =
+                            match x with
+                            | IRAssign (IRIndex (IRVar (b, _), i0 :: rest, _), v) when b = bufId ->
+                                if not (isN i0) then ok <- false
+                                rest |> List.iter walk
+                                walk v
+                            | IRIndex (IRVar (b, _), i0 :: rest, _) when b = bufId ->
+                                if not (earlierRow i0) then ok <- false
+                                rest |> List.iter walk
+                            | IRVar (b, _) when b = bufId -> ok <- false
+                            | ExprShape (children, _) -> children |> List.iter walk
+                        walk loopBody
+                        ok
+                    let fresh =
+                        match Map.tryFind bufId scope with
+                        | Some (IRUninit _ | IRCompute _ | IRArrayLit _) -> true
+                        | _ -> false
+                    if not (match idxs with [ i0; _ ] -> isN i0 | _ -> false) then
+                        Error "the store is not `BUF[n][k]` with n the enclosing time loop's variable (v1: rank-2 trajectories)"
+                    elif not fresh then Error "the trajectory is not a fresh buffer of this body (a parameter, a module binding, or an alias)"
+                    elif not (rowReads |> Seq.forall (fun r -> match r with [ r0 ] -> earlierRow r0 | _ -> false)) then
+                        Error "a trajectory read is not a row this worker wrote earlier (`prefix(n - c)` with a literal 1 <= c <= the loop's start) or a seed row written before the loop"
+                    elif not bodyUseOk then
+                        Error "the time loop reads or writes the trajectory other than storing its own row and reading earlier rows"
+                    elif sawRepro then Error "a spliced kernel or callee is `where repro` (its demand does not survive the splice)"
+                    elif writes slice then Error "the step may write storage outside its own row"
+                    // The buffer is this body's own fresh storage: judged
+                    // with it bound locally (the row-fold pass's `writes
+                    // block`), so only writes OUTSIDE it count.
+                    elif writes (IRLet (bufId, IRUninit bufT, loopBody)) then
+                        Error "a statement of the time loop may write storage outside the trajectory"
+                    elif not (RecStepTable.record
+                                { CellLoopVar = kId; StepVar = nId; StepLo = lo; BufferId = bufId; Cells = ext
+                                  Subject = subjectName; KernelName = kernelName k
+                                  Fold = ref None; ChunkBounds = ref None; Decided = ref false }) then
+                        Error "the time loop already carries a threaded step (one requesting slice per recursion)"
+                    else Ok ()
+            let expanded =
+                match expand ext kVar outsideOk prelude slice with
+                | Ok (atom, Some k, sawRepro) ->
+                    (match proveStep k sawRepro with
+                     | Ok () ->
+                        recordRecStep subjectName Blade.Effects.Applied
+                            [ $"the `where omp` request of `{(kernelName k)}` (the step's final map) names the fused cell loop: every worker reads only its own cell of strictly earlier rows, so the C++ lane may run the recursion's steps on one persistent team with fixed x ownership and no per-step synchronization (the codegen record under this rule says which form)" ]
+                        Ok atom
+                     | Error why ->
+                        recordRecStep subjectName (Blade.Effects.Declined why)
+                            [ $"the slice is not fused: the `where omp` request of `{(kernelName k)}` keeps its own per-step team and the row is copied" ]
+                        Error ("the step's final map asks for omp, which the fused cell loop cannot honour: " + why))
+                | Ok (atom, None, _) -> Ok atom
+                | Error why -> Error why
+            match expanded with
             | Ok atom ->
                 fired <- fired + 1
                 let store = IRLet (aId, IRAssign (IRIndex (IRVar (bufId, bufT), idxs, ident), atom), tail)
                 let body = Seq.foldBack (fun (id, v) acc -> IRLet (id, v, acc)) prelude store
-                IRLet (wId, IRForRange (kId, IRLit (IRLitInt 0L), IRLit (IRLitInt ext), body), rw scope rest)
+                IRLet (wId, IRForRange (kId, IRLit (IRLitInt 0L), IRLit (IRLitInt ext), body), rw enclosing scope rest)
             | Error why ->
                 // Only a slice that looks fusable (a call or an elementwise
                 // map) is a decision; a literal seed row is just a copy.
                 let mutable looksFusable = false
                 iterIRExpr (fun n -> match n with IRApp _ | IRApplyCombinator _ -> looksFusable <- true | _ -> ()) slice
                 if looksFusable then declines.Add why
-                IRLet (sId, rw scope slice, IRLet (wId, rwInner scope loop, rw (Map.add wId loop (Map.add sId slice scope)) rest))
-        | IRLet (id, v, body) -> IRLet (id, rw scope v, rw (Map.add id v scope) body)
-        | _ -> rwInner scope e
-    and rwInner (scope: Map<IRId, IRExpr>) (e: IRExpr) : IRExpr =
+                IRLet (sId, rw enclosing scope slice, IRLet (wId, rwInner enclosing scope loop, rw enclosing (Map.add wId loop (Map.add sId slice scope)) rest))
+        | IRLet (id, v, body) -> IRLet (id, rw enclosing scope v, rw enclosing (Map.add id v scope) body)
+        | _ -> rwInner enclosing scope e
+    and rwInner (enclosing: (IRId * int64 * IRExpr) option) (scope: Map<IRId, IRExpr>) (e: IRExpr) : IRExpr =
         match e with
-        | IRForRange (k, lo, hi, body) -> IRForRange (k, lo, hi, rw scope body)
-        | IRLet _ -> rw scope e
+        | IRForRange (k, lo, hi, body) ->
+            let inner = match lo with IRLit (IRLitInt l) -> Some (k, l, body) | _ -> None
+            IRForRange (k, lo, hi, rw inner scope body)
+        | IRLet _ -> rw enclosing scope e
         | ExprShape ([], _) -> e
-        | ExprShape (children, rebuild) -> rebuild (children |> List.map (rw scope))
+        | ExprShape (children, rebuild) -> rebuild (children |> List.map (rw enclosing scope))
     // One record per body: applied (with the count) and/or each decline's
     // reason -- a body can hold a fused arm and a declined one.
     let rewriteBody (subject: string) (outerIds: Set<IRId>) (body: IRExpr) =
         let before = fired
         declines.Clear ()
+        knobDeclines.Clear ()
         outer <- outerIds
-        let body' = rw Map.empty body
+        subjectName <- subject
+        let body' = rw None Map.empty body
         let record outcome evidence =
             Blade.Effects.Decisions.record
                 { Blade.Effects.Rule = "slice-write-fusion"; Version = 1
@@ -3486,6 +3724,9 @@ let fuseSliceWritesModule (modul: IRModule) (builder: IRBuilder) (programFuncs: 
                 [ $"{fired - before} row write(s) computed in place: the slice's pointwise DAG (callees inlined) is one scalar let chain per cell, stored straight into the destination row -- no slice temporary, no copy, no stage pools" ]
         for why in declines do
             record (Blade.Effects.Declined why) [ "the row is materialized and copied as written" ]
+        for kname in knobDeclines do
+            recordRecStep subject (Blade.Effects.Declined "disabled by BLADE_REC_STEP_OMP")
+                [ $"the `where omp` request of `{kname}` (the step's final map) is kept out of the fusion: the map runs as its own per-step team and the row is copied" ]
         body'
     let newFunctions =
         modul.Functions |> List.map (fun f ->
@@ -3600,13 +3841,14 @@ let fuseRowFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: IRC
         List.foldBack (fun (id, v) acc -> IRLet (id, v, acc)) stmts fin
     // The (row view, fold) let ids of the LAST foldUpdate built (B2r's
     // CellFoldTable entry names the step's pair).
-    let mutable lastFoldIds : (IRId * IRId) option = None
+    let mutable lastFoldIds : (IRId * IRId * IRId) option = None
     // `acc <- F(acc, K(BUF(row)))` as statements ending in `tail`.
     let foldUpdate (accId: IRId) (accT: IRType) (bufId: IRId) (bufT: IRType)
                    (k: IRCallable) (f: IRCallable) (row: IRExpr) (tail: IRExpr) =
         let rowId = builder.FreshId ()
         let pId = builder.FreshId ()
-        lastFoldIds <- Some (rowId, pId)
+        let assignId = builder.FreshId ()
+        lastFoldIds <- Some (rowId, pId, assignId)
         let kParam = k.Params.Head
         let subst (m: Map<IRId, IRExpr>) (body: IRExpr) =
             mapIRExpr (fun x -> match x with IRVar (id, _) -> (match Map.tryFind id m with Some a -> a | None -> x) | _ -> x) body
@@ -3625,7 +3867,7 @@ let fuseRowFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: IRC
                   (freshenLets f.Body)
         IRLet (rowId, IRIndex (IRVar (bufId, bufT), [ row ], None),
             IRLet (pId, kBody,
-                IRLet (builder.FreshId (), IRAssign (IRVar (accId, accT), fBody), tail)))
+                IRLet (assignId, IRAssign (IRVar (accId, accT), fBody), tail)))
     let record (subject: string) outcome evidence =
         Blade.Effects.Decisions.record
             { Blade.Effects.Rule = "row-fold-fusion"; Version = 1
@@ -3681,8 +3923,53 @@ let fuseRowFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: IRC
                     elif info.KernelOutputRank <> 0 || info.HasReynolds || info.IsCoIteration then
                         Some (Error "the fold's map is not a plain per-row map")
                     elif not (match info.OutputType with ArrayElem at -> at.IndexTypes.Length = 1 | _ -> false) then Some (Error "the fold does not reduce the rows to one scalar") else
+                    // The step's row is written by ONE slice-write-fused
+                    // cell loop whose last statement stores a scalar local
+                    // into BUF[n][k] (B2r's and E-G5's shape).
+                    let cellLoop =
+                        let stepStmts, _ = chainOf body
+                        let writers =
+                            stepStmts |> List.filter (fun (_, s) -> mentions bufId s && (match s with IRForRange _ -> true | _ -> false))
+                        match writers with
+                        | [ (_, IRForRange (kv, IRLit (IRLitInt 0L), IRLit (IRLitInt _), cb)) ] ->
+                            let cstmts, cfin = chainOf cb
+                            (match List.tryLast cstmts, cfin with
+                             | Some (_, IRAssign (IRIndex (IRVar (b, _), [ i0; IRVar (k2, _) ], _), IRVar (sv, _))), IRLit IRLitUnit
+                                when b = bufId && isN i0 && k2 = kv
+                                     && cstmts |> List.exists (fun (id, _) -> id = sv) ->
+                                Ok (kv, sv)
+                             | _ -> Error "the step's cell loop does not end in one store of a scalar local into its own row")
+                        | [] -> Error "the step's row is not written by a slice-write-fused cell loop"
+                        | _ -> Error "the step's row is written by more than one loop"
+                    // Wave 3 (E-G5): the step is THREADED (its cell loop has a
+                    // RecStepTable entry under this time loop).
+                    let stepEntry =
+                        match cellLoop with
+                        | Ok (kv, _) ->
+                            (match RecStepTable.tryLoop kv with
+                             | Some entry when entry.StepVar = nId && entry.BufferId = bufId -> Some entry
+                             | _ -> None)
+                        | Error _ -> None
+                    // A kernel demanding reproducible evaluation (`where repro`
+                    // itself, or the eta-wrapper of such a function).
+                    let reproCallee (c: IRCallable) =
+                        c.IsRepro
+                        || (match c.Body with
+                            | IRApp (IRVar (fid, _), _, _) -> (match callables.TryGetValue fid with | true, g -> g.IsRepro | _ -> false)
+                            | _ -> false)
+                    // A `where omp` on the OUTER fold kernel F is admitted only
+                    // behind a threaded step, where it is the request the
+                    // row post-pass reads (G35's gate); otherwise it declines
+                    // as before (the fold then keeps its own thread forms). A
+                    // `where repro` F is never admitted this way: the splice
+                    // would drop its BLADE_REPRO_FN boundary (Codex diff
+                    // review, finding 1).
+                    let outerKernelOk (f: IRCallable) =
+                        plainScalarKernel 2 f
+                        || (stepEntry.IsSome && f.IsOmpParallel && not (reproCallee f)
+                            && plainScalarKernel 2 { f with IsOmpParallel = false })
                     match rowKernel, foldKernel with
-                    | Some k, Some f when plainScalarKernel 1 k && plainScalarKernel 2 f ->
+                    | Some k, Some f when plainScalarKernel 1 k && outerKernelOk f ->
                         let preOk = pre |> List.forall (fun (_, s) -> bufferUseOk bufId isZero s && callsRepeatable s)
                         let seedWrites = pre |> List.exists (fun (_, s) -> mentions bufId s)
                         if not (bufferUseOk bufId isN body && callsRepeatable body && unitTail body) then
@@ -3715,29 +4002,32 @@ let fuseRowFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: IRC
                             | IRForRange (nv, l, h, _) -> IRForRange (nv, l, h, withUpdate body)
                             | other -> other
                         let stepFoldIds = lastFoldIds
-                        // B2r (round-2 cell epilogues): the step's row is
-                        // written by ONE slice-write-fused cell loop whose
-                        // last statement stores a scalar local into
-                        // BUF[n][k], and the row kernel is prodsum(row, row):
-                        // record the loop so an emitter may advance the
-                        // row's chain per cell (the IR is unchanged).
+                        // Wave 3 (E-G5): a THREADED step carries the fold
+                        // facts too: the C++ lane's time-loop emitter folds
+                        // each row inside the team (the self-dot's licensed
+                        // form per worker chunk) or after it (complete rows,
+                        // strict). The B2r entry below is STILL recorded: the
+                        // serial fallbacks (threads suppressed, the LLVM lane)
+                        // keep the chain interleave exactly as before, and the
+                        // threaded emission declines it at its own site.
+                        (match stepEntry, stepFoldIds with
+                         | Some entry, Some (rowId, pId, assignId) ->
+                            entry.Fold.Value <-
+                                Some { RowLetId = rowId; FoldLetId = pId; AccId = accId; AssignLetId = assignId
+                                       Term = rowKernelCellTerm k; OuterRequest = f.IsOmpParallel
+                                       StrictOnly = reproCallee k || reproCallee f }
+                            recordRecStep subject Blade.Effects.Applied
+                                [ (match rowKernelCellTerm k, f.IsOmpParallel with
+                                   | Some _, true -> "the fused row fold rides the team: a licensed build folds each worker's own chunk of the row it just wrote (the self-dot's licensed form), the chunks combined ascending from +0 per row; a strict build folds COMPLETE rows into indexed slots after the team, rows in parallel under the outer fold kernel's own `where omp`; the time chain then runs ascending from its seed"
+                                   | Some _, false -> "the fused row fold rides the team: a licensed build folds each worker's own chunk of the row it just wrote (the self-dot's licensed form), the chunks combined ascending from +0 per row; a strict build folds COMPLETE rows serially after the team (no `where omp` on the outer fold kernel licenses a parallel row pass); the time chain then runs ascending from its seed"
+                                   | None, _ -> "the fused row fold runs serially after the team: the row kernel on each COMPLETE row, then the time chain ascending from its seed (only the self-dot `prodsum(row, row)` has an in-team form)") ]
+                         | _ -> ())
+                        // B2r (round-2 cell epilogues): the row kernel is
+                        // prodsum(row, row): record the loop so an emitter
+                        // may advance the row's chain per cell (the IR is
+                        // unchanged).
                         (match rowKernelCellTerm k, stepFoldIds with
-                         | Some term, Some (rowId, pId) ->
-                            let stepStmts, _ = chainOf body
-                            let writers =
-                                stepStmts |> List.filter (fun (_, s) -> mentions bufId s && (match s with IRForRange _ -> true | _ -> false))
-                            let cellLoop =
-                                match writers with
-                                | [ (_, IRForRange (kv, IRLit (IRLitInt 0L), IRLit (IRLitInt _), cb)) ] ->
-                                    let cstmts, cfin = chainOf cb
-                                    (match List.tryLast cstmts, cfin with
-                                     | Some (_, IRAssign (IRIndex (IRVar (b, _), [ i0; IRVar (k2, _) ], _), IRVar (sv, _))), IRLit IRLitUnit
-                                        when b = bufId && isN i0 && k2 = kv
-                                             && cstmts |> List.exists (fun (id, _) -> id = sv) ->
-                                        Ok (kv, sv)
-                                     | _ -> Error "the step's cell loop does not end in one store of a scalar local into its own row")
-                                | [] -> Error "the step's row is not written by a slice-write-fused cell loop"
-                                | _ -> Error "the step's row is written by more than one loop"
+                         | Some term, Some (rowId, pId, _) ->
                             match cellLoop with
                             | Error why ->
                                 recordCellEpilogue subject (Blade.Effects.Declined why)
