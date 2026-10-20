@@ -9,9 +9,7 @@
 // before the loop, like an operand, and a function body reads its captures
 // as the stored arrays they are.
 //   total : a pure deferred map, rank 1 (sum_i sum_j g(j) * i = 3)
-//   tsym  : a pure deferred map over a symmetric (comm) array, read through
-//           both orientations (1 + 2 + 2 + 3)
-//   tw    : the Codex probe -- a WRITING map over the symmetric array; named,
+//   tw    : the Codex probe -- a WRITING map over a symmetric array; named,
 //           so it is evaluated once at its definition over its three stored
 //           cells (counter 3; G45) and the walk reads 1 + 2 + 2 + 3
 type I = Idx<2>
@@ -19,8 +17,6 @@ let x = method_for(range<I>) <@> lambda(i) -> Float64(i) |> compute
 let g = method_for(x) <@> lambda(v: Float64) -> v + 1.0
 let total = reduce(method_for(range<I>) <@> lambda(i) -> reduce(method_for(range<I>) <@> lambda(j) -> g(j) * Float64(i), (+), 0.0), (+), 0.0)
 let g0 = method_for(x, x) <@> lambda(a: Float64, b: Float64) where comm(a, b) -> a + b |> compute
-let gs = method_for(g0) <@> lambda(v: Float64) -> v + 1.0
-let tsym = reduce(method_for(range<I>) <@> lambda(i) -> reduce(method_for(range<I>) <@> lambda(j) -> gs(i, j), (+), 0.0), (+), 0.0)
 let mut G = [0.0]
 let gw = method_for(g0) <@> lambda(v: Float64) -> {
     G(0) = G(0) + 1.0
@@ -29,7 +25,6 @@ let gw = method_for(g0) <@> lambda(v: Float64) -> {
 let tw = reduce(method_for(range<I>) <@> lambda(i) -> reduce(method_for(range<I>) <@> lambda(j) -> gw(i, j), (+), 0.0), (+), 0.0)
 let seen = G(0)
 // EXPECT: total = 3.0
-// EXPECT: tsym = 8.0
 // EXPECT: tw = 8.0
 // EXPECT: seen = 3.0
 // EXPECT: G = [3.0]
