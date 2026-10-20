@@ -2127,6 +2127,11 @@ let buildFlatEpilogue (plan: Blade.Optimize.HotRowPlan) (producer: LoopNestCodeG
             let k = foldVecLanes kind
             let laneBlock = int64 k * (if elemStr = "float" then 8L else 4L)
             if cellElem <> elemStr then decline "the producer's cell type differs from the fold's accumulator type"
+            // G41 (Codex findings 15 / 18): a producer whose kernel may write
+            // keeps its own ordered loop -- no fused lane / chunk / chain form
+            // (the planner already declines a proved writer; this is the
+            // emitter's own guard).
+            elif exprMayWriteIn Map.empty producer.KernelExpr then decline "the producer's kernel may write storage outside itself: it keeps its own ordered loop"
             // The L1 BLAS dispatch takes an un-requested fold when the gate is
             // on (it declines on a `where omp` request: FoldRequestedOmp).
             elif Blade.LinAlgPatterns.blasAvailable () && not (callable.IsOmpParallel || mapLicensesOuter) then

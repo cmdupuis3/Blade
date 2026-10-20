@@ -1,0 +1,15 @@
+// TEST: parallel producer writing through a local view feeds a fold (rejects)
+// ERROR: BL4005 @ 9:1
+// ERROR-CONTAINS: a parallel kernel (`where omp` / cuda) writes storage captured from outside it
+// Gap G41, Codex review W2F-4 finding 18, the cell-epilogue shape: the same
+// aliasing `where omp` producer with a fold consuming its cells -- refused
+// before any fused lane / chunk form could be chosen.
+type K = Idx<2>
+let mut G = method_for(range<K>, range<K>) <@> lambda(i, j) -> 0.0 |> compute
+let x = [1.0, 2.0, 3.0, 4.0, 5.0]
+let p = method_for(x) <@> lambda(v) where omp -> {
+    let t = G((0 : K))
+    t((0 : K)) = t((0 : K)) + v
+    t((0 : K))
+} |> compute
+let total = reduce(method_for(p) <@> lambda(v) -> v, (+), 0.0)

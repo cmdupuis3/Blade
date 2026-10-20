@@ -1696,7 +1696,8 @@ let private codegenWriteFacts (deferred: Map<IRId, IRExpr>) : Blade.Optimize.Wri
           | None -> Map.tryFind id (programLetValuesCell ()).Value)
       // codegen does not know which lets deep-copy here: an alias of a
       // captured array counts as the captured array (a decline, never wrong)
-      CopiedLet = (fun _ -> false) }
+      CopiedLet = (fun _ -> false)
+      UnknownIsWrite = true }
 
 let callableMayWrite (callable: IRCallable) : bool =
     Blade.Optimize.callableMayWriteWith (codegenWriteFacts Map.empty) callable

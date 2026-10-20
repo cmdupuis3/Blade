@@ -1,0 +1,17 @@
+// TEST: Hot Row Schedule Declines A Writing Producer
+// Gap G41, Codex re-re-review finding 14. The producer bumps the captured G
+// once per cell; the consumer's row kernel reads G. Written as two passes,
+// every row reads the final G = 6, so total = 6 + 6 = 12. Hot-row scheduling
+// ran the row kernel behind each produced row (it read 3, then 6: total 9)
+// in every build and both lanes, repro included. A producer that writes is
+// never scheduled behind its own rows now.
+type I = Idx<2>
+type J = Idx<3>
+let mut G = [0.0]
+let p = method_for(range<I>, range<J>) <@> lambda(i, j) -> {
+    G(0) = G(0) + 1.0
+    0.0
+} |> compute
+let total = reduce(method_for(p) <@> lambda(row: Array<Float64 like J>) -> G(0), (+), 0.0)
+// EXPECT: total = 12.0
+// EXPECT: G = [6.0]

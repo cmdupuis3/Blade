@@ -1,0 +1,16 @@
+// TEST: Hot Row Schedule Declines A Writing Outer Kernel
+// Gap G41, Codex review W2F-4 finding 17. The producer is pure, but the OUTER
+// fold kernel `k` bumps G(0) and the row map reads G(0). Fused in order: the
+// rows read 0 then 1, so total = 1 and G = [2]. Hot-row scheduling computed
+// both row values first (0, 0: total 0) in both lanes, repro included.
+type I = Idx<2>
+type J = Idx<3>
+let mut G = [0.0]
+function k(a: Float64, b: Float64) -> Float64 = {
+    G(0) = G(0) + 1.0
+    a + b
+}
+let p = method_for(range<I>, range<J>) <@> lambda(i, j) -> Float64(i + j) |> compute
+let total = reduce(method_for(p) <@> lambda(row: Array<Float64 like J>) -> G(0), k, 0.0)
+// EXPECT: total = 1.0
+// EXPECT: G = [2.0]

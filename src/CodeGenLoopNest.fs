@@ -1761,10 +1761,15 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     // output, EmitCpp.fs:48-55). Fused nests are out of scope: every leaf
     // writes its own row, so clause 1 fails by construction there.
     let bodyHasInnerLoop = kernelBodyContainsInnerLoop codeGen.KernelExpr
+    // 4. (G41, Codex re-re-review finding 15) the kernel WRITES nothing outside
+    //    itself: a body that stores to captured storage (a counter, a shared
+    //    cell) carries exactly the loop-carried memory dependence `ivdep`
+    //    asserts away. A writer keeps the ordered loop.
     let ivdepEligible =
         outRowDecl.IsSome
         && not (ompInstrument && outerIsParallel)
         && not bodyHasInnerLoop
+        && not (exprMayWrite codeGen.KernelExpr)
     // Last nest level that belongs to the OpenMP construct. A `collapse(d)`
     // prefix FUSES its levels into one iteration space, and g++ then rejects a
     // pragma on any inner header of that prefix outright:
@@ -2562,13 +2567,15 @@ let internal flatNestMatchesSignature (sg: FlatGroup list) (bindings: LoopIndexB
 ///                    to the fold's ordered chain (no simd pragma: the chain is
 ///                    an in-order reduction; g++ vectorizes it as a fold-left)
 let tryGenFlatEpilogueNest (ep: FlatEpilogue) (outName: string) (outPool: string) (outElem: string) (cellExpr: string) (cells: int64)
-                           (allParallel: bool) (threadsOn: bool) (pragmaMarker: string list)
+                           (allParallel: bool) (threadsOn: bool) (producerWrites: bool) (pragmaMarker: string list)
                            (head: string list) (indent: int) : string list option =
     let ind n = String.replicate n "    "
     let i1 = ind (indent + 1)
     let i2 = ind (indent + 2)
     let i3 = ind (indent + 3)
-    let simdPragma = if allParallel then "BLADE_OMP_SIMD" else "BLADE_IVDEP"
+    // G41 (finding 15): a producer that WRITES captured storage keeps an
+    // ordered loop -- no `ivdep` (an omp-licensed producer cannot write: BL4005).
+    let simdPragma = if allParallel then "BLADE_OMP_SIMD" elif producerWrites then "" else "BLADE_IVDEP"
     let feed = if ep.Square then "feed_sq" else "feed_sum"
     let finish = if ep.Square then "finish_sq" else "finish_sum"
     let st = $"blade_fold::lane_state<{ep.ElemCpp}, {ep.K}>"
@@ -2577,6 +2584,7 @@ let tryGenFlatEpilogueNest (ep: FlatEpilogue) (outName: string) (outPool: string
         [ i + simdPragma
           i + $"for (size_t __fk = {lo}; __fk < {hi}; __fk++)"
           i + $"    {outPool}[__fk] = {cellExpr};" ]
+        |> List.filter (fun s -> s.Trim() <> "")
     match ep.Form with
     | FlatLanesSerial when not (allParallel && threadsOn) && ep.Block % ep.LaneBlock = 0L ->
         (foldLanesUsedCell ()).Value <- true
@@ -2810,9 +2818,22 @@ let tryGenFlatElementwiseNest
             // vectorization the knob was never about. See
             // `ompThreadEmissionEnabled`.
             let threadsOn = ompThreadEmissionEnabled ()
+            // G41 (finding 15): the dependence fact above is about the OUTPUT
+            // pool; a kernel that also stores to captured storage has a real
+            // loop-carried dependence, so a writer gets no `ivdep` (an
+            // omp-licensed kernel cannot write: BL4005).
+            let producerWrites = exprMayWrite codeGen.KernelExpr
+            // The write veto DOMINATES the omp routes too (Codex finding 18):
+            // lowering refuses a parallel kernel whose visible writes reach
+            // captured storage (BL4005 through provenance), so this only
+            // fires on a conservative "may" (an unresolved call) -- and then
+            // the loop stays ordered, with the dropped request on record.
+            let ompDroppedForWrites = allParallel && producerWrites
+            let allParallel = allParallel && not producerWrites
             let pragma =
                 if allParallel && threadsOn then "BLADE_OMP_PARALLEL_FOR_SIMD"
                 elif allParallel then "BLADE_OMP_SIMD"
+                elif producerWrites then ""
                 else "BLADE_IVDEP"
             // (The OpenMP construct is recorded once the FORM is chosen below:
             // the cell-epilogue forms spend the licence differently.)
@@ -2820,7 +2841,9 @@ let tryGenFlatElementwiseNest
             // It sits BEFORE the pragma: nothing may come between an OpenMP
             // construct and the `for` it governs.
             let pragmaMarker =
-                if allParallel && not threadsOn
+                if ompDroppedForWrites
+                then [ ind (indent + 1) + "// " + ompSuppressedPhrase "the kernel may write storage outside itself (G41: a writing producer keeps an ordered loop)" ]
+                elif allParallel && not threadsOn
                 then [ ind (indent + 1) + $"// {(ompSuppressedPhrase (ompThreadsSuppressedReason ()))}" ]
                 else []
             let shapeNote =
@@ -2842,7 +2865,7 @@ let tryGenFlatElementwiseNest
             let epilogue =
                 match codeGen.FlatEpilogue with
                 | Some ep when depth = 1 && allDense ->
-                    (match tryGenFlatEpilogueNest ep codeGen.OutputName outPool outElem body.CppExpr cells allParallel threadsOn pragmaMarker head indent with
+                    (match tryGenFlatEpilogueNest ep codeGen.OutputName outPool outElem body.CppExpr cells allParallel threadsOn producerWrites pragmaMarker head indent with
                      | Some ls -> ep.OnEmitted (); Some ls
                      | None -> None)
                 | _ -> None
@@ -2854,8 +2877,8 @@ let tryGenFlatElementwiseNest
             Some (
                 head
                 @ pragmaMarker
-                @ [ ind (indent + 1) + pragma
-                    ind (indent + 1) + "for (size_t __fk = 0; __fk < __fp_cells; __fk++)"
+                @ (if pragma = "" then [] else [ ind (indent + 1) + pragma ])
+                @ [ ind (indent + 1) + "for (size_t __fk = 0; __fk < __fp_cells; __fk++)"
                     ind (indent + 2) + $"{outPool}[__fk] = {body.CppExpr};"
                     ind indent + "}" ])
         | Some _ -> None

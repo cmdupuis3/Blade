@@ -2760,7 +2760,8 @@ let private refuseWritingJoinLegs (modules: IRModule list) : unit =
     let facts : Optimize.WriteFacts =
         { Resolve = resolve
           OuterLet = (fun id -> match lets.TryGetValue id with | true, v -> Some v | _ -> None)
-          CopiedLet = copied }
+          CopiedLet = copied
+          UnknownIsWrite = true }
     // An unresolved call head counts as a write here too: a joined evaluation
     // must be PROVED free of observable writes, not merely not seen writing.
     let writes (e: IRExpr) = Optimize.exprMayWriteWith facts e
@@ -2814,6 +2815,27 @@ let private refuseWritingJoinLegs (modules: IRModule list) : unit =
     for m in modules do
         for b in m.Bindings do check b.Name (Some b.Id) b.Value
         for f in m.Functions do check f.Name None f.Body
+    // G41 (Codex finding 18): a PARALLEL kernel (`where omp` / cuda) whose body
+    // writes storage outside itself through a local VIEW or ALIAS (`let t =
+    // G(0); t(0) = ...`) -- the front end's BL4005 check is lexical, so it sees
+    // the local name and lets it through; the cells then race. Judged with the
+    // same storage-provenance analysis, refusing only what it can see (calls
+    // are the front end's to judge, so an unresolved head is not assumed to
+    // write here). Located at the declaration that applies the kernel.
+    let visible = { facts with UnknownIsWrite = false }
+    let users =
+        modules |> List.collect (fun m -> m.Bindings)
+        |> List.map (fun b -> (b, collectVarRefsIR b.Value))
+    for m in modules do
+        for f in m.Functions do
+            if (f.IsOmpParallel || f.IsCudaKernel) && Optimize.exprMayWriteWith visible f.Body then
+                let span =
+                    match users |> List.tryFind (fun (_, refs) -> Set.contains f.Id refs) with
+                    | Some (b, _) -> spanOf b.Name (Some b.Id)
+                    | None -> IR.declSpanOf f.Name
+                raise (Blade.Diagnostics.BladeDiagnosticException
+                        (Blade.Diagnostics.mkError "BL4005" Blade.Diagnostics.PhConstraints span
+                            "a parallel kernel (`where omp` / cuda) writes storage captured from outside it through a local view or alias (a `let` bound to a slice or element view of a captured array, or rebound to one): its cells run concurrently, so the store is a data race. Write through a fresh local array, or return the value and fold it."))
 let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (builder: IRBuilder) : IRProgram =
     // The scratch-reuse plan is keyed by let id and let ids restart per
     // compile, so a stale plan from an earlier program in this flow (the test

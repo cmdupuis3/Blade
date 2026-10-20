@@ -554,6 +554,30 @@ let private instructionsOnly (ll: string) =
     |> Array.filter (fun l -> not (l.TrimStart().StartsWith ";"))
     |> String.concat "\n"
 
+// THE ACCUMULATOR, identified structurally (Codex re-re-review): an
+// `fadd` whose result is stored back into a slot the function also LOADS
+// (`%acc` = load ptr %s ... %n = fadd ... ; store %n, ptr %s). A counter
+// bump stores through a freshly computed element pointer, never a loaded
+// slot, so it is not mistaken for the fold's chain.
+let private accumulatorFadds (ll: string) : string list =
+    let lines = (instructionsOnly ll).Split('\n') |> Array.map (fun s -> s.Trim())
+    let loadedSlots =
+        lines |> Array.choose (fun s ->
+            let m = System.Text.RegularExpressions.Regex.Match(s, @"= load double, ptr (%[\w.]+)")
+            if m.Success then Some m.Groups.[1].Value else None) |> Set.ofArray
+    let stores =
+        lines |> Array.choose (fun s ->
+            let m = System.Text.RegularExpressions.Regex.Match(s, @"^store double (%[\w.]+), ptr (%[\w.]+)")
+            if m.Success then Some (m.Groups.[1].Value, m.Groups.[2].Value) else None)
+    lines |> Array.choose (fun s ->
+        let m = System.Text.RegularExpressions.Regex.Match(s, @"^(%[\w.]+) = fadd ")
+        if m.Success && (stores |> Array.exists (fun (v, slot) -> v = m.Groups.[1].Value && loadedSlots.Contains slot))
+        then Some s else None)
+    |> List.ofArray
+let private flagsOf (fadd: string) =
+    let m = System.Text.RegularExpressions.Regex.Match(fadd, @"= fadd ((?:[a-z]+ )*)double")
+    if m.Success then m.Groups.[1].Value.Trim() else "?"
+
 let runLlvmFactTests () : BlockResult =
     printHeader "LLVM Fact Layer"
     let mutable passed = 0
@@ -844,12 +868,12 @@ let total = reduce(method_for(range<Ix>) <@> lambda(i) -> {
     G(0) * 1.5
 }, (+))
 """
-     let pure = """
+     let pureSrc = """
 type Ix = Idx<9>
 let total = reduce(method_for(range<Ix>) <@> lambda(i) -> Float64(i) * 1.5, (+))
 """
      let name = "G41: a writing deferred map's fold carries no fold FMF; the pure twin does"
-     match emitUnder [] "g41w" writing, emitUnder [] "g41p" pure with
+     match emitUnder [] "g41w" writing, emitUnder [] "g41p" pureSrc with
      | Error e, _ | _, Error e -> fail name e
      | Ok w, Ok p ->
          if (instructionsOnly w).Contains "reassoc" then fail name "writing map: the fold accumulator still carries `reassoc`"
@@ -885,11 +909,92 @@ let total = reduce(method_for(range<Ix>) <@> lambda(i) -> Float64(i), k, 0.0)
          match emitUnder [] "g41c" w, emitUnder [] "g41cp" p with
          | Error e, _ | _, Error e -> fail name e
          | Ok wl, Ok pl ->
-             let wi = instructionsOnly wl
-             if wi.Contains "reassoc" then fail name "writing producer: a fold still carries `reassoc`"
-             elif not (wi.Contains "fadd contract double") then fail name "writing producer: no plain `fadd contract double` accumulator"
-             elif not ((instructionsOnly pl).Contains "reassoc nsz") then fail name "pure twin: no `reassoc nsz` (the control is vacuous)"
-             else pass name "serial `fadd contract double` over the writing producer; `reassoc nsz` over the pure twin")
+             let wAcc = accumulatorFadds wl
+             let pAcc = accumulatorFadds pl
+             if wAcc.IsEmpty then fail name "writing producer: no accumulator `fadd` identified"
+             elif wAcc |> List.exists (fun f -> flagsOf f <> "contract") then
+                 fail name ($"""writing producer: an accumulator carries flags other than `contract`: {(String.concat " | " wAcc)}""")
+             elif not (pAcc |> List.exists (fun f -> flagsOf f = "reassoc nsz contract")) then
+                 fail name "pure twin: no `reassoc nsz contract` accumulator (the control is vacuous)"
+             else pass name "the accumulator is `fadd contract` over the writing producer; `fadd reassoc nsz contract` over the pure twin")
+
+    // ---- G41 (Codex re-re-review, finding 12): a NAMED PARTIAL VIEW of a
+    // writing deferred map (`let row = m(0)`) is virtual too: folding it runs
+    // the writer, so the accumulator keeps the serial chain. Controls: the pure
+    // view keeps `reassoc nsz`; a view of a MATERIALIZED writing map is stored
+    // data and may reassociate.
+    (let view (body: string) (forced: string) = $"""
+type I = Idx<2>
+type J = Idx<3>
+let mut G = [0.0]
+let m = method_for(range<I>, range<J>) <@> lambda(i, j) -> {body}{forced}
+let row = m((0 : I))
+let total = reduce(row, (+), 0.0)
+"""
+     let writer = "{\n    G(0) = G(0) + 1.0\n    G(0)\n}"
+     let name = "G41-12: a fold over a named partial view of a writing map keeps the serial chain"
+     match emitUnder [] "g4112w" (view writer ""), emitUnder [] "g4112p" (view "Float64(i + j) * 0.5" ""),
+           emitUnder [] "g4112m" (view writer " |> compute") with
+     | Error e, _, _ | _, Error e, _ | _, _, Error e -> fail name e
+     | Ok w, Ok p, Ok m ->
+         let wAcc = accumulatorFadds w
+         if wAcc.IsEmpty then fail name "writing view: no accumulator identified"
+         elif wAcc |> List.exists (fun f -> flagsOf f <> "contract") then fail name ($"""writing view: accumulator flags {(String.concat " | " wAcc)}""")
+         elif not (accumulatorFadds p |> List.exists (fun f -> flagsOf f = "reassoc nsz contract")) then fail name "pure view control: no reassoc accumulator"
+         elif not (accumulatorFadds m |> List.exists (fun f -> flagsOf f = "reassoc nsz contract")) then fail name "materialized writing control: no reassoc accumulator (a stored view may reassociate)"
+         else pass name "writing view: `fadd contract`; pure view and materialized writer: `fadd reassoc nsz contract`")
+
+    // ---- G41 (Codex review W2F-4, finding 19): a view held INSIDE a named
+    // tuple (`let pair = (m(0), 0.0); let row = pair[0]`) is still a view of
+    // the writing map; the accumulator keeps the serial chain. Pure control.
+    (let tupleView (body: string) = $"""
+type I = Idx<2>
+type J = Idx<3>
+let mut G = [0.0]
+let m = method_for(range<I>, range<J>) <@> lambda(i, j) -> {body}
+let pair = (m((0 : I)), 0.0)
+let row = pair[0]
+let total = reduce(row, (+), 0.0)
+"""
+     let name = "G41-19: a fold over a tuple-held view of a writing map keeps the serial chain"
+     match emitUnder [] "g4119w" (tupleView "{\n    G(0) = G(0) + 1.0\n    G(0)\n}"), emitUnder [] "g4119p" (tupleView "Float64(i + j) * 0.5") with
+     | Error e, _ | _, Error e -> fail name e
+     | Ok w, Ok p ->
+         let wAcc = accumulatorFadds w
+         if wAcc.IsEmpty then fail name "writing tuple view: no accumulator identified"
+         elif wAcc |> List.exists (fun f -> flagsOf f <> "contract") then fail name ($"""writing tuple view: accumulator flags {(String.concat " | " wAcc)}""")
+         elif not (accumulatorFadds p |> List.exists (fun f -> flagsOf f = "reassoc nsz contract")) then fail name "pure control: no reassoc accumulator"
+         else pass name "writing tuple-held view: `fadd contract`; pure control: `fadd reassoc nsz contract`")
+
+    // ---- G41 (Codex re-re-review, finding 13): the orbit-class fold
+    // evaluates each canonical cell once and weights it, so it must never run
+    // over a source whose evaluation writes (it would drop evaluations: the
+    // logical walk prints total 10 / counter 4, the orbit arm printed 8 / 3).
+    // The writing virtual source takes the logical walk; a pure virtual source
+    // keeps the orbit form; a MATERIALIZED writing source is stored data.
+    (let orbit (body: string) (forced: string) = $"""
+type I = Idx<2>
+let x = method_for(range<I>) <@> lambda(i) -> Float64(i) |> compute
+let g0 = method_for(x, x) <@> lambda(a: Float64, b: Float64) where comm(a, b) -> a + b |> compute
+let mut G = [0.0]
+let g = method_for(g0) <@> lambda(v: Float64) -> {body}{forced}
+let total = reduce(method_for(range<I>) <@> lambda(i) -> reduce(method_for(range<I>) <@> lambda(j) -> g(i, j), (+), 0.0), (+), 0.0)
+let seen = G(0)
+"""
+     let writer = "{\n    G(0) = G(0) + 1.0\n    G(0)\n}"
+     let orbitLine = "the logical sum over the pool of"
+     let name = "G41-13: no orbit-class fold over a writing virtual source"
+     match emitUnder [] "g4113w" (orbit writer ""), emitUnder [] "g4113p" (orbit "v * 2.0" ""),
+           emitUnder [] "g4113m" (orbit writer " |> compute") with
+     | Error e, _, _ | _, Error e, _ | _, _, Error e -> fail name e
+     | Ok w, Ok p, Ok m ->
+         if w.Contains orbitLine then fail name "the writing virtual source still took the orbit-class fold"
+         elif not (p.Contains orbitLine) then fail name "pure virtual control: no orbit-class fold (the control is vacuous)"
+         // (the MATERIALIZED writer is evaluated once per canonical cell by its
+         // own `|> compute` -- counter 3, logical sum 8 in every lane -- and its
+         // stored pool is folded by the logical walk; it must still emit.)
+         elif String.IsNullOrWhiteSpace m then fail name "materialized writing control: no module emitted"
+         else pass name "writing virtual source: logical walk (no orbit regrouping); pure virtual source: orbit-class fold; materialized writer emits")
 
     // ---- gap G42: the three-leaf join projections run NATIVELY here ---------
     // corpus tuples/032's shape must be emitted by this lane, not handed back

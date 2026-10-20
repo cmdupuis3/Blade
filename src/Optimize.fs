@@ -814,6 +814,12 @@ type WriteFacts = {
     /// `let mut a = Z` over a dense array deep-copies Z (genVarAliasBinding /
     /// Interp.Core): such a let owns fresh storage.
     CopiedLet: IRId -> bool
+    /// Does an UNRESOLVED call head or function-typed kernel name count as a
+    /// write? true for every decline and for the join refusal (a reordered or
+    /// joined evaluation must be PROVED write-free); false only for the
+    /// parallel-body refusal, which refuses what it can SEE (the front end
+    /// already judges a parallel body's calls).
+    UnknownIsWrite: bool
 }
 
 /// The summary of one callable: does a call write storage the caller can
@@ -840,6 +846,9 @@ let private isDeferredForm (e: IRExpr) : bool =
     // registration; EmitLlvm's virtual choice / guard producers): their
     // operands run where the wrapper is read
     | IRChoice _ | IRFallback _ | IRGuard _ | IRSequence _ -> true
+    // an object_for application is a VIRTUAL array in the LLVM lane
+    // (objectForApply): a call-shaped head is not proof the value was stored
+    | IRApp (IRObjectFor _, _, _) -> true
     | _ -> false
 
 /// THE WRITE ANALYSIS (gaps G41 / G43; exprMayWriteWith / callableMayWriteWith): does evaluating `root` write storage
@@ -984,7 +993,7 @@ let private writeAnalyzer (facts: WriteFacts) =
                          // a combinator / loop-object head: its kernels are
                          // visited as references below
                          | IRObjectFor _ | IRMethodFor _ | IRCompose _ | IRComposeObj _ | IRComposeMeth _ -> visit f
-                         | _ -> add { writeNone with External = true })
+                         | _ -> if facts.UnknownIsWrite then add { writeNone with External = true })
                     args |> List.iter visit
                 | IRVar (id, vty) ->
                     (match facts.Resolve e with
@@ -997,7 +1006,7 @@ let private writeAnalyzer (facts: WriteFacts) =
                          // an unresolved FUNCTION-typed name (a higher-order
                          // parameter or value in a kernel slot) may do anything
                          if isFunctionTyped vty then
-                             add { writeNone with External = true }
+                             if facts.UnknownIsWrite then add { writeNone with External = true }
                          elif not (locals.ContainsKey id) && not (paramIdx.ContainsKey id) && walkedLets.Add id then
                              // a named deferred computation runs where it is read
                              let rec chase (seen: Set<IRId>) (x: IRExpr) =
@@ -1008,18 +1017,27 @@ let private writeAnalyzer (facts: WriteFacts) =
                                       | None -> None)
                                  // a projection of a deferred pack runs the pack
                                  | IRTupleProj (b, _, _) -> chase seen b
+                                 // an array VIEW (partial index `m(i)`, slice,
+                                 // shift, reverse, curry) of a deferred value is
+                                 // virtual too: reading it runs the producer
+                                 // (EmitLlvm rowView keeps AVirt / AVirtFlat).
+                                 // An explicit `|> compute` stays the boundary.
+                                 | IRIndex (b, _, _) | IRSlice (b, _, _, _) | IRShift (b, _, _, _)
+                                 | IRReverse (b, _) | IRCurry (b, _, _) when not (try holdsNoStorage (typeOf x) with _ -> true) ->
+                                     chase seen b
                                  | IRTuple es ->
-                                     // only the components that are themselves
-                                     // named or deferred (a stored component
-                                     // was evaluated at its let)
-                                     let live = es |> List.filter (fun x -> match x with IRVar _ | IRTupleProj _ | IRTuple _ -> true | v -> isDeferredForm v)
+                                     // every component is chased by the SAME
+                                     // rules (names, projections, views,
+                                     // deferred forms); a stored component
+                                     // (evaluated at its let) drops out
+                                     let live = es |> List.choose (chase seen)
                                      if live.IsEmpty then None else Some (IRTuple live)
                                  | v when isDeferredForm v -> Some v
                                  | _ -> None
                              match facts.OuterLet id |> Option.bind (chase (Set.singleton id)) with
                              | Some deferred -> visit deferred
                              | None -> ())
-                | IRParam (_, _, t) when isFunctionTyped t -> add { writeNone with External = true }
+                | IRParam (_, _, t) when isFunctionTyped t -> if facts.UnknownIsWrite then add { writeNone with External = true }
                 | other -> visitChildren other
         and visitChildren (e: IRExpr) =
             let (ExprShape (children, _)) = e
@@ -1039,6 +1057,55 @@ let callableMayWriteWith (facts: WriteFacts) (c: IRCallable) : bool =
     let (summaryOf, _) = writeAnalyzer facts
     let s = summaryOf c
     s.External || not s.Params.IsEmpty
+
+/// THE SCHEDULING-ADMISSION WRITE PREDICATE (gap G41; Codex reviews 14-19):
+/// one instance of the write analysis above over a whole module -- callees
+/// resolved through the module's functions AND let aliases of them, named
+/// deferred values followed through every let in the module (module bindings
+/// and function-body lets), `let mut` deep copies of dense arrays recognized.
+/// Every pass that MOVES an evaluation relative to another (hot-row and cell
+/// epilogue schedules, compact row classes, compaction fusion, row-fold
+/// fusion) asks it about all five parties: the producer kernel, the consumer
+/// (row / cell / walk) kernel, the OUTER fold kernel, the seed, and every
+/// binding in between. A conservative `cseFactsOf` check may stand beside it
+/// (it also catches display output), never instead of it: `cseFactsOf` does
+/// not chase a named deferred array initializer.
+let scheduleMayWriteIn (programFuncs: IRCallable list) (modul: IRModule) : IRExpr -> bool =
+    let funcs =
+        (programFuncs @ modul.Functions) |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+    let lets = System.Collections.Generic.Dictionary<IRId, IRExpr>()
+    let note (e: IRExpr) = iterIRExpr (fun n -> match n with IRLet (id, v, _) -> lets.[id] <- v | _ -> ()) e
+    for b in modul.Bindings do
+        lets.[b.Id] <- b.Value
+        note b.Value
+    for f in modul.Functions do note f.Body
+    let rec chaseAlias (seen: Set<IRId>) (e: IRExpr) =
+        match e with
+        | IRVar (id, _) when not (funcs.ContainsKey id) && not (seen.Contains id) ->
+            (match lets.TryGetValue id with
+             | true, (IRVar _ as v) -> chaseAlias (seen.Add id) v
+             | _ -> e)
+        | _ -> e
+    let resolve (e: IRExpr) =
+        match chaseAlias Set.empty e with
+        | IRVar (id, _) -> Map.tryFind id funcs
+        | _ -> None
+    let copied (id: IRId) =
+        modul.MutableArrayLets.Contains id
+        && (match lets.TryGetValue id with
+            | true, IRVar (_, ty) ->
+                (match stripUnits ty with
+                 | ArrayElem at -> at.IndexTypes |> List.forall (fun ix -> ix.IxKind = IxKPlain && ix.Symmetry = SymNone)
+                 | _ -> false)
+            | _ -> false)
+    let facts : WriteFacts =
+        { Resolve = resolve
+          OuterLet = (fun id -> match lets.TryGetValue id with | true, v -> Some v | _ -> None)
+          CopiedLet = copied
+          UnknownIsWrite = true }
+    fun (e: IRExpr) -> exprMayWriteWith facts e
+
+let scheduleMayWrite (modul: IRModule) : IRExpr -> bool = scheduleMayWriteIn [] modul
 
 /// A float literal as its bit pattern, for identity only: structural `=` on
 /// floats is IEEE equality, which calls `0.0` and `-0.0` the same value.
@@ -1986,6 +2053,7 @@ let cellKernelCellTerm (ck: IRCallable) : CellTerm option =
 let planHotRowFolds (builder: IRBuilder) (modul: IRModule) : unit =
     let funcs = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     let facts = cseFactsOf funcs
+    let writes = scheduleMayWrite modul
     let decide (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
         Blade.Effects.Decisions.record
             { Blade.Effects.Rule = "hot-row-fold"; Version = 1
@@ -2078,7 +2146,7 @@ let planHotRowFolds (builder: IRBuilder) (modul: IRModule) : unit =
                                     Some $"the row kernel reads `{iName}`, which is bound between the producer and the fold (the row kernel would run before it exists)"
                                 elif Set.contains pId r then Some $"`{iName}` reads `{pName}` between the producer and the fold"
                                 elif not (Set.isEmpty (Set.intersect r captureIds)) then Some $"`{iName}` references a binding the row kernel captures"
-                                elif not (facts iVal).Repeatable then Some $"`{iName}` is not repeatable (an assignment, display output, or a call the module cannot judge) between the producer and the fold"
+                                elif not (facts iVal).Repeatable || writes iVal then Some $"`{iName}` is not repeatable (an assignment, display output, or a call the module cannot judge) between the producer and the fold"
                                 elif not kernelMovable then
                                     Some $"the row kernel may fail (only `prodsum(row, row)` is proved non-failing) and `{iName}` sits between the producer and the fold: running the row kernel at the producer could move its failure ahead of `{iName}`'s"
                                 else None)
@@ -2089,8 +2157,21 @@ let planHotRowFolds (builder: IRBuilder) (modul: IRModule) : unit =
                         | Some fk ->
                         if Set.contains pId captureIds || Set.contains pId kernelRefs then
                             declined $"the row kernel reads `{pName}` beyond its own row (a capture or a direct reference), so it cannot run before the whole array exists"
-                        elif not (facts cinfo.Kernel).Repeatable then
+                        elif not (facts cinfo.Kernel).Repeatable || writes (IRApplyCombinator cinfo) then
                             declined "the row kernel is not repeatable (an assignment, display output, or a call the module cannot judge), so running it behind each row could reorder an observable effect"
+                        // G41 (Codex findings 14, 17): the row kernel would run
+                        // between the producer's rows and AHEAD of the outer
+                        // combine's earlier applications, so a producer, an
+                        // outer fold kernel or a seed that WRITES (its write set
+                        // is not proved disjoint from what the row kernel reads)
+                        // could change what a row sees. Conservative, all five
+                        // parties through the shared predicate.
+                        elif (facts pinfo.Kernel).MayWrite || writes (IRApplyCombinator pinfo) then
+                            declined "the producer's kernel may write (an assignment or a mutating call): running the row kernel behind each produced row would move its reads across the producer's later writes"
+                        elif (facts k).MayWrite || writes k then
+                            declined "the outer fold kernel may write: the row values would be computed ahead of its earlier applications, moving the row kernel's reads across its writes"
+                        elif (facts seed).MayWrite || writes seed then
+                            declined "the fold's seed may write: the row values would be computed ahead of it"
                         elif fk.IsOmpParallel && not (outerLicensed pinfo pk) then
                             declined "the fold's `where omp` threads it over the rows today (Path B) while the producer's outer level carries no omp licence; behind a serial producer the row folds would lose their team"
                         else
@@ -2197,7 +2278,7 @@ let planHotRowFolds (builder: IRBuilder) (modul: IRModule) : unit =
                     Some $"the cell kernel reads `{iName}`, which is bound between the producer and the fold (it would run before `{iName}` exists)"
                 elif Set.contains pId r then Some $"`{iName}` reads `{pName}` between the producer and the fold"
                 elif not (Set.isEmpty (Set.intersect r captureIds)) then Some $"`{iName}` references a binding the cell kernel captures"
-                elif not (facts iVal).Repeatable then Some $"`{iName}` is not repeatable (an assignment, display output, or a call the module cannot judge) between the producer and the fold"
+                elif not (facts iVal).Repeatable || writes iVal then Some $"`{iName}` is not repeatable (an assignment, display output, or a call the module cannot judge) between the producer and the fold"
                 else None)
         let extentLit =
             match (List.head pAt.IndexTypes).Extent with
@@ -2208,6 +2289,12 @@ let planHotRowFolds (builder: IRBuilder) (modul: IRModule) : unit =
         elif extentLit.IsNone then declined "the producer's extent is not a literal (the flat producer path needs one)"
         elif Set.contains pId captureIds || Set.contains pId (refs ck.Body) then
             declined $"the cell kernel reads `{pName}` beyond its own cell (a capture or a direct reference)"
+        // G41: the fold is fed behind the producer's stores -- all five
+        // parties through the shared write predicate.
+        elif writes (IRApplyCombinator pinfo) then declined "the producer's kernel may write: its writes would interleave with the fold"
+        elif writes (IRApplyCombinator cinfo) then declined "the cell kernel may write"
+        elif writes k then declined "the fold kernel may write: its applications would interleave with the producer"
+        elif writes seed then declined "the fold's seed may write"
         else
         match resolveCallableIn funcs (fst (peelReynolds k)) with
         | None -> declined "the fold kernel does not resolve to a callable"
@@ -2364,6 +2451,7 @@ module CompactionTable =
 let planCompactionFusion (modul: IRModule) : unit =
     let funcs = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     let facts = cseFactsOf funcs
+    let writes = scheduleMayWrite modul
     let enabled = compactionFusionEnabled ()
     let decide (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
         Blade.Effects.Decisions.record
@@ -2484,7 +2572,7 @@ let planCompactionFusion (modul: IRModule) : unit =
                             let offending =
                                 between |> List.tryPick (fun b ->
                                     if Set.contains kId (refs b.Value) then Some $"`{b.Name}` reads `{kb.Name}` between the mask and the compound"
-                                    elif (facts b.Value).MayWrite then Some $"`{b.Name}` may write (an assignment or a mutating call) between the mask and the compound"
+                                    elif (facts b.Value).MayWrite || writes b.Value then Some $"`{b.Name}` may write (an assignment or a mutating call) between the mask and the compound"
                                     else None)
                             // (IsMutable is no evidence either way: every
                             // non-static binding is assignable in its own
@@ -2537,7 +2625,7 @@ let planCompactionFusion (modul: IRModule) : unit =
                     // reduce both sit inside `hb`'s value, so no write in that
                     // value at all is the proof (a mutating call through a
                     // `mut` parameter or an alias writes without naming `y`).
-                    elif (facts hb.Value).MayWrite then
+                    elif (facts hb.Value).MayWrite || writes hb.Value then
                         declined $"`{hb.Name}` may write (an assignment or a mutating call) between the map's materialization and the fold, so the map's snapshot could differ from `{yName}` at the fold"
                     else
                     match fk with
@@ -2555,7 +2643,7 @@ let planCompactionFusion (modul: IRModule) : unit =
                         // from `y` through `hb`, and no assignment to `y`.
                         let inPass =
                             compaction.IsSome && not (assignedAnywhere yId)
-                            && ([ yi + 1 .. hi ] |> List.forall (fun i -> not (facts arr.[i].Value).MayWrite))
+                            && ([ yi + 1 .. hi ] |> List.forall (fun i -> not ((facts arr.[i].Value).MayWrite || writes arr.[i].Value)))
                         let evidence =
                             [ $"`{hb.Name}` = {what}: folded straight over `{yName}`'s compact buffer (m contiguous cells), no square pool; licensed: the lane form, repro: the unseeded serial chain from the first kept square, in kept order; every product rounded before its add in both lanes (C++ an asm rounding barrier, LLVM an undecorated fmul), as the stored product was; no write between the map and the fold"
                               (if inPass then $"under the serial (repro) form the chain is fed inside `{yName}`'s compaction pass, block by block, from completed cells only; the empty check (BL8003) stays at `{hb.Name}`"
@@ -2683,6 +2771,7 @@ module CompactRowTable =
 let planCompactRowClasses (modul: IRModule) : unit =
     let funcs = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     let facts = cseFactsOf funcs
+    let writes = scheduleMayWrite modul
     let decide (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
         Blade.Effects.Decisions.record
             { Blade.Effects.Rule = "compact-row-classes"; Version = 1
@@ -2742,7 +2831,7 @@ let planCompactRowClasses (modul: IRModule) : unit =
                         let offending =
                             between |> List.tryPick (fun (_, iName, iVal) ->
                                 if readsTransitively pId iVal then Some $"`{iName}` reads `{pName}` between the producer and the fold"
-                                elif (facts iVal).MayWrite then Some $"`{iName}` may write (an assignment or a mutating call) between the producer and the fold"
+                                elif (facts iVal).MayWrite || writes iVal then Some $"`{iName}` may write (an assignment or a mutating call) between the producer and the fold"
                                 else None)
                         let (_, _, cVal) = arr.[ci]
                         if hasReynolds then declined "a Reynolds kernel (v1 schedules the plain compact nest only)"
@@ -2751,6 +2840,18 @@ let planCompactRowClasses (modul: IRModule) : unit =
                         // write there could change the cells first.
                         elif (facts cVal).MayWrite then
                             declined "the fold itself may write (its seed or walk calls something that assigns or mutates), so the producer's rows could change before the fold reads them"
+                        // G41 (Codex finding 16): the class partials run behind
+                        // each packed row, so a PRODUCER that writes (a scalar
+                        // the walk body reads, say) would change what later
+                        // rows' partials see. Conservative: any producer write.
+                        elif (facts pinfo.Kernel).MayWrite || writes (IRApplyCombinator pinfo) then
+                            declined "the producer's kernel may write: the class partials would run between its rows and read across its later writes"
+                        elif writes comp then
+                            declined "the walk (consumer) kernel may write"
+                        elif writes k then
+                            declined "the outer fold kernel may write"
+                        elif writes seed then
+                            declined "the fold's seed may write"
                         else
                         match offending with
                         | Some why -> declined why
@@ -3103,6 +3204,7 @@ let fuseSliceWritesModule (modul: IRModule) (builder: IRBuilder) (programFuncs: 
 // Gate: BLADE_FUSION. Plan rule `row-fold-fusion`.
 let fuseRowFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: IRCallable list) : IRModule =
     if not (Blade.Toolchain.envFlag "BLADE_FUSION" true) then modul else
+    let writes = scheduleMayWriteIn programFuncs modul
     let callables = System.Collections.Generic.Dictionary<IRId, IRCallable>()
     for f in programFuncs do callables.[f.Id] <- f
     for f in modul.Functions do callables.[f.Id] <- f
@@ -3258,6 +3360,13 @@ let fuseRowFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: IRC
                         let seedWrites = pre |> List.exists (fun (_, s) -> mentions bufId s)
                         if not (bufferUseOk bufId isN body && callsRepeatable body && unitTail body) then
                             Some (Error "a step writes a row other than its own, calls something that is not repeatable, or may stop early")
+                        // G41: the fold moves INTO the recursion, between its
+                        // steps -- all five parties through the shared write
+                        // predicate (the recursion's own buffer is local to it).
+                        elif writes block then Some (Error "the recursion (the producer) may write storage outside its own buffer")
+                        elif writes (IRApplyCombinator info) then Some (Error "the row kernel may write")
+                        elif writes foldK then Some (Error "the fold kernel may write")
+                        elif writes init then Some (Error "the fold's seed may write")
                         elif not preOk then Some (Error "a statement before the recursion writes a row other than the seed row")
                         elif lo = 1L && not seedWrites then Some (Error "no seed statement writes row 0")
                         elif lo = 0L && seedWrites then Some (Error "a statement before a seedless recursion writes the buffer") else

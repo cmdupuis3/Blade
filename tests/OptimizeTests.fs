@@ -1284,6 +1284,27 @@ let private hotRowLateCaptureSrc =
 
 /// A row kernel that may fail, with a binding between producer and fold
 /// (the corpus twin is loops/485).
+/// G41 finding 14: the producer bumps G(0); the row kernel reads G(0).
+let private hotRowWritingProducerSrc =
+    "type I = Idx<2>\ntype J = Idx<3>\nlet mut G = [0.0]\n"
+    + "let p = method_for(range<I>, range<J>) <@> lambda(i, j) -> {\n    G(0) = G(0) + 1.0\n    0.0\n} |> compute\n"
+    + "let total = reduce(method_for(p) <@> lambda(row: Array<Float64 like J>) -> G(0), (+), 0.0)\n"
+
+/// G41 finding 17: a pure producer, but the OUTER fold kernel writes G(0),
+/// which the row map reads (fused 1.0 / G=[2.0]; hot-row 0.0 / G=[2.0]).
+let private hotRowWritingOuterKernelSrc =
+    "type I = Idx<2>\ntype J = Idx<3>\nlet mut G = [0.0]\n"
+    + "function k(a: Float64, b: Float64) -> Float64 = {\n    G(0) = G(0) + 1.0\n    a + b\n}\n"
+    + "let p = method_for(range<I>, range<J>) <@> lambda(i, j) -> Float64(i + j) |> compute\n"
+    + "let total = reduce(method_for(p) <@> lambda(row: Array<Float64 like J>) -> G(0), k, 0.0)\n"
+
+/// G41 finding 16: the compact producer bumps the scalar G; the walk reads it
+/// (two-pass 12 / seen 3; row partials 9).
+let private compactRowWritingProducerSrc =
+    "type I = Idx<2>\nlet x = method_for(range<I>) <@> lambda(i) -> Float64(i) |> compute\nlet mut G = 0.0\n"
+    + "let p = method_for(x, x) <@> lambda(a: Float64, b: Float64) where comm(a, b) -> {\n    G = G + 1.0\n    0.0\n} |> compute\n"
+    + "let total = reduce(method_for(range<I>) <@> lambda(i) -> reduce(method_for(range<I>) <@> lambda(j) -> p(i, j) + G, (+), 0.0), (+), 0.0)\n"
+
 let private hotRowMayFailSrc =
     "type R = Idx<5>\n"
     + "type C = Idx<6>\n"
@@ -1363,6 +1384,25 @@ let private cepDecisionCases () =
           (declinedMentioning "bound between the producer and the fold") "declined: the row kernel reads a binding made after the producer"
       decisionCase "decision_hot_row_declined_may_fail" hotRowMayFailSrc "hot-row-fold"
           (declinedMentioning "the row kernel may fail") "declined: a failing row kernel would move ahead of an intervening binding"
+      // G41 (Codex re-re-review, finding 14): a WRITING producer -- the row
+      // kernel would run between its rows and read G before its later writes
+      // (two-pass 12.0, hot-row 9.0; corpus loops/499). Default and repro.
+      decisionCase "decision_hot_row_declined_writing_producer" hotRowWritingProducerSrc "hot-row-fold"
+          (declinedMentioning "the producer's kernel may write") "declined: the producer writes"
+      withGate "BLADE_FP_REPRO" "1" (fun () ->
+        decisionCase "decision_hot_row_declined_writing_producer_repro" hotRowWritingProducerSrc "hot-row-fold"
+            (declinedMentioning "the producer's kernel may write") "declined under repro too: the producer writes")
+      // G41 finding 17: the OUTER fold kernel writes what the row map reads
+      // (values pinned by corpus loops/501).
+      decisionCase "decision_hot_row_declined_writing_outer_kernel" hotRowWritingOuterKernelSrc "hot-row-fold"
+          (declinedMentioning "the outer fold kernel may write") "declined: the outer combine writes"
+      withGate "BLADE_FP_REPRO" "1" (fun () ->
+        decisionCase "decision_hot_row_declined_writing_outer_kernel_repro" hotRowWritingOuterKernelSrc "hot-row-fold"
+            (declinedMentioning "the outer fold kernel may write") "declined under repro too: the outer combine writes")
+      // G41 finding 16: compact row classes behind a WRITING producer (values
+      // pinned by corpus loops/500).
+      decisionCase "decision_compact_row_classes_declined_writing_producer" compactRowWritingProducerSrc "compact-row-classes"
+          (declinedMentioning "the producer's kernel may write") "declined: the compact producer writes"
       // Outer-route and nest refusals of the offered chain.
       withGate "BLADE_FP_REPRO" "1" (fun () ->
         cepDecisionCase "decision_cell_epilogue_collapsed_nest" cepCollapsedSrc

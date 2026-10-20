@@ -1,0 +1,13 @@
+// TEST: join over a named partial view of a writing map (rejects)
+// ERROR: BL4005 @ 12:1
+// ERROR-CONTAINS: a leg of this join writes a captured binding
+// Gap G43, Codex re-re-review finding 12: `row` is a partial VIEW (`m(0)`) of
+// the writing deferred map `m`; reading the view runs the map, so both legs
+// evaluate the writer inside the join. Views are followed, not taken as a
+// materialization boundary.
+type I = Idx<2>
+type J = Idx<3>
+let mut G = [0.0]
+let m = method_for(range<I>, range<J>) <@> lambda(i, j) -> { G(0) = G(0) + 1.0; G(0) }
+let row = m((0 : I))
+let r = object_for(<&!>) <@> (reduce(row, (+)), reduce(row, (+)))

@@ -1,0 +1,13 @@
+// TEST: join over a tuple-held view of a writing map (rejects)
+// ERROR: BL4005 @ 12:1
+// ERROR-CONTAINS: a leg of this join writes a captured binding
+// Gap G43, Codex review W2F-4 finding 19: the view `m(0)` of the writing map
+// is held inside a named tuple and projected back out; the join's legs still
+// run the writer. Tuple components are chased by the same view rules.
+type I = Idx<2>
+type J = Idx<3>
+let mut G = [0.0]
+let m = method_for(range<I>, range<J>) <@> lambda(i, j) -> { G(0) = G(0) + 1.0; G(0) }
+let pair = (m((0 : I)), 0.0)
+let row = pair[0]
+let r = object_for(<&!>) <@> (reduce(row, (+)), reduce(row, (+)))

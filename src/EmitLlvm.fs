@@ -6432,6 +6432,15 @@ and private tryOrbitFold (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExpr) (initE
     match Blade.OrbitFold.recognise id resolveCallable name compExpr kernelExpr initExpr with
     | Blade.OrbitFold.Orbit p ->
         match scalarTyOf (IRTScalar p.AccTy), scalarTyOf (IRTScalar p.ElemTy) with
+        // G41 (Codex re-re-review, finding 13): the orbit-class fold
+        // evaluates each canonical cell ONCE and weights it, so a source
+        // whose evaluation writes (a virtual producer over a writing kernel,
+        // or anything the enclosing fold's operand fact flags) would lose
+        // evaluations, not just reassociate them. Declined BEFORE anything is
+        // emitted; the logical walk keeps the normal forcing / read policy.
+        | Some accTy, Some _ when (accTy = ScF64 || accTy = ScI64)
+                                  && (c.FoldOperandWrites
+                                      || Blade.CodeGenExprSupport.exprMayWriteIn c.BindingValues p.SourceExpr) -> None
         | Some accTy, Some _ when accTy = ScF64 || accTy = ScI64 ->
             let a = emitArr c p.SourceExpr
             (match soleSimplexR a.Groups with

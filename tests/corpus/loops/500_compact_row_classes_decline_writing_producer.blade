@@ -1,0 +1,18 @@
+// TEST: Compact Row Classes Decline A Writing Producer
+// Gap G41, Codex review W2F-4 finding 16. The compact (`where comm`)
+// producer bumps the captured scalar G once per canonical cell (3 cells);
+// the walk reads `p(i, j) + G`. Two passes: every cell reads the final G = 3,
+// so total = 4 * 3 = 12. Compact row classes ran the walk's class partials
+// behind each packed row (G = 2, then 3: total 9) in both lanes. A writing
+// producer is never scheduled behind its own rows now.
+type I = Idx<2>
+let x = method_for(range<I>) <@> lambda(i) -> Float64(i) |> compute
+let mut G = 0.0
+let p = method_for(x, x) <@> lambda(a: Float64, b: Float64) where comm(a, b) -> {
+    G = G + 1.0
+    0.0
+} |> compute
+let total = reduce(method_for(range<I>) <@> lambda(i) -> reduce(method_for(range<I>) <@> lambda(j) -> p(i, j) + G, (+), 0.0), (+), 0.0)
+let seen = G
+// EXPECT: total = 12.0
+// EXPECT: seen = 3.0

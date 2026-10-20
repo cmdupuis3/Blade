@@ -224,6 +224,12 @@ let private g41Fold1 (body: string) =
 let private g41WriteCensus = "[omp] requested but emitted serial: the fold kernel writes a captured binding; a map licence does not make the fold race-safe"
 let private g41Team = "comm-licensed parallel fold, outer level chunked"
 let private g41NoTeam = ["BLADE_OMP_PARALLEL_NUM_THREADS("; "blade_fold::chunk_lo"]
+/// Every spelling of a dependence-discarding producer annotation (Codex
+/// review W2F-4 (f)): the portable macro, the directive however spelled
+/// (`GCC ivdep`, `#pragma ivdep`, `_Pragma("ivdep")`), and the omp producer
+/// SIMD / team routes. (The bare word `ivdep` is not banned: the emitted
+/// program's own explanatory comments mention it.)
+let private g41WriterBans = [ "BLADE_IVDEP"; "GCC ivdep"; "pragma ivdep"; "_Pragma(\"ivdep"; "BLADE_OMP_SIMD\n"; "BLADE_OMP_PARALLEL_FOR_SIMD"; "BLADE_OMP_PARALLEL_FOR\n" ]
 let private ompReduceCases : (string * string * string list * string list) list =
     // (name, source, mustContain, mustNotContain)
     let arr = "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]\n"
@@ -580,7 +586,27 @@ let private emissionShapeCases : (string * string * string list * string list) l
       ("ivdep_kept_on_loop_free_body", loopFreeSrc,
        [ "BLADE_IVDEP" ],
        [ "// [ivdep] declined" ])
-      // ---- the threaded triangular outer level runs ASCENDING ----------------
+      // ---- G41 (Codex re-re-review, finding 15): `ivdep` asserts NO
+      // loop-carried dependence, so a producer whose kernel WRITES captured
+      // storage (a running counter) never gets it -- the plain flat loop, the
+      // cell-epilogue producer, and the general nest. Pure twins keep it.
+      ("ivdep_declined_on_writing_flat_producer",
+       "let x = [1.0, 2.0, 3.0, 4.0, 5.0]\nlet mut G = [0.0]\nlet p = method_for(x) <@> lambda(v) -> {\n    G(0) = G(0) + v\n    G(0)\n} |> compute\n",
+       [ "for (size_t __fk = 0; __fk < __fp_cells; __fk++)" ], g41WriterBans)
+      ("ivdep_kept_on_pure_flat_producer",
+       "let x = [1.0, 2.0, 3.0, 4.0, 5.0]\nlet p = method_for(x) <@> lambda(v) -> v * 2.0 + 1.0 |> compute\n",
+       [ "BLADE_IVDEP" ], [])
+      ("ivdep_declined_on_writing_epilogue_producer",
+       "let x = [1.0, 2.0, 3.0, 4.0, 5.0]\nlet mut G = [0.0]\nlet p = method_for(x) <@> lambda(v) -> {\n    G(0) = G(0) + v\n    G(0)\n} |> compute\nlet total = reduce(method_for(p) <@> lambda(v) -> v, (+), 0.0)\n",
+       // the path taken: the plain flat producer (the epilogue declined it)
+       [ "// flat elementwise: 5 cells"; "for (size_t __fk = 0; __fk < __fp_cells; __fk++)" ], g41WriterBans @ [ "blade_fold::lane_state" ])
+      ("ivdep_declined_on_writing_nest_producer",
+       "type I = Idx<3>\ntype J = Idx<4>\nlet mut G = [0.0]\nlet p = method_for(range<I>, range<J>) <@> lambda(i, j) -> {\n    G(0) = G(0) + 1.0\n    G(0)\n} |> compute\n",
+       // the path taken: the general two-level nest
+       [ "for (size_t __i0 = 0; __i0 < 3; __i0++) {"; "for (size_t __i1 = 0; __i1 < 4; __i1++) {" ], g41WriterBans)
+      ("ivdep_kept_on_pure_nest_producer",
+       "type I = Idx<3>\ntype J = Idx<4>\nlet p = method_for(range<I>, range<J>) <@> lambda(i, j) -> Float64(i * 4 + j) * 0.5 |> compute\n",
+       [ "BLADE_IVDEP" ], [])      // ---- the threaded triangular outer level runs ASCENDING ----------------
       // Pinned as a DECISION, not as an accident of never having considered it.
       // A performance audit proposed reversing this level to descending, on the
       // theory that `schedule(dynamic)` hands out chunks in iteration order so
