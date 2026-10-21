@@ -21,3 +21,11 @@ Extra sweeps on f1910060:
 - Bench emission identity: `blade emit` of all 12 bench kernels x {cpp, llvm} x {licensed, repro}, the 1cf90428 binary (the A/B mirrors'
   binary) vs f1910060: 48 same, 0 differ; src/cpp untouched between them. So the harness A/B, measured on the 1cf90428 binary, measures
   the final tip's bench programs bit for bit.
+
+## Final combined gates (run 7, the tree pushed to master)
+
+Integration tree 66e04875 = the 15 round-2 commits + G45-G47 (2) + G48-G50 (2) + wave 3 (6, rebased; its gap rows renumbered
+G51-G53). Blade.dll SHA256 6FF830880B0B76084DE851DC6C4DB42CE1EECB87F70B0E18B87E3B580203A5DE, unchanged across the gates.
+`blade test` TOTAL 7252 passed, 0 failed; opt-diff 2088 passed (1890 inert), 0 failed, 946 skipped; docs 131/0/78;
+llvm TOTAL 825 passed, 0 failed, 696 skipped; interp 3031 passed, 0 failed, 3 skip-unsupported. Examples sweep: the same six
+pre-existing non-zero exits. master fast-forwarded to 66e04875 and pushed 2026-10-20.
