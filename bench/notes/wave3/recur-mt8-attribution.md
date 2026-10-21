@@ -1,5 +1,11 @@
 # recur mt8 (E-G5) and the teardown asymmetry -- MEASURED 2026-10-20 (wave 3)
 
+> CAVEAT (found at 20:11): a stray single-core `find` process of the orchestrating session ran
+> from 16:50 to 20:11, i.e. beside EVERY probe in sections 1-4 below and the first harness A/B
+> run. The interleaved comparisons (Blade vs expert under the same conditions) stand
+> directionally; absolute figures may be inflated. The key probes were RE-RUN on the quiet box
+> afterwards (`reprobe.ps1`; section 6 below) and the harness A/B was re-run in full.
+
 Box: the bench laptop (Ryzen 7 5800HS, 16 MB L3), AC, Silent scheme, quiet (no builds); ucrt64
 g++ 16.2 / gfortran 16.2; `OMP_NUM_THREADS` as stated, otherwise the harness's mt8 environment
 (unbound; no wait-policy knobs). Single-process timings, 7 runs each, medians (ms); directional,
@@ -76,3 +82,28 @@ Cell-loop variants (restrict row pointers; `omp simd`): 7.7-8.1 vs 7.5-8.2 -- no
   for the user (an instrument-first follow-up: a compile-time ceiling knob and an indicative row).
 - The same instrument applies to stencil's mt8-licensed gap (item 2): `lap` (24 MB) and `u`
   (24 MB) are block-local and freed inside the timer there too.
+
+## 6. Quiet-box re-measure (21:31, after the stray process; `reprobe.ps1` + `secondlook.ps1` run 3)
+
+Console: `C:\bt_w3\ab\reprobe.txt`, `C:\bt_w3\ab\secondlook3.txt`. Load before 4.1%.
+
+| region only (ms, median of 7) | T=1 | T=8 |
+|---|---|---|
+| expert, as is (faults inside) | 9.68 | 6.98 |
+| expert, pre-touched | 5.54 | 5.44 |
+| Blade E-G5, as is (faults inside) | 8.56 | 6.85 |
+| Blade E-G5, pre-touched | 5.04 | 6.02 |
+
+- The region is at parity with the expert's as written (faults inside: 6.85 vs 6.98 at T=8)
+  and FASTER serially (8.56 vs 9.68); pre-touched, Blade is 11% slower at T=8 (6.02 vs 5.44)
+  and 9% faster at T=1. "Near parity" is the honest summary (Codex's correction), not "parity".
+- Fork / barrier cost unchanged: per-step parallel-for 46.9-47.1 us, persistent + barrier
+  42.8-44.4 us at T=8.
+- WRITE bandwidth on the quiet box (`bw.cpp`, 48 MB): rows 9.8 / 10.6 / 9.9 / 8.6 GB/s at
+  T = 1 / 2 / 4 / 8 (NT stores 10.0-10.8, memset 8.5-10.7): writes are flat across team sizes, so
+  the trajectory-store floor above STANDS. (READS do scale -- 22 -> 53 GB/s from 1 to 4 threads,
+  `second-look-actions.md` -- which is what the stencil note had wrong.)
+- **G49 retention arm** (probe copy of the pool header, `kMaxBlock` 64 MB / `kBudget` 96 MB):
+  program end at T=8 11.5-11.8 ms -> 7.9-8.2 ms (dealloc +3.4-3.5 ms -> +0.02 ms); at T=1
+  11.3 -> 9.6. With it, recur mt8 lands on the expert's full-program 6.85-7.5 ms band
+  within ~1 ms. The policy is the user's call (gap register G49).

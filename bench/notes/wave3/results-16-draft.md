@@ -33,6 +33,6 @@ at 4 MB; a larger retention is a footprint-policy decision left to the user.
   shape is no cheaper on this libgomp): DROPPED on the instrument, no code.
 - anti_g: re-measured in the A/B below (3 interleaved sessions per arm, serial + mt8).
 
-## 16.3 Harness A/B -- TBD
+## 16.3 Harness A/B -- SUPERSEDED: filled in bench/RESULTS.md section 16.3 (quiet-box re-run 20:12-21:30; anti_g kept at 1)
 
 ## 16.4 Gates -- TBD

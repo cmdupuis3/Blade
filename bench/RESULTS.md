@@ -2723,21 +2723,83 @@ call, ~1.8% of an mt8 gram, and the persistent-team shape is no cheaper on this 
 
 ### 16.2 Attribution (MEASURED, single-process phase timers, directional; `recur-mt8-attribution.md`, `stencil-mt8-attribution.md`)
 
-- **recur mt8 licensed.** E-G5's region is at parity with the gfortran expert's region
-  (trajectory pre-touched: expert 5.4 ms, Blade 5.9-6.3 ms at T=8; both on the box's
-  ~4.6 ms write-bandwidth floor -- raw 48 MB row-stream writes run 10.4 GB/s at one thread
-  and 6.9 at eight; page faults add ~1.6 ms to each). The whole remaining gap to the expert's
-  7.5 ms program is the 48 MB teardown INSIDE Blade's timed region: 1.7 ms serial, 4-5 ms
-  after a threaded fill (TLB shootdowns across the cores that touched the pages); the experts
-  free after their stop line (README item 6's recorded asymmetry; now quantified, G49). The
-  retained-block pool cache stops at 4 MB; a larger retention is a footprint-policy decision
-  left to the user.
-- **stencil mt8 licensed.** Of the ~2 ms gap to the expert's region (4.25 ms at T=8), 1.0 ms
-  is the 24 MB `lap` teardown inside the timer (G49); the rest sits in the DRAM-bound read
-  phases (input checksum 1.5-1.9 ms, producer 3.2-3.4 ms). The read-back licence is kept as
-  the fair spelling; measured flat (a 24 MB read does not scale with threads here).
+CAVEAT: the first probes and the first A/B run (18:53-20:09) ran beside a stray single-core
+process of this session's own (a `find /` started 16:50, killed 20:11). Every figure below
+is from the QUIET-box re-runs (`reprobe.ps1`, `secondlook.ps1` run 3, 20:12-21:35); the
+earlier figures stay in the notes, marked.
 
-### 16.3 Measured: wave-3 A/B -- (filled below when the harness sessions complete)
+- **recur mt8 licensed.** E-G5's region is NEAR parity with the gfortran expert's region:
+  6.85 vs 6.98 ms at T=8 as written (page faults inside both), 6.02 vs 5.44 pre-touched
+  (Blade 11% slower); serially Blade is faster (8.56 vs 9.68; pre-touched 5.04 vs 5.54).
+  Writes are flat on this box (48 MB row-stream writes 8.6-10.6 GB/s at T = 1..8), so the
+  trajectory store is a floor at any team size. The rest of the gap to the expert's
+  program is the 48 MB teardown INSIDE Blade's timed region (+3.4-3.5 ms after a threaded
+  fill, +1.8-1.9 serial); the experts free after their stop line (README item 6, G49).
+  MEASURED, probe-only: a bounded retention arm (`kMaxBlock` 64 MB, `kBudget` 96 MB in a probe
+  copy of the pool header) moves the teardown out of the timer -- recur T=8 program end
+  11.5-11.8 -> 7.9-8.2 ms, T=1 11.3 -> 9.6; stencil T=8 9.7-10.2 -> 9.3-9.4. Not changed: the
+  footprint policy is the user's call.
+- **stencil mt8 licensed.** Expert region 5.38 ms at T=8 (the loaded-box 4.25 was not
+  reliable); Blade's 6.0-6.4, of which the `lap` teardown is 0.8-1.0 ms (G49). The earlier
+  "DRAM-bound reads" diagnosis is WITHDRAWN: a READ probe scales 22 -> 53 GB/s from 1 to 4
+  threads, so the input checksum's 1.8-2.1 ms for 24 MB is ~1 ms slower than a streaming read
+  of the same bytes (0.73 ms) -- an emission item (the per-row chain under Path B), recorded as
+  a follow-up. The read-back licence interleaved directly (same build, old vs new source,
+  T=8): licensed 8.08 vs 8.38 ms medians (IQRs overlap), repro 9.58 vs 9.78 with identical
+  checksums -- no measurable gain; kept as the fair spelling pending that follow-up.
+- **Codex second look** (user request; `codex-second-look.md`, actions in
+  `second-look-actions.md`): B2l hand-patched and measured (serial licensed recur, blocks of
+  128/256/512: 14.0 / 13.7 / 13.0 vs 13.3 ms one-shot, identical checksum bits) -- within
+  noise, stays unbuilt; D1 re-instrumented with the real 201 pack panels (today 251-293 us per
+  call, the persistent shape 284-335) -- dropped; G48 judged build-now, narrowly -> follow-up.
+
+### 16.3 Measured: wave-3 A/B (harness `run.py bench`, 18 sessions 20:12-21:30, quiet box; tables `bench/notes/wave3/w3-scripts/tables.md`, `antig.md`)
+
+Mirrors: **w2** = the wave-2 binary on the ORIGINAL sources (OLD); **w3** = the wave-3 tip,
+defaults; **w3a** = w3 with `BLADE_REC_STEP_OMP=0`; **w3g** = w3 with `BLADE_TILE_TUNE=anti_g=0`.
+The first A/B run (18:53-20:09) is DISCARDED (it ran beside the stray process). Every
+session ended with 0 failures; controls held (compute 12.7-14.1 ms, memory 5.3-5.9 ms). A
+cross-session ratio below is the analyst's unpaired bootstrap of median(B)/median(A) (4000
+resamples; not a harness output); expert ratios are the harness's own (> 1 = Blade faster).
+`ind` = at least one block drift-suppressed by the harness: indicative, not live.
+
+| cell | Blade arm: A -> B (ms) | B/A [95% CI] | class | same-session expert ratio (gfortran / ifx expert) |
+|---|---|---|---|---|
+| recur mt8 licensed: E-G5 off (w3a) -> on (w3) | cpp 40.34 -> 10.01 | w3a/w3 4.03 [3.77, 4.14] | ind | w3 0.752 [0.685, 0.791] / 0.797, suppressed; w2 had no Blade arm (`no_parallel_form`) |
+| recur mt8 repro: E-G5 off -> on | cpp 44.13 -> 13.02 | w3a/w3 3.39 [3.29, 3.47] | live | w3 0.573 [0.545, 0.591] loss / 0.615 loss |
+| recur serial licensed, w2 -> w3 (control) | llvm 9.61 -> 8.64; cpp 11.67 -> 10.26 | 0.899 [0.875, 0.938]; 0.879 | live | w2 1.075 / 1.097 -> w3 1.070 detectable-win / 1.134 win (the experts moved 0.89-0.93 too: session level) |
+| recur serial repro, w2 -> w3 (control) | llvm 9.94 -> 9.56; cpp 11.89 -> 11.29 | 0.961 [0.938, 0.994]; 0.950 | ind | w3 1.328 win / 1.367 win |
+| stencil mt8 licensed (read-back licence) | cpp 8.54 -> 9.31 | 1.090 [0.987, 1.151] | ind | w2 0.937 / 0.969 -> w3 0.891 / 0.898 (all suppressed); same-session experts +0.7-6.1% |
+| stencil mt8 repro | cpp 9.92 -> 10.84 | **1.093 [1.027, 1.188]** | ind | w2 0.827 / 0.842 -> w3 0.782 / 0.805 (suppressed); same-session experts +3.4-7.8% |
+| stencil serial licensed (control) | llvm 11.04 -> 10.76; cpp 14.94 -> 14.45 | 0.974; 0.967 | ind | w3 llvm 1.321 win / 1.022 equivalent (live) |
+| gram serial licensed (control) | llvm 58.31 -> 57.89; cpp 59.56 -> 59.68 | 0.993; 1.002 | ind | w3 1.345 / 1.221 (suppressed) |
+
+- **E-G5 is the wave's result.** recur mt8 gains a Blade arm (w2 had none), 4.0x faster than
+  its own knob-off mirror licensed (3.4x live under repro). It still LOSES to both experts at
+  mt8 (licensed 0.75-0.80 indicative, repro 0.57-0.62 live). The licensed loss is dominated by
+  the teardown (16.2: the retention arm removes ~3.5 ms from the program in the probe); the
+  repro loss adds the strict post-pass (a second read of the 48 MB trajectory after the team).
+  Not claimed as a win.
+- **w3a is not the old program.** With the knob off, the NEW source's `where omp(v: 1)` stays
+  out of the fusion (the request is never silently dropped), so the slice is unfused and every
+  step copies: serial w3a is 2.0-2.3x slower than w3. The baseline for "nothing regressed" is
+  w2 (the old source), and serial w3 matches or beats it with the expert ratios unchanged.
+- **The one Blade cell slower beyond its CI: stencil mt8 repro, w3/w2 1.093 [1.027, 1.188]
+  (indicative).** Its emission differs from the old source's only in form (the request is
+  emitted serial under repro, `[omp] requested but emitted serial: BLADE_FP_REPRO=1`, the same
+  ascending chains); the same-session expert arms moved +3.4-7.8%; and the two emissions
+  interleaved directly (same build, T=8, contract off, 15 runs) give 9.58 vs 9.78 ms with
+  identical checksums. Recorded as box drift plus at most ~2%, NOT cleared by the harness.
+  The licensed cell (1.090 [0.987, 1.151]) is within its CI; the direct interleave there gives
+  8.08 vs 8.38 ms (IQRs overlap): the read-back licence buys nothing measurable (16.2).
+- **anti_g default (item 4): KEPT at 1.** Three interleaved sessions per arm, pooled (63
+  rounds each; `antig.md`): serial live, auto (w3g) / 1 (w3) = cpp **1.013 [1.004, 1.025]**,
+  llvm **1.014 [1.003, 1.029]** -- auto is 1.3-1.4% SLOWER beyond its CI; mt8 cpp 0.967
+  [0.925, 1.011], indicative, with the gfortran expert moving 0.969 in the same sessions (box
+  drift). The rule was "flip only if auto wins beyond CI on live blocks": it does not.
+  Per-session expert ratios (serial, live): llvm 1.099-1.122 vs gfortran expert, 1.047-1.075 vs
+  ifx expert -- antisym serial stays a Blade win.
+- **D1**: dropped on the instrument (16.2), no A/B cell. **B2l**: not built (16.2).
 
 ### 16.4 Gates: GREEN on b4a21003 (Blade.dll 2B9E12AC...; `bench/notes/wave3/w3-gates-summary.md`)
 

@@ -1,5 +1,10 @@
 # stencil mt8-licensed: where the ~1 ms goes -- MEASURED 2026-10-20 (wave 3, item 2)
 
+> CAVEAT (found at 20:11): a stray single-core `find` process of the orchestrating session ran
+> from 16:50 to 20:11, beside every probe below and the first harness A/B run. The interleaved
+> comparisons stand directionally; absolute figures may be inflated. Key probes re-run on the
+> quiet box afterwards (`reprobe.ps1`; the re-measure section at the end); the A/B re-run in full.
+
 Same instrument as `recur-mt8-attribution.md`: phase timers (stderr, cumulative ms from the
 program's own start) spliced into the EMITTED C++ (`probe/stencil/variants_stencil.py`),
 compiled with Blade's flags; the gfortran expert built with the harness's mt8 licensed flags,
@@ -66,3 +71,25 @@ folds its own L1-hot chunk right after writing it -- the in-team partial IS the 
 and bounded at ~0.35 ms of ~10 ms serially (brief B); stencil's at ~0.02 ms per thread. The
 harness cannot resolve a 2-3% serial effect on this box (CI half-widths ~3-4%). `lanes` stays
 RESERVED with its recorded decline; a follow-up card if a serial-licensed loss ever needs it.
+
+## Quiet-box re-measure (21:31, after the stray process; `reprobe.ps1`, `secondlook.ps1` run 3)
+
+- Expert at T=8: full program 8.24 ms, region only 5.38 ms (the loaded-box figures above were
+  8.55 / 4.25 -- the region-only figure was LOW then, not high: treat the earlier 2.0 ms gap as
+  unreliable).
+- Blade licensed-source phases at T=8 (3 runs, cumulative ms): inputs 3.1-3.5, input checksum
+  +1.8-2.1, producer +3.1-3.5, combine +0.1, dealloc +0.8-1.0, end 9.2-9.8. Blade's region
+  (end minus inputs) 6.0-6.4 ms against the expert's 5.38: ~0.8 ms, of which the teardown is
+  0.8-1.0 ms (G49; the retention arm takes it to +0.04 ms, end 9.3-9.4).
+- **The DRAM diagnosis above is WITHDRAWN for reads.** A READ probe (`rd.cpp`) shows a 24 MB
+  stream read scaling 22.2 -> 36.5 -> 53.0 GB/s at T = 1 / 2 / 4 (33.0 at 8); the earlier figure
+  was a WRITE probe (writes really are flat, ~10 GB/s at every team size, re-measured quiet).
+  So the input checksum's 1.8-2.1 ms for 24 MB (12-13 GB/s) is SLOWER than a streaming read of
+  the same bytes (0.73 ms at T=8): a real ~1 ms item in the emitted per-row form (Path B over
+  the rows with the lane-unrolled `__wrap` chain per row), not in the box. Follow-up.
+- **The read-back licence, interleaved directly** (the two emissions from the same Blade build,
+  `old` = the wave-2 source, `new` = `where omp` on the outer kernel; 21 interleaved runs, T=8):
+  licensed 8.08 ms (IQR 7.93-8.64) old vs 8.38 (7.97-8.87) new; repro (contract off, 15 runs)
+  9.58 vs 9.78 with identical checksums. The licence buys nothing measurable and may cost
+  ~0.3 ms licensed; it stays as the fair spelling pending the checksum follow-up (which is
+  where its benefit would have to come from), and RESULTS 16.3 reports the cell as is.

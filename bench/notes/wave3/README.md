@@ -14,7 +14,7 @@ mirrors). RESULTS section 16 is the summary; this directory holds the evidence i
 | `recur-mt8-attribution.md` | MEASURED: phase timers in the emitted C++, the expert's region alone, raw write bandwidth -- the region is at parity; the gap is the teardown inside the timed region |
 | `stencil-mt8-attribution.md` | MEASURED: the same instrument on stencil (teardown 1.0 ms, DRAM-bound read phases), the read-back licence, the D1 instrument (dropped), B2l (not built) |
 | `results-16-draft.md` | the section-16 draft as the wave ran |
-| `w3-scripts/` | `gates.ps1` (the five suites from `C:\bt_w3`, tests/docs junctions), `mirrors.ps1`, `smoke.ps1`, `driver.ps1`, `analyze.py` (the A/B: w2 = OLD binary + original sources; w3 = this tip; w3a = `BLADE_REC_STEP_OMP=0`; w3g = `anti_g=0`) |
+| `w3-scripts/` | `gates.ps1` (the five suites from `C:\bt_w3`, tests/docs junctions), `mirrors.ps1`, `smoke.ps1`, `driver.ps1`, `analyze.py` (the A/B: w2 = OLD binary + original sources; w3 = this tip; w3a = `BLADE_REC_STEP_OMP=0`; w3g = `anti_g=0`; output `tables.md`), `antig.py` (the anti_g verdict pooled over the three post-20:12 sessions per arm; output `antig.md`) |
 
 Scratch (the session's area, not durable): `scratchpad\w3\probe\` holds the probe sources
 (`forkcost.cpp`, `bw.cpp`, the phase-timed emissions, the region-only expert copies,
