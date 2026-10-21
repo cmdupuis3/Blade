@@ -1,0 +1,30 @@
+// TEST: Set Ops Over Rank-1 Sparse
+// ----------------------------------------------------------------------------
+// unique / intersect / union over a rank-1 SPARSE operand: the set-op walk of
+// round-3 W1-3 (sql-set-ops/012, sql-unique-contains/009) takes a Sparse like
+// a Compound -- its compact buffer in storage order, which for a Sparse is
+// the SUPPLIED key order (not sorted, not hashed), the order the interpreter's
+// sparseToDense hands the same set op. The empty compound is the empty-input
+// control.
+// ----------------------------------------------------------------------------
+let static K = [3, 7, 1, 9]
+type E = Idx<4>
+let vals: Array<Int64 like E> = [5, 2, 5, 2]
+let F = sparse(vals, K)
+let u = unique(F)
+let i = intersect(F, [2, 8])
+let un = union(F, [2, 8])
+let i2 = intersect([2, 5], F)
+// EXPECT: u = [5, 2]
+// EXPECT: i = [2]
+// EXPECT: un = [5, 2, 8]
+// EXPECT: i2 = [2, 5]
+
+let none = compound(vals, mask(vals, lambda(v) -> v > 100))
+let u0 = unique(none)
+let i0 = intersect(F, none)
+let un0 = union(none, F)
+let n0 = extents(u0)
+// EXPECT: n0 = 0
+// EXPECT: i0 = []
+// EXPECT: un0 = [5, 2]

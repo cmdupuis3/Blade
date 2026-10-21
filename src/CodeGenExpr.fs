@@ -2262,6 +2262,22 @@ and materializeMaskFormCounted (subst: SubstMap) (names: Map<IRId, string>) (var
 
 
 
+/// The walk of a rank-1 set-op operand (unique / intersect / union): its
+/// element count and its i-th element. A DENSE operand keeps `.extents[0]` and
+/// `operator[]`. A rank-1 COMPOUND or SPARSE operand -- `unique(compound(c,
+/// keep))`, the filtered key set -- has neither member (nested_array_types.hpp
+/// `Compound` / `Sparse` are a compact buffer plus an index): it walks its
+/// compact buffer in storage order, `.idx->cardinality` cells through
+/// `.data[i]` -- the cells, and the order, the interpreter's compoundToDense /
+/// sparse operand form hands the same set op, and the convention
+/// materializeSortForm already uses for the same operands.
+and setOpOperandWalk (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) : string * (string -> string) =
+    let nm = exprToCppCore subst names expr
+    match inferExprType expr with
+    | ArrayElem at when (isCompoundArrayType at || isSparseArrayType at) && at.IndexTypes.Length = 1 ->
+        ($"{nm}.idx->cardinality", (fun i -> $"{nm}.data[{i}]"))
+    | _ -> ($"{nm}.extents[0]", (fun i -> $"{nm}[{i}]"))
+
 and materializeIntersectForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (aExpr: IRExpr) (bExpr: IRExpr) : (string list * MaterializedAlloc list) option =
     // SQL INTERSECT: unique values appearing in BOTH arrays, output in
     // first-occurrence order from A. Two-pass with set reuse, mirroring
@@ -2272,8 +2288,8 @@ and materializeIntersectForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
     // check: returns true iff x wasn't previously in the set. Used in
     // both passes so each unique A-element is counted exactly once
     // (regardless of how often it repeats in A).
-    let aName = exprToCppCore subst names aExpr
-    let bName = exprToCppCore subst names bExpr
+    let (aBound, aAt) = setOpOperandWalk subst names aExpr
+    let (bBound, bAt) = setOpOperandWalk subst names bExpr
     // The cardinality is data-dependent, so this is always the heap arm of the
     // shared companion-extents rule -- which is what lets the result be
     // returned out of the function body that computed it.
@@ -2281,19 +2297,19 @@ and materializeIntersectForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
         emitExtentsTable "" ($"{varName}_extents") 1 [($"{varName}__count", false)]
     Some ([
         $"std::unordered_set<{elemTypeStr}> {varName}__b_set;"
-        $"for (size_t __si = 0; __si < {bName}.extents[0]; __si++) {varName}__b_set.insert({bName}[__si]);"
+        $"""for (size_t __si = 0; __si < {bBound}; __si++) {varName}__b_set.insert({bAt "__si"});"""
         $"std::unordered_set<{elemTypeStr}> {varName}__seen;"
         $"size_t {varName}__count = 0;"
-        $$"""for (size_t __si = 0; __si < {{aName}}.extents[0]; __si++) {"""
-        $"    {elemTypeStr} __x = {aName}[__si];"
+        $$"""for (size_t __si = 0; __si < {{aBound}}; __si++) {"""
+        $"""    {elemTypeStr} __x = {aAt "__si"};"""
         $"    if ({varName}__b_set.count(__x) && {varName}__seen.insert(__x).second) {varName}__count++;"
         "}"
     ] @ extentsDecl @ [
         $$"""Array<{{elemTypeStr}}, 1> {{varName}} = { new {{elemTypeStr}}[{{varName}}__count], {{varName}}_extents };"""
         $"{varName}__seen.clear();"
         $"size_t {varName}__fill = 0;"
-        $$"""for (size_t __si = 0; __si < {{aName}}.extents[0]; __si++) {"""
-        $"    {elemTypeStr} __x = {aName}[__si];"
+        $$"""for (size_t __si = 0; __si < {{aBound}}; __si++) {"""
+        $"""    {elemTypeStr} __x = {aAt "__si"};"""
         $"    if ({varName}__b_set.count(__x) && {varName}__seen.insert(__x).second) {varName}[{varName}__fill++] = __x;"
         "}"
     ], [MatRawData (varName, ownedExtents)])
@@ -2305,29 +2321,29 @@ and materializeUnionForm (subst: SubstMap) (names: Map<IRId, string>) (varName: 
     // with set reuse. Each pass walks A then B; the shared seen set
     // ensures A's elements appear before B's, and within each, only
     // first occurrences survive.
-    let aName = exprToCppCore subst names aExpr
-    let bName = exprToCppCore subst names bExpr
+    let (aBound, aAt) = setOpOperandWalk subst names aExpr
+    let (bBound, bAt) = setOpOperandWalk subst names bExpr
     // Data-dependent cardinality: always the heap arm (see the intersect form).
     let (extentsDecl, ownedExtents) =
         emitExtentsTable "" ($"{varName}_extents") 1 [($"{varName}__count", false)]
     Some ([
         $"std::unordered_set<{elemTypeStr}> {varName}__seen;"
         $"size_t {varName}__count = 0;"
-        $$"""for (size_t __si = 0; __si < {{aName}}.extents[0]; __si++) {"""
-        $"    if ({varName}__seen.insert({aName}[__si]).second) {varName}__count++;"
+        $$"""for (size_t __si = 0; __si < {{aBound}}; __si++) {"""
+        $"""    if ({varName}__seen.insert({aAt "__si"}).second) {varName}__count++;"""
         "}"
-        $$"""for (size_t __si = 0; __si < {{bName}}.extents[0]; __si++) {"""
-        $"    if ({varName}__seen.insert({bName}[__si]).second) {varName}__count++;"
+        $$"""for (size_t __si = 0; __si < {{bBound}}; __si++) {"""
+        $"""    if ({varName}__seen.insert({bAt "__si"}).second) {varName}__count++;"""
         "}"
     ] @ extentsDecl @ [
         $$"""Array<{{elemTypeStr}}, 1> {{varName}} = { new {{elemTypeStr}}[{{varName}}__count], {{varName}}_extents };"""
         $"{varName}__seen.clear();"
         $"size_t {varName}__fill = 0;"
-        $$"""for (size_t __si = 0; __si < {{aName}}.extents[0]; __si++) {"""
-        $"    if ({varName}__seen.insert({aName}[__si]).second) {varName}[{varName}__fill++] = {aName}[__si];"
+        $$"""for (size_t __si = 0; __si < {{aBound}}; __si++) {"""
+        $"""    if ({varName}__seen.insert({aAt "__si"}).second) {varName}[{varName}__fill++] = {aAt "__si"};"""
         "}"
-        $$"""for (size_t __si = 0; __si < {{bName}}.extents[0]; __si++) {"""
-        $"    if ({varName}__seen.insert({bName}[__si]).second) {varName}[{varName}__fill++] = {bName}[__si];"
+        $$"""for (size_t __si = 0; __si < {{bBound}}; __si++) {"""
+        $"""    if ({varName}__seen.insert({bAt "__si"}).second) {varName}[{varName}__fill++] = {bAt "__si"};"""
         "}"
     ], [MatRawData (varName, ownedExtents)])
 
@@ -2337,22 +2353,25 @@ and materializeUniqueForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
     // first-occurrences. Second pass: clear the set, rescan, emit on
     // first occurrence. Two passes keep allocation exact (no
     // intermediate vector) while preserving first-occurrence order.
-    let aName = exprToCppCore subst names aExpr
+    // Both passes walk the operand through setOpOperandWalk: a rank-1
+    // compound / sparse operand (the filtered key set) has no `.extents` or
+    // `operator[]`, so it walks its compact buffer.
+    let (aBound, aAt) = setOpOperandWalk subst names aExpr
     // Data-dependent cardinality: always the heap arm (see the intersect form).
     let (extentsDecl, ownedExtents) =
         emitExtentsTable "" ($"{varName}_extents") 1 [($"{varName}__count", false)]
     Some ([
         $"std::unordered_set<{elemTypeStr}> {varName}__seen;"
         $"size_t {varName}__count = 0;"
-        $$"""for (size_t __ui = 0; __ui < {{aName}}.extents[0]; __ui++) {"""
-        $"    if ({varName}__seen.insert({aName}[__ui]).second) {varName}__count++;"
+        $$"""for (size_t __ui = 0; __ui < {{aBound}}; __ui++) {"""
+        $"""    if ({varName}__seen.insert({aAt "__ui"}).second) {varName}__count++;"""
         "}"
     ] @ extentsDecl @ [
         $$"""Array<{{elemTypeStr}}, 1> {{varName}} = { new {{elemTypeStr}}[{{varName}}__count], {{varName}}_extents };"""
         $"{varName}__seen.clear();"
         $"size_t {varName}__fill = 0;"
-        $$"""for (size_t __ui = 0; __ui < {{aName}}.extents[0]; __ui++) {"""
-        $"    if ({varName}__seen.insert({aName}[__ui]).second) {varName}[{varName}__fill++] = {aName}[__ui];"
+        $$"""for (size_t __ui = 0; __ui < {{aBound}}; __ui++) {"""
+        $"""    if ({varName}__seen.insert({aAt "__ui"}).second) {varName}[{varName}__fill++] = {aAt "__ui"};"""
         "}"
     ], [MatRawData (varName, ownedExtents)])
 

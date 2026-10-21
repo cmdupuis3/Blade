@@ -7772,10 +7772,14 @@ let private emitCompoundInit (c: Ctx) (b: IRBinding) (denseExpr: IRExpr) (maskEx
         match scalarTyOf arrTy.ElemType with
         | Some (ScI64 | ScF64 | ScBool as e) -> e
         | _ -> refuse "a compound-index initializer over a non-Int64/Float64/Bool element"
-    // The mask and the dense source, both STORED (a deferred source is forced
-    // under its own name, as the C++ lane's forceDeferredArrayInput does).
-    let keep = materialize c (consumeArrOperand c maskExpr)
+    // The dense source, then the mask, both STORED (a deferred source is forced
+    // under its own name, as the C++ lane's forceDeferredArrayInput does), in
+    // that order -- the interpreter's (materializeCompoundBinding) and the C++
+    // lane's (genCompoundInitBinding): with both operands computed in place,
+    // a failure in the dense operand is the first failure, not one in the
+    // mask (corpus sql-masks/017; this lane materialized the mask first).
     let src = materialize c (consumeArrOperand c denseExpr)
+    let keep = materialize c (consumeArrOperand c maskExpr)
     if keep.Elem <> ScBool then refuse "a compound mask that is not a Bool array"
     let n =
         match keep.Groups with

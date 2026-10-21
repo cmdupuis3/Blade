@@ -1,0 +1,28 @@
+// TEST: Unique Of Rank-1 Compound
+// ----------------------------------------------------------------------------
+// Round-3 defect D-B2: unique() over a rank-1 COMPOUND -- the semijoin's
+// selected keys, then the distinct labels of a grouped sum. The C++ lane's
+// unique walked its operand with `.extents[0]` and `operator[]`, which a
+// Compound (a compact buffer plus an index) does not have: BL9002 "has no
+// member named 'extents'", while the interpreter deduplicated the compact
+// values (compoundToDense). Both passes of unique now walk the compact
+// buffer in storage order -- `.idx->cardinality` cells through `.data[i]`,
+// the convention sort() already used for the same operand. The dense control
+// is 010.
+// ----------------------------------------------------------------------------
+type Row = Idx<7>
+let customer: Array<Int64 like Row> = [3, 1, 3, 2, 1, 4, 3]
+let amount_cents: Array<Int64 like Row> = [100, 20, 50, 70, 80, 90, 30]
+let eligible = [3, 3, 1]
+let keep = mask(customer, lambda(c) -> contains(eligible, c))
+let selected_customer = compound(customer, keep)
+let selected_amount = compound(amount_cents, keep)
+let gk = group_keys(selected_customer)
+let grouped = group_by(selected_amount, gk)
+let labels = unique(selected_customer)
+let counts = extents(gk)
+let totals = method_for(grouped) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
+// EXPECT: selected_customer = [3, 1, 3, 1, 3]
+// EXPECT: labels = [3, 1]
+// EXPECT: counts = [3, 2]
+// EXPECT: totals = [180, 100]

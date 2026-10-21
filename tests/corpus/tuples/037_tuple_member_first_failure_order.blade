@@ -1,0 +1,18 @@
+// TEST: Tuple Member First Failure Order (aborts)
+// ----------------------------------------------------------------------------
+// Evaluation order of a tuple whose LATER member is materialized (034/036):
+// the members run left to right. The first member's checked cast fails
+// (k(3) = 5 is outside Row: BL8006) before the second member's map would
+// divide by zero (BL8013). The C++ lane hoists the map's materialization
+// ahead of `std::make_tuple`, so an EVALUATING member before it is bound to
+// a temporary at its own position first; otherwise the division would panic
+// first. The interpreter and the LLVM lane report the cast.
+// ----------------------------------------------------------------------------
+type Row = Idx<5>
+let a: Array<Int64 like Row> = [10, 20, 30, 40, 50]
+let k: Array<Int64 like Row> = [1, 2, 1, 5, 2]
+let z: Array<Int64 like Row> = [1, 1, 0, 1, 1]
+let y = method_for(a, z) <@> lambda(p, q) -> p / q
+let t = (a((k(3) : Row)), y |> compute)
+// ABORT: BL8006
+// ABORT: outside Row

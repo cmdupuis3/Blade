@@ -1,0 +1,21 @@
+// TEST: Tuple Bare Deferred Member (rejects)
+// ----------------------------------------------------------------------------
+// A BARE deferred array as a tuple member, `(g, 1.0)` (Codex review of round-3
+// W1-3, finding 2). The interpreter HOLDS the deferred value inside the tuple
+// and evaluates it only when a later consumer forces it, so here it never
+// runs `g` and fails at `bad`'s cast (BL8006); computing it at the tuple, as
+// the W1-3 commit briefly did, failed on g's division (BL8013) first. Until
+// that contract is implemented in every lane the C++ lane refuses the member
+// with the message it gives any unevaluated computation used as a value
+// (`blade run` reports it as BL7004; the harness sees the #error guard);
+// `g |> compute` is the supported spelling (042).
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let z: Array<Int64 like Row> = [0]
+let g = method_for(z) <@> lambda(v) -> 1 / v
+let held = (g, 1.0)
+let bad = a((a(0) : Row))
+// ERROR-CONTAINS: unevaluated computation used as value
+// REJECT-AT: codegen
+// WARN-CODEGEN: unevaluated computation used as value

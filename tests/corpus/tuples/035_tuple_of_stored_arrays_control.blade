@@ -1,0 +1,34 @@
+// TEST: Tuple Of Stored Arrays Control
+// ----------------------------------------------------------------------------
+// The control for 034 (round-3 fixture 02): the same block, with each member
+// bound by its own `let ... |> compute` before the tuple is built -- members
+// that are already stored arrays, the spelling that always compiled. The
+// values must equal 034's.
+// ----------------------------------------------------------------------------
+type Variable = Idx<4>
+type Observation = Idx<5>
+
+let partial_and_action = {
+    let ids = range<Variable>
+    let x = method_for(ids, range<Observation>) <@> lambda(i, k) ->
+        Float64(i + k) |> compute
+    let c = 1.0 + Float64(ids) |> compute
+    let a = 2.0 - Float64(ids) |> compute
+    let t = method_for(x, x, x) <@>
+        lambda(u: Array<Float64 like Observation>,
+               v: Array<Float64 like Observation>,
+               w: Array<Float64 like Observation>) where comm(u, v, w) -> prodsum(u, v, w)
+    let h = method_for(ids, ids) <@> lambda(i, j) where comm(i, j) ->
+        reduce(method_for(ids) <@> lambda(k) -> t(i, j, k) * c(k), (+), 0.0) |> compute
+    let y = method_for(ids) <@> lambda(i) ->
+        reduce(method_for(ids) <@> lambda(j) -> h(i, j) * a(j), (+), 0.0) |> compute
+    (h, y)
+}
+let h_out = partial_and_action[0]
+let y_out = partial_and_action[1]
+let h12 = h_out(1, 2)
+let h21 = h_out(2, 1)
+// EXPECT: h_out = [[1600.0, 2100.0, 2600.0, 3100.0], [2800.0, 3500.0, 4200.0], [4400.0, 5300.0], [6400.0]]
+// EXPECT: y_out = [2200.0, 2800.0, 3400.0, 4000.0]
+// EXPECT: h12 = 3500.0
+// EXPECT: h21 = 3500.0

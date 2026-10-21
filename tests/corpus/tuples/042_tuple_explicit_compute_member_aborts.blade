@@ -1,0 +1,14 @@
+// TEST: Tuple Explicit Compute Member (aborts)
+// ----------------------------------------------------------------------------
+// The control for 041: the same member written `g |> compute` is evaluated AT
+// the tuple, in every lane, so g's integer division by zero (BL8013) fires
+// before `bad`'s checked cast.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let z: Array<Int64 like Row> = [0]
+let g = method_for(z) <@> lambda(v) -> 1 / v
+let held = (g |> compute, 1.0)
+let bad = a((a(0) : Row))
+// ABORT: BL8013
+// ABORT: integer division by zero

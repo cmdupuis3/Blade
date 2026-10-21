@@ -1,0 +1,27 @@
+// TEST: Set Ops Over Rank-1 Compound
+// ----------------------------------------------------------------------------
+// intersect() and union() over rank-1 COMPOUND operands: the same walk as
+// unique() (sql-unique-contains/009, round-3 D-B2) in its two sibling
+// materializers, which spelled `.extents[0]` / `operator[]` on a Compound
+// too (BL9002 in the C++ lane; the interpreter walked the compact values).
+// All three now share one operand walk. The dense spellings of the same
+// values are the control (`di`, `du`).
+// ----------------------------------------------------------------------------
+type Row = Idx<7>
+let customer: Array<Int64 like Row> = [3, 1, 3, 2, 1, 4, 3]
+let other: Array<Int64 like Row> = [1, 1, 5, 6, 7, 8, 9]
+let keep = mask(customer, lambda(c) -> c != 2)
+let sel = compound(customer, keep)
+let osel = compound(other, keep)
+// sel = [3, 1, 3, 1, 4, 3], osel = [1, 1, 5, 7, 8, 9]
+let i = intersect(sel, osel)
+let u = union(sel, osel)
+let mixed = intersect([4, 9, 1], sel)
+// EXPECT: i = [1]
+// EXPECT: u = [3, 1, 4, 5, 7, 8, 9]
+// EXPECT: mixed = [4, 1]
+
+let di = intersect([3, 1, 3, 1, 4, 3], [1, 1, 5, 7, 8, 9])
+let du = union([3, 1, 3, 1, 4, 3], [1, 1, 5, 7, 8, 9])
+// EXPECT: di = [1]
+// EXPECT: du = [3, 1, 4, 5, 7, 8, 9]

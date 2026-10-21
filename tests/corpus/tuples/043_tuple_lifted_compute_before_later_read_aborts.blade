@@ -1,0 +1,18 @@
+// TEST: Tuple Lifted Compute Before Later Read (aborts)
+// ----------------------------------------------------------------------------
+// The let-chain spelling of 038: the computed first member reads an inline
+// literal, which the lift pass hoists into a let, so the tuple binding's value
+// is a LET CHAIN ending in the tuple. The chain's whole-value positional-read
+// pre-pass forced the second member's producer `later` ahead of the chain's
+// lets and of the first member, so the C++ lane reported `later`'s cast
+// (BL8006); this shape compiled before round-3 W1-3, with that wrong first
+// failure. A chain ending in a tuple now leaves the tuple's reads to the final
+// binding: the first member's division by zero (BL8013) fires first, as in
+// the interpreter and the LLVM lane.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let later = method_for(a) <@> lambda(v) -> a((v : Row))
+let t = (method_for([0]) <@> lambda(v) -> 1 / v |> compute, later(0))
+// ABORT: BL8013
+// ABORT: integer division by zero

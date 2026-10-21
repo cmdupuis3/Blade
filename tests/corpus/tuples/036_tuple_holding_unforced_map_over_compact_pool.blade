@@ -1,0 +1,67 @@
+// TEST: Tuple Holding Unforced Map Over Compact Pool
+// ----------------------------------------------------------------------------
+// RESULTS 15.4's "unforced map over a compact pool fails BL9002 in the C++
+// lane": the card's own probe (a deferred map read by a NESTED kernel) was
+// closed by 04b00fe8 (loops/524), and its other reads (a diagonal read, a
+// nested map walk, a deferred compact source) compile; the one use site left
+// failing was a TUPLE member -- `(g |> compute, 2.0)` named `g` in
+// `std::make_tuple` without materializing it ('g' was not declared), the
+// same site as 034's tuple of computes. Each unforced array member is now
+// computed into a temporary first, so `g` itself stays deferred and
+// unprinted, exactly as `let r = g |> compute` leaves it.
+//   held          : the pure map over the compact pool g0, computed in place
+//   pair          : a top-level tuple of computes whose FIRST member's kernel
+//                   captures the second's producer: `h` is forced under its
+//                   own name on the way (and so printed), then copied
+//   tw .. tw3     : the writing control -- a named writing map is stored at
+//                   its definition (G45), once per stored cell (counter 6);
+//                   the tuples read that one value: bare, under two explicit
+//                   computes, and beside a pure computed member whose kernel
+//                   captures it -- `seen` stays 6
+// (A BARE deferred member, `(g, 1.0)`, is refused by the C++ lane: the
+// interpreter holds it unforced inside the tuple, tuples/041.)
+// ----------------------------------------------------------------------------
+type I = Idx<3>
+let x = method_for(range<I>) <@> lambda(i) -> Float64(i) |> compute
+let g0 = method_for(x, x) <@> lambda(a: Float64, b: Float64) where comm(a, b) -> a + b |> compute
+let g = method_for(g0) <@> lambda(v: Float64) -> v * 2.0
+let held = (g |> compute, 2.0)
+let g_out = held[0]
+let g12 = g_out(1, 2)
+let g21 = g_out(2, 1)
+// EXPECT: g_out = [[0.0, 2.0, 4.0], [4.0, 6.0], [8.0]]
+// EXPECT: g12 = 6.0
+// EXPECT: g21 = 6.0
+
+type V = Idx<3>
+let ids = range<V>
+let av = 2.0 - Float64(ids) |> compute
+let h = method_for(ids, ids) <@> lambda(i, j) where comm(i, j) -> Float64(i) + Float64(j) + 2.0 * Float64(i) * Float64(j)
+let y = method_for(ids) <@> lambda(i) -> reduce(method_for(ids) <@> lambda(j) -> h(i, j) * av(j), (+), 0.0)
+let pair = (y |> compute, h |> compute)
+let y_out = pair[0]
+// EXPECT: h = [[0.0, 1.0, 2.0], [4.0, 7.0], [12.0]]
+// EXPECT: y_out = [1.0, 6.0, 11.0]
+
+let mut G = [0.0]
+let gw = method_for(g0) <@> lambda(v: Float64) -> {
+    G(0) = G(0) + 1.0
+    v + G(0)
+}
+let tw = (gw, G(0))
+let tw0 = tw[0]
+let tw1 = tw[1]
+// two explicit computes of the stored writer, and a pure computed member
+// whose kernel captures it beside the writer itself: none re-runs gw's body
+let tw2 = (gw |> compute, gw |> compute)
+let pg = method_for(range<I>) <@> lambda(i) -> gw(i, i) + 1.0
+let tw3 = (pg |> compute, gw)
+let tw2b = tw2[1]
+let pg_out = tw3[0]
+let seen = G(0)
+// EXPECT: gw = [[1.0, 3.0, 5.0], [6.0, 8.0], [10.0]]
+// EXPECT: tw0 = [[1.0, 3.0, 5.0], [6.0, 8.0], [10.0]]
+// EXPECT: tw1 = 6.0
+// EXPECT: tw2b = [[1.0, 3.0, 5.0], [6.0, 8.0], [10.0]]
+// EXPECT: pg_out = [2.0, 7.0, 11.0]
+// EXPECT: seen = 6.0

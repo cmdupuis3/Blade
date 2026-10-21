@@ -1,0 +1,19 @@
+// TEST: Tuple Compute Before Later Read (aborts)
+// ----------------------------------------------------------------------------
+// First-failure order of a tuple whose FIRST member computes a failing map and
+// whose SECOND member reads a deferred producer that fails too (Codex review
+// of round-3 W1-3, finding 1). The members run left to right: `first`'s
+// integer division by zero (BL8013) fires before `later`'s checked cast
+// (BL8006). The tuple binding's whole-expression positional-read pre-pass
+// used to force `later` ahead of every member, so the C++ lane reported the
+// cast; the member-ordered tuple path now forces each member's dependencies
+// at that member's own position. The reversed tuple is 039.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let z: Array<Int64 like Row> = [0]
+let first = method_for(z) <@> lambda(v) -> 1 / v
+let later = method_for(a) <@> lambda(v) -> a((v : Row))
+let t = (first |> compute, later(0))
+// ABORT: BL8013
+// ABORT: integer division by zero
