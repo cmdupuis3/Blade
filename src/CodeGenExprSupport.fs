@@ -2635,14 +2635,21 @@ let internal subviewAxesOk (arrTy: IRArrayType) (consumed: int) : bool =
 /// runs, and whatever a block does inside.
 ///
 /// `pre` names the loop's own scratch (`<pre>_b`, `<pre>_e`, `<pre>_f`).
-let compactionBlockLoop (ind: string) (pre: string) (bound: string) (elemCpp: string) (compact: string) (cursor: string) (feeds: (string * string) list) (block: string -> string -> string -> string list) : string list =
+let rec compactionBlockLoop (ind: string) (pre: string) (bound: string) (elemCpp: string) (compact: string) (cursor: string) (feeds: (string * string) list) (block: string -> string -> string -> string list) : string list =
+    compactionBlockLoopMulti ind pre bound elemCpp cursor (feeds |> List.map (fun (acc, wname) -> (acc, wname, compact))) block
+
+/// `compactionBlockLoop` whose chains may each read a DIFFERENT compact
+/// buffer (the shared selection, T4c: every companion's buffer advances on
+/// the one cursor `q`, so one completed-cell counter serves every chain).
+/// `feeds` = (accumulator, kernel wrapper, the buffer it folds).
+and compactionBlockLoopMulti (ind: string) (pre: string) (bound: string) (elemCpp: string) (cursor: string) (feeds: (string * string * string) list) (block: string -> string -> string -> string list) : string list =
     let i1 = ind + "    "
     let i2 = i1 + "    "
     let peel =
-        feeds |> List.map (fun (acc, _) ->
+        feeds |> List.map (fun (acc, _, compact) ->
             $"{i2}    {{ {elemCpp} __t = {compact}[0] * {compact}[0]; BLADE_FOLD_ROUND(__t); {acc} = __t; }}")
     let step =
-        feeds |> List.map (fun (acc, wname) ->
+        feeds |> List.map (fun (acc, wname, compact) ->
             $"{i2}    {{ {elemCpp} __t = {compact}[{pre}_f] * {compact}[{pre}_f]; BLADE_FOLD_ROUND(__t); {acc} = {wname}({acc}, __t); }}")
     let chain =
         if feeds.IsEmpty then []
@@ -2674,6 +2681,18 @@ let compactionPassLoop (ind: string) (pre: string) (iv: string) (bound: string) 
         @ [ $"{ind}}}" ]
     else
         compactionBlockLoop ind pre bound elemCpp compact cursor feeds (fun body lo hi ->
+            [ $"{body}for (size_t {iv} = {lo}; {iv} < {hi}; {iv}++) {{" ]
+            @ cell (body + "    ")
+            @ [ $"{body}}}" ])
+
+/// The per-cell pass over several companion buffers (T4c's joint pass).
+let compactionPassLoopMulti (ind: string) (pre: string) (iv: string) (bound: string) (cursor: string) (feeds: (string * string * string) list) (cell: string -> string list) : string list =
+    if feeds.IsEmpty then
+        [ $"{ind}for (size_t {iv} = 0; {iv} < {bound}; {iv}++) {{" ]
+        @ cell (ind + "    ")
+        @ [ $"{ind}}}" ]
+    else
+        compactionBlockLoopMulti ind pre bound "double" cursor feeds (fun body lo hi ->
             [ $"{body}for (size_t {iv} = {lo}; {iv} < {hi}; {iv}++) {{" ]
             @ cell (body + "    ")
             @ [ $"{body}}}" ])

@@ -3174,6 +3174,14 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // table like the scratch-reuse plan, read by both emitters; the
         // interpreter runs the tree as written. Gate: BLADE_HOT_ROW.
         Optimize.planHotRowFolds env.Builder programFuncs irModule
+        // Membership hoisting (Blade.Optimize.planMembershipHoist, round 3
+        // B-T1): a `contains(B, x)` probed once per cell of a host binding
+        // (mask predicate, map or fold kernel) reads ONE search structure
+        // built over the stored set B right before the host; side table,
+        // both emitters; the interpreter runs the as-written scan. Gate:
+        // BLADE_MEMBER_HOIST. It runs BEFORE compaction fusion, whose
+        // membership-probe certificate (T4c, Part B) reads its plans.
+        Optimize.planMembershipHoist programFuncs irModule
         // Compaction fusion (Blade.Optimize.planCompactionFusion): the
         // mask -> compound -> fold chain's side table, read by both emitters;
         // the interpreter runs the tree as written. Gate:
@@ -3192,13 +3200,6 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // rank-3 scatter dispatch; no IR change. Knob: BLADE_ORBIT_PULL (the
         // emitter's).
         Optimize.planOrbitPull programFuncs irModule
-        // Membership hoisting (Blade.Optimize.planMembershipHoist, round 3
-        // B-T1): a `contains(B, x)` probed once per cell of a host binding
-        // (mask predicate, map or fold kernel) reads ONE search structure
-        // built over the stored set B right before the host; side table,
-        // both emitters; the interpreter runs the as-written scan. Gate:
-        // BLADE_MEMBER_HOIST.
-        Optimize.planMembershipHoist programFuncs irModule
         irModule)
 
     // DEAD-POLYMORPH ELIMINATION, last and whole-program: a lambda lifted out

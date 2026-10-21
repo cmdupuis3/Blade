@@ -4403,13 +4403,32 @@ and private emitCompactionPassLlvm (c: Ctx) (n: string) (dst: string) (cursor: s
 /// The pass in 256-cell BLOCKS: `block lo trips` emits one block [lo, lo +
 /// trips), and the chains (when fed) advance after each block, as above.
 and private emitCompactionBlocksLlvm (c: Ctx) (n: string) (dst: string) (cursor: string) (feeds: (IRCallable * string) list) (block: string -> string -> unit) : unit =
+    emitCompactionBlocksLlvmMulti c n cursor (feeds |> List.map (fun (k, acc) -> (k, acc, dst))) block
+
+/// The per-cell pass over several companion pools (T4c's joint pass).
+and private emitCompactionPassLlvmMulti (c: Ctx) (n: string) (cursor: string) (feeds: (IRCallable * string * string) list) (step: string -> unit) : unit =
+    if feeds.IsEmpty then
+        emitCountedLoopTo c n step
+    else
+        emitCompactionBlocksLlvmMulti c n cursor feeds (fun lo trips ->
+            emitCountedLoopTo c trips (fun k -> step (i64Add c lo k)))
+
+/// `emitCompactionBlocksLlvm` whose chains may each fold a DIFFERENT pool
+/// (the shared selection, T4c: every companion's pool advances on the one
+/// cursor, so one completed-cell counter serves every chain). `feeds` =
+/// (kernel, accumulator slot, the pool it folds); each pool's square is
+/// formed once per cell and fed to that pool's chains in feed order (one
+/// pool: exactly the single-pool emission).
+and private emitCompactionBlocksLlvmMulti (c: Ctx) (n: string) (cursor: string) (feeds: (IRCallable * string * string) list) (block: string -> string -> unit) : unit =
     let fSlot =
         if feeds.IsEmpty then ""
         else
             let s = allocaOf c "i64"
             ln c ($"store i64 0, ptr {s}")
             s
-    let square (j: string) : Val =
+    let pools = feeds |> List.map (fun (_, _, d) -> d) |> List.distinct
+    let feedsOf (d: string) = feeds |> List.filter (fun (_, _, d2) -> d2 = d) |> List.map (fun (k, acc, _) -> (k, acc))
+    let squareOf (dst: string) (j: string) : Val =
         let v = loadCell c ScF64 (gepCell c ScF64 dst j)
         let p = freshReg c
         ln c (renderBin { Dest = p; Opcode = "fmul"; Flags = ""; Ty = ScF64; Lhs = v.Reg; Rhs = v.Reg })
@@ -4440,8 +4459,9 @@ and private emitCompactionBlocksLlvm (c: Ctx) (n: string) (dst: string) (cursor:
             ln c (renderCmp { Dest = first; Kind = "icmp"; Pred = "eq"; Ty = ScI64; Lhs = f0.Reg; Rhs = "0" })
             ln c (renderBr { Cond = first; IfTrue = lPeel; IfFalse = lChain })
             lbl c lPeel
-            let p0 = square "0"
-            for (_, acc) in feeds do ln c ($"store double {p0.Reg}, ptr {acc}")
+            for d in pools do
+                let p0 = squareOf d "0"
+                for (_, acc) in feedsOf d do ln c ($"store double {p0.Reg}, ptr {acc}")
             ln c ($"store i64 1, ptr {fSlot}")
             ln c (sprintf "br label %%%s" lChain)
             lbl c lChain
@@ -4449,11 +4469,12 @@ and private emitCompactionBlocksLlvm (c: Ctx) (n: string) (dst: string) (cursor:
             let trips2 = i64Bin c "sub" q.Reg f1.Reg
             emitCountedLoopTo c trips2 (fun k ->
                 let j = i64Add c f1.Reg k
-                let p = square j
-                for (cl, acc) in feeds do
-                    let cur = loadSlot c acc ScF64
-                    let next = withFoldFmf c false (fun () -> coerce c ScF64 (applyKernel c cl [ KScalar cur; KScalar p ]))
-                    ln c ($"store double {next.Reg}, ptr {acc}"))
+                for d in pools do
+                    let p = squareOf d j
+                    for (cl, acc) in feedsOf d do
+                        let cur = loadSlot c acc ScF64
+                        let next = withFoldFmf c false (fun () -> coerce c ScF64 (applyKernel c cl [ KScalar cur; KScalar p ]))
+                        ln c ($"store double {next.Reg}, ptr {acc}"))
             ln c ($"store i64 {q.Reg}, ptr {fSlot}")
             ln c (sprintf "br label %%%s" lDone)
             lbl c lDone)
@@ -4492,6 +4513,11 @@ and private tryBindCountedMask (c: Ctx) (id: IRId) (name: string) (plan: Blade.O
     plan.GatherLlvm.Value <- None
     let folds = Blade.Optimize.CompactionTable.foldsOf plan.CompoundId
     for f in folds do f.EmittedLlvm.Value <- None
+    // T4c: the shared selection's handshake, and every companion's chains
+    plan.Shared |> Option.iter (fun s ->
+        s.BuiltLlvm.Value <- None
+        for (cid, _, _) in s.Members do
+            for f in Blade.Optimize.CompactionTable.foldsOf cid do f.EmittedLlvm.Value <- None)
     match resolveCallable predExpr with
     | Some cl when cl.Params.Length = 1 ->
         let a = consumeArrOperand c arrExpr
@@ -4515,11 +4541,110 @@ and private tryBindCountedMask (c: Ctx) (id: IRId) (name: string) (plan: Blade.O
                  let next = i64Add c cur.Reg w
                  ln c ($"store i64 {next}, ptr {cnt}")
              let countedPass () = emitCountedLoopTo c n (fun i -> let (_, w) = maskCell i in advance w)
+             // T4c + T4a: the shared selection's ONE pass is this mask pass
+             // (every companion's source cell gathered at the one cursor; the
+             // shared positions when demanded; each companion's chains fed).
+             // A source this lane does not hold as a stored pool of the
+             // mask's shape: the plain counted pass (the first companion then
+             // runs the joint pass itself).
+             let sharedSrcs =
+                 match plan.Shared with
+                 // a STATIC extent only: the run-time-guarded shared gather is
+                 // not built in this lane (unverified -- see emitSharedCompanion)
+                 | Some s when s.GatherAtMask && s.StaticN.IsSome ->
+                     let maskSrc = match arrExpr with IRVar (sid, _) -> Some sid | _ -> None
+                     let srcs =
+                         s.Members |> List.map (fun (cid, _, src) ->
+                             let elem = scalarTyOf s.ElemTypes.[cid]
+                             let av =
+                                 if Some src = maskSrc then Some a
+                                 else
+                                     match c.ArrSlots.TryGetValue src with
+                                     | true, v when (match v.Src with APool _ -> true | _ -> false) && v.Groups = a.Groups -> Some v
+                                     | _ -> None
+                             (cid, elem, av))
+                     let usable =
+                         srcs |> List.forall (fun (_, e, av) ->
+                             match e, av with
+                             | Some (ScI64 | ScF64 | ScBool as el), Some v -> v.Elem = el
+                             | _ -> false)
+                     if usable then Some (s, srcs |> List.map (fun (cid, e, av) -> (cid, e.Value, av.Value))) else None
+                 | _ -> None
+             let emitShared (s: Blade.Optimize.SharedSelection, srcs: (IRId * Sc * ArrVal) list) =
+                 let dstSlots = srcs |> List.map (fun (cid, _, _) -> (cid, allocaOf c "ptr"))
+                 for (_, slot) in dstSlots do ln c ($"store ptr null, ptr {slot}")
+                 let posSlot = if s.PositionsNeeded then Some (allocaOf c "ptr") else None
+                 posSlot |> Option.iter (fun sl -> ln c ($"store ptr null, ptr {sl}"))
+                 let feeds =
+                     srcs |> List.collect (fun (cid, elem, _) ->
+                         if elem <> ScF64 then []
+                         else compactionFeedsLlvm c (Blade.Optimize.CompactionTable.foldsOf cid) |> List.map (fun (f, k, acc) -> (f, k, acc, cid)))
+                 let singlePass () =
+                     let nPlus = i64Add c n "1"
+                     let dsts =
+                         srcs |> List.map (fun (cid, elem, _) ->
+                             let d = allocPool c elem nPlus
+                             ln c ($"store ptr {d}, ptr {(dstSlots |> List.find (fun (k, _) -> k = cid) |> snd)}")
+                             (cid, d))
+                     let dstOf (cid: IRId) = dsts |> List.find (fun (k, _) -> k = cid) |> snd
+                     let pos =
+                         posSlot |> Option.map (fun sl ->
+                             let p = allocPool c ScI64 nPlus
+                             ln c ($"store ptr {p}, ptr {sl}")
+                             p)
+                     emitCompactionBlocksLlvmMulti c n cnt (feeds |> List.map (fun (_, k, acc, cid) -> (k, acc, dstOf cid))) (fun lo trips ->
+                         emitCountedLoopTo c trips (fun k ->
+                             let i = i64Add c lo k
+                             let v = readCell c a [ { Reg = i; Ty = ScI64 } ]
+                             let bit = coerce c ScBool (applyKernel c cl [ KScalar v ])
+                             storeCell c ScBool (gepCell c ScBool pool i) bit)
+                         emitCountedLoopTo c trips (fun k ->
+                             let i = i64Add c lo k
+                             let bit = loadCell c ScBool (gepCell c ScBool pool i)
+                             let w = freshReg c
+                             ln c ($"{w} = zext i1 {bit.Reg} to i64")
+                             let q = loadSlot c cnt ScI64
+                             for (cid, elem, src) in srcs do
+                                 let v = readCell c src [ { Reg = i; Ty = ScI64 } ]
+                                 storeCell c elem (gepCell c elem (dstOf cid) q.Reg) (coerce c elem v)
+                             pos |> Option.iter (fun p -> storeCell c ScI64 (gepCell c ScI64 p q.Reg) { Reg = i; Ty = ScI64 })
+                             advance w))
+                 let guard =
+                     match s.StaticN with
+                     | Some _ ->
+                         singlePass ()
+                         None
+                     | None ->
+                         let g = freshReg c
+                         ln c (renderCmp { Dest = g; Kind = "icmp"; Pred = "ult"; Ty = ScI64; Lhs = n; Rhs = string s.SelCapCells })
+                         let lOne = freshLbl c "csel.one"
+                         let lTwo = freshLbl c "csel.two"
+                         let lJoin = freshLbl c "csel.join"
+                         ln c (renderBr { Cond = g; IfTrue = lOne; IfFalse = lTwo })
+                         lbl c lOne
+                         singlePass ()
+                         ln c (sprintf "br label %%%s" lJoin)
+                         lbl c lTwo
+                         countedPass ()
+                         ln c (sprintf "br label %%%s" lJoin)
+                         lbl c lJoin
+                         Some g
+                 for (f, _, acc, _) in feeds do f.EmittedLlvm.Value <- Some acc
+                 ln c ($"; compaction fusion v2, shared selection (T4c + T4a): `{name}`'s pass gathered its {srcs.Length} companions")
+                 s.BuiltLlvm.Value <-
+                     Some { Blade.Optimize.SharedSelectionLlvm.DstSlots = Map.ofList dstSlots
+                            Blade.Optimize.SharedSelectionLlvm.PosSlot = posSlot
+                            Blade.Optimize.SharedSelectionLlvm.CountSlot = cnt
+                            Blade.Optimize.SharedSelectionLlvm.Guard = guard
+                            Blade.Optimize.SharedSelectionLlvm.Feeds = feeds |> List.map (fun (f, _, acc, cid) -> (f.MapId, acc, cid))
+                            Blade.Optimize.SharedSelectionLlvm.AtMask = true
+                            Blade.Optimize.SharedSelectionLlvm.Ready = false }
              let gatherElem =
                  match a.Elem with
-                 | ScI64 | ScF64 | ScBool when plan.GatherAtMask -> Some a.Elem
+                 | ScI64 | ScF64 | ScBool when plan.GatherAtMask && plan.Shared.IsNone -> Some a.Elem
                  | _ -> None
              match gatherElem with
+             | _ when sharedSrcs.IsSome -> emitShared sharedSrcs.Value
              | None -> countedPass ()
              | Some elem ->
                  let dstSlot = allocaOf c "ptr"
@@ -8143,6 +8268,158 @@ let private emitFusedCompaction (c: Ctx) (b: IRBinding) (elem: Sc) (n: string) (
         | None -> compactNoPositions
     bindArray c b.Id b.Name { Elem = elem; Groups = [ GCompact (m, pos) ]; Src = APool dst; RowOpBytes = 0L }
 
+/// A companion of a SHARED SELECTION (Blade.Optimize.planCompactionFusion,
+/// T4c; the C++ lane's genSharedCompanion). The FIRST companion completes the
+/// selection: ONE branchless pass over the source axis gathers every
+/// companion's pool (`v_j[q] = c_j[i]`, `pos[q] = i` when any companion
+/// demands the positions, `q += keep[i]`; m + 1 cells per pool, the slack
+/// never exposed) and feeds every companion's in-pass serial chains -- unless
+/// the mask's own pass already gathered (T4a), when it runs that pass only
+/// while the run-time cap guard is false. Every companion binds `GCompact (m,
+/// pos)` over ITS OWN pool with the SHARED count and positions (one
+/// selection; main's pools have program lifetime, so nothing is freed here,
+/// for any companion). False: the selection is unavailable here, and the
+/// caller takes its ordinary path.
+let private emitSharedCompanion (c: Ctx) (b: IRBinding) (elem: Sc) (n: string) (keepPool: string) (srcPool: string) (p: Blade.Optimize.CompactionPlan) (s: Blade.Optimize.SharedSelection) : bool =
+    let (firstId, _, _) = List.head s.Members
+    let bindFrom (dstSlot: string) (posSlot: string option) (cntSlot: string) =
+        let m = (loadSlot c cntSlot ScI64).Reg
+        let dst = freshReg c
+        ln c ($"{dst} = load ptr, ptr {dstSlot}")
+        let pos =
+            match posSlot with
+            | Some sl ->
+                let r = freshReg c
+                ln c ($"{r} = load ptr, ptr {sl}")
+                r
+            | None -> compactNoPositions
+        bindArray c b.Id b.Name { Elem = elem; Groups = [ GCompact (m, pos) ]; Src = APool dst; RowOpBytes = 0L }
+    if b.Id <> firstId then
+        match s.BuiltLlvm.Value with
+        | Some bl when bl.Ready && bl.DstSlots.ContainsKey b.Id ->
+            ln c ($"; compaction fusion v2, shared selection (T4c): `{b.Name}` binds its own pool and the shared count and positions")
+            let (lastId, _, _) = List.last s.Members
+            if b.Id = lastId then
+                ln c ($"; T4c lifetime: the shared count and positions are owned by the plan, never by a companion (each binds only its own pool; `{b.Name}` is the last); main's pools keep program lifetime (compound() is top-level only, BL6002): no free is emitted for any companion or for the selection")
+            bindFrom bl.DstSlots.[b.Id] bl.PosSlot bl.CountSlot
+            true
+        | _ -> false
+    else
+    // NOT BUILT in this lane for a RUN-TIME extent: the lane refuses runtime
+    // ranges, so no supported program can exercise the shared selection's
+    // dynamic arm here (neither the joint pass nor the guarded mask-site
+    // gather); fail closed -- every companion takes its own passes -- and
+    // record why.
+    if not (fst (System.Int64.TryParse n)) then
+        if Blade.Effects.Decisions.active () then
+            Blade.Effects.Decisions.record
+                { Rule = "compaction-fusion"; Version = 2; Span = c.DeclSpan; Subject = b.Name
+                  Outcome = Blade.Effects.Declined "llvm lane: the shared selection over a run-time extent is not built in this lane (unverified: no supported program reaches it); each companion keeps its own count / fill / gather passes"
+                  Evidence = [ "fail closed: the C++ lane builds the run-time arm (the guarded joint pass)" ] }
+        false
+    else
+    match p.CountLlvm.Value with
+    | None -> false
+    | Some cntSlot ->
+    let shapeOk (v: ArrVal) =
+        match v.Groups with
+        | [ GDense k ] -> string k = n
+        | [ GDynDense l ] -> l = n
+        | _ -> false
+    let srcs =
+        s.Members |> List.map (fun (cid, _, src) ->
+            let el = scalarTyOf s.ElemTypes.[cid]
+            let pool =
+                if cid = b.Id then Some srcPool
+                else
+                    match c.ArrSlots.TryGetValue src with
+                    | true, v ->
+                        (match v.Src, el with
+                         | APool ptr, Some e when v.Elem = e && shapeOk v -> Some ptr
+                         | _ -> None)
+                    | _ -> None
+            (cid, el, pool))
+    let usable =
+        srcs |> List.forall (fun (_, el, pool) ->
+            pool.IsSome && (match el with Some (ScI64 | ScF64 | ScBool) -> true | _ -> false))
+    if not usable then false
+    else
+    let srcs = srcs |> List.map (fun (cid, el, pool) -> (cid, el.Value, pool.Value))
+    let built = s.BuiltLlvm.Value |> Option.filter (fun bl -> bl.AtMask)
+    let dstSlots =
+        match built with
+        | Some bl -> bl.DstSlots
+        | None -> srcs |> List.map (fun (cid, _, _) -> (cid, allocaOf c "ptr")) |> Map.ofList
+    let posSlot =
+        match built with
+        | Some bl -> bl.PosSlot
+        | None -> if s.PositionsNeeded then Some (allocaOf c "ptr") else None
+    // The joint pass into fresh m + 1 pools written through the slots,
+    // feeding the given chains (kernel, accumulator, companion).
+    let jointPass (feeds: (IRCallable * string * IRId) list) =
+        let m = (loadSlot c cntSlot ScI64).Reg
+        let mSlack = i64Add c m "1"
+        let pos =
+            posSlot |> Option.map (fun sl ->
+                let pp = allocPool c ScI64 mSlack
+                ln c ($"store ptr {pp}, ptr {sl}")
+                pp)
+        let dsts =
+            srcs |> List.map (fun (cid, el, _) ->
+                let d = allocPool c el mSlack
+                ln c ($"store ptr {d}, ptr {dstSlots.[cid]}")
+                (cid, d)) |> Map.ofList
+        let cursor = allocaOf c "i64"
+        ln c ($"store i64 0, ptr {cursor}")
+        emitCompactionPassLlvmMulti c n cursor (feeds |> List.map (fun (k, acc, cid) -> (k, acc, dsts.[cid]))) (fun i ->
+            let q = loadSlot c cursor ScI64
+            for (cid, el, sp) in srcs do
+                let v = loadCell c el (gepCell c el sp i)
+                storeCell c el (gepCell c el dsts.[cid] q.Reg) v
+            pos |> Option.iter (fun pp -> storeCell c ScI64 (gepCell c ScI64 pp q.Reg) { Reg = i; Ty = ScI64 })
+            let bit = loadCell c ScBool (gepCell c ScBool keepPool i)
+            let w = freshReg c
+            ln c ($"{w} = zext i1 {bit.Reg} to i64")
+            let next = i64Add c q.Reg w
+            ln c ($"store i64 {next}, ptr {cursor}"))
+    (match built with
+     | Some bl ->
+         match bl.Guard with
+         | None -> ()
+         | Some guard ->
+             let feeds =
+                 bl.Feeds |> List.choose (fun (mid, acc, cid) ->
+                     Blade.Optimize.CompactionTable.foldsOf cid |> List.tryFind (fun f -> f.MapId = mid)
+                     |> Option.bind (fun f -> resolveCallable f.FoldKernel)
+                     |> Option.map (fun cl -> (cl, acc, cid)))
+             let lHave = freshLbl c "csel.have"
+             let lBuild = freshLbl c "csel.build"
+             ln c (renderBr { Cond = guard; IfTrue = lHave; IfFalse = lBuild })
+             lbl c lBuild
+             jointPass feeds
+             ln c (sprintf "br label %%%s" lHave)
+             lbl c lHave
+     | None ->
+         let feeds =
+             srcs |> List.collect (fun (cid, el, _) ->
+                 if el <> ScF64 then []
+                 else compactionFeedsLlvm c (Blade.Optimize.CompactionTable.foldsOf cid) |> List.map (fun (f, cl, acc) -> (f, cl, acc, cid)))
+         jointPass (feeds |> List.map (fun (_, cl, acc, cid) -> (cl, acc, cid)))
+         for (f, _, acc, _) in feeds do f.EmittedLlvm.Value <- Some acc)
+    ln c ($"; compaction fusion v2, shared selection (T4c): ONE selection (count, positions) for {s.Members.Length} companions, completed at `{b.Name}`")
+    if s.Members.Length = 1 then
+        ln c ($"; T4c lifetime: the shared count and positions are owned by the plan, never by a companion (each binds only its own pool; `{b.Name}` is the last); main's pools keep program lifetime (compound() is top-level only, BL6002): no free is emitted for any companion or for the selection")
+    s.BuiltLlvm.Value <-
+        Some { Blade.Optimize.SharedSelectionLlvm.DstSlots = dstSlots
+               Blade.Optimize.SharedSelectionLlvm.PosSlot = posSlot
+               Blade.Optimize.SharedSelectionLlvm.CountSlot = cntSlot
+               Blade.Optimize.SharedSelectionLlvm.Guard = (match built with Some bl -> bl.Guard | None -> None)
+               Blade.Optimize.SharedSelectionLlvm.Feeds = (match built with Some bl -> bl.Feeds | None -> [])
+               Blade.Optimize.SharedSelectionLlvm.AtMask = built.IsSome
+               Blade.Optimize.SharedSelectionLlvm.Ready = true }
+    bindFrom dstSlots.[b.Id] posSlot cntSlot
+    true
+
 let private emitCompoundInit (c: Ctx) (b: IRBinding) (denseExpr: IRExpr) (maskExpr: IRExpr) : unit =
     let arrTy =
         match Blade.IR.stripUnits b.Type with
@@ -8190,6 +8467,13 @@ let private emitCompoundInit (c: Ctx) (b: IRBinding) (denseExpr: IRExpr) (maskEx
         match Blade.Optimize.CompactionTable.tryCompound b.Id, maskExpr with
         | Some p, IRVar (mId, _) when mId = p.MaskId -> Some p
         | _ -> None
+    // T4c: a companion of a shared selection (the first completes it, the
+    // others bind their own pools over it; their chains were fed there).
+    let sharedDone =
+        match planHere with
+        | Some p when p.Shared.IsSome -> emitSharedCompanion c b elem n keepPool srcPool p p.Shared.Value
+        | _ -> false
+    if sharedDone then () else
     let gathered = planHere |> Option.bind (fun p -> p.GatherLlvm.Value)
     if gathered.IsNone then
         for f in folds do f.EmittedLlvm.Value <- None

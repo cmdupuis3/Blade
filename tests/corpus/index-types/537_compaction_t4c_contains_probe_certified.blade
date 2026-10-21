@@ -1,0 +1,20 @@
+// TEST: Compaction fusion T4c: a membership-probe predicate certified by member-hoist's admission
+// The semiagg shape: `keep = mask(cust, lambda(c) -> contains(elig, c))`,
+// `y = compound(amt, keep)`. `totalScalar` rejects the call; the hoisted probe
+// is certified pure and total SEPARATELY, from membership hoisting's own
+// admission of `keep` (`blade plan`: `membership probe certified pure/total
+// by member-hoist's admission: ...`), so the compaction fuses -- the count in
+// `keep`'s pass (which reads the hoisted structure), one selection for `y`
+// over `amt`. The amounts are integer-valued: every sum exact.
+type Row = Idx<2003>
+type Ev = Idx<101>
+let elig = method_for(range<Ev>) <@> lambda(e) -> (Int64(e) * 199) % 20011 |> compute
+let cust = method_for(range<Row>) <@> lambda(i) -> (Int64(i) * 7919 + 13) % 20011 |> compute
+let amt = method_for(range<Row>) <@> lambda(i) -> Float64((Int64(i) * 31) % 1000) |> compute
+let keep = mask(cust, lambda(c) -> contains(elig, c))
+let y = compound(amt, keep)
+let checksum = reduce(y, (+)) + Float64(extents(y))
+// EXPECT: checksum = 8184.0
+let ids = compound(cust, keep)
+let idsum = reduce(ids, (+))
+// EXPECT: idsum = 141688

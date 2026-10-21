@@ -1,0 +1,20 @@
+// TEST: Compaction fusion T4c: two companions whose sources precede the mask (the gather form)
+// Both sources are bound before `keep`, so under the opt-in mask-site gather
+// (BLADE_COMPACTION_FUSION=gather, J = 2 <= 4) the shared selection's one
+// pass IS `keep`'s mask pass -- per 256-cell block the predicate loop, then
+// the branchless gather of both columns -- and `y1` only completes the shared
+// index; by default the joint pass runs at `y1`. n = 1003 spans four blocks
+// and a tail; under BLADE_FP_REPRO=1 both self-product chains are fed in that
+// pass. Every value is the as-written program's; integer-valued data.
+type Ix = Idx<1003>
+let x = method_for(range<Ix>) <@> lambda(i) -> Float64((Int64(i) * 37) % 11) - 4.0 |> compute
+let c2 = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 7) |> compute
+let keep = mask(x, lambda(v) -> v > 1.0)
+let y1 = compound(x, keep)
+let s1 = reduce(y1 * y1, (+)) + Float64(extents(y1))
+// EXPECT: s1 = 8645.0
+let y2 = compound(c2, keep)
+let s2 = reduce(y2 * y2, (+)) + Float64(extents(y2))
+// EXPECT: s2 = 6370.0
+let t2 = reduce(y2, (+))
+// EXPECT: t2 = 1365.0

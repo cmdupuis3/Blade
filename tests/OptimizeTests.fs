@@ -1482,9 +1482,16 @@ let private compactionV2DecisionCases () =
       decisionCase "decision_compaction_v2_extent_in_an_embedded_type_elides"
           (compactionV2DemandSrc "let r = 0..extents(y) |> compute\nlet rs = reduce(r, (+))\n") "compaction-fusion"
           (fun d -> v2Applied d && evidenceHas "selection: positions elided" d) "an embedded type's `extents(y)` keeps the table elided"
-      decisionCase "decision_compaction_v2_shared_mask_first_declined" compactionV2SharedMaskSrc "compaction-fusion"
-          (fun d -> d.Version = 2 && d.Subject = "y" && declinedMentioning "its in-pass count serves one, the last (`y2`)" d)
-          "the first compound over a shared mask says it keeps the separate passes"
+      // T4c (the default): two compounds over one mask share ONE selection
+      decisionCase "decision_compaction_v2_shared_mask_one_selection" compactionV2SharedMaskSrc "compaction-fusion"
+          (fun d -> d.Version = 2 && applied d && d.Subject = "y" && evidenceHas "one selection index shared by 2 companions (`y`, `y2`), freed once after `y2`" d)
+          "two compounds over one mask share one selection index (T4c)"
+      // the pre-T4c v2 (`unshared`): the first compound keeps its separate passes
+      withGate "BLADE_COMPACTION_FUSION" "unshared" (fun () ->
+          decisionCase "decision_compaction_v2_unshared_shared_mask_first_declined" compactionV2SharedMaskSrc "compaction-fusion"
+              (fun d -> d.Version = 2 && d.Subject = "y" && declinedMentioning "its in-pass count serves one, the last (`y2`)" d
+                        && declinedMentioning "disabled by BLADE_COMPACTION_FUSION=unshared" d)
+              "unshared: the first compound over a shared mask says it keeps the separate passes")
       // finding 2 in the default: the hidden writer only writes x, so B4's count motion stays legal
       decisionCase "decision_compaction_v2_hidden_writer_keeps_b4" compactionV2RandomKeyWriterSrc "compaction-fusion"
           (fun d -> v2Applied d) "a hidden writer of x between keeps B4 (its count motion cannot be changed by x)"
@@ -1519,9 +1526,10 @@ let private compactionV2DecisionCases () =
               (fun d -> v2Applied d && evidenceHas "gather: declined -- the producer `x` may write" d && evidenceHas "DECLINES: the producer `x` may write" d)
               "gather declined: the producer writes (five-party matrix)")
       withGather (fun () ->
-          decisionCase "decision_compaction_v2_gather_declined_shared_mask" compactionV2SharedMaskSrc "compaction-fusion"
-              (fun d -> d.Version = 2 && applied d && d.Subject = "y2" && evidenceHas "gather: declined -- `keep` feeds 2 compounds" d)
-              "the last compound over a shared mask: fused, gather declined (a shared selection is T4c)")
+          decisionCase "decision_compaction_v2_gather_shared_mask_at_mask" compactionV2SharedMaskSrc "compaction-fusion"
+              (fun d -> d.Version = 2 && applied d && d.Subject = "y2" && evidenceHas "one selection index shared by 2 companions" d
+                        && evidenceHas "gather: at the mask site -- `keep`'s pass sweeps the sources once" d)
+              "gather: the shared selection's one pass is the mask pass (J = 2 <= 4)")
       withGather (fun () ->
           decisionCase "decision_compaction_v2_gather_declined_random_key_writer" compactionV2RandomKeyWriterSrc "compaction-fusion"
               (fun d -> v2Applied d && evidenceHas "gather: declined -- `noise` (between `keep` and `y`) may write (its value or side-table payload)" d)
@@ -1547,6 +1555,421 @@ let private compactionV2DecisionCases () =
           decisionCase "decision_compaction_b4_shared_mask_first_declined" compactionV2SharedMaskSrc "compaction-fusion"
               (fun d -> d.Version = 1 && d.Subject = "y" && declinedMentioning "feeds 2 compounds" d)
               "b4: the first compound over a shared mask is recorded declined (its emission was always the separate passes)") ]
+
+// --- Compaction fusion v2, T4c: one selection for every compound over a mask ---
+// Three companions over `keep` (x itself, an Int64 column, a Float64 column):
+// ONE `compound_index_t<1>` (`keep__sel`) built once, ONE joint pass, each
+// companion's OWN data store wrapped around the shared index; no companion
+// frees it (the one index-only free is the plan's, registered with the last
+// companion -- program lifetime at main's top level). Values: corpus
+// index-types/532-543.
+let private t4cSrc =
+    "type Ix = Idx<1003>\n"
+    + "let x = method_for(range<Ix>) <@> lambda(i) -> Float64((Int64(i) * 37) % 11) - 4.0 |> compute\n"
+    + "let c2 = method_for(range<Ix>) <@> lambda(i) -> (Int64(i) * 7) % 13 |> compute\n"
+    + "let c3 = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 5) |> compute\n"
+    + "let keep = mask(x, lambda(v) -> v > 1.0)\n"
+    + "let y1 = compound(x, keep)\n"
+    + "let s1 = reduce(y1 * y1, (+))\n"
+    + "let y2 = compound(c2, keep)\n"
+    + "let y3 = compound(c3, keep)\n"
+    + "let s3 = reduce(y3 * y3, (+)) + Float64(extents(y3))\n"
+    + "let s2 = reduce(y2, (+))\n"
+// a keyed read of the LAST companion keeps the shared positions (x(1000) = 3.0 is kept)
+let private t4cKeyedSrc = t4cSrc + "let k3 = y3(1000)\n"
+let private t4cSemiSrc =
+    "type Row = Idx<2003>\n"
+    + "type Ev = Idx<101>\n"
+    + "let elig = method_for(range<Ev>) <@> lambda(e) -> (Int64(e) * 199) % 20011 |> compute\n"
+    + "let cust = method_for(range<Row>) <@> lambda(i) -> (Int64(i) * 7919 + 13) % 20011 |> compute\n"
+    + "let amt = method_for(range<Row>) <@> lambda(i) -> Float64((Int64(i) * 31) % 1000) |> compute\n"
+    + "let keep = mask(cust, lambda(c) -> contains(elig, c))\n"
+    + "let y = compound(amt, keep)\n"
+    + "let checksum = reduce(y, (+)) + Float64(extents(y))\n"
+let private t4cOneBuildChecks (cpp: string) =
+    [ "ONE index build", countOf "new compound_index_t<1>(" cpp = 1
+      "the shared index", cpp.Contains "compound_index_t<1>* keep__sel = new compound_index_t<1>(\"keep__sel\", keep__sel_grid, keep__count, "
+      "y1's own data store", cpp.Contains "nested_array_utilities::Compound<double, 1> y1 { keep__sel_v0, keep__sel, y1_trail };"
+      "y2's own data store", cpp.Contains "nested_array_utilities::Compound<int64_t, 1> y2 { keep__sel_v1, keep__sel, y2_trail };"
+      "y3's own data store", cpp.Contains "nested_array_utilities::Compound<double, 1> y3 { keep__sel_v2, keep__sel, y3_trail };"
+      "three DISTINCT companion value allocations, each allocated once", countOf "keep__sel_v0 = new " cpp + countOf "keep__sv0 = new " cpp >= 1 && countOf "keep__sel_v1 = new " cpp + countOf "keep__sv1 = new " cpp >= 1 && countOf "keep__sel_v2 = new " cpp + countOf "keep__sv2 = new " cpp >= 1
+      "at most one shared position allocation", countOf "compound_index_t<1>::IDX[" cpp <= (if cpp.Contains "keep__one" then 2 else 1)
+      "no per-companion index deletion (program-lifetime / no-free check)",
+        not (cpp.Contains "deallocate_compound(y") && not (cpp.Contains "delete y1_idx") && not (cpp.Contains "delete keep__sel")
+        && not (cpp.Contains "deallocate_compound_index_only(keep__sel);") && not (cpp.Contains "deallocate_compound_shared_index(y")
+      "the lifetime line, once, at the last companion (no executed free at main's top level)",
+        countOf "// T4c lifetime: `keep__sel` is owned by the plan, never by a companion" cpp = 1
+        && cpp.Contains "with the last companion `y3` -- at main's top level (compound() is top-level only, BL6002) there is no scope, so no registration and no free is executed: program lifetime" ]
+let private t4cDefaultEmission () =
+    let name = "compaction_t4c_one_index_one_joint_pass"
+    match cppOfSource name t4cSrc with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        checkAll name cpp "one shared index, one joint pass at y1 over the three sources, positions elided, each companion its own buffer"
+            (t4cOneBuildChecks cpp
+             @ [ "count in the mask pass", cpp.Contains "keep__count += (size_t)__keep_k;"
+                 "ONE joint pass", countOf "keep__sel_q += (size_t)keep__sel_pool[keep__sel_i];" cpp = 1
+                 "the three gathers in it", cpp.Contains "keep__sel_v0[keep__sel_q] = keep__sel_d0[keep__sel_i];" && cpp.Contains "keep__sel_v1[keep__sel_q] = keep__sel_d1[keep__sel_i];" && cpp.Contains "keep__sel_v2[keep__sel_q] = keep__sel_d2[keep__sel_i];"
+                 "m + 1 cells per companion buffer", cpp.Contains "double* keep__sel_v0 = new double[keep__count + 1];" && cpp.Contains "int64_t* keep__sel_v1 = new int64_t[keep__count + 1];"
+                 "positions elided", cpp.Contains "keep__count, compound_index_t<1>::positions_elided);" && not (cpp.Contains "keep__sel_pos")
+                 "no per-compound pass", not (cpp.Contains "y2_q +=") && not (cpp.Contains "y3_q +=") && not (cpp.Contains "rank_to_tuple[y2_q]")
+                 "K-lane self-dot over y3.data", cpp.Contains "blade_fold::sq<double, 8>(y3.data, y3.idx->cardinality)" ])
+let private t4cKeyedEmission () =
+    let name = "compaction_t4c_keyed_read_keeps_shared_positions"
+    match cppOfSource name t4cKeyedSrc with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        checkAll name cpp "a keyed read of y3 keeps the SHARED kept positions, filled once by the joint pass"
+            (t4cOneBuildChecks cpp
+             @ [ "positions filled once", countOf "keep__sel_pos[keep__sel_q][0] = keep__sel_i;" cpp = 1
+                 "m + 1 position cells", cpp.Contains "compound_index_t<1>::IDX* keep__sel_pos = new compound_index_t<1>::IDX[keep__count + 1];"
+                 "ONE shared position allocation", countOf "compound_index_t<1>::IDX[" cpp = 1
+                 "the index adopts them", cpp.Contains "keep__count, keep__sel_pos);" ])
+let private t4cReproEmission () =
+    let name = "compaction_t4c_repro_chains_fed_in_joint_pass"
+    match withGate "BLADE_FP_REPRO" "1" (fun () -> cppOfSource name t4cSrc) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        checkAll name cpp "both self-product chains (over y1's and y3's own buffers) fed per block inside the one joint pass"
+            (t4cOneBuildChecks cpp
+             @ [ "y1's chain peeled from its buffer", cpp.Contains "double __t = keep__sel_v0[0] * keep__sel_v0[0]; BLADE_FOLD_ROUND(__t); keep__sel__fold0 = __t;"
+                 "y3's chain peeled from its buffer", cpp.Contains "double __t = keep__sel_v2[0] * keep__sel_v2[0]; BLADE_FOLD_ROUND(__t); keep__sel__fold1 = __t;"
+                 "chains only over completed cells", cpp.Contains "for (; keep__sel_f < keep__sel_q; keep__sel_f++)"
+                 "products rounded before the add", countOf "BLADE_FOLD_ROUND(__t);" cpp = 4
+                 "the folds return the fed chains", cpp.Contains "return keep__sel__fold0;" && cpp.Contains "return keep__sel__fold1;"
+                 "no K-lane form", not (cpp.Contains "blade_fold::sq<double") ])
+let private t4cGatherEmission () =
+    let name = "compaction_t4c_gather_joint_gather_in_mask_pass"
+    match withGather (fun () -> cppOfSource name t4cSrc) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        checkAll name cpp "gather (J = 3 <= 4, every source bound before the mask): the mask pass gathers all three; y1 only completes the index"
+            ((t4cOneBuildChecks cpp |> List.filter (fun (k: string, _) -> not (k.Contains "data store")))
+             @ [ "the three gathers in the mask pass", cpp.Contains "keep__sv0[keep__count] = x[__mi];" && cpp.Contains "keep__sv1[keep__count] = c2[__mi];" && cpp.Contains "keep__sv2[keep__count] = c3[__mi];"
+                 "n + 1 private cells per buffer", cpp.Contains "int64_t* keep__sv1 = new int64_t[(size_t)(1003) + 1];"
+                 "no joint pass at y1", not (cpp.Contains "keep__sel_q +=")
+                 "each companion's own buffer", cpp.Contains "Compound<double, 1> y1 { keep__sv0, keep__sel, y1_trail };" && cpp.Contains "Compound<int64_t, 1> y2 { keep__sv1, keep__sel, y2_trail };" && cpp.Contains "Compound<double, 1> y3 { keep__sv2, keep__sel, y3_trail };" ])
+let private t4cUnsharedEmission () =
+    let name = "compaction_t4c_unshared_mirror_one_index_per_compound"
+    match withGate "BLADE_COMPACTION_FUSION" "unshared" (fun () -> cppOfSource name t4cSrc) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        checkAll name cpp "unshared (the pre-T4c v2): no shared index, one index per compound"
+            [ "no shared selection", not (cpp.Contains "keep__sel")
+              "an index per compound", cpp.Contains "y1_idx" && cpp.Contains "y2_idx" && cpp.Contains "y3_idx"
+              "three index builds", countOf "compound_index_t<1>* y" cpp >= 3 ]
+let private t4cGateOffEmission () =
+    let name = "compaction_t4c_gate_off_one_index_per_compound"
+    match withGate "BLADE_COMPACTION_FUSION" "0" (fun () -> cppOfSource name t4cSrc) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        checkAll name cpp "gate off: no shared index, the counting constructor per compound"
+            [ "no shared selection", not (cpp.Contains "keep__sel")
+              "the counting constructor per compound", cpp.Contains "new compound_index_t<1>(\"y1_idx\", y1_idx_grid, y1_idx_pool)" && cpp.Contains "new compound_index_t<1>(\"y3_idx\", y3_idx_grid, y3_idx_pool)" ]
+/// The LLVM lane (maskagg's reference arm): ONE selection completed at y1 --
+/// the joint pass allocates exactly one pool per companion plus ONE shared
+/// position pool (all sized by the same m + 1 register), each stored into its
+/// own slot; y1, y2 and y3 each bind (load) a DIFFERENT one of the value
+/// slots; nothing is freed (program lifetime). `unshared` pays a position pool
+/// and a value pool per compound instead. Wiring read from the IR itself.
+let private t4cLlvmEmission () =
+    let name = "compaction_t4c_llvm_one_selection"
+    let llOf () =
+        match lower t4cKeyedSrc with
+        | Error e -> Error ($"lower: {e}")
+        | Ok ir ->
+            match EmitLlvm.tryEmitProgramNamed "t4c_llvm" ir with
+            | Ok ll -> Ok ll
+            | Error r -> Error ($"the llvm lane refused: {r}")
+    match llOf (), withGate "BLADE_COMPACTION_FUSION" "unshared" llOf with
+    | Ok ll, Ok llOld ->
+        let lines = ll.Replace("\r\n", "\n").Split('\n') |> Array.map (fun l -> l.Trim())
+        let rx (p: string) = System.Text.RegularExpressions.Regex(p)
+        let completed = lines |> Array.findIndex (fun l -> l.Contains "ONE selection (count, positions) for 3 companions, completed at `y1`")
+        // the joint pass: the allocations of the m + 1 register just before the completion line
+        let allocRe = rx @"^(%[\w.]+) = call ptr @blade_alloc_cells\(i64 (%[\w.]+), i64 8\)"
+        let allocs =
+            lines.[.. completed] |> Array.indexed |> Array.choose (fun (k, l) ->
+                let m = allocRe.Match l in if m.Success then Some (k, m.Groups.[1].Value, m.Groups.[2].Value) else None)
+        let jointSize = allocs |> Array.last |> fun (_, _, sz) -> sz
+        let joint = allocs |> Array.filter (fun (_, _, sz) -> sz = jointSize)
+        let slotOf (reg: string) =
+            lines |> Array.tryPick (fun l -> let m = (rx ("^store ptr " + System.Text.RegularExpressions.Regex.Escape reg + @", ptr (%[\w.]+)$")).Match l in if m.Success then Some m.Groups.[1].Value else None)
+        let slots = joint |> Array.map (fun (_, r, _) -> slotOf r)
+        // the slot each companion binds: the first `load ptr, ptr S` after its line
+        let bindAfter (k0: int) =
+            lines.[k0 + 1 ..] |> Array.tryPick (fun l -> let m = (rx @"= load ptr, ptr (%[\w.]+)$").Match l in if m.Success then Some m.Groups.[1].Value else None)
+        let lineOf (needle: string) = lines |> Array.tryFindIndex (fun l -> l.Contains needle)
+        let b1 = bindAfter completed
+        let b2 = lineOf "`y2` binds its own pool" |> Option.bind bindAfter
+        let b3 = lineOf "`y3` binds its own pool" |> Option.bind bindAfter
+        let valueSlots = [ b1; b2; b3 ]
+        checkAll name ll "one joint pass: 3 value pools + 1 shared position pool (one m + 1 size), distinct slots; y1 / y2 / y3 each bind a different value slot; no free"
+            [ "ONE selection", countOf "ONE selection (count, positions) for 3 companions, completed at `y1`" ll = 1
+              "4 joint allocations (3 companions + 1 shared position pool), one size", joint.Length = 4
+              "each stored into its own slot", slots |> Array.forall Option.isSome && (slots |> Array.distinct).Length = 4
+              "y1, y2, y3 each bind a different joint slot", valueSlots |> List.forall Option.isSome && (valueSlots |> List.distinct).Length = 3
+                                                             && valueSlots |> List.forall (fun s -> slots |> Array.contains s)
+              "the lifetime line once, at the last companion", countOf "; T4c lifetime: the shared count and positions are owned by the plan, never by a companion (each binds only its own pool; `y3` is the last)" ll = 1
+              "no free in main (program lifetime: no companion pool and no shared pool is released)", (match lines |> Array.tryFindIndex (fun l -> l.StartsWith "define i32 @main(") with Some m0 -> not (lines.[m0 ..] |> Array.exists (fun l -> l.Contains "call void @blade_free(")) | None -> false)
+              "unshared: one position pool and one value pool per compound (two more pools than the shared selection)", countOf "call ptr @blade_alloc_cells(" ll = countOf "call ptr @blade_alloc_cells(" llOld - 2
+              "unshared keeps no shared selection", not (llOld.Contains "shared selection (T4c)") ]
+    | Error e, _ | _, Error e -> resultLine Fail name e; false
+let private t4cDecisionCases () =
+    [ decisionCase "decision_compaction_t4c_applied_three_companions" t4cSrc "compaction-fusion"
+          (fun d -> d.Version = 2 && applied d && d.Subject = "y2"
+                    && evidenceHas "one selection index shared by 3 companions (`y1`, `y2`, `y3`), freed once after `y3`" d
+                    && evidenceHas "lifetime: the plan owns the index" d
+                    && evidenceHas "COMPLETE once the first companion `y1` is bound" d)
+          "T4c applied: one index for y1, y2, y3, freed once after y3, the completeness invariant recorded"
+      decisionCase "decision_compaction_t4c_five_party_matrix" t4cSrc "compaction-fusion"
+          (fun d -> d.Version = 2 && applied d && d.Subject = "y1"
+                    && evidenceHas "selectionAdmits (five parties, each through Optimize.scheduleMayWriteIn): producers `x`, `c2`, `c3` and the mask source `x`: proved stored through their alias chains (storedArrayProof), never assigned, no write in any payload; predicate of `keep`: no write" d
+                    && evidenceHas "outer fold kernel(s): 2 over the companions, none writes" d
+                    && evidenceHas "seed(s): 0 seeded fold(s)" d
+                    && evidenceHas "between `keep` and `y3`: `s1`: no write in any payload" d
+                    && evidenceHas "parallel: none" d)
+          "the five-party matrix (producers / predicate / outer kernel / seed / intervening, plus parallel)"
+      decisionCase "decision_compaction_t4c_keyed_positions_shared" t4cKeyedSrc "compaction-fusion"
+          (fun d -> d.Version = 2 && applied d && d.Subject = "y1" && evidenceHas "selection: positions required by a keyed read of `y3` in `k3` (`y3`) -- the SHARED index" d)
+          "one companion's keyed read keeps the shared positions"
+      decisionCase "decision_compaction_t4c_declined_keep_read_between" (t4cSrc.Replace("let y2 = compound(c2, keep)\n", "let k0 = keep(2)\nlet y2 = compound(c2, keep)\n")) "compaction-fusion"
+          (fun d -> d.Subject = "y2" && declinedMentioning "the shared selection (T4c) declined: `k0` (between `keep` and `y3`) reads `keep`" d)
+          "T4c declined: `keep` read between the mask and the last companion"
+      decisionCase "decision_compaction_t4c_declined_writer_between"
+          ("type Ix = Idx<4>\nfunction bump(a: mut Array<Int64 like Ix>) -> Int64 = {\n    a(0) = 9\n    7\n}\n"
+           + "let x: Array<Float64 like Ix> = [1.0, 2.0, 3.0, 4.0]\nlet mut c2: Array<Int64 like Ix> = [1, 2, 3, 4]\n"
+           + "let keep = mask(x, lambda(v) -> v > 1.5)\nlet y1 = compound(x, keep)\nlet w = bump(c2)\nlet y2 = compound(c2, keep)\n") "compaction-fusion"
+          (fun d -> d.Subject = "y2" && declinedMentioning "`w` (between `keep` and `y2`) may write" d)
+          "T4c declined: a writer between the companions (the shared write analysis)"
+      decisionCase "decision_compaction_t4c_declined_late_source" (t4cSrc.Replace("let y3 = compound(c3, keep)\n", "let c4 = c3 + 1.0 |> compute\nlet y3 = compound(c4, keep)\n")) "compaction-fusion"
+          (fun d -> d.Subject = "y2" && declinedMentioning "the source `c4` of `y3` is bound after the first companion `y1`" d)
+          "T4c declined: a source bound after the first companion (v1)"
+      decisionCase "decision_compaction_t4c_declined_assigned_companion"
+          ("type Ix = Idx<4>\nlet x: Array<Float64 like Ix> = [1.0, 2.0, 3.0, 4.0]\nlet c2: Array<Float64 like Ix> = [5.0, 6.0, 7.0, 8.0]\n"
+           + "let keep = mask(x, lambda(v) -> v > 1.5)\nlet mut y1 = compound(x, keep)\nlet y2 = compound(c2, keep)\ny1(3) = 0.5\n") "compaction-fusion"
+          (fun d -> d.Subject = "y2" && declinedMentioning "the companion `y1` is written (assigned) in the program" d)
+          "T4c declined: a companion written"
+      // ---- Part B: the membership-probe certificate ----
+      decisionCase "decision_compaction_t4c_probe_certified" t4cSemiSrc "compaction-fusion"
+          (fun d -> d.Version = 2 && applied d && d.Subject = "y"
+                    && evidenceHas "membership probe certified pure/total by member-hoist's admission: `keep`'s predicate probes `elig`" d
+                    && evidenceHas "membershipAdmits (five parties" d
+                    && evidenceHas "`totalScalar` itself is not widened" d)
+          "Part B: the semijoin predicate certified by T1's own admission record"
+      withGate "BLADE_MEMBER_HOIST" "0" (fun () ->
+          decisionCase "decision_compaction_t4c_probe_not_certified_t1_off" t4cSemiSrc "compaction-fusion"
+              (fun d -> d.Subject = "y" && declinedMentioning "the membership probe is not certified: member-hoist did not admit `keep`'s probe of `elig`" d)
+              "Part B: T1 declined (BLADE_MEMBER_HOIST=0) -> per-probe scan, T4c declined")
+      decisionCase "decision_compaction_t4c_probe_target_not_total" (t4cSemiSrc.Replace("contains(elig, c)", "contains(elig, c % 7)")) "compaction-fusion"
+          (fun d -> d.Subject = "y" && declinedMentioning "the target of `keep`'s probe of `elig` is not a pure, total scalar of the cell" d)
+          "Part B: a target with a panic site (integer %) is not certified"
+      withGate "BLADE_COMPACTION_FUSION" "b4" (fun () ->
+          decisionCase "decision_compaction_t4c_b4_mirror_never_certifies" (t4cSemiSrc.Replace("compound(amt, keep)", "compound(cust, keep)").Replace("reduce(y, (+)) + Float64", "Float64(reduce(y, (+))) + Float64")) "compaction-fusion"
+              (fun d -> d.Version = 1 && d.Subject = "y" && declinedMentioning "is not a pure, total scalar function of the cell" d && not (declinedMentioning "membership probe" d))
+              "b4 stays the round-2 form: no certificate")
+      withGate "BLADE_COMPACTION_FUSION" "unshared" (fun () ->
+          decisionCase "decision_compaction_t4c_unshared_mirror" t4cSrc "compaction-fusion"
+              (fun d -> d.Subject = "y2" && declinedMentioning "disabled by BLADE_COMPACTION_FUSION=unshared" d)
+              "unshared: no shared selection") ]
+
+// --- T4c fix round (Codex diff review of 278353cb) ---------------------------
+// Finding 1 (ruled: the singleton expansion is Part B's intent): (a) every
+// LEGACY singleton shape -- index-types 515-531 but the two-compound 526: a
+// single `compound(x, keep)` over the MASK SOURCE with a total predicate --
+// emits the SAME text by default as under `unshared` (the pre-T4c v2, which
+// takes the tip's planner path for them), in both lanes; (b) the two NEWLY
+// admitted singleton shapes route through the new plan (the twins' values
+// and first failures: the cli block). Finding 2: the positive storage proof
+// of the mask source and every companion source (alias chains, deferred
+// roots, streamed reads). Finding 3: run-time-extent wiring.
+let private t4cLegacySingletonIdentity () : bool list =
+    let files =
+        Blade.Tests.Corpus.category "index-types"
+        |> List.filter (fun (n, _) -> n.StartsWith "Compaction fusion" && not (n.Contains "T4c") && not (n.Contains "two compounds over one mask"))
+    let llOf (n: string) (src: string) =
+        match lower src with
+        | Error e -> "lower: " + e
+        | Ok ir ->
+            match (try EmitLlvm.tryEmitProgramNamed n ir with ex -> Error ("raised: " + ex.Message)) with
+            | Ok ll -> ll
+            | Error r -> "refused: " + r
+    [ let census = "compaction_t4c_legacy_singletons: the 16 shapes of index-types 515-531 (all but 526)"
+      if files.Length = 16 then resultLine Pass census "16 files"; yield true
+      else resultLine Fail census $"found {files.Length}"; yield false
+      for (n, src) in files do
+        let name = $"compaction_t4c_legacy_singleton_identity: `{n}`"
+        let cDef = cppOfSource n src
+        let cOld = withGate "BLADE_COMPACTION_FUSION" "unshared" (fun () -> cppOfSource n src)
+        let lDef = llOf n src
+        let lOld = withGate "BLADE_COMPACTION_FUSION" "unshared" (fun () -> llOf n src)
+        let sel = "__sel"
+        match cDef, cOld with
+        | Ok a, Ok b when a = b && lDef = lOld && not (a.Contains sel) ->
+            resultLine Pass name "C++ and LLVM text identical to the pre-T4c v2 (unshared); no shared selection"
+            yield true
+        | Ok a, Ok b ->
+            resultLine Fail name $"C++ identical: {a = b}; LLVM identical: {lDef = lOld}; shared selection present: {a.Contains sel}"
+            yield false
+        | Error e, _ | _, Error e -> resultLine Fail name e; yield false ]
+
+/// (b) the newly admitted singletons: a single compound over ANOTHER stored
+/// column with a total predicate (the shared-selection path, J = 1), and a
+/// single compound whose predicate is a certified probe -- over the mask
+/// source (the B4/T4 path, now admitted by the certificate) and over another
+/// column (semiagg: the shared-selection path).
+let private t4cSingleOtherColumnSrc =
+    "type Ix = Idx<1003>\n"
+    + "let x = method_for(range<Ix>) <@> lambda(i) -> Float64((Int64(i) * 37) % 11) - 4.0 |> compute\n"
+    + "let c = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 7) |> compute\n"
+    + "let keep = mask(x, lambda(v) -> v > 1.0)\n"
+    + "let y = compound(c, keep)\n"
+    + "let s = reduce(y * y, (+)) + Float64(extents(y))\n"
+let private t4cSingleProbeOverSourceSrc =
+    t4cSemiSrc.Replace("compound(amt, keep)", "compound(cust, keep)").Replace("let checksum = reduce(y, (+)) + Float64(extents(y))", "let checksum = Float64(reduce(y, (+))) + Float64(extents(y))")
+let private t4cNewSingletonRoutes () : bool list =
+    let route (name: string) (src: string) (summary: string) (onChecks: string -> (string * bool) list) (offChecks: string -> (string * bool) list) =
+        match cppOfSource name src, withGate "BLADE_COMPACTION_FUSION" "unshared" (fun () -> cppOfSource name src), withGate "BLADE_COMPACTION_FUSION" "0" (fun () -> cppOfSource name src) with
+        | Ok on, Ok uns, Ok off -> checkAll name on summary (onChecks on @ (offChecks uns |> List.map (fun (k, v) -> ("unshared: " + k, v))) @ (offChecks off |> List.map (fun (k, v) -> ("gate off: " + k, v))))
+        | Error e, _, _ | _, Error e, _ | _, _, Error e -> resultLine Fail name e; false
+    [ route "compaction_t4c_new_singleton_other_column" t4cSingleOtherColumnSrc
+          "a single compound over another stored column: the shared-selection path (one index, the joint pass at y); unshared / gate off: its own passes"
+          (fun cpp -> [ "the shared index", cpp.Contains "compound_index_t<1>* keep__sel = new compound_index_t<1>(\"keep__sel\", keep__sel_grid, keep__count, compound_index_t<1>::positions_elided)"
+                        "the one joint pass reads c", cpp.Contains "keep__sel_d0 = nested_array_utilities::pool_base(c.data);" && countOf "keep__sel_q += (size_t)keep__sel_pool[keep__sel_i];" cpp = 1
+                        "y wraps its own buffer", cpp.Contains "nested_array_utilities::Compound<double, 1> y { keep__sel_v0, keep__sel, y_trail };" ])
+          (fun cpp -> [ "no shared selection", not (cpp.Contains "keep__sel") ])
+      route "compaction_t4c_new_singleton_probe_over_source" t4cSingleProbeOverSourceSrc
+          "a single compound over the mask source with a certified probe: the B4/T4 plan (count in the mask pass, one fill+gather pass); unshared / gate off: the separate passes"
+          (fun cpp -> [ "count in the mask pass", cpp.Contains "keep__count += (size_t)__keep_k;"
+                        "one fill+gather pass at y", countOf "y_q += (size_t)y_idx_pool[y_i];" cpp = 1
+                        "the hoisted probe is kept", cpp.Contains "blade_member_build_i64(&" ])
+          (fun cpp -> [ "no counted mask", not (cpp.Contains "keep__count") ])
+      route "compaction_t4c_new_singleton_probe_other_column" t4cSemiSrc
+          "semiagg (a single compound over another column, certified probe): the shared-selection path; unshared / gate off: its own passes"
+          (fun cpp -> [ "the shared index", cpp.Contains "compound_index_t<1>* keep__sel = new compound_index_t<1>(\"keep__sel\""
+                        "the joint pass reads amt", cpp.Contains "keep__sel_d0 = nested_array_utilities::pool_base(amt.data);"
+                        "the hoisted probe is kept", cpp.Contains "blade_member_build_i64(&" ])
+          (fun cpp -> [ "no shared selection", not (cpp.Contains "keep__sel"); "the hoisted probe is kept (T1 is independent of the mirror)", cpp.Contains "blade_member_build_i64(&" ]) ]
+
+// Finding 2 probes. The reviewer's: a companion source that is an ALIAS of a
+// DEFERRED map (genVarAliasBinding names it without a pool behind it).
+let private t4cAliasDeferredSrc =
+    "type I = Idx<3>\n"
+    + "let x: Array<Float64 like I> = [1.0, 2.0, 3.0]\n"
+    + "let lazy_col = method_for(x) <@> lambda(v) -> v + 10.0\n"
+    + "let alias_col = lazy_col\n"
+    + "let keep = mask(x, lambda(v) -> v > 0.0)\n"
+    + "let y1 = compound(x, keep)\n"
+    + "let y2 = compound(alias_col, keep)\n"
+    + "let n = extents(y2)\n"
+let private t4cAliasStoredSrc =
+    t4cAliasDeferredSrc.Replace("let lazy_col = method_for(x) <@> lambda(v) -> v + 10.0\n", "let lazy_col = method_for(x) <@> lambda(v) -> v + 10.0 |> compute\n")
+// the mask source is no companion's source: deferred (not proved stored) /
+// stored (audited as a producer, read by no joint pass)
+let private t4cMaskSourceStoredSrc =
+    "type Ix = Idx<13>\n"
+    + "let x = method_for(range<Ix>) <@> lambda(i) -> Float64((Int64(i) * 3) % 13) |> compute\n"
+    + "let c2 = method_for(range<Ix>) <@> lambda(i) -> Int64(i) * 10 |> compute\n"
+    + "let c3 = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i)) * 0.5 |> compute\n"
+    + "let keep = mask(x, lambda(v) -> v > 5.5)\n"
+    + "let y2 = compound(c2, keep)\n"
+    + "let y3 = compound(c3, keep)\n"
+    + "let s = Float64(reduce(y2, (+))) + reduce(y3, (+))\n"
+let private t4cMaskSourceDeferredSrc =
+    t4cMaskSourceStoredSrc.Replace("let x = method_for(range<Ix>) <@> lambda(i) -> Float64((Int64(i) * 3) % 13) |> compute\n", "let x = method_for(range<Ix>) <@> lambda(i) -> Float64((Int64(i) * 3) % 13)\n")
+let private t4cStorageProofCases () : bool list =
+    [ decisionCase "decision_compaction_t4c_declined_alias_of_deferred" t4cAliasDeferredSrc "compaction-fusion"
+          (fun d -> d.Subject = "y2" && declinedMentioning "the source `alias_col` of `y2` is not proved stored: `alias_col` is an alias of `lazy_col`, and `lazy_col` is a deferred computation" d)
+          "finding 2: an alias of a deferred map is not proved stored (T4c declined)"
+      (let name = "compaction_t4c_alias_of_deferred_takes_own_passes"
+       match cppOfSource name t4cAliasDeferredSrc with
+       | Error e -> resultLine Fail name e; false
+       | Ok cpp ->
+           let decl = cpp.IndexOf "Array<double, 1> alias_col = "
+           let rd = cpp.IndexOf "y2_densepool = nested_array_utilities::pool_base(alias_col.data);"
+           checkAll name cpp "no shared selection: y2 reads its operand in its own pass"
+               [ "no shared selection", not (cpp.Contains "keep__sel")
+                 "y2 reads `alias_col` in its OWN pass, after the alias is materialized at its own site", decl >= 0 && rd > decl ])
+      decisionCase "decision_compaction_t4c_alias_of_stored_admitted" t4cAliasStoredSrc "compaction-fusion"
+          (fun d -> d.Subject = "y2" && applied d && evidenceHas "one selection index shared by 2 companions (`y1`, `y2`)" d)
+          "an alias of a STORED array is proved stored through its chain (T4c applied)"
+      decisionCase "decision_compaction_t4c_declined_mask_source_deferred" t4cMaskSourceDeferredSrc "compaction-fusion"
+          (fun d -> d.Subject = "y2" && declinedMentioning "the mask source `x` is not proved stored: `x` is a deferred computation" d)
+          "the mask source is audited even when it is no companion's source"
+      decisionCase "decision_compaction_t4c_mask_source_audited_not_read" t4cMaskSourceStoredSrc "compaction-fusion"
+          (fun d -> d.Subject = "y2" && applied d && evidenceHas "producers `c2`, `c3` and the mask source `x`: proved stored through their alias chains" d)
+          "x stored and no companion's source: admitted, x recorded among the producers"
+      (let name = "compaction_t4c_mask_source_not_read_by_the_joint_pass"
+       match cppOfSource name t4cMaskSourceStoredSrc with
+       | Error e -> resultLine Fail name e; false
+       | Ok cpp ->
+           checkAll name cpp "the joint pass reads c2 and c3 only"
+               [ "the joint pass reads c2", cpp.Contains "keep__sel_d0 = nested_array_utilities::pool_base(c2.data);"
+                 "and c3", cpp.Contains "keep__sel_d1 = nested_array_utilities::pool_base(c3.data);"
+                 "never x", not (cpp.Contains "pool_base(x.data)") ])
+      // a STREAMED companion source (hand-built: a NetCDF store is needed to
+      // write one): never proved stored
+      (let name = "decision_compaction_t4c_declined_streamed_source"
+       match lower t4cMaskSourceStoredSrc with
+       | Error e -> resultLine Fail name e; false
+       | Ok ir ->
+           let m = ir.Modules |> List.find (fun m -> not m.CompoundInits.IsEmpty)
+           let c2 = m.Bindings |> List.find (fun b -> b.Name = "c2")
+           let at = match Blade.IR.stripUnits c2.Type with Blade.IR.ArrayElem a -> a | _ -> failwith "c2 is no array"
+           let spec : Blade.IR.ProviderReadSpec =
+               { Provider = "netcdf"; FilePath = "stream.nc"; VarName = "c2"; VarType = at; MaskName = None; MaskType = None
+                 Window = None; Streamed = true; AllowMissing = false }
+           let md = { m with ProviderReads = Map.add c2.Id spec m.ProviderReads }
+           Blade.Effects.Decisions.start ()
+           Blade.Optimize.planCompactionFusion [] Set.empty md
+           let ds = Blade.Effects.Decisions.drain ()
+           Blade.Optimize.CompactionTable.reset ()
+           if ds |> List.exists (fun d -> d.Rule = "compaction-fusion" && d.Subject = "y2" && declinedMentioning "the source `c2` of `y2` is not proved stored: `c2` is a streamed provider read" d) then
+               resultLine Pass name "a streamed companion source is not proved stored (T4c declined)"; true
+           else
+               resultLine Fail name (ds |> List.filter (fun d -> d.Rule = "compaction-fusion") |> List.map Blade.Effects.Decisions.render |> String.concat " | "); false) ]
+
+// Finding 3: a run-time source extent the shared selection positively takes
+// (corpus index-types/542): the joint pass over the run-time grid, and under
+// `gather` the run-time cap test at the mask with the first companion's
+// guarded joint pass into the same buffers.
+let private t4cRuntimeSrc =
+    "let k = reduce([3, 4, 5], (+))\n"
+    + "let ks = 0..k |> compute\n"
+    + "let xs = method_for(ks) <@> lambda(i) -> i * 1 |> compute\n"
+    + "let ws = method_for(ks) <@> lambda(i) -> i * 3 + 1 |> compute\n"
+    + "let keep = mask(xs, lambda(v) -> v > 4)\n"
+    + "let ys = compound(xs, keep)\n"
+    + "let zs = compound(ws, keep)\n"
+    + "let zs_k9 = zs(9)\n"
+    + "let total = reduce(ys, (+)) + reduce(zs, (+))\n"
+let private t4cRuntimeRoutes () : bool list =
+    [ decisionCase "decision_compaction_t4c_runtime_extent_admitted" t4cRuntimeSrc "compaction-fusion"
+          (fun d -> d.Subject = "zs" && applied d && evidenceHas "one selection index shared by 2 companions (`ys`, `zs`)" d)
+          "a run-time source extent: the shared selection is admitted"
+      (let name = "compaction_t4c_runtime_extent_joint_pass"
+       match cppOfSource name t4cRuntimeSrc with
+       | Error e -> resultLine Fail name e; false
+       | Ok cpp ->
+           checkAll name cpp "one index over the run-time grid; one joint pass; ys and zs each wrap their own buffer; one shared position allocation"
+               [ "the shared index", countOf "new compound_index_t<1>(" cpp = 1 && cpp.Contains "compound_index_t<1>* keep__sel = new compound_index_t<1>(\"keep__sel\", keep__sel_grid, keep__count, keep__sel_pos);"
+                 "the run-time grid", cpp.Contains "size_t keep__sel_grid = keep.extents[0];"
+                 "one joint pass", countOf "keep__sel_q += (size_t)keep__sel_pool[keep__sel_i];" cpp = 1
+                 "ys / zs own buffers", cpp.Contains "Compound<int64_t, 1> ys { keep__sel_v0, keep__sel, ys_trail };" && cpp.Contains "Compound<int64_t, 1> zs { keep__sel_v1, keep__sel, zs_trail };"
+                 "one shared position allocation", countOf "compound_index_t<1>::IDX[" cpp = 1 ])
+      (let name = "compaction_t4c_runtime_extent_gather_guard_both_edges"
+       match withGather (fun () -> cppOfSource name t4cRuntimeSrc) with
+       | Error e -> resultLine Fail name e; false
+       | Ok cpp ->
+           let maskPass = cpp.IndexOf "if (keep__one) {"
+           let fallback = cpp.IndexOf "if (!keep__one) {"
+           let joint = cpp.IndexOf "keep__sel_q += (size_t)keep__sel_pool[keep__sel_i];"
+           checkAll name cpp "gather: the run-time cap test over BOTH companion buffers at the mask (true edge: the mask pass gathers both), the first companion's guarded joint pass (false edge) into the same buffers"
+               [ "the run-time cap comparison", cpp.Contains "const bool keep__one = (size_t)("
+                 "true edge: the mask pass gathers both companions", maskPass >= 0 && cpp.Contains "keep__sv0[keep__count] = xs[__mi];" && cpp.Contains "keep__sv1[keep__count] = ws[__mi];"
+                 "false edge: the first companion's guarded joint pass, after the mask pass", fallback > maskPass && joint > fallback
+                 "into the same buffers", cpp.Contains "keep__sv0[keep__sel_q] = keep__sel_d0[keep__sel_i];" && cpp.Contains "keep__sv1[keep__sel_q] = keep__sel_d1[keep__sel_i];"
+                 "the shared index adopts the shared positions", cpp.Contains "keep__count, keep__sp);" ]) ]
 
 /// Review finding 8: a `y` reference whose ONLY occurrence is an `ungroup`'s
 /// SOURCE index record (which `childrenOf` never hands out) demands the
@@ -4772,7 +5195,7 @@ let private memberHoistFailClosedGuards () : bool list =
                     | _ -> ()) host.Value
                 Blade.Optimize.MemberHoistTable.record
                     { HostId = host.Id; HostName = host.Name; SetId = set.Id; SetName = set.Name
-                      Kernels = Set.ofSeq kernels; Forced = 0 }
+                      Kernels = Set.ofSeq kernels; Forced = 0; Admission = "hand-built" }
                 Blade.Effects.Decisions.start ()
                 let emitted = try Ok (emit ir) with ex -> Error ("raised: " + ex.Message)
                 let ds = Blade.Effects.Decisions.drain ()
@@ -4943,6 +5366,20 @@ let runOptimizeTests () =
           compactionV2SelCapFallback ()
           compactionV2RuntimeGuard ()
           yield! compactionV2DecisionCases ()
+          // T4c (round 3, W2-2): one selection for every compound over a mask
+          t4cDefaultEmission ()
+          t4cKeyedEmission ()
+          t4cReproEmission ()
+          t4cGatherEmission ()
+          t4cUnsharedEmission ()
+          t4cGateOffEmission ()
+          t4cLlvmEmission ()
+          yield! t4cDecisionCases ()
+          // T4c fix round (Codex diff review of 278353cb, findings 1-3)
+          yield! t4cLegacySingletonIdentity ()
+          yield! t4cNewSingletonRoutes ()
+          yield! t4cStorageProofCases ()
+          yield! t4cRuntimeRoutes ()
           // Membership hoisting (round 3 B-T1).
           yield! memberHoistDecisionCases ()
           memberHoistEmission ()

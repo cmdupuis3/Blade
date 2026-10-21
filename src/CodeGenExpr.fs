@@ -2279,6 +2279,93 @@ and materializeMaskFormCounted (subst: SubstMap) (names: Map<IRId, string>) (var
                    "}" ], None)
             | Some c, None ->
                 ([ $"size_t {c} = 0;" ] @ countedLoop "" c, None)
+            | Some c, Some plan when plan.Shared.IsSome ->
+                // T4c + T4a: the shared selection's ONE pass is this mask
+                // pass -- per 256-cell block the predicate loop, then the
+                // branchless gather of EVERY companion's source cell at the
+                // one cursor `c` (and `i` into the shared position buffer
+                // when any companion demands it), n + 1 private cells per
+                // buffer; each companion's serial chain fed after each
+                // block. Published to the selection (`BuiltCpp`), which the
+                // first companion completes and every companion adopts.
+                let s = plan.Shared.Value
+                let maskSrc =
+                    match arrExpr with
+                    | IRVar (sid, _) -> Some sid
+                    | _ -> None
+                let members =
+                    s.Members |> List.map (fun (cid, _, src) ->
+                        let srcName = if Some src = maskSrc then Some arrName else Map.tryFind src names
+                        (cid, srcName, elemTypeToCpp s.ElemTypes.[cid]))
+                if members |> List.exists (fun (_, n, _) -> n.IsNone) then
+                    // a source this emission cannot name: the plain counted
+                    // pass; the first companion runs the joint pass itself
+                    ([ $"size_t {c} = 0;" ] @ countedLoop "" c, None)
+                else
+                let bufs = members |> List.mapi (fun j (cid, n, e) -> (cid, n.Value, e, $"{varName}__sv{j}"))
+                let gp = if s.PositionsNeeded then Some $"{varName}__sp" else None
+                let feeds =
+                    bufs |> List.collect (fun (cid, _, _, buf) ->
+                        Blade.Optimize.CompactionTable.foldsOf cid |> List.choose (fun f ->
+                            if not f.InPass then None
+                            else
+                            match resolveCallable f.FoldKernel with
+                            | Some cl when cl.Params.Length = 2 && not (fpReassocEnabled () && foldReorderLicensed cl) -> Some (f, cl, buf)
+                            | _ -> None))
+                    |> List.mapi (fun k (f, cl, buf) ->
+                        let (wcode, wn) = genCallableWrapper names $"{varName}__fold{k}" cl
+                        (f, $"{varName}__fold{k}", wcode, wn, buf))
+                if not feeds.IsEmpty then (foldLanesUsedCell ()).Value <- true
+                let feedDecls =
+                    feeds |> List.collect (fun (_, acc, wcode, _, _) -> wcode @ [ $"double {acc} = double(0);" ])
+                let block (body: string) (lo: string) (hi: string) =
+                    [ $"{body}for (size_t __mi = {lo}; __mi < {hi}; __mi++) {{"
+                      $"{body}    {srcElemStr} {predParamName} = {arrName}[__mi];"
+                      $"{body}    {varName}[__mi] = {wname}({predParamName});"
+                      $"{body}}}"
+                      $"{body}for (size_t __mi = {lo}; __mi < {hi}; __mi++) {{" ]
+                    @ (bufs |> List.map (fun (_, src, _, buf) -> $"{body}    {buf}[{c}] = {src}[__mi];"))
+                    @ (gp |> Option.map (fun p -> [ $"{body}    {p}[{c}][0] = __mi;" ]) |> Option.defaultValue [])
+                    @ [ $"{body}    {c} += (size_t){varName}[__mi];"
+                        $"{body}}}" ]
+                let alloc (ind: string) (declare: bool) =
+                    (bufs |> List.map (fun (_, _, e, buf) ->
+                        let vt = if declare then e + "* " else ""
+                        $"{ind}{vt}{buf} = new {e}[(size_t)({srcBound}) + 1];"))
+                    @ (gp |> Option.map (fun p ->
+                        let pt = if declare then "compound_index_t<1>::IDX* " else ""
+                        [ $"{ind}{pt}{p} = new compound_index_t<1>::IDX[(size_t)({srcBound}) + 1];" ]) |> Option.defaultValue [])
+                let pass (ind: string) =
+                    compactionBlockLoopMulti ind $"{varName}__g" srcBound "double" c
+                        (feeds |> List.map (fun (_, acc, _, wn, buf) -> (acc, wn, buf))) block
+                let alsoPos = if gp.IsSome then " and the shared kept positions" else " (positions elided)"
+                let what = $"// compaction fusion v2, shared selection (T4c + T4a): `{varName}`'s pass also gathers its {bufs.Length} companions{alsoPos} -- one sweep of the sources (per 256-cell block: the predicate loop, then the gather over the L1-resident block), n + 1 private cells per buffer, m + 1 touched"
+                let lines, guard =
+                    match s.StaticN with
+                    | Some _ -> ([ what; $"size_t {c} = 0;" ] @ alloc "" true @ feedDecls @ pass "", None)
+                    | None ->
+                        let g = $"{varName}__one"
+                        ([ what
+                           $"size_t {c} = 0;"
+                           $"const bool {g} = (size_t)({srcBound}) < (size_t){s.SelCapCells}ULL;" ]
+                         @ (bufs |> List.map (fun (_, _, e, buf) -> $"{e}* {buf} = nullptr;"))
+                         @ (gp |> Option.map (fun p -> [ $"compound_index_t<1>::IDX* {p} = nullptr;" ]) |> Option.defaultValue [])
+                         @ feedDecls
+                         @ [ $"if ({g}) {{" ]
+                         @ alloc "    " false
+                         @ pass "    "
+                         @ [ "} else {" ]
+                         @ countedLoop "    " c
+                         @ [ "}" ], Some g)
+                for (f, acc, _, _, _) in feeds do f.EmittedCpp.Value <- Some acc
+                s.BuiltCpp.Value <-
+                    Some { Blade.Optimize.SharedSelectionCpp.Index = None
+                           Blade.Optimize.SharedSelectionCpp.Compacts = bufs |> List.map (fun (cid, _, _, buf) -> (cid, buf)) |> Map.ofList
+                           Blade.Optimize.SharedSelectionCpp.Pos = gp
+                           Blade.Optimize.SharedSelectionCpp.Guard = guard
+                           Blade.Optimize.SharedSelectionCpp.Feeds = feeds |> List.map (fun (_, acc, _, wn, buf) -> (acc, wn, buf))
+                           Blade.Optimize.SharedSelectionCpp.AtMask = true }
+                (lines, None)
             | Some c, Some plan ->
                 // T4a: x is read ONCE here -- predicate, bit, the kept value
                 // (and position) stored at the cursor `c`, which is the

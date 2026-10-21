@@ -1,0 +1,29 @@
+// TEST: Compaction fusion T4c: two companions over one mask share one selection
+// `keep` feeds two compounds over DIFFERENT columns of its index space (`blade
+// plan`: `[compaction-fusion v2] y1: applied [one selection index shared by 2
+// companions (`y1`, `y2`), freed once after `y2`; ...]`): ONE selection index,
+// counted in `keep`'s mask pass, its kept positions (the keyed reads below
+// demand them) filled by ONE joint pass at `y1` that also gathers `y2`; each
+// companion keeps its OWN compact data store around the shared index. Keyed
+// reads address the same source positions in both; every value is the
+// as-written program's (the interpreter runs each compound's own passes).
+type Ix = Idx<11>
+let x = method_for(range<Ix>) <@> lambda(i) -> Float64((Int64(i) * 4) % 11) |> compute
+let w = method_for(range<Ix>) <@> lambda(i) -> Int64(i) * 10 - 3 |> compute
+let keep = mask(x, lambda(v) -> v > 4.5)
+let y1 = compound(x, keep)
+// EXPECT: y1 = [8.0, 5.0, 9.0, 6.0, 10.0, 7.0]
+let y2 = compound(w, keep)
+// EXPECT: y2 = [17, 37, 47, 67, 77, 97]
+let n1 = extents(y1)
+// EXPECT: n1 = 6
+let n2 = extents(y2)
+// EXPECT: n2 = 6
+let k1 = y1(5)
+// EXPECT: k1 = 9.0
+let k2 = y2(5)
+// EXPECT: k2 = 47
+let s1 = reduce(y1 * y1, (+))
+// EXPECT: s1 = 355.0
+let s2 = reduce(y2, (+))
+// EXPECT: s2 = 342

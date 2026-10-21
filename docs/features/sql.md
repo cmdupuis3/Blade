@@ -96,6 +96,79 @@ v7: `TypeCheck.fs compoundViewType`, IR `IRCompoundMask`, index kinds
 carrier, now reached only from a SparseIdx head.) Tests: `sql-masks/001`,
 `index-types/001–017`; the sparse counterparts are `index-types/171–184`.
 
+### Single-pass and shared selection (compaction fusion v2)
+
+A rank-1 compound over a let-bound `keep = mask(x, pred)` is a *compaction*:
+the kept cells are counted in the mask's own pass, and the value gather (plus
+the kept-position fill, when anything reads source positions) is ONE
+branchless pass at the compound. The kept-position table is compiler
+metadata: a fail-safe demand census elides it when every use reads only the
+compact buffer or the cardinality (folds, `extents`, derived maps, printing);
+a keyed read, `<|:>`, an argument, an alias or a capture keeps it. Under the
+opt-in `BLADE_COMPACTION_FUSION=gather` the gather moves into the mask pass
+itself (n + 1 private cells per buffer, capped by `BLADE_TILE_TUNE sel_cap`).
+
+When ONE mask feeds several compounds -- `y_j = compound(c_j, keep)` over
+different columns of the mask's index space (the WHERE of a multi-column
+SELECT) -- they share **one selection** (T4c): one index, counted in the
+mask pass, its positions (if any companion demands them) filled by one joint
+pass that gathers every companion at once, each companion keeping its own
+compact data store around the shared index. Values, cardinality, positions
+and the folds over each companion are exactly those of the separate passes.
+
+```blade
+type Ix = Idx<11>
+let x = method_for(range<Ix>) <@> lambda(i) -> Float64((Int64(i) * 4) % 11) |> compute
+let w = method_for(range<Ix>) <@> lambda(i) -> Int64(i) * 10 - 3 |> compute
+let keep = mask(x, lambda(v) -> v > 4.5)
+let y1 = compound(x, keep)
+let y2 = compound(w, keep)
+let k2 = y2(5)
+// EXPECT: k2 = 47
+let s2 = reduce(y2, (+))
+// EXPECT: s2 = 342
+```
+
+A mask predicate built from membership probes -- the semijoin `mask(cust,
+lambda(c) -> contains(elig, c))`, the antijoin `!contains(...)`, either `&&` a
+pure, total cell test -- joins the same plan when membership hoisting (§5)
+admitted that probe: its admission record certifies the probe pure and total
+(a stored, never-assigned set bound before the host; nothing writes), and every
+other operand must be a pure, total scalar of the cell. A probe membership
+hoisting declined (or `BLADE_MEMBER_HOIST=0`) keeps its scan, and the
+compaction keeps its separate passes. The shared selection declines -- each
+compound keeping its own passes -- when the mask is assigned or read between
+it and its last companion, when anything in that interval may write, when a
+companion is assigned, and when a companion's source is deferred or bound after
+the first companion. The mask's source and every companion's source must be
+proved STORED -- through any chain of `let B = A` aliases, as membership
+hoisting proves a set (a deferred map, directly or behind an alias, a range, a
+streamed read decline) -- and never assigned. `blade plan` rule `compaction-fusion`; `BLADE_COMPACTION_FUSION=unshared`
+is the pre-T4c form (one index per compound), `b4` the round-2 form, `0` off.
+Under `b4` and `unshared` the certificate is never used, but membership
+hoisting is independent of both: an admitted probe still reads its hoisted
+structure there (only membership hoisting's own refusal, or
+`BLADE_MEMBER_HOIST=0`, keeps the per-probe scan).
+
+Which SINGLE compounds changed emission with T4c, and why -- exactly two
+shapes, each newly admitted:
+
+- a single `compound(c, keep)` over a stored column `c` that is NOT the mask's
+  source, with a total predicate: before, its own count, fill and gather
+  passes ("the mask's source is not the compound's dense operand"); now the
+  shared-selection path with one companion -- counted in the mask pass, one
+  gather pass (the semijoin's `compound(amt, keep)` shape);
+- a single compound whose predicate is a CERTIFIED membership probe: before,
+  `totalScalar` refused the call and the compaction kept its separate passes;
+  now, over the mask's source, the ordinary compaction plan (count in the
+  mask pass, one fill+gather pass), and over another column the
+  shared-selection path above.
+
+A single `compound(x, keep)` over the mask's OWN source with a total
+predicate (the maskagg shape, `index-types/515–531`) emits exactly the text it
+did before, in both lanes (pinned against `unshared` by `blade test
+optimize`). Tests: `index-types/515–542`.
+
 ## 2a. Missing values at a provider boundary — `read_present` / `present`
 
 **The boundary rule: a missing value never crosses a provider boundary disguised
@@ -275,7 +348,12 @@ their short circuit (only the `contains` node reads the structure). One C core
 (`src/cpp/blade_member.h`) serves both compiled lanes; the interpreter keeps the
 scan. A writing party (the set's producer, the probing kernel, a fold kernel or
 seed, the host's payload), an unstored set, a kernel two hosts name, or non-Int64
-keys keep the per-probe scan. Tests: `sql-unique-contains/011–026`, the
+keys keep the per-probe scan. An admitted probe also lets the semijoin's
+compaction fuse: membership hoisting's admission certifies the mask predicate
+pure and total (§2, "Single-pass and shared selection"), so `y = compound(amt,
+keep)` over a hoisted `keep = mask(cust, lambda(c) -> contains(elig, c))` is
+counted in the mask pass and gathered in one pass (corpus
+`index-types/537-539`). Tests: `sql-unique-contains/011–026`, the
 `sql-semijoins` tests (correctness under the hoist, including "Pattern Does Not
 Fire On Conjunction").
 

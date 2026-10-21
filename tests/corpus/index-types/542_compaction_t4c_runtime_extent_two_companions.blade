@@ -1,0 +1,28 @@
+// TEST: Compaction fusion T4c: two companions over a run-time source extent
+// The source axis's extent is known only at run time. Both columns are
+// `|> compute` maps over the run-time range (stored pools: the range itself,
+// `0..k |> compute`, keeps a virtual type and is never a shared-selection
+// source), so the two companions share ONE selection (`blade plan`:
+// `[compaction-fusion v2] ys: applied [one selection index shared by 2
+// companions (`ys`, `zs`) ...]`): counted in `keep`'s pass, the kept
+// positions (the keyed read demands them) filled by one joint pass at `ys`
+// over the run-time grid. Under the opt-in mask-site gather the selectivity
+// cap is a RUN-TIME test over BOTH companion buffers: while it holds `keep`'s
+// pass gathers both, otherwise `ys` runs the joint pass into the same buffers
+// (`blade test optimize` asserts both edges' wiring; the cli block runs them).
+// The LLVM lane refuses run-time ranges. Values are the as-written
+// program's; integer-valued data, every sum exact.
+let k = reduce([3, 4, 5], (+))
+// EXPECT: k = 12
+let ks = 0..k |> compute
+let xs = method_for(ks) <@> lambda(i) -> i * 1 |> compute
+let ws = method_for(ks) <@> lambda(i) -> i * 3 + 1 |> compute
+let keep = mask(xs, lambda(v) -> v > 4)
+let ys = compound(xs, keep)
+// EXPECT: ys = [5, 6, 7, 8, 9, 10, 11]
+let zs = compound(ws, keep)
+// EXPECT: zs = [16, 19, 22, 25, 28, 31, 34]
+let zs_k9 = zs(9)
+// EXPECT: zs_k9 = 28
+let total = reduce(ys, (+)) + reduce(zs, (+))
+// EXPECT: total = 231

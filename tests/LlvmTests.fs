@@ -598,6 +598,10 @@ let memberHoistRoutes : MemberHoistRoute list =
       row "sql-semijoins" "Semijoin Float64" [] 0 None
       row "sql-semijoins" "Unique Of Semijoin" [ "inB" ] 0 (Some "the IR node IRUnique in array position -- no arm in the llvm lane")
       row "sql-semijoins" "Semijoin Then Mask" [ "inB" ] 0 None
+      // compaction fusion T4c's membership-probe certificate (round 3 W2-2)
+      row "index-types" "Compaction fusion T4c: a membership-probe predicate certified by member-hoist's admission" [ "keep" ] 0 None
+      row "index-types" "Compaction fusion T4c: a probe membership hoisting declines is not certified" [] 0 None
+      row "index-types" "Compaction fusion T4c: the antijoin `!contains` certified, two companions" [ "drop" ] 0 None
       row "memfree" "Memfree Inline Sparse Gather In Every Scalar Position" [] 0 (Some "a sparse-index initializer")
       row "reynolds" "Reynolds Dedup Sees Contains" [] 0 None
       row "reynolds" "Reynolds Antisym Dedup Sees Contains" [] 0 None ]

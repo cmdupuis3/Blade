@@ -1,0 +1,19 @@
+// TEST: Compaction fusion T4c: an intervening failure between companions comes before the empty fold (aborts)
+// An all-false mask leaves m = 0. The shared selection's one joint pass at
+// `y1` also gathers `y2` (nothing kept: only the slack cells are written,
+// nothing is exposed). The integer division by the empty extent written
+// BETWEEN the companions is the first failure (BL8013 at its own line, 10
+// once the harness drops the TEST line) in every lane, before the unseeded
+// fold's own empty check (BL8003) at `checksum` -- under BLADE_FP_REPRO=1
+// that fold's chain was fed in the joint pass and never started.
+type Ix = Idx<1003>
+let x = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i)) |> compute
+let c2 = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) * 2) |> compute
+let keep = mask(x, lambda(v) -> v > 5000.0)
+let y1 = compound(x, keep)
+let boom = 10 / extents(y1)
+let y2 = compound(c2, keep)
+let checksum = reduce(y2 * y2, (+))
+// ABORT: BL8013
+// ABORT: -->
+// ABORT: .blade:13

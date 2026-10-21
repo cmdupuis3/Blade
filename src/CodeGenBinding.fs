@@ -2582,6 +2582,16 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
              match Blade.Optimize.CompactionTable.tryCompound binding.Id, maskExpr with
              | Some p, IRVar (mId, _) when mId = p.MaskId && rank1 && trailingDimCount = 0 && maskPre.IsEmpty -> Some p
              | _ -> None
+         // T4c: a companion of a shared selection -- the first one runs the
+         // selection's one joint pass and builds the shared index, the others
+         // adopt it (their chains were fed there: no reset here).
+         let sharedLines =
+             match planHere with
+             | Some p when p.Shared.IsSome -> genSharedCompanion ctx ind binding name elemCpp denseName maskName p p.Shared.Value
+             | _ -> None
+         match sharedLines with
+         | Some lines -> (densePre @ lines, addVarName binding.Id name ctx)
+         | None ->
          // T4a: the mask's pass already gathered (and fed the folds it
          // published); otherwise the folds' handshakes start clean here.
          let gathered = planHere |> Option.bind (fun p -> p.GatherCpp.Value)
@@ -2736,6 +2746,146 @@ and genFusedCompaction (ctx: CodeGenContext) (ind: string) (name: string) (elemC
         (wrapperCode |> List.map (fun s -> ind + s)) @ [ $"{ind}{elemCpp} {acc} = {elemCpp}(0);" ]))
     @ b4Pass ind $"{name}_compact" pos (feeds |> List.map (fun (_, acc, _, wn) -> (acc, wn)))
     @ adopt $"{name}_compact" pos "the table this pass filled"
+
+/// A companion of a SHARED SELECTION (Blade.Optimize.planCompactionFusion,
+/// T4c): every `y_j = compound(c_j, keep)` over one mask shares ONE
+/// `compound_index_t<1>` (`<keep>__sel`) owned by the plan.
+///   * the FIRST companion completes the selection: ONE branchless pass over
+///     the source axis gathers every companion (`b = keep[i]; v_j[q] =
+///     c_j[i]; [pos[q] = i;] q += b`, m + 1 cells per buffer, the slack never
+///     exposed) and feeds each companion's in-pass serial chains (B4c) --
+///     unless `keep`'s own pass already gathered (T4a, `gather`), when it
+///     only runs that pass itself while the run-time cap guard is false --
+///     then builds the index from the mask pass's count and the positions
+///     (or cardinality-only, positions elided by every companion's census);
+///   * every companion's wrapper borrows the index and owns only its own
+///     compact data store (`deallocate_compound_shared_index`); in a scoped
+///     frame the ONE index-only free would be registered with the last
+///     companion -- registerShapedAlloc is a no-op at main's top level, where
+///     compound() lives (BL6002), so no registration and no free is executed:
+///     every compound keeps program lifetime.
+/// None: the selection is not available here (the mask did not count, a
+/// source has no name in scope, or the first companion fell back), and the
+/// caller takes its ordinary path -- correct by itself, one index of its own.
+and genSharedCompanion (ctx: CodeGenContext) (ind: string) (binding: IRBinding) (name: string) (elemCpp: string) (denseName: string) (maskName: string) (p: Blade.Optimize.CompactionPlan) (s: Blade.Optimize.SharedSelection) : string list option =
+    let idx = $"{maskName}__sel"
+    let (firstId, _, _) = List.head s.Members
+    let (lastId, lastName, _) = List.last s.Members
+    let isLast = binding.Id = lastId
+    let companions = s.Members |> List.map (fun (_, n, _) -> $"`{n}`") |> String.concat ", "
+    let posNote = if s.PositionsNeeded then "keyed reads by binary search over the shared kept positions" else "positions elided: no companion's census found a reader"
+    let wrap (compact: string) (how: string) =
+        registerShapedAlloc name "deallocate_compound_shared_index" name
+        if isLast then registerShapedAlloc idx "deallocate_compound_index_only" idx
+        recordCodegenDecision "compound" name Blade.Effects.Applied
+            [ $"representation: rank-1 compaction sharing `{maskName}`'s ONE selection index with {s.Members.Length} companions ({companions}) -- compaction fusion v2, T4c; no hash table; {posNote}"
+              $"{how}; `{name}` owns its compact data store only; the index is the plan's (no companion frees it; at main's top level no free is executed: program lifetime)" ]
+        [ $"{ind}size_t {name}_trail = 1;"
+          $"{ind}compound_index_t<1>* {name}_idx = {idx}; // the shared selection's index: owned by the plan, borrowed by `{name}`"
+          $$"""{{ind}}nested_array_utilities::Compound<{{elemCpp}}, 1> {{name}} { {{compact}}, {{idx}}, {{name}}_trail };""" ]
+        @ (if isLast then
+               [ $"{ind}// T4c lifetime: `{idx}` is owned by the plan, never by a companion (each owns only its own data: deallocate_compound_shared_index); in a scoped frame its ONE index-only free (deallocate_compound_index_only({idx})) would be registered here, with the last companion `{name}` -- at main's top level (compound() is top-level only, BL6002) there is no scope, so no registration and no free is executed: program lifetime" ]
+           else [])
+    if binding.Id <> firstId then
+        match s.BuiltCpp.Value with
+        | Some b when b.Index.IsSome && b.Compacts.ContainsKey binding.Id ->
+            Some ([ $"{ind}// compaction fusion v2, shared selection (T4c): `{name}`'s cells were gathered by the selection's one pass; its wrapper adopts its own buffer and the shared index" ]
+                  @ wrap b.Compacts.[binding.Id] "gathered by the shared selection's one pass (complete before the first companion was bound)")
+        | _ -> None
+    else
+    match p.CountCpp.Value with
+    | None -> None
+    | Some cnt ->
+    let srcs =
+        s.Members |> List.mapi (fun j (cid, _, src) ->
+            let srcName = if cid = binding.Id then Some denseName else Map.tryFind src ctx.VarNames
+            (cid, j, srcName, elemTypeToCpp s.ElemTypes.[cid]))
+    // FAIL CLOSED: the joint pass reads every source's pool BY NAME here, so
+    // a source this emission still holds as a deferred computation (a name
+    // with no pool behind it) takes the ordinary per-compound path instead --
+    // never forcing a later companion's operand early (its producer may fail).
+    // The planner's storage proof makes this unreachable; it is checked anyway.
+    if srcs |> List.exists (fun (_, _, n, _) -> n.IsNone)
+       || s.Members |> List.exists (fun (_, _, src) -> ctx.DeferredComputations.ContainsKey src) then None
+    else
+    let built = s.BuiltCpp.Value |> Option.filter (fun b -> b.AtMask)
+    let bufOf (cid: IRId) (j: int) =
+        match built with
+        | Some b when b.Compacts.ContainsKey cid -> b.Compacts.[cid]
+        | _ -> $"{idx}_v{j}"
+    let pos =
+        match built with
+        | Some b -> b.Pos
+        | None -> if s.PositionsNeeded then Some $"{idx}_pos" else None
+    let i1 = ind + "    "
+    // The joint pass into the given buffers (declared or not), feeding `feeds`.
+    let jointPass (ind: string) (declare: bool) (feeds: (string * string * string) list) =
+        let i1 = ind + "    "
+        let posTy = if declare then "compound_index_t<1>::IDX* " else ""
+        let tyOf (e: string) = if declare then e + "* " else ""
+        [ $"{ind}bool* {idx}_pool = nested_array_utilities::pool_base({maskName}.data);" ]
+        @ (srcs |> List.map (fun (_, j, n, e) -> $"{ind}{e}* {idx}_d{j} = nested_array_utilities::pool_base({n.Value}.data);"))
+        @ (pos |> Option.map (fun pv -> [ $"{ind}{posTy}{pv} = new compound_index_t<1>::IDX[{cnt} + 1];" ]) |> Option.defaultValue [])
+        @ (srcs |> List.map (fun (cid, j, _, e) -> $"{ind}{tyOf e}{bufOf cid j} = new {e}[{cnt} + 1];"))
+        @ [ $"{ind}{{"
+            $"{i1}size_t {idx}_q = 0;" ]
+        @ compactionPassLoopMulti i1 idx $"{idx}_i" $"{idx}_grid" $"{idx}_q" feeds (fun body ->
+            (srcs |> List.map (fun (cid, j, _, _) -> $"{body}{bufOf cid j}[{idx}_q] = {idx}_d{j}[{idx}_i];"))
+            @ (pos |> Option.map (fun pv -> [ $"{body}{pv}[{idx}_q][0] = {idx}_i;" ]) |> Option.defaultValue [])
+            @ [ $"{body}{idx}_q += (size_t){idx}_pool[{idx}_i];" ])
+        @ [ $"{ind}}}" ]
+    let passLines, how =
+        match built with
+        | Some b ->
+            let fallback =
+                match b.Guard with
+                | None -> []
+                | Some guard ->
+                    [ $"{ind}if (!{guard}) {{"
+                      $"{i1}// n is over the selectivity cap (BLADE_TILE_TUNE sel_cap): the joint pass here, m + 1 cells per buffer" ]
+                    @ jointPass i1 false b.Feeds
+                    @ [ $"{ind}}}" ]
+            ([ $"{ind}// compaction fusion v2, shared selection (T4c + T4a): `{maskName}`'s own pass counted AND gathered the {s.Members.Length} companions; the first companion completes the shared index"
+               $"{ind}size_t {idx}_grid = {maskName}.extents[0];" ]
+             @ fallback,
+             (match b.Guard with
+              | Some _ -> $"gathered in `{maskName}`'s mask pass (T4a) while n is within the selectivity cap, else by the joint pass at `{name}`"
+              | None -> $"gathered in `{maskName}`'s mask pass (T4a)"))
+        | None ->
+            // every companion's in-pass serial chains (B4c), each over its own buffer
+            let feeds =
+                srcs |> List.collect (fun (cid, j, _, _) ->
+                    Blade.Optimize.CompactionTable.foldsOf cid |> List.choose (fun f ->
+                        if not f.InPass then None
+                        else
+                        match resolveCallable f.FoldKernel with
+                        | Some cl when cl.Params.Length = 2 && not (fpReassocEnabled () && foldReorderLicensed cl) -> Some (f, cl, bufOf cid j)
+                        | _ -> None))
+                |> List.mapi (fun k (f, cl, buf) ->
+                    let (wrapperCode, wname) = genCallableWrapper ctx.VarNames $"{idx}__fold{k}" cl
+                    (f, $"{idx}__fold{k}", wrapperCode, wname, buf))
+            if not feeds.IsEmpty then (foldLanesUsedCell ()).Value <- true
+            for (f, acc, _, _, _) in feeds do f.EmittedCpp.Value <- Some acc
+            let feedNote = if feeds.IsEmpty then "" else $"; the serial chain of {feeds.Length} fold(s) fed per 256-cell block"
+            let posWhat = if pos.IsSome then " and fills the shared kept positions" else " (positions elided)"
+            ([ $"{ind}// compaction fusion v2, shared selection (T4c): `{maskName}` was counted in its own mask pass; ONE branchless pass gathers its {s.Members.Length} companions ({companions}){posWhat}, m + 1 cells per buffer, the slack never exposed"
+               $"{ind}size_t {idx}_grid = {maskName}.extents[0];" ]
+             @ (feeds |> List.collect (fun (_, acc, wrapperCode, _, _) ->
+                    (wrapperCode |> List.map (fun l -> ind + l)) @ [ $"{ind}double {acc} = double(0);" ]))
+             @ jointPass ind true (feeds |> List.map (fun (_, acc, _, wn, buf) -> (acc, wn, buf))),
+             $"gathered by the shared selection's one joint pass at `{name}`{feedNote}")
+    let idxLine =
+        match pos with
+        | Some pv -> $"{ind}compound_index_t<1>* {idx} = new compound_index_t<1>(\"{idx}\", {idx}_grid, {cnt}, {pv}); // the SHARED selection index (T4c): one build for {s.Members.Length} companions, owned by the plan"
+        | None -> $"{ind}compound_index_t<1>* {idx} = new compound_index_t<1>(\"{idx}\", {idx}_grid, {cnt}, compound_index_t<1>::positions_elided); // the SHARED selection index (T4c), positions elided: one build for {s.Members.Length} companions, owned by the plan"
+    s.BuiltCpp.Value <-
+        Some { Blade.Optimize.SharedSelectionCpp.Index = Some idx
+               Blade.Optimize.SharedSelectionCpp.Compacts = srcs |> List.map (fun (cid, j, _, _) -> (cid, bufOf cid j)) |> Map.ofList
+               Blade.Optimize.SharedSelectionCpp.Pos = pos
+               Blade.Optimize.SharedSelectionCpp.Guard = (match built with Some b -> b.Guard | None -> None)
+               Blade.Optimize.SharedSelectionCpp.Feeds = (match built with Some b -> b.Feeds | None -> [])
+               Blade.Optimize.SharedSelectionCpp.AtMask = built.IsSome }
+    Some (passLines @ [ idxLine ] @ wrap (bufOf binding.Id (srcs |> List.findIndex (fun (cid, _, _, _) -> cid = binding.Id))) how)
 
 and genSparseInitBinding (ctx: CodeGenContext) (binding: IRBinding) : string list * CodeGenContext =
     let ind = indentStr ctx
@@ -2921,9 +3071,22 @@ and genMaskBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
     plan |> Option.iter (fun p ->
         p.CountCpp.Value <- None
         p.GatherCpp.Value <- None
-        for f in Blade.Optimize.CompactionTable.foldsOf p.CompoundId do f.EmittedCpp.Value <- None)
+        for f in Blade.Optimize.CompactionTable.foldsOf p.CompoundId do f.EmittedCpp.Value <- None
+        // T4c: the shared selection's handshake, and every companion's chains
+        p.Shared |> Option.iter (fun s ->
+            s.BuiltCpp.Value <- None
+            for (cid, _, _) in s.Members do
+                for f in Blade.Optimize.CompactionTable.foldsOf cid do f.EmittedCpp.Value <- None))
     let countVar = plan |> Option.map (fun _ -> $"{name}__count")
-    let gatherPlan = plan |> Option.filter (fun p -> p.GatherAtMask)
+    // T4c: a shared selection's mask-site gather reads every companion source
+    // by name -- FAIL CLOSED (count only; the first companion then declines
+    // too) when one is still a deferred computation in this emission.
+    let gatherPlan =
+        plan |> Option.filter (fun p ->
+            p.GatherAtMask
+            && (match p.Shared with
+                | Some s -> not (s.Members |> List.exists (fun (_, _, src) -> ctx.DeferredComputations.ContainsKey src))
+                | None -> true))
     let matStmts =
         match materializeMaskFormCounted emptySubst ctx.VarNames name elemStr arrExpr predExpr countVar gatherPlan with
         | Some (s, allocs, counted, gathered) ->

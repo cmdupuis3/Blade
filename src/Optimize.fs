@@ -96,16 +96,23 @@ let cellEpilogueMode () : CellEpilogueMode =
         | _ -> CellEpilogueOn
 
 let cellEpilogueEnabled () = cellEpilogueMode () <> CellEpilogueOff
-/// BLADE_COMPACTION_FUSION (`planCompactionFusion`), four values:
-///   unset / `1` / `on` -> compaction fusion v2 (round 3, T4b): the round-2
-///                         plan with the kept-position table ELIDED when the
-///                         demand census proves no consumer reads it; the
-///                         gather stays at the compound (B4's one pass)
+/// BLADE_COMPACTION_FUSION (`planCompactionFusion`), five values:
+///   unset / `1` / `on` -> compaction fusion v2 (round 3, T4b + T4c): the
+///                         round-2 plan with the kept-position table ELIDED
+///                         when the demand census proves no consumer reads
+///                         it; the gather stays at the compound (B4's one
+///                         pass); every compound over ONE mask shares ONE
+///                         selection index (T4c), its gathers one pass
 ///   `gather`           -> v2 plus T4a (OPT-IN this round: its own measured
 ///                         gain, 0.18-0.36 ms on maskagg, is under the round's
 ///                         0.4 ms acceptance line): the gather -- and the
 ///                         strict chain -- in the mask pass, n + 1 private
-///                         cells under BLADE_TILE_TUNE sel_cap
+///                         cells under BLADE_TILE_TUNE sel_cap (for a shared
+///                         selection: J <= 4 companions, every source bound
+///                         before the mask)
+///   `unshared`         -> v2 WITHOUT T4c (the pre-T4c v2: one index per
+///                         compound; a mask feeding several compounds fuses
+///                         the last one only)
 ///   `b4`               -> the exact round-2 form (B4): count in the mask
 ///                         pass, ONE fill+gather pass at the compound,
 ///                         positions always built
@@ -113,19 +120,21 @@ let cellEpilogueEnabled () = cellEpilogueMode () <> CellEpilogueOff
 ///                         records `declined -- disabled by
 ///                         BLADE_COMPACTION_FUSION` and both emitters keep the
 ///                         separate count / fill / gather / pool passes
-/// `b4` and `gather` are both knob MIRRORS (`optimizerGateMirrors`): opt-diff
-/// compares each against the default. Read per call.
+/// `b4`, `gather` and `unshared` are knob MIRRORS (`optimizerGateMirrors`):
+/// opt-diff compares each against the default. Read per call.
 type CompactionFusionMode =
     | CompactionFusionOff
     | CompactionFusionB4
     | CompactionFusionT4
     | CompactionFusionGather
+    | CompactionFusionUnshared
 
 let compactionFusionMode () : CompactionFusionMode =
     match Blade.Toolchain.envSwitch "BLADE_COMPACTION_FUSION" with
     | Blade.Toolchain.SwitchOff -> CompactionFusionOff
     | Blade.Toolchain.SwitchOther v when v.ToLowerInvariant() = "b4" -> CompactionFusionB4
     | Blade.Toolchain.SwitchOther v when v.ToLowerInvariant() = "gather" -> CompactionFusionGather
+    | Blade.Toolchain.SwitchOther v when v.ToLowerInvariant() = "unshared" -> CompactionFusionUnshared
     | _ -> CompactionFusionT4
 let compactionFusionEnabled () = compactionFusionMode () <> CompactionFusionOff
 
@@ -189,7 +198,7 @@ let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE
 /// against its predecessor as well as against no optimizer at all (the
 /// all-off comparison alone never runs the predecessor). Each gate here is
 /// also in `optimizerGates`.
-let optimizerGateMirrors : (string * string) list = [ ("BLADE_COMPACTION_FUSION", "b4"); ("BLADE_COMPACTION_FUSION", "gather") ]
+let optimizerGateMirrors : (string * string) list = [ ("BLADE_COMPACTION_FUSION", "b4"); ("BLADE_COMPACTION_FUSION", "gather"); ("BLADE_COMPACTION_FUSION", "unshared") ]
 
 /// The decline reason for a LICENSED row prodsum (B2r applies only where
 /// the build keeps the serial association). `lanes` RESERVES the opt-in
@@ -3230,6 +3239,46 @@ let planHotRowFolds (builder: IRBuilder) (programFuncs: IRCallable list) (modul:
         | IRLet _ -> planChain (chain b.Value)
         | _ -> ()
 
+/// One planned membership hoist (`planMembershipHoist`, below): the structure
+/// over set `SetId` built before host `HostId`, read by the probes of `SetId`
+/// in the host's kernels `Kernels` (and in the host's own emission, where a
+/// lane inlines those kernels). Defined here, ahead of compaction fusion,
+/// which reads it: the plan is the PROOF INPUT of T4c's membership-probe
+/// certificate (`Admission` is the planner's own five-party record).
+type MemberHoistPlan = {
+    HostId: IRId
+    HostName: string
+    SetId: IRId
+    SetName: string
+    Kernels: Set<IRId>
+    /// 0 = the chooser, 1 / 2 / 3 = BLADE_MEMBER_HOIST=linear / bitmap / hash.
+    Forced: int
+    /// The admission record (`membershipAdmits`' matrix) that let it through.
+    Admission: string
+}
+
+/// AsyncLocal like CompactionTable; reset once per program in
+/// `lowerTypedProgram` (let ids restart per compile).
+module MemberHoistTable =
+    open System.Threading
+    let private cell = new AsyncLocal<Map<IRId, MemberHoistPlan list>>()
+    let private get () = match box cell.Value with null -> Map.empty | _ -> cell.Value
+    let reset () = cell.Value <- Map.empty
+    let record (p: MemberHoistPlan) =
+        let s = get ()
+        let prev = Map.tryFind p.HostId s |> Option.defaultValue []
+        cell.Value <- Map.add p.HostId (prev @ [ p ]) s
+    /// The structures to build before host `hostId`, in plan order.
+    let plansOf (hostId: IRId) : MemberHoistPlan list = Map.tryFind hostId (get ()) |> Option.defaultValue []
+    /// The plan whose structure a probe of set `setId` may read while the
+    /// declaration `declId` is being emitted: the host itself, or one of its
+    /// probing kernels.
+    let tryProbe (declId: IRId) (setId: IRId) : MemberHoistPlan option =
+        get () |> Map.toSeq |> Seq.collect snd
+        |> Seq.tryFind (fun p -> p.SetId = setId && (p.HostId = declId || p.Kernels.Contains declId))
+    /// Every plan, hosts in id order then plan order.
+    let all () : MemberHoistPlan list = get () |> Map.toList |> List.collect snd
+
 // --- Compaction fusion: mask -> compound -> fold (round 2 item B4) ----------
 //
 // The WHERE idiom of examples/01 at its smallest:
@@ -3334,6 +3383,68 @@ type CompactionGatherLlvm = {
     Feeds: (IRId * string) list
 }
 
+/// T4c's C++ handshake: what the shared selection's ONE pass filled (at the
+/// mask under `gather`, else at the first companion), published by that site
+/// and adopted by every companion.
+type SharedSelectionCpp = {
+    /// The shared `compound_index_t<1>*` once the first companion built it.
+    Index: string option
+    /// Each companion's compact value buffer (compound id -> C++ variable).
+    Compacts: Map<IRId, string>
+    /// The kept-position buffer, when any companion demands the table.
+    Pos: string option
+    /// T4a's run-time cap guard (the first companion runs the joint B4 pass
+    /// itself when it is false).
+    Guard: string option
+    /// The in-pass chains (accumulator, kernel wrapper, the companion buffer
+    /// it reads), so a fallback pass feeds the same accumulators.
+    Feeds: (string * string * string) list
+    /// The single pass ran in the mask pass (T4a), not at the first companion.
+    AtMask: bool
+}
+
+/// The LLVM lane's twin: pool slots (alloca'd `ptr`) per companion, the
+/// position slot, the count slot, the run-time guard, the in-pass chains
+/// (fold plan id, accumulator, the companion's pool slot).
+type SharedSelectionLlvm = {
+    DstSlots: Map<IRId, string>
+    PosSlot: string option
+    CountSlot: string
+    Guard: string option
+    Feeds: (IRId * string * IRId) list
+    AtMask: bool
+    /// The first companion completed the selection (the pools are filled).
+    Ready: bool
+}
+
+/// T4c: ONE selection for every `y_j = compound(c_j, keep)` over the same
+/// let-bound rank-1 mask (each c_j over the mask source's index space). The
+/// plan OWNS the index: built once (counted in the mask pass; its kept
+/// positions, when demanded, filled by the one joint pass), shared by every
+/// companion's Compound wrapper, freed once -- every companion owns only its
+/// own compact data store (`deallocate_compound_shared_index`), the index's
+/// single index-only free is registered with the LAST companion.
+type SharedSelection = {
+    MaskId: IRId
+    MaskName: string
+    /// The companions in declaration order: (compound id, compound name,
+    /// dense source id).
+    Members: (IRId * string * IRId) list
+    /// Each companion's element type (compound id -> element).
+    ElemTypes: Map<IRId, IRType>
+    /// The union of the companions' position demands (T4b census per
+    /// companion: one keyed read anywhere keeps the shared table).
+    PositionsNeeded: bool
+    /// The joint gather runs in the mask pass (T4a, `gather`, J <= 4, every
+    /// source bound before the mask, within sel_cap).
+    GatherAtMask: bool
+    StaticN: int64 option
+    /// sel_cap as a cell count over EVERY companion buffer and the positions.
+    SelCapCells: int64
+    BuiltCpp: SharedSelectionCpp option ref
+    BuiltLlvm: SharedSelectionLlvm option ref
+}
+
 /// The fused compaction of one `let y = compound(x, keep)` over a let-bound
 /// rank-1 `keep = mask(x, pred)`.
 type CompactionPlan = {
@@ -3364,6 +3475,9 @@ type CompactionPlan = {
     /// T4a: what the mask pass gathered (reset with the count).
     GatherCpp: CompactionGatherCpp option ref
     GatherLlvm: CompactionGatherLlvm option ref
+    /// T4c: the shared selection this compound is a companion of (every
+    /// companion's plan carries the SAME record and the same count refs).
+    Shared: SharedSelection option
 }
 
 /// The fused fold `reduce(y * y, (+))` of one compound `y`: the lifted map
@@ -3399,9 +3513,16 @@ module CompactionTable =
     let private cell = new AsyncLocal<State>()
     let private get () = match box cell.Value with null -> empty | _ -> cell.Value
     let reset () = cell.Value <- empty
+    /// ONE plan per mask: the FIRST recorded (a shared selection records its
+    /// companions in declaration order, so the mask's plan is the first
+    /// companion's, whose `Shared` names them all). A second plan over the
+    /// same mask never overwrites the mask's entry -- before T4c the planner
+    /// let only one compound per mask through (the others declined), so the
+    /// map's last-write-wins was unreachable; it is now refused outright.
     let record (p: CompactionPlan) =
         let s = get ()
-        cell.Value <- { s with ByMask = Map.add p.MaskId p s.ByMask; ByCompound = Map.add p.CompoundId p s.ByCompound }
+        let byMask = if Map.containsKey p.MaskId s.ByMask then s.ByMask else Map.add p.MaskId p s.ByMask
+        cell.Value <- { s with ByMask = byMask; ByCompound = Map.add p.CompoundId p s.ByCompound }
     let recordFold (f: CompactionFoldPlan) =
         let s = get ()
         let prev = Map.tryFind f.CompoundId s.FoldsByCompound |> Option.defaultValue []
@@ -3529,6 +3650,64 @@ let moduleReferencedIds (modul: IRModule) : Set<IRId> =
         | RootSourceRef (_, id) -> acc.Add id |> ignore
         | RootNameRef _ -> ()
     Set.ofSeq acc
+/// THE POSITIVE STORAGE PROOF of a top-level array binding (Codex diff review
+/// of W2-1, finding 2; shared since W2-2's fix round with compaction fusion's
+/// shared selection, whose joint pass reads every source's pool by name): the
+/// cells must EXIST as a stored pool at the binding's own site. Membership
+/// hoisting applies it to a probed set, the shared selection to the mask
+/// source and every companion source. Returns how the cells are stored and
+/// the alias chain (the named binding first, the root last).
+let storedArrayProof (modul: IRModule) : IRBinding -> Result<string * IRBinding list, string> =
+    let arr = List.toArray modul.Bindings
+    let indexOf = arr |> Array.mapi (fun i b -> (b.Id, i)) |> Map.ofArray
+    let isPlaceholder (b: IRBinding) =
+        modul.CompoundInits.ContainsKey b.Id || modul.SparseInits.ContainsKey b.Id || modul.RandomInits.ContainsKey b.Id
+    // THE POSITIVE STORAGE PROOF of a set at the build point (Codex diff
+    // review of W2-1, finding 2): the set's cells must EXIST, as a stored
+    // pool, before the host's first statement -- so its value must be one of
+    // the forms that are materialized at their own site (an array literal, a
+    // `|> compute`, a compound, an eager set operation, a call's array
+    // result, a non-streamed provider read), reached through any chain of
+    // top-level let ALIASES (`let B = A`, each hop an earlier binding;
+    // `isDeferredForm` of an alias's own value -- an IRVar -- proves nothing
+    // about the cells: the C++ lane forces and deep-copies an ASSIGNABLE
+    // alias of a deferred map at the alias's site, the ordinary `let B =
+    // lazy` case, but propagates the deferral through a non-assignable one,
+    // so v1 proves the root and declines a deferred root either way). A virtual
+    // array (a range), a deferred map (directly or through an alias), a
+    // streamed read and every other form are not proved stored. Returns how
+    // the cells are stored and the chain (the named set first, the root
+    // last).
+    let rec storageOf (seen: Set<IRId>) (b: IRBinding) : Result<string * IRBinding list, string> =
+        let isVirtual =
+            match stripUnits b.Type with
+            | ArrayElem at -> at.IsVirtual
+            | _ -> false
+        if isVirtual then Error $"`{b.Name}` is a virtual array (it has no stored cells)"
+        else
+        match Map.tryFind b.Id modul.ProviderReads with
+        | Some r when r.Streamed -> Error $"`{b.Name}` is a streamed provider read (never materialized)"
+        | Some _ -> Ok ("a provider read, materialized at its site", [ b ])
+        | None ->
+        if modul.CompoundInits.ContainsKey b.Id then Ok ("a compound, built at its site", [ b ])
+        elif isPlaceholder b then Error $"`{b.Name}` is a side-table value v1 does not prove stored"
+        else
+        match b.Value with
+        | IRVar (aid, _) ->
+            match Map.tryFind aid indexOf, Map.tryFind b.Id indexOf with
+            | Some ai, Some bi when ai < bi && not (seen.Contains aid) ->
+                match storageOf (seen.Add b.Id) arr.[ai] with
+                | Ok (how, chain) -> Ok ($"an alias of `{arr.[ai].Name}`, {how}", b :: chain)
+                | Error why -> Error $"`{b.Name}` is an alias of `{arr.[ai].Name}`, and {why}"
+            | _ -> Error $"`{b.Name}` is an alias of a value that is not an earlier top-level binding"
+        | v when isDeferredForm v -> Error $"`{b.Name}` is a deferred computation"
+        | IRArrayLit _ -> Ok ("an array literal", [ b ])
+        | IRCompute _ -> Ok ("a `|> compute`", [ b ])
+        | IRMask _ | IRSort _ | IRUnique _ | IRIntersect _ | IRUnion _ -> Ok ("an eager set operation", [ b ])
+        | IRApp _ -> Ok ("a call's array result", [ b ])
+        | _ -> Error $"`{b.Name}`'s value is not a form v1 proves stored (an array literal, `|> compute`, a compound, an eager set operation, a call's result or a provider read, through aliases)"
+    storageOf Set.empty
+
 /// Plan compaction fusion over the module's top-level bindings (`compound`
 /// is top-level only, BL6002). Records into `CompactionTable` and the
 /// decision collector (`compaction-fusion`); the IR is untouched.
@@ -3538,7 +3717,10 @@ let planCompactionFusion (programFuncs: IRCallable list) (foreignRefs: Set<IRId>
     let writes = scheduleMayWriteIn programFuncs modul
     let mode = compactionFusionMode ()
     let enabled = mode <> CompactionFusionOff
-    let v2 = mode = CompactionFusionT4 || mode = CompactionFusionGather
+    let v2 = mode = CompactionFusionT4 || mode = CompactionFusionGather || mode = CompactionFusionUnshared
+    // T4c (the shared selection and the membership-probe certificate): the
+    // default and `gather`; `unshared` is exactly the pre-T4c v2.
+    let sharedOn = mode = CompactionFusionT4 || mode = CompactionFusionGather
     let gatherOn = mode = CompactionFusionGather
     let decide (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
         Blade.Effects.Decisions.record
@@ -3813,6 +3995,351 @@ let planCompactionFusion (programFuncs: IRCallable list) (foreignRefs: Set<IRId>
         | _ -> None
     let fmtBytes (b: int64) =
         if b >= 1048576L then $"{float b / 1048576.0:F1} MiB" elif b >= 1024L then $"{float b / 1024.0:F1} KiB" else $"{b} B"
+    // ---- Part B: the MEMBERSHIP-PROBE CERTIFICATE ------------------------
+    // `totalScalar` (above) judges literal arithmetic, comparisons and logic
+    // over the one parameter, and rejects every call, capture and `contains`
+    // -- it is NOT widened here. A predicate built from `contains(B, t)`
+    // probes (`contains(B, v)`, `!contains(B, v)`, `contains(B, v) && p(v)`,
+    // under `&&` / `||` / `!` / `if`) is certified pure and total SEPARATELY,
+    // and only when membership hoisting ADMITTED this host's probe of B: the
+    // T1 planner's own plan (`MemberHoistTable`, its five-party admission
+    // record quoted as the proof) is the input -- the set is a stored,
+    // never-assigned, rank-1 Int64 binding bound before the host whose
+    // producer and consumer write nothing -- never a re-derivation. What
+    // the certificate adds is the totality of everything else: every target
+    // and every other operand passes `totalScalar` (no panic site), and the
+    // lambda captures nothing but the certified set(s). A probe T1 declined
+    // (or BLADE_MEMBER_HOIST=0) stays the per-probe scan and the predicate is
+    // not certified. The snapshot / effect proof is unchanged: the predicate
+    // party is still `scheduleMayWriteIn` over its body.
+    let probeCertificate (kb: IRBinding) (pc: IRCallable) (p: IRParam) : Result<string, string> =
+        let plans = MemberHoistTable.plansOf kb.Id |> List.filter (fun hp -> hp.Kernels.Contains pc.Id)
+        let planOf (sid: IRId) = plans |> List.tryFind (fun hp -> hp.SetId = sid)
+        let used = ResizeArray<MemberHoistPlan>()
+        let mutable why : string option = None
+        let fail (s: string) = (if why.IsNone then why <- Some s); false
+        let rec ok (e: IRExpr) =
+            match e with
+            | IRContains (IRVar (sid, _), t) ->
+                (match planOf sid with
+                 | None ->
+                    let setName = match indexOf sid with Some si -> arr.[si].Name | None -> $"v{sid}"
+                    fail $"member-hoist did not admit `{kb.Name}`'s probe of `{setName}` (its `[member-hoist v1] {kb.Name}` record says why, or BLADE_MEMBER_HOIST=0): the probe stays the per-probe scan"
+                 | Some hp ->
+                    if not (totalScalar p t) then fail $"the target of `{kb.Name}`'s probe of `{hp.SetName}` is not a pure, total scalar of the cell (a panic site, a call or a capture)"
+                    else
+                        (if not (used |> Seq.exists (fun u -> u.SetId = hp.SetId)) then used.Add hp)
+                        true)
+            | IRContains _ -> fail $"`{kb.Name}`'s predicate probes a set expression, not a named stored set"
+            | IRBinOp (_, (IRAnd | IROr), l, r, _) -> ok l && ok r
+            | IRUnaryOp (IRNot, x) -> ok x
+            | IRIf (c, t, f) -> ok c && ok t && ok f
+            | _ -> totalScalar p e || fail $"`{kb.Name}`'s predicate holds an operand that is not a pure, total scalar of the cell"
+        let bodyOk = ok pc.Body
+        let certifiedIds = used |> Seq.map (fun hp -> hp.SetId) |> Set.ofSeq
+        let strayCapture = pc.Captures |> List.tryFind (fun c -> not (certifiedIds.Contains c.Id))
+        if not bodyOk then Error (defaultArg why "the predicate is not certified")
+        elif used.Count = 0 then Error "the predicate holds no certified `contains` probe"
+        else
+        match strayCapture with
+        | Some c -> Error $"`{kb.Name}`'s predicate captures `{c.Name}`, which is not a certified set"
+        | None ->
+            let sets = used |> Seq.map (fun hp -> $"`{hp.SetName}`") |> String.concat ", "
+            let proofs = used |> Seq.map (fun hp -> $"[{hp.SetName}: {hp.Admission}]") |> String.concat " "
+            Ok $"membership probe certified pure/total by member-hoist's admission: `{kb.Name}`'s predicate probes {sets} through the structure(s) membership hoisting built before `{kb.Name}` (proof input, the T1 planner's own record: {proofs}); every target and every other operand is a pure, total scalar of the cell (no panic site); no capture but the certified set(s); `totalScalar` itself is not widened"
+    // The mask predicate's admission: `totalScalar` (B4's), or -- in the T4c
+    // modes only (the default and `gather`), so `b4` stays exactly the
+    // round-2 form and `unshared` the pre-T4c v2 -- the certificate above.
+    let predicateAdmission (kb: IRBinding) : Result<string, string> =
+        match kb.Value with
+        | IRMask (_, pred) ->
+            (match resolveCallableIn funcs pred with
+             | Some pc ->
+                (match pc.Params with
+                 | [ p ] when pc.Captures.IsEmpty && totalScalar p pc.Body ->
+                    Ok $"predicate of `{kb.Name}`: a pure, total scalar function of the cell (totalScalar)"
+                 | [ p ] when sharedOn ->
+                    (match probeCertificate kb pc p with
+                     | Ok line -> Ok line
+                     | Error why -> Error $"the mask predicate of `{kb.Name}` is not a pure, total scalar function of the cell (v1 judges literal arithmetic, comparisons and logic over the one parameter), and the membership probe is not certified: {why}")
+                 | _ -> Error $"the mask predicate of `{kb.Name}` is not a pure, total scalar function of the cell (v1 judges literal arithmetic, comparisons and logic over the one parameter)")
+             | None -> Error $"the mask predicate of `{kb.Name}` does not resolve to a callable")
+        | _ -> Error "the compound's mask is not a let-bound `mask(x, pred)`"
+    // ---- T4c: ONE selection shared by every compound over the same mask ----
+    // `keep = mask(x, pred)` and its J companions `y_j = compound(c_j, keep)`
+    // (each c_j over x's index space): ONE selection index -- counted in the
+    // mask pass, its kept positions (when any companion demands them) filled
+    // by the one joint pass -- owned by the plan and shared by every
+    // companion's wrapper; the J gathers are ONE branchless pass at the
+    // first companion (`b = keep[i]; y1[q] = c1[i]; ..; yJ[q] = cJ[i]; [pos[q]
+    // = i;] q += b`), or, under `gather` with J <= 4 and every c_j bound
+    // before the mask, T4a's mask pass. Stable, ascending, serial: the same
+    // values, cardinality and positions each compound's own passes build.
+    // Each companion's data store stays its own named array. Not a T4c case
+    // (the round-2 / T4 plan decides): a single companion over x itself, the
+    // `unshared` / `b4` mirrors, the gate off.
+    let compoundsOfMask : Map<IRId, (IRId * int) list> =
+        modul.CompoundInits
+        |> Seq.choose (fun (KeyValue (cid, (_, m))) ->
+            match m, indexOf cid with
+            | IRVar (k, _), Some ci -> Some (k, (cid, ci))
+            | _ -> None)
+        |> Seq.groupBy fst
+        |> Seq.map (fun (k, xs) -> (k, xs |> Seq.map snd |> Seq.sortBy snd |> List.ofSeq))
+        |> Map.ofSeq
+    let rank1Compound (b: IRBinding) =
+        match stripUnits b.Type with
+        | ArrayElem at ->
+            (match at.IndexTypes with
+             | [ ix ] -> ix.IxKind = IxKCompound && ix.Rank = 1
+             | _ -> false)
+        | _ -> false
+    let plainAxisOf (t: IRType) : IRIndexType option =
+        match stripUnits t with
+        | ArrayElem a when not a.IsVirtual ->
+            (match a.IndexTypes with
+             | [ ix ] when ix.IxKind = IxKPlain && ix.Rank = 1 && ix.Symmetry = SymNone -> Some ix
+             | _ -> None)
+        | _ -> None
+    let elemOf (t: IRType) = match stripUnits t with ArrayElem a -> a.ElemType | other -> other
+    // Per mask: None = not a T4c case; Some (Ok (selection, evidence)) or
+    // Some (Error why) -- the reason every companion's record carries.
+    let groupDecision (kId: IRId) (ms: (IRId * int) list) : Result<SharedSelection * string list, string> option =
+        match indexOf kId with
+        | None -> None
+        | Some ki ->
+        let kb = arr.[ki]
+        match kb.Value with
+        | IRMask (IRVar (srcId, _), _) when enabled && sharedOn && not ms.IsEmpty ->
+            let dense (cid: IRId) = fst modul.CompoundInits.[cid]
+            let single =
+                match ms with
+                | [ (cid, _) ] -> (match dense cid with IRVar (d, _) -> d = srcId | _ -> false)
+                | _ -> false
+            if single then None
+            else
+            Some (
+                let (firstId, firstI) = List.head ms
+                let (lastId, lastI) = List.last ms
+                let firstName = arr.[firstI].Name
+                let lastName = arr.[lastI].Name
+                let memberIds = ms |> List.map fst |> Set.ofList
+                let xName = match indexOf srcId with Some xi -> arr.[xi].Name | None -> "x"
+                let srcAxis = match indexOf srcId with Some xi -> plainAxisOf arr.[xi].Type | None -> None
+                // the companions' sources, each checked; first failure wins
+                // THE POSITIVE STORAGE PROOF (`storedArrayProof`, membership
+                // hoisting's, through alias chains: a virtual array, a streamed
+                // read, a deferred root and every unproved form decline) of the
+                // mask source and of EVERY companion source -- the joint pass
+                // reads each source's pool by name -- with the assignment check
+                // over every binding of each alias chain.
+                let storedProof = storedArrayProof modul
+                let proveSource (b: IRBinding) : Result<string * IRBinding list, string> =
+                    match storedProof b with
+                    | Error why -> Error why
+                    | Ok (how, chain) ->
+                        match chain |> List.tryFind (fun c -> assignedAnywhere c.Id) with
+                        | Some c -> Error (sprintf "`%s` (its alias chain) is assigned in the program" c.Name)
+                        | None -> Ok (how, chain)
+                let memberWhy =
+                    ms |> List.tryPick (fun (cid, ci) ->
+                        let yb = arr.[ci]
+                        if not (rank1Compound yb) then Some $"`{yb.Name}` over `{kb.Name}` has trailing dims or a rank-k index (T4c shares a rank-1 selection only)"
+                        elif assignedAnywhere cid then Some $"the companion `{yb.Name}` is written (assigned) in the program"
+                        else
+                        match dense cid with
+                        | IRVar (cj, _) ->
+                            (match indexOf cj with
+                             | None -> Some $"the dense operand of `{yb.Name}` is not a top-level binding the write analysis can see"
+                             | Some cjI ->
+                                let cb = arr.[cjI]
+                                if cjI >= firstI then Some $"the source `{cb.Name}` of `{yb.Name}` is bound after the first companion `{firstName}`, where the one joint pass runs (v1)"
+                                elif (match proveSource cb with Error _ -> true | Ok _ -> false) then
+                                    (match proveSource cb with Error why -> Some $"the source `{cb.Name}` of `{yb.Name}` is not proved stored: {why} (the joint pass reads every source's pool by name)" | Ok _ -> None)
+                                elif (elemBytes (elemOf yb.Type)).IsNone then Some $"`{yb.Name}`'s element has no fixed cell width"
+                                else
+                                match plainAxisOf cb.Type, srcAxis with
+                                | Some a, Some s when a.Extent = s.Extent -> None
+                                | _ -> Some $"the source `{cb.Name}` of `{yb.Name}` is not provably over `{xName}`'s index space (BL3016 territory: never admitted)")
+                        | _ -> Some $"the dense operand of `{yb.Name}` is computed in place (T4c gathers stored companions)")
+                let sources = ms |> List.choose (fun (cid, _) -> match dense cid with IRVar (cj, _) -> Some cj | _ -> None) |> List.distinct
+                let sourceNames = sources |> List.map (fun s -> match indexOf s with Some i -> $"`{arr.[i].Name}`" | None -> "?") |> String.concat ", "
+                let names = ms |> List.map (fun (_, ci) -> $"`{arr.[ci].Name}`") |> String.concat ", "
+                let between = [ ki + 1 .. lastI ] |> List.filter (fun i -> not (memberIds.Contains arr.[i].Id)) |> List.map (fun i -> arr.[i])
+                if ki >= firstI then Error $"`{kb.Name}` is not bound before its companions"
+                elif assignedAnywhere kId then Error $"`{kb.Name}` is assigned"
+                else
+                match memberWhy with
+                | Some why -> Error why
+                | None ->
+                let maskSourceWhy =
+                    match indexOf srcId with
+                    | None -> Some $"the mask source of `{kb.Name}` is not a top-level binding the write analysis can see"
+                    | Some xi ->
+                        match proveSource arr.[xi] with
+                        | Error why -> Some $"the mask source `{xName}` is not proved stored: {why}"
+                        | Ok _ -> None
+                match maskSourceWhy with
+                | Some why -> Error why
+                | None ->
+                match predicateAdmission kb with
+                | Error why -> Error why
+                | Ok predLine ->
+                // ---- selectionAdmits, the five parties of T4c's motion ----
+                let pc = match kb.Value with IRMask (_, pred) -> resolveCallableIn funcs pred | _ -> None
+                let wrote (e: IRExpr) = (facts e).MayWrite || writes e
+                let producerParty =
+                    // every binding of every source's alias chain, the mask
+                    // source's included (x is a producer even when it is no
+                    // companion's source)
+                    let chains =
+                        (srcId :: sources) |> List.distinct |> List.collect (fun s ->
+                            match indexOf s with
+                            | Some i -> (match proveSource arr.[i] with Ok (_, ch) -> ch | Error _ -> [ arr.[i] ])
+                            | None -> [])
+                        |> List.distinctBy (fun b -> b.Id)
+                    match chains |> List.tryFind payloadWrites with
+                    | Some b -> Error $"the producer `{b.Name}` may write (its initializer or side-table payload, through the shared write analysis)"
+                    | None -> Ok $"producers {sourceNames} and the mask source `{xName}`: proved stored through their alias chains (storedArrayProof), never assigned, no write in any payload"
+                let predicateParty =
+                    match pc with
+                    | Some c when wrote c.Body -> Error $"the predicate of `{kb.Name}` may write"
+                    | Some c when c.IsOmpParallel || c.IsCudaKernel || c.IsMpiParallel -> Error $"the predicate of `{kb.Name}` requests a thread team or a device"
+                    | Some _ -> Ok $"predicate of `{kb.Name}`: no write (its site is unchanged)"
+                    | None -> Error $"the predicate of `{kb.Name}` does not resolve to a callable"
+                // The outer fold kernels and seeds of every fold over a
+                // companion: only an unseeded builtin-`+` self-product fold
+                // (B4a) is ever fed in the joint pass (its serial chain,
+                // under the repro form); every other fold, and every seed,
+                // stays at its own site.
+                let foldSitesAll =
+                    [ for (cid, ci) in ms do
+                        for hi in ci + 1 .. arr.Length - 1 do
+                            for (_, _, k, init) in foldSites cid arr.[hi].Value do
+                                yield (arr.[hi], k, init) ]
+                let foldParty =
+                    let writing =
+                        foldSitesAll |> List.tryFind (fun (_, k, _) ->
+                            match resolveCallableIn funcs (fst (peelReynolds k)) with
+                            | Some kc -> wrote kc.Body
+                            | None -> true)
+                    match writing with
+                    | Some (hb, _, _) -> Ok $"outer fold kernel(s): {foldSitesAll.Length} over the companions; `{hb.Name}`'s kernel may write (or does not resolve), so it is never fed and stays at its own site"
+                    | None ->
+                        if foldSitesAll.IsEmpty then Ok "outer fold kernel(s): none over the companions"
+                        else Ok $"outer fold kernel(s): {foldSitesAll.Length} over the companions, none writes; only an unseeded builtin `+` self-product fold may have its serial chain fed in the joint pass"
+                let seedParty =
+                    let seeded = foldSitesAll |> List.filter (fun (_, _, s) -> s.IsSome)
+                    match seeded |> List.tryFind (fun (_, _, s) -> match s with Some e -> wrote e | None -> false) with
+                    | Some (hb, _, _) -> Ok $"seed(s): `{hb.Name}`'s seed may write -- it is never moved (seeded folds stay at their own sites)"
+                    | None -> Ok $"seed(s): {seeded.Length} seeded fold(s) over the companions, none moved; every fed chain is unseeded and keeps its BL8003 check at its own site"
+                // every binding in (mask, last companion] but the companions:
+                // its WHOLE interval payload (`intervalPayloadOf`: the value,
+                // its side-table operands, a provider write's source) through
+                // the shared write analysis
+                let payloadOf = intervalPayloadOf modul
+                let betweenParty =
+                    let offends (b: IRBinding) =
+                        if wrote (payloadOf b.Id b.Value) || payloadWrites b then Some "may write (its value or side-table payload)"
+                        elif intervalHasProviderEffect modul b.Id then Some "is a provider write (an external effect)"
+                        elif readsMask kId b then Some $"reads `{kb.Name}` between the mask and the last companion"
+                        else None
+                    match between |> List.tryPick (fun b -> offends b |> Option.map (fun why -> (b, why))) with
+                    | Some (b, why) -> Error $"`{b.Name}` (between `{kb.Name}` and `{lastName}`) {why}"
+                    | None ->
+                        if between.IsEmpty then Ok $"between `{kb.Name}` and `{lastName}`: no binding but the companions"
+                        else Ok ($"between `{kb.Name}` and `{lastName}`: " + (between |> List.map (fun b -> $"`{b.Name}`") |> String.concat ", ") + $": no write in any payload, no provider write, no read of `{kb.Name}` (a read of an earlier companion is fine: its data is its own and the index is complete)")
+                let parallelParty = Ok "parallel: none -- the mask pass, the joint pass and every fed chain are serial (a predicate requesting a team or a device declines above; a `where omp` fold is never planned, B4a), so no parallel body runs moved work and callbackTable has no candidate set to audit"
+                let parties = [ producerParty; predicateParty; foldParty; seedParty; betweenParty; parallelParty ]
+                let matrix =
+                    "selectionAdmits (five parties, each through Optimize.scheduleMayWriteIn): "
+                    + (parties |> List.map (function Ok s -> s | Error s -> "DECLINES: " + s) |> String.concat "; ")
+                match parties |> List.tryPick (function Error s -> Some s | Ok _ -> None) with
+                | Some why -> Error $"{why} -- {matrix}"
+                | None ->
+                // ---- T4b per companion, united ----
+                let census = ms |> List.map (fun (cid, ci) -> (arr.[ci].Name, positionsDemand cid arr.[ci].Name))
+                let demanded = census |> List.choose (fun (n, r) -> match r with Error why -> Some (n, why) | Ok _ -> None)
+                let positionsNeeded = not demanded.IsEmpty
+                let selection =
+                    match demanded with
+                    | [] -> $"selection: positions elided (every companion's census: folds, `extents`, derived maps or printing only) -- the shared index keeps dense extent n and cardinality m; a lookup through the absent table is an internal error (BL9002), never a read"
+                    | (n, why) :: _ -> $"selection: positions required by {why} (`{n}`) -- the SHARED index holds the ascending kept positions for every companion (keyed reads, BL8006 unchanged, each at its own site)"
+                // ---- T4a for the group ----
+                let perCell =
+                    ms |> List.fold (fun acc (_, ci) ->
+                        match acc, elemBytes (elemOf arr.[ci].Type) with
+                        | Some a, Some b -> Some (a + b)
+                        | _ -> None) (Some (if positionsNeeded then 8L else 0L))
+                let staticN = staticExtentOf kb.Type |> Option.orElse (match indexOf srcId with Some xi -> staticExtentOf arr.[xi].Type | None -> None)
+                let capBytes = compactionSelCapBytes ()
+                let capCells = match perCell with Some pc when pc > 0L -> capBytes / pc | _ -> 0L
+                let gatherWhy : Result<string, string> =
+                    if not gatherOn then Error "opt-in this round (BLADE_COMPACTION_FUSION=gather)"
+                    elif ms.Length > 4 then Error $"{ms.Length} companions (the mask-site gather takes J <= 4)"
+                    else
+                    match sources |> List.tryFind (fun s -> match indexOf s with Some i -> i >= ki | None -> true) with
+                    | Some s -> Error $"the source `{(match indexOf s with Some i -> arr.[i].Name | None -> string s)}` is bound after `{kb.Name}` (the mask pass cannot read it)"
+                    | None ->
+                    let andPos = if positionsNeeded then " and the positions" else ""
+                    match perCell, staticN with
+                    | None, _ -> Error "a companion's element has no fixed cell width the cap can bound"
+                    | Some pc, Some n when n < capCells ->
+                        Ok $"gather: at the mask site -- `{kb.Name}`'s pass sweeps the sources once (per 256-cell block: the predicate loop, then the branchless gather of every companion at q): n + 1 = {n + 1L} private cells per buffer ({fmtBytes ((n + 1L) * pc)} over all {ms.Length} companions{andPos} <= sel_cap {fmtBytes capBytes}), m + 1 touched"
+                    | Some pc, Some n -> Error $"(n + 1) x {pc} B = {fmtBytes ((n + 1L) * pc)} over every companion buffer exceeds sel_cap {fmtBytes capBytes} (BLADE_TILE_TUNE sel_cap): the joint pass reserves only m + 1 cells per buffer"
+                    | Some _, None -> Ok $"gather: at the mask site when n < {capCells} at run time (n + 1 private cells per buffer over every companion within sel_cap {fmtBytes capBytes}), else the joint pass at `{firstName}`"
+                let gatherAtMask, gatherLine =
+                    match gatherWhy with
+                    | Ok line -> true, line
+                    | Error why -> false, $"gather: declined -- {why}; the joint gather runs at the first companion `{firstName}`"
+                let site = if gatherAtMask then $"`{kb.Name}`'s mask pass" else $"the first companion `{firstName}`"
+                let colsShown = ms |> List.map (fun (cid, ci) -> let s = (match dense cid with IRVar (d, _) -> (match indexOf d with Some i -> arr.[i].Name | None -> "c") | _ -> "c") in $"{arr.[ci].Name}[q] = {s}[i];") |> String.concat " "
+                let posStore = if positionsNeeded then " pos[q] = i;" else ""
+                let posFillNote = if positionsNeeded then ", its kept positions filled by the one joint pass in " + site else ""
+                let s =
+                    { MaskId = kId; MaskName = kb.Name; Members = ms |> List.map (fun (cid, ci) -> (cid, arr.[ci].Name, (match dense cid with IRVar (d, _) -> d | _ -> srcId)))
+                      ElemTypes = ms |> List.map (fun (cid, ci) -> (cid, elemOf arr.[ci].Type)) |> Map.ofList
+                      PositionsNeeded = positionsNeeded; GatherAtMask = gatherAtMask; StaticN = staticN; SelCapCells = capCells
+                      BuiltCpp = ref None; BuiltLlvm = ref None }
+                let evidence =
+                    [ (if ms.Length = 1 then $"one selection index for its single companion ({names}, whose source is not the mask's own: the shared-selection path), freed once after `{lastName}`" else $"one selection index shared by {ms.Length} companions ({names}), freed once after `{lastName}`")
+                      $"the index: counted in `{kb.Name}`'s own mask pass (cardinality m){posFillNote}; COMPLETE once the first companion `{firstName}` is bound (built at its site, before its wrapper) -- the invariant a later companion relies on: a companion read before a later one is built reads its own data and the already-complete index"
+                      $"lifetime: the plan owns the index; each companion's Compound wrapper borrows it and owns only its own compact data store (`deallocate_compound_shared_index`); in a scoped frame the ONE index-only free (`deallocate_compound_index_only`) would be registered with the last companion `{lastName}` -- compound() is top-level only (BL6002) and main's top level has no scope, so NO registration and NO free is executed in either lane (program lifetime); no companion frees the index"
+                      $"ONE branchless pass in {site} over `{xName}`'s axis: `b = {kb.Name}[i]; {colsShown}{posStore} q += b` (m + 1 cells per buffer, the slack never exposed) -- ascending, serial; identical values, cardinality and positions to each compound's own count / fill / gather passes ({ms.Length} index builds -> 1, {ms.Length} gathers -> 1 pass)"
+                      selection
+                      gatherLine
+                      predLine
+                      matrix
+                      $"`{kb.Name}` and every companion's data store ({names}) stay stored; the folds over them keep their own chains, seeds and BL8003 sites" ]
+                Ok (s, evidence))
+        | _ -> None
+    let groupDecisions : Map<IRId, Result<SharedSelection * string list, string>> =
+        compoundsOfMask |> Map.toSeq |> Seq.choose (fun (k, ms) -> groupDecision k ms |> Option.map (fun r -> (k, r))) |> Map.ofSeq
+    // The shared plans by companion: every companion's plan carries the SAME
+    // selection record and the SAME count / gather refs (the mask publishes
+    // its count once; every companion reads it).
+    let sharedPlans : Map<IRId, CompactionPlan * string list> =
+        groupDecisions |> Map.toSeq |> Seq.collect (fun (_, r) ->
+            match r with
+            | Ok (s, evidence) ->
+                let countCpp = ref None
+                let countLlvm = ref None
+                let gatherCpp = ref None
+                let gatherLlvm = ref None
+                s.Members |> List.map (fun (cid, cname, src) ->
+                    (cid, ({ MaskId = s.MaskId; MaskName = s.MaskName; CompoundId = cid; CompoundName = cname
+                             SourceId = src; PositionsNeeded = s.PositionsNeeded; GatherAtMask = s.GatherAtMask
+                             StaticN = s.StaticN; SelCapCells = s.SelCapCells
+                             CountCpp = countCpp; CountLlvm = countLlvm; GatherCpp = gatherCpp; GatherLlvm = gatherLlvm
+                             Shared = Some s }, evidence))) |> Seq.ofList
+            | Error _ -> Seq.empty) |> Map.ofSeq
+    let groupDeclineOf (yId: IRId) : string option =
+        match Map.tryFind yId modul.CompoundInits with
+        | Some (_, IRVar (k, _)) ->
+            (match Map.tryFind k groupDecisions with
+             | Some (Error why) -> Some why
+             | _ -> None)
+        | _ -> None
     for KeyValue (yId, (denseExpr, maskExpr)) in modul.CompoundInits do
         match indexOf yId with
         | None -> ()
@@ -3835,14 +4362,9 @@ let planCompactionFusion (programFuncs: IRCallable list) (foreignRefs: Set<IRId>
                      | Some ki when ki < yi ->
                         let kb = arr.[ki]
                         (match kb.Value with
-                         | IRMask (IRVar (srcId, _), pred) when srcId = xId ->
-                            let predOk =
-                                match resolveCallableIn funcs pred with
-                                | Some pc ->
-                                    (match pc.Params with
-                                     | [ p ] -> pc.Captures.IsEmpty && totalScalar p pc.Body
-                                     | _ -> false)
-                                | None -> false
+                         | IRMask (IRVar (srcId, _), _) when srcId = xId ->
+                            // totalScalar, or (v2) the membership-probe certificate
+                            let predAdmission = predicateAdmission kb
                             let between = [ ki + 1 .. yi - 1 ] |> List.map (fun i -> arr.[i])
                             // B4's own motion is the COUNT (taken in the mask
                             // pass, sizing the compound's buffers): sound while
@@ -3863,8 +4385,10 @@ let planCompactionFusion (programFuncs: IRCallable list) (foreignRefs: Set<IRId>
                             // non-static binding is assignable in its own
                             // scope; an actual assignment is.)
                             if assignedAnywhere kId then Error $"`{kb.Name}` is assigned"
-                            elif not predOk then Error $"the mask predicate of `{kb.Name}` is not a pure, total scalar function of the cell (v1 judges literal arithmetic, comparisons and logic over the one parameter)"
                             else
+                            match predAdmission with
+                            | Error why -> Error why
+                            | Ok _ ->
                             match offending with
                             | Some why -> Error why
                             | None ->
@@ -3872,11 +4396,15 @@ let planCompactionFusion (programFuncs: IRCallable list) (foreignRefs: Set<IRId>
                                       SourceId = xId; PositionsNeeded = true; GatherAtMask = false
                                       StaticN = None; SelCapCells = 0L
                                       CountCpp = ref None; CountLlvm = ref None
-                                      GatherCpp = ref None; GatherLlvm = ref None },
+                                      GatherCpp = ref None; GatherLlvm = ref None; Shared = None },
                                     [ $"`{kb.Name}`'s count is taken in its own mask pass (no count pass); the kept-position fill and the value gather are ONE branchless pass `v = x[i]; {yName}[q] = v; pos[q] = i; q += {kb.Name}[i]` (m + 1 cells in both buffers, the slack never exposed)"
                                       $"`{yName}`'s index: dense extent n, cardinality m, the ascending kept positions (keyed reads, BL8006 unchanged); positions always built (B4d deferred); `{kb.Name}` stays stored"
                                       "stable, ascending, serial: the same compaction in fewer sweeps" ])
-                         | IRMask _ -> Error "the mask's source is not the compound's dense operand"
+                         | IRMask _ ->
+                            (match groupDeclineOf yId with
+                             | Some why -> Error $"the mask's source is not the compound's dense operand, and the shared selection (T4c) declined: {why}"
+                             | None when mode = CompactionFusionUnshared -> Error "the mask's source is not the compound's dense operand (the shared selection, T4c, is disabled by BLADE_COMPACTION_FUSION=unshared)"
+                             | None -> Error "the mask's source is not the compound's dense operand")
                          | _ -> Error "the compound's mask is not a let-bound `mask(x, pred)`")
                      | _ -> Error "the compound's mask is not a let-bound `mask(x, pred)` ahead of it")
                 | _ -> Error "the mask or the dense operand is written in place (v1 fuses a let-bound mask over a stored array)"
@@ -3896,14 +4424,22 @@ let planCompactionFusion (programFuncs: IRCallable list) (foreignRefs: Set<IRId>
                     let last = List.max members
                     if members.Length > 1 && yId <> last then
                         let lastName = match indexOf last with Some li -> arr.[li].Name | None -> "another compound"
-                        Some $"`{plan.MaskName}` feeds {members.Length} compounds and its in-pass count serves one, the last (`{lastName}`): `{yName}` keeps the separate count / fill / gather passes (a selection shared across compounds is T4c, not built)"
+                        let t4c =
+                            match groupDeclineOf yId with
+                            | Some why -> $"the shared selection (T4c) declined: {why}"
+                            | None when mode = CompactionFusionUnshared -> "the shared selection, T4c, is disabled by BLADE_COMPACTION_FUSION=unshared"
+                            | None -> "a selection shared across compounds is T4c, which this mode does not take"
+                        Some $"`{plan.MaskName}` feeds {members.Length} compounds and its in-pass count serves one, the last (`{lastName}`): `{yName}` keeps the separate count / fill / gather passes ({t4c})"
                     else None
                 | _ -> None
+            // T4c: this compound is a companion of an admitted shared selection.
+            let shared = Map.tryFind yId sharedPlans
             // The compaction is planned (its decision is recorded below, once
             // the folds -- the outer kernels of T4a's matrix -- are known).
             let compaction =
-                match compactionDecision with
-                | Ok (plan, _) when enabled && sharedDecline.IsNone -> Some plan
+                match shared, compactionDecision with
+                | Some (plan, _), _ -> Some plan
+                | None, Ok (plan, _) when enabled && sharedDecline.IsNone -> Some plan
                 | _ -> None
             // ---- B4a (+ B4c): the folds over y's self-product -----------
             // Planned here, recorded after the compaction's decision.
@@ -3959,6 +4495,11 @@ let planCompactionFusion (programFuncs: IRCallable list) (foreignRefs: Set<IRId>
                         foldRecords.Add(fun () ->
                             let site =
                                 match finalPlan.Value with
+                                | Some { Shared = Some s } ->
+                                    let firstName = match s.Members with (_, n, _) :: _ -> n | [] -> yName
+                                    if s.GatherAtMask && s.StaticN.IsSome then $"`{s.MaskName}`'s mask pass (T4a, the shared selection's one pass)"
+                                    elif s.GatherAtMask then $"`{s.MaskName}`'s mask pass (T4a) when the single pass runs, else the shared selection's joint pass at `{firstName}`"
+                                    else $"the shared selection's one joint pass at `{firstName}` (T4c)"
                                 | Some p when p.GatherAtMask && p.StaticN.IsSome -> $"`{p.MaskName}`'s mask pass (T4a)"
                                 | Some p when p.GatherAtMask -> $"`{p.MaskName}`'s mask pass (T4a) when the single pass runs, else `{yName}`'s compaction pass"
                                 | _ -> $"`{yName}`'s compaction pass"
@@ -3975,6 +4516,12 @@ let planCompactionFusion (programFuncs: IRCallable list) (foreignRefs: Set<IRId>
             // ---- T4: the selection (T4b census) and the gather (T4a) ------
             let compaction =
                 match compaction, compactionDecision with
+                | Some plan, _ when shared.IsSome ->
+                    // T4c: the group's record (the same evidence on every companion)
+                    let evidence = snd shared.Value
+                    CompactionTable.record plan
+                    decide yName Blade.Effects.Applied evidence
+                    Some plan
                 | Some plan, Ok _ when v2 ->
                     let kb = arr.[(indexOf plan.MaskId).Value]
                     let ki = (indexOf plan.MaskId).Value
@@ -4057,7 +4604,7 @@ let planCompactionFusion (programFuncs: IRCallable list) (foreignRefs: Set<IRId>
                         match parties |> List.tryPick (function Error s -> Some s | Ok _ -> None) with
                         | Some why -> Error why
                         | None ->
-                        if sharers > 1 then Error $"`{kb.Name}` feeds {sharers} compounds (a selection shared across compounds is T4c, not built)"
+                        if sharers > 1 then Error $"`{kb.Name}` feeds {sharers} compounds (a selection shared across compounds is T4c: not taken here)"
                         else
                         match perCell with
                         | None -> Error "the compound's element has no fixed cell width the cap can bound"
@@ -4607,41 +5154,6 @@ let memberChooseRep (m: int64) (lo: int64) (hi: int64) (forced: int) : int =
                 else max 4096UL (uint64 m * 64UL)
             if fits && spanM1 < limit then 2 else 3
 
-/// One planned hoist: the structure over set `SetId` built before host
-/// `HostId`, read by the probes of `SetId` in the host's kernels `Kernels`
-/// (and in the host's own emission, where a lane inlines those kernels).
-type MemberHoistPlan = {
-    HostId: IRId
-    HostName: string
-    SetId: IRId
-    SetName: string
-    Kernels: Set<IRId>
-    /// 0 = the chooser, 1 / 2 / 3 = BLADE_MEMBER_HOIST=linear / bitmap / hash.
-    Forced: int
-}
-
-/// AsyncLocal like CompactionTable; reset once per program in
-/// `lowerTypedProgram` (let ids restart per compile).
-module MemberHoistTable =
-    open System.Threading
-    let private cell = new AsyncLocal<Map<IRId, MemberHoistPlan list>>()
-    let private get () = match box cell.Value with null -> Map.empty | _ -> cell.Value
-    let reset () = cell.Value <- Map.empty
-    let record (p: MemberHoistPlan) =
-        let s = get ()
-        let prev = Map.tryFind p.HostId s |> Option.defaultValue []
-        cell.Value <- Map.add p.HostId (prev @ [ p ]) s
-    /// The structures to build before host `hostId`, in plan order.
-    let plansOf (hostId: IRId) : MemberHoistPlan list = Map.tryFind hostId (get ()) |> Option.defaultValue []
-    /// The plan whose structure a probe of set `setId` may read while the
-    /// declaration `declId` is being emitted: the host itself, or one of its
-    /// probing kernels.
-    let tryProbe (declId: IRId) (setId: IRId) : MemberHoistPlan option =
-        get () |> Map.toSeq |> Seq.collect snd
-        |> Seq.tryFind (fun p -> p.SetId = setId && (p.HostId = declId || p.Kernels.Contains declId))
-    /// Every plan, hosts in id order then plan order.
-    let all () : MemberHoistPlan list = get () |> Map.toList |> List.collect snd
-
 /// Plan membership hoisting over the module's top-level bindings. Records
 /// into `MemberHoistTable` and the decision collector (`member-hoist`); the
 /// IR is untouched.
@@ -4688,50 +5200,11 @@ let planMembershipHoist (programFuncs: IRCallable list) (modul: IRModule) : unit
         || (allCallables |> List.exists (fun f -> assignsTo id f.Body))
     let isPlaceholder (b: IRBinding) =
         modul.CompoundInits.ContainsKey b.Id || modul.SparseInits.ContainsKey b.Id || modul.RandomInits.ContainsKey b.Id
-    // THE POSITIVE STORAGE PROOF of a set at the build point (Codex diff
-    // review of W2-1, finding 2): the set's cells must EXIST, as a stored
-    // pool, before the host's first statement -- so its value must be one of
-    // the forms that are materialized at their own site (an array literal, a
-    // `|> compute`, a compound, an eager set operation, a call's array
-    // result, a non-streamed provider read), reached through any chain of
-    // top-level let ALIASES (`let B = A`, each hop an earlier binding;
-    // `isDeferredForm` of an alias's own value -- an IRVar -- proves nothing
-    // about the cells: the C++ lane forces and deep-copies an ASSIGNABLE
-    // alias of a deferred map at the alias's site, the ordinary `let B =
-    // lazy` case, but propagates the deferral through a non-assignable one,
-    // so v1 proves the root and declines a deferred root either way). A virtual
-    // array (a range), a deferred map (directly or through an alias), a
-    // streamed read and every other form are not proved stored. Returns how
-    // the cells are stored and the chain (the named set first, the root
-    // last).
-    let rec storageOf (seen: Set<IRId>) (b: IRBinding) : Result<string * IRBinding list, string> =
-        let isVirtual =
-            match stripUnits b.Type with
-            | ArrayElem at -> at.IsVirtual
-            | _ -> false
-        if isVirtual then Error $"`{b.Name}` is a virtual array (it has no stored cells)"
-        else
-        match Map.tryFind b.Id modul.ProviderReads with
-        | Some r when r.Streamed -> Error $"`{b.Name}` is a streamed provider read (never materialized)"
-        | Some _ -> Ok ("a provider read, materialized at its site", [ b ])
-        | None ->
-        if modul.CompoundInits.ContainsKey b.Id then Ok ("a compound, built at its site", [ b ])
-        elif isPlaceholder b then Error $"`{b.Name}` is a side-table value v1 does not prove stored"
-        else
-        match b.Value with
-        | IRVar (aid, _) ->
-            match Map.tryFind aid indexOf, Map.tryFind b.Id indexOf with
-            | Some ai, Some bi when ai < bi && not (seen.Contains aid) ->
-                match storageOf (seen.Add b.Id) arr.[ai] with
-                | Ok (how, chain) -> Ok ($"an alias of `{arr.[ai].Name}`, {how}", b :: chain)
-                | Error why -> Error $"`{b.Name}` is an alias of `{arr.[ai].Name}`, and {why}"
-            | _ -> Error $"`{b.Name}` is an alias of a value that is not an earlier top-level binding"
-        | v when isDeferredForm v -> Error $"`{b.Name}` is a deferred computation"
-        | IRArrayLit _ -> Ok ("an array literal", [ b ])
-        | IRCompute _ -> Ok ("a `|> compute`", [ b ])
-        | IRMask _ | IRSort _ | IRUnique _ | IRIntersect _ | IRUnion _ -> Ok ("an eager set operation", [ b ])
-        | IRApp _ -> Ok ("a call's array result", [ b ])
-        | _ -> Error $"`{b.Name}`'s value is not a form v1 proves stored (an array literal, `|> compute`, a compound, an eager set operation, a call's result or a provider read, through aliases)"
+    // THE POSITIVE STORAGE PROOF of a set at the build point: the shared
+    // `storedArrayProof` (defined ahead of compaction fusion, which applies
+    // it to the mask source and every companion source of a shared selection).
+    let storedProof = storedArrayProof modul
+    let storageOf (_: Set<IRId>) (b: IRBinding) : Result<string * IRBinding list, string> = storedProof b
     // The callback table over the module (parallel kernels' function-valued
     // parameters): computed once, on demand.
     let cbTable =
@@ -5018,7 +5491,7 @@ let planMembershipHoist (programFuncs: IRCallable list) (modul: IRModule) : unit
                             MemberHoistTable.record
                                 { HostId = host.Id; HostName = host.Name; SetId = sb.Id; SetName = sb.Name
                                   Kernels = probingKernels |> List.map (fun c -> c.Id) |> Set.ofList
-                                  Forced = forced }
+                                  Forced = forced; Admission = matrix }
                             decide host.Name Blade.Effects.Applied evidence
 
 // --- Slice-write fusion: destination passing for a rank-1 row write --------
