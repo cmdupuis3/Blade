@@ -93,3 +93,26 @@ RESERVED with its recorded decline; a follow-up card if a serial-licensed loss e
   9.58 vs 9.78 with identical checksums. The licence buys nothing measurable and may cost
   ~0.3 ms licensed; it stays as the fair spelling pending the checksum follow-up (which is
   where its benefit would have to come from), and RESULTS 16.3 reports the cell as is.
+
+## G50 instrumented (21:50): NOT an emission defect -- closed
+
+The emitted licensed checksum (wave-3 source, T=8), with a phase timer around the checksum
+alone (medians of 7-11, quiet box; variants hand-patched into the emitted C++,
+`scratchpad/w3/stemit/mkvar*.py`):
+
+| variant | checksum ms (T=8) |
+|---|---|
+| as emitted (Path B, `omp simd reduction` on the row loop, lane-unrolled `__wrap` chain per row) | 1.68-1.89 |
+| outer `omp simd reduction` removed | 1.77 |
+| row fold as `blade_fold::sum<double, 8>(row, 2003)` (with / without the outer pragma) | 1.74 / 1.76 |
+| an empty parallel region first (team wake measured 0.09-0.15 ms) | 1.50-1.73 |
+| a 3 ms busy wait first (write-back drain) | 1.75 |
+| a SERIAL full read of `u` first, then the same checksum | **0.88** |
+
+All variants print the same `input_checksum`. Per-thread work inside the region is 1.4-1.8 ms:
+the reads themselves are slow, and only on the FIRST read after the fill. The emitted form,
+the pragma, the team wake and the write-back drain are all ruled out. `rd.cpp`'s 0.73 ms was a
+best-of-5 over a REPEATEDLY read buffer, so it is the wrong reference for a first read after a
+fill. The expert's input sum is a first read after its own fill too. Nothing to fix in Blade's
+emission; G50 is closed as a reference artifact. The read-back licence still buys nothing
+measurable here (section above).

@@ -2743,10 +2743,10 @@ earlier figures stay in the notes, marked.
   reliable); Blade's 6.0-6.4, of which the `lap` teardown is 0.8-1.0 ms (G49). The earlier
   "DRAM-bound reads" diagnosis is WITHDRAWN: a READ probe scales 22 -> 53 GB/s from 1 to 4
   threads, so the input checksum's 1.8-2.1 ms for 24 MB is ~1 ms slower than a streaming read
-  of the same bytes (0.73 ms) -- an emission item (the per-row chain under Path B), recorded as
-  a follow-up. The read-back licence interleaved directly (same build, old vs new source,
+  of the same bytes over a warm buffer (0.73 ms). Instrumented (G50), the cost is the FIRST read
+  after the fill, not the emission (0.88 ms after a prior full read): G50 closed. The read-back licence interleaved directly (same build, old vs new source,
   T=8): licensed 8.08 vs 8.38 ms medians (IQRs overlap), repro 9.58 vs 9.78 with identical
-  checksums -- no measurable gain; kept as the fair spelling pending that follow-up.
+  checksums -- no measurable gain; kept as the fair spelling.
 - **Codex second look** (user request; `codex-second-look.md`, actions in
   `second-look-actions.md`): B2l hand-patched and measured (serial licensed recur, blocks of
   128/256/512: 14.0 / 13.7 / 13.0 vs 13.3 ms one-shot, identical checksum bits) -- within
