@@ -32,5 +32,13 @@
     "smoke": {"checksum": 325.09985348018768, "input_checksum": 105.74347378872335, "sizes": {"n": 211, "w": 5}},
     "full": {"checksum": 34804.507020600446, "input_checksum": 10027.016977054533, "sizes": {"n": 20011, "w": 101}},
     "narrow": {"checksum": 33262.059213556364, "input_checksum": 10027.016977054533, "sizes": {"n": 20011, "w": 11}}
+  },
+  "twofir": {
+    "smoke": {"checksum": 6305.2538380402657, "input_checksum": 10027.016977054533, "sizes": {"n": 20011}},
+    "full": {"checksum": 627080.78547036019, "input_checksum": 999516.0866920664, "sizes": {"n": 2000003}}
+  },
+  "tensorop": {
+    "smoke": {"checksum": 48998954.10306979, "input_checksum": 1510.839869080577, "sizes": {"n1": 11, "n2": 13, "n3": 17}},
+    "full": {"checksum": 2495355625970968.5, "input_checksum": 449401.4694633875, "sizes": {"n1": 89, "n2": 97, "n3": 101}}
   }
 }

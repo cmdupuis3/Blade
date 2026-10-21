@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "name": "tensorop",
+  "group": "A",
+  "title": "named-axis tensor-product operator action Y = (A (x) B (x) C) X, three ordered mode contractions",
+  "sizes": {
+    "smoke": {
+      "n1": 11,
+      "n2": 13,
+      "n3": 17
+    },
+    "full": {
+      "n1": 89,
+      "n2": 97,
+      "n3": 101
+    }
+  },
+  "regimes": [
+    "serial-licensed-native",
+    "mt8-licensed-native",
+    "serial-repro-native",
+    "mt8-repro-native",
+    "serial-fastmath-native",
+    "mt8-fastmath-native"
+  ],
+  "inputonly": true,
+  "hypothesis": {
+    "natural": "equivalent (the natural arm is the same textbook nest the m.mode_product generator emits: output cells row-major, contraction innermost, one chain per cell)",
+    "expert": "LOSS 3-10x today (mode I's inner fold strides n2*n3 doubles, mode J's n3; one latency-bound chain per cell, no tile; serial kernel in mt8) against the expert's three register-tiled GEMM-shaped contractions with the same factor order"
+  },
+  "notes": "Round 3 (catalog N09). Required outputs X, A, B, C and Y only (review C/1): T1, T2 are the source's intermediates. Blade baseline = the library census baseline, the existing m.mode_product chain (a synthesized serial nest; no licence slot), so the Blade kernel is serial in mt8 (threaded preparation; checksum threaded in licensed / fastmath, serial in repro). Inputonly twins provisioned: input generation is estimated at ~5-15% of the expert's region (keep them if the pilot measures > 5%). Full size 27.9 MB principal payload (X, T1, T2, Y = 4 x 6.98 MB; factors 0.21 MB).",
+  "arms": [
+    "blade-llvm",
+    "blade-cpp",
+    "gfortran-natural",
+    "gfortran-expert",
+    "ifx-natural",
+    "ifx-expert"
+  ],
+  "parallel_notes": {
+    "blade-cpp": "serial mode_product kernel; threaded preparation; checksum threaded in licensed / fastmath, serial in repro"
+  },
+  "source_of_truth": "bench/kernels/tensorop/spec.md (round 3, W1-5, 2026-10-20)"
+}

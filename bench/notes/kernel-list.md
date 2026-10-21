@@ -241,6 +241,52 @@ unforced chain fuses into the checksum and never stores y2). Fortran: `!$omp par
 **Regimes.** serial, mt8.
 **Hypothesis.** PARITY (pure bandwidth). Not expected to win.
 
+## Round 3 additions (2026-10-20, W1-5; catalog N07 and N09)
+
+Added from `round3/research/C-workloads.md` with the Codex review C's corrections; each
+spec (`kernels/<name>/spec.md`) is authoritative. Both are unmeasured until the
+orchestrator's A/B; `run.py check --regimes all` is clean at smoke size for every arm.
+
+### `twofir`
+**Math.** x ∈ [0,1)ⁿ. y1 = the 7-tap FIR (1, 2, 3, 4, 3, 2, 1)/16 over centres 3..n−4;
+y2 = 0.5 x(i) − 0.25 x(i∓4) + 0.125 x(i∓8) over centres 8..n−9. Named outputs: y1, y2
+(different domains). Checksum: s1 + s2 (separate +0 chains Σ y1², Σ y2²). Honestly scoped
+as **resident two-output FIR / sibling-map fusion** (review C/13), not ghost reuse: the
+resident `Chunked` axis of the catalog is invisible to a halo walk, so the source uses a
+plain `Idx<n>`.
+**Sizes.** smoke n=20011; full n=2,000,003 (x, y1, y2 = 3 x 16.0 MB = 48.0 MB with the live
+input included; input share large → `inputonly` twin per arm).
+**Tiers.** natural: two loops, one per output, then one sum per output. expert: one fused
+loop over y2's domain writing both outputs from the same loads, y1's five head and five
+tail centres peeled, both sums fused.
+**omp.** Blade: `where omp` on the generator, both halo maps, s1, s2 and the input sum
+(`axes = 1`); Fortran: `parallel do` on every loop (expert: on the fused loop).
+**Regimes.** licensed, repro (serial, mt8).
+**Hypothesis.** equivalent / LOSS ~0.70–0.85 today (two FIR passes + two checksum passes
+vs one fused pass); equivalent once the sibling maps fuse.
+
+### `tensorop`
+**Math.** Y = (A ⊗ B ⊗ C) X as three ordered mode contractions (I, then J, then K) over
+X (n1, n2, n3). Required outputs X, A, B, C, Y only (review C/1); T1, T2 are intermediates;
+the factor order is fixed, per-cell chains +0-seeded ascending. Checksum: Σ Y².
+**Sizes.** smoke 11/13/17; full 89/97/101 (each tensor 6.98 MB; 250M FMAs; Blade peak
+≈ 35 MB with mode_product's work buffer, Fortran 27.9 MB); `inputonly` twins provisioned
+(input share estimated 5–15% of the expert's region).
+**Tiers.** natural: three ordered textbook nests (output cells row-major, contraction
+innermost) — a recorded deviation from the catalog's slice-`matmul` natural, which the
+Fortran tier review assesses against the ascending-chain requirement before publication.
+expert: three GEMM-shaped 8 x 6 register-tiled contractions on views of flat storage, same
+factor order and per-cell chains.
+**omp.** Blade = the library census baseline, the existing `m.mode_product` chain: a
+synthesized serial nest with no licence slot (serial kernel in every regime; generators and
+checksums licensed: checksums threaded in licensed / fastmath, serial in repro); the
+licensed map spelling (stronger, different permissions) is recorded for the later
+recognizer comparison.
+Fortran: `parallel do` on every nest.
+**Regimes.** licensed, repro (serial, mt8), fastmath.
+**Hypothesis.** equivalent (serial) / LOSS 3–10x (strided single-chain nests vs register
+tiles); the census target for a later contraction recognizer.
+
 ## Summary table
 
 | kernel | group | full size | est. serial | regimes (fp x threads) | hypothesis (vs dense baseline / vs expert), licensed unless stated |
@@ -256,8 +302,11 @@ unforced chain fuses into the checksum and never stores y2). Fortran: `!$omp par
 | maskagg | B | n=1,000,003 | 3–10 ms | licensed, repro (serial only, by protocol; differ in both checksum sums, 8-lane in licensed) | LOSS / LOSS (2–5x) |
 | dot | C | n=3,000,017 | 3–6 ms incremental | licensed, repro (serial, mt8), fastmath | equivalent / equivalent in both regimes (both Blade lanes vectorize the zip fold since the flip; natural's `dot_product` loses to expert in licensed) |
 | saxpy | C | n=2,000,003 | 4–8 ms incremental | licensed, repro (serial, mt8) | equivalent / equivalent |
+| twofir (round 3) | B | n=2,000,003 | 10–25 ms | licensed, repro (serial, mt8) | equivalent / LOSS ~0.70–0.85 (two passes vs one fused pass) |
+| tensorop (round 3) | A | 89 x 97 x 101 | Blade 0.2–0.6 s, expert 20–60 ms | licensed, repro (serial, mt8), fastmath | equivalent (serial) / LOSS 3–10x (mode_product nests vs register tiles; Blade kernel serial in mt8) |
 
-`inputonly` twin required: fusedchain, onepass, stencil, maskagg, dot, saxpy.
+`inputonly` twin required: fusedchain, onepass, stencil, maskagg, dot, saxpy, twofir;
+provisioned (keep if the pilot measures > 5%): tensorop.
 
 Methodology-review corrections (README rev. after `notes/review-method.md`): "natural" is
 the DENSE BASELINE (literal transcription, intrinsics, dense storage; gram keeps `matmul`),

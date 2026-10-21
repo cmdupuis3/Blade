@@ -1,0 +1,91 @@
+// tensorop -- the named-axis tensor-product operator action Y = (A (x) B (x) C) X as three
+// ordered mode contractions (bench/kernels/tensorop/spec.md)
+//
+//   T1(a, j, k) = sum_i A(a, i) X(i, j, k)      mode I first
+//   T2(a, b, k) = sum_j B(b, j) T1(a, j, k)     then mode J
+//   Y(a, b, c)  = sum_k C(c, k) T2(a, b, k)     then mode K      (Y stored; checksum = sum Y^2)
+//
+// The contraction ORDER (I, then J, then K) is the specification; T1 and T2 are this
+// source's intermediates, not required outputs (review C/1). This source is the LIBRARY
+// CENSUS BASELINE (the existing math-module spelling, not the best-performing Blade
+// spelling; spec.md records the licensed map spelling as the later comparison):
+// three `m.mode_product` calls (src/math/compiler/MathDecls.fs
+// modeProductDecl: one synthesized serial nest per shape, the output multi-index outermost
+// and row-major, the contraction innermost, `acc = 0.0; acc = acc + U(r, t) * X(.., t, ..)`
+// ascending t -- one +0-seeded chain per cell). Each call writes a flat work buffer and
+// reshapes it into the returned tensor. The nest carries no licence slot, so the kernel is
+// serial in every regime ("parallel preparation, serial kernel" in mt8); a strided-
+// contraction recognizer that routes the three contractions to the native GEMM tile is a
+// later item (spec.md). mode_product reads the DECLARED shapes, so every operand and result
+// is annotated with its named index types.
+// Licences: the four generator maps (outer level), the output checksum fold and the four
+// input-sum folds carry `where omp`; the inner row folds are licensed builtin `(+)` /
+// `prodsum` chains. A serial build (BLADE_OMP_THREADS=1) emits none of the thread pragmas.
+import math as m
+
+let static n1 = 89    // SIZE n1
+let static n2 = 97    // SIZE n2
+let static n3 = 101   // SIZE n3
+type I = Idx<n1>
+type J = Idx<n2>
+type K = Idx<n3>
+
+/// README section 5 input generator: five rounds mod 2^31 (affine, quadratic, affine,
+/// middle-square, affine), exact in Int64 (h3 * h3 < 2^62).
+function gen(k: Int64, seed: Int64, lo: Float64, hi: Float64) -> Float64 = {
+    let h1 = ((k + seed) * 1103515245 + 12345) % 2147483648
+    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648
+    let h3 = (h2 * 1103515245 + 12345) % 2147483648
+    let h4 = (h3 * h3 / 65536) % 2147483648
+    let h5 = (h4 * 1103515245 + 12345) % 2147483648
+    lo + (hi - lo) * (Float64(h5) / 2147483648.0)
+}
+
+// X(i, j, k) at k = (i*n2 + j)*n3 + k, seed 10000019; A(a, i) at a*n1 + i, seed 20000038;
+// B(b, j) at b*n2 + j, seed 30000057; C(c, k) at c*n3 + k, seed 40000076; all in [0, 1)
+function gen_x() -> Array<Float64 like I, J, K> = {
+    method_for(range<I, J, K>) <@> lambda(i, j, k) where omp(i: 1) ->
+        gen((Int64(i) * n2 + Int64(j)) * n3 + Int64(k), 10000019, 0.0, 1.0) |> compute
+}
+function gen_a() -> Array<Float64 like I, I> = {
+    method_for(range<I, I>) <@> lambda(a, i) where omp(a: 1) -> gen(Int64(a) * n1 + Int64(i), 20000038, 0.0, 1.0) |> compute
+}
+function gen_b() -> Array<Float64 like J, J> = {
+    method_for(range<J, J>) <@> lambda(b, j) where omp(b: 1) -> gen(Int64(b) * n2 + Int64(j), 30000057, 0.0, 1.0) |> compute
+}
+function gen_c() -> Array<Float64 like K, K> = {
+    method_for(range<K, K>) <@> lambda(c, k) where omp(c: 1) -> gen(Int64(c) * n3 + Int64(k), 40000076, 0.0, 1.0) |> compute
+}
+
+function kernel(x: Array<Float64 like I, J, K>, am: Array<Float64 like I, I>,
+                bm: Array<Float64 like J, J>, cm: Array<Float64 like K, K>) -> Float64 = {
+    let t1: Array<Float64 like I, J, K> = m.mode_product(x, am, 0)
+    let t2: Array<Float64 like I, J, K> = m.mode_product(t1, bm, 1)
+    let y: Array<Float64 like I, J, K> = m.mode_product(t2, cm, 2)
+    // sum Y^2 streamed per (a, b) row (no squared temporary); the thread licence sits on
+    // the outer fold kernel, bound to its own let (kernels/README.md sections 4.2, 4.10)
+    let s = reduce(method_for(range<I>) <@> lambda(a) ->
+                       reduce(method_for(range<J>) <@> lambda(b) -> prodsum(y(a, b), y(a, b)), (+)),
+                   lambda(p, q) where omp -> p + q, 0.0)
+    s
+}
+
+/// sum X + sum A + sum B + sum C, one licensed fold per input (rows summed first)
+function input_sum(x: Array<Float64 like I, J, K>, am: Array<Float64 like I, I>,
+                   bm: Array<Float64 like J, J>, cm: Array<Float64 like K, K>) -> Float64 = {
+    let sx = reduce(method_for(range<I>) <@> lambda(i) ->
+                        reduce(method_for(range<J>) <@> lambda(j) -> reduce(x(i, j), (+)), (+)),
+                    lambda(p, q) where omp -> p + q, 0.0)
+    let sa = reduce(method_for(range<I>) <@> lambda(a) -> reduce(am(a), (+)), lambda(p, q) where omp -> p + q, 0.0)
+    let sb = reduce(method_for(range<J>) <@> lambda(b) -> reduce(bm(b), (+)), lambda(p, q) where omp -> p + q, 0.0)
+    let sc = reduce(method_for(range<K>) <@> lambda(c) -> reduce(cm(c), (+)), lambda(p, q) where omp -> p + q, 0.0)
+    sx + sa + sb + sc
+}
+
+let (checksum, input_checksum) = {
+    let x = gen_x()
+    let am = gen_a()
+    let bm = gen_b()
+    let cm = gen_c()
+    (kernel(x, am, bm, cm), input_sum(x, am, bm, cm))
+}

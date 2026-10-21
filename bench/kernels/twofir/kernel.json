@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "name": "twofir",
+  "group": "B",
+  "title": "resident two-output FIR over one stored input (sibling-map fusion)",
+  "sizes": {
+    "smoke": {
+      "n": 20011
+    },
+    "full": {
+      "n": 2000003
+    }
+  },
+  "regimes": [
+    "serial-licensed-native",
+    "mt8-licensed-native",
+    "serial-repro-native",
+    "mt8-repro-native"
+  ],
+  "inputonly": true,
+  "hypothesis": {
+    "natural": "equivalent (both stream x twice: two FIR passes, two checksum passes)",
+    "expert": "LOSS ~0.70-0.85 today (Blade: two FIR passes + two checksum passes over the stored outputs; expert: one fused pass writing both outputs, sums fused); equivalent once the sibling maps are fused"
+  },
+  "notes": "Round 3 (catalog N07, honestly scoped: resident two-output FIR / sibling-map fusion, NOT ghost reuse -- review C/13). Named outputs y1 (n - 6) and y2 (n - 16), both stored; separate +0 checksum chains s1, s2, combined s1 + s2. Input share large (estimate ~40-50% of the expert's region): inputonly twin per arm. Full size 48.0 MB principal payload (x 16.0 + y1 16.0 + y2 16.0 MB) with the live input included.",
+  "arms": [
+    "blade-llvm",
+    "blade-cpp",
+    "gfortran-natural",
+    "gfortran-expert",
+    "ifx-natural",
+    "ifx-expert"
+  ],
+  "source_of_truth": "bench/kernels/twofir/spec.md (round 3, W1-5, 2026-10-20)"
+}
