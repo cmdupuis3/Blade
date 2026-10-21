@@ -87,3 +87,20 @@ Wave-3 end: gates + A/B. RESULTS 17.3.
 Each builder prompt = the item row above + the brief section + the Codex findings it must close + the preamble's hard
 constraints + the block list to run + "ONE commit per fix round, Fable trailer, no push". Reviewers get the diff and the
 findings list; verdict BUILD / MERGE AFTER FIXES / DO NOT MERGE.
+
+## 7. Execution log
+
+- 2026-10-21 ~02:00 -- WAVE 1 MERGED (squashed per item): W1-5 workloads 6459275b, W1-3 defects 982a984e, W1-A2 row-view
+  63710ee2, W1-4 maskagg 9da403a8 (= the wave-1 tip). Each item had a Codex diff review (W1-4 two rounds; the T4a gather
+  dropped to opt-in on the brief's own drop line); the hidden side-table writer hole was found live in three OTHER planners
+  (hot-row, cell epilogue, compact row classes: 13 vs 90, 4 vs 84, 12 vs 24) and closed by `Optimize.intervalPayloadOf`.
+  Corpus numbers collided at merge (W1-4's loops/528-530 -> 537-539). Gap rows G54-G64.
+- 2026-10-21 02:25-06:37 -- WAVE-1 END CHAIN unattended: gates green on 9da403a8 (7389 / 2173 / 131 / 841 / 3077, 0 failed),
+  mirrors r3old (master 66e04875 binary) / r3new / r3noslots / r3gather / r3antig0 smoked, 23 A/B sessions, 0 failures
+  (`round3/w1-ab.md`): stencil mt8 repro 0.876 (expert 0.805/0.877 -> 0.924/0.959); maskagg serial licensed 0.817 llvm /
+  0.772 cpp (expert 1.064/0.777 -> 1.290/0.970), repro 0.866 / 0.856 (1.073/0.827 -> 1.260/0.955); T4a on top 0.974-0.985
+  (stays opt-in); A1: the scatter beats the row slots under mt8 repro on pairkernel 0.841 and comoment3 0.843 (expert
+  0.686/0.653 -> 0.795/0.805 and 1.107/0.945 -> 1.303/1.120) -> W2-0 flips the precedence; anti_g auto 1-2% slower serially,
+  4.8% faster under threads -> W2-0b per-regime default; twofir 0.58-0.75 under threads (G56 target), tensorop 0.14-0.19 serial
+  / 0.05 mt8 (the recognizer target); gram control flat; the one CI-edge "slower" (pairkernel serial repro cpp 1.004) is noise on
+  an untouched program. Codex merge-level review: no lost hunk; two record fixes applied.

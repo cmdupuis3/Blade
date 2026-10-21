@@ -2687,7 +2687,7 @@ pool fails BL9002 in the C++ lane (CLOSED: the card's nested-kernel probe by 04b
 `(g |> compute, 2.0)` -- by round-3 W1-3 with the tuple of computes, `tuples/034`-`040`,
 `042`-`043`. NOT closed: a BARE deferred member `(g, 1.0)`, which the interpreter holds
 unforced inside the tuple -- the C++ lane refuses it at codegen, BL7004 `tuples/041`; the LLVM
-lane computes it eagerly; the shared contract is a gap row at merge); W1-D's "68 vs 20" plain-fold report
+lane computes it eagerly; the shared contract remains OPEN as G61); W1-D's "68 vs 20" plain-fold report
 (UNVERIFIED, card); join emitter private +0 accumulators override a user -0.0 seed (G40 note).
 The Codex every-fold-entry audit of W2-F (`codex-diff-W2F-3.md`) found four more holes of
 the G41 class, all pre-existing on master: the LLVM orbit-class fold ran its canonical-pool
