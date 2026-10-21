@@ -18,7 +18,7 @@ CELLS = [
     ('recur', 'serial-licensed-native', ['w2', 'w3', 'w3a'], 'control (serial emission; w3a = per-step copies)'),
     ('recur', 'serial-repro-native', ['w2', 'w3', 'w3a'], 'control'),
     ('stencil', 'mt8-licensed-native', ['w2', 'w3'], 'item 2: read-back licence (Path B)'),
-    ('stencil', 'mt8-repro-native', ['w2', 'w3'], 'item 2: repro (serial read-back, G48)'),
+    ('stencil', 'mt8-repro-native', ['w2', 'w3'], 'item 2: repro (serial read-back, G51)'),
     ('stencil', 'serial-licensed-native', ['w2', 'w3'], 'control'),
     ('antisym', 'serial-licensed-native', ['w3', 'w3g'], 'item 4: anti_g 1 vs auto (3 sessions each)'),
     ('antisym', 'mt8-licensed-native', ['w3', 'w3g'], 'item 4: anti_g 1 vs auto, mt8 (3 sessions each)'),

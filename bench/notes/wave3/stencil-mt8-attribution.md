@@ -52,7 +52,7 @@ form DECLINES this spelling (`row-slot form: not one complete fold per outer ind
 value is not a fold)`): v1 recognises a nested `reduce(method_for(range<X>) <@> lambda(j) ->
 u(i, j), (+))`, not a row-view fold `reduce(u(i), (+))` -- that spelling (`stencil_d`) threads
 under repro (`threaded complete rows (repro): 1501 row folds into indexed slots`). Recorded as
-a recognizer gap (gap register G48); the kernel keeps the readable spelling.
+a recognizer gap (gap register G51); the kernel keeps the readable spelling.
 
 ## D1 instrument (brief D: build only if an instrument shows > 2% fork/barrier/idle)
 
@@ -80,7 +80,7 @@ RESERVED with its recorded decline; a follow-up card if a serial-licensed loss e
 - Blade licensed-source phases at T=8 (3 runs, cumulative ms): inputs 3.1-3.5, input checksum
   +1.8-2.1, producer +3.1-3.5, combine +0.1, dealloc +0.8-1.0, end 9.2-9.8. Blade's region
   (end minus inputs) 6.0-6.4 ms against the expert's 5.38: ~0.8 ms, of which the teardown is
-  0.8-1.0 ms (G49; the retention arm takes it to +0.04 ms, end 9.3-9.4).
+  0.8-1.0 ms (G52; the retention arm takes it to +0.04 ms, end 9.3-9.4).
 - **The DRAM diagnosis above is WITHDRAWN for reads.** A READ probe (`rd.cpp`) shows a 24 MB
   stream read scaling 22.2 -> 36.5 -> 53.0 GB/s at T = 1 / 2 / 4 (33.0 at 8); the earlier figure
   was a WRITE probe (writes really are flat, ~10 GB/s at every team size, re-measured quiet).
@@ -94,7 +94,7 @@ RESERVED with its recorded decline; a follow-up card if a serial-licensed loss e
   ~0.3 ms licensed; it stays as the fair spelling pending the checksum follow-up (which is
   where its benefit would have to come from), and RESULTS 16.3 reports the cell as is.
 
-## G50 instrumented (21:50): NOT an emission defect -- closed
+## G53 instrumented (21:50): NOT an emission defect -- closed
 
 The emitted licensed checksum (wave-3 source, T=8), with a phase timer around the checksum
 alone (medians of 7-11, quiet box; variants hand-patched into the emitted C++,
@@ -114,5 +114,5 @@ the reads themselves are slow, and only on the FIRST read after the fill. The em
 the pragma, the team wake and the write-back drain are all ruled out. `rd.cpp`'s 0.73 ms was a
 best-of-5 over a REPEATEDLY read buffer, so it is the wrong reference for a first read after a
 fill. The expert's input sum is a first read after its own fill too. Nothing to fix in Blade's
-emission; G50 is closed as a reference artifact. The read-back licence still buys nothing
+emission; G53 is closed as a reference artifact. The read-back licence still buys nothing
 measurable here (section above).

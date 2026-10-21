@@ -60,12 +60,12 @@ Mirrors: w2 = w2 (wave-2 binary 1cf90428, ORIGINAL sources = OLD); w3 = w3 (wave
 | stencil | mt8-licensed-native | item 2: read-back licence (Path B) | w3/w2 | gfortran-expert | 7.998 -> 8.293 | 1.037 [0.966, 1.070] | ind 21/21 |
 | stencil | mt8-licensed-native | item 2: read-back licence (Path B) | w3/w2 | ifx-natural | 10.13 -> 10.2 | 1.007 [0.973, 1.062] | ind 21/21 |
 | stencil | mt8-licensed-native | item 2: read-back licence (Path B) | w3/w2 | ifx-expert | 8.273 -> 8.36 | 1.011 [0.987, 1.068] | ind 21/21 |
-| stencil | mt8-repro-native | item 2: repro (serial read-back, G48) | w3/w2 | blade-llvm | -- | | (serial-only / serial-only) |
-| stencil | mt8-repro-native | item 2: repro (serial read-back, G48) | w3/w2 | blade-cpp | 9.918 -> 10.84 | 1.093 [1.027, 1.188] | ind 21/21 |
-| stencil | mt8-repro-native | item 2: repro (serial read-back, G48) | w3/w2 | gfortran-natural | 9.088 -> 9.801 | 1.078 [1.009, 1.149] | ind 21/21 |
-| stencil | mt8-repro-native | item 2: repro (serial read-back, G48) | w3/w2 | gfortran-expert | 8.197 -> 8.475 | 1.034 [0.996, 1.075] | ind 21/21 |
-| stencil | mt8-repro-native | item 2: repro (serial read-back, G48) | w3/w2 | ifx-natural | 10.08 -> 10.56 | 1.047 [0.995, 1.098] | ind 21/21 |
-| stencil | mt8-repro-native | item 2: repro (serial read-back, G48) | w3/w2 | ifx-expert | 8.348 -> 8.726 | 1.045 [1.017, 1.156] | ind 21/21 |
+| stencil | mt8-repro-native | item 2: repro (serial read-back, G51) | w3/w2 | blade-llvm | -- | | (serial-only / serial-only) |
+| stencil | mt8-repro-native | item 2: repro (serial read-back, G51) | w3/w2 | blade-cpp | 9.918 -> 10.84 | 1.093 [1.027, 1.188] | ind 21/21 |
+| stencil | mt8-repro-native | item 2: repro (serial read-back, G51) | w3/w2 | gfortran-natural | 9.088 -> 9.801 | 1.078 [1.009, 1.149] | ind 21/21 |
+| stencil | mt8-repro-native | item 2: repro (serial read-back, G51) | w3/w2 | gfortran-expert | 8.197 -> 8.475 | 1.034 [0.996, 1.075] | ind 21/21 |
+| stencil | mt8-repro-native | item 2: repro (serial read-back, G51) | w3/w2 | ifx-natural | 10.08 -> 10.56 | 1.047 [0.995, 1.098] | ind 21/21 |
+| stencil | mt8-repro-native | item 2: repro (serial read-back, G51) | w3/w2 | ifx-expert | 8.348 -> 8.726 | 1.045 [1.017, 1.156] | ind 21/21 |
 | stencil | serial-licensed-native | control | w3/w2 | blade-llvm | 11.04 -> 10.76 | 0.974 [0.899, 1.019] | ind 21/21 |
 | stencil | serial-licensed-native | control | w3/w2 | blade-cpp | 14.94 -> 14.45 | 0.967 [0.916, 1.002] | ind 21/21 |
 | stencil | serial-licensed-native | control | w3/w2 | gfortran-natural | 17.31 -> 17.1 | 0.988 [0.956, 1.006] | ind 21/21 |

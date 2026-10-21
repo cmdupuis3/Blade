@@ -103,7 +103,7 @@ Console: `C:\bt_w3\ab\reprobe.txt`, `C:\bt_w3\ab\secondlook3.txt`. Load before 4
   T = 1 / 2 / 4 / 8 (NT stores 10.0-10.8, memset 8.5-10.7): writes are flat across team sizes, so
   the trajectory-store floor above STANDS. (READS do scale -- 22 -> 53 GB/s from 1 to 4 threads,
   `second-look-actions.md` -- which is what the stencil note had wrong.)
-- **G49 retention arm** (probe copy of the pool header, `kMaxBlock` 64 MB / `kBudget` 96 MB):
+- **G52 retention arm** (probe copy of the pool header, `kMaxBlock` 64 MB / `kBudget` 96 MB):
   program end at T=8 11.5-11.8 ms -> 7.9-8.2 ms (dealloc +3.4-3.5 ms -> +0.02 ms); at T=1
   11.3 -> 9.6. With it, recur mt8 lands on the expert's full-program 6.85-7.5 ms band
-  within ~1 ms. The policy is the user's call (gap register G49).
+  within ~1 ms. The policy is the user's call (gap register G52).

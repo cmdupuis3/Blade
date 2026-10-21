@@ -23,10 +23,10 @@ at 4 MB; a larger retention is a footprint-policy decision left to the user.
 ## 16.2b Items 2-4 (MEASURED, directional; `stencil-mt8-attribution.md`)
 
 - stencil mt8-licensed: of the ~2 ms gap to the expert's region, 1.0 ms is the 24 MB `lap`
-  teardown inside the timed region (G49); the rest sits in DRAM-bound read phases. The input
+  teardown inside the timed region (G52); the rest sits in DRAM-bound read phases. The input
   checksum now carries the read-back licence every Fortran arm has (`where omp` on its outer
   fold kernel): threaded under licensed (Path B), measured flat (a 24 MB read does not scale
-  on this box), serial under repro (G48: the row-slot recognizer misses a row-view fold).
+  on this box), serial under repro (G51: the row-slot recognizer misses a row-view fold).
 - B2l: not built -- E-G5's in-team partials serve its mt8 target; serial ceiling <= 3.5%
   (brief B), below what the harness resolves here. `lanes` stays reserved.
 - D1: instrumented (gram's 3 regions = 236-257 us per call, ~1.8% of mt8 gram; the persistent

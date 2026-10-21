@@ -1,16 +1,16 @@
-The strongest next action is **G48**. The other four decisions deserve narrower conclusions than the notes give: teardown dominates but does not establish parity; B2l has a plausible small opportunity; D1’s surrogate is incomplete; and the bandwidth diagnosis is not established.
+The strongest next action is **G51**. The other four decisions deserve narrower conclusions than the notes give: teardown dominates but does not establish parity; B2l has a plausible small opportunity; D1’s surrogate is incomplete; and the bandwidth diagnosis is not established.
 
 I made no edits and ran no benchmarks. I treat the recorded timings as measurements; the predictions below are hypotheses for the next experiments.
 
 | Option | Verdict | Best next experiment | Expected signal |
 |---|---|---|---|
-| G49 teardown | **Revisit** runtime retention policy | Bounded large-block retention, measuring kernel time, exit time, memory and repeated calls | Reported kernel time falls substantially; much of the cost moves to exit |
+| G52 teardown | **Revisit** runtime retention policy | Bounded large-block retention, measuring kernel time, exit time, memory and repeated calls | Reported kernel time falls substantially; much of the cost moves to exit |
 | B2l licensed epilogue | **Revisit**, prototype before compiler work | Exact-tree blocked epilogue versus current serial licensed recur | Potential saving around 0.1–0.35 ms; spills may erase it |
 | D1 persistent syrk | **Revisit the instrument**, defer implementation | Real `dsyrk_tri`: current / final-loop `nowait` / persistent team | Likely modest saving; actual idle time determines whether it exceeds 2% |
 | Stencil read-back | **Keep the licence; revisit the diagnosis** | Read-specific bandwidth and checksum sweep with clock/power telemetry | Distinguishes memory saturation from scheduling, clocks and reduction overhead |
-| G48 row-view recognition | **Build now**, narrowly | Readable row-view spelling versus gate-off and explicit-range control | Same strict bits, actual row team, potentially meaningful checksum-phase saving |
+| G51 row-view recognition | **Build now**, narrowly | Readable row-view spelling versus gate-off and explicit-range control | Same strict bits, actual row team, potentially meaningful checksum-phase saving |
 
-**1. G49: a legitimate retention policy exists, but it defers reclamation rather than making it free.**
+**1. G52: a legitimate retention policy exists, but it defers reclamation rather than making it free.**
 
 The measured scope-exit cost is compelling. The explanation “pages touched by eight cores, therefore TLB shootdowns caused 4–5 ms” is not established by phase timers. Heap bookkeeping, page reclamation, scheduling and translation invalidation are possible contributors. The code calls typed `delete[]`; it does not directly identify an OS release operation.
 
@@ -99,7 +99,7 @@ Interleave the declared Silent configuration with a separately labelled performa
 
 **Expected signal:** if streaming reads scale but the checksum does not, investigate reduction/codegen/scheduling. If both flatten and track power or clocks, the platform diagnosis gains support. Keep the read-back licence regardless: flat performance on one configuration does not invalidate its semantics or fairness.
 
-**5. G48: build the narrow recognizer extension; it is small, but not a one-line fix.**
+**5. G51: build the narrow recognizer extension; it is small, but not a one-line fix.**
 
 There are **two admission barriers**:
 

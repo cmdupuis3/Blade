@@ -7,7 +7,7 @@ $cells = @(
  # kernel, regimes, mirrors (run order; OLD first so a box-state drift shows against it)
  @('recur',   'mt8-licensed-native,mt8-repro-native',       @('w2','w3','w3a')),   # E-G5: the NEW mt8 arms (w2 = no Blade arm; w3a = admission off on the new source)
  @('recur',   'serial-licensed-native,serial-repro-native', @('w2','w3','w3a')),   # controls: the serial emission (region = threads only); w3a serial = per-step copies
- @('stencil', 'mt8-licensed-native,mt8-repro-native',       @('w2','w3')),         # item 2: the read-back licence (licensed: Path B; repro: serial, G48)
+ @('stencil', 'mt8-licensed-native,mt8-repro-native',       @('w2','w3')),         # item 2: the read-back licence (licensed: Path B; repro: serial, G51)
  @('stencil', 'serial-licensed-native',                     @('w2','w3')),         # control
  @('antisym', 'serial-licensed-native,mt8-licensed-native', @('w3','w3g')),        # item 4: anti_g 1 vs auto, session 1
  @('gram',    'serial-licensed-native',                     @('w2','w3')),         # control

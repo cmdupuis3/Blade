@@ -1,4 +1,4 @@
-# The Codex second-look experiments (box quiet): G49 retention arm, B2l hand patch, D1 with 201 panels, READ bandwidth.
+# The Codex second-look experiments (box quiet): G52 retention arm, B2l hand patch, D1 with 201 panels, READ bandwidth.
 $env:PATH = "C:\msys64\ucrt64\bin;" + $env:PATH
 $P = "C:\Users\cdupu\AppData\Local\Temp\claude\C--Users-cdupu-Documents-GitHub-Blade--claude-worktrees-magical-cannon-db55bf\e4c4311e-f42b-47b9-8d8f-fac1416b45c4\scratchpad\w3\probe"
 $H = "C:\Users\cdupu\AppData\Local\Temp\blade-build\recur_omp-8e221d98-30748-d4b3bea8"
@@ -13,7 +13,7 @@ function phase($exe, $t, $reps) {
     foreach ($n in $names) { $v = @(); foreach ($r in $rows) { $m = $r | Where-Object { $_ -match "^$n\s+([0-9.]+) ms" }; if ($m -and $m -match "([0-9.]+) ms") { $v += [double]$Matches[1] } }; if ($v.Count -gt 0) { $out[$n] = med $v } }
     return $out
 }
-"=== 1. G49 retention arm (kMaxBlock 64 MB, kBudget 96 MB) vs default; phase medians (cumulative ms)"
+"=== 1. G52 retention arm (kMaxBlock 64 MB, kBudget 96 MB) vs default; phase medians (cumulative ms)"
 # ret_build holds ALL runtime headers with the overridable pool header (quoted includes search the
 # source's own directory first, so a -I shadow never applied); def = the same sources with the
 # defaults (the overrides left at their default values).

@@ -2713,7 +2713,7 @@ saying so.
 | item | mechanism | knob | gate / proof |
 |---|---|---|---|
 | E-G5 threaded `let rec` step (recur mt8; gap G5) | `where omp(v: 1)` on the inductive arm's FINAL map is the request; slice-write fusion keeps it (a nested stage map with one still declines) and admits the step only with the proof the barrier-free team needs: a fresh rank-2 trajectory stored at `BUF[n][k]`, every trajectory read a row view `prefix(n - c)` with a literal `1 <= c <= lo` or a seed row `0 <= r < lo`, read at the cell being written; no write outside the buffer (the shared `scheduleMayWrite` predicate over the slice and the whole time-loop body, the buffer bound locally); no `where repro` callee spliced; one requesting slice per recursion. C++: the time loop inside ONE team, contiguous x ownership fixed for every step (`blade_fold::chunk_lo`), NO per-step synchronization -- MEASURED on the box: a team entry or a barrier is ~40 us (libgomp, Windows; wait-policy knobs change nothing), so brief E's per-step team (300 of them) is 12 ms against a 7 ms expert. A licensed `prodsum(row, row)` fold rides the team as per-worker chunk partials (the self-dot's K-lane form at the configured lane count), combined ascending per row, the time chain in order; otherwise a strict post-pass after the team folds COMPLETE rows (in parallel into slots only under the OUTER fold kernel's own `where omp`, G35's gate; else serially) -- bitwise the serial program for every team size. Fail-closed shape re-check at emission; threads suppressed prints the census at the time loop; a request the fused loop cannot honour leaves the slice UNFUSED (the map keeps its per-step team); an entry no emitter decided prints its census at the end of the unit; the LLVM lane runs the sequential loop and records so (G11) | `BLADE_REC_STEP_OMP` (optimizer gate; off = the pre-wave-3 emission) | corpus recursive-arrays/031-032, mutability-errors/042; 15 optimize decision / emission cases; `blade test rec-step` (threads-on vs threads-off by raw bits -- trajectory, scalar, observed team -- T = 1 / 3 / 8 and a thread-limited team; licensed 1e-12, repro bitwise); two Codex attack reviews (`codex-review-E-G5.md`: 19 objections, all folded in; `codex-diff-E-G5.md`: two findings, fixed) |
-| stencil read-back licence (item 2) | `stencil.blade`'s input checksum carries `where omp` on its outer fold kernel (the mt8 read-back licence every Fortran arm has, section 12 / D44): a licensed build threads it (Path B over the rows), a repro build keeps it serial (G48: the row-slot recognizer takes a nested `range` fold, not a row-view fold) | -- | values identical to the original source (repro bitwise); smoke in the A/B |
+| stencil read-back licence (item 2) | `stencil.blade`'s input checksum carries `where omp` on its outer fold kernel (the mt8 read-back licence every Fortran arm has, section 12 / D44): a licensed build threads it (Path B over the rows), a repro build keeps it serial (G51: the row-slot recognizer takes a nested `range` fold, not a row-view fold) | -- | values identical to the original source (repro bitwise); smoke in the A/B |
 
 Not built, on the numbers: **B2l** (brief B's optional licensed-lanes arm: E-G5's in-team
 partials serve its mt8 target; serial ceiling <= 3.5%, below what the harness resolves here;
@@ -2734,24 +2734,24 @@ earlier figures stay in the notes, marked.
   Writes are flat on this box (48 MB row-stream writes 8.6-10.6 GB/s at T = 1..8), so the
   trajectory store is a floor at any team size. The rest of the gap to the expert's
   program is the 48 MB teardown INSIDE Blade's timed region (+3.4-3.5 ms after a threaded
-  fill, +1.8-1.9 serial); the experts free after their stop line (README item 6, G49).
+  fill, +1.8-1.9 serial); the experts free after their stop line (README item 6, G52).
   MEASURED, probe-only: a bounded retention arm (`kMaxBlock` 64 MB, `kBudget` 96 MB in a probe
   copy of the pool header) moves the teardown out of the timer -- recur T=8 program end
   11.5-11.8 -> 7.9-8.2 ms, T=1 11.3 -> 9.6; stencil T=8 9.7-10.2 -> 9.3-9.4. Not changed: the
   footprint policy is the user's call.
 - **stencil mt8 licensed.** Expert region 5.38 ms at T=8 (the loaded-box 4.25 was not
-  reliable); Blade's 6.0-6.4, of which the `lap` teardown is 0.8-1.0 ms (G49). The earlier
+  reliable); Blade's 6.0-6.4, of which the `lap` teardown is 0.8-1.0 ms (G52). The earlier
   "DRAM-bound reads" diagnosis is WITHDRAWN: a READ probe scales 22 -> 53 GB/s from 1 to 4
   threads, so the input checksum's 1.8-2.1 ms for 24 MB is ~1 ms slower than a streaming read
-  of the same bytes over a warm buffer (0.73 ms). Instrumented (G50), the cost is the FIRST read
-  after the fill, not the emission (0.88 ms after a prior full read): G50 closed. The read-back licence interleaved directly (same build, old vs new source,
+  of the same bytes over a warm buffer (0.73 ms). Instrumented (G53), the cost is the FIRST read
+  after the fill, not the emission (0.88 ms after a prior full read): G53 closed. The read-back licence interleaved directly (same build, old vs new source,
   T=8): licensed 8.08 vs 8.38 ms medians (IQRs overlap), repro 9.58 vs 9.78 with identical
   checksums -- no measurable gain; kept as the fair spelling.
 - **Codex second look** (user request; `codex-second-look.md`, actions in
   `second-look-actions.md`): B2l hand-patched and measured (serial licensed recur, blocks of
   128/256/512: 14.0 / 13.7 / 13.0 vs 13.3 ms one-shot, identical checksum bits) -- within
   noise, stays unbuilt; D1 re-instrumented with the real 201 pack panels (today 251-293 us per
-  call, the persistent shape 284-335) -- dropped; G48 judged build-now, narrowly -> follow-up.
+  call, the persistent shape 284-335) -- dropped; G51 judged build-now, narrowly -> follow-up.
 
 ### 16.3 Measured: wave-3 A/B (harness `run.py bench`, 18 sessions 20:12-21:30, quiet box; tables `bench/notes/wave3/w3-scripts/tables.md`, `antig.md`)
 
