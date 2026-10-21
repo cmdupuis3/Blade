@@ -2812,6 +2812,102 @@ default **7234 / 0** (no skips), opt-diff 2074 / 0 / 945, docs 131 / 0 / 78, llv
 interp 3016 / 0 / 3 -- run 17:57-18:38 from `C:\bt_w3` (tests/docs junctions), the hash unchanged
 after every gate; the deltas against the wave-2 finals are the wave-3 tests.
 
+## 17. Round 3 (2026-10-21) -- waves 1 and 2: the research round, relational and orbit regions, workloads, the retention arm
+
+Record: `bench/notes/round3/` (README indexes the research briefs A-D and their Codex attack reviews, the staged plan,
+every builder brief, every Codex diff review, the two A/B records `w1-ab.md` / `w2-ab.md`, the gates summaries and the
+chain scripts). Base: `worktree-bench-fortran` at 66e04875 (the wave-3 tip, master). Process: one squashed commit per item,
+each after an independent Codex diff review and the fix round it demanded (three items needed two or three looks); a
+merge-level block run on the integration tree after every code merge; the five gates and a quiet-box harness A/B at each
+wave end. Honesty rules as in 14-16: `MEASURED` names the command; a block the harness flagged is `indicative`; no Blade
+arm may be slower than its OLD binary beyond its CI without the row saying so; a builder's directional number never
+replaces the harness's.
+
+### 17.1 Wave 1 (merged 9da403a8, records 667250cd = master): A/B `notes/round3/w1-ab.md`
+
+| cell | item | old gf / ifx | new gf / ifx | new / old (Blade ref) | class |
+|---|---|---|---|---|---|
+| stencil mt8 repro | A2: the G35 row-slot form admits a row-VIEW inner fold (G51) | 0.805 / 0.877 | **0.924 / 0.959** | **0.876** [0.858, 0.935] cpp | ind |
+| maskagg serial licensed | T4b: the positions table elided under a demand census (default); T4a mask-site gather opt-in | 1.064 / 0.777 | **1.290 / 0.970** | **0.817** llvm / 0.772 cpp | ind |
+| maskagg serial repro | T4b | 1.073 / 0.827 | **1.260 / 0.955** | **0.866** llvm / 0.856 cpp | live |
+| pairkernel / comoment3 mt8 repro, `BLADE_FOLD_ROW_SLOTS=0` | A1 experiment: the ordered scatter in place of the row slots | -- | -- | 0.841 / 0.843 of the row slots | ind |
+| antisym serial / mt8 licensed, `anti_g=0` vs 1 | re-measure (3 sessions each) | -- | -- | serial 1.010-1.020 (auto slower); mt8 0.952 (auto faster) | ind |
+| twofir (N07) serial / mt8 | new kernel: resident two-output FIR | 1.19 / 0.96; 0.70 / 0.74 | 1.18 / 0.96; 0.74 / 0.75 | ~1.0 | live / ind |
+| tensorop (N09) serial / mt8 | new kernel: named-axis tensor-product action (mode_product baseline, serial nests) | 0.19 / 0.14; 0.05 / 0.05 | 0.19 / 0.14; 0.05 / 0.05 | ~1.0 | live / ind |
+
+Also in wave 1: four C++ deferred-materialization BL9002s fixed (W1-3; gap rows G57-G62 opened for the pre-existing
+defects it found), tuple members evaluated in source order. Gates on 9da403a8: default 7389/0, opt-diff 2173/0, docs 131/0,
+llvm 841/0, interp 3077/0. The A1 experiment and the anti_g re-measure became wave-2 decisions (W2-0).
+
+### 17.2 Wave 2 (tip 3a3925ac): what landed
+
+| item | mechanism | knob | measured cell (17.3) |
+|---|---|---|---|
+| W2-0a scatter precedence (mt8 repro) | where `OrbitFold.planStrict` admits the walk, the ordered orbit scatter is taken ahead of the G35 row slots; raw-bit pins across default / `prefer` / slots-off / threads-off / the serial walk at T = 1 / 4 / 7 incl. two NaN payloads | `BLADE_FOLD_ROW_SLOTS=prefer` restores the old order | pairkernel mt8 repro 0.846 |
+| W2-0b anti_g per regime | row groups auto (cache budget) only when the build emits a thread team AND the driver's static cap (p*p*n) >> 20 is >= 2; else 1 | `BLADE_TILE_TUNE anti_g=<G>` forces | antisym mt8 licensed 0.857 |
+| W2-3 row-owned pull scatter (rank 3; G66) | each thread owns whole H rows: seeds H[a, b] once, pulls T(c, a, b) for c < a ascending, then the THIRD=false slice; team completion before the serial scatter2 tail; the executed form (`serial-leaf3` / `row-pull`) chosen on the ACTUAL team and recorded in the run record's `forms` census; 6,923 header identities + emitted raw bits via `BLADE_PRINT_BITS` | `BLADE_ORBIT_PULL`, `pull_min` | comoment3 mt8 repro 0.737 |
+| W2-1 membership hoisting (T1; G65) | ONE search structure (linear / bitmap / hash chosen from (M, min, max) only) built before the host, probed by every `contains(B, x)` in its kernels, freed after; one target-evaluation contract in all lanes (set first, target once, before any cell); a real LLVM IRContains arm; host-anchored route pins (31 rows = the corpus) | `BLADE_MEMBER_HOIST` | no bench kernel (directional: semiagg-shaped C++ 82-92 -> 11 ms, LLVM 345-400 -> 6.4 ms) |
+| W2-2 T4c shared selection (+ certificate; G70) | one selection index per mask for every `compound(c_j, keep)`, data stores kept, one joint pass at the first companion; a `contains` predicate certified pure/total only with T1's admitted plan; legacy single-compound shapes pinned byte-identical | `BLADE_COMPACTION_FUSION=unshared` | no bench kernel (directional: filtergroup-shaped J = 3 0.70-0.76 both lanes; semiagg flat -- see G70) |
+| W2-4 producer-input legs (A7c; G69) | saxpy's input sums ride the y2 producer pass as extra fold legs (strict chains under repro, builtin-licensed otherwise), the callee inlined one level with its pools released at the call's return boundary -- INCOMPLETE: see 17.5 | `BLADE_EPILOGUE_LEGS` | saxpy serial repro 0.889 llvm / 0.923 cpp |
+| W2-6 pool-retention arm (A4; G52) | the user's ruling: an opt-in arm, never a default change; `1` = 64 MB / 96 MB per thread (C++; the LLVM shim's process-wide cache gets the same caps); policy in the emitted text (the exe cache keys on it), the run record (`policy.pool`, additive) and the plan build line | `BLADE_POOL_RETAIN` | recur mt8 0.74-0.77, stencil mt8 0.92 under the arm |
+| W2-5 haloadjoint (N02) | 1-D weighted nonlinear halo primal + reverse action via `ad.grad`; the strict derivative reference is an explicit ordered update list both Fortran twins implement; N10 gated out as G67 (the per-group packed H fails in every lane), G68 (AD zero-literal compile blowup) | -- | first measurement 0.52-0.65 serial, 0.41-0.65 mt8 (losses) |
+
+### 17.3 Measured: wave-2 A/B (harness `run.py bench`, 28 sessions 15:07-17:49 + the saxpy legs-off re-run, quiet box; `notes/round3/w2-ab.md`)
+
+Mirrors: **r3w1** = the wave-1 tip binary (OLD) on the wave-2 bench tree; **r3w2** = the wave-2 tip, defaults;
+**prefer** / **pull0** / **antig1** / **legs0** / **retain** = r3w2 with the one knob named above. Ratios: B/A = analyst
+bootstrap of median(B)/median(A) of the Blade reference lane; expert ratios are the harness's own (> 1 Blade faster).
+
+| cell | Blade arm: A -> B (ms) | B/A [95% CI] | class | expert ratio gf / ifx: old -> new |
+|---|---|---|---|---|
+| pairkernel mt8 repro, old -> new (scatter precedence) | cpp 9.03 -> 7.64 | 0.846 [0.838, 0.861] | live | 0.681 / 0.686 -> 0.803 / 0.805 (loss, narrowed) |
+| pairkernel mt8 repro, new -> prefer (the old order) | cpp 7.64 -> 9.01 | 1.179 [1.160, 1.210] | ind | -- |
+| comoment3 mt8 repro, old -> new (the pull) | cpp 4.19 -> 3.09 | **0.737** [0.716, 0.760] | live | 1.147 / 0.964 -> **1.553 / 1.305** (both win) |
+| comoment3 mt8 repro, new -> pull0 (serial scatter) | cpp 3.09 -> 3.57 | 1.156 [1.108, 1.20] | ind | -- (the `prefer` arm still pulls at rank 3: 1.017 is not a row-slot measurement) |
+| comoment3 mt8 repro, new -> g35 (pull off AND `prefer`: the G35 row slots; re-run 18:09-18:11) | cpp 3.09 -> 4.40 | **1.422** [1.383, 1.501]; vs the serial scatter 1.230 [1.185, 1.308] | ind | on the row slots 1.100 / 0.950 (suppressed) |
+| pairkernel / comoment3 serial repro (controls, four mirrors) | llvm 29.7 / 8.8 | 0.996-1.009 | live | unchanged |
+| antisym mt8 licensed, old -> new | cpp 9.50 -> 8.13 | 0.857 [0.792, 0.899] | ind (pooled) | 1.152 / 1.227 -> 1.15-1.17 / 1.19-1.22 (suppressed) -- NOT an anti_g result: both experts moved 0.846-0.857 in the same sessions (environmental) |
+| antisym mt8 licensed, new -> antig1 (1 forced vs auto): the anti_g evidence | cpp 8.13 -> 8.45 | 1.039 [0.992, 1.069] | ind | marginal; the per-regime default is kept on it and wave 1's 0.952 |
+| antisym serial licensed, old -> new | llvm 27.45 -> 27.65; cpp 28.32 -> 28.64 | 1.007 [1.001, 1.020]; 1.011 [1.002, 1.019] | ind | 1.109 / 1.052 -> 1.10-1.12 / 1.06-1.07 -- slower at the CI edge on BYTE-IDENTICAL serial emission: session drift, recorded |
+| saxpy serial repro, old -> new (the legs) | llvm 10.79 -> 9.59; cpp 15.52 -> 14.33 | 0.889 [0.882, 0.919]; 0.923 [0.917, 0.930] | live | 1.408 / 0.888 -> 1.584 / 0.994 (ifx: loss -> detectable-loss) |
+| saxpy serial licensed, old -> new | llvm 10.58 -> 9.45; cpp 15.46 -> 14.65 | 0.893; 0.947 | live | 1.391 / 0.991 -> 1.547 / **1.113** (ifx: equivalent -> win) |
+| saxpy mt8 repro / licensed (decline controls) | cpp 10.89 -> 10.87; 8.95 -> 8.98 | 0.998; 1.003 | live / ind | unchanged |
+| saxpy serial repro / licensed, new -> legs0 (the separate joined pass; re-run 17:52-18:04) | llvm 9.59 -> 11.18; cpp 14.33 -> 15.76 / llvm 9.45 -> 10.84; cpp 14.65 -> 15.77 | 1.166 [1.129, 1.183]; 1.100 / 1.148; 1.077 | live / ind | legs0 lands 2-4% above the OLD binary (between-session drift); its mt8 controls flat (1.005 / 1.007) |
+| haloadjoint serial licensed / repro (new kernel) | llvm 1.73 / 1.83 | old = new (1.006 / 0.997) | live | 0.52 / 0.65; 0.52 / 0.66 |
+| haloadjoint mt8 licensed / repro | cpp 2.97 / 2.94 | 0.994 / 0.995 | live / ind | 0.42 / 0.64; 0.44 / 0.65 |
+| stencil mt8 repro / licensed, new -> retain | cpp 8.43 -> 7.80; 8.60 -> 7.92 | 0.926 [0.897, 0.943]; 0.920 [0.896, 0.971] | live / ind | with the arm ~0.99 / 1.04; 0.98 / 1.05 (derived from the new-binary expert medians) |
+| recur mt8 licensed / repro, new -> retain | cpp 9.13 -> 6.76; 12.38 -> 9.52 | **0.741** [0.724, 0.782]; **0.769** [0.754, 0.790] | ind | with the arm ~1.01 / 1.08; ~0.80 / 0.82 (derived) |
+| gram serial licensed (control) | llvm 56.0 -> 56.3 | 1.005 [1.000, 1.046] | ind | unchanged |
+
+Peak working set (harness PeakWorkingSetSize, MB): the retention arm raises recur from 51.7 to 51.8 and stencil from 51.4
+to 51.5-51.6; every other mirror equals its default. The LLVM lane has no mt8 arm (G11), so every mt8 cell is blade-cpp.
+
+### 17.4 Gates: GREEN on 3a3925ac (Blade.dll 12917295...; `notes/round3/gates/w2-gates-summary.md`)
+
+default **7872 / 0**, opt-diff 2257 / 0, docs 132 / 0 / 78, llvm 914 / 0, interp 3118 / 0 -- run 13:05-14:38 from `C:\bt_r2w1`,
+the hash unchanged after every gate; examples sweep 68 files, the same six pre-existing failures as wave 1 (four notebooks
+whose zarr stores are not in the checkout, one BL4003 warning, one BL3999). Every mirror smoked for its benched pairs.
+
+### 17.5 Open at the wave end
+
+- **W2-4's lifetime class (G69).** The kept one-level inline needs the callee's pools released at the call's return. Three
+  Codex looks: the join-site release (freed a live pool when the join sat inside the callee; double release with two
+  producers) was replaced by an explicit per-call boundary table, which still has four holes -- the join rewrite can delete
+  the boundary let, CSE runs after it and can merge a caller's equal map into the freed pool, function-body callers bypass
+  the renderer arm, and the LLVM lane (which frees an outlined callee's pools at its scalar return) retains them under the
+  inline. Admitted A7c plans only. The saxpy numbers above are live observations: the C++ release lands where the
+  as-written free did, and the archived OLD and NEW LLVM emissions of saxpy both allocate y2 in main and neither frees it
+  (merge-level review finding 4), so no moved free is in the saxpy delta -- but they are not a lifetime-matched compiler
+  claim, and the planner / docs strings that say "the LLVM lane frees no pool in either form" are WRONG in general and are
+  corrected by round 4. The merge-level Codex review (`reviews/codex-wave2-merged.md`) is HOLD on this item: round 4 (brief
+  `briefs/W2-4-round4-lifetime.md`) lands an IR-level cleanup event no pass removes, honoured by every renderer and both
+  lanes, fail-closed elsewhere, then a fourth look, the gates re-run and the saxpy cells re-measured; the wave's other
+  six items are not held.
+- **semiagg under T4c is flat** (G70): at ~5% selectivity the branchless single pass reads the whole payload where the old
+  position gather read the selected cells; a selectivity-aware gather is the follow-up.
+- **G67 / G68** (N10's per-group packed H; the AD zero-literal compile blowup) block N10 and large haloadjoint sizes.
+- **antisym serial drift**: 0.7-1.1% slower pooled across sessions on identical emission -- noise at the CI edge, watched.
+
 ## 12. Decisions put to the user — BOTH DECIDED (2026-10-18)
 
 **Decisions:** (1) mt8 matched parallelism — option (A) below: every arm threads input
