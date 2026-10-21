@@ -908,7 +908,8 @@ let total = reduce(method_for(range<Ix>) <@> lambda(i) -> Float64(i), k, 0.0)
      // fold kernel's inner reduce over it reads STORED cells and may
      // reassociate like any stored array (the counter is pinned by
      // corpus loops/497 and 518); the guard below stays covered by the
-     // writing CHOICE, a deferred wrapper G45 does not force.
+     // INLINE writing choice -- not a `let`, so neither G45 nor G50 (which
+     // stores a NAMED writing choice) forces it.
      (let name = "G45: a fold kernel's inner reduce over a named writing map reads its stored cells"
       match emitUnder [] "g45k" (kernel writingI) with
       | Error e -> fail name e
@@ -930,13 +931,14 @@ let total = reduce(method_for(range<Ix>) <@> lambda(i) -> Float64(i), k, 0.0)
              else pass name "the accumulator is `fadd contract` over the writing producer; `fadd reassoc nsz contract` over the pure twin")
 
     // ---- G41 (Codex re-re-review, finding 12): a NAMED PARTIAL VIEW of a
-    // writing deferred value (`let row = m(0)`) is virtual too: folding it runs
-    // the writer, so the accumulator keeps the serial chain. Since gap G45 a
-    // named writing MAP is stored at its definition (so its view is stored
-    // data, like the `|> compute` control); the virtual writer is a writing
-    // CHOICE, a deferred wrapper G45 does not force. Controls: the pure view
-    // keeps `reassoc nsz`; views of the named writing map and of a
-    // materialized one are stored data and may reassociate.
+    // writing deferred value (`let row = m(0)`) was virtual too: folding it ran
+    // the writer, so the accumulator had to keep the serial chain. Since gap
+    // G45 a named writing MAP, and since gap G50 a named writing CHOICE, is
+    // stored at its definition, so a view of either is stored data, like the
+    // `|> compute` control, and may reassociate: no NAMED writing value is
+    // virtual any more, and the deferred chase through views stays a backstop.
+    // The virtual-writer guard is the inline writing choice above ("G41:
+    // ordinary reduce over a writing choice keeps the serial chain").
     (let mapRhs (body: string) = $"method_for(range<I>, range<J>) <@> lambda(i, j) -> {body}"
      let view (rhs: string) = $"""
 type I = Idx<2>
@@ -949,23 +951,22 @@ let total = reduce(row, (+), 0.0)
      let writer = "{\n    G(0) = G(0) + 1.0\n    G(0)\n}"
      let zeroRhs = mapRhs "0.0"
      let choiceRhs = "(" + mapRhs writer + ") <|> (" + zeroRhs + ")"
-     let name = "G41-12: a fold over a named partial view of a writing virtual value keeps the serial chain"
+     let name = "G41-12 / G45 / G50: a fold over a named partial view of a writing value reads stored cells"
      match emitUnder [] "g4112w" (view choiceRhs), emitUnder [] "g4112p" (view (mapRhs "Float64(i + j) * 0.5")),
            emitUnder [] "g4112m" (view (mapRhs writer + " |> compute")), emitUnder [] "g4112n" (view (mapRhs writer)) with
      | Error e, _, _, _ | _, Error e, _, _ | _, _, Error e, _ | _, _, _, Error e -> fail name e
      | Ok w, Ok p, Ok m, Ok n ->
-         let wAcc = accumulatorFadds w
-         if wAcc.IsEmpty then fail name "writing view: no accumulator identified"
-         elif wAcc |> List.exists (fun f -> flagsOf f <> "contract") then fail name ($"""writing view: accumulator flags {(String.concat " | " wAcc)}""")
+         if not (accumulatorFadds w |> List.exists (fun f -> flagsOf f = "reassoc nsz contract")) then fail name "named writing choice (G50: stored at its let): no reassoc accumulator"
          elif not (accumulatorFadds p |> List.exists (fun f -> flagsOf f = "reassoc nsz contract")) then fail name "pure view control: no reassoc accumulator"
          elif not (accumulatorFadds m |> List.exists (fun f -> flagsOf f = "reassoc nsz contract")) then fail name "materialized writing control: no reassoc accumulator (a stored view may reassociate)"
          elif not (accumulatorFadds n |> List.exists (fun f -> flagsOf f = "reassoc nsz contract")) then fail name "named writing map (G45: stored at its let): no reassoc accumulator"
-         else pass name "writing choice view: `fadd contract`; pure view, materialized and named (G45-stored) writer: `fadd reassoc nsz contract`")
+         else pass name "views of the named writing choice (G50) and map (G45), the materialized writer and the pure control: `fadd reassoc nsz contract`")
 
     // ---- G41 (Codex review W2F-4, finding 19): a view held INSIDE a named
     // tuple (`let pair = (m(0), 0.0); let row = pair[0]`) is still a view of
-    // the writing virtual value; the accumulator keeps the serial chain. The
-    // writer is a CHOICE (G45 stores a named writing map). Pure control.
+    // the value behind it. The writer is a named CHOICE, which gap G50 stores
+    // at its definition (G45 stores a named writing map), so the tuple-held
+    // view is stored data and may reassociate, like the pure control.
     (let tupleView (rhs: string) = $"""
 type I = Idx<2>
 type J = Idx<3>
@@ -978,15 +979,13 @@ let total = reduce(row, (+), 0.0)
      let mapRhs (body: string) = $"method_for(range<I>, range<J>) <@> lambda(i, j) -> {body}"
      let writer = "{\n    G(0) = G(0) + 1.0\n    G(0)\n}"
      let choiceRhs = "(" + mapRhs writer + ") <|> (" + mapRhs "0.0" + ")"
-     let name = "G41-19: a fold over a tuple-held view of a writing virtual value keeps the serial chain"
+     let name = "G41-19 / G50: a fold over a tuple-held view of a named writing choice reads stored cells"
      match emitUnder [] "g4119w" (tupleView choiceRhs), emitUnder [] "g4119p" (tupleView (mapRhs "Float64(i + j) * 0.5")) with
      | Error e, _ | _, Error e -> fail name e
      | Ok w, Ok p ->
-         let wAcc = accumulatorFadds w
-         if wAcc.IsEmpty then fail name "writing tuple view: no accumulator identified"
-         elif wAcc |> List.exists (fun f -> flagsOf f <> "contract") then fail name ($"""writing tuple view: accumulator flags {(String.concat " | " wAcc)}""")
+         if not (accumulatorFadds w |> List.exists (fun f -> flagsOf f = "reassoc nsz contract")) then fail name "named writing choice (G50: stored at its let): no reassoc accumulator"
          elif not (accumulatorFadds p |> List.exists (fun f -> flagsOf f = "reassoc nsz contract")) then fail name "pure control: no reassoc accumulator"
-         else pass name "writing tuple-held choice view: `fadd contract`; pure control: `fadd reassoc nsz contract`")
+         else pass name "tuple-held views of the stored writing choice (G50) and of the pure control: `fadd reassoc nsz contract`")
 
     // ---- G41 (Codex re-re-review, finding 13): the orbit-class fold
     // evaluates each canonical cell once and weights it, so it must never run

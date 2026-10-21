@@ -1,0 +1,51 @@
+// TEST: Writing Choice Evaluated Once In Every Scope
+// Gap G50 (formalism 10.2, "Effectful named computations"): a NAMED value-keyed
+// wrapper -- `A <|> B` -- whose evaluation writes is evaluated ONCE, at its
+// definition, in every scope, like a writing map (G45). Two folds of it read
+// the stored cells. Before, both compiled lanes evaluated it once while the
+// interpreter re-ran the writing side per fold in a block and in a function or
+// lambda body (counter 6 vs 3 per scope); at module level every lane already
+// ran it once (loops/525).
+//   rm   : module level              (two folds, counter +3)
+//   rb   : a top-level block         (counter +3)
+//   rf   : a function body           (counter +3)
+//   rk   : a lambda (kernel) body, one cell per row of a two-row map (+3 each)
+//   seen : 3 + 3 + 3 + 6 = 15 writes; the interpreter's former per-read
+//          evaluation gave 3 + 6 + 6 + 12 = 27
+type R = Idx<2>
+let x = [1.0, 2.0, 3.0]
+let mut counter = 0
+let qm = (method_for(x) <@> lambda(v) -> {
+    counter = counter + 1
+    v * 2.0
+}) <|> (method_for(x) <@> lambda(v) -> v)
+let rm = reduce(qm, (+)) + reduce(qm, (+), 1.0)
+let rb = {
+    let qb = (method_for(x) <@> lambda(v) -> {
+        counter = counter + 1
+        v * 2.0
+    }) <|> (method_for(x) <@> lambda(v) -> v)
+    reduce(qb, (+)) + reduce(qb, (+), 1.0)
+}
+function f(s: Float64) -> Float64 = {
+    let qf = (method_for(x) <@> lambda(v) -> {
+        counter = counter + 1
+        v * s
+    }) <|> (method_for(x) <@> lambda(v) -> v)
+    reduce(qf, (+)) + reduce(qf, (+), 1.0)
+}
+let rf = f(2.0)
+let rk = method_for(range<R>) <@> lambda(r) -> {
+    let qk = (method_for(x) <@> lambda(v) -> {
+        counter = counter + 1
+        v * Float64(r + 1)
+    }) <|> (method_for(x) <@> lambda(v) -> v)
+    reduce(qk, (+)) + reduce(qk, (+), 1.0)
+} |> compute
+let seen = counter
+// EXPECT: qm = [2.0, 4.0, 6.0]
+// EXPECT: rm = 25.0
+// EXPECT: rb = 25.0
+// EXPECT: rf = 25.0
+// EXPECT: rk = [13.0, 25.0]
+// EXPECT: seen = 15

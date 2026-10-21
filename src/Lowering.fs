@@ -381,6 +381,21 @@ let joinDeferrableIdsMany (exprs: IRExpr list) : Set<IRId> =
 
 let joinDeferrableIds (expr: IRExpr) : Set<IRId> = joinDeferrableIdsMany [expr]
 
+/// A value-keyed WRAPPER over arrays -- `A <|> B` (choice) or `A <|:> B`
+/// (fallback) -- as a let's value (gap G50). It is forced where a map is: in a
+/// function or lambda body always (S2 below; the C++ body emitter already
+/// forced every deferring form at its let, forceDeferringForm), and at module
+/// level / in a top-level block when its evaluation writes
+/// (forceEffectfulModuleLets). A scalar choice is an ordinary value and is
+/// never wrapped.
+let isArrayWrapperValue (v: IRExpr) : bool =
+    match v with
+    | IRChoice _ | IRFallback _ ->
+        (match stripUnits (typeOf v) with
+         | ArrayElem _ -> true
+         | _ -> false)
+    | _ -> false
+
 let rec forceBareCombinatorLetsExcept (skip: Set<IRId>) (expr: IRExpr) : IRExpr =
     match expr with
     | IRLet (id, value, body) ->
@@ -388,6 +403,7 @@ let rec forceBareCombinatorLetsExcept (skip: Set<IRId>) (expr: IRExpr) : IRExpr 
             match value with
             | IRApplyCombinator _ | IRComposeApply _ when Set.contains id skip -> value
             | IRApplyCombinator _ | IRComposeApply _ -> IRCompute value
+            | v when isArrayWrapperValue v && not (Set.contains id skip) -> IRCompute v
             | _ -> forceBareCombinatorLetsExcept skip value
         IRLet (id, value', forceBareCombinatorLetsExcept skip body)
     | IRIf (c, t, e) -> IRIf (c, forceBareCombinatorLetsExcept skip t, forceBareCombinatorLetsExcept skip e)
@@ -2733,18 +2749,23 @@ let private refuseUncountableStorage (modules: IRModule list) : unit =
 /// closed-form domain map, S2's second exemption, is never left unread when
 /// it writes: the fold splice declines a named writing producer --
 /// tryInferReduceCompute's namedWritingProducer -- so the fold reads it.)
-/// Only bare maps are forced; a writing deferred WRAPPER (choice, fallback,
-/// guard, sequence) keeps the deferred protocol in every scope, and a join
-/// over one is refused. The write judgment is the shared scheduling
+/// A writing value-keyed WRAPPER over arrays (choice / fallback,
+/// isArrayWrapperValue) is forced by the same rule (gap G50: the interpreter
+/// re-ran its writing side per fold in a block or body while both compiled
+/// lanes ran it once); guard and sequence keep the deferred protocol, and a
+/// join over a writing wrapper it reads only as operands is still refused
+/// (mutability-errors/023). The write judgment is the shared scheduling
 /// predicate (an unresolvable callee counts as a write: forcing a map that
 /// does not write changes no value, only its schedule).
 let private forceEffectfulModuleLets (programFuncs: IRCallable list) (m: IRModule) : IRModule =
     let writes = Optimize.scheduleMayWriteIn programFuncs m
     let exempt = joinDeferrableIdsMany (m.Bindings |> List.map _.Value)
+    // G50: a writing value-keyed wrapper (choice / fallback) obeys the same
+    // rule as a writing map -- once, at its definition
     let isBareMap (v: IRExpr) =
         match v with
         | IRApplyCombinator _ | IRComposeApply _ -> true
-        | _ -> false
+        | v -> isArrayWrapperValue v
     // the statement spine of a top-level block, as S2 walks a body
     let rec spine (e: IRExpr) : IRExpr =
         match e with

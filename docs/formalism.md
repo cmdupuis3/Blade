@@ -2101,11 +2101,17 @@ it is read, fused into its consumer): its evaluation count is unobservable.
 The one exception is the join's sharing declaration above: a writing map whose
 ONLY readers are the operand slots of reduction joins stays deferred, and the
 join refuses it (BL4005) -- write `|> compute` to share the stored cells. A
-deferred WRAPPER (`<|>` choice, fallback, guard, sequence) is outside this
-contract: it is not forced, so a writing side runs where the wrapper is read
-(once per read -- force it with `|> compute` for one evaluation), and a join
-over a writing one is refused the same way. Pinned by `loops/494`, `497`,
-`518`-`524` in every lane.
+value-keyed WRAPPER over arrays -- a `<|>` choice or a `<|:>` fallback --
+obeys the same rule (gap G50): bound by a `let` and writing, it is evaluated
+once, completely, at its definition, in every scope, and its folds read the
+stored cells; a pure one stays deferred at module level and in a top-level
+block (it is stored where a fold or another eager consumer first reads it)
+and is stored at its let in a function or lambda body, where a map is too. A
+join whose only reads of a writing wrapper are its operand slots is refused
+the same way. The computation wrappers `guard` and `sequence` keep the
+deferred protocol. Pinned by `loops/494`, `497`, `518`-`527` in every lane
+(`526`, a fallback, in the C++ lane and the interpreter: the LLVM lane has no
+`<|:>`).
 - `<*>` concatenates array lists: `method_for(A) <*> method_for(B) ≡
   method_for(A, B)`; identity `method_for()`; commutative up to index
   reordering; associative. It is proved to be exactly shape concatenation with
