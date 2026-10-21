@@ -25,6 +25,15 @@
 // at scatter_g = 3. Every build: every e<k> true, the special values right,
 // the route census (scatter calls in the scatter builds, none with the knob
 // off), and the printed text IDENTICAL to the C++ default build.
+// Plus the ROW-OWNED PULL (round 3, D-P3): a header-level RAW-BIT leg
+// (cpp/orbit_pull_tests.cpp: every H cell and the total, memcmp, at T = 1, 3,
+// 8 observed and on a restricted team, with the executed form and the form
+// census) and an emitted-form leg that compares RAW RESULT BITS
+// (BLADE_PRINT_BITS: a controlled NaN payload and a signed zero included)
+// across the ordinary pull build at T = 1, 3, 8 and on a restricted team
+// (OMP_THREAD_LIMIT=1; the run record's `forms` names each site's executed
+// form), the test-mode pull build (teams observed), the pull off, the serial
+// scatter, the walk and the LLVM lane.
 // `blade test orbit-scatter`; part of the default suite. Needs g++ (Skipped
 // without it); the LLVM half needs clang (Skipped without it).
 module Blade.Tests.OrbitScatterTests
@@ -383,6 +392,315 @@ let runOrbitScatterTests () : BlockResult =
                 if code <> 0 && all.Contains "integer division by zero" && not (all.Contains "modulo") then
                     pass name "BL8013 integer division by zero (cell (0, 4), reached first in row order)"
                 else fail name ($"""wanted the division-by-zero abort: exit {code}: {all.Trim().Replace("\n", " | ")}""")
+    // ---- THE ROW-OWNED PULL SCATTER (round 3, D-P3) -------------------------
+    // (1) HEADER LEVEL, RAW BITS: cpp/orbit_pull_tests.cpp over the shipped
+    // blade_orbit_scatter.hpp compares, by memcmp, EVERY leaf chain of the
+    // packed H and the total of the serial slice form, of the pull form at
+    // T = 1, 3, 8 (team observed: exactly min(T, p) with dynamic teams off)
+    // and of the logical walk (see its header for the case list; one NaN
+    // payload -- which payload survives two NaNs is outside the contract).
+    let pullTestSrc = Path.Combine(AppContext.BaseDirectory, "cpp", "orbit_pull_tests.cpp")
+    let pullHeaderLeg () =
+        let name = "pull form, header level: every H cell and total == the serial slice form == the walk (raw bits, T = 1, 3, 8, a restricted team), the executed form and the form census"
+        if not (File.Exists pullTestSrc) then fail name $"orbit_pull_tests.cpp not found at {pullTestSrc}"
+        else
+        let exe = Path.Combine(work, "orbit_pull_tests.exe")
+        let psi = ProcessStartInfo("g++", $"-std=c++17 -O3 -march=native -fno-math-errno -fwrapv -fopenmp -ffp-contract=off -o \"{exe}\" \"{pullTestSrc}\"")
+        psi.RedirectStandardOutput <- true
+        psi.RedirectStandardError <- true
+        psi.UseShellExecute <- false
+        psi.CreateNoWindow <- true
+        use cproc = Process.Start(psi)
+        let co = Blade.Runtime.readToEndOffPool cproc.StandardOutput
+        let ce = Blade.Runtime.readToEndOffPool cproc.StandardError
+        if not (cproc.WaitForExit(180000)) then
+            (try cproc.Kill(true) with _ -> ())
+            fail name "compile timed out (180s)"
+        elif cproc.ExitCode <> 0 then fail name ("compile: " + (co.Result + ce.Result).Trim())
+        else
+        let rpsi = ProcessStartInfo(exe, "")
+        rpsi.RedirectStandardOutput <- true
+        rpsi.RedirectStandardError <- true
+        rpsi.UseShellExecute <- false
+        rpsi.CreateNoWindow <- true
+        rpsi.Environment.["OMP_DYNAMIC"] <- "false"
+        rpsi.Environment.Remove("OMP_THREAD_LIMIT") |> ignore
+        rpsi.Environment.Remove("OMP_NUM_THREADS") |> ignore
+        use rproc = Process.Start(rpsi)
+        let ro = Blade.Runtime.readToEndOffPool rproc.StandardOutput
+        let re = Blade.Runtime.readToEndOffPool rproc.StandardError
+        if not (rproc.WaitForExit(300000)) then
+            (try rproc.Kill(true) with _ -> ())
+            fail name "run timed out (300s)"
+        else
+        let out = ro.Result.Replace("\r\n", "\n")
+        let m = Text.RegularExpressions.Regex.Match(out, @"ORBIT PULL TESTS:\s*(\d+)/(\d+)\s*passed")
+        let teams = out.Split('\n') |> Array.tryFind (fun l -> l.StartsWith "teams observed") |> Option.defaultValue ""
+        let fails = out.Split('\n') |> Array.filter (fun l -> l.StartsWith "[FAIL]") |> Array.truncate 5 |> String.concat " | "
+        let forms = out.Split('\n') |> Array.tryFind (fun l -> l.StartsWith "executed forms") |> Option.defaultValue ""
+        let census = out.Split('\n') |> Array.tryFind (fun l -> l.StartsWith "form census") |> Option.defaultValue ""
+        if m.Success && rproc.ExitCode = 0 && m.Groups.[1].Value = m.Groups.[2].Value
+           && teams.Contains "T=1 -> 1, T=3 -> 3, T=8 -> 8" && forms <> "" && census <> "" then
+            pass name $"{m.Groups.[1].Value}/{m.Groups.[2].Value} identities, forms and census rows bitwise / exact; {teams.Trim()}; {forms.Trim()}; {census.Trim()}"
+        elif m.Success then fail name ($"{m.Groups.[1].Value}/{m.Groups.[2].Value} passed; {teams.Trim()}; {fails} {re.Result.Trim()}")
+        else fail name ($"no summary line (exit {rproc.ExitCode}): {re.Result.Trim()}")
+    pullHeaderLeg ()
+    // (2) THE EMITTED FORM, both lanes, BY RAW BITS: a generated rank-3
+    // program whose OUTER level carries the request (the fold kernel's `where
+    // omp`, or the map's `omp(i: 1)`), each case `a<k>` beside its walk-forced
+    // twin `b<k>`, under REPRO + contract=off with `pull_min=0` (so p = 13 / 23
+    // qualify). Every run prints with BLADE_PRINT_BITS=1, so each Float64
+    // binding carries its raw IEEE-754 pattern (` #<16 hex>`), and the
+    // patterns of EVERY a<k> (a controlled NaN -- one payload, from the pool's
+    // own invalid sqrt -- and a signed zero among them) must be identical
+    // across: the ordinary pull build at T = 1, 3, 8 and on a RESTRICTED team
+    // (OMP_NUM_THREADS=8 OMP_THREAD_LIMIT=1), the omp-test-mode pull build at
+    // T = 1, 3, 8 (every pull site's team observed: min(T, p)), the C++ lane
+    // with the pull off, the serial scatter (threads off), the walk (scatter
+    // off) and the LLVM lane's serial scatter. The ordinary pull build's run
+    // record (`forms`) must name the EXECUTED form of every site: `row-pull`
+    // with actual = min(T, p) at T = 3 / 8, `serial-leaf3` with actual 1 at
+    // T = 1 and on the restricted team. e<k> (each binary against its own walk
+    // twin) is kept as a second check. Routes asserted per build.
+    let pullProgram () : string * int * int list * int * int =
+        let sb = Text.StringBuilder(header)
+        let mutable k = 0
+        let exts = Collections.Generic.List<int>()
+        let add (p: int) (pool: string) (ks: string list) (ss: string list) (outer: string) (mapReq: bool) (fBody: string -> string) (twin: string -> string -> string) =
+            let vars = [ "i"; "j"; "k" ]
+            let read = $"""{pool}({String.concat ", " vars})"""
+            let mirror = $"""{pool}({String.concat ", " (List.rev vars)})"""
+            let mk (body: string) =
+                let inner = nest $"V{p}" [ "j"; "k" ] (List.tail ks) (List.tail ss) body
+                let lam = if mapReq then "lambda(i) where omp(i: 1)" else "lambda(i)"
+                $"reduce(method_for(range<V{p}>) <@> {lam} -> {inner}, {outer}, {ss.Head})"
+            sb.Append($"let a{k} = {mk (fBody read)}\n") |> ignore
+            sb.Append($"let b{k} = {mk (twin read mirror)}\n") |> ignore
+            sb.Append($"let e{k} = ((a{k} == b{k}) || (a{k} != a{k} && b{k} != b{k})) && ((a{k} != 0.0) || (1.0 / a{k} == 1.0 / b{k}))\n") |> ignore
+            exts.Add p
+            k <- k + 1
+        for p in [ 13; 23; 171 ] do
+            sb.Append($"type V{p} = Idx<{p}>\n") |> ignore
+            sb.Append(xDecl (string p) $"V{p}" None) |> ignore
+            sb.Append($"let t{p} = method_for(x{p}, x{p}, x{p}) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) |> compute\n") |> ignore
+        let foldReq = "lambda(u, v) where omp -> u + v"
+        for p in [ 13; 23 ] do
+            bodies |> List.iteri (fun bi (f, twin) ->
+                // leaf / middle kernels cycle (+) / radd / rhalf / rmax; the
+                // outer is licensed (the request's gate), its seed nonzero or -0
+                let ks = [ "(+)"; kernels.[(bi + p) % kernels.Length]; kernels.[(bi + p + 1) % kernels.Length] ]
+                let ss = [ seeds.[(bi + 1) % seeds.Length]; seeds.[(2 * bi + p) % seeds.Length]; seeds.[(bi + 2) % seeds.Length] ]
+                add p $"t{p}" (if bi % 2 = 0 then foldReq :: List.tail ks else ks) ss (if bi % 2 = 0 then foldReq else "(+)") (bi % 2 = 1) f twin)
+        // comoment3's extent (smoke) with the bench body
+        add 171 "t171" [ foldReq; "(+)"; "(+)" ] [ "0.0"; "0.0"; "0.0" ] foldReq false (fun r -> $"{r} * {r}") (fun r m -> $"{r} * {m}")
+        // a NaN pool (ONE payload: the pool's own invalid sqrt) and an all
+        // -0.0 fold (-0.0 seeds) through the pull
+        sb.Append("type V11 = Idx<11>\n") |> ignore
+        sb.Append(xDecl "n11" "V11" (Some 4)) |> ignore
+        sb.Append("let tn11 = method_for(xn11, xn11, xn11) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) |> compute\n") |> ignore
+        let nanAt = k
+        add 11 "tn11" [ foldReq; "radd"; "radd" ] [ "0.75"; "-0.0"; "0.5" ] foldReq false (fun r -> r) (fun r m -> $"if {m} > 1.0e300 then 0.0 else {r}")
+        // ...and through the order-sensitive max (a NaN operand is dropped or
+        // kept by its position: no `nan` expected, the twin decides)
+        add 11 "tn11" [ foldReq; "rmax"; "rmax" ] [ "0.75"; "-0.0"; "0.5" ] foldReq false (fun r -> r) (fun r m -> $"if {m} > 1.0e300 then 0.0 else {r}")
+        let zeroAt = k
+        add 13 "t13" [ foldReq; "radd"; "(+)" ] [ "-0.0"; "-0.0"; "-0.0" ] foldReq false (fun r -> $"-0.0 * abs({r})") (fun r m -> $"if {m} > 1.0e300 then 0.0 else -0.0 * abs({r})")
+        sb.Append($"let pn = a{nanAt}\nlet pz = 1.0 / a{zeroAt}\n") |> ignore
+        (sb.ToString(), k, List.ofSeq exts, nanAt, zeroAt)
+    let (psrc, pcases, pexts, nanAt, zeroAt) = pullProgram ()
+    let pprinted = [ for k in 0 .. pcases - 1 do yield $"a{k}"; yield $"e{k}" ] @ [ "pn"; "pz" ]
+    let pullCheck (out: string) : string option =
+        let lines = valueText out
+        let eqs = lines.Split('\n') |> Array.filter (fun l -> Text.RegularExpressions.Regex.IsMatch(l, @"^e\d+ = "))
+        let bad = eqs |> Array.filter (fun l -> not (l.EndsWith "= true"))
+        if eqs.Length <> pcases then Some $"{eqs.Length} e<k> lines printed, wanted {pcases}"
+        elif bad.Length > 0 then Some $"""{bad.Length} case(s) differ from the walk: {String.concat " | " (bad |> Array.truncate 6)}"""
+        elif not (Text.RegularExpressions.Regex.IsMatch(lines, @"(?m)^pn = -?nan( #[0-9a-f]{16})?$")) then Some "the NaN pool's fold must print nan"
+        elif not (lines.Contains "pz = -inf") then Some "the all -0.0 fold must keep its sign (1.0 / a = -inf)"
+        else None
+    // name -> the raw 64-bit pattern of every printed Float64 binding
+    let bitsOf (out: string) : Map<string, string> =
+        Text.RegularExpressions.Regex.Matches(out.Replace("\r\n", "\n"), @"(?m)^([A-Za-z_][A-Za-z_0-9]*) = [^\n]* #([0-9a-f]{16})$")
+        |> Seq.map (fun m -> (m.Groups.[1].Value, m.Groups.[2].Value))
+        |> Map.ofSeq
+    // site -> (form, requested, actual) from the run record's `forms` census
+    let formsOf (record: string) : Map<string, string * int * int> =
+        Text.RegularExpressions.Regex.Matches(record, "\\{\"site\":\"([^\"]+)\",\"form\":\"([^\"]+)\",\"requested\":(\\d+),\"actual\":(\\d+),\"calls\":(\\d+)\\}")
+        |> Seq.map (fun m -> (m.Groups.[1].Value, (m.Groups.[2].Value, int m.Groups.[3].Value, int m.Groups.[4].Value)))
+        |> Map.ofSeq
+    let pullCount (text: string) = Text.RegularExpressions.Regex.Matches(text, Text.RegularExpressions.Regex.Escape "blade_scatter::pull3<").Count
+    let scatter3Count (text: string) = Text.RegularExpressions.Regex.Matches(text, Text.RegularExpressions.Regex.Escape "blade_scatter::scatter3<").Count
+    let llvmScatterCount (text: string) = Text.RegularExpressions.Regex.Matches(text, Text.RegularExpressions.Regex.Escape "; ordered orbit scatter (rank 3").Count
+    let buildPull (lane: string) (pins: (string * string) list) (testMode: bool) (stem: string) : Result<string * string, string> =
+        let guards = pins |> List.map (fun (k, v) -> pinEnv k v)
+        try
+            if testMode then CodeGen.setOmpTestMode true
+            try
+                match (try lower psrc with ex -> Error ("lower raised: " + ex.Message)) with
+                | Error e -> Error ("lower: " + e)
+                | Ok ir ->
+                if lane = "cpp" then
+                    let (cpp, _) = CodeGen.genSelfContainedProgramFromIR ir stem
+                    CodeGen.takeUnhandledIRNodeDiagnostics () |> ignore
+                    let file = Path.Combine(work, stem + ".cpp")
+                    File.WriteAllText(file, cpp)
+                    match Build.compileCpp file work with
+                    | Error e -> Error ("compile: " + (if e.Length > 400 then e.Substring(0, 400) else e))
+                    | Ok exe -> Ok (exe, cpp)
+                else
+                    match (try EmitLlvm.tryEmitProgramNamed stem ir with ex -> Error ("raised: " + ex.Message)) with
+                    | Error why -> Error ($"the llvm lane refused the program: {why}")
+                    | Ok ll ->
+                    let llFile = Path.Combine(work, stem + ".ll")
+                    File.WriteAllText(llFile, ll)
+                    match Build.compileLlvmProgram llFile work with
+                    | Error e -> Error ("llvm compile: " + (if e.Length > 300 then e.Substring(0, 300) else e))
+                    | Ok exe -> Ok (exe, ll)
+            finally
+                if testMode then CodeGen.setOmpTestMode false
+        finally
+            for g in List.rev guards do g.Dispose()
+    // Run at OMP_NUM_THREADS=threads (dynamic teams off; `limit` = an
+    // OMP_THREAD_LIMIT, else none inherited), printing raw bits; returns the
+    // output and the run record's text.
+    let runAt (exe: string) (threads: string) (limit: string option) : Result<string * string, string> =
+        let record = Path.Combine(work, Path.GetFileNameWithoutExtension(exe) + $"_t{threads}" + (match limit with Some l -> $"_l{l}" | None -> "") + ".json")
+        (try File.Delete record with _ -> ())
+        let psi = ProcessStartInfo(exe, "")
+        psi.RedirectStandardOutput <- true
+        psi.RedirectStandardError <- true
+        psi.UseShellExecute <- false
+        psi.CreateNoWindow <- true
+        psi.Environment.["OMP_NUM_THREADS"] <- threads
+        psi.Environment.["OMP_DYNAMIC"] <- "false"
+        (match limit with
+         | Some l -> psi.Environment.["OMP_THREAD_LIMIT"] <- l
+         | None -> psi.Environment.Remove("OMP_THREAD_LIMIT") |> ignore)
+        psi.Environment.["BLADE_PRINT_BITS"] <- "1"
+        psi.Environment.["BLADE_RUN_RECORD"] <- record
+        use proc = Process.Start(psi)
+        let o = Blade.Runtime.readToEndOffPool proc.StandardOutput
+        let e = Blade.Runtime.readToEndOffPool proc.StandardError
+        if not (proc.WaitForExit(300000)) then
+            (try proc.Kill(true) with _ -> ())
+            Error "timed out"
+        elif proc.ExitCode <> 0 then Error ($"exit {proc.ExitCode}: {e.Result.Trim()}")
+        else Ok (o.Result, (try File.ReadAllText record with _ -> ""))
+    // every pull site's observed team and executed form (omp test mode)
+    let teamsOf (out: string) =
+        Text.RegularExpressions.Regex.Matches(out, @"\[omp-coverage\] region=a(\d+) teamsz=(\d+) distinct=(\d+) maxth=(\d+) form=(\S+) requested=(\d+) actual=(\d+)")
+        |> Seq.map (fun m -> (int m.Groups.[1].Value, int m.Groups.[2].Value, int m.Groups.[3].Value, m.Groups.[5].Value, int m.Groups.[7].Value))
+        |> List.ofSeq
+    use _pp = pinEnv "BLADE_PRINT" (String.concat "," pprinted)
+    let commonPins = [ ("BLADE_TILE_TUNE", "pull_min=0"); ("BLADE_ORBIT_FOLD", null); ("BLADE_FOLD_ROW_SLOTS", null) ]
+    let caseNames = [ for k in 0 .. pcases - 1 -> $"a{k}" ]
+    // THE REFERENCE: the raw patterns of the first run; every later run must
+    // reproduce them exactly (missing names fail too)
+    let mutable bitsRef : Map<string, string> option = None
+    let compareBits (name: string) (out: string) (detail: string) =
+        let bits = bitsOf out
+        let missing = caseNames |> List.filter (fun c -> not (bits.ContainsKey c))
+        if not missing.IsEmpty then fail name $"""no raw bits printed for {String.concat ", " (List.truncate 4 missing)} (BLADE_PRINT_BITS)"""
+        else
+        match bitsRef with
+        | None ->
+            let nanKey = $"a{nanAt}"
+            let zeroKey = $"a{zeroAt}"
+            let nanBits = Convert.ToUInt64(bits.[nanKey], 16)
+            let isNan = ((nanBits >>> 52) &&& 0x7FFUL) = 0x7FFUL && (nanBits &&& 0xFFFFFFFFFFFFFUL) <> 0UL
+            if not isNan then fail name $"the NaN case a{nanAt} printed #{bits.[nanKey]}, not a NaN pattern"
+            elif bits.[zeroKey] <> "8000000000000000" then fail name $"the signed-zero case a{zeroAt} printed #{bits.[zeroKey]}, not -0.0 (8000000000000000)"
+            else
+                bitsRef <- Some bits
+                pass name $"{detail}; {bits.Count} raw patterns recorded (NaN a{nanAt} #{bits.[nanKey]}, -0.0 a{zeroAt} #8000000000000000)"
+        | Some r ->
+            let diffs = caseNames |> List.filter (fun c -> r.[c] <> bits.[c])
+            if diffs.IsEmpty then pass name $"{detail}; all {caseNames.Length} raw patterns identical to the reference (NaN payload and -0.0 included)"
+            else
+                let c = diffs.Head
+                fail name $"raw bits differ from the reference at {diffs.Length} case(s): {c} #{bits.[c]} vs #{r.[c]}"
+    // (a) the ORDINARY pull build (no instrumentation): T = 1, 3, 8 and a
+    // restricted team; bits AND the executed form from the run record
+    let pullOrdinaryLeg () =
+        let pins = commonPins @ [ ("BLADE_OMP_THREADS", null); ("BLADE_ORBIT_PULL", null); ("BLADE_ORBIT_SCATTER", null) ]
+        match buildPull "cpp" pins false "opull_plain" with
+        | Error e -> fail "pull build (C++, threads on, REPRO, contract=off)" e
+        | Ok (exe, cpp) ->
+        let routes = pullCount cpp
+        if routes <> pcases then fail "pull build: route" $"{routes} pull3 site(s) in the emitted C++, wanted {pcases} (the comparison would not test the form)"
+        else
+        pass "pull build: route" $"{routes} pull3 site(s), the needle `blade_scatter::pull3<` at every case, each naming its site for the form census"
+        for (t, limit) in [ (1, None); (3, None); (8, None); (8, Some "1") ] do
+            let label = match limit with Some l -> $"T = {t}, OMP_THREAD_LIMIT={l} (restricted team)" | None -> $"T = {t}"
+            let name = $"pull build at {label}: {pcases} cases, raw bits == the reference; executed form from the run record"
+            match runAt exe (string t) limit with
+            | Error e -> fail name ("run: " + e)
+            | Ok (out, record) ->
+            match pullCheck out with
+            | Some why -> fail name why
+            | None ->
+            let forms = formsOf record
+            let wrong =
+                pexts |> List.indexed |> List.choose (fun (k, p) ->
+                    let actualWant = if limit.IsSome then 1 else min t p
+                    let formWant = if actualWant > 1 then "row-pull" else "serial-leaf3"
+                    match Map.tryFind $"a{k}" forms with
+                    | Some (form, _, actual) when form = formWant && actual = actualWant -> None
+                    | Some (form, req, actual) -> Some $"a{k} (p = {p}): {form} requested {req} actual {actual}, wanted {formWant} actual {actualWant}"
+                    | None -> Some $"a{k}: no `forms` row in the run record")
+            if not wrong.IsEmpty then fail name ($"""executed form: {String.concat " | " (List.truncate 4 wrong)}""")
+            else
+                let form = if limit.IsSome || t = 1 then "serial-leaf3, actual 1" else $"row-pull, actual min({t}, p)"
+                compareBits name out $"every e<k> true; run record: every site {form}"
+    pullOrdinaryLeg ()
+    // (b) the omp-test-mode pull build: teams observed, forms in the census
+    let pullTeamLeg () =
+        let pins = commonPins @ [ ("BLADE_OMP_THREADS", null); ("BLADE_ORBIT_PULL", null); ("BLADE_ORBIT_SCATTER", null) ]
+        match buildPull "cpp" pins true "opull_on" with
+        | Error e -> fail "pull build, omp test mode" e
+        | Ok (exe, _) ->
+        for t in [ 1; 3; 8 ] do
+            let name = $"pull build, omp test mode, at T = {t}: teams observed, raw bits == the reference"
+            match runAt exe (string t) None with
+            | Error e -> fail name ("run: " + e)
+            | Ok (out, _) ->
+            match pullCheck out with
+            | Some why -> fail name why
+            | None ->
+            let teams = teamsOf out
+            let wrong =
+                teams |> List.filter (fun (k, tz, d, form, actual) ->
+                    let want = min t pexts.[k]
+                    tz <> want || d <> want || actual <> want || form <> (if want > 1 then "row-pull" else "serial-leaf3"))
+            if teams.Length <> pcases then fail name $"{teams.Length} observed pull team(s), wanted {pcases}"
+            elif not wrong.IsEmpty then
+                let (k, tz, d, form, actual) = wrong.Head
+                fail name $"pull team / form not min(T, p): a{k} (p = {pexts.[k]}) teamsz={tz} distinct={d} form={form} actual={actual} at T = {t}"
+            else compareBits name out $"every e<k> true; {teams.Length} teams observed = min(T, p), each [omp-coverage] line naming its executed form"
+    pullTeamLeg ()
+    // (c)-(e) the other C++ forms, (f) the LLVM lane
+    let others =
+        [ ("C++ BLADE_ORBIT_PULL=0 (threads on: the walk's other strict forms)", "cpp", [ ("BLADE_OMP_THREADS", null); ("BLADE_ORBIT_PULL", "0"); ("BLADE_ORBIT_SCATTER", null) ], (fun (t: string) -> if pullCount t <> 0 then Some "a pull3 site with the knob off" else None))
+          ("C++ BLADE_OMP_THREADS=1 (the serial scatter)", "cpp", [ ("BLADE_OMP_THREADS", "1"); ("BLADE_ORBIT_PULL", null); ("BLADE_ORBIT_SCATTER", null) ], (fun t -> if pullCount t <> 0 then Some "a pull3 site with threads off" elif scatter3Count t <> pcases then Some $"{scatter3Count t} scatter3 site(s), wanted {pcases}" else None))
+          ("C++ walk (BLADE_ORBIT_SCATTER=0, BLADE_FOLD_ROW_SLOTS=0)", "cpp", [ ("BLADE_OMP_THREADS", null); ("BLADE_ORBIT_PULL", null); ("BLADE_ORBIT_SCATTER", "0"); ("BLADE_FOLD_ROW_SLOTS", "0") ], (fun t -> if pullCount t + scatter3Count t <> 0 then Some "a scatter site with the scatter off" else None))
+          ("LLVM (its serial scatter)", "llvm", [ ("BLADE_OMP_THREADS", null); ("BLADE_ORBIT_PULL", null); ("BLADE_ORBIT_SCATTER", null) ], (fun t -> if llvmScatterCount t <> pcases then Some $"{llvmScatterCount t} LLVM rank-3 scatter site(s), wanted {pcases}" else None)) ]
+    for (label, lane, pins, routeWhy) in others do
+        let name = $"{label}: {pcases} cases, raw bits == the pull build's"
+        if lane = "llvm" && not llvmOn then skip name "no clang (BLADE_LLVM_CLANG)"
+        else
+        n <- n + 1
+        match buildPull lane (commonPins @ pins) false $"opull_{n}" with
+        | Error e -> fail name e
+        | Ok (exe, text) ->
+        match routeWhy text with
+        | Some why -> fail name ("route: " + why)
+        | None ->
+        match runAt exe "8" None with
+        | Error e -> fail name ("run: " + e)
+        | Ok (out, _) ->
+        match pullCheck out with
+        | Some why -> fail name why
+        | None -> compareBits name out "every e<k> true; routes as expected"
     (try Directory.Delete(work, true) with _ -> ())
     printFooter blockName [ $"{passed} passed"; $"{failed} failed"; $"{skipped} skipped" ]
     { Block = blockName; Passed = passed; Failed = failed; Skipped = skipped; FailedNames = names }

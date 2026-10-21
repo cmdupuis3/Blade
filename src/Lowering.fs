@@ -2958,6 +2958,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     Optimize.RecStepTable.reset ()
     Optimize.CompactionTable.reset ()
     Optimize.CompactRowTable.reset ()
+    Optimize.OrbitPullTable.reset ()
     // The raw decl list callers hand us is the program they PARSED, not the
     // one `TypeCheck.typeCheck` desugared inside itself -- so the icechunk
     // checkout rewrite is applied again here, ahead of Phase 0's
@@ -3183,6 +3184,11 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // each packed row; side table, both emitters. Gate:
         // BLADE_COMPACT_ROW_CLASSES.
         Optimize.planCompactRowClasses programFuncs irModule
+        // The row-owned pull scatter's five-party audit (Blade.Optimize.
+        // planOrbitPull, round 3 D-P3): facts only, read by the C++ emitter's
+        // rank-3 scatter dispatch; no IR change. Knob: BLADE_ORBIT_PULL (the
+        // emitter's).
+        Optimize.planOrbitPull programFuncs irModule
         // mask+contains fusion always runs a linear scan; the semijoin
         // hash-set is a separate, not-yet-implemented optimization.
         irModule)

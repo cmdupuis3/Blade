@@ -13,7 +13,9 @@
 // modification time; the toolchain (BLADE_RR_COMPILER) and the FP / library
 // policy the build was compiled under (the BLADE_RR_* defines Build.fs
 // passes, so the emitted .cpp itself carries no environment); the RNG
-// generator when the program draws; and the completion status -- ok, or
+// generator when the program draws; the runtime FORM CENSUS (`forms`: per
+// site whose form is chosen at run time, the form it executed and the
+// requested / actual team -- note_form); and the completion status -- ok, or
 // the BLxxxx code and message of the failure that ended the run.
 //
 // "Observed identity" is version identity (size + mtime), not content
@@ -36,8 +38,10 @@
 // declared Win32 entry point or /proc/self/exe.
 #pragma once
 #if !defined(__CUDA_ARCH__)
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include "blade_runtime.hpp"
@@ -102,6 +106,40 @@ namespace blade_rr {
     const char* identity;
     const char* content_hash;
   };
+
+  // THE RUNTIME FORM CENSUS (round 3 D-P3; Codex diff review of W2-3,
+  // finding 1). A site whose EXECUTED form is chosen at run time records the
+  // form it ran together with the requested and the ACTUAL team, so the record
+  // says which execution occurred -- `blade plan`'s counts are the planner's
+  // static facts (what the build COULD run), never an observation. Today's
+  // only such site is the rank-3 orbit scatter's leaf stage
+  // (blade_orbit_scatter.hpp pull3): `row-pull` (the row-owned pull on an
+  // actual team of more than one) or `serial-leaf3` (the serial slice form: a
+  // requested team of one, which opens no team, or an opened team the runtime
+  // made a team of one -- OMP_THREAD_LIMIT, an inactive nested region). One
+  // row per distinct (site, form, requested, actual), its `calls` counting
+  // repeats; the first 64 distinct rows are kept and the rest counted in
+  // `forms_dropped`. Called by the thread that called the site, after its
+  // team (if any) has joined; a spin flag serializes concurrent callers.
+  struct FormEvent { const char* site; const char* form; int requested; int actual; long long calls; };
+  constexpr int form_event_cap = 64;
+  inline FormEvent form_events[form_event_cap] = {};
+  inline int n_form_events = 0;
+  inline long long form_events_dropped = 0;
+  inline std::atomic_flag form_lock = ATOMIC_FLAG_INIT;
+  inline void note_form(const char* site, const char* form, int requested, int actual) {
+    while (form_lock.test_and_set(std::memory_order_acquire)) {}
+    int i = 0;
+    for (; i < n_form_events; ++i) {
+      const FormEvent& e = form_events[i];
+      if (e.requested == requested && e.actual == actual
+          && std::strcmp(e.site, site) == 0 && std::strcmp(e.form, form) == 0) break;
+    }
+    if (i < n_form_events) form_events[i].calls++;
+    else if (n_form_events < form_event_cap) form_events[n_form_events++] = FormEvent{ site, form, requested, actual, 1 };
+    else form_events_dropped++;
+    form_lock.clear(std::memory_order_release);
+  }
 
   BLADE_RR_COLD inline void json_string(std::FILE* f, const char* s) {
     std::fputc('"', f);
@@ -173,12 +211,24 @@ namespace blade_rr {
     json_string(f, BLADE_RR_STR(BLADE_RR_MARCH));
     std::fputs(",\"fp_contract\":", f);
     json_string(f, BLADE_RR_STR(BLADE_RR_FPC));
-    std::fprintf(f, ",\"fp_reassoc\":%s},\"routes\":{\"blas\":%s,\"lapack\":%s,\"cublas\":%s},\"rng\":%s,\"inputs\":[",
+    std::fprintf(f, ",\"fp_reassoc\":%s},\"routes\":{\"blas\":%s,\"lapack\":%s,\"cublas\":%s},\"rng\":%s",
                  BLADE_RR_REASSOC ? "true" : "false",
                  BLADE_RR_BLAS ? "true" : "false",
                  BLADE_RR_LAPACK ? "true" : "false",
                  BLADE_RR_CUBLAS ? "true" : "false",
                  uses_rng ? "{\"generator\":\"philox4x32-10\",\"version\":1}" : "null");
+    // the runtime form census (observed, per site; see note_form)
+    std::fputs(",\"forms\":[", f);
+    for (int i = 0; i < n_form_events; ++i) {
+      const FormEvent& e = form_events[i];
+      if (i) std::fputc(',', f);
+      std::fputs("{\"site\":", f); json_string(f, e.site);
+      std::fputs(",\"form\":", f); json_string(f, e.form);
+      std::fprintf(f, ",\"requested\":%d,\"actual\":%d,\"calls\":%lld}", e.requested, e.actual, e.calls);
+    }
+    std::fputc(']', f);
+    if (form_events_dropped > 0) std::fprintf(f, ",\"forms_dropped\":%lld", form_events_dropped);
+    std::fputs(",\"inputs\":[", f);
     for (int i = 0; i < n_inputs; ++i) {
       const Input& in = inputs[i];
       if (i) std::fputc(',', f);

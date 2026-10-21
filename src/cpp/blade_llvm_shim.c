@@ -428,18 +428,35 @@ double blade_now(void) {
 /* `cout << setprecision(15) << x` for a double, into `buf`. See the header
  * comment for why nan/inf are handled before printf gets a chance. */
 static void blade_fmt_f64(char *buf, size_t cap, double v) {
-    if (isnan(v)) { snprintf(buf, cap, "nan"); return; }
-    if (isinf(v)) { snprintf(buf, cap, v < 0.0 ? "-inf" : "inf"); return; }
-    int n = snprintf(buf, cap, "%.15g", v);
-    /* Typed float spelling: a bare digit run ("2", "-0") is an integer's
-     * spelling, so a double gains ".0" -- the C++ lane's blade_rt::float_put
-     * facet and the interpreter's CppFormat.markFloat apply the same rule. */
-    if (n > 0 && (size_t)n + 3 <= cap) {
-        int i = (buf[0] == '-') ? 1 : 0;
-        int bare = n > i;
-        for (int k = i; k < n; ++k)
-            if (buf[k] < '0' || buf[k] > '9') { bare = 0; break; }
-        if (bare) { buf[n] = '.'; buf[n + 1] = '0'; buf[n + 2] = '\0'; }
+    if (isnan(v)) snprintf(buf, cap, "nan");
+    else if (isinf(v)) snprintf(buf, cap, v < 0.0 ? "-inf" : "inf");
+    else {
+        int n = snprintf(buf, cap, "%.15g", v);
+        /* Typed float spelling: a bare digit run ("2", "-0") is an integer's
+         * spelling, so a double gains ".0" -- the C++ lane's blade_rt::float_put
+         * facet and the interpreter's CppFormat.markFloat apply the same rule. */
+        if (n > 0 && (size_t)n + 3 <= cap) {
+            int i = (buf[0] == '-') ? 1 : 0;
+            int bare = n > i;
+            for (int k = i; k < n; ++k)
+                if (buf[k] < '0' || buf[k] > '9') { bare = 0; break; }
+            if (bare) { buf[n] = '.'; buf[n + 1] = '0'; buf[n + 2] = '\0'; }
+        }
+    }
+    /* BLADE_PRINT_BITS (a RUN-TIME test instrument, read once): append the
+     * raw IEEE-754 bit pattern, " #<16 hex digits>" -- the C++ lane's
+     * blade_rt::float_put appends the same text. */
+    static int bits_mode = -1;
+    if (bits_mode < 0) {
+        const char *e = getenv("BLADE_PRINT_BITS");
+        bits_mode = (e && *e && strcmp(e, "0") != 0 && strcmp(e, "off") != 0 && strcmp(e, "OFF") != 0
+                     && strcmp(e, "false") != 0) ? 1 : 0;
+    }
+    if (bits_mode) {
+        unsigned long long u;
+        memcpy(&u, &v, sizeof u);
+        size_t used = strlen(buf);
+        if (used + 20 < cap) snprintf(buf + used, cap - used, " #%016llx", u);
     }
 }
 

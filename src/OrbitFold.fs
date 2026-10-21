@@ -901,6 +901,107 @@ let recordScatterYieldedToRows (subject: string) (p: StrictPlan) : unit =
         (Blade.Effects.Declined $"ordered orbit scatter not taken: {scatterG35Precedence} (BLADE_FOLD_ROW_SLOTS=prefer; unset, 0 or BLADE_OMP_THREADS=1 gives the scatter)")
         [ "fold form: " + scatterForm p; scatterEvidence p ]
 
+// ===========================================================================
+// THE ROW-OWNED PULL SCATTER (round 3, D-P3; C++ lane, rank 3, a thread team)
+// ===========================================================================
+//
+// The rank-3 scatter's LEAF chains partitioned by H row over the team the
+// walk's OUTER request opens (blade_orbit_scatter.hpp leaf3_pull carries the
+// ownership proof): the owner of row a seeds every H[a, b] once, pulls
+// T(c, a, b) for c < a in ascending c, then runs slice a's group scatter with
+// no third event -- each pair chain's source sequence, on one thread. A
+// mandatory team-completion barrier precedes the middle / outer tail, which is
+// scatter3's own (the rank-2 scatter over the retained H, serial from its
+// seeds). Same chains, same operands, same seeds, same kernels: bitwise the
+// serial scatter (and the walk) under BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off,
+// at every team size.
+//
+// WHAT THE REQUEST BUYS. The outer fold's (or the outer map level's) `omp`
+// request is spent as CONCURRENT EVALUATION of pure, total sub-computations
+// of its operands -- the leaf chains -- exactly the half of the licence the
+// threaded complete-row form (G35) spends on whole rows; its reorder half
+// stays unspent: no leaf, middle or outer chain is split, merged or
+// reassociated, and no licence moves between levels (an inner level's own
+// request still reaches the census).
+//
+// WHAT IS NOT KEPT: the serial form's same-term third-event reuse. f is
+// evaluated once per READ -- C(p + 2, 3) slice cells + C(p + 1, 3) pulls --
+// not once per pool cell (pure, deterministic, coordinate-free f: every
+// evaluation is the same value). The gain over G35 is fewer and contiguous
+// reads, not fewer f evaluations.
+//
+// ADMISSION (CodeGenBinding.orbitPullAdmission): planStrict admitted the walk
+// (rank 3, symmetric, the closed total whitelist for f, every kernel and
+// seed); the build emits threads; the request sits at EXACTLY the G35 request
+// / depth gate (the outer fold kernel's `where omp`, or a map `omp` covering
+// the outermost level, a licensed outer fold, a rectangular outer level) in a
+// strict (repro) build; the five-party write audit
+// (Optimize.planOrbitPull, the shared transitive analysis over the module,
+// plus the callback-aware codegen analysis of the team's bodies); the work
+// gate `BLADE_TILE_TUNE pull_min`; `BLADE_ORBIT_PULL`. The LLVM lane has no
+// thread runtime and keeps its serial scatter.
+
+/// BLADE_ORBIT_PULL=0|off keeps the other strict forms (the threaded
+/// complete-row form or the serial scatter, by their own precedence); unset /
+/// `1` / `on` = on. Emission-only (C++ lane; `suiteClearedKnobs`, not an
+/// optimizer gate); read per call.
+let orbitPullEnabled () : bool = Blade.Toolchain.envFlag "BLADE_ORBIT_PULL" true
+
+/// The pull form's STATIC WORK GATE (BLADE_TILE_TUNE pull_min): pool reads
+/// (slice cells + pulls) below which the team is not opened. Default 2^18 =
+/// 262144 (p >= 92) is PROVISIONAL, on operation counts and the box's ~40 us
+/// team entry (RESULTS 16.1), like `rowslots_min`. Speed-only.
+let pullMin () : int64 = max 0L (Blade.Toolchain.tileTune "pull_min" 262144L)
+
+/// (slice cells C(p + 2, 3), pulls C(p + 1, 3), leaf applications
+/// C(p + 1, 2) * p) of a rank-3 plan.
+let pullCounts (p: StrictPlan) : int64 * int64 * int64 =
+    let n = p.Shape.Extent
+    let c3 (m: int64) = (m * (m - 1L) * (m - 2L)) / 6L
+    (c3 (n + 2L), c3 (n + 1L), (n * (n + 1L) / 2L) * n)
+
+/// `blade plan`'s form line for a taken pull (the C++ lane's form; it starts
+/// with the scatter's own phrase, so `isScatterRecord` holds for it).
+let pullForm (p: StrictPlan) : string =
+    let s = p.Shape
+    $"ordered orbit scatter (rank 3, extent {s.Extent}, row groups of {p.RowGroup}, shared pair chains {p.StateCells} of {s.Extent * s.Extent}), row-owned pull on a thread team: each H row's pair chains on ONE thread -- seeded once, T(c, a, b) pulled for c < a ascending, then slice a's group scatter with no third event; a team-completion barrier; then the middle and outer chains serial from their seeds"
+
+let pullEvidence (p: StrictPlan) : string =
+    let s = p.Shape
+    let (slice, pulls, leaf) = pullCounts p
+    let logical = pown (bigint s.Extent) 3
+    let why =
+        if fpReproEnabled () then "every fold strict in this build (BLADE_FP_REPRO=1)"
+        else "every fold strict in this build"
+    $"{slice} slice cells + {pulls} pulls = {slice + pulls} contiguous reads of the {p.PoolCells}-cell SymIdx<3, {s.Extent}> pool of `{s.SourceName}` instead of {logical} logical reads; f evaluated {slice + pulls} times (the serial scatter: {slice} -- its same-term third-event reuse across owners is NOT kept: the gain is fewer, contiguous reads, not fewer f evaluations); {leaf} leaf applications, {s.Extent * s.Extent} middle and {s.Extent} outer (the serial scatter's counts); {why}: no licence consumed -- the outer request buys concurrent evaluation of the leaf chains (pure, total sub-computations of its operands), no chain split, merged or reassociated; column block {p.ColBlock}; bitwise the serial scatter and the walk under BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off at every team size"
+
+/// The ownership plan line of the record.
+let pullOwnership (p: StrictPlan) : string =
+    let n = p.Shape.Extent
+    let rowWork (a: int64) = a * (n - a) + (n - a) * (n - a + 1L) / 2L
+    let mid = n / 2L
+    $"ownership plan: {n} H rows claimed one at a time in ascending order by the team (row a = a(p - a) pulls + (p - a)(p - a + 1)/2 slice cells, descending in a: row 0 = {rowWork 0L} reads, row {mid} = {rowWork mid}, row {n - 1L} = {rowWork (n - 1L)}; ~{n} / T rows per thread, e.g. {float n / 8.0:F1} at T = 8); each owner seeds, pulls and scatters its row in a private buffer and stores it back once: writes disjoint by row, no synchronization inside the team; the region's end is the team-completion barrier before the serial middle / outer tail over the retained H (scatter2); the EXECUTED form is chosen at run time on the team that does the work: a requested team of one opens no team and an ACTUAL team of one (OMP_THREAD_LIMIT=1, an inactive nested region) is detected inside the region before any pull work, and both run the serial slice form's leaf stage (`serial-leaf3`: the same bits, without the pull's extra f evaluations), an actual team of two or more the pull (`row-pull`); the form and the requested / actual team are recorded per site in the run record's `forms` census (BLADE_RUN_RECORD) -- these counts are the planner's static facts, not an observation; PRECEDENCE: the pull comes first, the walk's other strict forms (the serial scatter, the threaded complete-row form G35) by their own order only when it declines (combined with W2-0's default: pull > scatter > row slots; `BLADE_FOLD_ROW_SLOTS=prefer` does not preempt the pull -- `BLADE_ORBIT_PULL=0` does)"
+
+/// Record a taken pull form: the fold-form line (a scatter record, so the
+/// LLVM lane's plan puts its emitter's own serial-scatter record in its
+/// place), the five-party matrix and the ownership plan.
+let recordPullTaken (subject: string) (p: StrictPlan) (orbitWhy: string option) (matrix: string list) : unit =
+    let knobNote =
+        match orbitWhy with
+        | Some why when why.Contains "BLADE_ORBIT_FOLD" ->
+            "; BLADE_ORBIT_FOLD=0 disables the licensed orbit-class fold only (the scatter's knob is BLADE_ORBIT_SCATTER, the pull's BLADE_ORBIT_PULL)"
+        | _ -> ""
+    recordCodegenDecision "fold-form" subject Blade.Effects.Applied
+        ([ "fold form: " + pullForm p; pullEvidence p + knobNote; pullOwnership p ] @ matrix)
+
+/// The prefix of a pull decline's form line (CliCommands.llvmLaneDecision
+/// re-states it for the LLVM lane, which has no thread runtime).
+let pullDeclinedForm = "fold form: row-owned pull scatter not taken"
+
+let recordPullDeclined (subject: string) (why: string) : unit =
+    recordCodegenDecision "fold-form" subject (Blade.Effects.Declined $"row-owned pull scatter not taken: {why}")
+        [ pullDeclinedForm + " -- the walk's other strict forms decide (the threaded complete-row form, the serial scatter)"; why ]
+
 /// The body read at the MIRROR value: `f(-x)` (the strict group's odd orbit
 /// members), as an expression over the same read variable.
 let negatedBody (p: OrbitPlan) : IRExpr =

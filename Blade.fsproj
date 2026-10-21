@@ -798,6 +798,10 @@
       <Link>cpp/fold_lanes_tests.cpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Include="src/cpp/orbit_pull_tests.cpp">
+      <Link>cpp/orbit_pull_tests.cpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <None Include="src/cpp/syrk_tile_tests.cpp">
       <Link>cpp/syrk_tile_tests.cpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

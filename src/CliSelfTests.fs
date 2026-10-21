@@ -84,7 +84,7 @@ let internal suiteClearedKnobs =
     [ "OPENBLAS_DIR"; "BLADE_BLAS"; "BLADE_CUBLAS"
       "BLADE_BLAS_LINK"; "BLADE_BLAS_INCLUDE"; "BLADE_BLAS_FLAVOR"; "BLADE_BLAS_PREFER"
       "BLADE_LAPACK_LINK"; "BLADE_LAPACK_INCLUDE"
-      "BLADE_PRINT"
+      "BLADE_PRINT"; "BLADE_PRINT_BITS"
       "BLADE_FP_REASSOC"; "BLADE_FP_REPRO"; "BLADE_FP_CONTRACT"; "BLADE_MARCH"
       "BLADE_OMP_THREADS"
       "BLADE_TILE_CACHE"; "BLADE_TILE_CACHE_VERBOSE"
@@ -92,7 +92,7 @@ let internal suiteClearedKnobs =
       "BLADE_AD_HALO_GATHER"; "BLADE_SHAPE_SPEC_CAP"; "BLADE_RUN_RECORD"
       "BLADE_SYRK_TILE"; "BLADE_ANTISYM_TILE"; "BLADE_SIMPLEX_TILE"; "BLADE_ORBIT_FOLD"
       "BLADE_DOMAIN_DIAGONAL"; "BLADE_TILE_TUNE"; "BLADE_FOLD_LANES"; "BLADE_FOLD_ROW_SLOTS"
-      "BLADE_ORBIT_SCATTER"; "BLADE_JOIN_THREADS" ]
+      "BLADE_ORBIT_SCATTER"; "BLADE_ORBIT_PULL"; "BLADE_JOIN_THREADS" ]
     @ Blade.Optimize.optimizerGates
 
 /// Knobs `blade test` SETS (after the clear above) rather than leaves unset,
@@ -618,6 +618,37 @@ let runCliSmokeTests () : TH.BlockResult =
                     (code = 0 && out.Contains "declined -- the LLVM lane has no thread runtime: it runs the serial walk"
                      && out.Contains "C++ lane: applied"
                      && not (out.Contains "fold form: one accumulator chain with `reassoc nsz` (LLVM lane; the vectorizer picks the lanes); C++ lane fold form: threaded complete rows"))
+                    (out + err)
+                // THE ROW-OWNED PULL (round 3, D-P3) is the C++ lane's thread
+                // team over the rank-3 scatter's leaf chains: the C++ plan
+                // says applied (form + omp record); under BLADE_LLVM=1 the
+                // record is the LLVM emitter's own serial scatter (the C++
+                // verdict trailing) and the team's omp record is declined;
+                // the pull's decline (knob off) is restated as this lane's.
+                File.WriteAllText(Path.Combine(dir, "pull3.blade"),
+                    "type Var = Idx<13>\ntype Obs = Idx<2>\n"
+                    + "let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 3 + s * 5) % 7) - 2.0 |> compute\n"
+                    + "let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) |> compute\n"
+                    + "let s = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> reduce(method_for(range<Var>) <@> lambda(k) -> t(i, j, k) * t(i, j, k), (+)), (+)), lambda(u, v) where omp -> u + v, 0.0)\n")
+                let pullEnv llvm knob = [ ("BLADE_LLVM", llvm); ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", null); ("BLADE_TILE_TUNE", "pull_min=0"); ("BLADE_ORBIT_PULL", knob) ]
+                let (code, out, err) = spawnWith (pullEnv null null) dir [ "plan"; "pull3.blade" ]
+                recordCase "cli: `plan` (C++ lane, BLADE_FP_REPRO=1) reports the row-owned pull applied with its team"
+                    (code = 0 && out.Contains "row-owned pull on a thread team" && out.Contains "applied [omp parallel num_threads(T) + ascending row claims + team-completion barrier")
+                    (out + err)
+                let (code, out, err) = spawnWith (pullEnv "1" null) dir [ "plan"; "pull3.blade" ]
+                recordCase "cli: `plan` under BLADE_LLVM=1 restates the pull as the LLVM emitter's serial scatter, its team declined"
+                    (code = 0 && out.Contains "lane: LLVM"
+                     && out.Contains "applied [fold form: ordered orbit scatter (rank 3, extent 13, row groups of 4, shared pair chains 91 of 169): one pass"
+                     && out.Contains "(recorded by the LLVM lane's emitter); C++ lane: applied"
+                     && not (out.Contains "row-owned pull on a thread team; ")
+                     && out.Contains "declined -- the LLVM lane has no thread-level form"
+                     && not (out.Contains "applied [omp parallel num_threads(T) + ascending row claims"))
+                    (out + err)
+                let (code, out, err) = spawnWith (pullEnv "1" "0") dir [ "plan"; "pull3.blade" ]
+                recordCase "cli: `plan` under BLADE_LLVM=1 restates the pull's decline in this lane's words"
+                    (code = 0 && out.Contains "declined -- the LLVM lane has no thread runtime (no row-owned pull form)"
+                     && out.Contains "C++ lane: declined -- row-owned pull scatter not taken: disabled by BLADE_ORBIT_PULL=0"
+                     && not (out.Contains "fold form: one accumulator chain with `reassoc nsz` (LLVM lane; the vectorizer picks the lanes); C++ lane fold form: row-owned pull"))
                     (out + err)
                 // THE LLVM SCATTER RECORD IS THE EMITTER'S OWN: an unforced map
                 // over a stored pool (C++: a deferred computation; LLVM: a

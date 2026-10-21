@@ -999,6 +999,12 @@ let internal llvmLaneDecision (d: Blade.Effects.Decision) : Blade.Effects.Decisi
               | _ -> false) then
             declined "the LLVM lane's emitter recorded no ordered-scatter decision for this walk (the C++ lane yielded it to its thread team)" []
         elif cppForm.StartsWith "fold form: ordered orbit scatter not taken" then d
+        // The row-owned pull (round 3, D-P3) is the C++ lane's thread team
+        // over the rank-3 scatter's leaf chains: this lane has none, so its
+        // decline (and its reason) is the C++ lane's; the lane's own scatter
+        // record for the walk says which form it runs.
+        elif cppForm.StartsWith Blade.OrbitFold.pullDeclinedForm then
+            declined "the LLVM lane has no thread runtime (no row-owned pull form); this lane's scatter record for the walk says which form it runs" []
         // A C++ scatter record the LLVM emitter recorded nothing about (it was
         // merged as unpartnered): never claimed for this lane.
         elif Blade.OrbitFold.isScatterRecord d then

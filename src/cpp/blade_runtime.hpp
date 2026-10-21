@@ -505,10 +505,24 @@ namespace blade_rt {
   // the facet. Other streams (display-frame JSON, provider writers) are not
   // imbued and keep their own number rules. The interpreter's twin is
   // src/Interp/CppFormat.fs markFloat; the LLVM lane's is blade_fmt_f64.
+  //
+  // BLADE_PRINT_BITS (read once, when main installs the facet; a RUN-TIME
+  // test instrument, never read by the compiler): `1`/`on` appends each
+  // double's raw IEEE-754 bit pattern, ` #<16 hex digits>`, after its decimal
+  // text -- the exact-bits channel the differential tests compare (signed
+  // zero and NaN payload included). The LLVM lane's blade_fmt_f64 reads the
+  // same variable; unset / `0` / `off` = the ordinary text.
+  inline bool print_bits_requested() {
+    const char* e = std::getenv("BLADE_PRINT_BITS");
+    if (!e || !*e) return false;
+    return !(std::strcmp(e, "0") == 0 || std::strcmp(e, "off") == 0 || std::strcmp(e, "OFF") == 0
+             || std::strcmp(e, "false") == 0);
+  }
   struct float_put : std::num_put<char> {
     using base = std::num_put<char>;
     using iter_type = base::iter_type;
     using base::do_put;  // keep the integral/bool/pointer overloads visible
+    const bool bits_ = print_bits_requested();
   protected:
     // A fixed sink for one rendering; overflow (never reached at the
     // precisions marked here) leaves the iterator failed and the text cut.
@@ -534,6 +548,13 @@ namespace blade_rt {
       for (std::size_t k = i; k < n; ++k)
         if (s.b[k] < '0' || s.b[k] > '9') { bare = false; break; }
       if (bare) { s.b[n++] = '.'; s.b[n++] = '0'; }
+      if constexpr (std::is_same<F, double>::value) {
+        if (bits_ && n + 20 < sizeof s.b) {
+          unsigned long long u;
+          std::memcpy(&u, &v, sizeof u);
+          n += (std::size_t)std::snprintf(s.b + n, sizeof s.b - n, " #%016llx", u);
+        }
+      }
       // Re-apply the width the rendering was taken without.
       std::size_t pad = w > static_cast<std::streamsize>(n) ? static_cast<std::size_t>(w) - n : 0;
       const auto adjust = io.flags() & std::ios_base::adjustfield;

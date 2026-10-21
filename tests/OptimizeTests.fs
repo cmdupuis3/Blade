@@ -2360,6 +2360,167 @@ let private planOrbitNest (body: string) (inner: string) (outer: string) =
 
 let private planOrbitSym2Body = planOrbitNest "g(i, j) * g(i, j)" "(+)" "lambda(u, v) where omp -> u + v, 0.0"
 
+/// Pin several knobs for one call, restoring each (the pull cases' spelling;
+/// `withGates` below is the same, defined later in the file).
+let private pullGates (pins: (string * string) list) (f: unit -> 'a) : 'a =
+    List.foldBack (fun (var, value) (g: unit -> 'a) -> (fun () -> withGate var value g)) pins f ()
+
+/// THE ROW-OWNED PULL fixture (round 3, D-P3): comoment3's rank-3 checksum
+/// shape over a packed SymIdx<3, p> pool `t` with the request on the OUTER
+/// fold; `between` sits between the pool and the fold, `leaf` is the leaf
+/// level's fold (kernel[, seed]), `prelude` lines go first. `bump` writes a
+/// cell of the pool through a `mut` parameter (the intervening writer).
+let private planPullSrcWith (prelude: string) (p: int) (between: string) (leaf: string) =
+    prelude
+    + $"type Var = Idx<{p}>\n"
+    + "type Obs = Idx<2>\n"
+    + "function bump(a: mut Array<Float64 like SymIdx<3, Var>>) -> Int64 = {\n    a(0, 1, 2) = 2.5\n    7\n}\n"
+    + "let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 3 + s * 5) % 7) - 2.0 |> compute\n"
+    + "let mut t = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) |> compute\n"
+    + between
+    + $"let ss = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> reduce(method_for(range<Var>) <@> lambda(k) -> t(i, j, k) * t(i, j, k), {leaf}), (+)), lambda(u, v) where omp -> u + v, 0.0)\n"
+let private planPullSrc (p: int) (between: string) = planPullSrcWith "" p between "(+)"
+
+/// The EARLIER-TOP-LEVEL-POOL scope (finding 3): the pool `t` is a top-level
+/// binding and the walk sits in a block's let chain of a LATER top-level
+/// binding; `between` is top-level statements between the two (the audit's
+/// intervening set: those, plus the block's statements before the fold).
+let private planPullBlockSrc (between: string) =
+    let full = planPullSrc 97 between
+    let cut = full.IndexOf "let ss = "
+    full.Substring(0, cut)
+    + "let (s5, q) = {\n    let q = 1.5\n"
+    + "    let s5 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> reduce(method_for(range<Var>) <@> lambda(k) -> t(i, j, k) * t(i, j, k), (+)), (+)), lambda(u, v) where omp -> u + v, 0.0)\n"
+    + "    (s5, q)\n}\n"
+
+/// The pull's applied record (form, five-party matrix, ownership plan).
+let private pullApplied (d: Blade.Effects.Decision) =
+    d.Rule = "fold-form" && d.Outcome = Blade.Effects.Applied
+    && d.Evidence |> List.exists (fun (e: string) -> e.Contains "row-owned pull on a thread team")
+    && d.Evidence |> List.exists (fun (e: string) -> e.StartsWith "five-party audit (planner: Optimize.scheduleMayWriteIn")
+    && d.Evidence |> List.exists (fun (e: string) -> e.StartsWith "team bodies (the callback-aware codegen write analysis")
+    && d.Evidence |> List.exists (fun (e: string) -> e.StartsWith "ownership plan: ")
+
+/// No pull record of either kind (the form is not in play).
+let private pullCase (name: string) (src: string) (want: Blade.Effects.Decision list -> bool) (describe: string) =
+    match planDecisionsOf src with
+    | Error e -> resultLine Fail name e; false
+    | Ok ds ->
+        if want ds then resultLine Pass name describe; true
+        else
+            let seen = ds |> List.filter (fun d -> d.Rule = "fold-form" || d.Rule = "omp") |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+            resultLine Fail name ($"wanted {describe}; the record: {seen}"); false
+/// The decision record and the C++ text of one lower + generate.
+let private pullPlanAndCpp (src: string) : Result<Blade.Effects.Decision list * string, string> =
+    Blade.Effects.Decisions.start ()
+    let r =
+        try
+            match lower src with
+            | Error e -> Error ($"lower: {e}")
+            | Ok ir ->
+                let cpp = fst (CodeGen.genSelfContainedProgramFromIR ir "plan_case")
+                Ok (Blade.Effects.Decisions.drain (), cpp)
+        with ex -> Error ($"codegen raised: {ex.Message}")
+    Blade.Effects.Decisions.drain () |> ignore
+    r
+
+/// Codex diff review of W2-3, finding 3 (a): a PRODUCER whose write lives
+/// ONLY in its side-table payload (Optimize.bindingPayload: the binding's own
+/// value a placeholder-like pure compute, a RandomInits key that writes). No
+/// frontend spelling attaches a side table to a SymIdx pool, so the fixture is
+/// CONSTRUCTED: the pure pull program, lowered; its writing statement
+/// `z = bump(t)` lifted out of the chain and attached as `t`'s random-fill key.
+/// The planner's audit must admit the pure module and decline the constructed
+/// one, naming the producer.
+let private pullSideTableProducerCase () : bool =
+    let name = "plan_orbit_pull_declined_producer_side_table_payload (constructed IR)"
+    match (try lower (planPullSrc 97 "let z = bump(t)\n") with ex -> Error ex.Message) with
+    | Error e -> resultLine Fail name ($"lower: {e}"); false
+    | Ok ir ->
+        match ir.Modules |> List.tryFind (fun m -> m.Bindings |> List.exists (fun b -> b.Name = "ss")) with
+        | None -> resultLine Fail name "no module binds `ss`"; false
+        | Some m ->
+        let byName (n: string) = m.Bindings |> List.find (fun b -> b.Name = n)
+        let t, ss, z = byName "t", byName "ss", byName "z"
+        let clean = { m with Bindings = m.Bindings |> List.filter (fun b -> b.Id <> z.Id) }
+        let tainted = { clean with RandomInits = Map.add t.Id (IR.RandGen ("uniform", z.Value, [], None, None)) clean.RandomInits }
+        let funcs = ir.Modules |> List.collect (fun mm -> mm.Functions)
+        let auditOf (mm: IR.IRModule) =
+            Blade.Optimize.OrbitPullTable.reset ()
+            Blade.Optimize.planOrbitPull funcs mm
+            Blade.Optimize.OrbitPullTable.tryAudit ss.Id t.Id
+        let pureAudit = auditOf clean
+        let taintedAudit = auditOf tainted
+        Blade.Optimize.OrbitPullTable.reset ()
+        match pureAudit, taintedAudit with
+        | Some (Ok _), Some (Error why) when why.Contains "the pool's producer `t` may write" ->
+            resultLine Pass name ($"pure control admitted; the side-table writer declines: {why}"); true
+        | p, tt ->
+            resultLine Fail name ($"wanted the pure module admitted and the constructed one declined on the producer; got pure {p}, constructed {tt}"); false
+
+/// Finding 3 (b): a HIGHER-ORDER callback writer in a would-be team body --
+/// `chk`'s walk calls its function-valued parameter `h`, the call site passes a
+/// lambda that writes a captured array -- under an otherwise eligible outer
+/// request. No `pull3` may be emitted (the walk's cell function is a call, not
+/// a pure scalar function of the read: the walk recogniser refuses it,
+/// and the omp census names the captured write), or lowering refuses the
+/// program (BL4005); beside it the PURE control (the same walk over the same
+/// parameter pool, its cell function inline) pulls.
+let private pullCallbackWriterCase () : bool =
+    let name = "plan_orbit_pull_higher_order_callback_writer_never_pulled"
+    let prelude =
+        "type Var = Idx<97>\ntype Obs = Idx<2>\ntype K = Idx<2>\n"
+        + "let mut G: Array<Float64 like K> = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute\n"
+        + "function sq(x: Float64) -> Float64 = x * x\n"
+        + "let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 3 + s * 5) % 7) - 2.0 |> compute\n"
+        + "let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) |> compute\n"
+    let walk (cell: string) =
+        $"reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> reduce(method_for(range<Var>) <@> lambda(k) -> {cell}, (+)), (+)), lambda(u, v) where omp -> u + v, 0.0)"
+    let walkH = walk "h(p(i, j, k))"
+    let walkSq = walk "p(i, j, k) * p(i, j, k)"
+    let writerSrc =
+        prelude
+        + "let w = lambda(v: Float64) -> {\n    G((0 : K)) = G((0 : K)) + 1.0\n    v * v\n}\n"
+        + $"function chk(p: Array<Float64 like SymIdx<3, Var>>, h: Float64 -> Float64) -> Float64 = {{\n    let s = {walkH}\n    s\n}}\n"
+        + "let sw = chk(t, w)\n"
+    let pureSrc =
+        prelude
+        + $"function chk(p: Array<Float64 like SymIdx<3, Var>>) -> Float64 = {{\n    let s = {walkSq}\n    s\n}}\n"
+        + "let sp = chk(t)\n"
+    let anyPull (ds: Blade.Effects.Decision list) = ds |> List.exists pullApplied
+    let writerOk =
+        match pullGates [ ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", null) ] (fun () -> pullPlanAndCpp writerSrc) with
+        | Error e when e.Contains "BL4005" -> Ok "lowering refused the writing callback (BL4005)"
+        | Error e -> Error e
+        | Ok (ds, cpp) ->
+            if cpp.Contains "blade_scatter::pull3<" || anyPull ds then Error "a pull3 site over a walk that calls a writing callback"
+            else
+                let declinedWith (needle: string) =
+                    ds |> List.exists (fun d ->
+                        match d.Outcome with
+                        | Blade.Effects.Declined why -> why.Contains needle
+                        | _ -> false)
+                let declined =
+                    (declinedWith "ordered orbit scatter not taken: the kernel body is not a pure scalar function of the read"
+                     || declinedWith "does not resolve to a callable")
+                    && declinedWith "the map kernel writes a captured binding"
+                if declined then Ok "no pull3; the strict scatter declines the callback walk (not a pure scalar function of the read) and the omp census names the captured write"
+                else Error "no pull3, but no decline names the callback"
+    let pureOk =
+        match pullGates [ ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", null) ] (fun () -> pullPlanAndCpp pureSrc) with
+        | Error e -> Error e
+        | Ok (ds, cpp) ->
+            if cpp.Contains "blade_scatter::pull3<" && anyPull ds then Ok "the pure control pulls"
+            else Error "the pure control (the same walk in a function, the cell function inline) did not pull"
+    match writerOk, pureOk with
+    | Ok w, Ok p -> resultLine Pass name ($"{w}; {p}"); true
+    | Error e, _ -> resultLine Fail name ("writer: " + e); false
+    | _, Error e -> resultLine Fail name ("pure control: " + e); false
+
+let private mentionsPull (d: Blade.Effects.Decision) =
+    d.Evidence |> List.exists (fun (e: string) -> e.Contains "row-owned pull")
+    || (match d.Outcome with Blade.Effects.Declined why -> why.Contains "row-owned pull" | _ -> false)
+
 let private planOrbitSym3Src =
     "type Var = Idx<7>\n"
     + "type Obs = Idx<4>\n"
@@ -2932,6 +3093,110 @@ let private planCases () =
           planCase "plan_orbit_scatter_declined_seed_coordinate" (planOrbitSrc (planOrbitNest "g(i, j)" "(+), Float64(i)" "(+)")) "fold-form"
               (declinedMentioning "level 2's seed is outside the scatter's admission (it mentions a level coordinate")
               "an inner seed mentioning the outer coordinate keeps the walk")
+      // THE ROW-OWNED PULL SCATTER (round 3, D-P3): rank 3, threaded strict
+      // build, the request at the G35 gate -- applied with the five-party
+      // matrix and the ownership plan; every pull-specific refusal named;
+      // not in play (no record) without threads or without the request.
+      pullGates [ ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", null) ] (fun () ->
+          planCase "plan_orbit_pull_applied_repro" (planPullSrc 97 "") "fold-form"
+              (fun d -> pullApplied d
+                        && evidenceMentioning "(rank 3, extent 97, row groups of 4, shared pair chains 4753 of 9409), row-owned pull on a thread team" d
+                        && evidenceMentioning "156849 slice cells + 152096 pulls = 308945 contiguous reads" d
+                        && evidenceMentioning "f evaluated 308945 times (the serial scatter: 156849" d
+                        && evidenceMentioning "ownership plan: 97 H rows claimed one at a time in ascending order" d
+                        && evidenceMentioning "producer = `t` STORED at its own binding before the fold" d
+                        && evidenceMentioning "intervening = 0 binding(s)" d)
+              "the pull applied: form, counts (f evaluations NOT shared), ownership plan, five-party matrix")
+      pullGates [ ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", null) ] (fun () ->
+          planCase "plan_orbit_pull_omp_record" (planPullSrc 97 "") "omp"
+              (fun d -> applied d && evidenceMentioning "omp parallel num_threads(T) + ascending row claims + team-completion barrier" d)
+              "omp applied: the pull's team (ascending row claims, team-completion barrier)")
+      pullGates [ ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", null) ] (fun () ->
+          planCase "plan_orbit_pull_intervening_reader_admitted" (planPullSrc 97 "let probe = t(1, 2, 3)\n") "fold-form"
+              (fun d -> pullApplied d && evidenceMentioning "intervening = 1 binding(s)" d)
+              "a binding that only READS the pool in between is admitted (and counted)")
+      pullGates [ ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", null) ] (fun () ->
+          planCase "plan_orbit_pull_declined_intervening_writer" (planPullSrc 97 "let z = bump(t)\n") "fold-form"
+              (declinedMentioning "row-owned pull scatter not taken: `z` may write between `t`'s materialization and the fold")
+              "an intervening writer (a mutating call) declines")
+      pullGates [ ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", null) ] (fun () ->
+          planCase "plan_orbit_pull_declined_side_table_writer" (planPullSrcWith "import rand as r\n" 97 "let noise = r.uniform(bump(t), 1)\n" "(+)") "fold-form"
+              (declinedMentioning "row-owned pull scatter not taken: `noise` may write between `t`'s materialization and the fold")
+              "an intervening writer hidden in a random fill's key (its side-table payload) declines")
+      pullGates [ ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", null); ("BLADE_TILE_TUNE", "pull_min=0") ] (fun () ->
+          planCase "plan_orbit_pull_declined_writing_producer"
+              ("type K = Idx<2>\nlet mut G: Array<Float64 like K> = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute\n"
+               + (planPullSrc 13 "").Replace("where comm(a, b, c) -> prodsum(a, b, c) |> compute", "where comm(a, b, c) -> {\n    G((0 : K)) = G((0 : K)) + 1.0\n    prodsum(a, b, c)\n} |> compute"))
+              "fold-form"
+              (declinedMentioning "row-owned pull scatter not taken: the pool's producer `t` may write")
+              "a writing producer declines (the producer party)")
+      pullGates [ ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", null); ("BLADE_ORBIT_PULL", "0") ] (fun () ->
+          planCase "plan_orbit_pull_declined_knob" (planPullSrc 97 "") "fold-form"
+              (declinedMentioning "row-owned pull scatter not taken: disabled by BLADE_ORBIT_PULL=0")
+              "BLADE_ORBIT_PULL=0 declines (the other strict forms decide)")
+      pullGates [ ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", null) ] (fun () ->
+          planCase "plan_orbit_pull_declined_gate" (planPullSrc 13 "") "fold-form"
+              (declinedMentioning "455 slice cells + 364 pulls = 819 pool reads below pull_min = 262144")
+              "below its provisional work gate the pull declines")
+      pullGates [ ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", null); ("BLADE_TILE_TUNE", "pull_min=0") ] (fun () ->
+          planCase "plan_orbit_pull_gate_tunable" (planPullSrc 13 "") "fold-form"
+              pullApplied "BLADE_TILE_TUNE pull_min=0 admits p = 13")
+      pullGates [ ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", null) ] (fun () ->
+          pullCase "plan_orbit_pull_inner_request_census" (planPullSrcWith "" 97 "" "lambda(a, b) where omp -> a + b, 0.0")
+              (fun ds ->
+                  ds |> List.exists pullApplied
+                  && ds |> List.exists (fun d ->
+                         d.Rule = "omp"
+                         && (match d.Outcome with
+                             | Blade.Effects.Declined why -> why.Contains "the row-owned pull threads the leaf chains under the OUTER level's request only" && why.Contains "requested at: level 3's fold"
+                             | _ -> false)))
+              "an inner level's request is not spent: the census names it (no licence moves between levels)")
+      pullGates [ ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", "1") ] (fun () ->
+          pullCase "plan_orbit_pull_not_in_play_threads_off" (planPullSrc 97 "")
+              (fun ds -> not (ds |> List.exists mentionsPull)
+                         && ds |> List.exists (fun d -> applied d && evidenceMentioning "fold form: ordered orbit scatter (rank 3, extent 97" d))
+              "BLADE_OMP_THREADS=1: no pull record; the serial scatter")
+      pullGates [ ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", null) ] (fun () ->
+          pullCase "plan_orbit_pull_not_in_play_without_request" ((planPullSrc 97 "").Replace("lambda(u, v) where omp -> u + v, 0.0)", "(+), 0.0)"))
+              (fun ds -> not (ds |> List.exists mentionsPull))
+              "no outer request: no pull record")
+      // Codex diff review of W2-3, finding 3: the producer's SIDE-TABLE
+      // payload (constructed IR), a higher-order callback writer in a would-be
+      // team body (beside a pure control that pulls), and the earlier-top-
+      // level-pool scope (admitted; an intervening top-level writer declines).
+      pullSideTableProducerCase ()
+      pullCallbackWriterCase ()
+      pullGates [ ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", null) ] (fun () ->
+          planCase "plan_orbit_pull_top_level_pool_in_block_admitted" (planPullBlockSrc "") "fold-form"
+              (fun d -> pullApplied d
+                        && evidenceMentioning "producer = `t` STORED at its own binding before the fold" d
+                        && evidenceMentioning "intervening = 1 binding(s)" d)
+              "a top-level pool read by a walk in a later binding's block: audited by its payload, the block's statements intervening; the pull applies")
+      pullGates [ ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", null) ] (fun () ->
+          planCase "plan_orbit_pull_top_level_pool_intervening_writer_declined" (planPullBlockSrc "let z = bump(t)\n") "fold-form"
+              (declinedMentioning "row-owned pull scatter not taken: `z` may write between `t`'s materialization and the fold")
+              "a top-level writer between the pool and the block declines")
+      // The other columns of the matrix, each refused BEFORE the pull is in
+      // play (and so never taken): a WRITING outer kernel is not
+      // reorder-licensed (G41: no request gate), and a seed that writes
+      // through a call is outside the scatter's closed whitelist.
+      pullGates [ ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", null) ] (fun () ->
+          pullCase "plan_orbit_pull_writing_outer_kernel_never_pulled"
+              ("type K = Idx<2>\nlet mut G: Array<Float64 like K> = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute\n"
+               + (planPullSrc 97 "").Replace("lambda(u, v) where omp -> u + v, 0.0)", "lambda(u, v) where comm(u, v) -> {\n    G((0 : K)) = G((0 : K)) + 1.0\n    u + v\n}, 0.0)").Replace("reduce(method_for(range<Var>) <@> lambda(i) ->", "reduce(method_for(range<Var>) <@> lambda(i) where omp(i: 1) ->"))
+              (fun ds -> not (ds |> List.exists pullApplied))
+              "a writing outer fold kernel: no pull (no licence, so no request gate)")
+      pullGates [ ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", null) ] (fun () ->
+          pullCase "plan_orbit_pull_writing_seed_never_pulled"
+              ("type K = Idx<2>\nlet mut G: Array<Float64 like K> = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute\nfunction seedf(g: mut Array<Float64 like K>) -> Float64 = {\n    g((0 : K)) = 1.0\n    0.0\n}\n"
+               + (planPullSrc 97 "").Replace("lambda(u, v) where omp -> u + v, 0.0)", "lambda(u, v) where omp -> u + v, seedf(G))"))
+              (fun ds -> not (ds |> List.exists pullApplied)
+                         && ds |> List.exists (declinedMentioning "ordered orbit scatter not taken: level 1's seed is outside the scatter's admission"))
+              "a seed that writes through a call: the scatter declines (closed whitelist), so no pull")
+      pullGates [ ("BLADE_FP_REPRO", null); ("BLADE_OMP_THREADS", null) ] (fun () ->
+          pullCase "plan_orbit_pull_not_in_default_build" (planPullSrc 97 "")
+              (fun ds -> not (ds |> List.exists mentionsPull))
+              "the default (licensed) build: no pull record (the licensed forms own the walk)")
       // THE THREADED FORM (bench G32): `where omp` on the outer fold is spent
       // as a team over the first-coordinate rows -- in the fold-form line and
       // as an applied `omp` record -- and BLADE_OMP_THREADS=1 keeps the

@@ -1,0 +1,34 @@
+// TEST: Row-owned pull scatter: rank-3 strict checksums under an outer omp request
+// comoment3's checksum shape over a packed SymIdx<3, 97> pool, inside a block
+// (the pool is not printed). In a threaded strict build (BLADE_FP_REPRO=1,
+// threads on: what `blade test interp` runs) the C++ lane takes the ROW-OWNED
+// PULL form of the rank-3 ordered scatter (`blade plan`: `fold form: ordered
+// orbit scatter (rank 3, extent 97, ...), row-owned pull on a thread team ...`
+// with the five-party matrix and the ownership plan): each H row's pair chains
+// on one thread -- seeded once, T(c, a, b) pulled for c < a ascending, then
+// slice a's group scatter with no third event -- a team-completion barrier,
+// then the middle and outer chains serial from their seeds. The request sits
+// on the OUTER level both ways the threaded complete-row form accepts it: the
+// fold kernel's `where omp` (s1) and a map `omp(i: 1)` (s2, with a
+// non-commutative leaf `b - a * 0.5`, a `where repro` middle and nonzero / -0
+// seeds). `probe` reads the pool between it and the folds (no write: the audit
+// admits it). The pins hold with BLADE_ORBIT_PULL on and off, at every team
+// size (bitwise the serial scatter and the walk under REPRO + contract=off);
+// the default build takes the licensed forms (s1: the orbit-class fold) or the
+// walk (s2: a mixed nest).
+let static p = 97
+type Var = Idx<p>
+type Obs = Idx<2>
+function radd(a: Float64, b: Float64) where repro -> Float64 = a + b
+function rhalf(a: Float64, b: Float64) where repro -> Float64 = b - a * 0.5
+let (s1, s2, probe) = {
+    let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 11) * 0.37 + 0.1 / Float64(i + 1) |> compute
+    let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) |> compute
+    let probe = t(3, 50, 7)
+    let s1 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> reduce(method_for(range<Var>) <@> lambda(k) -> t(i, j, k) * t(i, j, k), (+)), (+)), lambda(u, v) where omp -> u + v, 0.0)
+    let s2 = reduce(method_for(range<Var>) <@> lambda(i) where omp(i: 1) -> reduce(method_for(range<Var>) <@> lambda(j) -> reduce(method_for(range<Var>) <@> lambda(k) -> t(k, i, j) - 0.25, rhalf, 0.75), radd, -0.0), (+), 0.5)
+    (s1, s2, probe)
+}
+// EXPECT: s1 = 263562002.959511
+// EXPECT: s2 = 6747.58885384079
+// EXPECT: probe = 23.9623440539216

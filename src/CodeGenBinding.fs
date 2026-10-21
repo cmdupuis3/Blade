@@ -255,6 +255,52 @@ let private joinEffectAudit (deferred: Map<IRId, IRExpr>) (maps: (string * Apply
     | Some (what, _) ->
         Error $"{what} writes a captured binding: a joined traversal never reorders, threads or vectorizes an observable write (gaps G41 / G43)"
     | None -> Ok ()
+/// THE ROW-OWNED PULL SCATTER's admission (round 3, D-P3; Blade.OrbitFold's
+/// pull header and blade_orbit_scatter.hpp leaf3_pull carry the proof),
+/// called only for a walk the strict scatter admitted (`sp`, planStrict: rank,
+/// symmetry, the closed total whitelist over f and every level's kernel and
+/// seed, capture dominance) at the G35 request / depth gate in a threaded
+/// strict build. Ok (the record's five-party matrix) or Error (the first
+/// failed condition, for the decline record). The parties:
+///   * the planner's audit (Optimize.planOrbitPull: the shared transitive
+///     write analysis over the module for the pool's producer, the walk, the
+///     outer kernel, the outer seed and every intervening binding by its
+///     payload) -- a walk it recorded nothing for declines (unknown = refuse);
+///   * the TEAM'S BODIES, by the callback-aware codegen analysis
+///     (`exprMayWriteIn` / `callableMayWrite`: the program callback table, an
+///     unresolved callee a write): the walk, the cell function, every level's
+///     fold kernel and seed.
+let private orbitPullAdmission (deferred: Map<IRId, IRExpr>) (consumerId: IRId) (sp: Blade.OrbitFold.StrictPlan) (compExpr: IRExpr) : Result<string list, string> =
+    let s = sp.Shape
+    let (slice, pulls, _) = Blade.OrbitFold.pullCounts sp
+    let gate = Blade.OrbitFold.pullMin ()
+    if s.Rank <> 3 then Error $"rank {s.Rank}: v1 pulls the rank-3 leaf chains only"
+    elif not (Blade.OrbitFold.orbitPullEnabled ()) then Error "disabled by BLADE_ORBIT_PULL=0"
+    elif slice + pulls < gate then
+        Error $"{slice} slice cells + {pulls} pulls = {slice + pulls} pool reads below pull_min = {gate} (BLADE_TILE_TUNE; provisional gate)"
+    else
+    match Blade.Optimize.OrbitPullTable.tryAudit consumerId s.SourceId with
+    | None ->
+        Error $"no five-party audit recorded for this walk over `{s.SourceName}` (the pool is not bound in the fold's own let chain, a parameter of its function, or a top-level binding ahead of the enclosing one): unknown declines"
+    | Some (Error why) -> Error why
+    | Some (Ok planner) ->
+    let level (k: int) = $"level {k + 1}'s"
+    let kernelWrites = s.Levels |> List.tryFindIndex (fun l -> callableMayWrite l.Fold)
+    let seedWrites = s.Levels |> List.tryFindIndex (fun l -> exprMayWriteIn deferred l.Seed)
+    if exprMayWriteIn deferred compExpr then
+        Error "the walk may write (callback-aware analysis of the team's bodies; an unresolved callee counts as a write)"
+    elif exprMayWriteIn deferred s.Body then
+        Error "the cell function may write (callback-aware analysis of the team's bodies)"
+    elif kernelWrites.IsSome then
+        Error $"{level kernelWrites.Value} fold kernel may write (callback-aware analysis of the team's bodies)"
+    elif seedWrites.IsSome then
+        Error $"{level seedWrites.Value} seed may write (callback-aware analysis of the team's bodies)"
+    else
+    Ok (planner
+        @ [ "team bodies (the callback-aware codegen write analysis, the program callback table, an unresolved callee a write): the walk, the cell function, every level's fold kernel and seed -- no write; "
+            + "totality and purity: planStrict's closed whitelist (Blade.IRTotality) over f, every fold kernel and every seed -- no panic, so no failure can arrive in a different order; "
+            + "request: the outer level's (the G35 request / depth gate), threads emitted, every fold strict in this build" ])
+
 let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
     let (code, ctx') = genBindingDispatch ctx binding builder
     // Gap G42: a binding whose own C++ name gained TupleChildren holds a FLAT
@@ -4489,6 +4535,77 @@ and genOrbitScatterCpp (ctx: CodeGenContext) (ind: string) (name: string) (gName
       yield i1 + call
       yield $"{ind}}}" ]
 
+/// THE ROW-OWNED PULL SCATTER's C++ (round 3, D-P3; blade_orbit_scatter.hpp
+/// pull3 / leaf3_pull, whose header carries the ownership proof): the rank-3
+/// scatter's leaf chains partitioned by H row over a team of
+/// `blade_omp_get_max_threads()` (pull3 clamps it to the extent), a
+/// team-completion barrier, then scatter3's own serial middle / outer tail.
+/// `f`, the kernels and the seeds are rendered exactly as genOrbitScatterCpp
+/// renders them (one lambda of the cell value; `acc + z` for a plain `+`,
+/// else the callable's wrapper; seeds once, outer first). `matrix` is the
+/// admission's five-party audit; `ompNote` the census marker for a request
+/// this form does not spend (an inner level's). Under omp test mode the team
+/// is observed ([omp-coverage] region=<name>). Every statement one line with
+/// BLOCK comments only, like the scatter's.
+and genOrbitPullCpp (ctx: CodeGenContext) (ind: string) (name: string) (gName: string)
+                    (sp: Blade.OrbitFold.StrictPlan) (orbitWhy: string option) (ompNote: string option) (matrix: string list) : string list =
+    let s = sp.Shape
+    let accCpp = primTypeToCpp s.AccTy
+    let elemCpp = primTypeToCpp s.ElemTy
+    let n = s.Extent
+    let tag = sanitizeCppName name
+    let fLambda =
+        let c = { ctx with VarNames = Map.add Blade.OrbitFold.readVarId "__sx" ctx.VarNames }
+        $"[&]({elemCpp} __sx) -> {accCpp} {{ return {(exprToCppCtx c s.Body)}; }}"
+    let kernels =
+        s.Levels |> List.mapi (fun k (l: Blade.OrbitFold.OrbitLevel) ->
+            if sp.LevelAdd.[k] then
+                ([ $"auto __sk{k}_{tag} = []({accCpp} __a, {accCpp} __b) -> {accCpp} {{ return __a + __b; }};" ], $"__sk{k}_{tag}")
+            else
+                genCallableWrapper ctx.VarNames $"{name}__sc{k}" l.Fold)
+    let kName k = snd kernels.[k]
+    let seed k = exprToCppCtx ctx s.Levels.[k].Seed
+    let g = sp.RowGroup
+    let b = sp.ColBlock
+    let vadd k = sp.LevelAdd.[k] && s.AccTy = ETFloat64 && g % 4 = 0
+    let lit (x: bool) = if x then "true" else "false"
+    (orbitScatterUsedCell ()).Value <- true
+    (ompApiUsedCell ()).Value <- true
+    Blade.OrbitFold.recordPullTaken name sp orbitWhy matrix
+    recordOmpConstruct name "omp parallel num_threads(T) + ascending row claims + team-completion barrier"
+        $"row-owned pull scatter (rank 3, extent {n}): the leaf chains' H rows claimed in ascending order by the team, each row's chains on one thread; the middle and outer chains serial after the barrier; the EXECUTED form is chosen at run time -- `row-pull` on an actual team of two or more, `serial-leaf3` on a requested or actual team of one -- and recorded per site with the requested and actual team in the run record's `forms` census (BLADE_RUN_RECORD), which this static record cannot observe"
+    let i1 = ind + "    "
+    let instrument = ompTestModeEnabled ()
+    let maxth = $"__omp_maxth_{tag}"
+    let seen = $"__omp_seen_{tag}"
+    let team = $"__omp_team_{tag}"
+    let observer =
+        if instrument then $"[&](int __tn, int __nt) {{ {seen}[__tn] = true; {team}[__tn] = __nt; }}"
+        else "blade_scatter::no_observe{}"
+    // The EXECUTED form is chosen at run time (the requested and the actual
+    // team; blade_orbit_scatter.hpp leaf3_pull) and recorded per site in the
+    // runtime form census (the run record's `forms`), under this name.
+    let runVar = $"__srun_{tag}"
+    let call =
+        $"{name} = blade_scatter::pull3<{g}, {b}, {lit (vadd 2)}, {lit (vadd 1)}>(__spool_{tag}, (size_t){n}, {accCpp}({seed 2}), {accCpp}({seed 1}), {name}, __sf_{tag}, {kName 2}, {kName 1}, {kName 0}, blade_omp_get_max_threads(), {observer}, \"{tag}\", &{runVar});"
+    [ yield $"{ind}{accCpp} {name} = {seed 0};"
+      yield $"{ind}{{"
+      yield $"{i1}/* {Blade.OrbitFold.pullForm sp} (strict: no licence consumed) */"
+      match ompNote with
+      | Some why -> yield $"{i1}/* {(ompSuppressedPhrase why)} */"
+      | None -> ()
+      for (code, _) in kernels do
+          for line in code do yield i1 + line
+      yield $"{i1}auto __sf_{tag} = {fLambda};"
+      yield $"{i1}const {elemCpp}* __spool_{tag} = nested_array_utilities::pool_base({gName}.data);"
+      if instrument then
+          yield $"{i1}/* [omp-coverage] thread observation (test mode) */ int {maxth} = blade_omp_get_max_threads(); bool* {seen} = new bool[{maxth} > 0 ? {maxth} : 1](); int* {team} = new int[{maxth} > 0 ? {maxth} : 1]();"
+      yield $"{i1}blade_scatter::PullRun {runVar};"
+      yield i1 + call
+      if instrument then
+          yield $"{i1}{{ int __omp_distinct = 0; int __omp_teamsz = 0; for (int __t = 0; __t < {maxth}; __t++) {{ if ({seen}[__t]) __omp_distinct++; if ({team}[__t] > __omp_teamsz) __omp_teamsz = {team}[__t]; }} std::cout << \"[omp-coverage] region={tag} teamsz=\" << __omp_teamsz << \" distinct=\" << __omp_distinct << \" maxth=\" << {maxth} << \" form=\" << {runVar}.form << \" requested=\" << {runVar}.requested << \" actual=\" << {runVar}.actual << std::endl; delete[] {seen}; delete[] {team}; }}"
+      yield $"{ind}}}" ]
+
 and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (compExpr: IRExpr) (kernelExpr: IRExpr) (seedExpr: IRExpr) : string list * CodeGenContext =
     // THE JOIN ENCODING (IR.fs, IRReduceCompute): tuple kernel + tuple seed =
     // one fold per leg. Routed to its own emitter, because everything below
@@ -4795,6 +4912,42 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                             | head :: _ -> head.BoundDependencies.IsEmpty && head.StrictOffset = 0
                                            && (domainPlanOfLevel head).IsNone
                             | [] -> false)
+                    // THE ROW-OWNED PULL SCATTER (round 3, D-P3; Blade.OrbitFold's
+                    // pull header): a rank-3 walk the strict scatter admitted,
+                    // at EXACTLY the G35 request / depth gate (`chunkable`: an
+                    // outer fold `where omp` or a map `omp` covering the
+                    // outermost level, a licensed outer fold, a rectangular
+                    // outer level) in a threaded strict build, runs its leaf
+                    // chains on the team, row-owned -- ahead of the threaded
+                    // complete-row form and the serial scatter (whose relative
+                    // precedence below is untouched by it). Its admission
+                    // (orbitPullAdmission) audits all five parties; a decline
+                    // is recorded and the forms below decide as before.
+                    let pullTaken =
+                        match scatterPlan with
+                        | Some (sp, gName) when sp.Shape.Rank = 3 && chunkable && not (fpReassocEnabled ()) && ompThreadEmissionEnabled () ->
+                            (match orbitPullAdmission ctx.DeferredComputations binding.Id sp compExpr with
+                             | Ok matrix -> Some (sp, gName, matrix)
+                             | Error why ->
+                                 Blade.OrbitFold.recordPullDeclined name why
+                                 None)
+                        | _ -> None
+                    match pullTaken with
+                    | Some (sp, gName, matrix) ->
+                        // The outer level's request (its fold kernel's, or the
+                        // map's covering level 1) is the one spent; any other
+                        // level's reaches the census -- no licence moves
+                        // between levels.
+                        let unspent =
+                            Blade.OrbitFold.scatterThreadRequests sp
+                            |> List.filter (fun r -> r <> "level 1's fold" && r <> "level 1's map")
+                        let ompNote =
+                            if unspent.IsEmpty then None
+                            else
+                                let build = if fpReproEnabled () then fpReproReason () else "the walk's folds carry no reorder licence"
+                                Some $"""{build}; the row-owned pull threads the leaf chains under the OUTER level's request only -- an inner level's request licenses its own chain, which stays serial and unsplit (requested at: {String.concat ", " unspent})"""
+                        (genOrbitPullCpp ctx ind name gName sp orbitWhy ompNote matrix, ctx')
+                    | None ->
                     // M14 (gap G25): how the fold runs INSIDE each thread's
                     // chunk. Decided here, where the kernel is known, and read
                     // by the nest emitter AND the `blade plan` census so the

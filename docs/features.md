@@ -480,6 +480,31 @@ groups of G)`; `BLADE_ORBIT_SCATTER=0` keeps the walk (`BLADE_ORBIT_FOLD=0`
 does not: it disables only the licensed regrouping). Corpus
 `symmetry/132`-`135`.
 
+**The row-owned pull (rank 3, threaded strict builds; C++ lane).** When the
+rank-3 walk's OUTER level carries a thread request (the outer fold's `where
+omp`, or a map `omp(i: 1)`) in a threaded strict build, the C++ lane runs the
+scatter's LEAF chains on the team, partitioned by H row: the owner of row a
+seeds every H[a, b] once, pulls T(c, a, b) for c < a in ascending c, then runs
+slice a's group scatter with no third event -- every pair chain's source
+sequence, on one thread -- and after a team-completion barrier the middle and
+outer chains run serially from their seeds. Under `BLADE_FP_REPRO=1
+BLADE_FP_CONTRACT=off` it is bitwise the serial scatter and the walk at every
+team size -- the raw result bits are compared across the pull at T = 1 / 3 / 8,
+a restricted team, the pull off, the serial scatter, the walk and the LLVM lane
+(`blade test orbit-scatter`, through `BLADE_PRINT_BITS`), with one NaN payload
+(a NaN meeting a NaN of another payload is outside the contract: the compiler
+may commute an IEEE add, which keeps the value, not the payload); a
+contraction-fast build is not verified bitwise (the forms may contract
+differently, as the walk does per context). A requested or ACTUAL team of one
+runs the serial slice form's leaf stage instead (`serial-leaf3`), and the run
+record's `forms` census names each site's executed form with the requested and
+actual team. The cell function is evaluated once per read (the serial form's
+same-term reuse across rows is not kept). Its admission audits all five parties
+(pool producer, walk, outer kernel, seed, intervening bindings) with the shared
+write analysis. `blade plan` names it `..., row-owned pull on a thread team`;
+`BLADE_ORBIT_PULL=0` keeps the other strict forms; the LLVM lane keeps the
+serial scatter. Corpus `symmetry/138`-`139`.
+
 **`where repro` — the reproducibility demand (named functions only).** The
 inverse of the reorder licence: the function's emitted body must keep the
 interpreter's operation sequence. Discharged as (a) `BLADE_REPRO_FN` on the

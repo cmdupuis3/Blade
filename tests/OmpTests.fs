@@ -2564,6 +2564,107 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
              Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail name detail
              errors <- errors + 1
              failedNames <- failedNames @ [name])
+        // THE ROW-OWNED PULL SCATTER'S TEAM IS OBSERVED (round 3, D-P3): the
+        // rank-3 checksum walk under BLADE_FP_REPRO=1 with the outer request,
+        // generated in test mode (the pull site prints its own [omp-coverage]
+        // line, now with its EXECUTED form and requested / actual team), run
+        // with dynamic teams off at T = 1, 4, 7, 8 and on a RESTRICTED team
+        // (OMP_NUM_THREADS=8 OMP_THREAD_LIMIT=1): the team is EXACTLY
+        // min(T, p), every member checked in and the form `row-pull`; T = 1
+        // and the restricted team run `serial-leaf3` on one thread; the
+        // checksum is the T = 1 run's everywhere. p = 5 (gate lowered) pins
+        // the clamp.
+        // -------------------------------------------------------------------
+        let pullSrc (p: int) =
+            $"type Var = Idx<{p}>\ntype Obs = Idx<2>\n"
+            + "let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 3 + s * 5) % 7) * 0.37 - 2.0 |> compute\n"
+            + "let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) |> compute\n"
+            + "let s = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> reduce(method_for(range<Var>) <@> lambda(k) -> t(i, j, k) * t(i, j, k), (+)), (+)), lambda(u, v) where omp -> u + v, 0.0)\n"
+        for (name, p, tune) in [ ("orbit_pull_team_p97", 97, null); ("orbit_pull_team_clamped_p5", 5, "pull_min=0") ] do
+            setOmpTestMode true
+            let gen =
+                use _r = pinEnv "BLADE_FP_REPRO" "1"
+                use _c = pinEnv "BLADE_FP_CONTRACT" "off"
+                use _t = pinEnv "BLADE_TILE_TUNE" tune
+                use _k = pinEnv "BLADE_ORBIT_PULL" null
+                use _p = pinEnv "BLADE_PRINT" "s"
+                try
+                    match lower (pullSrc p) with
+                    | Error e -> Error ($"lower failed: {e}")
+                    | Ok ir ->
+                        let (cpp, _) = CodeGen.genSelfContainedProgramFromIR ir name
+                        let srcAbs = Path.GetFullPath(Path.Combine(outputDir, sanitizeFileName name + ".cpp"))
+                        File.WriteAllText(srcAbs, cpp)
+                        Ok (srcAbs, cpp)
+                with ex -> Error ($"codegen failed: {ex.Message}")
+            setOmpTestMode false
+            let outcome : Result<string, string> =
+                match gen with
+                | Error e -> Error e
+                | Ok (_, cpp) when not (cpp.Contains "blade_scatter::pull3<") -> Error "the generated C++ has no pull3 call (the case would not test the form)"
+                | Ok (srcAbs, _) ->
+                    let exeAbs = Path.ChangeExtension(srcAbs, (if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"))
+                    let cpsi = ProcessStartInfo("g++", $"-std=c++17 {(optFlags ())} -fopenmp -o \"{exeAbs}\" \"{srcAbs}\"")
+                    cpsi.RedirectStandardError <- true
+                    cpsi.UseShellExecute <- false
+                    use cproc = Process.Start(cpsi)
+                    let cerr = Blade.Runtime.readToEndOffPool cproc.StandardError
+                    if not (cproc.WaitForExit(120000)) then
+                        (try cproc.Kill(true) with _ -> ())
+                        Error "compile timed out (120s)"
+                    elif cproc.ExitCode <> 0 then Error ($"compile: {cerr.Result}")
+                    else
+                    let fixedTeam (threads: string) (limit: string option) =
+                        let rpsi = ProcessStartInfo(exeAbs)
+                        rpsi.RedirectStandardOutput <- true
+                        rpsi.RedirectStandardError <- true
+                        rpsi.UseShellExecute <- false
+                        rpsi.WorkingDirectory <- Path.GetDirectoryName(exeAbs)
+                        rpsi.Environment.["OMP_NUM_THREADS"] <- threads
+                        rpsi.Environment.["OMP_DYNAMIC"] <- "false"
+                        (match limit with
+                         | Some l -> rpsi.Environment.["OMP_THREAD_LIMIT"] <- l
+                         | None -> rpsi.Environment.Remove("OMP_THREAD_LIMIT") |> ignore)
+                        use rproc = Process.Start(rpsi)
+                        let rout = Blade.Runtime.readToEndOffPool rproc.StandardOutput
+                        if not (rproc.WaitForExit(60000)) then
+                            (try rproc.Kill(true) with _ -> ())
+                            Error "run timed out (60s)"
+                        elif rproc.ExitCode <> 0 then Error ($"exit {rproc.ExitCode}")
+                        else Ok rout.Result
+                    // (teamsz, distinct, maxth, executed form, actual team, `s` line)
+                    let runAtL (threads: string) (limit: string option) =
+                        match fixedTeam threads limit with
+                        | Error e -> Error e
+                        | Ok out ->
+                            let m = System.Text.RegularExpressions.Regex.Match(out, @"\[omp-coverage\] region=s teamsz=(\d+) distinct=(\d+) maxth=(\d+) form=(\S+) requested=(\d+) actual=(\d+)")
+                            let sLine = out.Split('\n') |> Array.map (_.Trim()) |> Array.tryFind (fun l -> l.StartsWith "s = ")
+                            if not m.Success then Error "no [omp-coverage] line (with its executed form) for the pull site"
+                            else Ok (int m.Groups.[1].Value, int m.Groups.[2].Value, int m.Groups.[3].Value, m.Groups.[4].Value, int m.Groups.[6].Value, defaultArg sLine "")
+                    let runAt (threads: string) = runAtL threads None
+                    match runAt "1", runAt "4", runAt "7", runAt "8", runAtL "8" (Some "1") with
+                    | Error e, _, _, _, _ | _, Error e, _, _, _ | _, _, Error e, _, _ | _, _, _, Error e, _ | _, _, _, _, Error e -> Error e
+                    | Ok (tz1, _, _, f1, a1, s1), Ok (tz4, d4, mx4, f4, a4, s4), Ok (tz7, d7, mx7, f7, a7, s7), Ok (tz8, d8, mx8, f8, a8, s8), Ok (_, _, _, fr, ar, sr) ->
+                        let want (t: int) = min t p
+                        let formOf (t: int) = if want t > 1 then "row-pull" else "serial-leaf3"
+                        if s1 = "" then Error "no `s = ` line in the output"
+                        elif s4 <> s1 || s7 <> s1 || s8 <> s1 || sr <> s1 then Error ($"checksum depends on the team: T=1 [{s1}] T=4 [{s4}] T=7 [{s7}] T=8 [{s8}] restricted [{sr}]")
+                        elif tz1 <> 1 || f1 <> "serial-leaf3" || a1 <> 1 then Error ($"T=1: team {tz1}, form {f1}, actual {a1} (wanted serial-leaf3 on a team of one)")
+                        elif fr <> "serial-leaf3" || ar <> 1 then Error ($"OMP_NUM_THREADS=8 OMP_THREAD_LIMIT=1: form {fr}, actual {ar} (wanted serial-leaf3 on the ACTUAL team of one)")
+                        elif mx4 <= 1 || mx7 <= 1 || mx8 <= 1 then Ok ($"single-core: maxth={mx4}/{mx7}/{mx8}, cannot test parallelism")
+                        elif tz4 <> want 4 || tz7 <> want 7 || tz8 <> want 8 || d4 <> want 4 || d7 <> want 7 || d8 <> want 8 then
+                            Error ($"pull team is not exactly min(T, p = {p}): T=4 {tz4}/{d4}, T=7 {tz7}/{d7}, T=8 {tz8}/{d8} (teamsz/distinct)")
+                        elif f4 <> formOf 4 || f7 <> formOf 7 || f8 <> formOf 8 || a4 <> want 4 || a7 <> want 7 || a8 <> want 8 then
+                            Error ($"executed form: T=4 {f4}/{a4}, T=7 {f7}/{a7}, T=8 {f8}/{a8} (form/actual)")
+                        else Ok ($"T=4 teamsz={tz4}; T=7 teamsz={tz7}; T=8 teamsz={tz8} (= min(T, {p})), form row-pull; T=1 and OMP_THREAD_LIMIT=1 serial-leaf3 on one thread; {s1} at every T")
+            match outcome with
+            | Ok detail ->
+                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass name detail
+                passed <- passed + 1
+            | Error detail ->
+                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail name detail
+                errors <- errors + 1
+                failedNames <- failedNames @ [name]
 
         // -------------------------------------------------------------------
         // G7: THE THREADED REDUCTION JOIN'S TEAM IS OBSERVED. Generated in the
