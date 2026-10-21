@@ -11,7 +11,7 @@
 // The input checksum carries `where omp` on its outer fold kernel (the mt8 read-back
 // licence every Fortran arm has, RESULTS section 12 / D44; wave 3 attribution: the serial
 // read-back was ~1.5 ms of the mt8-licensed gap). A licensed build threads it (Path B);
-// a repro build keeps it serial (the row-slot form does not recognise a row-view fold).
+// a repro build threads its complete rows (the G35 row-slot form admits row-view folds, G51).
 
 type Y = Idx<1501>   // SIZE ny
 type X = Idx<2003>   // SIZE nx

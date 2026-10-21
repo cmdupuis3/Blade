@@ -1,0 +1,38 @@
+// TEST: Row View Fold Signed Zeros
+// Gap G51 (round 3, A2): signed zero through the row-view forms.
+//   neg        -- rows of -0, row seed -0, outer seed -0
+//   neg_peeled -- the same rows UNSEEDED (head peel)
+//   mixed      -- rows mixing -0 and +0, seeds -0
+// The serial walk gives -0.0, -0.0, +0.0; BLADE_FP_REPRO=1 prints exactly that
+// (the repro row slots run each row's serial chain), byte for byte with the
+// interpreter. The LICENSED builds print +0.0 for all three: the licensed
+// arm's blade_fold::sum starts its chains at +0, as the LLVM lane's licensed
+// fold and the previous chunk form's `omp simd` private copies do (gap G40:
+// licensed folds do not promise the sign of an exact zero). A value pin
+// compares numbers, not the sign of a zero, so those three pins hold in every
+// build -- and say nothing about the sign. THE STRICT CASE does: `strict` and
+// `strict_peeled` fold the same rows through `where repro` kernels (no licence
+// anywhere, so every build and both lanes run the serial chains), and the
+// pinned BOOLEANS `1.0 / x < 0.0` are true only for -0.0. Both build modes of
+// this exact source are also pinned as TEXT by `blade test omp-reduce`
+// (row_view_signed_zero_corpus_533_both_modes).
+function radd(p: Float64, q: Float64) where repro -> Float64 = p + q
+type Y = Idx<521>
+type X = Idx<509>
+let (neg, neg_peeled, mixed, strict, strict_negative, strict_peeled, strict_peeled_negative) = {
+    let z = method_for(range<Y, X>) <@> lambda(i, j) -> -0.0 * Float64(i + j + 1) |> compute
+    let m = method_for(range<Y, X>) <@> lambda(i, j) -> if (i + j) % 2 == 0 then -0.0 else 0.0 |> compute
+    let a = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(z(i), lambda(p, q) -> p + q, -0.0), lambda(p, q) where omp -> p + q, -0.0)
+    let b = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(z(i), (+)), lambda(p, q) where omp -> p + q, -0.0)
+    let c = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(m(i), lambda(p, q) -> p + q, -0.0), lambda(p, q) where omp -> p + q, -0.0)
+    let d = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(z(i), radd, -0.0), radd, -0.0)
+    let e = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(z(i), radd), radd, -0.0)
+    (a, b, c, d, 1.0 / d < 0.0, e, 1.0 / e < 0.0)
+}
+// EXPECT: neg = -0.0
+// EXPECT: neg_peeled = -0.0
+// EXPECT: mixed = 0.0
+// EXPECT: strict = -0.0
+// EXPECT: strict_negative = true
+// EXPECT: strict_peeled = -0.0
+// EXPECT: strict_peeled_negative = true

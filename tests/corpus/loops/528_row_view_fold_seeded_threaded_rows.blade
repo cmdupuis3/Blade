@@ -1,0 +1,27 @@
+// TEST: Row View Fold Seeded Threaded Rows
+// Gap G51 (round 3, A2): the bench stencil's input-checksum shape -- an outer
+// `where omp` fold whose row value is a fold over a ROW VIEW `u(i)` of a
+// stored dense rank-2 array -- with a NONZERO inner seed that depends on the
+// row (`7.0 + Float64(i)`). Under BLADE_FP_REPRO=1 the threaded complete-row
+// form (G35) now admits it (each row's chain on one thread, from its own seed,
+// ascending in j; the outer chain ascending from 0.5); in the licensed default
+// build Path B folds each row with one blade_fold::sum call and adds the seed
+// ONCE (Codex review A, finding 4: the helper returns the row's sum, the fold
+// is `seed + row...`). The request rides the fold kernel (view / nested) and
+// the map's omp(i: 1) (view_map / nested_map); every spelling is the same
+// value. The data are quarter-integers, so every association is exact.
+//   row i = 7 + i + sum_j u(i, j);  total = 0.5 + sum over the 521 rows
+type Y = Idx<521>
+type X = Idx<509>
+let (view, nested, view_map, nested_map) = {
+    let u = method_for(range<Y, X>) <@> lambda(i, j) -> Float64((i * 7 + j * 3) % 11) * 0.25 - 1.0 |> compute
+    let a = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(u(i), (+), 7.0 + Float64(i)), lambda(p, q) where omp -> p + q, 0.5)
+    let b = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(method_for(range<X>) <@> lambda(j) -> u(i, j), (+), 7.0 + Float64(i)), lambda(p, q) where omp -> p + q, 0.5)
+    let c = reduce(method_for(range<Y>) <@> lambda(i) where omp(i: 1) -> reduce(u(i), (+), 7.0 + Float64(i)), (+), 0.5)
+    let d = reduce(method_for(range<Y>) <@> lambda(i) where omp(i: 1) -> reduce(method_for(range<X>) <@> lambda(j) -> u(i, j), (+), 7.0 + Float64(i)), (+), 0.5)
+    (a, b, c, d)
+}
+// EXPECT: view = 205405.5
+// EXPECT: nested = 205405.5
+// EXPECT: view_map = 205405.5
+// EXPECT: nested_map = 205405.5

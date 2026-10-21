@@ -65,10 +65,76 @@ let internal rowSlotWalk (deferred: Map<IRId, IRExpr>) (levels: Map<IRId, IRInde
     Blade.IRTotality.walk resolveCallable (fun id -> Map.tryFind id deferred) (fun id -> Map.containsKey id deferred)
         levels levelNames bound boundNames visiting e
 
-/// G35 admission for the single-leaf Path B fold nest: Ok (rows, cells) or
-/// Error (the first failed condition, for the `fold-form` decline record).
-/// Called only for a `chunkable` plan in a repro build.
-let private rowSlotAdmission (deferred: Map<IRId, IRExpr>) (info: ApplyInfo) (foldCl: IRCallable) (bindings: LoopIndexBinding list) : Result<int64 * int64, string> =
+/// G51: the stored base of a ROW-VIEW inner fold -- the row kernel's value
+/// (after its leading lets) is `reduce(u(i), op[, s])` over a row view of a
+/// named array -- with the fold's kernel and seed. The whitelist walk
+/// (IRTotality's IRReduce arm) owns the detailed proof (stored, dense rank 2,
+/// index identity, static extent, total kernel and seed); this only spots the
+/// shape, for the admission's write audit and its record.
+let private rowViewFoldOf (rowBody: IRExpr) : (IRId * IRType * IRExpr * IRExpr option) option =
+    let rec spine (e: IRExpr) =
+        match e with
+        | IRLet (_, _, b) -> spine b
+        | other -> other
+    match spine rowBody with
+    | IRReduce (IRIndex (IRVar (u, uty), [ _ ], _), k, s) -> Some (u, uty, k, s)
+    | _ -> None
+
+/// G51, the licensed arm: the row-view fold a Path B chunk folds with
+/// `blade_fold::sum` per row -- the base array (an IRVar), the row subscript
+/// (the level coordinate), the inner seed, and the row's static cell count.
+type private RowViewSumPlan =
+    { Base: IRExpr
+      Subscript: IRExpr
+      Seed: IRExpr option
+      Cells: int64 }
+
+/// G51: the `blade plan` lines of an admitted row-view fold -- what each row
+/// is, and the five-party matrix as audited. `form` names the threaded form
+/// (the repro row slots, or the licensed vector helper).
+let private rowViewFoldMatrix (form: string) (seedHandling: string) : string =
+    "five-party audit (shared transitive write analysis + the IRTotality closed whitelist): "
+    + "producer = the stored base (not deferred, non-virtual, dense rank 2; no producer evaluation moves) -- no write; "
+    + "consumer = the row callable incl. its leading lets and the inner fold callable -- total, no write; "
+    + "outer kernel = total (the closed whitelist, its parameters bound as plain values), no write, an explicit omp request on the fold kernel or the outer map level; "
+    + $"seeds = {seedHandling}; "
+    + $"intervening = none (no cross-binding motion: only this fold's row evaluations move before its outer-kernel applications, every one write-free); form: {form}"
+
+/// The seed party, as both arms audit it.
+let private rowViewSeedParty =
+    "the inner seed (evaluated once per row in the row's own scope; total, no write) and the outer seed (evaluated once, before the team, in its original scope as written; no write)"
+
+let private rowViewFoldRecord (baseName: string) (seeded: bool) : string list =
+    let seedWord =
+        if seeded then "its explicit seed, evaluated once per row in the row's own scope"
+        else "unseeded: head-peeled from the row's first cell (a statically non-empty row, so no BL8003 can fire)"
+    [ $"row-view folds (G51): each row's value is reduce over a ROW VIEW {baseName}(i) of the stored dense rank-2 array {baseName} (rows contiguous; the subscript is the level coordinate of the base's first index type), {seedWord}; each row's chain ascending over the base's second axis on one thread, then the outer chain ascending from its seed: bitwise the serial walk under BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off"
+      rowViewFoldMatrix "threaded complete rows (repro), the ascending outer combination kept" rowViewSeedParty ]
+
+/// G35 admission for the single-leaf Path B fold nest: Ok (rows, cells, the
+/// G51 row-view record lines when the row value is a row-view fold) or Error
+/// (the first failed condition, for the `fold-form` decline record). Called
+/// only for a `chunkable` plan in a repro build.
+///
+/// THE FIVE-PARTY WRITE AUDIT (preamble rule 4; the shared transitive write
+/// analysis, `exprMayWriteIn` / `callableMayWrite` = Optimize.exprMayWriteWith
+/// over the codegen resolver, the deferred table and the program callback
+/// table, an unresolved callee counting as a write), applied AFTER the closed
+/// totality walk so a refusal keeps the walk's own name for it:
+///   producer   -- the stored base of a row view (or the stored arrays a row
+///                 reads): never deferred (the walk refuses a deferred read),
+///                 so no producer evaluation moves;
+///   consumer   -- the whole row callable, its leading lets and (row view) the
+///                 inner fold's kernel callable and seed;
+///   outer      -- the outer fold kernel (its own explicit request is the
+///                 `chunkable` gate; the ascending outer chain is unchanged);
+///   seeds      -- the inner seed (inside the row callable) and the OUTER seed,
+///                 evaluated once before the team in its original scope;
+///   intervening -- nothing outside this fold moves (no cross-binding motion);
+///                 inside it, every row's evaluation moves before every outer-
+///                 kernel application, and those are the parties above.
+/// A writing party declines (the serial walk, as written).
+let private rowSlotAdmission (deferred: Map<IRId, IRExpr>) (baseName: IRId -> string) (info: ApplyInfo) (foldCl: IRCallable) (seedExpr: IRExpr) (bindings: LoopIndexBinding list) : Result<int64 * int64 * string list option, string> =
     if not (foldRowSlotsEnabled ()) then Error "disabled by BLADE_FOLD_ROW_SLOTS=0"
     elif not (ompThreadEmissionEnabled ()) then Error (ompThreadsSuppressedReason ())
     elif bindings.Length <> 1 then
@@ -82,9 +148,14 @@ let private rowSlotAdmission (deferred: Map<IRId, IRExpr>) (info: ApplyInfo) (fo
                  match e with
                  | IRLet (_, _, b) -> spine b
                  | other -> other
+             let rowView = rowViewFoldOf rowCl.Body
              let isCompleteFold =
                  match spine rowCl.Body with
                  | IRReduceCompute (_, k, s) -> (match k, s with IRTuple _, _ | _, IRTuple _ -> false | _ -> true)
+                 // G51: a complete fold over a row view of a stored array
+                 // (the walk below proves the rest, or declines with why)
+                 | IRReduce (_, IRTuple _, _) -> false
+                 | IRReduce _ -> rowView.IsSome
                  | _ -> false
              match rowSlotScalarElem rowCl.RetType with
              | None -> Error "not one complete fold per outer index (the row value is not a scalar)"
@@ -109,12 +180,35 @@ let private rowSlotAdmission (deferred: Map<IRId, IRExpr>) (info: ApplyInfo) (fo
                  | Error why, _ -> Error why
                  | _, Error why -> Error $"the outer fold kernel is outside the row-slot whitelist ({why}): its applications cannot move behind every row"
                  | Ok perRow, Ok _ ->
+                     // The five-party write audit (see the header), each party
+                     // by the shared transitive analysis.
+                     let innerKernelWrites =
+                         match rowView with
+                         | Some (_, _, k, _) ->
+                             (match resolveCallable k with
+                              | Some cl -> callableMayWrite cl
+                              | None -> true)
+                         | None -> false
+                     if exprMayWriteIn deferred rowCl.Body then
+                         Error "the row kernel may write (shared transitive write analysis; an unresolved callee counts as a write): its evaluations cannot move before the outer chain"
+                     elif innerKernelWrites then
+                         Error "the inner fold's kernel may write (shared transitive write analysis): its applications are ordered side effects"
+                     elif callableMayWrite foldCl then
+                         Error "the outer fold kernel may write (shared transitive write analysis): its applications cannot move behind every row"
+                     elif exprMayWriteIn deferred seedExpr then
+                         Error "the outer fold's seed may write (shared transitive write analysis)"
+                     else
                      let rows = defaultArg (tryEvalIntIR outerIx.Extent) 0L
                      let cells = rowSlotMul rows perRow
                      let gate = rowSlotsMin ()
                      if cells < gate then
                          Error $"{rows} row(s) x {perRow} fold step(s) = {cells} below rowslots_min = {gate} (BLADE_TILE_TUNE; provisional gate)"
-                     else Ok (rows, cells)
+                     else
+                     // G51: the row-view record lines -- what the row is, and
+                     // the five-party matrix as audited.
+                     let rowViewLines =
+                         rowView |> Option.map (fun (u, _, _, s) -> rowViewFoldRecord (baseName u) s.IsSome)
+                     Ok (rows, cells, rowViewLines)
          | _ -> Error "the row kernel is not a resolved one-parameter callable")
     | _ -> Error "the outer level is not a plain range<I> sweep of static extent (v1 slots range-driven rows)"
 
@@ -4621,9 +4715,46 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                     // reads `licensedFold`, never `foldReorderLicensed` alone.
                     let mapBodyWrites = exprMayWriteIn ctx.DeferredComputations cg0.KernelExpr
                     let licensedFold = foldReorderLicensed callable && not mapBodyWrites
+                    // G51 (Codex diff review of W1-A2, finding 1): a team over
+                    // ROW-VIEW folds in the LICENSED build moves every row's fold
+                    // onto a worker and the outer kernel's applications into
+                    // per-thread chains, so the OUTER kernel must pass the same
+                    // closed totality whitelist the repro row slots apply to it
+                    // (its parameters bound as plain values): a kernel that may
+                    // panic would report a different failure, or none (two
+                    // chunks can cancel before a cast the serial chain applies).
+                    // A licence is not a totality certificate. Such a fold gets
+                    // NO team -- neither the row-view helper arm nor the general
+                    // Path B chunk form (whose own missing outer-kernel audit is
+                    // an inherited weakness, recorded in the gap register's G51
+                    // row) -- and the census line says why. The repro build is
+                    // unaffected: its row-slot admission already audits the
+                    // outer kernel and declines with the walk's reason.
+                    let rowViewOuterRefusal =
+                        if not (fpReassocEnabled ()) || not (callable.IsOmpParallel || mapLicensesOuter) then None
+                        else
+                        match resolveCallable single.Kernel with
+                        | Some rowCl when rowCl.Params.Length = 1 && (rowViewFoldOf rowCl.Body).IsSome ->
+                            let foldBound = callable.Params |> List.map (fun q -> q.VarId) |> Set.ofList
+                            let foldNames = callable.Params |> List.map (fun q -> q.Name) |> Set.ofList
+                            (match rowSlotWalk ctx.DeferredComputations Map.empty Map.empty foldBound foldNames (Set.singleton callable.Id) callable.Body with
+                             | Ok _ -> None
+                             | Error why -> Some why)
+                        | _ -> None
+                    let rowViewOuterCensus =
+                        rowViewOuterRefusal |> Option.map (fun why ->
+                            $"the outer fold kernel is outside the closed totality whitelist ({why}): a team over row-view folds -- the licensed helper arm or a Path B chunk -- would change which failure arrives first (G51)")
+                    (match rowViewOuterRefusal with
+                     | Some why when licensedFold ->
+                         recordCodegenDecision "fold-form" name
+                             (Blade.Effects.Declined $"row-view helper arm: the outer fold kernel is outside the closed totality whitelist ({why})")
+                             [ "fold form: no team (the licensed row-view helper arm and the general Path B chunk form both declined; the serial licensed form runs)"
+                               "reduce over a deferred computation (G51 licensed row-view arm: the outer kernel's totality audit)" ]
+                     | _ -> ())
                     let chunkable =
                         (callable.IsOmpParallel || mapLicensesOuter)
                         && licensedFold
+                        && rowViewOuterRefusal.IsNone
                         && (match cg0.Bindings with
                             // a closed-form domain head is a whole affine nest
                             // over its fields, not a [0, extent) sweep to split
@@ -4649,11 +4780,17 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                     // that this one form also asks whether the build opens
                     // teams at all: a slot array with no team is pure cost.
                     let mutable rowSlotWhy = None
+                    // G51: the row-view record lines of a taken row-slot form
+                    // whose rows are row-view folds (None otherwise).
+                    let mutable rowViewLines : string list option = None
+                    let baseNameOf (id: IRId) = Map.tryFind id ctx.VarNames |> Option.defaultValue $"#{id}"
                     let rowSlots =
                         if not chunkable || fpReassocEnabled () then None
                         else
-                            match rowSlotAdmission ctx.DeferredComputations single callable cg0.Bindings with
-                            | Ok rc -> Some rc
+                            match rowSlotAdmission ctx.DeferredComputations baseNameOf single callable seedExpr cg0.Bindings with
+                            | Ok (rows, cells, rv) ->
+                                rowViewLines <- rv
+                                Some (rows, cells)
                             | Error why ->
                                 rowSlotWhy <- Some why
                                 let form =
@@ -4782,6 +4919,56 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                             else
                                 dotClassFactors (fun t -> irTypeToCpp t = elemStr) cg.KernelExpr cg.KernelParams lvl
                                 |> Option.bind foldVecKind
+                        // G51, the licensed row-view arm's recogniser: the ONE
+                        // shape `reduce(u(i), <builtin +>[, s])` as the whole
+                        // row kernel body, `u` a stored (non-deferred, non-
+                        // virtual) dense rank-2 array of the accumulator's
+                        // element type (double / float), `i` the kernel's one
+                        // parameter, bound to a plain `range<Y>` whose index is
+                        // EXACTLY u's first (index identity: the row read is
+                        // proven), the folded axis u's second, of static extent
+                        // >= 1; the INNER kernel reorder-licensed on its own
+                        // (`foldReorderLicensed`: no `where repro`, no write)
+                        // with a builtin `+` body; the body (seed included)
+                        // passes the closed totality whitelist the row-slot
+                        // form applies; no real array rides the level.
+                        let rowViewSum (lvl: LoopIndexBinding) : RowViewSumPlan option =
+                            let plain (ix: IRIndexType) = ix.Rank = 1 && ix.Symmetry = SymNone && ix.IxKind = IxKPlain
+                            if foldLanesMode () = FoldLanesOff || not (foldVecElem elemStr)
+                               || lvl.Elements |> List.exists (_.Virtual.IsRealArray)
+                               // the seed party: the outer seed is evaluated
+                               // once before the team either way; a writing
+                               // one keeps the previous form
+                               || exprMayWriteIn ctx.DeferredComputations seedExpr
+                               // the outer-kernel party's totality (no chunk
+                               // plan exists then; restated for the arm itself)
+                               || rowViewOuterRefusal.IsSome then None
+                            else
+                            match single.Arrays |> List.map rowSlotRangeIx, cg.KernelParams, cg.KernelExpr with
+                            | [ Some outerIx ], [ p ], IRReduce (IRIndex ((IRVar (u, uty) as uE), [ ixE ], _), k, seed)
+                                when not (Map.containsKey u ctx.DeferredComputations)
+                                     && (match ixE with
+                                         | IRVar (id, _) -> id = p.VarId
+                                         | IRParam (nm, _, _) -> nm = p.Name
+                                         | _ -> false) ->
+                                (match resolveCallable k, uty with
+                                 | Some innerCl, ArrayElem at
+                                     when innerCl.Params.Length = 2 && foldReorderLicensed innerCl
+                                          && fpReassocSimdOp innerCl elemStr = Some "+"
+                                          && not at.IsVirtual && irTypeToCpp at.ElemType = elemStr ->
+                                     (match at.IndexTypes with
+                                      | [ rowIx; colIx ] when plain rowIx && plain colIx && Blade.IRTotality.sameIndex rowIx outerIx ->
+                                          (match tryEvalIntIR colIx.Extent with
+                                           | Some n when n >= 1L ->
+                                               let levels = Map.ofList [ p.VarId, outerIx ]
+                                               let names = Map.ofList [ p.Name, outerIx ]
+                                               (match rowSlotWalk ctx.DeferredComputations levels names Set.empty Set.empty Set.empty cg.KernelExpr with
+                                                | Ok _ -> Some { Base = uE; Subscript = ixE; Seed = seed; Cells = n }
+                                                | Error _ -> None)
+                                           | _ -> None)
+                                      | _ -> None)
+                                 | _ -> None)
+                            | _ -> None
                         match cg.Bindings with
                         // M14 / gap G25: a THREADED dot-class fold. The Path B
                         // team is opened here, and each thread's chunk is ONE
@@ -4835,6 +5022,128 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                     $"{ind}            const size_t __rlo = blade_fold::chunk_lo(__rn, (size_t)__rt, (size_t)__rnt);"
                                     $"{ind}            const size_t __rhi = blade_fold::chunk_lo(__rn, (size_t)__rt + 1, (size_t)__rnt);"
                                     $$"""{{ind}}            if (__rhi > __rlo) { __rpart[__rt] = {{call}}; __rhad[__rt] = true; }"""
+                                    $$"""{{ind}}        }"""
+                                    $"{ind}        for (int __rt = 0; __rt < __rT; __rt++) if (__rhad[__rt]) {name} = {wname}({name}, __rpart[__rt]);"
+                                    $"{ind}        delete[] __rpart; delete[] __rhad;"
+                                    $$"""{{ind}}    }"""
+                                    $"{ind}}}" ])
+                        // G51, THE LICENSED ROW-VIEW ARM (bench stencil's input
+                        // checksum, `reduce(method_for(range<Y>) <@> lambda(i)
+                        // -> reduce(u(i), (+)[, s]), <omp fold>, s0)`): the
+                        // same Path B team and partition, but each row's
+                        // complete fold is ONE `blade_fold::sum<T, K>` call over
+                        // the row's contiguous cells -- not the expression
+                        // form's 8-scalar-lane IIFE re-spelling the row view per
+                        // element -- and the row loop carries NO `omp simd`
+                        // (its body is a complete fold: each thread's partial
+                        // is the ascending chain of its rows, seeded from its
+                        // first row's value, combined in job order from the
+                        // caller's seed). Licensed ONLY (rowViewSum: the INNER
+                        // fold's own reorder licence, builtin `+`, never under
+                        // `where repro` or BLADE_FP_REPRO=1, double / float,
+                        // BLADE_FOLD_LANES not off) -- NOT identity-preserving:
+                        // the helper reassociates each row. THE SEED IS
+                        // COMBINED EXACTLY ONCE (Codex review A, finding 4):
+                        // `reduce(u(i), +, s)` is `s + sum(row)`, s evaluated
+                        // once per row in the row's scope; the unseeded fold
+                        // keeps its head peel (`row[0] + sum(row[1..n))`, n = 1
+                        // is `row[0]` itself). SIGNED ZERO is the licensed
+                        // contract's: the tree's chains start at +0, so an
+                        // all-(-0) row that reaches the helper (a seeded row,
+                        // or an unseeded one of two or more cells; an unseeded
+                        // one-cell row is its own cell) folds to +0 -- what the
+                        // LLVM lane's licensed fold and the default build's
+                        // previous chunk form (whose `omp simd` private copies
+                        // start at +0) give, so the two compiled lanes print the
+                        // same zero (`blade test llvm`); BLADE_FP_REPRO=1 keeps
+                        // the -0 (and BLADE_FOLD_LANES=0's serial chunks can).
+                        // THE OUTER KERNEL'S TOTALITY is audited before any team
+                        // is planned (`rowViewOuterRefusal`; no chunk plan, so
+                        // this arm is unreachable for a kernel that may panic).
+                        | [lvl] when fpReassocEnabled () && licensedFold
+                                     && cg.FoldChunk.IsSome && ompThreadEmissionEnabled ()
+                                     && not (ompTestModeEnabled ())
+                                     && laneable lvl
+                                     && (rowViewSum lvl).IsSome ->
+                            let rv = (rowViewSum lvl).Value
+                            let k = foldVecLanes VecSum
+                            let boundStr = genLoopBoundExpr (compoundArrayNamesOf cg.Bindings) lvl
+                            // The level's own element peels (the range slot's
+                            // coordinate), declared in the row loop exactly as
+                            // the nest declares them.
+                            let mutable paramFinalNames : Map<IRId, string> = Map.empty
+                            let mutable peels : string list = []
+                            for elem in lvl.Elements do
+                                let (peelCode, newName) = genElementBindingPeel false lvl elem elem.ArrayName
+                                if not (List.contains peelCode peels) then peels <- peels @ [ peelCode ]
+                                match elem.Virtual with
+                                | VirtualRange _ | VirtualReverse ->
+                                    paramFinalNames <- Map.add elem.ParamVarId elem.ParamName paramFinalNames
+                                | RealArray ->
+                                    paramFinalNames <- Map.add elem.ParamVarId newName paramFinalNames
+                            let nameMap =
+                                paramFinalNames |> Map.fold (fun acc key v -> Map.add key v acc) ctx.VarNames
+                                |> withCaptureNames EnclosingNamesWin cg.Captures
+                            let uStr = exprToCpp nameMap rv.Base
+                            let ixStr = exprToCpp nameMap rv.Subscript
+                            let sumOf (p: string) (cnt: int64) =
+                                foldVecCall elemStr k VecSum [ p ] ("(size_t)" + string cnt)
+                            let rowValue =
+                                match rv.Seed with
+                                | Some s ->
+                                    let seedCpp = exprToCpp nameMap s
+                                    let whole = sumOf "__rrow" rv.Cells
+                                    $"({seedCpp}) + {whole}"
+                                | None when rv.Cells = 1L -> "__rrow[0]"
+                                | None ->
+                                    let tail = sumOf "(__rrow + 1)" (rv.Cells - 1L)
+                                    $"__rrow[0] + {tail}"
+                            let seedWord =
+                                match rv.Seed with
+                                | Some _ -> "its seed combined once (seed + sum(row))"
+                                | None when rv.Cells = 1L -> "unseeded single-cell rows: the row's one cell"
+                                | None -> "unseeded: head-peeled, row[0] + sum(row[1..n))"
+                            (ompApiUsedCell ()).Value <- true
+                            (foldLanesUsedCell ()).Value <- true
+                            // An unseeded one-cell row is its cell: no helper call.
+                            let noHelper = rv.Seed.IsNone && rv.Cells = 1L
+                            let label = if noHelper then "one-cell rows, no helper call" else $"blade_fold::sum<{elemStr}, {k}> per row"
+                            let treeWord = if noHelper then "its one cell, no lane tree" else "one vector lane tree"
+                            let rowPhrase =
+                                if noHelper then "each row's fold is its one cell"
+                                else $"each row's fold one blade_fold::sum<{elemStr}, {k}> call over its contiguous cells"
+                            recordOmpConstruct name "omp parallel num_threads(T) + fixed-order combine"
+                                $"comm-licensed parallel fold: outer level chunked per thread (Path B), licensed row-view folds: {label}, no omp simd on the row loop"
+                            recordCodegenDecision "fold-form" name Blade.Effects.Applied
+                                [ $"fold form: threaded(Path B chunks, {label}: licensed row-view folds, {seedWord}; no omp simd on the row loop)"
+                                  "reduce over a deferred computation (one level, Path B partition)"
+                                  $"row-view folds (G51, licensed arm, BLADE_FOLD_LANES): each row's reduce over the ROW VIEW {uStr}(i) of a stored dense rank-2 array ({rv.Cells} contiguous cells) is {treeWord} (K = {k}; BLADE_FOLD_LANES=4|8 sets K, 0/off keeps the previous chunk form: simd-reduction over rows of the lane IIFE); the inner fold's OWN reorder licence (builtin `+`), never a strict chain; {seedWord}; signed zero per the licensed contract (the tree's chains start at +0: an all-(-0) row the helper folds comes out +0, as in the LLVM lane and the default build's previous chunk form; an unseeded one-cell row is its own cell; BLADE_FP_REPRO=1 keeps -0); the outer kernel passed the closed totality whitelist before any team was planned; the row loop's omp simd dropped (a licensed-only choice: each thread's partial is the ascending chain of its rows)"
+                                  rowViewFoldMatrix "licensed Path B team (per-thread partials combined in job order from the caller's seed)" (rowViewSeedParty + "; the inner seed combined with its row's sum exactly once") ]
+                            Some (
+                                [ $"{ind}/* reduce over computation: comm-licensed parallel fold, outer level chunked per thread (Path B); licensed row-view folds: {rowPhrase}, {seedWord}; no omp simd on the row loop */"
+                                  $"{ind}{{"
+                                  $"{ind}    const size_t __rn = {boundStr};"
+                                  $"{ind}    int __rT = blade_omp_get_max_threads();"
+                                  $"{ind}    if ((size_t)__rT > __rn) __rT = (int)__rn;"
+                                  $"{ind}    if (__rT < 1) __rT = 1;"
+                                  $$"""{{ind}}    if (__rn > 0) {"""
+                                  $"{ind}        {elemStr}* __rpart = new {elemStr}[__rT];"
+                                  $"{ind}        bool* __rhad = new bool[__rT]();"
+                                  $"{ind}        BLADE_OMP_PARALLEL_NUM_THREADS(__rT)"
+                                  $$"""{{ind}}        {"""
+                                  $"{ind}            const int __rnt = blade_omp_get_num_threads();"
+                                  $"{ind}            const int __rt = blade_omp_get_thread_num();"
+                                  $"{ind}            const size_t __rlo = blade_fold::chunk_lo(__rn, (size_t)__rt, (size_t)__rnt);"
+                                  $"{ind}            const size_t __rhi = blade_fold::chunk_lo(__rn, (size_t)__rt + 1, (size_t)__rnt);"
+                                  $"{ind}            {elemStr} __racc = {elemStr}();"
+                                  $"{ind}            bool __rhas = false;"
+                                  $$"""{{ind}}            for (size_t {{lvl.IndexName}} = __rlo; {{lvl.IndexName}} < __rhi; {{lvl.IndexName}}++) {""" ]
+                                @ (peels |> List.map (fun p -> $"{ind}                {p}"))
+                                @ [ $"{ind}                const {elemStr}* __rrow = {uStr}.data[{ixStr}];"
+                                    $"{ind}                const {elemStr} __rv = {rowValue};"
+                                    $$"""{{ind}}                if (__rhas) __racc = {{wname}}(__racc, __rv); else { __racc = __rv; __rhas = true; }"""
+                                    $$"""{{ind}}            }"""
+                                    $$"""{{ind}}            if (__rhas) { __rpart[__rt] = __racc; __rhad[__rt] = true; }"""
                                     $$"""{{ind}}        }"""
                                     $"{ind}        for (int __rt = 0; __rt < __rT; __rt++) if (__rhad[__rt]) {name} = {wname}({name}, __rpart[__rt]);"
                                     $"{ind}        delete[] __rpart; delete[] __rhad;"
@@ -4946,6 +5255,10 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                             let chunkNote =
                                 if cg.FoldChunk.IsSome
                                 then [ $"{ind}/* {(ompSuppressedPhrase (ompThreadsSuppressedReason ()))} */" ]
+                                // G51: the request was refused its team by the
+                                // outer kernel's totality audit (never silently)
+                                elif rowViewOuterCensus.IsSome then
+                                    [ $"{ind}/* {(ompSuppressedPhrase rowViewOuterCensus.Value)} */" ]
                                 // The MAP kernel asked for omp but its licence
                                 // covers no level of this one-level nest (e.g.
                                 // `omp(i: 0)`), so no chunk plan exists. This
@@ -5205,7 +5518,13 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                        let serialLanes = if scatterPlan.IsSome then Blade.OrbitFold.scatterServesSerialMarker else ""
                                        $"reduce over a deferred computation (one level, Path B partition; {cells} inner fold steps; each row's fold is its own serial chain on one thread{walk}){serialLanes}"
                                    | _ -> "reduce over a deferred computation"
-                               recordFoldForm name form formWhere
+                               match rowSlotsForm, rowViewLines with
+                               // G51: a taken row-slot form over row-view folds
+                               // carries what its rows are and the audit matrix.
+                               | Some _, Some extra ->
+                                   recordCodegenDecision "fold-form" name Blade.Effects.Applied
+                                       ([ $"fold form: {form}"; formWhere ] @ extra)
+                               | _ -> recordFoldForm name form formWhere
                                // A `where omp` FOLD kernel that got no chunk plan
                                // (`chunkable` declined) reaches the nest with
                                // nothing that says so: the nest's own marker reads
@@ -5218,6 +5537,7 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                                "fold kernel is `where repro` (the operation order is the contract; reorder licence vetoed)"
                                            elif mapBodyWrites then
                                                "the map kernel writes a captured binding; a fold licence does not make the map's body race-safe (Path B would run it on a team)"
+                                           elif rowViewOuterCensus.IsSome then rowViewOuterCensus.Value
                                            else "the fold's outermost level is not a plain rectangular sweep, so it cannot be chunked per thread (Path B)"
                                        // BLOCK form: a kernel-body fold's lines are
                                        // space-joined into a one-line IIFE.

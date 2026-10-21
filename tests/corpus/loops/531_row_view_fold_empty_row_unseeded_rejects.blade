@@ -1,0 +1,10 @@
+// TEST: Row View Fold Empty Row Unseeded (rejects)
+// Gap G51 (round 3, A2): an UNSEEDED fold over a statically EMPTY row view has
+// no defined value (no element to peel, no identity), and the refusal stays at
+// the inner fold's own site -- the threaded row-view admissions never see it
+// (they admit an unseeded row fold only over a statically non-empty row).
+type Y = Idx<521>
+type X = Idx<0>
+let u = method_for(range<Y, X>) <@> lambda(i, j) -> Float64(i + j) |> compute
+let s = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(u(i), (+)), lambda(p, q) where omp -> p + q, 0.0)
+// ERROR: BL3007 @ 8:67

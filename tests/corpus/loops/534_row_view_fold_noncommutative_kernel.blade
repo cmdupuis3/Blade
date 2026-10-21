@@ -1,0 +1,22 @@
+// TEST: Row View Fold Noncommutative Kernel
+// Gap G51 (round 3, A2): a NON-commutative inner fold kernel, `3a + b`, over
+// row views. It carries no reorder licence, so the licensed helper arm never
+// takes it (each row stays its serial left fold in every build); under
+// BLADE_FP_REPRO=1 the row-slot form threads the ROWS -- each row's chain is
+// the serial walk's own, ascending in j from its seed, on one thread -- and
+// the outer chain stays ascending from its seed. The left fold's order is
+// decisive here: any reassociation of a row would change the value by orders
+// of magnitude, not ulps. view and nested (both seeded 1.0) are one value;
+// peeled is the unseeded view fold (head peel: row[0], then 3a + b).
+type Y = Idx<521>
+type X = Idx<509>
+let (view, nested, peeled) = {
+    let u = method_for(range<Y, X>) <@> lambda(i, j) -> Float64((i + 2 * j) % 3) - 1.0 |> compute
+    let a = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(u(i), lambda(p, q) -> 3.0 * p + q, 1.0), lambda(p, q) where omp -> p + q, 0.0)
+    let b = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(method_for(range<X>) <@> lambda(j) -> u(i, j), lambda(p, q) -> 3.0 * p + q, 1.0), lambda(p, q) where omp -> p + q, 0.0)
+    let c = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(u(i), lambda(p, q) -> 3.0 * p + q), lambda(p, q) where omp -> p + q, 0.0)
+    (a, b, c)
+}
+// EXPECT: view = 3.72648874685934e+245
+// EXPECT: nested = 3.72648874685934e+245
+// EXPECT: peeled = -2.20209114897879e+242

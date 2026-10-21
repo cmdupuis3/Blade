@@ -335,6 +335,69 @@ void run_partition() {
     }
 }
 
+// G51 (round 3, A2): the licensed row-view arm's ROW VALUE as the emitter
+// composes it, against the serial chain the source wrote --
+//   unseeded: a[0] + sum(a + 1, n - 1)   (n >= 2; n == 1 is a[0] itself)
+//   seeded:   s + sum(a, n)              (the seed combined exactly once)
+// For data whose every partial sum is exact (quarter-integers, cancellation to
+// an exact zero, +-0 mixes) the row value is the chain bit for bit, with ONE
+// documented exception: when EVERY addend (the seed or the head included) is
+// -0, the chain is -0 while the tree's chains start at +0, so the row value is
+// +0 -- the licensed contract the LLVM lane's fold and the previous chunk form
+// share (BLADE_FP_REPRO=1 keeps the chain). A NaN anywhere is NaN in both.
+template <typename T, int K>
+void run_row_values(const char* tname) {
+    const size_t cap = 600;
+    Buf<T> A(cap);
+    std::vector<size_t> ns;
+    for (size_t n = 0; n <= 40; n++) ns.push_back(n);
+    ns.push_back(509);
+    enum Z { AllNeg, AllPos, Mixed, Quarter, Cancel, WithNaN, ZCount };
+    const char* znames[] = { "all -0", "all +0", "mixed +-0", "quarter-integers", "cancel to zero", "with NaN" };
+    auto negZero = [](T x) { return x == (T)0 && std::signbit(x); };
+    for (int zi = 0; zi < ZCount; zi++) {
+        Rng r(0x2E50ULL + zi * 977ULL + K + sizeof(T));
+        for (size_t n : ns) {
+            for (size_t i = 0; i < cap; i++) A.base[i] = std::numeric_limits<T>::quiet_NaN();
+            T* a = A.base + 1;   // an unaligned start, like a row view + 1
+            for (size_t i = 0; i < n; i++) {
+                switch (zi) {
+                case AllNeg: a[i] = (T)-0.0; break;
+                case AllPos: a[i] = (T)0.0; break;
+                case Mixed: a[i] = (i % 2 == 0) ? (T)-0.0 : (T)0.0; break;
+                case Quarter: a[i] = (T)((double)(r.next() % 11) * 0.25 - 1.0); break;
+                case Cancel: a[i] = (i % 2 == 0) ? (T)1.5 : (T)-1.5; break;
+                default: a[i] = (i == n / 2) ? std::numeric_limits<T>::quiet_NaN() : (T)((double)(r.next() % 11) * 0.25 - 1.0); break;
+                }
+            }
+            if (zi == Cancel && n % 2 == 1) a[n - 1] = (T)0.0;   // an exact zero total either way
+            char tag[160];
+            std::snprintf(tag, sizeof tag, "%s K=%d %s n=%zu", tname, K, znames[zi], n);
+            bool allNeg = true;
+            for (size_t i = 0; i < n; i++) if (!negZero(a[i])) allNeg = false;
+            auto agrees = [&](T got, T chain, bool everyAddendNegZero) {
+                if (std::isnan((double)chain)) return std::isnan((double)got);
+                if (everyAddendNegZero) return bits_equal(got, (T)0.0);   // the licensed +0
+                return bits_equal(got, chain);
+            };
+            if (n >= 1) {
+                T chain = a[0];
+                for (size_t i = 1; i < n; i++) chain = chain + a[i];
+                const T peeled = n == 1 ? a[0] : a[0] + blade_fold::sum<T, K>(a + 1, n - 1);
+                // n == 1 is the cell itself: its sign survives
+                check(agrees(peeled, chain, n >= 2 && allNeg), std::string("unseeded row value vs the head-peeled chain ") + tag);
+            }
+            for (T s : { (T)-0.0, (T)0.0, (T)7.0 }) {
+                T chain = s;
+                for (size_t i = 0; i < n; i++) chain = chain + a[i];
+                const T seeded = n == 0 ? s : s + blade_fold::sum<T, K>(a, n);
+                check(agrees(seeded, chain, n >= 1 && allNeg && negZero(s)),
+                      std::string("seeded row value vs the chain from its seed (seed ") + std::to_string((double)s) + ") " + tag);
+            }
+        }
+    }
+}
+
 } // namespace
 
 int main() {
@@ -348,6 +411,10 @@ int main() {
     run_stream<float, 8>("f32");
     run_partition<4>();
     run_partition<8>();
+    run_row_values<double, 4>("f64");
+    run_row_values<double, 8>("f64");
+    run_row_values<float, 4>("f32");
+    run_row_values<float, 8>("f32");
     std::printf("lane tree vs the serial chain in this build: %lld of %lld random n=20011 dots differ in bits (expected: most -- the licence reassociates)\n",
                 g_vec_vs_serial_differ, g_vec_vs_serial_cells);
 #ifdef BLADE_FOLD_LANES_VECTOR

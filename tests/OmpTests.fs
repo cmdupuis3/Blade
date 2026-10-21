@@ -1016,6 +1016,42 @@ let private rowSlotOuterWriteSrc =
     + "    a + b\n"
     + "}, 0.0)\n"
 
+/// G51 (round 3, A2): the bench stencil's input-checksum shape -- an outer
+/// fold whose row value is a fold over a ROW VIEW `u(i)` of a stored dense
+/// rank-2 array. `rows` x 509 cells (521 rows: 265189 inner steps, above the
+/// row-slot gate); `inner` is the row's fold, `outer` the outer fold kernel.
+let private rowViewSrcRC (rows: int) (cols: int) (inner: string) (outer: string) =
+    $"type Y = Idx<{rows}>\ntype X = Idx<{cols}>\n"
+    + "let u = method_for(range<Y, X>) <@> lambda(i, j) -> Float64((i * 7 + j * 3) % 11) * 0.25 - 1.0 |> compute\n"
+    + $"let s = reduce(method_for(range<Y>) <@> lambda(i) -> {inner}, {outer}, 0.5)\n"
+let private rowViewSrc (rows: int) (inner: string) (outer: string) = rowViewSrcRC rows 509 inner outer
+
+/// ...with the thread request on the MAP's outer level (G27's placement) and a
+/// builtin `(+)` outer fold.
+let private rowViewMapSrc (inner: string) =
+    "type Y = Idx<521>\ntype X = Idx<509>\n"
+    + "let u = method_for(range<Y, X>) <@> lambda(i, j) -> Float64((i * 7 + j * 3) % 11) * 0.25 - 1.0 |> compute\n"
+    + $"let s = reduce(method_for(range<Y>) <@> lambda(i) where omp(i: 1) -> {inner}, (+), 0.5)\n"
+
+/// The five-party audit's writing parties (loops/535, 536): the inner fold's
+/// kernel writes a captured counter; or writes the BASE through a view.
+let private rowViewWritingInnerSrc =
+    "type Y = Idx<521>\ntype X = Idx<509>\ntype K = Idx<2>\n"
+    + "let mut G: Array<Float64 like K> = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute\n"
+    + "let u = method_for(range<Y, X>) <@> lambda(i, j) -> Float64((i * 7 + j * 3) % 11) * 0.25 - 1.0 |> compute\n"
+    + "let s = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(u(i), lambda(a, b) -> {\n"
+    + "    G((0 : K)) = G((0 : K)) + 1.0\n"
+    + "    a + b\n"
+    + "}), lambda(p, q) where omp -> p + q, 0.0)\n"
+let private rowViewBaseWriterSrc =
+    "type Y = Idx<521>\ntype X = Idx<509>\n"
+    + "let mut u = method_for(range<Y, X>) <@> lambda(i, j) -> Float64((i * 7 + j * 3) % 11) * 0.25 - 1.0 |> compute\n"
+    + "let s = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(u(i), lambda(a, b) -> {\n"
+    + "    let v = u((1 : Y))\n"
+    + "    v((0 : X)) = v((0 : X)) + 1.0\n"
+    + "    a + b\n"
+    + "}), lambda(p, q) where omp -> p + q, 0.0)\n"
+
 /// The decision record and the C++ text of one lower + generate.
 let private planAndCppOf (testName: string) (src: string) : Result<Blade.Effects.Decision list * string, string> =
     Blade.Effects.Decisions.start ()
@@ -1043,6 +1079,29 @@ let private rowSlotCases : (string * (string * string) list * string * (Blade.Ef
             | Blade.Effects.Declined why -> why.StartsWith "row-slot form: " && why.Contains needle
             | _ -> false)
     let reproCensus = "[omp] requested but emitted serial: BLADE_FP_REPRO=1"
+    // G51: the row slots taken over ROW-VIEW folds -- the row-view record and
+    // the five-party matrix ride the applied fold-form record.
+    let rowViewApplied (d: Blade.Effects.Decision) =
+        applied d
+        && d.Evidence |> List.exists (fun e -> e.StartsWith "row-view folds (G51): each row's value is reduce over a ROW VIEW")
+        && d.Evidence |> List.exists (fun e ->
+               e.StartsWith "five-party audit (shared transitive write analysis + the IRTotality closed whitelist): producer = "
+               && e.Contains "consumer = " && e.Contains "outer kernel = " && e.Contains "seeds = " && e.Contains "intervening = none (no cross-binding motion")
+    // ...and the licensed arm: Path B, blade_fold::sum per row, the knob named.
+    let rowViewLicensed (d: Blade.Effects.Decision) =
+        d.Rule = "fold-form" && d.Outcome = Blade.Effects.Applied
+        && d.Evidence |> List.exists (fun e -> e.StartsWith "fold form: threaded(Path B chunks, blade_fold::sum<double, 8> per row: licensed row-view folds")
+        && d.Evidence |> List.exists (fun e ->
+               e.StartsWith "row-view folds (G51, licensed arm, BLADE_FOLD_LANES)"
+               && e.Contains "0/off keeps the previous chunk form" && e.Contains "the row loop's omp simd dropped")
+        && d.Evidence |> List.exists (fun e -> e.StartsWith "five-party audit")
+    // A writing party: no chunk plan at all (the map body writes), the
+    // fold-form record names it.
+    let rowViewWriterDeclined (d: Blade.Effects.Decision) =
+        d.Rule = "fold-form"
+        && (match d.Outcome with
+            | Blade.Effects.Declined why -> why.Contains "the map kernel writes a captured binding"
+            | _ -> false)
     // `axes = 2`: the full fold over the two-level nest (the default would
     // fold only the innermost axis and bind a rank-1 array).
     let multiLevel =
@@ -1207,7 +1266,213 @@ let private rowSlotCases : (string * (string * string) list * string * (Blade.Ef
                         e.StartsWith "fold form: orbit-class fold"
                         || e.StartsWith "fold form: compact row classes")),
        "a licensed compact form applied (orbit-class fold or compact row classes; no row slots)",
-       [], [ "__rslot" ]) ]
+       [], [ "__rslot" ])
+      // ---- G51 (round 3, A2): ROW-VIEW inner folds ----------------------
+      // The stencil checksum shape: TAKEN by the repro row slots, with the
+      // row-view record and the five-party matrix; every party's refusal
+      // declines with its name; the licensed arm folds each row with ONE
+      // blade_fold::sum call, its seed combined once, no omp simd on the row
+      // loop, gated by BLADE_FOLD_LANES and the inner fold's OWN licence.
+      ("row_view_slots_threaded_repro", repro,
+       rowViewSrc 521 "reduce(u(i), (+))" rowSlotOmpOuter,
+       rowViewApplied, "fold-form applied: threaded complete rows over row-view folds (row-view record + five-party matrix)",
+       [ "__rslot_s[__i0] = "; "for (size_t __ri = 0; __ri < __rn_s; __ri++) s = "; "delete[] __rslot_s;" ],
+       [ reproCensus; "__rpart_s"; "blade_fold::sum<" ])
+      ("row_view_slots_seeded_repro", repro,
+       rowViewSrc 521 "reduce(u(i), (+), 7.0 + Float64(i))" rowSlotOmpOuter,
+       (fun d -> rowViewApplied d && d.Evidence |> List.exists (fun e -> e.Contains "its explicit seed, evaluated once per row in the row's own scope")),
+       "fold-form applied over seeded row-view folds (the seed named in the record)",
+       [ "__rslot_s[__i0] = " ], [ reproCensus; "blade_fold::sum<" ])
+      ("row_view_slots_map_request_repro", repro,
+       rowViewMapSrc "reduce(u(i), (+))",
+       rowViewApplied, "fold-form applied: the map's omp(i: 1) request (G27 placement) takes the row slots too",
+       [ "__rslot_s[__i0] = " ], [ reproCensus ])
+      ("row_view_slots_noncommutative_kernel_repro", repro,
+       rowViewSrc 521 "reduce(u(i), lambda(a, b) -> 3.0 * a + b, 1.0)" rowSlotOmpOuter,
+       rowViewApplied, "fold-form applied with a non-commutative inner kernel (each row's chain is the serial walk's own)",
+       [ "__rslot_s[__i0] = " ], [ reproCensus; "blade_fold::sum<" ])
+      ("row_view_slots_declined_light_rows", repro,
+       rowViewSrc 43 "reduce(u(i), (+))" rowSlotOmpOuter,
+       declined "43 row(s) x 509 fold step(s) = 21887 below rowslots_min = 262144", "row-slot form declined below the gate (the row-view work count is the row's cells)",
+       [ reproCensus ], [ "__rslot" ])
+      ("row_view_slots_threads_suppressed", repro @ [ ("BLADE_OMP_THREADS", "1") ],
+       rowViewSrc 521 "reduce(u(i), (+))" rowSlotOmpOuter,
+       declined "BLADE_OMP_THREADS=1", "row-slot form declined: BLADE_OMP_THREADS=1",
+       [ "[omp] requested but emitted serial: BLADE_OMP_THREADS=1" ], [ "__rslot"; "BLADE_OMP_PARALLEL_NUM_THREADS" ])
+      ("row_view_slots_knob_off", repro @ [ ("BLADE_FOLD_ROW_SLOTS", "0") ],
+       rowViewSrc 521 "reduce(u(i), (+))" rowSlotOmpOuter,
+       declined "disabled by BLADE_FOLD_ROW_SLOTS=0", "row-slot form declined by its knob",
+       [ reproCensus ], [ "__rslot" ])
+      ("row_view_slots_declined_unproven_subscript", repro,
+       rowViewSrc 521 "reduce(u((520 - i : Y)), (+))" rowSlotOmpOuter,
+       declined "a row-view subscript not proven in range: BL8006", "row-slot form declined: a row view by a computed (checked) subscript",
+       [ reproCensus ], [ "__rslot" ])
+      ("row_view_slots_declined_panicking_seed", repro,
+       rowViewSrc 521 "reduce(u(i), (+), Float64((i + 1) / 3))" rowSlotOmpOuter,
+       declined "body may panic (integer /)", "row-slot form declined: the inner seed may panic (seed party)",
+       [ reproCensus ], [ "__rslot" ])
+      ("row_view_slots_declined_panicking_kernel", repro,
+       rowViewSrc 521 "reduce(u(i), lambda(a, b) -> a + Float64(Int64(floor(b))))" rowSlotOmpOuter,
+       declined "body may panic (float -> int cast)", "row-slot form declined: the inner fold kernel may panic (consumer party)",
+       [ reproCensus ], [ "__rslot" ])
+      ("row_view_declined_writing_inner_kernel_repro", repro,
+       rowViewWritingInnerSrc,
+       rowViewWriterDeclined, "fold-form declined: the inner fold's kernel writes (consumer party; no chunk plan)",
+       [ "[omp] requested but emitted serial: the map kernel writes a captured binding" ],
+       [ "__rslot"; "BLADE_OMP_PARALLEL_NUM_THREADS"; "blade_fold::sum<" ])
+      ("row_view_declined_base_writer_through_view_repro", repro,
+       rowViewBaseWriterSrc,
+       rowViewWriterDeclined, "fold-form declined: the inner fold's kernel writes the base through a view (producer party)",
+       [ "[omp] requested but emitted serial: the map kernel writes a captured binding" ],
+       [ "__rslot"; "BLADE_OMP_PARALLEL_NUM_THREADS"; "blade_fold::sum<" ])
+      ("row_view_licensed_declined_writing_inner_kernel", [],
+       rowViewWritingInnerSrc,
+       rowViewWriterDeclined, "licensed build: the writing inner kernel keeps the serial walk",
+       [ "[omp] requested but emitted serial: the map kernel writes a captured binding" ],
+       [ "BLADE_OMP_PARALLEL_NUM_THREADS"; "blade_fold::sum<" ])
+      ("row_view_licensed_declined_base_writer_through_view", [],
+       rowViewBaseWriterSrc,
+       rowViewWriterDeclined, "licensed build: the base writer keeps the serial walk",
+       [ "[omp] requested but emitted serial: the map kernel writes a captured binding" ],
+       [ "BLADE_OMP_PARALLEL_NUM_THREADS"; "blade_fold::sum<" ])
+      // ---- the licensed arm (default build) ----
+      ("row_view_licensed_sum_helper_unseeded", [],
+       rowViewSrc 521 "reduce(u(i), (+))" rowSlotOmpOuter,
+       (fun d -> rowViewLicensed d && d.Evidence |> List.exists (fun e -> e.Contains "unseeded: head-peeled, row[0] + sum(row[1..n))")),
+       "fold-form applied: Path B, blade_fold::sum per row (head peel), no omp simd on the row loop",
+       [ "const double* __rrow = u.data[i];"
+         "const double __rv = __rrow[0] + blade_fold::sum<double, 8>((__rrow + 1), (size_t)508);"
+         "BLADE_OMP_PARALLEL_NUM_THREADS(__rT)"; "blade_fold::chunk_lo(__rn, (size_t)__rt, (size_t)__rnt)"
+         "for (int __rt = 0; __rt < __rT; __rt++) if (__rhad[__rt]) s = " ],
+       [ "BLADE_OMP_SIMD_REDUCTION"; "__rslot" ])
+      ("row_view_licensed_seed_combined_once", [],
+       rowViewSrc 521 "reduce(u(i), (+), 7.0 + Float64(i))" rowSlotOmpOuter,
+       (fun d -> rowViewLicensed d && d.Evidence |> List.exists (fun e -> e.Contains "its seed combined once (seed + sum(row))")),
+       "fold-form applied: the inner seed combined exactly once per row (Codex review A, finding 4)",
+       [ "const double __rv = ((7.0 + static_cast<double>(i))) + blade_fold::sum<double, 8>(__rrow, (size_t)509);" ],
+       [ "BLADE_OMP_SIMD_REDUCTION" ])
+      ("row_view_licensed_map_request", [],
+       rowViewMapSrc "reduce(u(i), (+))",
+       rowViewLicensed, "fold-form applied: the licensed arm under the map's omp(i: 1) request",
+       [ "blade_fold::sum<double, 8>((__rrow + 1), (size_t)508)" ], [ "BLADE_OMP_SIMD_REDUCTION" ])
+      ("row_view_licensed_singleton_rows_no_helper", [],
+       rowViewSrcRC 521 1 "reduce(u(i), (+))" rowSlotOmpOuter,
+       (fun d -> d.Rule = "fold-form" && d.Outcome = Blade.Effects.Applied
+                 && d.Evidence |> List.exists (fun e -> e.StartsWith "fold form: threaded(Path B chunks, one-cell rows, no helper call: licensed row-view folds, unseeded single-cell rows: the row's one cell")),
+       "fold-form applied: an unseeded one-cell row is its cell (no empty helper call)",
+       [ "const double __rv = __rrow[0];" ], [ "blade_fold::sum<"; "BLADE_OMP_SIMD_REDUCTION" ])
+      ("row_view_licensed_singleton_rows_seeded", [],
+       rowViewSrcRC 521 1 "reduce(u(i), (+), 0.25)" rowSlotOmpOuter,
+       rowViewLicensed, "fold-form applied: a seeded one-cell row is seed + sum(row, 1)",
+       [ "const double __rv = (0.25) + blade_fold::sum<double, 8>(__rrow, (size_t)1);" ], [])
+      ("row_view_licensed_lanes_knob_k4", [ ("BLADE_FOLD_LANES", "4") ],
+       rowViewSrc 521 "reduce(u(i), (+))" rowSlotOmpOuter,
+       (fun d -> d.Rule = "fold-form" && d.Outcome = Blade.Effects.Applied
+                 && d.Evidence |> List.exists (fun e -> e.StartsWith "fold form: threaded(Path B chunks, blade_fold::sum<double, 4> per row")),
+       "fold-form applied with K = 4 under BLADE_FOLD_LANES=4",
+       [ "blade_fold::sum<double, 4>((__rrow + 1), (size_t)508)" ], [ "blade_fold::sum<double, 8>" ])
+      ("row_view_licensed_lanes_knob_off_keeps_previous_form", [ ("BLADE_FOLD_LANES", "0") ],
+       rowViewSrc 521 "reduce(u(i), (+))" rowSlotOmpOuter,
+       (fun d -> d.Rule = "fold-form" && d.Outcome = Blade.Effects.Applied
+                 && d.Evidence |> List.exists (fun e -> e.StartsWith "fold form: threaded(Path B chunks, serial within each chunk: BLADE_FOLD_LANES=0/off")),
+       "BLADE_FOLD_LANES=0: the previous Path B chunk form, no helper",
+       [ "// reduce over computation: comm-licensed parallel fold, outer level chunked" ], [ "blade_fold::sum<" ])
+      ("row_view_licensed_noncommutative_kernel_no_helper", [],
+       rowViewSrc 521 "reduce(u(i), lambda(a, b) -> 3.0 * a + b, 1.0)" rowSlotOmpOuter,
+       (fun d -> d.Rule = "fold-form" && d.Outcome = Blade.Effects.Applied
+                 && d.Evidence |> List.exists (fun e -> e.StartsWith "fold form: threaded(Path B chunks, simd-reduction within each chunk)")),
+       "an unlicensed inner kernel never takes the reassociating helper (the previous Path B form, each row its serial chain)",
+       [ "BLADE_OMP_SIMD_REDUCTION" ], [ "blade_fold::sum<" ])
+      ("row_view_licensed_repro_inner_kernel_no_helper", [],
+       "function radd(a: Float64, b: Float64) where repro -> Float64 = a + b\n" + rowViewSrc 521 "reduce(u(i), radd)" rowSlotOmpOuter,
+       (fun d -> d.Rule = "fold-form" && d.Outcome = Blade.Effects.Applied
+                 && d.Evidence |> List.exists (fun e -> e.StartsWith "fold form: threaded(Path B chunks, simd-reduction within each chunk)")),
+       "a `where repro` inner kernel never takes the helper (its chain is the contract)",
+       [], [ "blade_fold::sum<" ])
+      ("row_view_licensed_threads_suppressed_unchanged", [ ("BLADE_OMP_THREADS", "1") ],
+       rowViewSrc 521 "reduce(u(i), (+))" rowSlotOmpOuter,
+       (fun d -> d.Rule = "fold-form" && d.Outcome = Blade.Effects.Applied
+                 && d.Evidence |> List.exists (fun e -> e.StartsWith "fold form: simd-reduction")),
+       "threads off: the serial licensed form is unchanged (the helper arm is the Path B team's)",
+       [ "[omp] requested but emitted serial: BLADE_OMP_THREADS=1" ], [ "blade_fold::sum<"; "BLADE_OMP_PARALLEL_NUM_THREADS" ])
+      // ---- admission edges (Codex diff review of W1-A2, findings 1 and 4) ----
+      // A row body with a LEADING LET holding the seed: the repro row slots
+      // walk the let and take it; the licensed helper takes only the bare
+      // `reduce(u(i), +[, s])` body, so it keeps the previous chunk form.
+      ("row_view_leading_let_repro_admitted", repro,
+       rowViewSrc 521 "{\n    let t = 7.0 + Float64(i)\n    reduce(u(i), (+), t)\n}" rowSlotOmpOuter,
+       rowViewApplied, "repro: a leading-let row body is admitted (the walk covers the let)",
+       [ "__rslot_s[__i0] = " ], [ reproCensus; "blade_fold::sum<" ])
+      ("row_view_leading_let_licensed_helper_declined", [],
+       rowViewSrc 521 "{\n    let t = 7.0 + Float64(i)\n    reduce(u(i), (+), t)\n}" rowSlotOmpOuter,
+       (fun d -> d.Rule = "fold-form" && d.Outcome = Blade.Effects.Applied
+                 && d.Evidence |> List.exists (fun e -> e.StartsWith "fold form: threaded(Path B chunks, simd-reduction within each chunk)")),
+       "licensed: a leading-let row body declines the helper (the previous Path B chunk form)",
+       [ "BLADE_OMP_SIMD_REDUCTION" ], [ "blade_fold::sum<" ])
+      // An OUTER SEED that is itself a nonzero pure fold: evaluated once, before
+      // the team, in both forms.
+      ("row_view_fold_valued_outer_seed_repro", repro,
+       (rowViewSrc 521 "reduce(u(i), (+))" rowSlotOmpOuter).Replace(", 0.5)\n", ", reduce(method_for(range<X>) <@> lambda(j) -> Float64(j % 5) * 0.25, (+)))\n"),
+       rowViewApplied, "repro: a fold-valued outer seed (write-audited, before the team) admits the row slots",
+       [ "__rslot_s[__i0] = " ], [ reproCensus ])
+      ("row_view_fold_valued_outer_seed_licensed", [],
+       (rowViewSrc 521 "reduce(u(i), (+))" rowSlotOmpOuter).Replace(", 0.5)\n", ", reduce(method_for(range<X>) <@> lambda(j) -> Float64(j % 5) * 0.25, (+)))\n"),
+       rowViewLicensed, "licensed: a fold-valued outer seed keeps the helper arm",
+       [ "blade_fold::sum<double, 8>((__rrow + 1), (size_t)508)" ], [])
+      // INTEGER elements: the repro row slots take them (integer + is total and
+      // wrapping); the helper has no integer form.
+      ("row_view_integer_elements_repro", repro,
+       "type Y = Idx<521>\ntype X = Idx<509>\n"
+       + "let u = method_for(range<Y, X>) <@> lambda(i, j) -> (Int64(i) * 7 + Int64(j) * 3) % 11 - 4 |> compute\n"
+       + "let s = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(u(i), (+)), lambda(p, q) where omp -> p + q, 0)\n",
+       rowViewApplied, "repro: integer row-view folds are admitted",
+       [ "__rslot_s[__i0] = " ], [ reproCensus; "blade_fold::sum<" ])
+      ("row_view_integer_elements_licensed_no_helper", [],
+       "type Y = Idx<521>\ntype X = Idx<509>\n"
+       + "let u = method_for(range<Y, X>) <@> lambda(i, j) -> (Int64(i) * 7 + Int64(j) * 3) % 11 - 4 |> compute\n"
+       + "let s = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(u(i), (+)), lambda(p, q) where omp -> p + q, 0)\n",
+       (fun d -> d.Rule = "fold-form" && d.Outcome = Blade.Effects.Applied
+                 && d.Evidence |> List.exists (fun e -> e.StartsWith "fold form: threaded(Path B chunks, simd-reduction within each chunk)")),
+       "licensed: integer elements decline the helper (no integer vector form)",
+       [ "BLADE_OMP_SIMD_REDUCTION" ], [ "blade_fold::sum<" ])
+      // A genuinely NON-builtin comm-declared inner kernel (`a + 1.0 * b` is
+      // not the recognised `a + b` body, so foldKernelBuiltinOp does not grant
+      // it): reorder-licensed by its comm, but the helper spells a builtin `+`
+      // tree, so it declines; the repro row slots take it (a total kernel).
+      ("row_view_comm_declared_inner_kernel_licensed_no_helper", [],
+       rowViewSrc 521 "reduce(u(i), lambda(a, b) where comm(a, b) -> a + 1.0 * b)" rowSlotOmpOuter,
+       (fun d -> d.Rule = "fold-form" && d.Outcome = Blade.Effects.Applied
+                 && d.Evidence |> List.exists (fun e -> e.StartsWith "fold form: threaded(Path B chunks, simd-reduction within each chunk)")),
+       "licensed: a non-builtin comm-declared inner kernel declines the helper",
+       [ "BLADE_OMP_SIMD_REDUCTION" ], [ "blade_fold::sum<" ])
+      ("row_view_comm_declared_inner_kernel_repro", repro,
+       rowViewSrc 521 "reduce(u(i), lambda(a, b) where comm(a, b) -> a + 1.0 * b)" rowSlotOmpOuter,
+       rowViewApplied, "repro: a non-builtin comm-declared inner kernel is admitted (total)",
+       [ "__rslot_s[__i0] = " ], [ reproCensus ])
+      // THE OUTER KERNEL'S TOTALITY (finding 1): a comm-declared outer kernel
+      // that may panic (a float -> int cast, BL8014) gets NO team in the
+      // licensed build -- neither the helper arm nor the general Path B chunk
+      // form -- with the census line; the repro row slots decline it by name.
+      ("row_view_outer_kernel_may_panic_licensed_no_team", [],
+       rowViewSrc 521 "reduce(u(i), (+))" "lambda(p, q) where comm(p, q), omp -> Float64(Int64(floor(p + q)))",
+       (fun d -> d.Rule = "fold-form"
+                 && (match d.Outcome with
+                     | Blade.Effects.Declined why -> why.StartsWith "row-view helper arm: the outer fold kernel is outside the closed totality whitelist (body may panic (float -> int cast))"
+                     | _ -> false)),
+       "licensed: a panicking comm-declared outer kernel is refused the helper arm and any team",
+       [ "[omp] requested but emitted serial: the outer fold kernel is outside the closed totality whitelist (body may panic (float -> int cast))" ],
+       [ "blade_fold::sum<"; "BLADE_OMP_PARALLEL_NUM_THREADS"; "__rpart" ])
+      ("row_view_outer_kernel_may_panic_repro_declined", repro,
+       rowViewSrc 521 "reduce(u(i), (+))" "lambda(p, q) where comm(p, q), omp -> Float64(Int64(floor(p + q)))",
+       declined "the outer fold kernel is outside the row-slot whitelist (body may panic (float -> int cast))",
+       "repro: the row slots decline a panicking outer kernel by name",
+       [ reproCensus ], [ "__rslot" ])
+      // ...and a TOTAL non-builtin comm-declared outer kernel keeps the arm
+      // (its combine is the fold wrapper; the licence is its comm).
+      ("row_view_outer_kernel_total_comm_licensed_helper", [],
+       rowViewSrc 521 "reduce(u(i), (+))" "lambda(p, q) where comm(p, q), omp -> p + 1.0 * q",
+       rowViewLicensed, "licensed: a total comm-declared outer kernel keeps the helper arm",
+       [ "blade_fold::sum<double, 8>((__rrow + 1), (size_t)508)"; "BLADE_OMP_PARALLEL_NUM_THREADS(__rT)" ], [ "BLADE_OMP_SIMD_REDUCTION" ]) ]
 
 /// Assert that `omp` reaches codegen as a pragma for every spelling of a
 /// kernel, and reaches it for NO spelling that omitted the clause.
@@ -1571,6 +1836,80 @@ let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
                  | a, b -> fail name ($"expected refused / proven, got {a} / {b}")
              | _ -> fail name "x / y carry no index records"
          | _ -> fail name "bindings x / y not found")
+    // ---- G51: the ROW-VIEW IRReduce arm of the shared whitelist, on
+    // hand-built IR where the front end would refuse first: a row view by a
+    // coordinate of a SAME-EXTENT different index (BL4003 at the front end) is
+    // refused, the base's own first index is proven; an UNSEEDED fold over an
+    // empty row (BL3007 at the front end) is refused, the seeded one admitted;
+    // a view of a rank-3 array and a view of a deferred computation decline.
+    (let name = "g51_row_view_walk_identity_empty_rank_deferred"
+     let src =
+         "type Ix = Idx<7>\ntype Jx = Idx<7>\ntype Kx = Idx<5>\ntype Ex = Idx<0>\n"
+         + "let w = method_for(range<Jx, Kx>) <@> lambda(j, k) -> Float64(j * k) |> compute\n"
+         + "let e = method_for(range<Jx, Ex>) <@> lambda(j, k) -> Float64(j * k) |> compute\n"
+         + "let c = method_for(range<Jx, Kx, Kx>) <@> lambda(j, k, l) -> Float64(j * k + l) |> compute\n"
+         + "let ix = method_for(range<Ix>) <@> lambda(i) -> Float64(i) |> compute\n"
+         + "let t = reduce(w((0 : Jx)), (+))\n"
+     match lower src with
+     | Error e -> fail name ($"lower: {e}")
+     | Ok ir ->
+         let binds = ir.Modules |> List.collect (fun m -> m.Bindings)
+         let fns = ir.Modules |> List.collect (fun m -> m.Functions) |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+         let res (x: IRExpr) =
+             match x with
+             | IRVar (id, _) when fns.ContainsKey id -> Some fns.[id]
+             | _ -> resolveCallable x
+         let find (n: string) = binds |> List.tryFind (fun (b: IRBinding) -> b.Name = n)
+         let mutable kernel = None
+         for b in binds do
+             iterIRExpr (fun n -> match n with IRReduce (_, k, _) when kernel.IsNone -> kernel <- Some k | _ -> ()) b.Value
+         let ixOf (b: IRBinding) =
+             match b.Type with
+             | ArrayElem at -> List.tryHead at.IndexTypes
+             | _ -> None
+         match find "w", find "e", find "c", find "ix", kernel with
+         | Some bw, Some be, Some bc, Some bi, Some k ->
+             (match ixOf bi, ixOf bw with
+              | Some ixI, Some ixJ ->
+                  let coord = IRVar (987654321, IRTScalar ETInt64)
+                  let view (b: IRBinding) = IRIndex (IRVar (b.Id, b.Type), [ coord ], None)
+                  let walkWith (isDeferred: IRId -> bool) (lvl: IRIndexType) (e: IRExpr) =
+                      Blade.IRTotality.walk res (fun _ -> None) isDeferred
+                          (Map.ofList [ (987654321, lvl) ]) Map.empty Set.empty Set.empty Set.empty e
+                  let walk = walkWith (fun _ -> false)
+                  // a base whose COLUMN extent does not evaluate (a runtime
+                  // extent): declined for the seeded and the unseeded fold
+                  let dynView =
+                      match bw.Type with
+                      | ArrayElem at ->
+                          let colDyn = { at.IndexTypes.[1] with Extent = IRVar (987654322, IRTScalar ETInt64) }
+                          Some (IRIndex (IRVar (bw.Id, mkArrayLike { at with IndexTypes = [ at.IndexTypes.[0]; colDyn ] }), [ coord ], None))
+                      | _ -> None
+                  let checks =
+                      (match dynView with
+                       | Some dv ->
+                           [ ("an unevaluable column extent, unseeded", walk ixJ (IRReduce (dv, k, None)), Some "no static extent")
+                             ("an unevaluable column extent, seeded", walk ixJ (IRReduce (dv, k, Some (IRLit (IRLitFloat 1.0)))), Some "no static extent") ]
+                       | None -> [ ("an unevaluable column extent", Error "w is not an array", Some "never") ])
+                      @
+                      [ ("a coordinate of a same-extent other index", walk ixI (IRReduce (view bw, k, None)), Some "row-view subscript not proven in range")
+                        ("the base's own first index", walk ixJ (IRReduce (view bw, k, None)), None)
+                        ("an unseeded fold over an empty row", walk ixJ (IRReduce (view be, k, None)), Some "BL8003: an unseeded fold over an empty row")
+                        ("a seeded fold over an empty row", walk ixJ (IRReduce (view be, k, Some (IRLit (IRLitFloat 1.0)))), None)
+                        ("a view of a rank-3 array", walk ixJ (IRReduce (view bc, k, None)), Some "not dense rank 2")
+                        ("a view of a deferred computation", walkWith (fun id -> id = bw.Id) ixJ (IRReduce (view bw, k, None)), Some "reads a deferred computation") ]
+                  let bad =
+                      checks |> List.choose (fun (what, got, want) ->
+                          match want, got with
+                          | None, Ok _ -> None
+                          | Some needle, Error why when why.Contains needle -> None
+                          | _ -> Some ($"{what}: got {got}"))
+                  if bad.IsEmpty then
+                      passed <- passed + 1
+                      resultLine Pass name "other index / empty unseeded / rank 3 / deferred / unevaluable column extent (seeded and unseeded): refused; own index / empty seeded: admitted"
+                  else fail name (String.concat " | " bad)
+              | _ -> fail name "w / ix carry no index records")
+         | _ -> fail name "bindings w / e / c / ix or the (+) kernel not found")
     printFooter "OpenMP Pragma" [$"{passed} passed"; $"{failed} failed"]
     { Block = "OpenMP Pragma"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }
 
@@ -1803,7 +2142,10 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
         let rowSlotCoverage : (string * string * string * int * string) list =
             [ ("row_slots_team_rank2", rowSlotSym2 521 rowSlotOmpOuter "g(i, j) * g(i, j)", null, 64, "")
               ("row_slots_team_small_rn_clamped", rowSlotSym2 3 rowSlotOmpOuter "g(i, j) * g(i, j)", "rowslots_min=1", 3, "")
-              ("row_slots_zero_rows_keeps_seed", zeroRowsSrc, "rowslots_min=0", 0, "s = 0.25") ]
+              ("row_slots_zero_rows_keeps_seed", zeroRowsSrc, "rowslots_min=0", 0, "s = 0.25")
+              // G51: the stencil checksum shape -- row-view folds -- observed too
+              // (quarter-integer data: the value is exact, 66298.5 = 0.5 + sum u)
+              ("row_slots_team_row_view", rowViewSrc 521 "reduce(u(i), (+))" rowSlotOmpOuter, null, 64, "s = 66298.5") ]
         for (name, src, tune, maxTeam, expectS) in rowSlotCoverage do
             setOmpTestMode true
             let gen =
@@ -1863,22 +2205,28 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
                             let sLine =
                                 out.Split('\n') |> Array.map (_.Trim()) |> Array.tryFind (fun l -> l.StartsWith "s = ")
                             Ok (field "teamsz", field "distinct", field "maxth", defaultArg sLine "")
-                    match runAt "1", runAt "4", runAt "7" with
-                    | Error e, _, _ | _, Error e, _ | _, _, Error e -> Error e
-                    | Ok (_, _, _, s1), Ok (tz4, d4, mx4, s4), Ok (tz7, d7, mx7, s7) ->
+                    // T = 8 too (Codex diff review of W1-A2, finding 3); with
+                    // dynamic teams off and no thread limit the team must be
+                    // EXACTLY min(T, rn), every member doing rows when rn >= T.
+                    match runAt "1", runAt "4", runAt "7", runAt "8" with
+                    | Error e, _, _, _ | _, Error e, _, _ | _, _, Error e, _ | _, _, _, Error e -> Error e
+                    | Ok (_, _, _, s1), Ok (tz4, d4, mx4, s4), Ok (tz7, d7, mx7, s7), Ok (tz8, d8, mx8, s8) ->
                         if s1 = "" then Error "no `s = ` line in the output"
-                        elif s4 <> s1 || s7 <> s1 then Error ($"checksum depends on the team: T=1 [{s1}] T=4 [{s4}] T=7 [{s7}]")
+                        elif s4 <> s1 || s7 <> s1 || s8 <> s1 then Error ($"checksum depends on the team: T=1 [{s1}] T=4 [{s4}] T=7 [{s7}] T=8 [{s8}]")
                         elif expectS <> "" && s1 <> expectS then Error ($"expected `{expectS}`, got `{s1}`")
                         elif maxTeam = 0 then Ok ($"rn = 0: no team, the seed is the value ({s1})")
                         else
-                            match tz4, d4, mx4, tz7, d7, mx7 with
-                            | Some tz4, Some d4, Some mx4, Some tz7, Some d7, Some mx7 ->
-                                if mx4 <= 1 || mx7 <= 1 then Ok ($"single-core: maxth={mx4}/{mx7}, cannot test parallelism")
-                                elif tz4 <= 1 || tz7 <= 1 || d4 <= 1 || d7 <= 1 then
-                                    Error ($"row-slot team not observed: T=4 teamsz={tz4} distinct={d4}; T=7 teamsz={tz7} distinct={d7}")
-                                elif tz4 > min 4 maxTeam || tz7 > min 7 maxTeam then
-                                    Error ($"team exceeds the clamp min(T, rn = {maxTeam}): T=4 teamsz={tz4}, T=7 teamsz={tz7}")
-                                else Ok ($"T=4 teamsz={tz4} distinct={d4}; T=7 teamsz={tz7} distinct={d7}; {s1} at every T")
+                            match tz4, d4, mx4, tz7, d7, mx7, tz8, d8, mx8 with
+                            | Some tz4, Some d4, Some mx4, Some tz7, Some d7, Some mx7, Some tz8, Some d8, Some mx8 ->
+                                let want (t: int) = min t maxTeam
+                                if mx4 <= 1 || mx7 <= 1 || mx8 <= 1 then Ok ($"single-core: maxth={mx4}/{mx7}/{mx8}, cannot test parallelism")
+                                elif tz4 <= 1 || tz7 <= 1 || tz8 <= 1 || d4 <= 1 || d7 <= 1 || d8 <= 1 then
+                                    Error ($"row-slot team not observed: T=4 teamsz={tz4} distinct={d4}; T=7 teamsz={tz7} distinct={d7}; T=8 teamsz={tz8} distinct={d8}")
+                                elif tz4 <> want 4 || tz7 <> want 7 || tz8 <> want 8 then
+                                    Error ($"team is not exactly min(T, rn = {maxTeam}): T=4 teamsz={tz4}, T=7 teamsz={tz7}, T=8 teamsz={tz8}")
+                                elif d4 <> want 4 || d7 <> want 7 || d8 <> want 8 then
+                                    Error ($"not every team member did rows: T=4 distinct={d4}, T=7 distinct={d7}, T=8 distinct={d8}")
+                                else Ok ($"T=4 teamsz={tz4} distinct={d4}; T=7 teamsz={tz7} distinct={d7}; T=8 teamsz={tz8} distinct={d8}; {s1} at every T")
                             | _ -> Error "unparseable or missing [omp-coverage] line"
             match outcome with
             | Ok detail ->
@@ -2159,7 +2507,10 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
 /// A single compiled program: source -> exe path, ready to run. `testMode` is
 /// forced OFF (the coverage instrumentation suppresses Phase 1's ivdep, which
 /// is exactly what the collapse case below needs to exercise).
-let private compileProgram (outputDir: string) (name: string) (src: string) : Result<string, string> =
+/// `compileProgram`, optionally with codegen TEST MODE on for the generation
+/// (the [omp-coverage] team observation; G51's identity battery observes its
+/// actual teams through it). Test mode is always switched off again.
+let private compileProgramMode (testMode: bool) (outputDir: string) (name: string) (src: string) : Result<string, string> =
     try
         setOmpTestMode false
         match lower src with
@@ -2168,7 +2519,10 @@ let private compileProgram (outputDir: string) (name: string) (src: string) : Re
             match IRValidate.validateIR ir0 with
             | Error errs -> Error ($"""IR validation failed: {(String.concat "; " errs)}""")
             | Ok ir ->
-                let (cppCode, _w) = CodeGen.genSelfContainedProgramFromIR ir name
+                let (cppCode, _w) =
+                    setOmpTestMode testMode
+                    try CodeGen.genSelfContainedProgramFromIR ir name
+                    finally setOmpTestMode false
                 let srcAbs = Path.GetFullPath(Path.Combine(outputDir, sanitizeFileName name + ".cpp"))
                 File.WriteAllText(srcAbs, cppCode)
                 let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
@@ -2184,6 +2538,32 @@ let private compileProgram (outputDir: string) (name: string) (src: string) : Re
                 elif cproc.ExitCode <> 0 then Error ($"compile: {(cerr.Result.Trim())}")
                 else Ok exeAbs
     with ex -> Error ($"codegen raised: {ex.Message}")
+
+let private compileProgram (outputDir: string) (name: string) (src: string) : Result<string, string> =
+    compileProgramMode false outputDir name src
+
+/// Run a compiled program at a FIXED team: OMP_NUM_THREADS forced, dynamic
+/// teams off (OMP_DYNAMIC=false), no OMP_THREAD_LIMIT inherited -- so the
+/// runtime may not hand back a smaller team than requested (Codex diff review
+/// of W1-A2, finding 3). Returns stdout.
+let private runProgramFixedTeam (exeAbs: string) (threads: string) : Result<string, string> =
+    let rpsi = ProcessStartInfo(exeAbs)
+    rpsi.RedirectStandardOutput <- true
+    rpsi.RedirectStandardError <- true
+    rpsi.UseShellExecute <- false
+    rpsi.WorkingDirectory <- Path.GetDirectoryName(exeAbs)
+    rpsi.Environment.["OMP_NUM_THREADS"] <- threads
+    rpsi.Environment.["OMP_DYNAMIC"] <- "false"
+    rpsi.Environment.Remove("OMP_THREAD_LIMIT") |> ignore
+    use rproc = Process.Start(rpsi)
+    let rout = Blade.Runtime.readToEndOffPool rproc.StandardOutput
+    let rerr = Blade.Runtime.readToEndOffPool rproc.StandardError
+    if not (rproc.WaitForExit(60000)) then
+        (try rproc.Kill(true) with _ -> ())
+        Error "run timed out (60s)"
+    elif rproc.ExitCode <> 0 then
+        Error ($"exit {rproc.ExitCode}: {(rerr.Result.Trim())}")
+    else Ok rout.Result
 
 /// Run a compiled program with OMP_NUM_THREADS forced, returning stdout.
 let private runProgram (exeAbs: string) (threads: string) : Result<string, string> =
@@ -3296,6 +3676,283 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                      fail name ($"threaded row slots differ from the serial walk: serial [{s}] vs T=4 [{stripTiming t4}] / T=7 [{stripTiming t7}] / T=1 [{stripTiming t1}]")
                  else
                      pass name "threaded (T = 1, 4, 7) text identical to the serial walk under REPRO + CONTRACT=off: finite-value low-bit identity (s1, r1), signed zero (-0.0 / -inf), NaN-equivalence (s3 = nan)"
+
+        // ---- G51 IDENTITY: row-view folds in threaded complete rows -------
+        // The stencil input-checksum shape `reduce(u(i), op[, s])` under an
+        // outer `where omp` fold, BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off: the
+        // threaded build (row slots TAKEN: 15 slot assignments, one per fold)
+        // prints the SAME text as the BLADE_OMP_THREADS=1 build (the serial
+        // walk), and each row-view spelling the same text as its twin.
+        // Unseeded (head peel), seeded by a row-dependent expression, -0.0 rows
+        // with -0.0 seeds (1 / s = -inf), a NaN row, a NON-commutative kernel
+        // 3a + b, an unseeded -0.0 view (no nested twin: that spelling seeds its
+        // unseeded builtin fold with +0), and the admission edges (Codex diff
+        // review of W1-A2, finding 4): the MAP-request spelling (s7, twin s1),
+        // a row body with a LEADING LET holding the seed (s8, twin s2), an outer
+        // seed that is itself a nonzero pure FOLD (s9, twin n9). r* / q* =
+        // value mod 1024 re-expose the low bits.
+        // THE TEAMS ARE OBSERVED (finding 3): every run has dynamic teams off
+        // and no thread limit (runProgramFixedTeam), and a second threaded build
+        // generated under codegen test mode prints one [omp-coverage] line per
+        // region -- each of the 15 must report teamsz = distinct = T at
+        // T = 1 / 4 / 7 / 8 (521 rows: every member owns rows), with the same
+        // values as the serial walk.
+        (let name = "row_view_slots_identity_threads_vs_serial_walk"
+         let src =
+             "type Y = Idx<521>\ntype X = Idx<509>\n"
+             + "let u = method_for(range<Y, X>) <@> lambda(i, j) -> (Float64((i * 7 + j * 3) % 11) * 0.37 + 0.1 / Float64(j + 1)) * (1.0 + 9999.0 * Float64((j % 4) / 3)) - 1.5 |> compute\n"
+             + "let z = method_for(range<Y, X>) <@> lambda(i, j) -> -0.0 * Float64(i + j + 1) |> compute\n"
+             + "let w = method_for(range<Y, X>) <@> lambda(i, j) -> sqrt(Float64((i * 5 + j) % 7) - 0.5) |> compute\n"
+             + "let v = method_for(range<X>) <@> lambda(j) -> Float64((j * 3) % 7) * 0.37 + 0.01 / Float64(j + 1) |> compute\n"
+             + "let s1 = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(u(i), (+)), lambda(p, q) where omp -> p + q, 0.25)\n"
+             + "let n1 = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(method_for(range<X>) <@> lambda(j) -> u(i, j), (+)), lambda(p, q) where omp -> p + q, 0.25)\n"
+             + "let r1 = s1 - floor(s1 / 1024.0) * 1024.0\n"
+             + "let q1 = n1 - floor(n1 / 1024.0) * 1024.0\n"
+             + "let s2 = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(u(i), (+), 7.0 + Float64(i)), lambda(p, q) where omp -> p + q, 0.5)\n"
+             + "let n2 = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(method_for(range<X>) <@> lambda(j) -> u(i, j), (+), 7.0 + Float64(i)), lambda(p, q) where omp -> p + q, 0.5)\n"
+             + "let r2 = s2 - floor(s2 / 1024.0) * 1024.0\n"
+             + "let q2 = n2 - floor(n2 / 1024.0) * 1024.0\n"
+             + "let s3 = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(z(i), lambda(a, b) -> a + b, -0.0), lambda(p, q) where omp -> p + q, -0.0)\n"
+             + "let n3 = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(method_for(range<X>) <@> lambda(j) -> z(i, j), lambda(a, b) -> a + b, -0.0), lambda(p, q) where omp -> p + q, -0.0)\n"
+             + "let z3 = 1.0 / s3\n"
+             + "let s4 = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(w(i), (+)), lambda(p, q) where omp -> p + q, 0.0)\n"
+             + "let n4 = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(method_for(range<X>) <@> lambda(j) -> w(i, j), (+)), lambda(p, q) where omp -> p + q, 0.0)\n"
+             + "let s5 = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(u(i), lambda(a, b) -> 3.0 * a + b, 1.0), lambda(p, q) where omp -> p + q, 0.0)\n"
+             + "let n5 = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(method_for(range<X>) <@> lambda(j) -> u(i, j), lambda(a, b) -> 3.0 * a + b, 1.0), lambda(p, q) where omp -> p + q, 0.0)\n"
+             + "let s6 = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(z(i), (+)), lambda(p, q) where omp -> p + q, -0.0)\n"
+             + "let z6 = 1.0 / s6\n"
+             + "let s7 = reduce(method_for(range<Y>) <@> lambda(i) where omp(i: 1) -> reduce(u(i), (+)), (+), 0.25)\n"
+             + "let r7 = s7 - floor(s7 / 1024.0) * 1024.0\n"
+             + "let s8 = reduce(method_for(range<Y>) <@> lambda(i) -> {\n    let t = 7.0 + Float64(i)\n    reduce(u(i), (+), t)\n}, lambda(p, q) where omp -> p + q, 0.5)\n"
+             + "let r8 = s8 - floor(s8 / 1024.0) * 1024.0\n"
+             + "let s9 = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(u(i), (+)), lambda(p, q) where omp -> p + q, reduce(v, (+)))\n"
+             + "let n9 = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(method_for(range<X>) <@> lambda(j) -> u(i, j), (+)), lambda(p, q) where omp -> p + q, reduce(v, (+)))\n"
+             + "let r9 = s9 - floor(s9 / 1024.0) * 1024.0\n"
+             + "let q9 = n9 - floor(n9 / 1024.0) * 1024.0\n"
+         let printed = "s1,n1,r1,q1,s2,n2,r2,q2,s3,n3,z3,s4,n4,s5,n5,s6,z6,s7,r7,s8,r8,s9,n9,r9,q9"
+         let build (instrumented: bool) (threads: string) (tag: string) =
+             use _r = pinEnv "BLADE_FP_REPRO" "1"
+             use _c = pinEnv "BLADE_FP_CONTRACT" "off"
+             use _p = pinEnv "BLADE_PRINT" printed
+             use _k = pinEnv "BLADE_FOLD_ROW_SLOTS" null
+             use _g = pinEnv "BLADE_TILE_TUNE" null
+             use _l = pinEnv "BLADE_FOLD_LANES" null
+             use _t = pinEnv "BLADE_OMP_THREADS" threads
+             compileProgramMode instrumented outputDir (name + tag) src
+         match build false null "_threaded", build false "1" "_serial", build true null "_observed" with
+         | Error e, _, _ -> fail name ($"threaded build: {e}")
+         | _, Error e, _ -> fail name ($"serial build: {e}")
+         | _, _, Error e -> fail name ($"observed (test-mode) build: {e}")
+         | Ok thrExe, Ok serExe, Ok obsExe ->
+             let cppOfExe (exe: string) = File.ReadAllText(Path.ChangeExtension(exe, ".cpp"))
+             let slotsOf (exe: string) = (System.Text.RegularExpressions.Regex.Matches(cppOfExe exe, @"__rslot_\w+\[__i0\] = ")).Count
+             if slotsOf thrExe <> 15 || slotsOf obsExe <> 15 then
+                 fail name ($"the threaded builds emitted {slotsOf thrExe} / {slotsOf obsExe} row-slot assignment(s), expected 15 (s1..s9, n1..n5, n9) -- the comparison would not test the form")
+             elif (cppOfExe serExe).Contains "__rslot" then
+                 fail name "the BLADE_OMP_THREADS=1 build emitted row slots (it must be the serial walk)"
+             else
+             let teams = [ "1"; "4"; "7"; "8" ]
+             let runs (exe: string) = teams |> List.map (fun t -> (t, runProgramFixedTeam exe t))
+             match runProgramFixedTeam serExe "1" with
+             | Error e -> fail name ($"serial run: {e}")
+             | Ok ser ->
+             let thr = runs thrExe
+             let obs = runs obsExe
+             match (thr @ obs) |> List.tryPick (fun (t, r) -> match r with Error e -> Some ($"T={t}: {e}") | Ok _ -> None) with
+             | Some e -> fail name ($"threaded run: {e}")
+             | None ->
+                 let outOf (r: Result<string, string>) = match r with Ok o -> o | Error _ -> ""
+                 let valuesOnly (o: string) =
+                     (stripTiming o).Replace("\r\n", "\n").Split('\n')
+                     |> Array.filter (fun l -> not (l.StartsWith "[omp-coverage]"))
+                     |> String.concat "\n"
+                 let s = valuesOnly ser
+                 let valueOf (n: string) =
+                     let m = System.Text.RegularExpressions.Regex.Match(s, $@"(?m)^{n} = (.*?)\r?$")
+                     if m.Success then Some m.Groups.[1].Value else None
+                 let twins = [ ("s1", "n1"); ("r1", "q1"); ("s2", "n2"); ("r2", "q2"); ("s3", "n3"); ("s4", "n4"); ("s5", "n5")
+                               ("s7", "s1"); ("r7", "r1"); ("s8", "s2"); ("r8", "r2"); ("s9", "n9"); ("r9", "q9") ]
+                 let twinBad =
+                     twins |> List.choose (fun (a, b) ->
+                         match valueOf a, valueOf b with
+                         | Some x, Some y when x = y -> None
+                         | x, y -> Some ($"{a} = {x} vs {b} = {y}"))
+                 let expected = [ "s3 = -0.0"; "n3 = -0.0"; "z3 = -inf"; "s6 = -0.0"; "z6 = -inf" ]
+                 let missing = expected |> List.filter (fun e -> not (s.Contains e))
+                 let nanOk = System.Text.RegularExpressions.Regex.IsMatch(s, @"(?m)^s4 = -?nan\r?$")
+                 // the fold-valued seed must actually matter (s9 is not s1)
+                 let seedMatters = valueOf "s9" <> valueOf "s1"
+                 let differ =
+                     (thr @ obs) |> List.choose (fun (t, r) -> if valuesOnly (outOf r) <> s then Some t else None)
+                 // the observed teams: 15 regions, each teamsz = distinct = T
+                 let teamBad =
+                     obs |> List.choose (fun (t, r) ->
+                         let want = int t
+                         let ms = System.Text.RegularExpressions.Regex.Matches(outOf r, @"\[omp-coverage\] region=(\S+) teamsz=(\d+) distinct=(\d+) maxth=(\d+)")
+                         let lines = [ for m in ms -> (m.Groups.[1].Value, int m.Groups.[2].Value, int m.Groups.[3].Value, int m.Groups.[4].Value) ]
+                         if lines.Length <> 15 then Some ($"T={t}: {lines.Length} [omp-coverage] region line(s), expected 15")
+                         else
+                             match lines |> List.tryFind (fun (_, tz, d, _) -> tz <> want || d <> want) with
+                             | Some (reg, tz, d, mx) -> Some ($"T={t}: region {reg} teamsz={tz} distinct={d} maxth={mx} (wanted {want} / {want})")
+                             | None -> None)
+                 if not missing.IsEmpty then
+                     fail name ($"""serial walk output lacks {(String.concat " | " missing)}: {s}""")
+                 elif not nanOk then
+                     fail name ($"the NaN row's checksum must print nan: {s}")
+                 elif not twinBad.IsEmpty then
+                     fail name ($"""a row-view spelling differs from its twin: {(String.concat " | " twinBad)}""")
+                 elif not seedMatters then
+                     fail name "s9 (outer seed = a nonzero fold) printed the same as s1 (seed 0.25): the seed case would be vacuous"
+                 elif not differ.IsEmpty then
+                     fail name ($"""threaded row-view slots differ from the serial walk at T = {(String.concat ", " differ)} (production or observed build)""")
+                 elif not teamBad.IsEmpty then
+                     fail name ($"""observed teams are not the requested sizes: {(String.concat " | " teamBad)}""")
+                 else
+                     pass name "threaded (T = 1, 4, 7, 8; dynamic teams off, no thread limit; every one of the 15 regions observed at teamsz = distinct = T) text identical to the serial walk under REPRO + CONTRACT=off, every row-view spelling identical to its twin: low bits, signed zero (-0.0 / -inf), NaN, 3a + b, the map-request spelling, a leading-let seed, a fold-valued outer seed")
+
+        // ---- G51, the LICENSED arm: values vs the previous form ----------
+        // Default build (the Path B team with one blade_fold::sum per row, no
+        // omp simd on the row loop) at T = 1 and 8 (dynamic teams off, no thread
+        // limit), against the previous chunk form (BLADE_FOLD_LANES=0) and the
+        // repro serial walk. Quarter-integer data are exact in every
+        // association, so a1 / a2 pin the SEEDS (unseeded head peel; seed 7 + i
+        // combined once per row -- the literal helper rewrite that dropped it
+        // would print a2 = 66298.5); the admission edges (Codex diff review of
+        // W1-A2, finding 4) print the same exact values in every build: a5, a
+        // LEADING-LET row body holding the seed (the helper declines it: the
+        // previous chunk form), a6, an outer seed that is itself a nonzero pure
+        // FOLD (the helper keeps it; the seed is evaluated once, before the
+        // team), k1, INTEGER elements (no integer helper: the previous form).
+        // The -0.0 rows pin signed zero as TEXT, the licensed contract's way:
+        // the tree's chains start at +0, so an all-(-0) total prints 0.0 / inf
+        // in the default build -- as its previous form (omp simd private copies
+        // from +0) and the LLVM lane print it -- for the row-view spellings a3 /
+        // a4 and the nested-range twin n3 alike, while the repro walk keeps
+        // -0.0 / -inf (BLADE_FOLD_LANES=0's serial chunks keep it too, gap G40,
+        // so only its exact seeds and c1 are compared); c1, cancellation-heavy,
+        // stays within the licensed 1e-9 of both references.
+        (let name = "row_view_licensed_helper_values"
+         let src =
+             "type Y = Idx<521>\ntype X = Idx<509>\n"
+             + "let u = method_for(range<Y, X>) <@> lambda(i, j) -> Float64((i * 7 + j * 3) % 11) * 0.25 - 1.0 |> compute\n"
+             + "let ui = method_for(range<Y, X>) <@> lambda(i, j) -> (Int64(i) * 7 + Int64(j) * 3) % 11 - 4 |> compute\n"
+             + "let c = method_for(range<Y, X>) <@> lambda(i, j) -> (Float64((i * 7 + j * 3) % 11) * 0.37 + 0.1 / Float64(j + 1)) * (1.0 + 9999.0 * Float64((j % 4) / 3)) - 1.5 |> compute\n"
+             + "let z = method_for(range<Y, X>) <@> lambda(i, j) -> -0.0 * Float64(i + j + 1) |> compute\n"
+             + "let v = method_for(range<X>) <@> lambda(j) -> Float64(j % 5) * 0.25 |> compute\n"
+             + "let a1 = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(u(i), (+)), lambda(p, q) where omp -> p + q, 0.25)\n"
+             + "let a2 = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(u(i), (+), 7.0 + Float64(i)), lambda(p, q) where omp -> p + q, 0.5)\n"
+             + "let a3 = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(z(i), (+), -0.0), lambda(p, q) where omp -> p + q, -0.0)\n"
+             + "let i3 = 1.0 / a3\n"
+             + "let n3 = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(method_for(range<X>) <@> lambda(j) -> z(i, j), lambda(a, b) -> a + b, -0.0), lambda(p, q) where omp -> p + q, -0.0)\n"
+             + "let j3 = 1.0 / n3\n"
+             + "let a4 = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(z(i), (+)), lambda(p, q) where omp -> p + q, -0.0)\n"
+             + "let i4 = 1.0 / a4\n"
+             + "let a5 = reduce(method_for(range<Y>) <@> lambda(i) -> {\n    let t = 7.0 + Float64(i)\n    reduce(u(i), (+), t)\n}, lambda(p, q) where omp -> p + q, 0.5)\n"
+             + "let a6 = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(u(i), (+)), lambda(p, q) where omp -> p + q, reduce(v, (+)))\n"
+             + "let k1 = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(ui(i), (+)), lambda(p, q) where omp -> p + q, 0)\n"
+             + "let c1 = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(c(i), (+)), lambda(p, q) where omp -> p + q, 0.25)\n"
+         let build (repro: string) (lanes: string) (threads: string) (tag: string) =
+             use _r = pinEnv "BLADE_FP_REPRO" repro
+             use _c = pinEnv "BLADE_FP_CONTRACT" null
+             use _p = pinEnv "BLADE_PRINT" "a1,a2,a3,i3,n3,j3,a4,i4,a5,a6,k1,c1"
+             use _l = pinEnv "BLADE_FOLD_LANES" lanes
+             use _t = pinEnv "BLADE_OMP_THREADS" threads
+             compileProgram outputDir (name + tag) src
+         match build null null null "_helper", build null "0" null "_previous", build "1" null "1" "_repro_serial" with
+         | Error e, _, _ -> fail name ($"helper build: {e}")
+         | _, Error e, _ -> fail name ($"previous-form build: {e}")
+         | _, _, Error e -> fail name ($"repro serial build: {e}")
+         | Ok newExe, Ok oldExe, Ok serExe ->
+             let cppOfExe (exe: string) = File.ReadAllText(Path.ChangeExtension(exe, ".cpp"))
+             let count (rx: string) (exe: string) = (System.Text.RegularExpressions.Regex.Matches(cppOfExe exe, rx)).Count
+             let helpers = count @"blade_fold::sum<double, 8>\(" newExe
+             // the folds the helper declines keep the previous chunk form: a5
+             // (leading let), n3 (nested range), k1 (integer elements)
+             let simd = count @"BLADE_OMP_SIMD_REDUCTION\(\+:__racc_" newExe
+             if helpers <> 6 then
+                 fail name ($"the default build emitted {helpers} blade_fold::sum call(s), expected 6 (a1..a4, a6, c1)")
+             elif simd <> 3 then
+                 fail name ($"the default build has {simd} Path B chunk(s) with an omp simd reduction, expected 3 (the declined a5, n3, k1 keep the previous chunk form; no helper row loop carries one)")
+             elif (cppOfExe oldExe).Contains "blade_fold::sum<" then
+                 fail name "the BLADE_FOLD_LANES=0 build took the helper arm (the knob must keep the previous form)"
+             else
+             match runProgramFixedTeam newExe "1", runProgramFixedTeam newExe "8", runProgramFixedTeam oldExe "8", runProgramFixedTeam serExe "1" with
+             | Error e, _, _, _ | _, Error e, _, _ -> fail name ($"helper run: {e}")
+             | _, _, Error e, _ -> fail name ($"previous-form run: {e}")
+             | _, _, _, Error e -> fail name ($"repro serial run: {e}")
+             | Ok n1, Ok n8, Ok o8, Ok sr ->
+                 let exactAll = [ "a1 = 66298.25"; "a2 = 205405.5"; "a5 = 205405.5"; "a6 = 66552.0"; "k1 = 265192" ]
+                 let licensed = exactAll @ [ "a3 = 0.0"; "i3 = inf"; "n3 = 0.0"; "j3 = inf"; "a4 = 0.0"; "i4 = inf" ]
+                 let strict = exactAll @ [ "a3 = -0.0"; "i3 = -inf"; "n3 = -0.0"; "j3 = -inf"; "a4 = -0.0"; "i4 = -inf" ]
+                 let lacksOf (want: string list) (out: string) =
+                     let lines = (stripTiming out).Split('\n') |> Array.map (fun l -> l.Trim())
+                     want |> List.filter (fun e -> not (Array.contains e lines))
+                 let lacks = lacksOf licensed
+                 let c1Of (out: string) = Map.tryFind "c1" (scalarBindings (stripTiming out))
+                 let within (a: float) (b: float) = abs (a - b) <= 1e-9 * max 1.0 (abs b)
+                 match lacks n1, lacks n8, lacksOf exactAll o8, lacksOf strict sr with
+                 | (_ :: _ as m), _, _, _ -> fail name ($"""helper build at T=1 lacks {(String.concat " | " m)}""")
+                 | _, (_ :: _ as m), _, _ -> fail name ($"""helper build at T=8 lacks {(String.concat " | " m)}""")
+                 | _, _, (_ :: _ as m), _ -> fail name ($"""the previous form at T=8 lacks {(String.concat " | " m)} (the exact values must agree with it)""")
+                 | _, _, _, (_ :: _ as m) -> fail name ($"""repro serial walk lacks {(String.concat " | " m)}""")
+                 | [], [], [], [] ->
+                     match c1Of n1, c1Of n8, c1Of o8, c1Of sr with
+                     | Some x1, Some x8, Some old8, Some ser ->
+                         if within x1 ser && within x8 ser && within x8 old8 then
+                             pass name (sprintf "seeds exact (a1 unseeded, a2 seed once per row, a5 leading-let seed, a6 fold-valued outer seed, k1 integer) at T = 1 and 8 and in the previous form; all-(-0) totals a3 / n3 / a4 print 0.0 / inf under the licence, -0.0 / -inf in the repro walk; c1 within 1e-9 of the previous form (%.17g vs %.17g) and the repro walk (%.17g)" x8 old8 ser)
+                         else fail name (sprintf "c1 outside the licensed 1e-9: helper T=1 %.17g / T=8 %.17g, previous %.17g, repro serial %.17g" x1 x8 old8 ser)
+                     | _ -> fail name "no c1 binding in some output (comparison would be vacuous)")
+
+        // ---- G51: corpus loops/533 itself, both build modes, as TEXT ---------
+        // Value pins compare a zero's NUMBER, not its sign (Expect.fs), so the
+        // corpus file's three licensed spellings are pinned here as printed
+        // text (Codex diff review of W1-A2, finding 2): the default build (the
+        // helper arm: 0.0, the licensed +0 chain starts), BLADE_FP_REPRO=1 +
+        // CONTRACT=off (the repro row slots: -0.0, the serial walk), and the G40
+        // probe BLADE_FOLD_LANES=0 (the previous serial chunks: -0.0); the
+        // `where repro` strict spellings print -0.0 / true in all three. T = 1
+        // and 8, dynamic teams off.
+        (let name = "row_view_signed_zero_corpus_533_both_modes"
+         let path = Path.Combine(Directory.GetCurrentDirectory(), "tests", "corpus", "loops", "533_row_view_fold_signed_zeros.blade")
+         if not (File.Exists path) then fail name ($"corpus file not found: {path} (run from the repository root)")
+         else
+         let src = File.ReadAllText path
+         let build (repro: string) (contract: string) (lanes: string) (tag: string) =
+             use _r = pinEnv "BLADE_FP_REPRO" repro
+             use _c = pinEnv "BLADE_FP_CONTRACT" contract
+             use _p = pinEnv "BLADE_PRINT" null
+             use _l = pinEnv "BLADE_FOLD_LANES" lanes
+             use _t = pinEnv "BLADE_OMP_THREADS" null
+             use _k = pinEnv "BLADE_FOLD_ROW_SLOTS" null
+             compileProgram outputDir (name + tag) src
+         let strictLines = [ "strict = -0.0"; "strict_negative = true"; "strict_peeled = -0.0"; "strict_peeled_negative = true" ]
+         let modes =
+             [ ("default", (null, null, null), [ "neg = 0.0"; "neg_peeled = 0.0"; "mixed = 0.0" ] @ strictLines, "blade_fold::sum<double, 8>(", 3)
+               ("repro", ("1", "off", null), [ "neg = -0.0"; "neg_peeled = -0.0"; "mixed = 0.0" ] @ strictLines, "__rslot_", 3)
+               ("fold_lanes_off", (null, null, "0"), [ "neg = -0.0"; "neg_peeled = -0.0"; "mixed = 0.0" ] @ strictLines, "", 0) ]
+         let bad =
+             modes |> List.collect (fun (tag, (r, c, l), want, needle, needleCount) ->
+                 match build r c l ("_" + tag) with
+                 | Error e -> [ $"{tag} build: {e}" ]
+                 | Ok exe ->
+                     let cpp = File.ReadAllText(Path.ChangeExtension(exe, ".cpp"))
+                     let formBad =
+                         if needle = "" then (if cpp.Contains "blade_fold::sum<" then [ $"{tag}: took the helper arm" ] else [])
+                         else
+                             let n = (System.Text.RegularExpressions.Regex.Matches(cpp, System.Text.RegularExpressions.Regex.Escape needle)).Count
+                             let n = if needle = "__rslot_" then (System.Text.RegularExpressions.Regex.Matches(cpp, @"__rslot_\w+\[__i0\] = ")).Count else n
+                             if n <> needleCount then [ $"{tag}: {n} x `{needle}`, expected {needleCount} (the form was not taken)" ] else []
+                     let runBad =
+                         [ "1"; "8" ] |> List.collect (fun t ->
+                             match runProgramFixedTeam exe t with
+                             | Error e -> [ $"{tag} T={t}: {e}" ]
+                             | Ok out ->
+                                 let lines = (stripTiming out).Split('\n') |> Array.map (fun x -> x.Trim())
+                                 want |> List.filter (fun w -> not (Array.contains w lines)) |> List.map (fun w -> $"{tag} T={t} lacks `{w}`"))
+                     formBad @ runBad)
+         if bad.IsEmpty then
+             pass name "loops/533 as text: default 0.0 x3 (helper arm), repro -0.0 / -0.0 / 0.0 (row slots), BLADE_FOLD_LANES=0 -0.0 / -0.0 / 0.0 (G40 probe); the strict `where repro` spellings -0.0 / true in all three modes, T = 1 and 8"
+         else fail name (String.concat " | " bad))
 
         // ---- the outer-kernel-write counterexample, RUN (blocker 1) -------
         // Declined, so the knob is inert: knob on and knob off print the same

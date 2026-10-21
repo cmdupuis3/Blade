@@ -1,0 +1,20 @@
+// TEST: Row View Fold Unseeded Threaded Rows
+// Gap G51 (round 3, A2): the stencil input checksum verbatim in shape --
+// `reduce(u(i), (+))`, UNSEEDED, under an outer `where omp` fold. The unseeded
+// fold keeps its head peel (row[0], then the rest ascending) in every form:
+// the repro row slots render the row's fold exactly as the serial walk does,
+// and the licensed Path B arm folds row[0] + sum(row[1..n)) (n = 509 here, a
+// statically non-empty row: no BL8003 can fire). The nested-range twin and the
+// map-request spelling agree. Quarter-integer data: every association exact.
+type Y = Idx<521>
+type X = Idx<509>
+let (view, nested, view_map) = {
+    let u = method_for(range<Y, X>) <@> lambda(i, j) -> Float64((i * 5 + j * 7) % 13) * 0.25 - 1.5 |> compute
+    let a = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(u(i), (+)), lambda(p, q) where omp -> p + q, 0.0)
+    let b = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(method_for(range<X>) <@> lambda(j) -> u(i, j), (+)), lambda(p, q) where omp -> p + q, 0.0)
+    let c = reduce(method_for(range<Y>) <@> lambda(i) where omp(i: 1) -> reduce(u(i), (+)), (+), 0.0)
+    (a, b, c)
+}
+// EXPECT: view = -1.25
+// EXPECT: nested = -1.25
+// EXPECT: view_map = -1.25

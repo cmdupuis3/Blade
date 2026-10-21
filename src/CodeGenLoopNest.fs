@@ -1613,12 +1613,19 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     let foldAccName = if foldChunk.IsSome then fcAcc else codeGen.OutputName
     // Unique region tag derived from the (unique) output name.
     let regionTag = codeGen.OutputName
+    // The test-mode observation's locals carry the region tag: two
+    // instrumented nests can share one C++ scope (several top-level folds in
+    // `main`), and unsuffixed names were redeclarations (g++ error) there.
+    let covSfx = "_" + (regionTag |> String.map (fun c -> if System.Char.IsLetterOrDigit c || c = '_' then c else '_'))
+    let covMaxth = "__omp_maxth" + covSfx
+    let covSeen = "__omp_seen" + covSfx
+    let covTeam = "__omp_team" + covSfx
     if ompInstrument && outerIsParallel then
         lines <- lines @ [
             ind depth + "// [omp-coverage] thread observation (test mode)"
-            ind depth + "int __omp_maxth = blade_omp_get_max_threads();"
-            ind depth + "bool* __omp_seen = new bool[__omp_maxth]();"
-            ind depth + "int* __omp_team = new int[__omp_maxth]();"
+            ind depth + $"int {covMaxth} = blade_omp_get_max_threads();"
+            ind depth + $"bool* {covSeen} = new bool[{covMaxth}]();"
+            ind depth + $"int* {covTeam} = new int[{covMaxth}]();"
         ]
 
     let mutable atOuterLevel = true
@@ -2050,7 +2057,7 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
         // values), so running it per innermost-iteration is harmless.
         if ompInstrument && outerIsParallel && bidx = lastBindingIdx then
             lines <- lines @ [
-                ind depth + "{ int __tn = blade_omp_get_thread_num(); __omp_seen[__tn] = true; __omp_team[__tn] = blade_omp_get_num_threads(); }"
+                ind depth + $"{{ int __tn = blade_omp_get_thread_num(); {covSeen}[__tn] = true; {covTeam}[__tn] = blade_omp_get_num_threads(); }}"
             ]
         bidx <- bidx + 1
         
@@ -2405,12 +2412,12 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     if ompInstrument && outerIsParallel then
         lines <- lines @ [
             ind depth + "{ int __omp_distinct = 0; int __omp_teamsz = 0;"
-            ind depth + "  for (int __t = 0; __t < __omp_maxth; __t++) {"
-            ind depth + "    if (__omp_seen[__t]) __omp_distinct++;"
-            ind depth + "    if (__omp_team[__t] > __omp_teamsz) __omp_teamsz = __omp_team[__t];"
+            ind depth + $"  for (int __t = 0; __t < {covMaxth}; __t++) {{"
+            ind depth + $"    if ({covSeen}[__t]) __omp_distinct++;"
+            ind depth + $"    if ({covTeam}[__t] > __omp_teamsz) __omp_teamsz = {covTeam}[__t];"
             ind depth + "  }"
-            ind depth + $"  std::cout << \"[omp-coverage] region={regionTag} teamsz=\" << __omp_teamsz << \" distinct=\" << __omp_distinct << \" maxth=\" << __omp_maxth << std::endl;"
-            ind depth + "  delete[] __omp_seen; delete[] __omp_team; }"
+            ind depth + $"  std::cout << \"[omp-coverage] region={regionTag} teamsz=\" << __omp_teamsz << \" distinct=\" << __omp_distinct << \" maxth=\" << {covMaxth} << std::endl;"
+            ind depth + $"  delete[] {covSeen}; delete[] {covTeam}; }}"
         ]
 
     lines

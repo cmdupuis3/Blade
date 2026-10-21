@@ -227,6 +227,55 @@ let rec walk (resolve: IRExpr -> IRCallable option) (deferredOf: IRId -> IRExpr 
                      | Ok _, Ok s -> Ok (addSat (mulSat cells (max 1L inner)) s)
              | _ -> Error "an inner fold's map or fold kernel is not a resolved callable"
          | _ -> Error "an inner fold is not over an unforced method_for(range<I>) application")
+    // G51: a fold over a ROW VIEW `u(i)` of a STORED dense rank-2 array --
+    // the bench stencil's input checksum, `reduce(u(i), op[, s])` -- and
+    // nothing wider: the base is a non-deferred, non-virtual array whose two
+    // axes are plain dense dimensions (rows contiguous); the ONE subscript is a
+    // level coordinate of exactly the base's FIRST index type (index identity,
+    // so the row read is proven in range); the folded axis is the base's second,
+    // of static extent; the kernel is a resolved two-parameter callable whose
+    // body passes this whitelist; a seed, when present, passes it too. An
+    // UNSEEDED fold over an empty row panics BL8003, so it is admitted only
+    // over a statically NON-EMPTY row (a statically empty one is BL3007 at the
+    // front end anyway). Work: the row's cells x the kernel's own steps, plus
+    // the seed's.
+    | IRReduce (view, kernel, seed) ->
+        let plainDense (ix: IRIndexType) = ix.Rank = 1 && ix.Symmetry = SymNone && ix.IxKind = IxKPlain
+        let rowCells =
+            match view with
+            | IRIndex (IRVar (g, _), _, _) when isDeferred g ->
+                Error "the body reads a deferred computation (its evaluation is not audited)"
+            | IRIndex (IRVar (_, gty), [ x ], _) ->
+                (match gty with
+                 | ArrayElem at when not at.IsVirtual ->
+                     (match at.IndexTypes with
+                      | [ rowIx; colIx ] when plainDense rowIx && plainDense colIx ->
+                          (match levelOf x with
+                           | Some lix when sameIndex rowIx lix ->
+                               (match evalInt colIx.Extent with
+                                | Some n when n >= 0L -> Ok n
+                                | _ -> Error "an inner fold's row view has no static extent")
+                           | _ -> Error "body may panic (a row-view subscript not proven in range: BL8006)")
+                      | _ -> Error "an inner fold is over a view of an array that is not dense rank 2 (only a row view of a stored dense rank-2 array is admitted)")
+                 | _ -> Error "an inner fold's row view is not of a stored (non-virtual) array")
+            | _ -> Error "an inner fold is not over a row view u(i) of a stored dense rank-2 array (nor an unforced method_for(range<I>) application)"
+        (match rowCells with
+         | Error why -> Error why
+         | Ok n ->
+             match resolve kernel with
+             | Some foldCl when foldCl.Params.Length = 2 ->
+                 if visiting.Contains foldCl.Id then
+                     Error "the body recurses (a recursive callee is outside the row-slot whitelist)"
+                 elif seed.IsNone && n < 1L then
+                     Error "body may panic (BL8003: an unseeded fold over an empty row)"
+                 else
+                 let foldBound = foldCl.Params |> List.fold (fun (s: Set<IRId>) p -> s.Add p.VarId) bound
+                 let foldNames = foldCl.Params |> List.fold (fun (s: Set<string>) p -> s.Add p.Name) boundNames
+                 let seedSteps = match seed with Some s -> go s | None -> Ok 0L
+                 match walk resolve deferredOf isDeferred levels levelNames foldBound foldNames (visiting.Add foldCl.Id) foldCl.Body, seedSteps with
+                 | Error why, _ | _, Error why -> Error why
+                 | Ok k, Ok s -> Ok (addSat (mulSat n (max 1L k)) s)
+             | _ -> Error "an inner fold's kernel is not a resolved two-parameter callable")
     | IRApp (f, args, _) ->
         (match resolve f with
          | Some cl when visiting.Contains cl.Id -> Error "the body recurses (a recursive callee is outside the row-slot whitelist)"

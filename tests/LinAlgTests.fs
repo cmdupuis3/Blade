@@ -1714,6 +1714,46 @@ let runFoldLanesTests () : BlockResult =
         let pass (n: string) (detail: string) =
             passed <- passed + 1
             resultLine Pass n detail
+        // ---- G51 (round 3, A2): the licensed ROW-VIEW arm's emission. A
+        // `where omp` fold whose rows are `reduce(u(i), (+)[, s])` over a stored
+        // dense rank-2 array folds each row with ONE blade_fold::sum call over
+        // the row's contiguous cells inside the Path B team (no omp simd on the
+        // row loop), the seed combined once; BLADE_FOLD_LANES=4 sets K, =0 keeps
+        // the previous form, and the repro build never takes it. Pure codegen.
+        (let rowSrc (inner: string) =
+            "type Y = Idx<521>\ntype X = Idx<509>\n"
+            + "let u = method_for(range<Y, X>) <@> lambda(i, j) -> Float64((i * 7 + j * 3) % 11) * 0.25 - 1.0 |> compute\n"
+            + $"let s = reduce(method_for(range<Y>) <@> lambda(i) -> {inner}, lambda(p, q) where omp -> p + q, 0.5)\n"
+         let rowCases : (string * (string * string) list * string * string list * string list) list =
+             [ ("row_view_sum_helper_unseeded", [], rowSrc "reduce(u(i), (+))",
+                [ "const double __rv = __rrow[0] + blade_fold::sum<double, 8>((__rrow + 1), (size_t)508);"
+                  "#include \"blade_fold_lanes.hpp\"" ],
+                [ "BLADE_OMP_SIMD_REDUCTION" ])
+               ("row_view_sum_helper_seed_once", [], rowSrc "reduce(u(i), (+), 7.0)",
+                [ "const double __rv = (7.0) + blade_fold::sum<double, 8>(__rrow, (size_t)509);" ],
+                [ "BLADE_OMP_SIMD_REDUCTION" ])
+               ("row_view_sum_helper_k4", [ ("BLADE_FOLD_LANES", "4") ], rowSrc "reduce(u(i), (+))",
+                [ "blade_fold::sum<double, 4>((__rrow + 1), (size_t)508)" ], [ "blade_fold::sum<double, 8>" ])
+               ("row_view_sum_helper_knob_off", [ ("BLADE_FOLD_LANES", "0") ], rowSrc "reduce(u(i), (+))",
+                [], [ "blade_fold::sum<" ])
+               ("row_view_sum_helper_not_in_repro", [ ("BLADE_FP_REPRO", "1") ], rowSrc "reduce(u(i), (+))",
+                [ "__rslot_s[__i0] = " ], [ "blade_fold::sum<" ]) ]
+         for (name, env, src, must, mustNot) in rowCases do
+             let pins =
+                 ([ "BLADE_FP_REPRO"; "BLADE_FOLD_LANES"; "BLADE_OMP_THREADS"; "BLADE_FOLD_ROW_SLOTS"; "BLADE_TILE_TUNE" ]
+                  |> List.filter (fun k -> not (env |> List.exists (fun (p, _) -> p = k)))
+                  |> List.map (fun k -> pinEnv k null))
+                 @ (env |> List.map (fun (k, v) -> pinEnv k v))
+             let r = cppOf false name src
+             pins |> List.rev |> List.iter (fun d -> d.Dispose())
+             match r with
+             | Error e -> fail name e
+             | Ok cpp ->
+                 let missing = must |> List.filter (fun s -> not (cpp.Contains s))
+                 let present = mustNot |> List.filter (fun s -> cpp.Contains s)
+                 if not missing.IsEmpty then fail name ($"""generated C++ lacks: {(String.concat " | " missing)}""")
+                 elif not present.IsEmpty then fail name ($"""generated C++ unexpectedly contains: {(String.concat " | " present)}""")
+                 else pass name "emission as expected")
         let baseFlags = "-std=c++17 -O3 -march=native -fno-math-errno -fwrapv -fopenmp"
         for (mode, extra) in [ ("off", ""); ("fast", "") ] do
             let exe = Path.Combine(work, $"fold_lanes_{mode}{exeExt}")

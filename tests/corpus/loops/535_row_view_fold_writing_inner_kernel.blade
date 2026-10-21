@@ -1,0 +1,22 @@
+// TEST: Row View Fold Writing Inner Kernel
+// Gap G51 (round 3, A2), the consumer party of the five-party audit: the
+// INNER row-view fold's kernel writes a captured counter on every
+// application. Its applications are ordered side effects, so the row's value
+// is not a pure function of the row: no threaded form (repro row slots or
+// licensed Path B) takes the fold, the outer `where omp` request is dropped
+// with its census line, and the serial walk counts every application once.
+//   applications: 521 rows x 508 (unseeded: head peel) = 264668
+type Y = Idx<521>
+type X = Idx<509>
+type K = Idx<2>
+let mut G: Array<Float64 like K> = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute
+let (total, count) = {
+    let u = method_for(range<Y, X>) <@> lambda(i, j) -> Float64((i * 7 + j * 3) % 11) * 0.25 - 1.0 |> compute
+    let t = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(u(i), lambda(a, b) -> {
+        G((0 : K)) = G((0 : K)) + 1.0
+        a + b
+    }), lambda(p, q) where omp -> p + q, 0.0)
+    (t, G((0 : K)))
+}
+// EXPECT: total = 66298.0
+// EXPECT: count = 264668.0
