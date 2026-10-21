@@ -419,6 +419,79 @@ and genBindingDispatch (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
         // fold emitter (which applies this build's fold-form policy to it).
         // A producer whose nest did not admit the epilogue published
         // nothing, and the two-pass form below is unchanged.
+        //
+        // A7c (round 3, gap G69): a JOIN whose legs rode a rank-1 producer's
+        // flat sweep (CodeGenCuda.attachEpilogueLegs published them): the
+        // tuple is bound HERE, at the join's own statement, from the legs'
+        // finished strict chains -- or, for a licensed leg, from its own
+        // seed (evaluated here, as the joined pass did) combined with the
+        // lane partial through the leg's wrapper. The same leaf names and
+        // tuple as genReduceJoinCore, so the projections are unchanged.
+        let legPlan = Blade.Optimize.EpilogueLegTable.tryJoin binding.Id
+        match legPlan, kernelExpr, seedExpr with
+        // The call the planner inlined for these legs RETURNED here (the join
+        // sits right behind the inlined spine): its pools are freed at this
+        // point in EVERY outcome -- legs carried or not -- so the inline moves
+        // no free (W2-4 review finding 2). Then the join itself, once.
+        | Some lp, _, _ when not lp.InlinedPools.IsEmpty && not lp.FreeGuard.Value ->
+            let reuse = Blade.Types.PoolReuseTable.donors ()
+            let inPoolReuse (pid: IRId) = reuse.ContainsKey pid || (reuse |> Map.exists (fun _ d -> d = pid))
+            let callTxt = lp.InlinedCall |> Option.defaultValue "the inlined call"
+            let frees =
+                lp.InlinedPools |> List.collect (fun (pid, pty) ->
+                    match Map.tryFind pid ctx.VarNames with
+                    | Some n when inPoolReuse pid ->
+                        [ $"{ind}// A7c: `{callTxt}` returned here; its pool `{n}` takes part in scratch pool reuse, which keeps owning it" ]
+                    | Some n ->
+                        let elem = match IR.stripUnits pty with ArrayElem at -> elemTypeToCpp at.ElemType | _ -> "double"
+                        let lines = freeAllocNow ind n $"deallocate<typename promote<{elem}, 1>::type, nullptr>({n}.data, {n}.extents);"
+                        if lines.IsEmpty then []
+                        else $"{ind}// A7c: `{callTxt}` was inlined for its input legs; its pool `{n}` is freed at the call's original return point" :: lines
+                    | None -> [])
+            lp.FreeGuard.Value <- true
+            let (code, ctx') =
+                try genBindingDispatch ctx binding builder
+                finally lp.FreeGuard.Value <- false
+            (frees @ code, ctx')
+        | Some lp, IRTuple ks, IRTuple ss when lp.EmittedCpp.Value.IsSome && ks.Length = lp.Legs.Length && ss.Length = lp.Legs.Length ->
+            let published = lp.EmittedCpp.Value.Value
+            lp.EmittedCpp.Value <- None
+            let name = bindingCppName binding
+            let leafNames = lp.Legs |> List.map (fun l -> $"{name}_{l.Slot}")
+            let lines =
+                List.zip3 lp.Legs published (List.zip ks ss)
+                |> List.collect (fun (l, (src, isPart), (k, s)) ->
+                    let cb =
+                        match resolveCallable k with
+                        | Some cb when cb.Params.Length = 2 -> cb
+                        | _ ->
+                            raise (Blade.Diagnostics.BladeDiagnosticException
+                                    (Blade.Diagnostics.Codes.iceCodegen "internal: an epilogue-leg join whose leg kernel no longer resolves"))
+                    let elemStr = match cb.RetType with IRTScalar et -> primTypeToCpp et | t -> irTypeToCpp t
+                    let leaf = $"{name}_{l.Slot}"
+                    if isPart then
+                        let (wrapperCode, wname) = genCallableWrapper ctx.VarNames $"{name}_j{l.Slot}" cb
+                        (wrapperCode |> List.map (fun x -> ind + x))
+                        @ [ $"{ind}{elemStr} {leaf} = {exprToCppCtx ctx s};"
+                            $"{ind}{leaf} = {wname}({leaf}, {src});   // A7c: leg {l.Name}'s lane partial, fed inside `{lp.ProducerName}`'s producer loop" ]
+                    else
+                        [ $"{ind}{elemStr} {leaf} = {src};   // A7c: leg {l.Name}'s strict chain ran inside `{lp.ProducerName}`'s producer loop" ])
+            recordFoldForm name $"producer-input legs ({lp.Legs.Length}) carried by `{lp.ProducerName}`'s producer loop (epilogue legs)" $"reduction join of {lp.Legs.Length} legs (riding the producer's sweep)"
+            let tupleLine = $"""{ind}auto {name} = std::make_tuple({(leafNames |> String.concat ", ")});"""
+            let ctx' = addVarName binding.Id name ctx
+            let ctxOut = { ctx' with TupleChildren = Map.add name leafNames ctx'.TupleChildren }
+            (lines @ [ tupleLine ], ctxOut)
+        | _ ->
+        (match legPlan with
+         | Some lp when not lp.DecidedCpp.Value ->
+            lp.DecidedCpp.Value <- true
+            Blade.Optimize.recordEpilogueLegs lp.Subject
+                (Blade.Effects.Declined "C++ lane: the producer's sweep did not carry the legs (its cell epilogue was not placed in this build: a declined epilogue, a non-flat or dispatched nest, or a flat-path gate)")
+                ([ $"""legs {(lp.Legs |> List.map (fun l -> l.Name) |> String.concat ", ")} keep their joined pass""" ]
+                 @ (match lp.InlinedCall with
+                    | Some call -> [ $"{call} stays inlined (planned for these legs); its pools are still freed at the call's original return point" ]
+                    | None -> []))
+         | _ -> ())
         match Blade.Optimize.HotRowTable.tryConsumer binding.Id with
         // B1 (round-2 cell epilogues): the producer's flat sweep already fed
         // this fold (CodeGenLoopNest.tryGenFlatEpilogueNest published the

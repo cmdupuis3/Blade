@@ -1026,6 +1026,11 @@ let internal llvmLaneDecision (d: Blade.Effects.Decision) : Blade.Effects.Decisi
         elif cppForm.StartsWith "fold form: serial (no reorder licence"
            || cppForm.StartsWith "fold form: serial (repro" then
             declined "the fold keeps its serial association in the LLVM lane too" []
+        // A7c (gap G69): the join's legs rode the producer's sweep -- in this
+        // lane its one fused cell-epilogue loop, each leg with its OWN fold
+        // flags (none when strict, `reassoc nsz` on its own licence).
+        elif cppForm.StartsWith "fold form: producer-input legs" then
+            { d with Evidence = "fold form: producer-input legs carried by the producer's one fused loop (LLVM lane: each leg its own chain and its own fold flags -- none when strict, `reassoc nsz` only on the leg's own licence)" :: d.Evidence }
         else
             { d with
                 Outcome = Blade.Effects.Applied
@@ -1040,6 +1045,15 @@ let internal llvmLaneDecision (d: Blade.Effects.Decision) : Blade.Effects.Decisi
     // keyed reads by binary search) and refuses every other one, so a plan
     // this lane prints never carries a `compound` record it did not build.
     | "compound" -> d
+    // A7c (gap G69): the planner's admission holds for both lanes; an
+    // emitter record ("C++ lane: ...") is that lane's. The LLVM lane carries
+    // the legs in its own fused cell-epilogue loop wherever that loop takes
+    // the producer (EmitLlvm.tryBindFlatEpilogueProducer: a literal fold seed
+    // and a builtin combine), and the C++ lane's lane-state / block forms are
+    // not this lane's.
+    | "epilogue-legs" when (d.Evidence |> List.exists (fun e -> e.StartsWith "C++ lane:"))
+                           || (match d.Outcome with Blade.Effects.Declined why -> why.StartsWith "C++ lane:" | _ -> false) ->
+        { d with Evidence = "LLVM lane: the legs ride this lane's one fused cell-epilogue loop wherever that loop takes the producer (a literal fold seed and a builtin combine); the forms below are the C++ lane's" :: d.Evidence }
     | _ -> d
 
 /// The LLVM lane's ordered-scatter records are its EMITTER's own

@@ -1732,6 +1732,433 @@ let private cepThreadedCellSrc =
     hotRowSrc.Replace("lambda(wr, wc) where omp(wr: 1) ->", "lambda(wr, wc) where omp(wc: 1) ->")
              .Replace("lambda(p, q) where omp -> p + q", "lambda(p, q) -> p + q")
 
+// ---------------------------------------------------------------------------
+// Round 3 A7c: producer-INPUT legs (rule `epilogue-legs` v1, gap G69;
+// Optimize.producerEpilogueLegAdmission, BLADE_EPILOGUE_LEGS). The values are
+// pinned by corpus sibling-folds/019-027, the raw bits by `blade test
+// cell-epilogue`; these pins read the emission (the legs inside the producer
+// loop, no joined pass; the gate off restores it) in both lanes, and one
+// decision per row of the five-party matrix.
+// ---------------------------------------------------------------------------
+
+/// The bench saxpy shape at n = 1003: the producer in `kernel`, the input
+/// sums in the caller (the admission inlines the call for them).
+let private eplSaxpySrc =
+    cepInputs
+    + "function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {\n"
+    + "    let y2 = method_for(zip(x, y)) <@> lambda(u, v) where omp(u: 1) -> 1.5 * u + v |> compute\n"
+    + "    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) where omp -> p + q, 0.0)\n"
+    + "    s\n"
+    + "}\n"
+    + "let (checksum, input_checksum) = {\n"
+    + "    let x = inputs(7)\n"
+    + "    let y = inputs(5)\n"
+    + "    (kernel(x, y), reduce(x, (+)) + reduce(y, (+)))\n"
+    + "}\n"
+
+/// The producer in the region itself: `body` is spliced after `s`, `legs`
+/// is the region's result.
+let private eplBlockSrc (producerKernel: string) (body: string) (legs: string) =
+    cepInputs
+    + "let (s, t) = {\n"
+    + "    let x = inputs(7)\n"
+    + "    let y = inputs(5)\n"
+    + "    let xa = x\n"
+    + $"    let y2 = method_for(zip(x, y)) <@> {producerKernel} |> compute\n"
+    + "    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)\n"
+    + body
+    + $"    (s, {legs})\n"
+    + "}\n"
+
+let private eplPlain = "lambda(u, v) -> u + v"
+let private eplSums = "reduce(x, (+)) + reduce(y, (+))"
+
+/// An `epilogue-legs` decision over lowering + C++ codegen.
+let private eplDecisionCase (name: string) (src: string) (want: Blade.Effects.Decision -> bool) (describe: string) =
+    match cepDecisionsOf src with
+    | Error e -> resultLine Fail name e; false
+    | Ok ds ->
+        let mine = ds |> List.filter (fun d -> d.Rule = "epilogue-legs")
+        if mine |> List.exists want then
+            resultLine Pass name ($"{mine.Length} `epilogue-legs` decision(s); {describe}")
+            true
+        else
+            let seen = mine |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+            let shown = if seen = "" then "no decisions" else seen
+            resultLine Fail name ($"wanted {describe}; saw: {shown}")
+            false
+
+let private evidenceMentions (needle: string) (d: Blade.Effects.Decision) = d.Evidence |> List.exists (fun e -> e.Contains needle)
+
+let private mainBody (cpp: string) =
+    let at = cpp.IndexOf "int main() {"
+    if at < 0 then "" else cpp.Substring at
+
+/// Repro serial: each leg's chain step sits inside the producer's loop right
+/// behind the store, the joined pass over x and y is gone, and the tuple is
+/// bound from the chains at the join's statement.
+let private eplCppRepro () =
+    let name = "epilogue_legs_cpp_repro_chains_inside_producer_loop"
+    match withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () -> cppOfSource name eplSaxpySrc)) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let m = mainBody cpp
+        let store = m.IndexOf "[__fk] = __c;"
+        let step = System.Text.RegularExpressions.Regex.Match(m, @"__epl_acc_\w+_0 = __wrap_\d+_epl_\w+_0\(__epl_acc_\w+_0, __fp_\w+\[__fk\]\);")
+        let close = m.IndexOf("    }\n", (if step.Success then step.Index else 0))
+        let bind = m.IndexOf "= __epl_acc_"
+        let joinedLoop = m.Contains "for (size_t __i0 = 0; __i0 < 1003; __i0++)"
+        if store >= 0 && step.Success && step.Index > store && bind > step.Index && not joinedLoop then
+            resultLine Pass name "the legs' `acc = F(acc, x[i])` right behind the producer's store; no joined pass in main; the join binds from the chains"
+            true
+        else
+            resultLine Fail name ($"store={store} step={step.Success}@{step.Index} bind={bind} joinedLoop={joinedLoop} close={close}")
+            false
+
+/// Licensed serial: each leg's own lane state fed over the producer's blocks.
+let private eplCppLicensed () =
+    let name = "epilogue_legs_cpp_licensed_lane_states_in_producer_blocks"
+    match withGate "BLADE_OMP_THREADS" "1" (fun () -> cppOfSource name eplSaxpySrc) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let m = mainBody cpp
+        let feedB1 = m.IndexOf "blade_fold::feed_sq<double, 8>(__cep_ls"
+        let feedLeg = m.IndexOf "blade_fold::feed_sum<double, 8>(__epl_ls_"
+        let finishLeg = m.IndexOf "blade_fold::finish_sum<double, 8>(__epl_ls_"
+        if feedB1 >= 0 && feedLeg > feedB1 && finishLeg > feedLeg && countOf "feed_sum<double, 8>(__epl_ls_" m = 2
+           && not (m.Contains "for (size_t __i0 = 0; __i0 < 1003; __i0++)") then
+            resultLine Pass name "two leg lane states fed behind B1's feed in each block, finished on the tail; no joined pass"
+            true
+        else
+            resultLine Fail name ($"feedB1={feedB1} feedLeg={feedLeg} finishLeg={finishLeg}")
+            false
+
+/// BLADE_EPILOGUE_LEGS=0: no leg in the producer, the joined pass back, and
+/// the callee not inlined for the legs.
+let private eplCppGateOff () =
+    let name = "epilogue_legs_gate_off_restores_joined_pass"
+    match withGate "BLADE_EPILOGUE_LEGS" "0" (fun () -> withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () -> cppOfSource name eplSaxpySrc))) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let m = mainBody cpp
+        if not (cpp.Contains "__epl_") && m.Contains "for (size_t __i0 = 0; __i0 < 1003; __i0++)" && m.Contains "kernel(" then
+            resultLine Pass name "no `__epl_` anywhere; main runs the joined pass and calls kernel"
+            true
+        else
+            resultLine Fail name ($"""epl={cpp.Contains "__epl_"} joined={m.Contains "for (size_t __i0 = 0; __i0 < 1003; __i0++)"} call={m.Contains "kernel("}""")
+            false
+
+/// The LLVM lane: one loop fewer with the gate on (the joined pass gone; the
+/// inlined callee no longer emitted), and its own applied record.
+let private eplLlvm () =
+    let name = "epilogue_legs_llvm_one_fused_loop"
+    let llWith (gate: string) =
+        withGate "BLADE_EPILOGUE_LEGS" gate (fun () ->
+        withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () ->
+            Blade.Effects.Decisions.start ()
+            let r =
+                match lower eplSaxpySrc with
+                | Error e -> Error e
+                | Ok ir -> (try EmitLlvm.tryEmitProgramNamed "epl_ll" ir with ex -> Error ("raised: " + ex.Message))
+            let ds = Blade.Effects.Decisions.drain ()
+            r |> Result.map (fun ll -> (ll, ds)))))
+    match llWith null, llWith "0" with
+    | Ok (on, ds), Ok (off, _) ->
+        let loops (s: string) = s.Replace("\r\n", "\n").Split('\n') |> Array.filter (fun l -> l.StartsWith "loop.cond") |> Array.length
+        let rec' = ds |> List.exists (fun d -> d.Rule = "epilogue-legs" && applied d && evidenceMentions "llvm lane: legs x-sum, y-sum folded inside" d)
+        if loops on = loops off - 1 && rec' then
+            resultLine Pass name ($"{loops on} loops on vs {loops off} off; the llvm lane's applied record")
+            true
+        else
+            resultLine Fail name ($"loops on={loops on} off={loops off} record={rec'}")
+            false
+    | Error e, _ | _, Error e -> resultLine Fail name ($"the llvm lane refused: {e}"); false
+
+/// A corpus file's source (the checkout's tests/corpus, else the copy
+/// deployed beside the binary).
+let private corpusSource (rel: string) : Result<string, string> =
+    let cands =
+        [ System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "tests", "corpus", rel)
+          System.IO.Path.Combine(System.AppContext.BaseDirectory, "tests", "corpus", rel) ]
+    match cands |> List.tryFind System.IO.File.Exists with
+    | Some p -> Ok (System.IO.File.ReadAllText p)
+    | None -> Error $"corpus file {rel} not found"
+
+/// The LLVM lane's fused producer loop, structurally: the loop body that
+/// stores into a pool (a GEP-addressed store) and updates the most
+/// alloca-slot accumulators with an `fadd`. Returns (accumulator updates,
+/// GEP reads) of that block and the number of loop bodies in the module.
+let private llvmFusedLoop (ll: string) : int * int * int =
+    let lines = ll.Replace("\r\n", "\n").Split('\n')
+    let slots =
+        lines |> Array.choose (fun l ->
+            let m = System.Text.RegularExpressions.Regex.Match(l, @"^\s*(%r\d+) = alloca ")
+            if m.Success then Some m.Groups.[1].Value else None) |> Set.ofArray
+    // blocks: label line .. next label
+    let blocks = ResizeArray<string list>()
+    let cur = ResizeArray<string>()
+    for l in lines do
+        if System.Text.RegularExpressions.Regex.IsMatch(l, @"^[A-Za-z_.][A-Za-z0-9_.]*:") then
+            blocks.Add(List.ofSeq cur); cur.Clear()
+        cur.Add l
+    blocks.Add(List.ofSeq cur)
+    let bodies = blocks |> Seq.filter (fun b -> match b with h :: _ -> h.StartsWith "loop.body" | [] -> false) |> List.ofSeq
+    let stats (b: string list) =
+        let geps = b |> List.choose (fun l ->
+                    let m = System.Text.RegularExpressions.Regex.Match(l, @"^\s*(%r\d+) = getelementptr inbounds double")
+                    if m.Success then Some m.Groups.[1].Value else None) |> Set.ofList
+        let fadds = b |> List.choose (fun l ->
+                    let m = System.Text.RegularExpressions.Regex.Match(l, @"^\s*(%r\d+) = fadd ")
+                    if m.Success then Some m.Groups.[1].Value else None) |> Set.ofList
+        let poolStore = b |> List.exists (fun l ->
+                            let m = System.Text.RegularExpressions.Regex.Match(l, @"store double %r\d+, ptr (%r\d+)")
+                            m.Success && geps.Contains m.Groups.[1].Value)
+        let accUpdates = b |> List.filter (fun l ->
+                            let m = System.Text.RegularExpressions.Regex.Match(l, @"store double (%r\d+), ptr (%r\d+)")
+                            m.Success && fadds.Contains m.Groups.[1].Value && slots.Contains m.Groups.[2].Value) |> List.length
+        (poolStore, accUpdates, geps.Count)
+    let fused =
+        bodies |> List.map stats |> List.filter (fun (p, _, _) -> p)
+        |> List.sortByDescending (fun (_, a, _) -> a) |> List.tryHead
+    match fused with
+    | Some (_, acc, geps) -> (acc, geps, bodies.Length)
+    | None -> (0, 0, bodies.Length)
+
+let private eplLlvmOf (src: string) (gate: string) =
+    withGate "BLADE_EPILOGUE_LEGS" gate (fun () ->
+        Blade.Effects.Decisions.start ()
+        let r =
+            match lower src with
+            | Error e -> Error e
+            | Ok ir -> (try EmitLlvm.tryEmitProgramNamed "epl_ll" ir with ex -> Error ("raised: " + ex.Message))
+        let ds = Blade.Effects.Decisions.drain ()
+        r |> Result.map (fun ll -> (ll, ds)))
+
+/// THE FAILURE FIXTURE ITSELF (sibling-folds/026; review finding 3): the
+/// legs ride the producer in both lanes, the joined pass is gone (and
+/// restored by the gate), and the producer's stores come before the failing
+/// binding. (The fault / site / frame text equality gate on vs off is
+/// executed in `blade test cell-epilogue`.)
+let private eplFailureFixtureRoute () =
+    let name = "epilogue_legs_failure_fixture_026_rides_both_lanes"
+    match corpusSource "sibling-folds/026_input_legs_failure_between_aborts.blade" with
+    | Error e -> resultLine Fail name e; false
+    | Ok src ->
+    let src = src.Substring(src.IndexOf '\n' + 1)   // the harness drops the TEST line
+    let cppWith gate = withGate "BLADE_EPILOGUE_LEGS" gate (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () -> cppOfSource name src))
+    match cppWith null, cppWith "0", withGate "BLADE_OMP_THREADS" "1" (fun () -> eplLlvmOf src null), withGate "BLADE_OMP_THREADS" "1" (fun () -> eplLlvmOf src "0") with
+    | Ok on, Ok off, Ok (llOn, ds), Ok (llOff, _) ->
+        let m, mOff = mainBody on, mainBody off
+        let feeds = countOf "blade_fold::feed_sum<double, 8>(__epl_ls_" m
+        let lastStore = m.LastIndexOf "[__fk] = (__fp_"
+        let boom = m.IndexOf "blade_rt::idiv64(10L"
+        let joined (s: string) = s.Contains "for (size_t __i0 = 0; __i0 < 1003; __i0++)"
+        let (accOn, gepOn, loopsOn) = llvmFusedLoop llOn
+        let (accOff, gepOff, loopsOff) = llvmFusedLoop llOff
+        let llvmRec = ds |> List.exists (fun d -> d.Rule = "epilogue-legs" && applied d && evidenceMentions "llvm lane: legs x-sum, y-sum folded inside" d)
+        if feeds = 2 && lastStore >= 0 && boom > lastStore && not (joined m) && joined mOff && not (off.Contains "__epl_")
+           && accOn = accOff + 2 && gepOn = gepOff + 2 && loopsOn = loopsOff - 1 && llvmRec then
+            resultLine Pass name ($"C++: 2 leg feeds in the producer, its stores before the BL8013 site, no joined pass (gate off restores it); LLVM: fused loop {accOff}->{accOn} accumulator updates, {gepOff}->{gepOn} cell reads, {loopsOff}->{loopsOn} loops")
+            true
+        else
+            resultLine Fail name ($"feeds={feeds} store={lastStore} boom={boom} joinedOn={joined m} joinedOff={joined mOff} llvm acc {accOff}->{accOn} gep {gepOff}->{gepOn} loops {loopsOff}->{loopsOn} rec={llvmRec}")
+            false
+    | Error e, _, _, _ | _, Error e, _, _ | _, _, Error e, _ | _, _, _, Error e -> resultLine Fail name e; false
+
+/// The saxpy shape's LLVM route, identified in the fused loop itself: two
+/// more accumulator updates and two more cell reads than gate-off's fused
+/// loop, and the joined pass's loop gone.
+let private eplLlvmAccumulators () =
+    let name = "epilogue_legs_llvm_input_accumulators_in_producer_loop"
+    match withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () -> eplLlvmOf eplSaxpySrc null, eplLlvmOf eplSaxpySrc "0")) with
+    | Ok (on, _), Ok (off, _) ->
+        let (aOn, gOn, lOn) = llvmFusedLoop on
+        let (aOff, gOff, lOff) = llvmFusedLoop off
+        if aOn = aOff + 2 && gOn = gOff + 2 && lOn = lOff - 1 then
+            resultLine Pass name ($"fused loop: {aOff}->{aOn} accumulator updates, {gOff}->{gOn} cell reads; {lOff}->{lOn} loops")
+            true
+        else
+            resultLine Fail name ($"acc {aOff}->{aOn} gep {gOff}->{gOn} loops {lOff}->{lOn}")
+            false
+    | Error e, _ | _, Error e -> resultLine Fail name e; false
+
+/// Finding 4: an inline is kept only when a lane would carry the legs. A
+/// nonliteral epilogue seed (no lane's fused form evaluates it ahead) and
+/// BLADE_FOLD_LANES=off in a licensed build (no lane-state form) decline AT
+/// PLANNING, and the call stays a call.
+let private eplNoRouteKeepsCall (name: string) (src: string) (env: (string * string) list) (needle: string) =
+    let rec withAll (es: (string * string) list) f = match es with [] -> f () | (k, v) :: rest -> withGate k v (fun () -> withAll rest f)
+    match withAll env (fun () -> cepDecisionsOf src), withAll env (fun () -> cppOfSource name src) with
+    | Ok ds, Ok cpp ->
+        let mine = ds |> List.filter (fun d -> d.Rule = "epilogue-legs")
+        let declined = mine |> List.exists (declinedMentioning needle)
+        let callKept = (mainBody cpp).Contains "kernel(" && not (cpp.Contains "__epl_")
+        if declined && callKept && not (mine |> List.exists applied) then
+            resultLine Pass name ($"declined at planning ({needle}); main still calls kernel; no leg emitted")
+            true
+        else
+            let seen = mine |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+            resultLine Fail name ($"declined={declined} callKept={callKept}; saw: {seen}")
+            false
+    | Error e, _ | _, Error e -> resultLine Fail name e; false
+
+let private eplNonliteralSeedSrc =
+    cepInputs
+    + "function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>, s0: Float64) -> Float64 = {\n"
+    + "    let y2 = method_for(zip(x, y)) <@> lambda(u, v) -> 1.5 * u + v |> compute\n"
+    + "    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, s0)\n"
+    + "    s\n"
+    + "}\n"
+    + "let (checksum, input_checksum) = {\n"
+    + "    let x = inputs(7)\n"
+    + "    let y = inputs(5)\n"
+    + "    let z0 = x((3 : Ix)) * 0.0 + 0.5\n"
+    + "    (kernel(x, y, z0), reduce(x, (+)) + reduce(y, (+)))\n"
+    + "}\n"
+
+/// The B1-shaped THROWING callee (sibling-folds/029): never inlined for the
+/// legs (its body may fail), so the call -- and its frame -- stays.
+let private eplThrowingCalleeKeepsCall () =
+    let name = "epilogue_legs_throwing_callee_not_inlined"
+    match corpusSource "sibling-folds/029_input_legs_throwing_callee_keeps_frame.blade" with
+    | Error e -> resultLine Fail name e; false
+    | Ok src ->
+    let src = src.Substring(src.IndexOf '\n' + 1)
+    match withGate "BLADE_OMP_THREADS" "1" (fun () -> cepDecisionsOf src), withGate "BLADE_OMP_THREADS" "1" (fun () -> cppOfSource name src) with
+    | Ok ds, Ok cpp ->
+        let noLegs = ds |> List.forall (fun d -> d.Rule <> "epilogue-legs") && not (cpp.Contains "__epl_")
+        let callKept = (mainBody cpp).Contains "kernel(" && cpp.Contains "BLADE_FRAME(\"kernel\""
+        if noLegs && callKept then
+            resultLine Pass name "no epilogue-legs plan; main calls kernel, whose frame holds the division"
+            true
+        else
+            resultLine Fail name ($"noLegs={noLegs} callKept={callKept}")
+            false
+    | Error e, _ | _, Error e -> resultLine Fail name e; false
+
+/// sibling-folds/028: the transitive-capture regions and the named view.
+let private eplCorpus028 () =
+    let name = "epilogue_legs_028_transitive_captures_and_views"
+    match corpusSource "sibling-folds/028_input_legs_transitive_captures_and_views.blade" with
+    | Error e -> resultLine Fail name e; false
+    | Ok src ->
+    let src = src.Substring(src.IndexOf '\n' + 1)
+    match withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () -> cepDecisionsOf src)) with
+    | Error e -> resultLine Fail name e; false
+    | Ok ds ->
+        let legs (subj: string) = ds |> List.filter (fun d -> d.Rule = "epilogue-legs" && d.Subject = subj)
+        let ok =
+            (legs "_(early1,e1t)" |> List.exists applied) && (legs "_(early2,e2t)" |> List.exists applied)
+            && (legs "_(late1,l1t)").IsEmpty && (legs "_(late2,l2t)").IsEmpty
+            && (legs "_(view,vt)" |> List.exists (declinedMentioning "not fresh storage"))
+            && (legs "_(view,vt)" |> List.forall (applied >> not))
+        if ok then
+            resultLine Pass name "early1/early2 (module callees) admitted; late1/late2 (capturing nested callees) never reach the admission; the named view declined"
+            true
+        else
+            let seen = ds |> List.filter (fun d -> d.Rule = "epilogue-legs") |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+            resultLine Fail name ($"saw: {seen}")
+            false
+
+/// The mt8 decline adds no `[omp]` census line (the legs requested nothing):
+/// the threaded emission carries exactly gate-off's census lines.
+let private eplTeamNoCensus () =
+    let name = "epilogue_legs_mt8_decline_adds_no_omp_census"
+    let census (cpp: string) = cpp.Replace("\r\n", "\n").Split('\n') |> Array.filter (fun l -> l.Contains "[omp] requested but emitted serial") |> Array.length
+    let emit gate = withGate "BLADE_EPILOGUE_LEGS" gate (fun () -> withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" null (fun () -> cppOfSource name eplSaxpySrc)))
+    match emit null, emit "0" with
+    | Ok on, Ok off ->
+        if census on = census off && not (on.Contains "__epl_") then
+            resultLine Pass name ($"{census on} census line(s) with the legs declined, {census off} with the gate off; no leg emitted")
+            true
+        else
+            resultLine Fail name ($"census on={census on} off={census off}")
+            false
+    | Error e, _ | _, Error e -> resultLine Fail name e; false
+
+/// Finding 2 (the route taken): the inlined callee's pool is freed at the
+/// call's original return point, so the inline moves no free -- in main
+/// (no frame: the plain dense free) and in a function body (the frame's own
+/// free, then spared at the function's return: no double free).
+let private eplReturnPointFree () =
+    let name = "epilogue_legs_inlined_pools_freed_at_return_point"
+    let fnSrc =
+        cepInputs
+        + "function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {\n"
+        + "    let y2 = method_for(zip(x, y)) <@> lambda(u, v) -> 2.0 * u + v |> compute\n"
+        + "    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)\n"
+        + "    s\n"
+        + "}\n"
+        + "function driver(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {\n"
+        + "    let k = kernel(x, y)\n"
+        + "    k + 1000000.0 * (reduce(x, (+)) + reduce(y, (+)))\n"
+        + "}\n"
+        + "let r = driver(inputs(7), inputs(5))\n"
+    match withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () -> cppOfSource name eplSaxpySrc, cppOfSource name fnSrc)) with
+    | Ok saxpy, Ok fn ->
+        let m = mainBody saxpy
+        let freeAt = m.IndexOf "is freed at the call's original return point"
+        let bind = m.IndexOf "= __epl_acc_"
+        let d = fn.IndexOf "double driver(Array<double, 1> x, Array<double, 1> y) {"
+        let dBody = if d < 0 then "" else fn.Substring(d, fn.IndexOf("\n}\n", d) - d)
+        let frees = countOf "deallocate<typename promote<double, 1>::type, nullptr>(" dBody
+        let freeBeforeJoin = dBody.IndexOf "is freed at the call's original return point" < dBody.IndexOf "= __epl_acc_"
+        if freeAt >= 0 && bind > freeAt && frees = 1 && freeBeforeJoin && dBody.Contains "__epl_acc_" then
+            resultLine Pass name "main frees y2 right behind the inlined spine; driver frees it once there and not again at its return"
+            true
+        else
+            resultLine Fail name ($"main freeAt={freeAt} bind={bind}; driver frees={frees} beforeJoin={freeBeforeJoin}")
+            false
+    | Error e, _ | _, Error e -> resultLine Fail name e; false
+
+let private eplDecisionCases () =
+    let serialRepro f = withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" f)
+    [ serialRepro (fun () ->
+        eplDecisionCase "decision_epilogue_legs_applied" eplSaxpySrc
+            (fun d -> applied d && evidenceMentions "legs x-sum, y-sum ride y2's producer pass (strict chains, ascending, own seeds)" d && evidenceMentions "licences: the repro build keeps every leg strict" d
+                      && evidenceMentions "kernel(x, y) inlined one level" d && evidenceMentions "producer kernel `y2`" d
+                      && evidenceMentions "seeds (x-sum: -0.0, y-sum: -0.0)" d && evidenceMentions "intervening (" d && evidenceMentions "outer kernel (" d)
+            "applied with the five-party matrix")
+      serialRepro (fun () ->
+        eplDecisionCase "decision_epilogue_legs_cpp_applied" eplSaxpySrc
+            (fun d -> applied d && evidenceMentions "C++ lane: legs x-sum, y-sum fed inside `y2`'s producer loop" d)
+            "the C++ lane's applied record")
+      // producer row: a threaded producer (mt8) keeps the strict legs serial
+      withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" null (fun () ->
+        eplDecisionCase "decision_epilogue_legs_declined_mt8" eplSaxpySrc
+            (declinedMentioning "the producer runs a thread team; the strict legs x-sum, y-sum keep their serial pass")
+            "declined: mt8 (strict legs never split per thread)"))
+      eplDecisionCase "decision_epilogue_legs_declined_producer_writes"
+          (eplBlockSrc "lambda(u, v) -> {\n        cnt = cnt + 1.0\n        u + v\n    }" "" eplSums |> fun s -> s.Replace("    let xa = x\n", "    let mut cnt = 0.0\n"))
+          (declinedMentioning "may write (scheduleMayWriteIn)") "declined: the producer kernel writes"
+      // leg row: the output, an alias, a team-requesting leg kernel
+      eplDecisionCase "decision_epilogue_legs_declined_output_leg" (eplBlockSrc eplPlain "" "reduce(y2, (+)) + reduce(x, (+))")
+          (declinedMentioning "folds the producer's OUTPUT") "declined: a leg over the producer's output"
+      eplDecisionCase "decision_epilogue_legs_declined_alias" (eplBlockSrc eplPlain "" "reduce(xa, (+)) + reduce(y, (+))")
+          (declinedMentioning "operands (an input leg reads exactly the producer's operand") "declined: a leg over an alias"
+      withGate "BLADE_OMP_THREADS" null (fun () ->
+        eplDecisionCase "decision_epilogue_legs_declined_omp_leg" (eplBlockSrc eplPlain "" "reduce(x, lambda(p, q) where omp -> p + q, 0.0) + reduce(y, lambda(p, q) where omp -> p + q, 0.0)")
+            (declinedMentioning "requests omp in a build that emits threads") "declined: a leg would lose its thread team")
+      // seed row: a capture and a seed bound after the producer
+      eplDecisionCase "decision_epilogue_legs_declined_late_capture"
+          (eplBlockSrc eplPlain "    let c = x((1 : Ix)) + 1.0\n" "reduce(x, lambda(a, b) -> a + c * b, 0.0) + reduce(y, lambda(a, b) -> a + c * b, 0.0)")
+          (declinedMentioning "fold kernel reads") "declined: a leg capture bound after the producer"
+      eplDecisionCase "decision_epilogue_legs_declined_late_seed"
+          (eplBlockSrc eplPlain "    let s0 = x((2 : Ix))\n" "reduce(x, (+), s0) + reduce(y, (+), s0)")
+          (declinedMentioning "seed reads") "declined: a seed bound after the producer"
+      // intervening row: a write to x between the producer and the legs
+      eplDecisionCase "decision_epilogue_legs_declined_write_between"
+          ((eplBlockSrc eplPlain "    let z = bump(x)\n" "reduce(x, (+)) + reduce(y, (+)) + z")
+              .Replace("    let x = inputs(7)\n", "    let mut x = inputs(7)\n")
+              .Replace("let (s, t) = {\n", "function bump(a: mut Array<Float64 like Ix>) -> Float64 = {\n    a((0 : Ix)) = 50.0\n    0.0\n}\nlet (s, t) = {\n"))
+          (declinedMentioning "may write between the producer and the legs") "declined: an intervening write"
+      // the gate
+      serialRepro (fun () ->
+        withGate "BLADE_EPILOGUE_LEGS" "0" (fun () ->
+            eplDecisionCase "decision_epilogue_legs_declined_gate" eplSaxpySrc
+                (fun d -> declinedMentioning "disabled by BLADE_EPILOGUE_LEGS" d && evidenceMentions "producer kernel `y2`" d)
+                "declined: disabled by BLADE_EPILOGUE_LEGS, with the matrix")) ]
+
 /// One decision per refusal reason (and the applied forms).
 let private cepDecisionCases () =
     [ withGate "BLADE_OMP_THREADS" "1" (fun () ->
@@ -4485,6 +4912,22 @@ let runOptimizeTests () =
           cepRecurRepro ()
           cepGateOff ()
           yield! cepDecisionCases ()
+          // Round 3 A7c: producer-input legs (epilogue-legs v1, G69).
+          eplCppRepro ()
+          eplCppLicensed ()
+          eplCppGateOff ()
+          eplLlvm ()
+          eplLlvmAccumulators ()
+          eplFailureFixtureRoute ()
+          eplThrowingCalleeKeepsCall ()
+          eplCorpus028 ()
+          eplTeamNoCensus ()
+          eplReturnPointFree ()
+          withGate "BLADE_OMP_THREADS" "1" (fun () ->
+            eplNoRouteKeepsCall "epilogue_legs_nonliteral_epilogue_seed_keeps_call" eplNonliteralSeedSrc [ ("BLADE_FP_REPRO", "1") ] "seed is not a literal")
+          withGate "BLADE_OMP_THREADS" "1" (fun () ->
+            eplNoRouteKeepsCall "epilogue_legs_lanes_off_keeps_call" eplSaxpySrc [ ("BLADE_FOLD_LANES", "off") ] "BLADE_FOLD_LANES=off")
+          yield! eplDecisionCases ()
           // Compaction fusion (round 2 item B4).
           compactionFusedLicensed ()
           compactionFusedRepro ()

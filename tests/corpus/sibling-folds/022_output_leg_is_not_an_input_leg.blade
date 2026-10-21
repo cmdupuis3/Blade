@@ -1,0 +1,21 @@
+// TEST: A leg over the producer's OUTPUT is not an input leg
+// ============================================================================
+// `reduce(y2, (+))` joined with `reduce(x, (+))`: y2 is the producer's
+// output, which the cell epilogue (B1) owns -- `s` keeps riding y2's sweep
+// exactly as before, while the join over {y2, x} declines the epilogue-legs
+// admission (an input leg reads one of the producer's operands) and keeps
+// its own pass after the producer.
+// ============================================================================
+type Ix = Idx<1003>
+function inputs(m: Int64) -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute
+}
+let (s, t) = {
+    let x = inputs(7)
+    let y = inputs(5)
+    let y2 = method_for(zip(x, y)) <@> lambda(u, v) -> u + 3.0 * v |> compute
+    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
+    (s, reduce(y2, (+)) + 2.0 * reduce(x, (+)))
+}
+// EXPECT: s = 103065.0
+// EXPECT: t = 15021.0

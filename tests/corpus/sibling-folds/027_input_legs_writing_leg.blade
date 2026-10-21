@@ -1,0 +1,25 @@
+// TEST: A writing leg never rides the producer's loop
+// ============================================================================
+// The x leg's fold kernel counts its applications in a captured `let mut`
+// (an ordered serial write, gap G43). The leg is not total, so it is neither
+// joined nor moved: it runs where it was written, after y2 and s, and the
+// count is the leg's 1003 applications. The plain y leg has no sibling left
+// to join, so nothing rides.
+// ============================================================================
+type Ix = Idx<1003>
+function inputs(m: Int64) -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute
+}
+function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {
+    let mut n = 0.0
+    let y2 = method_for(zip(x, y)) <@> lambda(u, v) -> u + v |> compute
+    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
+    let a = reduce(x, lambda(p, q) -> {
+        n = n + 1.0
+        p + q
+    }, 0.0)
+    let b = reduce(y, (+))
+    s + 10.0 * a + 100.0 * b + 1000000.0 * n
+}
+let r = kernel(inputs(7), inputs(5))
+// EXPECT: r = 1003261361.0

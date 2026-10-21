@@ -2150,7 +2150,7 @@ let buildFlatEpilogue (plan: Blade.Optimize.HotRowPlan) (producer: LoopNestCodeG
                     Some { Form = form; ElemCpp = elemStr; K = k; LaneBlock = laneBlock
                            Square = (term = Blade.Optimize.Square); Block = block
                            PartName = $"__cep_part_{tag}"; HadName = $"__cep_had_{tag}"; TeamName = $"__cep_T_{tag}"
-                           ChainPrelude = []; ChainStep = (fun _ -> "")
+                           ChainPrelude = []; ChainStep = (fun _ -> ""); Legs = []
                            OnEmitted = (fun () ->
                                let label = foldVecLabel kind k
                                let formText =
@@ -2172,7 +2172,7 @@ let buildFlatEpilogue (plan: Blade.Optimize.HotRowPlan) (producer: LoopNestCodeG
                     let block = cellEpiBlockR ()
                     Some { Form = FlatChain; ElemCpp = elemStr; K = 0; LaneBlock = 1L
                            Square = (term = Blade.Optimize.Square); Block = block
-                           PartName = acc; HadName = ""; TeamName = ""
+                           PartName = acc; HadName = ""; TeamName = ""; Legs = []
                            ChainPrelude = wrapperCode @ [ $"{elemStr} {acc} = {seedStr};" ]
                            ChainStep = (fun c ->
                                let cellTerm = if term = Blade.Optimize.Square then $"({c} * {c})" else c
@@ -2189,6 +2189,100 @@ let buildFlatEpilogue (plan: Blade.Optimize.HotRowPlan) (producer: LoopNestCodeG
                     decline "the fold's seed is not a literal: the chain would evaluate it ahead of the producer (a failure could move; the seed stays at the consumer)"
         | _ -> decline "the consumer's cell map is not one plain level over the producer"
     | _ -> decline "the fold kernel does not resolve to a two-parameter callable, or the cell kernel has no recognized term"
+
+/// A7c (round 3, gap G69; Blade.Optimize.producerEpilogueLegAdmission): the
+/// producer-INPUT legs a planned join hands this producer's flat sweep, each
+/// in the form THIS build gives it, decided from the predicates the join's
+/// own emission reads (fpReassocEnabled, foldReorderLicensed, the K-lane
+/// recogniser):
+///   * a STRICT leg (repro build, or no reorder licence of its OWN) is its
+///     ascending chain `acc = F(acc, x[i])` from its own seed, evaluated once
+///     before the sweep -- the joined pass's chain, the same operations in
+///     the same order, only interleaved with the producer's stores (one step
+///     per cell beside B1's chain; per lane block, over the block just
+///     produced, beside B1's lane feed);
+///   * a LICENSED leg is its own `blade_fold` lane state fed over each block
+///     (`feed_sum` / `finish_sum`, the tree of `blade_fold::sum<T, K>`: the
+///     standalone licensed fold's, NOT the joined pass's `omp simd reduction`
+///     -- a licensed association change, recorded); its seed and combine stay
+///     at the join, like B1's licensed consumer. Never another leg's licence,
+///     never the map's.
+/// Declines (recorded; the join keeps its pass): a threaded sweep (strict
+/// legs never split per thread; no per-chunk leg partial in v1), a licensed
+/// leg beside an ordered chain, a leg whose types or operator the forms do
+/// not take.
+let attachEpilogueLegs (producerId: IRId) (producer: LoopNestCodeGen) (names: Map<IRId, string>) (ep: FlatEpilogue) : FlatEpilogue =
+    match Blade.Optimize.EpilogueLegTable.tryProducer producerId with
+    | None -> ep
+    | Some lp ->
+    let legNames = lp.Legs |> List.map (fun l -> l.Name) |> String.concat ", "
+    let decline (why: string) =
+        lp.DecidedCpp.Value <- true
+        Blade.Optimize.recordEpilogueLegs lp.Subject (Blade.Effects.Declined ("C++ lane: " + why))
+            ([ $"legs {legNames} keep their joined pass after `{lp.ProducerName}`'s producer loop" ]
+             @ (match lp.InlinedCall with
+                | Some call -> [ $"{call} stays inlined (planned for these legs); its pools are still freed at the call's original return point" ]
+                | None -> []))
+        ep
+    let tag = sanitizeCppName producer.OutputName
+    let cppOf (t: IRType) = match stripUnits t with IRTScalar et -> primTypeToCpp et | t -> irTypeToCpp t
+    match ep.Form with
+    | FlatLanesChunks -> decline "the producer's sweep runs a thread team in this build: a strict leg never splits into per-thread chains, and v1 builds no per-chunk leg partial"
+    | _ ->
+    let oneLeg (l: Blade.Optimize.EpilogueLeg) : Result<FlatLeg * string, string> =
+        match resolveCallable l.Kernel with
+        | Some cl when cl.Params.Length = 2 ->
+            let accCpp = cppOf cl.RetType
+            let opCpp = cppOf l.OperandElem
+            if accCpp <> opCpp || accCpp <> cppOf l.ElemType then
+                Error $"leg {l.Name}'s accumulator type is not its operand's element type"
+            else
+            let licensed = fpReassocEnabled () && foldReorderLicensed cl
+            if licensed then
+                let k = foldVecLanes VecSum
+                let laneBlock = int64 k * (if accCpp = "float" then 8L else 4L)
+                if ep.Form <> FlatLanesSerial then
+                    Error $"leg {l.Name} is licensed but the producer's epilogue is an ordered chain in this build (v1 feeds a licensed leg only into the lane-block sweep)"
+                elif not (foldVecElem accCpp) || foldLanesMode () = FoldLanesOff || fpReassocSimdOp cl accCpp <> Some "+" then
+                    Error $"leg {l.Name} is licensed but takes a form the lane state does not reproduce (not a real `+` sum, or BLADE_FOLD_LANES=off)"
+                elif ep.Block % laneBlock <> 0L then
+                    Error $"leg {l.Name}'s lane block {laneBlock} does not divide the producer's block {ep.Block}"
+                else
+                    let part = $"__epl_part_{tag}_{l.Slot}"
+                    Ok ({ OperandPos = l.OperandPos; Prelude = [ $"{accCpp} {part};   // A7c: leg {l.Name}'s lane-tree partial, fed over the producer's blocks" ]
+                          ChainStep = (fun _ -> ""); LaneK = Some k; LaneBlock = laneBlock
+                          StateName = $"__epl_ls_{tag}_{l.Slot}"; PartName = part; ElemCpp = accCpp },
+                        $"{l.Name}: {foldVecLabel VecSum k} lane state (its own licence) -- a LICENSED ASSOCIATION CHANGE: the leg folds in blade_fold::sum<{accCpp}, {k}>'s tree (feed_sum / finish_sum over the producer's blocks), not the joined pass's `omp simd reduction` tree; the two trees are not claimed equal")
+            else
+                let (wrapperCode, wname) = genCallableWrapper names $"epl_{tag}_{l.Slot}" cl
+                let acc = $"__epl_acc_{tag}_{l.Slot}"
+                let seedStr = exprToCpp names l.Seed
+                Ok ({ OperandPos = l.OperandPos
+                      Prelude = wrapperCode @ [ $"{accCpp} {acc} = {seedStr};   // A7c: leg {l.Name}'s strict chain, its own seed, evaluated once" ]
+                      ChainStep = (fun v -> $"{acc} = {wname}({acc}, {v});")
+                      LaneK = None; LaneBlock = 1L; StateName = ""; PartName = acc; ElemCpp = accCpp },
+                    $"{l.Name}: strict ascending chain from its own seed (bitwise the joined pass's chain for this leg)")
+        | _ -> Error $"leg {l.Name}'s fold kernel does not resolve to a two-parameter callable"
+    let results = lp.Legs |> List.map oneLeg
+    match results |> List.tryPick (function Error why -> Some why | Ok _ -> None) with
+    | Some why -> decline why
+    | None ->
+    let legs = results |> List.map (function Ok (fl, _) -> fl | Error _ -> failwith "unreachable")
+    let forms = results |> List.map (function Ok (_, f) -> f | Error _ -> "")
+    let where =
+        match ep.Form with
+        | FlatChain -> "one step per cell right behind the store, beside the fold's ordered chain"
+        | _ -> $"over each {ep.Block}-cell block right behind its production, beside the fold's lane feed"
+    { ep with
+        Legs = legs
+        OnEmitted = (fun () ->
+            ep.OnEmitted ()
+            lp.DecidedCpp.Value <- true
+            lp.EmittedCpp.Value <- Some (List.map2 (fun (fl: FlatLeg) (l: Blade.Optimize.EpilogueLeg) -> (fl.PartName, fl.LaneK.IsSome)) legs lp.Legs)
+            Blade.Optimize.recordEpilogueLegs lp.Subject Blade.Effects.Applied
+                ([ $"C++ lane: legs {legNames} fed inside `{lp.ProducerName}`'s producer loop ({where}); the joined pass over the operands is gone" ]
+                 @ forms
+                 @ [ "the results are bound at the join's own statement; the stored output and the fold's epilogue are unchanged" ])) }
 /// A row's class partial, from ZERO, in a FIXED per-row scheme: the K-lane
 /// self-dot / sum tree (`blade_fold::sq|sum`, a fixed function of the data and
 /// K) for the dot-class bodies `x * x` and `x` over Float64, else eight
@@ -3793,7 +3887,12 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                 // elementwise emitter honours it; any other route declines
                 // (recorded below) and the consumer keeps the two-pass fold.
                 | true, plan when (match plan.Form with Blade.Optimize.ChunkFold -> true | _ -> false) ->
-                    { codeGen with FlatEpilogue = buildFlatEpilogue plan codeGen tempCtx.VarNames builder }
+                    // A7c: a planned join's producer-input legs ride the same
+                    // sweep (attachEpilogueLegs decides their form or declines).
+                    { codeGen with
+                        FlatEpilogue =
+                            buildFlatEpilogue plan codeGen tempCtx.VarNames builder
+                            |> Option.map (attachEpilogueLegs plan.ProducerId codeGen tempCtx.VarNames) }
                 | _ -> codeGen
             // Compact row classes: the same hand-over for a compact producer.
             let codeGen =

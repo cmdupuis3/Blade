@@ -461,6 +461,200 @@ let runCellEpilogueTests () : BlockResult =
             else fail name ($"expected one loop fewer with the gate on; got {loops on} on vs {loops off} off")
         // a pinned supported program: a refusal is a failure, not a skip
         | Error e, _ | _, Error e -> fail name ($"the llvm lane refused a pinned supported program: {e}")
+    // A7c (round 3, gap G69): producer-INPUT legs riding B1's sweep, NEW vs
+    // BLADE_EPILOGUE_LEGS=0 (the joined pass), serial (T = 1). Strict legs
+    // (the repro build, or legs with no licence of their own) are bitwise in
+    // both contraction modes -- each leg is the same ascending chain from the
+    // same seed, only interleaved with the stores; licensed legs are their
+    // own `blade_fold::sum` lane state against the joined pass's `omp simd
+    // reduction` -- a licensed association change, held to 1e-12. The LLVM
+    // lane: printed values gate on == gate off under the identity regime, and
+    // the joined pass's loop is gone.
+    let legsCall =
+        { Name = "legs_call"
+          Source =
+            "type Ix = Idx<2003>\n"
+            + "function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {\n"
+            + "    let y2 = method_for(zip(x, y)) <@> lambda(u, v) where omp(u: 1) -> 1.5 * u + v |> compute\n"
+            + "    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) where omp -> p + q, 0.0)\n"
+            + "    s\n"
+            + "}\n"
+            + "let (s, ixs) = {\n"
+            + "    let x = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 13) / 7.0 + 0.1 |> compute\n"
+            + "    let y = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 11) / 3.0 |> compute\n"
+            + "    (kernel(x, y), reduce(x, (+)) + reduce(y, (+)))\n"
+            + "}\n"
+          Scalars = [ "s"; "ixs" ]; Pools = []; LocalPool = None
+          Needle = fun r ->
+            match r with
+            | "rep_ser" -> Some "__epl_acc_"
+            | _ -> Some "blade_fold::feed_sum<double, 8>(__epl_ls_" }
+    let legsStrict =
+        { Name = "legs_strict"
+          Source =
+            "type Ix = Idx<2003>\n"
+            + "let (s, d) = {\n"
+            + "    let x = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 17) / 9.0 |> compute\n"
+            + "    let y = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 5) / 7.0 - 0.3 |> compute\n"
+            + "    let y2 = method_for(zip(x, y)) <@> lambda(u, v) -> 1.5 * u + v |> compute\n"
+            + "    let s = reduce(method_for(y2) <@> lambda(w) -> w, lambda(p, q) -> p + q, 1.25)\n"
+            + "    (s, reduce(x, lambda(a, b) -> a - b, 0.75) * 3.0 + reduce(y, lambda(a, b) -> a - 0.5 * b, -0.0))\n"
+            + "}\n"
+          Scalars = [ "s"; "d" ]; Pools = []; LocalPool = None
+          Needle = fun r ->
+            match r with
+            | "rep_ser" -> Some "__epl_acc_"
+            | _ -> Some "for (size_t __ek = __cep_b;" }
+    let legRegimes =
+        [ (legsCall, "rep_ser", "off", true, true)
+          (legsCall, "lic_ser", "off", false, false)
+          (legsCall, "lic_ser", "fast", false, false)
+          (legsStrict, "rep_ser", "off", true, true)
+          (legsStrict, "lic_ser", "off", false, true)
+          (legsStrict, "lic_ser", "fast", false, true) ]
+    for (p, regime, contract, repro, bitwise) in legRegimes do
+        let name = $"{p.Name} epilogue legs {regime} contract={contract} T=1 (NEW vs BLADE_EPILOGUE_LEGS=0)"
+        use _c = pinEnv "BLADE_FP_CONTRACT" contract
+        use _r = pinEnv "BLADE_FP_REPRO" (if repro then "1" else null)
+        use _o = pinEnv "BLADE_OMP_THREADS" "1"
+        let emitWith (gate: string) =
+            use _g = pinEnv "BLADE_EPILOGUE_LEGS" gate
+            stemN <- stemN + 1
+            let stem = $"epl_{p.Name}_{stemN}"
+            emitCpp p stem |> Result.map (fun cpp -> (stem, cpp))
+        match emitWith null, emitWith "0" with
+        | Error e, _ | _, Error e -> fail name e
+        | Ok (sNew, cNew), Ok (sOld, cOld) ->
+        let needle = (p.Needle regime).Value
+        if not (cNew.Contains needle) then fail name ($"the legs did not ride: no `{needle}` in the NEW emission")
+        elif cOld.Contains "__epl_" then fail name "BLADE_EPILOGUE_LEGS=0 still emitted a leg (`__epl_`)"
+        else
+        match injectProbe p cNew, injectProbe p cOld with
+        | None, _ | _, None -> fail name "could not place the raw-bit probe in main"
+        | Some pNew, Some pOld ->
+        match buildRun sNew pNew "1", buildRun sOld pOld "1" with
+        | Error e, _ | _, Error e when e.StartsWith "compile: Skipped" -> skip name e
+        | Error e, _ -> fail name ("NEW: " + e)
+        | _, Error e -> fail name ("CTRL: " + e)
+        | Ok oNew, Ok oOld ->
+            let rNew, rOld = rawLines oNew, rawLines oOld
+            if rNew.Length <> p.Scalars.Length + 1 || rOld.Length <> rNew.Length then
+                fail name ($"raw-bit probe printed {rNew.Length}/{rOld.Length} lines")
+            elif bitwise then
+                if rNew = rOld then pass name ($"""bitwise NEW == CTRL: {String.concat "; " rNew}""")
+                else fail name ($"""raw bits differ: NEW [{String.concat "; " rNew}] CTRL [{String.concat "; " rOld}]""")
+            else
+                let vals (o: string) =
+                    valueLines o
+                    |> List.filter (fun l -> p.Scalars |> List.exists (fun s -> l.StartsWith (s + " = ")))
+                    |> List.map (fun l -> Double.Parse(l.Substring(l.IndexOf " = " + 3).Trim(), Globalization.CultureInfo.InvariantCulture))
+                let a, b = vals oNew, vals oOld
+                let close = a.Length = p.Scalars.Length && a.Length = b.Length && List.forall2 (fun (x: float) (y: float) -> abs (x - y) <= 1e-12 * max (abs x) (abs y)) a b
+                if close then pass name ($"""licensed legs (a licensed association change) within 1e-12 relative ON THIS FIXTURE, not a general bound (bits {(if rNew = rOld then "identical" else "differ")}): {String.concat "; " rNew}""")
+                else fail name ($"values differ beyond 1e-12: NEW {a} CTRL {b}")
+    // The LLVM lane: identity regime, gate on vs off.
+    (match Build.resolveClang () with
+     | None -> skip "llvm epilogue legs" "no clang (BLADE_LLVM_CLANG)"
+     | Some _ ->
+     for p in [ legsCall; legsStrict ] do
+        let name = $"{p.Name} llvm epilogue legs (REPRO, contract=off, T=1): gate on == gate off"
+        use _c = pinEnv "BLADE_FP_CONTRACT" "off"
+        use _r = pinEnv "BLADE_FP_REPRO" "1"
+        use _o = pinEnv "BLADE_OMP_THREADS" "1"
+        let runWith (gate: string) =
+            use _g = pinEnv "BLADE_EPILOGUE_LEGS" gate
+            stemN <- stemN + 1
+            let stem = $"epl_ll_{p.Name}_{stemN}"
+            match lower p.Source with
+            | Error e -> Error ("lower: " + e)
+            | Ok ir ->
+            match (try EmitLlvm.tryEmitProgramNamed stem ir with ex -> Error ("raised: " + ex.Message)) with
+            | Error why -> Error ($"the llvm lane refused a pinned supported program: {why}")
+            | Ok ll ->
+            let llFile = Path.Combine(work, stem + ".ll")
+            File.WriteAllText(llFile, ll)
+            match Build.compileLlvmProgram llFile work with
+            | Error e -> Error ("llvm compile: " + (if e.Length > 300 then e.Substring(0, 300) else e))
+            | Ok exe ->
+            use _t = pinEnv "OMP_NUM_THREADS" "1"
+            // RAW BITS (W2-3's instrument): every printed Float64 carries its
+            // IEEE-754 pattern, so equal lines are equal bits.
+            use _b = pinEnv "BLADE_PRINT_BITS" "1"
+            match runProc exe 120000 with
+            | Ok (0, out, _) -> Ok (ll, out)
+            | Ok (code, _, err) -> Error ($"llvm exit {code}: {err.Trim()}")
+            | Error e -> Error e
+        match runWith null, runWith "0" with
+        | Error e, _ | _, Error e when e.StartsWith "llvm compile: Skipped" -> skip name e
+        | Error e, _ | _, Error e -> fail name e
+        | Ok (llOn, oOn), Ok (llOff, oOff) ->
+            let loops (s: string) = s.Replace("\r\n", "\n").Split('\n') |> Array.filter (fun l -> l.StartsWith "loop.cond") |> Array.length
+            let a, b = valueLines oOn, valueLines oOff
+            let bitsShown = a |> List.forall (fun l -> l.Contains " #")
+            // the joined pass's loop is gone (the call form's inlined callee
+            // is not emitted when nothing calls it any more)
+            let armOk = loops llOn = loops llOff - 1
+            if a.IsEmpty || not bitsShown then fail name ($"""no raw bits printed (BLADE_PRINT_BITS): [{String.concat " | " a}]""")
+            elif a <> b then fail name ($"""raw bits differ: on [{String.concat " | " a}] off [{String.concat " | " b}]""")
+            elif not armOk then fail name ($"arm needle: {loops llOn} loops on vs {loops llOff} off")
+            else pass name ($"""bitwise gate on == off: {String.concat " | " a}; {loops llOn} vs {loops llOff} loops"""))
+    // The failure fixtures, executed (W2-4 review finding 3): the full fault /
+    // site / frame text with the gate on equals gate-off's, both lanes.
+    //   sibling-folds/026: the legs RIDE (pinned in `blade test optimize`); the
+    //     intervening BL8013 still fires at its own line, after the producer.
+    //   sibling-folds/029: a B1-shaped THROWING callee is never inlined for the
+    //     legs; BL8013 fires inside `kernel`'s own frame (`at kernel`).
+    let corpusFile (rel: string) =
+        [ Path.Combine(Directory.GetCurrentDirectory(), "tests", "corpus", rel)
+          Path.Combine(AppContext.BaseDirectory, "tests", "corpus", rel) ] |> List.tryFind File.Exists
+    for (rel, frame) in [ ("sibling-folds/026_input_legs_failure_between_aborts.blade", None)
+                          ("sibling-folds/029_input_legs_throwing_callee_keeps_frame.blade", Some "at kernel") ] do
+      for lane in [ "cpp"; "llvm" ] do
+        let name = $"{Path.GetFileNameWithoutExtension rel} {lane}: fault, site and frame equal gate on vs off"
+        match corpusFile rel with
+        | None -> fail name "corpus file not found"
+        | Some path ->
+        let src = File.ReadAllText path
+        let src = src.Substring(src.IndexOf '\n' + 1)
+        use _o = pinEnv "BLADE_OMP_THREADS" "1"
+        let runWith (gate: string) : Result<int * string, string> =
+            use _g = pinEnv "BLADE_EPILOGUE_LEGS" gate
+            stemN <- stemN + 1
+            let stem = $"epl_fault_{lane}_{stemN}"
+            match lower src with
+            | Error e -> Error ("lower: " + e)
+            | Ok ir ->
+            let exeR =
+                if lane = "cpp" then
+                    match (try Ok (fst (CodeGen.genSelfContainedProgramFromIR ir stem)) with ex -> Error ex.Message) with
+                    | Error e -> Error e
+                    | Ok cpp ->
+                        let file = Path.Combine(work, stem + ".cpp")
+                        File.WriteAllText(file, cpp)
+                        Build.compileCpp file work
+                else
+                    match (try EmitLlvm.tryEmitProgramNamed stem ir with ex -> Error ("raised: " + ex.Message)) with
+                    | Error why -> Error ("the llvm lane refused: " + why)
+                    | Ok ll ->
+                        let llFile = Path.Combine(work, stem + ".ll")
+                        File.WriteAllText(llFile, ll)
+                        Build.compileLlvmProgram llFile work
+            match exeR with
+            | Error e -> Error e
+            | Ok exe ->
+                use _t = pinEnv "OMP_NUM_THREADS" "1"
+                match runProc exe 120000 with
+                | Ok (code, out, err) -> Ok (code, (out + "\n" + err).Replace("\r\n", "\n").Trim())
+                | Error e -> Error e
+        match runWith null, runWith "0" with
+        | Error e, _ | _, Error e when e.Contains "Skipped" -> skip name e
+        | Error e, _ | _, Error e -> fail name e
+        | Ok (cOn, tOn), Ok (cOff, tOff) ->
+            let frameOk = match frame with Some f -> tOn.Contains f | None -> true
+            if cOn <> 0 && cOn = cOff && tOn = tOff && tOn.Contains "BL8013" && frameOk then
+                let lineTxt = tOn.Split('\n') |> Array.filter (fun l -> l.Contains "BL8013" || l.Contains "-->" || l.Trim().StartsWith "at ") |> String.concat " / "
+                pass name ($"exit {cOn} both; identical text: {lineTxt}")
+            else fail name ($"exit on={cOn} off={cOff}; frame={frameOk}; on [{tOn}] off [{tOff}]")
     (try Directory.Delete(work, true) with _ -> ())
     printFooter blockName [ $"{passed} passed"; $"{failed} failed"; $"{skipped} skipped" ]
     { Block = blockName; Passed = passed; Failed = failed; Skipped = skipped; FailedNames = names }

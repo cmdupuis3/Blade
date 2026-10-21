@@ -2960,6 +2960,8 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     Optimize.CompactRowTable.reset ()
     Optimize.OrbitPullTable.reset ()
     Optimize.MemberHoistTable.reset ()
+    Optimize.EpilogueLegTable.reset ()
+    Optimize.blasGateProbe <- Blade.LinAlgPatterns.blasAvailable
     // The raw decl list callers hand us is the program they PARSED, not the
     // one `TypeCheck.typeCheck` desugared inside itself -- so the icechunk
     // checkout rewrite is applied again here, ahead of Phase 0's

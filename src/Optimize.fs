@@ -158,13 +158,27 @@ let siblingFoldsEnabled () = gateOn "BLADE_SIBLING_FOLDS"
 /// before; the pass records `rec-step-parallel` DECLINED ("disabled by
 /// BLADE_REC_STEP_OMP") for the step it would have admitted. Unset = on.
 let recStepOmpEnabled () = gateOn "BLADE_REC_STEP_OMP"
+/// BLADE_EPILOGUE_LEGS=0|off keeps a producer's INPUT legs (round 3 A7c, gap
+/// G69: sibling folds over the operands of a rank-1 `|> compute` producer
+/// whose cell epilogue B1 places) out of the producer's fused loop: the
+/// legs keep their own joined pass, and the call holding the producer is not
+/// inlined for them. The admission still runs and records `epilogue-legs`
+/// DECLINED ("disabled by BLADE_EPILOGUE_LEGS") with its five-party matrix.
+/// Unset = on.
+let epilogueLegsEnabled () = gateOn "BLADE_EPILOGUE_LEGS"
+/// The C++ lane's BLAS gate (`LinAlgPatterns.blasAvailable`, which compiles
+/// after this file), installed by Lowering before the optimizer runs: the
+/// epilogue-legs planner keeps an inline only when the cell epilogue it rides
+/// is not left to the L1 dispatch. A FUNCTION (read per call), never a cached
+/// value; the default answers "off".
+let mutable blasGateProbe : unit -> bool = fun () -> false
 
 /// Every gate of this layer (charter rule 3), in one place: the optimizer
 /// differential (`blade test opt-diff`, tests/OptDiff.fs) turns ALL of them
 /// off for its reference lane, so a new pass's gate belongs in this list the
 /// day the pass lands -- a gate missing here is a pass the differential
 /// cannot see.
-let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_HOIST"; "BLADE_HOT_ROW"; "BLADE_CELL_EPILOGUE"; "BLADE_COMPACTION_FUSION"; "BLADE_COMPACT_ROW_CLASSES"; "BLADE_SIBLING_FOLDS"; "BLADE_REC_STEP_OMP"; "BLADE_MEMBER_HOIST" ]
+let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_HOIST"; "BLADE_HOT_ROW"; "BLADE_CELL_EPILOGUE"; "BLADE_COMPACTION_FUSION"; "BLADE_COMPACT_ROW_CLASSES"; "BLADE_SIBLING_FOLDS"; "BLADE_REC_STEP_OMP"; "BLADE_MEMBER_HOIST"; "BLADE_EPILOGUE_LEGS" ]
 
 /// A gate's KNOB MIRROR: a value that keeps a pass's PREVIOUS version, or
 /// selects an opt-in variant (not the pass off), for the passes whose forms
@@ -1505,7 +1519,18 @@ let intervalHasProviderEffect (modul: IRModule) (id: IRId) : bool =
 /// binding in between. A conservative `cseFactsOf` check may stand beside it
 /// (it also catches display output), never instead of it: `cseFactsOf` does
 /// not chase a named deferred array initializer.
-let scheduleMayWriteIn (programFuncs: IRCallable list) (modul: IRModule) : IRExpr -> bool =
+let rec scheduleMayWriteIn (programFuncs: IRCallable list) (modul: IRModule) : IRExpr -> bool =
+    scheduleMayWriteWith false programFuncs modul
+
+/// `scheduleMayWriteIn` with every CALLBACK (a function-valued parameter)
+/// joined over the arguments its call sites pass (`callbackTable`, the
+/// collector Lowering's parallel-body refusal uses): the predicate an
+/// admission applies to a PARALLEL body (A7c's producer under an omp
+/// request). An unknown callback still counts as a write.
+and scheduleMayWriteWithCallbacksIn (programFuncs: IRCallable list) (modul: IRModule) : IRExpr -> bool =
+    scheduleMayWriteWith true programFuncs modul
+
+and scheduleMayWriteWith (withCallbacks: bool) (programFuncs: IRCallable list) (modul: IRModule) : IRExpr -> bool =
     let funcs =
         (programFuncs @ modul.Functions) |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     let lets = System.Collections.Generic.Dictionary<IRId, IRExpr>()
@@ -1542,6 +1567,16 @@ let scheduleMayWriteIn (programFuncs: IRCallable list) (modul: IRModule) : IRExp
           CopiedLet = copied
           UnknownIsWrite = true
           Callbacks = (fun _ -> None) }
+    let facts =
+        if not withCallbacks then facts
+        else
+            let table =
+                callbackTable resolve (programFuncs @ modul.Functions) (modul.Bindings |> List.map (fun b -> (b.Id, b.Value)))
+            { facts with
+                Callbacks = (fun id ->
+                    match Map.tryFind id table with
+                    | Some args when not args.IsEmpty -> Some args
+                    | _ -> None) }
     fun (e: IRExpr) -> exprMayWriteWith facts e
 
 let scheduleMayWrite (modul: IRModule) : IRExpr -> bool = scheduleMayWriteIn [] modul
@@ -2551,6 +2586,328 @@ let recordRecStep (subject: string) (outcome: Blade.Effects.DecisionOutcome) (ev
         { Blade.Effects.Rule = "rec-step-parallel"; Version = 1
           Span = Blade.Ast.noSpan; Subject = subject
           Outcome = outcome; Evidence = evidence }
+
+// --- Producer-input legs (round 3 A7c, rule `epilogue-legs` v1, gap G69) -----
+//
+// saxpy's region after the sibling-fold join:
+//
+//     let y2 = method_for(zip(x, y)) <@> k |> compute          (named, stored)
+//     let s  = reduce(method_for(y2) <@> lambda(w) -> w * w, F, 0.0)   (B1)
+//     let j  = reduce(id <@> x <&!> id <@> y, ((+), (+)), (-0.0, -0.0))
+//     (s, j[0] + j[1])
+//
+// walks x and y twice: once in y2's producer loop (which B1 already fuses with
+// s), once in j's joined pass. The legs of j fold EXACTLY the producer's input
+// operands, so the producer loop can carry them as extra fold state, fed by
+// the values it already loads: a STRICT leg as its own ascending chain from its
+// own seed (one step per cell, the producer's order), a LICENSED leg (its OWN
+// reorder licence -- never the map's, never another leg's, G7 policy) as its
+// own K-lane state. Each leg's result is bound where the join was; the combine
+// and everything downstream stay at their original points.
+//
+// The side table below is the whole interface: the IR keeps the join (the
+// interpreter runs it as written), the producer's emitter carries the legs
+// and publishes their accumulators, the join's emitter binds its tuple from
+// them -- or, when the producer did not carry them in this lane and build,
+// emits the ordinary joined pass. The admission is
+// `producerEpilogueLegAdmission` (closed totality, dominating captures and
+// seeds, operand / index equality, the five parties through the shared write
+// analysis); the region is assembled by the sibling-fold pass, which -- when
+// the producer sits in a callee the legs' statement calls (saxpy's
+// `kernel(x, y)`) -- inlines that call one level ONLY for an admitted plan.
+
+/// One input leg riding a producer's loop.
+type EpilogueLeg = {
+    /// The leg's position among the join's leaves (its tuple slot).
+    Slot: int
+    /// The producer operand the leg folds: its position in the producer's
+    /// `Arrays` (its pool in the flat sweep) and its id.
+    OperandPos: int
+    OperandId: IRId
+    /// The leg's fold kernel and seed, as the join carries them.
+    Kernel: IRExpr
+    Seed: IRExpr
+    /// The leg's accumulator (result) type and the operand's element type.
+    ElemType: IRType
+    OperandElem: IRType
+    /// The leg's OWN reorder licence in this build (planning view; each
+    /// emitter re-derives it from its own predicate).
+    Licensed: bool
+    Name: string
+    /// The LLVM lane's handshake: a fresh id the producer binds in its slot
+    /// table and the join reads (never in the IR tree).
+    SlotId: IRId
+}
+
+type EpilogueLegPlan = {
+    ProducerId: IRId
+    JoinId: IRId
+    Legs: EpilogueLeg list
+    ProducerName: string
+    Subject: string
+    /// The call the sibling pass inlined one level FOR this plan (`kernel(x,
+    /// y)`), None when the producer was already in the region.
+    InlinedCall: string option
+    /// That inlined callee's array lets (its stored `|> compute` pools: y2),
+    /// which the call's return used to free. The C++ lane frees them at the
+    /// join -- the statement right behind the inlined spine, i.e. the call's
+    /// ORIGINAL return point -- so the inline changes no lifetime there
+    /// (W2-4 review finding 2); the LLVM lane frees no pool in either form.
+    InlinedPools: (IRId * IRType) list
+    /// C++ handshake: per leg (slot order) the published name and whether it
+    /// is a lane partial (true: the join applies seed + combine) or the
+    /// finished chain (false). Set by the producer's flat sweep when it
+    /// carried the legs, read and CLEARED by the join.
+    EmittedCpp: (string * bool) list option ref
+    /// An emitter recorded this plan's per-lane outcome already.
+    DecidedCpp: bool ref
+    DecidedLlvm: bool ref
+    /// The C++ join site's re-entry guard while it emits the join behind the
+    /// inlined call's pool frees (set only for the duration of that call).
+    FreeGuard: bool ref
+}
+
+module EpilogueLegTable =
+    open System.Threading
+    type State = { ByProducer: Map<IRId, EpilogueLegPlan>; ByJoin: Map<IRId, EpilogueLegPlan> }
+    let private empty = { ByProducer = Map.empty; ByJoin = Map.empty }
+    let private cell = new AsyncLocal<State>()
+    let private get () = match box cell.Value with null -> empty | _ -> cell.Value
+    let reset () = cell.Value <- empty
+    /// False when the producer already carries another join's legs.
+    let record (p: EpilogueLegPlan) : bool =
+        let s = get ()
+        if s.ByProducer.ContainsKey p.ProducerId || s.ByJoin.ContainsKey p.JoinId then false
+        else
+            cell.Value <- { ByProducer = Map.add p.ProducerId p s.ByProducer
+                            ByJoin = Map.add p.JoinId p s.ByJoin }
+            true
+    let tryProducer (id: IRId) : EpilogueLegPlan option = Map.tryFind id (get ()).ByProducer
+    let tryJoin (id: IRId) : EpilogueLegPlan option = Map.tryFind id (get ()).ByJoin
+
+/// One `epilogue-legs` v1 decision (the planner's admission with its
+/// five-party matrix; each emitter records its per-lane outcome under the
+/// same rule).
+let recordEpilogueLegs (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
+    Blade.Effects.Decisions.record
+        { Blade.Effects.Rule = "epilogue-legs"; Version = 1
+          Span = Blade.Ast.noSpan; Subject = subject
+          Outcome = outcome; Evidence = evidence }
+
+/// One candidate leg as the region presents it.
+type EpilogueLegSpec = {
+    Name: string
+    OperandId: IRId
+    OperandName: string
+    Kernel: IRExpr
+    Seed: IRExpr
+    SeedText: string
+    /// The leg's own reorder licence in this build (repro: false).
+    Licensed: bool
+}
+
+/// The region the admission judges: its statements in order, the producer's
+/// statement, the join point (the statement the legs' results are bound
+/// before) and every statement holding a leg (whose remainder is the legs'
+/// OUTER combine).
+type EpilogueLegRegion = {
+    Subject: string
+    ProducerName: string
+    ProducerId: IRId
+    ProducerInfo: ApplyInfo
+    Stmts: (IRId option * string * IRExpr) array
+    ProducerAt: int
+    JoinAt: int
+    MemberAts: int list
+    Legs: EpilogueLegSpec list
+}
+
+/// What the admission asks of its caller's analyses.
+type EpilogueLegFacts = {
+    Resolve: IRExpr -> IRCallable option
+    /// THE shared transitive write analysis (`scheduleMayWriteIn programFuncs
+    /// modul`; an unresolved callee counts as a write).
+    Writes: IRExpr -> bool
+    /// The same analysis with every callback (a function-valued parameter)
+    /// joined over the arguments its call sites pass (`callbackTable`): the
+    /// producer's parallel body when it requests omp.
+    CallbackWrites: IRExpr -> bool
+    /// The CSE facts' repeatability (no display output, no effect).
+    Repeatable: IRExpr -> bool
+    /// The seed judge (the sibling pass's closed total whitelist).
+    SeedTotal: IRExpr -> bool
+    /// A statement's complete payload (`intervalPayloadOf`).
+    PayloadOf: IRId -> IRExpr -> IRExpr
+    ProviderEffect: IRId -> bool
+    /// An IRAssign anywhere in the module (bindings' payloads, function
+    /// bodies, the region) targets this id.
+    AssignedAnywhere: IRId -> bool
+    /// This build emits thread-level OpenMP.
+    ThreadsBuild: bool
+    /// The TRANSITIVE free names of an expression: its references, and for
+    /// every callable it names (a kernel, a seed's callee, a nested function)
+    /// that callable's captures and body, cycle-safe (the sibling pass's
+    /// `freeVarsOf`). Dominance at the producer is judged on this closure,
+    /// never on the immediate body alone (Codex W2-4 review finding 1).
+    FreeVarsOf: IRExpr -> Set<IRId>
+    /// Some why when an operand is not FRESH storage of its own -- a named
+    /// view or alias of another array (`let xv = X(0)`, `let xa = x`): v1
+    /// admits fresh operands only (a `|> compute`, a function result, a
+    /// literal, a parameter), so operand identity is identity of storage.
+    OperandNotFresh: IRId -> string option
+}
+
+/// THE A7c ADMISSION (rule `epilogue-legs` v1). Ok = the evidence (the
+/// five-party matrix); Error = (the first failed condition, the matrix rows
+/// established before it). Codex review A finding 11 is the checklist:
+///   * the producer: a forced (`|> compute`) dense rank-1 literal-extent map,
+///     plain one-level co-iteration over stored named arrays, no Reynolds,
+///     cuda or mpi, never assigned; its kernel writes nothing (both the
+///     shared analysis and, under an omp request, the callback-joined one);
+///     NOT threaded in this build (a strict chain split per thread would not
+///     be the serial chain; v1 builds no per-chunk licensed leg either);
+///   * each leg: its operand is EXACTLY one of the producer's operands (the
+///     same id: not a view, alias, slice or deferred map of it), over the
+///     same index space and extent, never assigned; its kernel a resolved
+///     two-parameter callable, CLOSED-TOTAL (Blade.IRTotality: no BL8013 /
+///     BL8006 / BL8003 site, so running it at the producer cannot move a
+///     failure ahead of an intervening binding's), writing nothing (G43);
+///     its seed total and writing nothing; every capture / free name of the
+///     kernel and the seed bound BEFORE the producer (it runs there);
+///   * the outer combine (the remainder of every statement holding a leg)
+///     writes nothing -- it stays where it is, reading the same values;
+///   * every intervening binding (the producer .. the join point, and the
+///     legs' own statements) by its complete payload: no write (an operand
+///     array, a capture, a seed input or anything else), no provider effect,
+///     repeatable.
+let producerEpilogueLegAdmission (facts: EpilogueLegFacts) (r: EpilogueLegRegion) : Result<string list, string * string list> =
+    let rows = ResizeArray<string>()
+    let fail (why: string) = Error (why, List.ofSeq rows)
+    let pinfo = r.ProducerInfo
+    let legNames = r.Legs |> List.map (fun l -> l.Name) |> String.concat ", "
+    let refs (e: IRExpr) = collectVarRefsIR e
+    let opIds = pinfo.Arrays |> List.choose (function IRVar (id, _) -> Some id | _ -> None)
+    let opNames =
+        List.zip pinfo.Arrays (if pinfo.Identities.Length = pinfo.Arrays.Length then pinfo.Identities else List.replicate pinfo.Arrays.Length (AIDVariable "?"))
+        |> List.map (fun (_, ident) -> match ident with AIDVariable n -> n | _ -> "?")
+    let plainAxis (t: IRType) : (int64 * IRIndexType) option =
+        match stripUnits t with
+        | ArrayElem at when not at.IsVirtual ->
+            (match at.IndexTypes with
+             | [ ix ] when ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank = 1 ->
+                (match ix.Extent with IRLit (IRLitInt n) when n > 0L -> Some (n, ix) | _ -> None)
+             | _ -> None)
+        | _ -> None
+    match facts.Resolve (fst (peelReynolds pinfo.Kernel)) with
+    | None -> fail "the producer's kernel does not resolve to a callable"
+    | Some pk ->
+    // ---- party 1: the producer kernel ----------------------------------
+    let pAxis = plainAxis pinfo.OutputType
+    if pAxis.IsNone || pinfo.KernelOutputRank <> 0 then fail $"`{r.ProducerName}` is not a dense rank-1 literal-extent producer"
+    elif pinfo.HasReynolds || pk.IsCudaKernel || pk.IsMpiParallel then fail $"`{r.ProducerName}`'s kernel carries a Reynolds body or a cuda/mpi strategy"
+    elif opIds.Length <> pinfo.Arrays.Length || pinfo.Arrays.IsEmpty || (pinfo.Arrays.Length > 1 && not pinfo.IsCoIteration) then
+        fail $"`{r.ProducerName}` is not a plain co-iteration over stored named arrays"
+    elif facts.AssignedAnywhere r.ProducerId then fail $"`{r.ProducerName}` is assigned after its binding (its stores are not the producer's alone)"
+    elif facts.Writes (IRApplyCombinator pinfo) then
+        fail $"the producer kernel of `{r.ProducerName}` may write (scheduleMayWriteIn): the legs' reads would interleave with its writes"
+    elif pk.IsOmpParallel && facts.CallbackWrites (IRApplyCombinator pinfo) then
+        fail $"the producer's parallel body may write through a callback (callbackTable)"
+    else
+    let (pn, pix) = pAxis.Value
+    let ompNote = if pk.IsOmpParallel then "; its omp body audited with callbackTable's callbacks too" else ""
+    let opsTxt = String.concat ", " opNames
+    rows.Add $"producer kernel `{r.ProducerName}` = map over {{{opsTxt}}} ({pn} cells): no write (scheduleMayWriteIn){ompNote}; forced, stored, never assigned"
+    if pk.IsOmpParallel && facts.ThreadsBuild then
+        let strict = r.Legs |> List.filter (fun l -> not l.Licensed)
+        if not strict.IsEmpty then
+            let names = strict |> List.map (fun l -> l.Name) |> String.concat ", "
+            fail $"the producer runs a thread team; the strict legs {names} keep their serial pass"
+        else
+            fail $"the producer runs a thread team; the licensed legs {legNames} keep their own pass (v1 builds no per-chunk leg partial: the standalone fold's chunk partition and combine are not shown to be the producer's)"
+    else
+    // ---- party 2: the leg kernels (operands, totality, writes) -----------
+    let legProblem =
+        r.Legs |> List.tryPick (fun l ->
+            if not (List.contains l.OperandId opIds) then
+                if l.OperandId = r.ProducerId then
+                    Some $"leg {l.Name} folds the producer's OUTPUT `{r.ProducerName}` (the cell epilogue owns the output; an input leg reads one of the producer's operands)"
+                else
+                    Some $"leg {l.Name} folds `{l.OperandName}`, which is not one of `{r.ProducerName}`'s operands (an input leg reads exactly the producer's operand -- not an alias, view, slice or deferred map of it)"
+            else
+            let pos = opIds |> List.findIndex (fun id -> id = l.OperandId)
+            match plainAxis (typeOf pinfo.Arrays.[pos]) with
+            | Some (n, ix) when n = pn && IRTotality.sameIndex ix pix ->
+                if facts.AssignedAnywhere l.OperandId then Some $"leg {l.Name}'s operand `{l.OperandName}` is assigned somewhere in the module"
+                else
+                match facts.OperandNotFresh l.OperandId with
+                | Some why -> Some $"leg {l.Name}'s operand `{l.OperandName}` is {why} (v1 admits fresh operands only: a `|> compute`, a function result, a literal or a parameter -- a shared named view is not proved to be the same storage at both traversals)"
+                | None ->
+                match facts.Resolve l.Kernel with
+                | None -> Some $"leg {l.Name}'s fold kernel does not resolve to a callable"
+                | Some kc when kc.Params.Length <> 2 || kc.IsCudaKernel || kc.IsMpiParallel -> Some $"leg {l.Name}'s fold kernel is not a plain two-parameter callable"
+                | Some kc when kc.IsOmpParallel && facts.ThreadsBuild ->
+                    Some $"leg {l.Name}'s fold kernel requests omp in a build that emits threads: riding the serial producer loop would drop its thread team (the joined pass keeps it)"
+                | Some kc ->
+                    match IRTotality.auditCallable facts.Resolve (fun _ -> None) (fun _ -> false) kc [] with
+                    | Error why -> Some $"leg {l.Name}'s fold kernel is not closed-total ({why}): running it at the producer could move its failure ahead of an intervening binding's"
+                    | Ok () ->
+                        if facts.Writes l.Kernel then Some $"leg {l.Name}'s fold kernel may write (G43)"
+                        else None
+            | _ -> Some $"leg {l.Name}'s operand `{l.OperandName}` is not over `{r.ProducerName}`'s index space and extent")
+    match legProblem with
+    | Some why -> fail why
+    | None ->
+    rows.Add $"leg kernels {legNames}: each folds one of the producer's own operands (same id, index space and extent; never assigned); closed-total (IRTotality); no write (scheduleMayWriteIn)"
+    // ---- party 3: the seeds (and the captures) dominate the producer -----
+    let insideIds =
+        [ r.ProducerAt .. r.JoinAt - 1 ]
+        |> List.choose (fun i -> let (b, n, _) = r.Stmts.[i] in b |> Option.map (fun id -> (id, n)))
+    let kernelFree (k: IRExpr) =
+        match facts.Resolve k with
+        | Some kc -> Set.union (refs kc.Body) (kc.Captures |> List.map (fun c -> c.Id) |> Set.ofList)
+        | None -> Set.empty
+    let seedProblem =
+        r.Legs |> List.tryPick (fun l ->
+            if not (facts.SeedTotal l.Seed) then Some $"leg {l.Name}'s seed may fail or has effects"
+            elif facts.Writes l.Seed then Some $"leg {l.Name}'s seed may write"
+            else
+            // TRANSITIVE (finding 1): the kernel's and the seed's callees, their
+            // captures and their bodies, followed through every resolved callable.
+            let kf = Set.union (kernelFree l.Kernel) (facts.FreeVarsOf l.Kernel)
+            let sf = Set.union (refs l.Seed) (facts.FreeVarsOf l.Seed)
+            match insideIds |> List.tryFind (fun (id, _) -> Set.contains id kf) with
+            | Some (_, n) -> Some $"leg {l.Name}'s fold kernel reads `{n}` (directly or through a callee it names), which is bound at or after the producer (the leg would run before it exists)"
+            | None ->
+            match insideIds |> List.tryFind (fun (id, _) -> Set.contains id sf) with
+            | Some (_, n) -> Some $"leg {l.Name}'s seed reads `{n}` (directly or through a callee it names), which is bound at or after the producer (a strict chain starts at the producer)"
+            | None -> None)
+    match seedProblem with
+    | Some why -> fail why
+    | None ->
+    let seedTxt = r.Legs |> List.map (fun l -> $"{l.Name}: {l.SeedText}") |> String.concat ", "
+    rows.Add $"seeds ({seedTxt}): total, no write, every input (and every capture of the leg kernels, transitively through every callee they name) bound before the producer; each evaluated once, at its chain's start"
+    // ---- parties 4-5: the outer combine and the intervening bindings ------
+    let between = [ r.ProducerAt + 1 .. r.JoinAt - 1 ] @ r.MemberAts |> List.distinct |> List.sort
+    let stmtProblem =
+        between |> List.tryPick (fun i ->
+            let (b, n, v0) = r.Stmts.[i]
+            let v = match b with Some id -> facts.PayloadOf id v0 | None -> v0
+            let isMember = List.contains i r.MemberAts
+            let what = if isMember then $"the legs' own statement `{n}` (their outer combine)" else $"`{n}`"
+            if facts.Writes v then Some $"{what} may write between the producer and the legs (scheduleMayWriteIn): the legs would read their operands before it"
+            elif (match b with Some id -> facts.ProviderEffect id | None -> false) then Some $"{what} has a provider effect between the producer and the legs"
+            elif not (facts.Repeatable v) then Some $"{what} is not repeatable (display output or a call the module cannot judge) between the producer and the legs"
+            else None)
+    match stmtProblem with
+    | Some why -> fail why
+    | None ->
+    let memberNames = r.MemberAts |> List.map (fun i -> let (_, n, _) = r.Stmts.[i] in $"`{n}`") |> String.concat ", "
+    rows.Add $"outer kernel ({memberNames}: the combine of the legs' results): no write; it stays at its original point"
+    let interNames =
+        [ r.ProducerAt + 1 .. r.JoinAt - 1 ] |> List.map (fun i -> let (_, n, _) = r.Stmts.[i] in $"`{n}`")
+    let interTxt = if interNames.IsEmpty then "none" else String.concat ", " interNames
+    rows.Add $"intervening ({interTxt}; the legs' statements included): no write (by complete payload), no provider effect, repeatable"
+    Ok (List.ofSeq rows)
 
 /// The cell term of a ROW kernel `lambda(row) -> prodsum(row, row)`.
 let rowKernelCellTerm (ck: IRCallable) : CellTerm option =
@@ -5555,7 +5912,11 @@ type private SfLeg =
       /// `joinedFoldThreadPlan`'s audit applies): Ok for a synthesized
       /// identity / product leaf.
       Audit: Result<unit, string>
-      ResultType: IRType }
+      ResultType: IRType
+      /// A leg made from `reduce(a, k[, s])` over a stored array: (a, k, the
+      /// leg's seed -- the identity seed for an unseeded builtin leg). The
+      /// producer-input admission (A7c) reads it; None for every other leg.
+      Source: (IRId * IRExpr * IRExpr) option }
 
 type private SfMember =
     { Unit: int
@@ -6136,7 +6497,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
         let mkLeg (leafF: unit -> IRExpr) (k: IRExpr) (c: IRCallable) (seed: IRExpr) (note: (string * string) option) (leafOmp: bool) (audit: Result<unit, string>) (resTy: IRType) =
             let lic = licensed c
             { Build = (fun () -> (leafF (), k, seed)); SeedNote = note; Licensed = lic; Op = builtinOp c
-              Threads = (c.IsOmpParallel && lic) || leafOmp; Audit = audit; ResultType = resTy }
+              Threads = (c.IsOmpParallel && lic) || leafOmp; Audit = audit; ResultType = resTy; Source = None }
 
         // Member admission.
         let admit (ui: int) (ord: int) (node: IRExpr) : Result<SfMember, string> =
@@ -6186,7 +6547,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                                     | IRTArrow (slots, _, id2) -> IRTArrow (slots, elemTy, id2)
                                     | t -> t
                                 mapOneArrayApply arr at (IRVar (lam.Id, mkFuncArrow [ elemTy ] elemTy)) outTy
-                            let leg = mkLeg leafF k c seed note false (Ok ()) (typeOf node)
+                            let leg = { mkLeg leafF k c seed note false (Ok ()) (typeOf node) with Source = Some (aid, k, seed) }
                             Ok (baseM [ leg ] n ix [ aid ] (Some (canon node)) desc None))
                  | _ -> Error $"{desc}: the operand is not a stored array named by a variable")
             | IRProdSum args ->
@@ -6246,7 +6607,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                         let leaf = leafF ()
                         let add = addLam () |> mint origin
                         (leaf, IRVar (add.Id, mkFuncArrow [ f64; f64 ] f64), IRLit (IRLitFloat 0.0)))
-                      SeedNote = None; Licensed = true; Op = Some IRAdd; Threads = false; Audit = Ok (); ResultType = f64 }
+                      SeedNote = None; Licensed = true; Op = Some IRAdd; Threads = false; Audit = Ok (); ResultType = f64; Source = None }
                 Ok (baseM [ leg ] n0 ix0 (typed |> List.map (fun (id, _, _, _) -> id)) (Some (canon node)) desc None)
             | IRReduceCompute (comp, k, s) ->
                 let leaves = leavesOf comp
@@ -6494,15 +6855,221 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
 
         if applied.Count = 0 then body else
 
+        // ---- A7c: producer-input legs (rule `epilogue-legs` v1, gap G69) -----
+        // An applied group whose every leg is `reduce(a, k[, s])` of a stored
+        // array, after a rank-1 producer of this region whose cell epilogue
+        // B1 will take (`epilogueReserved`: an original statement, or a let of
+        // a call body the tentative spine inlined -- saxpy's `kernel(x, y)`)
+        // and whose operands (or output) the legs read, is judged by
+        // producerEpilogueLegAdmission. Admitted with the gate on, the call
+        // holding the producer is inlined FOR the legs (the region then has
+        // no call boundary between them), and the plan is recorded once the
+        // join has its id (below). Nothing else changes: the join stays in
+        // the IR, so the interpreter -- and any lane that does not carry the
+        // legs -- runs it as written.
+        let legPlans = System.Collections.Generic.Dictionary<int, IRId * ApplyInfo * EpilogueLegSpec list * string option * (IRId * IRType) list>()
+        let legInlines = System.Collections.Generic.HashSet<int * int>()
+        if cellEpilogueOn () then
+            let legFacts : EpilogueLegFacts =
+                let schedWrites = scheduleMayWriteIn programFuncs modul
+                let schedWritesCb = scheduleMayWriteWithCallbacksIn programFuncs modul
+                let assignsTo (id: IRId) (e: IRExpr) =
+                    let mutable hit = false
+                    iterIRExpr (fun n ->
+                        match n with
+                        | IRAssign (target, _) when Set.contains id (collectVarRefsIR target) -> hit <- true
+                        | _ -> ()) e
+                    hit
+                { Resolve = (fun e -> resolveCallableIn funcs (fst (peelReynolds e)))
+                  Writes = (fun e -> schedWrites e || mayWrite e)
+                  CallbackWrites = schedWritesCb
+                  Repeatable = (fun e -> (facts e).Repeatable)
+                  SeedTotal = sfTotal Set.empty
+                  PayloadOf = intervalPayloadOf modul
+                  ProviderEffect = intervalHasProviderEffect modul
+                  AssignedAnywhere = (fun id ->
+                      (modul.Bindings |> List.exists (fun b -> bindingPayload modul b |> List.exists (assignsTo id)))
+                      || (modul.Functions |> List.exists (fun f -> assignsTo id f.Body))
+                      || (tentative |> Array.exists (fun u -> assignsTo id u.Value)))
+                  ThreadsBuild = Blade.Toolchain.ompThreadEmissionEnabled ()
+                  FreeVarsOf = freeVarsOf
+                  OperandNotFresh = (fun id ->
+                      let fresh (v: IRExpr) =
+                          match v with
+                          | IRCompute _ | IRArrayLit _ -> None
+                          | IRApp (IRVar (f, _), _, _) when Map.containsKey f funcs -> None
+                          | IRVar (y, _) -> Some $"an alias of `{nameOf y}`"
+                          | IRApp (IRVar (y, _), _, _) -> Some $"a named view into `{nameOf y}`"
+                          | _ -> Some "bound to a value that is not fresh storage of its own"
+                      match boundAt.TryGetValue id with
+                      | true, ui -> fresh tentative.[ui].Value
+                      | _ ->
+                          if regionParams.Contains id then None
+                          else
+                              match modul.Bindings |> List.tryFind (fun b -> b.Id = id) with
+                              | Some b -> fresh b.Value
+                              | None -> Some "bound outside this region and module") }
+            let rec collapseC (e: IRExpr) = match e with IRCompute i -> collapseC i | e -> e
+            let taken = System.Collections.Generic.HashSet<IRId>()
+            let fmtSeed (s: IRExpr) =
+                match s with
+                | IRLit (IRLitFloat f) when System.Math.Abs f < 1e15 && f = System.Math.Floor f -> sprintf "%.1f" f
+                | IRLit (IRLitFloat f) -> sprintf "%.17g" f
+                | IRLit (IRLitInt n) -> string n
+                | IRVar (id, _) -> nameOf id
+                | _ -> "a total expression"
+            applied |> Seq.iteri (fun gi (g, legs, _) ->
+                if legs |> List.forall (fun l -> l.Source.IsSome) then
+                    let joinAt = (g |> List.minBy (fun m -> (m.Unit, m.Ordinal))).Unit
+                    let legOps = legs |> List.map (fun l -> let (a, _, _) = l.Source.Value in a)
+                    let producers =
+                        [ 0 .. tentative.Length - 1 ]
+                        |> List.choose (fun ci ->
+                            if not (epilogueReserved ci 0 tentative.[ci].Value) then None
+                            else
+                                match oneCellConsumerOf tentative.[ci].Value, tentative.[ci].Value with
+                                | Some (pId, cinfo, ck), IRReduceCompute (_, ck2, cseed) ->
+                                    (match boundAt.TryGetValue pId with
+                                     | true, pu when pu < joinAt -> Some (pu, pId, (cinfo, ck, ck2, cseed))
+                                     | _ -> None)
+                                | _ -> None)
+                        |> List.distinctBy (fun (pu, pId, _) -> (pu, pId))
+                    let reads (pu: int, pId: IRId, b1) =
+                        match collapseC tentative.[pu].Value with
+                        | IRApplyCombinator pinfo ->
+                            let ops = pinfo.Arrays |> List.choose (function IRVar (id, _) -> Some id | _ -> None)
+                            if legOps |> List.exists (fun a -> a = pId || List.contains a ops) then Some (pu, pId, pinfo, b1) else None
+                        | _ -> None
+                    match producers |> List.choose reads |> List.sortBy (fun (pu, _, _, _) -> -pu) with
+                    | [] -> ()
+                    | (pu, pId, pinfo, (cinfo, ck, fkExpr, b1Seed)) :: _ ->
+                    let pName = nameOf pId
+                    let specs =
+                        legs |> List.map (fun l ->
+                            let (a, k, s) = l.Source.Value
+                            let opName = nameOf a
+                            let suffix = match l.Op with Some IRAdd -> "sum" | Some IRMul -> "prod" | _ -> "fold"
+                            let seedText = match l.SeedNote with Some (_, txt) -> txt | None -> fmtSeed s
+                            let spec : EpilogueLegSpec =
+                                { Name = $"{opName}-{suffix}"; OperandId = a; OperandName = opName; Kernel = k; Seed = s
+                                  SeedText = seedText; Licensed = reorderingBuild && l.Licensed }
+                            spec)
+                    let names = specs |> List.map (fun s -> s.Name) |> String.concat ", "
+                    // Finding 5: a builtin `(+)` / `(*)` leg carries its OWN licence
+                    // (formalism 2.4's recognised builtins), so it is strict only in
+                    // the repro build; the record says which, per build.
+                    let form =
+                        if specs |> List.forall (fun s -> not s.Licensed) then "strict chains, ascending, own seeds"
+                        elif specs |> List.forall (fun s -> s.Licensed) then
+                            "builtin-licensed: each leg its own licence, its own K-lane state (C++) / fold flags (LLVM) and seed, never another leg's or the map's; strict under repro"
+                        else "strict legs as ascending chains, licensed legs as their own K-lane states, each its own seed"
+                    let headline = $"legs {names} ride {pName}'s producer pass ({form})"
+                    let licenceNote =
+                        if not reorderingBuild then "licences: the repro build keeps every leg strict (a builtin `(+)` / `(*)` leg is licensed only outside repro)"
+                        else
+                            specs |> List.map (fun s -> $"{s.Name}: " + (if s.Licensed then "licensed (its own: a builtin or commutative kernel)" else "strict (no licence of its own)")) |> String.concat ", " |> sprintf "licences: %s"
+                    let region : EpilogueLegRegion =
+                        { Subject = subject; ProducerName = pName; ProducerId = pId; ProducerInfo = pinfo
+                          Stmts = tentative |> Array.map (fun u ->
+                                    (u.Binder, (match u.Binder with Some id -> nameOf id | None -> "the region's result"), u.Value))
+                          ProducerAt = pu; JoinAt = joinAt
+                          MemberAts = g |> List.map (fun m -> m.Unit) |> List.distinct |> List.sort
+                          Legs = specs }
+                    let inlineKey = match tentative.[pu].Key with SfInl (i, c, _) -> Some (i, c) | SfOrig _ -> None
+                    // The inlined callee's ARRAY lets (its stored pools), freed at the
+                    // call's original return point by the C++ lane (finding 2).
+                    let inlinedPools =
+                        match inlineKey with
+                        | Some key ->
+                            tentative |> Array.toList |> List.choose (fun u ->
+                                match u.Key, u.Binder, u.Value with
+                                | SfInl (i, c, _), Some id, (IRCompute _ as v) when (i, c) = key -> Some (id, typeOf v)
+                                | _ -> None)
+                        | None -> []
+                    let inlNote =
+                        match inlineKey with
+                        | Some key ->
+                            let pools = inlinedPools |> List.map (fst >> nameOf) |> String.concat ", "
+                            [ $"{inlineDisp key} inlined one level so the producer and the legs share one region (no call boundary between them); the C++ lane frees its pools ({pools}) at the call's original return point (right behind the inlined spine), so the inline moves no free -- the LLVM lane frees no pool in either form" ]
+                        | None -> []
+                    // FINDING 4: the inline is kept only when BOTH lanes' fused forms
+                    // can carry the legs in this build -- the facts each emitter's own
+                    // gate reads (CodeGenCuda.buildFlatEpilogue / attachEpilogueLegs,
+                    // EmitLlvm.tryBindFlatEpilogueProducer), stated here so a planned
+                    // inline never outlives a route no lane emits.
+                    let routeProblem () : string option =
+                        let fk = kernelOf fkExpr
+                        let elemOf (t: IRType) = match stripUnits t with IRTScalar et -> Some et | ArrayElem at -> (match stripUnits at.ElemType with IRTScalar et -> Some et | _ -> None) | _ -> None
+                        let realFloat (et: ElemType option) = (et = Some ETFloat64 || et = Some ETFloat32)
+                        let lanesOff () =
+                            match System.Environment.GetEnvironmentVariable "BLADE_FOLD_LANES" with
+                            | null -> false
+                            | v -> List.contains (v.Trim().ToLowerInvariant()) [ "0"; "off"; "false"; "no" ]
+                        match fk with
+                        | None -> Some "the producer's epilogue fold kernel does not resolve"
+                        | Some fk ->
+                        let b1Op = builtinOp fk
+                        let b1Licensed = reorderingBuild && licensed fk
+                        let b1Elem = elemOf fk.RetType
+                        let cellElem = elemOf pinfo.OutputType
+                        let b1Request = fk.IsOmpParallel || ck.IsOmpParallel
+                        match b1Seed with
+                        | IRLit _ when b1Op = Some IRAdd || b1Op = Some IRMul ->
+                            if cellElem <> b1Elem then Some "the producer's cell type differs from its epilogue fold's accumulator type (no lane fuses it)"
+                            elif b1Licensed && b1Op <> Some IRAdd then Some "the epilogue fold is licensed but not a builtin `+` (the C++ lane-state form takes `+` only)"
+                            elif b1Licensed && not (realFloat b1Elem) then Some "the epilogue fold is licensed over a non-floating element (no lane-state form)"
+                            elif b1Licensed && lanesOff () then Some "the epilogue fold is licensed and BLADE_FOLD_LANES=off (the C++ lane keeps its two-pass fold)"
+                            elif b1Licensed && blasGateProbe () && not b1Request then Some "the BLAS gate is on and the epilogue fold carries no omp request (the C++ L1 dispatch may own it)"
+                            else
+                            specs |> List.tryPick (fun s ->
+                                let lk = kernelOf s.Kernel
+                                let lElem = lk |> Option.bind (fun c -> elemOf c.RetType)
+                                let opElem =
+                                    pinfo.Arrays |> List.tryFindIndex (function IRVar (id, _) -> id = s.OperandId | _ -> false)
+                                    |> Option.bind (fun pos -> List.tryItem pos pinfo.ArrayTypes)
+                                    |> Option.bind (fun at -> match stripUnits at.ElemType with IRTScalar et -> Some et | _ -> None)
+                                match lk with
+                                | None -> Some $"leg {s.Name}'s kernel does not resolve"
+                                | Some lc ->
+                                if s.Licensed && not b1Licensed then Some $"leg {s.Name} is licensed but the epilogue keeps its ordered chain in this build (v1 feeds a licensed leg only beside the lane-state form)"
+                                elif s.Licensed && (builtinOp lc <> Some IRAdd || not (realFloat lElem) || lanesOff ()) then Some $"leg {s.Name} is licensed but takes no lane-state form (not a floating builtin `+`, or BLADE_FOLD_LANES=off)"
+                                elif lElem.IsNone || lElem <> opElem then Some $"leg {s.Name}'s accumulator type is not its operand's element type"
+                                else None)
+                        | IRLit _ -> Some "the producer's epilogue fold kernel is not a builtin `+` / `*` (both lanes' fused loops evaluate it ahead of the intervening bindings)"
+                        | _ -> Some "the producer's epilogue fold seed is not a literal (both lanes' fused loops evaluate it ahead of the producer)"
+                    match producerEpilogueLegAdmission legFacts region with
+                    | Error (why, rows) ->
+                        recordEpilogueLegs subject (Blade.Effects.Declined (resolveNames why)) ((headline :: rows) |> List.map resolveNames)
+                    | Ok rows when not (epilogueLegsEnabled ()) ->
+                        recordEpilogueLegs subject (Blade.Effects.Declined "disabled by BLADE_EPILOGUE_LEGS") ((headline :: rows) |> List.map resolveNames)
+                    | Ok rows when taken.Contains pId ->
+                        recordEpilogueLegs subject (Blade.Effects.Declined $"another join's legs already ride `{pName}`'s producer pass") ((headline :: rows) |> List.map resolveNames)
+                    | Ok rows ->
+                    match routeProblem () with
+                    | Some why ->
+                        recordEpilogueLegs subject (Blade.Effects.Declined ("no lane would carry the legs in this build: " + why + "; nothing is inlined for them"))
+                            ((headline :: rows) |> List.map resolveNames)
+                    | None ->
+                        taken.Add pId |> ignore
+                        (match inlineKey with
+                         | Some key -> legInlines.Add key |> ignore
+                         | None -> ())
+                        recordEpilogueLegs subject Blade.Effects.Applied
+                            ((headline :: [ licenceNote; "planner admission (each lane's emitter records whether its fused form carried the legs)" ] @ inlNote @ rows) |> List.map resolveNames)
+                        legPlans.[gi] <- (pId, pinfo, specs, (inlineKey |> Option.map inlineDisp), inlinedPools))
+
         // ---- rewrite on the spine with only the contributing inlines ---------
         let keptInlines =
             applied |> Seq.collect (fun (g, _, _) -> g |> List.choose (fun m -> inlineKeyOf m.UnitKey)) |> Set.ofSeq
+            |> Set.union (Set.ofSeq legInlines)
         let finalUnits = buildUnits (fun k -> Set.contains k keptInlines)
         let replace = System.Collections.Generic.Dictionary<SfUnitKey * int, IRExpr>()
         let dropUnits = System.Collections.Generic.HashSet<SfUnitKey>()
         let projOf = System.Collections.Generic.Dictionary<IRId, IRId list * IRType list>()
         let inserts = System.Collections.Generic.Dictionary<SfUnitKey, (IRId * IRExpr) list>()
+        let groupAt = ref -1
         for (g, legs, idx) in applied do
+            groupAt.Value <- groupAt.Value + 1
             let built = legs |> List.map (fun l -> l.Build ())
             let comp = built |> List.map (fun (lf, _, _) -> lf) |> List.reduce (fun a b -> IRFusion (a, b))
             let rc = IRReduceCompute (comp, IRTuple (built |> List.map (fun (_, k, _) -> k)), IRTuple (built |> List.map (fun (_, _, s) -> s)))
@@ -6510,6 +7077,24 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
             let jTy = typeOf rc
             let pIds = legs |> List.map (fun _ -> builder.FreshId())
             let pTys = legs |> List.map (fun l -> l.ResultType)
+            // A7c: the admitted plan, keyed by the producer and by this join.
+            (match legPlans.TryGetValue groupAt.Value with
+             | true, (pId, pinfo, specs, inlinedCall, inlinedPools) ->
+                let opIds = pinfo.Arrays |> List.map (function IRVar (id, _) -> id | _ -> -1)
+                let plan : EpilogueLegPlan =
+                    { ProducerId = pId; JoinId = jId
+                      Legs =
+                        List.zip specs pTys |> List.mapi (fun slot (s, ty) ->
+                            let pos = opIds |> List.findIndex (fun id -> id = s.OperandId)
+                            { Slot = slot; OperandPos = pos
+                              OperandId = s.OperandId; Kernel = s.Kernel; Seed = s.Seed; ElemType = ty
+                              OperandElem = (match List.tryItem pos pinfo.ArrayTypes with Some at -> at.ElemType | None -> ty)
+                              Licensed = s.Licensed; Name = s.Name; SlotId = builder.FreshId() })
+                      ProducerName = nameOf pId; Subject = subject
+                      InlinedCall = inlinedCall |> Option.map resolveNames; InlinedPools = inlinedPools
+                      EmittedCpp = ref None; DecidedCpp = ref false; DecidedLlvm = ref false; FreeGuard = ref false }
+                EpilogueLegTable.record plan |> ignore
+             | _ -> ())
             let lets =
                 (jId, rc) :: (List.mapi (fun i pid -> (pid, IRTupleProj (IRVar (jId, jTy), i, false))) pIds)
             let earliest = (g |> List.minBy (fun m -> (m.Unit, m.Ordinal))).UnitKey

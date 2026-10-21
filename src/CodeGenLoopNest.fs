@@ -2583,11 +2583,38 @@ let internal flatNestMatchesSignature (sg: FlatGroup list) (bindings: LoopIndexB
 ///                    an in-order reduction; g++ vectorizes it as a fold-left)
 let tryGenFlatEpilogueNest (ep: FlatEpilogue) (outName: string) (outPool: string) (outElem: string) (cellExpr: string) (cells: int64)
                            (allParallel: bool) (threadsOn: bool) (producerWrites: bool) (pragmaMarker: string list)
-                           (head: string list) (indent: int) : string list option =
+                           (head: string list) (operandPools: string list) (indent: int) : string list option =
     let ind n = String.replicate n "    "
     let i1 = ind (indent + 1)
     let i2 = ind (indent + 2)
     let i3 = ind (indent + 3)
+    // A7c (gap G69): the producer-input legs (attachEpilogueLegs). Their
+    // declarations go before the sweep's scope (the join reads them after it);
+    // a strict leg is its ascending chain over the operand cells, a licensed
+    // leg its own lane state over the operand's blocks.
+    let legPool (fl: FlatLeg) = List.item fl.OperandPos operandPools
+    let legPreludes = ep.Legs |> List.collect (fun fl -> fl.Prelude |> List.map (fun l -> ind indent + l))
+    let legLaneInits (i: string) =
+        ep.Legs |> List.choose (fun fl ->
+            fl.LaneK |> Option.map (fun k -> i + $"blade_fold::lane_state<{fl.ElemCpp}, {k}> {fl.StateName} = blade_fold::lane_init<{fl.ElemCpp}, {k}>();"))
+    let legBlock (i: string) (lo: string) (hi: string) =
+        ep.Legs |> List.collect (fun fl ->
+            match fl.LaneK with
+            | Some k -> [ i + $"blade_fold::feed_sum<{fl.ElemCpp}, {k}>({fl.StateName}, {legPool fl} + {lo}, {ep.Block / fl.LaneBlock});" ]
+            | None ->
+                let step = fl.ChainStep (legPool fl + "[__ek]")
+                [ i + $"for (size_t __ek = {lo}; __ek < {hi}; __ek++) {step}" ])
+    let legTail (i: string) =
+        ep.Legs |> List.collect (fun fl ->
+            match fl.LaneK with
+            | Some k -> [ i + $"{fl.PartName} = blade_fold::finish_sum<{fl.ElemCpp}, {k}>({fl.StateName}, {legPool fl} + __cep_b, __fp_cells - __cep_b);" ]
+            | None ->
+                let step = fl.ChainStep (legPool fl + "[__ek]")
+                [ i + $"for (size_t __ek = __cep_b; __ek < __fp_cells; __ek++) {step}" ])
+    let legCellSteps = ep.Legs |> List.map (fun fl -> fl.ChainStep (legPool fl + "[__fk]"))
+    let legNote (i: string) =
+        if ep.Legs.IsEmpty then []
+        else [ i + $"// A7c: {ep.Legs.Length} producer-input leg(s) ride this sweep (Blade.Optimize.producerEpilogueLegAdmission)" ]
     // G41 (finding 15): a producer that WRITES captured storage keeps an
     // ordered loop -- no `ivdep` (an omp-licensed producer cannot write: BL4005).
     let simdPragma = if allParallel then "BLADE_OMP_SIMD" elif producerWrites then "" else "BLADE_IVDEP"
@@ -2607,18 +2634,23 @@ let tryGenFlatEpilogueNest (ep: FlatEpilogue) (outName: string) (outPool: string
             recordOmpConstruct outName simdPragma "cell epilogue: the flat producer's blocks (omp simd), each fed into the fold's lane state"
         Some (
             [ ind indent + $"{ep.ElemCpp} {ep.PartName};   // cell epilogue: the fold's lane-tree partial, fed behind the stores below" ]
+            @ legPreludes
             @ head
             @ pragmaMarker
-            @ [ i1 + $"{st} __cep_ls = blade_fold::lane_init<{ep.ElemCpp}, {ep.K}>();"
-                i1 + "size_t __cep_b = 0;"
+            @ legNote i1
+            @ [ i1 + $"{st} __cep_ls = blade_fold::lane_init<{ep.ElemCpp}, {ep.K}>();" ]
+            @ legLaneInits i1
+            @ [ i1 + "size_t __cep_b = 0;"
                 i1 + $"for (; __cep_b + {ep.Block} <= __fp_cells; __cep_b += {ep.Block}) {{" ]
             @ produceLoop i2 "__cep_b" $"__cep_b + {ep.Block}"
-            @ [ i2 + $"blade_fold::{feed}<{ep.ElemCpp}, {ep.K}>(__cep_ls, {outPool} + __cep_b, {nb});"
-                i1 + "}" ]
+            @ [ i2 + $"blade_fold::{feed}<{ep.ElemCpp}, {ep.K}>(__cep_ls, {outPool} + __cep_b, {nb});" ]
+            @ legBlock i2 "__cep_b" $"__cep_b + {ep.Block}"
+            @ [ i1 + "}" ]
             @ produceLoop i1 "__cep_b" "__fp_cells"
-            @ [ i1 + $"{ep.PartName} = blade_fold::{finish}<{ep.ElemCpp}, {ep.K}>(__cep_ls, {outPool} + __cep_b, __fp_cells - __cep_b);"
-                ind indent + "}" ])
-    | FlatLanesChunks when allParallel && threadsOn && ep.Block % ep.LaneBlock = 0L ->
+            @ [ i1 + $"{ep.PartName} = blade_fold::{finish}<{ep.ElemCpp}, {ep.K}>(__cep_ls, {outPool} + __cep_b, __fp_cells - __cep_b);" ]
+            @ legTail i1
+            @ [ ind indent + "}" ])
+    | FlatLanesChunks when allParallel && threadsOn && ep.Block % ep.LaneBlock = 0L && ep.Legs.IsEmpty ->
         (foldLanesUsedCell ()).Value <- true
         (ompApiUsedCell ()).Value <- true
         // The OLD fold's team sizing, verbatim (laneLines' threaded arm):
@@ -2656,8 +2688,9 @@ let tryGenFlatEpilogueNest (ep: FlatEpilogue) (outName: string) (outPool: string
             [ i + "for (size_t __fk = __cep_b; __fk < __cep_e; __fk++) {"
               i + $"    const {outElem} __c = {cellExpr};"
               i + $"    {outPool}[__fk] = __c;"
-              i + $"    {stepText}"
-              i + "}" ]
+              i + $"    {stepText}" ]
+            @ (legCellSteps |> List.map (fun s -> i + "    " + s))
+            @ [ i + "}" ]
         let loop =
             if ep.Block > 0L then
                 [ i1 + $"for (size_t __cep_b = 0; __cep_b < __fp_cells; __cep_b += {ep.Block}) {{"
@@ -2669,9 +2702,11 @@ let tryGenFlatEpilogueNest (ep: FlatEpilogue) (outName: string) (outPool: string
                 @ cellStmt i1
         Some (
             (ep.ChainPrelude |> List.map (fun l -> ind indent + l))
+            @ legPreludes
             @ head
             @ pragmaMarker
             @ [ i1 + "// cell epilogue: the fold's ordered chain advances on each cell right behind its store (no simd pragma: an in-order reduction)" ]
+            @ legNote i1
             @ loop
             @ [ ind indent + "}" ])
     | _ -> None
@@ -2880,7 +2915,7 @@ let tryGenFlatElementwiseNest
             let epilogue =
                 match codeGen.FlatEpilogue with
                 | Some ep when depth = 1 && allDense ->
-                    (match tryGenFlatEpilogueNest ep codeGen.OutputName outPool outElem body.CppExpr cells allParallel threadsOn producerWrites pragmaMarker head indent with
+                    (match tryGenFlatEpilogueNest ep codeGen.OutputName outPool outElem body.CppExpr cells allParallel threadsOn producerWrites pragmaMarker head (codeGen.InputArrayNames |> List.map poolOf) indent with
                      | Some ls -> ep.OnEmitted (); Some ls
                      | None -> None)
                 | _ -> None
@@ -4915,6 +4950,28 @@ let peekAllocScopeFrees (ind: string) : string list =
     match currentAllocScope () with
     | None -> []
     | Some frame -> renderFrameFrees ind frame
+
+/// A7c (gap G69, W2-4 review finding 2): free ONE pool now, at an inlined
+/// callee's original return point, and spare it from the scope's own frees.
+///   * a live frame that tracks `n` (a function body / loop scope): its own
+///     rendered free, the name then suppressed (no double free at scope exit);
+///   * a live frame that does NOT track it (suppressed, escaping, unregistered)
+///     : nothing -- whatever owned it before still owns it;
+///   * no frame at all (main's top level, which frees nothing at exit): the
+///     plain dense free `fallback` -- nothing else would ever free it.
+let freeAllocNow (ind: string) (n: string) (fallback: string) : string list =
+    match currentAllocScope () with
+    | None -> [ ind + fallback ]
+    | Some frame ->
+        if Set.contains n frame.SuppressNames then []
+        else
+            match frame.Allocs |> List.tryFind (fun a -> trackedAllocName a = n) with
+            | Some a when (match trackedAllocOwner a with Some oid -> Set.contains oid frame.Escapes | None -> false) -> []
+            | Some a ->
+                let lines = renderFrameFrees ind { frame with Allocs = [ a ]; Escapes = Set.empty; SuppressNames = Set.empty }
+                frame.SuppressNames <- Set.add n frame.SuppressNames
+                lines
+            | None -> []
 
 /// Generate code to allocate and initialize an array from literal values
 /// `sourceName` is the binding's BLADE name, for the runtime guard's message

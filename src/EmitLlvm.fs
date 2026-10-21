@@ -4196,6 +4196,31 @@ and private bindNamed (c: Ctx) (id: IRId) (name: string) (declTy: IRType) (value
         let v = loadSlot c slot ty
         let target = match scalarTyOf declTy with Some t when t <> ScVoid -> t | _ -> v.Ty
         bindScalar c id name (coerce c target v)
+    // A7c (gap G69): a join whose legs rode the producer's fused loop -- its
+    // tuple is the legs' published slots, bound here, at the join's own
+    // statement (a producer that did not carry them published none, and the
+    // join falls through to its ordinary pass).
+    | IRReduceCompute _ when (match Blade.Optimize.EpilogueLegTable.tryJoin id with
+                              | Some lp -> lp.Legs |> List.forall (fun l -> c.Slots.ContainsKey l.SlotId)
+                              | None -> false) ->
+        let lp = (Blade.Optimize.EpilogueLegTable.tryJoin id).Value
+        let vs =
+            lp.Legs |> List.map (fun l ->
+                let (slot, ty) = c.Slots.[l.SlotId]
+                c.Slots.Remove l.SlotId |> ignore
+                VScalar (loadSlot c slot ty))
+        c.TupleSlots.[id] <- vs
+    | IRReduceCompute _ when (match Blade.Optimize.EpilogueLegTable.tryJoin id with
+                              | Some lp -> not lp.DecidedLlvm.Value
+                              | None -> false) ->
+        let lp = (Blade.Optimize.EpilogueLegTable.tryJoin id).Value
+        lp.DecidedLlvm.Value <- true
+        if Blade.Effects.Decisions.active () then
+            Blade.Effects.Decisions.record
+                { Rule = "epilogue-legs"; Version = 1; Span = c.DeclSpan; Subject = lp.Subject
+                  Outcome = Blade.Effects.Declined "llvm lane: the producer's fused loop did not carry the legs (its cell epilogue was not taken in this lane)"
+                  Evidence = [ "the legs keep their joined pass" ] @ (match lp.InlinedCall with Some call -> [ $"{call} stays inlined (planned for these legs); this lane frees no pool in either form" ] | None -> []) }
+        bindNamed c id name declTy value
     // B2r for a recursion: the step's cell loop carried this prodsum's chain.
     | IRProdSum _ when (match Blade.Optimize.CellFoldTable.tryFoldLet id with
                         | Some e -> e.EmittedLlvm.Value.IsSome
@@ -4705,6 +4730,46 @@ and private tryBindFlatEpilogueProducer (c: Ctx) (id: IRId) (name: string) (plan
             let seed = coerce c ty (emitExpr c plan.Seed)
             ln c ($"store {(llTy ty)} {seed.Reg}, ptr {slot}")
             let licensed = foldFmfDecorable c cl
+            // A7c (round 3, gap G69): a planned join's producer-INPUT legs
+            // ride the same loop -- each its own chain from its own seed
+            // (evaluated once, here, before the loop; the admission proved it
+            // total and bound before the producer), fed by the operand cell
+            // the producer already loads (GVN forwards the second load), with
+            // the leg's OWN fold flags (foldFmfDecorable: reassoc only on the
+            // leg's own licence). Bit for bit the joined pass's chain when
+            // strict; the vectorizer's tree when licensed, as in the joined
+            // pass. The join binds its tuple from the published slots.
+            let legPlan =
+                match Blade.Optimize.EpilogueLegTable.tryProducer id with
+                | Some lp ->
+                    let resolved =
+                        lp.Legs |> List.map (fun l ->
+                            match resolveCallable l.Kernel, List.tryItem l.OperandPos pinfo.Arrays with
+                            | Some lcl, Some opExpr when lcl.Params.Length = 2 -> Some (l, lcl, opExpr)
+                            | _ -> None)
+                    if resolved |> List.forall Option.isSome then Some (lp, resolved |> List.map Option.get)
+                    else
+                        lp.DecidedLlvm.Value <- true
+                        if Blade.Effects.Decisions.active () then
+                            Blade.Effects.Decisions.record
+                                { Rule = "epilogue-legs"; Version = 1; Span = c.DeclSpan; Subject = lp.Subject
+                                  Outcome = Blade.Effects.Declined "llvm lane: a leg's fold kernel or operand does not resolve"
+                                  Evidence = [ "the legs keep their joined pass" ] }
+                        None
+                | None -> None
+            let legState =
+                match legPlan with
+                | Some (lp, legs) ->
+                    legs |> List.map (fun (l, lcl, opExpr) ->
+                        let lty =
+                            match scalarTyOf lcl.RetType with
+                            | Some t when t <> ScVoid -> t
+                            | _ -> refuse "an epilogue leg whose fold kernel has no scalar result"
+                        let lslot = allocaOf c (llTy lty)
+                        let lseed = coerce c lty (emitExpr c l.Seed)
+                        ln c ($"store {(llTy lty)} {lseed.Reg}, ptr {lslot}")
+                        (l, lcl, emitArr c opExpr, lslot, lty, foldFmfDecorable c lcl))
+                | None -> []
             emitCountedLoop c total (fun i ->
                 let iv = { Reg = i; Ty = ScI64 }
                 let v = coerce c a.Elem (readCell c a [ iv ])
@@ -4714,8 +4779,31 @@ and private tryBindFlatEpilogueProducer (c: Ctx) (id: IRId) (name: string) (plan
                 let next =
                     withFoldFmf c licensed (fun () ->
                         coerce c ty (applyKernel c cl [ KScalar cur; KScalar cell ]))
-                ln c ($"store {(llTy ty)} {next.Reg}, ptr {slot}"))
+                ln c ($"store {(llTy ty)} {next.Reg}, ptr {slot}")
+                for (_, lcl, opArr, lslot, lty, llic) in legState do
+                    let lcur = loadSlot c lslot lty
+                    let lcell = readCell c opArr [ iv ]
+                    let lnext =
+                        withFoldFmf c llic (fun () ->
+                            coerce c lty (applyKernel c lcl [ KScalar lcur; KScalar lcell ]))
+                    ln c ($"store {(llTy lty)} {lnext.Reg}, ptr {lslot}"))
             c.Slots.[plan.RowSumId] <- (slot, ty)
+            (match legPlan with
+             | Some (lp, _) ->
+                for (l, _, _, lslot, lty, _) in legState do
+                    c.Slots.[l.SlotId] <- (lslot, lty)
+                lp.DecidedLlvm.Value <- true
+                let forms =
+                    legState |> List.map (fun (l, _, _, _, _, llic) ->
+                        if llic then $"{l.Name}: builtin-licensed (its own licence: `reassoc nsz` on its own adds; the vectorizer may pick a different tree than in the joined pass -- a licensed association change)"
+                        else $"{l.Name}: strict ascending chain from its own seed")
+                let legNames = lp.Legs |> List.map (fun l -> l.Name) |> String.concat ", "
+                if Blade.Effects.Decisions.active () then
+                    Blade.Effects.Decisions.record
+                        { Rule = "epilogue-legs"; Version = 1; Span = c.DeclSpan; Subject = lp.Subject
+                          Outcome = Blade.Effects.Applied
+                          Evidence = [ $"llvm lane: legs {legNames} folded inside `{lp.ProducerName}`'s one fused loop; the joined pass over the operands is gone" ] @ forms }
+             | None -> ())
             record Blade.Effects.Applied
                 [ $"""llvm lane: rank-1 producer: one fused loop -- each cell of `{plan.ProducerName}` produced, stored and folded into `{plan.ConsumerName}` ({(if licensed then "licensed: the vectorizer's reduction tree over the stream" else "the ordered chain")})""" ]
             true

@@ -241,6 +241,32 @@ type FlatEpilogueForm =
     /// (register-consume), serial; the accumulator is `PartName`.
     | FlatChain
 
+/// A7c (round 3, gap G69): one producer-INPUT leg the flat sweep carries
+/// beside B1's fold -- a sibling fold of one of the producer's operands,
+/// fed by the operand value the sweep already loads.
+type FlatLeg = {
+    /// The producer operand the leg reads (its position in the nest's
+    /// operand list, hence its pool pointer).
+    OperandPos: int
+    /// Declarations before the producer's block, unindented: the strict
+    /// chain's wrapper and accumulator (seeded), or the licensed leg's
+    /// partial.
+    Prelude: string list
+    /// Strict: the chain statement for one operand cell (`acc = w(acc, v);`).
+    ChainStep: string -> string
+    /// Licensed: Some K (the leg's own blade_fold lane state, `feed_sum` /
+    /// `finish_sum`, the SAME tree as `blade_fold::sum<T, K>`); None = the
+    /// strict ascending chain.
+    LaneK: int option
+    /// The lane block B = K * 32 / sizeof(T) of a licensed leg (1 otherwise).
+    LaneBlock: int64
+    /// The licensed leg's lane state (inside the block) and partial (before
+    /// it) names.
+    StateName: string
+    PartName: string
+    ElemCpp: string
+}
+
 /// What the flat elementwise emitter fuses into its sweep (B1).
 type FlatEpilogue = {
     Form: FlatEpilogueForm
@@ -264,6 +290,11 @@ type FlatEpilogue = {
     ChainStep: string -> string
     /// Called when the flat emitter placed the form (publishes to the plan).
     OnEmitted: unit -> unit
+    /// A7c: the producer-input legs riding the same sweep (empty = none).
+    /// Only the serial forms (FlatChain, FlatLanesSerial) carry them; when
+    /// the form is placed the legs are placed with it (OnEmitted publishes
+    /// both).
+    Legs: FlatLeg list
 }
 
 /// Compact row-class scheduling (Blade.Optimize.planCompactRowClasses, round
