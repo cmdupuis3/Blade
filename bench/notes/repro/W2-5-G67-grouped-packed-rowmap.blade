@@ -1,0 +1,42 @@
+// REPRO W2-5-G67 (round 3 wave 2, 2026-10-21, compiler 0.20.0): a ROW MAP whose cell is a
+// packed `comm` contraction (a per-group SymIdx H) checks but runs in NO lane.
+// Gap register G67; the minimal form of N10 groupls' per-group H (W2-5-G67-n10-groupls.blade).
+// Tree / binary (check, C++, LLVM rows): worktree-bench-fortran 667250cd, Blade.dll
+//   SHA-256 FB1415508581CF4CDD8DA324A49641EEBD5B94B69AE787CFA1A5E7BCF96E1F60.
+// Interpreter row: the blade MCP server's `blade_eval`, i.e. the MAIN checkout's binary
+//   (master 66e04875, Blade.dll SHA-256 462B9D924F5D48B4BAF7F88CADC766DD78685F1BAA2F7CB61D19AEE0E07D19E1),
+//   NOT the tree above.
+// Run: blade check / blade run W2-5-G67-grouped-packed-rowmap.blade (ucrt64 first on PATH;
+//   BLADE_BLAS=0 and the BLAS gate on behave the same), and BLADE_LLVM=1 blade run ...
+// Expected: v = 4524.0  (jt(g, a, s) = 12 g + 4 a + s; h(2, 0, 1) = sum_s (24 + s)(28 + s)
+//   = 3014; h(1, 2, 1) reads the mirror h(1, 1, 2) = sum_s (16 + s)(20 + s) = 1510).
+// Observed:
+//   check:       OK
+//   C++ lane:    error[BL8005]: std::bad_array_new_length (at run time). The emitted output
+//                is rank 3 with __v_symm[3] = {1, 2, 2} but __v_extents[3] = { 3, 3 } (one
+//                extent per GROUP; the third axis reads 0), and the cell store is
+//                __v[g] = group_h(..) (a rank-2 packed array into a row).
+//   LLVM lane:   [blade] llvm lane refused: a compact output whose group extents disagree
+//                with the loop levels; falling back to C++ -- then the C++ failure above.
+//   interpreter: error[BL8003]: array write: coordinate/shape mismatch (at kernel).
+// Not a corpus value test on purpose: it fails today; pins (multi-group canonical and
+// mirrored reads, distinct groups) belong with the compiler repair.
+type G = Idx<3>
+type P = Idx<3>
+type S = Idx<4>
+
+function group_h(jg: Array<Float64 like P, S>) = method_for(jg, jg) <@> lambda(ra, rb) where comm(ra, rb) -> prodsum(ra, rb)
+
+function kernel(jt: Array<Float64 like G, P, S>) -> Float64 = {
+    let h = method_for(range<G>) <@> lambda(g) -> group_h(jt(g)) |> compute
+    h((2 : G), (0 : P), (1 : P)) + h((1 : G), (2 : P), (1 : P))
+}
+
+function mk() -> Array<Float64 like G, P, S> = {
+    method_for(range<G, P, S>) <@> lambda(g, a, s) -> Float64(g * 12 + a * 4 + s) |> compute
+}
+
+let v = {
+    let jt = mk()
+    kernel(jt)
+}

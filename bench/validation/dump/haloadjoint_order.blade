@@ -1,0 +1,70 @@
+// haloadjoint ORDER CHECK (spec.md "The derivative reference"): ad.grad's dx against the
+// spec's explicit ordered update list spelled out by hand, compared with `==` cell by cell
+// in the SAME program (so both sides call the same libm sin / cos). At SMOKE size (n = 1013).
+//
+//   BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off blade run haloadjoint_order.blade
+//       --print mismatches,dw_mismatches,boundary_dw          (C++ lane; BLADE_LLVM=1 for LLVM)
+//
+// Expected: mismatches = 0 (every dx cell numerically EQUAL, ==, to the list), dw_mismatches =
+// 0 (dw equals F on the interior and zero on the four boundary cells), boundary_dw = 0.0.
+// `==` is exact numeric equality, not a raw-bit comparison: it does not distinguish +0 from
+// -0. Under contraction (the default -ffp-contract=fast) the two sides may contract
+// differently (GCC's contraction is context-dependent), so the claim is made with it off.
+import ad as ad
+
+// reverse mode needs a LITERAL `Idx<n>` inner (BL5500 on `Idx<n>` of a static), so the
+// extent is written twice here
+type I = Idx<1013>
+let static n = 1013
+
+/// README section 5 input generator (as in the kernel source).
+function gen(k: Int64, seed: Int64, lo: Float64, hi: Float64) -> Float64 = {
+    let h1 = ((k + seed) * 1103515245 + 12345) % 2147483648
+    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648
+    let h3 = (h2 * 1103515245 + 12345) % 2147483648
+    let h4 = (h3 * h3 / 65536) % 2147483648
+    let h5 = (h4 * 1103515245 + 12345) % 2147483648
+    lo + (hi - lo) * (Float64(h5) / 2147483648.0)
+}
+
+function field(seed: Int64) -> Array<Float64 like I> = {
+    method_for(range<I>) <@> lambda(i) -> gen(Int64(i), seed, 0.0, 1.0) |> compute
+}
+
+function loss(x: Array<Float64 like I>, wt: Array<Float64 like I>) -> Float64 = {
+    let d = method_for(halo<I, [-2, -1, 0, 1, 2]>) <@> lambda(q) ->
+        wt(q(0)) * (x(q(-1)) * x(q(1)) + sin(x(q(0))) * x(q(2)) - 0.5 * x(q(-2)) * x(q(-2))) |> compute
+    reduce(d, (+))
+}
+
+/// a(k) at a computed coordinate (cast to I: checked at run time, every read is guarded)
+function at(a: Array<Float64 like I>, k: Int64) -> Float64 = a((k : I))
+
+/// The spec's update list for destination j: +0, then U1 (offset +2), U2 (+1), U3 (0),
+/// U4 (-1), U5 (-2, left occurrence), U6 (-2, right occurrence), each only when its window
+/// centre c = j - offset lies in 2 .. n-3. (s = 1.0, so s * w(c) is written w(c).)
+function listed(x: Array<Float64 like I>, wt: Array<Float64 like I>, j: Int64) -> Float64 = {
+    let a0 = 0.0
+    let a1 = if j >= 4 then a0 + at(wt, j - 2) * sin(at(x, j - 2)) else a0
+    let a2 = if j >= 3 && j <= n - 2 then a1 + at(wt, j - 1) * at(x, j - 2) else a1
+    let a3 = if j >= 2 && j <= n - 3 then a2 + (at(wt, j) * at(x, j + 2)) * cos(at(x, j)) else a2
+    let a4 = if j >= 1 && j <= n - 4 then a3 + at(wt, j + 1) * at(x, j + 2) else a3
+    let a5 = if j <= n - 5 then a4 + ((-at(wt, j + 2)) * at(x, j)) * 0.5 else a4
+    let a6 = if j <= n - 5 then a5 + (-at(wt, j + 2)) * (0.5 * at(x, j)) else a5
+    a6
+}
+
+/// F_c for c in 2 .. n-3, zero elsewhere: what dw must hold
+function fprimal(x: Array<Float64 like I>, j: Int64) -> Float64 = {
+    let inside = j >= 2 && j <= n - 3
+    if inside then at(x, j - 1) * at(x, j + 1) + sin(at(x, j)) * at(x, j + 2) - 0.5 * at(x, j - 2) * at(x, j - 2) else 0.0
+}
+
+let x = field(10000019)
+let wt = field(20000038)
+let mut dx: Array<Float64 like I> = method_for(range<I>) <@> lambda(i) -> 0.0 |> compute
+let mut dw: Array<Float64 like I> = method_for(range<I>) <@> lambda(i) -> 0.0 |> compute
+let lv = ad.grad(loss)(x, wt, dx, dw)
+let mismatches = reduce(method_for(range<I>) <@> lambda(j) -> if dx(j) == listed(x, wt, Int64(j)) then 0 else 1, (+))
+let dw_mismatches = reduce(method_for(range<I>) <@> lambda(j) -> if dw(j) == fprimal(x, Int64(j)) then 0 else 1, (+))
+let boundary_dw = abs(dw((0 : I))) + abs(dw((1 : I))) + abs(dw(((n - 2) : I))) + abs(dw(((n - 1) : I)))

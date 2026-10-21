@@ -1,0 +1,43 @@
+// haloadjoint DUMP variant (methodology review M11): bench/kernels/haloadjoint/haloadjoint.blade
+// at SMOKE size (n = 1013), with the named outputs y and dx exposed as top-level bindings so
+// the print pass echoes them cell by cell. Run in the C++ lane. Compared cell by cell
+// against numpy by validate_B.py. (The ORDER of dx's update list is checked by exact numeric
+// equality, `==`, in haloadjoint_order.blade.)
+import ad as ad
+
+type I = Idx<1013>
+
+/// README section 5 input generator: five rounds mod 2^31 (affine, quadratic, affine,
+/// middle-square, affine), exact in Int64 (h3 * h3 < 2^62).
+function gen(k: Int64, seed: Int64, lo: Float64, hi: Float64) -> Float64 = {
+    let h1 = ((k + seed) * 1103515245 + 12345) % 2147483648
+    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648
+    let h3 = (h2 * 1103515245 + 12345) % 2147483648
+    let h4 = (h3 * h3 / 65536) % 2147483648
+    let h5 = (h4 * 1103515245 + 12345) % 2147483648
+    lo + (hi - lo) * (Float64(h5) / 2147483648.0)
+}
+
+function field(seed: Int64) -> Array<Float64 like I> = {
+    method_for(range<I>) <@> lambda(i) where omp -> gen(Int64(i), seed, 0.0, 1.0) |> compute
+}
+
+function loss(x: Array<Float64 like I>, wt: Array<Float64 like I>) -> Float64 = {
+    let d = method_for(halo<I, [-2, -1, 0, 1, 2]>) <@> lambda(q) ->
+        wt(q(0)) * (x(q(-1)) * x(q(1)) + sin(x(q(0))) * x(q(2)) - 0.5 * x(q(-2)) * x(q(-2))) |> compute
+    reduce(d, (+))
+}
+
+function primal(x: Array<Float64 like I>) = {
+    method_for(halo<I, [-2, -1, 0, 1, 2]>) <@> lambda(q) where omp ->
+        x(q(-1)) * x(q(1)) + sin(x(q(0))) * x(q(2)) - 0.5 * x(q(-2)) * x(q(-2)) |> compute
+}
+
+let x = field(10000019)
+let wt = field(20000038)
+let y = primal(x)
+let mut dx: Array<Float64 like I> = method_for(range<I>) <@> lambda(i) -> 0.0 |> compute
+let mut dw: Array<Float64 like I> = method_for(range<I>) <@> lambda(i) -> 0.0 |> compute
+let lv = ad.grad(loss)(x, wt, dx, dw)
+let checksum = prodsum(y, y) + prodsum(dx, dx)
+let input_checksum = reduce(x, (+)) + reduce(wt, (+))

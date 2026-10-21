@@ -40,5 +40,9 @@
   "tensorop": {
     "smoke": {"checksum": 48998954.10306979, "input_checksum": 1510.839869080577, "sizes": {"n1": 11, "n2": 13, "n3": 17}},
     "full": {"checksum": 2495355625970968.5, "input_checksum": 449401.4694633875, "sizes": {"n1": 89, "n2": 97, "n3": 101}}
+  },
+  "haloadjoint": {
+    "smoke": {"checksum": 931.84702902803338, "input_checksum": 994.20763162942603, "sizes": {"n": 1013}},
+    "full": {"checksum": 49031.582053620172, "input_checksum": 49973.552964067087, "sizes": {"n": 50021}}
   }
 }

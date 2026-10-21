@@ -1,0 +1,82 @@
+// REPRO W2-5-G67-n10 (round 3 wave 2, 2026-10-21, compiler 0.20.0): the corrected N10
+// `groupls` source (round3/research/C-workloads.md N10 with review C's fixes: P = 5 model
+// components, deferred r / jt producers, licensed outer maps) at smoke size -- the emission
+// gate of W2-5. It checks but runs in NO lane, because of its per-group packed H (the minimal
+// form is W2-5-G67-grouped-packed-rowmap.blade; gap register G67). The research brief's
+// original n10.blade (P = 4, forced r / jt tapes) fails the same way.
+// Model f = th0 exp(-th1 t) + th2 t + th3 + th4 t^2, r = f - y, hand-derived dr/dth (spec-fixed);
+// per group g: cost(g) = sum_s r^2, grad(g, a) = sum_s j_a r, H(g) = sum_s j j^T (packed).
+// Tree / binary (check, C++, LLVM rows): worktree-bench-fortran 667250cd, Blade.dll
+//   SHA-256 FB1415508581CF4CDD8DA324A49641EEBD5B94B69AE787CFA1A5E7BCF96E1F60.
+// Interpreter row: the blade MCP server's `blade_eval`, i.e. the MAIN checkout's binary
+//   (master 66e04875, Blade.dll SHA-256 462B9D924F5D48B4BAF7F88CADC766DD78685F1BAA2F7CB61D19AEE0E07D19E1),
+//   NOT the tree above.
+// Run: blade check / blade run W2-5-G67-n10-groupls.blade (ucrt64 first on PATH; BLADE_BLAS=0
+//   and the BLAS gate on behave the same), and BLADE_LLVM=1 blade run ...
+// Expected: it runs and prints checksum / input_checksum (no oracle pin exists yet).
+// Observed:
+//   check:       OK
+//   C++ lane:    error[BL8005]: std::bad_array_new_length (at run time): h is emitted rank 3
+//                with __v111_symm[3] = {1, 2, 2} but __v111_extents[3] = { 7, 5 }, and its
+//                cell store is __v111[g] = group_h(..). group_h alone emits a correct packed
+//                upper triangle (the triangular blade_fold::dot nest with BLADE_BLAS=0,
+//                blade_gram_same_d with the gate on).
+//   LLVM lane:   [blade] llvm lane refused: a compact output whose group extents disagree
+//                with the loop levels; falling back to C++ -- then the C++ failure above.
+//   interpreter: error[BL8003]: array write: coordinate/shape mismatch (at kernel).
+type G = Idx<7>
+type S = Idx<23>
+type P = Idx<5>
+
+function gen(k: Int64, seed: Int64, lo: Float64, hi: Float64) -> Float64 = {
+    let h1 = ((k + seed) * 1103515245 + 12345) % 2147483648
+    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648
+    let h3 = (h2 * 1103515245 + 12345) % 2147483648
+    let h4 = (h3 * h3 / 65536) % 2147483648
+    let h5 = (h4 * 1103515245 + 12345) % 2147483648
+    lo + (hi - lo) * (Float64(h5) / 2147483648.0)
+}
+
+function gen_gs(seed: Int64) -> Array<Float64 like G, S> = {
+    let ns = Int64(extents(range<S>))
+    method_for(range<G, S>) <@> lambda(g, s) where omp(g: 1) ->
+        gen(Int64(g) * ns + Int64(s), seed, 0.0, 2.0) |> compute
+}
+function gen_th() -> Array<Float64 like G, P> = {
+    let np = Int64(extents(range<P>))
+    method_for(range<G, P>) <@> lambda(g, a) -> gen(Int64(g) * np + Int64(a), 30000057, 0.0, 1.0) |> compute
+}
+
+/// d r / d th_a at one sample (hand-derived)
+function dres(a: Int64, th: Array<Float64 like P>, t: Float64) -> Float64 = {
+    let e = exp(-th((1 : P)) * t)
+    if a == 0 then e
+    else if a == 1 then -th((0 : P)) * t * e
+    else if a == 2 then t
+    else if a == 3 then 1.0
+    else t * t
+}
+function res(th: Array<Float64 like P>, t: Float64, y: Float64) -> Float64 =
+    th((0 : P)) * exp(-th((1 : P)) * t) + th((2 : P)) * t + th((3 : P)) + th((4 : P)) * t * t - y
+
+/// One group's packed Gauss-Newton matrix: the same local Jacobian in both commuting slots.
+function group_h(jg: Array<Float64 like P, S>) = method_for(jg, jg) <@> lambda(ra, rb) where comm(ra, rb) -> prodsum(ra, rb)
+
+function kernel(t: Array<Float64 like G, S>, y: Array<Float64 like G, S>, th: Array<Float64 like G, P>) -> Float64 = {
+    let r = method_for(range<G, S>) <@> lambda(g, s) -> res(th(g), t(g, s), y(g, s))
+    let jt = method_for(range<G, P, S>) <@> lambda(g, a, s) -> dres(Int64(a), th(g), t(g, s))
+    let cost = method_for(range<G>) <@> lambda(g) where omp -> prodsum(r(g), r(g)) |> compute
+    let grad = method_for(range<G, P>) <@> lambda(g, a) where omp(g: 1) -> prodsum(jt(g, a), r(g)) |> compute
+    let h = method_for(range<G>) <@> lambda(g) where omp -> group_h(jt(g)) |> compute
+    let hsum = reduce(method_for(range<G>) <@> lambda(g) ->
+                   reduce(method_for(range<P>) <@> lambda(a) ->
+                       reduce(method_for(range<P>) <@> lambda(b) -> h(g, a, b) * h(g, a, b), (+)), (+)), (+))
+    reduce(cost, (+)) + reduce(grad * grad, (+), axes = 2) + hsum
+}
+
+let (checksum, input_checksum) = {
+    let t = gen_gs(10000019)
+    let y = gen_gs(20000038)
+    let th = gen_th()
+    (kernel(t, y, th), reduce(t, (+), axes = 2) + reduce(y, (+), axes = 2) + reduce(th, (+), axes = 2))
+}

@@ -16,6 +16,9 @@ printed bindings, and compares them with ref_<kernel>.py:
              Horner folds, the sum); each is recomputed from numpy's y;
   * twofir:  y1 (n - 6) and y2 (n - 16), every cell;
   * tensorop: Y, n1 x n2 x n3 (printed flat, row-major), every cell;
+  * haloadjoint: y (n - 4) and dx (n), every cell (dx = ad.grad's J^T w against the ordered
+             update list; the list's ORDER is checked by exact numeric equality, ==, in
+             dump/haloadjoint_order.blade);
   * all:     checksum and input_checksum against the numpy pins.
 
 Tolerance: |blade - ref| <= 1e-12 * max(1, |ref|) per cell. Blade prints 15 significant
@@ -33,6 +36,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import benchgen as g  # noqa: E402,F401
 import ref_band  # noqa: E402
+import ref_haloadjoint  # noqa: E402
 import ref_maskagg  # noqa: E402
 import ref_recur  # noqa: E402
 import ref_stencil  # noqa: E402
@@ -50,6 +54,7 @@ DUMPS = {
     "band": ["cells", "lexsum", "horner", "checksum", "input_checksum"],
     "twofir": ["y1", "y2", "checksum", "input_checksum"],
     "tensorop": ["y", "checksum", "input_checksum"],
+    "haloadjoint": ["y", "dx", "checksum", "input_checksum"],
 }
 
 
@@ -142,6 +147,10 @@ def main():
             r = ref_twofir.compute("smoke")
             rep.cmp_array("y1", v["y1"], r["output"][0])
             rep.cmp_array("y2", v["y2"], r["output"][1])
+        elif kernel == "haloadjoint":
+            r = ref_haloadjoint.compute("smoke")
+            rep.cmp_array("y", v["y"], r["output"][0])
+            rep.cmp_array("dx", v["dx"], r["output"][1])
         elif kernel == "tensorop":
             r = ref_tensorop.compute("smoke")
             rep.cmp_array("y", v["y"], r["output"])

@@ -1,0 +1,87 @@
+// haloadjoint -- a 1-D weighted nonlinear halo stencil: its primal and its reverse action
+// J^T w through ad.grad (bench/kernels/haloadjoint/spec.md; round 3, catalog N02 as
+// corrected by review C/2 -- the fallback of W2-5 after N10's per-group packed H failed its
+// emission gate, gap register G67)
+//
+//   F_c(x) = x(c-1) * x(c+1) + sin(x(c)) * x(c+2) - 0.5 * x(c-2) * x(c-2)   c = 2 .. n-3
+//   y(c)   = F_c(x)                         the primal, a named stored output (n - 4 cells)
+//   L      = sum_c w(c) * F_c(x)            the weighted loss ad.grad differentiates
+//   dx     = dL/dx = J^T w                  a named stored output (n cells)
+//   checksum = sum y^2 + sum dx^2  (two +0-seeded folds);  input_checksum = sum x + sum w
+//
+// The derivative is NOT an independent formula: it is the EXPLICIT ORDERED UPDATE LIST that
+// the reverse sweep emits (spec.md "The derivative reference"): +0 initial dx, then for each
+// destination j six separately rounded `+=` updates in descending window offset
+// (+2, +1, 0, -1, -2 left occurrence, -2 right occurrence), each present only when its window
+// exists; the Fortran twins and the oracle implement exactly that list.
+//
+// ad.grad differentiates EVERY Float64 array parameter, so the call also fills dw = dL/dw (F_c
+// on the interior, zero on the four boundary cells) and returns the loss value: with the
+// forced loss tape d these are AD-required auxiliaries this source names -- computed and
+// stored by this arm only, never required outputs (y and dx are), and never deletable under
+// this source (spec.md "Accounting"). Reverse
+// mode refuses a `where` clause inside the differentiated function (BL5500), so the loss map,
+// its fold and the adjoint passes are serial in every regime ("parallel preparation, serial
+// kernel" in mt8 for the adjoint half).
+// Licences: the two generator maps, the primal map, the two buffer fills, the two checksum
+// folds and the two input-sum folds carry `where omp`; a serial build (BLADE_OMP_THREADS=1)
+// emits none of the thread pragmas.
+// Size: n = 50021, not the catalog's 1,000,003 -- the reverse sweep's zero buffer for the
+// loss map's cotangent is an (n - 4)-element array LITERAL, and lowering it is super-linear
+// in n (gap register G68: 19 s at n = 50021, 95 s at 100003, unfinished after 10 CPU
+// minutes at 1,000,003) -- a compiler limit, not the 64 MB rule.
+import ad as ad
+
+type I = Idx<50021>   // SIZE n
+
+/// README section 5 input generator: five rounds mod 2^31 (affine, quadratic, affine,
+/// middle-square, affine), exact in Int64 (h3 * h3 < 2^62).
+function gen(k: Int64, seed: Int64, lo: Float64, hi: Float64) -> Float64 = {
+    let h1 = ((k + seed) * 1103515245 + 12345) % 2147483648
+    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648
+    let h3 = (h2 * 1103515245 + 12345) % 2147483648
+    let h4 = (h3 * h3 / 65536) % 2147483648
+    let h5 = (h4 * 1103515245 + 12345) % 2147483648
+    lo + (hi - lo) * (Float64(h5) / 2147483648.0)
+}
+
+/// x at seed 10000019, w at seed 20000038, both in [0, 1), index k = the cell
+function field(seed: Int64) -> Array<Float64 like I> = {
+    method_for(range<I>) <@> lambda(i) where omp -> gen(Int64(i), seed, 0.0, 1.0) |> compute
+}
+
+/// The weighted loss sum_c w(c) F_c(x): w is read at each window's centre. No `where` clause
+/// (BL5500 inside a differentiated function).
+function loss(x: Array<Float64 like I>, wt: Array<Float64 like I>) -> Float64 = {
+    let d = method_for(halo<I, [-2, -1, 0, 1, 2]>) <@> lambda(q) ->
+        wt(q(0)) * (x(q(-1)) * x(q(1)) + sin(x(q(0))) * x(q(2)) - 0.5 * x(q(-2)) * x(q(-2))) |> compute
+    reduce(d, (+))
+}
+
+function kernel(x: Array<Float64 like I>, wt: Array<Float64 like I>) -> Float64 = {
+    // the primal F(x) over the interior, a named stored output
+    let y = method_for(halo<I, [-2, -1, 0, 1, 2]>) <@> lambda(q) where omp ->
+        x(q(-1)) * x(q(1)) + sin(x(q(0))) * x(q(2)) - 0.5 * x(q(-2)) * x(q(-2)) |> compute
+    // the gradient buffers (+0 initial values; ad.grad accumulates into them)
+    let mut dx: Array<Float64 like I> = method_for(range<I>) <@> lambda(i) where omp -> 0.0 |> compute
+    let mut dw: Array<Float64 like I> = method_for(range<I>) <@> lambda(i) where omp -> 0.0 |> compute
+    let lv = ad.grad(loss)(x, wt, dx, dw)
+    // the checksum folds stream over the stored outputs (no squared temporary); each is its
+    // own let, so the licensed form opens a team (kernels/README.md section 4.10)
+    let sy = reduce(method_for(y) <@> lambda(v) -> v * v, lambda(p, q) where omp -> p + q, 0.0)
+    let sd = reduce(method_for(dx) <@> lambda(v) -> v * v, lambda(p, q) where omp -> p + q, 0.0)
+    sy + sd
+}
+
+/// sum x + sum w, one licensed fold per input (`axes = 1` is the spelling that threads)
+function input_sum(x: Array<Float64 like I>, wt: Array<Float64 like I>) -> Float64 = {
+    let sx = reduce(x, lambda(p, q) where omp -> p + q, 0.0, axes = 1)
+    let sw = reduce(wt, lambda(p, q) where omp -> p + q, 0.0, axes = 1)
+    sx + sw
+}
+
+let (checksum, input_checksum) = {
+    let x = field(10000019)
+    let wt = field(20000038)
+    (kernel(x, wt), input_sum(x, wt))
+}
