@@ -655,6 +655,66 @@ let runCellEpilogueTests () : BlockResult =
                 let lineTxt = tOn.Split('\n') |> Array.filter (fun l -> l.Contains "BL8013" || l.Contains "-->" || l.Trim().StartsWith "at ") |> String.concat " / "
                 pass name ($"exit {cOn} both; identical text: {lineTxt}")
             else fail name ($"exit on={cOn} off={cOff}; frame={frameOk}; on [{tOn}] off [{tOff}]")
+    // The return-boundary releases (W2-4 second review NEW 1-2), executed:
+    // sibling-folds/030 (the join inside the inlined callee, a later map
+    // reading the producer) and 031 (two plans riding one inlined call), gate
+    // on vs off, BLADE_POOL_REUSE=off. Under BLADE_MEMCHECK=1 (ASan, the pool
+    // cache OFF) every release is a real free: no ASan report, and for 031 the
+    // alloc / free / outstanding census equals gate-off's (one release per
+    // allocation). For 030 gate-off keeps W1-D's own join-driven inline of
+    // `later`, whose pools then live to exit, so gate-on may free MORE, never
+    // less. Then the ordinary build (pool cache ON): printed values equal.
+    for rel in [ "sibling-folds/030_input_legs_join_inside_inlined_callee.blade"
+                 "sibling-folds/031_input_legs_two_plans_one_inlined_call.blade" ] do
+        let name = $"{Path.GetFileNameWithoutExtension rel}: return-boundary releases under ASan and with the pool cache"
+        match corpusFile rel with
+        | None -> fail name "corpus file not found"
+        | Some path ->
+        let src = File.ReadAllText path
+        let src = src.Substring(src.IndexOf '\n' + 1)
+        use _o = pinEnv "BLADE_OMP_THREADS" "1"
+        use _r = pinEnv "BLADE_FP_REPRO" "1"
+        use _c = pinEnv "BLADE_FP_CONTRACT" "off"
+        use _pr = pinEnv "BLADE_POOL_REUSE" "off"
+        let runWith (gate: string) (memcheck: bool) : Result<int * string, string> =
+            use _g = pinEnv "BLADE_EPILOGUE_LEGS" gate
+            use _m = pinEnv "BLADE_MEMCHECK" (if memcheck then "1" else null)
+            stemN <- stemN + 1
+            let stem = $"epl_rel_{stemN}"
+            match emitCpp { saxpySq with Name = stem; Source = src } stem with
+            | Error e -> Error e
+            | Ok cpp ->
+            let file = Path.Combine(work, stem + ".cpp")
+            File.WriteAllText(file, cpp)
+            match Build.compileCpp file work with
+            | Error e -> Error ("compile: " + (if e.Length > 300 then e.Substring(0, 300) else e))
+            | Ok exe ->
+                use _t = pinEnv "OMP_NUM_THREADS" "1"
+                match runProc exe 120000 with
+                | Ok (code, out, err) -> Ok (code, (out + "\n" + err).Replace("\r\n", "\n"))
+                | Error e -> Error e
+        let census (t: string) =
+            t.Split('\n') |> Array.tryFind (fun l -> l.Contains "BLADE-MEMCHECK:")
+            |> Option.map (fun l ->
+                let num (k: string) = let m = Text.RegularExpressions.Regex.Match(l, k + @"=(\d+)") in if m.Success then int64 m.Groups.[1].Value else -1L
+                (num "allocs", num "frees", num "outstanding_bytes"))
+        match runWith null true, runWith "0" true, runWith null false, runWith "0" false with
+        | Error e, _, _, _ | _, Error e, _, _ when e.Contains "Skipped" || e.Contains "sanitize" -> skip name e
+        | Error e, _, _, _ | _, Error e, _, _ | _, _, Error e, _ | _, _, _, Error e -> fail name e
+        | Ok (aOn, tOn), Ok (aOff, tOff), Ok (nOn, vOn), Ok (nOff, vOff) ->
+            let asanClean (t: string) = not (t.Contains "ERROR: AddressSanitizer") && not (t.Contains "double-free") && not (t.Contains "heap-use-after-free")
+            let values (t: string) = t.Split('\n') |> Array.filter (fun l -> l.Contains " = " && not (l.Contains "completed in")) |> List.ofArray
+            let cOn, cOff = census tOn, census tOff
+            let censusOk =
+                match cOn, cOff with
+                | Some (a1, f1, o1), Some (a2, f2, o2) ->
+                    if rel.Contains "031" then a1 = a2 && f1 = f2 && o1 = o2 else a1 = a2 && f1 >= f2 && o1 <= o2
+                | _ -> false
+            if aOn <> 0 || aOff <> 0 || nOn <> 0 || nOff <> 0 then fail name ($"exit codes asan {aOn}/{aOff} plain {nOn}/{nOff}: {tOn}")
+            elif not (asanClean tOn && asanClean tOff) then fail name ($"ASan reported: {tOn}")
+            elif not censusOk then fail name ($"census on {cOn} off {cOff}")
+            elif values vOn <> values vOff || values vOn <> values tOn then fail name "printed values differ between gate on / off or between the cache-on and cache-off builds"
+            else pass name ($"ASan clean; census on {cOn} off {cOff} (allocs, frees, outstanding bytes); values equal with the pool cache on and off")
     (try Directory.Delete(work, true) with _ -> ())
     printFooter blockName [ $"{passed} passed"; $"{failed} failed"; $"{skipped} skipped" ]
     { Block = blockName; Passed = passed; Failed = failed; Skipped = skipped; FailedNames = names }

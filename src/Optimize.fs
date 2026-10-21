@@ -2657,12 +2657,7 @@ type EpilogueLegPlan = {
     /// The call the sibling pass inlined one level FOR this plan (`kernel(x,
     /// y)`), None when the producer was already in the region.
     InlinedCall: string option
-    /// That inlined callee's array lets (its stored `|> compute` pools: y2),
-    /// which the call's return used to free. The C++ lane frees them at the
-    /// join -- the statement right behind the inlined spine, i.e. the call's
-    /// ORIGINAL return point -- so the inline changes no lifetime there
-    /// (W2-4 review finding 2); the LLVM lane frees no pool in either form.
-    InlinedPools: (IRId * IRType) list
+
     /// C++ handshake: per leg (slot order) the published name and whether it
     /// is a lane partial (true: the join applies seed + combine) or the
     /// finished chain (false). Set by the producer's flat sweep when it
@@ -2671,10 +2666,39 @@ type EpilogueLegPlan = {
     /// An emitter recorded this plan's per-lane outcome already.
     DecidedCpp: bool ref
     DecidedLlvm: bool ref
-    /// The C++ join site's re-entry guard while it emits the join behind the
-    /// inlined call's pool frees (set only for the duration of that call).
-    FreeGuard: bool ref
 }
+
+/// THE INLINED CALL'S RETURN BOUNDARY (W2-4 second review, NEW 1-2): the
+/// sibling pass, when it keeps a call inlined for producer-input legs, records
+/// ONE entry per inlined CALL (never per plan or per join; several plans may
+/// share one call): the let that ends the call's inlined spine -- its last
+/// statement, i.e. the evaluated scalar return (inlineJudge binds a non-atom
+/// return to a fresh final let; an atom return names the spine's last let) --
+/// and the callee's array lets (its stored `|> compute` pools), which the
+/// call's return used to free. Every callee statement precedes that let by
+/// construction (the inlined spine is contiguous), so the pools have no read
+/// after it: the C++ lane releases them right behind that let's emission,
+/// once, through the scope frame's own free (or main's plain dense free when
+/// no frame tracks them). The boundary is independent of where any join is
+/// inserted. The LLVM lane frees no pool in either form.
+type InlineReturnEntry = {
+    /// The let whose emission ends the inlined call (the table key).
+    BoundaryLetId: IRId
+    /// The callee's pools, with their types (the dense free's element).
+    Pools: (IRId * IRType) list
+    /// The call, as written (records and comments).
+    Call: string
+    /// Re-entry guard while the boundary let itself is emitted.
+    Guard: bool ref
+}
+
+module InlineReturnTable =
+    open System.Threading
+    let private cell = new AsyncLocal<Map<IRId, InlineReturnEntry>>()
+    let private get () = match box cell.Value with null -> Map.empty | _ -> cell.Value
+    let reset () = cell.Value <- Map.empty
+    let record (e: InlineReturnEntry) = cell.Value <- Map.add e.BoundaryLetId e (get ())
+    let tryBoundary (id: IRId) : InlineReturnEntry option = Map.tryFind id (get ())
 
 module EpilogueLegTable =
     open System.Threading
@@ -7340,8 +7364,10 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
         // join has its id (below). Nothing else changes: the join stays in
         // the IR, so the interpreter -- and any lane that does not carry the
         // legs -- runs it as written.
-        let legPlans = System.Collections.Generic.Dictionary<int, IRId * ApplyInfo * EpilogueLegSpec list * string option * (IRId * IRType) list>()
-        let legInlines = System.Collections.Generic.HashSet<int * int>()
+        let legPlans = System.Collections.Generic.Dictionary<int, IRId * ApplyInfo * EpilogueLegSpec list * string option>()
+        // One entry per inlined CALL kept for legs (several plans may share it):
+        // its pools, released once at the call's return boundary.
+        let legInlines = System.Collections.Generic.Dictionary<int * int, (IRId * IRType) list * string>()
         if cellEpilogueOn () then
             let legFacts : EpilogueLegFacts =
                 let schedWrites = scheduleMayWriteIn programFuncs modul
@@ -7450,7 +7476,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                           Legs = specs }
                     let inlineKey = match tentative.[pu].Key with SfInl (i, c, _) -> Some (i, c) | SfOrig _ -> None
                     // The inlined callee's ARRAY lets (its stored pools), freed at the
-                    // call's original return point by the C++ lane (finding 2).
+                    // call's RETURN BOUNDARY by the C++ lane (InlineReturnTable).
                     let inlinedPools =
                         match inlineKey with
                         | Some key ->
@@ -7463,7 +7489,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                         match inlineKey with
                         | Some key ->
                             let pools = inlinedPools |> List.map (fst >> nameOf) |> String.concat ", "
-                            [ $"{inlineDisp key} inlined one level so the producer and the legs share one region (no call boundary between them); the C++ lane frees its pools ({pools}) at the call's original return point (right behind the inlined spine), so the inline moves no free -- the LLVM lane frees no pool in either form" ]
+                            [ $"{inlineDisp key} inlined one level so the producer and the legs share one region (no call boundary between them); the C++ lane releases its pools ({pools}) ONCE at the call's return boundary -- right behind the inlined spine's last statement (its evaluated scalar return), independent of where the join sits -- where the call used to free them; the LLVM lane frees no pool in either form" ]
                         | None -> []
                     // FINDING 4: the inline is kept only when BOTH lanes' fused forms
                     // can carry the legs in this build -- the facts each emitter's own
@@ -7492,7 +7518,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                             elif b1Licensed && b1Op <> Some IRAdd then Some "the epilogue fold is licensed but not a builtin `+` (the C++ lane-state form takes `+` only)"
                             elif b1Licensed && not (realFloat b1Elem) then Some "the epilogue fold is licensed over a non-floating element (no lane-state form)"
                             elif b1Licensed && lanesOff () then Some "the epilogue fold is licensed and BLADE_FOLD_LANES=off (the C++ lane keeps its two-pass fold)"
-                            elif b1Licensed && blasGateProbe () && not b1Request then Some "the BLAS gate is on and the epilogue fold carries no omp request (the C++ L1 dispatch may own it)"
+                            elif blasGateProbe () && not b1Request then Some "the BLAS gate is on and the epilogue fold carries no omp request (the C++ L1 dispatch may own it, in every build)"
                             else
                             specs |> List.tryPick (fun s ->
                                 let lk = kernelOf s.Kernel
@@ -7525,17 +7551,26 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                     | None ->
                         taken.Add pId |> ignore
                         (match inlineKey with
-                         | Some key -> legInlines.Add key |> ignore
+                         | Some key -> legInlines.[key] <- (inlinedPools, inlineDisp key)
                          | None -> ())
                         recordEpilogueLegs subject Blade.Effects.Applied
                             ((headline :: [ licenceNote; "planner admission (each lane's emitter records whether its fused form carried the legs)" ] @ inlNote @ rows) |> List.map resolveNames)
-                        legPlans.[gi] <- (pId, pinfo, specs, (inlineKey |> Option.map inlineDisp), inlinedPools))
+                        legPlans.[gi] <- (pId, pinfo, specs, (inlineKey |> Option.map inlineDisp)))
 
         // ---- rewrite on the spine with only the contributing inlines ---------
         let keptInlines =
             applied |> Seq.collect (fun (g, _, _) -> g |> List.choose (fun m -> inlineKeyOf m.UnitKey)) |> Set.ofSeq
-            |> Set.union (Set.ofSeq legInlines)
+            |> Set.union (Set.ofSeq legInlines.Keys)
         let finalUnits = buildUnits (fun k -> Set.contains k keptInlines)
+        // The return boundary of every call inlined for legs: the LAST unit of
+        // its inlined spine (all of the callee's statements precede it).
+        for KeyValue (key, (pools, call)) in legInlines do
+            let last =
+                finalUnits |> List.filter (fun u -> match u.Key with SfInl (i, c, _) -> (i, c) = key | SfOrig _ -> false) |> List.tryLast
+            match last with
+            | Some { Binder = Some bid } when not pools.IsEmpty ->
+                InlineReturnTable.record { BoundaryLetId = bid; Pools = pools; Call = resolveNames call; Guard = ref false }
+            | _ -> ()
         let replace = System.Collections.Generic.Dictionary<SfUnitKey * int, IRExpr>()
         let dropUnits = System.Collections.Generic.HashSet<SfUnitKey>()
         let projOf = System.Collections.Generic.Dictionary<IRId, IRId list * IRType list>()
@@ -7552,7 +7587,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
             let pTys = legs |> List.map (fun l -> l.ResultType)
             // A7c: the admitted plan, keyed by the producer and by this join.
             (match legPlans.TryGetValue groupAt.Value with
-             | true, (pId, pinfo, specs, inlinedCall, inlinedPools) ->
+             | true, (pId, pinfo, specs, inlinedCall) ->
                 let opIds = pinfo.Arrays |> List.map (function IRVar (id, _) -> id | _ -> -1)
                 let plan : EpilogueLegPlan =
                     { ProducerId = pId; JoinId = jId
@@ -7564,8 +7599,8 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                               OperandElem = (match List.tryItem pos pinfo.ArrayTypes with Some at -> at.ElemType | None -> ty)
                               Licensed = s.Licensed; Name = s.Name; SlotId = builder.FreshId() })
                       ProducerName = nameOf pId; Subject = subject
-                      InlinedCall = inlinedCall |> Option.map resolveNames; InlinedPools = inlinedPools
-                      EmittedCpp = ref None; DecidedCpp = ref false; DecidedLlvm = ref false; FreeGuard = ref false }
+                      InlinedCall = inlinedCall |> Option.map resolveNames
+                      EmittedCpp = ref None; DecidedCpp = ref false; DecidedLlvm = ref false }
                 EpilogueLegTable.record plan |> ignore
              | _ -> ())
             let lets =

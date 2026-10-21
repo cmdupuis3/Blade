@@ -2311,6 +2311,10 @@ let private corpusSource (rel: string) : Result<string, string> =
 /// stores into a pool (a GEP-addressed store) and updates the most
 /// alloca-slot accumulators with an `fadd`. Returns (accumulator updates,
 /// GEP reads) of that block and the number of loop bodies in the module.
+/// It reads the lane's RAW emitter IR, before clang's optimizer and
+/// vectorizer (it would not recognize vectorized IR), and picks the
+/// pool-storing block with the most accumulators rather than tracing named
+/// inputs -- adequate for these small fixtures.
 let private llvmFusedLoop (ll: string) : int * int * int =
     let lines = ll.Replace("\r\n", "\n").Split('\n')
     let slots =
@@ -2499,8 +2503,25 @@ let private eplTeamNoCensus () =
             false
     | Error e, _ | _, Error e -> resultLine Fail name e; false
 
+/// Every A7c return-boundary release in `body`: each released pool is freed
+/// exactly once and never named after its release. Ok = the pool names.
+let private releasesSafe (body: string) : Result<string list, string> =
+    let lines = body.Replace("\r\n", "\n").Split('\n')
+    let rx = System.Text.RegularExpressions.Regex(@"its pool `(__v\d+)` is released at that return boundary")
+    let rels = lines |> Array.mapi (fun i l -> (i, rx.Match l)) |> Array.filter (fun (_, m) -> m.Success) |> Array.map (fun (i, m) -> (i, m.Groups.[1].Value))
+    let tok (n: string) (l: string) = System.Text.RegularExpressions.Regex.IsMatch(l, "(?<![A-Za-z0-9_])" + n + "(?![A-Za-z0-9_])")
+    let problem =
+        rels |> Array.tryPick (fun (i, n) ->
+            let frees = lines |> Array.filter (fun l -> l.Contains $"({n}.data, {n}.extents)") |> Array.length
+            let after = lines |> Array.skip (i + 2) |> Array.exists (tok n)
+            if frees <> 1 then Some $"{n} released {frees} times"
+            elif after then Some $"{n} is named after its release"
+            else None)
+    match problem with
+    | Some p -> Error p
+    | None -> Ok (rels |> Array.map snd |> List.ofArray)
 /// Finding 2 (the route taken): the inlined callee's pool is freed at the
-/// call's original return point, so the inline moves no free -- in main
+/// call's return boundary (behind the inlined spine's evaluated return) -- in main
 /// (no frame: the plain dense free) and in a function body (the frame's own
 /// free, then spared at the function's return: no double free).
 let private eplReturnPointFree () =
@@ -2519,21 +2540,83 @@ let private eplReturnPointFree () =
         + "let r = driver(inputs(7), inputs(5))\n"
     match withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () -> cppOfSource name eplSaxpySrc, cppOfSource name fnSrc)) with
     | Ok saxpy, Ok fn ->
-        let m = mainBody saxpy
-        let freeAt = m.IndexOf "is freed at the call's original return point"
-        let bind = m.IndexOf "= __epl_acc_"
         let d = fn.IndexOf "double driver(Array<double, 1> x, Array<double, 1> y) {"
         let dBody = if d < 0 then "" else fn.Substring(d, fn.IndexOf("\n}\n", d) - d)
-        let frees = countOf "deallocate<typename promote<double, 1>::type, nullptr>(" dBody
-        let freeBeforeJoin = dBody.IndexOf "is freed at the call's original return point" < dBody.IndexOf "= __epl_acc_"
-        if freeAt >= 0 && bind > freeAt && frees = 1 && freeBeforeJoin && dBody.Contains "__epl_acc_" then
-            resultLine Pass name "main frees y2 right behind the inlined spine; driver frees it once there and not again at its return"
+        match releasesSafe (mainBody saxpy), releasesSafe dBody with
+        | Ok [ _ ], Ok [ _ ] when dBody.Contains "__epl_acc_" && countOf "deallocate<typename promote<double, 1>::type, nullptr>(" dBody = 1 ->
+            resultLine Pass name "main and driver each release y2 once at the inlined call's return boundary, with no read after it; driver does not free it again at its return"
             true
-        else
-            resultLine Fail name ($"main freeAt={freeAt} bind={bind}; driver frees={frees} beforeJoin={freeBeforeJoin}")
-            false
+        | rm, rd -> resultLine Fail name ($"main {rm}; driver {rd}"); false
     | Error e, _ | _, Error e -> resultLine Fail name e; false
 
+/// NEW 1 (second review): the join lands INSIDE the inlined callee
+/// (sibling-folds/030 `later`: inner folds of x and y between y2 and a later
+/// map z that reads y2) -- the pools are released at the call's return
+/// boundary, after z; and with the cell epilogue declined at emission (omp
+/// test mode) y2's two-pass epilogue fold still reads it before its release
+/// (`early`: the inner folds before s).
+let private eplJoinInsideCallee () =
+    let name = "epilogue_legs_join_inside_inlined_callee_releases_at_return"
+    match corpusSource "sibling-folds/030_input_legs_join_inside_inlined_callee.blade" with
+    | Error e -> resultLine Fail name e; false
+    | Ok src ->
+    let src = src.Substring(src.IndexOf '\n' + 1)
+    let emit (testMode: bool) =
+        withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () -> withGate "BLADE_POOL_REUSE" "off" (fun () ->
+            Blade.CodeGenState.setOmpTestMode testMode
+            try cppOfSource name src
+            finally Blade.CodeGenState.setOmpTestMode false)))
+    match emit false, emit true with
+    | Ok normal, Ok testMode ->
+        match releasesSafe (mainBody normal), releasesSafe (mainBody testMode) with
+        | Ok rn, Ok rt when rn.Length = 3 && rt.Length = 3 && (mainBody normal).Contains "__epl_acc_" ->
+            resultLine Pass name ($"3 callee pools (y2 and z of later, y2 of early) released once each at the call's return boundary, no read after any release -- with the epilogue fused and with it declined (omp test mode)")
+            true
+        | a, b -> resultLine Fail name (sprintf "normal %A; test mode %A" a b); false
+    | Error e, _ | _, Error e -> resultLine Fail name e; false
+
+/// NEW 2 (second review): two plans riding two producers of ONE inlined call
+/// (sibling-folds/031) -- each pool released exactly once; the nested-block
+/// region keeps its call.
+let private eplTwoPlansOneCall () =
+    let name = "epilogue_legs_two_plans_one_call_release_once"
+    match corpusSource "sibling-folds/031_input_legs_two_plans_one_inlined_call.blade" with
+    | Error e -> resultLine Fail name e; false
+    | Ok src ->
+    let src = src.Substring(src.IndexOf '\n' + 1)
+    match withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () -> withGate "BLADE_POOL_REUSE" "off" (fun () -> cppOfSource name src))) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let m = mainBody cpp
+        match releasesSafe m with
+        | Ok rs when rs.Length = 2 && countOf "__epl_acc_" m >= 4 && System.Text.RegularExpressions.Regex.Matches(m, @"= kernel\(").Count = 1 ->
+            resultLine Pass name "y2 and w2 released exactly once each at the shared return boundary (two plans, one call); the nested-block region still calls kernel"
+            true
+        | r ->
+            let legs, calls = countOf "__epl_acc_" m, System.Text.RegularExpressions.Regex.Matches(m, @"= kernel\(").Count
+            resultLine Fail name (sprintf "releases %A; legs %d; calls %d" r legs calls); false
+
+/// 029 in the LLVM lane: the throwing callee is not inlined for legs -- no
+/// extra accumulator in its fused loop vs gate-off, and its frame is pushed.
+let private eplThrowingCalleeLlvm () =
+    let name = "epilogue_legs_throwing_callee_llvm_keeps_frame"
+    match corpusSource "sibling-folds/029_input_legs_throwing_callee_keeps_frame.blade" with
+    | Error e -> resultLine Fail name e; false
+    | Ok src ->
+    let src = src.Substring(src.IndexOf '\n' + 1)
+    match withGate "BLADE_OMP_THREADS" "1" (fun () -> eplLlvmOf src null, eplLlvmOf src "0") with
+    | Ok (on, ds), Ok (off, _) ->
+        let (aOn, _, _) = llvmFusedLoop on
+        let (aOff, _, _) = llvmFusedLoop off
+        let frame = on.Contains "c\"kernel\\00\"" && on.Contains "@blade_frame_stack"
+        let noPlan = ds |> List.forall (fun d -> d.Rule <> "epilogue-legs")
+        if aOn = aOff && frame && noPlan then
+            resultLine Pass name ($"no epilogue-legs plan; fused loop accumulators {aOn} == gate-off {aOff}; kernel's frame pushed")
+            true
+        else
+            resultLine Fail name ($"acc on={aOn} off={aOff} frame={frame} noPlan={noPlan}")
+            false
+    | Error e, _ | _, Error e -> resultLine Fail name e; false
 let private eplDecisionCases () =
     let serialRepro f = withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" f)
     [ serialRepro (fun () ->
@@ -5346,6 +5429,9 @@ let runOptimizeTests () =
           eplCorpus028 ()
           eplTeamNoCensus ()
           eplReturnPointFree ()
+          eplJoinInsideCallee ()
+          eplTwoPlansOneCall ()
+          eplThrowingCalleeLlvm ()
           withGate "BLADE_OMP_THREADS" "1" (fun () ->
             eplNoRouteKeepsCall "epilogue_legs_nonliteral_epilogue_seed_keeps_call" eplNonliteralSeedSrc [ ("BLADE_FP_REPRO", "1") ] "seed is not a literal")
           withGate "BLADE_OMP_THREADS" "1" (fun () ->

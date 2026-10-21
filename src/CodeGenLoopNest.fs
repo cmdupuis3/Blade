@@ -4965,7 +4965,8 @@ let peekAllocScopeFrees (ind: string) : string list =
     | Some frame -> renderFrameFrees ind frame
 
 /// A7c (gap G69, W2-4 review finding 2): free ONE pool now, at an inlined
-/// callee's original return point, and spare it from the scope's own frees.
+/// callee's return boundary (Optimize.InlineReturnTable), and spare it from
+/// the scope's own frees.
 ///   * a live frame that tracks `n` (a function body / loop scope): its own
 ///     rendered free, the name then suppressed (no double free at scope exit);
 ///   * a live frame that does NOT track it (suppressed, escaping, unregistered)

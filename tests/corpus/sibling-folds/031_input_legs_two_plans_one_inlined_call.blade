@@ -1,0 +1,48 @@
+// TEST: Two input-leg plans in ONE inlined call release its pools once
+// ============================================================================
+// `kernel` holds two producers over two different extents (x, y over Ix;
+// u, v over Jx), each with its own cell epilogue. The caller's four input
+// sums form two sibling groups -- two epilogue-legs plans riding two
+// producers of the SAME inlined call. The call's pools (y2, w2) are owned by
+// ONE return-boundary entry and released exactly once (W2-4 second review
+// NEW 2). A second region calls the kernel from a NESTED block: no region
+// spans the call and the sums, so nothing is inlined and the call keeps its
+// own frees. Values are the as-written ones.
+// ============================================================================
+type Ix = Idx<1003>
+type Jx = Idx<1009>
+function inputs(m: Int64) -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute
+}
+function inputs_j(m: Int64) -> Array<Float64 like Jx> = {
+    method_for(range<Jx>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute
+}
+function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>, u: Array<Float64 like Jx>, v: Array<Float64 like Jx>) -> Float64 = {
+    let y2 = method_for(zip(x, y)) <@> lambda(a, b) -> a + b |> compute
+    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
+    let w2 = method_for(zip(u, v)) <@> lambda(a, b) -> a - b |> compute
+    let q = reduce(method_for(w2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
+    s + 10.0 * q
+}
+let (r, t) = {
+    let x = inputs(7)
+    let y = inputs(5)
+    let u = inputs_j(11)
+    let v = inputs_j(3)
+    (kernel(x, y, u, v), reduce(x, (+)) + reduce(y, (+)) + 100.0 * reduce(u, (+)) + 1000.0 * reduce(v, (+)))
+}
+let (rn, tn) = {
+    let x = inputs(6)
+    let y = inputs(4)
+    let u = inputs_j(5)
+    let v = inputs_j(2)
+    let inner = {
+        let k = kernel(x, y, u, v)
+        k * 2.0
+    }
+    (inner, reduce(x, (+)) + reduce(y, (+)) + 100.0 * reduce(u, (+)) + 1000.0 * reduce(v, (+)))
+}
+// EXPECT: r = 299031.0
+// EXPECT: t = 1516307.0
+// EXPECT: rn = 132112.0
+// EXPECT: tn = 709608.0
