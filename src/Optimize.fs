@@ -4337,9 +4337,12 @@ let planMembershipHoist (programFuncs: IRCallable list) (modul: IRModule) : unit
     // the forms that are materialized at their own site (an array literal, a
     // `|> compute`, a compound, an eager set operation, a call's array
     // result, a non-streamed provider read), reached through any chain of
-    // top-level let ALIASES (`let B = A`, each hop an earlier binding; the
-    // C++ lane propagates a deferred source's deferral through an alias, so
-    // `isDeferredForm` of the alias's own value proves nothing). A virtual
+    // top-level let ALIASES (`let B = A`, each hop an earlier binding;
+    // `isDeferredForm` of an alias's own value -- an IRVar -- proves nothing
+    // about the cells: the C++ lane forces and deep-copies an ASSIGNABLE
+    // alias of a deferred map at the alias's site, the ordinary `let B =
+    // lazy` case, but propagates the deferral through a non-assignable one,
+    // so v1 proves the root and declines a deferred root either way). A virtual
     // array (a range), a deferred map (directly or through an alias), a
     // streamed read and every other form are not proved stored. Returns how
     // the cells are stored and the chain (the named set first, the root

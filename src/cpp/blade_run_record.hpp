@@ -15,8 +15,11 @@
 // passes, so the emitted .cpp itself carries no environment); the RNG
 // generator when the program draws; the runtime FORM CENSUS (`forms`: per
 // site whose form is chosen at run time, the form it executed and the
-// requested / actual team -- note_form); and the completion status -- ok, or
-// the BLxxxx code and message of the failure that ended the run.
+// requested / actual team -- note_form; present only when a site recorded
+// one); membership hoisting's builds (`member_hoist`, blade_member.h; present
+// only when a build ran); and the completion status -- ok, or the BLxxxx code
+// and message of the failure that ended the run. A program that records
+// neither writes the record format that predates both.
 //
 // "Observed identity" is version identity (size + mtime), not content
 // identity: hashing a multi-gigabyte store at exit is not a cost a run
@@ -223,17 +226,22 @@ namespace blade_rr {
                  BLADE_RR_LAPACK ? "true" : "false",
                  BLADE_RR_CUBLAS ? "true" : "false",
                  uses_rng ? "{\"generator\":\"philox4x32-10\",\"version\":1}" : "null");
-    // the runtime form census (observed, per site; see note_form)
-    std::fputs(",\"forms\":[", f);
-    for (int i = 0; i < n_form_events; ++i) {
-      const FormEvent& e = form_events[i];
-      if (i) std::fputc(',', f);
-      std::fputs("{\"site\":", f); json_string(f, e.site);
-      std::fputs(",\"form\":", f); json_string(f, e.form);
-      std::fprintf(f, ",\"requested\":%d,\"actual\":%d,\"calls\":%lld}", e.requested, e.actual, e.calls);
+    // the runtime form census (observed, per site; see note_form) -- written
+    // ONLY when a site recorded an event (or dropped one), so the record of a
+    // program with no run-time-chosen form is byte-identical to the record
+    // format before the census existed (version 1 unchanged)
+    if (n_form_events > 0 || form_events_dropped > 0) {
+      std::fputs(",\"forms\":[", f);
+      for (int i = 0; i < n_form_events; ++i) {
+        const FormEvent& e = form_events[i];
+        if (i) std::fputc(',', f);
+        std::fputs("{\"site\":", f); json_string(f, e.site);
+        std::fputs(",\"form\":", f); json_string(f, e.form);
+        std::fprintf(f, ",\"requested\":%d,\"actual\":%d,\"calls\":%lld}", e.requested, e.actual, e.calls);
+      }
+      std::fputc(']', f);
+      if (form_events_dropped > 0) std::fprintf(f, ",\"forms_dropped\":%lld", form_events_dropped);
     }
-    std::fputc(']', f);
-    if (form_events_dropped > 0) std::fprintf(f, ",\"forms_dropped\":%lld", form_events_dropped);
     std::fputs(",\"inputs\":[", f);
     for (int i = 0; i < n_inputs; ++i) {
       const Input& in = inputs[i];

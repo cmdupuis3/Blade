@@ -348,5 +348,98 @@ let q = method_for(z) <@> lambda(x) where omp(x: 1) -> 10 / x |> compute
          finally
              Environment.SetEnvironmentVariable("OMP_NUM_THREADS", priorThreads))
 
+    // ---------------- 4. the record's OPTIONAL members, parsed ----------------
+    // Two runtime components append to the record: the FORM CENSUS (`forms`,
+    // W2-3: the rank-3 orbit scatter's executed leaf form) and membership
+    // hoisting's builds (`member_hoist`, W2-1). Each member is written ONLY
+    // when its component recorded something (Codex second look of W2-1, NEW
+    // 3): a program with neither writes exactly the top-level members the
+    // record had before both. Five programs, the record PARSED (System.Text.Json),
+    // the member list and the route fields asserted: none / membership only /
+    // forms only, on a team of 3 (`row-pull`) and of 1 (`serial-leaf3`) /
+    // both together.
+    printfn "\n--- record: optional members (parsed JSON) ---"
+    let withPins (pins: (string * string) list) (f: unit -> 'a) : 'a =
+        let prior = pins |> List.map (fun (k, _) -> (k, Environment.GetEnvironmentVariable k))
+        for (k, v) in pins do Environment.SetEnvironmentVariable(k, v)
+        try f () finally for (k, v) in prior do Environment.SetEnvironmentVariable(k, v)
+    let baseMembers = [ "blade_run_record"; "program"; "status"; "executable"; "policy"; "routes"; "rng"; "inputs" ]
+    let memberPart =
+        "type Row = Idx<9>\n"
+        + "let customer: Array<Int64 like Row> = [3, 1, 3, 2, 1, 4, 3, 9, -5]\n"
+        + "let evens = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 44, 46, 58, 60]\n"
+        + "let keep = mask(customer, lambda(c) -> contains(evens, c))\n"
+    // the rank-3 ordered orbit scatter's row-owned pull (BLADE_FP_REPRO=1,
+    // threads on, BLADE_TILE_TUNE pull_min=0): its leaf stage notes its form
+    let formsPart =
+        "type Obs = Idx<3>\n"
+        + "type V13 = Idx<13>\n"
+        + "let x13 = method_for(range<V13>, range<Obs>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 11) * 0.37 + 0.1 / Float64(i + 1) |> compute\n"
+        + "let t13 = method_for(x13, x13, x13) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) |> compute\n"
+        + "let a0 = reduce(method_for(range<V13>) <@> lambda(i) -> reduce(method_for(range<V13>) <@> lambda(j) -> reduce(method_for(range<V13>) <@> lambda(k) -> t13(i, j, k) * t13(i, j, k), (+), 0.0), (+), 0.0), lambda(u, v) where omp -> u + v, 0.0)\n"
+    let buildPins = [ ("BLADE_FP_REPRO", "1"); ("BLADE_FP_CONTRACT", "off"); ("BLADE_TILE_TUNE", "pull_min=0"); ("BLADE_OMP_THREADS", null)
+                      ("BLADE_ORBIT_PULL", null); ("BLADE_ORBIT_SCATTER", null); ("BLADE_ORBIT_FOLD", null); ("BLADE_FOLD_ROW_SLOTS", null)
+                      ("BLADE_MEMBER_HOIST", null) ]
+    // (stem, source, top-level members in order, member_hoist expected, the
+    // one forms row expected (form, requested, actual), OMP_NUM_THREADS at run
+    // time): the forms program runs on a team of 3 (the row-owned pull) and,
+    // as its own build, on a team of 1 (the serial slice form, no team opened)
+    let withForms = [ "blade_run_record"; "program"; "status"; "executable"; "policy"; "routes"; "rng"; "forms"; "inputs" ]
+    let fixtures =
+        [ ("rr_opt_none", "let xs = [1, 2, 3]\nlet s = reduce(xs, (+))\n", baseMembers, false, None, "3")
+          ("rr_opt_member", memberPart, baseMembers @ [ "member_hoist"; "member_hoist_dropped" ], true, None, "3")
+          ("rr_opt_forms", formsPart, withForms, false, Some ("row-pull", 3, 3), "3")
+          ("rr_opt_forms_serial", formsPart, withForms, false, Some ("serial-leaf3", 1, 1), "1")
+          ("rr_opt_both", formsPart + memberPart, withForms @ [ "member_hoist"; "member_hoist_dropped" ], true, Some ("row-pull", 3, 3), "3") ]
+    for (stem, src, wantMembers, wantMember, wantForms, threads) in fixtures do
+        let name = $"record (parsed): {stem} -- top-level members, the route fields"
+        match withPins buildPins (fun () -> buildExe stem src) with
+        | Error e when isSkipError e -> skip name e
+        | Error e -> check name false ("build: " + e)
+        | Ok exe ->
+            let recPath = Path.GetFullPath(Path.Combine(e2eDir, stem + ".record.json"))
+            if File.Exists recPath then File.Delete recPath
+            let runOutcome =
+                withPins [ ("OMP_NUM_THREADS", threads) ] (fun () ->
+                    let r = ref (Error "not run")
+                    withRecord (Some recPath) (fun () -> r.Value <- runExecutable exe)
+                    r.Value)
+            match runOutcome with
+            | Ok (0, _) -> ()
+            | Ok (code, out) -> check name false ($"exit {code}: {out}")
+            | Error e -> check name false ("run: " + e)
+            if not (File.Exists recPath) then check name false "no record written"
+            else
+                let text = File.ReadAllText recPath
+                match (try Ok (System.Text.Json.JsonDocument.Parse text) with ex -> Error ex.Message) with
+                | Error e -> check name false ($"the record is not JSON: {e}")
+                | Ok doc ->
+                    use doc = doc
+                    let root = doc.RootElement
+                    let members = [ for p in root.EnumerateObject() -> p.Name ]
+                    let memberOk =
+                        if not wantMember then true
+                        else
+                            let mh = root.GetProperty "member_hoist"
+                            mh.GetArrayLength() = 1
+                            && (let e = mh.[0]
+                                e.GetProperty("host").GetString() = "keep" && e.GetProperty("set").GetString() = "evens"
+                                && e.GetProperty("m").GetInt64() = 20L && e.GetProperty("preferred").GetString() = "bitmap"
+                                && e.GetProperty("actual").GetString() = "bitmap" && e.GetProperty("fallback").GetString() = "")
+                            && root.GetProperty("member_hoist_dropped").GetInt32() = 0
+                    let formsOk =
+                        match wantForms with
+                        | None -> true
+                        | Some (form, requested, actual) ->
+                            let fs = root.GetProperty "forms"
+                            fs.GetArrayLength() = 1
+                            && (let e = fs.[0]
+                                e.GetProperty("site").GetString() = "a0" && e.GetProperty("form").GetString() = form
+                                && e.GetProperty("requested").GetInt32() = requested && e.GetProperty("actual").GetInt32() = actual
+                                && e.GetProperty("calls").GetInt64() = 1L)
+                    let statusOk = root.GetProperty("status").GetProperty("ok").GetBoolean()
+                    check name (members = wantMembers && memberOk && formsOk && statusOk)
+                        ($"""members [{String.concat ", " members}] (want [{String.concat ", " wantMembers}]); member route {memberOk}; forms route {formsOk}; status ok {statusOk}; {text}""")
+
     { Block = "Run Records"; Passed = passed; Failed = failed; Skipped = skipped
       FailedNames = List.ofSeq failedNames }

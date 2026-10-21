@@ -544,51 +544,84 @@ let k = 7
 let v = R((k, k + 2))
 """
 
+/// One row of membership hoisting's ROUTE TABLE (`memberHoistRoutes`).
+type MemberHoistRoute =
+    { /// The literal corpus directory.
+      Category: string
+      /// The file's `// TEST:` name.
+      Test: string
+      /// The planned hosts, in the order they are bound: each one structure,
+      /// built before the host, probed inside it, freed after it. Empty = no
+      /// plan: no member call at all, the as-written scan.
+      Hosts: string list
+      /// How many of those builds are over a COMPOUND set (the C++ build reads
+      /// its cardinality and compact buffer).
+      CompoundBuilds: int
+      /// None: the LLVM lane emits the program. Some reason: the lane refuses
+      /// it with exactly this reason (the program runs in the C++ lane) -- an
+      /// unrelated refusal, a lowering or a validation error FAILS the row.
+      LlvmRefusal: string option }
+
+/// MEMBERSHIP HOISTING'S ROUTE TABLE (round 3 B-T1; Codex diff reviews of
+/// W2-1, finding 4 and the second look's NEW 1-2), shared by this block (the
+/// LLVM route) and `blade test optimize` (the C++ route): one row per corpus
+/// file that calls `contains` -- the corpus/table name sets are asserted
+/// EQUAL (`memberHoistRouteCoverage`), so a new unlisted file fails too.
+let memberHoistRoutes : MemberHoistRoute list =
+    let row cat test hosts compound refusal = { Category = cat; Test = test; Hosts = hosts; CompoundBuilds = compound; LlvmRefusal = refusal }
+    let compoundParam = Some "parameter 'a' of 'own_hit' has type Array<Int64 like Idx<?>> -- the llvm lane handles Int64/Float64/Bool/String scalars only"
+    [ row "sql-unique-contains" "Contains Present" [] 0 None
+      row "sql-unique-contains" "Contains Absent" [] 0 None
+      row "sql-unique-contains" "Contains Empty After Mask" [] 0 None
+      row "sql-unique-contains" "Contains In Mask Predicate" [ "in_B" ] 0 None
+      row "sql-unique-contains" "Unique Of Rank-1 Compound" [ "keep" ] 0 (Some "group_keys over a key array that is not a dense rank-1 axis")
+      row "sql-unique-contains" "Member Hoist Small Set Linear" [ "keep"; "outside" ] 0 None
+      row "sql-unique-contains" "Member Hoist Literal Set Bitmap" [ "hit"; "next_hit" ] 0 None
+      row "sql-unique-contains" "Member Hoist Extreme Keys Hash" [ "hit" ] 0 None
+      row "sql-unique-contains" "Member Hoist Empty Compound Set" [ "hit"; "cnt" ] 2 None
+      row "sql-unique-contains" "Contains Target Evaluated Once Per Probe" [] 0 None
+      row "sql-unique-contains" "Contains Failing Target Over Empty Set (aborts)" [] 0 None
+      row "sql-unique-contains" "Member Hoist Failing Target (aborts)" [ "keep" ] 0 None
+      row "sql-unique-contains" "Member Hoist Fold Kernel Short Circuit" [ "guarded"; "weighted" ] 0 None
+      row "sql-unique-contains" "Member Hoist OMP Map Hash" [ "flags" ] 0 None
+      row "sql-unique-contains" "Member Hoist Compound Set" [ "hit" ] 1 None
+      row "sql-unique-contains" "Member Hoist Declines Keep Values" [] 0 None
+      row "sql-unique-contains" "Member Hoist Semiagg Probe" [ "keep"; "keep2" ] 0 None
+      row "sql-unique-contains" "Contains Target Mutates A Dense Set" [] 0 None
+      row "sql-unique-contains" "Contains Target Mutates A Compound Set" [] 0 compoundParam
+      row "sql-unique-contains" "Member Hoist Fold Kernel Probe" [ "picked" ] 0 None
+      row "sql-unique-contains" "Member Hoist Stored Alias Chain" [ "flags_s" ] 0 None
+      row "sql-semijoins" "Semijoin Preserves Multiplicity" [ "r" ] 0 None
+      row "sql-semijoins" "Antijoin Basic" [ "r" ] 0 None
+      row "sql-semijoins" "Antijoin Preserves Multiplicity" [ "r" ] 0 None
+      row "sql-semijoins" "Pattern Does Not Fire On Conjunction" [ "r" ] 0 None
+      row "sql-semijoins" "Semijoin Float64" [] 0 None
+      row "sql-semijoins" "Unique Of Semijoin" [ "inB" ] 0 (Some "the IR node IRUnique in array position -- no arm in the llvm lane")
+      row "sql-semijoins" "Semijoin Then Mask" [ "inB" ] 0 None
+      row "memfree" "Memfree Inline Sparse Gather In Every Scalar Position" [] 0 (Some "a sparse-index initializer")
+      row "reynolds" "Reynolds Dedup Sees Contains" [] 0 None
+      row "reynolds" "Reynolds Antisym Dedup Sees Contains" [] 0 None ]
+
+/// The table covers EXACTLY the corpus's contains programs: every non-reject
+/// file of every single-file corpus directory whose source calls `contains(`
+/// has a row, and every row names an existing such file. Returns (missing
+/// rows, stale rows) as "category / test" names.
+let memberHoistRouteCoverage () : string list * string list =
+    let onDisk =
+        Blade.Tests.Corpus.singleFileCategories ()
+        |> List.collect (fun cat ->
+            (try Blade.Tests.Corpus.category cat with _ -> [])
+            |> List.filter (fun (n, src) -> not (n.EndsWith "(rejects)") && src.Contains "contains(")
+            |> List.map (fun (n, _) -> $"{cat} / {n}"))
+        |> Set.ofList
+    let inTable = memberHoistRoutes |> List.map (fun r -> $"{r.Category} / {r.Test}") |> Set.ofList
+    (Set.difference onDisk inTable |> Set.toList, Set.difference inTable onDisk |> Set.toList)
+
 /// Drop `;` comment lines before asserting on emitted text. The module banner
 /// NAMES the knobs it documents ("per-instruction `contract`"), so a bare
 /// substring search over the whole file would find `contract` in a module that
 /// emitted none -- a false pass in the direction that matters least and a
 /// false failure in the direction that matters most.
-/// MEMBERSHIP HOISTING'S ROUTE TABLE (round 3 B-T1; Codex diff review of
-/// W2-1, finding 4), shared by this block (the LLVM route) and
-/// `blade test optimize` (the C++ route): for each contains / member-hoist
-/// corpus file, the number of planned hosts -- each one structure, built
-/// before the host, probed inside it, freed after it (0 = no plan: no member
-/// call at all, the as-written scan) --, how many of those builds are over a
-/// COMPOUND set (the build reads its cardinality and compact buffer), and
-/// whether the LLVM lane emits the program (false: it refuses -- a compound
-/// `mut` parameter, a contains over an unstored set -- and the program runs
-/// in the C++ lane). A corpus file renamed or added without a row here is a
-/// gap this table is meant to make visible.
-let memberHoistRoutes : (string * string * int * int * bool) list =
-    [ "sql-unique-contains", "Contains Present", 0, 0, true
-      "sql-unique-contains", "Contains Absent", 0, 0, true
-      "sql-unique-contains", "Contains Empty After Mask", 0, 0, true
-      "sql-unique-contains", "Contains In Mask Predicate", 1, 0, true
-      "sql-unique-contains", "Member Hoist Small Set Linear", 2, 0, true
-      "sql-unique-contains", "Member Hoist Literal Set Bitmap", 2, 0, true
-      "sql-unique-contains", "Member Hoist Extreme Keys Hash", 1, 0, true
-      "sql-unique-contains", "Member Hoist Empty Compound Set", 2, 2, true
-      "sql-unique-contains", "Contains Target Evaluated Once Per Probe", 0, 0, true
-      "sql-unique-contains", "Contains Failing Target Over Empty Set (aborts)", 0, 0, true
-      "sql-unique-contains", "Member Hoist Failing Target (aborts)", 1, 0, true
-      "sql-unique-contains", "Member Hoist Fold Kernel Short Circuit", 2, 0, true
-      "sql-unique-contains", "Member Hoist OMP Map Hash", 1, 0, true
-      "sql-unique-contains", "Member Hoist Compound Set", 1, 1, true
-      "sql-unique-contains", "Member Hoist Declines Keep Values", 0, 0, true
-      "sql-unique-contains", "Member Hoist Semiagg Probe", 2, 0, true
-      "sql-unique-contains", "Contains Target Mutates A Dense Set", 0, 0, true
-      "sql-unique-contains", "Contains Target Mutates A Compound Set", 0, 0, false
-      "sql-unique-contains", "Member Hoist Fold Kernel Probe", 1, 0, true
-      "sql-unique-contains", "Member Hoist Stored Alias Chain", 1, 0, true
-      "sql-semijoins", "Semijoin Preserves Multiplicity", 1, 0, true
-      "sql-semijoins", "Antijoin Basic", 1, 0, true
-      "sql-semijoins", "Antijoin Preserves Multiplicity", 1, 0, true
-      "sql-semijoins", "Pattern Does Not Fire On Conjunction", 1, 0, true
-      "sql-semijoins", "Semijoin Float64", 0, 0, true
-      "sql-semijoins", "Unique Of Semijoin", 1, 0, false
-      "sql-semijoins", "Semijoin Then Mask", 1, 0, true ]
-
 let private instructionsOnly (ll: string) =
     ll.Replace("\r\n", "\n").Split('\n')
     |> Array.filter (fun l -> not (l.TrimStart().StartsWith ";"))
@@ -1261,47 +1294,68 @@ let one = contains(evens, 44)
         [ "BLADE_MEMBER_HOIST", Some "0" ] memberSrc [ "has.cond" ] [ "blade_member_" ]
     check "contains over a Float64 set: IEEE == in the scan"
         memberOn "let fs = [1.5, -0.0, 2.5]\nlet z = contains(fs, 0.0)\n" [ "fcmp oeq double" ] [ "blade_member_" ]
-    // THE ROUTE of every contains / member-hoist corpus file (Codex diff
-    // review of W2-1, finding 4: a value pin passes when the hoist vanishes):
-    // the lane emits the program (or refuses it, where the table says so),
-    // with exactly the planned number of structures, each `init` (and its
-    // report) BEFORE its first probe, each probe of that slot inside the
-    // host, each `fini` after the last probe; a file with no plan carries no
-    // member call at all.
-    (for (cat, test, hosts, _, emits) in memberHoistRoutes do
-        let name = $"member hoist route (llvm): {cat} `{test}` -- {hosts} build(s)"
-        match (try Blade.Tests.Corpus.category cat |> List.tryFind (fun (n, _) -> n = test) with _ -> None) with
+    // THE ROUTE of every contains program in the corpus (Codex diff reviews
+    // of W2-1, finding 4 and the second look's NEW 1-2): the table covers the
+    // corpus's contains programs EXACTLY (no missing, no stale row); a row
+    // whose program the lane emits has exactly its planned hosts -- each
+    // `init`'s report naming that host, in binding order -- with init ->
+    // report -> every probe of the slot -> fini; a row with no plan carries
+    // no member call at all; a refusing row is refused with EXACTLY its
+    // recorded reason. A lowering or validation error, or an exception, fails
+    // the row whatever it says.
+    (let (missing, stale) = memberHoistRouteCoverage ()
+     let name = "member hoist route table: the corpus's contains programs, exactly"
+     if missing.IsEmpty && stale.IsEmpty then pass name ($"{memberHoistRoutes.Length} rows = the corpus's contains programs")
+     else fail name ($"""missing rows: [{String.concat "; " missing}]; stale rows: [{String.concat "; " stale}]"""))
+    (for r in memberHoistRoutes do
+        let name = $"member hoist route (llvm): {r.Category} `{r.Test}` -- {r.Hosts.Length} build(s)"
+        match (try Blade.Tests.Corpus.category r.Category |> List.tryFind (fun (n, _) -> n = r.Test) with _ -> None) with
         | None -> fail name "the corpus file is missing (renamed?)"
         | Some (_, src) ->
-            let emitted =
-                withEnv defaultEmissionEnv (fun () ->
-                    match fst (Lowering.lowerCaptured src) with
-                    | Error e -> Error ("lowering refused: " + e)
-                    | Ok ir ->
-                        match IRValidate.validateIR ir with
-                        | Error errs -> Error ("IR validation refused: " + String.concat "; " errs)
-                        | Ok ir -> EmitLlvm.tryEmitProgramNamed "facts" ir)
-            match emitted, emits with
-            | Error r, false -> pass name ($"refused as the table says ({r})")
-            | Ok _, false -> fail name "emitted, but the table says the lane refuses this program (update the table)"
-            | Error r, true -> fail name r
-            | Ok raw, true ->
+            let lowered =
+                try
+                    withEnv defaultEmissionEnv (fun () ->
+                        match fst (Lowering.lowerCaptured src) with
+                        | Error e -> Error ("lowering refused: " + e)
+                        | Ok ir ->
+                            match IRValidate.validateIR ir with
+                            | Error errs -> Error ("IR validation refused: " + String.concat "; " errs)
+                            | Ok ir -> Ok (EmitLlvm.tryEmitProgramNamed "facts" ir))
+                with ex -> Error ("raised: " + ex.Message)
+            match lowered, r.LlvmRefusal with
+            | Error e, _ -> fail name e
+            | Ok (Error why), Some want ->
+                if why.Contains want then pass name ($"refused with the recorded reason ({want})")
+                else fail name ($"refused for ANOTHER reason: {why} (recorded: {want})")
+            | Ok (Ok _), Some want -> fail name ($"emitted, but the table records the refusal `{want}` (update the table)")
+            | Ok (Error why), None -> fail name ("the lane refused: " + why)
+            | Ok (Ok raw), None ->
                 let lines = (instructionsOnly raw).Split('\n')
                 let initRe = System.Text.RegularExpressions.Regex(@"call void @blade_member_init_i64\(ptr (%[A-Za-z0-9_.]+),")
                 let inits = lines |> Array.indexed |> Array.choose (fun (i, l) -> let m = initRe.Match l in if m.Success then Some (i, m.Groups.[1].Value) else None)
-                let slotOk (i, slot: string) =
+                // the host each report names: its string global's bytes
+                let strOf (sym: string) =
+                    lines |> Array.tryPick (fun l ->
+                        let m = System.Text.RegularExpressions.Regex.Match(l, "^" + System.Text.RegularExpressions.Regex.Escape sym + @" = .*c""([^""]*)\\00""")
+                        if m.Success then Some m.Groups.[1].Value else None)
+                let slotHost (i, slot: string) : string option =
                     let has = lines |> Array.indexed |> Array.filter (fun (_, l) -> l.Contains($"@blade_member_has_i64(ptr {slot},")) |> Array.map fst
                     let fini = lines |> Array.tryFindIndex (fun l -> l.Contains($"call void @blade_member_fini_i64(ptr {slot})"))
-                    let note = lines |> Array.tryFindIndex (fun l -> l.Contains($"call void @blade_member_note_llvm(ptr {slot},"))
-                    has.Length > 0 && (match fini, note with
-                                       | Some f, Some n -> n > i && Array.min has > n && Array.max has < f
-                                       | _ -> false)
+                    let noteRe = System.Text.RegularExpressions.Regex("call void @blade_member_note_llvm\\(ptr " + System.Text.RegularExpressions.Regex.Escape slot + @", ptr (@[A-Za-z0-9_.]+),")
+                    let note = lines |> Array.indexed |> Array.tryPick (fun (k, l) -> let m = noteRe.Match l in if m.Success then Some (k, m.Groups.[1].Value) else None)
+                    match fini, note with
+                    | Some f, Some (n, hostSym) when has.Length > 0 && n > i && Array.min has > n && Array.max has < f -> strOf hostSym
+                    | _ -> None
                 let anyMember = lines |> Array.exists (fun l -> l.Contains "blade_member_")
-                if hosts = 0 then
+                if r.Hosts.IsEmpty then
                     if anyMember then fail name "a member call in a program with no plan" else pass name "no structure, the scan"
-                elif inits.Length <> hosts then fail name ($"{inits.Length} init(s), want {hosts}")
-                elif not (inits |> Array.forall slotOk) then fail name "an init / report / probe / fini out of order (or a slot never probed)"
-                else pass name ($"{hosts} init -> report -> probes -> fini"))
+                else
+                    let hosts = inits |> Array.map slotHost |> List.ofArray
+                    if hosts |> List.exists Option.isNone then fail name "an init / report / probe / fini out of order (or a slot never probed)"
+                    else
+                        let got = hosts |> List.map Option.get
+                        if got <> r.Hosts then fail name ($"""hosts [{String.concat ", " got}], want [{String.concat ", " r.Hosts}]""")
+                        else pass name ($"""{String.concat ", " got}: init -> report -> probes -> fini"""))
 
     printFooter "LLVM Fact Layer"
         [ $"{passed} passed"; $"{failed} failed"; "0 skipped" ]

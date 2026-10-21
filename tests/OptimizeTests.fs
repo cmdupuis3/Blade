@@ -4075,57 +4075,254 @@ let private memberHoistGateOffEmission () =
             resultLine Fail name "expected no blade_member_* text and the contract-form scan"
             false
 
-/// THE C++ ROUTE of every contains / member-hoist corpus file (Codex diff
-/// review of W2-1, finding 4; the table is LlvmTests.memberHoistRoutes, which
-/// the LLVM route shares): exactly the planned number of file-scope
-/// structures; each one built ONCE in main and reported on the next line,
-/// the host's code after it, freed once after that; every probe of it either
-/// in a kernel function (defined before main, called only by its host) or
-/// inside that build..free window; the compound sets' builds reading the
-/// cardinality; and no member text at all in a file with no plan.
+/// Lower (warnings captured), VALIDATE the IR, then hand it to `k`: a
+/// lowering or validation refusal, or an exception anywhere, is an Error.
+let private loweredValidated (src: string) (k: Blade.IR.IRProgram -> 'a) : Result<'a, string> =
+    try
+        match fst (Lowering.lowerCaptured src) with
+        | Error e -> Error ("lowering refused: " + e)
+        | Ok ir ->
+            match IRValidate.validateIR ir with
+            | Error errs -> Error ("IR validation refused: " + String.concat "; " errs)
+            | Ok ir -> Ok (k ir)
+    with ex -> Error ("raised: " + ex.Message)
+
+/// Where one planned structure `g` (host `host`) sits in emitted C++ `lines`
+/// (`mainAt` = the `int main(` line): built ONCE in main and reported on the
+/// next line; the host's first statement -- its first mention in main outside
+/// a comment and the member calls -- AFTER the report; the host's cell loop
+/// (its first `for (` from there: a braced body to its closing brace, a
+/// brace-less one to its statement's `;`) closing BEFORE the free, which
+/// happens once. Every probe of `g` runs only inside that loop: inline in it,
+/// or in a callable (a kernel function before main, a consumer-local
+/// `auto W = [&] ...` wrapper in main, transitively) EVERY invocation of
+/// which is inside the loop. A kernel copy nothing invokes is dead code (the
+/// emitter keeps the function when it inlines the kernel into the loop) and
+/// is counted, not failed; at least one probe must run in the loop. Ok = the
+/// number of dead kernel copies.
+let private memberHostPlacement (lines: string[]) (mainAt: int) (g: string, host: string) : Result<int, string> =
+    let re (p: string) = System.Text.RegularExpressions.Regex(p)
+    let esc (s: string) = System.Text.RegularExpressions.Regex.Escape s
+    let idx (needle: string) = lines |> Array.indexed |> Array.filter (fun (_, l) -> l.Contains needle) |> Array.map fst
+    let isComment (l: string) = l.TrimStart().StartsWith "//"
+    // the line the brace opened at or after line `s` closes on
+    let blockEnd (s: int) =
+        let mutable depth = 0
+        let mutable opened = false
+        let mutable e = -1
+        let mutable k = s
+        while e < 0 && k < lines.Length do
+            for ch in lines.[k] do
+                if ch = '{' then
+                    depth <- depth + 1
+                    opened <- true
+                elif ch = '}' then depth <- depth - 1
+            if opened && depth <= 0 then e <- k
+            k <- k + 1
+        e
+    // the last line of the loop whose header is line `s`
+    let loopEnd (s: int) =
+        if lines.[s].TrimEnd().EndsWith "{" then blockEnd s
+        elif s + 1 < lines.Length && lines.[s + 1].TrimStart().StartsWith "{" then blockEnd (s + 1)
+        else
+            // brace-less: the one statement (or nested loop) that is its body
+            let mutable depth = 0
+            let mutable opened = false
+            let mutable e = -1
+            let mutable k = s + 1
+            while e < 0 && k < lines.Length do
+                for ch in lines.[k] do
+                    if ch = '{' then
+                        depth <- depth + 1
+                        opened <- true
+                    elif ch = '}' then depth <- depth - 1
+                let t = lines.[k].TrimEnd()
+                if depth = 0 && (t.EndsWith ";" || (opened && t.EndsWith "}")) then e <- k
+                k <- k + 1
+            e
+    // the function definition (column 0, before main) a line belongs to
+    let funcRe = re @"^[A-Za-z_][^;()]*?\b([A-Za-z_][A-Za-z0-9_]*)\(.*\)\s*\{\s*$"
+    let enclosingFn (p: int) =
+        seq { p .. -1 .. 0 } |> Seq.tryPick (fun k -> let m = funcRe.Match lines.[k] in if m.Success then Some m.Groups.[1].Value else None)
+    let wrapRe = re @"^\s*auto (\w+) = \[&\]"
+    // a declaration or definition of `fn` (column 0), not a call
+    let declOf (fn: string) (l: string) =
+        l.Length > 0 && not (System.Char.IsWhiteSpace l.[0]) && (re ("^[A-Za-z_][^=;]*?\\b" + esc fn + "\\(")).IsMatch l
+    // every main line that (transitively) invokes callable `fn`; -1 = a call
+    // that resolves to no function and no main line
+    let rec mainInvocations (visited: Set<string>) (fn: string) : int list =
+        if visited.Contains fn then []
+        else
+            let visited = visited.Add fn
+            let callRe = re ("(?<![A-Za-z0-9_])" + esc fn + "\\(")
+            [ for k in 0 .. lines.Length - 1 do
+                let l = lines.[k]
+                if callRe.IsMatch l && not (declOf fn l) && not (isComment l) then
+                    if mainAt >= 0 && k > mainAt then
+                        let w = wrapRe.Match l
+                        if w.Success && w.Groups.[1].Value <> fn then yield! mainInvocations visited w.Groups.[1].Value
+                        else yield k
+                    else
+                        match enclosingFn k with
+                        | Some caller when caller <> fn -> yield! mainInvocations visited caller
+                        | Some _ -> ()
+                        | None -> yield -1 ]
+    match idx $"blade_member_build_i64(&{g}, ", idx $"blade_member_note_i64(&{g}, ", idx $"blade_member_free_i64(&{g});" with
+    | [| b |], [| n |], [| f |] when mainAt >= 0 && b > mainAt && n = b + 1 && f > n ->
+        let hostRe = re ("(?<![A-Za-z0-9_])" + esc host + "(?![A-Za-z0-9])")
+        match [ mainAt + 1 .. lines.Length - 1 ]
+              |> List.tryFind (fun k -> not (isComment lines.[k]) && not (lines.[k].Contains "blade_member_") && hostRe.IsMatch lines.[k]) with
+        | None -> Error $"`{host}` is never mentioned in main"
+        | Some h when h <= n -> Error $"`{host}`'s code starts at line {h + 1}, before its structure is built and reported (line {n + 1})"
+        | Some h ->
+        match [ h .. f - 1 ] |> List.tryFind (fun k -> lines.[k].Contains "for (") with
+        | None -> Error $"no cell loop of `{host}` between its first statement (line {h + 1}) and the free"
+        | Some ls ->
+        let le = loopEnd ls
+        if le < 0 || le >= f then Error $"`{host}`'s cell loop (line {ls + 1}) does not complete before the free (line {f + 1})"
+        else
+        let inLoop (k: int) = k >= ls && k <= le
+        let calledOnlyInLoop (fn: string) : Result<bool, string> =
+            let inv = mainInvocations Set.empty fn
+            match inv |> List.tryFind (inLoop >> not) with
+            | Some k -> Error $"`{fn}`, which probes `{g}`, is invoked outside `{host}`'s loop (lines {ls + 1}-{le + 1}) at line {k + 1}"
+            | None -> Ok (not inv.IsEmpty)
+        let probeVerdict (p: int) : Result<bool, string> =
+            if p > mainAt then
+                if inLoop p then Ok true
+                else
+                    let w = wrapRe.Match lines.[p]
+                    if w.Success then calledOnlyInLoop w.Groups.[1].Value
+                    else Error $"the probe at line {p + 1} is in main outside `{host}`'s loop (lines {ls + 1}-{le + 1})"
+            else
+                match enclosingFn p with
+                | Some fn -> calledOnlyInLoop fn
+                | None -> Error $"the probe at line {p + 1} belongs to no function"
+        let verdicts = idx $"blade_member_test_i64(&{g}, " |> Array.map probeVerdict
+        match verdicts |> Array.tryPick (function Error e -> Some e | Ok _ -> None) with
+        | Some e -> Error e
+        | None when not (verdicts |> Array.contains (Ok true)) -> Error $"no probe of `{g}` runs inside `{host}`'s loop"
+        | None -> Ok (verdicts |> Array.filter (fun v -> v = Ok false) |> Array.length)
+    | _ -> Error $"`{g}` is not built once in main, reported on the next line and freed once after"
+
+/// THE C++ ROUTE of every contains program in the corpus (Codex diff reviews
+/// of W2-1, finding 4 and the second look's NEW 1; the table is
+/// LlvmTests.memberHoistRoutes, which the LLVM route shares, and covers the
+/// corpus's contains programs exactly -- asserted here and there). For each
+/// planned host, BY NAME (the file-scope structure's declaration names its
+/// host), `memberHostPlacement`: built once and reported before the host's
+/// first statement, freed after its cell loop closes, every probe run only
+/// inside that loop; the compound sets' builds read the cardinality; the
+/// structures are exactly the row's hosts, in binding order.
+/// A row without a plan has no member text at all. A lowering or validation
+/// error, or an exception, fails the row whatever it says.
 let private memberHoistCorpusRoutes () : bool list =
-    [ for (cat, test, hosts, compoundBuilds, _) in Blade.Tests.LlvmTests.memberHoistRoutes do
-        let name = $"member_hoist_route_cpp: {cat} `{test}` -- {hosts} build(s)"
-        match (try Blade.Tests.Corpus.category cat |> List.tryFind (fun (n, _) -> n = test) with _ -> None) with
+    let re (p: string) = System.Text.RegularExpressions.Regex(p)
+    [ let (missing, stale) = Blade.Tests.LlvmTests.memberHoistRouteCoverage ()
+      let coverName = "member_hoist_route_cpp: the table covers the corpus's contains programs, exactly"
+      if missing.IsEmpty && stale.IsEmpty then
+          resultLine Pass coverName ($"{Blade.Tests.LlvmTests.memberHoistRoutes.Length} rows = the corpus's contains programs")
+          yield true
+      else
+          resultLine Fail coverName ($"""missing rows: [{String.concat "; " missing}]; stale rows: [{String.concat "; " stale}]""")
+          yield false
+      for r in Blade.Tests.LlvmTests.memberHoistRoutes do
+        let name = $"member_hoist_route_cpp: {r.Category} `{r.Test}` -- {r.Hosts.Length} build(s)"
+        match (try Blade.Tests.Corpus.category r.Category |> List.tryFind (fun (n, _) -> n = r.Test) with _ -> None) with
         | None ->
             resultLine Fail name "the corpus file is missing (renamed?)"
             yield false
         | Some (_, src) ->
-            match cppOfSource name src with
+            match loweredValidated src (fun ir -> fst (CodeGen.genSelfContainedProgramFromIR ir name)) with
             | Error e ->
                 resultLine Fail name e
                 yield false
             | Ok cpp ->
                 let lines = cpp.Replace("\r\n", "\n").Split('\n')
                 let mainAt = lines |> Array.tryFindIndex (fun l -> l.StartsWith "int main(") |> Option.defaultValue -1
-                let declRe = System.Text.RegularExpressions.Regex(@"^static blade_member_i64 (__bl_member_\d+_\d+);")
+                let declRe = re @"^static blade_member_i64 (__bl_member_\d+_\d+); // member-hoist v1: the search structure over `[^`]+` for `([^`]+)`"
                 let globals =
-                    lines |> Array.choose (fun l -> let m = declRe.Match l in if m.Success then Some m.Groups.[1].Value else None)
-                let idx (needle: string) = lines |> Array.indexed |> Array.filter (fun (_, l) -> l.Contains needle) |> Array.map fst
-                let windowOk (g: string) =
-                    match idx $"blade_member_build_i64(&{g}, ", idx $"blade_member_note_i64(&{g}, ", idx $"blade_member_free_i64(&{g});" with
-                    | [| b |], [| n |], [| f |] when mainAt >= 0 && b > mainAt && n = b + 1 && f > n ->
-                        let hostCode = lines.[n + 1 .. f - 1] |> Array.exists (fun l -> l.Trim() <> "" && not (l.Trim().StartsWith "//"))
-                        let probes = idx $"blade_member_test_i64(&{g}, "
-                        hostCode && probes.Length > 0 && probes |> Array.forall (fun p -> p < mainAt || (p > n && p < f))
-                    | _ -> false
+                    lines |> Array.choose (fun l -> let m = declRe.Match l in if m.Success then Some (m.Groups.[1].Value, m.Groups.[2].Value) else None)
+                    |> List.ofArray
                 let compoundCount =
                     lines |> Array.filter (fun l -> l.Contains "blade_member_build_i64(&" && l.Contains ".idx->cardinality)") |> Array.length
                 let ok, detail =
-                    if hosts = 0 then
+                    if r.Hosts.IsEmpty then
                         (not (cpp.Contains "blade_member_"), "no plan: no member text, the as-written scan")
-                    elif globals.Length <> hosts then (false, $"{globals.Length} structure(s), want {hosts}")
-                    elif not (globals |> Array.forall windowOk) then (false, "a build / report / host / free / probe out of place")
-                    elif compoundCount <> compoundBuilds then (false, $"{compoundCount} compound build(s), want {compoundBuilds}")
-                    else (true, $"{hosts} build -> report -> host -> free; {compoundBuilds} over a compound's cardinality")
+                    elif (globals |> List.map snd) <> r.Hosts then
+                        (false, $"""structures for [{String.concat ", " (globals |> List.map snd)}], want [{String.concat ", " r.Hosts}]""")
+                    else
+                    let placements = globals |> List.map (memberHostPlacement lines mainAt)
+                    match placements |> List.tryPick (function Error why -> Some why | Ok _ -> None) with
+                    | Some why -> (false, why)
+                    | None ->
+                        if compoundCount <> r.CompoundBuilds then (false, $"{compoundCount} compound build(s), want {r.CompoundBuilds}")
+                        else
+                            let dead = placements |> List.sumBy (function Ok d -> d | Error _ -> 0)
+                            (true, $"""{String.concat ", " r.Hosts}: build -> report -> host's cell loop, every probe run only inside it (inline or through a kernel invoked only there; {dead} uncalled kernel copies) -> free; {r.CompoundBuilds} over a compound's cardinality""")
                 resultLine (if ok then Pass else Fail) name detail
                 yield ok ]
 
-/// THE FAIL-CLOSED EMISSION GUARDS (Codex diff review of W2-1, finding 2):
-/// a plan the planner would never make -- a hand-recorded hoist of the
-/// DEFERRED map `lazy` for host `flags_b` -- reaches both emitters, and each
-/// builds nothing (no build line / no init) and records a truthful decline
-/// instead of reading cells that do not exist yet.
+/// The route checker DISCRIMINATES (Codex second look of W2-1, NEW 1): over
+/// the real emission of `sql-unique-contains` "Member Hoist Small Set
+/// Linear", the unmutated text places `keep`, and three placement mutations
+/// are each refused by `memberHostPlacement` FOR THEIR OWN REASON -- the free
+/// moved inside the host's cell loop, the build and report moved after the
+/// host's first statement, one more invocation of the probing kernel's
+/// wrapper after the free.
+let private memberHoistPlacementMutations () : bool list =
+    let name = "member_hoist_route_cpp_checker_refuses_misplacements"
+    match (try Blade.Tests.Corpus.category "sql-unique-contains" |> List.tryFind (fun (n, _) -> n = "Member Hoist Small Set Linear") with _ -> None) with
+    | None -> resultLine Fail name "the corpus file is missing (renamed?)"; [ false ]
+    | Some (_, src) ->
+    match loweredValidated src (fun ir -> fst (CodeGen.genSelfContainedProgramFromIR ir name)) with
+    | Error e -> resultLine Fail name e; [ false ]
+    | Ok cpp ->
+        let lines = cpp.Replace("\r\n", "\n").Split('\n')
+        let mainOf (arr: string[]) = arr |> Array.findIndex (fun l -> l.StartsWith "int main(")
+        let declRe = System.Text.RegularExpressions.Regex(@"^static blade_member_i64 (__bl_member_\d+_\d+); // member-hoist v1: the search structure over `[^`]+` for `keep`")
+        let wrapper (n: int) (f: int) =
+            [ n + 1 .. f - 1 ] |> List.tryPick (fun k ->
+                let m = System.Text.RegularExpressions.Regex.Match(lines.[k], @"auto (\w+) = \[&\]")
+                if m.Success then Some m.Groups.[1].Value else None)
+        match lines |> Array.tryPick (fun l -> let m = declRe.Match l in if m.Success then Some m.Groups.[1].Value else None) with
+        | None -> resultLine Fail name "no structure for `keep`"; [ false ]
+        | Some g ->
+        let at (needle: string) = lines |> Array.findIndex (fun l -> l.Contains needle)
+        let b, n, f = at $"blade_member_build_i64(&{g}, ", at $"blade_member_note_i64(&{g}, ", at $"blade_member_free_i64(&{g});"
+        match wrapper n f with
+        | None -> resultLine Fail name "no consumer-local wrapper between the report and the free"; [ false ]
+        | Some w ->
+        let hostRe = System.Text.RegularExpressions.Regex(@"(?<![A-Za-z0-9_])keep(?![A-Za-z0-9])")
+        let h = [ n + 1 .. f - 1 ] |> List.find (fun k -> hostRe.IsMatch lines.[k] && not (lines.[k].TrimStart().StartsWith "//"))
+        let ls = [ h .. f - 1 ] |> List.find (fun k -> lines.[k].Contains "for (")
+        // drop the lines `remove`, insert `extra` right after line `after`
+        let moved (remove: int list) (after: int) (extra: string list) =
+            [| for k in 0 .. lines.Length - 1 do
+                 if not (List.contains k remove) then yield lines.[k]
+                 if k = after then yield! extra |]
+        let mutants =
+            [ "the free inside the host's loop", moved [ f ] ls [ lines.[f] ], "does not complete before the free"
+              "the build and report after the host's first statement", moved [ b; n ] h [ lines.[b]; lines.[n] ], "before its structure is built and reported"
+              "the kernel's wrapper invoked after the free", moved [] f [ $"    bool __late_probe = {w}(0);" ], "is invoked outside" ]
+        [ match memberHostPlacement lines (mainOf lines) (g, "keep") with
+          | Ok _ -> resultLine Pass (name + ": unmutated") "the real emission places `keep`"; yield true
+          | Error e -> resultLine Fail (name + ": unmutated") e; yield false
+          for (what, mutant, reason) in mutants do
+            match memberHostPlacement mutant (mainOf mutant) (g, "keep") with
+            | Error why when why.Contains reason -> resultLine Pass (name + ": " + what) ("refused: " + why); yield true
+            | Error why -> resultLine Fail (name + ": " + what) ($"refused for ANOTHER reason: {why} (want `{reason}`)"); yield false
+            | Ok _ -> resultLine Fail (name + ": " + what) "the checker accepted a misplaced structure"; yield false ]
+
+/// THE FAIL-CLOSED EMISSION GUARDS (Codex diff reviews of W2-1, finding 2 and
+/// the second look's NEW 2): a plan the planner would never make -- a
+/// hand-recorded hoist of the DEFERRED map `lazy` for host `flags_b` --
+/// reaches both emitters. The C++ lane must EMIT the program (no exception),
+/// build nothing, keep the as-written fallback scan (the set bound, the
+/// target evaluated once, the loop) and record the build-point decline. The
+/// LLVM lane must record the same decline and either emit with no `init` and
+/// the scan, or refuse with exactly the known unsupported-computed-set
+/// reason. A lowering error, an exception or any other refusal fails.
 let private memberHoistFailClosedGuards () : bool list =
     // the set `lazy` is a deferred map the host captures: the C++ lane
     // materializes it inside the host's own prelude, AFTER the build point
@@ -4134,8 +4331,8 @@ let private memberHoistFailClosedGuards () : bool list =
         + "let src: Array<Int64 like Row> = [1, 4, 3, 9, 2]\n"
         + "let lazy = method_for(range<Three>) <@> lambda(i) -> Int64(i) + 1\n"
         + "let flags_b = method_for(src) <@> lambda(v) -> contains(lazy, v) |> compute\n"
-    let injectAndRun (name: string) (emit: Blade.IR.IRProgram -> string) (want: string) (deny: string) =
-        match lower src with
+    let injectAndRun (name: string) (emit: Blade.IR.IRProgram -> Result<string, string>) (want: string) (judge: Result<string, string> -> Result<string, string>) =
+        match loweredValidated src id with
         | Error e -> resultLine Fail name e; false
         | Ok ir ->
             let bs = ir.Modules |> List.collect (fun m -> m.Bindings)
@@ -4150,28 +4347,42 @@ let private memberHoistFailClosedGuards () : bool list =
                     { HostId = host.Id; HostName = host.Name; SetId = set.Id; SetName = set.Name
                       Kernels = Set.ofSeq kernels; Forced = 0 }
                 Blade.Effects.Decisions.start ()
-                let text = try emit ir with ex -> "raised: " + ex.Message
+                let emitted = try Ok (emit ir) with ex -> Error ("raised: " + ex.Message)
                 let ds = Blade.Effects.Decisions.drain ()
                 let declined = ds |> List.exists (fun d -> d.Rule = "member-hoist" && d.Subject = "flags_b" && declinedMentioning want d)
-                if declined && not (text.Contains deny) then
-                    resultLine Pass name "no structure built; the decline is recorded"
+                match emitted with
+                | Error e -> resultLine Fail name e; false
+                | Ok outcome ->
+                match judge outcome with
+                | Ok detail when declined ->
+                    resultLine Pass name ($"the build-point decline is recorded; {detail}")
                     true
-                else
+                | Ok _ ->
                     let seen = ds |> List.filter (fun d -> d.Rule = "member-hoist") |> List.map Blade.Effects.Decisions.render |> String.concat " | "
-                    resultLine Fail name ($"declined={declined}, built={text.Contains deny}; saw: {seen}")
+                    resultLine Fail name ($"no build-point decline recorded; saw: {seen}")
                     false
+                | Error why -> resultLine Fail name why; false
             | _ -> resultLine Fail name "fixture bindings not found"; false
     [ injectAndRun "member_hoist_cpp_fail_closed_deferred_capture"
-          (fun ir -> fst (CodeGen.genSelfContainedProgramFromIR ir "member_fail_closed"))
+          (fun ir -> Ok (fst (CodeGen.genSelfContainedProgramFromIR ir "member_fail_closed")))
           "C++ emission: the planned build over `lazy` is not emitted -- it is a deferred computation at the build point"
-          "blade_member_build_i64(&"
+          (fun outcome ->
+              match outcome with
+              | Ok cpp when cpp.Contains "blade_member_build_i64(&" -> Error "a build was emitted"
+              | Ok cpp when cpp.Contains "auto&& __cs = lazy; const auto __cx = v;" && cpp.Contains "for (size_t __ci = 0;" ->
+                  Ok "C++ emitted with no build; the fallback scan binds the set, evaluates the target once, then loops"
+              | Ok _ -> Error "the fallback scan is missing"
+              | Error e -> Error ("the C++ lane refused: " + e))
       injectAndRun "member_hoist_llvm_fail_closed_deferred_capture"
-          (fun ir ->
-              match EmitLlvm.tryEmitProgramNamed "member_fail_closed" ir with
-              | Ok ll -> ll
-              | Error r -> "refused: " + r)
+          (fun ir -> EmitLlvm.tryEmitProgramNamed "member_fail_closed" ir)
           "llvm lane: the planned build over `lazy` is not emitted"
-          "@blade_member_init_i64(" ]
+          (fun outcome ->
+              match outcome with
+              | Ok ll when ll.Contains "@blade_member_init_i64(" -> Error "an init was emitted"
+              | Ok ll when ll.Contains "has.cond" -> Ok "emitted with no init; the linear scan"
+              | Ok _ -> Error "emitted, but with neither a structure nor the scan"
+              | Error why when why.Contains "contains over a computed (unstored) set" -> Ok "refused with the known unsupported-computed-set reason (the program falls back to C++)"
+              | Error why -> Error ("refused for ANOTHER reason: " + why)) ]
 
 let private memberHoistForcedEmission () =
     [ for (knob, k) in [ ("linear", 1); ("bitmap", 2); ("hash", 3) ] do
@@ -4295,6 +4506,7 @@ let runOptimizeTests () =
           memberHoistGateOffEmission ()
           yield! memberHoistForcedEmission ()
           yield! memberHoistCorpusRoutes ()
+          yield! memberHoistPlacementMutations ()
           yield! memberHoistFailClosedGuards ()
           compactionV2UngroupIndexExtentCensus ()
           yield! intervalPayloadDecisionCases ()

@@ -1968,10 +1968,14 @@ let private memberHoistBracket (ctx: CodeGenContext) (modul: IRModule) (binding:
             // FAIL CLOSED (Codex diff review of W2-1, finding 2): the build
             // reads the set's STORED cells here, before the host's first
             // statement, so it is emitted only when this emission holds them:
-            // the set is bound, not a deferred computation (directly or
-            // through an alias -- genVarAliasBinding propagates deferral), not
-            // streamed, and a rank-1 array. Otherwise nothing is built (the
-            // probes test `kind` and scan as written) and the plan says so.
+            // the set is bound, not a deferred computation, not streamed, and
+            // a rank-1 array. (A deferred map captured by the host is forced
+            // in the host's own prelude, AFTER this point. An alias of one is
+            // usually not deferred: an ordinary `let B = lazy` is assignable,
+            // so genVarAliasBinding forces `lazy` and deep-copies B at B's own
+            // site; only a NON-assignable alias propagates the deferral --
+            // either way the map's entry tells.) Otherwise nothing is built
+            // (the probes test `kind` and scan as written) and the plan says so.
             let unavailable =
                 match modul.Bindings |> List.tryFind (fun b -> b.Id = p.SetId) with
                 | None -> Some "it is not a binding of this module"
