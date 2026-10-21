@@ -3137,6 +3137,64 @@ int main(void) {
 }
 """
 
+/// BLADE_POOL_RETAIN (round-3 A4, gap G52) through the real shim source: the
+/// 48 MB recur trajectory released once. Under a policy whose block cap admits
+/// it, it is RETAINED (not freed), handed back to the next request of its
+/// size, and EVICTED by the shim's atexit flush -- observed by an atexit hook
+/// registered before the shim's own (so it runs after it). Under the default,
+/// or a cap below 48 MB, it is freed at once and nothing is evicted at exit.
+let private shimRetainDriver = """
+#include <stdio.h>
+#include <stdlib.h>
+void *blade_alloc_cells(long long n, long long cellBytes);
+void blade_free(void *p);
+void blade_pool_cache_stats(long long *out);
+void blade_pool_cache_policy(long long *out);
+static int pass = 0, total = 0;
+static long long evicted_before_exit = 0;
+static void check(const char *name, int ok) {
+    total++;
+    if (ok) { pass++; printf("  [PASS]: %s\n", name); } else printf("  [FAIL]: %s\n", name);
+}
+static long long st(int k) { long long s[5]; blade_pool_cache_stats(s); return s[k]; }
+static void after_shim_flush(void) {
+    printf("  [atexit]: evicted_at_exit=%lld\n", st(3) - evicted_before_exit);
+    fflush(stdout);
+}
+int main(void) {
+    long long pol[3];
+    long long traj = 301LL * 20011LL;
+    int kept;
+    void *a, *b;
+    long long t0, r0;
+    atexit(after_shim_flush);              /* before the shim's: runs AFTER it */
+    blade_pool_cache_policy(pol);
+    kept = traj * 8 <= pol[0];
+    printf("  [info]: shim policy max_block=%lld budget=%lld arm=%lld; a 48 MB release is %s\n",
+           pol[0], pol[1], pol[2], kept ? "RETAINED" : "freed at once");
+#if defined(EXPECT_MAX)
+    check("shim_policy_reads_the_arm_defines", pol[2] == 1 && pol[0] == EXPECT_MAX && pol[1] == EXPECT_BUDGET);
+#else
+    check("shim_policy_default_is_4mb_8mb", pol[2] == 0 && pol[0] == (4LL << 20) && pol[1] == (8LL << 20));
+#endif
+    t0 = st(2); r0 = st(1);
+    a = blade_alloc_cells(traj, 8);
+    ((double *)a)[traj - 1] = 1.0;
+    blade_free(a);
+    if (kept) {
+        int retained = st(2) == t0 + 1;
+        b = blade_alloc_cells(traj, 8);
+        check("shim_48mb_release_retained_then_reused", retained && b == a && st(1) == r0 + 1);
+        blade_free(b);                      /* retained again: the exit flush evicts it */
+    } else {
+        check("shim_48mb_release_freed_inside", st(2) == t0);
+    }
+    evicted_before_exit = st(3);
+    printf("SHIM RETAIN TESTS: %d/%d passed\n", pass, total);
+    return pass == total ? 0 : 1;
+}
+"""
+
 let runLlvmRuntimeShimTests () : BlockResult =
     printHeader "LLVM Runtime Shim (object identity, retained-block cache)"
     let block = "LLVM Runtime Shim"
@@ -3195,6 +3253,55 @@ let runLlvmRuntimeShimTests () : BlockResult =
                 printf "%s" out
                 let ok = code = 0 && out.Contains "SHIM POOL TESTS:" && not (out.Contains "[FAIL]")
                 record ($"shim_pool_cache_{mode}") ok ($"exit {code}")
+    // BLADE_POOL_RETAIN (round-3 A4, gap G52). (a) The policy is part of the
+    // shim object's identity (so of llvmExeCacheKey): the arm and a pair each
+    // build their own object, `0` and a malformed value build the DEFAULT one,
+    // and the defines are exactly the twin pair the C++ lane emits.
+    // Every default case says `off` explicitly: an UNSET variable falls back to
+    // blade.toolchain.json, which may have persisted the arm. Unset is tested
+    // once, against an isolated empty toolchain file (selector and parse cache
+    // restored afterwards).
+    let buildWith (v: string option) =
+        withEnv [ "BLADE_MEMCHECK", None; "BLADE_POOL_RETAIN", v ] (fun () -> Build.llvmShimDefines (), Build.buildLlvmShim clang dir)
+    let emptyToolchain = Path.Combine(dir, "pool_tc_empty.json")
+    File.WriteAllText(emptyToolchain, "{}")
+    let buildUnsetIsolated () =
+        withEnv [ "BLADE_TOOLCHAIN_FILE", Some emptyToolchain ] (fun () ->
+            Blade.Toolchain.refresh ()
+            try buildWith None finally Blade.Toolchain.refresh ())
+    (match buildWith (Some "off"), buildWith (Some "1"), buildWith (Some "32:64"), buildWith (Some "0"), buildWith (Some "bogus"), buildUnsetIsolated () with
+     | (d0, Ok (o0, i0)), (d1, Ok (o1, i1)), (d2, Ok (o2, i2)), (dz, Ok (oz, iz)), (db, Ok (ob, ib)), (du, Ok (ou, iu)) ->
+         record "pool_retain_default_adds_no_shim_define" (d0 = "" && dz = "" && db = "" && du = "") $"defines '{d0}' / '{dz}' / '{db}' / unset '{du}'"
+         record "pool_retain_unset_isolated_is_the_default_identity" (iu = i0 && ou = o0) $"unset {iu} vs off {i0}"
+         record "pool_retain_arm_shim_defines" (d1 = " -DBLADE_POOL_MAX_BLOCK=67108864 -DBLADE_POOL_BUDGET=100663296"
+                                                && d2 = " -DBLADE_POOL_MAX_BLOCK=33554432 -DBLADE_POOL_BUDGET=67108864") $"'{d1}' / '{d2}'"
+         record "pool_retain_changes_the_shim_identity" (i1 <> i0 && i2 <> i0 && i1 <> i2 && o1 <> o0 && o2 <> o0)
+                $"default {i0} / arm {i1} / pair {i2}"
+         record "pool_retain_off_and_malformed_keep_the_default_identity" (iz = i0 && ib = i0 && oz = o0 && ob = o0)
+                $"off {iz} / malformed {ib} vs default {i0}"
+     | _ -> record "pool_retain_shim_builds" false "a shim build under BLADE_POOL_RETAIN failed")
+    // (b) The allocator under each policy: the 48 MB release retained and
+    // evicted at exit under the arm, freed at once under the default and a
+    // 32 MB cap.
+    let retainDriver = Path.Combine(dir, "shim_retain_driver.c")
+    File.WriteAllText(retainDriver, shimRetainDriver)
+    for (mode, setting, keptExpected) in [ "default", None, false; "retain1", Some "1", true; "retain32_64", Some "32:64", false ] do
+        let p = Blade.Toolchain.parsePoolRetention setting "test"
+        let defs =
+            (Blade.Toolchain.poolRetentionDefines p |> List.map (fun (n, b) -> $" -D{n}={b}") |> String.concat "")
+            + (if p.IsDefault then "" else $" -DEXPECT_MAX={p.MaxBlockBytes}LL -DEXPECT_BUDGET={p.BudgetBytes}LL")
+        let exe = Path.Combine(dir, $"shim_retain_{mode}{Platforms.exeExtension}")
+        let name = $"shim_pool_retain_{mode}"
+        match Build.runProc clang ($"-O2 -DBLADE_POOL_CACHE_STATS=1{defs} -o \"{exe}\" \"{retainDriver}\" \"{shimSrc}\"") 120000 with
+        | Error e -> record name false ($"driver compile failed: {e}")
+        | Ok () ->
+            match runExeCapture exe with
+            | Error e -> record name false e
+            | Ok (code, out, _) ->
+                printf "%s" out
+                let evictLine = if keptExpected then "evicted_at_exit=1" else "evicted_at_exit=0"
+                let ok = code = 0 && out.Contains "SHIM RETAIN TESTS:" && not (out.Contains "[FAIL]") && out.Contains evictLine
+                record name ok ($"exit {code}; wanted {evictLine}")
     printFooter block [ $"{passed} passed"; $"{failed} failed"; "0 skipped" ]
     { Block = block; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }
 

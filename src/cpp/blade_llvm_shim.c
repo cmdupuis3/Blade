@@ -197,7 +197,8 @@ long long blade_f2i64(double x, const char *file, long long line) {
  * pools this allocator made ever reach blade_free.
  *
  * Policy (measured, not semantics; review section 4.4): payloads of 16 KB ..
- * 4 MB, at most 16 slots and 8 MB retained, oldest evicted first, exact-size
+ * 4 MB (BLADE_POOL_RETAIN's arm: its own cap, below), at most 16 slots and
+ * 8 MB retained (the arm: its budget), oldest evicted first, exact-size
  * matching, newest first. PLAIN GLOBALS, like the shadow stack above: this
  * lane has no threads (every emitted function is `nosync`); a future thread
  * runtime must make these _Thread_local. Retained blocks are freed by an
@@ -227,9 +228,32 @@ long long blade_f2i64(double x, const char *file, long long line) {
 #  define BLADE_POOL_CACHE_ON 1
 #endif
 
+/* BLADE_POOL_RETAIN (round-3 A4, bench gap G52) is an OPT-IN arm: only when
+ * it is set does Build.fs compile this shim with -DBLADE_POOL_MAX_BLOCK=<bytes>
+ * -DBLADE_POOL_BUDGET=<bytes> (1 / on = 64 MB / 96 MB, or an explicit
+ * <maxMB>:<budgetMB> pair); the defines enter the shim object's identity hash
+ * and through it the executable cache key. Without them the policy is the
+ * default 4 MB / 8 MB below, unchanged. Under the arm a released pool up to
+ * the larger cap stays committed until reuse, eviction or the atexit flush:
+ * the release leaves the timed region, it is not less work, and the peak
+ * working set can rise. This lane has no threads, so its one budget is the
+ * process's (the C++ lane's is per thread). */
+#if defined(BLADE_POOL_MAX_BLOCK) || defined(BLADE_POOL_BUDGET)
+#  if !defined(BLADE_POOL_MAX_BLOCK) || !defined(BLADE_POOL_BUDGET)
+#    error "BLADE_POOL_RETAIN: BLADE_POOL_MAX_BLOCK and BLADE_POOL_BUDGET are defined together"
+#  endif
+#  if BLADE_POOL_MAX_BLOCK > BLADE_POOL_BUDGET
+#    error "BLADE_POOL_RETAIN: the largest retained block must fit the budget"
+#  endif
+#  define BLADE_CACHE_MAXBLOCK ((size_t)(BLADE_POOL_MAX_BLOCK))
+#  define BLADE_CACHE_BUDGET   ((size_t)(BLADE_POOL_BUDGET))
+#  define BLADE_CACHE_RETAIN_ARM 1
+#else
+#  define BLADE_CACHE_MAXBLOCK ((size_t)4 << 20)
+#  define BLADE_CACHE_BUDGET   ((size_t)8 << 20)
+#  define BLADE_CACHE_RETAIN_ARM 0
+#endif
 #define BLADE_CACHE_MIN      ((size_t)16 << 10)
-#define BLADE_CACHE_MAXBLOCK ((size_t)4 << 20)
-#define BLADE_CACHE_BUDGET   ((size_t)8 << 20)
 #define BLADE_CACHE_SLOTS    16
 
 #if defined(BLADE_POOL_CACHE_STATS) && BLADE_POOL_CACHE_STATS
@@ -241,6 +265,13 @@ void blade_pool_cache_stats(long long *out) {
     int k;
     for (k = 0; k < 4; k++) out[k] = g_pool_stats[k];
     out[4] = BLADE_POOL_CACHE_ON;
+}
+/* out[0] = the largest retained payload, out[1] = the budget (bytes),
+ * out[2] = 1 under the BLADE_POOL_RETAIN arm, 0 for the default. */
+void blade_pool_cache_policy(long long *out) {
+    out[0] = (long long)BLADE_CACHE_MAXBLOCK;
+    out[1] = (long long)BLADE_CACHE_BUDGET;
+    out[2] = BLADE_CACHE_RETAIN_ARM;
 }
 #else
 #  define BLADE_POOL_COUNT(k) ((void)0)

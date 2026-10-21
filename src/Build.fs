@@ -1236,8 +1236,21 @@ let private clangStamp (clang: string) : string =
 /// cached free is no free at all to a leak counter, and it hides a
 /// use-after-free. The ENVIRONMENT setting is not a C define by itself; this is
 /// where it becomes one. Read per call, like every environment gate here.
-let private llvmShimDefines () : string =
-    if CodeGen.memcheckEnabled () then " -DBLADE_POOL_CACHE_OFF=1" else ""
+///
+/// BLADE_POOL_RETAIN (round-3 A4, gap G52): a NON-default pool-retention
+/// policy becomes `-DBLADE_POOL_MAX_BLOCK=<bytes> -DBLADE_POOL_BUDGET=<bytes>`
+/// here -- the C++ lane's twin defines, which that lane writes into the
+/// emitted text instead. They are part of `flags`, so they enter the shim
+/// object's identity hash and, through it, `llvmExeCacheKey`. The default
+/// adds nothing (the default shim object and its key are unchanged in shape).
+let internal llvmShimDefines () : string =
+    let retention = Blade.Toolchain.poolRetention ()
+    Blade.Toolchain.warnPoolRetention retention
+    let pool =
+        Blade.Toolchain.poolRetentionDefines retention
+        |> List.map (fun (name, bytes) -> $" -D{name}={bytes}")
+        |> String.concat ""
+    (if CodeGen.memcheckEnabled () then " -DBLADE_POOL_CACHE_OFF=1" else "") + pool
 
 /// Build the BLADE_LLVM lane's runtime shim into `outputDir`, returning the
 /// object to link and its IDENTITY (a hash of everything the `clang -c` reads

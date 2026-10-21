@@ -92,7 +92,8 @@ let internal suiteClearedKnobs =
       "BLADE_AD_HALO_GATHER"; "BLADE_SHAPE_SPEC_CAP"; "BLADE_RUN_RECORD"
       "BLADE_SYRK_TILE"; "BLADE_ANTISYM_TILE"; "BLADE_SIMPLEX_TILE"; "BLADE_ORBIT_FOLD"
       "BLADE_DOMAIN_DIAGONAL"; "BLADE_TILE_TUNE"; "BLADE_FOLD_LANES"; "BLADE_FOLD_ROW_SLOTS"
-      "BLADE_ORBIT_SCATTER"; "BLADE_ORBIT_PULL"; "BLADE_JOIN_THREADS" ]
+      "BLADE_ORBIT_SCATTER"; "BLADE_ORBIT_PULL"; "BLADE_JOIN_THREADS"
+      "BLADE_POOL_RETAIN" ]
     @ Blade.Optimize.optimizerGates
 
 /// Knobs `blade test` SETS (after the clear above) rather than leaves unset,
@@ -102,7 +103,15 @@ let internal suiteClearedKnobs =
 /// machine whose toolchain file says `library` -- or `BLADE_BLAS_FLAVOR=mkl`,
 /// under which `auto` resolves to `library` -- would otherwise flip every
 /// BLAS-on dispatch pin. The preference's own cases set it in their scope.
-let internal suitePinnedKnobs = [ "BLADE_BLAS", "off"; "BLADE_BLAS_PREFER", "native" ]
+/// BLADE_POOL_RETAIN is pinned `off` (the default policy) for the same reason:
+/// a toolchain file that persisted the retention arm would otherwise put its
+/// defines into every program the suite emits.
+let internal suitePinnedKnobs = [ "BLADE_BLAS", "off"; "BLADE_BLAS_PREFER", "native"; "BLADE_POOL_RETAIN", "off" ]
+
+/// A program the LLVM lane REFUSES (a Float32 scalar: that lane lowers Int64 /
+/// Float64 / Bool only), so `blade plan` under BLADE_LLVM=1 falls back to the
+/// C++ lane -- the cli case that pins the pool-retention scope of a fallback.
+let private poolFallbackSource = "let x = Float32(1.5)\nlet y = x * Float32(2.0)\n"
 
 /// Run `f` in the suite's pristine environment: every `suiteClearedKnobs`
 /// variable unset, every `suitePinnedKnobs` variable pinned, the caller's
@@ -520,6 +529,79 @@ let runCliSmokeTests () : TH.BlockResult =
                 (code = 0 && out.Contains "\"rule\":\"symmetric-storage\"" && out.Contains "\"outcome\":\"applied\""
                  && out.Contains "\"version\":1" && out.Contains "\"evidence\":[" && out.Contains "\"inputs\":")
                 (out + err)
+            // BLADE_POOL_RETAIN (round-3 A4, gap G52): the plan's build line
+            // names the runtime pool-retention policy -- the default, the
+            // opt-in arm with its per-thread honesty, a malformed value read
+            // as the default (with a warning line) -- and the JSON carries it.
+            // Every case names its toolchain file (an isolated fixture): an
+            // UNSET variable falls back to the file, and a machine whose
+            // blade.toolchain.json persisted the arm must not move these pins.
+            let emptyToolchain = Path.Combine(dir, "pool_tc_empty.json")
+            File.WriteAllText(emptyToolchain, "{}")
+            let armToolchain = Path.Combine(dir, "pool_tc_retain1.json")
+            File.WriteAllText(armToolchain, "{\"BLADE_POOL_RETAIN\": \"1\"}")
+            let poolEnv (file: string) (v: string) = [ ("BLADE_TOOLCHAIN_FILE", file); ("BLADE_POOL_RETAIN", v); ("BLADE_LLVM", null) ]
+            let buildLine (out: string) =
+                out.Replace("\r\n", "\n").Split('\n') |> Array.tryFind (fun l -> l.StartsWith "build: ") |> Option.defaultValue "<none>"
+            let defaultLine = "build: pool retention: default (4 MB / 8 MB per thread)"
+            let (codeU, outU, errU) = spawnWith (poolEnv emptyToolchain null) dir [ "plan"; "cov.blade" ]
+            let (codeO, outO, errO) = spawnWith (poolEnv emptyToolchain "off") dir [ "plan"; "cov.blade" ]
+            recordCase "cli: `plan` build line for an unset and an `off` default is exactly the plain default line (no provenance)"
+                (codeU = 0 && codeO = 0 && buildLine outU = defaultLine && buildLine outO = defaultLine)
+                ($"unset: '{buildLine outU}' / off: '{buildLine outO}' {errU}{errO}")
+            let (code, out, err) = spawnWith (poolEnv emptyToolchain "1") dir [ "plan"; "cov.blade" ]
+            recordCase "cli: `plan` build line names the BLADE_POOL_RETAIN=1 arm in the C++ lane, per thread"
+                (code = 0 && buildLine out = "build: pool retention: BLADE_POOL_RETAIN=1 (env BLADE_POOL_RETAIN) -> 64 MB / 96 MB per thread (opt-in arm, C++ lane blade_pool; a released pool of 16 KB .. 64 MB stays committed until reuse, eviction, flush or thread exit, so T threads may retain T x 96 MB and the peak working set can rise without any reuse; it moves the release out of the timed region, it is not less work; the run record's policy.pool says which arm ran)")
+                (buildLine out + err)
+            let (code, out, err) = spawnWith (poolEnv armToolchain null) dir [ "plan"; "cov.blade" ]
+            recordCase "cli: `plan` reads the arm from the toolchain file when the variable is unset"
+                (code = 0 && (buildLine out).StartsWith "build: pool retention: BLADE_POOL_RETAIN=1 (blade.toolchain.json) -> 64 MB / 96 MB per thread")
+                (buildLine out + err)
+            let (code, out, err) = spawnWith (poolEnv armToolchain "off") dir [ "plan"; "cov.blade" ]
+            recordCase "cli: `plan` lets env `off` override a toolchain file's arm"
+                (code = 0 && buildLine out = defaultLine) (buildLine out + err)
+            let (code, out, err) = spawnWith (poolEnv emptyToolchain "16:48") dir [ "plan"; "cov.blade"; "--json" ]
+            recordCase "cli: `plan --json` carries an explicit retention pair, per-thread in the C++ lane"
+                (code = 0 && out.Contains "\"build\":{\"pool_retain\":{\"arm\":\"pair\",\"setting\":\"16:48\""
+                 && out.Contains "\"max_block\":16777216,\"budget\":50331648,\"budget_scope\":\"per-thread\",\"runtime\":\"cpp-blade_pool\"")
+                (out + err)
+            let (code, out, err) = spawnWith (poolEnv emptyToolchain "96:64") dir [ "plan"; "cov.blade" ]
+            recordCase "cli: `plan` reads a malformed retention pair (max > budget) as the default, with a warning"
+                (code = 0 && (buildLine out).StartsWith "build: pool retention: default (4 MB / 8 MB per thread) -- BLADE_POOL_RETAIN='96:64'"
+                 && err.Contains "warning: BLADE_POOL_RETAIN='96:64'")
+                (out + err)
+            // The LLVM lane holds its pools in the shim allocator: ONE process
+            // budget, an atexit flush, and no run record. The scope follows
+            // the lane that BUILDS the program -- an LLVM refusal falls back to
+            // the C++ lane, and so does the scope.
+            if (Blade.Build.resolveClang ()).IsNone then
+                record "cli: `plan` under BLADE_LLVM=1 scopes the pool budget per process" TH.Skip "no clang (the LLVM lane is unavailable)"
+            else
+                let llvmEnv (v: string) = [ ("BLADE_TOOLCHAIN_FILE", emptyToolchain); ("BLADE_POOL_RETAIN", v); ("BLADE_LLVM", "1") ]
+                let (code, out, err) = spawnWith (llvmEnv "1") dir [ "plan"; "cov.blade" ]
+                recordCase "cli: `plan` under BLADE_LLVM=1 scopes the arm to the shim's ONE process budget, no run record"
+                    (code = 0 && out.Contains "lane: LLVM"
+                     && (buildLine out).StartsWith "build: pool retention: BLADE_POOL_RETAIN=1 (env BLADE_POOL_RETAIN) -> 64 MB / 96 MB per process (opt-in arm, LLVM lane shim allocator: ONE 96 MB budget for the process"
+                     && (buildLine out).Contains "atexit flush" && (buildLine out).Contains "writes NO run record"
+                     && not ((buildLine out).Contains "per thread") && not ((buildLine out).Contains "T threads"))
+                    (out + err)
+                let (code, out, err) = spawnWith (llvmEnv "off") dir [ "plan"; "cov.blade" ]
+                recordCase "cli: `plan` under BLADE_LLVM=1 names the default as the shim's process budget"
+                    (code = 0 && out.Contains "lane: LLVM"
+                     && buildLine out = "build: pool retention: default (4 MB / 8 MB per process, the LLVM lane's shim allocator)")
+                    (buildLine out + err)
+                let (code, out, err) = spawnWith (llvmEnv "16:48") dir [ "plan"; "cov.blade"; "--json" ]
+                recordCase "cli: `plan --json` under BLADE_LLVM=1 says budget_scope process"
+                    (code = 0 && out.Contains "\"lane\":\"llvm\""
+                     && out.Contains "\"budget_scope\":\"process\",\"runtime\":\"llvm-shim\"" && not (out.Contains "per-thread"))
+                    (out + err)
+                File.WriteAllText(Path.Combine(dir, "pool_fallback.blade"), poolFallbackSource)
+                let (code, out, err) = spawnWith (llvmEnv "1") dir [ "plan"; "pool_fallback.blade"; "--json" ]
+                let (code2, out2, err2) = spawnWith (llvmEnv "1") dir [ "plan"; "pool_fallback.blade" ]
+                recordCase "cli: `plan` under BLADE_LLVM=1 with an LLVM refusal keeps the C++ lane's per-thread scope"
+                    (code = 0 && code2 = 0 && out.Contains "\"lane\":\"cpp\"" && out.Contains "\"budget_scope\":\"per-thread\",\"runtime\":\"cpp-blade_pool\""
+                     && out2.Contains "but the LLVM lane refused" && (buildLine out2).Contains "96 MB per thread (opt-in arm, C++ lane blade_pool")
+                    (out + err + out2 + err2)
             // LANE-CORRECT PLAN (bench gap G23 / G11). The same gram with the
             // BLAS gate forced on routes to syrk in the C++ lane; with
             // BLADE_LLVM=1 the LLVM lane takes the program, links no OpenBLAS

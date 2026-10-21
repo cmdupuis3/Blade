@@ -3865,6 +3865,19 @@ let deployRuntimeHeaders (outputDir: string) : unit =
 
 /// Generate includes that reference external header
 let genIncludesExternal () : string list =
+    // BLADE_POOL_RETAIN (round-3 A4, gap G52): a NON-default pool-retention
+    // policy is written into the program ahead of every include, so
+    // nested_array_utilities.hpp's blade_pool (and the run record, which
+    // reports it) compile with it and the exe cache keys on it through this
+    // text. The default writes nothing: its emission is unchanged.
+    let retention = Blade.Toolchain.poolRetention ()
+    Blade.Toolchain.warnPoolRetention retention
+    (match Blade.Toolchain.poolRetentionDefines retention with
+     | [] -> []
+     | defines ->
+         [ $"// BLADE_POOL_RETAIN={retention.Setting}: the opt-in pool-retention arm ({retention.MaxBlockMB} MB blocks / {retention.BudgetMB} MB per thread; nested_array_utilities.hpp blade_pool)" ]
+         @ (defines |> List.map (fun (name, bytes) -> $"#define {name} {bytes}")))
+    @
     ["#include <cstdint>"
      "#include <cstdlib>"
      "#include <cmath>"

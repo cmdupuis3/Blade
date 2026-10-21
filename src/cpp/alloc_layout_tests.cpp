@@ -339,10 +339,68 @@ static long long pool_evicted()  { return blade_pool::g_stats.evicted.load(); }
 static const size_t k_ext3000[1] = { 3000 };       // 24 KB of doubles: eligible
 static const size_t k_ext100[1]  = { 100 };        // 800 B: below the band
 static const size_t k_ext3001[1] = { 3001 };
-static const size_t k_big[1]     = { 600000 };     // 4.8 MB: above the 4 MB block cap
-static const size_t k_3mb[1]     = { 393216 };     // exactly 3 MB of doubles
+static const size_t k_big[1]     = { 600000 };     // 4.8 MB: above the DEFAULT 4 MB block cap
+// 3/8 of the budget (exactly 3 MB of doubles under the default 8 MB budget):
+// two fit, the third evicts the oldest -- under either retention policy.
+static const size_t k_3mb[1]     = { blade_pool::kBudget * 3 / 8 / sizeof(double) };
 static const size_t k_rec[1]     = { 20011 };      // the bench recur row (160,088 B)
 static const size_t k_2d[2]      = { 50, 60 };     // rank 2, 3000 cells
+static const size_t k_traj[1]    = { 301 * 20011 }; // the bench recur trajectory: 48,186,488 B
+
+// BLADE_POOL_RETAIN (round-3 A4, gap G52): tests/AllocTests.fs compiles this
+// file once per policy -- the default (no define), the arm, and an explicit
+// pair whose block cap is below the 48 MB trajectory -- passing the defines
+// the compiler writes into a generated program plus BLADE_POOL_TEST_MAX /
+// BLADE_POOL_TEST_BUDGET (the bytes it expects the header to have read).
+static void run_pool_policy_tests() {
+    using P1 = promote<double, 1>::type;
+#if defined(BLADE_POOL_TEST_MAX)
+    check("pool_policy_reads_the_arm_defines", blade_pool::kRetainArm
+          && blade_pool::kMaxBlock == size_t(BLADE_POOL_TEST_MAX) && blade_pool::kBudget == size_t(BLADE_POOL_TEST_BUDGET));
+#else
+    check("pool_policy_default_is_4mb_8mb", !blade_pool::kRetainArm
+          && blade_pool::kMaxBlock == (size_t(4) << 20) && blade_pool::kBudget == (size_t(8) << 20));
+#endif
+    const bool trajKept = k_traj[0] * sizeof(double) <= blade_pool::kMaxBlock;
+    printf("  [info]: pool policy: max block %zu B, budget %zu B per thread; a 48 MB release is %s\n",
+           blade_pool::kMaxBlock, blade_pool::kBudget, trajKept ? "RETAINED" : "freed at once");
+    // The 48 MB trajectory released on this thread: retained (and handed back
+    // to the next request of its size) under the arm; freed at once otherwise.
+    {
+        blade_pool::flush();
+        size_t live0 = live_arrays();
+        long long t0 = pool_retained(), r0 = pool_reused();
+        double* tr = allocate<P1>(k_traj);
+        tr[k_traj[0] - 1] = 1.0;
+        deallocate<P1>(tr, k_traj);
+        if (trajKept) {
+            bool kept = pool_retained() == t0 + 1 && live_arrays() == live0 + 1;
+            double* tr2 = allocate<P1>(k_traj);
+            check("pool_arm_48mb_release_retained_then_reused", kept && tr2 == tr && pool_reused() == r0 + 1);
+            deallocate<P1>(tr2, k_traj);
+        } else {
+            check("pool_48mb_release_freed_inside", pool_retained() == t0 && live_arrays() == live0);
+        }
+        blade_pool::flush();
+        check("pool_48mb_flush_balances", live_arrays() == live0);
+    }
+    // ... and a retained block is EVICTED at thread exit (the Reaper), not held
+    // to process exit: a worker's 48 MB release comes back when it ends.
+    {
+        size_t live0 = live_arrays();
+        long long t0 = pool_retained(), e0 = pool_evicted();
+        std::thread t([] {
+            double* a = allocate<P1>(k_traj);
+            a[0] = 2.0;
+            deallocate<P1>(a, k_traj);
+        });
+        t.join();
+        if (trajKept)
+            check("pool_arm_48mb_evicted_at_thread_exit", pool_retained() == t0 + 1 && pool_evicted() == e0 + 1 && live_arrays() == live0);
+        else
+            check("pool_48mb_worker_release_freed_inside", pool_retained() == t0 && pool_evicted() == e0 && live_arrays() == live0);
+    }
+}
 
 static void run_pool_cache_tests() {
     using P1 = promote<double, 1>::type;
@@ -375,15 +433,22 @@ static void run_pool_cache_tests() {
         blade_pool::flush();
     }
     // Outside the size band nothing is retained: a small pool and a pool above
-    // the 4 MB block cap both go straight back to delete[].
+    // the 4 MB block cap both go straight back to delete[]. (Under a
+    // BLADE_POOL_RETAIN arm whose cap admits 4.8 MB, that pool IS retained.)
     {
+        blade_pool::flush();
+        const bool bigKept = k_big[0] * sizeof(double) <= blade_pool::kMaxBlock;
         long long t0 = pool_retained();
         size_t live0 = live_arrays();
         double* s = allocate<P1>(k_ext100);
         double* g = allocate<P1>(k_big);
         deallocate<P1>(s, k_ext100);
         deallocate<P1>(g, k_big);
-        check("pool_small_and_huge_not_retained", pool_retained() == t0 && live_arrays() == live0);
+        if (bigKept)
+            check("pool_small_not_retained_big_retained_under_arm", pool_retained() == t0 + 1 && live_arrays() == live0 + 1);
+        else
+            check("pool_small_and_huge_not_retained", pool_retained() == t0 && live_arrays() == live0);
+        blade_pool::flush();
     }
     // The per-thread budget (8 MB, all types together): a third 3 MB block
     // evicts the oldest one rather than growing past it.
@@ -462,6 +527,7 @@ static void run_pool_cache_tests() {
                                                 && checksum == double(8 * (299 * 300 / 2) + 300 * 28));
         blade_pool::flush();
     }
+    run_pool_policy_tests();
 }
 #else
 static void run_pool_cache_tests() {

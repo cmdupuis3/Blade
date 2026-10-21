@@ -75,6 +75,29 @@ A comparison is fair when all of the following hold:
    after the stop line, while worker panels and compiler temporaries have their own
    lifetimes, recorded per arm).
 
+   **The retention arm (`BLADE_POOL_RETAIN`, gap G52; the user's decision 2026-10-21).** A
+   RECORDED runtime-policy arm beside the default, never the default: with
+   `BLADE_POOL_RETAIN=1` both lane runtimes retain a freed pool of up to 64 MB (96 MB budget)
+   instead of 4 MB (8 MB), so a kernel's large pool (recur's 48 MB trajectory, stencil's
+   24 MB `lap`) is not released inside the timed region. Every cell measured under it is
+   reported as that arm, beside the default arm, with kernel time, wall_s AND
+   peak_working_set per arm -- never the time alone. The two lanes differ, and the record
+   says which applies:
+   - **C++ lane** (`blade_pool`, thread_local): the budget is PER THREAD, so T threads may
+     retain T x budget; a retained block lives until reuse, eviction (oldest first), flush
+     or thread exit (the main thread's at process exit), not unconditionally until process
+     exit. The run record's `policy.pool` is the OBSERVED runtime evidence of which arm ran.
+   - **LLVM lane** (the shim allocator, plain globals; that lane has no threads): ONE
+     process budget, released by the shim's atexit flush. This lane writes NO run record:
+     `blade plan`'s build line (`budget_scope: process`) and the shim object's identity,
+     captured beside the measurement, are BUILD evidence for the arm, not an observed
+     runtime record.
+
+   What it is not, in either lane: retention RELOCATES destruction out of the timer, it is
+   not less total application work; and the peak working set the harness records can RISE
+   under the arm without any page reuse (a retained A stays resident while an unrelated B
+   allocates), or stay unchanged.
+
 
 ## 2. Building and running
 

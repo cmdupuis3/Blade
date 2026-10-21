@@ -151,7 +151,7 @@ module Decisions =
         let ev = if d.Evidence.IsEmpty then "" else " [" + String.concat "; " d.Evidence + "]"
         $"[{d.Rule} v{d.Version}] {d.Subject}{where}: {outcome}{ev}"
 
-    let private jsonString (s: string) : string =
+    let jsonString (s: string) : string =
         let sb = System.Text.StringBuilder()
         sb.Append('"') |> ignore
         for c in s do

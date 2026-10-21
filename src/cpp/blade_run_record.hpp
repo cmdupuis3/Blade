@@ -12,7 +12,14 @@
 // existence, kind, size and modification time; the executable's own size and
 // modification time; the toolchain (BLADE_RR_COMPILER) and the FP / library
 // policy the build was compiled under (the BLADE_RR_* defines Build.fs
-// passes, so the emitted .cpp itself carries no environment); the RNG
+// passes, so the emitted .cpp itself carries no environment), plus the pool
+// allocator's retention policy (`policy.pool`: blade_pool's block cap and
+// per-thread budget in bytes, `default` or the opt-in BLADE_POOL_RETAIN arm --
+// the one policy the emitted text carries, as #defines -- and whether the
+// cache is compiled in; an ADDITIVE, OPTIONAL member of the version-1 record:
+// written by every C++ program since round-3 W2-6, default builds included,
+// so a v1 reader must accept a record without it -- older v1 records lack it
+// -- and a default record is not byte-identical to a pre-W2-6 one); the RNG
 // generator when the program draws; the runtime FORM CENSUS (`forms`: per
 // site whose form is chosen at run time, the form it executed and the
 // requested / actual team -- note_form; present only when a site recorded
@@ -220,8 +227,23 @@ namespace blade_rr {
     json_string(f, BLADE_RR_STR(BLADE_RR_MARCH));
     std::fputs(",\"fp_contract\":", f);
     json_string(f, BLADE_RR_STR(BLADE_RR_FPC));
-    std::fprintf(f, ",\"fp_reassoc\":%s},\"routes\":{\"blas\":%s,\"lapack\":%s,\"cublas\":%s},\"rng\":%s",
-                 BLADE_RR_REASSOC ? "true" : "false",
+    std::fprintf(f, ",\"fp_reassoc\":%s", BLADE_RR_REASSOC ? "true" : "false");
+#if defined(BLADE_POOL_POLICY_DECLARED)
+    // BLADE_POOL_RETAIN (gap G52): which retention arm this executable runs.
+    {
+#if defined(BLADE_POOL_CACHE_OFF) && BLADE_POOL_CACHE_OFF
+      const char* pool_cache = "off";
+#else
+      const char* pool_cache = "on";
+#endif
+      std::fprintf(f, ",\"pool\":{\"retain\":\"%s\",\"max_block\":%llu,\"budget\":%llu,\"budget_scope\":\"per-thread\",\"cache\":\"%s\"}",
+                   ::blade_pool::kRetainArm ? "arm" : "default",
+                   (unsigned long long)::blade_pool::kMaxBlock,
+                   (unsigned long long)::blade_pool::kBudget,
+                   pool_cache);
+    }
+#endif
+    std::fprintf(f, "},\"routes\":{\"blas\":%s,\"lapack\":%s,\"cublas\":%s},\"rng\":%s",
                  BLADE_RR_BLAS ? "true" : "false",
                  BLADE_RR_LAPACK ? "true" : "false",
                  BLADE_RR_CUBLAS ? "true" : "false",

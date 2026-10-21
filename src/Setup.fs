@@ -275,7 +275,10 @@ let private setupPersistCurrent () : int =
     let keys =
         [ "OPENBLAS_DIR"; "NETCDF_DIR"; "MSMPI_BIN"; "BLADE_BLAS"
           "BLADE_BLAS_LINK"; "BLADE_BLAS_INCLUDE"; "BLADE_LAPACK_LINK"
-          "BLADE_LAPACK_INCLUDE"; "BLADE_BLAS_FLAVOR"; "BLADE_BLAS_PREFER" ]
+          "BLADE_LAPACK_INCLUDE"; "BLADE_BLAS_FLAVOR"; "BLADE_BLAS_PREFER"
+          // the runtime pool-retention arm (round-3 A4, gap G52): a policy,
+          // not a machine fact, but the env-wins / file-mirror rule is the same
+          "BLADE_POOL_RETAIN" ]
     let fromEnv =
         keys
         |> List.choose (fun k ->

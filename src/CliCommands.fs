@@ -1212,19 +1212,41 @@ let planFile (filePath: string) (json: bool) : int =
                     match verdict with
                     | Ok _ -> Some ("llvm", "LLVM (BLADE_LLVM=1): C++-only routes below are reported for this lane"), mergeLlvmTileRecords (mergeLlvmScatterRecords ds llvmScatter) llvmOwn
                     | Error reason -> Some ("cpp", $"C++ (BLADE_LLVM=1, but the LLVM lane refused: {reason})"), ds
+            // The build line: the runtime allocator's pool-retention policy
+            // (BLADE_POOL_RETAIN, round-3 A4 / gap G52) -- a runtime arm, not
+            // an optimization decision, so it is not counted among them.
+            let retention = Blade.Toolchain.poolRetention ()
+            // The runtime that holds the pools is the lane that BUILDS it: the
+            // LLVM shim (one process budget) only when that lane took the
+            // program; C++ (per-thread) otherwise, a refusal / fallback included.
+            let poolLane =
+                match lane with
+                | Some ("llvm", _) -> Blade.Toolchain.PoolLaneLlvm
+                | _ -> Blade.Toolchain.PoolLaneCpp
             if json then
                 let js = Blade.Effects.Decisions.renderJson filePath ds
                 let laneJs =
                     match lane with
                     | Some (key, _) -> $",\"lane\":\"{key}\""
                     | None -> ""
+                let buildJs =
+                    let malformed =
+                        match retention.Malformed with
+                        | Some v -> Blade.Effects.Decisions.jsonString v
+                        | None -> "null"
+                    let poolRuntime =
+                        match poolLane with
+                        | Blade.Toolchain.PoolLaneLlvm -> "llvm-shim"
+                        | Blade.Toolchain.PoolLaneCpp -> "cpp-blade_pool"
+                    $",\"build\":{{\"pool_retain\":{{\"arm\":\"{retention.Arm}\",\"setting\":{Blade.Effects.Decisions.jsonString retention.Setting},\"source\":{Blade.Effects.Decisions.jsonString retention.Source},\"max_block\":{retention.MaxBlockBytes},\"budget\":{retention.BudgetBytes},\"budget_scope\":\"{Blade.Toolchain.poolBudgetScope poolLane}\",\"runtime\":\"{poolRuntime}\",\"malformed\":{malformed}}}}}"
                 // `{"file":..,"decisions":[..]}` -> add the manifest as a sibling.
-                printfn "%s" (js.Substring(0, js.Length - 1) + laneJs + ",\"inputs\":" + Blade.RunRecord.renderJson inputs + "}")
+                printfn "%s" (js.Substring(0, js.Length - 1) + laneJs + buildJs + ",\"inputs\":" + Blade.RunRecord.renderJson inputs + "}")
             else
                 printfn "plan: %s -- %d optimization decision(s)" filePath ds.Length
                 match lane with
                 | Some (_, text) -> printfn "lane: %s" text
                 | None -> ()
+                printfn "build: %s" (Blade.Toolchain.describePoolRetention poolLane retention)
                 for d in ds do
                     printfn "  %s" (Blade.Effects.Decisions.render d)
                 printfn "inputs: %d (identity policy: `content` = folded at compile time, hashed; `version` = read at run time, size + mtime observed -- BLADE_RUN_RECORD=<path> writes the run record)" inputs.Length

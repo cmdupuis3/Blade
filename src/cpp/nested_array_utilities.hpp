@@ -48,7 +48,8 @@
 //     constructors, e.g. std::complex zero-initializes);
 //   * blocks of 16 KB .. 4 MB; at most 16 slots and 8 MB per THREAD, one
 //     budget across all element types (oldest slot evicted first). Both
-//     numbers are measured policy (review section 4.4), not semantics;
+//     numbers are measured policy (review section 4.4), not semantics -- the
+//     DEFAULT; the opt-in BLADE_POOL_RETAIN arm raises both (see kMaxBlock);
 //   * per-thread (thread_local): no locking, and a block freed on another
 //     thread simply lands in that thread's cache (any thread may delete[] a
 //     new[] block). A thread's cache is freed at thread exit; after that the
@@ -103,9 +104,32 @@ namespace blade_pool {
 
     // Policy constants (bytes). kMaxBlock <= kBudget, so a block that passes
     // the size test always fits once the oldest slots are evicted.
+    //
+    // BLADE_POOL_RETAIN (round-3 A4, bench gap G52) is an OPT-IN arm: the
+    // compiler writes `#define BLADE_POOL_MAX_BLOCK <bytes>` / `BLADE_POOL_BUDGET
+    // <bytes>` at the top of the generated program ONLY when it is set (1 / on
+    // = 64 MB / 96 MB, or an explicit <maxMB>:<budgetMB> pair). Without them
+    // the policy below is the default, unchanged. Under the arm a released
+    // pool up to the larger cap (recur's 48 MB trajectory, stencil's 24 MB
+    // `lap`) stays committed until reuse, eviction or THREAD EXIT, so its
+    // release leaves the timed region -- it is not less work, the budget is per
+    // thread (T threads may retain T x kBudget), and the peak working set can
+    // rise. BLADE_POOL_CACHE_OFF (memcheck / ASan) disables the cache under
+    // either policy.
     constexpr size_t kMinBytes = size_t(16) << 10;   // below this the heap's front end keeps pages warm anyway
-    constexpr size_t kMaxBlock = size_t(4) << 20;    // a whole trajectory (48 MB) is never retained
+#if defined(BLADE_POOL_MAX_BLOCK) || defined(BLADE_POOL_BUDGET)
+#  if !defined(BLADE_POOL_MAX_BLOCK) || !defined(BLADE_POOL_BUDGET)
+#    error "BLADE_POOL_RETAIN: BLADE_POOL_MAX_BLOCK and BLADE_POOL_BUDGET are defined together"
+#  endif
+    constexpr size_t kMaxBlock = size_t(BLADE_POOL_MAX_BLOCK);
+    constexpr size_t kBudget   = size_t(BLADE_POOL_BUDGET);
+    constexpr bool kRetainArm  = true;
+#else
+    constexpr size_t kMaxBlock = size_t(4) << 20;    // default: a whole trajectory (48 MB) is never retained
     constexpr size_t kBudget   = size_t(8) << 20;    // per thread, ALL element types together
+    constexpr bool kRetainArm  = false;
+#endif
+    static_assert(kMaxBlock <= kBudget, "blade_pool: the largest retained block must fit the budget");
     constexpr size_t kSlots    = 16;
 
     // Is a pool of `cells` T's in the retained size band? (Overflow-safe: a
@@ -197,6 +221,9 @@ namespace blade_pool {
     }
 #endif
 } // namespace blade_pool
+// The run record (blade_run_record.hpp) reports blade_pool's policy when the
+// program includes this header first, as every generated program does.
+#define BLADE_POOL_POLICY_DECLARED 1
 
 namespace nested_array_utilities {
 
