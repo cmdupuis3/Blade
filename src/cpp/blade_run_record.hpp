@@ -249,9 +249,11 @@ namespace blade_rr {
                  BLADE_RR_CUBLAS ? "true" : "false",
                  uses_rng ? "{\"generator\":\"philox4x32-10\",\"version\":1}" : "null");
     // the runtime form census (observed, per site; see note_form) -- written
-    // ONLY when a site recorded an event (or dropped one), so the record of a
-    // program with no run-time-chosen form is byte-identical to the record
-    // format before the census existed (version 1 unchanged)
+    // ONLY when a site recorded an event (or dropped one), so a program with
+    // no run-time-chosen form keeps the top-level members of the pre-census
+    // format (version 1 unchanged; since the pool-retention arm every record
+    // also carries policy.pool, so a default record is NOT byte-identical to
+    // one written before that additive member existed)
     if (n_form_events > 0 || form_events_dropped > 0) {
       std::fputs(",\"forms\":[", f);
       for (int i = 0; i < n_form_events; ++i) {

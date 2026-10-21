@@ -2680,7 +2680,11 @@ type EpilogueLegPlan = {
 /// after it: the C++ lane releases them right behind that let's emission,
 /// once, through the scope frame's own free (or main's plain dense free when
 /// no frame tracks them). The boundary is independent of where any join is
-/// inserted. The LLVM lane frees no pool in either form.
+/// inserted. KNOWN INCOMPLETE (G69, round 4 pending): the join rewrite can
+/// delete the boundary let, CSE runs after this table and can merge a
+/// caller's equal map into the released pool, function-body return lets
+/// bypass the renderer arm, and the LLVM lane -- which frees an outlined
+/// callee's pools at its scalar return -- retains them under the inline.
 type InlineReturnEntry = {
     /// The let whose emission ends the inlined call (the table key).
     BoundaryLetId: IRId
