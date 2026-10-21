@@ -1,0 +1,22 @@
+// TEST: Cell epilogue: a writer hidden in a random fill's key between the producer and the fold
+// `noise`'s key `bump(p)` writes p(0) -- but a random fill's key lives in a
+// side table and its binding's value is a placeholder, so an interval audit
+// that reads only binding values sees nothing (W1-4 review finding 7). The
+// rank-1 producer epilogue (B1, `blade plan` rule `cell-epilogue`) audits
+// every intervening module binding by its whole PAYLOAD and declines
+// (`noise` reads `p`), so the fold reads p AFTER the write, as written:
+// s = 81 + 9 = 90 (the stale epilogue would fold the unbumped 4 + 9 = 13).
+// The cli block runs the BLADE_CELL_EPILOGUE=0 twin.
+import rand as r
+type I = Idx<2>
+function bump(a: mut Array<Float64 like I>) -> Int64 = {
+    a(0) = 9.0
+    7
+}
+let x: Array<Float64 like I> = [1.0, 2.0]
+let mut p = method_for(x) <@> lambda(v) -> v + 1.0 |> compute
+let noise = r.uniform(bump(p), 1)
+let s = reduce(method_for(p) <@> lambda(v) -> v * v, (+), 0.0)
+// EXPECT: s = 90.0
+let p_after = p
+// EXPECT: p_after = [9.0, 3.0]

@@ -729,10 +729,11 @@ let runCliSmokeTests () : TH.BlockResult =
                 let compoundEnv llvm = [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", llvm); ("BLADE_FP_REPRO", null) ]
                 // compound1's let-bound mask takes compaction fusion
                 // (Blade.Optimize.planCompactionFusion): the same
-                // representation, its table counted in the mask pass and
-                // filled in the gather pass.
+                // representation, counted in the mask pass and gathered in one
+                // pass at the compound, and -- `s` only folds it -- its kept
+                // positions elided (v2, T4b's demand census).
                 let compactionLine =
-                    ": applied [representation: rank-1 compaction (kept positions counted in the mask pass and filled in the gather pass -- compaction fusion; no hash table; keyed reads by binary search over the kept positions)"
+                    ": applied [representation: rank-1 compaction (counted in the mask pass, gathered in one pass -- compaction fusion; no hash table; positions elided: the demand census found no consumer that reads them)"
                 let hashedLine =
                     "declined -- hashed SparseIdx: a rank-2 mask has no closed-form rank, so compound_index_t<2> keeps one tuple->rank hash entry per present cell"
                 for llvm in [ null; "1" ] do
@@ -783,38 +784,124 @@ let runCliSmokeTests () : TH.BlockResult =
                 + "let resid = checksum - floor(checksum)\n"
             File.WriteAllText(Path.Combine(dir, "full.blade"), body "")
             File.WriteAllText(Path.Combine(dir, "b4a.blade"), body "let k0 = keep(3)\n")
+            // v2 with the kept positions DEMANDED (an alias: the census does
+            // not follow it), so they are filled (in the mask pass under
+            // `gather`).
+            File.WriteAllText(Path.Combine(dir, "held.blade"),
+                body "" + "let w = y\nlet held = reduce(w, (+))\n")
             let valueOf (key: string) (out: string) =
                 out.Split('\n') |> Array.tryPick (fun l ->
                     let t = l.Trim()
                     if t.StartsWith(key + " = ") then Some (t.Substring(key.Length + 3)) else None)
+            // The settings compared: the gate off, the b4 mirror (round 2),
+            // the v2 default (T4b), the opt-in mask-site gather (`gather`, T4a
+            // + T4b), and `gather` with the selectivity cap at 0 (its two-pass
+            // fallback).
+            let settings = [ ("0", null); ("b4", null); ("1", null); ("gather", null); ("gather", "sel_cap=0") ]
+            let label (gate: string, tune: string) = if isNull tune then gate else $"{gate}+{tune}"
             for llvm in [ null; "1" ] do
-                for prog in [ "full"; "b4a" ] do
+                for prog in [ "full"; "b4a"; "held" ] do
                     let lane = if isNull llvm then "C++" else "LLVM"
-                    let runWith (gate: string) (repro: bool) =
+                    let runWith (gate: string, tune: string) (repro: bool) =
                         let env =
                             [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", llvm); ("BLADE_COMPACTION_FUSION", gate)
+                              ("BLADE_TILE_TUNE", tune)
                               ("BLADE_FP_REPRO", (if repro then "1" else null))
                               ("BLADE_FP_CONTRACT", (if repro then "off" else null)) ]
                         spawnWith env dir [ "run"; $"{prog}.blade"; "--print"; "checksum,resid"; "--verbose" ]
-                    let (c1, o1, e1) = runWith "0" true
-                    let (c2, o2, e2) = runWith "1" true
                     // `--verbose` names the emitted file on stderr: `.ll` is the LLVM lane.
                     let laneOk (o: string) = isNull llvm || o.Contains ".ll"
-                    let (k1, r1, k2, r2) = (valueOf "checksum" o1, valueOf "resid" o1, valueOf "checksum" o2, valueOf "resid" o2)
-                    let same = c1 = 0 && c2 = 0 && laneOk (o2 + e2) && k1 = k2 && r1 = r2 && r1.IsSome
-                    recordCase $"cli: compaction fusion ({lane}, {prog}) identity regime: gate off == on, every bit"
-                        same ($"off: {k1} / {r1}; on: {k2} / {r2} {e1}{e2}")
-                    let (c3, o3, e3) = runWith "0" false
-                    let (c4, o4, e4) = runWith "1" false
-                    let (k3, k4) = (valueOf "checksum" o3, valueOf "checksum" o4)
+                    let ident = settings |> List.map (fun s -> let (c, o, e) = runWith s true in (s, c, valueOf "checksum" o, valueOf "resid" o, o + e))
+                    let (_, _, k0, r0, _) = List.head ident
+                    let same = ident |> List.forall (fun (_, c, k, r, oe) -> c = 0 && laneOk oe && k = k0 && r = r0 && r.IsSome)
+                    let shown = ident |> List.map (fun (s, _, k, r, _) -> $"{label s}: {k} / {r}") |> String.concat "; "
+                    recordCase $"cli: compaction fusion ({lane}, {prog}) identity regime: gate off == b4 == on == gather (and sel_cap=0), every bit"
+                        same shown
+                    let dflt = settings |> List.map (fun s -> let (c, o, e) = runWith s false in (s, c, valueOf "checksum" o, o + e))
                     let close =
-                        match k3, k4 with
-                        | Some a, Some b when c3 = 0 && c4 = 0 && laneOk (o4 + e4) ->
-                            let (fa, fb) = (Double.Parse a, Double.Parse b)
-                            abs (fa - fb) <= 1e-12 * abs fa
+                        match dflt with
+                        | (_, c0, Some a, _) :: rest when c0 = 0 ->
+                            let fa = Double.Parse a
+                            rest |> List.forall (fun (_, c, k, oe) ->
+                                match k with
+                                | Some b when c = 0 && laneOk oe -> abs (fa - Double.Parse b) <= 1e-12 * abs fa
+                                | _ -> false)
                         | _ -> false
-                    recordCase $"cli: compaction fusion ({lane}, {prog}) default build: gate off vs on within 1e-12"
-                        close ($"off: {k3}; on: {k4} {e3}{e4}")
+                    let shownD = dflt |> List.map (fun (s, _, k, _) -> $"{label s}: {k}") |> String.concat "; "
+                    recordCase $"cli: compaction fusion ({lane}, {prog}) default build: gate off vs b4 vs on vs gather (and sel_cap=0) within 1e-12"
+                        close shownD
+            // A RUN-TIME source extent (C++ lane: the LLVM lane bakes range
+            // extents): `gather`'s single pass runs under a run-time cap test,
+            // and with sel_cap=0 that test fails, so the mask pass only counts and
+            // the compound runs B4's pass into the same buffers and feeds the
+            // same chain. Identity regime: every setting, every bit.
+            File.WriteAllText(Path.Combine(dir, "dyn.blade"),
+                "function gen(k: Int64) -> Float64 = {\n"
+                + "    let h1 = ((k + 10000019) * 1103515245 + 12345) % 2147483648\n"
+                + "    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648\n"
+                + "    2.0 * (Float64(h2) / 2147483648.0)\n"
+                + "}\n"
+                + "let k = reduce([300, 400, 303], (+))\n"
+                + "let ks = 0..k |> compute\n"
+                + "let x = method_for(ks) <@> lambda(i) -> gen(i) |> compute\n"
+                + "let keep = mask(x, lambda(v) -> v > 1.0)\n"
+                + "let y = compound(x, keep)\n"
+                + "let checksum = reduce(y * y, (+))\n"
+                + "let resid = checksum - floor(checksum)\n"
+                + "let m = extents(y)\n")
+            let dynRun (gate: string, tune: string) =
+                let env =
+                    [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", null); ("BLADE_COMPACTION_FUSION", gate); ("BLADE_TILE_TUNE", tune)
+                      ("BLADE_FP_REPRO", "1"); ("BLADE_FP_CONTRACT", "off") ]
+                let (c, o, e) = spawnWith env dir [ "run"; "dyn.blade"; "--print"; "checksum,resid,m" ]
+                ((gate, tune), c, valueOf "checksum" o, valueOf "resid" o, valueOf "m" o, e)
+            let dyn = settings |> List.map dynRun
+            let (_, _, dk, dr, dm, _) = List.head dyn
+            let dynSame = dyn |> List.forall (fun (_, c, k, r, m, _) -> c = 0 && k = dk && r = dr && m = dm && r.IsSome && m.IsSome)
+            // W1-4 review finding 7, the KNOB-OFF TWINS of corpus loops/537-539
+            // and symmetry/137: a writer hidden in a side-table operand (a
+            // random key, another compound's operand) between a producer and
+            // its fold. With the schedule's knob on, the interval audit sees
+            // the payload and declines; off, the two-pass form runs. Both
+            // print the as-written value, in each regime the schedule exists.
+            let hiddenBump = "function bump(a: mut Array<Float64 like I>) -> Int64 = {\n    a(0) = 9.0\n    7\n}\n"
+            File.WriteAllText(Path.Combine(dir, "hb1.blade"),
+                "import rand as r\ntype I = Idx<2>\n" + hiddenBump
+                + "let x: Array<Float64 like I> = [1.0, 2.0]\nlet mut p = method_for(x) <@> lambda(v) -> v + 1.0 |> compute\n"
+                + "let noise = r.uniform(bump(p), 1)\nlet s = reduce(method_for(p) <@> lambda(v) -> v * v, (+), 0.0)\n")
+            File.WriteAllText(Path.Combine(dir, "hb1c.blade"),
+                "type I = Idx<2>\nfunction bumped(a: mut Array<Float64 like I>) -> Array<Float64 like I> = {\n    a(0) = 9.0\n    let b = a + 0.0 |> compute\n    b\n}\n"
+                + "let x: Array<Float64 like I> = [1.0, 2.0]\nlet other = mask(x, lambda(v) -> v > 0.5)\nlet mut p = method_for(x) <@> lambda(v) -> v + 1.0 |> compute\n"
+                + "let zz = compound(bumped(p), other)\nlet s = reduce(method_for(p) <@> lambda(v) -> v * v, (+), 0.0)\n")
+            File.WriteAllText(Path.Combine(dir, "hhot.blade"),
+                "import rand as r\ntype I = Idx<2>\ntype J = Idx<2>\nfunction bump(a: mut Array<Float64 like I, J>) -> Int64 = {\n    a(0, 0) = 9.0\n    7\n}\n"
+                + "let mut p = method_for(range<I, J>) <@> lambda(i, j) -> 1.0 |> compute\nlet noise = r.uniform(bump(p), 1)\n"
+                + "let s = reduce(method_for(p) <@> lambda(row) -> prodsum(row, row), (+), 0.0)\n")
+            File.WriteAllText(Path.Combine(dir, "hcrow.blade"),
+                "import rand as r\ntype I = Idx<2>\nfunction bump(a: mut Array<Float64 like SymIdx<2, I>>) -> Int64 = {\n    a(0, 1) = 9.0\n    7\n}\n"
+                + "let x: Array<Float64 like I> = [1.0, 2.0]\nlet mut p = method_for(x, x) <@> lambda(a, b) where comm(a, b) -> a + b |> compute\n"
+                + "let noise = r.uniform(bump(p), 1)\n"
+                + "let s = reduce(method_for(range<I>) <@> lambda(i) -> reduce(method_for(range<I>) <@> lambda(j) -> p(i, j), (+)), lambda(a, b) where omp -> a + b, 0.0)\n")
+            for (prog, knob, regimes, want) in
+                    [ ("hb1", "BLADE_CELL_EPILOGUE", [ true; false ], "90.0")
+                      ("hb1c", "BLADE_CELL_EPILOGUE", [ true; false ], "90.0")
+                      ("hhot", "BLADE_HOT_ROW", [ true; false ], "84.0")
+                      ("hcrow", "BLADE_COMPACT_ROW_CLASSES", [ false ], "24.0") ] do
+                for repro in regimes do
+                    let runK (v: string) =
+                        let env =
+                            [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", null); (knob, v)
+                              ("BLADE_FP_REPRO", (if repro then "1" else null))
+                              ("BLADE_FP_CONTRACT", (if repro then "off" else null)) ]
+                        let (c, o, _) = spawnWith env dir [ "run"; $"{prog}.blade"; "--print"; "s" ]
+                        (c, valueOf "s" o)
+                    let (c1, s1) = runK null
+                    let (c0, s0) = runK "0"
+                    let build = if repro then "identity regime" else "default build"
+                    recordCase $"cli: hidden side-table writer ({prog}, {build}): {knob} on == off == the as-written s = {want}"
+                        (c1 = 0 && c0 = 0 && s1 = Some want && s0 = Some want) ($"on: {s1}; off: {s0}")
+            recordCase "cli: compaction fusion (C++, run-time extent) identity regime: gate off == b4 == on == gather == gather over the cap (the guarded fallback), every bit"
+                dynSame (dyn |> List.map (fun (s, c, k, r, m, e) -> $"{label s}: exit {c} {k} / {r} / {m} {e}") |> String.concat "; ")
             // The empty unseeded fold aborts BL8003 at the FOLD's own line (5),
             // after the fused compaction (line 4), gate on and off, both
             // lanes, both builds (under repro the chain was fed in the pass).
@@ -829,14 +916,14 @@ let runCliSmokeTests () : TH.BlockResult =
                     let lane = if isNull llvm then "C++" else "LLVM"
                     let build = if repro then "repro" else "default"
                     let ok =
-                        [ "0"; "1" ] |> List.forall (fun gate ->
+                        [ "0"; "b4"; "1"; "gather" ] |> List.forall (fun gate ->
                             let env =
                                 [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", llvm); ("BLADE_COMPACTION_FUSION", gate)
                                   ("BLADE_FP_REPRO", (if repro then "1" else null)) ]
                             let (code, out, err) = spawnWith env dir [ "run"; "empty.blade" ]
                             let all = out + err
                             code <> 0 && all.Contains "error[BL8003]" && all.Contains "empty.blade:5")
-                    recordCase $"cli: compaction fusion ({lane}, {build}): the empty fold aborts BL8003 at its own line, gate off and on" ok ""
+                    recordCase $"cli: compaction fusion ({lane}, {build}): the empty fold aborts BL8003 at its own line, gate off, b4, on and gather" ok ""
             // COMPACT ROW CLASSES (Blade.Optimize.planCompactRowClasses): the
             // licensed checksum of a compact producer's orbit fold is summed
             // per packed row and combined in row order, so its bits do not

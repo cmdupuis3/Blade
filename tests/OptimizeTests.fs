@@ -1091,7 +1091,11 @@ let private cepLlvmDecisionCase (name: string) (src: string) (want: Blade.Effect
 // read the emission (the count in the mask pass, ONE fill+gather pass, no
 // `y * y` pool, the fold form per build) and the decision record of each
 // decline. The licensed form is invisible to the repro-pinned differentials,
-// so it is pinned here.
+// so it is pinned here. The round-2 cases run under the `b4` mirror
+// (BLADE_COMPACTION_FUSION=b4, the exact round-2 form); the round-3 default
+// (v2: T4b, positions elided under the demand census) and its opt-in T4a
+// (`gather`: the gather in the mask pass) are pinned by the compactionV2
+// cases, values by corpus index-types/522-531 and multifile/037-040.
 // ---------------------------------------------------------------------------
 
 let private compactionSrc =
@@ -1101,12 +1105,12 @@ let private compactionSrc =
     + "let y = compound(x, keep)\n"
     + "let checksum = reduce(y * y, (+)) + Float64(extents(y))\n"
 
-/// Licensed (the suite's default build): the mask pass counts, one fused
-/// fill+gather pass, the index adopts the filled table, no square pool, and
-/// the fold is the K-lane self-dot over `y.data`.
+/// The b4 mirror, licensed (the suite's default build): the mask pass counts,
+/// one fused fill+gather pass, the index adopts the filled table, no square
+/// pool, and the fold is the K-lane self-dot over `y.data`.
 let private compactionFusedLicensed () =
     let name = "compaction_fusion_one_pass_licensed_sq_over_buffer"
-    match cppOfSource name compactionSrc with
+    match withGate "BLADE_COMPACTION_FUSION" "b4" (fun () -> cppOfSource name compactionSrc) with
     | Error e -> resultLine Fail name e; false
     | Ok cpp ->
         let checks =
@@ -1128,7 +1132,7 @@ let private compactionFusedLicensed () =
 /// site keeps the empty check and returns the accumulator.
 let private compactionFusedRepro () =
     let name = "compaction_fusion_repro_chain_fed_in_pass"
-    match withGate "BLADE_FP_REPRO" "1" (fun () -> cppOfSource name compactionSrc) with
+    match withGate "BLADE_COMPACTION_FUSION" "b4" (fun () -> withGate "BLADE_FP_REPRO" "1" (fun () -> cppOfSource name compactionSrc)) with
     | Error e -> resultLine Fail name e; false
     | Ok cpp ->
         let pass = cpp.IndexOf "y_q += (size_t)y_idx_pool[y_i];"
@@ -1213,7 +1217,7 @@ let private compactionAliasWriteSrc =
 
 let private compactionAliasWriteNoInPass () =
     let name = "compaction_fusion_alias_write_keeps_fold_at_its_site"
-    match withGate "BLADE_FP_REPRO" "1" (fun () -> cppOfSource name compactionAliasWriteSrc) with
+    match withGate "BLADE_COMPACTION_FUSION" "b4" (fun () -> withGate "BLADE_FP_REPRO" "1" (fun () -> cppOfSource name compactionAliasWriteSrc)) with
     | Error e -> resultLine Fail name e; false
     | Ok cpp ->
         if not (cpp.Contains "y__fold0") && countOf "y_q += (size_t)y_idx_pool[y_i];" cpp = 1
@@ -1224,6 +1228,409 @@ let private compactionAliasWriteNoInPass () =
             resultLine Fail name "an in-pass chain (or the square pool) survived a write through an alias"
             false
 
+// --- Compaction fusion v2 (round 3, T4) --------------------------------------
+// T4b (the DEFAULT): the kept-position table elided when the demand census
+// certifies no consumer reads it; the gather stays at the compound (B4's one
+// pass). T4a (OPT-IN, BLADE_COMPACTION_FUSION=gather): `keep`'s own pass
+// counts AND gathers (one sweep of x from memory, n + 1 private cells; the
+// strict chain fed there). Every admission audits a binding's whole payload
+// (side-table operands included). Values: corpus index-types/522-531 (515-521
+// unchanged), multifile/037-040.
+
+let private checkAll (name: string) (cpp: string) (summary: string) (checks: (string * bool) list) =
+    match checks |> List.filter (snd >> not) with
+    | [] -> resultLine Pass name summary; true
+    | bad -> resultLine Fail name ("missing: " + (bad |> List.map fst |> String.concat ", ")); ignore cpp; false
+
+let private withGather (f: unit -> 'a) : 'a = withGate "BLADE_COMPACTION_FUSION" "gather" f
+
+/// The default (T4b only): the count in the mask pass, B4's one fill+gather
+/// pass at the compound with NO position store, the cardinality-only index,
+/// the K-lane self-dot over y.data.
+let private compactionV2DefaultElides () =
+    let name = "compaction_v2_default_positions_elided_gather_at_compound"
+    match cppOfSource name compactionSrc with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        checkAll name cpp "count in the mask pass, B4's pass at the compound without the positions fill, cardinality-only index"
+            [ "count in the mask pass", cpp.Contains "keep__count += (size_t)__keep_k;"
+              "no mask-site gather (T4a is opt-in)", not (cpp.Contains "keep__gv")
+              "one compound-site pass", countOf "y_q += (size_t)y_idx_pool[y_i];" cpp = 1
+              "m + 1 value cells", cpp.Contains "double* y_compact = new double[keep__count + 1];"
+              "no positions fill", not (cpp.Contains "y_pos") && not (cpp.Contains "[0] = y_i;")
+              "cardinality-only index", cpp.Contains "new compound_index_t<1>(\"y_idx\", y_idx_grid, keep__count, compound_index_t<1>::positions_elided)"
+              "K-lane self-dot over y.data", cpp.Contains "blade_fold::sq<double, 8>(y.data, y.idx->cardinality)"
+              "BL8003 guard at the fold", cpp.Contains "if (y.idx->cardinality == 0) { blade_rt::panic(\"BL8003\"" ]
+
+/// `gather`, licensed: the gather in the mask pass, one sweep of x from
+/// memory, n + 1 cells, no positions (the fold and `extents` read only the
+/// buffer and the cardinality), the cardinality-only index, no compound-site
+/// pass, no square pool, the K-lane self-dot at the fold's own site.
+let private compactionV2Licensed () =
+    let name = "compaction_v2_gather_at_mask_positions_elided"
+    match withGather (fun () -> cppOfSource name compactionSrc) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        checkAll name cpp "one sweep of x at the mask (per block: predicate, then gather), cardinality-only index, sq<double, 8> over y.data"
+            [ "gather in the mask pass", cpp.Contains "keep__gv[keep__count] = x[__mi];"
+              "one sweep of x: per 256-cell block the predicate loop, then the gather loop",
+                cpp.Contains "for (size_t keep__g_b = 0; keep__g_b < 1003; keep__g_b += 256)"
+                && countOf "for (size_t __mi = keep__g_b; __mi < keep__g_e; __mi++)" cpp = 2
+                && not (cpp.Contains "pool_base(x.data)")
+              "n + 1 private value cells", cpp.Contains "double* keep__gv = new double[(size_t)(1003) + 1];"
+              "no position buffer (no positions fill)", not (cpp.Contains "keep__gp") && not (cpp.Contains "y_pos") && not (cpp.Contains "[0] = __mi;")
+              "cardinality-only index", cpp.Contains "new compound_index_t<1>(\"y_idx\", y_idx_grid, keep__count, compound_index_t<1>::positions_elided)"
+              "no compound-site pass", not (cpp.Contains "y_q += ")
+              "no square pool", not (cpp.Contains "new double[y.idx->cardinality")
+              "K-lane self-dot over y.data", cpp.Contains "blade_fold::sq<double, 8>(y.data, y.idx->cardinality)"
+              "BL8003 guard at the fold", cpp.Contains "if (y.idx->cardinality == 0) { blade_rt::panic(\"BL8003\"" ]
+
+/// `gather`, BLADE_FP_REPRO=1: B4c's chain moves into the mask pass unchanged
+/// -- per 256-cell block, completed cells only, the first square peeled --
+/// and the fold's site keeps the empty check and returns the accumulator.
+let private compactionV2Repro () =
+    let name = "compaction_v2_gather_repro_chain_in_mask_pass"
+    match withGather (fun () -> withGate "BLADE_FP_REPRO" "1" (fun () -> cppOfSource name compactionSrc)) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let pass = cpp.IndexOf "keep__gv[keep__count] = x[__mi];"
+        let peel = cpp.IndexOf "keep__fold0 = __t;"
+        let step = cpp.IndexOf "keep__fold0 = __wrap_"
+        let ret = cpp.IndexOf "return keep__fold0;"
+        checkAll name cpp "the peeled chain fed per block inside the mask pass; the fold returns it behind the empty check"
+            [ "blocked mask pass", cpp.Contains "for (size_t __mi = keep__g_b; __mi < keep__g_e; __mi++)"
+              "chain only over completed cells", cpp.Contains "for (; keep__g_f < keep__count; keep__g_f++)"
+              "gather, peel, chain, then the fold reads it", pass >= 0 && peel > pass && step > peel && ret > step
+              "products rounded before the add", countOf "BLADE_FOLD_ROUND(__t);" cpp = 2
+              "no compound-site pass", not (cpp.Contains "y_q += ")
+              "no K-lane form", not (cpp.Contains "blade_fold::sq<double")
+              "BL8003 guard at the fold", cpp.Contains "if (y.idx->cardinality == 0) { blade_rt::panic(\"BL8003\"" ]
+
+/// A keyed read demands the table: under `gather` the mask pass fills the
+/// kept positions too, and the index adopts them.
+let private compactionV2KeyedSrc = compactionSrc + "let k5 = y(5)\n"
+let private compactionV2KeyedKeepsPositions () =
+    let name = "compaction_v2_gather_keyed_read_keeps_positions"
+    match withGather (fun () -> cppOfSource name compactionV2KeyedSrc) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        checkAll name cpp "the mask pass fills the kept positions; the index adopts them"
+            [ "positions filled in the mask pass", cpp.Contains "keep__gp[keep__count][0] = __mi;"
+              "n + 1 position cells", cpp.Contains "compound_index_t<1>::IDX* keep__gp = new compound_index_t<1>::IDX[(size_t)(1003) + 1];"
+              "adopting constructor", cpp.Contains "new compound_index_t<1>(\"y_idx\", y_idx_grid, keep__count, keep__gp)"
+              "not elided", not (cpp.Contains "positions_elided)") ]
+
+/// `gather` over the selectivity cap: (n + 1) x 8 B over sel_cap=1 KiB keeps
+/// B4's two passes (count in the mask pass, one fill+gather pass at the
+/// compound, m + 1 cells); the positions are still elided (T4b is
+/// independent).
+let private compactionV2SelCapFallback () =
+    let name = "compaction_v2_gather_sel_cap_keeps_b4_passes"
+    match withGather (fun () -> withGate "BLADE_TILE_TUNE" "sel_cap=1" (fun () -> cppOfSource name compactionSrc)) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        checkAll name cpp "over the cap: B4's compound-site pass, m + 1 cells, positions still elided"
+            [ "no mask-site gather", not (cpp.Contains "keep__gv")
+              "count in the mask pass", cpp.Contains "keep__count += (size_t)__keep_k;"
+              "one compound-site pass", countOf "y_q += (size_t)y_idx_pool[y_i];" cpp = 1
+              "m + 1 value cells", cpp.Contains "new double[keep__count + 1]"
+              "no positions", not (cpp.Contains "y_pos") && cpp.Contains "positions_elided)" ]
+
+/// `gather` over a run-time source extent: the single pass runs under a
+/// run-time cap test, the compound falls back to B4's pass into the same
+/// buffers otherwise.
+let private compactionV2RuntimeSrc =
+    "let k = reduce([3, 4, 5], (+))\n"
+    + "let xs = 0..k |> compute\n"
+    + "let keep = mask(xs, lambda(v) -> v > 4)\n"
+    + "let y = compound(xs, keep)\n"
+    + "let s = reduce(y, (+))\n"
+let private compactionV2RuntimeGuard () =
+    let name = "compaction_v2_gather_runtime_extent_guarded_single_pass"
+    match withGather (fun () -> cppOfSource name compactionV2RuntimeSrc) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        checkAll name cpp "a run-time cap test at the mask; B4's pass at the compound when it fails"
+            [ "the run-time cap test", cpp.Contains "const bool keep__one = (size_t)("
+              "buffers declared before the branch", cpp.Contains "int64_t* keep__gv = nullptr;"
+              "single pass under the guard", cpp.Contains "if (keep__one) {" && cpp.Contains "keep__gv[keep__count] = xs[__mi];"
+              "counted-only pass otherwise", cpp.Contains "} else {"
+              "B4 fallback at the compound", cpp.Contains "if (!keep__one) {" && cpp.Contains "keep__gv = new int64_t[keep__count + 1];"
+              "positions elided", cpp.Contains "positions_elided)" ]
+
+// Demand-kind sources for the census decision cases: one use each that reads
+// source positions.
+let private compactionV2DemandSrc (uses: string) =
+    "type Ix = Idx<13>\n"
+    + "let x = method_for(range<Ix>) <@> lambda(i) -> Float64((Int64(i) * 3) % 13) |> compute\n"
+    + "let keep = mask(x, lambda(v) -> v > 5.5)\n"
+    + "let y = compound(x, keep)\n"
+    + uses
+let private compactionV2WritingProducerSrc =
+    "type Ix = Idx<13>\n"
+    + "let mut calls = 0\n"
+    + "let x = method_for(range<Ix>) <@> lambda(i) -> {\n"
+    + "    calls = calls + 1\n"
+    + "    Float64(Int64(i) % 5)\n"
+    + "} |> compute\n"
+    + "let keep = mask(x, lambda(v) -> v > 1.5)\n"
+    + "let y = compound(x, keep)\n"
+    + "let s = reduce(y * y, (+))\n"
+let private compactionV2SharedMaskSrc =
+    compactionSrc + "let y2 = compound(x, keep)\nlet s2 = reduce(y2, (+))\n"
+// W1-4 review finding 2: a HIDDEN writer between the mask and the compound --
+// a random fill's key (its binding value is a placeholder) and another
+// compound's computed dense operand (distinct mask), each writing x.
+let private compactionV2HiddenWriterHead =
+    "type Ix = Idx<2>\n"
+    + "function bump(a: mut Array<Float64 like Ix>) -> Int64 = {\n"
+    + "    a(0) = 9.0\n"
+    + "    7\n"
+    + "}\n"
+    + "function bumped(a: mut Array<Float64 like Ix>) -> Array<Float64 like Ix> = {\n"
+    + "    a(0) = 9.0\n"
+    + "    let b = a + 0.0 |> compute\n"
+    + "    b\n"
+    + "}\n"
+    + "let mut x: Array<Float64 like Ix> = [1.0, 2.0]\n"
+    + "let keep = mask(x, lambda(v) -> v > 0.0)\n"
+let private compactionV2RandomKeyWriterSrc =
+    "import rand as r\n" + compactionV2HiddenWriterHead
+    + "let noise = r.uniform(bump(x), 1)\n"
+    + "let y = compound(x, keep)\n"
+    + "let s = reduce(y, (+))\n"
+let private compactionV2CompoundOperandWriterSrc =
+    compactionV2HiddenWriterHead
+    + "let other = mask(x, lambda(v) -> v > 0.5)\n"
+    + "let zz = compound(bumped(x), other)\n"
+    + "let y = compound(x, keep)\n"
+    + "let s = reduce(y, (+))\n"
+let private compactionV2ProviderWriteSrc =
+    "import csv as c\n"
+    + "type Ix = Idx<13>\n"
+    + "let x = method_for(range<Ix>) <@> lambda(i) -> Float64((Int64(i) * 3) % 13) |> compute\n"
+    + "let keep = mask(x, lambda(v) -> v > 5.5)\n"
+    + "let w = c.write(\"compaction_barrier_out.csv\", x)\n"
+    + "let y = compound(x, keep)\n"
+    + "let s = reduce(y, (+))\n"
+// Two-module programs (finding 1: an imported lookup hidden in a random key).
+let private compactionV2ImportedKeySources (exported: string) (key: string) =
+    [ ("Data", "module Data\n\nlet x = [12345, -3, 4]\nlet keep = mask(x, lambda(v) -> v > 0)\nlet y = compound(x, keep)\n" + exported)
+      ("Main", "module Main\nimport Data\nimport rand as r\n\nlet u = r.uniform(" + key + ", 1)\n") ]
+let private compactionV2ImportedHelperSources =
+    [ ("Helpers", "module Helpers\n\ntype Ix = Idx<2>\nfunction bump(a: mut Array<Float64 like Ix>) -> Int64 = {\n    a(0) = 9.0\n    7\n}\n")
+      ("Main", "module Main\nimport Helpers\nimport rand as r\n\nlet mut x: Array<Float64 like Helpers.Ix> = [1.0, 2.0]\nlet keep = mask(x, lambda(v) -> v > 0.0)\nlet noise = r.uniform(Helpers.bump(x), 1)\nlet y = compound(x, keep)\nlet s = reduce(y, (+))\n") ]
+let private v2Applied (d: Blade.Effects.Decision) = d.Version = 2 && applied d && d.Subject = "y"
+let private evidenceHas (needle: string) (d: Blade.Effects.Decision) = d.Evidence |> List.exists (fun e -> e.Contains needle)
+
+let private decisionsOfMulti (sources: (string * string) list) : Result<Blade.Effects.Decision list, string> =
+    Blade.Effects.Decisions.start ()
+    let r =
+        match fst (Blade.Lowering.lowerMultiSourceCaptured sources) with
+        | Error e -> Error ($"lower: {e}")
+        | Ok _ -> Ok (Blade.Effects.Decisions.drain ())
+    Blade.Effects.Decisions.drain () |> ignore
+    r
+let private decisionCaseMulti (name: string) (sources: (string * string) list) (want: Blade.Effects.Decision -> bool) (describe: string) =
+    match decisionsOfMulti sources with
+    | Error e -> resultLine Fail name e; false
+    | Ok ds ->
+        let mine = ds |> List.filter (fun d -> d.Rule = "compaction-fusion")
+        if mine |> List.exists want then
+            resultLine Pass name ($"{mine.Length} `compaction-fusion` decision(s); {describe}")
+            true
+        else
+            let seen = mine |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+            let shown = if seen = "" then "no decisions" else seen
+            resultLine Fail name ($"wanted {describe}; saw: {shown}")
+            false
+
+let private compactionV2DecisionCases () =
+    [ // ---- the default (T4b) ----
+      decisionCase "decision_compaction_v2_positions_elided" compactionSrc "compaction-fusion"
+          (fun d -> v2Applied d && evidenceHas "selection: positions elided (census: " d) "v2 applied: positions elided by the census"
+      decisionCase "decision_compaction_v2_default_gather_opt_in" compactionSrc "compaction-fusion"
+          (fun d -> v2Applied d && evidenceHas "gather: declined -- opt-in this round (BLADE_COMPACTION_FUSION=gather)" d
+                    && not (evidenceHas "selectionAdmits" d))
+          "the default keeps the gather at the compound (T4a opt-in)"
+      decisionCase "decision_compaction_v2_keyed_read_requires" compactionV2KeyedSrc "compaction-fusion"
+          (fun d -> v2Applied d && evidenceHas "selection: positions required by a keyed read of `y` in `k5`" d) "positions required by a keyed read"
+      decisionCase "decision_compaction_v2_argument_requires"
+          (compactionV2DemandSrc "function at4(c: Array<Float64 like CompoundIdx<keep>>) -> Float64 = c(4)\nlet a4 = at4(y)\n") "compaction-fusion"
+          (fun d -> v2Applied d && evidenceHas "positions required by `y` passed as a call argument in `a4`" d) "positions required by a call argument"
+      decisionCase "decision_compaction_v2_alias_requires"
+          (compactionV2DemandSrc "let w = y\nlet s = reduce(w, (+))\n") "compaction-fusion"
+          (fun d -> v2Applied d && evidenceHas "positions required by the alias `w` of `y`" d) "positions required by an alias"
+      decisionCase "decision_compaction_v2_capture_requires"
+          (compactionV2DemandSrc "let c = reduce(method_for(range<Ix>) <@> lambda(i) -> Float64(extents(y)) + Float64(Int64(i)), (+))\n") "compaction-fusion"
+          (fun d -> v2Applied d && evidenceHas "positions required by `y` captured by" d) "positions required by a capture"
+      decisionCase "decision_compaction_v2_present_requires"
+          (compactionV2DemandSrc "let d: Array<Float64 like Ix> = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]\nlet o = y <|:> d |> compute\n") "compaction-fusion"
+          (fun d -> v2Applied d && evidenceHas "positions required by `y` as an operand of IRFallback" d) "positions required by a present read"
+      decisionCase "decision_compaction_v2_derived_map_keyed_requires"
+          (compactionV2DemandSrc "let z = y * 2.0 |> compute\nlet z7 = z(7)\n") "compaction-fusion"
+          (fun d -> v2Applied d && evidenceHas "positions required by a keyed read of `z` in `z7`" d) "positions required through a derived map"
+      decisionCase "decision_compaction_v2_derived_map_fold_elides"
+          (compactionV2DemandSrc "let z = y * 2.0 |> compute\nlet zs = reduce(z, (+))\n") "compaction-fusion"
+          (fun d -> v2Applied d && evidenceHas "selection: positions elided (census: the named map `z`" d) "positions elided through a derived map's fold"
+      // review finding 6: a whole-array kernel (input rank 1) is no cellwise map
+      decisionCase "decision_compaction_v2_whole_array_kernel_requires"
+          (compactionV2DemandSrc "function at0(c: Array<Float64 like CompoundIdx<keep>>) -> Float64 = c(2)\nlet w = object_for(at0) <@> y |> compute\n") "compaction-fusion"
+          (fun d -> v2Applied d && evidenceHas "positions required by `y` as an operand of IRApplyCombinator" d)
+          "positions required by a whole-array kernel (nonzero input rank)"
+      // a cardinality inside an expression's TYPE (a range over `extents(y)`) is certified
+      decisionCase "decision_compaction_v2_extent_in_an_embedded_type_elides"
+          (compactionV2DemandSrc "let r = 0..extents(y) |> compute\nlet rs = reduce(r, (+))\n") "compaction-fusion"
+          (fun d -> v2Applied d && evidenceHas "selection: positions elided" d) "an embedded type's `extents(y)` keeps the table elided"
+      decisionCase "decision_compaction_v2_shared_mask_first_declined" compactionV2SharedMaskSrc "compaction-fusion"
+          (fun d -> d.Version = 2 && d.Subject = "y" && declinedMentioning "its in-pass count serves one, the last (`y2`)" d)
+          "the first compound over a shared mask says it keeps the separate passes"
+      // finding 2 in the default: the hidden writer only writes x, so B4's count motion stays legal
+      decisionCase "decision_compaction_v2_hidden_writer_keeps_b4" compactionV2RandomKeyWriterSrc "compaction-fusion"
+          (fun d -> v2Applied d) "a hidden writer of x between keeps B4 (its count motion cannot be changed by x)"
+      // finding 1: an imported lookup hidden in a random key (and through an exported derived map)
+      decisionCaseMulti "decision_compaction_v2_imported_random_key_requires" (compactionV2ImportedKeySources "" "Data.y(0)")
+          (fun d -> d.Version = 2 && applied d && d.Subject = "y" && evidenceHas "positions required by `y` named in another module" d)
+          "an imported keyed read inside a random key demands the table"
+      decisionCaseMulti "decision_compaction_v2_imported_derived_map_key_requires" (compactionV2ImportedKeySources "let z = y * 2 |> compute\n" "Data.z(2)")
+          (fun d -> d.Version = 2 && applied d && d.Subject = "y" && evidenceHas "positions required by `z` named in another module" d)
+          "an imported derived map read inside a random key demands the table"
+      withGather (fun () ->
+          withGate "BLADE_TILE_TUNE" "sel_cap=0" (fun () ->
+              decisionCaseMulti "decision_compaction_v2_imported_random_key_requires_gather_sel_cap0" (compactionV2ImportedKeySources "" "Data.y(0)")
+                  (fun d -> d.Version = 2 && applied d && d.Subject = "y" && evidenceHas "positions required by `y` named in another module" d)
+                  "the same under `gather` with sel_cap=0 (T4b alone)"))
+      // ---- `gather` (T4a opt-in) ----
+      withGather (fun () ->
+          decisionCase "decision_compaction_v2_gather_at_mask" compactionSrc "compaction-fusion"
+              (fun d -> v2Applied d && evidenceHas "gather: at the mask site" d) "gather: at the mask site")
+      withGather (fun () ->
+          decisionCase "decision_compaction_v2_gather_five_party_matrix" compactionSrc "compaction-fusion"
+              (fun d -> v2Applied d && evidenceHas "selectionAdmits (five parties, each through Optimize.scheduleMayWriteIn): producer `x`: no write; predicate of `keep`: no write" d
+                        && evidenceHas "seed(s): none" d && evidenceHas "between `keep` and `y`: no binding" d)
+              "gather: the five-party matrix recorded")
+      withGather (fun () ->
+          withGate "BLADE_TILE_TUNE" "sel_cap=1" (fun () ->
+              decisionCase "decision_compaction_v2_gather_declined_sel_cap" compactionSrc "compaction-fusion"
+                  (fun d -> v2Applied d && evidenceHas "gather: declined -- (n + 1) x 8 B = 7.8 KiB exceeds sel_cap 1.0 KiB" d)
+                  "gather declined: over the selectivity cap"))
+      withGather (fun () ->
+          decisionCase "decision_compaction_v2_gather_declined_writing_producer" compactionV2WritingProducerSrc "compaction-fusion"
+              (fun d -> v2Applied d && evidenceHas "gather: declined -- the producer `x` may write" d && evidenceHas "DECLINES: the producer `x` may write" d)
+              "gather declined: the producer writes (five-party matrix)")
+      withGather (fun () ->
+          decisionCase "decision_compaction_v2_gather_declined_shared_mask" compactionV2SharedMaskSrc "compaction-fusion"
+              (fun d -> d.Version = 2 && applied d && d.Subject = "y2" && evidenceHas "gather: declined -- `keep` feeds 2 compounds" d)
+              "the last compound over a shared mask: fused, gather declined (a shared selection is T4c)")
+      withGather (fun () ->
+          decisionCase "decision_compaction_v2_gather_declined_random_key_writer" compactionV2RandomKeyWriterSrc "compaction-fusion"
+              (fun d -> v2Applied d && evidenceHas "gather: declined -- `noise` (between `keep` and `y`) may write (its value or side-table payload)" d)
+              "gather declined: a random fill's key writes x (its value is a placeholder)")
+      withGather (fun () ->
+          decisionCase "decision_compaction_v2_gather_declined_compound_operand_writer" compactionV2CompoundOperandWriterSrc "compaction-fusion"
+              (fun d -> v2Applied d && evidenceHas "gather: declined -- `zz` (between `keep` and `y`) may write (its value or side-table payload)" d)
+              "gather declined: another compound's operand (a distinct mask) writes x")
+      withGather (fun () ->
+          decisionCase "decision_compaction_v2_gather_declined_provider_write" compactionV2ProviderWriteSrc "compaction-fusion"
+              (fun d -> v2Applied d && evidenceHas "is a provider write (an external effect)" d)
+              "gather declined: a provider write between the mask and the compound")
+      withGather (fun () ->
+          decisionCaseMulti "decision_compaction_v2_gather_declined_imported_helper" compactionV2ImportedHelperSources
+              (fun d -> v2Applied d && evidenceHas "gather: declined -- `noise` (between `keep` and `y`) may write" d)
+              "gather declined: an imported mutating helper in a random key")
+      // ---- the `b4` mirror ----
+      withGate "BLADE_COMPACTION_FUSION" "b4" (fun () ->
+          decisionCase "decision_compaction_b4_mirror_is_round2" compactionSrc "compaction-fusion"
+              (fun d -> d.Version = 1 && applied d && d.Subject = "y" && evidenceHas "positions always built (B4d deferred)" d)
+              "the b4 mirror records the round-2 plan (v1, positions always built)")
+      withGate "BLADE_COMPACTION_FUSION" "b4" (fun () ->
+          decisionCase "decision_compaction_b4_shared_mask_first_declined" compactionV2SharedMaskSrc "compaction-fusion"
+              (fun d -> d.Version = 1 && d.Subject = "y" && declinedMentioning "feeds 2 compounds" d)
+              "b4: the first compound over a shared mask is recorded declined (its emission was always the separate passes)") ]
+
+/// Review finding 8: a `y` reference whose ONLY occurrence is an `ungroup`'s
+/// SOURCE index record (which `childrenOf` never hands out) demands the
+/// table -- in y's own module (the census) and from another module (the
+/// foreign-demand collection). Hand-built IR over a lowered program: a probe
+/// binding `IRUngroup (0, src)` whose source extent is the keyed read `y(0)`.
+let private compactionV2UngroupIndexExtentCensus () =
+    let name = "compaction_v2_census_sees_ungroup_source_index_extents"
+    match lower compactionSrc with
+    | Error e -> resultLine Fail name e; false
+    | Ok ir ->
+        let m = ir.Modules |> List.find (fun m -> not m.CompoundInits.IsEmpty)
+        let yb = m.Bindings |> List.find (fun b -> b.Name = "y")
+        let lookup = Blade.IR.IRIndex (Blade.IR.IRVar (yb.Id, yb.Type), [ Blade.IR.IRLit (Blade.IR.IRLitInt 0L) ], None)
+        let src : Blade.IR.IRIndexType =
+            { Id = 990001; Rank = 1; Extent = lookup; Symmetry = Blade.Types.SymNone; Tag = None
+              IxKind = Blade.Types.IxKPlain; Kind = Blade.Types.SDimension; Dependencies = [] }
+        let probe = { yb with Id = 990002; Name = "probe"; Type = Blade.Types.IRTUnit; Value = Blade.IR.IRUngroup (Blade.IR.IRLit (Blade.IR.IRLitInt 0L), src) }
+        let requiredIn (md: Blade.IR.IRModule) (foreign: Set<int>) =
+            Blade.Effects.Decisions.start ()
+            Blade.Optimize.planCompactionFusion [] foreign md
+            let ds = Blade.Effects.Decisions.drain ()
+            Blade.Optimize.CompactionTable.reset ()
+            ds |> List.exists (fun d -> d.Rule = "compaction-fusion" && d.Subject = "y" && evidenceHas "selection: positions required by" d)
+        let elidedWithout = not (requiredIn m Set.empty)
+        let localOk = requiredIn { m with Bindings = m.Bindings @ [ probe ] } Set.empty
+        let other =
+            { m with Name = "Other"; Bindings = [ probe ]; Functions = []; CompoundInits = Map.empty
+                     SparseInits = Map.empty; RandomInits = Map.empty; ProviderWrites = Map.empty; ProviderReads = Map.empty }
+        let foreignRefs = Blade.Optimize.moduleReferencedIds other
+        let foreignOk = foreignRefs.Contains yb.Id && requiredIn m foreignRefs
+        checkAll name "" "an ungroup source extent's `y(0)` demands the table, locally and from another module"
+            [ "without the probe the table is elided", elidedWithout
+              "local: the census sees the ungroup source extent", localOk
+              "foreign: moduleReferencedIds collects it and the census honours it", foreignOk ]
+// Review finding 7: the other scheduling intervals (hot-row, the B1 cell
+// epilogue, compact row classes) audit each intervening MODULE binding by its
+// whole payload too -- a writer hidden in a random fill's key or in another
+// compound's operand declines the schedule, naming the binding. Values: corpus
+// loops/537-539, symmetry/137; knob-off twins: the cli block.
+let private intervalB1RandomKeySrc =
+    "import rand as r\n"
+    + "type I = Idx<2>\n"
+    + "function bump(a: mut Array<Float64 like I>) -> Int64 = {\n    a(0) = 9.0\n    7\n}\n"
+    + "let x: Array<Float64 like I> = [1.0, 2.0]\n"
+    + "let mut p = method_for(x) <@> lambda(v) -> v + 1.0 |> compute\n"
+    + "let noise = r.uniform(bump(p), 1)\n"
+    + "let s = reduce(method_for(p) <@> lambda(v) -> v * v, (+), 0.0)\n"
+let private intervalB1CompoundSrc =
+    "type I = Idx<2>\n"
+    + "function bumped(a: mut Array<Float64 like I>) -> Array<Float64 like I> = {\n    a(0) = 9.0\n    let b = a + 0.0 |> compute\n    b\n}\n"
+    + "let x: Array<Float64 like I> = [1.0, 2.0]\n"
+    + "let other = mask(x, lambda(v) -> v > 0.5)\n"
+    + "let mut p = method_for(x) <@> lambda(v) -> v + 1.0 |> compute\n"
+    + "let zz = compound(bumped(p), other)\n"
+    + "let s = reduce(method_for(p) <@> lambda(v) -> v * v, (+), 0.0)\n"
+let private intervalHotRowRandomKeySrc =
+    "import rand as r\n"
+    + "type I = Idx<2>\ntype J = Idx<2>\n"
+    + "function bump(a: mut Array<Float64 like I, J>) -> Int64 = {\n    a(0, 0) = 9.0\n    7\n}\n"
+    + "let mut p = method_for(range<I, J>) <@> lambda(i, j) -> 1.0 |> compute\n"
+    + "let noise = r.uniform(bump(p), 1)\n"
+    + "let s = reduce(method_for(p) <@> lambda(row) -> prodsum(row, row), (+), 0.0)\n"
+let private intervalCompactRowRandomKeySrc =
+    "import rand as r\n"
+    + "type I = Idx<2>\n"
+    + "function bump(a: mut Array<Float64 like SymIdx<2, I>>) -> Int64 = {\n    a(0, 1) = 9.0\n    7\n}\n"
+    + "let x: Array<Float64 like I> = [1.0, 2.0]\n"
+    + "let mut p = method_for(x, x) <@> lambda(a, b) where comm(a, b) -> a + b |> compute\n"
+    + "let noise = r.uniform(bump(p), 1)\n"
+    + "let s = reduce(method_for(range<I>) <@> lambda(i) -> reduce(method_for(range<I>) <@> lambda(j) -> p(i, j), (+)), lambda(a, b) where omp -> a + b, 0.0)\n"
+let private intervalPayloadDecisionCases () =
+    [ decisionCase "decision_cell_epilogue_declined_random_key_writer" intervalB1RandomKeySrc "cell-epilogue"
+          (fun d -> d.Subject = "s" && declinedMentioning "`noise` reads `p` between the producer and the fold" d)
+          "B1 declined: a random fill's key between writes the producer"
+      decisionCase "decision_cell_epilogue_declined_compound_operand_writer" intervalB1CompoundSrc "cell-epilogue"
+          (fun d -> d.Subject = "s" && declinedMentioning "`zz` reads `p` between the producer and the fold" d)
+          "B1 declined: another compound's operand between writes the producer"
+      decisionCase "decision_hot_row_declined_random_key_writer" intervalHotRowRandomKeySrc "hot-row-fold"
+          (fun d -> d.Subject = "s" && declinedMentioning "`noise` reads `p` between the producer and the fold" d)
+          "hot-row declined: a random fill's key between writes the producer"
+      decisionCase "decision_compact_row_classes_declined_random_key_writer" intervalCompactRowRandomKeySrc "compact-row-classes"
+          (fun d -> d.Subject = "s" && declinedMentioning "`noise` reads `p` between the producer and the fold" d)
+          "compact row classes declined: a random fill's key between writes the producer" ]
 // ---------------------------------------------------------------------------
 // Compact row classes (Blade.Optimize.planCompactRowClasses; round 2 item B3,
 // bench pairkernel). Values are pinned by corpus symmetry/129-130; the
@@ -1491,7 +1898,7 @@ let private compactRowWritingSeedSrc =
 /// census); serial admission is compactionFusedLicensed above.
 let private compactionOmpFoldKeepsPool () =
     let name = "compaction_fusion_path_b_fold_keeps_materialized_route"
-    match cppOfSource name compactionOmpFoldSrc with
+    match withGate "BLADE_COMPACTION_FUSION" "b4" (fun () -> cppOfSource name compactionOmpFoldSrc) with
     | Error e -> resultLine Fail name e; false
     | Ok cpp ->
         if cpp.Contains "new double[" && not (cpp.Contains "blade_fold::sq<double, 8>(y.data")
@@ -3255,6 +3662,17 @@ let runOptimizeTests () =
           compactionGateOff ()
           compactionOmpFoldKeepsPool ()
           compactionAliasWriteNoInPass ()
+          // Compaction fusion v2 (round 3 item T4: the gather at the mask
+          // site, positions elided under the demand census).
+          compactionV2DefaultElides ()
+          compactionV2Licensed ()
+          compactionV2Repro ()
+          compactionV2KeyedKeepsPositions ()
+          compactionV2SelCapFallback ()
+          compactionV2RuntimeGuard ()
+          yield! compactionV2DecisionCases ()
+          compactionV2UngroupIndexExtentCensus ()
+          yield! intervalPayloadDecisionCases ()
           // Compact row classes (round 2 item B3).
           compactRowEmitted ()
           compactRowReproDeclined ()

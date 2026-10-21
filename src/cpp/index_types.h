@@ -357,9 +357,22 @@ template<>
 struct compound_index_t<1> : abstract_idx_t<1> {
 	using IDX = std::array<size_t, 1>;
 
+	/* A lookup through an ELIDED table (compaction fusion v2, T4b: the
+	 * compiler's demand census proved no consumer reads the positions, and
+	 * built the index cardinality-only). Unreachable by that certificate; if
+	 * it is ever reached it is an internal error, reported as such -- never a
+	 * read through a null pointer. */
+	[[noreturn]] static void positions_absent() {
+		throw std::logic_error("[BL9002] internal codegen invariant violated: a lookup through a compound index whose kept positions were elided (the positions demand census missed a consumer)");
+	}
+
 	/* The kept-position table: a vector-shaped view over an owned raw buffer
 	 * (new IDX[] leaves the cells indeterminate instead of zero-filling them,
-	 * which std::vector::resize would -- one whole write pass of the table). */
+	 * which std::vector::resize would -- one whole write pass of the table).
+	 * Every constructor but the positions-elided one leaves `p` non-null (the
+	 * counting forms allocate m + 1 cells, the adopting form refuses a null
+	 * buffer), so a null `p` means exactly "elided", and every accessor
+	 * refuses it. */
 	struct positions_t {
 		IDX* p = nullptr;
 		size_t n = 0;
@@ -371,17 +384,24 @@ struct compound_index_t<1> : abstract_idx_t<1> {
 		// Take ownership of a caller-built `new IDX[]` buffer holding `count`
 		// table cells (plus whatever slack the caller allocated).
 		void adopt(IDX* buf, size_t count) { delete[] p; p = buf; n = count; }
-		IDX& operator[](size_t i) { return p[i]; }
-		const IDX& operator[](size_t i) const { return p[i]; }
+		IDX& operator[](size_t i) { if (!p) positions_absent(); return p[i]; }
+		const IDX& operator[](size_t i) const { if (!p) positions_absent(); return p[i]; }
 		size_t size() const { return n; }
-		IDX* data() { return p; }
-		const IDX* data() const { return p; }
-		const IDX* begin() const { return p; }
-		const IDX* end() const { return p + n; }
+		IDX* data() { if (!p) positions_absent(); return p; }
+		const IDX* data() const { if (!p) positions_absent(); return p; }
+		const IDX* begin() const { if (!p) positions_absent(); return p; }
+		const IDX* end() const { if (!p) positions_absent(); return p + n; }
 	};
 
 	IDX extents;
 	positions_t rank_to_tuple;
+	/* True only for the positions-elided form: cardinality and extent are
+	 * intact (rank_to_tuple.n == cardinality == m), the table is absent. */
+	bool positions_elided_ = false;
+
+	/* The tag selecting the positions-elided constructor. */
+	struct positions_elided_t {};
+	static constexpr positions_elided_t positions_elided{};
 
 	/* The compaction constructor: `keep` is the flat bool array over [0, n). */
 	compound_index_t(std::string name_in, size_t n, const bool* keep)
@@ -407,8 +427,26 @@ struct compound_index_t<1> : abstract_idx_t<1> {
 	 * and freed exactly as that one is. */
 	compound_index_t(std::string name_in, size_t n, size_t m, IDX* pos)
 		: abstract_idx_t<1>(std::move(name_in), n), extents{ n } {
+		// A null table is the elided form's, which has its own constructor:
+		// refusing it here keeps "p == nullptr" meaning exactly "elided".
+		if (!pos) throw std::logic_error("[BL9002] internal codegen invariant violated: the adopting compound-index constructor was handed no position table");
 		rank_to_tuple.adopt(pos, m);
 		this->cardinality = m;
+	}
+
+	/* The POSITIONS-ELIDED constructor (compaction fusion v2, T4b): the
+	 * caller counted m and gathered the values; no consumer reads the kept
+	 * positions (the compiler's demand census certified it), so no table is
+	 * built. Dense extent n and cardinality m are those of every other form
+	 * (rank_to_tuple.n == m: the count is kept, never a 0 meaning "absent");
+	 * `unhash`, `linearize`, `present`, `prefix_range` and every table
+	 * accessor refuse the absent table (positions_absent, BL9002). */
+	compound_index_t(std::string name_in, size_t n, size_t m, positions_elided_t)
+		: abstract_idx_t<1>(std::move(name_in), n), extents{ n } {
+		rank_to_tuple.p = nullptr;
+		rank_to_tuple.n = m;
+		this->cardinality = m;
+		positions_elided_ = true;
 	}
 
 	/* The legacy constructor: the same table from a bit vector. */
@@ -427,10 +465,11 @@ struct compound_index_t<1> : abstract_idx_t<1> {
 	// The table is built at construction; nothing to (re)build.
 	void hash() override {}
 
-	IDX unhash(size_t index) override { return rank_to_tuple[index]; }
+	IDX unhash(size_t index) override { if (positions_elided_) positions_absent(); return rank_to_tuple[index]; }
 
 	// Binary search for a position: the first slot >= key (== size when none).
 	size_t lower_bound(size_t key) const {
+		if (positions_elided_) positions_absent();
 		size_t a = 0, b = rank_to_tuple.n;
 		while (a < b) {
 			size_t mid = a + (b - a) / 2;
@@ -457,6 +496,7 @@ struct compound_index_t<1> : abstract_idx_t<1> {
 	// The half-open rank range sharing a leading prefix: the whole table for
 	// an empty prefix, the single kept slot (or an empty range) for a full one.
 	std::pair<size_t, size_t> prefix_range(const IDX& prefix, size_t plen) const {
+		if (positions_elided_) positions_absent();
 		if (plen == 0) return { 0, rank_to_tuple.n };
 		size_t r = lower_bound(prefix[0]);
 		if (r < rank_to_tuple.n && rank_to_tuple.p[r][0] == prefix[0]) return { r, r + 1 };

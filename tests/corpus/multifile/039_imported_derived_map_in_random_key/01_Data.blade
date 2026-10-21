@@ -1,0 +1,13 @@
+// TEST: An imported map of a compound read inside a random fill's key keeps the kept positions
+// MODULE: Data
+// `z` is an elementwise map of `y` (it shares y's index); the importing module
+// reads `Data.z(2)` inside `r.uniform`'s key, a side-table operand. The
+// foreign demand reaches the derived map, so y's table is built (key 8, the
+// kept cell at source position 2, doubled).
+module Data
+
+let x = [12345, -3, 4]
+let keep = mask(x, lambda(v) -> v > 0)
+let y = compound(x, keep)
+let z = y * 2 |> compute
+let zsum = reduce(z, (+))

@@ -1,0 +1,23 @@
+// TEST: Compaction fusion v2: a writing producer keeps every as-written value
+// The PRODUCER of x writes (its kernel counts its calls in a captured `let
+// mut`). Under the opt-in mask-site gather (BLADE_COMPACTION_FUSION=gather)
+// T4a's admission (`selectionAdmits`, `blade plan`) asks the shared write
+// analysis about all five parties of the motion, and this writing party
+// declines it to B4's one fill+gather pass at the compound -- not further
+// back; the count in the mask pass, the fold over y's buffer and the elided
+// positions still apply in every mode. Every value is the as-written
+// program's: the kernel runs once per cell.
+type Ix = Idx<13>
+let mut calls = 0
+let x = method_for(range<Ix>) <@> lambda(i) -> {
+    calls = calls + 1
+    Float64(Int64(i) % 5)
+} |> compute
+let keep = mask(x, lambda(v) -> v > 1.5)
+let y = compound(x, keep)
+let s = reduce(y * y, (+))
+// EXPECT: s = 62.0
+let n = extents(y)
+// EXPECT: n = 7
+let seen = calls
+// EXPECT: seen = 13

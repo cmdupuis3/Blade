@@ -1,0 +1,32 @@
+// TEST: Compaction fusion v2: every consumer kind that reads the kept positions keeps them
+// The positions demand census (T4b) is fail-safe: the table is elided only
+// when every use is certified to read the compact buffer or the cardinality.
+// Each compound below has ONE use that reads source positions or that the
+// census does not certify -- a keyed read through a named map (which shares
+// the index), an alias, a capture inside a kernel -- so its table is built
+// (`blade plan`: `selection: positions required by ...`) and every value is
+// the as-written program's (529 adds the `<|:>` read and a call argument;
+// 530-531 and multifile/038-039 the hidden side-table payloads). x(i) =
+// (3 i) % 13: kept (> 5.5) at source positions 2, 3, 4, 7, 8, 11, 12 with
+// values 6, 9, 12, 8, 11, 7, 10.
+type Ix = Idx<13>
+let x = method_for(range<Ix>) <@> lambda(i) -> Float64((Int64(i) * 3) % 13) |> compute
+// a keyed read through a named map
+let k1 = mask(x, lambda(v) -> v > 5.5)
+let y1 = compound(x, k1)
+let z1 = y1 * 2.0 |> compute
+let z1_7 = z1(7)
+// EXPECT: z1_7 = 16.0
+// an alias
+let k4 = mask(x, lambda(v) -> v > 5.5)
+let y4 = compound(x, k4)
+let w4 = y4
+let w4_11 = w4(11)
+// EXPECT: w4_11 = 7.0
+let y4_sum = reduce(y4, (+))
+// EXPECT: y4_sum = 63.0
+// a capture inside a kernel (even one that only asks for the cardinality)
+let k5 = mask(x, lambda(v) -> v > 5.5)
+let y5 = compound(x, k5)
+let cap5 = reduce(method_for(range<Ix>) <@> lambda(i) -> Float64(extents(y5)) + Float64(Int64(i)), (+))
+// EXPECT: cap5 = 169.0

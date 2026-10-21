@@ -1,6 +1,6 @@
 // TEST: Compaction fusion keeps the abort order: an intervening failure comes before the empty fold (aborts)
-// The fused compaction runs at `y`; under BLADE_FP_REPRO=1 its pass also
-// feeds the fold's chain. The fold's own empty check (BL8003) stays at the
+// The fused compaction runs in `keep`'s mask pass (v2); under BLADE_FP_REPRO=1
+// it also feeds the fold's chain. The fold's own empty check (BL8003) stays at the
 // fold's declaration, so a failure written BETWEEN the compaction and the
 // fold -- here an integer division by the empty compound's extent, BL8013 --
 // is the one every lane reports, as before (line 10 once the harness drops the TEST line).

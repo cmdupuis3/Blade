@@ -1,0 +1,19 @@
+// TEST: Cell epilogue: a writer hidden in a compound's operand between the producer and the fold
+// `zz = compound(bumped(p), other)` -- over a pre-existing all-true mask of
+// x, so no ordinary binding between reads p -- runs `bumped`, which writes
+// p(0), at its own site: a compound's operands live in a side table and its
+// binding's value is a placeholder. The B1 epilogue audits the binding's
+// whole payload and declines (`zz` reads `p`): s = 81 + 9 = 90, as written.
+type I = Idx<2>
+function bumped(a: mut Array<Float64 like I>) -> Array<Float64 like I> = {
+    a(0) = 9.0
+    let b = a + 0.0 |> compute
+    b
+}
+let x: Array<Float64 like I> = [1.0, 2.0]
+let other = mask(x, lambda(v) -> v > 0.5)
+let mut p = method_for(x) <@> lambda(v) -> v + 1.0 |> compute
+let zz = compound(bumped(p), other)
+// EXPECT: zz = [9.0, 3.0]
+let s = reduce(method_for(p) <@> lambda(v) -> v * v, (+), 0.0)
+// EXPECT: s = 90.0

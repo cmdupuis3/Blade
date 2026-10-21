@@ -1,0 +1,13 @@
+// TEST: An imported mutating helper in a random key between the mask and the compound
+// MODULE: Main
+module Main
+import Helpers
+import rand as r
+
+let mut x: Array<Float64 like Helpers.Ix> = [1.0, 2.0]
+let keep = mask(x, lambda(v) -> v > 0.0)
+let noise = r.uniform(Helpers.bump(x), 1)
+let y = compound(x, keep)
+// EXPECT: y = [9.0, 2.0]
+let s = reduce(y, (+))
+// EXPECT: s = 11.0

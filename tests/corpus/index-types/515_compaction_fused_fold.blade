@@ -1,10 +1,10 @@
 // TEST: Compaction fusion: one compaction pass and the y * y fold over y's buffer
-// The bench maskagg chain (`blade plan`: `[compaction-fusion v1] y: applied`,
-// `[compaction-fusion v1] checksum: applied`): the count of `keep` is taken in
-// its own mask pass, the kept-position fill and the value gather are ONE
-// branchless pass, and `reduce(y * y, (+))` folds y's compact buffer with no
-// square pool -- the K-lane self-dot when licensed, the unseeded serial chain
-// (fed inside the compaction pass, block by block) under BLADE_FP_REPRO=1.
+// The bench maskagg chain (`blade plan`: `[compaction-fusion v2] y: applied`,
+// `[compaction-fusion v2] checksum: applied`): the count of `keep`, the value
+// gather and (the keyed reads below demand it) the kept-position fill all run
+// in `keep`'s own mask pass, and `reduce(y * y, (+))` folds y's compact buffer
+// with no square pool -- the K-lane self-dot when licensed, the unseeded serial
+// chain (fed inside that pass, block by block) under BLADE_FP_REPRO=1.
 // n = 1003 spans four 256-cell blocks. Integer-valued data: every sum exact.
 type Ix = Idx<1003>
 let x = method_for(range<Ix>) <@> lambda(i) -> Float64((Int64(i) * 37) % 11) - 4.0 |> compute

@@ -2459,15 +2459,20 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
          // planned over this compound resets its handshake first, so a fold
          // reads an accumulator only when THIS emission fed it.
          let folds = Blade.Optimize.CompactionTable.foldsOf binding.Id
-         for f in folds do f.EmittedCpp.Value <- None
-         let fusedCount =
+         let planHere =
              match Blade.Optimize.CompactionTable.tryCompound binding.Id, maskExpr with
-             | Some p, IRVar (mId, _) when mId = p.MaskId && rank1 && trailingDimCount = 0 && maskPre.IsEmpty ->
-                 p.CountCpp.Value
+             | Some p, IRVar (mId, _) when mId = p.MaskId && rank1 && trailingDimCount = 0 && maskPre.IsEmpty -> Some p
              | _ -> None
+         // T4a: the mask's pass already gathered (and fed the folds it
+         // published); otherwise the folds' handshakes start clean here.
+         let gathered = planHere |> Option.bind (fun p -> p.GatherCpp.Value)
+         if gathered.IsNone then
+             for f in folds do f.EmittedCpp.Value <- None
+         let fusedCount = planHere |> Option.bind (fun p -> p.CountCpp.Value)
          match fusedCount with
          | Some cnt ->
-             let lines = genFusedCompaction ctx ind name elemCpp denseName maskName cnt folds
+             let positions = planHere |> Option.forall (fun p -> p.PositionsNeeded)
+             let lines = genFusedCompaction ctx ind name elemCpp denseName maskName cnt folds positions gathered
              registerShapedAlloc name "deallocate_compound" name
              (densePre @ lines, addVarName binding.Id name ctx)
          | None ->
@@ -2522,8 +2527,62 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
 /// stored product is); the fold's empty check stays at its own declaration.
 /// The licensed lane form is not fed here (the fold reads `y.data` at its
 /// site); its streaming twin is the cell-epilogue lane state's follow-up.
-and genFusedCompaction (ctx: CodeGenContext) (ind: string) (name: string) (elemCpp: string) (denseName: string) (maskName: string) (cnt: string) (folds: Blade.Optimize.CompactionFoldPlan list) : string list =
+///
+/// Round 3 (compaction fusion v2):
+///   * `positions = false` (T4b, the demand census certified no reader): no
+///     position buffer and no `pos[q] = i` store; the index is built
+///     cardinality-only (dense extent n, cardinality m; every lookup through
+///     the absent table is BL9002).
+///   * `gathered = Some g` (T4a): the mask's pass already gathered into g's
+///     n + 1 buffers (and fed the in-pass chains); this site only adopts
+///     them -- unless g carries a run-time guard, when it first runs the B4
+///     pass itself while the guard is false (n over the selectivity cap),
+///     into the same buffer variables and the same chain accumulators.
+and genFusedCompaction (ctx: CodeGenContext) (ind: string) (name: string) (elemCpp: string) (denseName: string) (maskName: string) (cnt: string) (folds: Blade.Optimize.CompactionFoldPlan list) (positions: bool) (gathered: Blade.Optimize.CompactionGatherCpp option) : string list =
     let idxName = $"{name}_idx"
+    let i1 = ind + "    "
+    // The B4 pass into `compact` / `pos`, feeding `feeds` (accumulator, wrapper).
+    let b4Pass (ind: string) (compact: string) (pos: string option) (feeds: (string * string) list) =
+        let cell (body: string) =
+            [ $"{body}const {elemCpp} {name}_v = {name}_densepool[{name}_i];"
+              $"{body}{compact}[{name}_q] = {name}_v;" ]
+            @ (pos |> Option.map (fun p -> [ $"{body}{p}[{name}_q][0] = {name}_i;" ]) |> Option.defaultValue [])
+            @ [ $"{body}{name}_q += (size_t){idxName}_pool[{name}_i];" ]
+        [ $"{ind}{{"
+          $"{ind}    size_t {name}_q = 0;" ]
+        @ compactionPassLoop (ind + "    ") name $"{name}_i" $"{idxName}_grid" elemCpp compact $"{name}_q" feeds cell
+        @ [ $"{ind}}}" ]
+    let adopt (compact: string) (pos: string option) (how: string) =
+        [ (match pos with
+           | Some p -> $"{ind}compound_index_t<1>* {idxName} = new compound_index_t<1>(\"{idxName}\", {idxName}_grid, {cnt}, {p}); // rank-1 compaction, fused: {how}"
+           | None -> $"{ind}compound_index_t<1>* {idxName} = new compound_index_t<1>(\"{idxName}\", {idxName}_grid, {cnt}, compound_index_t<1>::positions_elided); // rank-1 compaction, fused, positions elided (no consumer reads them): {how}")
+          $$"""{{ind}}nested_array_utilities::Compound<{{elemCpp}}, 1> {{name}} { {{compact}}, {{idxName}}, {{name}}_trail };""" ]
+    let posNote = if positions then "keyed reads by binary search over the kept positions" else "positions elided: the demand census found no consumer that reads them"
+    match gathered with
+    | Some g ->
+        let fallback =
+            match g.Guard with
+            | None -> []
+            | Some guard ->
+                [ $"{ind}if (!{guard}) {{"
+                  $"{i1}// n is over the selectivity cap (BLADE_TILE_TUNE sel_cap): the two-pass form, m + 1 cells per buffer"
+                  $"{i1}bool* {idxName}_pool = nested_array_utilities::pool_base({maskName}.data);"
+                  $"{i1}{elemCpp}* {name}_densepool = nested_array_utilities::pool_base({denseName}.data);" ]
+                @ (g.Pos |> Option.map (fun p -> [ $"{i1}{p} = new compound_index_t<1>::IDX[{cnt} + 1];" ]) |> Option.defaultValue [])
+                @ [ $"{i1}{g.Compact} = new {elemCpp}[{cnt} + 1];" ]
+                @ b4Pass i1 g.Compact g.Pos g.Feeds
+                @ [ $"{ind}}}" ]
+        let guardNote = match g.Guard with Some _ -> " while n is within the selectivity cap (else one fill+gather pass at the compound)" | None -> ""
+        let feedNote = if g.Feeds.IsEmpty then "" else $"; the serial chain of {g.Feeds.Length} fold(s) over `{name} * {name}` fed per 256-cell block in that pass"
+        recordCodegenDecision "compound" name Blade.Effects.Applied
+            [ $"representation: rank-1 compaction (counted and gathered in the mask pass -- compaction fusion v2; no hash table; {posNote})"
+              $"rank-1 mask over one dense axis; no trailing dims; `{maskName}`'s pass sweeps the source once (per 256-cell block: the predicate, then the gather){guardNote}{feedNote}" ]
+        [ $"{ind}// compaction fusion v2 (Blade.Optimize.planCompactionFusion, T4a): `{maskName}`'s own pass counted AND gathered `{name}` (n + 1 private cells per buffer, m + 1 touched); this site adopts them"
+          $"{ind}size_t {idxName}_grid = {maskName}.extents[0];"
+          $"{ind}size_t {name}_trail = 1;" ]
+        @ fallback
+        @ adopt g.Compact g.Pos "the buffers the mask pass filled"
+    | None ->
     let feeds =
         folds |> List.choose (fun f ->
             if not f.InPass then None
@@ -2536,64 +2595,28 @@ and genFusedCompaction (ctx: CodeGenContext) (ind: string) (name: string) (elemC
             let (wrapperCode, wname) = genCallableWrapper ctx.VarNames $"{name}__fold{k}" cl
             (f, $"{name}__fold{k}", wrapperCode, wname))
     if not feeds.IsEmpty then (foldLanesUsedCell ()).Value <- true
-    let i1 = ind + "    "
-    let i2 = i1 + "    "
-    let i3 = i2 + "    "
-    let gather (body: string) =
-        [ $"{body}const {elemCpp} {name}_v = {name}_densepool[{name}_i];"
-          $"{body}{name}_compact[{name}_q] = {name}_v;"
-          $"{body}{name}_pos[{name}_q][0] = {name}_i;"
-          $"{body}{name}_q += (size_t){idxName}_pool[{name}_i];" ]
-    let pass =
-        if feeds.IsEmpty then
-            [ $"{i1}for (size_t {name}_i = 0; {name}_i < {idxName}_grid; {name}_i++) {{" ]
-            @ gather i2
-            @ [ $"{i1}}}" ]
-        else
-            let peel =
-                feeds |> List.map (fun (_, acc, _, _) ->
-                    $"{i3}    {{ {elemCpp} __t = {name}_compact[0] * {name}_compact[0]; BLADE_FOLD_ROUND(__t); {acc} = __t; }}")
-            let step =
-                feeds |> List.map (fun (_, acc, _, wname) ->
-                    $"{i3}    {{ {elemCpp} __t = {name}_compact[{name}_f] * {name}_compact[{name}_f]; BLADE_FOLD_ROUND(__t); {acc} = {wname}({acc}, __t); }}")
-            [ $"{i1}size_t {name}_f = 0;"
-              $"{i1}for (size_t {name}_b = 0; {name}_b < {idxName}_grid; {name}_b += 256) {{"
-              $"{i2}const size_t {name}_e = ({idxName}_grid - {name}_b < 256) ? {idxName}_grid : {name}_b + 256;"
-              $"{i2}for (size_t {name}_i = {name}_b; {name}_i < {name}_e; {name}_i++) {{" ]
-            @ gather i3
-            @ [ $"{i2}}}"
-                $"{i2}// the chain over the cells this block completed (index < q; the slack cell is never read)"
-                $"{i2}if ({name}_f < {name}_q) {{"
-                $"{i3}if ({name}_f == 0) {{" ]
-            @ peel
-            @ [ $"{i3}    {name}_f = 1;"
-                $"{i3}}}"
-                $"{i3}for (; {name}_f < {name}_q; {name}_f++) {{" ]
-            @ step
-            @ [ $"{i3}}}"
-                $"{i2}}}"
-                $"{i1}}}" ]
     for (f, acc, _, _) in feeds do f.EmittedCpp.Value <- Some acc
     let feedNote =
         if feeds.IsEmpty then "" else $"; the serial chain of {feeds.Length} fold(s) over `{name} * {name}` fed per 256-cell block"
+    let pos = if positions then Some $"{name}_pos" else None
     recordCodegenDecision "compound" name Blade.Effects.Applied
-        [ "representation: rank-1 compaction (kept positions counted in the mask pass and filled in the gather pass -- compaction fusion; no hash table; keyed reads by binary search over the kept positions)"
+        [ (if positions then "representation: rank-1 compaction (kept positions counted in the mask pass and filled in the gather pass -- compaction fusion; no hash table; keyed reads by binary search over the kept positions)"
+           else $"representation: rank-1 compaction (counted in the mask pass, gathered in one pass -- compaction fusion; no hash table; {posNote})")
           $"rank-1 mask over one dense axis; no trailing dims; one fill+gather pass{feedNote}" ]
-    [ $"{ind}// compaction fusion (Blade.Optimize.planCompactionFusion): `{maskName}` was counted in its own mask pass; ONE branchless pass gathers the values and fills the kept positions (m + 1 cells each, the slack never exposed)"
+    let what =
+        if positions then "gathers the values and fills the kept positions (m + 1 cells each, the slack never exposed)"
+        else "gathers the values (m + 1 cells, the slack never exposed; positions elided)"
+    [ $"{ind}// compaction fusion (Blade.Optimize.planCompactionFusion): `{maskName}` was counted in its own mask pass; ONE branchless pass {what}"
       $"{ind}size_t {idxName}_grid = {maskName}.extents[0];"
       $"{ind}bool* {idxName}_pool = nested_array_utilities::pool_base({maskName}.data);"
       $"{ind}size_t {name}_trail = 1;"
-      $"{ind}{elemCpp}* {name}_densepool = nested_array_utilities::pool_base({denseName}.data);"
-      $"{ind}compound_index_t<1>::IDX* {name}_pos = new compound_index_t<1>::IDX[{cnt} + 1];"
-      $"{ind}{elemCpp}* {name}_compact = new {elemCpp}[{cnt} + 1];" ]
+      $"{ind}{elemCpp}* {name}_densepool = nested_array_utilities::pool_base({denseName}.data);" ]
+    @ (pos |> Option.map (fun p -> [ $"{ind}compound_index_t<1>::IDX* {p} = new compound_index_t<1>::IDX[{cnt} + 1];" ]) |> Option.defaultValue [])
+    @ [ $"{ind}{elemCpp}* {name}_compact = new {elemCpp}[{cnt} + 1];" ]
     @ (feeds |> List.collect (fun (_, acc, wrapperCode, _) ->
         (wrapperCode |> List.map (fun s -> ind + s)) @ [ $"{ind}{elemCpp} {acc} = {elemCpp}(0);" ]))
-    @ [ $"{ind}{{"
-        $"{i1}size_t {name}_q = 0;" ]
-    @ pass
-    @ [ $"{ind}}}"
-        $"{ind}compound_index_t<1>* {idxName} = new compound_index_t<1>(\"{idxName}\", {idxName}_grid, {cnt}, {name}_pos); // rank-1 compaction, fused: the table this pass filled"
-        $$"""{{ind}}nested_array_utilities::Compound<{{elemCpp}}, 1> {{name}} { {{name}}_compact, {{idxName}}, {{name}}_trail };""" ]
+    @ b4Pass ind $"{name}_compact" pos (feeds |> List.map (fun (_, acc, _, wn) -> (acc, wn)))
+    @ adopt $"{name}_compact" pos "the table this pass filled"
 
 and genSparseInitBinding (ctx: CodeGenContext) (binding: IRBinding) : string list * CodeGenContext =
     let ind = indentStr ctx
@@ -2771,15 +2794,25 @@ and genMaskBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
     // Compaction fusion (Blade.Optimize.planCompactionFusion): a planned mask
     // also COUNTS its kept cells in this pass, and publishes the count's name
     // for the compound that consumes it (which then skips its count pass).
+    // T4a: a plan whose gather runs at the mask site also gathers the
+    // compound in this pass (and feeds its in-pass fold chains); every
+    // handshake is reset first, so a fold reads an accumulator only when THIS
+    // emission fed it.
     let plan = Blade.Optimize.CompactionTable.tryMask binding.Id
-    plan |> Option.iter (fun p -> p.CountCpp.Value <- None)
+    plan |> Option.iter (fun p ->
+        p.CountCpp.Value <- None
+        p.GatherCpp.Value <- None
+        for f in Blade.Optimize.CompactionTable.foldsOf p.CompoundId do f.EmittedCpp.Value <- None)
     let countVar = plan |> Option.map (fun _ -> $"{name}__count")
+    let gatherPlan = plan |> Option.filter (fun p -> p.GatherAtMask)
     let matStmts =
-        match materializeMaskFormCounted emptySubst ctx.VarNames name elemStr arrExpr predExpr countVar with
-        | Some (s, allocs, counted) ->
+        match materializeMaskFormCounted emptySubst ctx.VarNames name elemStr arrExpr predExpr countVar gatherPlan with
+        | Some (s, allocs, counted, gathered) ->
             registerMaterializedAllocs allocs
             (match plan, countVar with
-             | Some p, Some c when counted -> p.CountCpp.Value <- Some c
+             | Some p, Some c when counted ->
+                 p.CountCpp.Value <- Some c
+                 p.GatherCpp.Value <- gathered
              | _ -> ())
             s
         | None -> []  // Unreachable: helper supports IRMask

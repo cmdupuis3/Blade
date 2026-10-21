@@ -1,0 +1,33 @@
+// TEST: Compaction fusion v2: the in-pass chain over block edges, positions elided
+// Under BLADE_FP_REPRO=1 the unseeded serial chain of `reduce(y * y, (+))` is
+// fed inside the compaction pass (at the compound; in `keep`'s own mask pass
+// under the opt-in `gather`), after every 256-cell block, from completed cells
+// only (index < q; the slack cell the branchless store lands on is never
+// read). n = 1003 spans four blocks and a tail: kept cells only in the last
+// block (the chain starts there), exactly the first block (then 747 stores on
+// the slack cell), a pair straddling the first block edge, and every cell (the
+// slack never written). No consumer reads the kept positions, so none are
+// built. The licensed K-lane fold reads the same buffer. Values are the
+// as-written program's; integer-valued data, every sum exact.
+type Ix = Idx<1003>
+let r = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i)) |> compute
+let k_late = mask(r, lambda(v) -> v > 999.5)
+let late = compound(r, k_late)
+// EXPECT: late = [1000.0, 1001.0, 1002.0]
+let late_sq = reduce(late * late, (+))
+// EXPECT: late_sq = 3006005.0
+let k_first = mask(r, lambda(v) -> v < 255.5)
+let first = compound(r, k_first)
+let first_n = extents(first)
+// EXPECT: first_n = 256
+let first_sq = reduce(first * first, (+))
+// EXPECT: first_sq = 5559680.0
+let k_edge = mask(r, lambda(v) -> v > 254.5 && v < 256.5)
+let edge = compound(r, k_edge)
+// EXPECT: edge = [255.0, 256.0]
+let edge_sq = reduce(edge * edge, (+)) + Float64(extents(edge))
+// EXPECT: edge_sq = 130563.0
+let k_all = mask(r, lambda(v) -> v > -1.0)
+let all = compound(r, k_all)
+let all_sq = reduce(all * all, (+))
+// EXPECT: all_sq = 335839505.0

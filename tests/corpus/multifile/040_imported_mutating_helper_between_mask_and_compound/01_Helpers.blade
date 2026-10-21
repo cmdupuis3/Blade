@@ -1,0 +1,13 @@
+// TEST: An imported mutating helper in a random key between the mask and the compound
+// MODULE: Helpers
+// `bump` (another module) writes its `mut` argument. Main calls it inside a
+// random fill's key between `keep` and `y`; the payload audit resolves the
+// imported callee through the whole program's callables, so the opt-in
+// mask-site gather declines and y gathers x after the write: y = [9.0, 2.0].
+module Helpers
+
+type Ix = Idx<2>
+function bump(a: mut Array<Float64 like Ix>) -> Int64 = {
+    a(0) = 9.0
+    7
+}

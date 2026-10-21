@@ -2162,19 +2162,11 @@ let syrkTileKc (k: int64) : int64 =
 ///            (`cellEpiBlock`: default 256, a multiple of the lane block)
 ///   epi_blk_r  the cell-chain mini-block (`cellEpiBlockR`: default 0 = one
 ///            fused loop)
-let tileTune (key: string) (dflt: int64) : int64 =
-    match System.Environment.GetEnvironmentVariable "BLADE_TILE_TUNE" with
-    | null -> dflt
-    | v ->
-        v.Split([| ','; ' '; ';' |], System.StringSplitOptions.RemoveEmptyEntries)
-        |> Array.tryPick (fun kv ->
-            match kv.Split('=') with
-            | [| k; x |] when k.Trim().ToLowerInvariant() = key ->
-                match System.Int64.TryParse(x.Trim()) with
-                | true, n -> Some n
-                | _ -> None
-            | _ -> None)
-        |> Option.defaultValue dflt
+///   sel_cap  the compaction's single-pass selectivity cap in KiB (read by
+///            the optimizer, Optimize.compactionSelCapBytes: default 262144
+///            = 256 MiB of n + 1 private cells across the compound's buffers)
+/// The parser itself is Blade.Toolchain.tileTune (the optimizer reads it too).
+let tileTune (key: string) (dflt: int64) : int64 = Blade.Toolchain.tileTune key dflt
 
 /// dsyrk_tri's row panels per group (BLADE_TILE_TUNE syrk_g), clamped to the
 /// drivers' TRI_G_MAX = 8.
@@ -2559,3 +2551,63 @@ let internal subviewAxesOk (arrTy: IRArrayType) (consumed: int) : bool =
                 (ix.IxKind = IxKPlain || ix.IxKind = IxKGroupOuter)
                 && ix.Symmetry = SymNone && ix.Rank = 1
             else plainAxis ix || compactGroup ix)
+
+/// THE COMPACTION PASS LOOP (Blade.Optimize.planCompactionFusion): the loop
+/// over the source axis that both compaction-fusion passes run -- B4's
+/// fill+gather pass at the compound and T4a's predicate+gather pass at the
+/// mask -- in 256-cell BLOCKS: `block body lo hi` gives the lines of one
+/// block [lo, hi) at indentation `body` (the block advances `cursor`, the
+/// count of kept cells written so far).
+///
+/// With `feeds` (accumulator, kernel wrapper) -- the serial chains of the
+/// planned `reduce(y * y, (+))` folds (B4c) -- after each block every chain
+/// advances over the compact cells that block COMPLETED (index < cursor; the
+/// slack cell the branchless store lands on is never read): the first kept
+/// square peeled as the chain's start, then `acc = k(acc, v * v)` in kept
+/// order, each product rounded before its add (BLADE_FOLD_ROUND), as a
+/// stored product is. The same terms in the same order wherever the pass
+/// runs, and whatever a block does inside.
+///
+/// `pre` names the loop's own scratch (`<pre>_b`, `<pre>_e`, `<pre>_f`).
+let compactionBlockLoop (ind: string) (pre: string) (bound: string) (elemCpp: string) (compact: string) (cursor: string) (feeds: (string * string) list) (block: string -> string -> string -> string list) : string list =
+    let i1 = ind + "    "
+    let i2 = i1 + "    "
+    let peel =
+        feeds |> List.map (fun (acc, _) ->
+            $"{i2}    {{ {elemCpp} __t = {compact}[0] * {compact}[0]; BLADE_FOLD_ROUND(__t); {acc} = __t; }}")
+    let step =
+        feeds |> List.map (fun (acc, wname) ->
+            $"{i2}    {{ {elemCpp} __t = {compact}[{pre}_f] * {compact}[{pre}_f]; BLADE_FOLD_ROUND(__t); {acc} = {wname}({acc}, __t); }}")
+    let chain =
+        if feeds.IsEmpty then []
+        else
+            [ $"{i1}// the chain over the cells this block completed (index < q; the slack cell is never read)"
+              $"{i1}if ({pre}_f < {cursor}) {{"
+              $"{i2}if ({pre}_f == 0) {{" ]
+            @ peel
+            @ [ $"{i2}    {pre}_f = 1;"
+                $"{i2}}}"
+                $"{i2}for (; {pre}_f < {cursor}; {pre}_f++) {{" ]
+            @ step
+            @ [ $"{i2}}}"
+                $"{i1}}}" ]
+    (if feeds.IsEmpty then [] else [ $"{ind}size_t {pre}_f = 0;" ])
+    @ [ $"{ind}for (size_t {pre}_b = 0; {pre}_b < {bound}; {pre}_b += 256) {{"
+        $"{i1}const size_t {pre}_e = ({bound} - {pre}_b < 256) ? {bound} : {pre}_b + 256;" ]
+    @ block i1 $"{pre}_b" $"{pre}_e"
+    @ chain
+    @ [ $"{ind}}}" ]
+
+/// The per-CELL form of the pass (B4's compound-site fill+gather pass): one
+/// unblocked loop when no chain is fed, else the block loop above with one
+/// inner cell loop per block. `cell body` gives one source cell's lines.
+let compactionPassLoop (ind: string) (pre: string) (iv: string) (bound: string) (elemCpp: string) (compact: string) (cursor: string) (feeds: (string * string) list) (cell: string -> string list) : string list =
+    if feeds.IsEmpty then
+        [ $"{ind}for (size_t {iv} = 0; {iv} < {bound}; {iv}++) {{" ]
+        @ cell (ind + "    ")
+        @ [ $"{ind}}}" ]
+    else
+        compactionBlockLoop ind pre bound elemCpp compact cursor feeds (fun body lo hi ->
+            [ $"{body}for (size_t {iv} = {lo}; {iv} < {hi}; {iv}++) {{" ]
+            @ cell (body + "    ")
+            @ [ $"{body}}}" ])

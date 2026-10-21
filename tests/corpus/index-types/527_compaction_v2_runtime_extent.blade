@@ -1,0 +1,25 @@
+// TEST: Compaction fusion v2: a run-time source extent
+// The source axis's extent is known only at run time (an anonymous `0..k`
+// range whose bound is a computed value). Keyed reads keep the positions, a
+// fold-only compound elides them (T4b). Under the opt-in mask-site gather
+// (BLADE_COMPACTION_FUSION=gather) the selectivity cap (BLADE_TILE_TUNE
+// sel_cap) is a RUN-TIME test: while n + 1 private cells fit it, `keep`'s own
+// pass gathers (T4a); otherwise that pass only counts and the compound runs
+// B4's one fill+gather pass itself into the same buffers and chain (the cli
+// block runs both branches). Values are the as-written program's;
+// integer-valued data, every sum exact.
+let k = reduce([3, 4, 5], (+))
+// EXPECT: k = 12
+let xs = 0..k |> compute
+let keep = mask(xs, lambda(v) -> v > 4)
+let ys = compound(xs, keep)
+// EXPECT: ys = [5, 6, 7, 8, 9, 10, 11]
+let ys_sum = reduce(ys, (+))
+// EXPECT: ys_sum = 56
+let ys_k9 = ys(9)
+// EXPECT: ys_k9 = 9
+let fx = Float64(xs) |> compute
+let kf = mask(fx, lambda(v) -> v > 7.5)
+let yf = compound(fx, kf)
+let yf_sq = reduce(yf * yf, (+)) + Float64(extents(yf))
+// EXPECT: yf_sq = 370.0

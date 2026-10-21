@@ -3080,6 +3080,16 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     // optimizer resolves a callee defined in ANOTHER module here (a callee's
     // effect summary does not change under the per-module rewrites below).
     let programFuncs = irModules |> List.collect (fun m -> m.Functions)
+    // Every id each module's executable code, types and side tables name
+    // (Optimize.moduleReferencedIds: the SAME traversal the census walks --
+    // binding values, every side-table operand executed at a binding's site,
+    // function bodies and captures, declared and embedded types, provider
+    // sources): the compaction planner's positions census (T4b) runs per
+    // module, so a compound named in ANOTHER module (an import) must reach it
+    // as an uncertified use. Computed only for a multi-module program with a
+    // compound to plan.
+    let moduleRefs =
+        lazy (irModules |> List.map (fun m -> (m.Name, Optimize.moduleReferencedIds m)))
     let irModules =
         irModules |> List.map (fun irModule ->
         // Rewrite raw array-typed binops into object_for combinators now
@@ -3164,7 +3174,10 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // mask -> compound -> fold chain's side table, read by both emitters;
         // the interpreter runs the tree as written. Gate:
         // BLADE_COMPACTION_FUSION.
-        Optimize.planCompactionFusion programFuncs irModule
+        let foreignRefs =
+            if irModules.Length < 2 || irModule.CompoundInits.IsEmpty then Set.empty
+            else moduleRefs.Force() |> List.filter (fun (n, _) -> n <> irModule.Name) |> List.map snd |> Set.unionMany
+        Optimize.planCompactionFusion programFuncs foreignRefs irModule
         // Compact row classes (Blade.Optimize.planCompactRowClasses): a
         // compact rank-2 producer's orbit-fold class partials computed behind
         // each packed row; side table, both emitters. Gate:

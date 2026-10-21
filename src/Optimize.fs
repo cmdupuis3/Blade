@@ -96,12 +96,50 @@ let cellEpilogueMode () : CellEpilogueMode =
         | _ -> CellEpilogueOn
 
 let cellEpilogueEnabled () = cellEpilogueMode () <> CellEpilogueOff
-/// BLADE_COMPACTION_FUSION=0|off disables compaction fusion
-/// (`planCompactionFusion`): the analysis still runs, and a mask -> compound
-/// -> fold chain it would have fused records `compaction-fusion` DECLINED
-/// ("disabled by BLADE_COMPACTION_FUSION"); nothing reaches the side table,
-/// so both emitters keep the separate count / fill / gather / pool passes.
-let compactionFusionEnabled () = gateOn "BLADE_COMPACTION_FUSION"
+/// BLADE_COMPACTION_FUSION (`planCompactionFusion`), four values:
+///   unset / `1` / `on` -> compaction fusion v2 (round 3, T4b): the round-2
+///                         plan with the kept-position table ELIDED when the
+///                         demand census proves no consumer reads it; the
+///                         gather stays at the compound (B4's one pass)
+///   `gather`           -> v2 plus T4a (OPT-IN this round: its own measured
+///                         gain, 0.18-0.36 ms on maskagg, is under the round's
+///                         0.4 ms acceptance line): the gather -- and the
+///                         strict chain -- in the mask pass, n + 1 private
+///                         cells under BLADE_TILE_TUNE sel_cap
+///   `b4`               -> the exact round-2 form (B4): count in the mask
+///                         pass, ONE fill+gather pass at the compound,
+///                         positions always built
+///   `0` / `off`        -> nothing reaches the side table: every decision
+///                         records `declined -- disabled by
+///                         BLADE_COMPACTION_FUSION` and both emitters keep the
+///                         separate count / fill / gather / pool passes
+/// `b4` and `gather` are both knob MIRRORS (`optimizerGateMirrors`): opt-diff
+/// compares each against the default. Read per call.
+type CompactionFusionMode =
+    | CompactionFusionOff
+    | CompactionFusionB4
+    | CompactionFusionT4
+    | CompactionFusionGather
+
+let compactionFusionMode () : CompactionFusionMode =
+    match Blade.Toolchain.envSwitch "BLADE_COMPACTION_FUSION" with
+    | Blade.Toolchain.SwitchOff -> CompactionFusionOff
+    | Blade.Toolchain.SwitchOther v when v.ToLowerInvariant() = "b4" -> CompactionFusionB4
+    | Blade.Toolchain.SwitchOther v when v.ToLowerInvariant() = "gather" -> CompactionFusionGather
+    | _ -> CompactionFusionT4
+let compactionFusionEnabled () = compactionFusionMode () <> CompactionFusionOff
+
+/// T4a's selectivity cap (BLADE_TILE_TUNE `sel_cap`, in KiB; default 262144 =
+/// 256 MiB): the single-pass form reserves n + 1 private cells in EVERY
+/// compound buffer (values, and the kept positions when they are built)
+/// before m is known, so it is taken only while those bytes fit the cap --
+/// at compile time for a static n, by a run-time test otherwise; above it the
+/// two-pass form (B4) runs. Speed only: both forms build the same compound.
+/// `sel_cap=0` never takes the single pass. The KiB-to-byte product is
+/// checked (clamped at Int64.MaxValue).
+let compactionSelCapBytes () : int64 =
+    let kib = max 0L (Blade.Toolchain.tileTune "sel_cap" 262144L)
+    if kib > System.Int64.MaxValue / 1024L then System.Int64.MaxValue else kib * 1024L
 
 /// BLADE_COMPACT_ROW_CLASSES=0|off disables compact row-class scheduling
 /// (`planCompactRowClasses`): a compact rank-2 producer / orbit-fold pair it
@@ -127,6 +165,17 @@ let recStepOmpEnabled () = gateOn "BLADE_REC_STEP_OMP"
 /// day the pass lands -- a gate missing here is a pass the differential
 /// cannot see.
 let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_HOIST"; "BLADE_HOT_ROW"; "BLADE_CELL_EPILOGUE"; "BLADE_COMPACTION_FUSION"; "BLADE_COMPACT_ROW_CLASSES"; "BLADE_SIBLING_FOLDS"; "BLADE_REC_STEP_OMP" ]
+
+/// A gate's KNOB MIRROR: a value that keeps a pass's PREVIOUS version, or
+/// selects an opt-in variant (not the pass off), for the passes whose forms
+/// extend one another.
+/// `blade test opt-diff` emits every program a third way -- the defaults
+/// with this one gate at the mirror value -- and compiles + compares the
+/// pairs whose C++ differs from the default, so a new version is checked
+/// against its predecessor as well as against no optimizer at all (the
+/// all-off comparison alone never runs the predecessor). Each gate here is
+/// also in `optimizerGates`.
+let optimizerGateMirrors : (string * string) list = [ ("BLADE_COMPACTION_FUSION", "b4"); ("BLADE_COMPACTION_FUSION", "gather") ]
 
 /// The decline reason for a LICENSED row prodsum (B2r applies only where
 /// the build keeps the serial association). `lanes` RESERVES the opt-in
@@ -1390,6 +1439,60 @@ let callableMayWriteWith (facts: WriteFacts) (c: IRCallable) : bool =
     let s = summaryOf c
     s.External || not s.Params.IsEmpty
 
+/// The operands a module SIDE TABLE executes at binding `id`'s own site: a
+/// `compound(dense, mask)`'s two operands, a `sparse(values, keys)`'s values,
+/// a random fill's key / parameters / weights / address (or `fill_random`'s
+/// modulus). The binding's own `Value` is then a placeholder (IRUnit), so an
+/// analysis that reads only `Value` audits nothing: every admission and every
+/// demand census reads `bindingPayload` instead (W1-4 review findings 1-2).
+let bindingSideOperands (modul: IRModule) (id: IRId) : IRExpr list =
+    (match Map.tryFind id modul.CompoundInits with Some (d, m) -> [ d; m ] | None -> [])
+    @ (match Map.tryFind id modul.SparseInits with Some v -> [ v ] | None -> [])
+    @ (match Map.tryFind id modul.RandomInits with
+       | Some (FillModulus e) -> [ e ]
+       | Some (RandGen (_, key, pars, weights, address)) ->
+           key :: pars
+           @ (weights |> Option.map fst |> Option.toList)
+           @ (address |> Option.map (fun (s, o) -> [ s; o ]) |> Option.defaultValue [])
+       | None -> [])
+
+/// A module binding's ACTUAL execution payload: its value plus the side-table
+/// operands executed at its site.
+let bindingPayload (modul: IRModule) (b: IRBinding) : IRExpr list =
+    b.Value :: bindingSideOperands modul b.Id
+
+/// The payload as ONE expression (the value when there is no side operand).
+let bindingPayloadExpr (modul: IRModule) (b: IRBinding) : IRExpr =
+    match bindingSideOperands modul b.Id with
+    | [] -> b.Value
+    | ops -> IRSequence (ops @ [ b.Value ])
+
+/// THE INTERVENING-STATEMENT PAYLOAD of a scheduling interval (hot-row, the
+/// cell epilogue, compact row classes -- W1-4 review finding 7): the planners
+/// walk let CHAINS of (id, name, value); a MODULE binding in such a chain is
+/// resolved by id to its complete payload (its value plus its side-table
+/// operands, plus the source a provider write reads), so the read,
+/// repeatability and write checks see what its site actually runs. A nested
+/// ordinary let (not a module binding) keeps its own value. Producer and
+/// consumer RECOGNITION keeps the original values.
+let intervalPayloadOf (modul: IRModule) : IRId -> IRExpr -> IRExpr =
+    let byId = modul.Bindings |> List.map (fun b -> (b.Id, b)) |> Map.ofList
+    fun (id: IRId) (v: IRExpr) ->
+        match Map.tryFind id byId with
+        | Some b ->
+            let provider =
+                match Map.tryFind b.Id modul.ProviderWrites with
+                | Some w -> [ IRVar (w.SourceId, IRTUnit) ]
+                | None -> []
+            match bindingSideOperands modul b.Id @ provider with
+            | [] -> v
+            | ops -> IRSequence (ops @ [ v ])
+        | None -> v
+
+/// A provider effect at an intervening module binding (a store write): an
+/// external effect no schedule moves work across.
+let intervalHasProviderEffect (modul: IRModule) (id: IRId) : bool =
+    modul.ProviderWrites.ContainsKey id
 /// THE SCHEDULING-ADMISSION WRITE PREDICATE (gap G41; Codex reviews 14-19):
 /// one instance of the write analysis above over a whole module -- callees
 /// resolved through the module's functions AND let aliases of them, named
@@ -1407,9 +1510,12 @@ let scheduleMayWriteIn (programFuncs: IRCallable list) (modul: IRModule) : IRExp
         (programFuncs @ modul.Functions) |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     let lets = System.Collections.Generic.Dictionary<IRId, IRExpr>()
     let note (e: IRExpr) = iterIRExpr (fun n -> match n with IRLet (id, v, _) -> lets.[id] <- v | _ -> ()) e
+    // a side-table binding's initializer is its PAYLOAD (its value is a
+    // placeholder): a reference to it is charged with what its site runs
     for b in modul.Bindings do
-        lets.[b.Id] <- b.Value
-        note b.Value
+        let payload = bindingPayloadExpr modul b
+        lets.[b.Id] <- payload
+        note payload
     for f in modul.Functions do note f.Body
     let rec chaseAlias (seen: Set<IRId>) (e: IRExpr) =
         match e with
@@ -2474,6 +2580,9 @@ let planHotRowFolds (builder: IRBuilder) (programFuncs: IRCallable list) (modul:
     let funcs = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     let facts = cseFactsOf funcs
     let writes = scheduleMayWriteIn programFuncs modul
+    // An intervening statement is audited by its complete payload (finding 7).
+    let payloadOf = intervalPayloadOf modul
+    let providerEffect = intervalHasProviderEffect modul
     let decide (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
         Blade.Effects.Decisions.record
             { Blade.Effects.Rule = "hot-row-fold"; Version = 1
@@ -2554,7 +2663,10 @@ let planHotRowFolds (builder: IRBuilder) (programFuncs: IRCallable list) (modul:
                         // between the producer and the fold.
                         let kernelMovable = (rowKernelCellTerm ck).IsSome
                         let offending =
-                            between |> List.tryPick (fun (iId, iName, iVal) ->
+                            between |> List.tryPick (fun (iId, iName, iVal0) ->
+                                // the statement's complete payload (a module
+                                // binding's side-table operands included)
+                                let iVal = payloadOf iId iVal0
                                 let r = refs iVal
                                 // DOMINANCE: the row kernel runs at the
                                 // producer, so every value it reads must be
@@ -2566,7 +2678,7 @@ let planHotRowFolds (builder: IRBuilder) (programFuncs: IRCallable list) (modul:
                                     Some $"the row kernel reads `{iName}`, which is bound between the producer and the fold (the row kernel would run before it exists)"
                                 elif Set.contains pId r then Some $"`{iName}` reads `{pName}` between the producer and the fold"
                                 elif not (Set.isEmpty (Set.intersect r captureIds)) then Some $"`{iName}` references a binding the row kernel captures"
-                                elif not (facts iVal).Repeatable || writes iVal then Some $"`{iName}` is not repeatable (an assignment, display output, or a call the module cannot judge) between the producer and the fold"
+                                elif not (facts iVal).Repeatable || writes iVal || providerEffect iId then Some $"`{iName}` is not repeatable (an assignment, display output, a provider write, or a call the module cannot judge -- its side-table payload included) between the producer and the fold"
                                 elif not kernelMovable then
                                     Some $"the row kernel may fail (only `prodsum(row, row)` is proved non-failing) and `{iName}` sits between the producer and the fold: running the row kernel at the producer could move its failure ahead of `{iName}`'s"
                                 else None)
@@ -2690,7 +2802,9 @@ let planHotRowFolds (builder: IRBuilder) (programFuncs: IRCallable list) (modul:
         let captureIds = ck.Captures |> List.map (fun c -> c.Id) |> Set.ofList
         let between = [ pi + 1 .. ci - 1 ] |> List.map (fun i -> arr.[i])
         let offending =
-            between |> List.tryPick (fun (iId, iName, iVal) ->
+            between |> List.tryPick (fun (iId, iName, iVal0) ->
+                // the statement's complete payload (finding 7)
+                let iVal = payloadOf iId iVal0
                 let r = refs iVal
                 // Dominance: the cell kernel runs at the producer, so nothing
                 // it reads may be bound in between.
@@ -2698,7 +2812,7 @@ let planHotRowFolds (builder: IRBuilder) (programFuncs: IRCallable list) (modul:
                     Some $"the cell kernel reads `{iName}`, which is bound between the producer and the fold (it would run before `{iName}` exists)"
                 elif Set.contains pId r then Some $"`{iName}` reads `{pName}` between the producer and the fold"
                 elif not (Set.isEmpty (Set.intersect r captureIds)) then Some $"`{iName}` references a binding the cell kernel captures"
-                elif not (facts iVal).Repeatable || writes iVal then Some $"`{iName}` is not repeatable (an assignment, display output, or a call the module cannot judge) between the producer and the fold"
+                elif not (facts iVal).Repeatable || writes iVal || providerEffect iId then Some $"`{iName}` is not repeatable (an assignment, display output, a provider write, or a call the module cannot judge -- its side-table payload included) between the producer and the fold"
                 else None)
         let extentLit =
             match (List.head pAt.IndexTypes).Extent with
@@ -2798,8 +2912,70 @@ let planHotRowFolds (builder: IRBuilder) (programFuncs: IRCallable list) (modul:
 //     self-product of `y`'s own cells, the fold a builtin `+`, `y` is never
 //     assigned -- and the empty check still runs at the fold's own site.
 //
-// Positions are always built (B4d, eliding them, needs an index-demand
-// census across aliases and is deferred). Gate: BLADE_COMPACTION_FUSION.
+// Round 3 (T4, `[compaction-fusion v2]`; `b4` keeps exactly the round-2 form
+// above) adds two schedule changes on the same side table -- T4b is the
+// DEFAULT, T4a is OPT-IN (`gather`) this round (its own measured gain is
+// under the round's acceptance line):
+//
+//   * T4b, positions ELIDED: the kept-position table is compiler metadata,
+//     not a named output. A fail-safe DEMAND CERTIFICATE over `y` (and every
+//     elementwise map derived from it, which shares its index) proves that
+//     nothing reads it: every use must be a fold, `extents`, a derived map,
+//     or printing (which reads the compact buffer); a keyed read, an alias,
+//     an argument, a tuple, an assignment, a capture, a provider write, a
+//     side-table operand or ANY use the census does not recognize demands
+//     the table. Certified, the index is built cardinality-only
+//     (compound_index_t<1>'s positions-elided constructor: n and m intact;
+//     every lookup through the absent table is an internal error, BL9002,
+//     never a read of a null pointer).
+//   * T4a, the gather AT THE MASK SITE: `keep`'s own pass sweeps x once:
+//     per 256-cell block, the predicate loop (vectorizable, as the counted
+//     mask pass is), then the branchless gather of the kept values (and
+//     positions, when built) over that L1-resident block, into n + 1 private
+//     cells per buffer (m + 1 touched by the n branchless stores); under the
+//     serial form B4c's chain is fed after each block. (One scalar loop doing
+//     both measured SLOWER than B4's two passes over a cached x: the
+//     predicate loses its vector form.) `keep` and `y` stay stored.
+//     Admission is `selectionAdmits`: the five parties of the motion (the producer x, the
+//     predicate, every planned outer fold's kernel, the seeds, every binding
+//     between the mask and the compound) through the shared write analysis
+//     (`scheduleMayWriteIn`); a writing party declines to the B4 form, never
+//     further. The n + 1 reservation is capped (BLADE_TILE_TUNE sel_cap):
+//     above it, at compile time or by a run-time test, B4's two passes run.
+//
+// Every admission audits a binding's whole PAYLOAD (`bindingPayload`: its
+// value and the side-table operands its site runs), never the placeholder
+// value of a compound / sparse / random binding.
+//
+// Gate: BLADE_COMPACTION_FUSION (`0`/`off`, `b4`, default = T4b, `gather` =
+// T4b + T4a).
+
+/// T4a's C++ handshake: what the mask pass gathered into, published by the
+/// mask's emission and read by the compound's.
+type CompactionGatherCpp = {
+    /// The value buffer (`new T[n + 1]`; nullptr until the guard holds).
+    Compact: string
+    /// The kept-position buffer, when the table is built.
+    Pos: string option
+    /// `None`: the single pass ALWAYS ran (static n within the cap). `Some
+    /// g`: a run-time test -- the compound runs B4's pass itself when `g`
+    /// is false.
+    Guard: string option
+    /// The in-pass chains (accumulator, kernel wrapper), so the compound's
+    /// fallback pass feeds the same accumulators.
+    Feeds: (string * string) list
+}
+
+/// The LLVM lane's twin: pool slots (alloca'd `ptr`), the count slot, the
+/// run-time guard (an i1 register computed before any branch), and the
+/// in-pass chain accumulators with their fold callables' plan ids.
+type CompactionGatherLlvm = {
+    DstSlot: string
+    PosSlot: string option
+    CountSlot: string
+    Guard: string option
+    Feeds: (IRId * string) list
+}
 
 /// The fused compaction of one `let y = compound(x, keep)` over a let-bound
 /// rank-1 `keep = mask(x, pred)`.
@@ -2809,6 +2985,18 @@ type CompactionPlan = {
     CompoundId: IRId
     CompoundName: string
     SourceId: IRId
+    /// T4b: build the kept-position table (a consumer demands it, the census
+    /// could not prove otherwise, or the `b4` mirror).
+    PositionsNeeded: bool
+    /// T4a: the gather runs in the mask pass (subject to `SelCapCells`).
+    GatherAtMask: bool
+    /// T4a's static extent, when the source's is a literal (the cap was then
+    /// decided at plan time and the emitters take the single pass outright).
+    StaticN: int64 option
+    /// The selectivity cap as a cell count: the single pass is taken iff
+    /// n < SelCapCells, i.e. (n + 1) x (bytes per cell over every buffer)
+    /// <= sel_cap -- the product checked by division, never overflowing.
+    SelCapCells: int64
     /// The C++ lane's handshake: the mask emitter's count variable, written
     /// when it actually counted (its rank-1 callable arm), read by the
     /// compound's emission to choose the fused pass. Reset by the mask's
@@ -2816,6 +3004,9 @@ type CompactionPlan = {
     CountCpp: string option ref
     /// The LLVM lane's twin: the alloca slot holding the count.
     CountLlvm: string option ref
+    /// T4a: what the mask pass gathered (reset with the count).
+    GatherCpp: CompactionGatherCpp option ref
+    GatherLlvm: CompactionGatherLlvm option ref
 }
 
 /// The fused fold `reduce(y * y, (+))` of one compound `y`: the lifted map
@@ -2865,17 +3056,136 @@ module CompactionTable =
     let foldsOf (compoundId: IRId) : CompactionFoldPlan list =
         Map.tryFind compoundId (get ()).FoldsByCompound |> Option.defaultValue []
 
+/// The extent expressions a TYPE carries (its index records' extents, a tagged
+/// index's anonymous extent, nested types' extents): what the generic child
+/// walk (`childrenOf`) never enters.
+let rec irTypeExtentExprs (t: IRType) : IRExpr list =
+    match t with
+    | IRTScalar _ | IRTUnit | IRTNat _ | IRTNamed _ | IRTInfer _ -> []
+    | IRTTuple ts -> List.collect irTypeExtentExprs ts
+    | IRTLoop l -> List.collect irTypeExtentExprs l.ArrayTypes @ (l.KernelType |> Option.map irTypeExtentExprs |> Option.defaultValue [])
+    | IRTComputation t | IRTPoly (t, _) | IRTUnitAnnotated (t, _) -> irTypeExtentExprs t
+    | IRTIdxTagged (t, tag) -> irTypeExtentExprs t @ (match tag with IRefAnon (_, e) -> [ e ] | _ -> [])
+    | IRTDist (_, t, axes) -> irTypeExtentExprs t @ (axes |> List.map (fun ix -> ix.Extent))
+    | IRTGroupKeys (a, b, _) -> [ a.Extent; b.Extent ]
+    | IRTArrow (slots, r, _) ->
+        (slots |> List.collect (function SIdx ix | SIdxVirt ix -> [ ix.Extent ] | SVal st -> irTypeExtentExprs st)) @ irTypeExtentExprs r
+
+let private arrayTypeExtentExprs (at: IRArrayType) : IRExpr list =
+    (at.IndexTypes |> List.map (fun ix -> ix.Extent)) @ irTypeExtentExprs at.ElemType
+
+/// Every type and index expression embedded in the nodes of `e` -- a
+/// variable's or call's type, an array literal's, an apply's output, operand
+/// and shared index types, a range's index records, an `ungroup`'s source
+/// index records -- as extent expressions; and, recursively, those embedded
+/// in the extracted extents themselves (types are finite trees, so this ends;
+/// a depth bound keeps it linear-ish on pathological nesting -- past it the
+/// extent itself is still returned, and its references still collected).
+let embeddedExtentExprs (e: IRExpr) : IRExpr list =
+    let acc = ResizeArray<IRExpr>()
+    let rec visit (depth: int) (root: IRExpr) =
+        let found = ResizeArray<IRExpr>()
+        let addTy (t: IRType) = found.AddRange(irTypeExtentExprs t)
+        let addIx (ixs: IRIndexType list) = for ix in ixs do found.Add ix.Extent
+        iterIRExpr (fun n ->
+            match n with
+            | IRVar (_, ty) | IRParam (_, _, ty) | IRZero ty | IRUninit ty | IRApp (_, _, ty) -> addTy ty
+            | IRArrayLit (_, at) -> found.AddRange(arrayTypeExtentExprs at)
+            | IRApplyCombinator info ->
+                addTy info.OutputType
+                for at in info.ArrayTypes do found.AddRange(arrayTypeExtentExprs at)
+                addIx info.SharedIndexTypes
+                addIx info.KernelTDims
+            | IRComposeApply info -> addTy info.OutputType
+            | IRMethodFor mf ->
+                for at in mf.ArrayTypes do found.AddRange(arrayTypeExtentExprs at)
+                addIx mf.SharedIndexTypes
+            | IRRange (ixs, _) -> addIx ixs
+            | IRVirtualReverse ix -> addIx [ ix ]
+            // the source index records `childrenOf` does not hand out
+            | IRUngroup (_, src) -> addIx [ src ]
+            | IRUngroupRows (_, _, src) -> addIx [ src ]
+            | IRUngroupGrid (_, srcs, _) -> addIx srcs
+            | _ -> ()) root
+        for x in found do
+            acc.Add x
+            if depth < 8 then visit (depth + 1) x
+    visit 0 e
+    List.ofSeq acc
+/// A root of THE MODULE TRAVERSAL that the compaction census (T4b) and the
+/// foreign-demand collection (`moduleReferencedIds`, which Lowering hands to
+/// every other module's census) share: every executable expression of the
+/// module -- binding values, the side-table operands executed at a binding's
+/// site, function bodies -- every declared type, and every side table that
+/// names a binding by id or by name.
+type CompactionRoot =
+    | RootBindingValue of IRBinding
+    | RootSideOperand of IRBinding * string * IRExpr
+    | RootFunctionBody of IRCallable
+    | RootType of string * IRType
+    | RootSourceRef of string * IRId
+    | RootNameRef of string * string
+
+let compactionRoots (callables: IRCallable list) (modul: IRModule) : CompactionRoot list =
+    let byId = modul.Bindings |> List.map (fun b -> (b.Id, b)) |> Map.ofList
+    let sideLabel (id: IRId) =
+        if modul.CompoundInits.ContainsKey id then "a compound() operand"
+        elif modul.SparseInits.ContainsKey id then "a sparse() operand"
+        else "a random fill's key, parameter, weights or address"
+    [ for b in modul.Bindings do
+        yield RootBindingValue b
+        for op in bindingSideOperands modul b.Id do yield RootSideOperand (b, sideLabel b.Id, op)
+        yield RootType ($"`{b.Name}`", b.Type)
+      for f in callables do
+        yield RootFunctionBody f
+        for p in f.Params do yield RootType ($"`{f.SourceName}`", p.Type)
+        yield RootType ($"`{f.SourceName}`", f.RetType)
+        for c in f.Captures do yield RootType ($"`{f.SourceName}`", c.Type)
+      for KeyValue (wid, w) in modul.ProviderWrites do
+        let who = match Map.tryFind wid byId with Some b -> $" (`{b.Name}`)" | None -> ""
+        yield RootSourceRef ($"a provider write{who}", w.SourceId)
+      for KeyValue (_, r) in modul.ProviderReads do
+        match r.MaskName with
+        | Some mn -> yield RootNameRef ("a provider read masked by", mn)
+        | None -> () ]
+
+/// Every binding / callable id this module's executable code, types and side
+/// tables name (`compactionRoots` over the module's own functions): what
+/// another module's census must treat as an uncertified use when one of them
+/// is its compound.
+let moduleReferencedIds (modul: IRModule) : Set<IRId> =
+    let acc = System.Collections.Generic.HashSet<IRId>()
+    let addExpr (e: IRExpr) =
+        for id in collectVarRefsIR e do acc.Add id |> ignore
+        for x in embeddedExtentExprs e do
+            for id in collectVarRefsIR x do acc.Add id |> ignore
+    let addTy (t: IRType) =
+        for x in irTypeExtentExprs t do addExpr x
+    for root in compactionRoots modul.Functions modul do
+        match root with
+        | RootBindingValue b -> addExpr b.Value
+        | RootSideOperand (_, _, e) -> addExpr e
+        | RootFunctionBody f ->
+            addExpr f.Body
+            for c in f.Captures do acc.Add c.Id |> ignore
+        | RootType (_, t) -> addTy t
+        | RootSourceRef (_, id) -> acc.Add id |> ignore
+        | RootNameRef _ -> ()
+    Set.ofSeq acc
 /// Plan compaction fusion over the module's top-level bindings (`compound`
 /// is top-level only, BL6002). Records into `CompactionTable` and the
 /// decision collector (`compaction-fusion`); the IR is untouched.
-let planCompactionFusion (programFuncs: IRCallable list) (modul: IRModule) : unit =
+let planCompactionFusion (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (modul: IRModule) : unit =
     let funcs = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     let facts = cseFactsOf funcs
     let writes = scheduleMayWriteIn programFuncs modul
-    let enabled = compactionFusionEnabled ()
+    let mode = compactionFusionMode ()
+    let enabled = mode <> CompactionFusionOff
+    let v2 = mode = CompactionFusionT4 || mode = CompactionFusionGather
+    let gatherOn = mode = CompactionFusionGather
     let decide (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
         Blade.Effects.Decisions.record
-            { Blade.Effects.Rule = "compaction-fusion"; Version = 1
+            { Blade.Effects.Rule = "compaction-fusion"; Version = (if v2 then 2 else 1)
               Span = declSpanOf subject; Subject = subject
               Outcome = outcome; Evidence = evidence }
     let arr = List.toArray modul.Bindings
@@ -2890,8 +3200,46 @@ let planCompactionFusion (programFuncs: IRCallable list) (modul: IRModule) : uni
             | _ -> ()) e
         hit
     let assignedAnywhere (id: IRId) =
-        (arr |> Array.exists (fun b -> assignsTo id b.Value))
+        (arr |> Array.exists (fun b -> bindingPayload modul b |> List.exists (assignsTo id)))
         || (modul.Functions |> List.exists (fun f -> assignsTo id f.Body))
+    // Each binding's ACTUAL execution payload (its value plus the side-table
+    // operands its site runs -- the value alone is a placeholder for a
+    // compound / sparse / random binding), through the shared write analysis
+    // and the conservative facts check.
+    let payloadWrites (b: IRBinding) =
+        bindingPayload modul b |> List.exists (fun e -> (facts e).MayWrite || writes e)
+    let payloadRefs (b: IRBinding) = bindingPayload modul b |> List.map refs |> Set.unionMany
+    // Does `b`'s payload READ mask `kId`? A sibling `compound(d, kId)` names
+    // the mask only as its own mask operand -- it reads the bits and writes
+    // nothing through them -- so that one occurrence is not a read here.
+    let readsMask (kId: IRId) (b: IRBinding) =
+        let ops =
+            match Map.tryFind b.Id modul.CompoundInits with
+            | Some (d, IRVar (m, _)) when m = kId -> b.Value :: d :: (bindingSideOperands modul b.Id |> List.skip 2)
+            | _ -> bindingPayload modul b
+        ops |> List.exists (fun e -> Set.contains kId (refs e))
+    // Every id a payload reaches: its references, and transitively the bodies
+    // and captures of every callable it names (and of let aliases of them) --
+    // what a payload could name, and therefore write through a `mut`
+    // parameter, without naming it at its own site.
+    let callableById =
+        (modul.Functions @ programFuncs) |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+    let letValueById = arr |> Array.map (fun b -> (b.Id, b.Value)) |> Map.ofArray
+    let transitiveRefs (b: IRBinding) : Set<IRId> =
+        let seen = System.Collections.Generic.HashSet<IRId>()
+        let work = System.Collections.Generic.Stack<IRId>(payloadRefs b)
+        while work.Count > 0 do
+            let id = work.Pop()
+            if seen.Add id then
+                match Map.tryFind id callableById with
+                | Some fn ->
+                    for r in refs fn.Body do work.Push r
+                    for c in fn.Captures do work.Push c.Id
+                | None ->
+                    match Map.tryFind id letValueById with
+                    | Some (IRVar (v, _)) -> work.Push v
+                    | _ -> ()
+        Set.ofSeq seen
     let isParamRef (p: IRParam) (e: IRExpr) =
         match e with
         | IRVar (v, _) -> v = p.VarId
@@ -2958,6 +3306,156 @@ let planCompactionFusion (programFuncs: IRCallable list) (modul: IRModule) : uni
                  | _ -> ())
             | _ -> ()) hostValue
         List.ofSeq found
+    // ---- T4b: the positions DEMAND CERTIFICATE ---------------------------
+    // Fail-safe by construction: `Ok uses` only when EVERY occurrence of `y`
+    // -- and of every elementwise map derived from it, which shares its index
+    // (the C++ map output `Compound { new T[card], y.idx, .. }`, the LLVM
+    // output's GCompact shape) -- is one this census recognizes as reading
+    // the compact buffer or the cardinality alone: a fold, `extents`, a
+    // derived map (whose own uses are then certified the same way), or
+    // printing (both lanes print `size()` cells of `.data`). The first other
+    // occurrence -- a keyed read, an alias, an argument, a tuple, an
+    // assignment, a capture, a provider write, an operand of another side
+    // table, a type extent other than `extents(y)`, or anything the census
+    // does not know -- is `Error <what demands the table>`. Every module
+    // binding, every function body and signature (this module's and the
+    // program's), every capture list and every side table is scanned.
+    let peelMap (e: IRExpr) : ApplyInfo option =
+        match e with
+        | IRApplyCombinator info | IRCompute (IRApplyCombinator info) -> Some info
+        | _ -> None
+    let allCallables =
+        (modul.Functions @ programFuncs) |> List.distinctBy (fun f -> f.Id)
+    let positionsDemand (yId: IRId) (yName: string) : Result<string list, string> =
+        let tracked = System.Collections.Generic.Dictionary<IRId, string>()
+        tracked.[yId] <- yName
+        let uses = ResizeArray<string>()
+        let note (u: string) = if not (uses.Contains u) then uses.Add u
+        let mutable demand : string option = None
+        let req (why: string) = if demand.IsNone then demand <- Some why
+        let isT (e: IRExpr) = match e with IRVar (v, _) -> tracked.ContainsKey v | _ -> false
+        let nameOf (e: IRExpr) = match e with IRVar (v, _) when tracked.ContainsKey v -> tracked.[v] | _ -> yName
+        // A CELLWISE map: every kernel input is one scalar cell (input rank
+        // 0, known), the output is one scalar per cell (output rank 0) and
+        // keeps the compound axis -- a kernel over the whole array (`c(0)` in
+        // a whole-array parameter) or of unknown input rank is no derived map.
+        let derivedMap (info: ApplyInfo) =
+            not info.Arrays.IsEmpty
+            && info.Arrays |> List.forall (fun a -> isT a || (match a with IRZip es -> not es.IsEmpty && List.forall isT es | _ -> false))
+            && not info.HasReynolds && info.KernelOutputRank = 0
+            && not info.KernelInputRanks.IsEmpty && info.KernelInputRanks |> List.forall ((=) 0)
+            && (match stripUnits info.OutputType with
+                | ArrayElem o -> (match o.IndexTypes with [ ix ] -> ix.IxKind = IxKCompound && ix.Rank = 1 | _ -> false)
+                | _ -> false)
+            && (info.Arrays.Length = 1 || info.IsCoIteration)
+        let rec scan (where: string) (e: IRExpr) =
+            match e with
+            | IRExtent (a, _) when isT a -> note "extents (the cardinality)"
+            | IRReduce (a, k, init) when isT a ->
+                note "folds over the compact buffer"
+                scan where k
+                init |> Option.iter (scan where)
+            | IRLet (mid, v, body) when (match peelMap v with Some info -> derivedMap info | None -> false) ->
+                let info = (peelMap v).Value
+                tracked.[mid] <- $"the map over `{nameOf (List.head info.Arrays)}` in {where}"
+                note "elementwise maps over it (sharing its index)"
+                scanMapRest where v
+                scan where body
+            | IRIndex (a, _, _) when isT a -> req $"a keyed read of `{nameOf a}` in {where}"
+            | IRApp (_, args, _) when List.exists isT args ->
+                req $"`{nameOf (List.find isT args)}` passed as a call argument in {where}"
+            | IRTuple es when List.exists isT es -> req $"`{nameOf (List.find isT es)}` stored in a tuple in {where}"
+            | IRAssign (t, _) when (refs t) |> Set.exists tracked.ContainsKey -> req $"an assignment to `{yName}` (or a map of it) in {where}"
+            | IRLet (_, v, _) when isT v -> req $"an alias of `{nameOf v}` in {where}"
+            | IRVar (v, _) when tracked.ContainsKey v -> req $"a use of `{tracked.[v]}` the census does not certify, in {where}"
+            | _ ->
+                // an operand position the census does not certify names its node
+                match childrenOf e |> List.tryFind isT with
+                | Some a ->
+                    let node = (Microsoft.FSharp.Reflection.FSharpValue.GetUnionFields(e, typeof<IRExpr>) |> fst).Name
+                    req $"`{nameOf a}` as an operand of {node} (a use the census does not certify) in {where}"
+                | None -> childrenOf e |> List.iter (scan where)
+        // A derived map's own operands are the tracked arrays (positions-free
+        // by the map's emission); everything else in it is scanned.
+        // (The apply's Loop provenance repeats the operands -- `IRMethodFor`
+        // over them, or over their `zip` -- and is skipped when it does.)
+        and scanMapRest (where: string) (v: IRExpr) =
+            match peelMap v with
+            | Some info ->
+                let operandOnly (a: IRExpr) = isT a || (match a with IRZip es -> List.forall isT es | _ -> false)
+                (match info.Loop with
+                 | IRMethodFor mf when List.forall operandOnly mf.Arrays -> ()
+                 | IRObjectFor ofi -> scan where ofi.Kernel
+                 | loop -> scan where loop)
+                scan where info.Kernel
+            | None -> scan where v
+        let scanType (where: string) (t: IRType) =
+            for e in (try irTypeExtentExprs t with _ -> [ IRVar (yId, IRTUnit) ]) do scan $"the type of {where}" e
+        // Every type and index expression an executable root carries (the
+        // generic child walk does not enter types).
+        let scanEmbedded (where: string) (e: IRExpr) =
+            for x in (try embeddedExtentExprs e with _ -> [ IRVar (yId, IRTUnit) ]) do scan $"a type inside {where}" x
+        // Module-level derived maps, in declaration order (a map reads only
+        // earlier bindings).
+        for b in arr do
+            if b.Id <> yId then
+                match peelMap b.Value with
+                | Some info when derivedMap info ->
+                    tracked.[b.Id] <- b.Name
+                    note $"the named map `{b.Name}` (sharing its index)"
+                | _ -> ()
+        // THE MODULE TRAVERSAL (`compactionRoots`, shared with the foreign-
+        // demand collection Lowering hands in as `foreignRefs`).
+        for root in compactionRoots allCallables modul do
+            match root with
+            | RootBindingValue b when b.Id = yId -> ()
+            | RootBindingValue b ->
+                let where = $"`{b.Name}`"
+                (match b.Value with
+                 | IRVar (v, _) when tracked.ContainsKey v -> req $"the alias `{b.Name}` of `{tracked.[v]}`"
+                 | _ -> if tracked.ContainsKey b.Id then scanMapRest where b.Value else scan where b.Value)
+                scanEmbedded where b.Value
+            | RootSideOperand (b, _, _) when b.Id = yId -> ()
+            | RootSideOperand (b, what, e) ->
+                let where = $"{what} of `{b.Name}`"
+                scan where e
+                scanEmbedded where e
+            | RootFunctionBody fn ->
+                let where = $"`{fn.SourceName}`"
+                (match fn.Captures |> List.tryFind (fun c -> tracked.ContainsKey c.Id) with
+                 | Some c -> req $"`{tracked.[c.Id]}` captured by {where}"
+                 | None -> ())
+                scan where fn.Body
+                scanEmbedded where fn.Body
+            | RootType (where, ty) -> scanType where ty
+            | RootSourceRef (where, id) ->
+                if tracked.ContainsKey id then req $"{where} of `{tracked.[id]}`"
+            | RootNameRef (where, nm) ->
+                if tracked.Values |> Seq.contains nm then req $"{where} `{nm}`"
+        // Another module naming it (an import): the census does not see
+        // that module's uses, so any reference at all demands the table.
+        for KeyValue (id, nm) in tracked do
+            if foreignRefs.Contains id then req $"`{nm}` named in another module"
+        match demand with
+        | Some why -> Error why
+        | None -> Ok (List.ofSeq uses)
+    // The element's bytes per cell (both lanes' pool widths), for the cap.
+    let elemBytes (t: IRType) : int64 option =
+        match stripUnits t with
+        | IRTScalar (ETFloat64 | ETInt64 | ETComplex64) -> Some 8L
+        | IRTScalar (ETFloat32 | ETInt32) -> Some 4L
+        | IRTScalar ETBool -> Some 1L
+        | IRTScalar ETComplex128 -> Some 16L
+        | _ -> None
+    let staticExtentOf (t: IRType) : int64 option =
+        match stripUnits t with
+        | ArrayElem a ->
+            (match a.IndexTypes with
+             | [ ix ] -> (match ix.Extent with IRLit (IRLitInt n) when n >= 0L -> Some n | _ -> None)
+             | _ -> None)
+        | _ -> None
+    let fmtBytes (b: int64) =
+        if b >= 1048576L then $"{float b / 1048576.0:F1} MiB" elif b >= 1024L then $"{float b / 1024.0:F1} KiB" else $"{b} B"
     for KeyValue (yId, (denseExpr, maskExpr)) in modul.CompoundInits do
         match indexOf yId with
         | None -> ()
@@ -2989,10 +3487,20 @@ let planCompactionFusion (programFuncs: IRCallable list) (modul: IRModule) : uni
                                      | _ -> false)
                                 | None -> false
                             let between = [ ki + 1 .. yi - 1 ] |> List.map (fun i -> arr.[i])
+                            // B4's own motion is the COUNT (taken in the mask
+                            // pass, sizing the compound's buffers): sound while
+                            // nothing between can change `keep`. Each binding's
+                            // whole payload is audited (side-table operands
+                            // included): a read of `keep`, a visibly writing
+                            // value (round 2's rule), or a writing payload that
+                            // can reach `keep` (transitively, through the
+                            // callables it names) declines.
                             let offending =
                                 between |> List.tryPick (fun b ->
-                                    if Set.contains kId (refs b.Value) then Some $"`{b.Name}` reads `{kb.Name}` between the mask and the compound"
+                                    if readsMask kId b then Some $"`{b.Name}` reads `{kb.Name}` between the mask and the compound"
                                     elif (facts b.Value).MayWrite || writes b.Value then Some $"`{b.Name}` may write (an assignment or a mutating call) between the mask and the compound"
+                                    elif payloadWrites b && Set.contains kId (transitiveRefs b) then
+                                        Some $"`{b.Name}` may write `{kb.Name}` (its side-table payload writes and reaches it) between the mask and the compound"
                                     else None)
                             // (IsMutable is no evidence either way: every
                             // non-static binding is assignable in its own
@@ -3004,7 +3512,10 @@ let planCompactionFusion (programFuncs: IRCallable list) (modul: IRModule) : uni
                             | Some why -> Error why
                             | None ->
                                 Ok ({ MaskId = kId; MaskName = kb.Name; CompoundId = yId; CompoundName = yName
-                                      SourceId = xId; CountCpp = ref None; CountLlvm = ref None },
+                                      SourceId = xId; PositionsNeeded = true; GatherAtMask = false
+                                      StaticN = None; SelCapCells = 0L
+                                      CountCpp = ref None; CountLlvm = ref None
+                                      GatherCpp = ref None; GatherLlvm = ref None },
                                     [ $"`{kb.Name}`'s count is taken in its own mask pass (no count pass); the kept-position fill and the value gather are ONE branchless pass `v = x[i]; {yName}[q] = v; pos[q] = i; q += {kb.Name}[i]` (m + 1 cells in both buffers, the slack never exposed)"
                                       $"`{yName}`'s index: dense extent n, cardinality m, the ascending kept positions (keyed reads, BL8006 unchanged); positions always built (B4d deferred); `{kb.Name}` stays stored"
                                       "stable, ascending, serial: the same compaction in fewer sweeps" ])
@@ -3012,25 +3523,41 @@ let planCompactionFusion (programFuncs: IRCallable list) (modul: IRModule) : uni
                          | _ -> Error "the compound's mask is not a let-bound `mask(x, pred)`")
                      | _ -> Error "the compound's mask is not a let-bound `mask(x, pred)` ahead of it")
                 | _ -> Error "the mask or the dense operand is written in place (v1 fuses a let-bound mask over a stored array)"
+            // A mask feeding SEVERAL compounds publishes its count to ONE plan
+            // (the table keeps one plan per mask: the last compound's), so the
+            // others keep their separate passes -- and say so in every mode,
+            // `b4` included (the round-2 record called them applied while
+            // their emission took the unfused path; the emission is unchanged).
+            let sharedDecline =
+                match compactionDecision with
+                | Ok (plan, _) when enabled ->
+                    let members =
+                        modul.CompoundInits |> Seq.choose (fun (KeyValue (cid, (_, m))) ->
+                            match m with
+                            | IRVar (v, _) when v = plan.MaskId -> Some cid
+                            | _ -> None) |> List.ofSeq
+                    let last = List.max members
+                    if members.Length > 1 && yId <> last then
+                        let lastName = match indexOf last with Some li -> arr.[li].Name | None -> "another compound"
+                        Some $"`{plan.MaskName}` feeds {members.Length} compounds and its in-pass count serves one, the last (`{lastName}`): `{yName}` keeps the separate count / fill / gather passes (a selection shared across compounds is T4c, not built)"
+                    else None
+                | _ -> None
+            // The compaction is planned (its decision is recorded below, once
+            // the folds -- the outer kernels of T4a's matrix -- are known).
             let compaction =
                 match compactionDecision with
-                | Error why ->
-                    decide yName (Blade.Effects.Declined why) []
-                    None
-                | Ok (plan, evidence) ->
-                    if not enabled then
-                        decide yName (Blade.Effects.Declined "disabled by BLADE_COMPACTION_FUSION") evidence
-                        None
-                    else
-                        CompactionTable.record plan
-                        decide yName Blade.Effects.Applied evidence
-                        Some plan
+                | Ok (plan, _) when enabled && sharedDecline.IsNone -> Some plan
+                | _ -> None
             // ---- B4a (+ B4c): the folds over y's self-product -----------
+            // Planned here, recorded after the compaction's decision.
+            let foldRecords = ResizeArray<(unit -> unit)>()
+            let foldPlans = ResizeArray<CompactionFoldPlan * IRCallable>()
+            let finalPlan : CompactionPlan option ref = ref None
             for hi in yi + 1 .. arr.Length - 1 do
                 let hb = arr.[hi]
                 for (mid, info, k, init) in foldSites yId hb.Value do
                     let what = $"fold of `{yName} * {yName}`"
-                    let declined (why: string) = decide hb.Name (Blade.Effects.Declined why) [ what ]
+                    let declined (why: string) = foldRecords.Add(fun () -> decide hb.Name (Blade.Effects.Declined why) [ what ])
                     let fk = resolveCallableIn funcs (fst (peelReynolds k))
                     let elemOk =
                         match stripUnits at.ElemType with
@@ -3045,7 +3572,7 @@ let planCompactionFusion (programFuncs: IRCallable list) (modul: IRModule) : uni
                     // reduce both sit inside `hb`'s value, so no write in that
                     // value at all is the proof (a mutating call through a
                     // `mut` parameter or an alias writes without naming `y`).
-                    elif (facts hb.Value).MayWrite || writes hb.Value then
+                    elif payloadWrites hb then
                         declined $"`{hb.Name}` may write (an assignment or a mutating call) between the map's materialization and the fold, so the map's snapshot could differ from `{yName}` at the fold"
                     else
                     match fk with
@@ -3053,7 +3580,7 @@ let planCompactionFusion (programFuncs: IRCallable list) (modul: IRModule) : uni
                     | Some f when f.IsOmpParallel || f.IsCudaKernel || f.IsMpiParallel ->
                         declined "the fold kernel requests a thread team or a device (`where omp` / cuda / mpi): v1 keeps the materialized route, which owns that census"
                     | Some f when not (builtinAdd f) -> declined "the fold kernel is not the builtin `+` (v1 fuses `reduce(y * y, (+))`)"
-                    | Some _ ->
+                    | Some f ->
                         // Feeding the chain inside the compaction pass moves
                         // its evaluation from `hb` up to `y`: sound when no
                         // one can change `y`'s cells in between. Without an
@@ -3061,22 +3588,166 @@ let planCompactionFusion (programFuncs: IRCallable list) (modul: IRModule) : uni
                         // storage; a call through a `mut` parameter writes
                         // without naming `y`), the proof is NO write at all
                         // from `y` through `hb`, and no assignment to `y`.
+                        // (T4a moves it further up, to the mask: the interval
+                        // `keep`..`y` is write-free by the compaction's own
+                        // admission, and the matrix below names it again.)
                         let inPass =
                             compaction.IsSome && not (assignedAnywhere yId)
-                            && ([ yi + 1 .. hi ] |> List.forall (fun i -> not ((facts arr.[i].Value).MayWrite || writes arr.[i].Value)))
-                        let evidence =
-                            [ $"`{hb.Name}` = {what}: folded straight over `{yName}`'s compact buffer (m contiguous cells), no square pool; licensed: the lane form, repro: the unseeded serial chain from the first kept square, in kept order; every product rounded before its add in both lanes (C++ an asm rounding barrier, LLVM an undecorated fmul), as the stored product was; no write between the map and the fold"
-                              (if inPass then $"under the serial (repro) form the chain is fed inside `{yName}`'s compaction pass, block by block, from completed cells only; the empty check (BL8003) stays at `{hb.Name}`"
-                               else $"the fold runs at `{hb.Name}` (the compaction pass does not feed it)")
-                              $"`{yName}` and every named binding stay stored" ]
-                        if not enabled then
-                            decide hb.Name (Blade.Effects.Declined "disabled by BLADE_COMPACTION_FUSION") evidence
+                            && ([ yi + 1 .. hi ] |> List.forall (fun i -> not (payloadWrites arr.[i])))
+                        let plan =
+                            { MapId = mid; CompoundId = yId; CompoundName = yName; HostName = hb.Name
+                              FoldKernel = k; InPass = inPass
+                              EmittedCpp = ref None; EmittedLlvm = ref None }
+                        foldPlans.Add((plan, f))
+                        foldRecords.Add(fun () ->
+                            let site =
+                                match finalPlan.Value with
+                                | Some p when p.GatherAtMask && p.StaticN.IsSome -> $"`{p.MaskName}`'s mask pass (T4a)"
+                                | Some p when p.GatherAtMask -> $"`{p.MaskName}`'s mask pass (T4a) when the single pass runs, else `{yName}`'s compaction pass"
+                                | _ -> $"`{yName}`'s compaction pass"
+                            let evidence =
+                                [ $"`{hb.Name}` = {what}: folded straight over `{yName}`'s compact buffer (m contiguous cells), no square pool; licensed: the lane form, repro: the unseeded serial chain from the first kept square, in kept order; every product rounded before its add in both lanes (C++ an asm rounding barrier, LLVM an undecorated fmul), as the stored product was; no write between the map and the fold"
+                                  (if inPass then $"under the serial (repro) form the chain is fed inside {site}, block by block, from completed cells only; the empty check (BL8003) stays at `{hb.Name}`"
+                                   else $"the fold runs at `{hb.Name}` (the compaction pass does not feed it)")
+                                  $"`{yName}` and every named binding stay stored" ]
+                            if not enabled then
+                                decide hb.Name (Blade.Effects.Declined "disabled by BLADE_COMPACTION_FUSION") evidence
+                            else
+                                CompactionTable.recordFold plan
+                                decide hb.Name Blade.Effects.Applied evidence)
+            // ---- T4: the selection (T4b census) and the gather (T4a) ------
+            let compaction =
+                match compaction, compactionDecision with
+                | Some plan, Ok _ when v2 ->
+                    let kb = arr.[(indexOf plan.MaskId).Value]
+                    let ki = (indexOf plan.MaskId).Value
+                    let xName =
+                        match indexOf plan.SourceId with
+                        | Some xi -> arr.[xi].Name
+                        | None -> "x"
+                    // T4b
+                    let census = positionsDemand yId yName
+                    let positionsNeeded = match census with Ok _ -> false | Error _ -> true
+                    let selection =
+                        match census with
+                        | Ok uses ->
+                            let seen = if uses.IsEmpty then "no use" else String.concat ", " uses
+                            $"selection: positions elided (census: {seen}; printing reads the compact buffer only) -- `{yName}`'s index keeps dense extent n and cardinality m, and any lookup through the absent table is an internal error (BL9002), never a read"
+                        | Error why ->
+                            $"selection: positions required by {why} -- `{yName}`'s index holds the ascending kept positions (keyed reads, BL8006 unchanged)"
+                    // T4a: selectionAdmits, the five parties of the motion
+                    // (the gather moves from `y` up to `keep`; an in-pass
+                    // chain moves from its fold's host up to `keep`).
+                    let predCallable =
+                        match kb.Value with
+                        | IRMask (_, pred) -> resolveCallableIn funcs pred
+                        | _ -> None
+                    let wrote (e: IRExpr) = (facts e).MayWrite || writes e
+                    let inPassFolds = foldPlans |> Seq.filter (fun (fp, _) -> fp.InPass) |> List.ofSeq
+                    let between = [ ki + 1 .. yi - 1 ] |> List.map (fun i -> arr.[i])
+                    let sharers =
+                        modul.CompoundInits |> Seq.filter (fun (KeyValue (_, (_, m))) ->
+                            match m with IRVar (v, _) -> v = plan.MaskId | _ -> false) |> Seq.length
+                    let perCell =
+                        elemBytes at.ElemType
+                        |> Option.map (fun b -> b + (if positionsNeeded then 8L else 0L))
+                    let staticN = staticExtentOf kb.Type |> Option.orElse (staticExtentOf (match indexOf plan.SourceId with Some xi -> arr.[xi].Type | None -> IRTUnit))
+                    let capBytes = compactionSelCapBytes ()
+                    let posWord = if positionsNeeded then ", kept position" else ""
+                    let posStore = if positionsNeeded then " pos[q] = i;" else ""
+                    let posFill = " and the kept-position fill"
+                    let posNone = " (positions elided)"
+                    let producerParty =
+                        match indexOf plan.SourceId with
+                        | Some xi when payloadWrites arr.[xi] -> Error $"the producer `{xName}` may write (its initializer or side-table payload, through the shared write analysis)"
+                        | Some _ -> Ok $"producer `{xName}`: no write"
+                        | None -> Error $"the producer `{xName}` is not a module binding the write analysis can see"
+                    let predicateParty =
+                        match predCallable with
+                        | Some pc when not (wrote pc.Body) -> Ok $"predicate of `{kb.Name}`: no write (pure, total)"
+                        | Some _ -> Error $"the predicate of `{kb.Name}` may write"
+                        | None -> Error $"the predicate of `{kb.Name}` does not resolve to a callable"
+                    let foldParty =
+                        match inPassFolds |> List.tryFind (fun (_, f) -> wrote f.Body) with
+                        | Some (fp, _) -> Error $"the outer fold kernel of `{fp.HostName}` may write"
+                        | None ->
+                            if inPassFolds.IsEmpty then Ok "outer fold kernel(s): none fed in the pass"
+                            else Ok ("outer fold kernel(s): " + (inPassFolds |> List.map (fun (fp, _) -> $"`{fp.HostName}` (+)") |> String.concat ", ") + ": no write")
+                    let seedParty = Ok "seed(s): none (the compaction has none; every planned fold is unseeded and keeps its BL8003 check at its own site)"
+                    // Each intervening binding's WHOLE payload (its value and
+                    // the side-table operands its site runs -- a random key, a
+                    // compound's operands) and any provider write at it: the
+                    // gather moves ahead of all of them.
+                    let betweenParty =
+                        let offends (b: IRBinding) =
+                            if payloadWrites b then Some "may write (its value or side-table payload)"
+                            elif modul.ProviderWrites.ContainsKey b.Id then Some "is a provider write (an external effect)"
+                            elif readsMask plan.MaskId b then Some $"reads `{kb.Name}`"
+                            else None
+                        match between |> List.tryPick (fun b -> offends b |> Option.map (fun why -> (b, why))) with
+                        | Some (b, why) -> Error $"`{b.Name}` (between `{kb.Name}` and `{yName}`) {why}"
+                        | None ->
+                            if between.IsEmpty then Ok $"between `{kb.Name}` and `{yName}`: no binding"
+                            else Ok ($"between `{kb.Name}` and `{yName}`: " + (between |> List.map (fun b -> $"`{b.Name}`") |> String.concat ", ") + $": no write in any payload, no provider write, no read of `{kb.Name}`")
+                    let parties = [ producerParty; predicateParty; foldParty; seedParty; betweenParty ]
+                    let matrix =
+                        "selectionAdmits (five parties, each through Optimize.scheduleMayWriteIn): "
+                        + (parties |> List.map (function Ok s -> s | Error s -> "DECLINES: " + s) |> String.concat "; ")
+                    let gatherWhy : Result<string, string> =
+                        if not gatherOn then
+                            Error "opt-in this round (BLADE_COMPACTION_FUSION=gather): T4a's own measured gain on maskagg, 0.18-0.36 ms, is under the round's 0.4 ms acceptance line"
                         else
-                            CompactionTable.recordFold
-                                { MapId = mid; CompoundId = yId; CompoundName = yName; HostName = hb.Name
-                                  FoldKernel = k; InPass = inPass
-                                  EmittedCpp = ref None; EmittedLlvm = ref None }
-                            decide hb.Name Blade.Effects.Applied evidence
+                        match parties |> List.tryPick (function Error s -> Some s | Ok _ -> None) with
+                        | Some why -> Error why
+                        | None ->
+                        if sharers > 1 then Error $"`{kb.Name}` feeds {sharers} compounds (a selection shared across compounds is T4c, not built)"
+                        else
+                        match perCell with
+                        | None -> Error "the compound's element has no fixed cell width the cap can bound"
+                        | Some pc ->
+                            let capCells = capBytes / pc
+                            match staticN with
+                            | Some n when n < capCells ->
+                                Ok $"gather: at the mask site -- `{kb.Name}`'s pass sweeps `{xName}` once (per 256-cell block: the predicate loop, then the branchless gather of the kept value{posWord} at q over the L1-resident block): n + 1 = {n + 1L} private cells per buffer ({fmtBytes ((n + 1L) * pc)} <= sel_cap {fmtBytes capBytes}), m + 1 of them touched by the n branchless stores"
+                            | Some n ->
+                                Error $"(n + 1) x {pc} B = {fmtBytes ((n + 1L) * pc)} exceeds sel_cap {fmtBytes capBytes} (BLADE_TILE_TUNE sel_cap): the two-pass form reserves only m + 1 cells"
+                            | None ->
+                                Ok $"gather: at the mask site when n < {capCells} at run time (n + 1 private cells x {pc} B within sel_cap {fmtBytes capBytes}), else the compound-site pass -- `{kb.Name}`'s pass sweeps `{xName}` once; m + 1 cells touched by the n branchless stores"
+                    let gatherAtMask, gatherLine =
+                        match gatherWhy with
+                        | Ok line -> true, line
+                        | Error why -> false, $"gather: declined -- {why}; the gather stays at `{yName}` (one fill+gather pass, B4)"
+                    let capCells = match perCell with Some pc -> capBytes / pc | None -> 0L
+                    let plan' =
+                        { plan with PositionsNeeded = positionsNeeded; GatherAtMask = gatherAtMask
+                                    StaticN = staticN; SelCapCells = capCells }
+                    let passLine =
+                        if gatherAtMask then
+                            $"`{kb.Name}`'s count AND `{yName}`'s gather run in `{kb.Name}`'s own mask pass: `v = {xName}[i]; b = pred(v); {kb.Name}[i] = b; {yName}[q] = v;{posStore} q += b` per 256-cell block -- no count pass and one sweep of `{xName}` and `{kb.Name}` from memory (the gather loop re-reads each block's cells and bits from L1: two loads of `{xName}`, a bit store and load, and a value store per source cell); `{kb.Name}` stays stored"
+                        else
+                            $"`{kb.Name}`'s count is taken in its own mask pass (no count pass); the value gather{(if positionsNeeded then posFill else posNone)} is ONE branchless pass at `{yName}`: `v = {xName}[i]; {yName}[q] = v;{posStore} q += {kb.Name}[i]` (m + 1 cells per buffer, the slack never exposed); `{kb.Name}` stays stored"
+                    let evidence =
+                        [ passLine; selection; gatherLine ]
+                        @ (if gatherOn then [ matrix ] else [])
+                        @ [ "stable, ascending, serial: the same compaction in fewer sweeps" ]
+                    CompactionTable.record plan'
+                    decide yName Blade.Effects.Applied evidence
+                    Some plan'
+                | Some plan, Ok (_, evidence) ->
+                    CompactionTable.record plan
+                    decide yName Blade.Effects.Applied evidence
+                    Some plan
+                | None, Ok _ when enabled && sharedDecline.IsSome ->
+                    decide yName (Blade.Effects.Declined sharedDecline.Value) []
+                    None
+                | _, Ok (_, evidence) ->
+                    decide yName (Blade.Effects.Declined "disabled by BLADE_COMPACTION_FUSION") evidence
+                    None
+                | _, Error why ->
+                    decide yName (Blade.Effects.Declined why) []
+                    None
+            finalPlan.Value <- compaction
+            for r in foldRecords do r ()
         | _ -> ()
 
 // --- Compact row classes: the orbit fold's class sums behind each row (B3) --
@@ -3192,6 +3863,9 @@ let planCompactRowClasses (programFuncs: IRCallable list) (modul: IRModule) : un
     let funcs = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     let facts = cseFactsOf funcs
     let writes = scheduleMayWriteIn programFuncs modul
+    // An intervening statement is audited by its complete payload (finding 7).
+    let payloadOf = intervalPayloadOf modul
+    let providerEffect = intervalHasProviderEffect modul
     let decide (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
         Blade.Effects.Decisions.record
             { Blade.Effects.Rule = "compact-row-classes"; Version = 1
@@ -3249,9 +3923,11 @@ let planCompactRowClasses (programFuncs: IRCallable list) (modul: IRModule) : un
                         let declined (why: string) = decide cName (Blade.Effects.Declined why) [ what ]
                         let between = [ pi + 1 .. ci - 1 ] |> List.map (fun i -> arr.[i])
                         let offending =
-                            between |> List.tryPick (fun (_, iName, iVal) ->
+                            between |> List.tryPick (fun (iId, iName, iVal0) ->
+                                // the statement's complete payload (W1-4 review finding 7)
+                                let iVal = payloadOf iId iVal0
                                 if readsTransitively pId iVal then Some $"`{iName}` reads `{pName}` between the producer and the fold"
-                                elif (facts iVal).MayWrite || writes iVal then Some $"`{iName}` may write (an assignment or a mutating call) between the producer and the fold"
+                                elif (facts iVal).MayWrite || writes iVal || providerEffect iId then Some $"`{iName}` may write (an assignment, a mutating call or a provider write -- its side-table payload included) between the producer and the fold"
                                 else None)
                         let (_, _, cVal) = arr.[ci]
                         if hasReynolds then declined "a Reynolds kernel (v1 schedules the plain compact nest only)"

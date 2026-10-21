@@ -2144,8 +2144,8 @@ and materializeRangeForm (subst: SubstMap) (names: Map<IRId, string>) (varName: 
 
 
 and materializeMaskForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (arrExpr: IRExpr) (predExpr: IRExpr) : (string list * MaterializedAlloc list) option =
-    materializeMaskFormCounted subst names varName elemTypeStr arrExpr predExpr None
-    |> Option.map (fun (stmts, allocs, _) -> (stmts, allocs))
+    materializeMaskFormCounted subst names varName elemTypeStr arrExpr predExpr None None
+    |> Option.map (fun (stmts, allocs, _, _) -> (stmts, allocs))
 
 /// `materializeMaskForm` that may also COUNT the kept cells in the same pass
 /// (compaction fusion, Blade.Optimize.planCompactionFusion): with
@@ -2153,8 +2153,18 @@ and materializeMaskForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
 /// adds each stored bit to it. The third component says whether it counted
 /// (only that arm does; every other arm answers false and the compound keeps
 /// its own count).
-and materializeMaskFormCounted (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (arrExpr: IRExpr) (predExpr: IRExpr) (countVar: string option) : (string list * MaterializedAlloc list * bool) option =
-    let uncounted (r: (string list * MaterializedAlloc list) option) = r |> Option.map (fun (s, a) -> (s, a, false))
+///
+/// T4a (`gather = Some plan`, the plan's GatherAtMask): the same pass also
+/// GATHERS the compound -- the predicate's own load of `x[i]` is stored at
+/// the cursor of an n + 1 private value buffer (and `i` into an n + 1
+/// kept-position buffer when the table is built), the cursor being the count
+/// itself -- and feeds the serial chains of the compound's in-pass folds
+/// (B4c's chain, moved here unchanged). For a run-time extent the single pass
+/// runs only while n is under the plan's selectivity cap; otherwise this
+/// arm's plain counted pass runs and the compound does B4's pass itself. The
+/// fourth component is what the compound's emission adopts.
+and materializeMaskFormCounted (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (arrExpr: IRExpr) (predExpr: IRExpr) (countVar: string option) (gather: Blade.Optimize.CompactionPlan option) : (string list * MaterializedAlloc list * bool * Blade.Optimize.CompactionGatherCpp option) option =
+    let uncounted (r: (string list * MaterializedAlloc list) option) = r |> Option.map (fun (s, a) -> (s, a, false, None))
     // mask(A, pred) -> the Bool PRESENCE array over A's own index space,
     // m[i] = pred(A[i]). One pass, no value copying: compaction belongs
     // to compound(A, m); iteration to range<CompoundIdx<m>>. A contains(B, x)
@@ -2224,23 +2234,92 @@ and materializeMaskFormCounted (subst: SubstMap) (names: Map<IRId, string>) (var
             match inferExprType arrExpr with
             | ArrayElem a -> elemTypeToCpp a.ElemType
             | _ -> "double"
-        let loop =
-            match countVar with
-            | None ->
-                [ $$"""for (size_t __mi = 0; __mi < {{srcBound}}; __mi++) {"""
-                  $"    {srcElemStr} {predParamName} = {arrName}[__mi];"
-                  $"    {varName}[__mi] = {wname}({predParamName});"
-                  "}" ]
-            | Some c ->
-                // The compaction's count, taken in this pass: the bit as
-                // stored, so the count is exactly the kept cells.
-                [ $"size_t {c} = 0;"
-                  $$"""for (size_t __mi = 0; __mi < {{srcBound}}; __mi++) {"""
-                  $"    {srcElemStr} {predParamName} = {arrName}[__mi];"
-                  $"    const bool __{varName}_k = {wname}({predParamName});"
-                  $"    {varName}[__mi] = __{varName}_k;"
-                  $"    {c} += (size_t)__{varName}_k;"
-                  "}" ]
+        // The compaction's count, taken in this pass: the bit as stored, so
+        // the count is exactly the kept cells.
+        let countedLoop (ind: string) (c: string) =
+            [ $$"""{{ind}}for (size_t __mi = 0; __mi < {{srcBound}}; __mi++) {"""
+              $"{ind}    {srcElemStr} {predParamName} = {arrName}[__mi];"
+              $"{ind}    const bool __{varName}_k = {wname}({predParamName});"
+              $"{ind}    {varName}[__mi] = __{varName}_k;"
+              $"{ind}    {c} += (size_t)__{varName}_k;"
+              $"{ind}}}" ]
+        let (loop, gathered) =
+            match countVar, gather with
+            | None, _ ->
+                ([ $$"""for (size_t __mi = 0; __mi < {{srcBound}}; __mi++) {"""
+                   $"    {srcElemStr} {predParamName} = {arrName}[__mi];"
+                   $"    {varName}[__mi] = {wname}({predParamName});"
+                   "}" ], None)
+            | Some c, None ->
+                ([ $"size_t {c} = 0;" ] @ countedLoop "" c, None)
+            | Some c, Some plan ->
+                // T4a: x is read ONCE here -- predicate, bit, the kept value
+                // (and position) stored at the cursor `c`, which is the
+                // count. n + 1 private cells per buffer: the n branchless
+                // stores land on the m + 1 cells 0..m, the last one the slack
+                // the store after the last kept cell needs (never exposed).
+                let gv = $"{varName}__gv"
+                let gp = if plan.PositionsNeeded then Some $"{varName}__gp" else None
+                let folds = Blade.Optimize.CompactionTable.foldsOf plan.CompoundId
+                let feeds =
+                    folds |> List.choose (fun f ->
+                        if not f.InPass then None
+                        else
+                        match resolveCallable f.FoldKernel with
+                        | Some cl when cl.Params.Length = 2 && not (fpReassocEnabled () && foldReorderLicensed cl) -> Some (f, cl)
+                        | _ -> None)
+                    |> List.mapi (fun k (f, cl) ->
+                        let (wcode, wn) = genCallableWrapper names $"{varName}__fold{k}" cl
+                        (f, $"{varName}__fold{k}", wcode, wn))
+                if not feeds.IsEmpty then (foldLanesUsedCell ()).Value <- true
+                let feedDecls =
+                    feeds |> List.collect (fun (_, acc, wcode, _) -> wcode @ [ $"{srcElemStr} {acc} = {srcElemStr}(0);" ])
+                // One 256-cell block: the predicate over the block first (the
+                // vectorizable loop the counted mask pass is), then the
+                // branchless gather over the same block, whose x and bits are
+                // L1-resident -- x is swept from memory once.
+                let block (body: string) (lo: string) (hi: string) =
+                    [ $"{body}for (size_t __mi = {lo}; __mi < {hi}; __mi++) {{"
+                      $"{body}    {srcElemStr} {predParamName} = {arrName}[__mi];"
+                      $"{body}    {varName}[__mi] = {wname}({predParamName});"
+                      $"{body}}}"
+                      $"{body}for (size_t __mi = {lo}; __mi < {hi}; __mi++) {{"
+                      $"{body}    {gv}[{c}] = {arrName}[__mi];" ]
+                    @ (gp |> Option.map (fun p -> [ $"{body}    {p}[{c}][0] = __mi;" ]) |> Option.defaultValue [])
+                    @ [ $"{body}    {c} += (size_t){varName}[__mi];"
+                        $"{body}}}" ]
+                let alloc (ind: string) (declare: bool) =
+                    let vt = if declare then srcElemStr + "* " else ""
+                    let pt = if declare then "compound_index_t<1>::IDX* " else ""
+                    [ $"{ind}{vt}{gv} = new {srcElemStr}[(size_t)({srcBound}) + 1];" ]
+                    @ (gp |> Option.map (fun p -> [ $"{ind}{pt}{p} = new compound_index_t<1>::IDX[(size_t)({srcBound}) + 1];" ]) |> Option.defaultValue [])
+                let pass (ind: string) =
+                    compactionBlockLoop ind $"{varName}__g" srcBound srcElemStr gv c
+                        (feeds |> List.map (fun (_, acc, _, wn) -> (acc, wn))) block
+                let alsoPos = if gp.IsSome then " and its kept positions" else " (positions elided)"
+                let what = $"// compaction fusion v2 (T4a): `{varName}`'s pass also gathers `{plan.CompoundName}`{alsoPos} -- one sweep of x (per 256-cell block: the predicate loop, then the gather over the L1-resident block), n + 1 private cells per buffer, m + 1 touched"
+                let lines, guard =
+                    match plan.StaticN with
+                    | Some _ ->
+                        ([ what; $"size_t {c} = 0;" ] @ alloc "" true @ feedDecls @ pass "", None)
+                    | None ->
+                        let g = $"{varName}__one"
+                        ([ what
+                           $"size_t {c} = 0;"
+                           // the selectivity cap (BLADE_TILE_TUNE sel_cap), checked as n < cells: no product can overflow
+                           $"const bool {g} = (size_t)({srcBound}) < (size_t){plan.SelCapCells}ULL;"
+                           $"{srcElemStr}* {gv} = nullptr;" ]
+                         @ (gp |> Option.map (fun p -> [ $"compound_index_t<1>::IDX* {p} = nullptr;" ]) |> Option.defaultValue [])
+                         @ feedDecls
+                         @ [ $"if ({g}) {{" ]
+                         @ alloc "    " false
+                         @ pass "    "
+                         @ [ "} else {" ]
+                         @ countedLoop "    " c
+                         @ [ "}" ], Some g)
+                for (f, acc, _, _) in feeds do f.EmittedCpp.Value <- Some acc
+                (lines, Some { Blade.Optimize.CompactionGatherCpp.Compact = gv; Blade.Optimize.CompactionGatherCpp.Pos = gp; Blade.Optimize.CompactionGatherCpp.Guard = guard
+                               Blade.Optimize.CompactionGatherCpp.Feeds = feeds |> List.map (fun (_, acc, _, wn) -> (acc, wn)) })
         Some (
             wrapperCode @ extentsDecl @ [
                 $$"""Array<bool, 1> {{varName}} = { new bool[{{srcBound}}], {{varName}}_extents };""" ]
@@ -2250,7 +2329,8 @@ and materializeMaskFormCounted (subst: SubstMap) (names: Map<IRId, string>) (var
             // std::vector<bool> at construction (genCompoundIndexFromMask), so
             // nothing outlives this scope by pointing INTO the mask.
             [MatRawData (varName, ownedExtents)],
-            countVar.IsSome
+            countVar.IsSome,
+            gathered
         )
     | _ ->
         // Degenerate (unresolved predicate): all-true mask; #error would be

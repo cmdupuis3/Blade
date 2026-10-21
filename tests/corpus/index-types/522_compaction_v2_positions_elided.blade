@@ -1,0 +1,37 @@
+// TEST: Compaction fusion v2: positions elided under the demand census
+// Round 3 (T4b, the default; `blade plan`: `[compaction-fusion v2] y: applied
+// [...; selection: positions elided (census: ...) ...]`): no consumer here
+// reads the kept positions (folds, `extents`, a named map and its fold,
+// printing), so the demand census certifies the table away -- the one
+// fill+gather pass at the compound stores no position, and the index is built
+// cardinality-only (n and m intact; a lookup through it would be BL9002). The
+// opt-in mask-site gather (BLADE_COMPACTION_FUSION=gather, T4a) takes the same
+// compounds. Every value is the as-written program's; an Int64 and a Bool
+// compound take the same path. Integer-valued data: every sum exact.
+type Ix = Idx<1003>
+let x = method_for(range<Ix>) <@> lambda(i) -> Float64((Int64(i) * 37) % 11) - 4.0 |> compute
+let keep = mask(x, lambda(v) -> v > 1.0)
+let y = compound(x, keep)
+let m = extents(y)
+// EXPECT: m = 455
+let checksum = reduce(y * y, (+)) + Float64(extents(y))
+// EXPECT: checksum = 8645.0
+let ysum = reduce(y, (+))
+// EXPECT: ysum = 1820.0
+// a named elementwise map shares the index; its fold reads the buffer too
+let twice = y * 2.0 |> compute
+let tsum = reduce(twice, (+))
+// EXPECT: tsum = 3640.0
+type Jx = Idx<9>
+let a = method_for(range<Jx>) <@> lambda(i) -> (Int64(i) * 5) % 7 - 3 |> compute
+let ka = mask(a, lambda(v) -> v >= 0)
+let ya = compound(a, ka)
+// EXPECT: ya = [2, 0, 3, 1, 2]
+let na = extents(ya)
+// EXPECT: na = 5
+let flags = method_for(range<Jx>) <@> lambda(i) -> Int64(i) % 3 == 0 |> compute
+let kf = mask(flags, lambda(b) -> b)
+let yf = compound(flags, kf)
+// EXPECT: yf = [true, true, true]
+let nf = extents(yf)
+// EXPECT: nf = 3

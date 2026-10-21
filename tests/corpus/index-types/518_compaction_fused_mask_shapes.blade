@@ -1,6 +1,6 @@
 // TEST: Compaction fusion over mask shapes: all-false, all-true, kept-early, kept-late, alternating
 // The fused pass (`v = x[i]; y[q] = v; pos[q] = i; q += keep[i]`, m + 1 cells
-// in both buffers) at its edges, n = 1003 over four 256-cell blocks: an
+// touched per buffer) at its edges, n = 1003 over four 256-cell blocks: an
 // all-false mask (m = 0: only the slack cell is ever written, `[]` prints),
 // all-true (m = n, the slack never written), the last kept cell in the FIRST
 // block (every later store lands on the slack), the first kept cell in the

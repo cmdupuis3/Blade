@@ -2144,6 +2144,12 @@ let private soleExtentOp (a: ArrVal) : string =
     | [ GCompact (len, _) ] -> len
     | _ -> refuse "a rank-1 operand with no single extent"
 
+/// The `pos` operand of a rank-1 compound whose kept positions were ELIDED
+/// (compaction fusion v2, T4b: the demand census proved no consumer reads
+/// them). Its only reader, the keyed-read arm, refuses it as an internal
+/// error, so no lookup through it is ever emitted.
+let private compactNoPositions = "null"
+
 /// The rank-1 compound's kept-position table, when `a` is one.
 let private compactPosOf (a: ArrVal) : (string * string) option =
     match a.Groups with
@@ -2838,6 +2844,10 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
         // algorithm -- and a key that was not kept is BL8006 with that lane's
         // text and no location line (its throw carries none).
         match compactPosOf a, idxExprs with
+        | Some (_, pos), _ when pos = compactNoPositions ->
+            // Unreachable by the positions demand census (Optimize.planCompactionFusion):
+            // a keyed read demands the table, so it is built. Never a lookup through null.
+            failwith "BL9002 internal codegen invariant violated: a keyed read of a compound whose kept positions were elided (the positions demand census missed a consumer)"
         | Some (len, pos), ([ key ] | [ IRTuple [ key ] ]) ->
             let k = coerce c ScI64 (emitExpr c key)
             needShim c "blade_compact1_rank"
@@ -4221,14 +4231,117 @@ and private compactRowConsumer (c: Ctx) (plan: Blade.Optimize.CompactRowPlan) : 
          | _ -> None)
     | _ -> None
 
+/// THE COMPACTION PASS LOOP of this lane (the C++ lane's
+/// CodeGenExprSupport.compactionPassLoop): `step i` handles one source cell
+/// (it advances the cursor slot). With `feeds` (fold callable, accumulator
+/// slot) -- the serial chains of the planned `reduce(y * y, (+))` folds
+/// (B4c) -- the loop is blocked by 256 source cells and after each block
+/// every chain advances over the compact cells that block completed (index <
+/// cursor; the slack cell is never read): the first kept square peeled as
+/// the chain's start, then `acc = k(acc, v * v)` in kept order. The product
+/// carries NO fast-math flag, so it cannot contract into the add -- the
+/// rounding a stored `y * y` cell has, under every contraction mode. Shared
+/// by B4's compound-site pass and T4a's mask-site pass, so the chain is the
+/// same wherever it runs.
+and private emitCompactionPassLlvm (c: Ctx) (n: string) (dst: string) (cursor: string) (feeds: (IRCallable * string) list) (step: string -> unit) : unit =
+    if feeds.IsEmpty then
+        emitCountedLoopTo c n step
+    else
+        emitCompactionBlocksLlvm c n dst cursor feeds (fun lo trips ->
+            emitCountedLoopTo c trips (fun k -> step (i64Add c lo k)))
+
+/// The pass in 256-cell BLOCKS: `block lo trips` emits one block [lo, lo +
+/// trips), and the chains (when fed) advance after each block, as above.
+and private emitCompactionBlocksLlvm (c: Ctx) (n: string) (dst: string) (cursor: string) (feeds: (IRCallable * string) list) (block: string -> string -> unit) : unit =
+    let fSlot =
+        if feeds.IsEmpty then ""
+        else
+            let s = allocaOf c "i64"
+            ln c ($"store i64 0, ptr {s}")
+            s
+    let square (j: string) : Val =
+        let v = loadCell c ScF64 (gepCell c ScF64 dst j)
+        let p = freshReg c
+        ln c (renderBin { Dest = p; Opcode = "fmul"; Flags = ""; Ty = ScF64; Lhs = v.Reg; Rhs = v.Reg })
+        { Reg = p; Ty = ScF64 }
+    let nb = i64Bin c "udiv" (i64Add c n "255") "256"
+    emitCountedLoopTo c nb (fun bi ->
+        let lo = i64Bin c "mul" bi "256"
+        let hiRaw = i64Add c lo "256"
+        let lt = freshReg c
+        ln c (renderCmp { Dest = lt; Kind = "icmp"; Pred = "slt"; Ty = ScI64; Lhs = hiRaw; Rhs = n })
+        let hi = freshReg c
+        ln c ($"{hi} = select i1 {lt}, i64 {hiRaw}, i64 {n}")
+        let trips = i64Bin c "sub" hi lo
+        block lo trips
+        if not feeds.IsEmpty then
+            // The chain over the cells this block completed (index < q).
+            let f0 = loadSlot c fSlot ScI64
+            let q = loadSlot c cursor ScI64
+            let anyNew = freshReg c
+            ln c (renderCmp { Dest = anyNew; Kind = "icmp"; Pred = "ult"; Ty = ScI64; Lhs = f0.Reg; Rhs = q.Reg })
+            let lFeed = freshLbl c "cfuse.feed"
+            let lPeel = freshLbl c "cfuse.peel"
+            let lChain = freshLbl c "cfuse.chain"
+            let lDone = freshLbl c "cfuse.done"
+            ln c (renderBr { Cond = anyNew; IfTrue = lFeed; IfFalse = lDone })
+            lbl c lFeed
+            let first = freshReg c
+            ln c (renderCmp { Dest = first; Kind = "icmp"; Pred = "eq"; Ty = ScI64; Lhs = f0.Reg; Rhs = "0" })
+            ln c (renderBr { Cond = first; IfTrue = lPeel; IfFalse = lChain })
+            lbl c lPeel
+            let p0 = square "0"
+            for (_, acc) in feeds do ln c ($"store double {p0.Reg}, ptr {acc}")
+            ln c ($"store i64 1, ptr {fSlot}")
+            ln c (sprintf "br label %%%s" lChain)
+            lbl c lChain
+            let f1 = loadSlot c fSlot ScI64
+            let trips2 = i64Bin c "sub" q.Reg f1.Reg
+            emitCountedLoopTo c trips2 (fun k ->
+                let j = i64Add c f1.Reg k
+                let p = square j
+                for (cl, acc) in feeds do
+                    let cur = loadSlot c acc ScF64
+                    let next = withFoldFmf c false (fun () -> coerce c ScF64 (applyKernel c cl [ KScalar cur; KScalar p ]))
+                    ln c ($"store double {next.Reg}, ptr {acc}"))
+            ln c ($"store i64 {q.Reg}, ptr {fSlot}")
+            ln c (sprintf "br label %%%s" lDone)
+            lbl c lDone)
+
+/// The in-pass chains of a compound's planned folds in this lane: each fold
+/// whose form here is the SERIAL chain (BLADE_FP_REPRO=1, or no licence) and
+/// that the plan let into the pass, with a fresh accumulator slot.
+and private compactionFeedsLlvm (c: Ctx) (folds: Blade.Optimize.CompactionFoldPlan list) : (Blade.Optimize.CompactionFoldPlan * IRCallable * string) list =
+    folds |> List.choose (fun f ->
+        if not f.InPass then None
+        else
+        match resolveCallable f.FoldKernel with
+        | Some cl when cl.Params.Length = 2 && not (foldFmfDecorable c cl) ->
+            let acc = allocaOf c (llTy ScF64)
+            ln c ($"store double 0x0000000000000000, ptr {acc}")
+            Some (f, cl, acc)
+        | _ -> None)
+
 /// A planned mask (compaction fusion, B4b): the Bool presence pool exactly as
 /// the IRMask arm of emitArr materializes it -- one pass, pred(x[i]) stored --
 /// plus the count of kept cells taken in that same pass into an i64 slot the
 /// compound's emission reads (`CountLlvm`). False (nothing emitted, nothing
 /// published) for a source that is not one dense axis; the ordinary path
 /// then runs.
+///
+/// T4a (the plan's GatherAtMask): the same pass also GATHERS the compound --
+/// the predicate's own load of x[i] stored at the cursor (the count itself)
+/// of an n + 1 value pool, i into an n + 1 position pool when the table is
+/// built -- and feeds the in-pass chains; published as `GatherLlvm` (pools
+/// through `ptr` slots, so a run-time-guarded single pass needs no dominance
+/// argument). A run-time extent takes the single pass only while n is under
+/// the plan's selectivity cap; otherwise the plain counted pass runs and the
+/// compound runs B4's pass itself.
 and private tryBindCountedMask (c: Ctx) (id: IRId) (name: string) (plan: Blade.Optimize.CompactionPlan) (arrExpr: IRExpr) (predExpr: IRExpr) : bool =
     plan.CountLlvm.Value <- None
+    plan.GatherLlvm.Value <- None
+    let folds = Blade.Optimize.CompactionTable.foldsOf plan.CompoundId
+    for f in folds do f.EmittedLlvm.Value <- None
     match resolveCallable predExpr with
     | Some cl when cl.Params.Length = 1 ->
         let a = consumeArrOperand c arrExpr
@@ -4238,14 +4351,85 @@ and private tryBindCountedMask (c: Ctx) (id: IRId) (name: string) (plan: Blade.O
              let pool = allocPool c ScBool n
              let cnt = allocaOf c "i64"
              ln c ($"store i64 0, ptr {cnt}")
-             emitCountedLoopTo c n (fun i ->
-                 let bit = coerce c ScBool (applyKernel c cl [ KScalar (readCell c a [ { Reg = i; Ty = ScI64 } ]) ])
+             // One source cell of the mask pass: the predicate over x[i], the
+             // bit stored; the value and the bit handed back.
+             let maskCell (i: string) : Val * string =
+                 let v = readCell c a [ { Reg = i; Ty = ScI64 } ]
+                 let bit = coerce c ScBool (applyKernel c cl [ KScalar v ])
                  storeCell c ScBool (gepCell c ScBool pool i) bit
                  let w = freshReg c
                  ln c ($"{w} = zext i1 {bit.Reg} to i64")
+                 (v, w)
+             let advance (w: string) =
                  let cur = loadSlot c cnt ScI64
                  let next = i64Add c cur.Reg w
-                 ln c ($"store i64 {next}, ptr {cnt}"))
+                 ln c ($"store i64 {next}, ptr {cnt}")
+             let countedPass () = emitCountedLoopTo c n (fun i -> let (_, w) = maskCell i in advance w)
+             let gatherElem =
+                 match a.Elem with
+                 | ScI64 | ScF64 | ScBool when plan.GatherAtMask -> Some a.Elem
+                 | _ -> None
+             match gatherElem with
+             | None -> countedPass ()
+             | Some elem ->
+                 let dstSlot = allocaOf c "ptr"
+                 let posSlot = if plan.PositionsNeeded then Some (allocaOf c "ptr") else None
+                 ln c ($"store ptr null, ptr {dstSlot}")
+                 posSlot |> Option.iter (fun s -> ln c ($"store ptr null, ptr {s}"))
+                 let feeds = if elem = ScF64 then compactionFeedsLlvm c folds else []
+                 let singlePass () =
+                     let nPlus = i64Add c n "1"
+                     let dst = allocPool c elem nPlus
+                     ln c ($"store ptr {dst}, ptr {dstSlot}")
+                     let pos =
+                         posSlot |> Option.map (fun s ->
+                             let p = allocPool c ScI64 nPlus
+                             ln c ($"store ptr {p}, ptr {s}")
+                             p)
+                     // Per 256-cell block: the predicate over the block (the
+                     // vectorizable loop the counted pass is), then the
+                     // branchless gather over the same, L1-resident, block.
+                     emitCompactionBlocksLlvm c n dst cnt (feeds |> List.map (fun (_, k, acc) -> (k, acc))) (fun lo trips ->
+                         emitCountedLoopTo c trips (fun k ->
+                             let i = i64Add c lo k
+                             let v = readCell c a [ { Reg = i; Ty = ScI64 } ]
+                             let bit = coerce c ScBool (applyKernel c cl [ KScalar v ])
+                             storeCell c ScBool (gepCell c ScBool pool i) bit)
+                         emitCountedLoopTo c trips (fun k ->
+                             let i = i64Add c lo k
+                             let v = readCell c a [ { Reg = i; Ty = ScI64 } ]
+                             let bit = loadCell c ScBool (gepCell c ScBool pool i)
+                             let w = freshReg c
+                             ln c ($"{w} = zext i1 {bit.Reg} to i64")
+                             let q = loadSlot c cnt ScI64
+                             storeCell c elem (gepCell c elem dst q.Reg) (coerce c elem v)
+                             pos |> Option.iter (fun p -> storeCell c ScI64 (gepCell c ScI64 p q.Reg) { Reg = i; Ty = ScI64 })
+                             advance w))
+                 let guard =
+                     match plan.StaticN with
+                     | Some _ ->
+                         singlePass ()
+                         None
+                     | None ->
+                         // the selectivity cap (BLADE_TILE_TUNE sel_cap) as n < cells: no product can overflow
+                         let g = freshReg c
+                         ln c (renderCmp { Dest = g; Kind = "icmp"; Pred = "ult"; Ty = ScI64; Lhs = n; Rhs = string plan.SelCapCells })
+                         let lOne = freshLbl c "cgather.one"
+                         let lTwo = freshLbl c "cgather.two"
+                         let lJoin = freshLbl c "cgather.join"
+                         ln c (renderBr { Cond = g; IfTrue = lOne; IfFalse = lTwo })
+                         lbl c lOne
+                         singlePass ()
+                         ln c (sprintf "br label %%%s" lJoin)
+                         lbl c lTwo
+                         countedPass ()
+                         ln c (sprintf "br label %%%s" lJoin)
+                         lbl c lJoin
+                         Some g
+                 for (f, _, acc) in feeds do f.EmittedLlvm.Value <- Some acc
+                 plan.GatherLlvm.Value <-
+                     Some { Blade.Optimize.CompactionGatherLlvm.DstSlot = dstSlot; Blade.Optimize.CompactionGatherLlvm.PosSlot = posSlot; Blade.Optimize.CompactionGatherLlvm.CountSlot = cnt
+                            Blade.Optimize.CompactionGatherLlvm.Guard = guard; Blade.Optimize.CompactionGatherLlvm.Feeds = feeds |> List.map (fun (f, _, acc) -> (f.MapId, acc)) }
              bindArray c id name { Elem = ScBool; Groups = a.Groups; Src = APool pool; RowOpBytes = 0L }
              plan.CountLlvm.Value <- Some cnt
              true
@@ -7673,88 +7857,76 @@ let private emitPrints (c: Ctx) (bindings: IRBinding list) : unit =
 /// order. The product carries NO fast-math flag, so it cannot contract into
 /// the add -- the rounding a stored `y * y` cell has, under every contraction
 /// mode. The fold's own site keeps the BL8003 empty check (emitReduce).
-let private emitFusedCompaction (c: Ctx) (b: IRBinding) (elem: Sc) (n: string) (keepPool: string) (srcPool: string) (cntSlot: string) (folds: Blade.Optimize.CompactionFoldPlan list) : unit =
-    let m = (loadSlot c cntSlot ScI64).Reg
-    let mSlack = i64Add c m "1"
-    let pos = allocPool c ScI64 mSlack
-    let dst = allocPool c elem mSlack
-    let cursor = allocaOf c "i64"
-    ln c ($"store i64 0, ptr {cursor}")
-    let feeds =
-        if elem <> ScF64 then []
-        else
-            folds |> List.choose (fun f ->
-                if not f.InPass then None
-                else
-                match resolveCallable f.FoldKernel with
-                | Some cl when cl.Params.Length = 2 && not (foldFmfDecorable c cl) ->
-                    let acc = allocaOf c (llTy ScF64)
-                    ln c ($"store double 0x0000000000000000, ptr {acc}")
-                    Some (f, cl, acc)
-                | _ -> None)
-    let step (i: string) =
-        let q = loadSlot c cursor ScI64
-        let v = loadCell c elem (gepCell c elem srcPool i)
-        storeCell c elem (gepCell c elem dst q.Reg) v
-        storeCell c ScI64 (gepCell c ScI64 pos q.Reg) { Reg = i; Ty = ScI64 }
-        let bit = loadCell c ScBool (gepCell c ScBool keepPool i)
-        let w = freshReg c
-        ln c ($"{w} = zext i1 {bit.Reg} to i64")
-        let next = i64Add c q.Reg w
-        ln c ($"store i64 {next}, ptr {cursor}")
-    if feeds.IsEmpty then
-        emitCountedLoopTo c n step
-    else
-        let fSlot = allocaOf c "i64"
-        ln c ($"store i64 0, ptr {fSlot}")
-        let square (j: string) : Val =
-            let v = loadCell c ScF64 (gepCell c ScF64 dst j)
-            let p = freshReg c
-            ln c (renderBin { Dest = p; Opcode = "fmul"; Flags = ""; Ty = ScF64; Lhs = v.Reg; Rhs = v.Reg })
-            { Reg = p; Ty = ScF64 }
-        let nb = i64Bin c "udiv" (i64Add c n "255") "256"
-        emitCountedLoopTo c nb (fun bi ->
-            let lo = i64Bin c "mul" bi "256"
-            let hiRaw = i64Add c lo "256"
-            let lt = freshReg c
-            ln c (renderCmp { Dest = lt; Kind = "icmp"; Pred = "slt"; Ty = ScI64; Lhs = hiRaw; Rhs = n })
-            let hi = freshReg c
-            ln c ($"{hi} = select i1 {lt}, i64 {hiRaw}, i64 {n}")
-            let trips = i64Bin c "sub" hi lo
-            emitCountedLoopTo c trips (fun k -> step (i64Add c lo k))
-            // The chain over the cells this block completed (index < q).
-            let f0 = loadSlot c fSlot ScI64
+///
+/// Round 3 (compaction fusion v2), as in the C++ lane:
+///   * `positions = false` (T4b): no position pool, no `pos[q] = i` store;
+///     the value is `GCompact (m, compactNoPositions)`, which the keyed-read
+///     arm refuses to look up (the census proved there is none);
+///   * `gathered = Some g` (T4a): the mask's pass already filled g's pools
+///     (and fed the chains); this site loads them -- after running the B4
+///     pass itself into the same slots and accumulators when g's run-time
+///     guard is false (n over the selectivity cap).
+let private emitFusedCompaction (c: Ctx) (b: IRBinding) (elem: Sc) (n: string) (keepPool: string) (srcPool: string) (cntSlot: string) (folds: Blade.Optimize.CompactionFoldPlan list) (positions: bool) (gathered: Blade.Optimize.CompactionGatherLlvm option) : unit =
+    // B4's one fill+gather pass into fresh m + 1 pools, written through the
+    // given slots, feeding the given chains.
+    let b4Pass (dstSlot: string) (posSlot: string option) (feeds: (IRCallable * string) list) =
+        let m = (loadSlot c cntSlot ScI64).Reg
+        let mSlack = i64Add c m "1"
+        let pos =
+            posSlot |> Option.map (fun s ->
+                let p = allocPool c ScI64 mSlack
+                ln c ($"store ptr {p}, ptr {s}")
+                p)
+        let dst = allocPool c elem mSlack
+        ln c ($"store ptr {dst}, ptr {dstSlot}")
+        let cursor = allocaOf c "i64"
+        ln c ($"store i64 0, ptr {cursor}")
+        emitCompactionPassLlvm c n dst cursor feeds (fun i ->
             let q = loadSlot c cursor ScI64
-            let anyNew = freshReg c
-            ln c (renderCmp { Dest = anyNew; Kind = "icmp"; Pred = "ult"; Ty = ScI64; Lhs = f0.Reg; Rhs = q.Reg })
-            let lFeed = freshLbl c "cfuse.feed"
-            let lPeel = freshLbl c "cfuse.peel"
-            let lChain = freshLbl c "cfuse.chain"
-            let lDone = freshLbl c "cfuse.done"
-            ln c (renderBr { Cond = anyNew; IfTrue = lFeed; IfFalse = lDone })
-            lbl c lFeed
-            let first = freshReg c
-            ln c (renderCmp { Dest = first; Kind = "icmp"; Pred = "eq"; Ty = ScI64; Lhs = f0.Reg; Rhs = "0" })
-            ln c (renderBr { Cond = first; IfTrue = lPeel; IfFalse = lChain })
-            lbl c lPeel
-            let p0 = square "0"
-            for (_, _, acc) in feeds do ln c ($"store double {p0.Reg}, ptr {acc}")
-            ln c ($"store i64 1, ptr {fSlot}")
-            ln c (sprintf "br label %%%s" lChain)
-            lbl c lChain
-            let f1 = loadSlot c fSlot ScI64
-            let trips2 = i64Bin c "sub" q.Reg f1.Reg
-            emitCountedLoopTo c trips2 (fun k ->
-                let j = i64Add c f1.Reg k
-                let p = square j
-                for (_, cl, acc) in feeds do
-                    let cur = loadSlot c acc ScF64
-                    let next = withFoldFmf c false (fun () -> coerce c ScF64 (applyKernel c cl [ KScalar cur; KScalar p ]))
-                    ln c ($"store double {next.Reg}, ptr {acc}"))
-            ln c ($"store i64 {q.Reg}, ptr {fSlot}")
-            ln c (sprintf "br label %%%s" lDone)
-            lbl c lDone)
-        for (f, _, acc) in feeds do f.EmittedLlvm.Value <- Some acc
+            let v = loadCell c elem (gepCell c elem srcPool i)
+            storeCell c elem (gepCell c elem dst q.Reg) v
+            pos |> Option.iter (fun p -> storeCell c ScI64 (gepCell c ScI64 p q.Reg) { Reg = i; Ty = ScI64 })
+            let bit = loadCell c ScBool (gepCell c ScBool keepPool i)
+            let w = freshReg c
+            ln c ($"{w} = zext i1 {bit.Reg} to i64")
+            let next = i64Add c q.Reg w
+            ln c ($"store i64 {next}, ptr {cursor}"))
+    let (dstSlot, posSlot) =
+        match gathered with
+        | Some g ->
+            (match g.Guard with
+             | None -> ()
+             | Some guard ->
+                 let feeds =
+                     g.Feeds |> List.choose (fun (mid, acc) ->
+                         folds |> List.tryFind (fun f -> f.MapId = mid)
+                         |> Option.bind (fun f -> resolveCallable f.FoldKernel)
+                         |> Option.map (fun cl -> (cl, acc)))
+                 let lHave = freshLbl c "cgather.have"
+                 let lBuild = freshLbl c "cgather.build"
+                 ln c (renderBr { Cond = guard; IfTrue = lHave; IfFalse = lBuild })
+                 lbl c lBuild
+                 b4Pass g.DstSlot g.PosSlot feeds
+                 ln c (sprintf "br label %%%s" lHave)
+                 lbl c lHave)
+            (g.DstSlot, g.PosSlot)
+        | None ->
+            let dstSlot = allocaOf c "ptr"
+            let posSlot = if positions then Some (allocaOf c "ptr") else None
+            let feeds = if elem <> ScF64 then [] else compactionFeedsLlvm c folds
+            b4Pass dstSlot posSlot (feeds |> List.map (fun (_, cl, acc) -> (cl, acc)))
+            for (f, _, acc) in feeds do f.EmittedLlvm.Value <- Some acc
+            (dstSlot, posSlot)
+    let m = (loadSlot c cntSlot ScI64).Reg
+    let dst = freshReg c
+    ln c ($"{dst} = load ptr, ptr {dstSlot}")
+    let pos =
+        match posSlot with
+        | Some s ->
+            let p = freshReg c
+            ln c ($"{p} = load ptr, ptr {s}")
+            p
+        | None -> compactNoPositions
     bindArray c b.Id b.Name { Elem = elem; Groups = [ GCompact (m, pos) ]; Src = APool dst; RowOpBytes = 0L }
 
 let private emitCompoundInit (c: Ctx) (b: IRBinding) (denseExpr: IRExpr) (maskExpr: IRExpr) : unit =
@@ -7797,15 +7969,21 @@ let private emitCompoundInit (c: Ctx) (b: IRBinding) (denseExpr: IRExpr) (maskEx
     // mask's own pass counted (tryBindCountedMask published the slot), so the
     // fill and the gather are ONE pass; the twin of the C++ lane's
     // genFusedCompaction. Every planned fold over this compound resets its
-    // handshake first.
+    // handshake first -- unless the mask's pass already gathered (T4a) and
+    // fed the chains it published.
     let folds = Blade.Optimize.CompactionTable.foldsOf b.Id
-    for f in folds do f.EmittedLlvm.Value <- None
-    let fusedCount =
+    let planHere =
         match Blade.Optimize.CompactionTable.tryCompound b.Id, maskExpr with
-        | Some p, IRVar (mId, _) when mId = p.MaskId -> p.CountLlvm.Value
+        | Some p, IRVar (mId, _) when mId = p.MaskId -> Some p
         | _ -> None
+    let gathered = planHere |> Option.bind (fun p -> p.GatherLlvm.Value)
+    if gathered.IsNone then
+        for f in folds do f.EmittedLlvm.Value <- None
+    let fusedCount = planHere |> Option.bind (fun p -> p.CountLlvm.Value)
     match fusedCount with
-    | Some cntSlot -> emitFusedCompaction c b elem n keepPool srcPool cntSlot folds
+    | Some cntSlot ->
+        let positions = planHere |> Option.forall (fun p -> p.PositionsNeeded)
+        emitFusedCompaction c b elem n keepPool srcPool cntSlot folds positions gathered
     | None ->
     // 2. COUNT.
     let acc = allocaOf c "i64"

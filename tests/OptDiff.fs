@@ -113,7 +113,12 @@ let private compileAndRun (dir: string) (stem: string) (cpp: string) : Result<in
             | Ok (code, out) -> Ok (code, Blade.Tests.InterpDiff.normalize out)
             | Error e -> Error e
 
-type private Pending = { Name: string; Stem: string; Program: Program; On: string; Off: string }
+/// `Ref` names the reference side: "OFF" (every gate off) or a KNOB-OFF
+/// MIRROR (`Optimize.optimizerGateMirrors`: the defaults with one gate at
+/// the value that keeps its pass's previous version, e.g.
+/// BLADE_COMPACTION_FUSION=b4), so a new version is compared against its
+/// predecessor as well as against no optimizer at all.
+type private Pending = { Name: string; Stem: string; Program: Program; On: string; Off: string; Ref: string; Culprits: string list option }
 
 let runOptDiffTests (categories: string list) (includeMultiFile: bool) : BlockResult =
     printHeader "Optimizer Differential (all gates OFF vs ON)"
@@ -122,6 +127,7 @@ let runOptDiffTests (categories: string list) (includeMultiFile: bool) : BlockRe
     Directory.CreateDirectory outDir |> ignore
     CodeGen.deployRuntimeHeaders outDir
     printfn "gates: %s" (String.concat ", " Optimize.optimizerGates)
+    printfn "knob-off mirrors (each also compared against the default): %s" (Optimize.optimizerGateMirrors |> List.map (fun (g, v) -> $"{g}={v}") |> String.concat ", ")
     let passed = ref 0
     let failed = ref 0
     let skipped = ref 0
@@ -162,17 +168,33 @@ let runOptDiffTests (categories: string list) (includeMultiFile: bool) : BlockRe
                 inert.Value <- inert.Value + 1
                 passed.Value <- passed.Value + 1
             | Emitted a, Emitted b ->
-                pending.Add { Name = name; Stem = $"{ordinal:D4}_{sanitizeFileName name}"; Program = program; On = a; Off = b }
+                pending.Add { Name = name; Stem = $"{ordinal:D4}_{sanitizeFileName name}"; Program = program; On = a; Off = b; Ref = "OFF"; Culprits = None }
             | Refused e, Emitted _ ->
                 fail name $"refused with the optimizer ON only: {firstLine e}"
             | Emitted _, Refused e ->
                 fail name $"refused with the optimizer OFF only: {firstLine e}"
+            // The knob-off MIRRORS: each against the default emission. A
+            // mirror that leaves the C++ unchanged adds nothing to run.
+            match on with
+            | Emitted a ->
+                for (gate, value) in Optimize.optimizerGateMirrors do
+                    let label = $"{gate}={value}"
+                    match withEnv (gatesDefault @ [ (gate, Some value) ]) (fun () -> emit name program) with
+                    | Emitted m when m = a -> ()
+                    | Emitted m ->
+                        let stem = $"{ordinal:D4}_{sanitizeFileName name}_" + sanitizeFileName value
+                        pending.Add { Name = name; Stem = stem; Program = program; On = a; Off = m; Ref = label; Culprits = Some [ label ] }
+                    | Refused e -> fail name $"refused under the mirror {label} only: {firstLine e}"
+            | Refused _ -> ()
         if lastCat <> "" then printfn "  (%s emitted)" lastCat
         printfn "emitted %d programs in %.1fs: %d with identical C++ (optimizer inert), %d to compile and run both ways"
             programs.Length sw.Elapsed.TotalSeconds inert.Value pending.Count
         // Which gates move a program's emission, by switching each off
         // alone (emission only -- cheap). Sequential, like phase 1.
         let culpritsOf (p: Pending) =
+            match p.Culprits with
+            | Some known -> known
+            | None ->
             Optimize.optimizerGates
             |> List.filter (fun g ->
                 match withEnv (gatesDefault @ gatesOff [ g ]) (fun () -> emit p.Name p.Program) with
@@ -200,7 +222,7 @@ let runOptDiffTests (categories: string list) (includeMultiFile: bool) : BlockRe
                 | Ok (ca, oa), Ok (cb, ob) when ca = cb && oa = ob ->
                     pass p.Name $"C++ differs ({who}), output identical"
                 | Ok (ca, oa), Ok (cb, ob) ->
-                    fail p.Name $"OUTPUT DIVERGES ({who}): exit {ca} ON vs {cb} OFF"
+                    fail p.Name $"OUTPUT DIVERGES ({who}): exit {ca} ON vs {cb} {p.Ref}"
                     let la = oa.Split('\n')
                     let lb = ob.Split('\n')
                     let firstDiff =
@@ -208,7 +230,7 @@ let runOptDiffTests (categories: string list) (includeMultiFile: bool) : BlockRe
                         |> Option.defaultValue (min la.Length lb.Length)
                     let at (ls: string[]) = if firstDiff < ls.Length then ls.[firstDiff] else "<end of output>"
                     printfn "    ON : %s" (at la)
-                    printfn "    OFF: %s" (at lb)
+                    printfn "    %s: %s" p.Ref (at lb)
                 | Error e, _ when isSkipError e -> skip p.Name e
                 | _, Error e when isSkipError e -> skip p.Name e
                 | Error ea, Error _ when p.On.Contains "#error" && p.Off.Contains "#error" ->
@@ -219,7 +241,7 @@ let runOptDiffTests (categories: string list) (includeMultiFile: bool) : BlockRe
                     // both failed to compile for some other reason (a
                     // missing header, a toolchain gap): nothing was observed
                     skip p.Name $"C++ differs ({who}); neither side compiled ({firstLine ea})"
-                | Error e, Ok _ -> fail p.Name $"only the OFF side compiled ({who}): {firstLine e}"
+                | Error e, Ok _ -> fail p.Name $"only the {p.Ref} side compiled ({who}): {firstLine e}"
                 | Ok _, Error e -> fail p.Name $"only the ON side compiled ({who}): {firstLine e}")
     printFooter blockName
         [ $"{passed.Value} passed ({inert.Value} optimizer-inert)"; $"{failed.Value} failed"; $"{skipped.Value} skipped"

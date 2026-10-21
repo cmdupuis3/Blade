@@ -139,6 +139,26 @@ let fpReproEnabled () : bool =
     envFlag "BLADE_FP_REPRO" false
     || envSwitch "BLADE_FP_REASSOC" = SwitchOff
 
+/// One key of BLADE_TILE_TUNE, the SPEED-ONLY parameter list (`key=value`
+/// pairs separated by commas, spaces or semicolons; unknown keys ignored, a
+/// malformed value = `dflt`). The one parser: the emitters' keys
+/// (`CodeGenExprSupport.tileTune`, which documents them) and the optimizer's
+/// (`sel_cap`, Optimize.compactionSelCapBytes) both read it here. Per call,
+/// never cached.
+let tileTune (key: string) (dflt: int64) : int64 =
+    match Environment.GetEnvironmentVariable "BLADE_TILE_TUNE" with
+    | null -> dflt
+    | v ->
+        v.Split([| ','; ' '; ';' |], StringSplitOptions.RemoveEmptyEntries)
+        |> Array.tryPick (fun kv ->
+            match kv.Split('=') with
+            | [| k; x |] when k.Trim().ToLowerInvariant() = key ->
+                match Int64.TryParse(x.Trim()) with
+                | true, n -> Some n
+                | _ -> None
+            | _ -> None)
+        |> Option.defaultValue dflt
+
 /// The threaded reduction join (bench gap G7, `CodeGenFusion.joinedFoldThreadPlan`):
 /// `BLADE_JOIN_THREADS` unset / `1` / `on` = an explicitly requested, fully
 /// licensed `<&!>` join opens one Path B team over its shared traversal;

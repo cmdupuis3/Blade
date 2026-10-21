@@ -1,0 +1,21 @@
+// TEST: Hot-row fold: a writer hidden in a random fill's key between the producer and the fold
+// The rank-2 hot-row schedule (`blade plan` rule `hot-row-fold`) would fold
+// each row of p right behind its store; `noise`'s key `bump(p)` (a side-table
+// operand, its binding's value a placeholder) writes p(0, 0) in between. The
+// interval audit reads every intervening module binding's whole payload and
+// declines (`noise` reads `p`): rows [9, 1] and [1, 1] fold to 82 + 2 = 84,
+// as written (the stale schedule would give 4). The cli block runs the
+// BLADE_HOT_ROW=0 twin.
+import rand as r
+type I = Idx<2>
+type J = Idx<2>
+function bump(a: mut Array<Float64 like I, J>) -> Int64 = {
+    a(0, 0) = 9.0
+    7
+}
+let mut p = method_for(range<I, J>) <@> lambda(i, j) -> 1.0 |> compute
+let noise = r.uniform(bump(p), 1)
+let s = reduce(method_for(p) <@> lambda(row) -> prodsum(row, row), (+), 0.0)
+// EXPECT: s = 84.0
+let p_after = p
+// EXPECT: p_after = [[9.0, 1.0], [1.0, 1.0]]

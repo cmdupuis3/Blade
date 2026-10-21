@@ -1,0 +1,21 @@
+// TEST: Compaction fusion: a writer hidden in a random fill's key between the mask and the compound
+// `noise`'s key `bump(x)` writes x(0) -- but a random fill's key lives in a
+// side table and its binding's value is a placeholder, so an admission that
+// audits only binding values sees nothing (W1-4 review finding 2). Every
+// admission audits the binding's whole PAYLOAD: B4's count motion stays (x is
+// not the mask; nothing can change `keep`), and the opt-in mask-site gather
+// (BLADE_COMPACTION_FUSION=gather) declines, so y gathers x AFTER the write,
+// as written: y = [9.0, 2.0], never the stale [1.0, 2.0].
+import rand as r
+type Ix = Idx<2>
+function bump(a: mut Array<Float64 like Ix>) -> Int64 = {
+    a(0) = 9.0
+    7
+}
+let mut x: Array<Float64 like Ix> = [1.0, 2.0]
+let keep = mask(x, lambda(v) -> v > 0.0)
+let noise = r.uniform(bump(x), 1)
+let y = compound(x, keep)
+// EXPECT: y = [9.0, 2.0]
+let s = reduce(y, (+))
+// EXPECT: s = 11.0
