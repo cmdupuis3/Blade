@@ -1856,12 +1856,27 @@ let runRowContractionTileTests () : BlockResult =
           ("antisym_tile_knob_off_keeps_the_nest", [ ("BLADE_ANTISYM_TILE", "0") ],
            antiSrc 29 11 "anticomm(a, b)" antiBody,
            [ "z____i0"; "__i1 < 29 - __i0 - 1" ], [ "dantisym_tri" ])
+          // The licence makes the driver call `threaded` (the argument is the
+          // request, unchanged). anti_g's unset default follows the TILE's
+          // regime (round 3, W2-0b): at 29 x 11 the driver's static work cap
+          // (p * p * n) >> 20 is 0, so no team can ever form and G stays 1;
+          // at 193 x 401 (cap 14) the tile is team-eligible and takes the
+          // cache budget's G = 4; anti_g=1 forces the previous order there.
           ("antisym_tile_takes_the_omp_licence", [],
            antiSrc 29 11 "anticomm(a, b), omp(a: 1)" antiBody,
-           [ "nested_array_utilities::pool_base(l.data), 0, (double)(0.0), true, 0, 0, (size_t)0, (size_t)1);" ], [ "z____i0" ])
+           [ "nested_array_utilities::pool_base(l.data), 0, (double)(0.0), true, 0, 0, (size_t)0, (size_t)1);"; "row groups of 1, per cell" ], [ "z____i0" ])
           ("antisym_tile_census_under_serial_emission", [ ("BLADE_OMP_THREADS", "1") ],
            antiSrc 29 11 "anticomm(a, b), omp(a: 1)" antiBody,
            [ "[omp] requested but emitted serial"; "(double)(0.0), false, 0, 0, (size_t)0, (size_t)1);" ], [ "z____i0" ])
+          ("antisym_tile_team_eligible_takes_the_cache_budget", [],
+           antiSrc 193 401 "anticomm(a, b), omp(a: 1)" antiBody,
+           [ "blade_pgemm::dantisym_tri((size_t)(193), (size_t)(401), z.data, (size_t)0, (size_t)1, nested_array_utilities::pool_base(l.data), 0, (double)(0.0), true, 0, 0, (size_t)0, (size_t)4);"; "row groups of 4, per cell" ], [ "z____i0" ])
+          ("antisym_tile_team_eligible_serial_emission_keeps_one", [ ("BLADE_OMP_THREADS", "1") ],
+           antiSrc 193 401 "anticomm(a, b), omp(a: 1)" antiBody,
+           [ "(double)(0.0), false, 0, 0, (size_t)0, (size_t)1);" ], [ "z____i0" ])
+          ("antisym_tile_team_eligible_row_groups_forced_to_one", [ ("BLADE_TILE_TUNE", "anti_g=1") ],
+           antiSrc 193 401 "anticomm(a, b), omp(a: 1)" antiBody,
+           [ "(double)(0.0), true, 0, 0, (size_t)0, (size_t)1);" ], [ "z____i0" ])
           ("antisym_tile_scale_divides_the_finished_cell", [],
            antiSrc 29 11 "anticomm(a, b)" ("(" + antiBody + ") / 4.0"),
            [ "pool_base(l.data), 1, (double)(4.0), false, 0, 0, (size_t)0, (size_t)1);" ], [ "z____i0" ])
@@ -1870,8 +1885,9 @@ let runRowContractionTileTests () : BlockResult =
           ("antisym_tile_sample_blocks_under_the_tune_knob", [ ("BLADE_TILE_TUNE", "anti_kc=100") ],
            antiSrc 29 11 "anticomm(a, b)" antiBody,
            [ "pool_base(l.data), 0, (double)(0.0), false, 0, 0, (size_t)100, (size_t)1);" ], [ "z____i0" ])
-          // Row-panel groups (BLADE_TILE_TUNE anti_g; unset = 1, the default;
-          // 0 = the compile-time cache budget: n = 11 -> 4, n = 1001 -> 1) ride
+          // Row-panel groups (BLADE_TILE_TUNE anti_g; unset = 1 for these
+          // serial tiles; 0 = the compile-time cache budget: n = 11 -> 4,
+          // n = 1001 -> 1) ride
           // the call as its last argument (speed only; the bits are pinned by
           // `blade test row-tile`).
           ("antisym_tile_row_groups_cache_budget_policy", [ ("BLADE_TILE_TUNE", "anti_g=0") ],

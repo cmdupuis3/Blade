@@ -456,8 +456,11 @@ shape) / `planLicensed` (the orbit-class fold, unchanged) / `planStrict` (the sc
 C++ `blade_orbit_scatter.hpp`, LLVM `EmitLlvm.emitOrbitScatter`. v1 declines AntisymIdx
 (mirror -x and +0 events), rank >= 4, mixed licensed/strict nests and coordinate-dependent
 seeds; the knob is `BLADE_ORBIT_SCATTER`. Threading: the column chains make it a
-wavefront, so the threaded strict form is G35 (complete rows on threads), which wins when
-taken.
+wavefront, so the threaded strict form is G35 (complete rows on threads). Precedence
+where BOTH admit a walk: since round 3 (W2-0a, measured faster under mt8 repro) the
+DEFAULT takes the scatter, `BLADE_FOLD_ROW_SLOTS=prefer` takes the row slots (the
+round-2 order, when G35 won whenever taken -- historical), and `BLADE_FOLD_ROW_SLOTS=0`
+disables the row slots only (the scatter then serves the walk where it admits it).
 
 ## 6. Corpus and diagnostics
 

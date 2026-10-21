@@ -564,17 +564,39 @@ let runCliSmokeTests () : TH.BlockResult =
                     + "let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 11) * 0.37 |> compute\n"
                     + "let g = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute\n"
                     + "let s = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * g(i, j), (+)), lambda(u, v) where omp -> u + v, 0.0)\n")
-                let slotEnv llvm = [ ("BLADE_LLVM", llvm); ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", null); ("BLADE_FOLD_ROW_SLOTS", null) ]
+                let slotEnvKnob llvm knob = [ ("BLADE_LLVM", llvm); ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", null); ("BLADE_FOLD_ROW_SLOTS", knob) ]
+                let slotEnv llvm = slotEnvKnob llvm null
+                // THE PRECEDENCE (round 3, W2-0a): this walk is one BOTH the row
+                // slots and the ordered orbit scatter admit; by default the
+                // scatter is taken and the row-slot record says it yielded.
                 let (code, out, err) = spawnWith (slotEnv null) dir [ "plan"; "rowslots.blade" ]
-                recordCase "cli: `plan` (C++ lane, BLADE_FP_REPRO=1) reports the threaded complete-row form applied"
+                recordCase "cli: `plan` (C++ lane, BLADE_FP_REPRO=1) reports the ordered orbit scatter taken over the admitted row-slot form"
+                    (code = 0 && out.Contains "applied [fold form: ordered orbit scatter (rank 2, extent 521, row groups of 4)"
+                     && out.Contains ("declined -- row-slot form: " + Blade.OrbitFold.rowSlotsYieldedToScatter + " [" + Blade.OrbitFold.rowSlotsYieldedForm)
+                     && out.Contains "the ordered orbit scatter runs serially (its chains thread only as a wavefront; the threaded complete-row form admitted but yielded"
+                     && not (out.Contains "fold form: threaded complete rows (repro): 521"))
+                    (out + err)
+                // BLADE_FOLD_ROW_SLOTS=prefer: the round-2 order and its records.
+                let (code, out, err) = spawnWith (slotEnvKnob null "prefer") dir [ "plan"; "rowslots.blade" ]
+                recordCase "cli: `plan` (C++ lane, BLADE_FP_REPRO=1, BLADE_FOLD_ROW_SLOTS=prefer) reports the threaded complete-row form applied"
                     (code = 0 && out.Contains ": applied [fold form: threaded complete rows (repro): 521 row folds"
-                     // G35 PRECEDENCE: the scatter the same walk admits is recorded as yielded
-                     && out.Contains "declined -- ordered orbit scatter not taken: the threaded complete-row form (G35) is taken under the omp request")
+                     // G35 PRECEDENCE under prefer: the scatter the same walk admits is recorded as yielded
+                     && out.Contains "declined -- ordered orbit scatter not taken: the threaded complete-row form (G35) is taken under the omp request (BLADE_FOLD_ROW_SLOTS=prefer")
                     (out + err)
                 let (code, out, err) = spawnWith (slotEnv "1") dir [ "plan"; "rowslots.blade" ]
-                // The walk is one the ordered orbit scatter admits: the serial
-                // LLVM lane takes the scatter (both records say so).
-                recordCase "cli: `plan` under BLADE_LLVM=1 restates the row-slot form, and the LLVM emitter's own record says it scatters"
+                // The LLVM lane (no threads, no row slots) is unchanged: its
+                // emitter's own record says it scatters, and the C++ lane's
+                // yielded row-slot record is restated in this lane's words.
+                recordCase "cli: `plan` under BLADE_LLVM=1 restates the yielded row-slot form, and the LLVM emitter's own record says it scatters"
+                    (code = 0 && out.Contains "declined -- the LLVM lane has no thread runtime (no threaded complete-row form); this lane's scatter record for the walk says which form it runs"
+                     && out.Contains "applied [fold form: ordered orbit scatter (rank 2, extent 521, row groups of 4)"
+                     && out.Contains "(recorded by the LLVM lane's emitter); C++ lane: applied"
+                     && not (out.Contains "fold form: one accumulator chain with `reassoc nsz` (LLVM lane; the vectorizer picks the lanes); C++ lane fold form: ordered orbit scatter (repro"))
+                    (out + err)
+                let (code, out, err) = spawnWith (slotEnvKnob "1" "prefer") dir [ "plan"; "rowslots.blade" ]
+                // ...and under prefer the C++ lane's row slots are restated as
+                // the serial walk the LLVM lane scatters (both records say so).
+                recordCase "cli: `plan` under BLADE_LLVM=1, BLADE_FOLD_ROW_SLOTS=prefer restates the row-slot form, and the LLVM emitter's own record says it scatters"
                     (code = 0 && out.Contains "declined -- the LLVM lane has no thread runtime: it runs this walk serially in the same association"
                      && out.Contains "applied [fold form: ordered orbit scatter (rank 2, extent 521, row groups of 4)"
                      && out.Contains "(recorded by the LLVM lane's emitter); C++ lane: declined -- ordered orbit scatter not taken: the threaded complete-row form (G35)"
@@ -582,9 +604,15 @@ let runCliSmokeTests () : TH.BlockResult =
                      && not (out.Contains "fold form: one accumulator chain with `reassoc nsz` (LLVM lane; the vectorizer picks the lanes); C++ lane fold form: threaded complete rows"))
                     (out + err)
                 // A walk the scatter declines (the body reads the mirror cell
-                // too): the LLVM lane's form is the serial walk.
+                // too): the row slots are the C++ form by default, and the LLVM
+                // lane's form is the serial walk.
                 File.WriteAllText(Path.Combine(dir, "rowslots_walk.blade"),
                     File.ReadAllText(Path.Combine(dir, "rowslots.blade")).Replace("g(i, j) * g(i, j)", "g(i, j) * g(j, i)"))
+                let (code, out, err) = spawnWith (slotEnv null) dir [ "plan"; "rowslots_walk.blade" ]
+                recordCase "cli: `plan` (C++ lane, BLADE_FP_REPRO=1) keeps the threaded complete-row form where the scatter declines"
+                    (code = 0 && out.Contains ": applied [fold form: threaded complete rows (repro): 521 row folds"
+                     && not (out.Contains "admitted but yielded"))
+                    (out + err)
                 let (code, out, err) = spawnWith (slotEnv "1") dir [ "plan"; "rowslots_walk.blade" ]
                 recordCase "cli: `plan` under BLADE_LLVM=1 restates the row-slot form as the LLVM lane's serial walk (scatter declined)"
                     (code = 0 && out.Contains "declined -- the LLVM lane has no thread runtime: it runs the serial walk"
@@ -664,7 +692,8 @@ let runCliSmokeTests () : TH.BlockResult =
                     let (code, out, err) = spawnWith (rowEnv "BLADE_ANTISYM_TILE" null repro) dir [ "plan"; "anti.blade" ]
                     recordCase $"cli: `plan` under BLADE_LLVM=1 ({build}) reports the antisym tile through the shared C core"
                         (code = 0 && out.Contains "fold form: antisym tile (shared C core) sequential 6x8"
-                         && out.Contains "whole chain per tile, row groups of 1 (the default; BLADE_TILE_TUNE anti_g=0 selects the cache-budget groups)"
+                         // the LLVM lane is the serial regime: anti_g's default is 1 there
+                         && out.Contains ("whole chain per tile, " + Blade.CodeGenExprSupport.antisymSerialDefaultNote Blade.CodeGenExprSupport.antisymNoTeamRequested)
                          && out.Contains "[microkernel v1] l @ "
                          && out.Contains ": applied [antisym tile (shared C core")
                         (out + err)

@@ -2153,8 +2153,10 @@ let syrkTileKc (k: int64) : int64 =
 ///            spilled and reloaded exactly between balanced blocks; 0 = the
 ///            whole chain in one block, the default)
 ///   anti_g   row panels per GROUP in dantisym_tri / blade_dantisym_tri_f64:
-///            unset = 1 (the previous order, the default), 0 = the
-///            compile-time cache budget (`antisymRowGroup`), 1..8 = forced
+///            unset = per regime (`antisymRowGroup`: 1, the previous order,
+///            for a serial tile; the cache budget for a TEAM-ELIGIBLE one --
+///            licence, thread emission, static work cap >= 2), 0 = the
+///            compile-time cache budget, 1..8 = forced
 ///   tri_edge the syrk / simplex EDGE tiles' kloop (blade_tiles.h
 ///            blade_tri_tile_edge): 1 = only the accumulators with a real lane
 ///            (the default), 0 = the full 6 x 8 kloop
@@ -2180,6 +2182,26 @@ let antisymKcMax () : int64 = max 0L (tileTune "anti_kc" 0L)
 /// spills, the packing stream and the other data the visit touches.
 let antisymRowGroupBudgetBytes = 256L * 1024L
 
+/// The antisym driver's STATIC work cap on its team (blade_packed_gemm.hpp
+/// `dantisym_tri`: T = max(1, min(omp_get_max_threads(), (p * p * n) >> 20)),
+/// a team only when T > 1 and not inside an enclosing parallel region),
+/// computed here without overflow. A cap below 2 means the driver runs
+/// serially whatever the thread count.
+let antisymTeamWorkCap (p: int64) (n: int64) : bigint =
+    (bigint (max 0L p) * bigint (max 0L p) * bigint (max 0L n)) / bigint (1L <<< 20)
+
+/// The plan phrases of anti_g's per-regime default (`antisymRowGroup`).
+/// Why a tile is in the SERIAL regime, by cause.
+let antisymNoTeamRequested =
+    "no thread team is requested for this tile (no omp licence on the kernel, thread emission off, or the LLVM lane)"
+let antisymNoTeamByWorkCap (cap: bigint) =
+    $"the driver's static work cap (p * p * n) >> 20 = {cap} admits no team of two, so the tile runs serially at any thread count"
+let antisymSerialDefaultNote (why: string) =
+    $"row groups of 1 (the serial-tile default: {why}; G = 1 measured faster than the cache-budget groups serially, round 3; BLADE_TILE_TUNE anti_g=0 selects the cache-budget groups)"
+/// The suffix of the TEAM-ELIGIBLE regime's cache-budget phrase.
+let antisymTeamEligibleNote (cap: bigint) =
+    $"; the team-eligible-tile default: the omp licence, thread emission and the driver's static work cap (p * p * n) >> 20 = {cap} >= 2 make this tile ELIGIBLE for the driver's thread team -- the runtime team is min(OMP_NUM_THREADS, cap), none at one thread or inside an enclosing parallel region -- and the cache-budget groups measured faster than G = 1 under mt8, round 3; BLADE_TILE_TUNE anti_g=1 keeps the previous order"
+
 /// dantisym_tri's row panels per group and the plan phrase that states why
 /// (BLADE_TILE_TUNE anti_g; the C++ driver's and the LLVM core's rowGroup).
 /// A GROUP packs G row panels' X(i) / Y(i) pairs (G x 2 x RM x n doubles per
@@ -2187,10 +2209,24 @@ let antisymRowGroupBudgetBytes = 256L * 1024L
 /// doubles) with every member in turn: each member rereads the pair; the
 /// modeled lower-cache traffic assumes one fetch per group and residency
 /// across its visits (a model, not a measured fetch count).
-/// DEFAULT (anti_g unset): G = 1, the previous order -- the round-2
-/// directional A/B did not show the auto policy winning (serial G = 4 was
-/// 5-7.5% slower on a quiet box), so it is not promoted until the runner's
-/// A/B says so. anti_g = 0: the cache-budget policy, the largest fitting G in
+/// DEFAULT (anti_g unset) PER REGIME (round 3, W2-0b; the wave-1 harness
+/// A/B, bench/notes/round3/w1-ab.md, three interleaved sessions per mirror,
+/// pooled n = 63): a SERIAL tile takes G = 1, the previous order (the cache
+/// budget measured 1.0-2.0% SLOWER serially: 1.010 llvm, 1.020 cpp); a
+/// TEAM-ELIGIBLE tile takes the cache-budget policy (measured 4.8% FASTER
+/// under mt8: 0.952 [0.929, 0.987] cpp). Team-eligible = the driver is asked
+/// for a team (`teamRequested`: the kernel's omp licence AND thread emission
+/// on -- the driver's own `threaded` argument, unchanged) AND its STATIC work
+/// cap (`antisymTeamWorkCap`, (p * p * n) >> 20) is at least 2: below that the
+/// driver never forms a team (29 x 11: cap 0; 61 x 401: cap 1; 193 x 401: 14;
+/// the bench's 1201 x 401: 551). Everything else is serial: thread emission
+/// off (BLADE_OMP_THREADS=1/0/off), no licence, a cap below 2, or the LLVM
+/// lane (no thread runtime). ELIGIBILITY, not a guaranteed team: at run time
+/// OMP_NUM_THREADS=1 or an enclosing parallel region still runs the call
+/// serially (with the cache-budget G, which no bit depends on). The regime
+/// is the tile's own, not the build's: an unlicensed tile in a threaded build
+/// runs serially, which is the serial measurement's situation. anti_g = 0:
+/// the cache-budget policy in either regime, the largest fitting G in
 /// {4, 2}, otherwise 1, with
 ///     G * 2 * RM * n * 8 + 2 * RN * n * 8 <= 256 KiB,
 /// decided at COMPILE time on the literal n (the header carries no copy of
@@ -2198,27 +2234,35 @@ let antisymRowGroupBudgetBytes = 256L * 1024L
 /// group is visiting -- not the whole packed B (n = 401: 4 groups' A pairs
 /// 150.4 KiB + the B pair 50.1 KiB = 200.5 KiB, G = 4; n = 1001: G = 2 needs
 /// 312.8 KiB, G = 1). The fallback G = 1 need not fit either (6x8 at n = 1201
-/// needs 269,024 B): it is simply the previous order. 1..8 forces G. No bit
-/// depends on G: the group visits the same (i0, j0) tile calls with the same
-/// arguments, in another order.
+/// needs 269,024 B): it is simply the previous order. 1..8 forces G (in
+/// either regime). No bit depends on G: the group visits the same (i0, j0)
+/// tile calls with the same arguments, in another order.
 /// `paired` = the 4 x 4 schedule (RM = RN = 4), else the sequential 6 x 8.
-let antisymRowGroup (p: int64) (n: int64) (paired: bool) : int64 * string =
-    ignore p
+/// `teamRequested` = the C++ lane's `threaded` driver argument (licence AND
+/// thread emission); always false in the LLVM lane.
+let antisymRowGroup (p: int64) (n: int64) (paired: bool) (teamRequested: bool) : int64 * string =
     let rm, rn = if paired then 4L, 4L else 6L, 8L
+    let cap = antisymTeamWorkCap p n
+    let teamEligible = teamRequested && cap >= 2I
     let bytes (g: int64) = g * 2L * rm * n * 8L + 2L * rn * n * 8L
+    let budgetPolicy (why: string) =
+        let budget = antisymRowGroupBudgetBytes
+        match [ 4L; 2L ] |> List.tryFind (fun g -> bytes g <= budget) with
+        | Some g -> g, $"row groups of {g} (cache budget {bytes g / 1024L} KiB of {budget / 1024L} KiB{why})"
+        | None ->
+            let over = (bytes 2L + 1023L) / 1024L
+            1L, $"row groups of 1 -- cache budget: B pair + 2 row panels = {over} KiB > {budget / 1024L} KiB{why}"
     match tileTune "anti_g" -1L with
     | v when v >= 1L ->
         let g = min 8L v
         g, $"row groups of {g} (BLADE_TILE_TUNE anti_g={g})"
+    | v when v < 0L && not teamRequested ->
+        1L, antisymSerialDefaultNote antisymNoTeamRequested
+    | v when v < 0L && not teamEligible ->
+        1L, antisymSerialDefaultNote (antisymNoTeamByWorkCap cap)
     | v when v < 0L ->
-        1L, "row groups of 1 (the default; BLADE_TILE_TUNE anti_g=0 selects the cache-budget groups)"
-    | _ ->
-        let budget = antisymRowGroupBudgetBytes
-        match [ 4L; 2L ] |> List.tryFind (fun g -> bytes g <= budget) with
-        | Some g -> g, $"row groups of {g} (cache budget {bytes g / 1024L} KiB of {budget / 1024L} KiB)"
-        | None ->
-            let over = (bytes 2L + 1023L) / 1024L
-            1L, $"row groups of 1 -- cache budget: B pair + 2 row panels = {over} KiB > {budget / 1024L} KiB"
+        budgetPolicy (antisymTeamEligibleNote cap)
+    | _ -> budgetPolicy ""
 
 /// The syrk / simplex edge tiles' kloop (BLADE_TILE_TUNE tri_edge): 1 = the
 /// live-accumulator variants (default), 0 = the full 6 x 8 kloop. Speed only.
@@ -2238,14 +2282,36 @@ let triEdgeNote (edge: int64) : string =
 /// timing behind it yet. Speed-only: no bit depends on it.
 let rowSlotsMin () : int64 = max 0L (tileTune "rowslots_min" 262144L)
 
-/// BLADE_FOLD_ROW_SLOTS: unset / `1` / `on` = under BLADE_FP_REPRO=1 (or
-/// BLADE_FP_REASSOC=0) a `where omp` fold whose outer level's value is one
-/// complete scalar fold per index runs those row folds on the thread team
-/// into indexed slots, then the outer chain serially (G35); `0` / `off` =
-/// the serial walk, for A/B. Emission-only (C++ lane; the LLVM lane has no
-/// thread runtime). A FUNCTION, read per call.
-let foldRowSlotsEnabled () : bool =
-    Blade.Toolchain.envSwitch "BLADE_FOLD_ROW_SLOTS" <> Blade.Toolchain.SwitchOff
+/// BLADE_FOLD_ROW_SLOTS, a POLICY knob (round 3, W2-0a):
+///   unset / `1` / `on` / `true` = under BLADE_FP_REPRO=1 (or BLADE_FP_REASSOC=0) a
+///             `where omp` fold whose outer level's value is one complete
+///             scalar fold per index runs those row folds on the thread team
+///             into indexed slots, then the outer chain serially (G35) --
+///             EXCEPT where the ordered orbit scatter admits the same walk:
+///             there the scatter takes precedence (measured faster under mt8
+///             repro, round 3: pairkernel 0.841, comoment3 0.843 of the row
+///             slots' time, bench/notes/round3/w1-ab.md);
+///   `prefer` = the row slots win wherever both admit (the round-2 order);
+///   `0` / `off` / `false` = no row slots at all (the serial walk, or the
+///             scatter where it admits the walk).
+/// Any other spelling reads as the default. Emission-only (C++ lane; the
+/// LLVM lane has no thread runtime). FUNCTIONS, read per call.
+type RowSlotsPolicy =
+    | RowSlotsOff
+    | RowSlotsAdmit
+    | RowSlotsPrefer
+
+let foldRowSlotsPolicy () : RowSlotsPolicy =
+    match Blade.Toolchain.envSwitch "BLADE_FOLD_ROW_SLOTS" with
+    | Blade.Toolchain.SwitchOff -> RowSlotsOff
+    | Blade.Toolchain.SwitchOther t when t.ToLowerInvariant() = "prefer" -> RowSlotsPrefer
+    | _ -> RowSlotsAdmit
+
+let foldRowSlotsEnabled () : bool = foldRowSlotsPolicy () <> RowSlotsOff
+
+/// `BLADE_FOLD_ROW_SLOTS=prefer`: a taken row-slot form wins over an
+/// admitted ordered orbit scatter (the round-2 precedence).
+let foldRowSlotsPreferred () : bool = foldRowSlotsPolicy () = RowSlotsPrefer
 
 /// B1's producer block between lane-state feeds (BLADE_TILE_TUNE epi_blk,
 /// round-2 cell epilogues): cells per block, default 256 (2 KB of double).

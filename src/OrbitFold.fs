@@ -864,11 +864,41 @@ let recordScatterDeclined (subject: string) (why: string) : unit =
 /// scatter it takes there.
 let scatterG35Precedence = "the threaded complete-row form (G35) is taken under the omp request"
 
-/// The C++ lane took G35 for a walk the scatter admits: record why the
-/// scatter was not taken there, with its form for the serial lanes.
+/// THE PRECEDENCE (round 3, W2-0a): when the G35 row-slot form AND the
+/// ordered scatter both admit a walk (repro, threads on, an omp request on
+/// the outer level, a stored SymIdx<2/3> pool, every level strict, the
+/// closed total whitelist), the SCATTER is taken -- measured faster under
+/// mt8 repro in the wave-1 harness A/B (bench/notes/round3/w1-ab.md, 21
+/// interleaved rounds, blade-cpp: pairkernel 9.23 -> 7.76 ms, 0.841
+/// [0.811, 0.872]; comoment3 4.43 -> 3.74 ms, 0.843 [0.817, 0.885]). Both
+/// strict forms are bitwise the serial walk under REPRO + CONTRACT=off --
+/// PINNED as raw uint64 bits (cancellation, -0.0, distinct NaN payloads) by
+/// `blade test omp-reduce` scatter_precedence_raw_bits_rank{2,3}, not inferred
+/// from timings. Default = the scatter where both admit;
+/// `BLADE_FOLD_ROW_SLOTS=prefer` = the row slots (the round-2 order;
+/// `recordScatterYieldedToRows`); `0` = row slots off. The row slots stay the
+/// form of every walk the scatter does not admit.
+let rowSlotsYieldedToScatter =
+    "admitted, but the ordered orbit scatter admits the same walk and takes precedence (measured faster under mt8 repro, round 3: pairkernel 0.841, comoment3 0.843 of the row slots' time; BLADE_FOLD_ROW_SLOTS=prefer gives the row slots)"
+
+/// The form line of that yielded row-slot record (`blade plan`).
+let rowSlotsYieldedForm =
+    "fold form: ordered orbit scatter (repro; the threaded complete-row form admitted but yielded: measured slower, round 3)"
+
+/// The census clause of the scatter's omp note when the row slots yielded.
+let rowSlotsYieldedCensus =
+    "the threaded complete-row form admitted but yielded to the scatter: measured slower under mt8 repro, round 3 (BLADE_FOLD_ROW_SLOTS=prefer spends the request on the row-slot team)"
+
+/// The prefix every row-slot record whose walk the C++ plan scatters carries
+/// (declined, or admitted and yielded): the LLVM lane restates both the same way.
+let rowSlotsScatterFormPrefix = "fold form: ordered orbit scatter (repro; the threaded complete-row form "
+
+/// The C++ lane took G35 for a walk the scatter admits (only under
+/// BLADE_FOLD_ROW_SLOTS=prefer since round 3): record why the scatter was not
+/// taken there, with its form for the serial lanes.
 let recordScatterYieldedToRows (subject: string) (p: StrictPlan) : unit =
     recordCodegenDecision "fold-form" subject
-        (Blade.Effects.Declined $"ordered orbit scatter not taken: {scatterG35Precedence} (BLADE_OMP_THREADS=1 or BLADE_FOLD_ROW_SLOTS=0 gives the scatter)")
+        (Blade.Effects.Declined $"ordered orbit scatter not taken: {scatterG35Precedence} (BLADE_FOLD_ROW_SLOTS=prefer; unset, 0 or BLADE_OMP_THREADS=1 gives the scatter)")
         [ "fold form: " + scatterForm p; scatterEvidence p ]
 
 /// The body read at the MIRROR value: `f(-x)` (the strict group's odd orbit

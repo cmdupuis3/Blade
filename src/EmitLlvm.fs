@@ -5446,10 +5446,11 @@ and private tryRowTileCore (c: Ctx) (a: ArrVal) : ArrVal option =
             let scaleMode, scaleVal = scaleArgs ()
             let zPtr = operandPtr ()
             let out = allocPool c ScF64 (string (shapeCells a.Groups))
-            // Row-panel groups: the C++ lane's rule (antisymRowGroup), the
-            // scratch sized for them (a short scratch would silently drop the
-            // core to its scalar chain).
-            let g, groupNote = Blade.CodeGenExprSupport.antisymRowGroup p n paired
+            // Row-panel groups: the C++ lane's rule (antisymRowGroup) in its
+            // SERIAL regime (this lane has no thread runtime, so the default
+            // is G = 1), the scratch sized for them (a short scratch would
+            // silently drop the core to its scalar chain).
+            let g, groupNote = Blade.CodeGenExprSupport.antisymRowGroup p n paired false
             let scratchCells = antisymTileScratchCells p n paired g
             let scratch = allocPool c ScF64 (string scratchCells)
             let kcMax = Blade.CodeGenExprSupport.antisymKcMax ()

@@ -3491,8 +3491,8 @@ let internal tryGenRowContractionTile
             | Some (Blade.LinAlgPatterns.ScaleDiv d) -> renderScalar d |> Option.map (fun t -> (1, t))
             | Some (Blade.LinAlgPatterns.ScaleMul s) -> renderScalar s |> Option.map (fun t -> (2, t))
         let lit (s: string) = match System.Int64.TryParse s with | true, v -> Some v | _ -> None
-        let threadedArg =
-            if codeGen.OmpRequested && ompThreadEmissionEnabled () then "true" else "false"
+        let threaded = codeGen.OmpRequested && ompThreadEmissionEnabled ()
+        let threadedArg = if threaded then "true" else "false"
         // The omp census: a licensed kernel's team is the DRIVER's (row panels
         // / i sub-simplices under schedule(dynamic); cells split across the
         // team, sums never), recorded as applied; a licence the build knob
@@ -3540,9 +3540,13 @@ let internal tryGenRowContractionTile
                 let chainNote =
                     if kcMax = 0L || kcMax >= n then "whole chain per tile"
                     else $"whole chain per tile in sample blocks of <= {kcMax}"
-                // Row-panel groups (BLADE_TILE_TUNE anti_g; 1 by default, 0 =
-                // the cache budget): the visiting order only, never a bit.
-                let (g, groupNote) = antisymRowGroup p n (variant = 1)
+                // Row-panel groups (BLADE_TILE_TUNE anti_g; unset = per
+                // regime: 1 for a serial tile, the cache budget for one
+                // ELIGIBLE for the driver's team -- `threaded` here plus the
+                // driver's static work cap, checked inside; 0 = the cache
+                // budget): the visiting order only, never a bit. The driver
+                // argument `threaded` itself is unchanged.
+                let (g, groupNote) = antisymRowGroup p n (variant = 1) threaded
                 recordCodegenDecision "microkernel" cName Blade.Effects.Applied
                     [ $"antisym tile (blade_pgemm::dantisym_tri, {form}, strict packed triangle)"
                       $"P={p} N={n} components=({cx},{cy}) KC={kcMax} G={g}" ]

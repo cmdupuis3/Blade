@@ -2328,6 +2328,12 @@ type S = Idx<{n}>
     + "let l = method_for(z, z) <@> lambda(a: Array<Float64 like C, S>, b: Array<Float64 like C, S>) where anticomm(a, b) -> prodsum(a((0 : C)), b((1 : C))) - prodsum(b((0 : C)), a((1 : C))) |> compute
 "
 
+/// ...with the bench's thread licence on the kernel's level 0 (`omp(a: 1)`):
+/// with thread emission on, the tile driver runs a team (anti_g's threaded
+/// regime, round 3 W2-0b).
+let private planAntiOmpSrc (p: int) (n: int) =
+    (planAntiSrc p n).Replace("where anticomm(a, b) ->", "where anticomm(a, b), omp(a: 1) ->")
+
 /// The rank-3 simplex `prodsum(a, b, c) / Float64(n)` (review item M8's
 /// spelling, bench/kernels/comoment3).
 let private planSym3Src (p: int) (n: int) =
@@ -2622,13 +2628,62 @@ let private planCases () =
           planCase "plan_antisym_tile_row_groups_knob" (planAntiSrc 61 401) "fold-form"
               (fun d -> applied d && evidenceMentioning "whole chain per tile, row groups of 2 (BLADE_TILE_TUNE anti_g=2)" d)
               "BLADE_TILE_TUNE anti_g=2 names the row group"))
-      // The DEFAULT (unset) is G = 1, the previous order, until an A/B
-      // promotes the policy; anti_g=0 selects the cache-budget policy.
+      // The DEFAULT (unset) is PER REGIME (round 3, W2-0b, measured in the
+      // wave-1 harness A/B): a SERIAL tile keeps G = 1, the previous order; a
+      // TEAM-ELIGIBLE tile -- licence + thread emission + the driver's static
+      // work cap (p * p * n) >> 20 >= 2 -- takes the cache-budget groups. The
+      // cap is what the driver itself checks: 61 x 401 (cap 1) and 29 x 11
+      // (cap 0) never form a team, 193 x 401 (cap 14) and 61 x 1201 (cap 4)
+      // may. anti_g=0 / 1..8 force either regime's choice unconditionally.
+      let serialBy (why: string) = Blade.CodeGenExprSupport.antisymSerialDefaultNote why
+      let eligible (cap: int) = Blade.CodeGenExprSupport.antisymTeamEligibleNote (bigint cap)
+      let seq6x8 = "fold form: antisym tile sequential 6x8 (P pass, spill, Q pass), whole chain per tile, "
+      let antiDefault (name: string) (src: string) (threads: string) (rule: string) (want: Blade.Effects.Decision -> bool) (describe: string) =
+          withGate "BLADE_ANTISYM_TILE" null (fun () ->
+           withGate "BLADE_TILE_TUNE" null (fun () ->
+            withGate "BLADE_OMP_THREADS" threads (fun () -> planCase name src rule want describe)))
+      antiDefault "plan_antisym_tile_row_groups_default" (planAntiSrc 61 401) null "fold-form"
+          (fun d -> applied d && evidenceMentioning (seq6x8 + serialBy Blade.CodeGenExprSupport.antisymNoTeamRequested) d)
+          "unset, no omp licence (a serial tile in a threaded build): row groups of 1, the serial-tile default named"
+      antiDefault "plan_antisym_tile_row_groups_default_team_eligible" (planAntiOmpSrc 193 401) null "fold-form"
+          (fun d -> applied d && evidenceMentioning (seq6x8 + "row groups of 4 (cache budget 200 KiB of 256 KiB" + eligible 14 + ")") d)
+          "unset, licence, threads on, 193 x 401 (static cap 14): row groups of 4 by the cache budget, the team-eligible default named"
+      antiDefault "plan_antisym_tile_row_groups_default_team_eligible_micro_g4" (planAntiOmpSrc 193 401) null "microkernel"
+          (fun d -> applied d && evidenceMentioning "P=193 N=401 components=(0,1) KC=0 G=4" d)
+          "unset, team-eligible tile: the microkernel record carries G=4"
+      antiDefault "plan_antisym_tile_row_groups_default_team_eligible_long_chain" (planAntiOmpSrc 61 1201) null "fold-form"
+          (fun d -> applied d && evidenceMentioning ("row groups of 1 -- cache budget: B pair + 2 row panels = 376 KiB > 256 KiB" + eligible 4) d)
+          "unset, team-eligible tile (cap 4), n = 1201: the cache budget falls to 1, the regime named"
+      antiDefault "plan_antisym_tile_row_groups_default_cap_one_serial" (planAntiOmpSrc 61 401) null "fold-form"
+          (fun d -> applied d && evidenceMentioning (seq6x8 + serialBy (Blade.CodeGenExprSupport.antisymNoTeamByWorkCap 1I)) d)
+          "unset, licence, threads on, 61 x 401: static cap 1, so no team can form -- row groups of 1, the cause named"
+      antiDefault "plan_antisym_tile_row_groups_default_cap_one_micro_g1" (planAntiOmpSrc 61 401) null "microkernel"
+          (fun d -> applied d && evidenceMentioning "P=61 N=401 components=(0,1) KC=0 G=1" d)
+          "unset, cap-1 tile: the microkernel record carries G=1"
+      antiDefault "plan_antisym_tile_row_groups_default_cap_zero_serial" (planAntiOmpSrc 29 11) null "fold-form"
+          (fun d -> applied d && evidenceMentioning (serialBy (Blade.CodeGenExprSupport.antisymNoTeamByWorkCap 0I)) d)
+          "unset, licence, threads on, 29 x 11: static cap 0 -- row groups of 1"
+      antiDefault "plan_antisym_tile_row_groups_default_threads_suppressed" (planAntiOmpSrc 193 401) "1" "fold-form"
+          (fun d -> applied d && evidenceMentioning (seq6x8 + serialBy Blade.CodeGenExprSupport.antisymNoTeamRequested) d)
+          "unset, licence, BLADE_OMP_THREADS=1 (no team requested), 193 x 401: row groups of 1, the serial-tile default"
       withGate "BLADE_ANTISYM_TILE" null (fun () ->
-       withGate "BLADE_TILE_TUNE" null (fun () ->
-          planCase "plan_antisym_tile_row_groups_default" (planAntiSrc 61 401) "fold-form"
-              (fun d -> applied d && evidenceMentioning "fold form: antisym tile sequential 6x8 (P pass, spill, Q pass), whole chain per tile, row groups of 1 (the default; BLADE_TILE_TUNE anti_g=0 selects the cache-budget groups)" d)
-              "unset: row groups of 1, the default named"))
+       withGate "BLADE_TILE_TUNE" "anti_g=1" (fun () ->
+        withGate "BLADE_OMP_THREADS" null (fun () ->
+          planCase "plan_antisym_tile_row_groups_forced_one_team_eligible" (planAntiOmpSrc 193 401) "fold-form"
+              (fun d -> applied d && evidenceMentioning (seq6x8 + "row groups of 1 (BLADE_TILE_TUNE anti_g=1)") d)
+              "anti_g=1 on a team-eligible tile forces the previous order")))
+      withGate "BLADE_ANTISYM_TILE" null (fun () ->
+       withGate "BLADE_TILE_TUNE" "anti_g=2" (fun () ->
+        withGate "BLADE_OMP_THREADS" null (fun () ->
+          planCase "plan_antisym_tile_row_groups_forced_two_cap_one" (planAntiOmpSrc 61 401) "fold-form"
+              (fun d -> applied d && evidenceMentioning (seq6x8 + "row groups of 2 (BLADE_TILE_TUNE anti_g=2)") d)
+              "anti_g=2 on a cap-1 tile: an explicit override is unconditional")))
+      withGate "BLADE_ANTISYM_TILE" null (fun () ->
+       withGate "BLADE_TILE_TUNE" "anti_g=0" (fun () ->
+        withGate "BLADE_OMP_THREADS" "1" (fun () ->
+          planCase "plan_antisym_tile_row_groups_forced_budget_serial" (planAntiOmpSrc 61 401) "fold-form"
+              (fun d -> applied d && evidenceMentioning (seq6x8 + "row groups of 4 (cache budget 200 KiB of 256 KiB)") d)
+              "anti_g=0 on a serial tile forces the cache budget")))
       withGate "BLADE_ANTISYM_TILE" null (fun () ->
        withGate "BLADE_TILE_TUNE" "anti_g=0" (fun () ->
           planCase "plan_antisym_tile_budget_auto" (planAntiSrc 61 401) "fold-form"

@@ -1070,6 +1070,20 @@ let private planAndCppOf (testName: string) (src: string) : Result<Blade.Effects
 /// contain, C++ must not contain).
 let private rowSlotCases : (string * (string * string) list * string * (Blade.Effects.Decision -> bool) * string * string list * string list) list =
     let repro = [ ("BLADE_FP_REPRO", "1") ]
+    // Since round 3 (W2-0a) the ordered orbit scatter takes precedence over
+    // the row slots wherever BOTH admit a walk -- every rowSlotSym2 walk with a
+    // scatter-admissible body is one. The cases that pin the ROW-SLOT
+    // emission over such a walk ask for the round-2 order explicitly.
+    let reproPrefer = repro @ [ ("BLADE_FOLD_ROW_SLOTS", "prefer") ]
+    // The yielded row-slot record (both forms admitted, the scatter taken).
+    let yieldedToScatter (d: Blade.Effects.Decision) =
+        d.Rule = "fold-form"
+        && (match d.Outcome with
+            | Blade.Effects.Declined why -> why = "row-slot form: " + Blade.OrbitFold.rowSlotsYieldedToScatter
+            | _ -> false)
+        && d.Evidence |> List.exists (fun e -> e = "fold form: ordered orbit scatter (repro; the threaded complete-row form admitted but yielded: measured slower, round 3)")
+        && d.Evidence |> List.exists (fun e -> e.StartsWith "both forms admitted this walk: the row-slot admission's five-party audit passed")
+    let yieldedCensus = "the ordered orbit scatter runs serially (its chains thread only as a wavefront; the threaded complete-row form admitted but yielded to the scatter: measured slower under mt8 repro, round 3 (BLADE_FOLD_ROW_SLOTS=prefer spends the request on the row-slot team); requested at: level 1's fold)"
     let applied (d: Blade.Effects.Decision) =
         d.Rule = "fold-form" && d.Outcome = Blade.Effects.Applied
         && d.Evidence |> List.exists (fun e -> e.StartsWith "fold form: threaded complete rows (repro): ")
@@ -1110,14 +1124,15 @@ let private rowSlotCases : (string * (string * string) list * string * (Blade.Ef
                      "let s = reduce(method_for(range<Var>, range<Var>) <@> lambda(i, j) -> g(i, j) * g(i, j), ")
             .Replace(", 0.25)\n", ", 0.25, axes = 2)\n")
     [ // ABOVE the gate: 521 rows x 521 = 271441 inner steps >= 262144.
-      ("row_slots_threaded_repro", repro,
+      // (prefer: the scatter admits this walk and would take it by default.)
+      ("row_slots_threaded_repro", reproPrefer,
        rowSlotSym2 521 rowSlotOmpOuter "g(i, j) * g(i, j)",
        applied, "fold-form applied: threaded complete rows (repro)",
        [ "__rslot_s[__i0] = "; "blade_fold::chunk_lo(__rn_s, (size_t)__rt, (size_t)__rnt)"
          "for (size_t __ri = 0; __ri < __rn_s; __ri++) s = "; "delete[] __rslot_s;" ],
        [ reproCensus; "__rpart_s"; "__racc_s" ])
       // The rank-3 walk (comoment3's shape): 67 rows x 67 x 67 = 300763.
-      ("row_slots_threaded_repro_rank3", repro,
+      ("row_slots_threaded_repro_rank3", reproPrefer,
        "type I = Idx<67>\ntype Obs = Idx<3>\n"
        + "let x = method_for(range<I>, range<Obs>) <@> lambda(i, s) -> Float64((i * 5 + s) % 7) - 3.0 |> compute\n"
        + "let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) |> compute\n"
@@ -1126,7 +1141,7 @@ let private rowSlotCases : (string * (string * string) list * string * (Blade.Ef
        [ "__rslot_s[__i0] = " ], [ reproCensus ])
       // BLADE_ORBIT_FOLD=0 keeps the LOGICAL WALK; under repro the walk's rows
       // may still be threaded, and the record says whose rows they are.
-      ("row_slots_orbit_fold_off_threads_the_walk", repro @ [ ("BLADE_ORBIT_FOLD", "0") ],
+      ("row_slots_orbit_fold_off_threads_the_walk", reproPrefer @ [ ("BLADE_ORBIT_FOLD", "0") ],
        rowSlotSym2 521 rowSlotOmpOuter "g(i, j) * g(i, j)",
        (fun d -> applied d && d.Evidence |> List.exists (fun e -> e.Contains "orbit-class fold not taken: disabled by BLADE_ORBIT_FOLD=0")),
        "fold-form applied, naming the orbit fold's knob decline",
@@ -1143,7 +1158,7 @@ let private rowSlotCases : (string * (string * string) list * string * (Blade.Ef
        declined "below rowslots_min = 262144", "row-slot form declined below the gate",
        [ reproCensus ], [ "__rslot" ])
       // ...and the gate is the provisional TUNE key: pinned low, it admits.
-      ("row_slots_gate_is_tunable", repro @ [ ("BLADE_TILE_TUNE", "rowslots_min=1000") ],
+      ("row_slots_gate_is_tunable", reproPrefer @ [ ("BLADE_TILE_TUNE", "rowslots_min=1000") ],
        rowSlotSym2 43 rowSlotOmpOuter "g(i, j) * g(i, j)",
        applied, "fold-form applied with rowslots_min=1000",
        [ "__rslot_s[__i0] = " ], [ reproCensus ])
@@ -1184,7 +1199,7 @@ let private rowSlotCases : (string * (string * string) list * string * (Blade.Ef
        declined "subscript not proven in range", "row-slot form declined: unproven subscript",
        [ reproCensus ], [ "__rslot" ])
       // Float `/` is IEEE-total: admitted (integer `/` is the refusal above).
-      ("row_slots_float_division_admitted", repro,
+      ("row_slots_float_division_admitted", reproPrefer,
        rowSlotSym2 521 rowSlotOmpOuter "g(i, j) / (1.0 + abs(g(i, j)))",
        applied, "fold-form applied with a float `/` body",
        [ "__rslot_s[__i0] = " ], [ reproCensus ])
@@ -1204,18 +1219,54 @@ let private rowSlotCases : (string * (string * string) list * string * (Blade.Ef
        "fold-form declined: the fold kernel writes (not reorder-licensed; G41)",
        [ "[omp] requested but emitted serial: the fold kernel writes a captured binding; a map licence does not make the fold race-safe" ],
        [ "__rslot"; "BLADE_OMP_PARALLEL_NUM_THREADS"; "blade_scatter::" ])
-      // G35 PRECEDENCE over the ordered orbit scatter (round 2): this walk is
-      // one the scatter admits; the taken row-slot form wins under the omp
-      // request, and the scatter records that it yielded.
-      ("row_slots_precede_orbit_scatter", repro,
+      // THE PRECEDENCE (round 3, W2-0a; the wave-1 harness A/B measured the
+      // scatter faster under mt8 repro): this walk is one BOTH forms admit;
+      // the ordered orbit scatter is taken, the row-slot form records that it
+      // was admitted and yielded, and the census says why the omp request
+      // was not spent on a team.
+      ("orbit_scatter_precedes_row_slots", repro,
+       rowSlotSym2 521 rowSlotOmpOuter "g(i, j) * g(i, j)",
+       yieldedToScatter,
+       "the row-slot form admitted but yielded to the ordered orbit scatter (record names the scatter form and the audit)",
+       [ "blade_scatter::scatter2<4, 64, true>("; yieldedCensus; reproCensus ], [ "__rslot" ])
+      ("orbit_scatter_precedes_row_slots_scatter_record", repro,
+       rowSlotSym2 521 rowSlotOmpOuter "g(i, j) * g(i, j)",
+       (fun d -> d.Rule = "fold-form" && d.Outcome = Blade.Effects.Applied
+                 && d.Evidence |> List.exists (fun e -> e.StartsWith "fold form: ordered orbit scatter (rank 2, extent 521, row groups of 4)")),
+       "fold-form applied: the ordered orbit scatter over the walk the row slots also admit",
+       [ "blade_scatter::scatter2<" ], [ "__rslot"; "BLADE_OMP_PARALLEL_NUM_THREADS" ])
+      // Rank 3 (comoment3's shape): the same precedence.
+      ("orbit_scatter_precedes_row_slots_rank3", repro,
+       "type I = Idx<67>\ntype Obs = Idx<3>\n"
+       + "let x = method_for(range<I>, range<Obs>) <@> lambda(i, s) -> Float64((i * 5 + s) % 7) - 3.0 |> compute\n"
+       + "let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) |> compute\n"
+       + $"let s = reduce(method_for(range<I>) <@> lambda(i) -> reduce(method_for(range<I>) <@> lambda(j) -> reduce(method_for(range<I>) <@> lambda(k) -> t(i, j, k) * t(i, j, k), (+)), (+)), {rowSlotOmpOuter}, 0.0)\n",
+       yieldedToScatter, "rank 3: the row-slot form admitted but yielded to the scatter",
+       [ "blade_scatter::scatter3<"; yieldedCensus; reproCensus ], [ "__rslot" ])
+      // BLADE_FOLD_ROW_SLOTS=prefer restores the round-2 order: the taken
+      // row-slot form wins under the omp request, and the scatter records
+      // that it yielded (the old record and the old emission).
+      ("row_slots_prefer_knob", reproPrefer,
        rowSlotSym2 521 rowSlotOmpOuter "g(i, j) * g(i, j)",
        (fun d -> d.Rule = "fold-form"
                  && (match d.Outcome with
-                     | Blade.Effects.Declined why -> why.StartsWith "ordered orbit scatter not taken: the threaded complete-row form (G35) is taken under the omp request"
+                     | Blade.Effects.Declined why ->
+                         why.StartsWith "ordered orbit scatter not taken: the threaded complete-row form (G35) is taken under the omp request"
+                         && why.Contains "BLADE_FOLD_ROW_SLOTS=prefer"
                      | _ -> false)
                  && d.Evidence |> List.exists (fun e -> e.StartsWith "fold form: ordered orbit scatter (rank 2, extent 521")),
-       "the ordered orbit scatter yields to the taken row-slot form (record names its form)",
-       [ "__rslot_s[__i0] = " ], [ "blade_scatter::" ])
+       "prefer: the ordered orbit scatter yields to the taken row-slot form (record names its form and the knob)",
+       [ "__rslot_s[__i0] = "; "blade_fold::chunk_lo(__rn_s, (size_t)__rt, (size_t)__rnt)" ], [ "blade_scatter::" ])
+      ("row_slots_prefer_knob_rows_applied", reproPrefer,
+       rowSlotSym2 521 rowSlotOmpOuter "g(i, j) * g(i, j)",
+       applied, "prefer: fold-form applied, threaded complete rows",
+       [ "__rslot_s[__i0] = " ], [ "blade_scatter::"; "admitted but yielded" ])
+      // The row slots stay the DEFAULT form for a walk the scatter does not
+      // admit: here the cell function uses a level coordinate.
+      ("row_slots_default_where_scatter_declines", repro,
+       rowSlotSym2 521 rowSlotOmpOuter "g(i, j) * Float64(j + 1)",
+       applied, "fold-form applied by default: threaded complete rows (the scatter declines a coordinate-dependent term)",
+       [ "__rslot_s[__i0] = " ], [ "blade_scatter::"; "admitted but yielded" ])
       // ...and with threads off (or below the gate) the same walk is the
       // serial ordered orbit scatter, the census naming why the request was
       // not spent.
@@ -2138,21 +2189,26 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
             "type Z = Idx<0>\ntype J = Idx<5>\n"
             + "let w = method_for(range<J>) <@> lambda(j) -> Float64(j) + 0.5 |> compute\n"
             + "let s = reduce(method_for(range<Z>) <@> lambda(i) -> reduce(method_for(range<J>) <@> lambda(j) -> w(j) * 2.0, (+)), lambda(u, v) where omp -> u + v, 0.25)\n"
-        // (name, source, BLADE_TILE_TUNE, max team size the clamp allows, expected `s` line or "")
-        let rowSlotCoverage : (string * string * string * int * string) list =
-            [ ("row_slots_team_rank2", rowSlotSym2 521 rowSlotOmpOuter "g(i, j) * g(i, j)", null, 64, "")
-              ("row_slots_team_small_rn_clamped", rowSlotSym2 3 rowSlotOmpOuter "g(i, j) * g(i, j)", "rowslots_min=1", 3, "")
-              ("row_slots_zero_rows_keeps_seed", zeroRowsSrc, "rowslots_min=0", 0, "s = 0.25")
+        // (name, source, BLADE_TILE_TUNE, BLADE_FOLD_ROW_SLOTS, max team size
+        // the clamp allows, expected `s` line or ""). The two rowSlotSym2 walks
+        // are ones the ordered orbit scatter also admits, and since round 3
+        // (W2-0a) it takes them by default: they observe the ROW-SLOT team
+        // under `prefer`. The zero-row and row-view walks are no scatter's, so
+        // the row slots are their default form.
+        let rowSlotCoverage : (string * string * string * string * int * string) list =
+            [ ("row_slots_team_rank2", rowSlotSym2 521 rowSlotOmpOuter "g(i, j) * g(i, j)", null, "prefer", 64, "")
+              ("row_slots_team_small_rn_clamped", rowSlotSym2 3 rowSlotOmpOuter "g(i, j) * g(i, j)", "rowslots_min=1", "prefer", 3, "")
+              ("row_slots_zero_rows_keeps_seed", zeroRowsSrc, "rowslots_min=0", null, 0, "s = 0.25")
               // G51: the stencil checksum shape -- row-view folds -- observed too
               // (quarter-integer data: the value is exact, 66298.5 = 0.5 + sum u)
-              ("row_slots_team_row_view", rowViewSrc 521 "reduce(u(i), (+))" rowSlotOmpOuter, null, 64, "s = 66298.5") ]
-        for (name, src, tune, maxTeam, expectS) in rowSlotCoverage do
+              ("row_slots_team_row_view", rowViewSrc 521 "reduce(u(i), (+))" rowSlotOmpOuter, null, null, 64, "s = 66298.5") ]
+        for (name, src, tune, slotsKnob, maxTeam, expectS) in rowSlotCoverage do
             setOmpTestMode true
             let gen =
                 use _r = pinEnv "BLADE_FP_REPRO" "1"
                 use _c = pinEnv "BLADE_FP_CONTRACT" "off"
                 use _t = pinEnv "BLADE_TILE_TUNE" tune
-                use _k = pinEnv "BLADE_FOLD_ROW_SLOTS" null
+                use _k = pinEnv "BLADE_FOLD_ROW_SLOTS" slotsKnob
                 use _p = pinEnv "BLADE_PRINT" "s"
                 try
                     match lower src with
@@ -2236,6 +2292,278 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
                 Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail name detail
                 errors <- errors + 1
                 failedNames <- failedNames @ [name]
+
+        // -------------------------------------------------------------------
+        // W2-0a (round 3): THE SCATTER'S PRECEDENCE, OBSERVED. A walk both the
+        // row slots and the ordered orbit scatter admit, generated under
+        // BLADE_FP_REPRO=1 + CONTRACT=off with test mode on, three ways: the
+        // DEFAULT (the scatter taken: no row slots, so NO team forms -- zero
+        // [omp-coverage] lines at T = 8 -- and the census in the C++ says why
+        // the request was not spent), `prefer` (the row-slot team, observed),
+        // and the serial walk (BLADE_OMP_THREADS=1 BLADE_ORBIT_SCATTER=0). The
+        // printed value is the same text in all three, at T = 1 and 8.
+        // -------------------------------------------------------------------
+        (let name = "orbit_scatter_precedence_spends_no_team"
+         let src = rowSlotSym2 521 rowSlotOmpOuter "g(i, j) * g(i, j)"
+         let genWith (knob: string) (threads: string) (scatter: string) (tag: string) =
+             setOmpTestMode true
+             let r =
+                 use _r = pinEnv "BLADE_FP_REPRO" "1"
+                 use _c = pinEnv "BLADE_FP_CONTRACT" "off"
+                 use _t = pinEnv "BLADE_TILE_TUNE" null
+                 use _k = pinEnv "BLADE_FOLD_ROW_SLOTS" knob
+                 use _o = pinEnv "BLADE_OMP_THREADS" threads
+                 use _s = pinEnv "BLADE_ORBIT_SCATTER" scatter
+                 use _p = pinEnv "BLADE_PRINT" "s"
+                 try
+                     match lower src with
+                     | Error e -> Error ($"lower failed: {e}")
+                     | Ok ir ->
+                         let (cpp, _) = CodeGen.genSelfContainedProgramFromIR ir (name + tag)
+                         let srcAbs = Path.GetFullPath(Path.Combine(outputDir, sanitizeFileName (name + tag) + ".cpp"))
+                         File.WriteAllText(srcAbs, cpp)
+                         Ok (srcAbs, cpp)
+                 with ex -> Error ($"codegen failed: {ex.Message}")
+             setOmpTestMode false
+             r
+         let compileExe (srcAbs: string) : Result<string, string> =
+             let exeAbs = Path.ChangeExtension(srcAbs, (if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"))
+             let cpsi = ProcessStartInfo("g++", $"-std=c++17 {(optFlags ())} -fopenmp -o \"{exeAbs}\" \"{srcAbs}\"")
+             cpsi.RedirectStandardError <- true
+             cpsi.UseShellExecute <- false
+             use cproc = Process.Start(cpsi)
+             let cerr = Blade.Runtime.readToEndOffPool cproc.StandardError
+             if not (cproc.WaitForExit(120000)) then
+                 (try cproc.Kill(true) with _ -> ())
+                 Error "compile timed out (120s)"
+             elif cproc.ExitCode <> 0 then Error ($"compile: {cerr.Result}")
+             else Ok exeAbs
+         let runAt (exeAbs: string) (threads: string) : Result<string * string list, string> =
+             let rpsi = ProcessStartInfo(exeAbs)
+             rpsi.RedirectStandardOutput <- true
+             rpsi.RedirectStandardError <- true
+             rpsi.UseShellExecute <- false
+             rpsi.WorkingDirectory <- Path.GetDirectoryName(exeAbs)
+             rpsi.Environment.["OMP_NUM_THREADS"] <- threads
+             rpsi.Environment.["OMP_DYNAMIC"] <- "false"
+             rpsi.Environment.Remove("OMP_THREAD_LIMIT") |> ignore
+             use rproc = Process.Start(rpsi)
+             let rout = Blade.Runtime.readToEndOffPool rproc.StandardOutput
+             if not (rproc.WaitForExit(60000)) then
+                 (try rproc.Kill(true) with _ -> ())
+                 Error "run timed out (60s)"
+             elif rproc.ExitCode <> 0 then Error ($"exit {rproc.ExitCode}")
+             else
+                 let lines = rout.Result.Split('\n') |> Array.map (_.Trim())
+                 let sLine = lines |> Array.tryFind (fun l -> l.StartsWith "s = ") |> Option.defaultValue ""
+                 Ok (sLine, lines |> Array.filter (fun l -> l.StartsWith "[omp-coverage]") |> Array.toList)
+         let outcome : Result<string, string> =
+             match genWith null null null "_default", genWith "prefer" null null "_prefer", genWith null "1" "0" "_walk" with
+             | Error e, _, _ | _, Error e, _ | _, _, Error e -> Error e
+             | Ok (dSrc, dCpp), Ok (pSrc, pCpp), Ok (wSrc, wCpp) ->
+                 if not (dCpp.Contains "blade_scatter::scatter2<") || dCpp.Contains "__rslot" then
+                     Error "the default build is not the ordered orbit scatter (no blade_scatter:: call, or row slots emitted)"
+                 elif not (dCpp.Contains ("; " + Blade.OrbitFold.rowSlotsYieldedCensus + "; requested at: level 1's fold)")) then
+                     Error "the default build's census does not say the row-slot form was admitted but yielded"
+                 elif not (pCpp.Contains "__rslot_s[__i0] = ") || pCpp.Contains "blade_scatter::" then
+                     Error "the prefer build is not the row-slot form"
+                 elif wCpp.Contains "__rslot" || wCpp.Contains "blade_scatter::" then
+                     Error "the serial-walk build emitted row slots or the scatter"
+                 else
+                 match compileExe dSrc, compileExe pSrc, compileExe wSrc with
+                 | Error e, _, _ | _, Error e, _ | _, _, Error e -> Error e
+                 | Ok dExe, Ok pExe, Ok wExe ->
+                     match runAt dExe "1", runAt dExe "8", runAt pExe "1", runAt pExe "8", runAt wExe "1" with
+                     | Error e, _, _, _, _ | _, Error e, _, _, _ | _, _, Error e, _, _ | _, _, _, Error e, _ | _, _, _, _, Error e -> Error e
+                     | Ok (d1, _), Ok (d8, dCov8), Ok (p1, _), Ok (p8, pCov8), Ok (w1, _) ->
+                         let teamOf (cov: string list) =
+                             cov |> List.choose (fun l ->
+                                 let m = System.Text.RegularExpressions.Regex.Match(l, @"teamsz=(\d+) distinct=(\d+) maxth=(\d+)")
+                                 if m.Success then Some (int m.Groups.[1].Value, int m.Groups.[2].Value, int m.Groups.[3].Value) else None)
+                         if w1 = "" then Error "no `s = ` line in the serial walk's output"
+                         elif d1 <> w1 || d8 <> w1 || p1 <> w1 || p8 <> w1 then
+                             Error ($"the value depends on the form: walk [{w1}] scatter T=1 [{d1}] T=8 [{d8}] row slots T=1 [{p1}] T=8 [{p8}]")
+                         elif not dCov8.IsEmpty then
+                             Error ($"""the scatter build formed a team at T=8 (the request must not be spent): {(String.concat " | " dCov8)}""")
+                         else
+                             match teamOf pCov8 with
+                             | [ (_, _, mx) ] when mx <= 1 -> Ok ($"single-core (maxth={mx}); scatter: no team; {w1} in every form")
+                             | [ (tz, d, _) ] when tz = 8 && d = 8 -> Ok ($"scatter: no team at T=8, census names the yield; prefer: the row-slot team at T=8 (teamsz=distinct=8); {w1} in the walk, the scatter (T = 1, 8) and the row slots (T = 1, 8)")
+                             | other -> Error ($"the prefer build's row-slot team at T=8 is not observed as 8 / 8: {other}")
+         match outcome with
+         | Ok detail ->
+             Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass name detail
+             passed <- passed + 1
+         | Error detail ->
+             Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail name detail
+             errors <- errors + 1
+             failedNames <- failedNames @ [name])
+
+        // -------------------------------------------------------------------
+        // W2-0a (round 3; Codex diff review of W2-0, finding 2): THE PRODUCER
+        // TEAMS ARE UNTOUCHED by the precedence. The measured hybrid's shape
+        // (pairkernel / comoment3): a stored-pool producer with its OWN omp
+        // licences -- the input map `omp(i: 1)` and the comm kernel's level 0
+        // `omp(a: 1)` (a non-dot body, so a plain threaded nest) -- then the
+        // checksum walk both forms admit. Generated in test mode under
+        // BLADE_FP_REPRO=1 + CONTRACT=off three ways -- the default (the
+        // scatter), BLADE_FOLD_ROW_SLOTS=0 (the scatter), `prefer` (the row
+        // slots) -- with ONE program name, so the texts are comparable:
+        //   * the C++ up to the fold (every producer line) is byte-identical
+        //     in all three, and carries no census line;
+        //   * default vs slots=0 differ ONLY in the fold's census comment (the
+        //     yield vs the knob decline), every other line identical;
+        //   * at T = 8 the default and slots=0 builds observe EXACTLY the same
+        //     producer regions (each a team of 8), and prefer observes those
+        //     same lines plus ONE more region, the row-slot team -- the census
+        //     sites distinguished: one census at the fold in default / slots=0,
+        //     none in prefer;
+        //   * `s` prints the same text in all three at T = 1 and 8.
+        // -------------------------------------------------------------------
+        (let name = "orbit_scatter_precedence_keeps_producer_teams"
+         let src =
+             "type Var = Idx<521>\ntype Obs = Idx<3>\n"
+             + "let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) where omp(i: 1) -> Float64((i * 7 + s * 3) % 11) * 0.37 + 0.1 / Float64(i + 1) |> compute\n"
+             + "let g = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b), omp(a: 1) -> (a((0 : Obs)) - b((0 : Obs))) * (a((1 : Obs)) - b((1 : Obs))) + a((2 : Obs)) * b((2 : Obs)) |> compute\n"
+             + "let s = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * g(i, j), (+)), lambda(u, v) where omp -> u + v, 0.25)\n"
+         let anchor = "\n    double s = "
+         let genWith (knob: string) (tag: string) =
+             setOmpTestMode true
+             let r =
+                 use _r = pinEnv "BLADE_FP_REPRO" "1"
+                 use _c = pinEnv "BLADE_FP_CONTRACT" "off"
+                 use _t = pinEnv "BLADE_TILE_TUNE" null
+                 use _k = pinEnv "BLADE_FOLD_ROW_SLOTS" knob
+                 use _o = pinEnv "BLADE_OMP_THREADS" null
+                 use _s = pinEnv "BLADE_ORBIT_SCATTER" null
+                 use _b = pinEnv "BLADE_BLAS" "0"
+                 use _p = pinEnv "BLADE_PRINT" "s"
+                 try
+                     match lower src with
+                     | Error e -> Error ($"lower failed: {e}")
+                     | Ok ir ->
+                         let (cpp, _) = CodeGen.genSelfContainedProgramFromIR ir name
+                         let srcAbs = Path.GetFullPath(Path.Combine(outputDir, sanitizeFileName (name + tag) + ".cpp"))
+                         File.WriteAllText(srcAbs, cpp)
+                         let exeAbs = Path.ChangeExtension(srcAbs, (if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"))
+                         let cpsi = ProcessStartInfo("g++", $"-std=c++17 {(optFlags ())} -fopenmp -o \"{exeAbs}\" \"{srcAbs}\"")
+                         cpsi.RedirectStandardError <- true
+                         cpsi.UseShellExecute <- false
+                         use cproc = Process.Start(cpsi)
+                         let cerr = Blade.Runtime.readToEndOffPool cproc.StandardError
+                         if not (cproc.WaitForExit(120000)) then
+                             (try cproc.Kill(true) with _ -> ())
+                             Error "compile timed out (120s)"
+                         elif cproc.ExitCode <> 0 then Error ($"compile: {cerr.Result}")
+                         else Ok (exeAbs, cpp.Replace("\r\n", "\n"))
+                 with ex -> Error ($"codegen failed: {ex.Message}")
+             setOmpTestMode false
+             r
+         // (s line, the sorted [omp-coverage] lines), dynamic teams off, no limit
+         let runAt (exeAbs: string) (threads: string) : Result<string * string list, string> =
+             let rpsi = ProcessStartInfo(exeAbs)
+             rpsi.RedirectStandardOutput <- true
+             rpsi.RedirectStandardError <- true
+             rpsi.UseShellExecute <- false
+             rpsi.WorkingDirectory <- Path.GetDirectoryName(exeAbs)
+             rpsi.Environment.["OMP_NUM_THREADS"] <- threads
+             rpsi.Environment.["OMP_DYNAMIC"] <- "false"
+             rpsi.Environment.Remove("OMP_THREAD_LIMIT") |> ignore
+             use rproc = Process.Start(rpsi)
+             let rout = Blade.Runtime.readToEndOffPool rproc.StandardOutput
+             if not (rproc.WaitForExit(60000)) then
+                 (try rproc.Kill(true) with _ -> ())
+                 Error "run timed out (60s)"
+             elif rproc.ExitCode <> 0 then Error ($"exit {rproc.ExitCode}")
+             else
+                 let lines = rout.Result.Replace("\r\n", "\n").Split('\n') |> Array.map (_.Trim())
+                 let sLine = lines |> Array.tryFind (fun l -> l.StartsWith "s = ") |> Option.defaultValue ""
+                 Ok (sLine, lines |> Array.filter (fun l -> l.StartsWith "[omp-coverage]") |> Array.sort |> Array.toList)
+         let census = "[omp] requested but emitted serial"
+         let countOf (needle: string) (text: string) =
+             (System.Text.RegularExpressions.Regex.Matches(text, System.Text.RegularExpressions.Regex.Escape needle)).Count
+         let outcome : Result<string, string> =
+             match genWith null "_default", genWith "0" "_slots_off", genWith "prefer" "_prefer" with
+             | Error e, _, _ | _, Error e, _ | _, _, Error e -> Error e
+             | Ok (dExe, dCpp), Ok (oExe, oCpp), Ok (pExe, pCpp) ->
+                 // the fold's first line: its seed, or (the row-slot form) the
+                 // fold kernel's wrapper emitted just before it
+                 let split (cpp: string) =
+                     let m = System.Text.RegularExpressions.Regex.Match(cpp, @"\n    (auto __wrap_\w+_s = |double s = )")
+                     let at = if m.Success then m.Index else cpp.IndexOf anchor
+                     // the one head line the FOLD's route decides: the scatter
+                     // runtime's include (asserted per build below)
+                     let scatterInclude = "#include \"blade_orbit_scatter.hpp\"\n"
+                     if at < 0 then None else Some (cpp.Substring(0, at).Replace(scatterInclude, ""), cpp.Substring(at))
+                 match split dCpp, split oCpp, split pCpp with
+                 | None, _, _ | _, None, _ | _, _, None -> Error "the fold's first line (`double s = `) is missing from a build"
+                 | Some (dHead, dFold), Some (oHead, oFold), Some (pHead, pFold) ->
+                     let foldCensusOther (fold: string) = fold.Split('\n') |> Array.filter (fun l -> l.Contains census) |> Array.toList
+                     let dMinus = dFold.Split('\n') |> Array.filter (fun l -> not (l.Contains census))
+                     let oMinus = oFold.Split('\n') |> Array.filter (fun l -> not (l.Contains census))
+                     let inc = "#include \"blade_orbit_scatter.hpp\""
+                     if not (dCpp.Contains inc && oCpp.Contains inc) || pCpp.Contains inc then
+                         Error "the scatter runtime include must be in the default / slots=0 builds only"
+                     elif not (dHead = oHead && dHead = pHead) then
+                         Error "the producer C++ (everything before the fold, the scatter include aside) differs between default / slots=0 / prefer"
+                     elif countOf census dHead <> 0 then
+                         Error "the producer C++ carries a census line (its omp licences must be spent as teams)"
+                     elif not (dCpp.Contains "blade_scatter::scatter2<") || dCpp.Contains "__rslot" || not (oCpp.Contains "blade_scatter::scatter2<") || oCpp.Contains "__rslot" then
+                         Error "the default / slots=0 builds are not the ordered orbit scatter"
+                     elif not (pCpp.Contains "__rslot_s[__i0] = ") || pCpp.Contains "blade_scatter::" then
+                         Error "the prefer build is not the row-slot form"
+                     elif (foldCensusOther dFold).Length <> 1 || not ((foldCensusOther dFold).Head.Contains Blade.OrbitFold.rowSlotsYieldedCensus) then
+                         Error ($"""the default fold must carry ONE census line naming the yield: {String.concat " | " (foldCensusOther dFold)}""")
+                     elif (foldCensusOther oFold).Length <> 1 || not ((foldCensusOther oFold).Head.Contains "the threaded complete-row form declined: disabled by BLADE_FOLD_ROW_SLOTS=0") then
+                         Error ($"""the slots=0 fold must carry ONE census line naming the knob: {String.concat " | " (foldCensusOther oFold)}""")
+                     elif countOf census pFold <> 0 then
+                         Error "the prefer fold spends the request on the row-slot team: no census line expected there"
+                     elif dMinus <> oMinus then
+                         Error "default and slots=0 differ beyond the fold's census comment"
+                     else
+                     match runAt dExe "1", runAt dExe "8", runAt oExe "8", runAt pExe "1", runAt pExe "8" with
+                     | Error e, _, _, _, _ | _, Error e, _, _, _ | _, _, Error e, _, _ | _, _, _, Error e, _ | _, _, _, _, Error e -> Error e
+                     | Ok (d1, _), Ok (d8, dCov), Ok (o8, oCov), Ok (p1, _), Ok (p8, pCov) ->
+                         // (region, teamsz, distinct, maxth); the REGION and the
+                         // team size are compared (`distinct` may vary run to run
+                         // under the producers' dynamic schedule)
+                         let teamOf (l: string) =
+                             let m = System.Text.RegularExpressions.Regex.Match(l, @"region=(\S+) teamsz=(\d+) distinct=(\d+) maxth=(\d+)")
+                             if m.Success then Some (m.Groups.[1].Value, int m.Groups.[2].Value, int m.Groups.[3].Value, int m.Groups.[4].Value) else None
+                         let parsed (cov: string list) = cov |> List.choose teamOf
+                         let keys (cov: string list) = parsed cov |> List.map (fun (r, tz, _, _) -> (r, tz)) |> List.sort
+                         let dK, oK, pK = keys dCov, keys oCov, keys pCov
+                         let extra = pK |> List.filter (fun k -> not (List.contains k dK))
+                         let shown (cov: string list) = String.concat " | " cov
+                         if d1 = "" then Error "no `s = ` line"
+                         elif d8 <> d1 || o8 <> d1 || p1 <> d1 || p8 <> d1 then
+                             Error ($"s differs between the forms: default T=1 [{d1}] T=8 [{d8}] slots=0 [{o8}] prefer T=1 [{p1}] T=8 [{p8}]")
+                         elif dCov.IsEmpty then Error "no producer region observed at T = 8 (the fixture would not test the producer team)"
+                         elif dK.Length <> dCov.Length || pK.Length <> pCov.Length || oK.Length <> oCov.Length then
+                             Error "unparseable [omp-coverage] line"
+                         elif dK <> oK then
+                             Error ($"the default and slots=0 builds observe different regions: [{shown dCov}] vs [{shown oCov}]")
+                         elif not (dK |> List.forall (fun k -> List.contains k pK)) || extra.Length <> 1 || pK.Length <> dK.Length + 1 then
+                             Error ($"prefer must observe the producer regions plus ONE row-slot region: default [{shown dCov}] prefer [{shown pCov}]")
+                         else
+                         let (rreg, _) = extra.Head
+                         let rowSlotLine = parsed pCov |> List.find (fun (r, _, _, _) -> r = rreg)
+                         let (_, rtz, rd, rmx) = rowSlotLine
+                         if rmx <= 1 then Ok "single-core: cannot test teams (texts and values compared)"
+                         elif dK |> List.exists (fun (_, tz) -> tz <> 8) then
+                             Error ($"a producer region is not a team of 8: {shown dCov}")
+                         elif rtz <> 8 || rd <> 8 then Error ($"the prefer build's row-slot region {rreg} is teamsz={rtz} distinct={rd}, wanted 8 / 8")
+                         else
+                             let regs = dK |> List.map fst |> String.concat ", "
+                             Ok ($"producer C++ byte-identical in default / slots=0 / prefer (no census); default vs slots=0 differ only in the fold's census line (yield vs knob); producer regions {regs} each a team of 8 in all three; prefer adds only the row-slot region {rreg} (8 / 8); {d1} in every form at T = 1 and 8")
+         match outcome with
+         | Ok detail ->
+             Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass name detail
+             passed <- passed + 1
+         | Error detail ->
+             Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail name detail
+             errors <- errors + 1
+             failedNames <- failedNames @ [name])
 
         // -------------------------------------------------------------------
         // G7: THE THREADED REDUCTION JOIN'S TEAM IS OBSERVED. Generated in the
@@ -2510,7 +2838,7 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
 /// `compileProgram`, optionally with codegen TEST MODE on for the generation
 /// (the [omp-coverage] team observation; G51's identity battery observes its
 /// actual teams through it). Test mode is always switched off again.
-let private compileProgramMode (testMode: bool) (outputDir: string) (name: string) (src: string) : Result<string, string> =
+let private compileProgramModeWith (testMode: bool) (transform: string -> Result<string, string>) (outputDir: string) (name: string) (src: string) : Result<string, string> =
     try
         setOmpTestMode false
         match lower src with
@@ -2519,10 +2847,13 @@ let private compileProgramMode (testMode: bool) (outputDir: string) (name: strin
             match IRValidate.validateIR ir0 with
             | Error errs -> Error ($"""IR validation failed: {(String.concat "; " errs)}""")
             | Ok ir ->
-                let (cppCode, _w) =
+                let (cppCode0, _w) =
                     setOmpTestMode testMode
                     try CodeGen.genSelfContainedProgramFromIR ir name
                     finally setOmpTestMode false
+                match transform cppCode0 with
+                | Error e -> Error e
+                | Ok cppCode ->
                 let srcAbs = Path.GetFullPath(Path.Combine(outputDir, sanitizeFileName name + ".cpp"))
                 File.WriteAllText(srcAbs, cppCode)
                 let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
@@ -2539,8 +2870,40 @@ let private compileProgramMode (testMode: bool) (outputDir: string) (name: strin
                 else Ok exeAbs
     with ex -> Error ($"codegen raised: {ex.Message}")
 
+let private compileProgramMode (testMode: bool) (outputDir: string) (name: string) (src: string) : Result<string, string> =
+    compileProgramModeWith testMode Ok outputDir name src
+
 let private compileProgram (outputDir: string) (name: string) (src: string) : Result<string, string> =
     compileProgramMode false outputDir name src
+
+/// The RAW-BIT probe of the scatter-precedence battery (round 3, W2-0a, Codex
+/// diff review finding 1): `pokes` = (pool binding, [pool index, uint64 bit
+/// pattern]) writes placed right before `anchor` (the first line of the first
+/// fold, after every pool is computed), so every form -- scatter, row slots,
+/// walk -- reads the SAME pool bytes; then, before main's `return 0;`, one
+/// `RAW <name> <%016llx>` line per scalar binding (its exact uint64
+/// representation: NaN payload and sign included).
+let private rawBitTransform (anchor: string) (pokes: (string * (int * uint64) list) list) (scalars: string list) (cpp0: string) : Result<string, string> =
+    let cpp = cpp0.Replace("\r\n", "\n")
+    let at = cpp.IndexOf anchor
+    let marker = "\n    return 0;\n    } catch"
+    let endAt = cpp.IndexOf marker
+    if at < 0 then Error ($"raw-bit probe: anchor `{anchor.Trim()}` not in the C++")
+    elif endAt < 0 then Error "raw-bit probe: main's `return 0;` not found"
+    elif at > endAt then Error "raw-bit probe: the anchor follows main's return"
+    else
+    let poke =
+        pokes |> List.collect (fun (pool, cells) ->
+            cells |> List.map (fun (ix, bits) ->
+                $"    {{ double* __pb = const_cast<double*>(nested_array_utilities::pool_base({pool}.data)); const unsigned long long __u = 0x{bits:X16}ULL; std::memcpy(__pb + {ix}, &__u, 8); }}\n"))
+        |> String.concat ""
+    let probe =
+        scalars
+        |> List.map (fun s -> $"    {{ unsigned long long __u; const double __d = (double)({s}); std::memcpy(&__u, &__d, 8); std::printf(\"RAW {s} %%016llx\\n\", __u); }}")
+        |> String.concat "\n"
+    let lineStart = cpp.LastIndexOf('\n', at) + 1
+    let head = "#include <cstdio>\n#include <cstring>\n"
+    Ok (head + cpp.Substring(0, lineStart) + poke + cpp.Substring(lineStart, endAt - lineStart) + "\n" + probe + cpp.Substring(endAt))
 
 /// Run a compiled program at a FIXED team: OMP_NUM_THREADS forced, dynamic
 /// teams off (OMP_DYNAMIC=false), no OMP_THREAD_LIMIT inherited -- so the
@@ -3639,43 +4002,193 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
             + "let s2 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> reduce(method_for(range<Var>) <@> lambda(k) -> -0.0 * t(i, j, k) * t(i, j, k), lambda(a, b) -> a + b, -0.0), lambda(a, b) -> a + b, -0.0), lambda(u, v) where omp -> u + v, -0.0)\n"
             + "let z2 = 1.0 / s2\n"
             + "let s3 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> reduce(method_for(range<Var>) <@> lambda(k) -> sqrt(w(k)) * t(i, j, k), (+)), (+)), lambda(u, v) where omp -> u + v, 0.0)\n"
+        // ROUND 3 (W2-0a): s2's walk (`-0.0 * g(i, j)` / `t(i, j, k)`, a plain
+        // `+` kernel, coordinate-free seeds) is one the ORDERED ORBIT SCATTER
+        // admits too, and since round 3 the scatter takes precedence there by
+        // default; s1 and s3 read `w`, which the scatter declines, so they
+        // keep the row slots. So the identity runs FOUR builds, every one's
+        // text equal at every team size: the default threaded build (row
+        // slots for s1 / s3, the scatter for s2), BLADE_FOLD_ROW_SLOTS=prefer
+        // (the round-2 order: row slots for all three), BLADE_OMP_THREADS=1
+        // (s2 the serial scatter), and the true serial walk (BLADE_OMP_THREADS=1
+        // BLADE_ORBIT_SCATTER=0: neither form).
         for (rank, rowSlotSrc) in [ ("rank2", rowSlotSrc2); ("rank3", rowSlotSrc3) ] do
          let name = $"row_slots_identity_{rank}_threads_vs_serial_walk"
-         let build (threads: string) (tag: string) =
+         let build (threads: string) (knob: string) (scatter: string) (tag: string) =
              use _r = pinEnv "BLADE_FP_REPRO" "1"
              use _c = pinEnv "BLADE_FP_CONTRACT" "off"
              use _p = pinEnv "BLADE_PRINT" "s1,r1,s2,z2,s3"
-             use _k = pinEnv "BLADE_FOLD_ROW_SLOTS" null
+             use _k = pinEnv "BLADE_FOLD_ROW_SLOTS" knob
+             use _o = pinEnv "BLADE_ORBIT_SCATTER" scatter
              use _g = pinEnv "BLADE_TILE_TUNE" null
              use _t = pinEnv "BLADE_OMP_THREADS" threads
              compileProgram outputDir (name + tag) rowSlotSrc
-         match build null "_threaded", build "1" "_serial" with
-         | Error e, _ -> fail name ($"threaded build: {e}")
-         | _, Error e -> fail name ($"serial build: {e}")
-         | Ok thrExe, Ok serExe ->
+         match build null null null "_threaded", build null "prefer" null "_prefer", build "1" null null "_serial_scatter", build "1" null "0" "_serial" with
+         | Error e, _, _, _ -> fail name ($"threaded build: {e}")
+         | _, Error e, _, _ -> fail name ($"prefer build: {e}")
+         | _, _, Error e, _ -> fail name ($"serial (scatter) build: {e}")
+         | _, _, _, Error e -> fail name ($"serial walk build: {e}")
+         | Ok thrExe, Ok prfExe, Ok sscExe, Ok serExe ->
              let cppOfExe (exe: string) = File.ReadAllText(Path.ChangeExtension(exe, ".cpp"))
-             let slots = (System.Text.RegularExpressions.Regex.Matches(cppOfExe thrExe, @"__rslot_s\d\[__i0\] = ")).Count
-             if slots <> 3 then
-                 fail name ($"the threaded build emitted {slots} row-slot assignment(s), expected 3 (s1, s2, s3) -- the comparison would not test the form")
-             elif (cppOfExe serExe).Contains "__rslot" then
-                 fail name "the BLADE_OMP_THREADS=1 build emitted row slots (it must be the serial walk)"
+             let slotsOf (exe: string) = (System.Text.RegularExpressions.Regex.Matches(cppOfExe exe, @"__rslot_s\d\[__i0\] = ")).Count
+             let scattersOf (exe: string) = (System.Text.RegularExpressions.Regex.Matches(cppOfExe exe, @"= blade_scatter::scatter[23]<")).Count
+             if slotsOf thrExe <> 2 || scattersOf thrExe <> 1 then
+                 fail name ($"the default threaded build emitted {slotsOf thrExe} row-slot assignment(s) and {scattersOf thrExe} scatter(s), expected 2 (s1, s3) and 1 (s2: the scatter's precedence) -- the comparison would not test the forms")
+             elif slotsOf prfExe <> 3 || scattersOf prfExe <> 0 then
+                 fail name ($"the prefer build emitted {slotsOf prfExe} row-slot assignment(s) and {scattersOf prfExe} scatter(s), expected 3 (s1, s2, s3) and 0")
+             elif (cppOfExe sscExe).Contains "__rslot" || scattersOf sscExe <> 1 then
+                 fail name "the BLADE_OMP_THREADS=1 build must scatter s2 serially and emit no row slots"
+             elif (cppOfExe serExe).Contains "__rslot" || scattersOf serExe <> 0 then
+                 fail name "the BLADE_OMP_THREADS=1 BLADE_ORBIT_SCATTER=0 build emitted row slots or a scatter (it must be the serial walk)"
              else
-             match runProgram serExe "1", runProgram thrExe "4", runProgram thrExe "7", runProgram thrExe "1" with
-             | Error e, _, _, _ -> fail name ($"serial run: {e}")
-             | _, Error e, _, _ | _, _, Error e, _ | _, _, _, Error e -> fail name ($"threaded run: {e}")
-             | Ok ser, Ok t4, Ok t7, Ok t1 ->
+             match runProgram serExe "1", runProgram thrExe "4", runProgram thrExe "7", runProgram thrExe "1",
+                   runProgram prfExe "4", runProgram prfExe "7", runProgram prfExe "1", runProgram sscExe "1" with
+             | Error e, _, _, _, _, _, _, _ -> fail name ($"serial run: {e}")
+             | _, Error e, _, _, _, _, _, _ | _, _, Error e, _, _, _, _, _ | _, _, _, Error e, _, _, _, _ -> fail name ($"threaded run: {e}")
+             | _, _, _, _, Error e, _, _, _ | _, _, _, _, _, Error e, _, _ | _, _, _, _, _, _, Error e, _ -> fail name ($"prefer run: {e}")
+             | _, _, _, _, _, _, _, Error e -> fail name ($"serial scatter run: {e}")
+             | Ok ser, Ok t4, Ok t7, Ok t1, Ok p4, Ok p7, Ok p1, Ok ssc ->
                  let s = stripTiming ser
                  let expected = [ "s1 = "; "r1 = "; "s2 = -0.0"; "z2 = -inf" ]
                  let missing = expected |> List.filter (fun e -> not (s.Contains e))
                  let nanOk = System.Text.RegularExpressions.Regex.IsMatch(s, @"(?m)^s3 = -?nan\r?$")
+                 let differ =
+                     [ ("default T=4", t4); ("default T=7", t7); ("default T=1", t1)
+                       ("prefer T=4", p4); ("prefer T=7", p7); ("prefer T=1", p1); ("threads-off scatter", ssc) ]
+                     |> List.filter (fun (_, o) -> stripTiming o <> s)
                  if not missing.IsEmpty then
                      fail name ($"""serial walk output lacks {(String.concat " | " missing)}: {s}""")
                  elif not nanOk then
                      fail name ($"the NaN cell's checksum must print nan: {s}")
-                 elif stripTiming t4 <> s || stripTiming t7 <> s || stripTiming t1 <> s then
-                     fail name ($"threaded row slots differ from the serial walk: serial [{s}] vs T=4 [{stripTiming t4}] / T=7 [{stripTiming t7}] / T=1 [{stripTiming t1}]")
+                 elif not differ.IsEmpty then
+                     fail name ($"""a form differs from the serial walk [{s}]: {(differ |> List.map (fun (k, o) -> $"{k} [{stripTiming o}]") |> String.concat " / ")}""")
                  else
-                     pass name "threaded (T = 1, 4, 7) text identical to the serial walk under REPRO + CONTRACT=off: finite-value low-bit identity (s1, r1), signed zero (-0.0 / -inf), NaN-equivalence (s3 = nan)"
+                     pass name "default (row slots + the scatter's precedence), prefer (row slots only) at T = 1, 4, 7 and the threads-off scatter: text identical to the serial walk under REPRO + CONTRACT=off: finite-value low-bit identity (s1, r1), signed zero (-0.0 / -inf), NaN-equivalence (s3 = nan)"
+
+        // ---- W2-0a RAW BITS: the scatter's precedence, every route -------
+        // (round 3; Codex diff review of W2-0, finding 1.) Walks that BOTH the
+        // row slots and the ordered orbit scatter admit (rank 2 at extent 521,
+        // rank 3 at extent 67, above the row-slot gate), over stored pools
+        // with heavy cancellation (1e4-scaled rows beside unit rows, signed
+        // values), a -0.0 seed chain over -0.0 cells, and a second pool with
+        // TWO DISTINCT NaN PAYLOADS poked into its stored bytes (one with the
+        // sign bit set) -- read raw and through arithmetic (s5). Every scalar's
+        // exact uint64 representation is captured, and five builds under
+        // BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off must print the SAME bits at
+        // every team size: the DEFAULT (the scatter, by precedence), `prefer`
+        // (the row slots), BLADE_FOLD_ROW_SLOTS=0 (the scatter), threads off
+        // (the serial scatter) and the true serial walk (threads off,
+        // BLADE_ORBIT_SCATTER=0). Each binding's ROUTE is asserted per build.
+        let rawNaNA = 0x7FF800000000A11CUL
+        let rawNaNB = 0xFFF80000000B0B0BUL
+        let rawCases =
+            let x2 = "(Float64((i * 7 + s * 3) % 11) * 0.37 - 1.85 + 0.1 / Float64(i + 1)) * (1.0 + 9999.0 * Float64((i % 4) / 3))"
+            let x3 = "(Float64((i * 7 + s * 3) % 11) * 0.37 - 1.85 + 0.1 / Float64(i + 1)) * (1.0 + 99.0 * Float64((i % 4) / 3))"
+            let omp = "lambda(u, v) where omp -> u + v"
+            let rank2 =
+                "type Var = Idx<521>\ntype Obs = Idx<3>\n"
+                + $"let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> {x2} |> compute\n"
+                + "let g = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute\n"
+                + "let gn = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) * 0.5 |> compute\n"
+                + "let gm = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) * 0.25 |> compute\n"
+                + $"let s1 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j), (+)), {omp}, 0.25)\n"
+                + $"let s2 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> -0.0 * (g(i, j) * g(i, j)), lambda(a, b) -> a + b, -0.0), {omp}, -0.0)\n"
+                + $"let s3 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * g(i, j) * 1.0e-9 - g(i, j), (+)), {omp}, 0.0)\n"
+                + $"let s4 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> gn(i, j), (+)), {omp}, 0.0)\n"
+                + $"let s5 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> gn(i, j) * 2.0 + 1.0, (+)), {omp}, 0.0)\n"
+                + $"let s6 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> gm(i, j), (+)), {omp}, 0.0)\n"
+            let lv3 (body: string) (inner: string) =
+                $"reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> reduce(method_for(range<Var>) <@> lambda(k) -> {body}, {inner}), {inner}), {omp}"
+            let rank3 =
+                "type Var = Idx<67>\ntype Obs = Idx<3>\n"
+                + $"let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> {x3} |> compute\n"
+                + "let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) |> compute\n"
+                + "let tn = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) * 0.5 |> compute\n"
+                + "let tm = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) * 0.25 |> compute\n"
+                + "let s1 = " + lv3 "t(i, j, k)" "(+)" + ", 0.25)\n"
+                + "let s2 = " + lv3 "-0.0 * (t(i, j, k) * t(i, j, k))" "lambda(a, b) -> a + b, -0.0" + ", -0.0)\n"
+                + "let s3 = " + lv3 "t(i, j, k) * t(i, j, k) * 1.0e-9 - t(i, j, k)" "(+)" + ", 0.0)\n"
+                + "let s4 = " + lv3 "tn(i, j, k)" "(+)" + ", 0.0)\n"
+                + "let s5 = " + lv3 "tn(i, j, k) * 2.0 + 1.0" "(+)" + ", 0.0)\n"
+                + "let s6 = " + lv3 "tm(i, j, k)" "(+)" + ", 0.0)\n"
+            // (rank, source, the NaN pool, its poked cells: C(522, 2) = 135981
+            // and C(69, 3) = 52394 canonical cells)
+            // `gm` / `tm` carry the same two payloads in the OPPOSITE order, so
+            // each payload is the first one some walk meets.
+            [ ("rank2", rank2, [ ("gn", [ (1234, rawNaNA); (70000, rawNaNB) ]); ("gm", [ (500, rawNaNB); (90000, rawNaNA) ]) ])
+              ("rank3", rank3, [ ("tn", [ (777, rawNaNA); (40000, rawNaNB) ]); ("tm", [ (300, rawNaNB); (45000, rawNaNA) ]) ]) ]
+        let rawScalars = [ "s1"; "s2"; "s3"; "s4"; "s5"; "s6" ]
+        for (rank, src, pokes) in rawCases do
+         let name = $"scatter_precedence_raw_bits_{rank}"
+         // (tag, BLADE_OMP_THREADS, BLADE_FOLD_ROW_SLOTS, BLADE_ORBIT_SCATTER, expected route, team sizes)
+         let builds =
+             [ ("default", null, null, null, "scatter", [ "1"; "4"; "7" ])
+               ("prefer", null, "prefer", null, "slots", [ "1"; "4"; "7" ])
+               ("slots_off", null, "0", null, "scatter", [ "1"; "4"; "7" ])
+               ("threads_off", "1", null, null, "scatter", [ "1" ])
+               ("walk", "1", null, "0", "walk", [ "1" ]) ]
+         let build (threads: string) (slots: string) (scatter: string) (tag: string) =
+             use _r = pinEnv "BLADE_FP_REPRO" "1"
+             use _a = pinEnv "BLADE_FP_REASSOC" null
+             use _c = pinEnv "BLADE_FP_CONTRACT" "off"
+             use _b = pinEnv "BLADE_BLAS" "0"
+             use _p = pinEnv "BLADE_PRINT" (String.concat "," rawScalars)
+             use _k = pinEnv "BLADE_FOLD_ROW_SLOTS" slots
+             use _o = pinEnv "BLADE_ORBIT_SCATTER" scatter
+             use _g = pinEnv "BLADE_TILE_TUNE" null
+             use _t = pinEnv "BLADE_OMP_THREADS" threads
+             compileProgramModeWith false (rawBitTransform "\n    double s1 = " pokes rawScalars) outputDir (name + "_" + tag) src
+         let routeOf (cpp: string) (s: string) =
+             let scattered = System.Text.RegularExpressions.Regex.IsMatch(cpp, $@"\b{s} = blade_scatter::scatter[23]<")
+             let slotted = cpp.Contains $"__rslot_{s}[__i0] = "
+             match scattered, slotted with
+             | true, false -> "scatter"
+             | false, true -> "slots"
+             | false, false -> "walk"
+             | true, true -> "both"
+         let rawOf (out: string) =
+             out.Replace("\r\n", "\n").Split('\n') |> Array.filter (fun l -> l.StartsWith "RAW ") |> List.ofArray
+         let results =
+             builds |> List.map (fun (tag, threads, slots, scatter, want, teams) ->
+                 match build threads slots scatter tag with
+                 | Error e -> Error ($"{tag} build: {e}")
+                 | Ok exe ->
+                     let cpp = File.ReadAllText(Path.ChangeExtension(exe, ".cpp"))
+                     let bad = rawScalars |> List.filter (fun s -> routeOf cpp s <> want) |> List.map (fun s -> $"{s} is {routeOf cpp s}")
+                     if not bad.IsEmpty then Error ($"""{tag}: route wanted {want} for every binding, got {(String.concat ", " bad)}""")
+                     else
+                     let runs = teams |> List.map (fun t -> (t, runProgramFixedTeam exe t))
+                     match runs |> List.tryPick (fun (t, r) -> match r with Error e -> Some ($"{tag} T={t}: {e}") | Ok _ -> None) with
+                     | Some e -> Error e
+                     | None -> Ok (tag, runs |> List.map (fun (t, r) -> (t, (match r with Ok o -> rawOf o | Error _ -> []))), cpp))
+         match results |> List.tryPick (fun r -> match r with Error e -> Some e | Ok _ -> None) with
+         | Some e -> fail name e
+         | None ->
+             let ok = results |> List.choose (fun r -> match r with Ok v -> Some v | Error _ -> None)
+             let (_, walkRuns, _) = ok |> List.find (fun (tag, _, _) -> tag = "walk")
+             let reference = snd walkRuns.Head
+             let bitsOf (s: string) =
+                 reference |> List.tryPick (fun l -> if l.StartsWith ($"RAW {s} ") then Some (System.Convert.ToUInt64(l.Substring(5 + s.Length).Trim(), 16)) else None)
+             let isNaN (b: uint64) = (b &&& 0x7FF0000000000000UL) = 0x7FF0000000000000UL && (b &&& 0x000FFFFFFFFFFFFFUL) <> 0UL
+             let isFinite (b: uint64) = (b &&& 0x7FF0000000000000UL) <> 0x7FF0000000000000UL
+             let differ =
+                 ok |> List.collect (fun (tag, runs, _) ->
+                     runs |> List.choose (fun (t, lines) -> if lines <> reference then Some ($"""{tag} T={t} [{String.concat "; " lines}]""") else None))
+             if reference.Length <> rawScalars.Length then
+                 fail name ($"the walk printed {reference.Length} RAW line(s), wanted {rawScalars.Length}")
+             elif bitsOf "s2" <> Some 0x8000000000000000UL then
+                 fail name ($"""s2 must be -0.0 (0x8000000000000000) in the walk, got {bitsOf "s2"}""")
+             elif not ([ "s1"; "s3" ] |> List.forall (fun s -> bitsOf s |> Option.exists isFinite)) then
+                 fail name ($"""s1 / s3 must be finite in the walk: {String.concat "; " reference}""")
+             elif not ([ "s4"; "s5"; "s6" ] |> List.forall (fun s -> bitsOf s |> Option.exists isNaN)) then
+                 fail name ($"""the poked NaN payloads did not reach s4 / s5 / s6 (the probe would not test them): {String.concat "; " reference}""")
+             elif bitsOf "s4" = bitsOf "s6" then
+                 fail name ($"""s4 and s6 (the same two payloads, met in opposite orders) carry the SAME bits in the walk: the payload probe would not distinguish an order change: {String.concat "; " reference}""")
+             elif not differ.IsEmpty then
+                 fail name ($"""raw bits differ from the true serial walk [{String.concat "; " reference}]: {String.concat " | " differ}""")
+             else
+                 let nanTxt = [ "s4"; "s5"; "s6" ] |> List.map (fun s -> $"{s} = 0x{(bitsOf s).Value:X16}") |> String.concat ", "
+                 pass name ($"""every binding's route as wanted in each build (default / slots=0 / threads-off: the scatter; prefer: the row slots; the walk), and the SAME uint64 bits at T = 1, 4, 7: cancellation (s1, s3), -0.0 (s2), poked NaN payloads 0x{rawNaNA:X16} / 0x{rawNaNB:X16} -> {nanTxt}""")
 
         // ---- G51 IDENTITY: row-view folds in threaded complete rows -------
         // The stencil input-checksum shape `reduce(u(i), op[, s])` under an

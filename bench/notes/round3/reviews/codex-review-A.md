@@ -164,7 +164,7 @@ Source baseline: bench-fortran e64fef3b (BF); wave-3 magical-cannon-db55bf b80e2
 
 | Brief claim | Actual BF hook | Verdict |
 |---|---|---|
-| G35 wins over scatter, :4465-4475 | CodeGenBinding.fs:4469-4474; rowSlotAdmission:72; OrbitFold.fs:865/869 | Holds; disabling slots yields scatter only when scatterPlan exists. |
+| G35 wins over scatter, :4465-4475 | CodeGenBinding.fs:4469-4474; rowSlotAdmission:72; OrbitFold.fs:865/869 | Holds; disabling slots yields scatter only when scatterPlan exists. [SUPERSEDED by round 3 W2-0a: the default takes the scatter where both admit; G35-first is now `BLADE_FOLD_ROW_SLOTS=prefer`] |
 | Row-view fold rejected by isCompleteFold | CodeGenBinding.fs:85-88; IRTotality.fs:173-195 | Holds; two separate admission barriers. |
 | blade_fold::sum at header:141 | model::sum:141; vector blade_fold::sum:345-349 | Wrong namespace/site; fix to :345. |
 | Pool caps at header:104-115 | nested_array_utilities.hpp:106-109, release:180-196 | Holds: 4 MiB max, 8 MiB per-thread budget; eviction can precede exit. |

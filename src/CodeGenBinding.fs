@@ -4549,8 +4549,9 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
     // chain fed its source sequence. Planned only where the orbit-class fold
     // DECLINED the walk (its licensed form wins when it applies; BLADE_ORBIT_FOLD=0
     // declines only that form, so the scatter still serves a repro build).
-    // Taken below, after the G35 row-slot decision (which wins when it
-    // applies): `(plan, pool name)`.
+    // Taken below, after the G35 row-slot decision: an admitted scatter wins
+    // over an admitted row-slot form (round 3, W2-0a; BLADE_FOLD_ROW_SLOTS=prefer
+    // gives the round-2 order, the row slots first): `(plan, pool name)`.
     let scatterPlan =
         match orbitWhy with
         | None -> None
@@ -4813,6 +4814,9 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                     // that this one form also asks whether the build opens
                     // teams at all: a slot array with no team is pure cost.
                     let mutable rowSlotWhy = None
+                    // W2-0a: the row-slot form was ADMITTED but yielded to the
+                    // ordered orbit scatter (the census says so).
+                    let mutable rowSlotsYielded = false
                     // G51: the row-view record lines of a taken row-slot form
                     // whose rows are row-view folds (None otherwise).
                     let mutable rowViewLines : string list option = None
@@ -4821,23 +4825,41 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                         if not chunkable || fpReassocEnabled () then None
                         else
                             match rowSlotAdmission ctx.DeferredComputations baseNameOf single callable seedExpr cg0.Bindings with
+                            // THE PRECEDENCE (round 3, W2-0a): both forms
+                            // admit the walk -- the scatter is taken (measured
+                            // faster under mt8 repro; Blade.OrbitFold's
+                            // rowSlotsYieldedToScatter has the numbers) unless
+                            // BLADE_FOLD_ROW_SLOTS=prefer. Both are bitwise the
+                            // serial walk under REPRO + CONTRACT=off, so this is
+                            // a speed choice only; no admission is added (the
+                            // scatter's is planStrict's, already passed above).
+                            | Ok _ when scatterPlan.IsSome && not (foldRowSlotsPreferred ()) ->
+                                rowSlotsYielded <- true
+                                recordCodegenDecision "fold-form" name
+                                    (Blade.Effects.Declined $"row-slot form: {Blade.OrbitFold.rowSlotsYieldedToScatter}")
+                                    [ Blade.OrbitFold.rowSlotsYieldedForm
+                                      "reduce over a deferred computation (threaded complete rows, G35)"
+                                      "both forms admitted this walk: the row-slot admission's five-party audit passed (shared transitive write analysis + the IRTotality closed whitelist: row callable, inner and outer fold kernels, both seeds -- no write; intervening = none), and the scatter's own admission (OrbitFold.planStrict: a stored SymIdx pool, every level strict, f / every kernel / every seed on the closed total whitelist, coordinate-free seeds) passed; the scatter moves no evaluation across a binding and keeps every chain's seed, operand order and kernel" ]
+                                None
                             | Ok (rows, cells, rv) ->
                                 rowViewLines <- rv
                                 Some (rows, cells)
                             | Error why ->
                                 rowSlotWhy <- Some why
                                 let form =
-                                    if scatterPlan.IsSome then "fold form: ordered orbit scatter (repro; the threaded complete-row form declined)"
+                                    if scatterPlan.IsSome then Blade.OrbitFold.rowSlotsScatterFormPrefix + "declined)"
                                     else "fold form: serial (repro; the threaded complete-row form declined)"
                                 recordCodegenDecision "fold-form" name (Blade.Effects.Declined $"row-slot form: {why}")
                                     [ form
                                       "reduce over a deferred computation (threaded complete rows, G35)" ]
                                 None
-                    // G35 PRECEDENCE over the ordered orbit scatter: a taken
-                    // row-slot form (omp requested, threads on, repro, its gate
-                    // passed) threads the walk's rows and wins; the scatter is
-                    // the form of every other strict cell (and of the serial
-                    // LLVM lane, which has no threads).
+                    // An admitted scatter yields to a TAKEN row-slot form only
+                    // under BLADE_FOLD_ROW_SLOTS=prefer (the round-2 order):
+                    // by default the row slots are taken only where the
+                    // scatter did not admit the walk (scatterPlan None), so
+                    // there is nothing to yield. Everywhere else an admitted
+                    // scatter is the strict cell's form (and the serial LLVM
+                    // lane's, which has no threads).
                     let scatterTaken =
                         match scatterPlan with
                         | Some (sp, _) when rowSlots.IsSome ->
@@ -5596,6 +5618,7 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                             else
                                 let g35 =
                                     match rowSlotWhy with
+                                    | _ when rowSlotsYielded -> Blade.OrbitFold.rowSlotsYieldedCensus
                                     | Some why -> $"the threaded complete-row form declined: {why}"
                                     | None -> "no threaded complete-row form applies"
                                 let build =

@@ -1118,11 +1118,12 @@ let u = reduce(method_for(range<V>) <@> lambda(k) -> t(0, 0, k), (+))
     let sym3Sym = "@" + EmitLlvm.simplexTileSymbol
     let antiOff = [ "BLADE_ANTISYM_TILE", None; "BLADE_FP_REPRO", None ]
     let sym3Off = [ "BLADE_SIMPLEX_TILE", None; "BLADE_FP_REPRO", None ]
-    // The row group rides the call and sizes the scratch (unset: the default
-    // G = 1; anti_g=0: the cache budget's G = 4 at n = 401 for both
-    // schedules); BLADE_TILE_TUNE anti_g=1..8 forces it.
-    let antiG6 = fst (Blade.CodeGenExprSupport.antisymRowGroup 61L 401L false)
-    let antiG4 = fst (Blade.CodeGenExprSupport.antisymRowGroup 61L 401L true)
+    // The row group rides the call and sizes the scratch (unset: the SERIAL
+    // regime's default G = 1 -- this lane has no thread runtime; anti_g=0: the
+    // cache budget's G = 4 at n = 401 for both schedules); BLADE_TILE_TUNE
+    // anti_g=1..8 forces it.
+    let antiG6 = fst (Blade.CodeGenExprSupport.antisymRowGroup 61L 401L false false)
+    let antiG4 = fst (Blade.CodeGenExprSupport.antisymRowGroup 61L 401L true false)
     check "antisym tile: 61 x 401 calls the core with the emitter's recipe"
         antiOff (antiSrc 61 401 "" "")
         [ $"call void {antiSym}(i64 61, i64 401, ptr "

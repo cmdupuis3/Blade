@@ -1013,8 +1013,9 @@ let internal llvmLaneDecision (d: Blade.Effects.Decision) : Blade.Effects.Decisi
             declined "the LLVM lane has no thread runtime: it runs this walk serially in the same association -- the ordered orbit scatter where its own record for this walk says applied, else the serial walk" []
         elif cppForm.StartsWith "fold form: threaded complete rows (repro)" then
             declined "the LLVM lane has no thread runtime: it runs the serial walk (each row's fold, then the outer chain ascending from its seed -- the same association as the C++ lane's row slots)" []
-        // A row-slot decline whose walk the C++ plan scatters.
-        elif cppForm.StartsWith "fold form: ordered orbit scatter (repro; the threaded complete-row form declined)" then
+        // A row-slot decline whose walk the C++ plan scatters -- declined by
+        // its own admission, or admitted and yielded to the scatter (round 3).
+        elif cppForm.StartsWith Blade.OrbitFold.rowSlotsScatterFormPrefix then
             declined "the LLVM lane has no thread runtime (no threaded complete-row form); this lane's scatter record for the walk says which form it runs" []
         elif cppForm.StartsWith "fold form: serial (no reorder licence"
            || cppForm.StartsWith "fold form: serial (repro" then

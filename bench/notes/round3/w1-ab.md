@@ -38,7 +38,8 @@ hidden side-table writer); recorded as noise at the CI edge. No other Blade arm 
 Decisions the measurement settles:
 - **A1: flip the precedence.** Under mt8 repro the ordered orbit scatter beats the G35 row slots on both stored-pool walks
   (pairkernel 0.841, comoment3 0.843; the serial controls agree to within 0.8% across all three mirrors, so both strict forms
-  print the same bits). Wave 2 item W2-0: the scatter wins the precedence when it is eligible; the row slots stay the form for
+  print the same bits) [CORRECTED in W2-0's fix round: agreeing timings say nothing about bits -- the bit equality of the
+  forms is pinned by `blade test omp-reduce` `scatter_precedence_raw_bits_rank{2,3}`]. Wave 2 item W2-0: the scatter wins the precedence when it is eligible; the row slots stay the form for
   walks the scatter does not admit; `blade plan` records the choice; the omp-reduce `row_slots_precede_orbit_scatter` case inverts.
 - **T4a stays opt-in.** Its gain on top of T4b is 1.5-2.6% (repro CI excludes 1; licensed within noise), below the brief's drop line.
 - **anti_g: default 1 serially, auto under threads.** Serial: auto is 1-2% slower (cpp CI excludes 1, pooled); mt8: auto is 4.8%

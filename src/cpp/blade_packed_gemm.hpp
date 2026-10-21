@@ -405,7 +405,9 @@ inline void dsyrk_tri(size_t p, size_t k, double* const* X, double* const* C, si
 // never interleave and the output never aliases an input. Only the GLOBAL
 // store order changes, so the pool bytes are the same for every G; G = 1 is
 // the previous visiting order exactly. G is chosen at COMPILE time
-// (CodeGenExprSupport.antisymRowGroup): 1 by default; under BLADE_TILE_TUNE
+// (CodeGenExprSupport.antisymRowGroup): by default 1 for a serial call and
+// the cache budget for a team-ELIGIBLE one -- `threaded` and the static cap
+// (p * p * n) >> 20 below at least 2 (round 3); under BLADE_TILE_TUNE
 // anti_g=0 the largest fitting G in {4, 2} -- G A-pairs plus the ACTIVE B pair
 // within half of Zen 3's 512 KiB L2 -- otherwise 1 (which need not fit
 // either); anti_g=1..8 forces it.
