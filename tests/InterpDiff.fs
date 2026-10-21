@@ -63,7 +63,11 @@ let interpExpectedUnsupported : (string * string) list =
       // A keyed element write into a compound through a `mut` parameter: the
       // compiled lanes' write-barrier regression for compaction fusion
       // (index-types/520); the interpreter has no compound element store.
-      "Compaction fusion declines across writes: a mutated compound keeps the as-written values", "IRAssign to non-array index target" ]
+      "Compaction fusion declines across writes: a mutated compound keeps the as-written values", "IRAssign to non-array index target"
+      // The same missing store, met by a contains() target that writes its
+      // compound set (sql-unique-contains/024, the compound twin of 023,
+      // which runs in all three lanes over a dense set).
+      "Contains Target Mutates A Compound Set", "IRAssign to non-array index target" ]
 
 /// The slice the `test interp` arm (and `blade test --interp`) runs: EVERY
 /// corpus category on disk -- single-file and multi-file, DISCOVERED -- minus

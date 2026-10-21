@@ -1,0 +1,18 @@
+// TEST: Member Hoist Literal Set Bitmap
+// ============================================================================
+// Membership hoisting: twenty literal keys spanning [0, 60] (M > 16, span 61
+// <= max(64 M, 4096)) pick the BITMAP representation -- decided from (M, min,
+// max) only, and stated by `blade plan` for a literal set. Probes below the
+// span (-3), above it (61, 62) and in its holes answer false without a scan.
+// The second host probes a computed target (`p + 1`), evaluated exactly once
+// per probe.
+// ============================================================================
+type Row = Idx<16>
+let probes: Array<Int64 like Row> = [-3, 0, 1, 2, 7, 12, 30, 31, 44, 45, 46, 57, 58, 60, 61, 62]
+let evens = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 44, 46, 58, 60]
+let hit = mask(probes, lambda(p) -> contains(evens, p))
+let next_hit = mask(probes, lambda(p) -> contains(evens, p + 1))
+let hits = reduce(method_for(hit) <@> lambda(b) -> if b then 1 else 0, (+), 0)
+// EXPECT: hit = [false, true, false, true, false, true, true, false, true, false, true, false, true, true, false, false]
+// EXPECT: next_hit = [false, false, true, false, true, false, false, false, false, true, false, true, false, false, false, false]
+// EXPECT: hits = 8

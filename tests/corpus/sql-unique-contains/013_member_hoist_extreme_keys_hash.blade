@@ -1,0 +1,16 @@
+// TEST: Member Hoist Extreme Keys Hash
+// ============================================================================
+// Membership hoisting: eighteen keys spanning the WHOLE Int64 range (both
+// extremes, 0 and -1 -- no key value is an empty-slot sentinel -- and
+// duplicates of 5 and 0) pick the HASH representation: the span max - min
+// is formed unsigned and never as max - min + 1, which would overflow. The
+// probes sit next to every extreme: hits and near misses answer exactly
+// integer ==.
+// ============================================================================
+type Row = Idx<14>
+let wide = [9223372036854775807, -9223372036854775807 - 1, 0, -1, 1, 1000000007, -1000000007, 4611686018427387904, -4611686018427387904, 123456789012345, -98765432109876, 77, -77, 1 - 9223372036854775807, 9223372036854775806, 5, 5, 0]
+let probes: Array<Int64 like Row> = [9223372036854775807, -9223372036854775807 - 1, 9223372036854775806, 9223372036854775805, 0, 2, -1, -2, 1000000007, 1000000008, 77, -78, -9223372036854775807, -9223372036854775806]
+let hit = mask(probes, lambda(p) -> contains(wide, p))
+let hits = reduce(method_for(hit) <@> lambda(b) -> if b then 1 else 0, (+), 0)
+// EXPECT: hit = [true, true, true, false, true, false, true, false, true, false, true, false, false, true]
+// EXPECT: hits = 8

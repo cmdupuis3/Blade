@@ -549,6 +549,46 @@ let v = R((k, k + 2))
 /// substring search over the whole file would find `contract` in a module that
 /// emitted none -- a false pass in the direction that matters least and a
 /// false failure in the direction that matters most.
+/// MEMBERSHIP HOISTING'S ROUTE TABLE (round 3 B-T1; Codex diff review of
+/// W2-1, finding 4), shared by this block (the LLVM route) and
+/// `blade test optimize` (the C++ route): for each contains / member-hoist
+/// corpus file, the number of planned hosts -- each one structure, built
+/// before the host, probed inside it, freed after it (0 = no plan: no member
+/// call at all, the as-written scan) --, how many of those builds are over a
+/// COMPOUND set (the build reads its cardinality and compact buffer), and
+/// whether the LLVM lane emits the program (false: it refuses -- a compound
+/// `mut` parameter, a contains over an unstored set -- and the program runs
+/// in the C++ lane). A corpus file renamed or added without a row here is a
+/// gap this table is meant to make visible.
+let memberHoistRoutes : (string * string * int * int * bool) list =
+    [ "sql-unique-contains", "Contains Present", 0, 0, true
+      "sql-unique-contains", "Contains Absent", 0, 0, true
+      "sql-unique-contains", "Contains Empty After Mask", 0, 0, true
+      "sql-unique-contains", "Contains In Mask Predicate", 1, 0, true
+      "sql-unique-contains", "Member Hoist Small Set Linear", 2, 0, true
+      "sql-unique-contains", "Member Hoist Literal Set Bitmap", 2, 0, true
+      "sql-unique-contains", "Member Hoist Extreme Keys Hash", 1, 0, true
+      "sql-unique-contains", "Member Hoist Empty Compound Set", 2, 2, true
+      "sql-unique-contains", "Contains Target Evaluated Once Per Probe", 0, 0, true
+      "sql-unique-contains", "Contains Failing Target Over Empty Set (aborts)", 0, 0, true
+      "sql-unique-contains", "Member Hoist Failing Target (aborts)", 1, 0, true
+      "sql-unique-contains", "Member Hoist Fold Kernel Short Circuit", 2, 0, true
+      "sql-unique-contains", "Member Hoist OMP Map Hash", 1, 0, true
+      "sql-unique-contains", "Member Hoist Compound Set", 1, 1, true
+      "sql-unique-contains", "Member Hoist Declines Keep Values", 0, 0, true
+      "sql-unique-contains", "Member Hoist Semiagg Probe", 2, 0, true
+      "sql-unique-contains", "Contains Target Mutates A Dense Set", 0, 0, true
+      "sql-unique-contains", "Contains Target Mutates A Compound Set", 0, 0, false
+      "sql-unique-contains", "Member Hoist Fold Kernel Probe", 1, 0, true
+      "sql-unique-contains", "Member Hoist Stored Alias Chain", 1, 0, true
+      "sql-semijoins", "Semijoin Preserves Multiplicity", 1, 0, true
+      "sql-semijoins", "Antijoin Basic", 1, 0, true
+      "sql-semijoins", "Antijoin Preserves Multiplicity", 1, 0, true
+      "sql-semijoins", "Pattern Does Not Fire On Conjunction", 1, 0, true
+      "sql-semijoins", "Semijoin Float64", 0, 0, true
+      "sql-semijoins", "Unique Of Semijoin", 1, 0, false
+      "sql-semijoins", "Semijoin Then Mask", 1, 0, true ]
+
 let private instructionsOnly (ll: string) =
     ll.Replace("\r\n", "\n").Split('\n')
     |> Array.filter (fun l -> not (l.TrimStart().StartsWith ";"))
@@ -1188,6 +1228,80 @@ let u = reduce(method_for(range<V>) <@> lambda(k) -> t(0, 0, k), (+))
         [ "BLADE_SIMPLEX_TILE", Some "0"; "BLADE_FP_REPRO", None ] (sym3Src 29 67 "") [] [ sym3Sym ]
     check "simplex tile: the inner level first (`prodsum(c, a, b)`) declines"
         sym3Off ((sym3Src 29 67 "").Replace("prodsum(a, b, c)", "prodsum(c, a, b)")) [] [ sym3Sym ]
+
+    // ---- contains and membership hoisting (round 3, B-T1) ------------------
+    // The lane has a real IRContains arm (it used to refuse the node, so every
+    // `contains` program fell back to C++): a probe in a planned host reads
+    // the structure emitMain builds before the host statement through the
+    // shared C core (blade_member.h via the shim) -- init / has / fini, the
+    // forced representation as init's last argument -- and every other probe
+    // is the linear scan with early exit (`has.cond`), the target evaluated
+    // once before it. The knob off keeps the scan everywhere.
+    printSubHeader "contains and membership hoisting (B-T1)"
+    let memberSrc = """
+type Row = Idx<16>
+let probes: Array<Int64 like Row> = [-3, 0, 1, 2, 7, 12, 30, 31, 44, 45, 46, 57, 58, 60, 61, 62]
+let evens = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 44, 46, 58, 60]
+let hit = mask(probes, lambda(p) -> contains(evens, p))
+let one = contains(evens, 44)
+"""
+    let memberOn = [ "BLADE_MEMBER_HOIST", None ]
+    check "member hoist: a planned mask host builds, probes and frees through the shim"
+        memberOn memberSrc
+        [ "call void @blade_member_init_i64(ptr "; ", i64 20, i64 0)"; "call i32 @blade_member_has_i64(ptr "
+          "call void @blade_member_fini_i64(ptr "
+          "declare i32 @blade_member_has_i64(ptr noundef, i64 noundef) #10"
+          "attributes #10 = { mustprogress nofree nosync nounwind willreturn memory(read) }" ]
+        []
+    check "member hoist: a top-level contains (no host) is the linear scan, in the same module"
+        memberOn memberSrc [ "has.cond"; "icmp eq i64" ] []
+    check "member hoist: BLADE_MEMBER_HOIST=hash forces the representation (init's last argument)"
+        [ "BLADE_MEMBER_HOIST", Some "hash" ] memberSrc [ ", i64 20, i64 3)" ] []
+    check "member hoist: BLADE_MEMBER_HOIST=0 keeps the linear scan everywhere"
+        [ "BLADE_MEMBER_HOIST", Some "0" ] memberSrc [ "has.cond" ] [ "blade_member_" ]
+    check "contains over a Float64 set: IEEE == in the scan"
+        memberOn "let fs = [1.5, -0.0, 2.5]\nlet z = contains(fs, 0.0)\n" [ "fcmp oeq double" ] [ "blade_member_" ]
+    // THE ROUTE of every contains / member-hoist corpus file (Codex diff
+    // review of W2-1, finding 4: a value pin passes when the hoist vanishes):
+    // the lane emits the program (or refuses it, where the table says so),
+    // with exactly the planned number of structures, each `init` (and its
+    // report) BEFORE its first probe, each probe of that slot inside the
+    // host, each `fini` after the last probe; a file with no plan carries no
+    // member call at all.
+    (for (cat, test, hosts, _, emits) in memberHoistRoutes do
+        let name = $"member hoist route (llvm): {cat} `{test}` -- {hosts} build(s)"
+        match (try Blade.Tests.Corpus.category cat |> List.tryFind (fun (n, _) -> n = test) with _ -> None) with
+        | None -> fail name "the corpus file is missing (renamed?)"
+        | Some (_, src) ->
+            let emitted =
+                withEnv defaultEmissionEnv (fun () ->
+                    match fst (Lowering.lowerCaptured src) with
+                    | Error e -> Error ("lowering refused: " + e)
+                    | Ok ir ->
+                        match IRValidate.validateIR ir with
+                        | Error errs -> Error ("IR validation refused: " + String.concat "; " errs)
+                        | Ok ir -> EmitLlvm.tryEmitProgramNamed "facts" ir)
+            match emitted, emits with
+            | Error r, false -> pass name ($"refused as the table says ({r})")
+            | Ok _, false -> fail name "emitted, but the table says the lane refuses this program (update the table)"
+            | Error r, true -> fail name r
+            | Ok raw, true ->
+                let lines = (instructionsOnly raw).Split('\n')
+                let initRe = System.Text.RegularExpressions.Regex(@"call void @blade_member_init_i64\(ptr (%[A-Za-z0-9_.]+),")
+                let inits = lines |> Array.indexed |> Array.choose (fun (i, l) -> let m = initRe.Match l in if m.Success then Some (i, m.Groups.[1].Value) else None)
+                let slotOk (i, slot: string) =
+                    let has = lines |> Array.indexed |> Array.filter (fun (_, l) -> l.Contains($"@blade_member_has_i64(ptr {slot},")) |> Array.map fst
+                    let fini = lines |> Array.tryFindIndex (fun l -> l.Contains($"call void @blade_member_fini_i64(ptr {slot})"))
+                    let note = lines |> Array.tryFindIndex (fun l -> l.Contains($"call void @blade_member_note_llvm(ptr {slot},"))
+                    has.Length > 0 && (match fini, note with
+                                       | Some f, Some n -> n > i && Array.min has > n && Array.max has < f
+                                       | _ -> false)
+                let anyMember = lines |> Array.exists (fun l -> l.Contains "blade_member_")
+                if hosts = 0 then
+                    if anyMember then fail name "a member call in a program with no plan" else pass name "no structure, the scan"
+                elif inits.Length <> hosts then fail name ($"{inits.Length} init(s), want {hosts}")
+                elif not (inits |> Array.forall slotOk) then fail name "an init / report / probe / fini out of order (or a slot never probed)"
+                else pass name ($"{hosts} init -> report -> probes -> fini"))
 
     printFooter "LLVM Fact Layer"
         [ $"{passed} passed"; $"{failed} failed"; "0 skipped" ]

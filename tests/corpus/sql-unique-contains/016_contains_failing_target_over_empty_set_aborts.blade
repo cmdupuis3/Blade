@@ -1,0 +1,12 @@
+// TEST: Contains Failing Target Over Empty Set (aborts)
+// ABORT: BL8013
+// ============================================================================
+// The target of contains() is evaluated exactly once, before any cell is
+// read, even when the set is EMPTY: an integer division by zero in the
+// target therefore aborts with BL8013 in every lane (the C++ lane used to
+// skip the target of an empty scan and print `r = false`).
+// ============================================================================
+let ids = [1, 2, 3]
+let none = compound(ids, mask(ids, lambda(v) -> v > 100))
+let z0 = reduce([0, 0], (+))
+let r = contains(none, 100 / z0)

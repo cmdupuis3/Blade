@@ -39,6 +39,8 @@
 #pragma once
 #if !defined(__CUDA_ARCH__)
 #include <atomic>
+// Runtime components that report into the record test for this (blade_member.h).
+#define BLADE_RUN_RECORD_HPP 1
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -140,6 +142,10 @@ namespace blade_rr {
     else form_events_dropped++;
     form_lock.clear(std::memory_order_release);
   }
+  // EXTRA MEMBERS a runtime component appends after "inputs" (each writes
+  // `,"key":value` text): null unless one registered -- membership
+  // hoisting's builds (blade_member.h, "member_hoist") are the one today.
+  inline void (*extra_members)(std::FILE*) = nullptr;
 
   BLADE_RR_COLD inline void json_string(std::FILE* f, const char* s) {
     std::fputc('"', f);
@@ -246,7 +252,9 @@ namespace blade_rr {
       std::fputs(",\"observed\":", f); observe(f, in.path);
       std::fputc('}', f);
     }
-    std::fputs("]}\n", f);
+    std::fputc(']', f);
+    if (extra_members) extra_members(f);
+    std::fputs("}\n", f);
     std::fclose(f);
   }
 

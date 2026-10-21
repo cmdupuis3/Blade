@@ -570,7 +570,14 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         // escape table with the quoted-payload path (Frame.jsonString).
         $"blade_display::jsonstr({(exprToCppCore subst names dataExpr)})"
     | IRContains (arrExpr, valueExpr) ->
-        // Linear-scan membership test as an IIFE returning bool.
+        // Membership test as an IIFE returning bool, under THE ONE
+        // target-evaluation contract of every lane (Optimize's
+        // membership-hoisting note; the interpreter's Loops.fs order): the
+        // set operand is evaluated first, ONCE (`__cs`), then the target
+        // exactly ONCE (`__cx`), before any cell is read -- an empty set
+        // still evaluates the target, and a failing target fails before the
+        // scan. (The target used to be interpolated INSIDE the scan: once per
+        // scanned cell, never for an empty set.)
         let arrStr = exprToCppCore subst names arrExpr
         let valStr = exprToCppCore subst names valueExpr
         // A rank-1 compound operand (filtered set) scans its compact buffer:
@@ -582,10 +589,27 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         // Dense scan bound goes through the shared literal-or-runtime rule (a
         // compound's cardinality is genuinely dynamic and has no literal form).
         let bound =
-            if isR1Compound then $"{arrStr}.idx->cardinality"
-            else literalOrRuntimeExtent (inferExprType arrExpr) arrStr 0
-        let elemAt = if isR1Compound then $"{arrStr}.data[__ci]" else $"{arrStr}[__ci]"
-        $"[&]() {{ for (size_t __ci = 0; __ci < {bound}; __ci++) {{ if ({elemAt} == {valStr}) return true; }} return false; }}()"
+            if isR1Compound then "__cs.idx->cardinality"
+            else literalOrRuntimeExtent (inferExprType arrExpr) "__cs" 0
+        let elemAt = if isR1Compound then "__cs.data[__ci]" else "__cs[__ci]"
+        let scan = $"for (size_t __ci = 0; __ci < {bound}; __ci++) {{ if ({elemAt} == __cx) return true; }} return false;"
+        // MEMBERSHIP HOISTING (Optimize.planMembershipHoist): while the
+        // plan's host binding or one of its probing kernels is the
+        // declaration being emitted, the probe reads the structure built
+        // right before the host -- when it is built (`kind` is
+        // BLADE_MEMBER_NONE outside the host's window, and then the
+        // as-written scan runs, so a call of the kernel from anywhere else
+        // can never read a stale or freed structure). Same booleans either way.
+        let hoisted =
+            match arrExpr with
+            | IRVar (setId, _) -> Blade.Optimize.MemberHoistTable.tryProbe (currentDeclIdCell ()).Value setId
+            | _ -> None
+        match hoisted with
+        | Some plan ->
+            let g = memberHoistGlobalName plan.HostId plan.SetId
+            $"[&]() {{ auto&& __cs = {arrStr}; const auto __cx = {valStr}; if ({g}.kind != BLADE_MEMBER_NONE) return blade_member_test_i64(&{g}, (int64_t)(__cx)) != 0; {scan} }}()"
+        | None ->
+            $"[&]() {{ auto&& __cs = {arrStr}; const auto __cx = {valStr}; {scan} }}()"
 
     | IRArity (Some n, _) -> string n
     | IRArity (None, paramName) -> 
@@ -2168,8 +2192,8 @@ and materializeMaskFormCounted (subst: SubstMap) (names: Map<IRId, string>) (var
     // mask(A, pred) -> the Bool PRESENCE array over A's own index space,
     // m[i] = pred(A[i]). One pass, no value copying: compaction belongs
     // to compound(A, m); iteration to range<CompoundIdx<m>>. A contains(B, x)
-    // inside the predicate renders as a linear scan (see the note on the
-    // predicate arm below).
+    // inside the predicate reads membership hoisting's structure when this
+    // mask is a planned host (see the note on the predicate arm below).
     let arrName = exprToCppCore subst names arrExpr
     let maskRank =
         match inferExprType arrExpr with
@@ -2224,9 +2248,12 @@ and materializeMaskFormCounted (subst: SubstMap) (names: Map<IRId, string>) (var
     else
     match resolveCallable predExpr with
     | Some callable when callable.Params.Length = 1 ->
-        // Emit the per-element predicate call; any contains inside the
-        // predicate runs as a linear scan (genCallableWrapper calls the
-        // predicate by NAME, so a hoisted set would be unqueried).
+        // Emit the per-element predicate call. genCallableWrapper calls the
+        // predicate by NAME, so a contains inside it is rendered in the
+        // lifted function's own body: when this mask is a planned
+        // membership-hoist host (Optimize.MemberHoistTable), that body's
+        // IRContains arm reads the file-scope structure the host's build
+        // filled (testing its `kind` first), else the as-written scan.
         let (wrapperCode, wname) = genCallableWrapper names varName callable
         let predParamName = $"__{varName}_x"
         // Source element type (elemTypeStr is the RESULT type, i.e. bool).

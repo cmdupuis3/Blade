@@ -3727,6 +3727,11 @@ let runtimeHeaderNames : string list =
       // OrbitFold.planStrict). INCLUDED only by a program whose fold took it
       // (orbitScatterUsedCell); deployed unconditionally like the rest.
       "blade_orbit_scatter.hpp"
+      // Membership hoisting's C core (blade_member_build_i64 / _test_i64,
+      // Optimize.planMembershipHoist). INCLUDED only by a program with a
+      // planned hoist (memberUsedCell); deployed unconditionally like the
+      // rest. The LLVM shim includes the same file.
+      "blade_member.h"
       // Dense linear-algebra dispatch: blade_gemm / blade_syrk plus the
       // gram/matmul adapters, resolving to cblas under -DBLADE_HAS_BLAS and to
       // native fallbacks otherwise. INCLUDED only by programs that actually

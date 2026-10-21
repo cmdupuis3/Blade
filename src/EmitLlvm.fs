@@ -278,6 +278,7 @@ let private grpShimFree = 6           // the pool deallocator (obviously not `no
 let private grpShimArith = 7          // arithmetic-contract helpers: may panic (BL8013/BL8014), so no `willreturn`
 let private grpTileCore = 8           // blade_llvm_tiles.c: pure, serial, argument memory only (M6)
 let private grpShimArgRead = 9        // shim lookups that only READ argument memory (blade_compact1_rank)
+let private grpShimRead = 10          // shim lookups that only READ memory, through pointers they load too (blade_member_has_i64)
 
 let private attrGroupText (anyFrees: bool) (anyPanics: bool) (g: int) : string =
     // Blade has no exceptions (nounwind: deletes all Windows SEH lowering)
@@ -319,6 +320,13 @@ let private attrGroupText (anyFrees: bool) (anyPanics: bool) (g: int) : string =
     // search: the shim states the claims above its definition): reads only
     // argument memory, writes nothing, no globals, no I/O, always returns.
     elif g = grpShimArgRead then "mustprogress nofree nosync nounwind willreturn memory(argmem: read)"
+    // The membership probe (blade_member_has_i64 over blade_member.h): it
+    // reads the caller's structure AND the tables that structure points to
+    // -- memory not BASED on its pointer argument in LLVM's sense, so the
+    // claim is `memory(read)`, not `argmem: read`. Writes nothing, no I/O,
+    // no threads, and returns on every input (a bounded scan, a bit test, or
+    // a probe sequence that meets an empty slot at load <= 1/2).
+    elif g = grpShimRead then "mustprogress nofree nosync nounwind willreturn memory(read)"
     else ""
 
 /// The facts a whole module carries, computed once before any instruction is
@@ -1029,7 +1037,14 @@ and private Ctx =
       mutable DeclName: string
       /// Attribute groups actually referenced, so the module's tail lists the
       /// ones it uses and no others.
-      UsedAttrGroups: SortedSet<int> }
+      UsedAttrGroups: SortedSet<int>
+      /// MEMBERSHIP HOISTING (Optimize.planMembershipHoist): set binding id
+      /// -> the entry-block slot of the search structure `emitMain` built
+      /// for the host statement being emitted. Live ONLY while that host's
+      /// statement is emitted in main (removed at its free), so a probe
+      /// anywhere else -- another statement, an out-of-line function --
+      /// takes the linear scan.
+      MemberTables: Dictionary<IRId, string> }
 
 /// A deferred value the TILE CORE may materialize (M6): a same-array `comm`
 /// row contraction `method_for(X, X) <@> lambda(a, b) where comm(a, b) ->
@@ -1108,7 +1123,8 @@ let private newCtx (callables: Map<IRId, IRCallable>) (facts: ModuleFacts) =
       HoistedIds = HashSet()
       BreakTargets = Stack()
       Allocas = ResizeArray()
-      Body = ResizeArray() }
+      Body = ResizeArray()
+      MemberTables = Dictionary() }
 
 let private nextN (c: Ctx) = c.Counter <- c.Counter + 1; c.Counter
 let private freshReg (c: Ctx) = sprintf "%%r%d" (nextN c)
@@ -1244,6 +1260,17 @@ let private shimTable : Map<string, ShimFn> =
           // The rank-1 compound's keyed read (G9): the kept ordinal of `key`
           // in the ascending position table, -1 when it was not kept.
           "blade_compact1_rank", { Ret = "i64"; RetAttrs = ""; Args = [ "ptr"; "i64"; "i64" ]; Group = grpShimArgRead }
+          // Membership hoisting (round 3, B-T1; blade_member.h through the
+          // shim): build into the caller's slot (allocates the tables, and
+          // frees a half-made one when an allocation fails -- so not
+          // `nofree` -- never panics, always returns: grpShimFree's claims),
+          // probe (reads only), free the tables.
+          "blade_member_init_i64", { Ret = "void"; RetAttrs = ""; Args = [ "ptr"; "ptr"; "i64"; "i64" ]; Group = grpShimFree }
+          "blade_member_has_i64", { Ret = "i32"; RetAttrs = ""; Args = [ "ptr"; "i64" ]; Group = grpShimRead }
+          "blade_member_fini_i64", { Ret = "void"; RetAttrs = ""; Args = [ "ptr" ]; Group = grpShimFree }
+          // the build's report: actual vs preferred representation (stderr
+          // under BLADE_MEMBER_VERBOSE=1)
+          "blade_member_note_llvm", io "void" [ "ptr"; "ptr"; "ptr" ]
           "blade_out_str", io "void" [ "ptr" ]
           "blade_out_i64", io "void" [ "i64" ]
           "blade_out_f64", io "void" [ "double" ]
@@ -2962,6 +2989,104 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
         (match slot with Some s -> loadSlot c s resTy | None -> { Reg = ""; Ty = ScVoid })
 
     | IRProdSum args -> emitProdSum c args
+
+    // contains(B, x): the membership test, under THE ONE target-evaluation
+    // contract of every lane (Optimize's membership-hoisting note; the
+    // interpreter's Loops.fs order): the set operand first, then the target
+    // exactly ONCE, before any cell is read -- an empty set still evaluates
+    // it. While a host statement that emitMain built a structure for is being
+    // emitted in main (MemberTables, membership hoisting), a probe of that
+    // set reads the structure through the shared C core (blade_member.h via
+    // the shim); anywhere else, the linear scan with early exit. Rank-1 sets
+    // of Int64 / Float64 / Bool cells, stored (a pool) -- dense or a rank-1
+    // compound's compact buffer; anything else refuses (the program falls
+    // back to the C++ lane) rather than invent a semantics.
+    | IRContains (arrExpr, valueExpr) ->
+        let live =
+            match arrExpr with
+            | IRVar (sid, _) when not c.InFunction ->
+                (match c.MemberTables.TryGetValue sid with
+                 | true, slot -> Some slot
+                 | _ -> None)
+            | _ -> None
+        match live with
+        | Some slot ->
+            // The set is a stored, never-assigned module binding (the plan's
+            // admission): evaluating it reads a name and nothing else.
+            let x = coerce c ScI64 (emitExpr c valueExpr)
+            needShim c "blade_member_has_i64"
+            let r = freshReg c
+            ln c ($"{r} = call i32 @blade_member_has_i64(ptr {slot}, i64 {x.Reg})")
+            let hit = freshReg c
+            ln c ($"{hit} = icmp ne i32 {r}, 0")
+            { Reg = hit; Ty = ScBool }
+        | None ->
+            let a = consumeArrOperand c arrExpr
+            let n =
+                match a.Groups with
+                | [ GDense n ] -> string n
+                | [ GDynDense len ] -> len
+                | [ GCompact (len, _) ] -> len
+                | _ -> refuse "contains over a set that is not rank-1 (dense, or a rank-1 compound)"
+            (match a.Src with
+             | APool _ -> ()
+             | _ -> refuse "contains over a computed (unstored) set")
+            (match a.Elem with
+             | ScI64 | ScF64 | ScBool -> ()
+             | _ -> refuse "contains over a set of String cells")
+            let x = coerce c a.Elem (emitExpr c valueExpr)
+            // BLOCKED early exit: 64 cells at a time, each block a branch-free
+            // OR of the compares (a counted loop the vectorizer takes), then
+            // the exit test. Reading the rest of a block after a hit reads a
+            // stored pool in bounds and changes nothing: the boolean is the
+            // scan's.
+            let found = allocaOf c "i1"
+            ln c ($"store i1 false, ptr {found}")
+            let pos = allocaOf c "i64"
+            ln c ($"store i64 0, ptr {pos}")
+            let lCond = freshLbl c "has.cond"
+            let lBlock = freshLbl c "has.block"
+            let lEnd = freshLbl c "has.end"
+            ln c (sprintf "br label %%%s" lCond)
+            lbl c lCond
+            let p = freshReg c
+            ln c ($"{p} = load i64, ptr {pos}")
+            let more = freshReg c
+            ln c (renderCmp { Dest = more; Kind = "icmp"; Pred = "slt"; Ty = ScI64; Lhs = p; Rhs = n })
+            let f = freshReg c
+            ln c ($"{f} = load i1, ptr {found}")
+            let nf = freshReg c
+            ln c ($"{nf} = xor i1 {f}, true")
+            let go = freshReg c
+            ln c ($"{go} = and i1 {more}, {nf}")
+            ln c (renderBr { Cond = go; IfTrue = lBlock; IfFalse = lEnd })
+            lbl c lBlock
+            let rem = i64Bin c "sub" n p
+            let short = freshReg c
+            ln c (renderCmp { Dest = short; Kind = "icmp"; Pred = "slt"; Ty = ScI64; Lhs = rem; Rhs = "64" })
+            let len = freshReg c
+            ln c ($"{len} = select i1 {short}, i64 {rem}, i64 64")
+            emitCountedLoopTo c len (fun k ->
+                let idx = i64Bin c "add" p k
+                let cell = readCell c a [ { Reg = idx; Ty = ScI64 } ]
+                let eq = freshReg c
+                (match a.Elem with
+                 // IEEE `==`, the C++ lane's and the interpreter's float
+                 // equality: NaN matches nothing, -0.0 matches +0.0
+                 | ScF64 -> ln c (renderCmp { Dest = eq; Kind = "fcmp"; Pred = "oeq"; Ty = ScF64; Lhs = cell.Reg; Rhs = x.Reg })
+                 | ty -> ln c (renderCmp { Dest = eq; Kind = "icmp"; Pred = "eq"; Ty = ty; Lhs = cell.Reg; Rhs = x.Reg }))
+                let acc = freshReg c
+                ln c ($"{acc} = load i1, ptr {found}")
+                let acc2 = freshReg c
+                ln c ($"{acc2} = or i1 {acc}, {eq}")
+                ln c ($"store i1 {acc2}, ptr {found}"))
+            let p2 = i64Bin c "add" p len
+            ln c ($"store i64 {p2}, ptr {pos}")
+            ln c (sprintf "br label %%%s" lCond)
+            lbl c lEnd
+            let r = freshReg c
+            ln c ($"{r} = load i1, ptr {found}")
+            { Reg = r; Ty = ScBool }
 
     | other ->
         refuse ($"the IR node {(caseName other)} in value position -- no arm in the llvm lane")
@@ -8035,6 +8160,49 @@ let private emitMain (c: Ctx) (m: IRModule) (programName: string) : string list 
     let t0 = freshReg c
     ln c (renderCall { Dest = Some t0; RetTy = ScF64; Callee = "@blade_now"; Args = [] })
     for b in m.Bindings do
+        // MEMBERSHIP HOISTING (Optimize.planMembershipHoist): each structure
+        // planned for this host is built BEFORE the statement starts -- ahead
+        // of StmtStart, so a force hoisted to the statement's start still
+        // follows it -- over the set's stored pool, read once, into an
+        // entry-block slot; it is live in MemberTables for this statement
+        // only and freed right after it. A set this lane holds as anything
+        // but a rank-1 Int64 pool builds nothing (its probes scan).
+        let built = ResizeArray<IRId * string>()
+        for p in Blade.Optimize.MemberHoistTable.plansOf b.Id do
+            // FAIL CLOSED: the build needs the set's STORED rank-1 Int64 pool
+            // here, before the host; anything else builds nothing (the probes
+            // scan as written) and says so in the plan record.
+            let pool =
+                match c.ArrSlots.TryGetValue p.SetId with
+                | true, a when a.Elem = ScI64 ->
+                    match a.Src, a.Groups with
+                    | APool ptr, [ GDense n ] -> Ok (ptr, string n)
+                    | APool ptr, [ GDynDense len ] -> Ok (ptr, len)
+                    | APool ptr, [ GCompact (len, _) ] -> Ok (ptr, len)
+                    | APool _, _ -> Error "it is not a rank-1 pool in this lane"
+                    | _ -> Error "it is a computed (unstored) array in this lane"
+                | true, _ -> Error "its cells are not Int64 in this lane"
+                | _ -> Error "it is not bound in this lane at the build point"
+            match pool with
+            | Ok (ptr, mCells) ->
+                let slot = allocaOf c "[128 x i8], align 8"
+                needShim c "blade_member_init_i64"
+                needShim c "blade_member_note_llvm"
+                c.AnyFrees <- true
+                ln c ($"; member-hoist v1: `{p.HostName}`'s probes of `{p.SetName}` read ONE search structure built here (blade_member.h through the shim)")
+                ln c ($"call void @blade_member_init_i64(ptr {slot}, ptr {ptr}, i64 {mCells}, i64 {p.Forced})")
+                let hostG = stringGlobal c p.HostName
+                let setG = stringGlobal c p.SetName
+                ln c ($"call void @blade_member_note_llvm(ptr {slot}, ptr {hostG}, ptr {setG})")
+                c.MemberTables.[p.SetId] <- slot
+                built.Add((p.SetId, slot))
+            | Error why ->
+                if Blade.Effects.Decisions.active () then
+                    Blade.Effects.Decisions.record
+                        { Rule = "member-hoist"; Version = 1; Span = Blade.IR.declSpanOf b.Name
+                          Subject = p.HostName
+                          Outcome = Blade.Effects.Declined $"llvm lane: the planned build over `{p.SetName}` is not emitted -- {why}; the probes scan as written"
+                          Evidence = [ "fail closed: no structure without the set's stored pool at the build point" ] }
         c.StmtStart <- c.Body.Count
         c.StmtSlots <- Dictionary(c.ArrSlots)
         c.HoistedIds.Clear()
@@ -8044,6 +8212,10 @@ let private emitMain (c: Ctx) (m: IRModule) (programName: string) : string list 
          | Some (denseExpr, maskExpr) -> emitCompoundInit c b denseExpr maskExpr
          | None -> bindNamed c b.Id b.Name b.Type b.Value)
         publishBinding c b.Id
+        for (sid, slot) in built do
+            needShim c "blade_member_fini_i64"
+            ln c ($"call void @blade_member_fini_i64(ptr {slot})")
+            c.MemberTables.Remove sid |> ignore
     c.StmtStart <- -1
     let t1 = freshReg c
     ln c (renderCall { Dest = Some t1; RetTy = ScF64; Callee = "@blade_now"; Args = [] })
@@ -8296,6 +8468,11 @@ let tryEmitProgram (program: IRProgram) : Result<string, string> =
 /// emit time.
 let shimFileName = "blade_llvm_shim.c"
 
+/// The headers the shim `#include`s from its own directory: deployed beside
+/// it (`deployShim`) and hashed into its object identity (Build.buildLlvmShim).
+/// blade_member.h is membership hoisting's C core, shared with the C++ lane.
+let shimIncludedHeaders = [ "blade_member.h" ]
+
 let shimSourceText () : string =
     Blade.CodeGenLoopNest.readCppRuntimeHeader shimFileName
 
@@ -8313,7 +8490,9 @@ let deployShim (outputDir: string) : unit =
     // The tile core (M6) and the arithmetic header it shares with the C++
     // lane ride along: Build.buildLlvmTilesObject compiles them only for a
     // `.ll` that calls the core, so deploying them is a write, not a compile.
-    for name in [ tilesSourceFileName; tilesHeaderFileName ] do
+    // The headers the shim itself includes (shimIncludedHeaders: the
+    // membership core) are deployed the same way.
+    for name in [ tilesSourceFileName; tilesHeaderFileName ] @ shimIncludedHeaders do
         let dest = System.IO.Path.Combine(outputDir, name)
         let text = Blade.CodeGenLoopNest.readCppRuntimeHeader name
         let current =

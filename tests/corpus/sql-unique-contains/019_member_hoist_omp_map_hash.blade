@@ -1,0 +1,16 @@
+// TEST: Member Hoist OMP Map Hash
+// ============================================================================
+// Membership hoisting with the probe inside a `where omp` map kernel: the
+// structure is built SERIALLY before the thread team and every thread only
+// reads it (read-only shared). The set is computed and stored (`|> compute`):
+// 37 keys over a span of ~3.6e7 pick the HASH representation at run time.
+// ============================================================================
+type Ev = Idx<37>
+type Row = Idx<211>
+let elig = method_for(range<Ev>) <@> lambda(e) -> (Int64(e) - 18) * 1000003 + Int64(e) % 5 |> compute
+let cust = method_for(range<Row>) <@> lambda(i) -> ((Int64(i) * 7) % 61 - 30) * 1000003 + (Int64(i) * 3) % 7 |> compute
+let flags = method_for(cust) <@> lambda(c) where omp -> contains(elig, c) |> compute
+let hits = reduce(method_for(flags) <@> lambda(f) -> if f then 1 else 0, (+), 0)
+let fp = reduce(method_for(range<Row>) <@> lambda(i) -> if flags(i) then Int64(i) else 0, (+), 0)
+// EXPECT: hits = 20
+// EXPECT: fp = 2152

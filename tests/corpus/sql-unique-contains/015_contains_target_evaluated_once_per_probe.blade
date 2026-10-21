@@ -1,0 +1,30 @@
+// TEST: Contains Target Evaluated Once Per Probe
+// ============================================================================
+// THE ONE target-evaluation contract of every lane: contains(B, x) evaluates
+// the set, then the target x EXACTLY ONCE, before any cell is read -- also
+// over an EMPTY set. The target here counts its own evaluations (a call that
+// bumps a counter through a `mut` parameter), so the counter after each mask
+// is the number of probes: 6, then 6 more over the empty set. (The C++ lane
+// used to evaluate the target inside the scan, once per scanned cell, and
+// never for an empty set.) The counting kernel writes, so membership
+// hoisting declines here: this is the as-written scan in every lane.
+// ============================================================================
+type One = Idx<1>
+type Row = Idx<6>
+let src: Array<Int64 like Row> = [4, 8, 15, 16, 23, 42]
+let mut calls: Array<Int64 like One> = [0]
+function tick(c: mut Array<Int64 like One>, x: Int64) -> Int64 = {
+    c(0) = c(0) + 1
+    x
+}
+let B = [8, 23, 99, 1, 2, 3]
+let keep = mask(src, lambda(v) -> contains(B, tick(calls, v)))
+let after_nonempty = calls(0)
+let empty = compound(src, mask(src, lambda(v) -> v > 1000))
+let keep2 = mask(src, lambda(v) -> contains(empty, tick(calls, v)))
+let after_empty = calls(0)
+// EXPECT: keep = [false, true, false, false, true, false]
+// EXPECT: after_nonempty = 6
+// EXPECT: keep2 = [false, false, false, false, false, false]
+// EXPECT: after_empty = 12
+// EXPECT: calls = [12]

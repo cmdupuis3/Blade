@@ -1138,6 +1138,307 @@ let runCliSmokeTests () : TH.BlockResult =
                 (eOn = 0 && eOff = 0 && bare llOn && not (bare llOff)) ""
         finally
             try Directory.Delete(dir, true) with _ -> ()
+    // --- MEMBERSHIP HOISTING (Blade.Optimize.planMembershipHoist, round 3 B-T1) ---
+    // (1) The C core itself (blade_member.h, the one text both lanes run): a
+    // g++-built driver builds 220 sets -- empty, tiny, at the linear
+    // crossover, dense, near the bitmap density bound, wide random 64-bit,
+    // Int64 extremes, heavy duplicates -- under each of the four chooser
+    // settings, checks every probe (each key, its +/-1 neighbours, the
+    // extremes, random keys) against the naive scan and that every free
+    // releases every allocation, and prints the representation each build
+    // chose, which must be Optimize.memberChooseRep's PREFERRED answer (the
+    // plan record's restatement of the chooser) since every allocation
+    // succeeds. Then DETERMINISTIC ALLOCATOR-FAILURE INJECTION through the
+    // header's allocation hooks (Codex diff review of W2-1, finding 3): the
+    // bitmap's words failing (-> hash), then also the hash keys or its
+    // occupancy failing (-> linear), a hash-preferred set's keys or occupancy
+    // failing (-> linear): each answers the naive booleans, leaves nothing
+    // allocated after its free (a half-made table freed at once), and REPORTS
+    // the route -- preferred, actual and why -- in the struct and through
+    // `blade_member_note_i64`'s stderr line (BLADE_MEMBER_VERBOSE=1). (2) One
+    // program with a host of each shape, run in BOTH lanes under the knob
+    // unset, off and forced linear / bitmap / hash: every run prints the same
+    // output AND, under BLADE_MEMBER_VERBOSE=1, each lane's builds report
+    // exactly the expected hosts and representations (none at all with the
+    // knob off) -- a route assertion, not only a value one. (3) `blade plan`
+    // names each forced representation.
+    if not capabilities.Value.HasGpp || selfExe.IsNone then
+        record "member hoist: the C core and the knob at run time" TH.Skip "requires g++ and the Blade executable"
+    else
+        let dir = Path.Combine(Path.GetTempPath(), "blade_cli_member_" + Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory dir |> ignore
+        try
+            Blade.CodeGen.deployRuntimeHeaders dir
+            let driver =
+                String.concat "\n"
+                    [ "#include <cstdio>"
+                      "#include <cstdint>"
+                      "#include <cstdlib>"
+                      "#include <vector>"
+                      "// the header's allocation hooks: bit k of g_fail fails the k-th allocation of a build"
+                      "static unsigned long long g_fail = 0;"
+                      "static int g_ord = 0, g_live = 0;"
+                      "static void* t_malloc(size_t n) { int k = g_ord++; if (k < 64 && ((g_fail >> k) & 1ull)) return nullptr; void* p = std::malloc(n); if (p) g_live++; return p; }"
+                      "static void* t_calloc(size_t n, size_t s) { int k = g_ord++; if (k < 64 && ((g_fail >> k) & 1ull)) return nullptr; void* p = std::calloc(n, s); if (p) g_live++; return p; }"
+                      "static void t_free(void* p) { if (p) { g_live--; std::free(p); } }"
+                      "#define BLADE_MEMBER_MALLOC(b) t_malloc(b)"
+                      "#define BLADE_MEMBER_CALLOC(n, s) t_calloc((n), (s))"
+                      "#define BLADE_MEMBER_FREE(p) t_free(p)"
+                      "#include \"blade_member.h\""
+                      "static uint64_t s_ = 0x2545F4914F6CDD1Dull;"
+                      "static uint64_t nx() { s_ ^= s_ << 13; s_ ^= s_ >> 7; s_ ^= s_ << 17; return s_; }"
+                      "static int64_t wrapAdd(int64_t a, int64_t b) { return (int64_t)((uint64_t)a + (uint64_t)b); }"
+                      "static long probe_all(const blade_member_i64& t, const std::vector<int64_t>& v, const std::vector<int64_t>& ps) {"
+                      "    long bad = 0;"
+                      "    for (size_t q = 0; q < ps.size(); q++) {"
+                      "        int naive = 0;"
+                      "        for (size_t i = 0; i < v.size(); i++) if (v[i] == ps[q]) { naive = 1; break; }"
+                      "        if (blade_member_test_i64(&t, ps[q]) != naive) bad++;"
+                      "    }"
+                      "    return bad;"
+                      "}"
+                      "static std::vector<int64_t> probes_of(const std::vector<int64_t>& v) {"
+                      "    const int64_t ex[] = {INT64_MIN, INT64_MAX, 0, -1, 1, INT64_MIN + 1, INT64_MAX - 1};"
+                      "    std::vector<int64_t> ps;"
+                      "    for (size_t i = 0; i < v.size(); i++) { ps.push_back(v[i]); ps.push_back(wrapAdd(v[i], 1)); ps.push_back(wrapAdd(v[i], -1)); }"
+                      "    for (int k = 0; k < 7; k++) ps.push_back(ex[k]);"
+                      "    for (int k = 0; k < 64; k++) ps.push_back((int64_t)nx());"
+                      "    return ps;"
+                      "}"
+                      "int main() {"
+                      "    const int sizes[] = {0, 1, 2, 15, 16, 17, 63, 64, 65, 211, 1009};"
+                      "    const int64_t ex[] = {INT64_MIN, INT64_MAX, 0, -1, 1, INT64_MIN + 1, INT64_MAX - 1};"
+                      "    long cases = 0, probes = 0, bad = 0;"
+                      "    for (int shape = 0; shape < 5; shape++)"
+                      "    for (int si = 0; si < 11; si++) {"
+                      "        const int m = sizes[si];"
+                      "        std::vector<int64_t> v((size_t)m);"
+                      "        for (int i = 0; i < m; i++) {"
+                      "            uint64_t r = nx();"
+                      "            if (shape == 0) v[i] = (int64_t)(r % 101) - 50;"
+                      "            else if (shape == 1) v[i] = (int64_t)(r % (uint64_t)(64 * (m + 1))) - 1000;"
+                      "            else if (shape == 2) v[i] = (int64_t)r;"
+                      "            else if (shape == 3) v[i] = ex[r % 7];"
+                      "            else v[i] = (int64_t)(r % 3) * 1000003;"
+                      "        }"
+                      "        int64_t lo = 0, hi = 0;"
+                      "        for (int i = 0; i < m; i++) { if (i == 0 || v[i] < lo) lo = v[i]; if (i == 0 || v[i] > hi) hi = v[i]; }"
+                      "        std::vector<int64_t> ps = probes_of(v);"
+                      "        for (int forced = 0; forced <= 3; forced++) {"
+                      "            blade_member_i64 t;"
+                      "            g_fail = 0; g_ord = 0;"
+                      "            blade_member_build_i64(&t, m ? v.data() : nullptr, (int64_t)m, forced);"
+                      "            std::printf(\"K %d %d %d %lld %lld %d %d\\n\", m, forced, t.kind, (long long)lo, (long long)hi, t.preferred, t.fallback);"
+                      "            long b = probe_all(t, v, ps);"
+                      "            probes += (long)ps.size();"
+                      "            if (b) { bad += b; std::printf(\"BAD m=%d forced=%d kind=%d: %ld probes\\n\", m, forced, t.kind, b); }"
+                      "            blade_member_free_i64(&t);"
+                      "            if (t.kind != BLADE_MEMBER_NONE) { bad++; std::printf(\"BAD free did not reset\\n\"); }"
+                      "            if (g_live != 0) { bad++; std::printf(\"BAD leak m=%d forced=%d live=%d\\n\", m, forced, g_live); g_live = 0; }"
+                      "            cases++;"
+                      "        }"
+                      "    }"
+                      "    std::printf(\"MEMBER CORE: %ld builds, %ld probes, %ld bad\\n\", cases, probes, bad);"
+                      "    // ---- allocator-failure injection ----"
+                      "#if defined(_WIN32)"
+                      "    _putenv(\"BLADE_MEMBER_VERBOSE=1\");"
+                      "#else"
+                      "    setenv(\"BLADE_MEMBER_VERBOSE\", \"1\", 1);"
+                      "#endif"
+                      "    std::vector<int64_t> dense, wide;"
+                      "    for (int i = 0; i < 17; i++) dense.push_back((int64_t)(i * 3) - 7);       // bitmap-preferred (span 49)"
+                      "    for (int i = 0; i < 40; i++) wide.push_back((int64_t)(nx() | 1ull));      // hash-preferred (a wide span)"
+                      "    struct F { const char* id; const std::vector<int64_t>* v; unsigned long long fail; };"
+                      "    const F fs[] = { {\"F1\", &dense, 1ull}, {\"F2\", &dense, 3ull}, {\"F3\", &dense, 5ull},"
+                      "                     {\"F4\", &wide, 1ull}, {\"F5\", &wide, 2ull}, {\"F6\", &wide, 0ull} };"
+                      "    for (const F& c : fs) {"
+                      "        std::vector<int64_t> ps = probes_of(*c.v);"
+                      "        blade_member_i64 t;"
+                      "        g_live = 0; g_ord = 0; g_fail = c.fail;"
+                      "        blade_member_build_i64(&t, c.v->data(), (int64_t)c.v->size(), 0);"
+                      "        int liveBuild = g_live;"
+                      "        blade_member_note_i64(&t, c.id, \"s\");"
+                      "        long b = probe_all(t, *c.v, ps);"
+                      "        int pref = t.preferred, kind = t.kind, fb = t.fallback;"
+                      "        blade_member_free_i64(&t);"
+                      "        std::printf(\"F %s %d %d %d %d %d %ld\\n\", c.id, pref, kind, fb, liveBuild, g_live, b);"
+                      "    }"
+                      "    return bad == 0 ? 0 : 1;"
+                      "}"
+                      "" ]
+            let drv = Path.Combine(dir, "member_core.cpp")
+            File.WriteAllText(drv, driver)
+            (match Build.compileCpp drv dir with
+             | Error e -> recordCase "member hoist: the C core (blade_member.h) driver" false e
+             | Ok exe ->
+                 match runExecutable exe with
+                 | Error e -> recordCase "member hoist: the C core (blade_member.h) driver" false e
+                 | Ok (code, out) ->
+                     let lines = out.Replace("\r\n", "\n").Split('\n')
+                     let kinds =
+                         lines |> Array.choose (fun l ->
+                             let p = l.Split(' ')
+                             if p.Length = 8 && p.[0] = "K" then
+                                 Some (int64 p.[1], int p.[2], int p.[3], int64 p.[4], int64 p.[5], int p.[6], int p.[7])
+                             else None)
+                     let disagree =
+                         kinds |> Array.filter (fun (m, forced, kind, lo, hi, pref, fb) ->
+                             let want = Blade.Optimize.memberChooseRep m lo hi forced
+                             want <> kind || want <> pref || fb <> 0)
+                     let used = kinds |> Array.map (fun (_, _, k, _, _, _, _) -> k) |> Set.ofArray
+                     let summary = lines |> Array.tryFind (fun l -> l.StartsWith "MEMBER CORE:") |> Option.defaultValue "(no summary)"
+                     recordCase "member hoist: the C core (blade_member.h): every probe of every representation is integer == against every cell, every free releases every allocation"
+                         (code = 0 && summary.EndsWith " 0 bad" && kinds.Length = 220) summary
+                     recordCase "member hoist: the C core's chooser is Optimize.memberChooseRep's PREFERRED representation (the plan record's restatement), case for case, and with every allocation made the actual one is it"
+                         (kinds.Length = 220 && disagree.Length = 0 && used = set [ 1; 2; 3 ])
+                         ($"{disagree.Length} disagreements of {kinds.Length}; representations seen: {used}")
+                     // (id, preferred, actual, fallback bits, live after build, report text)
+                     let wantF =
+                         [ ("F1", 2, 3, 1, 2, "preferred bitmap, actual hash -- the bitmap's words could not be allocated")
+                           ("F2", 2, 1, 3, 0, "preferred bitmap, actual linear -- the bitmap's words, then the hash table, could not be allocated")
+                           ("F3", 2, 1, 3, 0, "preferred bitmap, actual linear -- the bitmap's words, then the hash table, could not be allocated")
+                           ("F4", 3, 1, 2, 0, "preferred hash, actual linear -- the hash table could not be allocated")
+                           ("F5", 3, 1, 2, 0, "preferred hash, actual linear -- the hash table could not be allocated")
+                           ("F6", 3, 3, 0, 2, "preferred hash, actual hash") ]
+                     for (id, pref, kind, fb, liveB, report) in wantF do
+                         let got =
+                             lines |> Array.tryPick (fun l ->
+                                 let p = l.Split(' ')
+                                 if p.Length = 8 && p.[0] = "F" && p.[1] = id then Some (int p.[2], int p.[3], int p.[4], int p.[5], int p.[6], int64 p.[7]) else None)
+                         let reported =
+                             lines |> Array.exists (fun l ->
+                                 let t = l.Replace("[stderr]: ", "")
+                                 t.StartsWith $"[member] {id}: set s, M " && t.TrimEnd().EndsWith report)
+                         recordCase $"member hoist: allocator-failure injection {id}: preferred {pref} -> actual {kind} (fallback {fb}), the naive booleans, nothing left allocated after free, the route reported"
+                             (got = Some (pref, kind, fb, liveB, 0, 0L) && reported) ($"saw {got}; report found {reported}"))
+            // (2) one program, a host of each shape, both lanes, every setting
+            let prog =
+                String.concat "\n"
+                    [ "type Row = Idx<11>"
+                      "type Ev = Idx<37>"
+                      "type Big = Idx<211>"
+                      "let customer: Array<Int64 like Row> = [3, 1, 3, 2, 1, 4, 3, 9, -5, 0, -5]"
+                      "let small = [3, 3, 1, -5]"
+                      "let evens = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 44, 46, 58, 60]"
+                      "let wide = [9223372036854775807, -9223372036854775807 - 1, 0, -1, 1, 1000000007, -1000000007, 4611686018427387904, -4611686018427387904, 123456789012345, -98765432109876, 77, -77, 1 - 9223372036854775807, 9223372036854775806, 5, 5, 0]"
+                      "let none = compound(customer, mask(customer, lambda(v) -> v > 100))"
+                      "let picked = compound(customer, mask(customer, lambda(v) -> v % 3 == 0))"
+                      "let k_small = mask(customer, lambda(c) -> contains(small, c))"
+                      "let k_even = mask(customer, lambda(c) -> contains(evens, c + 1))"
+                      "let k_wide = mask(customer, lambda(c) -> contains(wide, c * 1000000007))"
+                      "let k_none = mask(customer, lambda(c) -> contains(none, c))"
+                      "let k_pick = mask(customer, lambda(c) -> !contains(picked, c))"
+                      "let elig = method_for(range<Ev>) <@> lambda(e) -> (Int64(e) - 18) * 1000003 |> compute"
+                      "let cust = method_for(range<Big>) <@> lambda(i) -> ((Int64(i) * 7) % 61 - 30) * 1000003 |> compute"
+                      "let flags = method_for(cust) <@> lambda(c) where omp -> contains(elig, c) |> compute"
+                      "let fp = reduce(method_for(range<Big>) <@> lambda(i) -> if flags(i) then Int64(i) * 31 else 1, (+), 7)"
+                      "" ]
+            File.WriteAllText(Path.Combine(dir, "hosts.blade"), prog)
+            // the printed VALUES only: `blade run` relays the program's stderr after
+            // its stdout (`[stderr]: ...`), where the build reports go
+            let strip (o: string) =
+                o.Replace("\r\n", "\n").Split('\n')
+                |> Array.filter (fun l -> not (l.Contains " completed in ") && l.Trim() <> "" && not (l.StartsWith "[stderr]") && not (l.StartsWith "[member] "))
+                |> String.concat "\n"
+            let memberReports (o: string) (e: string) =
+                (o + "\n" + e).Replace("\r\n", "\n").Split('\n')
+                |> Array.map (fun l -> if l.StartsWith "[stderr]: " then l.Substring 10 else l)
+                |> Array.filter (fun l -> l.StartsWith "[member] ")
+                |> List.ofArray
+            // each setting's EXPECTED builds: host -> the representation it
+            // prefers and builds (every allocation succeeds here); the knob
+            // off builds nothing
+            let hosts = [ "k_small"; "k_even"; "k_wide"; "k_none"; "k_pick"; "flags" ]
+            let expectedReps (s: string) =
+                match s with
+                | null -> Some [ "linear"; "bitmap"; "hash"; "linear"; "linear"; "hash" ]
+                | "linear" -> Some [ "linear"; "linear"; "linear"; "linear"; "linear"; "linear" ]
+                | "bitmap" -> Some [ "bitmap"; "bitmap"; "hash"; "linear"; "bitmap"; "bitmap" ]
+                | "hash" -> Some [ "hash"; "hash"; "hash"; "linear"; "hash"; "hash" ]
+                | _ -> None
+            let settings = [ null; "0"; "linear"; "bitmap"; "hash" ]
+            let runs =
+                [ for llvm in [ null; "1" ] do
+                    for s in settings do
+                        let env = [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", llvm); ("BLADE_MEMBER_HOIST", s); ("BLADE_MEMBER_VERBOSE", "1") ]
+                        let (c, o, e) = spawnWith env dir [ "run"; "hosts.blade"; "--verbose" ]
+                        let lane = if isNull llvm then "C++" else "LLVM"
+                        let laneOk = isNull llvm || e.Contains ".ll"
+                        let reports = memberReports o e
+                        let routeOk =
+                            match expectedReps s with
+                            | None -> reports.IsEmpty
+                            | Some reps ->
+                                reports.Length = hosts.Length
+                                && List.forall2 (fun h r ->
+                                        reports |> List.exists (fun l -> l.StartsWith $"[member] {h}: " && l.EndsWith $"preferred {r}, actual {r}")) hosts reps
+                        yield (lane, (if isNull s then "unset" else s), c, strip o, laneOk, routeOk, reports.Length) ]
+            let (_, _, c0, o0, _, _, _) = List.head runs
+            let agree = runs |> List.forall (fun (_, _, c, o, laneOk, _, _) -> c = 0 && laneOk && o = o0)
+            let routes = runs |> List.forall (fun (_, _, _, _, _, routeOk, _) -> routeOk)
+            let shown =
+                runs |> List.map (fun (l, s, c, o, laneOk, routeOk, n) ->
+                    let verdict = if o = o0 then "same" else "DIFFERS"
+                    $"{l}/{s}: exit {c}, lane {laneOk}, {verdict}, {n} build report(s), route {routeOk}") |> String.concat "; "
+            recordCase "member hoist: both lanes, knob unset / 0 / linear / bitmap / hash -- every run prints the same output"
+                (c0 = 0 && agree && o0.Contains "k_small = [true, true, true, false, true, false, true, false, true, false, true]") shown
+            recordCase "member hoist: both lanes report every expected build (host, preferred = actual representation) under each setting, and none with the knob off"
+                routes shown
+            // (2b) ALIAS CHAINS (Codex diff review of W2-1, finding 2), gate on
+            // and off, both lanes: a one- and a two-hop alias of a DEFERRED map
+            // build nothing (no report: never a build ahead of the map's
+            // materialization; the LLVM lane refuses a contains over an
+            // unstored set and the program falls back to C++), a two-hop alias
+            // of a literal builds exactly one structure with the gate on and
+            // none with it off; every run prints the same values.
+            File.WriteAllText(Path.Combine(dir, "alias_deferred.blade"),
+                String.concat "\n"
+                    [ "type Three = Idx<3>"
+                      "type Row = Idx<5>"
+                      "let src: Array<Int64 like Row> = [1, 4, 3, 9, 2]"
+                      "let lazy = method_for(range<Three>) <@> lambda(i) -> Int64(i) + 1"
+                      "let B = lazy"
+                      "let C = B"
+                      "let flags_b = method_for(src) <@> lambda(v) -> contains(B, v) |> compute"
+                      "let flags_c = method_for(src) <@> lambda(v) -> contains(C, v) |> compute"
+                      "" ])
+            File.WriteAllText(Path.Combine(dir, "alias_stored.blade"),
+                String.concat "\n"
+                    [ "type Row = Idx<5>"
+                      "let src: Array<Int64 like Row> = [1, 4, 3, 9, 2]"
+                      "let stored = [4, 9, 7]"
+                      "let S1 = stored"
+                      "let S2 = S1"
+                      "let flags_s = method_for(src) <@> lambda(v) -> contains(S2, v) |> compute"
+                      "" ])
+            for (prog, onReports) in [ ("alias_deferred", 0); ("alias_stored", 1) ] do
+                let aliasRuns =
+                    [ for llvm in [ null; "1" ] do
+                        for gate in [ null; "0" ] do
+                            let env = [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", llvm); ("BLADE_MEMBER_HOIST", gate); ("BLADE_MEMBER_VERBOSE", "1") ]
+                            let (c, o, e) = spawnWith env dir [ "run"; $"{prog}.blade"; "--verbose" ]
+                            let reports = (memberReports o e).Length
+                            let want = if isNull gate then onReports else 0
+                            // the LLVM lane runs the stored chain itself; it refuses the deferred one
+                            let laneOk =
+                                if isNull llvm then true
+                                elif prog = "alias_deferred" then e.Contains "llvm lane refused"
+                                else e.Contains ".ll"
+                            let lane = if isNull llvm then "C++" else "LLVM"
+                            let g = if isNull gate then "on" else "off"
+                            yield ($"{lane}/{g}", c, strip o, reports = want && laneOk, reports) ]
+                let (_, ca, oa, _, _) = List.head aliasRuns
+                let okAll = aliasRuns |> List.forall (fun (_, c, o, r, _) -> c = 0 && o = oa && r)
+                let shownA = aliasRuns |> List.map (fun (k, c, _, r, n) -> $"{k}: exit {c}, {n} report(s), route {r}") |> String.concat "; "
+                recordCase $"member hoist: {prog} -- gate on / off, both lanes: the same values, {onReports} build(s) with the gate on, none off"
+                    (ca = 0 && okAll) shownA
+            // (3) the plan names each forced representation
+            for (knob, rep) in [ ("linear", "linear"); ("bitmap", "bitmap"); ("hash", "hash") ] do
+                let (c, o, _) = spawnWith [ ("BLADE_MEMBER_HOIST", knob) ] dir [ "plan"; "hosts.blade" ]
+                recordCase $"member hoist: `plan` under BLADE_MEMBER_HOIST={knob} names the forced (preferred) representation"
+                    (c = 0 && o.Contains "[member-hoist v1] k_even" && o.Contains $"preferred representation: {rep} (span 61, M 20) -- forced by BLADE_MEMBER_HOIST={knob}") ""
+        finally
+            try Directory.Delete(dir, true) with _ -> ()
     if not capabilities.Value.HasGpp || selfExe.IsNone then
         record "build dir: run writes nothing beside the source" TH.Skip "requires g++ and the Blade executable"
     else

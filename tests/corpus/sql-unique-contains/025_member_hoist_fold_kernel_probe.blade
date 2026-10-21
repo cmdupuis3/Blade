@@ -1,0 +1,14 @@
+// TEST: Member Hoist Fold Kernel Probe
+// ============================================================================
+// Membership hoisting with the probe in the FOLD KERNEL itself (018's probe
+// sits in the map kernel of a fold): `reduce(xs, lambda(acc, x) -> ...)`
+// runs its two-argument kernel once per cell, and that kernel's contains
+// reads the structure built before the host. The kernel is unlicensed, so
+// the fold is the serial left fold in every lane; seeded, so the empty-set
+// case needs no guard. Seventeen keys within span 33: bitmap.
+// ============================================================================
+type Row = Idx<9>
+let xs: Array<Int64 like Row> = [0, 1, 2, 3, 4, 0, 6, 7, 8]
+let B = [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34]
+let picked = reduce(xs, lambda(acc, x) -> if contains(B, x) then acc * 10 + x else acc, 0)
+// EXPECT: picked = 2468

@@ -1,0 +1,22 @@
+// TEST: Member Hoist Semiagg Probe
+// ============================================================================
+// The `semiagg` kernel's shape at corpus size (round 3 B-T1): a semijoin of
+// 2003 customer ids against 101 eligible ids (span ~2e4: HASH), the kept
+// amounts compacted and summed. The amounts are integer-valued, so the
+// licensed fold's association cannot move a bit. A second semijoin probes a
+// computed target against 211 keys within span 4075 (BITMAP).
+// ============================================================================
+type Row = Idx<2003>
+type Ev = Idx<101>
+type Ev2 = Idx<211>
+let elig = method_for(range<Ev>) <@> lambda(e) -> (Int64(e) * 199) % 20011 |> compute
+let cust = method_for(range<Row>) <@> lambda(i) -> (Int64(i) * 7919 + 13) % 20011 |> compute
+let amt = method_for(range<Row>) <@> lambda(i) -> Float64((Int64(i) * 31) % 1000) |> compute
+let keep = mask(cust, lambda(c) -> contains(elig, c))
+let y = compound(amt, keep)
+let checksum = reduce(y, (+)) + Float64(extents(y))
+let elig2 = method_for(range<Ev2>) <@> lambda(e) -> (Int64(e) * 97) % 4093 |> compute
+let keep2 = mask(cust, lambda(c) -> contains(elig2, c % 4093))
+let hits2 = reduce(method_for(keep2) <@> lambda(b) -> if b then 1 else 0, (+), 0)
+// EXPECT: checksum = 8184.0
+// EXPECT: hits2 = 175

@@ -229,6 +229,19 @@ cardinality, so membership over an empty filtered set is safely `false`.
 Element type of `x` must unify with A's — mismatch is a type error.
 Tests: `sql-unique-contains/004–007`.
 
+**Evaluation contract (every lane).** The set operand is evaluated first — as
+the set itself, never a snapshot of its cells — then the target `x` exactly
+once, and only then are the cells read — also when the set is empty. A target
+that counts its evaluations counts one per probe; a failing target
+(`contains(empty, 100 / z)` with `z = 0`) aborts BL8013 even over an empty set;
+a target that writes the set through a `mut` parameter is seen by the scan
+(overwriting the probed key's cell makes it a miss). This order is a contract
+choice (formalism §6.5 delegates relational semantics to this page): the
+interpreter's, adopted by both compiled lanes in round 3. Tests:
+`sql-unique-contains/015–017`, `023` (a dense set, all lanes), `024` (a
+compound set: the C++ lane; the interpreter has no compound element store and
+the LLVM lane refuses a compound `mut` parameter).
+
 ## 6. Semijoin / antijoin — idiom, not keyword
 
 ```blade
@@ -242,13 +255,29 @@ let n_anti = extents(anti)
 // EXPECT: n_anti = 2
 ```
 
-Multiplicity-preserving (unlike `intersect`). **Performance status**: the
-O(|A|+|B|) hash-set fusion (pre-building a set from B) was attempted, found to be
-a no-op as wired, and removed; every `contains` is currently a linear scan, so the
-idiom is O(|A|·|B|). Re-landing the set-hoist is planned (open item 1 below).
-The `sql-semijoins` tests (7) guard correctness only, including "Pattern Does Not
-Fire On Conjunction" (the fusion must not misfire when the predicate is a
-conjunction).
+Multiplicity-preserving (unlike `intersect`). **Performance status: membership
+hoisting** (round 3, `Optimize.planMembershipHoist`, `blade plan` rule
+`member-hoist`, knob `BLADE_MEMBER_HOIST`). When the predicate is the kernel of an
+eager top-level host (a `mask`, a `|> compute` map, a fold, or the `compound` whose inline mask it is -- the idiom above) and B is a named,
+earlier rank-1 Int64 set that nothing writes and whose STORAGE is proved at the
+build point — a literal, a `|> compute`, a compound, an eager set operation, a
+call result or a provider read, through any chain of `let B = A` aliases (a
+deferred map, directly or through an alias, is not stored there and declines) —
+ONE search structure is built over B right before the host and every probe reads
+it: O(|A| + |B|). The PREFERRED representation (linear for |B| <= 16, a bitmap
+when the span is within max(64 |B|, 4096) and 2^26 bits, else a hash) is chosen
+from (|B|, min, max) only; an allocation the build cannot make degrades the
+ACTUAL one (bitmap -> hash -> linear), and each build reports both and why
+(`BLADE_MEMBER_VERBOSE=1` on stderr, both lanes; the C++ run record's
+`member_hoist`). All three answer exactly integer `==` — build-side duplicates
+collapse, the probe side keeps its order and multiplicity, and conjunctions keep
+their short circuit (only the `contains` node reads the structure). One C core
+(`src/cpp/blade_member.h`) serves both compiled lanes; the interpreter keeps the
+scan. A writing party (the set's producer, the probing kernel, a fold kernel or
+seed, the host's payload), an unstored set, a kernel two hosts name, or non-Int64
+keys keep the per-probe scan. Tests: `sql-unique-contains/011–026`, the
+`sql-semijoins` tests (correctness under the hoist, including "Pattern Does Not
+Fire On Conjunction").
 
 ## 7. `group_keys(k₁, k₂, ...)` — grouping structure
 
@@ -806,7 +835,9 @@ Tests: `sql-foreign-keys` (10).
 
 ## Open items
 
-1. Semijoin/antijoin hash fusion (set-hoist) — removed no-op; redesign.
+1. ~~Semijoin/antijoin hash fusion (set-hoist).~~ **Landed as membership
+   hoisting (round 3 B-T1)**; see §6. Open: a deferred set forced once at the
+   host, Int32 / float keys, probes in nested lambdas and function bodies.
 2. ~~`reduce(A, op, init)` — empty-input identity.~~ **Landed (arc 4)**; see §10.
 3. Rank-k `mask` — with the compound composition round.
 4. Sort laziness / order-in-types — lazy key-map chains, merge joins.

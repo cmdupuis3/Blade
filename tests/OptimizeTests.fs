@@ -3889,6 +3889,304 @@ let private recStepCases () : bool list =
           [ "step("; "BLADE_OMP_PARALLEL_FOR_SIMD" ]
           [ region; "__rspart_" ] ]
 
+// ---------------------------------------------------------------------------
+// Membership hoisting (round 3, B-T1; Optimize.planMembershipHoist, rule
+// `member-hoist`): the decision record -- representation, the five-party
+// matrix, every decline -- and the C++ emission's build / probe / free.
+// ---------------------------------------------------------------------------
+
+let private memberHead =
+    "type Row = Idx<9>\n"
+    + "let customer: Array<Int64 like Row> = [3, 1, 3, 2, 1, 4, 3, 9, -5]\n"
+let private memberSmallSrc =
+    memberHead + "let eligible = [3, 3, 1, -5]\nlet keep = mask(customer, lambda(c) -> contains(eligible, c))\n"
+let private memberBitmapSrc =
+    memberHead
+    + "let evens = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 44, 46, 58, 60]\n"
+    + "let keep = mask(customer, lambda(c) -> contains(evens, c))\n"
+let private memberExtremeSrc =
+    memberHead
+    + "let wide = [9223372036854775807, -9223372036854775807 - 1, 0, -1, 1, 1000000007, -1000000007, 4611686018427387904, -4611686018427387904, 123456789012345, -98765432109876, 77, -77, 1 - 9223372036854775807, 9223372036854775806, 5, 5, 0]\n"
+    + "let keep = mask(customer, lambda(c) -> contains(wide, c))\n"
+let private memberComputedSrc =
+    "type Ev = Idx<37>\ntype Row = Idx<211>\n"
+    + "let elig = method_for(range<Ev>) <@> lambda(e) -> (Int64(e) - 18) * 1000003 |> compute\n"
+    + "let cust = method_for(range<Row>) <@> lambda(i) -> (Int64(i) * 7) % 61 |> compute\n"
+    + "let flags = method_for(cust) <@> lambda(c) where omp -> contains(elig, c) |> compute\n"
+let private memberFoldSrc =
+    memberHead + "let B = [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34]\n"
+    + "let weighted = reduce(method_for(customer) <@> lambda(x) -> if contains(B, x) then x * 10 else 1, (+), 1000)\n"
+let private memberWritingKernelSrc =
+    "type One = Idx<1>\n" + memberHead
+    + "let mut calls: Array<Int64 like One> = [0]\n"
+    + "function tick(c: mut Array<Int64 like One>, x: Int64) -> Int64 = {\n    c(0) = c(0) + 1\n    x\n}\n"
+    + "let B = [8, 23, 99]\nlet keep = mask(customer, lambda(v) -> contains(B, tick(calls, v)))\n"
+let private memberWritingProducerSrc =
+    "type One = Idx<1>\ntype Three = Idx<3>\n" + memberHead
+    + "let mut log: Array<Int64 like One> = [0]\n"
+    + "function make(l: mut Array<Int64 like One>) -> Array<Int64 like Three> = {\n    l(0) = l(0) + 1\n    [4, 8, 15]\n}\n"
+    + "let logged = make(log)\nlet keep = mask(customer, lambda(v) -> contains(logged, v))\n"
+let private memberAssignedSrc =
+    memberHead + "let mut moving = [1, 2, 3]\nmoving(0) = 9\nlet keep = mask(customer, lambda(v) -> contains(moving, v))\n"
+let private memberDeferredSetSrc =
+    "type Three = Idx<3>\n" + memberHead
+    + "let lazy = method_for(range<Three>) <@> lambda(i) -> Int64(i) * 8 + 8\n"
+    + "let keep = mask(customer, lambda(v) -> contains(lazy, v))\n"
+let private memberDeferredHostSrc =
+    memberHead + "let eligible = [3, 3, 1, -5]\nlet flags = method_for(customer) <@> lambda(c) -> contains(eligible, c)\nlet n = reduce(method_for(flags) <@> lambda(b) -> if b then 1 else 0, (+), 0)\n"
+let private memberSharedKernelSrc =
+    memberHead + "let eligible = [3, 3, 1, -5]\nlet pred = lambda(c: Int64) -> contains(eligible, c)\nlet k1 = mask(customer, pred)\nlet k2 = mask(customer, pred)\n"
+let private memberFloatSrc =
+    "type Row = Idx<4>\nlet xs: Array<Float64 like Row> = [1.5, 2.5, 0.0, -1.0]\nlet fs = [1.5, -0.0, 2.5]\nlet keep = mask(xs, lambda(x) -> contains(fs, x))\n"
+let private memberWritingSeedSrc =
+    "type One = Idx<1>\n" + memberHead
+    + "let mut log: Array<Int64 like One> = [0]\n"
+    + "function seed(l: mut Array<Int64 like One>) -> Int64 = {\n    l(0) = l(0) + 1\n    1000\n}\n"
+    + "let B = [2, 4, 6]\n"
+    + "let weighted = reduce(method_for(customer) <@> lambda(x) -> if contains(B, x) then x else 0, (+), seed(log))\n"
+let private memberDeferredAliasSrc =
+    "type Three = Idx<3>\ntype Row = Idx<5>\n"
+    + "let src: Array<Int64 like Row> = [1, 4, 3, 9, 2]\n"
+    + "let lazy = method_for(range<Three>) <@> lambda(i) -> Int64(i) + 1\n"
+    + "let B = lazy\nlet C = B\n"
+    + "let flags_b = method_for(src) <@> lambda(v) -> contains(B, v) |> compute\n"
+    + "let flags_c = method_for(src) <@> lambda(v) -> contains(C, v) |> compute\n"
+    + "let stored = [4, 9, 7]\nlet S1 = stored\nlet S2 = S1\n"
+    + "let flags_s = method_for(src) <@> lambda(v) -> contains(S2, v) |> compute\n"
+let private memberRule = "member-hoist"
+let private memberApplied (subject: string) (d: Blade.Effects.Decision) = applied d && d.Subject = subject
+
+let private memberHoistDecisionCases () =
+    [ decisionCase "decision_member_hoist_small_linear" memberSmallSrc memberRule
+          (fun d -> memberApplied "keep" d && evidenceHas "representation: linear (span 9, M 4)" d
+                    && evidenceHas "set `eligible` (rank-1 dense, Int64 keys): ONE search structure built immediately before `keep`" d)
+          "applied: four literal keys, linear"
+      decisionCase "decision_member_hoist_literal_bitmap" memberBitmapSrc memberRule
+          (fun d -> memberApplied "keep" d && evidenceHas "representation: bitmap (span 61, M 20)" d) "applied: bitmap (span 61, M 20)"
+      decisionCase "decision_member_hoist_extreme_keys_hash" memberExtremeSrc memberRule
+          (fun d -> memberApplied "keep" d && evidenceHas "representation: hash (span 2^64, M 18)" d) "applied: the full Int64 span is a hash (span 2^64, no overflow)"
+      decisionCase "decision_member_hoist_computed_set_runtime_choice" memberComputedSrc memberRule
+          (fun d -> memberApplied "flags" d && evidenceHas "representation: chosen at run time from (M, min, max) only, never from timing" d)
+          "applied: a computed stored set's representation is chosen at run time"
+      decisionCase "decision_member_hoist_five_party_matrix" memberSmallSrc memberRule
+          (fun d -> memberApplied "keep" d
+                    && evidenceHas "membershipAdmits (five parties, each through Optimize.scheduleMayWriteIn): set producer `eligible`: stored at its own site" d
+                    && evidenceHas "consumer kernel(s) `lambda in keep`: no write" d
+                    && evidenceHas "outer fold kernel(s) / seed(s): none (no fold in the host)" d
+                    && evidenceHas "between the build and `keep`: no binding" d
+                    && evidenceHas "parallel: none (a serial host)" d)
+          "the five-party matrix recorded"
+      decisionCase "decision_member_hoist_fold_kernel_and_seed_parties" memberFoldSrc memberRule
+          (fun d -> memberApplied "weighted" d && evidenceHas "outer fold kernel(s): 1, no write; seed(s): 1, no write" d)
+          "a fold host: its kernel and seed are parties, both write-free"
+      decisionCase "decision_member_hoist_omp_kernel_read_only" memberComputedSrc memberRule
+          (fun d -> memberApplied "flags" d && evidenceHas "`where omp` -- the build runs serially before the team and every thread only reads it; no function-valued parameter" d)
+          "a `where omp` kernel: serial build, read-only probes"
+      decisionCase "decision_member_hoist_target_contract" memberSmallSrc memberRule
+          (fun d -> memberApplied "keep" d && evidenceHas "target: evaluated exactly once per probe, before any cell is read" d)
+          "the one target-evaluation contract is stated"
+      withGate "BLADE_MEMBER_HOIST" "hash" (fun () ->
+          decisionCase "decision_member_hoist_forced_hash" memberSmallSrc memberRule
+              (fun d -> memberApplied "keep" d && evidenceHas "representation: hash (span 9, M 4) -- forced by BLADE_MEMBER_HOIST=hash" d)
+              "BLADE_MEMBER_HOIST=hash forces the hash")
+      withGate "BLADE_MEMBER_HOIST" "linear" (fun () ->
+          decisionCase "decision_member_hoist_forced_linear" memberBitmapSrc memberRule
+              (fun d -> memberApplied "keep" d && evidenceHas "representation: linear (span 61, M 20) -- forced by BLADE_MEMBER_HOIST=linear" d)
+              "BLADE_MEMBER_HOIST=linear forces the scan structure")
+      withGate "BLADE_MEMBER_HOIST" "bitmap" (fun () ->
+          decisionCase "decision_member_hoist_forced_bitmap_outside_domain" memberExtremeSrc memberRule
+              (fun d -> memberApplied "keep" d && evidenceHas "BLADE_MEMBER_HOIST=bitmap forced, outside its domain (the span exceeds the bitmap's 2^26-bit cap): built as hash" d)
+              "a forced bitmap over the full Int64 span falls back to the hash")
+      withGate "BLADE_MEMBER_HOIST" "0" (fun () ->
+          decisionCase "decision_member_hoist_disabled" memberSmallSrc memberRule
+              (fun d -> d.Subject = "keep" && declinedMentioning "disabled by BLADE_MEMBER_HOIST" d) "declined: disabled by BLADE_MEMBER_HOIST")
+      decisionCase "decision_member_hoist_declined_writing_kernel" memberWritingKernelSrc memberRule
+          (fun d -> d.Subject = "keep" && declinedMentioning "the consumer kernel `lambda in keep` may write" d
+                    && evidenceHas "DECLINES: the consumer kernel" d)
+          "declined: the probing kernel writes (five-party matrix)"
+      decisionCase "decision_member_hoist_declined_writing_producer" memberWritingProducerSrc memberRule
+          (fun d -> d.Subject = "keep" && declinedMentioning "the set producer `logged` may write" d) "declined: the set's producer writes"
+      decisionCase "decision_member_hoist_declined_writing_seed" memberWritingSeedSrc memberRule
+          (fun d -> d.Subject = "weighted" && declinedMentioning "a fold seed of `weighted` may write" d) "declined: the fold's seed writes"
+      decisionCase "decision_member_hoist_declined_assigned_set" memberAssignedSrc memberRule
+          (fun d -> d.Subject = "keep" && declinedMentioning "the set `moving` is" d) "declined: the set is written by the program"
+      decisionCase "decision_member_hoist_declined_deferred_set" memberDeferredSetSrc memberRule
+          (fun d -> d.Subject = "keep" && declinedMentioning "the set `lazy` is not proved stored at the build point: `lazy` is a deferred computation" d) "declined: a deferred set (v1.1)"
+      decisionCase "decision_member_hoist_declined_deferred_host" memberDeferredHostSrc memberRule
+          (fun d -> d.Subject = "flags" && declinedMentioning "the host `flags` is a deferred computation" d) "declined: a deferred host"
+      decisionCase "decision_member_hoist_declined_shared_kernel" memberSharedKernelSrc memberRule
+          (fun d -> declinedMentioning "times in the program (v1: a kernel that runs only inside its one host)" d)
+          "declined: a kernel named by two hosts"
+      decisionCase "decision_member_hoist_declined_float_keys" memberFloatSrc memberRule
+          (fun d -> d.Subject = "keep" && declinedMentioning "the set's elements are Float64" d) "declined: Float64 keys (v1.1)"
+      // the storage proof follows alias chains (Codex diff review of W2-1,
+      // finding 2): an alias of a deferred map declines, an alias chain of a
+      // literal is admitted
+      decisionCase "decision_member_hoist_declined_deferred_alias_chain" memberDeferredAliasSrc memberRule
+          (fun d -> d.Subject = "flags_c"
+                    && declinedMentioning "the set `C` is not proved stored at the build point: `C` is an alias of `B`, and `B` is an alias of `lazy`, and `lazy` is a deferred computation" d)
+          "declined: a two-hop alias of a deferred map"
+      decisionCase "decision_member_hoist_stored_alias_chain_applied" memberDeferredAliasSrc memberRule
+          (fun d -> memberApplied "flags_s" d && evidenceHas "an alias of `S1`, an alias of `stored`, an array literal" d)
+          "applied: a two-hop alias of a literal, proved stored"
+      // the canonical semijoin keeps its mask INLINE in the compound's side
+      // table: the compound binding (whose site runs the mask) is the host
+      decisionCase "decision_member_hoist_inline_semijoin_compound_host"
+          (memberHead + "let eligible = [3, 3, 1, -5]\nlet semi = compound(customer, mask(customer, lambda(c) -> contains(eligible, c)))\n") memberRule
+          (fun d -> memberApplied "semi" d && evidenceHas "built immediately before `semi`" d)
+          "applied: the compound whose inline mask probes is the host" ]
+
+/// The C++ emission of a planned hoist: the file-scope structure, its build
+/// before the host and free after it, the probe testing `kind` first; and
+/// the one target-evaluation contract in every IIFE (set, then target once).
+let private memberHoistEmission () =
+    let name = "member_hoist_cpp_build_probe_free"
+    match cppOfSource name memberBitmapSrc with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let want =
+            [ "#include \"blade_member.h\""
+              "static blade_member_i64 __bl_member_"
+              "blade_member_build_i64(&__bl_member_"
+              "nested_array_utilities::pool_base(evens.data), (int64_t)(20), 0);"
+              "blade_member_free_i64(&__bl_member_"
+              "auto&& __cs = evens; const auto __cx = c; if (__bl_member_"
+              ".kind != BLADE_MEMBER_NONE) return blade_member_test_i64(&__bl_member_" ]
+        let missing = want |> List.filter (fun s -> not (cpp.Contains s))
+        let b = cpp.IndexOf "blade_member_build_i64(&__bl_member_"
+        let h = cpp.IndexOf "Array<bool, 1> keep"
+        let f = cpp.IndexOf "blade_member_free_i64(&__bl_member_"
+        if missing.IsEmpty && b >= 0 && h > b && f > h then
+            resultLine Pass name "structure declared, built before `keep`, freed after it; the probe tests kind first"
+            true
+        else
+            resultLine Fail name ($"""missing: {(String.concat " | " missing)}; build/host/free at {b}/{h}/{f}""")
+            false
+
+let private memberHoistGateOffEmission () =
+    let name = "member_hoist_cpp_gate_off_keeps_scan"
+    match withGate "BLADE_MEMBER_HOIST" "0" (fun () -> cppOfSource name memberBitmapSrc) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        if not (cpp.Contains "blade_member") && cpp.Contains "auto&& __cs = evens; const auto __cx = c; for (size_t __ci = 0;" then
+            resultLine Pass name "no structure; the scan evaluates the target once before reading any cell"
+            true
+        else
+            resultLine Fail name "expected no blade_member_* text and the contract-form scan"
+            false
+
+/// THE C++ ROUTE of every contains / member-hoist corpus file (Codex diff
+/// review of W2-1, finding 4; the table is LlvmTests.memberHoistRoutes, which
+/// the LLVM route shares): exactly the planned number of file-scope
+/// structures; each one built ONCE in main and reported on the next line,
+/// the host's code after it, freed once after that; every probe of it either
+/// in a kernel function (defined before main, called only by its host) or
+/// inside that build..free window; the compound sets' builds reading the
+/// cardinality; and no member text at all in a file with no plan.
+let private memberHoistCorpusRoutes () : bool list =
+    [ for (cat, test, hosts, compoundBuilds, _) in Blade.Tests.LlvmTests.memberHoistRoutes do
+        let name = $"member_hoist_route_cpp: {cat} `{test}` -- {hosts} build(s)"
+        match (try Blade.Tests.Corpus.category cat |> List.tryFind (fun (n, _) -> n = test) with _ -> None) with
+        | None ->
+            resultLine Fail name "the corpus file is missing (renamed?)"
+            yield false
+        | Some (_, src) ->
+            match cppOfSource name src with
+            | Error e ->
+                resultLine Fail name e
+                yield false
+            | Ok cpp ->
+                let lines = cpp.Replace("\r\n", "\n").Split('\n')
+                let mainAt = lines |> Array.tryFindIndex (fun l -> l.StartsWith "int main(") |> Option.defaultValue -1
+                let declRe = System.Text.RegularExpressions.Regex(@"^static blade_member_i64 (__bl_member_\d+_\d+);")
+                let globals =
+                    lines |> Array.choose (fun l -> let m = declRe.Match l in if m.Success then Some m.Groups.[1].Value else None)
+                let idx (needle: string) = lines |> Array.indexed |> Array.filter (fun (_, l) -> l.Contains needle) |> Array.map fst
+                let windowOk (g: string) =
+                    match idx $"blade_member_build_i64(&{g}, ", idx $"blade_member_note_i64(&{g}, ", idx $"blade_member_free_i64(&{g});" with
+                    | [| b |], [| n |], [| f |] when mainAt >= 0 && b > mainAt && n = b + 1 && f > n ->
+                        let hostCode = lines.[n + 1 .. f - 1] |> Array.exists (fun l -> l.Trim() <> "" && not (l.Trim().StartsWith "//"))
+                        let probes = idx $"blade_member_test_i64(&{g}, "
+                        hostCode && probes.Length > 0 && probes |> Array.forall (fun p -> p < mainAt || (p > n && p < f))
+                    | _ -> false
+                let compoundCount =
+                    lines |> Array.filter (fun l -> l.Contains "blade_member_build_i64(&" && l.Contains ".idx->cardinality)") |> Array.length
+                let ok, detail =
+                    if hosts = 0 then
+                        (not (cpp.Contains "blade_member_"), "no plan: no member text, the as-written scan")
+                    elif globals.Length <> hosts then (false, $"{globals.Length} structure(s), want {hosts}")
+                    elif not (globals |> Array.forall windowOk) then (false, "a build / report / host / free / probe out of place")
+                    elif compoundCount <> compoundBuilds then (false, $"{compoundCount} compound build(s), want {compoundBuilds}")
+                    else (true, $"{hosts} build -> report -> host -> free; {compoundBuilds} over a compound's cardinality")
+                resultLine (if ok then Pass else Fail) name detail
+                yield ok ]
+
+/// THE FAIL-CLOSED EMISSION GUARDS (Codex diff review of W2-1, finding 2):
+/// a plan the planner would never make -- a hand-recorded hoist of the
+/// DEFERRED map `lazy` for host `flags_b` -- reaches both emitters, and each
+/// builds nothing (no build line / no init) and records a truthful decline
+/// instead of reading cells that do not exist yet.
+let private memberHoistFailClosedGuards () : bool list =
+    // the set `lazy` is a deferred map the host captures: the C++ lane
+    // materializes it inside the host's own prelude, AFTER the build point
+    let src =
+        "type Three = Idx<3>\ntype Row = Idx<5>\n"
+        + "let src: Array<Int64 like Row> = [1, 4, 3, 9, 2]\n"
+        + "let lazy = method_for(range<Three>) <@> lambda(i) -> Int64(i) + 1\n"
+        + "let flags_b = method_for(src) <@> lambda(v) -> contains(lazy, v) |> compute\n"
+    let injectAndRun (name: string) (emit: Blade.IR.IRProgram -> string) (want: string) (deny: string) =
+        match lower src with
+        | Error e -> resultLine Fail name e; false
+        | Ok ir ->
+            let bs = ir.Modules |> List.collect (fun m -> m.Bindings)
+            match bs |> List.tryFind (fun b -> b.Name = "flags_b"), bs |> List.tryFind (fun b -> b.Name = "lazy") with
+            | Some host, Some set ->
+                let kernels = System.Collections.Generic.HashSet<int>()
+                Blade.IR.iterIRExpr (fun n ->
+                    match n with
+                    | Blade.IR.IRApplyCombinator info -> (match info.Kernel with Blade.IR.IRVar (k, _) -> kernels.Add k |> ignore | _ -> ())
+                    | _ -> ()) host.Value
+                Blade.Optimize.MemberHoistTable.record
+                    { HostId = host.Id; HostName = host.Name; SetId = set.Id; SetName = set.Name
+                      Kernels = Set.ofSeq kernels; Forced = 0 }
+                Blade.Effects.Decisions.start ()
+                let text = try emit ir with ex -> "raised: " + ex.Message
+                let ds = Blade.Effects.Decisions.drain ()
+                let declined = ds |> List.exists (fun d -> d.Rule = "member-hoist" && d.Subject = "flags_b" && declinedMentioning want d)
+                if declined && not (text.Contains deny) then
+                    resultLine Pass name "no structure built; the decline is recorded"
+                    true
+                else
+                    let seen = ds |> List.filter (fun d -> d.Rule = "member-hoist") |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+                    resultLine Fail name ($"declined={declined}, built={text.Contains deny}; saw: {seen}")
+                    false
+            | _ -> resultLine Fail name "fixture bindings not found"; false
+    [ injectAndRun "member_hoist_cpp_fail_closed_deferred_capture"
+          (fun ir -> fst (CodeGen.genSelfContainedProgramFromIR ir "member_fail_closed"))
+          "C++ emission: the planned build over `lazy` is not emitted -- it is a deferred computation at the build point"
+          "blade_member_build_i64(&"
+      injectAndRun "member_hoist_llvm_fail_closed_deferred_capture"
+          (fun ir ->
+              match EmitLlvm.tryEmitProgramNamed "member_fail_closed" ir with
+              | Ok ll -> ll
+              | Error r -> "refused: " + r)
+          "llvm lane: the planned build over `lazy` is not emitted"
+          "@blade_member_init_i64(" ]
+
+let private memberHoistForcedEmission () =
+    [ for (knob, k) in [ ("linear", 1); ("bitmap", 2); ("hash", 3) ] do
+        let name = $"member_hoist_cpp_forced_{knob}"
+        match withGate "BLADE_MEMBER_HOIST" knob (fun () -> cppOfSource name memberBitmapSrc) with
+        | Error e -> resultLine Fail name e; yield false
+        | Ok cpp ->
+            let needle = $"(int64_t)(20), {k});"
+            if cpp.Contains needle then
+                resultLine Pass name $"the build passes forced representation {k}"
+                yield true
+            else
+                resultLine Fail name $"missing `{needle}`"
+                yield false ]
+
 let runOptimizeTests () =
     printHeader "Blade-DSL: Optimization Layer Tests"
     let results =
@@ -3991,6 +4289,13 @@ let runOptimizeTests () =
           compactionV2SelCapFallback ()
           compactionV2RuntimeGuard ()
           yield! compactionV2DecisionCases ()
+          // Membership hoisting (round 3 B-T1).
+          yield! memberHoistDecisionCases ()
+          memberHoistEmission ()
+          memberHoistGateOffEmission ()
+          yield! memberHoistForcedEmission ()
+          yield! memberHoistCorpusRoutes ()
+          yield! memberHoistFailClosedGuards ()
           compactionV2UngroupIndexExtentCensus ()
           yield! intervalPayloadDecisionCases ()
           // Compact row classes (round 2 item B3).

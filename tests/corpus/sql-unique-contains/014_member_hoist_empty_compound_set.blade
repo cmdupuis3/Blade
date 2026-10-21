@@ -1,0 +1,16 @@
+// TEST: Member Hoist Empty Compound Set
+// ============================================================================
+// Membership hoisting over an EMPTY set: a rank-1 compound with no kept cell
+// (M = 0, decided before any min / max exists) probed in a mask predicate and
+// in a fold kernel. Every probe answers false; the seeded fold returns its
+// seed's sum of zeros.
+// ============================================================================
+type Row = Idx<5>
+let ids: Array<Int64 like Row> = [1, 2, 3, 4, 5]
+let none = compound(ids, mask(ids, lambda(v) -> v > 100))
+let m = extents(none)
+let hit = mask(ids, lambda(v) -> contains(none, v))
+let cnt = reduce(method_for(ids) <@> lambda(v) -> if contains(none, v * 2) then 1 else 0, (+), 0)
+// EXPECT: m = 0
+// EXPECT: hit = [false, false, false, false, false]
+// EXPECT: cnt = 0

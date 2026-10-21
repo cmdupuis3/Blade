@@ -1,9 +1,9 @@
 // TEST: Contains In Mask Predicate
 // contains used inside a mask predicate — the canonical semijoin idiom.
-// After the IR pattern matcher runs, this lowers to IRSemijoin(A, B):
-// codegen pre-builds an unordered_set from B and probes A once, dropping
+// Membership hoisting (Optimize.planMembershipHoist) builds ONE search
+// structure over B right before the mask and probes it per row, dropping
 // the inner cost from O(|A|·|B|) to O(|A|+|B|). The result is identical
-// to the unfused form — this test guards correctness across the rewrite.
+// to the per-row scan — this test guards correctness across the hoist.
 let A = [1, 2, 3, 4, 5, 6]
 let B = [2, 4, 6, 8]
 let in_B = compound(A, mask(A, lambda(x) -> contains(B, x)))

@@ -2959,6 +2959,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     Optimize.CompactionTable.reset ()
     Optimize.CompactRowTable.reset ()
     Optimize.OrbitPullTable.reset ()
+    Optimize.MemberHoistTable.reset ()
     // The raw decl list callers hand us is the program they PARSED, not the
     // one `TypeCheck.typeCheck` desugared inside itself -- so the icechunk
     // checkout rewrite is applied again here, ahead of Phase 0's
@@ -3189,8 +3190,13 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // rank-3 scatter dispatch; no IR change. Knob: BLADE_ORBIT_PULL (the
         // emitter's).
         Optimize.planOrbitPull programFuncs irModule
-        // mask+contains fusion always runs a linear scan; the semijoin
-        // hash-set is a separate, not-yet-implemented optimization.
+        // Membership hoisting (Blade.Optimize.planMembershipHoist, round 3
+        // B-T1): a `contains(B, x)` probed once per cell of a host binding
+        // (mask predicate, map or fold kernel) reads ONE search structure
+        // built over the stored set B right before the host; side table,
+        // both emitters; the interpreter runs the as-written scan. Gate:
+        // BLADE_MEMBER_HOIST.
+        Optimize.planMembershipHoist programFuncs irModule
         irModule)
 
     // DEAD-POLYMORPH ELIMINATION, last and whole-program: a lambda lifted out

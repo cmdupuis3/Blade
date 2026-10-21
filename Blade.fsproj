@@ -864,6 +864,14 @@
       <Link>cpp/blade_llvm_tiles.c</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <!-- Membership hoisting's C core (round 3, B-T1): the representation
+         chooser, build and probe of a hoisted `contains` set. Included by a
+         C++ program with a planned hoist and by blade_llvm_shim.c, so both
+         lanes run one text; deployed with the C++ headers and beside the shim. -->
+    <None Include="src/cpp/blade_member.h">
+      <Link>cpp/blade_member.h</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <!-- Its cross-lane raw-bit test: one C/C++ polyglot, built by clang as C
          over the REAL tile object and by g++ as C++ over blade_pgemm::dsyrk_tri
          (`blade test llvm-tiles`). -->

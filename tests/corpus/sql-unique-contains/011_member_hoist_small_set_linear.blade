@@ -1,0 +1,27 @@
+// TEST: Member Hoist Small Set Linear
+// ============================================================================
+// Membership hoisting (Optimize.planMembershipHoist, round 3 B-T1): a
+// contains() probed once per cell of a host binding (here two mask
+// predicates) reads ONE search structure built over the stored set right
+// before the host. Four keys (M <= 16) pick the LINEAR representation. The
+// set carries a duplicate (3) and a negative key (-5): build-side duplicates
+// collapse, the probe side keeps its order and multiplicity (both -5 rows and
+// all three 3 rows survive), and the semijoin and the antijoin partition the
+// rows exactly.
+// ============================================================================
+type Row = Idx<11>
+let customer: Array<Int64 like Row> = [3, 1, 3, 2, 1, 4, 3, 9, -5, 0, -5]
+let amount: Array<Int64 like Row> = [100, 20, 50, 70, 80, 90, 30, 5, 7, 11, 13]
+let eligible = [3, 3, 1, -5]
+let keep = mask(customer, lambda(c) -> contains(eligible, c))
+let y = compound(amount, keep)
+let n = extents(y)
+let total = reduce(y, (+))
+let outside = mask(customer, lambda(c) -> !contains(eligible, c))
+let z = compound(amount, outside)
+let total_outside = reduce(z, (+))
+// EXPECT: keep = [true, true, true, false, true, false, true, false, true, false, true]
+// EXPECT: n = 7
+// EXPECT: total = 300
+// EXPECT: outside = [false, false, false, true, false, true, false, true, false, true, false]
+// EXPECT: total_outside = 176

@@ -202,6 +202,39 @@ let private declShownNamesCell () : Map<string, string> ref =
         fresh
     else v
 
+/// The IRId of the declaration being emitted (a top-level binding or a
+/// function), beside its name: membership hoisting's probes (the IRContains
+/// arm) read the hoisted structure only while their host binding or one of
+/// its probing kernels is the declaration being emitted. -1 outside
+/// genModule / genModuleSplit's item loop.
+let internal currentDeclIdStorage = System.Threading.AsyncLocal<IRId ref>()
+
+let currentDeclIdCell () : IRId ref =
+    let v = currentDeclIdStorage.Value
+    if isNull (box v) then
+        let fresh = ref -1
+        currentDeclIdStorage.Value <- fresh
+        fresh
+    else v
+
+/// Collector: does THIS program assembly carry a membership-hoist plan
+/// (Optimize.MemberHoistTable)? The assembler then appends
+/// `#include "blade_member.h"` and the plans' file-scope structures.
+let internal memberUsedStorage = System.Threading.AsyncLocal<bool ref>()
+
+let memberUsedCell () : bool ref =
+    let v = memberUsedStorage.Value
+    if isNull (box v) then
+        let fresh = ref false
+        memberUsedStorage.Value <- fresh
+        fresh
+    else v
+
+/// The file-scope structure of one membership-hoist plan: a zero-initialized
+/// static (`BLADE_MEMBER_NONE`, "not built") that the host's build fills and
+/// its free resets.
+let memberHoistGlobalName (hostId: IRId) (setId: IRId) : string = $"__bl_member_{hostId}_{setId}"
+
 /// Enter the emission of declaration `name` (its emitted name), which the
 /// program wrote as `shown` -- a binding's name, or a function's SourceName.
 let setCurrentCodegenDecl (name: string) (shown: string) : unit =
@@ -1638,6 +1671,8 @@ let resetProgramStateCells () : unit =
     freshCell unhandledNodesStorage []
     freshCell codegenRefusalsStorage []
     freshCell currentDeclStorage ""
+    freshCell currentDeclIdStorage -1
+    freshCell memberUsedStorage false
     freshCell declShownNamesStorage Map.empty
     freshCell forcedDeferredIdsStorage Set.empty
     freshCell moduleTupleChildrenStorage Map.empty

@@ -1,0 +1,12 @@
+// TEST: Member Hoist Failing Target (aborts)
+// ABORT: BL8013
+// ============================================================================
+// A hoisted set (seventeen keys, bitmap) and a target that fails on the
+// first probed row (100 / (v - 4) at v = 4): the build ran before the host,
+// but it is total and writes nothing, so the first observable failure is the
+// as-written one -- BL8013 at the target, before any cell of the set is read.
+// ============================================================================
+type Row = Idx<5>
+let src: Array<Int64 like Row> = [4, 5, 6, 7, 8]
+let B = [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34]
+let keep = mask(src, lambda(v) -> contains(B, 100 / (v - 4)))

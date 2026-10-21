@@ -1953,6 +1953,63 @@ let private genModuleBinding
 shape has no single `TYPE %s = ...;` definition line to split -- see tryHoistModuleBindingDecl)"
                               (indentStr ctx) name name ], ctx')
 
+/// MEMBERSHIP HOISTING's placement around one module binding
+/// (Optimize.planMembershipHoist): for each plan whose host is `binding`, the
+/// build of its file-scope structure over the stored set -- emitted
+/// immediately before the host's own code, the set's cells read once -- and
+/// its free immediately after (the structure is BLADE_MEMBER_NONE again, so a
+/// probe outside the host's window takes the as-written scan). Empty for any
+/// other binding.
+let private memberHoistBracket (ctx: CodeGenContext) (modul: IRModule) (binding: IRBinding) : string list * string list =
+    let ind = indentStr ctx
+    let pieces =
+        Blade.Optimize.MemberHoistTable.plansOf binding.Id
+        |> List.map (fun p ->
+            // FAIL CLOSED (Codex diff review of W2-1, finding 2): the build
+            // reads the set's STORED cells here, before the host's first
+            // statement, so it is emitted only when this emission holds them:
+            // the set is bound, not a deferred computation (directly or
+            // through an alias -- genVarAliasBinding propagates deferral), not
+            // streamed, and a rank-1 array. Otherwise nothing is built (the
+            // probes test `kind` and scan as written) and the plan says so.
+            let unavailable =
+                match modul.Bindings |> List.tryFind (fun b -> b.Id = p.SetId) with
+                | None -> Some "it is not a binding of this module"
+                | Some sb ->
+                    if not (Map.containsKey sb.Id ctx.VarNames) then Some "it is not bound at the build point"
+                    elif Map.containsKey sb.Id ctx.DeferredComputations then Some "it is a deferred computation at the build point (no stored cells)"
+                    elif (streamedBindingName sb.Id).IsSome then Some "it is a streamed provider read (no stored cells)"
+                    else
+                        match sb.Type with
+                        | ArrayElem at when at.IsVirtual -> Some "it is a virtual array (no stored cells)"
+                        | ArrayElem at when at.IndexTypes.Length = 1 -> None
+                        | _ -> Some "it is not a rank-1 array"
+            match unavailable, modul.Bindings |> List.tryFind (fun b -> b.Id = p.SetId) with
+            | None, Some sb ->
+                let name = exprToCppCtx ctx (IRVar (sb.Id, sb.Type))
+                let g = memberHoistGlobalName p.HostId p.SetId
+                let compound =
+                    match sb.Type with
+                    | ArrayElem at -> isCompoundArrayType at
+                    | _ -> false
+                let (cells, m) =
+                    if compound then ($"{name}.data", $"(int64_t)({name}.idx->cardinality)")
+                    else ($"nested_array_utilities::pool_base({name}.data)", $"(int64_t)({literalOrRuntimeExtent sb.Type name 0})")
+                let how =
+                    if p.Forced = 0 then "the preferred representation chosen from (M, min, max)"
+                    else $"BLADE_MEMBER_HOIST={Blade.Optimize.memberRepName p.Forced}"
+                ([ $"{ind}// member-hoist v1: `{p.HostName}`'s probes of `{p.SetName}` read ONE search structure built here ({how}; blade_member.h; the build reports the actual representation)"
+                   $"{ind}blade_member_build_i64(&{g}, {cells}, {m}, {p.Forced});"
+                   $"{ind}blade_member_note_i64(&{g}, {escapeStringLit p.HostName}, {escapeStringLit p.SetName});" ],
+                 [ $"{ind}blade_member_free_i64(&{g});" ])
+            | why, _ ->
+                let why = defaultArg why "it is not available"
+                recordCodegenDecision "member-hoist" p.HostName
+                    (Blade.Effects.Declined $"C++ emission: the planned build over `{p.SetName}` is not emitted -- {why}; the probes scan as written")
+                    [ "fail closed: no structure without the set's stored cells at the build point" ]
+                ([ $"{ind}// member-hoist v1: no structure over `{p.SetName}` for `{p.HostName}` -- {why}; the probes scan as written" ], []))
+    (pieces |> List.collect fst, pieces |> List.collect snd)
+
 /// The bindings-and-functions emission order, as ONE definition shared by
 /// `genModule` and `genModuleSplit` so the two can never drift.
 ///
@@ -2165,12 +2222,17 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
             match item with
             | Choice1Of2 binding ->
                 setCurrentCodegenDecl binding.Name binding.Name
+                (currentDeclIdCell ()).Value <- binding.Id
+                let (memberBuild, memberFree) = memberHoistBracket c modul binding
                 let (code, c') = genModuleBinding c binding builder hoistIds
+                bindLines.AddRange memberBuild
                 bindLines.AddRange code
+                bindLines.AddRange memberFree
                 bindLines.Add ""
                 c'
             | Choice2Of2 funcDef ->
                 setCurrentCodegenDecl funcDef.Name funcDef.SourceName
+                (currentDeclIdCell ()).Value <- funcDef.Id
                 if Set.contains funcDef.Id mainLocalFuncIds then
                     let (code, c') = genFuncDefAsLambda c builder funcDef
                     bindLines.AddRange code
@@ -2182,6 +2244,7 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
                     funcLines.Add ""
                     c'
         ) ctx0
+    (currentDeclIdCell ()).Value <- -1
     let funcCode = List.ofSeq funcLines
     let bindCode = List.ofSeq bindLines
 
@@ -2277,7 +2340,10 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
                     | Some target -> seen || binding.Name = target
                     | None -> seen || isComputeBinding binding
                 setCurrentCodegenDecl binding.Name binding.Name
+                (currentDeclIdCell ()).Value <- binding.Id
+                let (memberBuild, memberFree) = memberHoistBracket c modul binding
                 let (code, c') = genModuleBinding c binding builder hoistIds
+                let code = memberBuild @ code @ memberFree
                 if nowCompute then
                     computeLines.AddRange code
                     computeLines.Add ""
@@ -2288,6 +2354,7 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
                     (false, c')
             | Choice2Of2 funcDef ->
                 setCurrentCodegenDecl funcDef.Name funcDef.SourceName
+                (currentDeclIdCell ()).Value <- funcDef.Id
                 if Set.contains funcDef.Id mainLocalFuncIds then
                     // Lambda-as-binding (closure definition): follows the
                     // current phase -- setup if before the first compute, else
@@ -2309,6 +2376,7 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
                     funcLines.Add ""
                     (seen, c')
         ) (false, ctx0)
+    (currentDeclIdCell ()).Value <- -1
     let funcCode = List.ofSeq funcLines
     let setupCode = List.ofSeq setupLines
     let computeCode = List.ofSeq computeLines
@@ -3806,6 +3874,16 @@ let private genSelfContainedProgram (modul: IRModule) (testName: string) : strin
     let includes = if (foldLanesUsedCell ()).Value then includes @ ["#include \"blade_fold_lanes.hpp\""] else includes
     // blade_orbit_scatter.hpp only when a fold took the ordered orbit scatter.
     let includes = if (orbitScatterUsedCell ()).Value then includes @ ["#include \"blade_orbit_scatter.hpp\""] else includes
+    // blade_member.h and one zero-initialized file-scope structure per
+    // membership-hoist plan (Optimize.planMembershipHoist): declared for EVERY
+    // plan of the program, built or not -- a probe tests `kind` first, so an
+    // unbuilt structure is the as-written scan, never a dangling read.
+    let memberPlans = Blade.Optimize.MemberHoistTable.all ()
+    if not memberPlans.IsEmpty then (memberUsedCell ()).Value <- true
+    let includes = if (memberUsedCell ()).Value then includes @ ["#include \"blade_member.h\""] else includes
+    let memberDecls =
+        memberPlans |> List.map (fun p ->
+            $"static blade_member_i64 {memberHoistGlobalName p.HostId p.SetId}; // member-hoist v1: the search structure over `{p.SetName}` for `{p.HostName}` (all-zero = BLADE_MEMBER_NONE, not built)")
     // blade_linalg_cuda.hpp: the DEVICE half of the same collect-then-append
     // shape, its OWN cell and its own build consequence -- Build.fs
     // sniffs THIS line to write the companion `.cu`, build it with nvcc and
@@ -3846,7 +3924,7 @@ let private genSelfContainedProgram (modul: IRModule) (testName: string) : strin
     let moduleGlobalDecls = (moduleGlobalDeclsCell ()).Value
 
     let rrLines = runRecordLines modul testName mpiOn (funcDefs @ mainBody)
-    (includes @ typeDefs @ [""] @ mpiDecls @ rrLines @ symmDecls @ moduleGlobalDecls @ [""] @ cudaProtos @ dllBinds @ [""] @ funcDefs @ mainBody) |> String.concat "\n"
+    (includes @ typeDefs @ [""] @ mpiDecls @ rrLines @ symmDecls @ moduleGlobalDecls @ memberDecls @ [""] @ cudaProtos @ dllBinds @ [""] @ funcDefs @ mainBody) |> String.concat "\n"
 
 /// Every per-program emission cell, reset for a new assembly: warnings and
 /// refusal channels (back-end holes from a previous assembly must not be

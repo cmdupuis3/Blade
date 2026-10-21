@@ -1262,9 +1262,17 @@ let internal buildLlvmShim (clang: string) (outputDir: string) : Result<string *
     else
         let flags = "-c -O2" + llvmShimDefines ()
         let srcText = File.ReadAllText src
+        // The headers the shim #includes from its own directory (deployed
+        // beside it by EmitLlvm.deployShim): their text is part of what the
+        // compile reads, so it is part of the identity -- an edited header
+        // must never link a stale object.
+        let headerTexts =
+            EmitLlvm.shimIncludedHeaders |> List.map (fun h ->
+                let p = Path.Combine(dir, h)
+                if File.Exists p then h + "\n" + File.ReadAllText p else h + ":missing")
         let identity =
             use sha = System.Security.Cryptography.SHA256.Create()
-            sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(String.concat "\n" [ "blade-llvm-shim-v1"; clangStamp clang; flags; srcText ]))
+            sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(String.concat "\n" ([ "blade-llvm-shim-v1"; clangStamp clang; flags; srcText ] @ headerTexts)))
             |> Array.map _.ToString("x2")
             |> String.concat ""
         let stem = Path.GetFileNameWithoutExtension EmitLlvm.shimFileName

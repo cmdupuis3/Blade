@@ -1,0 +1,44 @@
+// TEST: Contains Target Mutates A Compound Set
+// ============================================================================
+// The compound twin of 023 (Codex diff review of W2-1, finding 1): the set
+// is a rank-1 COMPOUND whose kept cells the target writes through a `mut`
+// parameter (the index-types/520 shape). The set is evaluated first and kept
+// as the compound itself; the target runs once; the scan then reads the
+// compact buffer AS THE TARGET LEFT IT:
+//   * `own`: the target writes 9 into kept cell 0 and probes 9 -- a hit;
+//   * `gone`: the target overwrites the kept cell holding 3, probes 3 -- a miss;
+//   * `kept`: the target writes another kept cell, probes an untouched key --
+//     a hit.
+// Lanes: the C++ lane runs it; the LLVM lane refuses a compound `mut`
+// parameter (the program falls back to C++); the interpreter has no compound
+// element store (InterpDiff.interpExpectedUnsupported, as for index-types/520)
+// -- its IRContains arm reads a compound set's compact cells in place after
+// the target all the same.
+// ============================================================================
+let ids = [1, 2, 3]
+let keep = mask(ids, lambda(v) -> v > 0)
+let mut B = compound(ids, keep)
+function own_hit(a: mut Array<Int64 like CompoundIdx<keep>>) -> Int64 = {
+    a(0) = 9
+    9
+}
+function erase3(a: mut Array<Int64 like CompoundIdx<keep>>) -> Int64 = {
+    a(2) = 70
+    3
+}
+function other_cell(a: mut Array<Int64 like CompoundIdx<keep>>) -> Int64 = {
+    a(1) = 55
+    9
+}
+let own = contains(B, own_hit(B))
+let gone = contains(B, erase3(B))
+let kept = contains(B, other_cell(B))
+let b0 = B(0)
+let b1 = B(1)
+let b2 = B(2)
+// EXPECT: own = true
+// EXPECT: gone = false
+// EXPECT: kept = true
+// EXPECT: b0 = 9
+// EXPECT: b1 = 55
+// EXPECT: b2 = 70

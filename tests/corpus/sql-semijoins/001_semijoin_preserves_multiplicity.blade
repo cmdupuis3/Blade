@@ -1,18 +1,11 @@
 // TEST: Semijoin Preserves Multiplicity
 // ============================================================================
-// Phase 3.6: semijoin / antijoin pattern matcher tests
-// ============================================================================
-// These exercise the IR rewrite for mask(A, contains(B, x)) → IRSemijoin
-// and mask(A, !contains(B, x)) → IRAntijoin. Correctness is checked by
-// value comparison; the algorithmic improvement (O(|A|·|B|) → O(|A|+|B|))
-// is implicit but not measured here.
-// ============================================================================
-// Phase 3.6: semijoin / antijoin pattern matcher tests
-// ============================================================================
-// These exercise the IR rewrite for mask(A, contains(B, x)) → IRSemijoin
-// and mask(A, !contains(B, x)) → IRAntijoin. Correctness is checked by
-// value comparison; the algorithmic improvement (O(|A|·|B|) → O(|A|+|B|))
-// is implicit but not measured here.
+// Semijoin / antijoin tests: mask(A, contains(B, x)) and
+// mask(A, !contains(B, x)). There is no IR rewrite: membership hoisting
+// (round 3, Optimize.planMembershipHoist) builds ONE search structure over B
+// before the mask, so only the contains node reads it. Correctness is checked
+// by value comparison; the algorithmic improvement (O(|A|·|B|) →
+// O(|A|+|B|)) is implicit but not measured here.
 // Semijoin is NOT a set operation: it preserves A's multiplicity.
 // A has 3 twice and 1 twice; both copies of each should appear in the
 // output as long as they're members of B. This distinguishes semijoin

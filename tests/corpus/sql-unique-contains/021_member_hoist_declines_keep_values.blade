@@ -1,0 +1,26 @@
+// TEST: Member Hoist Declines Keep Values
+// ============================================================================
+// Two sets membership hoisting must NOT hoist (membershipAdmits declines to
+// the as-written per-cell scan), with the values that scan gives:
+//   * `logged`: its producer writes (a `mut` parameter bump inside the call
+//     that builds it) -- a writing party declines;
+//   * `moving`: assigned after its definition (`moving(0) = 9`) -- a set the
+//     program writes is never snapshotted.
+// ============================================================================
+type One = Idx<1>
+type Three = Idx<3>
+type Row = Idx<6>
+let mut log: Array<Int64 like One> = [0]
+function make(l: mut Array<Int64 like One>) -> Array<Int64 like Three> = {
+    l(0) = l(0) + 1
+    [4, 8, 15]
+}
+let src: Array<Int64 like Row> = [4, 8, 9, 15, 16, 23]
+let logged = make(log)
+let a = mask(src, lambda(v) -> contains(logged, v))
+let mut moving = [1, 2, 3]
+moving(0) = 9
+let b = mask(src, lambda(v) -> contains(moving, v))
+// EXPECT: a = [true, true, false, true, false, false]
+// EXPECT: b = [false, false, true, false, false, false]
+// EXPECT: log = [1]

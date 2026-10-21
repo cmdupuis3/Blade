@@ -2485,17 +2485,28 @@ let rec evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     | IRPolyIndex (packExpr, idxExpr) ->
         A.polyIndex (force st env (Core.evalExpr st env packExpr)) (toI64 (Core.evalExpr st env idxExpr))
     | IRContains (arrExpr, valExpr) ->
-        // A compound operand walks its compact present-cell buffer as a plain
-        // dense array (contains over an empty compound -> false, 006).
-        let arrOpt =
-            match force st env (Core.evalExpr st env arrExpr) with
-            | VArray a -> Some a
-            | VCompound cv -> Some (A.compoundToDense cv)
-            | VSparse sv -> Some (A.sparseToDense sv)
-            | _ -> None
-        (match arrOpt with
-         | Some a ->
-            let target = Core.evalExpr st env valExpr
+        // THE ONE target-evaluation contract (docs/features/sql.md section 5;
+        // the compiled lanes' IRContains arms): the set operand is evaluated
+        // FIRST and kept as the set itself -- a dense array, or a compound /
+        // sparse DESCRIPTOR, never a copy of its cells -- then the target
+        // exactly once, and only then are the cells read, in place, so a
+        // target that writes the set is seen by the scan (corpus
+        // sql-unique-contains/023-024). A compound operand walks its compact
+        // present-cell buffer (contains over an empty compound -> false, 006).
+        let setV = force st env (Core.evalExpr st env arrExpr)
+        (match setV with
+         | VArray _ | VCompound _ | VSparse _ -> ()
+         | _ -> raise (InterpUnsupported "contains over non-array"))
+        let target = Core.evalExpr st env valExpr
+        let scanCompact (count: int) (cell: int -> Value) =
+            let mutable found = false
+            let mutable i = 0
+            while not found && i < count do
+                if valuesEqual (cell i) target then found <- true
+                i <- i + 1
+            VBool found
+        (match setV with
+         | VArray a ->
             let rank = a.Extents.Length
             let mutable found = false
             let rec walk lvl acc =
@@ -2506,7 +2517,9 @@ let rec evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
                 else for i in 0L .. a.Extents.[lvl] - 1L do (if not found then walk (lvl + 1) (i :: acc))
             walk 0 []
             VBool found
-         | None -> raise (InterpUnsupported "contains over non-array"))
+         | VCompound cv -> scanCompact (A.compoundCompactCount cv) (A.compoundCompactCell cv)
+         | VSparse sv -> scanCompact (A.sparseCompactCount sv) (A.sparseCompactCell sv)
+         | _ -> raise (InterpUnsupported "contains over non-array"))
 
     | IRReplicate (countExpr, bodyExpr) ->
         let count = toI64 (Core.evalExpr st env countExpr)

@@ -39,10 +39,16 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <stdint.h>
 
 #if defined(_WIN32)
 #include <malloc.h> /* _aligned_malloc / _aligned_free */
 #endif
+
+/* Membership hoisting's C core, shared with the C++ lane (the exports are at
+ * the end of this file). Deployed beside the shim by EmitLlvm.deployShim and
+ * hashed into the shim object's identity (Build.buildLlvmShim). */
+#include "blade_member.h"
 
 #if defined(_MSC_VER)
 #define BLADE_NORETURN __declspec(noreturn)
@@ -526,4 +532,49 @@ long long blade_compact1_rank(const long long *pos, long long m, long long key) 
         if (pos[mid] < key) a = mid + 1; else b = mid;
     }
     return (a < m && pos[a] == key) ? a : -1;
+}
+
+/* ---- membership hoisting (round 3, B-T1) ---------------------------------- */
+
+/* The LLVM lane's three entry points over blade_member.h -- the SAME chooser,
+ * build and probe the C++ lane includes, so the two back ends pick the same
+ * representation for the same (m, min, max, forced) and answer the same
+ * booleans (blade_member.h states the contract). The structure lives in the
+ * CALLER's storage: the emitter reserves an entry-block `alloca [128 x i8],
+ * align 8` (BLADE_MEMBER_SLOT_BYTES below; the typedef refuses to compile if
+ * the struct ever outgrows it), so no export allocates the struct itself and
+ * none can fail: a build whose own tables cannot be allocated degrades to a
+ * representation that needs none.
+ *
+ * Claims the emitter's declarations make (EmitLlvm shimTable):
+ *   - blade_member_init_i64: reads cells[0, m), writes the slot, allocates
+ *     the tables (and frees a half-made pair when an allocation fails, so it
+ *     is NOT nofree), returns on every input (counted loops; an insertion
+ *     that ends at an empty slot, the load being <= 1/2)   -> grpShimFree;
+ *   - blade_member_has_i64: reads only (the slot and the tables it points
+ *     to), writes nothing, no I/O, no threads, always returns -> memory(read);
+ *   - blade_member_fini_i64: frees the tables                 -> grpShimFree;
+ *   - blade_member_note_llvm: the build's report (below)      -> grpExternReturns. */
+#define BLADE_MEMBER_SLOT_BYTES 128
+typedef char blade_member_slot_fits[(sizeof(blade_member_i64) <= BLADE_MEMBER_SLOT_BYTES) ? 1 : -1];
+
+void blade_member_init_i64(void *t, const int64_t *cells, long long m, long long forced) {
+    blade_member_build_i64((blade_member_i64 *)t, cells, (int64_t)m, (int)forced);
+}
+
+int blade_member_has_i64(const void *t, long long x) {
+    return blade_member_test_i64((const blade_member_i64 *)t, (int64_t)x);
+}
+
+void blade_member_fini_i64(void *t) {
+    blade_member_free_i64((blade_member_i64 *)t);
+}
+
+/* The build's report (blade_member_note_i64: the actual representation beside
+ * the preferred one, and why they differ), made by the emitter right after
+ * each init -- a `[member] ...` line on stderr under BLADE_MEMBER_VERBOSE=1,
+ * the same text the C++ lane prints (this lane writes no run record). Does
+ * I/O, always returns -> grpExternReturns. */
+void blade_member_note_llvm(const void *t, const char *host, const char *set) {
+    blade_member_note_i64((const blade_member_i64 *)t, host, set);
 }

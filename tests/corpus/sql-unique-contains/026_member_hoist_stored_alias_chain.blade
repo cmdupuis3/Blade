@@ -1,0 +1,18 @@
+// TEST: Member Hoist Stored Alias Chain
+// ============================================================================
+// Membership hoisting proves the set STORED positively, through any chain of
+// top-level aliases (Codex diff review of W2-1, finding 2): `S2 = S1 = stored`
+// alias an array literal, stored at its own site, so the proof follows the
+// chain to it and the host `flags_s` is hoisted -- the build reads the
+// literal's cells through the alias, before the host, in both compiled lanes.
+// (An alias of a DEFERRED map declines; that twin is pinned by the optimize
+// decision cases and the cli block, both lanes, gate on and off: as a corpus
+// file it would trip the open G60 print divergence of a deferred alias.)
+// ============================================================================
+type Row = Idx<5>
+let src: Array<Int64 like Row> = [1, 4, 3, 9, 2]
+let stored = [4, 9, 7]
+let S1 = stored
+let S2 = S1
+let flags_s = method_for(src) <@> lambda(v) -> contains(S2, v) |> compute
+// EXPECT: flags_s = [false, true, false, true, false]

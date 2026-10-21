@@ -1706,6 +1706,15 @@ let compoundRow (cv: CompoundValue) (coords: int64[]) : Value =
 // compound head is an internal invariant break, backstopped at the read
 // sites in Loops.fs / CodeGen's compoundRead.
 
+/// Cell `i` of a compound's compact buffer, read from its LIVE store (no
+/// copy): `contains` reads its set's cells only after the target was
+/// evaluated (the one target-evaluation contract), so it reads them here,
+/// in place, rather than from a `compoundToDense` snapshot taken before.
+let compoundCompactCell (cv: CompoundValue) (i: int) : Value = compactCell cv.Data i
+
+/// A compound's compact cell count (cardinality x trailing stride).
+let compoundCompactCount (cv: CompoundValue) : int = int cv.Cardinality * int cv.TrailingStride
+
 /// The compact present values of a compound as a plain rank-1 dense array
 /// (cardinality*trailing_stride cells, buffer order) -- the operand form the
 /// eager ops (sort/reduce/set-op) consume, matching CodeGen's compound-operand
@@ -1863,6 +1872,13 @@ let sparsePartial (sv: SparseValue) (pinned: (int * int64) list) (freePos: int l
               Cardinality = subCard
               TrailingStride = sv.TrailingStride
               Data = storeOfValues sv.ElemType compact }
+
+/// Cell `i` of a sparse array's compact buffer (key order), read in place --
+/// the twin of compoundCompactCell, for the same `contains` contract.
+let sparseCompactCell (sv: SparseValue) (i: int) : Value = compactCell sv.Data i
+
+/// A sparse array's compact cell count (cardinality x trailing stride).
+let sparseCompactCount (sv: SparseValue) : int = int sv.Cardinality * int sv.TrailingStride
 
 /// The compact values of a sparse as a plain rank-1 dense array (buffer/key
 /// order) -- the operand form the eager ops consume, mirroring compoundToDense.
