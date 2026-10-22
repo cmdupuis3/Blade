@@ -2759,6 +2759,52 @@ module EpilogueLegTable =
     let tryProducer (id: IRId) : EpilogueLegPlan option = Map.tryFind id (get ()).ByProducer
     let tryJoin (id: IRId) : EpilogueLegPlan option = Map.tryFind id (get ()).ByJoin
 
+/// Source spans of user calls (W2-4 round 9, BL7005): Lowering records each
+/// `f(args)` it lowers to an IRApp, keyed by the callee and its argument
+/// atoms, so the sibling pass can name the span of the call it inlined for
+/// legs. A lookup that does not resolve to exactly one span gives noSpan (the
+/// warning then still names the call by its text). Per async flow.
+module CallSpanTable =
+    open System.Threading
+    let private cell = new AsyncLocal<Map<IRId * string list, Blade.Ast.Span list>>()
+    let private get () = match box cell.Value with null -> Map.empty | _ -> cell.Value
+    let reset () = cell.Value <- Map.empty
+    let argKey (a: IRExpr) = match a with IRVar (id, _) -> $"v{id}" | IRLit l -> sprintf "l%A" l | _ -> "?"
+    let record (fid: IRId) (args: IRExpr list) (span: Blade.Ast.Span) =
+        let k = (fid, args |> List.map argKey)
+        let m = get ()
+        cell.Value <- Map.add k (span :: (match Map.tryFind k m with Some l -> l | None -> [])) m
+    /// The call's span: its exact key's one span, else the callee's only span.
+    let tryFind (call: IRExpr) : Blade.Ast.Span option =
+        match call with
+        | IRApp (IRVar (fid, _), args, _) ->
+            let m = get ()
+            let one (l: Blade.Ast.Span list) = match List.distinct l with [ s ] -> Some s | _ -> None
+            match Map.tryFind (fid, args |> List.map argKey) m |> Option.bind one with
+            | Some s -> Some s
+            | None -> m |> Map.toList |> List.filter (fun ((f, _), _) -> f = fid) |> List.collect snd |> one
+        | _ -> None
+
+/// The span of each kept inline's call, keyed by its return-boundary event's
+/// region start (the first owned pool's binder, unique per event).
+module InlineEventSpans =
+    open System.Threading
+    let private cell = new AsyncLocal<Map<IRId, Blade.Ast.Span>>()
+    let private get () = match box cell.Value with null -> Map.empty | _ -> cell.Value
+    let reset () = cell.Value <- Map.empty
+    let record (start: IRId) (span: Blade.Ast.Span) = cell.Value <- Map.add start span (get ())
+    let tryFind (start: IRId) = Map.tryFind start (get ())
+
+/// BL7005 (W2-4 round 9, the user's decision): a lane's emitter RETAINED the
+/// opt-in kept one-level inline of `call` (it reached the call's
+/// return-boundary event, whether or not the lane's fused form carried the
+/// legs). One warning per event per lane; the default build declines the
+/// inline before any event exists, so it never warns.
+let noteKeptInlineRetained (lane: string) (call: string) (start: IRId) =
+    let span = match InlineEventSpans.tryFind start with Some s -> s | None -> Blade.Ast.noSpan
+    Blade.Diagnostics.EmitterWarnings.add $"{lane}:{start}"
+        (Blade.Diagnostics.mkWarning "BL7005" Blade.Diagnostics.PhBackend span
+            $"experimental: the kept one-level inline (BLADE_EPILOGUE_LEGS=1) of {call} has an INCOMPLETE lifetime audit (G69: allocations made by the kernels it names may survive its return); the default build declines it")
 /// One `epilogue-legs` v1 decision (the planner's admission with its
 /// five-party matrix; each emitter records its per-lane outcome under the
 /// same rule).
@@ -7551,7 +7597,9 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
         // statement that may write anywhere keeps its calls as calls.
         let stmtWrites = stmts |> List.map (fun (_, v) -> mayWrite v) |> Array.ofList
         let inlineCache = System.Collections.Generic.Dictionary<int * int, Result<(IRId * IRExpr) list * IRExpr * string, string>>()
+        let callNodes = System.Collections.Generic.Dictionary<int * int, IRExpr>()
         let judgeAt (i: int) (ord: int) (call: IRExpr) =
+            callNodes.[(i, ord)] <- call
             match inlineCache.TryGetValue((i, ord)) with
             | true, r -> r
             | _ ->
@@ -8230,7 +8278,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                         match inlineKey with
                         | Some key ->
                             let pools = inlinedPools |> List.map (fst >> nameOf) |> String.concat ", "
-                            [ $"{inlineDisp key} inlined one level so the producer and the legs share one region (no call boundary between them) -- the OPT-IN arm, retained because BLADE_EPILOGUE_LEGS=1 is explicit (its lifetime audit is INCOMPLETE, G69: a fold kernel named by a non-owned unit is not audited); its pools ({pools}) are released ONCE at an IR-level return-boundary event (IRReleasePools) placed after the rebuilt inlined spine and its evaluated return, before the statement that held the call -- where the as-written call returned; CSE treats the event as a barrier and pins the pools, scratch reuse excludes them, IRValidate rejects a read after it (directly, or one level through a local let whose definition names a pool), and both lanes release there (C++: the scope frame's own free or main's dense free; LLVM: the tracking-slot free, slot nulled, or a direct free in main). Scope (fail closed): the callee was admitted because EVERY let of its inlined spine is a forced rank-1 dense map (an owned pool, listed) or an allocation-free value -- its type and the type of every let, branch, match, tuple, projection and compute its evaluation reaches is a numeric / Bool / complex scalar, a unit, an index label whose INNER type is one of those, or a tuple of them (no String, no bare Nat), it reads no String-typed value and evaluates no String literal, and it calls NO user function directly in any position (builtin operators -- arithmetic, libm, casts, extents, folds and maps -- are not calls; callee bodies, and the bodies of fold / map KERNELS it names, are NOT audited -- the known unaudited case) -- and it is the only inlinable call of its statement; any other callee, or a second call in the statement, is not retained for A7c (independent sibling-fold inlining is unchanged)" ]
+                            [ $"{inlineDisp key} inlined one level so the producer and the legs share one region (no call boundary between them) -- the OPT-IN arm, retained because BLADE_EPILOGUE_LEGS=1 is explicit (its lifetime audit is INCOMPLETE, G69: a fold kernel named by a non-owned unit is not audited; each lane that RETAINS it warns BL7005 on stderr, once, at the call; the planned closure is the scope model A, reviews/codex-g69-design.md, a later item); its pools ({pools}) are released ONCE at an IR-level return-boundary event (IRReleasePools) placed after the rebuilt inlined spine and its evaluated return, before the statement that held the call -- where the as-written call returned; CSE treats the event as a barrier and pins the pools, scratch reuse excludes them, IRValidate rejects a read after it (directly, or one level through a local let whose definition names a pool), and both lanes release there (C++: the scope frame's own free or main's dense free; LLVM: the tracking-slot free, slot nulled, or a direct free in main). Scope (fail closed): the callee was admitted because EVERY let of its inlined spine is a forced rank-1 dense map (an owned pool, listed) or an allocation-free value -- its type and the type of every let, branch, match, tuple, projection and compute its evaluation reaches is a numeric / Bool / complex scalar, a unit, an index label whose INNER type is one of those, or a tuple of them (no String, no bare Nat), it reads no String-typed value and evaluates no String literal, and it calls NO user function directly in any position (builtin operators -- arithmetic, libm, casts, extents, folds and maps -- are not calls; callee bodies, and the bodies of fold / map KERNELS it names, are NOT audited -- the known unaudited case) -- and it is the only inlinable call of its statement; any other callee, or a second call in the statement, is not retained for A7c (independent sibling-fold inlining is unchanged)" ]
                         | None -> []
                     // FINDING 4: the inline is kept only when BOTH lanes' fused forms
                     // can carry the legs in this build -- the facts each emitter's own
@@ -8427,6 +8475,9 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
             match pools with
             | (start, _) :: _ ->
                 let ev = (builder.FreshId(), IRReleasePools (resolveNames call, start, pools))
+                (match callNodes.TryGetValue((i, c)) with
+                 | true, node -> (match CallSpanTable.tryFind node with Some s -> InlineEventSpans.record start s | None -> ())
+                 | _ -> ())
                 events.[i] <- (match events.TryGetValue i with | true, l -> l | _ -> []) @ [ ev ]
             | _ -> ()
         let replace = System.Collections.Generic.Dictionary<SfUnitKey * int, IRExpr>()

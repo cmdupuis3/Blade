@@ -333,7 +333,9 @@ and genBindingDispatch (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
     // A pool a live frame does not track (never registered, escaping) is left
     // to its owner. Scratch reuse never takes a named pool (planPoolReuse
     // excludes them); the check below is the emitter's own guard.
-    | IRReleasePools (call, _, pools) ->
+    | IRReleasePools (call, start, pools) ->
+        // BL7005: this lane RETAINED the opt-in kept inline (G69). Once per event.
+        Blade.Optimize.noteKeptInlineRetained "cpp" call start
         let reuse = Blade.Types.PoolReuseTable.donors ()
         let inPoolReuse (pid: IRId) = reuse.ContainsKey pid || (reuse |> Map.exists (fun _ d -> d = pid))
         let frees =

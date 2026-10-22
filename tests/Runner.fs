@@ -247,6 +247,9 @@ type private FsPipelineOutcome =
 let private runFsharpPipelineLocked (source: string) (testName: string) (outputDir: string) (compileAndRun: bool) (wantDiags: bool) : FsPipelineOutcome * Blade.Diagnostics.Diagnostic list =
     withFsharpPipelineLock (fun () ->
         let (irResult, capturedWarnings) = lowerCaptured source
+        // The coded EMITTER warnings (BL7005) the generating lane raised join the
+        // captured channel, so `// WARN:` pins read them under the same rule.
+        let mutable emitterWarnings : Blade.Diagnostics.Diagnostic list = []
         let outcome =
             match irResult with
             | Error e ->
@@ -287,6 +290,7 @@ let private runFsharpPipelineLocked (source: string) (testName: string) (outputD
                         match Blade.EmitLlvm.tryEmitProgramNamed testName ir with
                         | Error reason -> FpBackendRefused (ir, reason)
                         | Ok llText ->
+                            emitterWarnings <- Blade.Diagnostics.EmitterWarnings.drain ()
                             let llFile = Path.Combine(outputDir, safeName + ".ll")
                             File.WriteAllText(llFile, llText)
                             FpLlvmGenerated (ir, llFile)
@@ -294,6 +298,7 @@ let private runFsharpPipelineLocked (source: string) (testName: string) (outputD
                         let safeName = sanitizeFileName testName
                         try
                             let (cppCode, codegenWarnings) = CodeGen.genSelfContainedProgramFromIR ir testName
+                            emitterWarnings <- Blade.Diagnostics.EmitterWarnings.drain ()
                             // Backend requirement is inferred from the settled
                             // codegen output. CUDA codegen emits device kernels
                             // (.cu, compiled by nvcc); CPU codegen does not
@@ -317,7 +322,7 @@ let private runFsharpPipelineLocked (source: string) (testName: string) (outputD
                             FpCppGenerated (ir, srcFile, codegenWarnings, backendReq, emittedErrorGuard, refusalDiags, cppCode)
                         with ex ->
                             FpGenError (ir, $"Generation failed: {ex.Message}")
-        outcome, capturedWarnings
+        outcome, capturedWarnings @ emitterWarnings
     )
 
 /// Run a full test: IR lowering + C++ generation + compilation + execution

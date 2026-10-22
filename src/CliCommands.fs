@@ -299,6 +299,13 @@ let private frontEndToIR (filePath: string) (strictPins: bool) (mark: string -> 
             Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
         | Ok ir -> Ok (ir, sm)
 
+/// Print (and drain) the coded warnings the lane that produced the artifact
+/// raised while emitting it -- BL7005 today -- on stderr.
+let private printEmitterWarnings (useColor: bool) (sm: Blade.Diagnostics.SourceMap) : unit =
+    match Blade.Diagnostics.EmitterWarnings.drain () with
+    | [] -> ()
+    | ds -> eprintfn "%s" (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
+
 /// The C++ back half: IRProgram -> translation unit, plus the two
 /// refusal channels codegen reports through.
 let private cppBackendOfIR (ir: Blade.IR.IRProgram) (testName: string) (sm: Blade.Diagnostics.SourceMap)
@@ -346,6 +353,9 @@ let private cppBackendOfIR (ir: Blade.IR.IRProgram) (testName: string) (sm: Blad
         // and outside cuda emit mode this list is empty.
         for w in warnings do
             if w.StartsWith "[cuda] " then eprintfn "warning: %s" w
+    // Coded emitter warnings (BL7005, G69's opt-in kept inline): unprompted,
+    // on stderr, rendered like every diagnostic.
+    printEmitterWarnings useColor sm
     Ok (cppCode, warnings)
 
 /// Env-gated phase timing (BLADE_PHASE_TIMING=1); see docs/plan-compile-speed.md.
@@ -414,6 +424,7 @@ let compileArtifact (filePath: string) (verbose: bool) (strictPins: bool) : Resu
                     | Error reason -> fallback reason
                     | Ok ll ->
                         mark "emit-llvm"
+                        printEmitterWarnings (not Console.IsErrorRedirected) sm
                         // The omp census (G11): the lane has no thread runtime,
                         // so every `where omp` licence compiled serial. Printed
                         // unprompted, like the refusal notice above -- "you

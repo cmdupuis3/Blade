@@ -4140,7 +4140,11 @@ and private bindNamed (c: Ctx) (id: IRId) (name: string) (declTy: IRType) (value
     // scope's own pop frees nothing twice; an untracked pool (main, which opens
     // no scope) is freed directly. The binding is then forgotten, so a later
     // reference -- which IRValidate already rejects -- would refuse loudly.
-    | IRReleasePools (call, _, pools) ->
+    | IRReleasePools (call, start, pools) ->
+        // BL7005: this lane RETAINED the opt-in kept inline (G69). Once per event;
+        // a program the lane later refuses has its warnings discarded by the
+        // channel reset of the C++ lane it falls back to.
+        Blade.Optimize.noteKeptInlineRetained "llvm" call start
         for (pid, _) in pools do
             match c.ArrSlots.TryGetValue pid with
             | true, { Src = APool p } ->
@@ -9023,6 +9027,8 @@ let ompRequestedKernels (program: IRProgram) : string list =
 /// `programName` is the label the timing line carries -- the C++ lane uses the
 /// source file's stem, so the router passes the same thing.
 let tryEmitProgramNamed (programName: string) (program: IRProgram) : Result<string, string> =
+    // A fresh BL7005 channel per program (the warnings of THIS lane's emission).
+    Blade.Diagnostics.EmitterWarnings.reset ()
     try
         match program.Modules with
         | [] -> Error "an empty program"
@@ -9111,7 +9117,9 @@ let tryEmitProgramNamed (programName: string) (program: IRProgram) : Result<stri
                     put ($$"""attributes #{{g}} = { {{(attrGroupText c.AnyFrees anyPanics g)}} }""")
             Ok (sb.ToString())
             finally Blade.IR.restoreAnalysisContext prevCtx
-    with LlvmRefusal reason -> Error reason
+    // A refused program emitted nothing: its BL7005 warnings are discarded
+    // (the C++ lane it falls back to raises its own).
+    with LlvmRefusal reason -> Blade.Diagnostics.EmitterWarnings.reset (); Error reason
 
 /// The fixed back-end surface (`IRProgram -> Result<string, string>`).
 /// Programs reaching this entry are unnamed; the timing line reads "program".

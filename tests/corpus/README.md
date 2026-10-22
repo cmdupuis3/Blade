@@ -101,6 +101,11 @@ Notes:
 - `(rejects)` probes are held to the same rule. The checker's warning channels
   survive its error path, so a program refused at typecheck has still earned
   whatever it emitted before the refusal.
+- `// WARN:` also reads the coded EMITTER warnings of the lane that generated
+  the program (`Diagnostics.EmitterWarnings`, single-file runner) -- today only
+  BL7005, the opt-in kept inline of gap G69 (`BLADE_EPILOGUE_LEGS=1`). The default
+  suite never raises it (the default build declines that inline), so no corpus
+  file pins it; the harness tests that build under the explicit arm assert it.
 - Multi-file tests take the **union** of the pins across their member sources
   (EXPECT and ERROR pins as well as WARN pins): a cross-module program is
   typechecked as one program, so its warnings cannot be attributed to a single

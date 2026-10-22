@@ -2908,6 +2908,86 @@ let private eplDeclineKeepsSiblingInline () =
         else resultLine Fail name (sprintf "a7c %b w1d %b noApplied %b noCall %b events %d sameCpp %b sameLl %b" a7c w1d noApplied noCall events sameCpp sameLl); false
     | Error e, _, _, _ | _, Error e, _, _ | _, _, Error e, _ | _, _, _, Error e -> resultLine Fail name e; false
 
+/// The BL7005 warnings the last emission raised (and clear the channel).
+let private bl7005Raised () =
+    Blade.Diagnostics.EmitterWarnings.drain () |> List.filter (fun d -> d.Code = "BL7005")
+
+/// W2-4 round 9 (the user's decision): every RETAINED kept inline warns
+/// BL7005 ONCE per lane, spanned at its call, in both lanes -- including when
+/// the lane's emitter declines the legs' fused form and the planned inline
+/// stays (030 under omp test mode); a program with no retained inline (a
+/// decline, 047's never-inlined callee) raises none. Runs under the explicit
+/// arm (the runner's BLADE_EPILOGUE_LEGS=1); the default build's absence is
+/// `epilogue_legs_default_build_declines_kept_inline`.
+let private eplKeptInlineWarns () =
+    let name = "epilogue_legs_kept_inline_warns_bl7005_both_lanes"
+    let serial f = withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" f)
+    let prefix = "experimental: the kept one-level inline (BLADE_EPILOGUE_LEGS=1) of "
+    let tail = " has an INCOMPLETE lifetime audit (G69: allocations made by the kernels it names may survive its return); the default build declines it"
+    let src (rel: string) = match corpusSource rel with Ok s -> Ok (s.Substring(s.IndexOf '\n' + 1)) | Error e -> Error e
+    let cppWarn (testMode: bool) (s: string) =
+        serial (fun () ->
+            Blade.CodeGenState.setOmpTestMode testMode
+            try (match cppOfSource name s with Ok _ -> Ok (bl7005Raised ()) | Error e -> Error e)
+            finally Blade.CodeGenState.setOmpTestMode false)
+    let llWarn (s: string) =
+        serial (fun () ->
+            match lower s with
+            | Error e -> Error e
+            | Ok ir ->
+                let r = (try EmitLlvm.tryEmitProgramNamed "bl7005" ir with ex -> Error ("raised: " + ex.Message))
+                Ok (r.IsOk, bl7005Raised ()))
+    let wellFormed (calls: string list) (ws: Blade.Diagnostics.Diagnostic list) =
+        ws.Length = calls.Length
+        && List.forall2 (fun (c: string) (d: Blade.Diagnostics.Diagnostic) ->
+               d.Severity = Blade.Diagnostics.SevWarning && d.Message = prefix + c + tail && d.Span.StartLine > 0) calls ws
+    // (fixture, source, the calls retained in order)
+    let cases =
+        [ ("saxpy", Ok eplSaxpySrc, [ "kernel(x, y)" ])
+          ("019", src "sibling-folds/019_input_legs_ride_producer.blade", [ "kernel(x, y)" ])
+          ("030", src "sibling-folds/030_input_legs_join_inside_inlined_callee.blade", [])
+          ("031", src "sibling-folds/031_input_legs_two_plans_one_inlined_call.blade", [])
+          ("032", src "sibling-folds/032_input_legs_unused_final_join_atom_return.blade", [])
+          ("033", src "sibling-folds/033_input_legs_cse_barrier_function_caller.blade", [ "kernel(x, y)" ])
+          ("034", src "sibling-folds/034_input_legs_function_caller_failure_after_return.blade", [])
+          ("035", src "sibling-folds/035_input_legs_scratch_reuse_inside_callee.blade", [])
+          ("038", src "sibling-folds/038_input_legs_durable_region_start.blade", [ "kernel(x, y, u, v)"; "kernel2(x, y)" ])
+          ("036", src "sibling-folds/036_input_legs_decline_alias_let_in_callee.blade", [])
+          ("044", src "sibling-folds/044_input_legs_decline_user_call_tuple_position.blade", [])
+          ("047", src "sibling-folds/047_input_legs_label_read_not_inlined.blade", []) ]
+    // the retained-call count where the call text is not pinned above
+    let counts = Map.ofList [ ("030", 2); ("031", 1); ("032", 1); ("034", 1); ("035", 1) ]
+    let problems =
+        cases |> List.choose (fun (fx, s, calls) ->
+            match s with
+            | Error e -> Some $"{fx}: {e}"
+            | Ok s ->
+            let n = match Map.tryFind fx counts with Some n -> n | None -> calls.Length
+            let check (ws: Blade.Diagnostics.Diagnostic list) =
+                if calls.IsEmpty then ws.Length = n && ws |> List.forall (fun d -> d.Message.StartsWith prefix && d.Message.EndsWith tail && d.Span.StartLine > 0)
+                else wellFormed calls ws
+            match cppWarn false s, llWarn s with
+            | Ok cw, Ok (llOk, lw) ->
+                if not (check cw) then Some $"{fx}: C++ raised {cw.Length} BL7005 (wanted {n}): %A{cw |> List.map (fun d -> d.Message, d.Span.StartLine)}"
+                elif llOk && not (check lw) then Some $"{fx}: LLVM raised {lw.Length} BL7005 (wanted {n})"
+                elif not llOk && not lw.IsEmpty then Some $"{fx}: the LLVM lane refused the program but kept {lw.Length} BL7005"
+                elif n > 0 && not llOk then Some $"{fx}: the LLVM lane refused a retaining program"
+                else None
+            | Error e, _ | _, Error e -> Some $"{fx}: {e}")
+    // the emitter declines the fused form (omp test mode) and the inline stays
+    let testMode =
+        match src "sibling-folds/030_input_legs_join_inside_inlined_callee.blade" with
+        | Error e -> Some e
+        | Ok s ->
+            match cppWarn true s with
+            | Ok ws when ws.Length = 2 -> None
+            | Ok ws -> Some $"030 under omp test mode: {ws.Length} BL7005 (wanted 2: the planned inlines stay)"
+            | Error e -> Some e
+    match problems @ Option.toList testMode with
+    | [] ->
+        resultLine Pass name "one BL7005 per retained inline per lane, spanned at its call, exact text: saxpy / 019 / 031-035 one, 030 / 038 two (030 also under omp test mode, the fused form declined and the inline kept), both lanes; 036 / 044 (declines) and 047 (never inlined; LLVM refusal) none"
+        true
+    | ps -> resultLine Fail name (String.concat " | " ps); false
 /// W2-4 round 8 (the user's decision after the seventh look): in the DEFAULT
 /// build (BLADE_EPILOGUE_LEGS unset) the kept one-level inline is OPT-IN, so
 /// the saxpy spelling (the producer in `kernel`, the legs in the caller)
@@ -2929,8 +3009,11 @@ let private eplDefaultDeclinesInline () =
         let ds = Blade.Effects.Decisions.drain ()
         r |> Result.map (fun ll -> (ll, ds))
     let want = Blade.Optimize.epilogueInlineOptInDecline
-    match dflt (fun () -> cepDecisionsOf eplSaxpySrc), dflt (fun () -> cppOfSource name eplSaxpySrc), off (fun () -> cppOfSource name eplSaxpySrc),
-          dflt (fun () -> llvmOf eplSaxpySrc), off (fun () -> llvmOf eplSaxpySrc), dflt (fun () -> lower eplSaxpySrc) with
+    // BL7005 is ABSENT in the default build: nothing is retained, in either lane
+    let mutable warned = -1
+    let withWarn (r: Result<'a, string>) = (match r with Ok _ -> warned <- max warned 0 + (bl7005Raised ()).Length | Error _ -> ()); r
+    match dflt (fun () -> cepDecisionsOf eplSaxpySrc), dflt (fun () -> cppOfSource name eplSaxpySrc |> withWarn), off (fun () -> cppOfSource name eplSaxpySrc),
+          dflt (fun () -> llvmOf eplSaxpySrc |> withWarn), off (fun () -> llvmOf eplSaxpySrc), dflt (fun () -> lower eplSaxpySrc) with
     | Ok ds, Ok cpp, Ok cppOff, Ok (ll, lds), Ok (llOff, _), Ok ir ->
         let mine = ds |> List.filter (fun d -> d.Rule = "epilogue-legs")
         let exact = mine |> List.exists (fun d -> match d.Outcome with Blade.Effects.Declined w -> w = want | _ -> false)
@@ -2950,10 +3033,10 @@ let private eplDefaultDeclinesInline () =
                     Some (ds2 |> List.exists (fun d -> d.Rule = "epilogue-legs" && applied d && d.Subject.Contains "s2"),
                           ds2 |> List.exists (fun d -> d.Rule = "epilogue-legs" && d.Subject.Contains "checksum" && (match d.Outcome with Blade.Effects.Declined w -> w = want | _ -> false)))
                 | Error _ -> None
-        if exact && not anyApplied && events = 0 && kept && cpp = cppOff && ll = llOff && second = Some (true, true) then
-            resultLine Pass name ($"saxpy declines `{want}`; the call stays; no event; C++ and LLVM byte-identical to BLADE_EPILOGUE_LEGS=0; 019's in-region plan (s2, t2) still applies by default and its callee region declines the same way")
+        if exact && not anyApplied && events = 0 && kept && cpp = cppOff && ll = llOff && second = Some (true, true) && warned = 0 then
+            resultLine Pass name ($"saxpy declines `{want}`; the call stays; no event; no BL7005 in either lane; C++ and LLVM byte-identical to BLADE_EPILOGUE_LEGS=0; 019's in-region plan (s2, t2) still applies by default and its callee region declines the same way")
             true
-        else resultLine Fail name (sprintf "exact %b applied %b events %d kept %b cpp= %b ll= %b 019 %A" exact anyApplied events kept (cpp = cppOff) (ll = llOff) second); false
+        else resultLine Fail name (sprintf "exact %b applied %b events %d kept %b cpp= %b ll= %b 019 %A bl7005 %d" exact anyApplied events kept (cpp = cppOff) (ll = llOff) second warned); false
     | Error e, _, _, _, _, _ | _, Error e, _, _, _, _ | _, _, Error e, _, _, _ | _, _, _, Error e, _, _ | _, _, _, _, Error e, _ | _, _, _, _, _, Error e -> resultLine Fail name e; false
 /// Round 7 (sixth review NEW 2): 047's callee reads a String-valued EnumIdx
 /// label. The predicate would refuse it (a tag is judged by its inner type),
@@ -6544,6 +6627,7 @@ let runOptimizeTests () =
               eplDurableStart ()
               eplDuplicateReturnPinned ()
               eplValidateProvenance ()
+              eplKeptInlineWarns ()
               withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () ->
                 decisionCase "epilogue_legs_cse_probe_merges_without_event" eplCseProbeSrc "cse" applied "cse applied: without an event the equal maps merge"))
               withGate "BLADE_OMP_THREADS" "1" (fun () ->

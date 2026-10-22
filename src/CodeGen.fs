@@ -3940,6 +3940,7 @@ let private genSelfContainedProgram (modul: IRModule) (testName: string) : strin
 /// flow and every sibling pipeline (CodeGenState.freshCell).
 let beginProgramAssembly () : unit =
     resetProgramStateCells ()
+    Blade.Diagnostics.EmitterWarnings.reset ()
     resetExprSupportCells ()
     resetLoopNestCells ()
     Blade.LinAlgPatterns.resetReproScope ()

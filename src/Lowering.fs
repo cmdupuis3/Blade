@@ -627,7 +627,10 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         // the lambda is inlined or lifted to a top-level function.
         match func.Type with
         | ArrayElem _ -> IRIndex (f, as', None)
-        | _ -> IRApp (f, as', texpr.Type)
+        | _ ->
+            // The call's span, for the opt-in kept inline's BL7005 (G69).
+            (match f with IRVar (fid, _) -> Optimize.CallSpanTable.record fid as' texpr.Span | _ -> ())
+            IRApp (f, as', texpr.Type)
     
     | TExprIndex (array, indices, identity) ->
         let arr = lowerTypedExpr env array
@@ -2963,6 +2966,8 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     Optimize.OrbitActionTable.reset ()
     Optimize.MemberHoistTable.reset ()
     Optimize.EpilogueLegTable.reset ()
+    Optimize.CallSpanTable.reset ()
+    Optimize.InlineEventSpans.reset ()
     Optimize.blasGateProbe <- Blade.LinAlgPatterns.blasAvailable
     // The raw decl list callers hand us is the program they PARSED, not the
     // one `TypeCheck.typeCheck` desugared inside itself -- so the icechunk
