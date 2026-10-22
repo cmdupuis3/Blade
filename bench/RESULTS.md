@@ -2899,8 +2899,8 @@ whose zarr stores are not in the checkout, one BL4003 warning, one BL3999). Ever
   as-written free did, and the archived OLD and NEW LLVM emissions of saxpy both allocate y2 in main and neither frees it
   (merge-level review finding 4), so no moved free is in the saxpy delta -- but they are not a lifetime-matched compiler
   claim, and the planner / docs strings that say "the LLVM lane frees no pool in either form" are WRONG in general and are
-  corrected by round 4. The merge-level Codex review (`reviews/codex-wave2-merged.md`) is HOLD on this item: round 4 (brief
-  `briefs/W2-4-round4-lifetime.md`) lands an IR-level cleanup event no pass removes, honoured by every renderer and both
+  corrected by round 4. The merge-level Codex review (`reviews/wave2-codex-reviews.md#codex-wave2-merged`) is HOLD on this item: round 4 (brief
+  `briefs/wave2-builder-briefs.md#w2-4-round4-lifetime`) lands an IR-level cleanup event no pass removes, honoured by every renderer and both
   lanes, fail-closed elsewhere, then a fourth look, the gates re-run and the saxpy cells re-measured; the wave's other
   six items are not held.
 - **semiagg under T4c is flat** (G70): at ~5% selectivity the branchless single pass reads the whole payload where the old

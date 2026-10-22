@@ -11,7 +11,7 @@ Blade.dll SHA256 E84BB4E59A8111432B957B6EE9764B027BE608E6BB8E15DACEE55C0D103AEAE
 | blade test llvm | TOTAL: 841 passed, 0 failed | 825/0 |
 | blade test interp | Interp Diff: 3077 passed, 0 failed, 3 skip-unsupported | 3031/0 |
 
-Examples sweep: the same six pre-existing non-zero exits as on master. The Codex merge-level review (reviews/codex-wave1-merged.md)
+Examples sweep: the same six pre-existing non-zero exits as on master. The Codex merge-level review (reviews/wave1-codex-reviews.md#codex-wave1-merged)
 found no lost hunk, no duplicate-counted test and no cross-item wrong value; its two record fixes (the G51 citation, the G58
 wording, the G61 reference) are applied in the same commit.
 
