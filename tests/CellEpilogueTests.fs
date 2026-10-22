@@ -505,6 +505,22 @@ let runCellEpilogueTests () : BlockResult =
             match r with
             | "rep_ser" -> Some "__epl_acc_"
             | _ -> Some "for (size_t __ek = __cep_b;" }
+    let corpusFile (rel: string) =
+        [ Path.Combine(Directory.GetCurrentDirectory(), "tests", "corpus", rel)
+          Path.Combine(AppContext.BaseDirectory, "tests", "corpus", rel) ] |> List.tryFind File.Exists
+    let lifetimePrograms =
+        [ "032_lifetime_deleted_final_join.blade", ["r"; "t"]
+          "033_lifetime_cse_equal_caller_map.blade", ["r"]
+          "034_lifetime_duplicate_scalar_return.blade", ["r"]
+          "035_lifetime_function_scalar_return.blade", ["r"]
+          "037_lifetime_scratch_reuse_region.blade", ["r"] ]
+        |> List.choose (fun (file, scalars) ->
+            match corpusFile ("sibling-folds/" + file) with
+            | None -> fail ("inline lifetime witness " + file) "corpus file not found"; None
+            | Some path ->
+                Some { legsCall with Name = "lifetime_" + Path.GetFileNameWithoutExtension file
+                                     Source = File.ReadAllText path; Scalars = scalars
+                                     Needle = fun _ -> Some "__epl_acc_" })
     let legRegimes =
         [ (legsCall, "rep_ser", "off", true, true)
           (legsCall, "lic_ser", "off", false, false)
@@ -512,6 +528,7 @@ let runCellEpilogueTests () : BlockResult =
           (legsStrict, "rep_ser", "off", true, true)
           (legsStrict, "lic_ser", "off", false, true)
           (legsStrict, "lic_ser", "fast", false, true) ]
+        @ (lifetimePrograms |> List.map (fun p -> p, "rep_ser", "off", true, true))
     for (p, regime, contract, repro, bitwise) in legRegimes do
         let name = $"{p.Name} epilogue legs {regime} contract={contract} T=1 (NEW vs BLADE_EPILOGUE_LEGS=0)"
         use _c = pinEnv "BLADE_FP_CONTRACT" contract
@@ -556,7 +573,7 @@ let runCellEpilogueTests () : BlockResult =
     (match Build.resolveClang () with
      | None -> skip "llvm epilogue legs" "no clang (BLADE_LLVM_CLANG)"
      | Some _ ->
-     for p in [ legsCall; legsStrict ] do
+     for p in [ legsCall; legsStrict ] @ lifetimePrograms do
         let name = $"{p.Name} llvm epilogue legs (REPRO, contract=off, T=1): gate on == gate off"
         use _c = pinEnv "BLADE_FP_CONTRACT" "off"
         use _r = pinEnv "BLADE_FP_REPRO" "1"
@@ -593,7 +610,10 @@ let runCellEpilogueTests () : BlockResult =
             let bitsShown = a |> List.forall (fun l -> l.Contains " #")
             // the joined pass's loop is gone (the call form's inlined callee
             // is not emitted when nothing calls it any more)
-            let armOk = loops llOn = loops llOff - 1
+            let armOk =
+                if p.Name.StartsWith "lifetime_" then
+                    match Blade.Tests.LlvmTests.inlineLifetimeCleanupProof llOn with Ok n -> n > 0 | Error _ -> false
+                else loops llOn = loops llOff - 1
             if a.IsEmpty || not bitsShown then fail name ($"""no raw bits printed (BLADE_PRINT_BITS): [{String.concat " | " a}]""")
             elif a <> b then fail name ($"""raw bits differ: on [{String.concat " | " a}] off [{String.concat " | " b}]""")
             elif not armOk then fail name ($"arm needle: {loops llOn} loops on vs {loops llOff} off")
@@ -604,11 +624,9 @@ let runCellEpilogueTests () : BlockResult =
     //     intervening BL8013 still fires at its own line, after the producer.
     //   sibling-folds/029: a B1-shaped THROWING callee is never inlined for the
     //     legs; BL8013 fires inside `kernel`'s own frame (`at kernel`).
-    let corpusFile (rel: string) =
-        [ Path.Combine(Directory.GetCurrentDirectory(), "tests", "corpus", rel)
-          Path.Combine(AppContext.BaseDirectory, "tests", "corpus", rel) ] |> List.tryFind File.Exists
     for (rel, frame) in [ ("sibling-folds/026_input_legs_failure_between_aborts.blade", None)
-                          ("sibling-folds/029_input_legs_throwing_callee_keeps_frame.blade", Some "at kernel") ] do
+                          ("sibling-folds/029_input_legs_throwing_callee_keeps_frame.blade", Some "at kernel")
+                          ("sibling-folds/036_lifetime_caller_panic.blade", Some "at driver") ] do
       for lane in [ "cpp"; "llvm" ] do
         let name = $"{Path.GetFileNameWithoutExtension rel} {lane}: fault, site and frame equal gate on vs off"
         match corpusFile rel with
@@ -665,7 +683,12 @@ let runCellEpilogueTests () : BlockResult =
     // `later`, whose pools then live to exit, so gate-on may free MORE, never
     // less. Then the ordinary build (pool cache ON): printed values equal.
     for rel in [ "sibling-folds/030_input_legs_join_inside_inlined_callee.blade"
-                 "sibling-folds/031_input_legs_two_plans_one_inlined_call.blade" ] do
+                 "sibling-folds/031_input_legs_two_plans_one_inlined_call.blade"
+                 "sibling-folds/032_lifetime_deleted_final_join.blade"
+                 "sibling-folds/033_lifetime_cse_equal_caller_map.blade"
+                 "sibling-folds/034_lifetime_duplicate_scalar_return.blade"
+                 "sibling-folds/035_lifetime_function_scalar_return.blade"
+                 "sibling-folds/037_lifetime_scratch_reuse_region.blade" ] do
         let name = $"{Path.GetFileNameWithoutExtension rel}: return-boundary releases under ASan and with the pool cache"
         match corpusFile rel with
         | None -> fail name "corpus file not found"

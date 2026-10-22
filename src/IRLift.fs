@@ -38,7 +38,7 @@ let isInlineForm (e: IRExpr) : bool =
     | IRSubset _ | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _ | IRNth
     | IRZero _ | IRUninit _ | IRRank _ | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _
     | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent
-    | IRAssign _ | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ -> false
+    | IRAssign _ | IRForRange _ | IRBeginPoolScope _ | IRReleasePools _ | IRConstraintCheck _ | IRBreakIf _ -> false
 
 /// Nodes whose ONLY emitter is `genBinding` -- they declare an extents table,
 /// call `allocate<>`, and run a fill nest, which is a STATEMENT SEQUENCE.
@@ -99,7 +99,7 @@ let isStatementShaped (e: IRExpr) : bool =
     | IRShift _ | IRDiag _ | IRSubset _ | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _
     | IRArity _ | IRNth | IRZero _ | IRRank _ | IRPolyIndex _ | IRPolyTail _ | IRExtent _
     | IRRaggedLookup _ | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _
-    | IROrbitClass _ | IROpaqueExtent | IRAssign _ | IRForRange _ | IRConstraintCheck _
+    | IROrbitClass _ | IROpaqueExtent | IRAssign _ | IRForRange _ | IRBeginPoolScope _ | IRReleasePools _ | IRConstraintCheck _
     | IRBreakIf _ -> false
 
 /// The four forms whose emission `genBinding` DEFERS: it records the value in
@@ -148,7 +148,7 @@ let isDeferringForm (e: IRExpr) : bool =
     | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUninit _ | IRRank _
     | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _
     | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent | IRAssign _
-    | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ -> false
+    | IRForRange _ | IRBeginPoolScope _ | IRReleasePools _ | IRConstraintCheck _ | IRBreakIf _ -> false
 
 let forceDeferringForm (e: IRExpr) : IRExpr =
     if isDeferringForm e then IRCompute e else e
@@ -183,7 +183,7 @@ let isGroupTableForm (e: IRExpr) : bool =
     | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUninit _ | IRRank _
     | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _
     | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent | IRAssign _
-    | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ -> false
+    | IRForRange _ | IRBeginPoolScope _ | IRReleasePools _ | IRConstraintCheck _ | IRBreakIf _ -> false
 
 /// `isStatementShaped` through an explicit `|> compute`. The user's own force
 /// is the SAME routing problem, not a different one: `sequence(a, b) |> compute`
@@ -226,7 +226,7 @@ let isArraysSlotAutoMaterialized (e: IRExpr) : bool =
     | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUninit _ | IRRank _
     | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _
     | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent | IRAssign _
-    | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ -> false
+    | IRForRange _ | IRBeginPoolScope _ | IRReleasePools _ | IRConstraintCheck _ | IRBreakIf _ -> false
 
 /// The `Arrays`-slot half of `isStatementShaped`: statement-shaped, NOT already
 /// auto-materialized there, and genuinely ARRAY-TYPED.
@@ -319,7 +319,7 @@ let internal isNestedLoopComputeArg (e: IRExpr) : bool =
     | IRShift _ | IRDiag _ | IRJoin _ | IRSubset _ | IRRange _ | IRVirtualReverse _
     | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUninit _ | IRRank _ | IRPolyIndex _ | IRPolyTail _
     | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _
-    | IROrbitClass _ | IROpaqueExtent | IRAssign _ | IRForRange _ | IRConstraintCheck _
+    | IROrbitClass _ | IROpaqueExtent | IRAssign _ | IRForRange _ | IRBeginPoolScope _ | IRReleasePools _ | IRConstraintCheck _
     | IRBreakIf _ -> false
 
 /// An INLINE array literal sitting directly in a loop form's `Arrays` list --
@@ -375,7 +375,7 @@ let internal isArrayValuedSelect (e: IRExpr) : bool =
     | IRShift _ | IRDiag _ | IRJoin _ | IRSubset _ | IRRange _ | IRVirtualReverse _
     | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUninit _ | IRRank _ | IRPolyIndex _ | IRPolyTail _
     | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _
-    | IROrbitClass _ | IROpaqueExtent | IRAssign _ | IRForRange _ | IRConstraintCheck _
+    | IROrbitClass _ | IROpaqueExtent | IRAssign _ | IRForRange _ | IRBeginPoolScope _ | IRReleasePools _ | IRConstraintCheck _
     | IRBreakIf _ -> false
 
 /// A LOOP FORM sitting directly in another loop form's `Arrays` list -- the
@@ -415,7 +415,7 @@ let internal isNestedLoopFormArg (e: IRExpr) : bool =
     | IRJoin _ | IRSubset _ | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _
     | IRNth | IRZero _ | IRUninit _ | IRRank _ | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _
     | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent
-    | IRAssign _ | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ -> false
+    | IRAssign _ | IRForRange _ | IRBeginPoolScope _ | IRReleasePools _ | IRConstraintCheck _ | IRBreakIf _ -> false
 
 /// Peel any IRLet chain that descendant lifts produced.
 /// When a sub-expression's lift wraps it in `IRLet(id, v, IRLet(...,inner))`,
@@ -465,7 +465,7 @@ let internal isArrayFieldAccess (e: IRExpr) : bool =
     | IRShift _ | IRDiag _ | IRJoin _ | IRSubset _ | IRRange _ | IRVirtualReverse _
     | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUninit _ | IRRank _ | IRPolyIndex _ | IRPolyTail _
     | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _
-    | IROrbitClass _ | IROpaqueExtent | IRAssign _ | IRForRange _ | IRConstraintCheck _
+    | IROrbitClass _ | IROpaqueExtent | IRAssign _ | IRForRange _ | IRBeginPoolScope _ | IRReleasePools _ | IRConstraintCheck _
     | IRBreakIf _ -> false
 
 /// Lift a single child if it's an inline form. Returns either ([], child)
@@ -1222,6 +1222,8 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
             wrapLets (peeled @ [ (id, ty, forced) ]) (IRAssign (target, IRVar (id, ty)))
         else IRAssign (target, v')
     | IRAssign (t, v) -> IRAssign (t, liftExpr builder v)
+    | IRBeginPoolScope _ -> expr
+    | IRReleasePools (scope, pools, call) -> IRReleasePools (scope, pools, call)
     | IRConstraintCheck (c, code, msg, sp) -> IRConstraintCheck (liftExpr builder c, code, msg, sp)
     | IRBreakIf c -> IRBreakIf (liftExpr builder c)
     | IRForRange (vid, lo, hi, body) ->

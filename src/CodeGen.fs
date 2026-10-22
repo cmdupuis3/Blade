@@ -230,6 +230,13 @@ let rec private genFuncBodyScoped
                 | e -> e
             collapse value
         match value with
+        | IRBeginPoolScope call ->
+            currentNames <- Map.add id varName currentNames
+            [ $"{indent}// A01: begin inline pool scope: {call}" ]
+        | IRReleasePools (_, pools, call) ->
+            let lines = releaseInlinePools indent currentNames pools call
+            currentNames <- Map.add id varName currentNames
+            lines
         | IRForRange (vid, lo, hi, forBody) ->
             // Route through genForRangeBinding -- the recursive binding-level
             // renderer -- so nested for-in loops (and any statement form its
@@ -1935,7 +1942,10 @@ let private computeModuleCaptureHoistIds
 let private genModuleBinding
         (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder)
         (hoistIds: Set<IRId>) : string list * CodeGenContext =
-    let (code, ctx') = genBinding ctx binding builder
+    let atBinding =
+        { ctx with TopLevelProviderRead = if ctx.ProviderReads.ContainsKey binding.Id then Some binding.Id else None }
+    let (code, emittedCtx) = genBinding atBinding binding builder
+    let ctx' = { emittedCtx with TopLevelProviderRead = ctx.TopLevelProviderRead }
     if not (Set.contains binding.Id hoistIds) then (code, ctx')
     else
         let name = bindingCppName binding
@@ -2120,7 +2130,7 @@ let private emissionOrderedItems (modul: IRModule) (mainLocalFuncIds: Set<IRId>)
         | _ -> (k, 1, 0)
     bindingItems @ funcItems |> List.sortBy sortKey
 
-let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list =
+let private genModuleCore (wholeProgram: bool) (modul: IRModule) (builder: IRBuilder) : string list * string list =
     // Companion-array gap: populate the codegen-side struct fields
     // cache so inferExprType can resolve IRFieldAccess result types.
     setCodegenStructFieldsCache modul.Types
@@ -2155,7 +2165,7 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
     let ctx0 = { ctx0 with ProviderReads = modul.ProviderReads; ProviderWrites = modul.ProviderWrites; RandomInits = modul.RandomInits; CompoundInits = modul.CompoundInits; SparseInits = modul.SparseInits; MutableArrayLets = modul.MutableArrayLets }
     // Revision reuse (docs/plans/structural/04): empty unless BLADE_TILE_CACHE is set.
     let (tilePlans, tileReads) = Blade.CodeGenTiles.planTiles modul
-    let ctx0 = { ctx0 with TilePlans = tilePlans; TileReads = tileReads }
+    let ctx0 = { ctx0 with TilePlans = tilePlans; TileReads = tileReads; StreamTerminalModule = if wholeProgram then Some modul else None }
 
     // First pass: register ALL names (both bindings and functions) in context
     let ctx0 =
@@ -2265,6 +2275,9 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
     | [fc; bc] -> (fc, bc)
     | _ -> (funcCode, bindCode)
 
+/// Low-level callers supply one module without whole-program demand evidence.
+let genModule modul builder = genModuleCore false modul builder
+
 /// Split-timing variant of genModule: identical context-threaded emission, but
 /// binding output is routed into TWO buckets -- `setupCode` (data-setup
 /// bindings) and `computeCode` (forced computations) -- so the caller can place
@@ -2272,7 +2285,7 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
 /// still threaded through ALL items in ID order (later bindings reference
 /// earlier ones), so only the OUTPUT is partitioned, never the evaluation
 /// order. Returns (funcCode, setupCode, computeCode).
-let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string list * string list =
+let private genModuleSplitCore (wholeProgram: bool) (modul: IRModule) (builder: IRBuilder) : string list * string list * string list =
     setCodegenStructFieldsCache modul.Types
     let callables = IRPrint.buildCallablesTableForModule modul
     IR.setCallablesContext callables |> ignore
@@ -2295,7 +2308,7 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
     let ctx0 = { ctx0 with ProviderReads = modul.ProviderReads; ProviderWrites = modul.ProviderWrites; RandomInits = modul.RandomInits; CompoundInits = modul.CompoundInits; SparseInits = modul.SparseInits; MutableArrayLets = modul.MutableArrayLets }
     // Revision reuse (docs/plans/structural/04): empty unless BLADE_TILE_CACHE is set.
     let (tilePlans, tileReads) = Blade.CodeGenTiles.planTiles modul
-    let ctx0 = { ctx0 with TilePlans = tilePlans; TileReads = tileReads }
+    let ctx0 = { ctx0 with TilePlans = tilePlans; TileReads = tileReads; StreamTerminalModule = if wholeProgram then Some modul else None }
     let ctx0 =
         modul.Bindings |> List.fold (fun c b -> addVarName b.Id b.Name c) ctx0
     let ctx0 =
@@ -2391,6 +2404,8 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
     match resolveShadowFrames [funcCode; setupCode; computeCode] with
     | [fc; sc; cc] -> (fc, sc, cc)
     | _ -> (funcCode, setupCode, computeCode)
+
+let genModuleSplit modul builder = genModuleSplitCore false modul builder
 
 /// Generate a complete C++ program with main() from an IR module
 let genStructDef (name: string) (fields: (string * IRType) list) : string list =
@@ -3851,13 +3866,13 @@ let private genSelfContainedProgram (modul: IRModule) (testName: string) : strin
     // the forced-deferred collector genModule* populates.
     let mainFunc =
         if splitTimingModeEnabled () then
-            let (funcDefs, setupCode, computeCode) = genModuleSplit modul builder
+            let (funcDefs, setupCode, computeCode) = genModuleSplitCore true modul builder
             let printCode = genPrintStatements modul
             let setupIndented = setupCode |> List.map (fun s -> "    " + s)
             let computeIndented = computeCode |> List.map (fun s -> "    " + s)
             (funcDefs, genMainWrapperSplit (mpiOn, mpiOn && moduleHybridMpiOmp modul, moduleUsesNetcdf modul) testName setupIndented computeIndented printCode)
         else
-            let (funcDefs, bindCode) = genModule modul builder
+            let (funcDefs, bindCode) = genModuleCore true modul builder
             let printCode = genPrintStatements modul
             let bodyIndented = bindCode |> List.map (fun s -> "    " + s)
             (funcDefs, genMainWrapper (mpiOn, mpiOn && moduleHybridMpiOmp modul, moduleUsesNetcdf modul) testName bodyIndented printCode)

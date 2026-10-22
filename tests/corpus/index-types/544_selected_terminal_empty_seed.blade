@@ -1,0 +1,6 @@
+// TEST: Selected terminal empty selection returns its explicit seed
+let x = [1.0, -2.0, 3.0, 0.0, 4.0]
+let keep = mask(x, lambda(v) -> v > 100.0)
+let y = compound(x, keep)
+let result = reduce(y, lambda(a, b) -> a * 2.0 + b, -7.25)
+// EXPECT: result = -7.25

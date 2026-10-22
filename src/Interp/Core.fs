@@ -595,6 +595,7 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     | IRUnaryOp (op, e) ->
         N.evalUnaryOp op (evalExpr st env e)
 
+    | IRBeginPoolScope _ | IRReleasePools _ -> VUnit
     | IRLet (id, value, body) ->
         // SSA ids are globally unique, so binding into the current frame (rather
         // than a child scope) is safe and matches the flat env model.

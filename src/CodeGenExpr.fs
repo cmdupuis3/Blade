@@ -336,6 +336,8 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
                 | (IRVar _ | IRParam _), ArrayElem _ -> [argStr]
                 | _ -> [argStr])
         $"""{funcStr}({(argStrs @ captureArgs |> String.concat ", ")})"""
+    | IRBeginPoolScope _ | IRReleasePools _ ->
+        exprError "inline lifetime event requires a statement renderer (retained inline must be declined)"
     | IRLet (id, value, body) ->
         renderLetExpr subst names id value body
     | IRMethodFor _ -> exprError "loop object used as value"
@@ -1832,6 +1834,8 @@ and renderLetExpr (subst: SubstMap) (names: Map<IRId, string>) id value body : s
 and renderUnitStmts (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) : string =
     match expr with
     | IRLit IRLitUnit -> ""
+    | IRBeginPoolScope _ | IRReleasePools _ ->
+        exprError "inline lifetime event not honoured by expression/kernel renderer"
     | IRAssign _ ->
         $"{(exprToCppCore subst names expr)};"
     | IRConstraintCheck (cond, blCode, message, span) ->

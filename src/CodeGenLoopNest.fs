@@ -4965,7 +4965,7 @@ let peekAllocScopeFrees (ind: string) : string list =
     | Some frame -> renderFrameFrees ind frame
 
 /// A7c (gap G69, W2-4 review finding 2): free ONE pool now, at an inlined
-/// callee's return boundary (Optimize.InlineReturnTable), and spare it from
+/// callee's IRReleasePools return event, and spare it from
 /// the scope's own frees.
 ///   * a live frame that tracks `n` (a function body / loop scope): its own
 ///     rendered free, the name then suppressed (no double free at scope exit);
@@ -4986,6 +4986,26 @@ let freeAllocNow (ind: string) (n: string) (fallback: string) : string list =
                 frame.SuppressNames <- Set.add n frame.SuppressNames
                 lines
             | None -> []
+
+/// IRReleasePools is a statement, shared by the module, function and loop
+/// renderers. Reuse is excluded for lifetime regions by the planner. Missing
+/// pool names are a compiler error, never a silently retained allocation.
+let releaseInlinePools (ind: string) (names: Map<IRId, string>) (pools: IRExpr list) (call: string) : string list =
+    pools |> List.rev |> List.collect (function
+        | IRVar (pid, pty) ->
+            let n =
+                match Map.tryFind pid names with
+                | Some n -> n
+                | None -> failwith $"IRReleasePools: pool v{pid} has no emitted name"
+            let elem =
+                match stripUnits pty with
+                | ArrayElem at when arrayRank at = 1 -> elemTypeToCpp at.ElemType
+                | _ -> failwith "IRReleasePools: only owned rank-one dense pools are supported"
+            let lines = freeAllocNow ind n $"deallocate<typename promote<{elem}, 1>::type, nullptr>({n}.data, {n}.extents);"
+            if lines.IsEmpty then
+                failwith $"IRReleasePools: pool {n} is not owned by the current allocation frame"
+            $"{ind}// A7c: `{call}` (inlined for its input legs) returns here; its pool `{n}` is released at that return boundary" :: lines
+        | _ -> failwith "IRReleasePools: an owned pool must be a binding reference")
 
 /// Generate code to allocate and initialize an array from literal values
 /// `sourceName` is the binding's BLADE name, for the runtime guard's message

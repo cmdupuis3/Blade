@@ -598,6 +598,14 @@ let planPoolReuse (modul: IRModule) : unit =
               Span = Blade.Ast.noSpan; Subject = subject
               Outcome = outcome; Evidence = evidence }
     for f in modul.Functions do
+        // A01: reuse has no lifetime-region proof. Decline the whole function
+        // rather than joining a callee pool to caller storage or extending an
+        // internal donor beyond its original scalar-return boundary.
+        let mutable lifetimeEvent = false
+        iterIRExpr (function IRBeginPoolScope _ | IRReleasePools _ -> lifetimeEvent <- true | _ -> ()) f.Body
+        if lifetimeEvent then
+            decide f.SourceName (Blade.Effects.Declined "inline lifetime region: scratch reuse requires a region ownership proof") []
+        else
         let (lets, ret) = unroll f.Body
         let letValues = Map.ofList lets
         // Reads a position performs, closed over deferred lets (their reads
@@ -843,6 +851,7 @@ let private cseFactsOf (funcs: Map<IRId, IRCallable>) : IRExpr -> CseFacts =
             | IRAssign _ | IRForRange _ ->
                 mayWrite <- true
                 repeatable <- false
+            | IRBeginPoolScope _ | IRReleasePools _
             | IRDisplayEmit _ | IRDisplayJson _ | IRDisplayNum _ | IRDisplayStr _ ->
                 repeatable <- false
             // An unfilled let-rec buffer is an IDENTITY (the storage the
@@ -1590,6 +1599,32 @@ and scheduleMayWriteWith (withCallbacks: bool) (programFuncs: IRCallable list) (
 
 let scheduleMayWrite (modul: IRModule) : IRExpr -> bool = scheduleMayWriteIn [] modul
 
+/// A resource boundary reached directly or through a callable is a motion
+/// barrier without being a source write. Every downstream schedule planner
+/// audits this independently of scheduleMayWriteIn.
+let scheduleHasLifetimeBarrierIn (programFuncs: IRCallable list) (modul: IRModule) : IRExpr -> bool =
+    if not (((programFuncs @ modul.Functions) |> List.exists (fun f -> containsPoolLifetimeEvent f.Body))
+            || (modul.Bindings |> List.exists (fun b -> containsPoolLifetimeEvent (bindingPayloadExpr modul b)))) then
+        fun _ -> false
+    else
+    let funcs = (programFuncs @ modul.Functions) |> List.map (fun f -> f.Id, f) |> Map.ofList
+    let values = System.Collections.Generic.Dictionary<IRId, IRExpr>()
+    for b in modul.Bindings do values.[b.Id] <- bindingPayloadExpr modul b
+    for e in (modul.Bindings |> List.map _.Value) @ ((programFuncs @ modul.Functions) |> List.map _.Body) do
+        iterIRExpr (function IRLet (id, v, _) -> values.[id] <- v | _ -> ()) e
+    let rec go seen e =
+        match e with
+        | IRBeginPoolScope _ | IRReleasePools _ -> true
+        | IRVar (id, _) when not (Set.contains id seen) ->
+            match Map.tryFind id funcs with
+            | Some f -> go (Set.add id seen) f.Body
+            | None ->
+                match values.TryGetValue id with
+                | true, v when isDeferredForm v || isFunctionTyped (typeOf v) -> go (Set.add id seen) v
+                | _ -> false
+        | ExprShape (children, _) -> children |> List.exists (go seen)
+    go Set.empty
+
 /// A float literal as its bit pattern, for identity only: structural `=` on
 /// floats is IEEE equality, which calls `0.0` and `-0.0` the same value.
 let private floatBitsLit (n: IRExpr) : IRExpr =
@@ -1661,7 +1696,7 @@ let cseModule (modul: IRModule) : IRModule =
         | _ -> false
     let hasBarrier (e: IRExpr) =
         let mutable found = false
-        iterIRExpr (fun n -> match n with IRAssign _ | IRForRange _ -> found <- true | _ -> ()) e
+        iterIRExpr (fun n -> match n with IRAssign _ | IRForRange _ | IRBeginPoolScope _ | IRReleasePools _ -> found <- true | _ -> ()) e
         found
     let moduleSubst = System.Collections.Generic.Dictionary<IRId, IRId>()
     let rewriteBody (f: IRCallable) : IRCallable =
@@ -2668,42 +2703,6 @@ type EpilogueLegPlan = {
     DecidedLlvm: bool ref
 }
 
-/// THE INLINED CALL'S RETURN BOUNDARY (W2-4 second review, NEW 1-2): the
-/// sibling pass, when it keeps a call inlined for producer-input legs, records
-/// ONE entry per inlined CALL (never per plan or per join; several plans may
-/// share one call): the let that ends the call's inlined spine -- its last
-/// statement, i.e. the evaluated scalar return (inlineJudge binds a non-atom
-/// return to a fresh final let; an atom return names the spine's last let) --
-/// and the callee's array lets (its stored `|> compute` pools), which the
-/// call's return used to free. Every callee statement precedes that let by
-/// construction (the inlined spine is contiguous), so the pools have no read
-/// after it: the C++ lane releases them right behind that let's emission,
-/// once, through the scope frame's own free (or main's plain dense free when
-/// no frame tracks them). The boundary is independent of where any join is
-/// inserted. KNOWN INCOMPLETE (G69, round 4 pending): the join rewrite can
-/// delete the boundary let, CSE runs after this table and can merge a
-/// caller's equal map into the released pool, function-body return lets
-/// bypass the renderer arm, and the LLVM lane -- which frees an outlined
-/// callee's pools at its scalar return -- retains them under the inline.
-type InlineReturnEntry = {
-    /// The let whose emission ends the inlined call (the table key).
-    BoundaryLetId: IRId
-    /// The callee's pools, with their types (the dense free's element).
-    Pools: (IRId * IRType) list
-    /// The call, as written (records and comments).
-    Call: string
-    /// Re-entry guard while the boundary let itself is emitted.
-    Guard: bool ref
-}
-
-module InlineReturnTable =
-    open System.Threading
-    let private cell = new AsyncLocal<Map<IRId, InlineReturnEntry>>()
-    let private get () = match box cell.Value with null -> Map.empty | _ -> cell.Value
-    let reset () = cell.Value <- Map.empty
-    let record (e: InlineReturnEntry) = cell.Value <- Map.add e.BoundaryLetId e (get ())
-    let tryBoundary (id: IRId) : InlineReturnEntry option = Map.tryFind id (get ())
-
 module EpilogueLegTable =
     open System.Threading
     type State = { ByProducer: Map<IRId, EpilogueLegPlan>; ByJoin: Map<IRId, EpilogueLegPlan> }
@@ -2974,6 +2973,7 @@ let planHotRowFolds (builder: IRBuilder) (programFuncs: IRCallable list) (modul:
     let funcs = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     let facts = cseFactsOf funcs
     let writes = scheduleMayWriteIn programFuncs modul
+    let lifetimeBarrier = scheduleHasLifetimeBarrierIn programFuncs modul
     // An intervening statement is audited by its complete payload (finding 7).
     let payloadOf = intervalPayloadOf modul
     let providerEffect = intervalHasProviderEffect modul
@@ -3068,7 +3068,8 @@ let planHotRowFolds (builder: IRBuilder) (programFuncs: IRCallable list) (modul:
                                 // free reference bound in between would be
                                 // read before its declaration (or a shadowed
                                 // outer name would be read instead).
-                                if Set.contains iId captureIds || Set.contains iId kernelRefs then
+                                if lifetimeBarrier iVal then Some $"`{iName}` is an inline lifetime boundary between the producer and the fold"
+                                elif Set.contains iId captureIds || Set.contains iId kernelRefs then
                                     Some $"the row kernel reads `{iName}`, which is bound between the producer and the fold (the row kernel would run before it exists)"
                                 elif Set.contains pId r then Some $"`{iName}` reads `{pName}` between the producer and the fold"
                                 elif not (Set.isEmpty (Set.intersect r captureIds)) then Some $"`{iName}` references a binding the row kernel captures"
@@ -3202,7 +3203,8 @@ let planHotRowFolds (builder: IRBuilder) (programFuncs: IRCallable list) (modul:
                 let r = refs iVal
                 // Dominance: the cell kernel runs at the producer, so nothing
                 // it reads may be bound in between.
-                if Set.contains iId captureIds || Set.contains iId (refs ck.Body) then
+                if lifetimeBarrier iVal then Some $"`{iName}` is an inline lifetime boundary between the producer and the fold"
+                elif Set.contains iId captureIds || Set.contains iId (refs ck.Body) then
                     Some $"the cell kernel reads `{iName}`, which is bound between the producer and the fold (it would run before `{iName}` exists)"
                 elif Set.contains pId r then Some $"`{iName}` reads `{pName}` between the producer and the fold"
                 elif not (Set.isEmpty (Set.intersect r captureIds)) then Some $"`{iName}` references a binding the cell kernel captures"
@@ -3638,7 +3640,17 @@ let compactionRoots (callables: IRCallable list) (modul: IRModule) : CompactionR
         if modul.CompoundInits.ContainsKey id then "a compound() operand"
         elif modul.SparseInits.ContainsKey id then "a sparse() operand"
         else "a random fill's key, parameter, weights or address"
-    [ for b in modul.Bindings do
+    [ for td in modul.Types do
+        match td with
+        | IRTDAlias (n, t) -> yield RootType ($"type `{n}`", t)
+        | IRTDStruct (n, fs) ->
+            for (_, t) in fs do yield RootType ($"struct `{n}`", t)
+        | IRTDVariant (n, vs) ->
+            for (_, t) in vs do
+                match t with Some t -> yield RootType ($"variant `{n}`", t) | None -> ()
+        | IRTDIndexType (n, ix) | IRTDEnumIdx (n, ix, _) ->
+            yield RootType ($"index type `{n}`", IRTArrow ([ SIdx ix ], IRTUnit, None))
+      for b in modul.Bindings do
         yield RootBindingValue b
         for op in bindingSideOperands modul b.Id do yield RootSideOperand (b, sideLabel b.Id, op)
         yield RootType ($"`{b.Name}`", b.Type)
@@ -3736,6 +3748,179 @@ let storedArrayProof (modul: IRModule) : IRBinding -> Result<string * IRBinding 
         | _ -> Error $"`{b.Name}`'s value is not a form v1 proves stored (an array literal, `|> compute`, a compound, an eager set operation, a call's result or a provider read, through aliases)"
     storageOf Set.empty
 
+/// PM19's first storage-elision arm. Unlike the compaction side-table plans,
+/// this rewrites the tree BOTH evaluators run, BEFORE any schedule table is
+/// built. Only an explicitly unprinted, otherwise private mask/compound pair
+/// and ONE direct seeded scalar fold qualify. `compound` is top-level-only
+/// today (BL6002), hence the explicit print-selection requirement here.
+///
+/// Repro builds only: the guarded kernel has no reorder licence. Converting a
+/// licensed K-lane fold to this serial chain would change its operation graph.
+/// No unseeded, selected-map, membership-predicate or multi-terminal arm yet.
+let fuseSelectedTerminalModule (builder: IRBuilder) (programFuncs: IRCallable list)
+                               (foreignRefs: Set<IRId>) (modul: IRModule) : IRModule =
+    if modul.CompoundInits.IsEmpty then modul
+    else
+    let mode = compactionFusionMode ()
+    let enabled = mode = CompactionFusionT4 || mode = CompactionFusionGather
+    let funcs = (programFuncs @ modul.Functions) |> List.map (fun f -> f.Id, f) |> Map.ofList
+    let writes = scheduleMayWriteIn programFuncs modul
+    let facts = cseFactsOf funcs
+    let payloadWrites b = bindingPayload modul b |> List.exists (fun e -> (facts e).MayWrite || writes e)
+    // Same separators/default as CodeGenState.printSelection, which compiles
+    // later. Empty/unset observes every named top-level mask and selection.
+    let selectedNames =
+        match System.Environment.GetEnvironmentVariable "BLADE_PRINT" with
+        | null -> Set.empty
+        | s -> s.Split([| ','; ' '; ';' |], System.StringSplitOptions.RemoveEmptyEntries)
+               |> Array.map (fun n -> n.Trim()) |> Array.filter ((<>) "") |> Set.ofArray
+    let allCallables = (modul.Functions @ programFuncs) |> List.distinctBy (fun f -> f.Id)
+    let roots = compactionRoots allCallables modul
+    let arr = List.toArray modul.Bindings
+    let indexOf id = arr |> Array.tryFindIndex (fun b -> b.Id = id)
+    let paramRef (p: IRParam) = function
+        | IRVar (id, _) -> id = p.VarId
+        | IRParam (_, i, _) -> i = p.Index
+        | _ -> false
+    // Closed whitelist: no reads/captures/calls/casts/panic sites, and no
+    // resource events. Floating arithmetic here is IEEE-total in both lanes.
+    let rec total (ps: IRParam list) e =
+        match e with
+        | _ when ps |> List.exists (fun p -> paramRef p e) -> true
+        | IRLit (IRLitFloat _ | IRLitBool _) -> true
+        | IRBinOp (_, (IRAdd | IRSub | IRMul | IRDiv | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe | IRAnd | IROr), a, b, _) ->
+            total ps a && total ps b
+            && (match typeOf a, typeOf b with
+                | IRTScalar ETFloat64, IRTScalar ETFloat64
+                | IRTScalar ETBool, IRTScalar ETBool -> true
+                | _ -> false)
+        | IRUnaryOp ((IRNeg | IRNot), x) -> total ps x
+        | IRIf (c, t, f) -> total ps c && total ps t && total ps f
+        | _ -> false
+    let plainCallable arity (c: IRCallable) =
+        c.Params.Length = arity && c.Captures.IsEmpty && not c.IsStatic && not c.IsArityPoly
+        && not c.IsOmpParallel && not c.IsCudaKernel && not c.IsMpiParallel
+        && (c.Params |> List.forall (fun p -> p.Type = IRTScalar ETFloat64))
+        && total c.Params c.Body
+    let denseFloat64 = function
+        | ArrayElem at when at.ElemType = IRTScalar ETFloat64 && not at.IsVirtual ->
+            match at.IndexTypes with
+            | [ ix ] -> ix.IxKind = IxKPlain && ix.Rank = 1 && ix.Symmetry = SymNone && ix.Dependencies.IsEmpty
+            | _ -> false
+        | _ -> false
+    let minted = ResizeArray<IRCallable * IRId>()
+    let removed = System.Collections.Generic.HashSet<IRId>()
+    let replacements = System.Collections.Generic.Dictionary<IRId, IRExpr>()
+    let decide name outcome evidence =
+        Blade.Effects.Decisions.record
+            { Blade.Effects.Rule = "selected-terminal"; Version = 1; Span = declSpanOf name
+              Subject = name; Outcome = outcome; Evidence = evidence }
+    for KeyValue (yid, (dense, mask)) in modul.CompoundInits do
+        match indexOf yid, dense, mask with
+        | Some yi, IRVar (xid, xt), IRVar (kid, _) ->
+            let y = arr.[yi]
+            let candidate =
+                match indexOf xid, indexOf kid with
+                | Some xi, Some ki when xi < ki && ki < yi ->
+                    match arr.[ki].Value with
+                    | IRMask (IRVar (src, _), pk) when src = xid -> Some (xi, ki, pk)
+                    | _ -> None
+                | _ -> None
+            match candidate with
+            | None -> ()
+            | Some (xi, ki, pk) ->
+                let x, k = arr.[xi], arr.[ki]
+                let terminals =
+                    arr |> Array.mapi (fun hi b -> hi, b) |> Array.choose (fun (hi, b) ->
+                        match b.Value with
+                        | IRReduce (IRVar (id, _), fk, Some seed) when id = yid && hi > yi -> Some (hi, b, fk, seed)
+                        | _ -> None)
+                let decline why = decide y.Name (Blade.Effects.Declined why) []
+                if terminals.Length <> 1 then decline "requires exactly one direct seeded scalar terminal"
+                else
+                let hi, host, fk, seed = terminals.[0]
+                let privateIds = Set.ofList [ kid; yid ]
+                let mentions e = not (Set.intersect privateIds (collectVarRefsIR e)).IsEmpty
+                let exprDemand e = mentions e || (embeddedExtentExprs e |> List.exists mentions)
+                let typeDemand t = irTypeExtentExprs t |> List.exists exprDemand
+                let observer =
+                    roots |> List.tryPick (function
+                        | RootBindingValue b when b.Id = kid || b.Id = yid -> None
+                        | RootBindingValue b when b.Id = host.Id ->
+                            if exprDemand fk || exprDemand seed then Some "the terminal kernel or seed observes the private arrays" else None
+                        | RootBindingValue b when exprDemand b.Value -> Some $"an additional consumer in `{b.Name}`"
+                        | RootSideOperand (b, _, _) when b.Id = yid -> None
+                        | RootSideOperand (b, what, e) when exprDemand e -> Some $"{what} of `{b.Name}`"
+                        | RootFunctionBody f when exprDemand f.Body || (f.Captures |> List.exists (fun c -> privateIds.Contains c.Id)) ->
+                            Some $"a callable body or capture in `{f.SourceName}`"
+                        | RootType (where, t) when where <> $"`{y.Name}`" && typeDemand t -> Some $"the type of {where}"
+                        | RootSourceRef (where, id) when privateIds.Contains id -> Some where
+                        | RootNameRef (where, n) when n = k.Name || n = y.Name -> Some where
+                        | _ -> None)
+                let producerProof = storedArrayProof modul x
+                let betweenWrites = [ ki + 1 .. hi ] |> List.exists (fun i -> payloadWrites arr.[i])
+                let selectedTypeOk =
+                    match y.Type with
+                    | ArrayElem at ->
+                        at.ElemType = IRTScalar ETFloat64
+                        && (match at.IndexTypes with [ ix ] -> ix.IxKind = IxKCompound && ix.Rank = 1 | _ -> false)
+                    | _ -> false
+                if not enabled then decline "disabled by BLADE_COMPACTION_FUSION (legacy mirrors keep their original storage)"
+                elif not (Blade.Toolchain.fpReproEnabled ()) then decline "requires the reproducible serial fold graph (BLADE_FP_REPRO=1)"
+                elif selectedNames.IsEmpty || selectedNames.Contains k.Name || selectedNames.Contains y.Name then
+                    decline "the mask or selected array is printed (requires an explicit print selection excluding both)"
+                elif not (selectedNames |> Set.forall (fun n -> arr |> Array.exists (fun b -> b.Name = n))) then
+                    decline "the print selection is not confined to this module's known binding names"
+                elif foreignRefs.Contains kid || foreignRefs.Contains yid then decline "the mask or selected array is referenced by another module"
+                elif not (denseFloat64 xt) || not selectedTypeOk || host.Type <> IRTScalar ETFloat64 then
+                    decline "requires a plain stored rank-1 Float64 input and scalar Float64 terminal"
+                elif not (bindingSideOperands modul k.Id).IsEmpty || not (bindingSideOperands modul host.Id).IsEmpty
+                     || (bindingSideOperands modul y.Id).Length <> 2 then decline "an unsupported side-table payload survives"
+                elif observer.IsSome then decline observer.Value
+                elif betweenWrites then decline "an intervening payload may write (source versions are not proved identical)"
+                elif not (total [] seed) || typeOf seed <> IRTScalar ETFloat64 then decline "the explicit seed is not a closed pure/total Float64 scalar"
+                else
+                match producerProof, resolveCallableIn funcs pk, resolveCallableIn funcs fk with
+                | Error why, _, _ -> decline $"the input is not proved stored: {why}"
+                | Ok (_, chain), _, _ when chain |> List.exists payloadWrites -> decline "a stored input initializer may write"
+                | Ok _, Some pred, Some fold when plainCallable 1 pred && pred.RetType = IRTScalar ETBool
+                                                   && plainCallable 2 fold && fold.RetType = IRTScalar ETFloat64
+                                                   && (modul.Functions |> List.exists (fun f -> f.Id = fold.Id)) ->
+                    let ps = fold.Params |> List.map (fun p -> { p with VarId = builder.FreshId () })
+                    let substitute (old: IRParam list) (values: IRExpr list) body =
+                        mapIRExpr (fun n ->
+                            List.zip old values |> List.tryPick (fun (p, v) -> if paramRef p n then Some v else None)
+                            |> Option.defaultValue n) body
+                    let acc, cell = IRVar (ps.[0].VarId, ps.[0].Type), IRVar (ps.[1].VarId, ps.[1].Type)
+                    let body = IRIf (substitute pred.Params [ cell ] pred.Body,
+                                     substitute fold.Params [ acc; cell ] fold.Body, acc)
+                    let guarded = mkCallable builder defaultLambdaOptions ps body fold.RetType [] false [] [] false false 256 false
+                    let guarded = { guarded with Name = $"__selected_terminal_{guarded.Id}"; SourceName = fold.SourceName }
+                    minted.Add (guarded, fold.Id)
+                    // Rebuild the plain function arrow too: all scheduling
+                    // metadata comes from the NEW, unlicensed callable.
+                    let guardedType = mkFuncArrow (ps |> List.map _.Type) guarded.RetType
+                    replacements.[host.Id] <- IRReduce (dense, IRVar (guarded.Id, guardedType), Some seed)
+                    removed.Add kid |> ignore
+                    removed.Add yid |> ignore
+                    decide y.Name Blade.Effects.Applied
+                        [ $"one stored-input scan at `{host.Name}`; `{k.Name}` Bool mask, `{y.Name}` positions/index/value stores eliminated"
+                          "complete binding/type/capture/side-table/foreign/print census; no intervening writes"
+                          "same source for mask and selection (shape checks redundant); pure/total predicate and fold; seed once at the original terminal"
+                          "ascending serial graph; false predicate returns the accumulator without a fold step; empty selection returns the exact seed" ]
+                | _ -> decline "the predicate or fold is not a supported capture-free pure/total scalar callable"
+        | _ -> ()
+    if removed.Count = 0 then modul
+    else
+        let byOrigin = minted |> Seq.groupBy snd |> Map.ofSeq
+        { modul with
+            Bindings = modul.Bindings |> List.filter (fun b -> not (removed.Contains b.Id))
+                        |> List.map (fun b -> match replacements.TryGetValue b.Id with true, v -> { b with Value = v } | _ -> b)
+            CompoundInits = modul.CompoundInits |> Map.filter (fun id _ -> not (removed.Contains id))
+            Functions = modul.Functions |> List.collect (fun f ->
+                f :: (Map.tryFind f.Id byOrigin |> Option.map (Seq.map fst >> List.ofSeq) |> Option.defaultValue []))
+            DerivedFuncOrigins = minted |> Seq.fold (fun m (f, origin) -> Map.add f.Id origin m) modul.DerivedFuncOrigins }
+
 /// Plan compaction fusion over the module's top-level bindings (`compound`
 /// is top-level only, BL6002). Records into `CompactionTable` and the
 /// decision collector (`compaction-fusion`); the IR is untouched.
@@ -3743,6 +3928,7 @@ let planCompactionFusion (programFuncs: IRCallable list) (foreignRefs: Set<IRId>
     let funcs = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     let facts = cseFactsOf funcs
     let writes = scheduleMayWriteIn programFuncs modul
+    let lifetimeBarrier = scheduleHasLifetimeBarrierIn programFuncs modul
     let mode = compactionFusionMode ()
     let enabled = mode <> CompactionFusionOff
     let v2 = mode = CompactionFusionT4 || mode = CompactionFusionGather || mode = CompactionFusionUnshared
@@ -3775,6 +3961,7 @@ let planCompactionFusion (programFuncs: IRCallable list) (foreignRefs: Set<IRId>
     // and the conservative facts check.
     let payloadWrites (b: IRBinding) =
         bindingPayload modul b |> List.exists (fun e -> (facts e).MayWrite || writes e)
+    let payloadLifetime (b: IRBinding) = bindingPayload modul b |> List.exists lifetimeBarrier
     let payloadRefs (b: IRBinding) = bindingPayload modul b |> List.map refs |> Set.unionMany
     // Does `b`'s payload READ mask `kId`? A sibling `compound(d, kId)` names
     // the mask only as its own mask operand -- it reads the bits and writes
@@ -4268,7 +4455,8 @@ let planCompactionFusion (programFuncs: IRCallable list) (foreignRefs: Set<IRId>
                 let payloadOf = intervalPayloadOf modul
                 let betweenParty =
                     let offends (b: IRBinding) =
-                        if wrote (payloadOf b.Id b.Value) || payloadWrites b then Some "may write (its value or side-table payload)"
+                        if payloadLifetime b then Some "contains an inline lifetime boundary"
+                        elif wrote (payloadOf b.Id b.Value) || payloadWrites b then Some "may write (its value or side-table payload)"
                         elif intervalHasProviderEffect modul b.Id then Some "is a provider write (an external effect)"
                         elif readsMask kId b then Some $"reads `{kb.Name}` between the mask and the last companion"
                         else None
@@ -4404,7 +4592,8 @@ let planCompactionFusion (programFuncs: IRCallable list) (foreignRefs: Set<IRId>
                             // callables it names) declines.
                             let offending =
                                 between |> List.tryPick (fun b ->
-                                    if readsMask kId b then Some $"`{b.Name}` reads `{kb.Name}` between the mask and the compound"
+                                    if payloadLifetime b then Some $"`{b.Name}` contains an inline lifetime boundary"
+                                    elif readsMask kId b then Some $"`{b.Name}` reads `{kb.Name}` between the mask and the compound"
                                     elif (facts b.Value).MayWrite || writes b.Value then Some $"`{b.Name}` may write (an assignment or a mutating call) between the mask and the compound"
                                     elif payloadWrites b && Set.contains kId (transitiveRefs b) then
                                         Some $"`{b.Name}` may write `{kb.Name}` (its side-table payload writes and reaches it) between the mask and the compound"
@@ -4493,6 +4682,8 @@ let planCompactionFusion (programFuncs: IRCallable list) (foreignRefs: Set<IRId>
                     // reduce both sit inside `hb`'s value, so no write in that
                     // value at all is the proof (a mutating call through a
                     // `mut` parameter or an alias writes without naming `y`).
+                    elif payloadLifetime hb then
+                        declined $"`{hb.Name}` contains an inline lifetime boundary"
                     elif payloadWrites hb then
                         declined $"`{hb.Name}` may write (an assignment or a mutating call) between the map's materialization and the fold, so the map's snapshot could differ from `{yName}` at the fold"
                     else
@@ -4514,7 +4705,7 @@ let planCompactionFusion (programFuncs: IRCallable list) (foreignRefs: Set<IRId>
                         // admission, and the matrix below names it again.)
                         let inPass =
                             compaction.IsSome && not (assignedAnywhere yId)
-                            && ([ yi + 1 .. hi ] |> List.forall (fun i -> not (payloadWrites arr.[i])))
+                            && ([ yi + 1 .. hi ] |> List.forall (fun i -> not (payloadWrites arr.[i]) && not (payloadLifetime arr.[i])))
                         let plan =
                             { MapId = mid; CompoundId = yId; CompoundName = yName; HostName = hb.Name
                               FoldKernel = k; InPass = inPass
@@ -4612,7 +4803,8 @@ let planCompactionFusion (programFuncs: IRCallable list) (foreignRefs: Set<IRId>
                     // gather moves ahead of all of them.
                     let betweenParty =
                         let offends (b: IRBinding) =
-                            if payloadWrites b then Some "may write (its value or side-table payload)"
+                            if payloadLifetime b then Some "contains an inline lifetime boundary"
+                            elif payloadWrites b then Some "may write (its value or side-table payload)"
                             elif modul.ProviderWrites.ContainsKey b.Id then Some "is a provider write (an external effect)"
                             elif readsMask plan.MaskId b then Some $"reads `{kb.Name}`"
                             else None
@@ -4795,6 +4987,7 @@ let planCompactRowClasses (programFuncs: IRCallable list) (modul: IRModule) : un
     let funcs = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     let facts = cseFactsOf funcs
     let writes = scheduleMayWriteIn programFuncs modul
+    let lifetimeBarrier = scheduleHasLifetimeBarrierIn programFuncs modul
     // An intervening statement is audited by its complete payload (finding 7).
     let payloadOf = intervalPayloadOf modul
     let providerEffect = intervalHasProviderEffect modul
@@ -4858,7 +5051,8 @@ let planCompactRowClasses (programFuncs: IRCallable list) (modul: IRModule) : un
                             between |> List.tryPick (fun (iId, iName, iVal0) ->
                                 // the statement's complete payload (W1-4 review finding 7)
                                 let iVal = payloadOf iId iVal0
-                                if readsTransitively pId iVal then Some $"`{iName}` reads `{pName}` between the producer and the fold"
+                                if lifetimeBarrier iVal then Some $"`{iName}` is an inline lifetime boundary between the producer and the fold"
+                                elif readsTransitively pId iVal then Some $"`{iName}` reads `{pName}` between the producer and the fold"
                                 elif (facts iVal).MayWrite || writes iVal || providerEffect iId then Some $"`{iName}` may write (an assignment, a mutating call or a provider write -- its side-table payload included) between the producer and the fold"
                                 else None)
                         let (_, _, cVal) = arr.[ci]
@@ -4964,6 +5158,7 @@ let planOrbitPull (programFuncs: IRCallable list) (modul: IRModule) : unit =
     let funcs = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     let facts = cseFactsOf funcs
     let writes = scheduleMayWriteIn programFuncs modul
+    let lifetimeBarrier = scheduleHasLifetimeBarrierIn programFuncs modul
     let payloadOf = intervalPayloadOf modul
     let providerEffect = intervalHasProviderEffect modul
     let mayWrite (e: IRExpr) = writes e || (facts e).MayWrite
@@ -5007,7 +5202,9 @@ let planOrbitPull (programFuncs: IRCallable list) (modul: IRModule) : unit =
     let interveningWhy (poolName: string) (items: (IRId * string * IRExpr) list) =
         items |> List.tryPick (fun (iId, iName, iVal0) ->
             let iVal = payloadOf iId iVal0
-            if mayWrite iVal || providerEffect iId then
+            if lifetimeBarrier iVal then
+                Some $"`{iName}` is an inline lifetime boundary between the pool and the fold"
+            elif mayWrite iVal || providerEffect iId then
                 Some $"`{iName}` may write between `{poolName}`'s materialization and the fold (an assignment, a mutating call or a provider write -- its side-table payload included)"
             else None)
     let matrix (poolName: string) (producer: string) (between: int) =
@@ -5194,6 +5391,7 @@ let planMembershipHoist (programFuncs: IRCallable list) (modul: IRModule) : unit
     let callableById = allCallables |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     let facts = cseFactsOf funcs
     let writes = scheduleMayWriteIn programFuncs modul
+    let lifetimeBarrier = scheduleHasLifetimeBarrierIn programFuncs modul
     let wrote (e: IRExpr) = (facts e).MayWrite || writes e
     let decide (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
         Blade.Effects.Decisions.record
@@ -5475,7 +5673,9 @@ let planMembershipHoist (programFuncs: IRCallable list) (modul: IRModule) : unit
                                 let seeds = folds |> List.filter (fun (_, s) -> s.IsSome) |> List.length
                                 Ok $"outer fold kernel(s): {folds.Length}, no write; seed(s): {seeds}, no write (both stay at their own sites, after the build)"
                     let hostParty =
-                        if bindingPayload modul host |> List.exists wrote then
+                        if bindingPayload modul host |> List.exists lifetimeBarrier then
+                            Error $"the host `{host.Name}` contains an inline lifetime boundary"
+                        elif bindingPayload modul host |> List.exists wrote then
                             Error $"the host `{host.Name}` may write (its source, a kernel, a seed or a statement of its payload -- all of which run after the build)"
                         else Ok $"host `{host.Name}` (its source, kernels, seeds and every statement of its payload, all evaluated after the build): no write"
                     let betweenParty = Ok $"between the build and `{host.Name}`: no binding (the build is `{host.Name}`'s first statement)"
@@ -6721,6 +6921,19 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
         | _ -> false
 
     // ---- one-level inliner ---------------------------------------------------
+    // Expression/kernel bodies do not open an allocation tracking frame in
+    // C++. Only ordinary statement-rendered functions may retain an inline
+    // owning pools. A function used as a value (including a kernel slot or
+    // alias) is therefore excluded; direct calls remain statement-rendered.
+    let expressionRendered = System.Collections.Generic.HashSet<IRId>()
+    let rec noteFunctionUses e =
+        match e with
+        | IRApp (IRVar _, args, _) -> args |> List.iter noteFunctionUses
+        | IRVar (id, _) when Map.containsKey id funcs -> expressionRendered.Add id |> ignore
+        | ExprShape (children, _) -> children |> List.iter noteFunctionUses
+    for f in programFuncs do noteFunctionUses f.Body
+    for f in modul.Functions do noteFunctionUses f.Body
+    for b in modul.Bindings do noteFunctionUses b.Value
     let isOwnCall (e: IRExpr) =
         match e with
         | IRApp (IRVar (fid, _), _, _) ->
@@ -6780,8 +6993,17 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
             if not shapeOk then refused "the callee body names a capturing lambda, a pack form or an assignment"
             else
             let (lets0, r0) = unrollSpine c.Body
+            let releaseSupported v =
+                match v with
+                | IRCompute (IRApplyCombinator info) ->
+                    match stripUnits info.OutputType with
+                    | ArrayElem at -> (plainAxis at).IsSome && (bareElem at.ElemType).IsSome
+                    | _ -> false
+                | _ -> true
             if not ((lets0 |> List.forall (snd >> inlineValueOk)) && inlineValueOk r0) then
                 refused "the callee body is not a pure-total let spine of folds, maps and scalar arithmetic"
+            elif not (lets0 |> List.forall (snd >> releaseSupported)) then
+                refused "lifetime event not honoured by the common dense rank-one pool renderer"
             else
             let (ps', body') = freshenCallable builder c
             let subst = List.zip ps' args |> List.map (fun (p, a) -> (p.VarId, a)) |> Map.ofList
@@ -6807,6 +7029,10 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
 
     // ---- one region ----------------------------------------------------------
     let processRegion (subject: string) (origin: IRId option) (regionParams: Set<IRId>) (body: IRExpr) : IRExpr =
+        let lifetimeProblem =
+            if (Blade.Toolchain.ompCoverageModeCell ()).Value then Some "OpenMP coverage renderer"
+            elif origin |> Option.exists expressionRendered.Contains then Some "expression/kernel renderer"
+            else None
         let (spineLets, final) = unrollSpine body
         let stmts = (spineLets |> List.map (fun (id, v) -> (Some id, v))) @ [ (None, final) ]
         // An inlined call's spine is placed BEFORE its whole statement, ahead
@@ -6820,6 +7046,8 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
             | _ ->
                 let r =
                     match inlineJudge call with
+                    | Ok (_, _, disp) when lifetimeProblem.IsSome ->
+                        Error $"{disp} not inlined: lifetime event not honoured by {lifetimeProblem.Value}; retained inline declined"
                     | Ok _ when stmtWrites.[i] ->
                         let disp =
                             match call with
@@ -7326,6 +7554,19 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
 
         let applied = ResizeArray<SfMember list * SfLeg list * int list list>()
         let mutable anyGroupRecord = false
+        // Lifetime capability is a decision about one attempted inline, not
+        // about the independent sibling groups that may still be joined.
+        // judgeAt memoizes (statement, call ordinal), so enumerate that cache
+        // once: discovery/reconstruction cannot duplicate the refusal, and
+        // textually identical calls at different positions remain distinct.
+        for KeyValue ((statement, ordinal), result) in inlineCache do
+            match result with
+            | Error why when why.Contains "lifetime event not honoured by"
+                             && (match refusedCallFolds.TryGetValue((statement, ordinal)) with true, n -> n > 0 | _ -> false) ->
+                anyGroupRecord <- true
+                record (Blade.Effects.Declined why)
+                    [ $"retained-inline candidate at region statement {statement + 1}, call {ordinal + 1}: the original call remains; independent sibling groups may still share a traversal" ]
+            | _ -> ()
         for g in groups do
             let (legs, idx) = layout g
             let memberCount = g |> List.sumBy (fun m -> m.Legs.Length)
@@ -7480,7 +7721,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                           Legs = specs }
                     let inlineKey = match tentative.[pu].Key with SfInl (i, c, _) -> Some (i, c) | SfOrig _ -> None
                     // The inlined callee's ARRAY lets (its stored pools), freed at the
-                    // call's RETURN BOUNDARY by the C++ lane (InlineReturnTable).
+                    // call's IRReleasePools event in both lanes.
                     let inlinedPools =
                         match inlineKey with
                         | Some key ->
@@ -7493,7 +7734,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                         match inlineKey with
                         | Some key ->
                             let pools = inlinedPools |> List.map (fst >> nameOf) |> String.concat ", "
-                            [ $"{inlineDisp key} inlined one level so the producer and the legs share one region (no call boundary between them); the C++ lane releases its pools ({pools}) ONCE at the call's return boundary -- right behind the inlined spine's last statement (its evaluated scalar return), independent of where the join sits -- where the call used to free them; the LLVM lane frees no pool in either form" ]
+                            [ $"{inlineDisp key} inlined one level so the producer and the legs share one region (no call boundary between them); its pools ({pools}) are released once by an IR-level return event after the scalar return is evaluated; both statement-rendered lanes honour the event, independently of join placement" ]
                         | None -> []
                     // FINDING 4: the inline is kept only when BOTH lanes' fused forms
                     // can carry the legs in this build -- the facts each emitter's own
@@ -7566,15 +7807,27 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
             applied |> Seq.collect (fun (g, _, _) -> g |> List.choose (fun m -> inlineKeyOf m.UnitKey)) |> Set.ofSeq
             |> Set.union (Set.ofSeq legInlines.Keys)
         let finalUnits = buildUnits (fun k -> Set.contains k keptInlines)
-        // The return boundary of every call inlined for legs: the LAST unit of
-        // its inlined spine (all of the callee's statements precede it).
-        for KeyValue (key, (pools, call)) in legInlines do
-            let last =
-                finalUnits |> List.filter (fun u -> match u.Key with SfInl (i, c, _) -> (i, c) = key | SfOrig _ -> false) |> List.tryLast
-            match last with
-            | Some { Binder = Some bid } when not pools.IsEmpty ->
-                InlineReturnTable.record { BoundaryLetId = bid; Pools = pools; Call = resolveNames call; Guard = ref false }
-            | _ -> ()
+        // A01: positions are used only while constructing the IR, never saved
+        // as lifetime facts. Emit events AFTER reconstruction, including behind
+        // a deleted final join. Every retained inline gets one region (also the
+        // older join-driven inline), rather than one region per leg plan.
+        let starts = System.Collections.Generic.Dictionary<SfUnitKey, IRId * string>()
+        let ends = System.Collections.Generic.Dictionary<SfUnitKey, IRId * IRExpr list * string>()
+        for key in keptInlines do
+            let us = finalUnits |> List.filter (fun u -> inlineKeyOf u.Key = Some key)
+            let pools =
+                us |> List.choose (fun u ->
+                    match u.Binder, u.Value with
+                    | Some id, IRCompute (IRApplyCombinator _ as v) ->
+                        match stripUnits (typeOf v) with
+                        | ArrayElem _ -> Some (IRVar (id, typeOf v))
+                        | _ -> None
+                    | _ -> None)
+            if not pools.IsEmpty then
+                let sid = builder.FreshId()
+                let call = resolveNames (inlineDisp key)
+                starts.[us.Head.Key] <- (sid, call)
+                ends.[(List.last us).Key] <- (sid, pools, call)
         let replace = System.Collections.Generic.Dictionary<SfUnitKey * int, IRExpr>()
         let dropUnits = System.Collections.Generic.HashSet<SfUnitKey>()
         let projOf = System.Collections.Generic.Dictionary<IRId, IRId list * IRType list>()
@@ -7630,6 +7883,9 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                     | _ -> n) e
         let out = ResizeArray<IRId option * IRExpr>()
         for u in finalUnits do
+            (match starts.TryGetValue u.Key with
+             | true, (sid, call) -> out.Add((Some sid, IRBeginPoolScope call))
+             | _ -> ())
             (match inserts.TryGetValue u.Key with
              | true, lets -> for (id, v) in lets do out.Add((Some id, v))
              | _ -> ())
@@ -7640,6 +7896,10 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                         | true, r -> r
                         | _ -> n) (fun _ c -> c) u.Value
                 out.Add((u.Binder, fixProj v'))
+            (match ends.TryGetValue u.Key with
+             | true, (sid, pools, call) ->
+                 out.Add((Some (builder.FreshId()), IRReleasePools (IRVar (sid, IRTUnit), pools, call)))
+             | _ -> ())
         let items = List.ofSeq out
         let (_, tail) = List.last items
         List.foldBack (fun (b, v) acc ->
@@ -7693,6 +7953,10 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
 /// one module and called from another (`from stats import mean`) is not in
 /// the calling module's own table.
 let optimizeModule (builder: IRBuilder) (programFuncs: IRCallable list) (modul: IRModule) : IRModule =
+    // Normal lowering constructs the events LAST. If a consumer re-applies
+    // this stage to optimized IR, retain the established lifetime regions.
+    if (modul.Functions |> List.exists (fun f -> containsPoolLifetimeEvent f.Body))
+       || (modul.Bindings |> List.exists (fun b -> containsPoolLifetimeEvent b.Value)) then modul else
     recordGramApplyAdvisory modul
     recordSegmentStreaming modul
     modul

@@ -1,0 +1,9 @@
+// TEST: Selected terminal seeded noncommutative encounter order
+// C01: default printing retains keep/y. With --print result and
+// BLADE_FP_REPRO=1 the guarded terminal removes their storage.
+// Selected cells are 1, 3, 4: ((1*2 + 1)*2 + 3)*2 + 4 = 22.
+let x = [1.0, -2.0, 3.0, 0.0, 4.0]
+let keep = mask(x, lambda(v) -> v > 0.0)
+let y = compound(x, keep)
+let result = reduce(y, lambda(a, b) -> a * 2.0 + b, 1.0)
+// EXPECT: result = 22.0

@@ -655,6 +655,99 @@ let private flagsOf (fadd: string) =
     let m = System.Text.RegularExpressions.Regex.Match(fadd, @"= fadd ((?:[a-z]+ )*)double")
     if m.Success then m.Groups.[1].Value.Trim() else "?"
 
+/// A01 allocation-specific cleanup proof on raw LLVM. Each pool allocated
+/// between an inline begin and return event is stored into a tracking slot;
+/// that slot is loaded/freed exactly once after the event, and no subsequent
+/// instruction can name the backing register. This detects both omitted
+/// cleanup and a second free at the enclosing function's return.
+let inlineLifetimeCleanupProof (ll: string) : Result<int, string> =
+    let funcs = System.Text.RegularExpressions.Regex.Matches(ll.Replace("\r\n", "\n"), @"(?ms)^define .*?^\}")
+    let mutable count = 0
+    let mutable problem : string option = None
+    for fm in funcs do
+        let body = fm.Value
+        let begins = System.Text.RegularExpressions.Regex.Matches(body, @"; A01: begin inline pool scope:[^\n]*")
+        for bm in begins do
+            let ending = body.IndexOf("; A01: inline return cleanup:", bm.Index + bm.Length)
+            if ending < 0 then problem <- Some "inline begin without return cleanup"
+            else
+                let region = body.Substring(bm.Index, ending - bm.Index)
+                let pools = System.Text.RegularExpressions.Regex.Matches(region, @"(%r\d+) = call ptr @blade_alloc_cells\(")
+                if pools.Count = 0 then problem <- Some "retained inline allocates no tracked pool"
+                for pm in pools do
+                    count <- count + 1
+                    let p = pm.Groups.[1].Value
+                    let tracked = System.Text.RegularExpressions.Regex.Match(region, @"store ptr " + p + @", ptr (%r\d+)")
+                    if not tracked.Success then problem <- Some ($"pool {p} has no tracking slot")
+                    else
+                        let slot = tracked.Groups.[1].Value
+                        let tail = body.Substring ending
+                        let loads = System.Text.RegularExpressions.Regex.Matches(tail, @"(%r\d+) = load ptr, ptr " + slot + @"(?![0-9])")
+                        if loads.Count <> 1 then problem <- Some ($"pool {p} tracking slot is loaded {loads.Count} times after return")
+                        else
+                            let loaded = loads.[0].Groups.[1].Value
+                            let free = System.Text.RegularExpressions.Regex.Matches(tail, @"call void @blade_free\(ptr " + loaded + @"\)")
+                            let liveRead = System.Text.RegularExpressions.Regex.IsMatch(tail, @"(?<![A-Za-z0-9_])" + p + @"(?![A-Za-z0-9_])")
+                            if free.Count <> 1 || liveRead then problem <- Some ($"pool {p}: frees={free.Count}, later backing reference={liveRead}")
+    match problem with Some p -> Error p | None -> Ok count
+
+/// Find the specific ordinary call ABI body, rather than accepting an unrelated
+/// free elsewhere in the module. LLVM register names are local to this body.
+let private outlinedLifetimeBody (stem: string) (ll: string) : (string * string) option =
+    let symbol = @"@bl_" + System.Text.RegularExpressions.Regex.Escape(stem) + @"_\d+"
+    let pattern = @"(?ms)^define internal [^\n]* (?<sym>" + symbol + @")\([^\n]*\)[^\n]*\{\n.*?^\}"
+    let m = System.Text.RegularExpressions.Regex.Match(ll.Replace("\r\n", "\n"), pattern)
+    if m.Success then Some (m.Groups.["sym"].Value, m.Value) else None
+
+let private outlinedLifetimeCallCount (symbol: string) (ll: string) =
+    System.Text.RegularExpressions.Regex.Matches(ll, @"call (?:double|ptr) " + System.Text.RegularExpressions.Regex.Escape(symbol) + @"\(").Count
+
+/// Every backing allocated in the named scalar callee must reach its own
+/// tracking-slot load and exactly one free before ret. No overwritten slot,
+/// escaped backing or later direct/GEP-alias reference can masquerade as cleanup.
+let private outlinedLifetimeCleanupProof (stem: string) (ll: string) : Result<int, string> =
+    match outlinedLifetimeBody stem ll with
+    | None -> Error ($"no outlined {stem} definition")
+    | Some (symbol, body) ->
+        let matches pattern = System.Text.RegularExpressions.Regex.Matches(body, pattern)
+        let pools = matches @"(%r\d+) = call ptr @blade_alloc_cells\("
+        let mutable problem : string option = None
+        if pools.Count = 0 then problem <- Some ($"{symbol} has no owned allocation")
+        if outlinedLifetimeCallCount symbol ll = 0 then problem <- Some ($"{symbol} is never called")
+        if not (System.Text.RegularExpressions.Regex.IsMatch(body, @"(?m)^  ret double ")) then
+            problem <- Some ($"{symbol} does not return a scalar through the ordinary ABI")
+        for pm in pools do
+            let p = pm.Groups.[1].Value
+            let tracked = matches (@"store ptr " + p + @", ptr (%r\d+)(?![0-9])")
+            if tracked.Count <> 1 then problem <- Some ($"{symbol}: pool {p} has {tracked.Count} tracking stores")
+            else
+                let slot = tracked.[0].Groups.[1].Value
+                let loads = matches (@"(%r\d+) = load ptr, ptr " + slot + @"(?![0-9])")
+                if loads.Count <> 1 then problem <- Some ($"{symbol}: pool {p} has {loads.Count} cleanup loads")
+                else
+                    let loaded = loads.[0].Groups.[1].Value
+                    let frees = matches (@"call void @blade_free\(ptr " + loaded + @"\)")
+                    if frees.Count <> 1 then problem <- Some ($"{symbol}: pool {p} has {frees.Count} frees")
+                    else
+                        let free = frees.[0]
+                        let afterTracking = tracked.[0].Index + tracked.[0].Length
+                        let overwritten =
+                            loads.[0].Index <= afterTracking ||
+                            System.Text.RegularExpressions.Regex.IsMatch(
+                                body.Substring(afterTracking, max 0 (loads.[0].Index - afterTracking)),
+                                @"store ptr [^\n]+, ptr " + slot + @"(?![0-9])")
+                        let aliases = HashSet<string>([p; loaded])
+                        for gep in matches @"(%r\d+) = getelementptr [^\n]*, ptr (%r\d+)," do
+                            if aliases.Contains gep.Groups.[2].Value then aliases.Add gep.Groups.[1].Value |> ignore
+                        let tail = body.Substring(free.Index + free.Length)
+                        let laterReference =
+                            aliases |> Seq.exists (fun alias ->
+                                System.Text.RegularExpressions.Regex.IsMatch(tail, @"(?<![A-Za-z0-9_])" + alias + @"(?![A-Za-z0-9_])"))
+                        if pm.Index >= tracked.[0].Index || overwritten || loads.[0].Index >= free.Index ||
+                           not (tail.Contains "ret double ") || laterReference then
+                            problem <- Some ($"{symbol}: pool {p} cleanup order/ownership failed; overwritten={overwritten}, later reference={laterReference}")
+        match problem with Some p -> Error p | None -> Ok pools.Count
+
 let runLlvmFactTests () : BlockResult =
     printHeader "LLVM Fact Layer"
     let mutable passed = 0
@@ -1265,6 +1358,123 @@ let u = reduce(method_for(range<V>) <@> lambda(k) -> t(0, 0, k), (+))
         [ "BLADE_SIMPLEX_TILE", Some "0"; "BLADE_FP_REPRO", None ] (sym3Src 29 67 "") [] [ sym3Sym ]
     check "simplex tile: the inner level first (`prodsum(c, a, b)`) declines"
         sym3Off ((sym3Src 29 67 "").Replace("prodsum(a, b, c)", "prodsum(c, a, b)")) [] [ sym3Sym ]
+
+    // ---- A01: actual alloc/free relationships at retained-inline returns --
+    let lifetimeCases =
+        [ "Producer-input legs ride the producer's loop across the call that holds it", 1
+          "Two input-leg plans in ONE inlined call release its pools once", 2
+          "Inline lifetime event survives deletion of an unused final join", 1
+          "CSE cannot merge a caller map into a released inline pool", 1
+          "Inline cleanup survives CSE of a duplicate scalar return", 1
+          "Function caller releases an inline pool after a non-atom return", 1
+          "Inline pool is released before the caller first failure (aborts)", 1
+          "Scratch reuse excludes retained inline lifetime regions", 2 ]
+    for (test, expected) in lifetimeCases do
+        let name = "inline lifetime cleanup (llvm): " + test
+        match Blade.Tests.Corpus.category "sibling-folds" |> List.tryFind (fun (n, _) -> n = test) with
+        | None -> fail name "missing corpus witness"
+        | Some (_, src) ->
+            let pins = [ "BLADE_FP_REPRO", Some "1"; "BLADE_OMP_THREADS", Some "1"; "BLADE_BLAS", Some "off"; "BLADE_CSE", Some "1" ]
+            match emitUnder pins "facts" src,
+                  emitUnder (("BLADE_EPILOGUE_LEGS", Some "0") :: pins) "facts" src with
+            | Ok on, Ok off ->
+                match inlineLifetimeCleanupProof on with
+                | Ok n when n = expected && on.Contains "; A01: inline return cleanup:" ->
+                    let cleanup = on.IndexOf "; A01: inline return cleanup:"
+                    let free = if cleanup < 0 then -1 else on.IndexOf("call void @blade_free(ptr", cleanup)
+                    let fault = on.IndexOf "call i64 @blade_idiv(i64 7"
+                    let failureOrder = not (test.Contains "caller first failure") || (cleanup >= 0 && free > cleanup && fault > free)
+                    // 032 also qualifies for the older explicit-join inline
+                    // route with EPILOGUE_LEGS=0. Only that named witness may
+                    // use an event proof instead of an outlined kernel proof.
+                    let offProof =
+                        match outlinedLifetimeBody "kernel" off with
+                        | Some _ -> outlinedLifetimeCleanupProof "kernel" off
+                        | None when test = "Inline lifetime event survives deletion of an unused final join" ->
+                            match inlineLifetimeCleanupProof off with
+                            | Ok count when count = expected -> Ok count
+                            | proof -> Error (sprintf "older explicit-join route wanted %d releases; proof %A" expected proof)
+                        | None -> Error "gate-off lost the outlined kernel definition"
+                    match offProof with
+                    | Ok offCount when offCount > 0 && failureOrder &&
+                                       (test <> "Producer-input legs ride the producer's loop across the call that holds it" || offCount = 1) ->
+                        pass name ($"{n} inline allocation-specific releases; {offCount} gate-off allocations traced to their own frees")
+                    | proof -> fail name (sprintf "gate-off ownership proof=%A; caller failure order=%b" proof failureOrder)
+                | rr -> fail name (sprintf "wanted %d releases; proof %A" expected rr)
+            | Error e, _ | _, Error e -> fail name e
+
+    // A scalar/array IRApp nested in a tuple must use its ordinary ABI;
+    // only actual tuple results need emitTupleParts' inline tuple ABI.
+    let memberPins =
+        [ "BLADE_FP_REPRO", Some "1"; "BLADE_OMP_THREADS", Some "1"; "BLADE_BLAS", Some "off"
+          "BLADE_EPILOGUE_LEGS", Some "0"; "BLADE_SIBLING_FOLDS", Some "0"; "BLADE_CSE", Some "0" ]
+    let memberCases =
+        [ "Repeated scalar calls in tuple members keep outlined pool cleanup", "member_scalar"
+          "Array calls in tuple members preserve their escaping pool results", "member_array"
+          "Genuine tuple returning calls retain the LLVM inline tuple ABI", "member_pair" ]
+    for (test, stem) in memberCases do
+        let name = "tuple member call ABI (llvm): " + test
+        match Blade.Tests.Corpus.category "sibling-folds" |> List.tryFind (fun (n, _) -> n = test) with
+        | None -> fail name "missing corpus witness"
+        | Some (_, src) ->
+            // Inspect the same validated IR that emission receives: absence
+            // of an outline alone cannot prove the tuple ABI was exercised.
+            let emission =
+                withEnv (defaultEmissionEnv @ memberPins) (fun () ->
+                    match Lowering.lower src with
+                    | Error e -> Error ("lowering refused: " + e)
+                    | Ok ir ->
+                        match IRValidate.validateIR ir with
+                        | Error errs -> Error ("IR validation refused: " + String.concat "; " errs)
+                        | Ok ir ->
+                            let tupleIds =
+                                ir.Modules |> List.collect (_.Functions)
+                                |> List.choose (fun f ->
+                                    match Blade.IR.stripUnits f.RetType with
+                                    | Blade.Types.IRTTuple [_; _] when f.SourceName = stem && f.Captures.IsEmpty -> Some f.Id
+                                    | _ -> None)
+                                |> Set.ofList
+                            let rec hasTupleCall e =
+                                match e with
+                                | Blade.IR.IRApp (Blade.IR.IRVar (fid, _), _, retType) when Set.contains fid tupleIds ->
+                                    match Blade.IR.stripUnits retType with Blade.Types.IRTTuple [_; _] -> true | _ -> false
+                                | _ -> Blade.IR.childrenOf e |> List.exists hasTupleCall
+                            let tupleCall =
+                                ir.Modules |> List.exists (fun m -> m.Bindings |> List.exists (fun b -> hasTupleCall b.Value))
+                            match EmitLlvm.tryEmitProgramNamed "facts" ir with
+                            | Error r -> Error ("the llvm lane refused: " + r)
+                            | Ok ll -> Ok (tupleCall, ll))
+            match emission with
+            | Error e -> fail name e
+            | Ok (tupleCall, ll) ->
+                match stem, outlinedLifetimeBody stem ll with
+                | "member_scalar", Some (symbol, _) ->
+                    match outlinedLifetimeCleanupProof stem ll with
+                    | Ok 1 when outlinedLifetimeCallCount symbol ll = 2 ->
+                        pass name "two ordinary scalar calls, each invocation frees its single owned pool"
+                    | proof -> fail name (sprintf "scalar ownership=%A; calls=%d" proof (outlinedLifetimeCallCount symbol ll))
+                | "member_array", Some (symbol, body) ->
+                    let pools = System.Text.RegularExpressions.Regex.Matches(body, @"(%r\d+) = call ptr @blade_alloc_cells\(")
+                    let returnsOwnPool =
+                        pools.Count = 1 && body.Contains("ret ptr " + pools.[0].Groups.[1].Value + "\n")
+                    if outlinedLifetimeCallCount symbol ll = 2 && returnsOwnPool && not (body.Contains "call void @blade_free(") then
+                        pass name "two ordinary array calls return their own live allocations to later caller folds"
+                    else fail name "array result was inlined, lost its backing, freed before escape, or called other than twice"
+                | "member_pair", None ->
+                    let main = System.Text.RegularExpressions.Regex.Match(ll.Replace("\r\n", "\n"), @"(?ms)^define i32 @main\(\)[^\n]*\{\n.*?^\}")
+                    let inlineBody =
+                        main.Success &&
+                        System.Text.RegularExpressions.Regex.Matches(main.Value, @" = fadd (?:[a-z]+ )*double ").Count = 2 &&
+                        System.Text.RegularExpressions.Regex.Matches(main.Value, @" = fmul (?:[a-z]+ )*double ").Count = 1
+                    let scalarOutputs =
+                        System.Text.RegularExpressions.Regex.Matches(main.Value, @"call void @blade_print_f64\(").Count = 2 &&
+                        ll.Contains "c\"s\\00\"" && ll.Contains "c\"q\\00\""
+                    // resolveFrames intentionally elides this nonfailing
+                    // body's frame/string. Corpus pins check s=666/q=16206.
+                    if tupleCall && inlineBody && scalarOutputs && not (ll.Contains "@bl_member_pair_") then
+                        pass name "real two-result IR call emits both reductions inline and prints both scalar results"
+                    else fail name ($"tuple IR call={tupleCall}; inline reductions={inlineBody}; scalar outputs={scalarOutputs}")
+                | _ -> fail name "wrong ordinary/tuple call ABI or missing callable definition"
 
     // ---- contains and membership hoisting (round 3, B-T1) ------------------
     // The lane has a real IRContains arm (it used to refuse the node, so every

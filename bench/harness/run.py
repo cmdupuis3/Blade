@@ -7,6 +7,7 @@ box is a Store stub).  Verbs:
     check <kernel>           build every arm (smoke size by default), run each once, validate
     smoke                    every kernel at smoke size, one validated run per arm
     bench                    the measured protocol -> an immutable bundle under bench/results/
+    diagnose-memory          PM54 distinct-workload Windows page touch/release diagnostic
 
 The protocol is bench/README.md (section 6) as amended by the method review
 (bench/notes/review-method.md: M3, M9, M12, M14-M21, M24, M25, M27, M28).  The JSON fields
@@ -41,7 +42,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-HARNESS_VERSION = "2"
+HARNESS_VERSION = "2.2"
+MEMORY_REPORT_SCHEMA = 1             # additive to session schema 2
 
 # ---------------------------------------------------------------------------
 # Fixed locations and toolchain facts (charter section 2)
@@ -559,6 +561,21 @@ def load_kernel(kdir: Path) -> Kernel:
         npf = []
     elif not isinstance(npf, list):
         raise HarnessError(f"{path}: no_parallel_form must be true, false or a list of regime names")
+    contract = raw.get("memory_contract")
+    if contract is not None:
+        if not isinstance(contract, dict):
+            raise HarnessError(f"{path}: memory_contract must be an object")
+        for key in ("id", "source", "required_values", "observation_boundary", "cleanup_endpoint", "audit_status"):
+            if not isinstance(contract.get(key), str) or not contract[key].strip():
+                raise HarnessError(f"{path}: memory_contract.{key} must be a non-empty string")
+        model = contract.get("linear_payload_model")
+        if model is not None:
+            if (not isinstance(model, dict) or not isinstance(model.get("parameter"), str)
+                    or model["parameter"] not in sizes["full"]):
+                raise HarnessError(f"{path}: memory_contract.linear_payload_model must name a size parameter")
+            terms = model.get("bytes_per_element")
+            if not isinstance(terms, dict) or not terms or any(type(v) is not int or v < 0 for v in terms.values()):
+                raise HarnessError(f"{path}: memory_contract bytes_per_element must be non-negative integers")
     return Kernel(name=name, dir=kdir, group=str(raw.get("group", "?")), sizes=sizes, arms=arms,
                   regimes=list(regimes), tolerance=tol,
                   input_tolerance=float(raw.get("input_tolerance", 0.0)),
@@ -1315,6 +1332,7 @@ class Sample:
     position: int | None = None
     started: str = ""
     peak_working_set: int | None = None
+    peak_commit_bytes: int | None = None
     page_faults: int | None = None
     affinity_mask: str | None = None
     excursion_dropped: bool = False
@@ -1378,6 +1396,8 @@ def run_exe(b: Build, regime: Regime, timeout: float, kind: str, affinity: int |
     s.affinity_mask = hex(affinity) if affinity is not None else None
     if r.memory:
         s.peak_working_set, s.page_faults = r.memory["peak_working_set"], r.memory["page_faults"]
+        # Win32 PeakPagefileUsage is peak process commit, not page-file I/O or live bytes.
+        s.peak_commit_bytes = r.memory.get("peak_pagefile")
     if r.launch_error or r.timed_out:
         s.ok, s.reason = False, r.launch_error or f"timed out after {timeout:.1f}s (watchdog)"
         return s
@@ -1429,6 +1449,70 @@ def describe(xs: list[float]) -> dict[str, Any]:
         q1 = q3 = xs[0]
     return {"n": len(xs), "min": min(xs), "median": statistics.median(xs), "q1": q1, "q3": q3,
             "iqr": q3 - q1, "max": max(xs), "mean": statistics.fmean(xs)}
+
+
+MEMORY_COUNTERS = {
+    "process_peak_resident_bytes": ("peak_working_set", "bytes", "Win32 PeakWorkingSetSize"),
+    "process_peak_commit_bytes": ("peak_commit_bytes", "bytes", "Win32 PeakPagefileUsage"),
+    "process_page_fault_count": ("page_faults", "count", "Win32 PageFaultCount (all faults)"),
+}
+
+
+def memory_coverage() -> dict[str, Any]:
+    """The scope of the process counters; no allocation or hardware-counter inference."""
+    return {
+        "schema": MEMORY_REPORT_SCHEMA,
+        "collection": "GetProcessMemoryInfo on each fresh child's handle after exit, when available",
+        "scope": "whole child process lifetime, including startup, runtime, libraries and teardown; not kernel-local",
+        "primary_population": "successful_rounds (including timing-excluded excursions)",
+        "comparison": "descriptive per-run distributions; no memory CI, no subtraction of input-only process peaks",
+        "counters": {name: {"unit": unit, "source": source}
+                     for name, (_, unit, source) in MEMORY_COUNTERS.items()},
+        "unmeasured": {
+            "demanded_value_bytes": "no compiler demand accounting connected to this report",
+            "modeled_live_backing_payload_bytes": "no execution-wide backing-root liveness model",
+            "live_allocation_capacity_bytes": "no native allocation/free byte instrumentation",
+            "retained_allocator_capacity_bytes": "no allocator retention byte instrumentation",
+            "allocation_count": "no whole-program allocation event instrumentation",
+            "cumulative_allocation_bytes": "no whole-program allocation event instrumentation",
+            "external_workspace_bytes": "provider, BLAS, heap and thread workspace not separately instrumented",
+            "modeled_cache_traffic_bytes": "no cache-line/pass model connected to this report",
+            "measured_dram_traffic_bytes": "no hardware memory-controller counters",
+            "provider_fetched_decoded_bytes": "no provider byte counters connected to this report",
+            "required_store_audit": "not established by process counters or checksums; separate artifact audit required",
+        },
+    }
+
+
+def summarize_memory(samples: list[dict[str, Any]]) -> dict[str, Any]:
+    """Distributions of each run's process high water, never an allocation peak.
+
+    Keep failed runs and warm-ups separate. A timing excursion is still a memory
+    observation; the timing-excluded population is a labelled subset of successful runs.
+    None/missing means unavailable, while zero is a valid observation.
+    """
+    successful = [s for s in samples if s.get("ok")]
+    populations = {
+        "successful_rounds": [s for s in successful if s.get("kind") == "round"],
+        "successful_contracts": [s for s in successful if s.get("kind") == "contract"],
+        "successful_warmups": [s for s in successful if s.get("kind") == "warmup"],
+        "successful_controls": [s for s in successful if s.get("kind") == "control"],
+        "successful_timing_excluded": [s for s in successful if s.get("excursion_dropped")],
+        "failed_runs": [s for s in samples if not s.get("ok")],
+    }
+    out: dict[str, Any] = {"schema": MEMORY_REPORT_SCHEMA, "populations": {}}
+    for population, runs in populations.items():
+        counters: dict[str, Any] = {}
+        for metric, (field_name, unit, _) in MEMORY_COUNTERS.items():
+            values = [s[field_name] for s in runs
+                      if type(s.get(field_name)) is int and s[field_name] >= 0]
+            counters[metric] = {
+                "status": "unmeasured" if not values else "measured" if len(values) == len(runs) else "partial",
+                "unit": unit, "available_runs": len(values), "missing_runs": len(runs) - len(values),
+                "distribution": describe(values),
+            }
+        out["populations"][population] = {"sample_count": len(runs), "counters": counters}
+    return out
 
 
 def verdict_of(ratio: float, lo: float, hi: float, delta: float) -> str:
@@ -1580,7 +1664,7 @@ class Session:
         self.serial_valid: dict[tuple[str, str, str], str] = {}    # (kernel, serial regime, arm) -> status
         self.manifest: list[dict[str, Any]] = []
         self.data: dict[str, Any] = {"schema": 2, "harness_version": HARNESS_VERSION, "mode": opt.mode,
-                                     "argv": opt.argv}
+                                     "argv": opt.argv, "memory_report": memory_coverage()}
         self.delta = float(opt.config["verdict_delta"])
         host = platform.node()
         if opt.mode == "bench":
@@ -1602,6 +1686,13 @@ class Session:
 
     def checkpoint(self) -> None:
         """Write the session JSON after every run (M27)."""
+        # Recompute from raw samples, including partial blocks left by an abort before
+        # timing statistics. Never use the timing filter for memory distributions.
+        for block in self.blocks:
+            for entry in block["arms"].values():
+                entry["memory_report"] = summarize_memory(entry.get("samples", []))
+        for control in self.controls:
+            control["memory_report"] = summarize_memory(control.get("samples", []))
         self.data.update({"failures": self.failures, "flags": self.flags, "warnings": self.warnings,
                           "blocks": self.blocks, "controls": self.controls, "manifest": self.manifest,
                           "checkpoint": dt.datetime.now().isoformat(timespec="seconds")})
@@ -1760,6 +1851,8 @@ class Session:
             if k is None:
                 self.flags.append(f"control {spec['name']}: kernel {spec['kernel']!r} not found")
                 continue
+            rec["memory_contract"] = k.raw.get("memory_contract")
+            rec["sizes"] = k.sizes.get(spec["size"], {})
             regime = Regime.parse(spec["regime"])
             log(f"control {spec['name']}: {k.name}/{spec['arm']}/{regime.name}/{spec['size']}")
             b = build_arm(k, ArmSpec.parse(spec["arm"]), regime, spec["size"], self.build_root / "_controls",
@@ -1807,6 +1900,7 @@ class Session:
         key = f"{k.name}/{regime.name}"
         blk: dict[str, Any] = {"kernel": k.name, "group": k.group, "regime": regime.name, "size": size,
                                "sizes": k.sizes[size], "tolerance": self.tol(k, regime),
+                               "memory_contract": k.raw.get("memory_contract"),
                                "input_tolerance": k.input_tolerance, "hypothesis": k.hypothesis,
                                "gate_only": gate_only, "started": dt.datetime.now().isoformat(timespec="seconds"),
                                "flags": [], "arms": {}}
@@ -2042,7 +2136,7 @@ class Session:
                 e["excursions_dropped"] = sum(1 for x in e["samples"] if x.get("excursion_dropped"))
             timed = [g for g in good if g["kind"] == "round"] if bench else good
             e["stats"] = describe([x["time_s"] for x in timed])
-            ws = [x["peak_working_set"] for x in e["samples"] if x.get("peak_working_set")]
+            ws = [x["peak_working_set"] for x in e["samples"] if x.get("peak_working_set") is not None]
             if ws:
                 e["peak_working_set_max"] = max(ws)
             if bench and e["status"] == "ok":
@@ -2186,7 +2280,9 @@ class Session:
                           "duration_s": round((end - self.started).total_seconds(), 1), "aborted": aborted})
         self.checkpoint()
         md = render_summary(self.data)
+        memory_md = render_memory_report(self.data)
         (self.bundle / "summary.md").write_text(md, encoding="utf-8")
+        (self.bundle / "memory.md").write_text(memory_md, encoding="utf-8")
         write_json_atomic(self.bundle / "manifest.json", {"argv": self.opt.argv, "cells": self.manifest})
         if self.opt.mode == "bench":
             self.archive_sources()
@@ -2196,6 +2292,7 @@ class Session:
             except OSError:
                 pass
             (self.bundle.parent / "summary.md").write_text(md, encoding="utf-8")
+            (self.bundle.parent / "memory.md").write_text(memory_md, encoding="utf-8")
         print()
         print(md)
         log(f"wrote {self.bundle}")
@@ -2270,7 +2367,7 @@ def render_summary(data: dict[str, Any]) -> str:
         lines += ["", f"## {rg}", "",
                   "Blade reference per kernel: " + ", ".join(f"{b['kernel']}={b.get('ratio_reference')}" for b in rows), ""]
         head = ["kernel", "arm", "status", "n", "min (s)", "median (s)", "IQR (s)", "ratio vs ref [95% CI]",
-                "verdict", "hypothesis", "fold form", "parallelism", "peak WS (MB)"]
+                "verdict", "hypothesis", "fold form", "parallelism", "peak WS all samples (MiB)"]
         if has_inc:
             head += ["incremental (s) [CI]", "incremental ratio [CI]"]
         head.append("notes")
@@ -2289,7 +2386,7 @@ def render_summary(data: dict[str, Any]) -> str:
                        (e.get("ratio") or {}).get("verdict", ""), hyp,
                        ((e.get("build") or {}).get("evidence") or {}).get("fold_form") or "",
                        ((e.get("build") or {}).get("evidence") or {}).get("parallelism") or "",
-                       f"{ws / 2**20:.1f}" if ws else ""]
+                       f"{ws / 2**20:.1f}" if ws is not None else ""]
                 if has_inc:
                     inc = e.get("incremental") or {}
                     row += [f"{inc['incremental']:.4g} [{inc['ci95'][0]:.4g}, {inc['ci95'][1]:.4g}]"
@@ -2314,10 +2411,115 @@ def render_summary(data: dict[str, Any]) -> str:
         lines += ["", "## Failures", ""] + [f"- {f}" for f in data["failures"]]
     if data.get("warnings"):
         lines += ["", "## Warnings", ""] + [f"- {w}" for w in data["warnings"]]
+    lines += ["", "Memory: [memory.md](memory.md) reports per-run process peak resident and commit distributions. "
+              "The legacy peak WS column above is the maximum over ALL samples (including warm-ups, "
+              "failed runs and timing exclusions); it is not live allocation capacity."]
     notes = [(b["kernel"], b["regime"], a, w) for b in data.get("blocks", [])
              for a, e in b["arms"].items() for w in (e.get("build") or {}).get("warnings", [])]
     if notes:
         lines += ["", "## Arm notes", ""] + [f"- {k}/{r}/{a}: {w}" for k, r, a, w in notes]
+    return "\n".join(lines) + "\n"
+
+
+def render_memory_report(data: dict[str, Any]) -> str:
+    """A descriptive process-footprint report beside the timing report (schema 2 + v1)."""
+    coverage = data.get("memory_report") or memory_coverage()
+    lines = [f"# Process memory -- {data['mode']} session {data.get('started')}", "",
+             f"Memory report schema {coverage['schema']}; session schema {data.get('schema')}. "
+             "Resident/commit distributions describe per-run high waters; page faults are cumulative "
+             "per-run counts. Neither measures live allocation peaks.", "",
+             f"- Collection: {coverage['collection']}.", f"- Scope: {coverage['scope']}.",
+             "- Primary bench population: successful measured rounds, including isolated excursions "
+             "excluded from timing. Check/smoke contract runs, warm-ups, failed runs and drift controls "
+             "are separate populations. Timing-excluded rows are a subset, not additional runs.",
+             "- A successful sample can belong to an arm later disqualified; arm status remains visible. "
+             "Partial/aborted blocks describe observations only and support no comparison claim.",
+             "- Missing/null counters stay unmeasured; zero is an observation. Available n may differ "
+             "by counter. No memory confidence interval and no total-minus-input-only peak subtraction.",
+             "- Bytes in JSON; MiB below = bytes / 1,048,576. Page faults include soft and hard faults; "
+             "they are not measured DRAM traffic.",
+             "- Counter definitions: [Microsoft PROCESS_MEMORY_COUNTERS]"
+             "(https://learn.microsoft.com/en-us/windows/win32/api/psapi/ns-psapi-process_memory_counters).", "",
+             "| metric | native source | unit |", "|---|---|---|"]
+    lines += [f"| {metric} | {info['source']} | {info['unit']} |"
+              for metric, info in coverage["counters"].items()]
+    if data["mode"] == "diagnostic":
+        lines += ["", "PM54 observations are distinct diagnostic workloads in the successful_contracts "
+                  "population, never equivalent-work or performance comparisons. Current stage counters, "
+                  "store/read coverage and release status are in [diagnostic.md](diagnostic.md). "
+                  "Source/Python executable identity is session.json source_sha256/python; no compiler build "
+                  "or Blade lane is involved."]
+    lines += ["", "## Coverage limits", ""]
+    lines += [f"- {metric}: **unmeasured** -- {reason}." for metric, reason in coverage["unmeasured"].items()]
+    lines += ["", "## Observed per-run distributions", "",
+              "Cells: available n / population n; median / IQR / max. Unmeasured means no observation.", "",
+              "| kernel/regime/size | arm (status) | population | process peak resident (MiB) | "
+              "process peak commit (MiB) | page faults (count) |", "|---|---|---|---|---|---|"]
+
+    def add_rows(label: str, arm: str, status: str, entry: dict[str, Any], primary: str) -> None:
+        report = entry.get("memory_report") or summarize_memory(entry.get("samples", []))
+        for population, rec in report["populations"].items():
+            if rec["sample_count"] == 0 and population != primary:
+                continue
+            cells = []
+            for metric in MEMORY_COUNTERS:
+                counter = rec["counters"][metric]
+                stats = counter["distribution"]
+                prefix = f"{counter['available_runs']}/{rec['sample_count']}"
+                if not stats["n"]:
+                    cells.append(prefix + "; unmeasured")
+                else:
+                    divisor = 2**20 if counter["unit"] == "bytes" else 1
+                    cells.append(prefix + "; " + " / ".join(f"{stats[key] / divisor:.4g}"
+                                                           for key in ("median", "iqr", "max")))
+            lines.append("| " + " | ".join([label, f"{arm} ({status})", population, *cells]) + " |")
+
+    bench = data["mode"] == "bench"
+    for block in data.get("blocks", []):
+        label = f"{block['kernel']}/{block['regime']}/{block['size']}"
+        if block.get("gate_only"):
+            label += " (serial gate)"
+        for arm, entry in block["arms"].items():
+            add_rows(label, arm, entry["status"], entry,
+                     "successful_rounds" if bench and not block.get("gate_only") else "successful_contracts")
+    for control in data.get("controls", []):
+        spec = control["spec"]
+        add_rows(f"control {spec['name']}: {spec['kernel']}/{spec['regime']}/{spec['size']}",
+                 spec["arm"], "valid" if control.get("valid") else "invalid/unbuilt", control, "successful_controls")
+    lines += ["", "## Contracts, cleanup and source identity", "",
+              "Exact identity and policy are in session.json: machine.git_sha, toolchain, each build's "
+              "exe_sha256, source hashes (including SIZE-substituted compiled_sha256), lane, flags, knobs "
+              "and run_knobs; source hashes are also archived in sources-sha256.json for bench sessions. "
+              "Build plan/emission are the route evidence. Process counters establish neither required "
+              "stores nor cleanup placement.", "",
+              "The counters cover the whole child lifetime through exit. Kernel timer endpoints remain "
+              "the existing source contract; no common cleanup endpoint is inferred from high waters."]
+    records = [(f"{b['kernel']}/{b['regime']}/{b['size']}", b.get("memory_contract"), b.get("sizes", {}))
+               for b in data.get("blocks", [])]
+    records += [(f"control {c['spec']['name']}", c.get("memory_contract"), c.get("sizes", {}))
+                for c in data.get("controls", [])]
+    for label, contract, sizes in records:
+        lines += ["", f"### {label}", ""]
+        if not contract:
+            lines.append("Memory contract/model and cleanup audit: **unmeasured**; consult the kernel spec.")
+            continue
+        lines += [f"- Contract: {contract['id']} ({contract['source']}).",
+                  f"- Required values: {contract['required_values']}.",
+                  f"- Observation boundary: {contract['observation_boundary']}.",
+                  f"- Cleanup endpoint: {contract['cleanup_endpoint']}.",
+                  f"- Route/lifetime/store audit: {contract['audit_status']}."]
+        model = contract.get("linear_payload_model", {})
+        n = sizes.get(model.get("parameter"))
+        if type(n) is int:
+            lines.append(f"- Analytical payload/operation model at {model['parameter']}={n} "
+                         "(not measured allocation capacity, process memory or DRAM traffic): " +
+                         "; ".join(f"{key}={n * per_element:,} bytes"
+                                   for key, per_element in model.get("bytes_per_element", {}).items()) + ". "
+                         "This model is for the total arm. Input-only twins require inputs only, "
+                         "checksum=0; total and twin process peaks are reported independently. "
+                         "No bandwidth rate is derived from allocation-inclusive total time.")
+    if data.get("aborted"):
+        lines += ["", f"**Aborted:** {data['aborted']}"]
     return "\n".join(lines) + "\n"
 
 
@@ -2384,6 +2586,10 @@ def main(argv: list[str] | None = None) -> int:
                        help="smoke/check: report unbuilt arms (missing source) as warnings instead of failures")
 
     sub.add_parser("list").add_argument("--kernels-dir", type=Path, default=KERNELS_DIR)
+    pd = sub.add_parser("diagnose-memory", help="PM54 Windows page touch/release diagnostic (distinct workloads; no ratios)")
+    pd.add_argument("--bytes", type=int, default=16_000_003, dest="requested")
+    pd.add_argument("--out-dir", type=Path)
+    pd.add_argument("--run-timeout", type=float, default=30.0)
     pc = sub.add_parser("check", help="build + run once (smoke size by default), validate, print checksums")
     pc.add_argument("kernel")
     pc.add_argument("--size", default="smoke")
@@ -2406,6 +2612,9 @@ def main(argv: list[str] | None = None) -> int:
     a = ap.parse_args(argv)
 
     try:
+        if a.verb == "diagnose-memory":
+            import pm54
+            return pm54.run_diagnostic(sys.modules[__name__], a)
         kernels = discover(a.kernels_dir)
         if a.verb == "list":
             return cmd_list(kernels)

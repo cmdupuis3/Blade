@@ -130,6 +130,12 @@ type IRExpr =
     | IRIf of cond: IRExpr * thenBr: IRExpr * elseBr: IRExpr
     | IRMatch of scrutinee: IRExpr * cases: IRMatchCase list
     | IRLet of IRId * value: IRExpr * body: IRExpr
+    /// Resource statements, bound by unit lets. The begin let's id is the
+    /// lifetime identity; the release names that id and the owned pools as
+    /// ordinary IRVar children, so cloning/substitution cannot strand ids.
+    /// This is an allocation boundary, not a source write or numeric licence.
+    | IRBeginPoolScope of call: string
+    | IRReleasePools of scope: IRExpr * pools: IRExpr list * call: string
     | IRMethodFor of MethodForInfo
     | IRObjectFor of ObjectForInfo
     | IRApplyCombinator of ApplyInfo
@@ -2224,7 +2230,7 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     match expr with
     // -- Leaves: no expression children ------------------------------------
     | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero _ | IRUninit _ | IROpaqueExtent
-    | IRVirtualReverse _ | IRArity _ ->
+    | IRVirtualReverse _ | IRArity _ | IRBeginPoolScope _ ->
         [], (function [] -> expr | _ -> badChildren "leaf")
     | IRRange (idxTys, offset) ->
         Option.toList offset,
@@ -2320,6 +2326,10 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     | IRGram (l, r, same) -> [l; r], (function [l'; r'] -> IRGram (l', r', same) | _ -> badChildren "IRGram")
     | IRGramApply (l, r, x) -> [l; r; x], (function [l'; r'; x'] -> IRGramApply (l', r', x') | _ -> badChildren "IRGramApply")
     | IRMatmul (l, r) -> [l; r], (function [l'; r'] -> IRMatmul (l', r') | _ -> badChildren "IRMatmul")
+    | IRReleasePools (scope, pools, call) ->
+        scope :: pools, (function
+            | scope' :: pools' when pools'.Length = pools.Length -> IRReleasePools (scope', pools', call)
+            | _ -> badChildren "IRReleasePools")
     | IRLet (id, v, b) -> [v; b], (function [v'; b'] -> IRLet (id, v', b') | _ -> badChildren "IRLet")
 
     // -- Three children -------------------------------------------------------
@@ -2547,7 +2557,7 @@ let irNodeMayAbort (e: IRExpr) : bool =
     | IRRaggedLookup _ | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _
     | IROrbitClass _ | IRSegments _ | IRSegmentsGrid _ -> false
     | IRDisplayEmit _ | IRDisplayJson _ | IRDisplayNum _ | IRDisplayStr _ -> false
-    | IRAssign _ | IRForRange _ | IRBreakIf _ -> false
+    | IRAssign _ | IRForRange _ | IRBreakIf _ | IRBeginPoolScope _ | IRReleasePools _ -> false
     | IRArrayLit _ | IRArrayNegate _ | IRArrayConjugate _ | IRContains _ -> false
     // -- may abort (checked reads, folds, factorizations, refusals) ---------
     | IRIndex _ | IRSlice _ | IRCurry _ | IRSubset _ | IRPolyIndex _ | IRPolyTail _
@@ -2622,7 +2632,7 @@ let rec isFreshPoolFormWith (appFresh: IRExpr -> bool) (e: IRExpr) : bool =
     | IRUngroupGrid _ | IRUngroupRows _ | IRUngroup _ | IRGroupSizes _
     | IRPolyIndex _ | IRPolyTail _ | IRHaloUnhash _ | IRRank _ | IRExtent _
     | IRRaggedLookup _ | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _
-    | IRAssign _ | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ -> false
+    | IRAssign _ | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ | IRBeginPoolScope _ | IRReleasePools _ -> false
 
 // Expression Mapping (bottom-up rewriter)
 
@@ -2649,6 +2659,14 @@ let rec iterIRExpr (f: IRExpr -> unit) (expr: IRExpr) : unit =
      | ExprShape ([], _) -> ()
      | ExprShape (children, _) -> children |> List.iter (iterIRExpr f))
     f expr
+
+/// Resource sequencing is independent of language writes and FP licences.
+/// Motion passes use this predicate rather than pretending cleanup mutates
+/// source storage. The canonical children include scope/pool references.
+let containsPoolLifetimeEvent (expr: IRExpr) : bool =
+    let mutable found = false
+    iterIRExpr (function IRBeginPoolScope _ | IRReleasePools _ -> found <- true | _ -> ()) expr
+    found
 
 /// Collect every variable id referenced (IRVar) anywhere in an expression.
 /// The one var-ref collector (audit section 3.2): capture computation and
@@ -3192,7 +3210,7 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
               | _ -> elemType))
     | IRAssign _ -> IRTUnit
     | IRForRange _ -> IRTUnit
-    | IRConstraintCheck _ -> IRTUnit
+    | IRBeginPoolScope _ | IRReleasePools _ | IRConstraintCheck _ -> IRTUnit
     | IRBreakIf _ -> IRTUnit
     | IRFieldAccess (obj, field) ->
         // Resolved via the ONE struct-fields cache (structFieldsCacheStorage

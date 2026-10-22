@@ -1,0 +1,6 @@
+// C02 census: anonymous scalar map over a stored rank-2 input.
+type R = Idx<2>
+type C = Idx<3>
+let M: Array<Float64 like R, C> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let rows = reduce(method_for(M) <@> lambda(v: Float64) -> v * v + 1.0, (+), 7.0)
+// Independent expected rows: [24.0, 87.0].

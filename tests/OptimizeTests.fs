@@ -1244,6 +1244,185 @@ let private checkAll (name: string) (cpp: string) (summary: string) (checks: (st
 
 let private withGather (f: unit -> 'a) : 'a = withGate "BLADE_COMPACTION_FUSION" "gather" f
 
+// PM19: these cases explicitly select the terminal output because named
+// top-level mask/compound bindings are observable under default printing.
+let private selectedTerminalSrc =
+    "let x = [1.0, -2.0, 3.0, 0.0, 4.0]\n"
+    + "let keep = mask(x, lambda(v) -> v > 0.0)\n"
+    + "let y = compound(x, keep)\n"
+    + "let result = reduce(y, lambda(a, b) -> a * 2.0 + b, 1.0)\n"
+
+let private withSelectedTerminal f =
+    withGate "BLADE_PRINT" "result" (fun () -> withGate "BLADE_FP_REPRO" "1" f)
+
+let private selectedTerminalEmission () =
+    let name = "selected_terminal_repro_elides_all_selection_storage"
+    withSelectedTerminal (fun () ->
+        match cppOfSource name selectedTerminalSrc with
+        | Error e -> resultLine Fail name e; false
+        | Ok cpp ->
+            checkAll name cpp "guarded serial fold over stored x, no mask/index/selected-value allocation"
+                [ "guarded route actually emitted", cpp.Contains "__selected_terminal_"
+                  "dense input retained", cpp.Contains "x_extents"
+                  "no mask buffer", not (cpp.Contains "keep_extents")
+                  "no compact values or index", not (cpp.Contains "y_compact") && not (cpp.Contains "y_idx")
+                  "no positions", not (cpp.Contains "y_pos")
+                  "no compact reads", not (cpp.Contains "y.data[")
+                  "terminal output retained", cpp.Contains "\"result = \"" ])
+
+let private selectedTerminalRefusals () =
+    let cases =
+        [ "extra_mask_read", selectedTerminalSrc + "let observed = keep(0)\n", "additional consumer"
+          "keyed_selection_read", selectedTerminalSrc + "let observed = y(0)\n", "additional consumer"
+          "selection_alias", selectedTerminalSrc + "let observed = y\n", "additional consumer"
+          "selection_capture", selectedTerminalSrc + "let observed = method_for(x) <@> lambda(v) -> Float64(extents(y)) + v\n", "callable body or capture"
+          "selection_extent", selectedTerminalSrc + "let observed = extents(y)\n", "additional consumer"
+          "selected_map", selectedTerminalSrc.Replace("reduce(y, lambda", "reduce(y * y, lambda"), "direct seeded"
+          "unseeded", selectedTerminalSrc.Replace(", 1.0)\n", ")\n"), "direct seeded"
+          "may_fail_predicate", selectedTerminalSrc.Replace("v > 0.0", "lgamma(v) > 0.0"), "pure/total"
+          "may_fail_fold", selectedTerminalSrc.Replace("a * 2.0 + b", "a + lgamma(b)"), "pure/total"
+          "nonliteral_seed", selectedTerminalSrc.Replace("let keep", "let seed = 1.0\nlet keep").Replace(", 1.0)\n", ", seed)\n"), "explicit seed"
+          "source_write", selectedTerminalSrc.Replace("let x =", "let mut x =").Replace("let y =", "x(0) = 9.0\nlet y ="), "may write"
+          "hidden_writer",
+              "type I = Idx<5>\nfunction bump(a: mut Array<Float64 like I>) -> Float64 = {\n    a(0) += 1.0\n    a(0)\n}\n"
+              + selectedTerminalSrc.Replace("let x =", "let mut x: Array<Float64 like I> =").Replace("let y =", "let changed = bump(x)\nlet y ="), "may write"
+          "source_alias_writer",
+              "type I = Idx<5>\nfunction bump(a: mut Array<Float64 like I>) -> Float64 = {\n    a(0) += 1.0\n    a(0)\n}\n"
+              + selectedTerminalSrc.Replace("let x =", "let mut x: Array<Float64 like I> =").Replace("let keep", "let mut alias = x\nlet keep").Replace("let y =", "let changed = bump(alias)\nlet y ="), "may write"
+          "side_table_writer",
+              "import rand as r\ntype I = Idx<5>\nfunction bump(a: mut Array<Float64 like I>) -> Int64 = {\n    a(0) += 1.0\n    7\n}\n"
+              + selectedTerminalSrc.Replace("let x =", "let mut x: Array<Float64 like I> =").Replace("let y =", "let noise = r.uniform(bump(x), 1)\nlet y ="), "may write"
+          "deferred_source",
+              selectedTerminalSrc.Replace("let x = [1.0, -2.0, 3.0, 0.0, 4.0]", "let x = method_for(range<Idx<5>>) <@> lambda(i) -> Float64(Int64(i))"), "not proved stored"
+          "parallel_fold", selectedTerminalSrc.Replace("lambda(a, b) -> a * 2.0 + b", "lambda(a, b) where comm(a, b), omp -> a + b"), "pure/total"
+          "second_companion", selectedTerminalSrc + "let other = compound(x, keep)\n", "compound() operand" ]
+    [ for suffix, src, why in cases do
+        let name = $"selected_terminal_declines_{suffix}"
+        yield withSelectedTerminal (fun () ->
+            decisionCase name src "selected-terminal" (declinedMentioning why) why)
+      for suffix, gate, value, why in
+          [ "default_print", "BLADE_PRINT", "", "printed"
+            "selected_output", "BLADE_PRINT", "result;y", "printed"
+            "mask_output", "BLADE_PRINT", "result keep", "printed"
+            "default_licensed_graph", "BLADE_FP_REPRO", "0", "reproducible"
+            "optimizer_off", "BLADE_COMPACTION_FUSION", "0", "disabled"
+            "legacy_mirror", "BLADE_COMPACTION_FUSION", "b4", "disabled"
+            "positions_elided_mirror", "BLADE_COMPACTION_FUSION", "unshared", "disabled" ] do
+        let name = $"selected_terminal_declines_{suffix}"
+        yield withSelectedTerminal (fun () -> withGate gate value (fun () ->
+            decisionCase name selectedTerminalSrc "selected-terminal" (declinedMentioning why) why))
+      // lowerTypeExpr erases the mask in this UNUSED alias to IRParam
+      // ("compound", 0, IRTNat None). It has no surviving keep reference;
+      // a real declared-index payload is checked independently below.
+      yield withSelectedTerminal (fun () ->
+          decisionCase "selected_terminal_erased_unused_alias_admitted"
+              (selectedTerminalSrc.Replace("let y =", "type Selected = CompoundIdx<keep>\nlet y ="))
+              "selected-terminal" (fun d -> d.Subject = "y" && applied d)
+              "the unused erased alias carries no mask demand") ]
+
+let private selectedTerminalForeignRef () =
+    let name = "selected_terminal_foreign_census_keeps_storage"
+    withSelectedTerminal (fun () ->
+        match withGate "BLADE_COMPACTION_FUSION" "0" (fun () -> lower selectedTerminalSrc) with
+        | Error e -> resultLine Fail name e; false
+        | Ok ir ->
+            let m = ir.Modules.Head
+            let y = m.Bindings |> List.find (fun b -> b.Name = "y")
+            Blade.Effects.Decisions.start ()
+            let kept = Optimize.fuseSelectedTerminalModule (IR.IRBuilder ()) m.Functions (Set.singleton y.Id) m
+            let ds = Blade.Effects.Decisions.drain ()
+            if kept.CompoundInits.ContainsKey y.Id
+               && (ds |> List.exists (fun d -> d.Rule = "selected-terminal" && declinedMentioning "another module" d)) then
+                resultLine Pass name "a foreign demand cannot be erased by the module-local census"; true
+            else resultLine Fail name "the foreign use did not retain the selected store"; false)
+
+/// lowerIndexType's real CompoundIdx axis carries IRCompoundMask(IRVar keep),
+/// whereas an unused standalone alias lowers through lowerTypeExpr and loses
+/// that operand. Inject the actual index payload to test the declared-type
+/// seam directly, as compactionV2UngroupIndexExtentCensus tests embedded types.
+let private selectedTerminalDeclaredIndexPayload () =
+    let name = "selected_terminal_declared_index_payload_local_and_foreign"
+    withSelectedTerminal (fun () ->
+        match withGate "BLADE_COMPACTION_FUSION" "0" (fun () -> lower selectedTerminalSrc) with
+        | Error e -> resultLine Fail name e; false
+        | Ok ir ->
+            let m = ir.Modules.Head
+            let y = m.Bindings |> List.find (fun b -> b.Name = "y")
+            let keep = m.Bindings |> List.find (fun b -> b.Name = "keep")
+            let at = match y.Type with Blade.IR.ArrayElem a -> a | _ -> failwith "y is no array"
+            let ix = { at.IndexTypes.Head with Id = 990003; Extent = Blade.IR.IRCompoundMask (Blade.IR.IRVar (keep.Id, keep.Type)) }
+            let td = Blade.IR.IRTDIndexType ("DemandedSelection", ix)
+            let local = { m with Types = m.Types @ [ td ] }
+            // ONLY the declared type survives in Other. No executable value,
+            // callable, side-table operand or capture can supply its demand.
+            let other =
+                { m with Name = "Other"; Types = [ td ]; Bindings = []; Functions = []
+                         CompoundInits = Map.empty; SparseInits = Map.empty; RandomInits = Map.empty
+                         ProviderWrites = Map.empty; ProviderReads = Map.empty }
+            let retained (md: Blade.IR.IRModule) foreign why =
+                Blade.Effects.Decisions.start ()
+                let kept = Optimize.fuseSelectedTerminalModule (IR.IRBuilder ()) md.Functions foreign md
+                let ds = Blade.Effects.Decisions.drain ()
+                kept.CompoundInits.ContainsKey y.Id
+                && (kept.Bindings |> List.exists (fun b -> b.Id = keep.Id))
+                && (ds |> List.exists (fun d -> d.Rule = "selected-terminal" && d.Subject = "y" && declinedMentioning why d))
+                && not (ds |> List.exists (fun d -> d.Rule = "selected-terminal" && applied d))
+            let foreignRefs = Optimize.moduleReferencedIds other
+            checkAll name "" "a real declared-index mask payload keeps storage locally and across modules"
+                [ "the type itself names keep", Optimize.moduleReferencedIds other |> Set.contains keep.Id
+                  "local type demand retains both stores", retained local Set.empty "index type"
+                  "foreign type demand retains both stores", foreignRefs.Contains keep.Id && retained m foreignRefs "another module" ])
+
+/// An optimizer bug can agree in the interpreter and C++ lanes because both
+/// consume rewritten IR. Compare interpreter ON/OFF AND independent small
+/// pins, and assert admission happened; inert tests cannot pass this gate.
+let private selectedTerminalInterpreterCases () =
+    let cases =
+        [ "ordered_noncommutative", selectedTerminalSrc, "22.0"
+          "empty_seed", selectedTerminalSrc.Replace("v > 0.0", "v > 100.0").Replace(", 1.0)\n", ", -7.25)\n"), "-7.25"
+          "all_selected", selectedTerminalSrc.Replace("v > 0.0", "v > -100.0"), "48.0"
+          "empty_input", "let x: Array<Float64 like Idx<0>> = []\nlet keep = mask(x, lambda(v) -> v > 0.0)\nlet y = compound(x, keep)\nlet result = reduce(y, (+), 3.25)\n", "3.25"
+          "cancellation", "let x = [1e16, 1.0, -1e16, 3.0]\nlet keep = mask(x, lambda(v) -> v == v)\nlet y = compound(x, keep)\nlet result = reduce(y, (+), 0.0)\n", "3.0"
+          "negative_zero_seed", "let x = [0.0, -0.0]\nlet keep = mask(x, lambda(v) -> v > 1.0)\nlet y = compound(x, keep)\nlet result = reduce(y, (+), -0.0)\n", "-0.0" ]
+    [ for suffix, src, expected in cases do
+        let name = $"selected_terminal_interp_on_off_{suffix}"
+        yield withSelectedTerminal (fun () ->
+            let interpret gate = withGate "BLADE_COMPACTION_FUSION" gate (fun () ->
+                match lower src with
+                | Error e -> Error e
+                | Ok ir ->
+                    match IRValidate.validateIR ir with
+                    | Error es -> Error (String.concat "; " es)
+                    | Ok ir ->
+                        let admitted = ir.Modules |> List.exists (fun m -> m.Functions |> List.exists (fun f -> f.Name.Contains "__selected_terminal_"))
+                        let r = Blade.Interp.Run.runProgram ir name Blade.Interp.Value.defaultLimits
+                        Ok (admitted, r))
+            match interpret "on", interpret "0" with
+            | Ok (true, on), Ok (false, off) when on.ExitCode = 0 && off.ExitCode = 0
+                                                     && on.Stdout = off.Stdout && on.Stderr = off.Stderr
+                                                     && on.Stdout.Contains ($"result = {expected}") ->
+                resultLine Pass name "admitted route agrees with unoptimized IR and independent scalar pin"; true
+            | a, b -> resultLine Fail name ($"ON={a}; OFF={b}"); false) ]
+
+let private selectedTerminalLlvm () =
+    let name = "selected_terminal_llvm_real_route_no_selection_allocations"
+    withSelectedTerminal (fun () ->
+        let emit mode = withGate "BLADE_COMPACTION_FUSION" mode (fun () ->
+            match lower selectedTerminalSrc with
+            | Error e -> Error e
+            | Ok ir ->
+                let admitted = ir.Modules |> List.exists (fun m -> m.Functions |> List.exists (fun f -> f.Name.Contains "__selected_terminal_"))
+                EmitLlvm.tryEmitProgramNamed name ir |> Result.map (fun ll -> admitted, ll))
+        match emit "on", emit "0" with
+        | Ok (true, ll), Ok (false, old) ->
+            let allocs (s: string) = System.Text.RegularExpressions.Regex.Matches(s, @"call ptr @blade_alloc_cells\(").Count
+            checkAll name ll "LLVM stays in its own backend: only the stored input remains"
+                [ "an actual guarded chain", ll.Contains "fcmp ogt" && (ll.Contains "br i1" || ll.Contains "select i1")
+                  "exactly one array allocation", allocs ll = 1
+                  "reference really has removable storage", allocs old > allocs ll
+                  "serial arithmetic", not (ll.Contains "fadd reassoc") && not (ll.Contains "fmul reassoc") ]
+        | a, b -> resultLine Fail name ($"ON={a}; OFF={b}"); false)
+
 /// The default (T4b only): the count in the mask pass, B4's one fill+gather
 /// pass at the compound with NO position store, the cardinality-only index,
 /// the K-lane self-dot over y.data.
@@ -2531,7 +2710,7 @@ let private eplReturnPointFree () =
         + "function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {\n"
         + "    let y2 = method_for(zip(x, y)) <@> lambda(u, v) -> 2.0 * u + v |> compute\n"
         + "    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)\n"
-        + "    s\n"
+        + "    s + 1.0\n"
         + "}\n"
         + "function driver(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {\n"
         + "    let k = kernel(x, y)\n"
@@ -2569,8 +2748,11 @@ let private eplJoinInsideCallee () =
     match emit false, emit true with
     | Ok normal, Ok testMode ->
         match releasesSafe (mainBody normal), releasesSafe (mainBody testMode) with
-        | Ok rn, Ok rt when rn.Length = 3 && rt.Length = 3 && (mainBody normal).Contains "__epl_acc_" ->
-            resultLine Pass name ($"3 callee pools (y2 and z of later, y2 of early) released once each at the call's return boundary, no read after any release -- with the epilogue fused and with it declined (omp test mode)")
+        | Ok rn, Ok rt when rn.Length = 3 && rt.IsEmpty && (mainBody normal).Contains "__epl_acc_"
+                           && not ((mainBody testMode).Contains "__epl_")
+                           && (mainBody testMode).Contains "later("
+                           && (mainBody testMode).Contains "early(" ->
+            resultLine Pass name "normal: 3 pools released once at return; coverage mode actually declines the retained inlines and keeps both calls, with no fused input legs"
             true
         | a, b -> resultLine Fail name (sprintf "normal %A; test mode %A" a b); false
     | Error e, _ | _, Error e -> resultLine Fail name e; false
@@ -2595,6 +2777,179 @@ let private eplTwoPlansOneCall () =
         | r ->
             let legs, calls = countOf "__epl_acc_" m, System.Text.RegularExpressions.Regex.Matches(m, @"= kernel\(").Count
             resultLine Fail name (sprintf "releases %A; legs %d; calls %d" r legs calls); false
+
+// A01: the four concrete lifetime holes, plus the documented scratch reuse
+// exclusion. These read the actual retained-inline route and allocation
+// release order, with CSE on/off. Execution/raw-bit twins live in the
+// cell-epilogue block and corpus (the sole runner executes them).
+let private lifetimeFiles =
+    [ "032_lifetime_deleted_final_join.blade", false, 1
+      "033_lifetime_cse_equal_caller_map.blade", true, 1
+      "034_lifetime_duplicate_scalar_return.blade", true, 1
+      "035_lifetime_function_scalar_return.blade", true, 1
+      "036_lifetime_caller_panic.blade", true, 1
+      "037_lifetime_scratch_reuse_region.blade", true, 2 ]
+
+let private lifetimeCppFunction (cpp: string) =
+    let m = System.Text.RegularExpressions.Regex.Match(cpp, @"(?s)double driver\([^;{]*\) \{.*?\n\}")
+    if m.Success then m.Value else ""
+
+let private eplLifetimeWitnesses () =
+    [ for (file, inFunction, poolCount) in lifetimeFiles do
+       for cse in [ "1"; "0" ] do
+        let name = $"inline_lifetime_{file}_cse_{cse}"
+        yield
+          withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () ->
+          withGate "BLADE_BLAS" "off" (fun () -> withGate "BLADE_POOL_REUSE" "1" (fun () ->
+          withGate "BLADE_CSE" cse (fun () ->
+            match corpusSource ("sibling-folds/" + file) with
+            | Error e -> resultLine Fail name e; false
+            | Ok src ->
+            match cppOfSource name src with
+            | Error e -> resultLine Fail name e; false
+            | Ok cpp ->
+                let body = if inFunction then lifetimeCppFunction cpp else mainBody cpp
+                let boundary = body.IndexOf "is released at that return boundary"
+                let panic = body.IndexOf "blade_rt::idiv64(7L"
+                let panicOrder = not (file.StartsWith "036") || panic > boundary
+                match releasesSafe body with
+                | Ok pools when pools.Length = poolCount && body.Contains "__epl_acc_" && panicOrder ->
+                    resultLine Pass name ($"{poolCount} owned pools released once, no later read; fused route present; caller failure follows cleanup")
+                    true
+                | rr -> resultLine Fail name (sprintf "release proof %A; fused=%b; boundary=%d panic=%d" rr (body.Contains "__epl_acc_") boundary panic); false))))) ]
+
+let private eplLifetimeValidatorCases () =
+    let run name corrupt (needle: string option) =
+        withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () ->
+        withGate "BLADE_BLAS" "off" (fun () ->
+            match corpusSource "sibling-folds/033_lifetime_cse_equal_caller_map.blade" |> Result.bind lower with
+            | Error e -> resultLine Fail name e; false
+            | Ok ir ->
+                let ir' = corrupt ir
+                match Blade.IRValidate.validateIR ir', needle with
+                | Ok _, None -> resultLine Pass name "untouched lifetime region validates"; true
+                | Error es, Some n when es |> List.exists (fun e -> e.Contains n) -> resultLine Pass name n; true
+                | Error es, _ -> resultLine Fail name (String.concat " | " es); false
+                | Ok _, Some n -> resultLine Fail name ($"malformed lifetime IR accepted: {n}"); false)))
+    let mutate change (ir: Blade.IR.IRProgram) =
+        { ir with
+            Modules =
+                ir.Modules |> List.map (fun m ->
+                    { m with
+                        Functions =
+                            m.Functions |> List.map (fun f ->
+                                { f with Body = Blade.IR.mapIRExpr change f.Body }) }) }
+    let after alias = mutate (fun n ->
+        match n with
+        | Blade.IR.IRLet (eid, (Blade.IR.IRReleasePools (_, (pool :: _), _) as release), rest) ->
+            let read = if alias then Blade.IR.IRVar (990001, Blade.IR.typeOf pool) else pool
+            let bad = Blade.IR.IRLet (990002, Blade.IR.IRExtent (read, 0), rest)
+            let tail = Blade.IR.IRLet (eid, release, bad)
+            if alias then Blade.IR.IRLet (990001, Blade.IR.IRPure pool, tail) else tail
+        | _ -> n)
+    let foreign = mutate (fun n ->
+        match n with
+        | Blade.IR.IRReleasePools (scope, pools, call) ->
+            let p = pools.Head
+            Blade.IR.IRReleasePools (scope, Blade.IR.IRVar (990003, Blade.IR.typeOf p) :: pools, call)
+        | _ -> n)
+    let missing = mutate (function Blade.IR.IRReleasePools _ -> Blade.IR.IRLit Blade.IR.IRLitUnit | n -> n)
+    let embeddedExtent = mutate (fun n ->
+        match n with
+        | Blade.IR.IRLet (eid, (Blade.IR.IRReleasePools (_, (pool :: _), _) as release), rest) ->
+            match Blade.IR.typeOf pool with
+            | Blade.Types.IRTArrow ((Blade.Types.SIdx ix) :: slots, ret, ident) ->
+                let ty = Blade.Types.IRTArrow (Blade.Types.SIdx { ix with Extent = Blade.IR.IRExtent (pool, 0) } :: slots, ret, ident)
+                Blade.IR.IRLet (eid, release, Blade.IR.IRLet (990005, Blade.IR.IRZero ty, rest))
+            | _ -> n
+        | _ -> n)
+    let freshened (ir: Blade.IR.IRProgram) =
+        let builder = Blade.IR.IRBuilder()
+        builder.EnsureAtLeast(1000000)
+        let rewrite (f: Blade.IR.IRCallable) =
+            if not (Blade.IR.containsPoolLifetimeEvent f.Body) then f
+            else
+                let ps, body = Blade.IRMono.freshenCallable builder f
+                { f with Params = ps; Body = body }
+        { ir with
+            Modules =
+                ir.Modules |> List.map (fun m ->
+                    { m with Functions = m.Functions |> List.map rewrite }) }
+    let captured (ir: Blade.IR.IRProgram) =
+        let rewriteModule (m: Blade.IR.IRModule) =
+            let mutable capture : Blade.IR.IRExpr option = None
+            let rewriteNode n =
+                match n with
+                | Blade.IR.IRLet (eid, (Blade.IR.IRReleasePools (_, (pool :: _), _) as release), rest) ->
+                    capture <- Some pool
+                    let t = Blade.Types.IRTScalar Blade.Types.ETInt64
+                    let callableTy = Blade.Types.IRTArrow ([], t, None)
+                    let call = Blade.IR.IRApp (Blade.IR.IRVar (990004, callableTy), [], t)
+                    Blade.IR.IRLet (eid, release, Blade.IR.IRLet (990006, call, rest))
+                | _ -> n
+            let functions =
+                m.Functions |> List.map (fun f ->
+                    { f with Body = Blade.IR.mapIRExpr rewriteNode f.Body })
+            match capture with
+            | Some (Blade.IR.IRVar (pid, pty) as pool) ->
+                let helper =
+                    { functions.Head with
+                        Id = 990004
+                        Name = "bad_capture"
+                        SourceName = "bad_capture"
+                        Params = []
+                        RetType = Blade.Types.IRTScalar Blade.Types.ETInt64
+                        Body = Blade.IR.IRExtent (pool, 0)
+                        Captures = [ { Id = pid; Name = "p"; Type = pty; IsMutable = false } ] }
+                { m with Functions = functions @ [helper] }
+            | _ -> m
+        { ir with Modules = ir.Modules |> List.map rewriteModule }
+    [ run "inline_lifetime_validator_clean" id None
+      run "inline_lifetime_validator_freshened_ids" freshened None
+      run "inline_lifetime_validator_captured_pool_after_release" captured (Some "reference to released inline pool")
+      run "inline_lifetime_validator_embedded_extent_after_release" embeddedExtent (Some "reference to released inline pool")
+      run "inline_lifetime_validator_read_after_release" (after false) (Some "reference to released inline pool")
+      run "inline_lifetime_validator_deferred_alias_after_release" (after true) (Some "reference to released inline pool")
+      run "inline_lifetime_validator_foreign_pool" foreign (Some "not owned by its inline region")
+      run "inline_lifetime_validator_missing_release" missing (Some "no release event") ]
+
+let private eplLifetimeBarrierIsNotWrite () =
+    let name = "inline_lifetime_resource_barrier_is_not_source_write"
+    match corpusSource "sibling-folds/035_lifetime_function_scalar_return.blade" |> Result.bind lower with
+    | Error e -> resultLine Fail name e; false
+    | Ok ir ->
+        let m = ir.Modules |> List.find (fun m -> m.Functions |> List.exists (fun f -> f.Name = "driver"))
+        let f = m.Functions |> List.find (fun f -> f.Name = "driver")
+        let barrier = Blade.Optimize.scheduleHasLifetimeBarrierIn [] m f.Body
+        let writes = Blade.Optimize.scheduleMayWriteIn [] m f.Body
+        if barrier && not writes then resultLine Pass name "lifetime event is a separate motion barrier, with no source write or FP licence"; true
+        else resultLine Fail name (sprintf "barrier=%b writes=%b" barrier writes); false
+
+let private eplLifetimeKernelRefusal () =
+    let name = "inline_lifetime_expression_renderer_declines"
+    match corpusSource "sibling-folds/035_lifetime_function_scalar_return.blade" with
+    | Error e -> resultLine Fail name e; false
+    | Ok src ->
+        let asValue = src + "\nlet held = driver\n"
+        withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () ->
+        withGate "BLADE_BLAS" "off" (fun () ->
+            match cppOfSource (name + "_eligible") src, codegenDecisionsOf asValue, cppOfSource name asValue with
+            | Ok baseline, Ok ds, Ok cpp ->
+                let declines = ds |> List.filter (fun d ->
+                    d.Rule = "sibling-folds" && d.Subject = "driver"
+                    && declinedMentioning "kernel(x, y) not inlined: lifetime event not honoured by expression/kernel renderer" d)
+                let joined = ds |> List.exists (fun d ->
+                    d.Rule = "sibling-folds" && d.Subject = "driver" && applied d)
+                let body = lifetimeCppFunction cpp
+                let eligible = (lifetimeCppFunction baseline).Contains "__epl_acc_"
+                if eligible && declines.Length = 1 && joined && body.Contains "kernel(" && not (body.Contains "__epl_") then
+                    resultLine Pass name "eligible baseline fuses; function used as a value records exactly one retained-inline decline while its independent sibling group still applies; original call remains"
+                    true
+                else
+                    let seen = ds |> List.filter (fun d -> d.Rule = "sibling-folds") |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+                    resultLine Fail name (sprintf "eligible=%b; capability declines=%d; independent group applied=%b; original call present=%b; decisions: %s" eligible declines.Length joined (body.Contains "kernel(") seen)
+                    false
+            | Error e, _, _ | _, Error e, _ | _, _, Error e -> resultLine Fail name e; false)))
 
 /// 029 in the LLVM lane: the throwing callee is not inlined for legs -- no
 /// extra accumulator in its fused loop vs gate-off, and its frame is pushed.
@@ -5431,6 +5786,10 @@ let runOptimizeTests () =
           eplReturnPointFree ()
           eplJoinInsideCallee ()
           eplTwoPlansOneCall ()
+          yield! eplLifetimeWitnesses ()
+          yield! eplLifetimeValidatorCases ()
+          eplLifetimeKernelRefusal ()
+          eplLifetimeBarrierIsNotWrite ()
           eplThrowingCalleeLlvm ()
           withGate "BLADE_OMP_THREADS" "1" (fun () ->
             eplNoRouteKeepsCall "epilogue_legs_nonliteral_epilogue_seed_keeps_call" eplNonliteralSeedSrc [ ("BLADE_FP_REPRO", "1") ] "seed is not a literal")
@@ -5443,6 +5802,13 @@ let runOptimizeTests () =
           compactionGateOff ()
           compactionOmpFoldKeepsPool ()
           compactionAliasWriteNoInPass ()
+          // PM19 stored-input, private selection, seeded terminal (repro).
+          selectedTerminalEmission ()
+          selectedTerminalLlvm ()
+          selectedTerminalForeignRef ()
+          selectedTerminalDeclaredIndexPayload ()
+          yield! selectedTerminalRefusals ()
+          yield! selectedTerminalInterpreterCases ()
           // Compaction fusion v2 (round 3 item T4: the gather at the mask
           // site, positions elided under the demand census).
           compactionV2DefaultElides ()

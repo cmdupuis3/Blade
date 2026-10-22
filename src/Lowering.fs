@@ -2961,7 +2961,6 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     Optimize.OrbitPullTable.reset ()
     Optimize.MemberHoistTable.reset ()
     Optimize.EpilogueLegTable.reset ()
-    Optimize.InlineReturnTable.reset ()
     Optimize.blasGateProbe <- Blade.LinAlgPatterns.blasAvailable
     // The raw decl list callers hand us is the program they PARSED, not the
     // one `TypeCheck.typeCheck` desugared inside itself -- so the icechunk
@@ -3115,6 +3114,13 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // values is refused (keys are represented as positions, D2).
         IRMono.refuseEnumKeyArithModule irModule
         let irModule = IRMono.lowerArrayBinOpsModule irModule env.Builder programFuncs
+        // PM19 terminal selection must run before IRLift/CSE and every
+        // schedule side table. The whole-program census is already available
+        // here; a removed private mask can never orphan a membership plan.
+        let foreignRefs =
+            if irModules.Length < 2 || irModule.CompoundInits.IsEmpty then Set.empty
+            else moduleRefs.Force() |> List.filter (fun (n, _) -> n <> irModule.Name) |> List.map snd |> Set.unionMany
+        let irModule = Optimize.fuseSelectedTerminalModule env.Builder programFuncs foreignRefs irModule
         // The semantic-equivalence optimization stage (Blade.Optimize --
         // see its charter): constant-scrutinee match folding (which also
         // resolves symbolic ranks per specialization), elementwise-chain
@@ -3187,9 +3193,6 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // mask -> compound -> fold chain's side table, read by both emitters;
         // the interpreter runs the tree as written. Gate:
         // BLADE_COMPACTION_FUSION.
-        let foreignRefs =
-            if irModules.Length < 2 || irModule.CompoundInits.IsEmpty then Set.empty
-            else moduleRefs.Force() |> List.filter (fun (n, _) -> n <> irModule.Name) |> List.map snd |> Set.unionMany
         Optimize.planCompactionFusion programFuncs foreignRefs irModule
         // Compact row classes (Blade.Optimize.planCompactRowClasses): a
         // compact rank-2 producer's orbit-fold class partials computed behind

@@ -1,0 +1,10 @@
+// TEST: Selected terminal cancellation keeps the ascending serial association
+// A per-function repro veto pins this control in default builds too.
+// Named-call fold bodies are outside C01's initial closed whitelist; the
+// positive cancellation admission is checked by OptimizeTests under FP_REPRO.
+function ordered_add(a: Float64, b: Float64) where repro -> Float64 = a + b
+let x = [1e16, 1.0, -1e16, 3.0]
+let keep = mask(x, lambda(v) -> v == v)
+let y = compound(x, keep)
+let result = reduce(y, ordered_add, 0.0)
+// EXPECT: result = 3.0

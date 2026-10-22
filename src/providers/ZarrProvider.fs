@@ -1440,7 +1440,13 @@ module CppZarr =
     /// mask: the compute phase must not run on a missing cell). `check` is
     /// the store path the refusal names; None is a window read's SOURCE
     /// assembly, whose extracted destination is scanned instead.
-    let private genAssembleFlatCore (check: string option) (fetch: ChunkFetchEmitter) (meta: ZarrArrayMeta) (cppVarName: string) (elemCpp: string)
+    type private AssemblyDestination =
+        | OwnedFlat
+        /// The caller owns this correctly typed backing and its eventual cleanup.
+        /// Setup runs AFTER the metadata probe, at the old flat-allocation site.
+        | CallerDestination of buffer: string * setup: string list
+
+    let private genAssembleFlatCore (destination: AssemblyDestination) (check: string option) (fetch: ChunkFetchEmitter) (meta: ZarrArrayMeta) (cppVarName: string) (elemCpp: string)
                                     (mask: (string * string * string) option) (phase: int) : string list =
         let v = cppVarName
         let varName = meta.Name
@@ -1463,6 +1469,12 @@ module CppZarr =
         let chunkCount = chunks |> List.fold (*) 1
         let chunkBytes = chunkCount * meta.Dtype.ByteSize
         let src = fetch v chunkBytes
+        let dest, setup =
+            match destination with
+            | OwnedFlat -> $"{v}_flat", [ $"{elemCpp}* {v}_flat = new {elemCpp}[{total}];" ]
+            | CallerDestination (buf, setup) ->
+                if mask.IsSome || phase <> 1 then failwith "caller-owned Zarr assembly requires an ordinary whole read"
+                buf, setup
 
         let fillDecl =
             match meta.FillValue with
@@ -1472,8 +1484,8 @@ module CppZarr =
 
         let header =
             src.Prologue
-            @ [ $"{elemCpp}* {v}_flat = new {elemCpp}[{total}];"
-                $"{diskCpp}* {v}_cbuf = new {diskCpp}[{chunkCount}];" ]
+            @ setup
+            @ [ $"{diskCpp}* {v}_cbuf = new {diskCpp}[{chunkCount}];" ]
             @ fillDecl
             @ Blade.ProviderRegistry.tallyDeclCpp rule v
 
@@ -1510,7 +1522,7 @@ module CppZarr =
             |> String.concat " + "
         // The boundary rule's per-cell note and its report (both empty when
         // the variable has no rule).
-        let note = Blade.ProviderRegistry.tallyNoteCpp rule v $"{v}_flat[{gIdx}]" gIdx
+        let note = Blade.ProviderRegistry.tallyNoteCpp rule v $"{dest}[{gIdx}]" gIdx
         let report = Blade.ProviderRegistry.tallyReportCpp rule v varName messagePath (shape |> List.map string)
 
         // Under a mask, a satisfied chunk (read or filled) is recorded and
@@ -1527,7 +1539,7 @@ module CppZarr =
             [ gInd + $"if ({src.Present}) {{" ]
             @ src.Read (gInd + "    ")
             @ satisfied
-            @ (copyLoops $"{v}_flat[{gIdx}] = ({elemCpp}){v}_cbuf[{cIdx}];{note}")
+            @ (copyLoops $"{dest}[{gIdx}] = ({elemCpp}){v}_cbuf[{cIdx}];{note}")
         let missingBranch =
             match meta.FillValue with
             | FillNone ->
@@ -1537,7 +1549,7 @@ module CppZarr =
             | _ ->
                 [ gInd + "} else {" ]
                 @ filledMark
-                @ (copyLoops $"{v}_flat[{gIdx}] = {v}_fillv;{note}" |> List.map (fun s -> "    " + s))
+                @ (copyLoops $"{dest}[{gIdx}] = {v}_fillv;{note}" |> List.map (fun s -> "    " + s))
                 @ [ gInd + "}" ]
 
         let chunkBody =
@@ -1581,12 +1593,12 @@ module CppZarr =
     /// (The unmasked case of `genAssembleFlatPhased`, byte for byte.)
     /// `path` is the store path as the program wrote it (the refusal names it).
     let genAssembleFlatVia (path: string) (fetch: ChunkFetchEmitter) (meta: ZarrArrayMeta) (cppVarName: string) (elemCpp: string) : string list =
-        genAssembleFlatCore (Some path) fetch meta cppVarName elemCpp None 1
+        genAssembleFlatCore OwnedFlat (Some path) fetch meta cppVarName elemCpp None 1
 
     /// The core, phased, under the boundary rule (see genAssembleFlatCore).
     let genAssembleFlatPhased (path: string) (fetch: ChunkFetchEmitter) (meta: ZarrArrayMeta) (cppVarName: string) (elemCpp: string)
                               (mask: (string * string * string) option) (phase: int) : string list =
-        genAssembleFlatCore (Some path) fetch meta cppVarName elemCpp mask phase
+        genAssembleFlatCore OwnedFlat (Some path) fetch meta cppVarName elemCpp mask phase
 
     /// The assembly core over a Zarr store directory (its file-per-chunk-key fetch).
     let private genAssembleFlat (storePath: string) (store: ZarrStore) (meta: ZarrArrayMeta) (cppVarName: string) (elemCpp: string) : string list =
@@ -1595,7 +1607,7 @@ module CppZarr =
     /// A window read's SOURCE assembly: no rule here -- cells outside the
     /// window are not read by the program, so the extracted window is scanned.
     let private genAssembleFlatUnchecked (storePath: string) (store: ZarrStore) (meta: ZarrArrayMeta) (cppVarName: string) (elemCpp: string) : string list =
-        genAssembleFlatCore None (zarrChunkFetch storePath store meta) meta cppVarName elemCpp None 1
+        genAssembleFlatCore OwnedFlat None (zarrChunkFetch storePath store meta) meta cppVarName elemCpp None 1
 
     /// Generates C++ to read a DENSE variable: chunk assembly into
     /// `<v>_flat`, then the same materialization as CppNetcdf.genReadVar
@@ -1639,6 +1651,45 @@ module CppZarr =
             @ [ $"delete[] {v}_flat;" ]
 
         assemble @ materialize
+
+    /// PM43: the CODEGEN CALLER certifies an ordinary module-level binding.
+    /// The generic GenReadVar contract has no scope/cleanup evidence and keeps
+    /// using the owned-flat reader above. Unsupported shapes retain that route.
+    let tryGenReadVarIntoFinal (spec: ProviderReadSpec) (cppVarName: string) : string list option =
+        if spec.Provider <> "zarr" || spec.Streamed || spec.AllowMissing
+           || spec.MaskName.IsSome || spec.MaskType.IsSome || spec.Window.IsSome || spec.VarType.IsVirtual then None
+        else
+        let store = load spec.FilePath
+        match tryFindArray store spec.VarName, spec.VarType.IndexTypes with
+        | Some meta, [ ix ] when (meta.Version = 2 || meta.Version = 3) && meta.Codec = CodecIdentity
+                               && meta.Blade.IsNone && meta.Shape.Length = 1 && meta.Chunks.Length = 1
+                               && ix.Rank = 1 && ix.Symmetry = SymNone && ix.IxKind = IxKPlain
+                               && spec.VarType.ElemType = IRTScalar meta.Dtype.Elem ->
+            let elemBytes = if meta.Dtype.Elem = ETFloat32 then 4L else 8L
+            match ix.Extent with
+            // The shared core uses Int32 shape/stride/byte arithmetic. Check
+            // both converted destination and padded disk chunk BEFORE narrowing.
+            | IRLit (IRLitInt n) when n >= 0L && meta.Shape = [ n ]
+                                     && n <= int64 Int32.MaxValue / elemBytes
+                                     && meta.Chunks.Head > 0L && meta.Dtype.ByteSize > 0
+                                     && meta.Chunks.Head <= int64 Int32.MaxValue / int64 meta.Dtype.ByteSize ->
+                let v = cppVarName
+                let elemCpp = elemCppOf spec.VarType.ElemType
+                let pending = $"{v}__resident_pending"
+                let setup =
+                    [ $"// zarr-rank1-direct-destination: required resident output; no full flat staging or final copy"
+                      $"size_t {v}_extent_0 = {n};"
+                      $"size_t {v}_extents[] = {{ {v}_extent_0 }};"
+                      $"{elemCpp}* {pending} = allocate<typename promote<{elemCpp}, 1>::type, nullptr>({v}_extents);" ]
+                let assembly =
+                    genAssembleFlatCore (CallerDestination (pending, setup)) (Some spec.FilePath)
+                        (zarrChunkFetch spec.FilePath store meta) meta v elemCpp None 1
+                // Pending storage is exclusively private until all source-data
+                // validation succeeds. Same allocator, type and extent owner as
+                // the original final Array; no new[] buffer is adopted.
+                Some (assembly @ [ $"Array<{elemCpp}, 1> {v} = {{ {pending}, {v}_extents }};" ])
+            | _ -> None
+        | _ -> None
 
     /// Blocks-layout pool assembly with PER-BLOCK chunk I/O: for each block
     /// (tile multiset), optionally skip it (window / MPI ownership), read ITS
@@ -2052,7 +2103,7 @@ module CppZarr =
     /// allocated), and the intersection copied; a missing chunk fills, or
     /// fails loudly under a null fill_value. The window bounds are C++
     /// expressions so a run loop can drive them.
-    let genStreamWindow (storePath: string) (varName: string) (cppVarName: string) (destBuf: string) (ranges: (string * string) list) (arrType: IRArrayType) : string list =
+    let private genStreamWindowCore (wholeReadTally: string option) (storePath: string) (varName: string) (cppVarName: string) (destBuf: string) (ranges: (string * string) list) (arrType: IRArrayType) : string list =
         let store = load storePath
         let meta =
             match tryFindArray store varName with
@@ -2126,10 +2177,54 @@ module CppZarr =
         // variable's coordinates (origin = the window's low corner).
         let wext = [ for d in 0 .. rank - 1 -> $"{v}_whi{d} - {v}_wlo{d}" ]
         let scan =
-            Blade.ProviderRegistry.refuseScanCpp (missingRuleOfMeta meta) varName storePath
-                destBuf (wext |> List.map (fun e -> $"({e})") |> String.concat " * ")
-                [] [ for d in 0 .. rank - 1 -> $"{v}_wlo{d}" ] wext
+            match wholeReadTally with
+            | Some tally when rank = 1 ->
+                // The scalar-terminal reader has ONE original whole-read boundary.
+                // Keep reading after nonfinite cells: a later corrupt chunk must
+                // still fail before the deferred missing-value report, like .read.
+                let note = Blade.ProviderRegistry.tallyNoteCpp (missingRuleOfMeta meta) tally
+                               $"({destBuf})[{v}_mq]" $"({v}_wlo0 + {v}_mq)"
+                if note = "" then []
+                else [ $"for (size_t {v}_mq = 0; {v}_mq < {v}_whi0 - {v}_wlo0; ++{v}_mq) {{{note} }}" ]
+            | Some _ -> failwith "Zarr whole-read terminal tally requires rank 1"
+            | None ->
+                Blade.ProviderRegistry.refuseScanCpp (missingRuleOfMeta meta) varName storePath
+                    destBuf (wext |> List.map (fun e -> $"({e})") |> String.concat " * ")
+                    [] [ for d in 0 .. rank - 1 -> $"{v}_wlo{d}" ] wext
         scratch @ boundDecls @ gridLoops @ limDecls @ src.Locate gInd @ presentBranch @ missingBranch @ gridClose @ scan
+
+    let genStreamWindow storePath varName cppVarName destBuf ranges arrType =
+        genStreamWindowCore None storePath varName cppVarName destBuf ranges arrType
+
+    /// S2 capability, deliberately local Zarr only. The window reader decodes a
+    /// WHOLE padded chunk (disk bytes) plus the caller's converted block; neither
+    /// a chunk schedule nor a full-height pointer skeleton is retained.
+    let rank1TerminalChunk (spec: ProviderReadSpec) : Result<int64 * int, string> =
+        if spec.Provider <> "zarr" || not spec.Streamed || spec.AllowMissing || spec.VarType.IsVirtual
+           || spec.Window.IsSome || spec.MaskName.IsSome || spec.MaskType.IsSome then
+            Error "requires one ordinary local Zarr .stream read"
+        else
+        let store = load spec.FilePath
+        match tryFindArray store spec.VarName, spec.VarType.IndexTypes with
+        | Some meta, [ ix ] when (meta.Version = 2 || meta.Version = 3)
+                               && meta.Blade.IsNone && meta.Codec = CodecIdentity
+                               && meta.Shape.Length = 1 && meta.Chunks.Length = 1
+                               && meta.Dtype.Code = "f8" && spec.VarType.ElemType = IRTScalar ETFloat64
+                               && ix.Rank = 1 && ix.Symmetry = SymNone && ix.IxKind = IxKPlain ->
+            match ix.Extent with
+            | IRLit (IRLitInt n) when n >= 0L && meta.Shape = [ n ] && n <= int64 Int32.MaxValue
+                                     && meta.Chunks.Head > 0L
+                                     && meta.Chunks.Head <= int64 Int32.MaxValue / int64 meta.Dtype.ByteSize ->
+                Ok (meta.Chunks.Head, meta.Dtype.ByteSize)
+            | _ -> Error "requires matching static shape and a representable padded chunk"
+        | _ -> Error "requires known Zarr v2/v3, uncompressed dense rank-1 Float64"
+
+    /// Borrowed scalar block for an admitted whole-read terminal. Unlike
+    /// GenStreamRows, this tallies missing cells across all blocks; the caller
+    /// must emit tallyReportCpp before publishing its scalar results.
+    let genStreamRowsTerminal (spec: ProviderReadSpec) (cppVarName: string) (destBuf: string)
+                              (lo: string) (hi: string) (tally: string) : string list =
+        genStreamWindowCore (Some tally) spec.FilePath spec.VarName cppVarName destBuf [ lo, hi ] spec.VarType
 
     /// The run [lo, hi) of a rank-1 dense variable read into `destBuf[0 ..
     /// hi-lo)`: one file open per chunk the run intersects, one seek+read of

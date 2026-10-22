@@ -345,6 +345,144 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
         let funcScope = Set.unionMany [moduleIds; paramIds; captureIds]
         checkScope funcScope ctx f.Body
 
+    // --- Check 2b: inline allocation lifetime regions ---
+    // Unit lets make the events sequence points. The begin binder is a real
+    // IR id and the release's scope/pools are normal IRVar children, so every
+    // canonical substitution and freshening sees the ownership references.
+    let hasLifetimeEvents =
+        (modul.Bindings |> List.exists (fun b -> containsPoolLifetimeEvent b.Value))
+        || (modul.Functions |> List.exists (fun f -> containsPoolLifetimeEvent f.Body))
+    if hasLifetimeEvents then
+        let nodeTypes e =
+            match e with
+            | IRVar (_, ty) | IRParam (_, _, ty) | IRApp (_, _, ty) -> [ty]
+            | IRArrayLit (_, at) -> [mkArrayLike at]
+            | IRMethodFor info -> info.ArrayTypes |> List.map mkArrayLike
+            | IRApplyCombinator info -> info.OutputType :: (info.ArrayTypes |> List.map mkArrayLike)
+            | IRComposeApply info -> [info.OutputType]
+            | IRZero ty | IRUninit ty -> [ty]
+            | _ -> []
+        let rec typeRefs ty =
+            let indices xs = xs |> List.map (fun ix -> Set.union (Set.ofList ix.Dependencies) (exprRefs ix.Extent)) |> Set.unionMany
+            match ty with
+            | IRTArrow (slots, ret, _) ->
+                Set.union (typeRefs ret)
+                    (slots |> List.map (function SVal t -> typeRefs t | SIdx ix | SIdxVirt ix -> indices [ix]) |> Set.unionMany)
+            | IRTTuple ts -> ts |> List.map typeRefs |> Set.unionMany
+            | IRTLoop lt -> (lt.ArrayTypes @ Option.toList lt.KernelType) |> List.map typeRefs |> Set.unionMany
+            | IRTComputation t | IRTPoly (t, _) | IRTUnitAnnotated (t, _) -> typeRefs t
+            | IRTIdxTagged (t, IRefAnon (_, extent)) -> Set.union (typeRefs t) (exprRefs extent)
+            | IRTIdxTagged (t, _) -> typeRefs t
+            | IRTDist (_, t, axes) -> Set.union (typeRefs t) (indices axes)
+            | IRTGroupKeys (outer, source, _) -> indices [outer; source]
+            | IRTScalar _ | IRTUnit | IRTNat _ | IRTNamed _ | IRTInfer _ -> Set.empty
+        and exprRefs e =
+            let own = match e with IRVar (id, _) -> Set.singleton id | _ -> Set.empty
+            let carried = nodeTypes e |> List.map typeRefs |> Set.unionMany
+            let structural = childrenOf e |> List.map exprRefs |> Set.unionMany
+            let axes =
+                match e with
+                | IRRange (xs, _) -> xs
+                | IRApplyCombinator info -> info.SharedIndexTypes @ info.KernelTDims
+                | IRMethodFor info -> info.SharedIndexTypes
+                | _ -> []
+            let embedded = axes |> List.map (fun ix -> Set.union (Set.ofList ix.Dependencies) (exprRefs ix.Extent)) |> Set.unionMany
+            Set.unionMany [own; carried; structural; embedded]
+        let initialDependencies =
+            modul.Functions
+            |> List.map (fun f ->
+                let attrs = exprAttrs f.Body
+                let ps = f.Params |> List.map _.VarId |> Set.ofList
+                (f.Id, Set.union (f.Captures |> List.map _.Id |> Set.ofList)
+                    (Set.difference (exprRefs f.Body) (Set.union ps attrs.BoundVars))))
+            |> Map.ofList
+        let storageDependencies (v: IRExpr) =
+            // Scalar results are snapshots. Keep dependencies of carried extents
+            // separately: an array/view/deferred value may read both its expression
+            // operands and the expressions embedded in its type/loop metadata.
+            if Blade.Optimize.holdsNoStorage (typeOf v) then
+                nodeTypes v |> List.map typeRefs |> Set.unionMany
+            else exprRefs v
+        let referenceClosure (deps: Map<IRId, Set<IRId>>) (id: IRId) =
+            let rec loop pending seen =
+                match pending with
+                | [] -> seen
+                | x :: rest when Set.contains x seen -> loop rest seen
+                | x :: rest ->
+                    let next = Map.tryFind x deps |> Option.defaultValue Set.empty |> Set.toList
+                    loop (next @ rest) (Set.add x seen)
+            loop [id] Set.empty
+        let checkLifetimes ctx deps expr =
+            let mutable hasEvent = false
+            iterIRExpr (function IRBeginPoolScope _ | IRReleasePools _ -> hasEvent <- true | _ -> ()) expr
+            let checkRef released deps id =
+                let dead = Set.intersect released (referenceClosure deps id)
+                if not dead.IsEmpty then
+                    let ids = dead |> Seq.map (sprintf "v%d") |> String.concat ", "
+                    addError ctx $"reference to released inline pool: {ids} (through v{id})"
+            let rec value released deps e =
+                for ty in nodeTypes e do
+                    for id in typeRefs ty do checkRef released deps id
+                let axes =
+                    match e with
+                    | IRRange (xs, _) -> xs
+                    | IRApplyCombinator info -> info.SharedIndexTypes @ info.KernelTDims
+                    | IRMethodFor info -> info.SharedIndexTypes
+                    | _ -> []
+                for ix in axes do
+                    for id in Set.union (Set.ofList ix.Dependencies) (exprRefs ix.Extent) do checkRef released deps id
+                match e with
+                | IRVar (id, _) -> checkRef released deps id
+                | IRLet _ -> spine [] released deps e
+                | IRBeginPoolScope _ | IRReleasePools _ ->
+                    addError ctx "inline lifetime event must be a unit let statement"
+                | ExprShape (children, _) -> children |> List.iter (value released deps)
+            and spine (regions: (IRId * Map<IRId, IRType>) list) released deps e =
+                match e with
+                | IRLet (sid, IRBeginPoolScope _, rest) ->
+                    spine ((sid, Map.empty) :: regions) released deps rest
+                | IRLet (_, IRReleasePools (scope, pools, _), rest) ->
+                    let ids = pools |> List.choose (function IRVar (id, _) -> Some id | _ -> None)
+                    let named = Set.ofList ids
+                    if ids.Length <> pools.Length || ids.Length <> named.Count then
+                        addError ctx "inline release pools must be distinct binding references"
+                    let remaining =
+                        match scope, regions with
+                        | IRVar (sid, IRTUnit), (owner, owned) :: parents when sid = owner ->
+                            let ownedIds = owned |> Map.toSeq |> Seq.map fst |> Set.ofSeq
+                            if named <> ownedIds then
+                                addError ctx "inline release names pools not owned by its inline region, or omits an owned pool"
+                            for pool in pools do
+                                match pool with
+                                | IRVar (pid, pty) when Map.tryFind pid owned = Some pty -> ()
+                                | _ -> addError ctx "inline release pool type disagrees with its owned allocation"
+                            parents
+                        | _ ->
+                            addError ctx "inline release has no matching innermost begin event"
+                            regions
+                    spine remaining (Set.union released named) deps rest
+                | IRLet (id, v, rest) ->
+                    value released deps v
+                    let regions' =
+                        match regions, v with
+                        | (sid, owned) :: parents, IRCompute (IRApplyCombinator _)
+                            when (match stripUnits (typeOf v) with ArrayElem _ -> true | _ -> false) ->
+                            (sid, Map.add id (typeOf v) owned) :: parents
+                        | _ -> regions
+                    let deps' = Map.add id (storageDependencies v) deps
+                    spine regions' released deps' rest
+                | tail ->
+                    value released deps tail
+                    if not regions.IsEmpty then addError ctx "inline pool scope has no release event"
+            if hasEvent then spine [] Set.empty deps expr
+        let mutable lifetimeDeps = initialDependencies
+        for b in modul.Bindings do
+            checkLifetimes $"in binding '{b.Name}'" lifetimeDeps b.Value
+            let deps = Set.union (typeRefs b.Type) (if Blade.Optimize.holdsNoStorage b.Type then Set.empty else exprRefs b.Value)
+            lifetimeDeps <- Map.add b.Id deps lifetimeDeps
+        for f in modul.Functions do
+            checkLifetimes $"in function '{f.SourceName}'" lifetimeDeps f.Body
+
     // --- Check 3: ApplyInfo consistency ---
     let checkApplyInfoNode (ctx: string) (expr: IRExpr) =
         match expr with

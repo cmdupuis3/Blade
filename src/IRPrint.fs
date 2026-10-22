@@ -363,6 +363,9 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
         $"{pp e}.{i}"
     | IRIf (c, t, e) ->
         $"if {pp c} then {pp t} else {pp e}"
+    | IRBeginPoolScope call -> $"begin_pool_scope({call})"
+    | IRReleasePools (scope, pools, call) ->
+        $"""release_pools({pp scope}, [{pools |> List.map pp |> String.concat "; "}], {call})"""
     | IRLet (id, v, b) ->
         // Add the let-bound name to mapping for body
         let names' = Map.add id $"v{id}" names

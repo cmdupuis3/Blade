@@ -890,6 +890,7 @@ and private KArg =
 and private PoolScope =
     { At: int
       Pools: ResizeArray<string * string>
+      mutable InlineId: IRId option
       KnownIds: HashSet<IRId> }
 
 /// One emitted group_keys binding: the llvm-lane port of the C++ lane's
@@ -1318,6 +1319,7 @@ let private allocaOf (c: Ctx) (llType: string) : string =
 let private pushPoolScope (c: Ctx) : unit =
     c.PoolScopes.Add { At = c.Body.Count
                        Pools = ResizeArray()
+                       InlineId = None
                        KnownIds = HashSet(c.ArrSlots.Keys) }
 
 /// A tracked pool ESCAPES: null its tracking slot wherever it is tracked, so
@@ -2732,6 +2734,24 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
 
     | IRMatch (scrutinee, cases) -> emitMatch c e scrutinee cases
 
+    | IRBeginPoolScope _ -> refuse "an inline pool scope must be let-bound"
+    | IRReleasePools (IRVar (sid, _), pools, call) ->
+        if c.PoolScopes.Count = 0 || c.PoolScopes.[c.PoolScopes.Count - 1].InlineId <> Some sid then
+            refuse "an unmatched inline pool release"
+        let scope = c.PoolScopes.[c.PoolScopes.Count - 1]
+        for pool in pools do
+            match pool with
+            | IRVar (pid, _) ->
+                match c.ArrSlots.TryGetValue pid with
+                | true, { Src = APool p } when scope.Pools |> Seq.exists (fun (q, _) -> p = q) -> ()
+                | _ -> refuse "an inline release does not own its named pool"
+            | _ -> refuse "an inline release pool is not a binding reference"
+        ln c ($"; A01: inline return cleanup: {call}")
+        // These allocations were registered in this nested scope, never in
+        // its parent. Removing the scope prevents a second free at exit.
+        popPoolScope c None true
+        { Reg = ""; Ty = ScVoid }
+    | IRReleasePools _ -> refuse "an inline release has no scope reference"
     | IRLet (id, value, body) ->
         bindLetIn c id value body
         emitExpr c body
@@ -4129,6 +4149,11 @@ and private bindLetIn (c: Ctx) (id: IRId) (value: IRExpr) (scope: IRExpr) : unit
 and private bindNamed (c: Ctx) (id: IRId) (name: string) (declTy: IRType) (value: IRExpr) : unit =
     let rec peelCompute (e: IRExpr) = match e with IRCompute i -> peelCompute i | e -> e
     match value with
+    | IRBeginPoolScope call ->
+        ln c ($"; A01: begin inline pool scope: {call}")
+        pushPoolScope c
+        c.PoolScopes.[c.PoolScopes.Count - 1].InlineId <- Some id
+    | IRReleasePools _ -> emitExpr c value |> ignore
     | IRGroupKeys keys ->
         // A module-scope grouping carries its regime on the binding record;
         // the sentinel itself has no runtime value and prints nothing.
@@ -4219,7 +4244,7 @@ and private bindNamed (c: Ctx) (id: IRId) (name: string) (declTy: IRType) (value
             Blade.Effects.Decisions.record
                 { Rule = "epilogue-legs"; Version = 1; Span = c.DeclSpan; Subject = lp.Subject
                   Outcome = Blade.Effects.Declined "llvm lane: the producer's fused loop did not carry the legs (its cell epilogue was not taken in this lane)"
-                  Evidence = [ "the legs keep their joined pass" ] @ (match lp.InlinedCall with Some call -> [ $"{call} stays inlined (planned for these legs); this lane frees no pool in either form" ] | None -> []) }
+                  Evidence = [ "the legs keep their joined pass" ] @ (match lp.InlinedCall with Some call -> [ $"{call} stays inlined (planned for these legs); its IR return event still closes the inline allocation scope when the fused form declines" ] | None -> []) }
         bindNamed c id name declTy value
     // B2r for a recursion: the step's cell loop carried this prodsum's chain.
     | IRProdSum _ when (match Blade.Optimize.CellFoldTable.tryFoldLet id with
@@ -7562,8 +7587,11 @@ and private emitTupleParts (c: Ctx) (e: IRExpr) : ValKind list =
     // callee is in emitCall: its parameters bind to the arguments, and its
     // body is walked here as a pack, so the components land as the caller's
     // own values. A recursive tuple-returning call cannot be inlined and
-    // refuses (the C++ lane takes it).
-    | IRApp (IRVar (fid, _), args, _) when c.Callables.ContainsKey fid ->
+    // refuses (the C++ lane takes it). Scalar and array tuple members must
+    // fall through to classifyValue: their ordinary call ABI owns scoped
+    // cleanup and escaping array results, even when the call is a tuple leaf.
+    | IRApp (IRVar (fid, _), args, retType)
+        when c.Callables.ContainsKey fid && (match stripUnits retType with IRTTuple _ -> true | _ -> false) ->
         let cl = c.Callables.[fid]
         if cl.IsArityPoly then refuse ($"a call to the arity-polymorphic function '{cl.SourceName}'")
         if cl.IsCudaKernel || cl.IsMpiParallel then

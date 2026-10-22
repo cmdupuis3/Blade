@@ -1,0 +1,26 @@
+// TEST: Inline lifetime event survives deletion of an unused final join
+type Ix = Idx<1003>
+function inputs(a: Float64) -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> a + 0.0 * Float64(i) |> compute
+}
+function cell(a: Float64, b: Float64) -> Float64 = a + b
+function cube(a: Float64) -> Float64 = a * a * a
+type Jx = Idx<1009>
+function inputs_j(a: Float64) -> Array<Float64 like Jx> = {
+    method_for(range<Jx>) <@> lambda(i) -> a + 0.0 * Float64(i) |> compute
+}
+function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>, u: Array<Float64 like Jx>, v: Array<Float64 like Jx>) -> Float64 = {
+    let y2 = method_for(zip(x, y)) <@> cell |> compute
+    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
+    let unused = object_for(<&!>) <@> (reduce(u, (+)), reduce(v, (+)))
+    s
+}
+let (r, t) = {
+    let x = inputs(1.0)
+    let y = inputs(2.0)
+    let u = inputs_j(3.0)
+    let v = inputs_j(4.0)
+    (kernel(x, y, u, v), reduce(x, (+)) + reduce(y, (+)) + reduce(u, (+)) + reduce(v, (+)))
+}
+// EXPECT: r = 9027.0
+// EXPECT: t = 10072.0

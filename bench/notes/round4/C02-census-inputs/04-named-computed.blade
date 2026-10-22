@@ -1,0 +1,8 @@
+// C02 census: P is a demanded mapped output, also observed by a keyed read.
+type R = Idx<2>
+type C = Idx<3>
+let M: Array<Float64 like R, C> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let P = (method_for(M) <@> lambda(v: Float64) -> v * v + 1.0) |> compute
+let rows = reduce(P, (+), 7.0)
+let sample = P(1, 2)
+// Independent expected rows: [24.0, 87.0]; sample: 37.0.
