@@ -357,6 +357,53 @@ counted in the mask pass and gathered in one pass (corpus
 `sql-semijoins` tests (correctness under the hoist, including "Pattern Does Not
 Fire On Conjunction").
 
+## 6a. Inner equijoin — idiom, not keyword
+
+```blade
+type LeftRow = Idx<3>
+type RightRow = Idx<4>
+let left_key: Array<Int64 like LeftRow> = [1, 2, 9]
+let left_amount: Array<Int64 like LeftRow> = [2, 3, 7]
+let right_key: Array<Int64 like RightRow> = [1, 2, 1, 2]
+let right_amount: Array<Int64 like RightRow> = [10, 10, 20, 10]
+let matched = compound(method_for(left_amount, right_amount) <@> lambda(l, r) -> l * r, mask(method_for(left_key, right_key) <@> lambda(l, r) -> l == r, lambda(e) -> e))
+let match_count = extents(matched)
+let total = reduce(matched, (+), 0)
+// EXPECT: matched = [20, 40, 30, 30]
+// EXPECT: match_count = 4
+// EXPECT: total = 120
+```
+
+The relation is a rank-2 compound over (left row, right row), stored in lex order: left row
+ascending, then every matching right row ascending. It is a BAG — every left row pairs with
+every right row of equal key, duplicates on both sides kept (4 matches above; a set-based
+probe would find 2). **Performance status: the hash equijoin** (round 3 W3-2, item T2,
+`Optimize.planEquiJoin`, `blade plan` rule `hash-join`, knob `BLADE_HASH_JOIN`). Written
+INLINE as above — both outer products inside `compound(..)`, so they are compiler
+temporaries — the C++ lane never builds the N x M pools: it builds a stable CSR over the
+right keys (a counting sort over their measured span, or an open-addressing hash for a wide
+one; `src/cpp/blade_member.h`), counts the matches, then probes the left keys in order,
+storing each match's payload — O(N + M + J) instead of six passes over all N x M pairs, the
+same cells in the same order. Negative keys match like any other (equality has no
+negative-key drop, unlike `group_keys`); a left key no right row holds matches nothing,
+never an out-of-domain error. `matched` stays stored; `extents`, folds and printing read it
+as before. Admitted only when the keys are Int64 (plain or a positional `Idx<K>` tag), the
+key kernel is exactly `l == r`, the payload kernel is a pure, total, capture-free scalar of
+its two cells, the four sources are stored and never assigned, none of the parties whose
+work is SKIPPED or moved writes (the four sources' producers, the payload and key kernels, the
+predicate, the relation's own payload -- a fold kernel or seed that writes is left at its own
+site unchanged, and is admitted), and every use of the relation reads its cells or its count
+alone. A
+keyed read `matched(i, j)`, an alias, a call argument, a map over the relation, a writing or
+non-total kernel, float keys, a conjunctive key kernel (v1.1) or the NAMED spelling
+(`let equal_keys = method_for(..) <@> lambda(l, r) -> l == r |> compute`,
+`let keep = mask(equal_keys, ..)`, `let products = .. |> compute`, `compound(products,
+keep)` — every named array stays stored) keep the as-written passes, with the reason in
+the plan. The LLVM lane refuses rank-2 compounds (the program falls back to C++) and
+records the decline; the interpreter runs the as-written passes. Tests: `sql-joins/001–019`
+(014–019 are failure witnesses: a payload or key kernel that can panic on a NON-matching
+pair keeps the as-written passes, so the panic stays).
+
 ## 7. `group_keys(k₁, k₂, ...)` — grouping structure
 
 ```blade sketch
@@ -921,3 +968,7 @@ Tests: `sql-foreign-keys` (10).
 4. Sort laziness / order-in-types — lazy key-map chains, merge joins.
 5. Static `CompoundIdx<mask>` type path — exercise the reserved route.
 6. Elementwise-over-grouped: stays rejected; revisit if a use case appears.
+7. Equijoin (§6a), v1.1: the LLVM lane's CSR build and probe; conjunctive (multi-key)
+   equality kernels; a fold fused into the probe (needs a snapshot proof that nothing
+   between the relation and the fold writes its sources); keyed reads of the relation
+   without the hashed index; the full-size bench run after a footprint / store audit.

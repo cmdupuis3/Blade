@@ -44,5 +44,9 @@
   "haloadjoint": {
     "smoke": {"checksum": 931.84702902803338, "input_checksum": 994.20763162942603, "sizes": {"n": 1013}},
     "full": {"checksum": 49031.582053620172, "input_checksum": 49973.552964067087, "sizes": {"n": 50021}}
+  },
+  "hashjoin": {
+    "smoke": {"checksum": 966472222, "input_checksum": 156236, "sizes": {"n": 211, "m": 101, "k": 41}},
+    "full": {"checksum": 2251884269, "input_checksum": 2115829, "sizes": {"n": 2003, "m": 1009, "k": 401}}
   }
 }

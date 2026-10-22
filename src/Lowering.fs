@@ -2957,6 +2957,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     Optimize.CellFoldTable.reset ()
     Optimize.RecStepTable.reset ()
     Optimize.CompactionTable.reset ()
+    Optimize.EquiJoinTable.reset ()
     Optimize.CompactRowTable.reset ()
     Optimize.OrbitPullTable.reset ()
     Optimize.OrbitActionTable.reset ()
@@ -3191,6 +3192,12 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
             if irModules.Length < 2 || irModule.CompoundInits.IsEmpty then Set.empty
             else moduleRefs.Force() |> List.filter (fun (n, _) -> n <> irModule.Name) |> List.map snd |> Set.unionMany
         Optimize.planCompactionFusion programFuncs foreignRefs irModule
+        // Hash equijoin (Blade.Optimize.planEquiJoin, round 3 W3-2, item
+        // T2): an inline rank-2 equijoin compound becomes a stable CSR build
+        // over the right keys plus a left-major / right-minor probe in the
+        // C++ lane; side table, the interpreter runs the as-written tree.
+        // Gate: BLADE_HASH_JOIN.
+        Optimize.planEquiJoin programFuncs foreignRefs irModule
         // Compact row classes (Blade.Optimize.planCompactRowClasses): a
         // compact rank-2 producer's orbit-fold class partials computed behind
         // each packed row; side table, both emitters. Gate:

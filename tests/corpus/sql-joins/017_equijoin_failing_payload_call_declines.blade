@@ -1,0 +1,27 @@
+// TEST: Equijoin Failing Payload Call Declines (aborts)
+// ----------------------------------------------------------------------------
+// A FAILURE-ADMISSION witness: the payload kernel CALLS a function that
+// divides, and the right row j = 4 (key 5, which no left row holds) has amount
+// 0, so the NON-matching pair (0, 4) panics BL8013 inside the call. The
+// totalScalarOver whitelist judges no call, so the join declines and the
+// as-written program (pk on every pair) keeps the panic.
+// ----------------------------------------------------------------------------
+type LeftRow = Idx<3>
+type RightRow = Idx<5>
+function ratio(a: Int64, b: Int64) -> Int64 = a / b
+let left_key: Array<Int64 like LeftRow> = [1, 2, 9]
+let left_amount: Array<Int64 like LeftRow> = [2, 3, 7]
+let right_key: Array<Int64 like RightRow> = [1, 2, 1, 2, 5]
+let right_amount: Array<Int64 like RightRow> = [10, 10, 20, 10, 0]
+let matched = compound(method_for(left_amount, right_amount) <@> lambda(l, r) -> ratio(l, r), mask(method_for(left_key, right_key) <@> lambda(l, r) -> l == r, lambda(e) -> e))
+let match_count = extents(matched)
+// ABORT: BL8013
+// ABORT: .blade:10
+// ABORT: at ratio
+// The failure SITE is pinned as well as the code (the line -- the corpus harness strips the
+// `// TEST:` line, so a pinned line is the file's line minus one, as in index-types/521 --
+// and for a call the callee's
+// frame), checked in the C++ lane and by the interpreter differential. The LLVM lane
+// refuses this program (a rank-2 compound) and the run falls back to C++: no LLVM panic or
+// location is pinned here; the lane's hash-join refusal and record are pinned only by the
+// synthetic tests/OptimizeTests.fs decision_hash_join_llvm_declines.

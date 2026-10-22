@@ -84,7 +84,7 @@ let internal suiteClearedKnobs =
     [ "OPENBLAS_DIR"; "BLADE_BLAS"; "BLADE_CUBLAS"
       "BLADE_BLAS_LINK"; "BLADE_BLAS_INCLUDE"; "BLADE_BLAS_FLAVOR"; "BLADE_BLAS_PREFER"
       "BLADE_LAPACK_LINK"; "BLADE_LAPACK_INCLUDE"
-      "BLADE_PRINT"; "BLADE_PRINT_BITS"; "BLADE_MEMBER_VERBOSE"
+      "BLADE_PRINT"; "BLADE_PRINT_BITS"; "BLADE_MEMBER_VERBOSE"; "BLADE_JOIN_REPORT"
       "BLADE_FP_REASSOC"; "BLADE_FP_REPRO"; "BLADE_FP_CONTRACT"; "BLADE_MARCH"
       "BLADE_OMP_THREADS"
       "BLADE_TILE_CACHE"; "BLADE_TILE_CACHE_VERBOSE"
@@ -1622,6 +1622,268 @@ let runCliSmokeTests () : TH.BlockResult =
                 let (c, o, _) = spawnWith [ ("BLADE_MEMBER_HOIST", knob) ] dir [ "plan"; "hosts.blade" ]
                 recordCase $"member hoist: `plan` under BLADE_MEMBER_HOIST={knob} names the forced (preferred) representation"
                     (c = 0 && o.Contains "[member-hoist v1] k_even" && o.Contains $"preferred representation: {rep} (span 61, M 20) -- forced by BLADE_MEMBER_HOIST={knob}") ""
+        finally
+            try Directory.Delete(dir, true) with _ -> ()
+    // --- HASH EQUIJOIN (Blade.Optimize.planEquiJoin, round 3 W3-2, item T2) ---
+    // (1) The join's C core (blade_join_* in blade_member.h): a g++-built
+    // driver builds the CSR over right-key sets of several shapes -- empty,
+    // one row, all equal (skew), a small span with negatives, a span at the
+    // counting-sort bound, wide random 64-bit, Int64 extremes, heavy
+    // duplicates -- with the positional flag off and on, and checks, for every
+    // probe key (each right key, its +/-1 neighbours, the extremes, random
+    // keys), that the bucket's rows are EXACTLY the right rows j holding that
+    // key, ASCENDING (the naive scan's list: forward-filled, stable, bags kept),
+    // and -1 exactly when the scan finds none; every free releases every
+    // allocation; then each allocation of a build fails in turn (the header's
+    // hooks): the build returns -1 with nothing left allocated. (2) The run
+    // time: sql-joins-shaped programs COMPILED with BLADE_JOIN_REPORT=1 report
+    // the form each build took (`[join] ...`: the counting sort for a small or
+    // positional span, the hash for a wide one) and print the same values as
+    // the gate off (the six as-written passes).
+    if not capabilities.Value.HasGpp || selfExe.IsNone then
+        record "hash join: the C core and the run-time route" TH.Skip "requires g++ and the Blade executable"
+    else
+        let dir = Path.Combine(Path.GetTempPath(), "blade_cli_join_" + Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory dir |> ignore
+        try
+            Blade.CodeGen.deployRuntimeHeaders dir
+            let driver =
+                String.concat "\n"
+                    [ "#include <cstdio>"
+                      "#include <cstdint>"
+                      "#include <cstdlib>"
+                      "#include <vector>"
+                      "static int g_ord = 0, g_live = 0, g_failat = -1;"
+                      "static void* t_malloc(size_t n) { int k = g_ord++; if (k == g_failat) return nullptr; void* p = std::malloc(n ? n : 1); if (p) g_live++; return p; }"
+                      "static void* t_calloc(size_t n, size_t s) { int k = g_ord++; if (k == g_failat) return nullptr; void* p = std::calloc(n ? n : 1, s ? s : 1); if (p) g_live++; return p; }"
+                      "static void t_free(void* p) { if (p) { g_live--; std::free(p); } }"
+                      "#define BLADE_MEMBER_MALLOC(b) t_malloc(b)"
+                      "#define BLADE_MEMBER_CALLOC(n, s) t_calloc((n), (s))"
+                      "#define BLADE_MEMBER_FREE(p) t_free(p)"
+                      "#include \"blade_member.h\""
+                      "static uint64_t s_ = 0x9E3779B97F4A7C15ull;"
+                      "static uint64_t nx() { s_ ^= s_ << 13; s_ ^= s_ >> 7; s_ ^= s_ << 17; return s_; }"
+                      "static int64_t wrapAdd(int64_t a, int64_t b) { return (int64_t)((uint64_t)a + (uint64_t)b); }"
+                      "static long check(const blade_join_csr_i64& t, const std::vector<int64_t>& rk) {"
+                      "    const int64_t ex[] = {INT64_MIN, INT64_MAX, 0, -1, 1, INT64_MIN + 1, INT64_MAX - 1};"
+                      "    std::vector<int64_t> ps;"
+                      "    for (size_t i = 0; i < rk.size(); i++) { ps.push_back(rk[i]); ps.push_back(wrapAdd(rk[i], 1)); ps.push_back(wrapAdd(rk[i], -1)); }"
+                      "    for (int k = 0; k < 7; k++) ps.push_back(ex[k]);"
+                      "    for (int k = 0; k < 64; k++) ps.push_back((int64_t)nx());"
+                      "    long bad = 0;"
+                      "    if (t.off[t.nb] != (int64_t)rk.size()) bad++;"
+                      "    for (size_t q = 0; q < ps.size(); q++) {"
+                      "        std::vector<int64_t> naive;"
+                      "        for (size_t j = 0; j < rk.size(); j++) if (rk[j] == ps[q]) naive.push_back((int64_t)j);"
+                      "        int64_t b = blade_join_lookup_i64(&t, ps[q]);"
+                      "        std::vector<int64_t> got;"
+                      "        if (b >= 0) { if (b >= t.nb) { bad++; continue; } for (int64_t x = t.off[b]; x < t.off[b + 1]; x++) got.push_back(t.perm[x]); }"
+                      "        if (got != naive) bad++;"
+                      "    }"
+                      "    return bad;"
+                      "}"
+                      "int main() {"
+                      "    const int sizes[] = {0, 1, 2, 7, 64, 211, 1009};"
+                      "    const int64_t ex[] = {INT64_MIN, INT64_MAX, 0, -1, 1, INT64_MIN + 1, INT64_MAX - 1};"
+                      "    long builds = 0, bad = 0, direct = 0, hash = 0;"
+                      "    for (int shape = 0; shape < 7; shape++)"
+                      "    for (int si = 0; si < 7; si++) {"
+                      "        const int m = sizes[si];"
+                      "        std::vector<int64_t> rk((size_t)m);"
+                      "        for (int i = 0; i < m; i++) {"
+                      "            uint64_t r = nx();"
+                      "            if (shape == 0) rk[i] = 5;"
+                      "            else if (shape == 1) rk[i] = (int64_t)(r % 17) - 8;"
+                      "            else if (shape == 2) rk[i] = (int64_t)(r % 4096);"
+                      "            else if (shape == 3) rk[i] = (int64_t)r;"
+                      "            else if (shape == 4) rk[i] = ex[r % 7];"
+                      "            else if (shape == 5) rk[i] = (int64_t)(r % 3) * 1000003;"
+                      "            else rk[i] = (int64_t)(r % 401);"
+                      "        }"
+                      "        for (int positional = 0; positional <= 1; positional++) {"
+                      "            blade_join_csr_i64 t;"
+                      "            g_ord = 0; g_live = 0; g_failat = -1;"
+                      "            if (blade_join_build_i64(&t, m ? rk.data() : nullptr, (int64_t)m, positional) != 0) { bad++; std::printf(\"BAD build failed m=%d\\n\", m); continue; }"
+                      "            if (t.kind == BLADE_JOIN_DIRECT) direct++; else if (t.kind == BLADE_JOIN_HASH) hash++;"
+                      "            { int64_t lo = 0, hi = 0; for (int i = 0; i < m; i++) { if (i == 0 || rk[i] < lo) lo = rk[i]; if (i == 0 || rk[i] > hi) hi = rk[i]; }"
+                      "              std::printf(\"K %d %d %d %lld %lld\\n\", m, positional, t.kind, (long long)lo, (long long)hi); }"
+                      "            long b = check(t, rk);"
+                      "            if (b) { bad += b; std::printf(\"BAD shape=%d m=%d positional=%d kind=%d: %ld\\n\", shape, m, positional, t.kind, b); }"
+                      "            blade_join_free_i64(&t);"
+                      "            if (t.kind != BLADE_JOIN_NONE || g_live != 0) { bad++; std::printf(\"BAD free m=%d live=%d\\n\", m, g_live); }"
+                      "            builds++;"
+                      "        }"
+                      "    }"
+                      "    // allocation failures: every allocation of a direct and of a hash build, in turn"
+                      "    long fails = 0, failbad = 0;"
+                      "    for (int form = 0; form < 2; form++) {"
+                      "        std::vector<int64_t> rk;"
+                      "        for (int i = 0; i < 97; i++) rk.push_back(form == 0 ? (int64_t)(i % 13) : (int64_t)nx());"
+                      "        for (int k = 0; k < 8; k++) {"
+                      "            blade_join_csr_i64 t;"
+                      "            g_ord = 0; g_live = 0; g_failat = k;"
+                      "            int rc = blade_join_build_i64(&t, rk.data(), (int64_t)rk.size(), 0);"
+                      "            if (rc == 0) { if (g_ord <= k) { blade_join_free_i64(&t); break; } failbad++; blade_join_free_i64(&t); }"
+                      "            else if (g_live != 0 || t.kind != BLADE_JOIN_NONE) failbad++;"
+                      "            fails++;"
+                      "        }"
+                      "    }"
+                      "    // the chooser's THRESHOLDS, below / at / above each, both positional flags:"
+                      "    // the max(4 M, 4096) switch (its 4096 floor at M = 5, its 4 M branch at M = 1025"
+                      "    // and 2000), the 2^20 positional force (M = 5, and M = 300000 where 4 M > 2^20),"
+                      "    // the 2^26 span cap (M = 5, and M = 2^25 where 4 M > 2^26), M = 0, a negative lo,"
+                      "    // the full Int64 span. blade_join_choose_i64 itself (no build: the shapes are too"
+                      "    // large to allocate), compared with Optimize.joinChooseDirect line by line."
+                      "    struct BC { long long m; long long lo; unsigned long long span_m1; };"
+                      "    std::vector<BC> bc;"
+                      "    const unsigned long long d[] = {0ull, 1ull, 2ull};"
+                      "    for (int k = 0; k < 3; k++) {"
+                      "        bc.push_back({5, 0, 4095ull + d[k]}); bc.push_back({5, -7, 4095ull + d[k]});"
+                      "        bc.push_back({1025, 0, 4099ull + d[k]}); bc.push_back({2000, 0, 7999ull + d[k]});"
+                      "        bc.push_back({5, 0, (1ull << 20) - 1 + d[k]}); bc.push_back({300000, 0, (1ull << 20) - 1 + d[k]});"
+                      "        bc.push_back({5, 0, (1ull << 26) - 1 + d[k]}); bc.push_back({1ll << 25, 0, (1ull << 26) - 1 + d[k]});"
+                      "    }"
+                      "    bc.push_back({0, 0, 0}); bc.push_back({0, INT64_MIN, ~0ull}); bc.push_back({5, INT64_MIN, ~0ull}); bc.push_back({1, 42, 0});"
+                      "    long nbc = 0;"
+                      "    for (const BC& c : bc)"
+                      "        for (int positional = 0; positional <= 1; positional++) {"
+                      "            int64_t lo = (int64_t)c.lo; int64_t hi = (int64_t)((uint64_t)lo + c.span_m1);"
+                      "            int kind = blade_join_choose_i64((int64_t)c.m, lo, hi, positional);"
+                      "            std::printf(\"B %lld %d %d %lld %lld\\n\", c.m, positional, kind, (long long)lo, (long long)hi);"
+                      "            nbc++;"
+                      "        }"
+                      "    std::printf(\"JOIN CORE: %ld builds (%ld counting sort, %ld hash), %ld bad; %ld injected failures, %ld bad\\n\", builds, direct, hash, bad, fails, failbad);"
+                      "    return (bad == 0 && failbad == 0) ? 0 : 1;"
+                      "}"
+                      "" ]
+            let drv = Path.Combine(dir, "join_core.cpp")
+            File.WriteAllText(drv, driver)
+            (match Build.compileCpp drv dir with
+             | Error e -> recordCase "hash join: the C core (blade_join_*) driver" false e
+             | Ok exe ->
+                 match runExecutable exe with
+                 | Error e -> recordCase "hash join: the C core (blade_join_*) driver" false e
+                 | Ok (code, out) ->
+                     let summary =
+                         out.Replace("\r\n", "\n").Split('\n') |> Array.tryFind (fun l -> l.StartsWith "JOIN CORE:") |> Option.defaultValue "(no summary)"
+                     let formsSeen = not (summary.Contains "(0 counting sort") && not (summary.Contains ", 0 hash)")
+                     recordCase "hash join: the C core -- every bucket is exactly the right rows holding its key, ascending (forward-filled, bags kept), -1 exactly when none; both forms built; every free and every failed build releases everything"
+                         (code = 0 && summary.Contains "98 builds" && summary.Contains " 0 bad; " && summary.EndsWith " 0 bad" && formsSeen) summary
+                     // the plan record's restatement of the chooser
+                     // (Optimize.joinChooseDirect) agrees with the C core, case for case
+                     let kinds =
+                         out.Replace("\r\n", "\n").Split('\n') |> Array.choose (fun l ->
+                             let p = l.Split(' ')
+                             if p.Length = 6 && p.[0] = "K" then Some (int64 p.[1], p.[2] = "1", int p.[3], int64 p.[4], int64 p.[5]) else None)
+                     let disagree =
+                         kinds |> Array.filter (fun (m, pos, kind, lo, hi) ->
+                             let wantDirect = Blade.Optimize.joinChooseDirect m lo hi pos
+                             (kind = 1) <> wantDirect)
+                     recordCase "hash join: the C core's form chooser is Optimize.joinChooseDirect's (the plan record's restatement), case for case"
+                         (kinds.Length = 98 && disagree.Length = 0) ($"{disagree.Length} disagreements of {kinds.Length}")
+                     // ... and at every THRESHOLD (below / at / above), both flags
+                     let bounds =
+                         out.Replace("\r\n", "\n").Split('\n') |> Array.choose (fun l ->
+                             let p = l.Split(' ')
+                             if p.Length = 6 && p.[0] = "B" then Some (int64 p.[1], p.[2] = "1", int p.[3], int64 p.[4], int64 p.[5]) else None)
+                     let bDisagree =
+                         bounds |> Array.filter (fun (m, pos, kind, lo, hi) -> (kind = 1) <> Blade.Optimize.joinChooseDirect m lo hi pos)
+                     // the thresholds really switch: each below / at pair differs where the rule says it must
+                     let kindOf (m: int64) (pos: bool) (lo: int64) (spanM1: uint64) =
+                         bounds |> Array.tryPick (fun (m', pos', kind, lo', hi') ->
+                             if m' = m && pos' = pos && lo' = lo && uint64 hi' - uint64 lo' = spanM1 then Some kind else None)
+                     let switches =
+                         [ kindOf 5L false 0L 4095UL, kindOf 5L false 0L 4096UL                          // 4096 floor
+                           kindOf 2000L false 0L 7999UL, kindOf 2000L false 0L 8000UL                    // the 4 M branch
+                           kindOf 1025L false 0L 4099UL, kindOf 1025L false 0L 4100UL
+                           kindOf 5L true 0L ((1UL <<< 20) - 1UL), kindOf 5L true 0L (1UL <<< 20)        // the positional force
+                           kindOf (1L <<< 25) false 0L ((1UL <<< 26) - 1UL), kindOf (1L <<< 25) false 0L (1UL <<< 26) ] // the span cap
+                         |> List.forall (fun (a, b) -> a = Some 1 && b = Some 2)
+                     recordCase "hash join: the chooser's thresholds -- max(4 M, 4096) (its 4096 floor and its 4 M branch, M > 1024), the 2^20 positional force, the 2^26 span cap, M = 0, both positional flags -- below / at / above each: C core = Optimize.joinChooseDirect, and each switches DIRECT -> HASH exactly at its threshold"
+                         (bounds.Length = 56 && bDisagree.Length = 0 && switches) ($"{bDisagree.Length} disagreements of {bounds.Length}; thresholds switch: {switches}"))
+            // (2) the run-time route, gate on vs off
+            let progs =
+                [ ("hj_small",
+                   [ "type L = Idx<7>"; "type R = Idx<5>"
+                     "let lk: Array<Int64 like L> = [3, -1, 3, 8, 0, -1, 3]"
+                     "let la: Array<Int64 like L> = [1, 2, 3, 4, 5, 6, 7]"
+                     "let rk: Array<Int64 like R> = [-1, 3, 0, 3, -1]"
+                     "let ra: Array<Int64 like R> = [10, 20, 30, 40, 50]"
+                     "let rel = compound(method_for(la, ra) <@> lambda(l, r) -> l * 100 + r, mask(method_for(lk, rk) <@> lambda(l, r) -> l == r, lambda(e) -> e))"
+                     "let n_rel = extents(rel)"
+                     "let fp = reduce(rel, lambda(a, b) -> 3 * a + b, 0)" ],
+                   "form counting sort, buckets 5; N 7, |J| 11")
+                  ("hj_wide",
+                   [ "type L = Idx<4>"; "type R = Idx<5>"
+                     "let lk: Array<Int64 like L> = [1000000007, -5, 42, 1000000007]"
+                     "let la: Array<Int64 like L> = [1, 2, 3, 4]"
+                     "let rk: Array<Int64 like R> = [42, 1000000007, 7, 1000000007, -5]"
+                     "let ra: Array<Int64 like R> = [10, 20, 30, 40, 50]"
+                     "let rel = compound(method_for(la, ra) <@> lambda(l, r) -> l * 100 + r, mask(method_for(lk, rk) <@> lambda(l, r) -> l == r, lambda(e) -> e))"
+                     "let n_rel = extents(rel)"
+                     "let fp = reduce(rel, lambda(a, b) -> 3 * a + b, 0)" ],
+                   "form hash, buckets 4; N 4, |J| 6")
+                  ("hj_positional",
+                   [ "type K = Idx<6>"; "type L = Idx<4>"; "type R = Idx<5>"
+                     "let lk: Array<K like L> = [5, 0, 2, 5]"
+                     "let la: Array<Int64 like L> = [1, 2, 3, 4]"
+                     "let rk: Array<K like R> = [5, 1, 5, 0, 5]"
+                     "let ra: Array<Int64 like R> = [10, 20, 30, 40, 50]"
+                     "let rel = compound(method_for(la, ra) <@> lambda(l, r) -> l * 100 + r, mask(method_for(lk, rk) <@> lambda(l, r) -> l == r, lambda(e) -> e))"
+                     "let n_rel = extents(rel)"
+                     "let fp = reduce(rel, lambda(a, b) -> 3 * a + b, 0)" ],
+                   "form counting sort, buckets 6; N 4, |J| 7") ]
+            let strip (o: string) =
+                o.Replace("\r\n", "\n").Split('\n')
+                |> Array.filter (fun l -> not (l.Contains " completed in ") && l.Trim() <> "" && not (l.StartsWith "[stderr]") && not (l.StartsWith "[join] "))
+                |> String.concat "\n"
+            let joinReports (o: string) (e: string) =
+                (o + "\n" + e).Replace("\r\n", "\n").Split('\n')
+                |> Array.map (fun l -> if l.StartsWith "[stderr]: " then l.Substring 10 else l)
+                |> Array.filter (fun l -> l.StartsWith "[join] ")
+                |> List.ofArray
+            // BLADE_JOIN_REPORT is a COMPILE-TIME gate (review W3-2 finding
+            // 3): each program is COMPILED under one environment and its
+            // executable RUN under another, so the two settings are pinned
+            // independently -- compile-on / run-off reports, compile-off /
+            // run-on (BLADE_JOIN_REPORT and BLADE_MEMBER_VERBOSE both set at
+            // run time) does not; the gate off builds no CSR.
+            let runExe (env: (string * string) list) (exe: string) =
+                let psi = System.Diagnostics.ProcessStartInfo(exe)
+                for (k, v) in env do
+                    if isNull v then psi.Environment.Remove k |> ignore else psi.Environment.[k] <- v
+                psi.WorkingDirectory <- dir
+                psi.RedirectStandardOutput <- true
+                psi.RedirectStandardError <- true
+                psi.UseShellExecute <- false
+                psi.CreateNoWindow <- true
+                use p = System.Diagnostics.Process.Start psi
+                let o = Blade.Runtime.readToEndOffPool p.StandardOutput
+                let e = Blade.Runtime.readToEndOffPool p.StandardError
+                if p.WaitForExit 120000 then (p.ExitCode, o.Result, e.Result) else ((try p.Kill() with _ -> ()); (-1, o.Result, "timed out"))
+            let quiet = [ ("BLADE_JOIN_REPORT", null); ("BLADE_MEMBER_VERBOSE", null) ]
+            let loud = [ ("BLADE_JOIN_REPORT", "1"); ("BLADE_MEMBER_VERBOSE", "1") ]
+            for (nm, lines, wantForm) in progs do
+                File.WriteAllText(Path.Combine(dir, nm + ".blade"), String.concat "\n" (lines @ [ "" ]))
+                let compileTo (tag: string) (env: (string * string) list) =
+                    let exe = Path.Combine(dir, $"{nm}_{tag}.exe")
+                    let (c, _, e) = spawnWith ([ ("BLADE_BLAS", "off"); ("BLADE_EXE_CACHE", "0") ] @ env) dir [ "compile"; nm + ".blade"; "-o"; exe ]
+                    if c = 0 && File.Exists exe then Ok exe else Error ($"compile {tag}: exit {c}: {e}")
+                match compileTo "rep" [ ("BLADE_JOIN_REPORT", "1"); ("BLADE_MEMBER_VERBOSE", null) ],
+                      compileTo "norep" [ ("BLADE_JOIN_REPORT", null); ("BLADE_MEMBER_VERBOSE", "1") ],
+                      compileTo "off" [ ("BLADE_JOIN_REPORT", "1"); ("BLADE_HASH_JOIN", "0") ] with
+                | Ok exeRep, Ok exeNoRep, Ok exeOff ->
+                    let (c1, o1, e1) = runExe quiet exeRep     // compile-on / run-off
+                    let (c2, o2, e2) = runExe loud exeNoRep    // compile-off / run-on
+                    let (c3, o3, e3) = runExe loud exeOff      // the gate off
+                    let r1, r2, r3 = joinReports o1 e1, joinReports o2 e2, joinReports o3 e3
+                    let same = strip o1 = strip o2 && strip o2 = strip o3
+                    let routeOk = (r1 = [ $"[join] rel: CSR over rk, M 5, {wantForm}" ]) && r2.IsEmpty && r3.IsEmpty
+                    recordCase $"hash join: {nm} -- compiled with BLADE_JOIN_REPORT=1 and run with no switch it reports `{wantForm}`; compiled without it and run with BLADE_JOIN_REPORT=1 BLADE_MEMBER_VERBOSE=1 it reports nothing; the gate off builds no CSR; all three print the same values"
+                        (c1 = 0 && c2 = 0 && c3 = 0 && same && routeOk) ($"compile-on/run-off: {r1}; compile-off/run-on: {r2.Length} report(s); gate off: {r3.Length}; values same: {same}")
+                | a, b, c ->
+                    let why = [ a; b; c ] |> List.choose (function Error e -> Some e | Ok _ -> None) |> String.concat " | "
+                    recordCase $"hash join: {nm} -- compile-time report gate" false why
         finally
             try Directory.Delete(dir, true) with _ -> ()
     if not capabilities.Value.HasGpp || selfExe.IsNone then

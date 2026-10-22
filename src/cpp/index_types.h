@@ -257,12 +257,33 @@ struct compound_index_t : abstract_sorted_hashed_idx_t<RANK> {
 	IDX extents;
 	std::vector<bool> mask;
 
+	/* A CARDINALITY-ONLY index (the hash equijoin, round 3 W3-2,
+	 * Blade.Optimize.planEquiJoin): the compiler's demand census proved no
+	 * consumer reads anything but the compact buffer and the cardinality, so
+	 * no tuple table, reverse hash or mask is built. Extents and cardinality
+	 * are those of every other form; `unhash`, `linearize`, `present`,
+	 * `prefix_range` and `hash` refuse the absent table (BL9002, an internal
+	 * error) -- never a read through it. */
+	bool tuples_elided_ = false;
+	struct cardinality_only_t {};
+	static constexpr cardinality_only_t cardinality_only{};
+	[[noreturn]] static void tuples_absent() {
+		throw std::logic_error("[BL9002] internal codegen invariant violated: a lookup through a cardinality-only compound index (the hash equijoin's demand census missed a consumer)");
+	}
+
 	compound_index_t(std::string name_in, IDX extents_in, std::vector<bool> mask_in)
 		: base(name_in, product(extents_in)), extents(extents_in), mask(std::move(mask_in)) {
 		this->hash();
 	}
 
+	compound_index_t(std::string name_in, IDX extents_in, size_t cardinality_in, cardinality_only_t)
+		: base(name_in, product(extents_in)), extents(extents_in), mask() {
+		this->cardinality = cardinality_in;
+		tuples_elided_ = true;
+	}
+
 	void hash() {
+		if (tuples_elided_) tuples_absent();
 		this->rank_to_tuple.clear();
 		this->tuple_to_rank.clear();
 		IDX idx{};
@@ -270,14 +291,26 @@ struct compound_index_t : abstract_sorted_hashed_idx_t<RANK> {
 		this->cardinality = this->rank_to_tuple.size();
 	}
 
+	IDX unhash(size_t index) {
+		if (tuples_elided_) tuples_absent();
+		return this->rank_to_tuple[index];
+	}
+
+	size_t linearize(const IDX& tuple) const {
+		if (tuples_elided_) tuples_absent();
+		return base::linearize(tuple);
+	}
+
 	// Presence (allocation) query for the <|:> allocated-fallback read: does
 	// this compound hold a cell for the full tuple? The mask bit IS the
 	// allocation record of the compact buffer (absent cells have no storage).
 	bool present(const IDX& t) const {
+		if (tuples_elided_) tuples_absent();
 		return mask[mask_offset(t)];
 	}
 
 	std::pair<size_t, size_t> prefix_range(const IDX& prefix, size_t plen) const {
+		if (tuples_elided_) tuples_absent();
 		size_t n = this->rank_to_tuple.size();
 		size_t lo, hi;
 		{ size_t a = 0, b = n;

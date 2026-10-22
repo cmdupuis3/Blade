@@ -348,4 +348,210 @@ static inline void blade_member_note_i64(const blade_member_i64 *t, const char *
 #endif
 }
 
+/* ---------------------------------------------------------------------------
+ * THE EQUIJOIN CSR (round 3 W3-2, item T2; Blade.Optimize.planEquiJoin, plan
+ * rule `hash-join`): the KEY -> BUCKET map of the same core, plus the bucket
+ * rows. Built ONCE over the right keys rk[0, m) of an inline equijoin
+ * compound; the caller (the C++ lane's genEquiJoinBinding) then probes the
+ * left keys i ascending and walks every bucket row ascending, which is the
+ * compound's lex (left-major / right-minor) order.
+ *
+ * THE OPERATION. Every distinct right key k gets a bucket b; off[b] ..
+ * off[b + 1] are the positions in perm of the right rows j with rk[j] == k,
+ * ASCENDING in j: the rows are filled FORWARD (stable), never prepended, and
+ * duplicates are all kept (bags survive). `blade_join_lookup_i64(t, x)` is
+ * the bucket of key x, or -1 when no right row holds x -- exactly integer
+ * `==` against every right cell: negative keys, 0, INT64_MIN and INT64_MAX
+ * are ordinary keys, and a key outside any declared domain simply has no
+ * bucket (there is no domain check, as `==` has none). A DIRECT bucket may be
+ * empty (off[b] == off[b + 1]): the caller reads the range, never assumes it
+ * non-empty.
+ *
+ * TWO FORMS, one answer:
+ *   DIRECT -- a counting sort over the keys' measured span [lo, hi]: bucket
+ *             b = x - lo (unsigned difference, exact for every hi >= lo),
+ *             nb = hi - lo + 1 buckets. Taken when `positional` (the right
+ *             key's type is a positional Idx<K>: span <= K by type, and the
+ *             span is still MEASURED, never assumed) and the span is below
+ *             2^20 (8 MiB of offsets), or when the span is below
+ *             max(4 m, 4096) and 2^26 (offsets O(m)).
+ *   HASH   -- open addressing over a power-of-two capacity >= 2m (load <=
+ *             1/2), Fibonacci hashing of the key's bits, linear probing; an
+ *             OWN occupancy byte array (no key is a sentinel); buckets
+ *             numbered in first-occurrence order (the numbering never
+ *             reaches the output: the probe order is the left keys').
+ * The chooser reads (m, lo, hi, positional) only -- never timing or the
+ * machine. m == 0 is DIRECT with nb = 0 (every lookup -1).
+ *
+ * FAILURE. An allocation that cannot be made returns -1 with every partial
+ * allocation freed and the struct reset; the caller raises std::bad_alloc
+ * (the as-written N x M pools would have needed far more). No other failure
+ * exists: no key value, duplicate or span overflows the arithmetic.
+ *
+ * LIFETIME. Caller-owned struct; `blade_join_free_i64` releases the build
+ * and resets it. The build reads rk only during the call (nothing borrowed).
+ * The interpreter does NOT use this core (the independent oracle).
+ */
+#define BLADE_JOIN_NONE   0
+#define BLADE_JOIN_DIRECT 1
+#define BLADE_JOIN_HASH   2
+
+#define BLADE_JOIN_SPAN_PER_ROW 4
+#define BLADE_JOIN_SPAN_FLOOR   4096
+#define BLADE_JOIN_SPAN_CAP     ((uint64_t)1 << 26)
+#define BLADE_JOIN_POSITIONAL_CAP ((uint64_t)1 << 20)
+
+typedef struct blade_join_csr_i64 {
+    int kind;              /* BLADE_JOIN_DIRECT / _HASH (NONE = not built) */
+    int shift;             /* HASH: 64 - log2(capacity) */
+    int64_t m;             /* right rows */
+    int64_t nb;            /* buckets */
+    int64_t *off;          /* nb + 1 offsets into perm (owned) */
+    int64_t *perm;         /* m right rows, bucket-major, ascending within a bucket (owned) */
+    int64_t lo;            /* DIRECT: the smallest key */
+    uint64_t span_m1;      /* DIRECT: hi - lo, unsigned */
+    int64_t *keys;         /* HASH: capacity slots (owned) */
+    int64_t *bucket;       /* HASH: capacity bucket ids (owned) */
+    unsigned char *used;   /* HASH: capacity occupancy bytes (owned) */
+    uint64_t cap_mask;     /* HASH: capacity - 1 */
+} blade_join_csr_i64;
+
+/* The form the build takes for (m, lo, hi, positional); lo / hi read only
+ * when m > 0. */
+static inline int blade_join_choose_i64(int64_t m, int64_t lo, int64_t hi, int positional) {
+    uint64_t span_m1, limit;
+    if (m <= 0) return BLADE_JOIN_DIRECT;
+    span_m1 = (uint64_t)hi - (uint64_t)lo;
+    if (positional && span_m1 < BLADE_JOIN_POSITIONAL_CAP) return BLADE_JOIN_DIRECT;
+    if (span_m1 >= BLADE_JOIN_SPAN_CAP) return BLADE_JOIN_HASH;
+    /* m <= SIZE_MAX / 16 (the build checked it), so 4 m does not wrap */
+    limit = (uint64_t)BLADE_JOIN_SPAN_FLOOR;
+    if ((uint64_t)m * BLADE_JOIN_SPAN_PER_ROW > limit) limit = (uint64_t)m * BLADE_JOIN_SPAN_PER_ROW;
+    return span_m1 < limit ? BLADE_JOIN_DIRECT : BLADE_JOIN_HASH;
+}
+
+/* Two allocations at most: the CSR block (off, then perm, interior) and the
+ * HASH form's table block (keys, bucket ids, occupancy bytes, interior). */
+static inline void blade_join_free_i64(blade_join_csr_i64 *t) {
+    if (t->off) BLADE_MEMBER_FREE(t->off);
+    if (t->keys) BLADE_MEMBER_FREE(t->keys);
+    memset(t, 0, sizeof *t);
+}
+
+/* The bucket of key x: an index in [0, nb), or -1 when no right row holds x.
+ * Read-only. */
+static inline int64_t blade_join_lookup_i64(const blade_join_csr_i64 *t, int64_t x) {
+    if (t->kind == BLADE_JOIN_DIRECT) {
+        uint64_t d;
+        if (t->nb == 0) return -1;
+        d = (uint64_t)x - (uint64_t)t->lo;
+        return d > t->span_m1 ? -1 : (int64_t)d;
+    }
+    if (t->kind == BLADE_JOIN_HASH) {
+        uint64_t h = ((uint64_t)x * BLADE_MEMBER_GOLDEN) >> t->shift;
+        for (;;) {
+            if (!t->used[h]) return -1;
+            if (t->keys[h] == x) return t->bucket[h];
+            h = (h + 1) & t->cap_mask;
+        }
+    }
+    return -1;
+}
+
+/* Build over rk[0, m). Returns 0, or -1 (allocation failure, struct reset).
+ *
+ * THE CSR BLOCK is ONE allocation of nb + 2 + m cells: off[0, nb + 2) then
+ * perm[0, m). The classic one-array build: the count of bucket b goes to
+ * off[b + 2]; the prefix makes off[b + 1] the START of bucket b; the forward
+ * fill `perm[off[b + 1]++] = j` (j ascending) then leaves off[b + 1] at the
+ * END of bucket b -- the start of b + 1 -- with off[0] = 0, so off[b] ..
+ * off[b + 1] is bucket b, its rows ascending. No cursor array, no row ->
+ * bucket array (the HASH fill looks each row's bucket up again): every cell
+ * the build writes is one it keeps, which at the pilot sizes is what first
+ * touch costs. */
+static inline int blade_join_build_i64(blade_join_csr_i64 *t, const int64_t *rk, int64_t m, int positional) {
+    int64_t j, lo, hi, b;
+    memset(t, 0, sizeof *t);
+    t->m = m < 0 ? 0 : m;
+    if (t->m == 0) {
+        t->kind = BLADE_JOIN_DIRECT;
+        t->off = (int64_t *)BLADE_MEMBER_CALLOC(2, sizeof(int64_t));
+        if (!t->off) { blade_join_free_i64(t); return -1; }
+        return 0;
+    }
+    if ((uint64_t)t->m > (uint64_t)SIZE_MAX / sizeof(int64_t) / 4) return -1;
+    lo = rk[0];
+    hi = rk[0];
+    for (j = 1; j < t->m; j++) {
+        if (rk[j] < lo) lo = rk[j];
+        if (rk[j] > hi) hi = rk[j];
+    }
+    t->kind = blade_join_choose_i64(t->m, lo, hi, positional);
+    if (t->kind == BLADE_JOIN_DIRECT) {
+        t->lo = lo;
+        t->span_m1 = (uint64_t)hi - (uint64_t)lo;
+        t->nb = (int64_t)t->span_m1 + 1;
+    } else {
+        uint64_t cap = 16;
+        int log2cap = 4;
+        size_t bytes;
+        while (cap < (uint64_t)t->m * 2) { cap <<= 1; log2cap++; }
+        if (cap > (uint64_t)SIZE_MAX / (2 * sizeof(int64_t) + 1)) goto fail;
+        bytes = (size_t)cap * (2 * sizeof(int64_t) + 1);
+        t->keys = (int64_t *)BLADE_MEMBER_MALLOC(bytes);
+        if (!t->keys) goto fail;
+        t->bucket = t->keys + cap;
+        t->used = (unsigned char *)(t->bucket + cap);
+        memset(t->used, 0, (size_t)cap);
+        t->cap_mask = cap - 1;
+        t->shift = 64 - log2cap;
+        /* first-occurrence bucket numbering */
+        for (j = 0; j < t->m; j++) {
+            int64_t k = rk[j];
+            uint64_t h = (((uint64_t)k * BLADE_MEMBER_GOLDEN) >> t->shift);
+            while (t->used[h] && t->keys[h] != k) h = (h + 1) & t->cap_mask;
+            if (!t->used[h]) { t->used[h] = 1; t->keys[h] = k; t->bucket[h] = t->nb++; }
+        }
+    }
+    t->off = (int64_t *)BLADE_MEMBER_MALLOC(((size_t)t->nb + 2 + (size_t)t->m) * sizeof(int64_t));
+    if (!t->off) goto fail;
+    t->perm = t->off + t->nb + 2;
+    memset(t->off, 0, ((size_t)t->nb + 2) * sizeof(int64_t));
+    if (t->kind == BLADE_JOIN_DIRECT) {
+        for (j = 0; j < t->m; j++) t->off[(int64_t)((uint64_t)rk[j] - (uint64_t)lo) + 2]++;
+    } else {
+        for (j = 0; j < t->m; j++) t->off[blade_join_lookup_i64(t, rk[j]) + 2]++;
+    }
+    for (b = 2; b <= t->nb; b++) t->off[b] += t->off[b - 1];
+    /* FORWARD fill (stable: every bucket lists its rows j ascending) */
+    if (t->kind == BLADE_JOIN_DIRECT) {
+        for (j = 0; j < t->m; j++) t->perm[t->off[(int64_t)((uint64_t)rk[j] - (uint64_t)lo) + 1]++] = j;
+    } else {
+        for (j = 0; j < t->m; j++) t->perm[t->off[blade_join_lookup_i64(t, rk[j]) + 1]++] = j;
+    }
+    return 0;
+fail:
+    blade_join_free_i64(t);
+    return -1;
+}
+
+static inline const char *blade_join_form_name(int kind) {
+    switch (kind) {
+    case BLADE_JOIN_DIRECT: return "counting sort";
+    case BLADE_JOIN_HASH: return "hash";
+    default: return "none";
+    }
+}
+
+/* The join's REPORT, made by its caller after the counting pass: the form
+ * the build took and the relation's size -- a `[join] ...` line on stderr.
+ * Printed UNCONDITIONALLY: the caller's call exists only when the program was
+ * compiled with the instrumentation gate BLADE_JOIN_REPORT=1 (no run-time
+ * switch, so no getenv inside the timed region; BLADE_MEMBER_VERBOSE, the
+ * member builds' run-time switch, does not apply). */
+static inline void blade_join_note_i64(const blade_join_csr_i64 *t, const char *rel, const char *right, int64_t n, int64_t card) {
+    fprintf(stderr, "[join] %s: CSR over %s, M %lld, form %s, buckets %lld; N %lld, |J| %lld\n",
+            rel, right, (long long)t->m, blade_join_form_name(t->kind), (long long)t->nb, (long long)n, (long long)card);
+}
+
 #endif /* BLADE_MEMBER_H */

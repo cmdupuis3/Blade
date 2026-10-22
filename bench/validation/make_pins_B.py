@@ -16,7 +16,7 @@ sys.path.insert(0, HERE)
 import benchgen as g  # noqa: E402
 
 KERNELS = ["fusedchain", "onepass", "stencil", "recur", "maskagg", "dot", "saxpy", "band", "twofir", "tensorop",
-           "haloadjoint"]
+           "haloadjoint", "hashjoin"]
 
 
 def num17(x):

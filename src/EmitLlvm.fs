@@ -8704,6 +8704,17 @@ let private emitCompoundInit (c: Ctx) (b: IRBinding) (denseExpr: IRExpr) (maskEx
         | _ -> refuse "a compound-index initializer whose binding is not an array"
     (match arrTy.IndexTypes with
      | [ ix ] when ix.IxKind = IxKCompound && ix.Rank = 1 -> ()
+     | [ _ ] when (Blade.Optimize.EquiJoinTable.tryCompound b.Id).IsSome ->
+         // The hash equijoin (Blade.Optimize.planEquiJoin) is C++ v1: this
+         // lane refuses the rank-2 compound as before, and says so for the
+         // plan (the program falls back to the C++ lane, which places it).
+         let why = "llvm lane: the hash equijoin is not built in this lane (v1.1)"
+         if Blade.Effects.Decisions.active () then
+             Blade.Effects.Decisions.record
+                 { Rule = "hash-join"; Version = 1; Span = c.DeclSpan; Subject = b.Name
+                   Outcome = Blade.Effects.Declined why
+                   Evidence = [ "the rank-2 compound (the C++ lane's) is refused here; the C++ fallback emits the stable CSR and the left-major / right-minor probe" ] }
+         refuse ($"a rank-2 compound-index initializer ({why}; the hashed index is the C++ lane's)")
      | [ ix ] when ix.IxKind = IxKCompound ->
          refuse ($"a rank-{ix.Rank} compound-index initializer (the hashed index is the C++ lane's)")
      | _ :: _ :: _ -> refuse "a compound-index initializer with trailing dims (the C++ lane's)"

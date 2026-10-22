@@ -1,0 +1,22 @@
+// TEST: Equijoin Keyed Read Declines
+// ----------------------------------------------------------------------------
+// A KEYED read of the relation, `matched(2, 0)`, needs the tuple -> rank table
+// the hashed compound index keeps (and the N x M mask behind it): the hash
+// join's demand census refuses it, the plan records `hash-join` DECLINED
+// naming the keyed read, and the as-written six passes run. Same values as
+// the joined form would give.
+// ----------------------------------------------------------------------------
+type LeftRow = Idx<3>
+type RightRow = Idx<4>
+let left_key: Array<Int64 like LeftRow> = [1, 2, 1]
+let left_amount: Array<Int64 like LeftRow> = [2, 3, 7]
+let right_key: Array<Int64 like RightRow> = [1, 2, 1, 2]
+let right_amount: Array<Int64 like RightRow> = [10, 10, 20, 10]
+let matched = compound(method_for(left_amount, right_amount) <@> lambda(l, r) -> l * r, mask(method_for(left_key, right_key) <@> lambda(l, r) -> l == r, lambda(e) -> e))
+let match_count = extents(matched)
+let total = reduce(matched, (+), 0)
+let corner = matched(2, 0)
+// EXPECT: matched = [20, 40, 30, 30, 70, 140]
+// EXPECT: match_count = 6
+// EXPECT: total = 330
+// EXPECT: corner = 70

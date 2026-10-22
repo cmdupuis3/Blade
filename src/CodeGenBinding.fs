@@ -2505,6 +2505,20 @@ and genRandomInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IR
 
 
 and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
+    // The hash equijoin (Blade.Optimize.planEquiJoin, round 3 W3-2): an
+    // admitted inline equijoin compound never builds its N x M operands.
+    let joined =
+        match Blade.Optimize.EquiJoinTable.tryCompound binding.Id with
+        | Some jp ->
+            let r = genEquiJoinBinding ctx binding jp
+            if r.IsNone then
+                recordCodegenDecision "hash-join" (bindingCppName binding)
+                    (Blade.Effects.Declined "c++ lane: a source or the payload kernel does not render as a stored name here; the as-written six passes run") []
+            r
+        | None -> None
+    match joined with
+    | Some emitted -> emitted
+    | None ->
     let ind = indentStr ctx
     let name = bindingCppName binding
     // Compound-construction constructor (`let B = compound(dense, mask)`):
@@ -2651,6 +2665,112 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
          (lines, addVarName binding.Id name ctx)
      | _ ->
          ([refusalErrorLine ind ($"compound() binding '{name}' is not a CompoundIdx array type")], addVarName binding.Id name ctx))
+
+/// THE HASH EQUIJOIN (Blade.Optimize.planEquiJoin, round 3 W3-2, item T2;
+/// plan rule `hash-join v1`): `J = compound(method_for(a1, b1) <@> pk,
+/// mask(method_for(a0, b0) <@> lambda(l, r) -> l == r, lambda(e) -> e))`
+/// over four stored sources, emitted as
+///   1. the CSR over the right keys b0 (blade_join_build_i64, blade_member.h:
+///      a counting sort for a small span / a positional key, else the
+///      open-addressing key -> bucket map; bucket rows filled FORWARD, so
+///      every bucket lists its right rows j ascending);
+///   2. the COUNTING pass: each left key's bucket (or -1) kept per row, |J| =
+///      the sum of the bucket sizes -- J sized before any store;
+///   3. the PROBE: i ascending, every row of the bucket ascending,
+///      `compact[q++] = pk(a1[i], b1[j])` -- left-major / right-minor, the
+///      compound's lex order;
+///   4. J bundled over a CARDINALITY-ONLY compound_index_t<2> (dense extents
+///      N x M, cardinality |J|; no tuple table, reverse hash or mask).
+/// The N x M payload / Bool / identity-mask pools, the bit vector and the
+/// hashed enumeration are never built; J's consumers read its stored buffer.
+/// None when a source does not render as a stored name (the as-written
+/// passes then run, and the caller records the C++ lane's decline).
+and genEquiJoinBinding (ctx: CodeGenContext) (binding: IRBinding) (jp: Blade.Optimize.EquiJoinPlan) : (string list * CodeGenContext) option =
+    let ind = indentStr ctx
+    let name = bindingCppName binding
+    match binding.Type, resolveCallable jp.PayloadKernel with
+    | ArrayElem arrTy, Some pk when isCompoundArrayType arrTy && arrTy.IndexTypes.Length = 1 && pk.Captures.IsEmpty ->
+        let src (e: IRExpr) = exprToCpp ctx.VarNames e
+        let lk, rk, la, ra = src jp.LeftKey, src jp.RightKey, src jp.LeftPay, src jp.RightPay
+        let bad (s: string) = s = "" || s.Contains "BLADE_CODEGEN_ERROR" || s.Contains "("
+        if bad lk || bad rk || bad la || bad ra then None
+        else
+        let elemCpp = elemTypeToCpp arrTy.ElemType
+        let (wrapperCode, wname) = genCallableWrapper ctx.VarNames $"{name}__pk" pk
+        let positional = match jp.KeyRegime with Blade.Optimize.JoinPositional _ -> 1 | Blade.Optimize.JoinDynamic -> 0
+        let regime =
+            match jp.KeyRegime with
+            | Blade.Optimize.JoinPositional k -> $"positional right keys (Idx<{k}>): counting sort"
+            | Blade.Optimize.JoinDynamic -> "dynamic right keys: counting sort for a small span, else hash (chosen at run time)"
+        let i1 = ind + "    "
+        let i2 = i1 + "    "
+        let i3 = i2 + "    "
+        // The `[join] ...` build report (blade_join_note_i64, stderr) is
+        // EMITTED only under the COMPILE-TIME instrumentation gate
+        // BLADE_JOIN_REPORT (Optimize.joinReportEnabled), and then printed
+        // unconditionally by the executable: a run-time switch would be a
+        // getenv, whose first call builds the CRT's narrow environment (~4 us
+        // measured at the pilot) inside the timed region. BLADE_MEMBER_VERBOSE
+        // (the membership builds' run-time switch) is not read here.
+        // Emission-only (the exe cache keys on the text); the suite clears it.
+        let verbose = Blade.Optimize.joinReportEnabled ()
+        let lines =
+            [ $"{ind}// hash-join v1 (Blade.Optimize.planEquiJoin): `{name}` = the equijoin of `{jp.LeftKeyName}` and `{jp.RightKeyName}` -- a stable CSR over the right keys ({regime}), a counting pass sizing the relation, then the left-major / right-minor probe (the compound's lex order); no N x M pool is built"
+              $"{ind}const size_t {name}__n = {lk}.extents[0];"
+              $"{ind}const size_t {name}__m = {rk}.extents[0];"
+              $"{ind}const int64_t* {name}__lk = (const int64_t*)nested_array_utilities::pool_base({lk}.data);"
+              $"{ind}const int64_t* {name}__rk = (const int64_t*)nested_array_utilities::pool_base({rk}.data);"
+              $"{ind}const auto* {name}__la = nested_array_utilities::pool_base({la}.data);"
+              $"{ind}const auto* {name}__ra = nested_array_utilities::pool_base({ra}.data);" ]
+            @ (wrapperCode |> List.map (fun l -> ind + l))
+            // The dense extents product N x M the index retains is checked
+            // FIRST, ahead of the CSR build (it depends on nothing else).
+            @ [ $"{ind}if ({name}__m != 0 && {name}__n > SIZE_MAX / {name}__m) throw std::length_error(\"hash join `{name}`: the dense extents N x M overflow size_t\");"
+                $"{ind}blade_join_csr_i64 {name}__csr;"
+                $"{ind}if (blade_join_build_i64(&{name}__csr, {name}__rk, (int64_t){name}__m, {positional}) != 0) throw std::bad_alloc();"
+                // the COUNTING pass: |J| before any store (the probe looks each
+                // left key up again -- no per-row bucket array to allocate).
+                // CHECKED: every bucket length is added against the largest
+                // element count `new T[card + 1]` can allocate (PTRDIFF_MAX
+                // bytes, the slack cell included); an overflow throws
+                // std::length_error BEFORE the RELATION's allocation and stores
+                // (the program's ordinary BL8005 runtime failure, never UB; the
+                // CSR, built just above, is the only allocation before it). The
+                // probe stores exactly the counted cells.
+                $"{ind}const size_t {name}__cap = (size_t)PTRDIFF_MAX / sizeof({elemCpp}) - 1;"
+                $"{ind}size_t {name}__card = 0;"
+                $"{ind}for (size_t {name}__i = 0; {name}__i < {name}__n; {name}__i++) {{"
+                $"{i1}const int64_t {name}__b = blade_join_lookup_i64(&{name}__csr, {name}__lk[{name}__i]);"
+                $"{i1}if ({name}__b < 0) continue;"
+                $"{i1}const size_t {name}__len = (size_t)({name}__csr.off[{name}__b + 1] - {name}__csr.off[{name}__b]);"
+                $"{i1}if ({name}__len > {name}__cap - {name}__card) throw std::length_error(\"hash join `{name}`: the relation's cardinality exceeds the largest allocatable buffer\");"
+                $"{i1}{name}__card += {name}__len;"
+                $"{ind}}}" ]
+            @ (if verbose then [ $"{ind}blade_join_note_i64(&{name}__csr, \"{name}\", \"{jp.RightKeyName}\", (int64_t){name}__n, (int64_t){name}__card);" ] else [])
+            @ [ $"{ind}{elemCpp}* {name}_compact = new {elemCpp}[{name}__card + 1];"
+                $"{ind}{{"
+                $"{i1}size_t {name}__q = 0;"
+                $"{i1}for (size_t {name}__i = 0; {name}__i < {name}__n; {name}__i++) {{"
+                $"{i2}const int64_t {name}__b = blade_join_lookup_i64(&{name}__csr, {name}__lk[{name}__i]);"
+                $"{i2}if ({name}__b < 0) continue;"
+                $"{i2}const int64_t {name}__hi = {name}__csr.off[{name}__b + 1];"
+                $"{i2}for (int64_t {name}__t = {name}__csr.off[{name}__b]; {name}__t < {name}__hi; {name}__t++) {{"
+                $"{i3}{name}_compact[{name}__q++] = {wname}({name}__la[{name}__i], {name}__ra[{name}__csr.perm[{name}__t]]);"
+                $"{i2}}}"
+                $"{i1}}}"
+                $"{ind}}}"
+                $"{ind}blade_join_free_i64(&{name}__csr);"
+                $$"""{{ind}}std::array<size_t, 2> {{name}}_idx_extents = { {{name}}__n, {{name}}__m };"""
+                $"{ind}compound_index_t<2>* {name}_idx = new compound_index_t<2>(\"{name}_idx\", {name}_idx_extents, {name}__card, compound_index_t<2>::cardinality_only); // hash-join v1: cardinality-only (no tuple table, reverse hash or mask)"
+                $$"""{{ind}}nested_array_utilities::Compound<{{elemCpp}}, 2> {{name}} { {{name}}_compact, {{name}}_idx, 1 };""" ]
+        (memberUsedCell ()).Value <- true
+        jp.EmittedCpp.Value <- true
+        recordCodegenDecision "compound" name Blade.Effects.Applied
+            [ "representation: the equijoin relation (hash-join v1) -- the compact buffer in lex order over a cardinality-only compound_index_t<2>; no tuple table, no reverse hash, no mask"
+              "rank-2 relation over (left row, right row); no trailing dims" ]
+        registerShapedAlloc name "deallocate_compound" name
+        Some (lines, addVarName binding.Id name ctx)
+    | _ -> None
 
 /// The FUSED rank-1 compaction (Blade.Optimize.planCompactionFusion, B4b/c):
 /// `cnt` (the mask pass's count) sizes both buffers at m + 1 -- the last cell

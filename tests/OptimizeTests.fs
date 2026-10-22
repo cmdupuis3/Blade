@@ -6115,6 +6115,319 @@ let private memberHoistForcedEmission () =
                 resultLine Fail name $"missing `{needle}`"
                 yield false ]
 
+// ---------------------------------------------------------------------------
+// Hash equijoin (round 3 W3-2, item T2; Blade.Optimize.planEquiJoin, rule
+// `hash-join v1`). Values are pinned by corpus sql-joins/001-019 (and the
+// interpreter differential over them); these pin the admission record (cases
+// for the five-party rows and a SAMPLE of the refusals -- not every refusal),
+// the emission (the CSR build, the overflow guards, the counting pass, no
+// all-pairs pool), the gate-off form (the six passes), and -- per corpus file
+// -- the route each sql-joins file takes (hashJoinCorpusRoutes).
+// ---------------------------------------------------------------------------
+
+let private hjHead =
+    "type LeftRow = Idx<3>\ntype RightRow = Idx<4>\n"
+    + "let left_key: Array<Int64 like LeftRow> = [1, 2, 9]\n"
+    + "let left_amount: Array<Int64 like LeftRow> = [2, 3, 7]\n"
+    + "let right_key: Array<Int64 like RightRow> = [1, 2, 1, 2]\n"
+    + "let right_amount: Array<Int64 like RightRow> = [10, 10, 20, 10]\n"
+let private hjJoin (pk: string) (eq: string) (pred: string) =
+    $"let matched = compound(method_for(left_amount, right_amount) <@> {pk}, mask(method_for(left_key, right_key) <@> {eq}, {pred}))\n"
+let private hjTail = "let match_count = extents(matched)\nlet total = reduce(matched, (+), 0)\n"
+let private hjSrc = hjHead + hjJoin "lambda(l, r) -> l * r" "lambda(l, r) -> l == r" "lambda(e) -> e" + hjTail
+let private hjPositionalSrc =
+    "type KIdx = Idx<5>\ntype LeftRow = Idx<5>\ntype RightRow = Idx<4>\n"
+    + "let left_key: Array<KIdx like LeftRow> = [0, 4, 2, 1, 0]\n"
+    + "let left_amount: Array<Int64 like LeftRow> = [1, 2, 3, 4, 5]\n"
+    + "let right_key: Array<KIdx like RightRow> = [0, 4, 1, 0]\n"
+    + "let right_amount: Array<Int64 like RightRow> = [10, 20, 30, 40]\n"
+    + hjJoin "lambda(l, r) -> l * r" "lambda(l, r) -> l == r" "lambda(e) -> e" + hjTail
+let private hjRule = "hash-join"
+let private hjApplied (d: Blade.Effects.Decision) = applied d && d.Subject = "matched"
+let private hjDeclined (needle: string) (d: Blade.Effects.Decision) = d.Subject = "matched" && declinedMentioning needle d
+
+let private hashJoinDecisionCases () =
+    [ decisionCase "decision_hash_join_applied" hjSrc hjRule
+          (fun d -> hjApplied d
+                    && evidenceHas "stable CSR over `right_key`" d
+                    && evidenceHas "bucket rows filled FORWARD (every bucket lists its right rows j ascending)" d
+                    && evidenceHas "left-major / right-minor = the compound's lex order" d
+                    && evidenceHas "a COUNTING pass sizes `matched` before any store" d
+                    && evidenceHas "cardinality-only compound_index_t<2>" d)
+          "applied: stable CSR, left-major / right-minor probe, counting pass, cardinality-only index"
+      decisionCase "decision_hash_join_five_party_matrix" hjSrc hjRule
+          (fun d -> hjApplied d
+                    && evidenceHas "equiJoinAdmits (five parties, each write query through Optimize.scheduleMayWriteIn): producers `left_key`, `right_key`, `left_amount`, `right_amount`: proved stored at their own sites (storedArrayProof" d
+                    && evidenceHas "producer kernels (`==`, the identity predicate, pk): pure, total scalars" d
+                    && evidenceHas "consumer `matched`: its whole payload (value and both compound operands) writes nothing" d
+                    && evidenceHas "outer fold kernel(s): 1 over `matched` (`total`), none writes, none moved" d
+                    && evidenceHas "seed(s): 1 seeded fold(s), none writes, none moved" d
+                    && evidenceHas "intervening: none -- the CSR build, the counting pass and the probe all run at `matched`'s own site" d
+                    && evidenceHas "parallel: none -- every pass is serial" d)
+          "the five-party matrix recorded, every row"
+      decisionCase "decision_hash_join_census_uses" hjSrc hjRule
+          (fun d -> hjApplied d && evidenceHas "uses of `matched` (census: every one reads the compact buffer or the cardinality alone): `extents` (the cardinality), folds over the compact buffer (pure total kernels), printing" d)
+          "the demand census lists the certified uses"
+      decisionCase "decision_hash_join_positional_counting_sort" hjPositionalSrc hjRule
+          (fun d -> hjApplied d && evidenceHas "right keys `right_key` positional (`Idx<5>`): a COUNTING SORT" d)
+          "a positional right key takes the counting sort"
+      decisionCase "decision_hash_join_extreme_keys_span_bigint"
+          (hjSrc.Replace("let right_key: Array<Int64 like RightRow> = [1, 2, 1, 2]", "let right_key: Array<Int64 like RightRow> = [-9223372036854775807 - 1, 2, 9223372036854775807, 2]")) hjRule
+          (fun d -> hjApplied d && evidenceHas "form at run time: hash (span 18446744073709551616, M 4" d)
+          "the inclusive span of [INT64_MIN, INT64_MAX] prints as 2^64 (a bigint), never a wrapped 0"
+      decisionCase "decision_hash_join_dynamic_chooser" hjSrc hjRule
+          (fun d -> hjApplied d && evidenceHas "right keys `right_key` dynamic Int64: a COUNTING SORT when their span is within max(4 M, 4096) cells (and 2^26), else an open-addressing key -> bucket hash" d)
+          "dynamic keys: the run-time chooser is stated"
+      withGate "BLADE_HASH_JOIN" "0" (fun () ->
+          decisionCase "decision_hash_join_disabled" hjSrc hjRule
+              (fun d -> hjDeclined "disabled by BLADE_HASH_JOIN" d && evidenceHas "equiJoinAdmits (five parties" d)
+              "declined: disabled by BLADE_HASH_JOIN, the matrix still recorded")
+      // producers
+      decisionCase "decision_hash_join_declined_assigned_source"
+          (hjSrc.Replace("let right_amount: Array<Int64 like RightRow>", "let mut right_amount: Array<Int64 like RightRow>") + "right_amount(0) = 5\n") hjRule
+          (hjDeclined "the source `right_amount` (an alias chain of `right_amount`) is assigned in the program") "declined: a source is assigned"
+      decisionCase "decision_hash_join_declined_unstored_source"
+          (hjSrc.Replace("let right_amount: Array<Int64 like RightRow> = [10, 10, 20, 10]", "let right_amount = method_for(range<RightRow>) <@> lambda(j) -> Int64(j) * 10")) hjRule
+          (hjDeclined "the source `right_amount` is not proved stored") "declined: a deferred source is not proved stored"
+      decisionCase "decision_hash_join_declined_writing_producer"
+          ("type One = Idx<1>\n" + hjHead.Replace("let right_amount: Array<Int64 like RightRow> = [10, 10, 20, 10]\n", "")
+           + "let mut log: Array<Int64 like One> = [0]\n"
+           + "function make(l: mut Array<Int64 like One>) -> Array<Int64 like RightRow> = {\n    l(0) = l(0) + 1\n    [10, 10, 20, 10]\n}\n"
+           + "let right_amount = make(log)\n"
+           + hjJoin "lambda(l, r) -> l * r" "lambda(l, r) -> l == r" "lambda(e) -> e" + hjTail) hjRule
+          (hjDeclined "the producer `right_amount` may write") "declined: a producer's initializer writes (the shared write analysis)"
+      // producer kernels
+      decisionCase "decision_hash_join_declined_writing_payload"
+          ("let mut calls = 0\n" + hjHead + "let matched = compound(method_for(left_amount, right_amount) <@> lambda(l, r) -> {\n    calls = calls + 1\n    l * r\n}, mask(method_for(left_key, right_key) <@> lambda(l, r) -> l == r, lambda(e) -> e))\n" + hjTail) hjRule
+          (hjDeclined "the payload kernel pk may write") "declined: the payload kernel writes"
+      decisionCase "decision_hash_join_declined_payload_not_total" (hjHead + hjJoin "lambda(l, r) -> l / r" "lambda(l, r) -> l == r" "lambda(e) -> e" + hjTail) hjRule
+          (hjDeclined "the payload kernel is not a pure, total scalar") "declined: integer `/` in the payload kernel"
+      decisionCase "decision_hash_join_declined_payload_capture" (hjHead + "let s = 3\n" + hjJoin "lambda(l, r) -> l * r + s" "lambda(l, r) -> l == r" "lambda(e) -> e" + hjTail) hjRule
+          (hjDeclined "the payload kernel captures a value") "declined: the payload kernel captures"
+      decisionCase "decision_hash_join_declined_predicate" (hjHead + hjJoin "lambda(l, r) -> l * r" "lambda(l, r) -> l == r" "lambda(e) -> !e" + hjTail) hjRule
+          (hjDeclined "a non-identity mask predicate") "declined: a non-identity predicate (the anti-join spelling)"
+      decisionCase "decision_hash_join_declined_conjunctive" (hjHead + hjJoin "lambda(l, r) -> l * r" "lambda(l, r) -> l == r && l == r" "lambda(e) -> e" + hjTail) hjRule
+          (hjDeclined "a conjunctive key kernel") "declined: a conjunctive key kernel (v1.1)"
+      decisionCase "decision_hash_join_declined_not_equality" (hjHead + hjJoin "lambda(l, r) -> l * r" "lambda(l, r) -> l < r" "lambda(e) -> e" + hjTail) hjRule
+          (hjDeclined "the key kernel is not the equality") "declined: a band / inequality kernel"
+      decisionCase "decision_hash_join_declined_float_keys"
+          (hjSrc.Replace("let left_key: Array<Int64 like LeftRow> = [1, 2, 9]", "let left_key: Array<Float64 like LeftRow> = [1.0, 2.0, 9.0]")
+                .Replace("let right_key: Array<Int64 like RightRow> = [1, 2, 1, 2]", "let right_key: Array<Float64 like RightRow> = [1.0, 2.0, 1.0, 2.0]")) hjRule
+          (hjDeclined "float keys") "declined: float keys"
+      // consumer census
+      decisionCase "decision_hash_join_declined_keyed_read" (hjSrc + "let corner = matched(0, 0)\n") hjRule
+          (hjDeclined "a keyed read of `matched` in `corner`") "declined: a keyed read needs the tuple table"
+      decisionCase "decision_hash_join_declined_alias" (hjSrc + "let again = matched\n") hjRule
+          (hjDeclined "the alias `again` of `matched`") "declined: an alias of the relation"
+      decisionCase "decision_hash_join_declined_fold_not_total" (hjSrc + "let q = reduce(matched, lambda(a, b) -> a / (b + 1), 7)\n") hjRule
+          (hjDeclined "whose kernel is not a resolved, capture-free, pure total scalar function") "declined: a fold kernel the census cannot certify"
+      decisionCase "decision_hash_join_declined_map_over_relation" (hjSrc + "let twice = method_for(matched) <@> lambda(v) -> v * 2 |> compute\n") hjRule
+          (hjDeclined "`matched` as an operand of IRApplyCombinator (a use the census does not certify) in `twice`")
+          "declined: a map over the relation is not certified (v1)"
+      // the named spelling
+      decisionCase "decision_hash_join_declined_named_spelling"
+          (hjHead + "let equal_keys = method_for(left_key, right_key) <@> lambda(l, r) -> l == r |> compute\nlet keep = mask(equal_keys, lambda(e) -> e)\nlet products = method_for(left_amount, right_amount) <@> lambda(l, r) -> l * r |> compute\nlet matched = compound(products, keep)\n" + hjTail) hjRule
+          (hjDeclined "the R4 spelling") "declined: the named spelling keeps every named array stored" ]
+
+let private hashJoinEmission () =
+    let name = "hash_join_cpp_emission"
+    match cppOfSource name hjSrc with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let has (s: string) = cpp.Contains s
+        let want =
+            [ "#include \"blade_member.h\""
+              "blade_join_build_i64(&matched__csr, matched__rk, (int64_t)matched__m, 0)"
+              "const int64_t matched__b = blade_join_lookup_i64(&matched__csr, matched__lk[matched__i]);"
+              // the overflow guards (review W3-2 finding 5): the dense
+              // extents product (before the CSR build), then every bucket
+              // length checked-added against the largest allocatable count,
+              // BEFORE the relation's allocation and stores (a run-time
+              // witness would need N x M past 2^63 / 8 cells: impractical,
+              // so the guard is pinned here)
+              "const size_t matched__cap = (size_t)PTRDIFF_MAX / sizeof(int64_t) - 1;"
+              "if (matched__m != 0 && matched__n > SIZE_MAX / matched__m) throw std::length_error("
+              "if (matched__len > matched__cap - matched__card) throw std::length_error("
+              "matched__card += matched__len;"
+              "int64_t* matched_compact = new int64_t[matched__card + 1];"
+              "matched_compact[matched__q++] = __wrap_"
+              "matched__ra[matched__csr.perm[matched__t]]"
+              "compound_index_t<2>::cardinality_only" ]
+        let absent = [ "matched__dense"; "matched__masksrc"; "matched_idx_maskvec"; "matched_densepool" ]
+        let missing = want |> List.filter (has >> not)
+        let present = absent |> List.filter has
+        // the counting pass precedes the probe's first store
+        // product check < CSR build < checked-add test < accumulation <
+        // relation allocation < fill
+        let ordered =
+            let at (s: string) = cpp.IndexOf s
+            let steps =
+                [ at "matched__n > SIZE_MAX / matched__m"
+                  at "blade_join_build_i64(&matched__csr"
+                  at "if (matched__len > matched__cap - matched__card) throw std::length_error("
+                  at "matched__card += matched__len;"
+                  at "int64_t* matched_compact = new int64_t[matched__card + 1];"
+                  at "matched_compact[matched__q++]" ]
+            steps |> List.forall (fun i -> i >= 0) && (steps |> List.pairwise |> List.forall (fun (a, b) -> a < b))
+        if missing.IsEmpty && present.IsEmpty && ordered then
+            resultLine Pass name "in order: the N x M product check, the CSR build, the checked-add test, the accumulation, the relation's allocation, the probe's stores; the cardinality-only index; no N x M dense / Bool / mask pool, no bit vector"
+            true
+        else
+            resultLine Fail name ($"missing: {missing}; unexpected: {present}; counting-before-probe: {ordered}")
+            false
+
+let private hashJoinGateOffEmission () =
+    let name = "hash_join_cpp_gate_off_six_passes"
+    match withGate "BLADE_HASH_JOIN" "0" (fun () -> cppOfSource name hjSrc) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let six = [ "matched__dense"; "matched__masksrc__arr"; "std::vector<bool> matched_idx_maskvec"; "new compound_index_t<2>(\"matched_idx\", matched_idx_extents, matched_idx_maskvec)"; "matched_densepool" ]
+        let missing = six |> List.filter (cpp.Contains >> not)
+        let csr = cpp.Contains "blade_join_build_i64(&"
+        if missing.IsEmpty && not csr then
+            resultLine Pass name "gate off: the as-written passes (dense payload pool, Bool pool, identity mask, bit vector, hashed index, scatter); no CSR"
+            true
+        else
+            resultLine Fail name ($"missing: {missing}; CSR present: {csr}")
+            false
+
+let private hashJoinPositionalEmission () =
+    let name = "hash_join_cpp_positional_forces_counting_sort"
+    match cppOfSource name hjPositionalSrc with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        if cpp.Contains "blade_join_build_i64(&matched__csr, matched__rk, (int64_t)matched__m, 1)" then
+            resultLine Pass name "a positional right key passes the positional flag (the counting sort over the measured span)"
+            true
+        else
+            resultLine Fail name "the build does not pass the positional flag"
+            false
+
+/// THE PER-FILE CORPUS ROUTE CENSUS (review W3-2 finding 1): every
+/// tests/corpus/sql-joins file's own route, not a synthetic fixture's -- the
+/// value / error pins alone cannot tell the CSR from the six passes (opt-diff
+/// treats identical emission as a pass). An ADMITTED file must record the
+/// applied plan for each of its relations AND emit the CSR build and the
+/// cardinality-only constructor (plus its route needle); a DECLINED file must
+/// record its particular decline AND emit no CSR; with BLADE_HASH_JOIN=0 no
+/// file emits a CSR. The census also fails when a file on disk is not in the
+/// table (a new witness must state its route).
+let private hashJoinCorpusRoutes () =
+    let dir = "tests/corpus/sql-joins"
+    // (complete filename, Ok [(subject, extra plan needle, extra C++ needle)] | Error [(subject, decline needle)])
+    let admitted (subs: (string * string * string) list) = Ok subs
+    let m = "matched"
+    let dyn = "blade_join_build_i64(&matched__csr, matched__rk, (int64_t)matched__m, 0)"
+    let table : (string * Result<(string * string * string) list, (string * string) list>) list =
+        [ ("001_equijoin_bags_survive.blade", admitted [ (m, "form at run time: counting sort", dyn) ])
+          ("002_equijoin_order_fingerprint_interleaved.blade", admitted [ (m, "form at run time: counting sort", dyn) ])
+          ("003_equijoin_negative_keys_match.blade", admitted [ (m, "form at run time: counting sort (span 6, M 4", dyn) ])
+          ("004_equijoin_no_matches_seeded.blade", admitted [ (m, "form at run time: counting sort", dyn) ])
+          ("005_equijoin_no_matches_unseeded_aborts.blade", admitted [ (m, "form at run time: counting sort", dyn) ])
+          ("006_equijoin_keyed_read_declines.blade", Error [ (m, "a keyed read of `matched` in `corner`") ])
+          ("007_equijoin_writing_payload_declines.blade", Error [ (m, "the payload kernel pk may write") ])
+          ("008_equijoin_dynamic_keys_hash.blade", admitted [ (m, "form at run time: hash (span 1000000013, M 6", dyn) ])
+          ("009_equijoin_positional_keys.blade", admitted [ (m, "right keys `right_key` positional (`Idx<5>`)", "blade_join_build_i64(&matched__csr, matched__rk, (int64_t)matched__m, 1)") ])
+          ("010_equijoin_duplicate_2x2_order.blade", admitted [ (m, "form at run time: counting sort (span 1, M 2", dyn) ])
+          ("011_equijoin_out_of_domain_left_key.blade", admitted [ (m, "right keys `right_key` positional (`Idx<4>`)", "blade_join_build_i64(&matched__csr, matched__rk, (int64_t)matched__m, 1)") ])
+          ("012_equijoin_all_equal_skew_and_tails.blade",
+           admitted [ ("skew", "form at run time: counting sort (span 1, M 7", "blade_join_build_i64(&skew__csr, skew__rk, (int64_t)skew__m, 0)");
+                      ("tails", "form at run time: counting sort (span 9, M 7", "blade_join_build_i64(&tails__csr, tails__rk, (int64_t)tails__m, 0)") ])
+          ("013_equijoin_named_spelling_declines.blade", Error [ (m, "the dense operand is the named array `products`") ])
+          ("014_equijoin_failing_payload_mod_declines.blade", Error [ (m, "the payload kernel is not a pure, total scalar") ])
+          ("015_equijoin_failing_payload_negative_power_declines.blade", Error [ (m, "the payload kernel is not a pure, total scalar") ])
+          ("016_equijoin_failing_payload_cast_declines.blade", Error [ (m, "the payload kernel is not a pure, total scalar") ])
+          ("017_equijoin_failing_payload_call_declines.blade", Error [ (m, "the payload kernel is not a pure, total scalar") ])
+          ("018_equijoin_failing_key_kernel_mod_declines.blade", Error [ (m, "the key kernel is not the equality `l == r` of its two parameters") ])
+          ("019_equijoin_failing_payload_unresolved_call_declines.blade", Error [ (m, "the payload kernel pk may write") ]) ]
+    if not (System.IO.Directory.Exists dir) then
+        resultLine Fail "hash_join_corpus_route_census" $"missing {dir} (run from the repo root)"
+        [ false ]
+    else
+    // Keyed by COMPLETE filenames; the disk set and the table set must be
+    // EQUAL both ways (a file without a row fails, a row without a file
+    // fails, a duplicated row fails).
+    let files = System.IO.Directory.GetFiles(dir, "*.blade") |> Array.sort |> List.ofArray
+    let diskSet = files |> List.map System.IO.Path.GetFileName |> Set.ofList
+    let tableNames = table |> List.map fst
+    let tableSet = Set.ofList tableNames
+    let unlisted = Set.difference diskSet tableSet |> Set.toList
+    let missing = Set.difference tableSet diskSet |> Set.toList
+    let duplicated = tableNames |> List.countBy id |> List.filter (fun (_, c) -> c > 1) |> List.map fst
+    let coverage =
+        let name = "hash_join_corpus_route_census: the disk set of sql-joins files equals the route table's (complete filenames)"
+        if unlisted.IsEmpty && missing.IsEmpty && duplicated.IsEmpty then
+            resultLine Pass name $"{files.Length} files on disk, {tableNames.Length} rows, the same names"
+            true
+        else
+            resultLine Fail name ($"on disk without a row: {unlisted}; rows without a file: {missing}; duplicated rows: {duplicated}")
+            false
+    let perFile =
+        [ for p in files do
+            match table |> List.tryFind (fun (k, _) -> k = System.IO.Path.GetFileName p) with
+            | None -> ()
+            | Some (k, route) ->
+                let file = System.IO.Path.GetFileName p
+                let name = $"hash_join_corpus_route: {file}"
+                let src = System.IO.File.ReadAllText p
+                match decisionsOf src, cppOfSource name src, withGate "BLADE_HASH_JOIN" "0" (fun () -> cppOfSource name src) with
+                | Error e, _, _ | _, Error e, _ | _, _, Error e -> resultLine Fail name e; yield false
+                | Ok ds, Ok cpp, Ok cppOff ->
+                    let mine = ds |> List.filter (fun d -> d.Rule = hjRule)
+                    let offCsr = cppOff.Contains "blade_join_build_i64(&"
+                    let problems =
+                        match route with
+                        | Ok subs ->
+                            [ for (s, planNeedle, cppNeedle) in subs do
+                                if not (mine |> List.exists (fun d -> applied d && d.Subject = s && evidenceHas planNeedle d)) then
+                                    yield $"no applied plan for `{s}` naming `{planNeedle}`"
+                                if not (cpp.Contains cppNeedle) then yield $"no CSR build `{cppNeedle}`"
+                                if not (cpp.Contains $"compound_index_t<2>* {s}_idx = new compound_index_t<2>(\"{s}_idx\", {s}_idx_extents, {s}__card, compound_index_t<2>::cardinality_only)") then
+                                    yield $"no cardinality-only constructor for `{s}`"
+                                if cpp.Contains $"{s}_idx_maskvec" then yield $"`{s}` still builds the N x M bit vector" ]
+                        | Error decl ->
+                            [ for (s, needle) in decl do
+                                if not (mine |> List.exists (fun d -> d.Subject = s && declinedMentioning needle d)) then
+                                    yield $"no decline for `{s}` naming `{needle}`"
+                              if cpp.Contains "blade_join_build_i64(&" then yield "a CSR is emitted for a declined join" ]
+                    let problems = problems @ (if offCsr then [ "BLADE_HASH_JOIN=0 still emits a CSR" ] else [])
+                    let what = match route with Ok subs -> $"""applied ({subs |> List.map (fun (s, _, _) -> s) |> String.concat ", "}), CSR + cardinality-only index emitted""" | Error _ -> "declined with its reason, no CSR"
+                    if problems.IsEmpty then
+                        resultLine Pass name ($"{what}; gate off: no CSR")
+                        yield true
+                    else
+                        resultLine Fail name (String.concat "; " problems)
+                        yield false ]
+    coverage :: perFile
+
+let private hashJoinCodegenCases () =
+    [ codegenDecisionCase "decision_hash_join_compound_representation" hjSrc "compound"
+          (fun d -> applied d && d.Subject = "matched" && evidenceHas "the equijoin relation (hash-join v1)" d)
+          "the compound representation record names the relation"
+      // the LLVM lane: the rank-2 compound stays refused, and the plan says so
+      (let name = "decision_hash_join_llvm_declines"
+       Blade.Effects.Decisions.start ()
+       let r =
+           try
+               match lower hjSrc with
+               | Error e -> Error ($"lower: {e}")
+               | Ok ir ->
+                   match EmitLlvm.tryEmitProgramNamed "hj_llvm" ir with
+                   | Ok _ -> Error "the llvm lane emitted a rank-2 compound"
+                   | Error why -> Ok (why, Blade.Effects.Decisions.drain ())
+           with ex -> Error ($"raised: {ex.Message}")
+       Blade.Effects.Decisions.drain () |> ignore
+       match r with
+       | Error e -> resultLine Fail name e; false
+       | Ok (why, ds) ->
+           let rec' = ds |> List.exists (fun d -> d.Rule = hjRule && d.Subject = "matched" && declinedMentioning "llvm lane: the hash equijoin is not built in this lane (v1.1)" d)
+           if rec' && why.Contains "the hash equijoin is not built in this lane" then
+               resultLine Pass name "refused (the program falls back to C++) with the recorded `hash-join` decline"
+               true
+           else
+               resultLine Fail name ($"refusal: {why}; recorded: {rec'}")
+               false) ]
+
 let runOptimizeTests () =
     printHeader "Blade-DSL: Optimization Layer Tests"
     let results =
@@ -6276,6 +6589,13 @@ let runOptimizeTests () =
           yield! memberHoistCorpusRoutes ()
           yield! memberHoistPlacementMutations ()
           yield! memberHoistFailClosedGuards ()
+          // Hash equijoin (round 3 W3-2, item T2).
+          yield! hashJoinDecisionCases ()
+          hashJoinEmission ()
+          hashJoinGateOffEmission ()
+          hashJoinPositionalEmission ()
+          yield! hashJoinCodegenCases ()
+          yield! hashJoinCorpusRoutes ()
           compactionV2UngroupIndexExtentCensus ()
           yield! intervalPayloadDecisionCases ()
           // Compact row classes (round 2 item B3).

@@ -1,0 +1,26 @@
+// TEST: Equijoin All Equal Skew And Tails
+// ----------------------------------------------------------------------------
+// Every key equal: the worst case of the counting pass, |J| = N x M = 21 --
+// one bucket holding every right row, every left row walking all of it,
+// ascending. Then a second relation over the same sources whose matches sit
+// only in the TAILS (the last left row against the last right row, and a
+// first-row / last-row pair), so the empty leading buckets and the
+// trailing-only probe are both exercised.
+// ----------------------------------------------------------------------------
+type LeftRow = Idx<3>
+type RightRow = Idx<7>
+let left_key: Array<Int64 like LeftRow> = [5, 5, 5]
+let left_amount: Array<Int64 like LeftRow> = [1, 2, 3]
+let right_key: Array<Int64 like RightRow> = [5, 5, 5, 5, 5, 5, 5]
+let right_amount: Array<Int64 like RightRow> = [1, 2, 3, 4, 5, 6, 7]
+let skew = compound(method_for(left_amount, right_amount) <@> lambda(l, r) -> l * 10 + r, mask(method_for(left_key, right_key) <@> lambda(l, r) -> l == r, lambda(e) -> e))
+let skew_count = extents(skew)
+let skew_fp = reduce(skew, lambda(a, b) -> 3 * a + b, 0)
+let tail_lkey: Array<Int64 like LeftRow> = [6, 0, 9]
+let tail_rkey: Array<Int64 like RightRow> = [1, 2, 3, 4, 5, 6, 9]
+let tails = compound(method_for(left_amount, right_amount) <@> lambda(l, r) -> l * 10 + r, mask(method_for(tail_lkey, tail_rkey) <@> lambda(l, r) -> l == r, lambda(e) -> e))
+let tails_count = extents(tails)
+// EXPECT: skew = [11, 12, 13, 14, 15, 16, 17, 21, 22, 23, 24, 25, 26, 27, 31, 32, 33, 34, 35, 36, 37]
+// EXPECT: skew_count = 21
+// EXPECT: tails = [16, 37]
+// EXPECT: tails_count = 2

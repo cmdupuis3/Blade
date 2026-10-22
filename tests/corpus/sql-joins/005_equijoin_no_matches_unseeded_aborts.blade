@@ -1,0 +1,17 @@
+// TEST: Equijoin No Matches Unseeded (aborts)
+// ----------------------------------------------------------------------------
+// The empty relation under an UNSEEDED fold: BL8003 at the fold's own
+// declaration, after the relation is built -- the consumer is not moved by
+// the hash join, so its empty check stays where the as-written program has it.
+// ----------------------------------------------------------------------------
+type LeftRow = Idx<3>
+type RightRow = Idx<2>
+let left_key: Array<Int64 like LeftRow> = [1, 2, 3]
+let left_amount: Array<Int64 like LeftRow> = [1, 2, 3]
+let right_key: Array<Int64 like RightRow> = [4, 5]
+let right_amount: Array<Int64 like RightRow> = [10, 20]
+let matched = compound(method_for(left_amount, right_amount) <@> lambda(l, r) -> l * r, mask(method_for(left_key, right_key) <@> lambda(l, r) -> l == r, lambda(e) -> e))
+let match_count = extents(matched)
+let total = reduce(matched, (+))
+// ABORT: BL8003
+// ABORT: reduce: empty array
