@@ -506,6 +506,49 @@ write analysis. `blade plan` names it `..., row-owned pull on a thread team`;
 `BLADE_ORBIT_PULL=0` keeps the other strict forms; the LLVM lane keeps the
 serial scatter. Corpus `symmetry/138`-`139`.
 
+**The row orbit action (rank 2, one channel, a stored SymIdx pool; C++ and
+LLVM lanes, with a lane split on thread requests and types).** A ROW ACTION -- `u = method_for(range<I>) <@> lambda(i) ->
+reduce(method_for(range<I>) <@> lambda(j) -> g(S(i, j), V(i), V(j), ..), k, s)
+|> compute` at top level, over a STORED SymIdx<2, n> pool S, with g a pure total
+scalar function of the cell value, of rank-1 dense weights read at the row's
+own coordinate i or at the partner j, and of invariant scalars -- is ONE pass
+over S's canonical cells filling `u`'s own pool. The ROLE-TERM RULE: an
+off-diagonal cell (a, b) is read once and its term evaluated TWICE, row chain a
+with own = V(a), partner = V(b) and row chain b with own = V(b), partner = V(a)
+-- never one weighted term at both endpoints (S01 = 2, V = [3, 5]: S(i, j) *
+V(i) is 6 at (0, 1) and 10 at (1, 0)); the diagonal once. Each row chain gets
+its terms in ascending j from its own seed through its own kernel (the rank-2
+scatter's order), so the result is the row walk's: tested as RAW BITS for
+Float64 under `BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off`, in both lanes
+(`blade test orbit-scatter`). An explicit seed is preserved (an explicit -0.0
+seed over all -0.0 terms stays -0.0, raw bits); seedless semantics are NOT
+established by that leg: the checker seeds a seedless deferred `(+)` with
++0.0, so an all -0.0 seedless row is +0.0 in the action, the knob-off walk and
+the interpreter alike (the pre-existing G74 family; pinned as current
+behaviour, not closed). Taken in licensed builds too (the serial chain is an
+admissible association; recorded); `BLADE_ORBIT_ACTIONS=strict` restricts it
+to strict builds, `0` keeps the row walk. LANE SPLIT on a thread request: in
+the C++ lane, with threads enabled and any request on the map, the inner map
+or the fold, the action is declined and the old emitter runs (the row walk
+keeps the request); the LLVM lane has no thread runtime and takes the serial
+action whenever its own admission succeeds (otherwise its own fallback, the
+row walk). TYPE SPLIT: the C++ lane admits Float64 / Float32 / Int64 / Int32
+pools, weights and accumulators, the LLVM lane Float64 / Int64 only (anything
+else declines there and runs that lane's walk). Declined with the first failed
+condition for AntisymIdx / Hermitian / wreath pools, two contracted axes in one
+stage, the pool read at both coordinate orders or a second compact array, a
+weight read at another subscript or not rank-1 dense over S's index, a
+deferred pool or weight, a per-row seed, a term / kernel / seed outside the
+closed total whitelist, a block-local or function-body action (v1's storage
+proof covers top-level bindings), the C++ lane's threaded-request case above,
+and a writing party (the five-party audit: producers, consumer, fold kernel,
+seed, intervening bindings) -- a finite set of tested refusals, not an
+exhaustive list; a walk FOLDING weighted rows is declined too (a mixed licence
+nest first). Multi-channel is NOT RECOGNIZED: a tuple kernel or seed returns
+`ActionNotAction` (`OrbitFold.recogniseAction`), with no refusal record.
+`blade plan` names it `fold form: orbit action (rank 2, extent n, 1 channel,
+row groups of G)`. Corpus `symmetry/140`-`141`; bench kernel `pairaction`.
+
 **`where repro` — the reproducibility demand (named functions only).** The
 inverse of the reorder licence: the function's emitted body must keep the
 interpreter's operation sequence. Discharged as (a) `BLADE_REPRO_FN` on the

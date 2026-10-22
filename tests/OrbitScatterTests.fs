@@ -34,6 +34,10 @@
 // (OMP_THREAD_LIMIT=1; the run record's `forms` names each site's executed
 // form), the test-mode pull build (teams observed), the pull off, the serial
 // scatter, the walk and the LLVM lane.
+// Plus the ROW ORBIT ACTION (round 3, D-P2 / gap G73): a generated program of
+// rank-2 row actions, each beside its walk-forced twin, compared by RAW BITS
+// (BLADE_PRINT_BITS) within and across C++ / LLVM builds at several row
+// groups and with the knob off, and against the interpreter's decimal text.
 // `blade test orbit-scatter`; part of the default suite. Needs g++ (Skipped
 // without it); the LLVM half needs clang (Skipped without it).
 module Blade.Tests.OrbitScatterTests
@@ -701,6 +705,212 @@ let runOrbitScatterTests () : BlockResult =
         match pullCheck out with
         | Some why -> fail name why
         | None -> compareBits name out "every e<k> true; routes as expected"
+    // ---- THE ROW ORBIT ACTION (round 3, D-P2 / gap G73) ---------------------
+    // A generated program of rank-2 ROW ACTIONS `a<k> = method_for(range<V>)
+    // <@> lambda(i) -> reduce(method_for(range<V>) <@> lambda(j) -> BODY, K, S)
+    // |> compute` over stored SymIdx<2, p> pools at p in {1, 2, 3, 5, 7, 13, 23,
+    // 37}, bodies x / x * v(j) / x * (v(j) - y(i)) / (x - y(i)) * v(j) * v(i)
+    // (own and partner roles of one weight), kernels cycling (+) / radd /
+    // rhalf / rmax, seeds cycling 0.0 / -0.0 / 0.75 / -1.25; plus a NaN pool,
+    // an all -0.0 action with an EXPLICIT -0.0 seed (explicit-seed
+    // preservation, raw bits), the SEEDLESS all -0.0 witness `aseedless` (the
+    // G74 record's witness: the checker seeds a seedless deferred `(+)` with
+    // +0.0, so the CURRENT behaviour -- +0.0 in every row -- is pinned equal
+    // across the action, the walk and the interpreter; seedless first-term
+    // semantics are NOT established here and G74 is not closed) and D/5's
+    // mixed-nest row [1e16, -1e16, 1] (every row
+    // of `amn` must be EXACTLY 1.0, the ascending chain -- a regrouped chain
+    // gives 0.0 -- and the weighted walk `wmn` over it, declined, 3.0). Each
+    // a<k> sits beside a WALK-FORCED twin b<k> whose body also reads the
+    // mirror cell (declined: the pool read at two coordinate orders). Every
+    // build runs with BLADE_PRINT_BITS=1, so each printed Float64 carries its
+    // raw pattern: within the build, a<k>'s line must equal b<k>'s
+    // byte-for-byte (the action IS the walk, raw bits, Float64); across builds
+    // -- C++ at scatter_g 1 / 3 (scatter_b 8) / 4 / 8, C++ with
+    // BLADE_ORBIT_ACTIONS=0 (all walk), LLVM at 1 / 3 (scatter_b 8) / 4 / 8 and
+    // LLVM with BLADE_ORBIT_ACTIONS=0 (the identical-source knob-off A/B in that
+    // lane, route count 0) -- every a<k> line equals the reference build's;
+    // the interpreter (the oracle, the walk) must print the same DECIMAL text
+    // (it has no bit channel). REPRO + contract=off, T = 1 (v1's action is
+    // serial). Routes asserted per build.
+    let actionProgram () : string * int =
+        let sb = Text.StringBuilder(header)
+        let mutable k = 0
+        let aKernels = [| "(+)"; "radd"; "rhalf"; "rmax" |]
+        let aSeeds = [| "0.0"; "-0.0"; "0.75"; "-1.25" |]
+        // (action body over the read `r`, twin body over the read and its mirror `m`)
+        let aBodies (p: int) : ((string -> string) * (string -> string -> string)) list =
+            [ (fun r -> r), (fun r m -> $"if {m} > 1.0e300 then 0.0 else {r}")
+              (fun r -> $"{r} * v{p}(j)"), (fun r m -> $"if {m} > 1.0e300 then 0.0 else {r} * v{p}(j)")
+              (fun r -> $"{r} * (v{p}(j) - y{p}(i))"), (fun r m -> $"if {m} > 1.0e300 then 0.0 else {r} * (v{p}(j) - y{p}(i))")
+              (fun r -> $"({r} - y{p}(i)) * v{p}(j) * v{p}(i)"), (fun r m -> $"if {m} > 1.0e300 then 0.0 else ({r} - y{p}(i)) * v{p}(j) * v{p}(i)") ]
+        let add (p: int) (pool: string) (kern: string) (seed: string) (body: string) (twin: string) =
+            let mk (b: string) = $"method_for(range<V{p}>) <@> lambda(i) -> reduce(method_for(range<V{p}>) <@> lambda(j) -> {b}, {kern}, {seed}) |> compute"
+            sb.Append($"let a{k} = {mk body}\n") |> ignore
+            sb.Append($"let b{k} = {mk twin}\n") |> ignore
+            k <- k + 1
+        let ps = [ 1; 2; 3; 5; 7; 13; 23; 37 ]
+        for p in ps do
+            sb.Append($"type V{p} = Idx<{p}>\n") |> ignore
+            sb.Append(xDecl (string p) $"V{p}" None) |> ignore
+            sb.Append($"let g{p} = method_for(x{p}, x{p}) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute\n") |> ignore
+            sb.Append($"let v{p} = method_for(range<V{p}>) <@> lambda(i) -> Float64((i * 5) %% 7) * 0.31 - 0.83 |> compute\n") |> ignore
+            sb.Append($"let y{p} = method_for(range<V{p}>) <@> lambda(i) -> Float64((i * 3) %% 5) * 0.47 + 0.125 / Float64(i + 1) |> compute\n") |> ignore
+        for p in ps do
+            aBodies p |> List.iteri (fun bi (f, twin) ->
+                let kern = aKernels.[(bi + p) % aKernels.Length]
+                let seed = aSeeds.[(2 * bi + p) % aSeeds.Length]
+                add p $"g{p}" kern seed (f $"g{p}(i, j)") (twin $"g{p}(i, j)" $"g{p}(j, i)"))
+        // the S(j, i) read order
+        add 13 "g13" "rhalf" "0.75" "g13(j, i) * v13(j)" "if g13(i, j) > 1.0e300 then 0.0 else g13(j, i) * v13(j)"
+        // a NaN pool (one payload: the pool's own invalid sqrt)
+        sb.Append(xDecl "n7" "V7" (Some 3)) |> ignore
+        sb.Append("let gn = method_for(xn7, xn7) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute\n") |> ignore
+        add 7 "gn" "radd" "0.5" "gn(i, j) * v7(j)" "if gn(j, i) > 1.0e300 then 0.0 else gn(i, j) * v7(j)"
+        // all -0.0 terms from -0.0 seeds: every row is -0.0
+        add 13 "g13" "(+)" "-0.0" "-0.0 * abs(g13(i, j)) * abs(v13(j))" "if g13(j, i) > 1.0e300 then 0.0 else -0.0 * abs(g13(i, j)) * abs(v13(j))"
+        // D/5's mixed-nest row: S = ones, V = [1e16, -1e16, 1]
+        sb.Append("type Three = Idx<3>\n") |> ignore
+        sb.Append("let ones = method_for(range<Three>) <@> lambda(i) -> 1.0 |> compute\n") |> ignore
+        sb.Append("let s1 = method_for(ones, ones) <@> lambda(a: Float64, b: Float64) where comm(a, b) -> a * b |> compute\n") |> ignore
+        sb.Append("let vmn = method_for(range<Three>) <@> lambda(i) -> if i == 0 then 1.0e16 else if i == 1 then -1.0e16 else 1.0 |> compute\n") |> ignore
+        sb.Append("let amn = method_for(range<Three>) <@> lambda(i) -> reduce(method_for(range<Three>) <@> lambda(j) -> s1(i, j) * vmn(j), (+)) |> compute\n") |> ignore
+        sb.Append("let wmn = reduce(method_for(range<Three>) <@> lambda(i) -> reduce(method_for(range<Three>) <@> lambda(j) -> s1(i, j) * vmn(j), (+)), radd, 0.0)\n") |> ignore
+        // THE SEEDLESS all -0.0 witness (the G74 record's, Codex diff review of
+        // 719a2bce finding 2): the checker seeds a seedless deferred `(+)` with
+        // +0.0, so every row is +0.0 -- in the action, the knob-off walk and the
+        // interpreter alike. Pinned as the CURRENT behaviour; it does not
+        // establish first-term / -0.0 seedless semantics (G74 stays open).
+        sb.Append("let aseedless = method_for(range<V13>) <@> lambda(i) -> reduce(method_for(range<V13>) <@> lambda(j) -> -0.0 * abs(g13(i, j)) * abs(v13(j)), (+)) |> compute\n") |> ignore
+        sb.Append("let bseedless = method_for(range<V13>) <@> lambda(i) -> reduce(method_for(range<V13>) <@> lambda(j) -> if g13(j, i) > 1.0e300 then 0.0 else -0.0 * abs(g13(i, j)) * abs(v13(j)), (+)) |> compute\n") |> ignore
+        (sb.ToString(), k)
+    let (asrc, acases) = actionProgram ()
+    let aprinted = [ for k in 0 .. acases - 1 do yield $"a{k}"; yield $"b{k}" ] @ [ "amn"; "wmn"; "aseedless"; "bseedless" ]
+    let actionRoutes (lane: string) (text: string) =
+        let needle = if lane = "cpp" then "blade_scatter::action2<" else "; orbit action (rank 2"
+        Text.RegularExpressions.Regex.Matches(text, Text.RegularExpressions.Regex.Escape needle).Count
+    // name -> its printed line (the decimal text, raw bits included when printed)
+    let linesOf (out: string) : Map<string, string> =
+        out.Replace("\r\n", "\n").Split('\n')
+        |> Array.choose (fun l ->
+            let m = Text.RegularExpressions.Regex.Match(l, @"^([A-Za-z_][A-Za-z_0-9]*) = (.*)$")
+            if m.Success then Some (m.Groups.[1].Value, m.Groups.[2].Value) else None)
+        |> Map.ofArray
+    let stripBits (s: string) = Text.RegularExpressions.Regex.Replace(s, @" #[0-9a-f]{16}", "")
+    let actionPins = [ ("BLADE_FP_REPRO", "1"); ("BLADE_FP_CONTRACT", "off"); ("BLADE_OMP_THREADS", "1"); ("BLADE_PRINT", String.concat "," aprinted)
+                       ("BLADE_ORBIT_FOLD", null); ("BLADE_FOLD_ROW_SLOTS", null); ("BLADE_ORBIT_SCATTER", null) ]
+    let buildAction (lane: string) (pins: (string * string) list) (stem: string) : Result<string * string * Blade.IR.IRProgram, string> =
+        let guards = pins |> List.map (fun (k, v) -> pinEnv k v)
+        try
+            match (try lower asrc with ex -> Error ("lower raised: " + ex.Message)) with
+            | Error e -> Error ("lower: " + e)
+            | Ok ir ->
+            if lane = "cpp" then
+                let (cpp, _) = CodeGen.genSelfContainedProgramFromIR ir stem
+                CodeGen.takeUnhandledIRNodeDiagnostics () |> ignore
+                let file = Path.Combine(work, stem + ".cpp")
+                File.WriteAllText(file, cpp)
+                match Build.compileCpp file work with
+                | Error e -> Error ("compile: " + (if e.Length > 400 then e.Substring(0, 400) else e))
+                | Ok exe -> Ok (exe, cpp, ir)
+            else
+                match (try EmitLlvm.tryEmitProgramNamed stem ir with ex -> Error ("raised: " + ex.Message)) with
+                | Error why -> Error ($"the llvm lane refused the program: {why}")
+                | Ok ll ->
+                let llFile = Path.Combine(work, stem + ".ll")
+                File.WriteAllText(llFile, ll)
+                match Build.compileLlvmProgram llFile work with
+                | Error e -> Error ("llvm compile: " + (if e.Length > 300 then e.Substring(0, 300) else e))
+                | Ok exe -> Ok (exe, ll, ir)
+        finally
+            for g in List.rev guards do g.Dispose()
+    // (lane, extra pins, label, expected action routes)
+    let actionBuilds =
+        [ ("cpp", [ ("BLADE_TILE_TUNE", null); ("BLADE_ORBIT_ACTIONS", null) ], "C++ action, default (scatter_g=4)", acases + 2)
+          ("cpp", [ ("BLADE_TILE_TUNE", "scatter_g=1"); ("BLADE_ORBIT_ACTIONS", null) ], "C++ action, scatter_g=1", acases + 2)
+          ("cpp", [ ("BLADE_TILE_TUNE", "scatter_g=3,scatter_b=8"); ("BLADE_ORBIT_ACTIONS", null) ], "C++ action, scatter_g=3, scatter_b=8", acases + 2)
+          ("cpp", [ ("BLADE_TILE_TUNE", "scatter_g=8"); ("BLADE_ORBIT_ACTIONS", null) ], "C++ action, scatter_g=8", acases + 2)
+          ("cpp", [ ("BLADE_TILE_TUNE", null); ("BLADE_ORBIT_ACTIONS", "0") ], "C++ BLADE_ORBIT_ACTIONS=0 (every a<k> the walk)", 0)
+          ("llvm", [ ("BLADE_TILE_TUNE", null); ("BLADE_ORBIT_ACTIONS", null) ], "LLVM action, default (scatter_g=4)", acases + 2)
+          ("llvm", [ ("BLADE_TILE_TUNE", "scatter_g=1"); ("BLADE_ORBIT_ACTIONS", null) ], "LLVM action, scatter_g=1", acases + 2)
+          ("llvm", [ ("BLADE_TILE_TUNE", "scatter_g=3,scatter_b=8"); ("BLADE_ORBIT_ACTIONS", null) ], "LLVM action, scatter_g=3, scatter_b=8", acases + 2)
+          ("llvm", [ ("BLADE_TILE_TUNE", "scatter_g=8"); ("BLADE_ORBIT_ACTIONS", null) ], "LLVM action, scatter_g=8", acases + 2)
+          ("llvm", [ ("BLADE_TILE_TUNE", null); ("BLADE_ORBIT_ACTIONS", "0") ], "LLVM BLADE_ORBIT_ACTIONS=0 (every a<k> the walk)", 0) ]
+    let mutable actionRef : Map<string, string> option = None
+    let mutable actionIr : Blade.IR.IRProgram option = None
+    let caseKeys = [ for k in 0 .. acases - 1 -> $"a{k}" ] @ [ "amn"; "aseedless" ]
+    for (lane, pins, label, routes) in actionBuilds do
+        n <- n + 1
+        let name = $"{label}: {acases} actions == their walk-forced twins and the reference (raw bits, REPRO, contract=off)"
+        if lane = "llvm" && not llvmOn then skip name "no clang (BLADE_LLVM_CLANG)"
+        else
+        match buildAction lane (actionPins @ pins) $"oact_{n}" with
+        | Error e -> fail name e
+        | Ok (exe, text, ir) ->
+        actionIr <- Some ir
+        let rc = actionRoutes lane text
+        if rc <> routes then fail name $"route census: {rc} action site(s) in the emitted text, wanted {routes}"
+        elif lane = "llvm" && routes > 0 && isNull (snd (pins |> List.find (fun (k, _) -> k = "BLADE_TILE_TUNE"))) && not (text.Contains "fadd <4 x double>") then
+            fail name "the LLVM row chains of a builtin `+` action did not take the <4 x double> form (G % 4 = 0)"
+        else
+        match runAt exe "1" None with
+        | Error e -> fail name ("run: " + e)
+        | Ok (out, _) ->
+        let ls = linesOf out
+        let missing = (caseKeys @ [ "wmn"; "bseedless" ]) |> List.filter (fun c -> not (ls.ContainsKey c))
+        if not missing.IsEmpty then fail name $"""not printed: {String.concat ", " (List.truncate 4 missing)}"""
+        else
+        let twinDiff = [ for k in 0 .. acases - 1 do if ls.[$"a{k}"] <> ls.[$"b{k}"] then yield k ]
+        // the seedless witness: the CURRENT behaviour (+0.0 in every row, the checker's seed), equal to its walk twin
+        let seedlessOk =
+            ls.["aseedless"] = ls.["bseedless"]
+            && ls.["aseedless"] = "[" + String.concat ", " (List.replicate 13 "0.0 #0000000000000000") + "]"
+        let bitsShown = ls.[$"a0"].Contains " #"
+        let amnOk = ls.["amn"] = "[1.0 #3ff0000000000000, 1.0 #3ff0000000000000, 1.0 #3ff0000000000000]"
+        let wmnOk = ls.["wmn"] = "3.0 #4008000000000000"
+        let nanOk = ls.[$"a{acases - 2}"].Contains "nan"
+        let zeroOk =
+            let z = ls.[$"a{acases - 1}"]
+            z.StartsWith "[-0.0 #8000000000000000" && not (z.Contains "#0000000000000000")
+        if not bitsShown then fail name "no raw bits printed (BLADE_PRINT_BITS)"
+        elif not twinDiff.IsEmpty then
+            let k = twinDiff.Head
+            fail name ($"a{k} differs from its walk-forced twin b{k}: " + ls.[$"a{k}"] + " vs " + ls.[$"b{k}"])
+        elif not seedlessOk then fail name ("the SEEDLESS all -0.0 witness must be +0.0 in every row (the checker's +0.0 seed; G74) and equal its walk twin: aseedless = " + ls.["aseedless"] + " / bseedless = " + ls.["bseedless"])
+        elif not amnOk then fail name ("the mixed-nest row action must be the ascending chain, every row exactly 1.0: amn = " + ls.["amn"])
+        elif not wmnOk then fail name ("the weighted walk over the mixed-nest rows must be 3.0: wmn = " + ls.["wmn"])
+        elif not nanOk then fail name "the NaN pool's action must print nan"
+        elif not zeroOk then fail name ("the all -0.0 action must keep its sign in every row: " + ls.[$"a{acases - 1}"])
+        else
+        match actionRef with
+        | None ->
+            actionRef <- Some ls
+            pass name $"every a<k> line byte-identical to its walk twin (raw bits); amn = three exact 1.0 (ascending chains); NaN and -0.0 rows right; {rc} action site(s)"
+        | Some r ->
+            let diffs = caseKeys |> List.filter (fun c -> r.[c] <> ls.[c])
+            if diffs.IsEmpty then pass name $"every a<k> == its walk twin AND the reference build, raw bits; {rc} action site(s)"
+            else
+                let c = diffs.Head
+                fail name $"raw bits differ from the reference at {diffs.Length} case(s): {c} = {ls.[c]} vs {r.[c]}"
+    // the interpreter (the oracle): the same decimal text as the reference
+    let interpName = $"interpreter (the walk): {acases} actions print the reference build's decimal text"
+    match actionRef, actionIr with
+    | Some r, Some ir ->
+        let guards = actionPins |> List.map (fun (k, v) -> pinEnv k v)
+        try
+            match (try Ok (Blade.Interp.Run.runProgram ir "oact_interp" Blade.Interp.Value.defaultLimits) with ex -> Error ex.Message) with
+            | Error e -> fail interpName ("interpreter raised: " + e)
+            | Ok res when res.ExitCode <> 0 -> fail interpName ($"interpreter exit {res.ExitCode}: {res.Stderr.Trim()}")
+            | Ok res ->
+                let ls = linesOf res.Stdout
+                let diffs = (caseKeys @ [ "wmn" ]) |> List.filter (fun c -> not (ls.ContainsKey c) || ls.[c] <> stripBits r.[c])
+                if diffs.IsEmpty then pass interpName "every a<k>, amn and wmn line equal (decimal, 15 significant digits: the interpreter has no bit channel)"
+                else
+                    let c = diffs.Head
+                    fail interpName $"""{diffs.Length} line(s) differ: {c} = {(match Map.tryFind c ls with Some v -> v | None -> "<missing>")} vs {stripBits r.[c]}"""
+        finally
+            for g in List.rev guards do g.Dispose()
+    | _ -> skip interpName "no reference build"
     (try Directory.Delete(work, true) with _ -> ())
     printFooter blockName [ $"{passed} passed"; $"{failed} failed"; $"{skipped} skipped" ]
     { Block = blockName; Passed = passed; Failed = failed; Skipped = skipped; FailedNames = names }

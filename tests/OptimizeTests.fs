@@ -3604,6 +3604,240 @@ let private planFoldLanesThreadedSrc =
     + "let chain = reduce(method_for(a) <@> lambda(v) -> (v + 1.0) * v, lambda(p, q) where omp -> p + q, 0.0)\n"
     + "let comm_kernel = reduce(method_for(zip(a, b)) <@> lambda(x, y) -> x * y, myAdd, 0.0)\n"
 
+// --- THE ROW ORBIT ACTION (round 3, D-P2 / gap G73) ------------------------
+// `prelude` follows the declarations, `between` sits between the weight `v` and the action
+// `u`, whose cell term is `body` and whose fold is `kernSeed`. `bump` writes
+// a cell of the pool through a `mut` parameter (an intervening writer).
+let private planActionSrcWith (prelude: string) (between: string) (body: string) (kernSeed: string) =
+    "let static p = 13\ntype Var = Idx<p>\ntype Obs = Idx<3>\n"
+    + "function radd(a: Float64, b: Float64) where repro -> Float64 = a + b\n"
+    + "function bump(a: mut Array<Float64 like SymIdx<2, Var>>) -> Int64 = {\n    a(0, 1) = 2.5\n    7\n}\n"
+    + prelude
+    + "let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 3 + s * 5) % 7) - 2.0 |> compute\n"
+    + "let mut g = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute\n"
+    + "let v = method_for(range<Var>) <@> lambda(i) -> Float64((i * 5) % 7) - 3.0 |> compute\n"
+    + between
+    + $"let u = method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> {body}, {kernSeed}) |> compute\n"
+let private planActionSrc = planActionSrcWith "" "" "g(i, j) * v(j)" "(+), 0.75"
+
+let private actionApplied (d: Blade.Effects.Decision) =
+    d.Rule = "fold-form" && d.Outcome = Blade.Effects.Applied && d.Subject = "u"
+    && d.Evidence |> List.exists (fun (e: string) -> e = "fold form: orbit action (rank 2, extent 13, 1 channel, row groups of 4): own / partner role terms; every row chain fed its source order from its seed")
+    && d.Evidence |> List.exists (fun (e: string) -> e.Contains "its term evaluated TWICE -- row chain a with own = a, partner = b, row chain b with own = b, partner = a (never one weighted term at both endpoints)")
+    && d.Evidence |> List.exists (fun (e: string) -> e.StartsWith "five-party audit (planner: Optimize.scheduleMayWriteIn over the module")
+
+let private actionDeclined (needle: string) (d: Blade.Effects.Decision) =
+    d.Rule = "fold-form" && declinedMentioning ("orbit action not taken: " + needle) d
+
+/// The LLVM lane's OWN record of the action (EmitLlvm.tryBindOrbitAction,
+/// tagged like its scatter records, so `blade plan` under BLADE_LLVM=1 merges
+/// it in place of the C++ lane's) and its emitted pass.
+let private planActionLlvmRecord () : bool =
+    let name = "plan_orbit_action_llvm_lane_own_record"
+    pullGates [ ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", "1") ] (fun () ->
+        Blade.Effects.Decisions.start ()
+        let r =
+            try
+                match lower planActionSrc with
+                | Error e -> Error ($"lower: {e}")
+                | Ok ir ->
+                    match EmitLlvm.tryEmitProgramNamed "plan_case" ir with
+                    | Error why -> Error ($"the llvm lane refused: {why}")
+                    | Ok ll -> Ok (Blade.Effects.Decisions.drain (), ll)
+            with ex -> Error ($"raised: {ex.Message}")
+        Blade.Effects.Decisions.drain () |> ignore
+        match r with
+        | Error e -> resultLine Fail name e; false
+        | Ok (ds, ll) ->
+            let mine =
+                ds |> List.filter (fun d ->
+                    d.Rule = "fold-form" && d.Outcome = Blade.Effects.Applied
+                    && d.Evidence |> List.contains Blade.OrbitFold.llvmScatterRecordTag
+                    && d.Evidence |> List.exists (fun (e: string) -> e.StartsWith "fold form: orbit action (rank 2, extent 13, 1 channel")
+                    && d.Evidence |> List.exists (fun (e: string) -> e.StartsWith "five-party audit (planner:"))
+            if mine.Length = 1 && ll.Contains "; orbit action (rank 2, extent 13, 1 channel" then
+                resultLine Pass name "the LLVM emitter's own applied record (tagged, with the five-party matrix) and its pass in the .ll"; true
+            else
+                let inLl = ll.Contains "; orbit action (rank 2"
+                resultLine Fail name ($"{mine.Length} tagged applied action record(s); pass in .ll: {inLl}"); false)
+
+/// THE LANE SPLIT on a thread request (Codex diff review of 719a2bce, finding
+/// 1): with threads ENABLED and the map's `omp(i: 1)` request, the C++ lane
+/// declines (`plan_orbit_action_declined_threads_on_request`, the old emitter's
+/// row walk keeps the request) while the LLVM lane -- no thread runtime --
+/// TAKES the serial action, its own record saying so.
+let private planActionLlvmThreadedRequest () : bool =
+    let name = "plan_orbit_action_llvm_threaded_request_taken"
+    let src = planActionSrc.Replace("let u = method_for(range<Var>) <@> lambda(i) ->", "let u = method_for(range<Var>) <@> lambda(i) where omp(i: 1) ->")
+    pullGates [ ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", null) ] (fun () ->
+        Blade.Effects.Decisions.start ()
+        let r =
+            try
+                match lower src with
+                | Error e -> Error ($"lower: {e}")
+                | Ok ir ->
+                    match EmitLlvm.tryEmitProgramNamed "plan_case" ir with
+                    | Error why -> Error ($"the llvm lane refused: {why}")
+                    | Ok ll -> Ok (Blade.Effects.Decisions.drain (), ll)
+            with ex -> Error ($"raised: {ex.Message}")
+        Blade.Effects.Decisions.drain () |> ignore
+        match r with
+        | Error e -> resultLine Fail name e; false
+        | Ok (ds, ll) ->
+            let taken =
+                ds |> List.exists (fun d ->
+                    d.Rule = "fold-form" && d.Outcome = Blade.Effects.Applied
+                    && d.Evidence |> List.contains Blade.OrbitFold.llvmScatterRecordTag
+                    && d.Evidence |> List.exists (fun (e: string) -> e.StartsWith "fold form: orbit action (rank 2, extent 13, 1 channel")
+                    && d.Evidence |> List.exists (fun (e: string) -> e = "a thread request on the map: this lane has no thread runtime -- the action is serial here as every fold in this lane"))
+            if taken && ll.Contains "; orbit action (rank 2, extent 13, 1 channel" then
+                resultLine Pass name "threads enabled, the map's request present: the LLVM lane TAKES the serial action and records that it has no thread runtime (the C++ lane declines: plan_orbit_action_declined_threads_on_request)"; true
+            else
+                let shown = ds |> List.filter (fun d -> d.Rule = "fold-form") |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+                resultLine Fail name ($"wanted the LLVM lane's applied action with the no-thread-runtime note; the record: {shown}"); false)
+
+let private planActionCases () : bool list =
+    let repro f = pullGates [ ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", "1") ] f
+    [ repro (fun () ->
+          planCase "plan_orbit_action_applied_repro" planActionSrc "fold-form"
+              (fun d -> actionApplied d
+                        && evidenceMentioning "one pass over the 91-cell SymIdx<2, 13> pool of `g` instead of 169 logical reads" d
+                        && evidenceMentioning "weights `v` (partner)" d
+                        && evidenceMentioning "every fold strict in this build (BLADE_FP_REPRO=1)" d
+                        && evidenceMentioning "producer = the pool `g` stored at its own binding (a `|> compute`), 1 binding(s) between it and the action -- no write" d
+                        && evidenceMentioning "weights = `v` stored at its own binding (a `|> compute`), 0 binding(s) between it and the action -- no write" d
+                        && evidenceMentioning "parallel bodies = none (v1's action is serial" d)
+              "the action applied under REPRO: form, role terms, counts, the five-party matrix")
+      pullGates [ ("BLADE_FP_REPRO", null); ("BLADE_OMP_THREADS", "1") ] (fun () ->
+          planCase "plan_orbit_action_applied_licensed_recorded" planActionSrc "fold-form"
+              (fun d -> actionApplied d && evidenceMentioning "the fold carries a reorder licence in this build: the strict form is taken for the row action too" d)
+              "the default (licensed) build takes the strict form for the row action, and says so")
+      pullGates [ ("BLADE_FP_REPRO", null); ("BLADE_OMP_THREADS", "1"); ("BLADE_ORBIT_ACTIONS", "strict") ] (fun () ->
+          planCase "plan_orbit_action_strict_knob_declines_licensed" planActionSrc "fold-form"
+              (actionDeclined "BLADE_ORBIT_ACTIONS=strict: the fold carries a reorder licence in this non-repro build")
+              "BLADE_ORBIT_ACTIONS=strict keeps the licensed walk in the default build")
+      pullGates [ ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", "1"); ("BLADE_ORBIT_ACTIONS", "strict") ] (fun () ->
+          planCase "plan_orbit_action_strict_knob_applies_repro" planActionSrc "fold-form" actionApplied
+              "BLADE_ORBIT_ACTIONS=strict still takes the action in a strict build")
+      pullGates [ ("BLADE_FP_REPRO", null); ("BLADE_OMP_THREADS", "1") ] (fun () ->
+          planCase "plan_orbit_action_unlicensed_default" (planActionSrcWith "" "" "g(i, j) * v(j)" "radd, 0.75") "fold-form"
+              (fun d -> actionApplied d && evidenceMentioning "the fold carries no reorder licence" d)
+              "a `where repro` fold kernel in the default build: the strict form, no licence")
+      pullGates [ ("BLADE_FP_REPRO", "1"); ("BLADE_ORBIT_ACTIONS", "0") ] (fun () ->
+          planCase "plan_orbit_action_declined_knob" planActionSrc "fold-form"
+              (actionDeclined "disabled by BLADE_ORBIT_ACTIONS=0") "BLADE_ORBIT_ACTIONS=0 keeps the row walk")
+      // REFUSALS, each by its first failed condition (tests/corpus/symmetry/141 runs them)
+      repro (fun () ->
+          planCase "plan_orbit_action_declined_antisym"
+              (planActionSrcWith "" "let an = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where anticomm(a, b) -> a((0 : Obs)) * b((1 : Obs)) - b((0 : Obs)) * a((1 : Obs)) |> compute\n" "an(i, j) * v(j)" "(+)")
+              "fold-form" (actionDeclined "antisymmetric storage: a mirror cell reads -x and the diagonal +0 (signed events, v2)")
+              "an AntisymIdx pool: signed events (v2)")
+      repro (fun () ->
+          planCase "plan_orbit_action_declined_two_contracted_axes"
+              (planActionSrcWith "" "let t3 = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) |> compute\n"
+                   "reduce(method_for(range<Var>) <@> lambda(k) -> t3(i, j, k) * v(j) * v(k), (+))" "(+)")
+              "fold-form" (actionDeclined "two contracted axes in one stage (the term folds a third level): ordered events need per-destination queues (v2)")
+              "T(i, j, k) * v(j) * w(k): two contracted axes (v2)")
+      repro (fun () ->
+          planCase "plan_orbit_action_declined_weight_third_coordinate" (planActionSrcWith "" "" "g(i, j) * v((i + j) % 13)" "(+)") "fold-form"
+              (actionDeclined "the term reads another array, or a weight at a subscript other than the row / partner coordinate")
+              "a weight read at an index expression")
+      repro (fun () ->
+          planCase "plan_orbit_action_declined_second_order_read" (planActionSrcWith "" "" "g(i, j) * g(j, i)" "(+)") "fold-form"
+              (actionDeclined "the term reads the compact array at more than one coordinate order, or reads a second compact array")
+              "the pool read at both coordinate orders (the walk-forced twin's shape)")
+      repro (fun () ->
+          planCase "plan_orbit_action_declined_deferred_weight"
+              (planActionSrcWith "" "let vlate = method_for(range<Var>) <@> lambda(i) -> Float64(i) * 0.5\n" "g(i, j) * vlate(j)" "(+)") "fold-form"
+              (actionDeclined "a weight is not a stored array in scope at the action (a deferred weight would run its initializer inside the action)")
+              "a deferred weight (its definition would run inside the action)")
+      repro (fun () ->
+          planCase "plan_orbit_action_declined_deferred_pool"
+              (planActionSrcWith "" "let gd = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b)\n" "gd(i, j) * v(j)" "(+)") "fold-form"
+              (actionDeclined "the compact array is a deferred computation (no stored pool; P1-style fusion is v2)")
+              "a deferred pool (v2)")
+      repro (fun () ->
+          planCase "plan_orbit_action_declined_per_row_seed" (planActionSrcWith "" "" "g(i, j) * v(j)" "(+), v(i)") "fold-form"
+              (actionDeclined "the seed mentions the row coordinate (per-row seeds are v2)")
+              "a per-row seed (v2)")
+      repro (fun () ->
+          planCase "plan_orbit_action_declined_coordinate_use" (planActionSrcWith "" "" "g(i, j) * Float64(j)" "(+)") "fold-form"
+              (actionDeclined "the cell term is outside the closed total whitelist (it uses the row or partner coordinate beyond the pool and weight reads (v1: no other use of i, j))")
+              "a coordinate used beyond the reads")
+      repro (fun () ->
+          planCase "plan_orbit_action_declined_partial_term" (planActionSrcWith "" "" "g(i, j) * Float64(Int64(floor(v(j))) / 2)" "(+)") "fold-form"
+              (actionDeclined "the cell term is outside the closed total whitelist")
+              "a term that may panic (integer / , a float -> int cast): outside the total whitelist")
+      repro (fun () ->
+          planCase "plan_orbit_action_declined_block_local"
+              (planActionSrcWith "" "" "g(i, j) * v(j)" "(+)" + "let (w, q) = {\n    let q = 1.5\n    let w = method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * v(j), (+)) |> compute\n    (w, q)\n}\n")
+              "fold-form" (actionDeclined "no five-party audit recorded for this action (v1 admits a TOP-LEVEL action binding")
+              "a block-local action: no audit (v1's storage proof covers top-level bindings), unknown declines")
+      pullGates [ ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", null) ] (fun () ->
+          planCase "plan_orbit_action_declined_threads_on_request"
+              ((planActionSrc).Replace("let u = method_for(range<Var>) <@> lambda(i) ->", "let u = method_for(range<Var>) <@> lambda(i) where omp(i: 1) ->")) "fold-form"
+              (actionDeclined "a thread request on the map: this build emits threads and v1's action is serial -- the row walk keeps the request")
+              "a map request in a threaded build: the walk threads the rows")
+      repro (fun () ->
+          planCase "plan_orbit_action_threads_off_request_census"
+              ((planActionSrc).Replace("let u = method_for(range<Var>) <@> lambda(i) ->", "let u = method_for(range<Var>) <@> lambda(i) where omp(i: 1) ->")) "fold-form"
+              (fun d -> actionApplied d && evidenceMentioning "[omp] requested but emitted serial: BLADE_OMP_THREADS=1" d && evidenceMentioning "(requested at: the map)" d)
+              "BLADE_OMP_THREADS=1: the action is taken and the dropped request named")
+      // D/5's mixed nest: a strict outer fold over a licensed inner fold of
+      // weighted rows [1e16, -1e16, 1] (the ascending chain gives 1, a
+      // regrouped one 0) -- refused in the default build by planStrict's rule;
+      // under REPRO every level is strict and the scalar form is v1.1.
+      pullGates [ ("BLADE_FP_REPRO", null); ("BLADE_OMP_THREADS", "1") ] (fun () ->
+          planCase "plan_orbit_action_declined_mixed_nest"
+              ("type Three = Idx<3>\nfunction radd(a: Float64, b: Float64) where repro -> Float64 = a + b\n"
+               + "let ones = method_for(range<Three>) <@> lambda(i) -> 1.0 |> compute\n"
+               + "let s1 = method_for(ones, ones) <@> lambda(a: Float64, b: Float64) where comm(a, b) -> a * b |> compute\n"
+               + "let vmn = method_for(range<Three>) <@> lambda(i) -> if i == 0 then 1.0e16 else if i == 1 then -1.0e16 else 1.0 |> compute\n"
+               + "let wmn = reduce(method_for(range<Three>) <@> lambda(i) -> reduce(method_for(range<Three>) <@> lambda(j) -> s1(i, j) * vmn(j), (+)), radd, 0.0)\n")
+              "fold-form"
+              (actionDeclined "a mixed nest: level 2's fold carries a reorder licence and level 1's does not (v1 keeps the walk; making the licensed level strict would change the default build's bits)")
+              "a strict outer fold over a licensed inner fold of weighted rows: a mixed nest")
+      repro (fun () ->
+          planCase "plan_orbit_action_declined_scalar_form_v11"
+              (planActionSrc + "let total = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * v(j), radd, 0.0), radd, 0.0)\n")
+              "fold-form" (actionDeclined "an outer fold over the weighted rows: v1 builds the row action's stored vector output only (the scalar form is v1.1)")
+              "a strict walk folding weighted rows: the scalar form is v1.1")
+      // THE FIVE-PARTY MATRIX's columns (writing parties decline)
+      repro (fun () ->
+          planCase "plan_orbit_action_declined_intervening_writer" (planActionSrcWith "" "let z = bump(g)\n" "g(i, j) * v(j)" "(+)") "fold-form"
+              (actionDeclined "`z` may write between `g` and the action")
+              "an intervening writer (a mutating call on the pool)")
+      repro (fun () ->
+          planCase "plan_orbit_action_declined_writing_weight_producer"
+              (planActionSrcWith "type K = Idx<2>\nlet mut G: Array<Float64 like K> = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute\nlet vw = method_for(range<Var>) <@> lambda(i) -> {\n    G((0 : K)) = G((0 : K)) + 1.0\n    Float64((i * 5) % 7) - 3.0\n} |> compute\n" ""
+                   "g(i, j) * vw(j)" "(+)")
+              "fold-form" (actionDeclined "the producer of `vw` may write")
+              "a weight whose producer writes (the producer party)")
+      repro (fun () ->
+          planCase "plan_orbit_action_declined_writing_pool_producer"
+              ((planActionSrcWith "type K = Idx<2>\nlet mut G: Array<Float64 like K> = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute\n" ""
+                   "g(i, j) * v(j)" "(+)").Replace("where comm(a, b) -> prodsum(a, b) |> compute", "where comm(a, b) -> {\n    G((0 : K)) = G((0 : K)) + 1.0\n    prodsum(a, b)\n} |> compute"))
+              "fold-form" (actionDeclined "the producer of `g` may write")
+              "a pool whose producer writes (the producer party)")
+      repro (fun () ->
+          planCase "plan_orbit_action_declined_assigned_free_scalar"
+              (planActionSrcWith "let mut c = 0.5\nc = 0.75\n" "" "g(i, j) * v(j) + c" "(+)")
+              "fold-form" (actionDeclined "`__expr1` may write between `c` and the action")
+              "a free scalar assigned between its binding and the action (the intervening party)")
+      repro (fun () ->
+          planCase "plan_orbit_action_declined_writing_fold_kernel"
+              (planActionSrcWith "type K = Idx<2>\nlet mut G: Array<Float64 like K> = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute\n" ""
+                   "g(i, j) * v(j)" "lambda(acc, z) where comm(acc, z) -> {\n    G((0 : K)) = G((0 : K)) + 1.0\n    acc + z\n}, 0.0")
+              "fold-form" (actionDeclined "the fold kernel")
+              "a writing fold kernel (outside the closed whitelist; the planner's fold-kernel column too)")
+      repro (fun () ->
+          planCase "plan_orbit_action_declined_writing_seed"
+              (planActionSrcWith "type K = Idx<2>\nlet mut G: Array<Float64 like K> = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute\nfunction seedf(q: mut Array<Float64 like K>) -> Float64 = {\n    q((0 : K)) = 1.0\n    0.0\n}\n" ""
+                   "g(i, j) * v(j)" "(+), seedf(G)")
+              "fold-form" (actionDeclined "the seed")
+              "a seed that writes through a call") ]
+      @ [ planActionLlvmRecord (); planActionLlvmThreadedRequest () ]
+
 let private planCases () =
     let pinBlas (v: string) f =
         withGate "BLADE_BLAS" v (fun () -> withGate "OPENBLAS_DIR" null (fun () -> withGate "BLADE_BLAS_LINK" null f))
@@ -4130,6 +4364,10 @@ let private planCases () =
           pullCase "plan_orbit_pull_not_in_default_build" (planPullSrc 97 "")
               (fun ds -> not (ds |> List.exists mentionsPull))
               "the default (licensed) build: no pull record (the licensed forms own the walk)")
+      // THE ROW ORBIT ACTION (round 3, D-P2 / gap G73): applied (repro and
+      // licensed, recorded), the knob's three settings, every refusal by its
+      // first failed condition, and the five-party matrix's columns.
+      yield! planActionCases ()
       // THE THREADED FORM (bench G32): `where omp` on the outer fold is spent
       // as a team over the first-coordinate rows -- in the fold-form line and
       // as an applied `omp` record -- and BLADE_OMP_THREADS=1 keeps the

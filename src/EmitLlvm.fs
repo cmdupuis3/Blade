@@ -4231,6 +4231,9 @@ and private bindNamed (c: Ctx) (id: IRId) (name: string) (declTy: IRType) (value
         let v = loadSlot c slot ScF64
         let target = match scalarTyOf declTy with Some t when t <> ScVoid -> t | _ -> v.Ty
         bindScalar c id name (coerce c target v)
+    // THE ROW ORBIT ACTION (round 3, D-P2 / gap G73): the direct `map |>
+    // compute` spelling of a row action over a stored SymIdx<2, n> pool.
+    | IRCompute (IRApplyCombinator ainfo) when tryBindOrbitAction c id name declTy ainfo -> ()
     | _ ->
     match classifyValue c value with
     | VArray a ->
@@ -7403,6 +7406,239 @@ and private emitOrbitScatter (c: Ctx) (sp: Blade.OrbitFold.StrictPlan) (a: ArrVa
     c.FoldFmf <- savedFmf
     loadSlot c outSlot accTy
 
+/// THE ROW ORBIT ACTION in this lane (round 3, D-P2 / gap G73; Blade.OrbitFold's
+/// action header carries the role-term rule and the order proof; the C++ twin
+/// is blade_orbit_scatter.hpp action2 / tri_action through
+/// CodeGenBinding.tryGenOrbitActionCpp, same schedule). A `|> compute` row
+/// action over a STORED SymIdx<2, n> pool whose weights are stored dense
+/// rank-1 pools and whose free scalars are slots here, admitted by the shared
+/// admission: its own pool is allocated and filled by one pass over the
+/// canonical cells. This lane has no thread runtime: a request on the map or
+/// the fold is serial here as everywhere in this lane (recorded). False --
+/// nothing emitted -- when it is not taken (a recognised action records why).
+and private tryBindOrbitAction (c: Ctx) (id: IRId) (name: string) (declTy: IRType) (info: ApplyInfo) : bool =
+    let srcName i = match Map.tryFind i c.ModuleNames with Some n -> n | None -> $"__v{i}"
+    let record (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
+        if Blade.Effects.Decisions.active () then
+            Blade.Effects.Decisions.record
+                { Rule = "fold-form"; Version = 1; Span = c.DeclSpan
+                  Subject = (if name <> "" then name elif c.DeclName = "" then "main" else c.DeclName)
+                  Outcome = outcome; Evidence = evidence @ [ Blade.OrbitFold.llvmScatterRecordTag ] }
+    let decline (why: string) =
+        record (Blade.OrbitFold.actionDeclineOutcome why) [ Blade.OrbitFold.actionDeclinedForm; why ]
+        false
+    match Blade.OrbitFold.recogniseAction (fun e -> e) resolveCallable srcName info with
+    | Blade.OrbitFold.ActionNotAction -> false
+    | Blade.OrbitFold.ActionDeclined why -> decline why
+    | Blade.OrbitFold.ActionTaken p ->
+    let s = p.Shape
+    let n = s.Extent
+    let outOk =
+        match stripUnits declTy with
+        | ArrayElem at when not at.IsVirtual && Blade.CodeGenExprSupport.isFreeableDenseArrayType at ->
+            (match at.IndexTypes, Blade.IRTotality.scalarElem at.ElemType with
+             | [ ix ], Some et -> ix.Rank = 1 && ix.Symmetry = SymNone && Blade.IRPrint.tryEvalIntIR ix.Extent = Some n && et = s.AccTy
+             | _ -> false)
+        | _ -> false
+    match scalarTyOf (IRTScalar s.AccTy), scalarTyOf (IRTScalar s.ElemTy) with
+    | Some accTy, Some elemTy when (accTy = ScF64 || accTy = ScI64) && (elemTy = ScF64 || elemTy = ScI64) ->
+        if not outOk then decline "the output is not a dense rank-1 array of the fold's accumulator type over the pool's index"
+        elif (Blade.Optimize.HotRowTable.tryProducer id).IsSome || (Blade.Optimize.CompactRowTable.tryProducer id).IsSome
+             || (Blade.Optimize.EpilogueLegTable.tryProducer id).IsSome then
+            decline "another schedule (a hot-row fold, a cell epilogue, compact row classes or producer-input legs) owns this producer"
+        elif s.Weights |> List.exists (fun w -> match scalarTyOf (IRTScalar w.ElemTy) with Some t -> t <> ScF64 && t <> ScI64 | None -> true) then
+            decline "a weight's element type is not Float64 / Int64 (LLVM lane)"
+        elif not (p.FreeIds |> Set.forall (fun v -> c.Slots.ContainsKey v)) then
+            decline "a free scalar of the cell term, the fold kernel or the seed is not a scalar slot at the action (LLVM lane)"
+        else
+        match c.ArrSlots.TryGetValue s.SourceId with
+        | true, pool ->
+            (match pool.Src, soleSimplexR pool.Groups with
+             | APool _, Some (2, pn, false) when pn = n ->
+                 let weights =
+                     s.Weights |> List.map (fun w ->
+                         match c.ArrSlots.TryGetValue w.ArrayId with
+                         | true, ({ Src = APool _ } as wa) when wa.Groups = [ GDense n ] -> Some (w, wa)
+                         | _ -> None)
+                 if weights |> List.exists Option.isNone then
+                     decline "a weight is not a stored dense rank-1 pool in scope (LLVM lane: a deferred weight would run its producer inside the action)"
+                 else
+                 match Blade.OrbitFold.orbitActionAdmissible c.BindingValues id p with
+                 | Error why -> decline why
+                 | Ok matrix ->
+                 let reqs = Blade.OrbitFold.actionThreadRequests p
+                 let note =
+                     if reqs.IsEmpty then []
+                     else [ $"""a thread request on {String.concat ", " reqs}: this lane has no thread runtime -- the action is serial here as every fold in this lane""" ]
+                 record Blade.Effects.Applied
+                     ([ "fold form: " + Blade.OrbitFold.actionForm p; Blade.OrbitFold.actionEvidence p ] @ matrix @ note)
+                 let out = allocPool c accTy (string n)
+                 emitOrbitAction c p pool (weights |> List.choose (fun w -> w)) out accTy
+                 bindArray c id name { Elem = accTy; Groups = [ GDense n ]; Src = APool out; RowOpBytes = 0L }
+                 true
+             | APool _, _ -> decline "the pool's storage groups are not one SymIdx<2, n> simplex of the action's extent (LLVM lane)"
+             | _ -> decline "the compact array is an unforced computation, not a stored pool (LLVM lane: its producer would run inside the action)")
+        | _ -> decline "the compact array is not a materialized array in scope (LLVM lane)"
+    | _ -> decline "the accumulator or element type is not Float64 / Int64 (LLVM lane)"
+
+/// The action's pass (blade_scatter::tri_action's schedule): every chain of
+/// the output pool `out` seeded once, then the G-row groups -- the diagonal
+/// block block-lex, then per column block the role terms of each canonical
+/// cell into Zr (the row chain's, own = row) and Zc (the column chain's, own =
+/// column), the column chains in row order, the row chains one application
+/// per column -- and the tail rows one at a time. Every instruction is born
+/// WITHOUT `reassoc nsz` (lanes are distinct chains); `contract` follows the
+/// build (`fmfFor`).
+and private emitOrbitAction (c: Ctx) (p: Blade.OrbitFold.ActionPlan) (pool: ArrVal)
+                            (weights: (Blade.OrbitFold.ActionWeight * ArrVal) list) (out: string) (accTy: Sc) : unit =
+    let s = p.Shape
+    let n = s.Extent
+    let g = p.RowGroup
+    let blk = p.ColBlock
+    let ety = poolTy accTy
+    ln c ($"; {(Blade.OrbitFold.actionForm p)} (strict: no licence consumed)")
+    let savedFmf = c.FoldFmf
+    c.FoldFmf <- false
+    // f(x, own, partner): the term with the cell value and each weight's own /
+    // partner value bound to the plan's sentinels
+    let evalF (x: Val) (own: string) (partner: string) : Val =
+        let binds = System.Collections.Generic.List<IRId * (string * Sc) option>()
+        let bindSlot (vid: IRId) (v: Val) =
+            let slot = allocaOf c (llTy v.Ty)
+            ln c ($"store {(llTy v.Ty)} {v.Reg}, ptr {slot}")
+            let saved = match c.Slots.TryGetValue vid with | true, sl -> Some sl | _ -> None
+            c.Slots.[vid] <- (slot, v.Ty)
+            binds.Add((vid, saved))
+        bindSlot Blade.OrbitFold.readVarId x
+        for (w, wa) in weights do
+            if w.Own then bindSlot (Blade.OrbitFold.actionOwnId w.Index) (readFlat c wa { Reg = own; Ty = ScI64 })
+            if w.Partner then bindSlot (Blade.OrbitFold.actionPartnerId w.Index) (readFlat c wa { Reg = partner; Ty = ScI64 })
+        let res = coerce c accTy (emitExpr c s.Body)
+        for (vid, saved) in binds do
+            match saved with
+            | Some sl -> c.Slots.[vid] <- sl
+            | None -> c.Slots.Remove vid |> ignore
+        res
+    let kk (x: Val) (y: Val) : Val = coerce c accTy (applyKernel c s.Level.Fold [ KScalar x; KScalar y ])
+    let gep (basePtr: string) (off: string) = gepCell c accTy basePtr off
+    let ld (basePtr: string) (off: string) : Val = loadCell c accTy (gep basePtr off)
+    let st (basePtr: string) (off: string) (v: Val) = storeCell c accTy (gep basePtr off) v
+    let icmp (pred: string) (lhs: string) (rhs: string) =
+        let d = freshReg c
+        ln c (renderCmp { Dest = d; Kind = "icmp"; Pred = pred; Ty = ScI64; Lhs = lhs; Rhs = rhs })
+        d
+    let imin (x: string) (y: string) =
+        let lt = icmp "slt" x y
+        let d = freshReg c
+        ln c ($"{d} = select i1 {lt}, i64 {x}, i64 {y}")
+        d
+    let triRow (m: string) (r: string) =
+        let t1 = i64Bin c "mul" r m
+        let t3 = i64Bin c "mul" r (i64Bin c "sub" r "1")
+        i64Bin c "sub" t1 (i64Bin c "lshr" t3 "1")
+    let read (off: string) : Val = readFlat c pool { Reg = off; Ty = ScI64 }
+    let zr = allocaOf c $"[{g * blk} x {ety}]"
+    let zc = allocaOf c $"[{g * blk} x {ety}]"
+    let vadd = p.LevelAdd && accTy = ScF64 && g % 4 = 0 && Blade.CodeGenExprSupport.scatterVectorRows ()
+    let m = string n
+    // every chain seeded once, from the seed evaluated once (total,
+    // coordinate-free)
+    let seedVal = coerce c accTy (emitExpr c s.Level.Seed)
+    emitCountedLoopTo c m (fun i -> st out i seedVal)
+    let groups = i64Bin c "udiv" m (string g)
+    emitCountedLoopTo c groups (fun gi ->
+        let i0 = i64Bin c "mul" gi (string g)
+        let rs = [| for q in 0 .. g - 1 -> triRow m (i64Add c i0 (string q)) |]
+        // (1) the diagonal block, block-lex: the row role to R[i0 + q], the
+        // column role to R[i0 + q2]
+        for q in 0 .. g - 1 do
+            for q2 in q .. g - 1 do
+                let x = read (i64Add c rs.[q] (string (q2 - q)))
+                let ra = i64Add c i0 (string q)
+                let rb = i64Add c i0 (string q2)
+                st out ra (kk (ld out ra) (evalF x ra rb))
+                if q2 <> q then st out rb (kk (ld out rb) (evalF x rb ra))
+        let nv = g / 4
+        let rc = if vadd then [||] else [| for _ in 0 .. g - 1 -> allocaOf c ety |]
+        let rcv = if vadd then [| for _ in 0 .. nv - 1 -> allocaOf c "<4 x double>" |] else [||]
+        if vadd then
+            for v in 0 .. nv - 1 do
+                let x = freshReg c
+                ln c ($"{x} = load <4 x double>, ptr {(gep out (i64Add c i0 (string (4 * v))))}, align 8")
+                ln c ($"store <4 x double> {x}, ptr {rcv.[v]}")
+        else
+            for q in 0 .. g - 1 do
+                let v = ld out (i64Add c i0 (string q))
+                ln c ($"store {ety} {v.Reg}, ptr {rc.[q]}")
+        let c0 = i64Add c i0 (string g)
+        let ncols = i64Bin c "sub" m c0
+        let nblocks = i64Bin c "udiv" (i64Bin c "add" ncols (string (blk - 1))) (string blk)
+        emitCountedLoopTo c nblocks (fun bi ->
+            let jb = i64Add c c0 (i64Bin c "mul" bi (string blk))
+            let len = imin (string blk) (i64Bin c "sub" m jb)
+            // (2a) the term map: each canonical cell read once, its two role
+            // terms formed (Zr: own = the row; Zc: own = the column)
+            for q in 0 .. g - 1 do
+                let own = i64Add c i0 (string q)
+                let rowOff = i64Add c rs.[q] (i64Bin c "sub" jb own)
+                emitCountedLoopTo c len (fun jj ->
+                    let x = read (i64Add c rowOff jj)
+                    let col = i64Add c jb jj
+                    let slot = i64Add c (string (q * blk)) jj
+                    st zr slot (evalF x own col)
+                    st zc slot (evalF x col own))
+            // (2b) the column chains (lane jj = distinct chain R[jb + jj]),
+            // their G column-role terms in row order
+            emitCountedLoopTo c len (fun jj ->
+                let col = i64Add c jb jj
+                let mutable acc = ld out col
+                for q in 0 .. g - 1 do
+                    acc <- kk acc (ld zc (i64Add c (string (q * blk)) jj))
+                st out col acc)
+            // (2c) the row chains: one application per chain per column
+            if vadd then
+                let flags = fmfFor c ScF64
+                emitCountedLoopTo c len (fun jj ->
+                    for v in 0 .. nv - 1 do
+                        let acc = freshReg c
+                        ln c ($"{acc} = load <4 x double>, ptr {rcv.[v]}")
+                        let mutable vec = "poison"
+                        for mm in 0 .. 3 do
+                            let z = ld zr (i64Add c (string ((4 * v + mm) * blk)) jj)
+                            let nx = freshReg c
+                            ln c ($"{nx} = insertelement <4 x double> {vec}, double {z.Reg}, i32 {mm}")
+                            vec <- nx
+                        let sum = freshReg c
+                        ln c ($"{sum} = fadd{flags} <4 x double> {acc}, {vec}")
+                        ln c ($"store <4 x double> {sum}, ptr {rcv.[v]}"))
+            else
+                emitCountedLoopTo c len (fun jj ->
+                    for q in 0 .. g - 1 do
+                        let cur = loadSlot c rc.[q] accTy
+                        let next = kk cur (ld zr (i64Add c (string (q * blk)) jj))
+                        ln c ($"store {ety} {next.Reg}, ptr {rc.[q]}")))
+        if vadd then
+            for v in 0 .. nv - 1 do
+                let x = freshReg c
+                ln c ($"{x} = load <4 x double>, ptr {rcv.[v]}")
+                ln c ($"store <4 x double> {x}, ptr {(gep out (i64Add c i0 (string (4 * v))))}, align 8")
+        else
+            for q in 0 .. g - 1 do
+                st out (i64Add c i0 (string q)) (loadSlot c rc.[q] accTy))
+    // the tail rows, one at a time: the diagonal cell, then the columns
+    let done0 = i64Bin c "mul" groups (string g)
+    emitCountedLoopTo c (i64Bin c "sub" m done0) (fun t ->
+        let i0 = i64Add c done0 t
+        let row = triRow m i0
+        st out i0 (kk (ld out i0) (evalF (read row) i0 i0))
+        emitCountedLoopTo c (i64Bin c "sub" (i64Bin c "sub" m i0) "1") (fun t2 ->
+            let jj = i64Add c t2 "1"
+            let j = i64Add c i0 jj
+            let x = read (i64Add c row jj)
+            st out i0 (kk (ld out i0) (evalF x i0 j))
+            st out j (kk (ld out j) (evalF x j i0))))
+    c.FoldFmf <- savedFmf
+
 /// `reduce(<deferred computation>, op, init)` -- the FUSED terminal. One nest,
 /// no materialized array, and one accumulator PER FUSION LEAF: an `<&!>` tree
 /// answers a flat pack of scalars, which is how "several statistics in one
@@ -7422,6 +7658,18 @@ and private emitReduceComputeCore (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExp
     match tryOrbitScatter c compExpr kernelExpr initExpr with
     | Some v -> [ v ]
     | None ->
+    // THE ROW ORBIT ACTION's walk form (round 3, D-P2): a walk folding weighted
+    // rows is recognised and declined in v1 (this lane's own record).
+    (if Blade.Effects.Decisions.active () then
+        let name id = match Map.tryFind id c.ModuleNames with Some n -> n | None -> $"__v{id}"
+        match Blade.OrbitFold.recogniseActionWalk (fun e -> e) resolveCallable name compExpr kernelExpr initExpr with
+        | Some why ->
+            Blade.Effects.Decisions.record
+                { Rule = "fold-form"; Version = 1; Span = c.DeclSpan
+                  Subject = (if c.DeclName = "" then "main" else c.DeclName)
+                  Outcome = Blade.OrbitFold.actionDeclineOutcome why
+                  Evidence = [ Blade.OrbitFold.actionDeclinedForm; why; Blade.OrbitFold.llvmScatterRecordTag ] }
+        | None -> ())
     let rec leaves e =
         match e with
         | IRFusion (l, r) -> leaves l @ leaves r

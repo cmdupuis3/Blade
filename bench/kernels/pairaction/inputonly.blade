@@ -1,0 +1,24 @@
+// pairaction inputonly twin -- the input generation and input_checksum of pairaction.blade, the
+// kernel (W, z, u_r, y_r) omitted (README section 5: net = median(total) - median(inputonly)).
+let static n = 2503    // SIZE n
+type Pts = Idx<n>
+type Dim = Idx<3>
+
+/// The suite's input generator (bench/README.md section 5, variant D: five rounds): u in [0, 1),
+/// exact in Int64 (h3 * h3 < 2^62).
+function lcg(k: Int64, seed: Int64) -> Float64 = {
+    let h1 = ((k + seed) * 1103515245 + 12345) % 2147483648
+    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648
+    let h3 = (h2 * 1103515245 + 12345) % 2147483648
+    let h4 = (h3 * h3 / 65536) % 2147483648
+    let h5 = (h4 * 1103515245 + 12345) % 2147483648
+    Float64(h5) / 2147483648.0
+}
+
+let pts = method_for(range<Pts>, range<Dim>) <@> lambda(i, d) where omp(i: 1) -> lcg(i, 10000019 * (d + 1)) |> compute
+let v0 = method_for(range<Pts>) <@> lambda(i) where omp(i: 1) -> lcg(i, 10000019 * 4) |> compute
+let v1 = method_for(range<Pts>) <@> lambda(i) where omp(i: 1) -> lcg(i, 10000019 * 5) |> compute
+let v2 = method_for(range<Pts>) <@> lambda(i) where omp(i: 1) -> lcg(i, 10000019 * 6) |> compute
+let checksum = 0.0
+let input_checksum = reduce(reduce(pts, (+)), lambda(p, q) where omp -> p + q, 0.0)
+    + reduce(v0, lambda(p, q) where omp -> p + q, 0.0) + reduce(v1, lambda(p, q) where omp -> p + q, 0.0) + reduce(v2, lambda(p, q) where omp -> p + q, 0.0)

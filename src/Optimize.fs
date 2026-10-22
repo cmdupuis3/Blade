@@ -187,7 +187,7 @@ let mutable blasGateProbe : unit -> bool = fun () -> false
 /// off for its reference lane, so a new pass's gate belongs in this list the
 /// day the pass lands -- a gate missing here is a pass the differential
 /// cannot see.
-let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_HOIST"; "BLADE_HOT_ROW"; "BLADE_CELL_EPILOGUE"; "BLADE_COMPACTION_FUSION"; "BLADE_COMPACT_ROW_CLASSES"; "BLADE_SIBLING_FOLDS"; "BLADE_REC_STEP_OMP"; "BLADE_MEMBER_HOIST"; "BLADE_EPILOGUE_LEGS" ]
+let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_HOIST"; "BLADE_HOT_ROW"; "BLADE_CELL_EPILOGUE"; "BLADE_COMPACTION_FUSION"; "BLADE_COMPACT_ROW_CLASSES"; "BLADE_SIBLING_FOLDS"; "BLADE_REC_STEP_OMP"; "BLADE_MEMBER_HOIST"; "BLADE_EPILOGUE_LEGS"; "BLADE_ORBIT_ACTIONS" ]
 
 /// A gate's KNOB MIRROR: a value that keeps a pass's PREVIOUS version, or
 /// selects an opt-in variant (not the pass off), for the passes whose forms
@@ -5078,6 +5078,142 @@ let planOrbitPull (programFuncs: IRCallable list) (modul: IRModule) : unit =
                         let ahead = [ for i in j + 1 .. bi - 1 -> topArr.[i] ]
                         yield (pb.Id, pb.Name, producerWhyOf pb.Id pb.Name pb.Value, stored, ahead) ]
             planChain pools (chain b.Value)
+        | _ -> ())
+
+// --- The row orbit action's five-party audit (round 3, D-P2; gap G73) -------
+//
+// A ROW ACTION `u = method_for(range<I>) <@> lambda(i) -> reduce(method_for(
+// range<I>) <@> lambda(j) -> g(S(i, j), V(i), V(j), ..), k, s) |> compute`
+// over a STORED SymIdx<2, n> pool S may be emitted as ONE pass over S's
+// canonical cells feeding every row chain its source sequence
+// (OrbitFold.planAction; blade_orbit_scatter.hpp tri_action;
+// EmitLlvm.emitOrbitAction). Nothing is MOVED across bindings: the action runs
+// at its own site and reads S, the weights V and its free scalars there,
+// exactly as the walk does; only the order of the action's OWN pure, total
+// sub-computations (its row chains) is interleaved. This planner records what
+// the IR shows for every TOP-LEVEL action binding (v1: the storage proof is
+// `storedArrayProof`, which proves top-level bindings) -- the emitters join it
+// to the recogniser's pool / weights / free scalars and decline whatever it
+// cannot prove (unknown = refuse):
+//   producer    -- every earlier top-level binding the action reads (the pool,
+//                  each weight, each free scalar) by its COMPLETE payload
+//                  (intervalPayloadOf): no write, no provider effect; an
+//                  ARRAY must also be proved stored at its own site
+//                  (storedArrayProof: a `|> compute`, a literal, ...; a
+//                  deferred map would execute its initializer inside the
+//                  action and is refused);
+//   consumer    -- the action's map kernel (the whole binding value) and the
+//                  inner map (the cell term g): no write;
+//   fold kernel -- the inner fold kernel: no write;
+//   seed        -- the inner fold seed: no write;
+//   intervening -- EVERY top-level binding between the read binding and the
+//                  action (by payload; a provider effect included): no write
+//                  -- the conservative W check, not a conflict analysis.
+// The action is serial (no team), so no parallel body exists and the callback
+// table is not consulted; the emitters add the callback-aware codegen write
+// analysis over the term, the kernel and the seed.
+module OrbitActionTable =
+    open System.Threading
+    /// What the planner proved about one earlier top-level binding the
+    /// action reads: its producer (`Ok` how it is stored, or the first
+    /// failure) and the bindings between it and the action (`Ok` their count,
+    /// or the first writer).
+    type ReadAudit =
+        { Name: string
+          Producer: Result<string, string>
+          Between: Result<int, string> }
+    type Audit =
+        { /// The consumer / fold-kernel / seed verdicts (None = no write), in
+          /// that order of report.
+          Consumer: string option
+          Reads: Map<IRId, ReadAudit> }
+    type private State = { Audits: Map<IRId, Audit> }
+    let private empty = { Audits = Map.empty }
+    let private cell = new AsyncLocal<State>()
+    let private get () = match box cell.Value with null -> empty | _ -> cell.Value
+    let reset () = cell.Value <- empty
+    let record (action: IRId) (audit: Audit) =
+        cell.Value <- { Audits = Map.add action audit (get ()).Audits }
+    /// The audit of a top-level action binding; None = the planner saw no
+    /// top-level action there (a block-local or function-body action, or no
+    /// action shape): the emitters decline.
+    let tryAudit (action: IRId) : Audit option = Map.tryFind action (get ()).Audits
+
+/// Plan the row orbit action's audits over the TOP-LEVEL binding sequence
+/// (v1). Facts only: no IR change, no decision record (the emitters record
+/// the outcome); no gate of its own (the emitters read BLADE_ORBIT_ACTIONS).
+let planOrbitActions (programFuncs: IRCallable list) (modul: IRModule) : unit =
+    let funcs = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+    let facts = cseFactsOf funcs
+    let writes = scheduleMayWriteIn programFuncs modul
+    let payloadOf = intervalPayloadOf modul
+    let providerEffect = intervalHasProviderEffect modul
+    let mayWrite (e: IRExpr) = writes e || (facts e).MayWrite
+    let storedProof = storedArrayProof modul
+    let readsOf (e: IRExpr) : Set<IRId> =
+        let visited = System.Collections.Generic.HashSet<IRId>()
+        let acc = System.Collections.Generic.HashSet<IRId>()
+        let rec go (e: IRExpr) =
+            for id in collectVarRefsIR e do
+                acc.Add id |> ignore
+                match Map.tryFind id funcs with
+                | Some cl when visited.Add id -> go cl.Body
+                | _ -> ()
+        go e
+        Set.ofSeq acc
+    let rec peel (e: IRExpr) = match e with IRCompute i -> peel i | e -> e
+    let isArray (t: IRType) = match stripUnits t with ArrayElem _ -> true | _ -> false
+    let arr = List.toArray modul.Bindings
+    arr |> Array.iteri (fun ci b ->
+        match b.Value with
+        | IRCompute _ ->
+            (match peel b.Value with
+             | IRApplyCombinator oinfo ->
+                 (match oinfo.Arrays, oinfo.Kernel with
+                  | [ IRRange ([ _ ], None) ], IRVar (kid, _) ->
+                      (match Map.tryFind kid funcs with
+                       | Some cl when cl.Params.Length = 1 ->
+                           (match cl.Body with
+                            | IRReduceCompute (comp, k, seed) ->
+                                let consumer =
+                                    if mayWrite b.Value || mayWrite comp then
+                                        Some "the consumer (the action's map kernel or its cell term) may write (shared transitive write analysis)"
+                                    elif mayWrite k then Some "the inner fold kernel may write (shared transitive write analysis)"
+                                    elif mayWrite seed then Some "the inner fold seed may write (shared transitive write analysis)"
+                                    else None
+                                let reads = readsOf b.Value
+                                let audits =
+                                    [ for si in 0 .. ci - 1 do
+                                        let s = arr.[si]
+                                        if reads.Contains s.Id then
+                                            let pv = payloadOf s.Id s.Value
+                                            let producer =
+                                                if mayWrite pv || providerEffect s.Id then
+                                                    Error $"the producer of `{s.Name}` may write (its complete payload; shared transitive write analysis)"
+                                                elif isArray s.Type then
+                                                    match storedProof s with
+                                                    | Ok (how, _) -> Ok $"stored at its own binding ({how})"
+                                                    | Error why -> Error $"`{s.Name}` is not proved stored before the action ({why}): a deferred array would run its initializer inside the action"
+                                                else Ok "a scalar binding"
+                                            let between =
+                                                [ for i in si + 1 .. ci - 1 -> arr.[i] ]
+                                                |> List.tryPick (fun x ->
+                                                    if mayWrite (payloadOf x.Id x.Value) || providerEffect x.Id then
+                                                        Some $"`{x.Name}` may write between `{s.Name}` and the action (an assignment, a mutating call or a provider write -- its side-table payload included)"
+                                                    else None)
+                                            let ra : OrbitActionTable.ReadAudit =
+                                                { Name = s.Name
+                                                  Producer = producer
+                                                  Between = (match between with
+                                                             | Some why -> Error why
+                                                             | None -> Ok (ci - si - 1)) }
+                                            yield (s.Id, ra) ]
+                                let audit : OrbitActionTable.Audit = { Consumer = consumer; Reads = Map.ofList audits }
+                                OrbitActionTable.record b.Id audit
+                            | _ -> ())
+                       | _ -> ())
+                  | _ -> ())
+             | _ -> ())
         | _ -> ())
 // --- Membership hoisting (round 3, item B-T1; plan rule `member-hoist`) -----
 //

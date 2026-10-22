@@ -2959,6 +2959,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     Optimize.CompactionTable.reset ()
     Optimize.CompactRowTable.reset ()
     Optimize.OrbitPullTable.reset ()
+    Optimize.OrbitActionTable.reset ()
     Optimize.MemberHoistTable.reset ()
     Optimize.EpilogueLegTable.reset ()
     Optimize.InlineReturnTable.reset ()
@@ -3201,6 +3202,11 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // rank-3 scatter dispatch; no IR change. Knob: BLADE_ORBIT_PULL (the
         // emitter's).
         Optimize.planOrbitPull programFuncs irModule
+        // The row orbit action's five-party audit (Blade.Optimize.
+        // planOrbitActions, round 3 D-P2 / gap G73): facts only, read by both
+        // emitters' action admission (OrbitFold.orbitActionAdmissible); no IR
+        // change. Knob: BLADE_ORBIT_ACTIONS (the emitters').
+        Optimize.planOrbitActions programFuncs irModule
         irModule)
 
     // DEAD-POLYMORPH ELIMINATION, last and whole-program: a lambda lifted out

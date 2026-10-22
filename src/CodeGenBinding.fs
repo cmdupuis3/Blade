@@ -1404,6 +1404,18 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                 | _ -> newOutputType
             { info with Kernel = wrappedKernel; OutputType = adjustedOutputType }
     
+    // THE ROW ORBIT ACTION (round 3, D-P2 / gap G73): a row action over a
+    // stored SymIdx<2, n> pool, admitted (Blade.OrbitFold.orbitActionAdmissible),
+    // is one pass over the pool's canonical cells filling this binding's pool.
+    // Only the direct `map |> compute` spelling (no functor wrapper, no
+    // deferred alias) is considered.
+    let actionCode =
+        match resolved, inner with
+        | IRApplyCombinator info, IRApplyCombinator _ when functorWrappers.IsEmpty -> tryGenOrbitActionCpp ctx binding info
+        | _ -> None
+    match actionCode with
+    | Some code -> (code, addVarName binding.Id name ctx)
+    | None ->
     match resolved with
     | IRApplyCombinator info ->
         // info.Loop is never a composed-object chain here -- those route
@@ -4848,6 +4860,112 @@ and genOrbitPullCpp (ctx: CodeGenContext) (ind: string) (name: string) (gName: s
           yield $"{i1}{{ int __omp_distinct = 0; int __omp_teamsz = 0; for (int __t = 0; __t < {maxth}; __t++) {{ if ({seen}[__t]) __omp_distinct++; if ({team}[__t] > __omp_teamsz) __omp_teamsz = {team}[__t]; }} std::cout << \"[omp-coverage] region={tag} teamsz=\" << __omp_teamsz << \" distinct=\" << __omp_distinct << \" maxth=\" << {maxth} << \" form=\" << {runVar}.form << \" requested=\" << {runVar}.requested << \" actual=\" << {runVar}.actual << std::endl; delete[] {seen}; delete[] {team}; }}"
       yield $"{ind}}}" ]
 
+/// THE ROW ORBIT ACTION's C++ (round 3, D-P2 / gap G73; Blade.OrbitFold's
+/// action header carries the role-term rule and the order proof, the runtime
+/// is blade_orbit_scatter.hpp action2 / tri_action). Called for a `|> compute`
+/// map binding before the ordinary apply emitter: Some lines when the action
+/// is taken (the binding's own rank-1 pool allocated and filled by one pass
+/// over the stored SymIdx<2, n> pool), None otherwise (a recognised action
+/// that declines leaves its record). `f` is ONE lambda of (cell value, own,
+/// partner) binding each weight's own / partner value from its stored pool;
+/// the fold kernel is `acc + z` when it is exactly `p0 + p1`, else the
+/// callable's wrapper (a `where repro` kernel keeps its BLADE_REPRO_FN body);
+/// the seed is evaluated once (total, coordinate-free). Every statement is one
+/// line with BLOCK comments only.
+and tryGenOrbitActionCpp (ctx: CodeGenContext) (binding: IRBinding) (info: ApplyInfo) : string list option =
+    let ind = indentStr ctx
+    let name = bindingCppName binding
+    let rec resolveDeferred e =
+        match e with
+        | IRVar (id, _) ->
+            (match Map.tryFind id ctx.DeferredComputations with
+             | Some d -> resolveDeferred d
+             | None -> e)
+        | _ -> e
+    let sourceName id = Map.tryFind id ctx.VarNames |> Option.defaultValue $"__v{id}"
+    match Blade.OrbitFold.recogniseAction resolveDeferred resolveCallable sourceName info with
+    | Blade.OrbitFold.ActionNotAction -> None
+    | Blade.OrbitFold.ActionDeclined why ->
+        Blade.OrbitFold.recordActionDeclined name why
+        None
+    | Blade.OrbitFold.ActionTaken p ->
+    let s = p.Shape
+    let decline (why: string) =
+        Blade.OrbitFold.recordActionDeclined name why
+        None
+    let outOk =
+        match IR.stripUnits binding.Type with
+        | ArrayElem at when not at.IsVirtual && isFreeableDenseArrayType at ->
+            (match at.IndexTypes, Blade.IRTotality.scalarElem at.ElemType with
+             | [ ix ], Some et -> ix.Rank = 1 && ix.Symmetry = SymNone && tryEvalIntIR ix.Extent = Some s.Extent && et = s.AccTy
+             | _ -> false)
+        | _ -> false
+    let reqs = Blade.OrbitFold.actionThreadRequests p
+    let isDeferred (id: IRId) = ctx.DeferredComputations.ContainsKey id
+    let inScope (id: IRId) = ctx.VarNames.ContainsKey id && not (isDeferred id)
+    if not outOk then decline "the output is not a dense rank-1 array of the fold's accumulator type over the pool's index"
+    elif (Blade.Optimize.HotRowTable.tryProducer binding.Id).IsSome || (Blade.Optimize.CompactRowTable.tryProducer binding.Id).IsSome
+         || (Blade.Optimize.EpilogueLegTable.tryProducer binding.Id).IsSome then
+        decline "another schedule (a hot-row fold, a cell epilogue, compact row classes or producer-input legs) owns this producer"
+    elif not reqs.IsEmpty && ompThreadEmissionEnabled () then
+        decline $"""a thread request on {String.concat ", " reqs}: this build emits threads and v1's action is serial -- the row walk keeps the request (each row's chain on one thread)"""
+    elif isDeferred s.SourceId then decline "the compact array is a deferred computation (no stored pool; P1-style fusion is v2)"
+    elif not (ctx.VarNames.ContainsKey s.SourceId) then decline "the compact array has no materialized pool in scope"
+    elif s.Weights |> List.exists (fun w -> not (inScope w.ArrayId)) then
+        decline "a weight is not a stored array in scope at the action (a deferred weight would run its initializer inside the action)"
+    elif p.FreeIds |> Seq.exists (fun id -> not (inScope id)) then
+        decline "a free scalar of the cell term, the fold kernel or the seed is not a materialized binding in scope at the action (capture dominance)"
+    else
+    match Blade.OrbitFold.orbitActionAdmissible ctx.DeferredComputations binding.Id p with
+    | Error why -> decline why
+    | Ok matrix ->
+    let accCpp = primTypeToCpp s.AccTy
+    let elemCpp = primTypeToCpp s.ElemTy
+    let n = s.Extent
+    let tag = sanitizeCppName name
+    let names =
+        s.Weights |> List.fold (fun (m: Map<IRId, string>) (w: Blade.OrbitFold.ActionWeight) ->
+            m |> Map.add (Blade.OrbitFold.actionOwnId w.Index) $"__aw{w.Index}o_{tag}"
+              |> Map.add (Blade.OrbitFold.actionPartnerId w.Index) $"__aw{w.Index}p_{tag}") (Map.add Blade.OrbitFold.readVarId "__sx" ctx.VarNames)
+    let weightBinds =
+        s.Weights |> List.collect (fun w ->
+            let wCpp = primTypeToCpp w.ElemTy
+            let arr = ctx.VarNames.[w.ArrayId]
+            [ if w.Own then yield $"const {wCpp} __aw{w.Index}o_{tag} = {arr}[__so];"
+              if w.Partner then yield $"const {wCpp} __aw{w.Index}p_{tag} = {arr}[__sp];" ])
+        |> String.concat " "
+    let fLambda =
+        let c = { ctx with VarNames = names }
+        $"[&]({elemCpp} __sx, [[maybe_unused]] size_t __so, [[maybe_unused]] size_t __sp) -> {accCpp} {{ {weightBinds} return {(exprToCppCtx c s.Body)}; }}"
+    let (kCode, kName) =
+        if p.LevelAdd then
+            ([ $"auto __ak_{tag} = []({accCpp} __a, {accCpp} __b) -> {accCpp} {{ return __a + __b; }};" ], $"__ak_{tag}")
+        else genCallableWrapper ctx.VarNames $"{name}__ac" s.Level.Fold
+    let seed = exprToCppCtx ctx s.Level.Seed
+    let g = p.RowGroup
+    let b = p.ColBlock
+    let vadd = p.LevelAdd && s.AccTy = ETFloat64 && g % 4 = 0
+    let ompNote =
+        if reqs.IsEmpty then None
+        else Some $"""[omp] requested but emitted serial: {ompThreadsSuppressedReason ()} -- v1's action is serial (requested at: {String.concat ", " reqs})"""
+    (orbitScatterUsedCell ()).Value <- true
+    Blade.OrbitFold.recordActionTaken name p matrix ompNote
+    registerPoolAlloc AllocDense accCpp 1 "nullptr" (name + "_extents") name None
+    let i1 = ind + "    "
+    Some
+        [ yield $"{ind}static constexpr const size_t {name}_extents[1] = {{ {n} }};"
+          yield arrayAlloc { Ind = ind; Elem = accCpp; Rank = 1; Name = name; Symm = "nullptr"; Strict = None; Extents = name + "_extents" }
+          yield $"{ind}{{"
+          yield $"{i1}/* {Blade.OrbitFold.actionForm p} (strict: no licence consumed) */"
+          if not reqs.IsEmpty then
+              yield $"{i1}/* {(ompSuppressedPhrase (ompThreadsSuppressedReason ()))} */"
+          for line in kCode do yield i1 + line
+          yield $"{i1}auto __af_{tag} = {fLambda};"
+          yield $"{i1}const {elemCpp}* __apool_{tag} = nested_array_utilities::pool_base({ctx.VarNames.[s.SourceId]}.data);"
+          let vaddLit = if vadd then "true" else "false"
+          yield $"{i1}blade_scatter::action2<{g}, {b}, {vaddLit}>(__apool_{tag}, (size_t){n}, {accCpp}({seed}), nested_array_utilities::pool_base({name}.data), __af_{tag}, {kName});"
+          yield $"{ind}}}" ]
+
 and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (compExpr: IRExpr) (kernelExpr: IRExpr) (seedExpr: IRExpr) : string list * CodeGenContext =
     // THE JOIN ENCODING (IR.fs, IRReduceCompute): tuple kernel + tuple seed =
     // one fold per leg. Routed to its own emitter, because everything below
@@ -4936,6 +5054,16 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                         "a free scalar of the cell function, a fold kernel or a seed is not a materialized binding in scope at the fold (capture dominance)"
                     None
                 else Some (sp, ctx.VarNames.[src])
+    // THE ROW ORBIT ACTION's walk form (round 3, D-P2): a walk that FOLDS
+    // weighted rows over a SymIdx<2, n> pool is recognised and declined in v1
+    // (a mixed licence nest first; Blade.OrbitFold.recogniseActionWalk).
+    (match scatterPlan, orbitWhy with
+     | None, Some _ ->
+         let sourceName id = Map.tryFind id ctx.VarNames |> Option.defaultValue $"__v{id}"
+         match Blade.OrbitFold.recogniseActionWalk resolveDeferred resolveCallable sourceName compExpr kernelExpr seedExpr with
+         | Some why -> Blade.OrbitFold.recordActionDeclined name why
+         | None -> ()
+     | _ -> ())
     // Compact row classes (Blade.Optimize.planCompactRowClasses): when the
     // producer's nest stored each packed row's class partials (it published
     // their arrays), the orbit pass becomes the row combine. A producer that
