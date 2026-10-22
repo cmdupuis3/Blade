@@ -1,0 +1,22 @@
+// TEST: LLVM return reuse keeps scalar snapshots and two live returned pools
+// Both calls retain their results. The tail captures a scalar computed from
+// the dead donor; that scalar holds no storage and must keep its old value.
+type Ix = Idx<7>
+function returned_pool(x: Array<Float64 like Ix>) -> Array<Float64 like Ix> = {
+    let p = x * 2.0 + 1.0 |> compute
+    let mean = reduce(p, (+)) / Float64(extents(p))
+    let q = p - mean |> compute
+    q * 0.5 + mean
+}
+let x: Array<Float64 like Ix> = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let y: Array<Float64 like Ix> = [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0]
+let a = returned_pool(x)
+let b = returned_pool(y)
+let sa = reduce(a, (+))
+let sb = reduce(b, (+))
+// EXPECT: x = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+// EXPECT: y = [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0]
+// EXPECT: a = [4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
+// EXPECT: b = [11.0, 13.0, 15.0, 17.0, 19.0, 21.0, 23.0]
+// EXPECT: sa = 49.0
+// EXPECT: sb = 119.0

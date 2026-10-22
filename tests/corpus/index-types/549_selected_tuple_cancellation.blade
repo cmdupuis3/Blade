@@ -1,0 +1,8 @@
+// TEST: Selected tuple preserves distinct ascending cancellation graphs
+// A per-function veto pins the default materialized arm as well as repro.
+function ordered_add(a: Float64, b: Float64) where repro -> Float64 = a + b
+let x = [1e16, -1e16, 1.0]
+let keep = mask(x, lambda(v) -> v != 0.0)
+let y = compound(x, keep)
+let result = (reduce(y, ordered_add, 1.0), reduce(y, lambda(a, b) -> a - b, -2.0))
+// EXPECT: result = (1.0, -3.0)

@@ -770,6 +770,10 @@
       <Link>cpp/blade_runtime.hpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Include="src/cpp/blade_private_spool.hpp">
+      <Link>cpp/blade_private_spool.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <None Include="src/cpp/blade_run_record.hpp">
       <Link>cpp/blade_run_record.hpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

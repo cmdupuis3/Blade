@@ -1,0 +1,14 @@
+// TEST: Selected tuple finishes predicate before either failing fold (aborts)
+function late_selected_predicate(v: Float64) -> Bool = {
+    let z = Int64(floor(v - 2.0))
+    if v == 2.0 then (1 / z) > 0 else v > 0.0
+}
+function early_selected_fold(a: Float64, b: Float64) -> Float64 = {
+    let z = Int64(floor(b - b))
+    a + Float64(1 / z)
+}
+let x = [-2.0, 0.0, 1.0, 3.0, -1.0, 2.0]
+let keep = mask(x, late_selected_predicate)
+let y = compound(x, keep)
+let result = (reduce(y, early_selected_fold, 7.0), reduce(y, lambda(a, b) -> a * 10.0 + b, -2.0))
+// ABORT: late_selected_predicate

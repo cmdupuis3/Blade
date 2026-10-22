@@ -61,4 +61,30 @@ its broad category/sanitizer follow-up is consolidated into A03's ownership chan
 A03's return-only design is approved, waiting for accepted C02-L1 integration.
 B05 designs benchmark observation/timing boundaries. D06's design is approved for
 one explicitly granted private spool runtime protocol, with no compiler admission.
-No full-suite launch has occurred.
+That paragraph records the earlier checkpoint. The current state supersedes its pending
+items: C02-L1 is accepted and integrated; A03 is implementing the bounded LLVM return
+consumer on the combined source; C03's tuple-host topology was observed and its
+implementation is active; B05 closes as an accepted design with implementation gated.
+D06's runtime protocol is being revised to retain recovery evidence through late cleanup
+failures. Three coders (A/C/D) are active; Luna resumes only when a reviewed source freeze
+opens a child slot. The combined optimizer check passed 608 checks. No full-suite launch
+has occurred.
+
+Checkpoint update: D06 is accepted and integrated after 256 native protocol checks
+passed (one unavailable symlink-privilege check). It provides the explicitly granted
+spool runtime only; D07 is a source/design census for compiler admission and grant
+transport. A03 passes its primary, affected category, all-output native and raw
+ownership reviews; combined partial-fold controls and real sanitizer instrumentation
+remain before acceptance. C03's repaired test annotation builds, and all 653 optimizer
+checks pass; its focused native matrix is underway. The earlier build failure remains
+recorded. B05 remains an accepted design, with no performance-eligible benchmark.
+The full default suite has still not been launched.
+C03 is now integrated (`6fbe765b` plus annotation repair `302405bf`) after 48
+unique native arms and 39 plan/emission checks. The 653-check optimizer gate
+also passes. A03's final combined partial-fold and sanitizer gates are active.
+D07's statistical-barrier design is accepted, and D08's exact topology probe
+is staged for a matching combined build. New source-only censuses cover C04
+(private transpose to a seeded partial fold) and B06 (actual emitted C03 pool
+capacity coverage). Neither is permission for an unreviewed implementation or
+an additional performance sweep. Full-suite launch count remains0.
+Current checkpoint: A03 is integrated as f10ca17f after all remaining partial-fold and sanitizer gates passed. B06 closes as an evidenced pool-accounting coverage gap, without executing an adapter. C04 and D08 are staged for one fresh combined compiler build and bounded topology probes; neither production route is implemented yet. Full-suite launches remain 0.

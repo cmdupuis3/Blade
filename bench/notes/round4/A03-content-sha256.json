@@ -1,0 +1,6 @@
+{
+  "bench/notes/round4/A03-census.md": "1e754ee59ac6a1ce9a77a31f6c24c6fc3e7120dcffcb42f2d508b565b9aa1bcb",
+  "src/EmitLlvm.fs": "43293fba349a5312212d78f45ad5d5e8a7c2dd4ea16e42a26b01a03cb48b3063",
+  "tests/LlvmTests.fs": "d2b4a019c282f94697d3caebd792f04dbcd73e2dbb55321b945d46339c152149",
+  "tests/corpus/memfree/032_return_reuse_scalar_snapshot.blade": "0a1a3483713eb978362a022df58efec957e7e29105e7d37d46725cbcbc0d7eb0"
+}

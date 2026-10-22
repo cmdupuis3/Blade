@@ -5544,6 +5544,14 @@ and private emitArrayLit (c: Ctx) (elems: IRExpr list) (arrType: IRArrayType) : 
         storeCell c elem (gepCell c elem ptr (string i)) v)
     { Elem = elem; Groups = groups; Src = APool ptr; RowOpBytes = 0L }
 
+/// The unchanged dense fill, shared by fresh materialization and an A03
+/// return whose existing owned backing has passed the realization checks.
+and private fillDensePool (c: Ctx) (ptr: string) (a: ArrVal) : ArrVal =
+    emitNest c a.Extents (fun idxs ->
+        let v = coerce c a.Elem (readCell c a idxs)
+        storeCell c a.Elem (gepCell c a.Elem ptr (storageOffset c a.Groups idxs)) v)
+    { a with Src = APool ptr }
+
 /// Run a producer into a fresh pool. The ONLY place an array acquires
 /// storage in this lane, and therefore the one place the iteration strategy
 /// for a shape is chosen. Four shapes, four strategies:
@@ -5603,10 +5611,7 @@ and private materialize (c: Ctx) (a: ArrVal) : ArrVal =
     | AVirt _ when isDenseShape a.Groups ->
         let total = shapeCells a.Groups
         let ptr = allocPool c a.Elem (string total)
-        emitNest c a.Extents (fun idxs ->
-            let v = coerce c a.Elem (readCell c a idxs)
-            storeCell c a.Elem (gepCell c a.Elem ptr (storageOffset c a.Groups idxs)) v)
-        { a with Src = APool ptr }
+        fillDensePool c ptr a
     | AVirt _ ->
         match trySyrkTileCore c a with
         | Some pooled -> pooled
@@ -7704,6 +7709,109 @@ type private ParamKind =
     /// offsets are what addressing consumes and offsets[rows] is the total.
     | PRagged of Sc * int64
 
+/// A03 consumes only an existing return-donor plan in an ordinary outlined
+/// function. This is a realization check over actual slots/owned allocations,
+/// not a new liveness or alias analysis. In particular AVirt operands are not
+/// forced speculatively: their late evaluation could still read the old donor.
+let private returnPoolDestination (c: Ctx) (cl: IRCallable) (lets: Map<IRId, IRExpr>)
+                                  (tail: IRExpr) (donor: IRId) : Result<ApplyInfo * string * string, string> =
+    let rec computedMap e =
+        match e with
+        | IRCompute (IRApplyCombinator info) -> Some info
+        | IRCompute (IRCompute _ as inner) -> computedMap inner
+        | _ -> None
+    let plainShape ty =
+        // No outer/element unit erasure or virtual/layout conversion. Axis
+        // Id/Tag identify logical types; only their already-planned physical
+        // extent is reused. The producer/result keep their original metadata.
+        match ty with
+        | ArrayElem at when not at.IsVirtual && at.ElemType = IRTScalar ETFloat64 ->
+            match at.IndexTypes with
+            | [ix] when ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank = 1 &&
+                        ix.Kind = SDimension && ix.Dependencies.IsEmpty ->
+                match ix.Extent with IRLit (IRLitInt n) when n > 0L -> Some n | _ -> None
+            | _ -> None
+        | _ -> None
+    let mutable blocked : string option = None
+    let require ok why = if not ok && blocked.IsNone then blocked <- Some why
+    require (not (containsPoolLifetimeEvent cl.Body)) "inline lifetime region remains excluded"
+    require (cl.Captures.IsEmpty && not (c.Facts.SelfRecursive.Contains cl.Id) &&
+             not cl.IsOmpParallel && not cl.IsCudaKernel && not cl.IsMpiParallel)
+            "the callable is not an ordinary capture-free nonrecursive serial function"
+    let mutable letPlan = false
+    iterIRExpr (function
+        | IRLet (id, _, _) when (Blade.Types.PoolReuseTable.tryDonor id).IsSome -> letPlan <- true
+        | _ -> ()) cl.Body
+    require (not letPlan) "let-donor plans are outside the return-only LLVM consumer"
+    let info = computedMap tail
+    require info.IsSome "the return is not a computed scalar map"
+    let donorValue = Map.tryFind donor lets
+    require (donorValue |> Option.bind computedMap |> Option.isSome) "the donor is not a direct fresh computed body let"
+    let n = plainShape cl.RetType
+    require n.IsSome "the return is not static plain rank-one Float64 storage"
+    require ((donorValue |> Option.bind (typeOf >> plainShape)) = n && n.IsSome) "the donor type/extent does not match the return"
+    let scope = if c.PoolScopes.Count = 1 then Some c.PoolScopes.[0] else None
+    require (scope |> Option.exists (fun s -> s.InlineId.IsNone && not (s.KnownIds.Contains donor)))
+            "the donor has no exact current ordinary function scope"
+    let donorArray = match c.ArrSlots.TryGetValue donor with true, a -> Some a | _ -> None
+    let donorPtr = donorArray |> Option.bind (fun a -> match a.Src with APool p -> Some p | _ -> None)
+    require donorPtr.IsSome "the donor is not a completed stored backing"
+    let ownedSlot =
+        match scope, donorPtr with
+        | Some sc, Some ptr ->
+            let entries = sc.Pools |> Seq.filter (fun (p, _) -> p = ptr) |> List.ofSeq
+            match entries with [(_, slot)] -> Some slot | _ -> None
+        | _ -> None
+    require ownedSlot.IsSome "the donor has no unique owned allocation/tracking slot"
+    let matchesShape (a: ArrVal) = a.Elem = ScF64 && (match a.Groups, n with [GDense m], Some n -> m = n | _ -> false)
+    require (donorArray |> Option.exists matchesShape) "the donor backing layout does not match the return"
+    match info with
+    | Some info ->
+        require (plainShape info.OutputType = n && n.IsSome && info.KernelInputRanks = [0] &&
+                 info.KernelOutputRank = 0 && info.SDimsPerArray = [1] && info.KernelTDims.IsEmpty &&
+                 not info.HasReynolds && (info.TriangularLevels |> List.forall not))
+                "the return map has unsupported shape/peel/strategy metadata"
+        match info.Arrays with
+        | [IRVar (input, inputType)] ->
+            require (plainShape inputType = n && n.IsSome) "the input type/extent does not match the return"
+            match c.ArrSlots.TryGetValue input with
+            | true, a ->
+                require (matchesShape a) "the input backing layout does not match the return"
+                match a.Src with
+                | APool ptr ->
+                    require (donorPtr <> Some ptr) "the input reads the donor backing"
+                    let owned = scope |> Option.exists (fun sc -> sc.Pools |> Seq.filter (fun (p, _) -> p = ptr) |> Seq.length = 1)
+                    let param = cl.Params |> List.mapi (fun i p -> p.VarId = input && ptr = sprintf "%%a%d" i) |> List.exists id
+                    require (owned || param) "the input is not an independent owned root or original formal array"
+                | _ -> require false "the input is deferred: no speculative forcing for return reuse"
+            | _ -> require false "the input has no completed array slot"
+        | _ -> require false "the return map does not have one named stored operand"
+        match info.Kernel with
+        | IRVar (kid, _) when c.Callables.ContainsKey kid ->
+            let k = c.Callables.[kid]
+            let snapshot (cap: CaptureInfo) =
+                cap.Type = IRTScalar ETFloat64 &&
+                (match c.Slots.TryGetValue cap.Id with true, (_, ScF64) -> true | _ -> false) &&
+                ((Map.tryFind cap.Id lets |> Option.exists (fun v -> typeOf v = IRTScalar ETFloat64)) ||
+                 (cl.Params |> List.exists (fun p -> p.VarId = cap.Id && p.Type = IRTScalar ETFloat64)))
+            let vars = (k.Params |> List.map (_.VarId)) @ (k.Captures |> List.map (_.Id)) |> Set.ofList
+            let rec closed e =
+                match e with
+                | IRLit (IRLitFloat _) -> true
+                | IRVar (id, ty) -> ty = IRTScalar ETFloat64 && Set.contains id vars
+                | IRBinOp (IRElementwise, (IRAdd | IRSub | IRMul | IRDiv), l, r, _) -> closed l && closed r
+                | _ -> false
+            require (k.Params.Length = 1 && (k.Params |> List.forall (fun p -> p.Type = IRTScalar ETFloat64)) &&
+                     k.RetType = IRTScalar ETFloat64 && (k.Captures |> List.forall snapshot) && closed k.Body &&
+                     not k.IsOmpParallel && not k.IsCudaKernel && not k.IsMpiParallel && not k.IsArityPoly)
+                    "the return kernel is not closed scalar arithmetic over completed snapshots"
+        | _ -> require false "the return kernel is not a direct resolved scalar callable"
+    | None -> ()
+    match blocked, info, donorPtr, ownedSlot with
+    | None, Some info, Some ptr, Some slot -> Ok (info, ptr, slot)
+    | Some why, _, _, _ -> Error why
+    | _ -> Error "the return donor lacks a complete backing proof"
+
 /// `internal` linkage everywhere but `main`: the module is the whole program
 /// (Blade has no separate compilation), so nothing needs to be externally
 /// visible and every definition stays available for inlining and DCE.
@@ -7816,7 +7924,36 @@ let private emitFunctionBody (c: Ctx) (cl: IRCallable) (sym: string) : string li
         // An array-returning function hands back the pool pointer. The result
         // must be MATERIALIZED before it leaves: a producer's closure captures
         // this frame's slots, which do not survive the return.
-        let result = materialize c (emitArr c cl.Body)
+        let result =
+            match Blade.Types.PoolReuseTable.tryReturnDonor cl.Id with
+            | None -> materialize c (emitArr c cl.Body)
+            | Some donor ->
+                let record outcome evidence =
+                    Blade.Effects.Decisions.record
+                        { Rule = "pool-reuse-llvm"; Version = 1; Span = c.DeclSpan; Subject = cl.SourceName
+                          Outcome = outcome; Evidence = ($"function v{cl.Id}, return donor v{donor}" :: evidence) }
+                let rec emitReturn lets tail =
+                    match tail with
+                    | IRLet (id, value, body) ->
+                        bindLetIn c id value body
+                        emitReturn (Map.add id value lets) body
+                    | tail ->
+                        match returnPoolDestination c cl lets tail donor with
+                        | Error why ->
+                            record (Blade.Effects.Declined why) []
+                            materialize c (emitArr c tail)
+                        | Ok (info, ptr, slot) ->
+                            // Preflight emitted nothing and proved every input
+                            // already stored; prepare the original producer ONCE.
+                            let producer = applyToArr c info
+                            match producer.Src with
+                            | AVirt _ when producer.Elem = ScF64 && producer.Groups = groups ->
+                                ln c ($"; A03: return pool reuse: function v{cl.Id} donor v{donor} backing {ptr} slot {slot}")
+                                let result = fillDensePool c ptr producer
+                                record Blade.Effects.Applied [ $"owned backing {ptr}, tracking slot {slot}; completed independent input; original dense fill" ]
+                                result
+                            | _ -> refuse "return pool reuse: prepared producer contradicts its dense scalar preflight"
+                emitReturn Map.empty cl.Body
         if result.Elem <> elem || result.Groups <> groups then
             refuse ($"the body of '{cl.Name}' produces a shape its return type does not declare")
         (match result.Src with

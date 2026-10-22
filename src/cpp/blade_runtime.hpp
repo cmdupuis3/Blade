@@ -354,8 +354,15 @@ namespace blade_rt {
   // private registry rather than at_quick_exit, which not every C++ runtime
   // Blade targets provides.
   inline void (*failure_exit_hooks[8])() = {};
+  // Checked registration for mandatory resources. Existing callers retain
+  // their void API; a new owner must not silently lose its exit cleanup.
+  inline bool try_on_failure_exit(void (*f)()) {
+    if (!f) return false;
+    for (auto& h : failure_exit_hooks) if (!h) { h = f; return true; }
+    return false;
+  }
   inline void on_failure_exit(void (*f)()) {
-    for (auto& h : failure_exit_hooks) if (!h) { h = f; return; }
+    (void)try_on_failure_exit(f);
   }
   //
   // `panicking` is set by the FIRST panic. OpenMP workers routinely fail

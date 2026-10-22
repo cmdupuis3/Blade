@@ -3751,12 +3751,13 @@ let storedArrayProof (modul: IRModule) : IRBinding -> Result<string * IRBinding 
 /// PM19's first storage-elision arm. Unlike the compaction side-table plans,
 /// this rewrites the tree BOTH evaluators run, BEFORE any schedule table is
 /// built. Only an explicitly unprinted, otherwise private mask/compound pair
-/// and ONE direct seeded scalar fold qualify. `compound` is top-level-only
+/// and one direct seeded scalar fold, or two such folds in one adjacent tuple
+/// host, qualify. `compound` is top-level-only
 /// today (BL6002), hence the explicit print-selection requirement here.
 ///
 /// Repro builds only: the guarded kernel has no reorder licence. Converting a
 /// licensed K-lane fold to this serial chain would change its operation graph.
-/// No unseeded, selected-map, membership-predicate or multi-terminal arm yet.
+/// No unseeded, selected-map, membership-predicate or cross-binding join arm.
 let fuseSelectedTerminalModule (builder: IRBuilder) (programFuncs: IRCallable list)
                                (foreignRefs: Set<IRId>) (modul: IRModule) : IRModule =
     if modul.CompoundInits.IsEmpty then modul
@@ -3765,6 +3766,7 @@ let fuseSelectedTerminalModule (builder: IRBuilder) (programFuncs: IRCallable li
     let enabled = mode = CompactionFusionT4 || mode = CompactionFusionGather
     let funcs = (programFuncs @ modul.Functions) |> List.map (fun f -> f.Id, f) |> Map.ofList
     let writes = scheduleMayWriteIn programFuncs modul
+    let lifetimeBarrier = scheduleHasLifetimeBarrierIn programFuncs modul
     let facts = cseFactsOf funcs
     let payloadWrites b = bindingPayload modul b |> List.exists (fun e -> (facts e).MayWrite || writes e)
     // Same separators/default as CodeGenState.printSelection, which compiles
@@ -3833,12 +3835,15 @@ let fuseSelectedTerminalModule (builder: IRBuilder) (programFuncs: IRCallable li
                 let terminals =
                     arr |> Array.mapi (fun hi b -> hi, b) |> Array.choose (fun (hi, b) ->
                         match b.Value with
-                        | IRReduce (IRVar (id, _), fk, Some seed) when id = yid && hi > yi -> Some (hi, b, fk, seed)
+                        | IRReduce (IRVar (id, _), fk, Some seed) when id = yid && hi > yi ->
+                            Some (hi, b, [ fk, seed ], false)
+                        | IRTuple [ IRReduce (IRVar (a, _), k1, Some s1); IRReduce (IRVar (bId, _), k2, Some s2) ]
+                            when a = yid && bId = yid && hi > yi -> Some (hi, b, [ k1, s1; k2, s2 ], true)
                         | _ -> None)
                 let decline why = decide y.Name (Blade.Effects.Declined why) []
-                if terminals.Length <> 1 then decline "requires exactly one direct seeded scalar terminal"
+                if terminals.Length <> 1 then decline "requires exactly one direct seeded scalar terminal or one two-terminal tuple host"
                 else
-                let hi, host, fk, seed = terminals.[0]
+                let hi, host, legs, tupleHost = terminals.[0]
                 let privateIds = Set.ofList [ kid; yid ]
                 let mentions e = not (Set.intersect privateIds (collectVarRefsIR e)).IsEmpty
                 let exprDemand e = mentions e || (embeddedExtentExprs e |> List.exists mentions)
@@ -3847,7 +3852,11 @@ let fuseSelectedTerminalModule (builder: IRBuilder) (programFuncs: IRCallable li
                     roots |> List.tryPick (function
                         | RootBindingValue b when b.Id = kid || b.Id = yid -> None
                         | RootBindingValue b when b.Id = host.Id ->
-                            if exprDemand fk || exprDemand seed then Some "the terminal kernel or seed observes the private arrays" else None
+                            // Only the matched fold inputs are subtracted. The
+                            // exact tuple grammar has no other value children;
+                            // operand types are certified separately below.
+                            if legs |> List.exists (fun (fk, seed) -> exprDemand fk || exprDemand seed) then
+                                Some "the terminal kernel or seed observes the private arrays" else None
                         | RootBindingValue b when exprDemand b.Value -> Some $"an additional consumer in `{b.Name}`"
                         | RootSideOperand (b, _, _) when b.Id = yid -> None
                         | RootSideOperand (b, what, e) when exprDemand e -> Some $"{what} of `{b.Name}`"
@@ -3859,6 +3868,43 @@ let fuseSelectedTerminalModule (builder: IRBuilder) (programFuncs: IRCallable li
                         | _ -> None)
                 let producerProof = storedArrayProof modul x
                 let betweenWrites = [ ki + 1 .. hi ] |> List.exists (fun i -> payloadWrites arr.[i])
+                let payloadLifetime b = bindingPayload modul b |> List.exists lifetimeBarrier
+                let tupleGeometryOk =
+                    if not tupleHost then true else
+                    let literalSource =
+                        match xt with
+                        | ArrayElem at ->
+                            match at.IndexTypes with
+                            | [ ix ] -> match ix.Extent with IRLit (IRLitInt n) -> n >= 0L | _ -> false
+                            | _ -> false
+                        | _ -> false
+                    let maskType =
+                        match xt, k.Type with
+                        | ArrayElem a, ArrayElem b -> b.ElemType = IRTScalar ETBool && not b.IsVirtual && a.IndexTypes = b.IndexTypes
+                        | _ -> false
+                    let selectedType =
+                        match y.Type with
+                        | ArrayElem at when not at.IsVirtual && at.ElemType = IRTScalar ETFloat64 ->
+                            match at.IndexTypes with
+                            | [ ix ] -> ix.IxKind = IxKCompound && ix.Rank = 1 && ix.Symmetry = SymNone
+                                        && ix.Dependencies.IsEmpty && ix.Extent = IRCompoundMask (IRLit IRLitUnit)
+                            | _ -> false
+                        | _ -> false
+                    let inputs =
+                        match host.Value with
+                        | IRTuple [ IRReduce (IRVar (_, t1), _, _); IRReduce (IRVar (_, t2), _, _) ] -> t1 = y.Type && t2 = y.Type
+                        | _ -> false
+                    let producerInputs =
+                        match k.Value, mask with
+                        | IRMask (IRVar (_, sourceType), _), IRVar (_, maskType) -> sourceType = xt && maskType = k.Type
+                        | _ -> false
+                    let callableTypes =
+                        let plainRef expected = function IRVar (_, ty) -> ty = expected | _ -> false
+                        plainRef (mkFuncArrow [ IRTScalar ETFloat64 ] (IRTScalar ETBool)) pk
+                        && (legs |> List.forall (fun (fk, _) ->
+                            plainRef (mkFuncArrow [ IRTScalar ETFloat64; IRTScalar ETFloat64 ] (IRTScalar ETFloat64)) fk))
+                    literalSource && maskType && selectedType && inputs && producerInputs
+                    && callableTypes && x.Type = xt && y.Value = IRLit IRLitUnit
                 let selectedTypeOk =
                     match y.Type with
                     | ArrayElem at ->
@@ -3872,40 +3918,60 @@ let fuseSelectedTerminalModule (builder: IRBuilder) (programFuncs: IRCallable li
                 elif not (selectedNames |> Set.forall (fun n -> arr |> Array.exists (fun b -> b.Name = n))) then
                     decline "the print selection is not confined to this module's known binding names"
                 elif foreignRefs.Contains kid || foreignRefs.Contains yid then decline "the mask or selected array is referenced by another module"
-                elif not (denseFloat64 xt) || not selectedTypeOk || host.Type <> IRTScalar ETFloat64 then
+                elif tupleHost && (ki + 1 <> yi || yi + 1 <> hi) then
+                    decline "the two-terminal tuple requires adjacent mask, compound and host (failure order)"
+                elif tupleHost && not tupleGeometryOk then decline "the two-terminal tuple has unsupported literal-axis or selected operand/type metadata"
+                elif not (denseFloat64 xt) || not selectedTypeOk
+                     || host.Type <> (if tupleHost then IRTTuple [ IRTScalar ETFloat64; IRTScalar ETFloat64 ] else IRTScalar ETFloat64) then
                     decline "requires a plain stored rank-1 Float64 input and scalar Float64 terminal"
                 elif not (bindingSideOperands modul k.Id).IsEmpty || not (bindingSideOperands modul host.Id).IsEmpty
                      || (bindingSideOperands modul y.Id).Length <> 2 then decline "an unsupported side-table payload survives"
+                elif tupleHost && ([ kid; yid; host.Id ] |> List.exists (fun id -> modul.ProviderReads.ContainsKey id || modul.ProviderWrites.ContainsKey id)) then
+                    decline "a tuple-region provider payload survives"
                 elif observer.IsSome then decline observer.Value
                 elif betweenWrites then decline "an intervening payload may write (source versions are not proved identical)"
-                elif not (total [] seed) || typeOf seed <> IRTScalar ETFloat64 then decline "the explicit seed is not a closed pure/total Float64 scalar"
+                elif tupleHost && ([ ki .. hi ] |> List.exists (fun i -> payloadLifetime arr.[i])) then
+                    decline "a tuple-region payload crosses a pool lifetime event"
+                elif legs |> List.exists (fun (_, seed) -> not (total [] seed) || typeOf seed <> IRTScalar ETFloat64) then
+                    decline "the explicit seed is not a closed pure/total Float64 scalar"
                 else
-                match producerProof, resolveCallableIn funcs pk, resolveCallableIn funcs fk with
+                let folds = legs |> List.map (fun (fk, _) -> resolveCallableIn funcs fk)
+                match producerProof, resolveCallableIn funcs pk, folds with
                 | Error why, _, _ -> decline $"the input is not proved stored: {why}"
                 | Ok (_, chain), _, _ when chain |> List.exists payloadWrites -> decline "a stored input initializer may write"
-                | Ok _, Some pred, Some fold when plainCallable 1 pred && pred.RetType = IRTScalar ETBool
-                                                   && plainCallable 2 fold && fold.RetType = IRTScalar ETFloat64
-                                                   && (modul.Functions |> List.exists (fun f -> f.Id = fold.Id)) ->
-                    let ps = fold.Params |> List.map (fun p -> { p with VarId = builder.FreshId () })
-                    let substitute (old: IRParam list) (values: IRExpr list) body =
-                        mapIRExpr (fun n ->
-                            List.zip old values |> List.tryPick (fun (p, v) -> if paramRef p n then Some v else None)
-                            |> Option.defaultValue n) body
-                    let acc, cell = IRVar (ps.[0].VarId, ps.[0].Type), IRVar (ps.[1].VarId, ps.[1].Type)
-                    let body = IRIf (substitute pred.Params [ cell ] pred.Body,
-                                     substitute fold.Params [ acc; cell ] fold.Body, acc)
-                    let guarded = mkCallable builder defaultLambdaOptions ps body fold.RetType [] false [] [] false false 256 false
-                    let guarded = { guarded with Name = $"__selected_terminal_{guarded.Id}"; SourceName = fold.SourceName }
-                    minted.Add (guarded, fold.Id)
-                    // Rebuild the plain function arrow too: all scheduling
-                    // metadata comes from the NEW, unlicensed callable.
-                    let guardedType = mkFuncArrow (ps |> List.map _.Type) guarded.RetType
-                    replacements.[host.Id] <- IRReduce (dense, IRVar (guarded.Id, guardedType), Some seed)
+                | Ok (_, chain), _, _ when tupleHost && (chain |> List.exists payloadLifetime) -> decline "a stored input initializer crosses a pool lifetime event"
+                | Ok _, Some pred, folds when plainCallable 1 pred && pred.RetType = IRTScalar ETBool
+                                               && (folds |> List.forall (function
+                                                   | Some fold -> plainCallable 2 fold && fold.RetType = IRTScalar ETFloat64
+                                                                  && (modul.Functions |> List.exists (fun f -> f.Id = fold.Id))
+                                                   | None -> false)) ->
+                    let guardedLeg (fold: IRCallable) seed =
+                        let ps = fold.Params |> List.map (fun p -> { p with VarId = builder.FreshId () })
+                        let substitute (old: IRParam list) (values: IRExpr list) body =
+                            mapIRExpr (fun n ->
+                                List.zip old values |> List.tryPick (fun (p, v) -> if paramRef p n then Some v else None)
+                                |> Option.defaultValue n) body
+                        let acc, cell = IRVar (ps.[0].VarId, ps.[0].Type), IRVar (ps.[1].VarId, ps.[1].Type)
+                        let body = IRIf (substitute pred.Params [ cell ] pred.Body,
+                                         substitute fold.Params [ acc; cell ] fold.Body, acc)
+                        let guarded = mkCallable builder defaultLambdaOptions ps body fold.RetType [] false [] [] false false 256 false
+                        let guarded = { guarded with Name = $"__selected_terminal_{guarded.Id}"; SourceName = fold.SourceName }
+                        minted.Add (guarded, fold.Id)
+                        // Rebuild the plain function arrow too: all scheduling
+                        // metadata comes from the NEW, unlicensed callable.
+                        let guardedType = mkFuncArrow (ps |> List.map _.Type) guarded.RetType
+                        IRReduce (dense, IRVar (guarded.Id, guardedType), Some seed)
+                    let rewritten = List.map2 (fun fold (_, seed) -> guardedLeg (Option.get fold) seed) folds legs
+                    replacements.[host.Id] <- if tupleHost then IRTuple rewritten else rewritten.Head
                     removed.Add kid |> ignore
                     removed.Add yid |> ignore
                     decide y.Name Blade.Effects.Applied
-                        [ $"one stored-input scan at `{host.Name}`; `{k.Name}` Bool mask, `{y.Name}` positions/index/value stores eliminated"
+                        [ (if tupleHost then
+                               $"two guarded stored-input folds at tuple `{host.Name}`; `{k.Name}` Bool mask and `{y.Name}` selected value/index stores eliminated; positions may already be elided"
+                           else $"one stored-input scan at `{host.Name}`; `{k.Name}` Bool mask, `{y.Name}` positions/index/value stores eliminated")
                           "complete binding/type/capture/side-table/foreign/print census; no intervening writes"
+                          (if tupleHost then "storage elision only at this stage; sibling traversal sharing is separately gated; predicate remains in each fold"
+                           else "one guarded scalar terminal")
                           "same source for mask and selection (shape checks redundant); pure/total predicate and fold; seed once at the original terminal"
                           "ascending serial graph; false predicate returns the accumulator without a fold step; empty selection returns the exact seed" ]
                 | _ -> decline "the predicate or fold is not a supported capture-free pure/total scalar callable"

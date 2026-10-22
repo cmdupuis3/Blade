@@ -5481,6 +5481,228 @@ let private siblingCases () =
       siblingSurfaceJoinSeed ()
       siblingFailingCalleeSite () ]
 
+// C03: exactly two private selected terminals in one adjacent tuple host.
+// C01's single-fold assertions above remain independent regressions.
+let private selectedTupleSrc =
+    "let x = [-2.0, 0.0, 1.0, 3.0, -1.0, 2.0]\n"
+    + "let keep = mask(x, lambda(v) -> v > 0.0)\n"
+    + "let y = compound(x, keep)\n"
+    + "let result = (reduce(y, (+), 7.0), reduce(y, lambda(a, b) -> a * 10.0 + b, -2.0))\n"
+
+let private withSelectedTuple f =
+    withGates [ ("BLADE_PRINT", "result"); ("BLADE_FP_REPRO", "1"); ("BLADE_FP_CONTRACT", "off");
+                ("BLADE_BLAS", "off"); ("BLADE_OMP_THREADS", "1");
+                ("BLADE_COMPACTION_FUSION", "on"); ("BLADE_SIBLING_FOLDS", "on") ] f
+
+let private selectedTupleGuardCount (ir: Blade.IR.IRProgram) =
+    ir.Modules |> List.sumBy (fun m -> m.Functions |> List.filter (fun f -> f.Name.StartsWith "__selected_terminal_") |> List.length)
+
+let private selectedTupleTopology () =
+    let name = "selected_tuple_exact_host_two_seeds_fresh_serial_guards"
+    withSelectedTuple (fun () ->
+        match withGate "BLADE_COMPACTION_FUSION" "0" (fun () -> lower selectedTupleSrc) with
+        | Error e -> resultLine Fail name e; false
+        | Ok ir ->
+            let m = ir.Modules.Head
+            let host = m.Bindings |> List.find (fun b -> b.Name = "result")
+            let x = m.Bindings |> List.find (fun b -> b.Name = "x")
+            let builder = IR.IRBuilder ()
+            builder.EnsureAtLeast 1000000
+            let changed = Optimize.fuseSelectedTerminalModule builder m.Functions Set.empty m
+            let newHost = changed.Bindings |> List.find (fun b -> b.Id = host.Id)
+            let guards = changed.Functions |> List.filter (fun f -> f.Name.StartsWith "__selected_terminal_")
+            let rec seedValue = function
+                | IR.IRLit (IR.IRLitFloat f) -> Some f
+                | IR.IRUnaryOp (IR.IRNeg, e) -> seedValue e |> Option.map (~-)
+                | _ -> None
+            let shape =
+                match host.Value, newHost.Value with
+                | IR.IRTuple [ IR.IRReduce (IR.IRVar (y1, _), _, Some _); IR.IRReduce (IR.IRVar (y2, _), _, Some _) ],
+                  IR.IRTuple [ IR.IRReduce (IR.IRVar (a, _), IR.IRVar (k1, t1), Some s1);
+                               IR.IRReduce (IR.IRVar (b, _), IR.IRVar (k2, t2), Some s2) ] ->
+                    y1 = y2 && a = x.Id && b = x.Id && k1 <> k2
+                    && seedValue s1 = Some 7.0 && seedValue s2 = Some (-2.0)
+                    && ([ k1, t1; k2, t2 ] |> List.forall (fun (id, ty) ->
+                        guards |> List.exists (fun g -> g.Id = id && ty = IR.mkFuncArrow (g.Params |> List.map _.Type) g.RetType)))
+                | _ -> false
+            let guardGraph (g: IR.IRCallable) =
+                not g.IsOmpParallel && not g.IsCudaKernel && not g.IsMpiParallel && not g.IsCommutative
+                && g.CommGroups.IsEmpty && g.Captures.IsEmpty
+                && (match g.Body with
+                    | IR.IRIf (_, _, IR.IRVar (acc, _)) -> acc = g.Params.Head.VarId
+                    | _ -> false)
+                && changed.DerivedFuncOrigins.ContainsKey g.Id
+            checkAll name "" "exact tuple topology; original host identity; two fresh unlicensed guards and independent seeds"
+                [ ("raw and rewritten tuple topology", shape);
+                  ("host ID/name/type preserved", newHost.Name = host.Name && newHost.Type = host.Type);
+                  ("only input and result bindings", (changed.Bindings |> List.map _.Id) = [x.Id; host.Id]);
+                  ("no selected initializer", changed.CompoundInits.IsEmpty);
+                  ("both guards keep false-branch accumulator", guards.Length = 2 && List.forall guardGraph guards) ])
+
+let private selectedTupleEmission () =
+    let name = "selected_tuple_storage_elision_vs_sibling_traversal_cpp_and_llvm"
+    withSelectedTuple (fun () ->
+        let emit compaction sibling = withGates [ ("BLADE_COMPACTION_FUSION", compaction); ("BLADE_SIBLING_FOLDS", sibling) ] (fun () ->
+            match lower selectedTupleSrc with
+            | Error e -> Error e
+            | Ok ir ->
+                let mutable joins = 0
+                for m in ir.Modules do
+                    for b in m.Bindings do
+                        IR.iterIRExpr (function IR.IRReduceCompute (_, IR.IRTuple [_; _], IR.IRTuple [_; _]) -> joins <- joins + 1 | _ -> ()) b.Value
+                EmitLlvm.tryEmitProgramNamed name ir
+                |> Result.map (fun ll -> selectedTupleGuardCount ir, joins, fst (CodeGen.genSelfContainedProgramFromIR ir name), ll))
+        // `unshared` disables selected-terminal while retaining the existing
+        // positions-elided compaction route. Fully OFF restores positions;
+        // it must not inflate the saving credited to this card.
+        match emit "on" "on", emit "on" "0", emit "unshared" "on", emit "0" "on" with
+        | Ok (g1, j1, joined, ll), Ok (g2, j2, separate, sl), Ok (g3, j3, baseline, old), Ok (g4, j4, _, fullyOff) ->
+            let loops (cpp: string) = System.Text.RegularExpressions.Regex.Matches(mainOf cpp, @"for \(size_t (?:__i\d|__ri) = 0;").Count
+            let pools (s: string) = System.Text.RegularExpressions.Regex.Matches(s, @"call ptr @blade_alloc_cells\(").Count
+            let cppPrivate (s: string) = s.Contains "keep_extents" || s.Contains "y_compact" || s.Contains "y_idx"
+            let main = mainOf joined
+            let seeds = System.Text.RegularExpressions.Regex.Matches(main, @"double __v\d+_\d+ = ([^;]+);") |> Seq.map (fun m -> m.Groups.[1].Value) |> List.ofSeq
+            let llvmScans (s: string) = System.Text.RegularExpressions.Regex.Matches(s, @"icmp slt i64 %r\d+, 6\b").Count
+            let description = $"guards={g1}/{g2}/{g3}/{g4}, joins={j1}/{j2}/{j3}/{j4}; C++ scans={loops joined}/{loops separate}; LLVM scans={llvmScans ll}/{llvmScans sl}, pools={pools ll}/{pools sl}/{pools old}/{pools fullyOff}; seeds={seeds}"
+            checkAll name ll description
+                [ ("actual rewritten and joined IR: " + description, (g1, j1, g2, j2, g3, j3, g4, j4) = (2, 1, 2, 0, 0, 0, 0, 0));
+                  ("one vs two native source scans: " + description, loops joined = 1 && loops separate = 2 && llvmScans ll = 1 && llvmScans sl = 2);
+                  ("both elided routes retain only required x storage", not (cppPrivate joined) && not (cppPrivate separate)
+                      && main.Contains "x_extents" && System.Text.RegularExpressions.Regex.Matches(main, @"allocate<").Count = 1);
+                  ("baseline really keeps mask+compact values", cppPrivate baseline && baseline.Contains "y_compact = new double[");
+                  ("positions already absent in baseline", not (baseline.Contains "y_pos"));
+                  ("two original C++ seeds", seeds = ["7.0"; "-(2.0)"]);
+                  ("LLVM actual allocations: " + description, pools ll = 1 && pools sl = 1 && pools old = 3 && pools fullyOff = 4
+                      && ll.Contains "call ptr @blade_alloc_cells(i64 6, i64 8)");
+                  ("logical predicate retained per LLVM leg", System.Text.RegularExpressions.Regex.Matches(ll, @"fcmp ogt double").Count = 2);
+                  ("result observable in both backends", main.Contains "\"result = \"" && ll.Contains "result = ");
+                  ("serial LLVM graph", not (ll.Contains "fadd reassoc") && not (ll.Contains "fmul reassoc")) ]
+        | a, b, c, d -> resultLine Fail name ($"joined={a}; sibling-off={b}; positions-elided reference={c}; fully OFF={d}"); false)
+
+let private selectedTupleFailures =
+    "function late_selected_predicate(v: Float64) -> Bool = {\n"
+    + "    let z = Int64(floor(v - 2.0))\n    if v == 2.0 then (1 / z) > 0 else v > 0.0\n}\n"
+    + "function early_selected_fold(a: Float64, b: Float64) -> Float64 = {\n"
+    + "    let z = Int64(floor(b - b))\n    a + Float64(1 / z)\n}\n"
+    + selectedTupleSrc.Replace("lambda(v) -> v > 0.0", "late_selected_predicate").Replace("reduce(y, (+), 7.0)", "reduce(y, early_selected_fold, 7.0)")
+
+let private selectedTupleInterpreterCases () =
+    let cases =
+        [ ("ordered", selectedTupleSrc, "(13.0, -1868.0)", true);
+          ("empty", selectedTupleSrc.Replace("v > 0.0", "v > 100.0"), "(7.0, -2.0)", true);
+          ("stored_alias", selectedTupleSrc.Replace("let x =", "let storage =").Replace("let keep =", "let x = storage\nlet keep ="), "(13.0, -1868.0)", true);
+          ("empty_input", selectedTupleSrc.Replace("let x = [-2.0, 0.0, 1.0, 3.0, -1.0, 2.0]", "let x: Array<Float64 like Idx<0>> = []"), "(7.0, -2.0)", true);
+          ("cancellation", selectedTupleSrc.Replace("[-2.0, 0.0, 1.0, 3.0, -1.0, 2.0]", "[1e16, -1e16, 1.0]").Replace("v > 0.0", "v != 0.0").Replace("(+), 7.0", "(+), 1.0").Replace("a * 10.0 + b", "a - b"), "(1.0, -3.0)", true);
+          ("zero_seed_bits", selectedTupleSrc.Replace("v > 0.0", "v > 100.0").Replace("(+), 7.0", "(+), 0.0").Replace(", -2.0)", ", -0.0)"), "(0.0, -0.0)", true);
+          ("paired_failure", selectedTupleFailures, "late_selected_predicate", false) ]
+    [ for suffix, src, expected, positive in cases do
+        let name = $"selected_tuple_interp_independent_on_off_{suffix}"
+        yield withSelectedTuple (fun () ->
+            let interpret compaction sibling = withGates [ ("BLADE_COMPACTION_FUSION", compaction); ("BLADE_SIBLING_FOLDS", sibling) ] (fun () ->
+                match lower src with
+                | Error e -> Error e
+                | Ok ir ->
+                    match IRValidate.validateIR ir with
+                    | Error es -> Error (String.concat "; " es)
+                    | Ok valid -> Ok (selectedTupleGuardCount ir, Blade.Interp.Run.runProgram valid name Blade.Interp.Value.defaultLimits))
+            match interpret "on" "on", interpret "on" "0", interpret "0" "on" with
+            | Ok (a, on), Ok (b, separate), Ok (0, off) ->
+                let outcome =
+                    if positive then a = 2 && b = 2 && on.ExitCode = 0 && separate.ExitCode = 0 && off.ExitCode = 0
+                                     && on.Stdout.Contains ("result = " + expected)
+                    else a = 0 && b = 0 && on.ExitCode <> 0 && separate.ExitCode = on.ExitCode && off.ExitCode = on.ExitCode
+                         && on.Stderr.Contains expected
+                checkAll name on.Stdout "three independently pinned arms; admission asserted separately from value agreement"
+                    [ ("independent value/failure and route", outcome);
+                      ("ON/sibling-OFF/reference stdout", on.Stdout = separate.Stdout && on.Stdout = off.Stdout);
+                      ("ON/sibling-OFF/reference stderr", on.Stderr = separate.Stderr && on.Stderr = off.Stderr) ]
+            | a, b, c -> resultLine Fail name ($"ON={a}; sibling-off={b}; OFF={c}"); false) ]
+
+let private selectedTupleRefusals () =
+    let cases =
+        [ ("extra_mask_read", selectedTupleSrc + "let observed = keep(0)\n", "additional consumer");
+          ("keyed_selection", selectedTupleSrc + "let observed = y(2)\n", "additional consumer");
+          ("selected_alias", selectedTupleSrc + "let observed = y\n", "additional consumer");
+          ("third_terminal", selectedTupleSrc + "let third = reduce(y, (+), 3.0)\n", "exactly one");
+          ("selected_capture", selectedTupleSrc + "let observed = method_for(x) <@> lambda(v) -> Float64(extents(y)) + v\n", "callable body or capture");
+          ("unseeded", selectedTupleSrc.Replace("(+), 7.0", "(+)"), "direct seeded");
+          ("selected_map", selectedTupleSrc.Replace("reduce(y, (+)", "reduce(y * y, (+)"), "direct seeded");
+          ("separate_bindings", selectedTupleSrc.Replace("let result = (reduce(y, (+), 7.0), reduce(y, lambda(a, b) -> a * 10.0 + b, -2.0))", "let first = reduce(y, (+), 7.0)\nlet result = reduce(y, lambda(a, b) -> a * 10.0 + b, -2.0)"), "exactly one");
+          ("dependent_seed", selectedTupleSrc.Replace("let result = (reduce(y, (+), 7.0), reduce(y, lambda(a, b) -> a * 10.0 + b, -2.0))", "let first = reduce(y, (+), 7.0)\nlet result = reduce(y, lambda(a, b) -> a * 10.0 + b, first)"), "exactly one");
+          ("intervening_abort", selectedTupleSrc.Replace("let result =", "let z = Int64(floor(x(1)))\nlet boom = 1 / z\nlet result ="), "adjacent");
+          ("source_write", selectedTupleSrc.Replace("let x =", "let mut x =").Replace("let y =", "x(0) = 9.0\nlet y ="), "adjacent");
+          ("failing_predicate", selectedTupleSrc.Replace("v > 0.0", "lgamma(v) > 0.0"), "pure/total");
+          ("failing_second_fold", selectedTupleSrc.Replace("a * 10.0 + b", "a + lgamma(b)"), "pure/total");
+          ("failing_second_seed", selectedTupleSrc.Replace(", -2.0)", ", lgamma(-2.0))"), "explicit seed");
+          ("unknown_call", "function opaque(v: Float64) -> Float64 = v * v\n" + selectedTupleSrc.Replace("a * 10.0 + b", "a + opaque(b)"), "pure/total");
+          ("fold_capture", "let bias = 3.0\n" + selectedTupleSrc.Replace("a * 10.0 + b", "a + b + bias"), "pure/total");
+          ("parallel_fold", selectedTupleSrc.Replace("lambda(a, b) -> a * 10.0 + b", "lambda(a, b) where comm(a, b), omp -> a + b"), "pure/total");
+          ("paired_failure", selectedTupleFailures, "pure/total") ]
+    [ for suffix, src, why in cases do
+        yield withSelectedTuple (fun () -> decisionCase ($"selected_tuple_declines_{suffix}") src "selected-terminal" (declinedMentioning why) why)
+      for suffix, gate, value, why in
+          [ ("default_print", "BLADE_PRINT", "", "printed"); ("mask_print", "BLADE_PRINT", "result keep", "printed");
+            ("selected_print", "BLADE_PRINT", "result y", "printed"); ("licensed", "BLADE_FP_REPRO", "0", "reproducible");
+            ("optimizer_off", "BLADE_COMPACTION_FUSION", "0", "disabled"); ("unshared", "BLADE_COMPACTION_FUSION", "unshared", "disabled") ] do
+        yield withSelectedTuple (fun () -> withGate gate value (fun () ->
+            decisionCase ($"selected_tuple_declines_{suffix}") selectedTupleSrc "selected-terminal" (declinedMentioning why) why)) ]
+
+let private selectedTupleHiddenDemands () =
+    withSelectedTuple (fun () ->
+        match withGate "BLADE_COMPACTION_FUSION" "0" (fun () -> lower selectedTupleSrc) with
+        | Error e -> resultLine Fail "selected_tuple_hidden_setup" e; [false]
+        | Ok ir ->
+            let m = ir.Modules.Head
+            let host = m.Bindings |> List.find (fun b -> b.Name = "result")
+            let y = m.Bindings |> List.find (fun b -> b.Name = "y")
+            let keep = m.Bindings |> List.find (fun b -> b.Name = "keep")
+            let x = m.Bindings |> List.find (fun b -> b.Name = "x")
+            let at = match x.Type with IR.ArrayElem at -> at | _ -> failwith "x is not dense"
+            let hiddenIx = { at.IndexTypes.Head with Id = 990021; Extent = IR.IRExtent (IR.IRVar (y.Id, y.Type), 0) }
+            let typeDemand = { m with Types = m.Types @ [IR.IRTDIndexType ("DemandedSelected", hiddenIx)] }
+            let capture: IR.CaptureInfo = { Id = keep.Id; Name = "hidden"; Type = keep.Type; IsMutable = false }
+            let captureDemand = { m with Functions = m.Functions @ [{ m.Functions.Head with Id = 990022; Name = "observer"; Captures = [capture] }] }
+            let otherHost = { m with Bindings = m.Bindings @ [{ host with Id = 990023; Name = "other" }] }
+            let payload = { m with SparseInits = m.SparseInits.Add(host.Id, IR.IRLit (IR.IRLitFloat 1.0)) }
+            let operandType = IR.mkArrayLike { at with IndexTypes = [hiddenIx] }
+            let hiddenOperand =
+                let changed = IR.mapIRExpr (function IR.IRVar (id, _) when id = y.Id -> IR.IRVar (id, operandType) | e -> e) host.Value
+                { m with Bindings = m.Bindings |> List.map (fun b -> if b.Id = host.Id then { b with Value = changed } else b) }
+            let sourceEvent = { m with Bindings = m.Bindings |> List.map (fun b -> if b.Id = x.Id then { b with Value = IR.IRCompute (IR.IRBeginPoolScope "hidden") } else b) }
+            let structured =
+                let dense = IR.IRVar (x.Id, IR.mkArrayLike { at with IndexTypes = [{ at.IndexTypes.Head with IxKind = Blade.Types.IxKRagged }] })
+                { m with CompoundInits = m.CompoundInits.Add(y.Id, (dense, IR.IRVar (keep.Id, keep.Type))) }
+            let ownSelectedType =
+                let ya = match y.Type with IR.ArrayElem a -> a | _ -> failwith "y is not compound"
+                let ty = IR.mkArrayLike { ya with IndexTypes = [{ ya.IndexTypes.Head with Extent = hiddenIx.Extent }] }
+                { m with Bindings = m.Bindings |> List.map (fun b -> if b.Id = y.Id then { b with Type = ty } else b) }
+            let dynamicAxis =
+                let ty = IR.mkArrayLike { at with IndexTypes = [{ at.IndexTypes.Head with Extent = IR.IRExtent (IR.IRVar (x.Id, x.Type), 0) }] }
+                { m with CompoundInits = m.CompoundInits.Add(y.Id, (IR.IRVar (x.Id, ty), IR.IRVar (keep.Id, keep.Type))) }
+            let unknownKernel =
+                let value = match host.Value with
+                            | IR.IRTuple [a; IR.IRReduce (v, k, s)] -> IR.IRTuple [a; IR.IRReduce (v, IR.IRVar (990026, IR.typeOf k), s)]
+                            | _ -> failwith "tuple topology changed"
+                { m with Bindings = m.Bindings |> List.map (fun b -> if b.Id = host.Id then { b with Value = value } else b) }
+            let witnesses: (string * IR.IRModule * Set<Blade.Types.IRId>) list =
+                [ ("declared_type", typeDemand, Set.empty); ("capture", captureDemand, Set.empty);
+                  ("reference_equal_other_host", otherHost, Set.empty); ("host_execution_payload", payload, Set.empty);
+                  ("operand_type", hiddenOperand, Set.empty); ("source_lifetime_event", sourceEvent, Set.empty);
+                  ("structured_source", structured, Set.empty); ("unknown_kernel", unknownKernel, Set.empty);
+                  ("removed_selected_type", ownSelectedType, Set.empty); ("dynamic_axis", dynamicAxis, Set.empty);
+                  ("foreign_selection", m, Set.singleton y.Id); ("foreign_mask", m, Set.singleton keep.Id) ]
+            [ for suffix, md, foreign in witnesses do
+                let name = $"selected_tuple_hidden_{suffix}_retains_storage"
+                let builder = IR.IRBuilder ()
+                builder.EnsureAtLeast 1000000
+                Blade.Effects.Decisions.start ()
+                let kept = Optimize.fuseSelectedTerminalModule builder md.Functions foreign md
+                let decisions = Blade.Effects.Decisions.drain ()
+                let retained = kept.CompoundInits.ContainsKey y.Id && (kept.Bindings |> List.exists (fun b -> b.Id = keep.Id))
+                let declined = decisions |> List.exists (fun d -> d.Rule = "selected-terminal" && not (applied d))
+                if retained && declined then resultLine Pass name "full residual demand/legality census keeps both private stores"; yield true
+                else resultLine Fail name "a hidden demand or unsupported payload was erased"; yield false ])
+
 // ---------------------------------------------------------------------------
 // Wave 3, E-G5: the threaded `let rec` step (Blade.Optimize.RecStepTable;
 // BLADE_REC_STEP_OMP). The request is the `where omp` on the step's FINAL
@@ -6218,6 +6440,11 @@ let runOptimizeTests () =
           selectedTerminalDeclaredIndexPayload ()
           yield! selectedTerminalRefusals ()
           yield! selectedTerminalInterpreterCases ()
+          selectedTupleTopology ()
+          selectedTupleEmission ()
+          yield! selectedTupleInterpreterCases ()
+          yield! selectedTupleRefusals ()
+          yield! selectedTupleHiddenDemands ()
           // PM10 private rank-2 map -> seeded row terminal.
           partialRowsEmission ()
           yield! partialRowsLlvm ()

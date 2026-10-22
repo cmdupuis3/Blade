@@ -748,6 +748,75 @@ let private outlinedLifetimeCleanupProof (stem: string) (ll: string) : Result<in
                             problem <- Some ($"{symbol}: pool {p} cleanup order/ownership failed; overwritten={overwritten}, later reference={laterReference}")
         match problem with Some p -> Error p | None -> Ok pools.Count
 
+/// Trace every ordinary array-return allocation to its own tracking slot.
+/// The A03 marker identifies the selected root; allocation/store/load/free
+/// dataflow, rather than the marker alone, establishes actual realization.
+let private returnPoolReuseProof (reuse: bool) (ll: string) : Result<string, string> =
+    match outlinedLifetimeBody "returned_pool" ll with
+    | None -> Error "missing ordinary returned_pool outline"
+    | Some (_, body) ->
+        let matches pattern = System.Text.RegularExpressions.Regex.Matches(body, pattern)
+        let pools = matches @"(%r\d+) = call ptr @blade_alloc_cells\(i64 7, i64 8\)"
+        let ret = System.Text.RegularExpressions.Regex.Match(body, @"ret ptr (%r\d+)")
+        let marks = matches @"; A03: return pool reuse: function v\d+ donor v\d+ backing (%r\d+) slot (%r\d+)"
+        let mutable problem : string option = None
+        let wanted = if reuse then 2 else 3
+        if pools.Count <> wanted || (matches @" = call ptr @blade_alloc_cells\(").Count <> wanted || not ret.Success then
+            problem <- Some ($"allocations={pools.Count}, wanted={wanted}; return={ret.Success}")
+        if (matches @"call void @blade_free\(").Count <> wanted - 1 then problem <- Some "unexpected free count"
+        if marks.Count <> (if reuse then 1 else 0) then problem <- Some ($"reuse markers={marks.Count}")
+        let returned = if ret.Success then ret.Groups.[1].Value else "?"
+        for pm in pools do
+            let backing = pm.Groups.[1].Value
+            let stores = matches (@"store ptr " + backing + @", ptr (%r\d+)(?![0-9])")
+            if stores.Count <> 1 then problem <- Some ($"{backing}: tracking stores={stores.Count}")
+            else
+                let slot = stores.[0].Groups.[1].Value
+                let loads = matches (@"(%r\d+) = load ptr, ptr " + slot + @"(?![0-9])")
+                let afterTracking = stores.[0].Index + stores.[0].Length
+                if System.Text.RegularExpressions.Regex.IsMatch(body.Substring(afterTracking), @"store ptr [^\n]+, ptr " + slot + @"(?![0-9])") then
+                    problem <- Some ($"{backing}: tracking slot overwritten after allocation")
+                if backing = returned then
+                    if loads.Count <> 0 || body.Contains("call void @blade_free(ptr " + backing + ")") then
+                        problem <- Some ($"returned backing {backing} was freed")
+                    if reuse && marks.Count = 1 &&
+                       (marks.[0].Groups.[1].Value <> backing || marks.[0].Groups.[2].Value <> slot || pm.Index >= marks.[0].Index) then
+                        problem <- Some "selected donor does not match the earlier owned allocation and slot"
+                elif loads.Count <> 1 then problem <- Some ($"{backing}: cleanup loads={loads.Count}")
+                else
+                    let freed = loads.[0].Groups.[1].Value
+                    let frees = matches (@"call void @blade_free\(ptr " + freed + @"\)")
+                    if frees.Count <> 1 || loads.[0].Index >= frees.[0].Index || frees.[0].Index >= ret.Index then
+                        problem <- Some ($"{backing}: wrong free count/order")
+                    else
+                        let tail = body.Substring(frees.[0].Index + frees.[0].Length)
+                        if System.Text.RegularExpressions.Regex.IsMatch(tail, @"(?<![A-Za-z0-9_])" + backing + @"(?![A-Za-z0-9_])") then
+                            problem <- Some ($"{backing}: read after cleanup")
+        if not (pools |> Seq.exists (fun p -> p.Groups.[1].Value = returned)) then problem <- Some "returned pointer is not an owned allocation root"
+        if reuse && marks.Count = 1 then
+            let after = body.Substring(marks.[0].Index)
+            let dest = System.Text.RegularExpressions.Regex.Match(after, @"(%r\d+) = getelementptr inbounds double, ptr " + returned + @", i64 ")
+            let source = pools |> Seq.tryFind (fun p -> p.Groups.[1].Value <> returned)
+            match source with
+            | None -> problem <- Some "no independent completed input allocation"
+            | Some input ->
+                let inputPtr = input.Groups.[1].Value
+                let inputRead = System.Text.RegularExpressions.Regex.Match(after, @"(%r\d+) = getelementptr inbounds double, ptr " + inputPtr + @", i64 ")
+                let stores = if dest.Success then System.Text.RegularExpressions.Regex.IsMatch(after, @"store double [^\n]+, ptr " + dest.Groups.[1].Value + @"(?![0-9])") else false
+                let reads = if inputRead.Success then after.Contains("load double, ptr " + inputRead.Groups.[1].Value + "\n") else false
+                let before = body.Substring(0, marks.[0].Index)
+                let filled = System.Text.RegularExpressions.Regex.Match(before, @"(%r\d+) = getelementptr inbounds double, ptr " + inputPtr + @", i64 ")
+                let filledBefore = filled.Success && System.Text.RegularExpressions.Regex.IsMatch(before, @"store double [^\n]+, ptr " + filled.Groups.[1].Value + @"(?![0-9])")
+                if input.Index >= marks.[0].Index || not (stores && reads && filledBefore) then
+                    problem <- Some "final donor stores do not follow the independent input's completed fill"
+        match problem with
+        | Some why -> Error why
+        | None ->
+            // Compare the arithmetic instruction/flag sequence. Operand/SSA
+            // graph identity is checked in root's raw IR/emission review.
+            let arithmetic = matches @" = (?:fadd|fsub|fmul|fdiv) (?:[a-z]+ )*double " |> Seq.map (fun m -> m.Value) |> String.concat "|"
+            Ok arithmetic
+
 let runLlvmFactTests () : BlockResult =
     printHeader "LLVM Fact Layer"
     let mutable passed = 0
@@ -1475,6 +1544,134 @@ let u = reduce(method_for(range<V>) <@> lambda(k) -> t(0, 0, k), (+))
                         pass name "real two-result IR call emits both reductions inline and prints both scalar results"
                     else fail name ($"tuple IR call={tupleCall}; inline reductions={inlineBody}; scalar outputs={scalarOutputs}")
                 | _ -> fail name "wrong ordinary/tuple call ABI or missing callable definition"
+
+    // A03: existing return plan -> exact owned backing in the ordinary ABI.
+    let returnPins reuse =
+        [ "BLADE_FP_REPRO", Some "1"; "BLADE_FP_CONTRACT", Some "off"; "BLADE_OMP_THREADS", Some "1"
+          "BLADE_BLAS", Some "off"; "BLADE_CSE", Some "0"; "BLADE_POOL_REUSE", Some reuse ]
+    let rec directLets e =
+        match e with
+        | Blade.IR.IRLet (id, value, body) -> (id, value) :: directLets body
+        | _ -> []
+    let computed e = match e with Blade.IR.IRCompute (Blade.IR.IRApplyCombinator _) -> true | _ -> false
+    let unchanged (ir: Blade.IR.IRProgram) (_: Blade.IR.IRCallable) = ir
+    let replaceFunction (ir: Blade.IR.IRProgram) (f: Blade.IR.IRCallable) =
+        { ir with Modules = ir.Modules |> List.map (fun m -> { m with Functions = m.Functions |> List.map (fun g -> if g.Id = f.Id then f else g) }) }
+    let emitReturnCase reuse src tweak =
+        withEnv (defaultEmissionEnv @ returnPins reuse) (fun () ->
+            Blade.Effects.Decisions.start ()
+            try
+                match Lowering.lower src with
+                | Error e -> Error ("lowering: " + e)
+                | Ok ir ->
+                    let f = ir.Modules |> List.collect (_.Functions) |> List.find (fun f -> f.SourceName = "returned_pool")
+                    let ir = tweak ir f
+                    match IRValidate.validateIR ir with
+                    | Error errs -> Error ("validation: " + String.concat "; " errs)
+                    | Ok ir ->
+                        match EmitLlvm.tryEmitProgramNamed "facts" ir with
+                        | Error e -> Error ("llvm: " + e)
+                        | Ok ll -> Ok (ll, Blade.Effects.Decisions.drain ())
+            finally Blade.Effects.Decisions.drain () |> ignore)
+    let corpusSource name =
+        Blade.Tests.Corpus.category "memfree" |> List.tryFind (fun (n, _) -> n = name) |> Option.map snd
+    let baselineName = "PM01 ordinary array return preserves the existing dead-pool reuse route"
+    for test in [baselineName; "LLVM return reuse keeps scalar snapshots and two live returned pools"] do
+        let name = "return pool reuse (llvm): " + test
+        match corpusSource test with
+        | None -> fail name "missing corpus control"
+        | Some src ->
+            match emitReturnCase "1" src unchanged, emitReturnCase "0" src unchanged with
+            | Ok (on, decisions), Ok (off, _) ->
+                let admitted = decisions |> List.filter (fun d -> d.Rule = "pool-reuse-llvm" && d.Outcome = Blade.Effects.Applied)
+                match returnPoolReuseProof true on, returnPoolReuseProof false off with
+                | Ok onSequence, Ok offSequence when onSequence = offSequence && admitted.Length = 1 ->
+                    let calls = match outlinedLifetimeBody "returned_pool" on with Some (symbol, _) -> outlinedLifetimeCallCount symbol on | None -> 0
+                    let expectedCalls = if test = baselineName then 1 else 2
+                    if calls = expectedCalls then pass name "owned donor returned; independent completed input freed once; same arithmetic instruction/flag sequence; exact call count"
+                    else fail name ($"ordinary calls={calls}, wanted={expectedCalls}")
+                | a, b -> fail name (sprintf "on=%A; off=%A; backend admissions=%d" a b admitted.Length)
+            | Error e, _ | _, Error e -> fail name e
+    match corpusSource baselineName with
+    | None -> fail "return pool reuse refusal controls" "missing baseline"
+    | Some baseline ->
+        let forceFirst ir (f: Blade.IR.IRCallable) =
+            let donor = directLets f.Body |> List.find (snd >> computed) |> fst
+            Blade.Types.PoolReuseTable.recordReturn f.Id donor
+            ir
+        let callerOwned ir (f: Blade.IR.IRCallable) =
+            Blade.Types.PoolReuseTable.recordReturn f.Id f.Params.Head.VarId
+            ir
+        let sameInput ir (f: Blade.IR.IRCallable) =
+            let donor = directLets f.Body |> List.filter (snd >> computed) |> List.last |> fst
+            Blade.Types.PoolReuseTable.recordReturn f.Id donor
+            ir
+        let letPlan ir (f: Blade.IR.IRCallable) =
+            let arrays = directLets f.Body |> List.filter (snd >> computed)
+            Blade.Types.PoolReuseTable.record (arrays |> List.last |> fst) (arrays.Head |> fst)
+            ir
+        let deferred ir (f: Blade.IR.IRCallable) =
+            let input = directLets f.Body |> List.filter (snd >> computed) |> List.last |> fst
+            let change e =
+                match e with
+                | Blade.IR.IRLet (id, Blade.IR.IRCompute inner, body) when id = input -> Blade.IR.IRLet (id, inner, body)
+                | other -> other
+            replaceFunction ir { f with Body = Blade.IR.mapIRExpr change f.Body }
+        let released ir (f: Blade.IR.IRCallable) =
+            // Only mean reads this pool before release; later maps read x.
+            // Close a real event scope, then forge the freed root as donor.
+            let donor, value = directLets f.Body |> List.find (snd >> computed)
+            let scope, ending = 990100, 990101
+            let change e =
+                match e with
+                | Blade.IR.IRLet (id, v, Blade.IR.IRLet (meanId, meanValue, rest)) when id = donor ->
+                    let release = Blade.IR.IRReleasePools (Blade.IR.IRVar (scope, Blade.Types.IRTUnit), [Blade.IR.IRVar (donor, Blade.IR.typeOf value)], "A03 released negative")
+                    let afterMean = Blade.IR.IRLet (ending, release, rest)
+                    let afterDonor = Blade.IR.IRLet (meanId, meanValue, afterMean)
+                    Blade.IR.IRLet (scope, Blade.IR.IRBeginPoolScope "A03 released negative", Blade.IR.IRLet (id, v, afterDonor))
+                | other -> other
+            Blade.Types.PoolReuseTable.recordReturn f.Id donor
+            replaceFunction ir { f with Body = Blade.IR.mapIRExpr change f.Body }
+        let releaseSource = baseline.Replace("let q = p - mean |> compute", "let q = x - mean |> compute")
+        // The release follows the completed mean snapshot, so only the old
+        // backing is dead; the later q reads x and the retained scalar mean.
+        let hiddenCapture = baseline.Replace("q * 0.5", "method_for(q) <@> lambda(v) -> v + p(0) |> compute")
+        let mismatch = baseline.Replace("type Ix = Idx<7>", "type Ix = Idx<7>\ntype Jx = Idx<3>").Replace("let p = x * 2.0 + 1.0 |> compute", "let p = method_for(range<Jx>) <@> lambda(i) -> Float64(i) |> compute").Replace("let q = p - mean |> compute", "let q = x - mean |> compute")
+        let view = baseline.Replace("function returned_pool(x:", "type Rows = Idx<3>\nfunction returned_pool(x:")
+        // Use an independently constructed matrix argument only in this
+        // refusal source; q is a row GEP with no owning allocation entry.
+        let view = view.Replace("Array<Float64 like Ix>) -> Array", "Array<Float64 like Ix>, matrix: Array<Float64 like Rows, Ix>) -> Array").Replace("let q = p - mean |> compute", "let q = matrix((1 : Rows))").Replace("q * 0.5", "q * mean").Replace("returned_pool(x)", "returned_pool(x, method_for(range<Rows>, range<Ix>) <@> lambda(i, j) -> Float64(i) + Float64(j) |> compute)")
+        let controls =
+            [ "caller-owned", baseline, callerOwned, "not a direct fresh computed body let"
+              "same input backing", baseline, sameInput, "input reads the donor backing"
+              "general let plan", baseline, letPlan, "let-donor plans are outside"
+              "latent producer", baseline, deferred, "input is deferred"
+              "array capture", hiddenCapture, forceFirst, "not closed scalar arithmetic"
+              "released event root", releaseSource, released, "inline lifetime region remains excluded"
+              "mismatched extent", mismatch, forceFirst, "donor type/extent does not match"
+              "row view root", view, forceFirst, "not an independent owned root" ]
+        for label, source, tweak, expected in controls do
+            let name = "return pool reuse declines (llvm): " + label
+            match emitReturnCase "1" source tweak with
+            | Error e -> fail name e
+            | Ok (ll, decisions) ->
+                let decline = decisions |> List.exists (fun d ->
+                    d.Rule = "pool-reuse-llvm" && (match d.Outcome with Blade.Effects.Declined why -> why.Contains(expected: string) | _ -> false))
+                let noSpeculativeForce =
+                    if label <> "latent producer" then true
+                    else
+                        match outlinedLifetimeBody "returned_pool" ll with
+                        | None -> false
+                        | Some (_, body) ->
+                            let pools = System.Text.RegularExpressions.Regex.Matches(body, @"(%r\d+) = call ptr @blade_alloc_cells\(")
+                            let ret = System.Text.RegularExpressions.Regex.Match(body, @"ret ptr (%r\d+)")
+                            // p plus a fresh final result, with q still virtual:
+                            // preflight must not insert a third input allocation.
+                            pools.Count = 2 && ret.Success && ret.Groups.[1].Value = pools.[1].Groups.[1].Value &&
+                            System.Text.RegularExpressions.Regex.Matches(body, @"call void @blade_free\(").Count = 1
+                if decline && noSpeculativeForce && not (ll.Contains "; A03: return pool reuse:") then
+                    pass name "fresh-result fallback; exact backend refusal; no speculative donor fill/input forcing"
+                else fail name (sprintf "decline=%b; no speculative force=%b; decisions=%A" decline noSpeculativeForce decisions)
 
     // ---- contains and membership hoisting (round 3, B-T1) ------------------
     // The lane has a real IRContains arm (it used to refuse the node, so every

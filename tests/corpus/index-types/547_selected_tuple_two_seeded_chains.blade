@@ -1,0 +1,9 @@
+// TEST: Selected tuple keeps two independent seeded encounter-order chains
+// With result-only printing and repro, C03 removes mask/value stores.
+// Sibling ON joins traversal; sibling OFF still has two guarded scans.
+// The baseline already elides positions. Predicate sharing is not claimed.
+let x = [-2.0, 0.0, 1.0, 3.0, -1.0, 2.0]
+let keep = mask(x, lambda(v) -> v > 0.0)
+let y = compound(x, keep)
+let result = (reduce(y, (+), 7.0), reduce(y, lambda(a, b) -> a * 10.0 + b, -2.0))
+// EXPECT: result = (13.0, -1868.0)

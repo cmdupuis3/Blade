@@ -1,0 +1,15 @@
+// TEST: Selected tuple preserves earlier intervening abort before fold (aborts)
+function intervening_selected_abort() -> Float64 = {
+    let z = 0
+    Float64(1 / z)
+}
+function later_selected_fold(a: Float64, b: Float64) -> Float64 = {
+    let z = Int64(floor(b - b))
+    a + Float64(1 / z)
+}
+let x = [-2.0, 0.0, 1.0, 3.0, -1.0, 2.0]
+let keep = mask(x, lambda(v) -> v > 0.0)
+let y = compound(x, keep)
+let before = intervening_selected_abort()
+let result = (reduce(y, later_selected_fold, 7.0), reduce(y, lambda(a, b) -> a * 10.0 + b, -2.0))
+// ABORT: intervening_selected_abort
