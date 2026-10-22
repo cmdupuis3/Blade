@@ -7948,6 +7948,242 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                     | Some oid -> Map.add c.Id oid acc
                     | None -> acc) modul.DerivedFuncOrigins }
 
+/// PM10: one private scoped rank-2 scalar map, immediately consumed by a
+/// literal-seeded partial fold. Reuse the existing row apply + scalar fused
+/// terminal; neither a producer pool nor a new backend operation is needed.
+/// Top-level named producers are deliberately outside this first admission.
+let fusePartialRowTerminalsModule (builder: IRBuilder) (programFuncs: IRCallable list) (modul: IRModule) : IRModule =
+    let funcs = (programFuncs @ modul.Functions) |> List.map (fun f -> f.Id, f) |> Map.ofList
+    let resolve = resolveCallableIn funcs
+    let writes = scheduleMayWriteIn programFuncs modul
+    let allCallables = (modul.Functions @ programFuncs) |> List.distinctBy (fun f -> f.Id)
+    let roots = compactionRoots allCallables modul
+    let minted = ResizeArray<IRCallable * IRId>()
+    let scalar64 = IRTScalar ETFloat64
+    let plain (ix: IRIndexType) =
+        ix.Rank = 1 && ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Dependencies.IsEmpty
+        && (match IRTotality.evalInt ix.Extent with Some n -> n >= 0L | None -> false)
+    let arrayOf rank ty =
+        match ty with
+        | ArrayElem at when at.ElemType = scalar64 && not at.IsVirtual
+                            && at.IndexTypes.Length = rank && List.forall plain at.IndexTypes -> Some at
+        | _ -> None
+    let sameAxes (a: IRArrayType) (b: IRArrayType) =
+        a.IndexTypes.Length = b.IndexTypes.Length && List.forall2 IRTotality.sameIndex a.IndexTypes b.IndexTypes
+    let unstrategized (c: IRCallable) =
+        not c.IsStatic && not c.IsArityPoly && not c.IsOmpParallel && c.Parallelism.IsEmpty
+        && not c.IsCudaKernel && not c.IsMpiParallel
+    // Totality alone permits immutable free scalar reads. This motion also
+    // requires a CLOSED callable graph: params/local lets/callees only, no
+    // captures, module variables, callbacks, recursion or unknown functions.
+    let closedTotal (root: IRCallable) : Result<unit, string> =
+        let rec audit visiting (c: IRCallable) =
+            if visiting |> Set.contains c.Id then Error "a recursive callable"
+            elif not (unstrategized c) then Error "a parallel/device/static/arity strategy"
+            elif not c.Captures.IsEmpty then Error "a callable capture"
+            elif writes c.Body then Error "a callable body may write"
+            else
+            match IRTotality.auditCallable resolve (fun _ -> None) (fun _ -> false) c [] with
+            | Error why -> Error why
+            | Ok () ->
+                let mutable bound = c.Params |> List.map _.VarId |> Set.ofList
+                iterIRExpr (function IRLet (id, _, _) -> bound <- bound.Add id | _ -> ()) c.Body
+                let refs = collectVarRefsIR c.Body |> Set.filter (fun id -> not (bound.Contains id)) |> Set.toList
+                let rec check = function
+                    | [] -> Ok ()
+                    | id :: rest ->
+                        match Map.tryFind id funcs with
+                        | None -> Error "an unbound/global/callback reference"
+                        | Some callee ->
+                            match audit (visiting.Add c.Id) callee with Error why -> Error why | Ok () -> check rest
+                check refs
+        audit Set.empty root
+    let literalSeed = function
+        | IRLit (IRLitFloat _) | IRUnaryOp (IRNeg, IRLit (IRLitFloat _)) -> true
+        | _ -> false
+    let rowFold (info: ApplyInfo) =
+        match resolve info.Kernel with
+        | Some row when row.Params.Length = 1 && row.RetType = scalar64 && row.Captures.IsEmpty && unstrategized row ->
+            match row.Params.Head.Type, row.Body with
+            | ArrayElem at, IRReduce (IRVar (id, ty), k, Some seed)
+                when id = row.Params.Head.VarId && ty = row.Params.Head.Type
+                     && at.ElemType = scalar64 && not at.IsVirtual && at.IndexTypes.Length = 1
+                     && at.IndexTypes.Head.Rank = 1 && at.IndexTypes.Head.IxKind = IxKPlain
+                     && at.IndexTypes.Head.Symmetry = SymNone && at.IndexTypes.Head.Dependencies.IsEmpty -> Some (row, k, seed)
+            | _ -> None
+        | _ -> None
+    let record subject outcome evidence =
+        Blade.Effects.Decisions.record
+            { Blade.Effects.Rule = "partial-row-fold"; Version = 1; Span = declSpanOf subject
+              Subject = subject; Outcome = outcome; Evidence = evidence }
+    let peel = function IRCompute (IRApplyCombinator i) | IRApplyCombinator i -> Some i | _ -> None
+    let rewrite (host: IRBinding) =
+        let unchanged why = record host.Name (Blade.Effects.Declined why) []; host
+        match host.Value with
+        | IRLet (pid, value, IRCompute (IRApplyCombinator consumer)) when (peel value).IsSome ->
+            let producer = (peel value).Value
+            match producer.Arrays, consumer.Arrays, rowFold consumer with
+            | [ (IRVar (sourceId, sourceType) as source) ], [ IRVar (p, privateType) ], Some (row, foldExpr, seed) when p = pid ->
+                let loopsKnown =
+                    match producer.Loop, consumer.Loop with
+                    | IRMethodFor a, IRMethodFor b ->
+                        (match a.Arrays, b.Arrays with
+                         | [IRVar (s, _)], [IRVar (v, _)] -> s = sourceId && v = pid
+                         | _ -> false)
+                    | _ -> false
+                let sourceBinding = modul.Bindings |> List.tryFindIndex (fun b -> b.Id = sourceId)
+                let hostIndex = modul.Bindings |> List.findIndex (fun b -> b.Id = host.Id)
+                let hasDemand =
+                    let mentions e = (collectVarRefsIR e).Contains pid
+                    let expr e = mentions e || (embeddedExtentExprs e |> List.exists mentions)
+                    let ty t = irTypeExtentExprs t |> List.exists expr
+                    // Remove precisely this expression by identity, rather
+                    // than exempting a name, an entire host or all its types.
+                    let rec outside e =
+                        if obj.ReferenceEquals(e, host.Value) then IRLit IRLitUnit
+                        else rebuildWith e (childrenOf e |> List.map outside)
+                    roots |> List.exists (function
+                        | RootBindingValue b when b.Id = host.Id -> expr (outside b.Value)
+                        | RootBindingValue b -> expr b.Value
+                        | RootSideOperand (_, _, e) -> expr e
+                        | RootFunctionBody f -> expr f.Body || (f.Captures |> List.exists (fun c -> c.Id = pid))
+                        | RootType (_, t) -> ty t
+                        | RootSourceRef (_, id) -> id = pid
+                        // Local let names do not survive IR. A name-only
+                        // provider operand cannot be certified by this census.
+                        | RootNameRef _ -> true)
+                let privateMentions =
+                    let mutable n = 0
+                    iterIRExpr (function IRVar (id, _) when id = pid -> n <- n + 1 | _ -> ()) host.Value
+                    n
+                let privateTypeDemand =
+                    embeddedExtentExprs host.Value |> List.exists (fun e -> (collectVarRefsIR e).Contains pid)
+                if not (gateOn "BLADE_FUSION") then unchanged "disabled by BLADE_FUSION"
+                elif not (Blade.Toolchain.fpReproEnabled ()) then unchanged "requires the reproducible serial row graph (BLADE_FP_REPRO=1)"
+                elif hasDemand || privateTypeDemand || privateMentions <> 2 then
+                    unchanged "the private producer has an additional type/capture/side-table demand"
+                elif not (literalSeed seed) then unchanged "requires an explicit literal Float64 seed per row"
+                elif not loopsKnown then unchanged "an unsupported loop provenance payload survives"
+                elif producer.KernelInputRanks <> [0] || producer.KernelOutputRank <> 0 || producer.IsCoIteration
+                     || producer.HasReynolds || not producer.KernelTDims.IsEmpty
+                     || producer.SpeedupFactor <> 1L || producer.ReynoldsSpeedup <> 1L
+                     || producer.SymcomStates <> [SCNeither; SCNeither]
+                     || producer.TriangularLevels <> [false; false] then
+                    unchanged "the producer is not one plain scalar map"
+                elif consumer.KernelInputRanks <> [1] || consumer.KernelOutputRank <> 0 || consumer.HasReynolds
+                     || consumer.IsCoIteration || not consumer.KernelTDims.IsEmpty
+                     || consumer.SpeedupFactor <> 1L || consumer.ReynoldsSpeedup <> 1L
+                     || consumer.TriangularLevels <> [false] || consumer.SymcomStates <> [SCNeither] then
+                    unchanged "the consumer is not one plain row fold"
+                else
+                match arrayOf 2 sourceType, arrayOf 2 producer.OutputType, arrayOf 1 consumer.OutputType,
+                      resolve producer.Kernel, resolve foldExpr, sourceBinding with
+                | Some input, Some mapped, Some result, Some map, Some fold, Some si when si < hostIndex ->
+                    let sourceB = modul.Bindings.[si]
+                    let proof = storedArrayProof modul sourceB
+                    // Every omitted metadata payload is either the known
+                    // source/row role or a static, identical plain axis. In
+                    // particular no hidden shared/kernel axis may disappear.
+                    let storedRoles (at: IRArrayType) = at.IndexTypes |> List.forall (fun ix -> ix.Kind = SDimension)
+                    let denseMetadata (at: IRArrayType) =
+                        at.ElemType = scalar64 && not at.IsVirtual && at.IndexTypes.Length = 2
+                        && List.forall plain at.IndexTypes
+                    let loopMetadata (info: ApplyInfo) expected =
+                        match info.Loop with
+                        | IRMethodFor mf ->
+                            mf.TotalSDims = 2 && mf.SDimsPerArray = [2] && mf.SharedIndexTypes.IsEmpty
+                            && mf.Identities = info.Identities && mf.ArrayTypes.Length = 1
+                            && denseMetadata mf.ArrayTypes.Head
+                            && sameAxes mf.ArrayTypes.Head expected && storedRoles mf.ArrayTypes.Head
+                        | _ -> false
+                    let metadataKnown =
+                        producer.SharedIndexTypes.IsEmpty && consumer.SharedIndexTypes.IsEmpty
+                        && producer.SDimsPerArray = [2] && consumer.SDimsPerArray = [1]
+                        && producer.Identities.Length = 1 && consumer.Identities.Length = 1
+                        && producer.ArrayTypes.Length = 1 && consumer.ArrayTypes.Length = 1
+                        && denseMetadata producer.ArrayTypes.Head && denseMetadata consumer.ArrayTypes.Head
+                        && sameAxes producer.ArrayTypes.Head input && storedRoles producer.ArrayTypes.Head
+                        && sameAxes consumer.ArrayTypes.Head mapped
+                        && (consumer.ArrayTypes.Head.IndexTypes |> List.map _.Kind) = [SDimension; TDimension]
+                        && storedRoles input && storedRoles mapped && storedRoles result
+                        && loopMetadata producer input && loopMetadata consumer mapped
+                        && (match arrayOf 2 privateType with Some at -> sameAxes at mapped && storedRoles at | None -> false)
+                    if not (sameAxes input mapped) || not (IRTotality.sameIndex result.IndexTypes.Head input.IndexTypes.Head) then
+                        unchanged "source/map/result index provenance disagrees"
+                    elif not (bindingSideOperands modul host.Id).IsEmpty
+                         || modul.ProviderReads.ContainsKey host.Id || modul.ProviderWrites.ContainsKey host.Id then
+                        unchanged "the host has an additional execution payload"
+                    elif not metadataKnown then unchanged "the apply/method_for metadata is outside the known plain row geometry"
+                    elif map.Params.Length <> 1 || map.Params.Head.Type <> scalar64 || map.RetType <> scalar64
+                         || fold.Params.Length <> 2 || (fold.Params |> List.exists (fun p -> p.Type <> scalar64))
+                         || fold.RetType <> scalar64 || not (modul.Functions |> List.exists (fun f -> f.Id = row.Id)) then
+                        unchanged "the map/fold/row callable is outside the concrete scalar admission"
+                    else
+                    match proof, closedTotal map, closedTotal fold with
+                    | Error why, _, _ -> unchanged $"source is not proved stored: {why}"
+                    | _, Error why, _ | _, _, Error why -> unchanged $"a producer/fold is not closed pure/total: {why}"
+                    | Ok (_, chain), _, _ when chain |> List.exists (fun b -> modul.ProviderReads.ContainsKey b.Id) ->
+                        unchanged "provider sources are outside the initial stored-array admission"
+                    | Ok (_, chain), _, _ when chain |> List.exists (fun b -> bindingPayload modul b |> List.exists writes) ->
+                        unchanged "a stored source initializer or alias payload may write"
+                    | Ok _, Ok (), Ok () ->
+                        // The old row param may carry __reduce_inferred_n.
+                        // Build its real C axis from the stored source, never
+                        // from that abstract signature. Keep output R EXACTLY.
+                        let column = { input.IndexTypes.[1] with Kind = SDimension }
+                        let rowAt = { ElemType = scalar64; IndexTypes = [column]; IsVirtual = false; Identity = None }
+                        let rowType = mkArrayLike rowAt
+                        let rid = builder.FreshId ()
+                        let rp = { Name = $"__partial_row_{rid}"; Index = 0; VarId = rid; Type = rowType }
+                        let rv = IRVar (rid, rowType)
+                        let rowIdentity = AIDVariable rp.Name
+                        let inner =
+                            { producer with
+                                Loop = IRMethodFor { Arrays = [rv]; Identities = [rowIdentity]; ArrayTypes = [rowAt]
+                                                     SDimsPerArray = [1]; TotalSDims = 1; SharedIndexTypes = [] }
+                                Arrays = [rv]; Identities = [rowIdentity]; ArrayTypes = [rowAt]
+                                SharedIndexTypes = []; SymcomStates = [SCNeither]; TriangularLevels = [false]
+                                SDimsPerArray = [1]; KernelInputRanks = [0]; KernelTDims = []; OutputType = rowType }
+                        let fid = builder.FreshId ()
+                        let terminal = IRReduceCompute (IRApplyCombinator inner, foldExpr, seed)
+                        let body = IRLet (fid, terminal, IRVar (fid, scalar64))
+                        let fresh = mkCallable builder defaultLambdaOptions [rp] body scalar64 [] false [] [] false false 256 false
+                        let fresh = { fresh with Name = $"__partial_rows_{fresh.Id}"; SourceName = row.SourceName }
+                        let outerAt =
+                            { input with IndexTypes = [ { input.IndexTypes.[0] with Kind = SDimension }
+                                                        { input.IndexTypes.[1] with Kind = TDimension } ] }
+                        let outer =
+                            { consumer with
+                                Loop = IRMethodFor { Arrays = [source]; Identities = producer.Identities; ArrayTypes = [input]
+                                                     SDimsPerArray = [2]; TotalSDims = 2; SharedIndexTypes = [] }
+                                Kernel = IRVar (fresh.Id, mkFuncArrow [rowType] scalar64)
+                                Arrays = [source]; Identities = producer.Identities; ArrayTypes = [outerAt] }
+                        minted.Add (fresh, row.Id)
+                        record host.Name Blade.Effects.Applied
+                            [ "one private rank-2 mapped pool removed; stored input and original rank-1 result retained"
+                              "concrete source C row view; original R output type/identity; literal seed once per row"
+                              "closed pure/total producer/fold/callee graph; immediate sole-use scope and complete residual demand census"
+                              "reproducible ascending row chains; C=0 returns each seed, R=0 executes no row seeds" ]
+                        { host with Value = IRCompute (IRApplyCombinator outer) }
+                | _ -> unchanged "requires a dominating stored plain rank-2 Float64 source and a rank-1 Float64 result"
+            | _ -> unchanged "requires one source and an immediate sole seeded row-fold consumer"
+        | IRLet (_, value, _) when (peel value).IsSome ->
+            match arrayOf 2 (peel value).Value.OutputType with
+            | Some _ -> unchanged "the private producer is not consumed immediately by its sole row fold"
+            | None -> host
+        | IRCompute (IRApplyCombinator info) when (rowFold info).IsSome ->
+            unchanged "requires a private scoped producer; top-level named/printed producers retain their storage"
+        | _ -> host
+    let bindings = modul.Bindings |> List.map rewrite
+    if minted.Count = 0 then modul
+    else
+        let byOrigin = minted |> Seq.groupBy snd |> Map.ofSeq
+        { modul with
+            Bindings = bindings
+            Functions = modul.Functions |> List.collect (fun f ->
+                f :: (Map.tryFind f.Id byOrigin |> Option.map (Seq.map fst >> List.ofSeq) |> Option.defaultValue []))
+            DerivedFuncOrigins = minted |> Seq.fold (fun m (f, origin) -> Map.add f.Id origin m) modul.DerivedFuncOrigins }
+
 /// `programFuncs` is every callable of the PROGRAM (all modules): a pass that
 /// judges a callee's effects resolves it there, since a generic defined in
 /// one module and called from another (`from stats import mean`) is not in
@@ -7962,6 +8198,7 @@ let optimizeModule (builder: IRBuilder) (programFuncs: IRCallable list) (modul: 
     modul
     |> foldConstMatchesModule
     |> (fun m -> fuseElementwiseChainsModule m builder programFuncs)
+    |> fusePartialRowTerminalsModule builder programFuncs
     |> (fun m -> fuseSliceWritesModule m builder programFuncs)
     |> (fun m -> fuseRowFoldsModule m builder programFuncs)
     |> hoistKernelInvariantsModule builder programFuncs

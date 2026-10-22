@@ -18659,7 +18659,9 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                 let env' = registerDeclaredTypeDef srcName name defInfo env
                 match seg with
                 | Some (_, s) ->
-                    Blade.Types.SegmentTable.record name (segmentationOffsets s)
+                    match s.Levels with
+                    | [SegRegular k] -> Blade.Types.SegmentTable.recordUniform name s.Extent k
+                    | _ -> Blade.Types.SegmentTable.record name (segmentationOffsets s)
                     { env' with Segmentations = Map.add srcName s env'.Segmentations }
                 | None -> env'))
 

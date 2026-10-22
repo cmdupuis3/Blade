@@ -113,16 +113,21 @@ targeted requests, not extra full-suite sweeps. No full-suite launch has occurre
 |---|---|---|---|
 | Setup | Orchestrator | Branch created | `codex/round4-peakmem` from master `361504b6`; original checkout untouched |
 | A01 | Sol/high A | Integrated `4189da71` | All 17 targeted categories passed, including seven clean ASan witnesses; explicit LLVM/docs skips in [results](A01-tests.md); combined checks pending |
-| A02 | Sol/high A | Census/control authoring | PM01 barrier-chain existing reuse and A01 region boundary; [brief](A02-brief.md); no new compiler admission authorized |
+| A02 | Sol/high A | Census/control integrated `d42aec80` | Diagnostics plus 24 all-output native controls; broad ownership gates move to A03's implementation; [review](A02-review.md), [results](A02-tests.md) |
+| A03 | Sol/high A | Bounded return-donor design approved | LLVM ordinary array-return reuse; [review](A03-review.md); implementation waits for accepted C02-L1 integration |
 | B01 | Sol/high B | Integrated `38c41096` | 10 unit fixtures, 26 check arms, full-cell diagnostics across 10 backend/policy combinations; [results](B01-tests.md); performance unmeasured |
 | C01 | Sol/high C | Integrated `8c6571a7` | 524 optimize passes; C++ and LLVM ON/control runtime twins; [results](C01-tests.md); combined-code checks pending |
 | D01 | Sol/high D | Integrated `f0ee9797` | Zarr: 389 passes, one NetCDF library skip; [review](D01-review.md); shared-census integration checks pending |
 | B02 | Sol/high B | Integrated `b4ac861e` | 21 unit fixtures and six native diagnostic workloads passed; [review](B02-review.md); no performance claim |
-| C02 | Sol/high C | Initial build repair required | Three F# tuple-list test syntax/type errors; no tests ran; [implementation review](C02-review.md); production change unvalidated |
+| C02 | Sol/high C | Integrated `0c5c3e7d` with LLVM eager row-input repair | 586 optimizer checks, 36 native arms, facts/goldens and SQL/interp/opt-diff pass; eight bounded LLVM refusals recorded; [review](C02-review.md), [results](C02-L1-tests.md); combined checks pending |
 | D02 | Sol/high D | Integrated `e43d14d3` | PM43 required resident destination; 510 Zarr passes, one internal NetCDF skip; [review](D02-review.md); combined checks pending |
-| B03 | Sol/high B | Frozen and reviewed for validation | Instrumented C++ scalar-pool accounting only; observer strengthened to four mandatory live checkpoints; [review](B03-review.md); no execution yet |
+| B03 | Sol/high B | Integrated `307ba755` | 45 scenarios/494 assertions and six clean ASan positives/81 assertions; LSan unsupported; [results](B03-tests.md); source-tree pool API accounting only |
+| B04 | Sol/high B | Integrated `de03addd` | One PM52 producer/consumer control retaining both full outputs; all eight numeric/provenance/store/observation gates pass; [results](B04-tests.md); performance unmeasured |
+| B05 | Sol/high B | Design checkpoint accepted; implementation gated | External opaque task boundary recommended; [review](B05-review.md); B04 remains performance-ineligible |
 | D03 | Sol/high D | Census closed, implementation gated | Integrated `45f5e9b8`; repeated chunk reads evidenced, but runtime source identity and bounded cursor/addressing prerequisites remain; [census](D03-census.md) |
-| D04 | Sol/high D | Implementing approved design | Safe rank-one streamed window addressing; [design disposition](D04-review.md); separate from cache, cursor and source-snapshot work |
+| D04 | Sol/high D | Integrated `f8db0d1f` | Safe rank-one streaming-window addressing; 551 Zarr passes, one internal NetCDF skip; [review](D04-review.md), [results](D04-tests.md); combined checks pending |
+| D05 | Sol/high D | Integrated `b6f4beec` | Uniform segmentation descriptor and arithmetic cursor; 600 Zarr passes, one internal NetCDF skip; [review](D05-review.md), [results](D05-tests.md); combined checks pending |
+| D06 | Sol/high D | Runtime prerequisite implementation approved | Explicitly granted private sequential spool protocol only; no compiler admission or default disk use; [review](D06-review.md) |
 | Full suite | Luna/high runner | Reserved | End of whole round only; launch count 0 |
 
 Per-card handoffs and reviewer dispositions live beside this file. Historical plans and

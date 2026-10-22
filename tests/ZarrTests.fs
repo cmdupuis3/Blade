@@ -1565,6 +1565,11 @@ let d2 = method_for(halo<CX, [-2, 0, 2]>) <@> lambda(w) -> A(w(2)) * A(w(-2)) - 
                 let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir "zarr_segments_stencil"
                 check "stencil over segments: per-run emission, no whole-array buffer"
                     (cppCode.Contains "stencil over segments" && not (cppCode.Contains "A_flat = new")) ""
+                check "stencil over segments: actual local loads replace every rank1 alias"
+                    (cppCode.Contains "d__win0[static_cast<size_t>"
+                     && cppCode.Contains "d2__win0[static_cast<size_t>"
+                     && not (cppCode.Contains " - __w_lo,")
+                     && not (cppCode.Contains "Array<double, 1> A =")) ""
                 CodeGen.deployRuntimeHeaders e2eDir
                 let cppFile = Path.Combine(e2eDir, "zarr_segments_stencil.cpp")
                 File.WriteAllText(cppFile, cppCode)
@@ -1622,6 +1627,12 @@ let scaled = method_for(zip(A, m)) <@> lambda(x, w) -> x * w |> compute
                 let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir "zarr_segments_elementwise"
                 check "elementwise stream: per-block emission, no whole-array buffer"
                     (cppCode.Contains "elementwise over segments" && not (cppCode.Contains "A_flat = new")) ""
+                check "elementwise stream: scalar peels use local windows, resident zip stays resident"
+                    (cppCode.Contains "doubled__win0[static_cast<size_t>"
+                     && cppCode.Contains "shifted__win0[static_cast<size_t>"
+                     && cppCode.Contains "scaled__win0[static_cast<size_t>"
+                     && not (cppCode.Contains " - __w_lo,")
+                     && not (cppCode.Contains "Array<double, 1> A =")) ""
                 CodeGen.deployRuntimeHeaders e2eDir
                 let cppFile = Path.Combine(e2eDir, "zarr_segments_elementwise.cpp")
                 File.WriteAllText(cppFile, cppCode)
@@ -1643,6 +1654,449 @@ let scaled = method_for(zip(A, m)) <@> lambda(x, w) -> x * w |> compute
                 check "elementwise stream: lowers" false e
         with ex -> check "elementwise stream" false ex.Message
     elementwiseStreamE2E ()
+
+    // D04: local addressing is a safety prerequisite, independent of caching.
+    // These fixtures pin values without compiling the former invalid alias.
+    let rank1WindowAddressingE2E () =
+        printfn "\n--- rank1 streamed windows: local addresses, global coordinates ---"
+        let savedPrint = Environment.GetEnvironmentVariable "BLADE_PRINT"
+        let savedTile = Environment.GetEnvironmentVariable "BLADE_TILE_CACHE"
+        let fixture label version payload n fill omit =
+            let store = Path.GetFullPath(Path.Combine(scratch, "window_address_" + label)).Replace('\\', '/')
+            let vars : ZarrWrite.WriteVar list =
+                [ { Name = "A"; DimNames = Some ["x"]; Shape = [n]; Chunks = [4L]
+                    FillValue = fill; Data = payload; OmitChunks = omit; Blade = None } ]
+            (if version = 2 then ZarrWrite.writeStoreV2 else ZarrWrite.writeStoreV3) store vars
+            store
+        let source (store: string) (annotation: string) (extra: string) : string =
+            let lines : string list =
+                [ "import zarr as z";
+                  sprintf "let s = z.load(\"%s\")" store;
+                  "type CX = Chunked<s.index.x, store>";
+                  $"let A: Array<{annotation} like CX> = s.vars.A |> z.stream";
+                  "let d = method_for(halo<CX, [-1, 0, 1]>) <@> lambda(w) -> { let hi = A(w(1)); hi - A(w(-1)) } |> compute";
+                  extra; "" ]
+            String.concat "\n" lines
+        let run (label: string) (cpp: string) =
+            CodeGen.deployRuntimeHeaders e2eDir
+            let file = Path.Combine(e2eDir, label + ".cpp")
+            File.WriteAllText(file, cpp)
+            match compileCpp file e2eDir with Error e -> Error e | Ok exe -> runExecutable exe
+        let emit (label: string) (src: string) =
+            match lower src with
+            | Error e -> check ($"{label}: lowers") false e; None
+            | Ok ir ->
+                let cpp, _ = CodeGen.genSelfContainedProgramFromIR ir label
+                Some (ir, cpp)
+        let noUnsafeAlias (cpp: string) =
+            not (cpp.Contains " - __w_lo,") && not (cpp.Contains "Array<double, 1> A =")
+            && not (cpp.Contains "Array<float, 1> A =") && not (cpp.Contains "Array<int64_t, 1> A =")
+        try
+            try
+                Environment.SetEnvironmentVariable("BLADE_TILE_CACHE", null)
+                let dtypeCases : (string * string * ZarrWrite.WritePayload) list =
+                    [ ("f64", "Float", ZarrWrite.WF64 [| for j in 1 .. 11 -> float (j * j) |]);
+                      ("f32", "Float32", ZarrWrite.WF32 [| for j in 1 .. 11 -> float32 (j * j) |]);
+                      ("i4", "Int64", ZarrWrite.WI32 [| for j in 1 .. 11 -> j * j |]) ]
+                for dtype, annotation, payload in dtypeCases do
+                    for version in [2; 3] do
+                        let label = $"zarr_window_{dtype}_v{version}"
+                        let store = fixture label version payload 11L (if dtype = "i4" then FillInt 0L else FillFloat nan) []
+                        let extra =
+                            if dtype = "f64" then
+                                "let coords = method_for(halo<CX, [-1, 0, 1]>) <@> lambda(w) -> Float64(w(0)) + A(w(0)) |> compute"
+                            else ""
+                        Environment.SetEnvironmentVariable("BLADE_PRINT", if extra = "" then "d" else "d,coords")
+                        match emit label (source store annotation extra) with
+                        | None -> ()
+                        | Some (_, cpp) ->
+                            check ($"{label}: actual local load, final output and unchanged read owner")
+                                (noUnsafeAlias cpp && cpp.Contains "d__win0[static_cast<size_t>"
+                                 && cpp.Contains "static_cast<int64_t>(__w_lo)"
+                                 && cpp.Contains "uniform-zarr-halo-cursor" && not (cpp.Contains "d__runs[")
+                                 && cpp.Contains "delete[] d__win0;"
+                                 && cpp.Contains "d = { allocate<typename promote<"
+                                 && not (cpp.Contains "#error") && not (cpp.Contains "BLADE_CODEGEN_ERROR")
+                                 && not (cpp.Contains "A_flat = new")) ""
+                            if not zCaps.HasGpp then printfn "  SKIP %s: g++ not found" label
+                            else
+                                match run label cpp with
+                                | Ok (0, output) ->
+                                    let expected =
+                                        if dtype = "i4" then "d = [8, 12, 16, 20, 24, 28, 32, 36, 40]"
+                                        else "d = [8.0, 12.0, 16.0, 20.0, 24.0, 28.0, 32.0, 36.0, 40.0]"
+                                    check ($"{label}: independent odd-tail values, padded NaNs unobserved") (output.Contains expected) output
+                                    if extra <> "" then
+                                        check ($"{label}: kernel coordinates remain global across windows")
+                                            (output.Contains "coords = [5.0, 11.0, 19.0, 29.0, 41.0, 55.0, 71.0, 89.0, 109.0]") output
+                                | Ok (code, output) -> check ($"{label}: runs") false ($"exit {code}: {output}")
+                                | Error e -> baselineFailed label e
+                // Finite omitted chunk fills are real neighbor values, not
+                // invented boundary ghosts. Expected values computed by hand.
+                Environment.SetEnvironmentVariable("BLADE_PRINT", "d")
+                for n, expected in [0, "d = []"; 1, "d = [2.0]"] do
+                    let label = $"zarr_window_empty_or_single_{n}"
+                    let store = fixture label 2 (ZarrWrite.WF64 [| for j in 1 .. n -> float j |]) (int64 n) (FillFloat 0.0) []
+                    let lines : string list =
+                        [ "import zarr as z";
+                          sprintf "let s = z.load(\"%s\")" store;
+                          "let A = s.vars.A |> z.stream";
+                          "let d = A + 1.0"; "" ]
+                    let src = String.concat "\n" lines
+                    match emit label src with
+                    | Some (_, cpp) ->
+                        check ($"{label}: elementwise path retains safe local peel")
+                            (noUnsafeAlias cpp && cpp.Contains "d__win0[static_cast<size_t>") ""
+                        if zCaps.HasGpp then
+                            match run label cpp with
+                            | Ok (0, output) -> check ($"{label}: independent values and empty interior") (output.Contains expected) output
+                            | other -> check ($"{label}: runs") false (sprintf "%A" other)
+                    | None -> ()
+                let finite = fixture "finite_fill" 2 (ZarrWrite.WF64 [| 1.0 .. 10.0 |]) 10L (FillFloat -1.0) [[1L]]
+                match emit "zarr_window_finite" (source finite "Float" "") with
+                | Some (_, cpp) when zCaps.HasGpp ->
+                    match run "zarr_window_finite" cpp with
+                    | Ok (0, output) -> check "rank1 local windows: finite missing-chunk fill" (output.Contains "d = [2.0, 2.0, -4.0, -5.0, 0.0, 0.0, 10.0, 11.0]") output
+                    | other -> check "rank1 local windows: finite fill runs" false (sprintf "%A" other)
+                | _ -> ()
+                // Same-window source-data failure wins over an earlier NaN;
+                // future-window failure must not be touched before its turn.
+                let failureCases : (string * int * int * bool) list =
+                    [ ("future_short", 2, 0, false); ("same_short", 1, 0, false);
+                      ("future_null", 2, 0, true); ("same_null", 1, 0, true);
+                      ("global_missing", -1, 6, false) ]
+                for label, badChunk, missingAt, nullFill in failureCases do
+                    let data = [| for j in 0 .. 10 -> if j = missingAt then nan else float (j + 1) |]
+                    let store = fixture label 2 (ZarrWrite.WF64 data) 11L (if nullFill then FillNone else FillFloat 0.0) (if nullFill then [[int64 badChunk]] else [])
+                    match emit ("zarr_window_" + label) (source store "Float" "") with
+                    | None -> ()
+                    | Some (_, cpp) ->
+                        if badChunk >= 0 && not nullFill then File.WriteAllBytes(Path.Combine(store, "A", string badChunk), [|0uy|])
+                        if zCaps.HasGpp then
+                            match run ("zarr_window_" + label) cpp with
+                            | Ok (code, output) ->
+                                let expected =
+                                    if label = "same_short" then output.Contains "is short (expected 32 bytes)" && not (output.Contains "error[BL8015]")
+                                    elif label = "same_null" then output.Contains "is missing and fill_value is null" && not (output.Contains "error[BL8015]")
+                                    else output.Contains "error[BL8015]" && output.Contains ($"first at [{missingAt}]")
+                                         && not (output.Contains "is short") && not (output.Contains "fill_value is null")
+                                check ($"rank1 local windows: {label} preserves per-window failure order/global location")
+                                    (code <> 0 && expected && not (output.Contains "d = ")) output
+                            | Error e -> baselineFailed label e
+                // Mutate otherwise-positive lowered IR to isolate backend
+                // refusal boundaries even when the front end rules them out.
+                let store = fixture "refusal" 2 (ZarrWrite.WF64 [| 1.0 .. 11.0 |]) 11L (FillFloat 0.0) []
+                let helperSource =
+                    let withHelper = (source store "Float" "").Replace(
+                        "let d = method_for", "function gap(a: Float, b: Float) -> Float = { a - b }\nlet d = method_for")
+                    withHelper.Replace("let hi = A(w(1)); hi - A(w(-1))", "gap(A(w(1)), A(w(-1)))")
+                match emit "zarr_window_scalar_helper" helperSource with
+                | Some (_, cpp) ->
+                    let helperCall = System.Text.RegularExpressions.Regex.IsMatch(cpp, @"gap[^\s(]*\(d__win0\[static_cast<size_t>")
+                    check "rank1 local windows: capture-free named scalar call renders certified loads"
+                        (helperCall && noUnsafeAlias cpp && not (cpp.Contains "BLADE_CODEGEN_ERROR")) ""
+                    if zCaps.HasGpp then
+                        match run "zarr_window_scalar_helper" cpp with
+                        | Ok (0, output) ->
+                            check "rank1 local windows: named scalar helper independent values"
+                                (output.Contains "d = [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]") output
+                        | other -> check "rank1 local windows: named scalar helper runs" false (sprintf "%A" other)
+                | None -> ()
+                match lower (source store "Float" "") with
+                | Error e -> check "rank1 local windows: refusal fixture lowers" false e
+                | Ok ir ->
+                    let transformExpr rewrite (program: IRProgram) =
+                        { Modules = program.Modules |> List.map (fun m ->
+                            { m with Functions = m.Functions |> List.map (fun f -> { f with Body = mapIRExpr rewrite f.Body })
+                                     Bindings = m.Bindings |> List.map (fun b -> { b with Value = mapIRExpr rewrite b.Value }) }) }
+                    let rewriteRead change = function
+                        | IRIndex (IRVar (aid, ty), [IRBinOp (IRElementwise, IRAdd, w, off, loc)], ident) as e
+                            when (Blade.IRAccess.denseHaloTagOf w).IsSome -> change e aid ty w off loc ident
+                        | e -> e
+                    let refuse label program =
+                        try
+                            let cpp, _ = CodeGen.genSelfContainedProgramFromIR program ("zarr_window_refuse_" + label)
+                            check ($"rank1 local windows: {label} refuses without runnable alias fallback") false cpp
+                        with
+                        | Blade.Diagnostics.BladeDiagnosticException d ->
+                            check ($"rank1 local windows: {label} refuses without runnable alias fallback")
+                                (d.Code = "BL7001" && d.Message.Contains "rank-one streamed window addressing" && d.Span.StartLine > 0) (string d)
+                    let changed label change = refuse label (transformExpr (rewriteRead change) ir)
+                    changed "computed_offset" (fun _ aid ty w _ loc ident -> IRIndex (IRVar(aid,ty), [IRBinOp(IRElementwise,IRAdd,w,w,loc)], ident))
+                    changed "huge_offset" (fun _ aid ty w _ loc ident -> IRIndex (IRVar(aid,ty), [IRBinOp(IRElementwise,IRAdd,w,IRLit(IRLitInt System.Int64.MaxValue),loc)], ident))
+                    changed "foreign_window" (fun _ aid ty w off loc ident ->
+                        let foreign = match w with IRVar (_, t) -> IRVar (0x3ffffffe, t) | _ -> w
+                        IRIndex (IRVar(aid,ty), [IRBinOp(IRElementwise,IRAdd,foreign,off,loc)], ident))
+                    changed "mixed_global_read" (fun e aid ty _ _ loc _ -> IRBinOp(IRElementwise,IRAdd,e,IRIndex(IRVar(aid,ty),[IRLit(IRLitInt 0L)],None),loc))
+                    changed "source_escape" (fun e aid ty _ _ _ _ -> IRLet (0x3ffffffd, IRVar(aid,ty), e))
+                    changed "hidden_type_extent" (fun _ aid ty w off loc ident ->
+                        let badTy = IRTIdxTagged(ty, IRefAnon(0x3ffffffc, IRVar(aid,ty)))
+                        IRIndex(IRVar(aid,badTy),[IRBinOp(IRElementwise,IRAdd,w,off,loc)],ident))
+                    refuse "reynolds" (transformExpr (function IRApplyCombinator a -> IRApplyCombinator {a with HasReynolds = true} | e -> e) ir)
+                    let haloCallable =
+                        ir.Modules |> List.collect (_.Functions) |> List.tryFind (fun f ->
+                            not (Blade.IRAccess.windowReadsOf (fun w -> (Blade.IRAccess.denseHaloTagOf w).IsSome) f.Body).IsEmpty)
+                    match haloCallable with
+                    | None -> check "rank1 local windows: captured-callee refusal has a real lifted kernel" false "no callable"
+                    | Some f ->
+                        let callee = { f with Id = 0x3ffffffb; Name = "__window_captured_callee" }
+                        let call = IRApp(IRVar(callee.Id, IRTUnit), f.Params |> List.map (fun p -> IRVar(p.VarId,p.Type)), f.RetType)
+                        let opaque =
+                            { Modules = ir.Modules |> List.map (fun m ->
+                                if m.Functions |> List.exists (fun c -> c.Id = f.Id) then
+                                    { m with Functions = (m.Functions |> List.map (fun c -> if c.Id = f.Id then {c with Body = call} else c)) @ [callee] }
+                                else m) }
+                        refuse "captured_callee" opaque
+                    let arraySource = (source store "Float" "").Replace("let hi = A(w(1)); hi - A(w(-1))", "[A(w(1)), A(w(-1))]")
+                    match lower arraySource with
+                    | Ok arrayIr -> refuse "array_result" arrayIr
+                    | Error e -> check "rank1 local windows: array-result refusal fixture lowers" false e
+                    let changedProvider (_: IRId) (s: ProviderReadSpec) : ProviderReadSpec =
+                        let changedIndices : IRIndexType list =
+                            s.VarType.IndexTypes |> List.map (fun ix -> {ix with Extent = IRLit(IRLitInt 12L)})
+                        let changedType : IRArrayType = {s.VarType with IndexTypes = changedIndices}
+                        {s with VarType = changedType}
+                    let changedModule (m: IRModule) : IRModule =
+                        let changedReads : Map<IRId, ProviderReadSpec> = Map.map changedProvider m.ProviderReads
+                        {m with ProviderReads = changedReads}
+                    let disagree : IRProgram = {Modules = List.map changedModule ir.Modules}
+                    refuse "source_extent_disagreement" disagree
+                    // The immutable certificate is scoped to the final IR and
+                    // exact binding records; it cannot be reused after a rewrite.
+                    let priorAnalysis =
+                        setCallablesContext (ir.Modules |> List.collect (_.Functions) |> List.map (fun f -> f.Id, f) |> Map.ofList)
+                    try
+                        let applies = ResizeArray<ApplyInfo>()
+                        for m in ir.Modules do
+                            for b in m.Bindings do
+                                iterIRExpr (function IRApplyCombinator a -> applies.Add a | _ -> ()) b.Value
+                        let a = applies |> Seq.find (fun a -> match a.Arrays with [IRRange _] -> true | _ -> false)
+                        let sourceId, spec = ir.Modules |> List.collect (fun m -> Map.toList m.ProviderReads) |> List.find (fun (_, s) -> s.Streamed)
+                        let builder = IRBuilder()
+                        builder.EnsureAtLeast(0x40000000)
+                        let initial = buildLoopNestCodeGen a ["__halo_range"] "__certificate_test" builder
+                        let cg = {initial with MpiSlab = true}
+                        match Blade.CodeGenLoopNest.certifyRank1WindowReads cg "stencil" [(sourceId,"A",spec,"__cert_win")] (-1L) 1L 1L [] with
+                        | Error why -> check "rank1 local windows: stale-proof fixture obtains a certificate" false why
+                        | Ok cert ->
+                            let stale label changed =
+                                try
+                                    Blade.CodeGenLoopNest.genLoopNestWindowed cert Map.empty changed Map.empty 0 |> ignore
+                                    check ($"rank1 local windows: changed {label} rejects stale certificate before rendering") false "unexpected render"
+                                with
+                                | :? InvalidOperationException as ex ->
+                                    check ($"rank1 local windows: changed {label} rejects stale certificate before rendering")
+                                        (ex.Message.Contains "certificate belongs to a different kernel") ex.Message
+                            stale "kernel" {cg with KernelExpr = IRUnaryOp(IRNeg,cg.KernelExpr)}
+                            stale "bindings" {cg with Bindings = cg.Bindings |> List.map (fun b -> {b with Extent = IRLit(IRLitInt 1L)})}
+                    finally
+                        restoreAnalysisContext priorAnalysis
+                    // A normal emission after refusals cannot inherit state or
+                    // lose its own certificate. No ambient authorization exists.
+                    let cpp, _ = CodeGen.genSelfContainedProgramFromIR ir "zarr_window_after_refusal"
+                    check "rank1 local windows: repeated emission retains safe local addressing"
+                        (cpp.Contains "d__win0[static_cast<size_t>" && noUnsafeAlias cpp
+                         && not (cpp.Contains "#error") && not (cpp.Contains "BLADE_CODEGEN_ERROR")) ""
+            with ex -> check "rank1 local window addressing" false ex.Message
+        finally
+            Environment.SetEnvironmentVariable("BLADE_PRINT", savedPrint)
+            Environment.SetEnvironmentVariable("BLADE_TILE_CACHE", savedTile)
+    rank1WindowAddressingE2E ()
+
+    // D05: bound traversal metadata through declaration and emission. Explicit
+    // structural groupings and store fingerprint enumeration remain separate.
+    let uniformHaloCursorE2E () =
+        printfn "\n--- uniform Zarr halo cursor: compact metadata and identical windows ---"
+        let marker = "uniform-zarr-halo-cursor"
+        let savedPrint = Environment.GetEnvironmentVariable "BLADE_PRINT"
+        let savedTile = Environment.GetEnvironmentVariable "BLADE_TILE_CACHE"
+        let source (store: string) (edge: string) (radius: int) : string =
+            let lines : string list =
+                [ "import zarr as z";
+                  sprintf "let s = z.load(\"%s\")" store;
+                  sprintf "type CX = Chunked<s.index.x, %s>" edge;
+                  "let A: Array<Float like CX> = s.vars.A |> z.stream";
+                  sprintf "let d = method_for(halo<CX, [-%d, 0, %d]>) <@> lambda(w) -> A(w(%d)) - A(w(-%d)) |> compute" radius radius radius radius;
+                  "" ]
+            String.concat "\n" lines
+        let fixture (label: string) (n: int) (missing: bool) (nullChunk: bool) : string =
+            let store = Path.GetFullPath(Path.Combine(scratch, "uniform_cursor_" + label)).Replace('\\', '/')
+            let values = [| for j in 0 .. n - 1 -> if missing && j = 0 then nan else float ((j + 1) * (j + 1)) |]
+            let vars : ZarrWrite.WriteVar list =
+                [ { Name = "A"; DimNames = Some ["x"]; Shape = [int64 n]; Chunks = [4L]
+                    FillValue = (if nullChunk then FillNone else FillFloat 0.0); Data = ZarrWrite.WF64 values
+                    OmitChunks = (if nullChunk then [[1L]] else []); Blade = None } ]
+            ZarrWrite.writeStoreV2 store vars
+            store
+        let metadataOnly (label: string) (n: int64) (edge: int64) : string =
+            let store = Path.GetFullPath(Path.Combine(scratch, "uniform_cursor_metadata_" + label)).Replace('\\', '/')
+            let arrayDir = Path.Combine(store, "A")
+            Directory.CreateDirectory arrayDir |> ignore
+            let metadata : string = sprintf """{"zarr_format":2,"shape":[%d],"chunks":[%d],"dtype":"<f8","compressor":null,"fill_value":0.0,"order":"C","filters":null}""" n edge
+            File.WriteAllText(Path.Combine(store, ".zgroup"), """{"zarr_format":2}""")
+            File.WriteAllText(Path.Combine(arrayDir, ".zarray"), metadata)
+            File.WriteAllText(Path.Combine(arrayDir, ".zattrs"), """{"_ARRAY_DIMENSIONS":["x"]}""")
+            store
+        let run (label: string) (cpp: string) =
+            CodeGen.deployRuntimeHeaders e2eDir
+            let file = Path.Combine(e2eDir, label + ".cpp")
+            File.WriteAllText(file, cpp)
+            match compileCpp file e2eDir with Error e -> Error e | Ok exe -> runExecutable exe
+        let emit (label: string) (src: string) : (IRProgram * string) option =
+            match lower src with
+            | Error e -> check ($"{label}: lowers") false e; None
+            | Ok ir ->
+                let cpp, _ = CodeGen.genSelfContainedProgramFromIR ir label
+                Some (ir, cpp)
+        try
+            try
+                Environment.SetEnvironmentVariable("BLADE_PRINT", "d")
+                Environment.SetEnvironmentVariable("BLADE_TILE_CACHE", null)
+                SegmentTable.recordUniform "D05.left.CX" 10L 3L
+                SegmentTable.recordUniform "D05.right.CX" 11L 4L
+                check "uniform cursor: qualified alias identities stay distinct"
+                    (SegmentTable.tryFindRuns "D05.left.CX" = Some (SegmentTable.UniformRuns(10L,3L))
+                     && SegmentTable.tryFindRuns "D05.right.CX" = Some (SegmentTable.UniformRuns(11L,4L))) ""
+                SegmentTable.record "D05.explicit" [0L; 3L; 8L; 10L]
+                check "uniform cursor: explicit registry and compatibility APIs retain boundaries"
+                    (SegmentTable.tryFindRuns "D05.explicit" = Some (SegmentTable.ExplicitRuns [0L;3L;8L;10L])
+                     && SegmentTable.tryFind "D05.explicit" = Some [0L;3L;8L;10L]
+                     && SegmentTable.tryFind "D05.left.CX" = Some [0L;3L;6L;9L;10L]) ""
+                SegmentTable.reset ()
+                check "uniform cursor: reset clears compact and explicit entries"
+                    (SegmentTable.tryFindRuns "D05.left.CX" = None && SegmentTable.tryFindRuns "D05.explicit" = None) ""
+                let geometryCases : (int64 * int64 * int64 * int64 * int64 * int64 list) list =
+                    [ (10L,4L,-1L,1L,6L,[0L;4L;8L;10L]);
+                      (11L,4L,-1L,1L,6L,[0L;4L;8L;11L]);
+                      (10L,3L,-1L,1L,5L,[0L;3L;6L;9L;10L]);
+                      (11L,2L,-3L,3L,8L,[0L;2L;4L;6L;8L;10L;11L]);
+                      (2L,1L,-1L,1L,1L,[0L;1L;2L]);
+                      (10L,4L,-3L,0L,7L,[0L;4L;8L;10L]) ]
+                for n,k,lo,hi,capacity,offsets in geometryCases do
+                    let actual = Blade.CodeGenCuda.uniformHaloWindowCapacity n k (-lo) (n-hi) lo hi
+                    check ($"uniform cursor: independent exact capacity N{n} K{k} reach{lo},{hi}") (actual = Ok capacity) (sprintf "%A" actual)
+                    check ($"uniform cursor: compatibility boundary reference N{n} K{k}")
+                        (SegmentTable.toExplicitOffsets (SegmentTable.UniformRuns(n,k)) = offsets) ""
+                check "uniform cursor: signed-limit capacity checked without enumeration"
+                    (Blade.CodeGenCuda.uniformHaloWindowCapacity Int64.MaxValue Int64.MaxValue 0L Int64.MaxValue 0L 0L = Ok Int64.MaxValue) ""
+                let badGeometry : (int64 * int64 * int64 * int64 * int64 * int64) list =
+                    [ (10L,0L,1L,9L,-1L,1L); (10L,11L,1L,9L,-1L,1L);
+                      (10L,4L,2L,9L,-1L,1L); (10L,4L,1L,10L,-1L,1L);
+                      (0L,1L,0L,0L,0L,0L); (10L,4L,0L,9L,Int64.MinValue,1L) ]
+                for n,k,a,b,lo,hi in badGeometry do
+                    check "uniform cursor: malformed/overflowing geometry refuses without enumeration"
+                        ((Blade.CodeGenCuda.uniformHaloWindowCapacity n k a b lo hi).IsError) ""
+                let valueCases : (string * int * string * int * int64 * string) list =
+                    [ ("store",11,"store",1,6L,"d = [8.0, 12.0, 16.0, 20.0, 24.0, 28.0, 32.0, 36.0, 40.0]");
+                      ("literal3",10,"3",1,5L,"d = [8.0, 12.0, 16.0, 20.0, 24.0, 28.0, 32.0, 36.0]");
+                      ("wide_radius",11,"2",3,8L,"d = [48.0, 60.0, 72.0, 84.0, 96.0]");
+                      ("empty_interior",2,"1",1,1L,"d = []") ]
+                for label,n,edge,radius,capacity,expected in valueCases do
+                    let store = fixture label n false false
+                    match emit ("zarr_cursor_" + label) (source store edge radius) with
+                    | None -> ()
+                    | Some (_, cpp) ->
+                        let k = if edge = "store" then 4L else Int64.Parse edge
+                        check ($"uniform cursor: {label} keeps compact declaration facts through emission")
+                            (SegmentTable.tryFindRuns "CX" = Some (SegmentTable.UniformRuns(int64 n,k))) ""
+                        let advance = cpp.IndexOf("__run_next = __run_hi;", StringComparison.Ordinal)
+                        let emptyContinue = cpp.IndexOf("if (__c_lo >= __c_hi) continue;", StringComparison.Ordinal)
+                        check ($"uniform cursor: {label} actual capped step, local load and progress before continue")
+                            (cpp.Contains marker && not (cpp.Contains "d__runs[")
+                             && cpp.Contains "__run_step" && cpp.Contains "d__win0[static_cast<size_t>"
+                             && advance >= 0 && emptyContinue > advance
+                             && cpp.Contains ($"d__win0 = new double[{capacity}];")
+                             && cpp.Contains "__c_lo = __run_lo <" && cpp.Contains "__c_hi = __run_hi >"
+                             && cpp.Contains "delete[] d__win0;" && not (cpp.Contains " - __w_lo,")) ""
+                        if zCaps.HasGpp then
+                            match run ("zarr_cursor_" + label) cpp with
+                            | Ok (0, output) -> check ($"uniform cursor: {label} independent values/clipped empty runs") (output.Contains expected) output
+                            | other -> check ($"uniform cursor: {label} runs") false (sprintf "%A" other)
+                        else printfn "  SKIP uniform cursor %s: g++ not found" label
+                // Metadata-only fixtures contain no payload. Large N cannot
+                // build a compiler boundary list or emitted boundary initializer.
+                let mutable smallCppBytes = 0
+                for label,n in [("small",1009L); ("large",1000000007L)] do
+                    let store = metadataOnly label n 127L
+                    match emit ("zarr_cursor_metadata_" + label) (source store "store" 1) with
+                    | None -> ()
+                    | Some (_, cpp) ->
+                        check ($"uniform cursor: metadata-only {label} has one compact descriptor and no payload")
+                            (SegmentTable.tryFindRuns "CX" = Some (SegmentTable.UniformRuns(n,127L))
+                             && Directory.GetFiles(store,"*",SearchOption.AllDirectories).Length = 3
+                             && cpp.Contains marker && not (cpp.Contains "d__runs[")) ""
+                        if label = "small" then smallCppBytes <- cpp.Length
+                        else
+                            check "uniform cursor: emitted metadata does not grow with N/K"
+                                (smallCppBytes > 0 && cpp.Length < smallCppBytes + 8192) ($"small={smallCppBytes}, large={cpp.Length}")
+                let store = fixture "explicit_control" 11 false false
+                match emit "zarr_cursor_control" (source store "store" 1) with
+                | None -> ()
+                | Some (ir, _) ->
+                    SegmentTable.record "CX" [0L;3L;7L;11L]
+                    let cpp, _ = CodeGen.genSelfContainedProgramFromIR ir "zarr_cursor_explicit"
+                    check "uniform cursor: irregular explicit plan keeps D04 table and safe local addressing"
+                        (not (cpp.Contains marker) && cpp.Contains "d__runs[4] = { 0UL, 3UL, 7UL, 11UL }"
+                         && cpp.Contains "d__win0[static_cast<size_t>" && not (cpp.Contains " - __w_lo,")) ""
+                    let invalidDescriptors : (int64 * int64) list = [(12L,4L); (11L,0L); (11L,-1L); (11L,12L)]
+                    for n,k in invalidDescriptors do
+                        SegmentTable.recordUniform "CX" n k
+                        try
+                            CodeGen.genSelfContainedProgramFromIR ir "zarr_cursor_bad_descriptor" |> ignore
+                            check "uniform cursor: malformed descriptor refuses before emission" false "unexpected success"
+                        with
+                        | Blade.Diagnostics.BladeDiagnosticException d ->
+                            check "uniform cursor: malformed descriptor refuses before emission"
+                                (d.Code = "BL7001" && d.Message.Contains "rank-one streamed window addressing") d.Message
+                    SegmentTable.recordUniform "CX" 11L 4L
+                // Separate user-visible structural grouping keeps its own
+                // explicit IR/offsets representation; no whole-program bound.
+                let groupedSource = (source store "store" 1) + "\nlet seg = segments(CX)\n"
+                match emit "zarr_cursor_grouping_control" groupedSource with
+                | Some (_, cpp) ->
+                    check "uniform cursor: explicit segments consumer retains its table"
+                        (cpp.Contains marker && cpp.Contains "seg__offsets[4]") ""
+                | None -> ()
+                let huge = metadataOnly "overflow" Int64.MaxValue 127L
+                match lower (source huge "store" 1) with
+                | Error e -> check "uniform cursor: overflow fixture lowers without eager offsets" false e
+                | Ok ir ->
+                    try
+                        CodeGen.genSelfContainedProgramFromIR ir "zarr_cursor_capacity_overflow" |> ignore
+                        check "uniform cursor: required output capacity refuses before allocation" false "unexpected success"
+                    with
+                    | Blade.Diagnostics.BladeDiagnosticException d ->
+                        check "uniform cursor: required output capacity refuses before allocation"
+                            (d.Code = "BL7001" && d.Message.Contains "allocation capacity overflows") d.Message
+                let zero = metadataOnly "zero" 0L 1L
+                check "uniform cursor: frontend zero-extent Chunked admission remains unchanged"
+                    (isError (lower (source zero "1" 1)) "chunk edge must be between 1") ""
+                // K is the authored segmentation, independently of physical C=4.
+                let failures : (string * bool) list = [("short",false); ("null",true)]
+                for label,isNull in failures do
+                    for k in [3;4] do
+                        let label = $"zarr_cursor_{label}_K{k}"
+                        let store = fixture label 10 true isNull
+                        match emit label (source store (string k) 1) with
+                        | None -> ()
+                        | Some (_, cpp) ->
+                            if not isNull then File.WriteAllBytes(Path.Combine(store,"A","1"),[|0uy|])
+                            if zCaps.HasGpp then
+                                match run label cpp with
+                                | Ok (code, output) ->
+                                    let correct =
+                                        if k = 3 then output.Contains "error[BL8015]" && output.Contains "first at [0]"
+                                        elif isNull then output.Contains "fill_value is null" && not (output.Contains "error[BL8015]")
+                                        else output.Contains "is short (expected 32 bytes)" && not (output.Contains "error[BL8015]")
+                                    check ($"uniform cursor: {label} preserves authored-grid failure order")
+                                        (code <> 0 && correct && not (output.Contains "d = ")) output
+                                | Error e -> baselineFailed label e
+            with ex -> check "uniform Zarr halo cursor" false ex.Message
+        finally
+            Environment.SetEnvironmentVariable("BLADE_PRINT", savedPrint)
+            Environment.SetEnvironmentVariable("BLADE_TILE_CACHE", savedTile)
+            SegmentTable.reset ()
+    uniformHaloCursorE2E ()
 
     // ---------------------------------------------------------------
     // 10i. RANK-2 streaming: one store standing in for four files decomposed

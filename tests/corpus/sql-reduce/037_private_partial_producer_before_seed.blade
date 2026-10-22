@@ -1,0 +1,16 @@
+// TEST: Partial Map Completes Before Evaluating The First Row Seed (aborts)
+// A row-input boundary precedes the seed as well as the fold's first step.
+type R = Idx<2>
+type C = Idx<3>
+function late_producer_failure(v: Float64) -> Float64 = {
+    let z = Int64(floor(v - 6.0))
+    if v > 5.0 then Float64(1 / z) else v
+}
+function row_seed_failure() -> Float64 = {
+    let z = 0
+    Float64(1 / z)
+}
+let M: Array<Float64 like R, C> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let rows = reduce(method_for(M) <@> late_producer_failure, (+), row_seed_failure())
+// ABORT: error[BL8013]: integer division by zero
+// ABORT: at late_producer_failure

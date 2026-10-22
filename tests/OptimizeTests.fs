@@ -1404,6 +1404,415 @@ let private selectedTerminalInterpreterCases () =
                 resultLine Pass name "admitted route agrees with unoptimized IR and independent scalar pin"; true
             | a, b -> resultLine Fail name ($"ON={a}; OFF={b}"); false) ]
 
+// PM10: the named input stays stored/printed. Only its anonymous mapped
+// rank-2 intermediate is private; result rows keep their original R index.
+let private partialRowsSrc =
+    "type R = Idx<2>\ntype C = Idx<3>\n"
+    + "let M: Array<Float64 like R, C> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n"
+    + "let rows = reduce(method_for(M) <@> lambda(v: Float64) -> v * v + 1.0, (+), 7.0)\n"
+
+let private partialRowsNamedSrc =
+    partialRowsSrc.Replace("let rows = reduce(method_for(M) <@> lambda(v: Float64) -> v * v + 1.0, (+), 7.0)",
+        "let P = method_for(M) <@> lambda(v: Float64) -> v * v + 1.0 |> compute\nlet rows = reduce(P, (+), 7.0)\nlet sample = P(1, 2)")
+
+let private withPartialRows f =
+    withGate "BLADE_PRINT" "" (fun () -> withGate "BLADE_FP_REPRO" "1" (fun () ->
+        withGate "BLADE_FP_CONTRACT" "off" f))
+
+let private partialRowsEmission () =
+    let name = "partial_rows_cpp_eliminates_only_the_private_mapped_matrix"
+    withPartialRows (fun () ->
+        let emit gate = withGate "BLADE_FUSION" gate (fun () -> cppOfSource name partialRowsSrc)
+        match emit "on", emit "0" with
+        | Ok cpp, Ok old ->
+            let pools (s: string) = System.Text.RegularExpressions.Regex.Matches(s, @"allocate<typename promote<double, 2>::type, nullptr>").Count
+            checkAll name cpp "required M + rows retained; anonymous mapped matrix allocation/fill/read removed"
+                [ "real row-terminal callable", cpp.Contains "__partial_rows_"
+                  "one required rank-2 pool", pools cpp = 1 && pools old = 2
+                  "source print retained", cpp.Contains "\"M = [\""
+                  "row output print retained", cpp.Contains "\"rows = [\"" ]
+        | a, b -> resultLine Fail name ($"ON={a}; OFF={b}"); false)
+
+let private partialRowsLlvm () =
+    withPartialRows (fun () ->
+        // L1 restores method_for's row-input forcing boundary in LLVM.
+        // C02 safely removes that pool ON; the corrected OFF reference has it.
+        let route name src demanded =
+            let emit gate = withGate "BLADE_FUSION" gate (fun () ->
+                match lower src with Error e -> Error e | Ok ir -> EmitLlvm.tryEmitProgramNamed name ir)
+            match emit "on", emit "0" with
+            | Ok ll, Ok old ->
+                let audit label (s: string) =
+                    let matches pattern = System.Text.RegularExpressions.Regex.Matches(s, pattern)
+                    let pools =
+                        [ for m in matches @"(%r\d+) = call ptr @blade_alloc_cells\(i64 (\d+), i64 (\d+)\)" do
+                            yield (m.Groups.[1].Value, m.Groups.[2].Value + "x" + m.Groups.[3].Value) ]
+                    let layouts = pools |> List.map snd
+                    let expected = if demanded || label = "OFF" then ["6x8"; "6x8"; "2x8"] else ["6x8"; "2x8"]
+                    let calls = (matches @"call ptr @blade_alloc_cells\(").Count
+                    let description = $"{label}: calls={calls}, layouts={layouts}"
+                    // Limit dataflow checks to evaluation, before printing can
+                    // introduce unrelated pool reads. Follow both a direct
+                    // flattened subscript and a row-view GEP then cell GEP.
+                    let endOfEvaluation = s.IndexOf("  call void @blade_print_completed", System.StringComparison.Ordinal)
+                    let evaluation = if endOfEvaluation < 0 then "" else s.Substring(0, endOfEvaluation)
+                    let dynamicAccess root operation =
+                        let mutable pointers = Set.singleton root
+                        for m in System.Text.RegularExpressions.Regex.Matches(evaluation,
+                                     @"(%r\d+) = getelementptr inbounds double, ptr (%r\d+), i64 %r\d+") do
+                            if pointers.Contains m.Groups.[2].Value then pointers <- pointers.Add m.Groups.[1].Value
+                        pointers.Remove root |> Seq.exists (fun p ->
+                            System.Text.RegularExpressions.Regex.IsMatch(evaluation,
+                                operation + System.Text.RegularExpressions.Regex.Escape(p) + @"(?:\r?\n|$)"))
+                    let dataflow =
+                        match pools with
+                        | (input, _) :: rest when not rest.IsEmpty ->
+                            let output = rest |> List.last |> fst
+                            dynamicAccess input @"= load double, ptr "
+                            && dynamicAccess output @"store double %r\d+, ptr "
+                            && (pools.Length <> 3 || (dynamicAccess (fst rest.Head) @"store double %r\d+, ptr "
+                                                 && dynamicAccess (fst rest.Head) @"= load double, ptr "))
+                        | _ -> false
+                    let printed text scalar =
+                        s.Split('\n') |> Array.tryFind (fun line -> line.Contains ($"c\"{text}\\00\""))
+                        |> Option.exists (fun line ->
+                            let constant = line.Substring(0, line.IndexOf(" =", System.StringComparison.Ordinal))
+                            let call = if scalar then "call void @blade_print_f64(ptr " else "call void @blade_out_str(ptr "
+                            s.Contains (call + constant))
+                    [ ($"exact required pools ({description})", calls = expected.Length && layouts = expected);
+                      ($"only main defines storage ({description})", (matches @"(?m)^define ").Count = 1 && s.Contains "define i32 @main()");
+                      ($"M -> map/fold -> rows dataflow ({description})", dataflow && evaluation.Contains "fmul double"
+                          && evaluation.Contains "fadd double" && evaluation.Contains "store double 0x401C000000000000");
+                      ($"required prints ({description})", printed "M = [" false && printed "rows = [" false
+                          && (not demanded || (printed "P = [" false && printed "sample" true)));
+                      ($"serial graph ({description})", not (s.Contains "fadd reassoc") && not (s.Contains "fmul reassoc")) ]
+                checkAll name ll "C02 streams ON; L1 restores the full row-input boundary OFF; demanded P stays stored"
+                    (audit "ON" ll @ audit "OFF" old)
+            | a, b -> resultLine Fail name ($"ON={a}; OFF={b}"); false
+        [ route "partial_rows_llvm_C02_two_pools_vs_L1_corrected_three_pool_reference" partialRowsSrc false;
+          route "partial_rows_llvm_demanded_P_keeps_three_required_allocations" partialRowsNamedSrc true ])
+
+let private partialRowsMetadata () =
+    let name = "partial_rows_preserves_result_R_and_constructs_concrete_C_metadata"
+    withPartialRows (fun () ->
+        match withGate "BLADE_FUSION" "on" (fun () -> lower partialRowsSrc),
+              withGate "BLADE_FUSION" "0" (fun () -> lower partialRowsSrc) with
+        | Ok ir, Ok old ->
+            let m = ir.Modules.Head
+            let source = m.Bindings |> List.find (fun b -> b.Name = "M")
+            let rows = m.Bindings |> List.find (fun b -> b.Name = "rows")
+            let oldRows = old.Modules.Head.Bindings |> List.find (fun b -> b.Name = "rows")
+            let fresh = m.Functions |> List.tryFind (fun f -> f.Name.Contains "__partial_rows_")
+            match source.Type, rows.Value, fresh with
+            | Blade.IR.ArrayElem sourceAt, Blade.IR.IRCompute (Blade.IR.IRApplyCombinator outer), Some f ->
+                let columnOk =
+                    match f.Params.Head.Type with
+                    | Blade.IR.ArrayElem rowAt -> rowAt.IndexTypes = [sourceAt.IndexTypes.[1]]
+                    | _ -> false
+                let mutable innerOk = false
+                Blade.IR.iterIRExpr (function
+                    | Blade.IR.IRReduceCompute (Blade.IR.IRApplyCombinator inner, _, _) ->
+                        innerOk <- inner.KernelInputRanks = [0] && inner.SDimsPerArray = [1]
+                                   && inner.ArrayTypes.Head.IndexTypes = [sourceAt.IndexTypes.[1]]
+                    | _ -> ()) f.Body
+                checkAll name "" "original output type unchanged; concrete C in row signature/inner map; outer C is a fiber"
+                    [ "exact R result type", rows.Type = oldRows.Type && outer.OutputType = oldRows.Type
+                      "concrete C row param", columnOk
+                      "concrete C inner metadata", innerOk
+                      "outer fiber", outer.KernelInputRanks = [1] && outer.ArrayTypes.Head.IndexTypes.[1].Kind = Blade.Types.TDimension
+                      "fresh callable origin", m.DerivedFuncOrigins.ContainsKey f.Id ]
+            | _ -> resultLine Fail name "the admitted outer/inner shape is missing"; false
+        | a, b -> resultLine Fail name ($"ON={a}; OFF={b}"); false)
+
+let private partialRowsFailureSrc =
+    "function late_producer_failure(v: Float64) -> Float64 = {\n"
+    + "    let z = Int64(floor(v - 6.0))\n    if v > 5.0 then Float64(1 / z) else v\n}\n"
+    + "function early_fold_failure(a: Float64, b: Float64) -> Float64 = {\n"
+    + "    let z = Int64(floor(b - b))\n    a + Float64(1 / z)\n}\n"
+    + partialRowsSrc.Replace("lambda(v: Float64) -> v * v + 1.0, (+)", "late_producer_failure, early_fold_failure")
+
+let private partialRowsSeedFailureSrc =
+    "function row_seed_failure() -> Float64 = {\n    let z = 0\n    Float64(1 / z)\n}\n"
+    + partialRowsFailureSrc.Replace("early_fold_failure, 7.0)", "(+), row_seed_failure())")
+
+// L1: method_for's entire real input precedes a row kernel's first action.
+// These are actual LLVM emissions, independently of the C++/interpreter gate.
+let private partialRowsLlvmInputBoundary () =
+    let prologue = partialRowsSrc.Substring(0, partialRowsSrc.IndexOf("let rows", System.StringComparison.Ordinal))
+    let stored = prologue + "let rows = ((method_for(M) <@> (lambda(row: Array<Float64 like C>) -> reduce(row, (+), 7.0))) |> compute)\n"
+    let packedStored =
+        "type R = Idx<2>\ntype S = SymIdx<2, 3>\n"
+        + "let M: Array<Float64 like R, S> = [[[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0], [12.0]]]\n"
+        + "let rows = ((method_for(M) <@> (lambda(row: Array<Float64 like S>) -> row(0, 0))) |> compute)\n"
+    let shared =
+        prologue + "let totals = {\n"
+        + "    let P = method_for(M) <@> lambda(v: Float64) -> v * v + 1.0\n"
+        + "    let first_rows = reduce(P, (+), 7.0)\n"
+        + "    let second_rows = reduce(P, (+), -7.0)\n"
+        + "    (reduce(first_rows, (+), 0.0), reduce(second_rows, (+), 0.0))\n}\n"
+    let scalarMap = prologue + "let P = method_for(M) <@> lambda(v: Float64) -> v * v + 1.0 |> compute\n"
+    let scalarTerminal =
+        "let x = [1.0, 2.0, 3.0]\nlet total = reduce(method_for(x) <@> lambda(v: Float64) -> v * v + 1.0, (+), 7.0)\n"
+    // An unannotated full rank-2 fold takes TypeCheckInfer.rankKDesugar:
+    // bind the anonymous matrix, then index it in a serial IRForRange nest.
+    // This pre-existing topology is distinct from a direct scalar terminal.
+    let rankTwoMaterialized = partialRowsSrc.Replace("let rows =", "let total =").Replace("(+), 7.0)", "(+), 7.0, axes = 2)")
+    let virtuals =
+        "type I = Idx<3>\nlet forward = method_for(range<I>) <@> lambda(i: Int64) -> Float64(i) |> compute\n"
+        + "let backward = method_for(reverse<I>) <@> lambda(i: Int64) -> Float64(i) |> compute\n"
+    let virtualMulti =
+        "type R = Idx<2>\ntype C = Idx<3>\n"
+        + "let grid = method_for(range<R, C>) <@> lambda(i: Int64, j: Int64) -> Float64(i + j) |> compute\n"
+    let layouts (ll: string) =
+        [ for m in System.Text.RegularExpressions.Regex.Matches(ll, @"call ptr @blade_alloc_cells\(i64 (\d+), i64 (\d+)\)") do
+            yield m.Groups.[1].Value + "x" + m.Groups.[2].Value ]
+    let emit name src =
+        match lower src with
+        | Error e -> Error e
+        | Ok ir -> EmitLlvm.tryEmitProgramNamed name ir |> Result.map (fun ll -> ll, ir)
+    let controls: (string * string * string list) list =
+        [ ("stored_row_input_no_copy", stored, ["6x8"; "2x8"]);
+          ("packed_record_row_has_two_axes_one_input_rank", packedStored, ["12x8"; "2x8"]);
+          ("shared_named_input_forced_once", shared, ["6x8"; "6x8"; "2x8"; "2x8"]);
+          ("scalar_input_map_unchanged", scalarMap, ["6x8"; "6x8"]);
+          ("rank1_direct_scalar_terminal_unchanged", scalarTerminal, ["3x8"]);
+          ("rank2_full_fold_materialized_desugar", rankTwoMaterialized, ["6x8"; "6x8"]);
+          ("virtual_scalar_range_and_reverse_unchanged", virtuals, ["3x8"; "3x8"]);
+          ("virtual_multislot_range_unchanged", virtualMulti, ["6x8"]) ]
+    [ for gate in ["on"; "0"] do
+        for suffix, src, expected in controls do
+            let name = $"partial_rows_L1_llvm_{suffix}_{gate}"
+            yield withPartialRows (fun () -> withGate "BLADE_FUSION" gate (fun () ->
+                match emit name src with
+                | Error e -> resultLine Fail name e; false
+                | Ok (ll, ir) ->
+                    let actual = layouts ll
+                    let privateOutput = suffix <> "shared_named_input_forced_once" || (not (ll.Contains "P = [") && ll.Contains "totals")
+                    let mutable fused = false
+                    let mutable serialNest = false
+                    let mapped = System.Collections.Generic.HashSet<int>()
+                    let indexed = System.Collections.Generic.HashSet<int>()
+                    let noteMapped id (info: Blade.IR.ApplyInfo) =
+                        match info.OutputType with
+                        | Blade.IR.ArrayElem at when (at.IndexTypes |> List.sumBy _.Rank) = 2 -> mapped.Add id |> ignore
+                        | _ -> ()
+                    for m in ir.Modules do
+                        for b in m.Bindings do
+                            match b.Value with
+                            | Blade.IR.IRApplyCombinator info | Blade.IR.IRCompute (Blade.IR.IRApplyCombinator info) -> noteMapped b.Id info
+                            | _ -> ()
+                            Blade.IR.iterIRExpr (function
+                                | Blade.IR.IRReduceCompute _ -> fused <- true
+                                | Blade.IR.IRForRange _ -> serialNest <- true
+                                | Blade.IR.IRLet (id, Blade.IR.IRApplyCombinator info, _)
+                                | Blade.IR.IRLet (id, Blade.IR.IRCompute (Blade.IR.IRApplyCombinator info), _) -> noteMapped id info
+                                | Blade.IR.IRIndex (Blade.IR.IRVar (id, _), _, _) -> indexed.Add id |> ignore
+                                | _ -> ()) b.Value
+                    let topology =
+                        if suffix = "rank1_direct_scalar_terminal_unchanged" then fused && not serialNest
+                        elif suffix = "rank2_full_fold_materialized_desugar" then serialNest && not fused && mapped.Overlaps indexed
+                        else true
+                    if actual = expected && privateOutput && topology then
+                        resultLine Pass name ($"pool layouts={actual}; topology verified; no extra row-input copy"); true
+                    else
+                        resultLine Fail name ($"expected={expected}, actual={actual}, private output={privateOutput}, topology={topology}, IRReduceCompute={fused}, IRForRange={serialNest}, mapped IDs={mapped.Count}, indexed IDs={indexed.Count}"); false))
+        for suffix, src in [ ("producer_before_fold", partialRowsFailureSrc); ("producer_before_seed", partialRowsSeedFailureSrc) ] do
+            let name = $"partial_rows_L1_llvm_{suffix}_{gate}"
+            yield withPartialRows (fun () -> withGate "BLADE_FUSION" gate (fun () ->
+                match emit name src with
+                | Error e -> resultLine Fail name e; false
+                | Ok (ll, _) ->
+                    let actual = layouts ll
+                    let mainAt = ll.IndexOf("define i32 @main()", System.StringComparison.Ordinal)
+                    let main = if mainAt < 0 then "" else ll.Substring mainAt
+                    let producer = System.Text.RegularExpressions.Regex.Match(main, @"call double @bl_late_producer_failure_\d+\(")
+                    let rows = System.Text.RegularExpressions.Regex.Match(main, @"call ptr @blade_alloc_cells\(i64 2, i64 8\)")
+                    let fillEnd =
+                        if not producer.Success || not rows.Success || producer.Index >= rows.Index then ""
+                        else main.Substring(producer.Index, rows.Index - producer.Index)
+                    checkAll name ll ($"actual pools={actual}; full producer fill must precede row allocation/seed/fold")
+                        [ ($"three pools (actual={actual})", actual = ["6x8"; "6x8"; "2x8"]);
+                          ("producer fill before rows", producer.Success && rows.Success && producer.Index < rows.Index
+                              && fillEnd.Contains "store double" && fillEnd.Contains "br label %loop.cond" && fillEnd.Contains "loop.end") ])) ]
+
+let private partialRowsLlvmMalformedPeel () =
+    withPartialRows (fun () -> withGate "BLADE_FUSION" "0" (fun () ->
+        let cases =
+            [ ("real_row_rank", partialRowsSrc, 1, 0);
+              ("negative_row_rank", partialRowsSrc, 1, -1);
+              ("virtual_row_rank", "type I = Idx<3>\nlet y = method_for(range<I>) <@> lambda(i: Int64) -> Float64(i) |> compute\n", 0, 1) ]
+        [ for suffix, src, originalRank, badRank in cases do
+            let name = $"partial_rows_L1_llvm_declines_malformed_{suffix}"
+            match lower src with
+            | Error e -> resultLine Fail name e; yield false
+            | Ok ir ->
+                let mutable changed = false
+                let alter e =
+                    match e with
+                    | Blade.IR.IRApplyCombinator info when not changed && info.KernelInputRanks = [originalRank] ->
+                        changed <- true
+                        Blade.IR.IRApplyCombinator { info with KernelInputRanks = [badRank] }
+                    | _ -> e
+                let alteredModules =
+                    ir.Modules
+                    |> List.map (fun (m: Blade.IR.IRModule) ->
+                        let bindings =
+                            m.Bindings
+                            |> List.map (fun b -> { b with Value = Blade.IR.mapIRExpr alter b.Value })
+                        { m with Bindings = bindings })
+                let altered = { ir with Modules = alteredModules }
+                match EmitLlvm.tryEmitProgramNamed name altered with
+                | Error why when changed && (why.Contains "input rank" || why.Contains "array-valued kernel argument") ->
+                    resultLine Pass name why; yield true
+                | other -> resultLine Fail name ($"changed={changed}, emission={other}"); yield false ]))
+
+let private partialRowsInterpreterCases () =
+    let cases =
+        [ "sum", partialRowsSrc, "[24.0, 87.0]", true
+          "ordered", partialRowsSrc.Replace("(+), 7.0", "lambda(a, b) -> a * 2.0 + b, 7.0"), "[84.0, 213.0]", true
+          "total_block_and_callee",
+              "function square_plus(v: Float64) -> Float64 = {\n    let w = v * v\n    w + 1.0\n}\n"
+              + partialRowsSrc.Replace("v * v + 1.0, (+)", "square_plus(v), (+)"), "[24.0, 87.0]", true
+          "zero_columns", partialRowsSrc.Replace("Idx<3>", "Idx<0>").Replace("[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]", "[[], []]").Replace("7.0)", "-7.25)"), "[-7.25, -7.25]", true
+          "zero_rows", partialRowsSrc.Replace("Idx<2>", "Idx<0>").Replace("[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]", "[]"), "[]", true
+          "cancellation", partialRowsSrc.Replace("[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]", "[[1e16, 1.0, -1e16], [1e16, -1e16, 1.0]]").Replace("v * v + 1.0", "v * 1.0").Replace("7.0)", "0.0)"), "[0.0, 1.0]", true
+          "negative_zero_seed", partialRowsSrc.Replace("(+), 7.0", "lambda(a, b) -> a, -0.0"), "[-0.0, -0.0]", true
+          "paired_failure", partialRowsFailureSrc, "late_producer_failure", false
+          "producer_before_row_seed", partialRowsSeedFailureSrc, "late_producer_failure", false ]
+    [ for suffix, src, expected, admitted in cases do
+        let name = $"partial_rows_interp_on_off_{suffix}"
+        yield withPartialRows (fun () ->
+            let run gate = withGate "BLADE_FUSION" gate (fun () ->
+                match lower src with
+                | Error e -> Error e
+                | Ok ir ->
+                    match IRValidate.validateIR ir with
+                    | Error es -> Error (String.concat "; " es)
+                    | Ok ir ->
+                        let routed = ir.Modules |> List.exists (fun m -> m.Functions |> List.exists (fun f -> f.Name.Contains "__partial_rows_"))
+                        Ok (routed, Blade.Interp.Run.runProgram ir name Blade.Interp.Value.defaultLimits))
+            match run "on", run "0" with
+            | Ok (route, on), Ok (false, off) when route = admitted && on.ExitCode = off.ExitCode
+                                                   && on.Stdout = off.Stdout && on.Stderr = off.Stderr ->
+                let output = on.Stdout + on.Stderr
+                let good =
+                    if admitted then on.ExitCode = 0 && output.Contains ($"rows = {expected}")
+                    else on.ExitCode <> 0 && output.Contains "BL8013" && output.Contains expected
+                         && not (output.Contains "early_fold_failure")
+                if good then resultLine Pass name "actual route/refusal agrees with original IR and independent result/failure pin"; true
+                else resultLine Fail name output; false
+            | a, b -> resultLine Fail name ($"ON={a}; OFF={b}"); false) ]
+
+let private partialRowsRefusals () =
+    let named = partialRowsNamedSrc
+    let cases =
+        [ "named_printed_keyed", named
+          "named_deferred", named.Replace(" |> compute", "").Replace("\nlet sample = P(1, 2)", "")
+          "producer_capture", "let bias = 1.0\n" + partialRowsSrc.Replace("v * v + 1.0", "v * v + bias")
+          "fold_capture", "let bias = 1.0\n" + partialRowsSrc.Replace("(+), 7.0", "lambda(a, b) -> a + b + bias, 7.0")
+          "may_fail_producer", partialRowsSrc.Replace("v * v + 1.0", "lgamma(v)")
+          "may_fail_fold", partialRowsSrc.Replace("(+), 7.0", "lambda(a, b) -> a + lgamma(b), 7.0")
+          "nonliteral_seed", "let seed = 7.0\n" + partialRowsSrc.Replace("7.0)", "seed)")
+          "may_fail_seed", "function risky_seed() -> Float64 = {\n    let z = 0\n    Float64(1 / z)\n}\n"
+              + partialRowsSrc.Replace("7.0)", "risky_seed())")
+          "parallel_producer", partialRowsSrc.Replace("lambda(v: Float64) ->", "lambda(v: Float64) where omp ->")
+          "parallel_fold", partialRowsSrc.Replace("(+), 7.0", "lambda(a, b) where comm(a, b), omp -> a + b, 7.0")
+          "private_alias_observer", partialRowsSrc.Replace("let rows = reduce(method_for(M) <@> lambda(v: Float64) -> v * v + 1.0, (+), 7.0)",
+              "let rows = {\n    let P = method_for(M) <@> lambda(v: Float64) -> v * v + 1.0\n    let alias = P\n    let sample = alias(0, 0)\n    reduce(P, (+), 7.0)\n}")
+          "hidden_writer", partialRowsSrc.Replace("let M:",
+              "function bump(a: mut Array<Float64 like R, C>) -> Float64 = {\n    a(0, 0) += 1.0\n    a(0, 0)\n}\nlet mut M:")
+              .Replace("v * v + 1.0", "{ let changed = bump(M)\n v + changed }")
+          "paired_failure", partialRowsFailureSrc ]
+    [ for suffix, src in cases do
+        let name = $"partial_rows_declines_{suffix}"
+        yield withPartialRows (fun () ->
+            decisionCase name src "partial-row-fold" (fun d -> match d.Outcome with Blade.Effects.Declined _ -> true | _ -> false)
+                "materialized route retained")
+      for suffix, key, value in [ "optimizer_off", "BLADE_FUSION", "0"; "licensed_graph", "BLADE_FP_REPRO", "0" ] do
+        let name = $"partial_rows_declines_{suffix}"
+        yield withPartialRows (fun () -> withGate key value (fun () ->
+            decisionCase name partialRowsSrc "partial-row-fold" (fun d -> match d.Outcome with Blade.Effects.Declined _ -> true | _ -> false)
+                "the gate preserves the original route"))
+      yield withPartialRows (fun () ->
+          let name = "partial_rows_demanded_control_keeps_P_allocation_print_and_keyed_read"
+          match cppOfSource name named with
+          | Error e -> resultLine Fail name e; false
+          | Ok cpp -> checkAll name cpp "demanded P remains a materialized observable output"
+                          [ "P allocation", cpp.Contains "promote<double, 2>::type, nullptr>(P_extents)"
+                            "P print", cpp.Contains "\"P = [\""
+                            "no partial terminal route", not (cpp.Contains "__partial_rows_") ]) ]
+
+/// Explicit IR payload probes isolate references source sugar can erase.
+/// No backend evaluates these deliberately altered refusal candidates.
+let private partialRowsHiddenPayloads () =
+    withPartialRows (fun () ->
+        match withGate "BLADE_FUSION" "0" (fun () -> lower partialRowsSrc) with
+        | Error e -> resultLine Fail "partial_rows_hidden_payload_setup" e; [false]
+        | Ok ir ->
+            let m = ir.Modules.Head
+            let host = m.Bindings |> List.find (fun b -> b.Name = "rows")
+            match host.Value with
+            | Blade.IR.IRLet (pid, Blade.IR.IRApplyCombinator producer, body) ->
+                let source = m.Bindings |> List.find (fun b -> b.Name = "M")
+                let sourceAt = match source.Type with Blade.IR.ArrayElem a -> a | _ -> failwith "M is no array"
+                let kernelId = match producer.Kernel with Blade.IR.IRVar (id, _) -> id | _ -> failwith "map has no callable"
+                let kernel = m.Functions |> List.find (fun f -> f.Id = kernelId)
+                let hiddenIx = { sourceAt.IndexTypes.Head with Extent = Blade.IR.IRExtent (Blade.IR.IRVar (pid, producer.OutputType), 0) }
+                let typeDemand = { m with Types = m.Types @ [ Blade.IR.IRTDIndexType ("HiddenDemand", hiddenIx) ] }
+                let capture: Blade.IR.CaptureInfo = { Id = pid; Name = "hidden"; Type = producer.OutputType; IsMutable = false }
+                let captureDemand = { m with Functions = m.Functions @ [ { kernel with Id = 990007; Name = "hidden_capture"; Captures = [capture] } ] }
+                let unknownCall =
+                    Blade.IR.IRApp (Blade.IR.IRVar (990009, Blade.IR.mkFuncArrow [Blade.Types.IRTScalar Blade.Types.ETFloat64] kernel.RetType),
+                                    [ Blade.IR.IRVar (kernel.Params.Head.VarId, kernel.Params.Head.Type) ], kernel.RetType)
+                let unknown = { m with Functions = m.Functions |> List.map (fun f -> if f.Id = kernelId then { f with Body = unknownCall } else f) }
+                let structuredAt = { sourceAt with IndexTypes = [ { sourceAt.IndexTypes.Head with IxKind = Blade.Types.IxKRagged }; sourceAt.IndexTypes.[1] ] }
+                let structuredValue =
+                    Blade.IR.mapIRExpr (function
+                        | Blade.IR.IRVar (id, _) when id = source.Id -> Blade.IR.IRVar (id, Blade.IR.mkArrayLike structuredAt)
+                        | e -> e) host.Value
+                let structured = { m with Bindings = m.Bindings |> List.map (fun b -> if b.Id = host.Id then { b with Value = structuredValue } else b) }
+                // Even reference-equal expression trees in OTHER bindings
+                // remain demands; only the actual host may be subtracted.
+                let sharedExpression = { m with Bindings = m.Bindings @ [ { host with Id = 990010; Name = "other_host" } ] }
+                let hiddenMapMetadata =
+                    let at = { producer.ArrayTypes.Head with IndexTypes = [hiddenIx; sourceAt.IndexTypes.[1]] }
+                    let value = Blade.IR.IRLet (pid, Blade.IR.IRApplyCombinator { producer with ArrayTypes = [at] }, body)
+                    { m with Bindings = m.Bindings |> List.map (fun b -> if b.Id = host.Id then { b with Value = value } else b) }
+                let alteredProducer change =
+                    let value = Blade.IR.IRLet (pid, Blade.IR.IRApplyCombinator (change producer), body)
+                    { m with Bindings = m.Bindings |> List.map (fun b -> if b.Id = host.Id then { b with Value = value } else b) }
+                let sharedAxis = alteredProducer (fun p -> { p with SharedIndexTypes = [hiddenIx] })
+                let kernelAxis = alteredProducer (fun p -> { p with KernelTDims = [hiddenIx] })
+                let methodAxis = alteredProducer (fun p ->
+                    match p.Loop with
+                    | Blade.IR.IRMethodFor mf -> { p with Loop = Blade.IR.IRMethodFor { mf with SharedIndexTypes = [hiddenIx] } }
+                    | _ -> failwith "map has no method_for")
+                let hostSidePayload = { m with SparseInits = m.SparseInits.Add(host.Id, Blade.IR.IRLit (Blade.IR.IRLitFloat 1.0)) }
+                let witnesses: (string * Blade.IR.IRModule) list =
+                    [ ("declared_type", typeDemand);
+                      ("callable_capture", captureDemand);
+                      ("unknown_callee", unknown);
+                      ("structured_source", structured);
+                      ("other_binding_shared_expression", sharedExpression);
+                      ("apply_metadata", hiddenMapMetadata);
+                      ("shared_axis", sharedAxis);
+                      ("kernel_axis", kernelAxis);
+                      ("method_for_axis", methodAxis);
+                      ("host_execution_payload", hostSidePayload) ]
+                [ for suffix, md in witnesses do
+                    let name = $"partial_rows_hidden_payload_{suffix}_retains_private_store"
+                    Blade.Effects.Decisions.start ()
+                    let kept = Optimize.fusePartialRowTerminalsModule (Blade.IR.IRBuilder ()) md.Functions md
+                    let decisions = Blade.Effects.Decisions.drain ()
+                    let stillPrivate =
+                        match (kept.Bindings |> List.find (fun b -> b.Id = host.Id)).Value with
+                        | Blade.IR.IRLet (id, _, _) -> id = pid
+                        | _ -> false
+                    let declined = decisions |> List.exists (fun d -> d.Rule = "partial-row-fold" && not (applied d))
+                    if stillPrivate && declined then resultLine Pass name "the complete census/legality proof refuses the altered payload"; yield true
+                    else resultLine Fail name "a hidden demand or unsupported callable/renderer was admitted"; yield false ]
+            | _ -> resultLine Fail "partial_rows_hidden_payload_setup" "the unoptimized scoped producer shape changed"; [false])
+
 let private selectedTerminalLlvm () =
     let name = "selected_terminal_llvm_real_route_no_selection_allocations"
     withSelectedTerminal (fun () ->
@@ -5809,6 +6218,15 @@ let runOptimizeTests () =
           selectedTerminalDeclaredIndexPayload ()
           yield! selectedTerminalRefusals ()
           yield! selectedTerminalInterpreterCases ()
+          // PM10 private rank-2 map -> seeded row terminal.
+          partialRowsEmission ()
+          yield! partialRowsLlvm ()
+          partialRowsMetadata ()
+          yield! partialRowsRefusals ()
+          yield! partialRowsInterpreterCases ()
+          yield! partialRowsHiddenPayloads ()
+          yield! partialRowsLlvmInputBoundary ()
+          yield! partialRowsLlvmMalformedPeel ()
           // Compaction fusion v2 (round 3 item T4: the gather at the mask
           // site, positions elided under the demand census).
           compactionV2DefaultElides ()

@@ -1507,7 +1507,183 @@ let compoundOutputSubscript (bindings: LoopIndexBinding list) (outName: string) 
         | [tb] -> $".data[{cb.IndexName} * {outName}.trailing_stride + {tb.IndexName}]"
         | tbs -> $""".data[{cb.IndexName} * {outName}.trailing_stride + {(tbs |> List.map (fun b -> b.IndexName) |> String.concat " + ")}]"""
 
-let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: LoopNestCodeGen) (outerNames: Map<int, string>) (indent: int) : string list =
+/// A segment caller owns these windows; no global Array alias exists. The
+/// certificate is tied to the final kernel and exact scalar peel sites.
+type internal Rank1WindowReads = private {
+    Kernel: IRExpr
+    Bindings: LoopIndexBinding list
+    Reads: (IRExpr * IRExpr * int64 * string) list
+    Peels: (ElementBinding * string) list
+}
+
+/// Pure, complete admission before any source sentinel is masked or rendered.
+/// The closed scalar grammar also refuses array escapes and hidden side forms.
+let internal certifyRank1WindowReads (cg: LoopNestCodeGen) (kind: string)
+                                    (sources: (IRId * string * ProviderReadSpec * string) list)
+                                    (reachLo: int64) (reachHi: int64) (start: int64)
+                                    (sideTypes: IRType list) : Result<Rank1WindowReads, string> =
+    let scalar ty =
+        let rec go = function
+            | IRTScalar (ETFloat64 | ETFloat32 | ETInt64 | ETInt32 | ETBool) -> true
+            | IRTIdxTagged (t, _) | IRTUnitAnnotated (t, _) -> go t
+            | _ -> false
+        go ty
+    let literal = function IRLit (IRLitInt n) -> n >= 0L | _ -> false
+    // Only passive scalar/plain-index types: no dependent/sparse/ragged side
+    // tables or hidden executable extents. Identities/tags are provenance.
+    let rec passiveType = function
+        | IRTScalar _ -> true
+        | IRTUnitAnnotated (t, _) -> passiveType t
+        | IRTIdxTagged (t, tag) ->
+            passiveType t && (match tag with IRefAnon (_, e) -> literal e | _ -> true)
+        | IRTArrow (slots, result, _) ->
+            passiveType result && (slots |> List.forall (function
+                | SIdx ix | SIdxVirt ix ->
+                    ix.Rank = 1 && ix.Symmetry = SymNone && ix.IxKind = IxKPlain
+                    && ix.Dependencies.IsEmpty && literal ix.Extent
+                | SVal _ -> false))
+        | _ -> false
+    let literalExtents ty =
+        passiveType ty && (Blade.Optimize.irTypeExtentExprs ty |> List.forall literal)
+    let sourceIds = sources |> List.map (fun (id, _, _, _) -> id) |> Set.ofList
+    let mutable reads = []
+    let mutable peels = []
+    let mutable why = None
+    let refuse msg = if why.IsNone then why <- Some msg
+    let types = sideTypes @ [cg.OutputType] @ (cg.KernelParams |> List.map (_.Type))
+                @ (cg.Captures |> List.map (_.Type))
+                @ (sources |> List.map (fun (_, _, s, _) -> mkArrayLike s.VarType))
+    if types |> List.exists (literalExtents >> not) then refuse "nonliteral type/extent payload"
+    if cg.HasReynolds || cg.FoldWrapper.IsSome || cg.FoldChunk.IsSome || cg.ShareDecl.IsSome then
+        refuse "Reynolds, fold or shared-value form"
+    match cg.OutputType with
+    | ArrayElem at when arrayRank at = 1 && scalar at.ElemType
+                        && isFreeableDenseArrayType at && not at.IsVirtual -> ()
+    | _ -> refuse "requires a dense rank-one scalar-cell output"
+    let level =
+        match cg.Bindings with
+        | [b] when b.FusedRank.IsNone && b.BoundDependencies.IsEmpty && b.StrictOffset = 0
+                   && b.Level = 0 && b.ExtentDimRef = 0 ->
+            if not (b.Elements |> List.forall (fun e -> scalar e.ArrayElemType && literalExtents e.ArrayElemType)) then
+                refuse "unsupported operand element type"
+            match sources with
+            | (_, _, s, _) :: _ ->
+                match s.VarType.IndexTypes with
+                | [ix] ->
+                    match ix.Extent, b.Extent with
+                    | IRLit (IRLitInt n), IRLit (IRLitInt m)
+                        when bigint m = bigint n - (bigint reachHi - bigint reachLo) && m >= 0L -> ()
+                    | _ -> refuse "loop extent disagrees with the certified window geometry"
+                | _ -> refuse "unsupported source rank"
+            | [] -> refuse "no rank-one source evidence"
+            Some b
+        | _ -> refuse "requires one unshifted dense loop level"; None
+    for c in cg.Captures do
+        // A normal `let A` may be reassignable in its enclosing scope. Its
+        // capture descriptor is allowed ONLY because the complete body proof
+        // below consumes every A occurrence as a read, never forwards/writes it.
+        if not (sourceIds.Contains c.Id) && (c.IsMutable || not (scalar c.Type)) then
+            refuse "unsupported mutable/array capture"
+    for (_, vn, spec, win) in sources do
+        if spec.VarType.IsVirtual then refuse "virtual source storage is not certified"
+        match spec.VarType.IndexTypes with
+        | [ix] when ix.Rank = 1 && ix.Symmetry = SymNone && ix.IxKind = IxKPlain
+                    && ix.Dependencies.IsEmpty && scalar spec.VarType.ElemType ->
+            match ix.Extent with
+            | IRLit (IRLitInt n) when n >= 0L -> ()
+            | _ -> refuse "requires a checked static source extent"
+        | _ -> refuse "requires plain dense rank-one source storage"
+        match kind, level with
+        | "elementwise", Some b ->
+            let sites = b.Elements |> List.filter (fun e -> e.ArrayName = vn)
+            if sites.IsEmpty then refuse "streamed operand has no scalar peel"
+            for e in sites do
+                if e.Virtual <> RealArray || e.ArrayRank <> 1 || e.RankComponent <> 0 || e.DimIndex <> 0 then
+                    refuse "unsupported streamed operand peel"
+                else peels <- (e, win) :: peels
+        | "stencil", Some b ->
+            match b.Elements, cg.KernelParams with
+            | [e], [p] when e.ParamVarId = p.VarId ->
+                match e.Virtual with
+                | VirtualRange (Some (IRLit (IRLitInt s))) when s = start -> ()
+                | VirtualRange None when start = 0L -> ()
+                | _ -> refuse "unsupported halo center binding"
+            | _ -> refuse "requires one dense halo window parameter"
+        | _ -> refuse "unsupported rank-one segment form"
+    // Bounds/offsets are kept as Int64. IRAccess.Offset's int conversion is
+    // deliberately NOT used as evidence for a potentially huge literal.
+    let signedOffset = function
+        | IRLit (IRLitInt n) -> Some n
+        | IRUnaryOp (IRNeg, IRLit (IRLitInt n)) when n <> System.Int64.MinValue -> Some (-n)
+        | _ -> None
+    let windowMatches w =
+        match level, cg.KernelParams with
+        | Some b, [p] ->
+            let sameParam =
+                match w with
+                | IRVar (id, _) -> id = p.VarId
+                | IRParam (nm, idx, _) -> nm = p.Name && idx = p.Index
+                | _ -> false
+            sameParam && Blade.IRAccess.denseHaloTagOf w = (b.Elements |> List.tryHead |> Option.bind (_.SlotTag))
+            && (Blade.IRAccess.denseHaloTagOf w).IsSome
+        | _ -> false
+    let rec body (ids: Set<IRId>) (paramNames: Set<string>) (visiting: Set<IRId>) e =
+        let go = body ids paramNames visiting
+        match e with
+        | IRLit (IRLitInt _ | IRLitFloat _ | IRLitFloat32 _ | IRLitBool _) -> true
+        | IRVar (id, ty) -> ids.Contains id && not (sourceIds.Contains id) && scalar ty && literalExtents ty
+        | IRParam (nm, _, ty) -> paramNames.Contains nm && scalar ty && literalExtents ty
+        | IRBinOp (IRElementwise, _, a, b, _) -> go a && go b
+        | IRUnaryOp (_, a) -> go a
+        | IRIf (c, a, b) -> go c && go a && go b
+        | IRLet (id, v, b) -> go v && body (ids.Add id) paramNames visiting b
+        | IRIndex (IRVar (aid, ty), [IRBinOp (IRElementwise, IRAdd, w, off, _)], _)
+            when kind = "stencil" && sourceIds.Contains aid && windowMatches w && literalExtents ty ->
+            match signedOffset off, sources |> List.tryFind (fun (id, _, _, _) -> id = aid) with
+            | Some o, Some (_, _, _, win) when o >= reachLo && o <= reachHi ->
+                reads <- (e, w, o, win) :: reads
+                true
+            | _ -> false
+        | IRApp (f, args, ret) when scalar ret && literalExtents ret ->
+            match resolveCallable f with
+            | Some cl when cl.Captures.IsEmpty && not (visiting.Contains cl.Id)
+                           && cl.Params.Length = args.Length && scalar cl.RetType && literalExtents cl.RetType
+                           && (cl.Params |> List.forall (fun p -> scalar p.Type && literalExtents p.Type))
+                           && (Blade.Optimize.embeddedExtentExprs cl.Body |> List.forall literal) ->
+                (args |> List.forall go)
+                && body (cl.Params |> List.map (_.VarId) |> Set.ofList)
+                        (cl.Params |> List.map (_.Name) |> Set.ofList) (visiting.Add cl.Id) cl.Body
+            | _ -> false
+        | _ -> false
+    let ids = (cg.KernelParams |> List.map (_.VarId)) @ (cg.Captures |> List.map (_.Id)) |> Set.ofList
+    let names = cg.KernelParams |> List.map (_.Name) |> Set.ofList
+    if not (body ids names Set.empty cg.KernelExpr) then
+        refuse "uncertified source read, escape, callee or scalar expression"
+    // Callee bodies cannot consume this caller's reference-keyed substitutions.
+    // Only capture-free scalar callees were accepted above; require all halo
+    // recipes to belong to the final rendered tree, not a callee body.
+    let nodes = ResizeArray<IRExpr>()
+    iterIRExpr (fun node -> nodes.Add node) cg.KernelExpr
+    if reads |> List.exists (fun (node, _, _, _) -> not (nodes |> Seq.exists (fun n -> obj.ReferenceEquals(n, node)))) then
+        refuse "a callee contains a streamed load"
+    let extentRoots = Blade.Optimize.embeddedExtentExprs cg.KernelExpr
+    if extentRoots |> List.exists (function IRLit (IRLitInt n) when n >= 0L -> false | _ -> true) then
+        refuse "nonliteral embedded type/extent payload"
+    if kind = "stencil" && reads.IsEmpty then refuse "no certified halo loads"
+    match why with
+    | Some msg -> Error msg
+    | None -> Ok { Kernel = cg.KernelExpr; Bindings = cg.Bindings; Reads = reads; Peels = peels }
+
+let private genLoopNestStreamedCore (windowReads: Rank1WindowReads option)
+                                   (streamed: Map<string, ProviderReadSpec>) (codeGen: LoopNestCodeGen)
+                                   (outerNames: Map<int, string>) (indent: int) : string list =
+    match windowReads with
+    | Some p when not (obj.ReferenceEquals(p.Kernel, codeGen.KernelExpr))
+                  || not codeGen.MpiSlab
+                  || p.Bindings.Length <> codeGen.Bindings.Length
+                  || not (List.forall2 (fun a b -> obj.ReferenceEquals(a, b)) p.Bindings codeGen.Bindings) ->
+        invalidOp "rank-one window certificate belongs to a different kernel"
+    | _ -> ()
     let ind n = String.replicate n "    "
     let mutable lines = []
     let mutable depth = indent
@@ -2089,7 +2265,12 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
                     Map.tryFind elem.ArrayPosition currentNames
                     |> Option.defaultValue elem.ArrayName
                 let rawRow = Set.contains (levelIdx, elem.ArrayPosition) restrictSites
-                let (code, newName) = genElementBindingPeel rawRow binding elem currentName
+                let (code, newName) =
+                    match windowReads |> Option.bind (fun p -> p.Peels |> List.tryFind (fun (e, _) -> obj.ReferenceEquals(e, elem))) with
+                    | Some (_, win) ->
+                        let newName = $"{currentName}__{binding.IndexName}"
+                        ($"{(elemTypeToCpp elem.ArrayElemType)} {newName} = {win}[static_cast<size_t>(static_cast<int64_t>({binding.IndexName}) - static_cast<int64_t>(__w_lo))];", newName)
+                    | None -> genElementBindingPeel rawRow binding elem currentName
                 if Map.tryFind newName declaredNames <> Some code then
                     lines <- lines @ [ind depth + code]
                 declaredNames <- Map.add newName code declaredNames
@@ -2147,7 +2328,15 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     // rendered array-literal body left a spurious `#error` behind in an
     // otherwise perfectly good program.
     let reynoldsResult =
-        lazy (genKernelExprWithReynolds codeGen.KernelExpr codeGen.KernelParams codeGen.HasReynolds codeGen.IsAntisymmetric nameMap paramFinalNames)
+        lazy (
+            match windowReads with
+            | Some p ->
+                let subst =
+                    p.Reads |> List.map (fun (node, w, offset, win) ->
+                        let center = exprToCpp nameMap w
+                        node, $"{win}[static_cast<size_t>((static_cast<int64_t>({center}) + ({offset}LL)) - static_cast<int64_t>(__w_lo))]")
+                { CppExpr = exprToCppWithSubst subst nameMap codeGen.KernelExpr; TotalPerms = 1; UniqueTerms = 1 }
+            | None -> genKernelExprWithReynolds codeGen.KernelExpr codeGen.KernelParams codeGen.HasReynolds codeGen.IsAntisymmetric nameMap paramFinalNames)
     if codeGen.HasReynolds && reynoldsResult.Value.UniqueTerms < reynoldsResult.Value.TotalPerms then
         lines <- lines @ [ind depth + $"// Reynolds: {reynoldsResult.Value.UniqueTerms}/{reynoldsResult.Value.TotalPerms} perms unique (dedup {reynoldsResult.Value.TotalPerms / max 1 reynoldsResult.Value.UniqueTerms}x)"]
     // When the output row was hoisted, the write goes through the
@@ -2425,6 +2614,14 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
 /// The ordinary (no streamed sources) nest emitter -- every existing call
 /// site goes through here; only genApplyCombinator's provider-aware paths
 /// use genLoopNestStreamed directly.
+let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: LoopNestCodeGen) (outerNames: Map<int, string>) (indent: int) : string list =
+    genLoopNestStreamedCore None streamed codeGen outerNames indent
+
+/// Only the segment caller that certified the final body/peels supplies this.
+let internal genLoopNestWindowed (plan: Rank1WindowReads) (streamed: Map<string, ProviderReadSpec>)
+                                (codeGen: LoopNestCodeGen) (outerNames: Map<int, string>) (indent: int) : string list =
+    genLoopNestStreamedCore (Some plan) streamed codeGen outerNames indent
+
 let genLoopNest (codeGen: LoopNestCodeGen) (outerNames: Map<int, string>) (indent: int) : string list =
     genLoopNestStreamed Map.empty codeGen outerNames indent
 

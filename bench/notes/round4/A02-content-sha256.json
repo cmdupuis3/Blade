@@ -1,0 +1,9 @@
+{
+  "bench/notes/round4/A02-census.md": "e0ccb14fdf38f626cbdfc14a74779b6c33b6408cce940ce8750b154f273d68bb",
+  "bench/notes/round4/A02-runner-request.md": "59de23ae2de5860dde8ae58d81cfb75956ebca1b6890c4d0a5803d381386410e",
+  "tests/corpus/memfree/027_pm01_barrier_chain_three.blade": "b2b539277349db7504fe39a1b39d93230df021296f42b902546ad04acb5e9fa7",
+  "tests/corpus/memfree/028_pm01_barrier_chain_five.blade": "efd7c8e264f18a61db69bf0427cea2c051dc2e147d53f72534f26aba3026e0b9",
+  "tests/corpus/memfree/029_pm01_barrier_retained_alias.blade": "b707cda9fea7ac4f68f23cb34030400971dca6d2be57a0c24a43c17c1f6bfe26",
+  "tests/corpus/memfree/030_pm01_existing_array_return_reuse.blade": "d7ff61eb6c1b84328f2b33d454b331a55bfa04a77daa5aa37a971cca6a349594",
+  "tests/corpus/memfree/031_pm01_inline_region_refuses_reuse.blade": "0300c9c1f400d518ffcc08c7490788a08e311d0c0a83e194c24f78781e04ef8e"
+}

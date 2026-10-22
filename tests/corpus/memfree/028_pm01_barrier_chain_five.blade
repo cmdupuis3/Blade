@@ -1,0 +1,24 @@
+// TEST: PM01 five-stage barrier chain keeps final array and every scalar
+// Longer odd-extent control. All observations remain required at the caller.
+type Ix = Idx<11>
+function barrier_five(x: Array<Float64 like Ix>) -> (Array<Float64 like Ix>, Float64, Float64, Float64, Float64, Float64) = {
+    let p = x + 1.0 |> compute
+    let s1 = reduce(p, (+))
+    let q = p + s1 |> compute
+    let s2 = reduce(q, (+))
+    let r = q + s2 |> compute
+    let s3 = reduce(r, (+))
+    let u = r + s3 |> compute
+    let s4 = reduce(u, (+))
+    let v = u + s4 |> compute
+    let s5 = reduce(v, (+))
+    (v, s1, s2, s3, s4, s5)
+}
+let x: Array<Float64 like Ix> = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
+let (final, s1, s2, s3, s4, s5) = barrier_five(x)
+// EXPECT: final = [124411.0, 124412.0, 124413.0, 124414.0, 124415.0, 124416.0, 124417.0, 124418.0, 124419.0, 124420.0, 124421.0]
+// EXPECT: s1 = 66.0
+// EXPECT: s2 = 792.0
+// EXPECT: s3 = 9504.0
+// EXPECT: s4 = 114048.0
+// EXPECT: s5 = 1368576.0

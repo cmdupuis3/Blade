@@ -18,6 +18,26 @@ open Blade.CodeGenExprSupport
 open Blade.CodeGenExpr
 open Blade.CodeGenLoopNest
 
+/// Exact maximum filled-window capacity for a uniform clipped halo traversal.
+/// Wide arithmetic precedes all narrowing; no boundary list is constructed.
+let internal uniformHaloWindowCapacity (n: int64) (edge: int64) (cMin: int64) (cMax: int64)
+                                       (rLo: int64) (rHi: int64) : Result<int64, string> =
+    let nn, kk, a, b, lo, hi = bigint n, bigint edge, bigint cMin, bigint cMax, bigint rLo, bigint rHi
+    if nn <= 0I || kk <= 0I || kk > nn then Error "invalid uniform segmentation extent/edge"
+    elif lo > 0I || hi < 0I || a <> -lo || b <> nn - hi || a < 0I || b < a || b > nn then
+        Error "invalid uniform center/window geometry"
+    else
+        let m = b - a
+        let capacity =
+            if m = 0I then 1I
+            else
+                let head = min m (kk - a % kk)
+                let rest = m - head
+                let core = if rest >= kk then kk else max head rest
+                core + hi - lo
+        if capacity > bigint System.Int64.MaxValue then Error "uniform window capacity overflows"
+        else Ok (int64 capacity)
+
 // ---------------------------------------------------------------------------
 // What a __global__ can NAME (device-body expressibility) -- section 1 of 2
 // ---------------------------------------------------------------------------
@@ -3522,10 +3542,9 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
         // axis runs one segment at a time. Per run, the halo's own reach
         // (HaloAccess.haloDemand) says which input cells the run's windows
         // touch -- the run plus its ghost cells -- and exactly those are
-        // read from the store into a window buffer; the variable's name is
-        // then bound, inside the run, to an Array whose data pointer is the
-        // window shifted back by the window's start, so the nest's GLOBAL
-        // subscripts land in the window unchanged. The nest itself is the
+        // read from the store into a window buffer. Certified rank-one
+        // source loads subtract the window origin at the access; no pointer
+        // before the allocation is ever formed. The nest itself is the
         // ordinary one with its outermost bounds rewritten to the run's
         // interior ordinals (the MpiSlab bound variables, defined per run);
         // the carousel stays off, as under any slab. Nothing of the variable
@@ -3547,6 +3566,10 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                 Map.tryFind aid ctx.VarNames
                 |> Option.bind (fun vn -> Map.tryFind vn ctx.StreamedArrays |> Option.map (fun s -> (vn, s)))
             | _ -> None
+        let windowRefusal why =
+            raise (Blade.Diagnostics.BladeDiagnosticException
+                (Blade.Diagnostics.Codes.backendLimit (decisionSpan ())
+                    ($"rank-one streamed window addressing: {why}; use .read or a supported static scalar halo/elementwise map")))
         let segmentRun =
             match info.Arrays with
             | [ IRRange ([ ix ], _) ] ->
@@ -3554,8 +3577,8 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                  | Some tag ->
                      (match Blade.Types.haloAccessOfTag tag with
                       | Some h when not h.IsCompound && h.Inner <> "" ->
-                          (match Blade.Types.SegmentTable.tryFind h.Inner with
-                           | Some offsets ->
+                          (match Blade.Types.SegmentTable.tryFindRuns h.Inner with
+                           | Some registeredRuns ->
                                let reads =
                                    Blade.IRAccess.windowReadsOf
                                        (fun wv -> (Blade.IRAccess.denseHaloTagOf wv).IsSome) codeGen.KernelExpr
@@ -3567,13 +3590,32 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                                    |> List.distinctBy (fun (vn, _, _) -> vn)
                                (match streamedReads with
                                 | [ (vn, spec, 1) ] when spec.VarType.IndexTypes.Length = 1 ->
-                                    let n = (match spec.VarType.IndexTypes.[0].Extent with IRLit (IRLitInt n) -> n | _ -> List.last offsets)
+                                    let n = (match spec.VarType.IndexTypes.[0].Extent with IRLit (IRLitInt n) when n >= 0L -> n | _ -> windowRefusal "requires a static nonnegative source extent")
                                     let reach = Blade.Types.haloReach h
-                                    Some (offsets, h.Start, n - (h.Shrink - h.Start), int64 (List.min reach), int64 (List.max reach), h.Start, [ (vn, spec) ], "stencil")
-                                | [] -> None
+                                    // haloAccessOf uses int arithmetic; verify its
+                                    // result against wide arithmetic before using it.
+                                    let lo, hi = int64 (List.min reach), int64 (List.max reach)
+                                    if bigint h.Start <> -(bigint lo) || bigint h.Shrink <> bigint hi - bigint lo
+                                       || bigint n - (bigint h.Shrink - bigint h.Start) < 0I then
+                                        windowRefusal "invalid or overflowing halo geometry"
+                                    let runs =
+                                        match registeredRuns with
+                                        | SegmentTable.UniformRuns _ when spec.Provider = "zarr" && spec.Streamed
+                                                                            && not spec.AllowMissing && spec.Window.IsNone
+                                                                            && spec.MaskName.IsNone && spec.MaskType.IsNone -> registeredRuns
+                                        | other -> SegmentTable.ExplicitRuns (SegmentTable.toExplicitOffsets other)
+                                    Some (runs, h.Start, n - (h.Shrink - h.Start), lo, hi, h.Start, [ (vn, spec) ], "stencil")
+                                | [] ->
+                                    let hiddenRank1 =
+                                        ((collectVarRefsIR codeGen.KernelExpr |> Set.toList) @ (codeGen.Captures |> List.map (_.Id)))
+                                        |> List.exists (fun id ->
+                                            Map.tryFind id ctx.VarNames
+                                            |> Option.bind (fun vn -> Map.tryFind vn ctx.StreamedArrays)
+                                            |> Option.exists (fun s -> s.VarType.IndexTypes.Length = 1))
+                                    if hiddenRank1 then windowRefusal "halo source reads are hidden or unsupported"
+                                    None
                                 | _ ->
-                                    raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan
-                                        "a stencil over segments streams ONE rank-1 variable through the window; bind the others with .read")))
+                                    windowRefusal "a stencil over segments streams ONE rank-1 variable through the window; bind the others with .read")
                            | None -> None)
                       | _ -> None)
                  | None -> None)
@@ -3596,28 +3638,121 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                     raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan
                         "an elementwise consumer streams rank-1 and rank-2 variables today; bind a higher-rank streamed variable with .read"))
                 | (_, s0) :: _ ->
-                    let n = (match s0.VarType.IndexTypes.[0].Extent with IRLit (IRLitInt n) -> n | _ -> 0L)
+                    let n =
+                        match s0.VarType.IndexTypes.[0].Extent with
+                        | IRLit (IRLitInt n) when n >= 0L -> n
+                        | _ when sources |> List.exists (fun (_, s) -> s.VarType.IndexTypes.Length = 1) ->
+                            windowRefusal "requires a static nonnegative source extent"
+                        | _ -> 0L
+                    if sources |> List.exists (fun (_, s) -> s.VarType.IndexTypes.Length = 1) then
+                        let maxBytes = if System.IntPtr.Size = 4 then bigint System.Int32.MaxValue else bigint System.Int64.MaxValue
+                        let bytes =
+                            match codeGen.OutputType with
+                            | ArrayElem at ->
+                                match stripUnits at.ElemType with
+                                | IRTScalar (ETFloat64 | ETInt64) -> 8I
+                                | IRTScalar (ETFloat32 | ETInt32) -> 4I
+                                | _ -> windowRefusal "unsupported output element type"
+                            | _ -> windowRefusal "requires rank-one array output"
+                        if bigint n * bytes > maxBytes then windowRefusal "output allocation capacity overflows"
                     let pspec = (Blade.ProviderRegistry.tryFind s0.Provider).Value
                     let block =
                         match pspec.StreamRowsBlock with
                         | Some f -> max 1L (f s0.FilePath s0.VarName)
                         | None -> 4096L
                     let runs = [ for b in 0L .. block .. n - 1L -> b ] @ [ n ]
-                    Some (runs, 0L, n, 0L, 0L, 0L, sources, "elementwise")
-        // inside the run each streamed source IS an array (its window alias)
+                    Some (SegmentTable.ExplicitRuns runs, 0L, n, 0L, 0L, 0L, sources, "elementwise")
+        // Certify BOTH direct halo loads and scalar operand peels before any
+        // renderer sees a materialized source name. Rank-two bands retain
+        // their row table; no rank-one unsafe-alias fallback is available.
+        let rank1WindowPlan =
+            match segmentRun with
+            | Some (runs, cMin, cMax, rLo, rHi, start, sources, kind)
+                when sources |> List.exists (fun (_, s) -> s.VarType.IndexTypes.Length = 1) ->
+                if sources |> List.exists (fun (_, s) -> s.VarType.IndexTypes.Length <> 1) then
+                    windowRefusal "mixed source ranks are not certified"
+                let n =
+                    match (snd sources.Head).VarType.IndexTypes.Head.Extent with
+                    | IRLit (IRLitInt n) when n >= 0L -> n
+                    | _ -> windowRefusal "requires a static source extent"
+                if mpiRequested || (match resolveKernel info.Kernel with
+                                    | Some rk -> rk.Callable.IsCudaKernel && cudaEmitModeEnabled ()
+                                    | None -> false) then
+                    windowRefusal "MPI/device segment emission is not certified"
+                let pointerMax = if System.IntPtr.Size = 4 then bigint System.Int32.MaxValue else bigint System.Int64.MaxValue
+                let elemBytes ty =
+                    match stripUnits ty with
+                    | IRTScalar (ETFloat64 | ETInt64) -> 8I
+                    | IRTScalar (ETFloat32 | ETInt32) -> 4I
+                    | _ -> windowRefusal "unsupported source/output element type"
+                if rLo > 0L || rHi < 0L || bigint start <> -(bigint rLo)
+                   || cMin <> start || bigint cMax <> bigint n - bigint rHi
+                   || cMax < cMin then
+                    windowRefusal "invalid center/run geometry"
+                let cells = bigint cMax - bigint start
+                let outElem =
+                    match codeGen.OutputType with
+                    | ArrayElem at when at.IndexTypes.Length = 1 && at.IndexTypes.Head.Extent = IRLit (IRLitInt (int64 cells)) -> at.ElemType
+                    | _ -> windowRefusal "requires a rank-one output with the certified extent"
+                if cells * elemBytes outElem > pointerMax then windowRefusal "output allocation capacity overflows"
+                let maxWin =
+                    match runs with
+                    | SegmentTable.UniformRuns (gridN, edge) ->
+                        if gridN <> n || kind <> "stencil" then windowRefusal "uniform segmentation extent/form disagreement"
+                        match uniformHaloWindowCapacity n edge cMin cMax rLo rHi with
+                        | Ok capacity -> bigint capacity
+                        | Error why -> windowRefusal why
+                    | SegmentTable.ExplicitRuns offsets ->
+                        if offsets.IsEmpty || offsets.Head <> 0L || List.last offsets <> n
+                           || (List.pairwise offsets |> List.exists (fun (a, b) -> a < 0L || b <= a || b > n)) then
+                            windowRefusal "invalid center/run geometry"
+                        List.pairwise offsets |> List.fold (fun capacity (lo, hi) ->
+                            let a, b = max lo cMin, min hi cMax
+                            if a >= b then capacity
+                            else
+                                let l, h = bigint a + bigint rLo, bigint b + bigint rHi
+                                if l < 0I || h > bigint n || h < l then windowRefusal "window endpoints escape the source"
+                                max capacity (h - l)) 1I
+                let certifiedSources =
+                    sources |> List.mapi (fun k (vn, spec) ->
+                        if spec.VarType.IndexTypes.Head.Extent <> IRLit (IRLitInt n)
+                           || maxWin * elemBytes spec.VarType.ElemType > pointerMax then
+                            windowRefusal "source extent disagreement or window allocation capacity overflow"
+                        if ((Blade.ProviderRegistry.tryFind spec.Provider).Value).GenStreamRows.IsNone then
+                            windowRefusal "provider does not support per-window reads"
+                        let ids = ctx.VarNames |> Map.toList |> List.choose (fun (id, nm) -> if nm = vn then Some id else None)
+                        match ids with
+                        | [id] -> (id, vn, spec, $"{name}__win{k}")
+                        | _ -> windowRefusal "ambiguous streamed source identity")
+                // Arrays are either direct operands or a dense virtual halo.
+                // Reject hidden operand work; Loop is provenance, not executed.
+                if info.Arrays |> List.exists (function
+                    | IRVar _ -> false
+                    | IRRange (_, None) | IRRange (_, Some (IRLit (IRLitInt _))) -> false
+                    | _ -> true) then
+                    windowRefusal "unsupported source operand expression"
+                let sideTypes =
+                    [info.OutputType] @ (info.ArrayTypes |> List.map mkArrayLike)
+                    @ ((info.SharedIndexTypes @ info.KernelTDims) |> List.map (fun ix -> IRTArrow ([SIdx ix], IRTScalar ETInt64, None)))
+                match certifyRank1WindowReads codeGen kind certifiedSources rLo rHi start sideTypes with
+                | Error why -> windowRefusal why
+                | Ok plan -> Some (plan, int64 maxWin)
+            | _ -> None
+        // Rank-two sources still have a row-table alias. Certified rank-one
+        // sources have only local loads and never reach a source-name renderer.
         let ctx =
             match segmentRun with
             | Some (_, _, _, _, _, _, sources, _) ->
                 sources |> List.fold (fun c (vn, _) -> { c with StreamedArrays = Map.remove vn c.StreamedArrays }) ctx
             | None -> ctx
-        // ...so its reads render by name for the rest of this emission, the
-        // same fact as the StreamedArrays removal above, for the renderers that
-        // see only a name map (CodeGenState, "STREAMED VALUES NEVER REACH
-        // C++"). Disposed when this block ends.
+        // Only rank-two row aliases render by source name. Rank-one sentinels
+        // remain active: all of their legitimate loads use the certificate.
+        // Disposed when this block ends.
         use _runAliasMask =
             maskStreamedNames
                 (match segmentRun with
-                 | Some (_, _, _, _, _, _, sources, _) -> sources |> List.map fst
+                 | Some (_, _, _, _, _, _, sources, _) ->
+                     sources |> List.choose (fun (vn, spec) -> if spec.VarType.IndexTypes.Length = 2 then Some vn else None)
                  | None -> [])
         // STREAMED provider inputs (`alias.stream`): no materialized arrays
         // exist -- the nest inlines per-fiber reads at the S/T boundary.
@@ -3899,6 +4034,8 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                 match (compactRowPendingCell ()).TryGetValue name with
                 | true, plan -> { codeGen with CompactRowEpilogue = buildCompactRowEpilogue plan codeGen tempCtx.VarNames }
                 | _ -> codeGen
+            if rank1WindowPlan.IsSome && (codeGen.RowEpilogue.IsSome || codeGen.FlatEpilogue.IsSome || codeGen.CompactRowEpilogue.IsSome) then
+                windowRefusal "scheduled epilogue emission is not certified"
             let flatEpiDeclined () =
                 match (hotRowPendingCell ()).TryGetValue name, codeGen.FlatEpilogue with
                 | (true, plan), Some _ when plan.EmittedCpp.Value.IsNone ->
@@ -3947,7 +4084,10 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                 match (if segmentRun.IsSome || tilePlan.IsSome then None
                        else tryGenFlatElementwiseNest streamedMap info.ArrayTypes codeGen tempCtx.VarNames tempCtx.Indent) with
                 | Some flat -> flat
-                | None -> genLoopNestStreamed streamedMap codeGen tempCtx.VarNames tempCtx.Indent
+                | None ->
+                    match rank1WindowPlan with
+                    | Some (plan, _) -> genLoopNestWindowed plan streamedMap codeGen tempCtx.VarNames tempCtx.Indent
+                    | None -> genLoopNestStreamed streamedMap codeGen tempCtx.VarNames tempCtx.Indent
             flatEpiDeclined ()
 
             // Per-rank slab bounds. Balanced split: q = n/P with the first
@@ -4097,7 +4237,7 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                              (tilesUsedCell ()).Value <- true
                              tileLoopLines ind plan loopCode
                          | None -> loopCode)
-                    | Some (offsets, cMin, cMax, rLo, rHi, start, sources, kind) ->
+                    | Some (runShape, cMin, cMax, rLo, rHi, start, sources, kind) ->
                         let missing =
                             sources |> List.tryFind (fun (_, s) -> ((Blade.ProviderRegistry.tryFind s.Provider).Value).GenStreamRows.IsNone)
                         match missing with
@@ -4105,21 +4245,46 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                             recordCodegenRefusal $"provider '{s.Provider}' does not support per-segment streamed reads ('{s.VarName}' -- bind with .read)"
                             loopCode
                         | None ->
-                            let g = offsets.Length - 1
-                            let table = offsets |> List.map (fun b -> $"{b}UL") |> String.concat ", "
+                            let runExtent =
+                                match runShape with
+                                | SegmentTable.UniformRuns (n, _) -> n
+                                | SegmentTable.ExplicitRuns offsets -> List.last offsets
                             let maxWin =
-                                List.pairwise offsets
-                                |> List.map (fun (lo, hi) -> (min hi cMax) - (max lo cMin) + (rHi - rLo))
-                                |> List.fold max 1L
+                                match rank1WindowPlan with
+                                | Some (_, capacity) -> capacity
+                                | None ->
+                                    match runShape with
+                                    | SegmentTable.ExplicitRuns offsets ->
+                                        List.pairwise offsets
+                                        |> List.map (fun (lo, hi) -> (min hi cMax) - (max lo cMin) + (rHi - rLo))
+                                        |> List.fold max 1L
+                                    | SegmentTable.UniformRuns _ -> windowRefusal "uniform cursor lacks a rank-one read certificate"
                             // scratch names are per OUTPUT and per source: two
                             // consumers may share one source, one zip may hold two
                             let runs = $"{name}__runs"
+                            let runDecl, runOpen, rawLo, rawHi =
+                                match runShape with
+                                | SegmentTable.UniformRuns (n, edge) ->
+                                    ([ $"{ind}// uniform-zarr-halo-cursor: compact grid N={n}, K={edge}; no boundary table" ],
+                                     [ $$"""{{ind}}for (size_t __run_next = 0; __run_next < {{n}}UL; ) {""";
+                                       $"{ind}    const size_t __run_lo = __run_next;";
+                                       $"{ind}    const size_t __run_remaining = {n}UL - __run_lo;";
+                                       $"{ind}    const size_t __run_step = {edge}UL < __run_remaining ? {edge}UL : __run_remaining;";
+                                       $"{ind}    const size_t __run_hi = __run_lo + __run_step;";
+                                       $"{ind}    __run_next = __run_hi; // advance before an empty-center continue" ],
+                                     "__run_lo", "__run_hi")
+                                | SegmentTable.ExplicitRuns offsets ->
+                                    let g = offsets.Length - 1
+                                    let table = offsets |> List.map (fun b -> $"{b}UL") |> String.concat ", "
+                                    ([ $"{ind}const size_t {runs}[{g + 1}] = {{ {table} }};" ],
+                                     [ $$"""{{ind}}for (size_t __seg = 0; __seg < {{g}}; __seg++) {""" ],
+                                     $"{runs}[__seg]", $"{runs}[__seg + 1]")
                             let windows =
                                 sources |> List.mapi (fun k (vn, spec) ->
                                     let genRows = ((Blade.ProviderRegistry.tryFind spec.Provider).Value).GenStreamRows.Value
                                     let elemCpp = elemTypeToCpp spec.VarType.ElemType
                                     let extents =
-                                        spec.VarType.IndexTypes |> List.map (fun ix -> match ix.Extent with IRLit (IRLitInt n) -> n | _ -> List.last offsets)
+                                        spec.VarType.IndexTypes |> List.map (fun ix -> match ix.Extent with IRLit (IRLitInt n) -> n | _ -> runExtent)
                                     let n = extents.Head
                                     let trailing = extents |> List.tail |> List.fold (*) 1L
                                     let rank = extents.Length
@@ -4128,13 +4293,15 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                                     let rows = $"{name}__rows{k}"
                                     let extTable = extents |> List.map (fun e -> $"{e}UL") |> String.concat ", "
                                     let decl =
-                                        [ $"{ind}size_t {ext}[{rank}] = {{ {extTable} }};"
-                                          $"{ind}{elemCpp}* {win} = new {elemCpp}[{maxWin * trailing}];" ]
+                                        (if rank = 2 then [ $"{ind}size_t {ext}[{rank}] = {{ {extTable} }};" ] else [])
+                                        @ [ $"{ind}{elemCpp}* {win} = new {elemCpp}[{maxWin * trailing}];" ]
                                         @ (if rank = 2 then [ $"{ind}{elemCpp}** {rows} = new {elemCpp}*[{n}]();" ] else [])
                                     let alias =
                                         if rank = 1 then
-                                            // the window shifted back by its start: global subscripts land inside it
-                                            [ $"{ind}    Array<{elemCpp}, 1> {vn} = {{ {win} - __w_lo, {ext} }};" ]
+                                            // All uses were certified before rendering; loads
+                                            // use an in-allocation local offset, never a
+                                            // synthetic globally-addressed Array wrapper.
+                                            []
                                         else
                                             // a row-pointer table over the full leading extent; only the band's rows are live
                                             [ $"{ind}    for (size_t __r = __w_lo; __r < __w_hi; __r++) {rows}[__r] = {win} + (__r - __w_lo) * {trailing}UL;"
@@ -4145,17 +4312,19 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                                         @ alias
                                     (decl, read, [ $"{ind}delete[] {win};" ] @ (if rank = 2 then [ $"{ind}delete[] {rows};" ] else [])))
                             let what = sources |> List.map (fun (_, s) -> $"'{s.VarName}'") |> String.concat ", "
-                            let lastN = sources |> List.map (fun (_, s) -> match s.VarType.IndexTypes.[0].Extent with IRLit (IRLitInt n) -> n | _ -> List.last offsets) |> List.min
+                            let lastN = sources |> List.map (fun (_, s) -> match s.VarType.IndexTypes.[0].Extent with IRLit (IRLitInt n) -> n | _ -> runExtent) |> List.min
                             [ (if kind = "stencil"
                                then $"{ind}// stencil over segments: {what} streamed one run at a time, each run read with its ghost cells [{rLo}, {rHi}] (HaloAccess.haloDemand); no whole-array buffer"
-                               else $"{ind}// elementwise over segments: {what} streamed one run at a time (the store's chunk edge), each run its own window; no whole-array buffer")
-                              $"{ind}const size_t {runs}[{g + 1}] = {{ {table} }};" ]
+                               else $"{ind}// elementwise over segments: {what} streamed one run at a time (the store's chunk edge), each run its own window; no whole-array buffer") ]
+                            @ runDecl
                             @ (windows |> List.collect (fun (d, _, _) -> d))
-                            @ [ $$"""{{ind}}for (size_t __seg = 0; __seg < {{g}}; __seg++) {"""
-                                $"{ind}    size_t __c_lo = {runs}[__seg] < {cMin}UL ? {cMin}UL : {runs}[__seg];"
-                                $"{ind}    size_t __c_hi = {runs}[__seg + 1] > {cMax}UL ? {cMax}UL : {runs}[__seg + 1];"
+                            @ runOpen
+                            @ [ $"{ind}    size_t __c_lo = {rawLo} < {cMin}UL ? {cMin}UL : {rawLo};"
+                                $"{ind}    size_t __c_hi = {rawHi} > {cMax}UL ? {cMax}UL : {rawHi};"
                                 $"{ind}    if (__c_lo >= __c_hi) continue;"
-                                $"{ind}    size_t __w_lo = __c_lo + ({rLo}L); size_t __w_hi = __c_hi + ({rHi}L);"
+                                (if rank1WindowPlan.IsSome then
+                                     $"{ind}    size_t __w_lo = static_cast<size_t>(static_cast<int64_t>(__c_lo) + ({rLo}LL)); size_t __w_hi = static_cast<size_t>(static_cast<int64_t>(__c_hi) + ({rHi}LL));"
+                                 else $"{ind}    size_t __w_lo = __c_lo + ({rLo}L); size_t __w_hi = __c_hi + ({rHi}L);")
                                 $"{ind}    if (__w_hi > {lastN}UL) __w_hi = {lastN}UL;" ]
                             @ (windows |> List.collect (fun (_, r, _) -> r))
                             @ [ $"{ind}    size_t __blade_mpi_lo_{name} = __c_lo - {start}UL;"

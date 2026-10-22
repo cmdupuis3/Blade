@@ -1,0 +1,11 @@
+# D05 runner results
+
+The D05 handoff and all seven listed source/census pins matched the frozen `d-streaming` checkout before the build. The Release build succeeded with 0 errors and 4 NU1900 warnings. The exact Blade.exe SHA-256 is `3408536BFECD09F6E005295AF6DA4EEB11CCFFF47FC1CC6EA4890730D1A8F6DF`; Blade.dll is `CED93633000930CC3901891C953B52B8571E2ADAF6D17286CC1B15E8AD102879`.
+
+The only test command was `C:\Users\cdupu\Documents\GitHub\Blade\.round4-worktrees\d-streaming\bin\Release\net10.0\Blade.exe test zarr`, run from the `d-streaming` checkout root so the relative corpus fixtures resolved to that checkout. It exited 0: 600 passed, 0 failed. The output contains one internal skip: `nc stream differential`, because the NetCDF native library could not load (`0x8007007F`). This skip is not included in the footer count. No other `SKIP` marker appeared.
+
+The new uniform-halo cursor block passed its descriptor/reset/alias and exact-capacity checks, small fixture value and failure-order checks, emitted capped-step/local-read/progress checks, metadata-only small and large cases, bounded-emission growth, explicit irregular control, malformed descriptor refusals, output-capacity refusal, and unchanged zero-extent admission. The large N=1,000,000,007 case was metadata-only; no resident result for it was compiled or run. Existing D04 Zarr tests remained active. No performance or total-program-memory claim is made.
+
+The complete build stdout is `C:\Users\cdupu\Documents\GitHub\Blade\.round4-worktrees\d-streaming\bench\.build\D05-runner\release-build.stdout.txt` (SHA-256 `7A03B2658A7591D0EF6DCDD828D1537615E41739CBF82C7DBB0C3E38799DFDF1`); stderr is empty (SHA-256 `E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855`). Zarr stdout SHA-256 is `5C7B2ECA724343E8FC8EC181CC9B1773505D20478A6BA149D92AE3D92BF4806A`; stderr SHA-256 is `2DFFC42C8783F8B9F8AB0CD9EEF29DF957BC3CBD17EE67D221320F60480B8478`. Both full logs are under the same private D05 runner folder.
+
+No full/default suite or benchmark was run. This validates the frozen D05 snapshot; integration status is pending the orchestrator.

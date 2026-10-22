@@ -165,6 +165,19 @@ labelled as streaming. Final gate naming/placement is for root review.
 
 ## Backend and storage evidence requested next
 
+Historical pre-L1 correction (runner checkpoint, 2026-10-22): the C++ primary has
+the removable mapped matrix, but the original LLVM primary already streams
+the map inside its row fold. Actual LLVM ON/OFF emissions each allocate only
+M (six Float64 cells) and rows (two Float64 cells). The named/demanded P control
+retains three allocations (six, six, two Float64 cells) in both settings.
+See `C02-handoff.md` and `bench/.build/C02-runner/llvm-allocation-diagnostic`.
+At that checkpoint the new storage-elision benefit was C++ only. Later corpus
+036 exposed that LLVM baseline's unsound failure ordering. The approved L1
+semantic barrier now restores complete row-input materialization: the repaired
+LLVM reference has three pools OFF, while C02's proved ON rewrite has two.
+The old two-pool OFF emission is historical evidence of the unsafe baseline,
+not the repaired reference. See `C02-L1-handoff.md` for the current request.
+
 Luna alone should lower and emit the primary candidate, parenthesized row-wise
 idiom, materialized/named controls, the already-streamed two-vector control,
 and plain/block/composed/full/join variants. Save exact source and normalized
@@ -174,7 +187,7 @@ and the proposed match shape is confirmed.
 
 The allocation assertion must isolate the producer: stored input `M` remains
 rank 2, so `Array<double,2>` is NOT globally forbidden. Current expected extra
-storage is mapped `8*R*C` cells plus row-pointer metadata; target removes that
+storage in C++ is mapped `8*R*C` cells plus row-pointer metadata; target removes that
 store/read pair while retaining `M` and the required `8*R` result. Removing a
 full rank-2 pool is a source hypothesis until emitted evidence confirms it.
 No allocation curve, measured memory reduction or runtime gain is claimed.

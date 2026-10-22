@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "contract": "PM52-immediate-two-stores-v1",
+  "scope": "diagnostic-only",
+  "arm": null,
+  "regime": null,
+  "exe_sha256": null,
+  "source_sha256": {},
+  "output_sha256": {},
+  "reviewer": null,
+  "artifacts": [],
+  "stores": {
+    "status": "unmeasured",
+    "inputs_stored": null,
+    "original_inputs_preserved": null,
+    "p_q_distinct": null,
+    "p_all_cells_stored": null,
+    "q_all_cells_stored": null,
+    "fp_graph_preserved": null,
+    "route": null,
+    "evidence": null
+  },
+  "endpoints": {
+    "status": "unmeasured",
+    "stop_precedes_array_observation": null,
+    "post_stop_p_loads_all_cells": null,
+    "post_stop_q_loads_all_cells": null,
+    "outputs_valid_through_observation": null,
+    "cleanup": null,
+    "evidence": null
+  }
+}

@@ -1,10 +1,18 @@
 # B03 design disposition
 
+Final disposition: accepted and integrated as `307ba755`, source `a7048cd2`.
+All six build modes, disabled/zero preprocessing, C++17 syntax and 45 fresh
+scenario processes passed (494 assertions). Six ASan positives passed (81
+assertions); LeakSanitizer explicitly reported unsupported and is skipped.
+Root inspected full scenario/sanitizer logs and the observer, OOM and sticky
+invalidity JSON witnesses. See [B03-tests.md](B03-tests.md). The earlier design
+and source-review stages below are retained as review history.
+
 2026-10-22. Root reviewed B03-design.md
 (`7A100C38B102B1D5E6C9B08D3BD6CDEAD02322A9878DF7EA1B6CC1863BAE783D`)
 and the standalone pool-capacity probe specification
 (`4836B7DF19BC859DE414AA331A0366A7BA7C40B5B8FB8C55205318AE1F6C52AF`).
-Approved for one implementation checkpoint; no implementation or test acceptance yet.
+At that design stage, approved for one implementation checkpoint only.
 
 The admitted metric is coherent API-accounted element-slot capacity at the
 C++ blade_pool boundary. Active, retained and combined capacity share one

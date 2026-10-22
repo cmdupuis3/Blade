@@ -6099,6 +6099,27 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
      | ArrayElem arr when arr.IndexTypes |> List.exists (fun ix -> ix.Symmetry = SymWreath) ->
          refuse "an OrbIdx (iterated-wreath) output pool"
      | _ -> ())
+    // A virtual multi-slot source consumes one scalar parameter PER axis;
+    // real operands consume one parameter each (IRStorage's paramSpan rule).
+    let paramSpans =
+        info.Arrays |> List.mapi (fun pos a ->
+            match a with
+            | IRRange _ | IRVirtualReverse _ when pos < info.ArrayTypes.Length ->
+                max 1 (info.ArrayTypes.[pos].IndexTypes |> List.sumBy _.Rank)
+            | IRRange _ | IRVirtualReverse _ -> refuse "a virtual apply operand without slot metadata"
+            | _ -> 1)
+    let paramStart pos = paramSpans |> List.take pos |> List.sum
+    let inputRank pos = info.KernelInputRanks.[paramStart pos]
+    if info.KernelInputRanks.Length <> List.sum paramSpans then
+        refuse "an apply whose input-rank metadata does not match its operands"
+    if info.KernelInputRanks |> List.exists (fun rank -> rank < 0) then
+        refuse "an apply with negative input rank metadata"
+    info.Arrays |> List.iteri (fun pos a ->
+        match a with
+        | IRRange _ | IRVirtualReverse _ ->
+            if info.KernelInputRanks |> List.skip (paramStart pos) |> List.take paramSpans.[pos] |> List.exists ((<>) 0) then
+                refuse "a virtual range/reverse passed as an array-valued kernel argument"
+        | _ -> ())
     let cg =
         buildLoopNestCodeGen info
             (info.Arrays |> List.mapi (fun i _ -> $"__a{i}"))
@@ -6197,14 +6218,6 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
             match Blade.IR.stripUnits info.OutputType with
             | ArrayElem arr -> requireScalar "a combinator's element" arr.ElemType
             | t -> requireScalar "a combinator's result" t
-    // Operand arrays are emitted ONCE, here -- not per cell. Virtual sources
-    // (`range`, `reverse`) never become arrays at all: their levels peel as
-    // induction values below.
-    let operands =
-        info.Arrays |> List.map (fun a ->
-            match a with
-            | IRRange _ | IRVirtualReverse _ -> None
-            | _ -> Some (emitArr c a))
     // Level -> which array positions peel there, and with which element
     // descriptor. Outer product gives one position per level; co-iteration
     // gives every position at every level.
@@ -6213,6 +6226,46 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
         |> List.mapi (fun li b -> (li, b))
         |> List.collect (fun (li, b) ->
             b.Elements |> List.filter (fun el -> el.ArrayPosition = pos) |> List.map (fun el -> (li, el)))
+    // method_for consumes an ArrayExpr BEFORE handing its rows to a kernel.
+    // Letting a producer survive as an AVirt row view interleaves its cells
+    // with row-kernel failures/writes (PM10/L1). Scalar-peel maps and virtual
+    // scalar ranges retain their streaming path. Decide before emitting an
+    // operand, so a call/extent computation is never evaluated twice.
+    let rowOperands =
+        info.Arrays |> List.mapi (fun pos a ->
+            let kernelRank = inputRank pos
+            match a with
+            | IRRange _ | IRVirtualReverse _ -> false
+            | _ ->
+                let rank =
+                    match Blade.IR.stripUnits (typeOf a) with
+                    | ArrayElem at -> at.IndexTypes |> List.sumBy _.Rank
+                    | _ -> refuse "a real apply operand without concrete array-rank metadata"
+                let remaining = rank - (levelsOf pos).Length
+                if remaining < 0 || (remaining > 0) <> (kernelRank > 0) then
+                    refuse "an apply whose input rank disagrees with its actual operand peel"
+                if paramStart pos >= rk.Callable.Params.Length then
+                    refuse "a real apply operand without a kernel parameter"
+                match Blade.IR.stripUnits rk.Callable.Params.[paramStart pos].Type with
+                | ArrayElem at when at.IndexTypes.Length <> kernelRank ->
+                    refuse "an apply whose input rank disagrees with its concrete kernel parameter"
+                | ty when (scalarTyOf ty).IsSome && kernelRank <> 0 ->
+                    refuse "an apply whose array input rank names a scalar kernel parameter"
+                | _ -> ()
+                remaining > 0)
+    let operands =
+        info.Arrays |> List.mapi (fun pos a ->
+            match a with
+            | IRRange _ | IRVirtualReverse _ -> None
+            | _ ->
+                let value = if rowOperands.[pos] then materializeExpr c a else emitArr c a
+                let sourceRank =
+                    match Blade.IR.stripUnits (typeOf a) with
+                    | ArrayElem at -> at.IndexTypes |> List.sumBy _.Rank
+                    | _ -> refuse "a real apply operand without concrete array-rank metadata"
+                if value.Rank <> sourceRank || (value.Rank > (levelsOf pos).Length) <> rowOperands.[pos] then
+                    refuse "an emitted apply operand whose rank disagrees with its kernel argument"
+                Some value)
     let positions = cg.Bindings |> List.collect (fun b -> b.Elements |> List.map (_.ArrayPosition)) |> List.distinct
     let paramOf (varId: IRId) =
         cg.KernelParams |> List.tryFind (fun p -> p.VarId = varId)
@@ -6433,6 +6486,8 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
                             if d < rawAxis.Length && rawAxis.[d] then idxs.[li]
                             else absoluteAt c2 li idxs)
                     let arg =
+                        if (List.length myIdxs < a.Rank) <> rowOperands.[pos] then
+                            refuse "an apply whose scalar/array kernel argument disagrees with its input-rank metadata"
                         if List.length myIdxs = List.length a.Extents then KScalar (readCell c2 a myIdxs)
                         elif List.length myIdxs < List.length a.Extents then KArray (rowView c2 a myIdxs)
                         else refuse "a loop nest that peels more levels than the array has"

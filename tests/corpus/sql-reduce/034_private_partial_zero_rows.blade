@@ -1,0 +1,9 @@
+// TEST: Private Partial Map With Zero Rows Returns The Original Empty R
+type R = Idx<0>
+type C = Idx<3>
+let M: Array<Float64 like R, C> = []
+let rows = reduce(method_for(M) <@> lambda(v: Float64) -> v * v + 1.0, (+), -7.25)
+function accept_rows(a: Array<Float64 like R>) -> Float64 = reduce(a, (+), -2.0)
+let total = accept_rows(rows)
+// EXPECT: rows = []
+// EXPECT: total = -2.0

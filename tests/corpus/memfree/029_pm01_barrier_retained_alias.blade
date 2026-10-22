@@ -1,0 +1,23 @@
+// TEST: PM01 retained alias prevents a later map from taking its backing
+// held aliases p and is consumed after r. Returning held also requires its
+// original values to survive. A name match alone cannot prove this alias.
+type Ix = Idx<7>
+function barrier_alias(x: Array<Float64 like Ix>) -> (Array<Float64 like Ix>, Array<Float64 like Ix>, Float64, Float64, Float64, Float64) = {
+    let p = x + 1.0 |> compute
+    let held = p
+    let s1 = reduce(p, (+))
+    let q = p + s1 |> compute
+    let s2 = reduce(q, (+))
+    let r = q + s2 |> compute
+    let s3 = reduce(r, (+))
+    let held_sum = reduce(held, (+))
+    (held, r, s1, s2, s3, held_sum)
+}
+let x: Array<Float64 like Ix> = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let (held, final, s1, s2, s3, held_sum) = barrier_alias(x)
+// EXPECT: held = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+// EXPECT: final = [253.0, 254.0, 255.0, 256.0, 257.0, 258.0, 259.0]
+// EXPECT: s1 = 28.0
+// EXPECT: s2 = 224.0
+// EXPECT: s3 = 1792.0
+// EXPECT: held_sum = 28.0
