@@ -65,11 +65,20 @@ typedef double v4d __attribute__((vector_size(32)));
 // VADD: the row chains' kernel is the builtin `+` on double and G % 4 == 0 --
 // one vertical vector add per column for every 4 row chains (lane m is chain
 // R[i0+m]; still one add per chain per column, in column order).
+//
+// tri is the ascending sequence of its GROUP BODIES (tri_group, rows i0 ..
+// i0+G-1, i0 + G <= m) followed by its TAIL ROWS (tri_tail_row, one row each).
+// Group i0 reads only pool rows i0 .. i0+G-1 and writes only chains
+// R[i0 .. m) (and, THIRD, the pair chains of those rows); when it returns,
+// R[i0 .. i0+G-1] are complete (no later group or tail row touches them). So
+// any schedule that runs these same calls in the same ascending order, each
+// on the values the previous calls left, feeds every chain the same sequence
+// (the producer-fused commit prototype, bench/notes/round3/prototypes/
+// p1-commit, calls them one interval at a time behind a ticket).
 template <int G, int B, bool VADD, bool THIRD, class T, class E, class F, class K>
-inline void tri(const E* S, size_t m, T* R, T* H, size_t hRow0, size_t hn, const F& f, const K& k) {
+inline void tri_group(const E* S, size_t m, T* R, T* H, size_t hRow0, size_t hn, size_t i0, const F& f, const K& k) {
     alignas(64) T Z[G][B];
-    size_t i0 = 0;
-    for (; i0 + (size_t)G <= m; i0 += G) {
+    {
         size_t rs[G];
         size_t hrs[G];
         for (int a = 0; a < G; a++) rs[a] = tri_row(m, i0 + a);
@@ -127,18 +136,28 @@ inline void tri(const E* S, size_t m, T* R, T* H, size_t hRow0, size_t hn, const
         }
         for (int a = 0; a < G; a++) R[i0 + a] = rc[a];
     }
-    // the tail: one row at a time (diagonal cell, then its columns ascending)
-    for (; i0 < m; i0++) {
-        const E* row = S + tri_row(m, i0);
-        T* hrow = THIRD ? H + tri_row(hn, hRow0 + i0) : nullptr;
-        const bool third = THIRD && i0 >= 1;
-        for (size_t j = i0; j < m; j++) {
-            const T z = f(row[j - i0]);
-            R[i0] = k(R[i0], z);
-            if (j != i0) R[j] = k(R[j], z);
-            if (third) hrow[j - i0] = k(hrow[j - i0], z);
-        }
+}
+
+// One TAIL row i0 of tri (diagonal cell, then its columns ascending).
+template <bool THIRD, class T, class E, class F, class K>
+inline void tri_tail_row(const E* S, size_t m, T* R, T* H, size_t hRow0, size_t hn, size_t i0, const F& f, const K& k) {
+    const E* row = S + tri_row(m, i0);
+    T* hrow = THIRD ? H + tri_row(hn, hRow0 + i0) : nullptr;
+    const bool third = THIRD && i0 >= 1;
+    for (size_t j = i0; j < m; j++) {
+        const T z = f(row[j - i0]);
+        R[i0] = k(R[i0], z);
+        if (j != i0) R[j] = k(R[j], z);
+        if (third) hrow[j - i0] = k(hrow[j - i0], z);
     }
+}
+
+template <int G, int B, bool VADD, bool THIRD, class T, class E, class F, class K>
+inline void tri(const E* S, size_t m, T* R, T* H, size_t hRow0, size_t hn, const F& f, const K& k) {
+    size_t i0 = 0;
+    for (; i0 + (size_t)G <= m; i0 += G) tri_group<G, B, VADD, THIRD>(S, m, R, H, hRow0, hn, i0, f, k);
+    // the tail: one row at a time (diagonal cell, then its columns ascending)
+    for (; i0 < m; i0++) tri_tail_row<THIRD>(S, m, R, H, hRow0, hn, i0, f, k);
 }
 
 // Rank 2: fold_out(so, [ fold_in(si, [ f(S(i, j)) for j ]) for i ]).

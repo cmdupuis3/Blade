@@ -1,0 +1,43 @@
+{
+ "exe": "C:\\Users\\cdupu\\AppData\\Local\\Temp\\claude\\C--Users-cdupu-Documents-GitHub-Blade\\dbd3f5e5-01ed-41dd-bc92-4bc0ec85152b\\scratchpad\\p1\\p1_commit.exe",
+ "rounds": 21,
+ "seed": 20261021,
+ "teams": {
+  "T1": {
+   "OMP_NUM_THREADS": "1",
+   "P1_AFFINITY": "0x4"
+  },
+  "T3": {
+   "OMP_NUM_THREADS": "3"
+  },
+  "T8": {
+   "OMP_NUM_THREADS": "8"
+  },
+  "R2": {
+   "OMP_NUM_THREADS": "8",
+   "OMP_THREAD_LIMIT": "2"
+  }
+ },
+ "configs": [
+  "a",
+  "a2:1",
+  "a2:4",
+  "a2:8",
+  "b:1",
+  "b:4",
+  "b:8",
+  "c",
+  "d:1",
+  "d:4",
+  "d:8",
+  "di:1",
+  "di:4",
+  "di:8"
+ ],
+ "base_env": {
+  "OMP_DYNAMIC": "false",
+  "BLADE_FP_REPRO": "1",
+  "BLADE_FP_CONTRACT": "off",
+  "KMP_AFFINITY": "disabled"
+ }
+}

@@ -1,0 +1,39 @@
+identity: OMP_NUM_THREADS=8 OMP_THREAD_LIMIT=2
+  n=1 T=1 actual team (G=1/4/8): 1/1/1
+  n=1 T=3 actual team (G=1/4/8): 1/1/1
+  n=1 T=8 actual team (G=1/4/8): 1/1/1
+  n=2 T=1 actual team (G=1/4/8): 1/1/1
+  n=2 T=3 actual team (G=1/4/8): 2/1/1
+  n=2 T=8 actual team (G=1/4/8): 2/1/1
+  n=3 T=1 actual team (G=1/4/8): 1/1/1
+  n=3 T=3 actual team (G=1/4/8): 2/1/1
+  n=3 T=8 actual team (G=1/4/8): 2/1/1
+  n=4 T=1 actual team (G=1/4/8): 1/1/1
+  n=4 T=3 actual team (G=1/4/8): 2/1/1
+  n=4 T=8 actual team (G=1/4/8): 2/1/1
+  n=5 T=1 actual team (G=1/4/8): 1/1/1
+  n=5 T=3 actual team (G=1/4/8): 2/2/1
+  n=5 T=8 actual team (G=1/4/8): 2/2/1
+  n=7 T=1 actual team (G=1/4/8): 1/1/1
+  n=7 T=3 actual team (G=1/4/8): 2/2/1
+  n=7 T=8 actual team (G=1/4/8): 2/2/1
+  n=8 T=1 actual team (G=1/4/8): 1/1/1
+  n=8 T=3 actual team (G=1/4/8): 2/2/1
+  n=8 T=8 actual team (G=1/4/8): 2/2/1
+  n=9 T=1 actual team (G=1/4/8): 1/1/1
+  n=9 T=3 actual team (G=1/4/8): 2/2/2
+  n=9 T=8 actual team (G=1/4/8): 2/2/2
+  n=13 T=1 actual team (G=1/4/8): 1/1/1
+  n=13 T=3 actual team (G=1/4/8): 2/2/2
+  n=13 T=8 actual team (G=1/4/8): 2/2/2
+  n=23 T=1 actual team (G=1/4/8): 1/1/1
+  n=23 T=3 actual team (G=1/4/8): 2/2/2
+  n=23 T=8 actual team (G=1/4/8): 2/2/2
+  n=101 T=1 actual team (G=1/4/8): 1/1/1
+  n=101 T=3 actual team (G=1/4/8): 2/2/2
+  n=101 T=8 actual team (G=1/4/8): 2/2/2
+  n=2503 T=1 actual team (G=1/4/8): 1/1/1
+  n=2503 T=3 actual team (G=1/4/8): 2/2/2
+  n=2503 T=8 actual team (G=1/4/8): 2/2/2
+identity: 6075 cases, 0 mismatches
+nanN payload disagreements (informational, of 87804 values): commit vs scatter(G) 171, commit vs walk 59319, scatter(G) vs scatter(4) 30537, scatter(G) vs walk 59481
