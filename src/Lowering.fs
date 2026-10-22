@@ -2962,7 +2962,6 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     Optimize.OrbitActionTable.reset ()
     Optimize.MemberHoistTable.reset ()
     Optimize.EpilogueLegTable.reset ()
-    Optimize.InlineReturnTable.reset ()
     Optimize.blasGateProbe <- Blade.LinAlgPatterns.blasAvailable
     // The raw decl list callers hand us is the program they PARSED, not the
     // one `TypeCheck.typeCheck` desugared inside itself -- so the icechunk

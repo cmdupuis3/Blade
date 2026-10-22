@@ -1,6 +1,6 @@
 # Round-3 wave-2 Codex diff reviews (condensed)
 
-The independent Codex diff review of each wave-2 item (W2-1 two looks; W2-4 three looks here, the later looks appended as they land) and the merge-level review of the wave (HOLD on W2-4's lifetime class).
+The independent Codex diff review of each wave-2 item (W2-1 two looks; W2-4 SEVEN looks: the third held round 2, the fourth held round 4, the fifth gated rounds 4+5, the sixth gated round 6, the seventh gated round 7 -- DO NOT MERGE on the fold-kernel hole -- after which the user's fallback made the kept inline opt-in; round 8) and the merge-level review of the wave (HOLD on W2-4's lifetime class).
 
 Sections (each is one former file, verbatim): [`wave2-codex-reviews.md#codex-diff-w2-5`](#codex-diff-w2-5), [`wave2-codex-reviews.md#codex-diff-w2-0`](#codex-diff-w2-0), [`wave2-codex-reviews.md#codex-diff-w2-3`](#codex-diff-w2-3), [`wave2-codex-reviews.md#codex-diff-w2-1`](#codex-diff-w2-1), [`wave2-codex-reviews.md#codex-diff-w2-1-2`](#codex-diff-w2-1-2), [`wave2-codex-reviews.md#codex-diff-w2-2`](#codex-diff-w2-2), [`wave2-codex-reviews.md#codex-diff-w2-6`](#codex-diff-w2-6), [`wave2-codex-reviews.md#codex-diff-w2-4`](#codex-diff-w2-4), [`wave2-codex-reviews.md#codex-diff-w2-4-2`](#codex-diff-w2-4-2), [`wave2-codex-reviews.md#codex-diff-w2-4-3`](#codex-diff-w2-4-3), [`wave2-codex-reviews.md#codex-wave2-merged`](#codex-wave2-merged)
 
@@ -532,3 +532,310 @@ Five hook checks:
 | Pool + forms + membership coexist | tests/RunRecordTests.fs:593; src/cpp/blade_run_record.hpp:239, :255, :286 | Parsed three-way fixture; additive version-1 record. |
 
 (g) No new default scheduling/text change found for a plain program outside these admissions; universal runtime/header/shim changes do affect its executable/cache identity and float-print instrument, and its default C++ run record now gains policy.pool—whole-program byte identity with wave 1 is not a valid claim.
+
+---
+
+## codex-diff-W2-4-4
+
+_formerly `bench/notes/round3/reviews/codex-diff-W2-4-4.md` (scratchpad; appended after the condensation)_
+
+VERDICT: DO NOT MERGE
+
+Hole 1 — PARTIAL: the release statement survives a dropped final join, but its required spineStart still names a removable let; a dropped FIRST join now produces BL6001 (NEW 2).
+Hole 2 — PARTIAL: available.Clear() really prevents later-to-earlier CSE across the event, and named pools cannot merge in either direction; spineStart is unpinned, and multiple calls in one statement defeat the claimed per-call return-let pin (NEW 2–3).
+Hole 3 — CLOSED for the reported ordinary function-body case: isStatementShaped routes the unit event through genBindingDispatch, independently of the return value's renderer. This is not universal expression-renderer support.
+Hole 4 — PARTIAL: tracked free/null and direct main free are implemented for LISTED pools; an admitted array rename allocates an UNLISTED LLVM pool and retains it beyond the original return (NEW 1).
+
+Read-only review of 654760e6..19898911; parent and target worktree HEAD verified. Locations below are at 19898911. Read CLAUDE.md, the round-4 brief and both prior reviews. Files/git only; no builds, tests, compiler execution or measurements. Reported footers and ASan results are unverified. git diff --check is clean.
+
+1. NEW — BLOCKER: the event's ownership list omits admitted copy-on-alias allocations.
+
+   Optimize.fs:7474–7480 collects ONLY IRCompute lets. inlineValueOk accepts an array IRVar through sfTotal (:6731–6741, :6598–6600); the producer-input freshness check concerns the producer's input operands, not every unrelated callee let. LLVM bindNamed copies a stored array rename (:4262–4270); copyArr allocates through allocPool (:4996–5005). The original scalar callee frees that allocation at :7800. The inline's event never names it: in main it is retained to exit; in a function caller it survives until the caller returns, and remains outstanding if that caller panics first. IRValidate cannot detect an allocation absent from pools.
+
+   Source-derived witness: in 019's kernel, after s, add `let spare = x` and return `s + Float64(extents(spare))`. Keep the caller's input folds, serial repro, BLAS off, reuse off. This leaves A7c's producer/legs unchanged. The IRVar let is not CSE-eliminated (Optimize.fs:1664–1667), and LLVM emits its copy even if the extent is constant. Expected missing boundary free: spare's 1003-cell Float64 pool, 8024 payload bytes. No execution claimed.
+
+   Exact fix: represent the inline's complete allocation ownership, including emitted rename copies, and release those owners at its boundary; alternatively decline an inline whose allocation forms are not covered. Do NOT indiscriminately add every array-typed alias to pools: C++ freshening does not propagate MutableArrayLets (IRMono.fs:1869–1892), and its copy decision differs (CodeGen.fs:490; CodeGenBinding.fs:6653), so a blind alias free can reclaim caller storage. Preserve copy/ownership metadata consistently. Add a main and a function-caller-panic witness, matching allocation identities to boundary frees in both lanes. This is an additional residual lifetime hole, not a newly introduced copy rule.
+
+2. NEW — HIGH: spineStart recreates the dangling-key defect as a validation failure.
+
+   Optimize.fs:7568–7571 chooses the FIRST original inline binder before dropUnits is applied. Existing joined tuples are deleted at :7613/:7638. IRValidate.fs:463–464 then requires that exact binder to exist. Witness: move 032's unused Jx join from the END to the START of kernel, leaving its Ix producer/B1 and earlier-scalar return intact. The Jx join still combines with the caller's Jx folds and is dropped; the Ix input-leg plan still retains the inline. The event survives, but the valid admitted program fails BL6001 because its start vanished.
+
+   Independently, CSE pins pool IDs and the preceding let, NOT start (Optimize.fs:1754–1756). A first scalar helper call equal to an earlier caller value can be removed at :1772–1773, producing the same rejection. The new “honoured by every pass”/closed-hole records are false for this shape.
+
+   Exact fix: make region identity durable—e.g. a dedicated non-removable start marker, or a guaranteed surviving/pinned owned-pool anchor with a correspondingly precise validator. Establish it against the reconstructed spine, and preserve it through CSE. Add both first-join-deleted and first-scalar-CSE witnesses; assert validation succeeds with the plan admitted.
+
+3. NEW — MEDIUM: calls sharing one statement share a delayed cleanup position.
+
+   buildUnits appends ALL called spines before SfOrig i (Optimize.fs:6839–6841). Events are accumulated by i, not by the boundary between (i,c) spines (:7566–7572), and all are emitted only upon SfOrig i (:7629–7634). Thus call A's pools remain live throughout call B's entire inlined body, contrary to the claimed original return boundary.
+
+   Witness shape: two scalar callees in one tuple/arithmetic statement, one with an Ix producer/B1, one with a Jx producer/B1, plus each extent's caller input-sum pair; use distinct extents as in 031/032 so both plans admit independently. Both events land after B. This changes peak live storage versus the outlined calls; no read-after-release or double free established here. The preceding-let pin also pins B's return for A's event, then A's EVENT for B's event, not each call's return.
+
+   Exact fix: emit each event after its own reconstructed spine and evaluated return, before the next call's spine, keyed by (statement, call ordinal). Preserve each explicit return binder rather than inferring it from adjacency to a group of events. Add the two-calls/one-statement case with free(A) before alloc(B), and a true duplicate-helper return assertion.
+
+4. NEW — MEDIUM: check 5 is a reference scan, not a complete storage-liveness check.
+
+   IRValidate.fs:447–458 follows module callables and captures, but never resolves local let definitions. A hand-built spine `p = compute(...); d = deferred_map(p); release(p); reduce(d)` passes this new check: its suffix names d, not p. Likewise `t = (p,...)` before the event and a projection of t afterward hides p. A later mut-call through such an alias is not traced to its storage either. Direct pool arguments/projections and direct callable captures ARE found. The interval test also accepts any ID bound since start; it does not prove ownership or allocation-list completeness.
+
+   No current admitted source route to these hidden post-event reads was established: the inliner refuses deferred-map/capturing-lambda bodies, returns a bare scalar, and refuses assignments. This is a missing invariant backstop, not evidence of a reachable use-after-free.
+
+   Exact fix: track local storage provenance and deferred dependencies through aliases/projections and callable arguments; distinguish stored scalar results from deferred reads so published B1 scalars remain legal. Validate ownership/list completeness against the inline region. Add deferred, tuple-alias and mut-argument negative fixtures alongside the current direct-reference fixture; qualify the records until that check exists.
+
+Remaining requested checks:
+
+- POSITION / surviving joins: reconstruction inserts a group at its earliest member (Optimize.fs:7608–7609), never after that member. Any member reading a callee-local pool originates inside that callee; the scalar return cannot expose the pool to a caller leg. A7c explicitly rejects output legs (:2858–2862). Consequently I found no surviving rebuilt join moved from a pool-reading callee statement to AFTER its event. This does not cure omitted ownership, lost start IDs, or the multiple-call delay above.
+- PASS ORDER / CSE: freeze recognition precedes lowering's optimizer; slice-write, row-fold and invariant hoisting precede sibling sharing (Optimize.fs:7701–7708). Afterward: IRLift, forceCallableBody, CSE, then side-table planners (Lowering.fs:3135–3202). No separate post-sibling IRLift CSE/equivalence table found. IRLift preserves enclosing let IDs (:700–713). available.Clear at Optimize.fs:1775 empties the actual lookup dictionary, not merely a pool subset; pinned pools are neither substituted nor installed as representatives. For a SINGLE call, its final fresh return let is retained even when equal to an earlier helper call. Existing substitutions remain, but none can target a named pool because those never enter available.
+- C++ RENDERERS: module/block let chains use genLetChainBinding -> genBinding (:7349); ordinary named-function bodies use CodeGen.fs:662–698; statement loop bodies use CodeGenBinding.fs:7005/:7175. Normal/split/self-contained program assembly shares these paths (CodeGen.fs:3854/:3860/:3949). MPI/CUDA HOST assembly also uses them; sibling sharing excludes CUDA/MPI function regions (Optimize.fs:7662), and producer admission excludes device/MPI kernels. Raw expression/IIFE chains use renderLetExpr/renderUnitStmts (CodeGenExpr.fs:1748/:1832), which do NOT consume the event: their fallback reaches BL7001. Generic dense nests route these materializing bodies through an outlined callable (CodeGenExprSupport.fs:1262/:1311); raw ragged/wreath body renderers remain expression paths. No new event-specific BL7001 on a previously supported admitted source program was established. “Every other let renderer through isStatementShaped” is nevertheless not literally the implementation; document the reachable routes and excluded contexts.
+- LLVM OWNERS / EXITS: a listed plain computed map allocates once and registers one slot in the innermost scope (EmitLlvm.fs:2061–2072). CSE/reuse cannot give that named owner another allocation slot; no admissible named-pool phi/rebinding path found. The event loads/frees/nulls that slot (:4140–4157); normal pop and break cleanup load the slot (:1349/:2832), and blade_free(NULL) is a no-op (blade_llvm_shim.c:405–407). Compiler refusal discards the attempted LLVM emission; CLI fallback generates C++ from the same IR (CliCommands.fs:402–414), including its event. This establishes the listed-pool mechanism, not the completeness missing in NEW 1.
+- FAILURE / TWINS: 034's event precedes the caller's division by construction in both binders. A potentially failing callee is refused by inlineJudge's closed-total check (Optimize.fs:6773); its frame and original cleanup behavior remain. Both interpreter and compiler consume the post-optimizer tree; Interp/Core.fs:1048 accepts the event as VUnit. REPL/notebook evaluation uses the same lowered/validated IR through Interp/Repl.fs:103/:110/:147 and ReplSession.fs:1262/:1289. interp cannot detect a shared optimizer error or native lifetime defect; opt-diff includes EPILOGUE_LEGS (Optimize.fs:190) and can catch gate-dependent validation failure, but value equality alone cannot certify frees.
+- REUSE / RECORDS / TEST LIMITS: G69 (bench/notes/gap-register.md:119) records 035's +1 allocation/+1 release and unchanged outstanding storage, explicitly lists W1-D return events as NOT BUILT, and keeps LLVM lifetime-matched saxpy attribution WITHDRAWN. Those qualifications are present. Its closed-class claim, the unconditional pool-release claims at Optimize.fs:7486, EmitLlvm.fs:4248, CLAUDE.md:206 and docs/features.md:281 still overstate NEW 1–3; amend them with the fixes. 033 returns `bump(s) + 0.0 * r`, not the identical `bump(s)` RHS its comment describes; no assertion pins that duplicate return's survival. llvmReleasesSafe (OptimizeTests.fs:2586) counts annotated frees and checks later uses of the allocation register, but does not independently require tracking-slot nulling or compare release position with blade_idiv. Add those structural assertions; do not treat the listed footers as an ownership proof.
+
+Hook verification (five claims):
+
+| Claim | File:line hooks | Result |
+|---|---|---|
+| Shared admission and per-build BLAS gate | src/Optimize.fs:2810, :2858, :7515 | Output legs refused; BLAS checked in repro and licensed builds. |
+| One durable boundary and CSE barrier | src/Optimize.fs:7571, :7632, :1754, :1775 | Event survives; ownership anchor and per-call position do not satisfy the full claim. |
+| C++ feed, publication and release dispatch | src/CodeGenCuda.fs:2214; src/CodeGenLoopNest.fs:2584, :4976; src/CodeGenBinding.fs:458, :336; src/CodeGen.fs:698 | Existing feed/publication retained; ordinary function/main release reaches the new arm. |
+| LLVM ownership and release | src/EmitLlvm.fs:4140, :4268, :5001, :7800; src/CliCommands.fs:414 | Listed slots free/null correctly; rename-copy allocations are omitted. |
+| Validation and interpreter twin | src/IRValidate.fs:447, :463; src/Interp/Core.fs:1048; src/Lowering.fs:3171 | Stale start rejects; indirect local storage reads are not closed over; interpreter consumes the same optimized IR. |
+
+Scope: no production emission or validation change found for a program with NO admitted A7c retained-inline plan at 654760e6; check 5 adds errors only when an event exists. The admitted class remains unsafe/incomplete as above. Only this review file was written; no full-suite, timing or execution conclusion.
+
+---
+
+## codex-diff-W2-4-5
+
+_formerly `bench/notes/round3/reviews/codex-diff-W2-4-5.md` (scratchpad; appended after the condensation)_
+
+VERDICT: DO NOT MERGE
+
+Fourth-look NEW 1 — PARTIAL: top-level aliases decline; scalar-valued RHSs still hide unlisted LLVM allocations (NEW 1 below).
+Fourth-look NEW 2 — CLOSED: the first listed owned-pool binder survives join rebuilding, IRLift and CSE; no subsequent producer-pool DCE found.
+Fourth-look NEW 3 — CLOSED for delayed A7c cleanup: the tentative spine detects other contributing inlinable calls, including ones W1-D would retain; its “call stays” record is overbroad (NEW 3).
+Fourth-look NEW 4 — CLOSED as the documented ONE-LEVEL backstop, not a storage-liveness or ownership-completeness proof. That bounded backstop is acceptable once admission actually closes allocation shapes.
+
+Read-only inspection of 19898911..23fe111c and 654760e6..23fe111c. Target HEAD/parents verified; 361504b6's intervening changes are bench/notes only. Locations below are at 23fe111c. Read the requested CLAUDE.md and fourth review. No builds, tests, Blade execution, g++, or measurements; reported footers unverified. git diff --check is clean. Stored graft index unavailable; no refreshing graft command run.
+
+1. NEW — BLOCKER: “storage-free result type” does not mean allocation-free evaluation; nested array lets bypass the whitelist.
+
+   Optimize.fs:7560-7579 checks each OUTER SfInl unit, not all lets evaluated by its RHS. sfTotal explicitly accepts IRIf and IRLet recursively (:6611-6612), including array IRVar values (:6598). Source-derived witness: keep 036's producer/B1 and caller, replacing its top-level spare/return with:
+
+   ```blade
+   let extra = if s > 0.0 then {
+       let spare = x
+       Float64(extents(spare))
+   } else 0.0
+   s + extra
+   ```
+
+   extra has scalar type, is not a deferred form, and passes :7578. The fresh return also passes. The only listed pool remains y2 (:7474-7480). IRLift preserves conditional-arm lets (IRLift.fs:1126-1138); CSE does not eliminate the branch's alias. LLVM emitExpr evaluates the arm's IRLet without opening a pool scope (EmitLlvm.fs:2714-2737); bindNamed copies spare (:4268), through copyArr/allocPool (:5001/:2061). Thus an additional 1003-double pool is unlisted: main retains it; a function caller retains it until its own exit, or through a subsequent panic. Original outlined kernel frees it at :7800. The event and validator know only y2. This is a source-derived allocation path, not a claimed executed witness. The C++ branch has an ordinary IRVar/IIFE rendering (CodeGenExpr.fs:1799-1822), so no unsupported array-construction renderer is required.
+
+   Exact fix: replace the result-type test with a closed evaluation-shape check. Recursively inspect nested lets, branches, tuple/projection operands and other evaluated children, declining any caller-scope allocation outside the enumerated top-level owned maps. An array alias inside a scalar RHS must decline too. Recheck the normalized/freshened body or ensure later normalization cannot expose unchecked allocations. Add this main witness and 037's failing-driver variant, pinning the ownership decline and surviving calls in both lanes. Do not add the alias blindly to pools: C++ and LLVM alias ownership still differ.
+
+2. NEW — HIGH: String is admitted as “storage-free,” contrary to the cross-lane allocation claim.
+
+   holdsNoStorage is explicitly an ARRAY-storage predicate (Optimize.fs:932-938); IRTScalar ETString returns true. sfTotal accepts a string literal, and CSE preserves literal lets (:6597/:1666). A long string let added to 019's callee is admitted. C++ emits an owning std::string (CodeGenExprSupport.fs:595), whose heap storage/destruction follows its enclosing scope; LLVM interns the literal (EmitLlvm.fs:2658). The string is neither a listed dense pool nor allocation-free in both lanes. This is an owning C++ value counterexample, not an assertion that std::string uses Blade's pool allocator.
+
+   Exact fix: use a dedicated recursively defined allocation-free value-type whitelist here, excluding String (including tuples containing it), rather than widening/changing the shared holdsNoStorage predicate. Alternatively explicitly narrow the lifetime contract to Blade array pools and document the changed string lifetime; that does not satisfy the requested “allocates in neither lane” guarantee. Add a long-string decline fixture. Remove “every allocation the admitted callee makes” at EmitLlvm.fs:4248 until the actual contract is proved.
+
+3. NEW — HIGH: decline records promise a surviving call that W1-D can still remove.
+
+   Optimize.fs:7586 says “nothing is inlined for the legs, the call stays.” But :7603-7606 independently retains every inline contributing a W1-D join. Modify 038's first kernel to add 036's top-level spare and extent use: the A7c ownership check declines, while its Jx join still causes W1-D to retain the inline. No A7c event is installed. This preserves pre-existing W1-D behavior, but contradicts the new decline text and the scope paragraphs in CLAUDE.md:206, docs/features.md:281 and G69 (bench/notes/gap-register.md:119). The planner's applied evidence (:7486) makes the same unconditional promise about other callees/second calls.
+
+   Exact fix: say “not retained for A7c; independent sibling-fold inlining is unchanged,” or produce the final call-survival record after keptInlines is known. Add the alias-plus-Jx-join witness and assert both the A7c decline and retained W1-D inline. Do not disable W1-D to make the wording true. Also correct CLAUDE.md:206's old “inline's first let” description and its blanket 030-039 ASan/both-lane release-testing claim: the checked-in ASan list remains 030/031/032/033/035 (CellEpilogueTests.fs:669), and 036-039 ASan was explicitly not run. The new SCOPE paragraphs qualify the intended release promise, but do not cure NEW 1-2. Raw renderers still refuse; “every let renderer” should name the supported statement paths, not imply expression-renderer support.
+
+4. NEW — HIGH: the new witnesses do not establish the claimed LLVM routes.
+
+   OptimizeTests.fs:2798-2807 checks a planner decline substring, no applied plan, C++ leg absence/CALL survival, and only absence of an LLVM A7c comment. It never asserts an LLVM call instruction or LLVM leg absence; it discards LLVM's decisions. 039 requires only ONE matching decline, not one for each call. eplDurableStart (:2828-2838) checks validation, two planner admissions and single C++ releases in main/driver; it never emits LLVM. eplLlvmReleaseOrder's case list (:2659-2663) excludes 038. The fault/frame twin loop includes 026/029/034, not 037 (CellEpilogueTests.fs:610-612); 037's corpus pins do not assert “at driver.” Value comparisons cannot fill these structural gaps.
+
+   Exact fix: scope call assertions to main/bl_driver and require actual LLVM calls to kernel/ka/kb, with each expected decline and no A7c feed/publication/release. For 038 require both planner admissions, successful validation, actual lane placement (or explicitly pinned fallback), and exactly one matching allocation/release in each of LLVM main and bl_driver, using llvmReleasesSafe including slot nulling. Add 037 to the gate-on/off fault/site/frame twin with “at driver.” Keep 033's new true-duplicate assertion and 034's free-before-idiv assertion.
+
+Requested boundary checks:
+
+- The whitelist does run on freshened units AFTER inlineJudge appends the non-atom return let (Optimize.fs:6777-6792). That return's TYPE is bare scalar; its evaluation is not allocation-free by construction (NEW 1). Top-level array-typed IRApp results, array tuples/projections and aliases fail ownership; IRMask and Bool-producing maps fail the earlier totality/plainLeaf gates. Ordinary scalar extents and numeric scalar tuples allocate no array pool; IRRange is not admitted by sfTotal despite its special type representation. This whitelist is conservative, not the exact complement of all allocating forms.
+- The anchor is taken from the tentative pool list, not literally recomputed after dropUnits; this is safe for the listed maps because only join members are dropped (:7661-7664), IRLift preserves their IDs, and CSE pins them (:1754-1764). Post-sibling passes are IRLift/forcing/CSE then side-table planners (Lowering.fs:3135-3202). B1 still emits the producer pool (EmitLlvm.fs:4872); no unread-producer DCE was found. A callee containing only storage-free lets cannot supply this inline's forced producer, hence cannot enter legInlines through that producer. Empty pool lists produce no event (:7619-7623).
+- The second-call test examines ALL tentative units, before W1-D's final rebuild, so it includes a second W1-D-contributing spine. Declining A7c does not change W1-D's keep set. A zero-let identity call contributes no units, but also contributes no allocating spine whose execution would delay cleanup.
+- One-level provenance (IRValidate.fs:470-482) is ordinarily only a hand-built-IR backstop: caller lets preceding the call cannot name its fresh pool IDs, and the intended whitelist excludes storage-bearing aliases inside it. Listed owned maps derived from another pool are independent allocations, not aliases. No source-produced hidden post-release read was established. NEW 1 concerns missing ownership, which this check cannot detect. Deeper provenance remains unproved; interpreter value equality cannot prove native frees.
+
+Hook verification (five claims):
+
+| Claim | File:line hooks | Result |
+|---|---|---|
+| Freshened, fail-closed admission | src/Optimize.fs:6777, :6786, :7557, :7578 | Fresh return included; scalar RHS evaluation and String escape the claimed allocation closure. |
+| Durable start and CSE/reuse protection | src/Optimize.fs:7619, :7663, :1754, :632; src/Lowering.fs:3139 | Listed pool binder retained; no post-sibling pool DCE found. |
+| C++ return-boundary release | src/CodeGenBinding.fs:336, :7349; src/CodeGenLoopNest.fs:4976 | Listed owners reach frame free/suppression or main dense free. Raw expression paths remain outside this mechanism. |
+| LLVM allocation and release ownership | src/EmitLlvm.fs:4872, :2069, :4140, :4268, :5001 | Listed map has one slot in a function, direct pool in main; nested alias copies are unlisted. |
+| Validator and interpreter twin | src/IRValidate.fs:470, :484; src/Interp/Core.fs:1048 | One-level reference backstop and no-op twin implemented; neither proves allocation-list completeness. |
+
+Scope: no emission change found for programs with no admitted A7c retained-inline plan at the baseline; round 5 only narrows A7c admission and preserves W1-D. Interp/opt-diff implications remain round 4's; no test or timing conclusion. Only this review file was written.
+
+---
+
+## codex-diff-W2-4-6
+
+_formerly `bench/notes/round3/reviews/codex-diff-W2-4-6.md` (scratchpad; appended after the condensation)_
+
+VERDICT: DO NOT MERGE
+
+Fifth-look NEW 1 — PARTIAL: direct nested aliases are checked; allocations behind a call evaluated in tuple position remain unlisted (NEW 1).
+Fifth-look NEW 2 — PARTIAL: bare String and ordinary tuples containing String decline; IRTIdxTagged can wrap String and bypasses the new predicate (NEW 2).
+Fifth-look NEW 3 — PARTIAL: the A7c/W1-D decline wording and first-owned-pool anchor are corrected; allocation and test-coverage claims remain too broad (NEW 1–4).
+Fifth-look NEW 4 — PARTIAL: 038 now checks LLVM placement/release/nulling; 037/041 join the fault twins; decline byte identity is checked, but the asserted LLVM route is not, and is wrong for several fixtures (NEW 3–4).
+Premise correction — PARTIAL: 019/saxpy and direct tuple-component calls expand through EmitLlvm.fs:7559/:7592, without a pool scope; ordinary noncapturing scalar calls, including 037/041 and 039's arithmetic operands, outline through :2799/:3797/:3852 and free at :7800. Array parameters and totality do NOT select these routes.
+
+Inspected 23fe111c..5c230f74 and 654760e6..5c230f74; target HEAD and parent verified. Read the requested bench-fortran CLAUDE.md first and the fifth review. Locations below are at 5c230f74. Files/git only; no builds, tests, Blade, g++, or measurements. Reported footers remain unverified. git diff --check is clean. Existing graft index has no source cards; no refreshing query was run. 654760e6..361504b6 changes bench material only (including bench/RESULTS.md).
+
+1. NEW — BLOCKER: a scalar call inside a scalar tuple can allocate an unlisted LLVM alias pool.
+
+   Source-derived variant of 019, retaining its producer, B1 and caller: define this noncapturing helper before kernel, then replace kernel's final `s` with the two lines below.
+
+   ```blade
+   function extra(a: Array<Float64 like Ix>) -> Float64 = {
+       let spare = a
+       Float64(extents(spare))
+   }
+   // At the end of kernel:
+   let t = (extra(x), 1.0)
+   s + t[0]
+   ```
+
+   sfTotal accepts the helper's alias/extent and follows the call (Optimize.fs:6613, :6627, :6630–6636). inlineValueOk therefore accepts t (:6756). The freshened unit is a tuple of Float64; shapeProblem checks the tuple and call RESULT types, never extra's body (:7607–7621). The helper is not another original-statement SfInl: buildUnits inserts only the outer call's freshened lets (:6843–6855). IRLift preserves scalar calls in tuple components (:30, :1001–1013).
+
+   LLVM classifyValue sends t to emitTupleParts (EmitLlvm.fs:5024); its IRTuple arm recursively visits each component (:7559), and its IRApp arm expands EVEN this scalar-returning extra (:7592–7613). That arm binds parameters and emits a shadow-frame pair, but opens/pops no pool scope. The helper's `spare` reaches bindNamed's copyArr (:4268), allocPool (:5001/:2069). Only y2 is listed by Optimize.fs:7489–7495. In main the copy survives the A7c event; inside driver it belongs to driver's scope, not kernel's return boundary. A tuple-returning helper containing the same alias also takes this path (:5043). No downstream admission rechecks the emitter expansion. This is an admitted unlisted-pool path derived from source, not an executed probe.
+
+   Exact fix: audit resolved callable bodies transitively for allocation when their execution can expand into the caller (including scalar calls in tuple-component position and tuple-returning calls); conservatively decline unresolved/unaudited cases. Alternatively give those expansions a proven pool scope and prove returned components cannot escape it. Do not assume a scalar/tuple return implies separate cleanup. Add both main and failing-driver witnesses, pinning the decline/no-event and unchanged output, or the complete release route if implementing scopes. Do not add spare indiscriminately to the event's pool list.
+
+   Contrast within this finding: `let t = extra(x)` with a SCALAR RHS reaches emitCall and, for a noncapturing helper, outlines and frees its alias at the helper's return (:7756/:7800). It is reachable, not allocation-free evaluation, but separately scoped. A helper building a local map/literal is refused by sfTotal's default; an array rename is not. The tuple-context variant above invalidates the builder's proposed blanket exemption.
+
+2. NEW — HIGH: the dedicated value-type predicate still admits owning String values through index tags.
+
+   Optimize.fs:944 accepts `IRTIdxTagged _` without inspecting its inner type. stripUnits strips ONLY unit annotations (IR.fs:1523–1526). This is not an integer-only type: Types.fs:1263–1275 expressly permits any inner type; TypeCheckInfer.fs:12994–13006 accepts string-valued EnumIdx labels. CodeGen.fs:2463–2469 emits their aliases as std::string; CodeGenState.fs:2223–2245 erases the tag to that representation. LLVM likewise peels the tag (:98), so it does not establish a cross-lane no-allocation property.
+
+   In particular, a normal helper returning a long string-valued EnumIdx label has an IRApp result of `IRTIdxTagged(IRTScalar ETString, ...)`; a let binding that call in kernel passes both the outer predicate and the call-result check. Its C++ return value owns heap storage in the enlarged caller scope. Nested tuples containing that tagged value pass recursively too. Ordinary numeric tuples, including nested ones, are handled correctly. Nat<I> over integers is a primitive value; bare IRTNat is size_t in C++ (:2222), but LLVM scalarTyOf has no IRTNat arm (:91–100), so claiming supported emission in both lanes for every admitted type is also too strong.
+
+   Exact fix: replace `IRTIdxTagged _ -> true` with `IRTIdxTagged(inner, _) -> go inner`; keep holdsNoStorage unchanged. Add tagged-String and nested-tuple predicate tests plus a source decline witness. Also close the literal/operand gap if retaining the literal “whole evaluation is allocation-free” claim: shapeProblem ignores IRLit/IRVar leaves, so a String literal used only inside a Bool comparison is not judged (C++ constructs std::string at CodeGenExprSupport.fs:595). Scope claims to supported lane representations, not all types accepted by the predicate.
+
+3. NEW — HIGH: the LLVM premise/route record confuses tuple-position expansion with array-parameter calling.
+
+   Actual route census:
+   - 019, saxpy, 036, 040, 042: kernel is a direct component of a tuple. emitTupleParts expands it in place, irrespective of scalar return or array parameters; main opens no pool scope. The correction is right for these programs.
+   - 037/041: driver's `let k = kernel(x, y)` is scalar. classifyValue :5044 -> emitExpr :2799 -> emitCall :3797/:3852 outlines kernel. Its scope frees y2 and spare at :7800 before driver's later failure. The fourth-look path applies here, and to an admitted clean variant of this shape; the evaluation guard is essential when the call is then inlined for A7c.
+   - 039: the first tuple component is an arithmetic expression. emitTupleParts :7623 falls through to scalar emission; ka/kb within that arithmetic are outlined calls, each with its own cleanup.
+   - 038's first kernel and 043 can already be optimizer-inlined for W1-D; 038's driver-side kernel2 has the ordinary scalar-call route when not retained by A7c.
+
+   Totality affects shadow-frame retention (resolveFrames, :8679–8694), not outlining or pool-scope creation. No shadow frame does not mean no pool scope.
+
+   Exact fix: correct G69's “total array-parameter callee” explanation and OptimizeTests.fs:2831–2833/:2848. Pin route-specific evidence: LLVM kernel calls in bl_driver for 037/041 and calls to ka/kb in main for 039; direct tuple expansion/no kernel call plus its allocations for 036/040/042. Keep the byte-identity pins: they prove no gate-induced change, not which baseline route executed. Blanket LLVM-CALL assertions from the fifth review were wrong for the direct tuple cases; blanket in-place-expansion assertions are wrong for the scalar cases.
+
+4. NEW — HIGH: checked-in coverage claims exceed the assertions.
+
+   CLAUDE.md:206 says “the declines 036-043 pinned as emission byte-identical” in both lanes. The equality assertions cover exactly 036/037/039/040/041/042 (OptimizeTests.fs:2810–2829/:2840–2845). 038 is admitted. 043's separate test never emits gate-off, discards LLVM decisions (:2861), and does not assert absence of applied plans; it checks one decline, a W1-D application, C++ call absence, binding-level event absence and release/leg markers (:2862–2868). G69:119 similarly says “every decline pinned”. Those statements are not supported by that test.
+
+   Exact fix: enumerate the six equality fixtures in CLAUDE.md/G69. Add both-lane gate-off comparisons and no-applied-plan checks to 043 before claiming them. Describe 043's retained inline/alias-copy lifetime as pre-existing W1-D behavior; G69 already excludes W1-D return-boundary events from BUILT, but does not explicitly identify 043's unlisted alias copy in that exclusion. Keep ASan restricted to 030/031/032/033/035 C++; no ASan claim for 036–043. The narrowed LLVM owned-pools record (:4248) is accurate for its listed pools; the planner's whole-evaluation claim (:7501) still fails NEW 1–2.
+
+Evaluation/rewrite audit:
+
+- Direct nested IRLet array values, array/String IRApp results, array-bearing tuples/projections, and array/String branch results are judged and decline (:7611–7628). A direct IRMatch is already outside sfTotal. Non-owned IRCompute is either refused earlier or declined by its result type; owned forced maps are the explicit exception.
+- IRMask, array literals, ranges (even though IRRange can report scalar type), zero/uninit, index/slice materializations, sort/set operations, array combinators outside the allowed forced map/fold shapes, sequence/assignment and unknown node kinds fail inlineValueOk/sfTotal's closed defaults. Deferred maps/loop values fail the ownership predicate; reading a recorded deferred value fails sfTotal. A captured lambda is refused by inlineJudge (:6777–6784).
+- Stored array IRVar operands of accepted folds/maps are reads, not alias binders. Numeric literal/arithmetic/extent values and scalar tuples allocate no owned pool. Calls are the missing classification: sfTotal proves neither allocation freedom nor separate cleanup; NEW 1 supplies the uncovered execution context. String/index-tag cases are NEW 2.
+- The check DOES include inlineJudge's fresh return let (:6798–6804), but runs on tentative units BEFORE finalUnits/join reconstruction (:7653/:7678–7704), not after every rewrite. The rebuild adds scalar joins/projections; the second-call check sees all original-statement tentative SfInl units (:7572), including a second W1-D contributor. It does not inspect call bodies later expanded by LLVM. Later IRLift/forcing/CSE (:3139/:3162/:3171 in Lowering.fs) do not cure that omission.
+- 038's test now requires two LLVM placement records and exactly one release in main and bl_driver (:2894–2896). llvmReleasesSafe traces allocation -> tracking slot -> loaded free operand and requires that SAME slot nulled on the next line (:2601–2629); it is a textual direct-register check, not a general alias-liveness proof. 037/041 fault twins and at-driver pins are present. The decline helper checks no applied LLVM plan plus byte identity; __epl_ absence is checked only in C++, not LLVM.
+
+Hook verification (five claims):
+
+| Claim | File:line hooks | Result |
+|---|---|---|
+| Freshened allocation admission | Optimize.fs:6798, :7575, :7607; EmitLlvm.fs:7592 | Fresh return included; callable-body/tuple-context allocation escapes. |
+| Durable region start and optimizer barriers | Optimize.fs:7667, :1754, :632; Lowering.fs:3139 | First listed owned-pool binder; joins cannot drop it, CSE pins it, reuse excludes it. |
+| C++ boundary release/renderers | CodeGenBinding.fs:336, :7349; CodeGen.fs:662; CodeGenLoopNest.fs:4976; IRLift.fs:84 | Supported statement routes reach release; owner frame suppressed or main freed. Raw expression paths are not supported. |
+| LLVM ownership and release | EmitLlvm.fs:3797, :4140, :7592, :7756, :7800 | Outlined scope and tuple expansion differ; event frees only listed pools, nulling tracked slots. |
+| Validation/twin and LLVM witness | IRValidate.fs:470, :484; Interp/Core.fs:1048; OptimizeTests.fs:2624, :2895 | One-level liveness backstop/no-op twin; 038 slot/nulling checked; none proves ownership completeness. |
+
+Scope: round 6 only narrows A7c admission; no emission change found for programs without an admitted A7c plan (decision text changes). W1-D's keep set remains independent. No new timing conclusion; saxpy remeasurement remains outstanding. Only this review file was written.
+
+---
+
+## codex-diff-W2-4-7
+
+_formerly `bench/notes/round3/reviews/codex-diff-W2-4-7.md` (scratchpad; appended after the condensation)_
+
+VERDICT: DO NOT MERGE
+
+Sixth-look NEW 1 — PARTIAL: direct IRApp nodes, including tuple-position 044/045 and scalar-let 046, now decline; the same call hidden in a fold kernel bypasses the walk (NEW 1 below).
+Sixth-look NEW 2 — CLOSED for the reported predicate defect: tags recurse through their inner type, nested tuples recurse, bare Nat declines; predicate tests cover these. Direct String literals/reads are checked. 047 is an earlier totality refusal, not an exercised tagged-String admission.
+Sixth-look NEW 3 — CLOSED: tuple-component expansion versus scalar-let/arithmetic outlining is corrected and asserted per equality fixture.
+Sixth-look NEW 4 — PARTIAL: the equality list and 043's gate-off/no-applied-plan assertions are fixed; 047's equal LLVM refusal is still described as identical emission (NEW 2).
+
+Read the requested bench-fortran CLAUDE.md first. Inspected 5c230f74..ec57d7d3 and 654760e6..ec57d7d3; target HEAD and parent verified. Locations below are at ec57d7d3. Files/git only; no build, test, Blade, g++, or measurement. Reported footers were not independently executed. Diff whitespace check clean. Existing graft index has no source cards; no refreshing query was run. 654760e6..361504b6 is bench-only, including bench/RESULTS.md.
+
+1. NEW — BLOCKER: a non-owned fold can execute an unaudited kernel containing the same tuple-position alias-copy call.
+
+   Source-derived variant of 019 (not an executed probe): retain its inputs, producer, B1 and caller. Declare these before kernel; add `let h = reduce(aux, step, 0.0)` after its s binding and return `s + h`.
+
+   ```blade
+   type Aux = Idx<3>
+   let aux: Array<Float64 like Aux> = [1.0, 2.0, 3.0]
+   function extra(a: Array<Float64 like Aux>, q: Float64) -> Float64 = {
+       let spare = a
+       q + Float64(extents(spare))
+   }
+   function step(p: Float64, q: Float64) -> Float64 = {
+       let t = (extra(aux, q), 1.0)
+       p + q + t[0]
+   }
+   ```
+
+   Admission: foldTotal accepts the stored, nonempty Aux fold and kernelTotal follows step's body via sfTotal (Optimize.fs:6711, :6647, :6635). sfTotal accepts the tuple, helper call, alias and extent. Source-level functions have empty Captures (Lowering.fs:1742), so inlineJudge's capturing-lambda check does not reject step. Aux has a different extent from Ix; h cannot join the caller's Ix legs. The q-dependent call stays in the kernel; this is not an invariant hoisted into a checked spine let.
+
+   The allocation check visits h's IRReduce children, ending at the IRVar naming step. IR.fs:2326/:2328 and :2665 traverse expression trees; IRVar is a leaf (:2242). They do NOT resolve callable bodies. Optimize.fs:7632 ignores function-typed references; :7639 judges no kernel body. Thus neither extra's IRApp nor spare is checked. The final pool list contains y2 only (:7493).
+
+   LLVM executes step via emitReduceCore -> applyKernel (:6861/:6023). applyKernel binds parameters and emits a shadow-frame pair, but opens no pool scope. t goes through classifyValue's tuple arm (:5024), emitTupleParts expands extra (:7592), again without a pool scope, and spare reaches copyArr (:4268/:5001). That allocation is absent from the A7c event (:4140). The counted loop opens no scope either (:1627). In main these copies remain untracked by a function scope; in a scalar-let driver variant they belong to the driver's scope after A7c inlining, whereas the outlined kernel's scope owns them with A7c off. Earlier iterations' existing tracking limitations are not claimed as newly introduced; the missing ownership census and delayed surviving copy are sufficient here. C++ calls its kernel/helper through ordinary function wrappers (CodeGenBinding.fs:4156; CodeGenExprSupport.fs:1175); this finding needs only the LLVM path.
+
+   A direct array alias or a long String literal in step's body also bypasses the ownership walk. The latter constructs std::string in C++ (CodeGenExprSupport.fs:595). This is user callback execution, not an opaque allocation inside a trusted arithmetic builtin. The owned-map exemption also skips kernel-body ownership analysis (:7651); do not claim a map's output is necessarily its only allocation.
+
+   EXACT FIX: resolve every executed map/fold kernel while auditing an inline, and audit its body with the allocation/evaluation rules, cycle-safe. Conservatively reject IRApp inside such a body, array aliases, String construction and other unproved allocation forms; alternatively prove transitive callable allocation/cleanup explicitly. Apply this to kernels of owned maps too, separately from accepting their output pool. Add an Aux-fold witness with this tuple helper in main and in a scalar-let driver; require decline/no event and gate-off identity, or a complete allocation/free census if implementing cleanup. Counting original statement calls or re-running the same shallow walker does not fix it.
+
+   SURVIVES THE OPT-IN FALLBACK: YES in the explicit BLADE_EPILOGUE_LEGS=1 inline path. Disabling A7c-kept inlining by default removes this new return-boundary ownership obligation from the default. Ordinary kernel expansion/allocation remains pre-existing; no new no-inline-default read-after-release is established by this witness.
+
+2. NEW — HIGH, record-only: 047 does not establish byte-identical LLVM emission.
+
+   OptimizeTests.fs:2926 accepts either equal emitted modules OR equal Error strings. Its success text (:2932), CLAUDE.md:206 and G69 (bench/notes/gap-register.md:119) nevertheless include 047 in “both lanes” emission-byte-identity coverage. The reported LLVM result is a refusal/skip, not an emitted program. The assertion correctly compares that refusal; the description is stronger than the evidence.
+
+   EXACT FIX: say “047: C++ emission identical and call retained; LLVM refusal identical in both gate states (or identical modules if subsequently supported).” Change the test's pass text and the two records. Keep 047 separate from the ten emitted equality witnesses and from ASan coverage. No compiler change required for this finding.
+
+   SURVIVES THE OPT-IN FALLBACK: YES as a coverage/record defect; it makes no default-path memory claim.
+
+Closure and rewrite audit:
+
+- Numeric/Bool/complex literals, scalar arithmetic/comparison, scalar casts/libm and extents of stored variables need no heap pool/copy in either lane. Numeric tuples/projections, scalar if and nested scalar lets likewise need only value/stack storage, PROVIDED their executed operands and callable bodies satisfy that restriction. NEW 1 breaks that proviso.
+- IRMatch is not presently admitted by sfTotal. Neither is a direct IRIndex, including a String-array element used inside a Bool comparison, a tagged-String element, or a partial array view. There is NO IRIndex arm in shapeProblem that catches the String result: today's protection is sfTotal's closed default (Optimize.fs:6642), not the new type test. A future indexing whitelist must add that check; 047's no-record assertion would catch widening that admits its particular kernel.
+- IRReduce/IRProdSum over genuinely stored arrays use scalar/lane state; IRReduceCompute streams its plain map leaves in LLVM (:7467/:7544) and the C++ fused reduction. Kernels are executable user bodies, not traversed expression children. This is the closure hole.
+- A bare deferred map/loop let in the inlined spine declines; an arbitrary deferred expression is not an accepted fold operand shape. However foldTotal's IRReduce variable arm checks plainAxis/isStreamed, not positive storage provenance or deferred membership (:6711). A named deferred operand supplied from outside the spine is not made “stored” by this test: LLVM may materialize a multiply-read name (:6716); C++ routes a deferred wrapper separately (CodeGenBinding.fs:431). Do not infer allocation freedom merely from a variable operand. These caller-owned/global materializations are not themselves proof of a new callee lifetime regression.
+- Array casts cannot escape the scalar/type restrictions through an admitted scalar expression; array-bearing tuples/branches are rejected. Scalar IRCompute exists in the IR representation, but sfTotal/inlineValueOk does not admit it here; the only direct compute exception is the forced map.
+- A separate omp fold inside the callee is not excluded just because the producer and riding legs are serial. Its C++ Path B form allocates a temporary partial array (CodeGenBinding.fs:4274), then deletes it at that fold's end (:4285); LLVM's ordinary fold is serial. That is additional allocation, but locally paired, not evidence of a missed return-boundary free. The records' stated builtin-trust limitation is material; allocation-free evaluation is not proved.
+- The “other IRApp” ownership arm is defensive: inlineValueOk/sfTotal already reject unresolved/non-variable calls on these admitted source paths (:6635–6642). No present source witness reaches it.
+- The ownership check DOES include inlineJudge's fresh return let (:6802–6808). It runs on tentative units before the final join rebuild, once; neither emitter repeats it. The one-call check (:7576) sees all original-statement tentative SfInl units (:6862), including ones W1-D will retain. W1-D has not invisibly removed a second original call before this count. Calls inside named kernels were never such units.
+- Rebuilding adds joins/projections and inserts the event before the original statement (:7678/:7754); subsequent IRLift/forcing/CSE do not resolve the missed kernel-body ownership. The planner's fused-route mirror and the emitters' placement checks are not allocation audits.
+
+Fixtures and records:
+
+- 033 still tests the duplicate return boundary: r and the fresh return are both sqrt(s), with the latter immediately before the event. Dropping that return duplicate leaves no earlier sqrt twin for the preceding let, so the present nonLeaf/structural-equality assertion still fails that regression (OptimizeTests.fs:3008–3018). The equal caller map and post-release cube fold remain. This was never two calls to the outer kernel; it is one inlined spine with duplicate return computation. Re-pin follows solely from replacing 0.5*s+1 by sqrt(s): s=82065, so 1035390.5 - 41033.5 + sqrt(82065) = 994643.469893706.
+- 038 retains two admitted regions in one compilation, one in main and one in driver; CSE's duplicate pre/h is within driver, not cross-function CSE. Both plans, both release sites, validation and an applied CSE decision remain asserted (:2967–2981). The CSE test checks a decision exists, not h's exact removed ID. Re-pin is 69234 - 5 + 2*sqrt(1006) = 69292.4350061086. No other existing 019–043 program or EXPECT pin changed in round 7.
+- 044/046/048 require expanded kernel to be neither called in the selected LLVM caller nor defined anywhere; 044 requires the same for extra. 045 requires a kernel call in bl_driver; 046 requires an extra call in main. An outlined route cannot satisfy the expansion assertions (OptimizeTests.fs:2846–2869). All ten fixtures also require byte equality to gate-off and no applied LLVM plan.
+- 045's fault twin runs both lanes and compares nonzero exit plus complete fault text, requiring BL8013 and “at driver” (CellEpilogueTests.fs:615–658). Its corpus also pins line 23. 047 requires NO epilogue-legs record at all (:2922), so an appearing record fails it. 043 now compares both emitted lanes with gate-off and checks no applied plan (:2884–2903); its alias-copy inline is accurately identified as pre-existing W1-D.
+- Builtin-trust language is present in CLAUDE.md:206, features.md:281 and G69:119. ASan is limited to 030/031/032/033/035 C++; declines are not ASan-run. The ten emitted equality fixtures are exactly 036/037/039/040/041/042/044/045/046/048, with 043 checked separately. Remaining overclaims are NEW 1's whole-evaluation/no-user-call assertion in those records and Optimize.fs:7505, and NEW 2.
+- LLVM's emitted decline record (:4248) correctly limits cleanup to the listed owned maps. Its source comment at :4133 still incorrectly says the as-written call was outlined; change that to distinguish scalar-call and tuple-component routes. The LLVM saxpy lifetime-matched remeasurement remains outstanding.
+
+Opt-in fallback: gate only the A7c inline retention/plan for inlineKey=Some on explicit 1; preserve inlineKey=None plans for a producer already present in the region (019's second spelling). W1-D's independent keep set remains. IRReleasePools is minted only from legInlines, so without an A7c inline there is no new event for CSE to pin/clear, pool reuse to exclude, the interpreter to consume, or IRValidate check 5 to reject. Those handlers remain installed but inert for an event-free program. No additional default-path misfire found. The fallback contains NEW 1; it does not repair it.
+
+Hook verification (five claims):
+
+| Claim | File:line hooks | Result |
+|---|---|---|
+| Freshened-spine ownership and execution closure | Optimize.fs:6802, :7573, :7612; IR.fs:2242, :2326, :2665 | Fresh return checked; named kernel bodies missed. |
+| Durable event and optimization barriers | Optimize.fs:7694, :1773, :1794, :632; Lowering.fs:3135, :3171 | First owned-pool anchor; listed pools/preceding return pinned, event clears CSE, reuse excludes listed pools. |
+| C++ statement cleanup | IRLift.fs:87; CodeGenBinding.fs:336; CodeGenLoopNest.fs:4976 | Supported statement paths free via owning frame or main; no completeness proof for hidden allocations. |
+| LLVM scopes and boundary | EmitLlvm.fs:4140, :4268, :6023, :7592, :7756, :7800 | Event frees listed pools/nulls slots; kernel/tuple expansions open no scope; outlined functions do. |
+| Validation, twin and witnesses | IRValidate.fs:470, :484; Interp/Core.fs:1048; OptimizeTests.fs:2846, :2977 | One-level liveness backstop/no-op twin; route and listed-pool release checks do not census hidden pools. |
+
+Scope: round 7 only narrows A7c admission plus decision/docs/test changes and the two fixture rewrites; no emission change found versus 5c230f74 for programs with no admitted A7c plan in either revision. Only this review file was written.

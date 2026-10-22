@@ -1,0 +1,29 @@
+// TEST: Scratch reuse never joins an inlined callee's pools across its return boundary
+// ============================================================================
+// `kernel` has two producers whose lifetimes do not overlap: called as a
+// function, scratch pool reuse lets a2 take a1's dead pool. Inlined into
+// `driver` for its input legs, both pools are named by the return-boundary
+// event, and planPoolReuse excludes them (neither donor nor reuser): each is
+// allocated and released once at the boundary -- the documented exclusion
+// (the uninlined callee's own reuse is forgone). Values are the as-written
+// ones.
+// ============================================================================
+type Ix = Idx<1003>
+function inputs(m: Int64) -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute
+}
+function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {
+    let a1 = method_for(zip(x, y)) <@> lambda(u, v) -> u + v |> compute
+    let s1 = reduce(method_for(a1) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
+    let a2 = method_for(zip(x, y)) <@> lambda(u, v) -> u - v |> compute
+    let s2 = reduce(method_for(a2) <@> lambda(w) -> w, lambda(p, q) -> p + q, 0.0)
+    s1 + 10.0 * s2
+}
+function driver(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {
+    let k = kernel(x, y)
+    k + 100.0 * (reduce(x, (+)) + reduce(y, (+)))
+}
+let res = driver(inputs(7), inputs(5))
+let direct = kernel(inputs(9), inputs(4))
+// EXPECT: res = 541731.0
+// EXPECT: direct = 63137.0

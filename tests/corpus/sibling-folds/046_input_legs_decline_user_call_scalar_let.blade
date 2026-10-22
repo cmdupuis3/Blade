@@ -1,0 +1,28 @@
+// TEST: A callee that calls a user function in a scalar let is not inlined for the input legs
+// ============================================================================
+// 044's kernel with the helper call bound to a scalar let `let t = extra(x)`:
+// a Float64 let, but its evaluation calls a user function, so the kept inline
+// declines `callee let t calls extra` (W2-4 sixth review NEW 1). Values are
+// the as-written ones.
+// ============================================================================
+type Ix = Idx<1003>
+function inputs(m: Int64) -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute
+}
+function extra(a: Array<Float64 like Ix>) -> Float64 = {
+    let spare = a
+    Float64(extents(spare))
+}
+function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {
+    let y2 = method_for(zip(x, y)) <@> lambda(u, v) -> 2.0 * u + v |> compute
+    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
+    let t = extra(x)
+    s + t
+}
+let (checksum, input_checksum) = {
+    let x = inputs(7)
+    let y = inputs(5)
+    (kernel(x, y), reduce(x, (+)) + reduce(y, (+)))
+}
+// EXPECT: checksum = 83068.0
+// EXPECT: input_checksum = 5007.0

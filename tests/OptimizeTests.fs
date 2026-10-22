@@ -18,6 +18,8 @@ module Blade.Tests.OptimizeTests
 
 open Blade
 open Blade.Lowering
+open Blade.Types
+open Blade.IR
 open Blade.Tests.TestHarness
 
 let private cppOfSource (testName: string) (src: string) : Result<string, string> =
@@ -2163,6 +2165,11 @@ let private cepThreadedCellSrc =
 // loop, no joined pass; the gate off restores it) in both lanes, and one
 // decision per row of the five-party matrix.
 // ---------------------------------------------------------------------------
+/// The A7c tests' "gate on" arm: a null gate means the EXPLICIT opt-in
+/// `BLADE_EPILOGUE_LEGS=1` (the kept one-level inline is opt-in since W2-4
+/// round 8); `0` stays the gate off. The default (unset) build is asserted
+/// separately by `eplDefaultDeclinesInline`.
+let private eplArm (gate: string) = if isNull gate then "1" else gate
 
 /// The bench saxpy shape at n = 1003: the producer in `kernel`, the input
 /// sums in the caller (the admission inlines the call for them).
@@ -2276,7 +2283,7 @@ let private eplCppGateOff () =
 let private eplLlvm () =
     let name = "epilogue_legs_llvm_one_fused_loop"
     let llWith (gate: string) =
-        withGate "BLADE_EPILOGUE_LEGS" gate (fun () ->
+        withGate "BLADE_EPILOGUE_LEGS" (eplArm gate) (fun () ->
         withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () ->
             Blade.Effects.Decisions.start ()
             let r =
@@ -2352,7 +2359,7 @@ let private llvmFusedLoop (ll: string) : int * int * int =
     | None -> (0, 0, bodies.Length)
 
 let private eplLlvmOf (src: string) (gate: string) =
-    withGate "BLADE_EPILOGUE_LEGS" gate (fun () ->
+    withGate "BLADE_EPILOGUE_LEGS" (eplArm gate) (fun () ->
         Blade.Effects.Decisions.start ()
         let r =
             match lower src with
@@ -2372,7 +2379,7 @@ let private eplFailureFixtureRoute () =
     | Error e -> resultLine Fail name e; false
     | Ok src ->
     let src = src.Substring(src.IndexOf '\n' + 1)   // the harness drops the TEST line
-    let cppWith gate = withGate "BLADE_EPILOGUE_LEGS" gate (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () -> cppOfSource name src))
+    let cppWith gate = withGate "BLADE_EPILOGUE_LEGS" (eplArm gate) (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () -> cppOfSource name src))
     match cppWith null, cppWith "0", withGate "BLADE_OMP_THREADS" "1" (fun () -> eplLlvmOf src null), withGate "BLADE_OMP_THREADS" "1" (fun () -> eplLlvmOf src "0") with
     | Ok on, Ok off, Ok (llOn, ds), Ok (llOff, _) ->
         let m, mOff = mainBody on, mainBody off
@@ -2492,7 +2499,7 @@ let private eplCorpus028 () =
 let private eplTeamNoCensus () =
     let name = "epilogue_legs_mt8_decline_adds_no_omp_census"
     let census (cpp: string) = cpp.Replace("\r\n", "\n").Split('\n') |> Array.filter (fun l -> l.Contains "[omp] requested but emitted serial") |> Array.length
-    let emit gate = withGate "BLADE_EPILOGUE_LEGS" gate (fun () -> withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" null (fun () -> cppOfSource name eplSaxpySrc)))
+    let emit gate = withGate "BLADE_EPILOGUE_LEGS" (eplArm gate) (fun () -> withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" null (fun () -> cppOfSource name eplSaxpySrc)))
     match emit null, emit "0" with
     | Ok on, Ok off ->
         if census on = census off && not (on.Contains "__epl_") then
@@ -2569,12 +2576,551 @@ let private eplJoinInsideCallee () =
     match emit false, emit true with
     | Ok normal, Ok testMode ->
         match releasesSafe (mainBody normal), releasesSafe (mainBody testMode) with
-        | Ok rn, Ok rt when rn.Length = 3 && rt.Length = 3 && (mainBody normal).Contains "__epl_acc_" ->
-            resultLine Pass name ($"3 callee pools (y2 and z of later, y2 of early) released once each at the call's return boundary, no read after any release -- with the epilogue fused and with it declined (omp test mode)")
+        | Ok rn, Ok rt when rn.Length = 3 && rt.Length = 3 && (mainBody normal).Contains "__epl_acc_"
+                            && not ((mainBody testMode).Contains "__cep_") && not ((mainBody testMode).Contains "__epl_") ->
+            resultLine Pass name ($"3 callee pools (y2 and z of later, y2 of early) released once each at the call's return boundary, no read after any release -- with the epilogue fused, and with it ACTUALLY declined under omp test mode (no `__cep_` / `__epl_` route in main)")
             true
         | a, b -> resultLine Fail name (sprintf "normal %A; test mode %A" a b); false
     | Error e, _ | _, Error e -> resultLine Fail name e; false
 
+/// Round 4: the release in the LLVM lane, read from the raw emitter IR of one
+/// function (`define ... @<fn>(` .. `}`): every `; A7c:` free releases a pool
+/// this function allocated (directly, or through the tracking slot the alloc
+/// was stored to, then nulled), once, and the pool register is never used
+/// after it. Ok = the number of releases.
+let private llvmReleasesSafe (ll: string) (fn: string) : Result<int, string> =
+    let lines = ll.Replace("\r\n", "\n").Split('\n')
+    let start = lines |> Array.tryFindIndex (fun l -> l.StartsWith "define " && System.Text.RegularExpressions.Regex.IsMatch(l, "@" + fn + @"(_\d+)?\("))
+    match start with
+    | None -> Error $"no function @{fn}"
+    | Some st ->
+    let stop = (lines |> Array.skip st |> Array.findIndex (fun l -> l = "}")) + st
+    let body = lines.[st .. stop]
+    let rx (p: string) (l: string) = System.Text.RegularExpressions.Regex.Match(l, p)
+    let grab (p: string) (k: int) (l: string) =
+        let m = rx p l
+        if m.Success then Some (m.Groups.[k].Value) else None
+    let grab2 (p: string) (l: string) =
+        let m = rx p l
+        if m.Success then Some (m.Groups.[1].Value, m.Groups.[2].Value) else None
+    let allocOf = body |> Array.choose (grab @"^\s*(%r\d+) = call ptr @blade_alloc_cells" 1) |> Set.ofArray
+    let slotOf =
+        body |> Array.choose (grab2 @"^\s*store ptr (%r\d+), ptr (%r\d+)")
+        |> Array.filter (fun (r, _) -> allocOf.Contains r) |> Array.map (fun (r, slot) -> (slot, r)) |> Map.ofArray
+    let loadOf = body |> Array.choose (grab2 @"^\s*(%r\d+) = load ptr, ptr (%r\d+)") |> Map.ofArray
+    let rels = body |> Array.mapi (fun i l -> (i, l)) |> Array.filter (fun (_, l) -> l.Contains "; A7c:")
+    let pools =
+        rels |> Array.map (fun (i, l) ->
+            let r = (rx @"@blade_free\(ptr (%r\d+)\)" l).Groups.[1].Value
+            let pool =
+                if allocOf.Contains r then Some r
+                else
+                    match Map.tryFind r loadOf with
+                    | Some slot -> Map.tryFind slot slotOf
+                    | None -> None
+            (i, pool))
+    let tok (r: string) (l: string) = System.Text.RegularExpressions.Regex.IsMatch(l, System.Text.RegularExpressions.Regex.Escape r + "(?![0-9])")
+    match pools |> Array.tryPick (fun (i, p) ->
+            match p with
+            | None -> Some $"release at line {i} frees no pool this function allocated"
+            | Some r ->
+                let after = body |> Array.skip (i + 1) |> Array.exists (fun l -> tok r l && not (l.TrimStart().StartsWith "store ptr null"))
+                // a slot-form release must null its tracking slot on the very next line
+                let freed = (rx @"@blade_free\(ptr (%r\d+)\)" body.[i]).Groups.[1].Value
+                let slotForm = not (allocOf.Contains freed)
+                let nulled =
+                    not slotForm
+                    || (match Map.tryFind freed loadOf with
+                        | Some slot -> i + 1 < body.Length && body.[i + 1].Trim() = $"store ptr null, ptr {slot}"
+                        | None -> false)
+                if after then Some $"{r} is used after its release"
+                elif not nulled then Some $"the slot-form release of {r} does not null its tracking slot"
+                else None) with
+    | Some why -> Error why
+    | None ->
+        let distinct = pools |> Array.choose snd |> Array.distinct
+        if distinct.Length <> pools.Length then Error "a pool is released twice" else Ok pools.Length
+
+let private eplLlvmEmit (src: string) =
+    withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () -> withGate "BLADE_POOL_REUSE" "off" (fun () -> eplLlvmOf src null)))
+
+/// Round 4 hole 4 (the LLVM lane): 019 and 031 release their inlined pools in
+/// main (019: y2; 031: y2 and w2, two plans, one call), 034 in its function
+/// caller through the tracking slot -- each after its last use, once.
+let private eplLlvmReleaseOrder () =
+    let name = "epilogue_legs_llvm_release_order_main_and_function"
+    let one (rel: string) (fn: string) (want: int) =
+        match corpusSource rel with
+        | Error e -> Error e
+        | Ok src ->
+            let src = src.Substring(src.IndexOf '\n' + 1)
+            match eplLlvmEmit src with
+            | Error e -> Error e
+            | Ok (ll, _) ->
+                match llvmReleasesSafe ll fn with
+                | Ok n when n = want -> Ok n
+                | Ok n -> Error $"{rel}: {n} releases in @{fn}, wanted {want}"
+                | Error e -> Error $"{rel}: {e}"
+    let cases =
+        [ ("sibling-folds/019_input_legs_ride_producer.blade", "main", 1)
+          ("sibling-folds/031_input_legs_two_plans_one_inlined_call.blade", "main", 2)
+          ("sibling-folds/032_input_legs_unused_final_join_atom_return.blade", "main", 1)
+          ("sibling-folds/034_input_legs_function_caller_failure_after_return.blade", "bl_driver", 1) ]
+    let res = cases |> List.map (fun (r, f, w) -> one r f w)
+    // 034: the function caller's release sits BEFORE the failing blade_idiv call
+    let order =
+        match corpusSource "sibling-folds/034_input_legs_function_caller_failure_after_return.blade" with
+        | Error e -> Error e
+        | Ok src ->
+            match eplLlvmEmit (src.Substring(src.IndexOf '\n' + 1)) with
+            | Error e -> Error e
+            | Ok (ll, _) ->
+                let lines = ll.Replace("\r\n", "\n").Split('\n')
+                let st = lines |> Array.findIndex (fun l -> l.StartsWith "define " && System.Text.RegularExpressions.Regex.IsMatch(l, @"@bl_driver(_\d+)?\("))
+                let rel = lines |> Array.skip st |> Array.tryFindIndex (fun l -> l.Contains "; A7c:")
+                let div = lines |> Array.skip st |> Array.tryFindIndex (fun l -> l.Contains "@blade_idiv(")
+                match rel, div with
+                | Some r, Some d when r < d -> Ok 1
+                | r, d -> Error (sprintf "034 driver: release %A, blade_idiv %A" r d)
+    let res = res @ [ order ]
+    match res |> List.tryPick (function Error e -> Some e | Ok _ -> None) with
+    | Some e -> resultLine Fail name e; false
+    | None -> resultLine Pass name "019 / 031 / 032 main and 034's function caller: each inlined pool released once after its last use (031: y2 and w2); the function caller through its tracking slot"; true
+
+/// 033's witness is live: the same two maps in one function body WITHOUT an
+/// inline between them ARE merged by CSE (so only the event's barrier keeps
+/// 033's z out of the released y2).
+let private eplCseProbeSrc =
+    cepInputs
+    + "function cell(u: Float64, v: Float64) -> Float64 = 2.0 * u + v\n"
+    + "function driver(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {\n"
+    + "    let y2 = method_for(zip(x, y)) <@> lambda(u, v) -> cell(u, v) |> compute\n"
+    + "    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)\n"
+    + "    let z = method_for(zip(x, y)) <@> lambda(u, v) -> cell(u, v) |> compute\n"
+    + "    let c = reduce(method_for(z) <@> lambda(w) -> w * w * w, lambda(p, q) -> p + q, 0.0)\n"
+    + "    s + c\n"
+    + "}\n"
+    + "let res = driver(inputs(7), inputs(5))\n"
+/// Round 4 holes 1-3 (the C++ lane): 032 -- the callee's last let is a join
+/// the rebuild drops, the return atom an earlier scalar: y2 still released in
+/// main; 033 -- CSE on: the caller's equal map z keeps its own pool (no
+/// merge into the released y2); 034 -- the function caller releases y2
+/// before the failing division; 035 -- the callee's pools take no part in
+/// scratch reuse in the caller, released once each, while the uninlined
+/// kernel keeps its own reuse.
+let private eplRound4Cpp () =
+    let name = "epilogue_legs_round4_events_cpp"
+    let emit rel =
+        match corpusSource rel with
+        | Error e -> Error e
+        | Ok src ->
+            let src = src.Substring(src.IndexOf '\n' + 1)
+            withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () -> cppOfSource name src))
+    let fnBody (cpp: string) (sigText: string) =
+        let d = cpp.IndexOf sigText
+        if d < 0 then "" else cpp.Substring(d, cpp.IndexOf("\n}\n", d) - d)
+    let driverSig = "double driver(Array<double, 1> x, Array<double, 1> y) {"
+    match emit "sibling-folds/032_input_legs_unused_final_join_atom_return.blade",
+          emit "sibling-folds/033_input_legs_cse_barrier_function_caller.blade",
+          emit "sibling-folds/034_input_legs_function_caller_failure_after_return.blade",
+          emit "sibling-folds/035_input_legs_scratch_reuse_inside_callee.blade" with
+    | Ok c32, Ok c33, Ok c34, Ok c35 ->
+        let d33, d34, d35 = fnBody c33 driverSig, fnBody c34 driverSig, fnBody c35 driverSig
+        let checks =
+            [ ("032 main", (match releasesSafe (mainBody c32) with Ok [ _ ] -> None | r -> Some (sprintf "%A" r)))
+              ("033 driver", (match releasesSafe d33 with
+                              | Ok [ _ ] when System.Text.RegularExpressions.Regex.Matches(d33, @"(?<!de)allocate<typename promote<double, 1>::type, nullptr>\(").Count = 2 -> None
+                              | r -> Some (sprintf "%A; allocations %d" r (System.Text.RegularExpressions.Regex.Matches(d33, @"(?<!de)allocate<typename promote<double, 1>::type, nullptr>\(").Count))))
+              ("034 driver", (let rel = d34.IndexOf "is released at that return boundary"
+                              let boom = d34.IndexOf "blade_rt::idiv64(10L"
+                              match releasesSafe d34 with
+                              | Ok [ _ ] when rel >= 0 && boom > rel -> None
+                              | r -> Some (sprintf "%A; release %d, division %d" r rel boom)))
+              ("035 driver", (match releasesSafe d35 with
+                              | Ok [ _; _ ] when not (d35.Contains "pool reuse") -> None
+                              | r -> Some (sprintf "%A; reuse in driver %b" r (d35.Contains "pool reuse")))) ]
+        match checks |> List.tryPick (fun (w, p) -> p |> Option.map (fun why -> $"{w}: {why}")) with
+        | Some why -> resultLine Fail name why; false
+        | None -> resultLine Pass name "032: released in main though the callee's last let was dropped; 033: z keeps its own pool under CSE; 034: released before the failing division; 035: no reuse across the boundary, both pools released once"; true
+    | Error e, _, _, _ | _, Error e, _, _ | _, _, Error e, _ | _, _, _, Error e -> resultLine Fail name e; false
+
+/// Round 4: IRValidate's rule on hand-built violations of the lowered saxpy
+/// shape -- the event moved before the epilogue fold that reads y2 (a read
+/// after release), and an event naming a pool bound outside its inline.
+let private eplValidateRule () =
+    let name = "epilogue_legs_irvalidate_release_rule"
+    match withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () -> lower eplSaxpySrc)) with
+    | Error e -> resultLine Fail name e; false
+    | Ok ir ->
+    let rec unroll (e: IRExpr) = match e with IRLet (id, v, b) -> let (ls, r) = unroll b in ((id, v) :: ls, r) | _ -> ([], e)
+    let refold (ls: (IRId * IRExpr) list) (r: IRExpr) = List.foldBack (fun (id, v) acc -> IRLet (id, v, acc)) ls r
+    let hasEvent (ls: (IRId * IRExpr) list) = ls |> List.exists (fun (_, v) -> match v with IRReleasePools _ -> true | _ -> false)
+    let mutate (f: (IRId * IRExpr) list -> (IRId * IRExpr) list) =
+        let fixB (b: IRBinding) =
+            let (ls, r) = unroll b.Value
+            if hasEvent ls then { b with Value = refold (f ls) r } else b
+        let fixM (m: IRModule) = { m with Bindings = m.Bindings |> List.map fixB }
+        { ir with Modules = ir.Modules |> List.map fixM }
+    let ok0 = match Blade.IRValidate.validateIR ir with Ok _ -> true | Error _ -> false
+    // (1) the event right behind its spine start (before the epilogue fold)
+    let early =
+        mutate (fun ls ->
+            let ev = ls |> List.find (fun (_, v) -> match v with IRReleasePools _ -> true | _ -> false)
+            let start = match snd ev with IRReleasePools (_, s, _) -> s | _ -> -1
+            let rest = ls |> List.filter (fun x -> not (obj.ReferenceEquals(x, ev)))
+            rest |> List.collect (fun (id, v) -> if id = start then [ (id, v); ev ] else [ (id, v) ]))
+    // (2) the event names a caller binding (x, bound before the inline)
+    let foreign =
+        mutate (fun ls ->
+            let firstId = fst ls.Head
+            ls |> List.map (fun (id, v) ->
+                match v with
+                | IRReleasePools (c, s, pools) -> (id, IRReleasePools (c, s, (firstId, IRTUnit) :: pools))
+                | _ -> (id, v)))
+    let msgs (p: IRProgram) = match Blade.IRValidate.validateIR p with Ok _ -> [] | Error ms -> ms
+    let m1, m2 = msgs early, msgs foreign
+    if ok0 && (m1 |> List.exists (fun m -> m.Contains "referenced after its release"))
+       && (m2 |> List.exists (fun m -> m.Contains "not bound inside the inline it closes")) then
+        resultLine Pass name "the lowered program validates; a release moved before a read and a release naming caller storage are both rejected"
+        true
+    else
+        resultLine Fail name (sprintf "ok0=%b early=%A foreign=%A" ok0 m1 m2)
+        false
+/// Round 5 (fourth review NEW 1, 3): the fail-closed declines. 036 / 037 --
+/// a callee holding an array rename (`let spare = x`, an unlisted LLVM copy)
+/// is not inlined for the legs, in main and in a failing function caller;
+/// 039 -- two inlinable calls in one statement keep both calls. Each: the
+/// decline record, the call kept in C++, no `__epl_` leg, and no A7c release
+/// in the LLVM module. Round 7 (sixth review NEW 1-3): 044 / 045 / 046 -- a
+/// user call in a non-owned unit (a tuple component, a failing caller, a
+/// scalar let) -- and 048 -- a String literal inside a Float64 let -- decline
+/// too; and each fixture pins its LLVM ROUTE, which A7c's decline leaves as
+/// it was: a call that is a direct TUPLE COMPONENT of a top-level statement
+/// expands in place in main (no call instruction, no pool scope: 036, 040,
+/// 042, 044, 046, 048), while a SCALAR-LET call or an ARITHMETIC OPERAND is
+/// OUTLINED and frees its pools at its own return (037 / 041 / 045 `kernel`
+/// in bl_driver, 039 `ka` / `kb` in main, 046's inner `extra` in main).
+/// Array parameters and totality do not select the route.
+let private eplFailClosedDeclines () =
+    let name = "epilogue_legs_round5_fail_closed_declines"
+    let rx (p: string) (t: string) = System.Text.RegularExpressions.Regex.IsMatch(t, p)
+    let llvmFn (ll: string) (fn: string) =
+        let lines = ll.Replace("\r\n", "\n").Split('\n')
+        match lines |> Array.tryFindIndex (fun l -> l.StartsWith "define " && rx ("@" + fn + @"(_\d+)?\(") l) with
+        | None -> ""
+        | Some st -> String.concat "\n" (lines.[st .. (lines |> Array.skip st |> Array.findIndex (fun l -> l = "}")) + st])
+    let cppFn (cpp: string) (fn: string) =
+        if fn = "main" then mainBody cpp
+        else
+            let d = cpp.IndexOf $"double {fn}(Array<double, 1> x, Array<double, 1> y) {{"
+            if d < 0 then "" else cpp.Substring(d, cpp.IndexOf("\n}\n", d) - d)
+    // (file, decline needle, the caller function, the callees that must stay
+    // calls, the LLVM route: the callees that are CALL instructions in the
+    // caller's LLVM body -- outlined -- and the ones expanded in place there)
+    let one (rel: string) (needle: string) (caller: string) (calls: string list) (llOutlined: string list) (llExpanded: string list) =
+        match corpusSource rel with
+        | Error e -> Error e
+        | Ok src ->
+        let src = src.Substring(src.IndexOf '\n' + 1)
+        let serial f = withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" f)
+        let offCpp = withGate "BLADE_EPILOGUE_LEGS" "0" (fun () -> serial (fun () -> cppOfSource name src))
+        let offLl = serial (fun () -> eplLlvmOf src "0")
+        match serial (fun () -> cepDecisionsOf src), serial (fun () -> cppOfSource name src), serial (fun () -> eplLlvmOf src null) with
+        | Ok ds, Ok cpp, Ok (ll, lds) ->
+            let mine = ds |> List.filter (fun d -> d.Rule = "epilogue-legs")
+            let declines = mine |> List.filter (declinedMentioning needle)
+            let cBody, lBody = cppFn cpp caller, llvmFn ll (if caller = "main" then "main" else "bl_" + caller)
+            let llvmApplied = lds |> List.exists (fun d -> d.Rule = "epilogue-legs" && applied d)
+            if declines.Length < calls.Length then Error $"{rel}: {declines.Length} decline(s) mentioning `{needle}`, wanted one per call ({calls.Length})"
+            elif calls |> List.exists (fun c -> not (declines |> List.exists (fun d -> match d.Outcome with Blade.Effects.Declined w -> w.Contains (c + "(") || calls.Length = 1 | _ -> false))) then
+                Error $"{rel}: not every call has its own decline"
+            elif mine |> List.exists applied || llvmApplied then Error $"{rel}: an epilogue-legs plan was applied"
+            elif cpp.Contains "__epl_" then Error $"{rel}: a C++ leg was emitted"
+            elif ll.Contains "; A7c:" then Error $"{rel}: the LLVM module releases an inline's pool"
+            elif cBody = "" || lBody = "" then Error $"{rel}: caller {caller} not found in both lanes"
+            // A DECLINE changes no emission: each lane's gate-on text equals its
+            // gate-off text (the LLVM lane's own call handling -- an outlined call
+            // or its in-place expansion -- is whatever it was without A7c).
+            elif (match offCpp with Ok c -> c <> cpp | Error _ -> true) then Error $"{rel}: the C++ emission differs from BLADE_EPILOGUE_LEGS=0"
+            elif (match offLl with Ok (l, _) -> l <> ll | Error _ -> true) then Error $"{rel}: the LLVM emission differs from BLADE_EPILOGUE_LEGS=0"
+            else
+                // The LLVM route, pinned per fixture (the byte identity above says
+                // A7c's decline did not change it): an outlined callee is a call
+                // instruction in the caller's body; an expanded one is neither
+                // called there nor defined in the module.
+                let llCalls (f: string) = rx (@"call \w+ @bl_" + f + @"(_\d+)?\(") lBody
+                let llDefines (f: string) = rx (@"(?m)^define [^@]*@bl_" + f + @"(_\d+)?\(") ll
+                match calls |> List.tryFind (fun c -> not (rx (System.Text.RegularExpressions.Regex.Escape c + @"\(") cBody)) with
+                | Some c -> Error $"{rel}: {caller} does not keep the C++ call {c}(..)"
+                | None ->
+                match llOutlined |> List.tryFind (llCalls >> not) with
+                | Some c -> Error $"{rel}: the LLVM {caller} does not call the outlined {c}"
+                | None ->
+                match llExpanded |> List.tryFind (fun c -> llCalls c || llDefines c) with
+                | Some c -> Error $"{rel}: the LLVM lane does not expand {c} in place in {caller}"
+                | None -> Ok ()
+        | Error e, _, _ | _, Error e, _ | _, _, Error e -> Error $"{rel}: {e}"
+    let own = "not an owned allocation form"
+    let res =
+        [ one "sibling-folds/036_input_legs_decline_alias_let_in_callee.blade" own "main" [ "kernel" ] [] [ "kernel" ]
+          one "sibling-folds/037_input_legs_decline_alias_function_caller_aborts.blade" own "driver" [ "kernel" ] [ "kernel" ] []
+          one "sibling-folds/039_input_legs_decline_two_calls_one_statement.blade" "holds another inlinable call" "main" [ "ka"; "kb" ] [ "ka"; "kb" ] []
+          one "sibling-folds/040_input_legs_decline_nested_alias_in_branch.blade" "evaluates a nested let" "main" [ "kernel" ] [] [ "kernel" ]
+          one "sibling-folds/041_input_legs_decline_nested_alias_function_caller_aborts.blade" "evaluates a nested let" "driver" [ "kernel" ] [ "kernel" ] []
+          one "sibling-folds/042_input_legs_decline_string_let.blade" own "main" [ "kernel" ] [] [ "kernel" ]
+          one "sibling-folds/044_input_legs_decline_user_call_tuple_position.blade" "calls extra" "main" [ "kernel" ] [] [ "kernel"; "extra" ]
+          one "sibling-folds/045_input_legs_decline_user_call_function_caller_aborts.blade" "calls extra" "driver" [ "kernel" ] [ "kernel" ] []
+          one "sibling-folds/046_input_legs_decline_user_call_scalar_let.blade" "calls extra" "main" [ "kernel" ] [ "extra" ] [ "kernel" ]
+          one "sibling-folds/048_input_legs_decline_string_literal_in_projection.blade" "evaluates a String literal" "main" [ "kernel" ] [] [ "kernel" ] ]
+    match res |> List.tryPick (function Error e -> Some e | Ok () -> None) with
+    | Some e -> resultLine Fail name e; false
+    | None -> resultLine Pass name "036 / 037 (a rename), 040 / 041 (a rename inside a scalar branch), 042 (a String let), 039 (two calls, one decline each), 044 / 045 / 046 (a user call: tuple position, failing caller, scalar let), 048 (a String literal in a Float64 let): each declines; both lanes emit byte-identically to BLADE_EPILOGUE_LEGS=0; the C++ caller keeps the call; LLVM routes: kernel expanded in place in main for 036 / 040 / 042 / 044 / 046 / 048 (044's extra too), kernel outlined in bl_driver for 037 / 041 / 045, ka / kb outlined in main for 039, extra outlined in main for 046; no leg, no LLVM plan, no inline release"; true
+
+/// Round 6 (fifth review NEW 3): an A7c ownership decline leaves the sibling
+/// pass's own join-driven inlining unchanged (043: the callee still inlined
+/// for its Jx join, no return-boundary event, no A7c plan in either lane).
+let private eplDeclineKeepsSiblingInline () =
+    let name = "epilogue_legs_decline_keeps_sibling_inline"
+    match corpusSource "sibling-folds/043_input_legs_decline_keeps_sibling_inline.blade" with
+    | Error e -> resultLine Fail name e; false
+    | Ok src ->
+    let src = src.Substring(src.IndexOf '\n' + 1)
+    let serial f = withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" f)
+    let offCpp = withGate "BLADE_EPILOGUE_LEGS" "0" (fun () -> serial (fun () -> cppOfSource name src))
+    let offLl = serial (fun () -> eplLlvmOf src "0")
+    match serial (fun () -> cepDecisionsOf src), serial (fun () -> cppOfSource name src), serial (fun () -> eplLlvmOf src null), serial (fun () -> lower src) with
+    | Ok ds, Ok cpp, Ok (ll, lds), Ok ir ->
+        let a7c = ds |> List.exists (fun d -> d.Rule = "epilogue-legs" && declinedMentioning "the call is not retained for A7c (independent sibling-fold inlining is unchanged)" d)
+        let w1d = ds |> List.exists (fun d -> d.Rule = "sibling-folds" && applied d && evidenceMentions "kernel(x, y, u, v) inlined" d)
+        let noApplied = not ((ds @ lds) |> List.exists (fun d -> d.Rule = "epilogue-legs" && applied d))
+        let noCall = not ((mainBody cpp).Contains "kernel(")
+        let mutable events = 0
+        for m in ir.Modules do
+            for b in m.Bindings do iterIRExpr (fun n -> match n with IRReleasePools _ -> events <- events + 1 | _ -> ()) b.Value
+        // the decline changes no emission in either lane: the retained W1-D
+        // inline (and the alias copy the LLVM lane makes for it) is the
+        // pre-existing sibling-fold behaviour, identical with A7c off
+        let sameCpp = match offCpp with Ok c -> c = cpp | Error _ -> false
+        let sameLl = match offLl with Ok (l, _) -> l = ll | Error _ -> false
+        if a7c && w1d && noApplied && noCall && events = 0 && sameCpp && sameLl && not (ll.Contains "; A7c:") && not (cpp.Contains "__epl_") then
+            resultLine Pass name "A7c declines with the narrowed wording; no epilogue-legs plan applied in either lane; the sibling pass still inlines kernel for its Jx join; both lanes byte-identical to BLADE_EPILOGUE_LEGS=0; no event, no leg, no inline release"
+            true
+        else resultLine Fail name (sprintf "a7c %b w1d %b noApplied %b noCall %b events %d sameCpp %b sameLl %b" a7c w1d noApplied noCall events sameCpp sameLl); false
+    | Error e, _, _, _ | _, Error e, _, _ | _, _, Error e, _ | _, _, _, Error e -> resultLine Fail name e; false
+
+/// W2-4 round 8 (the user's decision after the seventh look): in the DEFAULT
+/// build (BLADE_EPILOGUE_LEGS unset) the kept one-level inline is OPT-IN, so
+/// the saxpy spelling (the producer in `kernel`, the legs in the caller)
+/// DECLINES with the opt-in text, keeps its call, mints no return-boundary
+/// event, and emits byte-identically to BLADE_EPILOGUE_LEGS=0 in both lanes;
+/// a plan whose producer is already in the region (019's second region)
+/// still applies by default.
+let private eplDefaultDeclinesInline () =
+    let name = "epilogue_legs_default_build_declines_kept_inline"
+    let serial f = withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" f)
+    let dflt f = withGate "BLADE_EPILOGUE_LEGS" null (fun () -> serial f)
+    let off f = withGate "BLADE_EPILOGUE_LEGS" "0" (fun () -> serial f)
+    let llvmOf (src: string) =
+        Blade.Effects.Decisions.start ()
+        let r =
+            match lower src with
+            | Error e -> Error e
+            | Ok ir -> (try EmitLlvm.tryEmitProgramNamed "epl_ll" ir with ex -> Error ("raised: " + ex.Message))
+        let ds = Blade.Effects.Decisions.drain ()
+        r |> Result.map (fun ll -> (ll, ds))
+    let want = Blade.Optimize.epilogueInlineOptInDecline
+    match dflt (fun () -> cepDecisionsOf eplSaxpySrc), dflt (fun () -> cppOfSource name eplSaxpySrc), off (fun () -> cppOfSource name eplSaxpySrc),
+          dflt (fun () -> llvmOf eplSaxpySrc), off (fun () -> llvmOf eplSaxpySrc), dflt (fun () -> lower eplSaxpySrc) with
+    | Ok ds, Ok cpp, Ok cppOff, Ok (ll, lds), Ok (llOff, _), Ok ir ->
+        let mine = ds |> List.filter (fun d -> d.Rule = "epilogue-legs")
+        let exact = mine |> List.exists (fun d -> match d.Outcome with Blade.Effects.Declined w -> w = want | _ -> false)
+        let anyApplied = (mine @ lds) |> List.exists (fun d -> d.Rule = "epilogue-legs" && applied d)
+        let mutable events = 0
+        for m in ir.Modules do
+            for b in m.Bindings do iterIRExpr (fun n -> match n with IRReleasePools _ -> events <- events + 1 | _ -> ()) b.Value
+            for fn in m.Functions do iterIRExpr (fun n -> match n with IRReleasePools _ -> events <- events + 1 | _ -> ()) fn.Body
+        let kept = (mainBody cpp).Contains "kernel("
+        // 019's second region holds its producer itself (no inline): applied by default
+        let second =
+            match corpusSource "sibling-folds/019_input_legs_ride_producer.blade" with
+            | Error _ -> None
+            | Ok s ->
+                match dflt (fun () -> cepDecisionsOf (s.Substring(s.IndexOf '\n' + 1))) with
+                | Ok ds2 ->
+                    Some (ds2 |> List.exists (fun d -> d.Rule = "epilogue-legs" && applied d && d.Subject.Contains "s2"),
+                          ds2 |> List.exists (fun d -> d.Rule = "epilogue-legs" && d.Subject.Contains "checksum" && (match d.Outcome with Blade.Effects.Declined w -> w = want | _ -> false)))
+                | Error _ -> None
+        if exact && not anyApplied && events = 0 && kept && cpp = cppOff && ll = llOff && second = Some (true, true) then
+            resultLine Pass name ($"saxpy declines `{want}`; the call stays; no event; C++ and LLVM byte-identical to BLADE_EPILOGUE_LEGS=0; 019's in-region plan (s2, t2) still applies by default and its callee region declines the same way")
+            true
+        else resultLine Fail name (sprintf "exact %b applied %b events %d kept %b cpp= %b ll= %b 019 %A" exact anyApplied events kept (cpp = cppOff) (ll = llOff) second); false
+    | Error e, _, _, _, _, _ | _, Error e, _, _, _, _ | _, _, Error e, _, _, _ | _, _, _, Error e, _, _ | _, _, _, _, Error e, _ | _, _, _, _, _, Error e -> resultLine Fail name e; false
+/// Round 7 (sixth review NEW 2): 047's callee reads a String-valued EnumIdx
+/// label. The predicate would refuse it (a tag is judged by its inner type),
+/// but the sibling pass's totality whitelist keeps the call a call first: no
+/// epilogue-legs record at all, the C++ main keeps `kernel(..)` and emits
+/// byte-identically to BLADE_EPILOGUE_LEGS=0, and the LLVM lane's REFUSAL is
+/// identical in both gate states (or the same module, if it ever emits one).
+let private eplLabelReadNotInlined () =
+    let name = "epilogue_legs_string_label_read_not_inlined"
+    match corpusSource "sibling-folds/047_input_legs_label_read_not_inlined.blade" with
+    | Error e -> resultLine Fail name e; false
+    | Ok src ->
+    let src = src.Substring(src.IndexOf '\n' + 1)
+    let serial f = withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" f)
+    let offCpp = withGate "BLADE_EPILOGUE_LEGS" "0" (fun () -> serial (fun () -> cppOfSource name src))
+    let llOn, llOff = serial (fun () -> eplLlvmOf src null), serial (fun () -> eplLlvmOf src "0")
+    match serial (fun () -> cepDecisionsOf src), serial (fun () -> cppOfSource name src) with
+    | Ok ds, Ok cpp ->
+        let none = not (ds |> List.exists (fun d -> d.Rule = "epilogue-legs"))
+        let kept = (mainBody cpp).Contains "kernel("
+        let sameCpp = match offCpp with Ok c -> c = cpp | Error _ -> false
+        let sameLl =
+            match llOn, llOff with
+            | Ok (a, _), Ok (b, _) -> a = b
+            | Error a, Error b -> a = b
+            | _ -> false
+        if none && kept && sameCpp && sameLl then
+            resultLine Pass name "no epilogue-legs record (the label-reading callee is not inlined by the sibling pass); C++ emission identical to BLADE_EPILOGUE_LEGS=0 and the call retained; LLVM: the lane's refusal identical in both gate states (or identical modules, if the lane ever supports it) -- not an emitted-equality witness"
+            true
+        else resultLine Fail name (sprintf "none %b kept %b sameCpp %b sameLl %b" none kept sameCpp sameLl); false
+    | Error e, _ | _, Error e -> resultLine Fail name e; false
+
+/// Round 7 (sixth review NEW 2): the allocation-free VALUE predicate judges an
+/// index tag by its inner type, recurses through nested tuples, and admits no
+/// String and no bare Nat (the LLVM lane's scalar map has no Nat arm).
+let private eplValueTypePredicate () =
+    let name = "epilogue_legs_allocation_free_value_type_predicate"
+    let tag = IRefNamed "RegionIdx"
+    let s = IRTScalar ETString
+    let cases =
+        [ "Float64", IRTScalar ETFloat64, true
+          "Int64-tagged label", IRTIdxTagged (IRTScalar ETInt64, tag), true
+          "String-tagged label", IRTIdxTagged (s, tag), false
+          "String", s, false
+          "nested numeric tuple", IRTTuple [ IRTScalar ETFloat64; IRTTuple [ IRTScalar ETInt64; IRTScalar ETBool ] ], true
+          "nested tuple with a String-tagged label", IRTTuple [ IRTScalar ETFloat64; IRTTuple [ IRTScalar ETInt64; IRTIdxTagged (s, tag) ] ], false
+          "bare Nat", IRTNat (Some 3), false ]
+    match cases |> List.tryFind (fun (_, t, want) -> Blade.Optimize.allocationFreeValueType t <> want) with
+    | Some (what, _, want) -> resultLine Fail name $"{what}: wanted {want}"; false
+    | None -> resultLine Pass name "Float64, an Int64 label and nested numeric tuples admitted; a String, a String-tagged label (bare or nested in a tuple) and bare Nat refused"; true
+/// Round 5 (NEW 2): 038's two admitted regions -- the callee's first let a
+/// join the rebuild drops, and a first scalar builtin let CSE removes --
+/// validate (the region start is the first owned pool) and release once.
+let private eplDurableStart () =
+    let name = "epilogue_legs_round5_durable_region_start"
+    match corpusSource "sibling-folds/038_input_legs_durable_region_start.blade" with
+    | Error e -> resultLine Fail name e; false
+    | Ok src ->
+    let src = src.Substring(src.IndexOf '\n' + 1)
+    let serial f = withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" f)
+    match serial (fun () -> lower src), serial (fun () -> cepDecisionsOf src), serial (fun () -> cppOfSource name src) with
+    | Ok ir, Ok ds, Ok cpp ->
+        let valid = match Blade.IRValidate.validateIR ir with Ok _ -> None | Error ms -> Some (String.concat " | " ms)
+        let applied2 = ds |> List.filter (fun d -> d.Rule = "epilogue-legs" && applied d && not (evidenceMentions "C++ lane" d)) |> List.length
+        let cse = ds |> List.exists (fun d -> d.Rule = "cse" && applied d)
+        let d = cpp.IndexOf "double driver(Array<double, 1> x, Array<double, 1> y) {"
+        let dBody = if d < 0 then "" else cpp.Substring(d, cpp.IndexOf("\n}\n", d) - d)
+        let llvmR =
+            match eplLlvmEmit src with
+            | Error e -> Error e
+            | Ok (ll, lds) ->
+                let placed = lds |> List.filter (fun d -> d.Rule = "epilogue-legs" && applied d && evidenceMentions "llvm lane: legs x-sum, y-sum folded inside" d) |> List.length
+                match llvmReleasesSafe ll "main", llvmReleasesSafe ll "bl_driver" with
+                | Ok 1, Ok 1 when placed = 2 -> Ok ()
+                | m, dr -> Error (sprintf "llvm main %A, bl_driver %A, placed %d" m dr placed)
+        match valid, releasesSafe (mainBody cpp), releasesSafe dBody, llvmR with
+        | None, Ok [ _ ], Ok [ _ ], Ok () when applied2 = 2 && cse ->
+            resultLine Pass name "both plans admitted (first join dropped; first builtin let CSE-removed); the program validates; C++ main and driver release once; the LLVM lane places both legs plans and releases once in main and once in bl_driver (slot nulled)"
+            true
+        | v, m, dr, l -> resultLine Fail name (sprintf "validate %A; main %A; driver %A; llvm %A; applied %d; cse %b" v m dr l applied2 cse); false
+    | Error e, _, _ | _, Error e, _ | _, _, Error e -> resultLine Fail name e; false
+
+/// 033's true duplicate return: kernel's `sqrt(s)` return is a fresh let
+/// structurally equal to its earlier `let r = sqrt(s)` (a builtin since round
+/// 7: a user call in the callee declines the kept inline); inlined into
+/// driver with CSE on, BOTH lets survive (the return let before the event is
+/// pinned).
+let private eplDuplicateReturnPinned () =
+    let name = "epilogue_legs_duplicate_return_let_pinned"
+    match corpusSource "sibling-folds/033_input_legs_cse_barrier_function_caller.blade" with
+    | Error e -> resultLine Fail name e; false
+    | Ok src ->
+    let src = src.Substring(src.IndexOf '\n' + 1)
+    match withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () -> lower src)) with
+    | Error e -> resultLine Fail name e; false
+    | Ok ir ->
+        let rec unroll (e: IRExpr) = match e with IRLet (id, v, b) -> let (ls, r) = unroll b in ((id, v) :: ls, r) | _ -> ([], e)
+        let driver = ir.Modules |> List.collect (fun m -> m.Functions) |> List.tryFind (fun f -> f.SourceName = "driver")
+        match driver with
+        | None -> resultLine Fail name "no driver"; false
+        | Some f ->
+            let (ls, _) = unroll f.Body
+            let arr = List.toArray ls
+            match arr |> Array.tryFindIndex (fun (_, v) -> match v with IRReleasePools _ -> true | _ -> false) with
+            | Some ei when ei > 0 ->
+                let (_, retV) = arr.[ei - 1]
+                // a non-trivial value (not a bare variable or literal) whose
+                // structural twin is an earlier let of the same spine
+                let nonLeaf (v: IRExpr) = match v with IRVar _ | IRLit _ | IRParam _ -> false | _ -> true
+                let earlierTwin = arr |> Array.take (ei - 1) |> Array.exists (fun (_, v) -> nonLeaf v && v = retV)
+                if nonLeaf retV && earlierTwin then
+                    resultLine Pass name "the event's preceding let (the fresh return sqrt(s)) survives CSE beside its earlier twin `r`"
+                    true
+                else resultLine Fail name (sprintf "return let %A; twin %b" retV earlierTwin); false
+            | _ -> resultLine Fail name "no event with a preceding let in driver"; false
+
+/// Round 5 (NEW 4): IRValidate's one-level provenance -- a deferred map, a
+/// tuple alias and a mut-call result naming a released pool, read after the
+/// release, are each rejected (hand-built on the lowered saxpy shape).
+let private eplValidateProvenance () =
+    let name = "epilogue_legs_irvalidate_one_level_provenance"
+    match withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () -> lower eplSaxpySrc)) with
+    | Error e -> resultLine Fail name e; false
+    | Ok ir ->
+    let rec unroll (e: IRExpr) = match e with IRLet (id, v, b) -> let (ls, r) = unroll b in ((id, v) :: ls, r) | _ -> ([], e)
+    let refold (ls: (IRId * IRExpr) list) (r: IRExpr) = List.foldBack (fun (id, v) acc -> IRLet (id, v, acc)) ls r
+    let anyFn = ir.Modules |> List.collect (fun m -> m.Functions) |> List.head
+    let isEvent (v: IRExpr) = match v with IRReleasePools _ -> true | _ -> false
+    let mutate (build: (IRId * IRType) -> (IRId * IRExpr) list -> (IRId * IRExpr) list * (IRId * IRExpr) list) =
+        let fixB (b: IRBinding) =
+            let (ls, r) = unroll b.Value
+            match ls |> List.tryFind (snd >> isEvent) with
+            | Some ((_, IRReleasePools (_, _, pool :: _)) as ev) ->
+                let (before, after) = build pool ls
+                let i = ls |> List.findIndex (fun x -> obj.ReferenceEquals(x, ev))
+                let pre = ls |> List.take i
+                let post = ls |> List.skip (i + 1)
+                { b with Value = refold (pre @ before @ [ ev ] @ after @ post) r }
+            | _ -> b
+        { ir with Modules = ir.Modules |> List.map (fun m -> { m with Bindings = m.Bindings |> List.map fixB }) }
+    let deferred =
+        mutate (fun (p, pty) ls ->
+            let comp =
+                ls |> List.pick (fun (_, v) ->
+                    match v with
+                    | IRReduceCompute ((IRApplyCombinator _ as c), _, _) when Set.contains p (collectVarRefsIR c) -> Some v
+                    | _ -> None)
+            match comp with
+            | IRReduceCompute (c, k, s0) ->
+                ([ (990001, c) ], [ (990002, IRReduceCompute (IRVar (990001, typeOf c), k, s0)) ])
+            | _ -> ([], []))
+    let tupled =
+        mutate (fun (p, pty) _ ->
+            let tt = IRTuple [ IRVar (p, pty); IRLit (IRLitFloat 1.0) ]
+            ([ (990003, tt) ], [ (990004, IRTupleProj (IRVar (990003, typeOf tt), 0, false)) ]))
+    let mutArg =
+        mutate (fun (p, pty) _ ->
+            ([ (990005, IRApp (IRVar (anyFn.Id, IRTUnit), [ IRVar (p, pty) ], pty)) ], [ (990006, IRVar (990005, pty)) ]))
+    let msgs (prog: IRProgram) = match Blade.IRValidate.validateIR prog with Ok _ -> [] | Error ms -> ms
+    let hit (ms: string list) (alias: int) = ms |> List.exists (fun m -> m.Contains $"__v{alias}, whose definition names a released pool")
+    let a, b, c = msgs deferred, msgs tupled, msgs mutArg
+    if hit a 990001 && hit b 990003 && hit c 990005 then
+        resultLine Pass name "a deferred map, a tuple alias and a mut-call result over a released pool, each read after the release, are rejected"
+        true
+    else
+        resultLine Fail name (sprintf "deferred %A; tuple %A; mut %A" a b c)
+        false
 /// NEW 2 (second review): two plans riding two producers of ONE inlined call
 /// (sibling-folds/031) -- each pool released exactly once; the nested-block
 /// region keeps its call.
@@ -5657,24 +6203,42 @@ let runOptimizeTests () =
           cepGateOff ()
           yield! cepDecisionCases ()
           // Round 3 A7c: producer-input legs (epilogue-legs v1, G69).
-          eplCppRepro ()
-          eplCppLicensed ()
-          eplCppGateOff ()
-          eplLlvm ()
-          eplLlvmAccumulators ()
-          eplFailureFixtureRoute ()
-          eplThrowingCalleeKeepsCall ()
-          eplCorpus028 ()
-          eplTeamNoCensus ()
-          eplReturnPointFree ()
-          eplJoinInsideCallee ()
-          eplTwoPlansOneCall ()
-          eplThrowingCalleeLlvm ()
-          withGate "BLADE_OMP_THREADS" "1" (fun () ->
-            eplNoRouteKeepsCall "epilogue_legs_nonliteral_epilogue_seed_keeps_call" eplNonliteralSeedSrc [ ("BLADE_FP_REPRO", "1") ] "seed is not a literal")
-          withGate "BLADE_OMP_THREADS" "1" (fun () ->
-            eplNoRouteKeepsCall "epilogue_legs_lanes_off_keeps_call" eplSaxpySrc [ ("BLADE_FOLD_LANES", "off") ] "BLADE_FOLD_LANES=off")
-          yield! eplDecisionCases ()
+          // Every A7c test below builds under the EXPLICIT opt-in arm (BLADE_EPILOGUE_LEGS=1:
+          // the kept one-level inline is opt-in since W2-4 round 8); the default build's
+          // decline is asserted on its own, after them.
+          yield! withGate "BLADE_EPILOGUE_LEGS" "1" (fun () ->
+            [
+              eplCppRepro ()
+              eplCppLicensed ()
+              eplCppGateOff ()
+              eplLlvm ()
+              eplLlvmAccumulators ()
+              eplFailureFixtureRoute ()
+              eplThrowingCalleeKeepsCall ()
+              eplCorpus028 ()
+              eplTeamNoCensus ()
+              eplReturnPointFree ()
+              eplJoinInsideCallee ()
+              eplTwoPlansOneCall ()
+              eplThrowingCalleeLlvm ()
+              eplLlvmReleaseOrder ()
+              eplRound4Cpp ()
+              eplValidateRule ()
+              eplFailClosedDeclines ()
+              eplDeclineKeepsSiblingInline ()
+              eplLabelReadNotInlined ()
+              eplValueTypePredicate ()
+              eplDurableStart ()
+              eplDuplicateReturnPinned ()
+              eplValidateProvenance ()
+              withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () ->
+                decisionCase "epilogue_legs_cse_probe_merges_without_event" eplCseProbeSrc "cse" applied "cse applied: without an event the equal maps merge"))
+              withGate "BLADE_OMP_THREADS" "1" (fun () ->
+                eplNoRouteKeepsCall "epilogue_legs_nonliteral_epilogue_seed_keeps_call" eplNonliteralSeedSrc [ ("BLADE_FP_REPRO", "1") ] "seed is not a literal")
+              withGate "BLADE_OMP_THREADS" "1" (fun () ->
+                eplNoRouteKeepsCall "epilogue_legs_lanes_off_keeps_call" eplSaxpySrc [ ("BLADE_FOLD_LANES", "off") ] "BLADE_FOLD_LANES=off")
+              yield! eplDecisionCases () ])
+          eplDefaultDeclinesInline ()
           // Compaction fusion (round 2 item B4).
           compactionFusedLicensed ()
           compactionFusedRepro ()

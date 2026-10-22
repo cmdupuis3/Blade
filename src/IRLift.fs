@@ -36,7 +36,7 @@ let isInlineForm (e: IRExpr) : bool =
     | IRDisplayJson _ | IRDisplayNum _ | IRDisplayStr _ | IRReduce _ | IRProdSum _ | IRZip _
     | IRAlign _ | IRStack _ | IRGram _ | IRReverse _ | IRShift _ | IRDiag _ | IRJoin _
     | IRSubset _ | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _ | IRNth
-    | IRZero _ | IRUninit _ | IRRank _ | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _
+    | IRZero _ | IRUninit _ | IRReleasePools _ | IRRank _ | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _
     | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent
     | IRAssign _ | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ -> false
 
@@ -81,6 +81,10 @@ let isStatementShaped (e: IRExpr) : bool =
     | IRArrayLit _ -> true
     // The unfilled let-rec buffer: extents table + allocate, nothing else.
     | IRUninit _ -> true
+    // An inlined call's return boundary (Optimize, A7c round 4): a STATEMENT
+    // whose only emitter is genBinding's release arm, so every let renderer
+    // (genFuncBodyScoped's statement-shaped arm included) routes it there.
+    | IRReleasePools _ -> true
     // The DEFERRING family. `genBinding` answers these with a comment and a
     // DeferredComputations entry rather than code, so binding one of them
     // BARE registers a name with no declaration behind it. They must be
@@ -145,7 +149,7 @@ let isDeferringForm (e: IRExpr) : bool =
     | IRZip _ | IRAlign _ | IRStack _ | IRTranspose _ | IRDecompact _ | IRGram _ | IRGramApply _
     | IRMatmul _ | IREigh _ | IRSolve _ | IRLu _ | IRLuSolve _ | IRArrayNegate _
     | IRArrayConjugate _ | IRReverse _ | IRShift _ | IRDiag _ | IRJoin _ | IRSubset _
-    | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUninit _ | IRRank _
+    | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUninit _ | IRReleasePools _ | IRRank _
     | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _
     | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent | IRAssign _
     | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ -> false
@@ -180,7 +184,7 @@ let isGroupTableForm (e: IRExpr) : bool =
     | IRAlign _ | IRStack _ | IRTranspose _ | IRDecompact _ | IRGram _ | IRGramApply _
     | IRMatmul _ | IREigh _ | IRSolve _ | IRLu _ | IRLuSolve _ | IRArrayNegate _
     | IRArrayConjugate _ | IRReverse _ | IRShift _ | IRDiag _ | IRJoin _ | IRSubset _
-    | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUninit _ | IRRank _
+    | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUninit _ | IRReleasePools _ | IRRank _
     | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _
     | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent | IRAssign _
     | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ -> false
@@ -223,7 +227,7 @@ let isArraysSlotAutoMaterialized (e: IRExpr) : bool =
     | IRZip _ | IRAlign _ | IRStack _ | IRTranspose _ | IRDecompact _ | IRGram _ | IRGramApply _
     | IRMatmul _ | IREigh _ | IRSolve _ | IRLu _ | IRLuSolve _ | IRArrayNegate _
     | IRArrayConjugate _ | IRReverse _ | IRShift _ | IRDiag _ | IRJoin _ | IRSubset _
-    | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUninit _ | IRRank _
+    | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUninit _ | IRReleasePools _ | IRRank _
     | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _
     | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent | IRAssign _
     | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ -> false
@@ -317,7 +321,7 @@ let internal isNestedLoopComputeArg (e: IRExpr) : bool =
     | IRReduceCompute _ | IRProdSum _ | IRZip _ | IRAlign _ | IRStack _ | IRTranspose _
     | IRDecompact _ | IREigh _ | IRLu _ | IRArrayNegate _ | IRArrayConjugate _ | IRReverse _
     | IRShift _ | IRDiag _ | IRJoin _ | IRSubset _ | IRRange _ | IRVirtualReverse _
-    | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUninit _ | IRRank _ | IRPolyIndex _ | IRPolyTail _
+    | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUninit _ | IRReleasePools _ | IRRank _ | IRPolyIndex _ | IRPolyTail _
     | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _
     | IROrbitClass _ | IROpaqueExtent | IRAssign _ | IRForRange _ | IRConstraintCheck _
     | IRBreakIf _ -> false
@@ -373,7 +377,7 @@ let internal isArrayValuedSelect (e: IRExpr) : bool =
     | IRTranspose _ | IRDecompact _ | IRGram _ | IRGramApply _ | IRMatmul _ | IREigh _
     | IRSolve _ | IRLu _ | IRLuSolve _ | IRArrayNegate _ | IRArrayConjugate _ | IRReverse _
     | IRShift _ | IRDiag _ | IRJoin _ | IRSubset _ | IRRange _ | IRVirtualReverse _
-    | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUninit _ | IRRank _ | IRPolyIndex _ | IRPolyTail _
+    | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUninit _ | IRReleasePools _ | IRRank _ | IRPolyIndex _ | IRPolyTail _
     | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _
     | IROrbitClass _ | IROpaqueExtent | IRAssign _ | IRForRange _ | IRConstraintCheck _
     | IRBreakIf _ -> false
@@ -413,7 +417,7 @@ let internal isNestedLoopFormArg (e: IRExpr) : bool =
     | IRDecompact _ | IRGram _ | IRGramApply _ | IRMatmul _ | IREigh _ | IRSolve _ | IRLu _
     | IRLuSolve _ | IRArrayNegate _ | IRArrayConjugate _ | IRReverse _ | IRShift _ | IRDiag _
     | IRJoin _ | IRSubset _ | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _
-    | IRNth | IRZero _ | IRUninit _ | IRRank _ | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _
+    | IRNth | IRZero _ | IRUninit _ | IRReleasePools _ | IRRank _ | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _
     | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent
     | IRAssign _ | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ -> false
 
@@ -463,7 +467,7 @@ let internal isArrayFieldAccess (e: IRExpr) : bool =
     | IRTranspose _ | IRDecompact _ | IRGram _ | IRGramApply _ | IRMatmul _ | IREigh _
     | IRSolve _ | IRLu _ | IRLuSolve _ | IRArrayNegate _ | IRArrayConjugate _ | IRReverse _
     | IRShift _ | IRDiag _ | IRJoin _ | IRSubset _ | IRRange _ | IRVirtualReverse _
-    | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUninit _ | IRRank _ | IRPolyIndex _ | IRPolyTail _
+    | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUninit _ | IRReleasePools _ | IRRank _ | IRPolyIndex _ | IRPolyTail _
     | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _
     | IROrbitClass _ | IROpaqueExtent | IRAssign _ | IRForRange _ | IRConstraintCheck _
     | IRBreakIf _ -> false
@@ -687,7 +691,7 @@ let wrapLets (bindings: (IRId * IRType * IRExpr) list) (body: IRExpr) : IRExpr =
 let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
     match expr with
     // Leaves: nothing to do
-    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero _ | IRUninit _
+    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero _ | IRUninit _ | IRReleasePools _
     | IRRange _ | IRVirtualReverse _ | IRArity _
     | IROpaqueExtent -> expr
 

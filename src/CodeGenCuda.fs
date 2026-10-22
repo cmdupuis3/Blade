@@ -2221,7 +2221,7 @@ let attachEpilogueLegs (producerId: IRId) (producer: LoopNestCodeGen) (names: Ma
         Blade.Optimize.recordEpilogueLegs lp.Subject (Blade.Effects.Declined ("C++ lane: " + why))
             ([ $"legs {legNames} keep their joined pass after `{lp.ProducerName}`'s producer loop" ]
              @ (match lp.InlinedCall with
-                | Some call -> [ $"{call} stays inlined (planned for these legs); its pools are still released once at the call's return boundary (behind the inlined spine's evaluated return)" ]
+                | Some call -> [ $"{call} stays inlined (planned for these legs under the OPT-IN BLADE_EPILOGUE_LEGS=1 arm, whose lifetime audit is incomplete, G69); its pools are still released once at the call's return-boundary event (IRReleasePools)" ]
                 | None -> []))
         ep
     let tag = sanitizeCppName producer.OutputName

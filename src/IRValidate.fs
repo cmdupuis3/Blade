@@ -437,6 +437,73 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
     for f in modul.Functions do
         everyNode $"in function '{f.SourceName}'" f.Body
 
+    // --- Check 5: an inlined call's return-boundary event (IRReleasePools, A7c
+    // round 4) -- (a) it names only pools bound INSIDE the inline it closes
+    // (lets of the same spine, at or after its `spineStart`, before it), and
+    // (b) nothing after it references a named pool: no read in the rest of the
+    // spine, directly or through the captures / body of a callable it names.
+    // It lives only on a region's top let spine. ---
+    let funcById = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+    let refsThrough (e: IRExpr) : Set<IRId> =
+        let acc = System.Collections.Generic.HashSet<IRId>()
+        let rec go (ids: seq<IRId>) =
+            for id in ids do
+                if acc.Add id then
+                    match Map.tryFind id funcById with
+                    | Some g ->
+                        go (g.Captures |> List.map (fun c -> c.Id))
+                        go (collectVarRefsIR g.Body)
+                    | None -> ()
+        go (collectVarRefsIR e)
+        Set.ofSeq acc
+    // (c) ONE LEVEL of local storage provenance (round 5, fourth review NEW 4):
+    // a let bound before the release whose value names a released pool and
+    // may itself hold storage or defer a read of it -- a deferred map, a
+    // tuple, a projection, an alias, a call result of a storage type -- is
+    // the pool for this check, so a later read of THAT let is a read of the
+    // pool. A let holding no storage (a fold result, a published scalar) is
+    // not. Deeper chains are not followed (the inliner's admission keeps them
+    // out of an inline: every callee let is an owned map or storage-free).
+    let defs = System.Collections.Generic.Dictionary<IRId, IRExpr>()
+    let rec spine (ctx: string) (bound: IRId list) (e: IRExpr) =
+        match e with
+        | IRLet (eid, IRReleasePools (call, start, pools), body) ->
+            let poolIds = pools |> List.map fst |> Set.ofList
+            let aliases =
+                bound |> List.choose (fun id ->
+                    match defs.TryGetValue id with
+                    | true, v when not (poolIds.Contains id)
+                                   && not (Set.isEmpty (Set.intersect (collectVarRefsIR v) poolIds))
+                                   && not (Blade.Optimize.holdsNoStorage (typeOf v)) -> Some id
+                    | _ -> None)
+            let laterAll = refsThrough body
+            for a in aliases do
+                if laterAll.Contains a then
+                    addError ctx $"release node for {call}: __v{a}, whose definition names a released pool, is referenced after the release"
+            let order = List.rev bound
+            (match List.tryFindIndex (fun id -> id = start) order with
+             | None -> addError ctx $"release node for `{call}`: its spine start __v{start} is not bound before it on this spine"
+             | Some si ->
+                let inside = order |> List.skip si |> Set.ofList
+                for (pid, _) in pools do
+                    if not (inside.Contains pid) then
+                        addError ctx $"release node for `{call}` names __v{pid}, which is not bound inside the inline it closes (from __v{start})")
+            let later = refsThrough body
+            for (pid, _) in pools do
+                if later.Contains pid then
+                    addError ctx $"release node for `{call}`: __v{pid} is referenced after its release"
+            spine ctx (eid :: bound) body
+        | IRLet (id, v, body) ->
+            defs.[id] <- v
+            iterIRExpr (fun n -> match n with IRReleasePools (call, _, _) -> addError ctx $"release node for `{call}` outside a region's top let spine" | _ -> ()) v
+            spine ctx (id :: bound) body
+        | other ->
+            iterIRExpr (fun n -> match n with IRReleasePools (call, _, _) -> addError ctx $"release node for `{call}` outside a region's top let spine" | _ -> ()) other
+    for b in modul.Bindings do
+        spine $"in binding '{b.Name}'" [] b.Value
+    for f in modul.Functions do
+        spine $"in function '{f.SourceName}'" [] f.Body
+
     // Restore the prior AnalysisContext so the validator doesn't
     // leak its installed CallablesTable to subsequent passes.
     restoreAnalysisContext savedCtx

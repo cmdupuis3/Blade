@@ -518,7 +518,7 @@ let runCellEpilogueTests () : BlockResult =
         use _r = pinEnv "BLADE_FP_REPRO" (if repro then "1" else null)
         use _o = pinEnv "BLADE_OMP_THREADS" "1"
         let emitWith (gate: string) =
-            use _g = pinEnv "BLADE_EPILOGUE_LEGS" gate
+            use _g = pinEnv "BLADE_EPILOGUE_LEGS" (if isNull gate then "1" else gate)
             stemN <- stemN + 1
             let stem = $"epl_{p.Name}_{stemN}"
             emitCpp p stem |> Result.map (fun cpp -> (stem, cpp))
@@ -562,7 +562,7 @@ let runCellEpilogueTests () : BlockResult =
         use _r = pinEnv "BLADE_FP_REPRO" "1"
         use _o = pinEnv "BLADE_OMP_THREADS" "1"
         let runWith (gate: string) =
-            use _g = pinEnv "BLADE_EPILOGUE_LEGS" gate
+            use _g = pinEnv "BLADE_EPILOGUE_LEGS" (if isNull gate then "1" else gate)
             stemN <- stemN + 1
             let stem = $"epl_ll_{p.Name}_{stemN}"
             match lower p.Source with
@@ -608,7 +608,11 @@ let runCellEpilogueTests () : BlockResult =
         [ Path.Combine(Directory.GetCurrentDirectory(), "tests", "corpus", rel)
           Path.Combine(AppContext.BaseDirectory, "tests", "corpus", rel) ] |> List.tryFind File.Exists
     for (rel, frame) in [ ("sibling-folds/026_input_legs_failure_between_aborts.blade", None)
-                          ("sibling-folds/029_input_legs_throwing_callee_keeps_frame.blade", Some "at kernel") ] do
+                          ("sibling-folds/029_input_legs_throwing_callee_keeps_frame.blade", Some "at kernel")
+                          ("sibling-folds/034_input_legs_function_caller_failure_after_return.blade", Some "at driver")
+                          ("sibling-folds/037_input_legs_decline_alias_function_caller_aborts.blade", Some "at driver")
+                          ("sibling-folds/041_input_legs_decline_nested_alias_function_caller_aborts.blade", Some "at driver")
+                          ("sibling-folds/045_input_legs_decline_user_call_function_caller_aborts.blade", Some "at driver") ] do
       for lane in [ "cpp"; "llvm" ] do
         let name = $"{Path.GetFileNameWithoutExtension rel} {lane}: fault, site and frame equal gate on vs off"
         match corpusFile rel with
@@ -618,7 +622,7 @@ let runCellEpilogueTests () : BlockResult =
         let src = src.Substring(src.IndexOf '\n' + 1)
         use _o = pinEnv "BLADE_OMP_THREADS" "1"
         let runWith (gate: string) : Result<int * string, string> =
-            use _g = pinEnv "BLADE_EPILOGUE_LEGS" gate
+            use _g = pinEnv "BLADE_EPILOGUE_LEGS" (if isNull gate then "1" else gate)
             stemN <- stemN + 1
             let stem = $"epl_fault_{lane}_{stemN}"
             match lower src with
@@ -665,7 +669,10 @@ let runCellEpilogueTests () : BlockResult =
     // `later`, whose pools then live to exit, so gate-on may free MORE, never
     // less. Then the ordinary build (pool cache ON): printed values equal.
     for rel in [ "sibling-folds/030_input_legs_join_inside_inlined_callee.blade"
-                 "sibling-folds/031_input_legs_two_plans_one_inlined_call.blade" ] do
+                 "sibling-folds/031_input_legs_two_plans_one_inlined_call.blade"
+                 "sibling-folds/032_input_legs_unused_final_join_atom_return.blade"
+                 "sibling-folds/033_input_legs_cse_barrier_function_caller.blade"
+                 "sibling-folds/035_input_legs_scratch_reuse_inside_callee.blade" ] do
         let name = $"{Path.GetFileNameWithoutExtension rel}: return-boundary releases under ASan and with the pool cache"
         match corpusFile rel with
         | None -> fail name "corpus file not found"
@@ -675,9 +682,10 @@ let runCellEpilogueTests () : BlockResult =
         use _o = pinEnv "BLADE_OMP_THREADS" "1"
         use _r = pinEnv "BLADE_FP_REPRO" "1"
         use _c = pinEnv "BLADE_FP_CONTRACT" "off"
-        use _pr = pinEnv "BLADE_POOL_REUSE" "off"
+        // 035 is the scratch-reuse witness: reuse ON there (the default), off elsewhere.
+        use _pr = pinEnv "BLADE_POOL_REUSE" (if rel.Contains "035" then null else "off")
         let runWith (gate: string) (memcheck: bool) : Result<int * string, string> =
-            use _g = pinEnv "BLADE_EPILOGUE_LEGS" gate
+            use _g = pinEnv "BLADE_EPILOGUE_LEGS" (if isNull gate then "1" else gate)
             use _m = pinEnv "BLADE_MEMCHECK" (if memcheck then "1" else null)
             stemN <- stemN + 1
             let stem = $"epl_rel_{stemN}"
@@ -708,7 +716,15 @@ let runCellEpilogueTests () : BlockResult =
             let censusOk =
                 match cOn, cOff with
                 | Some (a1, f1, o1), Some (a2, f2, o2) ->
-                    if rel.Contains "031" then a1 = a2 && f1 = f2 && o1 = o2 else a1 = a2 && f1 >= f2 && o1 <= o2
+                    // 031 / 033: the inline changes no lifetime -- identical census.
+                    // 035: scratch reuse is forgone for the inlined callee's pools
+                    // (the documented exclusion): one more allocation and one more
+                    // release, nothing left outstanding that gate-off frees.
+                    // 030 / 032: gate-off keeps W1-D's own join-driven inline, whose
+                    // pools then live to exit (pre-existing): gate-on frees more.
+                    if rel.Contains "031" || rel.Contains "033" then a1 = a2 && f1 = f2 && o1 = o2
+                    elif rel.Contains "035" then a1 = a2 + 1L && f1 = f2 + 1L && o1 = o2
+                    else a1 = a2 && f1 >= f2 && o1 <= o2
                 | _ -> false
             if aOn <> 0 || aOff <> 0 || nOn <> 0 || nOff <> 0 then fail name ($"exit codes asan {aOn}/{aOff} plain {nOn}/{nOff}: {tOn}")
             elif not (asanClean tOn && asanClean tOff) then fail name ($"ASan reported: {tOn}")

@@ -1042,6 +1042,11 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
             |> Array.ofList
         VArray (ArrayOps.allocDense at.ElemType at.IndexTypes extents)
 
+    // An inlined call's return boundary (IR.IRReleasePools, A7c): the compiled
+    // lanes free the callee's pools here; the interpreter's arrays are
+    // garbage-collected, so the event is a no-op that changes no value.
+    | IRReleasePools _ -> VUnit
+
     | other ->
         // Anything still uninterpreted (compound / group / provider forms, ...):
         // later milestones.

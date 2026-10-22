@@ -273,7 +273,23 @@ type IRExpr =
     /// already return uninitialized storage); the interpreter allocates
     /// zeros, which no read can observe -- the license is that none happens.
     | IRUninit of ty: IRTypeG<IRExpr>
+    /// THE RETURN BOUNDARY OF A CALL THE OPTIMIZER INLINED (round 3 A7c, gap
+    /// G69: Optimize.shareSiblingFoldsModule keeps a call inlined one level
+    /// for producer-input legs). A STATEMENT, bound by its own unit-typed let,
+    /// placed after the inlined spine (and its evaluated scalar return) and
+    /// before the statement that held the call -- where the as-written call
+    /// returned. pools are the callee's stored array lets, by ID (never as
+    /// IRVar references, so no substitution can retarget them), in binding
+    /// order: the storage the call's return used to free. Every lane releases
+    /// them HERE (the C++ frame's own free / main's dense free; the LLVM lane's
+    /// tracked free plus removal from its scope); the interpreter evaluates it
+    /// as a no-op. NO PASS MOVES OR DROPS IT; CSE treats it as a barrier;
+    /// scratch reuse never joins a named pool; IRValidate rejects any
+    /// reference to a named pool after it, and a node naming a pool not bound
+    /// before it. Leaf: no expression children.
+    | IRReleasePools of call: string * spineStart: IRId * pools: (IRId * IRTypeG<IRExpr>) list
     | IRRank of array: IRExpr
+
     | IRPolyIndex of pack: IRExpr * index: IRExpr  // Dynamic poly-pack indexing: args[k]
     // Pack tail from cons-destructuring `let head :: tail = A`: a "shifted
     // pack view" behaving as a Poly pack of arity one less than `pack`,
@@ -2224,7 +2240,7 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     match expr with
     // -- Leaves: no expression children ------------------------------------
     | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero _ | IRUninit _ | IROpaqueExtent
-    | IRVirtualReverse _ | IRArity _ ->
+    | IRVirtualReverse _ | IRArity _ | IRReleasePools _ ->
         [], (function [] -> expr | _ -> badChildren "leaf")
     | IRRange (idxTys, offset) ->
         Option.toList offset,
@@ -2515,7 +2531,7 @@ let irNodeMayAbort (e: IRExpr) : bool =
     match e with
     // -- cannot abort on their own ------------------------------------------
     | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero _ | IRUninit _ | IROpaqueExtent
-    | IRArity _ | IRRange _ | IRVirtualReverse _ -> false
+    | IRArity _ | IRRange _ | IRVirtualReverse _ | IRReleasePools _ -> false
     // Integer `/` and `%` by zero abort (BL8013 in every lane, the arithmetic
     // contract of docs/formalism.md section 2.4). The node is judged without
     // its operand types, so a division / modulo answers yes unless its
@@ -2597,6 +2613,8 @@ let rec isFreshPoolFormWith (appFresh: IRExpr -> bool) (e: IRExpr) : bool =
     // An unfilled fresh pool, registered for freeing exactly like a
     // materialized map (MatPool in the C++ lane, a tracked allocPool in LLVM).
     | IRUninit _ -> true
+    // A statement (an inlined call's return boundary), not a value.
+    | IRReleasePools _ -> false
     | IRMask _ | IRSort _ | IRUnique _ | IRIntersect _ | IRUnion _ -> true
     | IRTranspose _ | IRDecompact _ | IRStack _ | IRJoin _ | IRGram _ | IRGramApply _ | IRMatmul _ -> true
     // eigh / lu: BOTH pools each produces are fresh (`allocate<>` under derived
@@ -2765,6 +2783,7 @@ let (|CarriedType|_|) (expr: IRExpr) : IRType option =
     | IRLit (IRLitBool _) -> Some (IRTScalar ETBool)
     | IRLit (IRLitString _) -> Some (IRTScalar ETString)
     | IRLit IRLitUnit -> Some IRTUnit
+    | IRReleasePools _ -> Some IRTUnit
     | IRZero ty -> Some ty
     | IRUninit ty -> Some ty
     | _ -> None
@@ -3615,7 +3634,7 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
     // typing rule -- and if one of these arms ever fires, a family pattern
     // was edited out of sync: fail loudly, never mistype.
     | IRVar _ | IRParam _ | IRApp _ | IRArrayLit _ | IRStructLit _
-    | IRApplyCombinator _ | IRComposeApply _ | IRLit _ | IRZero _ | IRUninit _ ->
+    | IRApplyCombinator _ | IRComposeApply _ | IRLit _ | IRZero _ | IRUninit _ | IRReleasePools _ ->
         unreachableTyping "CarriedType" expr
     | IRSort _ | IRArrayNegate _ | IRArrayConjugate _ | IRIntersect _
     | IRUnion _ | IRUnique _ | IRCompute _ | IRPure _ | IRLet _ | IRIf _

@@ -4965,7 +4965,7 @@ let peekAllocScopeFrees (ind: string) : string list =
     | Some frame -> renderFrameFrees ind frame
 
 /// A7c (gap G69, W2-4 review finding 2): free ONE pool now, at an inlined
-/// callee's return boundary (Optimize.InlineReturnTable), and spare it from
+/// callee's return-boundary event (IR.IRReleasePools), and spare it from
 /// the scope's own frees.
 ///   * a live frame that tracks `n` (a function body / loop scope): its own
 ///     rendered free, the name then suppressed (no double free at scope exit);
@@ -4974,19 +4974,22 @@ let peekAllocScopeFrees (ind: string) : string list =
 ///   * no frame at all (main's top level, which frees nothing at exit): the
 ///     plain dense free `fallback` -- nothing else would ever free it.
 let freeAllocNow (ind: string) (n: string) (fallback: string) : string list =
-    match currentAllocScope () with
-    | None -> [ ind + fallback ]
-    | Some frame ->
-        if Set.contains n frame.SuppressNames then []
-        else
-            match frame.Allocs |> List.tryFind (fun a -> trackedAllocName a = n) with
-            | Some a when (match trackedAllocOwner a with Some oid -> Set.contains oid frame.Escapes | None -> false) -> []
-            | Some a ->
-                let lines = renderFrameFrees ind { frame with Allocs = [ a ]; Escapes = Set.empty; SuppressNames = Set.empty }
-                frame.SuppressNames <- Set.add n frame.SuppressNames
-                lines
-            | None -> []
-
+    match (allocScopeStackCell ()).Value with
+    | [] -> [ ind + fallback ]
+    | frames ->
+        // innermost first: the frame that registered the pool owns its free
+        match frames |> List.tryFind (fun f -> f.Allocs |> List.exists (fun a -> trackedAllocName a = n)) with
+        | None -> []
+        | Some frame ->
+            if Set.contains n frame.SuppressNames then []
+            else
+                match frame.Allocs |> List.tryFind (fun a -> trackedAllocName a = n) with
+                | Some a when (match trackedAllocOwner a with Some oid -> Set.contains oid frame.Escapes | None -> false) -> []
+                | Some a ->
+                    let lines = renderFrameFrees ind { frame with Allocs = [ a ]; Escapes = Set.empty; SuppressNames = Set.empty }
+                    frame.SuppressNames <- Set.add n frame.SuppressNames
+                    lines
+                | None -> []
 /// Generate code to allocate and initialize an array from literal values
 /// `sourceName` is the binding's BLADE name, for the runtime guard's message
 /// (the C++ spelling `varName` can be a rename, `a_extents_` / `M__x`).

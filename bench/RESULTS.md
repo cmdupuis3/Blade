@@ -2890,19 +2890,7 @@ whose zarr stores are not in the checkout, one BL4003 warning, one BL3999). Ever
 
 ### 17.5 Open at the wave end
 
-- **W2-4's lifetime class (G69).** The kept one-level inline needs the callee's pools released at the call's return. Three
-  Codex looks: the join-site release (freed a live pool when the join sat inside the callee; double release with two
-  producers) was replaced by an explicit per-call boundary table, which still has four holes -- the join rewrite can delete
-  the boundary let, CSE runs after it and can merge a caller's equal map into the freed pool, function-body callers bypass
-  the renderer arm, and the LLVM lane (which frees an outlined callee's pools at its scalar return) retains them under the
-  inline. Admitted A7c plans only. The saxpy numbers above are live observations: the C++ release lands where the
-  as-written free did, and the archived OLD and NEW LLVM emissions of saxpy both allocate y2 in main and neither frees it
-  (merge-level review finding 4), so no moved free is in the saxpy delta -- but they are not a lifetime-matched compiler
-  claim, and the planner / docs strings that say "the LLVM lane frees no pool in either form" are WRONG in general and are
-  corrected by round 4. The merge-level Codex review (`reviews/wave2-codex-reviews.md#codex-wave2-merged`) is HOLD on this item: round 4 (brief
-  `briefs/wave2-builder-briefs.md#w2-4-round4-lifetime`) lands an IR-level cleanup event no pass removes, honoured by every renderer and both
-  lanes, fail-closed elsewhere, then a fourth look, the gates re-run and the saxpy cells re-measured; the wave's other
-  six items are not held.
+- **W2-4's lifetime class (G69): seven Codex looks, the kept inline made OPT-IN by the user's decision (rounds 4-8).** Round 4 made the cleanup an IR-level RETURN-BOUNDARY EVENT (`IRReleasePools`, one per inlined call: a CSE barrier, an IRValidate check, every renderer and the LLVM lane releasing through it, the interpreter a no-op); rounds 5-7 narrowed the admission to a closed whitelist (owned pools = forced rank-1 dense maps; every other callee unit allocation-free by type AND evaluation, every user call in a non-owned unit refused, tagged types judged by their inner type, String leaves refused) and corrected the route and coverage records. The seventh look still found the class open: a non-owned unit may NAME a fold kernel whose body is never resolved by the ownership walk, so a helper called inside that kernel can expand in place in the LLVM lane with an unlisted alias copy. Per the user (2026-10-22: no further fix rounds) round 8 makes the kept one-level inline OPT-IN -- an explicit `BLADE_EPILOGUE_LEGS=1` -- and records the hole as KNOWN INCOMPLETE in G69 / CLAUDE.md / features.md; unset keeps the legs that ride a producer already in the region (the top-level spelling) and declines the inline-needing plans with a record; `=1` is an opt-diff mirror so the arm stays differentially tested. The default path (legs without a kept inline) is verified; the opt-in arm is tested on its witnesses (ASan 030 / 031 / 032 / 033 / 035 C++ only; the ten emitted equality witnesses; 047 = equal LLVM refusal) and NOT proved. The seven looks are sections of `notes/round3/reviews/wave2-codex-reviews.md`. Consequence for the numbers: saxpy's DEFAULT emission is the joined pass again (its 17.3 gains belong to the now-explicit arm); the wave-3 end chain re-measures saxpy as default vs `BLADE_EPILOGUE_LEGS=1` vs the wave-1 binary, four regimes.
 - **semiagg under T4c is flat** (G70): at ~5% selectivity the branchless single pass reads the whole payload where the old
   position gather read the selected cells; a selectivity-aware gather is the follow-up.
 - **G67 / G68** (N10's per-group packed H; the AD zero-literal compile blowup) block N10 and large haloadjoint sizes.

@@ -175,6 +175,16 @@ let recStepOmpEnabled () = gateOn "BLADE_REC_STEP_OMP"
 /// DECLINED ("disabled by BLADE_EPILOGUE_LEGS") with its five-party matrix.
 /// Unset = on.
 let epilogueLegsEnabled () = gateOn "BLADE_EPILOGUE_LEGS"
+/// The KEPT ONE-LEVEL INLINE (a plan whose producer sits in a callee the legs'
+/// statement calls, saxpy's `kernel(x, y)`) is OPT-IN: only an EXPLICIT
+/// `BLADE_EPILOGUE_LEGS=1` (`1` / `on` / `true`) retains it. Its lifetime audit is
+/// INCOMPLETE (G69, the seventh diff look: a fold kernel a non-owned callee
+/// unit names is not audited, and the LLVM lane may expand an allocating call
+/// inside it with no pool scope), so unset keeps every plan whose producer is
+/// already in the region and declines the inline-needing ones. Per call.
+/// The decline text of an inline-needing plan in the default build.
+let epilogueInlineOptInDecline = "the kept one-level inline is opt-in (BLADE_EPILOGUE_LEGS=1): its lifetime audit is INCOMPLETE (G69: a fold kernel named by a non-owned unit is not audited); the legs stay in their joined pass and the call stays"
+let epilogueLegsInlineOptIn () = Blade.Toolchain.envSwitch "BLADE_EPILOGUE_LEGS" = Blade.Toolchain.SwitchOn
 /// The C++ lane's BLAS gate (`LinAlgPatterns.blasAvailable`, which compiles
 /// after this file), installed by Lowering before the optimizer runs: the
 /// epilogue-legs planner keeps an inline only when the cell epilogue it rides
@@ -198,7 +208,7 @@ let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE
 /// against its predecessor as well as against no optimizer at all (the
 /// all-off comparison alone never runs the predecessor). Each gate here is
 /// also in `optimizerGates`.
-let optimizerGateMirrors : (string * string) list = [ ("BLADE_COMPACTION_FUSION", "b4"); ("BLADE_COMPACTION_FUSION", "gather"); ("BLADE_COMPACTION_FUSION", "unshared") ]
+let optimizerGateMirrors : (string * string) list = [ ("BLADE_COMPACTION_FUSION", "b4"); ("BLADE_COMPACTION_FUSION", "gather"); ("BLADE_COMPACTION_FUSION", "unshared"); ("BLADE_EPILOGUE_LEGS", "1") ]
 
 /// The decline reason for a LICENSED row prodsum (B2r applies only where
 /// the build keeps the serial association). `lanes` RESERVES the opt-in
@@ -623,6 +633,13 @@ let planPoolReuse (modul: IRModule) : unit =
         let refsAt = positions |> List.map (fun (_, v) -> refsOf v) |> Array.ofList
         let valueAt = positions |> List.map snd |> Array.ofList
         // Candidate pools: (position, let id option, shape, bytes).
+        // A7c round 4: a pool an inlined call's return-boundary event names is
+        // NEVER a reuse candidate (neither donor nor reuser): its storage is
+        // released at the event, so joining it with a caller pool would move a
+        // free across the boundary. (This also forgoes the reuse the uninlined
+        // callee could do among its OWN pools -- the documented exclusion.)
+        let eventPools =
+            lets |> List.collect (fun (_, v) -> match v with IRReleasePools (_, _, ps) -> ps |> List.map fst | _ -> []) |> Set.ofList
         let candidateAt (k: int) =
             let (idOpt, v) = positions.[k]
             // A body-level `let` is reassignable in its own scope, so the
@@ -632,7 +649,7 @@ let planPoolReuse (modul: IRModule) : unit =
                 (match idOpt with
                     | Some _ -> materialized v
                     | None -> (match collapse v with IRCompute (IRApplyCombinator _) | IRApplyCombinator _ -> true | _ -> false))
-            if not ok then None
+            if not ok || (match idOpt with Some id -> eventPools.Contains id | None -> false) then None
             else
                 match densePoolShape (typeOf (collapse v)) with
                 | Some (elem, exts) ->
@@ -924,6 +941,25 @@ let private writeJoin (a: WriteProvenance) (b: WriteProvenance) =
 
 /// A value of this type holds no array storage (scalars, units, index tags,
 /// tuples of those). Public for the C++ kernel-body copy (gap G46).
+/// A7c round 6: the value types an inlined callee's non-owned lets may have
+/// -- values that allocate in NEITHER lane: numeric and Bool / complex
+/// scalars, index-tagged values whose INNER type is one of those, unit, and
+/// tuples of those (bare Nat excluded: the LLVM lane has no scalar arm for it). String is EXCLUDED (the
+/// C++ lane's std::string owns heap storage that follows its scope), as is
+/// every array, loop, computation and function type. Deliberately separate
+/// from holdsNoStorage (an array-storage predicate other passes share).
+let allocationFreeValueType (t: IRType) : bool =
+    let rec go (t: IRType) =
+        match stripUnits t with
+        | IRTScalar (ETFloat64 | ETFloat32 | ETInt64 | ETInt32 | ETBool | ETComplex64 | ETComplex128) -> true
+        // an index tag is judged by its INNER type (a string-valued EnumIdx label
+        // is a std::string in C++); bare Nat is excluded (no LLVM scalar arm)
+        | IRTIdxTagged (inner, _) -> go inner
+        | IRTUnit -> true
+        | IRTTuple ts -> ts |> List.forall go
+        | _ -> false
+    go t
+
 let holdsNoStorage (t: IRType) : bool =
     let rec go (t: IRType) =
         match stripUnits t with
@@ -1732,11 +1768,29 @@ let cseModule (modul: IRModule) : IRModule =
                          | Some dv -> for b in collectVarRefsIR dv do work.Push b
                          | None -> ())
                 acc
+            // A7c round 4: an inlined call's RETURN-BOUNDARY EVENT (IRReleasePools)
+            // is a BARRIER -- no equivalence crosses it, so a later value equal to
+            // a callee computation is never merged into the released pool -- and
+            // the pools it names, and the let right before it (the call's
+            // evaluated return), are PINNED: never dropped, never redirected (a
+            // callee pool merged into earlier caller storage would make the event
+            // release the caller's pool).
+            let pinned =
+                let acc = System.Collections.Generic.HashSet<IRId>()
+                let arr = List.toArray lets
+                arr |> Array.iteri (fun i (_, v) ->
+                    match v with
+                    | IRReleasePools (_, _, pools) ->
+                        for (pid, _) in pools do acc.Add pid |> ignore
+                        if i > 0 then acc.Add (fst arr.[i - 1]) |> ignore
+                    | _ -> ())
+                acc
             for (id, v0) in lets do
                 let v = applySubst v0
                 let vf = factsOfValue v
+                let isEvent = match v with IRReleasePools _ -> true | _ -> false
                 let dup =
-                    if trivial v || not vf.Repeatable || exposed.Contains id then None
+                    if isEvent || trivial v || not vf.Repeatable || exposed.Contains id || pinned.Contains id then None
                     else
                         let cv = canon v
                         match available.TryGetValue cv with
@@ -1747,7 +1801,7 @@ let cseModule (modul: IRModule) : IRModule =
                     subst.[id] <- earlier
                     pairs.Add((id, earlier))
                 | None -> kept.Add((id, v))
-                if vf.MayWrite then available.Clear()
+                if vf.MayWrite || isEvent then available.Clear()
             if pairs.Count = 0 then f
             elif not enabled then
                 Blade.Effects.Decisions.record
@@ -2668,41 +2722,6 @@ type EpilogueLegPlan = {
     DecidedLlvm: bool ref
 }
 
-/// THE INLINED CALL'S RETURN BOUNDARY (W2-4 second review, NEW 1-2): the
-/// sibling pass, when it keeps a call inlined for producer-input legs, records
-/// ONE entry per inlined CALL (never per plan or per join; several plans may
-/// share one call): the let that ends the call's inlined spine -- its last
-/// statement, i.e. the evaluated scalar return (inlineJudge binds a non-atom
-/// return to a fresh final let; an atom return names the spine's last let) --
-/// and the callee's array lets (its stored `|> compute` pools), which the
-/// call's return used to free. Every callee statement precedes that let by
-/// construction (the inlined spine is contiguous), so the pools have no read
-/// after it: the C++ lane releases them right behind that let's emission,
-/// once, through the scope frame's own free (or main's plain dense free when
-/// no frame tracks them). The boundary is independent of where any join is
-/// inserted. KNOWN INCOMPLETE (G69, round 4 pending): the join rewrite can
-/// delete the boundary let, CSE runs after this table and can merge a
-/// caller's equal map into the released pool, function-body return lets
-/// bypass the renderer arm, and the LLVM lane -- which frees an outlined
-/// callee's pools at its scalar return -- retains them under the inline.
-type InlineReturnEntry = {
-    /// The let whose emission ends the inlined call (the table key).
-    BoundaryLetId: IRId
-    /// The callee's pools, with their types (the dense free's element).
-    Pools: (IRId * IRType) list
-    /// The call, as written (records and comments).
-    Call: string
-    /// Re-entry guard while the boundary let itself is emitted.
-    Guard: bool ref
-}
-
-module InlineReturnTable =
-    open System.Threading
-    let private cell = new AsyncLocal<Map<IRId, InlineReturnEntry>>()
-    let private get () = match box cell.Value with null -> Map.empty | _ -> cell.Value
-    let reset () = cell.Value <- Map.empty
-    let record (e: InlineReturnEntry) = cell.Value <- Map.add e.BoundaryLetId e (get ())
-    let tryBoundary (id: IRId) : InlineReturnEntry option = Map.tryFind id (get ())
 
 module EpilogueLegTable =
     open System.Threading
@@ -7616,7 +7635,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                           Legs = specs }
                     let inlineKey = match tentative.[pu].Key with SfInl (i, c, _) -> Some (i, c) | SfOrig _ -> None
                     // The inlined callee's ARRAY lets (its stored pools), freed at the
-                    // call's RETURN BOUNDARY by the C++ lane (InlineReturnTable).
+                    // call's return-boundary event (IR.IRReleasePools), in both lanes.
                     let inlinedPools =
                         match inlineKey with
                         | Some key ->
@@ -7629,7 +7648,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                         match inlineKey with
                         | Some key ->
                             let pools = inlinedPools |> List.map (fst >> nameOf) |> String.concat ", "
-                            [ $"{inlineDisp key} inlined one level so the producer and the legs share one region (no call boundary between them); the C++ lane releases its pools ({pools}) ONCE at the call's return boundary -- right behind the inlined spine's last statement (its evaluated scalar return), independent of where the join sits -- where the call used to free them; the LLVM lane frees no pool in either form" ]
+                            [ $"{inlineDisp key} inlined one level so the producer and the legs share one region (no call boundary between them) -- the OPT-IN arm, retained because BLADE_EPILOGUE_LEGS=1 is explicit (its lifetime audit is INCOMPLETE, G69: a fold kernel named by a non-owned unit is not audited); its pools ({pools}) are released ONCE at an IR-level return-boundary event (IRReleasePools) placed after the rebuilt inlined spine and its evaluated return, before the statement that held the call -- where the as-written call returned; CSE treats the event as a barrier and pins the pools, scratch reuse excludes them, IRValidate rejects a read after it (directly, or one level through a local let whose definition names a pool), and both lanes release there (C++: the scope frame's own free or main's dense free; LLVM: the tracking-slot free, slot nulled, or a direct free in main). Scope (fail closed): the callee was admitted because EVERY let of its inlined spine is a forced rank-1 dense map (an owned pool, listed) or an allocation-free value -- its type and the type of every let, branch, match, tuple, projection and compute its evaluation reaches is a numeric / Bool / complex scalar, a unit, an index label whose INNER type is one of those, or a tuple of them (no String, no bare Nat), it reads no String-typed value and evaluates no String literal, and it calls NO user function directly in any position (builtin operators -- arithmetic, libm, casts, extents, folds and maps -- are not calls; callee bodies, and the bodies of fold / map KERNELS it names, are NOT audited -- the known unaudited case) -- and it is the only inlinable call of its statement; any other callee, or a second call in the statement, is not retained for A7c (independent sibling-fold inlining is unchanged)" ]
                         | None -> []
                     // FINDING 4: the inline is kept only when BOTH lanes' fused forms
                     // can carry the legs in this build -- the facts each emitter's own
@@ -7681,9 +7700,118 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                         recordEpilogueLegs subject (Blade.Effects.Declined (resolveNames why)) ((headline :: rows) |> List.map resolveNames)
                     | Ok rows when not (epilogueLegsEnabled ()) ->
                         recordEpilogueLegs subject (Blade.Effects.Declined "disabled by BLADE_EPILOGUE_LEGS") ((headline :: rows) |> List.map resolveNames)
+                    // W2-4 round 8 (the seventh look, NEW 1 not fixed -- the user's decision):
+                    // the kept one-level inline is OPT-IN. A plan that needs it declines under
+                    // unset; a plan whose producer is already in the region is unaffected.
+                    | Ok rows when inlineKey.IsSome && not (epilogueLegsInlineOptIn ()) ->
+                        recordEpilogueLegs subject (Blade.Effects.Declined epilogueInlineOptInDecline) ((headline :: rows) |> List.map resolveNames)
                     | Ok rows when taken.Contains pId ->
                         recordEpilogueLegs subject (Blade.Effects.Declined $"another join's legs already ride `{pName}`'s producer pass") ((headline :: rows) |> List.map resolveNames)
                     | Ok rows ->
+                    // ROUND 5, FAIL CLOSED (fourth review NEW 1, 3, 4): the kept inline's
+                    // return-boundary event releases exactly the callee's OWNED
+                    // allocations, so the callee must allocate nothing else: EVERY let of
+                    // its inlined spine is either a forced rank-1 dense map (IRCompute of
+                    // a map -- an owned pool, listed) or a value that holds no storage (a
+                    // scalar or a tuple of scalars, e.g. a fold or a join's result) and is
+                    // no deferred form. An array alias / rename (the LLVM lane copies it
+                    // into an unlisted pool), a loop object, a deferred map, an array
+                    // tuple or projection, or any other array-valued let declines. And
+                    // one inlinable call per statement: several spines before one
+                    // statement would share one delayed boundary.
+                    let ownershipProblem () : string option =
+                        match inlineKey with
+                        | None -> None
+                        | Some (i, c) ->
+                            let call = inlineDisp (i, c)
+                            if tentative |> Array.exists (fun u -> match u.Key with SfInl (i2, c2, _) -> i2 = i && c2 <> c | SfOrig _ -> false) then
+                                Some $"the statement holding {call} holds another inlinable call (v1 places one return boundary per statement)"
+                            else
+                                tentative |> Array.tryPick (fun u ->
+                                    match u.Key with
+                                    | SfInl (i2, c2, _) when (i2, c2) = (i, c) ->
+                                        let v = u.Value
+                                        let owned =
+                                            match v with
+                                            | IRCompute inner ->
+                                                (match collapseC inner with
+                                                 | IRApplyCombinator _ ->
+                                                    (match stripUnits (typeOf v) with
+                                                     | ArrayElem at ->
+                                                        not at.IsVirtual
+                                                        && (match at.IndexTypes with
+                                                            | [ ix ] -> ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank = 1
+                                                            | _ -> false)
+                                                     | _ -> false)
+                                                 | _ -> false)
+                                            | _ -> false
+                                        // Round 6 (fifth review NEW 1-2): ALLOCATION-FREE EVALUATION,
+                                        // not a storage-free result type. A non-owned unit's type must
+                                        // be an allocation-free VALUE type (numeric scalars, Bool,
+                                        // complex, index values, unit, tuples of those -- NOT String,
+                                        // whose C++ value owns heap storage), and NO node its
+                                        // evaluation reaches may bind, branch to, build or call out a
+                                        // value of any other type: a nested let (`if c then { let
+                                        // spare = x; .. }`), an if / match arm, a tuple or projection,
+                                        // a call result, a compute -- each is judged by its own type (and,
+                                        // round 7, no user call is admitted at all; see below).
+                                        // Reads of arrays inside folds and maps (their operands) are
+                                        // leaves, not bindings.
+                                        let nm = match u.Binder with Some id -> nameOf id | None -> "its return"
+                                        let shapeProblem () =
+                                            let mutable bad : string option = None
+                                            iterIRExpr (fun n ->
+                                                if bad.IsNone then
+                                                    // Round 7 (sixth review NEW 1): EVERY call to a user
+                                                    // callable declines -- whatever its result type, in any
+                                                    // position (let RHS, tuple component, projection operand,
+                                                    // branch arm, seed, arithmetic operand): a lane may expand
+                                                    // its body in place (the LLVM lane's tuple-component path
+                                                    // opens no pool scope), so a call's expansion may allocate
+                                                    // outside the owned pools. Callee bodies are NOT audited.
+                                                    // Builtins are IR operators (arithmetic, libm, casts,
+                                                    // extents, folds / maps), not calls.
+                                                    (match n with
+                                                     | IRApp (IRVar (fid, _), _, _) when Map.containsKey fid funcs ->
+                                                        let fnm = (Map.find fid funcs).SourceName
+                                                        bad <- Some $"callee let `{nm}` calls {fnm}: a call's expansion may allocate outside the owned pools"
+                                                     | IRApp _ ->
+                                                        bad <- Some $"callee let `{nm}` applies a value that does not resolve to a known callable"
+                                                     // (NEW 2) a String-typed LEAF (a literal, a variable) is an owning value
+                                                     | IRLit (IRLitString _) ->
+                                                        bad <- Some $"callee let `{nm}` evaluates a String literal (an owning value in the C++ lane)"
+                                                     | IRVar (_, t) | IRParam (_, _, t) when (match stripUnits t with IRTScalar _ | IRTIdxTagged _ | IRTTuple _ -> not (allocationFreeValueType t) | _ -> false) ->
+                                                        bad <- Some $"callee let `{nm}` reads a value of a type that is not an allocation-free value (a String or a String-valued index label)"
+                                                     | _ -> ())
+                                                    let judged =
+                                                        if bad.IsSome then None
+                                                        else
+                                                        match n with
+                                                        | IRLet (_, bv, _) -> Some (typeOf bv)
+                                                        | IRIf _ | IRMatch _ | IRTuple _ | IRTupleProj _ | IRApp _ | IRCompute _ -> Some (typeOf n)
+                                                        | _ -> None
+                                                    match judged with
+                                                    | Some t when not (allocationFreeValueType t) ->
+                                                        let kind =
+                                                            match n with
+                                                            | IRLet _ -> "a nested let" | IRIf _ -> "an if" | IRMatch _ -> "a match"
+                                                            | IRTuple _ -> "a tuple" | IRTupleProj _ -> "a projection" | IRApp _ -> "a call" | _ -> "a compute"
+                                                        bad <- Some $"callee let `{nm}` evaluates {kind} of a type that is not an allocation-free value (an array, String, loop or function type)"
+                                                    | _ -> ()) v
+                                            bad
+                                        if owned then None
+                                        elif not (allocationFreeValueType (typeOf v)) || isDeferredForm v then
+                                            Some $"callee let `{nm}` is not an owned allocation form (the inline's boundary releases only forced rank-1 dense maps; every other let must be an allocation-free value)"
+                                        else
+                                            match shapeProblem () with
+                                            | Some why -> Some (why + " -- not an owned allocation form")
+                                            | None -> None
+                                    | _ -> None)
+                    match ownershipProblem () with
+                    | Some why ->
+                        recordEpilogueLegs subject (Blade.Effects.Declined (resolveNames why + "; the call is not retained for A7c (independent sibling-fold inlining is unchanged)"))
+                            ((headline :: rows) |> List.map resolveNames)
+                    | None ->
                     match routeProblem () with
                     | Some why ->
                         recordEpilogueLegs subject (Blade.Effects.Declined ("no lane would carry the legs in this build: " + why + "; nothing is inlined for them"))
@@ -7702,14 +7830,22 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
             applied |> Seq.collect (fun (g, _, _) -> g |> List.choose (fun m -> inlineKeyOf m.UnitKey)) |> Set.ofSeq
             |> Set.union (Set.ofSeq legInlines.Keys)
         let finalUnits = buildUnits (fun k -> Set.contains k keptInlines)
-        // The return boundary of every call inlined for legs: the LAST unit of
-        // its inlined spine (all of the callee's statements precede it).
-        for KeyValue (key, (pools, call)) in legInlines do
-            let last =
-                finalUnits |> List.filter (fun u -> match u.Key with SfInl (i, c, _) -> (i, c) = key | SfOrig _ -> false) |> List.tryLast
-            match last with
-            | Some { Binder = Some bid } when not pools.IsEmpty ->
-                InlineReturnTable.record { BoundaryLetId = bid; Pools = pools; Call = resolveNames call; Guard = ref false }
+        // THE RETURN-BOUNDARY EVENTS (W2-4 round 4): one IRReleasePools statement
+        // per call inlined for legs, built from the call's own inlined units --
+        // its first let (the region it closes) and its stored pools -- and placed
+        // in the rebuilt spine right before the statement that held the call,
+        // AHEAD of that statement's own hoisted joins: after the whole inlined
+        // spine and its evaluated scalar return, where the as-written call
+        // returned. Not keyed by any let the rebuild may drop.
+        let events = System.Collections.Generic.Dictionary<int, (IRId * IRExpr) list>()
+        for KeyValue ((i, c), (pools, call)) in legInlines |> Seq.sortBy (fun kv -> kv.Key) do
+            // The region start is the FIRST OWNED POOL's binder (round 5, NEW 2): a
+            // pool let is never a join member (the rebuild never drops it) and CSE
+            // pins it, so the identity the validator checks always survives.
+            match pools with
+            | (start, _) :: _ ->
+                let ev = (builder.FreshId(), IRReleasePools (resolveNames call, start, pools))
+                events.[i] <- (match events.TryGetValue i with | true, l -> l | _ -> []) @ [ ev ]
             | _ -> ()
         let replace = System.Collections.Generic.Dictionary<SfUnitKey * int, IRExpr>()
         let dropUnits = System.Collections.Generic.HashSet<SfUnitKey>()
@@ -7766,6 +7902,12 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                     | _ -> n) e
         let out = ResizeArray<IRId option * IRExpr>()
         for u in finalUnits do
+            (match u.Key with
+             | SfOrig i ->
+                (match events.TryGetValue i with
+                 | true, evs -> for (id, v) in evs do out.Add((Some id, v))
+                 | _ -> ())
+             | SfInl _ -> ())
             (match inserts.TryGetValue u.Key with
              | true, lets -> for (id, v) in lets do out.Add((Some id, v))
              | _ -> ())

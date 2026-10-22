@@ -421,6 +421,7 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
     | IRNth -> "nth"
     | IRZero _ -> "zero"
     | IRUninit ty -> $"uninit<{ppIRType ty}>"
+    | IRReleasePools (call, start, pools) -> $"""release_pools[{call}; from __v{start}]({(pools |> List.map (fun (id, _) -> $"__v{id}") |> String.concat ", ")})"""
     | IRRank arr -> $"rank({pp arr})"
     | IRPolyIndex (pack, idx) -> $"{pp pack}[{pp idx}]"
     | IRPolyTail (pack, drop) -> $"{pp pack}[{drop}..]"

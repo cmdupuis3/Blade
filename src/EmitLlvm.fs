@@ -4129,6 +4129,35 @@ and private bindLetIn (c: Ctx) (id: IRId) (value: IRExpr) (scope: IRExpr) : unit
 and private bindNamed (c: Ctx) (id: IRId) (name: string) (declTy: IRType) (value: IRExpr) : unit =
     let rec peelCompute (e: IRExpr) = match e with IRCompute i -> peelCompute i | e -> e
     match value with
+    // A7c round 4: an inlined call's RETURN-BOUNDARY EVENT (IR.IRReleasePools).
+    // As written, a SCALAR-LET call (`let k = kernel(x, y)`) or an arithmetic
+    // operand ran as an OUTLINED function whose pool scope freed these pools
+    // at its scalar return, while a direct TUPLE-COMPONENT call expanded in
+    // place in main with no pool scope (main frees nothing there in either
+    // gate state); either way the kept inline must not retain them. Each
+    // pool is released here, once, in binding order: a pool an enclosing scope
+    // tracks is freed through its tracking slot and the slot nulled, so that
+    // scope's own pop frees nothing twice; an untracked pool (main, which opens
+    // no scope) is freed directly. The binding is then forgotten, so a later
+    // reference -- which IRValidate already rejects -- would refuse loudly.
+    | IRReleasePools (call, _, pools) ->
+        for (pid, _) in pools do
+            match c.ArrSlots.TryGetValue pid with
+            | true, { Src = APool p } ->
+                needShim c "blade_free"
+                c.AnyFrees <- true
+                let tracked =
+                    c.PoolScopes |> Seq.collect (fun s -> s.Pools) |> Seq.tryFind (fun (q, _) -> q = p)
+                (match tracked with
+                 | Some (_, slot) ->
+                    let r = freshReg c
+                    ln c ($"{r} = load ptr, ptr {slot}")
+                    ln c ($"call void @blade_free(ptr {r})   ; A7c: `{call}` returns here (tracked pool, slot nulled)")
+                    ln c ($"store ptr null, ptr {slot}")
+                 | None ->
+                    ln c ($"call void @blade_free(ptr {p})   ; A7c: `{call}` returns here"))
+                c.ArrSlots.Remove pid |> ignore
+            | _ -> ()
     | IRGroupKeys keys ->
         // A module-scope grouping carries its regime on the binding record;
         // the sentinel itself has no runtime value and prints nothing.
@@ -4219,7 +4248,7 @@ and private bindNamed (c: Ctx) (id: IRId) (name: string) (declTy: IRType) (value
             Blade.Effects.Decisions.record
                 { Rule = "epilogue-legs"; Version = 1; Span = c.DeclSpan; Subject = lp.Subject
                   Outcome = Blade.Effects.Declined "llvm lane: the producer's fused loop did not carry the legs (its cell epilogue was not taken in this lane)"
-                  Evidence = [ "the legs keep their joined pass" ] @ (match lp.InlinedCall with Some call -> [ $"{call} stays inlined (planned for these legs); this lane frees no pool in either form" ] | None -> []) }
+                  Evidence = [ "the legs keep their joined pass" ] @ (match lp.InlinedCall with Some call -> [ $"{call} stays inlined (planned for these legs under the OPT-IN BLADE_EPILOGUE_LEGS=1 arm, whose lifetime audit is incomplete, G69); its owned pools (the forced rank-1 dense maps the event lists) are released at the call's return-boundary event (IRReleasePools) in this lane too" ] | None -> []) }
         bindNamed c id name declTy value
     // B2r for a recursion: the step's cell loop carried this prodsum's chain.
     | IRProdSum _ when (match Blade.Optimize.CellFoldTable.tryFoldLet id with
