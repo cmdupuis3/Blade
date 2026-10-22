@@ -399,8 +399,9 @@ let private synthesizeRev (ctx: Ctx) (fd: FunctionDecl) (vjp: bool) : Result<Fun
                         zerosLikeLiteral value |> Option.map (fun z -> NLet (dName n, true, ascribeCot n z dims))
                     | _ ->
                         // C6: combinator-built locals get a zero buffer
-                        // sized from the dims env (else rejected below)
-                        dims |> Option.map (fun ds -> NLet (dName n, true, ascribeCot n (zerosOfDims ds) (Some ds)))
+                        // sized from the dims env (else rejected below),
+                        // built as a zero FILL, never an n-cell literal (G68)
+                        dims |> Option.map (fun ds -> NLet (dName n, true, ascribeCot n (zeroFillOfDims ctx ds) (Some ds)))
                 else Some (NLet (dName n, true, ascribeCot n (fLit 0.0) None))
             | _ -> None)
     // reject function-level diff array locals whose initializer has neither

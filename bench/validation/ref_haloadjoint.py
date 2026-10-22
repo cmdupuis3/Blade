@@ -39,7 +39,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import benchgen as g  # noqa: E402
 import numpy as np  # noqa: E402
 
-SIZES = {"smoke": {"n": 1013}, "full": {"n": 50021}}
+SIZES = {"smoke": {"n": 1013}, "full": {"n": 1000003}}
 
 
 def inputs(n):

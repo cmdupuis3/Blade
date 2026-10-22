@@ -119,9 +119,9 @@ and stores stay — hard constraint 1 lets only compiler-inserted temporaries di
 
 **Synthesized by the reverse sweep** (compiler-created; not source storage):
 
-- **d's cotangent** (n − 4 cells, all 1.0, the fold's seed), whose zero initializer is an
-  (n − 4)-element literal copied from .rodata (G68), and the sweep's index / validity
-  bookkeeping.
+- **d's cotangent** (n − 4 cells, all 1.0, the fold's seed), whose zero initializer is a
+  fill loop over its pool (`__v[i] = 0.0`; until round 3 wave 4 an (n − 4)-element literal
+  copied from .rodata, gap G68, FIXED), and the sweep's index / validity bookkeeping.
 - in the seeding loop the forward tape is re-added into the (already copied) loss
   accumulator — a dead second fold that g++ may delete.
 - the plain `loss` function (never called) is emitted too.
@@ -134,13 +134,13 @@ keeps their stores.
 **Transcendental calls** (source level, in the emitted C++ / the Fortran sources; the machine
 code is not audited, and these are counts, not measured call evidence):
 
-| arm | sin | cos | total | smoke (n = 1013) | full (n = 50,021) |
+| arm | sin | cos | total | smoke (n = 1013) | full (n = 1,000,003) |
 |---|---|---|---|---|---|
-| Blade (this emission) | 4(n − 4): y, the tape d, the dw pass, U1 | n − 4: U3 | 5(n − 4) | 5045 | 250,085 |
-| natural | 2(n − 4): y, U1 | n − 4: U3 | 3(n − 4) | 3027 | 150,051 |
-| expert | n + 2B | n − 4 | 2n + 2B − 4 | 2024 | 100,136 |
+| Blade (this emission) | 4(n − 4): y, the tape d, the dw pass, U1 | n − 4: U3 | 5(n − 4) | 5045 | 4,999,995 |
+| natural | 2(n − 4): y, U1 | n − 4: U3 | 3(n − 4) | 3027 | 2,999,997 |
+| expert | n + 2B | n − 4 | 2n + 2B − 4 | 2024 | 2,001,956 |
 
-B = ⌈(n − 8)/1024⌉ blocks (1 at smoke, 49 at full): each block's sin strip recomputes its two
+B = ⌈(n − 8)/1024⌉ blocks (1 at smoke, 977 at full): each block's sin strip recomputes its two
 overlap cells, and the peeled boundary computes its own (y at 2, 3, n−4, n−3; U1 at the four
 tail cells), so the expert is APPROXIMATELY two calls per cell. Blade's four sin calls per
 window revisit the same interior arguments (x(c) in y, d, dw and U1): that is this emission's
@@ -163,49 +163,66 @@ Jᵀw or a lower bound of `ad.grad`.
     input_checksum = Σ x + Σ w           (two chains, ascending, then one add)
 
 Both checksum terms are sums of squares (non-negative). Every input is a multiple of 2⁻³¹
-below 1 and the partial sums stay below 2¹⁶, so the input sums are exact in every order and
-every arm's `input_checksum` equals the pin exactly. Pins: smoke checksum 931.84702902803338,
-input 994.20763162942603; full 49031.582053620172, 49973.552964067087 (`pins-B.json`).
+below 1 and the partial sums stay below 2²² (= 2⁵³ · 2⁻³¹; Σ x and Σ w are each about 5 × 10⁵
+at full size), so the input sums are exact in every order and every arm's `input_checksum`
+equals the pin exactly. Pins: smoke checksum 931.84702902803338, input 994.20763162942603;
+full (n = 1,000,003) 982246.50221908255, 999284.5857284111 (`pins-B.json`; at the former full
+size n = 50,021 they were 49031.582053620172, 49973.552964067087).
 
 ## Sizes
 
 | variant | n | x, w | y | dx | principal payload (spec outputs + inputs) |
 |---|---|---|---|---|---|
 | smoke | 1013 | 2 × 7.9 KB | 7.9 KB | 7.9 KB | 32 KB |
-| full | 50,021 | 2 × 0.40 MB | 0.40 MB | 0.40 MB | **1.6 MB** |
+| full | 1,000,003 | 2 × 8.0 MB | 8.0 MB | 8.0 MB | **32.0 MB** |
 
-**The full size is capped by the compiler (gap G68), not by the 64 MB rule** — the shipped
-payload (1.6 MB required, ~2.8 MB in the Blade arm) is far below it. The catalog's n =
-1,000,003 does not compile in useful time: the reverse sweep's zero buffer for the tape's
-cotangent is an (n − 4)-element array LITERAL (`Grad.fs` C6 → `GradExpand.zerosOfDims`), and
-the `lower` phase (which includes the optimizer passes; no hotspot was isolated) is
-super-linear in its length — `BLADE_PHASE_TIMING=1 blade emit`: emit 3 / 6 / 24 / 97 s at n =
-5003 / 20011 / 50021 / 100003 (`lower` 19 s at 50021, 95 s at 100003); at 1,000,003 the
-compiler was killed after 627 CPU s without finishing. Each Blade arm runs the front end twice
-(compile + plan), so n = 50,021 keeps a full-size build near 50 s per arm (`run.py check
-haloadjoint --size full --regimes serial-licensed-native,serial-repro-native`: every arm and
-twin built and validated against the full pin, 338 s for the whole check). n is odd and not a
-power of two.
+**The full size is the catalog's n = 1,000,003** (round 3 wave 4, W4-4). Until then it was
+capped at n = 50,021 by the compiler (gap G68): the reverse sweep's zero buffer for the tape's
+cotangent was an (n − 4)-element array LITERAL (`Grad.fs` C6 → `GradExpand.zerosOfDims`) whose
+`lower` phase was super-linear in its length (`lower` 0.9 / 4.2 / 22.4 / 95-146 s at n = 5003 /
+20011 / 50021 / 100003; at 1,000,003 the compiler was killed after 627 CPU s unfinished). The
+buffer is now a zero FILL (`GradExpand.zeroFillOfDims`: the `method_for(range<Idx<n − 4>>) <@>
+lambda(_) -> 0.0 |> compute` former the let-rec buffer desugar already uses), and the front end
+is flat in n: `BLADE_PHASE_TIMING=1 blade emit`, one core, `lower` 0.53 / 0.58 / 0.52 / 0.67 /
+0.64 s and the whole emit 2.4 / 2.4 / 2.1 / 2.3 / 2.8 s at n = 5003 / 20011 / 50021 / 100003 /
+1,000,003 (gap register G68 has the table). n is odd and not a power of two.
 
-At the catalog's n = 1,000,003 the four required arrays alone (x, w, dx: n cells; y: n − 4)
-are 32,000,064 bytes; with dw, d and d's cotangent the Blade arm's arrays are 56,000,072
-bytes, plus 7,999,992 bytes for today's literal image — 64,000,064 bytes if all were resident
-together, before metadata and thread scratch. So the size does NOT follow automatically from
-a G68 repair: after the fill repair, a fresh per-arm peak-live / store audit (lifetimes, image
-residency, scratch) decides the next full size.
+At n = 1,000,003 the four required arrays (x, w, dx: n cells; y: n − 4) are 32,000,064
+bytes; with dw, d and d's cotangent the Blade arm's arrays are 56,000,072 bytes (7n − 12
+doubles) if all were resident together, before metadata and thread scratch; the literal
+image (7,999,992 bytes of .rodata, which would have made it 64,000,064) is gone with the
+fill. The harness check at this size (W4-4, single runs) recorded peak working sets of
+58.5-59.0 MB for blade-cpp (all four regimes), 58.1 MB for blade-llvm (the two serial
+regimes, the only ones that run it) and 35.2-37.6 MB for the Fortran arms; every arm and
+twin validated against the full pin, and a Blade arm builds in 3.7-6 s.
 
-**Storage estimate per arm (full size).**
+**Memory audit status: PENDING.** Neither the seven-array arithmetic estimate nor the
+single-run peak working sets above IS the per-arm peak-live / store audit that the pre-fix
+G68 row made the condition for a new full size: a working set does not establish allocation
+lifetimes, temporaries, thread scratch or that the named outputs are retained. The size is
+raised to the catalog's n = 1,000,003 with that audit PENDING for the integration
+measurement gate (the wave's end chain records the peak working set per arm); the per-arm
+audit (inputs / named outputs / compiler temporaries / lifetimes / image / thread scratch,
+for blade-cpp, blade-llvm and the Fortran arms) and the machine-code store verification of
+the named outputs y and dx remain PENDING until performed. A known lifetime defect bears on
+it: in the LLVM lane the tape d and d's cotangent ESCAPE the gradient function's cleanup
+(gap G78, pre-existing, OPEN).
+
+**Storage estimate per arm (full size; arithmetic, not an audit).**
 
 | arm | named / required arrays | extra | estimate |
 |---|---|---|---|
-| blade-cpp | x, w, y, dx | dw, tape d, d's cotangent (+ its 0.40 MB .rodata initializer); checksum folds stream; mt8 Path B partials | ~2.8 MB + 0.4 MB image |
-| blade-llvm | as blade-cpp (same AD expansion) | not audited beyond the smoke run | ~2.8 MB |
-| natural | x, w, y, dx | none | 1.6 MB |
-| expert | x, w, y, dx | two strips of 1024 doubles (16 KB; per thread in mt8) | 1.6 MB |
-| every inputonly twin | x, w | none | 0.8 MB |
+| blade-cpp | x, w, y, dx | dw, tape d, d's cotangent (a zero fill, no image); checksum folds stream; mt8 Path B partials | ~56 MB |
+| blade-llvm | as blade-cpp (same AD expansion) | built and validated at full size in the two serial regimes (peak working set 58.1 MB); its lifetimes are NOT audited, and the tape d and d's cotangent escape the function cleanup (G78) | ~56 MB |
+| natural | x, w, y, dx | none | 32 MB |
+| expert | x, w, y, dx | two strips of 1024 doubles (16 KB; per thread in mt8) | 32 MB |
+| every inputonly twin | x, w | none | 16 MB |
 
-Everything is L2/L3-resident at full size: the kernel is transcendental- and pass-bound, not
-DRAM-bound. Input share: two generator fills against roughly 2–5 transcendentals per cell; in the
+At full size the working set is 32-56 MB per kernel arm, at or past a Zen 3 CCD's 32 MB L3
+(not measured here), so the passes may stream from DRAM as well as being transcendental-bound;
+at the former n = 50,021 everything was L2/L3-resident.
+
+Input share: two generator fills against roughly 2–5 transcendentals per cell; in the
 check session's single smoke runs (not a measurement) the twins were ~15–30% of their arm's
 region → **an `inputonly` twin per arm is REQUIRED** (kernels/README.md §3.3).
 
@@ -243,7 +260,7 @@ region → **an `inputonly` twin per arm is REQUIRED** (kernels/README.md §3.3)
 ## Blade idiom
 
 ```blade sketch
-type I = Idx<50021>   // SIZE n
+type I = Idx<1000003>   // SIZE n
 function loss(x: Array<Float64 like I>, wt: Array<Float64 like I>) -> Float64 = {
     let d = method_for(halo<I, [-2, -1, 0, 1, 2]>) <@> lambda(q) ->
         wt(q(0)) * (x(q(-1)) * x(q(1)) + sin(x(q(0))) * x(q(2)) - 0.5 * x(q(-2)) * x(q(-2))) |> compute
@@ -293,9 +310,10 @@ committed spellings (`axes = 1` for the input sums, gap G55).
 - The LLVM lane accepts the source (no fallback), emits the maps serially and reassociates
   the four licensed folds in licensed (`one accumulator chain with reassoc nsz`).
 
-At full size (n = 50,021) the emitted sweep is the same: seven destination passes over 50021
-cells, the `static const double __v51__init[50017]` initializer (route G, not the 65536-cell
-route-S backstop).
+At full size the emitted sweep is the same: seven destination passes over n cells (route G,
+not the 65536-cell route-S backstop), d's cotangent zeroed by a fill loop over its pool. At the
+former full size (n = 50,021) the initializer was `static const double __v51__init[50017]`
+plus `std::copy_n` (G68, FIXED in round 3 wave 4).
 
 **What this workload measures.** Today Blade runs the primal map, the loss-tape map and its
 fold, then seven serial destination passes (six read-modify-writes of dx, one of dw), plus two
@@ -308,8 +326,9 @@ pass and U1 — by cross-pass CSE / destination fusion, while still STORING the 
 y, d and dw (sharing computations is legal; deleting the forced d or dw stores is not, under
 this frozen source); (3) the P2 independent-iteration mark so the destination pass threads
 (structural 02 §3.3.3), and a licence inside a differentiated function for the gather route
-(BL5500 today); (4) G68, after which a fresh per-arm peak-live / store audit decides the next
-size. Dropping dw / lv altogether needs a different source (a `wrt` selector or an `ad.vjp`
+(BL5500 today). (G68, the compile-time cap on the size, is FIXED: round 3 wave 4 raised the
+full size to the catalog's n = 1,000,003, with the per-arm peak-live / store audit still
+PENDING -- see "Memory audit status" above.) Dropping dw / lv altogether needs a different source (a `wrt` selector or an `ad.vjp`
 spelling) and therefore a protocol revision and a fresh baseline; it is not a transformation
 of this kernel. Any fused form must keep y and dx stored, keep the list's per-cell order in
 repro, and keep sy and sd separate +0 chains.

@@ -307,12 +307,17 @@ oracle (gfortran twins raw-bit equal to it with contraction off). Checksum: Σ y
 Blade also computes AD-required auxiliaries its source names (the forced loss tape d, the dw
 buffer, the loss value lv) and a synthesized cotangent of d — disclosed, stored, not
 required, and not deletable under this source.
-**Sizes.** smoke n=1013; full n=50,021 — capped by the compiler (G68: the reverse sweep's
-cotangent zero buffer is an (n − 4)-element literal; lowering is super-linear in n), not by
-the 64 MB rule (Blade ≈ 2.8 MB, Fortran 1.6 MB). At the catalog's 1,000,003 the required
-arrays are 32.0 MB and the Blade arm's 56.0 MB (+ 8.0 MB literal image), so a size change
-needs a fresh per-arm peak-live / store audit after the G68 repair. `inputonly` twin per arm
-(input share est. 10–30%).
+**Sizes.** smoke n=1013; full n=1,000,003, the catalog's (round 3 wave 4, W4-4: until then
+capped at n=50,021 by the compiler -- G68, the reverse sweep's cotangent zero buffer was an
+(n − 4)-element literal whose lowering was super-linear in n; FIXED, the buffer is a zero
+fill and the front end is flat in n, 2.8 s for `blade emit` at full size). The required
+arrays are 32.0 MB and the Blade arm's 56.0 MB (arithmetic upper bound, every array resident
+at once; no literal image any more); the W4-4 check's single runs saw Blade peak working sets
+of 58.1-59.0 MB. NEITHER is the per-arm peak-live / store audit the pre-fix G68 row required:
+that audit and the machine-code store verification of y and dx are PENDING for the
+integration measurement gate (spec.md "Memory audit status"), and the LLVM lane's tape and
+cotangent escape the gradient function's cleanup (G78, pre-existing, OPEN). `inputonly` twin
+per arm (input share est. 10–30%).
 **Tiers.** natural: the primal loop, dx = 0, then one destination-indexed loop per update in
 list order. expert: one fused destination-owned pass (y, dx, both sums), approximately one
 sin and one cos per cell from per-block strips (sin n + 2B, cos n − 4), 8 boundary cells
@@ -372,7 +377,7 @@ overflow guards are not re-timed.
 | saxpy | C | n=2,000,003 | 4–8 ms incremental | licensed, repro (serial, mt8) | equivalent / equivalent |
 | twofir (round 3) | B | n=2,000,003 | 10–25 ms | licensed, repro (serial, mt8) | equivalent / LOSS ~0.70–0.85 (two passes vs one fused pass) |
 | tensorop (round 3) | A | 89 x 97 x 101 | Blade 0.2–0.6 s, expert 20–60 ms | licensed, repro (serial, mt8), fastmath | equivalent (serial) / LOSS 3–10x (mode_product nests vs register tiles; Blade kernel serial in mt8) |
-| haloadjoint (round 3) | B | n=50,021 (G68 cap) | 2–8 ms | licensed, repro (serial, mt8; the adjoint serial in mt8) | LOSS ~0.5–0.8 / LOSS ~0.35–0.6 (per-update passes + source-named AD auxiliaries vs one fused pass) |
+| haloadjoint (round 3) | B | n=1,000,003 (raised from 50,021 by W4-4, G68 FIXED) | 2–8 ms at the former n; not yet timed at this n | licensed, repro (serial, mt8; the adjoint serial in mt8) | LOSS ~0.5–0.8 / LOSS ~0.35–0.6 (per-update passes + source-named AD auxiliaries vs one fused pass) |
 | hashjoin (round 3, pilot) | B | N=2003, M=1009, K=401 | ~0.1 ms | licensed, repro (serial only) | WIN ~10–20x / LOSS ~0.75–0.9 (separate consumer folds vs folds fused into the probe) |
 
 `inputonly` twin required: fusedchain, onepass, stencil, maskagg, dot, saxpy, twofir, haloadjoint, hashjoin;
