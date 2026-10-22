@@ -130,10 +130,12 @@ targeted requests, not extra full-suite sweeps. No full-suite launch has occurre
 | D05 | Sol/high D | Integrated `b6f4beec` | Uniform segmentation descriptor and arithmetic cursor; 600 Zarr passes, one internal NetCDF skip; [review](D05-review.md), [results](D05-tests.md); combined checks pending |
 | D06 | Sol/high D | Integrated `02325693` + `fafd232a` | Repaired harness 256/0/1 (unavailable symlink probe); original failed run retained. Explicit-grant runtime prerequisite only; no compiler admission/default disk use; [review](D06-review.md), [results](D06-tests.md) |
 | D07 | Sol/high D | Design checkpoint accepted `363269a7` | Exact statistical-barrier target and missing policy/accounting/fault-drain obligations; [census](D07-census.md), [review](D07-review.md); compiler admission remains unimplemented |
-| D08 | Sol/high D | Role repair d5b2599a; focused retry queued | Exact topology confirmed by one successful lower/validate/emission; explicit-policy statistical-barrier region; [review](D08-review.md), [census](D08-census-results.md) |
+| D08 | Sol/high D | Integrated499e1781 | C++17 compatibility, D06 protocol256/0/1, D08 focused82/0/0 and standalone Zarr601 outer checks pass; one optional NetCDF skip; combined checks pending; [review](D08-review.md), [results](D08-tests.md) |
 | B06 | Sol/high B | Census accepted | Existing pool ledger misses the selection allocations; no measured whole-kernel saving; [review](B06-review.md) |
 | C04 | Sol/high C | Integrated c521a81b (kernel bfefabe5) | 706 optimizer checks,32 native arms,32 emit/plan checks and final SQL/interpreter/opt-diff gates pass; [review](C04-review.md), [census](C04-census-results.md) |
-| A04 | Sol/high A | Checkpoint 416f9504; build type/control-flow repair active | Seven paired IR snapshots/fourteen emissions accepted; [review](A04-review.md), [census](A04-census-results.md); C++ remains fresh destination |
+| A04 | Sol/high A | Integrated38256bb1 (kernel6c9d6e1d) | 151 facts,653 optimizer checks, affected categories, all-output native controls and four033 sanitizer arms pass; combined checks pending; [review](A04-review.md), [results](A04-tests.md) |
+| B07 | Sol/high B | Integrated27d31e74; diagnostic checkpoint accepted | 14 fixtures and8 canonical native numeric checks pass; opaque task, separate observer and matched cleanup; [review](B07-review.md); all eight canonical and one prepared native enclosure audits and saved validators pass; performance ineligible |
+| C05 | Sol/high C | Primary744 pass/1 failure; snapshot diagnostic queued | Layout repair built; route refuses snapshot mutation correctly, but interpreter value check fails; raw diagnostic pending |
 | Full suite | Luna/high runner | Reserved | End of whole round only; launch count 0 |
 
 Per-card handoffs and reviewer dispositions live beside this file. Historical plans and

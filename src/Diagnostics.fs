@@ -531,6 +531,7 @@ module Codes =
             // refused under the same code. The opt-in is the masked read,
             // `alias.read_present` / `alias.present`.
             "BL8015", "provider read holds missing values"
+            "BL8016", "private intermediate resource or protocol failure"
             // BL9xxx: internal compiler errors
             "BL9001", "internal compiler error"
             "BL9002", "internal codegen invariant violated"

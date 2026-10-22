@@ -7812,6 +7812,185 @@ let private returnPoolDestination (c: Ctx) (cl: IRCallable) (lets: Map<IRId, IRE
     | Some why, _, _, _ -> Error why
     | _ -> Error "the return donor lacks a complete backing proof"
 
+/// A04 is NOT a dead-pool ReturnDonors entry: C++'s generic consumer assumes
+/// distinct restricted input/output paths. This immutable, emission-local
+/// certificate authorizes only the LLVM ordinary same-cell RETURN below.
+type private SameCellReturn =
+    { Function: IRId
+      Donor: IRId
+      Body: IRExpr
+      Tail: ApplyInfo
+      Extent: int64
+      Snapshots: Set<IRId> }
+
+let private sameCellReturnCertificate (c: Ctx) (cl: IRCallable) : Result<SameCellReturn, string> =
+    let plain ty =
+        match ty with
+        | ArrayElem at when not at.IsVirtual && at.Identity.IsNone && at.ElemType = IRTScalar ETFloat64 ->
+            match at.IndexTypes with
+            | [ix] when ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank = 1 &&
+                        ix.Kind = SDimension && ix.Dependencies.IsEmpty ->
+                match ix.Extent with IRLit (IRLitInt n) when n > 0L -> Some ix | _ -> None
+            | _ -> None
+        | _ -> None
+    let rec spine e =
+        match e with
+        | IRLet (id, v, body) ->
+            let ls, tail = spine body
+            (id, v) :: ls, tail
+        | tail -> [], tail
+    let lets, tail = spine cl.Body
+    let mutable blocked = None
+    let require ok why = if not ok && blocked.IsNone then blocked <- Some why
+    let ordinary (k: IRCallable) =
+        not k.IsStatic && not k.IsOmpParallel && k.Parallelism.IsEmpty && not k.IsCudaKernel && not k.IsMpiParallel &&
+        not k.IsArityPoly && k.ArityParam.IsNone && k.AntisymGroups.IsEmpty
+    let rec scalar (vars: Set<IRId>) e =
+        match e with
+        | IRLit (IRLitFloat _) -> true
+        | IRVar (id, IRTScalar ETFloat64) -> Set.contains id vars
+        | IRBinOp (IRElementwise, (IRAdd | IRSub | IRMul), l, r, _) -> scalar vars l && scalar vars r
+        | _ -> false
+    // Unknown effect summaries on synthesized lambdas are discharged by this
+    // closed syntax, never by assuming their summary means pure/total.
+    let kernel arity snapshots expr =
+        match expr with
+        | IRVar (kid, _) when c.Callables.ContainsKey kid ->
+            let k = c.Callables.[kid]
+            let vars = Set.ofList ((k.Params |> List.map (_.VarId)) @ (k.Captures |> List.map (_.Id)))
+            ordinary k && typeOf expr = IRTArrow (List.replicate arity (SVal (IRTScalar ETFloat64)), IRTScalar ETFloat64, None) &&
+            k.Params.Length = arity && k.RetType = IRTScalar ETFloat64 &&
+            (k.Params |> List.mapi (fun i p -> p.Index = i) |> List.forall id) &&
+            vars.Count = k.Params.Length + k.Captures.Length &&
+            (k.Params |> List.forall (fun p -> p.Type = IRTScalar ETFloat64)) &&
+            (k.Captures |> List.forall (fun cap -> cap.Type = IRTScalar ETFloat64 && Set.contains cap.Id snapshots)) &&
+            scalar vars k.Body
+        | _ -> false
+    let shape = plain cl.RetType
+    let sameShape ty =
+        match shape, plain ty with Some a, Some b -> Blade.IRTotality.sameIndex a b | _ -> false
+    let map (info: ApplyInfo) =
+        sameShape info.OutputType &&
+        info.KernelInputRanks = [0] && info.KernelOutputRank = 0 && info.SDimsPerArray = [1] &&
+        info.KernelTDims.IsEmpty && info.SharedIndexTypes.IsEmpty && info.TriangularLevels = [false] &&
+        info.SymcomStates = [SCNeither] && not info.IsCoIteration && not info.HasReynolds &&
+        info.SpeedupFactor = 1L && info.ReynoldsSpeedup = 1L && info.Identities.Length = 1 &&
+        (match info.ArrayTypes with [a] -> sameShape (mkArrayLike a) | _ -> false) &&
+        (match info.Loop with
+         | IRMethodFor loop ->
+             loop.Arrays = info.Arrays && loop.ArrayTypes = info.ArrayTypes && loop.Identities = info.Identities &&
+             loop.SDimsPerArray = [1] && loop.TotalSDims = 1 && loop.SharedIndexTypes.IsEmpty
+         | _ -> false)
+    require (Blade.Optimize.poolReuseEnabled ()) "disabled by BLADE_POOL_REUSE"
+    require (ordinary cl && cl.Captures.IsEmpty && not (c.Facts.SelfRecursive.Contains cl.Id))
+            "not an ordinary capture-free nonrecursive serial callable"
+    require ((cl.Params |> List.mapi (fun i p -> p.Index = i) |> List.forall id) &&
+             ((cl.Params |> List.map (_.VarId)) @ (lets |> List.map fst) |> Set.ofList |> Set.count) = cl.Params.Length + lets.Length)
+            "parameter/local identities or parameter positions are not unique"
+    require (not (containsPoolLifetimeEvent cl.Body)) "inline lifetime region remains excluded"
+    require shape.IsSome "return is not unitless static plain rank-one Float64 storage"
+    require (cl.Params |> List.forall (fun p -> p.Type = IRTScalar ETFloat64 || sameShape p.Type))
+            "parameter type/index provenance does not match the return"
+    let ids =
+        Set.union (collectVarRefsIR cl.Body)
+            (Set.ofList (cl.Id :: ((lets |> List.map fst) @ (cl.Params |> List.map (_.VarId)))))
+    let owns id =
+        (Blade.Optimize.HotRowTable.tryProducer id).IsSome || (Blade.Optimize.HotRowTable.tryConsumer id).IsSome ||
+        (Blade.Optimize.CellFoldTable.tryLoop id).IsSome || (Blade.Optimize.CellFoldTable.tryFoldLet id).IsSome ||
+        (Blade.Optimize.RecStepTable.tryLoop id).IsSome || (Blade.Optimize.RecStepTable.tryStep id).IsSome ||
+        (Blade.Optimize.EpilogueLegTable.tryProducer id).IsSome || (Blade.Optimize.EpilogueLegTable.tryJoin id).IsSome ||
+        (Blade.Optimize.CompactionTable.tryMask id).IsSome || (Blade.Optimize.CompactionTable.tryCompound id).IsSome ||
+        (Blade.Optimize.CompactionTable.tryFoldMap id).IsSome || not (Blade.Optimize.CompactionTable.foldsOf id).IsEmpty ||
+        (Blade.Optimize.CompactRowTable.tryProducer id).IsSome || (Blade.Optimize.CompactRowTable.tryConsumer id).IsSome ||
+        not (Blade.Optimize.MemberHoistTable.plansOf id).IsEmpty
+    let generic =
+        (Blade.Types.PoolReuseTable.tryReturnDonor cl.Id).IsSome ||
+        (Blade.Types.PoolReuseTable.currentReturnDonor ()).IsSome ||
+        (Blade.Types.PoolReuseTable.returnDonors () |> Map.exists (fun id donor -> ids.Contains id || ids.Contains donor)) ||
+        (Blade.Types.PoolReuseTable.donors () |> Map.exists (fun a b -> ids.Contains a || ids.Contains b))
+    let memberOwner = Blade.Optimize.MemberHoistTable.all () |> List.exists (fun p -> ids.Contains p.HostId || ids.Contains p.SetId || not (Set.intersect ids p.Kernels).IsEmpty)
+    require (not generic && not memberOwner && not (ids |> Set.exists owns) &&
+             not (ids |> Set.exists (fun a -> ids |> Set.exists (fun b -> (Blade.Optimize.OrbitPullTable.tryAudit a b).IsSome))))
+            "another planner owns this body"
+    let paramScalars = cl.Params |> List.filter (fun p -> p.Type = IRTScalar ETFloat64) |> List.map (_.VarId) |> Set.ofList
+    let mutable snapshots = paramScalars
+    let mutable barriers = 0
+    let mutable donor = None
+    let rec typeReads (id: IRId) (ty: IRType) : bool =
+        let indices (xs: IRIndexType list) = xs |> List.exists (fun ix -> List.contains id ix.Dependencies || exprReads id ix.Extent)
+        match ty with
+        | IRTArrow (slots, ret, _) -> typeReads id ret || (slots |> List.exists (function SVal t -> typeReads id t | SIdx ix | SIdxVirt ix -> indices [ix]))
+        | IRTTuple ts -> ts |> List.exists (typeReads id)
+        | IRTLoop lt -> (lt.ArrayTypes @ Option.toList lt.KernelType) |> List.exists (typeReads id)
+        | IRTComputation t | IRTPoly (t, _) | IRTUnitAnnotated (t, _) -> typeReads id t
+        | IRTIdxTagged (t, IRefAnon (_, extent)) -> typeReads id t || exprReads id extent
+        | IRTIdxTagged (t, _) -> typeReads id t
+        | IRTDist (_, t, axes) -> typeReads id t || indices axes
+        | IRTGroupKeys (outer, source, _) -> indices [outer; source]
+        | IRTScalar _ | IRTUnit | IRTNat _ | IRTNamed _ | IRTInfer _ -> false
+    and exprReads (id: IRId) (expr: IRExpr) : bool =
+        Set.contains id (collectVarRefsIR expr) || (Blade.IRValidate.collectTypesInExpr expr |> List.exists (typeReads id))
+    match lets with
+    | (id, IRCompute (IRApplyCombinator producer)) :: scalars ->
+        donor <- Some id
+        // Even a callable not named in this body's expression tree must not
+        // retain p through its capture list or embedded type dependencies.
+        let retained =
+            c.Callables.Values |> Seq.exists (fun k ->
+                (k.Captures |> List.exists (fun cap -> cap.Id = id || typeReads id cap.Type)) ||
+                typeReads id k.RetType || (k.Params |> List.exists (fun p -> typeReads id p.Type)))
+        require (not retained) "donor is retained by a callable capture/type payload"
+        require (map producer && kernel 1 snapshots producer.Kernel) "donor producer is not a closed total plain scalar map"
+        require (match producer.Arrays with
+                 | [IRVar (input, ty)] -> sameShape ty && (cl.Params |> List.exists (fun p -> p.VarId = input && p.Type = ty))
+                 | _ -> false) "donor is not a fresh map of an original formal array"
+        for sid, value in scalars do
+            let sum =
+                match value with
+                | IRReduce (IRVar (input, ty), fold, None) when input = id && sameShape ty ->
+                    // Positive literal extent discharges unseeded-empty failure;
+                    // preserve the existing fold order and exact kernel body.
+                    kernel 2 snapshots fold
+                | _ -> false
+            require (typeOf value = IRTScalar ETFloat64 && (sum || scalar snapshots value))
+                    "body retains an array/alias/deferred read or has an unsupported scalar observation"
+            if sum then barriers <- barriers + 1
+            snapshots <- Set.add sid snapshots
+        require (barriers > 0) "no completed scalar barrier over the donor"
+    | _ -> require false "donor is not one direct fresh computed local map"
+    let info = match tail with IRCompute (IRApplyCombinator info) -> Some info | _ -> None
+    match info, donor with
+    | Some info, Some id ->
+        require (map info && kernel 1 snapshots info.Kernel) "return kernel/metadata is not closed total same-cell scalar arithmetic"
+        require (match info.Arrays with [IRVar (input, ty)] -> input = id && sameShape ty | _ -> false)
+                "return does not read exactly the named donor cell"
+    | _ -> require false "return is not one computed same-cell scalar map"
+    match blocked, donor, info, shape with
+    | None, Some id, Some info, Some ix ->
+        Ok { Function = cl.Id; Donor = id; Body = cl.Body; Tail = info; Extent = (Blade.IRTotality.evalInt ix.Extent).Value; Snapshots = snapshots }
+    | Some why, _, _, _ -> Error why
+    | _ -> Error "incomplete same-cell return certificate"
+
+/// Read-only realization check. No forcing, allocation, slot mutation or early
+/// free happens speculatively; fallback evaluates the original tail once.
+let private sameCellReturnBacking (c: Ctx) (proof: SameCellReturn) : Result<string * string, string> =
+    if c.PoolScopes.Count <> 1 then Error "no exact ordinary function scope"
+    else
+        let scope = c.PoolScopes.[0]
+        match c.ArrSlots.TryGetValue proof.Donor, List.ofSeq scope.Pools with
+        | (true, a), [(ptr, slot)] when scope.InlineId.IsNone && not (scope.KnownIds.Contains proof.Donor) &&
+                                       a.Elem = ScF64 && a.Groups = [GDense proof.Extent] && a.RowOpBytes = 0L &&
+                                       (match a.Src with APool p -> p = ptr | _ -> false) ->
+            let tracking =
+                c.Body |> Seq.map (fun line -> line.Trim())
+                |> Seq.filter (fun line -> line.StartsWith "store ptr " && line.EndsWith (", ptr " + slot)) |> List.ofSeq
+            let alias = c.ArrSlots |> Seq.exists (fun kv -> kv.Key <> proof.Donor && (match kv.Value.Src with APool p -> p = ptr | _ -> false))
+            let complete = proof.Snapshots |> Set.forall (fun id -> match c.Slots.TryGetValue id with true, (_, ScF64) -> true | _ -> false)
+            if alias || tracking <> [$"store ptr {ptr}, ptr {slot}"] then Error "donor ownership/slot was aliased, escaped or released"
+            elif not complete then Error "scalar snapshot is not completed in this frame"
+            else Ok (ptr, slot)
+        | _ -> Error "donor is not the sole completed owned backing/tracking entry"
+
 /// `internal` linkage everywhere but `main`: the module is the whole program
 /// (Blade has no separate compilation), so nothing needs to be externally
 /// visible and every definition stays available for inlining and DCE.
@@ -7926,7 +8105,38 @@ let private emitFunctionBody (c: Ctx) (cl: IRCallable) (sym: string) : string li
         // this frame's slots, which do not survive the return.
         let result =
             match Blade.Types.PoolReuseTable.tryReturnDonor cl.Id with
-            | None -> materialize c (emitArr c cl.Body)
+            | None ->
+                let record outcome evidence =
+                    Blade.Effects.Decisions.record
+                        { Rule = "same-cell-return-llvm"; Version = 1; Span = c.DeclSpan; Subject = cl.SourceName
+                          Outcome = outcome; Evidence = ($"function v{cl.Id}; LLVM-only certificate (no generic return donor)" :: evidence) }
+                match sameCellReturnCertificate c cl with
+                | Error why ->
+                    record (Blade.Effects.Declined why) []
+                    materialize c (emitArr c cl.Body)
+                | Ok proof ->
+                    if proof.Function <> cl.Id || proof.Body <> cl.Body then
+                        refuse "same-cell return: certificate belongs to a different function/body"
+                    let rec bindOriginal e =
+                        match e with
+                        | IRLet (id, value, body) ->
+                            bindLetIn c id value body
+                            bindOriginal body
+                        | _ -> ()
+                    bindOriginal proof.Body
+                    match sameCellReturnBacking c proof with
+                    | Error why ->
+                        record (Blade.Effects.Declined why) []
+                        materialize c (emitArr c (IRCompute (IRApplyCombinator proof.Tail)))
+                    | Ok (ptr, slot) ->
+                        let producer = applyToArr c proof.Tail
+                        match producer.Src with
+                        | AVirt _ when producer.Elem = ScF64 && producer.Groups = groups ->
+                            ln c ($"; A04: same-cell return: function v{proof.Function} donor v{proof.Donor} backing {ptr} slot {slot}")
+                            let result = fillDensePool c ptr producer
+                            record Blade.Effects.Applied [$"donor v{proof.Donor}, owned backing {ptr}, tracking slot {slot}; old cell loaded before same-index store"]
+                            result
+                        | _ -> refuse "same-cell return: prepared producer contradicts its closed dense certificate"
             | Some donor ->
                 let record outcome evidence =
                     Blade.Effects.Decisions.record

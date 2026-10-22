@@ -44,8 +44,9 @@
 // pulls no <filesystem>, <chrono>, <string> or <windows.h>, and the writer is
 // cold C stdio code -- a std::string-building writer cost g++ ~0.4 s of -O3
 // per program (measured on a two-line program: 1.15 s vs 0.76 s). File
-// observation is POSIX/MinGW stat(); the executable's own path is one
-// declared Win32 entry point or /proc/self/exe.
+// observation is POSIX/MinGW stat(); the executable's own path uses the
+// narrow Win32 loader API header or /proc/self/exe. Use the SDK's declaration
+// so both include orders with other Win32 runtime headers agree on HMODULE.
 #pragma once
 #if !defined(__CUDA_ARCH__)
 #include <atomic>
@@ -58,7 +59,10 @@
 #include <sys/stat.h>
 #include "blade_runtime.hpp"
 #if defined(_WIN32)
-extern "C" __declspec(dllimport) unsigned long __stdcall GetModuleFileNameA(void* module, char* out, unsigned long size);
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <libloaderapi.h>
 #else
 #include <unistd.h>
 #endif

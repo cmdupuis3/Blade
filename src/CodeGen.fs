@@ -1944,7 +1944,23 @@ let private genModuleBinding
         (hoistIds: Set<IRId>) : string list * CodeGenContext =
     let atBinding =
         { ctx with TopLevelProviderRead = if ctx.ProviderReads.ContainsKey binding.Id then Some binding.Id else None }
-    let (code, emittedCtx) = genBinding atBinding binding builder
+    let (code, emittedCtx) =
+        match ctx.PrivateSpoolRegion with
+        | Some region when obj.ReferenceEquals(binding, region.Plan.Producer) && not region.Committed ->
+            match Blade.CodeGenPrivateSpool.tryGenerate atBinding region.Plan with
+            | Ok lines ->
+                Blade.CodeGenPrivateSpool.record binding.Name Blade.Effects.Applied
+                    [ "private-statistic-spool-v1: exact stored F64 bits, serial/repro and contraction off"
+                      "retained normal-window decode/input capacity; append faults drain original source windows"
+                      "tracked workspace and serialized disk only; terminal publication follows replay/EOF/cleanup" ]
+                lines, { atBinding with PrivateSpoolRegion = Some { region with Committed = true } }
+            | Error why ->
+                Blade.CodeGenPrivateSpool.record binding.Name (Blade.Effects.Declined why) []
+                genBinding { atBinding with PrivateSpoolRegion = None } binding builder
+        | Some region when region.Committed
+                           && ([region.Plan.Statistic;region.Plan.Barrier;region.Plan.Terminal]
+                               |> List.exists (fun b -> obj.ReferenceEquals(b,binding))) -> [], atBinding
+        | _ -> genBinding atBinding binding builder
     let ctx' = { emittedCtx with TopLevelProviderRead = ctx.TopLevelProviderRead }
     if not (Set.contains binding.Id hoistIds) then (code, ctx')
     else
@@ -2130,7 +2146,7 @@ let private emissionOrderedItems (modul: IRModule) (mainLocalFuncIds: Set<IRId>)
         | _ -> (k, 1, 0)
     bindingItems @ funcItems |> List.sortBy sortKey
 
-let private genModuleCore (wholeProgram: bool) (modul: IRModule) (builder: IRBuilder) : string list * string list =
+let private genModuleCore (wholeProgram: bool) (spool: Blade.OptimizePrivateSpool.Plan option) (modul: IRModule) (builder: IRBuilder) : string list * string list =
     // Companion-array gap: populate the codegen-side struct fields
     // cache so inferExprType can resolve IRFieldAccess result types.
     setCodegenStructFieldsCache modul.Types
@@ -2166,6 +2182,7 @@ let private genModuleCore (wholeProgram: bool) (modul: IRModule) (builder: IRBui
     // Revision reuse (docs/plans/structural/04): empty unless BLADE_TILE_CACHE is set.
     let (tilePlans, tileReads) = Blade.CodeGenTiles.planTiles modul
     let ctx0 = { ctx0 with TilePlans = tilePlans; TileReads = tileReads; StreamTerminalModule = if wholeProgram then Some modul else None }
+    let ctx0 = { ctx0 with PrivateSpoolRegion = if wholeProgram then spool |> Option.map (fun p -> {Plan=p;Committed=false}) else None }
 
     // First pass: register ALL names (both bindings and functions) in context
     let ctx0 =
@@ -2187,6 +2204,9 @@ let private genModuleCore (wholeProgram: bool) (modul: IRModule) (builder: IRBui
     // Main-locality first: the emission order reads it (emissionOrderedItems).
     let mainLocalFuncIds = computeMainLocalFuncIds modul ctx0
     let allItems = emissionOrderedItems modul mainLocalFuncIds
+    let ctx0 =
+        Blade.CodeGenPrivateSpool.checkEmissionOrder ctx0
+            (allItems |> List.choose (fun (_,item) -> match item with Choice1Of2 b -> Some b | _ -> None))
 
     // Generate in ID order (approximates source order).
     // First, collect file-scope functions to generate forward declarations.
@@ -2276,7 +2296,7 @@ let private genModuleCore (wholeProgram: bool) (modul: IRModule) (builder: IRBui
     | _ -> (funcCode, bindCode)
 
 /// Low-level callers supply one module without whole-program demand evidence.
-let genModule modul builder = genModuleCore false modul builder
+let genModule modul builder = genModuleCore false None modul builder
 
 /// Split-timing variant of genModule: identical context-threaded emission, but
 /// binding output is routed into TWO buckets -- `setupCode` (data-setup
@@ -2285,7 +2305,7 @@ let genModule modul builder = genModuleCore false modul builder
 /// still threaded through ALL items in ID order (later bindings reference
 /// earlier ones), so only the OUTPUT is partitioned, never the evaluation
 /// order. Returns (funcCode, setupCode, computeCode).
-let private genModuleSplitCore (wholeProgram: bool) (modul: IRModule) (builder: IRBuilder) : string list * string list * string list =
+let private genModuleSplitCore (wholeProgram: bool) (spool: Blade.OptimizePrivateSpool.Plan option) (modul: IRModule) (builder: IRBuilder) : string list * string list * string list =
     setCodegenStructFieldsCache modul.Types
     let callables = IRPrint.buildCallablesTableForModule modul
     IR.setCallablesContext callables |> ignore
@@ -2309,6 +2329,7 @@ let private genModuleSplitCore (wholeProgram: bool) (modul: IRModule) (builder: 
     // Revision reuse (docs/plans/structural/04): empty unless BLADE_TILE_CACHE is set.
     let (tilePlans, tileReads) = Blade.CodeGenTiles.planTiles modul
     let ctx0 = { ctx0 with TilePlans = tilePlans; TileReads = tileReads; StreamTerminalModule = if wholeProgram then Some modul else None }
+    let ctx0 = { ctx0 with PrivateSpoolRegion = if wholeProgram then spool |> Option.map (fun p -> {Plan=p;Committed=false}) else None }
     let ctx0 =
         modul.Bindings |> List.fold (fun c b -> addVarName b.Id b.Name c) ctx0
     let ctx0 =
@@ -2318,6 +2339,9 @@ let private genModuleSplitCore (wholeProgram: bool) (modul: IRModule) (builder: 
     let mainLocalFuncIds = computeMainLocalFuncIds modul ctx0
     // Same emission order as genModule, from the same definition.
     let allItems = emissionOrderedItems modul mainLocalFuncIds
+    let ctx0 =
+        Blade.CodeGenPrivateSpool.checkEmissionOrder ctx0
+            (allItems |> List.choose (fun (_,item) -> match item with Choice1Of2 b -> Some b | _ -> None))
     let fileScopeFuncs =
         allItems |> List.choose (fun (_, item) ->
             match item with
@@ -2405,7 +2429,7 @@ let private genModuleSplitCore (wholeProgram: bool) (modul: IRModule) (builder: 
     | [fc; sc; cc] -> (fc, sc, cc)
     | _ -> (funcCode, setupCode, computeCode)
 
-let genModuleSplit modul builder = genModuleSplitCore false modul builder
+let genModuleSplit modul builder = genModuleSplitCore false None modul builder
 
 /// Generate a complete C++ program with main() from an IR module
 let genStructDef (name: string) (fields: (string * IRType) list) : string list =
@@ -3825,7 +3849,7 @@ let providerIncludes (modul: IRModule) : string list =
 /// ids read by genPrintStatements, the include flags read below) start empty,
 /// and the deterministic-deallocation facts are reinstalled by genModule /
 /// genModuleSplit (they need the callables table first).
-let private genSelfContainedProgram (modul: IRModule) (testName: string) : string =
+let private genSelfContainedProgram (spool: Blade.OptimizePrivateSpool.Plan option) (modul: IRModule) (testName: string) : string =
     let builder = IRBuilder()
     // Codegen-synthesized ids (sequence children, __s1 stages, __ret temps)
     // must not collide with typecheck/lowering ids arriving in the module --
@@ -3842,6 +3866,7 @@ let private genSelfContainedProgram (modul: IRModule) (testName: string) : strin
         // the module actually has provider I/O, so non-provider programs gain
         // no extra dependency (registry-dispatched per provider).
         genIncludesExternal () @ providerIncludes modul
+        @ (if spool.IsSome then ["#include \"blade_private_spool.hpp\"";"#include <memory>"] else [])
     // MPI scaffolding: only when the emit gate is on AND the module has an
     // mpi kernel (a PURE predicate -- includes are computed before genModule
     // runs, so an emission-time cell would not work here). Adds
@@ -3866,13 +3891,13 @@ let private genSelfContainedProgram (modul: IRModule) (testName: string) : strin
     // the forced-deferred collector genModule* populates.
     let mainFunc =
         if splitTimingModeEnabled () then
-            let (funcDefs, setupCode, computeCode) = genModuleSplitCore true modul builder
+            let (funcDefs, setupCode, computeCode) = genModuleSplitCore true spool modul builder
             let printCode = genPrintStatements modul
             let setupIndented = setupCode |> List.map (fun s -> "    " + s)
             let computeIndented = computeCode |> List.map (fun s -> "    " + s)
             (funcDefs, genMainWrapperSplit (mpiOn, mpiOn && moduleHybridMpiOmp modul, moduleUsesNetcdf modul) testName setupIndented computeIndented printCode)
         else
-            let (funcDefs, bindCode) = genModuleCore true modul builder
+            let (funcDefs, bindCode) = genModuleCore true spool modul builder
             let printCode = genPrintStatements modul
             let bodyIndented = bindCode |> List.map (fun s -> "    " + s)
             (funcDefs, genMainWrapper (mpiOn, mpiOn && moduleHybridMpiOmp modul, moduleUsesNetcdf modul) testName bodyIndented printCode)
@@ -3961,13 +3986,30 @@ let beginProgramAssembly () : unit =
 
 /// Generate a self-contained C++ program from an IR program: THE program
 /// assembler (CLI, REPL, notebook and every test lane go through here).
-let genSelfContainedProgramFromIR (program: IRProgram) (testName: string) : string * string list =
+let genSelfContainedProgramFromIRWithOptions (options: ProgramEmissionOptions) (program: IRProgram) (testName: string) : string * string list =
     beginProgramAssembly ()
+    let spool =
+        match options.PrivateSpool with
+        | None -> None
+        | Some policy ->
+            Blade.CodeGenPrivateSpool.validatePolicy policy
+            if splitTimingModeEnabled () then
+                Blade.CodeGenPrivateSpool.record testName (Blade.Effects.Declined "split timing placement is not admitted") []
+                None
+            elif not (Blade.CodeGenPrivateSpool.fpSupported ()) then
+                Blade.CodeGenPrivateSpool.record testName (Blade.Effects.Declined "requires reproducible serial folds and explicit BLADE_FP_CONTRACT=off") []
+                None
+            else
+                match Blade.OptimizePrivateSpool.tryPlan policy (printSelection ()) program with
+                | Ok plan -> Some plan
+                | Error why ->
+                    Blade.CodeGenPrivateSpool.record testName (Blade.Effects.Declined why) []
+                    None
     let cell = exprWarningsCell ()
     let code =
         match program.Modules with
         | [] -> "// Empty program\nint main() { return 0; }\n"
-        | [modul] -> genSelfContainedProgram modul testName
+        | [modul] -> genSelfContainedProgram spool modul testName
         | modules ->
             // Multi-module: merge all modules into one for code generation
             // Functions and bindings from earlier modules come first
@@ -3990,7 +4032,7 @@ let genSelfContainedProgramFromIR (program: IRProgram) (testName: string) : stri
                 DerivedFuncOrigins = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.DerivedFuncOrigins) Map.empty
                 FunctionAliasNames = modules |> List.fold (fun acc m -> Set.union acc m.FunctionAliasNames) Set.empty
             }
-            genSelfContainedProgram merged testName
+            genSelfContainedProgram None merged testName
     // Expression-position refusals become real `#error` directives. They are
     // appended to the END of the translation unit rather than spliced at the
     // refusal site because the refusal site is an EXPRESSION and a preprocessor
@@ -4025,3 +4067,9 @@ let genSelfContainedProgramFromIR (program: IRProgram) (testName: string) : stri
                     "// " + Blade.CodeGenState.ompSuppressedPhrase why)
             code + "\n" + (lines |> String.concat "\n") + "\n"
     (code, cell.Value)
+
+/// Existing callers never acquire disk authority. The explicit options entry
+/// deliberately binds its validated policy to the generated artifact; optional
+/// resident fallback does not implement an enforced global workspace limit.
+let genSelfContainedProgramFromIR (program: IRProgram) (testName: string) : string * string list =
+    genSelfContainedProgramFromIRWithOptions defaultProgramEmissionOptions program testName

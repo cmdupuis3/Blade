@@ -3932,6 +3932,10 @@ let runtimeHeaderNames : string list =
       // BLADE_FRAME macro. Header-only, host-only (device passes see
       // no-op stubs); deployed unconditionally and included by every program.
       "blade_runtime.hpp"
+      // Explicit private-spool artifacts include this protocol header. Keep
+      // deployment/cache/cleanup on the shared registry like other runtimes;
+      // deploying its bytes alone grants no disk or compiler admission.
+      "blade_private_spool.hpp"
       // The run record (BLADE_RUN_RECORD): the baked input manifest paired
       // at exit with what the run observed and how it ended. Header-only,
       // host-only; deployed unconditionally and included by every program.

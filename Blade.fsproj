@@ -143,6 +143,8 @@
          emitters apply ONE predicate. Before Optimize, after IR. -->
     <Compile Include="src/IRTotality.fs" />
     <Compile Include="src/Optimize.fs" />
+    <!-- One final-IR private statistic-spool certificate; no provider dependency. -->
+    <Compile Include="src/OptimizePrivateSpool.fs" />
     <Compile Include="src/IRPrint.fs" />
     <Compile Include="src/IRValidate.fs" />
     <!-- Provider registry: the core<->provider seam (ProviderSpec records
@@ -412,6 +414,7 @@
          bindingCppName; the emission helpers it feeds live in CodeGenState. -->
     <Compile Include="src/CodeGenTiles.fs" />
     <Compile Include="src/CodeGenBinding.fs" />
+    <Compile Include="src/CodeGenPrivateSpool.fs" />
     <Compile Include="src/CodeGen.fs" />
     <!-- The direct LLVM back end (BLADE_LLVM lane): IRProgram -> textual .ll,
          whole-program refusal, no C++ in between. Placed AFTER the CodeGen
@@ -618,6 +621,7 @@
          the netcdf/zarr/csv/icechunk blocks below. -->
     <Compile Include="tests/ProviderBoundaryTests.fs" />
     <Compile Include="tests/NetcdfTests.fs" />
+    <Compile Include="tests/PrivateSpoolTests.fs" />
     <Compile Include="tests/ZarrTests.fs" />
     <Compile Include="tests/CsvTests.fs" />
     <!-- Input manifests + run records: the manifest table, its emission, and

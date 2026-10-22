@@ -109,3 +109,30 @@ reject skips. Its narrow empty-literal interpreter repair is separately recorded
 D08 fixes its observed fresh-output-axis proof and retries the focused gate.
 A04's first build found F# inference/test-control-flow errors; its coder repairs
 those before any fact/native result. B07 remains source-only diagnostic work.
+
+Current checkpoint: C04 is integrated; A04's five raw captures establish one
+old-cell load before the same-address store, so only its fact matcher and exact
+capture-refusal expectation are being repaired. D08 now reaches native compilation;
+the shared C++17 build exposed an endian-API compatibility issue and conflicting
+Windows declarations. Its compatibility repair precedes any native acceptance.
+C05 is a bounded sparse-wildcard terminal census, with no production change yet.
+B07's opaque benchmark boundary is committed and approved for eight diagnostic
+arms, followed by root's native audit. Luna serializes those frozen jobs; full
+default suite launches remain0.
+
+Current checkpoint: A04 source52f4bcc3 passes151 LLVM facts and653 optimizer
+checks; its affected categories and four all-output033 native arms are queued.
+B07 source2a5c2e26 passes14 fixtures and all8 canonical numeric/provenance arms;
+root is auditing actual native timing, stores, observation and cleanup. D08's
+C++17 compatibility and256 protocol checks pass (one expected symlink skip).
+Its first native program produced the expected value/counters; five printed
+Float64 expectations were corrected in717790c4 before the focused retry.
+C05's census is accepted and its bounded sparse-wildcard terminal is being
+implemented. No performance claim; full-suite launches remain0.
+Current checkpoint: A04 is integrated38256bb1 after primary/category/all-output
+native and four033 sanitizer gates. C05 is frozen4c3c4601 and undergoing its
+fresh Release/optimizer gate. B07 canonical native audit is accepted; saved-output
+validation is queued, then exactly one separately reviewed prepared LLVM repro
+witness. D08 focused82/0/0 is accepted; standalone Zarr is queued. A05 early
+release and D09 rank-two window metadata are source-census proposals only.
+Full-suite launch count remains0.

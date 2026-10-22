@@ -85,6 +85,11 @@ and TilePlan = {
     Hoisted: bool
 }
 
+type ProgramEmissionOptions = { PrivateSpool: PrivateSpoolPolicy option }
+let defaultProgramEmissionOptions : ProgramEmissionOptions = { PrivateSpool = None }
+
+type PrivateSpoolEmission = { Plan: Blade.OptimizePrivateSpool.Plan; Committed: bool }
+
 type CodeGenContext = {
     /// Map from IR variable IDs to C++ variable names
     VarNames: Map<IRId, string>
@@ -125,6 +130,9 @@ type CodeGenContext = {
     /// the sole assembler has merged every module. Low-level genModule callers
     /// have None. Context-owned; no ambient flag or omitted resident allocation.
     StreamTerminalModule: IRModule option
+    /// Explicit whole-program policy/certificate only. Never inherited by
+    /// generic module APIs; commit is immutable context state at the producer.
+    PrivateSpoolRegion: PrivateSpoolEmission option
     /// An explicit capability for the CURRENT ordinary module-level provider
     /// binding only. genModuleBinding grants/restores it; nested bindings and
     /// generic provider API calls have no scope/cleanup proof for PM43.
@@ -1818,6 +1826,7 @@ let emptyContext () = {
     ProviderWrites = Map.empty
     StreamedArrays = Map.empty
     StreamTerminalModule = None
+    PrivateSpoolRegion = None
     TopLevelProviderRead = None
     StructuralGroupings = Set.empty
     GridGroupings = Map.empty

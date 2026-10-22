@@ -11,7 +11,6 @@
 #include <new>
 #include <utility>
 #include <initializer_list>
-#include <bit>
 #if defined(_WIN32)
 #ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0600
@@ -58,6 +57,21 @@ struct Counters {
 enum class Phase { idle, writing, faulted, sealed, reading, checked };
 
 namespace detail {
+// Wire values are raw IEEE64 cells. Check the actual integer and floating
+// byte representations without requiring the C++20 std::endian API: ordinary
+// generated Blade programs use C++17. Never assume host byte order from OS.
+inline bool little_endian_f64() noexcept {
+  const std::uint64_t integer = UINT64_C(0x0102030405060708);
+  const double floating = 1.0;
+  unsigned char integer_bytes[sizeof integer], floating_bytes[sizeof floating];
+  std::memcpy(integer_bytes, &integer, sizeof integer);
+  std::memcpy(floating_bytes, &floating, sizeof floating);
+  const unsigned char integer_le[8] = {8, 7, 6, 5, 4, 3, 2, 1};
+  const unsigned char floating_le[8] = {0, 0, 0, 0, 0, 0, 0xf0, 0x3f};
+  return sizeof integer == 8 && sizeof floating == 8
+      && std::memcmp(integer_bytes, integer_le, 8) == 0
+      && std::memcmp(floating_bytes, floating_le, 8) == 0;
+}
 inline bool add(std::uint64_t a, std::uint64_t b, std::uint64_t& out) noexcept {
   if (b > UINT64_MAX - a) return false;
   out = a + b; return true;
@@ -134,7 +148,7 @@ inline Status plan(const Grant& g, Plan& out) noexcept {
   if (!g.root || !g.block_cells || g.block_cells > max_block_cells)
     return {Code::invalid_grant};
   if (sizeof(double) != 8 || std::numeric_limits<unsigned char>::digits != 8
-      || !std::numeric_limits<double>::is_iec559 || std::endian::native != std::endian::little) return {Code::unsupported};
+      || !std::numeric_limits<double>::is_iec559 || !detail::little_endian_f64()) return {Code::unsupported};
   const auto blocks = g.cells / g.block_cells + (g.cells % g.block_cells != 0);
   std::uint64_t payload, headers, bytes, workspace;
   if (!detail::mul(g.cells, 8, payload)

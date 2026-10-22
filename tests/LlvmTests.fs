@@ -817,6 +817,117 @@ let private returnPoolReuseProof (reuse: bool) (ll: string) : Result<string, str
             let arithmetic = matches @" = (?:fadd|fsub|fmul|fdiv) (?:[a-z]+ )*double " |> Seq.map (fun m -> m.Value) |> String.concat "|"
             Ok arithmetic
 
+/// A04: prove the actual root/slot/return and the final same-index old-load
+/// BEFORE store. The returned graph normalizes scalar spill/reload temporaries,
+/// retaining arithmetic operands/flags and the completed snapshot as an input.
+let private sameCellReturnProof (reuse: bool) (ll: string) : Result<string, string> =
+    let rx pattern text = System.Text.RegularExpressions.Regex.Match(text, pattern)
+    let all pattern text = System.Text.RegularExpressions.Regex.Matches(text, pattern) |> Seq.toList
+    match outlinedLifetimeBody "same_cell" ll with
+    | None -> Error "missing ordinary same_cell outline"
+    | Some (symbol, body) ->
+        let pools = all @"(%r\d+) = call ptr @blade_alloc_cells\(i64 7, i64 8\)" body
+        let ret = rx @"ret ptr (%r\d+)" body
+        let marks = all @"; A04: same-cell return: function v\d+ donor v\d+ backing (%r\d+) slot (%r\d+)" body
+        let wanted = if reuse then 1 else 2
+        let mutable problem : string option = None
+        let require ok why = if not ok && problem.IsNone then problem <- Some why
+        require (pools.Length = wanted && (all @" = call ptr @blade_alloc_cells\(" body).Length = wanted && ret.Success)
+                "wrong actual allocation count or return"
+        require (marks.Length = (if reuse then 1 else 0)) "wrong same-cell marker count"
+        require ((all @"call void @blade_free\(" body).Length = wanted - 1) "wrong owned free count"
+        if pools.Length = wanted && ret.Success then
+            let donor = pools.Head.Groups.[1].Value
+            let returned = ret.Groups.[1].Value
+            require (returned = (if reuse then donor else pools.[1].Groups.[1].Value)) "wrong returned allocation root"
+            for pool in pools do
+                let ptr = pool.Groups.[1].Value
+                let tracking = all (@"store ptr " + ptr + @", ptr (%r\d+)(?![0-9])") body
+                require (tracking.Length = 1) "allocation does not have one tracking entry"
+                if tracking.Length = 1 then
+                    let slot = tracking.Head.Groups.[1].Value
+                    let writes = all (@"store ptr [^\n]+, ptr " + slot + @"(?![0-9])") body
+                    let loads = all (@"(%r\d+) = load ptr, ptr " + slot + @"(?![0-9])") body
+                    let expectedWrites = if ptr = returned then 1 else 2 // initial cleanup reset + allocation
+                    require (writes.Length = expectedWrites) "ownership slot overwritten or duplicated"
+                    if ptr = returned then
+                        require (loads.IsEmpty && not (body.Contains("@blade_free(ptr " + ptr + ")"))) "returned root freed"
+                        if reuse && marks.Length = 1 then
+                            require (marks.Head.Groups.[1].Value = ptr && marks.Head.Groups.[2].Value = slot && pool.Index < marks.Head.Index)
+                                    "marker not tied to the original allocation/tracking entry"
+                    else
+                        require (loads.Length = 1 && (all (@"@blade_free\(ptr " + loads.Head.Groups.[1].Value + @"\)") body).Length = 1)
+                                "old donor not freed exactly once on fresh-output path"
+            let stores = all @"store double ([^,\n]+), ptr (%r\d+)" body
+            if stores.IsEmpty then
+                require false "no payload store"
+                Error (defaultArg problem "no payload store")
+            else
+                let store = stores |> List.last
+                let definitions = all @"(?m)^  (%r\d+) = ([^\n]+)" body |> List.map (fun m -> m.Groups.[1].Value, m) |> Map.ofList
+                let address = Map.tryFind store.Groups.[2].Value definitions
+                let dest = address |> Option.map (fun d -> rx (@"getelementptr inbounds double, ptr " + returned + @", i64 (%r\d+)$") d.Groups.[2].Value)
+                match dest with
+                | Some dest when dest.Success ->
+                    let index = dest.Groups.[1].Value
+                    let tailStart = if reuse && marks.Length = 1 then marks.Head.Index else pools.[wanted - 1].Index
+                    // Donation has TWO same-root GEPs (read and destination).
+                    // Count actual old payload loads, including OTHER indices,
+                    // rather than treating an unloaded destination as a read.
+                    let source =
+                        all (@"(%r\d+) = getelementptr inbounds double, ptr " + donor + @", i64 ([^\n]+)") body
+                    let reads = source |> List.collect (fun gep ->
+                        all (@"(%r\d+) = load double, ptr " + gep.Groups.[1].Value + @"(?![0-9])") body
+                        |> List.filter (fun load -> load.Index > tailStart)
+                        |> List.map (fun load -> gep, load))
+                    let loads = reads |> List.map snd
+                    let destAt = address |> Option.map (fun d -> d.Index) |> Option.defaultValue -1
+                    let direct = all (@"load double, ptr " + donor + @"(?![0-9])") body |> List.filter (fun load -> load.Index > tailStart)
+                    let oneOldRead =
+                        match reads with
+                        | [(gep, load)] -> gep.Groups.[2].Value = index && gep.Index < load.Index && load.Index < destAt && destAt < store.Index
+                        | _ -> false
+                    require (direct.IsEmpty && oneOldRead)
+                            "no single old-cell read before same-index destination/store, or extra/cross-index old read"
+                    let rec graph depth (value: string) =
+                        if depth > 30 then "?cycle"
+                        elif not (value.StartsWith "%") then value
+                        else
+                            match Map.tryFind value definitions with
+                            | None -> "?undefined"
+                            | Some d ->
+                                let expression = d.Groups.[2].Value
+                                let arithmetic = rx @"^(fadd|fsub|fmul) ((?:[a-z]+ )*)double ([^,]+), (.+)$" expression
+                                let load = rx @"^load double, ptr (%r\d+)$" expression
+                                if arithmetic.Success then
+                                    arithmetic.Groups.[1].Value + ":" + arithmetic.Groups.[2].Value + "(" +
+                                    graph (depth + 1) arithmetic.Groups.[3].Value + "," + graph (depth + 1) arithmetic.Groups.[4].Value + ")"
+                                elif load.Success then
+                                    let ptr = load.Groups.[1].Value
+                                    if loads |> List.exists (fun m -> m.Groups.[1].Value = value) then "old-cell"
+                                    else
+                                        match stores |> List.filter (fun s -> s.Groups.[2].Value = ptr && s.Index < d.Index) |> List.tryLast with
+                                        | Some s when s.Index < tailStart -> "completed-snapshot"
+                                        | Some s -> graph (depth + 1) s.Groups.[1].Value
+                                        | None -> "?uninitialized"
+                                else "?unsupported"
+                    let cellGraph = graph 0 store.Groups.[1].Value
+                    require (cellGraph = "fadd:(fmul:(old-cell,0x3FE0000000000000),completed-snapshot)")
+                            ("unexpected final-cell arithmetic operands/flags: " + cellGraph)
+                    require (not (body.Contains "!alias.scope") && not (body.Contains "!noalias") && not (body.Contains "!llvm.access.group"))
+                            "same-cell accesses carry disjointness metadata"
+                    let main = ll.Substring(ll.IndexOf "define i32 @main()")
+                    let calls = all (@"(%r\d+) = call ptr " + System.Text.RegularExpressions.Regex.Escape(symbol) + @"\(ptr (%r\d+)\)") main
+                    require (calls.Length = 2) "two independent calls were not retained"
+                    if calls.Length = 2 then
+                        let afterSecond = main.Substring(calls.[1].Index + calls.[1].Length)
+                        for root in [calls.[0].Groups.[1].Value; calls.[1].Groups.[1].Value; calls.[0].Groups.[2].Value; calls.[1].Groups.[2].Value] do
+                            require ((rx (@"getelementptr inbounds double, ptr " + root + @", i64 ") afterSecond).Success)
+                                    "a required caller input/result is not accessed after the second call"
+                    match problem with Some why -> Error why | None -> Ok cellGraph
+                | _ -> Error "last payload store does not address the returned root at a scalar loop index"
+        else Error (defaultArg problem "no allocation proof")
+
 let runLlvmFactTests () : BlockResult =
     printHeader "LLVM Fact Layer"
     let mutable passed = 0
@@ -1672,6 +1783,202 @@ let u = reduce(method_for(range<V>) <@> lambda(k) -> t(0, 0, k), (+))
                 if decline && noSpeculativeForce && not (ll.Contains "; A03: return pool reuse:") then
                     pass name "fresh-result fallback; exact backend refusal; no speculative donor fill/input forcing"
                 else fail name (sprintf "decline=%b; no speculative force=%b; decisions=%A" decline noSpeculativeForce decisions)
+
+    // A04: same-cell proof is backend-local; shared dead-donor tables and
+    // C++'s fresh-output/restrict path must remain unchanged.
+    let samePins reuse defaultSchedule =
+        returnPins reuse @
+        [ "BLADE_HOT_ROW", (if defaultSchedule then None else Some "0")
+          "BLADE_CELL_EPILOGUE", (if defaultSchedule then None else Some "off")
+          "BLADE_EPILOGUE_LEGS", (if defaultSchedule then None else Some "0")
+          "BLADE_COMPACTION_FUSION", Some "0"; "BLADE_COMPACT_ROW_CLASSES", Some "0" ]
+    let emitSame reuse schedule pairedCpp src tweak =
+        withEnv (defaultEmissionEnv @ samePins reuse schedule) (fun () ->
+            Blade.Effects.Decisions.start ()
+            try
+                match Lowering.lower src with
+                | Error e -> Error ("lowering: " + e)
+                | Ok ir ->
+                    let f = ir.Modules |> List.collect (_.Functions) |> List.find (fun f -> f.SourceName = "same_cell")
+                    let ir = tweak ir f
+                    match IRValidate.validateIR ir with
+                    | Error errs -> Error ("validation: " + String.concat "; " errs)
+                    | Ok ir ->
+                        let donors = Blade.Types.PoolReuseTable.donors ()
+                        let returns = Blade.Types.PoolReuseTable.returnDonors ()
+                        let cpp = if pairedCpp then fst (CodeGen.genSelfContainedProgramFromIR ir "facts") else ""
+                        match EmitLlvm.tryEmitProgramNamed "facts" ir with
+                        | Error e -> Error ("llvm: " + e)
+                        | Ok ll ->
+                            let unchanged = donors = Blade.Types.PoolReuseTable.donors () && returns = Blade.Types.PoolReuseTable.returnDonors ()
+                            Ok (ll, cpp, Blade.Effects.Decisions.drain (), unchanged)
+            finally
+                Blade.Types.PoolReuseTable.setCurrentReturnDonor None
+                Blade.Effects.Decisions.drain () |> ignore)
+    let sameName = "LLVM same-cell return keeps old scalar snapshots and two live call results"
+    match corpusSource sameName with
+    | None -> fail "same-cell return controls" "missing independent all-output corpus control"
+    | Some source ->
+        let source = source.Replace("\r\n", "\n")
+        for schedule in [false; true] do
+            let name = if schedule then "same-cell return: actual default scheduler" else "same-cell return: isolated ordinary maps"
+            match emitSame "1" schedule true source unchanged, emitSame "0" schedule true source unchanged with
+            | Ok (on, cppOn, decisions, tablesOn), Ok (off, cppOff, _, tablesOff) ->
+                let admissions = decisions |> List.filter (fun d -> d.Rule = "same-cell-return-llvm" && d.Subject = "same_cell" && d.Outcome = Blade.Effects.Applied)
+                let cppFresh =
+                    let body = System.Text.RegularExpressions.Regex.Match(cppOn, @"(?s)Array<double, 1> same_cell\(Array<double, 1> x\) \{(.*?)return __ret\d+;\s*\}")
+                    body.Success && System.Text.RegularExpressions.Regex.Matches(body.Value, @" = \{ allocate<typename promote<double, 1>::type, nullptr>").Count = 2 &&
+                    System.Text.RegularExpressions.Regex.Matches(body.Value, @"deallocate<typename promote<double, 1>::type, nullptr>").Count = 1 &&
+                    not (body.Value.Contains "pool reuse:") && cppOn = cppOff
+                match sameCellReturnProof true on, sameCellReturnProof false off with
+                | Ok a, Ok b when a = b && admissions.Length = 1 && tablesOn && tablesOff && cppFresh ->
+                    pass name "same-root old load before same-index store; one owner escapes; two calls and later input/result reads; same final-cell graph; C++ stays fresh"
+                | a, b -> fail name (sprintf "on=%A off=%A admissions=%d tables=%b/%b C++fresh=%b" a b admissions.Length tablesOn tablesOff cppFresh)
+            | Error e, _ | _, Error e -> fail name e
+
+        let tupleSource =
+            source.Replace(") -> Array<Float64 like Ix> = {", ") -> (Array<Float64 like Ix>, Float64) = {")
+                  .Replace("p * 0.5 + bias", "(p * 0.5 + bias, old_sum)")
+                  .Replace("let a = same_cell(x)", "let (a, old_a) = same_cell(x)")
+                  .Replace("let b = same_cell(y)", "let (b, old_b) = same_cell(y)")
+        match emitSame "1" false false tupleSource unchanged with
+        | Ok (ll, _, _, true) when not (ll.Contains "; A04: same-cell return:") && (outlinedLifetimeBody "same_cell" ll).IsNone ->
+            pass "same-cell tuple result excluded" "established tuple expansion retained; no ordinary return certificate or generic donor change"
+        | result -> fail "same-cell tuple result excluded" (sprintf "%A" result)
+
+        let tailKernel (ir: Blade.IR.IRProgram) (f: Blade.IR.IRCallable) change =
+            let rec last e = match e with Blade.IR.IRLet (_, _, body) -> last body | e -> e
+            match last f.Body with
+            | Blade.IR.IRCompute (Blade.IR.IRApplyCombinator info) ->
+                match info.Kernel with
+                | Blade.IR.IRVar (kid, _) ->
+                    let k = ir.Modules |> List.collect (_.Functions) |> List.find (fun k -> k.Id = kid)
+                    replaceFunction ir (change k)
+                | _ -> failwith "same-cell control needs a named scalar kernel"
+            | _ -> failwith "same-cell control needs a computed tail"
+        let hiddenCapture ir (f: Blade.IR.IRCallable) =
+            let p = f.Params.Head
+            tailKernel ir f (fun k ->
+                { k with Captures = k.Captures @ [{ Id = p.VarId; Name = p.Name; Type = p.Type; IsMutable = false }]
+                         Body = Blade.IR.IRBinOp (Blade.IR.IRElementwise, Blade.IR.IRAdd, k.Body,
+                                  Blade.IR.IRIndex (Blade.IR.IRVar (p.VarId, p.Type), [Blade.IR.IRLit (Blade.IR.IRLitInt 0L)], None), Blade.IR.SrcLoc.Nowhere) })
+        let failure ir f =
+            tailKernel ir f (fun k ->
+                { k with Body = Blade.IR.IRLet (990400, Blade.IR.IRConstraintCheck (Blade.IR.IRLit (Blade.IR.IRLitBool false), "BL8010", "A04 retained failure", Blade.Ast.noSpan), k.Body) })
+        let latent ir (f: Blade.IR.IRCallable) =
+            match f.Body with
+            | Blade.IR.IRLet (id, Blade.IR.IRCompute value, body) -> replaceFunction ir { f with Body = Blade.IR.IRLet (id, value, body) }
+            | _ -> failwith "missing donor let"
+        let region ir (f: Blade.IR.IRCallable) =
+            let _, value = directLets f.Body |> List.head
+            let scope, scratch, ending = 990401, 990402, 990403
+            let release = Blade.IR.IRReleasePools (Blade.IR.IRVar (scope, Blade.Types.IRTUnit), [Blade.IR.IRVar (scratch, Blade.IR.typeOf value)], "A04 event refusal")
+            let body = Blade.IR.IRLet (scope, Blade.IR.IRBeginPoolScope "A04 event refusal", Blade.IR.IRLet (scratch, value, Blade.IR.IRLet (ending, release, f.Body)))
+            replaceFunction ir { f with Body = body }
+        let ownedElsewhere ir (f: Blade.IR.IRCallable) =
+            let donor = directLets f.Body |> List.head |> fst
+            Blade.Optimize.OrbitPullTable.record donor donor (Error "A04 forged external owner")
+            ir
+        let genericValue ir (f: Blade.IR.IRCallable) =
+            let donor = directLets f.Body |> List.head |> fst
+            // The owner key intentionally is NOT a callable; a scan limited
+            // to Callables.Keys would miss this still-live donation value.
+            Blade.Types.PoolReuseTable.recordReturn 990499 donor
+            ir
+        let hiddenOwner ir (f: Blade.IR.IRCallable) =
+            let donor = directLets f.Body |> List.head |> fst
+            Blade.Optimize.MemberHoistTable.record
+                { HostId = 990498; HostName = "outside body"; SetId = donor; SetName = "A04 donor"
+                  Kernels = Set.empty; Forced = 0; Admission = "A04 hidden owner control" }
+            ir
+        let hiddenMetadata ir (f: Blade.IR.IRCallable) =
+            let p = f.Params.Head
+            let change e =
+                match e with
+                | Blade.IR.IRCompute (Blade.IR.IRApplyCombinator info) ->
+                    match info.Arrays, info.Loop with
+                    | [Blade.IR.IRVar (id, _)], Blade.IR.IRMethodFor loop when id <> p.VarId ->
+                        Blade.IR.IRCompute (Blade.IR.IRApplyCombinator { info with Loop = Blade.IR.IRMethodFor { loop with Arrays = [Blade.IR.IRVar (p.VarId, p.Type)] } })
+                    | _ -> e
+                | _ -> e
+            replaceFunction ir { f with Body = Blade.IR.mapIRExpr change f.Body }
+        let anonymousIndices ir (f: Blade.IR.IRCallable) =
+            let anon ty =
+                match ty with
+                | Blade.IR.ArrayElem a -> Blade.IR.mkArrayLike { a with IndexTypes = a.IndexTypes |> List.map (fun ix -> { ix with Tag = None }) }
+                | ty -> ty
+            let change e =
+                match e with
+                | Blade.IR.IRVar (id, ty) -> Blade.IR.IRVar (id, anon ty)
+                | Blade.IR.IRMethodFor loop -> Blade.IR.IRMethodFor { loop with ArrayTypes = loop.ArrayTypes |> List.map (fun a -> { a with IndexTypes = a.IndexTypes |> List.map (fun ix -> { ix with Tag = None }) }) }
+                | Blade.IR.IRApplyCombinator info ->
+                    Blade.IR.IRApplyCombinator
+                        { info with
+                            OutputType = anon info.OutputType
+                            ArrayTypes = info.ArrayTypes |> List.map (fun a -> { a with IndexTypes = a.IndexTypes |> List.map (fun ix -> { ix with Tag = None }) }) }
+                | _ -> e
+            replaceFunction ir { f with RetType = anon f.RetType; Params = f.Params |> List.map (fun p -> { p with Type = anon p.Type }); Body = Blade.IR.mapIRExpr change f.Body }
+        let staticKernel ir f = tailKernel ir f (fun k -> { k with IsStatic = true })
+        let badParamIndex ir f = tailKernel ir f (fun k -> { k with Params = k.Params |> List.map (fun p -> { p with Index = p.Index + 1 }) })
+        let externalCapture throughType (ir: Blade.IR.IRProgram) (f: Blade.IR.IRCallable) =
+            let donor, value = directLets f.Body |> List.head
+            let ty = Blade.IR.typeOf value
+            let captureTy =
+                if not throughType then ty
+                else
+                    match ty with
+                    | Blade.IR.ArrayElem a -> Blade.IR.mkArrayLike { a with IndexTypes = a.IndexTypes |> List.map (fun ix -> { ix with Dependencies = [donor] }) }
+                    | _ -> failwith "same-cell donor is not an array"
+            let shadow =
+                { f with Id = 990497; Name = "A04_unreferenced_capture"; SourceName = "A04 unreferenced capture"; Params = []
+                         RetType = Blade.Types.IRTScalar Blade.Types.ETFloat64; Body = Blade.IR.IRLit (Blade.IR.IRLitFloat 0.0)
+                         Captures = [{ Id = (if throughType then 990496 else donor); Name = "retained"; Type = captureTy; IsMutable = false }] }
+            { ir with Modules = ir.Modules |> List.map (fun m -> if m.Functions |> List.exists (fun g -> g.Id = f.Id) then { m with Functions = m.Functions @ [shadow] } else m) }
+        let currentDonor ir (f: Blade.IR.IRCallable) =
+            Blade.Types.PoolReuseTable.setCurrentReturnDonor (Some (directLets f.Body |> List.head |> fst))
+            ir
+        let caller = source.Replace("    let p = x * 2.0 + 1.0 |> compute\n", "").Replace("reduce(p, (+))", "reduce(x, (+))").Replace("p * 0.5 + bias", "x * 0.5 + bias")
+        let alias = source.Replace("    let old_sum = reduce(p, (+))", "    let held = p\n    let old_sum = reduce(held, (+))")
+        let gather = source.Replace("p * 0.5 + bias", "method_for(range<Ix>) <@> lambda(i) -> p(i) * 0.5 + bias |> compute")
+        let controls =
+            [ "caller-owned", caller, unchanged, "not one direct fresh computed local map"
+              "retained array name", alias, unchanged, "retains an array/alias/deferred read"
+              "gather closure", gather, unchanged, "donor is retained by a callable capture/type payload"
+              "division outside closed grammar", source.Replace("p * 0.5 + bias", "(p * 0.5 + bias) / 2.0"), unchanged, "return kernel/metadata"
+              "no scalar barrier", source.Replace("reduce(p, (+))", "1.0"), unchanged, "no completed scalar barrier"
+              "unsupported scalar snapshot", source.Replace("old_sum - 1.0", "sqrt(old_sum)"), unchanged, "unsupported scalar observation"
+              "hidden array capture", source, hiddenCapture, "return kernel/metadata"
+              "failure in kernel", source, failure, "return kernel/metadata"
+              "deferred donor", source, latent, "not one direct fresh computed local map"
+              "lifetime event", source, region, "inline lifetime region remains excluded"
+              "other planner owner", source, ownedElsewhere, "another planner owns this body"
+              "hidden owner value", source, hiddenOwner, "another planner owns this body"
+              "hidden loop metadata", source, hiddenMetadata, "return kernel/metadata"
+              "different anonymous index IDs", source, anonymousIndices, "parameter type/index provenance"
+              "static kernel", source, staticKernel, "return kernel/metadata"
+              "kernel parameter position", source, badParamIndex, "return kernel/metadata"
+              "unreferenced callable capture", source, externalCapture false, "callable capture/type payload"
+              "unreferenced capture type dependency", source, externalCapture true, "callable capture/type payload"
+              "other return donor value", source, genericValue, "another planner owns this body"
+              "current return donor", source, currentDonor, "another planner owns this body" ]
+        for label, src, tweak, expected in controls do
+            let name = "same-cell return declines (llvm): " + label
+            match emitSame "1" false false src tweak with
+            | Error e -> fail name e
+            | Ok (ll, _, decisions, tables) ->
+                let refusals = decisions |> List.filter (fun d -> d.Rule = "same-cell-return-llvm" && d.Subject = "same_cell")
+                let declined =
+                    match refusals with
+                    | [d] ->
+                        match d.Outcome with
+                        | Blade.Effects.Declined why when label = "gather closure" -> why = expected
+                        | Blade.Effects.Declined why -> why.Contains(expected: string)
+                        | _ -> false
+                    | _ -> false
+                let failureKept = label <> "failure in kernel" || ll.Contains "A04 retained failure"
+                if declined && tables && failureKept && not (ll.Contains "; A04: same-cell return:") then
+                    pass name "one truthful backend refusal; no same-cell fill; shared donor tables unchanged"
+                else fail name (sprintf "declined=%b tables=%b failureKept=%b decisions=%A" declined tables failureKept refusals)
 
     // ---- contains and membership hoisting (round 3, B-T1) ------------------
     // The lane has a real IRContains arm (it used to refuse the node, so every

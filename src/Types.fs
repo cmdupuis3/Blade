@@ -567,6 +567,17 @@ module TypeOrigins =
     let cppName (identity: string) : string =
         if table.ContainsKey identity then identity.Replace(".", "__") else identity
 
+/// Optional private intermediate capability. These are tracked workspace and
+/// serialized disk allowances, NOT a whole-program memory or physical disk cap.
+/// A caller deliberately binding this policy to an artifact authorizes its
+/// persistent scratch behavior. None at existing entry points stays resident.
+type PrivateSpoolPolicy = {
+    Root: string
+    TrackedWorkspaceBytes: uint64
+    LogicalDiskBytes: uint64
+    BlockCells: uint64
+}
+
 /// SCRATCH REUSE ACROSS BARRIERS (plan-fortran-killer-2 section 4, gate 2):
 /// the plan `Blade.Optimize.planPoolReuse` computes per function body and
 /// codegen consumes. A let whose fresh dense pool has the same element type
@@ -595,6 +606,7 @@ module PoolReuseTable =
     let donors () : Map<IRId, IRId> = (get ()).Donors
     let recordReturn (func: IRId) (donor: IRId) = cell.Value <- { get () with ReturnDonors = Map.add func donor (get ()).ReturnDonors }
     let tryReturnDonor (func: IRId) : IRId option = Map.tryFind func (get ()).ReturnDonors
+    let returnDonors () : Map<IRId, IRId> = (get ()).ReturnDonors
     let setCurrentReturnDonor (d: IRId option) = cell.Value <- { get () with CurrentReturnDonor = d }
     let currentReturnDonor () : IRId option = (get ()).CurrentReturnDonor
 

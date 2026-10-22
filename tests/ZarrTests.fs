@@ -2098,6 +2098,10 @@ let scaled = method_for(zip(A, m)) <@> lambda(x, w) -> x * w |> compute
             SegmentTable.reset ()
     uniformHaloCursorE2E ()
 
+    check "private statistical-barrier spool focused gate"
+        (Blade.Tests.PrivateSpoolTests.runPrivateSpoolTests
+            (Path.Combine(e2eDir, "D08_" + Guid.NewGuid().ToString("N"))) = 0) "see focused gate above"
+
     // ---------------------------------------------------------------
     // 10i. RANK-2 streaming: one store standing in for four files decomposed
     // along lat and lon (a 6 x 8 variable chunked 3 x 4 = four chunk files).

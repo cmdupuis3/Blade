@@ -1,0 +1,15 @@
+// TEST: C05 census sparse parent completes before terminal fold failure
+let static K = [(4, 1), (0, 3), (2, 1), (1, 0), (0, 1)]
+let vals: Array<Float64 like Idx<5>> = [4.0, 9.0, 2.0, 8.0, 3.0]
+function late_sparse_parent(v: Float64) -> Float64 = {
+    let z = Int64(floor(v - 3.0))
+    if v == 3.0 then Float64(1 / z) else v
+}
+function early_sparse_fold(a: Float64, b: Float64) -> Float64 = {
+    let z = Int64(floor(b - b))
+    a + Float64(1 / z)
+}
+let produced = method_for(vals) <@> late_sparse_parent |> compute
+let S = sparse(produced, K)
+let total = reduce(S((_, 1)), early_sparse_fold, 7.0)
+// ABORT: late_sparse_parent

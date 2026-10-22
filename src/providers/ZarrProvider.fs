@@ -2103,7 +2103,7 @@ module CppZarr =
     /// allocated), and the intersection copied; a missing chunk fills, or
     /// fails loudly under a null fill_value. The window bounds are C++
     /// expressions so a run loop can drive them.
-    let private genStreamWindowCore (wholeReadTally: string option) (storePath: string) (varName: string) (cppVarName: string) (destBuf: string) (ranges: (string * string) list) (arrType: IRArrayType) : string list =
+    let private genStreamWindowCore (wholeReadTally: string option) (borrowedDecode: string option) (storePath: string) (varName: string) (cppVarName: string) (destBuf: string) (ranges: (string * string) list) (arrType: IRArrayType) : string list =
         let store = load storePath
         let meta =
             match tryFindArray store varName with
@@ -2171,8 +2171,11 @@ module CppZarr =
         // the chunk scratch is this read's own (block-scoped), so the reader
         // works under either stream prologue
         let scratch =
-            [ $"std::vector<{diskCpp}> {v}_wbufv({chunkCount});"
-              $"{diskCpp}* {v}_cbuf = {v}_wbufv.data();" ]
+            match borrowedDecode with
+            | Some pointer -> [ $"{diskCpp}* {v}_cbuf = {pointer}; // certified retained private-spool decode workspace" ]
+            | None ->
+                [ $"std::vector<{diskCpp}> {v}_wbufv({chunkCount});"
+                  $"{diskCpp}* {v}_cbuf = {v}_wbufv.data();" ]
         // The boundary rule over the window just read (BL8015), in the
         // variable's coordinates (origin = the window's low corner).
         let wext = [ for d in 0 .. rank - 1 -> $"{v}_whi{d} - {v}_wlo{d}" ]
@@ -2194,7 +2197,7 @@ module CppZarr =
         scratch @ boundDecls @ gridLoops @ limDecls @ src.Locate gInd @ presentBranch @ missingBranch @ gridClose @ scan
 
     let genStreamWindow storePath varName cppVarName destBuf ranges arrType =
-        genStreamWindowCore None storePath varName cppVarName destBuf ranges arrType
+        genStreamWindowCore None None storePath varName cppVarName destBuf ranges arrType
 
     /// S2 capability, deliberately local Zarr only. The window reader decodes a
     /// WHOLE padded chunk (disk bytes) plus the caller's converted block; neither
@@ -2224,7 +2227,18 @@ module CppZarr =
     /// must emit tallyReportCpp before publishing its scalar results.
     let genStreamRowsTerminal (spec: ProviderReadSpec) (cppVarName: string) (destBuf: string)
                               (lo: string) (hi: string) (tally: string) : string list =
-        genStreamWindowCore (Some tally) spec.FilePath spec.VarName cppVarName destBuf [ lo, hi ] spec.VarType
+        genStreamWindowCore (Some tally) None spec.FilePath spec.VarName cppVarName destBuf [ lo, hi ] spec.VarType
+
+    /// Only the certified private statistical barrier may borrow this storage.
+    /// Same normal None-validation core, same chunk reads/scan/global origin;
+    /// no generic provider callback, tally, or altered ordinary window caller.
+    let genPrivateSpoolRows (spec: ProviderReadSpec) (cppName: string) (dest: string)
+                            (decode: string) (capacity: int64) (lo: string) (hi: string)
+                            : Result<string list, string> =
+        match rank1TerminalChunk spec with
+        | Ok (chunk, 8) when chunk = capacity ->
+            Ok (genStreamWindowCore None (Some decode) spec.FilePath spec.VarName cppName dest [lo,hi] spec.VarType)
+        | _ -> Error "private-spool borrowed decode requires its exact certified rank-one local identity Float64 chunk capacity"
 
     /// The run [lo, hi) of a rank-1 dense variable read into `destBuf[0 ..
     /// hi-lo)`: one file open per chunk the run intersects, one seek+read of
