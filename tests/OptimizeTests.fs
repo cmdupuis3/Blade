@@ -5952,6 +5952,7 @@ let private groupAggCppEmission () =
         else
             resultLine Fail name ($"missing {missing}; planned perm={perm}; gate-off CSR={offPerm}")
             false
+    | Error e, _ | _, Error e -> resultLine Fail name e; false
 
 /// The C++ positional pass: the BL8006 guard and the drop exactly as the
 /// CSR's key pass, the group IS the key, the seeded state stored once per
