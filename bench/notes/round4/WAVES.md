@@ -88,3 +88,24 @@ is staged for a matching combined build. New source-only censuses cover C04
 capacity coverage). Neither is permission for an unreviewed implementation or
 an additional performance sweep. Full-suite launch count remains0.
 Current checkpoint: A03 is integrated as f10ca17f after all remaining partial-fold and sanitizer gates passed. B06 closes as an evidenced pool-accounting coverage gap, without executing an adapter. C04 and D08 are staged for one fresh combined compiler build and bounded topology probes; neither production route is implemented yet. Full-suite launches remain 0.
+
+Next coding wave: the combined build and all 17 census invocations passed. C04
+implements the observed anonymous transpose-to-partial-fold rewrite; D08 implements
+the explicit-policy statistical-barrier spool region. A04 scopes one same-cell
+last-use donor, including native alias promises, before any implementation. These
+three Sol/high lanes are active; Luna is idle until a reviewed checkpoint is ready.
+The observed shapes and approval boundaries are in C04-review.md and D08-review.md.
+No runtime or memory claim follows from the emission-only census. Full-suite count0.
+
+Current checkpoint: C04-I1 interpreter repair, A04 LLVM same-cell return and
+D08 explicit-policy compiler region are reviewed source checkpoints with serialized
+Luna gates pending/active. B07 implements the accepted B05 benchmark-only opaque
+task boundary while those checkouts remain frozen. It cannot admit ordinary Blade
+benchmark results or change production emission/harness behavior. Full suite0.
+
+C04 is accepted and integrated through c521a81b:706 optimizer checks,32 native
+arms,32 emit/plan captures,SQL47/0/interpreter48/0/opt-diff47/0 plus two intentional
+reject skips. Its narrow empty-literal interpreter repair is separately recorded.
+D08 fixes its observed fresh-output-axis proof and retries the focused gate.
+A04's first build found F# inference/test-control-flow errors; its coder repairs
+those before any fact/native result. B07 remains source-only diagnostic work.

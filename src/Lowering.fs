@@ -3088,10 +3088,9 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     // (Optimize.moduleReferencedIds: the SAME traversal the census walks --
     // binding values, every side-table operand executed at a binding's site,
     // function bodies and captures, declared and embedded types, provider
-    // sources): the compaction planner's positions census (T4b) runs per
-    // module, so a compound named in ANOTHER module (an import) must reach it
-    // as an uncertified use. Computed only for a multi-module program with a
-    // compound to plan.
+    // sources): compaction and private-transpose admission run per module,
+    // so ANOTHER module's references must reach them as uncertified uses.
+    // Computed lazily once for a multi-module program.
     let moduleRefs =
         lazy (irModules |> List.map (fun m -> (m.Name, Optimize.moduleReferencedIds m)))
     let irModules =
@@ -3118,7 +3117,10 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // schedule side table. The whole-program census is already available
         // here; a removed private mask can never orphan a membership plan.
         let foreignRefs =
-            if irModules.Length < 2 || irModule.CompoundInits.IsEmpty then Set.empty
+            // This is also C04's COMPLETE foreign-demand evidence. A private
+            // transpose has no CompoundInits entry, so that shortcut would
+            // silently erase foreign binding/type/side-payload observers.
+            if irModules.Length < 2 then Set.empty
             else moduleRefs.Force() |> List.filter (fun (n, _) -> n <> irModule.Name) |> List.map snd |> Set.unionMany
         let irModule = Optimize.fuseSelectedTerminalModule env.Builder programFuncs foreignRefs irModule
         // The semantic-equivalence optimization stage (Blade.Optimize --
@@ -3139,7 +3141,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // CANNOT see an optimizer bug (both print the same wrong answer); the
         // lane that can is `blade test opt-diff` (tests/OptDiff.fs), which
         // compares every gate OFF against every gate ON.
-        let irModule = Optimize.optimizeModule env.Builder programFuncs irModule
+        let irModule = Optimize.optimizeModuleWithForeignCensus env.Builder programFuncs foreignRefs irModule
         // Lift inline forms (mask/sort/intersect/union/group_by/group_keys
         // appearing in non-let-RHS positions) into auto-let bindings so
         // codegen sees the canonical "let-bound" pattern uniformly.

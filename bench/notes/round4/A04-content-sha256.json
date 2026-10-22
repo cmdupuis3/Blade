@@ -1,0 +1,33 @@
+{
+  "card": "A04",
+  "scope": "source-census-and-diagnostic-inputs-only",
+  "base_commit": "00163192e9a4c04a450a783c66ff76b6c431e7cd",
+  "execution": "none-by-coder",
+  "files": [
+    {
+      "path": "bench/notes/round4/A04-census.md",
+      "sha256": "dd56d50fefc76e491ee0bba445a468eba8db46f7b2601fa435cc8ba1fe6eb1aa",
+      "bytes": 13652
+    },
+    {
+      "path": "bench/notes/round4/A04-runner-request.md",
+      "sha256": "497319c47b1ccc1651d9b233d887b9458cd2680cf0c9e1ed684232c64e19e25e",
+      "bytes": 4936
+    },
+    {
+      "path": "bench/notes/round4/A04-census-inputs/01_same_cell_return.blade",
+      "sha256": "169214c16d90ebb8470e90303236877f07d339389289888c2c85f5bf344c41dc",
+      "bytes": 821
+    },
+    {
+      "path": "bench/notes/round4/A04-census-inputs/02_caller_owned.blade",
+      "sha256": "a282af7e2182ca23b050690f809bad46533b3d0fff46812f8631c8279a0c59b6",
+      "bytes": 729
+    },
+    {
+      "path": "bench/notes/round4/A04-census-inputs/03_retained_name.blade",
+      "sha256": "fc8ab484999cdcf6d38e08548b891247f92607c7f5fe6e7dbe36c94898ea446f",
+      "bytes": 895
+    }
+  ]
+}

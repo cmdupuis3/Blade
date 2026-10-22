@@ -1,0 +1,38 @@
+# A04 same-cell lifetime census
+
+**Result:** the six requested paired primary arms and the one authorized default-schedule control completed. Each call lowered and validated its source once, then emitted both C++ and direct LLVM from that same IR. All seven invocations exited 0; there were no backend refusals or skips. This is an IR and emission census only: no generated program was compiled or run, and no test category, benchmark, or full suite was launched.
+
+## Frozen identities and provenance
+
+The source checkout was `a-lifetimes` at `00163192e9a4c04a450a783c66ff76b6c431e7cd`, with compiler/test/fsproj bytes matching integration source base `5e208a77d74bccf40d0fcff5179e3af4ad9161f8`. The verified five source hashes were `Optimize.fs` `96452127C6A298BC4C2AB2B8DEC81BF4DCC8B968F1C4F890DF42ACA613F0E36A`, `EmitLlvm.fs` `43293FBA349A5312212D78F45AD5D5E8A7C2DD4EA16E42A26B01A03CB48B3063`, `CodeGen.fs` `531D38D9BD44101C67EDB8D00555A8397A15CA189B1B8EA39D89F08B5E98C4AA`, `OptimizeTests.fs` `405200D5CFFA71258864FFBA50BEF0E61986C0FA7492FE7C433428EE5FD3CC07`, and `Blade.fsproj` `0F35B0948E914597FB813CDAFFFF326AF6FA9711974A54A01DA6ECC18ADA1224`. The A04 five-entry manifest is `EC332E97CD6AFA3B6E7E16A7C81EE04E7F2EC971015FD6A45FF4AD97138C2226`; its three source pins were verified before execution.
+
+The reused Release assembly was `C:\Users\cdupu\Documents\GitHub\Blade\.round4-worktrees\integration\bin\Release\net10.0\Blade.dll`, SHA256 `FE12B5CEC4CAFC311D393160835278EDC93828AFEDC2368F820F5CA0CCE172AD`. Tool identity: .NET SDK/runtime `10.0.400`; `dotnet.exe` SHA256 `AB1B71FD3DD71062E074C9FAB8312081A81B7F2B3E0327C48C4D249C8D1A3135`. The paired adapter [probe-a04-paired-approved.fsx](../../../../a-lifetimes/bench/.build/A04-runner/probe-a04-paired-approved.fsx) is SHA256 `8A794F4A86BF0571D747B61924D2B111E7C86387B8AD7FA7D3A130E283DF94F8`. It runs `lower`/validation once, records full IR and tables, emits C++ and drains those decisions, then emits direct LLVM from the same IR and drains LLVM decisions separately. The emitter calls do not reset lowering tables.
+
+All calls ran from the `a-lifetimes` checkout root with private `TEMP` and `TMP` under `bench/.build/A04-runner/tmp/<arm>`. Primary gates were explicitly set to `BLADE_POOL_REUSE=1|0`, `BLADE_FUSION=on`, `BLADE_CSE=0`, `BLADE_FP_REPRO=1`, `BLADE_FP_CONTRACT=off`, `BLADE_BLAS=off`, `BLADE_OMP_THREADS=1`, `OMP_NUM_THREADS=1`, `BLADE_EXE_CACHE=0`, `BLADE_HOT_ROW=0`, `BLADE_CELL_EPILOGUE=off`, `BLADE_EPILOGUE_LEGS=0`, `BLADE_COMPACTION_FUSION=0`, and `BLADE_COMPACT_ROW_CLASSES=0`. `BLADE_PRINT`, `BLADE_TILE_CACHE`, and `BLADE_LLVM` were unset. The conditional default-schedule positive used reuse 1 and left `BLADE_HOT_ROW`, `BLADE_CELL_EPILOGUE`, and `BLADE_EPILOGUE_LEGS` unset; all other gates matched.
+
+## Paired arms
+
+| Input | Reuse | Lowering / table result | Backend artifacts |
+|---|---:|---|---|
+| `01_same_cell_return.blade` | 1 | `last_use` returns one `Array<Float64 like Ix>`; mutable array ID 12; 0 nonempty scheduler entries among 33 known IDs; no donor pair or return donor | `paired-01-reuse1/arm.cpp`, `arm.ll` |
+| `01_same_cell_return.blade` | 0 | Same callable and demanded producer shape; mutable ID 12; 0/33 known-ID scheduler entries; no donor pair or return donor | `paired-01-reuse0/arm.cpp`, `arm.ll` |
+| `02_caller_owned.blade` | 1 | `caller_owned` takes an array formal; no mutable array lets; 0/25 known-ID scheduler entries; no donor pair or return donor | `paired-02-reuse1/arm.cpp`, `arm.ll` |
+| `02_caller_owned.blade` | 0 | Same caller-owned shape; no mutable array lets; 0/25 known-ID scheduler entries; no donor pair or return donor | `paired-02-reuse0/arm.cpp`, `arm.ll` |
+| `03_retained_name.blade` | 1 | Tuple return `(Array, Array, Float64)`; mutable IDs 13, 14, 23; 0/36 known-ID scheduler entries; no donor pair or return donor | `paired-03-reuse1/arm.cpp`, `arm.ll` |
+| `03_retained_name.blade` | 0 | Same tuple and retained-name shape; mutable IDs 13, 14, 23; 0/36 known-ID scheduler entries; no donor pair or return donor | `paired-03-reuse0/arm.cpp`, `arm.ll` |
+
+The adapter queried existing HotRow, CompactRow, EpilogueLeg, Compaction, CellFold, RecStep, and MemberHoist plans for IDs present in each IR. For RecStep it queried `tryLoop`/`tryStep`; for MemberHoist it queried `plansOf(id)`. These are known-ID results, not claims that global `MemberHoistTable.all` or `RecStepTable.undecided` was queried. Every arm has the full `arm.ir.txt`, C++/LLVM outputs, separate backend decisions, allocation/free extracts, warnings, stdout/stderr, exit code, and provenance under `a-lifetimes/bench/.build/A04-runner/<arm>/`.
+
+## Positive allocation evidence
+
+In the reuse-on paired primary, `arm.ir.txt` line 204 identifies `last_use` as callable ID 3, returning `Array<Float64 like Ix>` from parameter ID 4. Lines 624 and 1061 identify demanded/materialized producer array ID 12 and `MutableArrayLets set [12]`; the callable body contains the completed scalar reduction from that array and a final scalar map reading the same ID with the reduction result. There is no donor entry for the callable or donor pair in the pool reuse map. The C++ excerpt in `paired-01-reuse1/arm.cpp` allocates producer ID 12, reads it while filling the separate returned array (`__ret1073741824`), deallocates producer storage, then returns the new output. The direct LLVM function in `paired-01-reuse1/arm.ll` allocates separate 7-element roots at lines 39 and 88; the final loop loads producer values and stores the computed values to the output, frees the producer root at line 112, and returns the output root at line 113. This records current behavior only; it makes no capacity, lifetime-improvement, or performance claim.
+
+The caller-owned control keeps the input as a readonly formal and emits a fresh destination; it does not free the caller pointer. The retained-name control is excluded from same-cell admission. Its tuple/name structure and mutable IDs are evidence only; the name `held` alone does not establish a physical alias.
+
+The conditional default-schedule arm, `schedule-default-positive-paired/`, preserved the same `last_use` topology, two distinct current backend allocation sites, empty donor tables, and zero nonempty scheduler entries among 33 known IDs. No competing scheduler owner appeared in this source's known-ID query set.
+
+## Execution history and artifacts
+
+The early A02 single-emission capture, probe/printer iterations, and six-arm unpaired preflight matrix are retained as preliminary diagnostics and are excluded from the counts above. One early adapter FSI compilation failed, another runner-only adapter version failed with FS0003, and an intermediate version was generated but not executed; these records remain in the artifact tree. The final approved adapter was reviewed before the seven counted paired invocations. All six primary arm provenance files record its exact SHA256. The conditional default-schedule arm records the same script path and command but omits a separate `probeSha=` field; that path was verified to resolve to the same 8A794F4A script. The separately reviewed 2D8E3BF9 script differs only by two additional global-table output lines (`MemberHoistTable.all()` and `RecStepTable.undecided()`); it was not invoked.
+
+The 209-file SHA256 inventory is [artifact-sha256.tsv](../../../../a-lifetimes/bench/.build/A04-runner/artifact-sha256.tsv), hash `C9E96D71255C8B6ABBC9F62E532D28C8681059260EF76F4C386456999886AF59`. It covers all A04-runner files present at inventory time except the inventory file itself. Exact commands, per-arm environment, full logs, outputs, and exits are retained beside each arm.

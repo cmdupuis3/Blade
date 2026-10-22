@@ -1,0 +1,6 @@
+// TEST: Private transpose over zero original columns has no output chains
+type R = Idx<2>
+type C = Idx<0>
+let M: Array<Float64 like R, C> = [[], []]
+let rows: Array<Float64 like C> = reduce(transpose(M, [0, 1]), lambda(a: Float64, b: Float64) -> a * 10.0 + b, 7.0)
+// EXPECT: rows = []

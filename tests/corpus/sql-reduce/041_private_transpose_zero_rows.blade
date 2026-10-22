@@ -1,0 +1,6 @@
+// TEST: Private transpose over zero original rows returns each column seed
+type R = Idx<0>
+type C = Idx<3>
+let M: Array<Float64 like R, C> = []
+let rows: Array<Float64 like C> = reduce(transpose(M, [0, 1]), lambda(a: Float64, b: Float64) -> a * 10.0 + b, -7.25)
+// EXPECT: rows = [-7.25, -7.25, -7.25]

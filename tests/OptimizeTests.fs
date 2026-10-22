@@ -1813,6 +1813,375 @@ let private partialRowsHiddenPayloads () =
                     else resultLine Fail name "a hidden demand or unsupported callable/renderer was admitted"; yield false ]
             | _ -> resultLine Fail "partial_rows_hidden_payload_setup" "the unoptimized scoped producer shape changed"; [false])
 
+// C04: the source remains required; an anonymous hard transpose is consumed
+// only by a scalar seeded partial fold. No row-valued virtual input is added.
+let private transposeRowsSrc =
+    "type R = Idx<2>\ntype C = Idx<3>\n"
+    + "let M: Array<Float64 like R, C> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n"
+    + "let rows: Array<Float64 like C> = reduce(transpose(M, [0, 1]), lambda(a: Float64, b: Float64) -> a * 10.0 + b, 7.0)\n"
+
+let private transposeRowsNamedSrc =
+    transposeRowsSrc.Replace("let rows:", "let T = transpose(M, [0, 1])\nlet rows:")
+                    .Replace("reduce(transpose(M, [0, 1]),", "reduce(T,")
+    + "let sample = T(1, 0)\n"
+
+let private withTransposeRows f =
+    withPartialRows (fun () -> withGate "BLADE_FUSION" "on" (fun () ->
+        withGate "BLADE_BLAS" "off" (fun () -> withGate "BLADE_OMP_THREADS" "1" f)))
+
+let private transposeRowRoute (ir: IR.IRProgram) =
+    ir.Modules |> List.exists (fun m -> m.Functions |> List.exists (fun f -> f.Name.StartsWith "__transpose_rows_"))
+
+// C04-I1 exercises the literal constructor directly, without relying on an
+// optimizer to avoid the empty input. The existing source ON/OFF pins below
+// independently check the original transpose/fold route and exact seed bits.
+let private transposeRowsEmptyLiteralShape () =
+    let elemTy = Blade.Types.IRTScalar Blade.Types.ETFloat64
+    let axis id n : IR.IRIndexType =
+        { Id = id
+          Rank = 1
+          Extent = IR.IRLit (IR.IRLitInt n)
+          Symmetry = Blade.Types.SymNone
+          Tag = Some ($"I{id}")
+          Kind = Blade.Types.SDimension
+          IxKind = Blade.Types.IxKPlain
+          Dependencies = [] }
+    let arrayType indices : IR.IRArrayType =
+        { ElemType = elemTy
+          IndexTypes = indices
+          IsVirtual = false
+          Identity = None }
+    let literal indices values = Blade.Interp.ArrayOps.arrayLitFromValues (arrayType indices) values
+    let rec cells store =
+        match store with
+        | Blade.Interp.Value.SFloat a -> a.Length
+        | Blade.Interp.Value.SInt a -> a.Length
+        | Blade.Interp.Value.SComplex a -> a.Length
+        | Blade.Interp.Value.SBool a -> a.Length
+        | Blade.Interp.Value.SObj a -> a.Length
+        | Blade.Interp.Value.SNested rows -> rows |> Array.sumBy cells
+        | Blade.Interp.Value.SRagged (rows, _, _) -> rows |> Array.sumBy cells
+    let emptyNested store =
+        match store with
+        | Blade.Interp.Value.SNested rows -> rows.Length = 0
+        | _ -> false
+    let shapeCase suffix indices expected d1 d2 transposed =
+        let name = "transpose_rows_I1_empty_literal_" + suffix
+        try
+            let a = literal indices []
+            let t = Blade.Interp.ArrayOps.transposeArray a d1 d2
+            checkAll name "" (sprintf "literal=%A; transpose=%A" a.Extents t.Extents)
+                [ ("declared rank/extents and exact nominal indices", a.Extents = expected && a.IndexTypes = indices && a.ElemType = elemTy);
+                  ("zero cell backing and no exemplar row", emptyNested a.Data && cells a.Data = 0);
+                  ("transpose preserves empty shape without a cell read", t.Extents = transposed && cells t.Data = 0) ]
+        with ex -> resultLine Fail name ex.Message; false
+    let r0 = axis 991001 0L
+    let c3 = axis 991002 3L
+    let k2 = axis 991003 2L
+    let rank1Empty = literal [r0] []
+    let row = literal [k2] [Blade.Interp.Value.VFloat 1.0; Blade.Interp.Value.VFloat 2.0]
+    let one = literal [axis 991004 1L] [Blade.Interp.Value.VFloat 3.0]
+    let r2 = axis 991005 2L
+    let zeroInner = literal [r2; r0] [Blade.Interp.Value.VArray rank1Empty; Blade.Interp.Value.VArray rank1Empty]
+    let nonempty = literal [r2; k2] [Blade.Interp.Value.VArray row; Blade.Interp.Value.VArray row]
+    let excluded =
+        [ ("ragged", [r0; { c3 with IxKind = Blade.Types.IxKRagged }]);
+          ("compact", [{ r0 with Rank = 2; Symmetry = Blade.Types.SymSymmetric }; c3]);
+          ("dependent", [r0; { c3 with Dependencies = [r0.Id] }]);
+          ("unresolved", [r0; { c3 with Extent = IR.IRVar (991006, Blade.Types.IRTScalar Blade.Types.ETInt64) }]);
+          ("negative", [r0; axis 991007 (-1L)]);
+          ("outside_managed_extent", [r0; axis 991008 (int64 System.Int32.MaxValue + 1L)]);
+          ("leading_nonzero", [r2; c3]) ]
+    let raggedAxes = [r2; { c3 with IxKind = Blade.Types.IxKRagged }]
+    let ragged = literal raggedAxes [Blade.Interp.Value.VArray row; Blade.Interp.Value.VArray one]
+    let compactAxes = [{ r2 with Rank = 2; Symmetry = Blade.Types.SymSymmetric }]
+    let compact = literal compactAxes [Blade.Interp.Value.VArray row; Blade.Interp.Value.VArray one]
+    let raggedBacking =
+        match ragged.Data with
+        | Blade.Interp.Value.SRagged (_, lens, offsets) ->
+            lens = [|2L; 1L|] && offsets = [|0L; 2L; 3L|] && cells ragged.Data = 3
+        | _ -> false
+    let compactBacking =
+        match compact.Data with
+        | Blade.Interp.Value.SNested rows -> rows.Length = 2 && cells compact.Data = 3
+        | _ -> false
+    [ shapeCase "rank2_0_3" [r0; c3] [|0L; 3L|] 0 1 [|3L; 0L|]
+      shapeCase "rank3_0_3_2" [r0; c3; k2] [|0L; 3L; 2L|] 0 2 [|2L; 3L; 0L|]
+      checkAll "transpose_rows_I1_rank1_unchanged" "" "rank1 remains flat, with its original metadata and values"
+          [ ("empty rank1 flat store", rank1Empty.Extents = [|0L|] && rank1Empty.IndexTypes = [r0]
+              && (match rank1Empty.Data with Blade.Interp.Value.SFloat a -> a.Length = 0 | _ -> false));
+            ("nonempty rank1 values", row.Extents = [|2L|] && row.IndexTypes = [k2]
+              && (match row.Data with Blade.Interp.Value.SFloat a -> a = [|1.0; 2.0|] | _ -> false)) ]
+      checkAll "transpose_rows_I1_rectangular_existing_rows_unchanged" "" "nonempty exemplar rows retain the existing literal route"
+          [ ("zero inner axis", zeroInner.Extents = [|2L; 0L|] && zeroInner.IndexTypes = [r2; r0] && cells zeroInner.Data = 0);
+            ("nonempty matrix", nonempty.Extents = [|2L; 2L|] && nonempty.IndexTypes = [r2; k2] && cells nonempty.Data = 4) ]
+      for suffix, indices in excluded do
+          let a = literal indices []
+          checkAll ("transpose_rows_I1_excluded_empty_" + suffix) "" "the narrow repair does not reinterpret excluded metadata"
+              [ ("previous flat empty route retained", a.Extents = [|0L|] && a.IndexTypes = indices
+                  && (match a.Data with Blade.Interp.Value.SFloat cells -> cells.Length = 0 | _ -> false)) ]
+      checkAll "transpose_rows_I1_nonempty_ragged_route_unchanged" "" "ragged rows keep CSR lengths and offsets"
+          [ ("ragged shape and metadata", ragged.Extents = [|2L; 2L|] && ragged.IndexTypes = raggedAxes);
+            ("CSR backing", raggedBacking) ]
+      checkAll "transpose_rows_I1_nonempty_compact_route_unchanged" "" "compact rows keep the declared grouped extent"
+          [ ("compact shape and metadata", compact.Extents = [|2L; 2L|] && compact.IndexTypes = compactAxes);
+            ("compact nested backing", compactBacking) ] ]
+
+let private transposeRowsEmission () =
+    let name = "transpose_rows_cpp_llvm_remove_only_private_transpose"
+    withTransposeRows (fun () ->
+        let emit src gate = withGate "BLADE_FUSION" gate (fun () ->
+            match lower src with
+            | Error e -> Error e
+            | Ok ir -> EmitLlvm.tryEmitProgramNamed name ir |> Result.map (fun ll -> transposeRowRoute ir, fst (CodeGen.genSelfContainedProgramFromIR ir name), ll))
+        match emit transposeRowsSrc "on", emit transposeRowsSrc "0", emit transposeRowsNamedSrc "on" with
+        | Ok (routed, cpp, ll), Ok (oldRoute, oldCpp, oldLl), Ok (namedRoute, namedCpp, namedLl) ->
+            let rank2 (s: string) = System.Text.RegularExpressions.Regex.Matches(s, @"allocate<typename promote<double, 2>::type, nullptr>").Count
+            let layouts (s: string) =
+                [ for m in System.Text.RegularExpressions.Regex.Matches(s, @"call ptr @blade_alloc_cells\(i64 (\d+), i64 (\d+)\)") ->
+                    m.Groups.[1].Value + "x" + m.Groups.[2].Value ]
+            let allocs (s: string) = System.Text.RegularExpressions.Regex.Matches(s, @"call ptr @blade_alloc_cells\(").Count
+            let description = $"CPP rank2={rank2 cpp}/{rank2 oldCpp}/{rank2 namedCpp}; LLVM layouts={layouts ll}/{layouts oldLl}/{layouts namedLl}"
+            let evaluation =
+                let endAt = ll.IndexOf("  call void @blade_print_completed", System.StringComparison.Ordinal)
+                if endAt < 0 then "" else ll.Substring(0, endAt)
+            let inputPool = System.Text.RegularExpressions.Regex.Match(evaluation, @"(%r\d+) = call ptr @blade_alloc_cells\(i64 6, i64 8\)")
+            let inputRead =
+                inputPool.Success && System.Text.RegularExpressions.Regex.IsMatch(evaluation,
+                    @"getelementptr inbounds double, ptr " + System.Text.RegularExpressions.Regex.Escape(inputPool.Groups.[1].Value) + @", i64 %r\d+")
+            let cppFunctions =
+                let endAt = cpp.IndexOf("int main", System.StringComparison.Ordinal)
+                if endAt < 0 then "" else cpp.Substring(0, endAt)
+            checkAll name ll description
+                [ ("actual route, not materialized fallback", routed && not oldRoute && not namedRoute);
+                  ("only required rank-2 M remains: " + description, rank2 cpp = 1 && rank2 oldCpp = 2 && rank2 namedCpp = 2);
+                  ("no transpose copy ON", not (cpp.Contains "// transpose: hard") && oldCpp.Contains "// transpose: hard");
+                  ("LLVM exact allocation layouts: " + description, layouts ll = ["6x8"; "3x8"] && allocs ll = 2
+                      && layouts oldLl = ["6x8"; "6x8"; "3x8"] && allocs oldLl = 3
+                      && layouts namedLl = ["6x8"; "6x8"; "3x8"] && allocs namedLl = 3);
+                  ("LLVM strided source dataflow", inputRead && evaluation.Contains "mul i64" && evaluation.Contains ", 3"
+                      && System.Text.RegularExpressions.Regex.IsMatch(evaluation, @"icmp slt i64 %r\d+, 2\b")
+                      && System.Text.RegularExpressions.Regex.IsMatch(evaluation, @"icmp slt i64 %r\d+, 3\b")
+                      && evaluation.Contains "store double 0x401C000000000000" && evaluation.Contains "fmul double" && evaluation.Contains "fadd double");
+                  ("C++ scalar source read in the generated callable", System.Text.RegularExpressions.Regex.IsMatch(cppFunctions, @"M\[[^\]]+\]\[[^\]]+\]"));
+                  ("required input and result print", cpp.Contains "\"M = [\"" && cpp.Contains "\"rows = [\""
+                      && ll.Contains "M = [" && ll.Contains "rows = [");
+                  ("named output print retained", namedCpp.Contains "\"T = [\"" && namedLl.Contains "T = [");
+                  ("no LLVM reassociation", not (ll.Contains "fadd reassoc") && not (ll.Contains "fmul reassoc")) ]
+        | a, b, c -> resultLine Fail name ($"ON={a}; OFF={b}; demanded={c}"); false)
+
+let private transposeRowsMetadataAndInterface () =
+    let name = "transpose_rows_complete_census_entry_and_concrete_R_C_metadata"
+    withTransposeRows (fun () ->
+        match withGate "BLADE_FUSION" "0" (fun () -> lower transposeRowsSrc) with
+        | Error e -> resultLine Fail name e; false
+        | Ok ir ->
+            let m = ir.Modules.Head
+            let host = m.Bindings |> List.find (fun b -> b.Name = "rows")
+            let source = m.Bindings |> List.find (fun b -> b.Name = "M")
+            let input = match source.Type with IR.ArrayElem a -> a | _ -> failwith "M is not rank two"
+            let builder () =
+                let b = IR.IRBuilder ()
+                b.EnsureAtLeast 1000000
+                b
+            let defaultModule = Optimize.optimizeModule (builder ()) m.Functions m
+            let changed = Optimize.optimizeModuleWithForeignCensus (builder ()) m.Functions Set.empty m
+            let changedHost = changed.Bindings |> List.find (fun b -> b.Id = host.Id)
+            let containsTranspose (md: IR.IRModule) =
+                let mutable found = false
+                for b in md.Bindings do IR.iterIRExpr (function IR.IRTranspose _ -> found <- true | _ -> ()) b.Value
+                found
+            let distinctNominalIds =
+                match host.Type, host.Value with
+                | IR.ArrayElem h, IR.IRLet (_, _, IR.IRCompute (IR.IRApplyCombinator original)) ->
+                    match original.OutputType with
+                    | IR.ArrayElem c -> h.IndexTypes.Head.Id <> c.IndexTypes.Head.Id
+                                        && IRTotality.sameIndex h.IndexTypes.Head c.IndexTypes.Head
+                    | _ -> false
+                | _ -> false
+            let shape =
+                match changedHost.Value with
+                | IR.IRCompute (IR.IRApplyCombinator outer) ->
+                    let col = match outer.Kernel with IR.IRVar (id, _) -> changed.Functions |> List.find (fun f -> f.Id = id) | _ -> failwith "no column kernel"
+                    match outer.Arrays, col.Body with
+                    | [IR.IRRange ([c], None)], IR.IRReduceCompute (IR.IRApplyCombinator inner, _, seed) ->
+                        let read = match inner.Kernel with IR.IRVar (id, _) -> changed.Functions |> List.find (fun f -> f.Id = id) | _ -> failwith "no gather kernel"
+                        let origins = changed.DerivedFuncOrigins.ContainsKey col.Id && changed.DerivedFuncOrigins.ContainsKey read.Id
+                        let serial (f: IR.IRCallable) = not f.IsCommutative && f.CommGroups.IsEmpty && not f.IsOmpParallel && f.Parallelism.IsEmpty
+                        match inner.Arrays, read.Body with
+                        | [IR.IRRange ([r], None)], IR.IRIndex (IR.IRVar (s, _), [IR.IRVar (rId, _); IR.IRVar (cId, _)], None) ->
+                            s = source.Id && rId = read.Params.Head.VarId && cId = col.Params.Head.VarId
+                            && IRTotality.sameIndex r input.IndexTypes.[0] && IRTotality.sameIndex c input.IndexTypes.[1]
+                            && outer.OutputType = host.Type && outer.KernelInputRanks = [0] && inner.KernelInputRanks = [0]
+                            && outer.ArrayTypes.Head.IsVirtual && inner.ArrayTypes.Head.IsVirtual
+                            && seed = IR.IRLit (IR.IRLitFloat 7.0) && origins && serial col && serial read
+                            && (read.Captures |> List.map _.Id |> Set.ofList) = Set.ofList [source.Id; col.Params.Head.VarId]
+                            && (col.Captures |> List.map _.Id) = [source.Id]
+                        | _ -> false
+                    | _ -> false
+                | _ -> false
+            checkAll name "" "default entry retains transpose; explicit complete census permits exact strided idiom"
+                [ ("default optimizeModule does not gain the arm", containsTranspose defaultModule);
+                  ("explicit entry removes transpose", not (containsTranspose changed));
+                  ("actual distinct numeric IDs share nominal C identity", distinctNominalIds);
+                  ("output ID/name/type exact", changedHost.Id = host.Id && changedHost.Name = host.Name && changedHost.Type = host.Type);
+                  ("concrete R/C ranges, indexed read, seed, captures, origins, serial metadata", shape) ])
+
+let private transposeRowsFailureSrc =
+    "function late_transpose_source(v: Float64) -> Float64 = {\n"
+    + "    let z = Int64(floor(v - 6.0))\n    if v == 6.0 then Float64(1 / z) else v\n}\n"
+    + "function early_transpose_fold(a: Float64, b: Float64) -> Float64 = {\n"
+    + "    let z = Int64(floor(b - b))\n    a + Float64(1 / z)\n}\n"
+    + transposeRowsSrc.Replace("let M:", "let A:").Replace("let rows:", "let M = method_for(A) <@> late_transpose_source\nlet rows:")
+                      .Replace("lambda(a: Float64, b: Float64) -> a * 10.0 + b", "early_transpose_fold")
+
+let private transposeRowsSeedFailureSrc =
+    "function transpose_seed_failure() -> Float64 = {\n    let z = 0\n    Float64(1 / z)\n}\n"
+    + transposeRowsSrc.Replace("7.0)", "transpose_seed_failure())")
+
+let private transposeRowsInterpreterCases () =
+    let cases =
+        [ ("ordered", transposeRowsSrc, "[714.0, 725.0, 736.0]", true);
+          ("R0", transposeRowsSrc.Replace("Idx<2>", "Idx<0>").Replace("[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]", "[]").Replace("7.0)", "-7.25)"), "[-7.25, -7.25, -7.25]", true);
+          ("C0", transposeRowsSrc.Replace("Idx<3>", "Idx<0>").Replace("[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]", "[[], []]"), "[]", true);
+          ("negative_zero", transposeRowsSrc.Replace("Idx<2>", "Idx<0>").Replace("[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]", "[]").Replace("7.0)", "-0.0)"), "[-0.0, -0.0, -0.0]", true);
+          ("cancellation", transposeRowsSrc.Replace("Idx<2>", "Idx<9>").Replace("Idx<3>", "Idx<2>").Replace("Idx<9>", "Idx<3>")
+              .Replace("[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]", "[[1e16, 1e16], [1.0, -1e16], [-1e16, 1.0]]").Replace("a * 10.0 + b", "a + b").Replace("7.0)", "0.0)"), "[0.0, 1.0]", true);
+          ("stored_alias", transposeRowsSrc.Replace("let M:", "let storage:").Replace("let rows:", "let M = storage\nlet rows:"), "[714.0, 725.0, 736.0]", true);
+          ("total_block", "function step(a: Float64, b: Float64) -> Float64 = {\n    let t = a * 10.0\n    t + b\n}\n"
+              + transposeRowsSrc.Replace("lambda(a: Float64, b: Float64) -> a * 10.0 + b", "step"), "[714.0, 725.0, 736.0]", true);
+          ("deferred_failure_first", transposeRowsFailureSrc, "late_transpose_source", false);
+          ("seed_failure", transposeRowsSeedFailureSrc, "transpose_seed_failure", false) ]
+    [ for suffix, src, expected, admitted in cases do
+        let name = $"transpose_rows_interp_independent_on_off_{suffix}"
+        yield withTransposeRows (fun () ->
+            let run gate = withGate "BLADE_FUSION" gate (fun () ->
+                match lower src with
+                | Error e -> Error e
+                | Ok ir ->
+                    match IRValidate.validateIR ir with
+                    | Error es -> Error (String.concat "; " es)
+                    | Ok valid -> Ok (transposeRowRoute ir, Blade.Interp.Run.runProgram valid name Blade.Interp.Value.defaultLimits))
+            match run "on", run "0" with
+            | Ok (routed, on), Ok (false, off) ->
+                let pin = if admitted then on.ExitCode = 0 && on.Stdout.Contains ("rows = " + expected)
+                          else on.ExitCode <> 0 && on.Stderr.Contains expected && not (on.Stderr.Contains "early_transpose_fold")
+                checkAll name on.Stdout "independent value/failure pin plus actual route/refusal and optimizer OFF comparison"
+                    [ ("pin and admission", pin && routed = admitted);
+                      ("same output/error/status", on.ExitCode = off.ExitCode && on.Stdout = off.Stdout && on.Stderr = off.Stderr) ]
+            | a, b -> resultLine Fail name ($"ON={a}; OFF={b}"); false) ]
+
+let private transposeRowsRefusals () =
+    let scalar = transposeRowsSrc.Replace("let rows: Array<Float64 like C>", "let total: Float64").Replace("7.0)", "7.0, axes = 2)")
+    let cases =
+        [ ("named_demanded", transposeRowsNamedSrc);
+          ("full_scalar", scalar);
+          ("fold_capture", "let bias = 1.0\n" + transposeRowsSrc.Replace("a * 10.0 + b", "a * 10.0 + b + bias"));
+          ("failing_fold", transposeRowsSrc.Replace("a * 10.0 + b", "a + lgamma(b)"));
+          ("failing_seed", transposeRowsSeedFailureSrc);
+          ("seed_capture", "let seed = 7.0\n" + transposeRowsSrc.Replace("7.0)", "seed)"));
+          ("parallel_fold", transposeRowsSrc.Replace("lambda(a: Float64, b: Float64) -> a * 10.0 + b", "lambda(a: Float64, b: Float64) where comm(a, b), omp -> a + b"));
+          ("deferred_source", transposeRowsSrc.Replace("let M:", "let A:").Replace("let rows:", "let M = method_for(A) <@> lambda(v: Float64) -> v + 1.0\nlet rows:"));
+          ("deferred_failure", transposeRowsFailureSrc);
+          ("alias_escape", transposeRowsSrc.Replace("reduce(transpose(M, [0, 1]),", "reduce({\n    let t = transpose(M, [0, 1])\n    let alias = t\n    alias\n},")) ]
+    [ for suffix, src in cases do
+        let name = $"transpose_rows_declines_{suffix}"
+        yield withTransposeRows (fun () ->
+            match lower src with
+            | Error e -> resultLine Fail name e; false
+            | Ok ir ->
+                if not (transposeRowRoute ir) then resultLine Pass name "the unsupported/demanded source retains its original route"; true
+                else resultLine Fail name "unsupported transpose storage was eliminated"; false)
+      for suffix, gate, value in [ ("optimizer_off", "BLADE_FUSION", "0"); ("licensed_graph", "BLADE_FP_REPRO", "0") ] do
+        yield withTransposeRows (fun () -> withGate gate value (fun () ->
+            decisionCase ($"transpose_rows_declines_{suffix}") transposeRowsSrc "transpose-row-fold" (fun d -> not (applied d)) "gated arm keeps the original route")) ]
+
+let private transposeRowsHiddenDemands () =
+    withTransposeRows (fun () ->
+        match withGate "BLADE_FUSION" "0" (fun () -> lower transposeRowsSrc) with
+        | Error e -> resultLine Fail "transpose_rows_hidden_setup" e; [false]
+        | Ok ir ->
+            let m = ir.Modules.Head
+            let host = m.Bindings |> List.find (fun b -> b.Name = "rows")
+            let source = m.Bindings |> List.find (fun b -> b.Name = "M")
+            match host.Value with
+            | IR.IRLet (pid, (IR.IRTranspose _ as producer), IR.IRCompute (IR.IRApplyCombinator consumer)) ->
+                let privateType = IR.typeOf producer
+                let input = match source.Type with IR.ArrayElem a -> a | _ -> failwith "source is not dense"
+                let hiddenIx = { input.IndexTypes.Head with Extent = IR.IRExtent (IR.IRVar (pid, privateType), 0) }
+                let changeHost value = { m with Bindings = m.Bindings |> List.map (fun b -> if b.Id = host.Id then { b with Value = value } else b) }
+                let changeConsumer f = changeHost (IR.IRLet (pid, producer, IR.IRCompute (IR.IRApplyCombinator (f consumer))))
+                let declared = { m with Types = m.Types @ [IR.IRTDIndexType ("HiddenTranspose", hiddenIx)] }
+                let foreignModule =
+                    { declared with
+                        Bindings = []
+                        Functions = []
+                        CompoundInits = Map.empty
+                        SparseInits = Map.empty
+                        RandomInits = Map.empty
+                        ProviderReads = Map.empty
+                        ProviderWrites = Map.empty }
+                let foreignRefs = Optimize.moduleReferencedIds foreignModule
+                let capture: IR.CaptureInfo = { Id = pid; Name = "hidden"; Type = privateType; IsMutable = false }
+                let captureDemand = { m with Functions = m.Functions @ [{ m.Functions.Head with Id = 990032; Name = "observer"; Captures = [capture] }] }
+                let shared = { m with Bindings = m.Bindings @ [{ host with Id = 990033; Name = "other" }] }
+                let side = { m with SparseInits = m.SparseInits.Add(host.Id, IR.IRLit (IR.IRLitFloat 1.0)) }
+                let metadata = changeConsumer (fun c -> { c with SharedIndexTypes = [hiddenIx] })
+                let kernelAxis = changeConsumer (fun c -> { c with KernelTDims = [hiddenIx] })
+                let operandAxis = changeConsumer (fun c ->
+                    let a = c.ArrayTypes.Head
+                    { c with ArrayTypes = [{ a with IndexTypes = [hiddenIx; a.IndexTypes.[1]] }] })
+                let loopAxis = changeConsumer (fun c ->
+                    match c.Loop with
+                    | IR.IRMethodFor mf -> { c with Loop = IR.IRMethodFor { mf with SharedIndexTypes = [hiddenIx] } }
+                    | _ -> failwith "no method_for")
+                let negativeRank = changeConsumer (fun c -> { c with KernelInputRanks = [-1] })
+                let unknownFold =
+                    let rowId = match consumer.Kernel with IR.IRVar (id, _) -> id | _ -> failwith "no row kernel"
+                    let functions =
+                        m.Functions
+                        |> List.map (fun f ->
+                            if f.Id <> rowId then f
+                            else
+                                match f.Body with
+                                | IR.IRReduce (a, k, seed) -> { f with Body = IR.IRReduce (a, IR.IRVar (990036, IR.typeOf k), seed) }
+                                | _ -> failwith "no direct row fold")
+                    { m with Functions = functions }
+                let wrongIdentity =
+                    let c = match host.Type with IR.ArrayElem a -> a | _ -> failwith "no output"
+                    let ty = IR.mkArrayLike { c with IndexTypes = [{ c.IndexTypes.Head with Tag = Some "WrongC" }] }
+                    { m with Bindings = m.Bindings |> List.map (fun b -> if b.Id = host.Id then { b with Type = ty } else b) }
+                let structured =
+                    let ty = IR.mkArrayLike { input with IndexTypes = [{ input.IndexTypes.Head with IxKind = Blade.Types.IxKRagged }; input.IndexTypes.[1]] }
+                    changeHost (IR.mapIRExpr (function IR.IRVar (id, _) when id = source.Id -> IR.IRVar (id, ty) | n -> n) host.Value)
+                let sourceEvent = { m with Bindings = m.Bindings |> List.map (fun b -> if b.Id = source.Id then { b with Value = IR.IRCompute (IR.IRBeginPoolScope "hidden") } else b) }
+                let write = IR.IRAssign (IR.IRIndex (IR.IRVar (source.Id, source.Type), [IR.IRLit (IR.IRLitInt 0L); IR.IRLit (IR.IRLitInt 0L)], None), IR.IRLit (IR.IRLitFloat 9.0))
+                let mutation = changeHost (IR.IRLet (pid, producer, IR.IRLet (990034, write, IR.IRCompute (IR.IRApplyCombinator consumer))))
+                let alias = changeHost (IR.IRLet (pid, producer, IR.IRLet (990035, IR.IRVar (pid, privateType), IR.IRCompute (IR.IRApplyCombinator consumer))))
+                let witnesses: (string * IR.IRModule * Set<Blade.Types.IRId> option) list =
+                    [ ("missing_foreign_certificate", m, None); ("foreign_type_only", m, Some foreignRefs);
+                      ("declared_type", declared, Some Set.empty); ("capture", captureDemand, Some Set.empty);
+                      ("reference_equal_other_host", shared, Some Set.empty); ("constant_side_payload", side, Some Set.empty);
+                      ("shared_axis", metadata, Some Set.empty); ("kernel_axis", kernelAxis, Some Set.empty);
+                      ("operand_axis", operandAxis, Some Set.empty); ("method_for_axis", loopAxis, Some Set.empty);
+                      ("negative_rank", negativeRank, Some Set.empty); ("wrong_output_identity", wrongIdentity, Some Set.empty);
+                      ("unknown_fold", unknownFold, Some Set.empty);
+                      ("structured_source", structured, Some Set.empty); ("source_lifetime", sourceEvent, Some Set.empty);
+                      ("intervening_mutation", mutation, Some Set.empty); ("local_alias", alias, Some Set.empty) ]
+                [ for suffix, md, evidence in witnesses do
+                    let name = $"transpose_rows_hidden_{suffix}_keeps_transpose"
+                    let builder = IR.IRBuilder ()
+                    builder.EnsureAtLeast 1000000
+                    Blade.Effects.Decisions.start ()
+                    let kept = Optimize.fusePartialRowTerminalsWithCensusModule builder md.Functions evidence md
+                    let ds = Blade.Effects.Decisions.drain ()
+                    let mutable retained = false
+                    for b in kept.Bindings do IR.iterIRExpr (function IR.IRTranspose _ -> retained <- true | _ -> ()) b.Value
+                    if retained && (ds |> List.exists (fun d -> d.Rule = "transpose-row-fold" && not (applied d))) then
+                        resultLine Pass name "complete residual/metadata/order proof declines"; yield true
+                    else resultLine Fail name "unsupported payload lost its hard-transpose storage"; yield false ]
+            | _ -> resultLine Fail "transpose_rows_hidden_setup" "the actual immediate transpose/row topology changed"; [false])
+
 let private selectedTerminalLlvm () =
     let name = "selected_terminal_llvm_real_route_no_selection_allocations"
     withSelectedTerminal (fun () ->
@@ -6454,6 +6823,12 @@ let runOptimizeTests () =
           yield! partialRowsHiddenPayloads ()
           yield! partialRowsLlvmInputBoundary ()
           yield! partialRowsLlvmMalformedPeel ()
+          yield! transposeRowsEmptyLiteralShape ()
+          transposeRowsEmission ()
+          transposeRowsMetadataAndInterface ()
+          yield! transposeRowsInterpreterCases ()
+          yield! transposeRowsRefusals ()
+          yield! transposeRowsHiddenDemands ()
           // Compaction fusion v2 (round 3 item T4: the gather at the mask
           // site, positions elided under the demand census).
           compactionV2DefaultElides ()

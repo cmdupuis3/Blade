@@ -717,7 +717,25 @@ let arrayLitFromValues (arrType: IRArrayType) (elems: Value list) : BladeArray =
     let idxTys = arrType.IndexTypes
     let isRagged =
         Blade.CodeGen.isRaggedArrayType arrType || Blade.CodeGen.isDepIdxArrayType arrType
+    // An empty outer literal has no exemplar row from which to recover its
+    // trailing dimensions. Retain the declared rectangular shape instead of
+    // collapsing Array<T like Idx<0>, J, ...> to a runtime rank-1 array.
+    // Nonplain, dependent and unresolved axes stay on their existing routes.
+    let emptyRectangularShape =
+        if elems.IsEmpty && not isRagged && idxTys.Length >= 2 then
+            let extents =
+                idxTys |> List.choose (fun ix ->
+                    match ix.Extent with
+                    | IRLit (IRLitInt n) when ix.IxKind = IxKPlain && ix.Rank = 1
+                                             && ix.Symmetry = SymNone && ix.Dependencies.IsEmpty
+                                             && n >= 0L && n <= int64 System.Int32.MaxValue -> Some n
+                    | _ -> None)
+            if extents.Length = idxTys.Length && extents.Head = 0L then Some (Array.ofList extents)
+            else None
+        else None
     match elems with
+    | [] when emptyRectangularShape.IsSome ->
+        allocDense elemTy idxTys emptyRectangularShape.Value
     | (VArray _) :: _ when isRagged ->
         // Ragged / DepIdx literal (heterogeneous per-row lengths). CSR layout
         // mirroring CodeGen.genArrayLiteral's Ragged<T> emission (CodeGen.fs:

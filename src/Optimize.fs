@@ -8018,10 +8018,12 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
 /// literal-seeded partial fold. Reuse the existing row apply + scalar fused
 /// terminal; neither a producer pool nor a new backend operation is needed.
 /// Top-level named producers are deliberately outside this first admission.
-let fusePartialRowTerminalsModule (builder: IRBuilder) (programFuncs: IRCallable list) (modul: IRModule) : IRModule =
+let internal fusePartialRowTerminalsWithCensusModule (builder: IRBuilder) (programFuncs: IRCallable list)
+                                                    (foreignCensus: Set<IRId> option) (modul: IRModule) : IRModule =
     let funcs = (programFuncs @ modul.Functions) |> List.map (fun f -> f.Id, f) |> Map.ofList
     let resolve = resolveCallableIn funcs
     let writes = scheduleMayWriteIn programFuncs modul
+    let lifetimeBarrier = scheduleHasLifetimeBarrierIn programFuncs modul
     let allCallables = (modul.Functions @ programFuncs) |> List.distinctBy (fun f -> f.Id)
     let roots = compactionRoots allCallables modul
     let minted = ResizeArray<IRCallable * IRId>()
@@ -8083,9 +8085,149 @@ let fusePartialRowTerminalsModule (builder: IRBuilder) (programFuncs: IRCallable
             { Blade.Effects.Rule = "partial-row-fold"; Version = 1; Span = declSpanOf subject
               Subject = subject; Outcome = outcome; Evidence = evidence }
     let peel = function IRCompute (IRApplyCombinator i) | IRApplyCombinator i -> Some i | _ -> None
+    // PM25: the private hard transpose has no observer besides this exact
+    // row apply. Manufacture the already-supported C range / R fused-fold
+    // idiom, rather than changing the ownership or layout of IRTranspose.
+    let transposeRows (host: IRBinding) pid sourceId sourceType (consumer: ApplyInfo) =
+        let decide outcome evidence =
+            Blade.Effects.Decisions.record
+                { Blade.Effects.Rule = "transpose-row-fold"; Version = 1; Span = declSpanOf host.Name
+                  Subject = host.Name; Outcome = outcome; Evidence = evidence }
+        let unchanged why = decide (Blade.Effects.Declined why) []; host
+        let exprDemand e =
+            (collectVarRefsIR e).Contains pid
+            || (embeddedExtentExprs e |> List.exists (fun x -> (collectVarRefsIR x).Contains pid))
+        let typeDemand ty = irTypeExtentExprs ty |> List.exists exprDemand
+        let residual =
+            // The only exempted value is this host's two certified array
+            // input occurrences (Arrays and MethodFor.Arrays). Keep their
+            // types and every other payload, including reference-equal
+            // expressions rooted in a different binding.
+            mapIRExpr (function IRVar (id, ty) when id = pid -> IRZero ty | n -> n) host.Value
+        let hasDemand =
+            roots |> List.exists (function
+                | RootBindingValue b -> exprDemand (if b.Id = host.Id then residual else b.Value)
+                | RootSideOperand (_, _, e) -> exprDemand e
+                | RootFunctionBody f -> exprDemand f.Body || (f.Captures |> List.exists (fun c -> c.Id = pid))
+                | RootType (_, ty) -> typeDemand ty
+                | RootSourceRef (_, id) -> id = pid
+                | RootNameRef _ -> true)
+        let mutable uses = 0
+        iterIRExpr (function IRVar (id, _) when id = pid -> uses <- uses + 1 | _ -> ()) host.Value
+        let sourceIndex = modul.Bindings |> List.tryFindIndex (fun b -> b.Id = sourceId)
+        let hostIndex = modul.Bindings |> List.findIndex (fun b -> b.Id = host.Id)
+        match foreignCensus with
+        | None -> unchanged "requires explicit complete foreign-demand census evidence"
+        | Some refs when refs.Contains pid -> unchanged "the private transpose is referenced by another module"
+        | Some _ when not (gateOn "BLADE_FUSION") -> unchanged "disabled by BLADE_FUSION"
+        | Some _ when not (Blade.Toolchain.fpReproEnabled ()) -> unchanged "requires the reproducible serial column graph (BLADE_FP_REPRO=1)"
+        | Some _ when hasDemand || uses <> 2 -> unchanged "the private transpose has an additional value/type/capture/side-table demand"
+        | Some _ when not (bindingSideOperands modul host.Id).IsEmpty
+                      || modul.ProviderReads.ContainsKey host.Id || modul.ProviderWrites.ContainsKey host.Id ->
+            unchanged "the host has an additional execution payload"
+        | Some _ ->
+            match arrayOf 2 sourceType, arrayOf 1 consumer.OutputType, consumer.Arrays, rowFold consumer, sourceIndex with
+            | Some input, Some output, [IRVar (p, privateType)], Some (row, foldExpr, seed), Some si when p = pid && si < hostIndex ->
+                let source = modul.Bindings.[si]
+                let transposed = { input with IndexTypes = [input.IndexTypes.[1]; input.IndexTypes.[0]] }
+                let storedRoles (a: IRArrayType) = a.IndexTypes |> List.forall (fun ix -> ix.Kind = SDimension)
+                let knownArray roles expected ty =
+                    match arrayOf 2 ty with
+                    | Some a -> sameAxes a expected && (a.IndexTypes |> List.map _.Kind) = roles
+                    | None -> false
+                let metadataKnown =
+                    consumer.KernelInputRanks = [1] && consumer.KernelOutputRank = 0 && not consumer.IsCoIteration
+                    && not consumer.HasReynolds && consumer.KernelTDims.IsEmpty && consumer.SharedIndexTypes.IsEmpty
+                    && consumer.SpeedupFactor = 1L && consumer.ReynoldsSpeedup = 1L
+                    && consumer.TriangularLevels = [false] && consumer.SymcomStates = [SCNeither]
+                    && consumer.SDimsPerArray = [1] && consumer.Identities.Length = 1
+                    && consumer.ArrayTypes.Length = 1
+                    && knownArray [SDimension; TDimension] transposed (mkArrayLike consumer.ArrayTypes.Head)
+                    && knownArray [SDimension; SDimension] transposed privateType
+                    && source.Type = sourceType && storedRoles input && storedRoles output
+                    && (match arrayOf 1 host.Type with Some h -> sameAxes h output && storedRoles h | None -> false)
+                    && IRTotality.sameIndex output.IndexTypes.Head input.IndexTypes.[1]
+                    && (match consumer.Kernel with
+                        | IRVar (id, ty) -> id = row.Id && ty = mkFuncArrow [row.Params.Head.Type] scalar64
+                        | _ -> false)
+                    && (match consumer.Loop with
+                        | IRMethodFor mf ->
+                            mf.TotalSDims = 2 && mf.SDimsPerArray = [2] && mf.SharedIndexTypes.IsEmpty
+                            && mf.Identities = consumer.Identities && mf.ArrayTypes.Length = 1
+                            && knownArray [SDimension; SDimension] transposed (mkArrayLike mf.ArrayTypes.Head)
+                            && (match mf.Arrays with [IRVar (v, t)] -> v = pid && t = privateType | _ -> false)
+                        | _ -> false)
+                let payloadUnsafe b = bindingPayload modul b |> List.exists (fun e -> writes e || lifetimeBarrier e)
+                if not metadataKnown then unchanged "the transpose/consumer/index metadata is outside the known plain column geometry"
+                elif not (literalSeed seed) || typeOf seed <> scalar64 then unchanged "requires an explicit literal Float64 seed per column"
+                elif not (modul.Functions |> List.exists (fun f -> f.Id = row.Id)) then unchanged "the row callable is not owned by this module"
+                elif payloadUnsafe host then unchanged "a host payload may write or cross a pool lifetime event"
+                else
+                match resolve foldExpr, storedArrayProof modul source with
+                | None, _ -> unchanged "the scalar fold is unresolved"
+                | _, Error why -> unchanged $"source is not proved stored: {why}"
+                | Some fold, Ok (_, chain) ->
+                    if fold.Params.Length <> 2 || (fold.Params |> List.exists (fun p -> p.Type <> scalar64)) || fold.RetType <> scalar64
+                       || (match foldExpr with IRVar (_, ty) -> ty <> mkFuncArrow [scalar64; scalar64] scalar64 | _ -> true) then
+                        unchanged "the fold is outside the concrete scalar admission"
+                    elif chain |> List.exists (fun b -> modul.ProviderReads.ContainsKey b.Id || payloadUnsafe b) then
+                        unchanged "a stored source initializer/alias is a provider, may write or has a lifetime event"
+                    else
+                    match closedTotal fold with
+                    | Error why -> unchanged $"the fold is not closed pure/total: {why}"
+                    | Ok () ->
+                        let rAxis = { input.IndexTypes.[0] with Kind = SDimension }
+                        let cAxis = { input.IndexTypes.[1] with Kind = SDimension }
+                        let coordinateType (ix: IRIndexType) =
+                            let tag = match ix.Tag with Some n -> IRefNamed n | None -> IRefAnon (ix.Id, ix.Extent)
+                            IRTIdxTagged (IRTScalar ETInt64, tag)
+                        let param name (ix: IRIndexType) : IRParam =
+                            let id = builder.FreshId ()
+                            { Name = $"{name}_{id}"; VarId = id; Index = 0; Type = coordinateType ix }
+                        let cp, rp = param "__transpose_c" cAxis, param "__transpose_r" rAxis
+                        let cv, rv = IRVar (cp.VarId, cp.Type), IRVar (rp.VarId, rp.Type)
+                        let sourceCapture: CaptureInfo = { Id = sourceId; Name = source.Name; Type = sourceType; IsMutable = source.IsMutable }
+                        let columnCapture: CaptureInfo = { Id = cp.VarId; Name = cp.Name; Type = cp.Type; IsMutable = false }
+                        // Bounds are established by construction: each coordinate
+                        // ranges over the original source's EXACT index space.
+                        let read = IRIndex (IRVar (sourceId, sourceType), [rv; cv], None)
+                        let gather = mkCallable builder defaultLambdaOptions [rp] read scalar64 [sourceCapture; columnCapture] false [] [] false false 256 false
+                        let gather = { gather with Name = $"__transpose_cell_{gather.Id}"; SourceName = row.SourceName }
+                        let map (ix: IRIndexType) (kernel: IRCallable) outputType : ApplyInfo =
+                            let range = IRRange ([ix], None)
+                            let identity = AIDLiteral (builder.FreshId ())
+                            let a = { ElemType = coordinateType ix; IndexTypes = [ix]; IsVirtual = true; Identity = None }
+                            { Loop = IRMethodFor { Arrays = [range]; Identities = [identity]; ArrayTypes = [a]
+                                                   SDimsPerArray = [1]; TotalSDims = 1; SharedIndexTypes = [] }
+                              Kernel = IRVar (kernel.Id, mkFuncArrow (kernel.Params |> List.map _.Type) scalar64)
+                              Arrays = [range]; Identities = [identity]; ArrayTypes = [a]; SharedIndexTypes = []
+                              SymcomStates = [SCNeither]; TriangularLevels = [false]; SDimsPerArray = [1]
+                              KernelInputRanks = [0]; KernelOutputRank = 0; KernelTDims = []
+                              SpeedupFactor = 1L; ReynoldsSpeedup = 1L; HasReynolds = false
+                              OutputType = outputType; IsCoIteration = false }
+                        let innerType = mkArrayLike { ElemType = scalar64; IndexTypes = [rAxis]; IsVirtual = false; Identity = None }
+                        let terminal = IRReduceCompute (IRApplyCombinator (map rAxis gather innerType), foldExpr, seed)
+                        let column = mkCallable builder defaultLambdaOptions [cp] terminal scalar64 [sourceCapture] false [] [] false false 256 false
+                        let column = { column with Name = $"__transpose_rows_{column.Id}"; SourceName = row.SourceName }
+                        minted.Add (gather, row.Id)
+                        minted.Add (column, row.Id)
+                        decide Blade.Effects.Applied
+                            [ "private hard-transpose pool removed; required stored source and original C output retained"
+                              "C outer range / R inner fused terminal; exact original fold and literal seed once per column"
+                              "same index identity, static in-bounds source reads; ascending reproducible association"
+                              "complete value/type/capture/side-table/foreign census; immediate scope; no writes or lifetime motion" ]
+                        { host with Value = IRCompute (IRApplyCombinator (map cAxis column host.Type)) }
+            | _ -> unchanged "requires a dominating stored rank-2 Float64 source and one immediate seeded row fold"
     let rewrite (host: IRBinding) =
         let unchanged why = record host.Name (Blade.Effects.Declined why) []; host
         match host.Value with
+        | IRLet (pid, IRTranspose (IRVar (sourceId, sourceType), 0, 1), IRCompute (IRApplyCombinator consumer)) ->
+            transposeRows host pid sourceId sourceType consumer
+        | IRLet (_, IRTranspose _, _) ->
+            Blade.Effects.Decisions.record
+                { Blade.Effects.Rule = "transpose-row-fold"; Version = 1; Span = declSpanOf host.Name; Subject = host.Name
+                  Outcome = Blade.Effects.Declined "requires one private transpose immediately consumed by its sole row fold"; Evidence = [] }
+            host
         | IRLet (pid, value, IRCompute (IRApplyCombinator consumer)) when (peel value).IsSome ->
             let producer = (peel value).Value
             match producer.Arrays, consumer.Arrays, rowFold consumer with
@@ -8250,11 +8392,16 @@ let fusePartialRowTerminalsModule (builder: IRBuilder) (programFuncs: IRCallable
                 f :: (Map.tryFind f.Id byOrigin |> Option.map (Seq.map fst >> List.ofSeq) |> Option.defaultValue []))
             DerivedFuncOrigins = minted |> Seq.fold (fun m (f, origin) -> Map.add f.Id origin m) modul.DerivedFuncOrigins }
 
+// Existing callers have no complete foreign-binding/type census. C02 map
+// admission stays as before; the new transpose arm must decline explicitly.
+let fusePartialRowTerminalsModule (builder: IRBuilder) (programFuncs: IRCallable list) (modul: IRModule) : IRModule =
+    fusePartialRowTerminalsWithCensusModule builder programFuncs None modul
+
 /// `programFuncs` is every callable of the PROGRAM (all modules): a pass that
 /// judges a callee's effects resolves it there, since a generic defined in
 /// one module and called from another (`from stats import mean`) is not in
 /// the calling module's own table.
-let optimizeModule (builder: IRBuilder) (programFuncs: IRCallable list) (modul: IRModule) : IRModule =
+let private optimizeModuleCore (builder: IRBuilder) (programFuncs: IRCallable list) foreignCensus (modul: IRModule) : IRModule =
     // Normal lowering constructs the events LAST. If a consumer re-applies
     // this stage to optimized IR, retain the established lifetime regions.
     if (modul.Functions |> List.exists (fun f -> containsPoolLifetimeEvent f.Body))
@@ -8264,10 +8411,18 @@ let optimizeModule (builder: IRBuilder) (programFuncs: IRCallable list) (modul: 
     modul
     |> foldConstMatchesModule
     |> (fun m -> fuseElementwiseChainsModule m builder programFuncs)
-    |> fusePartialRowTerminalsModule builder programFuncs
+    |> fusePartialRowTerminalsWithCensusModule builder programFuncs foreignCensus
     |> (fun m -> fuseSliceWritesModule m builder programFuncs)
     |> (fun m -> fuseRowFoldsModule m builder programFuncs)
     |> hoistKernelInvariantsModule builder programFuncs
     // LAST (it sees every fold the passes above left in place); before
     // IRLift and CSE, so the pass dedupes repeated legs itself.
     |> shareSiblingFoldsModule builder programFuncs
+
+let optimizeModule (builder: IRBuilder) (programFuncs: IRCallable list) (modul: IRModule) : IRModule =
+    optimizeModuleCore builder programFuncs None modul
+
+/// Only the whole-program Lowering driver supplies this complete census.
+let internal optimizeModuleWithForeignCensus (builder: IRBuilder) (programFuncs: IRCallable list)
+                                            (foreignRefs: Set<IRId>) (modul: IRModule) : IRModule =
+    optimizeModuleCore builder programFuncs (Some foreignRefs) modul
