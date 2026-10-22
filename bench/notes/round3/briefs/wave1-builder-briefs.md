@@ -10,7 +10,7 @@ Sections (each is one former file, verbatim): [`wave1-builder-briefs.md#builder-
 
 _formerly `bench/notes/round3/briefs/BUILDER-PREAMBLE.md`_
 
-## Round 3 -- builder preamble (shared by every wave-1 item)
+### Round 3 -- builder preamble (shared by every wave-1 item)
 
 You are a builder in round 3 of Blade's microkernel work. Blade: an array-functional language whose F# compiler emits
 C++17 (g++ ucrt64) and LLVM, with a tree-walking interpreter as a differential twin. Read `CLAUDE.md` in your worktree
@@ -68,7 +68,7 @@ and every pre-existing defect you found (do not fix those outside your item; rep
 
 _formerly `bench/notes/round3/briefs/W1-A2-rowview.md`_
 
-## W1-2 / A2 -- the row-view inner fold in the strict threaded forms (gap G51), and the licensed helper arm
+### W1-2 / A2 -- the row-view inner fold in the strict threaded forms (gap G51), and the licensed helper arm
 
 Read `wave1-builder-briefs.md#builder-preamble` first. Brief: `research/A-census.md` item A2 (sections "A2" and its implementation design;
 emitted evidence in `scratchpad/round3/A-emit/stencil_lic.cpp` and `stencil_repro.cpp`). Review: `reviews/codex-review-A.md`
@@ -133,7 +133,7 @@ gap list (do not renumber anything).
 
 _formerly `bench/notes/round3/briefs/W1-T4-maskagg.md`_
 
-## W1-4 / B-T4 -- maskagg selection structures: positions demand census (T4b) and the mask-site gather (T4a)
+### W1-4 / B-T4 -- maskagg selection structures: positions demand census (T4b) and the mask-site gather (T4a)
 
 Read `wave1-builder-briefs.md#builder-preamble` first. Brief: `research/B-relational.md` item T4 (and its probes in `B-work/`). Review:
 `reviews/codex-review-B.md` findings 8, 9, 10, 11 (the T4 rows) -- close them. Round-2 base: the B4 compaction fusion
@@ -187,7 +187,7 @@ old vs new interleaved (directional). Report logical traffic before / after (the
 
 _formerly `bench/notes/round3/briefs/W1-defects.md`_
 
-## W1-3 -- deferred-materialization defects in the C++ lane (four reproducers, BL9002 today)
+### W1-3 -- deferred-materialization defects in the C++ lane (four reproducers, BL9002 today)
 
 Read `wave1-builder-briefs.md#builder-preamble` first. These are correctness fixes, no performance claim. Each reproducer stays its OWN corpus
 pin and its own gap-register line; do not merge their identities unless you trace them to one site (review B/12, D/9).
@@ -220,7 +220,7 @@ directories. Close the RESULTS 15.4 card text and the G41 note; add a gap row on
 
 _formerly `bench/notes/round3/briefs/W1-runner.md`_
 
-## W1-1 + W1-6 -- runner tasks (measurement only, no code)
+### W1-1 + W1-6 -- runner tasks (measurement only, no code)
 
 You are the round-3 test runner. Box rules: one timing process at a time; before any timing, audit `Get-Process` for stray
 work (a backgrounded `find /` once burned a core beside an A/B); never time while a build or test runs; ucrt64 first on
@@ -260,7 +260,7 @@ and the two verdicts.
 
 _formerly `bench/notes/round3/briefs/W1-workloads.md`_
 
-## W1-5 / C -- two new bench workloads: N07 (resident two-FIR / sibling-map fusion) and N09 (tensorop)
+### W1-5 / C -- two new bench workloads: N07 (resident two-FIR / sibling-map fusion) and N09 (tensorop)
 
 Read `wave1-builder-briefs.md#builder-preamble` first. Brief: `research/C-workloads.md` sections N07 and N09 (complete sources in
 `scratchpad/c-work/n07.blade`, `n09.blade`; all ten `blade check` today). Review: `reviews/codex-review-C.md` -- per-workload

@@ -10,7 +10,7 @@ Sections (each is one former file, verbatim): [`wave2-builder-briefs.md#w2-0-pre
 
 _formerly `bench/notes/round3/briefs/W2-0-precedence-antig.md`_
 
-## W2-0 -- two measured decisions from the wave-1 A/B: the scatter wins the mt8-repro precedence; anti_g per regime
+### W2-0 -- two measured decisions from the wave-1 A/B: the scatter wins the mt8-repro precedence; anti_g per regime
 
 Read `wave1-builder-briefs.md#builder-preamble` first (it names the integration tip; reset your worktree to it). Evidence: the wave-1 harness A/B,
 `bench/notes/round3/w1-ab.md` (committed on the integration branch) -- read its section 0 and the pairkernel / comoment3 /
@@ -63,7 +63,7 @@ antisym row-group entry (G1's tuning note or wherever anti_g lives).
 
 _formerly `bench/notes/round3/briefs/W2-1-T1-membership.md`_
 
-## W2-1 / B-T1 -- membership hoisting (`contains` over a small set), both lanes
+### W2-1 / B-T1 -- membership hoisting (`contains` over a small set), both lanes
 
 Read `wave1-builder-briefs.md#builder-preamble` first (reset to the integration tip it names). Brief: `research/B-relational.md` item T1 and its
 probes in `research/B-work/`. Review: `reviews/codex-review-B.md` finding 7 (HIGH) and the T1 lines of finding 11 -- close them.
@@ -118,7 +118,7 @@ brief's `semiagg` SOURCE as a corpus-sized probe only if cheap. Gap row for T1 (
 
 _formerly `bench/notes/round3/briefs/W2-2-T4c-shared-selection.md`_
 
-## W2-2 -- T4c shared selection: one index for every compound over the same mask; the membership-probe certificate
+### W2-2 -- T4c shared selection: one index for every compound over the same mask; the membership-probe certificate
 
 Read `wave1-builder-briefs.md#builder-preamble` first (its gap-register range is stale: the register reaches G69 on the integration branch
 when you start; this item's row is **G70**). Your worktree is cut from the integration tip named in your task (it
@@ -226,7 +226,7 @@ interp index-types, opt-diff index-types, docs, corpus-wiring. Name what you cou
 
 _formerly `bench/notes/round3/briefs/W2-3-P3-pull-scatter.md`_
 
-## W2-3 / D-P3 -- a row-owned PULL scatter at rank 3 (strict mt8), measured against the scatter precedence of W2-0a
+### W2-3 / D-P3 -- a row-owned PULL scatter at rank 3 (strict mt8), measured against the scatter precedence of W2-0a
 
 Read `wave1-builder-briefs.md#builder-preamble` first (reset to the integration tip it names). Brief: `research/D-orbit-regions.md` piece P3 (and
 its admission section 5). Review: `reviews/codex-review-D.md` findings 3, 4 (the P3 bullet), 6 (knob contract) and 7 (the
@@ -275,7 +275,7 @@ Gap row G66 (the measured form) at the end; update G44's note.
 
 _formerly `bench/notes/round3/briefs/W2-4-A7c-epilogue-legs.md`_
 
-## W2-4 -- A7c producer-input legs: saxpy's input sums ride the y2 producer pass
+### W2-4 -- A7c producer-input legs: saxpy's input sums ride the y2 producer pass
 
 Read `wave1-builder-briefs.md#builder-preamble` first (its gap-register range is stale: the register now reaches G68; this item's row is
 **G69**). Integration tip at launch: `e4dec0ba` on `worktree-bench-fortran` (your worktree is cut from it). Research:
@@ -394,7 +394,7 @@ corpus-wiring. Name what you could not verify.
 
 _formerly `bench/notes/round3/briefs/W2-4-round4-lifetime.md`_
 
-## W2-4 round 4 -- close the lifetime class: a cleanup EVENT every pass, every renderer and both lanes honour
+### W2-4 round 4 -- close the lifetime class: a cleanup EVENT every pass, every renderer and both lanes honour
 
 Context: your round 2 (merged as 3a3925ac on worktree-bench-fortran) replaced the join-inferred release with
 `InlineReturnTable`. The third Codex look (`round3/reviews/wave2-codex-reviews.md#codex-diff-w2-4-3`) is DO NOT MERGE: NEW 2 resolved, NEW 1
@@ -471,7 +471,7 @@ look follows; nothing merges before it passes.
 
 _formerly `bench/notes/round3/briefs/W2-5-N10-workload.md`_
 
-## W2-5 / C -- workload N10 `groupls` (grouped nonlinear least-squares local models), with corrected N02 as the fallback
+### W2-5 / C -- workload N10 `groupls` (grouped nonlinear least-squares local models), with corrected N02 as the fallback
 
 Read `wave1-builder-briefs.md#builder-preamble` first (reset to the integration tip it names). Brief: `research/C-workloads.md` section N10 (source
 `scratchpad/c-work/n10.blade`) and N02 (`n02.blade`). Review: `reviews/codex-review-C.md` -- N10 verdict ADD AFTER FIXES and
@@ -518,7 +518,7 @@ footers, validate_B, `git diff --check`; no compiler change; no full-size timing
 
 _formerly `bench/notes/round3/briefs/W2-6-A4-pool-retain.md`_
 
-## W2-6 -- A4: the pool-retention policy as an OPT-IN arm (`BLADE_POOL_RETAIN`), measured beside the default
+### W2-6 -- A4: the pool-retention policy as an OPT-IN arm (`BLADE_POOL_RETAIN`), measured beside the default
 
 Read `wave1-builder-briefs.md#builder-preamble` first (its gap-register range is stale: the register reaches G68/G69 on the integration
 branch; this item does not open a new row -- it updates **G52**). Your worktree is cut from the integration tip named in
