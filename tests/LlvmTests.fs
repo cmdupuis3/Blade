@@ -346,7 +346,7 @@ let private withEnv (pins: (string * string option) list) (body: unit -> 'a) : '
 /// The knobs that change emitted text. Pinned OFF around any assertion about
 /// default emission; listed once so a knob added later is added in one place.
 let private numericKnobs =
-    [ "BLADE_FP_REASSOC"; "BLADE_FP_REPRO"; "BLADE_FP_CONTRACT"; "BLADE_LLVM_FACTS"; "BLADE_LLVM_BRICKS"; "BLADE_SYRK_TILE" ]
+    [ "BLADE_FP_REASSOC"; "BLADE_FP_REPRO"; "BLADE_FP_CONTRACT"; "BLADE_LLVM_FACTS"; "BLADE_LLVM_BRICKS"; "BLADE_SYRK_TILE"; "BLADE_POOL_EARLY_RELEASE" ]
 
 let private defaultEmissionEnv = numericKnobs |> List.map (fun k -> k, None)
 
@@ -940,6 +940,10 @@ let runLlvmFactTests () : BlockResult =
         failed <- failed + 1
         failedNames <- failedNames @ [ name ]
         resultLine Fail name detail
+    for name, result in EarlyPoolReleaseTests.llvmCases () do
+        match result with
+        | Ok detail -> pass name detail
+        | Error why -> fail name why
     /// `name`: what is asserted. `want`/`deny`: substrings that must appear /
     /// must not. Both lists are checked, so one case states a fact and its
     /// boundary together.

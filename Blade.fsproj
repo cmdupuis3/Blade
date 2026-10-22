@@ -147,6 +147,9 @@
     <Compile Include="src/OptimizePrivateSpool.fs" />
     <Compile Include="src/IRPrint.fs" />
     <Compile Include="src/IRValidate.fs" />
+    <!-- Exact ordinary scratch lifetime; consumes final planner ownership and
+         emits existing typed pool events before either backend. -->
+    <Compile Include="src/EarlyPoolRelease.fs" />
     <!-- Provider registry: the core<->provider seam (ProviderSpec records
          keyed by surface module name). Compiles after IR.fs and before the
          provider implementations that register into it. -->
@@ -575,6 +578,7 @@
          later, and the ordinary runner is the C++ lane by construction), so it
          needs only Lowering/CodeGen/EmitLlvm/Build + the corpus loader. Skips
          cleanly without clang or g++; standalone only, never in the default suite. -->
+    <Compile Include="tests/EarlyPoolReleaseTests.fs" />
     <Compile Include="tests/LlvmTests.fs" />
     <Compile Include="tests/OmpTests.fs" />
     <Compile Include="tests/LinAlgTests.fs" />

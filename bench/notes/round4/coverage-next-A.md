@@ -84,3 +84,6 @@ This update supersedes pending validation labels above without closing their bro
 ## Current checkpoint after C05 targeted acceptance
 
 C05/PM58 is integrated through78c0e903 after757 optimizer checks,12 native arms and all SQL/interpreter/opt-diff gates; combined validation remains pending. A05 is frozenb6200465, with a minimal compiler-type/namespace repair in progress after the first fresh build reached compilation. B08 diagonal initialization is frozena2b82e73 for targeted testing. D09-I1 guard restoration is frozen7ff59a20 and its focused gate is next; row-table removal remains unimplemented. C06 PM09 full-fold composition census is active against integrated source. Earlier broad PM/ST coverage gaps remain open; full-suite launches remain0.
+## User-directed final scope
+
+The user has closed further kernel waves because tokens are running low. Round4 now ends after the active A05/B08/C06/D09 cards, integration review and the single full suite. A06 is a deferred source-only C++ parity design. Every broader PM/ST gap listed above remains explicitly deferred, rather than silently counted as implemented or required before this round may close. Measurement infrastructure and source allocation reductions still do not establish a whole-process peak-memory or bandwidth win.

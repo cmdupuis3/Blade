@@ -1,0 +1,41 @@
+{
+  "card": "A05",
+  "scope": "separate unexecuted narrow raw-route FSI diagnostic; no production/fixture/primary-manifest edits",
+  "source_commit": "b9df5a9bb23b116c66e17155927f70412b100efa",
+  "execution": "adapter unexecuted by coder; root reports primary152facts730opt passed; adapter review required",
+  "primary_manifest_sha256": "c14bd8a74b41b1311beeea33153d5d7b08b6f700b66d8af2994e9aec868ca3b0",
+  "files": [
+    {
+      "path": "bench/notes/round4/A05-raw-route/adapter.fsx",
+      "sha256": "d2847b111d41e8704dda782b4414222cd7af4560c2a5fb11aeb6a19dcd71f71f",
+      "bytes": 13324
+    },
+    {
+      "path": "bench/notes/round4/A05-raw-route/request.md",
+      "sha256": "9954f53a008361812f5f46f7ecd4e099a9cbb6af5aebe14da2e52c2327158c0e",
+      "bytes": 6660
+    }
+  ],
+  "original_inputs": [
+    {
+      "path": "tests/corpus/memfree/034_different_extent_early_release.blade",
+      "sha256": "ef7ab770d7e814267c44d2c9bc17aa1e5e86c999d3af5ee337b982256824edce",
+      "bytes": 1757
+    },
+    {
+      "path": "bench/notes/round4/A05-census-inputs/02_caller_owned.blade",
+      "sha256": "5bb3db4af63ebe4502dad3ea38f52a6dfa32aa8430d06e527c1a9cc120717766",
+      "bytes": 1468
+    },
+    {
+      "path": "bench/notes/round4/A05-census-inputs/03_later_read.blade",
+      "sha256": "e50fe638ed1dab2d0d0bbc7b8c6007c43f5370485d2974357bf8e5916d1c020e",
+      "bytes": 1150
+    },
+    {
+      "path": "tests/corpus/memfree/035_different_extent_failure_order.blade",
+      "sha256": "45c87b848aa766afac1a4a87c060b0c0acaf885657097df1ca2df53b7738dbbf",
+      "bytes": 718
+    }
+  ]
+}

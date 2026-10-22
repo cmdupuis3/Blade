@@ -3207,6 +3207,9 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // emitter's).
         Optimize.planOrbitPull programFuncs irModule
         irModule)
+    // A05 consumes every module's final executable/type/side payload and ALL
+    // established owners. No planner runs after these typed resource barriers.
+    let irModules = EarlyPoolRelease.scheduleModules builder irModules
 
     // DEAD-POLYMORPH ELIMINATION, last and whole-program: a lambda lifted out
     // of a never-instantiated generic keeps that generic's type vars in its

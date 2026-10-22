@@ -78,6 +78,10 @@ not silently dropped tasks. A card can close as already-covered, implemented, me
 or a specific evidenced refusal requiring a new design; the ledger must distinguish them.
 Do not claim the whole round complete while required implementation or review remains.
 
+## Final-wave scope update
+
+The user closed further kernel expansion because tokens are running low. Finish the current A05, B08, C06 and D09 implementation/validation cards, then review and validate the integrated branch. A06 remains a source-only planning note; all broader unimplemented PM/ST catalog entries are explicitly deferred beyond this round. No additional kernel or research wave is required for round closure. Preserve the single final full-suite launch below.
+
 ## One test runner; one full-suite launch
 
 Luna is the only agent allowed to build, emit, compile, execute fixtures, run tests,
@@ -136,9 +140,11 @@ targeted requests, not extra full-suite sweeps. No full-suite launch has occurre
 | A04 | Sol/high A | Integrated38256bb1 (kernel6c9d6e1d) | 151 facts,653 optimizer checks, affected categories, all-output native controls and four033 sanitizer arms pass; combined checks pending; [review](A04-review.md), [results](A04-tests.md) |
 | B07 | Sol/high B | Integrated27d31e74; diagnostic checkpoint accepted | 14 fixtures and8 canonical native numeric checks pass; opaque task, separate observer and matched cleanup; [review](B07-review.md); all eight canonical and one prepared native enclosure audits and saved validators pass; performance ineligible |
 | C05 | Sol/high C | Integrated78c0e903 | 757 optimizer checks,12 native arms and SQL53/interp54/opt-diff53 pass (two expected reject skips); [review](C05-review.md); combined checks pending |
-| A05 | Sol/high A | Frozenb6200465; build repair active | Restore recovered through existing cache; first compilation exposed type/namespace errors; no tests yet; [review](A05-review.md), [results](A05-tests.md) |
-| D09 | Sol/high D | I1 guard checkpoint7ff59a20; focused validation queued | Census exposed unsafe source-value uses; row-table removal remains separate; [review](D09-review.md) |
-| B08 | Sol/high B | Frozena2b82e73; primary validation queued | Accepted baseline; diagonal-only initialization and full-output/sign controls authored; [review](B08-review.md) |
+| A05 | Sol/high A | Integrated5c31834e + build repairb5fc1bb6 | All targeted categories, six paired raw emissions and six strict native/sanitizer arms accepted; [review](A05-review.md), [results](A05-tests.md) |
+| A06 | Sol/high A | Deferred implementation; census integratedce5f1292 | C++ same-cell return parity planning only; [census](A06-census.md) |
+| D09 | Sol/high D | I1 integrated59e261b4; I2 integratedb7a8b8fe | Guard and certified direct-row paths accepted; I2 focused123/0/0; combined Zarr pending; [review](D09-review.md), [results](D09-I2-tests.md) |
+| B08 | Sol/high B | Integrated947549d3 | 561 optimizer checks, both actual emission controls and index-types409/0/0 accepted; [review](B08-review.md), [results](B08-tests.md) |
+| C06 | Sol/high C | Integrated0672123a + repairs2352b78c/3275b886 | 789 optimizer checks and28 strict native arms pass; actual allocation/order proof accepted; [review](C06-review.md), [results](C06-tests.md) |
 | Full suite | Luna/high runner | Reserved | End of whole round only; launch count 0 |
 
 Per-card handoffs and reviewer dispositions live beside this file. Historical plans and

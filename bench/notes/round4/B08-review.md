@@ -16,3 +16,12 @@ Authored coverage must verify every dense cell, required anti output, N1 empty s
 ## Frozen implementation source approval
 
 Root reviewed the final21-line production diff,92-line optimizer tests and four complete-value corpus witnesses554–557. Only the admitted stored static positive unitless F64 antisymmetric rank-two expansion changes: initialize its diagonal, then retain the original strict-pair copy/negation order. Source forcing, allocation, extents, pool ownership and every other geometry/type fallback remain unchanged. Signed-zero checks observe all dense cell signs; N1 checks its otherwise unwritten diagonal. All eight source/context manifest entries match. Checkpointa2b82e73 is frozen for a fresh isolated build and targeted validation. No executable result or native-store reduction has yet been established.
+## Primary gate accepted
+
+Root read the raw561/0 optimizer result and all15 PM07 route verdicts. Fresh source-matching DLL A9D88348F0FBEE1E46F5502B6D3276C410319E97FE4BBAF0FEAEA9F9B3B035AF is accepted for two post-change emissions of the unchanged N5/N1 baseline sources. Complete-value native index-types validation remains pending, with all four new554–557 witnesses required. Baseline and current reports are preserved separately; source-store counts are not native-store or performance evidence.
+## Post-change emission accepted
+
+Root inspected both actual optimized N5/N1 emissions under B08-primary-emits. The compact source allocation/fill precedes the required dense output allocation. N5 has five diagonal zeros followed by the original20 signed pair writes; N1 keeps its one diagonal zero and no scatter iteration. Both complete source/output print paths remain. The matching input baseline is preserved; this establishes emitted recipe/ownership, not native-store or timing reduction. One standalone index-types category is authorized on the same B08 compiler, including554–557 complete values and reciprocal sign witnesses.
+## Targeted acceptance and integration
+
+Root read the actual409/0/0 index-types verdict and all four PM07 complete-value/signed-zero/fallback PASS entries. Combined with561 optimizer checks and reviewed baseline/current emissions, the bounded change is accepted and integrated as947549d3. The additive OptimizeTests merge preserved existing cases. One existing reject lacks a detail pin and is disclosed; there were no skips. Final combined validation remains pending. This removes redundant emitted initialization work only; no native-store-count, timing, capacity or RSS saving is claimed.

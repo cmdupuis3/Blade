@@ -1,0 +1,40 @@
+{
+  "schema": "blade.round4.b08.diagonal-init-source.v1",
+  "state": "authored_unexecuted_pending_root_review",
+  "checkout": "C:/Users/cdupu/Documents/GitHub/Blade/.round4-worktrees/b-measurement",
+  "parent_head": "d2f50db7f37fa581d71721bf3de834068850be1e",
+  "hash_basis": "SHA256_of_actual_worktree_file_bytes",
+  "production_scope": "CodeGenExpr.materializeDecompactForm, sole static positive nonvirtual rank-two antisymmetric unitless F64 group, stored IRVar or IRParam source; diagonal initialization only",
+  "execution_by_coder": false,
+  "native_store_counts": null,
+  "timing": null,
+  "capacity_or_rss_saving": null,
+  "performance_eligible": false,
+  "files": [
+    { "path": "src/CodeGenExpr.fs", "sha256": "C1FB4835957F7D6A307F3F0AAFDFBE49113B40B2D113F025EF1C523C7A07FAD9" },
+    { "path": "tests/OptimizeTests.fs", "sha256": "E75D9EA98426AF91124DE46DC0CB6E2DDA4036E6EE30816891AC917C684D9243" },
+    { "path": "tests/corpus/index-types/554_pm07_anti_complete_write_n5.blade", "sha256": "875D218B5E35D98D426F362790E65952404FE93FAAADF12986B88EC0001AAB02" },
+    { "path": "tests/corpus/index-types/555_pm07_anti_empty_scatter_n1.blade", "sha256": "45450D89EA7BCAE05575055464680C781BB45FCB9B19F13B2FD9313E6CE5D463" },
+    { "path": "tests/corpus/index-types/556_pm07_anti_signed_zero.blade", "sha256": "D05BD97B4B7F66D9B2FC567B313917A3802434EA2EF77C5CB2D0DCF8E755019C" },
+    { "path": "tests/corpus/index-types/557_pm07_anti_integer_fallback.blade", "sha256": "18BD9B3425C97FFBE95F5A2E019727C8727BCDF52728A76791C80D676391C0BD" }
+  ],
+  "unchanged_ownership_anchors": [
+    { "path": "src/CodeGenBinding.fs", "lines": "3888-3908", "sha256": "829568D273B59E26CE1233C2848A0A387343537E49A1BAF6B803BEDF507AC597" },
+    { "path": "src/cpp/nested_array_utilities.hpp", "sha256": "FA12D552F27D4757C73B764E384A3F883510BFDBE15655DA352CEE4E32146DB9" }
+  ],
+  "unchanged_baseline_controls": {
+    "census_sha256": "FA4176FE52F3F96BA5B84F58B3A70C5B72ED6F83AA2F8121603EB4A8892BED7B",
+    "input_manifest_sha256": "69BF1F0F8B6B0EBB00727FFDD776D0FE11613D4B372E659E4C4B011E1183F106",
+    "input_request_sha256": "967544E1A3168E3828D8D2F1FE0DFD4A6094EB93A15B029CC153BDC4DD8A040A",
+    "root_reviewed_n5_cpp_sha256": "A7284BD81AEA14F94663C308B4287D936FF32FBCE83BCD827B20CBEEC3DF5AB4",
+    "root_reviewed_n1_cpp_sha256": "61DCC731AEF8E0592DC24195385EF706DA4C186BD2C7076D358A882A925C4453"
+  },
+  "authored_test_counts": { "raw_materializer_route_cases": 11, "whole_program_route_cases": 4, "new_corpus_value_cases": 4 },
+  "limitations": [
+    "No build, lower, emission, native compilation, test, sanitizer or benchmark executed by coder",
+    "Raw IR fallback probes establish emitted fallback geometry only; they do not admit unsupported programs for execution",
+    "Logical zero writes change from N squared to N in the admitted source recipe; allocation, capacity, row metadata and ownership are unchanged",
+    "Native optimization may already eliminate the redundant zero writes; no measured native-store or timing saving is claimed",
+    "Existing baseline artifacts and B07 artifacts remain historical controls, not rewritten optimized artifacts"
+  ]
+}

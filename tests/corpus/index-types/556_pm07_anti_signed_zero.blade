@@ -1,0 +1,12 @@
+// TEST: PM07 Antisymmetric Signed Zero Scatter
+// Fixed stored payload avoids relying on Reynolds arithmetic to create -0.
+// Upper cells must copy their source sign; lower cells must negate it. Every
+// diagonal must be +0. Numeric zero equality alone cannot check this contract.
+let anti: Array<Float64 like AntisymIdx<2, 3>> = [[0.0, -0.0], [-0.0], []]
+let result = decompact(anti, 0)
+let source02_negative = 1.0 / anti(0, 2) < 0.0
+let result_negative = method_for(result) <@> lambda(v) -> 1.0 / v < 0.0 |> compute
+// EXPECT: anti = [[0.0, -0.0], [-0.0], []]
+// EXPECT: result = [[0.0, 0.0, -0.0], [-0.0, 0.0, -0.0], [0.0, 0.0, 0.0]]
+// EXPECT: source02_negative = true
+// EXPECT: result_negative = [[false, false, true], [true, false, true], [false, false, false]]

@@ -1,0 +1,17 @@
+// TEST: PM02 unknown scalar failures keep their original function order (aborts)
+type Short = Idx<7>
+type Long = Idx<11>
+function no_early(x: Array<Float64 like Short>, y: Array<Float64 like Long>) -> Array<Float64 like Long> = {
+    let p = x * 2.0 + 1.0 |> compute
+    let old_sum = reduce(p, (+))
+    let middle = p(3)
+    let bad = 7 / Int64(floor(x(0)))
+    let second_bad = 9 / Int64(floor(y(0)))
+    y * 0.5 + old_sum + middle + Float64(bad + second_bad)
+}
+let x: Array<Float64 like Short> = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let y: Array<Float64 like Long> = [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0]
+let result = no_early(x, y)
+// ABORT: BL8013
+// ABORT: .blade:7
+// ABORT: at no_early

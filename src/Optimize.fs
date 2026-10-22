@@ -57,6 +57,10 @@ let cseEnabled () = gateOn "BLADE_CSE"
 /// by BLADE_POOL_REUSE") with the pairs as evidence.
 let poolReuseEnabled () = gateOn "BLADE_POOL_REUSE"
 
+/// A05: exact ordinary-function scratch lifetime, independent of donation.
+/// Read per lowering; the off arm keeps the original scope-exit cleanup.
+let earlyPoolReleaseEnabled () = gateOn "BLADE_POOL_EARLY_RELEASE"
+
 /// BLADE_HOIST=0|off disables kernel-invariant hoisting
 /// (`hoistKernelInvariantsModule`): the analysis still runs, and a kernel it
 /// would have rewritten records `invariant-hoist` DECLINED ("disabled by
@@ -187,7 +191,7 @@ let mutable blasGateProbe : unit -> bool = fun () -> false
 /// off for its reference lane, so a new pass's gate belongs in this list the
 /// day the pass lands -- a gate missing here is a pass the differential
 /// cannot see.
-let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_HOIST"; "BLADE_HOT_ROW"; "BLADE_CELL_EPILOGUE"; "BLADE_COMPACTION_FUSION"; "BLADE_COMPACT_ROW_CLASSES"; "BLADE_SIBLING_FOLDS"; "BLADE_REC_STEP_OMP"; "BLADE_MEMBER_HOIST"; "BLADE_EPILOGUE_LEGS" ]
+let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_POOL_EARLY_RELEASE"; "BLADE_HOIST"; "BLADE_HOT_ROW"; "BLADE_CELL_EPILOGUE"; "BLADE_COMPACTION_FUSION"; "BLADE_COMPACT_ROW_CLASSES"; "BLADE_SIBLING_FOLDS"; "BLADE_REC_STEP_OMP"; "BLADE_MEMBER_HOIST"; "BLADE_EPILOGUE_LEGS" ]
 
 /// A gate's KNOB MIRROR: a value that keeps a pass's PREVIOUS version, or
 /// selects an opt-in variant (not the pass off), for the passes whose forms
@@ -8382,12 +8386,181 @@ let internal fusePartialRowTerminalsWithCensusModule (builder: IRBuilder) (progr
         | IRCompute (IRApplyCombinator info) when (rowFold info).IsSome ->
             unchanged "requires a private scoped producer; top-level named/printed producers retain their storage"
         | _ -> host
-    let bindings = modul.Bindings |> List.map rewrite
-    if minted.Count = 0 then modul
+    // PM09: the observed rank-k desugar has ONE scalar state, with three
+    // unit-valued statement wrappers. Recognize that exact private rank-2
+    // region; do not flatten a partial/outer fold or normalize arbitrary lets.
+    let removedFullPools = System.Collections.Generic.HashSet<IRId>()
+    let fullFold (host: IRBinding) =
+        let decide outcome evidence =
+            Blade.Effects.Decisions.record
+                { Blade.Effects.Rule = "full-map-fold"; Version = 1; Span = declSpanOf host.Name
+                  Subject = host.Name; Outcome = outcome; Evidence = evidence }
+        let unchanged why = decide (Blade.Effects.Declined why) []; Some host
+        match host.Type, host.Value with
+        | IRTScalar ETFloat64, IRLet (pid, IRApplyCombinator info, rest) when (arrayOf 2 info.OutputType).IsSome ->
+            let int64Type = IRTScalar ETInt64
+            let step acc r c = function
+                | IRLet (u, IRAssign (IRVar (target, tt),
+                    IRApp (fold, [IRVar (a, at); IRIndex (IRVar (p, pt), [IRVar (ri, rt); IRVar (ci, ct)], _)], ret)), IRLit IRLitUnit)
+                    when target = acc && a = acc && p = pid && ri = r && ci = c
+                         && tt = scalar64 && at = scalar64 && ret = scalar64 && rt = int64Type && ct = int64Type -> Some (u, fold, pt)
+                | _ -> None
+            let shape =
+                match rest with
+                | IRLet (acc, seed,
+                    IRLet (outerUnit, IRForRange (r, loR, hiR,
+                        IRLet (innerUnit, IRForRange (c, loC, hiC, body), IRLit IRLitUnit)), IRVar (last, ty)))
+                    when last = acc && ty = scalar64 ->
+                    step acc r c body |> Option.map (fun (u, fold, pt) ->
+                        acc, seed, [outerUnit; innerUnit; u], r, c, [loR; loC], [hiR; hiC], fold, pt)
+                | _ -> None
+            match shape, info.Arrays, resolve info.Kernel, foreignCensus with
+            | Some (acc, seed, units, r, c, lows, highs, foldExpr, privateType), [IRVar (sid, sty)], Some map, Some foreign ->
+                let removed = Set.ofList (pid :: acc :: r :: c :: units)
+                let residual = IRReduceCompute (IRApplyCombinator info, foldExpr, seed)
+                let refs e =
+                    Set.union (collectVarRefsIR e)
+                        (embeddedExtentExprs e |> List.map collectVarRefsIR |> Set.unionMany)
+                let demanded e = not (Set.intersect removed (refs e)).IsEmpty
+                let bad e = writes e || lifetimeBarrier e
+                let badPayload e = bad e || (embeddedExtentExprs e |> List.exists bad)
+                let extraDemand =
+                    roots |> List.exists (function
+                        | RootBindingValue b -> demanded (if b.Id = host.Id then residual else b.Value)
+                        | RootSideOperand (_, _, e) -> demanded e
+                        | RootFunctionBody f -> demanded f.Body || (f.Captures |> List.exists (fun x -> removed.Contains x.Id))
+                        | RootType (_, ty) -> irTypeExtentExprs ty |> List.exists demanded
+                        | RootSourceRef (_, id) -> removed.Contains id
+                        | RootNameRef _ -> true)
+                // Count definitions too: a malformed second scope may reuse a
+                // removed id without containing a variable read of it.
+                let definitions = System.Collections.Generic.Dictionary<IRId, int>()
+                let add id =
+                    let n = match definitions.TryGetValue id with true, n -> n | _ -> 0
+                    definitions.[id] <- n + 1
+                let note e =
+                    iterIRExpr (function
+                        | BinderShape (_, scopes) -> for ids, _ in scopes do for id in ids do add id
+                        | _ -> ()) e
+                for b in modul.Bindings do add b.Id
+                for f in allCallables do
+                    add f.Id
+                    for p in f.Params do add p.VarId
+                for root in roots do
+                    match root with
+                    | RootBindingValue b -> note b.Value; embeddedExtentExprs b.Value |> List.iter note
+                    | RootSideOperand (_, _, e) | RootFunctionBody { Body = e } -> note e; embeddedExtentExprs e |> List.iter note
+                    | RootType (_, ty) -> irTypeExtentExprs ty |> List.iter note
+                    | _ -> ()
+                let unique =
+                    removed.Count = 7 && (removed |> Set.forall (fun id ->
+                        match definitions.TryGetValue id with true, 1 -> true | _ -> false))
+                    && (modul.Bindings |> List.filter (fun b -> b.Id = host.Id) |> List.length) = 1
+                    && (modul.Functions |> List.map _.Id |> Set.ofList |> Set.count) = modul.Functions.Length
+                let metadata (input: IRArrayType) (output: IRArrayType) =
+                    let stored (at: IRArrayType) = at.Identity.IsNone && (at.IndexTypes |> List.forall (fun ix -> ix.Kind = SDimension))
+                    let known at =
+                        match arrayOf 2 (mkArrayLike at) with
+                        | Some a -> sameAxes a input && stored a
+                        | None -> false
+                    sameAxes input output && stored input && stored output
+                    && (match arrayOf 2 privateType with Some a -> sameAxes a output && stored a | _ -> false)
+                    && info.KernelInputRanks = [0] && info.KernelOutputRank = 0 && info.KernelTDims.IsEmpty
+                    && info.SDimsPerArray = [2] && info.SharedIndexTypes.IsEmpty && not info.IsCoIteration
+                    && info.SymcomStates = [SCNeither; SCNeither] && info.TriangularLevels = [false; false]
+                    && info.SpeedupFactor = 1L && info.ReynoldsSpeedup = 1L && not info.HasReynolds
+                    && info.ArrayTypes.Length = 1 && known info.ArrayTypes.Head && info.Identities.Length = 1
+                    && (match info.Loop with
+                        | IRMethodFor mf ->
+                            mf.TotalSDims = 2 && mf.SDimsPerArray = [2] && mf.SharedIndexTypes.IsEmpty
+                            && mf.Identities = info.Identities && mf.ArrayTypes.Length = 1 && known mf.ArrayTypes.Head
+                            && (match mf.Arrays with [IRVar (id, ty)] -> id = sid && ty = sty | _ -> false)
+                        | _ -> false)
+                    && lows = [IRLit (IRLitInt 0L); IRLit (IRLitInt 0L)]
+                    && List.forall2
+                        (fun (hi: IRExpr) (ix: IRIndexType) ->
+                            IRTotality.evalInt hi = IRTotality.evalInt ix.Extent
+                            && (match hi with IRLit (IRLitInt _) -> true | _ -> false))
+                        highs output.IndexTypes
+                let signature arity (cl: IRCallable) reference =
+                    cl.Params.Length = arity && cl.RetType = scalar64
+                    && (cl.Params |> List.mapi (fun i p -> p.Index = i && p.Type = scalar64) |> List.forall id)
+                    && (cl.Params |> List.map _.VarId |> Set.ofList |> Set.count) = arity
+                    && typeOf reference = mkFuncArrow (List.replicate arity scalar64) scalar64
+                let rec serialGraph seen (cl: IRCallable) =
+                    if seen |> Set.contains cl.Id then true
+                    else
+                        let scalar = function IRTScalar (ETFloat64 | ETInt64 | ETBool) -> true | _ -> false
+                        unstrategized cl && cl.ArityParam.IsNone && not cl.IsCommutative
+                        && cl.CommGroups.IsEmpty && cl.AntisymGroups.IsEmpty && cl.SignParities.IsEmpty
+                        && scalar cl.RetType && (cl.Params |> List.mapi (fun i p -> p.Index = i && scalar p.Type) |> List.forall id)
+                        && (cl.Params |> List.map _.VarId |> Set.ofList |> Set.count) = cl.Params.Length
+                        && not cl.Effects.Mutates && not cl.Effects.EmitsOutput && not cl.Effects.ReadsExternal && not cl.Effects.MayFail
+                        && not (lifetimeBarrier cl.Body)
+                        && (collectVarRefsIR cl.Body |> Set.toList |> List.choose (fun id -> Map.tryFind id funcs)
+                            |> List.forall (serialGraph (seen.Add cl.Id)))
+                let unsafeRoots =
+                    roots |> List.exists (function
+                        | RootBindingValue b -> badPayload (if b.Id = host.Id then residual else b.Value)
+                        | RootSideOperand (_, _, e) | RootFunctionBody { Body = e } -> badPayload e
+                        | RootType (_, ty) -> irTypeExtentExprs ty |> List.exists badPayload
+                        | _ -> false)
+                match arrayOf 2 sty, arrayOf 2 info.OutputType, resolve foldExpr,
+                      modul.Bindings |> List.tryFind (fun b -> b.Id = sid) with
+                | Some input, Some output, Some fold, Some source when source.Type = sty ->
+                    match storedArrayProof modul source, closedTotal map, closedTotal fold with
+                    | Ok (_, chain), Ok (), Ok () ->
+                        let owned = Set.union removed (chain |> List.map _.Id |> Set.ofList)
+                        let ownerIds = owned.Add host.Id
+                        let planned id =
+                            (HotRowTable.tryProducer id).IsSome || (HotRowTable.tryConsumer id).IsSome
+                            || (CellFoldTable.tryLoop id).IsSome || (CellFoldTable.tryFoldLet id).IsSome
+                            || (RecStepTable.tryLoop id).IsSome || (RecStepTable.tryStep id).IsSome
+                            || (EpilogueLegTable.tryProducer id).IsSome || (EpilogueLegTable.tryJoin id).IsSome
+                            || (CompactionTable.tryMask id).IsSome || (CompactionTable.tryCompound id).IsSome || (CompactionTable.tryFoldMap id).IsSome
+                            || (CompactRowTable.tryProducer id).IsSome || (CompactRowTable.tryConsumer id).IsSome
+                        let ownerConflict =
+                            (ownerIds |> Set.exists planned)
+                            || (PoolReuseTable.donors () |> Map.exists (fun a b -> ownerIds.Contains a || ownerIds.Contains b))
+                            || (PoolReuseTable.returnDonors () |> Map.exists (fun a b -> ownerIds.Contains a || ownerIds.Contains b))
+                            || (MemberHoistTable.all () |> List.exists (fun p -> ownerIds.Contains p.HostId || ownerIds.Contains p.SetId || not (Set.intersect ownerIds p.Kernels).IsEmpty))
+                        let hiddenExecution =
+                            (modul.SparseInits |> Map.exists (fun id _ -> removed.Contains id))
+                            || (modul.CompoundInits |> Map.exists (fun id _ -> removed.Contains id))
+                            || (modul.RandomInits |> Map.exists (fun id _ -> removed.Contains id))
+                            || (modul.ProviderReads |> Map.exists (fun id _ -> removed.Contains id))
+                            || (modul.ProviderWrites |> Map.exists (fun id _ -> removed.Contains id))
+                        let position id = modul.Bindings |> List.tryFindIndex (fun b -> b.Id = id)
+                        let dominates =
+                            match position sid, position host.Id with Some s, Some h -> s < h | _ -> false
+                        let sourceIdentity =
+                            match info.Identities with [AIDVariable name] -> name = source.Name | _ -> false
+                        if not (gateOn "BLADE_FUSION") || not (Blade.Toolchain.fpReproEnabled ()) then unchanged "requires FUSION and reproducible serial folding"
+                        elif not unique || not dominates then unchanged "nonunique local identities or source does not dominate"
+                        elif not (literalSeed seed) || typeOf seed <> scalar64 then unchanged "requires a literal Float64 seed"
+                        elif not (metadata input output && sourceIdentity && signature 1 map info.Kernel && signature 2 fold foldExpr) then
+                            unchanged "unsupported map/loop/fold metadata or index provenance"
+                        elif not (serialGraph Set.empty map && serialGraph Set.empty fold) then unchanged "a callable has effect/strategy metadata"
+                        elif not (Set.intersect owned foreign).IsEmpty || extraDemand then unchanged "additional local/source/foreign demand"
+                        elif unsafeRoots || (chain |> List.exists (fun b -> modul.ProviderReads.ContainsKey b.Id)) then unchanged "a source/payload may write or cross a lifetime/provider boundary"
+                        elif hiddenExecution || not (bindingSideOperands modul host.Id).IsEmpty || modul.ProviderReads.ContainsKey host.Id || modul.ProviderWrites.ContainsKey host.Id then unchanged "host/local execution side payload"
+                        elif ownerConflict || (Set.intersect removed modul.MutableArrayLets |> Set.exists ((<>) pid))
+                             || (modul.DerivedFuncOrigins |> Map.exists (fun a b -> removed.Contains a || removed.Contains b)) then unchanged "overlapping storage/identity owner"
+                        else
+                            removedFullPools.Add pid |> ignore
+                            decide Blade.Effects.Applied ["one private rank-2 mapped pool removed; stored source retained"; "one literal seed and original ascending scalar fold graph; complete residual/foreign/write census"]
+                            Some { host with Value = residual }
+                    | _ -> unchanged "source is not stored or callable graph is not closed pure/total"
+                | _ -> unchanged "requires stored rank-2 Float64 input and resolved scalar fold"
+            | _ -> unchanged "requires the exact unit-wrapped full-fold region and complete foreign census"
+        | _ -> None
+    let bindings = modul.Bindings |> List.map (fun b -> match fullFold b with Some full -> full | None -> rewrite b)
+    if minted.Count = 0 && removedFullPools.Count = 0 then modul
     else
         let byOrigin = minted |> Seq.groupBy snd |> Map.ofSeq
         { modul with
             Bindings = bindings
+            MutableArrayLets = Set.difference modul.MutableArrayLets (Set.ofSeq removedFullPools)
             Functions = modul.Functions |> List.collect (fun f ->
                 f :: (Map.tryFind f.Id byOrigin |> Option.map (Seq.map fst >> List.ofSeq) |> Option.defaultValue []))
             DerivedFuncOrigins = minted |> Seq.fold (fun m (f, origin) -> Map.add f.Id origin m) modul.DerivedFuncOrigins }

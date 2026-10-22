@@ -1,0 +1,10 @@
+// TEST: C06 census private rank2 mapped full scalar fold
+// One seed and one ascending row-major scalar graph; NOT a seeded row fold.
+type R = Idx<3>
+type C = Idx<3>
+let M: Array<Float64 like R, C> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]
+let total = reduce((method_for(M) <@> (lambda(v: Float64) -> v * v + 1.0)), lambda(a: Float64, b: Float64) -> a * 2.0 + b, 7.0, axes = 2)
+// Mapped row-major cells: 2,5,10,17,26,37,50,65,82.
+// Accumulators from seed7: 16,37,84,185,396,829,1708,3481,7044.
+// EXPECT: M = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]
+// EXPECT: total = 7044.0

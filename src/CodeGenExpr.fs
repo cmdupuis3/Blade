@@ -3024,9 +3024,24 @@ and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
             let a = $"__dc{varName}_a"
             let b = $"__dc{varName}_b"
             let zeroFill =
-                [ $"for (size_t __dcz0 = 0; __dcz0 < {nExpr}; __dcz0++)"
-                  $"    for (size_t __dcz1 = 0; __dcz1 < {nExpr}; __dcz1++)"
-                  $"        {varName}[__dcz0][__dcz1] = 0;" ]
+                // A sole static positive F64 group has exactly one strict
+                // pair (a,b) for every i<j. The unchanged scatter below writes
+                // both off-diagonal images once, so only the diagonal needs
+                // initialization. A stored name is not a fresh-ownership claim:
+                // the source remains read-only and the destination stays new.
+                let storedSource =
+                    match arrExpr with IRVar _ | IRParam _ -> true | _ -> false
+                let diagonalOnly =
+                    leadingN = 0 && not arrTy.IsVirtual && storedSource
+                    && arrTy.ElemType = IRTScalar ETFloat64
+                    && (literalExtentOfArray arrTy 0 |> Option.exists (fun n -> n > 0L))
+                if diagonalOnly then
+                    [ $"for (size_t __dcz0 = 0; __dcz0 < {nExpr}; __dcz0++)"
+                      $"    {varName}[__dcz0][__dcz0] = 0;" ]
+                else
+                    [ $"for (size_t __dcz0 = 0; __dcz0 < {nExpr}; __dcz0++)"
+                      $"    for (size_t __dcz1 = 0; __dcz1 < {nExpr}; __dcz1++)"
+                      $"        {varName}[__dcz0][__dcz1] = 0;" ]
             let loops =
                 [ $$"""for (size_t {{a}} = 0; {{a}} < {{nExpr}}; {{a}}++) {"""
                   $$"""    for (size_t {{b}} = 0; {{b}} + 1 < {{nExpr}} - {{a}}; {{b}}++) {"""

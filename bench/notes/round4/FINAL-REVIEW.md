@@ -1,0 +1,11 @@
+# Round 4 integration review
+
+Round 4 starts at master 361504b6 on codex/round4-peakmem. The original checkout and Claude's unfinished work are preserved. Sol/high implementation lanes handed off frozen checkpoints to one Luna/high runner; root reviewed source, emitted routes and recorded execution evidence. The user closed further kernel expansion at A05/B08/C06/D09. A06 and broader unimplemented PM/ST entries are deferred.
+
+Accepted changes cover ordinary scratch lifetime and LLVM return reuse, selection/partial-fold/transpose/sparse-terminal elimination, antisymmetric initialization, bounded Zarr addressing and explicit private-spool support. Measurement work includes pool accounting and diagnostic controls. These are bounded admissions with refusal controls, not a universal out-of-core policy or a measured whole-process peak-memory/bandwidth result. Spooling requires an explicit programmatic grant; default policy remains disabled.
+
+Per-card review and test reports retain initial failures, repairs, compiler/source identities, exact positive routes and unsupported checks. A05's ordinary early release uses existing typed ownership events; its six final strict runtime/sanitizer arms and actual LLVM payload instrumentation are accepted. B08 preserves positive-zero diagonals and paired antisymmetric scatter; its complete index-types category passes. D09-I2's 123 focused checks and actual emitted direct-row/fallback controls are accepted. C06 passed its corrected build,789 optimizer checks and28 strict native arms; source and emitted-route review are accepted. Its two minimal build repairs preserve semantics. All four final-wave cards are integrated through3275b886.
+
+Final combined validation is serialized in the integration checkout: fresh Release build; LLVM goldens including facts; standalone Zarr (excluded from the default suite); interpreter sql-reduce. After root accepts those results and closes C06, authorize exactly one full default suite, recording the exact revision before launch. A failed full run may be repaired with targeted checks only. The final result must name skips and distinguish source allocation removal from measured process memory.
+
+No full suite has launched at this checkpoint. This document is updated at closure; FINAL-tests.md will hold combined validation evidence.

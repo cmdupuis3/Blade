@@ -1674,7 +1674,242 @@ let internal certifyRank1WindowReads (cg: LoopNestCodeGen) (kind: string)
     | Some msg -> Error msg
     | None -> Ok { Kernel = cg.KernelExpr; Bindings = cg.Bindings; Reads = reads; Peels = peels }
 
-let private genLoopNestStreamedCore (windowReads: Rank1WindowReads option)
+/// Per-emission proof for exactly two plain scalar zip operands. Only this
+/// module constructs it; the segment owner consumes the same checked value.
+type internal Rank2BandPeels = private {
+    FinalCodeGen: LoopNestCodeGen
+    OuterNames: Map<int, string>
+    Sources: (IRId * string * ProviderReadSpec * string) list
+    CapacityRows: int64
+    Columns: int64
+    OuterPeels: (ElementBinding * string) list
+    FinalParams: Map<int, string>
+    Callees: (IRExpr * IRCallable) list
+}
+
+/// Nonadmission is an ordinary I1 fallback, never a new language refusal.
+/// Metadata is loaded for this compile-time check, not pinned as an immutable
+/// source version. The ordinary provider still loads/validates in its own path.
+let internal tryCertifyRank2BandPeels (info: ApplyInfo) (cg: LoopNestCodeGen)
+                                    (sources: (IRId * string * ProviderReadSpec * string) list)
+                                    (runs: int64 list) (names: Map<int, string>)
+                                    : Result<Rank2BandPeels, string> =
+    try
+        let require condition why = if not condition then invalidOp why
+        let f64 = IRTScalar ETFloat64
+        let literal = function IRLit (IRLitInt n) when n > 0L -> Some n | _ -> None
+        let plain (ix: IRIndexType) =
+            ix.Rank = 1 && ix.Kind = SDimension && ix.Symmetry = SymNone
+            && ix.IxKind = IxKPlain && ix.Dependencies.IsEmpty && ix.Tag.IsNone
+            && (literal ix.Extent).IsSome
+        let dense (at: IRArrayType) =
+            not at.IsVirtual && at.ElemType = f64 && at.IndexTypes.Length = 2
+            && (at.IndexTypes |> List.forall plain) && isFreeableDenseArrayType at
+        require (cg.MpiSlab && cg.Captures.IsEmpty && cg.KernelParams.Length = 2
+                 && cg.InputArrayNames.Length = 2 && cg.SpeedupFactor = 1L && cg.OutputSymmVec = [1; 2]
+                 && not cg.HasReynolds && not cg.IsAntisymmetric && not cg.OmpRequested
+                 && cg.FoldWrapper.IsNone && cg.FoldChunk.IsNone && cg.ShareDecl.IsNone
+                 && cg.RowEpilogue.IsNone && cg.FlatEpilogue.IsNone && cg.CompactRowEpilogue.IsNone
+                 && cg.FoldOmpDecline.IsNone)
+                "requires the final ordinary capture-free scalar zip renderer"
+        require (info.IsCoIteration && info.Arrays.Length = 2 && info.ArrayTypes.Length = 2
+                 && info.Identities.Length = 2 && info.SharedIndexTypes.Length = 2
+                 && info.KernelInputRanks = [0; 0] && info.KernelOutputRank = 0
+                 && info.KernelTDims.IsEmpty && info.SDimsPerArray = [2; 2]
+                 && info.SymcomStates = [SCNeither; SCNeither; SCNeither; SCNeither]
+                 && info.TriangularLevels = [false; false; false; false] && not info.HasReynolds
+                 && info.SpeedupFactor = 1L && info.ReynoldsSpeedup = 1L
+                 && info.OutputType = cg.OutputType)
+                "unsupported zip metadata"
+        match info.Loop with
+        | IRMethodFor loop ->
+            require (loop.Arrays = info.Arrays && loop.ArrayTypes = info.ArrayTypes
+                     && loop.Identities = info.Identities && loop.SDimsPerArray = [2; 2]
+                     && loop.TotalSDims = 4 && loop.SharedIndexTypes = info.SharedIndexTypes)
+                    "method_for payload differs from the zip"
+        | _ -> invalidOp "requires direct method_for zip provenance"
+        let output =
+            match cg.OutputType with
+            | ArrayElem at when dense at && at.Identity.IsNone
+                                && at.IndexTypes = info.SharedIndexTypes -> at
+            | _ -> invalidOp "requires the exact plain shared output axes"
+        let n = (literal output.IndexTypes.[0].Extent).Value
+        let m = (literal output.IndexTypes.[1].Extent).Value
+        // Conservative for supported 32/64-bit targets: bounds provider int
+        // narrowing, all padded chunk strides/bytes, size_t and ptrdiff_t,
+        // window/output cells and the retained owned output row skeleton.
+        let fitsBytes cells = cells > 0I && cells * 8I <= bigint System.Int32.MaxValue
+        require (fitsBytes (bigint n * bigint m) && fitsBytes (bigint n))
+                "shape/allocation exceeds conservative checked arithmetic"
+        require (sources.Length >= 1 && sources.Length <= 2
+                 && (sources |> List.map (fun (id, _, _, _) -> id) |> List.distinct).Length = sources.Length
+                 && (sources |> List.map (fun (_, vn, _, _) -> vn) |> List.distinct).Length = sources.Length)
+                "ambiguous source identities"
+        let mutable edge = None
+        for sourceIndex, (id, vn, spec, win) in List.indexed sources do
+            require (Map.tryFind id names = Some vn && vn <> cg.OutputName
+                     && win = $"{cg.OutputName}__win{sourceIndex}"
+                     && spec.Provider = "zarr" && spec.Streamed && not spec.AllowMissing
+                     && System.IO.Path.IsPathFullyQualified spec.FilePath
+                     && System.IO.Directory.Exists spec.FilePath
+                     && spec.Window.IsNone && spec.MaskName.IsNone && spec.MaskType.IsNone
+                     && dense spec.VarType && spec.VarType.IndexTypes = info.SharedIndexTypes)
+                    "source capability/type does not match the final zip"
+            let store = Blade.ZarrProvider.load spec.FilePath
+            let meta =
+                Blade.ZarrProvider.tryFindArray store spec.VarName
+                |> Option.defaultWith (fun () -> invalidOp "source metadata is absent")
+            require (store.Version = 2 && meta.Version = 2 && meta.Blade.IsNone
+                     && meta.Codec = Blade.ZarrProvider.CodecIdentity
+                     && meta.Dtype.Code = "f8" && meta.Dtype.ByteSize = 8
+                     && meta.Dtype.Elem = ETFloat64 && meta.Dtype.IsFloat
+                     && meta.Shape = [n; m] && meta.Chunks.Length = 2
+                     && (meta.Chunks |> List.forall (fun c -> c > 0L && c <= int64 System.Int32.MaxValue))
+                     && fitsBytes (meta.Chunks |> List.fold (fun a c -> a * bigint c) 1I))
+                    "requires representable local v2 identity Float64 chunks"
+            let k = meta.Chunks.Head
+            require (edge.IsNone || edge = Some k) "source chunk edges differ"
+            edge <- Some k
+        let k = edge.Value
+        let w = min n k
+        require (fitsBytes (bigint w * bigint m) && runs.Length >= 2 && runs.Head = 0L && List.last runs = n)
+                "invalid run capacity/endpoints"
+        for lo, hi in List.pairwise runs do
+            // No new boundary table or unchecked lo+K arithmetic.
+            require (lo >= 0L && lo < n && hi > lo && hi <= n
+                     && lo % k = 0L && bigint hi = min (bigint n) (bigint lo + bigint k))
+                    "run descriptor differs from the physical chunk grid"
+        let sourceForPosition pos =
+            match info.Arrays.[pos] with
+            | IRVar (id, ty) ->
+                let (_, vn, spec, win) =
+                    sources |> List.tryFind (fun (sid, _, _, _) -> sid = id)
+                    |> Option.defaultWith (fun () -> invalidOp "operand has no streamed source evidence")
+                require (ty = mkArrayLike spec.VarType && info.ArrayTypes.[pos] = spec.VarType
+                         && cg.InputArrayNames.[pos] = vn
+                         && info.Identities.[pos] = AIDVariable vn)
+                        "operand identity/type/name differs"
+                vn, win
+            | _ -> invalidOp "requires direct streamed operands"
+        let operands = [sourceForPosition 0; sourceForPosition 1]
+        require ((operands |> List.map fst |> List.distinct) = (sources |> List.map (fun (_, vn, _, _) -> vn)))
+                "ordered/deduplicated sources differ"
+        let outer, inner =
+            match cg.Bindings with
+            | [a; b] -> a, b
+            | _ -> invalidOp "requires exactly two final levels"
+        for level, binding in List.indexed cg.Bindings do
+            require (binding.Level = level && binding.Extent = output.IndexTypes.[level].Extent
+                     && binding.ExtentArrayRef = cg.InputArrayNames.Head && binding.ExtentDimRef = level
+                     && binding.BoundDependencies.IsEmpty && binding.StrictOffset = 0
+                     && binding.FusedRank.IsNone && not binding.IsParallel && binding.State = SCNeither
+                     && binding.Elements.Length = 2)
+                    "unsupported final bounds or extra peel sites"
+        require (outer.IndexName <> inner.IndexName && outer.IndexName <> "" && inner.IndexName <> "")
+                "ambiguous loop coordinates"
+        let restrictSites = restrictPeelSites cg.Bindings
+        let mutable peels = []
+        let mutable finalParams = Map.empty
+        for pos in 0..1 do
+            let p = cg.KernelParams.[pos]
+            let vn, win = operands.[pos]
+            require (p.Type = f64 && p.Index = pos
+                     && (cg.KernelParams |> List.filter (fun q -> q.VarId = p.VarId)).Length = 1
+                     && not (sources |> List.exists (fun (id, _, _, _) -> id = p.VarId)))
+                    "ambiguous/non-Float64 scalar parameter"
+            let site level (binding: LoopIndexBinding) =
+                let e = binding.Elements.[pos]
+                require (e.ArrayPosition = pos && e.ArrayName = vn && e.ParamName = p.Name
+                         && e.ParamVarId = p.VarId && e.ArrayRank = 2 && e.ArrayElemType = f64
+                         && e.RankComponent = level && e.DimIndex = level
+                         && e.Virtual = RealArray && e.SlotTag.IsNone)
+                        "final peel identity/provenance differs"
+                e
+            let a = site 0 outer
+            site 1 inner |> ignore
+            require (restrictSites.Contains (0, pos)) "outer row is not consumed by exactly one scalar successor"
+            peels <- peels @ [(a, win)]
+            finalParams <- Map.add p.VarId ($"{vn}__{outer.IndexName}__{inner.IndexName}") finalParams
+        let flags (f: IRCallable) =
+            not f.IsStatic && not f.IsArityPoly && f.ArityParam.IsNone && f.Parallelism.IsEmpty
+            && not f.IsOmpParallel && not f.IsCudaKernel && not f.IsMpiParallel
+            && not f.IsCommutative && f.CommGroups.IsEmpty && f.AntisymGroups.IsEmpty
+            && f.Captures.IsEmpty && f.RetType = f64
+            && (f.Params |> List.forall (fun p ->
+                p.Type = f64 && not (sources |> List.exists (fun (id, _, _, _) -> id = p.VarId))))
+            && (f.Params |> List.map (_.VarId) |> List.distinct).Length = f.Params.Length
+            && (f.Params |> List.map (_.Name) |> List.distinct).Length = f.Params.Length
+            && (f.Params |> List.mapi (fun i p -> p.Index = i) |> List.forall id)
+        let mutable callees = []
+        let rec body (params: IRParam list) (locals: Set<IRId>) (visiting: Set<IRId>) e =
+            let go = body params locals visiting
+            match e with
+            | IRLit (IRLitFloat _) -> true
+            | IRVar (id, ty) ->
+                ty = f64 && ((params |> List.exists (fun p -> p.VarId = id)) || locals.Contains id)
+                && not (sources |> List.exists (fun (sid, _, _, _) -> sid = id))
+            | IRParam (nm, i, ty) -> ty = f64 && (params |> List.exists (fun p -> p.Name = nm && p.Index = i))
+            | IRBinOp (IRElementwise, (IRAdd | IRSub | IRMul | IRDiv), a, b, _) ->
+                typeOf e = f64 && go a && go b
+            | IRUnaryOp (IRNeg, a) -> typeOf e = f64 && go a
+            | IRLet (id, value, rest) ->
+                not (locals.Contains id) && not (params |> List.exists (fun p -> p.VarId = id))
+                && not (sources |> List.exists (fun (sid, _, _, _) -> sid = id))
+                && typeOf e = f64 && go value && body params (locals.Add id) visiting rest
+            | IRApp (f, args, ret) when ret = f64 ->
+                match resolveCallable f with
+                | Some cl when flags cl && not (visiting.Contains cl.Id) && args.Length = cl.Params.Length ->
+                    let referenceMatches =
+                        match f with
+                        | IRVar (id, ty) -> id = cl.Id && ty = mkFuncArrow (cl.Params |> List.map (_.Type)) cl.RetType
+                        | _ -> false
+                    callees <- (f, cl) :: callees
+                    referenceMatches && (args |> List.forall go)
+                    && body cl.Params Set.empty (visiting.Add cl.Id) cl.Body
+                | _ -> false
+            | _ -> false
+        require (body cg.KernelParams Set.empty Set.empty cg.KernelExpr
+                 && (Blade.Optimize.embeddedExtentExprs cg.KernelExpr).IsEmpty)
+                "uncertified scalar body/capture/type payload"
+        match resolveKernel info.Kernel with
+        | Some rk ->
+            let referenceMatches =
+                match info.Kernel with
+                | IRVar (id, ty) -> id = rk.Callable.Id && ty = mkFuncArrow (cg.KernelParams |> List.map (_.Type)) f64
+                | _ -> false
+            require (flags rk.Callable && rk.Callable.Params = cg.KernelParams
+                     && referenceMatches && obj.ReferenceEquals(rk.Callable.Body, cg.KernelExpr))
+                    "kernel metadata/body differs from the final scalar renderer"
+            callees <- (info.Kernel, rk.Callable) :: callees
+        | None -> invalidOp "unresolved kernel"
+        Ok {
+            FinalCodeGen = cg
+            OuterNames = names
+            Sources = sources
+            CapacityRows = w
+            Columns = m
+            OuterPeels = peels
+            FinalParams = finalParams
+            Callees = callees
+        }
+    with ex -> Error ex.Message
+
+/// Checked owner contract: only the same ordered source windows/capacity can
+/// consume this certificate after its renderer succeeded.
+let internal rank2BandOwnsWindows (plan: Rank2BandPeels)
+                                 (outputName: string) (sources: (string * ProviderReadSpec) list) (capacity: int64) =
+    outputName = plan.FinalCodeGen.OutputName && capacity = plan.CapacityRows
+    && sources = (plan.Sources |> List.map (fun (_, vn, spec, _) -> vn, spec))
+    && (plan.Sources |> List.mapi (fun k (_, _, _, win) -> win = $"{outputName}__win{k}") |> List.forall id)
+
+let private rank2BandStillValid (plan: Rank2BandPeels) (cg: LoopNestCodeGen) (names: Map<int, string>)
+                                (streamed: Map<string, ProviderReadSpec>) =
+    obj.ReferenceEquals(plan.FinalCodeGen, cg) && plan.OuterNames = names
+    && (plan.Sources |> List.forall (fun (id, vn, _, _) -> Map.tryFind id names = Some vn && not (streamed.ContainsKey vn)))
+    && (plan.Callees |> List.forall (fun (expr, cl) ->
+        match resolveCallable expr with Some now -> obj.ReferenceEquals(now, cl) | None -> false))
+
+let private genLoopNestStreamedCore (windowReads: Rank1WindowReads option) (bandPeels: Rank2BandPeels option)
                                    (streamed: Map<string, ProviderReadSpec>) (codeGen: LoopNestCodeGen)
                                    (outerNames: Map<int, string>) (indent: int) : string list =
     match windowReads with
@@ -2270,7 +2505,13 @@ let private genLoopNestStreamedCore (windowReads: Rank1WindowReads option)
                     | Some (_, win) ->
                         let newName = $"{currentName}__{binding.IndexName}"
                         ($"{(elemTypeToCpp elem.ArrayElemType)} {newName} = {win}[static_cast<size_t>(static_cast<int64_t>({binding.IndexName}) - static_cast<int64_t>(__w_lo))];", newName)
-                    | None -> genElementBindingPeel rawRow binding elem currentName
+                    | None ->
+                        match bandPeels |> Option.bind (fun p -> p.OuterPeels |> List.tryFind (fun (e, _) -> obj.ReferenceEquals(e, elem))) with
+                        | Some (_, win) ->
+                            let newName = $"{currentName}__{binding.IndexName}"
+                            let columns = bandPeels.Value.Columns
+                            ($"double* BLADE_RESTRICT {newName} = {win} + static_cast<size_t>(static_cast<int64_t>({binding.IndexName}) - static_cast<int64_t>(__w_lo)) * {columns}UL;", newName)
+                        | None -> genElementBindingPeel rawRow binding elem currentName
                 if Map.tryFind newName declaredNames <> Some code then
                     lines <- lines @ [ind depth + code]
                 declaredNames <- Map.add newName code declaredNames
@@ -2282,6 +2523,10 @@ let private genLoopNestStreamedCore (windowReads: Rank1WindowReads option)
                 | RealArray ->
                     paramFinalNames <- Map.add elem.ParamVarId newName paramFinalNames
     
+    match bandPeels with
+    | Some p when paramFinalNames <> p.FinalParams ->
+        invalidOp "rank-two band certificate did not consume every final scalar peel"
+    | _ -> ()
     // Build name map for kernel body from final peeled names
     // Start from outer scope, then overlay kernel params (kernel params take priority)
     let nameMap = paramFinalNames |> Map.fold (fun acc k v -> Map.add k v acc) outerNames
@@ -2615,12 +2860,21 @@ let private genLoopNestStreamedCore (windowReads: Rank1WindowReads option)
 /// site goes through here; only genApplyCombinator's provider-aware paths
 /// use genLoopNestStreamed directly.
 let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: LoopNestCodeGen) (outerNames: Map<int, string>) (indent: int) : string list =
-    genLoopNestStreamedCore None streamed codeGen outerNames indent
+    genLoopNestStreamedCore None None streamed codeGen outerNames indent
 
 /// Only the segment caller that certified the final body/peels supplies this.
 let internal genLoopNestWindowed (plan: Rank1WindowReads) (streamed: Map<string, ProviderReadSpec>)
                                 (codeGen: LoopNestCodeGen) (outerNames: Map<int, string>) (indent: int) : string list =
-    genLoopNestStreamedCore (Some plan) streamed codeGen outerNames indent
+    genLoopNestStreamedCore (Some plan) None streamed codeGen outerNames indent
+
+/// Stale proof is rejected before entering the mutating renderer. Callers may
+/// then render the ordinary I1 route with all source owners still present.
+let internal tryGenLoopNestRank2Band (plan: Rank2BandPeels) (streamed: Map<string, ProviderReadSpec>)
+                                   (codeGen: LoopNestCodeGen) (outerNames: Map<int, string>) (indent: int)
+                                   : Result<string list, string> =
+    if not (rank2BandStillValid plan codeGen outerNames streamed) then
+        Error "stale final rank-two band certificate"
+    else Ok (genLoopNestStreamedCore None (Some plan) streamed codeGen outerNames indent)
 
 let genLoopNest (codeGen: LoopNestCodeGen) (outerNames: Map<int, string>) (indent: int) : string list =
     genLoopNestStreamed Map.empty codeGen outerNames indent

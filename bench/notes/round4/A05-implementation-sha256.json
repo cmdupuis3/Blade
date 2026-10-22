@@ -1,0 +1,109 @@
+{
+  "card": "A05",
+  "scope": "one ordinary static rank-one Float64 different-extent early-release schedule; existing typed event semantics",
+  "base_commit": "f0373cb30c6acc37705126eb8adc5589f40fe211",
+  "execution": "none-by-coder; runner attempt3 build failed; minimal repair unbuilt; new tests unrun",
+  "full_suite_launches": 0,
+  "files": [
+    {
+      "path": "Blade.fsproj",
+      "sha256": "0cacdc780d1bb82950cc6f84a19dafdd46ce4f8e5a7587571e6682fdc6360dc9",
+      "bytes": 56400
+    },
+    {
+      "path": "src/EarlyPoolRelease.fs",
+      "sha256": "2f11bd292af4bf4962afda87f1e3596f6072f42c719b3db6041d048ef55fef0d",
+      "bytes": 18281
+    },
+    {
+      "path": "src/Optimize.fs",
+      "sha256": "3b72ee3e74ba9ffc692b0c11d434579817fcd82599147026983ea904cbb0deec",
+      "bytes": 544231
+    },
+    {
+      "path": "src/Lowering.fs",
+      "sha256": "2a879ab4bcae71777c989555195f5710c129adb6a5eb2817bda42c9fdca65451",
+      "bytes": 193490
+    },
+    {
+      "path": "tests/EarlyPoolReleaseTests.fs",
+      "sha256": "b50448fc6219ba426d69ef5b3c5e146cb4dcf94231c53bc468f2c74c119a7ce2",
+      "bytes": 23077
+    },
+    {
+      "path": "tests/OptimizeTests.fs",
+      "sha256": "b6914ad5cd395fe986ea9ed462bd84ba7e6a28446df8608ea465c0dc565fd0bb",
+      "bytes": 475497
+    },
+    {
+      "path": "tests/LlvmTests.fs",
+      "sha256": "77a9d9032ef71d4c07c4445b6b0a77c75be843c283f24decf92d1733f1621af0",
+      "bytes": 260601
+    },
+    {
+      "path": "tests/corpus/memfree/034_different_extent_early_release.blade",
+      "sha256": "ef7ab770d7e814267c44d2c9bc17aa1e5e86c999d3af5ee337b982256824edce",
+      "bytes": 1757
+    },
+    {
+      "path": "tests/corpus/memfree/035_different_extent_failure_order.blade",
+      "sha256": "45c87b848aa766afac1a4a87c060b0c0acaf885657097df1ca2df53b7738dbbf",
+      "bytes": 718
+    },
+    {
+      "path": "bench/notes/round4/A05-handoff.md",
+      "sha256": "3976f5c1d683b302dda5b170bd2ef4bf2a210725a45650cd5573fa5d9d194bc2",
+      "bytes": 11762
+    },
+    {
+      "path": "bench/notes/round4/A05-implementation-request.md",
+      "sha256": "e21f455b7e3f020021b9ff4d4e322850f145483092a9e7e0b8184fabf42b1022",
+      "bytes": 6040
+    }
+  ],
+  "unchanged_context": [
+    {
+      "path": "src/EmitLlvm.fs",
+      "sha256": "b8dbf9d8bc6e21b8b6bbce0208635ae70652962ecfff316bb41516fb6c75cd18"
+    },
+    {
+      "path": "src/CodeGen.fs",
+      "sha256": "531d38d9bd44101c67edb8d00555a8397a15ca189b1b8ea39d89f08b5e98c4aa"
+    },
+    {
+      "path": "src/CodeGenLoopNest.fs",
+      "sha256": "ce9359328d4c3207eae24c27f2b77be9698b76c87a35159ac7b00f36186b3e03"
+    },
+    {
+      "path": "src/IR.fs",
+      "sha256": "90fcf321a3a019f2ee75c519dca44b9c1127881271d509fb054212db0ebd6216"
+    },
+    {
+      "path": "src/IRValidate.fs",
+      "sha256": "896de8dc464ff649145766db6a2f51adc6fcb762f6608411bbcfe982ce24e11a"
+    },
+    {
+      "path": "src/Interp/Core.fs",
+      "sha256": "7b8cfe17728abe61c03d297c1235426dc3edbc5ae66ad7253e039cfe292fd25e"
+    },
+    {
+      "path": "src/Types.fs",
+      "sha256": "115118d1315a6bc8a85dc4057563a8d1671e347e58c925e38fd9c7647694dad8"
+    },
+    {
+      "path": "src/Build.fs",
+      "sha256": "0a1c4fcf18bcbf9cb3b4d916ba560d30487f23d197bd5f635aa1528ea60decd9"
+    }
+  ],
+  "repair_base_commit": "b6200465566393dc8eac0b2b2a35c24565d1a91e",
+  "failure_history": [
+    {
+      "stage": "sole-runner Release attempt3 after environmental cache repair",
+      "log": "bench/.build/A05-implementation-runner/attempt3/build.stdout.log",
+      "sha256": "d0df4df64ffd6946f24f5c659bfffbddfe2c2992872df53ae43dc43c1dfc4c8b",
+      "result": "4 NU1900 warnings; 3 F# errors; facts/optimize not run",
+      "repair": "IRUngroupGrid source axes from second field; qualify existing IRPrint.exprAttrs; no admission or test changes",
+      "validation": "repair unbuilt/unexecuted by coder; sole runner retry pending"
+    }
+  ]
+}

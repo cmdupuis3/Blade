@@ -1,0 +1,12 @@
+// TEST: PM07 Antisymmetric Empty Scatter N1
+// A strict rank-two group with N=1 has no payload cells. Its dense image
+// still owns one cell, and that diagonal must be initialized to positive zero.
+let A = [1.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
+let anti = L <@> reynolds(g, Antisymmetric) |> compute
+let result = decompact(anti, 0)
+let diagonal_positive = 1.0 / result(0, 0) > 0.0
+// EXPECT: anti = [[]]
+// EXPECT: result = [[0.0]]
+// EXPECT: diagonal_positive = true

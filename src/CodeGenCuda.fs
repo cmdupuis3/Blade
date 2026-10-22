@@ -3738,22 +3738,19 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                 | Error why -> windowRefusal why
                 | Ok plan -> Some (plan, int64 maxWin)
             | _ -> None
-        // Rank-two sources still have a row-table alias. Certified rank-one
+        // Rank-two nonadmissions retain the I1 row-table alias; the final I2
+        // certificate may later replace all of their row peels. Rank-one
         // sources have only local loads and never reach a source-name renderer.
         let ctx =
             match segmentRun with
             | Some (_, _, _, _, _, _, sources, _) ->
                 sources |> List.fold (fun c (vn, _) -> { c with StreamedArrays = Map.remove vn c.StreamedArrays }) ctx
             | None -> ctx
-        // Only rank-two row aliases render by source name. Rank-one sentinels
-        // remain active: all of their legitimate loads use the certificate.
-        // Disposed when this block ends.
-        use _runAliasMask =
-            maskStreamedNames
-                (match segmentRun with
-                 | Some (_, _, _, _, _, _, sources, _) ->
-                     sources |> List.choose (fun (vn, spec) -> if spec.VarType.IndexTypes.Length = 2 then Some vn else None)
-                 | None -> [])
+        // A rank-two band alias is borrowed storage for the ordinary element
+        // peels, which render their names directly. Keep streamed-value guards
+        // active: a captured global read or whole-array return cannot use this
+        // reused window as the original full source. Rank-one loads use their
+        // certificate; neither route grants arbitrary source-value access.
         // STREAMED provider inputs (`alias.stream`): no materialized arrays
         // exist -- the nest inlines per-fiber reads at the S/T boundary.
         // Pre-allocate one destination buffer per streamed fiber binding (a
@@ -4067,7 +4064,37 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
             // lets the detector PROVE per-operand storage-class and extent
             // agreement rather than assume it (Blade's unify does not compare
             // extents).
+            // I2 is a final-renderer certificate, not an early source-shape
+            // hint. Preflight completes before any table/alias is omitted.
+            let rank2Rendered =
+                match segmentRun with
+                | Some (SegmentTable.ExplicitRuns offsets, 0L, cMax, 0L, 0L, 0L, sources, "elementwise")
+                    when not mpiRequested && tilePlan.IsNone && rank1WindowPlan.IsNone
+                         && (sources |> List.forall (fun (_, s) ->
+                             s.VarType.IndexTypes.Length = 2
+                             && s.VarType.IndexTypes.Head.Extent = IRLit (IRLitInt cMax)
+                             && (Blade.ProviderRegistry.tryFind s.Provider
+                                 |> Option.exists (fun p -> p.GenStreamRows.IsSome)))) ->
+                    let evidence =
+                        sources |> List.mapi (fun k (vn, spec) ->
+                            let ids = ctx.VarNames |> Map.toList |> List.choose (fun (id, nm) -> if nm = vn then Some id else None)
+                            match ids with
+                            | [id] when Map.tryFind id ctx.ProviderReads = Some spec -> Some (id, vn, spec, $"{name}__win{k}")
+                            | _ -> None)
+                    if evidence |> List.exists Option.isNone then None
+                    else
+                        match tryCertifyRank2BandPeels info codeGen (evidence |> List.choose id) offsets tempCtx.VarNames with
+                        | Error _ -> None // ordinary I1 tables and sentinels
+                        | Ok plan ->
+                            match tryGenLoopNestRank2Band plan streamedMap codeGen tempCtx.VarNames tempCtx.Indent with
+                            | Error _ -> None // stale proof: no renderer mutation
+                            | Ok lines -> Some (plan, lines)
+                | _ -> None
+            let rank2BandPlan = rank2Rendered |> Option.map fst
             let loopCode =
+                match rank2Rendered with
+                | Some (_, lines) -> lines
+                | None ->
                 // a segment run loop owns the outer bounds: neither the BLAS
                 // rewrite nor the flat collapse honours them
                 match (if segmentRun.IsSome || tilePlan.IsSome then None
@@ -4259,6 +4286,13 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                                         |> List.map (fun (lo, hi) -> (min hi cMax) - (max lo cMin) + (rHi - rLo))
                                         |> List.fold max 1L
                                     | SegmentTable.UniformRuns _ -> windowRefusal "uniform cursor lacks a rank-one read certificate"
+                            let directRows =
+                                match rank2BandPlan with
+                                | Some plan ->
+                                    if not (rank2BandOwnsWindows plan name sources maxWin) then
+                                        invalidOp "rank-two renderer/window-owner certificate disagreement"
+                                    true
+                                | None -> false
                             // scratch names are per OUTPUT and per source: two
                             // consumers may share one source, one zip may hold two
                             let runs = $"{name}__runs"
@@ -4293,11 +4327,11 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                                     let rows = $"{name}__rows{k}"
                                     let extTable = extents |> List.map (fun e -> $"{e}UL") |> String.concat ", "
                                     let decl =
-                                        (if rank = 2 then [ $"{ind}size_t {ext}[{rank}] = {{ {extTable} }};" ] else [])
+                                        (if rank = 2 && not directRows then [ $"{ind}size_t {ext}[{rank}] = {{ {extTable} }};" ] else [])
                                         @ [ $"{ind}{elemCpp}* {win} = new {elemCpp}[{maxWin * trailing}];" ]
-                                        @ (if rank = 2 then [ $"{ind}{elemCpp}** {rows} = new {elemCpp}*[{n}]();" ] else [])
+                                        @ (if rank = 2 && not directRows then [ $"{ind}{elemCpp}** {rows} = new {elemCpp}*[{n}]();" ] else [])
                                     let alias =
-                                        if rank = 1 then
+                                        if rank = 1 || directRows then
                                             // All uses were certified before rendering; loads
                                             // use an in-allocation local offset, never a
                                             // synthetic globally-addressed Array wrapper.
@@ -4310,7 +4344,7 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                                         (genRows spec.FilePath spec.VarName vn win "__w_lo" "__w_hi" spec.VarType
                                          |> List.map (fun s -> ind + "    " + s))
                                         @ alias
-                                    (decl, read, [ $"{ind}delete[] {win};" ] @ (if rank = 2 then [ $"{ind}delete[] {rows};" ] else [])))
+                                    (decl, read, [ $"{ind}delete[] {win};" ] @ (if rank = 2 && not directRows then [ $"{ind}delete[] {rows};" ] else [])))
                             let what = sources |> List.map (fun (_, s) -> $"'{s.VarName}'") |> String.concat ", "
                             let lastN = sources |> List.map (fun (_, s) -> match s.VarType.IndexTypes.[0].Extent with IRLit (IRLitInt n) -> n | _ -> runExtent) |> List.min
                             [ (if kind = "stencil"

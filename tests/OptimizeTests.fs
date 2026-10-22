@@ -2538,6 +2538,178 @@ let private sparseWildcardInterpreterWriteSources () =
                     :: (pins |> List.map (fun pin -> pin, output.Contains pin))
                 checkAll name (run.Stdout + "\n" + run.Stderr) (sprintf "interpreter exit=%d" run.ExitCode) checks) ]
 
+let private fullFoldSource file = System.IO.File.ReadAllText ("tests/corpus/sql-reduce/" + file)
+let private fullFoldPrimary () = fullFoldSource "054_private_full_map_terminal.blade"
+let private fullFoldRoute (m: IR.IRModule) =
+    m.Bindings |> List.exists (fun b -> b.Name = "total" && (match b.Value with IR.IRReduceCompute _ -> true | _ -> false))
+
+let private fullFoldEmission () =
+    withTransposeRows (fun () ->
+        let name = "full_map_fold_cpp_and_real_llvm_elide_private_matrix"
+        let emit gate =
+            withGate "BLADE_FUSION" gate (fun () ->
+                match lower (fullFoldPrimary ()) with
+                | Error e -> Error e
+                | Ok ir ->
+                    let cpp = fst (CodeGen.genSelfContainedProgramFromIR ir name)
+                    EmitLlvm.tryEmitProgramNamed name ir |> Result.map (fun ll -> ir.Modules.Head, cpp, ll))
+        match emit "on", emit "0", cppOfSource name (fullFoldSource "056_full_fold_demanded_intermediates.blade") with
+        | Ok (md, cpp, ll), Ok (old, off, oldLl), Ok demanded ->
+            let rank2 (s: string) = System.Text.RegularExpressions.Regex.Matches(s, @"allocate<typename promote<double, 2>::type, nullptr>").Count
+            let layouts (s: string) =
+                [ for m in System.Text.RegularExpressions.Regex.Matches(s, @"call ptr @blade_alloc_cells\(i64 (\d+), i64 (\d+)\)") ->
+                    m.Groups.[1].Value + "x" + m.Groups.[2].Value ]
+            let info = $"CPP matrices ON/OFF/demanded={rank2 cpp}/{rank2 off}/{rank2 demanded}; LLVM ON/OFF={layouts ll}/{layouts oldLl}"
+            let endAt = ll.IndexOf("  call void @blade_print_completed", System.StringComparison.Ordinal)
+            let evaluation = if endAt < 0 then "" else ll.Substring(0, endAt)
+            let input = System.Text.RegularExpressions.Regex.Match(evaluation, @"(%r\d+) = call ptr @blade_alloc_cells\(i64 9, i64 8\)")
+            let sourceRead =
+                input.Success && System.Text.RegularExpressions.Regex.IsMatch(evaluation,
+                    @"getelementptr inbounds double, ptr " + System.Text.RegularExpressions.Regex.Escape(input.Groups.[1].Value) + @", i64 %r\d+")
+            let totalLabel = System.Text.RegularExpressions.Regex.Match(ll, @"(@\.blade\.str\.\d+) = [^\r\n]* c""total\\00""")
+            let totalPrint =
+                totalLabel.Success && ll.Contains("call void @blade_print_f64(ptr " + totalLabel.Groups.[1].Value + ", double ")
+            checkAll name ll info
+                [ ("actual IRC route", fullFoldRoute md && not (fullFoldRoute old));
+                  ("required M only: " + info, rank2 cpp = 1 && rank2 off = 2 && rank2 demanded = 2);
+                  ("actual LLVM allocation cells: " + info, layouts ll = ["9x8"] && layouts oldLl = ["9x8"; "9x8"]);
+                  ("source read participates in evaluation", sourceRead && evaluation.Contains "fmul double" && evaluation.Contains "fadd double");
+                  ("one literal scalar seed", System.Text.RegularExpressions.Regex.Matches(cpp, @"double total = 7\.0;").Count = 1);
+                  ("required original input and scalar print", cpp.Contains "\"M = [\"" && cpp.Contains "\"total = \"" && ll.Contains "M = [" && totalPrint);
+                  ("demanded producer and rows print", demanded.Contains "\"P = [\"" && demanded.Contains "\"rows = [\"");
+                  ("no new reassociation licence", not (ll.Contains "fadd reassoc") && not (ll.Contains "fmul reassoc")) ]
+        | a, b, c -> resultLine Fail name ($"ON={a}; OFF={b}; demanded={c}"); false)
+
+let private fullFoldProofs () =
+    withTransposeRows (fun () ->
+        match withGate "BLADE_FUSION" "0" (fun () -> lower (fullFoldPrimary ())) with
+        | Error e -> resultLine Fail "full_map_fold_proof_setup" e; [false]
+        | Ok ir ->
+            let m = ir.Modules.Head
+            let host = m.Bindings |> List.find (fun b -> b.Name = "total")
+            let source = m.Bindings |> List.find (fun b -> b.Name = "M")
+            let builder () =
+                let b = IR.IRBuilder ()
+                b.EnsureAtLeast 1000000
+                b
+            let run foreign (md: IR.IRModule) = Optimize.optimizeModuleWithForeignCensus (builder ()) md.Functions foreign md
+            let change value = { m with Bindings = m.Bindings |> List.map (fun b -> if b.Id = host.Id then { b with Value = value } else b) }
+            let hostMap f = change (IR.mapIRExpr f host.Value)
+            match host.Value with
+            | IR.IRLet (pid, IR.IRApplyCombinator info, IR.IRLet (acc, _, _)) ->
+                let map = match info.Kernel with IR.IRVar (id, _) -> m.Functions |> List.find (fun f -> f.Id = id) | _ -> failwith "map"
+                let fold = m.Functions |> List.find (fun f -> f.Id <> map.Id)
+                let alterFunction id f = { m with Functions = m.Functions |> List.map (fun c -> if c.Id = id then f c else c) }
+                let alterInfo f = hostMap (function IR.IRApplyCombinator i -> IR.IRApplyCombinator (f i) | e -> e)
+                let scalar = Blade.Types.IRTScalar Blade.Types.ETFloat64
+                let lit = IR.IRLit (IR.IRLitFloat 0.0)
+                let local = IR.IRVar (pid, info.OutputType)
+                let extra = { host with Id = 995001; Name = "extra" }
+                let writer =
+                    { host with
+                        Id = 995002
+                        Name = "writer"
+                        Type = Blade.Types.IRTUnit
+                        Value = IR.IRAssign (IR.IRIndex (IR.IRVar (source.Id, source.Type), [IR.IRLit (IR.IRLitInt 0L); IR.IRLit (IR.IRLitInt 0L)], None), lit) }
+                let hiddenIx =
+                    match info.OutputType with IR.ArrayElem a -> { a.IndexTypes.Head with Extent = local } | _ -> failwith "output"
+                let hiddenType = IR.mkArrayArrow [hiddenIx] scalar None
+                let observer =
+                    { map with
+                        Id = 995003
+                        Name = "unused"
+                        Body = lit
+                        Params = [{ map.Params.Head with VarId = 995004; Type = hiddenType }] }
+                let unknown = IR.IRApp (IR.IRVar (995099, IR.mkFuncArrow [scalar] scalar), [IR.IRVar (map.Params.Head.VarId, scalar)], scalar)
+                let cases: (string * IR.IRModule) list =
+                    [ ("shared_expression_other_host", { m with Bindings = m.Bindings @ [extra] });
+                      ("local_alias", { m with Bindings = m.Bindings @ [{ extra with Value = local; Type = info.OutputType }] });
+                      ("source_writer", { m with Bindings = m.Bindings @ [writer] });
+                      ("host_execution_payload", { m with SparseInits = m.SparseInits.Add(host.Id, lit) });
+                      ("local_execution_payload", { m with SparseInits = m.SparseInits.Add(pid, lit) });
+                      ("unused_parameter_extent", { m with Functions = m.Functions @ [observer] });
+                      ("unused_return_extent", { m with Functions = m.Functions @ [{ observer with Params = []; RetType = hiddenType }] });
+                      ("declared_type_extent", { m with Types = m.Types @ [IR.IRTDIndexType ("Hidden", hiddenIx)] });
+                      ("unknown_map", alterFunction map.Id (fun f -> { f with Body = unknown }));
+                      ("failing_map", alterFunction map.Id (fun f -> { f with Body = IR.IRUnaryOp (IR.IRMath "lgamma", IR.IRVar (f.Params.Head.VarId, scalar)) }));
+                      ("capture", alterFunction fold.Id (fun f -> { f with Captures = [{ Id = pid; Name = "hidden"; Type = info.OutputType; IsMutable = false }] }));
+                      ("parallel_fold", alterFunction fold.Id (fun f -> { f with IsOmpParallel = true; Parallelism = [(0, 1)] }));
+                      ("duplicate_unit_identity", hostMap (function IR.IRLet (_, (IR.IRAssign _ as v), b) -> IR.IRLet (acc, v, b) | e -> e));
+                      ("extra_final_read", hostMap (function IR.IRVar (id, ty) when id = acc -> IR.IRBinOp (IR.IRElementwise, IR.IRAdd, IR.IRVar (id, ty), lit, IR.SrcLoc.Nowhere) | e -> e));
+                      ("nonunit_continuation", hostMap (function IR.IRLit IR.IRLitUnit -> lit | e -> e));
+                      ("nonzero_lower_bound", hostMap (function IR.IRForRange (id, _, hi, b) -> IR.IRForRange (id, IR.IRLit (IR.IRLitInt 1L), hi, b) | e -> e));
+                      ("wrong_upper_bound", hostMap (function IR.IRForRange (id, lo, _, b) -> IR.IRForRange (id, lo, IR.IRLit (IR.IRLitInt 2L), b) | e -> e));
+                      ("swapped_equal_extent_axes", hostMap (function IR.IRIndex (IR.IRVar (id, ty), [a;b], identity) when id = pid -> IR.IRIndex (IR.IRVar (id, ty), [b;a], identity) | e -> e));
+                      ("reversed_fold_arguments", hostMap (function IR.IRApp (k, [a;b], ty) -> IR.IRApp (k, [b;a], ty) | e -> e));
+                      ("nonliteral_seed", hostMap (function IR.IRLet (id, _, b) when id = acc -> IR.IRLet (id, unknown, b) | e -> e));
+                      ("hidden_apply_metadata", alterInfo (fun i -> { i with SharedIndexTypes = [hiddenIx] }));
+                      ("hidden_method_metadata", alterInfo (fun i ->
+                          let loop =
+                              match i.Loop with
+                              | IR.IRMethodFor mf -> IR.IRMethodFor { mf with SharedIndexTypes = [hiddenIx] }
+                              | x -> x
+                          { i with Loop = loop }));
+                      ("malformed_mutable_identity", { m with MutableArrayLets = m.MutableArrayLets.Add acc }) ]
+                let changed = run Set.empty m
+                let actual = changed.Bindings |> List.find (fun b -> b.Id = host.Id)
+                let distinct =
+                    match source.Type, info.OutputType with
+                    | IR.ArrayElem input, IR.ArrayElem output ->
+                        (input.IndexTypes |> List.map _.Id) <> (output.IndexTypes |> List.map _.Id)
+                        && List.forall2 IRTotality.sameIndex input.IndexTypes output.IndexTypes
+                    | _ -> false
+                let positive =
+                    checkAll "full_map_fold_actual_unit_wrappers_and_complete_census" "" "known early shape; same index provenance despite distinct numeric IDs"
+                        [ ("new actual IRC route", fullFoldRoute changed);
+                          ("host identity unchanged and no callable minted", actual.Id = host.Id && actual.Name = host.Name && actual.Type = host.Type && changed.Functions.Length = m.Functions.Length);
+                          ("only eliminated p ownership entry removed", m.MutableArrayLets.Contains pid && changed.MutableArrayLets = m.MutableArrayLets.Remove pid);
+                          ("distinct axis IDs admitted by sameIndex", distinct);
+                          ("unknown summaries structurally proved", map.Effects.Unknown && fold.Effects.Unknown);
+                          ("missing complete census refuses", not (fullFoldRoute (Optimize.optimizeModule (builder ()) m.Functions m)));
+                          ("foreign local demand refuses", not (fullFoldRoute (run (Set.singleton pid) m)));
+                          ("foreign source/version demand refuses", not (fullFoldRoute (run (Set.singleton source.Id) m)));
+                          ("default non-repro path refuses", withGate "BLADE_FP_REASSOC" null (fun () -> withGate "BLADE_FP_REPRO" null (fun () -> not (fullFoldRoute (run Set.empty m)))));
+                          ("per-call fusion off refuses", withGate "BLADE_FUSION" "0" (fun () -> not (fullFoldRoute (run Set.empty m)))) ]
+                let refusals =
+                    cases |> List.map (fun (suffix, md) ->
+                        let name = "full_map_fold_declines_" + suffix
+                        if not (fullFoldRoute (run Set.empty md)) then
+                            resultLine Pass name "exact proof declines"
+                            true
+                        else
+                            resultLine Fail name "unsupported region was rewritten"
+                            false)
+                positive :: refusals
+            | _ -> resultLine Fail "full_map_fold_proof_setup" "observed early topology changed"; [false])
+
+let private fullFoldValues () =
+    let cases =
+        [ ("primary", "054_private_full_map_terminal.blade", ["total = 7044.0"], false);
+          ("nested", "055_nested_partial_full_fold.blade", ["total = 1206.0"], false);
+          ("demanded", "056_full_fold_demanded_intermediates.blade", ["rows = [84.0, 213.0, 468.0]"; "flat = 7044.0"; "nested = 1206.0"], false);
+          ("association", "057_full_fold_fp_parenthesization.blade", ["flat = 1.0"; "nested = 0.0"], false);
+          ("failure_priority", "058_full_fold_producer_failure.blade", ["late_c06_producer"], true);
+          ("empty", "059_full_fold_empty_axes.blade", ["full_R0 = 7.0"; "full_C0 = 7.0"; "nested_R0 = -3.0"; "nested_C0 = 25.0"; "negative_zero = -0.0"], false);
+          ("already_covered_rowwise", "060_full_fold_rowwise_control.blade", ["total = 1206.0"], false) ]
+    [ for suffix, file, pins, aborts in cases do
+        yield withTransposeRows (fun () ->
+            let name = "full_map_fold_independent_on_off_" + suffix
+            let run gate =
+                withGate "BLADE_FUSION" gate (fun () ->
+                    match lower (fullFoldSource file) with
+                    | Error e -> Error e
+                    | Ok ir -> Ok (Blade.Interp.Run.runProgram ir name Blade.Interp.Value.defaultLimits))
+            match run "on", run "0" with
+            | Ok a, Ok b ->
+                let text = if aborts then a.Stderr else a.Stdout
+                let pin =
+                    (if aborts then a.ExitCode <> 0 && a.ExitCode <> 125 && not (a.Stderr.Contains "early_c06_fold") else a.ExitCode = 0)
+                    && (pins |> List.forall (fun p -> text.Contains p))
+                checkAll name (a.Stdout + a.Stderr) (sprintf "ON/OFF status=%d/%d" a.ExitCode b.ExitCode)
+                    [ ("independent strict value/failure pin", pin);
+                      ("optimizer OFF independent comparison", a.ExitCode = b.ExitCode && a.Stdout = b.Stdout && a.Stderr = b.Stderr) ]
+            | a, b -> resultLine Fail name ($"ON={a}; OFF={b}"); false) ]
+
 let private selectedTerminalLlvm () =
     let name = "selected_terminal_llvm_real_route_no_selection_allocations"
     withSelectedTerminal (fun () ->
@@ -7042,6 +7214,96 @@ let private memberHoistForcedEmission () =
                 resultLine Fail name $"missing `{needle}`"
                 yield false ]
 
+// PM07's local materializer boundary. These raw-IR probes deliberately cover
+// non-admitted geometry without making unsupported front-end programs runnable.
+// The corpus checks values independently; these pins distinguish the source
+// route and preserve the existing fallback/allocation/paired-scatter contract.
+module private Pm07Decompact =
+    open Blade.IR
+    open Blade.Types
+
+    let cases () : bool list =
+        let lit n = IRLit (IRLitInt n)
+        let group : IRIndexType =
+            { Id = 9701; Rank = 2; Extent = lit 5L; Symmetry = SymAntisymmetric
+              Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
+        let baseArr : IRArrayType =
+            { ElemType = IRTScalar ETFloat64; IndexTypes = [group]; IsVirtual = false; Identity = None }
+        let withExtent e = { baseArr with IndexTypes = [{ group with Extent = e }] }
+        let unitF64 = IRTUnitAnnotated (IRTScalar ETFloat64, unitOfDims (Map.ofList ["meters", 1]))
+        let rows =
+            [ "n5", baseArr, "var", "double", true
+              "n1_empty_scatter", withExtent (lit 1L), "var", "double", true
+              "stored_parameter", baseArr, "param", "double", true
+              "float32_fallback", { baseArr with ElemType = IRTScalar ETFloat32 }, "var", "float", false
+              "integer_fallback", { baseArr with ElemType = IRTScalar ETInt64 }, "var", "int64_t", false
+              "units_fallback", { baseArr with ElemType = unitF64 }, "var", "double", false
+              "dynamic_fallback", withExtent (IRVar (9702, IRTScalar ETInt64)), "var", "double", false
+              "zero_extent_fallback", withExtent (lit 0L), "var", "double", false
+              "virtual_fallback", { baseArr with IsVirtual = true }, "var", "double", false
+              "leading_group_fallback", { baseArr with IndexTypes = [{ group with Id = 9703; Rank = 1; Symmetry = SymNone }; group] }, "var", "double", false
+              "expression_fallback", baseArr, "conditional", "double", false ]
+        [ for (tag, arr, sourceKind, elem, diagonal) in rows do
+            let name = "pm07_decompact_" + tag
+            try
+                let ty = mkArrayLike arr
+                let v = IRVar (9700, ty)
+                let source =
+                    match sourceKind with
+                    | "param" -> IRParam ("pm07_src", 0, ty)
+                    | "conditional" -> IRIf (IRLit (IRLitBool true), v, v)
+                    | _ -> v
+                match Blade.CodeGenExpr.materializeDecompactForm [] (Map.ofList [9700, "pm07_src"]) "pm07_out" elem source 0 with
+                | None -> resultLine Fail name "the pre-existing rank-two materializer refused"; yield false
+                | Some (lines, allocs) ->
+                    let cpp = String.concat "\n" lines
+                    let diagonalStore = "pm07_out[__dcz0][__dcz0] = 0;"
+                    let fullStore = "pm07_out[__dcz0][__dcz1] = 0;"
+                    let initAt = cpp.IndexOf (if diagonal then diagonalStore else fullStore)
+                    let scatterAt = cpp.IndexOf "for (size_t __dcpm07_out_a = 0;"
+                    let copyAt = cpp.IndexOf "pm07_out[__dci][__dcj] = "
+                    let negateAt = cpp.IndexOf "pm07_out[__dcj][__dci] = -("
+                    let ownership =
+                        match allocs with
+                        | [Blade.CodeGenState.MatPool (n, e, 2, "nullptr", None, owned)] ->
+                            let expectedOwned = if tag = "dynamic_fallback" then Some "pm07_out_extents" else None
+                            n = "pm07_out" && e = elem && owned = expectedOwned
+                        | _ -> false
+                    let checks =
+                        [ "only admitted cases select diagonal initialization", cpp.Contains diagonalStore = diagonal
+                          "exact full-grid fallback retained", cpp.Contains fullStore = not diagonal
+                          "inner zero loop absent only on admitted cases", cpp.Contains "for (size_t __dcz1 = 0;" = not diagonal
+                          "initialization precedes original paired scatter", initAt >= 0 && scatterAt > initAt && copyAt > scatterAt && negateAt > copyAt
+                          "strict-pair bounds/order retained", cpp.Contains "__dcpm07_out_b + 1 < " && cpp.Contains " - __dcpm07_out_a; __dcpm07_out_b++)" && cpp.Contains "size_t __dci = __dcpm07_out_a; size_t __dcj = __dcpm07_out_a + __dcpm07_out_b + 1;"
+                          "stored payload copy and unary negation retained", sourceKind = "conditional" || (cpp.Contains "pm07_out[__dci][__dcj] = pm07_src[__dcpm07_out_a][__dcpm07_out_b];" && cpp.Contains "pm07_out[__dcj][__dci] = -(pm07_src[__dcpm07_out_a][__dcpm07_out_b]);")
+                          "destination allocation and ownership retained", cpp.Contains ($"allocate<typename promote<{elem}, 2>::type, nullptr>(pm07_out_extents)") && ownership ]
+                    let bad = checks |> List.filter (snd >> not) |> List.map fst
+                    let ok = bad.IsEmpty
+                    resultLine (if ok then Pass else Fail) name (if ok then "initialization route, strict-pair order and destination ownership" else String.concat "; " bad)
+                    yield ok
+            with ex -> resultLine Fail name ex.Message; yield false ]
+
+    // Exercise the front-end/forcing route as well as the local guard probes.
+    // Both full output roots are explicitly selected; value pins are separate.
+    let sourceCases () : bool list =
+        [ for (title, diagonal) in
+              [ "PM07 Antisymmetric Complete Write N5", true
+                "PM07 Antisymmetric Empty Scatter N1", true
+                "PM07 Antisymmetric Signed Zero Scatter", true
+                "PM07 Antisymmetric Integer Fallback", false ] do
+            let name = "pm07_whole_program_" + title
+            match Blade.Tests.Corpus.category "index-types" |> List.tryFind (fun (n, _) -> n = title) with
+            | None -> resultLine Fail name "missing required corpus witness"; yield false
+            | Some (_, src) ->
+                match withGate "BLADE_PRINT" "anti,result" (fun () -> cppOfSource name src) with
+                | Error e -> resultLine Fail name e; yield false
+                | Ok cpp ->
+                    let diag = cpp.Contains "result[__dcz0][__dcz0] = 0;"
+                    let grid = cpp.Contains "result[__dcz0][__dcz1] = 0;"
+                    let ok = diag = diagonal && grid = not diagonal && cpp.Contains "\"anti = [\"" && cpp.Contains "\"result = [\""
+                    resultLine (if ok then Pass else Fail) name (if ok then "correct initialization route with anti and full result print paths" else "wrong initialization or missing required full output")
+                    yield ok ]
+
 let runOptimizeTests () =
     printHeader "Blade-DSL: Optimization Layer Tests"
     let results =
@@ -7146,6 +7408,7 @@ let runOptimizeTests () =
           yield! eplLifetimeValidatorCases ()
           eplLifetimeKernelRefusal ()
           eplLifetimeBarrierIsNotWrite ()
+          yield! EarlyPoolReleaseTests.optimizerCases ()
           eplThrowingCalleeLlvm ()
           withGate "BLADE_OMP_THREADS" "1" (fun () ->
             eplNoRouteKeepsCall "epilogue_legs_nonliteral_epilogue_seed_keeps_call" eplNonliteralSeedSrc [ ("BLADE_FP_REPRO", "1") ] "seed is not a literal")
@@ -7190,6 +7453,9 @@ let runOptimizeTests () =
           yield! sparseWildcardValuesAndRefusals ()
           yield! sparseWildcardInterpreterWrites ()
           yield! sparseWildcardInterpreterWriteSources ()
+          fullFoldEmission ()
+          yield! fullFoldProofs ()
+          yield! fullFoldValues ()
           // Compaction fusion v2 (round 3 item T4: the gather at the mask
           // site, positions elided under the demand census).
           compactionV2DefaultElides ()
@@ -7337,6 +7603,8 @@ let runOptimizeTests () =
         @ siblingCases ()
         @ [ parallelEmissionIsolated (); declSpanResetIsolated () ]
         @ validatorPins ()
+        @ Pm07Decompact.cases ()
+        @ Pm07Decompact.sourceCases ()
     let passed = results |> List.filter id |> List.length
     let failed = results.Length - passed
     printFooter "Optimization Layer" [$"{passed} passed"; $"{failed} failed"]

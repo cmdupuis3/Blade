@@ -1,0 +1,16 @@
+// TEST: C06 census late producer failure before early full fold failure (aborts)
+type R = Idx<3>
+type C = Idx<3>
+let M: Array<Float64 like R, C> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]
+function late_c06_producer(v: Float64) -> Float64 = {
+    let denom = Int64(floor(v - 9.0))
+    if v == 9.0 then Float64(1 / denom) else v * v + 1.0
+}
+function early_c06_fold(a: Float64, b: Float64) -> Float64 = {
+    let denom = Int64(floor(b - b))
+    a + Float64(1 / denom)
+}
+let total = reduce((method_for(M) <@> late_c06_producer), early_c06_fold, 7.0, axes = 2)
+// Canonical full producer materialization fails at the final9 before any fold.
+// A new interleaved route must refuse this case rather than report early_fold.
+// ABORT: late_c06_producer

@@ -1,6 +1,6 @@
-# A05 different-extent last-use source census
+# A05 different-extent last-use validation
 
-All authorized A05 source-census stages completed on the root-approved source snapshot. The positive default-schedule emissions show the 7-cell producer is retained until after the independent 11-cell result fill. Both fixed controls were also captured. The complete census is now ready for root review; no generated program was compiled or run.
+The primary gate, six affected categories, and six approved raw-route emissions completed on the frozen A05 source snapshot. Raw artifacts preserve the separate C++ and LLVM emissions and planner decisions. No generated program was compiled or run in the raw-route stage; the categories used their own bounded harness runs.
 
 - Source/compiler checkout: `a-lifetimes`, production commit `0f3c5cdb2e7b35afc54bc5603cf12f6ec4849320`, docs/census commit `f0373cb30c6acc37705126eb8adc5589f40fe211`.
 - A05 manifest SHA-256 `2FA64790BBB4D611B917EC27428362540754CD53736FF5FD041735241A77C438`; all 6 bundle files and 10 source anchors matched. Probe SHA-256 `A497EB3CB1AD4FB6F3EF07DF9F1FE7C0FC8D9C4614E0B8B3DBC6C5FBEF686CAD`; positive input SHA-256 `2AF2C26BBC1CB460E50D86873C98F45F5194B1BF2431F75217BDAA0988EC1320`.
@@ -59,3 +59,68 @@ A fresh build was then run with the existing package cache and failed-source tol
 - Attempt 3 private `TEMP`/`TMP`: `a-lifetimes/bench/.build/A05-implementation-runner/attempt3/tmp`. [Build stdout](../../../../../../.round4-worktrees/a-lifetimes/bench/.build/A05-implementation-runner/attempt3/build.stdout.log), SHA-256 `D0DF4DF64FFD6946F24F5C659BFFFBDDFE2C2992872DF53AE43DC43C1DFC4C8B`; [stderr](../../../../../../.round4-worktrees/a-lifetimes/bench/.build/A05-implementation-runner/attempt3/build.stderr.log), SHA-256 `DB0EBDF4EFD7A10E8211391256A94146CF1390FE2A8D6FF66558BC9ED0682670`; [provenance](../../../../../../.round4-worktrees/a-lifetimes/bench/.build/A05-implementation-runner/attempt3/build.provenance.txt), SHA-256 `7BD0AFB4D6C43FE56D3FED972858FA6ACD9070BA131BDB274BDA0338E40A2676`.
 
 A05 remains stopped at the required build gate. No `llvm facts`, `optimize`, broader category, generated program, or full-suite run occurred.
+## Repaired implementation primary gate
+
+The repaired source freeze at `a-lifetimes` HEAD `b9df5a9bb23b116c66e17155927f70412b100efa` passed the authorized primary gate. All 19 entries in `A05-implementation-sha256.json` matched; manifest SHA-256 `C14BD8A74B41B1311BEEEA33153D5D7B08B6F700B66D8AF2994E9AEC868CA3B0`.
+
+- Fresh Release build command: `dotnet build Blade.fsproj -c Release -p:RestoreIgnoreFailedSources=true`. Restore used existing `C:\Users\cdupu\.nuget\packages`; .NET SDK `10.0.400`; exit 0, 4 NU1900 warnings from the unreachable vulnerability feed, 0 errors. Build stdout [log](../../../../../../.round4-worktrees/a-lifetimes/bench/.build/A05-implementation-runner/attempt4/build.stdout.log), SHA-256 `95971DD729DB9388236F8A803BF536933FEC5A81CA6A7B1FB27012EA26E00EE4`; stderr [log](../../../../../../.round4-worktrees/a-lifetimes/bench/.build/A05-implementation-runner/attempt4/build.stderr.log), SHA-256 `DB0EBDF4EFD7A10E8211391256A94146CF1390FE2A8D6FF66558BC9ED0682670`; [provenance](../../../../../../.round4-worktrees/a-lifetimes/bench/.build/A05-implementation-runner/attempt4/build.provenance.txt), SHA-256 `2772C9768D561FE0A1ACCA415D7AE5DB62E258F3BF0179684886CF7EC7C85B19`.
+- Fresh `Blade.dll` SHA-256 `57C3733526F9C9F740A2BF5AFE429E027B0FF2511A9F6AB202A2D0F95500E5BC`; `Blade.exe` SHA-256 `1ECAD9DDC5B3DBCE225A6398D0809A4716C6F391ED3ED703C7AE23C8A176F5BD`.
+- `Blade.exe test llvm facts`: exit 0, 152 passed, 0 failed, 0 skipped. [stdout](../../../../../../.round4-worktrees/a-lifetimes/bench/.build/A05-implementation-runner/attempt4/llvm-facts.stdout.log), SHA-256 `2F6D83B383462000C656747EBFD8A342C9A5957CA95A73B480722FFE7B91EEB3`; stderr empty. [provenance](../../../../../../.round4-worktrees/a-lifetimes/bench/.build/A05-implementation-runner/attempt4/llvm-facts.provenance.txt), SHA-256 `26021B05662C4D7C43E1C7A9DC3C234647C947D9EE750612866AEF7DD9A487E6`.
+- `Blade.exe test optimize`: exit 0, 730 passed, 0 failed; no internal SKIP markers were present. [stdout](../../../../../../.round4-worktrees/a-lifetimes/bench/.build/A05-implementation-runner/attempt4/optimize.stdout.log), SHA-256 `01CAB637144F607174351E74923478101939C6916FFE3DA57D3CCC16598C1BCC`; stderr empty. [provenance](../../../../../../.round4-worktrees/a-lifetimes/bench/.build/A05-implementation-runner/attempt4/optimize.provenance.txt), SHA-256 `D5ECA3244B793A570E0B117E12BF4D66426DD36D9728CE19BBC9F8DBA34F2B7A`.
+
+Earlier A05 primary build attempts are retained above with their original DNS, wrapper-setup, and compiler diagnostics. No A05 gate beyond LLVM facts and optimize was run; no full suite, benchmark, or generated-program execution occurred in this primary stage.
+
+### Stage 4: affected regression categories
+
+The same fresh A05 compiler was used for the six root-authorized categories, in order, from the a-lifetimes checkout root. Every process exited 0. Full output, stderr, and per-invocation environment/source/binary provenance are under `C:\Users\cdupu\Documents\GitHub\Blade\.round4-worktrees\a-lifetimes\bench\.build\A05-followon-runner`.
+
+| Category | Result | Skip census |
+|---|---|---|
+| `test memfree` | 34 passed, 0 failed | 0 |
+| `test interp memfree` | 35 passed, 0 failed | 0; includes provider-reads Zarr differential |
+| `test llvm memfree` | 24 passed, 0 failed | 10 explicit unsupported-lane refusals: 4 sparse-index initializers; 2 whole-module-array rebinding cases; one each for IRSort and IRStack in array position, module `POS` not a stored scalar/static array, and rank-2 compound initializer |
+| `test llvm goldens` | Compare Rules 23/0, Emission Pins 3/0, Fact Layer 152/0, Simplex Agreement 19/0 | 0 |
+| `test sibling-folds` | 40 passed, 0 failed | 0 |
+| `test cell-epilogue` | 87 passed, 0 failed | 0 |
+
+The four golden sub-blocks were read directly from the full log; no golden files were regenerated. Links: [memfree stdout](../../../../../../.round4-worktrees/a-lifetimes/bench/.build/A05-followon-runner/01-test-memfree.stdout.log), [interpreter stdout](../../../../../../.round4-worktrees/a-lifetimes/bench/.build/A05-followon-runner/02-test-interp-memfree.stdout.log), [LLVM memfree stdout](../../../../../../.round4-worktrees/a-lifetimes/bench/.build/A05-followon-runner/03-test-llvm-memfree.stdout.log), [LLVM goldens stdout](../../../../../../.round4-worktrees/a-lifetimes/bench/.build/A05-followon-runner/04-test-llvm-goldens.stdout.log), [sibling-folds stdout](../../../../../../.round4-worktrees/a-lifetimes/bench/.build/A05-followon-runner/05-test-sibling-folds.stdout.log), and [cell-epilogue stdout](../../../../../../.round4-worktrees/a-lifetimes/bench/.build/A05-followon-runner/06-test-cell-epilogue.stdout.log). Each has adjacent stderr and provenance. The category harnesses report that they ignore caller ambient strict-emission pins and set their own controls; this is preserved in the logs.
+
+### Stage 5: fixed raw-route emissions
+
+The reviewed adapter and manifest were verified before execution: `adapter.fsx` SHA-256 `D2847B111D41E8704DDA782B4414222CD7AF4560C2A5FB11AEB6A19DCD71F71F`; `manifest.json` SHA-256 `44AF72EC2BE81980444A820430033F0BE04687DA7625743DA816A750226914FB`. The four original inputs matched their frozen hashes. All six FSI processes loaded DLL `57C3733526F9C9F740A2BF5AFE429E027B0FF2511A9F6AB202A2D0F95500E5BC`, exited 0, lowered/validated once, then saved C++ followed by direct LLVM from the same IR. Every arm recorded unchanged IR and donation tables after both emitters and empty settled C++ refusals.
+
+| Arm | Early-release decision | C++ SHA-256 | LLVM SHA-256 |
+|---|---|---|---|
+| `034-on` | Applied to owned producer `v15`, after scalar snapshots and before independent return allocation | `726F4442257D0B3C19BF4759C87E7E0BCE27A0F4A3004B9496D1A7FE6C5FD824` | `4584496FD64713647D9CE9765673A0CB2363B3E65C6251C6FC03EED7D2BF66D4` |
+| `034-off` | Declined because explicitly disabled | `3AE0F013C357B39FCEF399D0844FD9B05DCA937D1D9DD207583FD59BD9677C8A` | `C343108BA58B9CB97A39EAC9EF924A638097B39810A8BBDC2FC7113535BEC48F` |
+| `caller-on` | No early-release decision: caller-owned `p` has no eligible local producer | `3C7BCDA4C8EB076D6AD0873A9FD7FB2E83A463E41B82F90BF549C399B591EC14` | `6D90D8560FCBE7F7104ED159540B17F905A34943909B006E41D56F2EBBE62A6E` |
+| `later-on` | No early-release decision; pool reuse declined with two candidates and 144 estimated live payload bytes | `69ED0FFB4793DA46E863C597BD801D1FB42BCEC277E26D24D845E84AC6DBCC89` | `D1FA004EFA28B3A29FF1EF356B3269F37B769032BE865694D426E47DDBAA9D14` |
+| `035-on` | Declined: unsupported observation, alias/deferred reader, failure, or extra allocation | `AC169DDD44C0F4623F955457874E8D03BAF990E5898A9709D34006D44C9B337D` | `73F86D1C416342CCD300CD4892320AA9F29C28A82B99A9F304722EB1E9425F0E` |
+| `035-off` | Same refusal as gate on | `AC169DDD44C0F4623F955457874E8D03BAF990E5898A9709D34006D44C9B337D` | `73F86D1C416342CCD300CD4892320AA9F29C28A82B99A9F304722EB1E9425F0E` |
+
+POOL_REUSE was 1 in both gate settings; the toggled control was POOL_EARLY_RELEASE. PRINT stayed unset, preserving every original demand. Raw arm directories, full IR, decision/owner snapshots, emitted text, per-process stdout/stderr and provenance are under [the A05 raw-route artifact root](../../../../../../.round4-worktrees/a-lifetimes/bench/.build/A05-followon-runner/raw-route).
+
+One runner-only post-run assertion mistakenly expected an explicit decline record for `caller-on`. Its FSI process had already exited 0, saved C++/LLVM, and reported all four immutability invariants true. The lower-decision log correctly has no early-release entry because caller-owned `p` is not an eligible local pool. The saved artifact was retained and not rerun; this is a corrected classification of completed evidence, not a compiler or adapter failure.
+
+These category and raw-emission stages make no memory-peak, RSS, native-runtime, or performance claim. Separate runtime/sanitizer review remains outside this checkpoint.
+
+### Strict 034 gate-off runtime attempt 1 (runner setup only)
+
+The first one-test C++ harness wrapper exited 1 during C++ compilation, before any generated program ran. It called `Runner.runFullTest` directly but omitted the category runner's `CodeGen.deployRuntimeHeaders outputDir` setup; consequently the generated source could not find `nested_array_utilities.hpp`. Two following FSI wrapper attempts also stopped before running a program: one had a script newline parse error, and explicit header deployment looked under the FSI SDK base directory for `cpp/blade_portability.hpp`. These setup failures are retained under `a-lifetimes/bench/.build/A05-final-runner`; none counts as a runtime arm. Root approved using the ordinary CLI path with the same source/environment and a fresh private output location.
+
+### Stage 6: strict focused runtime and ASan checks
+
+All executions reused the accepted A05 compiler (`Blade.dll` SHA-256 `57C3733526F9C9F740A2BF5AFE429E027B0FF2511A9F6AB202A2D0F95500E5BC`; `Blade.exe` SHA-256 `1ECAD9DDC5B3DBCE225A6398D0809A4716C6F391ED3ED703C7AE23C8A176F5BD`) and original fixture SHA-256 `EF7AB770D7E814267C44D2C9BC17AA1E5E86C999D3AF5EE337B982256824EDCE`. The two strict, unsanitized early-release-off runs and all four sanitizer runs used `BLADE_POOL_REUSE=1`, explicit gate 0 or 1, `FP_REPRO=1`, `FP_CONTRACT=off`, BLAS off, OMP single-threaded, PRINT unset, executable/tile caches off, private TEMP/TMP and full output. Each run was followed by the existing EXPECT parser; all six captured outputs checked all 12 pins.
+
+| Arm | Exit | Runtime evidence | Emitted/linked artifact hashes |
+|---|---:|---|---|
+| `034-off-cpp-cli` | 0 | 12/12 EXPECT pins | C++ `228144D2837F710FE9B469648302FB7C943E356BDF7F19E33AD89E8D30BF4A89`; executable `06E590C9D5A3E5291CCCBAA158D02A6BF8E09B5E1BACB3BCB2E2B8EAC28CE5A2` |
+| `034-off-llvm-cli` | 0 | Direct LLVM route, 12/12 pins | LLVM `4B215C2EBC40A1601CE46A9169D42F4D585EF1F060CAD75D06346F3EDEB9803F`; executable `A6614AD882FBF5D364838717C1E56C4AB159E28F34D4BCAAAF315109AA8AD762` |
+| `034-asan-cpp-on` | 0 | `BLADE-MEMCHECK ... asan=1`; 12/12 pins | C++ `FE29F75FFCE1521DE82D38EDE5DA6733E7709284252C877FB45B0B790FD5070E`; executable `F8BD34E6B5E20573786A46AAC459A616AD8C6B1E2BAF06184907E635B1B4C0DB` |
+| `034-asan-cpp-off` | 0 | `BLADE-MEMCHECK ... asan=1`; 12/12 pins | C++ `28C4185388A239B6A0A8DC7362E7428EC47F15375456C68E1AAF0DF8C91445B6`; executable `40A87069C002856DE34439F4C9DE34F58CE0EFAAE540CFD65309149DD5761F8E` |
+| `034-asan-llvm-on` | 0 | Instrumented direct LLVM, 12/12 pins, empty ASan stderr | checked IR `469EAC9A3D8CFD4559BB1C6D948159BE7D6D5748C470BEE394F557DA464093F3`; object `CF57733737ED498FA8533677EAB0B529E277EE8CF6FA1B7F2D4E52016874D09D`; executable `6B06A2998125A459A96EE9D8900900223BEE25CF565ED8D4E1C611F4D38B6B7A` |
+| `034-asan-llvm-off` | 0 | Instrumented direct LLVM, 12/12 pins, empty ASan stderr | checked IR `B8B880726B41245872B6D50376D3100ACECCDC1747872141D9B273D80C49C48A`; object `0B348EC2CCDC00DB471D72E52B6E488BF91EF4AF5F0CAD8684D80D521D94D5ED`; executable `5ECD26DD29D2FF614541F3F6298636FC76AAFF1387A9414A701855674725059D` |
+
+For both LLVM arms, `sanitize_address` was inserted exactly once in the shared `#0` function-attribute group; reverse replacement reproduced the input bytes exactly. The originals match the Stage 5 emission hashes. Instrumented IR contains payload `__asan_load8` and `__asan_store8` calls around the producer and result accesses, plus checked array reads in `main` after both calls. The corresponding program objects have 5 load/2 store relocations in `bl_release_candidate_5` and 18 load/36 store relocations in `main`; the linked executables import `libclang_rt.asan_dynamic-x86_64.dll` (SHA-256 `08DBBAD40F2E5A928AEE9B46874E14409EB615CDB7A41CEB97D659D982F1964A`). See each arm's `payload-review.txt`, `program.asan.objdump.txt` and `exe-deps.txt` for the address-level evidence. In the actual C++ output, gate-on frees `__v15` at generated line 218 before the independent result allocation; gate-off retains cleanup after the result fill at line 230.
+
+Both C++ sanitizer outputs report `asan=1`, 302 allocation hooks and 247 free hooks, with 1,390 bytes/11 blocks outstanding while the required outputs remain live; this is not a leak verdict. LLVM ASan stderr was empty on both runs. Leak detection was explicitly disabled (`detect_leaks=0`); LSan remains unsupported on this Windows runtime. Complete commands, environments, tool/source/runtime hashes, output and error logs, pin-check logs and adapted IR are under [A05-final-runner artifacts](../../../../../../.round4-worktrees/a-lifetimes/bench/.build/A05-final-runner). No performance, retention-capacity, RSS or measured peak claim follows from these checks.

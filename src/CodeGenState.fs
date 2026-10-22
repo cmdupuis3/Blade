@@ -1630,12 +1630,12 @@ let takeCodegenRefusalDiagnostics (cppCode: string) : Blade.Diagnostics.Diagnost
 // at a call site). ProviderReadSpec.Streamed has always promised a loud
 // codegen error there instead; this is it.
 //
-// The renderers see only a name map, not the context, and `A` IS legitimately
-// declared in two scopes: a lifted free function receives a capture as a
-// parameter named `A`, and a segment run declares a window alias named `A`.
-// So the check is by the BINDING's id and emitted name, and those two scopes
-// mask the name while they emit (`maskStreamedNames`, restored on Dispose --
-// bind it with `use`).
+// The renderers see only a name map, not the context. A lifted free function
+// legitimately receives a capture parameter named `A`; that formal scope masks
+// the binding's id/emitted name while rendering (`maskStreamedNames`, restored
+// on Dispose -- bind it with `use`). Segment-window aliases are different:
+// ordinary element peels use them directly, but arbitrary source-value access
+// must retain this guard because a reused window is not the full source array.
 //
 // The refusal is DEFERRED: a render returns a sentinel identifier and queues
 // the message, and `settleStreamedValueLeaks` turns it into a BL7004 refusal
