@@ -126,7 +126,8 @@ type CodeGenContext = {
     /// Streamed provider reads whose prologue is already emitted, keyed by cpp name:
     /// a hit means inline a fiber read at the S/T boundary instead of peeling.
     StreamedArrays: Map<string, ProviderReadSpec>
-    /// Whole-PROGRAM demand census for the narrow rank-1 streamed reduction join:
+    /// Whole-PROGRAM demand census for certified terminals (the rank-1 streamed
+    /// reduction join and the stored sparse wildcard scalar fold):
     /// the sole assembler has merged every module. Low-level genModule callers
     /// have None. Context-owned; no ambient flag or omitted resident allocation.
     StreamTerminalModule: IRModule option

@@ -136,3 +136,17 @@ validation is queued, then exactly one separately reviewed prepared LLVM repro
 witness. D08 focused82/0/0 is accepted; standalone Zarr is queued. A05 early
 release and D09 rank-two window metadata are source-census proposals only.
 Full-suite launch count remains0.
+Current checkpoint: B07 is integrated27d31e74 after eight canonical and one
+prepared diagnostic/native audits and saved validators; performance remains
+unmeasured. D08 is integrated499e1781 after its focused gate and standalone
+Zarr601 outer checks (one optional NetCDF skip). A05's default-schedule census
+confirms actual late reclamation in both backends and its bounded common
+lifetime-event implementation is active. C05's snapshot failure was isolated
+to unsupported interpreter sparse assignment; the reviewed scalar-only repair
+hit a test-helper constructor build error and is receiving a test-only fix.
+D09's four-case rank-two streaming diagnostic bundle is being frozen. Three
+Sol/high coders are active; Luna is idle until the next reviewed freeze.
+Full-suite launch count remains0.
+Current checkpoint: C05-I1 primary757/0 is accepted at02672fd0; Luna runs its12 C++ native arms next. A05 common early-release implementation is undergoing final source review. B08's two antisymmetric N5/N1 baseline emissions are queued against the verified C05 compiler (unchanged materializer/runtime; unrelated reduce-binding difference reviewed). D09's four-case emission census confirms two full-height input row tables and exposes unsafe captured-global/whole-array uses of reused window storage. D09-I1 admission repair is being scoped before row-table removal. Full-suite launches remain0.
+
+Current checkpoint: C05 is integrated78c0e903 after all targeted gates. A05's first compiler pass exposed two source API/type errors; Sol/high A repairs them while Luna validates the frozen D09-I1 guard checkpoint7ff59a20. B08 diagonal initialization is frozena2b82e73 and queued. Sol/high C begins the C06 full-fold composition source census. Full-suite launch count remains0.

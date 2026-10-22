@@ -113,3 +113,30 @@ handoff7E9BF6BD12079B792220E5AAAD856E61BF7327CFDA660B5ACB16A062DD1CBA09,
 manifest285318A5429B9E54EF88A95C9971D6F67826371616496E36271967880CD61207.
 Authorize fresh Release then optimize in a preserved separate attempt; first
 unexpected failure stops. This is no runtime acceptance or broader dispatch.
+## C05-I1 interpreter prerequisite: static approval
+
+The bounded diagnostic confirmed both exact sources lower and validate, then exit125 with `interp-unsupported: IRAssign to non-array index target`; the ordinary function-expression host correctly remains outside C05 admission. Root read the raw diagnostic, existing Sparse::operator() lookup/store and sparsePartial copying behavior.
+
+Repair2429ece2 adds only a 27-line VSparse arm in Core.evalAssign. Full packed keys (including rank1 scalar-key sugar), exactly one sparse index slot and stride1 are admitted. The existing sparseLinearize enforces present keys/BL8006; writeCell receives a flat descriptor sharing the original Store. RHS, target and coordinates retain existing evaluation order. Keys, rank map, cardinality, index provenance and residual copying are unchanged. All trailing and partial writes remain unsupported.
+
+Static review removed an optional trailing-offset draft whose flat bounds could select another key, and corrected authored numeric tests that incorrectly used Value's physical equality. Final tests extract primitive values while independently checking Store/key/rank object identity. Twelve new focused checks cover alias/snapshot/evaluation order/missing keys/rank1/refusals and a dense control. Existing snapshot7423/after99 pins are unchanged.
+
+Root verified all eight manifest inputs. Core SHA2564D0B3255A4D00417002E823DB1A1CE731B0170D4F697AC6DEA70673B9CA24C21; tests55DEFA9E2F539F7DC9A5F08050B632C815FEBCAE06D3E17CE38AD68D2CFC7C92. Only a fresh build and optimizer category are dispatched first; native/category follow-ons require their result. No execution success is asserted by this review.
+I1 attempt1 build failed in the authored counter-expression test helper: IRBinOp needs explicit mode and location. Root reviewed the test-only correction99108a19, adding IRElementwise and SrcLoc.Nowhere to both operations; Core remains byte-identical. Updated tests CF1CB9A9B4D0B13B2C515741520C3FF10C60DD7F9E3B61DD47A79F450891C5DD and manifest15E4A8C4BB36E5CECFF3BEEA98AD791DAF5420C9E5FEB5649E0B62A7536EA190 are approved for one fresh build/optimizer retry. Failed build logs are preserved; no test ran in that attempt.
+## Primary gate accepted; native gate dispatched
+
+Root inspected the attempt3 raw log at C05-I1 checkpoint02672fd0:757 passed,0 failed, no skips. All12 new sparse assignment controls and the original snapshot7423/after99 case pass. The two fixture-only repairs preserve Core4D0B3255...24C21 and language mutation rules. Fresh DLL C7D8B405F8CAFE1561653D76C08F5B5A20EA509D19AA385A2CC91560616E0C11 is accepted for the next gate; this is not final C05 acceptance.
+
+Luna is dispatched for six unchanged corpus048–053 cases in C++ fusion on/off,12 native arms with strict FP and all outputs, plus actual emitted-source/plan evidence. Parent supplied-key order, snapshot isolation, negative-zero seed and original failure priority remain independent requirements. No LLVM route, broader categories or full suite is authorized by this step.
+
+## Native gate accepted; affected categories next
+
+Root inspected actual048/052/053 ON C++: the original stored sparse parent and length guard remain, ordinal traversal reads rank_to_tuple[r] and parent.data[r], fold arguments remain accumulator then cell, and no-match keeps the original negative-zero seed. OFF C++ performs the allocating dense gather and paired deallocation. Native outputs preserve ordered7423, all-match749283, negative zero, demanded residual[4,2,3], and snapshot7423/after99. Both051 modes fail at late_sparse_parent line6 before early_sparse_fold. Twelve valid native arms and twelve paired plan/emission captures pass; the two runner-only dispatch mistakes are preserved and excluded.
+
+This accepts the native gate, not final integration. Same-DLL SQL-reduce, interpreter sql-reduce and opt-diff sql-reduce are queued after B08's two emission captures. No rebuild, full suite, benchmark, LLVM route or broad memory claim is authorized by this step.
+
+The first SQL category reported52 passed/1 failed because051's TEST name omitted the load-bearing (aborts) suffix. Root read Corpus.parseBladeFile and Runner's probe classifier, then reviewed the header-only repair6cf111ce. Program/pin bytes after the header are identical (body SHA2FC061E3131E98ACC2BBD00112510AD72C71B0611DAD6EEA2B06EA2E7C7D0C57). Current file SHA567F9411B465C6AC5AF532CBAA8D92748D838A078326310053D4DD2B0221617B. The source-matching compiler is reused because corpus is loaded from disk per process. Retry the stopped SQL gate, then interpreter and opt-diff, preserving the failed run. No production, harness, expected-failure or native-result change.
+
+## Targeted acceptance and integration
+
+Root inspected the final raw category totals: SQL53/0/0, interpreter54/0/0 (53 SQL plus one provider comparison), and opt-diff53/0 with two expected BL3999 reject skips, fixtures014/015, and34 inert cases. Together with the757 optimizer checks and12 all-output native arms, these satisfy this bounded card's targeted gate. The reviewed implementation and repairs are integrated through78c0e903. The merge retains exactly one PoolReuseTable.returnDonors accessor and only expands CodeGenContext's existing terminal-census comment; no duplicate context or reset protocol was introduced. Combined round validation is still pending. No whole-family, performance, native LLVM or measured memory claim follows from this checkpoint.

@@ -1,0 +1,12 @@
+// TEST: PM07 N5 antisymmetric decompact emission census
+// Diagnostic source only: emit with --print anti,result; do not run or time.
+// Preserve index-types/035's producer and decompact idiom. Strict canonical
+// anti(i,j) = A(i)-A(j) for i<j; all ten compact cells remain required.
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
+let anti = L <@> reynolds(g, Antisymmetric) |> compute
+let result = decompact(anti, 0)
+// Analytically authored, unexecuted dense contract: all 25 cells, positive-zero
+// diagonal; result(i,j)=A(i)-A(j) off diagonal. No native store claim.
+// EXPECT: result = [0.0, -1.0, -2.0, -3.0, -4.0, 1.0, 0.0, -1.0, -2.0, -3.0, 2.0, 1.0, 0.0, -1.0, -2.0, 3.0, 2.0, 1.0, 0.0, -1.0, 4.0, 3.0, 2.0, 1.0, 0.0]

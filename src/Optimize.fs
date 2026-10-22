@@ -8397,6 +8397,191 @@ let internal fusePartialRowTerminalsWithCensusModule (builder: IRBuilder) (progr
 let fusePartialRowTerminalsModule (builder: IRBuilder) (programFuncs: IRCallable list) (modul: IRModule) : IRModule =
     fusePartialRowTerminalsWithCensusModule builder programFuncs None modul
 
+/// C05's emitter-only certificate. The IR and the interpreter retain the
+/// canonical gather; no planner table or shared stored-array rule is changed.
+type SparseWildcardFoldPlan = {
+    ParentId: IRId
+    PinAxis: int
+    Pin: int64
+    Fold: IRCallable
+    Seed: IRExpr
+}
+
+let certifySparseWildcardFold (wholeProgram: IRModule option) (binding: IRBinding)
+                              (operand: IRExpr) (kernel: IRExpr) (seed: IRExpr option)
+                              : Result<SparseWildcardFoldPlan, string> =
+    let scalar64 = IRTScalar ETFloat64
+    let literal = function
+        | IRLit (IRLitFloat _) | IRUnaryOp (IRNeg, IRLit (IRLitFloat _)) -> true
+        | _ -> false
+    let plain (ix: IRIndexType) =
+        ix.Rank = 1 && ix.IxKind = IxKPlain && ix.Symmetry = SymNone
+        && ix.Kind = SDimension && ix.Dependencies.IsEmpty
+    let candidate =
+        match operand with
+        | IRIndex (IRVar (_, ArrayElem at), [IRTuple _], _) ->
+            at.IndexTypes.Length = 1 && at.IndexTypes.Head.IxKind = IxKSparse && at.IndexTypes.Head.Rank = 2
+        | _ -> false
+    match wholeProgram with
+    | None -> Error "requires complete whole-program emission evidence"
+    | Some _ when not (gateOn "BLADE_FUSION") -> Error "disabled by BLADE_FUSION"
+    | Some _ when not (Blade.Toolchain.fpReproEnabled ()) -> Error "requires the reproducible serial graph"
+    | Some _ when not candidate -> Error "not a direct rank-2 sparse partial operand"
+    | Some m ->
+        let funcs = m.Functions |> List.map (fun f -> f.Id, f) |> Map.ofList
+        let resolve = resolveCallableIn funcs
+        let writes = scheduleMayWriteIn m.Functions m
+        let lifetime = scheduleHasLifetimeBarrierIn m.Functions m
+        let same a b = obj.ReferenceEquals(a, b)
+        let host = m.Bindings |> List.filter (fun b -> b.Id = binding.Id)
+        let ordinary =
+            match host with
+            | [h] when h.Name = binding.Name && h.Type = scalar64 && binding.Type = scalar64
+                       && same h.Value binding.Value ->
+                match h.Value with
+                | IRReduce (a, k, s) when same a operand && same k kernel && s = seed -> true
+                | _ -> false
+            | _ -> false
+        let closedTotal root =
+            let scalarType = function IRTScalar (ETFloat64 | ETInt64 | ETBool) -> true | _ -> false
+            let rec audit visiting (f: IRCallable) =
+                if Set.contains f.Id visiting then Error "a recursive fold/callee"
+                elif f.IsStatic || f.IsArityPoly || f.IsOmpParallel || not f.Parallelism.IsEmpty
+                     || f.IsCudaKernel || f.IsMpiParallel || not f.Captures.IsEmpty then
+                    Error "a captured or strategized fold/callee"
+                elif not (scalarType f.RetType) || (f.Params |> List.exists (fun p -> not (scalarType p.Type)))
+                     || (f.Params |> List.mapi (fun i p -> p.Index <> i) |> List.exists id)
+                     || (f.Params |> List.map _.VarId |> Set.ofList |> Set.count) <> f.Params.Length then
+                    Error "a non-scalar or malformed fold/callee signature"
+                elif writes f.Body || lifetime f.Body then Error "a writing/resource fold/callee"
+                else
+                    match IRTotality.auditCallable resolve (fun _ -> None) (fun _ -> false) f [] with
+                    | Error why -> Error why
+                    | Ok () ->
+                        let mutable bound = f.Params |> List.map _.VarId |> Set.ofList
+                        iterIRExpr (function IRLet (id, _, _) -> bound <- bound.Add id | _ -> ()) f.Body
+                        let refs = collectVarRefsIR f.Body |> Set.filter (fun id -> not (bound.Contains id)) |> Set.toList
+                        let rec check = function
+                            | [] -> Ok ()
+                            | id :: rest ->
+                                match Map.tryFind id funcs with
+                                | None -> Error "an unknown/global/callback fold reference"
+                                | Some callee ->
+                                    match audit (visiting.Add f.Id) callee with
+                                    | Error why -> Error why
+                                    | Ok () -> check rest
+                        check refs
+            audit Set.empty root
+        if not ordinary || (m.Bindings |> List.map _.Id |> Set.ofList |> Set.count) <> m.Bindings.Length
+                        || funcs.Count <> m.Functions.Length then
+            Error "requires the exact ordinary host and unique binding/callable identities"
+        elif not m.ProviderReads.IsEmpty || not m.ProviderWrites.IsEmpty || not m.RandomInits.IsEmpty
+             || not m.CompoundInits.IsEmpty || not m.MutableArrayLets.IsEmpty then
+            Error "additional execution/ownership side payloads"
+        else
+        match operand, resolve kernel, seed with
+        | IRIndex (IRVar (sid, sty), [IRTuple coords], _), Some fold, Some init when literal init ->
+            let parent = m.Bindings |> List.tryFind (fun b -> b.Id = sid)
+            let pin =
+                match classifyCompoundIndexTuple 2 coords with
+                | CompoundPartial ([(axis, IRLit (IRLitInt n))], [_]) when coords.Length = 2 && n >= 0L -> Some (axis, n)
+                | _ -> None
+            match parent, sty, pin, Map.tryFind sid m.SparseInits with
+            | Some source, ArrayElem sparse, Some (axis, pinValue), Some (IRVar (vid, vty))
+                when source.Type = sty && source.Value = IRLit IRLitUnit
+                     && sparse.ElemType = scalar64 && not sparse.IsVirtual && sparse.IndexTypes.Length = 1
+                     && m.SparseInits.Count = 1 ->
+                let ix = sparse.IndexTypes.Head
+                let values = m.Bindings |> List.tryFind (fun b -> b.Id = vid)
+                let order = m.Bindings |> List.mapi (fun i b -> b.Id, i) |> Map.ofList
+                let dominates =
+                    match Map.tryFind vid order, Map.tryFind sid order, Map.tryFind binding.Id order with
+                    | Some v, Some s, Some h -> v < s && s < h
+                    | _ -> false
+                let geometry =
+                    match ix.Extent, values, vty with
+                    | IRSparseKeys (SkStatic keys), Some vb, ArrayElem vt
+                        when ix.Rank = 2 && ix.IxKind = IxKSparse && ix.Symmetry = SymNone
+                             && ix.Tag = Some "__sparseidx" && ix.Kind = SDimension && ix.Dependencies.IsEmpty
+                             && vb.Type = vty && vt.ElemType = scalar64 && not vt.IsVirtual && vt.IndexTypes.Length = 1
+                             && plain vt.IndexTypes.Head && (keys |> List.forall (fun k -> k.Length = 2 && List.forall (fun n -> n >= 0L) k))
+                             && (Set.ofList keys).Count = keys.Length ->
+                        match vb.Value with
+                        | IRArrayLit (cells, at) when at.ElemType = scalar64 && not at.IsVirtual && at.IndexTypes.Length = 1
+                                                      && plain at.IndexTypes.Head && IRTotality.sameIndex at.IndexTypes.Head vt.IndexTypes.Head ->
+                            cells.Length = keys.Length && List.forall literal cells
+                            && IRTotality.evalInt vt.IndexTypes.Head.Extent = Some (int64 keys.Length)
+                        | _ -> false
+                    | _ -> false
+                let signature =
+                    fold.Params.Length = 2 && fold.RetType = scalar64
+                    && (fold.Params |> List.mapi (fun i p -> p.Index = i && p.Type = scalar64) |> List.forall id)
+                    && fold.Params.[0].VarId <> fold.Params.[1].VarId
+                    && typeOf kernel = IRTArrow ([SVal scalar64; SVal scalar64], scalar64, None)
+                let residualType =
+                    match typeOf operand with
+                    | ArrayElem at when at.ElemType = scalar64 && not at.IsVirtual && at.IndexTypes.Length = 1 ->
+                        let r = at.IndexTypes.Head
+                        plain r && r.Extent = IRCompoundProject (IRVar (sid, sty), 1)
+                    | _ -> false
+                let ids = Set.ofList [vid; sid; binding.Id]
+                let planned id =
+                    (HotRowTable.tryProducer id).IsSome || (HotRowTable.tryConsumer id).IsSome
+                    || (CellFoldTable.tryLoop id).IsSome || (CellFoldTable.tryFoldLet id).IsSome
+                    || (RecStepTable.tryLoop id).IsSome || (RecStepTable.tryStep id).IsSome
+                    || (EpilogueLegTable.tryProducer id).IsSome || (EpilogueLegTable.tryJoin id).IsSome
+                    || (CompactionTable.tryMask id).IsSome || (CompactionTable.tryCompound id).IsSome
+                    || (CompactionTable.tryFoldMap id).IsSome
+                    || (CompactRowTable.tryProducer id).IsSome || (CompactRowTable.tryConsumer id).IsSome
+                let ownerConflict =
+                    (ids |> Set.exists planned)
+                    || (PoolReuseTable.donors () |> Map.exists (fun a b -> ids.Contains a || ids.Contains b))
+                    || (PoolReuseTable.returnDonors () |> Map.exists (fun a b -> ids.Contains a || ids.Contains b))
+                    || (MemberHoistTable.all () |> List.exists (fun p -> ids.Contains p.HostId || ids.Contains p.SetId || not (Set.intersect ids p.Kernels).IsEmpty))
+                let demand e =
+                    let mutable found = false
+                    iterIRExpr (function
+                        | IRIndex (IRVar (id, _), (IRTuple cs) :: _, _) when id = sid ->
+                            match classifyCompoundIndexTuple 2 cs with CompoundPartial _ -> found <- true | _ -> ()
+                        | IRCompoundProject (IRVar (id, _), _) when id = sid -> found <- true
+                        | IRLet (_, IRVar (id, _), _) when id = sid -> found <- true
+                        | IRVar (id, ty) when id = sid && ty <> sty -> found <- true
+                        | _ -> ()) e
+                    found
+                let exprDemand e = demand e || (embeddedExtentExprs e |> List.exists demand)
+                // The exact operand's complete type/coordinate metadata is
+                // certified above. No other root gets this exemption.
+                let residual = IRReduce (IRZero scalar64, kernel, seed)
+                let extraDemand =
+                    compactionRoots m.Functions m |> List.exists (function
+                        | RootBindingValue b ->
+                            exprDemand (if b.Id = binding.Id then residual else b.Value)
+                            || (b.Id <> sid && b.Id <> binding.Id && (match b.Value with IRVar (id, _) -> id = sid | _ -> false))
+                        | RootSideOperand (b, _, e) -> b.Id <> sid || exprDemand e
+                        | RootFunctionBody f -> exprDemand f.Body || (f.Captures |> List.exists (fun c -> c.Id = sid || c.Id = vid))
+                        | RootType (_, ty) -> irTypeExtentExprs ty |> List.exists exprDemand
+                        | RootSourceRef (_, id) -> ids.Contains id
+                        | RootNameRef _ -> true)
+                let effect =
+                    (m.Bindings |> List.exists (fun b -> bindingPayload m b |> List.exists (fun e -> writes e || lifetime e)))
+                    || (m.Functions |> List.exists (fun f -> writes f.Body || lifetime f.Body))
+                    || (compactionRoots m.Functions m |> List.exists (function
+                        | RootType (_, ty) -> irTypeExtentExprs ty |> List.exists (fun e -> writes e || lifetime e)
+                        | RootBindingValue b -> embeddedExtentExprs b.Value |> List.exists (fun e -> writes e || lifetime e)
+                        | RootSideOperand (_, _, e) | RootFunctionBody { Body = e } ->
+                            embeddedExtentExprs e |> List.exists (fun x -> writes x || lifetime x)
+                        | _ -> false))
+                if not dominates || not geometry || not signature || not residualType then Error "unsupported source/operand/fold geometry or provenance"
+                elif ownerConflict then Error "overlapping storage/schedule owner"
+                elif extraDemand then Error "additional residual/alias/capture/type/side-payload demand"
+                elif effect then Error "a whole-program payload may write or cross a resource boundary"
+                else
+                    match closedTotal fold with
+                    | Error why -> Error why
+                    | Ok () -> Ok { ParentId = sid; PinAxis = axis; Pin = pinValue; Fold = fold; Seed = init }
+            | _ -> Error "requires one known stored sparse constructor and a literal pin"
+        | _ -> Error "requires a direct sparse partial operand, resolved fold and literal seed"
+
 /// `programFuncs` is every callable of the PROGRAM (all modules): a pass that
 /// judges a callee's effects resolves it there, since a generic defined in
 /// one module and called from another (`from stats import mean`) is not in

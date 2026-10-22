@@ -1,0 +1,34 @@
+# A05 census review
+
+Root reviewed the three fixed sources, probe, manifest and runner request on 2026-10-22. All listed bundle and compiler source hashes matched a-lifetimes production0f3c5cdb; census-only commitf0373cb3 records the bundle. The analytic values are consistent with the stated expressions but remain unexecuted.
+
+The positive retains a seven-cell computed local, its ordered sum and in-bounds middle observation, then returns an eleven-cell map of independent stored input. Two calls retain both results and all caller arrays. The fixed exclusions are caller-owned storage and a later local read; neither may be relabeled a successful negative without inspecting its actual lowered schedule.
+
+Approved first stage: one fresh Release build in a-lifetimes, because the existing DLL predates the lane source; then exactly one positive lower-only probe using the resulting hash. All scheduler gates use defaults. No source change, category, native program, interpreter, or benchmark is authorized by this census. Stop for root review before emission. Later paired emission is described in the request but requires that the captured topology establish a retained owned producer and completed observations.
+
+The lifetime hypothesis is not a measured peak-memory result. An earlier free must target the actual backing and preserve all remaining readers; freeing an entire scope is admissible only if every allocation in that scope is disposable. A no-gain/default-fusion result closes this census without manufacturing a target by disabling another optimization.
+## Default positive topology and emitted lifetime
+
+Fresh source-matching DLL55379379D72D365F27DAF6823FA4B7EFF75DF22C58FFA8971680BFE62B32CFA1 built once. Root read the actual topology, empty donor maps and default environment. Ordinary callablev5 retains computed localv15, scalar foldv16, p(3)v17 and completed biasv18 before its independent y result. Scheduler owner flags are all false. The summary printer elides some expressions/sets, so it is not an exhaustive full-IR proof for later certification.
+
+Root then read both generated backends. Reuse1/0 C++ bytes match SHA25653CDBDBF420CD38F4B436F497F0CDC818AD138CCB6D873E40C9FC2A08072C10D; LLVM matches5C0FEDB5CCA9B2393D857AA278B050827B5AEA5A5D3128FC397046931326C72E. C++ allocates __v15 at201, finishes its fold/cell/bias at212–214, allocates result218, fills220–228 and frees __v15 at229 before return230. LLVM allocates r274 at47, tracks it in r275 at48, finishes fold/cell/bias69–102, allocates independent r320 at103 and fills111–124, then loads r338 from r275 at126 and frees exactly that backing127 before returning r320 at128. No pointer alias or generic-free-count inference is needed.
+
+This establishes a seven-cell local payload overlaps the eleven-cell result allocation/fill in the generated program. It is not a measured native peak, allocator-capacity or RSS result. The fixed caller-owned and later-read emission controls are approved next; production implementation remains gated on their review. The full suite remains unlaunched.
+## Control acceptance and implementation boundary
+
+Root verified the caller-owned function reads the formal and allocates only its result in both lanes. The later-read C++ tuple function reads p(6) after result fill and before p cleanup; LLVM flattens that workload into main and retains p with no frees. These are actual observed exclusions, not evidence of one common tuple ABI. The census closes with five FSI processes, eight raw backend emissions and no native execution.
+
+One bounded implementation is approved: ordinary nonrecursive rank-one static positive Float64 function, fresh computed local, completed closed scalar observations and independent stored-formal final map of a different extent. Full ownership, type/capture/side metadata and competing planner checks precede release. Existing lifetime events are preferable only when an exact nested ownership scope can be proved; LLVM's whole-scope pop must not reclaim anything still live. Caller roots, hidden/deferred/alias/later readers, tuple returns, unknown scopes and competing owners refuse. The coder must return source/tests/handoff for final review before Luna runs anything. Logical release is distinct from allocator retention and OS memory.
+## Draft implementation second look
+
+Root read the new common EarlyPoolRelease pass, its Lowering placement, per-call gate and both-backend ownership checks. The proof retains the original producer/observations/tail, opens a nested scope containing exactly one fresh pool, then releases it after scalar observations and before the independent output allocation. Unknown or allocating prefix expressions, arrays/views/aliases, captures, foreign use, competing schedules and function-value use are excluded. Existing binary fold commutativity metadata must remain admitted without granting new reassociation.
+
+The initial renderer-wide release-protocol tightening was removed: existing inline lifetime regions can own implicit temporaries and must retain their protocol. There are no intended renderer/LLVM-attribute changes. Root also requested complete fresh-ID declaration coverage and an A05-specific dependency-aware foreign census: the older shared moduleReferencedIds omits index Dependencies. The coder is moving the pass after all module planners and adding whole-program final-module evidence, leaving the older shared census unchanged. Unused high-ID declarations and foreign metadata receive focused regression controls. Final freeze review and first build are pending; this is no execution acceptance.
+
+## Frozen implementation approved for primary gate
+
+Root re-read the revised whole-program pass and focused tests. scheduleModules now runs once after all modules' planners and checks final roots directly, including foreign index Dependencies; the older shared census is unchanged. Fresh IDs reserve all binding/body/side declarations using EnsureAtLeast. Local/foreign unused billion-ID declarations and foreign metadata controls cover the review findings. Renderer, IR, interpreter and ownership protocol files have no net edits.
+
+All19 manifest entries verified before checkpoint b6200465. Manifest7B0431A034958D2250211F167DD3D18E601F73D445417C9F42147539651B6C52; new passD458F444E550DA1D4FBB4590DC74310F94B5923446060B80A742BB26770E2C19; focused testsB50448FC6219BA426D69EF5B3C5E146CB4DCF94231C53BC468F2C74C119A7CE2. The failure corpus uses harness line7 (direct source line8), as required by Corpus header stripping.
+
+Primary gate only is approved when Luna's slot is available: one fresh Release build, LLVM facts, then optimize, stopping on the first unexpected failure. Existing census DLL is stale. Later raw/native/category/sanitizer stages still require primary results and root dispatch. No test pass or memory measurement is claimed by this source approval.

@@ -4064,8 +4064,38 @@ and genSolveBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuild
 
 
 and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (arrExpr: IRExpr) (kernelExpr: IRExpr) (initExpr: IRExpr option) : string list * CodeGenContext =
-    match arrExpr with
-    | GatherTeardown routine ->
+    let sparseTerminal = Blade.Optimize.certifySparseWildcardFold ctx.StreamTerminalModule binding arrExpr kernelExpr initExpr
+    match arrExpr, sparseTerminal with
+    | _, Ok plan when ctx.ParamIds.IsEmpty && ctx.TilePlans.IsEmpty && ctx.TileReads.IsEmpty && ctx.StreamedArrays.IsEmpty
+                      && not (ctx.DeferredComputations.ContainsKey plan.ParentId) && Map.containsKey plan.ParentId ctx.VarNames ->
+        let ind = indentStr ctx
+        let name = bindingCppName binding
+        let parent = ctx.VarNames.[plan.ParentId]
+        let ordinal = name + "__sparse_r"
+        let (wrapper, foldName) = genCallableWrapper ctx.VarNames name plan.Fold
+        recordFoldForm name (serialFoldForm ()) "sparse wildcard terminal: supplied key order, no residual gather"
+        Blade.Effects.Decisions.record
+            { Blade.Effects.Rule = "sparse-wildcard-fold"; Version = 1; Span = declSpanOf binding.Name
+              Subject = binding.Name; Outcome = Blade.Effects.Applied
+              Evidence = [ "stored sparse constructor, validation and ownership retained"
+                           "one supplied-key ordinal scan; no residual ranks, copied values or extent buffer" ] }
+        let lines =
+            (wrapper |> List.map (fun line -> ind + line)) @
+            [ $"{ind}// sparse wildcard terminal: no residual gather"
+              $"{ind}double {name} = {exprToCppCtx ctx plan.Seed};"
+              $$"""{{ind}}for (size_t {{ordinal}} = 0; {{ordinal}} < {{parent}}.idx->cardinality; ++{{ordinal}}) {"""
+              $$"""{{ind}}    if ({{parent}}.idx->rank_to_tuple[{{ordinal}}][{{plan.PinAxis}}] == (size_t){{plan.Pin}}) {"""
+              $"{ind}        {name} = {foldName}({name}, {parent}.data[{ordinal}]);"
+              $"{ind}    }}"
+              $"{ind}}}" ]
+        (lines, addVarName binding.Id name ctx)
+    | GatherTeardown routine, _ ->
+        (match sparseTerminal with
+         | Error why ->
+             Blade.Effects.Decisions.record
+                 { Blade.Effects.Rule = "sparse-wildcard-fold"; Version = 1; Span = declSpanOf binding.Name
+                   Subject = binding.Name; Outcome = Blade.Effects.Declined why; Evidence = [] }
+         | Ok _ -> ())
         // An inline partial sparse read as the operand: the fold below spells
         // its operand at every element read, the bound and the guard, so the
         // gather ran (and leaked) once per access. Gather once into a named
@@ -4081,12 +4111,12 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
     // Compaction fusion (B4a/c): the fold of a planned `y * y` reads `y`'s
     // compact buffer (CodeGenExpr.renderCompactionFold); its map let emitted
     // only a comment.
-    | IRVar (mid, _) when initExpr.IsNone && (Blade.Optimize.CompactionTable.tryFoldMap mid).IsSome ->
+    | IRVar (mid, _), _ when initExpr.IsNone && (Blade.Optimize.CompactionTable.tryFoldMap mid).IsSome ->
         let ind = indentStr ctx
         let name = bindingCppName binding
         let plan = (Blade.Optimize.CompactionTable.tryFoldMap mid).Value
         ([ $"{ind}double {name} = {(renderCompactionFold ctx.VarNames plan kernelExpr)};" ], addVarName binding.Id name ctx)
-    | _ ->
+    | _, _ ->
     let ind = indentStr ctx
     let name = bindingCppName binding
     // reduce(array, op): T/S reduction. Consumes the innermost dim by a

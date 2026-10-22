@@ -135,7 +135,10 @@ targeted requests, not extra full-suite sweeps. No full-suite launch has occurre
 | C04 | Sol/high C | Integrated c521a81b (kernel bfefabe5) | 706 optimizer checks,32 native arms,32 emit/plan checks and final SQL/interpreter/opt-diff gates pass; [review](C04-review.md), [census](C04-census-results.md) |
 | A04 | Sol/high A | Integrated38256bb1 (kernel6c9d6e1d) | 151 facts,653 optimizer checks, affected categories, all-output native controls and four033 sanitizer arms pass; combined checks pending; [review](A04-review.md), [results](A04-tests.md) |
 | B07 | Sol/high B | Integrated27d31e74; diagnostic checkpoint accepted | 14 fixtures and8 canonical native numeric checks pass; opaque task, separate observer and matched cleanup; [review](B07-review.md); all eight canonical and one prepared native enclosure audits and saved validators pass; performance ineligible |
-| C05 | Sol/high C | Primary744 pass/1 failure; snapshot diagnostic queued | Layout repair built; route refuses snapshot mutation correctly, but interpreter value check fails; raw diagnostic pending |
+| C05 | Sol/high C | Integrated78c0e903 | 757 optimizer checks,12 native arms and SQL53/interp54/opt-diff53 pass (two expected reject skips); [review](C05-review.md); combined checks pending |
+| A05 | Sol/high A | Frozenb6200465; build repair active | Restore recovered through existing cache; first compilation exposed type/namespace errors; no tests yet; [review](A05-review.md), [results](A05-tests.md) |
+| D09 | Sol/high D | I1 guard checkpoint7ff59a20; focused validation queued | Census exposed unsafe source-value uses; row-table removal remains separate; [review](D09-review.md) |
+| B08 | Sol/high B | Frozena2b82e73; primary validation queued | Accepted baseline; diagonal-only initialization and full-output/sign controls authored; [review](B08-review.md) |
 | Full suite | Luna/high runner | Reserved | End of whole round only; launch count 0 |
 
 Per-card handoffs and reviewer dispositions live beside this file. Historical plans and

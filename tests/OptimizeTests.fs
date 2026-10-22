@@ -2182,6 +2182,362 @@ let private transposeRowsHiddenDemands () =
                     else resultLine Fail name "unsupported payload lost its hard-transpose storage"; yield false ]
             | _ -> resultLine Fail "transpose_rows_hidden_setup" "the actual immediate transpose/row topology changed"; [false])
 
+// C05 keeps semantic IR materialized. Only a certified ordinary C++ statement
+// consumer scans the immutable parent directly; the interpreter is the oracle.
+let private sparseWildcardSrc =
+    "let static K = [(4, 1), (0, 3), (2, 1), (1, 0), (0, 1)]\n"
+    + "let vals: Array<Float64 like Idx<5>> = [4.0, 9.0, 2.0, 8.0, 3.0]\n"
+    + "let S = sparse(vals, K)\n"
+    + "let total = reduce(S((_, 1)), lambda(a: Float64, b: Float64) -> a * 10.0 + b, 7.0)\n"
+
+let private sparseWildcardNamedSrc =
+    sparseWildcardSrc.Replace("let total = reduce(S((_, 1)),", "let residual = S((_, 1))\nlet total = reduce(residual,")
+    + "let first = residual(0)\nlet count = extents(residual)\n"
+
+let private sparseWildcardProof (m: IR.IRModule) =
+    let h = m.Bindings |> List.find (fun b -> b.Name = "total")
+    match h.Value with
+    | IR.IRReduce (a, k, s) -> Optimize.certifySparseWildcardFold (Some m) h a k s
+    | _ -> Error "not the direct ordinary host"
+
+let private sparseWildcardEmission () =
+    let name = "sparse_wildcard_cpp_removes_only_private_residual"
+    withTransposeRows (fun () ->
+        let emit gate src = withGate "BLADE_FUSION" gate (fun () -> cppOfSource name src)
+        match emit "on" sparseWildcardSrc, emit "0" sparseWildcardSrc, emit "on" sparseWildcardNamedSrc with
+        | Ok cpp, Ok off, Ok named ->
+            let gathers (s: string) = System.Text.RegularExpressions.Regex.Matches(s, @"auto \w+__gath = nested_array_utilities::make_sparse_gather_dense<double, 2, 1>\(").Count
+            let description = $"gather calls ON/OFF/named={gathers cpp}/{gathers off}/{gathers named}"
+            checkAll name cpp description
+                [ ("actual elided route", cpp.Contains "// sparse wildcard terminal: no residual gather" && not (off.Contains "// sparse wildcard terminal: no residual gather"));
+                  ("no residual gather call: " + description, gathers cpp = 0 && gathers off = 1 && named.Contains "make_sparse_gather_dense<double, 2, 1>(S");
+                  ("parent construction/validation retained", cpp.Contains "S_compact = new double[S_idx->cardinality * S_trail]"
+                      && cpp.Contains "sparse(values, keys): values length does not match key count" && cpp.Contains "Sparse<double, 2> S { S_compact, S_idx, S_trail }");
+                  ("ascending supplied-key ordinals and false skips fold", cpp.Contains "for (size_t total__sparse_r = 0; total__sparse_r < S.idx->cardinality; ++total__sparse_r)"
+                      && cpp.Contains "if (S.idx->rank_to_tuple[total__sparse_r][1] == (size_t)1)"
+                      && cpp.Contains "(total, S.data[total__sparse_r])");
+                  ("one literal seed, original scalar output", cpp.Contains "double total = 7.0;" && cpp.Contains "total = " && cpp.Contains "vals = [");
+                  ("no residual free; same main-scope parent lifetime", not (cpp.Contains "deallocate_gather_dense(total__gath)") && off.Contains "deallocate_gather_dense(total__gath)"
+                      && System.Text.RegularExpressions.Regex.Matches(cpp, @"deallocate_sparse\(S\)").Count = System.Text.RegularExpressions.Regex.Matches(off, @"deallocate_sparse\(S\)").Count);
+                  ("demanded residual remains observable", not (named.Contains "// sparse wildcard terminal: no residual gather") && named.Contains "residual = [" && named.Contains "count = ") ]
+        | a, b, c -> resultLine Fail name ($"ON={a}; OFF={b}; named={c}"); false)
+
+let private sparseWildcardCertificates () =
+    withTransposeRows (fun () ->
+        match lower sparseWildcardSrc with
+        | Error e -> resultLine Fail "sparse_wildcard_certificate_setup" e; [false]
+        | Ok ir ->
+            let m = ir.Modules.Head
+            let host = m.Bindings |> List.find (fun b -> b.Name = "total")
+            let parent = m.Bindings |> List.find (fun b -> b.Name = "S")
+            let values = m.Bindings |> List.find (fun b -> b.Name = "vals")
+            match host.Value with
+            | IR.IRReduce (operand, kernel, seed) ->
+                let fold = match kernel with IR.IRVar (id, _) -> m.Functions |> List.find (fun f -> f.Id = id) | _ -> failwith "no fold"
+                let updateBinding id f (md: IR.IRModule) = { md with Bindings = md.Bindings |> List.map (fun b -> if b.Id = id then f b else b) }
+                let hostValue v = updateBinding host.Id (fun b -> { b with Value = v }) m
+                let foldChange f = { m with Functions = m.Functions |> List.map (fun c -> if c.Id = fold.Id then f c else c) }
+                let parentType ty =
+                    let md = updateBinding parent.Id (fun b -> { b with Type = ty }) m
+                    updateBinding host.Id (fun b -> { b with Value = IR.mapIRExpr (function IR.IRVar (id, _) when id = parent.Id -> IR.IRVar (id, ty) | e -> e) b.Value }) md
+                let sparse = match parent.Type with IR.ArrayElem at -> at | _ -> failwith "not sparse"
+                let keyType keys = IR.mkArrayLike { sparse with IndexTypes = [{ sparse.IndexTypes.Head with Extent = IR.IRSparseKeys (IR.SkStatic keys) }] }
+                let hiddenIx: IR.IRIndexType =
+                    { sparse.IndexTypes.Head with
+                        Rank = 1
+                        IxKind = Blade.Types.IxKPlain
+                        Tag = None
+                        Extent = IR.IRCompoundProject (IR.IRVar (parent.Id, parent.Type), 1) }
+                let extra = { host with Id = 993001; Name = "other" }
+                let alias = { host with Id = 993002; Name = "alias"; Type = parent.Type; Value = IR.IRVar (parent.Id, parent.Type) }
+                let write = IR.IRAssign (IR.IRIndex (IR.IRVar (parent.Id, parent.Type), [IR.IRTuple [IR.IRLit (IR.IRLitInt 4L); IR.IRLit (IR.IRLitInt 1L)]], None), IR.IRLit (IR.IRLitFloat 99.0))
+                let writer = { host with Id = 993003; Name = "writer"; Type = Blade.Types.IRTUnit; Value = write }
+                let observer = { fold with Id = 993004; Name = "observer"; Captures = [{ Id = parent.Id; Name = "parent"; Type = parent.Type; IsMutable = false }] }
+                let hiddenType = IR.mkArrayLike { sparse with IndexTypes = [hiddenIx] }
+                let unknown = IR.IRApp (IR.IRVar (993005, IR.typeOf kernel), [IR.IRLit (IR.IRLitFloat 1.0); IR.IRLit (IR.IRLitFloat 2.0)], Blade.Types.IRTScalar Blade.Types.ETFloat64)
+                let changedPin pin =
+                    let a = IR.IRIndex (IR.IRVar (parent.Id, parent.Type), [IR.IRTuple [IR.IRLit IR.IRLitUnit; pin]], None)
+                    hostValue (IR.IRReduce (a, kernel, seed))
+                let witnesses: (string * IR.IRModule) list =
+                    [ ("same_expression_other_host", { m with Bindings = m.Bindings @ [extra] });
+                      ("parent_alias", { m with Bindings = m.Bindings @ [alias] });
+                      ("parent_capture", { m with Functions = m.Functions @ [observer] });
+                      ("unused_callable_param_type", { m with Functions = m.Functions @ [{ observer with Captures = []; Params = [{ fold.Params.Head with Type = hiddenType }] }] });
+                      ("unused_callable_return_type", { m with Functions = m.Functions @ [{ observer with Captures = []; RetType = hiddenType }] });
+                      ("declared_residual_extent", { m with Types = m.Types @ [IR.IRTDIndexType ("ObservedResidual", hiddenIx)] });
+                      ("hidden_type_writer", { m with Types = m.Types @ [IR.IRTDIndexType ("HiddenWrite", { hiddenIx with Extent = write })] });
+                      ("hidden_host_execution", { m with SparseInits = m.SparseInits.Add(host.Id, IR.IRLit (IR.IRLitFloat 1.0)) });
+                      ("hidden_random_execution", { m with RandomInits = m.RandomInits.Add(parent.Id, IR.FillModulus write) });
+                      ("actual_writer", { m with Bindings = m.Bindings @ [writer] });
+                      ("lifetime_event", { m with Bindings = m.Bindings @ [{ writer with Value = IR.IRBeginPoolScope "hidden" }] });
+                      ("unknown_fold", foldChange (fun f -> { f with Body = unknown }));
+                      ("failing_fold", foldChange (fun f -> { f with Body = IR.IRUnaryOp (IR.IRMath "lgamma", IR.IRVar (f.Params.[1].VarId, f.Params.[1].Type)) }));
+                      ("fold_capture", foldChange (fun f -> { f with Captures = [{ Id = 993006; Name = "hidden"; Type = f.RetType; IsMutable = false }] }));
+                      ("parallel_fold", foldChange (fun f -> { f with IsOmpParallel = true; Parallelism = [(0, 1)] }));
+                      ("unseeded", hostValue (IR.IRReduce (operand, kernel, None)));
+                      ("nonliteral_seed", hostValue (IR.IRReduce (operand, kernel, Some unknown)));
+                      ("nonliteral_pin", changedPin (IR.IRVar (993008, Blade.Types.IRTScalar Blade.Types.ETInt64)));
+                      ("negative_pin", changedPin (IR.IRLit (IR.IRLitInt (-1L))));
+                      ("wrong_kernel_type", hostValue (IR.IRReduce (operand, IR.IRVar (fold.Id, IR.mkArrayLike { sparse with IndexTypes = [hiddenIx] }), seed)));
+                      ("duplicate_keys", parentType (keyType [[4L;1L];[4L;1L];[2L;1L];[1L;0L];[0L;1L]]));
+                      ("negative_keys", parentType (keyType [[-1L;1L];[0L;3L];[2L;1L];[1L;0L];[0L;1L]]));
+                      ("runtime_keys", parentType (IR.mkArrayLike { sparse with IndexTypes = [{ sparse.IndexTypes.Head with Extent = IR.IRSparseKeys (IR.SkRuntime (IR.IRVar (values.Id, values.Type))) }] }));
+                      ("trailing_payload", parentType (IR.mkArrayLike { sparse with IndexTypes = sparse.IndexTypes @ [{ hiddenIx with Extent = IR.IRLit (IR.IRLitInt 1L) }] }));
+                      ("structured_payload", parentType (IR.mkArrayLike { sparse with ElemType = Blade.Types.IRTTuple [sparse.ElemType] }));
+                      ("unknown_values_initializer", updateBinding values.Id (fun b -> { b with Value = unknown }) m) ]
+                let errors =
+                    [ for suffix, md in witnesses do
+                        let result = sparseWildcardProof md
+                        if Result.isError result then resultLine Pass ("sparse_wildcard_declines_" + suffix) (sprintf "%A" result); yield true
+                        else resultLine Fail ("sparse_wildcard_declines_" + suffix) "unsupported metadata/storage was certified"; yield false ]
+                let lowLevel =
+                    let declarations, statements = CodeGen.genModule m (IR.IRBuilder ())
+                    String.concat "\n" (declarations @ statements)
+                let exactPlan =
+                    match sparseWildcardProof m with
+                    | Ok p -> p.ParentId = parent.Id && p.PinAxis = 1 && p.Pin = 1L && p.Fold.Id = fold.Id && Some p.Seed = seed
+                    | Error _ -> false
+                let admission =
+                    checkAll "sparse_wildcard_actual_certificate_not_mutability_or_stale_effect_flags" "" (sprintf "actual operand type=%A" (IR.typeOf operand))
+                        [ ("ordinary lets can be mutable without writes", host.IsMutable && parent.IsMutable && values.IsMutable);
+                          ("conservative unknown summary is not trusted as a purity proof", fold.Effects.Unknown);
+                          ("actual direct route admitted", Result.isOk (sparseWildcardProof m));
+                          ("exact parent, literal pin/seed and original fold", exactPlan);
+                          ("missing whole program declines", Result.isError (Optimize.certifySparseWildcardFold None host operand kernel seed));
+                          ("low-level emission keeps allocating fallback", not (lowLevel.Contains "// sparse wildcard terminal: no residual gather") && lowLevel.Contains "auto total__gath = ");
+                          ("fresh equal host is not the actual host", Result.isError (Optimize.certifySparseWildcardFold (Some m) { host with Value = IR.IRReduce (operand, kernel, seed) } operand kernel seed));
+                          ("equal reconstructed operand is not the actual operand", Result.isError (Optimize.certifySparseWildcardFold (Some m) host (match operand with IR.IRIndex (a, i, x) -> IR.IRIndex (a, i, x) | _ -> failwith "no index") kernel seed));
+                          ("per-call optimizer gate", withGate "BLADE_FUSION" "0" (fun () -> Result.isError (sparseWildcardProof m)));
+                          ("per-call repro gate", withGate "BLADE_FP_REPRO" "0" (fun () -> Result.isError (sparseWildcardProof m))) ]
+                let owner =
+                    let before = Blade.Types.PoolReuseTable.donors ()
+                    let returnBefore = Blade.Types.PoolReuseTable.returnDonors ()
+                    let currentBefore = Blade.Types.PoolReuseTable.currentReturnDonor ()
+                    try
+                        Blade.Types.PoolReuseTable.record parent.Id values.Id
+                        let directRefused = Result.isError (sparseWildcardProof m)
+                        Blade.Types.PoolReuseTable.reset ()
+                        Blade.Types.PoolReuseTable.recordReturn 993007 parent.Id
+                        let returnValueRefused = Result.isError (sparseWildcardProof m)
+                        Blade.Types.PoolReuseTable.reset ()
+                        Blade.Types.PoolReuseTable.recordReturn parent.Id 993007
+                        let returnKeyRefused = Result.isError (sparseWildcardProof m)
+                        checkAll "sparse_wildcard_declines_overlapping_owner" "" "direct and function-return donor edges are not ignored"
+                            [("direct donor overlap", directRefused); ("return donor value overlap", returnValueRefused); ("return donor key overlap", returnKeyRefused)]
+                    finally
+                        Blade.Types.PoolReuseTable.reset ()
+                        for KeyValue (a, b) in before do Blade.Types.PoolReuseTable.record a b
+                        for KeyValue (a, b) in returnBefore do Blade.Types.PoolReuseTable.recordReturn a b
+                        Blade.Types.PoolReuseTable.setCurrentReturnDonor currentBefore
+                admission :: owner :: errors
+            | _ -> resultLine Fail "sparse_wildcard_certificate_setup" "actual direct topology changed"; [false])
+
+let private sparseWildcardValuesAndRefusals () =
+    let smaller = sparseWildcardSrc.Replace("[(4, 1), (0, 3), (2, 1), (1, 0), (0, 1)]", "[(4, 1), (2, 1), (0, 1)]").Replace("Idx<5>", "Idx<3>").Replace("[4.0, 9.0, 2.0, 8.0, 3.0]", "[4.0, 2.0, 3.0]")
+    let all = sparseWildcardSrc.Replace("[(4, 1), (0, 3), (2, 1), (1, 0), (0, 1)]", "[(4, 1), (0, 1), (2, 1), (1, 1), (3, 1)]")
+    let miss = sparseWildcardSrc.Replace("S((_, 1))", "S((_, 99))").Replace(", 7.0)", ", -0.0)")
+    let reads = sparseWildcardSrc + "let parent_cell = S((4, 1))\nlet reuse = total + total\n"
+    let beforeTotal = sparseWildcardSrc.Substring(0, sparseWildcardSrc.IndexOf("let total =", System.StringComparison.Ordinal))
+    let snapshot =
+        beforeTotal.Replace("let S =", "let mut S =")
+        + "function snapshot(p: mut Array<Float64 like SparseIdx<K>>) -> Float64 = {\n"
+        + "    let residual = p((_, 1))\n    p((4, 1)) = 99.0\n"
+        + "    reduce(residual, lambda(a: Float64, b: Float64) -> a * 10.0 + b, 7.0)\n}\n"
+        + "let total = snapshot(S)\nlet after = S((4, 1))\n"
+    let failure =
+        beforeTotal.Replace("let S = sparse(vals, K)\n", "")
+        + "function late_sparse_parent(v: Float64) -> Float64 = {\n"
+        + "    let z = Int64(floor(v - 3.0))\n    if v == 3.0 then Float64(1 / z) else v\n}\n"
+        + "function early_sparse_fold(a: Float64, b: Float64) -> Float64 = {\n"
+        + "    let z = Int64(floor(b - b))\n    a + Float64(1 / z)\n}\n"
+        + "let produced = method_for(vals) <@> late_sparse_parent |> compute\nlet S = sparse(produced, K)\n"
+        + "let total = reduce(S((_, 1)), early_sparse_fold, 7.0)\n"
+    let functionScope = beforeTotal
+                        + "function scoped() -> Float64 = reduce(S((_, 1)), lambda(a: Float64, b: Float64) -> a * 10.0 + b, 7.0)\nlet total = scoped()\n"
+    let transitive =
+        "function scale(a: Float64) -> Float64 = {\n    let t = a * 10.0\n    t\n}\n"
+        + "function step(a: Float64, b: Float64) -> Float64 = scale(a) + b\n"
+        + sparseWildcardSrc.Replace("lambda(a: Float64, b: Float64) -> a * 10.0 + b", "step")
+    let cases =
+        [ ("ordered", sparseWildcardSrc, "7423.0", true);
+          ("different_parent_cardinality", smaller, "7423.0", true);
+          ("all_match", all, "749283.0", true);
+          ("no_match_signed_zero", miss, "-0.0", true);
+          ("parent_read_and_scalar_reuse", reads, "7423.0", true);
+          ("closed_transitive_block", transitive, "7423.0", true);
+          ("demanded", sparseWildcardNamedSrc, "7423.0", false);
+          ("function_expression", functionScope, "7423.0", false);
+          ("snapshot_mutation", snapshot, "7423.0", false);
+          ("parent_failure_before_fold", failure, "late_sparse_parent", false) ]
+    [ for suffix, src, expected, admitted in cases do
+        yield withTransposeRows (fun () ->
+            let name = "sparse_wildcard_canonical_interpreter_and_cpp_" + suffix
+            match lower src with
+            | Error e -> resultLine Fail name e; false
+            | Ok ir ->
+                let proof = sparseWildcardProof ir.Modules.Head
+                let cpp = fst (CodeGen.genSelfContainedProgramFromIR ir name)
+                let run = Blade.Interp.Run.runProgram ir name Blade.Interp.Value.defaultLimits
+                let pin =
+                    if suffix = "parent_failure_before_fold" then
+                        run.ExitCode <> 0 && run.Stderr.Contains expected && not (run.Stderr.Contains "early_sparse_fold")
+                    else run.ExitCode = 0 && run.Stdout.Contains ("total = " + expected)
+                checkAll name run.Stdout "independent canonical gather result and actual C++ route"
+                    [ ("proof and emitted route", Result.isOk proof = admitted && cpp.Contains "// sparse wildcard terminal: no residual gather" = admitted);
+                      ("literal ordered/empty value or original failure", pin);
+                      ("snapshot before parent mutation", suffix <> "snapshot_mutation" || run.Stdout.Contains "after = 99.0");
+                      ("required parent read/result reuse", suffix <> "parent_read_and_scalar_reuse" || (run.Stdout.Contains "parent_cell = 4.0" && run.Stdout.Contains "reuse = 14846.0")) ] ) ]
+
+// C05-I1: sparse scalar assignment must mutate the existing compact store,
+// while wildcard reads remain snapshots and absent keys never gain storage.
+let private sparseWildcardInterpreterWrites () =
+    withTransposeRows (fun () ->
+        match lower sparseWildcardSrc with
+        | Error e -> resultLine Fail "sparse_wildcard_I1_setup" e; [false]
+        | Ok ir ->
+            let m = ir.Modules.Head
+            let parent = m.Bindings |> List.find (fun b -> b.Name = "S")
+            let at = match parent.Type with IR.ArrayElem a -> a | _ -> failwith "not sparse"
+            let keys = [| [|4L;1L|]; [|0L;3L|]; [|2L;1L|]; [|1L;0L|]; [|0L;1L|] |]
+            let makeSparse (arrType: IR.IRArrayType) (keyArray: int64[][]) (values: float[]) =
+                let rankOf, card = Blade.Interp.ArrayOps.buildSparseIndex keyArray
+                let dense = Blade.Interp.ArrayOps.mkDenseArray arrType.ElemType [] [|card|] (Blade.Interp.Value.SFloat values)
+                Blade.Interp.ArrayOps.buildSparse arrType dense keyArray rankOf card
+            let sv = makeSparse at keys [|4.0;9.0;2.0;8.0;3.0|]
+            let backing = sv.Data
+            let keyObject = sv.Keys
+            let rankObject = sv.RankOf
+            let keysBefore = keys |> Array.map Array.copy
+            let st = Blade.Interp.Core.makeState m Blade.Interp.Value.defaultLimits
+            let env = Blade.Interp.Value.envNew ()
+            let aliasId, countId = 993101, 993102
+            Blade.Interp.Value.envBind env parent.Id (Blade.Interp.Value.VSparse sv) |> ignore
+            Blade.Interp.Value.envBind env aliasId (Blade.Interp.Value.VSparse sv) |> ignore
+            let counter = Blade.Interp.Value.envBind env countId (Blade.Interp.Value.VInt 0L)
+            let asFloat = function Blade.Interp.Value.VFloat n -> n | _ -> failwith "expected Float64 cell"
+            let counterValue () = match counter.V with Blade.Interp.Value.VInt n -> n | _ -> failwith "expected Int64 counter"
+            let intTy = Blade.Types.IRTScalar Blade.Types.ETInt64
+            let lit n = IR.IRLit (IR.IRLitInt n)
+            let effect digit value =
+                let scaled = IR.IRBinOp (IR.IRElementwise, IR.IRMul, IR.IRVar (countId, intTy), lit 10L, IR.SrcLoc.Nowhere)
+                let next = IR.IRBinOp (IR.IRElementwise, IR.IRAdd, scaled, lit digit, IR.SrcLoc.Nowhere)
+                IR.IRLet (993110 + int digit, IR.IRAssign (IR.IRVar (countId, intTy), next), value)
+            let target =
+                IR.IRIndex (effect 2L (IR.IRVar (aliasId, parent.Type)),
+                    [IR.IRTuple [effect 3L (lit 4L); effect 4L (lit 1L)]], None)
+            let residual =
+                match Blade.Interp.ArrayOps.sparsePartial sv [(1, 1L)] [0] with
+                | Blade.Interp.Value.VArray a -> a
+                | _ -> failwith "rank1 gather changed"
+            Blade.Interp.Core.evalExpr st env (IR.IRAssign (target, effect 1L (IR.IRLit (IR.IRLitFloat 99.0)))) |> ignore
+            let sameStructure () =
+                obj.ReferenceEquals(sv.Data, backing) && obj.ReferenceEquals(sv.Keys, keyObject)
+                && obj.ReferenceEquals(sv.RankOf, rankObject) && sv.Keys = keysBefore
+                && sv.Cardinality = 5L && sv.TrailingStride = 1L && sv.IndexTypes = at.IndexTypes
+                && sv.RankOf.Count = 5
+                && (keys |> Array.mapi (fun r key -> Blade.Interp.ArrayOps.sparseLinearize sv key = r) |> Array.forall id)
+            let present =
+                checkAll "sparse_wildcard_I1_same_backing_alias_and_order" "" "RHS, target, packed coordinates each run once; only an existing cell changes"
+                    [ ("same Store/key/rank objects and exact index metadata", sameStructure ());
+                      ("formal-style shared backing observes store", asFloat (Blade.Interp.ArrayOps.sparseFullScalar sv [|4L;1L|] 0L) = 99.0);
+                      ("RHS then target then each coordinate exactly once", counterValue () = 1234L);
+                      ("other existing cells unchanged", asFloat (Blade.Interp.ArrayOps.sparseFullScalar sv [|0L;3L|] 0L) = 9.0);
+                      ("residual snapshot has independent backing", not (obj.ReferenceEquals(residual.Data, sv.Data))
+                          && ([0L;1L;2L] |> List.map (fun i -> asFloat (Blade.Interp.ArrayOps.readCell residual [i]))) = [4.0;2.0;3.0]) ]
+            let missing =
+                let before = [0..4] |> List.map (fun i -> asFloat (Blade.Interp.ArrayOps.sparseCompactCell sv i))
+                let mutable expectedPanic = false
+                counter.V <- Blade.Interp.Value.VInt 0L
+                try
+                    let missingTarget =
+                        IR.IRIndex (effect 2L (IR.IRVar (parent.Id, parent.Type)),
+                            [IR.IRTuple [effect 3L (lit 99L); effect 4L (lit 1L)]], None)
+                    Blade.Interp.Core.evalExpr st env (IR.IRAssign (missingTarget, effect 1L (IR.IRLit (IR.IRLitFloat 123.0)))) |> ignore
+                with Blade.Interp.Value.InterpPanic (code, message, _, _) ->
+                    expectedPanic <- code = "BL8006" && message = "index out of bounds: a key outside the sparse key set"
+                checkAll "sparse_wildcard_I1_missing_key_never_inserts" "" "same lookup panic as Sparse::operator(); no cell or key changed"
+                    [ ("established BL8006 and message", expectedPanic);
+                      ("RHS and target coordinates precede missing-key lookup", counterValue () = 1234L);
+                      ("same Store and immutable key/rank mapping", sameStructure ());
+                      ("all compact cells unchanged", before = ([0..4] |> List.map (fun i -> asFloat (Blade.Interp.ArrayOps.sparseCompactCell sv i)))) ]
+            let unsupported suffix (sparse: Blade.Interp.Value.SparseValue) indices =
+                let state = Blade.Interp.Core.makeState m Blade.Interp.Value.defaultLimits
+                let local = Blade.Interp.Value.envNew ()
+                Blade.Interp.Value.envBind local parent.Id (Blade.Interp.Value.VSparse sparse) |> ignore
+                let dataBefore, keysObjectBefore, rankObjectBefore = sparse.Data, sparse.Keys, sparse.RankOf
+                let cellsBefore = [0..Blade.Interp.ArrayOps.sparseCompactCount sparse - 1] |> List.map (fun i -> asFloat (Blade.Interp.ArrayOps.sparseCompactCell sparse i))
+                let mutable refused = false
+                try
+                    let ty = IR.mkArrayLike { at with ElemType = sparse.ElemType; IndexTypes = sparse.IndexTypes }
+                    let dst = IR.IRIndex (IR.IRVar (parent.Id, ty), indices, None)
+                    Blade.Interp.Core.evalExpr state local (IR.IRAssign (dst, IR.IRLit (IR.IRLitFloat 55.0))) |> ignore
+                with Blade.Interp.Core.InterpUnsupported _ -> refused <- true
+                let name = "sparse_wildcard_I1_declines_" + suffix
+                let unchanged =
+                    obj.ReferenceEquals(sparse.Data, dataBefore) && obj.ReferenceEquals(sparse.Keys, keysObjectBefore)
+                    && obj.ReferenceEquals(sparse.RankOf, rankObjectBefore)
+                    && cellsBefore = ([0..Blade.Interp.ArrayOps.sparseCompactCount sparse - 1] |> List.map (fun i -> asFloat (Blade.Interp.ArrayOps.sparseCompactCell sparse i)))
+                if refused && unchanged then resultLine Pass name "unsupported target does not mutate the parent"; true
+                else resultLine Fail name "unsupported sparse target accepted or changed storage"; false
+            let wildcard = unsupported "wildcard_write" sv [IR.IRTuple [IR.IRLit IR.IRLitUnit; lit 1L]]
+            let short = unsupported "prefix_write" sv [IR.IRTuple [lit 4L]]
+            let overlong = unsupported "overlong_tuple" sv [IR.IRTuple [lit 4L; lit 1L; lit 0L]]
+            let oneAxis = { at.IndexTypes.Head with Rank = 1; Extent = IR.IRSparseKeys (IR.SkStatic [[5L];[2L]]) }
+            let rank1Type = { at with IndexTypes = [oneAxis] }
+            let rank1 = makeSparse rank1Type [|[|5L|];[|2L|]|] [|50.0;20.0|]
+            Blade.Interp.Value.envBind env aliasId (Blade.Interp.Value.VSparse rank1) |> ignore
+            let rank1Target = IR.IRIndex (IR.IRVar (aliasId, IR.mkArrayLike rank1Type), [lit 2L], None)
+            Blade.Interp.Core.evalExpr st env (IR.IRAssign (rank1Target, IR.IRLit (IR.IRLitFloat 21.0))) |> ignore
+            let rank1Result =
+                checkAll "sparse_wildcard_I1_rank1_scalar_key_sugar" "" "rank1 normalizes to one packed key, not a dense ordinal"
+                    [ ("key2 changes second compact cell", asFloat (Blade.Interp.ArrayOps.sparseFullScalar rank1 [|2L|] 0L) = 21.0);
+                      ("key5 stays first", asFloat (Blade.Interp.ArrayOps.sparseFullScalar rank1 [|5L|] 0L) = 50.0) ]
+            let trailIx =
+                { at.IndexTypes.Head with
+                    Rank = 1
+                    IxKind = Blade.Types.IxKPlain
+                    Tag = Some "Trailing"
+                    Extent = lit 2L }
+            let trailType = { at with IndexTypes = at.IndexTypes @ [trailIx] }
+            let rankOf, card = Blade.Interp.ArrayOps.buildSparseIndex keys
+            let trailValues =
+                Blade.Interp.ArrayOps.mkDenseArray at.ElemType [] [|5L;2L|]
+                    (Blade.Interp.Value.SFloat [|4.0;40.0;9.0;90.0;2.0;20.0;8.0;80.0;3.0;30.0|])
+            let withTrail = Blade.Interp.ArrayOps.buildSparse trailType trailValues keys rankOf card
+            let trailing = unsupported "single_trailing_write" withTrail [IR.IRTuple [lit 2L; lit 1L]; lit 1L]
+            let row = unsupported "row_write" withTrail [IR.IRTuple [lit 2L; lit 1L]]
+            let multi = { withTrail with IndexTypes = withTrail.IndexTypes @ [trailIx] }
+            let multiResult = unsupported "unrepresented_multi_trailing" multi [IR.IRTuple [lit 2L; lit 1L]; lit 0L; lit 1L]
+            [present; missing; wildcard; short; overlong; rank1Result; trailing; row; multiResult])
+
+let private sparseWildcardInterpreterWriteSources () =
+    let prefix = sparseWildcardSrc.Substring(0, sparseWildcardSrc.IndexOf("let total =", System.StringComparison.Ordinal)).Replace("let S =", "let mut S =")
+    let alias =
+        prefix + "let mut alias = S\n"
+        + "function change(p: mut Array<Float64 like SparseIdx<K>>) -> Float64 = {\n    p((2, 1)) = 17.0\n    p((2, 1))\n}\n"
+        + "let total = change(alias)\nlet original = S((2, 1))\nlet untouched = S((4, 1))\n"
+    let missing =
+        prefix + "function change(p: mut Array<Float64 like SparseIdx<K>>, key: Int64) -> Float64 = {\n    p((key, 1)) = 17.0\n    0.0\n}\nlet total = change(S, 99)\n"
+    let dense =
+        "type I = Idx<2>\nlet mut a: Array<Float64 like I> = [2.0, 3.0]\n"
+        + "function change(p: mut Array<Float64 like I>) -> Float64 = {\n    p(0) = 9.0\n    p(0)\n}\nlet total = change(a)\nlet after = a(0)\n"
+    let cases =
+        [ ("sparse_alias_formal", alias, ["total = 17.0"; "original = 17.0"; "untouched = 4.0"], false);
+          ("missing_key", missing, ["BL8006"; "a key outside the sparse key set"], true);
+          ("dense_formal_control", dense, ["total = 9.0"; "after = 9.0"], false) ]
+    [ for suffix, source, pins, aborts in cases do
+        yield withTransposeRows (fun () ->
+            let name = "sparse_wildcard_I1_source_" + suffix
+            match lower source with
+            | Error e -> resultLine Fail name e; false
+            | Ok ir ->
+                let run = Blade.Interp.Run.runProgram ir name Blade.Interp.Value.defaultLimits
+                let output = if aborts then run.Stderr else run.Stdout
+                let checks =
+                    ("status", (if aborts then run.ExitCode <> 0 && run.ExitCode <> 125 else run.ExitCode = 0))
+                    :: (pins |> List.map (fun pin -> pin, output.Contains pin))
+                checkAll name (run.Stdout + "\n" + run.Stderr) (sprintf "interpreter exit=%d" run.ExitCode) checks) ]
+
 let private selectedTerminalLlvm () =
     let name = "selected_terminal_llvm_real_route_no_selection_allocations"
     withSelectedTerminal (fun () ->
@@ -6829,6 +7185,11 @@ let runOptimizeTests () =
           yield! transposeRowsInterpreterCases ()
           yield! transposeRowsRefusals ()
           yield! transposeRowsHiddenDemands ()
+          sparseWildcardEmission ()
+          yield! sparseWildcardCertificates ()
+          yield! sparseWildcardValuesAndRefusals ()
+          yield! sparseWildcardInterpreterWrites ()
+          yield! sparseWildcardInterpreterWriteSources ()
           // Compaction fusion v2 (round 3 item T4: the gather at the mask
           // site, positions elided under the demand census).
           compactionV2DefaultElides ()
