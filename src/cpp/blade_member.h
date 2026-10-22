@@ -553,5 +553,149 @@ static inline void blade_join_note_i64(const blade_join_csr_i64 *t, const char *
     fprintf(stderr, "[join] %s: CSR over %s, M %lld, form %s, buckets %lld; N %lld, |J| %lld\n",
             rel, right, (long long)t->m, blade_join_form_name(t->kind), (long long)t->nb, (long long)n, (long long)card);
 }
+/* ---- the KEY -> GROUP map (round 3 W3-1, aggregate-only grouping) --------
+ *
+ * Blade.Optimize.planGroupAggregate's DYNAMIC regime: a grouping whose groups
+ * are numbered by FIRST occurrence runs ONE find-or-insert per row here
+ * (both lanes: the C++ lane includes this header, the LLVM lane calls the
+ * shim's thin exports), and every group owns a RECORD of `slots` 8-byte
+ * slots that the caller's one pass advances in place (slot 0 the row count,
+ * slot j + 1 state j -- an Int64 in `.i`, a Float64 in `.d`).
+ *
+ *   - Group numbers are 0, 1, 2, ... in the order keys are FIRST seen: the
+ *     map's table order is never exposed (there is no iteration over it),
+ *     so no hash order can define an output order.
+ *   - Keys are compared with integer `==`; every Int64 is an ordinary key
+ *     (occupancy is its own byte array, no sentinel).
+ *   - The table is open addressing over a power-of-two capacity >= 16 at
+ *     load <= 1/2 (Fibonacci hashing, linear probing -- the member set's
+ *     scheme), doubled and rehashed when an insertion would pass 1/2.
+ *   - Records live in one array of rec_cap * slots slots, doubled when full;
+ *     a NEW group's record is all-zero (count 0), and an existing record's
+ *     address may change on a later insertion -- the caller re-reads it
+ *     (`blade_gkmap_record_i64`) after every `blade_gkmap_group_i64`.
+ *   - Allocation failure is reported, never hidden: `blade_gkmap_init_i64`
+ *     returns 0 and `blade_gkmap_group_i64` returns -1 (the map is left
+ *     consistent; the caller aborts).
+ * The interpreter does NOT use it (src/Interp keeps its own dictionary in
+ * first-occurrence order): the independent oracle of `blade test interp`. */
+typedef union blade_gk_slot {
+    int64_t i;
+    double d;
+} blade_gk_slot;
+
+typedef struct blade_gkmap_i64 {
+    int64_t *keys;          /* capacity slots (owned) */
+    int64_t *group;         /* capacity slots: the group number of keys[h] (owned) */
+    unsigned char *used;    /* capacity occupancy bytes (owned) */
+    uint64_t cap_mask;      /* capacity - 1 */
+    int shift;              /* 64 - log2(capacity) */
+    int64_t ngroups;        /* groups so far = the next group number */
+    int64_t slots;          /* record slots per group (>= 1) */
+    blade_gk_slot *rec;     /* rec_cap * slots slots (owned) */
+    int64_t rec_cap;        /* records allocated */
+} blade_gkmap_i64;
+
+static inline void blade_gkmap_free_i64(blade_gkmap_i64 *t) {
+    if (t->keys) BLADE_MEMBER_FREE(t->keys);
+    if (t->group) BLADE_MEMBER_FREE(t->group);
+    if (t->used) BLADE_MEMBER_FREE(t->used);
+    if (t->rec) BLADE_MEMBER_FREE(t->rec);
+    memset(t, 0, sizeof *t);
+}
+
+/* An empty map whose groups own `slots` record slots each. 1 on success, 0
+ * when an allocation fails (nothing is left allocated). */
+static inline int blade_gkmap_init_i64(blade_gkmap_i64 *t, int64_t slots) {
+    memset(t, 0, sizeof *t);
+    t->slots = slots < 1 ? 1 : slots;
+    t->cap_mask = 15;
+    t->shift = 60;
+    t->rec_cap = 16;
+    t->keys = (int64_t *)BLADE_MEMBER_MALLOC(16 * sizeof(int64_t));
+    t->group = (int64_t *)BLADE_MEMBER_MALLOC(16 * sizeof(int64_t));
+    t->used = (unsigned char *)BLADE_MEMBER_CALLOC(16, 1);
+    if ((uint64_t)t->slots <= (uint64_t)SIZE_MAX / (16 * sizeof(blade_gk_slot)))
+        t->rec = (blade_gk_slot *)BLADE_MEMBER_CALLOC((size_t)(16 * t->slots), sizeof(blade_gk_slot));
+    if (!t->keys || !t->group || !t->used || !t->rec) {
+        blade_gkmap_free_i64(t);
+        return 0;
+    }
+    return 1;
+}
+
+/* The group of `key`: an existing key answers its number; a new key is
+ * numbered `ngroups` (first occurrence) with an all-zero record. -1 when the
+ * table or the records cannot grow (the map is unchanged). */
+static inline int64_t blade_gkmap_group_i64(blade_gkmap_i64 *t, int64_t key) {
+    uint64_t h = ((uint64_t)key * BLADE_MEMBER_GOLDEN) >> t->shift;
+    while (t->used[h]) {
+        if (t->keys[h] == key) return t->group[h];
+        h = (h + 1) & t->cap_mask;
+    }
+    /* a new group: room for its record first */
+    if (t->ngroups == t->rec_cap) {
+        int64_t ncap = t->rec_cap * 2;
+        blade_gk_slot *nrec;
+        if (ncap <= 0 || (uint64_t)ncap > (uint64_t)SIZE_MAX / sizeof(blade_gk_slot) / (uint64_t)t->slots) return -1;
+        nrec = (blade_gk_slot *)BLADE_MEMBER_CALLOC((size_t)(ncap * t->slots), sizeof(blade_gk_slot));
+        if (!nrec) return -1;
+        memcpy(nrec, t->rec, (size_t)(t->rec_cap * t->slots) * sizeof(blade_gk_slot));
+        BLADE_MEMBER_FREE(t->rec);
+        t->rec = nrec;
+        t->rec_cap = ncap;
+    }
+    /* then the table: keep the load <= 1/2 after this insertion */
+    if ((uint64_t)(t->ngroups + 1) * 2 > t->cap_mask + 1) {
+        uint64_t ncap = (t->cap_mask + 1) * 2, i;
+        int64_t *nkeys, *ngroup;
+        unsigned char *nused;
+        if (ncap > ((uint64_t)1 << 61) || ncap > (uint64_t)SIZE_MAX / sizeof(int64_t)) return -1;
+        nkeys = (int64_t *)BLADE_MEMBER_MALLOC((size_t)ncap * sizeof(int64_t));
+        ngroup = (int64_t *)BLADE_MEMBER_MALLOC((size_t)ncap * sizeof(int64_t));
+        nused = (unsigned char *)BLADE_MEMBER_CALLOC((size_t)ncap, 1);
+        if (!nkeys || !ngroup || !nused) {
+            if (nkeys) BLADE_MEMBER_FREE(nkeys);
+            if (ngroup) BLADE_MEMBER_FREE(ngroup);
+            if (nused) BLADE_MEMBER_FREE(nused);
+            return -1;
+        }
+        {
+            int nshift = t->shift - 1;
+            uint64_t nmask = ncap - 1;
+            for (i = 0; i <= t->cap_mask; i++) {
+                if (t->used[i]) {
+                    uint64_t g = ((uint64_t)t->keys[i] * BLADE_MEMBER_GOLDEN) >> nshift;
+                    while (nused[g]) g = (g + 1) & nmask;
+                    nused[g] = 1;
+                    nkeys[g] = t->keys[i];
+                    ngroup[g] = t->group[i];
+                }
+            }
+            BLADE_MEMBER_FREE(t->keys);
+            BLADE_MEMBER_FREE(t->group);
+            BLADE_MEMBER_FREE(t->used);
+            t->keys = nkeys;
+            t->group = ngroup;
+            t->used = nused;
+            t->cap_mask = nmask;
+            t->shift = nshift;
+        }
+        h = ((uint64_t)key * BLADE_MEMBER_GOLDEN) >> t->shift;
+        while (t->used[h]) h = (h + 1) & t->cap_mask;
+    }
+    t->used[h] = 1;
+    t->keys[h] = key;
+    t->group[h] = t->ngroups;
+    return t->ngroups++;
+}
+
+/* Group g's record (slot 0 the count). Valid until the next insertion. */
+static inline blade_gk_slot *blade_gkmap_record_i64(const blade_gkmap_i64 *t, int64_t g) {
+    return t->rec + g * t->slots;
+}
+
+/* The number of groups so far. */
+static inline int64_t blade_gkmap_count_i64(const blade_gkmap_i64 *t) { return t->ngroups; }
 
 #endif /* BLADE_MEMBER_H */

@@ -1,0 +1,40 @@
+// TEST: Group aggregate one pass, signed zero and singletons
+// The state machines keep the exact bits of their chains (gap G71): an
+// UNSEEDED fold copies its first value as the state -- a lone -0.0 stays
+// -0.0, no identity is added to it -- and a SEEDED fold starts from its exact
+// seed, -0.0 included (-0.0 + -0.0 = -0.0). No universal identity is
+// substituted for a generic callable. The folds' kernels carry no reorder
+// licence, so every build runs their strict chains; the Float64 prodsum is
+// licensed by construction, so zs takes the one pass in the repro build
+// (the differentials) and keeps today's form in the default one.
+type Region = Idx<3>
+type Row = Idx<6>
+
+function zs(k: Array<Region like Row>, x: Array<Float64 like Row>) = {
+    let gk = group_keys(k)
+    let g = group_by(x, gk)
+    let a = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, lambda(p, q) -> p + q * 1.0, -0.0) |> compute
+    let b = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, lambda(p, q) -> p + q * 1.0, 0.0) |> compute
+    let q = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> prodsum(r, r) |> compute
+    (a, b, q)
+}
+
+function zu(k: Array<Region like Row>, x: Array<Float64 like Row>) = {
+    let gk = group_keys(k)
+    let g = group_by(x, gk)
+    let u = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, lambda(p, q) -> p * 1.0 + q) |> compute
+    u
+}
+
+// group 0 = two -0.0; group 1 = empty; group 2 = 1.5, -1.5 (sums to +0.0)
+let k1: Array<Region like Row> = [0, 0, 2, 2, -1, -1]
+let x1: Array<Float64 like Row> = [-0.0, -0.0, 1.5, -1.5, 9.0, 9.0]
+let (a, b, q) = zs(k1, x1)
+// EXPECT: a = [-0.0, -0.0, 0.0]
+// EXPECT: b = [0.0, 0.0, 0.0]
+// EXPECT: q = [0.0, 0.0, 4.5]
+// singletons: group 0 = -0.0 alone, group 1 = 2.5 alone, group 2 = -0.0, -0.0
+let k2: Array<Region like Row> = [0, 1, 2, 2, -1, -1]
+let x2: Array<Float64 like Row> = [-0.0, 2.5, -0.0, -0.0, 3.0, 3.0]
+let u = zu(k2, x2)
+// EXPECT: u = [-0.0, 2.5, -0.0]

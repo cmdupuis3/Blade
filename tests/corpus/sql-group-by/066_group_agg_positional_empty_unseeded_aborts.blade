@@ -1,0 +1,26 @@
+// TEST: Group aggregate unseeded fold over an empty positional group (aborts)
+// ABORT: BL8003
+// ABORT: reduce: empty array, no reduction possible
+// An UNSEEDED fold has no value for an empty group. Under the one pass (gap
+// G71) the check stays at the PEEL's own site and fires for the FIRST empty
+// group in group order (group 1 here), exactly where the peel's reduce over
+// that group's empty row raised it -- the accumulation moved to the grouping,
+// the failure did not. (The function returns one array, so the LLVM lane refuses this
+// program and the LLVM differential skips it: an inlined guard panic's LOCATION differs between
+// the lanes as written -- the C++ lane names the function, the LLVM lane the caller's binding,
+// gate on and off alike, a pre-existing divergence recorded in gap G71. The complete failure --
+// code, location, frames, order -- is compared gate off vs on PER LANE in the cli block.)
+type Region = Idx<3>
+type Row = Idx<4>
+
+function agg(k: Array<Region like Row>, v: Array<Int64 like Row>) = {
+    let gk = group_keys(k)
+    let g = group_by(v, gk)
+    let n = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> extents(r) |> compute
+    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b) |> compute
+    s
+}
+
+let keys: Array<Region like Row> = [0, 2, 0, 2]
+let vals: Array<Int64 like Row> = [1, 2, 3, 4]
+let s = agg(keys, vals)

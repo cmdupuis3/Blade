@@ -905,7 +905,11 @@ and private GkVal =
     { NGroups: string
       Offsets: string
       Perm: string
-      NSrc: int64 }
+      NSrc: int64
+      /// AGGREGATE-ONLY GROUPING (Optimize.planGroupAggregate): the one
+      /// pass's per-group row counts and one pool per peel state ("" for a
+      /// count state); None for the ordinary CSR (whose Perm is real).
+      Agg: (string * string list) option }
 
 and private Ctx =
     { /// Module-scope constants (string literals for print labels and panics).
@@ -1271,6 +1275,15 @@ let private shimTable : Map<string, ShimFn> =
           // the build's report: actual vs preferred representation (stderr
           // under BLADE_MEMBER_VERBOSE=1)
           "blade_member_note_llvm", io "void" [ "ptr"; "ptr"; "ptr" ]
+          // aggregate-only grouping's key -> group map (blade_member.h,
+          // Optimize.planGroupAggregate): init and the find-or-insert may
+          // allocate, grow and free their own tables and always return;
+          // record / count only read the map; fini frees it
+          "blade_gkmap_init_llvm", { Ret = "i32"; RetAttrs = ""; Args = [ "ptr"; "i64" ]; Group = grpShimFree }
+          "blade_gkmap_group_llvm", { Ret = "i64"; RetAttrs = ""; Args = [ "ptr"; "i64" ]; Group = grpShimFree }
+          "blade_gkmap_record_llvm", { Ret = "ptr"; RetAttrs = ""; Args = [ "ptr"; "i64" ]; Group = grpShimRead }
+          "blade_gkmap_count_llvm", { Ret = "i64"; RetAttrs = ""; Args = [ "ptr" ]; Group = grpShimRead }
+          "blade_gkmap_fini_llvm", { Ret = "void"; RetAttrs = ""; Args = [ "ptr" ]; Group = grpShimFree }
           "blade_out_str", io "void" [ "ptr" ]
           "blade_out_i64", io "void" [ "i64" ]
           "blade_out_f64", io "void" [ "double" ]
@@ -3938,10 +3951,9 @@ and private emitGroupKeysBinding (c: Ctx) (id: IRId) (keys: IRExpr list) (gkTy: 
     // negative-keys-drop?). ENUM: position-in-list select chain, an unknown
     // key aborts BL8006, nothing drops. POSITIONAL: bucket IS the key,
     // negatives drop, a key >= N aborts BL8006. DYNAMIC: buckets in
-    // first-occurrence order over the observed keys -- discovered here by a
-    // LINEAR scan of the distinct-keys table (O(n*G); correct at any size,
-    // and the once-per-program cost the plan later routes through a shim
-    // hash when it shows up in a profile), negatives drop.
+    // first-occurrence order over the observed keys -- discovered through the
+    // C core's key -> group map (one find-or-insert per row per pass; the
+    // linear distinct-key scan it replaced was O(n*G)), negatives drop.
     // The C++ lane's BL8006 guards (genGroupKeysBinding; interpreter twin
     // ArrayOps.buildGroupKeys): a key outside its EnumIdx, or a positional key
     // past the last bucket, aborts -- located at the declaration being
@@ -3958,6 +3970,32 @@ and private emitGroupKeysBinding (c: Ctx) (id: IRId) (keys: IRExpr list) (gkTy: 
                            Args = [ ScStr, m ] @ declLocArgs c })
         ln c "unreachable"
         lbl c lOk
+    // AGGREGATE-ONLY GROUPING (Blade.Optimize.planGroupAggregate): the one
+    // pass that also advances every peel's state, when this lane can place
+    // it; otherwise the CSR below, emitted exactly as before (and the
+    // handshake flag stays false, so the group_by and peel statements take
+    // their ordinary forms).
+    let panicCodeUnless (code: string) (ok: string) (msg: string) =
+        let lOk = freshLbl c "gk.ok"
+        let lBad = freshLbl c "gk.bad"
+        ln c (renderBr { Cond = ok; IfTrue = lOk; IfFalse = lBad })
+        lbl c lBad
+        needShim c "blade_panic_at"
+        let m = stringGlobal c ($"error[{code}]: " + msg)
+        ln c (renderCall { Dest = None; RetTy = ScVoid; Callee = "@blade_panic_at"
+                           Args = [ ScStr, m ] @ declLocArgs c })
+        ln c "unreachable"
+        lbl c lOk
+    let gaPlan = Blade.Optimize.GroupAggTable.tryGk id
+    (match gaPlan with Some p -> p.EmittedLlvm.Value <- false | None -> ())
+    let gaPlaced =
+        match gaPlan with
+        | Some plan -> emitGroupAggPass c id plan keyArr nsrc gkTy readKey ifThen panicCodeUnless
+        | None -> false
+    if gaPlaced then () else
+    // The dynamic regime's key -> group map (blade_member.h, through the
+    // shim), freed after the scatter pass.
+    let mutable dynMap : string option = None
     let (ngOp, bucketOf, dropNeg) : string * (string -> string) * bool =
         match enumInts with
         | Some vals ->
@@ -3991,6 +4029,48 @@ and private emitGroupKeysBinding (c: Ctx) (id: IRId) (keys: IRExpr list) (gkTy: 
                     panicUnless ok ($"index out of bounds: a group_keys key outside 0 .. {n - 1L}")
                     kReg
                 (string n, bucket, true)
+            | None when (match keyArr.Src with APool _ -> true | _ -> false) ->
+                // ONLY OVER A STORED KEY POOL (Codex second look at e6eadfa2,
+                // BLOCKER): the passes below read the key column once each, and
+                // a pool reads the same cells every time. A key PRODUCER (an
+                // inline map left unforced, its kernel possibly writing) is
+                // evaluated once per pass -- pre-existing -- and could answer
+                // keys the discovery never saw; a find-or-insert would then
+                // number groups past the CSR it already sized. Such a source
+                // keeps the linear scan below, whose unknown key lands in
+                // bucket 0 (bounded writes), exactly as before.
+                // First-occurrence discovery through the C core's key ->
+                // group map (blade_member.h; W3-1 retired the O(n * G) linear
+                // scan of the distinct keys): the discovery pass inserts each
+                // admitted key (numbering groups 0, 1, .. by first
+                // occurrence), the count and scatter passes look the same key
+                // up again (an existing key answers its number; the map's
+                // table order is never read).
+                let slot = allocaOf c "[128 x i8], align 8"
+                dynMap <- Some slot
+                needShim c "blade_gkmap_init_llvm"
+                let okInit = freshReg c
+                ln c ($"{okInit} = call i32 @blade_gkmap_init_llvm(ptr {slot}, i64 1)")
+                let okB = freshReg c
+                ln c ($"{okB} = icmp ne i32 {okInit}, 0")
+                panicCodeUnless "BL8005" okB "group_keys: the key -> group map could not be allocated"
+                let groupOf (kReg: string) =
+                    needShim c "blade_gkmap_group_llvm"
+                    let g = freshReg c
+                    ln c ($"{g} = call i64 @blade_gkmap_group_llvm(ptr {slot}, i64 {kReg})")
+                    let ok = freshReg c
+                    ln c (renderCmp { Dest = ok; Kind = "icmp"; Pred = "sge"; Ty = ScI64; Lhs = g; Rhs = "0" })
+                    panicCodeUnless "BL8005" ok "group_keys: the key -> group map could not grow"
+                    g
+                emitCountedLoop c nsrc (fun ki ->
+                    let k = readKey ki
+                    let ok = freshReg c
+                    ln c (renderCmp { Dest = ok; Kind = "icmp"; Pred = "sge"; Ty = ScI64; Lhs = k; Rhs = "0" })
+                    ifThen ok (fun () -> groupOf k |> ignore))
+                needShim c "blade_gkmap_count_llvm"
+                let ngReg = freshReg c
+                ln c ($"{ngReg} = call i64 @blade_gkmap_count_llvm(ptr {slot})")
+                (ngReg, groupOf, true)
             | None ->
                 // First-occurrence discovery. distinct[] can hold at most
                 // nsrc keys; the running count lives in a slot so the scan
@@ -4081,7 +4161,305 @@ and private emitGroupKeysBinding (c: Ctx) (id: IRId) (keys: IRExpr list) (gkTy: 
         let f = loadCell c ScI64 fp
         storeCell c ScI64 (i64At perm (i64Bin c "add" o.Reg f.Reg)) { Reg = ki; Ty = ScI64 }
         storeCell c ScI64 fp { Reg = i64Bin c "add" f.Reg "1"; Ty = ScI64 })
-    c.GroupKeys.[id] <- { NGroups = ngOp; Offsets = offs; Perm = perm; NSrc = nsrc }
+    (match dynMap with
+     | Some slot ->
+         needShim c "blade_gkmap_fini_llvm"
+         ln c ($"call void @blade_gkmap_fini_llvm(ptr {slot})")
+     | None -> ())
+    c.GroupKeys.[id] <- { NGroups = ngOp; Offsets = offs; Perm = perm; NSrc = nsrc; Agg = None }
+
+/// The AGGREGATE-ONLY grouping's one pass (Blade.Optimize.planGroupAggregate,
+/// gap G71; the C++ lane's genGroupAggKeysBinding twin): per row in source
+/// order, the key (the negative-key drop and the BL8006 guards exactly as the
+/// CSR's first key pass), the group (positional: the key; EnumIdx: the
+/// declared-order select chain; dynamic: ONE find-or-insert in
+/// blade_member.h's key -> group map through the shim, first-occurrence
+/// numbering, each group a record of 8-byte slots -- slot 0 the count), then
+/// each state's step: UNSEEDED -- the first value stored (no kernel call),
+/// every later one `acc = k(acc, v)` through `applyKernel` (the fold's own
+/// inlined kernel, no fold flags: the strict chain); SEEDED -- `acc = k(acc,
+/// v)` from the seed stored once per group (before the pass for the static
+/// regimes, at the group's first row for the dynamic one); PRODSUM -- `acc =
+/// acc + a * b` from 0 with emitProdSum's own flags; and the count. The
+/// grouping's GkVal then carries the counts and one pool per state (`Agg`)
+/// and no permutation. False -- nothing emitted -- when this lane cannot place
+/// it (the type's regime differs from the plan's, a non-Int64 key, a source
+/// that is not a dense rank-1 axis of the key's extent, an unresolved kernel).
+and private emitGroupAggPass (c: Ctx) (id: IRId) (plan: Blade.Optimize.GroupAggPlan) (keyArr: ArrVal) (nsrc: int64)
+                             (gkTy: IRType) (readKey: string -> string) (ifThen: string -> (unit -> unit) -> unit)
+                             (panicCodeUnless: string -> string -> string -> unit) : bool =
+    let regimeHere =
+        match gkTy with
+        | IRTGroupKeys (outer, _, ev) ->
+            (match Blade.IRPrint.tryEvalIntIR outer.Extent, ev with
+             | Some n, None -> Some (Blade.Optimize.GaPositional n)
+             | Some _, Some vs when vs |> List.forall (function EVInt _ -> true | _ -> false) ->
+                 Some (Blade.Optimize.GaEnum (vs |> List.choose (function EVInt n -> Some n | _ -> None)))
+             | Some _, Some _ -> None
+             | None, _ -> Some Blade.Optimize.GaDynamic)
+        | _ -> None
+    // the key column must be a stored pool: a producer read once per row here
+    // would change the CSR's evaluation count (one read per pass, as written)
+    if regimeHere <> Some plan.Regime || keyArr.Elem <> ScI64 then false
+    elif (match keyArr.Src with APool _ -> false | _ -> true) then false else
+    let srcArrs = plan.States |> List.map (fun st -> st.Sources |> List.map (consumeArrOperand c))
+    let dense (a: ArrVal) = match a.Groups with [ GDense n ] -> n = nsrc | _ -> false
+    let kernels =
+        plan.States |> List.map (fun st ->
+            match st.Kind with
+            | Blade.Optimize.GaSeeded (fk, _) | Blade.Optimize.GaUnseeded fk ->
+                (match resolveCallable fk with Some cl when cl.Params.Length = 2 -> Some cl | _ -> None)
+            | _ -> None)
+    let placeable =
+        srcArrs |> List.forall (List.forall dense)
+        && List.forall2 (fun (st: Blade.Optimize.GroupAggState) (k: IRCallable option) ->
+                match st.Kind with
+                | Blade.Optimize.GaSeeded _ | Blade.Optimize.GaUnseeded _ -> k.IsSome
+                | _ -> true) plan.States kernels
+    if not placeable then false else
+    plan.EmittedLlvm.Value <- true
+    let sc (et: ElemType) = if et = ETInt64 then ScI64 else ScF64
+    let iv (r: string) = { Reg = r; Ty = ScI64 }
+    let i64At (pool: string) (idx: string) = gepCell c ScI64 pool idx
+    let isZero (r: string) =
+        let z = freshReg c
+        ln c (renderCmp { Dest = z; Kind = "icmp"; Pred = "eq"; Ty = ScI64; Lhs = r; Rhs = "0" })
+        z
+    let ifElse (cond: string) (t: unit -> unit) (e: unit -> unit) =
+        let lT = freshLbl c "ga.first"
+        let lE = freshLbl c "ga.next"
+        let lJ = freshLbl c "ga.join"
+        ln c (renderBr { Cond = cond; IfTrue = lT; IfFalse = lE })
+        lbl c lT
+        t ()
+        ln c (sprintf "br label %%%s" lJ)
+        lbl c lE
+        e ()
+        ln c (sprintf "br label %%%s" lJ)
+        lbl c lJ
+    let zeroOf (ty: Sc) = { Reg = (if ty = ScF64 then f64Const 0.0 else "0"); Ty = ty }
+    let incr (p: string) =
+        let cur = loadCell c ScI64 p
+        storeCell c ScI64 p { Reg = i64Bin c "add" cur.Reg "1"; Ty = ScI64 }
+    // one state's step at row `ki`, its accumulator and count cells in hand
+    let step (j: int) (st: Blade.Optimize.GroupAggState) (accPtr: string) (cntPtr: string) (ki: string) (dynamic: bool) =
+        let ty = sc st.Elem
+        let readSrc (k: int) = coerce c ty (readCell c srcArrs.[j].[k] [ iv ki ])
+        let firstRow () = isZero (loadCell c ScI64 cntPtr).Reg
+        match st.Kind, kernels.[j] with
+        | Blade.Optimize.GaUnseeded _, Some cl ->
+            let v = readSrc 0
+            ifElse (firstRow ())
+                (fun () -> storeCell c ty accPtr v)
+                (fun () ->
+                    let acc = loadCell c ty accPtr
+                    storeCell c ty accPtr (coerce c ty (applyKernel c cl [ KScalar acc; KScalar v ])))
+        | Blade.Optimize.GaSeeded (_, seed), Some cl ->
+            if dynamic then
+                ifThen (firstRow ()) (fun () -> storeCell c ty accPtr (coerce c ty (emitExpr c seed)))
+            let acc = loadCell c ty accPtr
+            let v = readSrc 0
+            storeCell c ty accPtr (coerce c ty (applyKernel c cl [ KScalar acc; KScalar v ]))
+        | Blade.Optimize.GaProdSum, _ ->
+            if dynamic then ifThen (firstRow ()) (fun () -> storeCell c ty accPtr (zeroOf ty))
+            let a = readSrc 0
+            let b = readSrc 1
+            let prod = freshReg c
+            ln c (renderBin { Dest = prod; Opcode = (if ty = ScF64 then "fmul" else "mul"); Flags = fmfFor c ty; Ty = ty; Lhs = a.Reg; Rhs = b.Reg })
+            // emitProdSum's outer accumulation flags: its `+` is licensed by
+            // construction, so the build's polarity decides
+            let accFlags = withFoldFmf c (Blade.CodeGenState.fpReassocEnabled ()) (fun () -> fmfFor c ty)
+            let cur = loadCell c ty accPtr
+            let s = freshReg c
+            ln c (renderBin { Dest = s; Opcode = (if ty = ScF64 then "fadd" else "add"); Flags = accFlags; Ty = ty; Lhs = cur.Reg; Rhs = prod })
+            storeCell c ty accPtr { Reg = s; Ty = ty }
+        | _ -> ()
+    let isCount (st: Blade.Optimize.GroupAggState) = (match st.Kind with Blade.Optimize.GaCount -> true | _ -> false)
+    let prefixOffsets (ngOp: string) (counts: string) =
+        let ngPlus1 =
+            match tryLitI64 ngOp with
+            | Some n -> string (n + 1L)
+            | None -> i64Bin c "add" ngOp "1"
+        let offs = allocPool c ScI64 ngPlus1
+        storeCell c ScI64 (i64At offs "0") { Reg = "0"; Ty = ScI64 }
+        emitCountedLoopTo c ngOp (fun gi ->
+            let o = loadCell c ScI64 (i64At offs gi)
+            let n = loadCell c ScI64 (i64At counts gi)
+            storeCell c ScI64 (i64At offs (i64Bin c "add" gi "1")) { Reg = i64Bin c "add" o.Reg n.Reg; Ty = ScI64 })
+        offs
+    match plan.Regime with
+    | Blade.Optimize.GaDynamic ->
+        let slot = allocaOf c "[128 x i8], align 8"
+        needShim c "blade_gkmap_init_llvm"
+        let okInit = freshReg c
+        ln c ($"{okInit} = call i32 @blade_gkmap_init_llvm(ptr {slot}, i64 {plan.States.Length + 1})")
+        let okB = freshReg c
+        ln c ($"{okB} = icmp ne i32 {okInit}, 0")
+        panicCodeUnless "BL8005" okB "group_keys: the key -> group map could not be allocated"
+        needShim c "blade_gkmap_group_llvm"
+        needShim c "blade_gkmap_record_llvm"
+        let recordOf (g: string) =
+            let r = freshReg c
+            ln c ($"{r} = call ptr @blade_gkmap_record_llvm(ptr {slot}, i64 {g})")
+            r
+        emitCountedLoop c nsrc (fun ki ->
+            let k = readKey ki
+            let ok = freshReg c
+            ln c (renderCmp { Dest = ok; Kind = "icmp"; Pred = "sge"; Ty = ScI64; Lhs = k; Rhs = "0" })
+            ifThen ok (fun () ->
+                let g = freshReg c
+                ln c ($"{g} = call i64 @blade_gkmap_group_llvm(ptr {slot}, i64 {k})")
+                let gok = freshReg c
+                ln c (renderCmp { Dest = gok; Kind = "icmp"; Pred = "sge"; Ty = ScI64; Lhs = g; Rhs = "0" })
+                panicCodeUnless "BL8005" gok "group_keys: the key -> group map could not grow"
+                let rcd = recordOf g
+                let cntPtr = i64At rcd "0"
+                plan.States |> List.iteri (fun j st ->
+                    if not (isCount st) then step j st (i64At rcd (string (j + 1))) cntPtr ki true)
+                incr cntPtr))
+        needShim c "blade_gkmap_count_llvm"
+        let ng = freshReg c
+        ln c ($"{ng} = call i64 @blade_gkmap_count_llvm(ptr {slot})")
+        let counts = allocPool c ScI64 ng
+        let pools =
+            plan.States |> List.map (fun st -> if isCount st then "" else allocPool c (sc st.Elem) ng)
+        emitCountedLoopTo c ng (fun g ->
+            let rcd = recordOf g
+            storeCell c ScI64 (i64At counts g) (loadCell c ScI64 (i64At rcd "0"))
+            plan.States |> List.iteri (fun j st ->
+                if not (isCount st) then
+                    let ty = sc st.Elem
+                    storeCell c ty (gepCell c ty pools.[j] g) (loadCell c ty (i64At rcd (string (j + 1))))))
+        needShim c "blade_gkmap_fini_llvm"
+        ln c ($"call void @blade_gkmap_fini_llvm(ptr {slot})")
+        let offs = prefixOffsets ng counts
+        c.GroupKeys.[id] <- { NGroups = ng; Offsets = offs; Perm = "null"; NSrc = nsrc; Agg = Some (counts, pools) }
+        true
+    | Blade.Optimize.GaPositional _ | Blade.Optimize.GaEnum _ ->
+        let (ngroups, bucket, dropNeg) : int64 * (string -> string) * bool =
+            match plan.Regime with
+            | Blade.Optimize.GaEnum vals ->
+                let bucket (kReg: string) =
+                    let mutable acc = "0"
+                    let mutable found = "false"
+                    vals |> List.iteri (fun i v ->
+                        let eq = freshReg c
+                        ln c (renderCmp { Dest = eq; Kind = "icmp"; Pred = "eq"; Ty = ScI64; Lhs = kReg; Rhs = string v })
+                        let sel = freshReg c
+                        ln c (sprintf "%s = select i1 %s, i64 %d, i64 %s" sel eq i acc)
+                        acc <- sel
+                        let f = freshReg c
+                        ln c (sprintf "%s = or i1 %s, %s" f found eq)
+                        found <- f)
+                    panicCodeUnless "BL8006" found "index out of bounds: a group_keys key outside its EnumIdx"
+                    acc
+                (int64 vals.Length, bucket, false)
+            | Blade.Optimize.GaPositional n ->
+                let bucket (kReg: string) =
+                    let ok = freshReg c
+                    ln c (renderCmp { Dest = ok; Kind = "icmp"; Pred = "slt"; Ty = ScI64; Lhs = kReg; Rhs = string n })
+                    panicCodeUnless "BL8006" ok ($"index out of bounds: a group_keys key outside 0 .. {n - 1L}")
+                    kReg
+                (n, bucket, true)
+            | Blade.Optimize.GaDynamic -> (0L, (fun k -> k), true)
+        let ngOp = string ngroups
+        let counts = allocPool c ScI64 ngOp
+        let pools =
+            plan.States |> List.map (fun st -> if isCount st then "" else allocPool c (sc st.Elem) ngOp)
+        emitCountedLoop c ngroups (fun g ->
+            storeCell c ScI64 (i64At counts g) { Reg = "0"; Ty = ScI64 }
+            plan.States |> List.iteri (fun j st ->
+                let ty = sc st.Elem
+                match st.Kind with
+                | Blade.Optimize.GaSeeded (_, seed) ->
+                    storeCell c ty (gepCell c ty pools.[j] g) (coerce c ty (emitExpr c seed))
+                | Blade.Optimize.GaProdSum ->
+                    storeCell c ty (gepCell c ty pools.[j] g) (zeroOf ty)
+                | _ -> ()))
+        emitCountedLoop c nsrc (fun ki ->
+            let k = readKey ki
+            let body () =
+                let b = bucket k
+                let cntPtr = i64At counts b
+                plan.States |> List.iteri (fun j st ->
+                    if not (isCount st) then step j st (gepCell c (sc st.Elem) pools.[j] b) cntPtr ki false)
+                incr cntPtr
+            if dropNeg then
+                let ok = freshReg c
+                ln c (renderCmp { Dest = ok; Kind = "icmp"; Pred = "sge"; Ty = ScI64; Lhs = k; Rhs = "0" })
+                ifThen ok body
+            else body ())
+        let offs = prefixOffsets ngOp counts
+        c.GroupKeys.[id] <- { NGroups = ngOp; Offsets = offs; Perm = "null"; NSrc = nsrc; Agg = Some (counts, pools) }
+        true
+
+/// A grouped array of an aggregate-only grouping whose one pass this lane
+/// placed: the ragged pair over the grouping's offsets with NO pool (every
+/// consumer is a peel that reads its state; the rows are never read).
+and private bindGroupAggRows (c: Ctx) (id: IRId) (values: IRExpr) (grouping: IRExpr) : unit =
+    let gk = gkOf c grouping
+    // FAIL CLOSED (Codex diff review of W3-1, finding 1): the rows are skipped
+    // only over a source whose cells already exist -- the plan proved it
+    // stored; a source this lane holds as anything but a pool (a producer the
+    // gather would have RUN) refuses the program instead of dropping that
+    // evaluation (the C++ lane then runs it, forcing as written).
+    (match (consumeArrOperand c values).Src with
+     | APool _ -> ()
+     | _ -> refuse "an aggregate-only grouping whose value source is not a stored pool in this lane (its evaluation cannot be skipped)")
+    let elem =
+        match Blade.IR.stripUnits (typeOf values) with
+        | ArrayElem at -> (match scalarTyOf at.ElemType with Some s -> s | None -> refuse "a group_by over non-scalar values")
+        | _ -> refuse "a group_by over a non-array value"
+    bindArray c id "" { Elem = elem; Groups = [ GRagged (gk.NGroups, RtDynamic gk.Offsets) ]; Src = APool "null"; RowOpBytes = 0L }
+
+/// A PEEL of an aggregate-only grouping whose one pass this lane placed
+/// (the C++ lane's genGroupAggPeelCpp twin): the COUNT from the offsets, an
+/// UNSEEDED reduce's BL8003 for the FIRST empty group in group order at this
+/// declaration, then the state's pool as the peel's stored output. False when
+/// the binding is no planned peel or the pass was not placed.
+and private tryBindGroupAggPeel (c: Ctx) (id: IRId) : bool =
+    match Blade.Optimize.GroupAggTable.tryPeel id with
+    | Some (plan, j) when plan.EmittedLlvm.Value ->
+        bindGroupAggPeelIn c id plan j
+    | _ -> false
+
+and private bindGroupAggPeelIn (c: Ctx) (id: IRId) (plan: Blade.Optimize.GroupAggPlan) (j: int) : bool =
+        (match c.GroupKeys.TryGetValue plan.GkId with
+         | true, ({ Agg = Some (counts, pools) } as gk) ->
+             let st = plan.States.[j]
+             let ty = if st.Elem = ETInt64 then ScI64 else ScF64
+             let pool =
+                 match st.Kind with
+                 | Blade.Optimize.GaCount ->
+                     let p = allocPool c ScI64 gk.NGroups
+                     emitCountedLoopTo c gk.NGroups (fun g ->
+                         let lo = loadCell c ScI64 (gepCell c ScI64 gk.Offsets g)
+                         let hi = loadCell c ScI64 (gepCell c ScI64 gk.Offsets (i64Bin c "add" g "1"))
+                         storeCell c ScI64 (gepCell c ScI64 p g) { Reg = i64Bin c "sub" hi.Reg lo.Reg; Ty = ScI64 })
+                     p
+                 | Blade.Optimize.GaUnseeded _ ->
+                     // inside the peel kernel's frame, as the peel's own
+                     // reduce raised it (the backtrace keeps its line)
+                     framePush c st.KernelFrame
+                     emitCountedLoopTo c gk.NGroups (fun g ->
+                         let n = loadCell c ScI64 (gepCell c ScI64 counts g)
+                         let isEmpty = freshReg c
+                         ln c ($"{isEmpty} = icmp eq i64 {n.Reg}, 0")
+                         let lEmpty = freshLbl c "ga.empty"
+                         let lOk = freshLbl c "ga.ok"
+                         ln c (renderBr { Cond = isEmpty; IfTrue = lEmpty; IfFalse = lOk })
+                         lbl c lEmpty
+                         needShim c "blade_panic_at"
+                         let msg = stringGlobal c "error[BL8003]: reduce: empty array, no reduction possible"
+                         ln c (renderCall { Dest = None; RetTy = ScVoid; Callee = "@blade_panic_at"; Args = [ ScStr, msg ] @ declLocArgs c })
+                         ln c "unreachable"
+                         lbl c lOk)
+                     framePop c
+                     pools.[j]
+                 | _ -> pools.[j]
+             bindArray c id "" { Elem = ty; Groups = [ denseOfOp gk.NGroups ]; Src = APool pool; RowOpBytes = 0L }
+             true
+         | _ -> false)
 
 /// Resolve a grouping operand to its emitted tables. BL3017 makes the bare
 /// name the only legal spelling, so anything else here is an escape.
@@ -4114,6 +4492,14 @@ and private bindLetIn (c: Ctx) (id: IRId) (value: IRExpr) (scope: IRExpr) : unit
         (match found with
          | Some ty -> emitGroupKeysBinding c id keys ty
          | None -> ())
+    // Aggregate-only grouping (Blade.Optimize.planGroupAggregate): once the
+    // grouping placed its one pass, its grouped arrays carry no rows and its
+    // peels read their states.
+    | IRGroupBy (values, grouping) when (match Blade.Optimize.GroupAggTable.tryGroupBy id with
+                                         | Some p -> p.EmittedLlvm.Value
+                                         | None -> false) ->
+        bindGroupAggRows c id values grouping
+    | IRCompute _ when tryBindGroupAggPeel c id -> ()
     | _ -> bindLet c id value
 
 /// Bind a NAME to a value: the one entry point for both `IRLet` and a

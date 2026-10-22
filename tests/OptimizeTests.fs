@@ -5690,6 +5690,350 @@ let private recStepCases () : bool list =
           [ region; "__rspart_" ] ]
 
 // ---------------------------------------------------------------------------
+// Aggregate-only grouping (round 3 wave 3, W3-1; Optimize.planGroupAggregate,
+// rule `group-aggregate`, gap G71): the decision record -- the three regimes,
+// the four state machines, the strict-first association, the five-party
+// matrix, every decline -- and both lanes' one pass (no permutation, no
+// gathered pool), with the gate-off control. The values are pinned by corpus
+// sql-group-by/064-074.
+// ---------------------------------------------------------------------------
+
+let private gaRule = "group-aggregate"
+let private gaHead = "type Row = Idx<5>\ntype Region = Idx<4>\n"
+let private gaCall (fn: string) (args: string) = $"let keys: Array<Int64 like Row> = [7, 3, 7, 9, 3]\nlet vals: Array<Int64 like Row> = [1, 2, 3, 4, 5]\nlet xs: Array<Float64 like Row> = [1.0, 2.0, 4.0, 8.0, 16.0]\nlet out = {fn}({args})\n"
+/// dynamic keys, the four state machines (integer: exact in every build)
+let private gaDynSrc =
+    gaHead
+    + "function agg(k: Array<Int64 like Row>, v: Array<Int64 like Row>) = {\n"
+    + "    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
+    + "    let u = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b) |> compute\n"
+    + "    let t = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+), 1000) |> compute\n"
+    + "    let q = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> prodsum(r, r) |> compute\n"
+    + "    let n = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> extents(r) |> compute\n"
+    + "    let c = extents(gk)\n    (u, t, q, n, c)\n}\n"
+    + gaCall "agg" "keys, vals"
+/// positional keys with an empty group
+let private gaPosSrc =
+    gaHead
+    + "function agg(k: Array<Region like Row>, v: Array<Int64 like Row>) = {\n"
+    + "    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
+    + "    let t = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+), 100) |> compute\n"
+    + "    let q = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> prodsum(r, r) |> compute\n"
+    + "    (t, q)\n}\n"
+    + "let pk: Array<Region like Row> = [2, 0, 2, -1, 3]\nlet vals: Array<Int64 like Row> = [1, 2, 3, 4, 5]\nlet out = agg(pk, vals)\n"
+/// EnumIdx keys, declared unsorted with a negative member
+let private gaEnumSrc =
+    "type Code = EnumIdx<[7, -2, 3]>\ntype Row = Idx<4>\n"
+    + "function agg(k: Array<Code like Row>, v: Array<Int64 like Row>) = {\n"
+    + "    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
+    + "    let t = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+), 0) |> compute\n    t\n}\n"
+    + "let codes: Array<Code like Row> = [-2, 7, -2, 7]\nlet vals: Array<Int64 like Row> = [1, 2, 3, 4]\nlet out = agg(codes, vals)\n"
+/// a licensed Float64 builtin fold and a Float64 prodsum
+let private gaFloatSrc =
+    gaHead
+    + "function agg(k: Array<Int64 like Row>, x: Array<Float64 like Row>) = {\n"
+    + "    let gk = group_keys(k)\n    let g = group_by(x, gk)\n"
+    + "    let s = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n"
+    + "    let q = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> prodsum(r, r) |> compute\n"
+    + "    (s, q)\n}\n"
+    + gaCall "agg" "keys, xs"
+let private gaDeclineSrc (body: string) =
+    gaHead
+    + "function agg(k: Array<Int64 like Row>, v: Array<Int64 like Row>) = {\n" + body + "}\n"
+    + gaCall "agg" "keys, vals"
+let private gaRowReadSrc =
+    gaDeclineSrc ("    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
+                  + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n"
+                  + "    let h = method_for(g) <@> lambda(r) -> r(0) |> compute\n    (s, h)\n")
+let private gaOmpSrc =
+    gaDeclineSrc ("    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
+                  + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) where omp(r: 1) -> reduce(r, (+)) |> compute\n    s\n")
+let private gaLateSeedSrc =
+    gaHead
+    + "function agg(k: Array<Int64 like Row>, v: Array<Int64 like Row>, b: Int64) = {\n"
+    + "    let gk = group_keys(k)\n    let s0 = b * 2\n    let g = group_by(v, gk)\n"
+    + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+), s0) |> compute\n    s\n}\n"
+    + gaCall "agg" "keys, vals, 5"
+let private gaDeferredSrc =
+    gaHead + "let lazy = method_for(range<Row>) <@> lambda(i) -> Int64(i) * 10\n"
+    + "function agg(k: Array<Int64 like Row>) = {\n"
+    + "    let gk = group_keys(k)\n    let g = group_by(lazy, gk)\n"
+    + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b) |> compute\n    s\n}\n"
+    + gaCall "agg" "keys"
+let private gaWritingSrc =
+    "type One = Idx<1>\n" + gaHead
+    + "let mut calls: Array<Int64 like One> = [0]\n"
+    + "function bump(c: mut Array<Int64 like One>, a: Int64, b: Int64) -> Int64 = {\n    c(0) = c(0) + 1\n    a + b\n}\n"
+    + "function agg(k: Array<Int64 like Row>, v: Array<Int64 like Row>) = {\n"
+    + "    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
+    + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> bump(calls, a, b)) |> compute\n    s\n}\n"
+    + gaCall "agg" "keys, vals"
+let private gaBetweenWriterSrc =
+    "type One = Idx<1>\n" + gaHead
+    + "let mut log: Array<Int64 like One> = [0]\n"
+    + "function note(c: mut Array<Int64 like One>) -> Int64 = {\n    c(0) = c(0) + 1\n    c(0)\n}\n"
+    + "function agg(k: Array<Int64 like Row>, v: Array<Int64 like Row>) = {\n"
+    + "    let gk = group_keys(k)\n    let w = note(log)\n    let g = group_by(v, gk)\n"
+    + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n    (w, s)\n}\n"
+    + gaCall "agg" "keys, vals"
+let private gaBucketSrc =
+    gaDeclineSrc ("    let gk = group_keys(k)\n    let g = group_by(v, gk)\n    let b = group_bucket(gk)\n"
+                  + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n    (b, s)\n")
+let private gaTopLevelSrc =
+    gaHead + "let keys: Array<Int64 like Row> = [7, 3, 7, 9, 3]\nlet vals: Array<Int64 like Row> = [1, 2, 3, 4, 5]\n"
+    + "let tgk = group_keys(keys)\nlet tg = group_by(vals, tgk)\n"
+    + "let ts = method_for(tg) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n"
+let private gaMultiKeySrc =
+    gaDeclineSrc ("    let gk = group_keys(k, v)\n    let g = group_by(v, gk)\n"
+                  + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n    s\n")
+let private gaApplied (d: Blade.Effects.Decision) = applied d && d.Subject = "agg"
+let private gaLazyHead =
+    "type Two = Idx<2>\nlet den: Array<Int64 like Two> = [1, 0]\nlet lazy = method_for(den) <@> lambda(d) -> 10 / d\nlet k: Array<Int64 like Two> = [7, 7]\nlet v: Array<Int64 like Two> = [3, 4]\n"
+let private gaCountOnlyLazySrc =
+    gaLazyHead
+    + "function counts(key: Array<Int64 like Two>) -> Int64 = {\n    let gk = group_keys(key)\n    let g = group_by(lazy, gk)\n"
+    + "    let n = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> extents(r) |> compute\n    reduce(n, (+))\n}\nlet total = counts(k)\n"
+let private gaUnusedLazySrc =
+    gaLazyHead
+    + "function sums(key: Array<Int64 like Two>, x: Array<Int64 like Two>) -> Int64 = {\n    let gk = group_keys(key)\n    let g = group_by(x, gk)\n    let unused = group_by(lazy, gk)\n"
+    + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n    reduce(s, (+))\n}\nlet total = sums(k, v)\n"
+let private gaMixedTypeSrc =
+    "type Row = Idx<3>\ntype Region = Idx<2>\n"
+    + "function f(k: Array<Region like Row>, v: Array<Int64 like Row>) = {\n    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
+    + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> Float64(a) + Float64(b)) |> compute\n    (s, s)\n}\n"
+    + "let keys: Array<Region like Row> = [0, 1, 1]\nlet vals: Array<Int64 like Row> = [9007199254740993, 9007199254740993, 2]\nlet (s, s2) = f(keys, vals)\n"
+let private gaWritingProducerSrc =
+    "type One = Idx<1>\n" + gaHead
+    + "let mut log: Array<Int64 like One> = [0]\n"
+    + "function make(l: mut Array<Int64 like One>) -> Array<Int64 like Row> = {\n    l(0) = l(0) + 1\n    [1, 2, 3, 4, 5]\n}\n"
+    + "let logged = make(log)\n"
+    + "function agg(k: Array<Int64 like Row>) = {\n    let gk = group_keys(k)\n    let g = group_by(logged, gk)\n"
+    + "    let n = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> extents(r) |> compute\n    n\n}\n"
+    + "let keys: Array<Int64 like Row> = [7, 3, 7, 9, 3]\nlet out = agg(keys)\n"
+let private gaDeferredArgSrc =
+    gaHead + "let lazyv = method_for(range<Row>) <@> lambda(i) -> Int64(i) * 10\n"
+    + "function agg(k: Array<Int64 like Row>, v: Array<Int64 like Row>) = {\n    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
+    + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n    s\n}\n"
+    + "let keys: Array<Int64 like Row> = [7, 3, 7, 9, 3]\nlet out = agg(keys, lazyv)\n"
+let private gaAssignedSrc =
+    gaHead
+    + "function agg(k: Array<Int64 like Row>, v: Array<Int64 like Row>) = {\n    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
+    + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n    s\n}\n"
+    + "let keys: Array<Int64 like Row> = [7, 3, 7, 9, 3]\nlet mut vals: Array<Int64 like Row> = [1, 2, 3, 4, 5]\nvals(0) = 9\nlet out = agg(keys, vals)\n"
+let private gaBlockArgSrc =
+    gaHead
+    + "function mk() -> Array<Int64 like Row> = [1, 2, 3, 4, 5]\n"
+    + "function agg(k: Array<Int64 like Row>, v: Array<Int64 like Row>) -> Int64 = {\n    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
+    + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n    reduce(s, (+))\n}\n"
+    + "let out = {\n    let kk: Array<Int64 like Row> = [7, 3, 7, 9, 3]\n    let vv = mk()\n    agg(kk, vv)\n}\n"
+
+let private groupAggDecisionCases () =
+    [ decisionCase "decision_group_agg_dynamic_applied" gaDynSrc gaRule
+          (fun d -> gaApplied d
+                    && evidenceHas "one pass over the rows in source order; states u, t, q, n; no perm, no gather" d
+                    && evidenceHas "dynamic: groups numbered by FIRST occurrence, through ONE find-or-insert per row in the C core" d)
+          "applied: dynamic keys, four states, one pass"
+      decisionCase "decision_group_agg_four_state_machines" gaDynSrc gaRule
+          (fun d -> gaApplied d
+                    && evidenceHas "`u`: UNSEEDED reduce (first value copied and consumed once" d
+                    && evidenceHas "`t`: SEEDED reduce (the chain from the exact seed" d
+                    && evidenceHas "`q`: PRODSUM (acc = 0, then acc += a * b)" d
+                    && evidenceHas "`n`: COUNT" d)
+          "the four state machines, each named"
+      decisionCase "decision_group_agg_five_party_matrix" gaDynSrc gaRule
+          (fun d -> gaApplied d
+                    && evidenceHas "groupAggAdmits (five parties, each through Optimize.scheduleMayWriteIn): producers (the key and EVERY group_by operand, count-only and unused ones included" d
+                    && evidenceHas "the key array: a parameter of `agg`; at each of its 1 call site(s): `keys`: a module binding, an array literal; producer payload(s) `keys`: scheduleMayWriteIn + CSE facts, no write" d
+                    && evidenceHas "consumer (peel) kernels `u`, `t`, `q`, `n`: no write" d
+                    && evidenceHas "outer fold kernels: 2, each closed-total (Blade.IRTotality), no write" d
+                    && evidenceHas "seeds: 1, each closed-total, no write, row-independent and dominating" d
+                    && evidenceHas "between the grouping and its last use:" d
+                    && evidenceHas "parallel: none -- the one pass is serial" d)
+          "the five-party matrix recorded"
+      decisionCase "decision_group_agg_first_failure_and_unproved" gaDynSrc gaRule
+          (fun d -> gaApplied d
+                    && evidenceHas "first failure: the pass raises only the grouping's own BL8006" d
+                    && evidenceHas "each unseeded peel keeps its BL8003 at its own site for the FIRST empty group in group order" d
+                    && evidenceHas "unproved: the bit identity with the two-pass form is ARGUED" d
+                    && evidenceHas "printed-value witnesses -- corpus sql-group-by/064-074 in the C++ lane" d)
+          "the failure order and what is unproved, stated"
+      decisionCase "decision_group_agg_integer_exact_in_default_build" gaDynSrc gaRule
+          (fun d -> gaApplied d && evidenceHas "exact (an integer builtin fold: wrapping, associative and commutative" d
+                    && evidenceHas "strict (the kernel carries no reorder licence: every build runs this exact chain)" d)
+          "default build: the integer builtin fold is exact, the 3a+b fold strict"
+      decisionCase "decision_group_agg_positional_empty_groups" gaPosSrc gaRule
+          (fun d -> gaApplied d && evidenceHas "positional (Idx<4> keys): group g is key value g, 0 .. 3, EMPTY groups included" d)
+          "applied: positional regime, empty groups included"
+      decisionCase "decision_group_agg_enum_declared_order" gaEnumSrc gaRule
+          (fun d -> gaApplied d && evidenceHas "EnumIdx (3 declared members; the stored key of each, in declared order: [0, 1, 2]): groups in the DECLARED enumeration order (never sorted by value)" d
+                    && evidenceHas "negative members valid (an EnumIdx key never drops)" d)
+          "applied: EnumIdx in declared order, negative member valid"
+      decisionCase "decision_group_agg_licensed_float_declined" gaFloatSrc gaRule
+          (fun d -> d.Subject = "agg" && declinedMentioning "`s` is a licensed Float64 fold: the one pass's ascending chain is a different association from today's licensed forms (the C++ lane's per-group K-lane tree; the LLVM lane's flagged recurrence), so v1 declines in both lanes -- a conservative shared gate" d)
+          "default build: a licensed Float64 fold keeps today's form (strict first)"
+      withGate "BLADE_FP_REPRO" "1" (fun () ->
+          decisionCase "decision_group_agg_repro_float_applied" gaFloatSrc gaRule
+              (fun d -> gaApplied d && evidenceHas "`s`: UNSEEDED reduce (first value copied and consumed once; empty group: BL8003 at the peel), strict (the repro build): the chain as written" d
+                        && evidenceHas "`q`: PRODSUM (acc = 0, then acc += a * b), strict (the repro build)" d)
+              "repro build: the Float64 states take the strict pass")
+      withGate "BLADE_GROUP_AGG" "licensed" (fun () ->
+          decisionCase "decision_group_agg_licensed_arm" gaFloatSrc gaRule
+              (fun d -> gaApplied d && evidenceHas "LICENSED (BLADE_GROUP_AGG=licensed, an EXPERIMENTAL arm): the ascending chain in place of today's form -- in the C++ lane a per-group K-lane tree, in the LLVM lane a recurrence carrying the fold's fast-math flags" d)
+              "BLADE_GROUP_AGG=licensed: the licensed float arm, recorded as an association change")
+      withGate "BLADE_GROUP_AGG" "0" (fun () ->
+          decisionCase "decision_group_agg_disabled" gaDynSrc gaRule
+              (fun d -> d.Subject = "agg" && declinedMentioning "disabled by BLADE_GROUP_AGG" d) "declined: disabled by BLADE_GROUP_AGG")
+      decisionCase "decision_group_agg_declined_row_read" gaRowReadSrc gaRule
+          (fun d -> d.Subject = "agg" && declinedMentioning "the peel `h`'s kernel is outside the aggregate subset" d) "declined: a row-reading consumer r(0)"
+      decisionCase "decision_group_agg_declined_omp_peel" gaOmpSrc gaRule
+          (fun d -> d.Subject = "agg" && declinedMentioning "is a `where omp` peel" d) "declined: a `where omp` peel"
+      decisionCase "decision_group_agg_declined_late_seed" gaLateSeedSrc gaRule
+          (fun d -> d.Subject = "agg" && declinedMentioning "captures a value bound after the grouping (a late seed or scalar" d) "declined: a seed bound after the grouping"
+      decisionCase "decision_group_agg_declined_deferred_source" gaDeferredSrc gaRule
+          (fun d -> d.Subject = "agg" && declinedMentioning "the value array is not proved stored: `lazy` is a deferred computation" d) "declined: a deferred value source"
+      decisionCase "decision_group_agg_declined_writing_fold" gaWritingSrc gaRule
+          (fun d -> d.Subject = "agg" && declinedMentioning "the peel `s` may write" d) "declined: a group fold writing a captured counter"
+      decisionCase "decision_group_agg_declined_writing_between" gaBetweenWriterSrc gaRule
+          (fun d -> d.Subject = "agg" && declinedMentioning "a binding between the grouping and the last peel may write" d
+                    && evidenceHas "DECLINES: a binding between the grouping and the last peel may write" d)
+          "declined: an intervening binding writes (the matrix names it)"
+      decisionCase "decision_group_agg_declined_group_bucket" gaBucketSrc gaRule
+          (fun d -> d.Subject = "agg" && declinedMentioning "the grouping is used other than as `group_by(_, gk)` / `extents(gk)`" d) "declined: a group_bucket use"
+      decisionCase "decision_group_agg_declined_top_level" gaTopLevelSrc gaRule
+          (fun d -> d.Subject = "tgk" && declinedMentioning "a top-level grouping: v1 plans groupings inside a function body only" d)
+          "declined: a top-level (named, printed) grouped array"
+      decisionCase "decision_group_agg_declined_count_only_deferred_source" gaCountOnlyLazySrc gaRule
+          (fun d -> d.Subject = "counts" && declinedMentioning "the value array is not proved stored: `lazy` is a deferred computation" d)
+          "declined: a COUNT-only grouped array over a deferred producer (its evaluation would be skipped)"
+      decisionCase "decision_group_agg_declined_unused_deferred_source" gaUnusedLazySrc gaRule
+          (fun d -> d.Subject = "sums" && declinedMentioning "the value array is not proved stored: `lazy` is a deferred computation" d)
+          "declined: an UNUSED grouped array over a deferred producer"
+      decisionCase "decision_group_agg_declined_mixed_type_fold" gaMixedTypeSrc gaRule
+          (fun d -> d.Subject = "f" && declinedMentioning "the fold kernel of `s` is not typed in the state's one scalar representation (Int64): parameters (Int64, Int64) -> Float64 over Int64 elements" d)
+          "declined: a fold whose result type differs from its state"
+      decisionCase "decision_group_agg_declined_writing_producer" gaWritingProducerSrc gaRule
+          (fun d -> d.Subject = "agg" && declinedMentioning "producer `logged` may write or is assigned" d)
+          "declined: a value source whose producer writes (count-only)"
+      decisionCase "decision_group_agg_declined_deferred_argument" gaDeferredArgSrc gaRule
+          (fun d -> d.Subject = "agg" && declinedMentioning "is not proved stored at every call site" d && declinedMentioning "deferred computation" d)
+          "declined: a parameter whose call-site argument is a deferred map"
+      decisionCase "decision_group_agg_declined_assigned_source" gaAssignedSrc gaRule
+          (fun d -> d.Subject = "agg" && declinedMentioning "is assigned in the program" d)
+          "declined: a value source assigned elsewhere"
+      decisionCase "decision_group_agg_block_let_argument_applied" gaBlockArgSrc gaRule
+          (fun d -> gaApplied d && evidenceHas "at each of its 1 call site(s): a let, a call's array result; its value: scheduleMayWriteIn + CSE facts, no write" d)
+          "applied: a parameter whose argument is a block let holding a call's array result"
+      decisionCase "decision_group_agg_declined_multi_key" gaMultiKeySrc gaRule
+          (fun d -> d.Subject = "agg" && declinedMentioning "a multi-key grouping" d) "declined: a multi-key grouping" ]
+
+/// The C++ one pass: the planned dynamic grouping finds each row's group with
+/// ONE find-or-insert and builds no permutation; its group_by gathers no rows;
+/// the unseeded peel checks its groups before adopting its state. The gate-off
+/// control restores the CSR (permutation, gather, peel IIFEs).
+let private groupAggCppEmission () =
+    let name = "group_agg_cpp_one_pass_no_perm_no_gather"
+    match cppOfSource name gaDynSrc, withGate "BLADE_GROUP_AGG" "0" (fun () -> cppOfSource name gaDynSrc) with
+    | Ok cpp, Ok off ->
+        let want =
+            [ "#include \"blade_member.h\""
+              "// group-aggregate v1 (Blade.Optimize.planGroupAggregate): ONE pass over the rows in source order, no permutation, no gather"
+              "int64_t __gi = blade_gkmap_group_i64(&"
+              "blade_gk_slot* __rec = blade_gkmap_record_i64(&"
+              "if (__rec[0].i == 0) __rec[1].i = __v; else __rec[1].i = "
+              "rows NOT gathered -- every consumer reads its group-aggregate state"
+              "blade_rt::panic(\"BL8003\", \"reduce: empty array, no reduction possible\""
+              "blade_gkmap_free_i64(&" ]
+        let missing = want |> List.filter (fun s -> not (cpp.Contains s))
+        let perm = cpp.Contains "__perm["
+        let offPerm = off.Contains "__perm[" && not (off.Contains "blade_gkmap") && off.Contains "__pool = new int64_t["
+        if missing.IsEmpty && not perm && offPerm then
+            resultLine Pass name "one find-or-insert per row, no permutation, rows null, the peel's BL8003 at its site; gate off: the CSR + gather"
+            true
+        else
+            resultLine Fail name ($"missing {missing}; planned perm={perm}; gate-off CSR={offPerm}")
+            false
+
+/// The C++ positional pass: the BL8006 guard and the drop exactly as the
+/// CSR's key pass, the group IS the key, the seeded state stored once per
+/// group (empty groups included) before the pass.
+let private groupAggCppPositional () =
+    let name = "group_agg_cpp_positional_guard_and_seed"
+    match cppOfSource name gaPosSrc with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let want =
+            [ "if (__k < 0) continue; // negative key: row belongs to no group"
+              "if ((size_t)__k >= 4) blade_rt::panic(\"BL8006\", \"index out of bounds: a group_keys key outside 0 .. 3\""
+              "size_t __g = (size_t)__k;"
+              "for (size_t __g = 0; __g < 4; __g++) "
+              "__agg0[__g] = 100L;"
+              "__agg1[__g] += v[__ki] * v[__ki];" ]
+        let missing = want |> List.filter (fun s -> not (cpp.Contains s))
+        if missing.IsEmpty && not (cpp.Contains "__perm[") then
+            resultLine Pass name "positional: the key guard and drop as today, seeded states before the pass, prodsum `+= a * b`"
+            true
+        else
+            let perm = cpp.Contains "__perm["
+            resultLine Fail name ($"missing {missing}; perm={perm}")
+            false
+
+/// The LLVM one pass: the planned dynamic grouping calls the C core's map
+/// with one record slot per state plus the count; gate off, the CSR's own
+/// discovery uses the same map with one slot (W3-1 retired the linear scan).
+let private groupAggLlvmEmission () =
+    let name = "group_agg_llvm_one_pass_map"
+    let llOf () =
+        match lower gaDynSrc with
+        | Error e -> Error ($"lower: {e}")
+        | Ok ir ->
+            match EmitLlvm.tryEmitProgramNamed "group_agg_llvm" ir with
+            | Ok ll -> Ok ll
+            | Error r -> Error ($"the llvm lane refused: {r}")
+    match llOf (), withGate "BLADE_GROUP_AGG" "0" llOf with
+    | Ok ll, Ok off ->
+        let initRe = System.Text.RegularExpressions.Regex(@"call i32 @blade_gkmap_init_llvm\(ptr %[\w.]+, i64 (\d+)\)")
+        let slots (s: string) = [ for m in initRe.Matches s -> m.Groups.[1].Value ]
+        let onPass = slots ll = [ "5" ] && ll.Contains "call ptr @blade_gkmap_record_llvm(" && ll.Contains "ga.first"
+        let offCsr = slots off = [ "1" ] && not (off.Contains "@blade_gkmap_record_llvm(") && off.Contains "@blade_gkmap_group_llvm("
+        if onPass && offCsr then
+            resultLine Pass name "planned: one map with 4 states + the count, records advanced in place; gate off: the CSR, its discovery through the same map (one slot)"
+            true
+        else
+            let records = ll.Contains "@blade_gkmap_record_llvm("
+            resultLine Fail name ($"planned slots {slots ll} (want [5]) records={records}; gate-off slots {slots off} (want [1])")
+            false
+    | Error e, _ | _, Error e -> resultLine Fail name e; false
+
+/// The LLVM lane's ordinary dynamic discovery takes the C-core map ONLY over a
+/// stored key pool (Codex second look at e6eadfa2): an inline, unforced key
+/// producer (here one whose kernel writes a captured counter, evaluated once
+/// per CSR pass) keeps the linear scan -- no `blade_gkmap` call at all -- so a
+/// later pass can never number a group past the CSR it sized; the stored key
+/// pool of `gaDynSrc` takes the map (`group_agg_llvm_one_pass_map`).
+let private groupKeysLlvmInlineProducerScan () =
+    let name = "group_keys_llvm_inline_key_producer_keeps_the_scan"
+    let src =
+        "type One = Idx<1>\ntype Two = Idx<2>\nlet mut calls: Array<Int64 like One> = [0]\nlet rows: Array<Int64 like Two> = [0, 0]\n"
+        + "function next_key(c: mut Array<Int64 like One>, x: Int64) -> Int64 = {\n    c(0) = c(0) + 1\n    c(0)\n}\n"
+        + "let gk = group_keys(method_for(rows) <@> lambda(x) -> next_key(calls, x))\nlet sizes = extents(gk)\n"
+    let llOf () =
+        match lower src with
+        | Error e -> Error ($"lower: {e}")
+        | Ok ir ->
+            match EmitLlvm.tryEmitProgramNamed "gk_inline" ir with
+            | Ok ll -> Ok ll
+            | Error r -> Error ($"the llvm lane refused: {r}")
+    match withGate "BLADE_GROUP_AGG" "0" llOf, llOf () with
+    | Ok off, Ok on ->
+        if not (off.Contains "@blade_gkmap") && not (on.Contains "@blade_gkmap") then
+            resultLine Pass name "an inline key producer: the linear scan in both gates (no map call)"
+            true
+        else
+            resultLine Fail name "expected no @blade_gkmap call for an inline (non-pool) key producer"
+            false
+    | Error e, _ | _, Error e -> resultLine Fail name e; false
+
+// ---------------------------------------------------------------------------
 // Membership hoisting (round 3, B-T1; Optimize.planMembershipHoist, rule
 // `member-hoist`): the decision record -- representation, the five-party
 // matrix, every decline -- and the C++ emission's build / probe / free.
@@ -6680,6 +7024,12 @@ let runOptimizeTests () =
           hashJoinPositionalEmission ()
           yield! hashJoinCodegenCases ()
           yield! hashJoinCorpusRoutes ()
+          // Aggregate-only grouping (round 3 wave 3, W3-1; gap G71).
+          yield! groupAggDecisionCases ()
+          groupAggCppEmission ()
+          groupAggCppPositional ()
+          groupAggLlvmEmission ()
+          groupKeysLlvmInlineProducerScan ()
           compactionV2UngroupIndexExtentCensus ()
           yield! intervalPayloadDecisionCases ()
           // Compact row classes (round 2 item B3).

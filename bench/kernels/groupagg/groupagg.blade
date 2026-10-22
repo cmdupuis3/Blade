@@ -1,0 +1,59 @@
+// groupagg -- per-group sum, sum of squares and count over positional keys
+// (bench/kernels/groupagg/spec.md)
+//
+//   key(k) = floor(ngroups * u(k))  in [0, ngroups)   (positional: Idx<ngroups> keys)
+//   s(g) = sum of x(k) over key(k) = g    (unseeded, ascending k)
+//   q(g) = sum of x(k)^2 over key(k) = g  (prodsum: from 0, ascending k)
+//   c(g) = #{k : key(k) = g}
+//   checksum = sum_g s(g)^2 + sum_g q(g) + sum_g c(g)^2
+//
+// The three per-group outputs s, q, c are NAMED, STORED arrays of the kernel function.
+// The grouping lives inside a function (round-3 review B/10: a top-level grouped array is
+// a named binding and keeps its rows): `group_by` there is a compiler-visible temporary,
+// so under the aggregate-only grouping (Blade.Optimize.planGroupAggregate, gap G71) the
+// grouping runs ONE pass over the rows in source order that advances s, q and c, with no
+// permutation and no gathered pool. In the default (licensed) build the per-group folds
+// are licensed builtin `+` folds, so the plan declines and today's CSR + gather + K-lane
+// peels run; under BLADE_FP_REPRO=1 (and BLADE_GROUP_AGG=licensed) the one pass runs.
+// Serial (no `where omp`: the per-group chains are independent, but v1 has no thread form).
+
+type Ix = Idx<1000003>   // SIZE n
+type G = Idx<1009>       // SIZE ngroups
+
+/// README section 5 input generator: five rounds mod 2^31 (affine, quadratic, affine,
+/// middle-square, affine), exact in Int64 (h3 * h3 < 2^62).
+function gen(k: Int64, seed: Int64, lo: Float64, hi: Float64) -> Float64 = {
+    let h1 = ((k + seed) * 1103515245 + 12345) % 2147483648
+    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648
+    let h3 = (h2 * 1103515245 + 12345) % 2147483648
+    let h4 = (h3 * h3 / 65536) % 2147483648
+    let h5 = (h4 * 1103515245 + 12345) % 2147483648
+    lo + (hi - lo) * (Float64(h5) / 2147483648.0)
+}
+
+/// key(k) = floor(ngroups * u(k)), u = gen(k, 10000019, 0, 1): ngroups * u is exact
+/// (a 31-bit fraction times an 11-bit integer), so every lane floors the same value.
+function keys() -> Array<Int64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> Int64(floor(gen(Int64(i), 10000019, 0.0, 1.0) * Float64(extents(range<G>)))) |> compute
+}
+
+function values() -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> gen(Int64(i), 20000038, 0.0, 2.0) |> compute
+}
+
+function kernel(key: Array<G like Ix>, x: Array<Float64 like Ix>) -> Float64 = {
+    let gk = group_keys(key)
+    let g = group_by(x, gk)
+    let s = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
+    let q = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> prodsum(r, r) |> compute
+    let c = extents(gk)
+    prodsum(s, s) + reduce(q, (+)) + Float64(prodsum(c, c))
+}
+
+function keysum(key: Array<G like Ix>) -> Float64 = reduce(method_for(key) <@> lambda(k) -> Float64(k), (+))
+
+let (checksum, input_checksum) = {
+    let key = keys()
+    let x = values()
+    (kernel(key, x), reduce(x, (+)) + keysum(key))
+}

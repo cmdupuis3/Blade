@@ -350,6 +350,11 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
              | Some plan -> plan.EmittedCpp.Value <- None; plan.DeclinedCpp.Value <- false; (compactRowPendingCell ()).[varName] <- plan
              | None -> ())
             let code =
+                // Aggregate-only grouping (Blade.Optimize.planGroupAggregate):
+                // a planned peel reads its state from the grouping's one pass.
+                match genGroupAggPeelCpp bodyCtx id varName with
+                | Some lines -> lines
+                | None ->
                 try genApplyCombinator bodyCtx varName info builder
                 finally
                     (hotRowPendingCell ()).Remove varName |> ignore

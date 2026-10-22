@@ -1323,6 +1323,399 @@ let runCliSmokeTests () : TH.BlockResult =
                 (eOn = 0 && eOff = 0 && bare llOn && not (bare llOff)) ""
         finally
             try Directory.Delete(dir, true) with _ -> ()
+    // --- AGGREGATE-ONLY GROUPING (Blade.Optimize.planGroupAggregate, round 3 W3-1, gap G71) ---
+    // (1) The key -> group map (blade_member.h, the C core both lanes run): a
+    // g++-built driver streams keys of several shapes (few / many distinct,
+    // Int64 extremes, a run of growth) and checks every answer against a
+    // first-occurrence std::unordered_map reference, that a new group's record
+    // is all-zero, that records written before a growth survive it, and that
+    // an injected allocation failure is REPORTED (init 0 / group -1, the map
+    // unchanged) and every free releases every allocation. (2) Run time: gate
+    // off vs on, per lane, comparing the COMPLETE output (exit status, stdout
+    // with every Float64's raw bits through BLADE_PRINT_BITS, the complete
+    // stderr of an abort) with the route and the plan asserted -- every state
+    // machine, signed zeros, a final-row singleton, nonzero seeds, the ordered
+    // 3a+b fold, an empty group, the three failure orders (066 / 073 / 074),
+    // the review's failing count-only / unused producers and its mixed-type
+    // fold; and every arm of the CANCELLATION fixture with its exact expected
+    // value (the licensed arm's chain changes today's C++ K-lane result).
+    if not capabilities.Value.HasGpp || selfExe.IsNone then
+        record "group aggregate: the C core and the knob at run time" TH.Skip "requires g++ and the Blade executable"
+    else
+        let dir = Path.Combine(Path.GetTempPath(), "blade_cli_gagg_" + Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory dir |> ignore
+        try
+            Blade.CodeGen.deployRuntimeHeaders dir
+            let driver =
+                String.concat "\n"
+                    [ "#include <cstdio>"
+                      "#include <cstdint>"
+                      "#include <cstdlib>"
+                      "#include <vector>"
+                      "#include <unordered_map>"
+                      "static unsigned long long g_fail = 0;"
+                      "static int g_ord = 0, g_live = 0;"
+                      "static void* t_malloc(size_t n) { int k = g_ord++; if (k < 64 && ((g_fail >> k) & 1ull)) return nullptr; void* p = std::malloc(n); if (p) g_live++; return p; }"
+                      "static void* t_calloc(size_t n, size_t s) { int k = g_ord++; if (k < 64 && ((g_fail >> k) & 1ull)) return nullptr; void* p = std::calloc(n, s); if (p) g_live++; return p; }"
+                      "static void t_free(void* p) { if (p) { g_live--; std::free(p); } }"
+                      "#define BLADE_MEMBER_MALLOC(b) t_malloc(b)"
+                      "#define BLADE_MEMBER_CALLOC(n, s) t_calloc((n), (s))"
+                      "#define BLADE_MEMBER_FREE(p) t_free(p)"
+                      "#include \"blade_member.h\""
+                      "static uint64_t s_ = 0x2545F4914F6CDD1Dull;"
+                      "static uint64_t nx() { s_ ^= s_ << 13; s_ ^= s_ >> 7; s_ ^= s_ << 17; return s_; }"
+                      "int main() {"
+                      "    const int64_t ex[] = {INT64_MIN, INT64_MAX, 0, -1, 1, INT64_MIN + 1, INT64_MAX - 1};"
+                      "    const int distinct[] = {1, 2, 15, 16, 17, 1009, 100003};"
+                      "    long rows = 0, bad = 0;"
+                      "    for (int shape = 0; shape < 3; shape++)"
+                      "    for (int di = 0; di < 7; di++) {"
+                      "        const int d = distinct[di];"
+                      "        std::vector<int64_t> pool((size_t)d);"
+                      "        for (int i = 0; i < d; i++) pool[i] = shape == 0 ? (int64_t)i * 7919 + 13 : shape == 1 ? (int64_t)nx() : ex[i % 7] ^ (int64_t)(i / 7);"
+                      "        blade_gkmap_i64 t;"
+                      "        g_fail = 0; g_ord = 0; g_live = 0;"
+                      "        if (!blade_gkmap_init_i64(&t, 3)) { bad++; continue; }"
+                      "        std::unordered_map<int64_t, int64_t> ref;"
+                      "        const int n = d * 3 + 11;"
+                      "        for (int r = 0; r < n; r++) {"
+                      "            int64_t k = pool[(size_t)(r < d ? r : (int)(nx() % (uint64_t)d))];"
+                      "            auto it = ref.find(k);"
+                      "            int64_t want = it == ref.end() ? (int64_t)ref.size() : it->second;"
+                      "            if (it == ref.end()) ref.emplace(k, want);"
+                      "            int64_t g = blade_gkmap_group_i64(&t, k);"
+                      "            if (g != want) { bad++; if (bad < 5) std::printf(\"BAD group d=%d r=%d got %lld want %lld\\n\", d, r, (long long)g, (long long)want); continue; }"
+                      "            blade_gk_slot* rec = blade_gkmap_record_i64(&t, g);"
+                      "            if (rec[0].i == 0 && (rec[1].i != 0 || rec[2].d != 0.0)) bad++;"
+                      "            rec[0].i++; rec[1].i += k; rec[2].d += 1.0;"
+                      "            rows++;"
+                      "        }"
+                      "        if (blade_gkmap_count_i64(&t) != (int64_t)ref.size()) bad++;"
+                      "        // every record survived every growth: count, key sum, float count"
+                      "        for (auto& kv : ref) { blade_gk_slot* rec = blade_gkmap_record_i64(&t, kv.second); if (rec[0].i <= 0 || (double)rec[0].i != rec[2].d || (int64_t)((uint64_t)rec[0].i * (uint64_t)kv.first) != rec[1].i) bad++; }"
+                      "        blade_gkmap_free_i64(&t);"
+                      "        if (g_live != 0) { bad++; std::printf(\"BAD leak d=%d live=%d\\n\", d, g_live); }"
+                      "    }"
+                      "    // allocation failure: init's k-th allocation, then a growth's (table or records)"
+                      "    long reported = 0;"
+                      "    for (int k = 0; k < 4; k++) {"
+                      "        blade_gkmap_i64 t; g_fail = 1ull << k; g_ord = 0; g_live = 0;"
+                      "        if (blade_gkmap_init_i64(&t, 2)) bad++; else reported++;"
+                      "        if (g_live != 0) bad++;"
+                      "    }"
+                      "    for (int k = 4; k < 12; k++) {"
+                      "        blade_gkmap_i64 t; g_fail = 0; g_ord = 0; g_live = 0;"
+                      "        if (!blade_gkmap_init_i64(&t, 2)) { bad++; continue; }"
+                      "        g_fail = 1ull << k;"
+                      "        int64_t last = 0, failedAt = -1;"
+                      "        for (int64_t key = 0; key < 200; key++) { last = blade_gkmap_group_i64(&t, key * 31); if (last < 0) { failedAt = key; break; } }"
+                      "        if (failedAt < 0) bad++; else {"
+                      "            reported++;"
+                      "            if (blade_gkmap_count_i64(&t) != failedAt) bad++;"
+                      "            for (int64_t key = 0; key < failedAt; key++) if (blade_gkmap_group_i64(&t, key * 31) != key) bad++;"
+                      "        }"
+                      "        blade_gkmap_free_i64(&t);"
+                      "        if (g_live != 0) bad++;"
+                      "    }"
+                      "    std::printf(\"GKMAP CORE: %ld rows, %ld failures reported, %ld bad\\n\", rows, reported, bad);"
+                      "    return bad == 0 ? 0 : 1;"
+                      "}"
+                      "" ]
+            let drv = Path.Combine(dir, "gkmap_core.cpp")
+            File.WriteAllText(drv, driver)
+            (match Build.compileCpp drv dir with
+             | Error e -> recordCase "group aggregate: the key -> group map (blade_member.h) driver" false e
+             | Ok exe ->
+                 match runExecutable exe with
+                 | Error e -> recordCase "group aggregate: the key -> group map (blade_member.h) driver" false e
+                 | Ok (code, out) ->
+                     let summary = out.Replace("\r\n", "\n").Split('\n') |> Array.tryFind (fun l -> l.StartsWith "GKMAP CORE:") |> Option.defaultValue out
+                     recordCase "group aggregate: the key -> group map numbers groups by first occurrence, zeroes new records, keeps records across growth, reports every allocation failure and frees everything"
+                         (code = 0 && summary.EndsWith " 12 failures reported, 0 bad") summary)
+            // (2) RUN TIME. Every comparison below is of the COMPLETE output
+            // -- stdout with BLADE_PRINT_BITS=1 (each Float64 followed by its
+            // raw IEEE-754 bits, so the comparison is of bits, not of printed
+            // digits), the exit status, and the full stderr for an abort --
+            // between the gate OFF (`BLADE_GROUP_AGG=0`) and ON, per lane, with
+            // the route asserted (the LLVM runs must take the `.ll` lane) and
+            // the plan asserted applied (gate on) / disabled (gate off) by
+            // `blade plan`, in the identity regime (BLADE_FP_REPRO=1
+            // BLADE_FP_CONTRACT=off) unless named otherwise.
+            let gen =
+                "function gen(k: Int64, seed: Int64) -> Float64 = {\n"
+                + "    let h1 = ((k + seed) * 1103515245 + 12345) % 2147483648\n"
+                + "    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648\n"
+                + "    2.0 * (Float64(h2) / 2147483648.0)\n"
+                + "}\n"
+            // a scalar fingerprint over random data, positional and dynamic
+            let prog (keyType: string) (keyExpr: string) =
+                "type Ix = Idx<3001>\ntype G = Idx<37>\n" + gen
+                + $"function agg(k: Array<{keyType} like Ix>, x: Array<Float64 like Ix>) -> Float64 = {{\n"
+                + "    let gk = group_keys(k)\n    let g = group_by(x, gk)\n"
+                + "    let s = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n"
+                + "    let q = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> prodsum(r, r) |> compute\n"
+                + "    let t = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> a * 0.75 + b, 0.5) |> compute\n"
+                + "    prodsum(s, s) + reduce(q, (+)) + reduce(t, (+))\n}\n"
+                + $"let keys = method_for(range<Ix>) <@> lambda(i) -> {keyExpr} |> compute\n"
+                + "let xs = method_for(range<Ix>) <@> lambda(i) -> gen(Int64(i), 20000038) |> compute\n"
+                + "let checksum = agg(keys, xs)\n"
+            File.WriteAllText(Path.Combine(dir, "gpos.blade"), prog "G" "Int64(floor(gen(Int64(i), 10000019) * 18.5))")
+            File.WriteAllText(Path.Combine(dir, "gdyn.blade"), prog "Int64" "7919 * Int64(floor(gen(Int64(i), 10000019) * 18.5)) + 13")
+            // EVERY state printed per group: the four state machines; signed
+            // zeros (an all -0.0 group, a -0.0 seed); a singleton at the FINAL
+            // row (group 3); a nonzero seed; the ordered non-commutative Int64
+            // fold, seeded and unseeded; cancellation inside a group (1e16,
+            // -1e16, 1.0); a positional EMPTY group (4) for the seeded, prodsum
+            // and count states. Positional, so both lanes route it.
+            let statesBody (regimeKeys: string) (keyType: string) =
+                "type Row = Idx<9>\n" + regimeKeys
+                + $"function st(k: Array<{keyType} like Row>, x: Array<Float64 like Row>, w: Array<Int64 like Row>) = {{\n"
+                + "    let gk = group_keys(k)\n    let g = group_by(x, gk)\n    let gw = group_by(w, gk)\n"
+                + "    let t = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+), 0.75) |> compute\n"
+                + "    let z = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> a + b, -0.0) |> compute\n"
+                + "    let q = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> prodsum(r, r) |> compute\n"
+                + "    let n = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> extents(r) |> compute\n"
+                + "    let f = method_for(gw) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b, 5) |> compute\n"
+                + "    (t, z, q, n, f)\n}\n"
+                + "let x: Array<Float64 like Row> = [-0.0, 1e16, -0.0, 0.1, -1e16, 0.2, -0.0, 1.0, -0.0]\n"
+                + "let w: Array<Int64 like Row> = [1, 2, 3, 4, 5, 6, 7, 8, 9]\n"
+                + "let (t, z, q, n, f) = st(keys, x, w)\n"
+            File.WriteAllText(Path.Combine(dir, "gstates.blade"),
+                statesBody "type G = Idx<5>\nlet keys: Array<G like Row> = [0, 1, 0, 2, 1, 2, 0, 1, 3]\n" "G")
+            // the UNSEEDED machine over the same data (no empty group: an
+            // unseeded empty group is the BL8003 fixture below)
+            File.WriteAllText(Path.Combine(dir, "gunseeded.blade"),
+                "type Row = Idx<9>\ntype G = Idx<4>\n"
+                + "function un(k: Array<G like Row>, x: Array<Float64 like Row>, w: Array<Int64 like Row>) = {\n"
+                + "    let gk = group_keys(k)\n    let g = group_by(x, gk)\n    let gw = group_by(w, gk)\n"
+                + "    let u = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n"
+                + "    let f = method_for(gw) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b) |> compute\n"
+                + "    (u, f)\n}\n"
+                + "let keys: Array<G like Row> = [0, 1, 0, 2, 1, 2, 0, 1, 3]\n"
+                + "let x: Array<Float64 like Row> = [-0.0, 1e16, -0.0, 0.1, -1e16, 0.2, -0.0, 1.0, -0.0]\n"
+                + "let w: Array<Int64 like Row> = [1, 2, 3, 4, 5, 6, 7, 8, 9]\n"
+                + "let (u, f) = un(keys, x, w)\n")
+            // the dynamic regime's arrays (the LLVM lane refuses a function's
+            // dynamic-extent array result -- pre-existing -- so C++ only)
+            File.WriteAllText(Path.Combine(dir, "gdynstates.blade"),
+                statesBody "let keys: Array<Int64 like Row> = [7, 3, 7, 9, 3, 9, 7, 3, 11]\n" "Int64")
+            File.WriteAllText(Path.Combine(dir, "gcancel.blade"),
+                "type Row = Idx<12>\n"
+                + "function agg(k: Array<Int64 like Row>, x: Array<Float64 like Row>) -> Float64 = {\n"
+                + "    let gk = group_keys(k)\n    let g = group_by(x, gk)\n"
+                + "    let s = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n"
+                + "    prodsum(s, s)\n}\n"
+                + "let keys: Array<Int64 like Row> = [5, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6, 6]\n"
+                + "let xs: Array<Float64 like Row> = [1e16, -1e16, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1e8, -1e8, 1.0]\n"
+                + "let checksum = agg(keys, xs)\n")
+            // COMPLETE-FAILURE fixtures (review finding 4): 066's unseeded
+            // empty group (BL8003 at the peel), 073's positional key past the
+            // last group (BL8006 at the grouping), 074's intervening BL8013 --
+            // tuple results, so the LLVM lane routes them too.
+            File.WriteAllText(Path.Combine(dir, "f066.blade"),
+                "type Region = Idx<3>\ntype Row = Idx<4>\n"
+                + "function agg(k: Array<Region like Row>, v: Array<Int64 like Row>) = {\n"
+                + "    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
+                + "    let n = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> extents(r) |> compute\n"
+                + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b) |> compute\n"
+                + "    (n, s)\n}\n"
+                + "let keys: Array<Region like Row> = [0, 2, 0, 2]\nlet vals: Array<Int64 like Row> = [1, 2, 3, 4]\nlet (n, s) = agg(keys, vals)\n")
+            File.WriteAllText(Path.Combine(dir, "f073.blade"),
+                "type Region = Idx<3>\ntype Row = Idx<5>\n"
+                + "function agg(k: Array<Region like Row>, v: Array<Int64 like Row>) = {\n"
+                + "    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
+                + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+), 0) |> compute\n"
+                + "    (s, s)\n}\n"
+                + "let keys = method_for(range<Row>) <@> lambda(i) -> (Int64(i) * 2) % 5 |> compute\n"
+                + "let vals: Array<Int64 like Row> = [1, 2, 3, 4, 5]\nlet (s, s2) = agg(keys, vals)\n")
+            File.WriteAllText(Path.Combine(dir, "f074.blade"),
+                "type Region = Idx<3>\ntype Row = Idx<4>\n"
+                + "function agg(k: Array<Region like Row>, v: Array<Int64 like Row>, d: Int64) = {\n"
+                + "    let gk = group_keys(k)\n    let g = group_by(v, gk)\n    let z = 10 / d\n"
+                + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b) |> compute\n"
+                + "    (z, s)\n}\n"
+                + "let keys: Array<Region like Row> = [0, 2, 0, 2]\nlet vals: Array<Int64 like Row> = [1, 2, 3, 4]\nlet (z, s) = agg(keys, vals, 0)\n")
+            // FINDING 1's producers: a COUNT-only and an UNUSED grouped array
+            // whose producer FAILS (10 / 0). Module-level deferred (`lazy`):
+            // declined (not proved stored), as written in both gates; the LLVM
+            // lane refuses the deferred module read (pre-existing) and the C++
+            // lane runs. Body producer (`|> compute`d at its own site, so
+            // stored and admitted): the producer fails at its own statement,
+            // before the grouping, in both gates and both lanes.
+            let lazyHead = "type Two = Idx<2>\nlet den: Array<Int64 like Two> = [1, 0]\nlet lazy = method_for(den) <@> lambda(d) -> 10 / d\nlet k: Array<Int64 like Two> = [7, 7]\nlet v: Array<Int64 like Two> = [3, 4]\n"
+            File.WriteAllText(Path.Combine(dir, "wcount.blade"),
+                lazyHead + "function counts(key: Array<Int64 like Two>) -> Int64 = {\n    let gk = group_keys(key)\n    let g = group_by(lazy, gk)\n"
+                + "    let n = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> extents(r) |> compute\n    reduce(n, (+))\n}\nlet total = counts(k)\n")
+            File.WriteAllText(Path.Combine(dir, "wunused.blade"),
+                lazyHead + "function sums(key: Array<Int64 like Two>, x: Array<Int64 like Two>) -> Int64 = {\n    let gk = group_keys(key)\n    let g = group_by(x, gk)\n    let unused = group_by(lazy, gk)\n"
+                + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n    reduce(s, (+))\n}\nlet total = sums(k, v)\n")
+            let bodyHead = "type Two = Idx<2>\nlet den: Array<Int64 like Two> = [1, 0]\nlet k: Array<Int64 like Two> = [7, 7]\nlet v: Array<Int64 like Two> = [3, 4]\n"
+            File.WriteAllText(Path.Combine(dir, "wbodycount.blade"),
+                bodyHead + "function counts(key: Array<Int64 like Two>, dd: Array<Int64 like Two>) -> Int64 = {\n    let p = method_for(dd) <@> lambda(d) -> 10 / d |> compute\n    let gk = group_keys(key)\n    let g = group_by(p, gk)\n"
+                + "    let n = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> extents(r) |> compute\n    reduce(n, (+))\n}\nlet total = counts(k, den)\n")
+            File.WriteAllText(Path.Combine(dir, "wbodyunused.blade"),
+                bodyHead + "function sums(key: Array<Int64 like Two>, x: Array<Int64 like Two>, dd: Array<Int64 like Two>) -> Int64 = {\n    let p = method_for(dd) <@> lambda(d) -> 10 / d |> compute\n    let gk = group_keys(key)\n    let g = group_by(x, gk)\n    let unused = group_by(p, gk)\n"
+                + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n    reduce(s, (+))\n}\nlet total = sums(k, v, den)\n")
+            // FINDING 2's type witness: a singleton Int64 group of
+            // 9007199254740993 and a multirow one, folded by a Float64-valued
+            // kernel into an Int64 aggregate. The plan declines; each lane's
+            // own outcome is identical in both gates (the C++ lane rejects the
+            // emitted conversion, BL9002, and the LLVM lane rounds through
+            // double -- a pre-existing ordinary-fold typing discrepancy,
+            // recorded in gap G71, not fixed here).
+            File.WriteAllText(Path.Combine(dir, "wtype.blade"),
+                "type Row = Idx<3>\ntype Region = Idx<2>\n"
+                + "function f(k: Array<Region like Row>, v: Array<Int64 like Row>) = {\n    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
+                + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> Float64(a) + Float64(b)) |> compute\n    (s, s)\n}\n"
+                + "let keys: Array<Region like Row> = [0, 1, 1]\nlet vals: Array<Int64 like Row> = [9007199254740993, 9007199254740993, 2]\nlet (s, s2) = f(keys, vals)\n")
+            let laneOf (llvm: string) = if isNull llvm then "C++" else "LLVM"
+            let routedLl (oe: string) = oe.Contains ".ll" && not (oe.Contains "falling back to C++")
+            let routeOk (llvm: string) (oe: string) = if isNull llvm then not (oe.Contains ".ll") else routedLl oe
+            let envOf (llvm: string) (gate: string) (repro: bool) (extra: (string * string) list) =
+                [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", llvm); ("BLADE_GROUP_AGG", gate)
+                  ("BLADE_FP_REPRO", (if repro then "1" else null))
+                  ("BLADE_FP_CONTRACT", (if repro then "off" else null))
+                  ("BLADE_PRINT_BITS", "1") ] @ extra
+            /// (exit, stdout, stderr) of one run, the build's `--verbose` lines stripped from stderr
+            let runIt (prog: string) (env: (string * string) list) =
+                let (c, o, e) = spawnWith env dir [ "run"; $"{prog}.blade"; "--verbose" ]
+                let strip (s: string) =
+                    s.Replace("\r\n", "\n").Split('\n')
+                    |> Array.filter (fun l -> not (l.StartsWith "[Emit]" || l.StartsWith "[Build]" || l.StartsWith "[cache]" || l.Contains " completed in "))
+                    |> String.concat "\n"
+                (c, strip o, strip e, o + e)
+            let planned (prog: string) (fn: string) (env: (string * string) list) =
+                let (_, o, e) = spawnWith env dir [ "plan"; $"{prog}.blade" ]
+                let t = o + e
+                if t.Contains $"[group-aggregate v1] {fn} @ " && t.Contains $"[group-aggregate v1] {fn} @ " then
+                    let line = t.Replace("\r\n", "\n").Split('\n') |> Array.find (fun l -> l.Contains $"[group-aggregate v1] {fn} @ ")
+                    if line.Contains ": applied [" then "applied" elif line.Contains "disabled by BLADE_GROUP_AGG" then "disabled" else "declined"
+                else "no record"
+            let planLine (prog: string) (fn: string) (env: (string * string) list) =
+                let (_, o, e) = spawnWith env dir [ "plan"; $"{prog}.blade" ]
+                (o + e).Replace("\r\n", "\n").Split('\n') |> Array.tryFind (fun l -> l.Contains $"[group-aggregate v1] {fn} @ ") |> Option.defaultValue ""
+            /// Gate off vs on, one lane: identical exit, stdout (raw bits) and
+            /// stderr; route; the plan applied on / disabled off (or the
+            /// expected decline in both); an abort fixture also pins its
+            /// expected code in BOTH gates, so a build failure (BL9002) or any
+            /// other abort cannot stand in for the intended run-time one.
+            let gateIdentity (prog: string) (fn: string) (llvm: string) (expectPlan: string) (expectExit: int -> bool) (expectCode: string option) (what: string) =
+                let lane = laneOf llvm
+                let (c0, o0, e0, oe0) = runIt prog (envOf llvm "0" true [])
+                let (c1, o1, e1, oe1) = runIt prog (envOf llvm null true [])
+                let p0 = planned prog fn (envOf llvm "0" true [])
+                let p1 = planned prog fn (envOf llvm null true [])
+                let planOk = if expectPlan = "applied" then p0 = "disabled" && p1 = "applied" else p1 = expectPlan
+                let codeOk =
+                    match expectCode with
+                    | Some code -> (o0 + e0).Contains $"error[{code}]" && (o1 + e1).Contains $"error[{code}]" && not ((o1 + e1).Contains "error[BL9002]")
+                    | None -> true
+                let ok = c0 = c1 && expectExit c1 && o0 = o1 && e0 = e1 && routeOk llvm oe0 && routeOk llvm oe1 && planOk && codeOk
+                let codeText = match expectCode with Some code -> $", code {code} in both gates" | None -> ""
+                recordCase $"cli: group aggregate ({lane}, {prog}) {what}: gate off == on (exit, stdout with raw bits, complete stderr), route {lane}, plan {expectPlan}{codeText}"
+                    ok ($"exit {c0}/{c1}; plan {p0}/{p1}; stdout same={o0 = o1}; stderr same={e0 = e1}; on: {o1.Trim()} {e1.Trim()}")
+            for llvm in [ null; "1" ] do
+                gateIdentity "gpos" "agg" llvm "applied" ((=) 0) None "random positional data, scalar fingerprint"
+                gateIdentity "gdyn" "agg" llvm "applied" ((=) 0) None "random dynamic data, scalar fingerprint"
+                gateIdentity "gstates" "st" llvm "applied" ((=) 0) None "every state per group (seeded 0.75 / -0.0, prodsum, count, 3a+b seeded; signed zeros; final-row singleton; empty group)"
+                gateIdentity "gunseeded" "un" llvm "applied" ((=) 0) None "the unseeded machine per group (Float64 and the ordered 3a+b Int64; signed zeros; final-row singleton)"
+                gateIdentity "f066" "agg" llvm "applied" ((<>) 0) (Some "BL8003") "complete failure: unseeded empty group, BL8003 at the peel"
+                gateIdentity "f073" "agg" llvm "applied" ((<>) 0) (Some "BL8006") "complete failure: positional key past the last group, BL8006 at the grouping"
+                gateIdentity "f074" "agg" llvm "applied" ((<>) 0) (Some "BL8013") "complete failure: an intervening BL8013 before the peel's BL8003"
+                gateIdentity "wbodycount" "counts" llvm "applied" ((<>) 0) (Some "BL8013") "a failing (stored) producer of a COUNT-only grouped array fails at its own statement"
+                gateIdentity "wbodyunused" "sums" llvm "applied" ((<>) 0) (Some "BL8013") "a failing (stored) producer of an UNUSED grouped array fails at its own statement"
+            gateIdentity "gdynstates" "st" null "applied" ((=) 0) None "every state per group, the dynamic regime (C++ only: the LLVM lane refuses a function's dynamic-extent ARRAY result; gdyn's dynamic scalar and gcancel run both lanes)"
+            // the deferred-producer forms decline, so both gates run the CSR;
+            // the C++ lane (the LLVM lane refuses the deferred module read)
+            for (prog, fn) in [ ("wcount", "counts"); ("wunused", "sums") ] do
+                let (c0, o0, e0, _) = runIt prog (envOf null "0" true [])
+                let (c1, o1, e1, _) = runIt prog (envOf null null true [])
+                let p1 = planned prog fn (envOf null null true [])
+                let (cl, _, _, ol) = runIt prog (envOf "1" null true [])
+                recordCase $"cli: group aggregate ({prog}) a DEFERRED failing producer of a count-only / unused grouped array: declined, BL8013 in both gates (C++), the LLVM lane falls back"
+                    (p1 = "declined" && c0 <> 0 && c0 = c1 && e0 = e1 && o0 = o1 && (o1 + e1).Contains "error[BL8013]" && cl <> 0 && ol.Contains "falling back to C++")
+                    ($"plan {p1}; exit {c0}/{c1}; LLVM exit {cl}; {(o1 + e1).Trim()}")
+            // THE MIXED-TYPE FOLD (first look's finding 2; second look's HIGH):
+            // the plan declines for the TYPE reason, and each lane's ordinary
+            // outcome is pinned, routed, identical in both gates -- the LLVM
+            // lane exits 0 printing the singleton and the multirow group rounded
+            // through double (9007199254740992, 9007199254740994: the
+            // pre-existing ordinary-fold typing discrepancy), the C++ lane fails
+            // with BL9002 in both gates (only the private build path normalized).
+            let typeReason = "is not typed in the state's one scalar representation (Int64): parameters (Int64, Int64) -> Float64 over Int64 elements"
+            let normBuild (s: string) =
+                Text.RegularExpressions.Regex.Replace(s.Replace("\r\n", "\n"), @"[A-Za-z]:[\\/][^\s""']*blade-build[\\/][^\s""':]*", "<build>")
+            for llvm in [ null; "1" ] do
+                let lane = laneOf llvm
+                let (c0, o0, e0, oe0) = runIt "wtype" (envOf llvm "0" true [])
+                let (c1, o1, e1, oe1) = runIt "wtype" (envOf llvm null true [])
+                let line = planLine "wtype" "f" (envOf llvm null true [])
+                let declinedForType = line.Contains ": declined -- " && line.Contains typeReason
+                let routed = routeOk llvm oe0 && routeOk llvm oe1
+                let outcome =
+                    if isNull llvm then
+                        c0 <> 0 && c1 <> 0 && c0 = c1
+                        && (o0 + e0).Contains "error[BL9002]" && (o1 + e1).Contains "error[BL9002]"
+                        && normBuild (o0 + "\n--\n" + e0) = normBuild (o1 + "\n--\n" + e1)
+                    else
+                        c0 = 0 && c1 = 0 && o0 = o1 && e0 = e1
+                        && o1.Contains "s = [9007199254740992, 9007199254740994]"
+                        && o1.Contains "s2 = [9007199254740992, 9007199254740994]"
+                let expectText = if isNull llvm then "BL9002 in both gates" else "exit 0, s = s2 = [9007199254740992, 9007199254740994] in both gates"
+                recordCase $"cli: group aggregate ({lane}, wtype) a Float64-valued fold into an Int64 aggregate: declined for its types; routed {lane}; {expectText}; complete output identical across gates"
+                    (declinedForType && routed && outcome)
+                    (let errHead = (if e1.Length > 160 then e1.Substring(0, 160) else e1).Trim()
+                     $"plan {line.Trim()}; exit {c0}/{c1}; routed {routed}; {o1.Trim()} {errHead}")
+            // THE INLINE EFFECTFUL KEY PRODUCER (Codex second look at e6eadfa2,
+            // BLOCKER): a top-level `group_keys` over an unforced inline map
+            // whose kernel bumps a captured counter. Every lane evaluates the
+            // producer once per CSR pass (pre-existing: calls = [6] over two
+            // rows and three passes); the LLVM lane's C-core map route is taken
+            // ONLY over a stored key pool, so this program keeps the linear scan
+            // (an unknown key lands in bucket 0: sizes = [2, 0]) and never
+            // numbers a group past the CSR it sized. The C++ lane refuses the
+            // program (BL7004, pre-existing). Per lane, both gates, routed.
+            File.WriteAllText(Path.Combine(dir, "winline.blade"),
+                "type One = Idx<1>\ntype Two = Idx<2>\nlet mut calls: Array<Int64 like One> = [0]\nlet rows: Array<Int64 like Two> = [0, 0]\n"
+                + "function next_key(c: mut Array<Int64 like One>, x: Int64) -> Int64 = {\n    c(0) = c(0) + 1\n    c(0)\n}\n"
+                + "let gk = group_keys(method_for(rows) <@> lambda(x) -> next_key(calls, x))\nlet sizes = extents(gk)\n")
+            for llvm in [ null; "1" ] do
+                let lane = laneOf llvm
+                let (c0, o0, e0, oe0) = runIt "winline" (envOf llvm "0" false [])
+                let (c1, o1, e1, oe1) = runIt "winline" (envOf llvm null false [])
+                let ok =
+                    if isNull llvm then
+                        c0 <> 0 && c1 <> 0 && (o0 + e0).Contains "error[BL7004]" && (o1 + e1).Contains "error[BL7004]" && o0 = o1 && e0 = e1
+                    else
+                        routedLl oe0 && routedLl oe1 && c0 = 0 && c1 = 0 && o0 = o1 && e0 = e1
+                        && o1.Contains "sizes = [2, 0]" && o1.Contains "calls = [6]"
+                let expectText = if isNull llvm then "BL7004 in both gates (the C++ lane refuses it, pre-existing)" else "routed, exit 0, sizes = [2, 0], calls = [6] in both gates (the linear scan: no group past the CSR)"
+                recordCase $"cli: group keys ({lane}, winline) an inline writing key producer: {expectText}"
+                    ok ($"exit {c0}/{c1}; {o1.Trim()} {e1.Trim()}")
+            // THE CANCELLATION FIXTURE, every arm (review finding 6): exit 0,
+            // the route, and the exact expected value with its bits.
+            // prodsum(s, s) with s = (the 1e16 group's sum, 1.0): the chain
+            // gives 2 for the first group (5.0 in all); today's C++ K-lane
+            // form gives 0 (1.0); the LLVM lane's flagged recurrence gives 2.
+            let five = "checksum = 5.0 #4014000000000000"
+            let one = "checksum = 1.0 #3ff0000000000000"
+            for llvm in [ null; "1" ] do
+                let lane = laneOf llvm
+                let arms =
+                    [ ("strict, gate on", envOf llvm null true [], five, "applied")
+                      ("strict, gate off", envOf llvm "0" true [], five, "disabled")
+                      ("default build, gate on (declined)", envOf llvm null false [], (if isNull llvm then one else five), "declined")
+                      ("default build, gate off", envOf llvm "0" false [], (if isNull llvm then one else five), "declined")
+                      ("licensed arm", envOf llvm "licensed" false [], five, "applied") ]
+                for (arm, env, want, wantPlan) in arms do
+                    let (c, o, _, oe) = runIt "gcancel" env
+                    let p = planned "gcancel" "agg" env
+                    let got = o.Replace("\r\n", "\n").Split('\n') |> Array.tryFind (fun l -> l.StartsWith "checksum = ")
+                    recordCase $"cli: group aggregate ({lane}) cancellation fixture [1e16, -1e16, 1, 0, 0, 0, 0, 0, 1], {arm}: exit 0, route {lane}, plan {wantPlan}, value {want}"
+                        (c = 0 && routeOk llvm oe && p = wantPlan && got = Some want)
+                        ($"exit {c}; plan {p}; got {got}")
+        finally
+            try Directory.Delete(dir, true) with _ -> ()
     // --- MEMBERSHIP HOISTING (Blade.Optimize.planMembershipHoist, round 3 B-T1) ---
     // (1) The C core itself (blade_member.h, the one text both lanes run): a
     // g++-built driver builds 220 sets -- empty, tiny, at the linear

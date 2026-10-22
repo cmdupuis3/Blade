@@ -768,6 +768,51 @@ and no outer product is formed.
 
 Tests: `sql-group-by` (25).
 
+### Aggregate-only groupings run in one pass
+
+A grouping inside a function body whose grouped arrays are consumed only by
+per-group aggregates — `reduce(r, k[, init])`, `prodsum(r, r)`, `prodsum(ra,
+rb)` over the same grouping, `extents(r)`, plus `extents(gk)` — compiles to ONE
+pass over the rows in source order: each row's key finds its group (positional:
+the key value; EnumIdx: its declared position; dynamic: one find-or-insert,
+groups numbered by first occurrence) and advances every aggregate's state there.
+No permutation is built and the rows are never gathered; the aggregate outputs
+are the same named, stored arrays.
+
+```blade sketch
+function stats(key: Array<G like Row>, x: Array<Float64 like Row>) = {
+    let gk = group_keys(key)
+    let g = group_by(x, gk)          // never gathered: every consumer below aggregates
+    let s = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
+    let q = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> prodsum(r, r) |> compute
+    let c = extents(gk)
+    (s, q, c)
+}
+```
+
+The values are the CSR form's (argued, and checked gate off against gate on bit
+for bit on witnesses -- not proved): each group's fold still visits its rows
+in ascending source order, from its own seed (or its first value), with its own
+kernel — the pass only interleaves independent chains — and the failures are
+where they were (a bad positional / EnumIdx key aborts at the grouping, row by
+row; an unseeded fold's empty group raises BL8003 at that fold, with the same
+location and frames as before). In the default build a LICENSED float fold (a
+builtin `+` over Float64, a Float64 prodsum) keeps today's form in both lanes --
+the C++ lane's per-group lane tree, the LLVM lane's flagged recurrence --
+because the one pass's ascending chain is a different association;
+`BLADE_FP_REPRO=1` takes the pass, and the experimental
+`BLADE_GROUP_AGG=licensed` opts into the association change. Integer folds,
+counts and kernels with no reorder licence take it in every build. Every
+grouped value source -- count-only and unused ones included -- must be proved
+stored with a write-free producer (a parameter through every call site's
+argument), and each fold's state, kernel parameters, kernel result, element and
+seed must share one scalar type; anything else keeps the CSR, as does a
+top-level grouping (the plan covers function bodies only) and anything else the
+plan does not recognize (a row read such as `r(0)`, a `group_bucket`, a
+`where omp` peel, a deferred or late source or seed). `blade plan` names the
+decision (`group-aggregate v1`). Tests: `sql-group-by/064-074` and the `cli`
+block's gate-off / gate-on raw-bit comparisons (gap G71).
+
 ## 9. `sort(A, keyFn)` — ORDER BY
 
 ```blade sketch

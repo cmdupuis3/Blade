@@ -1,0 +1,41 @@
+// TEST: Group aggregate one pass, dynamic keys
+// AGGREGATE-ONLY GROUPING (Blade.Optimize.planGroupAggregate, gap G71): a
+// function-body `group_keys` consumed only by per-group aggregates runs ONE
+// pass over the rows in source order -- no permutation, no gathered pool --
+// advancing every peel's state as it goes. The values are the CSR + gather +
+// peel values exactly: each group's chain still visits its rows in ascending
+// source order (the permutation was stable), with its own seed and kernel.
+//
+// DYNAMIC keys: groups numbered by FIRST occurrence (7 -> 0, 3 -> 1, 9 -> 2),
+// through one find-or-insert per row in the C core; hash order never decides
+// the output order. The four state machines, each pinned: an unseeded reduce
+// (the first value copied, consumed once), a seeded one (the chain from the
+// seed), a prodsum (from 0, `acc += a * b`), a count. The plan record (both
+// the applied form and its five-party matrix) is pinned in the Optimize block.
+type Row = Idx<5>
+
+function agg(k: Array<Int64 like Row>, v: Array<Int64 like Row>, x: Array<Float64 like Row>) = {
+    let gk = group_keys(k)
+    let g = group_by(v, gk)
+    let gx = group_by(x, gk)
+    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
+    let q = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> prodsum(r, r) |> compute
+    let t = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+), 1000) |> compute
+    let n = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> extents(r) |> compute
+    let c = extents(gk)
+    let h = method_for(gx) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> a * 0.5 + b) |> compute
+    (s, q, t, n, c, h)
+}
+
+let keys: Array<Int64 like Row> = [7, 3, 7, 9, 3]
+let vals: Array<Int64 like Row> = [1, 2, 3, 4, 5]
+let xs: Array<Float64 like Row> = [1.0, 2.0, 4.0, 8.0, 16.0]
+let (s, q, t, n, c, h) = agg(keys, vals, xs)
+// group 0 (key 7) = rows 0, 2; group 1 (key 3) = rows 1, 4; group 2 (key 9) = row 3
+// EXPECT: s = [4, 7, 4]
+// EXPECT: q = [10, 29, 16]
+// EXPECT: t = [1004, 1007, 1004]
+// EXPECT: n = [2, 2, 1]
+// EXPECT: c = [2, 2, 1]
+// h: unseeded, a * 0.5 + b in row order: group 0 = 1 * 0.5 + 4; group 1 = 2 * 0.5 + 16
+// EXPECT: h = [4.5, 17.0, 8.0]

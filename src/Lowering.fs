@@ -2965,6 +2965,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     Optimize.OrbitPullTable.reset ()
     Optimize.OrbitActionTable.reset ()
     Optimize.MemberHoistTable.reset ()
+    Optimize.GroupAggTable.reset ()
     Optimize.EpilogueLegTable.reset ()
     Optimize.CallSpanTable.reset ()
     Optimize.InlineEventSpans.reset ()
@@ -3218,6 +3219,13 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // emitters' action admission (OrbitFold.orbitActionAdmissible); no IR
         // change. Knob: BLADE_ORBIT_ACTIONS (the emitters').
         Optimize.planOrbitActions programFuncs irModule
+        // Aggregate-only grouping (Blade.Optimize.planGroupAggregate, round 3
+        // W3-1 / gap G71): a function-body `group_keys` consumed only by
+        // per-group aggregate peels advances every peel's chain in ONE pass
+        // over the rows in source order (no perm, no gather); side table,
+        // both emitters; the interpreter runs the as-written CSR. Gate:
+        // BLADE_GROUP_AGG.
+        Optimize.planGroupAggregate programFuncs irModule
         irModule)
 
     // DEAD-POLYMORPH ELIMINATION, last and whole-program: a lambda lifted out

@@ -1013,6 +1013,19 @@ and genGroupKeysBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
     // unique tuple its own bucket. Same ABI as the single-key dynamic case, so
     // downstream consumers don't need to know single- vs multi-key. Requires
     // the tuple_hasher helper from nested_array_utilities.hpp.
+    // AGGREGATE-ONLY GROUPING (Blade.Optimize.planGroupAggregate, gap G71):
+    // a planned grouping runs ONE pass that also advances every peel's state;
+    // the handshake flag says to its group_by and peel emissions whether it
+    // did (a regime this site does not recognize emits today's CSR instead).
+    let gaPlan = Blade.Optimize.GroupAggTable.tryGk binding.Id
+    (match gaPlan with Some p -> p.EmittedCpp.Value <- false | None -> ())
+    let gaResult =
+        match keys, gaPlan with
+        | [ singleKey ], Some plan -> genGroupAggKeysBinding ctx binding singleKey plan
+        | _ -> None
+    match gaResult with
+    | Some r -> r
+    | None ->
     match keys with
     | [] ->
         let ctx' = addVarName binding.Id name ctx
@@ -3317,6 +3330,210 @@ and genRangeBinding (ctx: CodeGenContext) (binding: IRBinding) : string list * C
 
 
 
+/// The AGGREGATE-ONLY grouping's one pass (Blade.Optimize.planGroupAggregate,
+/// gap G71): the grouping's own ABI (`__ngroups`, `__offsets`, `__nsrc`,
+/// `_extents`, the void* sentinel) WITHOUT a permutation, plus one
+/// accumulator per peel state (`<gk>__agg<j>`, G cells, adopted by the peel)
+/// and the per-group row counts (`<gk>__counts`). Per row, in source order:
+/// the key, the negative-key drop and the BL8006 guards exactly as the CSR's
+/// first key pass (positional / EnumIdx), the group (positional: the key;
+/// EnumIdx: the declared-order lookup; dynamic: ONE find-or-insert in
+/// blade_member.h's key -> group map, first-occurrence numbering), then each
+/// state's step -- UNSEEDED: the first value copied (no kernel call), every
+/// later one `acc = k(acc, v)`; SEEDED: `acc = k(acc, v)` from the seed
+/// stored once per group (before the pass for the static regimes, at the
+/// group's first row for the dynamic one); PRODSUM: `acc += a * b` from 0 --
+/// and the count. None when this site cannot place the plan (the regime the
+/// binding's type names differs from the plan's): today's CSR follows.
+and genGroupAggKeysBinding (ctx: CodeGenContext) (binding: IRBinding) (key: IRExpr) (plan: Blade.Optimize.GroupAggPlan) : (string list * CodeGenContext) option =
+    let ind = indentStr ctx
+    let name = bindingCppName binding
+    let regimeHere =
+        match binding.Type with
+        | IRTGroupKeys (outer, _, ev) ->
+            (match outer.Extent, ev with
+             | IRLit (IRLitInt n), None -> Some (Blade.Optimize.GaPositional n)
+             | IRLit (IRLitInt _), Some vs when vs |> List.forall (function EVInt _ -> true | _ -> false) ->
+                 Some (Blade.Optimize.GaEnum (vs |> List.choose (function EVInt n -> Some n | _ -> None)))
+             | IRLit _, _ -> None
+             | _, None -> Some Blade.Optimize.GaDynamic
+             | _ -> None)
+        | _ -> None
+    if regimeHere <> Some plan.Regime then None else
+    let keysName = exprToCppCtx ctx key
+    let (keysBound, keysAt) = compactOrDenseSource key keysName
+    let elemCpp (et: ElemType) = elemTypeToCpp (IRTScalar et)
+    let dynamic = (plan.Regime = Blade.Optimize.GaDynamic)
+    // per-state lvalues: the static regimes' accumulators, the dynamic
+    // regime's record slots (slot 0 the count, slot j + 1 state j)
+    let accAt (j: int) (st: Blade.Optimize.GroupAggState) =
+        if dynamic then (if st.Elem = ETInt64 then $"__rec[{j + 1}].i" else $"__rec[{j + 1}].d")
+        else $"{name}__agg{j}[__g]"
+    let cntAt = if dynamic then "__rec[0].i" else $"{name}__counts[__g]"
+    let srcAt (e: IRExpr) =
+        let (_, at) = compactOrDenseSource e (exprToCppCtx ctx e)
+        at "__ki"
+    let wrappers =
+        plan.States |> List.mapi (fun j st ->
+            match st.Kind with
+            | Blade.Optimize.GaSeeded (fk, _) | Blade.Optimize.GaUnseeded fk ->
+                (match resolveCallable fk with
+                 | Some cl ->
+                     let (code, wname) = genCallableWrapper ctx.VarNames $"{name}__ga{j}" cl
+                     Some (code, wname)
+                 | None -> None)
+            | _ -> None)
+    let stepLines =
+        plan.States |> List.mapi (fun j st ->
+            let acc = accAt j st
+            match st.Kind, wrappers.[j] with
+            | Blade.Optimize.GaUnseeded _, Some (_, w) ->
+                [ $"{ind}    {{ const {elemCpp st.Elem} __v = {srcAt st.Sources.[0]}; if ({cntAt} == 0) {acc} = __v; else {acc} = {w}({acc}, __v); }}" ]
+            | Blade.Optimize.GaSeeded (_, seed), Some (_, w) ->
+                (if dynamic then [ $"{ind}    if ({cntAt} == 0) {acc} = {exprToCppCtx ctx seed};" ] else [])
+                @ [ $"{ind}    {acc} = {w}({acc}, {srcAt st.Sources.[0]});" ]
+            | Blade.Optimize.GaProdSum, _ ->
+                (if dynamic then [ $"{ind}    if ({cntAt} == 0) {acc} = 0;" ] else [])
+                @ [ $"{ind}    {acc} += {srcAt st.Sources.[0]} * {srcAt st.Sources.[1]};" ]
+            | Blade.Optimize.GaCount, _ -> []
+            | _ -> [ "\u0000" ])
+        |> List.concat
+    if stepLines |> List.contains "\u0000" then None else
+    plan.EmittedCpp.Value <- true
+    let stateNote =
+        plan.States |> List.mapi (fun j st ->
+            let k =
+                match st.Kind with
+                | Blade.Optimize.GaUnseeded _ -> "unseeded reduce"
+                | Blade.Optimize.GaSeeded _ -> "seeded reduce"
+                | Blade.Optimize.GaProdSum -> "prodsum"
+                | Blade.Optimize.GaCount -> "count"
+            $"{j}: `{st.PeelLabel}` {k}") |> String.concat ", "
+    let header =
+        [ $"{ind}// group-aggregate v1 (Blade.Optimize.planGroupAggregate): ONE pass over the rows in source order, no permutation, no gather; states [{stateNote}]" ]
+    let wrapperLines = wrappers |> List.choose id |> List.collect (fun (code, _) -> code |> List.map (fun l -> ind + l))
+    let dropNeg = negativeKeyDrop (IRTScalar ETInt64) "__k" ind
+    let openRow =
+        [ $$"""{{ind}}for (size_t __ki = 0; __ki < {{keysBound}}; __ki++) {""" ]
+    let closeRow = [ $"{ind}    {cntAt}++;"; $"{ind}}}" ]
+    let tail =
+        [ $"{ind}size_t {name}__nsrc = {keysBound}; // source rows (>= offsets[ngroups]; negative keys drop)"
+          $"{ind}size_t {name}_extents[1] = {{{name}__ngroups}};"
+          $"{ind}void* {name} = nullptr; // gk: state in {name}__ngroups, {name}__offsets, {name}__agg<j> (group-aggregate: no permutation)" ]
+    let code =
+        match plan.Regime with
+        | _ when not dynamic ->
+            let ngroups =
+                match plan.Regime with
+                | Blade.Optimize.GaPositional n -> n
+                | Blade.Optimize.GaEnum vs -> int64 vs.Length
+                | Blade.Optimize.GaDynamic -> 0L
+            let accDecls =
+                plan.States |> List.mapi (fun j st ->
+                    match st.Kind with
+                    | Blade.Optimize.GaCount -> []
+                    | Blade.Optimize.GaSeeded (_, seed) ->
+                        [ $"{ind}{elemCpp st.Elem}* {name}__agg{j} = new {elemCpp st.Elem}[{ngroups}];"
+                          $"{ind}for (size_t __g = 0; __g < {ngroups}; __g++) {name}__agg{j}[__g] = {exprToCppCtx ctx seed};" ]
+                    | Blade.Optimize.GaProdSum ->
+                        [ $"{ind}{elemCpp st.Elem}* {name}__agg{j} = new {elemCpp st.Elem}[{ngroups}];"
+                          $"{ind}for (size_t __g = 0; __g < {ngroups}; __g++) {name}__agg{j}[__g] = 0;" ]
+                    | Blade.Optimize.GaUnseeded _ ->
+                        [ $"{ind}{elemCpp st.Elem}* {name}__agg{j} = new {elemCpp st.Elem}[{ngroups}];" ])
+                |> List.concat
+            let groupOf =
+                match plan.Regime with
+                | Blade.Optimize.GaEnum vs ->
+                    let entries = vs |> List.mapi (fun i v -> $"{{{v}LL, (size_t){i}}}") |> String.concat ", "
+                    [ $"""{ind}    size_t __g = {name}__bucket({(keysAt "__ki")});""" ],
+                    [ $"{ind}static const std::unordered_map<int64_t, size_t> {name}__bucket_map = {{{entries}}};"
+                      $$"""{{ind}}auto {{name}}__bucket = [](const int64_t& __v) -> size_t { auto it = {{name}}__bucket_map.find(__v); if (it == {{name}}__bucket_map.end()) blade_rt::panic("BL8006", "index out of bounds: a group_keys key outside its EnumIdx", {{declPanicArgs ()}}); return it->second; };""" ]
+                | _ ->
+                    [ $"""{ind}    int64_t __k = {(keysAt "__ki")};""" ] @ dropNeg
+                    @ [ $$"""{{ind}}    if ((size_t)__k >= {{ngroups}}) blade_rt::panic("BL8006", "index out of bounds: a group_keys key outside 0 .. {{ngroups - 1L}}", {{declPanicArgs ()}});"""
+                        $"{ind}    size_t __g = (size_t)__k;" ],
+                    []
+            let (rowGroup, enumDecls) = groupOf
+            header
+            @ [ $"{ind}size_t {name}__ngroups = {ngroups};"
+                $$"""{{ind}}size_t {{name}}__counts[{{ngroups}}] = {0};""" ]
+            @ enumDecls @ accDecls @ wrapperLines
+            @ openRow @ rowGroup @ stepLines @ closeRow
+            @ [ $"{ind}size_t {name}__offsets[{ngroups + 1L}];"
+                $"{ind}{name}__offsets[0] = 0;"
+                $"{ind}for (size_t __gi = 0; __gi < {ngroups}; __gi++) {name}__offsets[__gi + 1] = {name}__offsets[__gi] + {name}__counts[__gi];" ]
+            @ tail
+        | _ ->
+            (memberUsedCell ()).Value <- true
+            let slots = plan.States.Length + 1
+            let copyOut =
+                plan.States |> List.mapi (fun j st ->
+                    match st.Kind with
+                    | Blade.Optimize.GaCount -> []
+                    | _ ->
+                        let fld = if st.Elem = ETInt64 then "i" else "d"
+                        [ $"{ind}{elemCpp st.Elem}* {name}__agg{j} = new {elemCpp st.Elem}[{name}__ngroups > 0 ? {name}__ngroups : 1];"
+                          $"{ind}for (size_t __g = 0; __g < {name}__ngroups; __g++) {name}__agg{j}[__g] = blade_gkmap_record_i64(&{name}__map, (int64_t)__g)[{j + 1}].{fld};" ])
+                |> List.concat
+            header
+            @ [ $"{ind}blade_gkmap_i64 {name}__map;"
+                $"""{ind}if (!blade_gkmap_init_i64(&{name}__map, {slots})) blade_rt::panic("BL8005", "group_keys: the key -> group map could not be allocated", {declPanicArgs ()});""" ]
+            @ wrapperLines
+            @ openRow
+            @ [ $"""{ind}    int64_t __k = {(keysAt "__ki")};""" ] @ dropNeg
+            @ [ $"{ind}    int64_t __gi = blade_gkmap_group_i64(&{name}__map, __k);"
+                $"""{ind}    if (__gi < 0) blade_rt::panic("BL8005", "group_keys: the key -> group map could not grow", {declPanicArgs ()});"""
+                $"{ind}    blade_gk_slot* __rec = blade_gkmap_record_i64(&{name}__map, __gi);" ]
+            @ stepLines @ closeRow
+            @ [ $"{ind}size_t {name}__ngroups = (size_t)blade_gkmap_count_i64(&{name}__map);"
+                $"{ind}size_t* {name}__counts = new size_t[{name}__ngroups > 0 ? {name}__ngroups : 1];"
+                $"{ind}for (size_t __g = 0; __g < {name}__ngroups; __g++) {name}__counts[__g] = (size_t)blade_gkmap_record_i64(&{name}__map, (int64_t)__g)[0].i;" ]
+            @ copyOut
+            @ [ $"{ind}blade_gkmap_free_i64(&{name}__map);"
+                $"{ind}size_t* {name}__offsets = new size_t[{name}__ngroups + 1];"
+                $"{ind}{name}__offsets[0] = 0;"
+                $"{ind}for (size_t __gi = 0; __gi < {name}__ngroups; __gi++) {name}__offsets[__gi + 1] = {name}__offsets[__gi] + {name}__counts[__gi];" ]
+            @ tail
+    let ctx' = addVarName binding.Id name ctx
+    Some (code, ctx')
+
+/// A PEEL of an aggregate-only grouping (Blade.Optimize.planGroupAggregate):
+/// the peel statement `let <name> = method_for(g) <@> <aggregate kernel> |>
+/// compute` reads its state from the grouping's one pass -- still a named,
+/// stored rank-1 output over the group axis (the peel's own extents ABI and
+/// ownership). The COUNT reads the offsets, exactly as the peel did; an
+/// UNSEEDED reduce first checks the groups in group order and raises BL8003
+/// for the FIRST empty one, at this declaration, before its output exists
+/// (the peel's own empty check, at its own site); every other state adopts
+/// its accumulator. None when the grouping did not emit its pass (today's
+/// peel follows) or this binding is no planned peel.
+and genGroupAggPeelCpp (ctx: CodeGenContext) (id: IRId) (name: string) : string list option =
+    match Blade.Optimize.GroupAggTable.tryPeel id with
+    | Some (plan, j) when plan.EmittedCpp.Value ->
+        match Map.tryFind plan.GkId ctx.VarNames with
+        | None -> None
+        | Some gk ->
+        let ind = indentStr ctx
+        let st = plan.States.[j]
+        let et = elemTypeToCpp (IRTScalar st.Elem)
+        let ext = fst (emitExtentsTable ind (name + "_extents") 1 [ ($"{gk}__ngroups", false) ])
+        let header = $"{ind}// group-aggregate v1 (Blade.Optimize.planGroupAggregate): `{st.PeelLabel}` reads state {j} of `{gk}`'s one pass"
+        let body =
+            match st.Kind with
+            | Blade.Optimize.GaCount ->
+                [ $"{ind}Array<{et}, 1> {name} = {{ new {et}[{gk}__ngroups], {name}_extents }};"
+                  $"{ind}for (size_t __g = 0; __g < {gk}__ngroups; __g++) {name}[__g] = ({et})({gk}__offsets[__g + 1] - {gk}__offsets[__g]);" ]
+            | Blade.Optimize.GaUnseeded _ ->
+                [ $"""{ind}for (size_t __g = 0; __g < {gk}__ngroups; __g++) if ({gk}__counts[__g] == 0) blade_rt::panic("BL8003", "reduce: empty array, no reduction possible", {declPanicArgs ()});"""
+                  $"{ind}Array<{et}, 1> {name} = {{ {gk}__agg{j}, {name}_extents }};" ]
+            | Blade.Optimize.GaSeeded _ | Blade.Optimize.GaProdSum ->
+                [ $"{ind}Array<{et}, 1> {name} = {{ {gk}__agg{j}, {name}_extents }};" ]
+        // The peel's own ownership: a raw `new T[]` backing (the state's
+        // accumulator, adopted) and an unowned heap extents table.
+        registerAlloc (RawArrayData (name, None, None))
+        Some (header :: ext @ body)
+    | _ -> None
+
 and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (vals: IRExpr) (gk: IRExpr) : string list * CodeGenContext =
     let ind = indentStr ctx
     let name = bindingCppName binding
@@ -3476,10 +3693,19 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
     // buffers and the O(n) copy are dead, so the rows stay
     // null. Legal because the peel reads the pointer without dereferencing it,
     // and deallocate_ragged_rows_owned's `delete[] rows[i]` no-ops on null.
-    let elideGather = Set.contains binding.Id (extentsOnlyGroupBysCell ()).Value
+    // AGGREGATE-ONLY GROUPING (Blade.Optimize.planGroupAggregate): every
+    // consumer is a peel that reads its state from the grouping's one pass
+    // (placed: the handshake flag), so the rows are not gathered either.
+    let aggregated =
+        match Blade.Optimize.GroupAggTable.tryGroupBy binding.Id with
+        | Some p -> p.EmittedCpp.Value
+        | None -> false
+    let elideGather = aggregated || Set.contains binding.Id (extentsOnlyGroupBysCell ()).Value
     let code =
         elemErrCode
-        @ [ if elideGather
+        @ [ if aggregated
+            then $"{ind}// group_by: rows NOT gathered -- every consumer reads its group-aggregate state (Blade.Optimize.planGroupAggregate)"
+            elif elideGather
             then $"{ind}// group_by: rows NOT gathered -- every consumer reads only extents(row)"
             else $"{ind}// group_by: per-group nested allocation, group-contiguous via gk__perm" ]
         @ extentsDecl

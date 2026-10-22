@@ -48,5 +48,13 @@
   "hashjoin": {
     "smoke": {"checksum": 966472222, "input_checksum": 156236, "sizes": {"n": 211, "m": 101, "k": 41}},
     "full": {"checksum": 2251884269, "input_checksum": 2115829, "sizes": {"n": 2003, "m": 1009, "k": 401}}
+  },
+  "groupagg": {
+    "smoke": {"checksum": 1883737.6264091765, "input_checksum": 15174677.619158197, "sizes": {"n": 30011, "ngroups": 1009}},
+    "full": {"checksum": 1984333478.124723, "input_checksum": 504658603.05295414, "sizes": {"n": 1000003, "ngroups": 1009}}
+  },
+  "groupagg_dyn": {
+    "smoke": {"checksum": 1883737.6264091772, "input_checksum": 119932843430.61916, "sizes": {"n": 30011, "ngroups": 1009}},
+    "full": {"checksum": 1984333478.1247227, "input_checksum": 3988492455286.0527, "sizes": {"n": 1000003, "ngroups": 1009}}
   }
 }

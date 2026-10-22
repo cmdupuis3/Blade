@@ -1,0 +1,29 @@
+// TEST: Group aggregate one pass, a compound key source
+// The selection-then-grouping shape (SQL WHERE + GROUP BY): the keys and the
+// values are rank-1 COMPOUNDS of one mask, built at top level (stored at
+// their sites), grouped inside a function. The one pass (gap G71) walks the
+// compound's kept cells in kept order -- the order the CSR's key pass walked
+// -- so each group's chain is unchanged.
+type Row = Idx<8>
+
+let keys: Array<Int64 like Row> = [5, 8, 5, 8, 9, 5, 8, 9]
+let amt: Array<Int64 like Row> = [1, 2, 3, 4, 5, 6, 7, 8]
+let keep = mask(amt, lambda(a) -> a != 4 && a != 8)
+let skeys = compound(keys, keep)
+let samt = compound(amt, keep)
+
+function by_key() = {
+    let gk = group_keys(skeys)
+    let g = group_by(samt, gk)
+    let f = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b, 0) |> compute
+    let t = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
+    let n = extents(gk)
+    (f, t, n)
+}
+
+let (f, t, n) = by_key()
+// kept rows 0, 1, 2, 4, 5, 6: groups by first occurrence 5 -> (1, 3, 6), 8 -> (2, 7), 9 -> (5)
+// f: 3 * (3 * (3 * 0 + 1) + 3) + 6 = 24; 3 * (3 * 0 + 2) + 7 = 13; 5
+// EXPECT: f = [24, 13, 5]
+// EXPECT: t = [10, 9, 5]
+// EXPECT: n = [3, 2, 1]
