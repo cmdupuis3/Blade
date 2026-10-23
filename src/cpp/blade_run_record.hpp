@@ -62,7 +62,28 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+// The SDK's legacy memory/calling-convention macros are not Blade names.
+// Preserve even a caller-defined value; do not leak newly defined macros.
+#pragma push_macro("far")
+#pragma push_macro("near")
+#pragma push_macro("pascal")
+// A previous narrow SDK include may have set minwindef's include guard.
+// Supply its exact legacy definitions while parsing any remaining SDK headers;
+// caller sentinels must not enter the SDK even when that guard is already set.
+#undef far
+#undef near
+#undef pascal
+#define far
+#define near
+#if defined(_ARM_)
+#define pascal
+#else
+#define pascal __stdcall
+#endif
 #include <libloaderapi.h>
+#pragma pop_macro("pascal")
+#pragma pop_macro("near")
+#pragma pop_macro("far")
 #else
 #include <unistd.h>
 #endif

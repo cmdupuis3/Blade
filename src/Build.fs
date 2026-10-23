@@ -1759,23 +1759,32 @@ let runExecutableMpiIn (cwd: string) (ranks: int) (exeFile: string) : Result<int
 let runExecutableMpi (ranks: int) (exeFile: string) : Result<int * string, string> =
     runExecutableMpiIn (Path.GetDirectoryName(Path.GetFullPath exeFile)) ranks exeFile
 
-/// Sanitize a test name for use as a filename (cross-platform).
+/// Sanitize a generated artifact name (cross-platform). Existing ASCII names
+/// retain their spelling. Native Windows toolchains can change Unicode argv
+/// output paths, so project non-ASCII characters to '_' and disambiguate their
+/// original UTF-8 spelling with a fixed-size digest (no per-character growth).
 let sanitizeFileName (name: string) : string =
-    name
-        .Replace("&&", "_and_")
-        .Replace("||", "_or_")
-        .Replace(" ", "_")
-        .Replace(":", "")
-        .Replace("/", "_")
-        .Replace("\\", "_")
-        .Replace("(", "")
-        .Replace(")", "")
-        .Replace("|", "_")
-        .Replace("&", "_")
-        .Replace("+", "_")
-        .Replace(",", "_")
-        .Replace("<", "_")
-        .Replace(">", "_")
-        .Replace("\"", "")
-        .Replace("*", "_")
-        .Replace("?", "_")
+    let sanitized =
+        name
+            .Replace("&&", "_and_")
+            .Replace("||", "_or_")
+            .Replace(" ", "_")
+            .Replace(":", "")
+            .Replace("/", "_")
+            .Replace("\\", "_")
+            .Replace("(", "")
+            .Replace(")", "")
+            .Replace("|", "_")
+            .Replace("&", "_")
+            .Replace("+", "_")
+            .Replace(",", "_")
+            .Replace("<", "_")
+            .Replace(">", "_")
+            .Replace("\"", "")
+            .Replace("*", "_")
+            .Replace("?", "_")
+    if sanitized |> Seq.forall (fun c -> int c <= 127) then sanitized
+    else
+        let ascii = String(sanitized |> Seq.map (fun c -> if int c <= 127 then c else '_') |> Seq.toArray)
+        let digest = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes name)
+        ascii + "_u" + Convert.ToHexString(digest).Substring(0, 16)

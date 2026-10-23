@@ -1000,6 +1000,15 @@
         "docs/features/sql.md"
       ]
     },
+    "BL8016": {
+      "title": "private intermediate resource or protocol failure",
+      "explanation": "An explicitly permitted private intermediate could not be created, stored or replayed, or failed its resource, integrity or protocol checks. No partial result is published. Provider validation still takes priority when the original input itself is invalid. The resource grant covers the admitted intermediate, not whole-process memory.",
+      "fix": "Check the explicit resource grant, scratch-directory permissions and available allowed memory/disk capacity. If an integrity, count or replay-order failure persists, report the complete diagnostic and run record as a runtime defect.",
+      "examples": [
+        "tests/PrivateSpoolTests.fs"
+      ],
+      "docs": []
+    },
     "BL9001": {
       "title": "internal compiler error",
       "explanation": "An invariant inside the compiler broke, or an unexpected exception escaped to the CLI boundary. This is a bug in Blade, not in the program being compiled.",

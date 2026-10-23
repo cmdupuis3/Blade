@@ -18,7 +18,27 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+// Keep the SDK's legacy macros inside this include boundary, restoring the
+// caller's exact defined/undefined state in either runtime-header order.
+#pragma push_macro("far")
+#pragma push_macro("near")
+#pragma push_macro("pascal")
+// minwindef may already be guarded after a narrow SDK include. Other Windows
+// headers still use these tokens (for example MIDIHDR's far pointer).
+#undef far
+#undef near
+#undef pascal
+#define far
+#define near
+#if defined(_ARM_)
+#define pascal
+#else
+#define pascal __stdcall
+#endif
 #include <windows.h>
+#pragma pop_macro("pascal")
+#pragma pop_macro("near")
+#pragma pop_macro("far")
 #endif
 
 namespace blade_private_spool {

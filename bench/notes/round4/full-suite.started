@@ -1,0 +1,7 @@
+AUTHORIZED_BY=round4 root explicit one-time full-suite dispatch
+SOURCE_REVISION=ee4b1a0b895585036d659462fd1504313c941a83
+COMPILER_PATH=C:\Users\cdupu\Documents\GitHub\Blade\.round4-worktrees\integration\bin\Release\net10.0\Blade.exe
+COMPILER_SHA256=7506E38D9E3A5978324ABE41540FC4F63891CA06A1D9188EF25627C0464D67EC
+LAUNCH_UTC=2026-10-22 23:54:46 UTC
+COMMAND=Blade.exe test
+CWD=C:\Users\cdupu\Documents\GitHub\Blade\.round4-worktrees\integration
