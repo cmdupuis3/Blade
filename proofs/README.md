@@ -51,7 +51,30 @@ computed pins.  `count-theorems.ps1` is the mechanical implementation --
 run it with `-Check` to verify the numbers below and the headline in
 `docs/proofs.md`, which quotes the same total.
 
-## Contents (2121 theorems total)
+## Contents (2184 theorems total)
+
+- BladeStructuralIdentity.v (18): A small model separating identifiers from
+  versioned, oriented value keys. Alias binding preserves reads; transpose
+  preserves origin and changes orientation, with involution and certified
+  symmetric erasure. Same versus distinct operand partitions select different
+  structural result layouts even when ordinary input types agree. Exact
+  integer outer addition witnesses the sharing distinction. A snapshot/live
+  view counterexample and a stable-source theorem expose the mutation
+  obligation. This is not a verification of the compiler's alias analysis.
+- BladeCompositionalOptimization.v (35): Structural reindexing and packing
+  laws; monotone composition of work, traffic, and absolute peak footprint;
+  executable frontier pruning preserves exhaustive candidates up to dominance
+  at each fixed depth. Optimality is relative to the supplied transition
+  system and a monotone objective. State equality must capture the complete
+  continuation interface, and semantic preservation is a separate invariant.
+  No claim of hardware-time optimality or verified F# optimizer integration.
+- BladeLayoutOptimizationBridge.v (10): Imports BladeLayout's forward
+  reduction and schedule-selection results. Filters schedules by an explicit
+  structural traversal admission predicate, preserves minimum-cost choices,
+  and proves the zero-order-feasibility test. Resource dominance and contextual
+  replacement require additional resource factorization and monotonicity
+  hypotheses. Checker soundness is an explicit obligation; contiguous curried
+  traversal does not mean globally increasing writes in conversion kernels.
 
 - BladeCore.v (16): Group Law both halves (diagonal swap sound; per-dim
   product swap refuted), counting lemma (no lossless product layout),
