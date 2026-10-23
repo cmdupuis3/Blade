@@ -1,0 +1,633 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern,microtype,hyperref,enumitem}
+\hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue}
+\setlist{nosep}
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newcommand{\eval}[1]{[\![#1]\!]}
+\newcommand{\Can}{\mathsf{CanApply}}
+\newcommand{\rd}{\mathsf{read}}
+\newcommand{\cid}{\mathsf{id}}
+\newcommand{\Sem}{\mathsf{Sem}}
+\newcommand{\Front}{\mathcal F}
+\newcommand{\All}{\mathcal A}
+\newcommand{\Nat}{\mathbb N}
+\title{Identity, Structural Transpose, and Compute:\\Materialization Elimination and Compositional Optimization}
+\author{A proposed semantics and proof, prepared by Codex}
+\date{22 October 2026}
+\begin{document}
+\maketitle
+\begin{abstract}
+Transpose is a typed structural function: it composes an explicit coordinate map with an existing canonical read. Aliases preserve the entire ordered operand, while transpose generally changes it. This retains Blade's identity-sensitive quotient selection without making variable names semantic. Compute establishes a logical value and its observable obligations; it does not require an intermediate allocation. Canonical scalar evaluation stays fixed, and every surviving bulk traversal must satisfy Blade's structural, contiguous curried traversal contract.
+
+BladeLayout already proves a minimum of summed Kendall inversions over its finite schedule space. We reuse that result when its minimizer is admissible, and its generic minimum-selection lemmas when structural traversal requires filtering the space. A new Rocq development proves elimination of finite canonical buffers in pure producer graphs and in an unchanged effect/snapshot skeleton. Compositional optimization remains conditional on sufficient boundary interfaces, sound lowering, and the stated cost model; it does not turn the stride metric into a hardware cache theorem.
+\end{abstract}
+
+\section{The semantic decision}
+Preserve:
+\begin{enumerate}
+\item Structural index types determine the logical domain and canonical representatives.
+\item Kernels evaluate at canonical representatives; noncanonical reads reconstruct those values.
+\item Immutable aliases, including aliases passed through functions, preserve the complete ordered operand.
+\item Transpose is an explicit structural function, distinct from an alias and from its storage realization.
+\item Compute converts a computation into a logical value without prescribing its physical realization.
+\item Surviving bulk traversals follow the legal structural storage order; a deferred transpose does not expose an unrestricted strided array.
+\end{enumerate}
+Do not additionally promise that replacing any array by a pointwise-equal array preserves every identity-sensitive construction. The equality used for substitution must be stated.
+
+The reference semantics is exact about its chosen canonical evaluations. A separate numerical permission may admit a family of execution trees. Physical optimization must not silently choose a different reference quotient or representative. The word canonical has two different uses here: the representative of a value orbit, and BladeLayout's selected execution schedule. A minimum schedule must implement the former; it cannot redefine it.
+
+\section{Values and canonical application}
+\subsection{Structural descriptors}
+For an unsigned example, an index descriptor is
+\[
+ D=(X,G,R,\kappa,\mathsf{rank},\epsilon),
+\]
+where $X$ is the logical domain, $G$ acts on $X$, $R\subseteq X$ is a transversal, $\kappa:X\to R$ is canonicalization, and $\mathsf{rank}:R\to[0,|R|)$ is a bijection with inverse enumeration $\epsilon$. Require
+\[
+ \kappa(r)=r,\qquad
+ \kappa(x)=\kappa(y)\ \Longleftrightarrow\ x,y\text{ belong to the same orbit}.
+\]
+Thus $\mathsf{rank}(\epsilon(k))=k$ and $\epsilon(\mathsf{rank}(r))=r$. Blade's dependent residual traversal supplies $R$, its order, and its rank. This proposal preserves that constructive structure, including left-justified residual coordinates. An ordered structural frame $F$ comprises the typed axes and this logical ordering information; it is not a physical pointer or cache layout.
+
+For signed or conjugating types, canonicalization returns either structural zero or $(r,\tau_x)$. The descriptor supplies the transport $\tau_x$ and carrier constraints ensuring coherent reconstruction. Alternating types explicitly impose their repeated-coordinate zeros; these do not follow from $v=-v$ on every carrier.
+
+\subsection{Roots, structural operands, and aliases}
+An immutable canonical root is
+\[
+ A=(\nu,D,a),\qquad a:R\to V,
+\]
+with stable semantic identity $\nu$. In the unsigned case,
+\[
+ \rd(A,x)=a(\kappa(x)).
+\]
+In the general case the answer is $\tau_x(a(r))$ or the structural zero. $V$ may consist of machine scalar values; their operational arithmetic is not replaced by real-number equality.
+
+An ordered operand over a target domain $Y$ is a structural expression
+\[
+ U=(A,\phi,F_Y),\qquad \phi:Y\longrightarrow X,\qquad
+ \rd(U,y)=\rd(A,\phi(y)).
+\]
+For transpose, $\phi$ is a typed coordinate bijection. A root used directly has $\phi=\mathsf{id}_X$. Its operand key is
+\[
+ \cid(U)=(\nu,\mathsf{NF}(\phi),F_Y).
+\]
+Here $\mathsf{NF}$ normalizes a supported typed coordinate syntax, initially axis permutations, with composition and inverse laws. It is not a decision procedure for equality of arbitrary functions. More structural maps need their own typed normalization laws.
+
+These displayed equations describe the coordinate-only fragment. When the
+normalizer includes negation or conjugation, the operand key also retains the
+typed payload action and its reconstruction certificate. Applying an action to
+canonical payloads and then reconstructing need not equal applying it blindly
+to every logical read, particularly at implicit zeros. The finite-buffer model
+below makes this distinction explicit.
+
+Root identity denotes a logical definition or version. Operand identity additionally records the ordered structural use of that root. Neither is variable spelling, physical address, or a contents hash. An alias copies the entire operand:
+\[
+ \eval{\mathbf{let}\ B=A\ \mathbf{in}\ e}_{\rho}
+   =\eval e_{\rho[B\mapsto\rho(A)]}.
+\]
+This binding allocates no new identity and changes neither map nor frame. A physical copy, migration, or transpose buffer implementing $U$ preserves its operand key. The buffer is a realization of $U$, not a fresh logical root. A separately constructed object may have a different root identity even when its reads happen to agree.
+
+This adds nominal and ordered structural information to the underlying read function. Equality of source roots alone does not justify treating their differently indexed uses as repeated operands.
+
+\subsection{Transpose as a structural function}
+For a bijection $\pi:Z\to Y$ define
+\[
+ T_\pi(U)=\mathsf{Reindex}(\pi,U)
+       =(A,\mathsf{NF}(\phi\circ\pi),F_Z).
+\]
+The frame change is a typed part of the operation. In particular, for a matrix,
+\[
+ \pi:J\times I\to I\times J,\quad \pi(j,i)=(i,j),
+ \qquad \rd(T_\pi A,(j,i))=\rd(A,(i,j)).
+\]
+The structural function has the laws
+\[
+ T_\sigma(T_\pi U)=T_{\pi\circ\sigma}U,\qquad
+ T_{\mathsf{id}}U=U,
+\]
+where identity includes the matching frame, and an inverse transpose restores the original frame. These laws hold at the supported structural normal form, not just at the scalar-read projection. An ordinary transpose is therefore generally a different ordered operand; it is not an opaque numerical kernel and does not allocate an independent semantic root.
+
+For a symmetry-certified transpose, a further typed law may give $T_\pi U=U$, or a signed/conjugated read. Unsigned collapse can be included in structural normalization before quotient selection. A signed or conjugated result is a corresponding value transformation, not equality to the unchanged operand. Blade already distinguishes these outcomes in transpose inference. Applying a new certificate after elaboration must preserve the fixed canonical application; it must not silently re-elaborate sharing.
+
+There is no presumption that every conjugated group has a compact representation among Blade's current structural types. A supported transpose carries a target type and its read proof; otherwise lowering needs a supported dense representation, an explicit conversion, or rejection.
+
+\subsection{Construction}
+Define the operand-sharing partition by
+\[
+ \Pi(\vec A)=\{(i,j):\cid(A_i)=\cid(A_j)\}.
+\]
+The licence is the declared kernel group intersected with the stabilizer of these complete ordered operands. Blade's current contiguous subgroup can still be used, provided selection depends on this partition and positions, not variable names. Consequently $A$ and an ordinary $T_\pi A$ need not be exchangeable even though they have the same root. Write $D_Q$ for the deterministically selected descriptor.
+
+Elaboration produces an explicit core term
+\[
+ \Can_{D_Q,K,\eta}(\vec A),
+\]
+where $\eta$ fixes reference arithmetic evaluation. Its representative values are
+\[
+ b(r)=\mathsf{eval}_{\eta}
+       \bigl(K,\rd(A_1,r_1),\ldots,\rd(A_m,r_m)\bigr),\quad r\in R_Q.
+\]
+Generalize the tuple components $r_i$ to operand slices where needed. A read at $x$ reconstructs $b$ using $D_Q$. The dense extension is therefore \emph{defined} by canonical evaluation; it need not equal independently evaluating an IEEE body in every permuted order.
+
+The descriptor is semantic data in the core. CSE, inlining, fusion, layout selection, or newly discovered equality cannot silently strengthen $G_Q$ or change $\kappa_Q$. Such a change needs observation-preservation evidence or a numerical permission admitting it. A dense physical representation of an already canonical object still stores its canonical-read meaning.
+
+\subsection{Functions and typed sharing}
+Parameters inherit actual-argument operand keys; parameter renaming cannot reset the root, map, or frame. A useful typing view, with $\alpha$ ranging over these keys, is
+\[
+ f:\forall\vec\alpha.\quad
+   \prod_i\mathsf{Array}_{\alpha_i}(D_i,V_i)\longrightarrow T(\Pi(\vec\alpha)).
+\]
+Instantiation transports the sharing partition, descriptor choice, and witnesses. Statically known calls specialize on sharing, as they already specialize on arity.
+
+If a higher-order or existential interface hides sharing, preserve a witness or dispatch on handles; alternatively, that source interface must fix its quotient explicitly. Silently assuming hidden aliases are distinct is not an implementation of the proposed handle-dependent semantics. Supporting such interfaces is an implementation obligation, not a claim about current Blade.
+
+\begin{theorem}[Alias substitution]
+In the pure, terminating structural-operand semantics, substituting one variable for another bound to the same operand preserves results, canonical reads, and Boolean observations. If construction allocates root identities, equality is modulo consistent renaming of fresh roots.
+\end{theorem}
+\begin{proof}
+Use capture-avoiding substitution, simultaneously substituting identity parameters in types and descriptors. Induct on expressions. Variable cases follow from the environment premise. Scalar operations and reads follow from the induction hypotheses and determinism.
+
+At reindexing, equal operands receive the same typed map and frame transformation. Normalization produces equal composite maps, so operand keys and reads agree. At canonical application, corresponding operands therefore have identical keys and sharing partitions. Selection chooses the same group, descriptor, transversal, and reference evaluation. Each representative receives identical arguments and produces the same scalar value. Reconstructed reads therefore agree.
+
+Function application binds the actual handles without freshening them; apply the induction hypothesis to its body. Let-binding extends the environments with the same resulting handle, so induction again applies. Fresh allocations can be coupled by a bijection on identities; identity equality and sharing partitions are invariant under that bijection.
+\end{proof}
+This is call-by-value substitution of \emph{values}. It does not permit duplicating an arbitrary allocating or effectful expression. Inlining must preserve evaluation-once and sharing. CSE may share physical storage while preserving distinct logical handles where the source constructs distinct objects.
+
+For mutation, use store locations with versions or frozen read snapshots. A sharing witness refers to the version observed by the canonical computation. The theorem does not justify moving reads across mutation. Extending it to effects requires preserving store and trace observations; only the pure fragment is addressed here.
+
+\subsection{The remaining limit on extensionality}
+\begin{proposition}[An incompatibility]
+The following four requirements cannot all hold:
+\begin{enumerate}
+\item Pointwise-equal arrays are interchangeable in all scalar observations.
+\item Repeated identical operands select sorted-index canonical evaluation.
+\item Distinct operands with equal contents may evaluate in source index order.
+\item The body uses ordinary fixed-order floating-point addition.
+\end{enumerate}
+\end{proposition}
+\begin{proof}
+Let $A=[1,10^{16},-10^{16}]$ and let $B,C$ have equal reads but distinct identities. Use the declared-commutative body $(x+y)+z$. At $(1,2,0)$, the repeated-operand construction evaluates sorted representative $(0,1,2)$ and returns $0$. The distinct-operand construction evaluates $(10^{16}+(-10^{16}))+1$ and returns $1$. Testing equality to zero distinguishes them, contradicting requirement 1.
+\end{proof}
+Preserving identity through \texttt{let B = A; let C = A} resolves the original alias example: all three operands now share an identity. It does not establish equality of arbitrary computed arrays. Full extensionality requires changing another requirement; alias propagation alone cannot supply it.
+
+\section{Compute and materialization elimination}
+\subsection{Logical commitment and physical realization}
+The typing rule remains $\mathsf{compute}:\mathsf{Computation}\ T\to T$.
+Its result carries the fixed operand key, structural descriptor, numerical contract, and observed source versions. Its effect and failure obligations occur where the source semantics requires them. An interpreter may realize this commitment eagerly. A compiler may leave its physical representation undecided and later choose storage, fusion, streaming, or certified recomputation.
+
+Erasing a compute marker is permitted only after these commitments have been represented elsewhere in the core. In particular, materialization does not mint a new semantic root, and optimizer-created buffer sharing does not merge the source's semantic identities. A mathematical version label identifies old data but does not preserve its physical backing.
+
+Whole-program planning roots the graph in all observable results and events, not just the final printed value. Cross-file visibility expands the analyzable graph; it does not move every effect to program termination. The formal model below is finite and terminating. Recursion, unbounded loops, nondeterministic external input, concurrency, and unknown callees need additional contracts or opaque boundaries.
+
+\subsection{Finite canonical buffers}
+For a fixed descriptor $D$, let $N_D$ be its canonical slot count and let
+\[
+ \lambda_D(x)\in\{\mathsf{Zero}\}\mathbin{\cup}
+       \{(k,\tau):0\le k<N_D,\ \tau:V\to V\}
+\]
+locate a logical coordinate. For canonical cells $c:\Nat\to V$, define
+\[
+ \mathsf{read}_D(c,x)=
+ \begin{cases}
+ 0_V & \lambda_D(x)=\mathsf{Zero},\\
+ \tau(c(k)) & \lambda_D(x)=(k,\tau).
+ \end{cases}
+ \qquad
+ B_D(c)=[c(0),\ldots,c(N_D-1)].
+\]
+The stored reader uses $B_D(c)[k]$ in place of $c(k)$; the virtual reader uses $c(k)$ directly. The zero branch precedes any transport, so sign or conjugation is not applied to an implicit zero. This preserves the descriptor's actual zero convention even when a scalar action would change that zero's machine representation.
+
+\begin{lemma}[Finite materialization readback]
+Stored and virtual readers agree at every logical coordinate. They also agree after composition with any well-typed coordinate map, including transpose.
+\end{lemma}
+\begin{proof}
+By induction on the finite enumeration, the $k$th entry of $B_D(c)$ is $c(k)$ for $k<N_D$. The descriptor's bound proves this premise whenever it selects a stored slot. Apply the same reconstruction action on both sides. For a structural zero both readers return $0_V$ directly. A coordinate map simply selects another coordinate at which the same equality holds.
+\end{proof}
+This is \texttt{packed\_read\_equals\_virtual} and
+\texttt{elimination\_under\_reindex} in \texttt{BladeMaterialization.v}.
+The proof does not require $\tau(0_V)=0_V$.
+
+\subsection{Producer graphs and logical snapshots}
+A node $n$ fixes its result key, descriptor, and canonical scalar expression
+$b_n(k)$. Scalar trees contain literals, reads, value-dependent indexing,
+unary/binary operations, and conditionals. Their functions are pure and total;
+the tree fixes evaluation structure and is never reassociated. An environment
+$E$ maps operand keys to readers, and $c_n^E(k)=\mathsf{eval}(b_n(k),E)$.
+
+A retention policy $p(n)$ chooses either the finite buffer reader or the
+virtual reader for each node. Both readers capture the predecessor environment.
+The graph runner binds the chosen reader under the same result key and continues
+with the next node. Compiler lowering must ensure well-scoped, versioned keys;
+the graph model does not derive those keys from source identifiers.
+
+\begin{theorem}[Pure graph materialization elimination]
+For any finite producer graph, any retention policy, any fixed input environment,
+and any finite list of requested logical reads, retaining every intermediate
+buffer and following the selected policy produce identical answers.
+\end{theorem}
+\begin{proof}
+Maintain pointwise equality of environments. Structural induction on scalar
+trees preserves their values; equal conditions choose equal branches and equal
+computed indices choose equal reads. Finite materialization readback then gives
+equal readers for the next node under either policy. Binding them under the same
+key preserves the invariant. Induct on the graph and apply the invariant to
+each final request.
+\end{proof}
+The checked theorem is \texttt{pure\_graph\_materialization\_elimination}.
+\texttt{graph\_concatenation} permits separately described graph fragments to
+compose; it is not a proof of module linking or interprocedural analysis.
+
+\subsection{Effects and failures}
+The checked program syntax surrounds pure graph blocks with an explicit ordered
+skeleton of output, writes, snapshot capture, Boolean checks that can fail,
+unconditional abort, and return. Its observation is
+\[
+ \mathsf{Obs}=(\mathsf{finalStore},\mathsf{eventTrace},
+               \mathsf{ReturnedValues}\ \text{or}\ \mathsf{AbortedCode}).
+\]
+A snapshot binds a reader over the store at that point. Later writes produce a
+new mathematical store; they do not alter the captured one.
+
+\begin{theorem}[Materialization elimination with an effect skeleton]
+Changing any buffer-retention decisions inside the pure blocks preserves
+$\mathsf{Obs}$ exactly, provided the program's effect/snapshot skeleton and
+input store remain unchanged.
+\end{theorem}
+\begin{proof}
+Induct on the program while maintaining pointwise-equal reader environments
+and the same store. For a pure block apply graph policy equivalence. Output and
+write commands obtain identical values, thus emit identical events and produce
+the same next store. Snapshot capture binds identical readers. Checks choose
+the same continuation or the same failure; abort and return agree directly.
+The induction also preserves the suffix trace, yielding equality of the whole
+observation.
+\end{proof}
+This is \texttt{materialization\_elimination}; separate corollaries project
+the effect trace and result/failure equality. The model also proves that a
+snapshot read survives a later write, and that removing an unconsumed abort
+changes the result.
+
+The theorem does not extract an effectful or failing per-cell producer into
+this skeleton, reorder events, or prove termination of arbitrary Blade code.
+Such producers remain opaque obligations unless a separate proof licenses
+their transformation. External reads require their own event/input model.
+An interpreter that eagerly tabulates pure blocks and a compiled plan that
+eliminates their buffers are therefore consistent realizations of one meaning.
+
+\subsection{Legality and cost remain separate}
+A virtual reader is a denotational option, not automatically a legal bulk
+execution schedule. Blade still admits only supported contiguous curried
+traversals, canonical reconstruction, and licensed conversions. Availability
+of earlier source versions must be justified by scheduling, retained storage,
+or a copy. A writable or external buffer boundary can require materialization.
+Removing an allocation can increase recomputation or traffic; semantic
+equivalence does not establish resource dominance. These obligations determine
+which realizations enter the cost search below.
+
+\section{Forward realization without changing canonical evaluation}
+\subsection{Read transport and representative selection}
+Let $B=\Can_{D,K,\eta}(\vec U)$. In the unsigned case the meaning of a transposed read is exactly
+\[
+ \rd(T_\pi B,y)
+  =b(\kappa_D(\pi(y)))
+  =\mathsf{eval}_{\eta}\bigl(K,\vec U\text{ at }\kappa_D(\pi(y))\bigr).
+\]
+In the signed case retain the source zero test and reconstruction transport as well. This is the fusion rule: an absorbed transpose changes the coordinates supplied to the producer's read. It does not authorize replacing that read with a fresh evaluation of $K$ in the target's axis order.
+
+For an unsigned source action $G_X$, the transported action is
+$G_Y=\pi^{-1}G_X\pi$. The map
+$\pi^{-1}\kappa_X\pi$ chooses one representative per transported orbit, but its representatives need not be the desired forward canonical region in the target frame. We instead allow a target descriptor $E$ with its own representatives and ordering, provided the transported read $f=\rd(A,-)\circ\pi$ satisfies its reconstruction law. Thus the target can select its usual forward region while obtaining each value by the original source read.
+
+For unsigned $E$ the required law is $f(y)=f(\kappa_E(y))$. It follows from source orbit invariance when $E$ describes the transported orbits. For signed/conjugating $E$, require the full law
+$f(y)=\tau^E_y(f(r_E(y)))$ and the required structural zeros. It must follow from coherent transported actions on the actual carrier. A mathematical sign law alone is insufficient to establish bitwise floating-point behavior, including signed zeros and NaNs.
+
+\begin{lemma}[Unsigned transport preserves canonical reads]
+If $E$ chooses representatives of the $\pi^{-1}G_X\pi$-orbits, then
+$f(\kappa_E(y))=f(y)$ for $f(y)=a(\kappa_X(\pi(y)))$.
+\end{lemma}
+\begin{proof}
+There is $g\in G_X$ with $\kappa_E(y)=\pi^{-1}g\pi(y)$. Hence
+$\pi(\kappa_E(y))=g\pi(y)$. Source canonicalization is constant on that orbit, so
+$\kappa_X(\pi(\kappa_E(y)))=\kappa_X(\pi(y))$.
+Both reads fetch the very same representative value $a(r)$; no arithmetic reordering is used. This remains true for machine scalar values.
+\end{proof}
+
+\subsection{Forward packing lemma}
+For an unsigned descriptor $E$ with $N$ representatives, define
+\[
+ \mathsf{pack}_E(f)[k]=f(\epsilon_E(k)),\quad 0\le k<N,
+ \qquad
+ \mathsf{unpack}_E(p,y)=p[\mathsf{rank}_E(\kappa_E(y))].
+\]
+\begin{lemma}[Forward realization of a structural function]
+If $f(y)=f(\kappa_E(y))$ for every $y$, then
+$\mathsf{unpack}_E(\mathsf{pack}_E(f),y)=f(y)$.
+Writing cell $k$ at iteration $k=0,\ldots,N-1$ emits the canonical target once in forward storage order.
+\end{lemma}
+\begin{proof}
+The read is
+$f(\epsilon_E(\mathsf{rank}_E(\kappa_E(y))))=f(\kappa_E(y))=f(y)$
+by the inverse law and the reconstruction hypothesis. The write offsets are exactly $0,\ldots,N-1$, so every target representative is emitted once with successive offsets. Substitute $f(y)=\rd(A,\pi(y))$ to obtain transpose realization. The signed proof replaces the final equality by the supplied transport/zero law.
+\end{proof}
+This proves forward destination writes, not contiguous source reads. For example, a row-major $2\times3$ dense matrix transposed into a row-major $3\times2$ target reads source offsets $0,3,1,4,2,5$ while writing target offsets $0,1,2,3,4,5$. A buffer, tile, or absorbed view may change the cost; its legality still follows from the same read equation.
+
+\subsection{The forward requirement}
+Blade's requirement is a structural traversal contract: surviving bulk loops
+curry through the supported storage structure in its forward contiguous order,
+including dependent residual bounds for compact index types. A structural
+transpose must simplify, be absorbed by a compatible consumer, or use a
+supported explicit conversion. It must not expose an unrestricted strided
+array under an ordinary contiguous array type.
+
+The preceding packing lemma describes one valid target emission order. It
+does not impose increasing destination addresses on every conversion kernel.
+Blade's existing dense transpose can traverse its source forward while writing
+permuted destination coordinates. Conversion admission and cost must account
+for the actual implementation.
+
+An eliminated pure intermediate has no independent physical traversal to
+validate. Its logical canonical reads remain fixed, and the surviving fused
+or streamed traversal needs its own structural certificate. Required effects,
+failures, source versions, and reduction orders remain obligations. Thus the
+compiler cannot evade the contract merely by calling an illegal traversal a
+view.
+
+For a lowering template that emits a canonical stream, a cursor $k$ can certify
+the prefix $[0,\ldots,k-1]$ and legal segments compose. Other templates, such as
+whole conversion kernels, use their own structural certificate. There is no
+universal requirement that all physical destination-write traces be prefixes.
+
+\section{Using BladeLayout's existing results}
+\subsection{Structural and direction certificates}
+The structural-function proposal builds on several existing results:
+\begin{itemize}
+\item \texttt{transpose\_preserves\_when\_symmetric} and
+\texttt{transpose\_negates\_when\_antisymmetric} certify the two rank-two integer simplifications. \texttt{transpose\_changes\_value\_without\_declaration} supplies a concrete counterexample to unconditional collapse.
+\item \texttt{graded\_invariant\_compose} and \texttt{licensed\_compose} compose licensed actions with XOR of their signs. \texttt{character\_composes} transports this through a pipeline under its sign-homogeneity and involution hypotheses. Those hypotheses belong on any structural-function rewrite rule using that result.
+\item \texttt{transpose\_of\_product} and \texttt{transpose\_product\_signed} give an actual transpose-absorption rule over integer matrix multiplication:
+$(AB)^T=B^TA^T=\epsilon_A\epsilon_B BA$ when the input parity hypotheses hold. An absorbed plan still needs its own forward traversal and boundary/cost certificate.
+\item \texttt{direction\_is\_free\_gauge} justifies replacing backward reduction by forward reduction under both commutativity and associativity; separate counterexamples show that either assumption alone is insufficient for that general rule. This supplies the direction-normalization case, rather than treating forward direction as an unconditional semantic equality.
+\end{itemize}
+For a reduction that lacks these laws or the corresponding numerical permission, direction remains semantic. Canonical outer output traversal does not authorize reversing that reduction. The new packing theorem addresses forward storage emission; BladeLayout's direction theorem addresses equality of reduction values. Both can be needed in the same lowering, and neither entails the other.
+
+\subsection{Schedule minimum}
+BladeLayout section 5 represents a schedule by transformed reference axis orders and a loop order. Its $\mathsf{sched\_space}(d,G,\mathit{refs})$ enumerates licensed reference permutations crossed with loop permutations. Its cost
+\[
+ \ell(s)=\mathsf{sched\_cost}(s)
+        =\sum_{\text{reference }r}\mathsf{Kendall}(r,\mathsf{loopOrder}(s))
+\]
+measures stride coherence. The existing theorems
+\texttt{canonical\_is\_in\_space},
+\texttt{canonical\_is\_cost\_minimal}, and
+\texttt{best\_cost\_agrees\_canon}
+give membership, minimality, and agreement with the reported minimum on nonempty spaces.
+
+These are useful existing results. However, membership alone does not prove forward canonical output, validity on a dependent compact domain, or preservation of a particular IEEE evaluation. BladeLayout also has concrete rank-two integer value-preservation results for licensed rewrites; those do not automatically extend to arbitrary numerical carriers or structural domains.
+
+\subsection{Restrict before selecting}
+Fix an entry interface $a$, an exit interface $b$, and a lowering template $L$. Interpret each candidate schedule as a complete local realization $L(s)$. Define the certified admissible set
+\[
+ S_{a,b,L}=\{s\in\mathsf{sched\_space}:
+       L(s)\text{ is well typed, sound, forward, and realizes }a\to b\}.
+\]
+Sound means refinement of the source numerical contract. The predicate needs evidence connecting axis-order lists to actual dependent iteration and scalar operations. For an executable filter use a Boolean checker with a soundness theorem. Completeness of that checker is a separate obligation if the comparison class includes all semantically admissible schedules.
+
+\begin{theorem}[Forward-constrained local minimum]
+If $S_{a,b,L}\ne\varnothing$, a minimum selector using BladeLayout's
+$\mathsf{foldpick}$, cost $\ell$, and schedule key returns a member $s_*$ with
+$\ell(s_*)\le\ell(s)$ for every $s\in S_{a,b,L}$.
+If BladeLayout's existing $\mathsf{canon\_sched}$ itself belongs to $S_{a,b,L}$, it can be used directly.
+\end{theorem}
+\begin{proof}
+Write the filtered list as $s_0::\mathit{rest}$. Apply BladeLayout's
+$\mathsf{foldpick\_in}$ and $\mathsf{foldpick\_min}$ to that list. For the direct case, membership is the premise and
+$\mathsf{canonical\_is\_cost\_minimal}$ bounds every element of the unfiltered space, hence every element of the subset.
+\end{proof}
+If the unfiltered minimizer is excluded, its minimum value need not be attainable by a forward realization. One must minimize the filtered list; repairing the excluded minimizer does not preserve its theorem. An empty filtered list means this template cannot supply a certified realization. A different template, conversion, or materialization is a new candidate with its own cost.
+
+This incorporates the intended locality condition as a minimum \emph{among forward legal schedules}. It does not assert that all accesses can simultaneously be contiguous. Nor is summed Kendall distance a model of cache misses or elapsed time: BladeLayout explicitly leaves reuse, blocking, and vectorization outside this metric.
+
+\subsection{What a local certificate permits globally}
+A locality minimum and a resource minimum are distinct claims. There are two precise choices:
+\begin{enumerate}
+\item Make minimum $\ell$ a required local policy. Enumerate every relevant interface and template, keep the admissible minimum-$\ell$ alternatives, and prove resource optimality within that constrained plan class. Keep tied minima when their resource costs or resulting interfaces differ.
+\item Compare all forward legal plans. Keep the locality minimum as a candidate and a certificate, but eliminate other schedules only when the complete boundary and resource-dominance conditions below hold.
+\end{enumerate}
+Lexicographic tie breaking is safe for the objective $\ell$ alone; it need not be safe for a subsequent traffic or storage objective. Forward traversal is a hard legality condition in both choices. Only the first choice additionally makes local stride optimality a hard policy.
+
+\begin{lemma}[Certified local replacement]
+Suppose $p_*$ and $p$ are sound forward local realizations of the same entry and exit interfaces, with resource costs $c_*\preceq c$. In any compatible sequential context, replacing $p$ by $p_*$ preserves the source contract and forward emissions and does not increase composed resource cost.
+\end{lemma}
+\begin{proof}
+The entry invariant admits both realizations. They produce the same complete exit interface, including any partial-emission cursor and numerical commitments, so the same suffix remains legal and has the same incremental cost. Their local traces obey the same forward contract. For prefix and suffix costs $h,k$, monotonicity gives
+$h\otimes c_*\otimes k\preceq h\otimes c\otimes k$.
+This replacement preserves the observation contract; under relaxed numerical semantics it need not preserve a particular allowed bit pattern unless that pattern is committed in the interface.
+\end{proof}
+The following sections define $\preceq$ and $\otimes$. BladeLayout supplies the premise $\ell(s_*)\le\ell(s)$, not automatically $c_*\preceq c$. One sufficient bridge is a proved monotone function $h:\Nat\to\Nat^3$ with $c(s)=h(\ell(s))$ for the fixed boundary and template. Then monotonicity of $h$ supplies resource dominance. This factorization is a strong additional hypothesis, not a claim about real cache traffic. Without it or another resource certificate, retain the alternatives on the resource frontier.
+
+\section{Numerical permissions and observations}
+Separate a deterministic reference meaning from an explicitly permitted set of numerical executions. If $\Sem(e)$ is the set of allowed observable executions of source $e$, require
+\[
+ \mathsf{Behaviors}(p)\subseteq\Sem(e)
+\]
+for implementation $p$.
+
+Generate that set operationally: choose allowed arithmetic trees at licensed sites, then evaluate the remaining program normally. A branch follows the actual numerical value. This propagates permission through the continuation; it does not assert that every continuation respects a scalar equivalence relation.
+
+Choices belong to evaluation events. A value materialized once and read twice has one shared chosen value. Independent per-read sets would permit inconsistent observations. The plan interface must retain such correlations.
+
+This is not an error guarantee. Stability, error bounds, or restriction to congruent observers are additional contracts. Deterministic evaluation is the singleton case. Every relaxed candidate must refine the same source contract and expose a continuation-compatible interface.
+
+\section{The optimization model}
+\subsection{Task and continuation interface}
+A task includes its requested observation. Returning a whole array, reading one cell, reducing its cells, and producing a trajectory are different tasks.
+
+A \emph{continuation interface} $s$ contains everything affecting future legality, observations, or modeled cost:
+\begin{itemize}
+\item computed logical roots and versions, normalized coordinate maps, ordered frames, and fixed canonical descriptors;
+\item resident representations, sharing, layouts, devices, and live sizes;
+\item remaining dependencies, output demand, recomputation inputs, and each partially emitted realization's next canonical rank;
+\item numerical commitments, effect order, and cost-relevant machine state.
+\end{itemize}
+Interface equality is stronger than equal visible output. A field may be omitted only after proving no admitted continuation distinguishes it in the modeled observations or costs.
+
+Fix the task and machine parameters. Let $\mathsf{succ}(s)$ be a finite list of certified actions, each with destination interface and incremental cost. Each action preserves structural reads, numerical permissions, observable obligations, and source-version availability, and satisfies its template's traversal certificate. Stream templates extend their recorded canonical prefix; whole-kernel conversions have the appropriate conversion certificate. If using the minimum-stride policy, the action also carries its local minimum certificate. This is a Markov requirement: availability and costs depend only on $s$, not forgotten history. If cache history affects claimed traffic, include it or weaken the result to a justified bound.
+
+The optimization result is pointwise in these parameters. If input-dependent costs are unknown at compile time, a uniformly optimal static choice requires pointwise dominance, or the implementation needs runtime selection. Minimizing estimated costs or upper bounds establishes optimality for those estimates or bounds, not automatically for actual execution time.
+
+\subsection{Resources}
+Use costs and componentwise dominance
+\[
+ c=(w,t,m)\in\Nat^3,\qquad
+ c\preceq d\iff w_c\le w_d\land t_c\le t_d\land m_c\le m_d.
+\]
+Here $w$ is work in a specified model, $t$ traffic, and $m$ peak live storage. Sequential composition is
+\[
+ (w,t,m)\otimes(w',t',m')
+   =(w+w',t+t',\max(m,m')).
+\]
+The next action's peak is its \emph{absolute} footprint, including incoming resident values, not only new allocations. Charged initial storage belongs in the initial cost. Composition is associative, unital, and monotone. Parallel execution or another machine model requires an appropriate monotone composition and sufficient state.
+
+\begin{lemma}[Continuation-safe dominance]
+If two valid partial plans reach the same interface with costs $c\preceq d$, every admitted continuation can use the first in place of the second without increasing final cost.
+\end{lemma}
+\begin{proof}
+The interface gives the same legal continuation, observation contract, emission cursors, and incremental cost $k$. The totals are $c\otimes k$ and $d\otimes k$. Monotonicity of addition and maximum proves dominance. For several actions, use associativity or induction. Semantic compatibility comes from the interface invariant, not the cost inequality.
+\end{proof}
+
+\begin{proposition}[Prefix cost alone is insufficient]
+Equal visible results and a cheaper prefix do not imply a cheaper completion.
+\end{proposition}
+\begin{proof}
+Take two layout/cache interfaces with equal logical reads. Assign prefix costs $1,2$ and the required continuation costs $10,0$, respectively. Then $1<2$ but $1+10>2+0$. Identifying those interfaces and retaining only the cheaper prefix discards the cheaper completed plan. This is a countermodel to a general rule, not a Blade measurement.
+\end{proof}
+Nor is one resource vector always best: $(1,0,10)$ and $(2,0,1)$ are incomparable.
+
+\begin{proposition}[A necessary condition on interface abstraction]
+Let $q$ summarize concrete boundary configurations. If $q(x)=q(y)$ but some continuation has different incremental costs $k_C(x)\ne k_C(y)$, no exact cost function of the summary alone can model that continuation on both configurations.
+\end{proposition}
+\begin{proof}
+If $k_C=\widehat k_C\circ q$, then $q(x)=q(y)$ implies $k_C(x)=\widehat k_C(q(x))=\widehat k_C(q(y))=k_C(y)$, a contradiction. Thus one colliding pair refutes the proposed summary. A corresponding condition holds for legal continuation sets and observable outcomes.
+\end{proof}
+
+\section{The compositional optimization theorem}
+A label $(s,c)$ has a witnessing partial plan. Define
+\[
+ (s,c)\trianglelefteq(s',c')
+ \iff s=s'\land c\preceq c'.
+\]
+For finite $L$, let $\mathsf{prune}(L)$ retain nondominated labels, keeping one representative of equal labels and a plan witness for each. We need
+\begin{align*}
+ \mathsf{prune}(L)&\subseteq L,\\
+ \forall\ell\in L\ \exists\ell'\in\mathsf{prune}(L):
+ \ell'&\trianglelefteq\ell.
+\end{align*}
+An incremental algorithm discards a new label if an old one dominates it; otherwise it inserts the new label and removes old labels it dominates.
+
+\begin{lemma}[Pruning soundness and coverage]
+The incremental algorithm satisfies both conditions.
+\end{lemma}
+\begin{proof}
+Every returned label is new or previously retained. When the new label is discarded, an old dominating label witnesses its coverage and old labels witness themselves. Otherwise the new label witnesses itself and each removed old label; unremoved labels witness themselves. Induct through insertions. If a witness is later removed, transitivity gives another witness dominating the original label.
+\end{proof}
+
+Let $\mathsf{advance}(L)$ append every legal action to every label and compose its cost. Define exhaustive and pruned search:
+\begin{align*}
+ \All_0&=\{(s_0,c_0)\},&
+ \All_{n+1}&=\mathsf{advance}(\All_n),\\
+ \Front_0&=\All_0,&
+ \Front_{n+1}&=\mathsf{prune}(\mathsf{advance}(\Front_n)).
+\end{align*}
+$\All_n$ enumerates paths of exactly $n$ actions.
+
+\begin{theorem}[Compositional frontier completeness]
+For every $n$:
+\begin{enumerate}
+\item Every label in $\Front_n$ has a witnessing path in $\All_n$.
+\item Every $(s,c)\in\All_n$ has a label $(s,d)\in\Front_n$ with $d\preceq c$.
+\end{enumerate}
+\end{theorem}
+\begin{proof}
+Induct on $n$. At zero the collections coincide.
+
+For soundness at $n+1$, a retained label belongs to the advanced frontier by pruning soundness. Its prefix has an exhaustive witnessing path by induction; appending the action gives a path in $\All_{n+1}$.
+
+For coverage, choose $(s',c\otimes e)\in\All_{n+1}$, reached from $(s,c)\in\All_n$ by an action of cost $e$. Induction supplies $(s,d)\in\Front_n$ with $d\preceq c$. Interface sufficiency permits the same action, destination, and cost: in particular its source maps, canonical-evaluation commitments, and next emission ranks are unchanged. Its forward and local-layout certificates therefore still apply. Monotonicity gives $d\otimes e\preceq c\otimes e$. Pruning coverage then supplies a retained label dominating that advanced label. Transitivity proves the claim.
+\end{proof}
+
+\begin{theorem}[Global optimality within the plan space]
+Let terminal admissibility depend on the final interface, and let $J:\Nat^3\to\Nat$ be monotone under $\preceq$. If a terminal label exists, a terminal minimizer of $J$ in $\Front_n$ is a minimizer over all terminal paths in $\All_n$.
+\end{theorem}
+\begin{proof}
+Soundness makes the selected label an exhaustive candidate. For any exhaustive terminal competitor $(s,c)$, coverage supplies a retained $(s,d)$ with $d\preceq c$. It is terminal because its interface is identical. Therefore
+\[
+ J(c_{\rm selected})\le J(d)\le J(c).
+\]
+\end{proof}
+Downward-closed budgets, such as $m\le M$, are preserved by domination. For at most $N$ actions, union frontiers $0,\ldots,N$ and prune again, or add zero-cost terminal self-loops. The result assumes a finite search space and says nothing about polynomial complexity or bounded frontier width.
+
+\subsection{Semantic soundness remains separate}
+Let $\mathsf{Inv}(s)$ state that logical values and pending observations meet the source contract, old source versions remain available where required, and every surviving traversal meets its declared structural contract. For stream templates the contract may include a prefix cursor. Require
+\[
+ \mathsf{Inv}(s_0),\qquad
+ \mathsf{Inv}(s)\land(s',e)\in\mathsf{succ}(s)
+ \Longrightarrow\mathsf{Inv}(s').
+\]
+Induction gives the invariant for every exhaustive label. A stream action emits $[k,\ldots,k+j-1]$ and changes its cursor to $k+j$, so its prefix certificate composes. Conversion kernels supply their own traversal evidence. Materialization elimination supplies read/observation equivalence and removes an optional buffer; it must additionally discharge traversal and old-version availability. Frontier soundness transfers the invariant to retained labels. The terminal invariant entails the requested observation or permitted behavior.
+
+\begin{theorem}[Compositional optimization with structural transpose]
+Fix a finite action system satisfying the interface, semantic, forward-trace, and cost hypotheses above. Its reindexing actions implement structural read composition; its packed transpose actions satisfy the reconstruction law; and any asserted local layout minima are certified over the admissible schedule sets. For a finite action bound, frontier search retains a sound forward realization minimizing any monotone resource objective among generated terminal plans. If the generator is complete for a specified class of plans, the same minimum holds over that class.
+\end{theorem}
+\begin{proof}
+Structural read composition, the packing lemma, and materialization elimination establish the corresponding value-preservation cases of the invariant. Their physical implementations still supply traversal and availability certificates; other action cases are supplied lowering obligations. The filtered-selection theorem establishes any required local stride policy. Frontier completeness then retains a same-interface no-more-expensive witness for every generated path; the global-minimum theorem selects an optimal terminal witness. The checked frontier theorem is at a fixed depth; a union of depths up to a bound is a mathematical extension for paths of different lengths. Generator completeness extends the comparison class and is the only step that does so.
+\end{proof}
+This proof does not assume that composing locally minimum-stride kernels produces a globally minimum-resource plan. It derives global optimality by retaining the necessary interface and resource alternatives. Local replacement can reduce that search only under its additional certificate. Conversely, omitting the forward predicate or the structural map from the interface invalidates the induction's same-action step.
+
+Do not conflate:
+\begin{enumerate}
+\item semantic correctness of actions;
+\item sufficiency of the interface and validity of the cost model;
+\item completeness of the action space for the chosen comparison class.
+\end{enumerate}
+The theorem establishes composition of search under these obligations. It does not discharge them for the compiler.
+
+\section{Instantiating this in Blade}
+\begin{enumerate}
+\item Represent an operand by its root/version, typed normalized map, and ordered structural frame. Preserve this entire key through aliases and parameters.
+\item Add or expose $\mathsf{Reindex}$ in the core, normalize supported compositions, and keep logical keys across physical materialization. Fix canonical applications and numerical contracts before physical optimization.
+\item Specify requested observations before choosing intermediate materialization. Lower compute into a logical value commitment and explicit dependency/effect obligations; materialize only where the selected legal plan or a writable/external interface requires it.
+\item Include the intended alternatives as certified actions: canonical computation, forward streaming and packing, storage, recomputation, fusion by canonical reads, conversion, and schedules.
+\item Derive interfaces using dependencies and liveness, retaining maps, frames, sharing, old-version availability, representation, numerical commitments, and traversal progress where relevant.
+\item Connect BladeLayout's schedule lists to actual lowering templates. Filter by semantic and forward legality before selecting a minimum. Preserve ties or add resource-dominance proofs.
+\item Use orbit theorems as local work certificates under their oracle hypotheses, not as traffic or elapsed-time minima.
+\item Keep nondominated labels per interface. Merge interfaces only with contextual-equivalence evidence.
+\item Prove action semantics and cost claims, then instantiate frontier completeness.
+\end{enumerate}
+
+At extent five, Blade's fusion witness has $15+25=40$ kernel evaluations for separate symmetric and asymmetric traversals, versus $50$ for a fused dense traversal. Traversal count and kernel work are distinct objectives. A richer shared schedule might retain values and achieve another tradeoff; include it in the action space if the theorem is intended to compare against it.
+
+A coarse numerical relation can also erase distinctions used in an orbit lower bound. The frontier theorem does not need that bound; it compares valid generated plans. Proving optimality against \emph{all} permitted programs additionally requires a lower bound in the same observation and numerical model.
+
+\section{Verification status}
+The companion \texttt{BladeCompositionalOptimization.v} proves pointwise reindexing laws, unsigned packing/readback and forward-enumeration lemmas, an executable pruner, cost monotonicity, pruning and frontier coverage, optimality at a fixed depth for monotone objectives, and preservation of a supplied semantic invariant. It uses only the standard library.
+
+\texttt{BladeLayoutOptimizationBridge.v} imports BladeLayout and the companion. It applies the existing minimum-selection lemmas to a filtered schedule list, proves the admissible-unfiltered-minimizer special case, and supplies a conditional resource-cost bridge and contextual cost replacement. The admission checker, its connection to real lowering, and the resource factorization remain explicit hypotheses. Neither file implements Blade's compiler, a complete syntax/type system, signed-carrier transport, or a verified hardware cost model. Neither contains an axiom declaration or an \texttt{Admitted}.
+
+\texttt{BladeStructuralIdentity.v} checks the small oriented-key, alias,
+sharing-dependent-layout, and snapshot model. \texttt{BladeMaterialization.v}
+adds 21 results: finite-buffer readback with reconstruction actions and
+structural zeros, scalar and graph congruence, arbitrary retention-policy
+equivalence, ordered effect/snapshot observation preservation, and the
+snapshot and unconsumed-failure boundary results. No effectful-kernel
+extraction, traversal scheduler, or physical old-version implementation is
+claimed verified.
+
+The four modules are registered on branch
+\texttt{codex/structural-transpose-proofs} and compile with Rocq 9.0.1.
+The preceding development was kernel-checked and audited at 2,184 results.
+The new materialization module and its dependencies passed independent kernel
+checking, and the complete extended tower passed the assumption audit at
+2,205 results. Validation records accompany the proof sources. The cost-only labels have existential path
+witnesses through exhaustive-generation membership; an implementation should
+retain backpointers.
+
+Inspected connection points:
+\begin{itemize}
+\item \texttt{docs/formalism.md}, sections 5.2 and 8.3: numerical canonicalization and identity.
+\item \texttt{src/TypeCheckInfer.fs}, transpose handling: identity, negated, conjugated, physical-move, and unsupported compact-boundary cases.
+\item \texttt{proofs/BladeLayout.v}: graded action and pipeline composition, direction normalization, rank-two transpose laws, schedule space, summed Kendall cost, and minimum selection. The file explicitly limits its hardware and numerical interpretation.
+\item \texttt{proofs/BladeSurface.v}: application typing and the global-name fragment.
+\item \texttt{proofs/BladeLicence.v}: congruent continuations and numerical scope.
+\item \texttt{proofs/BladeTransport.v}: fusion work and the $50$ versus $40$ witness.
+\item \texttt{proofs/BladeOrbitWork.v}: the free-model pipeline bound.
+\item \texttt{proofs/BladeSummary.v}: continuation-sensitive state summaries.
+\end{itemize}
+The branch changes proofs, proof documentation, and the implementation plan;
+it does not yet change the compiler. The plan is
+\texttt{docs/plans/plan-identity-transpose-compute.md}.
+\end{document}

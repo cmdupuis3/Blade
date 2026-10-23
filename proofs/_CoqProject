@@ -57,3 +57,4 @@ BladeBoundary.v
 BladeStructuralIdentity.v
 BladeCompositionalOptimization.v
 BladeLayoutOptimizationBridge.v
+BladeMaterialization.v

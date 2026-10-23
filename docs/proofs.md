@@ -1,12 +1,12 @@
 # Blade Proofs
 
 Prose mirror of the machine-checked proof tower in `/proofs/`:
-**2184 theorems**, Rocq 9.0, stdlib only, verified by both `coqc`
+**2205 theorems**, Rocq 9.0, stdlib only, verified by both `coqc`
 and `coqchk`.
 
 Build: `coq_makefile -f _CoqProject -o Makefile && make`.
 
-The structural-transpose extension adds three scoped models:
+The structural-transpose extension adds four scoped models:
 `BladeStructuralIdentity.v` (18 results) formalizes alias-preserving oriented
 value keys, sharing-dependent result layouts, and the snapshot/live-view
 distinction. `BladeCompositionalOptimization.v` (35) proves reindexing and
@@ -15,6 +15,14 @@ a supplied transition system. `BladeLayoutOptimizationBridge.v` (10) reuses
 BladeLayout's schedule minimum and forward reduction results under an
 explicit structural traversal admission predicate. Its resource replacement
 theorem additionally requires resource factorization and monotonicity.
+`BladeMaterialization.v` (21) proves equality of actual finite canonical
+buffer reads and lexical deferred reads, including reconstruction actions
+and structural zeros. Arbitrary retention policies preserve finite producer
+graph observations. In an unchanged ordered effect/snapshot skeleton they
+also preserve the final store, event trace, and returned values or failure.
+Pure scalar bodies must be total; extraction of failing/effectful kernels,
+physical availability of old versions, and traversal legality are separate
+obligations. See [the implementation plan](plans/plan-identity-transpose-compute.md).
 These files do not verify F# identity propagation, the admission checker, or
 a hardware cache model. In particular, forward curried traversal is not a
 requirement that every conversion kernel write destination addresses in

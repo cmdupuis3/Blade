@@ -51,7 +51,18 @@ computed pins.  `count-theorems.ps1` is the mechanical implementation --
 run it with `-Check` to verify the numbers below and the headline in
 `docs/proofs.md`, which quotes the same total.
 
-## Contents (2184 theorems total)
+## Contents (2205 theorems total)
+
+- BladeMaterialization.v (21): Finite canonical buffers versus lexical deferred
+  readers, with bounded descriptor lookup, sign/conjugation actions, and an
+  action-free structural-zero branch. Exact scalar trees include conditionals
+  and value-dependent reads. Arbitrary buffer-retention policies preserve all
+  graph observations and, within an unchanged effect/snapshot skeleton, final
+  stores, output/write/snapshot/failure traces, and returned values or aborts.
+  Proves snapshot stability across writes and that an unused abort cannot be
+  erased. Pure scalar operations must be total. No source-to-graph extraction,
+  effect reordering, physical snapshot backing, traversal legality, or cost
+  improvement is inferred by the elimination theorem.
 
 - BladeStructuralIdentity.v (18): A small model separating identifiers from
   versioned, oriented value keys. Alias binding preserves reads; transpose
