@@ -1,0 +1,18 @@
+// TEST: If Untaken Arm Deferred Read (rejects)
+// ----------------------------------------------------------------------------
+// Gap G77: an `if` value whose arm FORCES a deferred map (a positional read
+// of g) that its condition does not. Only the taken arm is evaluated, and no
+// lane's print list or first-failure point followed the branch: the C++ lane
+// forced g before the condition (here the UNTAKEN arm's g divided by zero),
+// the llvm lane printed -- and so forced and failed -- g after the program,
+// the interpreter never evaluated it. Refused at lowering in every lane
+// (BL6002); force it before the `if`.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let z: Array<Int64 like Row> = [0]
+let g = method_for(z) <@> lambda(v) -> 1 / v
+let c = extents(z) > 5
+let r = if c then g(0) else 0
+// ERROR: BL6002 @ 14:1
+// ERROR-CONTAINS: whose arm forces the deferred computation `g`
+// REJECT-AT: lower

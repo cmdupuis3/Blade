@@ -1,0 +1,26 @@
+// TEST: If Block Tuple Alias In Function (rejects)
+// ----------------------------------------------------------------------------
+// Gap G59, finding 3 in a FUNCTION: an `if` value whose arms hold an alias
+// chain through a block-valued deferred tuple. The C++ emitter's view saw the
+// member-ordered shape where lowering's did not (BL9002 `'p2'` at g++);
+// both now normalize the block's result, so it is refused at lowering in
+// every lane with the common BL6002.
+// ----------------------------------------------------------------------------
+type Row = Idx<3>
+let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
+let m = method_for(x) <@> lambda(v) -> v * 2.0
+let h = method_for(x) <@> lambda(v) -> v + 5.0
+let p0 = {
+    let n = extents(x)
+    (m, m)
+}
+let p1 = p0
+let p2 = p1
+function pick(c: Bool) -> Float64 = {
+    let t = if c then (p2, 1.0) else (p2, 2.0)
+    t[1]
+}
+let r = pick(true)
+// ERROR: BL6002 @ 18:1
+// ERROR-CONTAINS: inside a function body, a lambda or a loop body
+// REJECT-AT: lower

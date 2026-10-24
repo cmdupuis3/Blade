@@ -1,0 +1,18 @@
+// TEST: Pure Row View Write (rejects)
+// ----------------------------------------------------------------------------
+// Gap G60(a), the second Codex look, finding 3: `pure` is the identity in
+// every lane, so `pure(m(0)) |> compute` is still a row VIEW of the deferred
+// map m (compute of a stored value is the identity too), and `row(1) = 9.0`
+// writes m. The walk follows `pure` with the projection path: refused at
+// lowering in every lane (BL4005; the C++ lane used to fail at g++, BL9002).
+// ----------------------------------------------------------------------------
+type Y = Idx<2>
+type X = Idx<3>
+let m = method_for(range<Y>, range<X>) <@> lambda(i, j) -> Float64(i) * 10.0 + Float64(j)
+let before = m(0, 0)
+let row = pure(m(0)) |> compute
+row(1) = 9.0
+let s = reduce(m, (+), axes = 2)
+// ERROR: BL4005 @ 13:1
+// ERROR-CONTAINS: a write through `m`, a deferred computation
+// REJECT-AT: lower

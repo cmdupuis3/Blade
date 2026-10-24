@@ -1,0 +1,247 @@
+// TEST: Tuple Of Views Then Proved Copy
+// ----------------------------------------------------------------------------
+// Gap G60(a)'s control: the tuple holds row views of the deferred map m, but
+// the array written is `let mut row = r0` -- an assignable alias of a plain
+// dense array, the PROVED COPY every lane deep-copies, which ends the
+// provenance walk. Accepted: the write lands in the copy, m and r0 keep their
+// cells, and the fold over m (fused) reads the unwritten map, in every lane.
+// The same through a `match` value (r0b / rowb; loops/570's carrier, the
+// first Codex look of W4B-A, finding 2).
+// Also gap G59's accepted twin (formerly a file of its own): a top-level
+// `if` value whose arms hold the 20-link alias of a deferred tuple and read
+// nothing else -- the condition, then only the taken arm, in every lane.
+// Also an accepted INDEPENDENT write (the third Codex look, finding 1): the
+// fresh pool of `transpose(mt, [0, 1])` is written, mt unchanged; and gap G79's succeeding ordered calls (a
+// fresh-array argument in both orders, as a body let and as the return).
+// Also gap G77's ADMITTED shapes (formerly loops/569; bindings renamed): an arm
+// reads the deferred binder whose forcing read is the first operation of its
+// statement that may fail -- gc in `&&`'s left operand, a bare condition, gc2
+// before a stored read, an `if` nested in `1 + (..)`, and the remedy (gc forced
+// by a statement of its own). gc and gc2 print, in every lane.
+// Also gap G77's MEMBER-ORDERED tuple (the fifth Codex look, finding 1): both
+// leaves may fail, so each is its own forcing region and the second leaf's
+// read of gt is admitted after the first leaf's checked read: rt5 = (0, 10).
+// Also (formerly tuples/072, renamed) a block whose final TUPLE holds an if
+// reading gb2 -- its own region (rb = (10, 1)); and a STRUCTURALLY member-
+// ordered tuple (the sixth Codex look, finding 1): `gs |> compute` is a copy
+// member, so each leaf is its own region and the next leaf's read of gs is
+// admitted (ru1 = ([10], 10); ru2, the nested spelling).
+// Also (the seventh Codex look) a DOMINATING force: `seen = gv(0)` forces gv,
+// so the later `if`'s arm read of gv is admitted (rv = 10; gv prints).
+// Also (the eighth Codex look) member-ordered tuple leaves accumulate forces left
+// to right: leaf 0 reads gx, so leaf 1's arm read of gx is admitted (rx1 = (10, 0);
+// rx2, the nested spelling).
+// Also (the ninth Codex look) the condition's forces carry into the arms:
+// the outer condition reads gy, so the inner if's arm read of gy is admitted (ry = 0).
+// Also (the tenth Codex look) LOOP bodies are outside the arm audit like
+// callable bodies (aq: a let-rec step's if reads gq; bq: the same under a while
+// guard), and an arm may read the binder whose force is the statement's FIRST
+// possibly-failing event, wherever it sits (rq = gq(0) + (if .. gq(0) ..)).
+// Also (the eleventh Codex look) a CALL's arguments run before the call (rw1:
+// bump(gw(0)) forces gw first) and a compute of STORED data adds no event (rw3).
+// Also (the twelfth Codex look) formalism 2.4's TOTAL scalar operations are
+// inert before the force -- an int -> float cast (rk1), a libm call (rk2), a
+// real-base power (rk3) -- and a SCALAR guard's condition (rk4) and choice's
+// left operand (rk5) run unconditionally (their failing twins: loops/591-595).
+// Also (the thirteenth Codex look) an INDEX-TAGGED scalar guard is a scalar:
+// its condition is walked (rt13 = 0).
+// ----------------------------------------------------------------------------
+type Y = Idx<2>
+type X = Idx<3>
+let m = method_for(range<Y>, range<X>) <@> lambda(i, j) -> Float64(i) * 10.0 + Float64(j)
+let pair = (m(0), m(1))
+let r0 = pair[0]
+let mut row = r0
+row(1) = 9.0
+let pair2 = match 0 with
+    | 0 -> (m(0), m(1))
+    | _ -> (m(1), m(0))
+let r0b = pair2[0]
+let mut rowb = r0b
+rowb(1) = 9.0
+let s = reduce(m, (+), axes = 2)
+type Row3 = Idx<3>
+let xx: Array<Float64 like Row3> = [1.0, 2.0, 3.0]
+let mm = method_for(xx) <@> lambda(v) -> v * 2.0
+let hh = method_for(xx) <@> lambda(v) -> v + 5.0
+let q0 = (mm, mm)
+let q1 = q0
+let q2 = q1
+let q3 = q2
+let q4 = q3
+let q5 = q4
+let q6 = q5
+let q7 = q6
+let q8 = q7
+let q9 = q8
+let q10 = q9
+let q11 = q10
+let q12 = q11
+let q13 = q12
+let q14 = q13
+let q15 = q14
+let q16 = q15
+let q17 = q16
+let q18 = q17
+let q19 = q18
+let q20 = q19
+let cc = reduce(xx, (+)) > 5.0
+let tt = if cc then (q20, 1.0) else (q20, 2.0)
+let ss = tt[1]
+let mt = method_for(range<Y>, range<X>) <@> lambda(i, j) -> Float64(i) * 10.0 + Float64(j)
+let t = transpose(mt, [0, 1])
+t(1, 0) = 9.0
+let st = reduce(mt, (+), axes = 2)
+let m01 = mt(0, 1)
+type Row = Idx<2>
+let z: Array<Int64 like Row> = [0, 1]
+function bad_array(k: Int64) -> Array<Int64 like Row> = [10 / k, 0]
+function consume(p: Int64, w: Array<Int64 like Row>) -> Int64 = p + reduce(w, (+))
+function consume2(w: Array<Int64 like Row>, p: Int64) -> Int64 = p + reduce(w, (+))
+function h(k: Int64) -> Int64 = {
+    let s = consume(k / z(1), bad_array(k))
+    s + 1
+}
+function h2(k: Int64) -> Int64 = consume2(bad_array(k), k / z(1))
+let r = h(2)
+let r2 = h2(5)
+type RowC = Idx<1>
+let zc: Array<Int64 like RowC> = [0]
+let gc = method_for(zc) <@> lambda(v) -> 10 / (v + 1)
+let gc2 = method_for(zc) <@> lambda(v) -> 7 / (v + 1)
+let rc = if (gc(0) > 5 && zc(0) == 0) then gc(0) else 0
+let rc1 = if gc(0) > 5 then gc(0) else 0
+let firstc = gc(0)
+let cflag = extents(zc) > 5
+let rc2 = if cflag then firstc else 0
+let rc3 = if (gc2(0) + zc(0) > 0) && true then gc2(0) else 0
+let rc4 = 1 + (if gc2(0) > 0 then gc2(0) else 0)
+type RowT = Idx<1>
+let zt: Array<Int64 like RowT> = [0]
+let gt = method_for(zt) <@> lambda(v) -> 10 / (v + 1)
+let rt5 = (zt((zt(0) : RowT)), (if gt(0) > 0 then gt(0) else 0))
+type RowB = Idx<1>
+let zb: Array<Int64 like RowB> = [0]
+let gb2 = method_for(zb) <@> lambda(v) -> 10 / (v + 1)
+let rb = {
+    let a = zb((zb(0) : RowB))
+    (if gb2(0) > 0 then gb2(0) else a, 1)
+}
+type RowU = Idx<1>
+let zu: Array<Int64 like RowU> = [0]
+let gs = method_for(zu) <@> lambda(v) -> 10 / (v + 1)
+let ru1 = (gs |> compute, (if gs(0) > 0 then gs(0) else 0))
+let ru2 = ((gs |> compute, 1.0), (if gs(0) > 0 then gs(0) else 0))
+type RowV = Idx<1>
+let zv: Array<Int64 like RowV> = [0]
+let gv = method_for(zv) <@> lambda(v) -> 10 / (v + 1)
+let seen = gv(0)
+let rv = if seen > 0 then gv(0) else 0
+type RowX = Idx<1>
+let zx: Array<Int64 like RowX> = [0]
+let gx = method_for(zx) <@> lambda(v) -> 10 / (v + 1)
+let rx1 = (gx(0), (if zx(0) > 0 then gx(0) else 0))
+let rx2 = ((gx(0), 1), (if zx(0) > 0 then gx(0) else 0))
+type RowY = Idx<1>
+let zy: Array<Int64 like RowY> = [0]
+let gy = method_for(zy) <@> lambda(v) -> 10 / (v + 1)
+let ry = if gy(0) > 0 then (if zy(0) > 0 then gy(0) else 0) else 0
+type RowQ = Idx<1>
+let zq: Array<Int64 like RowQ> = [0]
+let gq = method_for(zq) <@> lambda(v) -> 10 / (v + 1)
+type StepQ = Idx<2>
+let rec aq: Array<Int64 like StepQ> =
+    match aq with
+    | zero -> zero
+    | zero :: s -> zero :: 0
+    | prefix :: n -> prefix :: (if Int64(n) > 0 then gq(0) else 0)
+type StepW = Idx<4>
+let rec bq: Array<Int64 like StepW> =
+    match bq with
+    | zero -> zero
+    | zero :: s -> zero :: 1
+    | prefix :: n while prefix(n - 1) < 5 -> prefix :: prefix(n - 1) + (if Int64(n) > 0 then gq(0) else 0)
+let rq = gq(0) + (if zq(0) > 0 then gq(0) else 0)
+type RowW = Idx<1>
+let zw: Array<Int64 like RowW> = [0]
+let gw = method_for(zw) <@> lambda(v) -> 10 / (v + 1)
+function bump(k: Int64) -> Int64 = k + 1
+let rw1 = bump(gw(0)) + (if zw(0) > 0 then gw(0) else 0)
+let rw3 = {
+    let copy = zw |> compute
+    if gw(0) > 0 then gw(0) else 0
+}
+type RowK = Idx<1>
+let zk: Array<Int64 like RowK> = [0]
+let gk = method_for(zk) <@> lambda(v) -> 10 / (v + 1)
+let nk = 1
+let rk1 = {
+    let t = Float64(nk)
+    if gk(0) > 0 then Float64(gk(0)) + t else t
+}
+let rk2 = {
+    let t = sin(0.0)
+    if gk(0) > 0 then Float64(gk(0)) + t else t
+}
+let rk3 = {
+    let t = 2.0 ^ nk
+    if gk(0) > 0 then Float64(gk(0)) + t else t
+}
+let rk4 = guard(gk(0) > 0, 1) + (if zk(0) > 0 then gk(0) else 0)
+let rk5 = (gk(0) <|> 0) + (if zk(0) > 0 then gk(0) else 0)
+type RowT13 = Idx<1>
+let zt13: Array<Int64 like RowT13> = [0]
+let gt13 = method_for(zt13) <@> lambda(v) -> 10 / (v + 1)
+let kt13: Nat<RowT13> = 0
+let rt13 = Int64(guard(gt13(0) > 0, kt13)) + (if zt13(0) > 0 then gt13(0) else 0)
+// EXPECT: r0 = [0.0, 1.0, 2.0]
+// EXPECT: row = [0.0, 9.0, 2.0]
+// EXPECT: r0b = [0.0, 1.0, 2.0]
+// EXPECT: rowb = [0.0, 9.0, 2.0]
+// EXPECT: s = 36.0
+// EXPECT: cc = true
+// EXPECT: ss = 1.0
+// EXPECT: t = [[0.0, 10.0], [9.0, 11.0], [2.0, 12.0]]
+// EXPECT: st = 36.0
+// EXPECT: m01 = 1.0
+// EXPECT: r = 8
+// EXPECT: r2 = 7
+// EXPECT: gc = [10]
+// EXPECT: gc2 = [7]
+// EXPECT: rc = 10
+// EXPECT: rc1 = 10
+// EXPECT: firstc = 10
+// EXPECT: cflag = false
+// EXPECT: rc2 = 0
+// EXPECT: rc3 = 7
+// EXPECT: rc4 = 8
+// EXPECT: gt = [10]
+// EXPECT: rt5 = (0, 10)
+// EXPECT: gb2 = [10]
+// EXPECT: rb = (10, 1)
+// EXPECT: gs = [10]
+// EXPECT: ru1 = ([10], 10)
+// EXPECT: ru2 = (([10], 1.0), 10)
+// EXPECT: gv = [10]
+// EXPECT: seen = 10
+// EXPECT: rv = 10
+// EXPECT: gx = [10]
+// EXPECT: rx1 = (10, 0)
+// EXPECT: rx2 = ((10, 1), 0)
+// EXPECT: gy = [10]
+// EXPECT: ry = 0
+// EXPECT: gq = [10]
+// EXPECT: aq = [0, 10]
+// EXPECT: bq = [1, 11, 11, 11]
+// EXPECT: rq = 10
+// EXPECT: gw = [10]
+// EXPECT: rw1 = 11
+// EXPECT: rw3 = 10
+// EXPECT: gk = [10]
+// EXPECT: rk1 = 11.0
+// EXPECT: rk2 = 10.0
+// EXPECT: rk3 = 12.0
+// EXPECT: rk4 = 1
+// EXPECT: rk5 = 10
+// EXPECT: gt13 = [10]
+// EXPECT: rt13 = 0

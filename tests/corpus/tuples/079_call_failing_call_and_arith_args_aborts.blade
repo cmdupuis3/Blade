@@ -1,0 +1,16 @@
+// TEST: Call Failing Call And Arith Args (aborts)
+// ----------------------------------------------------------------------------
+// Gap G79 with a CALL and an arithmetic expression as the two failing
+// arguments: `bad(z(0))` divides by zero inside bad (BL8013 located at
+// bad's line, its frame on the stack) before the second argument's own
+// division by zero at the call's line would. Left to right in every lane.
+// ----------------------------------------------------------------------------
+type Row = Idx<2>
+let a: Array<Int64 like Row> = [1, 5]
+let z: Array<Int64 like Row> = [0, 1]
+function f(p: Int64, q: Int64) -> Int64 = p + q
+function bad(k: Int64) -> Int64 = 10 / k
+let r = f(bad(z(0)), 7 / z(0))
+// ABORT: BL8013
+// ABORT: .blade:11
+// ABORT: at bad
