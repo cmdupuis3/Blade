@@ -3773,6 +3773,42 @@ and private emitCall (c: Ctx) (func: IRExpr) (args: IRExpr list) : Val =
     if callable.IsArityPoly then refuse ($"a call to the arity-polymorphic function '{callable.SourceName}'")
     if callable.IsCudaKernel || callable.IsMpiParallel then
         refuse ($"a call to '{callable.SourceName}', which carries a cuda/mpi strategy")
+    // ARGUMENT ORDER (gap G57; Codex second look of W4-1, finding 5). A call
+    // holding an explicit `|> compute` argument evaluates EVERY argument left
+    // to right (formalism 10.2). A BARE deferred array argument cannot keep
+    // that order here: in an out-of-line call materializeExpr hoists its
+    // producer to the statement's start (dominance), and in an inlined
+    // capturing call it stays a producer the body runs later -- so either
+    // way it moves past every other argument that evaluates something. FAIL
+    // CLOSED: such a call is refused by this lane (the C++ lane's ordered
+    // path takes it), rather than reordered.
+    // A name is a still-deferred array when its slot is a producer, or when it
+    // has no slot yet and its module value is a deferred form (a deferred map
+    // may be bound lazily, at its first use).
+    let isBareDeferredArg (a: IRExpr) =
+        match a with
+        | IRVar (id, ty) when (match Blade.IR.stripUnits ty with ArrayElem _ -> true | _ -> false) ->
+            (match c.ArrSlots.TryGetValue id with
+             | true, { Src = APool _ } -> false
+             | true, _ -> true
+             | _ ->
+                 match Map.tryFind id c.BindingValues with
+                 | Some v -> not (match v with IRCompute _ | IRArrayLit _ -> true | _ -> false)
+                 | None -> false)
+        | _ -> false
+    let inertArg (a: IRExpr) =
+        match a with
+        | IRLit _ | IRParam _ -> true
+        | IRVar _ -> not (isBareDeferredArg a)
+        | _ -> false
+    if args |> List.exists (function IRCompute _ -> true | _ -> false) then
+        let indexed = List.indexed args
+        let hazard =
+            indexed |> List.exists (fun (j, a) ->
+                isBareDeferredArg a
+                && indexed |> List.exists (fun (i, b) -> i <> j && not (inertArg b)))
+        if hazard then
+            refuse ($"a call to '{callable.SourceName}' whose bare deferred array argument would be evaluated out of argument order (an explicit `|> compute` argument fixes left-to-right evaluation; the C++ lane's ordered path keeps it)")
     // An `omp` clause is a LICENCE to parallelize, not a demand: emitting the
     // serial body answers the same values. (Licensed reassociation is a
     // separate question and stays off -- see the numeric policy above.)
@@ -6287,6 +6323,21 @@ and private consumeArrOperand (c: Ctx) (e: IRExpr) : ArrVal =
     | _ -> emitArr c e
 
 and private materializeExpr (c: Ctx) (e: IRExpr) : ArrVal =
+    // The producer object this name held BEFORE the force: a deferred alias
+    // (`let g2 = g`) is bound to the SAME ArrVal as its source (classifyValue
+    // of the alias returns the source's slot), so reference equality is the
+    // alias class (gap G60). Every slot still holding it is upgraded to the
+    // forced pool below -- one stored value per class from the forcing event
+    // on, so a later read or print of any alias reads those cells and never
+    // reruns the producer over inputs that changed since (Codex second look
+    // of W4-1, finding 3).
+    let before =
+        match e with
+        | IRVar (id, _) ->
+            (match c.ArrSlots.TryGetValue id with
+             | true, old -> (match old.Src with APool _ -> None | _ -> Some old)
+             | _ -> None)
+        | _ -> None
     let a =
         match e with
         // FORCING A DEFERRED MODULE BINDING HOISTS to the start of main's
@@ -6332,6 +6383,19 @@ and private materializeExpr (c: Ctx) (e: IRExpr) : ArrVal =
      | IRVar (id, _) when c.ArrSlots.ContainsKey id ->
          c.ArrSlots.[id] <- a
          markForced c id
+         (match before with
+          | Some old ->
+              let sharers =
+                  [ for KeyValue (k, v) in c.ArrSlots do
+                      if k <> id && obj.ReferenceEquals(v, old) then yield k ]
+              for k in sharers do
+                  c.ArrSlots.[k] <- a
+                  if c.BindingValues.ContainsKey k then markForced c k
+              let named =
+                  [ for KeyValue (n, v) in c.NameArrSlots do
+                      if obj.ReferenceEquals(v, old) then yield n ]
+              for n in named do c.NameArrSlots.[n] <- a
+          | None -> ())
          // The upgraded binding may OUTLIVE an open tracking scope: it
          // escapes any scope it predates (its later reads happen after that
          // scope's exit frees). A binding born inside the scope dies with it,
@@ -8197,7 +8261,96 @@ and private emitReduceComputeCore (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExp
 /// `a <&> b <&> c` is three legs, not a nest -- so the walk flattens.
 and private emitTupleParts (c: Ctx) (e: IRExpr) : ValKind list =
     match e with
-    | IRTuple elems -> elems |> List.collect (emitTupleParts c)
+    // A tuple ALL of whose members are deferred computations is a deferred
+    // tuple (the C++ lane's isWhollyDeferredTuple): its legs stay producers.
+    // Any other tuple is a VALUE (formalism 10.2, "Deferred members of a tuple
+    // value", gaps G58 / G61): each member that is still a producer -- a bare
+    // deferred map, a named deferred tuple's legs -- is MATERIALIZED right
+    // after it is emitted, before the next member, so its evaluation (and its
+    // first failure) happens at the construction, left to right, as in the
+    // C++ lane and the interpreter. The pack used to keep the producer and run
+    // it only where the tuple was printed or projected.
+    | IRTuple elems ->
+        let isDeferredElem (x: IRExpr) =
+            match x with
+            | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRFunctorMap _ -> true
+            | IRVar (id, _) ->
+                (match c.ArrSlots.TryGetValue id with
+                 | true, { Src = (AVirt _ | AVirtFlat _) } -> true
+                 | _ ->
+                     match c.TupleSlots.TryGetValue id with
+                     | true, parts ->
+                         not parts.IsEmpty
+                         && parts |> List.forall (function
+                             | VArray { Src = (AVirt _ | AVirtFlat _) } -> true
+                             | _ -> false)
+                     | _ -> false)
+            | _ -> false
+        if elems |> List.forall isDeferredElem then elems |> List.collect (emitTupleParts c)
+        else
+            let rec forcePart (p: ValKind) =
+                match p with
+                | VArray ({ Src = (AVirt _ | AVirtFlat _) } as a) -> VArray (materialize c a)
+                | VTuple ps -> VTuple (ps |> List.map forcePart)
+                | other -> other
+            elems |> List.collect (fun x -> emitTupleParts c x |> List.map forcePart)
+    // A tuple-valued `if` (gap G59): the condition, then ONLY the taken arm's
+    // pack -- its members evaluated left to right inside its own block, as the
+    // array-valued `if` in emitArr builds each arm in place -- and one slot per
+    // component, joined after the arms. Arms must agree component by
+    // component (scalar types; array element types and static shapes).
+    | IRIf (cond, tb, fb) ->
+        let cv = coerce c ScBool (emitExpr c cond)
+        let lThen = freshLbl c "tupif.then"
+        let lElse = freshLbl c "tupif.else"
+        let lEnd = freshLbl c "tupif.end"
+        ln c (renderBr { Cond = cv.Reg; IfTrue = lThen; IfFalse = lElse })
+        let stored (p: ValKind) =
+            match p with
+            | VArray a ->
+                let a = materialize c a
+                (match a.Src with
+                 | APool _ -> VArray a
+                 | _ -> refuse "an unmaterialized array component of an if-held tuple")
+            | VScalar _ as s -> s
+            | VTuple _ -> refuse "a nested pack component of an if-held tuple"
+            | VOpaque -> refuse "an opaque (loop object / callable) component of an if-held tuple"
+        lbl c lThen
+        let tParts = emitTupleParts c tb |> List.map stored
+        let slots =
+            tParts |> List.map (fun p ->
+                match p with
+                | VArray a ->
+                    let s = allocaOf c "ptr"
+                    (match a.Src with APool ptr -> ln c ($"store ptr {ptr}, ptr {s}") | _ -> ())
+                    Some s
+                | VScalar v ->
+                    let s = allocSlot c v.Ty
+                    storeSlot c s v.Ty v
+                    s
+                | VTuple _ | VOpaque -> None)
+        ln c (sprintf "br label %%%s" lEnd)
+        lbl c lElse
+        let fParts = emitTupleParts c fb |> List.map stored
+        if fParts.Length <> tParts.Length then
+            refuse "an if-held tuple whose arms have different component counts"
+        List.zip3 tParts fParts slots |> List.iter (fun (tp, fp, slot) ->
+            match tp, fp, slot with
+            | VArray a, VArray b, Some s when a.Elem = b.Elem && a.Groups = b.Groups ->
+                (match b.Src with APool ptr -> ln c ($"store ptr {ptr}, ptr {s}") | _ -> ())
+            | VScalar a, VScalar b, s when a.Ty = b.Ty -> storeSlot c s b.Ty b
+            | _ -> refuse "an if-held tuple whose arms differ in a component's type or shape")
+        ln c (sprintf "br label %%%s" lEnd)
+        lbl c lEnd
+        List.zip tParts slots |> List.map (fun (tp, slot) ->
+            match tp, slot with
+            | VArray a, Some s ->
+                let p = freshReg c
+                ln c ($"{p} = load ptr, ptr {s}")
+                VArray { a with Src = APool p }
+            | VScalar v, Some s -> VScalar (loadSlot c s v.Ty)
+            | VScalar v, None -> VScalar v
+            | _ -> refuse "unreachable: an if-held tuple component without a slot")
     | IRParallel (l, r, _) -> emitTupleParts c l @ emitTupleParts c r
     // `<&!>` is MANDATORY fusion: legs whose loop extents differ cannot share
     // a nest, and the compiler must say so rather than quietly emit two
@@ -8739,6 +8892,14 @@ let rec private printableValue (v: IRExpr) : bool =
 /// `<name> = <value>` per printable binding.
 let private emitPrints (c: Ctx) (bindings: IRBinding list) : unit =
     let deferred = deferredBindingIds bindings
+    // ALIAS CLASSES (gap G60, formalism 10.2; IRLift.deferredAliasClasses, the
+    // C++ lane's and the interpreter's classification): a deferred map and its
+    // top-level aliases are ONE value, so once any member was forced every
+    // member prints (an alias's slot is its source's producer, or the pool a
+    // force upgraded it to -- the same cells: writes through them are refused).
+    let forcedOwn = HashSet<IRId>(c.Forced)
+    Blade.IRLift.deferredAliasClasses bindings (Blade.IRLift.computeDeferredIds bindings)
+    |> Map.iter (fun m cls -> if cls |> List.exists forcedOwn.Contains then c.Forced.Add m |> ignore)
     // The TYPES genPrintStatements has an arm for. A loop object, a function
     // alias, a tuple pack and a `Computation<T>` wrapper all fall off the end
     // of its match and print nothing -- `let x = pure(42)` echoes no line.

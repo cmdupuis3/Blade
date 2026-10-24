@@ -1,0 +1,18 @@
+// TEST: If Held Tuple Member Order (aborts)
+// ----------------------------------------------------------------------------
+// Gap G59's first failure. The UNTAKEN arm holds a map that divides by zero
+// (`boom`) and must not run. The taken arm's first member is a checked cast
+// that fails (BL8006) before its second member's compute would divide by
+// zero (BL8013): the arm's members are evaluated left to right, inside the
+// arm, in every lane.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let z: Array<Int64 like Row> = [0]
+let boom = method_for(z) <@> lambda(v) -> 2 / v
+let late = method_for(z) <@> lambda(v) -> 3 / v
+let c = a(0) > 0
+let t = if c then (a((a(0) : Row)), late |> compute) else (0, boom |> compute)
+// ABORT: BL8006
+// ABORT: outside Row
+// ABORT: .blade:14

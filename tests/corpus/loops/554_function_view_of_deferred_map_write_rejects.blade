@@ -1,0 +1,18 @@
+// TEST: Function View Of Deferred Map Write (rejects)
+// ----------------------------------------------------------------------------
+// Finding 1, in a FUNCTION body: a row view of the module-level deferred map
+// `m`, written through, is a write through m -- refused at lowering in every
+// lane (BL4005), with the module binding named.
+// ----------------------------------------------------------------------------
+type Y = Idx<2>
+type X = Idx<3>
+let m = method_for(range<Y>, range<X>) <@> lambda(i, j) -> Float64(i) * 10.0 + Float64(j)
+function poke(k: Float64) -> Float64 = {
+    let row = m(1)
+    row(0) = k
+    row(0)
+}
+let r = poke(5.0)
+// ERROR: BL4005 @ 9:1
+// ERROR-CONTAINS: a write through `m`, a deferred computation
+// REJECT-AT: lower

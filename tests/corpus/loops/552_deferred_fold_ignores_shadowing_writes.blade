@@ -1,0 +1,31 @@
+// TEST: Deferred Fold Ignores Shadowing Writes
+// ----------------------------------------------------------------------------
+// Codex review of W4-1, finding 6: the fused fold's write veto was BY NAME, so
+// a function writing its OWN `let mut g`, or a parameter named `g`, made the
+// module's `reduce(g, (+))` lose its fused terminal -- and then the C++ lane
+// fused (printing nothing) while the other lanes forced and printed g. The
+// veto is gone: a write through a deferred binder is refused at lowering BY
+// BINDER IDENTITY (loops/546), and a shadowing binder is a different binder,
+// so the module fold fuses and `g` prints nothing in every lane (the
+// differential gates compare the whole printed set).
+// ----------------------------------------------------------------------------
+type Row = Idx<3>
+let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+function local_writer(k: Float64) -> Float64 = {
+    let mut g = [0.0, 0.0, 0.0]
+    g(1) = k
+    g(1) + 1.0
+}
+function param_writer(g: mut Array<Float64 like Row>) -> Float64 = {
+    g(2) = 4.0
+    g(2)
+}
+let s = reduce(g, (+))
+let w = local_writer(3.0)
+let mut y: Array<Float64 like Row> = [1.0, 1.0, 1.0]
+let p = param_writer(y)
+// EXPECT: s = 12.0
+// EXPECT: w = 4.0
+// EXPECT: p = 4.0
+// EXPECT: y = [1.0, 1.0, 4.0]

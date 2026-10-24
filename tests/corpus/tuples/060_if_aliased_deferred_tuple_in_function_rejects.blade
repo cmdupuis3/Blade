@@ -1,0 +1,22 @@
+// TEST: If Aliased Deferred Tuple In Function (rejects)
+// ----------------------------------------------------------------------------
+// Codex second look of W4-1, finding 4: the arms hold an ALIAS of a deferred
+// tuple (`let p = (m, m); let q = p`). The lowering judgment used to see only
+// a direct tuple initializer while the C++ emitter followed the alias, so
+// inside a function this `if` escaped the common refusal. Both now use ONE
+// function (IRLift.ifNeedsOrderedArms) over the same deferred view, so it is
+// refused at lowering in every lane (BL6002).
+// ----------------------------------------------------------------------------
+type Row = Idx<3>
+let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
+let m = method_for(x) <@> lambda(v) -> v * 2.0
+let p = (m, m)
+let q = p
+function pick(c: Bool) -> Float64 = {
+    let t = if c then (q, 1.0) else (q, 2.0)
+    t[1]
+}
+let r = pick(true)
+// ERROR: BL6002 @ 14:1
+// ERROR-CONTAINS: inside a function body, a lambda or a loop body
+// REJECT-AT: lower

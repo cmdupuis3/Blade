@@ -1,0 +1,23 @@
+// TEST: Local Deferred Tuple Aliases Unused
+// ----------------------------------------------------------------------------
+// Finding 1's variants: a block-local ALIAS of a deferred tuple (`let r = p`)
+// nested again, and a module-level nesting -- every tuple here is wholly
+// deferred, so the failing map g never runs, in every lane. The same shapes
+// in a FUNCTION body are NOT here: the C++ lane emits a function-body tuple
+// of deferred maps as a value tuple naming the module map (`make_tuple(g,
+// g)`, BL9002 at g++) -- pre-existing (the master binary does the same),
+// recorded OPEN in gap G58 at the W4-1 merge.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let z: Array<Int64 like Row> = [0]
+let g = method_for(z) <@> lambda(v) -> 1 / v
+let mp = (g, g)
+let mq = (mp, mp)
+let blk = {
+    let p = (g, g)
+    let r = p
+    let s = (r, p)
+    let t = (s, r)
+    11
+}
+// EXPECT: blk = 11

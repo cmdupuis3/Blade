@@ -1,0 +1,15 @@
+// TEST: Write Through View Of Deferred Map (rejects)
+// ----------------------------------------------------------------------------
+// Gap G60's write class, through a view: `let row = m(0)` is a row view of
+// the deferred rank-2 map `m`, so `row(1) = 9.0` writes m's cells -- a write
+// through a deferred computation, refused at lowering in every lane (BL4005).
+// ----------------------------------------------------------------------------
+type Y = Idx<2>
+type X = Idx<3>
+let m = method_for(range<Y>, range<X>) <@> lambda(i, j) -> Float64(i) * 10.0 + Float64(j)
+let row = m(0)
+row(1) = 9.0
+let s = reduce(m, (+), axes = 2)
+// ERROR: BL4005 @ 10:1
+// ERROR-CONTAINS: a write through `m`, a deferred computation
+// REJECT-AT: lower

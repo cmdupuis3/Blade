@@ -741,10 +741,14 @@ and genBindingDispatch (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
     | IRLet _ ->
         genLetChainBinding ctx binding builder 
     | IRAssign _ ->
-        // Assignment expression: generate as statement
+        // Assignment expression: generate as statement. A deferred map READ
+        // positionally in it (`x(0) = g(1)`) is forced first, at the
+        // statement, as in every other binding. (A write THROUGH a deferred
+        // binding is refused at lowering, BL4005, gap G60.)
+        let (forceCode, ctx) = forceDeferredPositionalReads ctx builder ($"{name}__def") binding.Value
         let code = [$"{ind}{(exprToCppCtx ctx binding.Value)};"]
         let ctx' = addVarName binding.Id name ctx
-        (code, ctx')
+        (forceCode @ code, ctx')
 
     | IRConstraintCheck (cond, blCode, message, span) ->
         // Runtime constraint guard -- the loud-failure idiom (cerr + abort).
@@ -795,6 +799,17 @@ and genScalarExprBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IR
     // evaluates the members left to right instead.
     | IRTuple elems when not (isWhollyDeferredTuple ctx elems) && tupleNeedsMemberOrder ctx binding.Value ->
         genMemberOrderedTupleBinding ctx binding builder
+    // An `if` whose branch is such a tuple, or an explicit compute of an
+    // unforced array (gap G59): the taken branch is evaluated, member by
+    // member, inside its own arm -- never both branches' producers ahead of
+    // the condition.
+    | IRIf _ when ifNeedsMemberOrder ctx binding.Value ->
+        genMemberOrderedIfBinding ctx binding builder
+    // A call whose argument is an explicit compute of an unforced array,
+    // `f(m1 |> compute, 2.0)` (gap G57): the arguments are evaluated left to
+    // right into temporaries before the call.
+    | IRApp (_, args, _) when args |> List.exists (fun a -> (explicitComputeTupleMember ctx a).IsSome) ->
+        genOrderedCallBinding ctx binding builder
     | _ ->
     let ind = indentStr ctx
     let name = bindingCppName binding
@@ -844,14 +859,19 @@ and genScalarExprBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IR
         let ctx' = addVarName binding.Id name ctx
         (code, ctx')
 
+/// This emitter's view of deferred binders for the SHARED member-order
+/// predicates (IRLift.DeferredView; Codex second look of W4-1, finding 4):
+/// Lowering.refuseDeferredWritesAndUnorderedIfs judges the same shapes with
+/// the same functions over the program's let table.
+and deferredViewOf (ctx: CodeGenContext) : IRLift.DeferredView =
+    { IsDeferred = (fun id -> Map.containsKey id ctx.DeferredComputations)
+      ValueOf = (fun id -> Map.tryFind id ctx.DeferredComputations)
+      TypeOfExpr = inferExprType }
+
 /// Every element of a tuple value is a deferred computation (an inline map /
 /// fusion, or a name bound to one): the whole tuple is deferred, not rendered.
 and isWhollyDeferredTuple (ctx: CodeGenContext) (elems: IRExpr list) : bool =
-    elems |> List.forall (fun e ->
-        match e with
-        | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRFunctorMap _ -> true
-        | IRVar (id, _) -> Map.containsKey id ctx.DeferredComputations
-        | _ -> false)
+    IRLift.isWhollyDeferredTupleOf (deferredViewOf ctx) elems
 
 and stripComputeWrappers (e: IRExpr) : IRExpr =
     match e with
@@ -864,44 +884,93 @@ and isArrayTyped (t: IRType) : bool =
     | _ -> false
 
 /// A tuple member that EXPLICITLY computes an array still unforced at this
-/// point of the emission: `x |> compute` over a deferred binding, or a map
-/// (compose-apply, functor map, ...) written in place under its `|> compute`.
-/// Returns the computation under the compute wrapper. Only array-typed
-/// members qualify -- a deferred fusion or tuple member is a different value
-/// shape and keeps its old path.
+/// point of the emission: x |> compute over a deferred binding, or a map
+/// (compose-apply, functor map, ...) written in place under its |> compute.
+/// Returns the computation under the compute wrapper (IRLift, shared).
 and explicitComputeTupleMember (ctx: CodeGenContext) (e: IRExpr) : IRExpr option =
-    match e with
-    | IRCompute _ ->
-        match stripComputeWrappers e with
-        | IRVar (id, ty) as c when Map.containsKey id ctx.DeferredComputations && isArrayTyped ty -> Some c
-        | (IRApplyCombinator _ | IRComposeApply _ | IRFunctorMap _ | IRComposeMeth _ | IRBind _) as c
-            when isArrayTyped (inferExprType c) -> Some c
-        | _ -> None
-    | _ -> None
+    IRLift.explicitComputeMemberOf (deferredViewOf ctx) e
 
-/// A tuple member that is a BARE unforced array -- `g` naming a deferred map,
-/// or a map written in place, with no `|> compute`. Its semantics are not the
-/// same in every lane: the interpreter HOLDS the deferred value inside the
-/// tuple (Interp/Core.fs IRTuple; forcing the tuple does not force its
-/// members) and evaluates it only when a later consumer forces it, so
-/// computing it at the tuple would move its evaluation -- and its first
-/// failure -- ahead of the program's later statements. Until that contract
-/// is implemented in every lane, the C++ lane refuses the member (BL7004,
-/// the message exprToCpp already gives an unevaluated computation used as a
-/// value); `g |> compute` is the supported spelling.
+/// A tuple member that is a BARE unforced array -- g naming a deferred map,
+/// or a map written in place, with no |> compute. A tuple is a VALUE
+/// (formalism 10.2, "Deferred members of a tuple value", gap G61): such a
+/// member is evaluated AT THE TUPLE'S CONSTRUCTION, at its own position, as
+/// g |> compute would evaluate it -- a copy of the computation into a
+/// temporary; the binding it names is not forced (it prints only if a forcing
+/// use forces it). Every lane does this now: the interpreter's IRTuple arm
+/// (Interp/Core.fs) forces the member there, the llvm lane always did.
 and bareDeferredTupleMember (ctx: CodeGenContext) (e: IRExpr) : bool =
-    match e with
-    | IRVar (id, ty) -> Map.containsKey id ctx.DeferredComputations && isArrayTyped ty
-    | IRApplyCombinator _ | IRComposeApply _ | IRFunctorMap _ | IRComposeMeth _ | IRBind _ ->
-        isArrayTyped (inferExprType e)
-    | _ -> false
+    IRLift.bareDeferredMemberOf (deferredViewOf ctx) e
+
+/// A member naming a deferred TUPLE (p in let p = (m1, m2); let q = (p,
+/// 1.0), gap G58; through |> compute and deferred aliases): its members.
+/// A value tuple evaluates them in place, left to right, as if the deferred
+/// tuple had been written there; p itself stays deferred.
+and deferredTupleMembers (ctx: CodeGenContext) (e: IRExpr) : IRExpr list option =
+    IRLift.deferredTupleMembersOf (deferredViewOf ctx) e
+
+/// A member whose evaluation MAY FAIL (gap G62). Conservative in the
+/// direction that matters: only forms that CANNOT panic are cleared -- names,
+/// literals, a read of a stored binding, a tuple / field projection or an
+/// extent of one, and `+ - * /` arithmetic, comparisons and logic over them
+/// (an INTEGER `/` or `%` can divide by zero, an integer `^` can take a
+/// negative exponent, a float -> int cast can be out of range: those count);
+/// everything else -- a subscript (a checked index), an index cast, a call, a
+/// fold, a match, a deferred read -- may fail. A member wrongly cleared would
+/// only keep `std::make_tuple`'s unspecified order (the pre-W4-1 emission);
+/// one wrongly flagged costs a temporary.
+and memberMayFail (ctx: CodeGenContext) (e: IRExpr) : bool =
+    let isIntTyped (x: IRExpr) =
+        match Blade.IRTotality.scalarElem (inferExprType x) with
+        | Some et -> Blade.IRTotality.isInt et
+        | None -> false
+    let isFloatTyped (x: IRExpr) =
+        match Blade.IRTotality.scalarElem (inferExprType x) with
+        | Some et -> Blade.IRTotality.isFloat et
+        | None -> false
+    let rec mayFail (x: IRExpr) =
+        match x with
+        | IRLit _ | IRParam _ -> false
+        | IRVar (id, _) -> Map.containsKey id ctx.DeferredComputations
+        | IRBinOp (_, op, a, b, _) ->
+            (match op with
+             | IRDiv | IRMod -> isIntTyped a || isIntTyped b
+             | IRCaret ->
+                 isIntTyped b && (match b with IRLit (IRLitInt n) -> n < 0L | _ -> true)
+             | _ -> false)
+            || mayFail a || mayFail b
+        | IRUnaryOp (IRCast (et, _), a) -> (Blade.IRTotality.isInt et && isFloatTyped a) || mayFail a
+        | IRUnaryOp (_, a) -> mayFail a
+        | IRTupleProj (a, _, _) | IRFieldAccess (a, _) | IRExtent (a, _) -> mayFail a
+        | IRTuple es -> es |> List.exists mayFail
+        | IRIf (c, t, f) -> mayFail c || mayFail t || mayFail f
+        | _ -> true
+    match stripComputeWrappers e with
+    | IRVar _ | IRParam _ | IRLit _ -> false
+    | e -> mayFail e
+
+/// The leaves of a (possibly nested) tuple value, left to right.
+and tupleLeaves (value: IRExpr) : IRExpr list =
+    match value with
+    | IRTuple es -> es |> List.collect tupleLeaves
+    | e -> [ e ]
 
 /// Some leaf of a (possibly nested) tuple value needs the member-ordered
-/// path: an explicit compute of an unforced array, or a bare one to refuse.
+/// path: an explicit compute of an unforced array, a bare one (G61), a named
+/// deferred tuple (G58) -- or MORE THAN ONE leaf may fail (G62): C++17 leaves
+/// the evaluation order of `std::make_tuple`'s arguments unspecified (g++
+/// evaluates them right to left), so two failing members would report the
+/// LAST one's failure where the interpreter and the llvm lane report the
+/// first. An ordinary tuple (at most one member that can fail -- every
+/// literal / name tuple among them) keeps its single `std::make_tuple` line.
 and tupleNeedsMemberOrder (ctx: CodeGenContext) (value: IRExpr) : bool =
-    match value with
-    | IRTuple es -> es |> List.exists (tupleNeedsMemberOrder ctx)
-    | e -> (explicitComputeTupleMember ctx e).IsSome || bareDeferredTupleMember ctx e
+    memberNeedsOrder ctx value
+    || (tupleLeaves value |> List.filter (memberMayFail ctx) |> List.length) >= 2
+
+/// The structural half of tupleNeedsMemberOrder: some leaf is an explicit
+/// compute of an unforced array, a bare one (G61), or a named deferred tuple
+/// (G58).
+and memberNeedsOrder (ctx: CodeGenContext) (e: IRExpr) : bool =
+    IRLift.memberNeedsOrderOf (deferredViewOf ctx) e
 
 /// A module- or block-level tuple value that holds an explicit compute of an
 /// unforced array (round-3 W1-3; the shape `(h |> compute, y |> compute)`
@@ -919,6 +988,10 @@ and tupleNeedsMemberOrder (ctx: CodeGenContext) (value: IRExpr) : bool =
 ///     binding deferred, as `let r = y |> compute` does: the member is a copy
 ///     of the computation, not the binding (the interpreter prints the same
 ///     bindings: the deferred one stays unprinted, a capture-forced one prints);
+///   - a BARE unforced array member (G61) is evaluated the same way: a tuple
+///     is a value, so its members are values at its construction;
+///   - a member naming a deferred TUPLE (G58) is replaced by that tuple's
+///     members, evaluated here in order;
 ///   - EVERY other member that evaluates something -- a scalar expression, a
 ///     positional read of a deferred producer, an eager array op -- is bound to
 ///     a temporary at its own position, through the ordinary let path, so its
@@ -927,8 +1000,10 @@ and tupleNeedsMemberOrder (ctx: CodeGenContext) (value: IRExpr) : bool =
 ///     order between two evaluating members: C++17 leaves the evaluation order
 ///     of `std::make_tuple`'s arguments unspecified (g++ evaluates them right
 ///     to left), so no evaluating member reaches the call;
-///   - a plain name or literal evaluates nothing and stays in place;
-///   - a BARE unforced array member is refused (bareDeferredTupleMember).
+///   - a plain name or literal evaluates nothing and stays in place.
+/// FAIL CLOSED: a temporary the ordinary let path left DEFERRED (a member
+/// shape no arm above evaluates) would reach `std::make_tuple` as an
+/// undeclared name; the binding is refused instead (BL7004).
 /// Members are judged against the THREADED context: an earlier member's
 /// capture force may have materialized a later member's binding under its own
 /// name, and then that member reads it by name, as the interpreter reads the
@@ -948,6 +1023,8 @@ and genMemberOrderedTupleBinding (ctx: CodeGenContext) (binding: IRBinding) (bui
                     let (st', m') = go st m
                     (st', acc @ [ m' ])) ((accCode, accCtx), [])
             (st, IRTuple es')
+        | leaf when (deferredTupleMembers accCtx leaf).IsSome ->
+            go (accCode, accCtx) (IRTuple (deferredTupleMembers accCtx leaf).Value)
         | leaf ->
             pos.Value <- pos.Value + 1
             let k = pos.Value
@@ -956,14 +1033,15 @@ and genMemberOrderedTupleBinding (ctx: CodeGenContext) (binding: IRBinding) (bui
                     { Id = builder.FreshId(); Name = $"{name}__m{k}"; Type = ty; Value = v
                       IsConst = true; IsMutable = false }
                 let (code, ctx') = genBinding accCtx tmp builder
+                if Map.containsKey tmp.Id ctx'.DeferredComputations then refused.Value <- true
                 ((accCode @ code, ctx'), IRVar (tmp.Id, ty))
             match explicitComputeTupleMember accCtx leaf with
             | Some c ->
                 let ty = match c with IRVar (_, t) -> t | _ -> inferExprType c
                 bindTemp (IRCompute c) ty
             | None when bareDeferredTupleMember accCtx leaf ->
-                refused.Value <- true
-                ((accCode, accCtx), leaf)
+                let ty = match leaf with IRVar (_, t) -> t | _ -> inferExprType leaf
+                bindTemp (IRCompute leaf) ty
             | None ->
                 // A plain name or literal (under any `|> compute`, the identity
                 // on a stored value) stays in place; anything else is bound as
@@ -978,6 +1056,137 @@ and genMemberOrderedTupleBinding (ctx: CodeGenContext) (binding: IRBinding) (bui
     else
         let line = genScalarBinding ctxF name value' binding.Type
         (code @ line, addVarName binding.Id name ctxF)
+
+/// An `if` VALUE one of whose branches (through nested `if`s) is a tuple
+/// that needs the member-ordered path, or an explicit compute of an unforced
+/// array (gap G59): `if c then (m1 |> compute, m2 |> compute) else (...)`.
+/// The expression path rendered `c ? std::make_tuple(m1, m2) : ...` over two
+/// names the C++ never declared (BL9002).
+and ifNeedsMemberOrder (ctx: CodeGenContext) (value: IRExpr) : bool =
+    // STRUCTURAL members only (computes / bare deferred / deferred tuples),
+    // never G62's failing-member count; the ONE judgment Lowering's refusal
+    // audits too (IRLift.ifNeedsOrderedArms).
+    IRLift.ifNeedsOrderedArms (deferredViewOf ctx) value
+
+/// The `if` of ifNeedsMemberOrder, as an immediately-invoked lambda: the
+/// condition first (its own positional reads forced at the binding's
+/// indent), then ONLY the taken arm, each arm a temporary bound through the
+/// ordinary let path inside its own branch -- so a tuple arm takes the
+/// member-ordered path (its members left to right) and a nested `if` arm
+/// recurses. Nothing an arm materializes escapes it (the arm's context is not
+/// threaded out; its forces happen at a nested indent, so they are
+/// block-scoped and unprinted, as any nested-scope force), and the untaken
+/// arm evaluates nothing -- the interpreter's and the llvm lane's IRIf order.
+/// At main's top level the arms' pools live for the program, as every module
+/// binding's do. Inside a function or loop frame the shape is REFUSED (their
+/// names die with the lambda, so no frame could free them): Lowering refuses
+/// it in every lane (BL6002), and this emitter fails closed besides. An arm
+/// that reads a deferred computation other than as a copy member is refused at
+/// lowering too (gap G59), so an arm forces nothing the print list would have
+/// to follow. FAIL CLOSED: an arm the let path left deferred is refused
+/// (BL7004).
+and genMemberOrderedIfBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
+    let ind = indentStr ctx
+    let name = bindingCppName binding
+    match binding.Value with
+    | IRIf (cond, tb, fb) ->
+        let (condForce, ctxC) = forceDeferredPositionalReads ctx builder ($"{name}__def") cond
+        let armCtx = { ctxC with Indent = ctxC.Indent + 2 }
+        // FAIL CLOSED inside an allocation frame (a function / loop body):
+        // the arms' pools would have no owner after the branch.
+        // Lowering.refuseDeferredWritesAndUnorderedIfs refuses the shape there
+        // (BL6002, every lane); this is the emitter's own backstop.
+        let inFrame = (currentAllocScope ()).IsSome
+        let arm (k: int) (e: IRExpr) =
+            let tmp : IRBinding =
+                { Id = builder.FreshId(); Name = $"{name}__arm{k}"; Type = binding.Type; Value = e
+                  IsConst = true; IsMutable = false }
+            let (code, ctxA) = genBinding armCtx tmp builder
+            (code, bindingCppName tmp, Map.containsKey tmp.Id ctxA.DeferredComputations)
+        let (tCode, tName, tDeferred) = if inFrame then ([], "", true) else arm 0 tb
+        let (fCode, fName, fDeferred) = if inFrame then ([], "", true) else arm 1 fb
+        if inFrame then
+            (codegenError ctx ind "an if value over computed arrays inside a function or loop body has no owner for the taken arm's storage (refused at lowering, BL6002)",
+             addVarName binding.Id name ctx)
+        elif tDeferred || fDeferred then
+            (codegenError ctx ind "unevaluated computation used as value - use |> compute",
+             addVarName binding.Id name ctx)
+        else
+            let retTy =
+                match binding.Type with
+                | ArrayElem arr -> cppArrayTypeStr arr
+                | t -> irTypeToCpp t
+            let condStr = exprToCppCtx ctxC cond
+            let code =
+                condForce
+                @ [ $"{ind}// {name}: an `if` value, the taken arm evaluated inside its own branch (gap G59)"
+                    $$"""{{ind}}{{retTy}} {{name}} = [&]() -> {{retTy}} {"""
+                    $$"""{{ind}}    if ({{condStr}}) {""" ]
+                @ tCode
+                @ [ $"{ind}        return {tName};"
+                    $$"""{{ind}}    } else {""" ]
+                @ fCode
+                @ [ $"{ind}        return {fName};"
+                    $"{ind}    }}"
+                    $"{ind}}}();" ]
+            (code, addVarName binding.Id name ctxC)
+    | _ -> genScalarExprBinding ctx binding builder
+
+/// A call with an argument that EXPLICITLY computes an unforced array,
+/// `f(m1 |> compute, 2.0)` (gap G57). The call renders its arguments by name,
+/// and the IRCompute wrapper hid `m1` from the positional-read pre-pass's
+/// direct-IRVar test (CodeGenFusion.collectDeferredPositionalReads), so the
+/// C++ named an undeclared `m1`. The arguments are now evaluated LEFT TO
+/// RIGHT before the call: an explicit compute into a temporary (a copy of the
+/// computation, as `let tmp = m1 |> compute`: `m1` stays deferred, as in the
+/// interpreter and the llvm lane); a BARE deferred array argument forced under
+/// its own name at its position, exactly as the pre-pass forces the bare
+/// `f(m1)`; an evaluating SCALAR argument bound to a temporary at its
+/// position (C++ leaves argument evaluation order unspecified), and so is an
+/// evaluating ARRAY argument (a call, an array op, a view, an inline map --
+/// materialized there when the let path defers it); only a plain name, literal
+/// or parameter stays in the call.
+and genOrderedCallBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
+    let name = bindingCppName binding
+    match binding.Value with
+    | IRApp (f, args, info) ->
+        let (code, ctxF, args') =
+            args |> List.indexed |> List.fold (fun (accCode, accCtx: CodeGenContext, acc) (k, a) ->
+                let bindTemp (v: IRExpr) (ty: IRType) =
+                    let tmp : IRBinding =
+                        { Id = builder.FreshId(); Name = $"{name}__a{k}"; Type = ty; Value = v
+                          IsConst = true; IsMutable = false }
+                    let (c, ctx') = genBinding accCtx tmp builder
+                    (accCode @ c, ctx', acc @ [ IRVar (tmp.Id, ty) ])
+                match explicitComputeTupleMember accCtx a with
+                | Some c ->
+                    let ty = match c with IRVar (_, t) -> t | _ -> inferExprType c
+                    bindTemp (IRCompute c) ty
+                | None ->
+                    match a with
+                    | IRVar (id, _) when Map.containsKey id accCtx.DeferredComputations ->
+                        let (c, ctx', a') = forceDeferredArrayInput accCtx builder ($"{name}__a{k}") a
+                        (accCode @ c, ctx', acc @ [ a' ])
+                    | IRVar _ | IRParam _ | IRLit _ -> (accCode, accCtx, acc @ [ a ])
+                    | _ ->
+                        match inferExprType a with
+                        | ArrayElem _ as ty ->
+                            // An EVALUATING array argument (a call, an array
+                            // op, a view, an inline map) is bound at its own
+                            // position too, through the path `let tmp = <arg>`
+                            // takes; one the let path leaves deferred (an inline
+                            // map) is then materialized there, as
+                            // materializeCompoundOperand does -- so nothing is
+                            // left to evaluate inside the call (Codex review of
+                            // W4-1, finding 5).
+                            let (c1, ctx1, a1) = bindTemp a ty
+                            let tmpVar = List.last a1
+                            let (c2, ctx2, tmpVar') = forceDeferredArrayInput ctx1 builder ($"{name}__a{k}f") tmpVar
+                            (c1 @ c2, ctx2, (List.take (a1.Length - 1) a1) @ [ tmpVar' ])
+                        | ty -> bindTemp a ty) ([], ctx, [])
+        let (callCode, ctx') = genScalarExprBinding ctxF { binding with Value = IRApp (f, args', info) } builder
+        (code @ callCode, ctx')
+    | _ -> genScalarExprBinding ctx binding builder
 
 and genGroupKeysBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (keys: IRExpr list) : string list * CodeGenContext =
     let ind = indentStr ctx
@@ -3100,6 +3309,28 @@ and genSparseInitBinding (ctx: CodeGenContext) (binding: IRBinding) : string lis
 /// missing from VarNames); pass a distinct base per input slot.
 and forceDeferredArrayInput (ctx: CodeGenContext) (builder: IRBuilder) (tmpBase: string) (expr: IRExpr) : string list * CodeGenContext * IRExpr =
     match expr with
+    | IRVar (srcId, ty) when Map.containsKey srcId ctx.DeferredComputations
+                             && Map.containsKey srcId ctx.DeferredAliasOf ->
+        // A DEFERRED ALIAS (`let g2 = g`; gap G60): the alias is the same
+        // deferred value as its source, so forcing it forces the SOURCE under
+        // its own name first (recursively, for a chain of aliases; a source
+        // some earlier use already forced is simply stored), then binds the
+        // alias through the ordinary alias path over the now-stored source --
+        // the assignable deep copy (genVarAliasBinding), so a later element
+        // write through either name is not seen through the other. At main's
+        // top level both join the auto-print list, as the interpreter's force
+        // and the llvm lane's markForced record them.
+        let rootId = ctx.DeferredAliasOf.[srcId]
+        let srcName = Map.tryFind srcId ctx.VarNames |> Option.defaultValue tmpBase
+        let (rootCode, ctxR, _) = forceDeferredArrayInput ctx builder ($"{tmpBase}__src") (IRVar (rootId, ty))
+        let ctxR = { ctxR with DeferredComputations = Map.remove srcId ctxR.DeferredComputations
+                               DeferredAliasOf = Map.remove srcId ctxR.DeferredAliasOf }
+        let aliasBinding = { Id = srcId; Name = srcName; Type = ty; Value = IRVar (rootId, ty); IsConst = false; IsMutable = true }
+        let (code, ctx1) = genVarAliasBinding ctxR aliasBinding builder rootId
+        if ctx.Indent = 0 then
+            let cell = forcedDeferredIdsCell ()
+            cell.Value <- Set.add srcId cell.Value
+        (rootCode @ code @ [""], ctx1, expr)
     | IRVar (srcId, ty) when Map.containsKey srcId ctx.DeferredComputations ->
         // Materialize under the deferred binding's own name, then drop it
         // from the deferred map: later consumers (including a second
@@ -7002,17 +7233,44 @@ and genTupleProjBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
 
 
 and genVarAliasBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (srcId: IRId) : string list * CodeGenContext =
+    let (code, ctx') = genVarAliasBindingCore ctx binding builder srcId
+    // An alias DECLARED under its own name at main's top level (its source
+    // already stored) is a materialized binding: recorded, so the print pass's
+    // alias-class rule (gap G60) prints it and does not redeclare it.
+    if ctx.Indent = 0 && not (Map.containsKey binding.Id ctx'.DeferredComputations) then
+        let cell = forcedDeferredIdsCell ()
+        cell.Value <- Set.add binding.Id cell.Value
+    (code, ctx')
+
+and genVarAliasBindingCore (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (srcId: IRId) : string list * CodeGenContext =
     let ind = indentStr ctx
     let name = bindingCppName binding
-    // Check if source is deferred -- propagate deferral (but a MUTABLE
-    // binding deep-copies its initializer's storage, so a deferred source
-    // must be FORCED first: propagating would leave both unmaterialized
-    // while later assignments/reads use them by name).
+    // Check if source is deferred -- propagate deferral. An alias of a
+    // deferred map is the SAME deferred value (gap G60, formalism 10.2
+    // "Aliases and printing of deferred maps"): it evaluates nothing here.
+    // It used to FORCE the source when the alias is assignable (every
+    // non-static let is) and deep-copy it, which printed `g` and not `g2`
+    // and moved the source's evaluation -- and its first failure -- to the
+    // alias. Now an ARRAY alias records its source (DeferredAliasOf): the
+    // first forcing use through the alias (forceDeferredArrayInput) forces
+    // the source under its own name first, then binds the alias as an
+    // assignable copy of those cells, so an element write through one name is
+    // never seen through the other and both print.
+    // MODULE-LEVEL aliases only (main's top level, not a block or function
+    // body let -- those are the MutableArrayLets): a nested-scope assignable
+    // alias stays a forcing use of its source (the copy is made at the
+    // alias, block-scoped), the interpreter's IRLet arm mirroring it.
+    let moduleLevel = ctx.Indent = 0 && not (Set.contains binding.Id ctx.MutableArrayLets)
     match Map.tryFind srcId ctx.DeferredComputations with
-    | Some _ when binding.IsMutable || Set.contains binding.Id ctx.MutableArrayLets ->
+    | Some _ when not moduleLevel && (binding.IsMutable || Set.contains binding.Id ctx.MutableArrayLets) ->
         let (fcode, fctx, _) = forceDeferredArrayInput ctx builder ($"{name}__src") (IRVar (srcId, binding.Type))
         let (code, ctx') = genVarAliasBinding fctx binding builder srcId
         (fcode @ code, ctx')
+    | Some deferred when moduleLevel && (match binding.Type with ArrayElem _ -> true | _ -> false) ->
+        let ctx' = addVarName binding.Id name ctx
+        let ctx' = { ctx' with DeferredComputations = Map.add binding.Id deferred ctx'.DeferredComputations
+                               DeferredAliasOf = Map.add binding.Id srcId ctx'.DeferredAliasOf }
+        ([$"{ind}// {name} = <deferred computation (alias of {(Map.tryFind srcId ctx.VarNames |> Option.defaultValue (string srcId))})>"], ctx')
     | Some deferred ->
         let ctx' = addVarName binding.Id name ctx
         let ctx' = { ctx' with DeferredComputations = Map.add binding.Id deferred ctx'.DeferredComputations }

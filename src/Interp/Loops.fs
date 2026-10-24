@@ -285,8 +285,31 @@ let rec force (st: InterpState) (env: Env) (v: Value) : Value =
         // peel through root VDeferreds without calling force, mirroring
         // resolveComputation's inline resolution (also non-materializing).
         (match st.DeferredBindingIndex.TryGetValue expr with
+         // Inside a FUNCTION call (gap G75, formalism 10.2): the compiled
+         // lanes evaluate a module-level deferred map a function body forces
+         // privately, inside the body -- block-scoped, re-evaluated per call,
+         // never stored under its own name, so never printed. The same here:
+         // no memo, no registration.
+         | true, _ when st.FunctionCallDepth > 0 -> forceExpr st denv expr
          | true, id ->
-             let fv = forceExpr st denv expr
+             let fv =
+                 match expr with
+                 // A DEFERRED ALIAS (`let g2 = g`, gap G60): the same deferred
+                 // value as its source, so the source is forced under ITS own
+                 // name first (registered and memoized by this very function,
+                 // recursively along a chain of aliases; one already forced is
+                 // simply read), and the alias then holds an assignable COPY of
+                 // those cells (CodeGen's genVarAliasBinding deep copy), so an
+                 // element write through one name is not seen through the
+                 // other. Both names print.
+                 | IRVar (srcId, ty) when (match Blade.IR.stripUnits ty with ArrayElem _ -> true | _ -> false) ->
+                     (match st.Global |> Option.bind (fun g -> envTryFind g srcId) with
+                      | Some srcCell ->
+                          (match force st denv srcCell.V with
+                           | VArray ba when Core.isDenseCopyableArray ba -> VArray (copyBladeArray ba)
+                           | other -> other)
+                      | None -> forceExpr st denv expr)
+                 | _ -> forceExpr st denv expr
              st.ForcedDeferred.Add id |> ignore
              (match st.Global with
               | Some g ->

@@ -1965,8 +1965,8 @@ let runCliSmokeTests () : TH.BlockResult =
             // (2b) ALIAS CHAINS (Codex diff review of W2-1, finding 2), gate on
             // and off, both lanes: a one- and a two-hop alias of a DEFERRED map
             // build nothing (no report: never a build ahead of the map's
-            // materialization; the LLVM lane refuses a contains over an
-            // unstored set and the program falls back to C++), a two-hop alias
+            // materialization; the LLVM lane stores the alias class at its
+            // forcing event, gap G60, and runs it itself), a two-hop alias
             // of a literal builds exactly one structure with the gate on and
             // none with it off; every run prints the same values.
             File.WriteAllText(Path.Combine(dir, "alias_deferred.blade"),
@@ -1997,10 +1997,12 @@ let runCliSmokeTests () : TH.BlockResult =
                             let (c, o, e) = spawnWith env dir [ "run"; $"{prog}.blade"; "--verbose" ]
                             let reports = (memberReports o e).Length
                             let want = if isNull gate then onReports else 0
-                            // the LLVM lane runs the stored chain itself; it refuses the deferred one
+                            // the LLVM lane runs both chains itself: since W4-1 (gap G60) a
+                            // force of a deferred alias class stores ONE pool for every
+                            // member, so the deferred chain's contains reads stored cells
+                            // there too (it used to refuse an unstored set and fall back)
                             let laneOk =
                                 if isNull llvm then true
-                                elif prog = "alias_deferred" then e.Contains "llvm lane refused"
                                 else e.Contains ".ll"
                             let lane = if isNull llvm then "C++" else "LLVM"
                             let g = if isNull gate then "on" else "off"
@@ -2632,6 +2634,41 @@ let runCliSmokeTests () : TH.BlockResult =
                 (code = 0
                  && phiLl.Contains "lshr i64" && phiLl.Contains "sitofp i32" && not (phiLl.Contains "sitofp i64")
                  && genLl.Contains "sitofp i64" && not (genLl.Contains "lshr i64")) (out + err)
+            // Gap G62 (round 3 wave 4, W4-1): a tuple with at most one member
+            // that may fail keeps its single `std::make_tuple` line (no member
+            // temporaries); two failing members are bound in SOURCE order, so
+            // g++'s right-to-left argument order cannot pick the later failure.
+            File.WriteAllText(Path.Combine(dir, "tup.blade"),
+                "type Row = Idx<1>\n"
+                + "let a: Array<Int64 like Row> = [1]\n"
+                + "let z: Array<Int64 like Row> = [1]\n"
+                + "let x0 = 3.0\n"
+                + "let t = (1.0, 2.0)\n"
+                + "let p = (x0 + 1.0, x0 * 2.0)\n"
+                + "let u = (a((a(0) : Row)), 1 / z(0))\n")
+            let (code, out, err) = spawn dir [ "emit"; "tup.blade" ]
+            let i0 = out.IndexOf "u__m0 ="
+            let i1 = out.IndexOf "u__m1 ="
+            expectCase "tuples: an ordinary tuple keeps one make_tuple line; two failing members bind in source order (G62)"
+                (code = 0
+                 && out.Contains "std::tuple<double, double> t = std::make_tuple(1.0, 2.0);"
+                 && out.Contains "std::tuple<double, double> p = std::make_tuple((x0 + 1.0), (x0 * 2.0));"
+                 && not (out.Contains "t__m0") && not (out.Contains "p__m0")
+                 && i0 >= 0 && i1 > i0
+                 && out.Contains "std::make_tuple(u__m0, u__m1)") (out + err)
+            // Gap G60: a fold through an alias of a deferred map fuses and
+            // forces nothing, so neither name is materialized -- asked for by
+            // name, `--print` refuses them (the absence the corpus pins cannot
+            // state; loops/541).
+            File.WriteAllText(Path.Combine(dir, "alias.blade"),
+                "type Row = Idx<3>\n"
+                + "let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]\n"
+                + "let g = method_for(x) <@> lambda(v) -> v * 2.0\n"
+                + "let g2 = g\n"
+                + "let s = reduce(g2, (+))\n")
+            let (code, out, err) = spawn dir [ "run"; "alias.blade"; "--print"; "g,g2" ]
+            expectCase "deferred alias: a fold through it forces neither name, so `--print g,g2` is refused (G60)"
+                (code <> 0 && (out + err).Contains "never materialized") (out + err)
         finally
             try Directory.Delete(dir, true) with _ -> ()
     // The editor payload and the REPL: the instance is the same declaration,

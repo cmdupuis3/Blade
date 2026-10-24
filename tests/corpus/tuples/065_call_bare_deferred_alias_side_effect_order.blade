@@ -1,0 +1,24 @@
+// TEST: Call Bare Deferred Alias Side Effect Order
+// ----------------------------------------------------------------------------
+// Finding 5, the side-effect order: the first argument bumps a counter, and a
+// LATER bare deferred ALIAS reads that counter through its kernel's capture.
+// (The bare alias is forced at its argument, so the class seen / seen2 prints.)
+// Left to right, the bump happens first, so `seen` is computed with the
+// counter at 1: r = 1 + (10 + 1) + 2 = 14. A hoisted producer would read 0.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let mut cnt: Array<Int64 like Row> = [0]
+let seen = method_for(a) <@> lambda(v) -> v * 10 + cnt(0)
+let seen2 = seen
+let good = method_for(a) <@> lambda(v) -> v + 1
+function bump(c: mut Array<Int64 like Row>) -> Int64 = {
+    c(0) = c(0) + 1
+    c(0)
+}
+function h(k: Int64, p: Array<Int64 like Row>, q: Array<Int64 like Row>) -> Int64 = k + p(0) + q(0)
+let r = h(bump(cnt), seen2, good |> compute)
+// EXPECT: r = 14
+// EXPECT: cnt = [1]
+// EXPECT: seen = [11]
+// EXPECT: seen2 = [11]

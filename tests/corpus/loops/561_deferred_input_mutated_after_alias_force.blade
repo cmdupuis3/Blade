@@ -1,0 +1,21 @@
+// TEST: Deferred Input Mutated After Alias Force
+// ----------------------------------------------------------------------------
+// Finding 3, alias-first: the class is forced through the ALIAS (`g2(0)`,
+// `g2(1)`), then the input is zeroed. Every name -- g, g2, and an alias h3
+// bound after the force -- prints the cells stored at the force; rerunning the
+// producer at the print would divide by zero.
+// ----------------------------------------------------------------------------
+type Row = Idx<2>
+let mut x: Array<Int64 like Row> = [1, 2]
+let g = method_for(x) <@> lambda(v) -> 10 / v
+let g2 = g
+let a = g2(0)
+let b = g2(1)
+x(0) = 0
+let h3 = g
+// EXPECT: g = [10, 5]
+// EXPECT: g2 = [10, 5]
+// EXPECT: h3 = [10, 5]
+// EXPECT: a = 10
+// EXPECT: b = 5
+// EXPECT: x = [0, 2]

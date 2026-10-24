@@ -43,9 +43,9 @@ let s3 = late_seed(keys, vals, 50)
 // EXPECT: s3 = [104, 107, 104]
 
 // (a DEFERRED top-level value source also declines -- pinned in the Optimize block,
-// decision_group_agg_declined_deferred_source; not here, because the interpreter prints a
-// top-level deferred map a function forced and the compiled lanes do not -- a pre-existing
-// print divergence, recorded in gap G71)
+// decision_group_agg_declined_deferred_source; its values and printed set are pinned by
+// loops/544 -- the interpreter used to print a top-level deferred map a function forced
+// and the compiled lanes did not, gap G75, fixed in round 3 wave 4)
 
 // a group fold that writes a captured counter: an ordered side effect
 let mut calls: Array<Int64 like One> = [0]

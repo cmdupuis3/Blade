@@ -1,0 +1,21 @@
+// TEST: Deferred Map To Writing Mut Param (rejects)
+// ----------------------------------------------------------------------------
+// Gap G60's write class, through a call: passing a deferred map to a `mut`
+// parameter the callee writes is a write through the deferred computation
+// (judged by the shared write analysis, Optimize.callableWriteSummaryWith),
+// refused at lowering in every lane (BL4005). (A plain `let` is refused by the
+// type checker's mut-argument rule already; `let mut g` of a map is still a
+// deferred computation.)
+// ----------------------------------------------------------------------------
+type Row = Idx<3>
+let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
+let mut g = method_for(x) <@> lambda(v) -> v * 2.0
+function poke(a: mut Array<Float64 like Row>) -> Float64 = {
+    a(0) = 5.0
+    a(1)
+}
+let r = poke(g)
+let s = reduce(g, (+))
+// ERROR: BL4005 @ 16:1
+// ERROR-CONTAINS: a write through `g`, a deferred computation
+// REJECT-AT: lower

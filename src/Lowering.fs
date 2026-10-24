@@ -2788,22 +2788,11 @@ let private forceEffectfulModuleLets (programFuncs: IRCallable list) (m: IRModul
             else { b with Value = spine b.Value })
     { m with Bindings = bindings }
 
-/// A JOIN WHOSE LEG WRITES (gap G43, BL4005). A join -- a `<&!>` / `<&>`
-/// tree, or a reduction join `object_for(<&!>) <@> (reduce(..), ..)` -- runs
-/// its legs side by side, one joint cell at a time, and legs naming the same
-/// named deferred computation evaluate it ONCE per joint cell (formalism
-/// §10.2). That schedule is the join's meaning for values; it was never a
-/// promise about effects, and the lanes kept three different ones (the C++
-/// lane shared the cell, the LLVM lane interleaved one evaluation per leg,
-/// the interpreter ran the legs one after another), so a leg whose map kernel
-/// or fold kernel WRITES a captured binding printed three different answers.
-/// A serial write is an ordered side effect (§5.2), and a join has no single
-/// order to give it: refused, like a write in a parallel body. The fix is to
-/// force the writing map first (`|> compute`: one evaluation, stored) or fold
-/// the legs separately. A joined evaluation must be PROVED free of observable
-/// writes: an unresolvable callee or function-typed kernel counts as a write
-/// (Optimize.exprMayWriteWith). Spanned at the enclosing declaration.
-let private refuseWritingJoinLegs (modules: IRModule list) : unit =
+/// The program-wide context the write refusals share: every callable, every
+/// let-bound value (ids are unique per program), the assignable block lets,
+/// let-alias chasing, the callee resolver and the shared write analysis's facts
+/// (Optimize.exprMayWriteWith / callableWriteSummaryWith).
+let private programWriteContext (modules: IRModule list) =
     let funcs =
         modules |> List.collect (fun m -> m.Functions) |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     // Every let-bound value in the program (ids are unique per program): a leg
@@ -2844,6 +2833,26 @@ let private refuseWritingJoinLegs (modules: IRModule list) : unit =
           CopiedLet = copied
           UnknownIsWrite = true
           Callbacks = (fun _ -> None) }
+    (funcs, lets, mutableLets, chaseAlias, resolve, facts)
+
+/// A JOIN WHOSE LEG WRITES (gap G43, BL4005). A join -- a `<&!>` / `<&>`
+/// tree, or a reduction join `object_for(<&!>) <@> (reduce(..), ..)` -- runs
+/// its legs side by side, one joint cell at a time, and legs naming the same
+/// named deferred computation evaluate it ONCE per joint cell (formalism
+/// §10.2). That schedule is the join's meaning for values; it was never a
+/// promise about effects, and the lanes kept three different ones (the C++
+/// lane shared the cell, the LLVM lane interleaved one evaluation per leg,
+/// the interpreter ran the legs one after another), so a leg whose map kernel
+/// or fold kernel WRITES a captured binding printed three different answers.
+/// A serial write is an ordered side effect (§5.2), and a join has no single
+/// order to give it: refused, like a write in a parallel body. The fix is to
+/// force the writing map first (`|> compute`: one evaluation, stored) or fold
+/// the legs separately. A joined evaluation must be PROVED free of observable
+/// writes: an unresolvable callee or function-typed kernel counts as a write
+/// (Optimize.exprMayWriteWith). Spanned at the enclosing declaration.
+let private refuseWritingJoinLegs (modules: IRModule list) : unit =
+    let (funcs, lets, mutableLets, chaseAlias, resolve, facts) = programWriteContext modules
+    ignore mutableLets
     // An unresolved call head counts as a write here too: a joined evaluation
     // must be PROVED free of observable writes, not merely not seen writing.
     let writes (e: IRExpr) = Optimize.exprMayWriteWith facts e
@@ -2951,6 +2960,290 @@ let private refuseWritingJoinLegs (modules: IRModule list) : unit =
                 raise (Blade.Diagnostics.BladeDiagnosticException
                         (Blade.Diagnostics.mkError "BL4005" Blade.Diagnostics.PhConstraints span
                             "a parallel kernel (`where omp` / cuda) writes storage captured from outside it -- through a local view or alias (a `let` bound to, or rebound to, a slice or element view of a captured array) or through a callback it calls (a function-valued parameter whose argument writes, or one that cannot be resolved): its cells run concurrently, so the store is a data race. Write through a fresh local array, pass a callback that writes nothing outside itself, or return the value and fold it."))
+/// Two shapes the lanes cannot give ONE meaning, refused here so every lane
+/// (C++, LLVM, the interpreter -- all lower through this pass) reports the
+/// same diagnostic (round 3 wave 4, W4-1; formalism 10.2). COMPLETE rather
+/// than clever: every judgment below over-approximates, and an approximation
+/// it cannot finish refuses.
+///
+///   * A WRITE THROUGH A DEFERRED COMPUTATION (BL4005; gap G60). A deferred
+///     binder -- a top-level map, its top-level aliases, a deferred tuple, a
+///     bare map or non-copy alias bound in any block or callable body -- has
+///     no storage of its own: it is evaluated where it is read and fused into
+///     the folds over it. The WRITTEN-BINDER set is a program-wide fixpoint by
+///     binder IDENTITY: the binders an element write or a whole reassignment
+///     lands in (through every `let` view, alias, rebinding and `if` of one,
+///     stopping only at a PROVED copy -- an assignable `let a = Z` of a dense
+///     array, which every lane deep-copies -- or at fresh storage), the
+///     arguments a call passes to a parameter in the set (two hops and more,
+///     by iteration), every array argument of a call whose callee cannot be
+///     resolved (a callback), and the inputs of a map whose kernel writes a
+///     parameter. A deferred binder in the set is refused at its first write
+///     site; a provenance walk that runs out of budget refuses too.
+///   * AN `if` VALUE OVER COMPUTED ARRAYS the compiled lanes cannot order or
+///     own (BL6002; gap G59) -- the shapes IRLift.ifNeedsOrderedArms names
+///     (the C++ emitter's own judgment, shared). Inside a function body, a
+///     lambda or a loop body: the taken arm's storage has no owner after the
+///     branch. Anywhere: an arm that READS a deferred computation other than
+///     as a copy member (a positional read, a capture, a member whose own
+///     computation reads another deferred binding, a nested condition) would
+///     force it only on the taken arm, and no lane's static print list follows
+///     the branch.
+let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit =
+    let (funcs, lets, mutableLets, _chaseAlias, resolve, _facts) = programWriteContext modules
+    let allBindings = modules |> List.collect (fun m -> m.Bindings)
+    let allFuncs = modules |> List.collect (fun m -> m.Functions)
+    let bindingById = allBindings |> List.map (fun b -> (b.Id, b)) |> Map.ofList
+    let isArrayTy (t: IRType) = match stripUnits t with ArrayElem _ -> true | _ -> false
+    let typeIsArray (e: IRExpr) = try isArrayTy (typeOf e) with _ -> false
+    let isDeferredForm (e: IRExpr) =
+        match e with
+        | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRFunctorMap _
+        | IRChoice _ | IRFallback _ | IRComposeObj _ | IRComposeMeth _ | IRBind _ | IRZip _ -> true
+        | _ -> false
+    // ---- the deferred binders -------------------------------------------------
+    // The module bindings computeDeferredIds classifies (the classification
+    // every lane's print pass reads), plus every let in a block or callable
+    // body that is a deferred form, a deferred tuple, or a NON-copy alias of
+    // one (a block / body alias in MutableArrayLets is an assignable copy).
+    // Callable bodies' bare maps are stored by S2 (forceBareCombinatorLets),
+    // so they arrive here as computes and are not deferred.
+    let deferred =
+        let localLets = ResizeArray<IRId * IRExpr>()
+        let collect (e: IRExpr) =
+            iterIRExpr (fun n -> match n with IRLet (id, v, _) -> localLets.Add((id, v)) | _ -> ()) e
+        for b in allBindings do collect b.Value
+        for f in allFuncs do collect f.Body
+        let mutable acc = IRLift.computeDeferredIds allBindings
+        let mutable changed = true
+        while changed do
+            changed <- false
+            for (id, v) in localLets do
+                if not (acc.Contains id) then
+                    let isDef (e: IRExpr) =
+                        match e with
+                        | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRFunctorMap _ -> true
+                        | IRVar (s, _) -> acc.Contains s
+                        | _ -> false
+                    let d =
+                        match v with
+                        | IRVar (src, _) -> acc.Contains src && not (mutableLets.Contains id)
+                        | IRTuple es -> not es.IsEmpty && es |> List.forall isDef
+                        | v -> isDeferredForm v
+                    if d then
+                        acc <- acc.Add id
+                        changed <- true
+        acc
+    let dv : IRLift.DeferredView =
+        { IsDeferred = deferred.Contains
+          ValueOf = (fun id -> if deferred.Contains id then (match lets.TryGetValue id with | true, v -> Some v | _ -> None) else None)
+          TypeOfExpr = (fun e -> try typeOf e with _ -> IRTUnit) }
+    // A usable name for a refusal: a module binding's own name, else the
+    // shape of the local binder (its IR let carries no surface name).
+    let describe (id: IRId) =
+        match bindingById.TryFind id with
+        | Some b -> ($"`{b.Name}`", $"bind `{b.Name} |> compute`")
+        | None -> ("a deferred map bound by a `let` inside a block or a function body",
+                   "add `|> compute` at that `let` (`let m = <map> |> compute`)")
+    let users = allBindings |> List.map (fun b -> (b, collectVarRefsIR b.Value))
+    let funcSpan (f: IRCallable) =
+        let s = IR.declSpanOf f.Name
+        if s <> Blade.Ast.noSpan then s
+        else
+            match users |> List.tryFind (fun (_, refs) -> Set.contains f.Id refs) with
+            | Some (b, _) -> IR.declSpanOf b.Name
+            | None ->
+                match allFuncs |> List.tryFind (fun g -> g.Id <> f.Id && Set.contains f.Id (collectVarRefsIR g.Body)) with
+                | Some g -> IR.declSpanOf g.Name
+                | None -> s
+    // ---- the written binders ----------------------------------------------------
+    // Every rebinding of a name (`row = m(1)`) is another value it may hold.
+    let rebinds = System.Collections.Generic.Dictionary<IRId, ResizeArray<IRExpr>>()
+    let noteRebinds (e: IRExpr) =
+        iterIRExpr (fun n ->
+            match n with
+            | IRAssign (IRVar (id, _), rhs) ->
+                (match rebinds.TryGetValue id with
+                 | true, l -> l.Add rhs
+                 | _ -> rebinds.[id] <- ResizeArray [ rhs ])
+            | _ -> ()) e
+    for b in allBindings do noteRebinds b.Value
+    for f in allFuncs do noteRebinds f.Body
+    // `let a = Z` that every lane deep-copies: an ASSIGNABLE let (a block /
+    // body MutableArrayLets member, or a non-static module binding) of a
+    // plain dense array (the copy is dense-only in every lane).
+    let isProvedCopy (id: IRId) (v: IRExpr) =
+        match v with
+        | IRVar (_, ty) ->
+            let assignable =
+                mutableLets.Contains id
+                || (match bindingById.TryFind id with Some b -> b.IsMutable | None -> false)
+            assignable
+            && (match stripUnits ty with
+                | ArrayElem at -> at.IndexTypes |> List.forall (fun ix -> ix.IxKind = IxKPlain && ix.Symmetry = SymNone)
+                | _ -> false)
+        | _ -> false
+    // The binders an array expression's storage may belong to (None: the
+    // budget ran out -- the caller refuses). Followed: names (their
+    // initializer unless it is a proved copy or fresh storage, and every
+    // rebinding), views (index, curry, slice, field, tuple projection), both
+    // arms of an `if`, a let chain's value, and the array arguments of a call
+    // (a callee may return one of them). Anything else is fresh storage.
+    let rec storageOf (fuel: int) (owner: IRCallable option) (e: IRExpr) : Set<IRId> option =
+        if fuel <= 0 then None
+        else
+            let all (xs: IRExpr list) =
+                xs |> List.fold (fun acc x ->
+                    match acc, storageOf (fuel - 1) owner x with
+                    | Some a, Some b -> Some (Set.union a b)
+                    | _ -> None) (Some Set.empty)
+            match e with
+            | IRVar (id, ty) when isArrayTy ty || deferred.Contains id ->
+                let viaInit =
+                    match lets.TryGetValue id with
+                    | true, v when isProvedCopy id v -> Some Set.empty
+                    | true, v -> storageOf (fuel - 1) owner v
+                    | _ -> Some Set.empty
+                let viaRebinds =
+                    match rebinds.TryGetValue id with
+                    | true, rs -> all (List.ofSeq rs)
+                    | _ -> Some Set.empty
+                (match viaInit, viaRebinds with
+                 | Some a, Some b -> Some (Set.add id (Set.union a b))
+                 | _ -> None)
+            | IRVar _ -> Some Set.empty
+            | IRParam (nm, _, _) ->
+                (match owner |> Option.bind (fun c -> c.Params |> List.tryFind (fun p -> p.Name = nm)) with
+                 | Some p -> Some (Set.singleton p.VarId)
+                 | None -> Some Set.empty)
+            | IRIndex (a, _, _) | IRCurry (a, _, _) | IRSlice (a, _, _, _) | IRFieldAccess (a, _) | IRTupleProj (a, _, _) ->
+                storageOf (fuel - 1) owner a
+            | IRIf (_, t, f) -> all [ t; f ]
+            | IRLet _ -> storageOf (fuel - 1) owner (snd (IRLift.peelLetChain e))
+            | IRApp (_, args, _) -> all (args |> List.filter typeIsArray)
+            | IRTuple es -> all es
+            | _ -> Some Set.empty
+    let written = System.Collections.Generic.HashSet<IRId>()
+    let writeSite = System.Collections.Generic.Dictionary<IRId, Blade.Ast.Span>()
+    let changed = ref true
+    let mark (span: Blade.Ast.Span) (owner: IRCallable option) (e: IRExpr) =
+        match storageOf 48 owner e with
+        | Some ids ->
+            for id in ids do
+                if written.Add id then
+                    writeSite.[id] <- span
+                    changed.Value <- true
+        | None ->
+            raise (Blade.Diagnostics.BladeDiagnosticException
+                    (Blade.Diagnostics.mkError "BL4005" Blade.Diagnostics.PhConstraints span
+                        "a write whose target's storage could not be traced (more than 48 view, alias or rebinding steps): it may write a deferred computation, which has no storage of its own (formalism 10.2). Bind the array the write is meant for with `|> compute` and write that name directly."))
+    // Every site, with its owner (the callable whose parameters an IRParam
+    // names) and the span a refusal reports.
+    let sites =
+        [ for b in allBindings -> (IR.declSpanOf b.Name, None, b.Value)
+          for f in allFuncs -> (funcSpan f, Some f, f.Body) ]
+    let paramNamesOf (owner: IRCallable option) =
+        match owner with
+        | Some c -> c.Params |> List.map (fun p -> p.Name) |> Set.ofList
+        | None -> Set.empty
+    while changed.Value do
+        changed.Value <- false
+        for (span, owner, root) in sites do
+            let ownParams = paramNamesOf owner
+            iterIRExpr (fun n ->
+                match n with
+                | IRAssign (target, _) -> mark span owner target
+                | IRApp (f, args, _) ->
+                    (match resolve f with
+                     | Some c ->
+                         List.zip (List.truncate args.Length c.Params) (List.truncate c.Params.Length args)
+                         |> List.iter (fun (p, a) -> if written.Contains p.VarId then mark span owner a)
+                     | None ->
+                         // a FUNCTION VALUE (a callback parameter, a function-
+                         // typed name): its effects are unknown, so every array
+                         // it receives may be written. An intrinsic or a
+                         // constructor (an IRParam head that is no parameter of
+                         // this callable) writes nothing.
+                         let unknownCallee =
+                             match f with
+                             | IRVar _ -> true
+                             | IRParam (nm, _, _) -> ownParams.Contains nm
+                             | _ -> true
+                         if unknownCallee then
+                             args |> List.iter (fun a -> if typeIsArray a then mark span owner a))
+                | IRApplyCombinator info ->
+                    (match resolve info.Kernel with
+                     | Some k when k.Params |> List.exists (fun p -> written.Contains p.VarId) ->
+                         info.Arrays |> List.iter (mark span owner)
+                     | _ -> ())
+                | _ -> ()) root
+    for id in written do
+        if deferred.Contains id then
+            let (what, remedy) = describe id
+            raise (Blade.Diagnostics.BladeDiagnosticException
+                    (Blade.Diagnostics.mkError "BL4005" Blade.Diagnostics.PhConstraints writeSite.[id]
+                        ($"a write through {what}, a deferred computation: a map is evaluated where it is read and fused into the folds over it (formalism 10.2), so it has no storage of its own to write -- the write would leave its folds, its prints and its aliases disagreeing. Materialize it first: {remedy} (for a writable copy, `let mut c = <it> |> compute`) and write that.")))
+    // ---- if values over computed arrays -----------------------------------------
+    let rec stripC (e: IRExpr) = match e with IRCompute x -> stripC x | e -> e
+    // The deferred binders a piece of an arm READS: its references plus the
+    // captures of every callable it names (a kernel's capture is a force).
+    let readsOf (n: IRExpr) : IRId list =
+        let refs = collectVarRefsIR n
+        let all =
+            refs |> Set.fold (fun acc id ->
+                match Map.tryFind id funcs with
+                | Some c -> c.Captures |> List.fold (fun a ci -> Set.add ci.Id a) acc
+                | None -> acc) refs
+        Set.intersect all deferred |> Set.toList
+    let rec computationOf (fuel: int) (id: IRId) =
+        match lets.TryGetValue id with
+        | true, IRVar (src, _) when fuel > 0 && deferred.Contains src -> computationOf (fuel - 1) src
+        | true, v -> Some v
+        | _ -> None
+    // The first deferred binder an arm would force, if any. A copy member
+    // (`m`, `m |> compute`, an inline map under compute) is admitted when its
+    // own computation reads no deferred binding.
+    let rec badRead (e: IRExpr) : IRId option =
+        match e with
+        | IRIf (c, t, f) ->
+            (match readsOf c with
+             | id :: _ -> Some id
+             | [] -> badRead t |> Option.orElse (badRead f))
+        | IRTuple es -> es |> List.tryPick badRead
+        | m when (IRLift.deferredTupleMembersOf dv m).IsSome -> (IRLift.deferredTupleMembersOf dv m).Value |> List.tryPick badRead
+        | e ->
+            match stripC e with
+            | IRVar (id, ty) when deferred.Contains id && isArrayTy ty ->
+                (match computationOf 64 id with
+                 | Some v -> readsOf v |> List.tryHead
+                 | None -> None)
+            | c when isDeferredForm c -> readsOf c |> List.tryHead
+            | other -> readsOf other |> List.tryHead
+    let checkIfs (span: Blade.Ast.Span) (inFrame: bool) (root: IRExpr) =
+        let rec walk (frame: bool) (e: IRExpr) =
+            (match e with
+             | IRIf (_, t, f) when IRLift.ifNeedsOrderedArms dv e ->
+                 if frame then
+                     refuseLowering span
+                         "an `if` value that selects between computed arrays (a `|> compute`, or a deferred map held in a tuple) inside a function body, a lambda or a loop body: the compiled lanes have no owner for the taken arm's storage after the branch. Compute each array before the `if` (`let a = m |> compute`) and select between the names, or bind the `if` at the top level."
+                 else
+                     match badRead t |> Option.orElse (badRead f) with
+                     | Some id ->
+                         let (what, _) = describe id
+                         refuseLowering span
+                             ($"an `if` value whose arm reads the deferred computation {what} (by position, through a capture, or inside a computed member): it would be evaluated only on the TAKEN arm, and no lane's static print list follows the branch. Force it before the `if` (`let v = <it> |> compute`) and read `v` in the arm.")
+                     | None -> ()
+             | _ -> ())
+            match e with
+            | IRForRange (_, lo, hi, body) ->
+                walk frame lo
+                walk frame hi
+                walk true body
+            | _ -> childrenOf e |> List.iter (walk frame)
+        walk inFrame root
+    for b in allBindings do checkIfs (IR.declSpanOf b.Name) false b.Value
+    for f in allFuncs do checkIfs (funcSpan f) true f.Body
+
 let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (builder: IRBuilder) : IRProgram =
     // The scratch-reuse plan is keyed by let id and let ids restart per
     // compile, so a stale plan from an earlier program in this flow (the test
@@ -3077,6 +3370,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         let allFuncs = irModules |> List.collect (fun m -> m.Functions)
         irModules |> List.map (forceEffectfulModuleLets allFuncs)
     refuseWritingJoinLegs irModules
+    refuseDeferredWritesAndUnorderedIfs irModules
 
     // Every struct the program declares, for `zero` at a struct type
     // (IRMono.resolveTypedZerosModule): the struct may live in another module

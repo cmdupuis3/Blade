@@ -1,0 +1,21 @@
+// TEST: Chained View Rebinding Write (rejects)
+// ----------------------------------------------------------------------------
+// Finding 1's chains: `row` is first a view of a stored array, then REBOUND
+// to a view of the deferred map `m`, and written through an alias of it. The
+// provenance walk follows initializers, rebindings and aliases, so the write
+// is a write through m -- refused at lowering in every lane (BL4005).
+// ----------------------------------------------------------------------------
+type Y = Idx<2>
+type X = Idx<3>
+let s: Array<Float64 like Y, X> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let m = method_for(range<Y>, range<X>) <@> lambda(i, j) -> Float64(i) * 10.0 + Float64(j)
+let r = {
+    let mut row = s(0)
+    row = m(1)
+    let alias_row = row
+    alias_row(2) = 7.0
+    reduce(m, (+), axes = 2)
+}
+// ERROR: BL4005 @ 11:1
+// ERROR-CONTAINS: a write through `m`, a deferred computation
+// REJECT-AT: lower

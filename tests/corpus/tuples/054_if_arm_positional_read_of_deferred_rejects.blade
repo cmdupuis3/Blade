@@ -1,0 +1,19 @@
+// TEST: If Arm Positional Read Of Deferred (rejects)
+// ----------------------------------------------------------------------------
+// Codex review of W4-1, finding 4: an `if` value over computed arrays whose
+// arm READS a deferred map by position (`g(0)`) would force g only on the
+// taken arm -- the C++ lane forced it inside the arm, unprinted; the llvm lane
+// emitted both arms against one context (marking g printable even untaken);
+// the interpreter printed it when taken. No lane's static print list follows
+// the branch, so the shape is refused at lowering in every lane (BL6002;
+// formalism 10.2): force g before the `if` and read the stored name.
+// ----------------------------------------------------------------------------
+type Row = Idx<3>
+let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let m = method_for(x) <@> lambda(v) -> v + 1.0
+let c = reduce(x, (+)) > 5.0
+let t = if c then (g(0), m |> compute) else (0.0, m |> compute)
+// ERROR: BL6002 @ 15:1
+// ERROR-CONTAINS: whose arm reads the deferred computation `g`
+// REJECT-AT: lower

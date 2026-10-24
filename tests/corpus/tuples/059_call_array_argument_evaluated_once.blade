@@ -1,0 +1,19 @@
+// TEST: Call Array Argument Evaluated Once
+// ----------------------------------------------------------------------------
+// Finding 5, the value: an evaluating array argument of a call that also holds
+// an explicit compute is evaluated exactly ONCE, at its position: the writing
+// function `stamp` bumps a counter, which reads 1 afterwards in every lane.
+// ----------------------------------------------------------------------------
+type Row = Idx<3>
+type One = Idx<1>
+let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
+let m = method_for(x) <@> lambda(v) -> v * 2.0
+let mut calls: Array<Int64 like One> = [0]
+function stamp(c: mut Array<Int64 like One>) -> Array<Float64 like Row> = {
+    c(0) = c(0) + 1
+    [10.0, 20.0, 30.0]
+}
+function dot(p: Array<Float64 like Row>, q: Array<Float64 like Row>) -> Float64 = prodsum(p, q)
+let r = dot(stamp(calls), m |> compute)
+// EXPECT: r = 280.0
+// EXPECT: calls = [1]

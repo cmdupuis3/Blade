@@ -276,6 +276,14 @@ type EarthArray = Array<Float like LatIdx, LonIdx>
   (`docs/formalism.md` §3.10). Iterate with `range<I>` / `halo<I, ...>` to get the proofs.
 - `()` is application/indexing (curried); `[]` is ONLY tuple/pack structural access
   (`t[0]`, `args[k]`), never array indexing.
+- A tuple is a value: `(g, 1.0)` evaluates a deferred map member AT CONSTRUCTION, left to
+  right, as `g |> compute` would -- so a failing member fails there even if never projected
+  (a tuple of ONLY deferred computations stays deferred; formalism §10.2).
+- A deferred map (a `let` of a map with no `|> compute`) has no storage of its own: writing
+  through it, a top-level alias or a view of it, or handing it to a `mut` parameter that is
+  written or to a callback, is BL4005 -- bind `|> compute` first. An `if` VALUE selecting between computed
+  arrays is BL6002 inside a function / lambda / loop body, or when an arm reads a deferred
+  map other than as a copy member (formalism §10.2).
 - Statements end at a newline, `;`, or a closer; anything else on the same line is BL1001
   (no implicit multiplication). A line opening with a binary operator continues the one
   above (indented past the statement's column); a line opening with `(`/`[` starts a new

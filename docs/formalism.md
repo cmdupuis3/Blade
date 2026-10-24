@@ -2112,6 +2112,99 @@ the same way. The computation wrappers `guard` and `sequence` keep the
 deferred protocol. Pinned by `loops/494`, `497`, `518`-`527` in every lane
 (`526`, a fallback, in the C++ lane and the interpreter: the LLVM lane has no
 `<|:>`).
+
+**Aliases and printing of deferred maps (gaps G60, G75).** A pure deferred
+map (one that writes nothing, so it keeps the deferred reading above) is
+evaluated where a FORCING USE reads it: a positional read, a capture by a
+kernel, an eager array operation (`sort`, the set operations, `group_by`,
+...), a call argument, or `|> compute`. A fold, a map or a join over it FUSES
+instead and forces nothing, and a member of a tuple value evaluates a COPY
+(next paragraph). Its evaluation count is unobservable, so a program observes
+exactly two things: WHERE its first failure fires -- at its first forcing use
+-- and WHETHER it prints. A deferred map has NO STORAGE OF ITS OWN, so a
+WRITE through it -- an element write, a whole reassignment, a write through
+any `let` view, alias or rebinding of it (in any scope), passing it to a
+`mut` parameter some call chain writes, or handing it to a callee the
+compiler cannot resolve (a callback) -- is REFUSED (BL4005, at lowering, so
+in every lane; materialize it first: `let c = g |> compute`). The judgment
+is a program-wide fixpoint by binder identity that stops only at a PROVED copy
+(an assignable `let a = Z` of a dense array) or fresh storage, and refuses
+what it cannot trace. The ALIAS rule: a TOP-LEVEL `let g2 = g` over a
+deferred map binds `g2` to the SAME deferred value -- substitution holds. The
+alias evaluates nothing (so nothing can fail there), and a use through `g2` is
+that use of `g` (`reduce(g2, (+))` fuses exactly as `reduce(g, (+))` does, and
+is refused where that is). A deferred map and its top-level aliases form ONE
+ALIAS CLASS (siblings and chains included). The PRINT rule: a class prints,
+under EVERY name in it, iff a forcing use at MODULE LEVEL (a top-level
+statement or block, or the capture of a top-level kernel) has forced any
+member by the end of the program; every name prints the same cells (no member
+can be written). The class value is fixed at its FIRST forcing event: a later
+write to one of the map's INPUTS does not change the stored cells any name of
+the class reads or prints (a fold over the map, which fuses, still reads the
+current inputs). A map that only function bodies force is evaluated inside
+each call, privately, and never prints; a class nothing forces prints
+nothing. An alias bound inside a block or a function body (`let mut b = g`)
+is a local assignable COPY instead -- binding it is a forcing use of `g` --
+and is ordinary storage. LANE EXCEPTIONS (OPEN under G60, pre-existing): the
+LLVM lane keeps the first-forcing snapshot only for a module binding that is
+aliased or read more than once -- a map read exactly once and then printed
+after a write to its input RERUNS its producer there -- and makes the local
+copy only inside a function body: an alias bound in a TOP-LEVEL block stays
+deferred in that lane and reads post-write cells; the C++ lane and the
+interpreter follow the rule as written. What changed in round 3, wave 4: the C++ lane forced
+`g` AT an assignable alias, so `g` printed and `g2` never did and `g`'s
+failure fired at the alias; the interpreter forced and printed only the name
+read, and memoized and printed a module map a FUNCTION body forced; the LLVM
+lane forced through an alias where the fold should fuse; and writes through a
+deferred map gave three answers (the LLVM lane folded the unwritten map, a
+silent wrong value; a reassignment dropped the old producer's failure there).
+Pinned by `loops/540`-`561`. LANE REFUSALS (not LLVM semantics): the LLVM lane
+refuses a function that reads a deferred module binding, so `loops/544`, `545`
+and `547` (the G75 print rule and the function-body copy) are pinned in the
+C++ lane and the interpreter only, and G75 stays PARTIAL until that lane runs
+them.
+
+**Deferred members of a tuple value (gaps G58, G59, G61, G62).** A tuple ALL
+of whose members are deferred computations is itself a deferred tuple: binding
+it evaluates nothing, and a projection reads one member. Any other tuple is a
+VALUE, and its members are evaluated AT ITS CONSTRUCTION, LEFT TO RIGHT, each
+at its own position: a deferred array member `(g, 1.0)` exactly as
+`g |> compute` evaluates it (a copy -- `g` itself is not forced, and prints only
+if a forcing use forces it), and a named deferred tuple member `(p, 1.0)` member
+by member. An `if` value whose arm is such a tuple (or an explicit
+`|> compute`) evaluates its condition, then ONLY the taken arm, members left to
+right; the untaken arm evaluates nothing. Two shapes of it are REFUSED (BL6002,
+at lowering, every lane): one inside a function body, a lambda or a loop body
+(the compiled lanes have no owner for the taken arm's storage after the
+branch), and one whose arm READS a deferred computation other than as such a
+copy member -- by position, through a kernel's capture, inside a computed
+member's own computation, or in a nested condition -- because that force
+would happen only on the taken arm, which no lane's static print list follows
+(force it before the `if`). The shared predicate follows at most 16
+tuple-alias links; a longer alias chain is not classified and may meet a
+backend refusal (BL7004) instead of BL6002 (OPEN under G59). A call with an
+explicit `|> compute` argument
+evaluates EVERY argument left to right the same way, array-valued ones included
+(gap G57); the order of two failing arguments of an ORDINARY call (no compute
+argument) is not fixed in the C++ lane (C++ leaves argument evaluation order
+unspecified; an OPEN record of its own, G79). The LLVM lane cannot keep that
+order for a BARE deferred array argument (it would evaluate it at the
+statement's start, or inside an inlined callee), so it refuses such a call
+and the C++ lane runs it (`tuples/063`-`065`: the C++ lane and the
+interpreter). An `if` value OFF the member-ordered path (ordinary arms, e.g.
+`if c then g(0) else 0.0`) is unchanged: the C++ lane forces the deferred maps
+BOTH arms read before the condition while the interpreter evaluates the taken
+arm only -- a first-failure and print divergence, OPEN (G77). The first-failure consequence is
+deliberate: a failing member fails at the construction even when the program
+never projects it -- `let held = (g, 1.0)` with `g` dividing by zero fails at
+`held`, before a later failing statement (`tuples/041`). What changed in round
+3, wave 4: the C++ lane refused a bare member (`unevaluated computation used as
+value`), named undeclared members of a deferred tuple member or of an
+`if`-held tuple, and let g++ evaluate `std::make_tuple`'s arguments right to
+left; the interpreter held a bare member deferred inside the tuple and
+evaluated it at a later projection; the LLVM lane kept it a producer and ran
+it only where the tuple was read, and refused an `if`-held tuple. Pinned by
+`tuples/041`, `044`-`065`.
 - `<*>` concatenates array lists: `method_for(A) <*> method_for(B) ≡
   method_for(A, B)`; identity `method_for()`; commutative up to index
   reordering; associative. It is proved to be exactly shape concatenation with

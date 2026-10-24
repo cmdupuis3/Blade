@@ -1,0 +1,17 @@
+// TEST: Module Deferred Map Forced In Function (aborts)
+// ----------------------------------------------------------------------------
+// Gap G75's first failure: a module-level deferred map a function body
+// forces is evaluated AT THE CALL (inside the body), so its integer division
+// by zero (BL8013) fires at `r`, before `bad`'s checked cast (BL8006) on the
+// next line -- in every lane, memoized or not.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let z: Array<Int64 like Row> = [0]
+let lazy = method_for(z) <@> lambda(v) -> 1 / v
+function at(n: Int64) -> Int64 = lazy(0) + n
+let r = at(1)
+let bad = a((a(0) : Row))
+// ABORT: BL8013
+// ABORT: integer division by zero
+// ABORT: .blade:10

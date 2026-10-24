@@ -34,6 +34,22 @@ let private nestedFunctionBodiesTL =
         System.Collections.Generic.HashSet<Expr>(HashIdentity.Reference))
 let internal nestedFunctionBodies () = nestedFunctionBodiesTL.Value
 
+/// The binder ids of lets bound INSIDE a block ({ let b = g; ... }, at top
+/// level or in a body; inferBlock records them), for the reduce fusion's alias
+/// chase (gap G60, formalism 10.2): only a TOP-LEVEL alias of a deferred map
+/// is the same deferred value -- a block alias is a local assignable copy
+/// (written freely: let mut b = g; b(1) = 50.0), so the chase stops at it
+/// and the fold reads the copy's stored cells. By binder IDENTITY, so a
+/// shadowing name elsewhere changes nothing. Reset by checkModule.
+let internal blockLocalVidsStorage = System.Threading.AsyncLocal<System.Collections.Generic.HashSet<IRId>>()
+let internal blockLocalVids () : System.Collections.Generic.HashSet<IRId> =
+    let v = blockLocalVidsStorage.Value
+    if isNull (box v) then
+        let fresh = System.Collections.Generic.HashSet<IRId>()
+        blockLocalVidsStorage.Value <- fresh
+        fresh
+    else v
+
 /// A `let rec`'s STEP ORDINAL (`n` in `| prefix :: n -> ..`) runs over the
 /// recursion's leading axis, so it is that axis's index value `Nat<I>` when
 /// the axis is a NAMED index type -- exactly the iteration index a
@@ -2582,7 +2598,27 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
         // `anonymousUnwrap` at the callsite below.
         | TExprCompute inner -> collect inner
         | _ ->
-        let r = resolveTypedExpr env t
+        // Resolved to a FIXPOINT (gap G60): an alias of a deferred map
+        // (`let g2 = g`) is the same deferred value (formalism 10.2), so
+        // `reduce(g2, (+))` fuses exactly as `reduce(g, (+))` does. The
+        // one-hop resolution stopped at `g` and left the fold an ordinary
+        // reduce over a NAME, which the interpreter and the llvm lane force
+        // (printing the map) where the direct spelling prints nothing.
+        // Only a TOP-LEVEL alias is chased past: a BLOCK alias (let mut b =
+        // g inside { }, blockLocalVids) is a local assignable copy, so --
+        // as the one-hop resolution always did -- the chase stops at the
+        // value it names and the fold reads the copy's stored cells. (A write
+        // through a deferred binding itself is refused at lowering, so a
+        // chased value is never one the program wrote.)
+        let blockLocal = blockLocalVids ()
+        let rec chase (fuel: int) (e: TypedExpr) : TypedExpr =
+            match e.Kind with
+            | TExprVar (_, vid, _) when fuel > 0 ->
+                let r = resolveTypedExpr env e
+                if System.Object.ReferenceEquals(r, e) || blockLocal.Contains vid then r
+                else chase (fuel - 1) r
+            | _ -> e
+        let r = chase 64 t
         match r.Kind with
         | TExprFusion (l, rgt) ->
             (match collect l, collect rgt with
@@ -15236,6 +15272,7 @@ and inferBlock env stmts finalExpr (expectedFinal: IRType option) : TypeResult<T
                         | _ -> "_(" + String.concat "," (patternNames binding.Pattern) + ")"
                     let identity = match binding.Pattern.Kind with PatternKind.PatVar n -> Some (AIDVariable n) | _ -> None
                     let assign = assignOfBindingMut binding.Mutability
+                    (blockLocalVids ()).Add varId |> ignore   // a block let (the reduce alias chase, G60)
                     curEnv <- bindVarFull name varId tValue.Type identity assign (Some tValue) curEnv
                     // Dist provenance: in-block dist lets (e.g. `let h =
                     // 2.0 * d` on a licensed parameter) derive from the RHS.
@@ -15466,6 +15503,7 @@ and inferForIn (env: TypeEnv) (varName: string) (rangeExpr: Expr) (bodyStmts: St
                             let bName = match binding.Pattern.Kind with PatternKind.PatVar n -> n | _ -> "_"
                             let bId = bodyEnv.Builder.FreshId()
                             let assign = assignOfBindingMut binding.Mutability
+                            (blockLocalVids ()).Add bId |> ignore
                             bodyEnv <- bindVarFull bName bId tValue.Type None assign (Some tValue) bodyEnv
                             // Destructuring inside a loop body: routed through
                             // the same stmtDestructureBindings inferBlock uses

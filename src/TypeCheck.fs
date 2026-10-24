@@ -242,6 +242,9 @@ let private generalizeArrowLetLambdas (decls: Located<Decl> list) : Located<Decl
 
 let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * CompileError list =
     let modul = { modul with Decls = generalizeArrowLetLambdas modul.Decls }
+    // Binder ids restart per compile: a block-local id from an earlier module
+    // or program must not stop this module's reduce alias chase (G60).
+    Blade.TypeCheckInfer.blockLocalVidsStorage.Value <- System.Collections.Generic.HashSet<_>()
     // Fresh module: drop any span the PREVIOUS module's decl loop left in the
     // side-channel. The static-assertion errors below are raised before this
     // module's first `checkDecl` (which is where the per-decl reset lives), so

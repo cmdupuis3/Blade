@@ -1,0 +1,29 @@
+// TEST: If Held Tuple Of Computes
+// ----------------------------------------------------------------------------
+// Gap G59 (round 3, W1-3; pre-existing): a tuple of computes inside an `if`.
+// The C++ lane rendered `c ? std::make_tuple(m1, m2) : ...` over names it
+// never declared (BL9002) and the llvm lane refused an `if` in pack
+// position. Now the condition is evaluated, then ONLY the taken arm, its
+// members left to right inside the arm, in both compiled lanes. Pinned in
+// both branches (`up` takes the then-arm, `down` the else-arm), through a
+// nested `if`, with a bare deferred member (a tuple is a value: formalism
+// 10.2), and for the array-valued `if` of two computes (the same defect).
+// ----------------------------------------------------------------------------
+type Row = Idx<3>
+let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
+let m1 = method_for(x) <@> lambda(v) -> v * 2.0
+let m2 = method_for(x) <@> lambda(v) -> v + 1.0
+let big = reduce(x, (+)) > 5.0
+let small = reduce(x, (+)) > 50.0
+let up = if big then (m1 |> compute, m2 |> compute) else (m2 |> compute, m1 |> compute)
+let down = if small then (m1 |> compute, 1.0) else (m2 |> compute, 2.0)
+let nested = if small then (m1 |> compute, 0.0) else if big then (m2, 3.0) else (m1, 4.0)
+let arr = if small then m1 |> compute else m2 |> compute
+let u0 = up[0]
+let d1 = down[1]
+// EXPECT: up = ([2.0, 4.0, 6.0], [2.0, 3.0, 4.0])
+// EXPECT: down = ([2.0, 3.0, 4.0], 2.0)
+// EXPECT: nested = ([2.0, 3.0, 4.0], 3.0)
+// EXPECT: arr = [2.0, 3.0, 4.0]
+// EXPECT: u0 = [2.0, 4.0, 6.0]
+// EXPECT: d1 = 2.0

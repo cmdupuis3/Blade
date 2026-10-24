@@ -979,6 +979,19 @@ or return a scalar and materialize at the call site"
             // across the call boundary. No caller-side change is needed: the
             // caller already binds the returned wrapper and reads shape off
             // it (`c.extents[0]`), never off a companion `c_extents`.
+            //
+            // A MODULE-LEVEL deferred map the returned expression reads by
+            // name (`function f(n) = lazy(1) + n`, gap G75) is forced HERE,
+            // inside the body, at the body's indent -- block-scoped and
+            // unprinted, re-evaluated per call, exactly as a body-local map
+            // kernel's capture of it is (formalism 10.2). It used to reach
+            // the return as an undeclared `lazy` (BL9002).
+            let (retForce, retCtx) =
+                forceDeferredPositionalReads
+                    { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
+                    builder "__retdef" retExpr
+            let stmts = stmts @ retForce
+            let currentNames = retCtx.VarNames
             let retStr = exprToCpp currentNames retExpr
             // `return t` where a body let bound `t` to a JOINED reduce: the
             // local is the emitters' flat tuple, the signature says nested.
@@ -2865,65 +2878,10 @@ let genPrintArrayWreath (name: string) (levels: (int * bool) list) (extent: int6
       "    }"
       "    cout << \"]\" << endl;" ]
 
-/// Compute which binding IDs are deferred (no C++ code generated).
-/// A binding is deferred if it's a computation that hasn't been materialized via |> compute.
-let computeDeferredIds (bindings: IRBinding list) : Set<int> =
-    let isDeferred (ids: Set<int>) (e: IRExpr) =
-        match e with
-        | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRFunctorMap _ | IRChoice _ | IRFallback _ | IRComposeObj _ | IRComposeMeth _ | IRBind _ | IRZip _ | IRSequence _ -> true
-        | IRVar (id, _) -> Set.contains id ids
-        | _ -> false
-    let rec shouldDeferValue (ids: Set<int>) (ty: IRType) (value: IRExpr) : bool =
-        // A combinator whose RESULT TYPE is an array is a deferred computation
-        // regardless of whether its operands are already deferred -- it materializes
-        // only at |> compute, exactly like `<@>` (which always defers). Without this,
-        // `<$>` / sequence / `<|>` / guard / `>>=` / `>>@` applied to CONCRETE arrays
-        // fell through to `| _ -> false` and were eagerly materialized (and printed)
-        // with no |> compute. Scalar `<|>` / guard stay eager ternaries (result type
-        // is IRTScalar, so resultIsArray is false).
-        let resultIsArray = match IR.stripUnits ty with ArrayElem _ -> true | _ -> false
-        match value with
-        // A let CHAIN defers exactly when its final value does: genBinding
-        // routes it through genLetChainBinding, which emits the inner lets as
-        // temporaries and then genBinding's the final expression under the
-        // binding's own name. IRLift wraps a deferred binding this way when it
-        // hoists an inline operand -- `method_for(T(0)) <@> k`, `method_for([1.0,
-        // 2.0]) <@> k` lift the row / literal into a `__v<id>` let -- and the
-        // binding stays a deferred computation (only a comment in the C++),
-        // so it must not print ('mapped' was not declared, BL9002). An inner
-        // let that itself defers makes a final alias of it defer too.
-        | IRLet _ ->
-            let (lets, finalExpr) = IRLift.peelLetChain value
-            let inner =
-                lets |> List.fold (fun acc (id, lty, v) ->
-                    if shouldDeferValue acc lty v then Set.add id acc else acc) ids
-            shouldDeferValue inner ty finalExpr
-        | _ ->
-            match value with
-            | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ -> true
-            | IRZip _ -> true
-            | IRComposeObj _ -> true
-            | IRBind (comp, _) -> resultIsArray || isDeferred ids comp
-            | IRComposeMeth (left, right) -> resultIsArray || isDeferred ids left || isDeferred ids right
-            | IRFunctorMap (_, inner) -> resultIsArray || isDeferred ids inner
-            | IRChoice (left, right) -> resultIsArray || isDeferred ids left || isDeferred ids right
-            // <|:> operands are arrays, so the binding ALWAYS defers
-            // (genFallbackBinding) -- materialization happens at |> compute.
-            | IRFallback _ -> true
-            | IRGuard (_, body) ->
-                let rec leafIsDeferred e =
-                    match e with
-                    | IRGuard (_, inner) -> leafIsDeferred inner
-                    | _ -> isDeferred ids e
-                resultIsArray || leafIsDeferred body
-            | IRSequence elems -> resultIsArray || (elems |> List.exists (isDeferred ids))
-            | IRTuple elems -> elems |> List.forall (isDeferred ids)
-            | IRTupleProj (IRVar (pid, _), _, _) -> Set.contains pid ids
-            | IRVar (srcId, _) -> Set.contains srcId ids
-            | _ -> false
-    bindings |> List.fold (fun ids b ->
-        if shouldDeferValue ids b.Type b.Value then Set.add b.Id ids else ids
-    ) Set.empty
+/// Compute which binding IDs are deferred (no C++ code generated). The ONE
+/// classification lives in IRLift (shared with the lowering refusals, the
+/// interpreter and the llvm lane).
+let computeDeferredIds (bindings: IRBinding list) : Set<int> = IRLift.computeDeferredIds bindings
 
 /// Top-level bindings that hold a FUNCTION -- a binding of function type
 /// (`let g = sq`), plus the generic-function aliases monomorphization removed
@@ -3062,7 +3020,26 @@ let genPrintStatements (modul: IRModule) : string list =
     // stayed deferred through the whole program prints nothing. The cell is
     // populated during genModule, so callers must assemble print code AFTER
     // body generation.
-    let forcedIds = (forcedDeferredIdsCell ()).Value
+    let forcedOwn = (forcedDeferredIdsCell ()).Value
+    // ALIAS CLASSES (gap G60, formalism 10.2): a deferred map and its
+    // top-level aliases are ONE value, so the class prints under every name
+    // as soon as any member was forced at main's top level. A member never
+    // materialized under its own name there is declared as a reference to a
+    // forced member just before the prints (the cells are the same: a write
+    // through any member is refused at lowering). Shared with the interpreter
+    // and the llvm lane (IRLift.deferredAliasClasses).
+    let aliasClasses = IRLift.deferredAliasClasses modul.Bindings deferredIds
+    let forcedIds =
+        aliasClasses |> Map.fold (fun acc m cls ->
+            if cls |> List.exists (fun x -> Set.contains x forcedOwn) then Set.add m acc else acc) forcedOwn
+    let aliasDecls =
+        modul.Bindings |> List.choose (fun b ->
+            match Map.tryFind b.Id aliasClasses with
+            | Some cls when Set.contains b.Id forcedIds && not (Set.contains b.Id forcedOwn) ->
+                cls |> List.tryFind (fun x -> Set.contains x forcedOwn)
+                |> Option.bind (fun rep -> modul.Bindings |> List.tryFind (fun r -> r.Id = rep))
+                |> Option.map (fun r -> $"    auto& {sanitizeCppName b.Name} = {sanitizeCppName r.Name};")
+            | _ -> None)
     // |> compute of a DEFERRED combinator is a forced materialization and
     // always prints; |> compute of anything ELSE prints exactly when the
     // wrapped value itself would (an eager reduce/scalar is unchanged by
@@ -3137,7 +3114,7 @@ let genPrintStatements (modul: IRModule) : string list =
                 else
                     [ refusalErrorLine "    " (formlessPrintRefusal modul formless) ]
         | None -> []
-    selectionRefusal @
+    aliasDecls @ selectionRefusal @
     (let printLinesOf (b: IRBinding) : string list =
         let isPrintable = isPrintableBinding b
         

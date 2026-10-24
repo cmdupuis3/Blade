@@ -142,6 +142,16 @@ and InterpState = {
     /// auto-prints (mirroring genPrintStatements' forcedDeferredIdsCell); one
     /// that stayed deferred prints nothing. Populated by Loops.force.
     ForcedDeferred: HashSet<IRId>
+    /// How many calls of a capture-free callable (a source-level FUNCTION:
+    /// named functions reach module bindings directly, never through a
+    /// capture) are live. A module-level deferred map forced while it is
+    /// positive is evaluated privately -- not memoized into its root cell,
+    /// not registered in ForcedDeferred -- because the compiled lanes force it
+    /// inside the function body, block-scoped and unprinted (gap G75,
+    /// formalism 10.2). A capturing lambda (a top-level kernel) does not
+    /// count: the compiled lanes force its captures at the enclosing
+    /// statement, which at module level prints.
+    mutable FunctionCallDepth: int
 }
 
 /// The header's fixed frame-store size (cpp/blade_runtime.hpp: `Frame stack[64]`).
@@ -185,7 +195,8 @@ let makeState (modul: IRModule) (limits: InterpLimits) : InterpState =
             | IRLet _ -> d.TryAdd(snd (peelLetChain b.Value), b.Id) |> ignore
             | _ -> ()
         d
-      ForcedDeferred = HashSet<IRId>() }
+      ForcedDeferred = HashSet<IRId>()
+      FunctionCallDepth = 0 }
 
 // Shadow call stack push/pop + panic-time capture, mirroring blade_runtime.hpp.
 // Push at Blade function-body entry, pop on normal exit. On a panic the frames
@@ -447,7 +458,7 @@ let private forceValue (st: InterpState) (env: Env) (v: Value) : Value =
 /// C++ side's dense-only guard in genVarAliasBinding (plain dense or
 /// symmetric-compact Array<T,N>): ragged-family / dep-idx / compound index
 /// tags -- and any ragged backing store -- keep the historical alias.
-let private isDenseCopyableArray (ba: BladeArray) : bool =
+let isDenseCopyableArray (ba: BladeArray) : bool =
     (match ba.Data with SRagged _ -> false | _ -> true)
     && ba.IndexTypes |> List.forall (fun ix ->
         not (isRaggedRowKind ix.IxKind)
@@ -622,6 +633,17 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
             | IRVar _, VArray ba when Set.contains id st.MutableArrayLets
                                       && isDenseCopyableArray ba ->
                 VArray (copyBladeArray ba)
+            // A block / function-body assignable alias of a DEFERRED array is
+            // a forcing use of its source, the copy made here (CodeGen's
+            // genVarAliasBinding: only a MODULE-LEVEL alias is the same
+            // deferred value, formalism 10.2). A source that is a module
+            // binding is registered as forced exactly when the C++ lane's
+            // force registers it: at module level (not inside a function).
+            | IRVar (_, vty), VDeferred _ when Set.contains id st.MutableArrayLets
+                                               && (match stripUnits vty with ArrayElem _ -> true | _ -> false) ->
+                (match forceValue st env v with
+                 | VArray ba when isDenseCopyableArray ba -> VArray (copyBladeArray ba)
+                 | fv -> fv)
             | _ -> v
         envBind env id v |> ignore
         evalExpr st env body
@@ -639,8 +661,40 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         let sv = evalExpr st env scrutinee
         evalMatch st env sv cases
 
+    // A tuple ALL of whose members are deferred computations is itself a
+    // deferred tuple (CodeGen's isWhollyDeferredTuple): its members stay
+    // computations, forced only where a projection reads one. Any other tuple
+    // is a VALUE (formalism 10.2, "Deferred members of a tuple value", gap
+    // G61): each deferred array member is evaluated AT CONSTRUCTION, at its
+    // own position, left to right with the other members, as `|> compute`
+    // evaluates it (a copy; the binding it names is not registered or
+    // memoized) -- and a member naming a deferred TUPLE has its members
+    // evaluated the same way (G58).
     | IRTuple exprs ->
-        VTuple (exprs |> List.map (evalExpr st env) |> Array.ofList)
+        // A deferred VALUE: a suspension, or -- for a tuple bound by a LOCAL
+        // let (a block or body let evaluates `(g, g)` to a VTuple of
+        // suspensions, where a module binding holds one VDeferred) -- a tuple
+        // all of whose members are deferred values, recursively. The twin of
+        // IRLift.isWhollyDeferredTupleOf's deferred NAME (Codex third look of
+        // W4-1, finding 1: `{ let p = (g, g); let q = (p, p); 7 }` forced g
+        // through q's value-tuple arm, which the base never did).
+        let rec isDeferredValue (v: Value) =
+            match v with
+            | VDeferred _ -> true
+            | VTuple vs -> vs.Length > 0 && vs |> Array.forall isDeferredValue
+            | _ -> false
+        let isDeferredMember (e: IRExpr) =
+            match e with
+            | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRFunctorMap _ -> true
+            | IRVar (id, _) ->
+                (match envTryFind env id with
+                 | Some cell -> isDeferredValue cell.V
+                 | None -> false)
+            | _ -> false
+        if exprs |> List.forall isDeferredMember then
+            VTuple (exprs |> List.map (evalExpr st env) |> Array.ofList)
+        else
+            VTuple (exprs |> List.map (fun e -> forceTupleMember st (evalExpr st env e)) |> Array.ofList)
 
     | IRTupleProj (e, i, isFlat) ->
         let v = evalExpr st env e
@@ -1052,6 +1106,24 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         // later milestones.
         raise (InterpUnsupported (nodeName other))
 
+/// One member of a tuple VALUE, evaluated (gap G61): a deferred array
+/// member is computed now, through the explicit-compute path (Loops'
+/// IRCompute arm -> forceExpr, which neither memoizes into a root cell nor
+/// registers a module binding as forced -- `(g, 1.0)` is `(g |> compute,
+/// 1.0)`); a nested tuple's deferred members likewise (a deferred tuple
+/// member, G58, forces to a tuple of computations). A function value
+/// (a suspended `f >> g`) and a loop object are values already.
+and private forceTupleMember (st: InterpState) (v: Value) : Value =
+    match v with
+    | VDeferred (IRCompose _, _) -> v
+    | VDeferred (e, denv) ->
+        (match evalArrayNode st denv (IRCompute e) with
+         | VDeferred _ as still -> still   // no force form: leave it (never loop)
+         | r -> forceTupleMember st r)
+    | VTuple vs when vs |> Array.exists (fun x -> x.IsVDeferred || x.IsVTuple) ->
+        VTuple (vs |> Array.map (forceTupleMember st))
+    | v -> v
+
 /// Reify a callable id as a closure value, snapshotting the current frame's
 /// cells for each declared capture (by CaptureInfo.Id -- the free var's original
 /// VarId). Top-level functions have no captures, so this yields an empty map.
@@ -1095,7 +1167,20 @@ and evalApp (st: InterpState) (env: Env) (func: IRExpr) (args: IRExpr list) : Va
                                | _ -> false) ->
              raise (InterpUnsupported "a group_by result passed as a function argument (refused by codegen: no function signature carries the group_keys side state)")
          | _ -> ())
-        let argVals = args |> List.map (evalExpr st env)
+        // A deferred ARRAY argument is forced AT THE CALL, before the callee
+        // runs -- the C++ lane's positional-read pre-pass materializes a bare
+        // deferred call argument under its own name at the call statement
+        // (printed at module level). Forcing it later, inside the callee's
+        // body, would count as a function-body force (FunctionCallDepth, gap
+        // G75) and drop the print.
+        let argVals =
+            args |> List.map (fun a ->
+                let v = evalExpr st env a
+                match v with
+                | VDeferred (IRCompose _, _) -> v
+                | VDeferred _ when (match stripUnits (typeOf a) with ArrayElem _ -> true | _ -> false) ->
+                    forceValue st env v
+                | _ -> v)
         applyValue st fv argVals
 
 /// Apply an already-evaluated callee value. A composed function (`f >> g`,
@@ -1143,7 +1228,12 @@ and evalCall (st: InterpState) (callable: IRCallable) (captures: Map<IRId, Value
                             $"arity mismatch calling '{callable.Name}' (expected {(List.length ps)}, got {(List.length args)})",
                             None, 0))
     List.iter2 (fun (p: IRParam) (a: Value) -> envBind frame p.VarId a |> ignore) ps args
+    // A capture-free callable is a function body (see FunctionCallDepth). Not
+    // restored on a panic path: an escaping InterpPanic ends the run.
+    let isFunctionBody = List.isEmpty callable.Captures
+    if isFunctionBody then st.FunctionCallDepth <- st.FunctionCallDepth + 1
     let result = evalExpr st frame callable.Body
+    if isFunctionBody then st.FunctionCallDepth <- st.FunctionCallDepth - 1
     popFrame st
     st.Depth <- st.Depth - 1
     result
