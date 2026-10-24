@@ -2896,6 +2896,57 @@ whose zarr stores are not in the checkout, one BL4003 warning, one BL3999). Ever
 - **G67 / G68** (N10's per-group packed H; the AD zero-literal compile blowup) block N10 and large haloadjoint sizes.
 - **antisym serial drift**: 0.7-1.1% slower pooled across sessions on identical emission -- noise at the CI edge, watched.
 
+### 17.6 Wave 3 (tips 3641bfc1 .. e0991a39; records `notes/round3/reviews/wave3-codex-reviews.md`, `briefs/wave3-builder-briefs.md`): the relational and orbit regions, built
+
+| item | mechanism | knob | status |
+|---|---|---|---|
+| W3-1 T3 aggregate-only grouping (G71) | a function-body grouping whose grouped arrays feed only aggregate peels runs as ONE pass over the source rows in source order: per row the key, the group (positional / EnumIdx declared order / dynamic first-occurrence through the C core `blade_gkmap_*`), then four EXACT state machines (unseeded, seeded, prodsum, count) -- no perm, no gathered pool; bitwise the two-pass form under REPRO, strict first; three regimes; LLVM dynamic discovery through the shared C core | `BLADE_GROUP_AGG` (optimizer gate) | REDESIGNED after review B; three Codex looks; merged 5ea03056 + records e0991a39 (the sweep evidence made auditable) |
+| W3-2 T2 hash equijoin, PILOT (G72) | an inline rank-2 equijoin compound becomes a stable forward-filled CSR over the right keys (`blade_join_*` in `blade_member.h`), a counting pass sizing the relation before any store, a left-major / right-minor probe; C++ lane v1, the LLVM lane declines and records | `BLADE_HASH_JOIN`, `BLADE_JOIN_REPORT` | two Codex looks; merged 4f3a37b6 |
+| W3-3 P1 producer-fused ordered commit | a costed standalone prototype (`notes/round3/prototypes/p1-commit`): 21-round interleaved matrix, 1176 processes, 0 identity mismatches; T8 commit d:4 7.98 ms vs scatter 8.38 -- the rule (paired lower CI >= 1.5 ms AND wait fraction < 0.20) fails at every G; BIMODAL at T8 (a fast cluster at or under the expert, a slow one no better than the scatter) | -- | MEASURED and DROPPED by the predeclared rule (3641bfc1); the salvage note (`#codex-w3-3-salvage`) names ONE cheap experiment -- per-physical-core affinity, 0.5-1 day, a predeclared decider -- not taken this round |
+| W3-4 P2 row orbit actions (G73) | a top-level rank-2 row map over a stored SymIdx<2, n> pool whose inner fold reads the cell at `S(i, j)` with role terms runs as one pass over the canonical cells (`tri_action` / `action2`; an off-diagonal cell read once, its term evaluated twice with own / partner swapped); bitwise the row walk under REPRO + contract off in both lanes | `BLADE_ORBIT_ACTIONS` | one Codex look; merged 972633c6; not harness-measured (one-core directional only) |
+| W2-4 A7c lifetime class (G69), rounds 4-9 | the inlined callee's cleanup as an IR-level return-boundary event (`IRReleasePools`), a fail-closed ownership whitelist, allocation-free evaluation, every user call refused in a non-owned unit; the kept one-level inline made OPT-IN (`BLADE_EPILOGUE_LEGS=1` explicit) by the user's decision after the seventh look; BL7005 warns whenever a lane actually retains it | `BLADE_EPILOGUE_LEGS` | nine Codex looks in all; merged aa39e50a + bea9fcfe; the planned closure is the scope model A (`#codex-g69-design`: real lifetime scopes, 10-15 builder-days, a later item) |
+
+Gates and A/B: one combined chain after wave 4 (17.8).
+
+### 17.7 Wave 4 (tips a7c1394c .. f46fdfc0; `reviews/wave4-codex-reviews.md`, `briefs/wave4-builder-briefs.md`): the gap-register cleanup, closed under the fallback rule
+
+The user's rule (2026-10-22/23): a third look that still fails merges what passes and records every remaining hole as an OPEN gap row; then
+(2026-10-23) "don't continue any more rounds on these. Wrap up what's working for wave 4, then benchmark". The orchestrator merged the
+reviewed tips with MERGE-TIME fixes for the regressions the last looks found and nothing else; the builders' unreviewed round-3 WIP
+commits stay on their branches (W4-2 0fd34ee9, W4-3 5849be90) as the starting point if these are reopened.
+
+| item | landed | fixed at the merge | OPEN after the merge (gap rows) |
+|---|---|---|---|
+| W4-4 G68 grad zero-fill (a7c1394c) | reverse mode's cotangent zero buffer is a zero-fill MAP (haloadjoint at n = 1,000,003 lowers in 0.64 s, was killed after 627 CPU s) | -- (one fix round after its look) | G78: LLVM `keepPool` nulls the owning function scope's slot (a pre-existing escape) |
+| W4-1 deferred values in tuples / aliases (5d4a28d0) | one contract per divergence in every lane: writes through a deferred map REFUSED (BL4005, program-wide fixpoint), alias classes print as one value, tuples of deferred computations stay deferred / any other tuple forces at construction left to right, `if` values over computed arrays ordered or REFUSED (BL6002), calls holding an explicit compute evaluate every argument left to right; corpus tuples/041-067, loops/540-561 | the third look's one REGRESSION: the interpreter forced block-local tuples of deferred tuples (13 lines; tuples/066-067) | G57 PARTIAL (LLVM refuses, not orders, mixed ordered calls); G59 PARTIAL (>16-link tuple aliases); G60 PARTIAL (tuple-held views bypass BL4005; LLVM sole-read rerun at print; LLVM top-level-block alias not copied); G58 notes the pre-existing C++ function-body deferred-tuple BL9002; G75 PARTIAL; G77, G79 OPEN |
+| W4-2 function-body folds / captures / refusals (2bd7b485) | G54 scope-exit frees under a POSITIVE synchronous-kernel proof (tensorop's `y` no longer leaks per call); G55 the function-body fold let threads as at top level; G64 the zero-level whole-array apply lowered to its CALL before the lanes split; G67 a compact-cell row map refused once (BL4004) | the second look's one REGRESSION (a use after free: a scalar return's call argument storing a closure): the exemption WITHHELD in any scope whose scalar return names a callable -- fail closed, memfree/029 ASan clean | G54 PARTIAL (the builder's slot-by-slot return classification unreviewed; LLVM evidence only through its own slot policy); G55's plan-subject inconsistency; G64 PARTIAL (LLVM compound parameters: the lane's pre-existing refusal, not a common one; no must-succeed native assertion); G67 with no outer-iteration-dimension guard |
+| W4-3 strict seeds / provenance (f46fdfc0) | G74 the unseeded fold seed is a dedicated MARK resolved by route: the exact identity (-0.0) on the strict routes (REPRO build, `where repro` body), the base +0.0 on licensed ones -- licensed emission unchanged (builder-reported 949 / 251 identical files); `where repro` bodies strict in every lane (lifted lambdas / sections inherit the demand); G76 one guard-failure text across the three lanes (17 cli cases) | two fail-safe fixes: the declaration table attached to the FINAL program object (multi-module programs had lost it); the exact anonymous name `lambda` instead of a prefix test | G74 PARTIAL (a fold strict only by construction -- a writing map body -- still starts at +0.0 in a licensed build; the sweep is a reported count, not a committed artifact); G80 OPEN (a NAMED kernel declared outside a `where repro` body keeps the licensed forms); G76's per-lane texts |
+
+Light checks at each merge (C:\bt_r2w1, the integration tree), every block green; the footers are in the commit messages. The corpus
+numbering collisions between W4-2 and W4-3 were resolved at the merge (symmetry/142 -> 145, functions/535 -> 537, 536 -> 538).
+
+### 17.8 Measured: the combined wave 3+4 A/B on f46fdfc0 (`notes/round3/w3-ab.md`; 27 sessions 02:18-04:50, 2026-10-24, quiet box) and gates (`notes/round3/gates/w3-gates-summary.md`)
+
+Gates GREEN on f46fdfc0: default **8223 / 0**, opt-diff 2364 / 0 / 966 skipped, docs 133 / 0 / 79, llvm 950 / 0 / 730 skipped,
+interp 3229 / 0 / 4 skip-unsupported; examples 68 files, the same six pre-existing failures; every mirror smoked.
+
+| cell | item | blade-llvm NEW/OLD | blade-cpp NEW/OLD | class | expert ratio (gf / ifx) |
+|---|---|---|---|---|---|
+| groupagg serial repro | W3-1 T3 one pass (default) | **0.435** [0.426, 0.442] | **0.471** [0.455, 0.485] | live | 0.574 -> **1.331** / 0.385 -> 0.889 |
+| groupagg_dyn serial repro | T3 dynamic keys | **0.050** (248 -> 12.3 ms) | **0.491** [0.476, 0.503] | live | 0.077 -> **1.554** / 0.076 -> **1.533** |
+| groupagg serial licensed | default declines (control) / `BLADE_GROUP_AGG=licensed` opt-in | 1.010 / **0.431** | 1.025 / **0.453** | ind | 0.570 / 0.336 -> 1.278 / 0.745 (opt-in) |
+| hashjoin serial lic / repro | W3-2 T2 stable CSR, PILOT | LLVM declines (fallback, both binaries) | **0.010** / **0.009** (8.5 -> 0.087 ms) | ind | 0.008 -> 0.778 / 0.886 (lic): still a loss at pilot size |
+| pairaction serial licensed / repro | W3-4 P2 row actions (default) | **0.589** / **0.551** | **0.446** / **0.519** | ind 11/21 | lic 0.653 -> **1.110** / 0.579 -> 0.951; repro 0.559 -> 1.017 / 0.608 -> **1.113** |
+| pairaction mt8 | the action declines under a team | -- | 0.98 / 0.97 | ind | unchanged |
+| saxpy serial licensed vs r3w1 | W2-4: default joined pass / `BLADE_EPILOGUE_LEGS=1` | 1.046 [1.004, 1.180] / 0.933 | 1.079 [1.026, 1.163] / 0.993 | ind | the default SLOWER than the wave-1 binary beyond the CI (indicative, drifting block) |
+| saxpy serial repro vs r3w1 | default / legs1 | 0.976 / **0.869** [0.831, 0.930] | 0.996 / **0.863** [0.835, 0.881] | ind / live | legs1: 1.367 -> **1.488** / 0.872 -> 0.952 |
+| pairkernel, comoment3 (mt8 repro), gram (serial) | controls | -- / -- / 0.995 | 1.003 / 1.049 [0.971, 1.083] / 1.014 | ind | wins kept (comoment3 1.53-1.59, gram 1.36 / 1.24) |
+
+Peak working set: groupagg 35 -> 20 MB under the one pass, hashjoin C++ 25.4 -> 5.4 MB; nothing else moved. Decisions: T3 and
+P2 stay ON by default; the licensed one pass stays opt-in; T2 is proved at pilot size only (a full-size kernel and the LLVM route
+are the follow-ups); the W2-4 default joined pass buys nothing over the wave-1 binary while the opt-in legs arm takes 0.86-0.93
+serially -- the scope model A (G69) is the path to a default. Round 4 pivots to peak memory and bandwidth (the user's direction).
+
 ## 12. Decisions put to the user — BOTH DECIDED (2026-10-18)
 
 **Decisions:** (1) mt8 matched parallelism — option (A) below: every arm threads input
