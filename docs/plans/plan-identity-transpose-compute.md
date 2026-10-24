@@ -1,325 +1,461 @@
 # Identity, structural transpose, and compute
 
-Status: DESIGN; compiler changes not implemented. Abstract proof models are
-implemented on `codex/structural-transpose-proofs`, based on master
-`361504b60a1edd8a5c06993976daae7d7d25d9d3`. The first three models were committed
-in `71758a73`; the materialization-elimination extension accompanies this plan.
-Rocq 9.0.1 compilation and independent kernel checking passed for the new module
-and its dependencies; the extended assumption audit passed for all 2,205 results.
+Status: DESIGN, revised 2026-10-24 (Claude, after review and a Codex consultation;
+the original draft is Codex's, on `codex/structural-transpose-proofs` at c6a9b8b3,
+base master 361504b6). Compiler changes NOT implemented. The four Rocq models on that
+branch compile on Rocq 9.0.1, are axiom-free, pass `coqchk` and the assumption audit
+(2205 results); their scope is stated honestly in §7, which is narrower than the
+branch's README and `docs/proofs.md` prose (to be re-scoped before the proofs merge).
+The review that drove this revision is
+[review-identity-transpose-compute-2026-10-24.md](review-identity-transpose-compute-2026-10-24.md).
 
 The goal is to preserve Blade's structural index types and canonical evaluation
-while making aliases independent of variable spelling, treating transpose as a
-typed structural function, and allowing `compute` to participate in planning
+while making array identity independent of variable spelling, treating transpose
+as a typed structural function, and letting `|> compute` participate in planning
 across functions and files without forcing intermediate allocations.
 
-The [semantics and mathematical argument](../research/identity-transpose-compute.tex)
-and the `.v` sources below describe the proposed model. Existing
-[`formalism.md`](../formalism.md) remains the current language specification;
-its alias and compute wording must change with the corresponding implementation,
-not merely because this plan exists.
+[`formalism.md`](../formalism.md) remains the language specification. The owner has
+allowed small semantic changes to it for this work; each one is named below as a
+LANGUAGE CHANGE with its migration, and lands with its implementation, never ahead of it.
+
+## 0. Why: the performance case, measured
+
+The design invariant is "the fastest way is the only way": storage, iteration and
+routing derive from structure, never from how a program happens to be spelled. Today
+identity is spelled. Three probes on master cf2028cc (sources in the review):
+
+```blade sketch
+let A = [1.0, 2.0, 3.0]
+let B = A
+function f(x: T^1, y: T^1) where comm(x, y) =
+    method_for(x, y) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+function g(x: T^1) =
+    method_for(x, x) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+let PAA = f(A, A)   // DENSE today: "the commuting positions hold different arrays (x, y)"
+let PAB = f(A, B)   // dense
+let GA  = g(A)      // packed, "triangular-iteration ... speedup x2"
+```
+
+- Extracting a two-parameter helper loses the packed layout and the x2 (r! for an
+  r-way group) for every caller, including `f(A, A)`. The body never sees call-site
+  sharing: `IRMono.canonTypeKey` ignores identity, so `f(A, A)` and `f(A, B)` are ONE
+  instance.
+- A deferred-map alias is already the SAME value by the formalism (§10.2, W4-1), yet
+  `method_for(g, g2)` with `let g2 = g` prints dense while `method_for(g, g)` prints
+  packed. The language contradicts itself on this point today.
+- `transpose(transpose(M))` emits two full copies with zero plan decisions; a SymIdx
+  transpose is erased at typecheck but the alias binding still copies the pool; an
+  antisym transpose negates into a fresh pool.
+- A single-consumer `|> compute` always allocates a pool at top level; the same program
+  without `compute` fuses with no pool. Inside function bodies every let and return
+  combinator is forced (`Lowering.forceCallableBody`, Lowering.fs:490), so helpers
+  allocate what top level would fuse.
+
+Expected gains (operation and storage counts, not measured speedups): a shared pair
+group goes from n^2 to n(n+1)/2 cells (factor 2n/(n+1)); an r-way group from n^r to
+C(n+r-1, r) (approaching r!); a double transpose from two copies to none; a read-only
+compact transpose alias from one pool copy to none; a single-consumer pure producer
+from one N-cell pool plus N writes and N reads to none. Possible losses, each a reason
+to keep the materialized candidate and measure: recomputing an expensive producer for
+several consumers, retaining an old input across a write, a packed-to-dense boundary
+conversion, a lost BLAS or vectorized route, extra specializations.
 
 ## 1. Decisions and invariants
 
 1. Binding identifiers, semantic operand keys, and storage identities are distinct.
 2. An identity-transparent alias preserves the complete semantic operand key.
 3. Transpose composes a typed structural map. It is not an ordinary strided array
-   view and does not inherently create a new logical root.
+   view and does not create a new logical root.
 4. Canonical applications commit to their sharing relation, descriptor,
-   reconstruction rules, and numerical evaluation contract during elaboration.
+   reconstruction rules and numerical evaluation contract during elaboration.
 5. `compute : Computation<T> -> T` commits a logical value and its observable
-   evaluation obligations. Allocation and physical realization are planner choices.
-6. Every surviving bulk traversal satisfies the supported forward, contiguous
-   curried storage contract. A conversion kernel has its own checked contract;
-   increasing destination addresses are not a universal requirement.
-7. Materialization elimination preserves snapshots, required effects, failures,
-   and numerical observations. It does not imply that elimination is cheaper.
-8. Optimize.fs remains the home for deterministic semantic-equivalence rewrites.
-   The interpreter and compiled backends implement one observable language.
+   obligations (§4). Allocation and physical realization are planner choices.
+6. Every surviving bulk traversal satisfies the forward, contiguous curried storage
+   contract. A conversion kernel has its own checked contract; increasing destination
+   addresses are not a universal requirement.
+7. Materialization elimination preserves snapshots, required effects, failures and
+   numerical observations. It does not imply that elimination is cheaper.
+8. `Optimize.fs` remains the home for deterministic semantic-equivalence rewrites;
+   realization decisions are SIDE TABLES read by both emitters (as `PoolReuseTable`,
+   `HotRowTable` are), never tree rewrites, so the eager interpreter stays an
+   independent oracle (§8).
+9. A declared type fixes the layout AND the elaboration at that boundary (§2.3).
+10. AD elaborates its differentiated function with independent argument slots (§2.4).
+11. Alias transparency is a LANGUAGE CHANGE, never a gated optimization: no knob may
+    change meaning.
 
 ## 2. Identity and alias semantics
 
-Use a descriptor along these lines; these are conceptual fields, not a final F# API:
+Conceptual descriptor (not a final F# API):
 
 ```text
 BindingId       = existing scoped IR identifier
-ValueVersion    = stable logical definition / SSA version
+ValueVersion    = stable logical definition / SSA version (globally unique token)
 OperandKey      = (ValueVersion, normalized structural map/action, ordered frame)
 Representation  = (allocation, storage layout, ownership, lifetime, residency)
 ```
 
-Aliases copy `OperandKey`. Initially equal values can occupy independent copied
-storage; later writes to one copy must not alter the other. A mutation creates a
-fresh logical version for the affected value. Versions must be globally distinct
-SSA definitions or equivalent unique tokens: two independently mutated copies of
-one origin must not collide because both incremented a local counter to one.
-At control-flow joins, use a new value version unless equality is established.
+Aliases copy `OperandKey`. A mutation mints a fresh `ValueVersion` for the affected
+value; at control-flow joins a new version is used unless equality is established.
+Two independently mutated copies of one origin must never collide.
 
-Preserve the existing assignment/copy contract. In particular,
-[`loops/081`](../../tests/corpus/loops/081_mut_array_copy_semantics.blade) pins
-independence of assignable copies. Semantic alias propagation is not permission
-to replace those copies with observably shared mutable storage. Storage alias
-analysis determines which live descriptors a write invalidates; semantic key
-equality determines structural sharing at canonical application.
+**The existing copy contract is preserved.** `let B = A` at top level deep-copies
+(loops/081); `B(0) = 9.0` leaves `A` intact; a `mut` parameter's element writes alias
+the caller's array (functions/145, BL4005 on a plain `let` argument). Semantic key
+equality decides structural sharing at a canonical application; storage alias analysis
+decides which live descriptors a write invalidates. Neither replaces the other.
 
-Do not compare contents or physical pointers to establish semantic identity.
-Separately defined computations may retain different keys even when equal in
-value. Optimizer CSE may share a buffer without merging the keys used by the
-already-elaborated canonical applications.
+Do not compare contents or pointers to establish identity. Separately defined
+computations keep different keys even when equal in value. Optimizer CSE may share a
+buffer without merging the keys of already-elaborated applications.
 
-### Sharing-dependent calls
+### 2.1 Where to start: deferred-map aliases (P1 entry point)
 
-For adjacent rank-one inputs and a licensed commutative pair kernel, a call with
-partition `[0,0]` can return a symmetric pair space, while `[0,1]` returns a dense
-pair space. The individual argument types can be identical. The relationship
-therefore belongs in the call judgment and return type before storage is chosen.
+Master's §10.2 (W4-1, 5d4a28d0) already says a top-level `let g2 = g` over a pure
+deferred map binds the SAME deferred value, that the map and its aliases form one alias
+class fixed at its first forcing event, and that writes through any member are BL4005.
+No write is possible, so the equality witness is free. P1 begins by making the identity
+groups of §8.3 see one array through such an alias, which repairs today's contradiction
+(`method_for(g, g2)` dense) with no version machinery. Stored arrays with provable
+no-write intervals come second; function parameters (§2.2) third.
 
-Specialize identity-sensitive functions on normalized sharing partitions and
-necessary structural-map relations alongside ordinary type information. Do not
-specialize on literal root IDs or caller variable names. Identity-insensitive
-functions keep their existing specialization behavior.
+### 2.2 Sharing-dependent calls
 
-Preserve operand positions and current structural support. In particular,
-partition `[0,1,0]` does not license regrouping `(A,B,A)` or inventing a
-position-permuted compact representation. Retain the existing diagnostics and
-supported contiguous-group rule until a separate implementation justifies more.
+For adjacent inputs and a licensed commutative pair kernel, a call with partition
+`[0,0]` returns a symmetric pair space and `[0,1]` a dense one; the argument TYPES are
+identical. The relationship belongs in the call judgment and the inferred return type.
 
-For a higher-order/exported interface that hides sharing, explicitly choose a
-fixed representation contract, carry a witness, or reject the unsupported case.
-Assuming hidden aliases are distinct is not the proposed alias-transparent model.
-Runtime pointer equality is not a substitute for a semantic witness.
+Identity-sensitive functions (a body whose comm/anticomm application involves two or
+more parameters, directly or through resolved callees) are specialized on the
+normalized sharing partition of their relevant operands plus the supported structural
+map relations between them, in addition to ordinary type information: at most Bell(k)
+instances for k relevant operands, only the partitions actually encountered, never root
+ids or caller names. Identity-insensitive functions keep today's specialization.
 
-Alias transparency can change output structure and canonical evaluation relative
-to today's spelling-based semantics. Treat that as a language/elaboration change,
-with migration cases and revised expected types. It is not a late optimization
-whose on/off gate is allowed to change meaning.
+Positions are preserved: `[0,1,0]` does not license regrouping `(A, B, A)`; the
+adjacent-only rule of §8.3 (f882eb22, TypeCheckInfer.fs:10650-10709) and its BL4010
+advisory stay until a separate implementation justifies more.
+
+A higher-order or exported interface that hides sharing must fix a representation
+contract, carry a witness, or refuse. Assuming hidden aliases distinct is not this
+model; runtime pointer equality is not a witness.
+
+### 2.3 Declared signatures and ascriptions (LANGUAGE CHANGE)
+
+Today `let P: Array<Float64 like I, I> = method_for(A, A) <@> comm-kernel |> compute`
+is BL3001 (got `SymIdx<2, I>`), and a function declared `-> Array<Float64 like I, I>`
+with a comm body called as `mk(A, A)` returns dense (index-types/242 `make_g`).
+
+Rule: an explicit annotation (a `let` ascription or a declared return type) fixes the
+externally visible descriptor AND the elaboration at that boundary: the body is
+elaborated to the declared layout exactly as today, so declared-dense results keep
+today's cells, bits and pins (index-types/242 unchanged). A declaration is the
+optimization interface; writing a dense type is opting out of sharing specialization
+there. The top-level ascription above therefore becomes ACCEPTED with dense elaboration
+(migration: today's BL3001 cases). An UNANNOTATED helper infers its layout from the
+partition and may return packed.
+
+Recorded alternative (Codex): elaborate the body to its sharing-specialized canonical
+meaning and coerce compact to dense at the boundary by reconstructing logical reads.
+Same cells for kernels whose canonical and per-cell evaluations agree bitwise, but a
+changed canonical evaluation for kernels like `(x + y) + z` (the paper's incompatibility
+proposition) and a dense fill either way. Deferred until P2's reconstruction laws exist
+and a case needs it.
+
+### 2.4 AD (contract, new)
+
+`ad.grad`, `ad.jvp`, `ad.vjp` elaborate their function with INDEPENDENT formal argument
+slots and freeze that instance's canonical descriptors before transformation. Equal
+primal arguments never collapse slots: `ad.grad(floss)(A, A, ...)` over
+`floss(a, b) = gram(a, b)` differentiates the two-input dense-gram contract with
+distinct per-slot cotangents, and its returned primal belongs to that AD instance (never
+replaced by a sharing-specialized ordinary call whose canonical evaluation may differ).
+Tied differentiation is explicit: `h(a) = floss(a, a)`. A packed pullback needs the
+adjoint of reconstruction (orbit multiplicities, sign and conjugation actions): a
+separate contract, not implied by equal primals. ad-jvp-comb/020 and /091 are the pins.
+
+### 2.5 The commutativity sampler (LANGUAGE CHANGE)
+
+formalism.md:1332 today: "two names bound to one array (`let v = w`) are sampled
+independently ... a claim true only because they alias is refused." Replacement rule:
+
+> Captured array reads are sampled by semantic operand key and canonical coordinate,
+> honouring reconstruction. Identity-transparent aliases of one observed version share
+> samples; distinct or unproved keys are sampled independently. A write mints a fresh
+> version and invalidates every equality witness that depended on the old one; a law
+> checked under capture equality applies only while that equality holds, else it is
+> rechecked without it or refused. Formal kernel arguments stay independently sampled
+> unless the law carries a sharing constraint.
+
+A version minted after a write never retroactively repairs an unconditional certificate
+accepted earlier; a deferred capture needs invocation-time validity or a lifetime proof.
+
+### 2.6 Flow-sensitivity cost (stated, accepted)
+
+Because a write mints a version, the output TYPE of `method_for(A, B)` with `B = A`
+depends on whether a write to either can occur between the alias and the application.
+That proof happens at elaboration, while today's write analysis is IR-level
+(`Optimize.scheduleMayWriteIn` and friends). A conservative elaboration-time analysis
+means a program's type can change when an unrelated helper gains a write. Accepted: the
+analysis is fail-closed (dense), its decision is recorded by `blade plan`, and the
+deferred-alias entry point (§2.1) needs none of it.
+
+### 2.7 Identity minting sites (audit list)
+
+Not only `sameIdentity` (Types.fs:105-110, where `AIDParameter` is never constructed
+and `AIDDerived` never compares equal). Identities are minted from spelling at about ten
+TypeCheckInfer.fs sites (9714, 9923, 10069, 14699, 15237, 15586, 16340, 16592), by
+IRMono `coIterIdentityOf` (1839-1842; keyed by var id, with one shared
+`AIDVariable "__coi"` fallback for every non-variable operand), by providers from file
+variable names (CsvProvider.fs:302, NetcdfProvider.fs:482/536, ZarrProvider.fs:1176: two
+stores with a same-named variable may collide today), and read by CodeGenCuda.fs:1946-1971
+and Optimize.fs:2828/6496. P1 replaces every minting site.
 
 ## 3. Transpose as a structural function
 
-Represent supported coordinate permutations and payload actions explicitly,
-retaining the source's canonical read and ordered frame. Normalize composition,
-identity and inverse maps; add index-type certificates for symmetric identity,
-antisymmetric negation, and Hermitian conjugation.
+Represent supported coordinate permutations and payload actions explicitly, retaining
+the source's canonical read and ordered frame. Normalize composition, identity and
+inverse; consume index-type certificates for symmetric identity, antisymmetric negation
+and Hermitian conjugation (`inferTranspose` already selects among these,
+TypeCheckInfer.fs:5138-5146, intra-slot only; `TDataMove` within a slot is refused).
 
-An ordinary transpose preserves the underlying logical origin/version but changes
-its oriented operand key. A symmetric certificate may erase that distinction.
-Negation/conjugation remain explicit actions unless a valid carrier-specific law
-simplifies them. Arbitrary computed equality is outside this normalizer.
+An ordinary transpose keeps the origin and version but changes the oriented key. A
+symmetric certificate may erase that distinction. Negation and conjugation stay explicit
+actions unless a carrier-specific law simplifies them. Absorbing a transpose uses the
+source's reconstruction law: never re-evaluate the producer in a new canonical region
+or change its floating-point tree; an antisymmetric implicit diagonal zero keeps its
+prescribed representation (no blind negation of every logical read).
 
-Use the source reconstruction law when absorbing a transpose. Do not re-evaluate
-the producer kernel in a new canonical region or change its floating-point tree.
-Payload negation followed by compact reconstruction is not blindly equivalent to
-negating every logical read: an antisymmetric implicit diagonal zero must retain
-its prescribed representation. Sign, conjugation, fixed-point constraints, NaNs,
-and signed zeros belong in the exact rule's admission evidence.
+**Fold order under absorption (new rule).** `reduce` is a left fold in ascending storage
+order of its operand, pinned bitwise by `test interp` and `diff-oracle` under
+`BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off`. A general dense transpose feeding a strict
+fold (repro build, `where repro`, or an unlicensed kernel) keeps the transpose or
+conversion unless an exact-order supported traversal is proved: the consumer's operand
+sequence, association, seed, empty-input behaviour and failures are preserved, not only
+the producer's tree. In a licensed fast build a contiguous source-order reduction may
+replace the transposed traversal only when the kernel's own licence admits that
+permutation and the logical domain is unchanged; a partial reduction must also keep
+which output each cell feeds. Double transpose, certified symmetric identity and other
+order-preserving cases are eligible in every build. No unrestricted strided walk.
 
-A transformed value is realized by one of:
-
-- certified structural simplification;
-- absorption into a compatible consumer;
-- a supported explicit materialization/conversion;
-- rejection with a refactoring diagnostic when no supported traversal exists.
-
-Keep current compact-boundary refusals until their target descriptors and lowering
-are implemented. Do not silently decompact an unsupported map.
+A transformed value is realized by certified structural simplification, absorption
+into a compatible consumer, a supported explicit materialization or conversion, or
+rejection with a refactoring diagnostic. Compact-boundary refusals stay until their
+target descriptors and lowering exist; nothing is silently decompacted.
 
 ## 4. Compute semantics and whole-program planning
 
-Keep `compute` through typing and semantic dependency analysis. Its logical result
-has a stable key, fixed canonical descriptor, numerical contract, and particular
-source versions. Preserve any required once-only effects and failures. Once these
-obligations are explicit in the core, the marker need not emit a loop or allocation.
+`|> compute` keeps its typing and its place in dependency analysis. It COMMITS, at its
+program point: a snapshot of its inputs' versions; complete evaluation of its domain
+(so an empty-input BL8003 or a failing cell stays at the compute's site, in its order);
+once-only effects of a writing producer; a stable result with fixed descriptor and
+numerical contract; an ordinary value eligible for independent mutation and for the
+existing printing rules. A pure deferred `let` commits none of these: its fused
+consumers read CURRENT inputs, and its forcing and alias-class printing follow §10.2.
+That is the observable difference between the spellings after P3, and it is why the
+BL4005 remedy "bind `w |> compute` first" keeps its meaning: writing through the result
+needs independent writable storage before the write. Only after these obligations are
+explicit in the core may the marker stop emitting a loop or an allocation.
 
-The whole-program graph is rooted in all observable values and ordered events:
-returns, output, visible writes, external reads, failures, and interface demands.
-This is not a rule to delay all effects until process exit or to evaluate every
-unused declaration. Libraries and unknown callees need explicit summaries and
-representation contracts; they are not automatically closed-world programs.
-
-Separate logical computation from physical planning:
+The whole-program graph is rooted in all observable values and ordered events (returns,
+output, visible writes, external reads, failures, interface demands). Libraries and
+unknown callees need explicit summaries; this is not a closed-world rule.
 
 ```text
 typed canonical value graph + ordered obligations
     -> legal realization candidates
     -> deterministic cost selection
-    -> explicit storage / fused / streamed / conversion plan
+    -> explicit storage / fused / streamed / conversion plan (side tables)
     -> backend emission
 ```
 
-The first implementation should preserve snapshots using static provenance,
-ownership and dependency analysis. Keep the existing materialization when it
-cannot prove old data remains available. Runtime version counters, borrowing
-syntax, immutable runtime storage, and copy-on-write are optional later choices.
+Snapshots are preserved by static provenance, ownership and dependency analysis; keep
+the materialization when old data cannot be proved available. A version label is not an
+availability proof: eliminating a transpose buffer before a later input write requires
+scheduling the reads first, retaining the old backing, or copying. Runtime version
+counters, borrowing syntax, immutable storage and copy-on-write are later options.
 
-A pure kernel's reads still depend on source versions. Eliminating a transpose
-buffer before a later input write requires scheduling all necessary reads before
-the write, retaining the old backing, or copying enough data. A logical old-version
-label alone is not an availability proof.
+Failing and effectful producers stay opaque in the first planner: an unused `compute`
+that must fail is not dropped; a consumer's conditional read cannot suppress a required
+failure; moving a check needs proof of identical success/failure and order; termination
+is a precondition for pure elimination.
 
-Keep failing/effectful producers opaque in the initial planner. In particular,
-an unused `compute` that must fail cannot be dropped, and a consumer's conditional
-read cannot suppress a required producer failure. Moving or extracting checks
-requires proof of the same success/failure behavior and ordering. Termination is
-also a precondition for pure elimination; the current effect flags alone do not
-establish it for arbitrary recursive code.
+**Function boundaries ("THE CALLEE FORCES", Lowering.fs:458-475).** The documented
+decision stands at every SURVIVING boundary: a call that is not inlined or jointly
+lowered, an export, an unknown callback, a foreign interface keeps a materialized-array
+ABI and the callee's logical forcing point. P4 relaxes only the mandatory PHYSICAL
+allocation across analyzable internal boundaries by inlining or jointly lowering a
+supported call after its commitments are preserved; when that proof fails the call and
+its buffer stay. P1's inferred return types vary by sharing partition only (§2.2), never
+by whether a caller writes `compute`.
 
 ## 5. What already exists and what changes
 
 | Area | Existing implementation | Required extension |
 |---|---|---|
-| Identity | `Types.fs`: `ArrayIdentity`, `sameIdentity`; `TypeEnv.fs`: per-binding identity | Stable versioned operand descriptor separate from names and storage |
-| Aliases and calls | `TypeCheckInfer.fs`: name-derived identities at bindings/applications | Propagate semantic keys; instantiate sharing-sensitive return structure |
-| Specialization | `IRMono.fs`: `canonTypeKey`, arity/HM/shape specialization | Add normalized sharing information only to identity-sensitive instances |
-| Iteration/storage | `IRLoopStructure.fs`: shared canonical grouping rule; `IR.fs`: `ApplyInfo` | Retain grouping rule; consume resolved keys and freeze descriptor metadata |
-| Transpose laws | `IRStorage.fs`: `TransposeWithin`, `ReadTransform`; `inferTranspose` already selects identity/negation/conjugation | Shared typed structural normalizer and transport evidence |
-| Runtime realization | `nested_array_utilities.hpp`: flat negate/conjugate, lazy canonical reads; C++/LLVM/interpreter transpose paths | Preserve these as valid materialized implementations; add certified elimination |
-| Compute | `IRTComputation`, `TExprCompute`, `IRCompute`, interpreter force points | Represent value/effect commitments independently of buffer allocation |
-| Cross-compute optimization | `IRMono.fs` elementwise fusion; Optimize row-fold, sharing and reuse passes | Generalize legal producer/consumer plans while preserving existing guards |
-| Program visibility | `Lowering.fs`: whole-program shape specialization and callable summaries; Optimize invoked per module | Cross-module use/dependency census and analyzable producer graph |
-| Effects | `Effects.fs`: repeatable/movable summaries; forced writing maps in Lowering | Read/write/version dependencies, demand and termination evidence; retain conservative boundaries |
-| Validation | `IRValidate.fs`, decision records, interpreter/backend comparisons, opt-diff gates | Descriptor/version/plan consistency checks and optimization-off equivalence tests |
+| Identity | `Types.fs` `ArrayIdentity`/`sameIdentity`; `TypeEnv.fs` `VarInfo.Identity`; the minting sites of §2.7 | Versioned operand descriptor; every minting site replaced |
+| Aliases and calls | `TypeCheckInfer.fs` name-derived identities; §10.2 deferred alias classes (`Lowering.deferredAliasClasses`, `refuseDeferredWritesAndUnorderedIfs`) | Propagate keys through the alias class first (§2.1); sharing-sensitive return typing |
+| Specialization | `IRMono.fs` `canonTypeKey` (ignores identity) | Partition-keyed instances for identity-sensitive functions only |
+| Iteration/storage | `IRLoopStructure.fs` `partitionIntoIdentityGroups`; `IR.fs` `ApplyInfo.Identities` | Consume resolved keys; freeze descriptor metadata |
+| Transpose | `IRStorage.fs` `TransposeWithin`/`ReadTransform`; `inferTranspose`; `negate_pool`/`conjugate_pool` (nested_array_utilities.hpp:887-895) | Typed normalizer, certificates, the fold-order rule of §3 |
+| Compute | `IRTComputation`, `TExprCompute`, `IRCompute`; `Lowering.forceCallableBody` (490) and `forceReturnCombinator`; G45 (writing maps computed at definition) | Commitments represented independently of allocation; the forcing kept as logical, not physical |
+| Write legality | `Optimize.fs` `intervalPayloadOf` (1501), `scheduleMayWriteIn` (1531), `scheduleMayWrite` (1591), `storedArrayProof` (3688), `callbackTable`, the `IRTotality` whitelist, the five-party audit matrix | The producer graph generalizes these and inherits their audits |
+| Existing eliminations | compaction fusion v2, hash join, group-aggregate, slice-write fusion, row-fold fusion, cell epilogues, the A7c kept inline (`BLADE_EPILOGUE_LEGS`, opt-in, G69 open) | Subsume as instances of the realization plan; do not duplicate |
+| Effects | `Effects.fs` summaries (`isMovable` has no readers) | Read/write/version dependencies, demand and termination evidence |
+| Program visibility | `Lowering.fs` whole-program shape specialization; `Optimize.optimizeModule` per module (3136) | Cross-module use census and producer graph |
+| Validation | `IRValidate.fs`, decision records, lane differentials, `opt-diff` | Descriptor/version/plan consistency checks; migration pins (§8) |
 
-Do not simply remove all `IRCompute` patterns: existing lowering and emitter
-dispatch uses them to distinguish deferred computations from values. Replace
-their physical role only after an explicit plan supplies that distinction.
+Do not remove `IRCompute` patterns wholesale: lowering and emitter dispatch use them to
+tell deferred computations from values.
 
 ## 6. Implementation sequence and exit gates
 
-### P0 — Characterize the existing contract
+### P0 — Characterize the existing contract (mostly done by W4-1)
 
-Record alias/copy behavior, sharing-dependent output types, compute force points,
-canonical reads, and mutation/failure ordering in focused corpus cases. Include
-module-level, block, function and lambda scopes. Separate intended source changes
-from optimization equivalences. Keep current compiler emission as a reference.
+Master's W4-1 (5d4a28d0) pins alias and copy behaviour, compute force points, tuple
+member ordering, `if`-value refusals and failure ordering across module, block,
+function and lambda scope (loops/540-561, tuples/044-067), and records the open lane
+holes G60, G77, G79; W4-2 (2bd7b485) covers function-body folds, captures and scope-exit
+frees; W4-3 (f46fdfc0) makes the unseeded fold seed route-dependent (G80 open). P0 adds
+only what those lack: sharing-dependent output types through helpers and aliases
+(§0's probes as corpus tests), the comm-sampler alias case, declared-signature cases,
+the AD slot cases, and the transpose emission baselines.
 
-Exit: every behavioral difference contemplated by this plan is classified as
-an elaboration change, an exact optimization, or an unsupported case.
+Exit: every behavioural difference in this plan is classified as a language change
+(§2.3, §2.5, alias transparency), an exact optimization, or unsupported, and each
+language change has a pinned before-case.
 
 ### P1 — Stable identities and typed sharing
 
-Introduce logical versions and oriented operand descriptors in the type/IR layer;
-preserve them through aliases, calls, returns, and physical copies. Build the
-sharing partition before output deduction. Extend instance keys and call return
-typing where needed. Audit name-based identity construction sites, not just
-`sameIdentity`. Keep independent mutable storage and invalidate the correct values
-on writes. Update the source formalism with the implemented alias rule.
+Deferred-alias classes first (§2.1), then stored arrays with a fail-closed no-write
+interval, then parameters (§2.2). Build the sharing partition before output deduction;
+extend instance keys and call typing; replace every minting site of §2.7; implement
+the declared-signature rule (§2.3) and the sampler rule (§2.5); update the formalism
+wording in the same change.
 
-Exit: aliases, alpha-renaming and function extraction preserve canonical structure;
-`[0,0]` and `[0,1]` calls do not share an incompatible specialization; writes to
-independent copies remain independent; `(A,B,A)` keeps the supported layout rule.
+Exit: aliases, alpha-renaming and helper extraction preserve canonical structure (the
+§0 probes print packed); `[0,0]` and `[0,1]` calls do not share an instance; independent
+copies stay independent; `(A, B, A)` keeps the adjacent-only rule; declared-dense
+signatures keep today's bits; AD pins unchanged; a migration manifest lists every
+changed expected type or output.
 
 ### P2 — Structural transpose normal forms
 
-Add the supported typed map/action algebra and consume index-type certificates.
-Preserve map, frame, source version, and reconstruction in the core. Normalize
-before sharing-dependent elaboration when it affects identity. After elaboration,
-rewrites must preserve the selected canonical application rather than recompute it.
+Typed map/action algebra, certificates, the fold-order rule of §3. Normalize before
+sharing-dependent elaboration where it affects identity; after elaboration, rewrites
+preserve the selected canonical application.
 
-Exit: double transpose restores the original operand/frame; symmetric collapse
-and antisymmetric/Hermitian actions agree with existing reads; unsupported compact
-transforms retain diagnostics; canonical scalar evaluations are unchanged.
+Exit: double transpose restores the original operand and frame with zero copies; a
+read-only compact transpose alias copies nothing; symmetric collapse and
+antisymmetric/Hermitian actions agree with existing reads; unsupported compact
+transforms keep their diagnostics; strict-build fold bytes unchanged.
 
 ### P3 — Compute commitments and local materialization planning
 
-Extract a graph of fixed canonical producers in finite, terminating, pure regions.
-Retain opaque boundaries for effects, partial operations without a certificate,
-unknown calls, unsupported traversal, and writable/external representation needs.
-Introduce explicit realization decisions and start with the current materialized
-plan as the always-available baseline. Let Optimize eliminate selected buffers;
-validate old-version availability and all surviving traversals before emission.
+Extract the graph of fixed canonical producers in finite, terminating, pure regions;
+opaque boundaries for effects, partial operations without a certificate, unknown calls,
+unsupported traversal, writable or external representations. Realization decisions are
+side tables; the current materialized plan is the always-available baseline.
 
-Exit: a pure computed intermediate can fuse without a pool; repeated consumers
-share or recompute only under the declared value/cost contract; a write after
-compute cannot change the computed value; unused required failures still occur.
-The interpreter can remain eager for reference execution.
+Exit: a single-consumer pure `compute` fuses without a pool at top level and inside a
+function body; repeated consumers share or recompute only under the declared contract;
+a write after `compute` cannot change the computed value; unused required failures and
+empty-input BL8003 still occur at the compute's site; `test interp` passes with the
+interpreter eager.
 
 ### P4 — Whole-program visibility
 
-Add cross-module producer/consumer and capture analysis after specialization has
-established concrete types and sharing. Keep qualified IDs, export contracts,
-module initialization order, and refreshed callable summaries consistent with
-newly generated kernels. Inline/analyze supported calls or use verified summaries.
-Treat recursive SCCs, unknown higher-order calls and foreign interfaces as opaque
-until separately supported. Do not flatten modules merely to bypass their contracts.
+Cross-module producer/consumer and capture analysis after specialization; qualified ids,
+export contracts, module initialization order and callable summaries kept consistent;
+inline or jointly lower supported calls under the boundary rule of §4; recursive SCCs,
+unknown higher-order calls and foreign interfaces opaque.
 
-Exit: splitting a supported computation across files/functions does not force
-avoidable intermediates; effects retain their required order; an escaping value
-has a realizable lifetime and representation.
+Exit: splitting a supported computation across files or helpers forces no avoidable
+intermediate; effects keep their order; every escaping value has a realizable lifetime;
+`blade run --memcheck` (ASan) and `test memfree-stress` are green on the new fixtures
+(W4-2's merge-time fix and G69 are the precedent: the likely P4 failure is a
+use-after-free at a scope exit, which value parity cannot see).
 
 ### P5 — Broader deterministic selection
 
-Enumerate a bounded set of legal storage, fusion, streaming, conversion, and
-recomputation alternatives in Optimize. Use the existing decision record to report
-the chosen rule, facts and declined cases. Include live source versions, frames,
-resident layouts, sharing, effect progress and cost-relevant state in boundaries.
-Prune only same-interface resource-dominated alternatives. Preserve ties when
-later consumers distinguish them. A general search engine is not required for
-earlier phases' individually certified exact rewrites.
+A bounded family of storage, fusion, streaming, conversion and recomputation
+alternatives in Optimize; the decision record reports the rule, facts and declines;
+boundaries carry live versions, frames, layouts, sharing and effect progress; prune only
+same-interface resource-dominated alternatives; preserve ties later consumers
+distinguish. Optimality is claimed only for the enumerated family and stated cost model.
 
-Exit: each route decision states its legality and cost basis; eliminating a buffer
-is never assumed to improve work or traffic merely because it reduces allocation.
-Report optimality only for the enumerated plan family and stated cost model.
+## 7. Proof correspondence (scoped to what the files prove)
 
-## 7. Proof correspondence and remaining obligations
-
-| Artifact | Established result | Explicit scope |
+| Artifact | Established result | What it does NOT establish |
 |---|---|---|
-| [BladeStructuralIdentity.v](../../proofs/BladeStructuralIdentity.v) | Alias-preserving keys; transpose orientation/involution; sharing-dependent layout example; snapshot boundary | Small rank-two key model, not the full F# type system |
-| [BladeMaterialization.v](../../proofs/BladeMaterialization.v) | Finite buffer readback, pure graph elimination, and exact final-store/trace/result preservation under arbitrary retention policies | Fixed graph/descriptors/scalar trees; pure total operations; unchanged effect/snapshot skeleton |
-| [BladeLayout.v](../../proofs/BladeLayout.v) | Licensed transpose/direction laws and minimum summed-Kendall schedule selection | Stated carrier/group hypotheses; stride coherence is not a full cache model |
-| [BladeLayoutOptimizationBridge.v](../../proofs/BladeLayoutOptimizationBridge.v) | Admissible schedule selection and conditional contextual resource replacement | Requires checker soundness and additional resource dominance evidence |
-| [BladeCompositionalOptimization.v](../../proofs/BladeCompositionalOptimization.v) | Same-interface dominance survives continuation; frontier pruning preserves optimal candidates | Supplied transition system at fixed depth, sufficient states and monotone costs |
+| [BladeStructuralIdentity.v](../../proofs/BladeStructuralIdentity.v) (new, 18) | Key laws: transpose is an involution on the oriented key and keeps origin/epoch; `bind_alias` copies the key (by definition); same keys select `SymmetricPair`, distinct keys `DensePair` (by definition); two computed witnesses (`ordinary_types_do_not_determine_result_layout`, `distinct_add_outer_need_not_be_symmetric`) | Layout soundness (no theorem links `SymmetricPair` to a symmetric read); any mutation model (`epoch` is never incremented); the paper's alias-substitution theorem (prose only) |
+| [BladeMaterialization.v](../../proofs/BladeMaterialization.v) (new, 21) | `packed_read_equals_virtual`: a finite buffer tabulated from a descriptor reads back the virtual reader (obligation `locate_bound`), with structural zeros ahead of actions; lifted by congruence to graphs (`pure_graph_materialization_elimination`) and to an ordered effect/snapshot skeleton (`materialization_elimination`: final store, trace and result equal for every retention policy) | Anything operational: the policy selects between two readers defined from the SAME tree over a persistent environment, so allocation counts, evaluation counts, lifetimes and old-version availability are untouched; live reads of mutable backing (pure nodes never read the store); failing or effectful cells (scalars are total) |
+| [BladeLayout.v](../../proofs/BladeLayout.v) (pre-existing) | Licensed transpose/direction laws; minimum summed-Kendall schedule | A cache model |
+| [BladeLayoutOptimizationBridge.v](../../proofs/BladeLayoutOptimizationBridge.v) (new, 10) | `existing_canon_if_admissible` reuses BladeLayout's minimality on an admissible subset; argmin properties | "Forward" (schedules carry no direction; `admissible` is an opaque bool); resource dominance (assumed by `resource_factor`/`resource_monotone`) |
+| [BladeCompositionalOptimization.v](../../proofs/BladeCompositionalOptimization.v) (new, 35) | Correct Pareto-frontier pruning at a fixed depth: `dominates` is a partial order, the frontier covers the exhaustive set, an optimum survives for every `cost_le`-monotone objective; reindex/packing laws under assumed `rank`/`enumerate` bijections | That pruning prunes (all theorems hold for `prune := id`); depth-varying plans; the paper's composite theorem (tex l.563, not mechanized); any link to BladeDMWF's proved bijections |
 
-The materialization model has real finite lists for retained canonical payloads
-and readers over lexical predecessor environments for eliminated ones. Descriptor
-lookup is bounded and can return structural zero or a slot plus a reconstruction
-action. Scalar trees allow value-dependent reads and conditionals. Its ordered
-program skeleton includes output, writes, snapshots, checks, abort and return.
-The theorem preserves the complete observation, not merely the final array.
-The graph uses common coordinate and scalar carriers, parameterized in Rocq;
-a heterogeneous typed compiler graph needs an encoding or a typed extension.
-
-It does not prove source-to-graph lowering, arbitrary effect motion, failing-kernel
-extraction, numerical reassociation, physical availability of old values, a
-traversal scheduler, or a cheaper implementation. The mathematical snapshot store
-is persistent; a compiler must supply a physical strategy that realizes that
-persistence where needed. Arbitrary retention policies are denotationally equal
-in the model, but only structurally legal and realizable policies enter Blade's
-planner. The descriptors' correspondence to actual index types is also an
-instantiation obligation.
+Before the proofs merge: the README entries and `docs/proofs.md` must say the above
+(per-file `##` sections, "at a glance" rows, "What remains unproved" entries, README
+entries appended in `_CoqProject` order, trailing `Print Assumptions` removed, the tex's
+"validation records accompany" sentence removed). Codex has accepted this re-scoping.
 
 ## 8. Validation matrix
 
 | Case | Required observation / evidence |
 |---|---|
-| Alias, alpha-renaming, helper extraction | Same key relationships, canonical result structure and exact reads |
-| Same/distinct arguments with identical ordinary types | Correct return layout and distinct instances where necessary |
-| Two copies independently mutated from one origin | Unique logical versions; no accidental semantic or storage alias |
-| Double transpose; symmetric, antisymmetric, Hermitian inputs | Normal-form and reconstruction agreement, including zeros and fixed points |
-| Negative/conjugated compact reads | Preserve implicit zero policy and numeric contract, including signed-zero cases |
-| Pure compute with one/many consumers and empty domains | Correct values; justified allocation and evaluation counts |
-| Producer may fail in an unrequested cell | Preserve the required failure; decline elimination absent a complete obligation proof |
-| Conditional consumer, output before/after failure | Preserve executed branches, output prefix and abort code |
-| Snapshot, then input write, then transposed consumer | Read the earlier version; account for retained backing/copy/scheduling |
-| Writing producer with multiple consumers | Required once-only writes and order; never duplicate through recomputation |
-| Program split across modules or helpers | Same observations; eligible equivalent plans without accidental module barriers |
-| Foreign/writable return or unknown call | Explicit materialization/ownership boundary or conservative refusal |
-| Compact, dependent and nonadjacent layouts | Valid structural traversal and existing unsupported-case diagnostics |
+| Alias, alpha-renaming, helper extraction | Same key relationships, packed result, exact reads; the §0 probes as pins |
+| Same/distinct arguments with identical types | Correct return layout; distinct instances per partition |
+| Two copies independently mutated from one origin | Unique versions; no semantic or storage alias |
+| Declared dense signature / ascription with shared arguments | Dense, today's bits; index-types/242 unchanged; the former BL3001 case accepted |
+| `ad.grad` / `jvp` / `vjp` over a two-parameter body at `(A, A)` | Independent slots; ad-jvp-comb/020, /091 unchanged |
+| Comm sampler over an alias, with and without an intervening write | Claim accepted / refused per §2.5 |
+| Double transpose; Sym/Antisym/Herm inputs; negated compact reads | Normal form and reconstruction agreement, zeros and fixed points, signed-zero cases |
+| Transposed consumer of a strict fold | Bytes equal to today under `BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off` |
+| Pure compute with one/many consumers, empty domain, in a helper | Values; justified allocation and evaluation counts; BL8003 at the compute's site |
+| Producer may fail in an unrequested cell; conditional consumer | Required failure preserved; output prefix and abort code |
+| Snapshot, input write, transposed consumer | Reads the earlier version; backing/copy/scheduling accounted for |
+| Writing producer with several consumers | Once-only writes in order; never duplicated by recomputation |
+| Program split across modules or helpers | Same observations; no accidental module barrier; ASan clean |
+| Foreign/writable return or unknown call | Explicit boundary or conservative refusal |
 
-Use optimization gates off/on comparisons (`opt-diff`) in addition to interpreter,
-C++ and LLVM parity: all lanes can consume the same incorrectly optimized IR.
-Inspect allocation/plan output for intended buffer removal; use cost/performance
-measurements separately from value-correctness tests. Pin numerical modes when a
-bit-exact comparison requires them. Run targeted gates after each phase and the
-repository's required integration suites before merging compiler changes.
+Gates. A non-gated elaboration change is invisible to `opt-diff`, and to `test interp`
+and `diff-oracle` (the interpreter consumes the same typed IR: Interp/Loops.fs:1110
+reads `info.Identities`). Only corpus pins catch a P1 regression, and today NO corpus
+file feeds a plain `let X = Y` array alias into a comm or gram application: P1 ships a
+W4-1-style refusal-and-emission sweep with a manifest
+(`bench/notes/round3/w4-1-sweeps/` is the template) and new pins, not just updated
+ones. P3/P4 realization decisions are side tables, so `test interp`, `diff-oracle` and
+`opt-diff` all keep their power; `--memcheck` is part of P4's gate. Pin numerical modes
+where a bit-exact comparison needs them; measure cost separately from correctness, at
+non-power-of-two extents with interleaved A/B runs.
 
 ## 9. Non-goals and follow-up decisions
 
-This plan does not introduce a live mutable transpose view, content-based array
-identity, unrestricted strided bulk traversal, runtime COW by default, or a promise
-of globally fastest hardware execution. The initial normalizer is deliberately
-bounded; richer structural maps need their own typed laws and implementations.
+No live mutable transpose view, no content-based identity, no unrestricted strided
+traversal, no runtime COW by default, no claim of globally fastest hardware execution.
+The normalizer is bounded. Before P4: the exported sharing-witness ABI, the resource
+model and candidate family, the ownership/borrowing policy for external and writable
+values, and whether the compact-to-dense boundary coercion of §2.3 is wanted. None is a
+prerequisite for P1 or P2.
 
-Before expanding beyond P3, decide the exported sharing-witness ABI, the resource
-model and bounded candidate family, and the supported ownership/borrowing policy
-for external and writable values. None of those decisions is a prerequisite for
-alias-preserving elaboration or conservative local elimination.
+Incidental: a `Poly<T^1>` tail-pack kernel applied via `object_for(cg) <@> (A, A)`
+raises BL6001 "dangling VarId reference" on master (review §2.12); unrelated, to be
+filed separately.
+
+## Appendix: Codex consultation (2026-10-24, read-only, PAL clink)
+
+Codex, asked the eight questions behind §2.3-§2.5, §3's fold rule, §4's boundary rule,
+§0 and §7: proposed the sampler wording adopted in §2.5; confirmed the compute
+commitments of §4 (adding the BL8003 empty-input point); proposed keeping a materialized
+ABI at surviving boundaries while relaxing physical allocation internally (adopted, §4);
+proposed compact-to-dense boundary coercion (recorded as the alternative in §2.3; the
+simpler declared-layout rule was chosen); proposed independent AD slots (adopted, §2.4);
+proposed the strict/licensed fold-order split (adopted, §3); gave the gain and loss
+inventory of §0; accepted re-scoping the proof prose, holding that
+`materialization_elimination` does conclude full observation equality and that
+`snapshot_read_preserved_by_later_write` does model a store write followed by a
+persistent snapshot read (both true and both reflected in §7's wording). Its factual
+corrections to the review: "no mutation" should read "no live reads of mutable
+backing" (`write_store` exists), "nothing is stored" should read "no operational
+retention semantics" (a finite list is defined), and the paper does state the
+reduction-order obligation (tex l.355-356) without a concrete rule.
