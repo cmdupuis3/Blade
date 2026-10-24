@@ -262,6 +262,11 @@ type TypeError =
     | JoinDimRange of dim: int * totalDims: int
     | JoinShapeMismatch of pos: int * detail: string
     | StackJoinCompactSlot of op: string * slot: int
+    /// G67: a map whose KERNEL returns a compact (SymIdx / AntisymIdx /
+    /// HermitianIdx) array -- a row map with a packed cell. No lane stores it
+    /// (a grouped compact output is not built); refused by name. cell names
+    /// the cell's compact slot.
+    | RowMapCompactCell of cell: string
     // Unit mismatch (BL3006)
     | UnitMismatch of context: string * left: string * right: string
     // Quantity (nominal unit) violations

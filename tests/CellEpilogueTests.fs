@@ -731,6 +731,142 @@ let runCellEpilogueTests () : BlockResult =
             elif not censusOk then fail name ($"census on {cOn} off {cOff}")
             elif values vOn <> values vOff || values vOn <> values tOn then fail name "printed values differ between gate on / off or between the cache-on and cache-off builds"
             else pass name ($"ASan clean; census on {cOn} off {cOff} (allocs, frees, outstanding bytes); values equal with the pool cache on and off")
+    // G54 (W4-2 + its fix round). memfree/027: a function-local `y` read ONLY
+    // through a capture in a PROVED-SYNCHRONOUS fold kernel (the map kernel of
+    // a scalar fold let: one reference, writes nothing, returns no function)
+    // is freed at scope exit like its sibling `t`; `kernel` runs 10 times.
+    //   (1) C++: the emitted `kernel` frees every pool it allocates;
+    //   (2) LLVM: the native lane's `kernel` frees both pools before its
+    //       `ret`, in allocation order (t's, then y's);
+    //   (3) under BLADE_MEMCHECK=1 (ASan, the pool cache OFF) the run is
+    //       clean, prints the pinned values, and leaves less than one call's
+    //       worth of `y` (10 x 35 doubles = 2800 bytes) outstanding.
+    // memfree/028, the ESCAPING controls (a closure over `y` stored by an
+    // assignment, passed as an argument and stored, stored by a fold kernel,
+    // returned -- each invoked after its helper returned): no helper frees its
+    // `y`, and the ASan run is clean with the pinned values (the first W4-2
+    // build freed one: heap-use-after-free). The LLVM lane refuses function
+    // values, so 028 is a C++-lane pin only.
+    (let count (needle: string) (s: string) =
+         let mutable n = 0
+         let mutable at = s.IndexOf needle
+         while at >= 0 do
+             n <- n + 1
+             at <- s.IndexOf(needle, at + needle.Length)
+         n
+     let srcOf (rel: string) =
+         corpusFile rel |> Option.map (fun path ->
+             let src = File.ReadAllText path
+             src.Substring(src.IndexOf '\n' + 1))
+     let build (src: string) (memcheck: bool) : Result<string * string, string> =
+         use _m = pinEnv "BLADE_MEMCHECK" (if memcheck then "1" else null)
+         stemN <- stemN + 1
+         let stem = $"g54_free_{stemN}"
+         match emitCpp { saxpySq with Name = stem; Source = src } stem with
+         | Error e -> Error e
+         | Ok cpp ->
+         let file = Path.Combine(work, stem + ".cpp")
+         File.WriteAllText(file, cpp)
+         match Build.compileCpp file work with
+         | Error e -> Error ("compile: " + (if e.Length > 300 then e.Substring(0, 300) else e))
+         | Ok exe ->
+             match runProc exe 120000 with
+             | Ok (code, out, err) when code = 0 -> Ok (cpp.Replace("\r\n", "\n"), (out + "\n" + err).Replace("\r\n", "\n"))
+             | Ok (code, out, err) -> Error ($"exit {code}: {out} {err}")
+             | Error e -> Error e
+     // the DEFINITION (`<ret> name(...) {`), not the forward declaration
+     let defBody (cpp: string) (fname: string) =
+         let dm = Text.RegularExpressions.Regex.Match(cpp, "\n[^\n;]* " + fname + @"\([^;{]*\) \{\n")
+         let defAt = if dm.Success then dm.Index + dm.Length - 2 else -1
+         let endAt = if defAt < 0 then -1 else cpp.IndexOf("\n}\n", defAt)
+         if endAt < 0 then None else Some (cpp.Substring(defAt, endAt - defAt))
+     let census (t: string) =
+         t.Split('\n') |> Array.tryFind (fun l -> l.Contains "BLADE-MEMCHECK:")
+     let num (l: string) (k: string) =
+         let m = Text.RegularExpressions.Regex.Match(l, k + @"=(\d+)")
+         if m.Success then int64 m.Groups.[1].Value else -1L
+     // ---- memfree/027 ----
+     (let name = "memfree/027 (G54): fold-captured function local freed at scope exit; C++ frees, LLVM frees + order, ASan census"
+      match srcOf "memfree/027_fold_captured_function_local_freed.blade" with
+      | None -> fail name "corpus file not found"
+      | Some src ->
+      match build src false with
+      | Error e -> fail name e
+      | Ok (cpp, plain) ->
+      let valuesOk (t: string) = t.Contains "k2 = 57155.0" && t.Contains "total = 2834895.0"
+      match defBody cpp "kernel" with
+      | None -> fail name "no `double kernel(...)` definition in the emission"
+      | Some body ->
+      let allocs = count "= { allocate<" body
+      let frees = count "deallocate<" body
+      if allocs < 2 || frees <> allocs then
+          fail name ($"C++ kernel allocates {allocs} pools and frees {frees} (want every pool freed, >= 2)")
+      elif not (valuesOk plain) then fail name ($"values: {plain}")
+      else
+      // LLVM: `@bl_kernel_*`'s two pool slots, freed before `ret` in allocation order
+      let llvmVerdict =
+          match lower src with
+          | Error e -> Error ("lower: " + e)
+          | Ok ir ->
+          match (try EmitLlvm.tryEmitProgramNamed "g54_llvm" ir with ex -> Error ("raised: " + ex.Message)) with
+          | Error why -> Error ("the llvm lane refused memfree/027: " + why)
+          | Ok ll ->
+          let ll = ll.Replace("\r\n", "\n")
+          let fm = Text.RegularExpressions.Regex.Match(ll, @"\ndefine internal double @bl_kernel_\d+\([^\n]*\{\n")
+          if not fm.Success then Error "no `@bl_kernel_*` definition in the LLVM emission" else
+          let fEnd = ll.IndexOf("\n}\n", fm.Index)
+          let fb = ll.Substring(fm.Index, fEnd - fm.Index)
+          let slots =
+              Text.RegularExpressions.Regex.Matches(fb, @"(%r\d+) = call ptr @blade_alloc_cells\([^\n]*\n\s*store ptr \1, ptr (%r\d+)")
+              |> Seq.map (fun m -> m.Groups.[2].Value) |> List.ofSeq
+          let freed =
+              Text.RegularExpressions.Regex.Matches(fb, @"(%r\d+) = load ptr, ptr (%r\d+)\n\s*call void @blade_free\(ptr \1\)")
+              |> Seq.map (fun m -> m.Groups.[2].Value) |> List.ofSeq
+          let retAt = fb.LastIndexOf "\n  ret double"
+          let lastFree = fb.LastIndexOf "call void @blade_free"
+          if slots.Length <> 2 then Error ($"LLVM kernel allocates {slots.Length} pools (want 2): {slots}")
+          elif freed <> slots then Error ($"LLVM kernel frees slots {freed}, want {slots} (both, allocation order)")
+          elif lastFree < 0 || retAt < lastFree then Error "LLVM kernel's frees are not before its `ret`"
+          else Ok ($"""LLVM frees {String.concat ", " freed} (allocation order) before `ret`""")
+      match llvmVerdict with
+      | Error e -> fail name e
+      | Ok llvmNote ->
+      match build src true with
+      | Error e when e.Contains "Skipped" || e.Contains "sanitize" || e.Contains "vcvars" -> skip name e
+      | Error e -> fail name e
+      | Ok (_, t) ->
+          match census t with
+          | None -> fail name ($"no BLADE-MEMCHECK census line: {t}")
+          | Some l ->
+              let outstanding = num l "outstanding_bytes"
+              if t.Contains "ERROR: AddressSanitizer" then fail name ($"ASan reported: {t}")
+              elif not (valuesOk t) then fail name ($"ASan build values: {t}")
+              elif outstanding < 0L || outstanding >= 2800L then
+                  fail name ($"outstanding_bytes = {outstanding} (>= 2800: a per-call pool survives): {l.Trim()}")
+              else pass name ($"C++ kernel frees all {frees} of its pools; {llvmNote}; ASan clean; census {l.Trim()}"))
+     // ---- memfree/028: the escaping controls ----
+     (let name = "memfree/028 (G54 controls): escaping closures keep their captured `y`; ASan clean"
+      match srcOf "memfree/028_escaping_closure_captures_stay_alive.blade" with
+      | None -> fail name "corpus file not found"
+      | Some src ->
+      match build src false with
+      | Error e -> fail name e
+      | Ok (cpp, plain) ->
+      let want = [ "v1 = 60.0"; "v2 = 31.0"; "v3 = 38.0"; "v4 = 100.0" ]
+      let freesIn =
+          [ "store_direct"; "store_via_arg"; "store_in_kernel"; "mk" ]
+          |> List.map (fun f -> (f, defBody cpp f |> Option.map (fun b -> (count "= { allocate<" b, count "deallocate<" b))))
+      match freesIn |> List.tryFind (fun (_, r) -> match r with Some (a, fr) -> a <> 1 || fr <> 0 | None -> true) with
+      | Some (f, r) -> fail name (sprintf "helper %s (allocs, frees) = %A: want its one `y` allocated and NOT freed" f r)
+      | None ->
+      if want |> List.exists (fun w -> not (plain.Contains w)) then fail name ($"values: {plain}") else
+      match build src true with
+      | Error e when e.Contains "Skipped" || e.Contains "sanitize" || e.Contains "vcvars" -> skip name e
+      | Error e -> fail name e
+      | Ok (_, t) ->
+          if t.Contains "ERROR: AddressSanitizer" then fail name ($"ASan reported: {t}")
+          elif want |> List.exists (fun w -> not (t.Contains w)) then fail name ($"ASan build values: {t}")
+          else pass name ($"""no helper frees its captured `y`; ASan clean; {(census t |> Option.map (fun l -> l.Trim()) |> Option.defaultValue "no census")}""")))
     (try Directory.Delete(work, true) with _ -> ())
     printFooter blockName [ $"{passed} passed"; $"{failed} failed"; $"{skipped} skipped" ]
     { Block = blockName; Passed = passed; Failed = failed; Skipped = skipped; FailedNames = names }

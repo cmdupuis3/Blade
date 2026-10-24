@@ -4817,6 +4817,20 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                 // serial fold, byte-identical to the lane form for len < K.
                 let kLanes = foldLaneCount
                 let laneName (l: int) = $"__rlane{l}"
+                // [omp-coverage] (codegen test mode only, gap G55's team pin):
+                // each thread marks its own slot inside the region, and the
+                // team size / distinct threads are reported after it -- the
+                // same line the nest emitters print.
+                let covOn = ompTestModeEnabled ()
+                let covDecl =
+                    if covOn then [ $"{ind}        /* [omp-coverage] thread observation (test mode) */ int __omp_maxth_{name} = blade_omp_get_max_threads(); bool* __omp_seen_{name} = new bool[__omp_maxth_{name} > 0 ? __omp_maxth_{name} : 1](); int* __omp_team_{name} = new int[__omp_maxth_{name} > 0 ? __omp_maxth_{name} : 1]();" ]
+                    else []
+                let covMark =
+                    if covOn then [ $"{ind}            __omp_seen_{name}[__rt] = true; __omp_team_{name}[__rt] = __rnt;" ]
+                    else []
+                let covReport =
+                    if covOn then [ $"{ind}        {{ int __omp_distinct = 0; int __omp_teamsz = 0; for (int __t = 0; __t < __omp_maxth_{name}; __t++) {{ if (__omp_seen_{name}[__t]) __omp_distinct++; if (__omp_team_{name}[__t] > __omp_teamsz) __omp_teamsz = __omp_team_{name}[__t]; }} std::cout << \"[omp-coverage] region={name} teamsz=\" << __omp_teamsz << \" distinct=\" << __omp_distinct << \" maxth=\" << __omp_maxth_{name} << std::endl; delete[] __omp_seen_{name}; delete[] __omp_team_{name}; }}" ]
+                    else []
                 let laneBody =
                     [ $$"""{{ind}}            if (__rhi - __rlo < (size_t){{kLanes}}) {"""
                       $"""{ind}                {elemStr} __racc = {(elemAt "__rlo")};"""
@@ -4863,15 +4877,18 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                     // region's implicit barrier publishes it).
                     $"{ind}        int __rTact = __rT;"
                     $"{ind}        {elemStr}* {partName} = new {elemStr}[__rT];"
+                ] @ covDecl @ [
                     $"{ind}        BLADE_OMP_PARALLEL_NUM_THREADS(__rT)"
                     $$"""{{ind}}        {"""
                     $"{ind}            const int __rnt = blade_omp_get_num_threads();"
                     $"{ind}            const int __rt = blade_omp_get_thread_num();"
                     $"{ind}            if (__rt == 0) __rTact = __rnt;"
+                ] @ covMark @ [
                     $"{ind}            const size_t __rlo = __rlo0 + blade_fold::chunk_lo(__rcnt, (size_t)__rt, (size_t)__rnt);"
                     $"{ind}            const size_t __rhi = __rlo0 + blade_fold::chunk_lo(__rcnt, (size_t)__rt + 1, (size_t)__rnt);"
                 ] @ laneBody @ [
                     $$"""{{ind}}        }"""
+                ] @ covReport @ [
                     $"{ind}        for (int __rt = 0; __rt < __rTact; __rt++) {name} = {wname}({name}, {partName}[__rt]);"
                     $"{ind}        delete[] {partName};"
                     $$"""{{ind}}    }"""

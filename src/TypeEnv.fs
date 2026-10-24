@@ -1238,6 +1238,7 @@ class IS implemented, and the dense result folds like any other array." op level
     | JoinDimRange (dim, totalDims) -> $"join: dimension {dim} is out of range for a rank-{totalDims} array (valid dims 0..{totalDims - 1})"
     | JoinShapeMismatch (pos, detail) -> $"join: argument {pos} does not match argument 1 ({detail}). join(A, B, d) requires equal rank, equal element type, and equal extents on EVERY axis except the joined dimension d."
     | StackJoinCompactSlot (op, slot) -> $"{op}: index slot {slot} is a compact, ragged, or compound group. {op} materializes a dense rectangular result, so its operands must be dense (plain Idx) on every axis -- decompact the axis first."
+    | RowMapCompactCell cell -> $"a map whose kernel returns a compact array (each cell {cell}) is not supported: a grouped compact output -- one packed pool per outer cell -- is not built in any lane. Return a DENSE cell instead -- end the callee with `decompact(h, 0)` (`let h = method_for(r, r) <@> ...; decompact(h, 0)`) -- or write the flat map over every axis (`method_for(range<G, P, P>) <@> lambda(g, a, b) -> prodsum(x(g, a), x(g, b))`), or fold or read each compact result inside the kernel instead of storing it per cell."
     // An empty context is `unify`'s own (Unify.unifyUnitContext): it cannot
     // know the seam, so it names none rather than guess one.
     | UnitMismatch ("", left, right) -> $"Unit mismatch: {left} vs {right}"
@@ -1687,7 +1688,8 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | DecompactDimRange _ | DecompactPlainAxis _ | DecompactLastSlotOnly _
             | TransposeAxisRange _ | TransposeAxesEqual _ | TransposeWithinGroup _
             | StackNeedsArrays _ | StackShapeMismatch _ | JoinNeedsArrays _
-            | JoinDimRange _ | JoinShapeMismatch _ | StackJoinCompactSlot _ -> "BL4004"
+            | JoinDimRange _ | JoinShapeMismatch _ | StackJoinCompactSlot _
+            | RowMapCompactCell _ -> "BL4004"
             | ImmutableStaticAssign _ | MutParamNotArray _ | MutAssignRefused _
             | MutArgNotPassable _ | MutArgAliased _ | MutArgAliasesCalleeGlobal _ | MutCaptureEscapes _ -> "BL4005"
             | MutualBindJointly _ | MutualDirectElementsOnly _ | MutualMixedGroups

@@ -533,6 +533,36 @@ let private alignRangeOperandExtents (arrays: IRExpr list) (arrayTypes: IRArrayT
         (arrayTypes |> List.map (fun at -> { at with IndexTypes = at.IndexTypes |> List.map fix }),
          shared |> List.map fix)
 
+/// THE ZERO-LEVEL APPLY (gap G64; formalism §6, "a zero-level application is
+/// a call"): `object_for(f) <@> y` where f takes every operand WHOLE (no
+/// S-dimension level on any operand: `SDimsPerArray` all 0) and returns a
+/// scalar has no loop to run -- its value is the ONE term f(y1, .., yk). It is
+/// lowered to that call, once, before the C++ / LLVM / interpreter lanes
+/// split, so every lane evaluates the same call (each operand bound whole,
+/// the term evaluated exactly once, its value -- signed zero included -- the
+/// result) and no lane carries a zero-level nest form of its own (the C++
+/// nest used to leave the whole-operand parameter unbound, BL9002; the
+/// interpreter's added the term to a zero accumulator). Fail closed: a
+/// resolvable lifted kernel (`IRVar`), at least one operand, one kernel
+/// parameter per operand, no co-iteration, no Reynolds, a scalar result;
+/// anything else keeps `IRApplyCombinator`.
+let isZeroLevelWholeArrayApply (info: TypedApplyInfo) (loweredKernel: IRExpr) : bool =
+    (match loweredKernel with IRVar _ -> true | _ -> false)
+    && (match info.Loop.Kind with TExprObjectFor _ -> true | _ -> false)
+    && not (List.isEmpty info.Arrays)
+    && info.SDimsPerArray.Length = info.Arrays.Length
+    && info.SDimsPerArray |> List.forall ((=) 0)
+    && info.KernelInputRanks.Length = info.Arrays.Length
+    // each operand's KNOWN rank is the rank its parameter takes: the kernel
+    // consumes it whole (a generic `T^2` operand of a rank-1 row kernel --
+    // sql-group-by/054's `rowdots` -- is a row map, not a call)
+    && info.ArrayTypes.Length = info.Arrays.Length
+    && List.forall2 (fun (at: IRArrayTypeG<IRExpr>) (k: int) -> k > 0 && (at.IndexTypes |> List.sumBy (fun ix -> ix.Rank)) = k)
+           info.ArrayTypes info.KernelInputRanks
+    && not info.IsCoIteration
+    && not info.HasReynolds
+    && (match stripUnits info.OutputType with IRTScalar _ -> true | _ -> false)
+
 /// Lower a TypedExpr to IRExpr
 let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     match texpr.Kind with
@@ -746,6 +776,13 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
                 }
             | _ -> lowerTypedExpr env info.Loop
         let arrays = info.Arrays |> List.map (lowerTypedExpr env)
+        if isZeroLevelWholeArrayApply info loweredKernel then
+            // G64: a ZERO-LEVEL scalar apply IS the call (see
+            // isZeroLevelWholeArrayApply). Lowered here, before the lanes
+            // split, so the C++ lane, the LLVM lane and the interpreter all
+            // evaluate the same `f(operands)` -- one term, the operands whole.
+            IRApp (loweredKernel, arrays, info.OutputType)
+        else
         let (arrayTypes, shared) = alignRangeOperandExtents arrays info.ArrayTypes info.SharedIndexTypes
         IRApplyCombinator {
             Loop = loweredLoop
@@ -870,6 +907,13 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
                   let copies = List.replicate (int n) (lowerTypedExpr env inner)
                   IRArrayLit (copies, arrTy)
               | _ -> computeWrap (lowerTypedExpr env e))
+         | TExprApply _ ->
+             // A zero-level apply lowers to its scalar call (G64,
+             // isZeroLevelWholeArrayApply): `|> compute` of that value is
+             // the value, so no wrapper.
+             (match lowerTypedExpr env e with
+              | IRApp (IRVar _, _, _) as call -> call
+              | other -> computeWrap other)
          | _ -> computeWrap (lowerTypedExpr env e))
     
     | TExprRead e ->

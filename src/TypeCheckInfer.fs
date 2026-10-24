@@ -12498,6 +12498,23 @@ and buildApplyInfo (env: TypeEnv)
                     |> List.map (fun idx -> { idx with Kind = TDimension; Id = env.Builder.FreshId() })
                 mkArrayArrow (coIterSharedRecords @ outputTDims) outputElemType None
             else outputType
+        // G67: a kernel returning a COMPACT array makes every output cell a
+        // packed pool (a per-group SymIdx H: `method_for(range<G>) <@>
+        // lambda(g) -> group_h(jt(g))` with group_h a `comm` self-contraction).
+        // No lane stores that shape -- the C++ extents table is per group
+        // (bad_array_new_length at run time), the LLVM lane refuses it, the
+        // interpreter's row write panics -- so it is refused HERE, once, before
+        // any lane (gap register G67; the grouped compact output is NOT BUILT).
+        match kernelTDims |> List.tryFind (fun ix -> ix.Symmetry <> SymNone) with
+        | Some ix ->
+            let cell =
+                match ix.Symmetry with
+                | SymSymmetric -> "is a packed SymIdx group"
+                | SymAntisymmetric -> "is a packed AntisymIdx group"
+                | SymHermitian -> "is a packed HermitianIdx group"
+                | _ -> "has a compact index group"
+            Error (RowMapCompactCell cell)
+        | None ->
         let info : TypedApplyInfo = {
             Loop = tLoop; Kernel = resolvedKernel
             Arrays = arrays; Identities = identities
@@ -16490,6 +16507,11 @@ and inferForExpr env source kernelOpt : TypeResult<TypedExpr> =
                             | _ -> ([], 0)
                         let outputIndexTypes = sharedRecords @ (kernelTDims |> List.map (fun idx -> { idx with Id = env.Builder.FreshId() }))
                         let outputType = mkArrayArrow outputIndexTypes elemType None
+                        // G67: a compact kernel cell is refused on this path too
+                        // (the same check as inferApply's).
+                        match kernelTDims |> List.tryFind (fun ix -> ix.Symmetry <> SymNone) with
+                        | Some _ -> Error (RowMapCompactCell "has a compact index group")
+                        | None ->
                         // Note: SymcomStates/TriangularLevels/SpeedupFactor are unused
                         // by the co-iteration codegen path -- it derives loop structure
                         // directly from SharedIndexTypes

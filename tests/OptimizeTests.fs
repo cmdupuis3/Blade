@@ -1475,11 +1475,14 @@ let private compactionV2DecisionCases () =
       decisionCase "decision_compaction_v2_derived_map_fold_elides"
           (compactionV2DemandSrc "let z = y * 2.0 |> compute\nlet zs = reduce(z, (+))\n") "compaction-fusion"
           (fun d -> v2Applied d && evidenceHas "selection: positions elided (census: the named map `z`" d) "positions elided through a derived map's fold"
-      // review finding 6: a whole-array kernel (input rank 1) is no cellwise map
+      // review finding 6: a whole-array kernel (input rank 1) is no cellwise map.
+      // Since W4-2 (gap G64) the zero-level apply LOWERS to its call
+      // (Lowering.isZeroLevelWholeArrayApply), so the census reads `y` as a
+      // call argument -- positions still REQUIRED (the kernel's keyed `c(2)`).
       decisionCase "decision_compaction_v2_whole_array_kernel_requires"
           (compactionV2DemandSrc "function at0(c: Array<Float64 like CompoundIdx<keep>>) -> Float64 = c(2)\nlet w = object_for(at0) <@> y |> compute\n") "compaction-fusion"
-          (fun d -> v2Applied d && evidenceHas "positions required by `y` as an operand of IRApplyCombinator" d)
-          "positions required by a whole-array kernel (nonzero input rank)"
+          (fun d -> v2Applied d && evidenceHas "positions required by `y` passed as a call argument in `w`" d)
+          "positions required by a whole-array kernel (lowered to its call, G64)"
       // a cardinality inside an expression's TYPE (a range over `extents(y)`) is certified
       decisionCase "decision_compaction_v2_extent_in_an_embedded_type_elides"
           (compactionV2DemandSrc "let r = 0..extents(y) |> compute\nlet rs = reduce(r, (+))\n") "compaction-fusion"

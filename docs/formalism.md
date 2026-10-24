@@ -242,7 +242,13 @@ is the serial chain in every build. The thread licence may sit on the fold
 kernel or on the MAP the fold consumes: `omp(i: 1)` covering the outermost level
 of a reorder-licensed fold's nest threads that level (per-thread partials).
 The LLVM lane has no thread runtime, so it spends only the reordering half and
-reports the threading half with the census line. `blade plan` names each fold's form
+reports the threading half with the census line. *Fold placement:* the thread form belongs to a
+fold that is the WHOLE value of its own `let`, at top level and in a function body alike: a
+function-body `let s = reduce(x, lambda(p, q) where omp -> p + q, s0)` opens the same team as the
+top-level spelling, and its first failure is the top-level spelling's (the seed evaluated once
+before the fold; an empty unseeded fold BL8003; corpus functions/535, `blade test omp-reduce`
+`g55_*`). A fold that is an OPERAND of arithmetic, or a kernel's bare return, opens no team
+(the census says so) and keeps the single-thread licensed form. `blade plan` names each fold's form
 (`fold form: simd-reduction | K-lanes(k) | simd K-lanes(k) dot|self-dot|dot3|sum
 | threaded(...) | serial (repro) | serial (<why>)`; a `threaded(Path B chunks,
 ...)` form names what runs inside each chunk).
@@ -1522,6 +1528,13 @@ decomposition.
 Kernels live in T-world: they see slices, never S-dims; `comm` is metadata for
 the loop object, not the kernel body. S-dims are deduced at application sites.
 
+*Zero S-dimensions.* When every operand is consumed whole (S = 0: an `object_for` application
+whose kernel parameter ranks equal the operands' known ranks) and the kernel returns a
+scalar, the application has no loop: `object_for(f) <@> (A1, .., An)` IS the call
+`f(A1, .., An)` -- each operand bound whole (dense or compound), the one term evaluated exactly
+once, its value (signed zero included) and its first failure the call's. It is lowered to that
+call before any lane (Lowering `isZeroLevelWholeArrayApply`; corpus index-types/543-544).
+
 ### 7.3 Virtual arrays
 
 Type-level iteration sources with `Void` element type; they erase completely:
@@ -1930,6 +1943,14 @@ Given `object_for(kernel) <@> (A₁, ..., Aₙ)` with `kernel(a: Poly<T^k>) -> T
 4. **Concatenate** group contributions in order (concatenation, not
    broadcasting).
 5. **T-dims of output**: from the kernel's `T^m` (and `tdim` spec).
+   A kernel whose RETURN carries a compact group (`SymIdx` / `AntisymIdx` / `HermitianIdx`
+   T-dimensions) is refused in an application, BL4004 (any application, the zero-level one
+   included): every S-cell would hold its own packed pool -- a grouped compact output, which is
+   not built (gap G67). The restriction is on an application's kernel only: the same function
+   called directly (`let h = group_h(jg)`) returns its packed array as usual. The supported
+   spellings store a dense cell (the callee ends in `decompact(h, 0)`) or write the flat map
+   over every axis (`method_for(range<G, P, P>) <@> lambda(g, a, b) -> prodsum(x(g, a), x(g, b))`).
+   Corpus symmetry/142 (the refusal and its span), 143 (both spellings), 144 (the direct call).
 
 **Correction vs v10 §10.9.** v10 step 3 emitted `SymIdx<g, extent>` *per
 S-dimension* (e.g. `(A, A)` over `Array<M, N, T>` → `SymIdx<2,M>, SymIdx<2,N>`,

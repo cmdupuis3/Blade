@@ -1,0 +1,66 @@
+// TEST: Memfree Escaping Closure Captures Stay Alive (G54 controls)
+// The CONTROLS of memfree/027: a function-local `y` captured by a closure that
+// OUTLIVES the call must not be freed at the helper's exit. Every channel:
+//   store_direct    -- `out(0) = lambda(k) -> reduce(y, (+)) * k` into a
+//                      caller-owned closure array (an assignment, unit-typed:
+//                      the callable's id is the assigned value, its captures
+//                      are seeded from the callable);
+//   store_via_arg   -- the closure passed as a call ARGUMENT to `stash`, which
+//                      stores it;
+//   store_in_kernel -- a fold's MAP KERNEL stores the closure (the kernel
+//                      writes, so it is not a proved-synchronous slot);
+//   mk              -- the closure RETURNED.
+// Each stored closure is invoked AFTER its helper returned. The first W4-2
+// build (b91ff7d6) freed a captured `y` here (ASan heap-use-after-free); `blade
+// test cell-epilogue` pins the emission (no helper frees its `y`) and the ASan
+// run. Values: y = c * [0, 1, 2, 3, 4], so reduce(y, (+)) = 10 c.
+type I = Idx<5>
+type One = Idx<1>
+
+function stash(out: mut Array<(Float64 -> Float64) like One>, f: Float64 -> Float64) -> Float64 = {
+    out(0) = f
+    0.0
+}
+
+function store_direct(out: mut Array<(Float64 -> Float64) like One>, c: Float64) -> Float64 = {
+    let y = Float64(0..5) * c |> compute
+    out(0) = lambda(k: Float64) -> reduce(y, (+)) * k
+    1.0
+}
+
+function store_via_arg(out: mut Array<(Float64 -> Float64) like One>, c: Float64) -> Float64 = {
+    let y = Float64(0..5) * c |> compute
+    let s = stash(out, lambda(k: Float64) -> reduce(y, (+)) + k)
+    s
+}
+
+function store_in_kernel(out: mut Array<(Float64 -> Float64) like One>, c: Float64) -> Float64 = {
+    let y = Float64(0..5) * c |> compute
+    let s = reduce(method_for(range<I>) <@> lambda(a) -> {
+        out(0) = lambda(k: Float64) -> reduce(y, (+)) - k
+        y(a)
+    }, (+))
+    s
+}
+
+function mk(c: Float64) -> (Float64 -> Float64) = {
+    let y = Float64(0..5) * c |> compute
+    lambda(k: Float64) -> reduce(y, (+)) * k
+}
+
+let mut out: Array<(Float64 -> Float64) like One> = [lambda(k: Float64) -> k]
+let r1 = store_direct(out, 2.0)
+let v1 = out(0)(3.0)
+let r2 = store_via_arg(out, 3.0)
+let v2 = out(0)(1.0)
+let r3 = store_in_kernel(out, 4.0)
+let v3 = out(0)(2.0)
+let f = mk(5.0)
+let v4 = f(2.0)
+// EXPECT: r1 = 1.0
+// EXPECT: v1 = 60.0
+// EXPECT: r2 = 0.0
+// EXPECT: v2 = 31.0
+// EXPECT: r3 = 40.0
+// EXPECT: v3 = 38.0
+// EXPECT: v4 = 100.0

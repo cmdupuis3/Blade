@@ -527,7 +527,23 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             code
         | (IRReduce _ | IRCompute (IRReduce _)) when
             (let inner = (match value with IRCompute e -> e | e -> e)
-             match inferExprType inner with ArrayElem _ -> true | _ -> false) ->
+             match inferExprType inner with
+             | ArrayElem _ -> true
+             // G55: a SCALAR fold let whose kernel asks for a team
+             // (`let s = reduce(x, lambda(p, q) where omp -> p + q, 0.0)`)
+             // IS its own let: route it through the statement fold path
+             // (genReduceBinding: the team, the census line, the K-lane /
+             // Path B forms) exactly as at module level, instead of the
+             // inline IIFE's expression-position decline. A scalar fold with
+             // no request keeps the IIFE (the same K-lane form either way).
+             | IRTScalar _ ->
+                 (match inner with
+                  | IRReduce (_, k, _) ->
+                      (match resolveCallable k with
+                       | Some c -> c.Params.Length = 2 && c.IsOmpParallel
+                       | None -> false)
+                  | _ -> false)
+             | _ -> false) ->
             // An ARRAY-VALUED reduce (axis fold: rank-2 -> rank-1, lswosa's
             // per-frequency segment fold `reduce(ls_e <@> mag2, (+)) |> compute`)
             // as a function-body let, with or without the user's IRCompute

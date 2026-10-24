@@ -1557,7 +1557,7 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
         // text either way.
         let ompNote =
             ompSuppressedBlockMarker callable.IsOmpParallel
-                "reduce in expression position (kernel body / inline arithmetic) opens no team -- its context may already be a parallel region; bind the fold to its own `let` (or fold all axes with `axes = rank`) for the parallel form"
+                "reduce in expression position (kernel body / inline arithmetic) opens no team -- its context may already be a parallel region; for the parallel form make the fold the WHOLE value of its own `let` (`let s = reduce(...)`, then use `s`) -- an operand of arithmetic or a bare kernel return stays serial"
         // BLADE_FP_REASSOC, expression form. Same K-lane shape as the statement
         // form, minus the thread chunking: ONE chunk, K lanes, no pragma. That
         // is the right shape here for the reason the note above gives -- an IIFE

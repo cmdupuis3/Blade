@@ -1,3 +1,6 @@
+// STATUS (round 3 wave 4, W4-2): refused at typecheck in every lane, BL4004 (a map whose kernel
+//   returns a compact array; gap register G67, corpus symmetry/142-143); the grouped compact
+//   output stays NOT BUILT. The observations below are the pre-W4-2 record.
 // REPRO W2-5-G67 (round 3 wave 2, 2026-10-21, compiler 0.20.0): a ROW MAP whose cell is a
 // packed `comm` contraction (a per-group SymIdx H) checks but runs in NO lane.
 // Gap register G67; the minimal form of N10 groupls' per-group H (W2-5-G67-n10-groupls.blade).

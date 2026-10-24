@@ -301,6 +301,9 @@ type EarthArray = Array<Float like LatIdx, LonIdx>
   `omp` on a `reduce` kernel licenses fold reordering and requires commutativity (else
   BL4016), and is emitted vectorized/laned by default (`where omp` implies simd, even
   under `BLADE_OMP_THREADS=1`); `BLADE_FP_REPRO=1` restores the serial association.
+  A fold that is the WHOLE value of its own `let` threads in a function body exactly as at
+  top level (`let s = reduce(x, lambda(p, q) where omp -> p + q, 0.0)`); a fold that is an
+  operand of arithmetic or a bare kernel return opens no team (the `[omp]` census says so).
   `reynolds(g)` *manufactures* a commutative kernel by symmetrization when you
   can't annotate one.
 

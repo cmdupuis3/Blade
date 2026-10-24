@@ -4459,8 +4459,81 @@ let computeScopeEscapes (ctx: CodeGenContext) (kind: ScopeKind) (scopeLets: (IRI
         match kind with
         | FuncScope (Some retExpr) when carriesFn (inferExprType retExpr) -> allSubExprs retExpr
         | _ -> []
+    // SYNCHRONOUS FOLD KERNELS (gap G54; W4-2 fix round: a POSITIVE proof,
+    // never "the let is scalar"). Every callable occurrence anywhere in the
+    // scope -- an assign's value (`out(0) = <closure>`: assignSeeds names only
+    // the callable's id, so its captures are seeded HERE), a call argument, a
+    // deferred map, the return -- pins its captures, EXCEPT a callable proved
+    // to run and die inside one statement:
+    //   * it sits in a KERNEL SLOT of a scope let whose whole value is a
+    //     SCALAR fold -- `IRReduce`'s / `IRReduceCompute`'s fold kernel (each
+    //     leg of a join), or the kernel of the `IRApplyCombinator` map that
+    //     fold consumes directly (tensorop's `let s = reduce(method_for(..)
+    //     <@> lambda(a) -> prodsum(y(a), y(a)), lambda(p, q) where omp -> p +
+    //     q, 0.0)`): the nest, its team included, completes before the let;
+    //   * that occurrence is the callable's ONLY reference in the scope (it is
+    //     not also let-bound, stored, passed or returned);
+    //   * it writes nothing outside itself (`callableMayWrite`, the codegen
+    //     write analysis: transitive through every callable it names, an
+    //     unresolved callee a write) -- so no store hidden in its body exports
+    //     a closure over the capture;
+    //   * it returns no value that can hold a function.
+    // Only such a callable's captures are not seeded; the captured array then
+    // takes the ordinary scope-exit free beside its siblings.
+    let syncKernelSlots (value: IRExpr) : IRExpr list =
+        let v = match value with IRCompute e -> e | e -> e
+        let legs (k: IRExpr) = match k with IRTuple ks -> ks | k -> [ k ]
+        let mapKernel (a: IRExpr) =
+            match a with
+            | IRApplyCombinator info | IRCompute (IRApplyCombinator info) -> [ info.Kernel ]
+            | _ -> []
+        match inferExprType value with
+        | IRTScalar _ ->
+            (match v with
+             | IRReduce (arr, k, _) -> legs k @ mapKernel arr
+             | IRReduceCompute (comp, k, _) -> legs k @ mapKernel comp
+             | _ -> [])
+        | _ -> []
+    let allRefs = subs @ retSubs
+    let refCount (id: IRId) =
+        allRefs |> List.sumBy (fun e -> match e with IRVar (i, _) when i = id -> 1 | _ -> 0)
+    // FAIL CLOSED on the RETURN path (the second Codex look of W4-2, NEW 1):
+    // `stash(out, lambda(k) -> reduce(y(0), (+)) * k) + s` -- a SCALAR return
+    // whose call argument stores a closure over `y`. A non-function-typed
+    // return is not scanned above, so neither that closure's captures nor its
+    // reference count were seen, and the let's fold kernel kept its exemption:
+    // `y` was freed under a stored closure (a use after free the base never
+    // had, where the fold's capture pinned `y`). Until the return expression
+    // is classified slot by slot (the builder's round-3 rewrite, not merged),
+    // a scope whose non-function-typed return NAMES ANY CALLABLE -- a stored
+    // closure, a callable argument, a fold or map kernel in the return -- keeps
+    // every capture seeded: the exemption is withheld there, and the scope
+    // frees exactly what the base freed (memfree/029). The exemption stands
+    // for a scope that returns a plain value (memfree/027's `s`).
+    let returnNamesCallable =
+        match kind with
+        | FuncScope (Some retExpr) when not (carriesFn (inferExprType retExpr)) ->
+            allSubExprs retExpr |> List.exists (fun e -> (resolveCallable e).IsSome)
+        | _ -> false
+    let provedSync : Set<IRId> =
+        scopeLets
+        |> List.collect (fun (_, v) ->
+            syncKernelSlots v |> List.choose (fun k ->
+                match k with
+                | IRVar (kid, _) ->
+                    (match resolveCallable k with
+                     | Some c when refCount kid = 1
+                                   && not (callableMayWrite c)
+                                   && not (carriesFn c.RetType) -> Some kid
+                     | _ -> None)
+                | _ -> None))
+        |> Set.ofList
+    let provedSync = if returnNamesCallable then Set.empty else provedSync
     let captureSeeds =
-        subs @ retSubs |> List.collect (fun e ->
+        allRefs |> List.collect (fun e ->
+            match e with
+            | IRVar (id, _) when provedSync.Contains id -> []
+            | _ ->
             match resolveCallable e with
             | Some c -> c.Captures |> List.map (_.Id)
             | None -> [])
