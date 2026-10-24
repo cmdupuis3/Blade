@@ -1,4 +1,4 @@
-/// The ORBIT-CLASS FOLD (bench/notes/microkernel-sketches-review.md M4; plan
+/// The ORBIT-CLASS FOLD (bench/notes/microkernel-sketches-review.md (removed 2026-10-24; in git history at cf2028cc) M4; plan
 /// docs/plans/plan-compact-sym-folds.md section 4.3-4.4): the logical sum over
 /// the cells of a compact (symmetric / antisymmetric) array, regrouped by
 /// orbit class and computed in ONE pass over the packed pool.
@@ -874,7 +874,7 @@ let scatterG35Precedence = "the threaded complete-row form (G35) is taken under 
 /// ordered scatter both admit a walk (repro, threads on, an omp request on
 /// the outer level, a stored SymIdx<2/3> pool, every level strict, the
 /// closed total whitelist), the SCATTER is taken -- measured faster under
-/// mt8 repro in the wave-1 harness A/B (bench/notes/round3/w1-ab.md, 21
+/// mt8 repro in the wave-1 harness A/B (bench/results/stats.csv, labels r3old / r3new (the former bench/notes/round3/w1-ab.md, in git history at cf2028cc), 21
 /// interleaved rounds, blade-cpp: pairkernel 9.23 -> 7.76 ms, 0.841
 /// [0.811, 0.872]; comoment3 4.43 -> 3.74 ms, 0.843 [0.817, 0.885]). Both
 /// strict forms are bitwise the serial walk under REPRO + CONTRACT=off --

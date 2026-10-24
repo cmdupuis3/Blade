@@ -2214,7 +2214,7 @@ let antisymTeamEligibleNote (cap: bigint) =
 /// modeled lower-cache traffic assumes one fetch per group and residency
 /// across its visits (a model, not a measured fetch count).
 /// DEFAULT (anti_g unset) PER REGIME (round 3, W2-0b; the wave-1 harness
-/// A/B, bench/notes/round3/w1-ab.md, three interleaved sessions per mirror,
+/// A/B, bench/results/stats.csv, labels r3old / r3new (the former bench/notes/round3/w1-ab.md, in git history at cf2028cc), three interleaved sessions per mirror,
 /// pooled n = 63): a SERIAL tile takes G = 1, the previous order (the cache
 /// budget measured 1.0-2.0% SLOWER serially: 1.010 llvm, 1.020 cpp); a
 /// TEAM-ELIGIBLE tile takes the cache-budget policy (measured 4.8% FASTER
@@ -2294,7 +2294,7 @@ let rowSlotsMin () : int64 = max 0L (tileTune "rowslots_min" 262144L)
 ///             EXCEPT where the ordered orbit scatter admits the same walk:
 ///             there the scatter takes precedence (measured faster under mt8
 ///             repro, round 3: pairkernel 0.841, comoment3 0.843 of the row
-///             slots' time, bench/notes/round3/w1-ab.md);
+///             slots' time, bench/results/stats.csv, labels r3old / r3new (the former bench/notes/round3/w1-ab.md, in git history at cf2028cc));
 ///   `prefer` = the row slots win wherever both admit (the round-2 order);
 ///   `0` / `off` / `false` = no row slots at all (the serial walk, or the
 ///             scatter where it admits the walk).
@@ -2396,7 +2396,7 @@ let syrkTilePreferredOverBlas (p: string) (k: string) : bool =
 /// pass: 12 accumulators, 0.67 loads per FMA -- the reviewed default);
 /// `4x4` / `paired` = the PAIRED 4 x 4 tile (P and Q in one pass: 8
 /// accumulators, 1.25 loads per FMA, no spill -- the measured alternative,
-/// bench/notes/microkernel-sketches-review.md S2); `0` / `off` = the plain
+/// bench/notes/microkernel-sketches-review.md (removed 2026-10-24; in git history at cf2028cc) S2); `0` / `off` = the plain
 /// per-cell nest. Anything else is the default. Same bits in every schedule
 /// (each cell's two chains and one subtraction are unchanged).
 type AntisymTileSchedule =

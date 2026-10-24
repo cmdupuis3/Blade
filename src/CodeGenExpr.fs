@@ -197,7 +197,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             | None, IRCaret -> $"pow({lStr}, {rStr})"
             | None, IRMath2 name -> renderMath2 name lStr rStr
             | None, _ -> emitBinOpWithComplexCoercion op l r lStr rStr inferExprType binOpToCpp
-        // BIND ONCE (bench/notes/microkernel-sketches-review.md M2): the SAME
+        // BIND ONCE (bench/notes/microkernel-sketches-review.md (removed 2026-10-24; in git history at cf2028cc) M2): the SAME
         // canonicalizing compact read on both sides (`t(i, j, k) * t(i, j, k)`)
         // is evaluated once into a local and the operator applied to it --
         // one fold and one fetch instead of two. Pure read, same cell, same

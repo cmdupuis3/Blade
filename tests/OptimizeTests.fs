@@ -4537,7 +4537,7 @@ let private planCases () =
                   (fun d -> applied d && evidenceMentioning "fold form: syrk tile 6x8, KC=8" d
                             && evidenceMentioning "gram(A, A) node" d)
                   "gram(A, A): fold form: syrk tile 6x8, KC=8")))
-      // The review's route shapes (bench/notes/microkernel-sketches-review.md M5):
+      // The review's route shapes (bench/notes/microkernel-sketches-review.md (removed 2026-10-24; in git history at cf2028cc) M5):
       // ragged triangles and multi-K-block chains tile; a 13-row triangle keeps
       // the nest.
       for (p, n, kc) in [ (61, 257, 257); (97, 513, 257); (29, 1001, 334); (61, 31, 31) ] do

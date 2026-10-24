@@ -6979,7 +6979,7 @@ let planGroupAggregate (programFuncs: IRCallable list) (modul: IRModule) : unit 
 // and the final combination is one scalar local, never a recomputation), and
 // the last one is stored straight into the destination row. No temporary
 // row, no copy, no stage pools: one pass per step, reading the prefix rows
-// and writing the row being built (bench/notes/phase2-microkernel-plan.md
+// and writing the row being built (bench/notes/phase2-microkernel-plan.md (removed 2026-10-24; in git history at cf2028cc)
 // 4.5b(ii) destination passing + 4.5c pointwise-body fusion).
 //
 // Why it is cost-only (charter rule 1):

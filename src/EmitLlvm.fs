@@ -190,7 +190,7 @@ let private contractLicensed () : bool =
             | "" | "fast" | "on" | "1" -> true
             | _ -> false
 
-// The TILE CORE (bench/notes/microkernel-sketches-review.md item M6): the
+// The TILE CORE (bench/notes/microkernel-sketches-review.md (removed 2026-10-24; in git history at cf2028cc) item M6): the
 // packed-triangle SYRK tile of the C++ lane, reached from this lane through a
 // C translation unit over the SAME arithmetic header (blade_tiles.h), not
 // re-emitted as IR. Deployed beside the `.ll` by `deployShim`, compiled per
@@ -6094,7 +6094,7 @@ and private materialize (c: Ctx) (a: ArrVal) : ArrVal =
                  storeCell c a.Elem (gepCell c a.Elem ptr off.Reg) v))
         { a with Src = APool ptr }
 
-/// THE TILE CORE (bench/notes/microkernel-sketches-review.md item M6): run a
+/// THE TILE CORE (bench/notes/microkernel-sketches-review.md (removed 2026-10-24; in git history at cf2028cc) item M6): run a
 /// same-array `comm` row contraction (a `SyrkCandidate` applyToArr attached)
 /// into its packed-triangle pool with ONE call to blade_llvm_tiles.c's
 /// `blade_dsyrk_tri_f64` -- the C++ lane's 6 x 8 register tile, the same

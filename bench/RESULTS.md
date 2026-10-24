@@ -1,5 +1,12 @@
 # Blade vs gfortran / ifx — results
 
+> **Record cleanup, 2026-10-24.** The per-wave files this document cites -- `bench/notes/round2/`, `bench/notes/wave3/`,
+> `bench/notes/round3/` (the A/B records `w1-ab.md` / `w2-ab.md` / `w3-ab.md`, the Codex reviews, the builder briefs, the
+> gates summaries, the chain scripts, the sweeps, the P1 prototype), the top-level plans, sketches and reviews, the
+> runner record and the tracked session bundles -- were removed from the tree; they are in git history at cf2028cc.
+> Every measured number they carried is a row of `bench/results/stats.csv` (`label` = the A/B mirror named in the text;
+> `python bench/harness/stats.py sql "..."` queries it). Nothing below was rewritten; read a cited path as a historical one.
+
 **Round 2 (2026-10-20):** two more waves of microkernels plus an effect-analysis hardening track -- see **§15** (what landed, the wave-1 A/B, the wave-2 A/B, the gap rows it opened). Integration branch `worktree-bench-fortran`, final tip f1910060.
 
 **Status (2026-10-19):** sessions **1a** (serial x licensed x native: gram, comoment3,

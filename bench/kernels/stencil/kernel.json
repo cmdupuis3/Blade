@@ -24,7 +24,7 @@
     "natural": "parity (bandwidth-bound)",
     "expert": "parity"
   },
-  "notes": "Control. Input share ~40%. Wave 3: the input checksum's outer fold kernel carries `where omp` (the mt8 read-back licence every Fortran arm has; licensed = Path B team, repro = serial: the row-slot form does not recognise a row-view inner fold) -- the serial read-back was ~1.5 ms of the mt8-licensed gap, the 24 MB `lap` teardown inside the timer ~1 ms (bench/notes/wave3/stencil-mt8-attribution.md).",
+  "notes": "Control. Input share ~40%. Wave 3: the input checksum's outer fold kernel carries `where omp` (the mt8 read-back licence every Fortran arm has; licensed = Path B team, repro = serial: the row-slot form does not recognise a row-view inner fold) -- the serial read-back was ~1.5 ms of the mt8-licensed gap, the 24 MB `lap` teardown inside the timer ~1 ms (bench/notes/wave3/stencil-mt8-attribution.md (removed 2026-10-24; in git history at cf2028cc)).",
   "arms": [
     "blade-llvm",
     "blade-cpp",

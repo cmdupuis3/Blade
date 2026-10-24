@@ -9,7 +9,7 @@ box is a Store stub).  Verbs:
     bench                    the measured protocol -> an immutable bundle under bench/results/
 
 The protocol is bench/README.md (section 6) as amended by the method review
-(bench/notes/review-method.md: M3, M9, M12, M14-M21, M24, M25, M27, M28).  The JSON fields
+(bench/notes/review-method.md (removed 2026-10-24; in git history at cf2028cc): M3, M9, M12, M14-M21, M24, M25, M27, M28).  The JSON fields
 and the kernel.json / config.json / pins.json schemas are documented in
 bench/harness/README.md.  Every child process goes through :func:`run_proc`, which builds the
 environment, captures stdout/stderr, kills the process tree on timeout, optionally pins the
@@ -2196,6 +2196,15 @@ class Session:
             except OSError:
                 pass
             (self.bundle.parent / "summary.md").write_text(md, encoding="utf-8")
+            # the ONE statistics table (bench/results/stats.csv): every arm's numbers, one row per cell,
+            # appended here so a session never needs a hand-written results table (stats.py)
+            try:
+                sys.path.insert(0, str(Path(__file__).resolve().parent))
+                import stats as _stats
+                added = _stats.ingest([self.bundle / "session.json"])
+                log(f"stats.csv: {added} row(s) appended ({_stats.CSV})")
+            except Exception as e:  # never fatal: the bundle is complete, the CSV can be rebuilt by `stats.py ingest`
+                log(f"stats.csv: not appended ({e}); run `python bench/harness/stats.py ingest`")
         print()
         print(md)
         log(f"wrote {self.bundle}")

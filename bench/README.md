@@ -10,8 +10,8 @@ bundle, limits). `notes/design-decisions.md` is the decision log (D1–D46),
 the kernel inventory, `kernels/<name>/spec.md` each kernel's authoritative definition, and
 `notes/charter.md` the historical charter (this file supersedes its provisional sections
 4–7; where they disagree, this file wins; where it is silent, the charter stands). The
-independent methodology review is `notes/review-method-codex.md`, its dispositions
-`notes/review-method.md`; the protocol incorporates every item there.
+independent methodology review and its dispositions (the former `notes/review-method{,-codex}.md`,
+removed 2026-10-24, in git history at cf2028cc) are incorporated in the protocol below.
 
 Consolidated on 2026-10-18 from the single protocol document: §1 and §3 keep their numbers;
 the former §2, §4, §5 (5.1–5.4) and §7.1–7.9 are `kernels/README.md` §1, §2, §3 (3.1–3.4)
@@ -261,7 +261,7 @@ serial arms of the same kernel and regime have validated.
 | path | what | owner |
 |---|---|---|
 | `README.md` | this entry point: goal, fairness, build/run, regimes, reporting, honesty | architect |
-| `RESULTS.md` | the results document (closed 2026-10-18): §11 pre-fix headline, §13 post-fix re-measure, §12 decisions, §5A superseded rows | architect |
+| `RESULTS.md` | the results NARRATIVE by round (phase 1-2 §3-§13, the follow-up §14, round 2 §15-§16, round 3 §17); every number in it is also a row of `results/stats.csv`, which is the authoritative table | architect |
 | `kernels/README.md` | kernel authoring guide: arms and tiers, SIZE marker, output contract, Blade facts | architect |
 | `kernels/<name>/spec.md` | the kernel's authoritative definition (sizes, inputs, outputs, checksum, hypotheses, tier selection) | architect |
 | `kernels/<name>/<name>.blade`, `inputonly.blade`, `natural.f90`, `expert.f90` (+ `expert_blas.f90` for gram) | the arms' sources; one Blade source per kernel | blade-A / blade-B / fortran |
@@ -273,20 +273,22 @@ serial arms of the same kernel and regime have validated.
 | `notes/gap-register.md` | compiler gaps G1–G34 with evidence and status | architect |
 | `notes/kernel-list.md` | the kernel inventory, sizes and regime applicability | architect |
 | `notes/charter.md` | the original brief (HISTORICAL; its §2 hygiene rules were revised in place on 2026-10-18) | orchestrator |
-| `notes/fortran-notes.md`, `notes/harness-notes.md`, `notes/llvm-acceptance-{A,B}.md`, `notes/generator-check.md` | the agents' working notes: toolchain facts, CLI facts, lane acceptance per kernel, the generator statistics | fortran / harness / blade-A / blade-B |
-| `notes/review-method{,-codex}.md`, `notes/review-fortran{,-codex}.md` | the independent reviews (Codex transcripts, verbatim) and their dispositions | coordinator |
-| `notes/run-log.md`, `notes/phase2-microkernel-plan.md`, `notes/microkernel-sketches-*.md`, `notes/repro/` | the runner's log; the phase-2 plan and sketches; reproducers | runner / coordinator |
-| `results/<date>-<host>/session-<HHMMSS>/` | immutable session bundles (`session.json`, `summary.md`, `manifest.json`, build records; binaries git-ignored) | runner |
-| `results/full/RUNNER-RECORD.md` | the runner's consolidated per-session record; `results/gates/` the final compiler gate consoles; `results/pilot/`, `smoke*/` the early sweeps | runner |
+| `notes/fortran-notes.md`, `notes/harness-notes.md` | the agents' working notes: toolchain facts, CLI facts | fortran / harness |
+| `notes/repro/` | reproducers the gap rows cite | coordinator |
+| `results/stats.csv` | THE statistics table (2026-10-24): one row per session x kernel x regime x size x arm -- sample statistics, peak working set, the ratio against the Blade reference with its CI and verdict, block class and controls, fold form, parallelism, build identity; `label` = the A/B mirror (`repo`, round 2 `old` / `new` / `w1`-`w3`, round 3 `r3old` / `r3new` / `r3w1`-`r3w3` and the knob arms). `harness/stats.py ingest` rebuilds it from session bundles (idempotent), `stats.py sql "..."` queries it (in-memory SQLite), `stats.py summary` pivots it; `run.py bench` appends its session automatically | harness |
+| `results/<date>-<host>/session-<HHMMSS>/` (LOCAL, git-ignored since 2026-10-24) | the session bundles (`session.json`, `summary.md`, `manifest.json`, build records); the A/B mirrors keep theirs under `C:\bt_r2ab\<label>\bench\results`; the bundles tracked before the cleanup are in git history at cf2028cc | runner |
 | `.build/` (git-ignored) | smoke evidence, check/smoke sessions, stub kernels, the last-session timestamp | harness |
 
 ## 5. Reporting and where the results are
 
-The measured results are `RESULTS.md` (closed 2026-10-18, every number copied from a session
-bundle): **§13 is the post-fix re-measure headline** (Blade.dll 79AF7EDC / 30FBBC97 on tree
+The measured results are `results/stats.csv` (every session's every cell; query it with
+`python bench/harness/stats.py sql "SELECT ..."`) and the narrative `RESULTS.md`, whose numbers
+are copied from the same session bundles: **§13 is the post-fix re-measure headline** (Blade.dll 79AF7EDC / 30FBBC97 on tree
 2dcc0739, with the final compiler gate totals in its Status line), §11 the pre-fix headline
 with inventory and phase-2 worklist, §12 the two user decisions (D44, D45), §5A the superseded
-rows; `results/full/RUNNER-RECORD.md` is the runner's record; `notes/gap-register.md` the
+rows; the runner's record and the per-wave process files (plans, briefs, Codex reviews, A/B
+markdown, chain scripts) were removed from the tree on 2026-10-24 and live in git history
+at cf2028cc; `notes/gap-register.md` is the
 compiler gaps each diagnosis names. The report format below is the protocol's.
 
 One Markdown table per regime, rows = kernel x arm, columns:

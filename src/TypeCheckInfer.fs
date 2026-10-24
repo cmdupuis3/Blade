@@ -14132,8 +14132,8 @@ and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
         else
         let trailing = trailingOpt |> List.map Option.get
         zeroElem () |> Result.bind (fun zed ->
-        // ZERO-FILL ELISION (formalism 7.5; bench/notes/microkernel-sketches-
-        // review.md M3). The buffer's zero fill exists for exactly two kinds
+        // ZERO-FILL ELISION (formalism 7.5; bench/notes/microkernel-sketches-review.md (removed 2026-10-24; in git history at cf2028cc),
+        // M3). The buffer's zero fill exists for exactly two kinds
         // of read: a WHOLE-array use of `prefix` (which sees the unbuilt rows
         // as zero) and the freeze epilogue of a `while`-guarded recurrence
         // (which, stopping at n = 0, copies row 0 before anything wrote it).

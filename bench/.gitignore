@@ -16,3 +16,9 @@ results/**/generated/*.c
 results/**/*.copy
 results/**/build-stdout.txt
 results/**/build-stderr.txt
+
+# results bundles and gate logs stay LOCAL (2026-10-24 cleanup): every measured cell is a row of results/stats.csv
+results/20*/
+results/full/
+results/gates/
+results/summary.md

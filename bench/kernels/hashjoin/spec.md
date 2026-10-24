@@ -1,8 +1,8 @@
 # hashjoin — an inner equijoin of two keyed tables, the relation stored (round 3, W3-2)
 
 Group B. Directory `bench/kernels/hashjoin/`. Gap register row G72. Research:
-`bench/notes/round3/research/B-relational.md` section 2 "T2"; attack review
-`bench/notes/round3/reviews/codex-review-B.md` findings 5, 6, 10, 11 and 13.
+`bench/notes/round3/research/B-relational.md (removed 2026-10-24; in git history at cf2028cc)` section 2 "T2"; attack review
+`bench/notes/round3/reviews/codex-review-B.md (removed 2026-10-24; in git history at cf2028cc)` findings 5, 6, 10, 11 and 13.
 
 ## Object and operation
 
