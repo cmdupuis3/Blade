@@ -1692,6 +1692,125 @@ let runCliSmokeTests () : TH.BlockResult =
                 let expectText = if isNull llvm then "BL7004 in both gates (the C++ lane refuses it, pre-existing)" else "routed, exit 0, sizes = [2, 0], calls = [6] in both gates (the linear scan: no group past the CSR)"
                 recordCase $"cli: group keys ({lane}, winline) an inline writing key producer: {expectText}"
                     ok ($"exit {c0}/{c1}; {o1.Trim()} {e1.Trim()}")
+            // THE GUARD LOCATION RULE (gap G76), ONE failure text in all three
+            // lanes: a runtime guard panic (BL8002 non-exhaustive match, BL8003
+            // empty fold, BL8006 key) raised in the body of a callable the
+            // program NAMED -- a function, a let-bound lambda -- is located at
+            // that name's recorded declaration, through a plain `let x = f(..)`
+            // and a destructuring `let (a, b) = f(..)` alike (the LLVM lane
+            // INLINES a tuple-returning call: it used to locate the guard at the
+            // caller's binding, which a destructuring let does not have, and
+            // print no `-->` line); a block-local one has no recorded
+            // declaration and is located nowhere in every lane; an anonymous
+            // lambda's guard takes its enclosing declaration. An operator panic
+            // (BL8013 / BL8014) names its own line. The frames are the
+            // functions the program called, innermost first: the scalar ragged
+            // peel runs its kernel body INLINED in every lane (no `lambda in s`
+            // frame -- the LLVM lane used to push one). Each fixture's COMPLETE
+            // failure lines (error, `-->`, every frame, in order) are pinned and
+            // must be IDENTICAL in the C++ lane, the LLVM lane and the
+            // interpreter (run in-process on the lowered file, its declaration
+            // table installed from the program), gate on and off (T3's planned
+            // grouping and peels), and with the A7c kept inline requested
+            // (BLADE_EPILOGUE_LEGS=1: a callee that may fail is never inlined,
+            // so its guard keeps the function's location). The ORDER: ord1 /
+            // ord2 swap a match guard and a division.
+            let gkFn (ret: string) (tail: string) =
+                "type Region = Idx<3>\ntype Row = Idx<5>\n"
+                + $"function agg(k: Array<Region like Row>, v: Array<Int64 like Row>){ret} = {{\n"
+                + "    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
+                + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+), 0) |> compute\n"
+                + $"    {tail}\n}}\n"
+                + "let keys = method_for(range<Row>) <@> lambda(i) -> (Int64(i) * 2) % 5 |> compute\n"
+                + "let vals: Array<Int64 like Row> = [1, 2, 3, 4, 5]\n"
+            let peelFn (ret: string) (tail: string) =
+                "type Region = Idx<3>\ntype Row = Idx<4>\n"
+                + $"function agg(k: Array<Region like Row>, v: Array<Int64 like Row>){ret} = {{\n"
+                + "    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
+                + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b) |> compute\n"
+                + $"    {tail}\n}}\n"
+                + "let keys: Array<Region like Row> = [0, 2, 0, 2]\nlet vals: Array<Int64 like Row> = [1, 2, 3, 4]\n"
+            let matchFn (ret: string) (body: string) (tail: string) = $"function cls(i: Int64, d: Int64){ret} = {{\n{body}    {tail}\n}}\n"
+            let mGuard = "    let m = match i with\n        | 5 -> 1\n"
+            let dGuard = "    let q = 10 / d\n"
+            let castFn (ret: string) (tail: string) = $"function h(x: Float64){ret} = {{\n    let n = Int64(floor(x))\n    {tail}\n}}\nlet zz = 0.0\n"
+            let a7c =
+                "type Ix = Idx<1003>\n"
+                + "function inputs(m: Int64) -> Array<Float64 like Ix> = {\n    method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute\n}\n"
+                + "function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>, k: Int64) -> Float64 = {\n"
+                + "    let y2 = method_for(zip(x, y)) <@> lambda(u, v) -> 2.0 * u + v |> compute\n"
+                + "    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)\n"
+                + "    let m = match k with\n        | 5 -> 1\n"
+                + "    s + Float64(m)\n}\n"
+                + "let (checksum, input_checksum) = {\n    let x = inputs(7)\n    let y = inputs(5)\n"
+                + "    (kernel(x, y, 4), reduce(x, (+)) + reduce(y, (+)))\n}\n"
+            let blockFn (destructure: bool) =
+                "let base = [10, 20, 30]\nlet r = {\n    let k = 0\n"
+                + "    function cap(i: Int64) = {\n        let q = base(1) / (i - k)\n        let m = match q with\n            | 5 -> 1\n"
+                + (if destructure then "        (q, m)\n    }\n    let (u, v) = cap(5)\n    u + v\n}\n" else "        q + m\n    }\n    cap(5)\n}\n")
+            let bl8006 = "error[BL8006]: index out of bounds: a group_keys key outside 0 .. 2"
+            let bl8003 = "error[BL8003]: reduce: empty array, no reduction possible"
+            let bl8002 = "error[BL8002]: Blade: non-exhaustive match"
+            let bl8013 = "error[BL8013]: integer division by zero"
+            let bl8014 = "error[BL8014]: float-to-integer conversion of NaN or an out-of-range value"
+            // (fixture, source, error line, `-->` line (None = unlocated), frames, extra env)
+            let locCases =
+                [ ("gloc_tuple", gkFn "" "(s, 1)" + "let (s, one) = agg(keys, vals)\n", bl8006, Some 3, [ "agg" ], [])
+                  ("gloc_plain", gkFn " -> Int64" "reduce(s, (+))" + "let t = agg(keys, vals)\n", bl8006, Some 3, [ "agg" ], [])
+                  ("eloc_tuple", peelFn "" "(s, 1)" + "let (s, one) = agg(keys, vals)\n", bl8003, Some 3, [ "agg" ], [])
+                  ("eloc_plain", peelFn " -> Int64" "reduce(s, (+))" + "let t = agg(keys, vals)\n", bl8003, Some 3, [ "agg" ], [])
+                  ("mloc_tuple", matchFn "" mGuard "(m, m + 1)" + "let (a, b) = cls(4, 1)\n", bl8002, Some 1, [ "cls" ], [])
+                  ("mloc_plain", matchFn " -> Int64" mGuard "m + 1" + "let a = cls(4, 1)\n", bl8002, Some 1, [ "cls" ], [])
+                  ("ord1", matchFn "" (mGuard + dGuard) "(m, q)" + "let (a, b) = cls(4, 0)\n", bl8002, Some 1, [ "cls" ], [])
+                  ("ord2", matchFn "" (dGuard + mGuard) "(m, q)" + "let (a, b) = cls(4, 0)\n", bl8013, Some 2, [ "cls" ], [])
+                  ("cast_tuple", castFn "" "(n, n + 1)" + "let (a, b) = h(zz / zz)\n", bl8014, Some 2, [ "h" ], [])
+                  ("cast_plain", castFn " -> Int64" "n + 1" + "let a = h(zz / zz)\n", bl8014, Some 2, [ "h" ], [])
+                  ("nested", matchFn "" mGuard "(m, m)" + "function outer(i: Int64) -> Int64 = {\n    let (x, y) = cls(i, 1)\n    x + y\n}\nlet a = outer(4)\n", bl8002, Some 1, [ "cls"; "outer" ], [])
+                  ("lam_in_fn", "type R = Idx<3>\nfunction f(k: Int64) = {\n    let v = method_for(range<R>) <@> lambda(i) -> match Int64(i) + k with\n        | 5 -> 1\n    |> compute\n    (v, 1)\n}\nlet (a, b) = f(1)\n", bl8002, Some 2, [ "f" ], [])
+                  ("let_lambda", "let k = lambda(i: Int64) -> match i with\n    | 5 -> 1\nlet base = [10, 20, 30]\nlet a = k(base(0) - 6)\n", bl8002, Some 1, [ "k" ], [])
+                  ("block_tuple", blockFn true, bl8002, None, [ "cap" ], [])
+                  ("block_plain", blockFn false, bl8002, None, [ "cap" ], [])
+                  ("a7c_default", a7c, bl8002, Some 5, [ "kernel" ], [])
+                  ("a7c_kept_inline", a7c, bl8002, Some 5, [ "kernel" ], [ ("BLADE_EPILOGUE_LEGS", "1") ]) ]
+            let failureLines (e: string) =
+                e.Replace("\r\n", "\n").Split('\n')
+                |> Array.map (fun l -> if l.StartsWith "[stderr]: " then l.Substring 10 else l)
+                |> Array.filter (fun l -> l.StartsWith "error[" || l.StartsWith "  --> " || l.StartsWith "  at ")
+                |> List.ofArray
+            // the `-->` path names the file as each lane was given it: compare its file name
+            let normLoc (l: string) =
+                if l.StartsWith "  --> " then "  --> " + Path.GetFileName(l.Substring 6) else l
+            for (prog, src, errLine, line, frames, extra) in locCases do
+                File.WriteAllText(Path.Combine(dir, prog + ".blade"), src)
+                let wantLines =
+                    [ errLine ]
+                    @ (match line with Some n -> [ $"  --> {prog}.blade:{n}" ] | None -> [])
+                    @ (frames |> List.map (fun f -> "  at " + f))
+                let laneLines =
+                    [ for llvm in [ null; "1" ] do
+                        for gate in [ null; "0" ] do
+                            let (c, o, e, oe) = runIt prog (envOf llvm gate false extra)
+                            let tag = $"""{laneOf llvm}, gate {(if isNull gate then "on" else "off")}"""
+                            yield (tag, c <> 0 && routeOk llvm oe, failureLines (o + "\n" + e) |> List.map normLoc) ]
+                let interpLines =
+                    let path = Path.Combine(dir, prog + ".blade")
+                    let guards = extra |> List.map (fun (k, v) -> let prior = Environment.GetEnvironmentVariable k in Environment.SetEnvironmentVariable(k, v); (k, prior))
+                    try
+                        match fst (Blade.Lowering.lowerFileDiag path src) with
+                        | Error _ -> ("interpreter", false, [ "<lowering failed>" ])
+                        | Ok (ir, _) ->
+                            let res = Blade.Interp.Run.runProgram ir prog Blade.Interp.Value.defaultLimits
+                            ("interpreter", res.ExitCode <> 0, failureLines res.Stderr |> List.map normLoc)
+                    finally
+                        for (k, prior) in guards do Environment.SetEnvironmentVariable(k, prior)
+                let all = laneLines @ [ interpLines ]
+                let bad = all |> List.filter (fun (_, ran, ls) -> not ran || ls <> wantLines)
+                let (_, _, firstLines) = all.Head
+                recordCase $"""cli: guard location ({prog}) G76: ONE failure text in C++ / LLVM (gate on and off) and the interpreter: [{String.concat " | " (wantLines |> List.map (fun l -> l.Trim()))}]"""
+                    bad.IsEmpty
+                    (match bad with
+                     | (tag, ran, ls) :: _ -> $"""{tag}: ran={ran}: {String.concat " | " ls}"""
+                     | [] -> String.concat " | " firstLines)
             // THE CANCELLATION FIXTURE, every arm (review finding 6): exit 0,
             // the route, and the exact expected value with its bits.
             // prodsum(s, s) with s = (the 1e16 group's sum, 1.0): the chain

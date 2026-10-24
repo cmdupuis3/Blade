@@ -652,6 +652,11 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
          | Some lit, _ -> exprToCppCore subst names lit
          | None, Some refusal -> exprError refusal
          | None, None -> "0")
+    // A generic strict seed IRMono did not resolve (gap G74): its literal.
+    | IRAddIdentity ty ->
+        (match addIdentityLiteralOf ty with
+         | Some lit -> exprToCppCore subst names lit
+         | None -> exprError "internal: an unresolved unseeded-fold identity (IRAddIdentity)")
     | IRPolyIndex (pack, idx) ->
         // For static index, use std::get; otherwise runtime indexing
         match idx with

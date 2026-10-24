@@ -1081,6 +1081,11 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
             match ty with
             | IRTIdxTagged _ -> VInt 0L
             | _ -> VFloat 0.0
+    // A generic strict seed IRMono did not resolve (gap G74): its literal.
+    | IRAddIdentity ty ->
+        match addIdentityLiteralOf ty with
+        | Some lit -> evalExpr st env lit
+        | None -> VFloat -0.0
 
     // The let-rec buffer whose zero fill the desugar proved dead (IR.IRUninit;
     // formalism 7.5). The compiled lanes leave it unfilled; zeros here are
@@ -1232,7 +1237,30 @@ and evalCall (st: InterpState) (callable: IRCallable) (captures: Map<IRId, Value
     // restored on a panic path: an escaping InterpPanic ends the run.
     let isFunctionBody = List.isEmpty callable.Captures
     if isFunctionBody then st.FunctionCallDepth <- st.FunctionCallDepth + 1
-    let result = evalExpr st frame callable.Body
+    // THE GUARD LOCATION RULE (gap G76), the compiled lanes' `declPanicArgs` /
+    // `declLocArgs`: an unlocated runtime GUARD (empty reduce, key / shape /
+    // extent check, non-exhaustive match) raised in the body of a callable the
+    // PROGRAM NAMED -- a function, or a lambda a `let` binds -- is located at
+    // that name's recorded declaration, the innermost winning; one with NO
+    // recorded declaration (a block-local function or let-bound lambda) is
+    // located nowhere, as the compiled lanes print no `-->` for it (line -1
+    // marks "deliberately unlocated", which Run.fs's binding fallback does not
+    // overwrite); an ANONYMOUS lambda or section (`lambda in s`, `(+) in s`)
+    // leaves it to its enclosing declaration. The frame stays pushed.
+    let anonymous =
+        let n = callable.SourceName
+        // the exact anonymous names Lowering writes (`unboundLambdaWhat`: `lambda`, an operator's
+        // `(+)`, `.. in <scope>`), never a prefix test -- `lambda_guard` is a legal user name
+        // (the second Codex look of W4-3, NEW 4)
+        System.String.IsNullOrEmpty n || n = "lambda" || n.StartsWith "(" || n.Contains " in "
+    let result =
+        try evalExpr st frame callable.Body
+        with
+        | InterpPanic (code, msg, None, 0) when not anonymous ->
+            let s = Blade.IR.declSpanOf callable.Name
+            let s = if s.StartLine > 0 then s else Blade.IR.declSpanOf callable.SourceName
+            if s.StartLine > 0 && s.File.IsSome then raise (InterpPanic (code, msg, s.File, s.StartLine))
+            else raise (InterpPanic (code, msg, None, -1))
     if isFunctionBody then st.FunctionCallDepth <- st.FunctionCallDepth - 1
     popFrame st
     st.Depth <- st.Depth - 1

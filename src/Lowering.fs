@@ -133,6 +133,12 @@ type TypedLowerEnv = {
     /// `(/) in mk`). Set by every binding, function and named lambda around
     /// the expression being lowered (withLambdaScope); None at top level.
     LambdaScope: string option
+    /// Lowering INSIDE a `where repro` function's body (gap G74): every lambda
+    /// and operator section lifted from it is `IsRepro` too, so the repro
+    /// demand vetoes the reorder licence of every fold the body runs (each
+    /// lane's `foldReorderLicensed`), and an unseeded fold's seed takes the
+    /// strict identity (lowerUnseededSeed).
+    InRepro: bool
 }
 
 let emptyTypedEnv () : TypedLowerEnv = {
@@ -159,6 +165,7 @@ let emptyTypedEnv () : TypedLowerEnv = {
     LiftedCallables = ResizeArray<IRCallable>()
     MutableArrayLets = ResizeArray<IRId>()
     LambdaScope = None
+    InRepro = false
 }
 
 let bindTypedVar name id (env: TypedLowerEnv) : TypedLowerEnv =
@@ -565,6 +572,7 @@ let isZeroLevelWholeArrayApply (info: TypedApplyInfo) (loweredKernel: IRExpr) : 
 
 /// Lower a TypedExpr to IRExpr
 let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
+    if isUnseededSeed texpr then lowerUnseededSeed env texpr else
     match texpr.Kind with
     | TExprLit lit ->
         IRLit (lowerLiteralValued lit texpr.Type)
@@ -1183,6 +1191,36 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     | TExprPartialApp (op, arg, isLeft) ->
         lowerTypedPartialApp env op (lowerTypedExpr env arg) isLeft texpr.Type
 
+/// THE SEED OF AN UNSEEDED FOLD (gap G74; TypedAst.unseededSeedSpan marks the
+/// checker's synthesized `(+)` seed). An unseeded fold's value is the left
+/// fold of its cells. On a STRICT route -- the reproducible build
+/// (`BLADE_FP_REPRO=1` / `BLADE_FP_REASSOC=0`) or inside a `where repro`
+/// function, where no lane may reorder the fold -- the seed is the EXACT `(+)`
+/// identity (IR.addIdentityLiteralOf: `-0.0`, `-0.0f`, `(-0.0, -0.0)`, `0`;
+/// at a still-open element `IRAddIdentity`, resolved per instance), so every
+/// form that keeps the seed (the walk's row callable, the ordered scatter, the
+/// row-owned pull, the row action, the strict cell chains, the interpreter)
+/// runs the head-peeled chain bit for bit (formalism 2.4's identity
+/// insertion). On every other route the fold carries a reorder licence and
+/// the BASE seed is lowered exactly as before (the licence's signed zero,
+/// G40), so a licensed emission is unchanged. The route is decided here,
+/// before the optimizer, from the same two facts every lane's licence reads
+/// for a builtin section (the build's reorder licence and the kernel's repro
+/// demand: InRepro marks the kernels lifted from a repro body); a section
+/// kernel never writes. NOT covered: a licensed fold whose deferred map body
+/// WRITES keeps its serial chain from the base seed (gap G74's record).
+and lowerUnseededSeed env (texpr: TypedExpr) : IRExpr =
+    let baseSeed = lowerTypedExpr env { texpr with Span = Blade.Ast.noSpan }
+    let strict = Blade.Toolchain.fpReproEnabled () || env.InRepro
+    if not strict then baseSeed
+    else
+        match addIdentityLiteralOf texpr.Type with
+        | Some identity -> identity
+        | None ->
+            match baseSeed with
+            | IRZero ty -> IRAddIdentity ty
+            | _ -> baseSeed
+
 /// Lower the value of the binding `name` (a top-level or block `let`, an
 /// expression `let`): a lambda bound directly is no longer anonymous -- it
 /// prints as `name` -- and the anonymous functions anywhere else in the value
@@ -1266,7 +1304,9 @@ and lowerTypedLambdaAs env (boundTo: string option) (info: TypedLambdaInfo) : IR
                  // the same way, so codegen and the interpreter can hand
                  // IRLoopStructure.deduceWreathTie the values typecheck judged from.
                  SignParities = info.SignParities
-                 SourceName = shownName }
+                 SourceName = shownName
+                 // a lambda in a `where repro` body inherits the demand (G74)
+                 IsRepro = env.InRepro }
     // Emit IRVar(callable.Id, funcType): the callable lives in
     // LiftedCallables -> module.Functions, and the IRVar carries just the
     // function type for type-inference and consumer dispatch. Consumers use
@@ -1489,7 +1529,9 @@ and lowerTypedSection env (op: BinOp) (funcTy: IRType) : IRExpr =
     let commGroups = if isComm then [[0; 1]] else []
     let callable =
         { mkLambdaCallable env.Builder parms body retType [] isComm commGroups [] false false 256 false
-            with SourceName = operatorCallableName env irOp }
+            with SourceName = operatorCallableName env irOp
+                 // inside a `where repro` body it is a repro kernel (G74)
+                 IsRepro = env.InRepro }
     env.LiftedCallables.Add(callable)
     let funcType =
         let paramTypes = callable.Params |> List.map _.Type
@@ -1550,7 +1592,9 @@ and lowerTypedPartialAppWith env (op: BinOp) (argExpr: IRExpr) (isLeft: bool) (f
         | _ -> retTy
     let callable =
         { mkLambdaCallable env.Builder parms body retType captures false [] [] false false 256 false
-            with SourceName = operatorCallableName env irOp }
+            with SourceName = operatorCallableName env irOp
+                 // inside a `where repro` body it is a repro kernel (G74)
+                 IsRepro = env.InRepro }
     env.LiftedCallables.Add(callable)
     let funcType =
         let paramTypes = callable.Params |> List.map _.Type
@@ -1618,7 +1662,9 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType (loc: SrcLoc) 
         let commGroups = if mode = Elementwise then [[0; 1]] else []
         let lambdaInfo =
             { mkLambdaCallable env.Builder parms body kernelRetType [] false commGroups [] false false 256 false
-                with SourceName = operatorCallableName env irOp }
+                with SourceName = operatorCallableName env irOp
+                     // inside a `where repro` body it is a repro kernel (G74)
+                     IsRepro = env.InRepro }
         env.LiftedCallables.Add(lambdaInfo)
         // Kernel slot references the lifted callable via IRVar;
         // genObjectForApplication uses resolveCallable + wrapper to consume it.
@@ -1773,7 +1819,10 @@ let lowerTypedFuncDecl (env: TypedLowerEnv) (decl: TypedFunctionDecl) : IRFuncDe
 
     // Bind parameters in environment for body lowering
     // The anonymous functions in the body print as `lambda in <name>`.
-    let mutable paramEnv = withLambdaScope decl.SourceName { env with PolyParamNames = polyParamNames }
+    // `where repro` covers the WHOLE body: the lambdas and sections lifted
+    // from it inherit the demand (gap G74; TypedLowerEnv.InRepro).
+    let declRepro = (match decl.WhereClause with Some wc -> wc.Repro | None -> false) || env.InRepro
+    let mutable paramEnv = withLambdaScope decl.SourceName { env with PolyParamNames = polyParamNames; InRepro = declRepro }
     let irParams = decl.Params |> List.map (fun p ->
         paramEnv <- bindTypedVar p.Name p.VarId paramEnv
         { Name = p.Name; Type = p.Type; Index = p.Index; VarId = p.VarId } : IRParam)
@@ -1804,10 +1853,7 @@ let lowerTypedFuncDecl (env: TypedLowerEnv) (decl: TypedFunctionDecl) : IRFuncDe
                 // `where repro`, grafted here exactly as lowerTypedLambda
                 // grafts AntisymGroups: this is the one construction site
                 // that still sees the clause.
-                IsRepro =
-                    (match decl.WhereClause with
-                     | Some wc -> wc.Repro
-                     | None -> false)
+                IsRepro = declRepro
                 // The effect summary, from the same typed declaration -- the
                 // shared legality fact fusion's splice reads (IRMono.pureBody).
                 Effects = decl.Effects
@@ -3572,10 +3618,17 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     // drops it. Unreachable from any binding, it can only ever be a BL6001.
     // Must run after EVERY specializing pass -- each can make a function
     // concrete or mint new references -- and before validateIR.
-    IRValidate.eliminateDeadPolymorphs { Modules = irModules }
+    let program = IRValidate.eliminateDeadPolymorphs { Modules = irModules }
     // Module namespacing, after every pass that could mint or specialize a
     // member (see qualifyModuleNames).
-    |> qualifyModuleNames
+    let program = program |> qualifyModuleNames
+    // the declaration-span table travels with the program (gap G76): a
+    // consumer in another flow (the interpreter differential) installs it.
+    // Attached to the FINAL object: qualifyModuleNames' multi-module arm builds
+    // a new record, and the table is keyed by object identity (the second
+    // Codex look of W4-3, NEW 3 -- every multi-module program lost it).
+    IR.attachDeclSpans program
+    program
 
 // Typecheck warning surfacing (shared by every CLI lane)
 

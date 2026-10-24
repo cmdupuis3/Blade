@@ -3440,6 +3440,31 @@ and private faultLocArgs (c: Ctx) (loc: SrcLoc) : (Sc * string) list =
 and private declLocArgs (c: Ctx) : (Sc * string) list =
     faultLocArgs c (SrcLoc c.DeclSpan)
 
+/// Emit an INLINED NAMED FUNCTION's body (a tuple-returning call, a capturing
+/// callee) as the declaration being emitted: the C++ lane CALLS that
+/// function, whose guard panics (BL8002 / BL8003 / BL8006: `declLocArgs`) are
+/// located at its own declaration (CodeGenState.emittedDeclSpan: its span,
+/// else its source's; none for a block-local function), so this lane locates
+/// them there too -- exactly as emitFunctionBody does for an outlined body --
+/// instead of at the caller's binding, which a destructuring
+/// `let (a, b) = f(..)` does not even have (gap G76). Every guard emitted
+/// while the body is walked follows, planned ones included (they read
+/// `declLocArgs` too). Decision records made inside take the function as
+/// their span and subject, as an outlined body's do. Kernels (lambdas) are
+/// NOT routed here: the C++ lane locates a lambda's guard at its enclosing
+/// declaration, which is what `DeclSpan` already holds.
+and private withCalleeDecl<'T> (c: Ctx) (cl: IRCallable) (body: unit -> 'T) : 'T =
+    let savedSpan = c.DeclSpan
+    let savedName = c.DeclName
+    c.DeclSpan <-
+        (let s = Blade.IR.declSpanOf cl.Name
+         if s.StartLine > 0 then s else Blade.IR.declSpanOf cl.SourceName)
+    c.DeclName <- (if String.IsNullOrEmpty cl.SourceName then cl.Name else cl.SourceName)
+    try body ()
+    finally
+        c.DeclSpan <- savedSpan
+        c.DeclName <- savedName
+
 and private emitBinOp (c: Ctx) (op: IRBinOp) (l: IRExpr) (r: IRExpr) (loc: SrcLoc) : Val =
     match op with
     // `&&` / `||` SHORT-CIRCUIT, and that is not a micro-optimization here:
@@ -3828,7 +3853,9 @@ and private emitCall (c: Ctx) (func: IRExpr) (args: IRExpr list) : Val =
                     | Some _ -> KArray (emitArr c a)
                     | None when (raggedArrShape p.Type).IsSome -> KArray (emitArr c a)
                     | None -> KScalar (emitExpr c a))
-            applyKernel c callable kargs
+            // the arguments are the caller's; the BODY is located at the
+            // function's own declaration (gap G76, withCalleeDecl)
+            withCalleeDecl c callable (fun () -> applyKernel c callable kargs)
         finally c.Inlining.Remove callable.Id |> ignore
     else
     if List.length callable.Params <> List.length args then
@@ -4474,9 +4501,10 @@ and private bindGroupAggPeelIn (c: Ctx) (id: IRId) (plan: Blade.Optimize.GroupAg
                          storeCell c ScI64 (gepCell c ScI64 p g) { Reg = i64Bin c "sub" hi.Reg lo.Reg; Ty = ScI64 })
                      p
                  | Blade.Optimize.GaUnseeded _ ->
-                     // inside the peel kernel's frame, as the peel's own
-                     // reduce raised it (the backtrace keeps its line)
-                     framePush c st.KernelFrame
+                     // where the peel's own reduce raised it: the ordinary
+                     // peel runs the kernel body inlined, frameless (gap G76:
+                     // one frame list, the C++ lane's and the interpreter's),
+                     // so the planned check pushes no kernel frame either
                      emitCountedLoopTo c gk.NGroups (fun g ->
                          let n = loadCell c ScI64 (gepCell c ScI64 counts g)
                          let isEmpty = freshReg c
@@ -4490,7 +4518,6 @@ and private bindGroupAggPeelIn (c: Ctx) (id: IRId) (plan: Blade.Optimize.GroupAg
                          ln c (renderCall { Dest = None; RetTy = ScVoid; Callee = "@blade_panic_at"; Args = [ ScStr, msg ] @ declLocArgs c })
                          ln c "unreachable"
                          lbl c lOk)
-                     framePop c
                      pools.[j]
                  | _ -> pools.[j]
              bindArray c id "" { Elem = ty; Groups = [ denseOfOp gk.NGroups ]; Src = APool pool; RowOpBytes = 0L }
@@ -6481,6 +6508,15 @@ and private bindKernelParam (c: Ctx) (p: IRParam) (arg: KArg) : unit =
 /// not have -- a capture reference resolves through the ordinary slot tables
 /// instead, since IR ids are program-unique.
 and private applyKernel (c: Ctx) (cl: IRCallable) (args: KArg list) : Val =
+    applyKernelFramed c true cl args
+
+/// `applyKernel`, with or without the callable's shadow frame. FRAMELESS only
+/// where the C++ lane inlines the kernel's body instead of calling it -- the
+/// scalar ragged PEEL (`method_for(g) <@> lambda(r) -> reduce(r, ..)`,
+/// CodeGenCuda's inlined peel body) -- so a guard panic in it prints the SAME
+/// frame list in every lane (gap G76: the interpreter's peel pushes none
+/// either).
+and private applyKernelFramed (c: Ctx) (framed: bool) (cl: IRCallable) (args: KArg list) : Val =
     if cl.IsCudaKernel || cl.IsMpiParallel then
         refuse ($"the kernel '{cl.Name}', which carries a cuda/mpi strategy")
     if List.length cl.Params <> List.length args then
@@ -6488,9 +6524,9 @@ and private applyKernel (c: Ctx) (cl: IRCallable) (args: KArg list) : Val =
     List.iter2 (bindKernelParam c) cl.Params args
     // The inlined body is the callable the C++ lane would have called, so it
     // gets that callable's frame (see Shadow frames).
-    framePush c cl.SourceName
+    if framed then framePush c cl.SourceName
     let v = emitExpr c cl.Body
-    framePop c
+    if framed then framePop c
     v
 
 /// A `method_for(...) <@> kernel` map, as a PRODUCER.
@@ -7000,7 +7036,9 @@ and private applyRaggedPeel (c: Ctx) (info: ApplyInfo) (cl: IRCallable) : ArrVal
             { Elem = elem; Groups = [ denseOfOp rows ]; RowOpBytes = 0L
               Src = AVirt (fun c2 idxs ->
                         match idxs with
-                        | [ g ] -> coerce c2 elem (applyKernel c2 cl [ KArray (rowView c2 a [ g ]) ])
+                        // the peel kernel's body runs inlined, no frame (the
+                        // C++ lane's inlined peel; gap G76)
+                        | [ g ] -> coerce c2 elem (applyKernelFramed c2 false cl [ KArray (rowView c2 a [ g ]) ])
                         | _ -> refuse "a ragged peel read at other than its row coordinate") }
     | arrays, ps ->
         refuse ($"a ragged combinator over {(List.length arrays)} arrays and {(List.length ps)} kernel parameters -- mixing ragged operands with other arrays or multi-parameter kernels is not supported")
@@ -8401,10 +8439,15 @@ and private emitTupleParts (c: Ctx) (e: IRExpr) : ValKind list =
                     | None when (raggedArrShape p.Type).IsSome -> KArray (emitArr c a)
                     | None -> KScalar (emitExpr c a))
             List.iter2 (bindKernelParam c) cl.Params kargs
-            framePush c cl.SourceName
-            let parts = emitTupleParts c cl.Body
-            framePop c
-            parts
+            // The inlined BODY is the function the C++ lane calls, so a guard
+            // panic in it is located at the FUNCTION's declaration (gap G76;
+            // withCalleeDecl). The arguments above are the CALLER's and keep
+            // its span.
+            withCalleeDecl c cl (fun () ->
+                framePush c cl.SourceName
+                let parts = emitTupleParts c cl.Body
+                framePop c
+                parts)
         finally c.Inlining.Remove cl.Id |> ignore
     // TERMINATION: the base case must NOT hand a pack-typed node back to
     // `classifyValue`, whose `IRTTuple` arm calls straight back here -- that

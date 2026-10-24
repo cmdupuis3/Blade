@@ -6,9 +6,9 @@
 // group in group order (group 1 here), exactly where the peel's reduce over
 // that group's empty row raised it -- the accumulation moved to the grouping,
 // the failure did not. (The function returns one array, so the LLVM lane refuses this
-// program and the LLVM differential skips it: an inlined guard panic's LOCATION differs between
-// the lanes as written -- the C++ lane names the function, the LLVM lane the caller's binding,
-// gate on and off alike, a pre-existing divergence recorded in gap G71. The complete failure --
+// program and the LLVM differential skips it. An inlined guard panic's LOCATION used to differ
+// between the lanes -- the C++ lane named the function, the LLVM lane the caller's binding -- and
+// now names the function in both (gap G76; the peel kernel's FRAME still differs). The complete failure --
 // code, location, frames, order -- is compared gate off vs on PER LANE in the cli block.)
 type Region = Idx<3>
 type Row = Idx<4>

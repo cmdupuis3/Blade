@@ -263,6 +263,12 @@ type IRExpr =
     /// (IRMono.resolveTypedZerosModule, via `zeroLiteralOf`). The type rides
     /// the node so HM substitution reaches it like any other carried type.
     | IRZero of ty: IRTypeG<IRExpr>
+    /// The EXACT `(+)` identity at a type lowering could not yet name a
+    /// literal for (gap G74): ONLY the strict-route seed of an UNSEEDED fold
+    /// in a generic body (Lowering.lowerUnseededSeed; no source syntax builds
+    /// it), resolved per instance by IRMono.resolveTypedZerosModule to
+    /// `addIdentityLiteralOf` (`-0.0`, `-0.0f`, `0`, `(-0.0, -0.0)`).
+    | IRAddIdentity of ty: IRTypeG<IRExpr>
     /// A FRESH array of the carried (dense, statically shaped) array type
     /// whose cells are written before any is read, so no fill is emitted:
     /// the recursive-array buffer when the desugar PROVED every row is
@@ -913,6 +919,20 @@ let zeroLiteralOf (ty: IRTypeG<IRExpr>) : IRExpr option =
     | AnyPrimElem ETComplex64 -> Some (IRComplex (IRLit (IRLitFloat32 0.0f), IRLit (IRLitFloat32 0.0f)))
     | AnyPrimElem ETComplex128 -> Some (IRComplex (IRLit (IRLitFloat 0.0), IRLit (IRLitFloat 0.0)))
     | AnyPrimElem ETString -> Some (IRLit (IRLitString ""))
+    | _ -> None
+
+/// The EXACT `(+)` identity at a scalar type (gap G74): the seed a STRICT
+/// route gives an UNSEEDED fold (Lowering.lowerUnseededSeed, IRAddIdentity),
+/// so the seeded chain `id + c0 + ..` is the left fold of the cells bit for
+/// bit (formalism 2.4): `-0.0` / `-0.0f` for a real float, `(-0.0, -0.0)` for
+/// a complex one (componentwise), `0` for an integer. None otherwise.
+let addIdentityLiteralOf (ty: IRTypeG<IRExpr>) : IRExpr option =
+    match ty with
+    | AnyPrimElem (ETInt32 | ETInt64) -> Some (IRLit (IRLitInt 0L))
+    | AnyPrimElem ETFloat32 -> Some (IRLit (IRLitFloat32 -0.0f))
+    | AnyPrimElem ETFloat64 -> Some (IRLit (IRLitFloat -0.0))
+    | AnyPrimElem ETComplex64 -> Some (IRComplex (IRLit (IRLitFloat32 -0.0f), IRLit (IRLitFloat32 -0.0f)))
+    | AnyPrimElem ETComplex128 -> Some (IRComplex (IRLit (IRLitFloat -0.0), IRLit (IRLitFloat -0.0)))
     | _ -> None
 
 /// Unit-annotated primitive: returns both the elem type and the unit
@@ -2239,7 +2259,7 @@ let recUninitBufferPrefix = "__recu_"
 let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     match expr with
     // -- Leaves: no expression children ------------------------------------
-    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero _ | IRUninit _ | IROpaqueExtent
+    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero _ | IRAddIdentity _ | IRUninit _ | IROpaqueExtent
     | IRVirtualReverse _ | IRArity _ | IRReleasePools _ ->
         [], (function [] -> expr | _ -> badChildren "leaf")
     | IRRange (idxTys, offset) ->
@@ -2530,7 +2550,7 @@ let (|BinderShape|_|) (expr: IRExpr) : (IRExpr list * (Set<IRId> * IRExpr list) 
 let irNodeMayAbort (e: IRExpr) : bool =
     match e with
     // -- cannot abort on their own ------------------------------------------
-    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero _ | IRUninit _ | IROpaqueExtent
+    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero _ | IRAddIdentity _ | IRUninit _ | IROpaqueExtent
     | IRArity _ | IRRange _ | IRVirtualReverse _ | IRReleasePools _ -> false
     // Integer `/` and `%` by zero abort (BL8013 in every lane, the arithmetic
     // contract of docs/formalism.md section 2.4). The node is judged without
@@ -2630,7 +2650,7 @@ let rec isFreshPoolFormWith (appFresh: IRExpr -> bool) (e: IRExpr) : bool =
     | IRParallel _ | IRFusion _ | IRFunctorMap _ | IRZip _ -> false
     | IRVar _ | IRIndex _ | IRSlice _ | IRCurry _ | IRSubset _ | IRShift _ | IRReverse _
     | IRDiag _ | IRAlign _ | IRTuple _ | IRTupleProj _ | IRFieldAccess _ | IRIf _ | IRMatch _ -> false
-    | IRLit _ | IRParam _ | IRNth | IRZero _ | IROpaqueExtent | IRArity _ | IRRange _
+    | IRLit _ | IRParam _ | IRNth | IRZero _ | IRAddIdentity _ | IROpaqueExtent | IRArity _ | IRRange _
     | IRVirtualReverse _ | IRBinOp _ | IRUnaryOp _ | IRComplex _ | IRFma _ | IRRandAt _
     | IRTupleCons _ | IRTupleDecons _ | IRStructLit _ | IRLet _
     | IRMethodFor _ | IRObjectFor _ | IRBind _ | IRComposeObj _ | IRCompose _ | IRPure _
@@ -2736,6 +2756,7 @@ let substTypeInIRExpr (bindings: Map<int, IRType>) (expr: IRExpr) : IRExpr =
         | IRVar (id, ty) -> IRVar (id, st ty)
         | IRParam (n, i, ty) -> IRParam (n, i, st ty)
         | IRZero ty -> IRZero (st ty)
+        | IRAddIdentity ty -> IRAddIdentity (st ty)
         | IRUninit ty -> IRUninit (st ty)
         | IRApp (fn, args, retType) -> IRApp (fn, args, st retType)
         | IRArrayLit (elems, aty) ->
@@ -2785,6 +2806,7 @@ let (|CarriedType|_|) (expr: IRExpr) : IRType option =
     | IRLit IRLitUnit -> Some IRTUnit
     | IRReleasePools _ -> Some IRTUnit
     | IRZero ty -> Some ty
+    | IRAddIdentity ty -> Some ty
     | IRUninit ty -> Some ty
     | _ -> None
 
@@ -2897,6 +2919,24 @@ let declSpanOf (name: string) : Blade.Ast.Span =
     match Map.tryFind name (declSpansCell ()).Value with
     | Some s -> s
     | None -> Blade.Ast.noSpan
+
+/// The declaration-span table TRAVELS WITH THE PROGRAM (gap G76): lowering
+/// attaches the table it recorded to the IRProgram it returns, and a consumer
+/// running in another execution flow (the interpreter differential runs the
+/// interpreter in a Task beside the flow that lowered) installs it into its
+/// own flow before it reads `declSpanOf`. Keyed by the program OBJECT (a copy
+/// made with `{ p with .. }` carries none, and installs nothing).
+let private programDeclSpans =
+    System.Runtime.CompilerServices.ConditionalWeakTable<IRProgram, Map<string, Blade.Ast.Span> ref>()
+
+let attachDeclSpans (program: IRProgram) : unit =
+    programDeclSpans.AddOrUpdate(program, ref (declSpansCell ()).Value)
+
+/// Install the program's attached table (if any) as THIS flow's table.
+let installDeclSpansOf (program: IRProgram) : unit =
+    match programDeclSpans.TryGetValue program with
+    | true, spans -> declSpansStorage.Value <- ref spans.Value
+    | _ -> ()
 
 /// A named struct's fields in DECLARATION order, out of the same per-module
 /// cache `tryLookupFieldType` reads. The order is what lets a name-erased
@@ -3634,7 +3674,7 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
     // typing rule -- and if one of these arms ever fires, a family pattern
     // was edited out of sync: fail loudly, never mistype.
     | IRVar _ | IRParam _ | IRApp _ | IRArrayLit _ | IRStructLit _
-    | IRApplyCombinator _ | IRComposeApply _ | IRLit _ | IRZero _ | IRUninit _ | IRReleasePools _ ->
+    | IRApplyCombinator _ | IRComposeApply _ | IRLit _ | IRZero _ | IRAddIdentity _ | IRUninit _ | IRReleasePools _ ->
         unreachableTyping "CarriedType" expr
     | IRSort _ | IRArrayNegate _ | IRArrayConjugate _ | IRIntersect _
     | IRUnion _ | IRUnique _ | IRCompute _ | IRPure _ | IRLet _ | IRIf _

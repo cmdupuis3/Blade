@@ -1470,7 +1470,22 @@ the annotation hook only.
   (`reduce([1, 2, 3, 4], lambda(a, b) -> a - b)` is `((1 - 2) - 3) - 4 = -8`), `n = 1` by default (rank k in, rank k−n out;
   `n = rank(A)` is the full fold to a scalar); default kernel `(+)`; see
   [features/sql.md](features/sql.md) §10 for typing details, the axis-count
-  rules and the empty-input rule. Under the default `n = 1`, an anonymous
+  rules and the empty-input rule. Without `init` the fold's value is the left
+  fold of the CELLS, `c0 ⊕ c1 ⊕ ...`. Over a STORED array that fold has no
+  identity: a statically empty operand is refused (BL3007), a dynamically
+  empty one panics BL8003 at the fold. A fused fold over a DEFERRED
+  computation (a `(+)` / `(*)` section; `<&!>` join legs, the rank-k full
+  fold) is seeded by the implementation, and the seed depends on the ROUTE
+  (gap G74): on a strict route -- `BLADE_FP_REPRO=1`, or inside a
+  `where repro` function, where no lane may reorder the fold -- the `(+)`
+  seed is the EXACT identity, `-0.0` (`(-0.0, -0.0)` complex, `0` integer),
+  §2.4's identity insertion, so the chain is the left fold of the cells bit
+  for bit (an all-`-0.0` row folds to `-0.0`); on a licensed route it is
+  `+0.0`, and the sign of a zero result is the licence's (§2.4, "Fast by
+  default"). Its EMPTY fold is that seed: the deferred terminal has no BL8003
+  guard, so an empty deferred sum is `-0.0` on a strict route and `+0.0` on a
+  licensed one -- the two spellings keep distinct empty-input rules
+  (features/sql.md §10). Under the default `n = 1`, an anonymous
   deferred outer product `reduce(method_for(A, B) <@> lambda(a, b) -> f(a, b),
   op[, init])` (named rank-1 sources, no `where` clause on the map kernel, a
   `(+)`/`(*)` section or a seeded fold) is evaluated row by row -- an outer

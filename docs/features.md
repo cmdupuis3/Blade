@@ -523,11 +523,13 @@ its terms in ascending j from its own seed through its own kernel (the rank-2
 scatter's order), so the result is the row walk's: tested as RAW BITS for
 Float64 under `BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off`, in both lanes
 (`blade test orbit-scatter`). An explicit seed is preserved (an explicit -0.0
-seed over all -0.0 terms stays -0.0, raw bits); seedless semantics are NOT
-established by that leg: the checker seeds a seedless deferred `(+)` with
-+0.0, so an all -0.0 seedless row is +0.0 in the action, the knob-off walk and
-the interpreter alike (the pre-existing G74 family; pinned as current
-behaviour, not closed). Taken in licensed builds too (the serial chain is an
+seed over all -0.0 terms stays -0.0, raw bits), and on a STRICT route
+(`BLADE_FP_REPRO=1`, or a `where repro` body) a SEEDLESS `(+)` row is the
+left fold of its cells: its synthesized seed is there the exact identity
+-0.0 (gap G74), so an all -0.0 seedless row is -0.0 -- it was +0.0 -- in the
+action, the knob-off walk and the interpreter alike, and a NaN first cell's
+payload is the row's (raw bits, both lanes); a licensed build keeps the base
++0.0 seed. Taken in licensed builds too (the serial chain is an
 admissible association; recorded); `BLADE_ORBIT_ACTIONS=strict` restricts it
 to strict builds, `0` keeps the row walk. LANE SPLIT on a thread request: in
 the C++ lane, with threads enabled and any request on the map, the inner map

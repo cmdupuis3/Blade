@@ -696,6 +696,10 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
 let runProgramMemo (program: IRProgram) (testName: string) (limits: InterpLimits)
                    (memoIn: SessionMemo) (printOnly: Set<string> option) : InterpResult * SessionMemo =
     Blade.Runtime.runOnLargeStack (fun () ->
+        // The program's declaration spans (lowering attached them, gap G76):
+        // this flow may not be the one that lowered (the interpreter
+        // differential runs it in a Task), and the guard locator reads them.
+        Blade.IR.installDeclSpansOf program
         // Build the interpreter state OUTSIDE execProgram but capture it in a ref
         // the panic handler can read: on an escaping InterpPanic we render the
         // shadow-stack frames still live in the state (evalCall never pops on

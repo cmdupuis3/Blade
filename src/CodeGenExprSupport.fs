@@ -1815,6 +1815,10 @@ let foldReorderLicensed (callable: IRCallable) : bool =
 let unlicensedFoldForm (callable: IRCallable) : string =
     if callableMayWrite callable then
         "serial (the fold kernel writes a captured binding: its applications are ordered side effects; no licence -- comm, omp on the fold or the map -- reorders or threads them)"
+    elif foldKernelReproVetoed callable then
+        // the kernel's own `where repro`, or the ENCLOSING repro function's
+        // demand its lifted kernel inherits (Lowering's InRepro; gap G74)
+        "serial (no reorder licence: a `where repro` demand -- the kernel's own or its enclosing function's -- keeps the ordered chain)"
     else "serial (no reorder licence)"
 
 /// An operand's extent along `dim`, as a C++ expression: the LITERAL when the

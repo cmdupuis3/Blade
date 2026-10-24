@@ -189,9 +189,15 @@ let private irChildren (e: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     match e with
     | ExprShape (kids, rebuild) -> (kids, rebuild)
 
+/// A zero LITERAL inner seed the licensed orbit-class fold may drop. A `-0.0`
+/// literal is accepted beside `+0.0` (gap G74): it is the seed a STRICT route
+/// gives an unseeded fold (Lowering.lowerUnseededSeed), where this licensed
+/// plan then declines for the strict reason itself (the repro build / the
+/// repro kernel), as it did over the base `+0.0`; dropping it is exact. A
+/// source `-0.0` / `-zero` is a negation node, not a literal, and declines.
 let private isZeroSeed (acc: ElemType) (e: IRExpr) : bool =
     match e with
-    | IRLit (IRLitFloat v) -> (acc = ETFloat64 || acc = ETFloat32) && v = 0.0 && not (System.Double.IsNegative v)
+    | IRLit (IRLitFloat v) -> (acc = ETFloat64 || acc = ETFloat32) && v = 0.0
     | IRLit (IRLitInt 0L) -> acc = ETInt64 || acc = ETInt32
     | _ -> false
 
@@ -1105,8 +1111,9 @@ let recordDeclined (subject: string) (why: string) : unit =
 // BLADE_FP_CONTRACT=off in the C++ and the LLVM lane (`blade test
 // orbit-scatter`'s action leg). The chains start from the fold's SEED (an
 // explicit -0.0 seed is preserved); a seedless deferred `(+)` carries the
-// checker's +0.0 seed in every lane, the walk and the interpreter alike (the
-// pre-existing G74 family; this item neither changes nor closes it). Under `-ffp-contract=fast` a term
+// seed Lowering gives an UNSEEDED fold (gap G74): the exact identity -0.0 on a
+// strict route, so the row is the left fold of its cells, the base +0.0 on a
+// licensed one -- in every lane, the walk and the interpreter alike. Under `-ffp-contract=fast` a term
 // stored to a Z block may contract differently from the walk's own context
 // (the scatter's status; contraction invariance is not claimed).
 //

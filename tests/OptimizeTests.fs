@@ -5481,29 +5481,35 @@ let private siblingReproKernelSrc =
     + "    (reduce(zs, radd, -0.0), reduce(zs, radd, 0.0), reduce(mz, radd, -0.0))\n"
     + "}\n"
 
-/// The surface join's implicit seed for an unseeded (+) leg the USER wrote is
-/// +0.0 (TypeCheckInfer's rule, untouched by the sibling-fold pass, which
-/// seeds the legs IT builds with -0.0): the join's accumulators are declared
-/// `= 0.0` (leg 0) and `= 0.0` (prodsum).
+/// The surface join's implicit seed for an unseeded (+) leg the USER wrote
+/// (gap G74): the leg is UNSEEDED, so on a STRICT route (BLADE_FP_REPRO=1)
+/// its seed is the exact identity -0.0 -- the same seed the sibling-fold pass
+/// gives the legs IT builds -- and on a LICENSED route (the default build) the
+/// base +0.0, byte for byte as before; a prodsum leg is the sum from zero and
+/// keeps +0.0 on both: the join's accumulators are declared `= -0.0` /
+/// `= 0.0` under REPRO and `= 0.0` / `= 0.0` in the default build.
 let private siblingSurfaceJoinSeed () =
-    let name = "sibling_folds_surface_join_keeps_plus_zero_seed"
+    let name = "sibling_folds_surface_join_unseeded_leg_seed_by_route"
     let src =
         "type R = Idx<3>\n"
         + "let z: Array<Float64 like R> = [-0.0, -0.0, -0.0]\n"
         + "let (j_surface, j_other) = object_for(<&!>) <@> (reduce(z, (+)), prodsum(z, z))\n"
-    match withGates siblingSerialPins (fun () -> cppOfSource name src) with
-    | Error e -> resultLine Fail name e; false
-    | Ok cpp ->
-        let seeds =
-            System.Text.RegularExpressions.Regex.Matches(mainOf cpp, @"double __(?:v|tup_)\d+_\d+ = ([^;]+);")
-            |> Seq.map (fun x -> x.Groups.[1].Value) |> List.ofSeq
-        if seeds = [ "0.0"; "0.0" ] then
-            resultLine Pass name "the user-written join's unseeded (+) leg keeps its +0.0 seed"
+    let seedsUnder (pins: (string * string) list) =
+        match withGates pins (fun () -> cppOfSource name src) with
+        | Error e -> Error e
+        | Ok cpp ->
+            Ok (System.Text.RegularExpressions.Regex.Matches(mainOf cpp, @"double __(?:v|tup_)\d+_\d+ = ([^;]+);")
+                |> Seq.map (fun x -> x.Groups.[1].Value) |> List.ofSeq)
+    let licensedPins = [ ("BLADE_OMP_THREADS", "1"); ("BLADE_FP_REPRO", null); ("BLADE_SIBLING_FOLDS", null) ]
+    match seedsUnder siblingSerialPins, seedsUnder licensedPins with
+    | Error e, _ | _, Error e -> resultLine Fail name e; false
+    | Ok strict, Ok licensed ->
+        if strict = [ "-0.0"; "0.0" ] && licensed = [ "0.0"; "0.0" ] then
+            resultLine Pass name "REPRO (strict): the unseeded (+) leg takes the exact identity -0.0, the prodsum leg +0.0; default (licensed): both +0.0, the base emission"
             true
         else
-            resultLine Fail name ($"""seeds=[{String.concat "; " seeds}]""")
+            resultLine Fail name ($"""strict seeds=[{String.concat "; " strict}], licensed seeds=[{String.concat "; " licensed}]""")
             false
-
 /// A callee that may fail (integer `/`) beside a sibling fold is NOT inlined:
 /// its division stays inside `risky`'s own emitted body, under its
 /// BLADE_FRAME, carrying the division's source line (3 here), and `main`

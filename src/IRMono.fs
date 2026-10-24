@@ -1606,7 +1606,7 @@ let resolveTypedZerosModule (structFields: string -> (string * IRType) list opti
         let mutable hit = false
         let scan (b: IRExpr) =
             if not hit then
-                iterIRExpr (fun e -> match e with IRZero _ -> hit <- true | _ -> ()) b
+                iterIRExpr (fun e -> match e with IRZero _ | IRAddIdentity _ -> hit <- true | _ -> ()) b
         modul.Functions |> List.iter (fun f -> scan f.Body)
         modul.Bindings |> List.iter (fun b -> scan b.Value)
         hit
@@ -1655,6 +1655,25 @@ let resolveTypedZerosModule (structFields: string -> (string * IRType) list opti
             match fromKernel |> Option.orElse (partnerZero comp) with
             | Some lit -> IRReduceCompute (comp, k, lit)
             | None -> IRReduceCompute (comp, k, z)
+        // THE STRICT SEED OF AN UNSEEDED FOLD in a generic body (gap G74;
+        // Lowering.lowerUnseededSeed): the instance's EXACT identity -- by its
+        // own type once concrete, else by the specialized kernel's result /
+        // the operand's element, as the zero seed above.
+        | IRAddIdentity ty when not (isOpen ty) ->
+            addIdentityLiteralOf ty |> Option.defaultValue e
+        | IRReduceCompute (comp, k, (IRAddIdentity ty as z)) when isOpen ty ->
+            let fromKernel =
+                match exprTypeIfKnown k with
+                | Some (FuncElem (_, ret)) -> addIdentityLiteralOf ret
+                | _ -> None
+            let fromPartner () =
+                match exprTypeIfKnown comp with
+                | Some (ArrayElem a) -> addIdentityLiteralOf a.ElemType
+                | Some t -> addIdentityLiteralOf t
+                | None -> None
+            match fromKernel |> Option.orElse (fromPartner ()) with
+            | Some lit -> IRReduceCompute (comp, k, lit)
+            | None -> IRReduceCompute (comp, k, z)
         | _ -> e
     let bareArrayZero (e: IRExpr) : IRExpr =
         match e with
@@ -1666,6 +1685,7 @@ let resolveTypedZerosModule (structFields: string -> (string * IRType) list opti
     let fallback (e: IRExpr) : IRExpr =
         match e with
         | IRZero ty when isOpen ty -> IRLit (IRLitFloat 0.0)
+        | IRAddIdentity ty when isOpen ty -> IRLit (IRLitFloat -0.0)
         | _ -> e
     let rewrite b = b |> mapIRExpr resolve |> mapIRExpr bareArrayZero |> mapIRExpr fallback
     { modul with

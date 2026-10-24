@@ -420,6 +420,7 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
     | IRArity (Some n, name) -> $"arity({name}={n})"
     | IRNth -> "nth"
     | IRZero _ -> "zero"
+    | IRAddIdentity _ -> "add_identity"
     | IRUninit ty -> $"uninit<{ppIRType ty}>"
     | IRReleasePools (call, start, pools) -> $"""release_pools[{call}; from __v{start}]({(pools |> List.map (fun (id, _) -> $"__v{id}") |> String.concat ", ")})"""
     | IRRank arr -> $"rank({pp arr})"

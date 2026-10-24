@@ -4191,6 +4191,10 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
         // (the row slots), BLADE_FOLD_ROW_SLOTS=0 (the scatter), threads off
         // (the serial scatter) and the true serial walk (threads off,
         // BLADE_ORBIT_SCATTER=0). Each binding's ROUTE is asserted per build.
+        // G74: s7 / s8 fold their rows SEEDLESS (`(+)`): s7 over -0.0 cells
+        // must be -0.0 exactly (the left fold of the cells; the checker's
+        // former +0.0 seed gave +0.0), s8 must carry the payload poked into
+        // the pool's FIRST cell -- row 0's head -- as its bits.
         let rawNaNA = 0x7FF800000000A11CUL
         let rawNaNB = 0xFFF80000000B0B0BUL
         let rawCases =
@@ -4203,12 +4207,15 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                 + "let g = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute\n"
                 + "let gn = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) * 0.5 |> compute\n"
                 + "let gm = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) * 0.25 |> compute\n"
-                + $"let s1 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j), (+)), {omp}, 0.25)\n"
+                + "let gh = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) * 0.125 |> compute\n"
+                + $"let s1 =reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j), (+)), {omp}, 0.25)\n"
                 + $"let s2 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> -0.0 * (g(i, j) * g(i, j)), lambda(a, b) -> a + b, -0.0), {omp}, -0.0)\n"
                 + $"let s3 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * g(i, j) * 1.0e-9 - g(i, j), (+)), {omp}, 0.0)\n"
                 + $"let s4 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> gn(i, j), (+)), {omp}, 0.0)\n"
                 + $"let s5 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> gn(i, j) * 2.0 + 1.0, (+)), {omp}, 0.0)\n"
                 + $"let s6 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> gm(i, j), (+)), {omp}, 0.0)\n"
+                + $"let s7 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> -0.0 * (g(i, j) * g(i, j)), (+)), {omp}, -0.0)\n"
+                + $"let s8 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> gh(i, j), (+)), {omp}, 0.0)\n"
             let lv3 (body: string) (inner: string) =
                 $"reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> reduce(method_for(range<Var>) <@> lambda(k) -> {body}, {inner}), {inner}), {omp}"
             let rank3 =
@@ -4217,19 +4224,24 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                 + "let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) |> compute\n"
                 + "let tn = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) * 0.5 |> compute\n"
                 + "let tm = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) * 0.25 |> compute\n"
+                + "let th = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) * 0.125 |> compute\n"
                 + "let s1 = " + lv3 "t(i, j, k)" "(+)" + ", 0.25)\n"
                 + "let s2 = " + lv3 "-0.0 * (t(i, j, k) * t(i, j, k))" "lambda(a, b) -> a + b, -0.0" + ", -0.0)\n"
                 + "let s3 = " + lv3 "t(i, j, k) * t(i, j, k) * 1.0e-9 - t(i, j, k)" "(+)" + ", 0.0)\n"
                 + "let s4 = " + lv3 "tn(i, j, k)" "(+)" + ", 0.0)\n"
                 + "let s5 = " + lv3 "tn(i, j, k) * 2.0 + 1.0" "(+)" + ", 0.0)\n"
                 + "let s6 = " + lv3 "tm(i, j, k)" "(+)" + ", 0.0)\n"
+                + "let s7 = " + lv3 "-0.0 * (t(i, j, k) * t(i, j, k))" "(+)" + ", -0.0)\n"
+                + "let s8 = " + lv3 "th(i, j, k)" "(+)" + ", 0.0)\n"
             // (rank, source, the NaN pool, its poked cells: C(522, 2) = 135981
             // and C(69, 3) = 52394 canonical cells)
             // `gm` / `tm` carry the same two payloads in the OPPOSITE order, so
             // each payload is the first one some walk meets.
-            [ ("rank2", rank2, [ ("gn", [ (1234, rawNaNA); (70000, rawNaNB) ]); ("gm", [ (500, rawNaNB); (90000, rawNaNA) ]) ])
-              ("rank3", rank3, [ ("tn", [ (777, rawNaNA); (40000, rawNaNB) ]); ("tm", [ (300, rawNaNB); (45000, rawNaNA) ]) ]) ]
-        let rawScalars = [ "s1"; "s2"; "s3"; "s4"; "s5"; "s6" ]
+            // G74: `gh` / `th` carry payload A in their FIRST canonical cell
+            // (S(0, 0) / T(0, 0, 0)), the head of row 0's seedless chain (s8)
+            [ ("rank2", rank2, [ ("gn", [ (1234, rawNaNA); (70000, rawNaNB) ]); ("gm", [ (500, rawNaNB); (90000, rawNaNA) ]); ("gh", [ (0, rawNaNA) ]) ])
+              ("rank3", rank3, [ ("tn", [ (777, rawNaNA); (40000, rawNaNB) ]); ("tm", [ (300, rawNaNB); (45000, rawNaNA) ]); ("th", [ (0, rawNaNA) ]) ]) ]
+        let rawScalars = [ "s1"; "s2"; "s3"; "s4"; "s5"; "s6"; "s7"; "s8" ]
         for (rank, src, pokes) in rawCases do
          let name = $"scatter_precedence_raw_bits_{rank}"
          // (tag, BLADE_OMP_THREADS, BLADE_FOLD_ROW_SLOTS, BLADE_ORBIT_SCATTER, expected route, team sizes)
@@ -4290,6 +4302,10 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                  fail name ($"the walk printed {reference.Length} RAW line(s), wanted {rawScalars.Length}")
              elif bitsOf "s2" <> Some 0x8000000000000000UL then
                  fail name ($"""s2 must be -0.0 (0x8000000000000000) in the walk, got {bitsOf "s2"}""")
+             elif bitsOf "s7" <> Some 0x8000000000000000UL then
+                 fail name ($"""s7 (SEEDLESS inner `(+)` over -0.0 cells, a -0.0 outer seed) must be -0.0 (0x8000000000000000: the left fold of the cells, G74) in the walk, got {bitsOf "s7"}""")
+             elif bitsOf "s8" <> Some rawNaNA then
+                 fail name ($"""s8 (SEEDLESS rows, row 0's FIRST cell carrying payload 0x{rawNaNA:X16}) must carry that payload as the head in the walk, got {bitsOf "s8"}""")
              elif not ([ "s1"; "s3" ] |> List.forall (fun s -> bitsOf s |> Option.exists isFinite)) then
                  fail name ($"""s1 / s3 must be finite in the walk: {String.concat "; " reference}""")
              elif not ([ "s4"; "s5"; "s6" ] |> List.forall (fun s -> bitsOf s |> Option.exists isNaN)) then
@@ -4300,7 +4316,7 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                  fail name ($"""raw bits differ from the true serial walk [{String.concat "; " reference}]: {String.concat " | " differ}""")
              else
                  let nanTxt = [ "s4"; "s5"; "s6" ] |> List.map (fun s -> $"{s} = 0x{(bitsOf s).Value:X16}") |> String.concat ", "
-                 pass name ($"""every binding's route as wanted in each build (default / slots=0 / threads-off: the scatter; prefer: the row slots; the walk), and the SAME uint64 bits at T = 1, 4, 7: cancellation (s1, s3), -0.0 (s2), poked NaN payloads 0x{rawNaNA:X16} / 0x{rawNaNB:X16} -> {nanTxt}""")
+                 pass name ($"""every binding's route as wanted in each build (default / slots=0 / threads-off: the scatter; prefer: the row slots; the walk), and the SAME uint64 bits at T = 1, 4, 7: cancellation (s1, s3), -0.0 (s2), poked NaN payloads 0x{rawNaNA:X16} / 0x{rawNaNB:X16} -> {nanTxt}; seedless rows (G74): s7 = -0.0, s8 = the first cell's 0x{rawNaNA:X16}""")
 
         // ---- G51 IDENTITY: row-view folds in threaded complete rows -------
         // The stencil input-checksum shape `reduce(u(i), op[, s])` under an
