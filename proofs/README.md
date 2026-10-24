@@ -53,40 +53,6 @@ run it with `-Check` to verify the numbers below and the headline in
 
 ## Contents (2205 theorems total)
 
-- BladeMaterialization.v (21): Finite canonical buffers versus lexical deferred
-  readers, with bounded descriptor lookup, sign/conjugation actions, and an
-  action-free structural-zero branch. Exact scalar trees include conditionals
-  and value-dependent reads. Arbitrary buffer-retention policies preserve all
-  graph observations and, within an unchanged effect/snapshot skeleton, final
-  stores, output/write/snapshot/failure traces, and returned values or aborts.
-  Proves snapshot stability across writes and that an unused abort cannot be
-  erased. Pure scalar operations must be total. No source-to-graph extraction,
-  effect reordering, physical snapshot backing, traversal legality, or cost
-  improvement is inferred by the elimination theorem.
-
-- BladeStructuralIdentity.v (18): A small model separating identifiers from
-  versioned, oriented value keys. Alias binding preserves reads; transpose
-  preserves origin and changes orientation, with involution and certified
-  symmetric erasure. Same versus distinct operand partitions select different
-  structural result layouts even when ordinary input types agree. Exact
-  integer outer addition witnesses the sharing distinction. A snapshot/live
-  view counterexample and a stable-source theorem expose the mutation
-  obligation. This is not a verification of the compiler's alias analysis.
-- BladeCompositionalOptimization.v (35): Structural reindexing and packing
-  laws; monotone composition of work, traffic, and absolute peak footprint;
-  executable frontier pruning preserves exhaustive candidates up to dominance
-  at each fixed depth. Optimality is relative to the supplied transition
-  system and a monotone objective. State equality must capture the complete
-  continuation interface, and semantic preservation is a separate invariant.
-  No claim of hardware-time optimality or verified F# optimizer integration.
-- BladeLayoutOptimizationBridge.v (10): Imports BladeLayout's forward
-  reduction and schedule-selection results. Filters schedules by an explicit
-  structural traversal admission predicate, preserves minimum-cost choices,
-  and proves the zero-order-feasibility test. Resource dominance and contextual
-  replacement require additional resource factorization and monotonicity
-  hypotheses. Checker soundness is an explicit obligation; contiguous curried
-  traversal does not mean globally increasing writes in conversion kernels.
-
 - BladeCore.v (16): Group Law both halves (diagonal swap sound; per-dim
   product swap refuted), counting lemma (no lossless product layout),
   Reynolds soundness + lossless canonical access, left-justified
@@ -1030,6 +996,36 @@ run it with `-Check` to verify the numbers below and the headline in
   kernel >= n/2, ceil(n/2) at zero (nat artefact).  orbit_bound_boundary
   packages it (converse open); genericity_two_sides pairs it with
   nongeneric_data_beats_bound.  Pins 6 vs 3, 15 vs 5.
+- BladeStructuralIdentity.v (18): Oriented-key laws: transpose is an
+  involution preserving origin/epoch; bind_alias copies a key, hence its
+  read. Same and distinct keys select compact and dense layouts by
+  definition, with computed layout and outer-addition witnesses. No theorem
+  connects layout selection to symmetric reads; no mutation transition
+  increments epoch. Alias substitution is only the key-copy update lemma,
+  not the paper's general substitution theorem.
+- BladeCompositionalOptimization.v (35): Reindexing and unsigned packing
+  laws under assumed rank/enumerate bijections and reconstruction, with no
+  link to BladeDMWF's bijections. Same-state componentwise dominance is a
+  partial order; pruning and frontier coverage preserve an optimum for
+  every cost_le-monotone objective at a fixed depth. These guarantees also
+  hold for prune := id: no antichain or size bound, comparison across
+  depths, or composite structural-transpose theorem is proved.
+- BladeLayoutOptimizationBridge.v (10): Argmin properties over an admissible
+  filter of BladeLayout schedules; existing_canon_if_admissible reuses
+  canonical_is_cost_minimal. Schedules carry no direction and admissible
+  is an opaque Boolean predicate: forward legality requires checker_sound.
+  Resource dominance requires resource_factor and resource_monotone;
+  no traversal checker or hardware cost model is verified.
+- BladeMaterialization.v (21): Denotational finite-buffer readback:
+  packed_read_equals_virtual uses locate_bound and keeps structural zeros
+  ahead of reconstruction actions. Congruence lifts it through producer
+  graphs and an unchanged ordered persistent-store effect/snapshot skeleton,
+  preserving final store, trace and result for every retention policy.
+  Both readers use the same scalar tree and predecessor environment;
+  no operational retention, allocation/evaluation counts, lifetimes or
+  physical old-version availability are modelled. Pure nodes never read
+  mutable backing and scalars are total; failing/effectful cells and
+  source-to-graph lowering remain outside the theorem.
 
 ## Outside the tower: conditional on Coq's Reals axioms
 

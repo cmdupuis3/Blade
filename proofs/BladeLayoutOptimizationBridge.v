@@ -177,11 +177,3 @@ Section ForwardLayout.
     apply layout_minimum_lifts_to_resource_dominance; assumption.
   Qed.
 End ForwardLayout.
-
-Print Assumptions forward_canon_certificate.
-Print Assumptions forward_reduction_certificate.
-Print Assumptions existing_canon_if_admissible.
-Print Assumptions selected_realization_is_sound_and_forward.
-Print Assumptions layout_minimum_lifts_to_resource_dominance.
-Print Assumptions layout_replacement_in_cost_context.
-Print Assumptions zero_order_feasible_iff_selected_zero.

@@ -128,8 +128,3 @@ Example mutation_distinguishes_snapshot_from_live_view :
   let after := fun i j => if (Nat.eqb i 0 && Nat.eqb j 1)%bool then 7 else 0 in
   snapshot_transpose before 1 0 <> snapshot_transpose after 1 0.
 Proof. vm_compute; discriminate. Qed.
-
-Print Assumptions alias_preserves_read.
-Print Assumptions sharing_partition_ignores_alias_spelling.
-Print Assumptions ordinary_types_do_not_determine_result_layout.
-Print Assumptions stable_source_allows_delayed_transpose.

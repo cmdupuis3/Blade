@@ -271,9 +271,3 @@ Section Materialization.
     answer (run_program policy (Return []) env s).
   Proof. intros; simpl; discriminate. Qed.
 End Materialization.
-
-Print Assumptions packed_read_equals_virtual.
-Print Assumptions pure_graph_materialization_elimination.
-Print Assumptions materialization_elimination.
-Print Assumptions snapshot_read_preserved_by_later_write.
-Print Assumptions unconsumed_failure_cannot_be_erased.

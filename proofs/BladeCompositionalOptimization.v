@@ -467,15 +467,3 @@ Example a_scalar_cannot_select_both_resource_minima :
   let q := mkCost 2 0 1 in
   ~ cost_le p q /\ ~ cost_le q p.
 Proof. unfold cost_le; simpl; lia. Qed.
-
-Print Assumptions continuation_preserves_dominance.
-Print Assumptions frontier_complete_up_to_dominance.
-Print Assumptions optimal_frontier_is_globally_optimal.
-Print Assumptions frontier_invariant.
-Print Assumptions interface_collision_refutes_cost_factorization.
-Print Assumptions StructuralReindex.reindex_composes.
-Print Assumptions StructuralReindex.pack_readback.
-Print Assumptions StructuralReindex.packing_emits_in_slot_order.
-Print Assumptions StructuralReindex.forward_segments_compose.
-Print Assumptions contextual_cost_replacement.
-Print Assumptions certified_successors_legal.

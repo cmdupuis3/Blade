@@ -594,25 +594,20 @@ At extent five, Blade's fusion witness has $15+25=40$ kernel evaluations for sep
 A coarse numerical relation can also erase distinctions used in an orbit lower bound. The frontier theorem does not need that bound; it compares valid generated plans. Proving optimality against \emph{all} permitted programs additionally requires a lower bound in the same observation and numerical model.
 
 \section{Verification status}
-The companion \texttt{BladeCompositionalOptimization.v} proves pointwise reindexing laws, unsigned packing/readback and forward-enumeration lemmas, an executable pruner, cost monotonicity, pruning and frontier coverage, optimality at a fixed depth for monotone objectives, and preservation of a supplied semantic invariant. It uses only the standard library.
+The companion \texttt{BladeCompositionalOptimization.v} proves pointwise reindexing and unsigned packing/readback laws under assumed rank/enumerate bijections and reconstruction; these are not linked to BladeDMWF's proved bijections. Same-state componentwise dominance is a partial order. The pruning and frontier theorems establish coverage of exhaustive candidates and preservation of an optimum for every \texttt{cost\_le}-monotone objective at one fixed depth. These guarantees also hold for \texttt{prune := id}: no antichain or size bound, or comparison across depths, is proved. The composite theorem above remains a paper proof: the frontier successor relation is not tied to the certified-successor filter, and neither the layout bridge nor materialization instantiates its semantic invariant.
 
-\texttt{BladeLayoutOptimizationBridge.v} imports BladeLayout and the companion. It applies the existing minimum-selection lemmas to a filtered schedule list, proves the admissible-unfiltered-minimizer special case, and supplies a conditional resource-cost bridge and contextual cost replacement. The admission checker, its connection to real lowering, and the resource factorization remain explicit hypotheses. Neither file implements Blade's compiler, a complete syntax/type system, signed-carrier transport, or a verified hardware cost model. Neither contains an axiom declaration or an \texttt{Admitted}.
+\texttt{BladeLayoutOptimizationBridge.v} proves argmin properties over an admissible filter of BladeLayout schedules. Its \texttt{existing\_canon\_if\_admissible} directly reuses \texttt{canonical\_is\_cost\_minimal}. The schedule type carries no direction and admission is an opaque Boolean predicate; forward traversal legality is supplied by \texttt{checker\_sound}, not established by the filter. Resource dominance requires \texttt{resource\_factor} and \texttt{resource\_monotone}. No concrete traversal checker, compiler lowering, or hardware cost model is verified.
 
-\texttt{BladeStructuralIdentity.v} checks the small oriented-key, alias,
-sharing-dependent-layout, and snapshot model. \texttt{BladeMaterialization.v}
-adds 21 results: finite-buffer readback with reconstruction actions and
-structural zeros, scalar and graph congruence, arbitrary retention-policy
-equivalence, ordered effect/snapshot observation preservation, and the
-snapshot and unconsumed-failure boundary results. No effectful-kernel
-extraction, traversal scheduler, or physical old-version implementation is
-claimed verified.
+\texttt{BladeStructuralIdentity.v} proves oriented-key laws (transpose involution and preservation of origin/epoch), the key-copy update and its read corollary, and definitional same/distinct-key layout selection. Computed witnesses distinguish the selected layouts and refute symmetry for distinct outer-addition operands. No theorem connects compact layout selection to symmetric reads of a licensed kernel. There is no mutation transition and epoch is never incremented; the snapshot example compares supplied before/after functions. The paper's alias-substitution theorem is not mechanized beyond the key-copy update lemma.
+
+\texttt{BladeMaterialization.v} proves \texttt{packed\_read\_equals\_virtual}: finite tabulation reads back its generating cells under \texttt{locate\_bound}, with structural zeros ahead of reconstruction actions. Congruence lifts this to producer graphs and an unchanged ordered effect/snapshot skeleton over a persistent functional store; \texttt{materialization\_elimination} equates final store, trace, and result for every retention policy. Both retained and eliminated readers are defined from the same scalar tree over the same predecessor environment. No operational retention, allocation/evaluation counts, lifetimes, or physical old-version availability are modelled. Pure nodes never read live mutable backing and scalar operations are total, so failing/effectful cells and source-to-graph extraction remain outside the theorem. The snapshot theorem includes a store write but no pure-block elimination; the unused-abort theorem distinguishes an explicit abort from an empty return.
 
 The four modules are registered on branch
 \texttt{codex/structural-transpose-proofs} and compile with Rocq 9.0.1.
 The preceding development was kernel-checked and audited at 2,184 results.
 The new materialization module and its dependencies passed independent kernel
 checking, and the complete extended tower passed the assumption audit at
-2,205 results. Validation records accompany the proof sources. The cost-only labels have existential path
+2,205 results. The cost-only labels have existential path
 witnesses through exhaustive-generation membership; an implementation should
 retain backpointers.
 

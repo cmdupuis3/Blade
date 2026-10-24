@@ -6,28 +6,6 @@ and `coqchk`.
 
 Build: `coq_makefile -f _CoqProject -o Makefile && make`.
 
-The structural-transpose extension adds four scoped models:
-`BladeStructuralIdentity.v` (18 results) formalizes alias-preserving oriented
-value keys, sharing-dependent result layouts, and the snapshot/live-view
-distinction. `BladeCompositionalOptimization.v` (35) proves reindexing and
-packing laws plus sound frontier pruning and optimality at a fixed depth of
-a supplied transition system. `BladeLayoutOptimizationBridge.v` (10) reuses
-BladeLayout's schedule minimum and forward reduction results under an
-explicit structural traversal admission predicate. Its resource replacement
-theorem additionally requires resource factorization and monotonicity.
-`BladeMaterialization.v` (21) proves equality of actual finite canonical
-buffer reads and lexical deferred reads, including reconstruction actions
-and structural zeros. Arbitrary retention policies preserve finite producer
-graph observations. In an unchanged ordered effect/snapshot skeleton they
-also preserve the final store, event trace, and returned values or failure.
-Pure scalar bodies must be total; extraction of failing/effectful kernels,
-physical availability of old versions, and traversal legality are separate
-obligations. See [the implementation plan](plans/plan-identity-transpose-compute.md).
-These files do not verify F# identity propagation, the admission checker, or
-a hardware cache model. In particular, forward curried traversal is not a
-requirement that every conversion kernel write destination addresses in
-increasing order. See the individual files for the quantified obligations.
-
 Rules of this document:
 
 - The `.v` files are canonical; this document is the map. Every claim here
@@ -73,6 +51,10 @@ Rules of this document:
 | The theory's remaining items (plan items 3–7) | BladeTransport, BladeAttain, BladeInduction, BladeLicence, BladeBoundary | the licence group through every combinator (`<*>` glues identity groups at the seam, so the typed output of a product is a quotient of the product; zip, pipe, `<&>`, `<&!>` with fusion's one-traversal cost and its evaluation cost on mismatched licences; the orbit work of a pipeline attained by the composed object program and bridged program-level to BladeOrbitWork's free-model bound on the two-node schema); the orbit bound at proper subgroups (block licences composed with the binding's cut — the meet — forced and attained; the sign character at every r from adjacent anti-invariance alone; the neighbour rule of §8.3 proved sound but not optimal at (A, B, A)); the inductive side (`let rec` as the unique solution of the zero-extended recurrence on the leading axis, its work N × orbits forced and attained, the quotient surviving on the remaining axes, the `while` guard); numerics as a parameter (typing, soundness and the quotient theorem relative to a declared relation R; reordering needs a congruence, re-bracketing an identity too; a rounded reduce's licence is necessarily coarse); the scope boundary (the bound holds on every free class; separable kernels beat the query bound with n questions but not the storage bound; the converse is open) |
 | AD seam | BladeJacobian | symbolic differentiation: renaming equivariance, the Jacobian symmetry transfer, joint-pair-swap tangent symmetry, the accumulation multiplicity rule |
 | ML seam | BladeRepStatus, BladeSymPower, BladePartition, BladePointGroup | the `ml.equiv` representation-status transfer table, one soundness theorem per Rep/Inv row (abstract G-set model); the S₂ partition of a self-tensor weight space; the Sym^k/Λ^k composition-sector counts (Vandermonde, both flavours); set partitions as restricted growth strings — Bell/Stirling counts, RGS-lex extends refinement, the unitriangular witness certificate; the C₄/D₄ point-group registry — table closure, computed Frobenius–Schur indicators, the J identities, the e-weighted Hom count |
+| Structural identity (research) | BladeStructuralIdentity | oriented-key and key-copy laws; definitional sharing-dependent layout selection and computed witnesses, without layout soundness or mutation transitions |
+| Compositional optimization (research) | BladeCompositionalOptimization | fixed-depth frontier coverage and optimality for monotone objectives; reindex/packing laws under assumed bijections, without an antichain bound or a BladeDMWF instantiation |
+| Layout optimization bridge (research) | BladeLayoutOptimizationBridge | argmin over an admissible schedule filter, reusing BladeLayout minimality; traversal legality and resource factorization remain hypotheses |
+| Materialization (research) | BladeMaterialization | bounded finite-buffer readback lifted by congruence to graphs and an unchanged persistent-store effect/snapshot skeleton; no operational retention or lifetime semantics |
 
 Import structure is a DAG rooted at BladeDMWF (BladeCore and BladeLowering are
 self-contained); build order per `_CoqProject`.
@@ -2371,6 +2353,114 @@ the update a pure rescaling.
   sums of the true array about the propagated shift: the quantity the rounding
   analysis below compares against.
 
+## BladeStructuralIdentity.v (18 theorems) — oriented keys and definitional sharing
+
+A small model of keys and readers for the proposed identity/transpose design
+([implementation plan](plans/plan-identity-transpose-compute.md), §7).
+It does not verify the compiler's identity analysis.
+
+- `transpose_key_involutive`, `transpose_keeps_origin`, and
+  `transpose_key_read`: rank-two orientation toggles twice to the original
+  key, keeps origin/epoch, and swaps the read coordinates.
+  `symmetry_licenses_transpose_erasure` requires a symmetric-read hypothesis.
+- `alias_preserves_key` and `alias_preserves_read`: `bind_alias` is a key-copy
+  environment update; the destination therefore has the source's read.
+  `sharing_partition_ignores_alias_spelling` follows from that update.
+- `same_operand_selects_compact_layout` and
+  `distinct_operands_select_dense_layout` unfold `pair_result_layout`.
+  `ordinary_types_do_not_determine_result_layout` and
+  `distinct_add_outer_need_not_be_symmetric` are computed witnesses;
+  `shared_add_outer_is_symmetric` proves the separate integer-addition case.
+- `stable_source_allows_delayed_transpose` assumes equal before/after readers.
+  `mutation_distinguishes_snapshot_from_live_view` compares two supplied
+  functions at one coordinate; it is not a store-transition model.
+
+Scope: `epoch` is never incremented. No theorem connects the `SymmetricPair`
+selection to symmetric reads of a licensed kernel (`exchange_licensed` is
+only a Boolean). The paper's general alias-substitution theorem is prose;
+its mechanized counterpart here is the key-copy update lemma only.
+
+## BladeCompositionalOptimization.v (35 theorems) — fixed-depth frontier coverage
+
+A supplied transition system and cost record (work, traffic, absolute peak
+footprint), with state equality required to retain the complete continuation
+interface. This is a model, not a verified Blade optimizer.
+
+- `StructuralReindex.reindex_composes` and `reindex_inverse` give pointwise
+  transport laws. `pack_readback` and `packing_emits_in_slot_order` in that
+  module use the assumed `enumerate_rank`, `rank_enumerate` and
+  `reconstruction` laws; they do not instantiate BladeDMWF's bijections.
+- `dominates` requires equal states and componentwise `cost_le`, a partial
+  order on labels; `dominates_refl` and `dominates_trans` establish reflexivity
+  and transitivity. `compose_monotone` and `contextual_cost_replacement`
+  preserve the cost order under the specified composition operation.
+- `prune_sound` / `prune_covers`, `frontier_sound` and
+  `frontier_complete_up_to_dominance` establish membership and coverage of
+  exhaustive candidates. `optimal_frontier_is_globally_optimal` preserves
+  optimality for every `cost_le`-monotone objective at one fixed depth.
+- `frontier_invariant` preserves a supplied invariant under `initial_sound`
+  and `step_sound`; `certified_successors_legal` separately requires the
+  admission-soundness hypothesis.
+
+Scope: the coverage/optimality guarantees would also hold for `prune := id`;
+no antichain or frontier-size bound is proved. Terminals at different depths
+are not compared. `succ` is not connected to `certified_successors`, and no
+instance connects the frontier invariant to materialization or the layout
+bridge. The paper's composite theorem is therefore unmechanized.
+
+## BladeLayoutOptimizationBridge.v (10 theorems) — filtered schedule minima
+
+Reuses the pre-existing BladeLayout schedule model, whose cost is summed
+Kendall disagreement, not a cache or elapsed-time model.
+
+- `forward_canon_in_space`, `forward_canon_minimal` and
+  `forward_canon_certificate` give argmin properties for an admissible filter;
+  admissibility of the selected schedule requires a nonempty filtered space.
+  `existing_canon_if_admissible` directly reuses
+  `BladeLayout.canonical_is_cost_minimal` when its minimizer passes the filter.
+- `zero_order_feasible_iff_selected_zero` characterizes attainment of zero
+  schedule cost; `minimum_stride_space_spec` characterizes the retained ties.
+- `forward_reduction_certificate` re-exports
+  `BladeLayout.direction_is_free_gauge` under associativity and commutativity.
+  `selected_realization_is_sound_and_forward` requires `checker_sound`.
+- `layout_minimum_lifts_to_resource_dominance` and
+  `layout_replacement_in_cost_context` require `resource_factor` and
+  `resource_monotone`, which supply the resource-cost connection.
+
+Scope: the schedules carry no direction and `admissible` is an opaque Boolean
+predicate. The word "forward" in these names does not establish contiguous
+traversal: the checker and its connection to lowering remain obligations.
+Resource dominance is conditional on the stated hypotheses.
+
+## BladeMaterialization.v (21 theorems) — denotational readback and congruence
+
+The core is finite tabulation readback, lifted through a graph and an unchanged
+ordered effect/snapshot skeleton. It is not an operational retention model.
+
+- `buffer_readback` proves that an in-bounds lookup in a tabulated finite list
+  returns its generating cell. `packed_read_equals_virtual` applies it through
+  a descriptor using `locate_bound`. `structural_zero_survives_elimination`
+  keeps the structural-zero branch ahead of reconstruction actions.
+- `scalar_congruent`, `realization_congruent` and `graph_policy_equivalence`
+  lift readback to fixed scalar trees and producer graphs;
+  `pure_graph_materialization_elimination` equates their observed reads for
+  every retention policy.
+- `program_policy_equivalence` and `materialization_elimination` equate the
+  entire observation (final store, ordered trace and returned result or abort)
+  for an unchanged program skeleton over a persistent functional store.
+- `snapshot_read_preserved_by_later_write` models a store write followed by
+  reading a persistent snapshot. It contains no `PureBlock` elimination.
+  `unconsumed_failure_cannot_be_erased` distinguishes an explicit abort from an
+  empty return; it does not prove preservation of a failing unrequested cell.
+
+Scope: both branches of `realize` are readers defined from the same scalar
+producer tree over the same predecessor environment; the retained branch adds
+finite tabulation and lookup. No allocation or evaluation counts, physical
+retention, lifetimes, or availability of overwritten backing are modelled.
+Pure nodes read their environment, never live mutable backing, and scalar
+operations are total. Failing/effectful cells, their source-to-graph extraction,
+and legal traversal require separate proofs.
+
 ## Outside the tower: `proofs/reals/BladeSmoothRank.v` (24 theorems, conditional)
 
 **Not counted above. Not in `_CoqProject`. Not covered by "no axioms".** It
@@ -2647,6 +2737,23 @@ values: these do not depend on `-ffp-contract`.
   — NaN where the totalized reals give 0.
 
 ## What remains unproved
+
+The structural-transpose models leave these obligations open:
+
+- `BladeStructuralIdentity`: layout soundness linking key equality and a kernel
+  law to symmetric reads; mutation/version transitions and general alias
+  substitution beyond the `bind_alias` update.
+- `BladeMaterialization`: source-to-graph lowering; failing or effectful cells;
+  live reads of mutable backing; physical availability of old versions,
+  allocation/evaluation counts and lifetimes. Persistent snapshot readers do
+  not discharge these operational obligations.
+- `BladeCompositionalOptimization`: the `rank`/`enumerate` link to BladeDMWF
+  (and BladeMixedRadix), antichain/size guarantees, and comparison across
+  depths. The paper's composite compositional theorem remains paper-only:
+  `succ`, `certified_successors`, the layout bridge and the materialization
+  invariant are not instantiated together.
+- `BladeLayoutOptimizationBridge`: a concrete traversal admission checker and
+  its soundness, plus resource factorization/monotonicity for actual plans.
 
 Still open, from `docs/plans/plan-one-model-surface-calculus.md`: the surface
 calculus beyond its structure-first fragment (T-dimensions and `irank` slices,
