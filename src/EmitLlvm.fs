@@ -6525,7 +6525,15 @@ and private applyKernelFramed (c: Ctx) (framed: bool) (cl: IRCallable) (args: KA
     // The inlined body is the callable the C++ lane would have called, so it
     // gets that callable's frame (see Shadow frames).
     if framed then framePush c cl.SourceName
-    let v = emitExpr c cl.Body
+    // A NAMED FUNCTION in kernel position (a fold's `reduce(w, gsel, s)`,
+    // a repro twin of one): the C++ lane CALLS it, so its guards are located
+    // at its own declaration -- here too (gap G76, W4B-D: this lane used to
+    // locate them at the fold's declaration). A lambda (`__lambda_<id>`) keeps
+    // its enclosing declaration, as before.
+    let named =
+        not (cl.Name.StartsWith "__lambda")
+        && ((Blade.IR.declSpanOf cl.Name).StartLine > 0 || (Blade.IR.declSpanOf cl.SourceName).StartLine > 0)
+    let v = if named then withCalleeDecl c cl (fun () -> emitExpr c cl.Body) else emitExpr c cl.Body
     if framed then framePop c
     v
 

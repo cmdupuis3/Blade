@@ -1771,7 +1771,47 @@ let runCliSmokeTests () : TH.BlockResult =
                   ("block_tuple", blockFn true, bl8002, None, [ "cap" ], [])
                   ("block_plain", blockFn false, bl8002, None, [ "cap" ], [])
                   ("a7c_default", a7c, bl8002, Some 5, [ "kernel" ], [])
-                  ("a7c_kept_inline", a7c, bl8002, Some 5, [ "kernel" ], [ ("BLADE_EPILOGUE_LEGS", "1") ]) ]
+                  ("a7c_kept_inline", a7c, bl8002, Some 5, [ "kernel" ], [ ("BLADE_EPILOGUE_LEGS", "1") ])
+                  // W4B-D (the second Codex look of W4-3, NEW 4): a PROGRAM-WRITTEN
+                  // name that merely starts with `lambda` is a named callable, located
+                  // at its own declaration in every lane (the interpreter's
+                  // anonymous test used to be a prefix test)
+                  ("lname_tuple", (matchFn "" mGuard "(m, m + 1)").Replace("function cls(", "function lambda_guard(") + "let (a, b) = lambda_guard(4, 1)\n", bl8002, Some 1, [ "lambda_guard" ], [])
+                  ("lname_plain", (matchFn " -> Int64" mGuard "m + 1").Replace("function cls(", "function lambda_guard(") + "let a = lambda_guard(4, 1)\n", bl8002, Some 1, [ "lambda_guard" ], [])
+                  ("lname_let", "let lambda_kernel = lambda(i: Int64) -> match i with\n    | 5 -> 1\nlet base = [10, 20, 30]\nlet a = lambda_kernel(base(0) - 6)\n", bl8002, Some 1, [ "lambda_kernel" ], [])
+                  // ...and a MULTI-MODULE program (NEW 3): a guard raised in an
+                  // IMPORTED function's body is located at that function's line in
+                  // ITS file (GuardLib.blade, written below) -- module qualification
+                  // copies the program record, and the declaration table travels in
+                  // it -- through a destructuring call, a plain call (BL8002) and a
+                  // ragged peel (BL8003)
+                  ("mm_tuple", "import GuardLib\nlet (a, b) = GuardLib.classify(4)\n", bl8002, Some 3, [ "classify" ], [])
+                  ("mm_plain", "import GuardLib\nlet a = GuardLib.pick(4)\n", bl8002, Some 8, [ "pick" ], [])
+                  ("mm_peel", "import GuardLib\nlet keys: Array<GuardLib.Region like GuardLib.Row> = [0, 2, 0, 2]\nlet vals: Array<Int64 like GuardLib.Row> = [1, 2, 3, 4]\nlet t = GuardLib.agg(keys, vals)\n", bl8003, Some 15, [ "agg" ], [])
+                  // an IMPORTED fold kernel folded in a `where repro` body runs its repro
+                  // TWIN (gap G80): the first failure, its location in the defining
+                  // module's file and the frames are the origin's
+                  ("mm_fold", "import GuardLib\nlet w: Array<Int64 like Idx<3>> = [4, 0, 2]\nfunction folded() where repro -> Int64 = reduce(w, GuardLib.idiv, 100)\nlet s = folded()\n", bl8013, Some 21, [ "idiv"; "folded" ], [])
+                  // ...and a GUARD in the twin, located at the ORIGIN's declaration (the
+                  // twin's span is copied from it after module qualification)
+                  // a guard in a NAMED fold kernel used OUTSIDE a repro body: the C++ lane
+                  // calls the function, so it is located at its declaration -- the LLVM
+                  // lane, which inlines the kernel, used to say the fold's line (W4B-D
+                  // found it; EmitLlvm.applyKernelFramed now takes the callee's declaration)
+                  ("fk_local", "let w: Array<Int64 like Idx<3>> = [4, 0, 2]\nfunction gsel(a: Int64, b: Int64) -> Int64 = {\n    let m = match b with\n        | 5 -> 1\n    a + m\n}\nfunction folded() -> Int64 = reduce(w, gsel, 100)\nlet s = folded()\n", bl8002, Some 2, [ "gsel"; "folded" ], [])
+                  ("mm_foldguard", "import GuardLib\nlet w: Array<Int64 like Idx<3>> = [4, 0, 2]\nfunction folded() where repro -> Int64 = reduce(w, GuardLib.gsel, 100)\nlet s = folded()\n", bl8002, Some 22, [ "gsel"; "folded" ], []) ]
+            // the imported module of the mm_ cases; its line numbers are pinned above
+            File.WriteAllText(Path.Combine(dir, "GuardLib.blade"),
+                "module GuardLib\n\nfunction classify(i: Int64) = {\n    let m = match i with\n        | 5 -> 1\n    (m, m + 1)\n}\n"
+                + "function pick(i: Int64) -> Int64 = {\n    let m = match i with\n        | 5 -> 1\n    m + 1\n}\n"
+                + "type Region = Idx<3>\ntype Row = Idx<4>\n"
+                + "function agg(k: Array<Region like Row>, v: Array<Int64 like Row>) -> Int64 = {\n"
+                + "    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
+                + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b) |> compute\n"
+                + "    reduce(s, (+))\n}\n"
+                + "function idiv(a: Int64, b: Int64) -> Int64 = a / b\n"
+                + "function gsel(a: Int64, b: Int64) -> Int64 = {\n    let m = match b with\n        | 5 -> 1\n    a + m\n}\n")
+            let locFileOf (prog: string) = if prog.StartsWith "mm_" then "GuardLib" else prog
             let failureLines (e: string) =
                 e.Replace("\r\n", "\n").Split('\n')
                 |> Array.map (fun l -> if l.StartsWith "[stderr]: " then l.Substring 10 else l)
@@ -1784,7 +1824,7 @@ let runCliSmokeTests () : TH.BlockResult =
                 File.WriteAllText(Path.Combine(dir, prog + ".blade"), src)
                 let wantLines =
                     [ errLine ]
-                    @ (match line with Some n -> [ $"  --> {prog}.blade:{n}" ] | None -> [])
+                    @ (match line with Some n -> [ $"  --> {locFileOf prog}.blade:{n}" ] | None -> [])
                     @ (frames |> List.map (fun f -> "  at " + f))
                 let laneLines =
                     [ for llvm in [ null; "1" ] do
@@ -1799,7 +1839,16 @@ let runCliSmokeTests () : TH.BlockResult =
                         match fst (Blade.Lowering.lowerFileDiag path src) with
                         | Error _ -> ("interpreter", false, [ "<lowering failed>" ])
                         | Ok (ir, _) ->
-                            let res = Blade.Interp.Run.runProgram ir prog Blade.Interp.Value.defaultLimits
+                            // the program is run AFTER another program's lowering
+                            // replaced this flow's ambient declaration table, and in
+                            // ANOTHER flow (a Task, as the interpreter differential
+                            // runs it): the table it locates guards from is the one
+                            // the program carries (IRProgram.DeclSpans), never an
+                            // ambient one (the second Codex look of W4-3, NEW 3)
+                            Blade.Lowering.lower "function decoy(i: Int64) -> Int64 = i + 1\nlet zz = decoy(1)\n" |> ignore
+                            let res =
+                                System.Threading.Tasks.Task.Run(fun () ->
+                                    Blade.Interp.Run.runProgram ir prog Blade.Interp.Value.defaultLimits).Result
                             ("interpreter", res.ExitCode <> 0, failureLines res.Stderr |> List.map normLoc)
                     finally
                         for (k, prior) in guards do Environment.SetEnvironmentVariable(k, prior)
@@ -1811,6 +1860,36 @@ let runCliSmokeTests () : TH.BlockResult =
                     (match bad with
                      | (tag, ran, ls) :: _ -> $"""{tag}: ran={ran}: {String.concat " | " ls}"""
                      | [] -> String.concat " | " firstLines)
+            // ...and the PLANNED paths those fixtures cross (the second Codex look
+            // of W4-3, NEW 5): T3's aggregate-only grouping APPLIES to the
+            // gk / peel fixtures with the gate on (so the planned guards are the
+            // ones located) and is disabled with it off; the A7c fixture records
+            // NO applied producer-input-leg plan in either arm -- its callee may
+            // fail, so the call stays a call and its guard the function's. (mm_peel's
+            // imported gg is NOT a T3 path: its key is a parameter whose call site is
+            // in another module, which v1 does not audit -- the ordinary peel runs.)
+            for prog in [ "gloc_tuple"; "gloc_plain"; "eloc_tuple"; "eloc_plain" ] do
+                let fn = "agg"
+                let on = planned prog fn (envOf null null false [])
+                let off = planned prog fn (envOf null "0" false [])
+                recordCase $"cli: guard location ({prog}) G76: T3's grouping is the planned path -- applied with the gate on, disabled off"
+                    (on = "applied" && off = "disabled") $"on: {on}; off: {off}"
+            // A7c: the plan RUNS (exit 0) and says what it did with the region --
+            // the sibling pass joins the two INPUT folds (`reduce(x, (+)) +
+            // reduce(y, (+))`, applied, 2 folds) WITHOUT inlining `kernel` (a
+            // callee that may fail is not inlined, so there is no producer for
+            // A7c's legs to ride and no `[epilogue-legs v1]` record at all) --
+            // and no producer-input-leg plan is applied, in either arm
+            for (prog, extra) in [ ("a7c_default", []); ("a7c_kept_inline", [ ("BLADE_EPILOGUE_LEGS", "1") ]) ] do
+                let (code, o, e) = spawnWith (envOf null null false extra) dir [ "plan"; $"{prog}.blade" ]
+                let ls = (o + e).Replace("\r\n", "\n").Split('\n')
+                let sibling = ls |> Array.filter (fun l -> l.Contains "[sibling-folds v1]" && l.Contains ": applied [2 folds over ")
+                let legs = ls |> Array.filter (fun l -> l.Contains "[epilogue-legs v1]")
+                let applied = legs |> Array.filter (fun l -> l.Contains ": applied [")
+                let ok = code = 0 && sibling.Length = 1 && Array.isEmpty applied
+                recordCase $"cli: guard location ({prog}) G76: the plan runs, joins the two input folds without inlining the failing callee, and applies no producer-input-leg plan"
+                    ok
+                    $"plan exit {code}; sibling joins applied: {sibling.Length}; epilogue-legs records {legs.Length}, applied {applied.Length}"
             // THE CANCELLATION FIXTURE, every arm (review finding 6): exit 0,
             // the route, and the exact expected value with its bits.
             // prodsum(s, s) with s = (the 1e16 group's sum, 1.0): the chain

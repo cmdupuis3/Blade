@@ -264,7 +264,15 @@ interpreter's operation sequence, bit for bit -- is asked for, never assumed:
 
 - per function, `where repro`: the emitted body is compiled without
   contraction, never re-inlined into a contracting caller, and declines
-  reordered folds and library routes (features.md, `where repro`);
+  reordered folds and library routes (features.md, `where repro`). The
+  demand belongs to each fold the body PERFORMS, whatever its kernel: a
+  `reduce(xs, add)` in the body whose `add` is declared elsewhere (with
+  `comm`, even `omp`) keeps the ascending chain there, while `add`'s other
+  uses keep their licence (gap G80). The one kernel this cannot reach is a
+  function-typed PARAMETER (the kernel is whatever the caller passes): both
+  compiled lanes refuse such a fold (BL7004 deferred; BL9002 stored, a
+  pre-existing defect), so no reordered form of it exists. It is not
+  transitive: a function the body CALLS is repro only if it says so itself;
 - per build, `BLADE_FP_REPRO=1` (spelled `BLADE_FP_REASSOC=0` too): every fold
   keeps the serial association, the threaded fold forms included (each prints
   the `[omp] requested but emitted serial` census line); add
@@ -1480,13 +1488,19 @@ the annotation hook only.
   empty one panics BL8003 at the fold. A fused fold over a DEFERRED
   computation (a `(+)` / `(*)` section; `<&!>` join legs, the rank-k full
   fold) is seeded by the implementation, and the seed depends on the ROUTE
-  (gap G74): on a strict route -- `BLADE_FP_REPRO=1`, or inside a
-  `where repro` function, where no lane may reorder the fold -- the `(+)`
+  (gap G74): on a strict route -- one on which no lane may reorder the fold:
+  `BLADE_FP_REPRO=1`; inside a `where repro` function; a fold whose deferred
+  map body may WRITE (its evaluations are ordered side effects, §5.2, so
+  even the default build keeps the serial chain); the rank-k full fold over
+  a stored array, whose accumulator loop is serial in every build -- the `(+)`
   seed is the EXACT identity, `-0.0` (`(-0.0, -0.0)` complex, `0` integer),
   §2.4's identity insertion, so the chain is the left fold of the cells bit
   for bit (an all-`-0.0` row folds to `-0.0`); on a licensed route it is
   `+0.0`, and the sign of a zero result is the licence's (§2.4, "Fast by
-  default"). Its EMPTY fold is that seed: the deferred terminal has no BL8003
+  default") -- also where a lane happens to emit a LICENSED fold serially for
+  want of a vector form (a join over a streamed source, a multi-level or
+  mixed-operator join): the route is the licence's, not the emitted shape's
+  (gap G74 records these). Its EMPTY fold is that seed: the deferred terminal has no BL8003
   guard, so an empty deferred sum is `-0.0` on a strict route and `+0.0` on a
   licensed one -- the two spellings keep distinct empty-input rules
   (features/sql.md §10). Under the default `n = 1`, an anonymous

@@ -1606,7 +1606,7 @@ let resolveTypedZerosModule (structFields: string -> (string * IRType) list opti
         let mutable hit = false
         let scan (b: IRExpr) =
             if not hit then
-                iterIRExpr (fun e -> match e with IRZero _ | IRAddIdentity _ -> hit <- true | _ -> ()) b
+                iterIRExpr (fun e -> match e with IRZero _ | IRUnseededSeed _ -> hit <- true | _ -> ()) b
         modul.Functions |> List.iter (fun f -> scan f.Body)
         modul.Bindings |> List.iter (fun b -> scan b.Value)
         hit
@@ -1655,25 +1655,23 @@ let resolveTypedZerosModule (structFields: string -> (string * IRType) list opti
             match fromKernel |> Option.orElse (partnerZero comp) with
             | Some lit -> IRReduceCompute (comp, k, lit)
             | None -> IRReduceCompute (comp, k, z)
-        // THE STRICT SEED OF AN UNSEEDED FOLD in a generic body (gap G74;
-        // Lowering.lowerUnseededSeed): the instance's EXACT identity -- by its
-        // own type once concrete, else by the specialized kernel's result /
-        // the operand's element, as the zero seed above.
-        | IRAddIdentity ty when not (isOpen ty) ->
-            addIdentityLiteralOf ty |> Option.defaultValue e
-        | IRReduceCompute (comp, k, (IRAddIdentity ty as z)) when isOpen ty ->
+        // ...and the same open seed behind the UNSEEDED-fold mark (gap G74;
+        // Lowering.lowerUnseededSeed): the BASE becomes the instance's zero
+        // and the mark its type; the mark stays for
+        // Lowering.resolveUnseededSeedsModule, which picks the route's seed.
+        | IRReduceCompute (comp, k, IRUnseededSeed ((IRZero ty as z), uty, r)) when isOpen ty ->
             let fromKernel =
                 match exprTypeIfKnown k with
-                | Some (FuncElem (_, ret)) -> addIdentityLiteralOf ret
+                | Some (FuncElem (_, ret)) -> zeroLiteralOf ret |> Option.map (fun l -> (l, ret))
                 | _ -> None
             let fromPartner () =
                 match exprTypeIfKnown comp with
-                | Some (ArrayElem a) -> addIdentityLiteralOf a.ElemType
-                | Some t -> addIdentityLiteralOf t
+                | Some (ArrayElem a) -> zeroLiteralOf a.ElemType |> Option.map (fun l -> (l, a.ElemType))
+                | Some t -> zeroLiteralOf t |> Option.map (fun l -> (l, t))
                 | None -> None
             match fromKernel |> Option.orElse (fromPartner ()) with
-            | Some lit -> IRReduceCompute (comp, k, lit)
-            | None -> IRReduceCompute (comp, k, z)
+            | Some (lit, t) -> IRReduceCompute (comp, k, IRUnseededSeed (lit, t, r))
+            | None -> IRReduceCompute (comp, k, IRUnseededSeed (z, uty, r))
         | _ -> e
     let bareArrayZero (e: IRExpr) : IRExpr =
         match e with
@@ -1685,7 +1683,6 @@ let resolveTypedZerosModule (structFields: string -> (string * IRType) list opti
     let fallback (e: IRExpr) : IRExpr =
         match e with
         | IRZero ty when isOpen ty -> IRLit (IRLitFloat 0.0)
-        | IRAddIdentity ty when isOpen ty -> IRLit (IRLitFloat -0.0)
         | _ -> e
     let rewrite b = b |> mapIRExpr resolve |> mapIRExpr bareArrayZero |> mapIRExpr fallback
     { modul with
