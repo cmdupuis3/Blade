@@ -1361,48 +1361,7 @@ let one = contains(evens, 44)
                         if got <> r.Hosts then fail name ($"""hosts [{String.concat ", " got}], want [{String.concat ", " r.Hosts}]""")
                         else pass name ($"""{String.concat ", " got}: init -> report -> probes -> fini"""))
 
-    printSubHeader "call argument order (gaps G57 / G79)"
-    // G79: an ORDINARY call (no `|> compute` argument) with two failing
-    // arguments evaluates them LEFT TO RIGHT in this lane -- the checked cast
-    // (BL8006) before the later division by zero (BL8013) -- on the
-    // out-of-line and the capturing-inline path alike (the interpreter agrees;
-    // the C++ lane's order is unspecified there, g++ runs right to left: the
-    // open G79 row). Run, not read: the emitted guard order is not the
-    // executed order. Skipped without clang.
-    let mutable skipped = 0
-    let ordinaryCall (inlined: bool) =
-        "type Row = Idx<1>\n"
-        + "let a: Array<Int64 like Row> = [1]\n"
-        + "let z: Array<Int64 like Row> = [0]\n"
-        + "let base: Array<Int64 like Row> = [100]\n"
-        + (if inlined then "let f = lambda(k: Int64, m: Int64) -> k + m + base(0)\n"
-           else "function f(k: Int64, m: Int64) -> Int64 = k + m\n")
-        + "let r = f(a((a(0) : Row)), 1 / z(0))\n"
-    let firstAbort name (source: string) (want: string) =
-        match Build.resolveClang () with
-        | None -> skipped <- skipped + 1; resultLine Skip name "no clang (BLADE_LLVM_CLANG)"
-        | Some _ ->
-        match emitUnder [] "facts" source with
-        | Error e -> fail name e
-        | Ok ll ->
-            let dir = Path.Combine("generated_cpp_tests", "llvm_facts")
-            Directory.CreateDirectory dir |> ignore
-            EmitLlvm.deployShim dir
-            let llFile = Path.Combine(dir, "facts_" + name + ".ll")
-            File.WriteAllText(llFile, ll)
-            match Build.compileLlvmProgram llFile dir with
-            | Error e when e.StartsWith "Skipped:" -> skipped <- skipped + 1; resultLine Skip name e
-            | Error e -> fail name ("llvm compile: " + (if e.Length > 300 then e.Substring(0, 300) else e))
-            | Ok exe ->
-                match runExeCapture exe with
-                | Error e -> fail name e
-                | Ok (code, _, err) ->
-                    let first = err.Replace("\r\n", "\n").Split('\n') |> Array.tryFind (fun l -> l.StartsWith "error[")
-                    match first with
-                    | Some l when code <> 0 && l.StartsWith ("error[" + want + "]") -> pass name l
-                    | other -> fail name ($"exit {code}, first error {other}, wanted {want}")
-    firstAbort "g79_ordinary_call_left_to_right_out_of_line" (ordinaryCall false) "BL8006"
-    firstAbort "g79_ordinary_call_left_to_right_inlined" (ordinaryCall true) "BL8006"
+    printSubHeader "call argument order (gap G57; G79's run checks are runLlvmCallOrderRunTests)"
     // G57: the ordered path (a call holding an explicit compute and a bare
     // deferred argument) needs the call to be its statement's WHOLE value in
     // main; nested in an expression it is refused by name, fail closed.
@@ -1441,9 +1400,69 @@ let one = contains(evens, 44)
      | Error e -> fail "g75_function_reads_unforced_map_privately" e)
 
     printFooter "LLVM Fact Layer"
-        [ $"{passed} passed"; $"{failed} failed"; $"{skipped} skipped" ]
-    { Block = "LLVM Fact Layer"; Passed = passed; Failed = failed; Skipped = skipped
+        [ $"{passed} passed"; $"{failed} failed"; "0 skipped" ]
+    { Block = "LLVM Fact Layer"; Passed = passed; Failed = failed; Skipped = 0
       FailedNames = failedNames }
+
+/// Gap G79: an ORDINARY call (no `|> compute` argument) with two failing
+/// arguments evaluates them LEFT TO RIGHT in the llvm lane -- the checked cast
+/// (BL8006) before the later division by zero (BL8013) -- on the out-of-line
+/// and the capturing-inline path alike (the interpreter agrees; the C++ lane's
+/// order is unspecified there, g++ runs right to left: the open G79 row). Run,
+/// not read: the emitted guard order is not the executed order.
+///
+/// Its own block, NOT the fact layer: `test llvm goldens` (the fact layer's
+/// CI step, on Linux) is the toolchain-free gate and must spawn no compiler.
+/// Skipped without clang.
+let runLlvmCallOrderRunTests () : BlockResult =
+    printHeader "LLVM Call Argument Order (G79, compiled and run)"
+    let block = "LLVM Call Argument Order"
+    let mutable passed = 0
+    let mutable failed = 0
+    let mutable skipped = 0
+    let mutable failedNames = []
+    let pass name detail =
+        passed <- passed + 1
+        resultLine Pass name detail
+    let fail name detail =
+        failed <- failed + 1
+        failedNames <- failedNames @ [ name ]
+        resultLine Fail name detail
+    let ordinaryCall (inlined: bool) =
+        "type Row = Idx<1>\n"
+        + "let a: Array<Int64 like Row> = [1]\n"
+        + "let z: Array<Int64 like Row> = [0]\n"
+        + "let base: Array<Int64 like Row> = [100]\n"
+        + (if inlined then "let f = lambda(k: Int64, m: Int64) -> k + m + base(0)\n"
+           else "function f(k: Int64, m: Int64) -> Int64 = k + m\n")
+        + "let r = f(a((a(0) : Row)), 1 / z(0))\n"
+    let firstAbort name (source: string) (want: string) =
+        match Build.resolveClang () with
+        | None -> skipped <- skipped + 1; resultLine Skip name "no clang (BLADE_LLVM_CLANG)"
+        | Some _ ->
+        match emitUnder [] "facts" source with
+        | Error e -> fail name e
+        | Ok ll ->
+            let dir = Path.Combine("generated_cpp_tests", "llvm_facts")
+            Directory.CreateDirectory dir |> ignore
+            EmitLlvm.deployShim dir
+            let llFile = Path.Combine(dir, "facts_" + name + ".ll")
+            File.WriteAllText(llFile, ll)
+            match Build.compileLlvmProgram llFile dir with
+            | Error e when e.StartsWith "Skipped:" -> skipped <- skipped + 1; resultLine Skip name e
+            | Error e -> fail name ("llvm compile: " + (if e.Length > 300 then e.Substring(0, 300) else e))
+            | Ok exe ->
+                match runExeCapture exe with
+                | Error e -> fail name e
+                | Ok (code, _, err) ->
+                    let first = err.Replace("\r\n", "\n").Split('\n') |> Array.tryFind (fun l -> l.StartsWith "error[")
+                    match first with
+                    | Some l when code <> 0 && l.StartsWith ("error[" + want + "]") -> pass name l
+                    | other -> fail name ($"exit {code}, first error {other}, wanted {want}")
+    firstAbort "g79_ordinary_call_left_to_right_out_of_line" (ordinaryCall false) "BL8006"
+    firstAbort "g79_ordinary_call_left_to_right_inlined" (ordinaryCall true) "BL8006"
+    printFooter block [ $"{passed} passed"; $"{failed} failed"; $"{skipped} skipped" ]
+    { Block = block; Passed = passed; Failed = failed; Skipped = skipped; FailedNames = failedNames }
 
 // ---------------------------------------------------------------------------
 // Block 2b: the syrk tile core, raw bits across the lanes (M6)
@@ -3560,6 +3579,7 @@ let runLlvmTests () : int =
         [ runLlvmCompareRuleTests ()
           runLlvmGoldenTests ()
           runLlvmFactTests ()
+          runLlvmCallOrderRunTests ()
           runLlvmTilesRawBitTests ()
           runSimplexAgreementTests ()
           runLlvmSimplexGate ()
@@ -3613,8 +3633,9 @@ let runLlvmCategory (cat: string) : int =
         if r.Failed + g.Failed + f.Failed + s.Failed = 0 then 0 else 1
     | "facts" ->
         let f = runLlvmFactTests ()
+        let c = runLlvmCallOrderRunTests ()
         let t = runLlvmBlockForceTwins ()
-        if f.Failed + t.Failed = 0 then 0 else 1
+        if f.Failed + c.Failed + t.Failed = 0 then 0 else 1
     | "shim" ->
         let s = runLlvmRuntimeShimTests ()
         if s.Failed = 0 then 0 else 1
