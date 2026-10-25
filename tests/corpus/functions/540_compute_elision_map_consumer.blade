@@ -1,0 +1,23 @@
+// TEST: Compute Elision Pointwise Map Consumer
+// ============================================================================
+// BLADE_COMPUTE_ELIDE's second consumer: a `|> compute` read ONCE, at its own
+// cell, by a pointwise co-iteration that is the whole value of its statement
+// (here the RETURN, and a later let). x's map becomes that operand in place
+// and elementwise fusion splices it into the consumer's nest: one loop, no
+// pool for x. The consumer itself is still stored (it is returned / folded
+// twice).
+function scale_add(a: T^1, b: T^1) -> T^1 = {
+    let x = method_for(a) <@> lambda(v) -> v * 2.0 |> compute
+    method_for(zip(x, b)) <@> lambda(p, q) -> p + q |> compute
+}
+function both(a: T^1, b: T^1) -> T^0 = {
+    let x = method_for(a) <@> lambda(v) -> v - 0.5 |> compute
+    let y = method_for(zip(b, x)) <@> lambda(p, q) -> p * q |> compute
+    reduce(y, (+)) + reduce(y, (*))
+}
+let a = [1.0, 2.0, 3.0]
+let b = [10.0, 20.0, 30.0]
+let r = scale_add(a, b)
+let s = both(a, b)
+// EXPECT: r = [12.0, 24.0, 36.0]
+// EXPECT: s = 11360.0

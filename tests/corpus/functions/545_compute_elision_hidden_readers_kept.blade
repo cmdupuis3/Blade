@@ -1,0 +1,22 @@
+// TEST: Compute Elision Declines Readers In A Seed Or A Type
+// ============================================================================
+// Two readers of a `|> compute` that the child walk does not show as a second
+// statement: the fold's own SEED (`reduce(x, (+), x(0))`), and an extent a
+// TYPE carries (`0..extents(x)`, read by y's range). Both keep x stored
+// (BLADE_COMPUTE_ELIDE declines "read again by the fold's kernel or seed" /
+// "read by an extent expression a type carries"); dropping the let would
+// leave the reader naming a binding that no longer exists.
+function seeded_by_x(a: T^1) -> T^0 = {
+    let x = method_for(a) <@> lambda(v) -> v * 2.0 |> compute
+    reduce(x, (+), x(0))
+}
+function extent_of_x(a: T^1) -> Int64 = {
+    let x = method_for(a) <@> lambda(v) -> v + 1 |> compute
+    let y = method_for(0..extents(x)) <@> lambda(v) -> v + 1 |> compute
+    let s = reduce(x, (+), 0)
+    s + reduce(y, (+), 0)
+}
+let t = seeded_by_x([1.0, 2.0, 3.0])
+let e = extent_of_x([1, 2, 3])
+// EXPECT: t = 14.0
+// EXPECT: e = 15

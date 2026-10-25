@@ -1,0 +1,24 @@
+// TEST: Compute Elision Keeps The Snapshot Across An Input Write
+// ============================================================================
+// `|> compute` commits a SNAPSHOT of its inputs: `x` reads `w` as it was at
+// the compute, so the write `w(1) = 100.0` between the compute and the fold
+// must not reach the fold. BLADE_COMPUTE_ELIDE declines ("an intervening
+// statement may write"): x keeps its pool and the fold reads the snapshot,
+// 2 + 4 + 6 = 12 -- an elided x would have read 2 + 200 + 6 = 208. The
+// write itself is visible afterwards (w1).
+function snapshot() -> T^0 = {
+    let mut w = [1.0, 2.0, 3.0]
+    let x = method_for(w) <@> lambda(v) -> v * 2.0 |> compute
+    w(1) = 100.0
+    reduce(x, (+))
+}
+function after_write() -> T^0 = {
+    let mut w = [1.0, 2.0, 3.0]
+    let x = method_for(w) <@> lambda(v) -> v * 2.0 |> compute
+    w(1) = 100.0
+    reduce(x, (+)) + w(1)
+}
+let s = snapshot()
+let w1 = after_write()
+// EXPECT: s = 12.0
+// EXPECT: w1 = 112.0

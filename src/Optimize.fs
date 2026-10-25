@@ -203,6 +203,11 @@ let hashJoinEnabled () = gateOn "BLADE_HASH_JOIN"
 /// it. BLADE_MEMBER_VERBOSE stays the membership builds' RUN-TIME switch and
 /// has no effect on the join.
 let joinReportEnabled () = Blade.Toolchain.envFlag "BLADE_JOIN_REPORT" false
+/// BLADE_COMPUTE_ELIDE=0|off keeps every function- and block-body `|> compute`
+/// stored (`elideSingleConsumerComputesModule`): the admission still runs and
+/// a compute it would have elided records `compute-elision` DECLINED
+/// ("disabled by BLADE_COMPUTE_ELIDE"). Unset = on.
+let computeElideEnabled () = gateOn "BLADE_COMPUTE_ELIDE"
 /// The C++ lane's BLAS gate (`LinAlgPatterns.blasAvailable`, which compiles
 /// after this file), installed by Lowering before the optimizer runs: the
 /// epilogue-legs planner keeps an inline only when the cell epilogue it rides
@@ -215,7 +220,7 @@ let mutable blasGateProbe : unit -> bool = fun () -> false
 /// off for its reference lane, so a new pass's gate belongs in this list the
 /// day the pass lands -- a gate missing here is a pass the differential
 /// cannot see.
-let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_HOIST"; "BLADE_HOT_ROW"; "BLADE_CELL_EPILOGUE"; "BLADE_COMPACTION_FUSION"; "BLADE_COMPACT_ROW_CLASSES"; "BLADE_SIBLING_FOLDS"; "BLADE_REC_STEP_OMP"; "BLADE_MEMBER_HOIST"; "BLADE_EPILOGUE_LEGS"; "BLADE_ORBIT_ACTIONS"; "BLADE_HASH_JOIN"; "BLADE_GROUP_AGG" ]
+let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_HOIST"; "BLADE_HOT_ROW"; "BLADE_CELL_EPILOGUE"; "BLADE_COMPACTION_FUSION"; "BLADE_COMPACT_ROW_CLASSES"; "BLADE_SIBLING_FOLDS"; "BLADE_REC_STEP_OMP"; "BLADE_MEMBER_HOIST"; "BLADE_EPILOGUE_LEGS"; "BLADE_ORBIT_ACTIONS"; "BLADE_HASH_JOIN"; "BLADE_GROUP_AGG"; "BLADE_COMPUTE_ELIDE" ]
 
 /// A gate's KNOB MIRROR: a value that keeps a pass's PREVIOUS version, or
 /// selects an opt-in variant (not the pass off), for the passes whose forms
@@ -9255,6 +9260,425 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                     | Some oid -> Map.add c.Id oid acc
                     | None -> acc) modul.DerivedFuncOrigins }
 
+// ===========================================================================
+// COMPUTE ELISION (BLADE_COMPUTE_ELIDE, plan rule `compute-elision`;
+// docs/plans/plan-identity-transpose-compute.md section 6, the P3 entry).
+//
+// Inside a function, lambda or block body every computed let is STORED: the
+// user's `|> compute` and S2's force (Lowering.forceCallableBody) both leave
+// `let x = IRCompute (map)`, and a fold over `x` stays the ordinary `IRReduce`
+// over the pool (tryInferReduceCompute's `alreadyMaterializedLet` declines the
+// splice there, because the let is built anyway). The same two lines at top
+// level without `|> compute` fuse with no pool. When `x` has exactly ONE
+// reader and that reader consumes it cell by cell, the pool buys nothing:
+//
+//   FOLD  `reduce(x, k[, s])`, the WHOLE value of a statement on x's own
+//         spine (a later let, or the spine's tail) -> the fused terminal
+//         `IRReduceCompute (map, k, seed)` -- exactly the node the checker
+//         builds for the written-out `reduce(method_for(a) <@> f, k)`, which
+//         both emitters already take inside a body -- and x's let is dropped.
+//   MAP   a pointwise map / co-iteration `IRCompute (method_for(zip(.., x, ..))
+//         <@> g)`, the whole value of such a statement, whose kernel reads x's
+//         cell exactly once -> x's map becomes that operand in place and the
+//         let is dropped; elementwise fusion, which runs NEXT, is the
+//         realization (one nest, no pool for x). Recorded after fusion ran,
+//         saying whether it spliced.
+//
+// The commitments `compute` makes (plan section 4), and how each is kept:
+//   * SNAPSHOT. The consumer reads the producer's inputs where IT runs, so
+//     nothing between the let and the consumer -- each intervening statement
+//     and the consumer statement itself (fold kernel, seed, host kernel), and
+//     the extents their types carry (`0..bump(a)`) -- may write: the shared
+//     fail-closed analysis (`scheduleMayWriteIn`, which
+//     charges a write through any name not bound inside the statement as
+//     observable) plus provider effects.
+//   * FAILURE SITE AND ORDER. Chosen rule: the producer kernel passes the
+//     closed totality whitelist (`IRTotality.auditApply`), and a co-iteration
+//     producer has literal, equal operand extents (its agreement check is the
+//     apply's one other failure), and every extent the producer's types carry
+//     is a literal, a name, an extent read or `+ - *` of those (a range bound
+//     `0..(10 / z)` declines). A total producer has nothing to fail, so
+//     moving it past output, writes-free statements or another failure is
+//     unobservable. (The alternative, "no observable event in between", was
+//     NOT taken.)
+//   * ONCE-ONLY EFFECTS. A producer that may write declines (G45).
+//   * EVALUATION COUNT. One reader, consuming each cell exactly once. A second
+//     reader, a capture, an assignment, a keyed read / view, an argument, a
+//     tuple member, a return or alias of x, a read inside a larger expression
+//     or a nested block, the fold's own seed or kernel, an extent a type
+//     carries (`0..extents(x)`): all decline. Readers are counted per REGION
+//     (a shape specialization copies a body with its let ids).
+//   * EMPTY INPUT AND THE SEED. A seeded fold returns its seed either way.
+//     An UNSEEDED builtin `(+)` / `(*)` fold is admitted only over a LITERAL
+//     extent >= 1, so an empty (or run-time) input keeps the stored fold and
+//     its BL8003 at the fold; its seed follows W4-3's route rule
+//     (Lowering.lowerUnseededSeed, G74), the seed the written-out fused fold
+//     gets: on a STRICT route (`BLADE_FP_REPRO=1`, a `where repro` region or
+//     fold kernel) the exact identity (`sfIdentitySeed`: -0.0 / 1.0, 0 / 1 --
+//     bitwise the stored, head-seeded chain); on a licensed route the BASE
+//     seed (+0.0 for a float `+`; the licence owns the signed zero, G40).
+//
+// A tree rewrite BEFORE the lane split, like elementwise fusion (charter rule
+// 2): the interpreter runs the rewritten tree too, so `test interp` cannot see
+// a miscompile here -- `blade test opt-diff` (gate off vs on) is the gate.
+// v1 elides ONE level: a producer whose operand is itself an elided
+// computation declines. Top level is out of scope (every top-level binding
+// prints, so it is materialized anyway); a top-level binding's BLOCK is in.
+// A module that holds a CUDA kernel is skipped whole (device bodies).
+// ===========================================================================
+
+let recordComputeElision (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
+    Blade.Effects.Decisions.record
+        { Blade.Effects.Rule = "compute-elision"; Version = 1; Span = Blade.Ast.noSpan
+          Subject = subject; Outcome = outcome; Evidence = evidence }
+
+/// A MAP-consumer elision, recorded once elementwise fusion has run: applied
+/// iff no application of the host kernel still carries a computed operand.
+type ComputeElisionPending = { PendingSubject: string; HostKernel: IRId; PendingEvidence: string list }
+
+let elideSingleConsumerComputesModule (programFuncs: IRCallable list) (modul: IRModule) : IRModule * ComputeElisionPending list =
+    if modul.Functions |> List.exists (fun f -> f.IsCudaKernel) then (modul, []) else
+    let pending = ResizeArray<ComputeElisionPending>()
+    let enabled = computeElideEnabled ()
+    let own = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+    let funcs = programFuncs |> List.fold (fun m f -> if Map.containsKey f.Id m then m else Map.add f.Id f m) own
+    // IRMono's fusion predicates resolve kernels module-locally and purity
+    // program-wide, exactly as fuseElementwiseChainsModule does.
+    let localCallables = System.Collections.Generic.Dictionary<IRId, IRCallable>()
+    for f in modul.Functions do localCallables.[f.Id] <- f
+    let resolver = System.Collections.Generic.Dictionary<IRId, IRCallable>()
+    for f in programFuncs do resolver.[f.Id] <- f
+    for f in modul.Functions do resolver.[f.Id] <- f
+    let resolve (k: IRExpr) = resolveCallableIn funcs k
+    let mayWrite = scheduleMayWriteIn programFuncs modul
+    let payloadOf = intervalPayloadOf modul
+    // ---- the module census (conservative: a shape specialization copies a
+    // body WITH its ids, so an id assigned, deferred or captured in any copy
+    // counts in all of them; READERS are counted per region, below) ---------
+    let assigned = System.Collections.Generic.HashSet<IRId>()
+    let deferredIds = System.Collections.Generic.HashSet<IRId>()
+    let rec rootVar (t: IRExpr) =
+        match t with
+        | IRIndex (b, _, _) | IRFieldAccess (b, _) | IRTupleProj (b, _, _) -> rootVar b
+        | IRVar (id, _) -> Some id
+        | _ -> None
+    let census (e: IRExpr) =
+        iterIRExpr (fun n ->
+            match n with
+            | IRAssign (t, _) -> (match rootVar t with Some id -> assigned.Add id |> ignore | None -> ())
+            | IRLet (id, v, _) when isDeferredForm v -> deferredIds.Add id |> ignore
+            | _ -> ()) e
+    for f in modul.Functions do census f.Body
+    for b in modul.Bindings do
+        for p in bindingPayload modul b do census p
+    let captured =
+        funcs |> Map.fold (fun acc _ f -> f.Captures |> List.fold (fun a c -> Set.add c.Id a) acc) Set.empty
+    let refsOf (x: IRId) (e: IRExpr) =
+        let mutable n = 0
+        iterIRExpr (fun m -> match m with IRVar (id, _) when id = x -> n <- n + 1 | _ -> ()) e
+        n
+    let isX (x: IRId) (e: IRExpr) = match e with IRVar (id, _) -> id = x | _ -> false
+    /// References to x inside the extent expressions types carry.
+    let extentRefsOf (x: IRId) (e: IRExpr) =
+        embeddedExtentExprs e |> List.sumBy (refsOf x)
+    /// An extent expression that cannot fail or write: a literal, a name (not
+    /// a callable, not deferred), an extent read of a name, and wrapping
+    /// integer `+ - *` / negation of those.
+    let rec plainExtent (e: IRExpr) : bool =
+        match e with
+        | IRLit _ -> true
+        | IRVar (id, ty) -> not (Map.containsKey id funcs) && not (isFunctionTyped ty) && not (deferredIds.Contains id)
+        | IRParam (_, _, ty) -> not (isFunctionTyped ty)
+        | IRExtent (IRVar (id, _), _) -> not (deferredIds.Contains id)
+        | IRExtent (IRParam (_, _, ty), _) -> not (isFunctionTyped ty)
+        | IRBinOp (_, (IRAdd | IRSub | IRMul), a, b, _) -> plainExtent a && plainExtent b
+        | IRUnaryOp (IRNeg, a) -> plainExtent a
+        | _ -> false
+    let builtinOp (c: IRCallable) : IRBinOp option =
+        match c.Params, c.Body with
+        | [ p0; p1 ], IRBinOp (_, (IRAdd | IRMul as op), IRVar (a, _), IRVar (b, _), _)
+            when (a = p0.VarId && b = p1.VarId) || (a = p1.VarId && b = p0.VarId) -> Some op
+        | _ -> None
+    let requestsParallel (c: IRCallable) =
+        c.IsOmpParallel || not c.Parallelism.IsEmpty || c.IsCudaKernel || c.IsMpiParallel
+    let staticExtents (at: IRArrayType) =
+        at.IndexTypes |> List.map (fun ix -> match ix.Extent with IRLit (IRLitInt n) -> Some n | _ -> None)
+    // What the ONE reader does with x, when it is not a consumer this pass
+    // takes: the node holding x as a direct child names it (None when no
+    // node, or more than one, does -- the caller then speaks of readers).
+    let describeRead (x: IRId) (isTail: bool) (sv: IRExpr) : string option =
+        if isX x sv then Some (if isTail then "is returned" else "is aliased by another name")
+        else
+            let found = ResizeArray<string>()
+            iterIRExpr (fun n ->
+                let (ExprShape (children, _)) = n
+                // an extent read (a bounds check's) names no consumer, and a
+                // method_for loop repeats its apply's operands
+                if children |> List.exists (isX x) && not n.IsIRExtent && not n.IsIRMethodFor then
+                    found.Add (
+                        match n with
+                        | IRIndex _ | IRSlice _ | IRShift _ | IRReverse _ | IRCurry _ -> "is read by a keyed subscript or a view"
+                        | IRApp _ -> "is passed to a call"
+                        | IRTuple _ -> "is a tuple member"
+                        | IRReduce _ -> "is folded by a reduce that is not the whole value of its statement"
+                        | IRApplyCombinator _ -> "is read by a map that is not the whole computed value of its statement, or reads it more than once"
+                        | IRProdSum _ -> "is a prodsum operand (v1 elides into a reduce or a pointwise map only)"
+                        | IRAssign _ -> "is assigned"
+                        | _ -> "")) sv
+            if found.Count = 1 && found.[0] <> "" then Some found.[0] else None
+    let nameOfLet (xid: IRId) (p: ApplyInfo) =
+        match resolve p.Kernel with
+        | Some c when c.SourceName.StartsWith "lambda in " && c.SourceName.Length > 10 -> c.SourceName.Substring 10
+        | _ -> $"__v{xid}"
+
+    // the region's own repro demand (a `where repro` body): a strict seed route
+    let regionRepro = ref false
+    // ---- one statement spine -----------------------------------------------
+    let rec descend (subject: string) (root: IRExpr) (e: IRExpr) : IRExpr =
+        match e with
+        | IRLet _ -> processSpine subject root e
+        | IRIf (c, t, f) -> IRIf (c, descend subject root t, descend subject root f)
+        | IRMatch (s, cases) -> IRMatch (s, cases |> List.map (fun c -> { c with Body = descend subject root c.Body }))
+        | _ -> e
+    and processSpine (subject: string) (root: IRExpr) (e: IRExpr) : IRExpr =
+        let rec flatten acc e =
+            match e with
+            | IRLet (id, v, b) -> flatten ((id, v) :: acc) b
+            | t -> (List.rev acc, t)
+        let (letList, tail0) = flatten [] e
+        // nested blocks and branches first: each is its own spine
+        let lets = letList |> List.map (fun (id, v) -> (id, descend subject root v)) |> Array.ofList
+        let mutable tail = descend subject root tail0
+        let dropped = System.Collections.Generic.HashSet<int>()
+        for i in 0 .. lets.Length - 1 do
+            let (xid, xv) = lets.[i]
+            match xv with
+            | IRCompute (IRApplyCombinator p) when refsOf xid root > 0 ->
+                let xn = nameOfLet xid p
+                let subj = $"{subject}.{xn}"
+                // the statement after x that first reads it (index or tail)
+                let later = [ for j in i + 1 .. lets.Length - 1 -> (Some j, snd lets.[j]) ] @ [ (None, tail) ]
+                match later |> List.tryFind (fun (_, v) -> refsOf xid v > 0) with
+                | None ->
+                    // read only outside its spine: a lifted kernel's capture
+                    recordComputeElision subj (Blade.Effects.Declined $"`{xn}` is read only outside its own block (a capture by a kernel or closure)") []
+                | Some (at, sv) ->
+                // counted per REGION: shape specializations copy a body with its ids
+                let total = refsOf xid root
+                let here = refsOf xid sv
+                let isTail = at.IsNone
+                let between = [ for j in i + 1 .. (match at with Some j -> j - 1 | None -> lets.Length - 1) -> lets.[j] ]
+                let decline (why: string) (ev: string list) = recordComputeElision subj (Blade.Effects.Declined why) ev
+                // ---- readers ---------------------------------------------------
+                if Set.contains xid captured then decline $"`{xn}` is captured by a kernel or closure" []
+                elif assigned.Contains xid then decline $"`{xn}` is assigned" []
+                // a reader hidden in a TYPE (a range extent `0..extents(x)`, an
+                // index record's extent) is invisible to the child walk
+                elif extentRefsOf xid root > 0 then decline $"`{xn}` is read by an extent expression a type carries (`extents({xn})`)" []
+                else
+                // ---- the consumer --------------------------------------------
+                let consumer =
+                    match sv with
+                    | _ when here <> total -> Error $"`{xn}` has more than one reader ({total} references; a single consumer is required)"
+                    | IRReduce (IRVar (y, _), k, init) when y = xid ->
+                        // the fold's OWN operand is its one read: another in the
+                        // kernel or the seed would outlive the dropped let
+                        if refsOf xid k + (init |> Option.map (refsOf xid) |> Option.defaultValue 0) > 0 then
+                            Error $"`{xn}` is read again by the fold's kernel or seed"
+                        else Ok (Choice1Of2 (k, init))
+                    | IRCompute (IRApplyCombinator h)
+                        when (h.Arrays |> List.filter (isX xid) |> List.length) = 1
+                             && refsOf xid h.Kernel = 0 -> Ok (Choice2Of2 h)
+                    | _ ->
+                        match describeRead xid isTail sv with
+                        | Some what -> Error $"`{xn}` {what}"
+                        | None when total > 1 -> Error $"`{xn}` has more than one reader ({total} references; a single consumer is required)"
+                        | None -> Error $"`{xn}` is read by an expression that is not a fold or a pointwise map"
+                match consumer with
+                | Error why -> decline why []
+                | Ok kind ->
+                // ---- the producer --------------------------------------------
+                let pk = resolve p.Kernel
+                let operandOk (a: IRExpr) =
+                    match a with
+                    | IRVar (id, _) -> not (deferredIds.Contains id)
+                    | IRRange _ -> true
+                    | _ -> false
+                let producerProblem =
+                    match pk with
+                    | None -> Some "the producer kernel does not resolve to a callable"
+                    | Some pkc ->
+                        if not (tilePlainInfo p) then Some "the producer is not a plain dense map or co-iteration (structured storage, symmetry, or a non-scalar kernel)"
+                        elif not (tilePlainKernel pkc p.Arrays.Length) then Some "the producer kernel declares symmetry, a parallel strategy or arity polymorphism"
+                        elif not (p.Arrays |> List.forall operandOk) then Some "an operand of the producer is not a stored array or a range (v1 elides one level; an elided or deferred operand declines)"
+                        // the extents the producer's types carry (a range bound
+                        // `0..(10 / z)`) are evaluated where it runs: they must
+                        // be as total and write-free as its kernel
+                        elif not (embeddedExtentExprs (IRApplyCombinator p) |> List.forall plainExtent) then
+                            Some "an extent of the producer is not a literal, a scalar name or an extent read (it could fail or write where the consumer runs)"
+                        else
+                        match Blade.IRTotality.auditApply resolve (fun _ -> None) deferredIds.Contains p with
+                        | Error why -> Some $"the producer kernel is not proved total ({why})"
+                        | Ok () ->
+                        if mayWrite (IRApplyCombinator p) then Some "the producer may write (a writing producer is evaluated once, at its definition: G45)"
+                        elif p.Arrays.Length > 1
+                             && (let exts = p.ArrayTypes |> List.map staticExtents
+                                 exts |> List.exists (List.exists Option.isNone) || (exts |> List.distinct |> List.length) > 1) then
+                            Some "a co-iteration producer over run-time or unequal extents (its agreement check would move to the consumer)"
+                        else None
+                match producerProblem with
+                | Some why -> decline why []
+                | None ->
+                // ---- the interval: nothing may write ---------------------------
+                let interval =
+                    (between |> List.map (fun (id, v) -> ("an intervening statement", Some id, payloadOf id v)))
+                    @ [ ("the consumer statement", at |> Option.map (fun j -> fst lets.[j]), sv) ]
+                let writer =
+                    interval |> List.tryPick (fun (who, idOpt, v) ->
+                        let prov = match idOpt with Some id -> intervalHasProviderEffect modul id | None -> false
+                        // the extents a statement's types carry run there too
+                        // (`0..bump(a)`): audited like its value
+                        if prov || mayWrite v || (embeddedExtentExprs v |> List.exists mayWrite) then Some who else None)
+                match writer with
+                | Some who -> decline $"{who} may write between the compute and its consumer (the producer would read the inputs after the write)" []
+                | None ->
+                let common =
+                    [ "producer total (IRTotality whitelist) and write-free"
+                      $"inputs unwritten between ({between.Length} intervening statement(s) and the consumer write-free, the shared write analysis)" ]
+                match kind with
+                | Choice1Of2 (k, init) ->
+                    // ---- FOLD -----------------------------------------------
+                    let outAt = match stripUnits p.OutputType with ArrayElem at -> Some at | _ -> None
+                    let fk = resolve k
+                    let fold =
+                        match outAt, fk with
+                        | None, _ -> Error "the producer does not produce an array"
+                        | Some at, _ when not (at.IndexTypes.Length = 1 && at.IndexTypes.Head.Rank = 1) ->
+                            Error "a fold over a rank >= 2 array (the stored fold peels the innermost axis; the fused terminal folds every cell)"
+                        | _, None -> Error "the fold kernel does not resolve to a callable"
+                        | _, Some fkc when fkc.Params.Length <> 2 -> Error "the fold kernel is not a two-parameter callable"
+                        | _, Some fkc when requestsParallel fkc -> Error "the fold kernel requests a parallel strategy (v1 keeps its route)"
+                        | Some at, Some fkc ->
+                            match init with
+                            | Some s -> Ok (s, "seeded: the seed is the empty result either way")
+                            | None ->
+                                let n = match at.IndexTypes.Head.Extent with IRLit (IRLitInt n) -> Some n | _ -> None
+                                let et = match at.ElemType with IRTScalar et -> Some et | _ -> None
+                                match builtinOp fkc, et, n with
+                                | None, _, _ -> Error "an unseeded fold whose kernel is not a builtin `+` / `*` (no identity seed)"
+                                | _, None, _ -> Error "an unseeded fold over a unit-carrying or non-scalar element (no identity seed is spelled)"
+                                | _, _, None -> Error "an unseeded fold over an extent not known at compile time to be >= 1 (the fused terminal would return the identity where the stored fold panics BL8003 on an empty input)"
+                                | _, _, Some n when n < 1L -> Error "an unseeded fold over an empty extent (keeps its BL8003 at the fold)"
+                                | Some op, Some et, Some n ->
+                                    // W4-3's ROUTE rule (Lowering.lowerUnseededSeed, gap
+                                    // G74), so the elided fold carries exactly the seed the
+                                    // written-out `reduce(method_for(a) <@> f, op)` gets: on a
+                                    // STRICT route (the repro build, a `where repro` region or
+                                    // kernel) the exact identity -- the head-peeled chain of
+                                    // the stored fold, bit for bit; on a licensed route the
+                                    // BASE seed (+0.0 for a float `+`: the licence's signed
+                                    // zero, G40), the emission a licensed fold already has.
+                                    let strictRoute = Blade.Toolchain.fpReproEnabled () || regionRepro.Value || fkc.IsRepro
+                                    match sfIdentitySeed op et with
+                                    | Some (seed, txt) when strictRoute ->
+                                        Ok (seed, $"unseeded over a literal extent {n} >= 1, strict route: identity seed {txt}, bitwise the unseeded chain")
+                                    | Some (seed, txt) ->
+                                        let baseSeed, baseTxt =
+                                            match op, et with
+                                            | IRAdd, ETFloat64 -> IRLit (IRLitFloat 0.0), "+0.0"
+                                            | IRAdd, ETFloat32 -> IRLit (IRLitFloat32 0.0f), "+0.0"
+                                            | _ -> seed, txt
+                                        Ok (baseSeed, $"unseeded over a literal extent {n} >= 1, licensed route: base seed {baseTxt} (the route-resolved seed of the written-out fused fold; the licence owns the signed zero, G40)")
+                                    | None -> Error "an unseeded fold over an element with no exact identity seed"
+                    match fold with
+                    | Error why -> decline why common
+                    | Ok (seed, seedNote) ->
+                        let ev = [ "single consumer fold `reduce` (the whole value of its statement)" ] @ common @ [ seedNote; "the fold reads the map in place: no pool, no separate loop" ]
+                        if not enabled then decline "disabled by BLADE_COMPUTE_ELIDE" ev
+                        else
+                            recordComputeElision subj Blade.Effects.Applied ev
+                            let folded = IRReduceCompute (IRApplyCombinator p, k, seed)
+                            dropped.Add i |> ignore
+                            match at with
+                            | Some j -> lets.[j] <- (fst lets.[j], folded)
+                            | None -> tail <- folded
+                | Choice2Of2 h ->
+                    // ---- MAP (realized by elementwise fusion) ---------------
+                    let pos = h.Arrays |> List.findIndex (isX xid)
+                    let mapProblem =
+                        match tileKernelOf localCallables h with
+                        | _ when not (Blade.Toolchain.envFlag "BLADE_FUSION" true) ->
+                            Some "elementwise fusion, the map consumer's realization, is disabled (BLADE_FUSION)"
+                        | None -> Some "the consumer's kernel is not a resolvable callable"
+                        | Some hk ->
+                            if not (tilePlainInfo h) then Some "the consumer is not a plain dense map or co-iteration"
+                            elif not (tilePlainKernel hk h.Arrays.Length) then Some "the consumer kernel declares symmetry, a parallel strategy or arity polymorphism"
+                            elif not (tilePureBody resolver Set.empty hk.Body) then Some "the consumer kernel is not repeatable"
+                            elif (match pk with Some pkc -> not (tilePureBody resolver Set.empty pkc.Body) | None -> true) then Some "the producer kernel is not repeatable"
+                            elif refsOf hk.Params.[pos].VarId hk.Body <> 1 then Some $"the consumer kernel reads `{xn}`'s cell {refsOf hk.Params.[pos].VarId hk.Body} times (exactly once is required)"
+                            elif h.Arrays.Length + p.Arrays.Length - 1 > 8 then Some "the fused operand count would exceed elementwise fusion's fan-in cap (8)"
+                            elif h.SharedIndexTypes.IsEmpty && h.Arrays.Length + p.Arrays.Length - 1 > 1 && p.SharedIndexTypes.IsEmpty then
+                                Some "the fused node would read as an outer product (no shared index records)"
+                            else None
+                    match mapProblem with
+                    | Some why -> decline why common
+                    | None ->
+                        let ev = [ "single consumer pointwise map (it reads the cell once, at its own coordinate)" ] @ common @ [ "realized by elementwise fusion: the producer is spliced into the consumer's nest, no pool for it" ]
+                        if not enabled then decline "disabled by BLADE_COMPUTE_ELIDE" ev
+                        else
+                            let repl = IRCompute (IRApplyCombinator p)
+                            let subst (e: IRExpr) = mapIRExpr (fun n -> match n with IRVar (y, _) when y = xid -> repl | n -> n) e
+                            let h' = { h with Arrays = h.Arrays |> List.map subst; Loop = subst h.Loop }
+                            let hkId = match h.Kernel with IRVar (kid, _) -> kid | _ -> -1
+                            pending.Add { PendingSubject = subj; HostKernel = hkId; PendingEvidence = ev }
+                            dropped.Add i |> ignore
+                            let v' = IRCompute (IRApplyCombinator h')
+                            match at with
+                            | Some j -> lets.[j] <- (fst lets.[j], v')
+                            | None -> tail <- v'
+            | _ -> ()
+        let kept = lets |> Array.indexed |> Array.filter (fun (i, _) -> not (dropped.Contains i)) |> Array.map snd
+        Array.foldBack (fun (id, v) acc -> IRLet (id, v, acc)) kept tail
+
+    let functions' =
+        modul.Functions |> List.map (fun f ->
+            if f.IsStatic || f.IsCudaKernel || f.IsMpiParallel || f.IsArityPoly || hasTypeVarsInSignature f then f
+            else
+                let subject = if System.String.IsNullOrEmpty f.SourceName then f.Name else f.SourceName
+                regionRepro.Value <- f.IsRepro
+                let body' = descend subject f.Body f.Body
+                regionRepro.Value <- false
+                { f with Body = body' })
+    let bindings' =
+        modul.Bindings |> List.map (fun b ->
+            match b.Value with
+            | IRLet _ | IRIf _ | IRMatch _ -> { b with Value = descend b.Name b.Value b.Value }
+            | _ -> b)
+    ({ modul with Functions = functions'; Bindings = bindings' }, List.ofSeq pending)
+
+/// The map-consumer elisions' records, once elementwise fusion has run: the
+/// host kernel survives with a computed operand only where fusion declined.
+let recordComputeElisionMapOutcomes (pending: ComputeElisionPending list) (modul: IRModule) : unit =
+    if not pending.IsEmpty then
+        let unfused = System.Collections.Generic.HashSet<IRId>()
+        let scan (e: IRExpr) =
+            iterIRExpr (fun n ->
+                match n with
+                | IRApplyCombinator info ->
+                    (match info.Kernel with
+                     | IRVar (kid, _) when info.Arrays |> List.exists (function IRCompute (IRApplyCombinator _) -> true | _ -> false) ->
+                         unfused.Add kid |> ignore
+                     | _ -> ())
+                | _ -> ()) e
+        for f in modul.Functions do scan f.Body
+        for b in modul.Bindings do scan b.Value
+        for p in pending do
+            if unfused.Contains p.HostKernel then
+                recordComputeElision p.PendingSubject
+                    (Blade.Effects.Declined "elementwise fusion did not splice the producer into the consumer (its own decline is recorded); the producer is evaluated as the consumer's operand, still once, still at the consumer")
+                    p.PendingEvidence
+            else recordComputeElision p.PendingSubject Blade.Effects.Applied p.PendingEvidence
+
 /// `programFuncs` is every callable of the PROGRAM (all modules): a pass that
 /// judges a callee's effects resolves it there, since a generic defined in
 /// one module and called from another (`from stats import mean`) is not in
@@ -9262,9 +9686,11 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
 let optimizeModule (builder: IRBuilder) (programFuncs: IRCallable list) (modul: IRModule) : IRModule =
     recordGramApplyAdvisory modul
     recordSegmentStreaming modul
-    modul
-    |> foldConstMatchesModule
+    let (elided, pendingMaps) = elideSingleConsumerComputesModule programFuncs (foldConstMatchesModule modul)
+    elided
+    // compute elision feeds its map consumers to fusion, its realization
     |> (fun m -> fuseElementwiseChainsModule m builder programFuncs)
+    |> (fun m -> recordComputeElisionMapOutcomes pendingMaps m; m)
     |> (fun m -> fuseSliceWritesModule m builder programFuncs)
     |> (fun m -> fuseRowFoldsModule m builder programFuncs)
     |> hoistKernelInvariantsModule builder programFuncs

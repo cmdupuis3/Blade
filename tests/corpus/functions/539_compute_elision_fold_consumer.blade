@@ -1,0 +1,37 @@
+// TEST: Compute Elision Fold Consumer
+// ============================================================================
+// plan-identity-transpose-compute P3 entry (BLADE_COMPUTE_ELIDE). Inside a
+// function, lambda or block body, a `|> compute` whose ONE reader is a fold
+// over it is read in place: `reduce(x, (+))` becomes the fused terminal over
+// x's map (no pool for x), the node the written-out
+// `reduce(method_for(a) <@> f, (+))` already is. The unseeded `(+)` fold over
+// a literal extent takes the exact identity seed -0.0, so the chain is the
+// unseeded one; a seeded fold keeps its seed. The values are the stored
+// form's: BLADE_COMPUTE_ELIDE=0 prints the same (opt-diff compares them).
+function total(a: T^1) -> T^0 = {
+    let x = method_for(a) <@> lambda(v) -> v * 2.0 + 1.0 |> compute
+    reduce(x, (+))
+}
+function seeded(a: T^1) -> T^0 = {
+    let x = method_for(a) <@> lambda(v) -> v * v |> compute
+    let s = reduce(x, (+), 10.0)
+    s
+}
+let a = [1.0, 2.0, 3.0]
+let t = total(a)
+let u = seeded(a)
+// a top-level binding's block is a body too
+let blk = {
+    let y = method_for(a) <@> lambda(v) -> v + 1.0 |> compute
+    reduce(y, (*), 0.5)
+}
+// a kernel body: one fused fold per outer cell, no per-cell pool
+let ws = [1.0, 10.0]
+let per = method_for(ws) <@> lambda(w) -> {
+    let z = method_for(a) <@> lambda(v) -> v * w |> compute
+    reduce(z, (+))
+} |> compute
+// EXPECT: t = 15.0
+// EXPECT: u = 24.0
+// EXPECT: blk = 12.0
+// EXPECT: per = [6.0, 60.0]

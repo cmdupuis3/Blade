@@ -6580,6 +6580,222 @@ let private memberHoistForcedEmission () =
                 yield false ]
 
 // ---------------------------------------------------------------------------
+// Compute elision (BLADE_COMPUTE_ELIDE, Optimize.elideSingleConsumerComputesModule;
+// docs/plans/plan-identity-transpose-compute.md P3 entry). The VALUES are
+// corpus functions/539-547; these read the emission: an elided single-consumer
+// `|> compute` allocates nothing in its body in either lane, a declined one
+// keeps its pool, and every outcome is a `compute-elision` record.
+// ---------------------------------------------------------------------------
+
+let private ceFoldSrc =
+    "function total(a: T^1) -> T^0 = {\n"
+    + "    let x = method_for(a) <@> lambda(v) -> v * 2.0 + 1.0 |> compute\n"
+    + "    reduce(x, (+))\n"
+    + "}\n"
+    + "let a = [1.0, 2.0, 3.0]\n"
+    + "let t = total(a)\n"
+
+let private ceMapSrc =
+    "function scale_add(a: T^1, b: T^1) -> T^1 = {\n"
+    + "    let x = method_for(a) <@> lambda(v) -> v * 2.0 |> compute\n"
+    + "    method_for(zip(x, b)) <@> lambda(p, q) -> p + q |> compute\n"
+    + "}\n"
+    + "let a = [1.0, 2.0, 3.0]\n"
+    + "let b = [10.0, 20.0, 30.0]\n"
+    + "let r = scale_add(a, b)\n"
+
+let private ceTwoSrc =
+    "function sum_and_product(a: T^1) -> T^0 = {\n"
+    + "    let x = method_for(a) <@> lambda(v) -> v + 1.0 |> compute\n"
+    + "    reduce(x, (+)) * reduce(x, (*))\n"
+    + "}\n"
+    + "let a = [1.0, 2.0, 3.0]\n"
+    + "let p = sum_and_product(a)\n"
+
+let private ceWriteSrc =
+    "function snapshot() -> T^0 = {\n"
+    + "    let mut w = [1.0, 2.0, 3.0]\n"
+    + "    let x = method_for(w) <@> lambda(v) -> v * 2.0 |> compute\n"
+    + "    w(1) = 100.0\n"
+    + "    reduce(x, (+))\n"
+    + "}\n"
+    + "let s = snapshot()\n"
+
+let private ceKeyedSrc =
+    "function second(a: T^1) -> T^0 = {\n"
+    + "    let x = method_for(a) <@> lambda(v) -> v * 3.0 |> compute\n"
+    + "    x(1)\n"
+    + "}\n"
+    + "let a = [1.0, 2.0, 3.0]\n"
+    + "let k = second(a)\n"
+
+let private ceReturnedSrc =
+    "function tripled(a: T^1) -> T^1 = {\n"
+    + "    let x = method_for(a) <@> lambda(v) -> v * 3.0 |> compute\n"
+    + "    x\n"
+    + "}\n"
+    + "let a = [1.0, 2.0, 3.0]\n"
+    + "let r = tripled(a)\n"
+
+let private ceEmptySrc =
+    "function total(a: T^1) -> T^0 = {\n"
+    + "    let x = method_for(a) <@> lambda(v) -> v * 2.0 + 1.0 |> compute\n"
+    + "    reduce(x, (+))\n"
+    + "}\n"
+    + "let none: Array<Float64 like Idx<0>> = []\n"
+    + "let t = total(none)\n"
+
+// Codex review witnesses (a reader in the seed, a reader in a type's extent,
+// a producer range bound that may fail): each must decline.
+let private ceSeedReaderSrc =
+    "function seeded_by_x(a: T^1) -> T^0 = {\n"
+    + "    let x = method_for(a) <@> lambda(v) -> v * 2.0 |> compute\n"
+    + "    reduce(x, (+), x(0))\n"
+    + "}\n"
+    + "let t = seeded_by_x([1.0, 2.0, 3.0])\n"
+
+let private ceExtentReaderSrc =
+    "function extent_of_x(a: T^1) -> Int64 = {\n"
+    + "    let x = method_for(a) <@> lambda(v) -> v + 1 |> compute\n"
+    + "    let y = method_for(0..extents(x)) <@> lambda(v) -> v + 1 |> compute\n"
+    + "    let s = reduce(x, (+), 0)\n"
+    + "    s + reduce(y, (+), 0)\n"
+    + "}\n"
+    + "let e = extent_of_x([1, 2, 3])\n"
+
+let private ceFailingExtentSrc =
+    "function f(z: Int64) -> Int64 = {\n"
+    + "    let x = method_for(0..(10 / z)) <@> lambda(v) -> v + 1 |> compute\n"
+    + "    let a = [8, 9]\n"
+    + "    let bad = a(z - 1)\n"
+    + "    let s = reduce(x, (+), 0)\n"
+    + "    s + bad\n"
+    + "}\n"
+    + "let t = f(0)\n"
+
+let private ceExtentWriteSrc =
+    "function bump(a: mut Array<Int64 like Idx<3>>) -> Int64 = {\n"
+    + "    a(0) = 100\n"
+    + "    3\n"
+    + "}\n"
+    + "function f() -> Int64 = {\n"
+    + "    let mut a = [1, 2, 3]\n"
+    + "    let x = method_for(a) <@> lambda(v) -> v + 1 |> compute\n"
+    + "    let y = method_for(0..bump(a)) <@> lambda(v) -> v + 1 |> compute\n"
+    + "    let s = reduce(x, (+), 0)\n"
+    + "    s + reduce(y, (+), 0)\n"
+    + "}\n"
+    + "let t = f()\n"
+
+/// The body of the (specialized) C++ function whose name starts with `fn`.
+let private ceCppBody (cpp: string) (fn: string) : string option =
+    let m = System.Text.RegularExpressions.Regex.Match(cpp, @"\n[^\n;{}]*\b" + fn + @"\w*\([^\n;{}]*\) \{\n")
+    if not m.Success then None
+    else
+        let start = m.Index + 1
+        let stop = cpp.IndexOf("\n}\n", start)
+        Some (if stop < 0 then cpp.Substring start else cpp.Substring(start, stop - start))
+
+/// The body of the LLVM function `@bl_<fn>...`.
+let private ceLlvmBody (ll: string) (fn: string) : string option =
+    let ll = ll.Replace("\r\n", "\n")
+    let m = System.Text.RegularExpressions.Regex.Match(ll, @"\ndefine [^\n]*@bl_" + fn + @"[^\n]*\{\n")
+    if not m.Success then None
+    else
+        let start = m.Index + 1
+        let stop = ll.IndexOf("\n}\n", start)
+        Some (if stop < 0 then ll.Substring start else ll.Substring(start, stop - start))
+
+let private ceAllocs (body: string) = System.Text.RegularExpressions.Regex.Matches(body, @"(?<!de)allocate<").Count
+
+let private ceLlvmOf (name: string) (src: string) : Result<string, string> =
+    match lower src with
+    | Error e -> Error ($"lower: {e}")
+    | Ok ir -> (try EmitLlvm.tryEmitProgramNamed name ir with ex -> Error ("raised: " + ex.Message))
+
+/// C++ allocations in `fn`'s body with the gate on and off.
+let private ceCppAllocCase (name: string) (src: string) (fn: string) (wantOn: int -> bool) (wantOff: int -> bool) (describe: string) =
+    match cppOfSource name src, withGate "BLADE_COMPUTE_ELIDE" "0" (fun () -> cppOfSource name src) with
+    | Ok on, Ok off ->
+        match ceCppBody on fn, ceCppBody off fn with
+        | Some bOn, Some bOff ->
+            let aOn, aOff = ceAllocs bOn, ceAllocs bOff
+            if wantOn aOn && wantOff aOff then
+                resultLine Pass name ($"{fn}: {aOn} allocation(s) with the gate on, {aOff} off; {describe}")
+                true
+            else
+                resultLine Fail name ($"{fn}: {aOn} allocation(s) on, {aOff} off; wanted {describe}")
+                false
+        | _ -> resultLine Fail name ($"no C++ body for `{fn}`"); false
+    | Error e, _ | _, Error e -> resultLine Fail name e; false
+
+let private ceLlvmFoldNoPool () =
+    let name = "compute_elision_llvm_fold_no_pool"
+    match ceLlvmOf name ceFoldSrc, withGate "BLADE_COMPUTE_ELIDE" "0" (fun () -> ceLlvmOf name ceFoldSrc) with
+    | Ok on, Ok off ->
+        match ceLlvmBody on "total", ceLlvmBody off "total" with
+        | Some bOn, Some bOff ->
+            let count (b: string) = System.Text.RegularExpressions.Regex.Matches(b, @"blade_alloc_cells").Count
+            if count bOn = 0 && count bOff >= 1 then
+                resultLine Pass name ($"llvm lane, total: 0 pool allocations with the gate on, {count bOff} off")
+                true
+            else
+                resultLine Fail name ($"llvm lane, total: {count bOn} allocation(s) on, {count bOff} off; wanted 0 on, >= 1 off")
+                false
+        | _ -> resultLine Fail name "no LLVM body for `total`"; false
+    | Error e, _ | _, Error e -> resultLine Fail name ($"the llvm lane refused: {e}"); false
+
+let private ceSubject (s: string) (d: Blade.Effects.Decision) = d.Subject = s
+
+let private computeElisionCases () : bool list =
+    [ ceCppAllocCase "compute_elision_fold_no_pool" ceFoldSrc "total" ((=) 0) (fun n -> n >= 1)
+          "the fold reads x's map in place (no pool) and the gate restores it"
+      ceLlvmFoldNoPool ()
+      ceCppAllocCase "compute_elision_map_one_pool" ceMapSrc "scale_add" ((=) 1) ((=) 2)
+          "only the returned consumer's pool remains"
+      ceCppAllocCase "compute_elision_two_consumers_keep_pool" ceTwoSrc "sum_and_product" (fun n -> n >= 1) (fun n -> n >= 1)
+          "two readers keep x's pool"
+      ceCppAllocCase "compute_elision_write_between_keeps_pool" ceWriteSrc "snapshot" (fun n -> n >= 2) (fun n -> n >= 2)
+          "a write between keeps x's pool (and w's)"
+      ceCppAllocCase "compute_elision_keyed_read_keeps_pool" ceKeyedSrc "second" (fun n -> n >= 1) (fun n -> n >= 1)
+          "a keyed read keeps x's pool"
+      ceCppAllocCase "compute_elision_returned_keeps_pool" ceReturnedSrc "tripled" (fun n -> n >= 1) (fun n -> n >= 1)
+          "a returned x keeps its pool"
+      decisionCase "decision_compute_elision_fold_applied" ceFoldSrc "compute-elision"
+          (fun d -> ceSubject "total.x" d && applied d && d.Evidence |> List.exists (fun e -> e.Contains "licensed route: base seed +0.0"))
+          "applied to total.x with the licensed route's base seed +0.0 (W4-3)"
+      withGate "BLADE_FP_REPRO" "1" (fun () ->
+          decisionCase "decision_compute_elision_fold_applied_repro" ceFoldSrc "compute-elision"
+              (fun d -> ceSubject "total.x" d && applied d && d.Evidence |> List.exists (fun e -> e.Contains "strict route: identity seed -0.0"))
+              "applied to total.x with the strict route's identity seed -0.0 (W4-3)")
+      decisionCase "decision_compute_elision_map_applied" ceMapSrc "compute-elision"
+          (fun d -> ceSubject "scale_add.x" d && applied d && d.Evidence |> List.exists (fun e -> e.Contains "single consumer pointwise map"))
+          "applied to scale_add.x (pointwise map consumer, fused)"
+      decisionCase "decision_compute_elision_declined_two_readers" ceTwoSrc "compute-elision"
+          (fun d -> ceSubject "sum_and_product.x" d && declinedMentioning "more than one reader" d) "declined: more than one reader"
+      decisionCase "decision_compute_elision_declined_write_between" ceWriteSrc "compute-elision"
+          (fun d -> ceSubject "snapshot.x" d && declinedMentioning "may write between the compute and its consumer" d) "declined: a write between"
+      decisionCase "decision_compute_elision_declined_keyed_read" ceKeyedSrc "compute-elision"
+          (fun d -> ceSubject "second.x" d && declinedMentioning "keyed subscript" d) "declined: a keyed read"
+      decisionCase "decision_compute_elision_declined_returned" ceReturnedSrc "compute-elision"
+          (fun d -> ceSubject "tripled.x" d && declinedMentioning "is returned" d) "declined: x is returned"
+      decisionCase "decision_compute_elision_declined_empty_unseeded" ceEmptySrc "compute-elision"
+          (fun d -> ceSubject "total.x" d && declinedMentioning "an unseeded fold over an extent not known at compile time to be >= 1" d)
+          "declined: an unseeded fold over an extent that may be empty (BL8003 stays at the fold)"
+      decisionCase "decision_compute_elision_declined_seed_reader" ceSeedReaderSrc "compute-elision"
+          (fun d -> ceSubject "seeded_by_x.x" d && declinedMentioning "read again by the fold's kernel or seed" d) "declined: the seed reads x"
+      decisionCase "decision_compute_elision_declined_extent_reader" ceExtentReaderSrc "compute-elision"
+          (fun d -> ceSubject "extent_of_x.x" d && declinedMentioning "extent expression a type carries" d) "declined: a type's extent reads x"
+      decisionCase "decision_compute_elision_declined_failing_extent" ceFailingExtentSrc "compute-elision"
+          (fun d -> ceSubject "f.x" d && declinedMentioning "an extent of the producer is not a literal" d) "declined: the producer's range bound may fail"
+      decisionCase "decision_compute_elision_declined_extent_write" ceExtentWriteSrc "compute-elision"
+          (fun d -> ceSubject "f.x" d && declinedMentioning "may write between the compute and its consumer" d) "declined: a write hidden in a range bound"
+      withGate "BLADE_COMPUTE_ELIDE" "0" (fun () ->
+          decisionCase "decision_compute_elision_declined_gate" ceFoldSrc "compute-elision"
+              (fun d -> ceSubject "total.x" d && declinedMentioning "disabled by BLADE_COMPUTE_ELIDE" d)
+              "declined: disabled by BLADE_COMPUTE_ELIDE") ]
+
+// ---------------------------------------------------------------------------
 // Hash equijoin (round 3 W3-2, item T2; Blade.Optimize.planEquiJoin, rule
 // `hash-join v1`). Values are pinned by corpus sql-joins/001-019 (and the
 // interpreter differential over them); these pin the admission record (cases
@@ -6957,8 +7173,14 @@ let runOptimizeTests () =
           // Scratch reuse across barriers (fortran-killer-2 section 4, gate
           // 2): the alias declarations, the decision record, and the
           // escape-analysis leak the work found.
-          poolReuseReturnTakesDeadPool ()
-          poolReuseChainSharesRoot ()
+          // Pinned with compute elision OFF (ACCEPTED at the workstream-C
+          // review): elision (BLADE_COMPUTE_ELIDE) removes the single-fold
+          // temporary this fixture reuses (the returned fold's operand), which is
+          // fewer pools, not a reuse regression; reuse is about STORED temporaries.
+          withGate "BLADE_COMPUTE_ELIDE" "0" poolReuseReturnTakesDeadPool
+          // Pinned with compute elision OFF (ACCEPTED, as above): elision fuses
+          // `q` into `r` and `s` into the returned fold, leaving one reuser.
+          withGate "BLADE_COMPUTE_ELIDE" "0" poolReuseChainSharesRoot
           // Hot-row fold scheduling (bench review M13).
           hotRowEmitted ()
           hotRowGateOff ()
@@ -7178,7 +7400,9 @@ let runOptimizeTests () =
                   (declinedMentioning "disabled by BLADE_HOIST") "invariant-hoist declined, disabled by BLADE_HOIST")
           // The gram_apply advisory: left as written, spelled in the evidence.
           decisionCase "decision_gram_apply_advisory" gramAdvisorySrc "gram-apply-advisory"
-              (declinedMentioning "gram_apply(A, A, v)") "advisory names gram_apply(A, A, v)" ]
+              (declinedMentioning "gram_apply(A, A, v)") "advisory names gram_apply(A, A, v)"
+          // Compute elision (BLADE_COMPUTE_ELIDE): single-consumer body computes.
+          yield! computeElisionCases () ]
         @ planCases ()
         @ siblingCases ()
         @ [ parallelEmissionIsolated (); declSpanResetIsolated () ]
