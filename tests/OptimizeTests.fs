@@ -7991,6 +7991,173 @@ let private transposeNormalFormCases () =
               (declinedMentioning "disabled by BLADE_TRANSPOSE_ELIDE") "declined: disabled by BLADE_TRANSPOSE_ELIDE") ]
 
 // ---------------------------------------------------------------------------
+// TRANSPOSE NORMAL FORM, wave 3 (plan P2 remainder): chains through named
+// bindings (rule 1b, 1c), payload actions (rule 2), absorption into a consumer
+// under the fold-order rule (rule 3, 3b), the sharing-partition relation
+// (rule 4). Corpus index-types/556-564 prove the values; these pin the copies.
+// ---------------------------------------------------------------------------
+
+let private tnfM = "let M: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n"
+let private tnfNamedSrc = tnfM + "let C = transpose(M, [0, 1])\n" + "let D = transpose(C, [0, 1])\n"
+let private tnfNamedReadSrc = tnfNamedSrc + "let c10 = C(1, 0)\n"
+let private tnfNamedWrittenSrc = tnfM + "let C = transpose(M, [0, 1])\n" + "C(0, 1) = 40.0\n" + "let D = transpose(C, [0, 1])\n"
+let private tnfAntisymDoubleSrc =
+    "let A = [1.0, 1.0, 3.0]\n"
+    + "let L = method_for(A, A)\n"
+    + "let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y\n"
+    + "let anti = L <@> reynolds(g, Antisymmetric) |> compute\n"
+    + "let back = transpose(transpose(anti, [0, 1]), [0, 1])\n"
+let private tnfHermDoubleSrc =
+    "let H: Array<Complex128 like HermitianIdx<3>> = [\n"
+    + "    [complex(1.0, 0.0), complex(2.0, 3.0), complex(0.0, -1.0)],\n"
+    + "    [complex(4.0, 0.0), complex(5.0, 6.0)],\n"
+    + "    [complex(7.0, 0.0)]\n"
+    + "]\n"
+    + "let HH = transpose(transpose(H, [0, 1]), [0, 1])\n"
+let private tnfFoldSrc = tnfM + "let s2 = reduce(transpose(M, [0, 1]), (+), axes = 2)\n"
+let private tnfFoldOmpSrc = tnfM + "let s = reduce(transpose(M, [0, 1]), lambda(u, v) where omp -> u + v, 0.0, axes = 2)\n"
+let private tnfFoldUnlicensedSrc = tnfM + "let st = reduce(transpose(M, [0, 1]), lambda(a, b) -> (a + b) * 1.0, 0.0, axes = 2)\n"
+let private tnfPointPrefix =
+    "type R = Idx<2>\n"
+    + "type K = Idx<3>\n"
+    + "let M: Array<Float64 like R, K> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n"
+    + "let B: Array<Float64 like K, R> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]\n"
+let private tnfPointSrc = tnfPointPrefix + "let P = transpose(M, [0, 1]) + B\n"
+let private tnfPointWrittenSrc = tnfPointSrc + "M(1, 2) = 60.0\n"
+let private tnfPartitionDenseSrc =
+    "type I = Idx<2>\n"
+    + "let Q: Array<Float64 like I, I> = [[1.0, 2.0], [3.0, 4.0]]\n"
+    + "function f(x: T^2, y: T^2) where comm(x, y) =\n"
+    + "    method_for(x, y) <@> lambda(a, b) where comm(a, b) -> prodsum(a, b) |> compute\n"
+    + "let PQT = f(Q, transpose(Q, [0, 1]))\n"
+let private tnfPartitionSymSrc =
+    "type K = Idx<3>\n"
+    + "let v: Array<Float64 like K> = [1.0, 2.0, 3.0]\n"
+    + "let S = method_for(v, v) <@> lambda(a, b) where comm(a, b) -> a * b |> compute\n"
+    + "function g(x: Array<Float64 like SymIdx<2, K>>, y: Array<Float64 like SymIdx<2, K>>) where comm(x, y) = {\n"
+    + "    let P = method_for(x, y) <@> lambda(a, b) where comm(a, b) -> a * b |> compute\n"
+    + "    P((2 : K), (1 : K), (0 : K), (1 : K))\n"
+    + "}\n"
+    + "let GS = g(S, transpose(S, [0, 1]))\n"
+
+let private transposeNormalFormWave3Cases () =
+    let hardCopies (cpp: string) = tnfCount "// transpose: hard" cpp
+    let llvmAllocs (name: string) (src: string) (expectOn: int) (expectOff: int) =
+        match tnfLlvmAllocs src, withGate "BLADE_TRANSPOSE_ELIDE" "0" (fun () -> tnfLlvmAllocs src) with
+        | Ok on, Ok off when on = expectOn && off = expectOff ->
+            resultLine Pass name ($"llvm lane takes the form: {off} -> {on} pools"); true
+        | on, off -> resultLine Fail name (sprintf "llvm pools on/off = %A/%A (wanted %d/%d)" on off expectOn expectOff); false
+    [ // rule 1b: the named chain
+      tnfEmission "transpose_named_chain_composes" tnfNamedSrc (fun cpp ->
+          let h, alias = hardCopies cpp, cpp.Contains "Array<double, 2> D = M;"
+          if h = 1 && alias then Ok "D = M (a read-only alias): only C's own (printed) copy remains"
+          else Error ($"hard={h} D-alias={alias}"))
+      withGate "BLADE_TRANSPOSE_ELIDE" "0" (fun () ->
+          tnfEmission "transpose_named_chain_gate_off_copies" tnfNamedSrc (fun cpp ->
+              let h = hardCopies cpp
+              if h = 2 then Ok "gate off: C's copy and D's copy" else Error ($"expected 2 transpose copies, got {h}")))
+      decisionCase "decision_transpose_named_chain_applied" tnfNamedSrc "transpose-normal-form"
+          (fun d -> d.Subject = "D" && applied d && d.Evidence |> List.exists (fun e -> e.Contains "named chain through `C`"))
+          "applied: D's chain spliced through C"
+      decisionCase "decision_transpose_named_intermediate_kept_printed" tnfNamedSrc "transpose-normal-form"
+          (fun d -> d.Subject = "C" && declinedMentioning "every top-level binding is printed" d) "declined: C is printed"
+      // rule 1c: the intermediate elided under a print selection that excludes it
+      withGate "BLADE_PRINT" "D" (fun () ->
+          tnfEmission "transpose_named_intermediate_elided_print_selection" tnfNamedSrc (fun cpp ->
+              let h, cAlloc = hardCopies cpp, cpp.Contains "C_extents"
+              if h = 0 && not cAlloc then Ok "BLADE_PRINT=D: C has no reader left and is not printed: no copy at all"
+              else Error ($"hard={h} C-allocated={cAlloc}")))
+      withGate "BLADE_PRINT" "D" (fun () ->
+          decisionCase "decision_transpose_named_intermediate_elided" tnfNamedSrc "transpose-normal-form"
+              (fun d -> d.Subject = "C" && applied d && d.Evidence |> List.exists (fun e -> e.Contains "is elided"))
+              "applied: C elided")
+      withGate "BLADE_PRINT" "D,c10" (fun () ->
+          tnfEmission "transpose_named_intermediate_read_elsewhere_kept" tnfNamedReadSrc (fun cpp ->
+              let h, alias = hardCopies cpp, cpp.Contains "Array<double, 2> D = M;"
+              if h = 1 && alias then Ok "C is read by c10: its copy stays, D still reads M"
+              else Error ($"hard={h} D-alias={alias}")))
+      withGate "BLADE_PRINT" "D,c10" (fun () ->
+          decisionCase "decision_transpose_named_intermediate_read_kept" tnfNamedReadSrc "transpose-normal-form"
+              (fun d -> d.Subject = "C" && declinedMentioning "still read by `c10`" d) "declined: C is read by c10")
+      tnfEmission "transpose_named_chain_written_keeps_copies" tnfNamedWrittenSrc (fun cpp ->
+          let h = hardCopies cpp
+          if h = 2 then Ok "C is written: D keeps its own transpose of the written C" else Error ($"expected 2 transpose copies, got {h}"))
+      decisionCase "decision_transpose_named_chain_declined_written" tnfNamedWrittenSrc "transpose-normal-form"
+          (fun d -> d.Subject = "D" && declinedMentioning "is not spliced" d && declinedMentioning "`C` is assigned" d)
+          "declined: C is assigned"
+      // rule 2: payload actions
+      tnfEmission "transpose_antisym_double_no_negate" tnfAntisymDoubleSrc (fun cpp ->
+          let n, alias = tnfCount "negate_pool(" cpp, cpp.Contains "Array<double, 2> back = anti;"
+          if n = 0 && alias then Ok "two negations cancel: back = anti, no negate_pool, no pool"
+          else Error ($"negate_pool={n} back-alias={alias}"))
+      withGate "BLADE_TRANSPOSE_ELIDE" "0" (fun () ->
+          tnfEmission "transpose_antisym_double_gate_off_negates" tnfAntisymDoubleSrc (fun cpp ->
+              let n = tnfCount "negate_pool(" cpp
+              if n = 2 then Ok "gate off: two negate_pool passes" else Error ($"expected 2 negate_pool, got {n}")))
+      decisionCase "decision_transpose_antisym_double_applied" tnfAntisymDoubleSrc "transpose-normal-form"
+          (fun d -> d.Subject = "back" && applied d && d.Evidence |> List.exists (fun e -> e.Contains "2 negations cancel"))
+          "applied: the negations cancel"
+      tnfEmission "transpose_hermitian_double_no_conjugate" tnfHermDoubleSrc (fun cpp ->
+          let n = tnfCount "conjugate_pool(" cpp
+          if n = 0 then Ok "two conjugations cancel: no conjugate_pool" else Error ($"conjugate_pool={n}"))
+      withGate "BLADE_TRANSPOSE_ELIDE" "0" (fun () ->
+          tnfEmission "transpose_hermitian_double_gate_off_conjugates" tnfHermDoubleSrc (fun cpp ->
+              let n = tnfCount "conjugate_pool(" cpp
+              if n = 2 then Ok "gate off: two conjugate_pool passes" else Error ($"expected 2 conjugate_pool, got {n}")))
+      // rule 3: absorption into a licensed fold; declined under the fold-order rule
+      tnfEmission "transpose_fold_absorbed_nest" tnfFoldSrc (fun cpp ->
+          let h = hardCopies cpp
+          if h = 0 && cpp.Contains "+ M[" then Ok "the accumulator nest folds M in source order: no transpose copy"
+          else Error ($"hard={h}"))
+      decisionCase "decision_transpose_fold_absorbed_nest" tnfFoldSrc "transpose-normal-form"
+          (fun d -> d.Subject = "s2" && applied d && d.Evidence |> List.exists (fun e -> e.Contains "absorbed into the full fold"))
+          "applied: absorbed into the rank-2 nest"
+      tnfEmission "transpose_fold_absorbed_omp" tnfFoldOmpSrc (fun cpp ->
+          let h = hardCopies cpp
+          if h = 0 then Ok "the fused where-omp fold maps M itself: no transpose copy" else Error ($"hard={h}"))
+      decisionCase "decision_transpose_fold_absorbed_omp" tnfFoldOmpSrc "transpose-normal-form"
+          (fun d -> d.Subject = "s" && applied d && d.Evidence |> List.exists (fun e -> e.Contains "absorbed into the fused fold"))
+          "applied: absorbed into the fused terminal"
+      withGate "BLADE_FP_REPRO" "1" (fun () ->
+          tnfEmission "transpose_fold_strict_build_keeps_copy" tnfFoldSrc (fun cpp ->
+              let h = hardCopies cpp
+              if h = 1 then Ok "BLADE_FP_REPRO=1: the fold keeps the transposed copy and its order" else Error ($"expected 1 transpose copy, got {h}")))
+      withGate "BLADE_FP_REPRO" "1" (fun () ->
+          decisionCase "decision_transpose_fold_strict_build_declined" tnfFoldSrc "transpose-normal-form"
+              (fun d -> d.Subject = "s2" && declinedMentioning "FOLD-ORDER RULE" d && declinedMentioning "BLADE_FP_REPRO=1" d)
+              "declined: the fold-order rule (strict build)")
+      tnfEmission "transpose_fold_unlicensed_keeps_copy" tnfFoldUnlicensedSrc (fun cpp ->
+          let h = hardCopies cpp
+          if h = 1 then Ok "an unlicensed kernel keeps the transposed copy" else Error ($"expected 1 transpose copy, got {h}"))
+      decisionCase "decision_transpose_fold_unlicensed_declined" tnfFoldUnlicensedSrc "transpose-normal-form"
+          (fun d -> d.Subject = "st" && declinedMentioning "FOLD-ORDER RULE" d && declinedMentioning "no reorder licence" d)
+          "declined: the fold-order rule (unlicensed kernel)"
+      // rule 3b: pointwise absorption
+      tnfEmission "transpose_pointwise_absorbed" tnfPointSrc (fun cpp ->
+          let h = hardCopies cpp
+          if h = 0 && cpp.Contains "M[__tnf_j][__tnf_i]" then Ok "the range map gathers M(j, i): no transpose copy"
+          else Error ($"hard={h}"))
+      decisionCase "decision_transpose_pointwise_absorbed" tnfPointSrc "transpose-normal-form"
+          (fun d -> d.Subject = "P" && applied d && d.Evidence |> List.exists (fun e -> e.Contains "the surviving traversal is the output's"))
+          "applied: absorbed into the pointwise map"
+      withGate "BLADE_FP_REPRO" "1" (fun () ->
+          tnfEmission "transpose_pointwise_absorbed_strict_build" tnfPointSrc (fun cpp ->
+              let h = hardCopies cpp
+              if h = 0 then Ok "no order question: absorbed under BLADE_FP_REPRO=1 too" else Error ($"hard={h}")))
+      tnfEmission "transpose_pointwise_written_keeps_copy" tnfPointWrittenSrc (fun cpp ->
+          let h = hardCopies cpp
+          if h = 1 then Ok "M is written: P keeps the snapshot copy" else Error ($"expected 1 transpose copy, got {h}"))
+      llvmAllocs "transpose_pointwise_llvm_lane" tnfPointSrc 3 4
+      llvmAllocs "transpose_fold_llvm_lane" tnfFoldSrc 1 2
+      // rule 4: the sharing-partition relation
+      decisionCase "decision_transpose_partition_transposed_argument" tnfPartitionDenseSrc "transpose-normal-form"
+          (fun d -> d.Subject = "PQT" && declinedMentioning "its own class of the sharing partition" d)
+          "declined: the transposed argument is its own class"
+      decisionCase "decision_transpose_partition_symmetric_certificate" tnfPartitionSymSrc "sharing-partition"
+          (fun d -> applied d && d.Evidence |> List.exists (fun e -> e.Contains "partition [0,0]"))
+          "applied: g(S, transpose(S)) is the [0,0] instance" ]
+
+// ---------------------------------------------------------------------------
 // Hash equijoin (round 3 W3-2, item T2; Blade.Optimize.planEquiJoin, rule
 // `hash-join v1`). Values are pinned by corpus sql-joins/001-019 (and the
 // interpreter differential over them); these pin the admission record (cases
@@ -8378,6 +8545,7 @@ let runOptimizeTests () =
           withGate "BLADE_COMPUTE_ELIDE" "0" poolReuseChainSharesRoot
           // Transpose normal form and the read-only alias plan (P2 entry).
           yield! transposeNormalFormCases ()
+          yield! transposeNormalFormWave3Cases ()
           // Hot-row fold scheduling (bench review M13).
           hotRowEmitted ()
           hotRowGateOff ()

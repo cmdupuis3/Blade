@@ -1,0 +1,24 @@
+// TEST: Transpose Named Chain Composes
+// A transpose chain THROUGH A NAMED BINDING composes like the inline chain
+// (transpose-normal-form v1, rule 1b; BLADE_TRANSPOSE_ELIDE): nothing here
+// writes `M` or `C`, so at every read `C` holds exactly transpose(M), and
+// transpose(C, [0, 1]) is the identity of M -- `D` is bound as `D = M` (the
+// read-only alias plan then shares M's storage: no transpose copy, no pool
+// copy) and the fold reads M in place. `C` itself is still printed, so it is
+// kept; under a print selection that excludes it and with no other reader it
+// is elided (tests/OptimizeTests.fs pins both). `c10` reads C directly, which
+// keeps C's storage but does not stop D from reading M. Non-square 2x3.
+let M: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let C = transpose(M, [0, 1])
+let D = transpose(C, [0, 1])
+let s = reduce(transpose(C, [0, 1]), (+), axes = 2)
+let d12 = D(1, 2)
+let c10 = C(1, 0)
+let E = transpose(transpose(C, [0, 1]), [0, 1])
+// EXPECT: M = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+// EXPECT: C = [[1.0, 4.0], [2.0, 5.0], [3.0, 6.0]]
+// EXPECT: D = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+// EXPECT: s = 21.0
+// EXPECT: d12 = 6.0
+// EXPECT: c10 = 2.0
+// EXPECT: E = [[1.0, 4.0], [2.0, 5.0], [3.0, 6.0]]

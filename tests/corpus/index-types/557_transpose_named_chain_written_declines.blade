@@ -1,0 +1,20 @@
+// TEST: Transpose Named Chain Written Declines
+// The named chain of index-types/556 is spliced only when nothing can write
+// the intermediate or the root (transpose-normal-form v1, rule 1b, fail
+// closed). `C` is written after it is bound, so `D` must read the WRITTEN C;
+// `N` is written between `E = transpose(N)` and `F = transpose(E)`, so F must
+// see the OLD N that E copied. Both decline and keep their transpose copies.
+let M: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let C = transpose(M, [0, 1])
+C(0, 1) = 40.0
+let D = transpose(C, [0, 1])
+let N: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let E = transpose(N, [0, 1])
+N(0, 0) = 100.0
+let F = transpose(E, [0, 1])
+// EXPECT: C = [[1.0, 40.0], [2.0, 5.0], [3.0, 6.0]]
+// EXPECT: D = [[1.0, 2.0, 3.0], [40.0, 5.0, 6.0]]
+// EXPECT: M = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+// EXPECT: N = [[100.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+// EXPECT: E = [[1.0, 4.0], [2.0, 5.0], [3.0, 6.0]]
+// EXPECT: F = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]

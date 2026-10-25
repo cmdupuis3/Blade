@@ -459,10 +459,27 @@ syntactic `aliasWriteClosure` (assignments, writing statements and callees, othe
 modules), not `scheduleMayWriteIn`, which treats writes to fresh local storage as
 private -- exactly the copies this removes (two Codex-found holes closed that way).
 Corpus index-types/545-555; antisym / Hermitian actions kept and recorded as declines.
-Open: chains through named bindings, the typed map/action algebra beyond swaps,
-negation / conjugation simplification, absorption (and the fold-order rule above);
-unchecked: an incremental notebook path that compiles an early cell before a later
-write.
+BUILT (wave 3, the P2 remainder; same gate and rule): CHAINS THROUGH NAMED BINDINGS --
+let C = transpose(M, ..) read by 	ranspose(C, ..) splices C's ops and reads M when
+the never-written closure holds for C and M's fresh-root chain and the spliced normal
+form is shorter; C is dropped only when nothing reads it (payloads, types, functions,
+minted kernels, provider writes, other modules) and a single-module print selection
+excludes it. PAYLOAD ACTIONS as explicit normal-form nodes (negation, conjugation:
+exact involutions commuting with the permutation, so an even count cancels; one
+survivor keeps 
+egate_pool / conjugate_pool; a mixed survivor is declined).
+ABSORPTION under the fold-order rule: the rank-2 accumulator nest (rankKDesugar) and
+the where omp fused terminal fold a stored base in source order only in a licensed
+build with a licensed, write-free, IRTotality-total kernel; strict folds decline
+naming the rule; a computed top-level pointwise map over a transposed operand becomes
+the range map over the output's axes gathering X(j, i), in every build. The 2.2
+relation: (A, transpose(A)) keeps the all-distinct partition (recorded); a SymIdx
+operand's erased transpose takes the shared instance. Corpus index-types/556-565.
+Open: partial reductions over a transposed operand (each output's cell set is a
+column), named chains and pointwise absorption inside function bodies, a surviving
+mixed swap + action chain, normalization before sharing-dependent elaboration (a
+double transpose argument is still its own class at typecheck); unchecked: an
+incremental notebook path that compiles an early cell before a later write.
 
 ### P3 — Compute commitments and local materialization planning
 

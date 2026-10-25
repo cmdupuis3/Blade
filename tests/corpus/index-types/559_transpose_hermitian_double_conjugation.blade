@@ -1,0 +1,33 @@
+// TEST: Transpose Hermitian Double Conjugation
+// A Hermitian transpose is a whole-array CONJUGATION (transpose-normal-form
+// v1, rule 2): two cancel, conj(conj(z)) = z exactly on every stored cell (the
+// imaginary sign flipped twice; signed zeros come back as they were), so `HH`
+// is bound as `HH = H` with no conjugate_pool. A single one (`HC`) keeps
+// today's materialization. The same law on a dense complex array: `conj(conj(Z))`
+// is Z, and so is hermitian(hermitian(Z)) -- conjugations and swaps both cancel
+// (actions commute with the coordinate permutation). One hermitian(Z) is its
+// own normal form (a swap and a conjugation) and keeps both copies.
+let H: Array<Complex128 like HermitianIdx<3>> = [
+    [complex(1.0, 0.0), complex(2.0, 3.0), complex(0.0, -1.0)],
+    [complex(4.0, 0.0), complex(5.0, 6.0)],
+    [complex(7.0, 0.0)]
+]
+let HC = transpose(H, [0, 1])
+let HH = transpose(transpose(H, [0, 1]), [0, 1])
+let h01 = HH(0, 1)
+let h10 = HH(1, 0)
+let Z: Array<Complex128 like Idx<2>, Idx<3>> = [
+    [complex(1.0, 2.0), complex(3.0, -1.0), complex(0.0, 5.0)],
+    [complex(2.0, 1.0), complex(-1.0, 4.0), complex(6.0, 0.0)]
+]
+let ZZ = conj(conj(Z))
+let ZH = hermitian(hermitian(Z))
+let ZA = hermitian(Z)
+// EXPECT: H = [(1.0, 0.0), (2.0, 3.0), (0.0, -1.0), (4.0, 0.0), (5.0, 6.0), (7.0, 0.0)]
+// EXPECT: HC = [(1.0, 0.0), (2.0, -3.0), (0.0, 1.0), (4.0, 0.0), (5.0, -6.0), (7.0, 0.0)]
+// EXPECT: HH = [(1.0, 0.0), (2.0, 3.0), (0.0, -1.0), (4.0, 0.0), (5.0, 6.0), (7.0, 0.0)]
+// EXPECT: h01 = (2.0, 3.0)
+// EXPECT: h10 = (2.0, -3.0)
+// EXPECT: ZZ = [(1.0, 2.0), (3.0, -1.0), (0.0, 5.0), (2.0, 1.0), (-1.0, 4.0), (6.0, 0.0)]
+// EXPECT: ZH = [(1.0, 2.0), (3.0, -1.0), (0.0, 5.0), (2.0, 1.0), (-1.0, 4.0), (6.0, 0.0)]
+// EXPECT: ZA = [(1.0, -2.0), (2.0, -1.0), (3.0, 1.0), (-1.0, -4.0), (0.0, -5.0), (6.0, 0.0)]

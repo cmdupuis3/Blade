@@ -4281,7 +4281,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // transposes composes to one permutation, an identity disappears. A
         // semantic normal form every lane consumes; first, so the passes
         // below see the base. Gate: BLADE_TRANSPOSE_ELIDE.
-        let irModule = Optimize.normalizeTransposesModule programFuncs (foreignAll.Force()) irModule
+        let irModule = Optimize.normalizeTransposesModule env.Builder programFuncs (foreignAll.Force()) (irModules.Length < 2) irModule
         // (a single-module program: compute elision's top-level mode reads the
         // print selection's names, which name the program's own bindings)
         let irModule = Optimize.optimizeModule env.Builder programFuncs (irModules.Length < 2) irModule
