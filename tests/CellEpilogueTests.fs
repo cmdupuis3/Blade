@@ -890,7 +890,11 @@ let runCellEpilogueTests () : BlockResult =
              ("memfree/035_object_for_kernel_capture_freed.blade", "kernel", (2, 2), [ "k2 = 180.0"; "k3 = 390.0" ])
              ("functions/545_fold_seed_stores_closure_keeps_capture.blade", "kernel", (1, 0), [ "r = 120.0"; "v = 60.0" ])
              ("functions/546_one_kernel_two_object_for_folds_keeps_capture.blade", "kernel", (2, 1), [ "k2 = 361.0"; "k3 = 781.0" ])
-             ("functions/547_fold_let_then_direct_read_of_captured_array.blade", "kernel", (2, 2), [ "k2 = 170.0"; "k3 = 342.0" ])
+             // (1, 1) since compute elision (BLADE_COMPUTE_ELIDE, plan-identity-
+             // transpose-compute P3): `t`'s single pointwise consumer `y` reads
+             // its map in place, so the kernel owns ONE pool (`y`), freed once;
+             // it was (2, 2) with `t` stored.
+             ("functions/547_fold_let_then_direct_read_of_captured_array.blade", "kernel", (1, 1), [ "k2 = 170.0"; "k3 = 342.0" ])
              ("functions/548_memfree_fold_below_scalar_if_return_freed.blade", "kernel", (1, 1), [ "yes = 55.0"; "no = 0.0"; "total = 5300.0" ])
              ("functions/548_memfree_fold_below_scalar_if_return_freed.blade", "kjoin", (1, 1), [ "s = 15.0"; "ss = 55.0"; "total = 5300.0" ])
              ("functions/548_memfree_fold_below_scalar_if_return_freed.blade", "kfma", (1, 1), [ "r = 31.0"; "total = 5300.0" ])

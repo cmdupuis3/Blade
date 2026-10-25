@@ -2,10 +2,14 @@
 
 Status: DESIGN revised 2026-10-24 (Claude, after review and a Codex consultation;
 the original draft is Codex's, on `codex/structural-transpose-proofs` at c6a9b8b3,
-base master 361504b6). WAVE 1 BUILT 2026-10-25 on
+base master 361504b6). WAVES 1-3 BUILT 2026-10-25 on
 `claude/structural-transpose-proofs-review-f6bd01` (a fast-forward of the Codex branch
-plus master 94487a90): the P1, P2 and P3 ENTRY POINTS of §6, each marked BUILT there
-with its open remainder. The four Rocq models compile on Rocq 9.0.1, are axiom-free,
+with master 65c81f5d merged in): every phase P1-P5 has its entry and its remainder
+marked BUILT in §6 (P1 in three steps: the alias classes, the sharing partition with the
+declared-layout, AD and sampler rules; P2 the normal form with actions, named chains and
+licensed absorption; P3/P4 compute and call elision in bodies, across modules and in
+kernels; P5 the cost model, the cost and legality lines and the recompute selection),
+each with its open items listed there. The four Rocq models compile on Rocq 9.0.1, are axiom-free,
 pass `coqchk` and the assumption audit (2205 results); their prose in `proofs/README.md`
 and `docs/proofs.md` is re-scoped to §7 (40fd0a5f).
 The review that drove this revision is

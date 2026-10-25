@@ -11039,13 +11039,13 @@ let normalizeTransposesModule (builder: IRBuilder) (programFuncs: IRCallable lis
     // map), a call result -- fails closed (Codex review of the wave-3 pass:
     // `let e = d` over a deferred `d` passed the old one-level test and moved
     // d's division past the seed's).
-    let storedBase (params: Set<IRId>) (b: IRExpr) : Result<string, string> =
+    let storedBase (prms: Set<IRId>) (b: IRExpr) : Result<string, string> =
         match b with
         | IRVar (id, t) when byId.ContainsKey id ->
             match chainOf byId.[id] with
             | Ok (how, _) -> Ok $"`{byId.[id].Name}` is {how}"
             | Error why -> Error $"the transposed base is not proved stored: {why}"
-        | IRVar (id, t) when params.Contains id ->
+        | IRVar (id, t) when prms.Contains id ->
             (match stripUnits t with
              | ArrayElem at when not at.IsVirtual -> Ok $"`__v{id}` is a parameter of the function (a stored array)"
              | _ -> Error "the transposed base has no stored cells")
@@ -11107,7 +11107,7 @@ let normalizeTransposesModule (builder: IRBuilder) (programFuncs: IRCallable lis
     // X's own axes -- `for b { for a { acc = acc OP X(b, a) } }` -- so X is read
     // forward and contiguously, in its source order. Some = the rewrite or the
     // kept form (with its record); None = not this shape.
-    let absorbFoldNest (subject: string) (inRepro: bool) (params: Set<IRId>) (src: IRId) (tv: IRExpr) (body: IRExpr) : IRExpr option =
+    let absorbFoldNest (subject: string) (inRepro: bool) (prms: Set<IRId>) (src: IRId) (tv: IRExpr) (body: IRExpr) : IRExpr option =
         match tv, body with
         | IRTranspose (x, d1, d2),
           IRLet (acc, seed,
@@ -11151,7 +11151,7 @@ let normalizeTransposesModule (builder: IRBuilder) (programFuncs: IRCallable lis
             if kf.IsSome && kernel.IsNone then keep $"the fold kernel does not resolve to a callable, so its licence cannot be read: {strictRule}"
             elif mayWrite seed then keep "the fold's seed may write (the transposed copy was taken before it ran)"
             else
-            match storedBase params x with
+            match storedBase prms x with
             | Error why -> keep why
             | Ok baseHow ->
             let traversal = $"the nest runs over {nameOfExpr x}'s own axes, outer {extentTxt ix0} x inner {extentTxt ix1}, reading it forward and contiguously in its ascending SOURCE order instead of the transposed copy's order"
@@ -11174,7 +11174,7 @@ let normalizeTransposesModule (builder: IRBuilder) (programFuncs: IRCallable lis
     // iterates X itself, so the fused fold reads X forward and contiguously.
     // The map kernel's evaluations move with the traversal, so it must be
     // proved total (a failure's coordinate would otherwise change).
-    let absorbFoldCompute (subject: string) (inRepro: bool) (params: Set<IRId>) (comp: IRExpr) (k: IRExpr) (seed: IRExpr) : IRExpr =
+    let absorbFoldCompute (subject: string) (inRepro: bool) (prms: Set<IRId>) (comp: IRExpr) (k: IRExpr) (seed: IRExpr) : IRExpr =
         let asWritten = IRReduceCompute (comp, k, seed)
         match comp with
         | IRApplyCombinator mi when (match mi.Arrays with [ IRTranspose _ ] -> true | _ -> false) ->
@@ -11186,10 +11186,10 @@ let normalizeTransposesModule (builder: IRBuilder) (programFuncs: IRCallable lis
                 recordTransposeNF subject (Blade.Effects.Declined why)
                     [ $"{consumer} keeps the transposed copy and folds it in ITS ascending storage order" ]
                 asWritten
-            match rank2Dense (try typeOf x with _ -> IRTUnit), mi.Loop with
+            match rank2Dense (try typeOf x with _ -> IRTUnit), (match mi.Loop with IRMethodFor mf -> Some mf | _ -> None) with
             | None, _ -> keep "v1 absorbs a transpose into a fold only over a dense rank-2 operand (two plain axes)"
-            | _, l when (match l with IRMethodFor _ -> false | _ -> true) -> keep "the map is not a method_for application"
-            | Some (ix0, ix1), IRMethodFor mf ->
+            | _, None -> keep "the map is not a method_for application"
+            | Some (ix0, ix1), Some mf ->
             if mi.IsCoIteration || mi.HasReynolds || mi.KernelInputRanks <> [ 0 ] || mi.KernelOutputRank <> 0 then
                 keep "v1 absorbs only a one-operand scalar-cell map under the fold"
             else
@@ -11205,7 +11205,7 @@ let normalizeTransposesModule (builder: IRBuilder) (programFuncs: IRCallable lis
             if mayWrite mk.Body then keep $"the map kernel `{mk.SourceName}` may write"
             elif mayWrite seed then keep "the fold's seed may write (the transposed copy was taken before it ran)"
             else
-            match storedBase params x, stripUnits (try typeOf x with _ -> IRTUnit) with
+            match storedBase prms x, stripUnits (try typeOf x with _ -> IRTUnit) with
             | Error why, _ -> keep why
             | Ok baseHow, ArrayElem xat ->
                 let traversal = $"the map iterates {nameOfExpr x} itself, so the fused fold reads it forward and contiguously in its ascending SOURCE order (the map kernel `{mk.SourceName}` is total, so moving its evaluations moves no failure)"
@@ -11220,7 +11220,6 @@ let normalizeTransposesModule (builder: IRBuilder) (programFuncs: IRCallable lis
                     let mf' = { mf with Arrays = [ x ]; Identities = [ ident ]; ArrayTypes = [ xat ] }
                     IRReduceCompute (IRApplyCombinator { mi with Loop = IRMethodFor mf'; Arrays = [ x ]; Identities = [ ident ]; ArrayTypes = [ xat ]; OutputType = out' }, k, seed)
             | Ok _, _ -> keep "the transposed base has no array type"
-            | _ -> asWritten
         | _ -> asWritten
     // POINTWISE ABSORPTION (rule 3b): a computed top-level map whose operands
     // are dense rank-2 arrays, one or more of them `transpose(X, [0, 1])`,
