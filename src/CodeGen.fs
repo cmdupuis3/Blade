@@ -559,7 +559,52 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
                 Type = inferExprType (match value with IRCompute e -> e | e -> e)
                 Value = value; IsConst = false; IsMutable = true
             }
-            let (code, ctxAfter) = genBinding bodyCtx tempBinding builder
+            // G55's plan subject: a SCALAR fold let's decisions -- the applied
+            // `[omp]` record (subjected by the emitted `__v<id>`) and every
+            // decline (subjected by the function) -- are ONE subject,
+            // `<function>.<let name>`. The let's name is its fold kernel's
+            // scope: Lowering names an anonymous lambda in a let's value
+            // `lambda in <let>` (lowerBoundValue). A NAMED kernel (a function,
+            // a separately bound local lambda) carries no let name -- IRLet has
+            // none and Lowering records none (gap G55) -- so the subject is
+            // `<function>.<fold k>`, the k-th scalar fold let of this body in
+            // source order: distinct per fold, the same in every outcome, and a
+            // spelling no let name can take (`<` / space are no identifier
+            // characters), so it never collides with a real `<function>.<let>`.
+            let subjectCell = localDecisionSubjectCell ()
+            let priorSubject = subjectCell.Value
+            (match tempBinding.Type with
+             | IRTScalar _ ->
+                 let owner = (currentDeclCell ()).Value
+                 let fnShown = shownDeclName owner
+                 let letName =
+                     match (match value with IRCompute e -> e | e -> e) with
+                     | IRReduce (_, k, _) ->
+                         (match resolveCallable k with
+                          | Some c ->
+                              let sn = c.SourceName
+                              let at = sn.LastIndexOf " in "
+                              if at > 0 && sn.StartsWith "lambda in " then
+                                  let scope = sn.Substring(at + 4)
+                                  if scope <> fnShown && scope <> "" then Some scope else None
+                              else None
+                          | None -> None)
+                     | _ -> None
+                 let isScalarFoldLet (v: IRExpr) =
+                     match v with
+                     | IRReduce _ | IRCompute (IRReduce _) ->
+                         (match inferExprType (match v with IRCompute e -> e | e -> e) with
+                          | IRTScalar _ -> true
+                          | _ -> false)
+                     | _ -> false
+                 let ordinal =
+                     1 + (lets |> List.takeWhile (fun (i, _) -> i <> id) |> List.filter (snd >> isScalarFoldLet) |> List.length)
+                 let shown = match letName with Some n -> fnShown + "." + n | None -> $"{fnShown}.<fold {ordinal}>"
+                 subjectCell.Value <- Some (varName, owner, shown)
+             | _ -> ())
+            let (code, ctxAfter) =
+                try genBinding bodyCtx tempBinding builder
+                finally subjectCell.Value <- priorSubject
             currentTupleChildren <- ctxAfter.TupleChildren
             currentNames <- Map.add id varName currentNames
             code

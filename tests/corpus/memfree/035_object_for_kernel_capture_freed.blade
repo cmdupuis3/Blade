@@ -1,0 +1,17 @@
+// TEST: Memfree Object For Kernel Capture Freed (G54)
+// An `object_for` application names its kernel TWICE in the IR (the apply's
+// kernel and the loop object's provenance, one lifted id): one reference.
+// The kernel `lambda(v: Float64) -> v * y(4)` of the scalar fold let is
+// otherwise a proved-synchronous slot, so `y` takes the scope-exit free
+// beside `t`. Values: t = c * [0, 1, 2, 3, 4], y = t + 1, s = 10 c (4 c + 1).
+function kernel(c: Float64) -> Float64 = {
+    let t = Float64(0..5) * c |> compute
+    let y = t + 1.0 |> compute
+    let s = reduce(object_for(lambda(v: Float64) -> v * y(4)) <@> t, (+))
+    s
+}
+
+let k2 = kernel(2.0)
+let k3 = kernel(3.0)
+// EXPECT: k2 = 180.0
+// EXPECT: k3 = 390.0

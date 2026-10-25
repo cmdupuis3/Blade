@@ -12530,7 +12530,74 @@ and buildApplyInfo (env: TypeEnv)
         // (bad_array_new_length at run time), the LLVM lane refuses it, the
         // interpreter's row write panics -- so it is refused HERE, once, before
         // any lane (gap register G67; the grouped compact output is NOT BUILT).
+        //
+        // BOUNDARY (W4B-C, formalism 7.2 "Zero S-dimensions" / 8.4 step 5):
+        // the refusal needs an OUTER ITERATION DIMENSION. A ZERO-LEVEL
+        // application -- an `object_for` loop whose kernel consumes every
+        // operand WHOLE (no S-dimension on any operand, each operand's rank
+        // its parameter's), no co-iteration, no Reynolds -- has no outer cell
+        // to hold a pool: `object_for(group_h) <@> jg` IS the call
+        // `group_h(jg)`, its value the kernel's packed array. It is lowered to
+        // that call HERE, before the refusal and before any lane, so every
+        // lane runs the direct call (symmetry/146; the direct-call control is
+        // symmetry/144). The predicate is Lowering.isZeroLevelWholeArrayApply's
+        // (the scalar zero-level apply, G64) for a compact result; only a
+        // compact-returning kernel reaches it, every other result keeps the
+        // apply node exactly as before.
+        let zeroLevelCompactCall =
+            (match tLoop.Kind with TExprObjectFor _ -> true | _ -> false)
+            && not (List.isEmpty arrays)
+            && not isReynolds
+            && not isCoIter
+            && (match resolvedKernel.Kind with TExprLambda _ -> true | _ -> false)
+            && gridArrayTypes.Length = arrays.Length
+            && kernelInputRanks.Length = arrays.Length
+            && computeSDimsPerArray gridArrayTypes |> List.forall ((=) 0)
+            && List.forall2 (fun (at: IRArrayTypeG<IRExpr>) (k: int) -> k > 0 && (at.IndexTypes |> List.sumBy (fun ix -> ix.Rank)) = k)
+                   gridArrayTypes kernelInputRanks
         match kernelTDims |> List.tryFind (fun ix -> ix.Symmetry <> SymNone) with
+        | Some _ when zeroLevelCompactCall ->
+            // A NAMED kernel (`object_for(group_h)`) is called BY NAME -- the
+            // direct call itself, so a failure inside it carries exactly the
+            // direct call's frames (`at group_h`), not an extra one for the
+            // apply's eta-wrapper; an inline lambda kernel is called as the
+            // lambda it is.
+            // The named kernel reaches here eta-expanded (`lambda(jg) ->
+            // group_h(jg)`, etaExpandFunctionKernel): that COMPILER-SYNTHESIZED
+            // wrapper -- recognised by its construction, every parameter named
+            // `__k<uid>_<position>` with one shared uid, no captures, a body
+            // that is exactly the call of the named callee with the
+            // parameters in order, the callee's arity the wrapper's -- is
+            // reduced back to that callee (its comm / anticomm / omp clauses
+            // are the callee's own, surfaced, so nothing of the wrapper's is
+            // lost). A USER-written wrapper (`object_for(lambda(jg) ->
+            // gfail(jg))`, with or without its own `where` clause, permuted or
+            // dropped arguments) is NOT reduced: it is called as the lambda it
+            // is, its own frame kept.
+            let synthesizedWrapper =
+                let ps = resolvedLambdaInfo.Params
+                let ms = ps |> List.map (fun p -> System.Text.RegularExpressions.Regex.Match(p.Name, @"^__k(\d+)_(\d+)$"))
+                not ps.IsEmpty
+                && List.isEmpty resolvedLambdaInfo.Captures
+                && ms |> List.forall (fun m -> m.Success)
+                && (ms |> List.map (fun m -> m.Groups.[1].Value) |> List.distinct |> List.length) = 1
+                && (ms |> List.mapi (fun i m -> m.Groups.[2].Value = string i) |> List.forall id)
+            let callee =
+                let paramIds = resolvedLambdaInfo.Params |> List.map (fun p -> p.VarId)
+                match resolvedLambdaInfo.Body.Kind with
+                | TExprApp ({ Kind = TExprVar _ } as f, args)
+                    when synthesizedWrapper
+                         && (match env.Subst.Resolve f.Type with
+                             | FuncElem (pts, _) -> pts.Length = paramIds.Length
+                             | _ -> false)
+                         && args.Length = paramIds.Length
+                         && List.forall2 (fun (a: TypedExpr) pid ->
+                                match a.Kind with
+                                | TExprVar (_, vid, _) -> vid = pid
+                                | _ -> false) args paramIds ->
+                    f
+                | _ -> resolvedKernel
+            Ok (mkTyped (TExprApp (callee, arrays)) resolvedLambdaInfo.ReturnType)
         | Some ix ->
             let cell =
                 match ix.Symmetry with

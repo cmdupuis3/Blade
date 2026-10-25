@@ -1,0 +1,30 @@
+// TEST: Memfree Return Position Fold Kernel Capture Freed (G54)
+// memfree/027's shape with the fold as the RETURN expression itself:
+// `reduce(method_for(range<I>) <@> lambda(a) -> prodsum(y(a), y(a)), (+))`.
+// The map kernel is a kernel slot of a scalar fold reached from the return
+// root, its only reference in the scope, writes nothing and returns no
+// function, so it is proved synchronous: the scalar return is evaluated into
+// a local before the scope's frees, and `y` takes the scope-exit free beside
+// `t` (no per-call leak; `blade test cell-epilogue` holds the frees and the
+// ASan census). Integer-valued cells: kernel(c) = 13685 c^2 + 1190 c + 35.
+type I = Idx<7>
+type J = Idx<5>
+type Steps = Idx<9>
+
+function kernel(x: Array<Float64 like I, J>, c: Float64) -> Float64 = {
+    let t = x * c |> compute
+    let y = t + 1.0 |> compute
+    reduce(method_for(range<I>) <@> lambda(a) -> prodsum(y(a), y(a)), (+))
+}
+
+let x = method_for(range<I, J>) <@> lambda(i, j) -> Float64(i * 5 + j) |> compute
+let k2 = kernel(x, 2.0)
+let rec acc: Array<Float64 like Steps> =
+    match acc with
+    | zero -> zero
+    | zero :: s -> zero :: kernel(x, 0.0)
+    | prefix :: n -> prefix :: kernel(x, Float64(n))
+let total = reduce(acc, (+))
+// EXPECT: k2 = 57155.0
+// EXPECT: acc = [35.0, 14910.0, 57155.0, 126770.0, 223755.0, 348110.0, 499835.0, 678930.0, 885395.0]
+// EXPECT: total = 2834895.0

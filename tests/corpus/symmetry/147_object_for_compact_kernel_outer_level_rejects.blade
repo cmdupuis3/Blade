@@ -1,0 +1,15 @@
+// TEST: Object For Compact Kernel With An Outer Level Is Refused (G67) (rejects)
+// The other side of symmetry/146's boundary: the same `object_for(group_h)`
+// over a rank-3 operand whose kernel consumes only the trailing (P, S) block
+// leaves ONE outer iteration dimension (G), so every G-cell would hold its own
+// packed SymIdx pool -- the grouped compact output no lane builds. Refused at
+// typecheck, BL4004, exactly as the method_for row map of symmetry/142.
+type G = Idx<2>
+type P = Idx<3>
+type S = Idx<4>
+
+function group_h(jg: Array<Float64 like P, S>) = method_for(jg, jg) <@> lambda(ra, rb) where comm(ra, rb) -> prodsum(ra, rb)
+
+let jt = method_for(range<G, P, S>) <@> lambda(g, a, s) -> Float64(g * 12 + a * 4 + s) |> compute
+let h = object_for(group_h) <@> jt |> compute
+// ERROR: BL4004 @ 13:20

@@ -247,7 +247,11 @@ fold that is the WHOLE value of its own `let`, at top level and in a function bo
 function-body `let s = reduce(x, lambda(p, q) where omp -> p + q, s0)` opens the same team as the
 top-level spelling, and its first failure is the top-level spelling's (the seed evaluated once
 before the fold; an empty unseeded fold BL8003; corpus functions/535, `blade test omp-reduce`
-`g55_*`). A fold that is an OPERAND of arithmetic, or a kernel's bare return, opens no team
+`g55_*`). `blade plan` names such a fold by one subject in every outcome: `<function>.<let>`
+(`fsum.s`) when its kernel is an anonymous lambda written in the let, else
+`<function>.<fold k>`, the k-th scalar fold let of the body in source order -- a spelling no let
+name can take, so it never collides with a real `<function>.<let>` (a named kernel carries no let
+name through lowering; gap G55). A fold that is an OPERAND of arithmetic, or a kernel's bare return, opens no team
 (the census says so) and keeps the single-thread licensed form. `blade plan` names each fold's form
 (`fold form: simd-reduction | K-lanes(k) | simd K-lanes(k) dot|self-dot|dot3|sum
 | threaded(...) | serial (repro) | serial (<why>)`; a `threaded(Path B chunks,
@@ -1548,7 +1552,13 @@ whose kernel parameter ranks equal the operands' known ranks) and the kernel ret
 scalar, the application has no loop: `object_for(f) <@> (A1, .., An)` IS the call
 `f(A1, .., An)` -- each operand bound whole (dense or compound), the one term evaluated exactly
 once, its value (signed zero included) and its first failure the call's. It is lowered to that
-call before any lane (Lowering `isZeroLevelWholeArrayApply`; corpus index-types/543-544).
+call before any lane (Lowering `isZeroLevelWholeArrayApply`; corpus index-types/543-544). The
+same holds when the kernel returns a COMPACT array (a packed `SymIdx` / `AntisymIdx` /
+`HermitianIdx` result): the application is the call -- a named kernel called by name, so its
+value, its first failure and its frames are the direct call's (a user-written lambda kernel is
+called as that lambda, its own frame kept), the operands forced as the call
+forces them -- lowered at typecheck before the §8.4 step 5 refusal, which needs an outer
+iteration dimension (corpus symmetry/146, 148-149).
 
 ### 7.3 Virtual arrays
 
@@ -1959,13 +1969,19 @@ Given `object_for(kernel) <@> (A₁, ..., Aₙ)` with `kernel(a: Poly<T^k>) -> T
    broadcasting).
 5. **T-dims of output**: from the kernel's `T^m` (and `tdim` spec).
    A kernel whose RETURN carries a compact group (`SymIdx` / `AntisymIdx` / `HermitianIdx`
-   T-dimensions) is refused in an application, BL4004 (any application, the zero-level one
-   included): every S-cell would hold its own packed pool -- a grouped compact output, which is
-   not built (gap G67). The restriction is on an application's kernel only: the same function
+   T-dimensions) is refused in an application WITH AN OUTER ITERATION DIMENSION, BL4004
+   (S >= 1, or a co-iteration -- a `method_for` row map, an `object_for` whose kernel takes
+   only a trailing block of its operand): every S-cell would hold its own packed pool -- a
+   grouped compact output, which is not built (gap G67). A ZERO-LEVEL application (§7.2
+   "Zero S-dimensions": an `object_for` whose kernel takes every operand whole) has no outer
+   cell: `object_for(group_h) <@> jg` IS the call `group_h(jg)` and returns its packed array --
+   lowered to that call at typecheck, before the refusal and before any lane. The same function
    called directly (`let h = group_h(jg)`) returns its packed array as usual. The supported
-   spellings store a dense cell (the callee ends in `decompact(h, 0)`) or write the flat map
-   over every axis (`method_for(range<G, P, P>) <@> lambda(g, a, b) -> prodsum(x(g, a), x(g, b))`).
-   Corpus symmetry/142 (the refusal and its span), 143 (both spellings), 144 (the direct call).
+   spellings for the refused shape store a dense cell (the callee ends in `decompact(h, 0)`) or
+   write the flat map over every axis (`method_for(range<G, P, P>) <@> lambda(g, a, b) ->
+   prodsum(x(g, a), x(g, b))`). Corpus symmetry/142 and 147 (the refusal and its span: a row
+   map, an `object_for` with one outer level), 143 (both spellings), 144 (the direct call), 146
+   (the zero-level application, the direct call's value in every lane), 148-149 (its first failure).
 
 **Correction vs v10 §10.9.** v10 step 3 emitted `SymIdx<g, extent>` *per
 S-dimension* (e.g. `(A, A)` over `Array<M, N, T>` → `SymIdx<2,M>, SymIdx<2,N>`,
