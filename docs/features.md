@@ -137,6 +137,8 @@ corpus wins.
 | Anonymous ranges | `m..n` | Core | Half-open, equivalent to `range<Idx<n-m>> + m`; a first-class rank-1 array value: lifts elementwise (`x0 + dx * Float64(0..n)`), folds (`reduce(0..n, (+))`), materializes when bound bare or `\|> compute`d |
 | Multi-dimensional for-loops | `(for (A, B)) <@> f`, `(for f) <@> (A, B)` | Core | Shorthand for `method_for` / `object_for`; allows co-iterations with `in`. The five forms: formalism §7.4 (the poly `for args in SymIdx<...>` form is Planned) |
 | Co-iteration | `for (A, B) in range<I> <@> ...` | Core | Iterate elementwise over a shared index space. |
+| Zero-level application | `object_for(f) <@> x` with `f` taking `x` whole | Core | S = 0: the application IS the call `f(x)` -- one term, its value (signed zero included) and first failure the call's, in every lane (formalism §7.2). A scalar result is lowered to the call before the lanes split (index-types/543-544; LLVM compound operands fall back to C++, gap G64); a COMPACT result (a packed `SymIdx` / `AntisymIdx` / `HermitianIdx` array) is lowered to the call at typecheck (symmetry/146) |
+| Compact kernel cell | a map whose kernel returns `SymIdx` / `AntisymIdx` / `HermitianIdx` data, with an outer iteration dimension | **Refused** (BL4004) | A grouped compact output (one packed pool per S-cell) is not built (gap G67, formalism §8.4 step 5); store a dense cell (`decompact(h, 0)`) or write the flat map; the zero-level application and a direct call return the packed array (symmetry/142-147) |
 
 
 ## 9. Polymorphism

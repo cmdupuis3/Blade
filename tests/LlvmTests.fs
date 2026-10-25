@@ -3310,6 +3310,88 @@ let runLlvmRuntimeShimTests () : BlockResult =
     { Block = block; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }
 
 // ---------------------------------------------------------------------------
+// Block: MUST-NATIVE fixtures (round 3 wave 4, W4B-C; gaps G64 / G67)
+// ---------------------------------------------------------------------------
+//
+// The differential maps ANY llvm emission refusal to a skip, so a program
+// claimed native could lose the lane while `blade test llvm <dir>` stays
+// green. The files below are claimed NATIVE: each is lowered,
+// `EmitLlvm.tryEmitProgramNamed` must SUCCEED (a refusal FAILS here),
+// the .ll is compiled and run, and its stdout must carry every `// EXPECT:`
+// pin of the file verbatim -- index-types/544's sign Booleans (`dn_neg`,
+// `dk_neg`) included. Runs after the differential of the category it names.
+let private mustNativeFixtures : (string * string) list =
+    [ "index-types", "544_whole_array_kernel_over_dense_is_call.blade"
+      "symmetry", "144_packed_comm_contraction_direct_call_accepted.blade"
+      "symmetry", "146_zero_level_compact_application_is_call.blade" ]
+
+let runLlvmMustNativeTestsFor (categories: string list) : BlockResult =
+    let block = "LLVM Must-Native"
+    let wanted = mustNativeFixtures |> List.filter (fun (c, _) -> List.contains c categories)
+    if wanted.IsEmpty then { Block = block; Passed = 0; Failed = 0; Skipped = 0; FailedNames = [] } else
+    printHeader "LLVM Must-Native (a refusal fails)"
+    match Build.resolveClang () with
+    | None ->
+        printfn "Skipped: no clang found (set BLADE_LLVM_CLANG, or install C:\\msys64\\clang64)."
+        printFooter block [ "0 passed"; "0 failed"; "1 skipped" ]
+        { Block = block; Passed = 0; Failed = 0; Skipped = 1; FailedNames = [] }
+    | Some _ ->
+    let dir = Path.GetFullPath(Path.Combine(outputDir, "llvm_must_native"))
+    Directory.CreateDirectory dir |> ignore
+    EmitLlvm.deployShim dir
+    let mutable passed = 0
+    let mutable failed = 0
+    let mutable failedNames = []
+    for (cat, file) in wanted do
+        let name = $"{cat}/{file}: native llvm route, EXPECT pins"
+        let verdict =
+            let candidates =
+                [ Path.Combine(Directory.GetCurrentDirectory(), "tests", "corpus", cat, file)
+                  Path.Combine(AppContext.BaseDirectory, "tests", "corpus", cat, file) ]
+            match candidates |> List.tryFind File.Exists with
+            | None -> Error "corpus file not found"
+            | Some path ->
+            let source = File.ReadAllText path
+            let pins =
+                source.Replace("\r\n", "\n").Split('\n')
+                |> Array.choose (fun l -> if l.StartsWith "// EXPECT: " then Some (l.Substring("// EXPECT: ".Length).Trim()) else None)
+                |> List.ofArray
+            if pins.IsEmpty then Error "the fixture carries no EXPECT pin" else
+            match fst (Lowering.lowerCaptured source) with
+            | Error e -> Error ($"lower: {e}")
+            | Ok ir0 ->
+            match IRValidate.validateIR ir0 with
+            | Error errs -> Error ($"""IR validation: {String.concat "; " errs}""")
+            | Ok ir ->
+            let stem = "mustnative_" + Build.sanitizeFileName (Path.GetFileNameWithoutExtension file)
+            match (try EmitLlvm.tryEmitProgramNamed stem ir with ex -> Error ("raised: " + ex.Message)) with
+            | Error why -> Error ($"the llvm lane REFUSED a must-native fixture: {why}")
+            | Ok ll ->
+            let llFile = Path.Combine(dir, stem + ".ll")
+            File.WriteAllText(llFile, ll)
+            match Build.compileLlvmProgram llFile dir with
+            | Error e -> Error ($"llvm compile: {e}")
+            | Ok exe ->
+            match runExeCapture exe with
+            | Error e -> Error e
+            | Ok (code, out, err) when code <> 0 -> Error ($"exit {code}: {err.Trim()}")
+            | Ok (_, out, _) ->
+                let lines = out.Replace("\r\n", "\n").Split('\n') |> Array.map (fun l -> l.Trim())
+                match pins |> List.filter (fun p -> not (Array.contains p lines)) with
+                | [] -> Ok ($"""native; {pins.Length} pins: {String.concat "; " pins}""")
+                | missing -> Error ($"""native output lacks {String.concat "; " missing}: {out.Trim()}""")
+        match verdict with
+        | Ok note ->
+            passed <- passed + 1
+            resultLine Pass name note
+        | Error e ->
+            failed <- failed + 1
+            failedNames <- failedNames @ [ name ]
+            resultLine Fail name e
+    printFooter block [ $"{passed} passed"; $"{failed} failed"; "0 skipped" ]
+    { Block = block; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }
+
+// ---------------------------------------------------------------------------
 // Entry points for `blade test llvm [category]`
 // ---------------------------------------------------------------------------
 
@@ -3326,7 +3408,8 @@ let runLlvmTests () : int =
           runSimplexAgreementTests ()
           runLlvmSimplexGate ()
           runLlvmRuntimeShimTests ()
-          runLlvmDifferentialTests () ]
+          runLlvmDifferentialTests ()
+          runLlvmMustNativeTestsFor defaultCategories ]
     printGrandTotal blocks
     if blocks |> List.sumBy (_.Failed) = 0 then 0 else 1
 
@@ -3392,4 +3475,5 @@ let runLlvmCategory (cat: string) : int =
         runLlvmBench ()
     | _ ->
         let r = runLlvmDifferentialTestsFor [ cat ]
-        if r.Failed = 0 then 0 else 1
+        let m = runLlvmMustNativeTestsFor [ cat ]
+        if r.Failed + m.Failed = 0 then 0 else 1

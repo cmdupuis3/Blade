@@ -1,0 +1,19 @@
+// TEST: Zero-Level Compact Application Failing Kernel Is The Call (G67) (aborts)
+// The first failure of a zero-level application is its direct call's:
+// `object_for(gfail) <@> jg` IS `gfail(jg)`, called BY NAME (the apply's
+// eta-wrapper is reduced at typecheck), so the BL8013 inside `gfail` carries
+// the direct call's location and frame (`at gfail`) in every lane -- no extra
+// `at lambda in h` frame. `blade test cell-epilogue` compares the complete
+// located text against the direct-call twin in C++, native LLVM and the
+// interpreter (G67 zero-level compact call twins, kfail).
+type P = Idx<3>
+type S = Idx<4>
+let x0 = Float64(0..3) |> compute
+let zz = extents(x0) - 3
+
+function gfail(jg: Array<Float64 like P, S>) = method_for(jg, jg) <@> lambda(ra, rb) where comm(ra, rb) -> prodsum(ra, rb) * Float64(7 / zz)
+
+let jg = method_for(range<P, S>) <@> lambda(a, s) -> Float64(24 + a * 4 + s) |> compute
+let h = object_for(gfail) <@> jg |> compute
+let after = h((0 : P), (1 : P))
+// ABORT: BL8013
