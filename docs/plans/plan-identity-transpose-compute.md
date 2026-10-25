@@ -1,11 +1,13 @@
 # Identity, structural transpose, and compute
 
-Status: DESIGN, revised 2026-10-24 (Claude, after review and a Codex consultation;
+Status: DESIGN revised 2026-10-24 (Claude, after review and a Codex consultation;
 the original draft is Codex's, on `codex/structural-transpose-proofs` at c6a9b8b3,
-base master 361504b6). Compiler changes NOT implemented. The four Rocq models on that
-branch compile on Rocq 9.0.1, are axiom-free, pass `coqchk` and the assumption audit
-(2205 results); their scope is stated honestly in §7, which is narrower than the
-branch's README and `docs/proofs.md` prose (to be re-scoped before the proofs merge).
+base master 361504b6). WAVE 1 BUILT 2026-10-25 on
+`claude/structural-transpose-proofs-review-f6bd01` (a fast-forward of the Codex branch
+plus master 94487a90): the P1, P2 and P3 ENTRY POINTS of §6, each marked BUILT there
+with its open remainder. The four Rocq models compile on Rocq 9.0.1, are axiom-free,
+pass `coqchk` and the assumption audit (2205 results); their prose in `proofs/README.md`
+and `docs/proofs.md` is re-scoped to §7 (40fd0a5f).
 The review that drove this revision is
 [review-identity-transpose-compute-2026-10-24.md](review-identity-transpose-compute-2026-10-24.md).
 
@@ -339,6 +341,22 @@ copies stay independent; `(A, B, A)` keeps the adjacent-only rule; declared-dens
 signatures keep today's bits; AD pins unchanged; a migration manifest lists every
 changed expected type or output.
 
+BUILT (wave 1, §2.1 only): a module-level `let g2 = g` over a module-level pure
+deferred map takes g's identity (`Types.AIDAlias`, seen through by `sameIdentity`;
+`TypeEnv.DeferredAliasRoots`; `TypeCheckSupport.loopOperandIdentity` at every spelled
+operand site), so `method_for(g, g2)`, chains, `object_for` packs and `zip` behave as
+the same-array spelling; both lanes and the interpreter unchanged below typecheck. Fails
+closed (fresh identity, dense) unless the root is a plain `let` of a repeatable,
+write-free apply combinator whose outside reads are transitively admissible, the alias
+a plain unascribed `let` of a bare same-module name, and the use at module level in that
+module. Corpus symmetry/146-148 (packed), 149-151 (the P0 before-cases: helper, stored
+alias, scoped alias, all dense), 152-153 (fail-closed edges); formalism §8.3 and §10.2
+reworded. A sweep of the 112 corpus/example files with a top-level bare alias changed
+only 146-148. Open: stored arrays with a no-write interval, parameters / the sharing
+partition (§2.2), §2.3, §2.4, §2.5 (the sampler is still binder-keyed), the IRMono
+`__coi` fallback and the provider minting sites (§2.7). Noted: a module deferred alias
+read only by a function body is BL9002 on master (pre-existing).
+
 ### P2 — Structural transpose normal forms
 
 Typed map/action algebra, certificates, the fold-order rule of §3. Normalize before
@@ -349,6 +367,26 @@ Exit: double transpose restores the original operand and frame with zero copies;
 read-only compact transpose alias copies nothing; symmetric collapse and
 antisymmetric/Hermitian actions agree with existing reads; unsupported compact
 transforms keep their diagnostics; strict-build fold bytes unchanged.
+
+BUILT (wave 1, the two easy exits; `BLADE_TRANSPOSE_ELIDE`, an optimizer gate, rule
+`transpose-normal-form v1`): `Optimize.normalizeTransposesModule` composes a transpose
+chain to one permutation rebuilt as its minimal swaps and makes an identity chain its
+base (an IR normal form every lane and the interpreter consume; admitted over a fresh
+base, as an assignable binding's whole value, or read in place by a top-level expression
+whose never-written closure holds; declined as a function's return value); and the
+READ-ONLY ALIAS PLAN (`planAliasElision`, side table `AliasElideTable`, both emitters,
+main's top level only, the interpreter keeps its copy): a never-written top-level
+`let X = Y` over a stored fresh-rooted plain or compact array shares Y's storage --
+this covers the erased SymIdx transpose `let ST = S` and, deliberately, EVERY plain
+alias (limiting it to transposes would key on spelling). The never-written proof is the
+syntactic `aliasWriteClosure` (assignments, writing statements and callees, other
+modules), not `scheduleMayWriteIn`, which treats writes to fresh local storage as
+private -- exactly the copies this removes (two Codex-found holes closed that way).
+Corpus index-types/545-555; antisym / Hermitian actions kept and recorded as declines.
+Open: chains through named bindings, the typed map/action algebra beyond swaps,
+negation / conjugation simplification, absorption (and the fold-order rule above);
+unchecked: an incremental notebook path that compiles an early cell before a later
+write.
 
 ### P3 — Compute commitments and local materialization planning
 
@@ -362,6 +400,26 @@ function body; repeated consumers share or recompute only under the declared con
 a write after `compute` cannot change the computed value; unused required failures and
 empty-input BL8003 still occur at the compute's site; `test interp` passes with the
 interpreter eager.
+
+BUILT (wave 1, function / lambda / block bodies; `BLADE_COMPUTE_ELIDE`, an optimizer
+gate, rule `compute-elision v1`; `Optimize.elideSingleConsumerComputesModule`): a
+computed let with exactly ONE reader that is a fold (`reduce(x, k[, s])` as the whole
+value of a later statement of x's spine) becomes the fused `IRReduceCompute`, or a
+pointwise co-iteration reading x's cell once takes x's map as its operand and
+elementwise fusion splices it. Admission (fail closed): one reader per function body; a
+plain dense total (IRTotality) write-free producer over stored names or ranges with
+literal-or-affine extents; no write or provider effect from the let through the
+consumer (`scheduleMayWriteIn`); an unseeded builtin fold only over a literal extent
+>= 1, its seed by W4-3's route rule (`Lowering.lowerUnseededSeed`: the exact identity on
+a strict route, the base seed on a licensed one); CUDA modules, static / MPI /
+arity-polymorphic callables skipped. A TREE REWRITE before the lane split (rule 8's
+side-table form NOT built), so the interpreter runs the rewritten tree and `opt-diff` is
+the gate. Corpus functions/539-547; `blade test optimize` pins no `allocate<` /
+`blade_alloc_cells` in either lane for an elided x; the two pool-reuse fixtures run with
+the gate off (accepted). Open: top level under `--print` selection, multi-level chains
+(x0 -> x1 -> fold elides one level), run-time-extent unseeded folds (need an emptiness
+guard reproducing BL8003 in every lane), the side-table form; a BL8011 extent-mismatch
+message after a pointwise elision names the producer's input rather than the temporary.
 
 ### P4 — Whole-program visibility
 

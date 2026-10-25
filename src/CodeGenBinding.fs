@@ -7673,7 +7673,10 @@ and genForRangeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
         match Blade.Optimize.RecStepTable.tryLoop vid with
         | Some entry when entry.ChunkBounds.Value.IsSome -> entry.ChunkBounds.Value.Value
         | _ -> (exprToCppCtx ctx lo, exprToCppCtx ctx hi)
-    let varName = $"__k{vid}"
+    // `__kv`, not `__k`: clang predefines `__k8` / `__k8__` for the generic
+    // x86-64 target, so a `__k8` counter failed every memcheck (clang64) build
+    // whose var id reached 8 (g++ under -march=native defines neither).
+    let varName = $"__kv{vid}"
     let innerCtx = addVarName vid varName ctx
     // Unroll the body IRLet chain into statements
     let (bodyLets, _bodyFinal) = unrollLetChain body
@@ -7913,7 +7916,7 @@ and genRecStepTimeLoop (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
         match fold with
         | Some (f, _, _, _) -> f.OuterRequest && f.Term = Some Blade.Optimize.Square
         | None -> false
-    let nVar = $"__k{vid}"
+    let nVar = $"__kv{vid}"   // `__kv`: `__k8` is a clang predefined macro (see the for-in counter)
     let t = $"__rsT_{vid}"
     let rn = $"__rsn_{vid}"
     let part = $"__rspart_{vid}"

@@ -1853,7 +1853,10 @@ and renderUnitStmts (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) 
         // loops read like their module-level counterparts. int64_t, not
         // size_t: the loop var is the user's Int64 for-in variable, and an
         // unsigned binding wraps negative intermediates in body arithmetic.
-        let varName = $"__k{vid}"
+        // `__kv`, not `__k`: clang predefines `__k8` / `__k8__` (x86-64 CPU
+        // macros), so a `__k8` counter broke every memcheck (clang64) build
+        // whose var id reached 8.
+        let varName = $"__kv{vid}"
         let names' = Map.add vid varName names
         let loStr = exprToCppCore subst names lo
         let hiStr = exprToCppCore subst names hi
