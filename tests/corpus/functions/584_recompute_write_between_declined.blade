@@ -1,0 +1,17 @@
+// TEST: Recompute Selection Keeps The Snapshot Across A Write
+// ============================================================================
+// Between the two consumers, `w(1) = 100.0` writes the producer's input. A
+// recomputed second fold would read the written w (2, 200, 6 -> 208); the
+// compute's snapshot reads [1, 2, 3] -> [2, 4, 6]. BLADE_RECOMPUTE audits
+// every statement from the compute through its LAST consumer and declines, so
+// both folds read the pool: s = 12, q = 1 + 4 + 16 + 36 = 57.
+function snap() -> Float64 = {
+    let mut w = [1.0, 2.0, 3.0]
+    let x = method_for(w) <@> lambda(v) -> v * 2.0 |> compute
+    let s = reduce(x, (+))
+    w(1) = 100.0
+    let q = reduce(x, lambda(p, r) -> p + r * r, 1.0)
+    s + q
+}
+let t = snap()
+// EXPECT: t = 69.0

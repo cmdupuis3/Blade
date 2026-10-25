@@ -1,0 +1,17 @@
+// TEST: Recompute Selection Keeps An Expensive Producer Materialized
+// ============================================================================
+// The same two-fold shape, but the producer `v * v + v * 2.0` costs 3 model
+// ops per cell. Recomputing it for the second fold adds work +9 and saves
+// traffic -6 (x's 3 writes and 6 reads, against a second read of a), so the
+// model keeps today's form: `[recompute v1] stats.x: materialized --
+// recompute not dominant: work +9 > traffic -6`, x's pool stays. Values:
+// x = [3, 8, 15], s = 26, q = 9 + 64 + 225 = 298.
+function stats(a: T^1) -> T^0 = {
+    let x = method_for(a) <@> lambda(v) -> v * v + v * 2.0 |> compute
+    let s = reduce(x, (+))
+    let q = reduce(x, lambda(p, r) -> p + r * r, 0.0)
+    s + q
+}
+let a = [1.0, 2.0, 3.0]
+let t = stats(a)
+// EXPECT: t = 324.0

@@ -776,9 +776,18 @@ let private cseSrc =
     + "}\n"
     + "let r = twice(v)\n"
 
+// BLADE_RECOMPUTE=0 for both CSE emission pins: y has two fold consumers, so
+// the recompute selection (P5) would fold y's map in place twice -- and CSE
+// still merges the two identical fused folds (`decision_cse_after_recompute`)
+// -- which is no longer the stored-fold spelling these pins count.
+let private withRecomputeOff (f: unit -> 'a) : 'a =
+    let prior = System.Environment.GetEnvironmentVariable "BLADE_RECOMPUTE"
+    System.Environment.SetEnvironmentVariable("BLADE_RECOMPUTE", "0")
+    try f () finally System.Environment.SetEnvironmentVariable("BLADE_RECOMPUTE", prior)
+
 let private cseDropsRepeatedFold () =
     let name = "cse_drops_repeated_fold"
-    match cppOfSource name cseSrc with
+    match withRecomputeOff (fun () -> cppOfSource name cseSrc) with
     | Error e -> resultLine Fail name e; false
     | Ok cpp ->
         let folds = System.Text.RegularExpressions.Regex.Matches(cpp, @"double __r = ").Count
@@ -3478,7 +3487,7 @@ let private compactionOmpFoldKeepsPool () =
 /// and the decision says why.
 let private cseGateOffKeepsFolds () =
     let name = "cse_gate_off_keeps_both_folds"
-    match withGate "BLADE_CSE" "0" (fun () -> cppOfSource name cseSrc) with
+    match withGate "BLADE_RECOMPUTE" "0" (fun () -> withGate "BLADE_CSE" "0" (fun () -> cppOfSource name cseSrc)) with
     | Error e -> resultLine Fail name e; false
     | Ok cpp ->
         let folds = System.Text.RegularExpressions.Regex.Matches(cpp, @"double __r = ").Count
@@ -6757,6 +6766,369 @@ let private memberHoistForcedEmission () =
                 yield false ]
 
 // ---------------------------------------------------------------------------
+// THE STATIC COST MODEL v1 (src/CostModel.fs; plan-identity-transpose-compute
+// P5). Three hand-computed programs, priced by the model's own entry points
+// over the lowered IR (compute elision OFF, so each body keeps its
+// materialized `|> compute`), plus the polynomial / peak algebra and the
+// not-priced edges. Hand computation (one op per `+ - *`, a division 4, a
+// transcendental 16; one read per operand per output cell; peak = live pool
+// cells the region allocates):
+//   P1 `v * 2.0 + 1.0` over 3 cells, folded by `(+)`: map 2 ops/cell, a read
+//      3, x written 3 / read 3 by the fold: materialized work 6 + 3 = 9,
+//      traffic 3 + 3 + 3 = 9, peak 3; in place work 9, traffic 3, peak 0.
+//   P2 `exp(p) / q` over zip(a, b) of 4 cells: 16 + 4 = 20 ops/cell (heavy:
+//      exp, `/`), reads a 4 + b 4, r written 4: work 80, traffic 12, peak 4.
+//   P3 `Float64(i + j) * 2.0` over range<Idx<2>, Idx<3>>: 3 ops/cell, no
+//      stored reads (ranges are computed), 6 cells written: work 18,
+//      traffic 6, peak 6; a SymIdx<2, 5> pool is 15 cells, AntisymIdx<2, 5> 10.
+// ---------------------------------------------------------------------------
+
+let private cmP1Src =
+    "function total(a: T^1) -> T^0 = {\n"
+    + "    let x = method_for(a) <@> lambda(v) -> v * 2.0 + 1.0 |> compute\n"
+    + "    reduce(x, (+))\n"
+    + "}\n"
+    + "let t = total([1.0, 2.0, 3.0])\n"
+let private cmP2Src =
+    "type I4 = Idx<4>\n"
+    + "function ratio(a: Array<Float64 like I4>, b: Array<Float64 like I4>) -> Array<Float64 like I4> = {\n"
+    + "    let r = method_for(zip(a, b)) <@> lambda(p, q) -> exp(p) / q |> compute\n"
+    + "    r\n"
+    + "}\n"
+    + "let a4: Array<Float64 like I4> = [1.0, 2.0, 3.0, 4.0]\n"
+    + "let b4: Array<Float64 like I4> = [2.0, 2.0, 2.0, 2.0]\n"
+    + "let t = ratio(a4, b4)\n"
+let private cmP3Src =
+    "function grid() -> T^2 = {\n"
+    + "    let g = method_for(range<Idx<2>, Idx<3>>) <@> lambda(i, j) -> Float64(i + j) * 2.0 |> compute\n"
+    + "    g\n"
+    + "}\n"
+    + "let t = grid()\n"
+
+/// The first `let _ = IRCompute (map)` of the function whose source name is
+/// `fn`, with that function's fold kernel (when its body folds) and a resolver.
+let private cmFirstMap (src: string) (fn: string) =
+    match withGate "BLADE_COMPUTE_ELIDE" "0" (fun () -> withGate "BLADE_CALL_ELIDE" "0" (fun () -> lower src)) with
+    | Error e -> Error e
+    | Ok prog ->
+        let funcs = prog.Modules |> List.collect (fun m -> m.Functions)
+        let byId = funcs |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+        let resolve (k: IRExpr) = match k with IRVar (id, _) -> Map.tryFind id byId | _ -> None
+        // the concrete instance (a generic origin the specializer copied keeps
+        // its size variables)
+        match funcs |> List.tryFind (fun f -> f.SourceName = fn && not (f.Name.StartsWith "__lambda_") && not (Blade.IRMono.hasTypeVarsInSignature f)) with
+        | None -> Error $"no function `{fn}`"
+        | Some f ->
+            let found = ref None
+            let fold = ref None
+            iterIRExpr (fun n ->
+                match n with
+                | IRLet (_, IRCompute (IRApplyCombinator p), _) when found.Value.IsNone -> found.Value <- Some p
+                | IRReduce (_, k, _) when fold.Value.IsNone -> fold.Value <- resolve k
+                | _ -> ()) f.Body
+            match found.Value with
+            | Some p -> Ok (p, fold.Value, resolve)
+            | None -> Error $"no computed let in `{fn}`"
+
+let private cmNameOf (id: IRId) = $"__v{id}"
+let private cmStored (e: IRExpr) = match e with IRVar (id, _) -> Some (cmNameOf id) | _ -> None
+
+let private costModelCases () : bool list =
+    let check (name: string) (got: Result<string, string>) =
+        match got with
+        | Ok detail -> resultLine Pass name detail; true
+        | Error detail -> resultLine Fail name detail; false
+    let render (c: CostModel.Cost) = $"work {CostModel.Poly.render c.Work}, traffic {CostModel.Poly.render c.Traffic}, peak {CostModel.Peak.render c.Peak}"
+    let k = CostModel.Poly.konst
+    [ check "cost_model_p1_fold_over_map" (
+          match cmFirstMap cmP1Src "total" with
+          | Error e -> Error e
+          | Ok (p, fk, resolve) ->
+              match CostModel.mapCells cmNameOf p, CostModel.mapPerCell resolve cmStored p, fk |> Option.map (CostModel.kernelOps resolve) with
+              | Ok n, Ok pc, Some (Ok fops) ->
+                  let before = CostModel.seqStep (CostModel.materializedMap "x" n pc CostModel.Poly.zero) (CostModel.storedFold "x" n fops n)
+                  let after = CostModel.inPlaceFold n pc fops CostModel.Poly.zero
+                  let b, a = CostModel.costOf before, CostModel.costOf after
+                  let want (c: CostModel.Cost) w t pk = c.Work = k w && c.Traffic = k t && c.Peak = [ k pk ]
+                  if n = k 3L && pc.CellOps.Count = 2L && fops.Count = 1L && want b 9L 9L 3L && want a 9L 3L 0L then
+                      Ok $"materialized {render b}; in place {render a} (hand: 9/9/3 -> 9/3/0)"
+                  else Error $"n={CostModel.Poly.render n} ops={pc.CellOps.Count} fold={fops.Count}; materialized {render b}; in place {render a}"
+              | Error e, _, _ | _, Error e, _ -> Error e
+              | _, _, Some (Error e) -> Error ("fold kernel: " + e)
+              | _, _, None -> Error "no fold kernel")
+      check "cost_model_p2_coiteration_heavy" (
+          match cmFirstMap cmP2Src "ratio" with
+          | Error e -> Error e
+          | Ok (p, _, resolve) ->
+              match CostModel.mapCells cmNameOf p, CostModel.mapPerCell resolve cmStored p with
+              | Ok n, Ok pc ->
+                  let c = CostModel.costOf (CostModel.materializedMap "r" n pc CostModel.Poly.zero)
+                  let heavy = pc.CellOps.Heavy
+                  if c.Work = k 80L && c.Traffic = k 12L && c.Peak = [ k 4L ] && pc.Reads.Length = 2
+                     && heavy |> List.exists (fun h -> h.Contains "exp") && heavy |> List.exists (fun h -> h.Contains "division") then
+                      let hs = String.concat ", " heavy
+                      Ok $"{render c}; heavy [{hs}] (hand: 80/12/4)"
+                  else Error $"{render c}; reads {pc.Reads}; heavy {heavy}"
+              | Error e, _ | _, Error e -> Error e)
+      check "cost_model_p3_rank2_range_map" (
+          match cmFirstMap cmP3Src "grid" with
+          | Error e -> Error e
+          | Ok (p, _, resolve) ->
+              match CostModel.mapCells cmNameOf p, CostModel.mapPerCell resolve cmStored p with
+              | Ok n, Ok pc ->
+                  let c = CostModel.costOf (CostModel.materializedMap "g" n pc CostModel.Poly.zero)
+                  if c.Work = k 18L && c.Traffic = k 6L && c.Peak = [ k 6L ] && pc.Reads.IsEmpty then
+                      Ok $"{render c} (hand: 18/6/6; ranges are computed, not read)"
+                  else Error $"{render c}; reads {pc.Reads}"
+              | Error e, _ | _, Error e -> Error e)
+      check "cost_model_compact_pools_and_symbolic_extents" (
+          match cmFirstMap cmP1Src "total" with
+          | Error e -> Error e
+          | Ok (p, _, _) ->
+              match p.OutputType with
+              | ArrayElem at ->
+                  let ix0 = at.IndexTypes.Head
+                  let withIx (ix: IRIndexType) = IRTArrow ([ SIdx ix ], at.ElemType, None)
+                  let sym = CostModel.cellsOf cmNameOf (withIx { ix0 with Rank = 2; Extent = IRLit (IRLitInt 5L); Symmetry = SymSymmetric })
+                  let anti = CostModel.cellsOf cmNameOf (withIx { ix0 with Rank = 2; Extent = IRLit (IRLitInt 5L); Symmetry = SymAntisymmetric })
+                  let symb = CostModel.cellsOf cmNameOf (withIx { ix0 with Extent = IRBinOp (IRElementwise, IRMul, IRVar (7, IRTScalar ETInt64), IRLit (IRLitInt 2L), SrcLoc.Nowhere) })
+                  let runtime = CostModel.cellsOf cmNameOf (withIx { ix0 with Extent = IRBinOp (IRElementwise, IRDiv, IRVar (7, IRTScalar ETInt64), IRLit (IRLitInt 2L), SrcLoc.Nowhere) })
+                  let sizeVar = CostModel.cellsOf cmNameOf (withIx { ix0 with Extent = IRParam ("n", 0, IRTNat None) })
+                  let compoundCard = CostModel.cellsOf cmNameOf (withIx { ix0 with Extent = IRParam ("compound", 0, IRTNat None) })
+                  match sym, anti, symb, runtime, sizeVar, compoundCard with
+                  | Ok s, Ok a, Ok n2, Error why, Ok sv, Error _
+                        when s = k 15L && a = k 10L && CostModel.Poly.render n2 = "2*__v7" && CostModel.Poly.render sv = "n" ->
+                      Ok $"SymIdx<2, 5> = 15 cells, AntisymIdx<2, 5> = 10, extent `v * 2` = {CostModel.Poly.render n2}, size variable n = n, `v / 2` and a compound cardinality not priced ({why})"
+                  | s, a, n2, r, sv, cc -> Error (sprintf "sym %A anti %A symbolic %A runtime %A sizevar %A compound %A" s a n2 r sv cc)
+              | _ -> Error "x is not an array")
+      check "cost_model_algebra" (
+          let n = CostModel.Poly.sym "n"
+          let m = CostModel.Poly.sym "m"
+          let a = { CostModel.Work = CostModel.Poly.scale 3L n; CostModel.Traffic = CostModel.Poly.add n (k 2L); CostModel.Peak = [ n ] }
+          let b = { CostModel.Work = k 1L; CostModel.Traffic = m; CostModel.Peak = [ m ] }
+          let c = CostModel.compose a b
+          let leqProved = CostModel.Poly.leq (CostModel.Poly.scale 2L n) (CostModel.Poly.scale 3L n)
+          let leqNotProved = CostModel.Poly.leq n m
+          let peakAbsorb = CostModel.Peak.max [ n ] [ CostModel.Poly.scale 2L n ]
+          // checked arithmetic: a wrapped count would let `leq` prove nonsense
+          let overflowRaises =
+              try CostModel.Poly.scale 2L (k System.Int64.MaxValue) |> ignore; false
+              with :? System.OverflowException -> true
+          if CostModel.Poly.render c.Work = "3*n + 1" && CostModel.Poly.render c.Traffic = "m + n + 2"
+             && CostModel.Peak.render c.Peak = "max(m, n)" && leqProved && not leqNotProved
+             && peakAbsorb = [ CostModel.Poly.scale 2L n ] && overflowRaises
+             && CostModel.costLe a (CostModel.compose a b) then
+              Ok $"compose = add, add, max: {render c}; 2n <= 3n proved, n <= m not proved; max(n, 2n) = 2n"
+          else Error $"{render c}; leq {leqProved}/{leqNotProved}; peak {CostModel.Peak.render peakAbsorb}") ]
+
+/// P5 step 2: every realization record of the plan's rules carries one
+/// `legality: ...` and one `cost: ...` item (here: the exact hand-computed
+/// lines), and `blade plan --json` the same two fields.
+let private ceFoldSrcForCost = cmP1Src
+let private ceMapSrcForCost =
+    "function scale_add(a: T^1, b: T^1) -> T^1 = {\n"
+    + "    let x = method_for(a) <@> lambda(v) -> v * 2.0 |> compute\n"
+    + "    method_for(zip(x, b)) <@> lambda(p, q) -> p + q |> compute\n"
+    + "}\n"
+    + "let r = scale_add([1.0, 2.0, 3.0], [10.0, 20.0, 30.0])\n"
+let private clTopFoldSrcForCost =
+    "function prep(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> v * 2.0 + 1.0 |> compute }\n"
+    + "let A = 0.5 * Float64(0..1001)\n"
+    + "let s = reduce(prep(A), (+))\n"
+let private tnfDoubleSrcForCost =
+    "let M: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n"
+    + "let T2 = transpose(transpose(M, [0, 1]), [0, 1])\n"
+let private tnfSymSrcForCost =
+    "let A = [1.0, 2.0, 3.0]\n"
+    + "let L = method_for(A, A)\n"
+    + "let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y\n"
+    + "let S = L <@> reynolds(g) |> compute\n"
+    + "let ST = transpose(S, [0, 1])\n"
+    + "let tot = reduce(ST, (+), axes = 2)\n"
+let private costLineOf (d: Blade.Effects.Decision) = Blade.Effects.Decisions.evidenceField "cost" d
+let private hasLegality (d: Blade.Effects.Decision) = (Blade.Effects.Decisions.evidenceField "legality" d).IsSome
+let private costIs (prefix: string) (d: Blade.Effects.Decision) =
+    hasLegality d && (match costLineOf d with Some c -> c.StartsWith prefix | None -> false)
+
+let private recordSuffixCases () : bool list =
+    [ decisionCase "record_cost_compute_elision_fold" ceFoldSrcForCost "compute-elision"
+          (fun d -> d.Subject = "total.x" && applied d && costIs "work 9 -> 9, traffic 9 -> 3, peak 3 -> 0 (model v1: 3 cells; producer 2 ops/cell, fold 1 op/cell" d)
+          "applied with `cost: work 9 -> 9, traffic 9 -> 3, peak 3 -> 0` and a legality clause"
+      decisionCase "record_cost_compute_elision_map" ceMapSrcForCost "compute-elision"
+          (fun d -> d.Subject = "scale_add.x" && applied d && costIs "work 6 -> 6, traffic 15 -> 9, peak 6 -> 3" d)
+          "applied with `cost: work 6 -> 6, traffic 15 -> 9, peak 6 -> 3` (x's 3 writes and 3 reads gone)"
+      decisionCase "record_cost_call_elision_fold" clTopFoldSrcForCost "call-elision"
+          (fun d -> applied d && costIs "work 3003 -> 3003, traffic 3003 -> 1001, peak 1001 -> 0" d)
+          "applied with `cost: work 3003 -> 3003, traffic 3003 -> 1001, peak 1001 -> 0` (prep's return pool)"
+      decisionCase "record_cost_transpose_chain_identity" tnfDoubleSrcForCost "transpose-normal-form"
+          (fun d -> d.Subject = "T2" && applied d && costIs "work 0 -> 0, traffic 24 -> 12, peak 12 -> 6" d)
+          "applied with `cost: work 0 -> 0, traffic 24 -> 12, peak 12 -> 6` (two swap copies -> T2's copy-on-bind)"
+      decisionCase "record_cost_transpose_alias" tnfSymSrcForCost "transpose-normal-form"
+          (fun d -> d.Subject = "ST" && applied d && costIs "work 0 -> 0, traffic 12 -> 0, peak 6 -> 0" d)
+          "applied with `cost: work 0 -> 0, traffic 12 -> 0, peak 6 -> 0` (ST's 6-cell packed pool copy)"
+      (let name = "record_cost_plan_json_fields"
+       match decisionsOf ceFoldSrcForCost with
+       | Error e -> resultLine Fail name e; false
+       | Ok ds ->
+           let js = Blade.Effects.Decisions.renderJson "x.blade" (ds |> List.filter (fun d -> d.Rule = "compute-elision"))
+           if js.Contains "\"cost\":\"work 9 -> 9" && js.Contains "\"legality\":\"single-consumer compute elision" then
+               resultLine Pass name "blade plan --json: `cost` and `legality` fields carry the record's two clauses"
+               true
+           else
+               resultLine Fail name ("missing fields: " + js)
+               false) ]
+
+// ---------------------------------------------------------------------------
+// THE RECOMPUTE SELECTION (BLADE_RECOMPUTE, Optimize.selectRecomputeModule,
+// rule `recompute v1`; P5 step 3). Values: corpus functions/580-585. These
+// pin the decisions (the model's choice and its stated inequality) and the
+// emission (the recomputed x allocates nothing in either lane; the gate off
+// restores its pool).
+// ---------------------------------------------------------------------------
+
+let private rcCorpus (file: string) : string =
+    System.IO.File.ReadAllText ("tests/corpus/functions/" + file)
+
+let private rcTranscendentalSrc =
+    "function stats(a: T^1) -> T^0 = {\n"
+    + "    let x = method_for(a) <@> lambda(v) -> exp(v) |> compute\n"
+    + "    let s = reduce(x, (+))\n"
+    + "    let q = reduce(x, (*))\n"
+    + "    s + q\n"
+    + "}\n"
+    + "let t = stats([1.0, 2.0, 3.0])\n"
+
+// Codex review witnesses: two map consumers whose result pools coexist (the
+// peak carries y while z is built), and a consumer whose OTHER operand
+// fusion expands to seven leaves (no room left to splice x's two).
+let private rcTwoMapsSrc =
+    "function two_maps(a: T^1) -> T^0 = {\n"
+    + "    let x = method_for(a) <@> lambda(v) -> v * 2.0 |> compute\n"
+    + "    let y = method_for(x) <@> lambda(v) -> v + 1.0 |> compute\n"
+    + "    let z = method_for(zip(x, y)) <@> lambda(v, w) -> v + w |> compute\n"
+    + "    reduce(y, (+), 0.0) + reduce(z, (+), 0.0)\n"
+    + "}\n"
+    + "let t = two_maps([1.0, 2.0, 3.0])\n"
+
+let private rcFanInSrc =
+    "type I3 = Idx<3>\n"
+    + "function wide(a: Array<Float64 like I3>, b: Array<Float64 like I3>) -> Float64 = {\n"
+    + "    let x = method_for(zip(a, b)) <@> lambda(u, v) -> u + v |> compute\n"
+    + "    let s = reduce(x, (+), 0.0)\n"
+    + "    let r = method_for(zip((method_for(zip(a, a, a, a, a, a, a)) <@> lambda(p1, p2, p3, p4, p5, p6, p7) -> p1 + p2 + p3 + p4 + p5 + p6 + p7 |> compute), x)) <@> lambda(u, v) -> u + v |> compute\n"
+    + "    s + reduce(r, (+), 0.0)\n"
+    + "}\n"
+    + "let a3: Array<Float64 like I3> = [1.0, 2.0, 3.0]\n"
+    + "let b3: Array<Float64 like I3> = [4.0, 5.0, 6.0]\n"
+    + "let t = wide(a3, b3)\n"
+
+let private rcAllocCase (name: string) (src: string) (fn: string) (wantOn: int -> bool) (wantOff: int -> bool) (describe: string) =
+    let body (cpp: string) =
+        let m = System.Text.RegularExpressions.Regex.Match(cpp, @"\n[^\n;{}]*\b" + fn + @"\w*\([^\n;{}]*\) \{\n")
+        if not m.Success then None
+        else
+            let start = m.Index + 1
+            let stop = cpp.IndexOf("\n}\n", start)
+            Some (if stop < 0 then cpp.Substring start else cpp.Substring(start, stop - start))
+    let allocs (b: string) = System.Text.RegularExpressions.Regex.Matches(b, @"(?<!de)allocate<").Count
+    match cppOfSource name src, withGate "BLADE_RECOMPUTE" "0" (fun () -> cppOfSource name src) with
+    | Ok on, Ok off ->
+        match body on, body off with
+        | Some bOn, Some bOff ->
+            let aOn, aOff = allocs bOn, allocs bOff
+            if wantOn aOn && wantOff aOff then
+                resultLine Pass name ($"{fn}: {aOn} allocation(s) with BLADE_RECOMPUTE on, {aOff} off; {describe}")
+                true
+            else
+                resultLine Fail name ($"{fn}: {aOn} allocation(s) on, {aOff} off; wanted {describe}")
+                false
+        | _ -> resultLine Fail name ($"no C++ body for `{fn}`"); false
+    | Error e, _ | _, Error e -> resultLine Fail name e; false
+
+let private rcLlvmNoPool () =
+    let name = "recompute_llvm_two_folds_no_pool"
+    let src = rcCorpus "580_recompute_two_folds_applied.blade"
+    let llOf () =
+        match lower src with
+        | Error e -> Error ($"lower: {e}")
+        | Ok ir -> (try EmitLlvm.tryEmitProgramNamed name ir with ex -> Error ("raised: " + ex.Message))
+    let bodyOf (ll: string) =
+        let ll = ll.Replace("\r\n", "\n")
+        let m = System.Text.RegularExpressions.Regex.Match(ll, @"\ndefine [^\n]*@bl_stats[^\n]*\{\n")
+        if not m.Success then None
+        else
+            let start = m.Index + 1
+            let stop = ll.IndexOf("\n}\n", start)
+            Some (if stop < 0 then ll.Substring start else ll.Substring(start, stop - start))
+    match llOf (), withGate "BLADE_RECOMPUTE" "0" llOf with
+    | Ok on, Ok off ->
+        match bodyOf on, bodyOf off with
+        | Some bOn, Some bOff ->
+            let count (b: string) = System.Text.RegularExpressions.Regex.Matches(b, @"blade_alloc_cells").Count
+            if count bOn = 0 && count bOff >= 1 then
+                resultLine Pass name ($"llvm lane, stats: 0 pool allocations with BLADE_RECOMPUTE on, {count bOff} off")
+                true
+            else
+                resultLine Fail name ($"llvm lane, stats: {count bOn} on, {count bOff} off; wanted 0 on, >= 1 off")
+                false
+        | _ -> resultLine Fail name "no LLVM body for `stats`"; false
+    | Error e, _ | _, Error e -> resultLine Fail name ($"the llvm lane refused: {e}"); false
+
+let private recomputeCases () : bool list =
+    let rcSubject (s: string) (d: Blade.Effects.Decision) = d.Subject = s
+    let evidenceHas (needle: string) (d: Blade.Effects.Decision) = d.Evidence |> List.exists (fun e -> e.Contains needle)
+    [ decisionCase "decision_recompute_two_folds_applied" (rcCorpus "580_recompute_two_folds_applied.blade") "recompute"
+          (fun d -> rcSubject "stats.x" d && applied d && hasLegality d
+                    && costIs "work 15 -> 21, traffic 12 -> 6, peak 3 -> 0" d
+                    && evidenceHas "selection: work +6 <= traffic -6, peak 3 -> 0: recompute" d)
+          "applied: work +6 <= traffic -6, peak 3 -> 0 (the stated inequality, both costs)"
+      decisionCase "decision_recompute_fold_and_map_applied" (rcCorpus "581_recompute_fold_and_map_applied.blade") "recompute"
+          (fun d -> rcSubject "scaled.x" d && applied d && costIs "work 12 -> 15, traffic 18 -> 12, peak 6 -> 3" d)
+          "applied after fusion spliced the map consumer: work 12 -> 15, traffic 18 -> 12, peak 6 -> 3"
+      decisionCase "decision_recompute_expensive_materialized" (rcCorpus "582_recompute_expensive_producer_materialized.blade") "recompute"
+          (fun d -> rcSubject "stats.x" d && declinedMentioning "materialized -- recompute not dominant: work +9 > traffic -6" d
+                    && costIs "materialize (kept) work 18, traffic 12, peak 3; recompute (rejected) work 27, traffic 6, peak 0" d)
+          "materialized -- recompute not dominant: work +9 > traffic -6 (both costs recorded)"
+      decisionCase "decision_recompute_third_consumer_declined" (rcCorpus "583_recompute_third_consumer_declined.blade") "recompute"
+          (fun d -> rcSubject "stats.x" d && declinedMentioning "is read by 3 statements" d) "declined: a third consumer"
+      decisionCase "decision_recompute_write_between_declined" (rcCorpus "584_recompute_write_between_declined.blade") "recompute"
+          (fun d -> rcSubject "snap.x" d && declinedMentioning "may write" d) "declined: a write between the consumers"
+      decisionCase "decision_recompute_empty_unseeded_declined" (rcCorpus "585_recompute_empty_unseeded_aborts.blade") "recompute"
+          (fun d -> rcSubject "stats.x" d && declinedMentioning "an unseeded fold over" d) "declined: an unseeded fold over an extent that may be empty (BL8003 stays at the first consumer)"
+      decisionCase "decision_recompute_transcendental_declined" rcTranscendentalSrc "recompute"
+          (fun d -> rcSubject "stats.x" d && declinedMentioning "the producer is not cheap" d && declinedMentioning "transcendental `exp`" d)
+          "declined: an exp producer is never recomputed (admission)"
+      withGate "BLADE_RECOMPUTE" "0" (fun () ->
+          decisionCase "decision_recompute_gate_off" (rcCorpus "580_recompute_two_folds_applied.blade") "recompute"
+              (fun d -> rcSubject "stats.x" d && declinedMentioning "disabled by BLADE_RECOMPUTE" d && (costLineOf d).IsSome)
+              "declined: disabled by BLADE_RECOMPUTE (the model's line still recorded)")
+      rcAllocCase "recompute_two_folds_no_pool" (rcCorpus "580_recompute_two_folds_applied.blade") "stats" ((=) 0) (fun n -> n >= 1)
+          "both folds read x's map in place; the gate off restores x's pool"
+      rcAllocCase "recompute_expensive_keeps_pool" (rcCorpus "582_recompute_expensive_producer_materialized.blade") "stats" (fun n -> n >= 1) (fun n -> n >= 1)
+          "the materialized choice keeps x's pool either way"
+      rcAllocCase "recompute_fold_and_map_one_pool" (rcCorpus "581_recompute_fold_and_map_applied.blade") "scaled" ((=) 1) ((=) 2)
+          "only r's pool remains with the gate on (x's restored off)"
+      rcLlvmNoPool ()
+      decisionCase "decision_recompute_two_maps_peak_carries_outputs" rcTwoMapsSrc "recompute"
+          (fun d -> rcSubject "two_maps.x" d && costLineOf d |> Option.exists (fun c -> c.Contains "peak 9 -> 6"))
+          "y's pool stays live while z is built: peak 9 -> 6 (not 6 -> 3)"
+      decisionCase "decision_recompute_fan_in_declined" rcFanInSrc "recompute"
+          (fun d -> rcSubject "wide.x" d && declinedMentioning "fan-in cap" d)
+          "declined: the consumer's other operand expands to 7 leaves, no room for x's 2"
+      decisionCase "decision_cse_after_recompute" cseSrc "cse"
+          (fun d -> applied d) "CSE still merges the two recomputed (identical) fused folds into one"
+      decisionCase "decision_recompute_cse_fixture_applied" cseSrc "recompute"
+          (fun d -> applied d && costIs "work 3000 -> 4000, traffic 4000 -> 2000, peak 1000 -> 0" d)
+          "applied to the CSE fixture's y: work 3000 -> 4000, traffic 4000 -> 2000, peak 1000 -> 0"
+      (let name = "recompute_gate_registered"
+       if List.contains "BLADE_RECOMPUTE" Blade.Optimize.optimizerGates then
+           resultLine Pass name "BLADE_RECOMPUTE is an optimizer gate (opt-diff compares it, the suite clears it)"
+           true
+       else
+           resultLine Fail name "BLADE_RECOMPUTE is missing from optimizerGates"
+           false) ]
+
+// ---------------------------------------------------------------------------
 // Compute elision (BLADE_COMPUTE_ELIDE, Optimize.elideSingleConsumerComputesModule;
 // docs/plans/plan-identity-transpose-compute.md P3 entry). The VALUES are
 // corpus functions/539-547; these read the emission: an elided single-consumer
@@ -8226,6 +8598,10 @@ let runOptimizeTests () =
           // The gram_apply advisory: left as written, spelled in the evidence.
           decisionCase "decision_gram_apply_advisory" gramAdvisorySrc "gram-apply-advisory"
               (declinedMentioning "gram_apply(A, A, v)") "advisory names gram_apply(A, A, v)"
+          // The static cost model v1 (src/CostModel.fs, P5 step 1).
+          yield! costModelCases ()
+          yield! recordSuffixCases ()
+          yield! recomputeCases ()
           // Compute elision (BLADE_COMPUTE_ELIDE): single-consumer body computes.
           yield! computeElisionCases ()
           yield! ceRemainderCases ()

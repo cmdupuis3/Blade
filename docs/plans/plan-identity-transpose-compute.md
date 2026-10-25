@@ -586,6 +586,8 @@ distinguish. Optimality is claimed only for the enumerated family and stated cos
 | [BladeLayoutOptimizationBridge.v](../../proofs/BladeLayoutOptimizationBridge.v) (new, 10) | `existing_canon_if_admissible` reuses BladeLayout's minimality on an admissible subset; argmin properties | "Forward" (schedules carry no direction; `admissible` is an opaque bool); resource dominance (assumed by `resource_factor`/`resource_monotone`) |
 | [BladeCompositionalOptimization.v](../../proofs/BladeCompositionalOptimization.v) (new, 35) | Correct Pareto-frontier pruning at a fixed depth: `dominates` is a partial order, the frontier covers the exhaustive set, an optimum survives for every `cost_le`-monotone objective; reindex/packing laws under assumed `rank`/`enumerate` bijections | That pruning prunes (all theorems hold for `prune := id`); depth-varying plans; the paper's composite theorem (tex l.563, not mechanized); any link to BladeDMWF's proved bijections |
 
+P5's static cost model (`src/CostModel.fs`, model v1) mirrors all three fields of the Rocq `cost` record -- `work`, `traffic`, `peak` -- with `compose` as add, add, max and `cost_le` componentwise (symbolic extents compared coefficient-wise), and the `recompute v1` selection claims optimality only for its two-candidate family {materialize, recompute per consumer} under that model, not for any wider plan space or for measured time.
+
 Before the proofs merge: the README entries and `docs/proofs.md` must say the above
 (per-file `##` sections, "at a glance" rows, "What remains unproved" entries, README
 entries appended in `_CoqProject` order, trailing `Print Assumptions` removed, the tex's

@@ -1,0 +1,18 @@
+// TEST: Recompute Selection Two Fold Consumers
+// ============================================================================
+// A `|> compute` with TWO consumers (compute elision requires one). The
+// producer `v * 2.0 + 1.0` is cheap (2 model ops per cell, one stored read),
+// so the cost model (BLADE_RECOMPUTE, `recompute v1`) prices both candidates:
+// materialize = work 15, traffic 12 (a 3, x written 3, read 3 + 3), peak 3;
+// recompute = work 21, traffic 6, peak 0. Work +6 <= traffic -6 and the peak
+// drops, so each fold reads the map in place and x's pool is gone. The values
+// are those of the materialized form: x = [3, 5, 7], s = 15, q = 83.
+function stats(a: T^1) -> T^0 = {
+    let x = method_for(a) <@> lambda(v) -> v * 2.0 + 1.0 |> compute
+    let s = reduce(x, (+))
+    let q = reduce(x, lambda(p, r) -> p + r * r, 0.0)
+    s + q
+}
+let a = [1.0, 2.0, 3.0]
+let t = stats(a)
+// EXPECT: t = 98.0

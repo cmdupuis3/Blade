@@ -180,8 +180,15 @@ module Decisions =
         sb.Append('"') |> ignore
         sb.ToString()
 
+    /// The record's COST BASIS and LEGALITY clause (plan-identity-transpose-
+    /// compute P5): the evidence items spelled `cost: ...` / `legality: ...`
+    /// (the text after the prefix), or None. They stay in the evidence too.
+    let evidenceField (prefix: string) (d: Decision) : string option =
+        d.Evidence |> List.tryPick (fun e -> if e.StartsWith (prefix + ": ") then Some (e.Substring (prefix.Length + 2)) else None)
+
     /// One JSON object per plan: `{"file":..., "decisions":[{rule, version,
-    /// subject, line, col, outcome, reason, evidence}]}`.
+    /// subject, line, col, outcome, reason, cost, legality, evidence}]}`;
+    /// `cost` and `legality` are null where the record states none.
     let renderJson (file: string) (ds: Decision list) : string =
         let one (d: Decision) =
             let outcome, reason =
@@ -189,6 +196,8 @@ module Decisions =
                 | Applied -> "applied", "null"
                 | Declined why -> "declined", jsonString why
             let ev = d.Evidence |> List.map jsonString |> String.concat ","
-            $"{{\"rule\":{jsonString d.Rule},\"version\":{d.Version},\"subject\":{jsonString d.Subject},\"line\":{d.Span.StartLine},\"col\":{d.Span.StartCol},\"outcome\":\"{outcome}\",\"reason\":{reason},\"evidence\":[{ev}]}}"
+            let field (prefix: string) = match evidenceField prefix d with Some s -> jsonString s | None -> "null"
+            let cost, legality = field "cost", field "legality"
+            $"{{\"rule\":{jsonString d.Rule},\"version\":{d.Version},\"subject\":{jsonString d.Subject},\"line\":{d.Span.StartLine},\"col\":{d.Span.StartCol},\"outcome\":\"{outcome}\",\"reason\":{reason},\"cost\":{cost},\"legality\":{legality},\"evidence\":[{ev}]}}"
         let body = ds |> List.map one |> String.concat ","
         $"{{\"file\":{jsonString file},\"decisions\":[{body}]}}"
