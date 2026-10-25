@@ -1,0 +1,46 @@
+// TEST: Nested Fold Of An Array-Returning Call Evaluates The Call Once
+// ============================================================================
+// A fold whose operand is an inline array-returning call, NESTED inside a
+// larger expression (`1.0 + reduce(prep(A), (+))`), inside a function body's
+// return, or inside a map kernel's body, evaluates the call ONCE, at the
+// fold's own point in evaluation order (both C++ reduce emitters used to
+// spell the call at every element read: n + 1 calls, n + 1 leaked pools).
+// The order witnesses keep left-to-right evaluation: bump writes its array's
+// first cell before the nested fold over doubled(...) reads it
+// (1 + 20 + 4 + 6 = 31; the plain sum 20 + 4 + 6 = 30). A callee that returns
+// its own parameter (`same`) is folded in place and its result never freed.
+function prep(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> v * 2.0 |> compute }
+function same(a: T^1) -> T^1 = { a }
+function body(a: T^1) -> T^0 = { 1.0 + reduce(prep(a), (+)) }
+function doubled(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> v * 2.0 |> compute }
+function bump(a: mut Array<Float64 like Idx<3>>) -> Float64 = {
+    a(0) = 10.0
+    0.0
+}
+function combine(x: Float64, y: Float64) -> Float64 = { x + y }
+function inner(a: mut Array<Float64 like Idx<3>>) -> Float64 = {
+    combine(bump(a), 1.0 + reduce(doubled(a), (+)))
+}
+let A = [1.0, 2.0, 3.0]
+let s = 1.0 + reduce(prep(A), (+))
+let sd = 1.0 + reduce(prep(A), (+), 0.5)
+let t = body(A)
+let ws = [10.0, 20.0]
+let u = method_for(ws) <@> lambda(w) -> w + reduce(prep(A), (+)) |> compute
+let p = 2.0 * reduce(same(A), (+))
+let mut M = [1.0, 2.0, 3.0]
+let o2 = combine(bump(M), 1.0 + reduce(doubled(M), (+)))
+let mut N = [1.0, 2.0, 3.0]
+let o3 = bump(N) + reduce(doubled(N), (+))
+let mut K = [1.0, 2.0, 3.0]
+let o4 = inner(K)
+// EXPECT: s = 13.0
+// EXPECT: sd = 13.5
+// EXPECT: t = 13.0
+// EXPECT: u = [22.0, 32.0]
+// EXPECT: p = 12.0
+// EXPECT: A = [1.0, 2.0, 3.0]
+// EXPECT: o2 = 31.0
+// EXPECT: o3 = 30.0
+// EXPECT: o4 = 31.0
+// EXPECT: K = [10.0, 2.0, 3.0]

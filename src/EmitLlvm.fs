@@ -10070,6 +10070,47 @@ let private emitCompoundInit (c: Ctx) (b: IRBinding) (denseExpr: IRExpr) (maskEx
 /// timing line, then the auto-print pass -- the exact statement order
 /// `genMainWrapper` assembles for the C++ lane, which is what makes the two
 /// lanes' stdout comparable line for line.
+/// A TOP-LEVEL `|> compute` of a map FORCES its deferred array operands, as
+/// the C++ lane's genComputeBinding does (it forces every deferred
+/// `info.Arrays` entry under its own name before the nest renders, through
+/// forceDeferredArrayInput, so at main's top level each joins the auto-print
+/// list): formalism 10.2 -- a module-level forcing use forced a member, so the
+/// alias class prints. This lane read such an operand where it stood (an outer
+/// product's or a co-iteration's producer slot) and never marked it, so
+/// `let P = method_for(g, y) <@> k |> compute` printed `P` without `g` (corpus
+/// symmetry/147: `g`, `g2`, `g3` missing). Each operand now goes through the
+/// shared any-order operand rule (consumeArrOperandAnyOrderTotal): forced into
+/// a pool at the statement when it is read more than once or when in-place
+/// consumption could be told apart (an assignment anywhere, a producer that
+/// may fail), otherwise consumed in place and marked printable -- the
+/// emission of a retained operand is unchanged. The value is resolved as
+/// genComputeBinding's resolveComputation does: through `|> compute`
+/// wrappers, functor maps and still-deferred module names (`let v = h |>
+/// compute` forces h's operands, not h -- a copy, 10.2); an `object_for`
+/// application's arguments count as its operands.
+let private forceComputeOperandsAtTop (c: Ctx) (value: IRExpr) : unit =
+    let isDeferredModule (id: IRId) =
+        c.BindingValues.ContainsKey id
+        && (match c.ArrSlots.TryGetValue id with
+            | true, { Src = (AVirt _ | AVirtFlat _) } -> true
+            | _ -> false)
+    let rec resolve (seen: Set<IRId>) (e: IRExpr) : IRExpr list =
+        match e with
+        | IRCompute inner | IRFunctorMap (_, inner) -> resolve seen inner
+        | IRVar (id, _) when isDeferredModule id && not (Set.contains id seen) ->
+            resolve (Set.add id seen) c.BindingValues.[id]
+        | IRApplyCombinator info -> info.Arrays
+        | IRApp (IRObjectFor _, args, _) ->
+            args |> List.collect (function IRTuple es -> es | a -> [ a ])
+        | _ -> []
+    match value with
+    | IRCompute _ ->
+        for operand in resolve Set.empty value do
+            match operand with
+            | IRVar (id, _) when isDeferredModule id -> consumeArrOperandAnyOrderTotal c operand |> ignore
+            | _ -> ()
+    | _ -> ()
+
 let private emitMain (c: Ctx) (m: IRModule) (programName: string) : string list =
     c.Body <- ResizeArray()
     c.Allocas <- ResizeArray()
@@ -10157,7 +10198,9 @@ let private emitMain (c: Ctx) (m: IRModule) (programName: string) : string list 
          | _ -> ())
         (match Map.tryFind b.Id m.CompoundInits with
          | Some (denseExpr, maskExpr) -> emitCompoundInit c b denseExpr maskExpr
-         | None -> bindNamed c b.Id b.Name b.Type b.Value)
+         | None ->
+             forceComputeOperandsAtTop c b.Value
+             bindNamed c b.Id b.Name b.Type b.Value)
         publishBinding c b.Id
         for (sid, slot) in built do
             needShim c "blade_member_fini_i64"

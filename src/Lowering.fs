@@ -4225,6 +4225,10 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     // compound to plan.
     let moduleRefs =
         lazy (irModules |> List.map (fun m -> (m.Name, Optimize.moduleReferencedIds m)))
+    // Call elision's program-wide value-reference census (a callee in another
+    // module: Optimize.CallElideProgram), over the modules as they reach the
+    // optimizer.
+    Optimize.CallElideProgram.install (Optimize.programValueRefs irModules)
     let irModules =
         irModules |> List.map (fun irModule ->
         // Rewrite raw array-typed binops into object_for combinators now

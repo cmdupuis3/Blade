@@ -1,0 +1,17 @@
+// TEST: An imported helper's call is jointly lowered at its caller
+// MODULE: Helpers
+// docs/plans/plan-identity-transpose-compute.md P4 (wave 3 B, item (b)):
+// `prep` reads only its parameters, so a call of it in ANOTHER module is
+// jointly lowered there (BLADE_CALL_ELIDE, `call-elision v1`): its map kernel
+// is cloned into the caller's module, no return pool. `scaled` reads this
+// module's `scale`, so a foreign inline would need a qualified module value:
+// it declines and keeps its call (values unchanged either way); so does
+// `squared`, whose kernel calls another Helpers function (a cross-module
+// reference from the inlined copy is not audited in v1).
+module Helpers
+
+let scale = 3.0
+function sq(v: Float64) -> Float64 = { v * v }
+function prep(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> v * 2.0 + 1.0 |> compute }
+function scaled(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> v * scale |> compute }
+function squared(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> sq(v) |> compute }

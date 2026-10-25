@@ -7255,6 +7255,212 @@ let private callElisionCases () : bool list =
               "declined: disabled by BLADE_CALL_ELIDE") ]
 
 // ---------------------------------------------------------------------------
+// NESTED FOLD BIND-ONCE (wave 3 B goal 2; P4 open issue 1): a fold whose
+// operand is an inline array-returning call NESTED in a larger expression or
+// a kernel body evaluates the call ONCE in both C++ reduce emitters
+// (CodeGenExpr.bindInlineArrayCall / genReduceBinding's InlineArrayCall arm),
+// and frees a FreshPool result after the fold; a NotFresh callee (it returns
+// its parameter) is never freed. The VALUES are corpus functions/566. The
+// emitters used to spell the call at every element read -- every one of those
+// calls on ONE emitted line -- so "at most one call per emitted line" is the
+// pin; the LLVM lane already called once (asserted, it is the oracle shape).
+// ---------------------------------------------------------------------------
+
+let private nfTopSrc =
+    clPrep
+    + "let A = 0.5 * Float64(0..1001)\n"
+    + "let s = 1.0 + reduce(prep(A), (+))\n"
+
+let private nfBodySrc =
+    clPrep
+    + "function body(a: T^1) -> T^0 = { 1.0 + reduce(prep(a), (+), 0.5) }\n"
+    + "let A = 0.5 * Float64(0..1001)\n"
+    + "let t = body(A)\n"
+
+let private nfKernelSrc =
+    clPrep
+    + "let A = 0.5 * Float64(0..1001)\n"
+    + "let ws = [10.0, 20.0]\n"
+    + "let u = method_for(ws) <@> lambda(w) -> w + reduce(prep(A), (+)) |> compute\n"
+
+let private nfSameSrc =
+    "function same(a: T^1) -> T^1 = { a }\n"
+    + "function body(a: T^1) -> T^0 = { 2.0 * reduce(same(a), (+)) }\n"
+    + "let A = [1.0, 2.0, 3.0]\n"
+    + "let t = body(A)\n"
+
+/// (calls of `callee` on the busiest emitted line outside its declarations,
+/// total such calls) over the whole C++ program.
+let private nfCallsPerLine (callee: string) (cpp: string) =
+    let lines =
+        cpp.Replace("\r\n", "\n").Split('\n')
+        |> Array.filter (fun l -> not (System.Text.RegularExpressions.Regex.IsMatch(l.TrimStart(), @"^Array<[^>]*> " + callee)))
+    let counts = lines |> Array.map (fun l -> System.Text.RegularExpressions.Regex.Matches(l, @"\b" + callee + @"\w*\(").Count)
+    ((if counts.Length = 0 then 0 else Array.max counts), Array.sum counts)
+
+let private nfCppCase (name: string) (src: string) (callee: string) (wantFree: int -> bool) (describe: string) =
+    let check (cpp: string) =
+        let (mx, total) = nfCallsPerLine callee cpp
+        let frees = System.Text.RegularExpressions.Regex.Matches(cpp, @"deallocate<[^;]*\(__rcall\w+\.data").Count
+        (mx, total, frees)
+    match cppOfSource name src, withGate "BLADE_CALL_ELIDE" "0" (fun () -> cppOfSource name src) with
+    | Ok on, Ok off ->
+        let (mxOn, tOn, fOn), (mxOff, tOff, fOff) = check on, check off
+        if mxOn = 1 && mxOff = 1 && tOn >= 1 && wantFree fOn && wantFree fOff then
+            resultLine Pass name ($"one call of {callee} per site ({tOn} site(s) on, {tOff} off), {fOn} bound-call free(s); {describe}")
+            true
+        else
+            resultLine Fail name ($"calls of {callee}: busiest line {mxOn} on / {mxOff} off, total {tOn} / {tOff}, bound-call frees {fOn} / {fOff}; wanted one per line and {describe}")
+            false
+    | Error e, _ | _, Error e -> resultLine Fail name e; false
+
+let private nestedFoldCallCases () : bool list =
+    [ nfCppCase "nested_fold_call_top_once" nfTopSrc "prep" (fun f -> f = 1)
+          "a top-level `1.0 + reduce(prep(A), (+))` binds the call once and frees its pool"
+      nfCppCase "nested_fold_call_body_once" nfBodySrc "prep" (fun f -> f >= 1)
+          "a function body's nested seeded fold binds the call once and frees its pool"
+      nfCppCase "nested_fold_call_kernel_once" nfKernelSrc "prep" (fun f -> f >= 1)
+          "a map kernel's body folds prep(A) with one call per kernel evaluation"
+      nfCppCase "nested_fold_call_notfresh_not_freed" nfSameSrc "same" (fun f -> f = 0)
+          "a callee returning its parameter is bound once and never freed"
+      (match ceLlvmOf "nested_fold_call_llvm_body_once" nfBodySrc with
+       | Ok ll ->
+           match ceLlvmBody ll "body" with
+           | Some b ->
+               let calls = System.Text.RegularExpressions.Regex.Matches(b, @"call [^\n]*@bl_prep").Count
+               let frees = System.Text.RegularExpressions.Regex.Matches(b, @"call void @blade_free").Count
+               if calls = 1 && frees >= 1 then
+                   resultLine Pass "nested_fold_call_llvm_body_once" ($"llvm lane, body: {calls} call of @bl_prep, {frees} free(s) (the lane already evaluated the operand once)")
+                   true
+               else
+                   resultLine Fail "nested_fold_call_llvm_body_once" ($"llvm lane, body: {calls} call(s) of @bl_prep, {frees} free(s); wanted 1 call and a free")
+                   false
+           | None -> resultLine Fail "nested_fold_call_llvm_body_once" "no LLVM body for `body`"; false
+       | Error e -> resultLine Fail "nested_fold_call_llvm_body_once" ($"the llvm lane refused: {e}"); false) ]
+
+// ---------------------------------------------------------------------------
+// CALL ELISION, P4 REMAINDER (wave 3 B goal 3; corpus functions/567-569 and
+// multifile/044 hold the values): (a) a let-bound single-reader call, (b) a
+// callee in another module, (c) a kernel (lambda) caller -- each applied with
+// no call (so no return pool) at the site, the gate restoring the call -- and
+// (d) a callee with an array let declining with a record naming G69.
+// ---------------------------------------------------------------------------
+
+let private p4LetFoldSrc =
+    clPrep
+    + "function folded(a: T^1) -> T^0 = {\n    let x = prep(a)\n    let k = 0.5\n    reduce(x, (+), k)\n}\n"
+    + "let A = [1.0, 2.0, 3.0]\nlet f = folded(A)\n"
+
+let private p4LetMapSrc =
+    clPrep
+    + "function mapped(a: T^1, b: T^1) -> T^1 = {\n    let x = prep(a)\n    method_for(zip(x, b)) <@> lambda(u, w) -> u + w |> compute\n}\n"
+    + "let A = [1.0, 2.0, 3.0]\nlet B = [10.0, 20.0, 30.0]\nlet m = mapped(A, B)\n"
+
+let private p4LetDeclineSrc =
+    clPrep
+    + "function twice(a: T^1) -> T^0 = {\n    let x = prep(a)\n    let s1 = reduce(x, (+))\n    s1 + reduce(x, (*))\n}\n"
+    + "function written(a: mut Array<Float64 like Idx<3>>) -> Float64 = {\n    let x = prep(a)\n    a(2) = 100.0\n    reduce(x, (+))\n}\n"
+    + "let A = [1.0, 2.0, 3.0]\nlet t = twice(A)\nlet mut M = [1.0, 2.0, 3.0]\nlet w = written(M)\n"
+
+let private p4KernelSrc =
+    clPrep
+    + "let A = [1.0, 2.0, 3.0]\nlet ws = [10.0, 20.0]\n"
+    + "let u = method_for(ws) <@> lambda(w) -> reduce(prep(A), (+), w) |> compute\n"
+
+let private p4KernelOmpSrc =
+    clPrep
+    + "let A = [1.0, 2.0, 3.0]\nlet ws = [10.0, 20.0]\n"
+    + "let up = method_for(ws) <@> lambda(w) where omp(w: 1) -> reduce(prep(A), (+), w) |> compute\n"
+
+let private p4ArrayLetSrc =
+    "function prep2(a: T^1) -> T^1 = {\n    let t = method_for(a) <@> lambda(v) -> v * 2.0 |> compute\n    method_for(t) <@> lambda(v) -> v + 1.0 |> compute\n}\n"
+    + "let A = [1.0, 2.0, 3.0]\nlet s = reduce(prep2(A), (+))\n"
+
+let private p4ForeignSources =
+    [ ("Helpers",
+       "module Helpers\n\nlet scale = 3.0\nfunction sq(v: Float64) -> Float64 = { v * v }\n"
+       + "function prep(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> v * 2.0 + 1.0 |> compute }\n"
+       + "function scaled(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> v * scale |> compute }\n"
+       + "function squared(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> sq(v) |> compute }\n")
+      ("Main",
+       "module Main\nimport Helpers\nfrom Helpers import prep\n\n"
+       + "let A = [1.0, 2.0, 3.0]\nlet s = reduce(prep(A), (+))\n"
+       + "let z = reduce(Helpers.scaled(A), (+))\nlet q = reduce(Helpers.squared(A), (+))\n") ]
+
+let private cppOfMulti (name: string) (sources: (string * string) list) : Result<string, string> =
+    try
+        match fst (Blade.Lowering.lowerMultiSourceCaptured sources) with
+        | Error e -> Error ($"lower: {e}")
+        | Ok ir -> Ok (fst (CodeGen.genSelfContainedProgramFromIR ir name))
+    with ex -> Error ($"codegen raised: {ex.Message}")
+
+/// Calls of `callee` anywhere in the program outside its declarations, gate on and off.
+let private p4WholeCase (name: string) (cppOf: unit -> Result<string, string>) (callee: string) (wantOn: int -> bool) (wantOff: int -> bool) (describe: string) =
+    match cppOf (), withGate "BLADE_CALL_ELIDE" "0" cppOf with
+    | Ok on, Ok off ->
+        let (_, tOn), (_, tOff) = nfCallsPerLine callee on, nfCallsPerLine callee off
+        if wantOn tOn && wantOff tOff then
+            resultLine Pass name ($"calls of {callee} outside its declarations: {tOn} with the gate on, {tOff} off; {describe}")
+            true
+        else
+            resultLine Fail name ($"calls of {callee} outside its declarations: {tOn} on, {tOff} off; wanted {describe}")
+            false
+    | Error e, _ | _, Error e -> resultLine Fail name e; false
+
+let private p4Cases () : bool list =
+    [ // (a) let-bound single reader
+      clCppCase "call_elision_let_bound_fold_no_call_no_pool" p4LetFoldSrc "folded" "prep"
+          (fun (c, a) -> c = 0 && a = 0) (fun (c, _) -> c = 1)
+          "the let-bound call moves to its fold and is read in place: no call, no allocation"
+      clCppCase "call_elision_let_bound_map_no_call" p4LetMapSrc "mapped" "prep"
+          (fun (c, _) -> c = 0) (fun (c, _) -> c = 1)
+          "the let-bound call is spliced into its pointwise reader"
+      clLlvmCase "call_elision_llvm_let_bound_fold_no_call" p4LetFoldSrc "folded" "prep"
+      decisionCase "decision_call_elision_let_bound_applied" p4LetFoldSrc "call-elision"
+          (fun d -> clSubject "folded: let __v" d && d.Subject.Contains "= prep(a); reduce(__v" && applied d
+                    && d.Evidence |> List.exists (fun e -> e.Contains "let-bound: `__v"))
+          "applied to folded's let-bound call"
+      decisionCase "decision_call_elision_let_bound_declined_two_readers" p4LetDeclineSrc "call-elision"
+          (fun d -> clSubject "twice: let __v" d && declinedMentioning "has more than one reader" d)
+          "declined: the call's result has a second reader"
+      decisionCase "decision_call_elision_let_bound_declined_write_between" p4LetDeclineSrc "call-elision"
+          (fun d -> clSubject "written: let __v" d && declinedMentioning "an intervening statement may write" d)
+          "declined: a write between the let and its reader"
+      clCppCase "call_elision_let_bound_declined_keeps_call" p4LetDeclineSrc "written" "prep"
+          (fun (c, _) -> c = 1) (fun (c, _) -> c = 1) "the declined let keeps its one call"
+      // (c) kernel callers
+      p4WholeCase "call_elision_kernel_caller_no_call" (fun () -> cppOfSource "p4_kernel" p4KernelSrc) "prep"
+          (fun t -> t = 0) (fun t -> t >= 1) "the kernel's fold reads prep's map in place: no call in any kernel copy"
+      decisionCase "decision_call_elision_kernel_caller_applied" p4KernelSrc "call-elision"
+          (fun d -> clSubject "a kernel in u: reduce(prep(A))" d && applied d
+                    && d.Evidence |> List.exists (fun e -> e.Contains "the caller is a kernel (lambda) body"))
+          "applied in the kernel of u"
+      decisionCase "decision_call_elision_kernel_caller_declined_parallel" p4KernelOmpSrc "call-elision"
+          (fun d -> clSubject "a kernel in up: reduce(prep(A))" d && declinedMentioning "a kernel with a parallel strategy" d)
+          "declined: the kernel requests omp"
+      // (b) a callee in another module
+      p4WholeCase "call_elision_foreign_callee_no_call" (fun () -> cppOfMulti "p4_foreign" p4ForeignSources) "Helpers__prep"
+          (fun t -> t = 0) (fun t -> t >= 1) "Main's fold reads Helpers.prep's map in place"
+      (match decisionsOfMulti p4ForeignSources with
+       | Error e -> resultLine Fail "decision_call_elision_foreign_callee" e; false
+       | Ok ds ->
+           let mine = ds |> List.filter (fun d -> d.Rule = "call-elision")
+           let ok =
+               mine |> List.exists (fun d -> clSubject "s: reduce(prep(A))" d && applied d
+                                             && d.Evidence |> List.exists (fun e -> e.Contains "defined in ANOTHER module"))
+               && mine |> List.exists (fun d -> clSubject "z: reduce(scaled(A))" d && declinedMentioning "captures a value the callee does not bind" d)
+               && mine |> List.exists (fun d -> clSubject "q: reduce(squared(A))" d && declinedMentioning "names another callable (`sq`)" d)
+           if ok then resultLine Pass "decision_call_elision_foreign_callee" "applied to s (foreign prep); declined: scaled reads a module value, squared calls another Helpers function"
+           else resultLine Fail "decision_call_elision_foreign_callee" (mine |> List.map Blade.Effects.Decisions.render |> String.concat " | ")
+           ok)
+      // (d) a non-scalar callee let declines, naming G69
+      decisionCase "decision_call_elision_declined_array_let_g69" p4ArrayLetSrc "call-elision"
+          (fun d -> clSubject "s: reduce(prep2(A))" d && declinedMentioning "is not a scalar" d && declinedMentioning "gap G69" d)
+          "declined: an array let in the callee (G69, scope model A)"
+      clCppCase "call_elision_array_let_keeps_call" p4ArrayLetSrc "main" "prep2"
+          (fun (c, _) -> c = 1) (fun (c, _) -> c = 1) "the call stays, once" ]
+
+// ---------------------------------------------------------------------------
 // TRANSPOSE NORMAL FORM (P2 entry of docs/plans/plan-identity-transpose-
 // compute.md; Blade.Optimize.normalizeTransposesModule and planAliasElision,
 // rule `transpose-normal-form v1`, gate BLADE_TRANSPOSE_ELIDE). The corpus
@@ -8024,7 +8230,11 @@ let runOptimizeTests () =
           yield! computeElisionCases ()
           yield! ceRemainderCases ()
           // Call elision (BLADE_CALL_ELIDE): a supported call read in place.
-          yield! callElisionCases () ]
+          yield! callElisionCases ()
+          // A nested fold of an array-returning call evaluates it once.
+          yield! nestedFoldCallCases ()
+          // The P4 remainder: let-bound, foreign-module and kernel callers.
+          yield! p4Cases () ]
         @ planCases ()
         @ coIterIdentityPins ()
         @ siblingCases ()

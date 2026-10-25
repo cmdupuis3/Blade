@@ -552,6 +552,22 @@ modules, a let-bound single-reader call (`let x = prep(A); reduce(x)`), kernel-b
 callers, a non-scalar let in the callee (needs the return-boundary event), run-time-extent
 unseeded folds (as in P3).
 
+BUILT (wave 3, workstream B): the NESTED fold bind-once -- both C++ reduce emitters bind an
+inline array-returning call once at the fold's own evaluation point (an IIFE in expression
+position, a statement before a fold binding) and free a FreshPool result after the fold; the
+LLVM lane already evaluated it once (functions/566). Under `BLADE_CALL_ELIDE`: (a) a let-bound
+single-reader call moves to its reader when nothing between writes (functions/567); (b) a
+callee in another module, given Lowering's program-wide value-reference census
+(`Optimize.CallElideProgram`), its kernel cloned into the caller's module, declining when its
+body or kernel names a module value or another module's callable (multifile/044); (c) kernel
+(lambda) bodies as callers, declining for a parallel-strategy kernel or one reachable from a
+`where repro` body (functions/568, a capturing callee kernel cloned into a kernel included);
+(d) a non-scalar callee let still DECLINES, its record naming G69 and scope model A
+(functions/569). ASan clean on functions/554-569 and multifile/044. Also fixed: the LLVM lane
+now forces a top-level compute's deferred operands as the C++ lane does (formalism 10.2;
+symmetry/147, loops/599). Open: (d); a fold nested in a larger expression is bound once but not
+jointly lowered; prodsum over an inline call is evaluated once but its pool not freed.
+
 ### P5 — Broader deterministic selection
 
 A bounded family of storage, fusion, streaming, conversion and recomputation

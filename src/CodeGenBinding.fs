@@ -4481,6 +4481,29 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
         let (lines, ctx') =
             genReduceBinding ctx binding builder (IRParam (gname, 0, inferExprType arrExpr)) kernelExpr initExpr
         ([ gatherLine ] @ lines @ [ $"{ind}nested_array_utilities::{routine}({gname});" ], ctx')
+    // An inline ARRAY-RETURNING CALL as the operand: the fold below spells its
+    // operand at every element read, so the call ran n + 1 times and leaked
+    // every pool. Bind it once right before the fold (operand before seed, the
+    // interpreter's order), fold the binding, free a caller-owned pool after
+    // (the guard of CodeGenExpr.bindInlineArrayCall). Statement-level twin of
+    // bindInlineArrayCall; a kept user call at statement level was already
+    // bound to its own let by Optimize.elideCallsModule.
+    | InlineArrayCall _ ->
+        let ind = indentStr ctx
+        let cname = (bindingCppName binding) + "__call"
+        let ty = inferExprType arrExpr
+        let callLine = $"{ind}auto {cname} = {exprToCppCtx ctx arrExpr};"
+        let (lines, ctx') = genReduceBinding ctx binding builder (IRParam (cname, 0, ty)) kernelExpr initExpr
+        let free =
+            match arrExpr, stripUnits ty with
+            | IRApp (f, _, _), ArrayElem at
+                when freshReturnOf f = FreshPool
+                     && isFreeableDenseArrayType at
+                     && classifyOutputStorage ty = AllocDense
+                     && not (hasRealSymmetry (buildSymmVec ty)) ->
+                [ $"{ind}deallocate<typename promote<{elemTypeToCpp at.ElemType}, {arrayRank at}>::type, nullptr>({cname}.data, {cname}.extents);" ]
+            | _ -> []
+        ([ callLine ] @ lines @ free, ctx')
     // Compaction fusion (B4a/c): the fold of a planned `y * y` reads `y`'s
     // compact buffer (CodeGenExpr.renderCompactionFold); its map let emitted
     // only a comment.

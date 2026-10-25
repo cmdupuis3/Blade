@@ -1,0 +1,35 @@
+// TEST: Call Elision Takes A Call In A Kernel Body
+// ============================================================================
+// A KERNEL (lambda) body is a caller like a function body: a fold
+// `reduce(prep(A), (+), w)` that is the whole kernel body, its argument a
+// capture of the kernel, is jointly lowered inside the kernel (no call, no
+// return pool per cell). A row kernel folds `prep(row)` over its own array
+// parameter the same way, and `scaledk(A, w)` -- a scalar let k = 2w whose
+// map kernel captures it -- inlines k into the kernel and clones the
+// capturing map kernel onto the inlined copy (uk = 12w). Declines keep the call (values unchanged): a
+// captured argument the program assigns (`C`, written after `uc`), and a
+// kernel with a parallel strategy (`where omp`). Values: prep(A) sums to 12,
+// so u = [22, 32]; the rows of R double to sums 6 and 30.
+function prep(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> v * 2.0 |> compute }
+function scaledk(a: T^1, c: Float64) -> T^1 = {
+    let k = c * 2.0
+    method_for(a) <@> lambda(v) -> v * k |> compute
+}
+type Rw = Idx<2>
+type Cl = Idx<3>
+let A = [1.0, 2.0, 3.0]
+let ws = [10.0, 20.0]
+let u = method_for(ws) <@> lambda(w) -> reduce(prep(A), (+), w) |> compute
+let R: Array<Float64 like Rw, Cl> = [[0.0, 1.0, 2.0], [4.0, 5.0, 6.0]]
+let rs = method_for(R) <@> lambda(row) -> reduce(prep(row), (+)) |> compute
+let uk = method_for(ws) <@> lambda(w) -> reduce(scaledk(A, w), (+)) |> compute
+let mut C = [1.0, 1.0, 1.0]
+let uc = method_for(ws) <@> lambda(w) -> reduce(prep(C), (+), w) |> compute
+C(1) = 5.0
+let up = method_for(ws) <@> lambda(w) where omp(w: 1) -> reduce(prep(A), (+), w) |> compute
+// EXPECT: u = [22.0, 32.0]
+// EXPECT: rs = [6.0, 30.0]
+// EXPECT: uk = [120.0, 240.0]
+// EXPECT: uc = [16.0, 26.0]
+// EXPECT: C = [1.0, 5.0, 1.0]
+// EXPECT: up = [22.0, 32.0]

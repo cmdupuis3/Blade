@@ -69,6 +69,19 @@ let partialSparseGatherTeardown (value: IRExpr) : string option =
 /// Match-arm spelling of partialSparseGatherTeardown (one evaluation per arm).
 let (|GatherTeardown|_|) (value: IRExpr) : string option = partialSparseGatherTeardown value
 
+/// An inline ARRAY-RETURNING call -- `prep(A)` as a fold's operand -- which a
+/// consumer that spells its operand per element read would re-evaluate per
+/// read (bindInlineArrayCall binds it once). An `object_for` application is
+/// a loop, not a call, and keeps its own forms.
+let (|InlineArrayCall|_|) (value: IRExpr) : unit option =
+    match value with
+    | IRApp (IRObjectFor _, _, _) -> None
+    | IRApp _ ->
+        (match stripUnits (inferExprType value) with
+         | ArrayElem _ -> Some ()
+         | _ -> None)
+    | _ -> None
+
 /// Is `e` a canonicalizing compact read worth binding once when it is BOTH
 /// operands of a binary operator (`t(i, j, k) * t(i, j, k)`)? A full-cover
 /// read of a compact-group array whose array and coordinates are plain
@@ -1429,6 +1442,14 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
         renderCompactionFold names (Blade.Optimize.CompactionTable.tryFoldMap mid).Value kernelExpr
     | GatherTeardown _ ->
         bindInlineGathers subst names [ arrExpr ] (fun ops -> renderReduceExpr subst names (List.head ops) kernelExpr initExpr)
+    // An inline ARRAY-RETURNING CALL as the operand (`1.0 + reduce(prep(A),
+    // (+))`, a kernel body folding `prep(x)`): the fold below spells its
+    // operand at every element read, the bound and the guard, so the call ran
+    // n + 1 times (O(n^2)) and leaked every returned pool. Bind it once, at the
+    // fold's own evaluation point (operand before seed, the interpreter's
+    // order), fold the binding, free a caller-owned pool after the fold.
+    | InlineArrayCall _ ->
+        bindInlineArrayCall subst names arrExpr (fun op -> renderReduceExpr subst names op kernelExpr initExpr)
     | _ ->
     // Inline reduction as an IIFE (mirrors genBinding's loop, wrapped in
     // `[&]() { ... }()` for expression context: kernel bodies, arithmetic).
@@ -1629,6 +1650,39 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
         "/* reduce: non-callable kernel (typechecker or IR bug) */"
 
 
+
+/// AN INLINE ARRAY-RETURNING CALL in a fold's operand position (wave 3 B, the
+/// nested fold bind-once; plan-identity-transpose-compute P4 open issue 1).
+/// Bind the call once in an IIFE -- `auto __rcall<h> = <call>;` -- render the
+/// consumer over the binding (an IRParam renders as its bare name and types
+/// as the call's result), then free the result when the CALLER owns it: the
+/// guard is the function-body let's (CodeGen.genFuncBody site 3b): a FreshPool
+/// callee, a freeable dense type, AllocDense storage, no real symmetry --
+/// exactly the pools `deallocate<promote<T, r>, nullptr>` frees. A NotFresh
+/// callee may hand back its own parameter, so its result is bound but never
+/// freed. The consumer's result is a scalar, never a view into the binding,
+/// so the free cannot dangle. The IIFE sits where the fold sat, so the call
+/// is evaluated exactly once, at the fold's own point in evaluation order.
+and bindInlineArrayCall (subst: SubstMap) (names: Map<IRId, string>) (call: IRExpr) (render: IRExpr -> string) : string =
+    let fnv (t: string) =
+        let mutable h = 2166136261u
+        for c in t do
+            h <- (h ^^^ uint32 c) * 16777619u
+        h.ToString("x8")
+    let text = exprToCppCore subst names call
+    let ty = inferExprType call
+    let cname = "__rcall" + fnv text
+    let inner = render (IRParam (cname, 0, ty))
+    let free =
+        match call, stripUnits ty with
+        | IRApp (f, _, _), ArrayElem at
+            when freshReturnOf f = FreshPool
+                 && isFreeableDenseArrayType at
+                 && classifyOutputStorage ty = AllocDense
+                 && not (hasRealSymmetry (buildSymmVec ty)) ->
+            $" deallocate<typename promote<{elemTypeToCpp at.ElemType}, {arrayRank at}>::type, nullptr>({cname}.data, {cname}.extents);"
+        | _ -> ""
+    $$"""([&]() { auto {{cname}} = {{text}}; auto __rcres = {{inner}};{{free}} return __rcres; }())"""
 
 /// INLINE PARTIAL SPARSE READS in expression position (a fold, a prodsum or
 /// an extent of `S((k, _))`). Each is an allocating gather, and the consumers

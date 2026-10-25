@@ -9823,7 +9823,19 @@ let recordComputeElisionMapOutcomes (pending: ComputeElisionPending list) (modul
 //   * EMPTY INPUT AND THE SEED. `elidedFoldSeed`, compute elision's rule: an
 //     unseeded builtin fold only over a literal extent >= 1 (an empty input
 //     keeps the call and its BL8003 at the fold), the seed by W4-3's route.
-// Fails closed (each a recorded decline) on: a callee in another module;
+// WAVE 3 (P4 remainder): (a) a LET-BOUND single-reader call (`let x = f(..)`
+// whose one reader is a later fold of x or a pointwise map with x as one
+// operand, nothing written in between) moves to its reader and is lowered
+// there; (b) a callee in ANOTHER module is inlined into the caller's when the
+// program-wide value-reference census (CallElideProgram) is installed, its
+// body and kernel name nothing but its parameters, lets, literals and the
+// caller's module's callables, and its kernel is cloned into the caller's
+// module; (c) a KERNEL (lambda) body is a caller (a kernel with a parallel
+// strategy, or lexically inside a `where repro` body, declines as a repro or
+// parallel caller); (d) a callee with a NON-SCALAR let still declines, its
+// record naming gap G69 (no audited return-boundary release; scope model A).
+// Fails closed (each a recorded decline) on: a foreign callee without the
+// census, or naming another module's callables;
 // static, generic / arity-polymorphic, `where repro`, omp / cuda / mpi
 // callees and a `where repro` caller; captures; recursion; a callee
 // referenced as a value; an argument that is not a stored variable or a
@@ -9832,8 +9844,8 @@ let recordComputeElisionMapOutcomes (pending: ComputeElisionPending list) (modul
 // parameters; a body or map kernel reading a name it does not bind; a kernel
 // naming a capturing callable; a map extent naming a parameter (a shape the
 // specializer did not bake); a declared return type the map does not
-// produce; several calls in one statement. Kernel bodies (lambdas) are not
-// callers in v1. A module holding a CUDA kernel is skipped whole.
+// produce; several calls in one statement. A module holding a CUDA kernel is
+// skipped whole.
 //
 // A TREE REWRITE before the lane split, like compute elision: the
 // interpreter runs the rewritten tree, so `blade test opt-diff` (the gate off
@@ -9845,6 +9857,43 @@ let recordComputeElisionMapOutcomes (pending: ComputeElisionPending list) (modul
 
 let recordCallElision (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
     recordPendingElision "call-elision" subject outcome evidence
+
+/// THE PROGRAM-WIDE VALUE-REFERENCE CENSUS (wave 3 B, P4 remainder (b): a
+/// callee in ANOTHER module). `elideCallsModule` sees one module's bindings,
+/// so a callable another module passes AS A VALUE (an alias, an argument, a
+/// kernel) would be invisible to its `referencedAsValue` check. Lowering
+/// installs, before the per-module optimizer runs, the ids of every callable
+/// some module's bindings or some function body names outside the head of a
+/// call (`programValueRefs`); None (not installed: a caller that optimizes a
+/// lone module) makes every foreign callee decline, fail closed.
+module CallElideProgram =
+    open System.Threading
+    let private cell = new AsyncLocal<Set<IRId> option>()
+    let install (ids: Set<IRId>) = cell.Value <- Some ids
+    let reset () = cell.Value <- None
+    let valueRefs () : Set<IRId> option = match box cell.Value with null -> None | _ -> cell.Value
+
+/// Callables named as a VALUE anywhere in the program: more IRVar mentions
+/// than call heads, counted over every module's binding payloads (side-table
+/// operands included) and every function body, each once.
+let programValueRefs (modules: IRModule list) : Set<IRId> =
+    let fids = modules |> List.collect (fun m -> m.Functions |> List.map (fun f -> f.Id)) |> Set.ofList
+    let heads = System.Collections.Generic.Dictionary<IRId, int>()
+    let vars = System.Collections.Generic.Dictionary<IRId, int>()
+    let bump (d: System.Collections.Generic.Dictionary<IRId, int>) (id: IRId) =
+        d.[id] <- (match d.TryGetValue id with | true, n -> n + 1 | _ -> 1)
+    let count (e: IRExpr) =
+        iterIRExpr (fun n ->
+            match n with
+            | IRApp (IRVar (f, _), _, _) -> bump heads f
+            | IRVar (f, _) when fids.Contains f -> bump vars f
+            | _ -> ()) e
+    for m in modules do
+        for f in m.Functions do count f.Body
+        for b in m.Bindings do
+            for p in bindingPayload m b do count p
+    vars |> Seq.filter (fun kv -> kv.Value > (match heads.TryGetValue kv.Key with | true, n -> n | _ -> 0))
+         |> Seq.map (fun kv -> kv.Key) |> Set.ofSeq
 
 let elideCallsModule (builder: IRBuilder) (programFuncs: IRCallable list) (modul: IRModule) : IRModule * ComputeElisionPending list =
     if modul.Functions |> List.exists (fun f -> f.IsCudaKernel) then (modul, []) else
@@ -9910,9 +9959,13 @@ let elideCallsModule (builder: IRBuilder) (programFuncs: IRCallable list) (modul
     let referencedAsValue (c: IRCallable) =
         // the instance and every callable the program wrote under its name
         // (its generic origin, its other specializations)
+        // ... and, program-wide, every module's bindings (CallElideProgram:
+        // another module may pass the callee as a value; when the census is
+        // unavailable a foreign callee has already declined)
+        let progRefs = defaultArg (CallElideProgram.valueRefs ()) Set.empty
         funcs |> Map.exists (fun _ g ->
             (g.Id = c.Id || (g.SourceName = c.SourceName && not (g.Name.StartsWith "__lambda_")))
-            && countOf varRefs g.Id > countOf callHeads g.Id)
+            && (countOf varRefs g.Id > countOf callHeads g.Id || progRefs.Contains g.Id))
     let names = System.Collections.Generic.Dictionary<IRId, string>()
     for b in modul.Bindings do names.[b.Id] <- b.Name
     for KeyValue (_, f) in funcs do
@@ -9993,7 +10046,11 @@ let elideCallsModule (builder: IRBuilder) (programFuncs: IRCallable list) (modul
             | IRVar (id, _) when deferredIds.Contains id -> Some $"argument `{nameOfId id}` is a deferred computation (the call materializes it; v1 jointly lowers over stored arrays and scalars only)"
             | IRVar _ -> None
             | _ -> Some "an argument is not a variable or a literal"
-        if not (Map.containsKey c.Id own) then Error "the callee is defined in another module (v1 jointly lowers a callee of the caller's own module only)"
+        let foreignCallee = not (Map.containsKey c.Id own)
+        if foreignCallee && (CallElideProgram.valueRefs ()).IsNone then
+            Error "the callee is defined in another module (v1 jointly lowers a callee of the caller's own module only) -- the program's cross-module value-reference census is unavailable here"
+        elif foreignCallee && not (Map.containsKey c.Id funcs) then
+            Error "the callee is defined in another module (v1 jointly lowers a callee of the caller's own module only) -- it is not in the program's callable table"
         elif c.IsStatic then Error "a `static` callee"
         elif c.IsArityPoly || hasTypeVarsInSignature c then Error "a generic or arity-polymorphic callee the shape specializer has not resolved to a concrete instance"
         elif c.IsOmpParallel || not c.Parallelism.IsEmpty || c.IsCudaKernel || c.IsMpiParallel then
@@ -10033,7 +10090,7 @@ let elideCallsModule (builder: IRBuilder) (programFuncs: IRCallable list) (modul
                 | [] -> None
                 | (id, v) :: rest ->
                     if not (scalarTy v) then
-                        Some $"callee let `__v{id}` is not a scalar (an inline that would allocate anything but scalars declines)"
+                        Some $"callee let `__v{id}` is not a scalar (an inline that would allocate anything but scalars declines) -- gap G69: the inlined storage would need its release at an IR-level return-boundary event that every pass and both lanes honour, and IRReleasePools' lifetime is not audited for this inline (the boundary let can be deleted by a join rewrite, merged by CSE, reused by pool reuse); left for the plan's scope model A"
                     else
                     match Blade.IRTotality.walk resolve (fun _ -> None) deferredIds.Contains Map.empty Map.empty bound Set.empty (Set.singleton c.Id) v with
                     | Error why -> Some $"callee let `__v{id}` is not proved total ({why})"
@@ -10065,11 +10122,22 @@ let elideCallsModule (builder: IRBuilder) (programFuncs: IRCallable list) (modul
                 Error "the callee's declared return type is not the layout its map produces"
             else
             let kernelRefs = collectVarRefsIR pkc.Body
+            // a FOREIGN callee's body and kernel may name no other callable of
+            // a module but the caller's own (a cross-module reference from the
+            // inlined copy is not audited in v1)
+            let foreignNamed =
+                if not foreignCallee then None
+                else
+                    Set.union (collectVarRefsIR c.Body) kernelRefs
+                    |> Set.toList
+                    |> List.tryFind (fun id -> id <> c.Id && id <> pkc.Id && Map.containsKey id funcs && not (Map.containsKey id own))
             let kAllowed =
                 Set.unionMany [ pkc.Params |> List.map (fun pp -> pp.VarId) |> Set.ofList
                                 binderIds pkc.Body
                                 pkc.Captures |> List.map (fun cap -> cap.Id) |> Set.ofList ]
-            if kernelRefs |> Set.exists (fun id -> id <> pkc.Id && Map.containsKey id funcs && not funcs.[id].Captures.IsEmpty) then
+            if foreignNamed.IsSome then
+                Error $"the callee is defined in another module and its body or map kernel names another callable (`{funcs.[foreignNamed.Value].SourceName}`) of a module other than the caller's (a cross-module reference from the inlined copy is not audited in v1)"
+            elif kernelRefs |> Set.exists (fun id -> id <> pkc.Id && Map.containsKey id funcs && not funcs.[id].Captures.IsEmpty) then
                 Error "the callee's map kernel names a capturing callable"
             elif pkc.Captures |> List.exists (fun cap -> not (localIds.Contains cap.Id)) then
                 Error "the callee's map kernel captures a value the callee does not bind"
@@ -10098,8 +10166,10 @@ let elideCallsModule (builder: IRBuilder) (programFuncs: IRCallable list) (modul
             // a capturing kernel follows the inline: a CLONE whose captures
             // name the fresh copies (or the argument itself; a literal
             // argument is substituted and captured by nobody)
+            // (a FOREIGN callee's kernel is always cloned: the inlined map then
+            // names only this module's callables)
             let clone =
-                if pkc.Captures.IsEmpty then None
+                if pkc.Captures.IsEmpty && not foreignCallee then None
                 else
                     let kid = builder.FreshId()
                     let (ps', body') = freshenCallable builder pkc
@@ -10127,16 +10197,29 @@ let elideCallsModule (builder: IRBuilder) (programFuncs: IRCallable list) (modul
             let ev =
                 [ $"callee `{c.SourceName}`: {lets0.Length} scalar let(s) and one plain dense `|> compute` map, total (IRTotality whitelist) and write-free"
                   (match clone with
+                   | Some k when pkc.Captures.IsEmpty -> $"its map kernel captures nothing; it is cloned into the caller's module as `{k.Name}` (the callee is foreign)"
                    | Some k -> $"its map kernel captures the callee's scalars: a clone `{k.Name}` captures their inlined copies"
                    | None -> "its map kernel captures nothing (shared with the callee)")
                   "the inlined spine allocates nothing but scalars"
                   $"`{c.SourceName}` keeps its materialized-array ABI and forcing point for every other call site" ]
+                @ (if foreignCallee then
+                       [ $"`{c.SourceName}` is defined in ANOTHER module: inlined under fresh ids into this one; its body and map kernel read only its parameters, its own lets and literals (no module value, so no qualified name, export contract or module-initialization order is involved), and no module passes it as a value (the program-wide census); its own module keeps its code and ABI" ]
+                   else [])
             Ok (lets', p2, pkc, clone, ev)
         | _ -> Error "the callee's body is not a scalar let spine ending in one `|> compute` map"
 
     // ---- one statement -------------------------------------------------------
     let regionRepro = ref false
-    let tryElideCore (caller: string) (stmtId: IRId option) (sv: IRExpr) : ((IRId * IRExpr) list * IRExpr) option =
+    // A KERNEL caller (wave 3 B, P4 remainder (c)): a lambda body is a
+    // statement spine like a function body; a kernel with a parallel strategy
+    // declines (its body runs on a team).
+    let regionKernel = ref false
+    let regionParallel = ref false
+    // the region (function or lambda body, binding value) readers are counted in
+    let regionRoot = ref (IRLit IRLitUnit)
+    // `letBound` (P4 remainder (a)): Some (the let's name, evidence) when sv is
+    // the consumer of `let x = f(..)` with x substituted by the call.
+    let tryElideCore (caller: string) (stmtId: IRId option) (sv: IRExpr) (letBound: (string * string list) option) : ((IRId * IRExpr) list * IRExpr) option =
         let consumer =
             match sv with
             | IRReduce (op, k, init) ->
@@ -10154,17 +10237,25 @@ let elideCallsModule (builder: IRBuilder) (programFuncs: IRCallable list) (modul
         let (c, args) = match kind with Choice1Of2 (c, args, _, _) -> (c, args) | Choice2Of2 (_, _, c, args) -> (c, args)
         let callDisp = $"""{c.SourceName}({args |> List.map showArg |> String.concat ", "})"""
         let subject =
-            match kind with
-            | Choice1Of2 _ -> $"{caller}: reduce({callDisp}) -> one fused fold"
-            | Choice2Of2 _ -> $"{caller}: a pointwise map over {callDisp} -> one fused nest"
+            match kind, letBound with
+            | Choice1Of2 _, Some (xn, _) -> $"{caller}: let {xn} = {callDisp}; reduce({xn}) -> one fused fold"
+            | Choice2Of2 _, Some (xn, _) -> $"{caller}: let {xn} = {callDisp}; a pointwise map over {xn} -> one fused nest"
+            | Choice1Of2 _, None -> $"{caller}: reduce({callDisp}) -> one fused fold"
+            | Choice2Of2 _, None -> $"{caller}: a pointwise map over {callDisp} -> one fused nest"
         let decline (why: string) (ev: string list) =
             recordCallElision subject (Blade.Effects.Declined why) ev
             None
+        let extraEv =
+            (match letBound with Some (_, ev) -> ev | None -> [])
+            @ (if regionKernel.Value then [ "the caller is a kernel (lambda) body: the call's arguments are its parameters, its captures or its own lets, all bound before the call" ] else [])
         if countCalls sv > 1 then decline "several calls in one statement (v1 jointly lowers a statement's only call)" []
+        elif regionParallel.Value then
+            decline "the caller is a kernel with a parallel strategy (omp / cuda / mpi): v1 jointly lowers into serial kernel bodies only" []
         else
         match judge regionRepro.Value c args with
         | Error why -> decline why []
-        | Ok (lets', p', pkc, clone, ev0) ->
+        | Ok (lets', p', pkc, clone, ev00) ->
+        let ev0 = ev00 @ extraEv
         // the statement itself (fold kernel and seed, host kernel, the extents
         // its types carry) runs between the call and the consumer's reads
         let writer =
@@ -10247,35 +10338,134 @@ let elideCallsModule (builder: IRBuilder) (programFuncs: IRCallable list) (modul
     // arm): a fold nested inside a larger expression keeps today's emission
     // (an open gap). NOT gated: it is the language's evaluation count, not an
     // optimization, so opt-diff sees the same tree on both sides.
+    // (In a KERNEL body the kept call is left to the C++ emitters' own bind-
+    // once, CodeGenExpr.bindInlineArrayCall: a kernel body is an expression
+    // there, and the binding sits at the fold's evaluation point.)
     let tryElide (caller: string) (stmtId: IRId option) (sv: IRExpr) : ((IRId * IRExpr) list * IRExpr) option =
-        match tryElideCore caller stmtId sv with
+        match tryElideCore caller stmtId sv None with
         | Some r -> Some r
         | None ->
             match sv with
             | IRReduce ((IRApp (_, _, rt) as call), k, init)
-                when (userCall call).IsSome && (match stripUnits rt with ArrayElem _ -> true | _ -> false) ->
+                when not regionKernel.Value
+                     && (userCall call).IsSome && (match stripUnits rt with ArrayElem _ -> true | _ -> false) ->
                 let id = builder.FreshId()
                 Some ([ (id, call) ], IRReduce (IRVar (id, rt), k, init))
             | _ -> None
 
+    let captured =
+        funcs |> Map.fold (fun acc _ f -> f.Captures |> List.fold (fun a cap -> Set.add cap.Id a) acc) Set.empty
+    let isArrayTyped (e: IRExpr) = (try (match stripUnits (typeOf e) with ArrayElem _ -> true | _ -> false) with _ -> false)
+    let isX (x: IRId) (e: IRExpr) = match e with IRVar (id, _) -> id = x | _ -> false
+
     // ---- statement spines ----------------------------------------------------
     let rec processSpine (caller: string) (tailId: IRId option) (e: IRExpr) : IRExpr =
         let (letList, tail0) = unroll e
+        let lets = letList |> List.map (fun (id, v0) -> (id, nest caller v0)) |> Array.ofList
+        let mutable tail = nest caller tail0
+        // ---- LET-BOUND SINGLE-READER CALLS (P4 remainder (a)) ---------------
+        // `let x = f(..)` whose ONE reader is a later statement of this spine
+        // that folds x (`reduce(x, k[, s])`, the whole value) or reads it as one
+        // operand of a pointwise map: the call moves to its reader and is
+        // jointly lowered there exactly as the inline call would be (the let is
+        // dropped). Moving it is unobservable only when nothing between the
+        // let and the reader writes (the arguments' snapshot) -- the callee
+        // itself is total and write-free by the judge -- and x has no other
+        // reader anywhere in its region: no capture, no assignment, no extent
+        // a type carries. Any other shape keeps the let (silently, or with a
+        // recorded decline once the reader is a fold or a map of x).
+        let dropped = System.Collections.Generic.HashSet<int>()
+        let preAt = System.Collections.Generic.Dictionary<int, (IRId * IRExpr) list>()
+        let rewrittenAt = System.Collections.Generic.HashSet<int option>()
+        let mutable preTail : (IRId * IRExpr) list = []
+        for i in 0 .. lets.Length - 1 do
+            let (xid, xv) = lets.[i]
+            match userCall xv with
+            | Some (c, args) when isArrayTyped xv ->
+                let later = [ for j in i + 1 .. lets.Length - 1 -> (Some j, snd lets.[j]) ] @ [ (None, tail) ]
+                match later |> List.tryFind (fun (_, v) -> refsOf xid v > 0) with
+                | Some (at, sv) ->
+                    let consumerShape =
+                        match sv with
+                        | IRReduce (IRVar (y, _), k, init) when y = xid ->
+                            refsOf xid k + (init |> Option.map (refsOf xid) |> Option.defaultValue 0) = 0
+                        | IRCompute (IRApplyCombinator h) ->
+                            (h.Arrays |> List.filter (isX xid) |> List.length) = 1 && refsOf xid h.Kernel = 0
+                        | _ -> false
+                    if consumerShape && rewrittenAt.Contains at then
+                        recordCallElision
+                            $"""{caller}: let __v{xid} = {c.SourceName}({args |> List.map showArg |> String.concat ", "}); its reader -> one fused form"""
+                            (Blade.Effects.Declined "several calls in one statement (v1 jointly lowers a statement's only call): its reader already took another let-bound call") []
+                    elif consumerShape then
+                        let xn = $"__v{xid}"
+                        let callDisp = $"""{c.SourceName}({args |> List.map showArg |> String.concat ", "})"""
+                        let subj =
+                            match sv with
+                            | IRReduce _ -> $"{caller}: let {xn} = {callDisp}; reduce({xn}) -> one fused fold"
+                            | _ -> $"{caller}: let {xn} = {callDisp}; a pointwise map over {xn} -> one fused nest"
+                        let between = [ for j in i + 1 .. (match at with Some j -> j - 1 | None -> lets.Length - 1) -> lets.[j] ]
+                        let total = refsOf xid regionRoot.Value
+                        let readerProblem =
+                            if Set.contains xid captured then Some $"`{xn}` (the call's result) is captured by a kernel or closure"
+                            // (an assignable body let is in MutableArrayLets by
+                            // default; what proves a write is an assignment
+                            // rooted at x -- an element write included -- and
+                            // passing x to a `mut` parameter is a second reader)
+                            elif assigned.Contains xid then Some $"`{xn}` (the call's result) is assigned"
+                            elif embeddedExtentExprs regionRoot.Value |> List.exists (fun x -> refsOf xid x > 0) then
+                                Some $"`{xn}` (the call's result) is read by an extent expression a type carries"
+                            // (a map's Loop repeats its operands: the reader's
+                            // references are all of x's, its consumer shape one slot)
+                            elif total <> refsOf xid sv then
+                                Some $"`{xn}` (the call's result) has more than one reader ({total} references; a single consumer is required)"
+                            else
+                            // the arguments' snapshot: nothing between the let
+                            // and its reader may write or touch a provider
+                            between |> List.tryPick (fun (bid, bv) ->
+                                let payload = payloadOf bid bv
+                                if intervalHasProviderEffect modul bid || mayWrite payload || (embeddedExtentExprs payload |> List.exists mayWrite) then
+                                    Some "an intervening statement may write between the call's let and its reader (the arguments' snapshot would move past the write)"
+                                else None)
+                        match readerProblem with
+                        | Some why -> recordCallElision subj (Blade.Effects.Declined why) []
+                        | None ->
+                            let sv' = mapIRExpr (fun n -> match n with IRVar (y, _) when y = xid -> xv | n -> n) sv
+                            let stmtId = match at with Some j -> Some (fst lets.[j]) | None -> tailId
+                            let letEv =
+                                [ $"let-bound: `{xn}` = {callDisp} has ONE reader, this statement ({between.Length} intervening statement(s), write-free and provider-free: the arguments' snapshot holds at the reader); the let is dropped and the call jointly lowered at its reader" ]
+                            match tryElideCore caller stmtId sv' (Some (xn, letEv)) with
+                            | Some (pre, v') ->
+                                dropped.Add i |> ignore
+                                rewrittenAt.Add at |> ignore
+                                match at with
+                                | Some j ->
+                                    preAt.[j] <- (match preAt.TryGetValue j with | true, ps -> ps @ pre | _ -> pre)
+                                    lets.[j] <- (fst lets.[j], v')
+                                | None ->
+                                    preTail <- preTail @ pre
+                                    tail <- v'
+                            | None -> ()
+                | None -> ()
+            | _ -> ()
         let out = ResizeArray<IRId * IRExpr>()
-        for (id, v0) in letList do
-            let v = nest caller v0
-            match tryElide caller (Some id) v with
-            | Some (pre, v') ->
-                out.AddRange pre
-                out.Add((id, v'))
-            | None -> out.Add((id, v))
-        let tail1 = nest caller tail0
+        for i in 0 .. lets.Length - 1 do
+            if not (dropped.Contains i) then
+                let (id, v) = lets.[i]
+                match preAt.TryGetValue i with
+                | true, ps -> out.AddRange ps
+                | _ -> ()
+                match tryElide caller (Some id) v with
+                | Some (pre, v') ->
+                    out.AddRange pre
+                    out.Add((id, v'))
+                | None -> out.Add((id, v))
+        out.AddRange preTail
         let tail =
-            match tryElide caller tailId tail1 with
+            match tryElide caller tailId tail with
             | Some (pre, t') ->
                 out.AddRange pre
                 t'
-            | None -> tail1
+            | None -> tail
         Seq.foldBack (fun (id, v) acc -> IRLet (id, v, acc)) out tail
     and nest (caller: string) (v: IRExpr) : IRExpr =
         match v with
@@ -10284,20 +10474,48 @@ let elideCallsModule (builder: IRBuilder) (programFuncs: IRCallable list) (modul
         | IRMatch (s, cases) -> IRMatch (s, cases |> List.map (fun cs -> { cs with Body = processSpine caller None cs.Body }))
         | _ -> v
 
+    // A kernel lexically inside a `where repro` body (transitively, through
+    // nested kernels) is a repro caller: whether lifting kept the flag on the
+    // lambda or not, it keeps the region's contract (fail closed).
+    let reproKernels =
+        let mutable acc =
+            funcs |> Map.fold (fun s _ f -> if f.IsRepro then Set.add f.Id s else s) Set.empty
+        let mutable changed = true
+        while changed do
+            changed <- false
+            for KeyValue (_, f) in funcs do
+                if acc.Contains f.Id then
+                    for id in collectVarRefsIR f.Body do
+                        match Map.tryFind id funcs with
+                        | Some g when g.Name.StartsWith "__lambda_" && not (acc.Contains id) ->
+                            acc <- Set.add id acc
+                            changed <- true
+                        | _ -> ()
+        acc
     let functions' =
         modul.Functions |> List.map (fun f ->
-            if f.IsStatic || f.IsCudaKernel || f.IsMpiParallel || f.IsArityPoly || hasTypeVarsInSignature f
-               || f.Name.StartsWith "__lambda_" then f
+            if f.IsStatic || f.IsCudaKernel || f.IsMpiParallel || f.IsArityPoly || hasTypeVarsInSignature f then f
             else
-                let caller = if System.String.IsNullOrEmpty f.SourceName then f.Name else f.SourceName
-                regionRepro.Value <- f.IsRepro
+                let isKernel = f.Name.StartsWith "__lambda_"
+                let caller =
+                    if isKernel && f.SourceName.StartsWith "lambda in " && f.SourceName.Length > 10 then $"a kernel in {f.SourceName.Substring 10}"
+                    elif System.String.IsNullOrEmpty f.SourceName then f.Name
+                    else f.SourceName
+                regionRepro.Value <- f.IsRepro || (isKernel && reproKernels.Contains f.Id)
+                regionKernel.Value <- isKernel
+                regionParallel.Value <- isKernel && (f.IsOmpParallel || not f.Parallelism.IsEmpty)
+                regionRoot.Value <- f.Body
                 let body' = processSpine caller None f.Body
                 regionRepro.Value <- false
+                regionKernel.Value <- false
+                regionParallel.Value <- false
                 { f with Body = body' })
     let bindings' =
         modul.Bindings |> List.map (fun b ->
             if not (bindingSideOperands modul b.Id).IsEmpty || modul.ProviderWrites.ContainsKey b.Id then b
-            else { b with Value = processSpine b.Name (Some b.Id) b.Value })
+            else
+                regionRoot.Value <- b.Value
+                { b with Value = processSpine b.Name (Some b.Id) b.Value })
     if minted.Count = 0 then ({ modul with Functions = functions'; Bindings = bindings' }, List.ofSeq pending)
     else
         let byOrigin = minted |> Seq.groupBy snd |> Seq.map (fun (o, cs) -> (o, cs |> Seq.map fst |> List.ofSeq)) |> Map.ofSeq
