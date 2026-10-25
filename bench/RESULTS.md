@@ -2954,6 +2954,31 @@ P2 stay ON by default; the licensed one pass stays opt-in; T2 is proved at pilot
 are the follow-ups); the W2-4 default joined pass buys nothing over the wave-1 binary while the opt-in legs arm takes 0.86-0.93
 serially -- the scope model A (G69) is the path to a default. Round 4 pivots to peak memory and bandwidth (the user's direction).
 
+### 17.9 Wave 4b (base 94487a90; tips W4B-A 3094eb65, W4B-B e46227a9, W4B-C aa7eaf0b, W4B-D eadab464): the gap-register cleanup finished, every item merged on a MERGE verdict
+
+Four builders re-partitioned by code ownership (Lowering / C++ side; the LLVM lane; the function-body return
+classification; the strict seeds), one squashed commit each above the base, Codex diff reviews until a look found
+NO regression against 94487a90 (a program correct at the base miscomputed, refused or leaking at the head), the
+remaining holes recorded OPEN in place. Review counts: W4B-A 14 looks, W4B-B 6, W4B-C 9, W4B-D 4. Testing under
+the economy rule: builders ran witnesses and one block; a Sonnet runner ran each item's block list on a detached
+checkout of every head; the five gates ran once on the integration tip (below).
+
+| item | what landed (rows) | status at the merge |
+|---|---|---|
+| W4B-A (Lowering, C++ binding) | G58 function-local deferred tuples bind nothing; G59 tuple-alias chains followed to their end, block-valued initializers judged by result; G60(a) writes through deferred binders / views / hops refused BL4005 by identity; G77 the ordinary-arm refusal (BL6002) at TOP LEVEL ONLY: the admitted binder is the statement's FIRST possibly-failing event (`firstForceOf`, an exhaustive classification of every IR node against formalism 2.4's panic list), already-forced binders carried through statements, tuple leaves, conditions, scrutinees and bounds; G79 ordinary calls with two may-fail arguments ordered at three whole-value sites | G58 / G59 / G60 / G77 / G79 PARTIAL; OPEN: callable and loop bodies, match arms, operand order in general, totality not consulted, unknown types fail closed |
+| W4B-B (EmitLlvm) | G57 statement-value mixed calls admitted natively (nested refused); G60(b-e) the LLVM lane follows 10.2: positional reads collected by a line-for-line mirror of the C++ collector, every collected map of a top-level block forced UP FRONT in collector order, aliases copy a pre-forced source, root / chain-tail tuple force points through the shared member-order judgment; G75 private whole-map forces in function bodies; G78 a function's pools read by a younger loop scope freed by their owner | G57 / G60 / G75 / G78 PARTIAL; census of the final emitter vs the base over 3210 files: 1320 identical, 1795 refused in both, 11 newly taken, 84 changed = 60 G78 null-store-only + 14 pins + 8 lost-fusion exceptions (loops/524, 540, 542; index-types/037, 109, 110; symmetry/141; units/080 -- an accepted LLVM performance cost) + 2 reorder-only |
+| W4B-C (CodeGenLoopNest, CodeGen) | G54 the return classified slot by slot: an exhaustive 14-constructor type predicate decides which nodes the return walk enters, an immediately invoked lambda callee is a slot, an owned-cell write proof keeps every store operand in the residual (closes a BASE use-after-free, functions/549 `kwrx`); G55 one stable plan subject per function-body fold; G64 must-native LLVM fixtures; G67 the zero-level compact application is the direct call (value and first failure); new rows G87 / G88 | G54 / G55 / G64 / G67 PARTIAL, G87 / G88 OPEN; conservative leaks recorded (twice-referenced kernels, let-bound direct calls, writing IIFEs outside the proof) |
+| W4B-D (seeds, twins, declaration table) | G74 the unseeded seed is an IR mark resolved by the fold's effective route over every executable payload, writes judged against the WHOLE PROGRAM's constant-match-folded callables (an imported dead writing arm no longer changes a licensed seed); G80 exact-copy repro twins for kernels folded in repro bodies (local and imported); G76 the declaration table in the program record, the LLVM lane's named-fold-kernel guard LOCATION fixed (`applyKernelFramed`, an accepted ownership exception); `bench/harness/emission-sweep.ps1` compares raw stdout / stderr / exit and fails closed | G74 / G76 / G80 PARTIAL; 17 default-build emission differences vs the base, every one a seed 0.0 -> -0.0 on a route no lane licenses (rank-k accumulator loops, a writing map, an unresolved callback) |
+
+Integration: merge order C, D, B, A onto 94487a90 (`wave4b-integration`); conflicts only in the records (gap rows
+resolved by row ownership; formalism 10.2 and features.md: A's C++ rules with B's LLVM admission) and one rename
+(W4B-A's exhaustive match named `IRAddIdentity`, which W4B-D renamed `IRUnseededSeed`). No A/B this wave: no
+kernel's route changed (the W4B-B lost fusions are corpus files, not bench kernels); the licensed emission of the
+bench kernels is byte-identical to the base in both lanes by each item's sweep.
+
+Gates on the integration tip b457c029 (Blade.dll A130F8DC...E83D): default **8387 / 0 / 2 skipped**, opt-diff 2423 / 0 / 989 skipped, docs 133 / 0 / 79,
+llvm 998 / 0 / 747 skipped, interp 3311 / 0 / 4 skip-unsupported; examples 68 files, the same six pre-existing failures as the wave-3 gates (four zarr stores unresolvable at compile time, check_cod_shells BL4003, station_temps BL3999).
+
 ## 12. Decisions put to the user — BOTH DECIDED (2026-10-18)
 
 **Decisions:** (1) mt8 matched parallelism — option (A) below: every arm threads input
