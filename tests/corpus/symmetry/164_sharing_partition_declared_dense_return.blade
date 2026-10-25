@@ -1,0 +1,31 @@
+// TEST: A Declared Dense Return Opts Out Of Sharing Specialization
+// docs/plans/plan-identity-transpose-compute.md section 2.3 (LANGUAGE
+// CHANGE, wave 2): an explicit annotation fixes the layout AND the
+// elaboration at that boundary. `make_g` (index-types/242) declares a dense
+// `Array<Float64 like I, I>` return, so `make_g(a0, a0)` -- one array in
+// both gram operands -- keeps the generic declaration: dense, today's cells
+// and bits (`blade plan`: `[sharing-partition v1] make_g: declined -- the
+// declared return type fixes the layout and the elaboration at this
+// boundary`). The UNANNOTATED twin `mk` infers its layout per instance:
+// `mk(a0, a0)` is the [0,0] instance, whose `gram(a, b)` is `gram(a, a)` --
+// square symmetric storage, upper triangle only.
+type I = Idx<2>
+type K = Idx<3>
+function make_g(a: Array<Float64 like I, K>, b: Array<Float64 like I, K>) -> Array<Float64 like I, I> = {
+    let g = gram(a, b)
+    g
+}
+function mk(a: Array<Float64 like I, K>, b: Array<Float64 like I, K>) = {
+    let g = gram(a, b)
+    g
+}
+let a0: Array<Float64 like I, K> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let b0: Array<Float64 like I, K> = [[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]
+let gd = make_g(a0, a0)
+let gdb = make_g(a0, b0)
+let gs = mk(a0, a0)
+let gsb = mk(a0, b0)
+// EXPECT: gd = [[14.0, 32.0], [32.0, 77.0]]
+// EXPECT: gdb = [[4.0, 2.0], [10.0, 5.0]]
+// EXPECT: gs = [[14.0, 32.0], [77.0]]
+// EXPECT: gsb = [[4.0, 2.0], [10.0, 5.0]]

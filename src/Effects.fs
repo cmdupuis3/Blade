@@ -133,6 +133,20 @@ module Decisions =
         | null -> ()
         | l -> if not (l.Contains d) then l.Add d
 
+    /// How many decisions are recorded so far (0 without a collector): a mark
+    /// `rollback` cuts back to, for a speculative check whose result is
+    /// discarded (TypeCheckInfer.checkUnderDeclaredLayout).
+    let mark () : int =
+        match cell.Value with
+        | null -> 0
+        | l -> l.Count
+
+    /// Drop every decision recorded after `mark`.
+    let rollback (m: int) =
+        match cell.Value with
+        | null -> ()
+        | l -> if l.Count > m then l.RemoveRange(m, l.Count - m)
+
     /// Take every decision recorded since `start` and clear the collector.
     let drain () : Decision list =
         match cell.Value with

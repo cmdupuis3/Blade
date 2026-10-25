@@ -1,0 +1,45 @@
+// TEST: Sharing Instances Need A Direct Head, And A Declared Dense Body Stays Dense
+// docs/plans/plan-identity-transpose-compute.md sections 2.2 / 2.3 (wave 2;
+// Codex review of the change, findings 1-3). A `let k = f` alias may be
+// reassigned in its scope (`k = g`), so a call THROUGH an alias is never
+// re-targeted at the aliased declaration's sharing instance: `P` calls g,
+// dense, as written. A declared DENSE return fixes its body's elaboration
+// too: `h`'s body `f(x, x)` would be f's packed [0,0] instance, so it is
+// checked again as the dense generic call (it was refused BL3001 by the first
+// draft of this change). A dense `let` ascription over a block likewise keeps
+// its inner call dense; outside any annotation `f(A, A)` packs.
+type I = Idx<2>
+let A: Array<Float64 like I> = [1.0, 2.0]
+function f(x: Array<Float64 like I>, y: Array<Float64 like I>) =
+    method_for(x, y) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+function g(x: Array<Float64 like I>, y: Array<Float64 like I>) =
+    method_for(x, y) <@> lambda(a, b) -> a + 2.0 * b |> compute
+let P = {
+    let k = f
+    k = g
+    k(A, A)
+}
+function h(x: Array<Float64 like I>) -> Array<Float64 like I, I> =
+    f(x, x)
+let H = h(A)
+let D: Array<Float64 like I, I> = {
+    let s = 1.0
+    f(A, A)
+}
+let FA = f(A, A)
+// The re-check is a clean one: a branch the first attempt unified with the
+// packed result (`y`, unannotated) is not left packed, and a TUPLE holding a
+// declared dense array takes the rule at that component.
+function hb(x: Array<Float64 like I>, y) -> Array<Float64 like I, I> =
+    if true then f(x, x) else y
+function ht(x: Array<Float64 like I>) -> (Array<Float64 like I, I>, Int64) =
+    (f(x, x), 1)
+let HB = hb(A, g(A, A))
+let (T0, T1) = ht(A)
+// EXPECT: P = [[3.0, 5.0], [4.0, 6.0]]
+// EXPECT: H = [[1.0, 2.0], [2.0, 4.0]]
+// EXPECT: D = [[1.0, 2.0], [2.0, 4.0]]
+// EXPECT: FA = [[1.0, 2.0], [4.0]]
+// EXPECT: HB = [[1.0, 2.0], [2.0, 4.0]]
+// EXPECT: T0 = [[1.0, 2.0], [2.0, 4.0]]
+// EXPECT: T1 = 1

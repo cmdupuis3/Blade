@@ -3919,6 +3919,45 @@ let private coIterIdentityPins () : bool list =
       check "coi_identity_variable_operands_keyed_by_id" (sameIdentity v1 v1again && not (sameIdentity v1 v2))
           $"the same variable twice is one array, two variables are two: {v1}, {v1again}, {v2}" ]
 
+/// A two-parameter comm helper called on ONE array and on two
+/// (docs/plans/plan-identity-transpose-compute.md 2.2, the section 0 probe):
+/// `f(A, A)` is the sharing instance over [0,0] -- packed, triangular --
+/// and `f(A, B)` the generic declaration, declined as before.
+/// tests/corpus/symmetry/149, 154.
+let private planSharingSrc =
+    "let A = [1.0, 2.0, 3.0]\n"
+    + "let B = [4.0, 5.0, 6.0]\n"
+    + "function f(x: T^1, y: T^1) where comm(x, y) = method_for(x, y) <@> lambda(a, b) where comm(a, b) -> a * b |> compute\n"
+    + "let PAA = f(A, A)\n"
+    + "let PAB = f(A, B)\n"
+
+/// A declared DENSE return (plan 2.3, index-types/242 `make_g`) opts out:
+/// the call at one array keeps the generic declaration. symmetry/164.
+let private planSharingDeclaredSrc =
+    "type I = Idx<2>\ntype K = Idx<3>\n"
+    + "function make_g(a: Array<Float64 like I, K>, b: Array<Float64 like I, K>) -> Array<Float64 like I, I> = gram(a, b)\n"
+    + "let a0: Array<Float64 like I, K> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n"
+    + "let gd = make_g(a0, a0)\n"
+
+/// AD keeps independent argument slots (plan 2.4): the differentiated body
+/// is a synthesized declaration, never sharing-specialized.
+/// tests/corpus/ad-jvp-comb/115.
+let private planSharingAdSrc =
+    "import ad as ad\ntype I = Idx<2>\ntype K = Idx<3>\n"
+    + "function floss(a: Array<Float like I, K>, b: Array<Float like I, K>) -> Float = {\n    let g = gram(a, b)\n    g(0, 1) * 2.0 + g(1, 0)\n}\n"
+    + "let a0 = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n"
+    + "let mut da = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]\n"
+    + "let mut db = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]\n"
+    + "let gv = ad.grad(floss)(a0, a0, da, db)\n"
+
+/// A dense ascription fixes the elaboration of a call the partition would
+/// specialize (plan 2.3). symmetry/165.
+let private planSharingAscribedSrc =
+    "type I = Idx<3>\n"
+    + "let A: Array<Float64 like I> = [1.0, 2.0, 3.0]\n"
+    + "function f(x: T^1, y: T^1) where comm(x, y) = method_for(x, y) <@> lambda(a, b) where comm(a, b) -> a * b |> compute\n"
+    + "let F: Array<Float64 like I, I> = f(A, A)\n"
+
 /// An `omp`-licensed outer product: the placed construct is recorded.
 let private planOmpSrc =
     "let A = [1.0, 2.0, 3.0]\nlet B = [4.0, 5.0, 6.0]\n"
@@ -4621,6 +4660,29 @@ let private planCases () =
                (if ok then "a call into another module returning its own (written) array: no shared storage, no shared identity"
                 else "the record: " + ((tnf @ ai) |> List.map Blade.Effects.Decisions.render |> String.concat " | "))
            ok)
+      // ---- sharing-partition instances (plan 2.2-2.4) ----
+      planCase "plan_sharing_partition_applied" planSharingSrc "sharing-partition"
+          (fun d -> applied d && d.Subject = "f" && evidenceMentioning "partition [0,0] of (x, y)" d
+                    && evidenceMentioning "instance f__share1" d)
+          "f(A, A) is the sharing instance over [0,0] of (x, y)"
+      planCase "plan_symmetric_storage_applied_sharing_instance" planSharingSrc "symmetric-storage"
+          (fun d -> applied d && evidenceMentioning "operands: x, y" d)
+          "the [0,0] instance's comm product is packed, its operands named as written"
+      planCase "plan_symmetric_storage_declined_sharing_generic" planSharingSrc "symmetric-storage"
+          (fun d -> (declinedMentioning "different arrays") d && evidenceMentioning "operands: x, y" d)
+          "f(A, B) keeps the generic declaration: two arrays, dense"
+      planCase "plan_triangular_iteration_applied_sharing_instance" planSharingSrc "triangular-iteration"
+          (fun d -> applied d && evidenceMentioning "speedup x2" d)
+          "the [0,0] instance iterates the triangle"
+      planCase "plan_sharing_partition_declined_declared_return" planSharingDeclaredSrc "sharing-partition"
+          (fun d -> (declinedMentioning "declared return type") d && evidenceMentioning "partition [0,0] of (a, b)" d)
+          "a declared dense return keeps the generic declaration (plan 2.3)"
+      planCase "plan_sharing_partition_declined_ad_slots" planSharingAdSrc "sharing-partition"
+          (fun d -> (declinedMentioning "independent argument slots") d && d.Subject = "floss__grad")
+          "ad.grad's differentiated body keeps independent slots (plan 2.4)"
+      planCase "plan_sharing_partition_declined_dense_ascription" planSharingAscribedSrc "sharing-partition"
+          (fun d -> (declinedMentioning "dense ascription") d)
+          "a dense ascription keeps the generic declaration (plan 2.3)"
       withGate "BLADE_OMP_THREADS" null (fun () ->
           planCase "plan_omp_placement_applied" planOmpSrc "omp"
               (fun d -> applied d && evidenceMentioning "BLADE_OMP_PARALLEL_FOR" d)

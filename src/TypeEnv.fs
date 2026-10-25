@@ -739,6 +739,43 @@ type TypeEnv = {
     /// their origin binder (TypeCheck.checkModule places each after its
     /// origin). Shared by reference.
     ArrowVariantDecls: ResizeArray<IRId * TypedDecl>
+    /// IDENTITY-SENSITIVE declarations (docs/plans/plan-identity-transpose-compute.md
+    /// 2.2; formalism 8.3 "Sharing-partition instances"), by binder id: one
+    /// whose body holds a comm / anticomm application, a `gram`, or a
+    /// `reynolds` kernel application over two or more of its array
+    /// parameters -- directly, or by handing them to such positions of a
+    /// resolved identity-sensitive callee. Value: the SOURCE declaration, the
+    /// environment it was checked in (its own name bound), the RELEVANT
+    /// parameter positions (ascending), and -- when the declaration may not be
+    /// specialized -- the first fail-closed condition (a declared array return
+    /// type, recursion, `static` / `mpi` / `cuda`, a synthesized declaration,
+    /// array instances, a `mut` or reassigned relevant parameter). A call
+    /// whose arguments SHARE an identity at two relevant positions is the call
+    /// of a SHARING INSTANCE (TypeCheckInfer.checkSharingVariant) unless that
+    /// condition is set. Recorded by TypeCheckSupport.noteSharingRelevance
+    /// for generic declarations only (never for an instance). Shared by
+    /// reference.
+    SharingDeclSources: System.Collections.Generic.Dictionary<IRId, FunctionDecl * TypeEnv * int list * string option>
+    /// The sharing instances made so far, keyed by origin binder and the
+    /// normalized partition of the relevant positions. Registered before the
+    /// instance's body is checked. The checked declarations go to
+    /// ArrowVariantDecls, placed after their origin like array instances.
+    /// Shared by reference.
+    SharingVariants: System.Collections.Generic.Dictionary<string, ArrowVariant>
+    /// Inside a SHARING INSTANCE: the binder id of each relevant parameter ->
+    /// its identity, `AIDAlias (AIDParameter (instance, class), name)` -- the
+    /// parameters of one partition class share it, so the identity groups of
+    /// formalism 8.3 see the one array the call passed. Read by
+    /// TypeCheckSupport.loopOperandIdentity. Shared by reference.
+    SharingParamIdentities: System.Collections.Generic.Dictionary<IRId, ArrayIdentity>
+    /// True while the VALUE of a `let` whose explicit DENSE array ascription
+    /// the ordinary elaboration did not meet is re-checked (plan 2.3, the
+    /// declared-signature rule): every operand identity minted at the value's
+    /// own level is fresh, so no identity group forms, and no call there is
+    /// sharing-specialized -- the value is elaborated dense, as declared.
+    /// Cleared on entering a callable body (enterCallableBody): a kernel's own
+    /// applications are not that boundary.
+    DenseAscription: bool
     /// Typed CALLS to be REPLACED before zonk (keyed by the node, by
     /// reference): a call that handed an arrow parameter a value open when it
     /// was judged, and an array since, by the call of the declaration's array
@@ -896,6 +933,10 @@ let emptyEnv () = {
     ArrowDeclSources =System.Collections.Generic.Dictionary<IRId, FunctionDecl * TypeEnv * Map<int, IRType> * IRId>()
     ArrowVariants = System.Collections.Generic.Dictionary<string, ArrowVariant>()
     ArrowVariantDecls = ResizeArray<IRId * TypedDecl>()
+    SharingDeclSources = System.Collections.Generic.Dictionary<IRId, FunctionDecl * TypeEnv * int list * string option>()
+    SharingVariants = System.Collections.Generic.Dictionary<string, ArrowVariant>()
+    SharingParamIdentities = System.Collections.Generic.Dictionary<IRId, ArrayIdentity>()
+    DenseAscription = false
     ArrowRetargets = System.Collections.Generic.Dictionary<TypedExpr, TypedExpr>(HashIdentity.Reference)
     OpenCallArgs = System.Collections.Generic.HashSet<TypedExpr>(HashIdentity.Reference)
     ArrowSubscripts = System.Collections.Generic.Dictionary<TypedExpr, TypedExpr>(HashIdentity.Reference)
@@ -1790,7 +1831,8 @@ let assignOfBindingMut = function
 let enterCallableBody env =
     { env with
         OuterScope = Map.foldBack Map.add env.Variables env.OuterScope
-        InCallableBody = true }
+        InCallableBody = true
+        DenseAscription = false }
 
 /// Was `name` bound INSIDE the callable body currently being inferred?
 ///

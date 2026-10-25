@@ -399,6 +399,40 @@ callee's effects (imports decline today), the module-level-only scope (a
 function body reading two aliases keeps two identities), an incremental notebook
 path that checks an early cell before a later write.
 
+BUILT (wave 2 workstream A, §2.2-§2.4): SHARING-PARTITION INSTANCES. After its
+generic check a declaration's RELEVANT parameters are recorded
+(`TypeCheckSupport.noteSharingRelevance`, `TypeEnv.SharingDeclSources`): array
+parameters filling two or more bare-operand positions of one comm / anticomm
+(or `reynolds`, or let-bound-kernel) application, a `gram`, or an eligible
+identity-sensitive callee's relevant positions. A call whose relevant
+arguments share an identity (`loopOperandIdentity`: name, deferred alias class,
+an enclosing instance's parameter class -- any future key flows through) is the
+call of the instance over that first-occurrence-normalized partition
+(`TypeCheckInfer.checkSharingVariant`, cached per (origin, partition), named
+`f__shareN`, placed after its origin like an arrow instance), whose relevant
+parameters carry `AIDAlias (AIDParameter (instance, class), name)`
+(`TypeEnv.SharingParamIdentities`): the first construction of `AIDParameter`.
+The C++ / LLVM lanes and the interpreter consume the same specialized IR.
+Fails closed to the generic (all-distinct) declaration with a `[sharing-partition
+v1] f: declined -- ...` record: callbacks / lambda values / unresolved heads,
+recursion, `static` / `mpi` / `cuda`, packs, array instances, `mut` or assigned
+relevant parameters, synthesized declarations (`__` names, generated decls: the
+AD bodies, §2.4), a declared non-scalar return type (§2.3), and an instance that
+does not check. §2.3's ascription half: a dense `let` ascription the ordinary
+check does not meet is re-checked with fresh operand identities at its own level
+(`TypeEnv.DenseAscription`), accepted dense (was BL3001). `gram`'s same-array
+test keys on identity, not spelling. The same re-check covers a declared dense
+return's BODY and a tuple holding a dense array, transactionally (substitution
+snapshot, instance caches, side channels, plan records). A call through a `let`
+alias of the declaration is never re-targeted (the alias is reassignable).
+Corpus symmetry/149 (pin updated: packed), 161-167 (renumbered at the merge: 154-160 are workstream B's), ad-jvp-comb/115,
+multifile/043; `tests/OptimizeTests.fs` `plan_sharing_partition_*`; formalism
+§5.1 and §8.3; migration manifest
+[identity-transpose-compute-wave2a-manifest.md](identity-transpose-compute-wave2a-manifest.md)
+(1252 candidates swept: only symmetry/149 changes). Open: the IRMono `__coi` fallback and provider minting
+sites (§2.7), stored arrays with a no-write interval, §2.5 (the sampler), and
+the structural-map relations of §2.2 (a transposed argument is its own class).
+
 ### P2 — Structural transpose normal forms
 
 Typed map/action algebra, certificates, the fold-order rule of §3. Normalize before

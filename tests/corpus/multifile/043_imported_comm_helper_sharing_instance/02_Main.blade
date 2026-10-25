@@ -1,0 +1,16 @@
+// TEST: An imported two-parameter comm helper is sharing-specialized at its caller
+// MODULE: Main
+// `PairLib.pair(xs, xs)` is the [0,0] instance (packed SymIdx<2, ..>);
+// `pair(xs, ys)` keeps the generic declaration (dense). A local `scale` of
+// Main does not leak into the instance.
+module Main
+import PairLib
+from PairLib import pair
+
+let scale = 100.0
+let xs = [1.0, 2.0, 3.0]
+let ys = [1.0, 0.0, 1.0]
+let pq = PairLib.pair(xs, xs)
+let pd = pair(xs, ys)
+// EXPECT: pq = [[2.0, 4.0, 6.0], [8.0, 12.0], [18.0]]
+// EXPECT: pd = [[2.0, 0.0, 2.0], [4.0, 0.0, 4.0], [6.0, 0.0, 6.0]]

@@ -1,0 +1,43 @@
+// TEST: AD Of A Two-Parameter Gram Body At One Array Keeps Independent Slots
+// docs/plans/plan-identity-transpose-compute.md section 2.4 (AD contract,
+// wave 2): `ad.grad`, `ad.jvp` elaborate their function with INDEPENDENT
+// argument slots -- no sharing specialization reaches a differentiated
+// body, even at (A, A). So `ad.grad(floss)(a0, a0, da, db)` differentiates
+// the two-input dense-gram contract of 020 and returns DISTINCT per-slot
+// cotangents (`blade plan`: `[sharing-partition v1] floss__grad: declined
+// -- a compiler-synthesized declaration ... keeps independent argument
+// slots`): values identical to the pre-wave-2 compiler. G = gram(a0, a0) =
+// [[14, 32], [32, 77]], loss = 2 * 32 + 32 = 96; dG = [[0, 2], [1, 0]], so
+// da = dG b = [[8, 10, 12], [1, 2, 3]] and db = dG^T a = [[4, 5, 6], [2, 4, 6]].
+// The jvp along one seed in both slots is sum(da * s) + sum(db * s) = -3.
+// TIED differentiation is explicit (`tied(a) = floss(a, a)`): its gradient is
+// the sum of the two slots, da + db. The ordinary call `floss(a0, a0)` IS sharing-
+// specialized (its gram packs) and gives the same primal.
+import ad as ad
+
+type I = Idx<2>
+type K = Idx<3>
+
+function floss(a: Array<Float like I, K>, b: Array<Float like I, K>) -> Float = {
+    let g = gram(a, b)
+    g(0, 1) * 2.0 + g(1, 0)
+}
+function tied(a: Array<Float like I, K>) -> Float = floss(a, a)
+
+let a0 = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let mut da = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let mut db = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let gv = ad.grad(floss)(a0, a0, da, db)
+// EXPECT: gv = 96.0
+// EXPECT: da = [[8.0, 10.0, 12.0], [1.0, 2.0, 3.0]]
+// EXPECT: db = [[4.0, 5.0, 6.0], [2.0, 4.0, 6.0]]
+let sa = [[0.5, -1.0, 0.25], [2.0, 0.0, -0.5]]
+let (jp, jt) = ad.jvp(floss)(a0, a0, sa, sa)
+// EXPECT: jp = 96.0
+// EXPECT: jt = -3.0
+let mut dt = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let tv = ad.grad(tied)(a0, dt)
+// EXPECT: tv = 96.0
+// EXPECT: dt = [[12.0, 15.0, 18.0], [3.0, 6.0, 9.0]]
+let direct = floss(a0, a0)
+// EXPECT: direct = 96.0

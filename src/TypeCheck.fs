@@ -465,6 +465,8 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     // judgment reaches through a forward reference (it re-checks a
     // declaration). Installed here, at the one entry every check passes.
     arrowVariantHook.Value <- checkArrowVariant
+    // ...and of identity-sensitive declarations' SHARING INSTANCES (plan 2.2).
+    sharingVariantHook.Value <- checkSharingVariant
     // (The callee-fact tables -- defaults, where-conjuncts, `mut` positions,
     // co-iteration, units -- are keyed by binder id, program-unique, and
     // shared by reference across the program's modules: a module's entries

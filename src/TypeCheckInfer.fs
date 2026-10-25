@@ -4623,16 +4623,17 @@ and inferGram (env: TypeEnv) leftE rightE : TypeResult<TypedExpr> =
                         match outUnit with
                         | Some u -> IRTUnitAnnotated (outBare, u)
                         | None -> outBare
-                    // Conservative same-array test: both bare vars, the SAME
-                    // identity -- the same name, or identity-transparent
-                    // aliases of one array (a top-level deferred alias class,
-                    // a never-written stored alias: loopOperandIdentity, plan-
-                    // identity-transpose-compute 2.1), exactly as the loop
-                    // formers' identity groups see them.
+                    // Conservative same-array test: both bare vars of ONE
+                    // identity (loopOperandIdentity: the spelled name, a
+                    // deferred alias class or a never-written stored alias
+                    // (plan 2.1), a sharing instance's parameter class (plan
+                    // 2.2); FRESH under a dense ascription (plan 2.3), which
+                    // is why the same spelling alone does not count), exactly
+                    // as the loop formers' identity groups see them.
                     let sameArray =
                         match tL.Kind, tR.Kind with
                         | TExprVar (n1, v1, _), TExprVar (n2, v2, _) ->
-                            n1 = n2 || sameIdentity (loopOperandIdentity env n1 v1) (loopOperandIdentity env n2 v2)
+                            sameIdentity (loopOperandIdentity env n1 v1) (loopOperandIdentity env n2 v2)
                         | _ -> false
                     let freshSlot (ext: IRExpr) (sym: SymmetryClass) (rank: int) =
                         { Id = env.Builder.FreshId(); Rank = rank; Extent = ext
@@ -14090,7 +14091,7 @@ and inferLetBindingValueCore (env: TypeEnv) (binding: Binding) : TypeResult<Type
             | _ -> None
         let checkedValue =
             match scaledAnnot with
-            | None -> checkExpr env annotTy binding.Value
+            | None -> checkUnderDeclaredLayout env annotTy binding.Value
             | Some dst ->
                 // UnitTarget lets an additive RHS convert its operands
                 // straight into `dst`; convertScaleTo then finds nothing left
@@ -14104,6 +14105,91 @@ and inferLetBindingValueCore (env: TypeEnv) (binding: Binding) : TypeResult<Type
             // specific than what the value synthesized to.
             rejectEscapedWildcard { tv with Type = annotTy })
     | None -> inferExpr env binding.Value |> Result.bind rejectEscapedWildcard
+
+/// THE DECLARED-LAYOUT RULE (docs/plans/plan-identity-transpose-compute.md
+/// 2.3, LANGUAGE CHANGE; formalism 8.3 "Declared signatures and
+/// ascriptions"): an explicit DENSE array type -- a `let` ascription, or a
+/// declared return type for its body -- fixes the layout AND the elaboration of
+/// the value it annotates. When the ordinary elaboration does not meet it
+/// (`method_for(A, A) <@> comm-kernel`, `gram(A, A)`, a sharing-specialized
+/// call, each packed), the value is checked again with every operand identity
+/// at its own level fresh (TypeEnv.DenseAscription; cleared inside nested
+/// callable bodies): no identity group forms and no call is sharing-
+/// specialized, so it is elaborated dense, as declared (it was BL3001). A value
+/// the ordinary check accepts is untouched. The discarded attempt's side
+/// channels -- warnings, the warning log, pin suggestions, deduced facts, the
+/// editor's deductions, the spans -- are restored before the re-check, and a
+/// re-check that fails restores the first attempt's and reports ITS refusal.
+and checkUnderDeclaredLayout (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<TypedExpr> =
+    // A dense array, or a tuple holding one (the rule applies at each annotated
+    // array boundary; the whole value is re-checked).
+    let rec hasDenseArray (fuel: int) (t: IRType) =
+        fuel > 0
+        && (match IR.stripUnits (env.Subst.Resolve t) with
+            | ArrayElem at ->
+                not at.IndexTypes.IsEmpty
+                && at.IndexTypes |> List.forall (fun ix -> ix.Rank <= 1 && ix.Symmetry = SymNone && ix.IxKind = IxKPlain)
+            | IRTTuple ts -> ts |> List.exists (hasDenseArray (fuel - 1))
+            | _ -> false)
+    if not (hasDenseArray 8 expected) || env.DenseAscription then checkExpr env expected expr else
+    let snapshot () =
+        (List.ofSeq env.Warnings, Blade.TypeEnv.WarningLog.get (), Blade.TypeCheckIde.PinSuggestions.get (),
+         Blade.TypeEnv.DeducedFacts.get (), IdeDeductions.pairs.Value, IdeDeductions.packs.Value,
+         IdeDeductions.kernels.Value, currentStmtSpan (), currentExprSpan ())
+    let restore (ws, log, pins, facts, pairs, packs, kernels, stmtSp, exprSp) =
+        env.Warnings.Clear()
+        env.Warnings.AddRange(ws: string list)
+        Blade.TypeEnv.WarningLog.reset ()
+        for d in log do Blade.TypeEnv.WarningLog.add d
+        Blade.TypeCheckIde.PinSuggestions.reset ()
+        for (m, sp) in pins do Blade.TypeCheckIde.PinSuggestions.add m sp
+        Blade.TypeEnv.DeducedFacts.reset ()
+        for (f, sp) in facts do Blade.TypeEnv.DeducedFacts.add f sp
+        IdeDeductions.pairs.Value <- pairs
+        IdeDeductions.packs.Value <- packs
+        IdeDeductions.kernels.Value <- kernels
+        setCurrentStmtSpan stmtSp
+        setCurrentExprSpan exprSp
+    // The declaration-level accumulators the discarded attempt appended to
+    // (open arrow applications, generic casts) are cut back as well: their
+    // entries name nodes of a tree nobody keeps.
+    let pending0 = env.PendingArrowApps.Count
+    let obligations0 = env.CurrentGenericObligations |> Option.map (fun o -> o.Count)
+    let before = snapshot ()
+    let decisions0 = Blade.Effects.Decisions.mark ()
+    // The substitution itself (Codex second look: a failed attempt's
+    // unifications -- an unannotated parameter bound to the packed branch --
+    // must not constrain the re-check), and with it every instance the attempt
+    // made (its checked types lean on bindings now undone): array and sharing
+    // instances are forgotten and their declarations withdrawn.
+    let subst0 = env.Subst.Snapshot()
+    let arrowKeys0 = System.Collections.Generic.HashSet<string>(env.ArrowVariants.Keys)
+    let shareKeys0 = System.Collections.Generic.HashSet<string>(env.SharingVariants.Keys)
+    let variantDecls0 = env.ArrowVariantDecls.Count
+    match checkExpr env expected expr with
+    | Error e ->
+        let failed = snapshot ()
+        restore before
+        // ...and its `blade plan` records.
+        Blade.Effects.Decisions.rollback decisions0
+        env.Subst.Restore subst0
+        for k in List.ofSeq env.ArrowVariants.Keys do
+            if not (arrowKeys0.Contains k) then env.ArrowVariants.Remove k |> ignore
+        for k in List.ofSeq env.SharingVariants.Keys do
+            if not (shareKeys0.Contains k) then env.SharingVariants.Remove k |> ignore
+        if env.ArrowVariantDecls.Count > variantDecls0 then
+            env.ArrowVariantDecls.RemoveRange(variantDecls0, env.ArrowVariantDecls.Count - variantDecls0)
+        if env.PendingArrowApps.Count > pending0 then
+            env.PendingArrowApps.RemoveRange(pending0, env.PendingArrowApps.Count - pending0)
+        (match env.CurrentGenericObligations, obligations0 with
+         | Some o, Some n when o.Count > n -> o.RemoveRange(n, o.Count - n)
+         | _ -> ())
+        (match checkExpr { env with DenseAscription = true } expected expr with
+         | Ok tv -> Ok tv
+         | Error _ ->
+             restore failed
+             Error e)
+    | r -> r
 
 /// Recursive array definition, desugared here. The parser has already
 /// enforced the structural form (base arm `zero -> zero`, optional seed arm
@@ -17437,7 +17523,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
         Ok (TDeclImport (qname, style), env')
 
 and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<TypedDecl * TypeEnv> =
-    checkFunctionDeclWith Map.empty (fun _ _ -> ()) None env funcDecl
+    checkFunctionDeclWith Map.empty (fun _ _ -> ()) None None env funcDecl
 
 /// checkFunctionDecl, with some parameters' types FIXED (`fixedParams`,
 /// position -> type) -- an ARRAY INSTANCE of an arrow-parameter declaration
@@ -17448,8 +17534,12 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
 /// name (`funcDecl.Name` -- the name-keyed callee tables below must not
 /// overwrite the origin's entries), but it is the origin's declaration, so
 /// every message names the origin and so does the result's SourceName.
+/// `sharing` is a SHARING INSTANCE's partition (relevant parameter position ->
+/// class; TypeEnv.SharingDeclSources, checkSharingVariant): each such
+/// parameter carries its class's identity in the body, and the instance is
+/// recorded as no sharing source of its own. None for every other check.
 and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRType -> unit)
-                          (instanceOf: string option)
+                          (instanceOf: string option) (sharing: Map<int, int> option)
                           (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<TypedDecl * TypeEnv> =
     let shownName = defaultArg instanceOf funcDecl.Name
     // Fresh type variable scope for this function's type annotations.
@@ -17729,6 +17819,16 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
              env.Provenance.[varId] <- Set.singleton (Blade.Constraints.paramProvenanceToken (declIdentity env funcDecl.Name) p.Name)
          | _ -> ())
         { Name = p.Name; Type = paramTypes.[i]; Index = i; VarId = varId; Default = None; NameSpan = p.NameSpan } : TypedParam)
+    // A SHARING INSTANCE (checkSharingVariant): each relevant parameter is
+    // its partition class's array for every identity question of the body
+    // (TypeCheckSupport.loopOperandIdentity), spelled as written for records.
+    (match sharing with
+     | Some cls ->
+         for tp in typedParams do
+             match Map.tryFind tp.Index cls with
+             | Some c -> env.SharingParamIdentities.[tp.VarId] <- AIDAlias (AIDParameter (funcDecl.Name, c), tp.Name)
+             | None -> ()
+     | None -> ())
 
     // Which of those params a whole-array rebind must be refused on. Every
     // surviving `mut` param is array-typed (MutParamNotArray rejected the rest
@@ -17870,7 +17970,9 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
         // there's no expectation to push.
         let bodyResult =
             match funcDecl.ReturnType with
-            | Some _ -> checkExpr bodyEnv retType funcDecl.Body
+            // A declared DENSE array return fixes the body's elaboration too
+            // (plan 2.3; checkUnderDeclaredLayout).
+            | Some _ -> checkUnderDeclaredLayout bodyEnv retType funcDecl.Body
             | None -> inferExpr bodyEnv funcDecl.Body
         bodyResult |> Result.bind (fun tBody ->
             // A function body is a value-forming boundary: a wildcard `_` that
@@ -17935,6 +18037,11 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
                || env.FuncAxisSubscriptParams.ContainsKey funcVarId
                || env.FuncRankGenericParams.ContainsKey funcVarId then
                 env.ArrowDeclSources.[funcVarId] <- (funcDecl, envWithFunc, fixedParams, funcVarId)
+            // IDENTITY SENSITIVITY (plan 2.2): which parameters' sharing a
+            // call's partition decides, and whether this declaration may be
+            // specialized on it. A sharing instance is no source of its own.
+            if sharing.IsNone then
+                noteSharingRelevance env envWithFunc funcVarId funcDecl typedParams retType tBody
             pinSubscriptParams env (funcDecl.Params |> List.map (fun p -> p.Type.IsNone)) typedParams tBody
             unify env.Subst tBody.Type retType |> Result.bind (fun () ->
             // The wreath gate again, on the RESOLVED return type. The one at
@@ -18394,7 +18501,7 @@ and checkArrowVariant (env: TypeEnv) (fid: IRId) (arrays: Map<int, IRType>) : Ty
         checkFunctionDeclWith fixedTys
             (fun vid fty ->
                 env.ArrowVariants.[key] <- { DeclName = declName; VarId = vid; FuncType = fty; Origin = origin })
-            (Some srcDecl.Name)
+            (Some srcDecl.Name) None
             srcEnv { srcDecl with Name = declName }
     env.Warnings.RemoveRange(warnings0, env.Warnings.Count - warnings0)
     Blade.TypeEnv.WarningLog.reset ()
@@ -18418,6 +18525,75 @@ and checkArrowVariant (env: TypeEnv) (fid: IRId) (arrays: Map<int, IRType>) : Ty
          | true, _ -> env.ArrowDeclSources.[v.VarId] <- (srcDecl, srcEnv, fixedTys, origin)
          | _ -> ())
         env.ArrowVariantDecls.Add((origin, decl))
+        Ok (head v)
+
+/// THE SHARING INSTANCE of an identity-sensitive declaration (plan 2.2;
+/// TypeEnv.SharingDeclSources; the section note above
+/// TypeCheckSupport.sharingVariantHook): the declaration `fid` checked again
+/// from its source, in the environment it was checked in, with each relevant
+/// parameter carrying the identity of its class in `cls` (relevant position ->
+/// class, first-occurrence normalized), so `method_for(x, y)` over a [0,0]
+/// call is the identity group `method_for(x, x)` is -- packed and triangular
+/// under a comm kernel -- and the instance's return type is its own. Made once
+/// per (origin, partition); registered before the body is checked. Its
+/// warnings were the generic declaration's to give; a refusal is returned (the
+/// caller then keeps the generic declaration). The checked declaration waits
+/// in TypeEnv.ArrowVariantDecls, placed after its origin. `blade plan` records
+/// `[sharing-partition v1] <f>: applied [partition [0,0] of (x, y); ...]`.
+and checkSharingVariant (env: TypeEnv) (fid: IRId) (cls: Map<int, int>) : TypeResult<TypedExpr> =
+    match env.SharingDeclSources.TryGetValue fid with
+    | false, _ -> Error (Other "internal: a sharing instance was asked for, but its source was not recorded")
+    | true, (srcDecl, srcEnv, rel, _) ->
+    let partition = sharingPartitionText rel cls
+    let key = $"{fid}|{partition}"
+    let head (v: ArrowVariant) = mkTyped (TExprVar (srcDecl.Name, v.VarId, None)) v.FuncType
+    let names = rel |> List.map (fun p -> (List.item p srcDecl.Params).Name) |> String.concat ", "
+    let evidence (declName: string) =
+        [ $"partition {partition} of ({names})"
+          $"instance {declName}: each class is one array for the identity groups of its body"
+          "the all-distinct partition keeps the generic declaration" ]
+    match env.SharingVariants.TryGetValue key with
+    | true, v ->
+        sharingRecord srcDecl Blade.Effects.Applied (evidence v.DeclName)
+        Ok (head v)
+    | _ ->
+    let n = (env.SharingVariants.Values |> Seq.filter (fun v -> v.Origin = fid) |> Seq.length) + 1
+    let declName = $"{srcDecl.Name}__share{n}"
+    let exprSpan0 = currentExprSpan ()
+    let stmtSpan0 = currentStmtSpan ()
+    let warnings0 = env.Warnings.Count
+    let warningLog0 = Blade.TypeEnv.WarningLog.get ()
+    let pins0 = Blade.TypeCheckIde.PinSuggestions.get ()
+    let facts0 = Blade.TypeEnv.DeducedFacts.get ()
+    let idePairs0 = IdeDeductions.pairs.Value
+    let idePacks0 = IdeDeductions.packs.Value
+    let ideKernels0 = IdeDeductions.kernels.Value
+    let checkedR =
+        checkFunctionDeclWith Map.empty
+            (fun vid fty ->
+                env.SharingVariants.[key] <- { DeclName = declName; VarId = vid; FuncType = fty; Origin = fid })
+            (Some srcDecl.Name) (Some cls)
+            srcEnv { srcDecl with Name = declName }
+    env.Warnings.RemoveRange(warnings0, env.Warnings.Count - warnings0)
+    Blade.TypeEnv.WarningLog.reset ()
+    for d in warningLog0 do Blade.TypeEnv.WarningLog.add d
+    Blade.TypeCheckIde.PinSuggestions.reset ()
+    for (m, sp) in pins0 do Blade.TypeCheckIde.PinSuggestions.add m sp
+    Blade.TypeEnv.DeducedFacts.reset ()
+    for (f, sp) in facts0 do Blade.TypeEnv.DeducedFacts.add f sp
+    IdeDeductions.pairs.Value <- idePairs0
+    IdeDeductions.packs.Value <- idePacks0
+    IdeDeductions.kernels.Value <- ideKernels0
+    setCurrentStmtSpan stmtSpan0
+    setCurrentExprSpan exprSpan0
+    match checkedR with
+    | Error e ->
+        env.SharingVariants.Remove key |> ignore
+        Error e
+    | Ok (decl, _) ->
+        let v = env.SharingVariants.[key]
+        env.ArrowVariantDecls.Add((fid, decl))
+        sharingRecord srcDecl Blade.Effects.Applied (evidence declName)
         Ok (head v)
 
 /// Where-clause predicate contract: a static function called from a

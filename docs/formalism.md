@@ -1261,6 +1261,18 @@ higher rank is written `v: T^k`; a top-level `let` of a lambda that is only appl
 is the declaration, and a lambda used as a value is one body whose first call
 decides its open parameters.
 
+**Sharing at a direct call.** The argument TYPES do not say whether two
+arguments are one array, and the identity groups of §8.3 do: so a declaration
+whose body applies a `comm` / `anticomm` kernel (or `gram`, or a `reynolds`
+kernel) over two or more of its array parameters -- directly, or by handing
+them to such positions of a resolved callee -- is instantiated per call on the
+SHARING PARTITION of those arguments as well as on their types (§8.3
+"Sharing-partition instances"). `f(A, A)` and `f(A, B)` are then two instances
+with two return types, packed and dense. A DECLARED type fixes the layout and
+the elaboration at its boundary instead: a declared array return type, or a
+`let` ascription of the call's value, keeps the declaration's generic,
+all-distinct elaboration (§8.3).
+
 ```blade
 function inc(x) = x + 1
 let a = inc(6) / 4
@@ -2017,7 +2029,82 @@ a helper (`f(A, A)` over `f(x, y)` stays dense). LANGUAGE CHANGE, P1 of
 the stored alias second); before it an alias of a deferred map was a different
 array here (dense), contradicting §10.2, and so was a never-written stored
 alias. Corpus `symmetry/149`-`153` and `155` are the cases this does not
-change and the fail-closed edges.
+change and the fail-closed edges (`149`'s helper is now packed by the
+sharing-partition rule below).
+
+**Sharing-partition instances** (`docs/plans/plan-identity-transpose-compute.md`
+§2.2, LANGUAGE CHANGE, no knob). Inside a function body the parameters are the
+arrays a CALL passes, so the identity groups of the body depend on the call. A
+declaration is IDENTITY-SENSITIVE when its body holds an application whose
+kernel declares `comm` / `anticomm` groups (or is a `reynolds` kernel, or a
+named kernel), a `gram`, or a call of an identity-sensitive declaration at its
+relevant positions, with two or more distinct array PARAMETERS as bare
+operands there; those parameters are its RELEVANT ones. A call of it is
+specialized on the normalized SHARING PARTITION of its relevant arguments --
+classes numbered in first-occurrence order, two arguments in one class when
+they are identical in the sense above (the same array, or members of one
+deferred alias class; an argument that is not a bare variable is its own
+class) -- in addition to its ordinary type instance. The all-distinct
+partition is the declaration itself; any other partition is an INSTANCE of it,
+checked with each relevant parameter carrying its class's identity, so
+`function f(x: T^1, y: T^1) where comm(x, y) = method_for(x, y) <@> lambda(a,
+b) where comm(a, b) -> a * b |> compute` called `f(A, A)` is the instance over
+`[0,0]`, packed `SymIdx<2, I>` and triangular, while `f(A, B)` is dense (the
+argument types are identical; the result types are not). Only the partitions a
+program encounters are made (at most Bell(k) for k relevant parameters), keyed
+by the partition, never by a root or a caller's name; an identity-insensitive
+declaration keeps its one instance. Transitively, `g(x, y) = f(x, y)` called
+`g(A, A)` is g's `[0,0]` instance, inside which `f(x, y)` is f's. Positions
+are preserved: `[0,1,0]` licenses no regrouping, so `(A, B, A)` keeps the
+adjacent-only rule above (dense in operand order). FAIL CLOSED to the
+all-distinct elaboration, recorded by `blade plan` as `[sharing-partition v1]
+<f>: declined -- <first failed condition>`: a call through a callable
+parameter, a lambda value, a `let` alias of the declaration (reassignable in
+its scope) or any unresolved head (no partition is decided); a
+recursive declaration; a `static`, `mpi` or `cuda` callable; a parameter pack;
+a declaration with array instances (§4.3 arrow parameters, computed reads of
+an unnamed axis, a symbolic rank); a relevant parameter that is `mut` or
+assigned in the body; a compiler-synthesized declaration -- in particular the
+bodies `ad.grad`, `ad.jvp` and `ad.vjp` differentiate, which keep INDEPENDENT
+argument slots even at `(A, A)` (§2.4 of the plan: distinct per-slot
+cotangents; tied differentiation is written `h(a) = floss(a, a)`); and an
+instance that does not check under the shared identities. An applied record
+reads `[sharing-partition v1] f: applied [partition [0,0] of (x, y); instance
+f__share1: ...]`. Corpus `symmetry/149`, `161`-`167`, `ad-jvp-comb/115`, `multifile/043`.
+
+**Declared signatures and ascriptions** (plan §2.3, LANGUAGE CHANGE). An
+explicit annotation fixes the externally visible layout AND the elaboration at
+that boundary. A declaration with a declared ARRAY return type (a concrete
+array, a `T^k` caret with k ≥ 1, or a tuple holding one; a declared scalar or
+element variable such as `-> Float64` or `-> T` fixes no layout) is not
+specialized on its sharing partition: `function make_g(a, b)
+-> Array<Float64 like I, I> = gram(a, b)` called `make_g(A, A)` stays dense
+with the generic declaration's cells and bits (`declined -- the declared
+return type fixes the layout ...`), and its BODY is elaborated to the declared
+layout by the ascription rule below (a body `f(x, x)` under a declared dense
+return keeps f's generic call); an UNANNOTATED helper infers its layout per
+instance. A `let` with a DENSE array ascription whose value the ordinary
+elaboration does not meet -- `let P: Array<Float64 like I, I> = method_for(A,
+A) <@> comm-kernel |> compute`, `gram(A, A)`, a call the partition would
+specialize -- is elaborated with every operand at the value's own level a
+distinct array (kernel bodies are not that boundary), so it is accepted and
+dense (it was BL3001); a `SymIdx` ascription stays accepted and packed, and a
+value the ordinary check accepts is untouched. Corpus `symmetry/164`, `165`,
+`167`.
+
+```blade
+type I = Idx<3>
+let A: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let B: Array<Float64 like I> = [4.0, 5.0, 6.0]
+function f(x: T^1, y: T^1) where comm(x, y) =
+    method_for(x, y) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+let PAA = f(A, A)
+let PAB = f(A, B)
+let D: Array<Float64 like I, I> = f(A, A)
+// EXPECT: PAA = [[1.0, 2.0, 3.0], [4.0, 6.0], [9.0]]
+// EXPECT: PAB = [[4.0, 5.0, 6.0], [8.0, 10.0, 12.0], [12.0, 15.0, 18.0]]
+// EXPECT: D = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [3.0, 6.0, 9.0]]
+```
 
 This rule is proved SOUND and proved NOT OPTIMAL for non-adjacent repeats
 (proofs.md §Attain: `surface_comm_optimal`, `aba_beats_surface_rule`,
