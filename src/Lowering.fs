@@ -4278,7 +4278,9 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // semantic normal form every lane consumes; first, so the passes
         // below see the base. Gate: BLADE_TRANSPOSE_ELIDE.
         let irModule = Optimize.normalizeTransposesModule programFuncs (foreignAll.Force()) irModule
-        let irModule = Optimize.optimizeModule env.Builder programFuncs irModule
+        // (a single-module program: compute elision's top-level mode reads the
+        // print selection's names, which name the program's own bindings)
+        let irModule = Optimize.optimizeModule env.Builder programFuncs (irModules.Length < 2) irModule
         // Lift inline forms (mask/sort/intersect/union/group_by/group_keys
         // appearing in non-let-RHS positions) into auto-let bindings so
         // codegen sees the canonical "let-bound" pattern uniformly.

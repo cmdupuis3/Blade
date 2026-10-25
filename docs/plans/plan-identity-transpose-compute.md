@@ -458,8 +458,14 @@ arity-polymorphic callables skipped. A TREE REWRITE before the lane split (rule 
 side-table form NOT built), so the interpreter runs the rewritten tree and `opt-diff` is
 the gate. Corpus functions/539-547; `blade test optimize` pins no `allocate<` /
 `blade_alloc_cells` in either lane for an elided x; the two pool-reuse fixtures run with
-the gate off (accepted). Open: top level under `--print` selection, multi-level chains
-(x0 -> x1 -> fold elides one level), run-time-extent unseeded folds (need an emptiness
+the gate off (accepted). WAVE 2 (workstream C): ONE LEVEL DEEPER -- a producer whose
+operand is an elided map that passes the producer admission itself is admitted, so
+`x0 -> x1 -> fold` reads both maps in place (functions/565; a third level declines);
+TOP LEVEL UNDER A PRINT SELECTION -- in a single-module program with `BLADE_PRINT` /
+`--print` set, the binding list is one spine and a binding the selection excludes is a
+candidate (the record says the selection licensed it; printed bindings, provider and
+side-table bindings are never candidates; `blade test` refuses `--print`, so its pins are
+`blade test optimize` cases). Open: deeper chains, run-time-extent unseeded folds (need an emptiness
 guard reproducing BL8003 in every lane), the side-table form; a BL8011 extent-mismatch
 message after a pointwise elision names the producer's input rather than the temporary.
 
@@ -475,6 +481,42 @@ intermediate; effects keep their order; every escaping value has a realizable li
 `blade run --memcheck` (ASan) and `test memfree-stress` are green on the new fixtures
 (W4-2's merge-time fix and G69 are the precedent: the likely P4 failure is a
 use-after-free at a scope exit, which value parity cannot see).
+
+BUILT (wave 2, helpers in ONE module; `BLADE_CALL_ELIDE`, an optimizer gate, rule
+`call-elision v1`; `Optimize.elideCallsModule`): a DIRECT call that is a statement's only
+call and the sole operand of a fold (`reduce(prep(A), k[, s])`) or one operand of a
+pointwise map / co-iteration is jointly lowered at that site -- the callee's scalar let
+spine inlined under fresh ids, its one dense `|> compute` map (parameters replaced by the
+arguments) the fused fold's `IRReduceCompute` operand or the map's operand (elementwise
+fusion splices it) -- so the call allocates no return pool; the callee keeps its ABI and
+forcing point at every other site (§4). LIFETIME ARGUMENT: the inline owns no allocation
+(lets must be scalars; the map is read in place, or is the consumer's computed operand when
+fusion declines), so no return-boundary event is needed (G69's IRReleasePools is not
+used). A map kernel capturing the callee's scalars is CLONED onto the inlined copies
+(DerivedFuncOrigins keeps it at its origin). Admission fails closed: another module's
+callee, static / generic / repro / omp / cuda / mpi callees, a repro caller, captures,
+recursion, a callee referenced as a value, non-stored arguments (deferred, streamed,
+function-valued, `mut` / assigned), a writing callee, a body that is not a scalar let
+spine ending in one plain dense total map over its parameters, names the body or kernel
+does not bind, parameter-dependent map extents, a declared return layout the map does not
+produce, a writing statement (the snapshot), several calls in one statement; the fold by
+compute elision's rule (`elidedFoldSeed`, now shared). Corpus functions/554-564 (ASan clean
+under `--memcheck`, both lanes where the LLVM lane takes the program), `blade test
+optimize` call-elision cases (no call and no allocation at the elided site in C++ and
+LLVM; the declines keep their calls). FOUND AND FIXED on the way (not gated): both C++
+reduce emitters spell an inline array-returning CALL operand at every element read, so
+`reduce(prep(A), k)` called prep n + 1 times (O(n^2)), leaked n + 1 pools and let a
+writing fold kernel change the values later calls read; a fold call the pass KEEPS (a
+decline, or the gate off) at statement level is now bound to its own let right before its
+statement, evaluated once (functions/561 pins the snapshot). A first attempt in `IRLift`
+was withdrawn after a Codex review: IRLift's call-argument walker hoists such a let ahead
+of EARLIER arguments (`combine(bump(M), reduce(prep(M), (+)))` then printed 12 for 30;
+functions/564 pins the order). Codex's other finding, a capturing lambda applied in a
+callee's scalar let, now declines (functions/564). Open: the per-cell call in a fold
+NESTED inside a larger expression or a kernel body (both C++ emitters), calls across
+modules, a let-bound single-reader call (`let x = prep(A); reduce(x)`), kernel-body
+callers, a non-scalar let in the callee (needs the return-boundary event), run-time-extent
+unseeded folds (as in P3).
 
 ### P5 — Broader deterministic selection
 

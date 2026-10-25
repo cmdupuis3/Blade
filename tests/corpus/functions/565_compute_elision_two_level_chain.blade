@@ -1,0 +1,35 @@
+// TEST: Compute Elision Two-Level Chain
+// ============================================================================
+// plan-identity-transpose-compute P3 remainder (BLADE_COMPUTE_ELIDE, one level
+// deeper). `x0 -> x1 -> fold`: x0's only reader is x1's pointwise map, so x0
+// is elided into it; x1's only reader is the fold, and its producer now has
+// x0's map as its operand -- admitted because that inner map passes the
+// producer admission itself, so the fold reads both maps in place and the
+// body allocates nothing. Three levels (chain3) elide two and keep the last
+// pool (a deeper chain declines). A write after x1 keeps x1's pool and its
+// snapshot: snap2 folds the values from before `w(1) = 100.0`.
+function chain(a: T^1) -> T^0 = {
+    let x0 = method_for(a) <@> lambda(v) -> v * 2.0 |> compute
+    let x1 = method_for(x0) <@> lambda(w) -> w + 1.0 |> compute
+    reduce(x1, (+))
+}
+function chain3(a: T^1) -> T^0 = {
+    let x0 = method_for(a) <@> lambda(v) -> v * 2.0 |> compute
+    let x1 = method_for(x0) <@> lambda(w) -> w + 1.0 |> compute
+    let x2 = method_for(x1) <@> lambda(u) -> u * 3.0 |> compute
+    reduce(x2, (+))
+}
+function snap2() -> T^0 = {
+    let mut w = [1.0, 2.0, 3.0]
+    let x0 = method_for(w) <@> lambda(v) -> v * 2.0 |> compute
+    let x1 = method_for(x0) <@> lambda(u) -> u + 1.0 |> compute
+    w(1) = 100.0
+    reduce(x1, (+))
+}
+let a = [1.0, 2.0, 3.0]
+let t = chain(a)
+let t3 = chain3(a)
+let s2 = snap2()
+// EXPECT: t = 15.0
+// EXPECT: t3 = 45.0
+// EXPECT: s2 = 15.0

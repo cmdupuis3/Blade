@@ -6862,6 +6862,76 @@ let private ceLlvmFoldNoPool () =
 
 let private ceSubject (s: string) (d: Blade.Effects.Decision) = d.Subject = s
 
+// P3 remainder: one level deeper (x0 -> x1 -> fold), and the top level under a
+// print selection.
+let private ceChainSrc =
+    "function chain(a: T^1) -> T^0 = {\n"
+    + "    let x0 = method_for(a) <@> lambda(v) -> v * 2.0 |> compute\n"
+    + "    let x1 = method_for(x0) <@> lambda(w) -> w + 1.0 |> compute\n"
+    + "    reduce(x1, (+))\n"
+    + "}\n"
+    + "function deeper(a: T^1) -> T^0 = {\n"
+    + "    let x0 = method_for(a) <@> lambda(v) -> v * 2.0 |> compute\n"
+    + "    let x1 = method_for(x0) <@> lambda(w) -> w + 1.0 |> compute\n"
+    + "    let x2 = method_for(x1) <@> lambda(u) -> u * 3.0 |> compute\n"
+    + "    reduce(x2, (+))\n"
+    + "}\n"
+    + "let a = [1.0, 2.0, 3.0]\n"
+    + "let t = chain(a)\n"
+    + "let t3 = deeper(a)\n"
+
+let private ceTopSrc =
+    "let A = [1.0, 2.0, 3.0]\n"
+    + "let x = method_for(A) <@> lambda(v) -> v * 2.0 + 1.0 |> compute\n"
+    + "let s = reduce(x, (+))\n"
+
+/// C++ allocations in main under BLADE_PRINT=s, compute elision on vs off.
+let private ceTopAllocCase () =
+    let name = "compute_elision_top_level_print_selection_no_pool"
+    withGate "BLADE_PRINT" "s" (fun () ->
+        match cppOfSource name ceTopSrc, withGate "BLADE_COMPUTE_ELIDE" "0" (fun () -> cppOfSource name ceTopSrc) with
+        | Ok on, Ok off ->
+            match ceCppBody on "main", ceCppBody off "main" with
+            | Some bOn, Some bOff ->
+                let aOn, aOff = ceAllocs bOn, ceAllocs bOff
+                if aOn = aOff - 1 then
+                    resultLine Pass name ($"main under --print s: {aOn} allocation(s) with the gate on, {aOff} off (x's pool elided)")
+                    true
+                else
+                    resultLine Fail name ($"main under --print s: {aOn} on, {aOff} off; wanted exactly one fewer on")
+                    false
+            | _ -> resultLine Fail name "no C++ body for `main`"; false
+        | Error e, _ | _, Error e -> resultLine Fail name e; false)
+
+let private ceNoRecordFor (name: string) (src: string) (subject: string) =
+    match decisionsOf src with
+    | Error e -> resultLine Fail name e; false
+    | Ok ds ->
+        if ds |> List.exists (fun d -> d.Rule = "compute-elision" && d.Subject = subject) then
+            resultLine Fail name ($"a `{subject}` compute-elision record exists; wanted none (a printed binding is not a candidate)")
+            false
+        else
+            resultLine Pass name ($"no `{subject}` record: a printed top-level binding keeps today's form silently")
+            true
+
+let private ceRemainderCases () : bool list =
+    [ ceCppAllocCase "compute_elision_chain_no_pool" ceChainSrc "chain" ((=) 0) (fun n -> n >= 2)
+          "x0 and x1 both read in place by the fold"
+      decisionCase "decision_compute_elision_chain_one_level_deeper" ceChainSrc "compute-elision"
+          (fun d -> ceSubject "chain.x1" d && applied d && d.Evidence |> List.exists (fun e -> e.Contains "one level deeper"))
+          "applied to chain.x1 (its producer's operand is x0's elided map)"
+      decisionCase "decision_compute_elision_chain_deeper_declines" ceChainSrc "compute-elision"
+          (fun d -> ceSubject "deeper.x2" d && declinedMentioning "a deeper chain, declines" d)
+          "declined: deeper.x2 would be two levels deep"
+      ceTopAllocCase ()
+      withGate "BLADE_PRINT" "s" (fun () ->
+          decisionCase "decision_compute_elision_top_level_print_selection" ceTopSrc "compute-elision"
+              (fun d -> ceSubject "top level.x" d && applied d && d.Evidence |> List.exists (fun e -> e.Contains "the print selection licensed the elision"))
+              "applied to the unprinted top-level x, licensed by the print selection")
+      ceNoRecordFor "compute_elision_top_level_unselected_is_inert" ceTopSrc "top level.x"
+      withGate "BLADE_PRINT" "x,s" (fun () ->
+          ceNoRecordFor "compute_elision_top_level_printed_is_inert" ceTopSrc "top level.x") ]
+
 let private computeElisionCases () : bool list =
     [ ceCppAllocCase "compute_elision_fold_no_pool" ceFoldSrc "total" ((=) 0) (fun n -> n >= 1)
           "the fold reads x's map in place (no pool) and the gate restores it"
@@ -6909,6 +6979,218 @@ let private computeElisionCases () : bool list =
           decisionCase "decision_compute_elision_declined_gate" ceFoldSrc "compute-elision"
               (fun d -> ceSubject "total.x" d && declinedMentioning "disabled by BLADE_COMPUTE_ELIDE" d)
               "declined: disabled by BLADE_COMPUTE_ELIDE") ]
+
+// ---------------------------------------------------------------------------
+// Call elision (BLADE_CALL_ELIDE, Optimize.elideCallsModule; the P4 entry of
+// docs/plans/plan-identity-transpose-compute.md). The VALUES are corpus
+// functions/554-563; these read the emission: a jointly lowered call is not
+// called at its site (so its return pool is never allocated there) in either
+// lane, a declined call keeps its call, and every outcome is a `call-elision`
+// record.
+// ---------------------------------------------------------------------------
+
+let private clPrep = "function prep(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> v * 2.0 + 1.0 |> compute }\n"
+
+let private clTopFoldSrc =
+    clPrep
+    + "let A = 0.5 * Float64(0..1001)\n"
+    + "let s = reduce(prep(A), (+))\n"
+
+let private clBodyFoldSrc =
+    clPrep
+    + "function total(b: T^1) -> T^0 = { reduce(prep(b), (+)) }\n"
+    + "let A = [1.0, 2.0, 3.0]\n"
+    + "let t = total(A)\n"
+
+let private clMapSrc =
+    clPrep
+    + "let A = [1.0, 2.0, 3.0]\n"
+    + "let y = method_for(prep(A)) <@> lambda(v) -> v * 10.0 |> compute\n"
+
+let private clSpineSrc =
+    "function scaled(a: T^1, c: Float64) -> T^1 = {\n"
+    + "    let k = c * 2.0\n"
+    + "    method_for(a) <@> lambda(v) -> v * k |> compute\n"
+    + "}\n"
+    + "function both(b: T^1, c: Float64) -> T^0 = {\n"
+    + "    let s1 = reduce(scaled(b, c), (+))\n"
+    + "    let s2 = reduce(scaled(b, 1.0), (+), 0.5)\n"
+    + "    s1 + s2\n"
+    + "}\n"
+    + "let A = [1.0, 2.0, 3.0]\n"
+    + "let t = both(A, 2.0)\n"
+
+let private clRecursiveSrc =
+    "function deep(a: Array<Float64 like Idx<3>>, n: Int64) -> Array<Float64 like Idx<3>> = {\n"
+    + "    let k = if n == 0 then 0.0 else reduce(deep(a, n - 1), (+))\n"
+    + "    method_for(a) <@> lambda(v) -> v + k |> compute\n"
+    + "}\n"
+    + "let A = [1.0, 2.0, 3.0]\n"
+    + "let s = reduce(deep(A, 2), (+))\n"
+
+let private clMutSrc =
+    "function prep(a: mut Array<Float64 like Idx<3>>) -> Array<Float64 like Idx<3>> = {\n"
+    + "    a(0) = 10.0\n"
+    + "    method_for(a) <@> lambda(v) -> v * 2.0 |> compute\n"
+    + "}\n"
+    + "let mut M = [1.0, 2.0, 3.0]\n"
+    + "let s = reduce(prep(M), (+))\n"
+
+let private clOmpSrc =
+    "function kpar(xs: Float64^1) -> Float64^1 = {\n"
+    + "    method_for(xs) <@> lambda(x) where omp(x: 1) -> x + 1.0 |> compute\n"
+    + "}\n"
+    + "let A = [1.0, 2.0, 3.0, 4.0]\n"
+    + "let t = reduce(kpar(A), (+))\n"
+
+let private clTwoCallsSrc =
+    clPrep
+    + "let A = [1.0, 2.0, 3.0]\n"
+    + "let B = [10.0, 20.0, 30.0]\n"
+    + "let y = prep(A) + prep(B)\n"
+
+let private clWriteSrc =
+    clPrep
+    + "let mut M = [1.0, 2.0, 3.0]\n"
+    + "let s = reduce(prep(M), lambda(acc, v) -> {\n"
+    + "    M(2) = 100.0\n"
+    + "    acc + v\n"
+    + "})\n"
+
+let private clEmptySrc =
+    clPrep
+    + "let none: Array<Float64 like Idx<0>> = []\n"
+    + "let t = reduce(prep(none), (+))\n"
+
+let private clValueRefSrc =
+    "function inc(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> v + 1.0 |> compute }\n"
+    + "function apply_to(f: T^1 -> T^1, a: T^1) -> T^1 = { f(a) }\n"
+    + "let A = [1.0, 2.0, 3.0]\n"
+    + "let viaValue = reduce(apply_to(inc, A), (+))\n"
+    + "let direct = reduce(inc(A), (+))\n"
+
+let private clOtherSitesSrc =
+    clPrep
+    + "let A = [1.0, 2.0, 3.0]\n"
+    + "let s = reduce(prep(A), (+))\n"
+    + "let r = prep(A)\n"
+
+let private clCapturingLetSrc =
+    "function prep(a: T^1, c: Float64) -> T^1 = {\n"
+    + "    let k = (lambda(x: Float64) -> c + x)(1.0)\n"
+    + "    method_for(a) <@> lambda(v) -> v * k |> compute\n"
+    + "}\n"
+    + "let A = [1.0, 2.0, 3.0]\n"
+    + "let s = reduce(prep(A, 2.0), (+))\n"
+
+let private clCalls (fnPrefix: string) (body: string) =
+    System.Text.RegularExpressions.Regex.Matches(body, @"\b" + fnPrefix + @"\w*\(").Count
+
+/// Calls of `callee` (and allocations) in the C++ body of `fn`, gate on and off.
+let private clCppCase (name: string) (src: string) (fn: string) (callee: string)
+                      (wantOn: int * int -> bool) (wantOff: int * int -> bool) (describe: string) =
+    match cppOfSource name src, withGate "BLADE_CALL_ELIDE" "0" (fun () -> cppOfSource name src) with
+    | Ok on, Ok off ->
+        match ceCppBody on fn, ceCppBody off fn with
+        | Some bOn, Some bOff ->
+            let cOn, cOff = (clCalls callee bOn, ceAllocs bOn), (clCalls callee bOff, ceAllocs bOff)
+            if wantOn cOn && wantOff cOff then
+                resultLine Pass name ($"{fn}: (calls of {callee}, allocations) = {cOn} with the gate on, {cOff} off; {describe}")
+                true
+            else
+                resultLine Fail name ($"{fn}: (calls of {callee}, allocations) = {cOn} on, {cOff} off; wanted {describe}")
+                false
+        | _ -> resultLine Fail name ($"no C++ body for `{fn}`"); false
+    | Error e, _ | _, Error e -> resultLine Fail name e; false
+
+/// The LLVM lane: calls of `@bl_<callee>` and pool allocations in `fn`'s body.
+let private clLlvmCase (name: string) (src: string) (fn: string) (callee: string) =
+    match ceLlvmOf name src, withGate "BLADE_CALL_ELIDE" "0" (fun () -> ceLlvmOf name src) with
+    | Ok on, Ok off ->
+        match ceLlvmBody on fn, ceLlvmBody off fn with
+        | Some bOn, Some bOff ->
+            let calls (b: string) = System.Text.RegularExpressions.Regex.Matches(b, @"call [^\n]*@bl_" + callee).Count
+            let allocs (b: string) = System.Text.RegularExpressions.Regex.Matches(b, @"blade_alloc_cells").Count
+            if calls bOn = 0 && allocs bOn = 0 && calls bOff >= 1 then
+                resultLine Pass name ($"llvm lane, {fn}: 0 calls of @bl_{callee} and 0 pool allocations with the gate on; {calls bOff} call(s) off")
+                true
+            else
+                resultLine Fail name ($"llvm lane, {fn}: {calls bOn} call(s) / {allocs bOn} allocation(s) on, {calls bOff} call(s) off; wanted 0 / 0 on, >= 1 off")
+                false
+        | _ -> resultLine Fail name ($"no LLVM body for `{fn}`"); false
+    | Error e, _ | _, Error e -> resultLine Fail name ($"the llvm lane refused: {e}"); false
+
+let private clSubject (prefix: string) (d: Blade.Effects.Decision) = d.Subject.StartsWith prefix
+
+let private callElisionCases () : bool list =
+    [ clCppCase "call_elision_top_fold_no_call" clTopFoldSrc "main" "prep"
+          (fun (c, _) -> c = 0) (fun (c, _) -> c = 1)
+          "the fold reads prep's map in place (no call, so no return pool); the gate restores the one call"
+      clCppCase "call_elision_body_fold_no_call_no_pool" clBodyFoldSrc "total" "prep"
+          (fun (c, a) -> c = 0 && a = 0) (fun (c, _) -> c = 1)
+          "total neither calls prep nor allocates"
+      clLlvmCase "call_elision_llvm_body_fold_no_call" clBodyFoldSrc "total" "prep"
+      clCppCase "call_elision_map_no_call" clMapSrc "main" "prep"
+          (fun (c, _) -> c = 0) (fun (c, _) -> c = 1)
+          "the map consumer splices prep's map (no call)"
+      clCppCase "call_elision_spine_no_call_no_pool" clSpineSrc "both" "scaled"
+          (fun (c, a) -> c = 0 && a = 0) (fun (c, _) -> c = 2)
+          "both elided calls inline their scalar spine: no call, no allocation"
+      clCppCase "call_elision_recursive_keeps_call" clRecursiveSrc "main" "deep"
+          (fun (c, _) -> c = 1) (fun (c, _) -> c = 1) "the recursive call stays (once, at the fold)"
+      clCppCase "call_elision_two_calls_keep_calls" clTwoCallsSrc "main" "prep"
+          (fun (c, _) -> c >= 2) (fun (c, _) -> c >= 2) "both calls stay"
+      clCppCase "call_elision_write_keeps_call" clWriteSrc "main" "prep"
+          (fun (c, _) -> c = 1) (fun (c, _) -> c = 1) "the call stays, evaluated once before the writing fold"
+      clCppCase "call_elision_other_site_keeps_abi" clOtherSitesSrc "main" "prep"
+          (fun (c, _) -> c = 1) (fun (c, _) -> c = 2) "the fold's call is elided; `let r = prep(A)` keeps its call"
+      decisionCase "decision_call_elision_top_fold_applied" clTopFoldSrc "call-elision"
+          (fun d -> clSubject "s: reduce(prep(A)) -> one fused fold" d && applied d
+                    && d.Evidence |> List.exists (fun e -> e.Contains "licensed route: base seed +0.0"))
+          "applied to s: reduce(prep(A)) with the licensed route's base seed +0.0 (W4-3)"
+      withGate "BLADE_FP_REPRO" "1" (fun () ->
+          decisionCase "decision_call_elision_top_fold_applied_repro" clTopFoldSrc "call-elision"
+              (fun d -> clSubject "s: reduce(prep(A))" d && applied d
+                        && d.Evidence |> List.exists (fun e -> e.Contains "strict route: identity seed -0.0"))
+              "applied with the strict route's identity seed -0.0 (W4-3)")
+      decisionCase "decision_call_elision_body_fold_applied" clBodyFoldSrc "call-elision"
+          (fun d -> clSubject "total: reduce(prep(b))" d && applied d) "applied to total: reduce(prep(b))"
+      decisionCase "decision_call_elision_map_applied" clMapSrc "call-elision"
+          (fun d -> clSubject "y: a pointwise map over prep(A)" d && applied d
+                    && d.Evidence |> List.exists (fun e -> e.Contains "realized by elementwise fusion"))
+          "applied to y (pointwise consumer, fused)"
+      decisionCase "decision_call_elision_spine_clone" clSpineSrc "call-elision"
+          (fun d -> clSubject "both: reduce(scaled(b, c))" d && applied d
+                    && d.Evidence |> List.exists (fun e -> e.Contains "a clone `__lambda_"))
+          "applied with the capturing kernel cloned"
+      decisionCase "decision_call_elision_declined_recursive" clRecursiveSrc "call-elision"
+          (fun d -> clSubject "s: reduce(deep(A, 2))" d && declinedMentioning "a recursive callee" d) "declined: recursive"
+      decisionCase "decision_call_elision_declined_mut_writer" clMutSrc "call-elision"
+          (fun d -> clSubject "s: reduce(prep(M))" d && declinedMentioning "the callee may write" d) "declined: the callee writes its mut parameter"
+      decisionCase "decision_call_elision_declined_omp" clOmpSrc "call-elision"
+          (fun d -> clSubject "t: reduce(kpar(A))" d && declinedMentioning "parallel strategy" d) "declined: an omp map kernel"
+      decisionCase "decision_call_elision_declined_two_calls" clTwoCallsSrc "call-elision"
+          (fun d -> clSubject "y: a pointwise map over prep(A)" d && declinedMentioning "several calls in one statement" d)
+          "declined: several calls in one statement"
+      decisionCase "decision_call_elision_declined_write_between" clWriteSrc "call-elision"
+          (fun d -> clSubject "s: reduce(prep(M))" d && declinedMentioning "the consumer statement may write" d)
+          "declined: the fold kernel writes the argument"
+      decisionCase "decision_call_elision_declined_empty_unseeded" clEmptySrc "call-elision"
+          (fun d -> clSubject "t: reduce(prep(none))" d && declinedMentioning "an unseeded fold over an extent not known at compile time to be >= 1" d)
+          "declined: an unseeded fold over an extent that may be empty (BL8003 stays at the fold)"
+      decisionCase "decision_call_elision_declined_value_reference" clValueRefSrc "call-elision"
+          (fun d -> clSubject "direct: reduce(inc(A))" d && declinedMentioning "is referenced as a value" d)
+          "declined: the callee is referenced as a value"
+      decisionCase "decision_call_elision_declined_capturing_let" clCapturingLetSrc "call-elision"
+          (fun d -> clSubject "s: reduce(prep(A, 2.0))" d && declinedMentioning "capturing callable outside its map kernel" d)
+          "declined: a scalar let applies a capturing lambda"
+      // a KEPT fold call is evaluated once (bound before its statement), gate on and off
+      clCppCase "call_elision_kept_call_evaluated_once" clWriteSrc "main" "prep"
+          (fun (c, _) -> c = 1) (fun (c, _) -> c = 1) "one call of prep, not one per cell"
+      withGate "BLADE_CALL_ELIDE" "0" (fun () ->
+          decisionCase "decision_call_elision_declined_gate" clTopFoldSrc "call-elision"
+              (fun d -> clSubject "s: reduce(prep(A))" d && declinedMentioning "disabled by BLADE_CALL_ELIDE" d)
+              "declined: disabled by BLADE_CALL_ELIDE") ]
 
 // ---------------------------------------------------------------------------
 // TRANSPOSE NORMAL FORM (P2 entry of docs/plans/plan-identity-transpose-
@@ -7677,7 +7959,10 @@ let runOptimizeTests () =
           decisionCase "decision_gram_apply_advisory" gramAdvisorySrc "gram-apply-advisory"
               (declinedMentioning "gram_apply(A, A, v)") "advisory names gram_apply(A, A, v)"
           // Compute elision (BLADE_COMPUTE_ELIDE): single-consumer body computes.
-          yield! computeElisionCases () ]
+          yield! computeElisionCases ()
+          yield! ceRemainderCases ()
+          // Call elision (BLADE_CALL_ELIDE): a supported call read in place.
+          yield! callElisionCases () ]
         @ planCases ()
         @ coIterIdentityPins ()
         @ siblingCases ()

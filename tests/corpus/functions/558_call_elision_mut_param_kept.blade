@@ -1,0 +1,16 @@
+// TEST: Call Elision Keeps A Mut-Parameter Callee
+// ============================================================================
+// A callee that writes through a `mut` parameter has an effect that must
+// happen exactly once, at the call: BLADE_CALL_ELIDE declines ("the callee
+// may write"), so the call, its write and its return pool stay. The fold
+// sees the written cell (10 * 2 + 2 * 2 + 3 * 2 = 30) and the caller's array
+// keeps the write afterwards.
+function prep(a: mut Array<Float64 like Idx<3>>) -> Array<Float64 like Idx<3>> = {
+    a(0) = 10.0
+    method_for(a) <@> lambda(v) -> v * 2.0 |> compute
+}
+let mut M = [1.0, 2.0, 3.0]
+let s = reduce(prep(M), (+))
+let m0 = M(0)
+// EXPECT: s = 30.0
+// EXPECT: m0 = 10.0

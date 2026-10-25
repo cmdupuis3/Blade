@@ -1,0 +1,26 @@
+// TEST: Call Elision Scalar Let Spine
+// ============================================================================
+// A callee whose body is a short spine of SCALAR lets ending in its map: the
+// lets are inlined ahead of the consumer under fresh ids (only scalars are
+// bound, so the inline allocates nothing that could outlive the statement)
+// and the map kernel, which captures `k`, is CLONED to capture the inlined
+// copy. A literal and a variable scalar argument; a fold and a map consumer;
+// two elisions of one callee in one region (each its own fresh `k`).
+function scaled(a: T^1, c: Float64) -> T^1 = {
+    let k = c * 2.0
+    let off = k - 1.0
+    method_for(a) <@> lambda(v) -> v * k + off |> compute
+}
+function both(b: T^1, c: Float64) -> T^0 = {
+    let s1 = reduce(scaled(b, c), (+))
+    let s2 = reduce(scaled(b, 1.0), (+), 0.5)
+    s1 + s2
+}
+let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let c = 3.0
+let s = reduce(scaled(A, c), (+))
+let y = method_for(scaled(A, 0.5)) <@> lambda(v) -> v + 1.0 |> compute
+let b2 = both(A, 2.0)
+// EXPECT: s = 115.0
+// EXPECT: y = [2.0, 3.0, 4.0, 5.0, 6.0]
+// EXPECT: b2 = 110.5
