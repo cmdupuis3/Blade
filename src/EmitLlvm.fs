@@ -4721,6 +4721,11 @@ and private bindNamed (c: Ctx) (id: IRId) (name: string) (declTy: IRType) (value
     | VArray a ->
         let stored =
             match value, a.Src with
+            // The read-only alias plan (Optimize.planAliasElision, rule
+            // `transpose-normal-form v1`): neither name is ever written, so
+            // the binding shares the source's pool. Main only, as the C++
+            // lane's main top level (the shared pool outlives every reader).
+            | IRVar _, APool _ when not c.InFunction && Blade.Optimize.AliasElideTable.contains id -> a
             // Only a RENAME copies. A sub-view binding (`let row = M(0)`) is a
             // VIEW in the C++ lane too -- copying it would break writes made
             // through a `mut` array's peeled row.

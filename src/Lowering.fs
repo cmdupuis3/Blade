@@ -3352,6 +3352,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     Optimize.EpilogueLegTable.reset ()
     Optimize.CallSpanTable.reset ()
     Optimize.InlineEventSpans.reset ()
+    Optimize.AliasElideTable.reset ()
     Optimize.blasGateProbe <- Blade.LinAlgPatterns.blasAvailable
     // The raw decl list callers hand us is the program they PARSED, not the
     // one `TypeCheck.typeCheck` desugared inside itself -- so the icechunk
@@ -3524,6 +3525,18 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // CANNOT see an optimizer bug (both print the same wrong answer); the
         // lane that can is `blade test opt-diff` (tests/OptDiff.fs), which
         // compares every gate OFF against every gate ON.
+        // Every id another module names: the transpose normal form's and the
+        // read-only alias plan's never-written closure treats such a name as
+        // unjudged (Blade.Optimize.aliasWriteClosure).
+        let foreignAll =
+            lazy (if irModules.Length < 2 then Set.empty
+                  else moduleRefs.Force() |> List.filter (fun (n, _) -> n <> irModule.Name) |> List.map snd |> Set.unionMany)
+        // The transpose normal form (Blade.Optimize.normalizeTransposesModule,
+        // P2 of docs/plans/plan-identity-transpose-compute.md): a chain of
+        // transposes composes to one permutation, an identity disappears. A
+        // semantic normal form every lane consumes; first, so the passes
+        // below see the base. Gate: BLADE_TRANSPOSE_ELIDE.
+        let irModule = Optimize.normalizeTransposesModule programFuncs (foreignAll.Force()) irModule
         let irModule = Optimize.optimizeModule env.Builder programFuncs irModule
         // Lift inline forms (mask/sort/intersect/union/group_by/group_keys
         // appearing in non-let-RHS positions) into auto-let bindings so
@@ -3610,6 +3623,13 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // both emitters; the interpreter runs the as-written CSR. Gate:
         // BLADE_GROUP_AGG.
         Optimize.planGroupAggregate programFuncs irModule
+        // The read-only alias plan (Blade.Optimize.planAliasElision): an
+        // assignable top-level `let X = Y` whose two names are never written
+        // shares Y's storage instead of copying it (the symmetric transpose
+        // alias, the identity transpose chain). A side table, both emitters;
+        // the interpreter keeps its copy. Last, over the final tree. Gate:
+        // BLADE_TRANSPOSE_ELIDE.
+        Optimize.planAliasElision programFuncs (foreignAll.Force()) irModule
         irModule)
 
     // DEAD-POLYMORPH ELIMINATION, last and whole-program: a lambda lifted out

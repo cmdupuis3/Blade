@@ -6796,6 +6796,164 @@ let private computeElisionCases () : bool list =
               "declined: disabled by BLADE_COMPUTE_ELIDE") ]
 
 // ---------------------------------------------------------------------------
+// TRANSPOSE NORMAL FORM (P2 entry of docs/plans/plan-identity-transpose-
+// compute.md; Blade.Optimize.normalizeTransposesModule and planAliasElision,
+// rule `transpose-normal-form v1`, gate BLADE_TRANSPOSE_ELIDE). The corpus
+// (index-types/545-555) proves the values; only these pins can tell a copy
+// from none: the double transpose emits no transpose copy and no pool copy,
+// the read-only symmetric alias no pool copy, and a written source or alias
+// keeps its copy.
+// ---------------------------------------------------------------------------
+
+let private tnfDoubleSrc =
+    "let M: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n"
+    + "let T2 = transpose(transpose(M, [0, 1]), [0, 1])\n"
+    + "let s = reduce(transpose(transpose(M, [0, 1]), [0, 1]), (+), axes = 2)\n"
+
+let private tnfDoubleWrittenSrc =
+    "let M: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n"
+    + "let T2 = transpose(transpose(M, [0, 1]), [0, 1])\n"
+    + "M(0, 0) = 100.0\n"
+
+let private tnfRank3Src =
+    "let A: Array<Float64 like Idx<2>, Idx<3>, Idx<2>> = method_for(range<Idx<2>, Idx<3>, Idx<2>>) <@> lambda(i, j, k) -> Float64(100 * i + 10 * j + k) |> compute\n"
+    + "let R = transpose(transpose(transpose(A, [0, 1]), [1, 2]), [0, 1])\n"
+    + "let R2 = transpose(transpose(A, [0, 1]), [1, 2])\n"
+
+let private tnfSymPrefix =
+    "let A = [1.0, 2.0, 3.0]\n"
+    + "let L = method_for(A, A)\n"
+    + "let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y\n"
+    + "let S = L <@> reynolds(g) |> compute\n"
+    + "let ST = transpose(S, [0, 1])\n"
+let private tnfSymSrc = tnfSymPrefix + "let tot = reduce(ST, (+), axes = 2)\n"
+let private tnfSymSourceWrittenSrc = tnfSymPrefix + "S(0, 1) = 100.0\n"
+let private tnfSymAliasWrittenSrc = tnfSymPrefix + "ST(0, 1) = 100.0\n"
+
+let private tnfAntisymSrc =
+    "let A = [1.0, 2.0, 3.0]\n"
+    + "let L = method_for(A, A)\n"
+    + "let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y\n"
+    + "let anti = L <@> reynolds(g, Antisymmetric) |> compute\n"
+    + "let result = transpose(anti, [0, 1])\n"
+
+// Codex review of the pass (findings 1-2): a write to storage that is local
+// only BECAUSE of the copy being elided is still a write.
+let private tnfBlockMutParamSrc =
+    "function poke(a: mut Array<Float64 like Idx<2>>) -> Float64 = {\n"
+    + "    a((0 : Idx<2>)) = 99.0\n"
+    + "    a((0 : Idx<2>))\n"
+    + "}\n"
+    + "let M: Array<Float64 like Idx<2>> = [1.0, 2.0]\n"
+    + "let result = {\n"
+    + "    let mut X = M\n"
+    + "    poke(X)\n"
+    + "}\n"
+let private tnfNestedViewWriteSrc =
+    "let M: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n"
+    + "let result = {\n"
+    + "    let r = transpose(transpose(M, [0, 1]), [0, 1])(0)\n"
+    + "    r(1) = 99.0\n"
+    + "    r(1)\n"
+    + "}\n"
+let private tnfCount (needle: string) (s: string) =
+    s.Split([| needle |], System.StringSplitOptions.None).Length - 1
+
+let private tnfEmission (name: string) (src: string) (judge: string -> Result<string, string>) =
+    match cppOfSource name src with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        match judge cpp with
+        | Ok detail -> resultLine Pass name detail; true
+        | Error detail -> resultLine Fail name detail; false
+
+let private tnfLlvmAllocs (src: string) : Result<int, string> =
+    match lower src with
+    | Error e -> Error ($"lower: {e}")
+    | Ok ir ->
+        match EmitLlvm.tryEmitProgramNamed "tnf" ir with
+        | Ok ll -> Ok (System.Text.RegularExpressions.Regex.Matches(ll, "call ptr @blade_alloc").Count)
+        | Error why -> Error ($"the llvm lane refused: {why}")
+
+let private transposeNormalFormCases () =
+    let hardCopies (cpp: string) = tnfCount "// transpose: hard" cpp
+    let poolCopies (cpp: string) = tnfCount "std::copy_n(pool_base(" cpp
+    [ tnfEmission "transpose_double_identity_no_copy" tnfDoubleSrc (fun cpp ->
+          let h, p, alias = hardCopies cpp, poolCopies cpp, cpp.Contains "Array<double, 2> T2 = M;"
+          if h = 0 && p = 0 && alias then Ok "no transpose copy, no pool copy: T2 (and the fold's operand) read M's storage"
+          else Error ($"hard={h} poolCopies={p} T2-alias={alias}"))
+      withGate "BLADE_TRANSPOSE_ELIDE" "0" (fun () ->
+          tnfEmission "transpose_double_identity_gate_off_copies" tnfDoubleSrc (fun cpp ->
+              let h = hardCopies cpp
+              if h = 4 then Ok "gate off: today's four transpose copies"
+              else Error ($"expected 4 transpose copies, got {h}")))
+      tnfEmission "transpose_double_written_keeps_bind_copy" tnfDoubleWrittenSrc (fun cpp ->
+          let h, keep = hardCopies cpp, cpp.Contains "std::copy_n(pool_base(M.data), T2_n, pool_base(T2.data));"
+          if h = 0 && keep then Ok "no transpose copy; M is written, so T2 keeps its copy-on-bind copy"
+          else Error ($"hard={h} T2-copy={keep}"))
+      tnfEmission "transpose_rank3_chain_one_swap" tnfRank3Src (fun cpp ->
+          let h = hardCopies cpp
+          if h = 3 then Ok "R's three swaps are one; R2's 3-cycle keeps its two: 3 transpose copies"
+          else Error ($"expected 3 transpose copies (1 + 2), got {h}"))
+      tnfEmission "transpose_symmetric_alias_no_pool_copy" tnfSymSrc (fun cpp ->
+          let copy, alias = cpp.Contains "std::copy_n(pool_base(S.data)", cpp.Contains "Array<double, 2> ST = S;"
+          if not copy && alias then Ok "ST shares S's packed pool: no allocation, no copy_n"
+          else Error ($"poolCopy={copy} alias={alias}"))
+      tnfEmission "transpose_symmetric_source_written_keeps_copy" tnfSymSourceWrittenSrc (fun cpp ->
+          if cpp.Contains "std::copy_n(pool_base(S.data), ST_n, pool_base(ST.data));" then Ok "S is written after the alias: ST keeps its pool copy"
+          else Error "the pool copy is missing")
+      tnfEmission "transpose_symmetric_alias_written_keeps_copy" tnfSymAliasWrittenSrc (fun cpp ->
+          if cpp.Contains "std::copy_n(pool_base(S.data), ST_n, pool_base(ST.data));" then Ok "ST is written: it keeps its pool copy"
+          else Error "the pool copy is missing")
+      tnfEmission "transpose_antisym_negate_kept" tnfAntisymSrc (fun cpp ->
+          if cpp.Contains "negate_pool(" then Ok "the antisymmetric transpose still negates into a fresh pool"
+          else Error "negate_pool is missing")
+      (let name = "transpose_llvm_lane_allocations"
+       match tnfLlvmAllocs tnfDoubleSrc, withGate "BLADE_TRANSPOSE_ELIDE" "0" (fun () -> tnfLlvmAllocs tnfDoubleSrc),
+             tnfLlvmAllocs tnfSymSrc, withGate "BLADE_TRANSPOSE_ELIDE" "0" (fun () -> tnfLlvmAllocs tnfSymSrc) with
+       | Ok d, Ok dOff, Ok s, Ok sOff when d = 1 && dOff > d && s = sOff - 1 ->
+           resultLine Pass name ($"llvm lane: double transpose {dOff} -> {d} pool (M's), symmetric alias {sOff} -> {s} pools")
+           true
+       | d, dOff, s, sOff ->
+           resultLine Fail name (sprintf "double on/off = %A/%A, symmetric on/off = %A/%A" d dOff s sOff)
+           false)
+      decisionCase "decision_transpose_chain_identity_applied" tnfDoubleSrc "transpose-normal-form"
+          (fun d -> d.Subject = "T2" && applied d && d.Evidence |> List.exists (fun e -> e.Contains "IDENTITY permutation"))
+          "applied: T2's chain is the identity"
+      decisionCase "decision_transpose_chain_one_swap_applied" tnfRank3Src "transpose-normal-form"
+          (fun d -> d.Subject = "R" && applied d && d.Evidence |> List.exists (fun e -> e.Contains "1 swap(s) [0, 2]"))
+          "applied: R's chain is the swap [0, 2]"
+      decisionCase "decision_transpose_chain_declined_already_normal" tnfRank3Src "transpose-normal-form"
+          (fun d -> d.Subject = "R2" && declinedMentioning "already normal" d) "declined: R2's 3-cycle needs its two swaps"
+      decisionCase "decision_transpose_alias_applied" tnfSymSrc "transpose-normal-form"
+          (fun d -> d.Subject = "ST" && applied d && d.Evidence |> List.exists (fun e -> e.Contains "read-only alias"))
+          "applied: ST is a read-only alias of S"
+      decisionCase "decision_transpose_alias_declined_source_assigned" tnfSymSourceWrittenSrc "transpose-normal-form"
+          (fun d -> d.Subject = "ST" && declinedMentioning "`S` is assigned" d) "declined: S is assigned"
+      decisionCase "decision_transpose_alias_declined_alias_assigned" tnfSymAliasWrittenSrc "transpose-normal-form"
+          (fun d -> d.Subject = "ST" && declinedMentioning "`ST` is assigned" d) "declined: ST is assigned"
+      decisionCase "decision_transpose_antisym_declined" tnfAntisymSrc "transpose-normal-form"
+          (fun d -> d.Subject = "result" && declinedMentioning "negation" d) "declined: the antisymmetric negation is kept"
+      tnfEmission "transpose_block_mut_param_keeps_copy" tnfBlockMutParamSrc (fun cpp ->
+          if cpp.Contains "std::copy_n(pool_base(M.data)" then Ok "the block copy of M passed to a `mut` parameter is kept"
+          else Error "the copy of M is missing")
+      decisionCase "decision_transpose_alias_declined_block_mut_param" tnfBlockMutParamSrc "transpose-normal-form"
+          (fun d -> d.Subject = "result" && declinedMentioning "may write" d) "declined: the block passes its copy to a writing callee"
+      tnfEmission "transpose_nested_view_write_keeps_chain" tnfNestedViewWriteSrc (fun cpp ->
+          let h = tnfCount "// transpose: hard" cpp
+          if h = 2 then Ok "the written row view keeps both transpose copies" else Error ($"expected 2 transpose copies, got {h}"))
+      decisionCase "decision_transpose_chain_declined_view_write" tnfNestedViewWriteSrc "transpose-normal-form"
+          (fun d -> d.Subject = "result" && declinedMentioning "may write" d) "declined: a view of the result is written"
+      (match (try Ok (System.IO.File.ReadAllText "tests/corpus/index-types/555_transpose_named_pipeline_writing_kernel.blade") with ex -> Error ex.Message) with
+       | Error e -> resultLine Fail "decision_transpose_named_pipeline_declined" e; false
+       | Ok src ->
+           decisionCase "decision_transpose_named_pipeline_declined" src "transpose-normal-form"
+               (fun d -> d.Subject = "X" && declinedMentioning "may write" d) "declined: a named composition's writing kernel is applied to X")
+      withGate "BLADE_TRANSPOSE_ELIDE" "0" (fun () ->
+          decisionCase "decision_transpose_declined_gate" tnfSymSrc "transpose-normal-form"
+              (declinedMentioning "disabled by BLADE_TRANSPOSE_ELIDE") "declined: disabled by BLADE_TRANSPOSE_ELIDE") ]
+
+// ---------------------------------------------------------------------------
 // Hash equijoin (round 3 W3-2, item T2; Blade.Optimize.planEquiJoin, rule
 // `hash-join v1`). Values are pinned by corpus sql-joins/001-019 (and the
 // interpreter differential over them); these pin the admission record (cases
@@ -7181,6 +7339,8 @@ let runOptimizeTests () =
           // Pinned with compute elision OFF (ACCEPTED, as above): elision fuses
           // `q` into `r` and `s` into the returned fold, leaving one reuser.
           withGate "BLADE_COMPUTE_ELIDE" "0" poolReuseChainSharesRoot
+          // Transpose normal form and the read-only alias plan (P2 entry).
+          yield! transposeNormalFormCases ()
           // Hot-row fold scheduling (bench review M13).
           hotRowEmitted ()
           hotRowGateOff ()

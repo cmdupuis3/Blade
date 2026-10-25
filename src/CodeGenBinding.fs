@@ -7401,8 +7401,17 @@ and genVarAliasBindingCore (ctx: CodeGenContext) (binding: IRBinding) (builder: 
                 let ctx' = addVarName binding.Id name ctx
                 (code, { ctx' with GroupedArrays = Map.add name gkName ctx'.GroupedArrays })
             | None ->
+            // The read-only alias plan (Optimize.planAliasElision, rule
+            // `transpose-normal-form v1`): neither name is ever written, so
+            // the copy is unobservable and the binding shares the source's
+            // wrapper. Main's top level only (nothing is scope-freed there,
+            // so the shared pool outlives every reader); anywhere else the
+            // copy stays.
+            let readOnlyAlias =
+                Blade.Optimize.AliasElideTable.contains binding.Id && (currentAllocScope ()).IsNone
             let mutArrayCopy =
-                if binding.IsMutable || Set.contains binding.Id ctx.MutableArrayLets then
+                if readOnlyAlias then None
+                elif binding.IsMutable || Set.contains binding.Id ctx.MutableArrayLets then
                     match binding.Type with
                     | ArrayElem at when not (isCompoundArrayType at)
                                        && not (isRaggedArrayType at)
@@ -7431,6 +7440,9 @@ and genVarAliasBindingCore (ctx: CodeGenContext) (binding: IRBinding) (builder: 
                         [$"{ind}auto& {name} = {srcName};"]
                     else
                         genScalarBinding ctx name binding.Value binding.Type
+                let code =
+                    if readOnlyAlias then [ $"{ind}// {name} = {srcName}: read-only alias, no pool copy (transpose-normal-form v1)" ] @ code
+                    else code
                 let ctx' = addVarName binding.Id name ctx
                 let ctx' =
                     match Map.tryFind srcName ctx'.TupleChildren with

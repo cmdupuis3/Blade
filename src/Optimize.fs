@@ -220,7 +220,7 @@ let mutable blasGateProbe : unit -> bool = fun () -> false
 /// off for its reference lane, so a new pass's gate belongs in this list the
 /// day the pass lands -- a gate missing here is a pass the differential
 /// cannot see.
-let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_HOIST"; "BLADE_HOT_ROW"; "BLADE_CELL_EPILOGUE"; "BLADE_COMPACTION_FUSION"; "BLADE_COMPACT_ROW_CLASSES"; "BLADE_SIBLING_FOLDS"; "BLADE_REC_STEP_OMP"; "BLADE_MEMBER_HOIST"; "BLADE_EPILOGUE_LEGS"; "BLADE_ORBIT_ACTIONS"; "BLADE_HASH_JOIN"; "BLADE_GROUP_AGG"; "BLADE_COMPUTE_ELIDE" ]
+let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_HOIST"; "BLADE_HOT_ROW"; "BLADE_CELL_EPILOGUE"; "BLADE_COMPACTION_FUSION"; "BLADE_COMPACT_ROW_CLASSES"; "BLADE_SIBLING_FOLDS"; "BLADE_REC_STEP_OMP"; "BLADE_MEMBER_HOIST"; "BLADE_EPILOGUE_LEGS"; "BLADE_ORBIT_ACTIONS"; "BLADE_HASH_JOIN"; "BLADE_GROUP_AGG"; "BLADE_COMPUTE_ELIDE"; "BLADE_TRANSPOSE_ELIDE" ]
 
 /// A gate's KNOB MIRROR: a value that keeps a pass's PREVIOUS version, or
 /// selects an opt-in variant (not the pass off), for the passes whose forms
@@ -9678,6 +9678,470 @@ let recordComputeElisionMapOutcomes (pending: ComputeElisionPending list) (modul
                     (Blade.Effects.Declined "elementwise fusion did not splice the producer into the consumer (its own decline is recorded); the producer is evaluated as the consumer's operand, still once, still at the consumer")
                     p.PendingEvidence
             else recordComputeElision p.PendingSubject Blade.Effects.Applied p.PendingEvidence
+
+// ===========================================================================
+// TRANSPOSE NORMAL FORM (P2 entry, docs/plans/plan-identity-transpose-compute.md
+// sections 3 and 6 P2; `blade plan` rule `transpose-normal-form v1`)
+// ===========================================================================
+//
+// Two eliminations, both pure: every lane computes the same values with or
+// without them, so BLADE_TRANSPOSE_ELIDE (an optimizer gate) A/Bs them.
+//
+//   1. THE PERMUTATION CHAIN (`normalizeTransposesModule`, an IR rewrite --
+//      a SEMANTIC normal form, so codegen, the LLVM lane and the interpreter
+//      all consume it): `T_s(T_r(.. U))` composes to ONE coordinate
+//      permutation of U (T_sigma(T_pi U) = T_{pi o sigma} U); an identity
+//      permutation disappears (T_id U = U, the frame restored), anything else
+//      is rebuilt as its MINIMAL swap sequence (rank - cycles swaps, chosen
+//      deterministically), so a chain only ever loses copies. Each surviving
+//      swap is still the eager fresh copy it was; only the IDENTITY case
+//      changes which storage a reader sees, so only it needs evidence: a
+//      fresh base (a value no binding names), the binding's own copy-on-bind
+//      (`let T2 = transpose(transpose(M))` becomes `let T2 = M`, which
+//      deep-copies like any assignable alias -- or shares, under 2), or, for a
+//      chain nested in a larger expression, M's never-written closure below.
+//   2. THE READ-ONLY ALIAS (`planAliasElision`, a SIDE TABLE read by both
+//      emitters; the interpreter keeps its deep copy, the independent
+//      oracle): an assignable top-level `let X = Y` over a stored array --
+//      the symmetric transpose `let ST = transpose(S, [0, 1])`, which the
+//      checker erases to `let ST = S` (a certified symmetric identity), and
+//      the identity chain of 1 -- copies the pool only so that a write
+//      through one name cannot reach the other. When NEITHER can be written
+//      (fail-closed: `aliasWriteClosure`) the copy is unobservable and X
+//      reads Y's storage: no allocation, no pool copy. Main's top level only:
+//      top-level pools live to program exit (nothing is scope-freed there),
+//      so the shared storage outlives every reader.
+// Not in v1, recorded as declines: an antisymmetric / Hermitian transpose
+// (negate_pool / conjugate_pool into a fresh pool), an identity chain inside a
+// function body over a non-fresh base (the operand could be returned and
+// alias the caller's argument), chains through named intermediate bindings.
+// No absorption into a consumer fold is attempted (plan section 3's fold-
+// order rule never arises: no traversal order changes).
+
+/// BLADE_TRANSPOSE_ELIDE=0|off keeps today's copies: no transpose chain is
+/// normalized and nothing reaches AliasElideTable; every decision records
+/// `declined -- disabled by BLADE_TRANSPOSE_ELIDE` with what it would have
+/// done. Unset = on. Read per call.
+let transposeElideEnabled () = gateOn "BLADE_TRANSPOSE_ELIDE"
+
+/// The read-only alias plan: module binding ids whose `let X = Y` copy is
+/// elided (X shares Y's storage). Read by CodeGenBinding.genVarAliasBinding
+/// and EmitLlvm.bindNamed; only at main's top level (each emitter re-checks).
+module AliasElideTable =
+    open System.Threading
+    let private cell = new AsyncLocal<Set<IRId>>()
+    let private get () = match box cell.Value with null -> Set.empty | _ -> cell.Value
+    let reset () = cell.Value <- Set.empty
+    let record (id: IRId) = cell.Value <- Set.add id (get ())
+    let contains (id: IRId) : bool = Set.contains id (get ())
+
+let private recordTransposeNF (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
+    Blade.Effects.Decisions.record
+        { Blade.Effects.Rule = "transpose-normal-form"; Version = 1
+          Span = declSpanOf subject; Subject = subject
+          Outcome = outcome; Evidence = evidence }
+
+/// A value that OWNS a freshly allocated pool no binding names, and is not
+/// deferred: the shared fresh-pool classification minus the deferred map
+/// forms (a deferred map is not stored; reading it re-runs its kernel on
+/// current inputs) and minus calls (a callee may hand back storage a module
+/// binding owns). None = not proved fresh.
+let private freshRootForm (v: IRExpr) : string option =
+    match v with
+    | IRApplyCombinator _ | IRComposeApply _ | IRApp _ -> None
+    | IRArrayLit _ -> Some "an array literal"
+    | IRCompute _ when isFreshPoolFormWith (fun _ -> false) v -> Some "a `|> compute`"
+    | _ when isFreshPoolFormWith (fun _ -> false) v -> Some "an eager array operation (a fresh pool)"
+    | _ -> None
+
+/// THE STORED, FRESH ROOT of a top-level array binding, through any chain of
+/// earlier `let B = A` aliases: the root's value must be `freshRootForm` or a
+/// non-streamed provider read. Stricter than `storedArrayProof` (which also
+/// accepts a call's result): an alias that SHARES storage must know nothing
+/// else owns it. Returns how the root is stored and the chain (the named
+/// binding first, the root last).
+let private freshStoredChain (modul: IRModule) : IRBinding -> Result<string * IRBinding list, string> =
+    let arr = List.toArray modul.Bindings
+    let indexOf = arr |> Array.mapi (fun i b -> (b.Id, i)) |> Map.ofArray
+    let rec go (seen: Set<IRId>) (b: IRBinding) : Result<string * IRBinding list, string> =
+        let isVirtual = match stripUnits b.Type with ArrayElem at -> at.IsVirtual | _ -> false
+        if isVirtual then Error $"`{b.Name}` is a virtual array (it has no stored cells)"
+        else
+        match Map.tryFind b.Id modul.ProviderReads with
+        | Some r when r.Streamed -> Error $"`{b.Name}` is a streamed provider read (never materialized)"
+        | Some _ -> Ok ("a provider read, materialized at its site", [ b ])
+        | None ->
+        if modul.CompoundInits.ContainsKey b.Id || modul.SparseInits.ContainsKey b.Id || modul.RandomInits.ContainsKey b.Id then
+            Error $"`{b.Name}` is a side-table value v1 does not prove fresh"
+        else
+        match b.Value with
+        | IRVar (aid, _) ->
+            match Map.tryFind aid indexOf, Map.tryFind b.Id indexOf with
+            | Some ai, Some bi when ai < bi && not (seen.Contains aid) ->
+                match go (seen.Add b.Id) arr.[ai] with
+                | Ok (how, chain) -> Ok ($"an alias of `{arr.[ai].Name}`, {how}", b :: chain)
+                | Error why -> Error $"`{b.Name}` is an alias of `{arr.[ai].Name}`, and {why}"
+            | _ -> Error $"`{b.Name}` is an alias of a value that is not an earlier top-level binding"
+        | v when isDeferredForm v -> Error $"`{b.Name}` is a deferred computation (not stored)"
+        | v ->
+            match freshRootForm v with
+            | Some how -> Ok (how, [ b ])
+            | None -> Error $"`{b.Name}`'s value is not proved fresh (a call's result, a view or a deferred form may share or defer storage)"
+    go Set.empty
+
+/// THE NEVER-WRITTEN CLOSURE (fail closed). `seeds` are module binding ids
+/// whose storage is to be shared. The closure adds every STORAGE-BEARING
+/// module binding whose payload names a member (a view, alias, tuple, map or
+/// call result derived from it may share its storage) and every callable whose
+/// body or captures name a member (a call may hand a member back), to a
+/// fixpoint. Ok iff no member is the target of an assignment anywhere, no
+/// member is named by another module, no module binding whose payload names a
+/// member writes ANYTHING (syntactically: an assignment, a call to a writing
+/// callable, an unresolved call -- a write to local storage included, since
+/// the copy that made it local is the one being elided), and no member
+/// callable's body writes.
+let private aliasWriteClosure (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (modul: IRModule) : Set<IRId> -> Result<string, string> =
+    let arr = List.toArray modul.Bindings
+    let payloadOf = intervalPayloadOf modul
+    let pay = arr |> Array.map (fun b -> payloadOf b.Id b.Value)
+    let payRefs = pay |> Array.map collectVarRefsIR
+    let callables = (modul.Functions @ programFuncs) |> List.distinctBy (fun f -> f.Id)
+    let calleeRefs =
+        callables |> List.map (fun f ->
+            (f, Set.union (collectVarRefsIR f.Body) (f.Captures |> List.map (fun c -> c.Id) |> Set.ofList)))
+    let assigned =
+        let mutable s = Set.empty
+        let visit (e: IRExpr) =
+            iterIRExpr (fun n ->
+                match n with
+                | IRAssign (t, _) -> s <- Set.union s (collectVarRefsIR t)
+                | _ -> ()) e
+        for e in pay do visit e
+        for f in callables do visit f.Body
+        s
+    // WRITE-FREE, syntactically (fail closed). The shared write analysis
+    // (`scheduleMayWriteIn`) judges a write to provably FRESH local storage
+    // private -- a `let mut X = M` copy passed to a `mut` parameter, a row view
+    // of a fresh transpose then assigned -- and those are exactly the copies a
+    // shared alias or an identity normal form removes (Codex review of this
+    // pass, findings 1-2). So a statement or callable that names a member must
+    // write NOTHING at all: no assignment, no call head that does not resolve
+    // to a callable (an unknown or function-valued call may do anything), and
+    // every callable it references (a call head or a kernel / callback slot)
+    // write-free too, transitively.
+    let funcsById = callables |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+    let letValue = arr |> Array.map (fun b -> (b.Id, b.Value)) |> Map.ofArray
+    let rec resolveId (seen: Set<IRId>) (id: IRId) : IRCallable option =
+        match Map.tryFind id funcsById with
+        | Some f -> Some f
+        | None ->
+            match Map.tryFind id letValue with
+            | Some (IRVar (j, _)) when not (seen.Contains j) -> resolveId (seen.Add id) j
+            | _ -> None
+    let directlyWrites (e: IRExpr) =
+        let mutable hit = false
+        iterIRExpr (fun n ->
+            match n with
+            // Rebinding a SCALAR name (a lowered fold's accumulator) touches
+            // no array storage; every other assignment counts.
+            | IRAssign (IRVar (_, vty), _) when (try holdsNoStorage vty with _ -> false) -> ()
+            | IRAssign _ -> hit <- true
+            | IRApp (h, _, _) ->
+                (match h with
+                 | IRVar (hid, _) when (resolveId Set.empty hid).IsSome -> ()
+                 | IRObjectFor _ | IRMethodFor _ | IRCompose _ | IRComposeObj _ | IRComposeMeth _ -> ()
+                 | _ -> hit <- true)
+            | _ -> ()) e
+        hit
+    // The least fixpoint of "may write" over every callable AND every module
+    // binding: a name's definition runs where the name is used when it is a
+    // callable, a let alias of one, or a deferred value (a named composition
+    // `K = object_for(poke) >>@ ..` applied later runs poke there -- Codex
+    // review, finding 3), so a reference to a writing definition is a write.
+    // A STORED binding ran its payload at its own site, so a reference to it
+    // runs nothing: only deferred forms and let aliases carry their payload
+    // to the use (a stored binding's own payload is judged as a statement).
+    let bodyOf =
+        (callables |> List.map (fun f -> (f.Id, f.Body)))
+        @ (arr |> Array.mapi (fun i b -> (b, pay.[i]))
+               |> Array.filter (fun (b, _) ->
+                   isDeferredForm b.Value || (match b.Value with IRVar _ -> true | _ -> false)
+                   // a value that may CARRY code (a closure, a loop object, a tuple
+                   // holding one): anything but plain data or a stored array
+                   || not ((try holdsNoStorage b.Type with _ -> false) || (match stripUnits b.Type with ArrayElem _ -> true | _ -> false)))
+               |> Array.map (fun (b, p) -> (b.Id, p)) |> List.ofArray)
+        |> Map.ofList
+    let refsOf (e: IRExpr) : IRId list =
+        collectVarRefsIR e |> Set.toList |> List.collect (fun id ->
+            match resolveId Set.empty id with
+            | Some f -> [ id; f.Id ]
+            | None -> [ id ])
+        |> List.filter bodyOf.ContainsKey
+    let writingDefs =
+        let edges = bodyOf |> Map.map (fun _ body -> refsOf body)
+        let mutable s = bodyOf |> Map.filter (fun _ body -> directlyWrites body) |> Map.keys |> Set.ofSeq
+        let mutable changed = true
+        while changed do
+            changed <- false
+            for KeyValue (id, outs) in edges do
+                if not (s.Contains id) && (outs |> List.exists s.Contains) then
+                    s <- s.Add id
+                    changed <- true
+        s
+    let writes (e: IRExpr) = directlyWrites e || (refsOf e |> List.exists writingDefs.Contains)
+    let nameOf =
+        let m1 = arr |> Array.map (fun b -> (b.Id, b.Name)) |> Map.ofArray
+        let m2 = callables |> List.map (fun f -> (f.Id, f.SourceName)) |> Map.ofList
+        fun (id: IRId) ->
+            match Map.tryFind id m1 with
+            | Some n -> n
+            | None -> match Map.tryFind id m2 with Some n -> n | None -> $"__v{id}"
+    fun (seeds: Set<IRId>) ->
+        let mutable members = seeds
+        let mutable changed = true
+        while changed do
+            changed <- false
+            for i in 0 .. arr.Length - 1 do
+                let b = arr.[i]
+                if not (members.Contains b.Id)
+                   && not (try holdsNoStorage b.Type with _ -> false)
+                   && not (Set.isEmpty (Set.intersect payRefs.[i] members)) then
+                    members <- members.Add b.Id
+                    changed <- true
+            for (f, refs) in calleeRefs do
+                if not (members.Contains f.Id) && not (Set.isEmpty (Set.intersect refs members)) then
+                    members <- members.Add f.Id
+                    changed <- true
+        let named (ids: Set<IRId>) = ids |> Set.toList |> List.map (fun id -> $"`{nameOf id}`") |> String.concat ", "
+        let assignedHit = Set.intersect members assigned
+        let foreignHit = Set.intersect members foreignRefs
+        if not assignedHit.IsEmpty then
+            Error $"""{named assignedHit} {(if assignedHit.Count = 1 then "is" else "are")} assigned in the program"""
+        elif not foreignHit.IsEmpty then
+            Error $"""{named foreignHit} {(if foreignHit.Count = 1 then "is" else "are")} named by another module (its writes are not judged here)"""
+        else
+            let writingBinding =
+                [ 0 .. arr.Length - 1 ] |> List.tryFind (fun i ->
+                    not (Set.isEmpty (Set.intersect payRefs.[i] members)) && writes pay.[i])
+            match writingBinding with
+            | Some i -> Error $"`{arr.[i].Name}` names {named (Set.intersect payRefs.[i] members)} and may write (an assignment, a call to a writing callable, or an unresolved call -- a write to local storage counts: the copy it relies on is the one elided)"
+            | None ->
+                let writingFn =
+                    calleeRefs |> List.tryFind (fun (f, _) -> members.Contains f.Id && writes f.Body)
+                match writingFn with
+                | Some (f, refs) -> Error $"function `{f.SourceName}` names {named (Set.intersect refs members)} and may write (an assignment, a writing callee or an unresolved call)"
+                | None ->
+                    let derived = Set.difference members seeds
+                    Ok ($"never written: no assignment, mutating call or writing function names {named seeds}"
+                        + (if derived.IsEmpty then "" else $" or a value that may share their storage ({named derived})"))
+
+/// The plain array shape the two copy paths (C++ materializeArrayCopyForm,
+/// the LLVM lane's copyArr) handle: one stored pool, plain or compact.
+let private aliasableArrayType (t: IRType) : bool =
+    match stripUnits t with
+    | ArrayElem at ->
+        not at.IsVirtual
+        && not at.IndexTypes.IsEmpty
+        && at.IndexTypes |> List.forall (fun ix ->
+            ix.IxKind = IxKPlain
+            && (match ix.Symmetry with SymNone | SymSymmetric | SymAntisymmetric | SymHermitian -> true | _ -> false))
+    | _ -> false
+
+/// The axis-index list of an array type, for the normal form's type check.
+let private axisIds (t: IRType) : IRId list option =
+    match stripUnits t with
+    | ArrayElem at -> Some (at.IndexTypes |> List.map (fun ix -> ix.Id))
+    | _ -> None
+
+/// Compose a swap chain (INNERMOST first) into p: base component k of the
+/// result's cell j is j[p[k]] (each swap acts on the cell's index tuple).
+let private composeSwaps (rank: int) (swaps: (int * int) list) : int[] =
+    let p = Array.init rank id
+    for (d1, d2) in swaps do
+        for k in 0 .. rank - 1 do
+            p.[k] <- (if p.[k] = d1 then d2 elif p.[k] = d2 then d1 else p.[k])
+    p
+
+/// The MINIMAL swap sequence of p (INNERMOST first), deterministic: peel the
+/// outermost swap (k, p k) for the smallest moved k; each step fixes k and
+/// every point p already fixed, so rank - cycles swaps (the minimum).
+let private minimalSwaps (p: int[]) : (int * int) list =
+    let q = Array.copy p
+    let outerFirst = ResizeArray<int * int>()
+    let mutable k = 0
+    while k < q.Length do
+        if q.[k] = k then k <- k + 1
+        else
+            let a, b = min k q.[k], max k q.[k]
+            outerFirst.Add((a, b))
+            for x in 0 .. q.Length - 1 do
+                q.[x] <- (if q.[x] = a then b elif q.[x] = b then a else q.[x])
+    outerFirst |> Seq.rev |> List.ofSeq
+
+/// Rewrite every transpose chain of the module to its normal form (rule 1
+/// above). `foreignRefs`: the ids other modules name (the closure's check).
+let normalizeTransposesModule (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (modul: IRModule) : IRModule =
+    let enabled = transposeElideEnabled ()
+    let byId = modul.Bindings |> List.map (fun b -> (b.Id, b)) |> Map.ofList
+    let chainOf = freshStoredChain modul
+    let closure = lazy (aliasWriteClosure programFuncs foreignRefs modul)
+    let rec peel (acc: (int * int) list) (e: IRExpr) =
+        match e with
+        | IRTranspose (inner, d1, d2) -> peel ((d1, d2) :: acc) inner
+        | b -> (acc, b)
+    // `site`: Some b = a module binding, None = a function body (subject = the
+    // function's source name; `locals` = its parameters).
+    // `copyBind` (in `go`): the node is the WHOLE value of an assignable array
+    // binding or let, which deep-copies an existing array in every lane.
+    let copyOnBind (b: IRBinding) =
+        (b.IsMutable || modul.MutableArrayLets.Contains b.Id) && aliasableArrayType b.Type
+    let rewriteIn (subject: string) (site: IRBinding option) (locals: Set<IRId>) (rootCopy: bool) (root: IRExpr) : IRExpr =
+        let rec go (copyBind: bool) (e: IRExpr) : IRExpr =
+            match e with
+            | IRTranspose _ ->
+                // innermost swap first: the outer node is consed first, each
+                // inner one in front of it
+                let (swaps, base0) = peel [] e
+                let base1 = go false base0
+                let rebuild (ss: (int * int) list) = ss |> List.fold (fun acc (a, b) -> IRTranspose (acc, a, b)) base1
+                if swaps.Length < 2 then rebuild swaps
+                else
+                    let chainTxt = swaps |> List.map (fun (a, b) -> $"[{a}, {b}]") |> String.concat " then "
+                    match axisIds (try typeOf base1 with _ -> IRTUnit) with
+                    | None ->
+                        recordTransposeNF subject (Blade.Effects.Declined "the chain's base has no array type the normalizer can read") [ $"chain {chainTxt}" ]
+                        rebuild swaps
+                    | Some baseAxes ->
+                    let rank = baseAxes.Length
+                    let p = composeSwaps rank swaps
+                    let nf = minimalSwaps p
+                    let ok = composeSwaps rank nf = p
+                    let nfExpr = rebuild nf
+                    let sameType =
+                        match axisIds (try typeOf e with _ -> IRTUnit), axisIds (try typeOf nfExpr with _ -> IRTUnit) with
+                        | Some a, Some b -> a = b
+                        | _ -> false
+                    let permTxt = p |> Array.map string |> String.concat ", "
+                    let nfTxt = nf |> List.map (fun (a, b) -> $"[{a}, {b}]") |> String.concat " then "
+                    let shape =
+                        if nf.IsEmpty then $"chain {chainTxt} ({swaps.Length} swaps) composes to the IDENTITY permutation: the value is the base itself, {swaps.Length} copies -> 0"
+                        else $"chain {chainTxt} ({swaps.Length} swaps) composes to the permutation [{permTxt}] = {nf.Length} swap(s) {nfTxt}: {swaps.Length} copies -> {nf.Length}"
+                    if not ok || not sameType then
+                        recordTransposeNF subject (Blade.Effects.Declined "internal: the normal form does not reproduce the chain's permutation or axis types") [ shape ]
+                        rebuild swaps
+                    elif nf.Length >= swaps.Length then
+                        recordTransposeNF subject (Blade.Effects.Declined $"already normal: the chain's permutation needs {nf.Length} swaps") [ shape ]
+                        rebuild swaps
+                    else
+                    // Only the identity normal form changes which storage the
+                    // reader sees; a surviving swap is still a fresh copy.
+                    let evidence : Result<string, string> =
+                        if not nf.IsEmpty then Ok "each surviving swap is still an eager fresh copy, evaluated where the chain's innermost copy was"
+                        else
+                        match freshRootForm base1 with
+                        | Some how -> Ok $"the base is {how}: a fresh value no binding names"
+                        | None ->
+                        let copyTxt = "the binding keeps its copy-on-bind contract (an assignable array let deep-copies its source in every lane), so it still owns fresh storage"
+                        match site, base1 with
+                        | None, IRVar (vid, _) when copyBind && locals.Contains vid ->
+                            Ok $"{copyTxt}; the base is a parameter of the function"
+                        | None, _ when copyBind -> Error "the base is not a parameter of the function (a body-local base may be a staging pool the C++ lane lets the binding alias)"
+                        | None, _ -> Error "inside a function body v1 admits the identity only over a fresh base or as an assignable let's whole value (a returned operand would alias the caller's argument)"
+                        | Some _, IRVar (vid, _) when byId.ContainsKey vid ->
+                            match chainOf byId.[vid] with
+                            | Error why -> Error $"the base {why}"
+                            | Ok (how, chain) ->
+                                if copyBind then Ok $"{copyTxt}; the base is {how}; the alias plan decides whether that copy is needed"
+                                else
+                                    match closure.Force() (chain |> List.map (fun c -> c.Id) |> Set.ofList) with
+                                    | Ok why -> Ok $"the base is {how}, read in place: {why}"
+                                    | Error why -> Error $"the base is read in place by a larger expression, and {why}"
+                        | Some _, _ -> Error "the base is neither a fresh value nor a stored top-level array"
+                    match evidence with
+                    | Error why ->
+                        recordTransposeNF subject (Blade.Effects.Declined why) [ shape ]
+                        rebuild swaps
+                    | Ok why when not enabled ->
+                        recordTransposeNF subject (Blade.Effects.Declined "disabled by BLADE_TRANSPOSE_ELIDE") [ shape; why ]
+                        rebuild swaps
+                    | Ok why ->
+                        recordTransposeNF subject Blade.Effects.Applied [ shape; why ]
+                        nfExpr
+            | IRArrayNegate inner | IRArrayConjugate inner ->
+                let what = match e with IRArrayNegate _ -> "negation (an antisymmetric transpose, `negate_pool`)" | _ -> "conjugation (a Hermitian transpose, `conjugate_pool`)"
+                recordTransposeNF subject (Blade.Effects.Declined $"a whole-array {what} into a fresh pool is kept: v1 elides only the dense permutation chain and the symmetric identity") []
+                let inner' = go false inner
+                (match e with IRArrayNegate _ -> IRArrayNegate inner' | _ -> IRArrayConjugate inner')
+            // A block let's value: an assignable ARRAY let (MutableArrayLets)
+            // deep-copies an existing array (genVarAliasBinding, Interp.Core,
+            // EmitLlvm.bindNamed), like an assignable module binding.
+            | IRLet (id, v, body) ->
+                let isCopy =
+                    modul.MutableArrayLets.Contains id
+                    && (try aliasableArrayType (typeOf v) with _ -> false)
+                IRLet (id, go isCopy v, go false body)
+            | ExprShape ([], _) -> e
+            | ExprShape (children, rebuild) -> rebuild (children |> List.map (go false))
+        go rootCopy root
+    let bindings' =
+        modul.Bindings |> List.map (fun b -> { b with Value = rewriteIn b.Name (Some b) Set.empty (copyOnBind b) b.Value })
+    let functions' =
+        modul.Functions |> List.map (fun f ->
+            let locals = f.Params |> List.map (fun p -> p.VarId) |> Set.ofList
+            { f with Body = rewriteIn f.SourceName None locals false f.Body })
+    { modul with Bindings = bindings'; Functions = functions' }
+
+/// Plan the read-only aliases of the module's top-level bindings (rule 2
+/// above): every ASSIGNABLE `let X = Y` over a stored array records a
+/// decision; an admitted one reaches AliasElideTable.
+let planAliasElision (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (modul: IRModule) : unit =
+    let enabled = transposeElideEnabled ()
+    let byId = modul.Bindings |> List.map (fun b -> (b.Id, b)) |> Map.ofList
+    let chainOf = freshStoredChain modul
+    let closure = lazy (aliasWriteClosure programFuncs foreignRefs modul)
+    // One candidate: alias id `aid` (named `aname` in the record) bound to
+    // module binding `src`; `rootChain` = the module bindings whose storage
+    // it would share (src's alias chain to its fresh root).
+    let decide (subject: string) (aid: IRId) (aname: string) (aty: IRType) (src: IRBinding) =
+        let where = if byId.ContainsKey aid then "" else $" (a block let of `{subject}`)"
+        let what = $"`{aname} = {src.Name}`{where}: a read-only alias of `{src.Name}`'s storage (no allocation, no pool copy)"
+        let decision : Result<string list, string> =
+            if not (aliasableArrayType aty) then Error "the alias is not a plain or compact stored array (compound, sparse, ragged, orbit and virtual shapes keep their own path)"
+            else
+            match chainOf src with
+            | Error why -> Error why
+            | Ok (how, chain) ->
+                match closure.Force() (Set.add aid (chain |> List.map (fun c -> c.Id) |> Set.ofList)) with
+                | Error why -> Error $"the copy keeps the two independent: {why}"
+                | Ok why -> Ok [ $"storage of `{src.Name}`: {how}"; why; "main's top level: the shared pool lives to program exit" ]
+        match decision with
+        | Error why -> recordTransposeNF subject (Blade.Effects.Declined why) [ $"`{aname} = {src.Name}` deep-copies (copy-on-bind)" ]
+        | Ok ev when not enabled -> recordTransposeNF subject (Blade.Effects.Declined "disabled by BLADE_TRANSPOSE_ELIDE") (what :: ev)
+        | Ok ev ->
+            AliasElideTable.record aid
+            recordTransposeNF subject Blade.Effects.Applied (what :: ev)
+    let isArray (t: IRType) = match stripUnits t with ArrayElem _ -> true | _ -> false
+    for b in modul.Bindings do
+        match b.Value with
+        | IRVar (srcId, _) when byId.ContainsKey srcId
+                               && (b.IsMutable || modul.MutableArrayLets.Contains b.Id)
+                               && isArray b.Type ->
+            decide b.Name b.Id b.Name b.Type byId.[srcId]
+        | _ ->
+            // The binding's top-level let CHAIN (a block value: genLetChainBinding
+            // emits each let at main's top level, nothing scope-freed): an
+            // assignable block let over a module array copies like a binding.
+            let rec chainLets (e: IRExpr) =
+                match e with
+                | IRLet (id, v, rest) -> (id, v) :: chainLets rest
+                | _ -> []
+            for (id, v) in chainLets b.Value do
+                match v with
+                | IRVar (srcId, vty) when byId.ContainsKey srcId
+                                          && modul.MutableArrayLets.Contains id
+                                          && isArray vty ->
+                    decide b.Name id $"__v{id}" vty byId.[srcId]
+                | _ -> ()
 
 /// `programFuncs` is every callable of the PROGRAM (all modules): a pass that
 /// judges a callee's effects resolves it there, since a generic defined in
