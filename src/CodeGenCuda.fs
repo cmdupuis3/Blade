@@ -1944,6 +1944,7 @@ let private recordApplyStructure (name: string) (info: ApplyInfo) : unit =
         let rec showId (a: ArrayIdentity) =
             match a with
             | AIDVariable n -> n
+            | AIDAlias (_, n) -> n
             | AIDParameter (n, _) -> n
             | AIDLiteral id -> $"<literal #{id}>"
             | AIDDerived (b, op) -> $"{op}({showId b})"

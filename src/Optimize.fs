@@ -2909,7 +2909,7 @@ let producerEpilogueLegAdmission (facts: EpilogueLegFacts) (r: EpilogueLegRegion
     let opIds = pinfo.Arrays |> List.choose (function IRVar (id, _) -> Some id | _ -> None)
     let opNames =
         List.zip pinfo.Arrays (if pinfo.Identities.Length = pinfo.Arrays.Length then pinfo.Identities else List.replicate pinfo.Arrays.Length (AIDVariable "?"))
-        |> List.map (fun (_, ident) -> match ident with AIDVariable n -> n | _ -> "?")
+        |> List.map (fun (_, ident) -> match ident with AIDVariable n | AIDAlias (_, n) -> n | _ -> "?")
     let plainAxis (t: IRType) : (int64 * IRIndexType) option =
         match stripUnits t with
         | ArrayElem at when not at.IsVirtual ->
@@ -7932,6 +7932,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                 List.iter2 (fun a ident ->
                     match a, ident with
                     | IRVar (id, _), AIDVariable nm when not (nm.StartsWith "__") && not (names.ContainsKey id) -> names.[id] <- nm
+                    | IRVar (id, _), AIDAlias (_, nm) when not (nm.StartsWith "__") && not (names.ContainsKey id) -> names.[id] <- nm
                     | _ -> ()) info.Arrays info.Identities
             | _ -> ()) e
     let nameOf (id: IRId) = match names.TryGetValue id with | true, n -> n | _ -> $"__v{id}"

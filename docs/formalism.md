@@ -1922,6 +1922,29 @@ At a call site, **neighboring identical arguments** form identity groups
 (syntactic identity by name; `(A, B, A)` is three singleton groups). `comm`
 licenses symmetry only *within* an identity group.
 
+Two arguments are IDENTICAL when they name the same array, OR when they name
+members of one TOP-LEVEL PURE DEFERRED ALIAS CLASS (§10.2): a module-level
+`let g2 = g` (chains `let g3 = g2` included) over a pure deferred map binds
+the same deferred value, no member can be written (BL4005), so the members are
+one array, and `method_for(g, g2) <@> lambda(a, b) where comm(a, b) -> ...`
+is packed and triangular exactly as `method_for(g, g)` is (`blade plan` names
+the operands as written: `operands: g, g2`). The rule is applied only where
+the class is proved, and fails closed to distinct arrays otherwise: a root
+whose evaluation is not repeatable (it writes -- then it is stored at its
+definition and its alias is a copy -- prints, reads external data, or calls an
+unknown callee), a root that reads, directly or through a callable it names, a
+deferred value that is not itself such a root (a writing named map runs where
+it is read, so the reader is stored at its definition too: `symmetry/152`,
+`153`), an alias that is `let mut`, ascribed, or of another module's
+binding, an alias bound inside a block or a function body (a forcing copy,
+§10.2), and a use inside a lambda or function body all keep their own
+identities, as do a stored array's alias (`let B = A` deep-copies) and the
+parameters of a helper (`f(A, A)` over `f(x, y)` stays dense). LANGUAGE
+CHANGE, the P1 entry point of `docs/plans/plan-identity-transpose-compute.md`
+(§2.1); before it, an alias of a deferred map was a different array here
+(dense), contradicting §10.2. Corpus `symmetry/146`-`148` (packed), `149`-`153`
+(the cases this step does not change, and the fail-closed edges).
+
 This rule is proved SOUND and proved NOT OPTIMAL for non-adjacent repeats
 (proofs.md §Attain: `surface_comm_optimal`, `aba_beats_surface_rule`,
 `aba_orbit_count_forced`): the licence group H ∩ Stab of §11.2 is defined by
@@ -2170,7 +2193,9 @@ deferred map binds `g2` to the SAME deferred value -- substitution holds. The
 alias evaluates nothing (so nothing can fail there), and a use through `g2` is
 that use of `g` (`reduce(g2, (+))` fuses exactly as `reduce(g, (+))` does, and
 is refused where that is). A deferred map and its top-level aliases form ONE
-ALIAS CLASS (siblings and chains included). The PRINT rule: a class prints,
+ALIAS CLASS (siblings and chains included), whose members are ONE array for
+the identity groups of §8.3 (`method_for(g, g2)` under a comm kernel is
+packed). The PRINT rule: a class prints,
 under EVERY name in it, iff a forcing use at MODULE LEVEL (a top-level
 statement or block, or the capture of a top-level kernel) has forced any
 member by the end of the program; every name prints the same cells (no member

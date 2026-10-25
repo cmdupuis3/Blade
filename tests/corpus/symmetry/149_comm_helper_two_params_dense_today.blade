@@ -1,0 +1,24 @@
+// TEST: Two-Parameter Comm Helper Called On One Array Stays Dense (P0 Before-Case)
+// P0 BEFORE-CASE (docs/plans/plan-identity-transpose-compute.md section 0
+// probe, 6 P0; review 2026-10-24 section 0). Extracting a comm outer
+// product into a TWO-parameter helper loses the identity group: the body's
+// operands are the distinct parameters x and y, and `f(A, A)` and `f(A, B)`
+// share ONE instance (IRMono.canonTypeKey ignores identity), so both are
+// DENSE today, while the one-parameter helper `h(A)` -- `method_for(x, x)` --
+// is packed. Plan section 2.2 (P1, parameters third: sharing-partition
+// specialization) is expected to CHANGE `PAA` to packed; `PAB` stays dense
+// (B is a stored copy, section 2.9). Pinned so that change is a visible pin
+// update, not a silent one.
+type I = Idx<3>
+let A: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let B = A
+function f(x: T^1, y: T^1) where comm(x, y) =
+    method_for(x, y) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+function h(x: T^1) =
+    method_for(x, x) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+let PAA = f(A, A)
+let PAB = f(A, B)
+let HA = h(A)
+// EXPECT: PAA = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [3.0, 6.0, 9.0]]
+// EXPECT: PAB = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [3.0, 6.0, 9.0]]
+// EXPECT: HA = [[1.0, 2.0, 3.0], [4.0, 6.0], [9.0]]

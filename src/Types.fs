@@ -100,10 +100,20 @@ type ArrayIdentity =
     | AIDVariable of name: string           // Named variable
     | AIDParameter of name: string * idx: int  // Function parameter
     | AIDDerived of base': ArrayIdentity * op: string  // Derived from another array
+    /// An IDENTITY-TRANSPARENT alias spelled `name` of the array `root`: a
+    /// member of a top-level pure deferred alias class (formalism 10.2, 8.3;
+    /// docs/plans/plan-identity-transpose-compute.md 2.1). It IS `root` for
+    /// every identity question (`sameIdentity` sees through it); `name` is
+    /// kept only so decision records name the operand as written. Minted by
+    /// TypeCheckInfer.loopOperandIdentity alone, which fails closed to the
+    /// operand's own `AIDVariable` whenever the class is not proved.
+    | AIDAlias of root: ArrayIdentity * name: string
 
 /// Check if two array identities are the same
-let sameIdentity a b =
+let rec sameIdentity a b =
     match a, b with
+    | AIDAlias (r, _), _ -> sameIdentity r b
+    | _, AIDAlias (r, _) -> sameIdentity a r
     | AIDVariable n1, AIDVariable n2 -> n1 = n2
     | AIDParameter (n1, i1), AIDParameter (n2, i2) -> n1 = n2 && i1 = i2
     | AIDLiteral id1, AIDLiteral id2 -> id1 = id2

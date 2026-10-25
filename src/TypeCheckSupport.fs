@@ -7353,6 +7353,155 @@ let parallelCalleeWriteError (env: TypeEnv) (paramIds: IRId list) (body: TypedEx
         | None -> typedExprChildren e |> List.tryPick go
     go body
 
+/// TOP-LEVEL PURE DEFERRED ALIAS CLASSES, the checker's half (formalism 10.2
+/// "Aliases and printing of deferred maps", 8.3 identity groups;
+/// docs/plans/plan-identity-transpose-compute.md 2.1, the P1 entry point).
+/// A module-level `let g2 = g` over a pure deferred map binds the SAME
+/// deferred value -- no write through any member is possible (BL4005,
+/// Lowering.refuseDeferredWritesAndUnorderedIfs) -- so the members are ONE
+/// array for every identity question, and `method_for(g, g2)` under a comm
+/// kernel is the identity group `method_for(g, g)` is. LANGUAGE CHANGE, no
+/// knob.
+///
+/// Called by checkDecl for every module-level `let` with a plain-variable
+/// pattern (never in a block or a callable body, whose aliases are forcing
+/// COPIES). Registers, fail-closed:
+///   * a ROOT: a plain `let` (not `mut`) whose typed value is a bare apply
+///     combinator (`method_for(..) <@> k`, `object_for(k) <@> ..`) whose
+///     evaluation is REPEATABLE (Effects: no assignment, display output,
+///     external read or unknown callee anywhere in it -- a let-bound lambda or
+///     a higher-order callee is Unknown) and writes nothing outside itself
+///     (the G45 twins: outerWritesOfBody / parallelCalleeWriteError). A
+///     writing map is computed at its definition (G45) and is no class root.
+///   * an ALIAS: a plain `let` (not `mut`), no type ascription, whose value is
+///     a bare unqualified variable naming a registered member of THIS module.
+/// Anything else registers nothing and keeps its own spelled identity.
+///
+/// THE TRANSITIVE HALF of the root's purity (Codex diff look, finding 1): a
+/// named deferred producer runs where it is READ, so lowering's G45 judgment
+/// (Lowering.forceEffectfulModuleLets over Optimize.scheduleMayWriteIn, which
+/// chases every outer name to its deferred value) forces a map that reads a
+/// WRITING named map -- and then the alias is a writable copy. So every name
+/// the root's value reads from outside itself must be proved inert first
+/// (deferredRootReadsAdmissible): a class member already registered (its own
+/// value passed this same check), a callable whose recorded outside reads are
+/// all admissible in turn (its own effects are effectsOfBody's call summary,
+/// Unknown when it has none), a scalar value (a
+/// scalar `let` is evaluated at its let), or an array binding whose value
+/// chases -- through bare-name aliases only -- to STORAGE or a virtual range:
+/// an array literal, a `|> compute`, a declared function's call result (the
+/// callee forces), `range<..>`. Anything else (a deferred map that is not a
+/// registered root, a view, a tuple, a provider value, a name not found in
+/// scope) keeps the root unregistered.
+let private deferredRootReadsAdmissible (env: TypeEnv) (value: TypedExpr) : bool =
+    let inside = bindersInside value
+    let findVar (name: string) (vid: IRId) =
+        match Map.tryFind name env.Variables with
+        | Some vi when vi.VarId = vid -> Some vi
+        | _ -> None
+    let rec storedValue (fuel: int) (tv: TypedExpr) : bool =
+        fuel > 0
+        && (match tv.Kind with
+            | TExprArrayLit _ | TExprLit _ | TExprCompute _ | TExprRange _ -> true
+            | TExprApp (h, _) ->
+                let rec head (e: TypedExpr) =
+                    match e.Kind with
+                    | TExprApp (f, _) -> head f
+                    | TExprVar (_, fid, _) -> env.DeclaredFuncIds.Contains fid
+                    | _ -> false
+                head h
+            | TExprVar (n, v, _) -> admissibleVar (fuel - 1) n v
+            | _ -> false)
+    // A CALLABLE is admissible when every outside binding it names (its
+    // recorded TypeEnv.FuncOuterReads, which already folds in the declared
+    // functions it names) is: lowering's write analysis follows a callable
+    // REFERENCE into its body and every named producer it reads, whether or
+    // not the reference is called (Codex second look: a declared kernel or an
+    // unused let-bound lambda reading a writing map). No entry means the
+    // recording ran and found none -- for a declared function or a let-bound
+    // lambda literal only; any other function-typed value (a call result, a
+    // parameter) is unprovable. `seen` makes a recursive callable's own name
+    // a closed cycle, not a refusal.
+    and admissibleCallable (fuel: int) (seen: Set<IRId>) (vid: IRId) (isRecorded: bool) : bool =
+        if seen.Contains vid then true
+        else
+            match env.FuncOuterReads.TryGetValue vid with
+            | true, reads -> reads |> List.forall (fun (n, id) -> admissibleVarIn (fuel - 1) (seen.Add vid) n id)
+            | _ -> isRecorded
+    and admissibleVar (fuel: int) (name: string) (vid: IRId) : bool = admissibleVarIn fuel Set.empty name vid
+    and admissibleVarIn (fuel: int) (seen: Set<IRId>) (name: string) (vid: IRId) : bool =
+        if fuel <= 0 then false
+        elif env.DeferredAliasRoots.ContainsKey vid then true
+        elif env.DeclaredFuncIds.Contains vid then admissibleCallable fuel seen vid true
+        else
+            match findVar name vid with
+            | None -> false
+            | Some vi ->
+                match IR.stripUnits (env.Subst.Resolve vi.Type) with
+                | FuncElem _ ->
+                    (match vi.TypedValue with
+                     | Some { Kind = TExprLambda _ } -> admissibleCallable fuel seen vid true
+                     | Some { Kind = TExprVar (n2, v2, _) } -> admissibleVarIn (fuel - 1) seen n2 v2
+                     | _ -> false)
+                | ArrayElem _ | IRTTuple _ | IRTLoop _ | IRTComputation _ -> (match vi.TypedValue with Some tv -> storedValue fuel tv | None -> false)
+                | IRTScalar _ -> true
+                | _ -> false
+    let rec go (e: TypedExpr) : bool =
+        let own =
+            match e.Kind with
+            | TExprVar (n, v, _) when not (inside.Contains v) -> admissibleVar 16 n v
+            | _ -> true
+        own && (typedExprChildren e |> List.forall go)
+    go value
+
+let recordDeferredAliasMember (env: TypeEnv) (isPlainLet: bool) (hasAscription: bool)
+                              (surfaceVar: string option) (varId: IRId) (name: string)
+                              (tValue: TypedExpr) : unit =
+    if isPlainLet then
+        match tValue.Kind, surfaceVar with
+        | TExprVar (src, srcVid, _), Some surf when not hasAscription && src = surf && not (src.Contains ".") ->
+            (match env.DeferredAliasRoots.TryGetValue srcVid with
+             | true, (rootName, rootVid, qual) when qual = env.ModuleQualifier ->
+                 env.DeferredAliasRoots.[varId] <- (rootName, rootVid, qual)
+             | _ -> ())
+        | TExprApply _, _ ->
+            let isPure =
+                Blade.Effects.isRepeatable (effectsOfBody env None tValue)
+                && (outerWritesOfBody env env tValue).IsEmpty
+                && (parallelCalleeWriteError env [] tValue).IsNone
+                && deferredRootReadsAdmissible env tValue
+            let isArray =
+                match IR.stripUnits (env.Subst.Resolve tValue.Type) with
+                | ArrayElem at -> not at.IndexTypes.IsEmpty
+                | _ -> false
+            if isPure && isArray then
+                env.DeferredAliasRoots.[varId] <- (name, varId, env.ModuleQualifier)
+        | _ -> ()
+
+/// THE identity of a loop former's VARIABLE operand (every TypeCheckInfer
+/// site that used to mint `AIDVariable name` from the operand's spelling).
+/// A member of a top-level pure deferred alias class (recordDeferredAliasMember)
+/// other than its root is `AIDAlias (AIDVariable root, name)` -- the root's
+/// identity, the operand's spelling kept for the decision record -- but ONLY
+/// when the class is visible as proved: the use is at module level (not in a
+/// lambda or function body), in the class's own module, spelled unqualified,
+/// and the root's name still resolves to the root binder (so no shadowing or
+/// import can make two different arrays share a name-keyed identity).
+/// Everything else -- the root itself included -- is `AIDVariable name`,
+/// exactly as before.
+let loopOperandIdentity (env: TypeEnv) (name: string) (vid: IRId) : ArrayIdentity =
+    match env.DeferredAliasRoots.TryGetValue vid with
+    | true, (rootName, rootVid, qual)
+        when rootVid <> vid
+             && not env.InCallableBody
+             && qual = env.ModuleQualifier
+             && not (name.Contains ".")
+             && (match Map.tryFind rootName env.Variables with
+                 | Some vi -> vi.VarId = rootVid
+                 | None -> false) ->
+        AIDAlias (AIDVariable rootName, name)
+    | _ -> AIDVariable name
+
 /// Rejection message shared by the two orientations of the same unimplemented
 /// shape: a `zip(...)` sitting beside other arrays in ONE operand pack
 /// (`object_for(k) <@> (A, zip(B, C))`, `method_for(A, zip(B, C)) <@> k`).

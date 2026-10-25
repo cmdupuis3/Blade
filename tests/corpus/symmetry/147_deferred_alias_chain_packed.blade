@@ -1,0 +1,25 @@
+// TEST: Deferred Alias Chain Identity Groups Packed
+// The alias class of formalism 10.2 includes chains and siblings: g, g2 =
+// g, g3 = g2 are ONE array for the identity groups of 8.3
+// (docs/plans/plan-identity-transpose-compute.md 2.1). Every pair spelling
+// packs (either order, two aliases, the root last), a three-way comm group
+// over (g, g2, g3) stores C(5, 3) = 10 canonical cells (rank 3 prints flat),
+// and the object_for orientation packs too. A zipped co-iteration of g and
+// its alias reads the same cell twice (0.0 everywhere).
+type I = Idx<3>
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let g2 = g
+let g3 = g2
+let Pg3g = method_for(g3, g) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+let Pg2g3 = method_for(g2, g3) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+let T3 = method_for(g, g2, g3) <@> lambda(a, b, c) where comm(a, b, c) -> a * b * c |> compute
+let O = object_for(lambda(a, b) where comm(a, b) -> a * b) <@> (g3, g2) |> compute
+let Z = method_for(zip(g, g3)) <@> lambda(a, b) -> a - b |> compute
+let t3 = T3((2 : I), (0 : I), (1 : I))
+// EXPECT: Pg3g = [[4.0, 8.0, 12.0], [16.0, 24.0], [36.0]]
+// EXPECT: Pg2g3 = [[4.0, 8.0, 12.0], [16.0, 24.0], [36.0]]
+// EXPECT: T3 = [8.0, 16.0, 24.0, 32.0, 48.0, 72.0, 64.0, 96.0, 144.0, 216.0]
+// EXPECT: O = [[4.0, 8.0, 12.0], [16.0, 24.0], [36.0]]
+// EXPECT: Z = [0.0, 0.0, 0.0]
+// EXPECT: t3 = 48.0

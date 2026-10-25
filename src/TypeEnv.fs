@@ -647,6 +647,17 @@ type TypeEnv = {
     /// `mut` parameters are not listed (a call's arguments are checked at the
     /// call). Shared by reference.
     FuncOuterWrites: System.Collections.Generic.Dictionary<IRId, (string * IRId) list>
+    /// TOP-LEVEL PURE DEFERRED ALIAS CLASSES (formalism 10.2, 8.3;
+    /// docs/plans/plan-identity-transpose-compute.md 2.1): binder id of every
+    /// MEMBER -- the root, a module-level `let g = <map>` whose evaluation is
+    /// repeatable (Effects: no write, output, external read or unknown
+    /// callee), and each module-level `let g2 = g` (chains included) -- to
+    /// (root name, root binder id, module qualifier). Read by
+    /// TypeCheckInfer.loopOperandIdentity, which gives a member operand its
+    /// root's identity so identity groups see ONE array. Populated by
+    /// checkDecl only (never in a block or a callable body: those aliases are
+    /// forcing copies). Shared by reference.
+    DeferredAliasRoots: System.Collections.Generic.Dictionary<IRId, string * IRId * string option>
     /// Function BINDER ID -> (parameter ids, typed body) of a PURE (Effects
     /// repeatable), NON-RECURSIVE, fixed-arity user function or module-level
     /// let-bound lambda: the bodies the comm/anticomm witness may evaluate
@@ -850,6 +861,7 @@ let emptyEnv () = {
     FuncSigVarRange = System.Collections.Generic.Dictionary<IRId, int * int>()
     FuncEffects = System.Collections.Generic.Dictionary<IRId, Blade.Effects.EffectSummary>()
     FuncOuterWrites = System.Collections.Generic.Dictionary<IRId, (string * IRId) list>()
+    DeferredAliasRoots = System.Collections.Generic.Dictionary<IRId, string * IRId * string option>()
     FuncWitnessBodies = System.Collections.Generic.Dictionary<IRId, IRId list * TypedExpr>()
     FuncGenericObligations = System.Collections.Generic.Dictionary<IRId, GenericObligation list>()
     CurrentGenericObligations = None

@@ -3843,6 +3843,24 @@ let private planCommDistinctSrc =
     + "let k = lambda(a: Array<Float64 like TimeIdx>, b: Array<Float64 like TimeIdx>) where comm(a, b) -> prodsum(a, b)\n"
     + "let r = method_for(A, B) <@> k |> compute\n"
 
+/// A TOP-LEVEL alias of a pure deferred map (formalism 10.2 alias class, 8.3
+/// identity groups; docs/plans/plan-identity-transpose-compute.md 2.1): the
+/// map and its alias are ONE array, so the comm product over (g, g2) is
+/// packed and triangular, and the record names both operands as written.
+/// tests/corpus/symmetry/146.
+let private planDeferredAliasSrc =
+    "let x = [1.0, 2.0, 3.0]\n"
+    + "let g = method_for(x) <@> lambda(v) -> v * 2.0\n"
+    + "let g2 = g\n"
+    + "let r = method_for(g, g2) <@> lambda(a, b) where comm(a, b) -> a * b |> compute\n"
+
+/// The same alias bound inside a BLOCK is a forcing copy (10.2): two arrays,
+/// declined. tests/corpus/symmetry/151.
+let private planBlockDeferredAliasSrc =
+    "let x = [1.0, 2.0, 3.0]\n"
+    + "let g = method_for(x) <@> lambda(v) -> v * 2.0\n"
+    + "let r = {\n    let b = g\n    method_for(g, b) <@> lambda(a, c) where comm(a, c) -> a * c |> compute\n}\n"
+
 /// An `omp`-licensed outer product: the placed construct is recorded.
 let private planOmpSrc =
     "let A = [1.0, 2.0, 3.0]\nlet B = [4.0, 5.0, 6.0]\n"
@@ -4479,6 +4497,15 @@ let private planCases () =
           "triangular iteration over the commuting levels"
       planCase "plan_symmetric_storage_declined_distinct" planCommDistinctSrc "symmetric-storage"
           (declinedMentioning "different arrays") "declined: the commuting positions hold different arrays"
+      planCase "plan_symmetric_storage_applied_deferred_alias" planDeferredAliasSrc "symmetric-storage"
+          (fun d -> applied d && evidenceMentioning "operands: g, g2" d)
+          "packed storage over a top-level deferred alias class, operands named as written"
+      planCase "plan_triangular_iteration_applied_deferred_alias" planDeferredAliasSrc "triangular-iteration"
+          (fun d -> applied d && evidenceMentioning "speedup x2" d)
+          "triangular iteration over the deferred alias pair"
+      planCase "plan_symmetric_storage_declined_block_alias" planBlockDeferredAliasSrc "symmetric-storage"
+          (fun d -> (declinedMentioning "different arrays") d && evidenceMentioning "operands: g, b" d)
+          "declined: a block alias is a forcing copy, two arrays"
       withGate "BLADE_OMP_THREADS" null (fun () ->
           planCase "plan_omp_placement_applied" planOmpSrc "omp"
               (fun d -> applied d && evidenceMentioning "BLADE_OMP_PARALLEL_FOR" d)

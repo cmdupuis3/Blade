@@ -6104,7 +6104,7 @@ and warnImplicitOuterProduct (env: TypeEnv) (tLoop: TypedExpr) (rightResult: Typ
         let allSameIdentity =
             match info.Identities with
             | [] -> true
-            | first :: rest -> rest |> List.forall (fun i -> i = first)
+            | first :: rest -> rest |> List.forall (sameIdentity first)
         let kernelComm =
             match rightResult with
             | Ok tR ->
@@ -9772,7 +9772,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
 
         let identities = flatArrays |> List.map (fun arr ->
             match arr.Kind with
-            | TExprVar (name, _, _) -> AIDVariable name
+            | TExprVar (name, vid, _) -> loopOperandIdentity env name vid
             | _ -> AIDLiteral (env.Builder.FreshId()))
         // S1 SEAM 3 (docs/plan-kernel-body-materialization.md, M-B): the
         // operand-shape fallback just below degrades anything that is not
@@ -9924,7 +9924,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                                  let allSame =
                                      match identities with
                                      | [] -> false
-                                     | first :: rest -> rest |> List.forall (fun i -> i = first)
+                                     | first :: rest -> rest |> List.forall (sameIdentity first)
                                  // A fold leaf stores nothing (see the pair-site
                                  // note in buildApplyInfo and FoldOperandApplies).
                                  let isFoldLeaf =
@@ -9981,7 +9981,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                 Arrays = arrayExprs
                 Identities = arrayExprs |> List.map (fun arr ->
                     match (resolveTypedExpr env arr).Kind with
-                    | TExprVar (name, _, _) -> AIDVariable name
+                    | TExprVar (name, vid, _) -> loopOperandIdentity env name vid
                     | _ -> AIDLiteral (env.Builder.FreshId()))
                 ArrayTypes = arrayExprs |> List.map (fun a ->
                     match a.Type with
@@ -10127,7 +10127,7 @@ and buildApplyInfo (env: TypeEnv)
                     let ids =
                         expanded |> List.map (fun (ta: TypedExpr) ->
                             match ta.Kind with
-                            | TExprVar (name, _, _) -> AIDVariable name
+                            | TExprVar (name, vid, _) -> loopOperandIdentity env name vid
                             | _ -> AIDLiteral (env.Builder.FreshId()))
                     let ats =
                         expanded |> List.map (fun (ta: TypedExpr) ->
@@ -10621,7 +10621,7 @@ and buildApplyInfo (env: TypeEnv)
         |> List.iter (fun (i, par) ->
             if (par = Blade.Deduce.PInv || par = Blade.Deduce.PNeg)
                && i + 1 < identities.Length
-               && identities.[i] = identities.[i + 1]
+               && sameIdentity identities.[i] identities.[i + 1]
                // Synthesized wrapper params (`__of13_0`, `__k13_0`) are not
                // names a user can write in a pin -- suppress; the pack-level
                // suggestion at the deferred-former seam names the REAL pack
@@ -10732,6 +10732,7 @@ and buildApplyInfo (env: TypeEnv)
             else
                 match identities.[i] with
                 | AIDVariable n -> n
+                | AIDAlias (_, n) -> n
                 | AIDParameter (n, _) -> n
                 | AIDDerived (AIDVariable n, _) -> n
                 | AIDDerived (AIDParameter (n, _), _) -> n
@@ -15662,8 +15663,11 @@ and inferMethodForOperands env arrays : TypeResult<TypedExpr> =
     match arrays with
     | [{ Kind = ExprKind.ExprZip zipExprs }] ->
         zipExprs |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tZipArrays ->
-            let identities = zipExprs |> List.map (fun arr ->
-                match arr.Kind with ExprKind.ExprVar name -> AIDVariable name | _ -> AIDLiteral (env.Builder.FreshId()))
+            let identities = List.map2 (fun (arr: Expr) (ta: TypedExpr) ->
+                match arr.Kind, ta.Kind with
+                | ExprKind.ExprVar name, TExprVar (tn, vid, _) when tn = name -> loopOperandIdentity env name vid
+                | ExprKind.ExprVar name, _ -> AIDVariable name
+                | _ -> AIDLiteral (env.Builder.FreshId())) zipExprs tZipArrays
             // Resolved shape, defaulted element -- see loopOperandArrayType. This
             // is the arm a compound zip operand reaches (`(A - m) * (B - m)`).
             tZipArrays |> List.iter (fun ta -> materializeGenericLoopOperand env ta "method_for")
@@ -15719,7 +15723,7 @@ and inferMethodForOperands env arrays : TypeResult<TypedExpr> =
             | TExprZip zipExprs ->
                 let identities = zipExprs |> List.map (fun te ->
                     match te.Kind with
-                    | TExprVar (name, _, _) -> AIDVariable name
+                    | TExprVar (name, vid, _) -> loopOperandIdentity env name vid
                     | _ -> AIDLiteral (env.Builder.FreshId()))
                 // Same stale-IRTInfer hazard as the zip arm above.
                 let arrayTypes = zipExprs |> List.map (fun te ->
@@ -15784,7 +15788,7 @@ and inferMethodForOperands env arrays : TypeResult<TypedExpr> =
             else
             let identities = leafArrays |> List.map (fun ta ->
                 match ta.Kind with
-                | TExprVar (name, _, _) -> AIDVariable name
+                | TExprVar (name, vid, _) -> loopOperandIdentity env name vid
                 | _ -> AIDLiteral (env.Builder.FreshId()))
             // No surface expr to fall back on (a node may have come out of a
             // tuple VALUE), so the defaulted-shape thunk stands in -- the same
@@ -15807,8 +15811,11 @@ and inferMethodForOperands env arrays : TypeResult<TypedExpr> =
             }
             Ok (mkTyped (TExprMethodFor info) loopTy)
         else
-        let identities = arrays |> List.map (fun arr ->
-            match arr.Kind with ExprKind.ExprVar name -> AIDVariable name | _ -> AIDLiteral (env.Builder.FreshId()))
+        let identities = List.map2 (fun (arr: Expr) (ta: TypedExpr) ->
+            match arr.Kind, ta.Kind with
+            | ExprKind.ExprVar name, TExprVar (tn, vid, _) when tn = name -> loopOperandIdentity env name vid
+            | ExprKind.ExprVar name, _ -> AIDVariable name
+            | _ -> AIDLiteral (env.Builder.FreshId())) arrays tArrays
         // S1 SEAM 3, method_for orientation (see the object_for site): a
         // caret-shorthand `T^k` operand is an arity-constrained var, so
         // loopOperandArrayType takes its `fallback ()` branch and the loop
@@ -16416,8 +16423,11 @@ and inferForExpr env source kernelOpt : TypeResult<TypedExpr> =
                     Error (Other $"the `in` clause of `for (...) in <source>` must be a virtual array (range<...>, reverse<...>, or blocked<...>) -- it supplies the shared iteration index; got {ppIRType resolved}. Drop the `in` clause to co-iterate stored arrays (for (A, B) == method_for(A, B)), or use method_for(zip(A, B)) to zip them.")
             sharedRecordsRes |> Result.bind (fun sharedRecords ->
 
-            let identities = arrays |> List.map (fun arr ->
-                match arr.Kind with ExprKind.ExprVar name -> AIDVariable name | _ -> AIDLiteral (env.Builder.FreshId()))
+            let identities = List.map2 (fun (arr: Expr) (ta: TypedExpr) ->
+                match arr.Kind, ta.Kind with
+                | ExprKind.ExprVar name, TExprVar (tn, vid, _) when tn = name -> loopOperandIdentity env name vid
+                | ExprKind.ExprVar name, _ -> AIDVariable name
+                | _ -> AIDLiteral (env.Builder.FreshId())) arrays tArrays
             // For co-iteration, all arrays use the shared index space. A
             // generic declaration's unannotated parameter has no caret to
             // read: see materializeGenericLoopOperand.
@@ -16677,6 +16687,15 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
             let identity = match binding.Pattern.Kind with PatternKind.PatVar n -> Some (AIDVariable n) | _ -> None
             let assign = assignOfBindingMut binding.Mutability
             let (varId, env') = bindLetPatVar env name identity assign tValue
+            // Top-level pure deferred alias classes (formalism 10.2 / 8.3):
+            // a root map or an alias of one joins the class whose members are
+            // one array for the identity groups (loopOperandIdentity).
+            (match binding.Pattern.Kind with
+             | PatternKind.PatVar _ ->
+                 let surfaceVar = match binding.Value.Kind with ExprKind.ExprVar s -> Some s | _ -> None
+                 recordDeferredAliasMember env (binding.Mutability = BindLet) binding.Type.IsSome
+                                           surfaceVar varId name tValue
+             | _ -> ())
 
             // A module-level let-bound lambda is a callee like a declared
             // function: record the outside bindings it writes (#17, the
