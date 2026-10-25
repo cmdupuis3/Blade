@@ -1,0 +1,19 @@
+// TEST: If Aliased Deferred Tuple Arms
+// ----------------------------------------------------------------------------
+// Finding 4, the value: an `if` value whose arms hold an ALIAS of a deferred
+// tuple at top level is on the member-ordered path in every lane: only the
+// taken arm's members are evaluated (copies -- m, h and the tuples print
+// nothing), in both branches.
+// ----------------------------------------------------------------------------
+type Row = Idx<3>
+let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
+let m = method_for(x) <@> lambda(v) -> v * 2.0
+let h = method_for(x) <@> lambda(v) -> v + 5.0
+let p = (m, h)
+let q = p
+let yes = reduce(x, (+)) > 5.0
+let no = reduce(x, (+)) > 50.0
+let up = if yes then (q, 1.0) else (q, 2.0)
+let down = if no then (q, 1.0) else (q, 2.0)
+// EXPECT: up = (([2.0, 4.0, 6.0], [6.0, 7.0, 8.0]), 1.0)
+// EXPECT: down = (([2.0, 4.0, 6.0], [6.0, 7.0, 8.0]), 2.0)

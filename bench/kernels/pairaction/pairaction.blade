@@ -1,0 +1,62 @@
+// pairaction: one-channel row actions of a stored symmetric kernel matrix (bench/kernels/pairaction/spec.md).
+// W = pairkernel's Matern-5/2 matrix of n points in 3-D (packed SymIdx<2, n> by `where comm`, STORED and
+// named), R = 3 right-hand sides v_r (stored, named);
+//   z(i)   = sum_j W(i, j)            (the row sums, ascending j)
+//   u_r(i) = sum_j W(i, j) * v_r(j)   (the actions, ascending j)
+//   y_r(i) = u_r(i) / z(i)            (the normalized actions)
+// Every named output is a `|> compute` (stored); `checksum` reads every stored element of W, z, u_r, y_r.
+// Each action is ONE row action over the stored pool: under BLADE_OMP_THREADS=1 (the serial regimes) the
+// compiler's row orbit action (one pass over W's canonical cells feeding row chain a the term with own = a,
+// partner = b and row chain b the term with own = b, partner = a; `blade plan`: `fold form: orbit action`);
+// with threads on (mt8) the lanes split: the C++ lane keeps the row walk for the `omp(i: 1)` request,
+// each row's chain on one thread (output-owned, strict); the LLVM lane has no thread runtime and runs
+// the serial action. v1 is single-channel: four passes over W, one per action.
+let static n = 2503    // SIZE n
+type Pts = Idx<n>
+type Dim = Idx<3>
+
+/// The suite's input generator (bench/README.md section 5, variant D: five rounds): u in [0, 1),
+/// exact in Int64 (h3 * h3 < 2^62).
+function lcg(k: Int64, seed: Int64) -> Float64 = {
+    let h1 = ((k + seed) * 1103515245 + 12345) % 2147483648
+    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648
+    let h3 = (h2 * 1103515245 + 12345) % 2147483648
+    let h4 = (h3 * h3 / 65536) % 2147483648
+    let h5 = (h4 * 1103515245 + 12345) % 2147483648
+    Float64(h5) / 2147483648.0
+}
+
+/// Matern-5/2 covariance of a squared distance, length scale 0.7 (pairkernel's).
+function matern52(r2: Float64) -> Float64 = {
+    let a = sqrt(5.0 * r2) / 0.7
+    (1.0 + a + a * a / 3.0) * exp(-a)
+}
+
+// P(i, d): coordinate d of point i, input j = d + 1 (seed 10000019 * j, k = i) -- pairkernel's points
+let pts = method_for(range<Pts>, range<Dim>) <@> lambda(i, d) where omp(i: 1) -> lcg(i, 10000019 * (d + 1)) |> compute
+// the right-hand sides: inputs j = 4, 5, 6 (seed 10000019 * j, k = i)
+let v0 = method_for(range<Pts>) <@> lambda(i) where omp(i: 1) -> lcg(i, 10000019 * 4) |> compute
+let v1 = method_for(range<Pts>) <@> lambda(i) where omp(i: 1) -> lcg(i, 10000019 * 5) |> compute
+let v2 = method_for(range<Pts>) <@> lambda(i) where omp(i: 1) -> lcg(i, 10000019 * 6) |> compute
+// W: packed SymIdx<2, n> (`comm` on the same array), the producer threaded over the point axis
+let w = method_for(pts, pts) <@> lambda(a: Array<Float64 like Dim>, b: Array<Float64 like Dim>) where comm(a, b), omp(a: 1) -> {
+    let dx = a((0 : Dim)) - b((0 : Dim))
+    let dy = a((1 : Dim)) - b((1 : Dim))
+    let dz = a((2 : Dim)) - b((2 : Dim))
+    matern52(dx * dx + dy * dy + dz * dz)
+} |> compute
+let z = method_for(range<Pts>) <@> lambda(i) where omp(i: 1) -> reduce(method_for(range<Pts>) <@> lambda(j) -> w(i, j), (+), 0.0) |> compute
+let u0 = method_for(range<Pts>) <@> lambda(i) where omp(i: 1) -> reduce(method_for(range<Pts>) <@> lambda(j) -> w(i, j) * v0(j), (+), 0.0) |> compute
+let u1 = method_for(range<Pts>) <@> lambda(i) where omp(i: 1) -> reduce(method_for(range<Pts>) <@> lambda(j) -> w(i, j) * v1(j), (+), 0.0) |> compute
+let u2 = method_for(range<Pts>) <@> lambda(i) where omp(i: 1) -> reduce(method_for(range<Pts>) <@> lambda(j) -> w(i, j) * v2(j), (+), 0.0) |> compute
+let y0 = method_for(zip(u0, z)) <@> lambda(a, b) where omp(a: 1) -> a / b |> compute
+let y1 = method_for(zip(u1, z)) <@> lambda(a, b) where omp(a: 1) -> a / b |> compute
+let y2 = method_for(zip(u2, z)) <@> lambda(a, b) where omp(a: 1) -> a / b |> compute
+// every stored element read back: W over its logical cells (the orbit-class fold / ordered scatter), then
+// z, u_r, y_r, each a licensed fold, combined left to right
+let checksum = reduce(method_for(range<Pts>) <@> lambda(i) -> reduce(method_for(range<Pts>) <@> lambda(j) -> w(i, j), (+)), lambda(p, q) where omp -> p + q, 0.0)
+    + reduce(z, lambda(p, q) where omp -> p + q, 0.0)
+    + reduce(u0, lambda(p, q) where omp -> p + q, 0.0) + reduce(u1, lambda(p, q) where omp -> p + q, 0.0) + reduce(u2, lambda(p, q) where omp -> p + q, 0.0)
+    + reduce(y0, lambda(p, q) where omp -> p + q, 0.0) + reduce(y1, lambda(p, q) where omp -> p + q, 0.0) + reduce(y2, lambda(p, q) where omp -> p + q, 0.0)
+let input_checksum = reduce(reduce(pts, (+)), lambda(p, q) where omp -> p + q, 0.0)
+    + reduce(v0, lambda(p, q) where omp -> p + q, 0.0) + reduce(v1, lambda(p, q) where omp -> p + q, 0.0) + reduce(v2, lambda(p, q) where omp -> p + q, 0.0)

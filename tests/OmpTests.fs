@@ -2034,11 +2034,22 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
             "let A = [1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0]\n" +
             "let B = [1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0]\n" +
             "let s = reduce(method_for(A, B) <@> lambda(x, y) -> x * y, myAdd, 0.0, axes = 2)\n"
+        // G55: a SCALAR omp fold let in a FUNCTION body -- its own let, so it
+        // takes the statement fold path and forms a real team (it used to be
+        // rendered as an expression-position fold that opens none). The named
+        // comm kernel is the Path B explicit team.
+        let fnBodyFoldSrc =
+            "function myAdd(a: Float64, b: Float64) where comm(a, b), omp = (a + b) * 1.0\n" +
+            "type I = Idx<2003>\n" +
+            "function fsum(v: Array<Float64 like I>) -> Float64 = {\n    let s = reduce(v, myAdd, 0.0)\n    s\n}\n" +
+            "let x = Float64(0..2003) * 0.5 |> compute\n" +
+            "let fb = fsum(x)\n"
         let programs =
             [ ("rect_outer_product", rectSrc)
               ("symmetric_triangular", symSrc)
               ("mixed_partial_comm", mixedSrc)
-              ("comm_licensed_fold", foldSrc) ]
+              ("comm_licensed_fold", foldSrc)
+              ("function_body_scalar_fold_let", fnBodyFoldSrc) ]
         let outputDir = "./generated_omp_coverage"
         Directory.CreateDirectory(outputDir) |> ignore
         // Write runtime headers into the output dir so the generated programs'
@@ -4180,6 +4191,10 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
         // (the row slots), BLADE_FOLD_ROW_SLOTS=0 (the scatter), threads off
         // (the serial scatter) and the true serial walk (threads off,
         // BLADE_ORBIT_SCATTER=0). Each binding's ROUTE is asserted per build.
+        // G74: s7 / s8 fold their rows SEEDLESS (`(+)`): s7 over -0.0 cells
+        // must be -0.0 exactly (the left fold of the cells; the checker's
+        // former +0.0 seed gave +0.0), s8 must carry the payload poked into
+        // the pool's FIRST cell -- row 0's head -- as its bits.
         let rawNaNA = 0x7FF800000000A11CUL
         let rawNaNB = 0xFFF80000000B0B0BUL
         let rawCases =
@@ -4192,12 +4207,15 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                 + "let g = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute\n"
                 + "let gn = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) * 0.5 |> compute\n"
                 + "let gm = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) * 0.25 |> compute\n"
-                + $"let s1 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j), (+)), {omp}, 0.25)\n"
+                + "let gh = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) * 0.125 |> compute\n"
+                + $"let s1 =reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j), (+)), {omp}, 0.25)\n"
                 + $"let s2 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> -0.0 * (g(i, j) * g(i, j)), lambda(a, b) -> a + b, -0.0), {omp}, -0.0)\n"
                 + $"let s3 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * g(i, j) * 1.0e-9 - g(i, j), (+)), {omp}, 0.0)\n"
                 + $"let s4 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> gn(i, j), (+)), {omp}, 0.0)\n"
                 + $"let s5 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> gn(i, j) * 2.0 + 1.0, (+)), {omp}, 0.0)\n"
                 + $"let s6 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> gm(i, j), (+)), {omp}, 0.0)\n"
+                + $"let s7 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> -0.0 * (g(i, j) * g(i, j)), (+)), {omp}, -0.0)\n"
+                + $"let s8 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> gh(i, j), (+)), {omp}, 0.0)\n"
             let lv3 (body: string) (inner: string) =
                 $"reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> reduce(method_for(range<Var>) <@> lambda(k) -> {body}, {inner}), {inner}), {omp}"
             let rank3 =
@@ -4206,19 +4224,24 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                 + "let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) |> compute\n"
                 + "let tn = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) * 0.5 |> compute\n"
                 + "let tm = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) * 0.25 |> compute\n"
+                + "let th = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) * 0.125 |> compute\n"
                 + "let s1 = " + lv3 "t(i, j, k)" "(+)" + ", 0.25)\n"
                 + "let s2 = " + lv3 "-0.0 * (t(i, j, k) * t(i, j, k))" "lambda(a, b) -> a + b, -0.0" + ", -0.0)\n"
                 + "let s3 = " + lv3 "t(i, j, k) * t(i, j, k) * 1.0e-9 - t(i, j, k)" "(+)" + ", 0.0)\n"
                 + "let s4 = " + lv3 "tn(i, j, k)" "(+)" + ", 0.0)\n"
                 + "let s5 = " + lv3 "tn(i, j, k) * 2.0 + 1.0" "(+)" + ", 0.0)\n"
                 + "let s6 = " + lv3 "tm(i, j, k)" "(+)" + ", 0.0)\n"
+                + "let s7 = " + lv3 "-0.0 * (t(i, j, k) * t(i, j, k))" "(+)" + ", -0.0)\n"
+                + "let s8 = " + lv3 "th(i, j, k)" "(+)" + ", 0.0)\n"
             // (rank, source, the NaN pool, its poked cells: C(522, 2) = 135981
             // and C(69, 3) = 52394 canonical cells)
             // `gm` / `tm` carry the same two payloads in the OPPOSITE order, so
             // each payload is the first one some walk meets.
-            [ ("rank2", rank2, [ ("gn", [ (1234, rawNaNA); (70000, rawNaNB) ]); ("gm", [ (500, rawNaNB); (90000, rawNaNA) ]) ])
-              ("rank3", rank3, [ ("tn", [ (777, rawNaNA); (40000, rawNaNB) ]); ("tm", [ (300, rawNaNB); (45000, rawNaNA) ]) ]) ]
-        let rawScalars = [ "s1"; "s2"; "s3"; "s4"; "s5"; "s6" ]
+            // G74: `gh` / `th` carry payload A in their FIRST canonical cell
+            // (S(0, 0) / T(0, 0, 0)), the head of row 0's seedless chain (s8)
+            [ ("rank2", rank2, [ ("gn", [ (1234, rawNaNA); (70000, rawNaNB) ]); ("gm", [ (500, rawNaNB); (90000, rawNaNA) ]); ("gh", [ (0, rawNaNA) ]) ])
+              ("rank3", rank3, [ ("tn", [ (777, rawNaNA); (40000, rawNaNB) ]); ("tm", [ (300, rawNaNB); (45000, rawNaNA) ]); ("th", [ (0, rawNaNA) ]) ]) ]
+        let rawScalars = [ "s1"; "s2"; "s3"; "s4"; "s5"; "s6"; "s7"; "s8" ]
         for (rank, src, pokes) in rawCases do
          let name = $"scatter_precedence_raw_bits_{rank}"
          // (tag, BLADE_OMP_THREADS, BLADE_FOLD_ROW_SLOTS, BLADE_ORBIT_SCATTER, expected route, team sizes)
@@ -4279,6 +4302,10 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                  fail name ($"the walk printed {reference.Length} RAW line(s), wanted {rawScalars.Length}")
              elif bitsOf "s2" <> Some 0x8000000000000000UL then
                  fail name ($"""s2 must be -0.0 (0x8000000000000000) in the walk, got {bitsOf "s2"}""")
+             elif bitsOf "s7" <> Some 0x8000000000000000UL then
+                 fail name ($"""s7 (SEEDLESS inner `(+)` over -0.0 cells, a -0.0 outer seed) must be -0.0 (0x8000000000000000: the left fold of the cells, G74) in the walk, got {bitsOf "s7"}""")
+             elif bitsOf "s8" <> Some rawNaNA then
+                 fail name ($"""s8 (SEEDLESS rows, row 0's FIRST cell carrying payload 0x{rawNaNA:X16}) must carry that payload as the head in the walk, got {bitsOf "s8"}""")
              elif not ([ "s1"; "s3" ] |> List.forall (fun s -> bitsOf s |> Option.exists isFinite)) then
                  fail name ($"""s1 / s3 must be finite in the walk: {String.concat "; " reference}""")
              elif not ([ "s4"; "s5"; "s6" ] |> List.forall (fun s -> bitsOf s |> Option.exists isNaN)) then
@@ -4289,7 +4316,7 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                  fail name ($"""raw bits differ from the true serial walk [{String.concat "; " reference}]: {String.concat " | " differ}""")
              else
                  let nanTxt = [ "s4"; "s5"; "s6" ] |> List.map (fun s -> $"{s} = 0x{(bitsOf s).Value:X16}") |> String.concat ", "
-                 pass name ($"""every binding's route as wanted in each build (default / slots=0 / threads-off: the scatter; prefer: the row slots; the walk), and the SAME uint64 bits at T = 1, 4, 7: cancellation (s1, s3), -0.0 (s2), poked NaN payloads 0x{rawNaNA:X16} / 0x{rawNaNB:X16} -> {nanTxt}""")
+                 pass name ($"""every binding's route as wanted in each build (default / slots=0 / threads-off: the scatter; prefer: the row slots; the walk), and the SAME uint64 bits at T = 1, 4, 7: cancellation (s1, s3), -0.0 (s2), poked NaN payloads 0x{rawNaNA:X16} / 0x{rawNaNB:X16} -> {nanTxt}; seedless rows (G74): s7 = -0.0, s8 = the first cell's 0x{rawNaNA:X16}""")
 
         // ---- G51 IDENTITY: row-view folds in threaded complete rows -------
         // The stencil input-checksum shape `reduce(u(i), op[, s])` under an
@@ -4710,6 +4737,137 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
         g7Values "g7_fused_join_product_values" g7ProductFusedSrc [ "f1 = 1.0"; "f2 = 0.5" ]
         // zero extent: no team opens, every leg is exactly its seed, both shapes
         g7Values "g7_zero_extent_seeded_joins" g7ZeroSrc [ "z1 = 10.0"; "z2 = 10.0"; "y1 = 20.0"; "y2 = 30.0" ]
+
+        // ---- G55: a SCALAR omp fold let in a FUNCTION body takes the statement
+        // fold path (the Path A team) exactly as the top-level spelling does,
+        // instead of the expression form's "reduce in expression position"
+        // decline. (1) the emission of `fsum` carries the team and no decline;
+        // a fold that is an OPERAND (`fsum2`) keeps the decline, with the
+        // corrected suggestion; (2) licensed, threads at T = 4: fb within 1e-9
+        // of top; (3) BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off: the raw Float64
+        // bits (BLADE_PRINT_BITS) of fb equal top's, in the threaded build at
+        // T = 1 / 4 and in the BLADE_OMP_THREADS=1 build. Awkward data (1e4-
+        // scaled cells beside unit ones) so another association would show.
+        let g55Src =
+            "type I = Idx<2003>\n"
+            + "let x = method_for(range<I>) <@> lambda(i) -> (Float64((i * 7) % 11) * 0.37 + 0.1 / Float64(i + 1)) * (1.0 + 9999.0 * Float64((i % 4) / 3)) |> compute\n"
+            + "function fsum(v: Array<Float64 like I>) -> Float64 = {\n    let s = reduce(v, lambda(p, q) where omp -> p + q, 0.25)\n    s\n}\n"
+            + "function fsum2(v: Array<Float64 like I>) -> Float64 = {\n    let s = reduce(v, lambda(p, q) where omp -> p + q, 0.0) * 2.0\n    s\n}\n"
+            + "let top = reduce(x, lambda(p, q) where omp -> p + q, 0.25)\n"
+            + "let fb = fsum(x)\n"
+            + "let fb2 = fsum2(x)\n"
+        let withEnv (pairs: (string * string) list) (f: unit -> 'a) : 'a =
+            let priors = pairs |> List.map (fun (k, _) -> (k, System.Environment.GetEnvironmentVariable k))
+            for (k, v) in pairs do System.Environment.SetEnvironmentVariable(k, v)
+            try f ()
+            finally for (k, v) in priors do System.Environment.SetEnvironmentVariable(k, v)
+        let funcBody (cpp: string) (fname: string) =
+            let cpp = cpp.Replace("\r\n", "\n")
+            // the DEFINITION (`double f(...) {`), not the forward declaration
+            let m = System.Text.RegularExpressions.Regex.Match(cpp, "\ndouble " + fname + @"\([^;{]*\) \{\n")
+            let defAt = if m.Success then m.Index + m.Length - 2 else -1
+            let endAt = if defAt < 0 then -1 else cpp.IndexOf("\n}\n", defAt)
+            if endAt < 0 then None else Some (cpp.Substring(defAt, endAt - defAt))
+        (let name = "g55_function_body_scalar_fold_let_threads"
+         match compileProgram outputDir (name + "_lic") g55Src with
+         | Error e -> fail name ($"licensed build: {e}")
+         | Ok exe ->
+         let cpp = File.ReadAllText(Path.ChangeExtension(exe, ".cpp"))
+         match funcBody cpp "fsum", funcBody cpp "fsum2" with
+         | None, _ | _, None -> fail name "no fsum / fsum2 definition in the emission"
+         | Some fs, Some fs2 ->
+         if not (fs.Contains "BLADE_OMP_PARALLEL_FOR_SIMD_REDUCTION(+:") || fs.Contains "reduce in expression position" then
+             fail name "fsum's scalar fold let did not take the statement fold path (no Path A team, or the expression decline)"
+         elif not (fs2.Contains "reduce in expression position" && fs2.Contains "WHOLE value of its own `let`") then
+             fail name "fsum2's operand fold lost its expression-position decline or the corrected suggestion"
+         else
+         match runProgram exe forcedThreads with
+         | Error e -> fail name ($"licensed run: {e}")
+         | Ok out ->
+         let sb = scalarBindings out
+         match Map.tryFind "top" sb, Map.tryFind "fb" sb with
+         | Some t, Some f when abs (t - f) <= 1e-9 * max 1.0 (abs t) ->
+             let bits (o: string) (k: string) =
+                 let m = System.Text.RegularExpressions.Regex.Match(o, "(?m)^" + k + @" = \S+ #([0-9a-f]{16})")
+                 if m.Success then Some m.Groups.[1].Value else None
+             let repro = [ "BLADE_FP_REPRO", "1"; "BLADE_FP_CONTRACT", "off" ]
+             match withEnv repro (fun () -> compileProgram outputDir (name + "_rep") g55Src),
+                   withEnv (("BLADE_OMP_THREADS", "1") :: repro) (fun () -> compileProgram outputDir (name + "_rep1") g55Src) with
+             | Error e, _ | _, Error e -> fail name ($"repro build: {e}")
+             | Ok repExe, Ok rep1Exe ->
+                 let runs =
+                     withEnv [ "BLADE_PRINT_BITS", "1" ] (fun () ->
+                         [ runProgram repExe "1"; runProgram repExe forcedThreads; runProgram rep1Exe forcedThreads ])
+                 match runs |> List.tryPick (function Error e -> Some e | Ok _ -> None) with
+                 | Some e -> fail name ($"repro run: {e}")
+                 | None ->
+                 let outs = runs |> List.choose (function Ok o -> Some o | Error _ -> None)
+                 let pairs = outs |> List.map (fun o -> (bits o "top", bits o "fb"))
+                 match pairs with
+                 | (Some t0, Some f0) :: _ when pairs |> List.forall (fun p -> p = (Some t0, Some f0)) && t0 = f0 ->
+                     pass name ($"fsum threads (Path A); licensed |fb - top| = {abs (t - f)}; repro bits fb = top = #{t0} at T = 1 / 4 and with BLADE_OMP_THREADS=1")
+                 | _ -> fail name (sprintf "repro bits differ (top, fb) per run: %A" pairs)
+         | t, f -> fail name (sprintf "licensed values top %A fb %A" t f))
+
+        // G55 census: the function-body let's `[omp]` record is the top-level
+        // spelling's -- applied (Path A) with threads, declined with the knob's
+        // census text under BLADE_OMP_THREADS=1 and under BLADE_FP_REPRO=1.
+        (let name = "g55_function_body_fold_let_census_threads_off_and_repro"
+         let ompOf (ds: Blade.Effects.Decision list) (subject: string) =
+             ds |> List.filter (fun d -> d.Rule = "omp" && d.Subject = subject) |> List.map Blade.Effects.Decisions.render
+         let check (pins: (string * string) list) (needle: string) =
+             match withEnv pins (fun () -> planAndCppOf (name + "_plan") g55Src) with
+             | Error e -> Error e
+             | Ok (ds, _) ->
+                 // fsum's APPLIED record is subjected by the let's emitted name (`__v<id>`), its
+                 // declines by the function (`fsum`): every omp record but top's and fsum2's
+                 let fs =
+                     ds |> List.filter (fun d -> d.Rule = "omp" && d.Subject <> "top" && d.Subject <> "fsum2")
+                     |> List.map Blade.Effects.Decisions.render
+                 let tp = ompOf ds "top"
+                 let has (rs: string list) = rs |> List.exists (fun r -> r.Contains needle)
+                 if has fs && has tp then Ok ()
+                 else Error (sprintf "wanted `%s` on fsum and top; fsum %A top %A" needle fs tp)
+         match check [] "applied [BLADE_OMP_PARALLEL_FOR_SIMD_REDUCTION(+:",
+               check [ "BLADE_OMP_THREADS", "1" ] "declined -- BLADE_OMP_THREADS=1 -- this build emits no thread-level OpenMP",
+               check [ "BLADE_FP_REPRO", "1" ] "declined -- BLADE_FP_REPRO=1 -- this build keeps the serial association of every fold" with
+         | Ok (), Ok (), Ok () -> pass name "fsum's record equals top's: applied (Path A) / declined with the BLADE_OMP_THREADS=1 and BLADE_FP_REPRO=1 census text"
+         | Error e, _, _ | _, Error e, _ | _, _, Error e -> fail name e)
+
+        // G55 first failure: an empty unseeded fold (BL8003) and a failing seed
+        // (BL8013) fail with the SAME code and message whether the omp fold let
+        // is at top level or in a function body; and the function body's
+        // statement form fails with byte-identical diagnostics (code, message,
+        // line, `at f` frame) to the same body without the omp request (the
+        // expression form it used to take), the fold at the same line.
+        (let normalize (e: string) =
+             System.Text.RegularExpressions.Regex.Replace(e.Replace("\r\n", "\n"), @"--> [^\n]*?(:\d+)\n", "--> $1\n").Trim()
+         let firstLine (e: string) = (normalize e).Split('\n') |> Array.tryFind (fun l -> l.Contains "error[") |> Option.defaultValue ""
+         let fails (tag: string) (src: string) : Result<string, string> =
+             match compileProgram outputDir ("g55_ff_" + tag) src with
+             | Error e -> Error ($"{tag} build: {e}")
+             | Ok exe ->
+                 match runProgram exe forcedThreads with
+                 | Ok out -> Error ($"{tag} did not fail: {out}")
+                 | Error e -> Ok e
+         let kern (omp: bool) = if omp then "lambda(p, q) where omp -> p + q" else "lambda(p, q) -> p + q"
+         let emptyPre = "let x = Float64(0..5) |> compute\nlet n = extents(x) - 5\nlet e = Float64(0..n) |> compute\n"
+         let emptyTop = emptyPre + $"let s = reduce(e, {kern true})\n"
+         let emptyFn (omp: bool) = $"function f(v: T^1) -> T^0 = {{\n    let s = reduce(v, {kern omp})\n    s\n}}\n" + emptyPre + "let s = f(e)\n"
+         let seedPre = "type I = Idx<5>\nlet x = Float64(0..5) |> compute\nlet z = extents(x) - 5\n"
+         let seedTop = seedPre + $"let s = reduce(x, {kern true}, Float64(7 / z))\n"
+         let seedFn (omp: bool) = $"function f(v: Array<Float64 like I>, z: Int64) -> Float64 = {{\n    let s = reduce(v, {kern omp}, Float64(7 / z))\n    s\n}}\n" + seedPre + "let s = f(x, z)\n"
+         for (label, code, topSrc, fnSrc) in [ ("empty_unseeded", "BL8003", emptyTop, emptyFn); ("failing_seed", "BL8013", seedTop, seedFn) ] do
+             let name = $"g55_first_failure_{label}_function_body_vs_top_level"
+             match fails (label + "_top") topSrc, fails (label + "_fn") (fnSrc true), fails (label + "_fnser") (fnSrc false) with
+             | Error e, _, _ | _, Error e, _ | _, _, Error e -> fail name e
+             | Ok t, Ok f, Ok fs ->
+                 if not ((firstLine t).Contains $"error[{code}]") then fail name ($"top-level failed with {firstLine t}, want {code}")
+                 elif firstLine t <> firstLine f then fail name ($"top `{firstLine t}` vs function body `{firstLine f}`")
+                 elif normalize f <> normalize fs then fail name ($"function body: statement form `{normalize f}` vs expression form `{normalize fs}`")
+                 else
+                     let shown = (normalize f).Replace("\n", " ")
+                     pass name ($"{code} with the same message at top level and in the function body; the statement form's diagnostics equal the expression form's: {shown}"))
 
         printFooter "OpenMP Reduce" [$"{passed} passed"; $"{failed} failed"]
         { Block = "OpenMP Reduce"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

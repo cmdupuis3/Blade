@@ -1,0 +1,29 @@
+// hashjoin inputonly twin -- the input generation and input_checksum of hashjoin.blade, the
+// join and its folds omitted (README section 3.3: incremental = median(total) -
+// median(inputonly)). The kernel keeps its arrays at top level only because compound() is
+// top-level-only; the twin has no compound, so it keeps the four inputs inside the contract
+// block (the same generating loops are emitted either way) and is safe in the LLVM lane too,
+// which ignores --print and would echo top-level arrays after the clock.
+
+type L = Idx<2003>   // SIZE n
+type R = Idx<1009>   // SIZE m
+let static nkeys = 401   // SIZE k
+
+/// README section 5 input generator: five rounds mod 2^31 (affine, quadratic, affine,
+/// middle-square, affine), exact in Int64 (h3 * h3 < 2^62).
+function gen(k: Int64, seed: Int64, lo: Float64, hi: Float64) -> Float64 = {
+    let h1 = ((k + seed) * 1103515245 + 12345) % 2147483648
+    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648
+    let h3 = (h2 * 1103515245 + 12345) % 2147483648
+    let h4 = (h3 * h3 / 65536) % 2147483648
+    let h5 = (h4 * 1103515245 + 12345) % 2147483648
+    lo + (hi - lo) * (Float64(h5) / 2147483648.0)
+}
+
+let (checksum, input_checksum) = {
+    let lk = method_for(range<L>) <@> lambda(i) -> Int64(floor(gen(Int64(i), 10000019, 0.0, Float64(nkeys)))) |> compute
+    let la = method_for(range<L>) <@> lambda(i) -> Int64(floor(gen(Int64(i), 20000038, 0.0, 1024.0))) |> compute
+    let rk = method_for(range<R>) <@> lambda(j) -> Int64(floor(gen(Int64(j), 30000057, 0.0, Float64(nkeys)))) |> compute
+    let ra = method_for(range<R>) <@> lambda(j) -> Int64(floor(gen(Int64(j), 40000076, 0.0, 1024.0))) |> compute
+    (0.0, Float64(reduce(lk, (+)) + reduce(la, (+)) + reduce(rk, (+)) + reduce(ra, (+))))
+}

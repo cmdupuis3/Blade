@@ -307,12 +307,17 @@ oracle (gfortran twins raw-bit equal to it with contraction off). Checksum: Σ y
 Blade also computes AD-required auxiliaries its source names (the forced loss tape d, the dw
 buffer, the loss value lv) and a synthesized cotangent of d — disclosed, stored, not
 required, and not deletable under this source.
-**Sizes.** smoke n=1013; full n=50,021 — capped by the compiler (G68: the reverse sweep's
-cotangent zero buffer is an (n − 4)-element literal; lowering is super-linear in n), not by
-the 64 MB rule (Blade ≈ 2.8 MB, Fortran 1.6 MB). At the catalog's 1,000,003 the required
-arrays are 32.0 MB and the Blade arm's 56.0 MB (+ 8.0 MB literal image), so a size change
-needs a fresh per-arm peak-live / store audit after the G68 repair. `inputonly` twin per arm
-(input share est. 10–30%).
+**Sizes.** smoke n=1013; full n=1,000,003, the catalog's (round 3 wave 4, W4-4: until then
+capped at n=50,021 by the compiler -- G68, the reverse sweep's cotangent zero buffer was an
+(n − 4)-element literal whose lowering was super-linear in n; FIXED, the buffer is a zero
+fill and the front end is flat in n, 2.8 s for `blade emit` at full size). The required
+arrays are 32.0 MB and the Blade arm's 56.0 MB (arithmetic upper bound, every array resident
+at once; no literal image any more); the W4-4 check's single runs saw Blade peak working sets
+of 58.1-59.0 MB. NEITHER is the per-arm peak-live / store audit the pre-fix G68 row required:
+that audit and the machine-code store verification of y and dx are PENDING for the
+integration measurement gate (spec.md "Memory audit status"), and the LLVM lane's tape and
+cotangent escape the gradient function's cleanup (G78, pre-existing, OPEN). `inputonly` twin
+per arm (input share est. 10–30%).
 **Tiers.** natural: the primal loop, dx = 0, then one destination-indexed loop per update in
 list order. expert: one fused destination-owned pass (y, dx, both sums), approximately one
 sin and one cos per cell from per-block strips (sin n + 2B, cos n − 4), 8 boundary cells
@@ -326,6 +331,34 @@ emission — the extra sin calls re-evaluate arguments another pass already eval
 3(n − 4) vs approximately 2n; 7 serial destination passes vs 1 fused pass); closing it needs
 the per-update passes merged into one destination pass and cross-pass sharing of the primal,
 with d and dw still stored.
+
+## Round 3 wave-3 addition (2026-10-21, W3-2; research B, item T2)
+
+### `hashjoin`
+**Math.** Two keyed tables (lk, la) over N rows and (rk, ra) over M rows, integer keys
+uniform over K values and integer amounts in [0, 1024). Named output: the relation
+`matched = (la(i) ra(j) : lk(i) == rk(j))` in LEX order (i ascending, then j) — a BAG,
+duplicates on both sides kept. Checksum: total + J + fp, fp the order fingerprint
+(3 a + b) mod 1000000007 from 0 (exact, non-overflowing: review B/13).
+**Sizes.** PILOT ONLY: smoke N 211 / M 101 / K 41 (J = 522); full = the research pilot
+N 2003 / M 1009 / K 401 (P = 2,021,027 pairs, J = 5000). The research full size
+(N 100,003, M 20,011) is not benched this round. `inputonly` twin per arm.
+**Tiers.** natural: two N x M nested loops (count, then append in lex order). expert: a
+counting-sort CSR over [0, K), a counting pass sizing J, the probe storing `matched` with
+total and fp fused. Blade: the INLINE spelling (the outer products compiler temporaries),
+which the C++ lane's hash join (G72) turns into the stable CSR + probe; the named spelling
+keeps every named array stored and is not this kernel.
+**omp.** None: serial in every arm (an output-owned threaded probe is legal but unbuilt).
+**Regimes.** licensed, repro (serial; integer data, the same arithmetic).
+**Hypothesis.** WIN ~10–20x / LOSS ~0.75–0.9 (the consumer folds stay separate passes;
+the expert fuses them into the probe). Directional (W3-2, PROVISIONAL: gfortran only, ifx
+neither built nor store-audited): expert/NEW 0.84 on the TOTAL region (the DROP criterion,
+> 0.8), 0.75 input-net (reported, not the criterion), natural/NEW 15x, OLD/NEW 108x.
+Complete-kernel cost NEW 22,434 operations / 414 KB source-logical traffic vs the expert's
+21,826 / 230 KB (construction alone 12,434 / 334 KB vs 11,826 / 230 KB; spec.md). Store
+audit: blade-cpp and both gfortran tiers keep every input and `matched` store; OLD is not
+audited, so OLD/NEW 108x is not an audited ratio. Timings are bc3ddac9's emission; the
+overflow guards are not re-timed.
 
 ## Summary table
 
@@ -344,9 +377,10 @@ with d and dw still stored.
 | saxpy | C | n=2,000,003 | 4–8 ms incremental | licensed, repro (serial, mt8) | equivalent / equivalent |
 | twofir (round 3) | B | n=2,000,003 | 10–25 ms | licensed, repro (serial, mt8) | equivalent / LOSS ~0.70–0.85 (two passes vs one fused pass) |
 | tensorop (round 3) | A | 89 x 97 x 101 | Blade 0.2–0.6 s, expert 20–60 ms | licensed, repro (serial, mt8), fastmath | equivalent (serial) / LOSS 3–10x (mode_product nests vs register tiles; Blade kernel serial in mt8) |
-| haloadjoint (round 3) | B | n=50,021 (G68 cap) | 2–8 ms | licensed, repro (serial, mt8; the adjoint serial in mt8) | LOSS ~0.5–0.8 / LOSS ~0.35–0.6 (per-update passes + source-named AD auxiliaries vs one fused pass) |
+| haloadjoint (round 3) | B | n=1,000,003 (raised from 50,021 by W4-4, G68 FIXED) | 2–8 ms at the former n; not yet timed at this n | licensed, repro (serial, mt8; the adjoint serial in mt8) | LOSS ~0.5–0.8 / LOSS ~0.35–0.6 (per-update passes + source-named AD auxiliaries vs one fused pass) |
+| hashjoin (round 3, pilot) | B | N=2003, M=1009, K=401 | ~0.1 ms | licensed, repro (serial only) | WIN ~10–20x / LOSS ~0.75–0.9 (separate consumer folds vs folds fused into the probe) |
 
-`inputonly` twin required: fusedchain, onepass, stencil, maskagg, dot, saxpy, twofir, haloadjoint;
+`inputonly` twin required: fusedchain, onepass, stencil, maskagg, dot, saxpy, twofir, haloadjoint, hashjoin;
 provisioned (keep if the pilot measures > 5%): tensorop.
 
 Methodology-review corrections (README rev. after `notes/review-method.md`): "natural" is

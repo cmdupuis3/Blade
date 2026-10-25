@@ -609,3 +609,42 @@ void blade_member_fini_i64(void *t) {
 void blade_member_note_llvm(const void *t, const char *host, const char *set) {
     blade_member_note_i64((const blade_member_i64 *)t, host, set);
 }
+
+/* ---- aggregate-only grouping's key -> group map (round 3, W3-1) ----------- */
+
+/* The LLVM lane's entry points over blade_member.h's key -> group map (the
+ * SAME find-or-insert, first-occurrence numbering and record layout the C++
+ * lane includes; the header states the contract). The map lives in the
+ * caller's entry-block `alloca [128 x i8], align 8` (the typedef below
+ * refuses to compile if the struct outgrows it).
+ *
+ * Claims the emitter's declarations make (EmitLlvm shimTable):
+ *   - blade_gkmap_init_llvm: writes the slot, allocates the tables (frees a
+ *     half-made set on failure: NOT nofree), returns 1 / 0     -> grpShimFree;
+ *   - blade_gkmap_group_llvm: probes, and on a new key may grow (allocate,
+ *     copy, free) the table and the records; returns the group or -1 on an
+ *     allocation failure, always returns                       -> grpShimFree;
+ *   - blade_gkmap_record_llvm / blade_gkmap_count_llvm: read only the slot,
+ *     write nothing, always return                              -> grpShimRead;
+ *   - blade_gkmap_fini_llvm: frees the tables                   -> grpShimFree. */
+typedef char blade_gkmap_slot_fits[(sizeof(blade_gkmap_i64) <= BLADE_MEMBER_SLOT_BYTES) ? 1 : -1];
+
+int blade_gkmap_init_llvm(void *t, long long slots) {
+    return blade_gkmap_init_i64((blade_gkmap_i64 *)t, (int64_t)slots);
+}
+
+long long blade_gkmap_group_llvm(void *t, long long key) {
+    return (long long)blade_gkmap_group_i64((blade_gkmap_i64 *)t, (int64_t)key);
+}
+
+void *blade_gkmap_record_llvm(const void *t, long long g) {
+    return (void *)blade_gkmap_record_i64((const blade_gkmap_i64 *)t, (int64_t)g);
+}
+
+long long blade_gkmap_count_llvm(const void *t) {
+    return (long long)blade_gkmap_count_i64((const blade_gkmap_i64 *)t);
+}
+
+void blade_gkmap_fini_llvm(void *t) {
+    blade_gkmap_free_i64((blade_gkmap_i64 *)t);
+}

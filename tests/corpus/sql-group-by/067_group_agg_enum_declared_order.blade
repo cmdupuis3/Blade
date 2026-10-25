@@ -1,0 +1,28 @@
+// TEST: Group aggregate one pass, EnumIdx keys in declared order
+// ENUMIDX keys: the groups are the DECLARED enumeration, in its declared
+// order -- here deliberately unsorted, [7, -2, 3] -- never the numeric order
+// and never first occurrence. A NEGATIVE member is an ordinary value the type
+// admits (an EnumIdx key never drops), and a declared member no row names (3)
+// is an empty group. The one pass (gap G71) keeps all three facts.
+type Code = EnumIdx<[7, -2, 3]>
+type Row = Idx<6>
+
+function agg(k: Array<Code like Row>, v: Array<Int64 like Row>) = {
+    let gk = group_keys(k)
+    let g = group_by(v, gk)
+    let t = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+), 0) |> compute
+    let f = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b, 0) |> compute
+    let n = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> extents(r) |> compute
+    let c = extents(gk)
+    (t, f, n, c)
+}
+
+let codes: Array<Code like Row> = [-2, 7, -2, -2, 7, 7]
+let vals: Array<Int64 like Row> = [1, 2, 3, 4, 5, 6]
+let (t, f, n, c) = agg(codes, vals)
+// group 0 (7) = rows 1, 4, 5 (2, 5, 6); group 1 (-2) = rows 0, 2, 3 (1, 3, 4); group 2 (3) = empty
+// EXPECT: t = [13, 8, 0]
+// f: group 0 = 3 * (3 * 2 + 5) + 6 = 39; group 1 = 3 * (3 * 1 + 3) + 4 = 22
+// EXPECT: f = [39, 22, 0]
+// EXPECT: n = [3, 3, 0]
+// EXPECT: c = [3, 3, 0]

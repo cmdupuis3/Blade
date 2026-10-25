@@ -1,0 +1,32 @@
+// TEST: CSE never merges a caller value into an inlined callee's released pool
+// ============================================================================
+// `driver` inlines `kernel` for its input legs. After the call it builds z with
+// the SAME named cell kernel as kernel's y2 and folds it with a cube kernel:
+// without the return-boundary barrier, CSE would merge z into y2 -- released
+// at the boundary -- and the cube fold would read freed storage (W2-4 third
+// review hole 2). kernel's return `sqrt(s)` repeats its own `let r = sqrt(s)`
+// (a builtin: a user call in the callee would decline the inline, round 7):
+// the fresh return let it becomes is a CSE duplicate of r, PINNED (the let
+// right before the event is kept; `blade test optimize` asserts both lets
+// survive). Values are the as-written ones with CSE on.
+// ============================================================================
+type Ix = Idx<1003>
+function inputs(m: Int64) -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute
+}
+function cell(u: Float64, v: Float64) -> Float64 = 2.0 * u + v
+function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {
+    let y2 = method_for(zip(x, y)) <@> lambda(u, v) -> cell(u, v) |> compute
+    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
+    let r = sqrt(s)
+    sqrt(s)
+}
+function driver(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {
+    let k = kernel(x, y)
+    let t = reduce(x, (+)) + reduce(y, (+))
+    let z = method_for(zip(x, y)) <@> lambda(u, v) -> cell(u, v) |> compute
+    let c = reduce(method_for(z) <@> lambda(w) -> w * w * w, lambda(p, q) -> p + q, 0.0)
+    k + 10.0 * t + c
+}
+let res = driver(inputs(7), inputs(5))
+// EXPECT: res = 994643.469893706

@@ -175,6 +175,34 @@ let recStepOmpEnabled () = gateOn "BLADE_REC_STEP_OMP"
 /// DECLINED ("disabled by BLADE_EPILOGUE_LEGS") with its five-party matrix.
 /// Unset = on.
 let epilogueLegsEnabled () = gateOn "BLADE_EPILOGUE_LEGS"
+/// The KEPT ONE-LEVEL INLINE (a plan whose producer sits in a callee the legs'
+/// statement calls, saxpy's `kernel(x, y)`) is OPT-IN: only an EXPLICIT
+/// `BLADE_EPILOGUE_LEGS=1` (`1` / `on` / `true`) retains it. Its lifetime audit is
+/// INCOMPLETE (G69, the seventh diff look: a fold kernel a non-owned callee
+/// unit names is not audited, and the LLVM lane may expand an allocating call
+/// inside it with no pool scope), so unset keeps every plan whose producer is
+/// already in the region and declines the inline-needing ones. Per call.
+/// The decline text of an inline-needing plan in the default build.
+let epilogueInlineOptInDecline = "the kept one-level inline is opt-in (BLADE_EPILOGUE_LEGS=1): its lifetime audit is INCOMPLETE (G69: a fold kernel named by a non-owned unit is not audited); the legs stay in their joined pass and the call stays"
+let epilogueLegsInlineOptIn () = Blade.Toolchain.envSwitch "BLADE_EPILOGUE_LEGS" = Blade.Toolchain.SwitchOn
+/// BLADE_HASH_JOIN=0|off keeps an inline equijoin compound
+/// (`compound(products_map, mask(equal_keys_map, identity))`, round 3 W3-2,
+/// item T2, `planEquiJoin`) in the as-written six passes over all N x M pairs
+/// (the `==` Bool pool, the identity mask, the bit-vector copy, the hashed
+/// rank-2 index, the payload pool, the scatter). The admission still runs and
+/// records `hash-join` DECLINED ("disabled by BLADE_HASH_JOIN") with its
+/// five-party matrix. Unset = on.
+let hashJoinEnabled () = gateOn "BLADE_HASH_JOIN"
+/// BLADE_JOIN_REPORT=1|on: COMPILE-TIME instrumentation of the hash join (not
+/// an optimizer gate -- no value, schedule or store changes): the C++ lane
+/// EMITS a `[join] ...` build report (stderr) after each join's counting
+/// pass, printed unconditionally at run time by that executable. Unset / `0`
+/// = no report code at all (the default: a run-time switch would cost a
+/// `getenv` inside the timed region). Read by the compiler only, per call;
+/// `blade plan` names the setting in the `hash-join` record; the suite clears
+/// it. BLADE_MEMBER_VERBOSE stays the membership builds' RUN-TIME switch and
+/// has no effect on the join.
+let joinReportEnabled () = Blade.Toolchain.envFlag "BLADE_JOIN_REPORT" false
 /// The C++ lane's BLAS gate (`LinAlgPatterns.blasAvailable`, which compiles
 /// after this file), installed by Lowering before the optimizer runs: the
 /// epilogue-legs planner keeps an inline only when the cell epilogue it rides
@@ -187,7 +215,7 @@ let mutable blasGateProbe : unit -> bool = fun () -> false
 /// off for its reference lane, so a new pass's gate belongs in this list the
 /// day the pass lands -- a gate missing here is a pass the differential
 /// cannot see.
-let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_HOIST"; "BLADE_HOT_ROW"; "BLADE_CELL_EPILOGUE"; "BLADE_COMPACTION_FUSION"; "BLADE_COMPACT_ROW_CLASSES"; "BLADE_SIBLING_FOLDS"; "BLADE_REC_STEP_OMP"; "BLADE_MEMBER_HOIST"; "BLADE_EPILOGUE_LEGS" ]
+let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_HOIST"; "BLADE_HOT_ROW"; "BLADE_CELL_EPILOGUE"; "BLADE_COMPACTION_FUSION"; "BLADE_COMPACT_ROW_CLASSES"; "BLADE_SIBLING_FOLDS"; "BLADE_REC_STEP_OMP"; "BLADE_MEMBER_HOIST"; "BLADE_EPILOGUE_LEGS"; "BLADE_ORBIT_ACTIONS"; "BLADE_HASH_JOIN"; "BLADE_GROUP_AGG" ]
 
 /// A gate's KNOB MIRROR: a value that keeps a pass's PREVIOUS version, or
 /// selects an opt-in variant (not the pass off), for the passes whose forms
@@ -198,7 +226,7 @@ let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE
 /// against its predecessor as well as against no optimizer at all (the
 /// all-off comparison alone never runs the predecessor). Each gate here is
 /// also in `optimizerGates`.
-let optimizerGateMirrors : (string * string) list = [ ("BLADE_COMPACTION_FUSION", "b4"); ("BLADE_COMPACTION_FUSION", "gather"); ("BLADE_COMPACTION_FUSION", "unshared") ]
+let optimizerGateMirrors : (string * string) list = [ ("BLADE_COMPACTION_FUSION", "b4"); ("BLADE_COMPACTION_FUSION", "gather"); ("BLADE_COMPACTION_FUSION", "unshared"); ("BLADE_EPILOGUE_LEGS", "1") ]
 
 /// The decline reason for a LICENSED row prodsum (B2r applies only where
 /// the build keeps the serial association). `lanes` RESERVES the opt-in
@@ -623,6 +651,13 @@ let planPoolReuse (modul: IRModule) : unit =
         let refsAt = positions |> List.map (fun (_, v) -> refsOf v) |> Array.ofList
         let valueAt = positions |> List.map snd |> Array.ofList
         // Candidate pools: (position, let id option, shape, bytes).
+        // A7c round 4: a pool an inlined call's return-boundary event names is
+        // NEVER a reuse candidate (neither donor nor reuser): its storage is
+        // released at the event, so joining it with a caller pool would move a
+        // free across the boundary. (This also forgoes the reuse the uninlined
+        // callee could do among its OWN pools -- the documented exclusion.)
+        let eventPools =
+            lets |> List.collect (fun (_, v) -> match v with IRReleasePools (_, _, ps) -> ps |> List.map fst | _ -> []) |> Set.ofList
         let candidateAt (k: int) =
             let (idOpt, v) = positions.[k]
             // A body-level `let` is reassignable in its own scope, so the
@@ -632,7 +667,7 @@ let planPoolReuse (modul: IRModule) : unit =
                 (match idOpt with
                     | Some _ -> materialized v
                     | None -> (match collapse v with IRCompute (IRApplyCombinator _) | IRApplyCombinator _ -> true | _ -> false))
-            if not ok then None
+            if not ok || (match idOpt with Some id -> eventPools.Contains id | None -> false) then None
             else
                 match densePoolShape (typeOf (collapse v)) with
                 | Some (elem, exts) ->
@@ -924,6 +959,25 @@ let private writeJoin (a: WriteProvenance) (b: WriteProvenance) =
 
 /// A value of this type holds no array storage (scalars, units, index tags,
 /// tuples of those). Public for the C++ kernel-body copy (gap G46).
+/// A7c round 6: the value types an inlined callee's non-owned lets may have
+/// -- values that allocate in NEITHER lane: numeric and Bool / complex
+/// scalars, index-tagged values whose INNER type is one of those, unit, and
+/// tuples of those (bare Nat excluded: the LLVM lane has no scalar arm for it). String is EXCLUDED (the
+/// C++ lane's std::string owns heap storage that follows its scope), as is
+/// every array, loop, computation and function type. Deliberately separate
+/// from holdsNoStorage (an array-storage predicate other passes share).
+let allocationFreeValueType (t: IRType) : bool =
+    let rec go (t: IRType) =
+        match stripUnits t with
+        | IRTScalar (ETFloat64 | ETFloat32 | ETInt64 | ETInt32 | ETBool | ETComplex64 | ETComplex128) -> true
+        // an index tag is judged by its INNER type (a string-valued EnumIdx label
+        // is a std::string in C++); bare Nat is excluded (no LLVM scalar arm)
+        | IRTIdxTagged (inner, _) -> go inner
+        | IRTUnit -> true
+        | IRTTuple ts -> ts |> List.forall go
+        | _ -> false
+    go t
+
 let holdsNoStorage (t: IRType) : bool =
     let rec go (t: IRType) =
         match stripUnits t with
@@ -1732,11 +1786,29 @@ let cseModule (modul: IRModule) : IRModule =
                          | Some dv -> for b in collectVarRefsIR dv do work.Push b
                          | None -> ())
                 acc
+            // A7c round 4: an inlined call's RETURN-BOUNDARY EVENT (IRReleasePools)
+            // is a BARRIER -- no equivalence crosses it, so a later value equal to
+            // a callee computation is never merged into the released pool -- and
+            // the pools it names, and the let right before it (the call's
+            // evaluated return), are PINNED: never dropped, never redirected (a
+            // callee pool merged into earlier caller storage would make the event
+            // release the caller's pool).
+            let pinned =
+                let acc = System.Collections.Generic.HashSet<IRId>()
+                let arr = List.toArray lets
+                arr |> Array.iteri (fun i (_, v) ->
+                    match v with
+                    | IRReleasePools (_, _, pools) ->
+                        for (pid, _) in pools do acc.Add pid |> ignore
+                        if i > 0 then acc.Add (fst arr.[i - 1]) |> ignore
+                    | _ -> ())
+                acc
             for (id, v0) in lets do
                 let v = applySubst v0
                 let vf = factsOfValue v
+                let isEvent = match v with IRReleasePools _ -> true | _ -> false
                 let dup =
-                    if trivial v || not vf.Repeatable || exposed.Contains id then None
+                    if isEvent || trivial v || not vf.Repeatable || exposed.Contains id || pinned.Contains id then None
                     else
                         let cv = canon v
                         match available.TryGetValue cv with
@@ -1747,7 +1819,7 @@ let cseModule (modul: IRModule) : IRModule =
                     subst.[id] <- earlier
                     pairs.Add((id, earlier))
                 | None -> kept.Add((id, v))
-                if vf.MayWrite then available.Clear()
+                if vf.MayWrite || isEvent then available.Clear()
             if pairs.Count = 0 then f
             elif not enabled then
                 Blade.Effects.Decisions.record
@@ -1993,7 +2065,7 @@ let hoistKernelInvariantsModule (builder: IRBuilder) (programFuncs: IRCallable l
                     (match Map.tryFind id funcs with
                      | Some g -> if not (g.Captures |> List.forall (fun c -> captureIds.Contains c.Id)) then ok <- false
                      | None -> ok <- false)
-                | IRParam _ | IRNth | IRArity _ | IRPolyIndex _ | IRPolyTail _ | IRZero _ | IRUninit _
+                | IRParam _ | IRNth | IRArity _ | IRPolyIndex _ | IRPolyTail _ | IRZero _ | IRAddIdentity _ | IRUninit _
                 | IRLet _ | IRMatch _ | IRForRange _ | IRAssign _ | IRBreakIf _ | IRConstraintCheck _ -> ok <- false
                 | _ -> ()) e
         ok
@@ -2668,41 +2740,6 @@ type EpilogueLegPlan = {
     DecidedLlvm: bool ref
 }
 
-/// THE INLINED CALL'S RETURN BOUNDARY (W2-4 second review, NEW 1-2): the
-/// sibling pass, when it keeps a call inlined for producer-input legs, records
-/// ONE entry per inlined CALL (never per plan or per join; several plans may
-/// share one call): the let that ends the call's inlined spine -- its last
-/// statement, i.e. the evaluated scalar return (inlineJudge binds a non-atom
-/// return to a fresh final let; an atom return names the spine's last let) --
-/// and the callee's array lets (its stored `|> compute` pools), which the
-/// call's return used to free. Every callee statement precedes that let by
-/// construction (the inlined spine is contiguous), so the pools have no read
-/// after it: the C++ lane releases them right behind that let's emission,
-/// once, through the scope frame's own free (or main's plain dense free when
-/// no frame tracks them). The boundary is independent of where any join is
-/// inserted. KNOWN INCOMPLETE (G69, round 4 pending): the join rewrite can
-/// delete the boundary let, CSE runs after this table and can merge a
-/// caller's equal map into the released pool, function-body return lets
-/// bypass the renderer arm, and the LLVM lane -- which frees an outlined
-/// callee's pools at its scalar return -- retains them under the inline.
-type InlineReturnEntry = {
-    /// The let whose emission ends the inlined call (the table key).
-    BoundaryLetId: IRId
-    /// The callee's pools, with their types (the dense free's element).
-    Pools: (IRId * IRType) list
-    /// The call, as written (records and comments).
-    Call: string
-    /// Re-entry guard while the boundary let itself is emitted.
-    Guard: bool ref
-}
-
-module InlineReturnTable =
-    open System.Threading
-    let private cell = new AsyncLocal<Map<IRId, InlineReturnEntry>>()
-    let private get () = match box cell.Value with null -> Map.empty | _ -> cell.Value
-    let reset () = cell.Value <- Map.empty
-    let record (e: InlineReturnEntry) = cell.Value <- Map.add e.BoundaryLetId e (get ())
-    let tryBoundary (id: IRId) : InlineReturnEntry option = Map.tryFind id (get ())
 
 module EpilogueLegTable =
     open System.Threading
@@ -2722,6 +2759,52 @@ module EpilogueLegTable =
     let tryProducer (id: IRId) : EpilogueLegPlan option = Map.tryFind id (get ()).ByProducer
     let tryJoin (id: IRId) : EpilogueLegPlan option = Map.tryFind id (get ()).ByJoin
 
+/// Source spans of user calls (W2-4 round 9, BL7005): Lowering records each
+/// `f(args)` it lowers to an IRApp, keyed by the callee and its argument
+/// atoms, so the sibling pass can name the span of the call it inlined for
+/// legs. A lookup that does not resolve to exactly one span gives noSpan (the
+/// warning then still names the call by its text). Per async flow.
+module CallSpanTable =
+    open System.Threading
+    let private cell = new AsyncLocal<Map<IRId * string list, Blade.Ast.Span list>>()
+    let private get () = match box cell.Value with null -> Map.empty | _ -> cell.Value
+    let reset () = cell.Value <- Map.empty
+    let argKey (a: IRExpr) = match a with IRVar (id, _) -> $"v{id}" | IRLit l -> sprintf "l%A" l | _ -> "?"
+    let record (fid: IRId) (args: IRExpr list) (span: Blade.Ast.Span) =
+        let k = (fid, args |> List.map argKey)
+        let m = get ()
+        cell.Value <- Map.add k (span :: (match Map.tryFind k m with Some l -> l | None -> [])) m
+    /// The call's span: its exact key's one span, else the callee's only span.
+    let tryFind (call: IRExpr) : Blade.Ast.Span option =
+        match call with
+        | IRApp (IRVar (fid, _), args, _) ->
+            let m = get ()
+            let one (l: Blade.Ast.Span list) = match List.distinct l with [ s ] -> Some s | _ -> None
+            match Map.tryFind (fid, args |> List.map argKey) m |> Option.bind one with
+            | Some s -> Some s
+            | None -> m |> Map.toList |> List.filter (fun ((f, _), _) -> f = fid) |> List.collect snd |> one
+        | _ -> None
+
+/// The span of each kept inline's call, keyed by its return-boundary event's
+/// region start (the first owned pool's binder, unique per event).
+module InlineEventSpans =
+    open System.Threading
+    let private cell = new AsyncLocal<Map<IRId, Blade.Ast.Span>>()
+    let private get () = match box cell.Value with null -> Map.empty | _ -> cell.Value
+    let reset () = cell.Value <- Map.empty
+    let record (start: IRId) (span: Blade.Ast.Span) = cell.Value <- Map.add start span (get ())
+    let tryFind (start: IRId) = Map.tryFind start (get ())
+
+/// BL7005 (W2-4 round 9, the user's decision): a lane's emitter RETAINED the
+/// opt-in kept one-level inline of `call` (it reached the call's
+/// return-boundary event, whether or not the lane's fused form carried the
+/// legs). One warning per event per lane; the default build declines the
+/// inline before any event exists, so it never warns.
+let noteKeptInlineRetained (lane: string) (call: string) (start: IRId) =
+    let span = match InlineEventSpans.tryFind start with Some s -> s | None -> Blade.Ast.noSpan
+    Blade.Diagnostics.EmitterWarnings.add $"{lane}:{start}"
+        (Blade.Diagnostics.mkWarning "BL7005" Blade.Diagnostics.PhBackend span
+            $"experimental: the kept one-level inline (BLADE_EPILOGUE_LEGS=1) of {call} has an INCOMPLETE lifetime audit (G69: allocations made by the kernels it names may survive its return); the default build declines it")
 /// One `epilogue-legs` v1 decision (the planner's admission with its
 /// five-party matrix; each emitter records its per-lane outcome under the
 /// same rule).
@@ -3595,7 +3678,7 @@ let embeddedExtentExprs (e: IRExpr) : IRExpr list =
         let addIx (ixs: IRIndexType list) = for ix in ixs do found.Add ix.Extent
         iterIRExpr (fun n ->
             match n with
-            | IRVar (_, ty) | IRParam (_, _, ty) | IRZero ty | IRUninit ty | IRApp (_, _, ty) -> addTy ty
+            | IRVar (_, ty) | IRParam (_, _, ty) | IRZero ty | IRAddIdentity ty | IRUninit ty | IRApp (_, _, ty) -> addTy ty
             | IRArrayLit (_, at) -> found.AddRange(arrayTypeExtentExprs at)
             | IRApplyCombinator info ->
                 addTy info.OutputType
@@ -3736,6 +3819,39 @@ let storedArrayProof (modul: IRModule) : IRBinding -> Result<string * IRBinding 
         | _ -> Error $"`{b.Name}`'s value is not a form v1 proves stored (an array literal, `|> compute`, a compound, an eager set operation, a call's result or a provider read, through aliases)"
     storageOf Set.empty
 
+/// A PURE, TOTAL scalar body over the parameters `ps`: literals, the
+/// parameters, arithmetic that cannot trap (no integer `/` `%` `^`, no
+/// float->int cast), comparisons, logic, `if`. Anything else -- a call, a
+/// capture, an intrinsic that may be domain-checked -- is not judged (false).
+/// ONE closed whitelist, shared by compaction fusion's predicate admission
+/// (one parameter) and the hash equijoin's kernel admission (two).
+let totalScalarOver (ps: IRParam list) (e: IRExpr) : bool =
+    let isP (x: IRExpr) =
+        ps |> List.exists (fun p ->
+            match x with
+            | IRVar (v, _) -> v = p.VarId
+            | IRParam (_, i, _) -> i = p.Index
+            | _ -> false)
+    let isFloatTy (t: IRType) =
+        match stripUnits t with
+        | IRTScalar (ETFloat64 | ETFloat32) -> true
+        | _ -> false
+    let rec go (e: IRExpr) =
+        match e with
+        | _ when isP e -> true
+        | IRLit _ -> true
+        | IRBinOp (_, op, l, r, _) ->
+            let opOk =
+                match op with
+                | IRAdd | IRSub | IRMul | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe | IRAnd | IROr -> true
+                | IRDiv -> isFloatTy (typeOf l) && isFloatTy (typeOf r)
+                | _ -> false
+            opOk && go l && go r
+        | IRUnaryOp ((IRNeg | IRNot), x) -> go x
+        | IRIf (c, t, f) -> go c && go t && go f
+        | _ -> false
+    go e
+
 /// Plan compaction fusion over the module's top-level bindings (`compound`
 /// is top-level only, BL6002). Records into `CompactionTable` and the
 /// decision collector (`compaction-fusion`); the IR is untouched.
@@ -3820,20 +3936,9 @@ let planCompactionFusion (programFuncs: IRCallable list) (foreignRefs: Set<IRId>
     // parameter, arithmetic that cannot trap (no integer `/` `%` `^`, no
     // float->int cast), comparisons, logic, `if`. Anything else -- a call, a
     // capture, an intrinsic that may be domain-checked -- is not judged.
-    let rec totalScalar (p: IRParam) (e: IRExpr) =
-        match e with
-        | _ when isParamRef p e -> true
-        | IRLit _ -> true
-        | IRBinOp (_, op, l, r, _) ->
-            let opOk =
-                match op with
-                | IRAdd | IRSub | IRMul | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe | IRAnd | IROr -> true
-                | IRDiv -> isFloatTy (typeOf l) && isFloatTy (typeOf r)
-                | _ -> false
-            opOk && totalScalar p l && totalScalar p r
-        | IRUnaryOp ((IRNeg | IRNot), x) -> totalScalar p x
-        | IRIf (c, t, f) -> totalScalar p c && totalScalar p t && totalScalar p f
-        | _ -> false
+    // (The whitelist itself is `totalScalarOver`, shared since round 3 W3-2
+    // with the hash equijoin's kernel admission.)
+    let totalScalar (p: IRParam) (e: IRExpr) = totalScalarOver [ p ] e
     let squareMap (info: ApplyInfo) (yId: IRId) : bool =
         let overY = info.Arrays |> List.forall (function IRVar (a, _) -> a = yId | _ -> false)
         let shapeOk =
@@ -4682,6 +4787,548 @@ let planCompactionFusion (programFuncs: IRCallable list) (foreignRefs: Set<IRId>
             for r in foldRecords do r ()
         | _ -> ()
 
+// --- Hash equijoin (round 3 W3-2, item T2; rule `hash-join v1`) -------------
+//
+// THE SHAPE. A top-level rank-2 compound written INLINE over two outer
+// products,
+//
+//   let J = compound(method_for(a1, b1) <@> pk, mask(method_for(a0, b0) <@> lambda(l, r) -> l == r, lambda(e) -> e))
+//
+// with a0 / a1 over the LEFT nominal axis and b0 / b1 over the RIGHT one,
+// keys a0 / b0 Int64 (plain, or a positional Idx<K> tag), is the equijoin of
+// a0 and b0 with payload pk(a1[i], b1[j]). As written it runs SIX passes over
+// all N x M pairs (the `==` Bool pool, the identity mask through a wrapper,
+// the std::vector<bool> copy, compound_index_t<2>'s hashed enumeration, the
+// payload pool, the branchless scatter) and keeps ~20 B per pair live.
+//
+// THE PHYSICAL FORM (C++ lane, CodeGenBinding.genEquiJoinBinding; the C core
+// blade_join_* in blade_member.h): a CSR over the RIGHT keys b0 -- a counting
+// sort when the key span is small (a positional key type always takes it), an
+// open-addressing key -> bucket map otherwise -- whose bucket rows are filled
+// FORWARD (stable: every bucket lists its right rows j ascending); a COUNTING
+// pass over the left keys sizes J; then the probe walks i ascending and, for
+// each, EVERY right row of its bucket ascending, storing pk(a1[i], b1[j]) at
+// compact[q++]. Left-major / right-minor IS the compound's lex storage order
+// (BladeLex), so J's cells and their order are the as-written ones: bags
+// survive (duplicates on both sides kept), an out-of-domain or negative left
+// key matches exactly the right rows equal to it (none, for a key no right row
+// holds -- never BL8006: equality has no domain check). J stays STORED (its
+// compact buffer) with a CARDINALITY-ONLY compound_index_t<2> (dense extents
+// N x M, cardinality |J|; no tuple table, reverse hash or mask -- a lookup
+// through the absent table is BL9002). The consumers -- `extents(J)`, folds
+// over J, printing -- are untouched: they read the stored J as before.
+//
+// LEGALITY. The skipped work is `==` on every pair and pk on every
+// non-matching pair: pure and total (the closed `totalScalarOver` whitelist),
+// so skipping it has no effect. The dropped REPRESENTATIONS (the N x M payload
+// and Bool pools, the identity-mask pool, its bit vector, the tuple table and
+// reverse hash) are compiler temporaries of the inline spelling: the demand
+// census proves no consumer reads anything but J's compact buffer and its
+// cardinality. The NAMED R4 spelling (`equal_keys`, `keep`, `products` as
+// let-bound arrays) keeps every named array stored and is declined by name.
+//
+// FIVE PARTIES (equiJoinAdmits, every write query through the shared
+// `scheduleMayWriteIn programFuncs modul`): producers (the four sources,
+// proved stored by `storedArrayProof`, never assigned, write-free payloads),
+// the producer kernels (pk, `==`, the identity predicate: write-free, total,
+// capture-free, no team / device request), the consumer (J's whole payload;
+// every use of J census-certified, each staying at its own site), the outer
+// fold kernels and seeds (named, never moved), the intervening bindings (none:
+// the build, the counting pass and the probe all run at J's own site, reading
+// the four stored sources there exactly where the six passes read them), and
+// parallel bodies (none: every pass is serial).
+//
+// Lanes: C++ v1. The LLVM lane refuses every rank-2 compound already (the
+// program falls back to C++) and records `declined -- llvm lane: the hash
+// equijoin is not built in this lane (v1.1)`. The interpreter runs the
+// as-written six-pass tree: the independent oracle of `blade test interp`.
+
+/// How the right keys are bucketed (the plan's statement; the run-time
+/// chooser in blade_member.h decides the actual form from (M, lo, hi)).
+type EquiJoinKeyRegime =
+    /// The right key's element type is a positional index type `Idx<K>`
+    /// (static K <= 2^20): the counting sort over the keys' [lo, hi] is
+    /// forced (span <= K for every well-typed cell; a cell outside [0, K)
+    /// still buckets correctly -- the span is measured, never assumed).
+    | JoinPositional of k: int64
+    /// Plain Int64 keys: the counting sort when the span is within
+    /// max(4 M, 4096) cells (and 2^26), else the open-addressing hash.
+    | JoinDynamic
+
+type EquiJoinPlan = {
+    CompoundId: IRId
+    CompoundName: string
+    /// The four stored sources as IR references: keys (a0, b0) and payloads
+    /// (a1, b1); "left" is the mask's FIRST outer-product operand (the major
+    /// axis of J's lex order), "right" its second.
+    LeftKey: IRExpr
+    RightKey: IRExpr
+    LeftPay: IRExpr
+    RightPay: IRExpr
+    LeftKeyName: string
+    RightKeyName: string
+    /// pk, the payload kernel (a callable reference), applied as pk(a1[i], b1[j]).
+    PayloadKernel: IRExpr
+    KeyRegime: EquiJoinKeyRegime
+    /// The C++ emission placed it (set by genEquiJoinBinding).
+    EmittedCpp: bool ref
+}
+
+/// AsyncLocal like CompactionTable; reset once per program in
+/// `lowerTypedProgram`, because let ids restart per compile.
+module EquiJoinTable =
+    open System.Threading
+    let private cell = new AsyncLocal<Map<IRId, EquiJoinPlan>>()
+    let private get () = match box cell.Value with null -> Map.empty | _ -> cell.Value
+    let reset () = cell.Value <- Map.empty
+    let record (p: EquiJoinPlan) = cell.Value <- Map.add p.CompoundId p (get ())
+    let tryCompound (id: IRId) : EquiJoinPlan option = Map.tryFind id (get ())
+    let all () : EquiJoinPlan list = get () |> Map.toList |> List.map snd
+
+/// The C core's form chooser (`blade_join_choose_i64`, blade_member.h)
+/// restated for the plan record of a LITERAL right key: `true` = the counting
+/// sort (DIRECT), `false` = the hash. Keep the two in step (the cli block's C
+/// core driver compares them case by case).
+let joinChooseDirect (m: int64) (lo: int64) (hi: int64) (positional: bool) : bool =
+    if m <= 0L then true
+    else
+    let span = uint64 hi - uint64 lo
+    if positional && span < (1UL <<< 20) then true
+    elif span >= (1UL <<< 26) then false
+    else
+        let limit = if uint64 m * 4UL > 4096UL then uint64 m * 4UL else 4096UL
+        span < limit
+
+/// Plan the hash equijoin over the module's top-level rank-2 compounds
+/// (`compound` is top-level only, BL6002). Records into `EquiJoinTable` and
+/// the decision collector (`hash-join`); the IR is untouched. Every rank >= 2
+/// compound gets one record (applied, or the first failed condition).
+let planEquiJoin (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (modul: IRModule) : unit =
+    let funcs = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+    let facts = cseFactsOf funcs
+    let writes = scheduleMayWriteIn programFuncs modul
+    let wrote (e: IRExpr) = (facts e).MayWrite || writes e
+    let enabled = hashJoinEnabled ()
+    let decide (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
+        Blade.Effects.Decisions.record
+            { Blade.Effects.Rule = "hash-join"; Version = 1
+              Span = declSpanOf subject; Subject = subject
+              Outcome = outcome; Evidence = evidence }
+    let arr = List.toArray modul.Bindings
+    let indexOf (id: IRId) = arr |> Array.tryFindIndex (fun b -> b.Id = id)
+    let refs (e: IRExpr) = collectVarRefsIR e
+    let assignsTo (id: IRId) (e: IRExpr) =
+        let mutable hit = false
+        iterIRExpr (fun n ->
+            match n with
+            | IRAssign (target, _) when Set.contains id (refs target) -> hit <- true
+            | _ -> ()) e
+        hit
+    let assignedAnywhere (id: IRId) =
+        (arr |> Array.exists (fun b -> bindingPayload modul b |> List.exists (assignsTo id)))
+        || (modul.Functions |> List.exists (fun f -> assignsTo id f.Body))
+    let payloadWrites (b: IRBinding) = bindingPayload modul b |> List.exists wrote
+    let isParamRef (p: IRParam) (e: IRExpr) =
+        match e with
+        | IRVar (v, _) -> v = p.VarId
+        | IRParam (_, i, _) -> i = p.Index
+        | _ -> false
+    let nodeName (e: IRExpr) = (Microsoft.FSharp.Reflection.FSharpValue.GetUnionFields(e, typeof<IRExpr>) |> fst).Name
+    // An outer product over exactly two plain operands, possibly behind the
+    // `|> compute` the user wrote or the trivial `let t = apply; t` a lift
+    // may wrap it in. Anything else (a lifted statement ahead of the apply,
+    // a zip, a reynolds kernel, a rank-raising kernel) is not the shape.
+    let rec peelApply (e: IRExpr) : ApplyInfo option =
+        match e with
+        | IRCompute inner -> peelApply inner
+        | IRLet (t, v, IRVar (t', _)) when t = t' -> peelApply v
+        | IRApplyCombinator info -> Some info
+        | _ -> None
+    let outerOperands (info: ApplyInfo) : Result<IRExpr * IRExpr, string> =
+        if info.IsCoIteration then Error "a co-iteration (`zip`), not an outer product"
+        elif info.HasReynolds then Error "a reynolds kernel"
+        elif info.KernelOutputRank <> 0 then Error "a kernel with an array-valued cell"
+        else
+        match info.Arrays with
+        | [ (IRVar _ as l); (IRVar _ as r) ] -> Ok (l, r)
+        | [ _; _ ] -> Error "an outer product whose operands are not named stored arrays"
+        | xs -> Error $"an outer product over {xs.Length} operand(s) (v1 joins exactly two axes)"
+    let nameOfVar (e: IRExpr) =
+        match e with
+        | IRVar (id, _) -> (match indexOf id with Some i -> arr.[i].Name | None -> $"v{id}")
+        | _ -> "?"
+    let axisOf (e: IRExpr) : IRIndexType option =
+        match e with
+        | IRVar (id, _) ->
+            match indexOf id with
+            | Some i ->
+                (match stripUnits arr.[i].Type with
+                 | ArrayElem a when not a.IsVirtual ->
+                    (match a.IndexTypes with
+                     | [ ix ] when ix.IxKind = IxKPlain && ix.Rank = 1 && ix.Symmetry = SymNone -> Some ix
+                     | _ -> None)
+                 | _ -> None)
+            | None -> None
+        | _ -> None
+    // Index IDENTITY, never extent: the same named index type (its tag) or
+    // the same index record.
+    let sameAxis (a: IRIndexType) (b: IRIndexType) =
+        (a.Tag.IsSome && a.Tag = b.Tag) || a.Id = b.Id
+    let elemOfVar (e: IRExpr) : IRType option =
+        match e with
+        | IRVar (id, _) ->
+            (match indexOf id with
+             | Some i -> (match stripUnits arr.[i].Type with ArrayElem a -> Some (stripUnits a.ElemType) | _ -> None)
+             | None -> None)
+        | _ -> None
+    // A positional index tag's static extent, through aliases; None for an
+    // EnumIdx (its cells hold positions in the enumeration) or an unknown tag.
+    let rec positionalExtent (fuel: int) (tag: string) : Result<int64, string> =
+        if fuel <= 0 then Error $"the index tag `{tag}` does not resolve"
+        else
+        match modul.Types |> List.tryPick (fun td ->
+                match td with
+                | IRTDIndexType (n, ix) when n = tag -> Some (Choice1Of3 ix)
+                | IRTDEnumIdx (n, _, _) when n = tag -> Some (Choice2Of3 ())
+                | IRTDAlias (n, IRTIdxTagged (_, IRefNamed t2)) when n = tag && t2 <> tag -> Some (Choice3Of3 t2)
+                | _ -> None) with
+        | Some (Choice1Of3 ix) ->
+            (match ix.Extent with
+             | IRLit (IRLitInt k) when k > 0L && ix.Rank = 1 && ix.IxKind = IxKPlain -> Ok k
+             | _ -> Error $"the positional key type `{tag}` has no static extent")
+        | Some (Choice2Of3 ()) -> Error $"an EnumIdx key `{tag}` (its cells hold positions in the enumeration; v1.1)"
+        | Some (Choice3Of3 t2) -> positionalExtent (fuel - 1) t2
+        | None -> Error $"the index tag `{tag}` does not resolve to a declared index type"
+    // The key's class: Ok None = plain Int64, Ok (Some K) = positional Idx<K>.
+    let keyClass (e: IRExpr) : Result<int64 option, string> =
+        match elemOfVar e with
+        | Some (IRTScalar ETInt64) -> Ok None
+        | Some (IRTIdxTagged (IRTScalar ETInt64, IRefNamed tag)) -> positionalExtent 16 tag |> Result.map Some
+        | Some (IRTIdxTagged (IRTScalar ETInt64, IRefAnon (_, IRLit (IRLitInt k)))) when k > 0L -> Ok (Some k)
+        | Some (IRTScalar (ETFloat64 | ETFloat32)) -> Error $"float keys (`{nameOfVar e}`): v1 joins exact integer keys only"
+        | Some (IRTScalar ETInt32) -> Error $"Int32 keys (`{nameOfVar e}`): v1 joins Int64 keys"
+        | Some (IRTScalar ETBool) -> Error $"Bool keys (`{nameOfVar e}`): v1 joins Int64 keys"
+        | Some (IRTScalar ETString) -> Error $"String keys (`{nameOfVar e}`): v1 joins Int64 keys"
+        | Some _ -> Error $"the key `{nameOfVar e}` is not an Int64 (plain or positional) element (v1 joins Int64 keys)"
+        | None -> Error $"the key `{nameOfVar e}` is not a top-level array binding"
+    let storedProof = storedArrayProof modul
+    // ---- THE DEMAND CENSUS on J -------------------------------------------
+    // Fail-safe: `Ok` only when EVERY occurrence of J anywhere in the program
+    // (every module binding and side table, every function body, signature and
+    // capture list, this module's and the program's, another module's
+    // reference) is `extents(J)` or `reduce(J, k[, init])` with k a resolved,
+    // capture-free, pure total two-parameter kernel -- the forms that read J's
+    // compact buffer and cardinality alone. Printing J (a top-level binding's
+    // print pass, not an IR use) reads `J.size()` cells of `J.data` in the C++
+    // lane, the cardinality and the buffer only, and is certified with them.
+    // Any other occurrence -- a keyed read, a partial index, a `present` /
+    // `<|:>` query, an argument, an alias, a tuple, a capture, a map over J, a
+    // provider write, a type extent other than `extents(J)` -- needs the
+    // tuple table (and the mask), and is `Error <what demands it>`.
+    let allCallables = (modul.Functions @ programFuncs) |> List.distinctBy (fun f -> f.Id)
+    let joinDemand (jId: IRId) (jName: string) : Result<string list * (string * IRExpr * IRExpr option) list, string> =
+        let uses = ResizeArray<string>()
+        let folds = ResizeArray<string * IRExpr * IRExpr option>()
+        let note (u: string) = if not (uses.Contains u) then uses.Add u
+        let mutable demand : string option = None
+        let req (why: string) = if demand.IsNone then demand <- Some why
+        let isJ (e: IRExpr) = match e with IRVar (v, _) -> v = jId | _ -> false
+        let foldKernelOk (k: IRExpr) =
+            match resolveCallableIn funcs (fst (peelReynolds k)) with
+            | Some kc when kc.Captures.IsEmpty && kc.Params.Length = 2 && not kc.IsOmpParallel && not kc.IsCudaKernel && not kc.IsMpiParallel ->
+                totalScalarOver kc.Params kc.Body
+            | _ -> false
+        let rec scan (host: string) (where: string) (e: IRExpr) =
+            match e with
+            | IRExtent (a, _) when isJ a -> note "`extents` (the cardinality)"
+            | IRReduce (a, k, init) when isJ a ->
+                if foldKernelOk k then
+                    note "folds over the compact buffer (pure total kernels)"
+                    folds.Add((host, k, init))
+                else req $"a fold over `{jName}` in {where} whose kernel is not a resolved, capture-free, pure total scalar function without a team / device request (v1)"
+                scan host where k
+                init |> Option.iter (scan host where)
+            | IRIndex (a, _, _) when isJ a -> req $"a keyed read of `{jName}` in {where}"
+            | IRApp (_, args, _) when List.exists isJ args -> req $"`{jName}` passed as a call argument in {where}"
+            | IRTuple es when List.exists isJ es -> req $"`{jName}` stored in a tuple in {where}"
+            | IRAssign (t, _) when Set.contains jId (refs t) -> req $"an assignment to `{jName}` in {where}"
+            | IRLet (_, v, _) when isJ v -> req $"an alias of `{jName}` in {where}"
+            | IRVar (v, _) when v = jId -> req $"a use of `{jName}` the census does not certify, in {where}"
+            | _ ->
+                match childrenOf e |> List.tryFind isJ with
+                | Some _ -> req $"`{jName}` as an operand of {nodeName e} (a use the census does not certify) in {where}"
+                | None -> childrenOf e |> List.iter (scan host where)
+        let scanType (where: string) (t: IRType) =
+            for x in (try irTypeExtentExprs t with _ -> [ IRVar (jId, IRTUnit) ]) do scan "" $"the type of {where}" x
+        let scanEmbedded (where: string) (e: IRExpr) =
+            for x in (try embeddedExtentExprs e with _ -> [ IRVar (jId, IRTUnit) ]) do scan "" $"a type inside {where}" x
+        for root in compactionRoots allCallables modul do
+            match root with
+            | RootBindingValue b when b.Id = jId -> ()
+            | RootBindingValue b ->
+                let where = $"`{b.Name}`"
+                (match b.Value with
+                 | IRVar (v, _) when v = jId -> req $"the alias `{b.Name}` of `{jName}`"
+                 | _ -> scan b.Name where b.Value)
+                scanEmbedded where b.Value
+            | RootSideOperand (b, _, _) when b.Id = jId -> ()
+            | RootSideOperand (b, what, e) ->
+                let where = $"{what} of `{b.Name}`"
+                scan b.Name where e
+                scanEmbedded where e
+            | RootFunctionBody fn ->
+                let where = $"`{fn.SourceName}`"
+                (match fn.Captures |> List.tryFind (fun c -> c.Id = jId) with
+                 | Some _ -> req $"`{jName}` captured by {where}"
+                 | None -> ())
+                scan fn.SourceName where fn.Body
+                scanEmbedded where fn.Body
+            | RootType (where, ty) -> scanType where ty
+            | RootSourceRef (where, id) -> if id = jId then req $"{where} of `{jName}`"
+            | RootNameRef (where, nm) -> if nm = jName then req $"{where} `{jName}`"
+        if foreignRefs.Contains jId then req $"`{jName}` named in another module"
+        match demand with
+        | Some why -> Error why
+        | None ->
+            note "printing (the C++ print pass reads `size()` cells of the compact buffer)"
+            Ok (List.ofSeq uses, List.ofSeq folds)
+    let admit (ji: int) (dense: IRExpr) (mask: IRExpr) : Result<EquiJoinPlan * string list, string> =
+        let jb = arr.[ji]
+        let jName = jb.Name
+        let (|Fn|_|) (e: IRExpr) = resolveCallableIn funcs (fst (peelReynolds e))
+        let requests (c: IRCallable) = c.IsOmpParallel || c.IsCudaKernel || c.IsMpiParallel
+        // ---- the shape ----
+        let denseShape =
+            match dense with
+            | IRVar _ -> Error $"the dense operand is the named array `{nameOfVar dense}`: v1 takes the INLINE spelling only -- a named operand (the R4 spelling of a join, or any stored rank-2 array) stays stored (bench protocol), so no N x M representation can disappear"
+            | _ ->
+            match peelApply dense with
+            | None -> Error $"the dense operand is not an outer product written in place (it is {nodeName dense})"
+            | Some info -> outerOperands info |> Result.map (fun ops -> (info, ops)) |> Result.mapError (fun why -> $"the dense operand is {why}")
+        let maskShape =
+            match mask with
+            | IRVar _ -> Error $"the mask is the named array `{nameOfVar mask}`: v1 takes the INLINE spelling only -- a named operand (the R4 spelling of a join, or any stored rank-2 mask) stays stored (bench protocol), so no N x M representation can disappear"
+            | IRMask (src, pred) ->
+                (match peelApply src with
+                 | None -> Error $"the mask's source is not an outer product written in place (it is {nodeName src})"
+                 | Some info -> outerOperands info |> Result.map (fun ops -> (info, ops, pred)) |> Result.mapError (fun why -> $"the mask's source is {why}"))
+            | other -> Error $"the mask is not an inline `mask(..)` (it is {nodeName other})"
+        match denseShape, maskShape with
+        | Error why, _ | _, Error why -> Error why
+        | Ok (dInfo, (a1, b1)), Ok (mInfo, (a0, b0), pred) ->
+        // ---- the kernels: identity predicate, `l == r`, pk ----
+        let predWhy =
+            match pred with
+            | Fn pc when wrote pc.Body -> Some "the mask predicate may write (the shared write analysis): the as-written program evaluates it on every pair"
+            | Fn pc ->
+                (match pc.Params, pc.Captures with
+                 | [ p ], [] when isParamRef p pc.Body -> None
+                 | [ _ ], [] -> Some "a non-identity mask predicate (v1 takes `lambda(e) -> e` over the key-equality pool)"
+                 | _, _ :: _ -> Some "the mask predicate captures a value"
+                 | _ -> Some "the mask predicate is not a one-parameter function")
+            | _ -> Some "the mask predicate does not resolve to a callable"
+        let eqWhy =
+            match mInfo.Kernel with
+            | Fn ec when wrote ec.Body -> Some "the key kernel may write (the shared write analysis): the as-written program evaluates it on every pair"
+            | Fn ec ->
+                (match ec.Params, ec.Captures with
+                 | _, _ :: _ -> Some "the key kernel captures a value"
+                 | [ p0; p1 ], [] ->
+                    (match ec.Body with
+                     | IRBinOp (_, IREq, x, y, _) when (isParamRef p0 x && isParamRef p1 y) || (isParamRef p1 x && isParamRef p0 y) -> None
+                     | IRBinOp (_, IRAnd, IRBinOp (_, IREq, _, _, _), IRBinOp (_, IREq, _, _, _), _) ->
+                        Some "a conjunctive key kernel (several key equalities; v1.1)"
+                     | _ -> Some "the key kernel is not the equality `l == r` of its two parameters")
+                 | _ -> Some "the key kernel is not a two-parameter function")
+            | _ -> Some "the key kernel does not resolve to a callable"
+        let pkRes =
+            match dInfo.Kernel with
+            | Fn pk when wrote pk.Body ->
+                Error "the payload kernel pk may write (the shared write analysis, Optimize.scheduleMayWriteIn): the as-written program evaluates it on EVERY pair, so skipping the non-matching ones would drop writes -- the six passes run as written"
+            | Fn pk ->
+                (match pk.Params, pk.Captures with
+                 | _, _ :: _ -> Error "the payload kernel captures a value (v1: a pure total scalar of its two cells)"
+                 | [ _; _ ], [] when not (totalScalarOver pk.Params pk.Body) ->
+                    Error "the payload kernel is not a pure, total scalar of its two cells (the totalScalar whitelist: no call, no integer `/` `%` `^`, no cast)"
+                 | [ _; _ ], [] -> Ok pk
+                 | _ -> Error "the payload kernel is not a two-parameter function")
+            | _ -> Error "the payload kernel does not resolve to a callable"
+        match predWhy, eqWhy, pkRes with
+        | Some why, _, _ | None, Some why, _ -> Error why
+        | None, None, Error why -> Error why
+        | None, None, Ok pk ->
+        let ec = match mInfo.Kernel with Fn c -> c | _ -> pk
+        let pc = match pred with Fn c -> c | _ -> pk
+        // ---- the axes: index identity, not extent ----
+        let axisWhy =
+            match axisOf a0, axisOf a1, axisOf b0, axisOf b1 with
+            | Some l0, Some l1, Some r0, Some r1 ->
+                if not (sameAxis l0 l1) then Some $"the left key `{nameOfVar a0}` and the left payload `{nameOfVar a1}` do not share one nominal axis (index identity, not extent)"
+                elif not (sameAxis r0 r1) then Some $"the right key `{nameOfVar b0}` and the right payload `{nameOfVar b1}` do not share one nominal axis (index identity, not extent)"
+                else None
+            | _ -> Some "a source is not a stored rank-1 array over one plain axis"
+        match axisWhy with
+        | Some why -> Error why
+        | None ->
+        match keyClass a0, keyClass b0 with
+        | Error why, _ | _, Error why -> Error why
+        | Ok _, Ok rightClass ->
+        // ---- the sources: bound before J, proved stored, never assigned ----
+        let sources = [ a0; b0; a1; b1 ] |> List.distinct
+        let sourceWhy =
+            sources |> List.tryPick (fun s ->
+                match s with
+                | IRVar (sid, _) ->
+                    (match indexOf sid with
+                     | None -> Some $"the source `{nameOfVar s}` is not a top-level binding the write analysis can see"
+                     | Some si when si >= ji -> Some $"the source `{arr.[si].Name}` is bound after `{jName}`"
+                     | Some si ->
+                        match storedProof arr.[si] with
+                        | Error why -> Some $"the source `{arr.[si].Name}` is not proved stored: {why}"
+                        | Ok (_, chain) ->
+                            match chain |> List.tryFind (fun c -> assignedAnywhere c.Id) with
+                            | Some c -> Some $"the source `{c.Name}` (an alias chain of `{arr.[si].Name}`) is assigned in the program"
+                            | None -> None)
+                | _ -> Some "a source is not a named binding")
+        match sourceWhy with
+        | Some why -> Error why
+        | None ->
+        if assignedAnywhere jb.Id then Error $"`{jName}` is assigned in the program" else
+        // ---- equiJoinAdmits: the five parties ----
+        let chains =
+            sources |> List.collect (fun s ->
+                match s with
+                | IRVar (sid, _) ->
+                    (match indexOf sid with
+                     | Some i -> (match storedProof arr.[i] with Ok (_, ch) -> ch | Error _ -> [ arr.[i] ])
+                     | None -> [])
+                | _ -> [])
+            |> List.distinctBy (fun b -> b.Id)
+        let srcNames = sources |> List.map (fun s -> $"`{nameOfVar s}`") |> String.concat ", "
+        let producerParty =
+            match chains |> List.tryFind payloadWrites with
+            | Some b -> Error $"the producer `{b.Name}` may write (its initializer or side-table payload, through the shared write analysis)"
+            | None -> Ok $"producers {srcNames}: proved stored at their own sites (storedArrayProof, through their alias chains), never assigned, no write in any payload"
+        let kernelParty =
+            let ks = [ ("the key kernel `==`", ec); ("the identity predicate", pc); ("the payload kernel pk", pk) ]
+            match ks |> List.tryPick (fun (what, c) -> if wrote c.Body then Some $"{what} may write" elif requests c then Some $"{what} requests a thread team or a device" else None) with
+            | Some why -> Error why
+            | None -> Ok "producer kernels (`==`, the identity predicate, pk): pure, total scalars (the totalScalar whitelist), capture-free, no write, no team or device request -- the skipped evaluations (`==` on every pair, pk on every non-matching pair) have no effect"
+        let consumerParty =
+            if payloadWrites jb then Error $"`{jName}`'s payload (its value or its compound operands) may write"
+            else Ok $"consumer `{jName}`: its whole payload (value and both compound operands) writes nothing; its stored compact buffer is what every consumer reads, each at its own site"
+        let parties0 = [ producerParty; kernelParty; consumerParty ]
+        match parties0 |> List.tryPick (function Error s -> Some s | Ok _ -> None) with
+        | Some why -> Error why
+        | None ->
+        match joinDemand jb.Id jName with
+        | Error why -> Error $"{why}: it needs the tuple table and the N x M mask, which only the as-written hashed index keeps (v1.1)"
+        | Ok (uses, folds) ->
+        let foldParty =
+            let writing = folds |> List.tryFind (fun (_, k, _) -> match resolveCallableIn funcs (fst (peelReynolds k)) with Some kc -> wrote kc.Body | None -> true)
+            match folds, writing with
+            | [], _ -> "outer fold kernel(s): none over the relation"
+            | _, Some (h, _, _) -> $"outer fold kernel(s): {folds.Length} over `{jName}`; `{h}`'s may write -- never moved (it reads the stored relation at its own site)"
+            | _, None ->
+                let hosts = folds |> List.map (fun (h, _, _) -> $"`{h}`") |> List.distinct |> String.concat ", "
+                $"outer fold kernel(s): {folds.Length} over `{jName}` ({hosts}), none writes, none moved -- each reads the stored relation at its own site, in lex order"
+        let seedParty =
+            let seeded = folds |> List.choose (fun (h, _, s) -> s |> Option.map (fun e -> (h, e)))
+            match seeded |> List.tryFind (fun (_, e) -> wrote e) with
+            | Some (h, _) -> $"seed(s): `{h}`'s seed may write -- never moved (seeded folds stay at their own sites)"
+            | None -> $"seed(s): {seeded.Length} seeded fold(s), none writes, none moved; an unseeded fold keeps its BL8003 empty check at its own site"
+        let betweenParty = $"intervening: none -- the CSR build, the counting pass and the probe all run at `{jName}`'s own site and read only the four stored sources there, exactly where the six as-written passes read them"
+        let parallelParty = "parallel: none -- every pass is serial; a kernel requesting a team or a device declines above, so no parallel body runs moved work and callbackTable has no candidate set to audit"
+        let matrix =
+            "equiJoinAdmits (five parties, each write query through Optimize.scheduleMayWriteIn): "
+            + String.concat "; " ([ for p in parties0 do match p with Ok s -> yield s | Error s -> yield "DECLINES: " + s ] @ [ foldParty; seedParty; betweenParty; parallelParty ])
+        let regime, regimeLine =
+            match rightClass with
+            | Some k when k <= (1L <<< 20) ->
+                JoinPositional k, $"right keys `{nameOfVar b0}` positional (`Idx<{k}>`): a COUNTING SORT over their measured span [lo, hi] (inside [0, {k}) for every well-typed cell; span <= 2^20)"
+            | _ ->
+                JoinDynamic, $"right keys `{nameOfVar b0}` dynamic Int64: a COUNTING SORT when their span is within max(4 M, 4096) cells (and 2^26), else an open-addressing key -> bucket hash (blade_member.h, chosen at run time from (M, lo, hi) only)"
+        // A LITERAL right key (through its alias chain): the form the build
+        // will take, by the C core's own rule restated (joinChooseDirect).
+        let formLine =
+            // (wrapping Int64 arithmetic, as membership hoisting's literal
+            // reader: `-9223372036854775807 - 1` is Int64's minimum)
+            let rec lit (e: IRExpr) =
+                match e with
+                | IRLit (IRLitInt n) -> Some n
+                | IRUnaryOp (IRNeg, x) -> lit x |> Option.map (fun n -> -n)
+                | IRBinOp (_, IRAdd, l, r, _) -> Option.map2 (+) (lit l) (lit r)
+                | IRBinOp (_, IRSub, l, r, _) -> Option.map2 (-) (lit l) (lit r)
+                | IRBinOp (_, IRMul, l, r, _) -> Option.map2 (*) (lit l) (lit r)
+                | _ -> None
+            let literalKeys =
+                match b0 with
+                | IRVar (sid, _) ->
+                    (match indexOf sid with
+                     | Some si ->
+                        (match storedProof arr.[si] with
+                         | Ok (_, chain) ->
+                            (match (List.last chain).Value with
+                             | IRArrayLit (elems, _) ->
+                                let ks = elems |> List.map lit
+                                if ks |> List.forall Option.isSome then Some (ks |> List.map Option.get) else None
+                             | _ -> None)
+                         | Error _ -> None)
+                     | None -> None)
+                | _ -> None
+            match literalKeys with
+            | Some ks ->
+                let m = int64 ks.Length
+                let positional = match regime with JoinPositional _ -> true | JoinDynamic -> false
+                let direct = ks.IsEmpty || joinChooseDirect m (List.min ks) (List.max ks) positional
+                // the INCLUSIVE span as a bigint: [INT64_MIN, INT64_MAX] spans 2^64
+                let span = if ks.IsEmpty then "no keys" else $"span {bigint (List.max ks) - bigint (List.min ks) + 1I}"
+                let form = if direct then "counting sort" else "hash"
+                $"form at run time: {form} ({span}, M {m}; the literal right keys, by the C core's rule)"
+            | None -> "form at run time: chosen from (M, lo, hi) only, never from timing"
+        let reportLine =
+            if joinReportEnabled () then "report: the `[join]` build report is emitted (BLADE_JOIN_REPORT=1 at compile time; printed on stderr by the executable)"
+            else "report: none emitted (BLADE_JOIN_REPORT unset at compile time; the compile-time gate emits the `[join]` build report)"
+        let plan =
+            { CompoundId = jb.Id; CompoundName = jName
+              LeftKey = a0; RightKey = b0; LeftPay = a1; RightPay = b1
+              LeftKeyName = nameOfVar a0; RightKeyName = nameOfVar b0
+              PayloadKernel = dInfo.Kernel; KeyRegime = regime; EmittedCpp = ref false }
+        let evidence =
+            [ $"stable CSR over `{nameOfVar b0}`: {regimeLine}; bucket rows filled FORWARD (every bucket lists its right rows j ascending)"
+              formLine
+              reportLine
+              $"probe `{nameOfVar a0}` i ascending, EVERY right row of the bucket ascending: left-major / right-minor = the compound's lex order (BladeLex); bags survive (duplicates on both sides kept); negative keys match like any other; a left key no right row holds matches nothing (no BL8006: equality has no domain check)"
+              $"a COUNTING pass sizes `{jName}` before any store (|J| = the sum over i of the bucket size of `{nameOfVar a0}`[i]; worst case, every key equal, |J| = N x M -- never more than the as-written N x M payload pool); pk evaluated once per match, in that order"
+              $"never built: the N x M payload pool, the N x M Bool `==` pool, the identity-mask pool, its bit vector, the tuple table and the reverse hash (compiler temporaries of the inline spelling); `{jName}` is STORED -- its compact buffer in lex order, with a cardinality-only compound_index_t<2> (dense extents N x M, cardinality |J|; a lookup through the absent table is BL9002)"
+              ("uses of `" + jName + "` (census: every one reads the compact buffer or the cardinality alone): " + String.concat ", " uses)
+              matrix
+              "lanes: C++ v1; the LLVM lane declines (v1.1); the interpreter runs the as-written six passes (the independent oracle)" ]
+        Ok (plan, evidence)
+    for KeyValue (jId, (dense, mask)) in modul.CompoundInits do
+        match indexOf jId with
+        | None -> ()
+        | Some ji ->
+        let jb = arr.[ji]
+        let lead =
+            match stripUnits jb.Type with
+            | ArrayElem at ->
+                (match at.IndexTypes |> List.tryFind (fun ix -> ix.IxKind = IxKCompound) with
+                 | Some ix -> Some (ix.Rank, at.IndexTypes.Length - 1)
+                 | None -> None)
+            | _ -> None
+        match lead with
+        | Some (r, _) when r > 2 -> decide jb.Name (Blade.Effects.Declined $"a rank-{r} compound (v1 joins exactly two axes)") []
+        | Some (2, trail) when trail > 0 -> decide jb.Name (Blade.Effects.Declined $"{trail} trailing dim(s) per kept cell (v1 joins a scalar payload per pair)") []
+        | Some (2, _) ->
+            match admit ji dense mask with
+            | Ok (plan, evidence) when enabled ->
+                EquiJoinTable.record plan
+                decide jb.Name Blade.Effects.Applied evidence
+            | Ok (_, evidence) -> decide jb.Name (Blade.Effects.Declined "disabled by BLADE_HASH_JOIN") evidence
+            | Error why -> decide jb.Name (Blade.Effects.Declined why) []
+        | _ -> ()
+
 // --- Compact row classes: the orbit fold's class sums behind each row (B3) --
 //
 // The pairkernel shape: a compact rank-2 producer (SymIdx<2, n> inclusive or
@@ -5078,6 +5725,142 @@ let planOrbitPull (programFuncs: IRCallable list) (modul: IRModule) : unit =
                         let ahead = [ for i in j + 1 .. bi - 1 -> topArr.[i] ]
                         yield (pb.Id, pb.Name, producerWhyOf pb.Id pb.Name pb.Value, stored, ahead) ]
             planChain pools (chain b.Value)
+        | _ -> ())
+
+// --- The row orbit action's five-party audit (round 3, D-P2; gap G73) -------
+//
+// A ROW ACTION `u = method_for(range<I>) <@> lambda(i) -> reduce(method_for(
+// range<I>) <@> lambda(j) -> g(S(i, j), V(i), V(j), ..), k, s) |> compute`
+// over a STORED SymIdx<2, n> pool S may be emitted as ONE pass over S's
+// canonical cells feeding every row chain its source sequence
+// (OrbitFold.planAction; blade_orbit_scatter.hpp tri_action;
+// EmitLlvm.emitOrbitAction). Nothing is MOVED across bindings: the action runs
+// at its own site and reads S, the weights V and its free scalars there,
+// exactly as the walk does; only the order of the action's OWN pure, total
+// sub-computations (its row chains) is interleaved. This planner records what
+// the IR shows for every TOP-LEVEL action binding (v1: the storage proof is
+// `storedArrayProof`, which proves top-level bindings) -- the emitters join it
+// to the recogniser's pool / weights / free scalars and decline whatever it
+// cannot prove (unknown = refuse):
+//   producer    -- every earlier top-level binding the action reads (the pool,
+//                  each weight, each free scalar) by its COMPLETE payload
+//                  (intervalPayloadOf): no write, no provider effect; an
+//                  ARRAY must also be proved stored at its own site
+//                  (storedArrayProof: a `|> compute`, a literal, ...; a
+//                  deferred map would execute its initializer inside the
+//                  action and is refused);
+//   consumer    -- the action's map kernel (the whole binding value) and the
+//                  inner map (the cell term g): no write;
+//   fold kernel -- the inner fold kernel: no write;
+//   seed        -- the inner fold seed: no write;
+//   intervening -- EVERY top-level binding between the read binding and the
+//                  action (by payload; a provider effect included): no write
+//                  -- the conservative W check, not a conflict analysis.
+// The action is serial (no team), so no parallel body exists and the callback
+// table is not consulted; the emitters add the callback-aware codegen write
+// analysis over the term, the kernel and the seed.
+module OrbitActionTable =
+    open System.Threading
+    /// What the planner proved about one earlier top-level binding the
+    /// action reads: its producer (`Ok` how it is stored, or the first
+    /// failure) and the bindings between it and the action (`Ok` their count,
+    /// or the first writer).
+    type ReadAudit =
+        { Name: string
+          Producer: Result<string, string>
+          Between: Result<int, string> }
+    type Audit =
+        { /// The consumer / fold-kernel / seed verdicts (None = no write), in
+          /// that order of report.
+          Consumer: string option
+          Reads: Map<IRId, ReadAudit> }
+    type private State = { Audits: Map<IRId, Audit> }
+    let private empty = { Audits = Map.empty }
+    let private cell = new AsyncLocal<State>()
+    let private get () = match box cell.Value with null -> empty | _ -> cell.Value
+    let reset () = cell.Value <- empty
+    let record (action: IRId) (audit: Audit) =
+        cell.Value <- { Audits = Map.add action audit (get ()).Audits }
+    /// The audit of a top-level action binding; None = the planner saw no
+    /// top-level action there (a block-local or function-body action, or no
+    /// action shape): the emitters decline.
+    let tryAudit (action: IRId) : Audit option = Map.tryFind action (get ()).Audits
+
+/// Plan the row orbit action's audits over the TOP-LEVEL binding sequence
+/// (v1). Facts only: no IR change, no decision record (the emitters record
+/// the outcome); no gate of its own (the emitters read BLADE_ORBIT_ACTIONS).
+let planOrbitActions (programFuncs: IRCallable list) (modul: IRModule) : unit =
+    let funcs = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+    let facts = cseFactsOf funcs
+    let writes = scheduleMayWriteIn programFuncs modul
+    let payloadOf = intervalPayloadOf modul
+    let providerEffect = intervalHasProviderEffect modul
+    let mayWrite (e: IRExpr) = writes e || (facts e).MayWrite
+    let storedProof = storedArrayProof modul
+    let readsOf (e: IRExpr) : Set<IRId> =
+        let visited = System.Collections.Generic.HashSet<IRId>()
+        let acc = System.Collections.Generic.HashSet<IRId>()
+        let rec go (e: IRExpr) =
+            for id in collectVarRefsIR e do
+                acc.Add id |> ignore
+                match Map.tryFind id funcs with
+                | Some cl when visited.Add id -> go cl.Body
+                | _ -> ()
+        go e
+        Set.ofSeq acc
+    let rec peel (e: IRExpr) = match e with IRCompute i -> peel i | e -> e
+    let isArray (t: IRType) = match stripUnits t with ArrayElem _ -> true | _ -> false
+    let arr = List.toArray modul.Bindings
+    arr |> Array.iteri (fun ci b ->
+        match b.Value with
+        | IRCompute _ ->
+            (match peel b.Value with
+             | IRApplyCombinator oinfo ->
+                 (match oinfo.Arrays, oinfo.Kernel with
+                  | [ IRRange ([ _ ], None) ], IRVar (kid, _) ->
+                      (match Map.tryFind kid funcs with
+                       | Some cl when cl.Params.Length = 1 ->
+                           (match cl.Body with
+                            | IRReduceCompute (comp, k, seed) ->
+                                let consumer =
+                                    if mayWrite b.Value || mayWrite comp then
+                                        Some "the consumer (the action's map kernel or its cell term) may write (shared transitive write analysis)"
+                                    elif mayWrite k then Some "the inner fold kernel may write (shared transitive write analysis)"
+                                    elif mayWrite seed then Some "the inner fold seed may write (shared transitive write analysis)"
+                                    else None
+                                let reads = readsOf b.Value
+                                let audits =
+                                    [ for si in 0 .. ci - 1 do
+                                        let s = arr.[si]
+                                        if reads.Contains s.Id then
+                                            let pv = payloadOf s.Id s.Value
+                                            let producer =
+                                                if mayWrite pv || providerEffect s.Id then
+                                                    Error $"the producer of `{s.Name}` may write (its complete payload; shared transitive write analysis)"
+                                                elif isArray s.Type then
+                                                    match storedProof s with
+                                                    | Ok (how, _) -> Ok $"stored at its own binding ({how})"
+                                                    | Error why -> Error $"`{s.Name}` is not proved stored before the action ({why}): a deferred array would run its initializer inside the action"
+                                                else Ok "a scalar binding"
+                                            let between =
+                                                [ for i in si + 1 .. ci - 1 -> arr.[i] ]
+                                                |> List.tryPick (fun x ->
+                                                    if mayWrite (payloadOf x.Id x.Value) || providerEffect x.Id then
+                                                        Some $"`{x.Name}` may write between `{s.Name}` and the action (an assignment, a mutating call or a provider write -- its side-table payload included)"
+                                                    else None)
+                                            let ra : OrbitActionTable.ReadAudit =
+                                                { Name = s.Name
+                                                  Producer = producer
+                                                  Between = (match between with
+                                                             | Some why -> Error why
+                                                             | None -> Ok (ci - si - 1)) }
+                                            yield (s.Id, ra) ]
+                                let audit : OrbitActionTable.Audit = { Consumer = consumer; Reads = Map.ofList audits }
+                                OrbitActionTable.record b.Id audit
+                            | _ -> ())
+                       | _ -> ())
+                  | _ -> ())
+             | _ -> ())
         | _ -> ())
 // --- Membership hoisting (round 3, item B-T1; plan rule `member-hoist`) -----
 //
@@ -5522,6 +6305,661 @@ let planMembershipHoist (programFuncs: IRCallable list) (modul: IRModule) : unit
                                   Forced = forced; Admission = matrix }
                             decide host.Name Blade.Effects.Applied evidence
 
+// --- Aggregate-only grouping (round 3 wave 3, W3-1: T3 redesigned; gap G71) -
+//
+// A `group_keys` consumed only by per-group AGGREGATES:
+//
+//   function agg(key: .., x: ..) = {
+//       let gk = group_keys(key)
+//       let g = group_by(x, gk)
+//       let s = method_for(g) <@> lambda(r) -> reduce(r, (+)) |> compute
+//       let q = method_for(g) <@> lambda(r) -> prodsum(r, r) |> compute
+//       let c = extents(gk)
+//       ...
+//   }
+//
+// runs today as two or three key passes (discovery, counts, a scattered
+// permutation), one gather per group_by into a group-contiguous pool, and one
+// pass per peel over the pool. Every peel's chain visits its group's rows in
+// ASCENDING SOURCE ROW (the permutation is stable), so the same chains can be
+// advanced in ONE pass over the rows in source order: per row, read the key,
+// find its group, and advance every state of that group by that row's
+// values. Interleaving across groups reorders only INDEPENDENT chains; each
+// chain keeps its operands, its order, its seed and its left association --
+// bitwise the two-pass form under BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off in
+// both lanes. No permutation, no gathered pool (the grouped arrays' rows stay
+// null, as in the extents-only gather elision), and each peel binding reads
+// its state (`out[g] = acc[g]`), still a named, stored output.
+//
+// FOUR state machines, never one (review B/2):
+//   * UNSEEDED `reduce(r, k)`: a group's FIRST value is copied as the state
+//     and consumed exactly once (the first-row update is skipped); every
+//     later row is `acc = k(acc, v)`. An EMPTY group keeps its BL8003, raised
+//     at the peel's own site for the first empty group in group order.
+//   * SEEDED `reduce(r, k, init)`: the original chain from the exact seed --
+//     `acc = init` once per group (statically declared empty groups included:
+//     they answer the seed), then `acc = k(acc, v)` per row.
+//   * PRODSUM `prodsum(r, r)` / `prodsum(ra, rb)`: the prodsum emitters' own
+//     form -- `acc = 0` once per group, then `acc += a * b` (the product
+//     rounded, then added; the product's operand order as written).
+//   * COUNT `extents(r)`: the group's row count (the peel reads the offsets,
+//     exactly as today).
+// No identity is ever substituted for a generic callable.
+//
+// THREE regimes kept apart (review B/4): POSITIONAL `Idx<N>` keys -- group g
+// is key value g, 0 .. N-1, empty groups included; ENUMIDX -- the DECLARED
+// enumeration order, negative members valid (never dropped); DYNAMIC -- groups
+// numbered by FIRST occurrence through one find-or-insert per row in the C
+// core (blade_member.h's key -> group map: its table order never defines an
+// output order). The negative-key drop and the BL8006 key guards are exactly
+// today's, at the grouping's site, row by row in source order.
+//
+// STRICT FIRST (review B/3): in the repro build every admitted state takes the
+// pass. In the default (reordering) build a state takes it only when its
+// chain is already the strict one there (a kernel with no reorder licence) or
+// its value is exact under any grouping (an integer builtin fold, an integer
+// prodsum, a count); a LICENSED float fold keeps today's per-group K-lane
+// tree -- the one pass's ascending chain is a different association, with no
+// tolerance guarantee ([1e16, -1e16, 1, 0, 0, 0, 0, 0, 1] sums to 2 in the
+// chain and to 1 in eight lanes) -- unless BLADE_GROUP_AGG=licensed asks for
+// that association change explicitly.
+//
+// FIRST FAILURE (review B/1): accumulation MOVES from the peels up to the
+// grouping, so v1 admits only value sources already STORED and DOMINATING
+// (bound before the grouping), never assigned anywhere; fold kernels and
+// seeds on the closed total whitelist (Blade.IRTotality), row-independent
+// and dominating; and nothing between the grouping and the last peel may
+// write (the five parties through `scheduleMayWriteIn`). The pass is then
+// total apart from the grouping's own BL8006, which fires where today's count
+// pass fires it; an intervening failing binding still fails first; each
+// BL8003 stays at its peel. FUNCTION BODIES ONLY: a top-level grouped array
+// is a named top-level binding and keeps its rows stored (review B/10).
+//
+// Side table (`GroupAggTable`), both emitters; the IR is untouched, so the
+// interpreter runs the as-written CSR + gather + peels (the independent
+// oracle of `blade test interp`). Gate: BLADE_GROUP_AGG (`0`/`off`; unset =
+// the strict pass plus the exact integer arm; `licensed` adds the licensed
+// float arm).
+
+type GroupAggMode =
+    | GroupAggOff
+    | GroupAggStrict
+    | GroupAggLicensed
+
+let groupAggMode () : GroupAggMode =
+    match Blade.Toolchain.envSwitch "BLADE_GROUP_AGG" with
+    | Blade.Toolchain.SwitchOff -> GroupAggOff
+    | Blade.Toolchain.SwitchOther v when v.Trim().ToLowerInvariant() = "licensed" -> GroupAggLicensed
+    | _ -> GroupAggStrict
+
+/// The grouping's bucketing regime (the three kept apart).
+type GroupAggRegime =
+    | GaPositional of groups: int64
+    | GaEnum of values: int64 list
+    | GaDynamic
+
+/// One state machine.
+type GroupAggKind =
+    | GaSeeded of kernel: IRExpr * seed: IRExpr
+    | GaUnseeded of kernel: IRExpr
+    | GaProdSum
+    | GaCount
+
+/// One peel's state.
+type GroupAggState = {
+    PeelId: IRId
+    PeelLabel: string
+    Kind: GroupAggKind
+    /// The stored value sources read at each row (one for a reduce, two for
+    /// a prodsum -- the product's operand order -- none for a count).
+    Sources: IRExpr list
+    /// The state's (the peel output's) element type: Float64 or Int64.
+    Elem: ElemType
+    /// The peel kernel's frame name (the backtrace line its empty check keeps).
+    KernelFrame: string
+}
+
+type GroupAggPlan = {
+    GkId: IRId
+    Subject: string
+    FuncId: IRId
+    Regime: GroupAggRegime
+    Key: IRExpr
+    States: GroupAggState list
+    GroupBys: Set<IRId>
+    Admission: string
+    /// Placement handshakes: set by each lane's group_keys emission (true =
+    /// it emitted the one pass), read by that lane's group_by and peel
+    /// emissions, which take the planned forms only after it.
+    EmittedCpp: bool ref
+    EmittedLlvm: bool ref
+}
+
+/// AsyncLocal like CompactionTable; reset once per program in
+/// `lowerTypedProgram` (let ids restart per compile).
+module GroupAggTable =
+    open System.Threading
+    type State =
+        { ByGk: Map<IRId, GroupAggPlan>
+          ByGroupBy: Map<IRId, IRId>
+          ByPeel: Map<IRId, IRId * int> }
+    let private empty = { ByGk = Map.empty; ByGroupBy = Map.empty; ByPeel = Map.empty }
+    let private cell = new AsyncLocal<State>()
+    let private get () = match box cell.Value with null -> empty | _ -> cell.Value
+    let reset () = cell.Value <- empty
+    let record (p: GroupAggPlan) =
+        let s = get ()
+        cell.Value <-
+            { ByGk = Map.add p.GkId p s.ByGk
+              ByGroupBy = p.GroupBys |> Set.fold (fun m g -> Map.add g p.GkId m) s.ByGroupBy
+              ByPeel =
+                p.States |> List.mapi (fun j st -> (st.PeelId, (p.GkId, j)))
+                |> List.fold (fun m (k, v) -> Map.add k v m) s.ByPeel }
+    let tryGk (id: IRId) : GroupAggPlan option = Map.tryFind id (get ()).ByGk
+    let tryGroupBy (id: IRId) : GroupAggPlan option =
+        Map.tryFind id (get ()).ByGroupBy |> Option.bind tryGk
+    /// The plan and the state index a peel binding reads.
+    let tryPeel (id: IRId) : (GroupAggPlan * int) option =
+        Map.tryFind id (get ()).ByPeel |> Option.bind (fun (g, j) -> tryGk g |> Option.map (fun p -> (p, j)))
+    let all () : GroupAggPlan list = (get ()).ByGk |> Map.toList |> List.map snd
+
+/// The regime's record text.
+let groupAggRegimeText (r: GroupAggRegime) : string =
+    match r with
+    | GaPositional n ->
+        $"positional (Idx<{n}> keys): group g is key value g, 0 .. {n - 1L}, EMPTY groups included; a negative key drops its row and a key >= {n} aborts BL8006 at the grouping, row by row in source order, exactly as today's count pass"
+    | GaEnum vs ->
+        let shown = vs |> List.map string |> String.concat ", "
+        $"EnumIdx ({vs.Length} declared members; the stored key of each, in declared order: [{shown}]): groups in the DECLARED enumeration order (never sorted by value), EMPTY groups included, negative members valid (an EnumIdx key never drops); a key outside the enumeration aborts BL8006 at the grouping, row by row in source order, exactly as today"
+    | GaDynamic ->
+        "dynamic: groups numbered by FIRST occurrence, through ONE find-or-insert per row in the C core (blade_member.h's key -> group map, both lanes; its table order never defines an output order); a negative key drops its row, exactly as today"
+
+/// Plan aggregate-only grouping over the module's function bodies. Records
+/// into `GroupAggTable` and the decision collector (`group-aggregate`); the
+/// IR is untouched.
+let planGroupAggregate (programFuncs: IRCallable list) (modul: IRModule) : unit =
+    let mode = groupAggMode ()
+    let funcs = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+    let allCallables = (modul.Functions @ programFuncs) |> List.distinctBy (fun f -> f.Id)
+    let callableById = allCallables |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+    let resolve (e: IRExpr) : IRCallable option =
+        match fst (peelReynolds e) with
+        | IRVar (id, _) -> Map.tryFind id callableById
+        | _ -> None
+    let facts = cseFactsOf funcs
+    let writes = scheduleMayWriteIn programFuncs modul
+    let wrote (e: IRExpr) = (facts e).MayWrite || writes e
+    let reorderingBuild = not (Blade.Toolchain.fpReproEnabled ())
+    let decide (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
+        Blade.Effects.Decisions.record
+            { Blade.Effects.Rule = "group-aggregate"; Version = 1
+              Span = declSpanOf subject; Subject = subject
+              Outcome = outcome; Evidence = evidence }
+    let strip (e: IRExpr) = match e with IRCompute inner -> inner | e -> e
+    let refs (e: IRExpr) = collectVarRefsIR e
+    let bindingIds = modul.Bindings |> List.map (fun b -> b.Id) |> Set.ofList
+    let bindingById = modul.Bindings |> List.map (fun b -> (b.Id, b)) |> Map.ofList
+    let storedProof = storedArrayProof modul
+    // Every let value in the program (module bindings and every body let):
+    // a deferred one is never a proved-stored source.
+    let letValues = System.Collections.Generic.Dictionary<IRId, IRExpr>()
+    for b in modul.Bindings do letValues.[b.Id] <- b.Value
+    // the lets inside a binding's payload (a top-level block's `let x = ...`)
+    for b in modul.Bindings do
+        for e in bindingPayload modul b do
+            iterIRExpr (fun n -> match n with IRLet (id, v, _) -> letValues.[id] <- v | _ -> ()) e
+    for f in allCallables do
+        iterIRExpr (fun n -> match n with IRLet (id, v, _) -> letValues.[id] <- v | _ -> ()) f.Body
+    let isDeferredId (id: IRId) =
+        match letValues.TryGetValue id with
+        | true, v -> isDeferredForm v
+        | _ -> false
+    let assignsTo (id: IRId) (e: IRExpr) =
+        let mutable hit = false
+        iterIRExpr (fun n ->
+            match n with
+            | IRAssign (target, _) when Set.contains id (refs target) -> hit <- true
+            | _ -> ()) e
+        hit
+    let assignedAnywhere (id: IRId) =
+        (modul.Bindings |> List.exists (fun b -> bindingPayload modul b |> List.exists (assignsTo id)))
+        || (allCallables |> List.exists (fun f -> assignsTo id f.Body))
+    // How many times an id is NAMED: inside a given expression, and across
+    // the whole program (every binding payload and every callable body).
+    let countIn (id: IRId) (e: IRExpr) =
+        let mutable k = 0
+        iterIRExpr (fun n -> match n with IRVar (i, _) when i = id -> k <- k + 1 | _ -> ()) e
+        k
+    let countProgram (id: IRId) =
+        (modul.Bindings |> List.sumBy (fun b -> bindingPayload modul b |> List.sumBy (countIn id)))
+        + (allCallables |> List.sumBy (fun f -> countIn id f.Body))
+    let scalarOf (t: IRType) : ElemType option = IRTotality.scalarElem (stripUnits t)
+    let elemName (e: ElemType) =
+        match e with
+        | ETInt64 -> "Int64" | ETInt32 -> "Int32" | ETFloat64 -> "Float64" | ETFloat32 -> "Float32"
+        | ETComplex64 -> "Complex64" | ETComplex128 -> "Complex128" | ETBool -> "Bool"
+        | ETString -> "String" | ETUnit -> "Unit"
+    let builtinOp (c: IRCallable) : IRBinOp option =
+        match c.Params, c.Body with
+        | [ p0; p1 ], IRBinOp (_, op, IRVar (a, _), IRVar (b, _), _)
+            when (match op with IRAdd | IRMul | IRAnd | IROr -> true | _ -> false)
+                 && ((a = p0.VarId && b = p1.VarId) || (a = p1.VarId && b = p0.VarId)) -> Some op
+        | _ -> None
+    // `foldReorderLicensed`'s rule (CodeGenExprSupport), restated over this
+    // module's table, as the sibling-fold pass restates it: a `where repro`
+    // kernel (or the eta wrapper of one) vetoes; a writing kernel never
+    // reaches here (its write declines first).
+    let licensed (c: IRCallable) =
+        let vetoed =
+            c.IsRepro
+            || (match c.Body with
+                | IRApp (IRVar (fid, _), _, _) -> (match Map.tryFind fid callableById with Some g -> g.IsRepro | None -> false)
+                | _ -> false)
+        not vetoed && (c.IsCommutative || not c.CommGroups.IsEmpty || (builtinOp c).IsSome)
+    // A lifted peel kernel is named after its binding (`lambda in s`); a
+    // function-body let has no other source name in the IR.
+    let labelOf (c: IRCallable) =
+        if c.SourceName.StartsWith "lambda in " then c.SourceName.Substring 10
+        elif c.Name.StartsWith "lambda in " then c.Name.Substring 10
+        else c.SourceName
+    // ---- top level: a grouped array is a named binding (review B/10) ----
+    for b in modul.Bindings do
+        match strip b.Value with
+        | IRGroupKeys _ ->
+            decide b.Name (Blade.Effects.Declined "a top-level grouping: v1 plans groupings inside a function body only (review B/10: a top-level group_by result is a named binding, and an unprinted name is no permission for THIS plan to drop its rows; whether they are gathered stays the existing extents-only elision's decision, computeExtentsOnlyGroupBys)")
+                [ "the CSR (counts, offsets, permutation) and the peels stay as written; this plan does not touch the group_by gathers" ]
+        | _ -> ()
+    // ---- function bodies ----
+    let containing = System.Collections.Generic.Dictionary<IRId, int>()
+    for f in modul.Functions do
+        let seen = System.Collections.Generic.HashSet<IRId>()
+        iterIRExpr (fun n ->
+            match n with
+            | IRLet (id, IRGroupKeys _, _) | IRLet (id, IRCompute (IRGroupKeys _), _) ->
+                if seen.Add id then containing.[id] <- (match containing.TryGetValue id with | true, k -> k + 1 | _ -> 1)
+            | _ -> ()) f.Body
+    for f in modul.Functions do
+        let subject = f.SourceName
+        let rec spineOf (e: IRExpr) (acc: (IRId * IRExpr) list) =
+            match e with
+            | IRLet (id, v, body) -> spineOf body ((id, v) :: acc)
+            | _ -> List.rev acc
+        let spine = spineOf f.Body [] |> List.toArray
+        let spineIndex = spine |> Array.mapi (fun i (id, _) -> (id, i)) |> Map.ofArray
+        let gkLets = System.Collections.Generic.List<IRId * IRExpr list>()
+        iterIRExpr (fun n ->
+            match n with
+            | IRLet (id, v, _) ->
+                (match strip v with
+                 | IRGroupKeys ks -> gkLets.Add((id, ks))
+                 | _ -> ())
+            | _ -> ()) f.Body
+        for (gkId, keys) in gkLets |> Seq.distinctBy fst do
+            let fail (why: string) (ev: string list) = decide subject (Blade.Effects.Declined why) ev
+            match Map.tryFind gkId spineIndex with
+            | None -> fail "the grouping is not a statement of the function body's top-level let chain (v1)" []
+            | Some _ when (match containing.TryGetValue gkId with | true, k -> k > 1 | _ -> false) ->
+                fail "the grouping's function is present in more than one specialization (v1 plans one body)" []
+            | Some gi ->
+            match keys with
+            | [] | _ :: _ :: _ -> fail "a multi-key grouping (v1: one integer key; a compound tuple key keeps the hashed CSR)" []
+            | [ key ] ->
+            // The regime, from the body's typed mentions of the grouping
+            // (the recovery both lanes' emitters make).
+            let mutable gkTy : IRType option = None
+            iterIRExpr (fun n ->
+                match n with
+                | IRVar (vid, (IRTGroupKeys _ as ty)) when vid = gkId && gkTy.IsNone -> gkTy <- Some ty
+                | _ -> ()) f.Body
+            let regime : Result<GroupAggRegime, string> =
+                match gkTy with
+                | Some (IRTGroupKeys (outer, _, ev)) ->
+                    (match IRTotality.evalInt outer.Extent, ev with
+                     | Some n, None -> Ok (GaPositional n)
+                     | Some _, Some vs ->
+                         if vs |> List.forall (function EVInt _ -> true | _ -> false) then
+                             Ok (GaEnum (vs |> List.choose (function EVInt n -> Some n | _ -> None)))
+                         else Error "string keys (an EnumIdx of strings; v1: Int64 keys)"
+                     | None, _ -> Ok GaDynamic)
+                | _ -> Error "the grouping's regime is not recoverable from a typed mention"
+            match regime with
+            | Error why -> fail why []
+            | Ok regime ->
+            // Dominating names: f's parameters, the spine lets before the
+            // grouping, module bindings and callables.
+            let paramIds = f.Params |> List.map (fun p -> p.VarId) |> Set.ofList
+            let before = spine |> Array.take gi |> Array.map fst |> Set.ofArray
+            let dominates (id: IRId) =
+                paramIds.Contains id || before.Contains id || bindingIds.Contains id || callableById.ContainsKey id
+            // THE PRODUCER PROOF (Codex diff review of W3-1, findings 1 and 3):
+            // a source's cells must EXIST at the grouping and its producer must
+            // be write-free, proved by QUERIES, not asserted. A named array is
+            // proved by its provenance: a module binding through the shared
+            // `storedArrayProof` (every link of its alias chain then audited by
+            // `scheduleMayWriteIn` + the CSE facts over its PAYLOAD, and never
+            // assigned), any other let by the same stored-form rule over its
+            // value (a `|> compute`, a literal, a call's array result, an eager
+            // set operation -- never a deferred form) and the same write query
+            // over that value. `assignedAnywhere` stays a supplementary
+            // syntactic check.
+            let storedLetForm (v: IRExpr) : string option =
+                if isDeferredForm v then None
+                else
+                match v with
+                | IRCompute _ -> Some "`|> compute`d at its site"
+                | IRArrayLit _ -> Some "an array literal"
+                | IRApp _ -> Some "a call's array result"
+                | IRMask _ | IRSort _ | IRUnique _ | IRIntersect _ | IRUnion _ -> Some "an eager set operation"
+                | _ -> None
+            let provenance (what: string) (sid: IRId) : Result<string, string> =
+                if assignedAnywhere sid then Error $"the {what} is assigned in the program (v1: a source never written)"
+                elif bindingIds.Contains sid then
+                    let b = Map.find sid bindingById
+                    match storedProof b with
+                    | Error why -> Error $"the {what} is not proved stored: {why}"
+                    | Ok (how, chain) ->
+                        match chain |> List.tryFind (fun lb -> wrote (bindingPayloadExpr modul lb) || assignedAnywhere lb.Id) with
+                        | Some lb -> Error $"the {what}'s producer `{lb.Name}` may write or is assigned (scheduleMayWriteIn over its payload)"
+                        | None ->
+                            let links = chain |> List.map (fun lb -> $"`{lb.Name}`") |> String.concat " -> "
+                            Ok $"`{b.Name}`: a module binding, {how}; producer payload(s) {links}: scheduleMayWriteIn + CSE facts, no write"
+                else
+                match letValues.TryGetValue sid with
+                | true, v ->
+                    match storedLetForm v with
+                    | None ->
+                        if isDeferredForm v then Error $"the {what} is a deferred computation (v1 never forces a producer early)"
+                        else Error $"the {what} is a let whose value is not a form v1 proves stored"
+                    | Some how ->
+                        if wrote v then Error $"the {what}'s producer may write (scheduleMayWriteIn over its value)"
+                        else Ok $"a let, {how}; its value: scheduleMayWriteIn + CSE facts, no write"
+                | _ -> Error $"the {what} is not a let, a module binding or a parameter v1 can trace"
+            // A PARAMETER's provenance: every call site of the function passes,
+            // at that position, a named array proved as above or an array
+            // literal whose value writes nothing; a function referenced other
+            // than by direct calls (passed as a value) declines.
+            let callSites =
+                lazy (
+                    let acc = ResizeArray<IRExpr list>()
+                    let scan (e: IRExpr) =
+                        iterIRExpr (fun n ->
+                            match n with
+                            | IRApp (IRVar (fid, _), args, _) when fid = f.Id -> acc.Add args
+                            | _ -> ()) e
+                    for b in modul.Bindings do
+                        for e in bindingPayload modul b do scan e
+                    for c in allCallables do scan c.Body
+                    List.ofSeq acc)
+            let paramProof (what: string) (p: IRParam) : Result<string, string> =
+                let calls = callSites.Force()
+                let pos = f.Params |> List.findIndex (fun q -> q.VarId = p.VarId)
+                if calls.IsEmpty then Error $"the {what} is a parameter of `{f.SourceName}`, which has no call site v1 can audit"
+                elif countProgram f.Id <> calls.Length then Error $"the {what} is a parameter of `{f.SourceName}`, which is referenced other than by direct calls (its arguments cannot be audited)"
+                else
+                let argProof (args: IRExpr list) : Result<string, string> =
+                    if pos < 0 || pos >= args.Length then Error "a call site with a different arity"
+                    else
+                    match args.[pos] with
+                    | IRVar (aid, _) -> provenance $"argument for `{p.Name}`" aid
+                    | IRArrayLit _ as lit ->
+                        if wrote lit then Error $"the literal argument for `{p.Name}` may write" else Ok "an array literal argument, no write"
+                    | _ -> Error $"the argument for `{p.Name}` at a call site is an expression, not a named stored array or a literal (v1)"
+                match calls |> List.map argProof |> List.tryPick (function Error why -> Some why | Ok _ -> None) with
+                | Some why -> Error $"the {what} (a parameter of `{f.SourceName}`) is not proved stored at every call site: {why}"
+                | None ->
+                    let shown = calls |> List.map argProof |> List.choose (function Ok s -> Some s | _ -> None) |> List.distinct |> String.concat " / "
+                    Ok $"a parameter of `{f.SourceName}`; at each of its {calls.Length} call site(s): {shown}"
+            // A source array (the key or a value): rank 1, dense or a rank-1
+            // compound, a scalar element; STORED and DOMINATING, never assigned,
+            // its producer proved write-free.
+            let sourceProof (what: string) (e: IRExpr) : Result<string * ElemType, string> =
+                match e with
+                | IRVar (sid, sty) ->
+                    let shape =
+                        match stripUnits sty with
+                        | ArrayElem at when at.IndexTypes.Length = 1 && not at.IsVirtual ->
+                            let ix = at.IndexTypes.[0]
+                            if ix.Rank = 1 && ix.Symmetry = SymNone && (ix.IxKind = IxKPlain || ix.IxKind = IxKCompound) then
+                                match scalarOf at.ElemType with
+                                | Some et -> Ok et
+                                | None -> Error $"the {what} is not an array of scalars"
+                            else Error $"the {what} is not a dense rank-1 axis or a rank-1 compound"
+                        | ArrayElem at when at.IsVirtual -> Error $"the {what} is a virtual array (no stored cells)"
+                        | _ -> Error $"the {what} is not a rank-1 array"
+                    match shape with
+                    | Error why -> Error why
+                    | Ok et ->
+                    if assignedAnywhere sid then Error $"the {what} is assigned in the program (v1: a source never written)"
+                    elif paramIds.Contains sid then
+                        let p = f.Params |> List.find (fun p -> p.VarId = sid)
+                        paramProof what p |> Result.map (fun how -> (how, et))
+                    elif before.Contains sid then
+                        provenance what sid |> Result.map (fun how -> ($"a body let bound before the grouping -- {how}", et))
+                    elif bindingIds.Contains sid then
+                        provenance what sid |> Result.map (fun how -> (how, et))
+                    elif Map.containsKey sid spineIndex then
+                        Error $"the {what} is bound after the grouping (v1: a dominating source)"
+                    else Error $"the {what} is not a parameter, an earlier body let or a module binding"
+                | _ -> Error $"the {what} is an expression, not a named stored array"
+            match sourceProof "key array" key with
+            | Error why -> fail why []
+            | Ok (_, kElem) when kElem <> ETInt64 ->
+                fail $"the keys are {elemName kElem} (v1: Int64 keys; float and string keys keep the CSR)" []
+            | Ok (keyHow, _) ->
+            // ---- uses of the grouping: group_by(_, gk) and extents(gk) only ----
+            let groupBySites =
+                spine |> Array.toList |> List.indexed |> List.choose (fun (i, (id, v)) ->
+                    match strip v with
+                    | IRGroupBy (src, IRVar (g, _)) when g = gkId -> Some (i, id, src)
+                    | _ -> None)
+            let sizeSites =
+                spine |> Array.toList |> List.filter (fun (_, v) ->
+                    match strip v with
+                    | IRGroupSizes (IRVar (g, _)) when g = gkId -> true
+                    | _ -> false)
+            let gkUses = countProgram gkId
+            if gkUses <> groupBySites.Length + sizeSites.Length then
+                fail "the grouping is used other than as `group_by(_, gk)` / `extents(gk)` statements of its body (a group_bucket, an alias, a capture, a nested use: v1 declines)" []
+            else
+            let gbIds = groupBySites |> List.map (fun (_, id, _) -> id) |> Set.ofList
+            let gbSource = groupBySites |> List.map (fun (_, id, src) -> (id, src)) |> Map.ofList
+            // ---- the peels ----
+            let peelSites =
+                spine |> Array.toList |> List.indexed |> List.choose (fun (i, (id, v)) ->
+                    match strip v with
+                    | IRApplyCombinator info when info.Arrays |> List.exists (function IRVar (a, _) -> gbIds.Contains a | _ -> false) ->
+                        Some (i, id, v, info)
+                    | _ -> None)
+            // every use of a grouped array must sit inside one of these peels
+            let outsideUse =
+                gbIds |> Seq.tryFind (fun g ->
+                    let inPeels = peelSites |> List.sumBy (fun (_, _, v, _) -> countIn g v)
+                    countProgram g <> inPeels)
+            match outsideUse with
+            | Some _ ->
+                fail "a grouped array is used other than as the operand of a peel statement of the body (a returned / escaping or aliased grouped array, a capture, a row read outside a peel)" []
+            | None ->
+            // a peel state, or the first failed condition
+            let stateOf (pid: IRId) (v: IRExpr) (info: ApplyInfo) : Result<GroupAggState * IRCallable list * IRExpr list, string> =
+                match resolve info.Kernel with
+                | None -> Error "a peel kernel does not resolve to a callable"
+                | Some kc ->
+                let label = labelOf kc
+                if info.HasReynolds then Error $"the peel `{label}` is a reynolds kernel"
+                elif kc.IsOmpParallel then Error $"the peel `{label}` is a `where omp` peel (its row loop is a licensed team; sql-group-by/033: v1 declines)"
+                elif kc.IsCudaKernel || kc.IsMpiParallel then Error $"the peel `{label}` is a CUDA / MPI kernel"
+                elif kc.Params.Length <> info.Arrays.Length then Error $"the peel `{label}`'s kernel arity differs from its operands"
+                elif not (info.Arrays |> List.forall (function IRVar (a, _) -> gbIds.Contains a | _ -> false)) then
+                    Error $"the peel `{label}` co-iterates a grouped array with an operand that is not grouped by the same grouping"
+                elif wrote v then Error $"the peel `{label}` may write (its kernel or an operand, through the shared write analysis)"
+                elif not (kc.Captures |> List.forall (fun c -> dominates c.Id)) then
+                    Error $"the peel `{label}`'s kernel captures a value bound after the grouping (a late seed or scalar: it cannot be read where the pass runs)"
+                else
+                let outElem =
+                    match stripUnits info.OutputType with
+                    | ArrayElem at when at.IndexTypes.Length = 1 -> scalarOf at.ElemType
+                    | _ -> None
+                match outElem with
+                | None -> Error $"the peel `{label}` does not collapse each group to one scalar"
+                | Some oe when oe <> ETFloat64 && oe <> ETInt64 -> Error $"the peel `{label}`'s result is {elemName oe} (v1 states: Float64 / Int64)"
+                | Some oe ->
+                let srcOf (arr: IRExpr) = match arr with IRVar (a, _) -> Map.find a gbSource | e -> e
+                let srcElem (e: IRExpr) = match stripUnits (typeOf e) with ArrayElem at -> scalarOf at.ElemType | _ -> None
+                let pIds = kc.Params |> List.map (fun p -> p.VarId)
+                let operandOfParam (vid: IRId) = List.findIndex ((=) vid) pIds |> fun k -> srcOf info.Arrays.[k]
+                match kc.Params, kc.Body with
+                | [ r ], IRReduce (IRVar (rv, _), fk, init) when rv = r.VarId ->
+                    (match resolve fk with
+                     | Some fkc when fkc.Params.Length = 2 ->
+                         let src = operandOfParam rv
+                         let se = srcElem src
+                         // THE FOLD'S TYPES (Codex diff review of W3-1, finding
+                         // 2): the state, both kernel parameters, the kernel's
+                         // result, the element and (below) the seed must be ONE
+                         // supported scalar representation -- a lane's ordinary
+                         // fold picks its accumulator from the kernel's result
+                         // and converts the first value to it, which the pass
+                         // (a state of the output's type) would not reproduce.
+                         let shown (e: ElemType option) = match e with Some e -> elemName e | None -> "unresolved"
+                         let pEl = fkc.Params |> List.map (fun p -> scalarOf p.Type)
+                         let rEl = scalarOf fkc.RetType
+                         let pShown = pEl |> List.map shown |> String.concat ", "
+                         if pEl <> [ Some oe; Some oe ] || rEl <> Some oe || se <> Some oe then
+                             Error $"the fold kernel of `{label}` is not typed in the state's one scalar representation ({elemName oe}): parameters ({pShown}) -> {shown rEl} over {shown se} elements (v1 requires state, parameters, result, element and seed to agree; a mixed-type fold keeps the CSR)"
+                         elif wrote fk then Error $"the fold kernel of `{label}` may write"
+                         elif not (fkc.Captures |> List.forall (fun c -> dominates c.Id)) then
+                             Error $"the fold kernel of `{label}` captures a value bound after the grouping"
+                         else
+                         match IRTotality.auditCallable resolve (fun _ -> None) isDeferredId fkc [] with
+                         | Error why -> Error $"the fold kernel of `{label}` is not closed-total ({why})"
+                         | Ok () ->
+                         match init with
+                         | None ->
+                             if se <> Some oe then Error $"the unseeded fold `{label}` changes element type (its first value is copied as the state)"
+                             else Ok ({ PeelId = pid; PeelLabel = label; Kind = GaUnseeded fk; Sources = [ src ]; Elem = oe; KernelFrame = kc.SourceName }, [ fkc ], [])
+                         | Some s ->
+                             if not (refs s |> Set.forall dominates) then
+                                 Error $"the seed of `{label}` reads a value that does not dominate the grouping (a row read, a value bound after it)"
+                             elif wrote s then Error $"the seed of `{label}` may write"
+                             elif (match se with Some e -> not (IRTotality.isReal e) | None -> true) then Error $"the fold `{label}` folds a non-real element"
+                             else
+                             match IRTotality.walk resolve (fun _ -> None) isDeferredId Map.empty Map.empty Set.empty Set.empty Set.empty s with
+                             | Error why -> Error $"the seed of `{label}` may fail ({why})"
+                             | Ok _ ->
+                                 if scalarOf (typeOf s) <> Some oe then Error $"the seed of `{label}` is not of the state's element type"
+                                 else Ok ({ PeelId = pid; PeelLabel = label; Kind = GaSeeded (fk, s); Sources = [ src ]; Elem = oe; KernelFrame = kc.SourceName }, [ fkc ], [ s ])
+                     | _ -> Error $"the fold kernel of `{label}` is not a resolved two-parameter callable")
+                | [ r ], IRProdSum [ IRVar (a, _); IRVar (b, _) ] when a = r.VarId && b = r.VarId ->
+                    let src = operandOfParam a
+                    if srcElem src <> Some oe then Error $"the prodsum `{label}` changes element type"
+                    else Ok ({ PeelId = pid; PeelLabel = label; Kind = GaProdSum; Sources = [ src; src ]; Elem = oe; KernelFrame = kc.SourceName }, [], [])
+                | [ ra; rb ], IRProdSum [ IRVar (a, _); IRVar (b, _) ]
+                    when (a = ra.VarId || a = rb.VarId) && (b = ra.VarId || b = rb.VarId) ->
+                    let sa = operandOfParam a
+                    let sb = operandOfParam b
+                    if srcElem sa <> Some oe || srcElem sb <> Some oe then Error $"the prodsum `{label}` changes element type"
+                    else Ok ({ PeelId = pid; PeelLabel = label; Kind = GaProdSum; Sources = [ sa; sb ]; Elem = oe; KernelFrame = kc.SourceName }, [], [])
+                | [ r ], IRExtent (IRVar (rv, _), 0) when rv = r.VarId ->
+                    Ok ({ PeelId = pid; PeelLabel = label; Kind = GaCount; Sources = []; Elem = oe; KernelFrame = kc.SourceName }, [], [])
+                | _ -> Error $"the peel `{label}`'s kernel is outside the aggregate subset (reduce(r, k[, init]), prodsum(r, r), prodsum(ra, rb), extents(r)): a row read such as r(0), a composite body, or a kernel over several rows"
+            let states =
+                peelSites |> List.fold (fun acc (_, pid, v, info) ->
+                    match acc with
+                    | Error _ -> acc
+                    | Ok xs -> (match stateOf pid v info with Ok x -> Ok (xs @ [ x ]) | Error why -> Error why)) (Ok [])
+            match states with
+            | Error why -> fail why []
+            | Ok triples ->
+            let states = triples |> List.map (fun (s, _, _) -> s)
+            // ---- sources: EVERY group_by operand (count-only and unused
+            // grouped arrays included -- their rows are not gathered either, so
+            // an unproved producer would lose its evaluation), stored,
+            // dominating, write-free (Codex diff review of W3-1, finding 1) ----
+            let sourceExprs = groupBySites |> List.map (fun (_, _, src) -> src) |> List.distinct
+            let sourceLines = sourceExprs |> List.map (fun e -> (e, sourceProof "value array" e))
+            match sourceLines |> List.tryPick (fun (_, r) -> match r with Error why -> Some why | Ok _ -> None) with
+            | Some why -> fail why []
+            | None ->
+            // ---- association, per state ----
+            let assoc (s: GroupAggState) : Result<string, string> =
+                let isInt = s.Elem = ETInt64
+                let licensedText = "LICENSED (BLADE_GROUP_AGG=licensed, an EXPERIMENTAL arm): the ascending chain in place of today's form -- in the C++ lane a per-group K-lane tree, in the LLVM lane a recurrence carrying the fold's fast-math flags -- an association change under the source licence; bits may differ (no tolerance guarantee: the cancellation fixture [1e16, -1e16, 1, 0, 0, 0, 0, 0, 1] sums to 2 in the chain and to 0 in today's C++ K-lane form)"
+                match s.Kind with
+                | GaCount -> Ok "exact (a count)"
+                | GaProdSum ->
+                    if not reorderingBuild then Ok "strict (the repro build): `acc = 0`, then `acc += a * b` ascending"
+                    elif isInt then Ok "exact (an integer prodsum: wrapping, the same value under any grouping)"
+                    elif mode = GroupAggLicensed then Ok licensedText
+                    else Error $"`{s.PeelLabel}` is a licensed Float64 prodsum (its `+` is licensed by construction): the one pass's ascending chain is a different association from today's licensed forms (the C++ lane's per-group K-lane tree; the LLVM lane's flagged recurrence), so v1 declines in both lanes -- a conservative shared gate, not a claim that the two lanes' forms agree (BLADE_GROUP_AGG=licensed takes it; the repro build takes the strict pass)"
+                | GaSeeded (fk, _) | GaUnseeded fk ->
+                    let fkc = (resolve fk).Value
+                    if not reorderingBuild then Ok "strict (the repro build): the chain as written"
+                    elif not (licensed fkc) then Ok "strict (the kernel carries no reorder licence: every build runs this exact chain)"
+                    elif isInt && (builtinOp fkc).IsSome then Ok "exact (an integer builtin fold: wrapping, associative and commutative -- the same value under any grouping)"
+                    elif mode = GroupAggLicensed then Ok licensedText
+                    else Error $"`{s.PeelLabel}` is a licensed {elemName s.Elem} fold: the one pass's ascending chain is a different association from today's licensed forms (the C++ lane's per-group K-lane tree; the LLVM lane's flagged recurrence), so v1 declines in both lanes -- a conservative shared gate, not a claim that the two lanes' forms agree (BLADE_GROUP_AGG=licensed takes it; the repro build takes the strict pass)"
+            let assocs = states |> List.map (fun s -> (s, assoc s))
+            // ---- the five parties ----
+            let lastPeel = peelSites |> List.map (fun (i, _, _, _) -> i) |> List.fold max gi
+            let lastUse = (groupBySites |> List.map (fun (i, _, _) -> i)) |> List.fold max lastPeel
+            let between = [ for i in gi + 1 .. lastUse -> spine.[i] ]
+            let betweenWriter = between |> List.tryFind (fun (id, v) -> wrote (intervalPayloadOf modul id v))
+            let foldKs = triples |> List.collect (fun (_, ks, _) -> ks)
+            let seeds = triples |> List.collect (fun (_, _, ss) -> ss)
+            let srcText =
+                sourceLines |> List.map (fun (e, r) ->
+                    let n = match e with IRVar (i, _) -> (match Map.tryFind i bindingById with Some b -> b.Name | None -> (f.Params |> List.tryFind (fun p -> p.VarId = i) |> Option.map (fun p -> p.Name) |> Option.defaultValue $"v{i}")) | _ -> "?"
+                    match r with Ok (how, _) -> $"`{n}`: {how}" | Error _ -> "") |> String.concat "; "
+            let producerParty = $"producers (the key and EVERY group_by operand, count-only and unused ones included, each by its provenance -- storedArrayProof's chain or the stored-let rule, every link's payload through scheduleMayWriteIn + the CSE facts, a parameter through every call site's argument): the key array: {keyHow}; value source(s) {srcText}; all dominating the grouping, none assigned anywhere (a supplementary syntactic check)"
+            let peelParty =
+                let names = states |> List.map (fun s -> $"`{s.PeelLabel}`") |> String.concat ", "
+                if states.IsEmpty then "consumer (peel) kernels: none (only extents(gk))"
+                else $"consumer (peel) kernels {names}: no write (scheduleMayWriteIn over each peel), inside the aggregate subset, captures dominating"
+            let foldParty = $"outer fold kernels: {foldKs.Length}, each closed-total (Blade.IRTotality), no write, captures dominating"
+            let seedParty = $"seeds: {seeds.Length}, each closed-total, no write, row-independent and dominating (evaluated once per group, before that group's first row, as each peel evaluated it once per group)"
+            let betweenParty =
+                match betweenWriter with
+                | Some _ -> Error "a binding between the grouping and the last peel may write"
+                | None -> Ok $"between the grouping and its last use: {between.Length} binding(s), none writes (scheduleMayWriteIn + the CSE facts over each binding's payload)"
+            let parallelParty = "parallel: none -- the one pass is serial (a `where omp` peel declines; callbackTable unused: no parallel body is admitted)"
+            let matrix =
+                "groupAggAdmits (five parties, each through Optimize.scheduleMayWriteIn): "
+                + ([ producerParty; peelParty; foldParty; seedParty
+                     (match betweenParty with Ok s -> s | Error s -> "DECLINES: " + s); parallelParty ] |> String.concat "; ")
+            let stateLine =
+                let kindText (s: GroupAggState) =
+                    match s.Kind with
+                    | GaUnseeded _ -> "UNSEEDED reduce (first value copied and consumed once; empty group: BL8003 at the peel)"
+                    | GaSeeded _ -> "SEEDED reduce (the chain from the exact seed; an empty group answers the seed)"
+                    | GaProdSum -> "PRODSUM (acc = 0, then acc += a * b)"
+                    | GaCount -> "COUNT (offsets[g + 1] - offsets[g])"
+                let parts =
+                    assocs |> List.map (fun (s, a) ->
+                        let at = match a with Ok t -> t | Error t -> "DECLINES: " + t
+                        $"`{s.PeelLabel}`: {kindText s}, {at}")
+                if parts.IsEmpty then "states: none (the grouping's sizes only)" else "states: " + String.concat "; " parts
+            let failureLine =
+                "first failure: the pass raises only the grouping's own BL8006 (positional / EnumIdx), at the grouping's span and row, as today's first key pass; accumulation is total (stored sources, closed-total kernels and seeds), so a failing binding between the grouping and a peel still fails first; each unseeded peel keeps its BL8003 at its own site for the FIRST empty group in group order; the peel outputs stay named stored arrays"
+            let unproved =
+                "unproved: the bit identity with the two-pass form is ARGUED (each chain keeps its operands, order, seed and association; interleaving reorders only independent chains), not proved; the evidence is witnesses: the cli block's gate-off vs gate-on RAW-BIT comparisons (BLADE_PRINT_BITS, BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off, route asserted: the positional fixtures in both lanes, the dynamic ones in the C++ lane) and printed-value witnesses -- corpus sql-group-by/064-074 in the C++ lane (the default suite, test interp, opt-diff), of which the LLVM differential routes and plans 064, 065, 068, 071 and 074"
+            let gkName = $"group_keys in `{f.SourceName}`"
+            let evidence = [ $"{gkName}: {groupAggRegimeText regime}"; stateLine; failureLine; matrix; unproved ]
+            match betweenParty with
+            | Error why -> fail why evidence
+            | Ok _ ->
+            match assocs |> List.tryPick (fun (_, a) -> match a with Error t -> Some t | Ok _ -> None) with
+            | Some why -> fail why evidence
+            | None ->
+            if mode = GroupAggOff then fail "disabled by BLADE_GROUP_AGG" evidence
+            else
+                GroupAggTable.record
+                    { GkId = gkId; Subject = subject; FuncId = f.Id; Regime = regime; Key = key
+                      States = states; GroupBys = gbIds; Admission = matrix
+                      EmittedCpp = ref false; EmittedLlvm = ref false }
+                let peelNames = states |> List.map (fun s -> s.PeelLabel) |> String.concat ", "
+                decide subject Blade.Effects.Applied
+                    ([ $"one pass over the rows in source order; states {peelNames}; no perm, no gather (the grouped arrays' rows stay null); each peel reads its state" ] @ evidence)
+
 // --- Slice-write fusion: destination passing for a rank-1 row write --------
 //
 // The recursive-array desugar (TypeCheckInfer.inferRecArray) writes every
@@ -5541,7 +6979,7 @@ let planMembershipHoist (programFuncs: IRCallable list) (modul: IRModule) : unit
 // and the final combination is one scalar local, never a recomputation), and
 // the last one is stored straight into the destination row. No temporary
 // row, no copy, no stage pools: one pass per step, reading the prefix rows
-// and writing the row being built (bench/notes/phase2-microkernel-plan.md
+// and writing the row being built (bench/notes/phase2-microkernel-plan.md (removed 2026-10-24; in git history at cf2028cc)
 // 4.5b(ii) destination passing + 4.5c pointwise-body fusion).
 //
 // Why it is cost-only (charter rule 1):
@@ -6814,7 +8252,9 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
         // statement that may write anywhere keeps its calls as calls.
         let stmtWrites = stmts |> List.map (fun (_, v) -> mayWrite v) |> Array.ofList
         let inlineCache = System.Collections.Generic.Dictionary<int * int, Result<(IRId * IRExpr) list * IRExpr * string, string>>()
+        let callNodes = System.Collections.Generic.Dictionary<int * int, IRExpr>()
         let judgeAt (i: int) (ord: int) (call: IRExpr) =
+            callNodes.[(i, ord)] <- call
             match inlineCache.TryGetValue((i, ord)) with
             | true, r -> r
             | _ ->
@@ -7480,7 +8920,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                           Legs = specs }
                     let inlineKey = match tentative.[pu].Key with SfInl (i, c, _) -> Some (i, c) | SfOrig _ -> None
                     // The inlined callee's ARRAY lets (its stored pools), freed at the
-                    // call's RETURN BOUNDARY by the C++ lane (InlineReturnTable).
+                    // call's return-boundary event (IR.IRReleasePools), in both lanes.
                     let inlinedPools =
                         match inlineKey with
                         | Some key ->
@@ -7493,7 +8933,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                         match inlineKey with
                         | Some key ->
                             let pools = inlinedPools |> List.map (fst >> nameOf) |> String.concat ", "
-                            [ $"{inlineDisp key} inlined one level so the producer and the legs share one region (no call boundary between them); the C++ lane releases its pools ({pools}) ONCE at the call's return boundary -- right behind the inlined spine's last statement (its evaluated scalar return), independent of where the join sits -- where the call used to free them; the LLVM lane frees no pool in either form" ]
+                            [ $"{inlineDisp key} inlined one level so the producer and the legs share one region (no call boundary between them) -- the OPT-IN arm, retained because BLADE_EPILOGUE_LEGS=1 is explicit (its lifetime audit is INCOMPLETE, G69: a fold kernel named by a non-owned unit is not audited; each lane that RETAINS it warns BL7005 on stderr, once, at the call; the planned closure is the scope model A, reviews/codex-g69-design.md, a later item); its pools ({pools}) are released ONCE at an IR-level return-boundary event (IRReleasePools) placed after the rebuilt inlined spine and its evaluated return, before the statement that held the call -- where the as-written call returned; CSE treats the event as a barrier and pins the pools, scratch reuse excludes them, IRValidate rejects a read after it (directly, or one level through a local let whose definition names a pool), and both lanes release there (C++: the scope frame's own free or main's dense free; LLVM: the tracking-slot free, slot nulled, or a direct free in main). Scope (fail closed): the callee was admitted because EVERY let of its inlined spine is a forced rank-1 dense map (an owned pool, listed) or an allocation-free value -- its type and the type of every let, branch, match, tuple, projection and compute its evaluation reaches is a numeric / Bool / complex scalar, a unit, an index label whose INNER type is one of those, or a tuple of them (no String, no bare Nat), it reads no String-typed value and evaluates no String literal, and it calls NO user function directly in any position (builtin operators -- arithmetic, libm, casts, extents, folds and maps -- are not calls; callee bodies, and the bodies of fold / map KERNELS it names, are NOT audited -- the known unaudited case) -- and it is the only inlinable call of its statement; any other callee, or a second call in the statement, is not retained for A7c (independent sibling-fold inlining is unchanged)" ]
                         | None -> []
                     // FINDING 4: the inline is kept only when BOTH lanes' fused forms
                     // can carry the legs in this build -- the facts each emitter's own
@@ -7545,9 +8985,118 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                         recordEpilogueLegs subject (Blade.Effects.Declined (resolveNames why)) ((headline :: rows) |> List.map resolveNames)
                     | Ok rows when not (epilogueLegsEnabled ()) ->
                         recordEpilogueLegs subject (Blade.Effects.Declined "disabled by BLADE_EPILOGUE_LEGS") ((headline :: rows) |> List.map resolveNames)
+                    // W2-4 round 8 (the seventh look, NEW 1 not fixed -- the user's decision):
+                    // the kept one-level inline is OPT-IN. A plan that needs it declines under
+                    // unset; a plan whose producer is already in the region is unaffected.
+                    | Ok rows when inlineKey.IsSome && not (epilogueLegsInlineOptIn ()) ->
+                        recordEpilogueLegs subject (Blade.Effects.Declined epilogueInlineOptInDecline) ((headline :: rows) |> List.map resolveNames)
                     | Ok rows when taken.Contains pId ->
                         recordEpilogueLegs subject (Blade.Effects.Declined $"another join's legs already ride `{pName}`'s producer pass") ((headline :: rows) |> List.map resolveNames)
                     | Ok rows ->
+                    // ROUND 5, FAIL CLOSED (fourth review NEW 1, 3, 4): the kept inline's
+                    // return-boundary event releases exactly the callee's OWNED
+                    // allocations, so the callee must allocate nothing else: EVERY let of
+                    // its inlined spine is either a forced rank-1 dense map (IRCompute of
+                    // a map -- an owned pool, listed) or a value that holds no storage (a
+                    // scalar or a tuple of scalars, e.g. a fold or a join's result) and is
+                    // no deferred form. An array alias / rename (the LLVM lane copies it
+                    // into an unlisted pool), a loop object, a deferred map, an array
+                    // tuple or projection, or any other array-valued let declines. And
+                    // one inlinable call per statement: several spines before one
+                    // statement would share one delayed boundary.
+                    let ownershipProblem () : string option =
+                        match inlineKey with
+                        | None -> None
+                        | Some (i, c) ->
+                            let call = inlineDisp (i, c)
+                            if tentative |> Array.exists (fun u -> match u.Key with SfInl (i2, c2, _) -> i2 = i && c2 <> c | SfOrig _ -> false) then
+                                Some $"the statement holding {call} holds another inlinable call (v1 places one return boundary per statement)"
+                            else
+                                tentative |> Array.tryPick (fun u ->
+                                    match u.Key with
+                                    | SfInl (i2, c2, _) when (i2, c2) = (i, c) ->
+                                        let v = u.Value
+                                        let owned =
+                                            match v with
+                                            | IRCompute inner ->
+                                                (match collapseC inner with
+                                                 | IRApplyCombinator _ ->
+                                                    (match stripUnits (typeOf v) with
+                                                     | ArrayElem at ->
+                                                        not at.IsVirtual
+                                                        && (match at.IndexTypes with
+                                                            | [ ix ] -> ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank = 1
+                                                            | _ -> false)
+                                                     | _ -> false)
+                                                 | _ -> false)
+                                            | _ -> false
+                                        // Round 6 (fifth review NEW 1-2): ALLOCATION-FREE EVALUATION,
+                                        // not a storage-free result type. A non-owned unit's type must
+                                        // be an allocation-free VALUE type (numeric scalars, Bool,
+                                        // complex, index values, unit, tuples of those -- NOT String,
+                                        // whose C++ value owns heap storage), and NO node its
+                                        // evaluation reaches may bind, branch to, build or call out a
+                                        // value of any other type: a nested let (`if c then { let
+                                        // spare = x; .. }`), an if / match arm, a tuple or projection,
+                                        // a call result, a compute -- each is judged by its own type (and,
+                                        // round 7, no user call is admitted at all; see below).
+                                        // Reads of arrays inside folds and maps (their operands) are
+                                        // leaves, not bindings.
+                                        let nm = match u.Binder with Some id -> nameOf id | None -> "its return"
+                                        let shapeProblem () =
+                                            let mutable bad : string option = None
+                                            iterIRExpr (fun n ->
+                                                if bad.IsNone then
+                                                    // Round 7 (sixth review NEW 1): EVERY call to a user
+                                                    // callable declines -- whatever its result type, in any
+                                                    // position (let RHS, tuple component, projection operand,
+                                                    // branch arm, seed, arithmetic operand): a lane may expand
+                                                    // its body in place (the LLVM lane's tuple-component path
+                                                    // opens no pool scope), so a call's expansion may allocate
+                                                    // outside the owned pools. Callee bodies are NOT audited.
+                                                    // Builtins are IR operators (arithmetic, libm, casts,
+                                                    // extents, folds / maps), not calls.
+                                                    (match n with
+                                                     | IRApp (IRVar (fid, _), _, _) when Map.containsKey fid funcs ->
+                                                        let fnm = (Map.find fid funcs).SourceName
+                                                        bad <- Some $"callee let `{nm}` calls {fnm}: a call's expansion may allocate outside the owned pools"
+                                                     | IRApp _ ->
+                                                        bad <- Some $"callee let `{nm}` applies a value that does not resolve to a known callable"
+                                                     // (NEW 2) a String-typed LEAF (a literal, a variable) is an owning value
+                                                     | IRLit (IRLitString _) ->
+                                                        bad <- Some $"callee let `{nm}` evaluates a String literal (an owning value in the C++ lane)"
+                                                     | IRVar (_, t) | IRParam (_, _, t) when (match stripUnits t with IRTScalar _ | IRTIdxTagged _ | IRTTuple _ -> not (allocationFreeValueType t) | _ -> false) ->
+                                                        bad <- Some $"callee let `{nm}` reads a value of a type that is not an allocation-free value (a String or a String-valued index label)"
+                                                     | _ -> ())
+                                                    let judged =
+                                                        if bad.IsSome then None
+                                                        else
+                                                        match n with
+                                                        | IRLet (_, bv, _) -> Some (typeOf bv)
+                                                        | IRIf _ | IRMatch _ | IRTuple _ | IRTupleProj _ | IRApp _ | IRCompute _ -> Some (typeOf n)
+                                                        | _ -> None
+                                                    match judged with
+                                                    | Some t when not (allocationFreeValueType t) ->
+                                                        let kind =
+                                                            match n with
+                                                            | IRLet _ -> "a nested let" | IRIf _ -> "an if" | IRMatch _ -> "a match"
+                                                            | IRTuple _ -> "a tuple" | IRTupleProj _ -> "a projection" | IRApp _ -> "a call" | _ -> "a compute"
+                                                        bad <- Some $"callee let `{nm}` evaluates {kind} of a type that is not an allocation-free value (an array, String, loop or function type)"
+                                                    | _ -> ()) v
+                                            bad
+                                        if owned then None
+                                        elif not (allocationFreeValueType (typeOf v)) || isDeferredForm v then
+                                            Some $"callee let `{nm}` is not an owned allocation form (the inline's boundary releases only forced rank-1 dense maps; every other let must be an allocation-free value)"
+                                        else
+                                            match shapeProblem () with
+                                            | Some why -> Some (why + " -- not an owned allocation form")
+                                            | None -> None
+                                    | _ -> None)
+                    match ownershipProblem () with
+                    | Some why ->
+                        recordEpilogueLegs subject (Blade.Effects.Declined (resolveNames why + "; the call is not retained for A7c (independent sibling-fold inlining is unchanged)"))
+                            ((headline :: rows) |> List.map resolveNames)
+                    | None ->
                     match routeProblem () with
                     | Some why ->
                         recordEpilogueLegs subject (Blade.Effects.Declined ("no lane would carry the legs in this build: " + why + "; nothing is inlined for them"))
@@ -7566,14 +9115,25 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
             applied |> Seq.collect (fun (g, _, _) -> g |> List.choose (fun m -> inlineKeyOf m.UnitKey)) |> Set.ofSeq
             |> Set.union (Set.ofSeq legInlines.Keys)
         let finalUnits = buildUnits (fun k -> Set.contains k keptInlines)
-        // The return boundary of every call inlined for legs: the LAST unit of
-        // its inlined spine (all of the callee's statements precede it).
-        for KeyValue (key, (pools, call)) in legInlines do
-            let last =
-                finalUnits |> List.filter (fun u -> match u.Key with SfInl (i, c, _) -> (i, c) = key | SfOrig _ -> false) |> List.tryLast
-            match last with
-            | Some { Binder = Some bid } when not pools.IsEmpty ->
-                InlineReturnTable.record { BoundaryLetId = bid; Pools = pools; Call = resolveNames call; Guard = ref false }
+        // THE RETURN-BOUNDARY EVENTS (W2-4 round 4): one IRReleasePools statement
+        // per call inlined for legs, built from the call's own inlined units --
+        // its first let (the region it closes) and its stored pools -- and placed
+        // in the rebuilt spine right before the statement that held the call,
+        // AHEAD of that statement's own hoisted joins: after the whole inlined
+        // spine and its evaluated scalar return, where the as-written call
+        // returned. Not keyed by any let the rebuild may drop.
+        let events = System.Collections.Generic.Dictionary<int, (IRId * IRExpr) list>()
+        for KeyValue ((i, c), (pools, call)) in legInlines |> Seq.sortBy (fun kv -> kv.Key) do
+            // The region start is the FIRST OWNED POOL's binder (round 5, NEW 2): a
+            // pool let is never a join member (the rebuild never drops it) and CSE
+            // pins it, so the identity the validator checks always survives.
+            match pools with
+            | (start, _) :: _ ->
+                let ev = (builder.FreshId(), IRReleasePools (resolveNames call, start, pools))
+                (match callNodes.TryGetValue((i, c)) with
+                 | true, node -> (match CallSpanTable.tryFind node with Some s -> InlineEventSpans.record start s | None -> ())
+                 | _ -> ())
+                events.[i] <- (match events.TryGetValue i with | true, l -> l | _ -> []) @ [ ev ]
             | _ -> ()
         let replace = System.Collections.Generic.Dictionary<SfUnitKey * int, IRExpr>()
         let dropUnits = System.Collections.Generic.HashSet<SfUnitKey>()
@@ -7630,6 +9190,12 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                     | _ -> n) e
         let out = ResizeArray<IRId option * IRExpr>()
         for u in finalUnits do
+            (match u.Key with
+             | SfOrig i ->
+                (match events.TryGetValue i with
+                 | true, evs -> for (id, v) in evs do out.Add((Some id, v))
+                 | _ -> ())
+             | SfInl _ -> ())
             (match inserts.TryGetValue u.Key with
              | true, lets -> for (id, v) in lets do out.Add((Some id, v))
              | _ -> ())

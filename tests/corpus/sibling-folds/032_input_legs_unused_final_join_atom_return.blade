@@ -1,0 +1,33 @@
+// TEST: An inlined callee whose last statement is a dropped join still releases its pools at the return
+// ============================================================================
+// `kernel` computes y2 and its epilogue fold s over Ix, then ends with an
+// UNUSED join over the Jx inputs u, v, and returns the EARLIER scalar s (an
+// atom return). The caller's u / v sums absorb that join (the sibling pass
+// drops it), and the caller's x / y sums ride y2. The return-boundary event is
+// a statement of its own (IR.IRReleasePools), placed after the rebuilt spine,
+// so dropping the callee's last let cannot delete it (W2-4 third review hole
+// 1): y2 is released in main, once, with no read after it.
+// ============================================================================
+type Ix = Idx<1003>
+type Jx = Idx<1009>
+function inputs(m: Int64) -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute
+}
+function inputs_j(m: Int64) -> Array<Float64 like Jx> = {
+    method_for(range<Jx>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute
+}
+function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>, u: Array<Float64 like Jx>, v: Array<Float64 like Jx>) -> Float64 = {
+    let y2 = method_for(zip(x, y)) <@> lambda(a, b) -> a + b |> compute
+    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
+    let unused = reduce((method_for(u) <@> lambda(a) -> a) <&!> (method_for(v) <@> lambda(a) -> a), (+))
+    s
+}
+let (r, t) = {
+    let x = inputs(7)
+    let y = inputs(5)
+    let u = inputs_j(11)
+    let v = inputs_j(3)
+    (kernel(x, y, u, v), reduce(x, (+)) + reduce(y, (+)) + 100.0 * reduce(u, (+)) + 1000.0 * reduce(v, (+)))
+}
+// EXPECT: r = 31021.0
+// EXPECT: t = 1516307.0

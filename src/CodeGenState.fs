@@ -107,6 +107,13 @@ type CodeGenContext = {
     /// Deferred computation exprs (L <@> f), materialized only when |> compute forces them;
     /// <&!> looks through variables to find the original ApplyInfo for fusion.
     DeferredComputations: Map<IRId, IRExpr>
+    /// A deferred ARRAY alias (`let g2 = g`, g a deferred map) -> the deferred
+    /// binding it names (gap G60, formalism 10.2 "Aliases and printing of
+    /// deferred maps"). The alias is the SAME deferred value: it evaluates
+    /// nothing at its `let`, and the first forcing use through it forces the
+    /// SOURCE under its own name first (forceDeferredArrayInput), then binds
+    /// the alias as an assignable copy of the stored cells.
+    DeferredAliasOf: Map<IRId, IRId>
     /// Let-bound loop-object provenances (`let o = object_for(f)`); kept SEPARATE from
     /// DeferredComputations so array-position consumers never see a bare loop object --
     /// only genComposeApply reads this, to chase a composed leaf back to its IRObjectFor
@@ -1815,6 +1822,7 @@ let emptyContext () = {
     StaticDecls = []
     TupleChildren = Map.empty
     DeferredComputations = Map.empty
+    DeferredAliasOf = Map.empty
     ObjectLoopBindings = Map.empty
     ProviderReads = Map.empty
     ProviderWrites = Map.empty

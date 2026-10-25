@@ -1,0 +1,24 @@
+// TEST: Call Argument Wrapped Compute
+// ----------------------------------------------------------------------------
+// Gap G57 (round 3, W1-3 found it): a WRAPPED unforced array as a
+// module-level call argument, `f(m1 |> compute, 2.0)`. The C++ lane's
+// positional-read pre-pass forces a deferred call argument only when it is
+// a bare name, so the IRCompute wrapper hid `m1` and the call named an
+// undeclared `m1` (BL9002; the llvm lane and the interpreter ran it). The
+// arguments are now evaluated left to right before the call: the explicit
+// compute into a temporary (a copy, so `m1` itself stays deferred and prints
+// nothing, as `let r = m1 |> compute` leaves it), the bare `f(m2, 3.0)`
+// forced under m2's own name as before (so m2 prints).
+// ----------------------------------------------------------------------------
+type Row = Idx<3>
+let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
+let m1 = method_for(x) <@> lambda(v) -> v * 2.0
+let m2 = method_for(x) <@> lambda(v) -> v + 1.0
+function f(a: T^1, s: T^0) -> T^0 = reduce(a, (+)) * s
+let r1 = f(m1 |> compute, 2.0)
+let r2 = f(m2, 3.0)
+let r3 = f(method_for(x) <@> lambda(v) -> v * v |> compute, 0.5)
+// EXPECT: r1 = 24.0
+// EXPECT: m2 = [2.0, 3.0, 4.0]
+// EXPECT: r2 = 27.0
+// EXPECT: r3 = 7.0

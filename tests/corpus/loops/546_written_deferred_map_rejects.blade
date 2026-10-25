@@ -1,0 +1,17 @@
+// TEST: Written Deferred Map (rejects)
+// ----------------------------------------------------------------------------
+// Found by W4-1 (gap G60's class): `g(0) = 100.0` writes a deferred map. The
+// type checker splices a deferred map's computation into a fold over it, so
+// the llvm lane folded the UNWRITTEN map (s = 12.0, a silent wrong value) and
+// the C++ lane refused with BL9002. A write through a deferred computation is
+// now refused at lowering in every lane (BL4005, formalism 10.2):
+// materialize it first (`let g = ... |> compute`).
+// ----------------------------------------------------------------------------
+type Row = Idx<3>
+let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+g(0) = 100.0
+let s = reduce(g, (+))
+// ERROR: BL4005 @ 12:1
+// ERROR-CONTAINS: a write through `g`, a deferred computation
+// REJECT-AT: lower

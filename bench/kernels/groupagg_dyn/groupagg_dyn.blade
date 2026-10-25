@@ -1,0 +1,50 @@
+// groupagg_dyn -- groupagg over DYNAMIC keys (bench/kernels/groupagg_dyn/spec.md;
+// the shared definition is bench/kernels/groupagg/spec.md)
+//
+//   key(k) = 7919 * floor(ngroups * u(k)) + 13   (sparse Int64 keys, no declared index:
+//            the dynamic regime -- groups numbered by FIRST occurrence)
+//   s, q, c, checksum: exactly as groupagg, over the groups in first-occurrence order
+//
+// Under the aggregate-only grouping (Blade.Optimize.planGroupAggregate, gap G71) the one
+// pass finds each row's group with ONE find-or-insert in the C core's key -> group map
+// (blade_member.h) instead of the CSR's three hash operations per row. The default
+// (licensed) build declines it for the licensed builtin `+` folds; BLADE_FP_REPRO=1 and
+// BLADE_GROUP_AGG=licensed take it. Serial.
+
+type Ix = Idx<1000003>   // SIZE n
+// G is the dynamic keys' source range only: no grouping is declared over it.
+type G = Idx<1009>       // SIZE ngroups
+
+/// README section 5 input generator: five rounds mod 2^31 (affine, quadratic, affine,
+/// middle-square, affine), exact in Int64 (h3 * h3 < 2^62).
+function gen(k: Int64, seed: Int64, lo: Float64, hi: Float64) -> Float64 = {
+    let h1 = ((k + seed) * 1103515245 + 12345) % 2147483648
+    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648
+    let h3 = (h2 * 1103515245 + 12345) % 2147483648
+    let h4 = (h3 * h3 / 65536) % 2147483648
+    let h5 = (h4 * 1103515245 + 12345) % 2147483648
+    lo + (hi - lo) * (Float64(h5) / 2147483648.0)
+}
+
+function keys() -> Array<Int64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> 7919 * Int64(floor(gen(Int64(i), 10000019, 0.0, 1.0) * Float64(extents(range<G>)))) + 13 |> compute
+}
+
+function values() -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> gen(Int64(i), 20000038, 0.0, 2.0) |> compute
+}
+
+function kernel(key: Array<Int64 like Ix>, x: Array<Float64 like Ix>) -> Float64 = {
+    let gk = group_keys(key)
+    let g = group_by(x, gk)
+    let s = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
+    let q = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> prodsum(r, r) |> compute
+    let c = extents(gk)
+    prodsum(s, s) + reduce(q, (+)) + Float64(prodsum(c, c))
+}
+
+let (checksum, input_checksum) = {
+    let key = keys()
+    let x = values()
+    (kernel(key, x), reduce(x, (+)) + Float64(reduce(key, (+))))
+}

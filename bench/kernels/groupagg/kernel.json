@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "name": "groupagg",
+  "group": "B",
+  "title": "per-group sum, sum of squares and count over positional keys (aggregate-only GROUP BY)",
+  "sizes": {
+    "smoke": {
+      "n": 30011,
+      "ngroups": 1009
+    },
+    "full": {
+      "n": 1000003,
+      "ngroups": 1009
+    }
+  },
+  "regimes": [
+    "serial-licensed-native",
+    "serial-repro-native"
+  ],
+  "inputonly": true,
+  "expected_llvm": "lane",
+  "expected_llvm_reason": "positional group_keys / group_by / ragged peels are in the LLVM lane (2026-10), and the aggregate-only one pass (round 3 W3-1, gap G71) is placed by both lanes",
+  "hypothesis": {
+    "natural": "WIN (the natural tier is O(n * ngroups) masked intrinsics)",
+    "expert": "repro: parity or a small loss (both one pass over the rows; Blade adds the key-guard and the record copy-out); licensed: LOSS (Blade keeps the CSR + gather + K-lane peels because the per-group folds are licensed float folds, gap G71)"
+  },
+  "notes": "Serial only. The per-group chains are independent, so a threaded form exists in principle (privatized per-thread accumulators and an ordered combine), but it is a different association and Blade v1 has no thread form -- no mt8 arm in any language. The default (licensed) Blade build DECLINES the one pass (its folds are licensed builtin `+` folds; BLADE_GROUP_AGG=licensed takes the ascending chain instead, an association change); BLADE_FP_REPRO=1 takes it. Named outputs: s, q, c (stored in every arm). Input share ~45% (the generator runs twice over n). The natural tier is O(n * ngroups): ~3e9 element tests at full size, expected seconds.",
+  "arms": [
+    "blade-llvm",
+    "blade-cpp",
+    "gfortran-natural",
+    "gfortran-expert",
+    "ifx-natural",
+    "ifx-expert"
+  ],
+  "source_of_truth": "bench/kernels/groupagg/spec.md (round 3, W3-1, 2026-10-21)",
+  "no_parallel_form": true
+}

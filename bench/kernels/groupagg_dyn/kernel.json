@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "name": "groupagg_dyn",
+  "group": "B",
+  "title": "groupagg over dynamic (sparse Int64) keys: groups by first occurrence",
+  "sizes": {
+    "smoke": {
+      "n": 30011,
+      "ngroups": 1009
+    },
+    "full": {
+      "n": 1000003,
+      "ngroups": 1009
+    }
+  },
+  "regimes": [
+    "serial-licensed-native",
+    "serial-repro-native"
+  ],
+  "inputonly": true,
+  "expected_llvm": "lane",
+  "expected_llvm_reason": "the aggregate-only one pass (repro, or BLADE_GROUP_AGG=licensed) finds groups through the C core's key -> group map in both lanes, and the declined default build's LLVM CSR discovers them through the same map (round 3 W3-1, the separate LLVM dynamic-discovery change: the O(n * G) linear scan is retired)",
+  "hypothesis": {
+    "natural": "WIN (the natural tier discovers groups with ANY over the keys so far and folds with masked intrinsics: O(n * G) twice)",
+    "expert": "repro: parity or a small loss (one hash probe per row in both); licensed: LOSS (Blade keeps the CSR's three hash operations per row, the gather and the K-lane peels: gap G71)"
+  },
+  "notes": "Serial only, as groupagg. ngroups is the source range of the keys (7919 * floor(ngroups * u) + 13); the grouping itself is dynamic -- groups numbered by first occurrence, ~1009 of them. The default (licensed) Blade build declines the one pass (licensed float folds); BLADE_FP_REPRO=1 takes it. Named outputs: s, q, c in first-occurrence order (stored in every arm). Keys < 2^24 (the expert's multiplicative hash cannot overflow).",
+  "arms": [
+    "blade-llvm",
+    "blade-cpp",
+    "gfortran-natural",
+    "gfortran-expert",
+    "ifx-natural",
+    "ifx-expert"
+  ],
+  "source_of_truth": "bench/kernels/groupagg_dyn/spec.md + bench/kernels/groupagg/spec.md (round 3, W3-1, 2026-10-21)",
+  "no_parallel_form": true
+}

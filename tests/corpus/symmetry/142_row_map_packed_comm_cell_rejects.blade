@@ -1,0 +1,24 @@
+// TEST: Row Map With A Packed Comm Cell Is Refused (G67) (rejects)
+// A map whose kernel returns a COMPACT array -- here a per-group SymIdx H,
+// `group_h(jg) = method_for(jg, jg) <@> lambda(ra, rb) where comm(ra, rb) ->
+// prodsum(ra, rb)` stored per cell of `range<G>` -- would need a grouped
+// compact output (one packed pool per outer cell), which no lane builds. It
+// used to check and then fail differently in every lane (C++ BL8005
+// bad_array_new_length, LLVM a refusal then the same C++ failure, the
+// interpreter BL8003); it is refused ONCE at typecheck, BL4004, naming the
+// spellings that work (a dense cell via `decompact(h, 0)` in the callee, or
+// the flat `method_for(range<G, P, P>)` map; corpus symmetry/143).
+type G = Idx<3>
+type P = Idx<3>
+type S = Idx<4>
+
+function group_h(jg: Array<Float64 like P, S>) = method_for(jg, jg) <@> lambda(ra, rb) where comm(ra, rb) -> prodsum(ra, rb)
+
+function kernel(jt: Array<Float64 like G, P, S>) -> Float64 = {
+    let h = method_for(range<G>) <@> lambda(g) -> group_h(jt(g)) |> compute
+    h((2 : G), (0 : P), (1 : P)) + h((1 : G), (2 : P), (1 : P))
+}
+
+let jt = method_for(range<G, P, S>) <@> lambda(g, a, s) -> Float64(g * 12 + a * 4 + s) |> compute
+let v = kernel(jt)
+// ERROR: BL4004 @ 17:24

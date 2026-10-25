@@ -299,6 +299,13 @@ let private frontEndToIR (filePath: string) (strictPins: bool) (mark: string -> 
             Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
         | Ok ir -> Ok (ir, sm)
 
+/// Print (and drain) the coded warnings the lane that produced the artifact
+/// raised while emitting it -- BL7005 today -- on stderr.
+let private printEmitterWarnings (useColor: bool) (sm: Blade.Diagnostics.SourceMap) : unit =
+    match Blade.Diagnostics.EmitterWarnings.drain () with
+    | [] -> ()
+    | ds -> eprintfn "%s" (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
+
 /// The C++ back half: IRProgram -> translation unit, plus the two
 /// refusal channels codegen reports through.
 let private cppBackendOfIR (ir: Blade.IR.IRProgram) (testName: string) (sm: Blade.Diagnostics.SourceMap)
@@ -346,6 +353,9 @@ let private cppBackendOfIR (ir: Blade.IR.IRProgram) (testName: string) (sm: Blad
         // and outside cuda emit mode this list is empty.
         for w in warnings do
             if w.StartsWith "[cuda] " then eprintfn "warning: %s" w
+    // Coded emitter warnings (BL7005, G69's opt-in kept inline): unprompted,
+    // on stderr, rendered like every diagnostic.
+    printEmitterWarnings useColor sm
     Ok (cppCode, warnings)
 
 /// Env-gated phase timing (BLADE_PHASE_TIMING=1); see docs/plan-compile-speed.md.
@@ -414,6 +424,7 @@ let compileArtifact (filePath: string) (verbose: bool) (strictPins: bool) : Resu
                     | Error reason -> fallback reason
                     | Ok ll ->
                         mark "emit-llvm"
+                        printEmitterWarnings (not Console.IsErrorRedirected) sm
                         // The omp census (G11): the lane has no thread runtime,
                         // so every `where omp` licence compiled serial. Printed
                         // unprompted, like the refusal notice above -- "you
@@ -1005,6 +1016,11 @@ let internal llvmLaneDecision (d: Blade.Effects.Decision) : Blade.Effects.Decisi
         // record for the walk says which form it runs.
         elif cppForm.StartsWith Blade.OrbitFold.pullDeclinedForm then
             declined "the LLVM lane has no thread runtime (no row-owned pull form); this lane's scatter record for the walk says which form it runs" []
+        // A C++ orbit-action record (round 3, D-P2) the LLVM emitter recorded
+        // nothing about: never claimed for this lane (its own record, when it
+        // has one, was merged in above and carries the tag).
+        elif Blade.OrbitFold.isActionRecord d then
+            declined "the LLVM lane's emitter recorded no orbit-action decision for this site" []
         // A C++ scatter record the LLVM emitter recorded nothing about (it was
         // merged as unpartnered): never claimed for this lane.
         elif Blade.OrbitFold.isScatterRecord d then
@@ -1069,9 +1085,12 @@ let internal mergeLlvmScatterRecords (ds: Blade.Effects.Decision list) (own: Bla
     let pending = System.Collections.Generic.List<Blade.Effects.Decision>(own)
     let merged =
         ds |> List.map (fun d ->
-            if not (Blade.OrbitFold.isScatterRecord d) then d
+            if not (Blade.OrbitFold.isScatterRecord d || Blade.OrbitFold.isActionRecord d) then d
             else
-                match pending |> Seq.tryFindIndex (fun o -> o.Span = d.Span) with
+                // an orbit-action record (round 3, D-P2) pairs only with the
+                // emitter's own action record, a scatter record with a scatter's
+                let kind (x: Blade.Effects.Decision) = Blade.OrbitFold.isActionRecord x
+                match pending |> Seq.tryFindIndex (fun o -> o.Span = d.Span && kind o = kind d) with
                 | Some ix ->
                     let o = pending.[ix]
                     pending.RemoveAt ix

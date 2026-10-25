@@ -1,0 +1,33 @@
+// TEST: Memfree Fold-Captured Function Local Freed (G54)
+// A function-local array `y` read ONLY through a capture in a licensed fold's
+// map lambda (`let s = reduce(method_for(range<I>) <@> lambda(a) ->
+// prodsum(y(a), y(a)), lambda(p, q) where omp -> p + q, 0.0)`) is a
+// SYNCHRONOUS consumer: the lambda runs and dies inside the scalar let (its
+// team joins before the statement ends), so the capture pins nothing and `y`
+// takes the ordinary scope-exit free beside its sibling `t` -- it used to be
+// pinned to function exit and never freed (tensorop's `y` inside `kernel`).
+// Called once per recursion step, so a per-call leak would grow with Steps;
+// `blade test cell-epilogue` holds the emitted frees and the ASan census.
+// Integer-valued cells: kernel(c) = 13685 c^2 + 1190 c + 35, exact.
+type I = Idx<7>
+type J = Idx<5>
+type Steps = Idx<9>
+
+function kernel(x: Array<Float64 like I, J>, c: Float64) -> Float64 = {
+    let t = x * c |> compute
+    let y = t + 1.0 |> compute
+    let s = reduce(method_for(range<I>) <@> lambda(a) -> prodsum(y(a), y(a)), lambda(p, q) where omp -> p + q, 0.0)
+    s
+}
+
+let x = method_for(range<I, J>) <@> lambda(i, j) -> Float64(i * 5 + j) |> compute
+let k2 = kernel(x, 2.0)
+let rec acc: Array<Float64 like Steps> =
+    match acc with
+    | zero -> zero
+    | zero :: s -> zero :: kernel(x, 0.0)
+    | prefix :: n -> prefix :: kernel(x, Float64(n))
+let total = reduce(acc, (+))
+// EXPECT: k2 = 57155.0
+// EXPECT: acc = [35.0, 14910.0, 57155.0, 126770.0, 223755.0, 348110.0, 499835.0, 678930.0, 885395.0]
+// EXPECT: total = 2834895.0

@@ -1,0 +1,30 @@
+// TEST: Group aggregate one pass, order fingerprint
+// The non-commutative, non-associative fold `3 * a + b` over exact integers
+// is a FINGERPRINT of the order each group's chain visits its rows: any
+// other order, any regrouping, a doubled first element or a dropped seed
+// gives a different number. The one pass (gap G71) interleaves the groups'
+// chains row by row in source order, and each chain must still see its own
+// rows ascending -- the order the CSR's stable permutation gave the peel.
+// Unseeded: the first value is the state, consumed ONCE (3 * a + b starts at
+// the second row); seeded: the chain starts from the exact seed.
+type Row = Idx<9>
+
+function fp(k: Array<Int64 like Row>, v: Array<Int64 like Row>) = {
+    let gk = group_keys(k)
+    let g = group_by(v, gk)
+    let u = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b) |> compute
+    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b, 11) |> compute
+    let n = extents(gk)
+    (u, s, n)
+}
+
+// interleaved groups, a singleton group (key 4), a dropped row (key -3)
+let keys: Array<Int64 like Row> = [2, 1, 2, 4, 1, 2, -3, 1, 2]
+let vals: Array<Int64 like Row> = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+let (u, s, n) = fp(keys, vals)
+// groups by first occurrence: 2 -> rows 0, 2, 5, 8 (1, 3, 6, 9); 1 -> rows 1, 4, 7 (2, 5, 8); 4 -> row 3 (4)
+// u: group 0 = 3 * (3 * (3 * 1 + 3) + 6) + 9 = 81; group 1 = 3 * (3 * 2 + 5) + 8 = 41; singleton = 4
+// EXPECT: u = [81, 41, 4]
+// s from 11: group 0 = 3 * (3 * (3 * (3 * 11 + 1) + 3) + 6) + 9 = 972; group 1 = 3 * (3 * (3 * 11 + 2) + 5) + 8 = 338; singleton = 37
+// EXPECT: s = [972, 338, 37]
+// EXPECT: n = [4, 3, 1]

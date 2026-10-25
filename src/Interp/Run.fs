@@ -616,11 +616,28 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
     // which bindings render and in what order/format (iostream parity), and
     // emits the leading "<name> completed in 0s" timing line (the gate strips
     // timing lines on both sides).
+    // ALIAS CLASSES (gap G60, formalism 10.2; IRLift.deferredAliasClasses, the
+    // classification the compiled lanes' print passes share): a deferred map
+    // and its top-level aliases are ONE value, so once any member was forced
+    // at module level every member prints, with that member's cells (a write
+    // through any member is refused at lowering, so they are the same cells).
+    let aliasClasses =
+        Blade.IRLift.deferredAliasClasses merged.Bindings (Blade.CodeGen.computeDeferredIds merged.Bindings)
+    let forcedOwn = System.Collections.Generic.HashSet<IRId>(state.ForcedDeferred)
+    aliasClasses |> Map.iter (fun m cls ->
+        if cls |> List.exists forcedOwn.Contains then state.ForcedDeferred.Add m |> ignore)
     let lookup (id: IRId) : Value option =
-        match envTryFind root id with
-        | Some cell -> Some cell.V
-        | None -> None
-
+        let own = match envTryFind root id with Some cell -> Some cell.V | None -> None
+        match own, Map.tryFind id aliasClasses with
+        | Some (VDeferred _), Some cls when state.ForcedDeferred.Contains id ->
+            cls |> List.tryPick (fun m ->
+                if forcedOwn.Contains m then
+                    match envTryFind root m with
+                    | Some cell when not cell.V.IsVDeferred -> Some cell.V
+                    | _ -> None
+                else None)
+            |> Option.orElse own
+        | _ -> own
     let sb = StringBuilder()
     // Frames first, one whole line each at column 0 -- the position the
     // compiled binary puts them in (main()'s body precedes the timing line and
@@ -679,6 +696,10 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
 let runProgramMemo (program: IRProgram) (testName: string) (limits: InterpLimits)
                    (memoIn: SessionMemo) (printOnly: Set<string> option) : InterpResult * SessionMemo =
     Blade.Runtime.runOnLargeStack (fun () ->
+        // The program's declaration spans (lowering attached them, gap G76):
+        // this flow may not be the one that lowered (the interpreter
+        // differential runs it in a Task), and the guard locator reads them.
+        Blade.IR.installDeclSpansOf program
         // Build the interpreter state OUTSIDE execProgram but capture it in a ref
         // the panic handler can read: on an escaping InterpPanic we render the
         // shadow-stack frames still live in the state (evalCall never pops on

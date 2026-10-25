@@ -1,0 +1,33 @@
+// TEST: A callee reading a String-valued EnumIdx label never reaches the kept inline
+// ============================================================================
+// kernel reads a label of a string-valued EnumIdx (`let r = lab(1)`, a
+// std::string in the C++ lane) and subscripts by it. An index tag is judged
+// by its INNER type (W2-4 sixth review NEW 2), so the kept inline would
+// decline it; today the sibling pass's own totality whitelist already keeps
+// the call a call (a label subscript is not in it), so no epilogue-legs plan
+// forms at all and both lanes emit byte-identically to BLADE_EPILOGUE_LEGS=0
+// (`blade test optimize`; the predicate's tagged arms are unit-pinned there).
+// A helper RETURNING a label is BL4003 (an index type is no function return
+// type). Values are the as-written ones.
+// ============================================================================
+type Ix = Idx<1003>
+type RegionIdx = EnumIdx<["pacific", "atlantic", "indian"]>
+type StationIdx = Idx<4>
+function inputs(m: Int64) -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute
+}
+function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>, lab: Array<RegionIdx like StationIdx>, wts: Array<Float64 like RegionIdx>) -> Float64 = {
+    let y2 = method_for(zip(x, y)) <@> lambda(u, v) -> 2.0 * u + v |> compute
+    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
+    let r = lab((1 : StationIdx))
+    s + wts(r)
+}
+let station_region: Array<RegionIdx like StationIdx> = ["pacific", "indian", "pacific", "atlantic"]
+let region_weight: Array<Float64 like RegionIdx> = [1.0, 0.5, 2.0]
+let (checksum, input_checksum) = {
+    let x = inputs(7)
+    let y = inputs(5)
+    (kernel(x, y, station_region, region_weight), reduce(x, (+)) + reduce(y, (+)))
+}
+// EXPECT: checksum = 82067.0
+// EXPECT: input_checksum = 5007.0

@@ -15,10 +15,12 @@
 //     licensed form: the LLVM lane's `nsz` may drop a +0.0 addend and the C++
 //     join's `omp simd reduction` lanes start at +0.0 (both true on the
 //     4136f0b5 compiler);
-//   * the surface join's implicit +0.0 seed for an unseeded leg (`j_surface`
-//     in the probe) is pinned by an EMISSION needle instead
-//     (tests/OptimizeTests.fs, sibling_folds_surface_join_keeps_plus_zero_seed):
-//     its printed value is a licensed zero sum and differs by lane.
+//   * the surface join's implicit seed for an unseeded leg (`j_surface` in
+//     the probe) is pinned by an EMISSION needle instead (tests/OptimizeTests.fs,
+//     sibling_folds_surface_join_unseeded_leg_seed_by_route): +0.0 on a
+//     licensed route, the exact identity -0.0 on a strict one (gap G74); its
+//     printed value in the default build is a licensed zero sum and differs
+//     by lane.
 // ============================================================================
 type R = Idx<3>
 

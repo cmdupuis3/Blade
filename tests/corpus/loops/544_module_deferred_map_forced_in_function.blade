@@ -1,0 +1,30 @@
+// TEST: Module Deferred Map Forced In Function
+// ----------------------------------------------------------------------------
+// Gap G75 (round 3 wave 3, W3-1 found it): a MODULE-LEVEL deferred map that
+// only function bodies force -- a `group_by` over it, a positional read, a
+// map kernel reading it -- is evaluated inside each call, privately, and is
+// never stored under its own name, so it prints NOTHING (formalism 10.2).
+// The interpreter used to memoize the forced value into the module cell and
+// print `lazy`; the compiled lanes never did. (The positional read in a
+// function body, `lazy(1)`, was also BL9002 in the C++ lane -- the return
+// expression named the undeclared `lazy` -- and is forced in the body now.
+// The llvm lane refuses a function that reads a deferred module binding and
+// hands the program to the C++ lane.)
+// ----------------------------------------------------------------------------
+type Row = Idx<5>
+let keys: Array<Int64 like Row> = [7, 3, 7, 9, 3]
+let lazy = method_for(range<Row>) <@> lambda(i) -> Int64(i) * 10
+function agg(k: Array<Int64 like Row>) = {
+    let gk = group_keys(k)
+    let g = group_by(lazy, gk)
+    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b) |> compute
+    s
+}
+function at(n: Int64) -> Int64 = lazy(1) + n
+function scaled(n: Int64) -> Int64 = reduce(method_for(range<Row>) <@> lambda(i) -> lazy(i) * n, (+))
+let out = agg(keys)
+let one = at(1)
+let two = scaled(2)
+// EXPECT: out = [20, 70, 30]
+// EXPECT: one = 11
+// EXPECT: two = 200

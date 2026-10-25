@@ -3070,7 +3070,7 @@ let runLlvmBench () : int =
 
 // ---------------------------------------------------------------------------
 // Block: the runtime shim's build identity and its retained-block cache
-// (bench/notes/microkernel-sketches-review.md M0 + M1)
+// (bench/notes/microkernel-sketches-review.md (removed 2026-10-24; in git history at cf2028cc) M0 + M1)
 // ---------------------------------------------------------------------------
 
 /// A C driver over the shim's allocator ABI. It reads the cache counters

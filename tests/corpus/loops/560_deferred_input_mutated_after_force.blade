@@ -1,0 +1,23 @@
+// TEST: Deferred Input Mutated After Force
+// ----------------------------------------------------------------------------
+// Codex second look of W4-1, finding 3: a deferred map's INPUT is written after
+// the map was forced. The class value is fixed at its FIRST FORCING EVENT
+// (formalism 10.2): `g` was stored by the two reads, and its alias `g2` --
+// bound before the force, never read -- prints the SAME stored cells. The
+// llvm lane used to keep g2's own producer and rerun it at the print over the
+// mutated input, dividing by zero here (`10 / 0`); the C++ lane prints a
+// reference to stored g and the interpreter g's cells. A fold over the map
+// itself still recomputes from the current input (it fuses), as before.
+// ----------------------------------------------------------------------------
+type Row = Idx<2>
+let mut x: Array<Int64 like Row> = [1, 2]
+let g = method_for(x) <@> lambda(v) -> 10 / v
+let g2 = g
+let a = g(0)
+let b = g(1)
+x(0) = 5
+// EXPECT: g = [10, 5]
+// EXPECT: g2 = [10, 5]
+// EXPECT: a = 10
+// EXPECT: b = 5
+// EXPECT: x = [5, 2]

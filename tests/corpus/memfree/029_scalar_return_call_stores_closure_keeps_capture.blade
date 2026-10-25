@@ -1,0 +1,32 @@
+// TEST: Memfree Scalar Return Call Stores Closure Keeps Capture (G54 control)
+// The second Codex look of W4-2 (reviews/codex-diff-W4-2-2.md, NEW 1):
+// `kernel`'s local `y` is captured by a proved-synchronous fold kernel in a
+// scope let (memfree/027's shape) AND by a closure that the RETURN
+// expression's call argument stores into caller-owned storage --
+// `stash(out, lambda(k) -> ...) + s`. The stored closure is invoked after
+// `kernel` returned, so `y` must NOT be freed at the scope's exit. The
+// b3e0a1be build scanned no scalar return, so the let's fold kernel kept its
+// exemption and `y` was freed under the stored closure. At the merge the
+// exemption is withheld in any scope whose scalar return names a callable
+// (fail closed): `y` stays pinned, as at the base. Values for c = 2:
+// y = [0, 2, 4, 6, 8], s = sum(y * y) = 120, r = stash(..) + s = 0 + 120,
+// v = reduce(y, (+)) * 3 = 20 * 3.
+type I = Idx<5>
+type One = Idx<1>
+
+function stash(out: mut Array<(Float64 -> Float64) like One>, f: Float64 -> Float64) -> Float64 = {
+    out(0) = f
+    0.0
+}
+
+function kernel(out: mut Array<(Float64 -> Float64) like One>, c: Float64) -> Float64 = {
+    let y = Float64(0..5) * c |> compute
+    let s = reduce(method_for(range<I>) <@> lambda(a) -> y(a) * y(a), (+))
+    stash(out, lambda(k: Float64) -> reduce(y, (+)) * k) + s
+}
+
+let mut out: Array<(Float64 -> Float64) like One> = [lambda(k: Float64) -> k]
+let r = kernel(out, 2.0)
+let v = out(0)(3.0)
+// EXPECT: r = 120.0
+// EXPECT: v = 60.0

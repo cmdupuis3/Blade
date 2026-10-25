@@ -1,0 +1,22 @@
+// TEST: Deferred Alias Forced Through Alias
+// ----------------------------------------------------------------------------
+// Gap G60 (round 3, W1-3; pre-existing lane divergence), the alias contract
+// of formalism 10.2 ("Aliases and printing of deferred maps"): `let g2 = g`
+// over a deferred map binds g2 to the SAME deferred value -- the alias
+// evaluates nothing. The first forcing use through ANY name of the class
+// forces it, and then every name of the class prints. Here the force comes
+// through the END of a chain (`g3 = g2 = g`): all three print. The C++ lane
+// used to force g at the alias (printing g, never g2), the interpreter forced
+// only the name read, the llvm lane printed the chain it walked. (A write
+// through any member is refused, BL4005: loops/543, 546, 549.)
+// ----------------------------------------------------------------------------
+type Row = Idx<3>
+let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let g2 = g
+let g3 = g2
+let s = g3(1)
+// EXPECT: g = [2.0, 4.0, 6.0]
+// EXPECT: g2 = [2.0, 4.0, 6.0]
+// EXPECT: g3 = [2.0, 4.0, 6.0]
+// EXPECT: s = 4.0

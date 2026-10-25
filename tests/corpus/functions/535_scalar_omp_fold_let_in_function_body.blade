@@ -1,0 +1,30 @@
+// TEST: Scalar Omp Fold Let In A Function Body Threads (G55)
+// `let s = reduce(x, lambda(p, q) where omp -> p + q, 0.25)` as a FUNCTION-
+// body let IS its own let: it takes the statement fold path exactly as the
+// top-level spelling does (the Path A team, the census line under
+// BLADE_OMP_THREADS=1), instead of the inline expression form's "reduce in
+// expression position" decline. `blade test omp-reduce` pins the emission and
+// the REPRO bit identity of `fb` with `top`; `blade test omp-coverage`
+// observes the team. A fold that is an OPERAND (`reduce(..) * 2.0`) keeps the
+// expression form and its decline. Integer-valued data: the values are exact
+// under any association.
+type I = Idx<11>
+
+function fsum(v: Array<Float64 like I>) -> Float64 = {
+    let s = reduce(v, lambda(p, q) where omp -> p + q, 0.25)
+    s
+}
+
+function fsum2(v: Array<Float64 like I>) -> Float64 = {
+    let s = reduce(v, lambda(p, q) where omp -> p + q, 0.0) * 2.0
+    s
+}
+
+let x = Float64(0..11) * 2.0 |> compute
+let top = reduce(x, lambda(p, q) where omp -> p + q, 0.25)
+let fb = fsum(x)
+let fb2 = fsum2(x)
+// EXPECT: x = [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0]
+// EXPECT: top = 110.25
+// EXPECT: fb = 110.25
+// EXPECT: fb2 = 220.0

@@ -1,0 +1,48 @@
+// hashjoin -- an inner equijoin of two keyed tables, its relation stored (bench/kernels/hashjoin/spec.md)
+//
+//   matched = ( la(i) * ra(j) : lk(i) == rk(j) ),  (i, j) in lex order (i ascending, then j)
+//   checksum = total + |matched| + fp,  total = sum matched,  fp = the ORDER fingerprint
+//
+// The inline spelling of round 3's T2 (Blade.Optimize.planEquiJoin, `blade plan` rule
+// `hash-join`): the payload and key-equality outer products are written IN PLACE inside
+// `compound(..)`, so they are compiler temporaries and the C++ lane builds a stable CSR
+// over the right keys and probes the left keys, never forming an N x M pool; the named
+// relation `matched` is stored. The NAMED spelling (`equal_keys`, `keep`, `products` as
+// let-bound arrays) keeps every named array stored (bench/README.md output rule) and is
+// therefore NOT this kernel: spec.md says why. `compound(..)` is a top-level let only
+// (BL6002), so the arrays stay at top level; the LLVM lane refuses a rank-2 compound and
+// the program falls back to the C++ lane (kernel.json expected_llvm "fallback").
+// PILOT size only this round (N 2003, M 1009, K 401); the research full size (N 100,003,
+// M 20,011) is not benched.
+
+type L = Idx<2003>   // SIZE n
+type R = Idx<1009>   // SIZE m
+let static nkeys = 401   // SIZE k
+
+/// README section 5 input generator: five rounds mod 2^31 (affine, quadratic, affine,
+/// middle-square, affine), exact in Int64 (h3 * h3 < 2^62).
+function gen(k: Int64, seed: Int64, lo: Float64, hi: Float64) -> Float64 = {
+    let h1 = ((k + seed) * 1103515245 + 12345) % 2147483648
+    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648
+    let h3 = (h2 * 1103515245 + 12345) % 2147483648
+    let h4 = (h3 * h3 / 65536) % 2147483648
+    let h5 = (h4 * 1103515245 + 12345) % 2147483648
+    lo + (hi - lo) * (Float64(h5) / 2147483648.0)
+}
+
+// Integer inputs: floor(gen(k, seed, 0, w)) is exact (w <= 1024 has <= 22 significant
+// bits, so (hi - lo) * u is exact) -- keys uniform over [0, nkeys), amounts over [0, 1024).
+let lk = method_for(range<L>) <@> lambda(i) -> Int64(floor(gen(Int64(i), 10000019, 0.0, Float64(nkeys)))) |> compute
+let la = method_for(range<L>) <@> lambda(i) -> Int64(floor(gen(Int64(i), 20000038, 0.0, 1024.0))) |> compute
+let rk = method_for(range<R>) <@> lambda(j) -> Int64(floor(gen(Int64(j), 30000057, 0.0, Float64(nkeys)))) |> compute
+let ra = method_for(range<R>) <@> lambda(j) -> Int64(floor(gen(Int64(j), 40000076, 0.0, 1024.0))) |> compute
+
+let matched = compound(method_for(la, ra) <@> lambda(l, r) -> l * r, mask(method_for(lk, rk) <@> lambda(l, r) -> l == r, lambda(e) -> e))
+let match_count = extents(matched)
+let total = reduce(matched, (+), 0)
+// The ORDER fingerprint (3 a + b) mod 1000000007, left fold from 0: every cell is in
+// [0, 2^20), so 3 a + b < 4 * 1000000007 and three conditional subtractions are the
+// exact modulus (no Int64 wrap, no `%` -- the same value as Fortran's mod()).
+let fp = reduce(matched, lambda(a, b) -> if 3 * a + b >= 3000000021 then 3 * a + b - 3000000021 else if 3 * a + b >= 2000000014 then 3 * a + b - 2000000014 else if 3 * a + b >= 1000000007 then 3 * a + b - 1000000007 else 3 * a + b, 0)
+let checksum = Float64(total) + Float64(match_count) + Float64(fp)
+let input_checksum = Float64(reduce(lk, (+)) + reduce(la, (+)) + reduce(rk, (+)) + reduce(ra, (+)))

@@ -1,0 +1,17 @@
+// TEST: Tuple Bare Deferred Member Rank 2
+// ----------------------------------------------------------------------------
+// Gap G61, the rank-2 case: the interpreter used to hold the deferred map in
+// the tuple and evaluate it only at the later `held[0]` projection; it is now
+// evaluated at the construction in every lane (formalism 10.2), and the
+// projection reads the stored member. Integer data keeps every value exact.
+// ----------------------------------------------------------------------------
+type Y = Idx<2>
+type X = Idx<3>
+let g = method_for(range<Y>, range<X>) <@> lambda(i, j) -> Int64(i) * 10 + Int64(j)
+let held = (g, 7)
+let m = held[0]
+let corner = m(1, 2)
+let total = reduce(m, (+), axes = 2)
+// EXPECT: m = [[0, 1, 2], [10, 11, 12]]
+// EXPECT: corner = 12
+// EXPECT: total = 36

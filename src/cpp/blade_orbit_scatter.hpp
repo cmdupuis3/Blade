@@ -65,11 +65,20 @@ typedef double v4d __attribute__((vector_size(32)));
 // VADD: the row chains' kernel is the builtin `+` on double and G % 4 == 0 --
 // one vertical vector add per column for every 4 row chains (lane m is chain
 // R[i0+m]; still one add per chain per column, in column order).
+//
+// tri is the ascending sequence of its GROUP BODIES (tri_group, rows i0 ..
+// i0+G-1, i0 + G <= m) followed by its TAIL ROWS (tri_tail_row, one row each).
+// Group i0 reads only pool rows i0 .. i0+G-1 and writes only chains
+// R[i0 .. m) (and, THIRD, the pair chains of those rows); when it returns,
+// R[i0 .. i0+G-1] are complete (no later group or tail row touches them). So
+// any schedule that runs these same calls in the same ascending order, each
+// on the values the previous calls left, feeds every chain the same sequence
+// (the producer-fused commit prototype, bench/notes/round3/prototypes/
+// p1-commit, calls them one interval at a time behind a ticket).
 template <int G, int B, bool VADD, bool THIRD, class T, class E, class F, class K>
-inline void tri(const E* S, size_t m, T* R, T* H, size_t hRow0, size_t hn, const F& f, const K& k) {
+inline void tri_group(const E* S, size_t m, T* R, T* H, size_t hRow0, size_t hn, size_t i0, const F& f, const K& k) {
     alignas(64) T Z[G][B];
-    size_t i0 = 0;
-    for (; i0 + (size_t)G <= m; i0 += G) {
+    {
         size_t rs[G];
         size_t hrs[G];
         for (int a = 0; a < G; a++) rs[a] = tri_row(m, i0 + a);
@@ -127,18 +136,28 @@ inline void tri(const E* S, size_t m, T* R, T* H, size_t hRow0, size_t hn, const
         }
         for (int a = 0; a < G; a++) R[i0 + a] = rc[a];
     }
-    // the tail: one row at a time (diagonal cell, then its columns ascending)
-    for (; i0 < m; i0++) {
-        const E* row = S + tri_row(m, i0);
-        T* hrow = THIRD ? H + tri_row(hn, hRow0 + i0) : nullptr;
-        const bool third = THIRD && i0 >= 1;
-        for (size_t j = i0; j < m; j++) {
-            const T z = f(row[j - i0]);
-            R[i0] = k(R[i0], z);
-            if (j != i0) R[j] = k(R[j], z);
-            if (third) hrow[j - i0] = k(hrow[j - i0], z);
-        }
+}
+
+// One TAIL row i0 of tri (diagonal cell, then its columns ascending).
+template <bool THIRD, class T, class E, class F, class K>
+inline void tri_tail_row(const E* S, size_t m, T* R, T* H, size_t hRow0, size_t hn, size_t i0, const F& f, const K& k) {
+    const E* row = S + tri_row(m, i0);
+    T* hrow = THIRD ? H + tri_row(hn, hRow0 + i0) : nullptr;
+    const bool third = THIRD && i0 >= 1;
+    for (size_t j = i0; j < m; j++) {
+        const T z = f(row[j - i0]);
+        R[i0] = k(R[i0], z);
+        if (j != i0) R[j] = k(R[j], z);
+        if (third) hrow[j - i0] = k(hrow[j - i0], z);
     }
+}
+
+template <int G, int B, bool VADD, bool THIRD, class T, class E, class F, class K>
+inline void tri(const E* S, size_t m, T* R, T* H, size_t hRow0, size_t hn, const F& f, const K& k) {
+    size_t i0 = 0;
+    for (; i0 + (size_t)G <= m; i0 += G) tri_group<G, B, VADD, THIRD>(S, m, R, H, hRow0, hn, i0, f, k);
+    // the tail: one row at a time (diagonal cell, then its columns ascending)
+    for (; i0 < m; i0++) tri_tail_row<THIRD>(S, m, R, H, hRow0, hn, i0, f, k);
 }
 
 // Rank 2: fold_out(so, [ fold_in(si, [ f(S(i, j)) for j ]) for i ]).
@@ -179,6 +198,103 @@ inline T scatter3(const E* S, size_t p, T sl, T sm, T so, const F& f, const KL& 
     T out = scatter2<G, B, VADDM>(H, p, sm, so, [](T x) -> T { return x; }, km, ko);
     delete[] H;
     return out;
+}
+
+// THE ROW ORBIT ACTION (round 3, D-P2; src/OrbitFold.fs planAction): the
+// rank-2 group scatter for a ROW ACTION u(i) = fold_k(s, [ g(S(i, j), V(i),
+// V(j), ..) for j ]), whose term depends on WHICH endpoint's chain it feeds.
+// Same schedule and same per-chain order as `tri` (its proof unchanged: chain
+// R[r] receives rows 0..r-1's column-r terms ascending, then its own row's
+// terms ascending -- j = 0 .. m-1), but each off-diagonal canonical cell
+// (a, b), a < b, read ONCE, yields TWO terms -- the ROLE-TERM RULE:
+//   * row chain a takes f(x, a, b)   (own = a, partner = b),
+//   * row chain b takes f(x, b, a)   (own = b, partner = a),
+// two evaluations with the own / partner roles swapped, never one weighted
+// term at both endpoints (S01 = 2, V = [3, 5]: S(i, j) * V(i) is 6 at (0, 1)
+// and 10 at (1, 0)); a diagonal cell yields one term f(x, a, a). f(x, own,
+// partner) is the source's term with the pool read x and the weights read at
+// those coordinates: bitwise the walk's term (g pure, the same stored cells).
+// Zr holds the row role's terms of a column block, Zc the column role's.
+// Lanes are DISTINCT chains (no `omp simd` / reduction pragma on any of these
+// loops); VADD as in `tri` (the builtin `+` on double, G % 4 == 0: one vertical
+// add per column for every 4 row chains). G and B are speed-only.
+template <int G, int B, bool VADD, class T, class E, class F, class K>
+inline void tri_action(const E* S, size_t m, T* R, const F& f, const K& k) {
+    alignas(64) T Zr[G][B];
+    alignas(64) T Zc[G][B];
+    size_t i0 = 0;
+    for (; i0 + (size_t)G <= m; i0 += G) {
+        size_t rs[G];
+        for (int a = 0; a < G; a++) rs[a] = tri_row(m, i0 + a);
+        // (1) the diagonal block, block-lex: (a, b) feeds R[i0+a] its row-role
+        // term and, a != b, R[i0+b] its own (the column role)
+        for (int a = 0; a < G; a++)
+            for (int b = a; b < G; b++) {
+                const E x = S[rs[a] + (size_t)(b - a)];
+                R[i0 + a] = k(R[i0 + a], f(x, i0 + a, i0 + b));
+                if (a != b) R[i0 + b] = k(R[i0 + b], f(x, i0 + b, i0 + a));
+            }
+        T rc[G];
+        for (int a = 0; a < G; a++) rc[a] = R[i0 + a];
+        for (size_t jb = i0 + G; jb < m; jb += B) {
+            const size_t len = std::min<size_t>((size_t)B, m - jb);
+            // (2a) the term map: G contiguous runs of the pool, each cell read
+            // once and its two role terms formed
+            for (int a = 0; a < G; a++) {
+                const E* src = S + rs[a] + (jb - (i0 + a));
+                const size_t own = i0 + a;
+                for (size_t jj = 0; jj < len; jj++) {
+                    const E x = src[jj];
+                    Zr[a][jj] = f(x, own, jb + jj);
+                    Zc[a][jj] = f(x, jb + jj, own);
+                }
+            }
+            // (2b) the column chains: lane jj is the distinct chain R[jb + jj],
+            // fed its G column-role terms in row order
+            for (size_t jj = 0; jj < len; jj++) {
+                T c = R[jb + jj];
+                for (int a = 0; a < G; a++) c = k(c, Zc[a][jj]);
+                R[jb + jj] = c;
+            }
+            // (2c) the row chains: one application per chain per column, in
+            // column order, of the row-role terms
+#ifdef BLADE_SCATTER_VECTOR
+            if constexpr (VADD && G % 4 == 0 && std::is_same<T, double>::value) {
+                v4d acc[G / 4];
+                std::memcpy(acc, rc, sizeof acc);
+                for (size_t jj = 0; jj < len; jj++)
+                    for (int q = 0; q < G / 4; q++) {
+                        v4d t = { Zr[4 * q][jj], Zr[4 * q + 1][jj], Zr[4 * q + 2][jj], Zr[4 * q + 3][jj] };
+                        acc[q] = acc[q] + t;
+                    }
+                std::memcpy(rc, acc, sizeof acc);
+            } else
+#endif
+            {
+                for (size_t jj = 0; jj < len; jj++)
+                    for (int a = 0; a < G; a++) rc[a] = k(rc[a], Zr[a][jj]);
+            }
+        }
+        for (int a = 0; a < G; a++) R[i0 + a] = rc[a];
+    }
+    // the tail: one row at a time (diagonal cell, then its columns ascending)
+    for (; i0 < m; i0++) {
+        const E* row = S + tri_row(m, i0);
+        R[i0] = k(R[i0], f(row[0], i0, i0));
+        for (size_t j = i0 + 1; j < m; j++) {
+            const E x = row[j - i0];
+            R[i0] = k(R[i0], f(x, i0, j));
+            R[j] = k(R[j], f(x, j, i0));
+        }
+    }
+}
+
+// The row action's driver: every chain of the stored output R (n cells, the
+// action's own named pool) seeded once with s, then tri_action over the pool.
+template <int G, int B, bool VADD, class T, class E, class F, class K>
+inline void action2(const E* S, size_t n, T s, T* R, const F& f, const K& k) {
+    for (size_t i = 0; i < n; i++) R[i] = s;
+    tri_action<G, B, VADD>(S, n, R, f, k);
 }
 
 // The pull form's team observer: called once by every team member with its

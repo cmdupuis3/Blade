@@ -1,0 +1,20 @@
+// TEST: The first of two guards in a destructured call fires first (aborts)
+// Gap G76's ORDER witness: the body of a tuple-returning function holds two
+// guards that both fail -- an integer division by zero, then a non-exhaustive
+// `match` -- and the as-written first one fires, in both lanes, at its own
+// position: BL8013 names the operator's line (line 10 once the harness drops
+// the TEST line) and the function's frame; the match guard is never reached.
+// (Corpus 535 is the match guard alone, located at the function.)
+let d: Array<Int64 like Idx<3>> = [2, 0, 1]
+let z = reduce(d, (+)) - 3
+function both(i: Int64, n: Int64) = {
+    let q = 10 / n
+    let m = match i with
+        | 5 -> 1
+    (m, q)
+}
+let (a, b) = both(z, z)
+// ABORT: error[BL8013]: integer division by zero
+// ABORT: -->
+// ABORT: .blade:10
+// ABORT:   at both

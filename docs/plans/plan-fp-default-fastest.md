@@ -12,7 +12,7 @@ interpreter) is the OPT-IN, never the default. `where omp` implies simd. Map loo
 kept their `omp simd` / `BLADE_IVDEP` hints in serial builds; the gap was folds.
 
 Evidence that motivated it (bench worktree `bench-fortran`, read-only):
-`bench/notes/llvm-acceptance-B.md` F3/F4/F11, `llvm-acceptance-A.md` F14/F15,
+`bench/notes/llvm-acceptance-B.md (removed 2026-10-24; in git history at cf2028cc)` F3/F4/F11, `llvm-acceptance-A.md` F14/F15,
 `gap-register.md` G7, G10, G11, G14, G19, G20, G21.
 
 ## 1. Knob semantics

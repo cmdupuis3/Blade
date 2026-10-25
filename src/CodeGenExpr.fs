@@ -197,7 +197,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             | None, IRCaret -> $"pow({lStr}, {rStr})"
             | None, IRMath2 name -> renderMath2 name lStr rStr
             | None, _ -> emitBinOpWithComplexCoercion op l r lStr rStr inferExprType binOpToCpp
-        // BIND ONCE (bench/notes/microkernel-sketches-review.md M2): the SAME
+        // BIND ONCE (bench/notes/microkernel-sketches-review.md (removed 2026-10-24; in git history at cf2028cc) M2): the SAME
         // canonicalizing compact read on both sides (`t(i, j, k) * t(i, j, k)`)
         // is evaluated once into a local and the operator applied to it --
         // one fold and one fetch instead of two. Pure read, same cell, same
@@ -652,6 +652,11 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
          | Some lit, _ -> exprToCppCore subst names lit
          | None, Some refusal -> exprError refusal
          | None, None -> "0")
+    // A generic strict seed IRMono did not resolve (gap G74): its literal.
+    | IRAddIdentity ty ->
+        (match addIdentityLiteralOf ty with
+         | Some lit -> exprToCppCore subst names lit
+         | None -> exprError "internal: an unresolved unseeded-fold identity (IRAddIdentity)")
     | IRPolyIndex (pack, idx) ->
         // For static index, use std::get; otherwise runtime indexing
         match idx with
@@ -1557,7 +1562,7 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
         // text either way.
         let ompNote =
             ompSuppressedBlockMarker callable.IsOmpParallel
-                "reduce in expression position (kernel body / inline arithmetic) opens no team -- its context may already be a parallel region; bind the fold to its own `let` (or fold all axes with `axes = rank`) for the parallel form"
+                "reduce in expression position (kernel body / inline arithmetic) opens no team -- its context may already be a parallel region; for the parallel form make the fold the WHOLE value of its own `let` (`let s = reduce(...)`, then use `s`) -- an operand of arithmetic or a bare kernel return stays serial"
         // BLADE_FP_REASSOC, expression form. Same K-lane shape as the statement
         // form, minus the thread chunking: ONE chunk, K lanes, no pragma. That
         // is the right shape here for the reason the note above gives -- an IIFE

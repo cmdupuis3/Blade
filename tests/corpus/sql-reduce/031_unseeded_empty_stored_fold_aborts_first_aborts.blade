@@ -1,0 +1,13 @@
+// TEST: An unseeded fold over an EMPTY stored array aborts BL8003 before a later failure (aborts)
+// An UNSEEDED fold has no identity over a STORED array: `reduce(e, (+))` over
+// a dynamically empty compound panics BL8003 at the fold (a statically empty
+// one is refused at compile time, BL3007, corpus loops/531), and it fires
+// before the later failing division, in source order. The DEFERRED spelling,
+// a fused fold over a map, is its identity instead (corpus 032 / 033;
+// formalism 6.4, docs/features/sql.md section 10).
+let xs = [1.0, 2.0, 3.0]
+let e = compound(xs, mask(xs, lambda(q) -> q > 5.0))
+let s = reduce(e, (+))
+let d = extents(xs) - 3
+let boom = 10 / d
+// ABORT: error[BL8003]: reduce: empty array, no reduction possible

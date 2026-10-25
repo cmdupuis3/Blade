@@ -1,0 +1,26 @@
+// TEST: Equijoin Writing Payload Declines
+// ----------------------------------------------------------------------------
+// The payload kernel WRITES a captured counter: the as-written program
+// evaluates it on every one of the N x M = 12 pairs (an ordered serial side
+// effect), so evaluating it only on the 4 matches would drop 8 writes. The
+// hash join's admission asks the shared write analysis
+// (Optimize.scheduleMayWriteIn), which says the kernel may write: DECLINED,
+// and the six passes run as written -- `calls` counts every pair.
+// ----------------------------------------------------------------------------
+type LeftRow = Idx<3>
+type RightRow = Idx<4>
+let left_key: Array<Int64 like LeftRow> = [1, 2, 9]
+let left_amount: Array<Int64 like LeftRow> = [2, 3, 7]
+let right_key: Array<Int64 like RightRow> = [1, 2, 1, 2]
+let right_amount: Array<Int64 like RightRow> = [10, 10, 20, 10]
+let mut calls = 0
+let matched = compound(method_for(left_amount, right_amount) <@> lambda(l, r) -> {
+    calls = calls + 1
+    l * r
+}, mask(method_for(left_key, right_key) <@> lambda(l, r) -> l == r, lambda(e) -> e))
+let match_count = extents(matched)
+let total = reduce(matched, (+), 0)
+let seen = calls
+// EXPECT: match_count = 4
+// EXPECT: total = 120
+// EXPECT: seen = 12

@@ -34,6 +34,22 @@ let private nestedFunctionBodiesTL =
         System.Collections.Generic.HashSet<Expr>(HashIdentity.Reference))
 let internal nestedFunctionBodies () = nestedFunctionBodiesTL.Value
 
+/// The binder ids of lets bound INSIDE a block ({ let b = g; ... }, at top
+/// level or in a body; inferBlock records them), for the reduce fusion's alias
+/// chase (gap G60, formalism 10.2): only a TOP-LEVEL alias of a deferred map
+/// is the same deferred value -- a block alias is a local assignable copy
+/// (written freely: let mut b = g; b(1) = 50.0), so the chase stops at it
+/// and the fold reads the copy's stored cells. By binder IDENTITY, so a
+/// shadowing name elsewhere changes nothing. Reset by checkModule.
+let internal blockLocalVidsStorage = System.Threading.AsyncLocal<System.Collections.Generic.HashSet<IRId>>()
+let internal blockLocalVids () : System.Collections.Generic.HashSet<IRId> =
+    let v = blockLocalVidsStorage.Value
+    if isNull (box v) then
+        let fresh = System.Collections.Generic.HashSet<IRId>()
+        blockLocalVidsStorage.Value <- fresh
+        fresh
+    else v
+
 /// A `let rec`'s STEP ORDINAL (`n` in `| prefix :: n -> ..`) runs over the
 /// recursion's leading axis, so it is that axis's index value `Nat<I>` when
 /// the axis is a NAMED index type -- exactly the iteration index a
@@ -207,6 +223,9 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     match inferExprInner env expr with
     | Ok te when te.Span.StartLine = 0 && expr.Span.StartLine > 0 ->
         Ok { te with Span = expr.Span }
+    // a desugar's synthesized UNSEEDED seed (the rank-k full fold; gap G74)
+    // carries its mark onto the typed node
+    | Ok te when expr.Span = unseededSeedSpan -> Ok (markUnseeded te)
     | r -> r
 
 and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
@@ -2582,7 +2601,27 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
         // `anonymousUnwrap` at the callsite below.
         | TExprCompute inner -> collect inner
         | _ ->
-        let r = resolveTypedExpr env t
+        // Resolved to a FIXPOINT (gap G60): an alias of a deferred map
+        // (`let g2 = g`) is the same deferred value (formalism 10.2), so
+        // `reduce(g2, (+))` fuses exactly as `reduce(g, (+))` does. The
+        // one-hop resolution stopped at `g` and left the fold an ordinary
+        // reduce over a NAME, which the interpreter and the llvm lane force
+        // (printing the map) where the direct spelling prints nothing.
+        // Only a TOP-LEVEL alias is chased past: a BLOCK alias (let mut b =
+        // g inside { }, blockLocalVids) is a local assignable copy, so --
+        // as the one-hop resolution always did -- the chase stops at the
+        // value it names and the fold reads the copy's stored cells. (A write
+        // through a deferred binding itself is refused at lowering, so a
+        // chased value is never one the program wrote.)
+        let blockLocal = blockLocalVids ()
+        let rec chase (fuel: int) (e: TypedExpr) : TypedExpr =
+            match e.Kind with
+            | TExprVar (_, vid, _) when fuel > 0 ->
+                let r = resolveTypedExpr env e
+                if System.Object.ReferenceEquals(r, e) || blockLocal.Contains vid then r
+                else chase (fuel - 1) r
+            | _ -> e
+        let r = chase 64 t
         match r.Kind with
         | TExprFusion (l, rgt) ->
             (match collect l, collect rgt with
@@ -2808,7 +2847,10 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
                                 | OpMul, _ -> LitFloat 1.0
                                 | _, (ETInt32 | ETInt64) -> LitInt 0L
                                 | _ -> LitFloat 0.0
-                            mkTyped (TExprLit lit) e)
+                            // an unseeded `(+)` leg's seed carries the
+                            // UNSEEDED mark (gap G74; TypedAst.markUnseeded)
+                            let s = mkTyped (TExprLit lit) e
+                            if op = OpAdd then markUnseeded s else s)
                     let tree =
                         match leaves with
                         | first :: rest ->
@@ -2857,7 +2899,12 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
                         let lit =
                             if isOpenElemType env elem0 then TExprZero
                             else match et with ETInt32 | ETInt64 -> TExprLit (LitInt 0L) | _ -> TExprLit (LitFloat 0.0)
-                        Ok (mkTyped lit elem0)
+                        // The fold is UNSEEDED: its value is the left fold of
+                        // its cells. The base seed above is what every
+                        // licensed route keeps; the mark lets Lowering give a
+                        // STRICT route the exact identity instead (gap G74;
+                        // TypedAst.unseededSeedSpan, Lowering.lowerUnseededSeed).
+                        Ok (markUnseeded (mkTyped lit elem0))
                      | TExprSection OpMul ->
                         let lit = match et with ETInt32 | ETInt64 -> TExprLit (LitInt 1L) | _ -> TExprLit (LitFloat 1.0)
                         Ok (mkTyped lit elem0)
@@ -3094,9 +3141,19 @@ and inferReductionJoin (env: TypeEnv) (legs: Expr list) (site: Expr) : TypeResul
             let one () = match et with
                          | ETInt32 | ETInt64 -> TExprLit (LitInt 1L)
                          | _ -> TExprLit (LitFloat 1.0)
+            // An unseeded `reduce(x, (+))` leg is UNSEEDED (marked, gap G74);
+            // a `prodsum` leg is the sum FROM ZERO, so its synthesized zero is
+            // a real seed and stays unmarked (the condition is joinLegSurface's
+            // prodsum arm).
+            let isProdsumLeg =
+                match legs.[i].Kind with
+                | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "prodsum" }, args) ->
+                    not args.IsEmpty && (lookupVar "prodsum" env).IsNone
+                | _ -> false
+            let markAdd (s: TypedExpr) = if isProdsumLeg then s else markUnseeded s
             match (resolveTypedExpr env tK).Kind with
-            | TExprSection OpAdd when isOpenElemType env elem -> Ok (mkTyped TExprZero elem)
-            | TExprSection OpAdd -> Ok (mkTyped (lit ()) elem)
+            | TExprSection OpAdd when isOpenElemType env elem -> Ok (markAdd (mkTyped TExprZero elem))
+            | TExprSection OpAdd -> Ok (markAdd (mkTyped (lit ()) elem))
             | TExprSection OpMul -> Ok (mkTyped (one ()) elem)
             | TExprSection _ ->
                 Error (Other $"reduction-join leg {i + 1} needs an explicit init (`reduce(x, op, init)`): only (+) and (*) carry implicit identities, and a joined fold cannot seed from its first element.")
@@ -3799,13 +3856,17 @@ and inferReduceCore (env: TypeEnv) array kernel (init: Expr option) (axes: Expr 
                     let synAt k = mkExpr span k
                     let iLit (v: int64) = synAt (ExprLit (LitInt v))
                     let elemTy = env.Subst.Resolve at.ElemType
+                    // The implicit `(+)` seed of this UNSEEDED fold carries the
+                    // unseeded mark (gap G74): Lowering keeps it on a licensed
+                    // route and gives a strict one the exact identity.
+                    let unseeded k = mkExpr unseededSeedSpan k
                     let zeroOf () =
                         match elemTy with
-                        | IRTScalar (ETFloat64 | ETFloat32) -> Some (synAt (ExprLit (LitFloat 0.0)))
+                        | IRTScalar (ETFloat64 | ETFloat32) -> Some (unseeded (ExprLit (LitFloat 0.0)))
                         | IRTScalar (ETInt64 | ETInt32) -> Some (synAt (ExprLit (LitInt 0L)))
                         | IRTScalar (ETComplex128 | ETComplex64) ->
-                            Some (synAt (ExprApp (synAt (ExprVar "complex"),
-                                                  [synAt (ExprLit (LitFloat 0.0)); synAt (ExprLit (LitFloat 0.0))])))
+                            Some (unseeded (ExprApp (synAt (ExprVar "complex"),
+                                                     [synAt (ExprLit (LitFloat 0.0)); synAt (ExprLit (LitFloat 0.0))])))
                         | _ -> None
                     let oneOf () =
                         match elemTy with
@@ -12462,6 +12523,23 @@ and buildApplyInfo (env: TypeEnv)
                     |> List.map (fun idx -> { idx with Kind = TDimension; Id = env.Builder.FreshId() })
                 mkArrayArrow (coIterSharedRecords @ outputTDims) outputElemType None
             else outputType
+        // G67: a kernel returning a COMPACT array makes every output cell a
+        // packed pool (a per-group SymIdx H: `method_for(range<G>) <@>
+        // lambda(g) -> group_h(jt(g))` with group_h a `comm` self-contraction).
+        // No lane stores that shape -- the C++ extents table is per group
+        // (bad_array_new_length at run time), the LLVM lane refuses it, the
+        // interpreter's row write panics -- so it is refused HERE, once, before
+        // any lane (gap register G67; the grouped compact output is NOT BUILT).
+        match kernelTDims |> List.tryFind (fun ix -> ix.Symmetry <> SymNone) with
+        | Some ix ->
+            let cell =
+                match ix.Symmetry with
+                | SymSymmetric -> "is a packed SymIdx group"
+                | SymAntisymmetric -> "is a packed AntisymIdx group"
+                | SymHermitian -> "is a packed HermitianIdx group"
+                | _ -> "has a compact index group"
+            Error (RowMapCompactCell cell)
+        | None ->
         let info : TypedApplyInfo = {
             Loop = tLoop; Kernel = resolvedKernel
             Arrays = arrays; Identities = identities
@@ -14054,8 +14132,8 @@ and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
         else
         let trailing = trailingOpt |> List.map Option.get
         zeroElem () |> Result.bind (fun zed ->
-        // ZERO-FILL ELISION (formalism 7.5; bench/notes/microkernel-sketches-
-        // review.md M3). The buffer's zero fill exists for exactly two kinds
+        // ZERO-FILL ELISION (formalism 7.5; bench/notes/microkernel-sketches-review.md (removed 2026-10-24; in git history at cf2028cc),
+        // M3). The buffer's zero fill exists for exactly two kinds
         // of read: a WHOLE-array use of `prefix` (which sees the unbuilt rows
         // as zero) and the freeze epilogue of a `while`-guarded recurrence
         // (which, stopping at n = 0, copies row 0 before anything wrote it).
@@ -15236,6 +15314,7 @@ and inferBlock env stmts finalExpr (expectedFinal: IRType option) : TypeResult<T
                         | _ -> "_(" + String.concat "," (patternNames binding.Pattern) + ")"
                     let identity = match binding.Pattern.Kind with PatternKind.PatVar n -> Some (AIDVariable n) | _ -> None
                     let assign = assignOfBindingMut binding.Mutability
+                    (blockLocalVids ()).Add varId |> ignore   // a block let (the reduce alias chase, G60)
                     curEnv <- bindVarFull name varId tValue.Type identity assign (Some tValue) curEnv
                     // Dist provenance: in-block dist lets (e.g. `let h =
                     // 2.0 * d` on a licensed parameter) derive from the RHS.
@@ -15466,6 +15545,7 @@ and inferForIn (env: TypeEnv) (varName: string) (rangeExpr: Expr) (bodyStmts: St
                             let bName = match binding.Pattern.Kind with PatternKind.PatVar n -> n | _ -> "_"
                             let bId = bodyEnv.Builder.FreshId()
                             let assign = assignOfBindingMut binding.Mutability
+                            (blockLocalVids ()).Add bId |> ignore
                             bodyEnv <- bindVarFull bName bId tValue.Type None assign (Some tValue) bodyEnv
                             // Destructuring inside a loop body: routed through
                             // the same stmtDestructureBindings inferBlock uses
@@ -16452,6 +16532,11 @@ and inferForExpr env source kernelOpt : TypeResult<TypedExpr> =
                             | _ -> ([], 0)
                         let outputIndexTypes = sharedRecords @ (kernelTDims |> List.map (fun idx -> { idx with Id = env.Builder.FreshId() }))
                         let outputType = mkArrayArrow outputIndexTypes elemType None
+                        // G67: a compact kernel cell is refused on this path too
+                        // (the same check as inferApply's).
+                        match kernelTDims |> List.tryFind (fun ix -> ix.Symmetry <> SymNone) with
+                        | Some _ -> Error (RowMapCompactCell "has a compact index group")
+                        | None ->
                         // Note: SymcomStates/TriangularLevels/SpeedupFactor are unused
                         // by the co-iteration codegen path -- it derives loop structure
                         // directly from SharedIndexTypes

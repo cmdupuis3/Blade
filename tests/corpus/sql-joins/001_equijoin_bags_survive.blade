@@ -1,0 +1,23 @@
+// TEST: Equijoin Bags Survive
+// ----------------------------------------------------------------------------
+// The inline equijoin (round 3 W3-2, item T2; `blade plan` rule `hash-join`):
+// the pair pools are compiler temporaries, so the C++ lane builds a stable CSR
+// over the right keys and probes the left keys instead of the six passes over
+// all N x M pairs. The relation is a BAG: every left row pairs with EVERY
+// right row of equal key, duplicates on both sides kept -- 4 matches and a
+// total of 120 here, where a set-based probe (one match per distinct key)
+// would find 2. Lex (left-major / right-minor) order: (0,0) (0,2) (1,1) (1,3).
+// The interpreter runs the as-written passes (the independent oracle).
+// ----------------------------------------------------------------------------
+type LeftRow = Idx<3>
+type RightRow = Idx<4>
+let left_key: Array<Int64 like LeftRow> = [1, 2, 9]
+let left_amount: Array<Int64 like LeftRow> = [2, 3, 7]
+let right_key: Array<Int64 like RightRow> = [1, 2, 1, 2]
+let right_amount: Array<Int64 like RightRow> = [10, 10, 20, 10]
+let matched = compound(method_for(left_amount, right_amount) <@> lambda(l, r) -> l * r, mask(method_for(left_key, right_key) <@> lambda(l, r) -> l == r, lambda(e) -> e))
+let match_count = extents(matched)
+let total = reduce(matched, (+), 0)
+// EXPECT: matched = [20, 40, 30, 30]
+// EXPECT: match_count = 4
+// EXPECT: total = 120

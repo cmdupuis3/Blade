@@ -242,7 +242,13 @@ is the serial chain in every build. The thread licence may sit on the fold
 kernel or on the MAP the fold consumes: `omp(i: 1)` covering the outermost level
 of a reorder-licensed fold's nest threads that level (per-thread partials).
 The LLVM lane has no thread runtime, so it spends only the reordering half and
-reports the threading half with the census line. `blade plan` names each fold's form
+reports the threading half with the census line. *Fold placement:* the thread form belongs to a
+fold that is the WHOLE value of its own `let`, at top level and in a function body alike: a
+function-body `let s = reduce(x, lambda(p, q) where omp -> p + q, s0)` opens the same team as the
+top-level spelling, and its first failure is the top-level spelling's (the seed evaluated once
+before the fold; an empty unseeded fold BL8003; corpus functions/535, `blade test omp-reduce`
+`g55_*`). A fold that is an OPERAND of arithmetic, or a kernel's bare return, opens no team
+(the census says so) and keeps the single-thread licensed form. `blade plan` names each fold's form
 (`fold form: simd-reduction | K-lanes(k) | simd K-lanes(k) dot|self-dot|dot3|sum
 | threaded(...) | serial (repro) | serial (<why>)`; a `threaded(Path B chunks,
 ...)` form names what runs inside each chunk).
@@ -1464,7 +1470,22 @@ the annotation hook only.
   (`reduce([1, 2, 3, 4], lambda(a, b) -> a - b)` is `((1 - 2) - 3) - 4 = -8`), `n = 1` by default (rank k in, rank k−n out;
   `n = rank(A)` is the full fold to a scalar); default kernel `(+)`; see
   [features/sql.md](features/sql.md) §10 for typing details, the axis-count
-  rules and the empty-input rule. Under the default `n = 1`, an anonymous
+  rules and the empty-input rule. Without `init` the fold's value is the left
+  fold of the CELLS, `c0 ⊕ c1 ⊕ ...`. Over a STORED array that fold has no
+  identity: a statically empty operand is refused (BL3007), a dynamically
+  empty one panics BL8003 at the fold. A fused fold over a DEFERRED
+  computation (a `(+)` / `(*)` section; `<&!>` join legs, the rank-k full
+  fold) is seeded by the implementation, and the seed depends on the ROUTE
+  (gap G74): on a strict route -- `BLADE_FP_REPRO=1`, or inside a
+  `where repro` function, where no lane may reorder the fold -- the `(+)`
+  seed is the EXACT identity, `-0.0` (`(-0.0, -0.0)` complex, `0` integer),
+  §2.4's identity insertion, so the chain is the left fold of the cells bit
+  for bit (an all-`-0.0` row folds to `-0.0`); on a licensed route it is
+  `+0.0`, and the sign of a zero result is the licence's (§2.4, "Fast by
+  default"). Its EMPTY fold is that seed: the deferred terminal has no BL8003
+  guard, so an empty deferred sum is `-0.0` on a strict route and `+0.0` on a
+  licensed one -- the two spellings keep distinct empty-input rules
+  (features/sql.md §10). Under the default `n = 1`, an anonymous
   deferred outer product `reduce(method_for(A, B) <@> lambda(a, b) -> f(a, b),
   op[, init])` (named rank-1 sources, no `where` clause on the map kernel, a
   `(+)`/`(*)` section or a seeded fold) is evaluated row by row -- an outer
@@ -1521,6 +1542,13 @@ decomposition.
 
 Kernels live in T-world: they see slices, never S-dims; `comm` is metadata for
 the loop object, not the kernel body. S-dims are deduced at application sites.
+
+*Zero S-dimensions.* When every operand is consumed whole (S = 0: an `object_for` application
+whose kernel parameter ranks equal the operands' known ranks) and the kernel returns a
+scalar, the application has no loop: `object_for(f) <@> (A1, .., An)` IS the call
+`f(A1, .., An)` -- each operand bound whole (dense or compound), the one term evaluated exactly
+once, its value (signed zero included) and its first failure the call's. It is lowered to that
+call before any lane (Lowering `isZeroLevelWholeArrayApply`; corpus index-types/543-544).
 
 ### 7.3 Virtual arrays
 
@@ -1930,6 +1958,14 @@ Given `object_for(kernel) <@> (A₁, ..., Aₙ)` with `kernel(a: Poly<T^k>) -> T
 4. **Concatenate** group contributions in order (concatenation, not
    broadcasting).
 5. **T-dims of output**: from the kernel's `T^m` (and `tdim` spec).
+   A kernel whose RETURN carries a compact group (`SymIdx` / `AntisymIdx` / `HermitianIdx`
+   T-dimensions) is refused in an application, BL4004 (any application, the zero-level one
+   included): every S-cell would hold its own packed pool -- a grouped compact output, which is
+   not built (gap G67). The restriction is on an application's kernel only: the same function
+   called directly (`let h = group_h(jg)`) returns its packed array as usual. The supported
+   spellings store a dense cell (the callee ends in `decompact(h, 0)`) or write the flat map
+   over every axis (`method_for(range<G, P, P>) <@> lambda(g, a, b) -> prodsum(x(g, a), x(g, b))`).
+   Corpus symmetry/142 (the refusal and its span), 143 (both spellings), 144 (the direct call).
 
 **Correction vs v10 §10.9.** v10 step 3 emitted `SymIdx<g, extent>` *per
 S-dimension* (e.g. `(A, A)` over `Array<M, N, T>` → `SymIdx<2,M>, SymIdx<2,N>`,
@@ -2112,6 +2148,99 @@ the same way. The computation wrappers `guard` and `sequence` keep the
 deferred protocol. Pinned by `loops/494`, `497`, `518`-`527` in every lane
 (`526`, a fallback, in the C++ lane and the interpreter: the LLVM lane has no
 `<|:>`).
+
+**Aliases and printing of deferred maps (gaps G60, G75).** A pure deferred
+map (one that writes nothing, so it keeps the deferred reading above) is
+evaluated where a FORCING USE reads it: a positional read, a capture by a
+kernel, an eager array operation (`sort`, the set operations, `group_by`,
+...), a call argument, or `|> compute`. A fold, a map or a join over it FUSES
+instead and forces nothing, and a member of a tuple value evaluates a COPY
+(next paragraph). Its evaluation count is unobservable, so a program observes
+exactly two things: WHERE its first failure fires -- at its first forcing use
+-- and WHETHER it prints. A deferred map has NO STORAGE OF ITS OWN, so a
+WRITE through it -- an element write, a whole reassignment, a write through
+any `let` view, alias or rebinding of it (in any scope), passing it to a
+`mut` parameter some call chain writes, or handing it to a callee the
+compiler cannot resolve (a callback) -- is REFUSED (BL4005, at lowering, so
+in every lane; materialize it first: `let c = g |> compute`). The judgment
+is a program-wide fixpoint by binder identity that stops only at a PROVED copy
+(an assignable `let a = Z` of a dense array) or fresh storage, and refuses
+what it cannot trace. The ALIAS rule: a TOP-LEVEL `let g2 = g` over a
+deferred map binds `g2` to the SAME deferred value -- substitution holds. The
+alias evaluates nothing (so nothing can fail there), and a use through `g2` is
+that use of `g` (`reduce(g2, (+))` fuses exactly as `reduce(g, (+))` does, and
+is refused where that is). A deferred map and its top-level aliases form ONE
+ALIAS CLASS (siblings and chains included). The PRINT rule: a class prints,
+under EVERY name in it, iff a forcing use at MODULE LEVEL (a top-level
+statement or block, or the capture of a top-level kernel) has forced any
+member by the end of the program; every name prints the same cells (no member
+can be written). The class value is fixed at its FIRST forcing event: a later
+write to one of the map's INPUTS does not change the stored cells any name of
+the class reads or prints (a fold over the map, which fuses, still reads the
+current inputs). A map that only function bodies force is evaluated inside
+each call, privately, and never prints; a class nothing forces prints
+nothing. An alias bound inside a block or a function body (`let mut b = g`)
+is a local assignable COPY instead -- binding it is a forcing use of `g` --
+and is ordinary storage. LANE EXCEPTIONS (OPEN under G60, pre-existing): the
+LLVM lane keeps the first-forcing snapshot only for a module binding that is
+aliased or read more than once -- a map read exactly once and then printed
+after a write to its input RERUNS its producer there -- and makes the local
+copy only inside a function body: an alias bound in a TOP-LEVEL block stays
+deferred in that lane and reads post-write cells; the C++ lane and the
+interpreter follow the rule as written. What changed in round 3, wave 4: the C++ lane forced
+`g` AT an assignable alias, so `g` printed and `g2` never did and `g`'s
+failure fired at the alias; the interpreter forced and printed only the name
+read, and memoized and printed a module map a FUNCTION body forced; the LLVM
+lane forced through an alias where the fold should fuse; and writes through a
+deferred map gave three answers (the LLVM lane folded the unwritten map, a
+silent wrong value; a reassignment dropped the old producer's failure there).
+Pinned by `loops/540`-`561`. LANE REFUSALS (not LLVM semantics): the LLVM lane
+refuses a function that reads a deferred module binding, so `loops/544`, `545`
+and `547` (the G75 print rule and the function-body copy) are pinned in the
+C++ lane and the interpreter only, and G75 stays PARTIAL until that lane runs
+them.
+
+**Deferred members of a tuple value (gaps G58, G59, G61, G62).** A tuple ALL
+of whose members are deferred computations is itself a deferred tuple: binding
+it evaluates nothing, and a projection reads one member. Any other tuple is a
+VALUE, and its members are evaluated AT ITS CONSTRUCTION, LEFT TO RIGHT, each
+at its own position: a deferred array member `(g, 1.0)` exactly as
+`g |> compute` evaluates it (a copy -- `g` itself is not forced, and prints only
+if a forcing use forces it), and a named deferred tuple member `(p, 1.0)` member
+by member. An `if` value whose arm is such a tuple (or an explicit
+`|> compute`) evaluates its condition, then ONLY the taken arm, members left to
+right; the untaken arm evaluates nothing. Two shapes of it are REFUSED (BL6002,
+at lowering, every lane): one inside a function body, a lambda or a loop body
+(the compiled lanes have no owner for the taken arm's storage after the
+branch), and one whose arm READS a deferred computation other than as such a
+copy member -- by position, through a kernel's capture, inside a computed
+member's own computation, or in a nested condition -- because that force
+would happen only on the taken arm, which no lane's static print list follows
+(force it before the `if`). The shared predicate follows at most 16
+tuple-alias links; a longer alias chain is not classified and may meet a
+backend refusal (BL7004) instead of BL6002 (OPEN under G59). A call with an
+explicit `|> compute` argument
+evaluates EVERY argument left to right the same way, array-valued ones included
+(gap G57); the order of two failing arguments of an ORDINARY call (no compute
+argument) is not fixed in the C++ lane (C++ leaves argument evaluation order
+unspecified; an OPEN record of its own, G79). The LLVM lane cannot keep that
+order for a BARE deferred array argument (it would evaluate it at the
+statement's start, or inside an inlined callee), so it refuses such a call
+and the C++ lane runs it (`tuples/063`-`065`: the C++ lane and the
+interpreter). An `if` value OFF the member-ordered path (ordinary arms, e.g.
+`if c then g(0) else 0.0`) is unchanged: the C++ lane forces the deferred maps
+BOTH arms read before the condition while the interpreter evaluates the taken
+arm only -- a first-failure and print divergence, OPEN (G77). The first-failure consequence is
+deliberate: a failing member fails at the construction even when the program
+never projects it -- `let held = (g, 1.0)` with `g` dividing by zero fails at
+`held`, before a later failing statement (`tuples/041`). What changed in round
+3, wave 4: the C++ lane refused a bare member (`unevaluated computation used as
+value`), named undeclared members of a deferred tuple member or of an
+`if`-held tuple, and let g++ evaluate `std::make_tuple`'s arguments right to
+left; the interpreter held a bare member deferred inside the tuple and
+evaluated it at a later projection; the LLVM lane kept it a producer and ran
+it only where the tuple was read, and refused an `if`-held tuple. Pinned by
+`tuples/041`, `044`-`065`.
 - `<*>` concatenates array lists: `method_for(A) <*> method_for(B) ≡
   method_for(A, B)`; identity `method_for()`; commutative up to index
   reordering; associative. It is proved to be exactly shape concatenation with
