@@ -1,0 +1,20 @@
+// TEST: Pure View In Tuple Write (rejects)
+// ----------------------------------------------------------------------------
+// Gap G60(a), the second Codex look of W4B-A, finding 3, through an
+// AGGREGATE: the tuple's first member is `pure(m(0))` -- the identity, so a
+// row view of the deferred map m -- and the write through `pair[0]` writes m.
+// The walk follows the projection path into the tuple and through `pure`:
+// refused at lowering in every lane (BL4005; the C++ lane used to fail at its
+// back end, BL7004).
+// ----------------------------------------------------------------------------
+type Y = Idx<2>
+type X = Idx<3>
+let m = method_for(range<Y>, range<X>) <@> lambda(i, j) -> Float64(i) * 10.0 + Float64(j)
+let before = m(0, 0)
+let pair = (pure(m(0)), m(1))
+let row = pair[0]
+row(1) = 9.0
+let s = reduce(m, (+), axes = 2)
+// ERROR: BL4005 @ 15:1
+// ERROR-CONTAINS: a write through `m`, a deferred computation
+// REJECT-AT: lower

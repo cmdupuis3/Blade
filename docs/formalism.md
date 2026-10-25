@@ -247,7 +247,11 @@ fold that is the WHOLE value of its own `let`, at top level and in a function bo
 function-body `let s = reduce(x, lambda(p, q) where omp -> p + q, s0)` opens the same team as the
 top-level spelling, and its first failure is the top-level spelling's (the seed evaluated once
 before the fold; an empty unseeded fold BL8003; corpus functions/535, `blade test omp-reduce`
-`g55_*`). A fold that is an OPERAND of arithmetic, or a kernel's bare return, opens no team
+`g55_*`). `blade plan` names such a fold by one subject in every outcome: `<function>.<let>`
+(`fsum.s`) when its kernel is an anonymous lambda written in the let, else
+`<function>.<fold k>`, the k-th scalar fold let of the body in source order -- a spelling no let
+name can take, so it never collides with a real `<function>.<let>` (a named kernel carries no let
+name through lowering; gap G55). A fold that is an OPERAND of arithmetic, or a kernel's bare return, opens no team
 (the census says so) and keeps the single-thread licensed form. `blade plan` names each fold's form
 (`fold form: simd-reduction | K-lanes(k) | simd K-lanes(k) dot|self-dot|dot3|sum
 | threaded(...) | serial (repro) | serial (<why>)`; a `threaded(Path B chunks,
@@ -260,7 +264,15 @@ interpreter's operation sequence, bit for bit -- is asked for, never assumed:
 
 - per function, `where repro`: the emitted body is compiled without
   contraction, never re-inlined into a contracting caller, and declines
-  reordered folds and library routes (features.md, `where repro`);
+  reordered folds and library routes (features.md, `where repro`). The
+  demand belongs to each fold the body PERFORMS, whatever its kernel: a
+  `reduce(xs, add)` in the body whose `add` is declared elsewhere (with
+  `comm`, even `omp`) keeps the ascending chain there, while `add`'s other
+  uses keep their licence (gap G80). The one kernel this cannot reach is a
+  function-typed PARAMETER (the kernel is whatever the caller passes): both
+  compiled lanes refuse such a fold (BL7004 deferred; BL9002 stored, a
+  pre-existing defect), so no reordered form of it exists. It is not
+  transitive: a function the body CALLS is repro only if it says so itself;
 - per build, `BLADE_FP_REPRO=1` (spelled `BLADE_FP_REASSOC=0` too): every fold
   keeps the serial association, the threaded fold forms included (each prints
   the `[omp] requested but emitted serial` census line); add
@@ -1476,13 +1488,19 @@ the annotation hook only.
   empty one panics BL8003 at the fold. A fused fold over a DEFERRED
   computation (a `(+)` / `(*)` section; `<&!>` join legs, the rank-k full
   fold) is seeded by the implementation, and the seed depends on the ROUTE
-  (gap G74): on a strict route -- `BLADE_FP_REPRO=1`, or inside a
-  `where repro` function, where no lane may reorder the fold -- the `(+)`
+  (gap G74): on a strict route -- one on which no lane may reorder the fold:
+  `BLADE_FP_REPRO=1`; inside a `where repro` function; a fold whose deferred
+  map body may WRITE (its evaluations are ordered side effects, §5.2, so
+  even the default build keeps the serial chain); the rank-k full fold over
+  a stored array, whose accumulator loop is serial in every build -- the `(+)`
   seed is the EXACT identity, `-0.0` (`(-0.0, -0.0)` complex, `0` integer),
   §2.4's identity insertion, so the chain is the left fold of the cells bit
   for bit (an all-`-0.0` row folds to `-0.0`); on a licensed route it is
   `+0.0`, and the sign of a zero result is the licence's (§2.4, "Fast by
-  default"). Its EMPTY fold is that seed: the deferred terminal has no BL8003
+  default") -- also where a lane happens to emit a LICENSED fold serially for
+  want of a vector form (a join over a streamed source, a multi-level or
+  mixed-operator join): the route is the licence's, not the emitted shape's
+  (gap G74 records these). Its EMPTY fold is that seed: the deferred terminal has no BL8003
   guard, so an empty deferred sum is `-0.0` on a strict route and `+0.0` on a
   licensed one -- the two spellings keep distinct empty-input rules
   (features/sql.md §10). Under the default `n = 1`, an anonymous
@@ -1548,7 +1566,13 @@ whose kernel parameter ranks equal the operands' known ranks) and the kernel ret
 scalar, the application has no loop: `object_for(f) <@> (A1, .., An)` IS the call
 `f(A1, .., An)` -- each operand bound whole (dense or compound), the one term evaluated exactly
 once, its value (signed zero included) and its first failure the call's. It is lowered to that
-call before any lane (Lowering `isZeroLevelWholeArrayApply`; corpus index-types/543-544).
+call before any lane (Lowering `isZeroLevelWholeArrayApply`; corpus index-types/543-544). The
+same holds when the kernel returns a COMPACT array (a packed `SymIdx` / `AntisymIdx` /
+`HermitianIdx` result): the application is the call -- a named kernel called by name, so its
+value, its first failure and its frames are the direct call's (a user-written lambda kernel is
+called as that lambda, its own frame kept), the operands forced as the call
+forces them -- lowered at typecheck before the §8.4 step 5 refusal, which needs an outer
+iteration dimension (corpus symmetry/146, 148-149).
 
 ### 7.3 Virtual arrays
 
@@ -1982,13 +2006,19 @@ Given `object_for(kernel) <@> (A₁, ..., Aₙ)` with `kernel(a: Poly<T^k>) -> T
    broadcasting).
 5. **T-dims of output**: from the kernel's `T^m` (and `tdim` spec).
    A kernel whose RETURN carries a compact group (`SymIdx` / `AntisymIdx` / `HermitianIdx`
-   T-dimensions) is refused in an application, BL4004 (any application, the zero-level one
-   included): every S-cell would hold its own packed pool -- a grouped compact output, which is
-   not built (gap G67). The restriction is on an application's kernel only: the same function
+   T-dimensions) is refused in an application WITH AN OUTER ITERATION DIMENSION, BL4004
+   (S >= 1, or a co-iteration -- a `method_for` row map, an `object_for` whose kernel takes
+   only a trailing block of its operand): every S-cell would hold its own packed pool -- a
+   grouped compact output, which is not built (gap G67). A ZERO-LEVEL application (§7.2
+   "Zero S-dimensions": an `object_for` whose kernel takes every operand whole) has no outer
+   cell: `object_for(group_h) <@> jg` IS the call `group_h(jg)` and returns its packed array --
+   lowered to that call at typecheck, before the refusal and before any lane. The same function
    called directly (`let h = group_h(jg)`) returns its packed array as usual. The supported
-   spellings store a dense cell (the callee ends in `decompact(h, 0)`) or write the flat map
-   over every axis (`method_for(range<G, P, P>) <@> lambda(g, a, b) -> prodsum(x(g, a), x(g, b))`).
-   Corpus symmetry/142 (the refusal and its span), 143 (both spellings), 144 (the direct call).
+   spellings for the refused shape store a dense cell (the callee ends in `decompact(h, 0)`) or
+   write the flat map over every axis (`method_for(range<G, P, P>) <@> lambda(g, a, b) ->
+   prodsum(x(g, a), x(g, b))`). Corpus symmetry/142 and 147 (the refusal and its span: a row
+   map, an `object_for` with one outer level), 143 (both spellings), 144 (the direct call), 146
+   (the zero-level application, the direct call's value in every lane), 148-149 (its first failure).
 
 **Correction vs v10 §10.9.** v10 step 3 emitted `SymIdx<g, extent>` *per
 S-dimension* (e.g. `(A, A)` over `Array<M, N, T>` → `SymIdx<2,M>, SymIdx<2,N>`,
@@ -2188,7 +2218,19 @@ compiler cannot resolve (a callback) -- is REFUSED (BL4005, at lowering, so
 in every lane; materialize it first: `let c = g |> compute`). The judgment
 is a program-wide fixpoint by binder identity that stops only at a PROVED copy
 (an assignable `let a = Z` of a dense array) or fresh storage, and refuses
-what it cannot trace. The ALIAS rule: a TOP-LEVEL `let g2 = g` over a
+what it cannot trace. It follows AGGREGATE carriers too: a tuple (nested, or
+selected by an `if` or a `match` value) or a struct holding a view of a deferred map
+carries that view, a projection reaches it along its path, and a `match`
+pattern variable reaches the part of its scrutinee the pattern binds, so `let pair =
+(m(0), m(1)); let row = pair[0]; row(1) = 9.0` is a write through `m` (gap
+G60(a), `tuples/069`-`071`, `073`, `077`, `loops/570`-`573`; a tuple wrapper is no copy; `x |> compute` of a
+STORED name or view and `pure(x)` are the identity and are followed too, `loops/572`, `tuples/077`; a
+`|> compute` of any computing form -- a map, a guard, a transpose -- and a transpose, stack, join or
+group_by result are FRESH cells, and writing them is accepted, `tuples/068`, `073`, its first failure at the computation, `loops/569`; a `sequence`
+result is fresh in the C++ lane, while the interpreter's concrete-array sequence SHARES its
+members' stores -- a recorded divergence, OPEN under G60; a bare `guard` / `<|>` / `<|:>` / bind
+is a deferred VALUE whose provenance the walk follows conservatively, not a storage identity). Every IR form is classified as followed or as fresh storage; a
+form added later is not silently fresh (the classification is exhaustive). The ALIAS rule: a TOP-LEVEL `let g2 = g` over a
 deferred map binds `g2` to the SAME deferred value -- substitution holds. The
 alias evaluates nothing (so nothing can fail there), and a use through `g2` is
 that use of `g` (`reduce(g2, (+))` fuses exactly as `reduce(g, (+))` does, and
@@ -2206,24 +2248,56 @@ current inputs). A map that only function bodies force is evaluated inside
 each call, privately, and never prints; a class nothing forces prints
 nothing. An alias bound inside a block or a function body (`let mut b = g`)
 is a local assignable COPY instead -- binding it is a forcing use of `g` --
-and is ordinary storage. LANE EXCEPTIONS (OPEN under G60, pre-existing): the
-LLVM lane keeps the first-forcing snapshot only for a module binding that is
-aliased or read more than once -- a map read exactly once and then printed
-after a write to its input RERUNS its producer there -- and makes the local
-copy only inside a function body: an alias bound in a TOP-LEVEL block stays
-deferred in that lane and reads post-write cells; the C++ lane and the
-interpreter follow the rule as written. What changed in round 3, wave 4: the C++ lane forced
+and is ordinary storage. In the LLVM lane (round 3, wave 4b) the force
+points follow the C++ lane's statement pre-pass: a top-level BLOCK forces,
+before any of its effects, every deferred map the pre-pass would (the bases
+of its positional reads, call arguments, prodsum operands and folds over a
+deferred choice, in first-read order; a chain ending in a tuple, its lets'
+reads only); any other forcing use in main stores the map at the start of
+its top-level statement; in a function body, at the start of the body
+statement that first forces it. A map read exactly ONCE is stored there
+too (a force nested in another such force at the start of that one), so its
+print reads the first-forcing cells and an unread failing cell fails there
+(`loops/576`, `579`, `580`); a fold that is a map's only reader keeps it fused
+only when the program has no assignment at all and the fold's kernel and
+seed cannot fail and read no unforced deferred map (`586`-`588`); an alias
+bound in a block is copied at its binding, its source forced AT the alias,
+after the block's earlier effects (`577`, `584`, `585`) -- unless the block's
+pre-pass already forced the source, when the alias only copies; a tuple's
+members take their own force points only for a top-level statement's root
+tuple or the tuple its let chain ends in (admitted as the C++ lane admits
+member order), never a tuple bound by an inner `let` of a block;
+`let v = g |> compute` no longer makes g print once v is forced (the compute
+is a copy; `581`); and a function body evaluates a deferred module map
+privately, as a whole, from the current inputs (`547`, `578`, `582`, `583`).
+LANE EXCEPTIONS (OPEN under G60 / G75): where that lane cannot place such a
+store -- a sole read inside an open `let rec` trip scope at module level, or
+in a statement whose slots an earlier in-place force already upgraded -- the
+read is consumed in place and the print still REDOES the producer over the
+current inputs; a block alias of a module map OFF that straight-line spine
+(a block inside a branch or a loop body), and a private map a function
+forces inside one of its loop scopes, are refused by that lane (the program
+runs in the C++ lane); tested on the witnesses above, not proved absent
+elsewhere. OPEN (G60 / G77, inherited): the interpreter forces at the read
+instead -- `let r = { x(0) = 5; g(0) + g(1) }` is r = 15 in the LLVM lane
+(the pre-pass's force) and r = 7 in the interpreter, and an earlier failing
+statement in the block wins in the interpreter only; likewise with an alias of the map, a prodsum over
+it, an inner tuple `let` reading it, or reads of a second map beside an
+alias of the first. What
+changed in round 3, wave 4: the C++ lane forced
 `g` AT an assignable alias, so `g` printed and `g2` never did and `g`'s
 failure fired at the alias; the interpreter forced and printed only the name
 read, and memoized and printed a module map a FUNCTION body forced; the LLVM
 lane forced through an alias where the fold should fuse; and writes through a
 deferred map gave three answers (the LLVM lane folded the unwritten map, a
 silent wrong value; a reassignment dropped the old producer's failure there).
-Pinned by `loops/540`-`561`. LANE REFUSALS (not LLVM semantics): the LLVM lane
-refuses a function that reads a deferred module binding, so `loops/544`, `545`
-and `547` (the G75 print rule and the function-body copy) are pinned in the
-C++ lane and the interpreter only, and G75 stays PARTIAL until that lane runs
-them.
+Pinned by `loops/540`-`561` and `576`-`588`. The LLVM lane runs `loops/545`,
+`547`, `578`, `582` and `583` (the G75 print rule and the function-body
+copy). LANE REFUSALS (not LLVM semantics; the program runs in the C++ lane):
+`loops/544` (its function returns a dynamic-extent `group_by` result), a call
+from main after main forced the map (its class value is then the stored
+snapshot, which the private evaluation would not read), a deferred module
+value that is not a map form, and the two off-spine shapes above.
 
 **Deferred members of a tuple value (gaps G58, G59, G61, G62).** A tuple ALL
 of whose members are deferred computations is itself a deferred tuple: binding
@@ -2241,21 +2315,71 @@ branch), and one whose arm READS a deferred computation other than as such a
 copy member -- by position, through a kernel's capture, inside a computed
 member's own computation, or in a nested condition -- because that force
 would happen only on the taken arm, which no lane's static print list follows
-(force it before the `if`). The shared predicate follows at most 16
-tuple-alias links; a longer alias chain is not classified and may meet a
-backend refusal (BL7004) instead of BL6002 (OPEN under G59). A call with an
+(force it before the `if`). The shared predicate follows a tuple-alias chain
+to its END, so every lane judges a long chain alike (gap G59: it stopped after
+16 links, and a longer chain met a backend refusal, BL7004, instead of BL6002;
+`tuples/074`-`076`, `073`), and judges a BLOCK-valued initializer (`let p0 = { let n =
+..; (m, m) }`) by its result (`loops/574`, `functions/541`); a chain that revisits a binder is refused. A tuple ALL of
+whose members are deferred is deferred in a FUNCTION body too: binding it
+evaluates nothing (gap G58, `tuples/068`; the C++ lane named the module map in
+a value tuple, BL9002). A call with an
 explicit `|> compute` argument
 evaluates EVERY argument left to right the same way, array-valued ones included
-(gap G57); the order of two failing arguments of an ORDINARY call (no compute
-argument) is not fixed in the C++ lane (C++ leaves argument evaluation order
-unspecified; an OPEN record of its own, G79). The LLVM lane cannot keep that
-order for a BARE deferred array argument (it would evaluate it at the
-statement's start, or inside an inlined callee), so it refuses such a call
-and the C++ lane runs it (`tuples/063`-`065`: the C++ lane and the
-interpreter). An `if` value OFF the member-ordered path (ordinary arms, e.g.
-`if c then g(0) else 0.0`) is unchanged: the C++ lane forces the deferred maps
-BOTH arms read before the condition while the interpreter evaluates the taken
-arm only -- a first-failure and print divergence, OPEN (G77). The first-failure consequence is
+(gap G57); so does an ORDINARY call two or more of whose arguments may fail
+(gap G79: C++ leaves argument evaluation order unspecified, and g++ evaluated
+them right to left) at exactly these sites: the whole value of a module-level
+or top-level-block `let`, the whole value of a function-body `let`, and a
+function's returned value (`tuples/078`-`079`, `functions/542`-`543`,
+`tuples/073`; in a function body its arguments are bound in
+source order before any fresh-array argument is hoisted). Anywhere else -- a
+call nested inside a larger expression, a call in an `if` arm -- the C++
+lane keeps its unspecified operand order (OPEN under G79, as for any two
+failing operands of one expression). In the LLVM lane a BARE deferred array argument of such a call is forced AT its position, under its own name, on the out-of-line and the inlined (capturing) call alike, when the call is a top-level binding's root value or a function-body statement's whole value (`tuples/063`-`065`, `080`-`082`); nested in an expression the LLVM lane refuses such a call (fail closed) and the C++ lane runs it. An `if` value OFF the member-ordered path (ordinary arms) whose
+arm FORCES a deferred computation -- a positional, extent or membership read,
+a whole-array call argument, a prodsum operand, a kernel's capture: `if c then
+g(0) else 0` -- is REFUSED (BL6002, at lowering, every lane; gap G77): only
+the taken arm is evaluated, and no lane has a print list or a first-failure
+point that follows the branch (the C++ lane forced both arms' maps at the
+statement's start, so an untaken arm's map printed and failed; the LLVM lane
+printed -- and so forced -- it after the program; the interpreter forced the
+taken arm's only). ONE binder is admitted: the one whose forcing read is the
+FIRST operation of the whole statement that may fail, evaluating operands left
+to right -- in the `if`'s condition or anywhere earlier in the statement
+(`g(0) + (if z(0) > 0 then g(0) else 0)`). Then it is
+forced first in every lane -- the C++ lane at the statement's start, the
+others where they reach it -- with nothing that could fail before it, so the
+print set and the first failure agree. The operations that may fail first are EXACTLY section 2.4's panics -- an
+integer `/` or `%`, an integer-base `^` (a negative exponent), a float -> integer
+cast, a checked read -- and a call (its body is not entered; its callee and
+arguments run before it); every other operation is inert after its operands:
+names, literals, `+ - *`, float `/`, a real-base `^`, comparisons, negation, a
+cast to Float64 / Float32, every libm intrinsic EXCEPT `lgamma` / `digamma` (Blade's
+own series: BL8008 outside x > 0, so a barrier), complex ops, fma, tuple and
+field projections, a `|> compute` of a STORED name. A type counts as scalar
+through any unit / index-tag wrappers (`Nat<Row>` is a scalar Int64), and a
+type that is not a PROVEN real or complex float scalar (an unresolved, named or
+Nat type) is treated as possibly integer: its `/`, `%`, `^` or integer cast keeps
+the barrier. Of `&&` / `||` only the LEFT
+operand counts -- the right one may be short-circuited away, so an inert left
+operand leaves no admissible force; a SCALAR `guard`'s condition and a scalar
+choice's LEFT operand run first (never its conditional body / right operand);
+an array-valued guard or choice, an eager `sequence` and every deferred
+computation held as a value are opaque (`loops/591`-`595`). The
+REGIONS are the emitters': a top-level BLOCK (a let chain) is ONE statement --
+the C++ lane forces the whole block's deferred reads before its lets, so
+every earlier statement of the block precedes the admitted force -- except
+that a block's final TUPLE is its own region (its reads force at the tuple's
+binding, after the block's statements); a binding's tuple value that the C++
+lane evaluates MEMBER BY MEMBER (two or more leaves that may fail, or a
+compute / deferred member -- the emitter's own judgment) is one region per
+leaf, left to right.
+A binder already DEFINITELY forced may be read by a later arm: by an EARLIER top-level statement, an earlier let of the same block, an earlier leaf of a member-ordered tuple, or the enclosing `if`'s condition / `match`'s scrutinee / loop bounds (they run before the arms in every lane) -- definitely meaning on every successful evaluation path: a read of it, a whole-array call argument or a prodsum operand (eager), in an unconditional position (the left operand of `&&` / `||`; an inner `if` / `match` counts what EVERY branch forces, the intersection of its successful branches), never a copy, a fused fold or map over it, one arm for another, or one iteration for the next; at module level that force stores and memoizes it. This audit covers TOP-LEVEL code only (module statements and their blocks): inside a FUNCTION, lambda or kernel body, and inside a LOOP body (a let-rec step, a `while` guard), only the structural audit above applies -- a sound entry state there would need every invocation and consumption site (captures, recursion, deferred kernels), so the C++ pre-pass vs interpreter divergence inside callable bodies (pre-existing) stays OPEN under G77, recorded, not refused. The forcing read must be a read OF THE BINDER (`g(0)`): a copy (`g |>
+compute`) evaluates g's computation without forcing it or making it print,
+and counts as an operation that may fail. Force anything else before the `if`
+(`let v = g |> compute`, or a statement that reads it) and read the value in
+the arm. A fold or a map over a deferred map in an arm fuses and forces
+nothing and is admitted (`loops/562`-`568`, `575`, `functions/539`-`540`, `544`, `tuples/068`, `072`, `073`; `loops/564` the ordered tuple's failure). `match` ARMS are not judged (OPEN
+under G77). The first-failure consequence is
 deliberate: a failing member fails at the construction even when the program
 never projects it -- `let held = (g, 1.0)` with `g` dividing by zero fails at
 `held`, before a later failing statement (`tuples/041`). What changed in round
@@ -2265,7 +2389,7 @@ value`), named undeclared members of a deferred tuple member or of an
 left; the interpreter held a bare member deferred inside the tuple and
 evaluated it at a later projection; the LLVM lane kept it a producer and ran
 it only where the tuple was read, and refused an `if`-held tuple. Pinned by
-`tuples/041`, `044`-`065`.
+`tuples/041`, `044`-`079`.
 - `<*>` concatenates array lists: `method_for(A) <*> method_for(B) ≡
   method_for(A, B)`; identity `method_for()`; commutative up to index
   reordering; associative. It is proved to be exactly shape concatenation with

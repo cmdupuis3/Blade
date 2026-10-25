@@ -281,6 +281,24 @@ let decisionSpan () : Blade.Ast.Span = emittedDeclSpan (currentDeclCell ()).Valu
 /// operator's own span (panicSpanArgs loc.Span).
 let declPanicArgs () : string = panicSpanArgs (decisionSpan ())
 
+/// G55 (the plan subject of a FUNCTION-BODY fold let): while CodeGen's
+/// genFuncBody emits a scalar fold let through the statement path, `Some
+/// (emitted C++ name, enclosing declaration, source subject)` -- the subject
+/// being `<function>.<let name>` (`fsum.s`). A decision recorded about that
+/// binding -- by its emitted name (`__v<id>`, the applied `[omp]` record), by
+/// the enclosing declaration's name, or with no subject (`""`, a decline) --
+/// is attributed to the source subject, so the fold is ONE `blade plan`
+/// subject whatever the outcome. None outside that window.
+let internal localDecisionSubjectStorage = System.Threading.AsyncLocal<(string * string * string) option ref>()
+
+let localDecisionSubjectCell () : (string * string * string) option ref =
+    let v = localDecisionSubjectStorage.Value
+    if isNull (box v) then
+        let fresh = ref None
+        localDecisionSubjectStorage.Value <- fresh
+        fresh
+    else v
+
 let recordCodegenDecision (rule: string) (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) : unit =
     if Blade.Effects.Decisions.active () then
         let decl = (currentDeclCell ()).Value
@@ -289,9 +307,16 @@ let recordCodegenDecision (rule: string) (subject: string) (outcome: Blade.Effec
         let span =
             let s = IR.declSpanOf subject
             if s.StartLine > 0 then s else emittedDeclSpan decl
+        let localSubject =
+            match (localDecisionSubjectCell ()).Value with
+            | Some (emitted, owner, shown) when subject = "" || subject = emitted || subject = owner -> Some shown
+            | _ -> None
         Blade.Effects.Decisions.record
             { Rule = rule; Version = 1; Span = span
-              Subject = shownDeclName (if subject = "" then decl else subject)
+              Subject =
+                  (match localSubject with
+                   | Some s -> s
+                   | None -> shownDeclName (if subject = "" then decl else subject))
               Outcome = outcome; Evidence = evidence }
 
 /// Module-level expression warnings collector: exprToCpp is pure (returns a

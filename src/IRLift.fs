@@ -36,7 +36,7 @@ let isInlineForm (e: IRExpr) : bool =
     | IRDisplayJson _ | IRDisplayNum _ | IRDisplayStr _ | IRReduce _ | IRProdSum _ | IRZip _
     | IRAlign _ | IRStack _ | IRGram _ | IRReverse _ | IRShift _ | IRDiag _ | IRJoin _
     | IRSubset _ | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _ | IRNth
-    | IRZero _ | IRAddIdentity _ | IRUninit _ | IRReleasePools _ | IRRank _ | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _
+    | IRZero _ | IRUnseededSeed _ | IRUninit _ | IRReleasePools _ | IRRank _ | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _
     | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent
     | IRAssign _ | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ -> false
 
@@ -101,7 +101,7 @@ let isStatementShaped (e: IRExpr) : bool =
     | IRContains _ | IRDisplayEmit _ | IRDisplayJson _ | IRDisplayNum _ | IRDisplayStr _
     | IRReduce _ | IRReduceCompute _ | IRProdSum _ | IRZip _ | IRAlign _ | IRReverse _
     | IRShift _ | IRDiag _ | IRSubset _ | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _
-    | IRArity _ | IRNth | IRZero _ | IRAddIdentity _ | IRRank _ | IRPolyIndex _ | IRPolyTail _ | IRExtent _
+    | IRArity _ | IRNth | IRZero _ | IRUnseededSeed _ | IRRank _ | IRPolyIndex _ | IRPolyTail _ | IRExtent _
     | IRRaggedLookup _ | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _
     | IROrbitClass _ | IROpaqueExtent | IRAssign _ | IRForRange _ | IRConstraintCheck _
     | IRBreakIf _ -> false
@@ -149,7 +149,7 @@ let isDeferringForm (e: IRExpr) : bool =
     | IRZip _ | IRAlign _ | IRStack _ | IRTranspose _ | IRDecompact _ | IRGram _ | IRGramApply _
     | IRMatmul _ | IREigh _ | IRSolve _ | IRLu _ | IRLuSolve _ | IRArrayNegate _
     | IRArrayConjugate _ | IRReverse _ | IRShift _ | IRDiag _ | IRJoin _ | IRSubset _
-    | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRAddIdentity _ | IRUninit _ | IRReleasePools _ | IRRank _
+    | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUnseededSeed _ | IRUninit _ | IRReleasePools _ | IRRank _
     | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _
     | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent | IRAssign _
     | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ -> false
@@ -184,7 +184,7 @@ let isGroupTableForm (e: IRExpr) : bool =
     | IRAlign _ | IRStack _ | IRTranspose _ | IRDecompact _ | IRGram _ | IRGramApply _
     | IRMatmul _ | IREigh _ | IRSolve _ | IRLu _ | IRLuSolve _ | IRArrayNegate _
     | IRArrayConjugate _ | IRReverse _ | IRShift _ | IRDiag _ | IRJoin _ | IRSubset _
-    | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRAddIdentity _ | IRUninit _ | IRReleasePools _ | IRRank _
+    | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUnseededSeed _ | IRUninit _ | IRReleasePools _ | IRRank _
     | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _
     | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent | IRAssign _
     | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ -> false
@@ -227,7 +227,7 @@ let isArraysSlotAutoMaterialized (e: IRExpr) : bool =
     | IRZip _ | IRAlign _ | IRStack _ | IRTranspose _ | IRDecompact _ | IRGram _ | IRGramApply _
     | IRMatmul _ | IREigh _ | IRSolve _ | IRLu _ | IRLuSolve _ | IRArrayNegate _
     | IRArrayConjugate _ | IRReverse _ | IRShift _ | IRDiag _ | IRJoin _ | IRSubset _
-    | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRAddIdentity _ | IRUninit _ | IRReleasePools _ | IRRank _
+    | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUnseededSeed _ | IRUninit _ | IRReleasePools _ | IRRank _
     | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _
     | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent | IRAssign _
     | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ -> false
@@ -321,7 +321,7 @@ let internal isNestedLoopComputeArg (e: IRExpr) : bool =
     | IRReduceCompute _ | IRProdSum _ | IRZip _ | IRAlign _ | IRStack _ | IRTranspose _
     | IRDecompact _ | IREigh _ | IRLu _ | IRArrayNegate _ | IRArrayConjugate _ | IRReverse _
     | IRShift _ | IRDiag _ | IRJoin _ | IRSubset _ | IRRange _ | IRVirtualReverse _
-    | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRAddIdentity _ | IRUninit _ | IRReleasePools _ | IRRank _ | IRPolyIndex _ | IRPolyTail _
+    | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUnseededSeed _ | IRUninit _ | IRReleasePools _ | IRRank _ | IRPolyIndex _ | IRPolyTail _
     | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _
     | IROrbitClass _ | IROpaqueExtent | IRAssign _ | IRForRange _ | IRConstraintCheck _
     | IRBreakIf _ -> false
@@ -377,7 +377,7 @@ let internal isArrayValuedSelect (e: IRExpr) : bool =
     | IRTranspose _ | IRDecompact _ | IRGram _ | IRGramApply _ | IRMatmul _ | IREigh _
     | IRSolve _ | IRLu _ | IRLuSolve _ | IRArrayNegate _ | IRArrayConjugate _ | IRReverse _
     | IRShift _ | IRDiag _ | IRJoin _ | IRSubset _ | IRRange _ | IRVirtualReverse _
-    | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRAddIdentity _ | IRUninit _ | IRReleasePools _ | IRRank _ | IRPolyIndex _ | IRPolyTail _
+    | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUnseededSeed _ | IRUninit _ | IRReleasePools _ | IRRank _ | IRPolyIndex _ | IRPolyTail _
     | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _
     | IROrbitClass _ | IROpaqueExtent | IRAssign _ | IRForRange _ | IRConstraintCheck _
     | IRBreakIf _ -> false
@@ -417,7 +417,7 @@ let internal isNestedLoopFormArg (e: IRExpr) : bool =
     | IRDecompact _ | IRGram _ | IRGramApply _ | IRMatmul _ | IREigh _ | IRSolve _ | IRLu _
     | IRLuSolve _ | IRArrayNegate _ | IRArrayConjugate _ | IRReverse _ | IRShift _ | IRDiag _
     | IRJoin _ | IRSubset _ | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _
-    | IRNth | IRZero _ | IRAddIdentity _ | IRUninit _ | IRReleasePools _ | IRRank _ | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _
+    | IRNth | IRZero _ | IRUnseededSeed _ | IRUninit _ | IRReleasePools _ | IRRank _ | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _
     | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent
     | IRAssign _ | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ -> false
 
@@ -467,7 +467,7 @@ let internal isArrayFieldAccess (e: IRExpr) : bool =
     | IRTranspose _ | IRDecompact _ | IRGram _ | IRGramApply _ | IRMatmul _ | IREigh _
     | IRSolve _ | IRLu _ | IRLuSolve _ | IRArrayNegate _ | IRArrayConjugate _ | IRReverse _
     | IRShift _ | IRDiag _ | IRJoin _ | IRSubset _ | IRRange _ | IRVirtualReverse _
-    | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRAddIdentity _ | IRUninit _ | IRReleasePools _ | IRRank _ | IRPolyIndex _ | IRPolyTail _
+    | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUnseededSeed _ | IRUninit _ | IRReleasePools _ | IRRank _ | IRPolyIndex _ | IRPolyTail _
     | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _
     | IROrbitClass _ | IROpaqueExtent | IRAssign _ | IRForRange _ | IRConstraintCheck _
     | IRBreakIf _ -> false
@@ -691,7 +691,7 @@ let wrapLets (bindings: (IRId * IRType * IRExpr) list) (body: IRExpr) : IRExpr =
 let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
     match expr with
     // Leaves: nothing to do
-    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero _ | IRAddIdentity _ | IRUninit _ | IRReleasePools _
+    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero _ | IRUnseededSeed _ | IRUninit _ | IRReleasePools _
     | IRRange _ | IRVirtualReverse _ | IRArity _
     | IROpaqueExtent -> expr
 
@@ -1478,14 +1478,17 @@ let deferredAliasClasses (bindings: IRBinding list) (deferredIds: Set<int>) : Ma
         | IRVar (src, _) when deferredIds.Contains b.Id && deferredIds.Contains src && isArray b.Type ->
             parent.[b.Id] <- src
         | _ -> ()
-    let rec rootOf (fuel: int) (id: IRId) =
+    // To the chain's end, no depth cutoff (gap G59); a module binding's
+    // initializer names only earlier bindings, so the walk ends -- the visited
+    // set only guards it.
+    let rec rootOf (seen: Set<IRId>) (id: IRId) =
         match parent.TryGetValue id with
-        | true, p when fuel > 0 -> rootOf (fuel - 1) p
+        | true, p when not (seen.Contains p) -> rootOf (seen.Add id) p
         | _ -> id
     let members =
         bindings
         |> List.filter (fun b -> parent.ContainsKey b.Id)
-        |> List.map (fun b -> (rootOf 64 b.Id, b.Id))
+        |> List.map (fun b -> (rootOf Set.empty b.Id, b.Id))
         |> List.groupBy fst
         |> List.map (fun (r, xs) -> r :: (xs |> List.map snd))
     members
@@ -1532,19 +1535,38 @@ let bareDeferredMemberOf (dv: DeferredView) (e: IRExpr) : bool =
     | _ -> false
 
 /// A member naming a deferred TUPLE (through `|> compute` and deferred
-/// aliases, `let q = p`): its members.
+/// aliases, `let q = p`): its members. The alias chain is followed to its end
+/// with NO depth cutoff (gap G59: a cutoff of 16 links made the lowering
+/// pass's raw let chain answer "not a deferred tuple" where the C++ emitter's
+/// already-resolved view saw one, so the two judged one `if` differently). A
+/// chain that revisits a binder has no end and so no answer: it is REFUSED
+/// (BL6002) rather than answered "not deferred" -- unreachable through a let
+/// table (an initializer names only earlier binders, and a rebinding of a
+/// deferred binder is refused at lowering, BL4005), kept as the fail-closed
+/// backstop; the lowering pass re-spans it at the binding.
 let deferredTupleMembersOf (dv: DeferredView) (e: IRExpr) : IRExpr list option =
-    let rec go (fuel: int) (e: IRExpr) =
-        if fuel <= 0 then None
-        else
-            match stripComputes e with
-            | IRVar (id, _) when dv.IsDeferred id ->
-                (match dv.ValueOf id with
-                 | Some (IRTuple es) -> Some es
-                 | Some (IRVar _ as inner) -> go (fuel - 1) inner
-                 | _ -> None)
-            | _ -> None
-    go 16 e
+    let rec go (seen: Set<IRId>) (e: IRExpr) =
+        match stripComputes e with
+        | IRVar (id, _) when dv.IsDeferred id ->
+            if seen.Contains id then
+                raise (Blade.Diagnostics.BladeDiagnosticException
+                        (Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan
+                            "a deferred tuple whose alias chain is cyclic (a binder reached again through its own aliases): it has no provenance a lane can evaluate. Bind each tuple once (`let p = (a, b)`) and alias it without rebinding."))
+            // The binder's value NORMALIZED (Codex review of W4B-A, finding 3):
+            // a block-valued initializer `{ let n = ..; (m, m) }` is judged by
+            // its let chain's RESULT, as computeDeferredIds and the C++
+            // emitter (genLetChainBinding) already do -- so the lowering
+            // pass's raw let table and the emitter's resolved view agree.
+            let rec norm (v: IRExpr) =
+                match v with
+                | IRLet _ -> norm (snd (peelLetChain v))
+                | v -> v
+            (match dv.ValueOf id |> Option.map norm with
+             | Some (IRTuple es) -> Some es
+             | Some (IRVar _ as inner) -> go (seen.Add id) inner
+             | _ -> None)
+        | _ -> None
+    go Set.empty e
 
 /// Every element of a tuple value is a deferred computation: the whole tuple
 /// is a deferred tuple.
@@ -1561,6 +1583,63 @@ let rec memberNeedsOrderOf (dv: DeferredView) (e: IRExpr) : bool =
     match e with
     | IRTuple es -> es |> List.exists (memberNeedsOrderOf dv)
     | e -> (explicitComputeMemberOf dv e).IsSome || bareDeferredMemberOf dv e || (deferredTupleMembersOf dv e).IsSome
+
+/// A tuple member whose evaluation MAY FAIL (gap G62) -- THE predicate, shared
+/// by the C++ emitter (CodeGenBinding.memberMayFail, which delegates here) and
+/// the lowering refusal's forcing regions, so the two cannot disagree on which
+/// tuples the emitter evaluates member by member. Conservative in the direction
+/// that matters: only forms that CANNOT panic are cleared -- names, literals, a
+/// tuple / field projection or an extent of one, and `+ - * /` arithmetic,
+/// comparisons and logic over them (an INTEGER `/` or `%`, a possibly negative
+/// integer `^`, a float -> int cast count); everything else may fail.
+let memberMayFailOf (dv: DeferredView) (e: IRExpr) : bool =
+    let rec scalarElem (t: IRType) =
+        match t with
+        | IRTScalar et -> Some et
+        | IRTIdxTagged (inner, _) | IRTUnitAnnotated (inner, _) -> scalarElem inner
+        | _ -> None
+    let isIntTyped (x: IRExpr) =
+        match scalarElem (dv.TypeOfExpr x) with
+        | Some et -> et = ETInt64 || et = ETInt32
+        | None -> false
+    let isFloatTyped (x: IRExpr) =
+        match scalarElem (dv.TypeOfExpr x) with
+        | Some et -> et = ETFloat64 || et = ETFloat32
+        | None -> false
+    let rec mayFail (x: IRExpr) =
+        match x with
+        | IRLit _ | IRParam _ -> false
+        | IRVar (id, _) -> dv.IsDeferred id
+        | IRBinOp (_, op, a, b, _) ->
+            (match op with
+             | IRDiv | IRMod -> isIntTyped a || isIntTyped b
+             | IRCaret ->
+                 isIntTyped b && (match b with IRLit (IRLitInt n) -> n < 0L | _ -> true)
+             | _ -> false)
+            || mayFail a || mayFail b
+        | IRUnaryOp (IRCast (et, _), a) -> ((et = ETInt64 || et = ETInt32) && isFloatTyped a) || mayFail a
+        | IRUnaryOp (_, a) -> mayFail a
+        | IRTupleProj (a, _, _) | IRFieldAccess (a, _) | IRExtent (a, _) -> mayFail a
+        | IRTuple es -> es |> List.exists mayFail
+        | IRIf (c, t, f) -> mayFail c || mayFail t || mayFail f
+        | _ -> true
+    match stripComputes e with
+    | IRVar _ | IRParam _ | IRLit _ -> false
+    | e -> mayFail e
+
+/// The leaves of a (possibly nested) tuple value, left to right.
+let rec tupleLeavesOf (value: IRExpr) : IRExpr list =
+    match value with
+    | IRTuple es -> es |> List.collect tupleLeavesOf
+    | e -> [ e ]
+
+/// THE member-ordered TUPLE judgment: the C++ emitter evaluates a binding's
+/// tuple value member by member (genMemberOrderedTupleBinding) iff some leaf
+/// is a compute / bare deferred / deferred-tuple member, or two or more leaves
+/// may fail (G62). Shared with Lowering's forcing regions (gap G77).
+let tupleNeedsMemberOrderOf (dv: DeferredView) (value: IRExpr) : bool =
+    memberNeedsOrderOf dv value
+    || (tupleLeavesOf value |> List.filter (memberMayFailOf dv) |> List.length) >= 2
 
 /// THE member-ordered `if` judgment (gap G59): an arm, through nested `if`s,
 /// is a non-deferred tuple holding such a member, or is itself an explicit

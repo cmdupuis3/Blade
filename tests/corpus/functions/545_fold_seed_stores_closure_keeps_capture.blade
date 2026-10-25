@@ -1,0 +1,27 @@
+// TEST: Memfree Fold Seed Stores Closure Keeps Capture (G54 control)
+// A scalar fold let's SEED is a call that stores a closure over the local `y`
+// (`stash(out, lambda(k) -> reduce(y, (+)) * k)`). The let's map kernel is a
+// proved-synchronous slot (the base let whitelist: the let's whole value is
+// the fold), but the seed is not walked for slots: the stored closure is a
+// call argument, its captures are seeded, and `y` survives `kernel` for the
+// closure invoked after it returned. Values for c = 2: y = [0, 2, 4, 6, 8],
+// r = 0 + sum(y * y) = 120, v = reduce(y, (+)) * 3 = 60.
+type I = Idx<5>
+type One = Idx<1>
+
+function stash(out: mut Array<(Float64 -> Float64) like One>, f: Float64 -> Float64) -> Float64 = {
+    out(0) = f
+    0.0
+}
+
+function kernel(out: mut Array<(Float64 -> Float64) like One>, c: Float64) -> Float64 = {
+    let y = Float64(0..5) * c |> compute
+    let s = reduce(method_for(range<I>) <@> lambda(a) -> y(a) * y(a), (+), stash(out, lambda(k: Float64) -> reduce(y, (+)) * k))
+    s
+}
+
+let mut out: Array<(Float64 -> Float64) like One> = [lambda(k: Float64) -> k]
+let r = kernel(out, 2.0)
+let v = out(0)(3.0)
+// EXPECT: r = 120.0
+// EXPECT: v = 60.0

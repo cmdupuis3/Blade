@@ -1,0 +1,19 @@
+// TEST: Zero-Level Compact Application Competing Deferred Operands (G67) (aborts)
+// Two DEFERRED operands that both fail when forced -- `da` divides by zero
+// (BL8013), `db` casts NaN to Int64 (BL8014) -- passed whole to a
+// compact-returning kernel that reads only the first. The zero-level
+// application is the call `g2(da, db)`: the operands are forced in order, so
+// the FIRST operand's BL8013 fires, as for the direct call, in every lane
+// (`blade test cell-epilogue`, G67 zero-level compact call twins, compete).
+type P = Idx<3>
+type S = Idx<4>
+let x0 = Float64(0..3) |> compute
+let zz = extents(x0) - 3
+
+function g2(ja: Array<Float64 like P, S>, jb: Array<Float64 like P, S>) = method_for(ja, ja) <@> lambda(ra, rb) where comm(ra, rb) -> prodsum(ra, rb)
+
+let da = method_for(range<P, S>) <@> lambda(a, s) -> Float64(a) * Float64(7 / zz)
+let db = method_for(range<P, S>) <@> lambda(a, s) -> Float64(Int64(floor(Float64(a) / 0.0 * 0.0)))
+let h = object_for(g2) <@> (da, db)
+let after = h((0 : P), (1 : P))
+// ABORT: BL8013

@@ -810,6 +810,15 @@ and genScalarExprBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IR
     // right into temporaries before the call.
     | IRApp (_, args, _) when args |> List.exists (fun a -> (explicitComputeTupleMember ctx a).IsSome) ->
         genOrderedCallBinding ctx binding builder
+    // An ORDINARY call two or more of whose arguments may fail (gap G79, the
+    // call twin of G62's tuple rule): C++17 leaves argument evaluation order
+    // unspecified (g++ evaluates right to left), so the LAST failing argument
+    // would report first where the interpreter and the llvm lane report the
+    // first. The same ordered path binds every evaluating argument at its own
+    // position. A call with at most one argument that may fail keeps its
+    // single-expression emission, byte for byte.
+    | IRApp (_, args, _) when callNeedsArgumentOrder ctx args ->
+        genOrderedCallBinding ctx binding builder
     | _ ->
     let ind = indentStr ctx
     let name = bindingCppName binding
@@ -919,34 +928,13 @@ and deferredTupleMembers (ctx: CodeGenContext) (e: IRExpr) : IRExpr list option 
 /// only keep `std::make_tuple`'s unspecified order (the pre-W4-1 emission);
 /// one wrongly flagged costs a temporary.
 and memberMayFail (ctx: CodeGenContext) (e: IRExpr) : bool =
-    let isIntTyped (x: IRExpr) =
-        match Blade.IRTotality.scalarElem (inferExprType x) with
-        | Some et -> Blade.IRTotality.isInt et
-        | None -> false
-    let isFloatTyped (x: IRExpr) =
-        match Blade.IRTotality.scalarElem (inferExprType x) with
-        | Some et -> Blade.IRTotality.isFloat et
-        | None -> false
-    let rec mayFail (x: IRExpr) =
-        match x with
-        | IRLit _ | IRParam _ -> false
-        | IRVar (id, _) -> Map.containsKey id ctx.DeferredComputations
-        | IRBinOp (_, op, a, b, _) ->
-            (match op with
-             | IRDiv | IRMod -> isIntTyped a || isIntTyped b
-             | IRCaret ->
-                 isIntTyped b && (match b with IRLit (IRLitInt n) -> n < 0L | _ -> true)
-             | _ -> false)
-            || mayFail a || mayFail b
-        | IRUnaryOp (IRCast (et, _), a) -> (Blade.IRTotality.isInt et && isFloatTyped a) || mayFail a
-        | IRUnaryOp (_, a) -> mayFail a
-        | IRTupleProj (a, _, _) | IRFieldAccess (a, _) | IRExtent (a, _) -> mayFail a
-        | IRTuple es -> es |> List.exists mayFail
-        | IRIf (c, t, f) -> mayFail c || mayFail t || mayFail f
-        | _ -> true
-    match stripComputeWrappers e with
-    | IRVar _ | IRParam _ | IRLit _ -> false
-    | e -> mayFail e
+    // ONE predicate, shared with Lowering's G77 forcing regions
+    IRLift.memberMayFailOf (deferredViewOf ctx) e
+
+/// Two or more arguments of a call may fail (gap G79): its arguments must be
+/// evaluated left to right, each at its own position (genOrderedCallBinding).
+and callNeedsArgumentOrder (ctx: CodeGenContext) (args: IRExpr list) : bool =
+    (args |> List.filter (memberMayFail ctx) |> List.length) >= 2
 
 /// The leaves of a (possibly nested) tuple value, left to right.
 and tupleLeaves (value: IRExpr) : IRExpr list =
@@ -963,8 +951,7 @@ and tupleLeaves (value: IRExpr) : IRExpr list =
 /// first. An ordinary tuple (at most one member that can fail -- every
 /// literal / name tuple among them) keeps its single `std::make_tuple` line.
 and tupleNeedsMemberOrder (ctx: CodeGenContext) (value: IRExpr) : bool =
-    memberNeedsOrder ctx value
-    || (tupleLeaves value |> List.filter (memberMayFail ctx) |> List.length) >= 2
+    IRLift.tupleNeedsMemberOrderOf (deferredViewOf ctx) value
 
 /// The structural half of tupleNeedsMemberOrder: some leaf is an explicit
 /// compute of an unforced array, a bare one (G61), or a named deferred tuple

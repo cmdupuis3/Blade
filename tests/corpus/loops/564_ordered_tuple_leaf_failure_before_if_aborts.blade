@@ -1,0 +1,15 @@
+// TEST: Ordered Tuple Leaf Failure Before If Force (aborts)
+// ----------------------------------------------------------------------------
+// Gap G77, the fifth Codex look of W4B-A, finding 1: a tuple value both of
+// whose leaves may fail is evaluated MEMBER BY MEMBER (each leaf its own
+// forcing region), so the first leaf's checked cast fails (BL8006) before the
+// second leaf's if forces g -- admitted, BL8006 first in every lane (g cannot
+// fail on this input).
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let z: Array<Int64 like Row> = [2]
+let g = method_for(z) <@> lambda(v) -> 10 / (v + 1)
+let r = (z((z(0) : Row)), (if g(0) > 0 then g(0) else 0))
+// ABORT: BL8006
+// ABORT: outside Row
+// ABORT: .blade:11

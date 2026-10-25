@@ -1,0 +1,12 @@
+// TEST: A source `-zero` keeps its sign, real, concrete and generic (LLVM-routable)
+// basic/526's REAL cases, split out without the Complex128 bindings the LLVM
+// lane refuses, so `blade test llvm basic` compares the two compiled lanes on
+// them: `-zero` is the negation of the typed zero wherever the program writes
+// it -- never the unseeded-fold mark (gap G74) -- through a concrete binding
+// and a generic instance alike (the reciprocals pin the signs).
+let f: Float64 = -zero
+let fr = 1.0 / f
+function nzero(x: T) -> T = -zero
+let hr = 1.0 / nzero(2.0)
+// EXPECT: fr = "-inf"
+// EXPECT: hr = "-inf"

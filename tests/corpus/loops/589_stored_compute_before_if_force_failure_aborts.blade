@@ -1,0 +1,17 @@
+// TEST: Stored Compute Before If Force Failure (aborts)
+// ----------------------------------------------------------------------------
+// Gap G77, the eleventh Codex look of W4B-A: a block whose first statement
+// computes a copy of STORED data (`z |> compute` -- no event, it cannot fail)
+// and whose final `if` reads g first in its condition; the arm's read of g is
+// admitted, and g's kernel divides by zero at that condition (BL8013 at the
+// kernel's line), first, in every lane.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let z: Array<Int64 like Row> = [0]
+let g = method_for(z) <@> lambda(v) -> 1 / v
+let r = {
+    let copy = z |> compute
+    if g(0) > 0 then g(0) else 0
+}
+// ABORT: BL8013
+// ABORT: .blade:10

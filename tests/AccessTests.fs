@@ -485,12 +485,113 @@ let private zeroFillCase (c: ZeroFillCase) : bool option list =
             [ cppRun; llRun ])
     formResult :: valueRuns
 
+// ---------------------------------------------------------------------------
+// Gap G78: the LLVM lane's pool ownership across a YOUNGER loop scope.
+//
+// A pool a function allocates -- a combinator-built local, its reverse-mode
+// tape and cotangent -- is read by loop scopes opened after it (the adjoint
+// sweep's loops, a `let rec`'s trips). Such a read used to null the pool's
+// tracking slot in EVERY open scope, the owning function scope included, so
+// the function's exit `blade_free` loaded null and the pool leaked once per
+// call (haloadjoint's `loss__grad`: the tape d and its cotangent at full
+// size). Now only the younger scopes give the pool up; the owner keeps it, or
+// receives a pool a younger scope allocated through a fresh slot of its own
+// (`; G78: handed`). These pins read the emitted .ll of each named function:
+// every pool it allocates is FREED through a slot that holds it, and no such
+// slot is nulled after the allocation except as an explicit hand-off. No
+// toolchain is needed (emission only); the values are the corpus's.
+// ---------------------------------------------------------------------------
+
+/// The body of every `define` whose symbol starts with `@<prefix>` (the
+/// lane's `@bl_<name>_<id>`), each as its line array.
+let private llvmFunctionBodies (ll: string) (prefix: string) : string[] list =
+    let lines = ll.Replace("\r\n", "\n").Split('\n')
+    [ for i in 0 .. lines.Length - 1 do
+        if lines.[i].StartsWith "define " && lines.[i].Contains("@" + prefix) then
+            let stop = (lines |> Array.skip i |> Array.findIndex (fun l -> l = "}")) + i
+            yield lines.[i .. stop] ]
+
+/// Ok (pools checked) when every pool the body allocates is freed through a
+/// slot holding it and no slot holding it is nulled after its allocation
+/// except where the next line hands it to another (freed) slot.
+let private llvmPoolsFreed (body: string[]) : Result<int, string> =
+    let rx (p: string) (l: string) = System.Text.RegularExpressions.Regex.Match(l, p)
+    let allocs =
+        body |> Array.mapi (fun i l -> (i, rx @"^\s*(%r\d+) = call ptr @blade_alloc_cells" l))
+        |> Array.filter (fun (_, m) -> m.Success) |> Array.map (fun (i, m) -> (i, m.Groups.[1].Value))
+    let freedSlot (slot: string) =
+        body |> Array.mapi (fun i l -> (i, rx (@"^\s*(%r\d+) = load ptr, ptr " + System.Text.RegularExpressions.Regex.Escape slot + "$") l))
+        |> Array.exists (fun (i, m) ->
+            m.Success && i + 1 < body.Length && body.[i + 1].Trim() = $"call void @blade_free(ptr {m.Groups.[1].Value})")
+    let check (at: int, pool: string) : string option =
+        let after = body.[at + 1 ..]
+        let slots =
+            after |> Array.choose (fun l ->
+                let m = rx (@"^\s*store ptr " + System.Text.RegularExpressions.Regex.Escape pool + @", ptr (%r\d+)") l
+                if m.Success then Some m.Groups.[1].Value else None)
+            |> Array.distinct
+        if slots.Length = 0 then Some $"{pool} is never stored to a tracking slot"
+        else
+            let nulledBad =
+                slots |> Array.tryPick (fun s ->
+                    after |> Array.mapi (fun j l -> (j, l))
+                    |> Array.tryPick (fun (j, l) ->
+                        if l.Trim() = $"store ptr null, ptr {s}" then
+                            let handed = j + 1 < after.Length && after.[j + 1].Contains $"store ptr {pool}, ptr " && after.[j + 1].Contains "G78: handed"
+                            if handed then None else Some $"the slot {s} of {pool} is nulled after its allocation (the pool escapes its owner)"
+                        else None))
+            match nulledBad with
+            | Some why -> Some why
+            | None when slots |> Array.exists freedSlot -> None
+            | None -> Some $"{pool} is never freed through its slot"
+    match allocs |> Array.tryPick check with
+    | Some why -> Error why
+    | None -> Ok allocs.Length
+
+let private g78Case (name: string) (src: Result<string, string>) (fns: string list) : bool =
+    match src with
+    | Error e -> resultLine Fail name e; false
+    | Ok src ->
+    match (try lower src with ex -> Error ex.Message) with
+    | Error e -> resultLine Fail name $"lower: {e}"; false
+    | Ok ir ->
+    match (try EmitLlvm.tryEmitProgramNamed name ir with ex -> Error ("raised: " + ex.Message)) with
+    | Error why -> resultLine Fail name $"the LLVM lane refused the program (it must take it): {why}"; false
+    | Ok ll ->
+        let results =
+            fns |> List.map (fun fn ->
+                match llvmFunctionBodies ll fn with
+                | [] -> fn, Error "no such function in the emitted .ll"
+                | bodies ->
+                    bodies |> List.fold (fun acc b ->
+                        match acc, llvmPoolsFreed b with
+                        | Error e, _ | _, Error e -> Error e
+                        | Ok n, Ok m -> Ok (n + m)) (Ok 0)
+                    |> fun r -> fn, r)
+        match results |> List.tryPick (fun (fn, r) -> match r with Error e -> Some $"@{fn}: {e}" | Ok 0 -> Some $"@{fn}: no pool allocated (the witness lost its shape)" | Ok _ -> None) with
+        | Some why -> resultLine Fail name why; false
+        | None ->
+            let counts = results |> List.map (fun (fn, r) -> match r with Ok n -> $"@{fn} {n}" | Error _ -> "") |> String.concat ", "
+            resultLine Pass name $"every pool freed by its owning scope, no escape-by-null ({counts} pools)"
+            true
+
+let private g78Pins () : bool list =
+    // read relative to the CURRENT DIRECTORY (like corpusSource): run the
+    // block from the repo root, or from a directory that links `bench`
+    let benchFile = Path.Combine("bench", "kernels", "haloadjoint", "haloadjoint.blade")
+    let bench = if File.Exists benchFile then Ok (File.ReadAllText benchFile) else Error $"missing {benchFile} (run from the repo root)"
+    [ g78Case "g78_llvm_frees_halo_grad_linear" (corpusSource "030_halo_stencil_grad_linear.blade") [ "bl_f__grad" ]
+      g78Case "g78_llvm_frees_grad_and_let_rec_reader" (corpusSource "044_grad_combinator_local_read_by_loop_scope.blade") [ "bl_f__grad"; "bl_g_" ]
+      // the saved full-size shape (n = 1,000,003): the tape d and its cotangent
+      g78Case "g78_llvm_frees_haloadjoint_full_size" bench [ "bl_loss__grad" ] ]
+
 let runAccessTests () =
     printHeader "Blade-DSL: Halo Access Tests"
     let pins =
         [ recordPins ()
           routeEmission ()
           computedOffsetDeclines () ]
+        @ g78Pins ()
     let zeroFill = zeroFillCases |> List.collect zeroFillCase
     let diffs =
         if not Build.capabilities.Value.HasGpp then

@@ -1,0 +1,17 @@
+// TEST: An imported map kernel's dead writing arm keeps its fold licensed, its live write makes it strict
+// MODULE: Main
+// `total` is a LICENSED zero sum (its sign is the licence's: a numeric pin);
+// `strict` is the writing map's exact chain (a quoted pin carries the sign).
+module Main
+import Lib
+from Lib import mapk, mapw
+
+let v = [-0.0, -0.0, -0.0]
+let total = reduce(method_for(v) <@> mapk, (+))
+// EXPECT: total = 0.0
+let before = Lib.hits
+// EXPECT: before = 0
+let strict = reduce(method_for(v) <@> mapw, (+))
+// EXPECT: strict = "-0.0"
+let after = Lib.hits
+// EXPECT: after = 3

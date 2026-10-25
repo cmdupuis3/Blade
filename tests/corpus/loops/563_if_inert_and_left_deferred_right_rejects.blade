@@ -1,0 +1,16 @@
+// TEST: If Inert And Left Deferred Right (rejects)
+// ----------------------------------------------------------------------------
+// Gap G77, the third Codex look of W4B-A, finding 2: the left operand of `&&`
+// is an INERT name (c, false here), so the right operand -- where g is read --
+// runs only conditionally: the interpreter skipped it, the C++ lane forced g
+// before the condition (BL8013). A short-circuit operator grants a first force
+// only through its left side; refused at lowering in every lane (BL6002).
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let z: Array<Int64 like Row> = [0]
+let g = method_for(z) <@> lambda(v) -> 1 / v
+let c = z(0) > 0
+let r = if (c && g(0) > 0) then g(0) else 0
+// ERROR: BL6002 @ 12:1
+// ERROR-CONTAINS: whose arm forces the deferred computation `g`
+// REJECT-AT: lower

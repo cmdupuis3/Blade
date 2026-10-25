@@ -886,8 +886,9 @@ dynamic-extent operands keep the runtime non-emptiness guard (no identity, no
 defined empty fold). That rule is the STORED spelling's: an unseeded fused
 fold over a DEFERRED computation (`reduce(method_for(v) <@> k, (+))`) is
 seeded by the implementation and its empty fold is that seed -- `+0.0` on a
-licensed route, the exact identity `-0.0` on a strict one (`BLADE_FP_REPRO=1`
-or a `where repro` body; gap G74, formalism §6.4); corpus `sql-reduce/031`
+licensed route, the exact identity `-0.0` on a strict one (`BLADE_FP_REPRO=1`,
+a `where repro` body, a deferred map body that may write; gap G74, formalism
+§6.4); corpus `sql-reduce/031`
 (stored, BL8003 before a later failure), `032` / `033` (deferred). In the PARTIAL form the seed applies **per folded group**,
 not once globally: `reduce(grid, (+), 100.0)` adds 100 to every row, while
 `reduce(grid, (+), 100.0, axes = 2)` adds it once to the grand total.

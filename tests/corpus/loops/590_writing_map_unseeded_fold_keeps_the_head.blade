@@ -1,0 +1,21 @@
+// TEST: A writing map's unseeded fold is the left fold of its cells in every build
+// Gap G74, the strict-by-construction route (the second Codex look of W4-3,
+// NEW 1). The map's kernel writes a captured counter, so its fold keeps the
+// SERIAL chain in every build and lane (gap G41; corpus 496) -- it carries no
+// effective reorder licence even in the default build. Its unseeded seed is
+// therefore the EXACT identity -0.0 there too (Lowering's
+// resolveUnseededSeedsModule asks the shared write analysis), and nine -0.0
+// terms fold to -0.0 -- the base +0.0 seed made the default build's chain
+// +0.0 -- while every write happens, in order. QUOTED pins: a numeric -0.0
+// pin accepts either zero; the reciprocal pins the sign.
+type Ix = Idx<9>
+let mut G = [0.0]
+let total = reduce(method_for(range<Ix>) <@> lambda(i) -> {
+    G(0) = G(0) + 1.0
+    let r = -0.0 * G(0)
+    r
+}, (+))
+let inv = 1.0 / total
+// EXPECT: total = "-0.0"
+// EXPECT: inv = "-inf"
+// EXPECT: G = [9.0]

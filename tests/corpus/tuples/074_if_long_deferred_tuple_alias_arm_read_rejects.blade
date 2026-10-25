@@ -1,0 +1,39 @@
+// TEST: If Long Deferred Tuple Alias Arm Read (rejects)
+// ----------------------------------------------------------------------------
+// Gap G59: the arms hold a deferred tuple through a 20-LINK alias chain
+// (`p20 = p19`, ..., `p1 = p0`). The shared member-order predicate gave up
+// after 16 links, so the lowering pass's raw let chain did not see the
+// member-ordered `if` (and skipped the arm-read audit) where the C++
+// emitter's resolved view did. The chain is now followed to its end, so the
+// else arm's positional read of h is refused at lowering in every lane.
+// ----------------------------------------------------------------------------
+type Row = Idx<3>
+let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
+let m = method_for(x) <@> lambda(v) -> v * 2.0
+let h = method_for(x) <@> lambda(v) -> v + 5.0
+let p0 = (m, m)
+let p1 = p0
+let p2 = p1
+let p3 = p2
+let p4 = p3
+let p5 = p4
+let p6 = p5
+let p7 = p6
+let p8 = p7
+let p9 = p8
+let p10 = p9
+let p11 = p10
+let p12 = p11
+let p13 = p12
+let p14 = p13
+let p15 = p14
+let p16 = p15
+let p17 = p16
+let p18 = p17
+let p19 = p18
+let p20 = p19
+let c = reduce(x, (+)) > 5.0
+let t = if c then (p20, 1.0) else (p20, h(0))
+// ERROR: BL6002 @ 35:1
+// ERROR-CONTAINS: whose arm reads the deferred computation `h`
+// REJECT-AT: lower

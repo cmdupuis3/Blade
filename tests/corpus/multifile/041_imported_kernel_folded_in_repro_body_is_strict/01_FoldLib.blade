@@ -1,0 +1,8 @@
+// TEST: An imported named kernel folded in a repro body takes no licensed form
+// MODULE: FoldLib
+// Gap G80. `add` is declared in THIS module; Main folds with it inside `where
+// repro` functions, so those fold uses run its repro TWIN, placed here, in
+// the module that defines it (a copy recorded in DerivedFuncOrigins).
+module FoldLib
+
+function add(a: Float64, b: Float64) where comm(a, b) -> Float64 = a + b

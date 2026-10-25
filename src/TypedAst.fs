@@ -610,13 +610,18 @@ let mkLit lit ty = mkTyped (TExprLit lit) ty
 /// checker still synthesizes the fold's base seed (the section's `+0.0` /
 /// `0` / `zero`, exactly as before) because the fused terminal needs one, and
 /// marks it with THIS span, which no source expression can carry (line 0, a
-/// file name no path has). Lowering (`lowerUnseededSeed`) reads the mark and
-/// decides by ROUTE: on a STRICT route -- `BLADE_FP_REPRO=1`, or inside a
-/// `where repro` function -- the seed becomes the EXACT identity (`-0.0` for
-/// a real float, `(-0.0, -0.0)` complex; formalism 2.4's identity insertion),
-/// so the seeded chain is the head-peeled one bit for bit; on every other
-/// route the base seed is lowered unchanged (a licensed fold's signed zero is
-/// the licence's, G40). The mark is never a value: nothing but Lowering reads it.
+/// file name no path has). Lowering (`lowerUnseededSeed`) turns the mark into
+/// the IR node `IRUnseededSeed`, which keeps the provenance until
+/// `resolveUnseededSeedsModule` (after monomorphization, before the optimizer)
+/// knows the fold's EFFECTIVE route: on an obligatorily serial one --
+/// `BLADE_FP_REPRO=1`, a `where repro` body, a repro-vetoed kernel, a deferred
+/// map body that may WRITE -- the seed becomes the EXACT identity (`-0.0` for a
+/// real float, `(-0.0, -0.0)` complex; formalism 2.4's identity insertion), so
+/// the seeded chain is the head-peeled one bit for bit; on a licensed route the
+/// base seed is kept unchanged (a licensed fold's signed zero is the
+/// licence's, G40). The mark is never a value: nothing but Lowering reads it.
+/// (The rank >= 2 full fold's accumulator loop is serial on every route and
+/// takes the identity at the checker directly; it carries no mark.)
 let unseededSeedSpan : Span =
     { StartLine = 0; StartCol = -74; EndLine = 0; EndCol = -74; File = Some "<unseeded fold seed>" }
 

@@ -877,9 +877,12 @@ let runOrbitScatterTests () : BlockResult =
     // `lic`, and no LLVM function but main carries `reassoc`. (2) the LICENSED
     // route keeps the BASE seed byte for byte: the same unseeded spellings at
     // top level -- a deferred fold, a join, a row walk over a SymIdx pool, a
-    // cell-epilogue consumer, a rank-2 full fold -- emit no `-0.0` in the
-    // default build (C++ text; LLVM: no 0x8000000000000000 constant), and do
-    // under BLADE_FP_REPRO=1. (3) the EMPTY deferred fold is its identity: -0.0
+    // cell-epilogue consumer -- emit no `-0.0` in the default build (C++ text;
+    // LLVM: no 0x8000000000000000 constant), and do under BLADE_FP_REPRO=1 --
+    // a presence / absence check of the identity constant, NOT base-vs-head
+    // byte equality (that is `bench/harness/emission-sweep.ps1`). The rank-2
+    // full fold left this list: its accumulator loop is serial on every
+    // route, so it takes the identity in every build (leg 4e). (3) the EMPTY deferred fold is its identity: -0.0
     // under REPRO, the licensed base +0.0 in the default build (formalism 6.4;
     // the STORED spelling raises BL8003 -- corpus sql-reduce/031).
     let routeLeg () =
@@ -985,11 +988,10 @@ let runOrbitScatterTests () : BlockResult =
             + "let walk = reduce(method_for(range<V>) <@> lambda(i) -> reduce(method_for(range<V>) <@> lambda(j) -> g(i, j) * g(i, j), (+)), (+))\n"
             + "let y2 = method_for(zip(u, w)) <@> lambda(p, q) -> 2.0 * p + q |> compute\n"
             + "let ep = reduce(method_for(y2) <@> lambda(q) -> q * q, (+))\n"
-            + "let full = reduce(m, (+), axes = 2)\n"
-        use _pl = pinEnv "BLADE_PRINT" "d,ja,jb,walk,ep,full"
+        use _pl = pinEnv "BLADE_PRINT" "d,ja,jb,walk,ep"
         for (lane, repro) in [ ("cpp", false); ("llvm", false); ("cpp", true); ("llvm", true) ] do
             let lname = if lane = "cpp" then "C++" else "LLVM"
-            let name = $"""G74 route, {lname} {(if repro then "REPRO" else "default (licensed)")}: the unseeded seeds are {(if repro then "the identity -0.0" else "the BASE +0.0 (no -0.0 in the emission)")} -- deferred fold, join, row walk, cell epilogue, rank-2 full fold"""
+            let name = $"""G74 route, {lname} {(if repro then "REPRO" else "default (licensed)")}: the unseeded seeds are {(if repro then "the identity -0.0" else "the BASE +0.0 (no -0.0 in the emission)")} -- deferred fold, join, row walk, cell epilogue"""
             if lane = "llvm" && not llvmOn then skip name "no clang (BLADE_LLVM_CLANG)"
             else
             use _rp = pinEnv "BLADE_FP_REPRO" (if repro then "1" else null)
@@ -1030,6 +1032,217 @@ let runOrbitScatterTests () : BlockResult =
             match Map.tryFind "s" (bitsOf out) with
             | Some b when b = wantBits -> pass name $"s = #{b}"
             | other -> fail name $"""s = #{(match other with Some b -> b | None -> "<missing>")}, wanted #{wantBits}"""
+        // (4) THE EFFECTIVE ROUTE, witnessed in every lane (W4B-D; the second
+        // Codex look of W4-3, NEW 1 / NEW 2 / scope): one program per case,
+        // built C++ and LLVM and run through the interpreter, in the default
+        // build (REPRO unset) and/or under REPRO; raw bits per Float64 binding
+        // in the compiled lanes, decimal text in the interpreter.
+        let stripBitsOf (s: string) = Text.RegularExpressions.Regex.Replace(s, @" #[0-9a-f]{16}", "")
+        let threeLane (label: string) (src: string) (names: string list) (reproB: bool)
+                      (wantBits: (string * string) list) (routeWhy: string -> string -> string option) =
+            use _rp3 = pinEnv "BLADE_FP_REPRO" (if reproB then "1" else null)
+            use _pp3 = pinEnv "BLADE_PRINT" (String.concat "," names)
+            let build = if reproB then "REPRO" else "default build"
+            for lane in [ "cpp"; "llvm" ] do
+                let lname = if lane = "cpp" then "C++" else "LLVM"
+                let name = $"G74 route, {label} ({lname}, {build})"
+                if lane = "llvm" && not llvmOn then skip name "no clang (BLADE_LLVM_CLANG)"
+                else
+                n <- n + 1
+                match buildSrc src lane null null $"o3l_{n}" with
+                | Error e when lane = "llvm" && e.Contains "refused" -> skip name ("the LLVM lane refuses the program: " + e)
+                | Error e -> fail name e
+                | Ok (exe, text) ->
+                match routeWhy lane text with
+                | Some why -> fail name ("route: " + why)
+                | None ->
+                match runAt exe "8" None with
+                | Error e -> fail name ("run: " + e)
+                | Ok (out, _) ->
+                    let bits = bitsOf out
+                    match wantBits |> List.filter (fun (k, b) -> Map.tryFind k bits <> Some b) with
+                    | [] -> pass name (String.concat ", " (wantBits |> List.map (fun (k, b) -> $"{k} #{b}")))
+                    | (k, b) :: _ -> fail name $"""{k} #{(match Map.tryFind k bits with Some x -> x | None -> "<missing>")}, wanted #{b}"""
+            let iname = $"G74 route, {label} (interpreter, {build}-lowered)"
+            match (try lower src with ex -> Error ex.Message) with
+            | Error e -> fail iname ("lower: " + e)
+            | Ok ir ->
+                match (try Ok (Blade.Interp.Run.runProgram ir "o3l_interp" Blade.Interp.Value.defaultLimits) with ex -> Error ex.Message) with
+                | Error e -> fail iname ("interpreter raised: " + e)
+                | Ok res when res.ExitCode <> 0 -> fail iname ($"interpreter exit {res.ExitCode}: {res.Stderr.Trim()}")
+                | Ok res ->
+                    let ls = linesOfOut res.Stdout |> Map.map (fun _ v -> stripBitsOf v)
+                    let decimalOf (b: string) =
+                        match b with
+                        | "8000000000000000" -> "-0.0"
+                        | "0000000000000000" -> "0.0"
+                        | "fff0000000000000" -> "-inf"
+                        | "3ff0000000000000" -> "1.0"
+                        | "4000000000000000" -> "2.0"
+                        | "4010000000000000" -> "4.0"
+                        | "4022000000000000" -> "9.0"
+                        | other -> "#" + other
+                    let want = wantBits |> List.map (fun (k, b) -> (k, decimalOf b))
+                    match want |> List.filter (fun (k, v) -> Map.tryFind k ls <> Some v) with
+                    | [] -> pass iname (String.concat ", " (want |> List.map (fun (k, v) -> $"{k} = {v}")))
+                    | (k, v) :: _ -> fail iname $"""{k} = {(match Map.tryFind k ls with Some x -> x | None -> "<missing>")}, wanted {v}"""
+        let noRoute = fun (_: string) (_: string) -> (None: string option)
+        // (4a) a WRITING map (G74, NEW 1): the kernel writes a captured counter,
+        // so its fold keeps the SERIAL chain in every build and lane (gap G41,
+        // corpus loops/496) -- no effective reorder licence even in the default
+        // build -- and its unseeded seed is the exact identity there too: nine
+        // -0.0 terms fold to -0.0 in the DEFAULT build as under REPRO (the base
+        // +0.0 seed gave +0.0, base 94487a90), and all nine writes happen.
+        let wmSrc =
+            "type Ix = Idx<9>\nlet mut G = [0.0]\n"
+            + "let total = reduce(method_for(range<Ix>) <@> lambda(i) -> {\n    G(0) = G(0) + 1.0\n    let r = -0.0 * G(0)\n    r\n}, (+))\n"
+            + "let writes = G(0)\n"
+        for reproB in [ false; true ] do
+            threeLane "writing map, all -0.0 terms" wmSrc [ "total"; "writes" ] reproB
+                [ ("total", "8000000000000000"); ("writes", "4022000000000000") ] noRoute
+        // (4b) G80: a NAMED fold kernel declared OUTSIDE a repro body, folded
+        // INSIDE it -- stored, deferred and joined -- declines reordering there:
+        // the cancellation row [1e16, 1, -1e16, 1, 0, 0, 0, 0, 1] is exactly
+        // 2.0 (the ascending chain; the C++ K-lane tree gave 1.0 at base
+        // 94487a90), while the same kernel's top-level use `lics` stays
+        // licensed. C++: the fold-form records of `stored` / `deferred` name the
+        // repro demand, the join is declined for an unlicensed leg, and `lics`
+        // takes a licensed form; LLVM: no function but main carries `reassoc`.
+        let nkSrc =
+            "type N = Idx<9>\nlet v: Array<Float64 like N> = [1.0e16, 1.0, -1.0e16, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]\n"
+            + "function add(a: Float64, b: Float64) where comm(a, b), omp -> Float64 = a + b\n"
+            + "function stored() where repro -> Float64 = reduce(v, add, 0.0)\n"
+            + "function deferred() where repro -> Float64 = reduce(method_for(v) <@> lambda(x) -> x * 1.0, add, 0.0)\n"
+            + "function joined() where repro -> Float64 = {\n    let a, b = object_for(<&!>) <@> (reduce(v, add, 0.0), reduce(method_for(v) <@> lambda(x) -> x * 1.0, (+)))\n    a + b\n}\n"
+            + "let s = stored()\nlet d = deferred()\nlet j = joined()\nlet lics = reduce(v, add, 0.0)\n"
+        let nkRoute (lane: string) (text: string) =
+            if lane <> "cpp" then
+                let bad = llvmDefines text |> List.filter (fun (f, body) -> f <> "main" && body.Contains "reassoc") |> List.map fst
+                if bad.IsEmpty then None else Some $"""`reassoc` inside {String.concat ", " bad}"""
+            else
+                Blade.Effects.Decisions.start ()
+                try
+                    (match (try lower nkSrc with _ -> Error "") with
+                     | Ok ir -> CodeGen.genSelfContainedProgramFromIR ir "onk_plan" |> ignore
+                     | Error _ -> ())
+                    let all = Blade.Effects.Decisions.drain ()
+                    let ds = all |> List.filter (fun d -> d.Rule = "fold-form")
+                    let declinedWith (rule: string) (subj: string option) (needle: string) =
+                        all |> List.exists (fun d ->
+                            d.Rule = rule && (match subj with Some s -> d.Subject = s | None -> true)
+                            && (match d.Outcome with Blade.Effects.Declined why -> why.Contains needle | _ -> false))
+                    let reproForms =
+                        ds |> List.filter (fun d -> match d.Outcome with Blade.Effects.Declined why -> why.Contains "a `where repro` demand" | _ -> false)
+                    let licApplied = ds |> List.exists (fun d -> d.Subject = "lics" && (match d.Outcome with Blade.Effects.Applied -> true | _ -> false))
+                    // the fold-form subjects are the emitted accumulators (`stored`,
+                    // `__ret..` for the deferred body, `__v..` for the join); the
+                    // omp census lines (the copied `where omp` request, declined,
+                    // never dropped) name the functions
+                    if reproForms.Length < 2 then Some $"{reproForms.Length} fold-form record(s) name the repro demand, wanted 2 (stored, deferred)"
+                    elif not (declinedWith "fold-form" (Some "stored") "a `where repro` demand") then Some "no fold-form record declines `stored`'s fold for the repro demand"
+                    elif not (declinedWith "fold-form" None "a leg has no reorder licence") then Some "the join in `joined` is not declined for its unlicensed leg"
+                    elif not (declinedWith "omp" (Some "deferred") "`where repro`") then Some "no omp census line declines `deferred`'s request for the repro demand"
+                    elif not (declinedWith "omp" (Some "joined") "`where repro`") then Some "no omp census line declines `joined`'s request for the repro leg"
+                    elif not licApplied then Some "the top-level licensed control `lics` took no licensed form (the control would not test the veto)"
+                    else None
+                finally Blade.Effects.Decisions.drain () |> ignore
+        threeLane "named kernel folded in a repro body (stored, deferred, joined)" nkSrc [ "s"; "d"; "j" ] false
+            [ ("s", "4000000000000000"); ("d", "4000000000000000"); ("j", "4010000000000000") ] nkRoute
+        // (4c) SCOPE of the repro demand (second look, scope): it also covers an
+        // explicitly SEEDED fold (the cancellation row, exactly 2.0) and the
+        // CONTRACTION of a lambda lifted from the body: `x * x - c` with x = 1 +
+        // 2^-27 and c = round(x * x) is exactly 0.0 rounded twice, 2^-54 if fused
+        let scSrc =
+            "type N = Idx<9>\ntype One = Idx<1>\n"
+            + "let v: Array<Float64 like N> = [1.0e16, 1.0, -1.0e16, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]\nlet u: Array<Float64 like One> = [1.0000000074505806]\n"
+            + "function seeded(w: Array<Float64 like N>) where repro -> Float64 = reduce(method_for(w) <@> lambda(x) -> x * 1.0, (+), 0.0)\n"
+            + "function contracted(w: Array<Float64 like One>) where repro -> Float64 = reduce(method_for(w) <@> lambda(x) -> x * x - 1.0000000149011612, (+), 0.0)\n"
+            + "let sd = seeded(v)\nlet ct = contracted(u)\n"
+        threeLane "seeded fold and lifted contraction in a repro body" scSrc [ "sd"; "ct" ] false
+            [ ("sd", "4000000000000000"); ("ct", "0000000000000000") ] noRoute
+        // (4d) GENERIC identity types: a generic unseeded fold's strict seed is
+        // its INSTANCE's identity -- Float64 -0.0, Float32 -0.0f -- under REPRO
+        // (the reciprocals carry the signs)
+        let gtSrc =
+            "function negsum(v: T^1) = reduce(method_for(v) <@> lambda(x) -> -(x * zero), (+))\n"
+            + "let a64: Array<Float64 like Idx<2>> = [1.0, 2.0]\nlet a32: Array<Float32 like Idx<2>> = [Float32(1.0), Float32(2.0)]\n"
+            + "let r64 = 1.0 / negsum(a64)\nlet r32 = 1.0 / Float64(negsum(a32))\n"
+        threeLane "generic instance identity types" gtSrc [ "r64"; "r32" ] true
+            [ ("r64", "fff0000000000000"); ("r32", "fff0000000000000") ] noRoute
+        // ...and its Float64 instance alone, which the LLVM lane takes (it
+        // refuses the Float32 array literal above)
+        let gt64Src =
+            "function negsum(v: T^1) = reduce(method_for(v) <@> lambda(x) -> -(x * zero), (+))\n"
+            + "let a64: Array<Float64 like Idx<2>> = [1.0, 2.0]\nlet r64 = 1.0 / negsum(a64)\n"
+        threeLane "generic instance identity, Float64" gt64Src [ "r64" ] true [ ("r64", "fff0000000000000") ] noRoute
+        // (4e) the rank-2 FULL fold `reduce(m, (+), axes = 2)`: a plain
+        // accumulator loop, serial on every route, so its unseeded seed is the
+        // identity in EVERY build -- all -0.0 cells fold to -0.0 by default too
+        // (base 94487a90: +0.0 by default, -0.0 under REPRO)
+        let rkSrc =
+            "type A = Idx<3>\ntype B = Idx<5>\n"
+            + "let m: Array<Float64 like A, B> = method_for(range<A, B>) <@> lambda(i, j) -> -0.0 * Float64(i + j + 1) |> compute\n"
+            + "let full = reduce(m, (+), axes = 2)\n"
+        for reproB in [ false; true ] do
+            threeLane "rank-2 full fold, all -0.0 cells" rkSrc [ "full" ] reproB [ ("full", "8000000000000000") ] noRoute
+        // (4f) the EMPTY deferred fold in the DEFAULT interpreter: the licensed
+        // base seed, +0.0 (the compiled default lanes are pinned above; the
+        // REPRO interpreter below)
+        let edName = "G74 route, interpreter (default-lowered): an EMPTY deferred unseeded fold prints 0.0"
+        // (4g) G80 twin hygiene (second look of W4B-D, finding 2): a named
+        // kernel whose body lifts a lambda capturing its PARAMETER, folded in a
+        // repro body -- the twin shares the parameter ids, so the capture binds
+        // -- stored and deferred, 2.0 in every lane (the C++ K-lane tree gave
+        // 1.0 at base); its ordinary top-level use `t` stays licensed (unpinned)
+        let capSrc =
+            "type N = Idx<9>\nlet v: Array<Float64 like N> = [1.0e16, 1.0, -1.0e16, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]\n"
+            + "function addc(a: Float64, b: Float64) where comm(a, b) -> Float64 = {\n    let h = lambda(x: Float64) -> a + x\n    h(b)\n}\n"
+            + "function rf() where repro -> Float64 = reduce(v, addc, 0.0)\n"
+            + "function rd() where repro -> Float64 = reduce(method_for(v) <@> lambda(x) -> x * 1.0, addc, 0.0)\n"
+            + "let s = rf()\nlet sd = rd()\nlet t = reduce(v, addc, 0.0)\n"
+        threeLane "a parameter-capturing named kernel folded in a repro body (its twin)" capSrc [ "s"; "sd" ] false
+            [ ("s", "4000000000000000"); ("sd", "4000000000000000") ] noRoute
+        // (4h) a deferred fold INSIDE A SIDE TABLE (finding 1): a random fill's
+        // parameter. The unseeded mark there is resolved like any other (the
+        // first W4B-D cut left it in the RandomInits payload, which the
+        // interpreter refused as an unresolved node); the interpreter draws the
+        // same values as with the literal parameter 3.0. (Both compiled lanes
+        // refuse the shape, BL7004 -- a deferred fold in expression position,
+        // the LLVM lane falling back -- before and after this change.)
+        let sideName = "G74 route, a deferred fold in a random-fill parameter (interpreter): the mark resolved, the draws those of the literal parameter"
+        let sideProbe () =
+            let sideSrc =
+                "import rand as r\nlet w: Array<Float64 like Idx<2>> = [1.0, 2.0]\n"
+                + "let u = r.gamma(7, reduce(method_for(w) <@> lambda(x) -> x, (+)), 1.0, 4)\n"
+                + "let uc = r.gamma(7, 3.0, 1.0, 4)\nlet su = reduce(u, (+))\nlet suc = reduce(uc, (+))\n"
+            use _sp = pinEnv "BLADE_PRINT" "su,suc"
+            for reproB in [ false; true ] do
+                use _rs = pinEnv "BLADE_FP_REPRO" (if reproB then "1" else null)
+                let nm = $"""{sideName} ({(if reproB then "REPRO" else "default")})"""
+                match (try lower sideSrc with ex -> Error ex.Message) with
+                | Error e -> fail nm ("lower: " + e)
+                | Ok ir ->
+                    match (try Ok (Blade.Interp.Run.runProgram ir "oside_interp" Blade.Interp.Value.defaultLimits) with ex -> Error ex.Message) with
+                    | Error e -> fail nm ("interpreter raised: " + e)
+                    | Ok res when res.ExitCode <> 0 -> fail nm ($"interpreter exit {res.ExitCode}: {res.Stderr.Trim()}")
+                    | Ok res ->
+                        let ls = linesOfOut res.Stdout
+                        match Map.tryFind "su" ls, Map.tryFind "suc" ls with
+                        | Some a, Some b when a = b -> pass nm $"su = suc = {a}"
+                        | a, b -> fail nm $"su = {a}, suc = {b}"
+        sideProbe ()
+        let edProbe () =
+            use _rpd = pinEnv "BLADE_FP_REPRO" null
+            match (try lower emptySrc with ex -> Error ex.Message) with
+            | Error e -> fail edName ("lower: " + e)
+            | Ok ir ->
+                match (try Ok (Blade.Interp.Run.runProgram ir "oempty_interp_d" Blade.Interp.Value.defaultLimits) with ex -> Error ex.Message) with
+                | Error e -> fail edName ("interpreter raised: " + e)
+                | Ok res ->
+                    match Map.tryFind "s" (linesOfOut res.Stdout) with
+                    | Some "0.0" -> pass edName "s = 0.0"
+                    | other -> fail edName $"""s = {(match other with Some x -> x | None -> "<missing>")}, wanted 0.0"""
+        edProbe ()
         let ename = "G74 route, interpreter (REPRO-lowered): an EMPTY deferred unseeded fold prints -0.0"
         use _rp = pinEnv "BLADE_FP_REPRO" "1"
         match (try lower emptySrc with ex -> Error ex.Message) with

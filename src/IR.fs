@@ -263,12 +263,20 @@ type IRExpr =
     /// (IRMono.resolveTypedZerosModule, via `zeroLiteralOf`). The type rides
     /// the node so HM substitution reaches it like any other carried type.
     | IRZero of ty: IRTypeG<IRExpr>
-    /// The EXACT `(+)` identity at a type lowering could not yet name a
-    /// literal for (gap G74): ONLY the strict-route seed of an UNSEEDED fold
-    /// in a generic body (Lowering.lowerUnseededSeed; no source syntax builds
-    /// it), resolved per instance by IRMono.resolveTypedZerosModule to
-    /// `addIdentityLiteralOf` (`-0.0`, `-0.0f`, `0`, `(-0.0, -0.0)`).
-    | IRAddIdentity of ty: IRTypeG<IRExpr>
+    /// THE SEED OF AN UNSEEDED FOLD (gap G74): the checker-synthesized `(+)`
+    /// seed of a fused fold the program wrote WITHOUT an init, carried with
+    /// its provenance from Lowering.lowerUnseededSeed (the only builder; no
+    /// source syntax reaches it) to Lowering.resolveUnseededSeedsModule, which
+    /// runs after monomorphization and BEFORE the optimizer and replaces every
+    /// one by an ordinary seed: on an OBLIGATORILY SERIAL route -- the
+    /// reproducible build, a `where repro` body (`inRepro`), a repro-vetoed
+    /// kernel, or a deferred map body that MAY WRITE (the fact each compiled
+    /// lane's effective licence reads: C++ `licensedFold`, LLVM
+    /// `foldFmfLicensed`) -- by the EXACT identity (`addIdentityLiteralOf`:
+    /// `-0.0`, `-0.0f`, `(-0.0, -0.0)`, `0`), so the chain is the left fold of
+    /// the cells; on a licensed route by `baseSeed`, unchanged byte for byte.
+    /// No pass after that one, no emitter and no interpreter sees the node.
+    | IRUnseededSeed of baseSeed: IRExpr * ty: IRTypeG<IRExpr> * inRepro: bool
     /// A FRESH array of the carried (dense, statically shaped) array type
     /// whose cells are written before any is read, so no fill is emitted:
     /// the recursive-array buffer when the desugar PROVED every row is
@@ -922,7 +930,7 @@ let zeroLiteralOf (ty: IRTypeG<IRExpr>) : IRExpr option =
     | _ -> None
 
 /// The EXACT `(+)` identity at a scalar type (gap G74): the seed a STRICT
-/// route gives an UNSEEDED fold (Lowering.lowerUnseededSeed, IRAddIdentity),
+/// route gives an UNSEEDED fold (Lowering.resolveUnseededSeedsModule),
 /// so the seeded chain `id + c0 + ..` is the left fold of the cells bit for
 /// bit (formalism 2.4): `-0.0` / `-0.0f` for a real float, `(-0.0, -0.0)` for
 /// a complex one (componentwise), `0` for an integer. None otherwise.
@@ -1861,6 +1869,13 @@ type IRModule = {
 /// IR Program
 type IRProgram = {
     Modules: IRModule list
+    /// The program's DECLARATION SPANS (name -> span, Lowering's table; gap
+    /// G76): carried BY THE RECORD, so every `{ p with .. }` copy (module
+    /// qualification, dead-polymorph elimination, the AD and elaborator
+    /// passes) keeps it, and a consumer in ANOTHER execution flow (the
+    /// interpreter differential) locates guards from the program it runs,
+    /// never from another program's ambient table (`installDeclSpansOf`).
+    DeclSpans: Map<string, Blade.Ast.Span>
 }
 
 /// Query: the fully-deduced IR type of a top-level binding by name, searched
@@ -2259,9 +2274,11 @@ let recUninitBufferPrefix = "__recu_"
 let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     match expr with
     // -- Leaves: no expression children ------------------------------------
-    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero _ | IRAddIdentity _ | IRUninit _ | IROpaqueExtent
+    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero _ | IRUninit _ | IROpaqueExtent
     | IRVirtualReverse _ | IRArity _ | IRReleasePools _ ->
         [], (function [] -> expr | _ -> badChildren "leaf")
+    // the unseeded-fold seed's base value is its one child (gap G74)
+    | IRUnseededSeed (b, ty, r) -> [b], (function [b'] -> IRUnseededSeed (b', ty, r) | _ -> badChildren "IRUnseededSeed")
     | IRRange (idxTys, offset) ->
         Option.toList offset,
         (function
@@ -2550,7 +2567,7 @@ let (|BinderShape|_|) (expr: IRExpr) : (IRExpr list * (Set<IRId> * IRExpr list) 
 let irNodeMayAbort (e: IRExpr) : bool =
     match e with
     // -- cannot abort on their own ------------------------------------------
-    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero _ | IRAddIdentity _ | IRUninit _ | IROpaqueExtent
+    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero _ | IRUnseededSeed _ | IRUninit _ | IROpaqueExtent
     | IRArity _ | IRRange _ | IRVirtualReverse _ | IRReleasePools _ -> false
     // Integer `/` and `%` by zero abort (BL8013 in every lane, the arithmetic
     // contract of docs/formalism.md section 2.4). The node is judged without
@@ -2650,7 +2667,7 @@ let rec isFreshPoolFormWith (appFresh: IRExpr -> bool) (e: IRExpr) : bool =
     | IRParallel _ | IRFusion _ | IRFunctorMap _ | IRZip _ -> false
     | IRVar _ | IRIndex _ | IRSlice _ | IRCurry _ | IRSubset _ | IRShift _ | IRReverse _
     | IRDiag _ | IRAlign _ | IRTuple _ | IRTupleProj _ | IRFieldAccess _ | IRIf _ | IRMatch _ -> false
-    | IRLit _ | IRParam _ | IRNth | IRZero _ | IRAddIdentity _ | IROpaqueExtent | IRArity _ | IRRange _
+    | IRLit _ | IRParam _ | IRNth | IRZero _ | IRUnseededSeed _ | IROpaqueExtent | IRArity _ | IRRange _
     | IRVirtualReverse _ | IRBinOp _ | IRUnaryOp _ | IRComplex _ | IRFma _ | IRRandAt _
     | IRTupleCons _ | IRTupleDecons _ | IRStructLit _ | IRLet _
     | IRMethodFor _ | IRObjectFor _ | IRBind _ | IRComposeObj _ | IRCompose _ | IRPure _
@@ -2756,7 +2773,7 @@ let substTypeInIRExpr (bindings: Map<int, IRType>) (expr: IRExpr) : IRExpr =
         | IRVar (id, ty) -> IRVar (id, st ty)
         | IRParam (n, i, ty) -> IRParam (n, i, st ty)
         | IRZero ty -> IRZero (st ty)
-        | IRAddIdentity ty -> IRAddIdentity (st ty)
+        | IRUnseededSeed (b, ty, r) -> IRUnseededSeed (b, st ty, r)
         | IRUninit ty -> IRUninit (st ty)
         | IRApp (fn, args, retType) -> IRApp (fn, args, st retType)
         | IRArrayLit (elems, aty) ->
@@ -2806,7 +2823,7 @@ let (|CarriedType|_|) (expr: IRExpr) : IRType option =
     | IRLit IRLitUnit -> Some IRTUnit
     | IRReleasePools _ -> Some IRTUnit
     | IRZero ty -> Some ty
-    | IRAddIdentity ty -> Some ty
+    | IRUnseededSeed (_, ty, _) -> Some ty
     | IRUninit ty -> Some ty
     | _ -> None
 
@@ -2921,22 +2938,15 @@ let declSpanOf (name: string) : Blade.Ast.Span =
     | None -> Blade.Ast.noSpan
 
 /// The declaration-span table TRAVELS WITH THE PROGRAM (gap G76): lowering
-/// attaches the table it recorded to the IRProgram it returns, and a consumer
-/// running in another execution flow (the interpreter differential runs the
+/// stores the table it recorded in the IRProgram it returns
+/// (`IRProgram.DeclSpans`, after module qualification), and a consumer running
+/// in another execution flow (the interpreter differential runs the
 /// interpreter in a Task beside the flow that lowered) installs it into its
-/// own flow before it reads `declSpanOf`. Keyed by the program OBJECT (a copy
-/// made with `{ p with .. }` carries none, and installs nothing).
-let private programDeclSpans =
-    System.Runtime.CompilerServices.ConditionalWeakTable<IRProgram, Map<string, Blade.Ast.Span> ref>()
-
-let attachDeclSpans (program: IRProgram) : unit =
-    programDeclSpans.AddOrUpdate(program, ref (declSpansCell ()).Value)
-
-/// Install the program's attached table (if any) as THIS flow's table.
+/// own flow before it reads `declSpanOf` -- REPLACING whatever another program
+/// left there: a program that carries no table installs an empty one, never a
+/// stale one.
 let installDeclSpansOf (program: IRProgram) : unit =
-    match programDeclSpans.TryGetValue program with
-    | true, spans -> declSpansStorage.Value <- ref spans.Value
-    | _ -> ()
+    declSpansStorage.Value <- ref program.DeclSpans
 
 /// A named struct's fields in DECLARATION order, out of the same per-module
 /// cache `tryLookupFieldType` reads. The order is what lets a name-erased
@@ -3674,7 +3684,7 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
     // typing rule -- and if one of these arms ever fires, a family pattern
     // was edited out of sync: fail loudly, never mistype.
     | IRVar _ | IRParam _ | IRApp _ | IRArrayLit _ | IRStructLit _
-    | IRApplyCombinator _ | IRComposeApply _ | IRLit _ | IRZero _ | IRAddIdentity _ | IRUninit _ | IRReleasePools _ ->
+    | IRApplyCombinator _ | IRComposeApply _ | IRLit _ | IRZero _ | IRUnseededSeed _ | IRUninit _ | IRReleasePools _ ->
         unreachableTyping "CarriedType" expr
     | IRSort _ | IRArrayNegate _ | IRArrayConjugate _ | IRIntersect _
     | IRUnion _ | IRUnique _ | IRCompute _ | IRPure _ | IRLet _ | IRIf _

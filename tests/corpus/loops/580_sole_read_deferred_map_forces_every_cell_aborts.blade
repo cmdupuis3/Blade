@@ -1,0 +1,16 @@
+// TEST: Sole Read Deferred Map Forces Every Cell (aborts)
+// ----------------------------------------------------------------------------
+// Gap G60 (b), first failure: a positional read is a FORCING use of the
+// whole map (formalism 10.2), so `a = g(0)` evaluates cell 1 too and its
+// division by zero (BL8013, at g's declaration) fires at `a` -- before the
+// later checked cast (BL8006). The llvm lane used to compute only the cell a
+// sole read touches, run on to the cast, and abort there instead.
+// ----------------------------------------------------------------------------
+type Row = Idx<2>
+let x: Array<Int64 like Row> = [1, 0]
+let g = method_for(x) <@> lambda(v) -> 10 / v
+let a = g(0)
+let bad = x((x(0) + 5 : Row))
+// ABORT: BL8013
+// ABORT: integer division by zero
+// ABORT: .blade:10

@@ -4414,7 +4414,18 @@ type ScopeKind =
 let computeScopeEscapes (ctx: CodeGenContext) (kind: ScopeKind) (scopeLets: (IRId * IRExpr) list) : Set<IRId> =
     // Deep, so an assign or a callable reference buried in a nested loop body,
     // match arm, or ApplyInfo subtree cannot be missed.
-    let subs = scopeLets |> List.collect (fun (_, v) -> allSubExprs v)
+    // The RETURN expression is one of the scope's statements for the assign
+    // and capture seeds below, WHATEVER its type (gap G54, the second Codex
+    // look of W4-2, NEW 1): a scalar-returning call can export a closure
+    // into caller-owned storage (`stash(out, lambda(k) -> reduce(y(0), (+))
+    // * k) + s`), so its assigns and its callable references are scanned like
+    // a let's, and its references COUNT toward a kernel's uniqueness.
+    let retRoots =
+        match kind with
+        | FuncScope (Some retExpr) -> [ retExpr ]
+        | _ -> []
+    let letSubs = scopeLets |> List.collect (fun (_, v) -> allSubExprs v)
+    let subs = letSubs @ (retRoots |> List.collect allSubExprs)
     // Seed 1 -- whole-array reassignment. `a = someOther;` makes a.data alias
     // someOther's pool, so BOTH sides must survive: the target because its
     // original pool is no longer the one it names, the RHS because the target now
@@ -4440,14 +4451,13 @@ let computeScopeEscapes (ctx: CodeGenContext) (kind: ScopeKind) (scopeLets: (IRI
     // Seed 2 -- captures. A step function's `[&]` capture of an outer mut (and
     // any kernel lambda's captures) keeps reading that storage after the scope's
     // own use of it ends.
-    // The RETURN expression counts too: a closure returned from the function
-    // (`function mk(n) = { let v = ...; lambda(k) -> reduce(v, (+)) + k }`)
-    // copies v's wrapper and keeps reading v's pool after the frame is gone
-    // (CodeGenExprSupport, "CLOSURE VALUES CAPTURE BY VALUE"); the return
-    // seed below only sees the callable's id, not what it captured. Only a
-    // return whose TYPE can hold a function can carry a closure out: a kernel
-    // lambda inside a scalar or array-of-scalars return is dead when the
-    // frame ends, and pinning its captures would leak per call.
+    // The RETURN expression counts too (it is in `subs`, whatever its type):
+    // a closure returned from the function (`function mk(n) = { let v = ...;
+    // lambda(k) -> reduce(v, (+)) + k }`) copies v's wrapper and keeps reading
+    // v's pool after the frame is gone (CodeGenExprSupport, "CLOSURE VALUES
+    // CAPTURE BY VALUE"), and a scalar-returning call can STORE one
+    // (`stash(out, <closure>)`); the return seed below only sees ids, never
+    // what a callable captured.
     let rec carriesFn (t: IRType) =
         match t with
         | IRTScalar _ | IRTUnit | IRTIdxTagged _ -> false
@@ -4455,82 +4465,232 @@ let computeScopeEscapes (ctx: CodeGenContext) (kind: ScopeKind) (scopeLets: (IRI
         | ArrayElem at -> carriesFn at.ElemType
         | IRTTuple ts -> ts |> List.exists carriesFn
         | _ -> true
-    let retSubs =
-        match kind with
-        | FuncScope (Some retExpr) when carriesFn (inferExprType retExpr) -> allSubExprs retExpr
-        | _ -> []
-    // SYNCHRONOUS FOLD KERNELS (gap G54; W4-2 fix round: a POSITIVE proof,
-    // never "the let is scalar"). Every callable occurrence anywhere in the
-    // scope -- an assign's value (`out(0) = <closure>`: assignSeeds names only
-    // the callable's id, so its captures are seeded HERE), a call argument, a
-    // deferred map, the return -- pins its captures, EXCEPT a callable proved
-    // to run and die inside one statement:
-    //   * it sits in a KERNEL SLOT of a scope let whose whole value is a
-    //     SCALAR fold -- `IRReduce`'s / `IRReduceCompute`'s fold kernel (each
-    //     leg of a join), or the kernel of the `IRApplyCombinator` map that
-    //     fold consumes directly (tensorop's `let s = reduce(method_for(..)
-    //     <@> lambda(a) -> prodsum(y(a), y(a)), lambda(p, q) where omp -> p +
-    //     q, 0.0)`): the nest, its team included, completes before the let;
-    //   * that occurrence is the callable's ONLY reference in the scope (it is
-    //     not also let-bound, stored, passed or returned);
-    //   * it writes nothing outside itself (`callableMayWrite`, the codegen
-    //     write analysis: transitive through every callable it names, an
-    //     unresolved callee a write) -- so no store hidden in its body exports
-    //     a closure over the capture;
-    //   * it returns no value that can hold a function.
+    // SYNCHRONOUS KERNEL SLOTS (gap G54; a POSITIVE classification of every
+    // statement root, slot by slot, fail closed). EVERY callable occurrence
+    // in the scope -- each let's value and the return: an assign's value
+    // (`out(0) = <closure>`: assignSeeds names only the callable's id, so its
+    // captures are seeded HERE), a call argument (`stash(out, <closure>)`, in
+    // a let or in the return), a deferred map, a returned closure, a direct
+    // call of a local function -- pins its captures, EXCEPT an occurrence
+    // proved to run and die inside its statement:
+    //   * it is a KERNEL SLOT of a statement root:
+    //       - of a scope LET: only the base whitelist -- the let's WHOLE value
+    //         is a SCALAR fold (`IRReduce` / `IRReduceCompute`, `IRCompute`-
+    //         wrapped or not): its fold kernel (each join leg) and the kernel
+    //         of the map it consumes directly (the seed is not walked);
+    //       - of the RETURN: found by the GENERIC walk `slotsOf` below
+    //         (every child of a scalar node; a fold's kernel legs and
+    //         directly consumed map kernel; a joined fold's fusion leaves),
+    //         or the kernel of the return's whole materialized map
+    //         `IRCompute (IRApplyCombinator)` (run into `__retN` BEFORE the
+    //         scope frees, CodeGen's statement-shaped return arm);
+    //   * that occurrence is the callable's ONLY reference among all the
+    //     scope's sub-expressions, the return's included (an object_for
+    //     application names its kernel twice, `Kernel` and the loop's
+    //     provenance `IRObjectFor.Kernel`: one reference);
+    //   * it writes nothing outside itself (`callableMayWrite`: transitive
+    //     through every callable it names, an unresolved callee a write -- so
+    //     a closure stored from its body counts);
+    //   * its return type cannot hold a function.
     // Only such a callable's captures are not seeded; the captured array then
-    // takes the ordinary scope-exit free beside its siblings.
-    let syncKernelSlots (value: IRExpr) : IRExpr list =
-        let v = match value with IRCompute e -> e | e -> e
-        let legs (k: IRExpr) = match k with IRTuple ks -> ks | k -> [ k ]
-        let mapKernel (a: IRExpr) =
-            match a with
-            | IRApplyCombinator info | IRCompute (IRApplyCombinator info) -> [ info.Kernel ]
-            | _ -> []
+    // takes the ordinary scope-exit free beside its siblings. A let-bound
+    // computed map's kernel (`let z = method_for(..) <@> k |> compute`) is NOT
+    // admitted: its captures stay seeded, as before (a possible leak, never a
+    // use after free).
+    // POOL-FREE VALUE TYPES (the fifth Codex look of W4B-C: decided by what a
+    // scope free covers, not by a list of "scalar" spellings). A node is
+    // walked by the return classification iff its inferred type can hold
+    // NEITHER array storage NOR a function. EVERY IRType constructor is named
+    // (no wildcard), so a new one fails to compile here instead of silently
+    // stopping the walk:
+    //   * a plain scalar of any numeric / Bool element; a String too -- its
+    //     C++ value owns heap characters but never an array POOL, so no scope
+    //     free can cover or be pinned by it; ETUnit is the unit value
+    //     (assignments) and is NOT walked;
+    //   * a unit-annotated or INDEX-TAGGED type over a pool-free inner
+    //     (`Float<meters>`, `Nat<I>`), peeled recursively;
+    //   * NOT walked: an array / function (IRTArrow), a tuple (the joined-fold
+    //     rule below is the one tuple admission), a loop object, a suspended
+    //     computation, unit, an arity-polymorphic, type-level natural,
+    //     distribution (erased to packed cumulant pools), named (a struct may
+    //     hold arrays), group-keys or still-unresolved type.
+    let rec isScalarTy (t: IRType) =
+        match t with
+        | IRTScalar et ->
+            (match et with
+             | ETInt32 | ETInt64 | ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128 | ETBool | ETString -> true
+             | ETUnit -> false)
+        | IRTUnitAnnotated (inner, _) -> isScalarTy inner
+        | IRTIdxTagged (inner, _) -> isScalarTy inner
+        | IRTTuple _ | IRTLoop _ | IRTComputation _ | IRTUnit | IRTPoly _ | IRTNat _
+        | IRTDist _ | IRTNamed _ | IRTInfer _ | IRTGroupKeys _ | IRTArrow _ -> false
+    let legs (k: IRExpr) = match k with IRTuple ks -> ks | k -> [ k ]
+    let mapKernel (a: IRExpr) =
+        match a with
+        | IRApplyCombinator info | IRCompute (IRApplyCombinator info) -> [ info.Kernel ]
+        | _ -> []
+    // The scope-let whitelist: exactly the merge's (a whole-value scalar fold).
+    let letSlots (value: IRExpr) : IRExpr list =
         match inferExprType value with
         | IRTScalar _ ->
-            (match v with
+            (match (match value with IRCompute e -> e | e -> e) with
              | IRReduce (arr, k, _) -> legs k @ mapKernel arr
              | IRReduceCompute (comp, k, _) -> legs k @ mapKernel comp
              | _ -> [])
         | _ -> []
-    let allRefs = subs @ retSubs
-    let refCount (id: IRId) =
-        allRefs |> List.sumBy (fun e -> match e with IRVar (i, _) when i = id -> 1 | _ -> 0)
-    // FAIL CLOSED on the RETURN path (the second Codex look of W4-2, NEW 1):
-    // `stash(out, lambda(k) -> reduce(y(0), (+)) * k) + s` -- a SCALAR return
-    // whose call argument stores a closure over `y`. A non-function-typed
-    // return is not scanned above, so neither that closure's captures nor its
-    // reference count were seen, and the let's fold kernel kept its exemption:
-    // `y` was freed under a stored closure (a use after free the base never
-    // had, where the fold's capture pinned `y`). Until the return expression
-    // is classified slot by slot (the builder's round-3 rewrite, not merged),
-    // a scope whose non-function-typed return NAMES ANY CALLABLE -- a stored
-    // closure, a callable argument, a fold or map kernel in the return -- keeps
-    // every capture seeded: the exemption is withheld there, and the scope
-    // frees exactly what the base freed (memfree/029). The exemption stands
-    // for a scope that returns a plain value (memfree/027's `s`).
-    let returnNamesCallable =
-        match kind with
-        | FuncScope (Some retExpr) when not (carriesFn (inferExprType retExpr)) ->
-            allSubExprs retExpr |> List.exists (fun e -> (resolveCallable e).IsSome)
+    // A function-free TUPLE OF SCALARS (nested tuples of scalars included):
+    // the accumulators of a joined fold.
+    let rec scalarTuple (t: IRType) =
+        match t with
+        | IRTTuple ts -> not ts.IsEmpty && ts |> List.forall (fun t -> isScalarTy t || scalarTuple t)
         | _ -> false
+    // The map kernels of a FUSED fold's directly consumed `<&!>` tree: each
+    // leaf map of the IRFusion tree (the joined traversal runs them all inside
+    // the one fold).
+    let rec fusionLeafKernels (e: IRExpr) : IRExpr list =
+        match e with
+        | IRFusion (l, r) -> fusionLeafKernels l @ fusionLeafKernels r
+        | IRApplyCombinator info | IRCompute (IRApplyCombinator info) -> [ info.Kernel ]
+        | _ -> []
+    // THE RETURN WALK, GENERIC (the fourth Codex look of W4B-C: no container
+    // list -- `if` / `match` / `let`, `fma`, complex constructors, casts,
+    // comparisons, a call's scalar arguments, and any node added later). A
+    // SCALAR-typed node is evaluated, whole, inside the return statement, which
+    // a scalar return evaluates into a local BEFORE the scope frees (CodeGen's
+    // value-first return shape; a branching return runs the arm it takes as an
+    // immediately-invoked body there too), so it is walked through EVERY
+    // ExprShape child; the walk stops at any child that is not scalar-typed --
+    // a function-typed node (a callable VALUE: a call's callee, a callable
+    // argument, a closure -- stays seeded), an array-typed node (an array call
+    // argument, a deferred map), a unit-typed assignment -- and lambda / kernel
+    // bodies are never children (lifted, IRVar leaves). A FOLD contributes its
+    // kernel legs and the kernel of the map it consumes directly as slots; a
+    // JOINED fold (a function-free tuple of scalars, IRReduceCompute over an
+    // `<&!>` IRFusion tree) is its own boundary: its legs and every fusion
+    // leaf's map kernel. Nothing is hoisted or evaluated differently: this only
+    // classifies, and every occurrence it does not name stays in `subs`.
+    // The callee ids the return walk admitted as IMMEDIATELY INVOKED lambdas
+    // (the only candidates of the owned-cell write proof below).
+    let iifeCallees = System.Collections.Generic.HashSet<IRId>()
+    let rec slotsOf (e: IRExpr) : IRExpr list =
+        let ty = inferExprType e
+        if isScalarTy ty then
+            match e with
+            | IRCompute (IRReduce _ as inner) | IRCompute (IRReduceCompute _ as inner) -> slotsOf inner
+            | IRReduce (arr, k, seed) -> legs k @ mapKernel arr @ (seed |> Option.toList |> List.collect slotsOf)
+            | IRReduceCompute (comp, k, seed) -> legs k @ mapKernel comp @ slotsOf seed
+            // An IMMEDIATELY INVOKED anonymous lambda, `(lambda(i) -> y(i))(k)`
+            // (the sixth Codex look of W4B-C): the CALLEE occurrence itself is
+            // a slot -- the lifted lambda runs synchronously inside this
+            // pool-free call, which the scalar return evaluates before the
+            // frees -- under the same four gates (one effective reference, no
+            // transitive write, no function-holding return). Only a directly
+            // resolved ANONYMOUS lambda (`lambda` / `lambda in <scope>`): a
+            // let-bound local function called directly keeps its captures
+            // seeded (the pre-existing conservative case), and every callable
+            // ARGUMENT stays a non-pool-free child, never walked.
+            | IRApp (IRVar _ as f, args, _) ->
+                let calleeSlot =
+                    match resolveCallable f with
+                    | Some c when c.SourceName = "lambda" || c.SourceName.StartsWith "lambda in " ->
+                        (match f with IRVar (fid, _) -> iifeCallees.Add fid |> ignore | _ -> ())
+                        [ f ]
+                    | _ -> []
+                calleeSlot @ (args |> List.collect slotsOf)
+            | _ ->
+                let (ExprShape (kids, _)) = e
+                kids |> List.collect slotsOf
+        elif scalarTuple ty then
+            match e with
+            | IRReduceCompute (comp, k, seed) | IRCompute (IRReduceCompute (comp, k, seed)) ->
+                legs k @ fusionLeafKernels comp @ slotsOf seed
+            | _ -> []
+        else []
+    let returnSlots (root: IRExpr) : IRExpr list =
+        match root with
+        | IRCompute (IRApplyCombinator info) when not (carriesFn (inferExprType root)) -> [ info.Kernel ]
+        // A JOINED fold as the whole return (the third Codex look of W4B-C):
+        // evaluated into `__retN` by CodeGen's IRReduceCompute return arm
+        // BEFORE the scope frees. Any OTHER tuple-valued return takes the
+        // generic tuple arm (frees before `return`, suppressed only for the
+        // allocation names its text mentions), so it gets no slot: slotsOf
+        // admits a tuple only as a joined fold.
+        | _ -> slotsOf root
+    // THE OWNED-CELL WRITE PROOF (the seventh Codex look of W4B-C; its index
+    // effects closed by the eighth), for an immediately invoked lambda of the
+    // return ONLY: `(lambda(i) -> { y(i) = y(i) + 1.0; y(i) })(k)` writes, so
+    // the four gates' no-write condition fails, yet nothing escapes -- the call
+    // is synchronous, its result is pool-free, and the write lands in a CELL of
+    // the scope's own array. A closed proof, every condition positive:
+    //   * every assignment in the callee's body is a SCALAR store into one
+    //     element, `a(i..) = v` (`LVIndex` on a variable, every index and the
+    //     value pool-free), never a whole-array or variable assignment;
+    //   * its target is a CAPTURE of the callee that is a let of THIS scope
+    //     whose value is an EAGER fresh pool -- a `|> compute`d form or an
+    //     array literal that `isFreshPoolForm` accepts (`isFreshPoolForm`
+    //     alone also accepts a bare deferred combinator, so a deferred map is
+    //     excluded explicitly) -- never a parameter, a `mut` parameter or an
+    //     alias;
+    //   * with ONLY the stores themselves removed -- each replaced by its
+    //     OPERANDS, every index expression and the stored value, which still
+    //     run -- the body writes NOTHING by the one write analysis
+    //     (`exprMayWrite`: transitive through every callable it names, an
+    //     unresolved callee a write). So a named call in an index or in the
+    //     value that exports a closure or writes anything keeps the captures
+    //     seeded, as does any closure / pointer store, provider write,
+    //     mut-parameter call or unknown write elsewhere in the body.
+    // Anything else keeps the callee's captures seeded (memfree/034's
+    // exporting fold kernel is not even a candidate: it is no lambda callee).
+    let ownedCellWritesOnly (c: IRCallable) : bool =
+        let eagerFreshPool (v: IRExpr) =
+            match v with
+            | IRCompute _ | IRArrayLit _ -> isFreshPoolForm v
+            | _ -> false
+        let owned =
+            c.Captures |> List.map (_.Id)
+            |> List.filter (fun cid -> scopeLets |> List.exists (fun (id, v) -> id = cid && eagerFreshPool v))
+            |> Set.ofList
+        let assigns = allSubExprs c.Body |> List.choose (fun e -> match e with IRAssign (t, v) -> Some (t, v) | _ -> None)
+        let ownedCellStore (t: IRExpr) (v: IRExpr) =
+            match t with
+            | LVIndex (IRVar (tid, _), idxs) ->
+                owned.Contains tid
+                && isScalarTy (inferExprType v)
+                && idxs |> List.forall (fun i -> isScalarTy (inferExprType i))
+            | _ -> false
+        not assigns.IsEmpty
+        && assigns |> List.forall (fun (t, v) -> ownedCellStore t v)
+        && not (exprMayWrite (c.Body |> mapIRExpr (fun e ->
+                match e with
+                | IRAssign ((LVIndex (_, idxs)) as t, v) when ownedCellStore t v -> IRTuple (idxs @ [ v ])
+                | e -> e)))
+    let objectForDuplicates (id: IRId) =
+        subs |> List.sumBy (fun e ->
+            match e with
+            | IRApplyCombinator info ->
+                (match info.Kernel, info.Loop with
+                 | IRVar (k1, _), IRObjectFor { Kernel = IRVar (k2, _) } when k1 = id && k2 = id -> 1
+                 | _ -> 0)
+            | _ -> 0)
+    let refCount (id: IRId) =
+        (subs |> List.sumBy (fun e -> match e with IRVar (i, _) when i = id -> 1 | _ -> 0))
+        - objectForDuplicates id
     let provedSync : Set<IRId> =
-        scopeLets
-        |> List.collect (fun (_, v) ->
-            syncKernelSlots v |> List.choose (fun k ->
-                match k with
-                | IRVar (kid, _) ->
-                    (match resolveCallable k with
-                     | Some c when refCount kid = 1
-                                   && not (callableMayWrite c)
-                                   && not (carriesFn c.RetType) -> Some kid
-                     | _ -> None)
-                | _ -> None))
+        ((scopeLets |> List.collect (fun (_, v) -> letSlots v))
+         @ (retRoots |> List.collect returnSlots))
+        |> List.choose (fun k ->
+            match k with
+            | IRVar (kid, _) ->
+                (match resolveCallable k with
+                 | Some c when refCount kid = 1
+                               && (not (callableMayWrite c)
+                                   || (iifeCallees.Contains kid && ownedCellWritesOnly c))
+                               && not (carriesFn c.RetType) -> Some kid
+                 | _ -> None)
+            | _ -> None)
         |> Set.ofList
-    let provedSync = if returnNamesCallable then Set.empty else provedSync
     let captureSeeds =
-        allRefs |> List.collect (fun e ->
+        subs |> List.collect (fun e ->
             match e with
             | IRVar (id, _) when provedSync.Contains id -> []
             | _ ->
