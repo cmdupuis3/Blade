@@ -1,0 +1,21 @@
+// TEST: Sole Fold Read Captured Scalar Written
+// ----------------------------------------------------------------------------
+// Gap G60 (b), a SCALAR dependency: c's kernel captures `scale`, c's only
+// reader is a fold inside a kernel (loops/193's shape), and `scale` is
+// reassigned afterwards. The fold forces c, fixing its class value at
+// scale = 2.0, so c prints [2.0, 4.0, 6.0, 8.0]. The llvm lane's first fix
+// kept such a fold fused whenever no ARRAY was written, so the print reran c
+// with scale = 3.0; fusion is now kept only when no assignment of any kind
+// exists and the fold kernel and seed cannot fail.
+// ----------------------------------------------------------------------------
+type X = Idx<4>
+let A: Array<Float64 like X> = [1.0, 2.0, 3.0, 4.0]
+let mut scale = 2.0
+let c = method_for(A) <@> lambda(x) -> x * scale
+type W = Idx<2>
+let ws: Array<Float64 like W> = [1.0, 10.0]
+let out = ws <@> lambda(w) -> w * reduce(c, (+)) |> compute
+scale = 3.0
+// EXPECT: scale = 3.0
+// EXPECT: c = [2.0, 4.0, 6.0, 8.0]
+// EXPECT: out = [20.0, 200.0]

@@ -1,0 +1,18 @@
+// TEST: Sole Fold Read Producer Fails Before Kernel (aborts)
+// ----------------------------------------------------------------------------
+// Gap G60 (b), producer versus consumer failure: c's only reader is a fold
+// inside a kernel whose OWN kernel `k` can fail (100 / (b - 10) divides by
+// zero on c's first cell). The fold forces c first, so c's cell 2 fails
+// (BL8013 at c's declaration) before k ever runs. Consuming c in place would
+// run k on cell 0 and fail there instead (at `k`).
+// ----------------------------------------------------------------------------
+type X = Idx<3>
+let A: Array<Int64 like X> = [1, 1, 0]
+let c = method_for(A) <@> lambda(x) -> 10 / x
+let k = lambda(a: Int64, b: Int64) -> a + 100 / (b - 10)
+type W = Idx<2>
+let ws: Array<Int64 like W> = [1, 2]
+let out = ws <@> lambda(w) -> w * reduce(c, k, 0) |> compute
+// ABORT: BL8013
+// ABORT: integer division by zero
+// ABORT: .blade:10

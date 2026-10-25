@@ -1,0 +1,18 @@
+// TEST: Private Sole Read Forces Every Cell (aborts)
+// ----------------------------------------------------------------------------
+// Gap G75 with G60 (b)'s first-failure rule: a module deferred map that only a
+// function body forces is evaluated privately INSIDE the call, as a whole --
+// the positional read `g(0)` is a forcing use of every cell -- so cell 1's
+// division by zero (BL8013, at g's declaration, `at at`) fires at the call,
+// before the later checked cast (BL8006). The llvm lane's first private
+// evaluation computed only the cell the read touches and ran on to the cast.
+// ----------------------------------------------------------------------------
+type Row = Idx<2>
+let x: Array<Int64 like Row> = [1, 0]
+let g = method_for(x) <@> lambda(v) -> 10 / v
+function at(n: Int64) -> Int64 = g(0) + n
+let r = at(1)
+let bad = x((x(0) + 5 : Row))
+// ABORT: BL8013
+// ABORT: integer division by zero
+// ABORT: .blade:11

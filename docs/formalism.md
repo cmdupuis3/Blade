@@ -2211,24 +2211,56 @@ current inputs). A map that only function bodies force is evaluated inside
 each call, privately, and never prints; a class nothing forces prints
 nothing. An alias bound inside a block or a function body (`let mut b = g`)
 is a local assignable COPY instead -- binding it is a forcing use of `g` --
-and is ordinary storage. LANE EXCEPTIONS (OPEN under G60, pre-existing): the
-LLVM lane keeps the first-forcing snapshot only for a module binding that is
-aliased or read more than once -- a map read exactly once and then printed
-after a write to its input RERUNS its producer there -- and makes the local
-copy only inside a function body: an alias bound in a TOP-LEVEL block stays
-deferred in that lane and reads post-write cells; the C++ lane and the
-interpreter follow the rule as written. What changed in round 3, wave 4: the C++ lane forced
+and is ordinary storage. In the LLVM lane (round 3, wave 4b) the force
+points follow the C++ lane's statement pre-pass: a top-level BLOCK forces,
+before any of its effects, every deferred map the pre-pass would (the bases
+of its positional reads, call arguments, prodsum operands and folds over a
+deferred choice, in first-read order; a chain ending in a tuple, its lets'
+reads only); any other forcing use in main stores the map at the start of
+its top-level statement; in a function body, at the start of the body
+statement that first forces it. A map read exactly ONCE is stored there
+too (a force nested in another such force at the start of that one), so its
+print reads the first-forcing cells and an unread failing cell fails there
+(`loops/576`, `579`, `580`); a fold that is a map's only reader keeps it fused
+only when the program has no assignment at all and the fold's kernel and
+seed cannot fail and read no unforced deferred map (`586`-`588`); an alias
+bound in a block is copied at its binding, its source forced AT the alias,
+after the block's earlier effects (`577`, `584`, `585`) -- unless the block's
+pre-pass already forced the source, when the alias only copies; a tuple's
+members take their own force points only for a top-level statement's root
+tuple or the tuple its let chain ends in (admitted as the C++ lane admits
+member order), never a tuple bound by an inner `let` of a block;
+`let v = g |> compute` no longer makes g print once v is forced (the compute
+is a copy; `581`); and a function body evaluates a deferred module map
+privately, as a whole, from the current inputs (`547`, `578`, `582`, `583`).
+LANE EXCEPTIONS (OPEN under G60 / G75): where that lane cannot place such a
+store -- a sole read inside an open `let rec` trip scope at module level, or
+in a statement whose slots an earlier in-place force already upgraded -- the
+read is consumed in place and the print still REDOES the producer over the
+current inputs; a block alias of a module map OFF that straight-line spine
+(a block inside a branch or a loop body), and a private map a function
+forces inside one of its loop scopes, are refused by that lane (the program
+runs in the C++ lane); tested on the witnesses above, not proved absent
+elsewhere. OPEN (G60 / G77, inherited): the interpreter forces at the read
+instead -- `let r = { x(0) = 5; g(0) + g(1) }` is r = 15 in the LLVM lane
+(the pre-pass's force) and r = 7 in the interpreter, and an earlier failing
+statement in the block wins in the interpreter only; likewise with an alias of the map, a prodsum over
+it, an inner tuple `let` reading it, or reads of a second map beside an
+alias of the first. What
+changed in round 3, wave 4: the C++ lane forced
 `g` AT an assignable alias, so `g` printed and `g2` never did and `g`'s
 failure fired at the alias; the interpreter forced and printed only the name
 read, and memoized and printed a module map a FUNCTION body forced; the LLVM
 lane forced through an alias where the fold should fuse; and writes through a
 deferred map gave three answers (the LLVM lane folded the unwritten map, a
 silent wrong value; a reassignment dropped the old producer's failure there).
-Pinned by `loops/540`-`561`. LANE REFUSALS (not LLVM semantics): the LLVM lane
-refuses a function that reads a deferred module binding, so `loops/544`, `545`
-and `547` (the G75 print rule and the function-body copy) are pinned in the
-C++ lane and the interpreter only, and G75 stays PARTIAL until that lane runs
-them.
+Pinned by `loops/540`-`561` and `576`-`588`. The LLVM lane runs `loops/545`,
+`547`, `578`, `582` and `583` (the G75 print rule and the function-body
+copy). LANE REFUSALS (not LLVM semantics; the program runs in the C++ lane):
+`loops/544` (its function returns a dynamic-extent `group_by` result), a call
+from main after main forced the map (its class value is then the stored
+snapshot, which the private evaluation would not read), a deferred module
+value that is not a map form, and the two off-spine shapes above.
 
 **Deferred members of a tuple value (gaps G58, G59, G61, G62).** A tuple ALL
 of whose members are deferred computations is itself a deferred tuple: binding
@@ -2251,16 +2283,12 @@ tuple-alias links; a longer alias chain is not classified and may meet a
 backend refusal (BL7004) instead of BL6002 (OPEN under G59). A call with an
 explicit `|> compute` argument
 evaluates EVERY argument left to right the same way, array-valued ones included
-(gap G57); the order of two failing arguments of an ORDINARY call (no compute
-argument) is not fixed in the C++ lane (C++ leaves argument evaluation order
-unspecified; an OPEN record of its own, G79). The LLVM lane cannot keep that
-order for a BARE deferred array argument (it would evaluate it at the
-statement's start, or inside an inlined callee), so it refuses such a call
-and the C++ lane runs it (`tuples/063`-`065`: the C++ lane and the
-interpreter). An `if` value OFF the member-ordered path (ordinary arms, e.g.
-`if c then g(0) else 0.0`) is unchanged: the C++ lane forces the deferred maps
-BOTH arms read before the condition while the interpreter evaluates the taken
-arm only -- a first-failure and print divergence, OPEN (G77). The first-failure consequence is
+(gap G57). In the LLVM lane a BARE
+deferred array argument of such a call is forced AT its position, under its
+own name, on the out-of-line and the inlined (capturing) call alike, when the
+call is a top-level binding's root value or a function-body statement's
+whole value (`tuples/063`-`065`, `080`-`082`); nested in an expression the
+LLVM lane refuses such a call (fail closed). The first-failure consequence is
 deliberate: a failing member fails at the construction even when the program
 never projects it -- `let held = (g, 1.0)` with `g` dividing by zero fails at
 `held`, before a later failing statement (`tuples/041`). What changed in round

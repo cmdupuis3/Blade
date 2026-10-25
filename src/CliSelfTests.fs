@@ -1626,15 +1626,32 @@ let runCliSmokeTests () : TH.BlockResult =
                 gateIdentity "wbodyunused" "sums" llvm "applied" ((<>) 0) (Some "BL8013") "a failing (stored) producer of an UNUSED grouped array fails at its own statement"
             gateIdentity "gdynstates" "st" null "applied" ((=) 0) None "every state per group, the dynamic regime (C++ only: the LLVM lane refuses a function's dynamic-extent ARRAY result; gdyn's dynamic scalar and gcancel run both lanes)"
             // the deferred-producer forms decline, so both gates run the CSR;
-            // the C++ lane (the LLVM lane refuses the deferred module read)
+            // the C++ lane, and the LLVM lane, which since W4B-B (gap G75)
+            // evaluates the deferred module map privately in the function body
+            // instead of refusing the read: the same BL8013, no fallback
             for (prog, fn) in [ ("wcount", "counts"); ("wunused", "sums") ] do
                 let (c0, o0, e0, _) = runIt prog (envOf null "0" true [])
                 let (c1, o1, e1, _) = runIt prog (envOf null null true [])
                 let p1 = planned prog fn (envOf null null true [])
-                let (cl, _, _, ol) = runIt prog (envOf "1" null true [])
-                recordCase $"cli: group aggregate ({prog}) a DEFERRED failing producer of a count-only / unused grouped array: declined, BL8013 in both gates (C++), the LLVM lane falls back"
-                    (p1 = "declined" && c0 <> 0 && c0 = c1 && e0 = e1 && o0 = o1 && (o1 + e1).Contains "error[BL8013]" && cl <> 0 && ol.Contains "falling back to C++")
-                    ($"plan {p1}; exit {c0}/{c1}; LLVM exit {cl}; {(o1 + e1).Trim()}")
+                let (cl, oll, ell, ol) = runIt prog (envOf "1" null true [])
+                // the abort's identity, as the LLVM differential reads it: the
+                // first `error[...]` line and its `  --> file:line` location
+                // `blade run` relays the program's stderr behind a `[stderr]: `
+                // prefix, so the diagnostic is found by its `error[` token
+                let firstDiag (s: string) =
+                    let ls = s.Replace("\r\n", "\n").Split('\n')
+                    match ls |> Array.tryFindIndex (fun l -> l.Contains "error[") with
+                    | Some i ->
+                        let d = ls.[i].Substring(ls.[i].IndexOf "error[")
+                        let loc = if i + 1 < ls.Length && ls.[i + 1].TrimStart().StartsWith "-->" then ls.[i + 1].Trim() else "<no location>"
+                        d + " | " + loc
+                    | None -> "<no diagnostic>"
+                let dCpp = firstDiag (o1 + "\n" + e1)
+                let dLl = firstDiag (oll + "\n" + ell)
+                recordCase $"cli: group aggregate ({prog}) a DEFERRED failing producer of a count-only / unused grouped array: declined, BL8013 in both gates (C++) and in the LLVM lane (routed there, the same first diagnostic, location and exit)"
+                    (p1 = "declined" && c0 <> 0 && c0 = c1 && e0 = e1 && o0 = o1 && dCpp.StartsWith "error[BL8013]"
+                     && routedLl ol && cl = c1 && dLl = dCpp)
+                    ($"plan {p1}; exit {c0}/{c1}; LLVM exit {cl}; C++ [{dCpp}]; LLVM [{dLl}]")
             // THE MIXED-TYPE FOLD (first look's finding 2; second look's HIGH):
             // the plan declines for the TYPE reason, and each lane's ordinary
             // outcome is pinned, routed, identical in both gates -- the LLVM
