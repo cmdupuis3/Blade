@@ -1,0 +1,38 @@
+// TEST: Grad Combinator Local Read By A Loop Scope
+import ad as ad
+// ============================================================================
+// Gap G78 witness (llvm lane lifetime; the values are the corpus's part). A
+// function's combinator-built local (the halo map `d`) and, under ad.grad,
+// its tape and cotangent are pools the FUNCTION allocates and a YOUNGER loop
+// scope (the reverse sweep's loops; `g`'s `let rec` trips) reads. The llvm
+// lane used to null their tracking slots in EVERY open scope at those reads,
+// the owning function scope included, so the function's exit freed nothing
+// -- once per call, and `g` runs once per cell of `outs`. The frees are
+// pinned on the emitted .ll by `blade test access` (g78_llvm_frees_*).
+// ============================================================================
+type H = Idx<7>
+type Step = Idx<5>
+type K = Idx<9>
+function f(a: Array<Float like H>) -> Float = {
+    let d = method_for(halo<H, [-1, 0, 1]>) <@> lambda(w) -> a(w(1)) * a(w(-1)) |> compute
+    reduce(d, (+))
+}
+function g(a: Array<Float like H>, s: Float64) -> Float64 = {
+    let d = method_for(halo<H, [-1, 0, 1]>) <@> lambda(w) -> a(w(1)) - a(w(-1)) * s |> compute
+    let rec acc: Array<Float like Step> =
+        match acc with
+        | zero -> zero
+        | zero :: t -> zero :: d(0)
+        | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + d(1)
+    reduce(acc, (+))
+}
+let a0: Array<Float like H> = 1.0 + 0.25 * Float64(0..7)
+let mut da: Array<Float like H> = 0.0 * Float64(0..7)
+let fv = ad.grad(f)(a0, da)
+let outs = method_for(range<K>) <@> lambda(k) -> g(a0, Float64(k)) |> compute
+let total = reduce(outs, (+))
+// EXPECT: a0 = [1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5]
+// EXPECT: da = [1.5, 1.75, 3.0, 3.5, 4.0, 1.75, 2.0]
+// EXPECT: fv = 15.625
+// EXPECT: outs = [13.625, 4.03125, -5.5625, -15.15625, -24.75, -34.34375, -43.9375, -53.53125, -63.125]
+// EXPECT: total = -222.75

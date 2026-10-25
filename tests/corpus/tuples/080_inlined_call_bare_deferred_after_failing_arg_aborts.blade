@@ -1,0 +1,22 @@
+// TEST: Inlined Call Bare Deferred After Failing Arg (aborts)
+// ----------------------------------------------------------------------------
+// Gap G57, the CAPTURING (inlined) call path: `h` captures the module array
+// `base`, so the llvm lane expands its body in place instead of calling it.
+// A call holding an explicit compute evaluates every argument left to right
+// (formalism 10.2), so the first argument's checked cast (BL8006) fires
+// before the LATER bare deferred argument `bad` divides by zero (BL8013).
+// The llvm lane used to refuse the call (its inline path would have run
+// `bad` inside the body, after the others); it now evaluates each argument
+// at its position and forces `bad` there, as the C++ lane's ordered path does.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let z: Array<Int64 like Row> = [0]
+let base: Array<Int64 like Row> = [100]
+let bad = method_for(z) <@> lambda(v) -> 1 / v
+let good = method_for(a) <@> lambda(v) -> v + 1
+let h = lambda(k: Int64, p: Array<Int64 like Row>, q: Array<Int64 like Row>) -> k + p(0) + q(0) + base(0)
+let r = h(a((a(0) : Row)), bad, good |> compute)
+// ABORT: BL8006
+// ABORT: outside Row
+// ABORT: .blade:18
