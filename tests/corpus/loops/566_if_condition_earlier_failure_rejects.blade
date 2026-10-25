@@ -1,0 +1,16 @@
+// TEST: If Condition Earlier Failure (rejects)
+// ----------------------------------------------------------------------------
+// Gap G77, the second Codex look, finding 2: g is read in the condition's left
+// operand, but a checked index cast that fails (BL8006) is evaluated BEFORE
+// it. The C++ lane forced g at the statement's start (its BL8013 first), the
+// interpreter and the llvm lane reached the cast first (BL8006). The force is
+// not the statement's first operation that may fail: refused at lowering in
+// every lane (BL6002).
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let z: Array<Int64 like Row> = [2]
+let g = method_for(z) <@> lambda(v) -> 1 / (v - 2)
+let r = if ((z((z(0) : Row)) + g(0) > 0) && true) then g(0) else 0
+// ERROR: BL6002 @ 12:1
+// ERROR-CONTAINS: whose arm forces the deferred computation `g`
+// REJECT-AT: lower

@@ -1,0 +1,69 @@
+// TEST: Function Local Deferred Tuple Unused
+// ----------------------------------------------------------------------------
+// Gap G58, the shape dropped from tuples/067: a tuple of deferred maps, and a
+// tuple of such tuples, bound in a FUNCTION body. Every member is a deferred
+// computation, so each tuple is itself deferred and binding it evaluates
+// nothing: the failing map g never runs. The C++ lane emitted the function-body
+// tuple as a value tuple naming the module map (`std::make_tuple(g, g)`,
+// BL9002 at g++); it now classifies it as the module level does. C++ and the
+// interpreter (the llvm lane refuses a function that reads a deferred module
+// binding and falls back to C++). Also an accepted INDEPENDENT write (the third
+// Codex look of W4B-A, finding 1): `guard(true, gg) |> compute` is its own fresh
+// pool, so writing it is not a write through the deferred map gg (C++ and the
+// interpreter; the llvm lane has no array guard). And gap G77's two shapes the
+// fourth Codex look restored (rs: a function whose return's if reads gs after a
+// body statement; rt: a block whose final TUPLE holds such an if) -- admitted,
+// with their values. And (the eighth Codex look) a function DECLARED after a
+// statement that forced gp enters with gp forced: its arm read is admitted
+// (rp = 10; the llvm lane refuses the function, G75). And (the thirteenth look)
+// lgamma in its valid domain AFTER the condition's force: admitted (rl = 10.0;
+// the llvm lane refuses lgamma).
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let z: Array<Int64 like Row> = [0]
+let g = method_for(z) <@> lambda(v) -> 1 / v
+function f(k: Int64) -> Int64 = {
+    let p = (g, g)
+    let q = (p, p)
+    k + 1
+}
+let ok = {
+    let p = (g, g)
+    let q = (p, p)
+    7
+}
+let fv = f(4)
+type I1 = Idx<1>
+let x1: Array<Float64 like I1> = [1.0]
+let gg = method_for(x1) <@> lambda(v) -> v + 1.0
+let out = guard(true, gg) |> compute
+out(0) = 9.0
+let sg = reduce(gg, (+))
+type RowS = Idx<1>
+let zs: Array<Int64 like RowS> = [0]
+let gs = method_for(zs) <@> lambda(v) -> 10 / (v + 1)
+function fs(k: Int64) -> Int64 = {
+    let a = zs((zs(0) : RowS))
+    if gs(0) > 0 then gs(0) else a + k
+}
+let rs = fs(0)
+let zp: Array<Int64 like RowS> = [0]
+let gp = method_for(zp) <@> lambda(v) -> 10 / (v + 1)
+let seenp = gp(0)
+function pickp(k: Int64) -> Int64 = if k > 0 then gp(0) else 0
+let rp = pickp(seenp)
+let rl = if gp(0) > 0 then Float64(gp(0)) + lgamma(2.0) else 0.0
+let rt = {
+    let a = zs((zs(0) : RowS))
+    (if gs(0) > 0 then gs(0) else a, 1)
+}
+// EXPECT: ok = 7
+// EXPECT: fv = 5
+// EXPECT: out = [9.0]
+// EXPECT: sg = 2.0
+// EXPECT: rs = 10
+// EXPECT: gp = [10]
+// EXPECT: seenp = 10
+// EXPECT: rp = 10
+// EXPECT: rl = 10.0
+// EXPECT: rt = (10, 1)

@@ -281,9 +281,16 @@ type EarthArray = Array<Float like LatIdx, LonIdx>
   (a tuple of ONLY deferred computations stays deferred; formalism §10.2).
 - A deferred map (a `let` of a map with no `|> compute`) has no storage of its own: writing
   through it, a top-level alias or a view of it, or handing it to a `mut` parameter that is
-  written or to a callback, is BL4005 -- bind `|> compute` first. An `if` VALUE selecting between computed
+  written or to a callback, is BL4005 -- bind `|> compute` first (a view held in a tuple
+  counts: `let p = (g(0), g(1)); let r = p[0]; r(1) = 9.0` writes `g`). An `if` VALUE selecting between computed
   arrays is BL6002 inside a function / lambda / loop body, or when an arm reads a deferred
-  map other than as a copy member (formalism §10.2).
+  map other than as a copy member; any `if` value whose ARM forces a deferred map is
+  BL6002 too (`if c then g(0) else 0`) unless an earlier statement already forced it, or its read (in the condition or earlier in the statement) is the statement's FIRST
+  operation that may fail (`if g(0) > 5 then g(0) else 0` is admitted; a `g |> compute` copy, a read in the
+  right operand of `&&` / `||`, or one after another statement of a top-level block -- other than its final tuple -- is not;
+  a tuple whose leaves the C++ lane evaluates one by one is judged leaf by leaf; the rule covers top-level code,
+  not function / lambda / loop bodies) -- force it before the `if`
+  (formalism §10.2).
 - Statements end at a newline, `;`, or a closer; anything else on the same line is BL1001
   (no implicit multiplication). A line opening with a binary operator continues the one
   above (indented past the statement's column); a line opening with `(`/`[` starts a new

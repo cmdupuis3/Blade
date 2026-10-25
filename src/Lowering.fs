@@ -3347,11 +3347,19 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
                         | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRFunctorMap _ -> true
                         | IRVar (s, _) -> acc.Contains s
                         | _ -> false
-                    let d =
+                    // a block-valued initializer is judged by its let chain's
+                    // RESULT (computeDeferredIds' and the C++ emitter's reading)
+                    let rec norm (v: IRExpr) =
                         match v with
-                        | IRVar (src, _) -> acc.Contains src && not (mutableLets.Contains id)
-                        | IRTuple es -> not es.IsEmpty && es |> List.forall isDef
-                        | v -> isDeferredForm v
+                        | IRLet _ -> norm (snd (IRLift.peelLetChain v))
+                        | v -> v
+                    // (tuples only: a block whose result is a bare alias keeps
+                    // its own reading, a local copy)
+                    let d =
+                        match v, norm v with
+                        | IRVar (src, _), _ -> acc.Contains src && not (mutableLets.Contains id)
+                        | _, IRTuple es -> not es.IsEmpty && es |> List.forall isDef
+                        | v, _ -> isDeferredForm v
                     if d then
                         acc <- acc.Add id
                         changed <- true
@@ -3391,6 +3399,27 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
             | _ -> ()) e
     for b in allBindings do noteRebinds b.Value
     for f in allFuncs do noteRebinds f.Body
+    // Every match pattern variable, with the scrutinee and the projection
+    // path its pattern binds it at (a tuple component's index; any other
+    // pattern form -- a cons, a variant payload, a struct field -- the whole
+    // scrutinee, conservatively).
+    let patBinds = System.Collections.Generic.Dictionary<IRId, IRExpr * (int * bool) list>()
+    let notePatBinds (e: IRExpr) =
+        iterIRExpr (fun n ->
+            match n with
+            | IRMatch (scrut, cases) ->
+                let rec bind (pat: IRPattern) (path: (int * bool) list) =
+                    match pat with
+                    | IRPatVar id -> patBinds.[id] <- (scrut, path)
+                    | IRPatTuple ps -> ps |> List.iteri (fun k p -> bind p (path @ [ (k, false) ]))
+                    | IRPatCons (h, tl) -> bind h []; bind tl []
+                    | IRPatVariant (_, _, Some p, _) -> bind p []
+                    | IRPatStruct (_, fs) -> fs |> List.iter (fun (_, p) -> bind p [])
+                    | _ -> ()
+                for c in cases do bind c.Pattern []
+            | _ -> ()) e
+    for b in allBindings do notePatBinds b.Value
+    for f in allFuncs do notePatBinds f.Body
     // `let a = Z` that every lane deep-copies: an ASSIGNABLE let (a block /
     // body MutableArrayLets member, or a non-static module binding) of a
     // plain dense array (the copy is dense-only in every lane).
@@ -3411,24 +3440,51 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
     // rebinding), views (index, curry, slice, field, tuple projection), both
     // arms of an `if`, a let chain's value, and the array arguments of a call
     // (a callee may return one of them). Anything else is fresh storage.
-    let rec storageOf (fuel: int) (owner: IRCallable option) (e: IRExpr) : Set<IRId> option =
+    //
+    // AGGREGATE CARRIERS (gap G60(a)): a tuple, a struct or a computation
+    // value may HOLD views (`let pair = (m(0), m(1))`), so a name of such a
+    // type is followed exactly as an array name is -- its initializer and
+    // every rebinding, by binder identity -- and a projection follows the
+    // carrier along its PATH: `pair[0]` reaches the first member of the
+    // tuple literal that initialized `pair` (through nested tuples, `if`
+    // values, let chains and aliases of it), never its siblings. A path that
+    // meets a form it cannot see into (a call's result, a struct) falls back
+    // to the whole carrier: over-approximate, never under. A tuple wrapper is
+    // NOT a copy: only a proved copy or fresh storage ends the walk.
+    let rec holdsStorage (t: IRType) =
+        match t with
+        | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> holdsStorage inner
+        | IRTTuple ts -> ts |> List.exists holdsStorage
+        | IRTNamed _ | IRTComputation _ -> true
+        | t -> isArrayTy t
+    let exprHoldsStorage (e: IRExpr) = try holdsStorage (typeOf e) with _ -> false
+    let rec storageAt (seen: System.Collections.Generic.HashSet<IRId * (int * bool) list>) (fuel: int) (owner: IRCallable option) (path: (int * bool) list) (e: IRExpr) : Set<IRId> option =
         if fuel <= 0 then None
         else
-            let all (xs: IRExpr list) =
+            let allAt (p: (int * bool) list) (xs: IRExpr list) =
                 xs |> List.fold (fun acc x ->
-                    match acc, storageOf (fuel - 1) owner x with
+                    match acc, storageAt seen (fuel - 1) owner p x with
                     | Some a, Some b -> Some (Set.union a b)
                     | _ -> None) (Some Set.empty)
+            let all = allAt []
             match e with
-            | IRVar (id, ty) when isArrayTy ty || deferred.Contains id ->
+            // a binder already being followed along this path adds nothing new
+            // (the walk is a union): a cyclic rebinding ends here, not at fuel
+            | IRVar (id, ty) when (holdsStorage ty || deferred.Contains id) && not (seen.Add((id, path))) -> Some (Set.singleton id)
+            | IRVar (id, ty) when holdsStorage ty || deferred.Contains id ->
                 let viaInit =
                     match lets.TryGetValue id with
-                    | true, v when isProvedCopy id v -> Some Set.empty
-                    | true, v -> storageOf (fuel - 1) owner v
-                    | _ -> Some Set.empty
+                    | true, v when path.IsEmpty && isProvedCopy id v -> Some Set.empty
+                    | true, v -> storageAt seen (fuel - 1) owner path v
+                    | _ ->
+                        // a match PATTERN variable: the part of the scrutinee
+                        // its pattern binds (finding 2's pattern-bound aliases)
+                        match patBinds.TryGetValue id with
+                        | true, (scrut, ppath) -> storageAt seen (fuel - 1) owner (ppath @ path) scrut
+                        | _ -> Some Set.empty
                 let viaRebinds =
                     match rebinds.TryGetValue id with
-                    | true, rs -> all (List.ofSeq rs)
+                    | true, rs -> allAt path (List.ofSeq rs)
                     | _ -> Some Set.empty
                 (match viaInit, viaRebinds with
                  | Some a, Some b -> Some (Set.add id (Set.union a b))
@@ -3438,13 +3494,84 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
                 (match owner |> Option.bind (fun c -> c.Params |> List.tryFind (fun p -> p.Name = nm)) with
                  | Some p -> Some (Set.singleton p.VarId)
                  | None -> Some Set.empty)
-            | IRIndex (a, _, _) | IRCurry (a, _, _) | IRSlice (a, _, _, _) | IRFieldAccess (a, _) | IRTupleProj (a, _, _) ->
-                storageOf (fuel - 1) owner a
-            | IRIf (_, t, f) -> all [ t; f ]
-            | IRLet _ -> storageOf (fuel - 1) owner (snd (IRLift.peelLetChain e))
-            | IRApp (_, args, _) -> all (args |> List.filter typeIsArray)
-            | IRTuple es -> all es
-            | _ -> Some Set.empty
+            | IRTupleProj (a, k, isFlat) -> storageAt seen (fuel - 1) owner ((k, isFlat) :: path) a
+            | IRTuple es ->
+                (match path with
+                 | (k, false) :: rest when k >= 0 && k < es.Length -> storageAt seen (fuel - 1) owner rest es.[k]
+                 // a FLAT leaf index selects precisely only over leaves that
+                 // are not themselves tuples; otherwise every member
+                 | (k, true) :: rest when k >= 0 && k < es.Length
+                                         && es |> List.forall (fun m -> match (try typeOf m with _ -> IRTUnit) with IRTTuple _ -> false | _ -> true) ->
+                     storageAt seen (fuel - 1) owner rest es.[k]
+                 // the whole carrier: every member that can hold storage (a
+                 // scalar member -- `m(0, 1)` -- is a value read, no view)
+                 | _ -> all (es |> List.filter exprHoldsStorage))
+            | IRStructLit (_, fields) -> all (fields |> List.map snd |> List.filter exprHoldsStorage)
+            | IRIndex (a, _, _) | IRCurry (a, _, _) | IRSlice (a, _, _, _) | IRFieldAccess (a, _) ->
+                storageAt seen (fuel - 1) owner [] a
+            | IRIf (_, t, f) -> allAt path [ t; f ]
+            | IRLet _ -> storageAt seen (fuel - 1) owner path (snd (IRLift.peelLetChain e))
+            // a call returns (a view of) a storage-carrying argument, and an
+            // APPLIED storage-carrying value (`row(1)` over a computation-typed
+            // `row`) is a read of it
+            | IRApp (f, args, _) -> all ((if exprHoldsStorage f then [ f ] else []) @ (args |> List.filter exprHoldsStorage))
+            | IRTupleCons (h, t) -> all [ h; t ]
+            | IRTupleDecons t -> all [ t ]
+            // a match VALUE: every case body along the path, as an if's
+            // arms (Codex review of W4B-A, finding 2: it used to be "fresh")
+            | IRMatch (_, cases) -> allAt path (cases |> List.map (fun c -> c.Body))
+            // forms that may hand back (a view of) an operand's storage and
+            // have no proved fresh-copy emission in every lane (residual
+            // view nodes, pack projections): their operands, conservatively
+            | IRSubset (a, _, _, _) | IRReverse (a, _) | IRShift (a, _, _, _) | IRDiag a
+            | IRPolyIndex (a, _) | IRPolyTail (a, _) | IRCompoundProject (a, _) ->
+                storageAt seen (fuel - 1) owner [] a
+            // `|> compute` of a DEFERRED computation (a map, a deferred binder)
+            // or of any computing form (a guard, a transpose, a sequence, ...)
+            // materializes FRESH cells (third Codex look of W4B-A, finding 1:
+            // `guard(true, g) |> compute` is its own pool); of a stored VIEW or
+            // name it is the identity in the compiled lanes (measured: a write
+            // through `mc(0) |> compute` lands in mc in C++ and LLVM), so that
+            // operand is followed
+            | IRCompute x ->
+                let rec strip (e: IRExpr) = match e with IRCompute y -> strip y | e -> e
+                (match strip x with
+                 | IRVar (id, _) when deferred.Contains id -> Some Set.empty
+                 | (IRVar _ | IRParam _ | IRIndex _ | IRCurry _ | IRSlice _ | IRTupleProj _ | IRFieldAccess _ | IRPure _) as c ->
+                     storageAt seen (fuel - 1) owner path c
+                 | _ -> Some Set.empty)
+            // IDENTITY WRAPPERS (second Codex look, finding 3): `pure(x)` is the
+            // identity in every lane; a bare `guard` / `<|>` / `<|:>` / bind
+            // VALUE stands for its operand(s) (as a named binding it is a
+            // deferred binder anyway) -- followed
+            | IRPure a | IRGuard (_, a) | IRBind (a, _) -> storageAt seen (fuel - 1) owner path a
+            | IRChoice (l, r) | IRFallback (l, r) -> allAt path [ l; r ]
+            // FRESH: a computed value (the result's own new cells) or no
+            // storage at all
+            | IRLit _ | IRArrayLit _ | IRBinOp _ | IRUnaryOp _ | IRComplex _ | IRFma _ | IRRandAt _
+            | IRMethodFor _ | IRObjectFor _ | IRApplyCombinator _ | IRComposeApply _ | IRParallel _
+            | IRFusion _ | IRArrayProduct _ | IRComposeObj _ | IRComposeMeth _
+            | IRCompose _ | IRFunctorMap _ | IRReynolds _
+            // copies into their own pool in the C++ lane and the interpreter
+            // (transpose in all three lanes); a sequence / replicate copies in C++
+            // (the interpreter's concrete-array sequence SHARES its members' stores:
+            // a pre-existing cross-lane divergence, recorded in G60, not refused here)
+            | IRTranspose _ | IRDecompact _ | IRGroupBy _ | IRUngroup _ | IRUngroupGrid _ | IRStack _ | IRJoin _
+            | IRUngroupRows _ | IRSequence _ | IRReplicate _
+            | IRMask _ | IRIntersect _ | IRUnion _ | IRUnique _ | IRContains _ | IRDisplayEmit _ | IRDisplayJson _
+            | IRDisplayNum _ | IRDisplayStr _ | IRGroupKeys _ | IRGroupBucket _ | IRSegments _ | IRSegmentsGrid _
+            | IRGroupSizes _ | IRSort _ | IRReduce _ | IRReduceCompute _ | IRProdSum _ | IRZip _ | IRAlign _
+            | IRGram _ | IRGramApply _ | IRMatmul _ | IREigh _ | IRSolve _ | IRLu _ | IRLuSolve _
+            | IRArrayNegate _ | IRArrayConjugate _ | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _
+            | IRNth | IRZero _ | IRUnseededSeed _ | IRUninit _ | IRReleasePools _ | IRRank _ | IRExtent _
+            | IRRaggedLookup _ | IRCompoundMask _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent
+            | IRAssign _ | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ ->
+                Some Set.empty
+            // (EXHAUSTIVE over IRExpr, no wildcard: a form added later is an
+            // incomplete-match warning here until it is classified, never
+            // silently "fresh")
+    let storageOf (fuel: int) (owner: IRCallable option) (e: IRExpr) =
+        storageAt (System.Collections.Generic.HashSet<IRId * (int * bool) list>()) fuel owner [] e
     let written = System.Collections.Generic.HashSet<IRId>()
     let writeSite = System.Collections.Generic.Dictionary<IRId, Blade.Ast.Span>()
     let changed = ref true
@@ -3458,7 +3585,7 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
         | None ->
             raise (Blade.Diagnostics.BladeDiagnosticException
                     (Blade.Diagnostics.mkError "BL4005" Blade.Diagnostics.PhConstraints span
-                        "a write whose target's storage could not be traced (more than 48 view, alias or rebinding steps): it may write a deferred computation, which has no storage of its own (formalism 10.2). Bind the array the write is meant for with `|> compute` and write that name directly."))
+                        "a write whose target's storage could not be traced (through a storage-carrying form the provenance walk does not know, or more than 48 nested view, alias, projection or rebinding steps; a cycle of rebindings is followed once, not counted): it may write a deferred computation, which has no storage of its own (formalism 10.2). Bind the array the write is meant for with `|> compute` and write that name directly."))
     // Every site, with its owner (the callable whose parameters an IRParam
     // names) and the span a refusal reports.
     let sites =
@@ -3492,7 +3619,8 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
                              | IRParam (nm, _, _) -> ownParams.Contains nm
                              | _ -> true
                          if unknownCallee then
-                             args |> List.iter (fun a -> if typeIsArray a then mark span owner a))
+                             // (a tuple / struct carrying arrays too: finding 2)
+                             args |> List.iter (fun a -> if exprHoldsStorage a then mark span owner a))
                 | IRApplyCombinator info ->
                     (match resolve info.Kernel with
                      | Some k when k.Params |> List.exists (fun p -> written.Contains p.VarId) ->
@@ -3517,9 +3645,11 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
                 | Some c -> c.Captures |> List.fold (fun a ci -> Set.add ci.Id a) acc
                 | None -> acc) refs
         Set.intersect all deferred |> Set.toList
-    let rec computationOf (fuel: int) (id: IRId) =
+    // To the alias chain's end, no depth cutoff (gap G59); the visited set
+    // only guards it (an initializer names only earlier binders).
+    let rec computationOf (seen: Set<IRId>) (id: IRId) =
         match lets.TryGetValue id with
-        | true, IRVar (src, _) when fuel > 0 && deferred.Contains src -> computationOf (fuel - 1) src
+        | true, IRVar (src, _) when not (seen.Contains src) && deferred.Contains src -> computationOf (seen.Add id) src
         | true, v -> Some v
         | _ -> None
     // The first deferred binder an arm would force, if any. A copy member
@@ -3536,14 +3666,300 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
         | e ->
             match stripC e with
             | IRVar (id, ty) when deferred.Contains id && isArrayTy ty ->
-                (match computationOf 64 id with
+                (match computationOf Set.empty id with
                  | Some v -> readsOf v |> List.tryHead
                  | None -> None)
             | c when isDeferredForm c -> readsOf c |> List.tryHead
             | other -> readsOf other |> List.tryHead
-    let checkIfs (span: Blade.Ast.Span) (inFrame: bool) (root: IRExpr) =
-        let rec walk (frame: bool) (e: IRExpr) =
+    // The deferred binders a piece of an ARM forces when it is evaluated (gap
+    // G77): a positional / extent / membership / slice read, a whole-array call
+    // argument, a prodsum operand, an assignment's right-hand side, a fold over
+    // a deferred value-keyed wrapper (no fold form reads it cell by cell), and
+    // every capture of a callable the arm names. A fold or a map OVER a
+    // deferred map fuses and forces nothing, so it is not here.
+    let forcingReads (n: IRExpr) : IRId list =
+        let out = ResizeArray<IRId>()
+        let note (b: IRExpr) =
+            match stripC b with
+            | IRVar (id, _) when deferred.Contains id -> out.Add id
+            | _ -> ()
+        let isWrapper (b: IRExpr) =
+            match stripC b with
+            | IRVar (id, _) when deferred.Contains id ->
+                (match computationOf Set.empty id with
+                 | Some (IRChoice _ | IRFallback _) -> true
+                 | _ -> false)
+            | _ -> false
+        iterIRExpr (fun x ->
+            match x with
+            | IRIndex (a, _, _) | IRCurry (a, _, _) | IRSlice (a, _, _, _) | IRSubset (a, _, _, _)
+            | IRExtent (a, _) | IRContains (a, _) -> note a
+            | IRApp (_, args, _) -> args |> List.iter note
+            | IRProdSum es -> es |> List.iter note
+            | IRAssign (_, v) -> note v
+            | IRReduce (a, _, _) when isWrapper a -> note a
+            | _ -> ()) n
+        let refs = collectVarRefsIR n
+        for id in refs do
+            match Map.tryFind id funcs with
+            | Some c -> for ci in c.Captures do if deferred.Contains ci.Id then out.Add ci.Id
+            | None -> ()
+        out |> Seq.distinct |> List.ofSeq
+    // THE ADMITTED CONDITION FORCE (gap G77; Codex reviews of W4B-A, findings
+    // 1 / 2). The C++ lane forces every deferred binder a statement reads
+    // positionally at the START of that statement; the interpreter and the LLVM
+    // lane force it where the evaluation reaches it. The two agree on the print
+    // set AND the first failure only when the force is the FIRST thing in the
+    // statement that can fail. So the one binder an `if`'s arm may read is the
+    // binder whose forcing read is the condition's FIRST evaluated operation
+    // that is not inert (operands left to right, before the node): a read
+    // `g(..)` / `g(i, j)` of the binder itself, never a `|> compute` COPY of it
+    // (a copy forces nothing and prints nothing) -- and only when the `if` is
+    // the whole value of its statement (a let's value, a block's result, a
+    // function's return), so no other work of the statement precedes it.
+    // Inert: names, literals, parameters, `+ - *`, float `/`, comparisons, logic
+    // (the left operand of `&&` / `||` runs first; the first event found is in
+    // it), negation, tuple / field projections. Everything else may fail.
+    let firstForceOf (cond: IRExpr) : IRId option =
+        // the SCALAR element of a type, every unit / index-tag wrapper peeled
+        // RECURSIVELY (thirteenth Codex look); None = not a proven scalar
+        let rec peelScalar (ty: IRType) =
+            match ty with
+            | IRTScalar et -> Some et
+            | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> peelScalar inner
+            | _ -> None
+        let elemOf (x: IRExpr) = try peelScalar (typeOf x) with _ -> None
+        let isScalarExpr (x: IRExpr) = (elemOf x).IsSome
+        // FAIL CLOSED: an operand whose type is not a proven real-float / complex
+        // scalar may be an integer (IRTInfer, a named type, a Nat, a typeOf
+        // failure), so integer division / modulus / power keep their barrier
+        let maybeInt (x: IRExpr) =
+            match elemOf x with
+            | Some (ETFloat64 | ETFloat32 | ETComplex64 | ETComplex128) -> false
+            | Some _ -> true
+            | None -> true
+        // a cast SOURCE that may be a float (unknown fails closed too)
+        let maybeFloat (x: IRExpr) =
+            match elemOf x with
+            | Some (ETInt64 | ETInt32 | ETBool) -> false
+            | _ -> true
+        // Some (Some id) = the first event is the force of id; Some None = the
+        // first event may fail otherwise; None = nothing evaluated may fail
+        // EXHAUSTIVE over IRExpr (eleventh Codex look of W4B-A): every node is
+        // its evaluated children in evaluation order, then -- when the node
+        // itself may fail -- a barrier; or inert; or a force of a binder. No
+        // wildcard: a constructor added later is an incomplete-match warning.
+        let rec first (e: IRExpr) : IRId option option =
+            let seq (xs: IRExpr list) (self: IRId option option) =
+                match xs |> List.tryPick first with
+                | Some ev -> Some ev
+                | None -> self
+            let barrier = Some None
+            // a whole-array operand position that FORCES a bare deferred binder
+            // (a call argument, a prodsum operand: C++'s pre-pass and the
+            // interpreter both force it there)
+            let operand (a: IRExpr) =
+                match a with
+                | IRVar (id, _) when deferred.Contains id -> Some (Some id)
+                | a -> first a
+            let seqOperands (xs: IRExpr list) (self: IRId option option) =
+                match xs |> List.tryPick operand with
+                | Some ev -> Some ev
+                | None -> self
+            match e with
+            // leaves
+            | IRLit _ | IRParam _ -> None
+            // a bare deferred binder evaluated as a value is a COPY of its
+            // computation (it may fail), never a stored force
+            | IRVar (id, _) -> if deferred.Contains id then barrier else None
+            // reads of the binder itself: its force
+            | IRIndex (IRVar (id, _), _, _) | IRCurry (IRVar (id, _), _, _) | IRSlice (IRVar (id, _), _, _, _)
+            | IRSubset (IRVar (id, _), _, _, _) | IRContains (IRVar (id, _), _) when deferred.Contains id -> Some (Some id)
+            // checked reads: operands, then the read (a checked subscript) may fail
+            | IRIndex (a, idxs, _) -> seq (a :: idxs) barrier
+            | IRCurry (a, i, _) -> seq [ a; i ] barrier
+            | IRSlice (a, _, s, t) -> seq [ a; s; t ] barrier
+            | IRSubset (a, _, s, l) -> seq [ a; s; l ] barrier
+            | IRContains (a, v) -> seq [ a; v ] barrier
+            | IRExtent (IRVar (id, _), _) when deferred.Contains id -> barrier
+            | IRExtent (a, _) | IRRank a -> seq [ a ] None
+            // `&&` / `||`: only the LEFT operand runs unconditionally; an inert left
+            // operand leaves the right one CONDITIONAL, a barrier (third look, finding 2)
+            | IRBinOp (_, (IRAnd | IROr), l, _, _) -> (match first l with Some ev -> Some ev | None -> barrier)
+            // SCALAR PANICS, formalism 2.4 exactly (twelfth Codex look): an operation
+            // is a barrier after its operands ONLY if 2.4 says it can panic --
+            //   integer `/` and `%` (by zero)                        BL8013
+            //   integer-base `^` (a negative integer exponent)       BL8013
+            //   a float -> INTEGER cast (NaN / out of range)         BL8014
+            //   a checked read (above)                               BL8006
+            //   a call (below: its body is not entered)
+            // everything else is INERT after its operands: `+ - *`, float `/`,
+            // a REAL-base `^` (whatever the exponent), comparisons, logic,
+            // negation, every libm intrinsic (IEEE values, never a language
+            // panic), a cast to Float64 / Float32 (or int -> int), complex ops, fma
+            | IRBinOp (_, op, l, r, _) ->
+                let selfFails =
+                    match op with
+                    | IRDiv | IRMod -> maybeInt l && maybeInt r
+                    | IRCaret -> maybeInt l && (match r with IRLit (IRLitInt k) -> k < 0L | _ -> true)
+                    | _ -> false
+                seq [ l; r ] (if selfFails then barrier else None)
+            // lgamma / digamma are Blade's series and panic BL8008 outside x > 0
+            // (formalism 2.4; IR.irNodeMayAbort): a barrier after the operand
+            | IRUnaryOp (IRMath ("lgamma" | "digamma"), a) -> seq [ a ] barrier
+            | IRUnaryOp ((IRNeg | IRNot | IRConj | IRReal | IRImag | IRArg | IRMath _), a) -> seq [ a ] None
+            | IRUnaryOp (IRCast (et, _), a) ->
+                let toInt = (et = ETInt64 || et = ETInt32)
+                let fromFloat = maybeFloat a
+                seq [ a ] (if toInt && fromFloat then barrier else None)
+            | IRComplex (a, b) -> seq [ a; b ] None
+            | IRFma (a, b, c) -> seq [ a; b; c ] None
+            | IRRandAt (_, args, w) -> seq (args @ (w |> Option.map fst |> Option.toList)) barrier
+            // aggregates: members left to right
+            | IRTuple es -> seq es None
+            | IRTupleProj (a, _, _) | IRFieldAccess (a, _) | IRTupleDecons a | IRPure a -> seq [ a ] None
+            | IRTupleCons (h, tl) -> seq [ h; tl ] None
+            | IRStructLit (_, fields) -> seq (fields |> List.map snd) None
+            | IRArrayLit (es, _) -> seq es None
+            | IRPolyIndex (pk, i) -> seq [ pk; i ] None
+            | IRPolyTail (pk, _) -> seq [ pk ] None
+            // a CALL (eleventh look, finding 1): the callee expression and every
+            // argument left to right first, then the invocation -- a barrier (its
+            // body is not entered)
+            | IRApp (f, args, _) -> (match first f with Some ev -> Some ev | None -> seqOperands args barrier)
+            | IRProdSum es -> seqOperands es barrier
+            // control: the condition / scrutinee runs first; the next event is in
+            // an arm or case, which is conditional
+            | IRIf (c, _, _) -> (match first c with Some ev -> Some ev | None -> barrier)
+            | IRMatch (s, _) -> (match first s with Some ev -> Some ev | None -> barrier)
+            | IRLet (_, v, b) -> seq [ v; b ] None
+            // `|> compute` (finding 2): over a STORED name (not deferred: the
+            // member-order predicate's reading) it adds no event; over a deferred
+            // computation it evaluates a COPY -- may fail, never a force
+            | IRCompute x ->
+                let rec strip (y: IRExpr) = match y with IRCompute z -> strip z | y -> y
+                (match strip x with
+                 | IRVar (id, _) when not (deferred.Contains id) -> None
+                 | IRLit _ | IRParam _ -> None
+                 | _ -> barrier)
+            // loop objects and function values: compile-time, nothing evaluated
+            | IRMethodFor _ | IRObjectFor _ | IRCompose _ | IRComposeObj _ | IRComposeMeth _ | IRReynolds _ -> None
+            // deferred computations and computation wrappers held as values: their
+            // consumers evaluate them (may fail)
+            // a SCALAR guard / choice (second regression of the twelfth look): the
+            // guard's condition, the choice's LEFT operand run unconditionally --
+            // walk them, then a barrier (never admit from the conditional body /
+            // right operand); an array-valued (deferred) wrapper stays opaque
+            | IRGuard (c, _) when isScalarExpr e ->
+                (match first c with Some ev -> Some ev | None -> barrier)
+            | IRChoice (l, _) when isScalarExpr e ->
+                (match first l with Some ev -> Some ev | None -> barrier)
+            // deferred computations, computation wrappers and an eager sequence
+            // held as values: opaque barriers (their consumers evaluate them)
+            | IRApplyCombinator _ | IRComposeApply _ | IRBind _ | IRParallel _ | IRFusion _ | IRChoice _
+            | IRFallback _ | IRArrayProduct _ | IRFunctorMap _ | IRGuard _ | IRSequence _ | IRReplicate _
+            | IRZip _ | IRAlign _ -> barrier
+            // eager array operations, folds, factorizations, effects: operands
+            // first, then the operation may fail
+            | IRMask _ | IRIntersect _ | IRUnion _ | IRUnique _ | IRSort _ | IRReduce _ | IRReduceCompute _
+            | IRStack _ | IRJoin _ | IRTranspose _ | IRDecompact _ | IRGram _ | IRGramApply _ | IRMatmul _
+            | IREigh _ | IRSolve _ | IRLu _ | IRLuSolve _ | IRArrayNegate _ | IRArrayConjugate _ | IRReverse _
+            | IRShift _ | IRDiag _ | IRGroupBy _ | IRGroupKeys _ | IRGroupBucket _ | IRGroupSizes _ | IRUngroup _
+            | IRUngroupGrid _ | IRUngroupRows _ | IRDisplayEmit _ | IRDisplayJson _ | IRDisplayNum _
+            | IRDisplayStr _ -> seq (childrenOf e) barrier
+            // inert markers and constants
+            | IRSegments _ | IRSegmentsGrid _ | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _
+            | IRNth | IRZero _ | IRUnseededSeed _ | IRUninit _ | IRReleasePools _ | IRSparseKeys _ | IROrbitClass _
+            | IROpaqueExtent -> None
+            | IRRaggedLookup a | IRCompoundMask a | IRCompoundProject (a, _) -> seq [ a ] None
+            // statements: their operands, then they may fail / branch
+            | IRAssign (_, v) -> seq [ v ] barrier
+            | IRForRange (_, lo, hi, _) -> seq [ lo; hi ] barrier
+            | IRConstraintCheck (c, _, _, _) -> seq [ c ] barrier
+            | IRBreakIf c -> seq [ c ] barrier
+        match first cond with
+        | Some (Some id) -> Some id
+        | _ -> None
+    // The deferred binders a statement DEFINITELY FORCES -- forced at that
+    // statement on every evaluation path (seventh Codex look of W4B-A): a read
+    // of the binder itself (`g(k)`, a curry, a slice, a subset, a membership
+    // test), the binder as a whole-array call argument, a prodsum operand; an
+    // operand that runs unconditionally (only the LEFT side of `&&` / `||`, an
+    // `if`'s condition plus what BOTH arms force, a `match`'s scrutinee plus what
+    // EVERY case forces, a let chain's lets and result). NOT a force: a
+    // `|> compute` COPY, a fold or a map over it (fused: it evaluates the
+    // computation but neither stores nor prints it), an extent, anything under a
+    // deferred computation, a kernel (a lifted callable: its capture is read where
+    // its body reads it) or a computation wrapper. Forcing one member of a module
+    // ALIAS CLASS forces the class (formalism 10.2).
+    let aliasClasses = IRLift.deferredAliasClasses allBindings (IRLift.computeDeferredIds allBindings)
+    let rec definitelyForces (e: IRExpr) : Set<IRId> =
+        let note (b: IRExpr) =
+            match b with
+            | IRVar (id, _) when deferred.Contains id -> Set.singleton id
+            | _ -> Set.empty
+        let here =
+            match e with
+            | IRIndex (a, _, _) | IRCurry (a, _, _) | IRSlice (a, _, _, _) | IRSubset (a, _, _, _) | IRContains (a, _) -> note a
+            | IRApp (_, args, _) -> args |> List.map note |> Set.unionMany
+            | IRProdSum es -> es |> List.map note |> Set.unionMany
+            | _ -> Set.empty
+        let inter (xs: Set<IRId> list) = match xs with [] -> Set.empty | x :: rest -> List.fold Set.intersect x rest
+        let kids =
+            match e with
+            | IRBinOp (_, (IRAnd | IROr), l, _, _) -> definitelyForces l
+            | IRIf (c, t, f) -> Set.union (definitelyForces c) (Set.intersect (definitelyForces t) (definitelyForces f))
+            | IRMatch (s, cases) -> Set.union (definitelyForces s) (cases |> List.map (fun c -> definitelyForces c.Body) |> inter)
+            | IRLet (_, v, b) -> Set.union (definitelyForces v) (definitelyForces b)
+            | IRForRange (_, lo, hi, _) -> Set.union (definitelyForces lo) (definitelyForces hi)
+            | IRReduce _ | IRReduceCompute _ | IRExtent _ -> Set.empty
+            | IRGuard _ | IRSequence _ | IRReplicate _ | IRChoice _ | IRFallback _ -> Set.empty
+            | e when isDeferredForm e -> Set.empty
+            | e -> childrenOf e |> List.map definitelyForces |> Set.unionMany
+        Set.union here kids
+    let dominatingForces (e: IRExpr) : Set<IRId> =
+        definitelyForces e
+        |> Set.fold (fun acc id ->
+            match aliasClasses.TryFind id with
+            | Some cls -> cls |> List.fold (fun a m -> Set.add m a) acc
+            | None -> Set.add id acc) Set.empty
+    let checkIfs (span: Blade.Ast.Span) (inFrame: bool) (initialForced: Set<IRId>) (root: IRExpr) =
+        // `stmt`: the whole value of the statement `e` sits in (a binding's
+        // value, a let's value, a let chain's result, a loop bound / body).
+        let rec walk (frame: bool) (stmt: IRExpr) (forced: Set<IRId>) (e: IRExpr) =
             (match e with
+             // AN `if` VALUE WHOSE ARM FORCES A DEFERRED COMPUTATION (gap G77):
+             // the condition first, then only the taken arm is the
+             // interpreter's order; the C++ lane forced every deferred map
+             // either arm reads BEFORE the condition (so an untaken arm's map
+             // printed and its failure fired), and the LLVM lane printed it
+             // from both arms (forcing it, and failing, at print time). No lane
+             // has a print rule that follows the branch, so the shape is
+             // refused, every lane alike; the one binder whose forcing read is the
+             // condition's first possibly-failing operation, in an `if` that is
+             // its statement's whole value, is admitted (firstForceOf).
+             // (TOP-LEVEL code only -- module statements and their blocks, NOT a
+             // function / lambda / kernel body (ninth Codex look) nor a LOOP body
+             // -- a let-rec step, a while guard (tenth look): the CURRENT frame;
+             // there the entry force state is not decidable here, so only the
+             // structural audit below applies)
+             | IRIf (c, t, f) when not frame && not (IRLift.ifNeedsOrderedArms dv e) ->
+                 // the binder whose force is the first event of the whole
+                 // STATEMENT (what the C++ pre-pass moves to its start) and
+                 // of this condition
+                 // the binder whose force is the FIRST possibly-failing event of the
+                 // whole STATEMENT (region): the C++ pre-pass moves it to the
+                 // statement's start, where it already is in every lane -- whether it
+                 // sits in this condition or anywhere earlier in the statement
+                 // (`g(0) + (if z(0) > 0 then g(0) else 0)`; tenth Codex look). Any
+                 // may-fail event before it vetoes (firstForceOf's barrier).
+                 let admitted = firstForceOf stmt
+                 (match forcingReads t @ forcingReads f |> List.tryFind (fun id -> Some id <> admitted && not (forced.Contains id)) with
+                  | Some id ->
+                      let (what, _) = describe id
+                      refuseLowering span
+                          ($"an `if` value whose arm forces the deferred computation {what} (by position, as a call argument, through a capture, ...): only the TAKEN arm is evaluated, and no lane's print list or first-failure point follows the branch (formalism 10.2). Force it before the `if` (`let v = <it> |> compute`, or read it in a statement of its own) and read `v` in the arm.")
+                  | None -> ())
              | IRIf (_, t, f) when IRLift.ifNeedsOrderedArms dv e ->
                  if frame then
                      refuseLowering span
@@ -3558,13 +3974,95 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
              | _ -> ())
             match e with
             | IRForRange (_, lo, hi, body) ->
-                walk frame lo
-                walk frame hi
-                walk true body
-            | _ -> childrenOf e |> List.iter (walk frame)
-        walk inFrame root
-    for b in allBindings do checkIfs (IR.declSpanOf b.Name) false b.Value
-    for f in allFuncs do checkIfs (funcSpan f) true f.Body
+                walk frame lo forced lo
+                walk frame hi forced hi
+                walk true body (Set.union forced (Set.union (dominatingForces lo) (dominatingForces hi))) body
+            // a let chain (a block, a function body) is ONE hoist region: the
+            // C++ lane forces the whole block's deferred reads before its lets
+            // (genLetChainBinding; third look, finding 3), so every earlier let
+            // precedes the admitted force
+            // a binding's tuple value the C++ emitter evaluates MEMBER BY
+            // MEMBER (genMemberOrderedTupleBinding; IRLift.tupleNeedsMemberOrderOf,
+            // the emitter's own judgment): each leaf is its own region, left to
+            // right (fifth Codex look of W4B-A, finding 1). A tuple the emitter
+            // renders whole keeps the enclosing region.
+            | IRTuple _ when obj.ReferenceEquals (e, stmt) && not inFrame
+                             && not (IRLift.isWhollyDeferredTupleOf dv (match e with IRTuple es -> es | _ -> []))
+                             // the emitter's two halves: the STRUCTURAL one (an explicit
+                             // compute / bare deferred / deferred-tuple member) over the
+                             // program's deferred view -- a binder the emitter already
+                             // forced makes it skip the ordered path, but then that member
+                             // is a copy of stored cells, which cannot fail, so the first
+                             // failure is the same either way (sixth Codex look, finding
+                             // 1) -- and the may-fail COUNT with NO binder deferred: the
+                             // emitter's count can only be higher, so a tuple ordered here
+                             // by the count is ordered there
+                             && (IRLift.memberNeedsOrderOf dv e
+                                 || (IRLift.tupleLeavesOf e
+                                     |> List.filter (IRLift.memberMayFailOf { dv with IsDeferred = (fun _ -> false); ValueOf = (fun _ -> None) })
+                                     |> List.length) >= 2) ->
+                // the leaves run left to right (C++ threads its context leaf to leaf):
+                // each leaf is checked with what the EARLIER leaves definitely forced
+                (IRLift.tupleLeavesOf e |> List.fold (fun acc leaf ->
+                    walk frame leaf acc leaf
+                    Set.union acc (dominatingForces leaf)) forced) |> ignore
+            | IRLet (_, v, b) when inFrame ->
+                // a FUNCTION / lambda body is emitted statement by statement
+                // (genFuncBody): each let's value is its own region, and the
+                // return's forcing code follows the preceding statements
+                walk frame v forced v
+                walk frame b (Set.union forced (dominatingForces v)) b
+            | IRLet (_, v, b) ->
+                walk frame stmt forced v
+                let forcedB = Set.union forced (dominatingForces v)
+                // a block whose RESULT is a tuple: the C++ block pre-pass
+                // excludes the final tuple's reads, which force at the tuple's
+                // own binding, after the block's statements -- its own region
+                match stmt, b with
+                | IRLet _, IRTuple _ -> walk frame b forcedB b
+                | _ -> walk frame stmt forcedB b
+            // the condition / scrutinee / loop bounds run BEFORE the arms / cases /
+            // body in every lane: their definite forces are carried in (never one
+            // arm into another, never one iteration into the next)
+            | IRIf (c, t, f) ->
+                walk frame stmt forced c
+                let fc = Set.union forced (dominatingForces c)
+                walk frame stmt fc t
+                walk frame stmt fc f
+            | IRMatch (s, cases) ->
+                walk frame stmt forced s
+                let fs = Set.union forced (dominatingForces s)
+                for cs in cases do
+                    cs.Guard |> Option.iter (walk frame stmt fs)
+                    walk frame stmt fs cs.Body
+            | _ -> childrenOf e |> List.iter (walk frame stmt forced)
+        // The shared predicate refuses a cyclic deferred-tuple provenance
+        // unspanned (IRLift.deferredTupleMembersOf); locate it at the binding.
+        try walk inFrame root initialForced root
+        with Blade.Diagnostics.BladeDiagnosticException d when d.Code = "BL6002" && d.Span = Blade.Ast.noSpan ->
+            refuseLowering span d.Message
+    // top-level statements DOMINATE the ones after them, module by module
+    // in binding order: what an earlier statement definitely forced is stored
+    // when a later `if`'s arm reads it (seventh Codex look, the one finding)
+    // REGION BOUNDARIES of the force state (eighth Codex look of W4B-A):
+    //   top-level statements -- accumulate, module by module in binding order;
+    //   block lets and function-body lets -- accumulate (walk's IRLet arms);
+    //   a block's final tuple -- inherits the block's lets (walk);
+    //   member-ordered tuple leaves -- accumulate left to right (walk);
+    //   if / match arms -- inherit PLUS the condition's / scrutinee's definite
+    //     forces; add nothing for later code unless every branch forces;
+    //   a FUNCTION, lambda or kernel body -- NOT AUDITED by the ordinary-arm
+    //     refusal (only the structural one): a sound entry state needs every
+    //     invocation / consumption site (captures, recursion, deferred kernels),
+    //     recorded OPEN in G77;
+    //   a loop body -- inherits plus the bounds' forces, adds nothing across iterations;
+    //   a kernel -- like a function body (not audited).
+    for m in modules do
+        let mutable moduleForced = Set.empty
+        for b in m.Bindings do
+            checkIfs (IR.declSpanOf b.Name) false moduleForced b.Value
+            moduleForced <- Set.union moduleForced (dominatingForces b.Value)
+    for f in allFuncs do checkIfs (funcSpan f) true Set.empty f.Body
 
 let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (builder: IRBuilder) : IRProgram =
     // The scratch-reuse plan is keyed by let id and let ids restart per

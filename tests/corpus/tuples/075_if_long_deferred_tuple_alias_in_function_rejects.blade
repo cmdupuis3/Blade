@@ -1,0 +1,40 @@
+// TEST: If Long Deferred Tuple Alias In Function (rejects)
+// ----------------------------------------------------------------------------
+// Gap G59 in a FUNCTION body: the same 20-link alias chain in the arms of an
+// `if` value inside a function. It met the C++ backend's backstop (BL7004)
+// instead of the common refusal; the chain is now followed to its end, so it
+// is refused at lowering in every lane with the common BL6002.
+// ----------------------------------------------------------------------------
+type Row = Idx<3>
+let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
+let m = method_for(x) <@> lambda(v) -> v * 2.0
+let h = method_for(x) <@> lambda(v) -> v + 5.0
+let p0 = (m, m)
+let p1 = p0
+let p2 = p1
+let p3 = p2
+let p4 = p3
+let p5 = p4
+let p6 = p5
+let p7 = p6
+let p8 = p7
+let p9 = p8
+let p10 = p9
+let p11 = p10
+let p12 = p11
+let p13 = p12
+let p14 = p13
+let p15 = p14
+let p16 = p15
+let p17 = p16
+let p18 = p17
+let p19 = p18
+let p20 = p19
+function pick(c: Bool) -> Float64 = {
+    let t = if c then (p20, 1.0) else (p20, 2.0)
+    t[1]
+}
+let r = pick(true)
+// ERROR: BL6002 @ 32:1
+// ERROR-CONTAINS: inside a function body, a lambda or a loop body
+// REJECT-AT: lower

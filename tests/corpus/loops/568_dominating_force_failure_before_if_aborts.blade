@@ -1,0 +1,28 @@
+// TEST: Dominating Force Failure Before If (aborts)
+// ----------------------------------------------------------------------------
+// Gap G77, the seventh to tenth Codex looks of W4B-A: every statement below
+// must LOWER (a BL6002 would fail the probe) -- a let-rec step's if (loop
+// bodies are outside the arm audit), r1 (g read first in the statement, then
+// in an arm), r0 (a condition's forces carry into both arms), and r (`seen`
+// dominates its arm read). g's kernel divides by zero at the FIRST of them,
+// the recurrence's step (BL8013 at the kernel's line), in every lane.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let z: Array<Int64 like Row> = [0]
+let g = method_for(z) <@> lambda(v) -> 1 / v
+type Step = Idx<2>
+let rec a: Array<Int64 like Step> =
+    match a with
+    | zero -> zero
+    | zero :: s -> zero :: 0
+    | prefix :: n -> prefix :: (if Int64(n) > 0 then g(0) else 0)
+let r1 = g(0) + (if z(0) > 0 then g(0) else 0)
+let r0 = if g(0) > 0 then (if z(0) > 0 then g(0) else 0) else 0
+let seen = g(0)
+let r = if seen > 0 then g(0) else 0
+let rc = {
+    let copy = z |> compute
+    if g(0) > 0 then g(0) else 0
+}
+// ABORT: BL8013
+// ABORT: .blade:11

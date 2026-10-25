@@ -281,6 +281,23 @@ let rec private genFuncBodyScoped
             // Loop objects are compile-time only -- they're resolved when <@> is processed
             currentNames <- Map.add id varName currentNames
             []
+        | IRTuple elems when IRLift.isWhollyDeferredTupleOf
+                                { IsDeferred = (fun i -> Map.containsKey i currentDeferred)
+                                  ValueOf = (fun i -> Map.tryFind i currentDeferred)
+                                  TypeOfExpr = inferExprType } elems ->
+            // A WHOLLY DEFERRED TUPLE bound in a function body (gap G58): every
+            // member is a deferred computation -- a module map the body has not
+            // forced, an inline map, or another deferred tuple of this body --
+            // so the tuple is itself deferred, exactly as at module level
+            // (genScalarExprBinding's arm; IRLift.isWhollyDeferredTupleOf is the
+            // shared judgment, the lowering pass's and the interpreter's twin).
+            // Binding it evaluates nothing; a projection reads one member
+            // (resolved through currentDeferred). It used to fall to the default
+            // arm's `std::make_tuple(g, g)`, naming a module map this body never
+            // declared (BL9002 at g++).
+            currentNames <- Map.add id varName currentNames
+            currentDeferred <- Map.add id value currentDeferred
+            [$"{indent}// {varName} = <deferred computation tuple>"]
         | IRApplyCombinator info when Set.contains id forcedDeferredIds ->
             // Still-deferred combinator that a LATER statement reads BY NAME.
             // Materialize it here, through the same statement-form path the
@@ -696,8 +713,10 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // three or more did not compile. genTupleProjBinding keeps the
             // std::get form as its own fallback for tuples with no registered
             // children (a callee's returned tuple), so nothing that worked
-            // before is rerouted.
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
+            // before is rerouted. `currentDeferred` so a projection of a
+            // deferred tuple this body bound (gap G58) resolves to its member.
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped
+                                     DeferredComputations = currentDeferred; TupleChildren = currentTupleChildren }
             let tempBinding = {
                 Id = id; Name = varName; Type = inferExprType value
                 Value = value; IsConst = true; IsMutable = false
@@ -1182,6 +1201,34 @@ and genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, str
             | _ -> (innerLets @ [(id, innerFinal)] @ restLets, restFinal)
         | _ -> ([], expr)
     let (lets0, retExpr0) = deepUnroll body
+    // ORDERED CALL ARGUMENTS (gap G79; Codex review of W4B-A, finding 4): a
+    // body let's value, or the returned value, that is a call two or more of
+    // whose arguments may fail has those arguments bound to lets of their own,
+    // in source order, BEFORE any hoisting below -- the loop-app and fresh-pool
+    // hoists lift array-valued arguments ahead of the others, so a later
+    // argument would otherwise run first (C++ also leaves argument order
+    // unspecified). Each argument let then takes its ordinary arm (a fresh-pool
+    // call result is registered with the frame there); the call names them.
+    // A bare map argument is bound under `|> compute` (a body let must be
+    // forced; the call would materialize it anyway).
+    let splitOrderedArgs (v: IRExpr) : (IRId * IRExpr) list * IRExpr =
+        match v with
+        | IRApp (f, args, ty) when callNeedsArgumentOrder ctx args ->
+            let (pre, args') =
+                args |> List.fold (fun (pre, acc) a ->
+                    if memberMayFail ctx a then
+                        let tmp = builder.FreshId()
+                        let bound =
+                            match a with
+                            | IRApplyCombinator _ | IRComposeApply _ -> IRCompute a
+                            | a -> a
+                        (pre @ [ (tmp, bound) ], acc @ [ IRVar (tmp, inferExprType a) ])
+                    else (pre, acc @ [ a ])) ([], [])
+            (pre, IRApp (f, args', ty))
+        | v -> ([], v)
+    let lets0 = lets0 |> List.collect (fun (id, v) -> let (pre, v') = splitOrderedArgs v in pre @ [ (id, v') ])
+    let (retPre, retExpr0) = splitOrderedArgs retExpr0
+    let lets0 = lets0 @ retPre
     // Expression-position loop materialization. Synthesized
     // elementwise/broadcast loops (IRApp over IRObjectFor) are statement-
     // shaped: at module level genBinding materializes them, but inside a

@@ -1,0 +1,20 @@
+// TEST: Ordered Call Fresh Array First (aborts)
+// ----------------------------------------------------------------------------
+// Gap G79, finding 4's other argument order: `consume2(bad_array(k - 1),
+// k / z(0))` -- the array argument is FIRST, so its division inside
+// bad_array (BL8013 at bad_array's line, its frame on the stack) fires first,
+// in every lane.
+// ----------------------------------------------------------------------------
+type Row = Idx<2>
+let z: Array<Int64 like Row> = [0, 1]
+function bad_array(k: Int64) -> Array<Int64 like Row> = [10 / k, 0]
+function consume(p: Int64, w: Array<Int64 like Row>) -> Int64 = p + reduce(w, (+))
+function consume2(w: Array<Int64 like Row>, p: Int64) -> Int64 = p + reduce(w, (+))
+function h(k: Int64) -> Int64 = {
+    let s = consume2(bad_array(k - 1), k / z(0))
+    s + 1
+}
+let r = h(1)
+// ABORT: BL8013
+// ABORT: .blade:9
+// ABORT: at bad_array

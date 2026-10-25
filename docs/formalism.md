@@ -2195,7 +2195,19 @@ compiler cannot resolve (a callback) -- is REFUSED (BL4005, at lowering, so
 in every lane; materialize it first: `let c = g |> compute`). The judgment
 is a program-wide fixpoint by binder identity that stops only at a PROVED copy
 (an assignable `let a = Z` of a dense array) or fresh storage, and refuses
-what it cannot trace. The ALIAS rule: a TOP-LEVEL `let g2 = g` over a
+what it cannot trace. It follows AGGREGATE carriers too: a tuple (nested, or
+selected by an `if` or a `match` value) or a struct holding a view of a deferred map
+carries that view, a projection reaches it along its path, and a `match`
+pattern variable reaches the part of its scrutinee the pattern binds, so `let pair =
+(m(0), m(1)); let row = pair[0]; row(1) = 9.0` is a write through `m` (gap
+G60(a), `tuples/069`-`071`, `073`, `077`, `loops/570`-`573`; a tuple wrapper is no copy; `x |> compute` of a
+STORED name or view and `pure(x)` are the identity and are followed too, `loops/572`, `tuples/077`; a
+`|> compute` of any computing form -- a map, a guard, a transpose -- and a transpose, stack, join or
+group_by result are FRESH cells, and writing them is accepted, `tuples/068`, `073`, its first failure at the computation, `loops/569`; a `sequence`
+result is fresh in the C++ lane, while the interpreter's concrete-array sequence SHARES its
+members' stores -- a recorded divergence, OPEN under G60; a bare `guard` / `<|>` / `<|:>` / bind
+is a deferred VALUE whose provenance the walk follows conservatively, not a storage identity). Every IR form is classified as followed or as fresh storage; a
+form added later is not silently fresh (the classification is exhaustive). The ALIAS rule: a TOP-LEVEL `let g2 = g` over a
 deferred map binds `g2` to the SAME deferred value -- substitution holds. The
 alias evaluates nothing (so nothing can fail there), and a use through `g2` is
 that use of `g` (`reduce(g2, (+))` fuses exactly as `reduce(g, (+))` does, and
@@ -2278,17 +2290,71 @@ branch), and one whose arm READS a deferred computation other than as such a
 copy member -- by position, through a kernel's capture, inside a computed
 member's own computation, or in a nested condition -- because that force
 would happen only on the taken arm, which no lane's static print list follows
-(force it before the `if`). The shared predicate follows at most 16
-tuple-alias links; a longer alias chain is not classified and may meet a
-backend refusal (BL7004) instead of BL6002 (OPEN under G59). A call with an
+(force it before the `if`). The shared predicate follows a tuple-alias chain
+to its END, so every lane judges a long chain alike (gap G59: it stopped after
+16 links, and a longer chain met a backend refusal, BL7004, instead of BL6002;
+`tuples/074`-`076`, `073`), and judges a BLOCK-valued initializer (`let p0 = { let n =
+..; (m, m) }`) by its result (`loops/574`, `functions/541`); a chain that revisits a binder is refused. A tuple ALL of
+whose members are deferred is deferred in a FUNCTION body too: binding it
+evaluates nothing (gap G58, `tuples/068`; the C++ lane named the module map in
+a value tuple, BL9002). A call with an
 explicit `|> compute` argument
 evaluates EVERY argument left to right the same way, array-valued ones included
-(gap G57). In the LLVM lane a BARE
-deferred array argument of such a call is forced AT its position, under its
-own name, on the out-of-line and the inlined (capturing) call alike, when the
-call is a top-level binding's root value or a function-body statement's
-whole value (`tuples/063`-`065`, `080`-`082`); nested in an expression the
-LLVM lane refuses such a call (fail closed). The first-failure consequence is
+(gap G57); so does an ORDINARY call two or more of whose arguments may fail
+(gap G79: C++ leaves argument evaluation order unspecified, and g++ evaluated
+them right to left) at exactly these sites: the whole value of a module-level
+or top-level-block `let`, the whole value of a function-body `let`, and a
+function's returned value (`tuples/078`-`079`, `functions/542`-`543`,
+`tuples/073`; in a function body its arguments are bound in
+source order before any fresh-array argument is hoisted). Anywhere else -- a
+call nested inside a larger expression, a call in an `if` arm -- the C++
+lane keeps its unspecified operand order (OPEN under G79, as for any two
+failing operands of one expression). In the LLVM lane a BARE deferred array argument of such a call is forced AT its position, under its own name, on the out-of-line and the inlined (capturing) call alike, when the call is a top-level binding's root value or a function-body statement's whole value (`tuples/063`-`065`, `080`-`082`); nested in an expression the LLVM lane refuses such a call (fail closed) and the C++ lane runs it. An `if` value OFF the member-ordered path (ordinary arms) whose
+arm FORCES a deferred computation -- a positional, extent or membership read,
+a whole-array call argument, a prodsum operand, a kernel's capture: `if c then
+g(0) else 0` -- is REFUSED (BL6002, at lowering, every lane; gap G77): only
+the taken arm is evaluated, and no lane has a print list or a first-failure
+point that follows the branch (the C++ lane forced both arms' maps at the
+statement's start, so an untaken arm's map printed and failed; the LLVM lane
+printed -- and so forced -- it after the program; the interpreter forced the
+taken arm's only). ONE binder is admitted: the one whose forcing read is the
+FIRST operation of the whole statement that may fail, evaluating operands left
+to right -- in the `if`'s condition or anywhere earlier in the statement
+(`g(0) + (if z(0) > 0 then g(0) else 0)`). Then it is
+forced first in every lane -- the C++ lane at the statement's start, the
+others where they reach it -- with nothing that could fail before it, so the
+print set and the first failure agree. The operations that may fail first are EXACTLY section 2.4's panics -- an
+integer `/` or `%`, an integer-base `^` (a negative exponent), a float -> integer
+cast, a checked read -- and a call (its body is not entered; its callee and
+arguments run before it); every other operation is inert after its operands:
+names, literals, `+ - *`, float `/`, a real-base `^`, comparisons, negation, a
+cast to Float64 / Float32, every libm intrinsic EXCEPT `lgamma` / `digamma` (Blade's
+own series: BL8008 outside x > 0, so a barrier), complex ops, fma, tuple and
+field projections, a `|> compute` of a STORED name. A type counts as scalar
+through any unit / index-tag wrappers (`Nat<Row>` is a scalar Int64), and a
+type that is not a PROVEN real or complex float scalar (an unresolved, named or
+Nat type) is treated as possibly integer: its `/`, `%`, `^` or integer cast keeps
+the barrier. Of `&&` / `||` only the LEFT
+operand counts -- the right one may be short-circuited away, so an inert left
+operand leaves no admissible force; a SCALAR `guard`'s condition and a scalar
+choice's LEFT operand run first (never its conditional body / right operand);
+an array-valued guard or choice, an eager `sequence` and every deferred
+computation held as a value are opaque (`loops/591`-`595`). The
+REGIONS are the emitters': a top-level BLOCK (a let chain) is ONE statement --
+the C++ lane forces the whole block's deferred reads before its lets, so
+every earlier statement of the block precedes the admitted force -- except
+that a block's final TUPLE is its own region (its reads force at the tuple's
+binding, after the block's statements); a binding's tuple value that the C++
+lane evaluates MEMBER BY MEMBER (two or more leaves that may fail, or a
+compute / deferred member -- the emitter's own judgment) is one region per
+leaf, left to right.
+A binder already DEFINITELY forced may be read by a later arm: by an EARLIER top-level statement, an earlier let of the same block, an earlier leaf of a member-ordered tuple, or the enclosing `if`'s condition / `match`'s scrutinee / loop bounds (they run before the arms in every lane) -- definitely meaning on every successful evaluation path: a read of it, a whole-array call argument or a prodsum operand (eager), in an unconditional position (the left operand of `&&` / `||`; an inner `if` / `match` counts what EVERY branch forces, the intersection of its successful branches), never a copy, a fused fold or map over it, one arm for another, or one iteration for the next; at module level that force stores and memoizes it. This audit covers TOP-LEVEL code only (module statements and their blocks): inside a FUNCTION, lambda or kernel body, and inside a LOOP body (a let-rec step, a `while` guard), only the structural audit above applies -- a sound entry state there would need every invocation and consumption site (captures, recursion, deferred kernels), so the C++ pre-pass vs interpreter divergence inside callable bodies (pre-existing) stays OPEN under G77, recorded, not refused. The forcing read must be a read OF THE BINDER (`g(0)`): a copy (`g |>
+compute`) evaluates g's computation without forcing it or making it print,
+and counts as an operation that may fail. Force anything else before the `if`
+(`let v = g |> compute`, or a statement that reads it) and read the value in
+the arm. A fold or a map over a deferred map in an arm fuses and forces
+nothing and is admitted (`loops/562`-`568`, `575`, `functions/539`-`540`, `544`, `tuples/068`, `072`, `073`; `loops/564` the ordered tuple's failure). `match` ARMS are not judged (OPEN
+under G77). The first-failure consequence is
 deliberate: a failing member fails at the construction even when the program
 never projects it -- `let held = (g, 1.0)` with `g` dividing by zero fails at
 `held`, before a later failing statement (`tuples/041`). What changed in round
@@ -2298,7 +2364,7 @@ value`), named undeclared members of a deferred tuple member or of an
 left; the interpreter held a bare member deferred inside the tuple and
 evaluated it at a later projection; the LLVM lane kept it a producer and ran
 it only where the tuple was read, and refused an `if`-held tuple. Pinned by
-`tuples/041`, `044`-`065`.
+`tuples/041`, `044`-`079`.
 - `<*>` concatenates array lists: `method_for(A) <*> method_for(B) ≡
   method_for(A, B)`; identity `method_for()`; commutative up to index
   reordering; associative. It is proved to be exactly shape concatenation with

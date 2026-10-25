@@ -1,0 +1,16 @@
+// TEST: Nested Tuple Of Views Write (rejects)
+// ----------------------------------------------------------------------------
+// Gap G60(a), a NESTED carrier: the view sits one tuple deeper,
+// `pair[0][0]`. The walk follows the projection path through both tuple
+// literals to m's row view: refused at lowering in every lane (BL4005).
+// ----------------------------------------------------------------------------
+type Y = Idx<2>
+type X = Idx<3>
+let m = method_for(range<Y>, range<X>) <@> lambda(i, j) -> Float64(i) * 10.0 + Float64(j)
+let pair = ((m(0), 1.0), m(1))
+let row = pair[0][0]
+row(1) = 9.0
+let s = reduce(m, (+), axes = 2)
+// ERROR: BL4005 @ 11:1
+// ERROR-CONTAINS: a write through `m`, a deferred computation
+// REJECT-AT: lower
