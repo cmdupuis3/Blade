@@ -2065,7 +2065,7 @@ let hoistKernelInvariantsModule (builder: IRBuilder) (programFuncs: IRCallable l
                     (match Map.tryFind id funcs with
                      | Some g -> if not (g.Captures |> List.forall (fun c -> captureIds.Contains c.Id)) then ok <- false
                      | None -> ok <- false)
-                | IRParam _ | IRNth | IRArity _ | IRPolyIndex _ | IRPolyTail _ | IRZero _ | IRAddIdentity _ | IRUninit _
+                | IRParam _ | IRNth | IRArity _ | IRPolyIndex _ | IRPolyTail _ | IRZero _ | IRUnseededSeed _ | IRUninit _
                 | IRLet _ | IRMatch _ | IRForRange _ | IRAssign _ | IRBreakIf _ | IRConstraintCheck _ -> ok <- false
                 | _ -> ()) e
         ok
@@ -3678,7 +3678,7 @@ let embeddedExtentExprs (e: IRExpr) : IRExpr list =
         let addIx (ixs: IRIndexType list) = for ix in ixs do found.Add ix.Extent
         iterIRExpr (fun n ->
             match n with
-            | IRVar (_, ty) | IRParam (_, _, ty) | IRZero ty | IRAddIdentity ty | IRUninit ty | IRApp (_, _, ty) -> addTy ty
+            | IRVar (_, ty) | IRParam (_, _, ty) | IRZero ty | IRUnseededSeed (_, ty, _) | IRUninit ty | IRApp (_, _, ty) -> addTy ty
             | IRArrayLit (_, at) -> found.AddRange(arrayTypeExtentExprs at)
             | IRApplyCombinator info ->
                 addTy info.OutputType

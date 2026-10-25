@@ -1,0 +1,21 @@
+// TEST: An imported named kernel folded in a repro body takes no licensed form
+// MODULE: Main
+// The cancellation row is exactly 2.0, stored and deferred (the C++ K-lane
+// tree gave 1.0 before); the top-level use keeps its licence -- held in a block,
+// so only a lane-independent fact about it prints.
+module Main
+import FoldLib
+
+type N = Idx<9>
+let v: Array<Float64 like N> = [1.0e16, 1.0, -1.0e16, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+function rs() where repro -> Float64 = reduce(v, FoldLib.add, 0.0)
+function rd() where repro -> Float64 = reduce(method_for(v) <@> lambda(x) -> x * 1.0, FoldLib.add, 0.0)
+let s = rs()
+// EXPECT: s = 2.0
+let d = rd()
+// EXPECT: d = 2.0
+let licensed_ran = {
+    let t = reduce(v, FoldLib.add, 0.0)
+    t >= 1.0
+}
+// EXPECT: licensed_ran = true

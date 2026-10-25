@@ -1,0 +1,27 @@
+// TEST: A named kernel whose body lifts a parameter-capturing lambda, folded in a repro body
+// Gap G80 (the second Codex look of W4B-D, finding 2). The fold use in the
+// `where repro` body runs `addc`'s REPRO TWIN -- an exact copy sharing its
+// parameter ids, so the lambda `h` it lifts, which captures the parameter
+// `a`, captures the twin's `a` too (a copy with renamed parameters left `h`
+// capturing the OLD id). Stored and deferred, the cancellation row is exactly
+// 2.0 (the ascending chain; the C++ K-lane tree gave 1.0 before), while the
+// kernel's ordinary top-level use keeps its licensed form -- held in a block so
+// only a lane-independent fact about it prints (its value is the licence's,
+// so the C++ K-lane tree and the LLVM lane may disagree on it).
+type N = Idx<9>
+let v: Array<Float64 like N> = [1.0e16, 1.0, -1.0e16, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+function addc(a: Float64, b: Float64) where comm(a, b) -> Float64 = {
+    let h = lambda(x: Float64) -> a + x
+    h(b)
+}
+function rf() where repro -> Float64 = reduce(v, addc, 0.0)
+function rd() where repro -> Float64 = reduce(method_for(v) <@> lambda(x) -> x * 1.0, addc, 0.0)
+let s = rf()
+let sd = rd()
+let licensed_ran = {
+    let t = reduce(v, addc, 0.0)
+    t >= 1.0
+}
+// EXPECT: s = 2.0
+// EXPECT: sd = 2.0
+// EXPECT: licensed_ran = true

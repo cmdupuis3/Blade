@@ -1193,33 +1193,21 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
 
 /// THE SEED OF AN UNSEEDED FOLD (gap G74; TypedAst.unseededSeedSpan marks the
 /// checker's synthesized `(+)` seed). An unseeded fold's value is the left
-/// fold of its cells. On a STRICT route -- the reproducible build
-/// (`BLADE_FP_REPRO=1` / `BLADE_FP_REASSOC=0`) or inside a `where repro`
-/// function, where no lane may reorder the fold -- the seed is the EXACT `(+)`
-/// identity (IR.addIdentityLiteralOf: `-0.0`, `-0.0f`, `(-0.0, -0.0)`, `0`;
-/// at a still-open element `IRAddIdentity`, resolved per instance), so every
-/// form that keeps the seed (the walk's row callable, the ordered scatter, the
-/// row-owned pull, the row action, the strict cell chains, the interpreter)
-/// runs the head-peeled chain bit for bit (formalism 2.4's identity
-/// insertion). On every other route the fold carries a reorder licence and
-/// the BASE seed is lowered exactly as before (the licence's signed zero,
-/// G40), so a licensed emission is unchanged. The route is decided here,
-/// before the optimizer, from the same two facts every lane's licence reads
-/// for a builtin section (the build's reorder licence and the kernel's repro
-/// demand: InRepro marks the kernels lifted from a repro body); a section
-/// kernel never writes. NOT covered: a licensed fold whose deferred map body
-/// WRITES keeps its serial chain from the base seed (gap G74's record).
+/// fold of its cells. The mark becomes the IR node `IRUnseededSeed (base,
+/// type, inRepro)` -- the BASE seed lowered exactly as before, and whether the
+/// fold sits in a `where repro` body -- which carries the provenance through
+/// monomorphization to `resolveUnseededSeedsModule` (before the optimizer):
+/// once the producer's effects and the fold's effective licence are known, it
+/// gives every OBLIGATORILY SERIAL route the EXACT `(+)` identity
+/// (IR.addIdentityLiteralOf: `-0.0`, `-0.0f`, `(-0.0, -0.0)`, `0`), so every
+/// form that keeps the seed (the walk's row callable, the ordered scatter,
+/// the row-owned pull, the row action, the strict cell chains, the
+/// interpreter) runs the head-peeled chain bit for bit (formalism 2.4's
+/// identity insertion), and every licensed route the base seed byte for byte
+/// (the licence's signed zero, G40).
 and lowerUnseededSeed env (texpr: TypedExpr) : IRExpr =
     let baseSeed = lowerTypedExpr env { texpr with Span = Blade.Ast.noSpan }
-    let strict = Blade.Toolchain.fpReproEnabled () || env.InRepro
-    if not strict then baseSeed
-    else
-        match addIdentityLiteralOf texpr.Type with
-        | Some identity -> identity
-        | None ->
-            match baseSeed with
-            | IRZero ty -> IRAddIdentity ty
-            | _ -> baseSeed
+    IRUnseededSeed (baseSeed, texpr.Type, env.InRepro)
 
 /// Lower the value of the binding `name` (a top-level or block `let`, an
 /// expression `let`): a lambda bound directly is no longer anonymous -- it
@@ -2925,6 +2913,250 @@ let private programWriteContext (modules: IRModule list) =
           Callbacks = (fun _ -> None) }
     (funcs, lets, mutableLets, chaseAlias, resolve, facts)
 
+/// THE REPRO DEMAND ON EACH FOLD USE (gap G80). A fold performed in a `where
+/// repro` body declines reordering WHATEVER ITS KERNEL (formalism 2.4: the
+/// body "declines reordered folds"), but every lane's licence predicate
+/// (`CodeGenExprSupport.foldReorderLicensed`, which the LLVM lane's
+/// `foldFmfLicensed` / `foldFmfDecorable` read) consults the KERNEL's
+/// `IsRepro`: a kernel lifted from the body carries it (TypedLowerEnv.InRepro),
+/// a callable declared ELSEWHERE -- `reduce(xs, add)` with `add` a top-level or
+/// imported function, a lambda lifted outside the body -- does not. So in the
+/// body of every `IsRepro` callable of the program, each `reduce` (stored and
+/// fused; a join's kernels leg by leg) whose kernel names such a binary
+/// callable -- directly, or through `let k = add` aliases (local or
+/// top-level, any chain) -- is pointed, FOR THAT USE ONLY, at the callable's
+/// REPRO TWIN: an exact copy (same parameters, parameter ids, body, captures,
+/// clauses and SourceName; a fresh id and emitted name; `IsRepro`) placed
+/// right after its origin IN THE MODULE THAT DEFINES IT and recorded in
+/// `DerivedFuncOrigins` (so codegen emits it at its origin's program point,
+/// a main-local `std::function` included). Sharing the parameter ids keeps
+/// every nested closure the body lifts valid -- a lambda inside the kernel
+/// capturing its parameter captures the twin's (shape monomorphization's
+/// copies share ids the same way); the SourceName keeps a panic's frame, and
+/// `copyTwinDeclSpans` its declaration location, those of the origin. Every
+/// clause is copied, so a `where omp` request is still a request, declined
+/// by the repro veto with its census line. The twin's body is compiled
+/// strict too (contraction off), as the body that runs it is; the origin's
+/// other uses keep their licence. A function-typed PARAMETER kernel has no
+/// callable to point at -- both compiled lanes refuse such a fold anyway
+/// (BL7004 deferred, a pre-existing BL9002 stored) -- and is left as written.
+/// Runs over the WHOLE PROGRAM after monomorphization, before every
+/// per-module pass; a no-op in the reproducible build, where every fold is
+/// strict. Returns the program and the (twin id, origin id) pairs.
+let reproFoldUsesProgram (irModules: IRModule list) (builder: IRBuilder) : IRModule list * (IRId * IRId) list =
+    let allFuncs = irModules |> List.collect (fun m -> m.Functions)
+    if Blade.Toolchain.fpReproEnabled () || not (allFuncs |> List.exists (fun f -> f.IsRepro)) then irModules, []
+    else
+    let funcs = allFuncs |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+    let twins = System.Collections.Generic.Dictionary<IRId, IRCallable>()   // origin id -> its repro twin
+    // a NAME bound to a callable -- `let k = add` in a body or at module level,
+    // through any chain of such lets -- is that callable here
+    let aliasOf =
+        let acc = System.Collections.Generic.Dictionary<IRId, IRId>()
+        let note (id: IRId) (v: IRExpr) = match v with IRVar (g, FuncElem _) -> acc.[id] <- g | _ -> ()
+        for m in irModules do
+            for b in m.Bindings do note b.Id b.Value
+            for f in m.Functions do iterIRExpr (fun e -> match e with IRLet (id, v, _) -> note id v | _ -> ()) f.Body
+        let rec chase (seen: Set<IRId>) (id: IRId) =
+            match acc.TryGetValue id with
+            | true, g when not (seen.Contains g) && not (funcs.ContainsKey id) -> chase (seen.Add id) g
+            | _ -> id
+        chase Set.empty
+    let rec variantOf (k: IRExpr) : IRExpr =
+        match k with
+        | IRTuple ks -> IRTuple (ks |> List.map variantOf)
+        | IRVar (id0, (FuncElem (paramTys, _) as fty)) when paramTys.Length = 2 ->
+            let id = aliasOf id0
+            (match Map.tryFind id funcs with
+             | Some c when not c.IsRepro && c.Params.Length = 2 ->
+                 let twin =
+                     match twins.TryGetValue id with
+                     | true, w -> w
+                     | _ ->
+                         let cid = builder.FreshId()
+                         let w = { c with Id = cid; Name = $"{c.Name}__repro{cid}"; IsRepro = true }
+                         twins.[id] <- w
+                         w
+                 IRVar (twin.Id, fty)
+             | _ -> k)
+        | _ -> k
+    let rewriteBody (body: IRExpr) =
+        body |> mapIRExpr (fun e ->
+            match e with
+            | IRReduce (src, k, init) -> IRReduce (src, variantOf k, init)
+            | IRReduceCompute (comp, k, init) -> IRReduceCompute (comp, variantOf k, init)
+            | _ -> e)
+    let rewritten =
+        irModules |> List.map (fun m ->
+            { m with Functions = m.Functions |> List.map (fun f -> if f.IsRepro then { f with Body = rewriteBody f.Body } else f) })
+    if twins.Count = 0 then irModules, []
+    else
+        let placed =
+            rewritten |> List.map (fun m ->
+                let mine = m.Functions |> List.choose (fun f -> match twins.TryGetValue f.Id with | true, w -> Some (f.Id, w) | _ -> None)
+                if mine.IsEmpty then m
+                else
+                    { m with
+                        Functions = m.Functions |> List.collect (fun f -> match twins.TryGetValue f.Id with | true, w -> [ f; w ] | _ -> [ f ])
+                        DerivedFuncOrigins = mine |> List.fold (fun acc (oid, w) -> Map.add w.Id oid acc) m.DerivedFuncOrigins })
+        placed, (twins |> Seq.map (fun kv -> (kv.Value.Id, kv.Key)) |> List.ofSeq)
+
+/// The repro twins' DECLARATION SPANS (gap G80 / G76): a twin is located
+/// where its origin is declared, in every lane. Run on the FINAL program
+/// (after module qualification, which prefixes a non-main module's names):
+/// the twin's emitted name gets its origin's recorded span.
+let copyTwinDeclSpans (program: IRProgram) (pairs: (IRId * IRId) list) : unit =
+    if not pairs.IsEmpty then
+        let byId = program.Modules |> List.collect (fun m -> m.Functions) |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+        for (tid, oid) in pairs do
+            match Map.tryFind tid byId, Map.tryFind oid byId with
+            | Some t, Some o ->
+                let s = IR.declSpanOf o.Name
+                let s = if s.StartLine > 0 then s else IR.declSpanOf o.SourceName
+                IR.recordDeclSpan t.Name s
+            | _ -> ()
+
+/// Every EXECUTABLE expression of a module: function bodies, binding values
+/// and the side-table payloads each back end and the interpreter run at a
+/// binding's site -- random fills (the modulus; a generator's key,
+/// parameters, weights and address), compound constructors (dense source and
+/// mask) and sparse constructors (the values). Provider specs carry no
+/// expression.
+let moduleExecutablePayloads (m: IRModule) : IRExpr list =
+    [ for f in m.Functions do yield f.Body
+      for b in m.Bindings do yield b.Value
+      for kv in m.RandomInits do
+          match kv.Value with
+          | FillModulus e -> yield e
+          | RandGen (_, key, pars, weights, address) ->
+              yield key
+              yield! pars
+              match weights with Some (w, _) -> yield w | None -> ()
+              match address with Some (s, o) -> yield s; yield o | None -> ()
+      for kv in m.CompoundInits do
+          let (d, k) = kv.Value
+          yield d
+          yield k
+      for kv in m.SparseInits do yield kv.Value ]
+
+/// `moduleExecutablePayloads`'s surface, rewritten: `body` over function
+/// bodies and binding values, `side` over the side-table payloads.
+let mapModuleExecutablePayloads (body: IRExpr -> IRExpr) (side: IRExpr -> IRExpr) (m: IRModule) : IRModule =
+    { m with
+        Functions = m.Functions |> List.map (fun f -> { f with Body = body f.Body })
+        Bindings = m.Bindings |> List.map (fun b -> { b with Value = body b.Value })
+        RandomInits =
+            m.RandomInits |> Map.map (fun _ spec ->
+                match spec with
+                | FillModulus e -> FillModulus (side e)
+                | RandGen (kind, key, pars, weights, address) ->
+                    RandGen (kind, side key, pars |> List.map side,
+                             weights |> Option.map (fun (w, n) -> (side w, n)),
+                             address |> Option.map (fun (s, o) -> (side s, side o))))
+        CompoundInits = m.CompoundInits |> Map.map (fun _ (d, k) -> (side d, side k))
+        SparseInits = m.SparseInits |> Map.map (fun _ e -> side e) }
+
+/// THE UNSEEDED-SEED RESOLUTION (gap G74): every `IRUnseededSeed` of the
+/// module's EXECUTABLE payloads (`moduleExecutablePayloads`: bodies, binding
+/// values and side tables) becomes an ordinary seed, after monomorphization
+/// (types concrete), after `reproFoldUsesProgram` and BEFORE the optimizer
+/// (whose passes and plans read literal seeds); a surviving mark is an
+/// internal error. The seed is the EXACT identity (`addIdentityLiteralOf`)
+/// on every route that carries NO reorder licence -- the facts each compiled
+/// lane's effective licence reads (C++ `licensedFold = foldReorderLicensed
+/// callable && not mapBodyWrites`, LLVM `foldFmfLicensed`'s
+/// `FoldOperandWrites`): the reproducible build; a `where repro` body (the
+/// node's flag); a repro-vetoed kernel (`foldKernelReproVetoed`'s shapes,
+/// the G80 twins included); a deferred computation that MAY WRITE (the shared
+/// write analysis with callbacks joined, `Optimize.scheduleMayWriteWithCallbacksIn`,
+/// asked of the code the emitters will see: constant-scrutinee matches
+/// folded as the optimizer's first pass folds them) -- and the BASE seed,
+/// byte for byte, on a licensed route, INCLUDING a licensed fold some lane
+/// emits serially for want of a vector form (a streamed-source,
+/// multi-level or mixed-operator join: formalism 6.4, its zero is the
+/// licence's). A join's seeds share its computation's verdict (a writing leg
+/// is refused at lowering, BL4005); a mark outside any fold node (none is
+/// built today) is judged by the build and its flag alone. Tested on the
+/// witnesses in `blade test orbit-scatter` (route leg) and the base-vs-head
+/// emission sweep (`bench/harness/emission-sweep.ps1`), not proved in
+/// general.
+let resolveUnseededSeedsModule (programFuncs: IRCallable list) (modul: IRModule) : IRModule =
+    let hasMark (e: IRExpr) =
+        let mutable hit = false
+        iterIRExpr (fun n -> match n with IRUnseededSeed _ -> hit <- true | _ -> ()) e
+        hit
+    if not (moduleExecutablePayloads modul |> List.exists hasMark) then modul
+    else
+    let funcs = (programFuncs @ modul.Functions) |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+    // The write analysis asks of the code the EMITTERS will see: the
+    // optimizer's first pass folds constant-scrutinee matches (a dead arm's
+    // write disappears there -- the second Codex look of W4B-D, finding 3:
+    // `match 0 with | 0 -> x | _ -> { G(0) = 1.0; x }` is licensed in both
+    // emitters), so the analysis runs over the module with that same fold
+    // applied to its bodies and bindings (side-table payloads are not folded
+    // by the optimizer, and are judged as written). No other pre-emission
+    // pass removes a write (each consults the shared write analysis and
+    // declines on one); that is tested on the witnesses, not proved.
+    // ...and so must every OTHER module's callables the analysis resolves: an
+    // imported kernel's dead writing arm is folded away by ITS module's
+    // optimizer before emission too (the third Codex look of W4B-D). The
+    // caller passes the whole-program snapshot ALREADY folded
+    // (`foldedProgramFuncs`); this module's own entries are refolded here
+    // (its per-module passes ran since the snapshot), and the analysis --
+    // the callback table included -- sees only folded records.
+    let folded = IRMono.foldConstMatchesModule modul
+    let mayWrite = Optimize.scheduleMayWriteWithCallbacksIn programFuncs folded
+    let repro = Blade.Toolchain.fpReproEnabled ()
+    // `foldKernelReproVetoed`'s two shapes, over this module's callables
+    let rec kernelRepro (k: IRExpr) =
+        match k with
+        | IRTuple ks -> ks |> List.exists kernelRepro
+        | IRVar (id, _) ->
+            (match Map.tryFind id funcs with
+             | Some c ->
+                 c.IsRepro
+                 || (match c.Body with
+                     | IRApp (IRVar (g, _), _, _) -> (match Map.tryFind g funcs with Some cg -> cg.IsRepro | None -> false)
+                     | _ -> false)
+             | None -> false)
+        | _ -> false
+    // the identity at the MARK's type (the fold's accumulator type, carried
+    // through HM substitution and IRMono's open-seed arm); the base value's
+    // own type only when the mark's says nothing (a still-open variable) --
+    // a generic base can be IRMono's Float64 fallback zero, whose type is not
+    // the fold's (a Complex128 instance kept (-0.0, -0.0) this way)
+    let identityOf (b: IRExpr) (ty: IRType) =
+        match addIdentityLiteralOf ty with
+        | Some l -> l
+        | None ->
+            match exprTypeIfKnown b |> Option.bind addIdentityLiteralOf with
+            | Some l -> l
+            | None -> b
+    let pick (strict: unit -> bool) (seed: IRExpr) =
+        match seed with
+        | IRUnseededSeed (b, ty, r) -> if r || strict () then identityOf b ty else b
+        | other -> other
+    let resolve (foldDead: bool) (e: IRExpr) =
+        match e with
+        | IRReduceCompute (comp, k, init) when hasMark init ->
+            let strict = lazy (repro || kernelRepro k || mayWrite (if foldDead then IRMono.foldConstMatchesExpr comp else comp))
+            let strictFor () = strict.Value
+            (match init with
+             | IRTuple ss -> IRReduceCompute (comp, k, IRTuple (ss |> List.map (pick strictFor)))
+             | _ -> IRReduceCompute (comp, k, pick strictFor init))
+        | _ -> e
+    let leftover (e: IRExpr) =
+        match e with
+        | IRUnseededSeed (b, ty, r) -> if repro || r then identityOf b ty else b
+        | _ -> e
+    let rewriteWith (foldDead: bool) (x: IRExpr) = x |> mapIRExpr (resolve foldDead) |> mapIRExpr leftover
+    let resolved = mapModuleExecutablePayloads (rewriteWith true) (rewriteWith false) modul
+    // FAIL CLOSED: no mark survives anywhere a back end or the interpreter
+    // executes (the first W4B-D cut missed the side tables -- a random key or
+    // parameter, a compound's mask -- review finding 1)
+    if moduleExecutablePayloads resolved |> List.exists hasMark then
+        failwith $"internal: an unseeded-fold seed survived its resolution in module {modul.Name} (gap G74)"
+    resolved
 /// A JOIN WHOSE LEG WRITES (gap G43, BL4005). A join -- a `<&!>` / `<&>`
 /// tree, or a reduction join `object_for(<&!>) <@> (reduce(..), ..)` -- runs
 /// its legs side by side, one joint cell at a time, and legs naming the same
@@ -3475,7 +3707,15 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     // Every callable of the program, as the monomorphizers left it: the
     // optimizer resolves a callee defined in ANOTHER module here (a callee's
     // effect summary does not change under the per-module rewrites below).
+    // the repro demand on every fold use in a `where repro` body (gap G80):
+    // whole-program, so a twin lives in the module that defines its origin
+    let (irModules, reproTwins) = reproFoldUsesProgram irModules env.Builder
     let programFuncs = irModules |> List.collect (fun m -> m.Functions)
+    // The same snapshot with constant-scrutinee matches folded, as every module's
+    // optimizer folds them first: the unseeded-seed resolution judges writes on
+    // the code the emitters will see, imported callables included (gap G74).
+    let foldedProgramFuncs =
+        lazy (programFuncs |> List.map (fun f -> { f with Body = IRMono.foldConstMatchesExpr f.Body }))
     // Every id each module's executable code, types and side tables name
     // (Optimize.moduleReferencedIds: the SAME traversal the census walks --
     // binding values, every side-table operand executed at a binding's site,
@@ -3506,6 +3746,9 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // values is refused (keys are represented as positions, D2).
         IRMono.refuseEnumKeyArithModule irModule
         let irModule = IRMono.lowerArrayBinOpsModule irModule env.Builder programFuncs
+        // every unseeded fold's seed by its EFFECTIVE route (gap G74), before any
+        // optimizer pass reads a seed (the repro twins of gap G80 are in place)
+        let irModule = resolveUnseededSeedsModule (foldedProgramFuncs.Force()) irModule
         // The semantic-equivalence optimization stage (Blade.Optimize --
         // see its charter): constant-scrutinee match folding (which also
         // resolves symbolic ranks per specialization), elementwise-chain
@@ -3618,17 +3861,19 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     // drops it. Unreachable from any binding, it can only ever be a BL6001.
     // Must run after EVERY specializing pass -- each can make a function
     // concrete or mint new references -- and before validateIR.
-    let program = IRValidate.eliminateDeadPolymorphs { Modules = irModules }
+    // The declaration-span table TRAVELS WITH THE PROGRAM (gap G76): carried
+    // in the record (IRProgram.DeclSpans), so every `{ p with .. }` copy --
+    // qualifyModuleNames' multi-module arm among them (the second Codex look
+    // of W4-3, NEW 3: an object-keyed attachment made before it was lost for
+    // every multi-module program) -- keeps it; a consumer in another flow
+    // (the interpreter differential) installs it.
+    let program = IRValidate.eliminateDeadPolymorphs { Modules = irModules; DeclSpans = Map.empty }
     // Module namespacing, after every pass that could mint or specialize a
     // member (see qualifyModuleNames).
     let program = program |> qualifyModuleNames
-    // the declaration-span table travels with the program (gap G76): a
-    // consumer in another flow (the interpreter differential) installs it.
-    // Attached to the FINAL object: qualifyModuleNames' multi-module arm builds
-    // a new record, and the table is keyed by object identity (the second
-    // Codex look of W4-3, NEW 3 -- every multi-module program lost it).
-    IR.attachDeclSpans program
-    program
+    // a repro twin is located at its origin's declaration (gap G80)
+    copyTwinDeclSpans program reproTwins
+    { program with DeclSpans = (IR.declSpansCell ()).Value }
 
 // Typecheck warning surfacing (shared by every CLI lane)
 

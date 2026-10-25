@@ -1,0 +1,22 @@
+// TEST: An imported map kernel's dead writing arm keeps its fold licensed, its live write makes it strict
+// MODULE: Lib
+// Gap G74 (the third Codex look of W4B-D). `mapk` writes `hits` only in an arm
+// a constant scrutinee never takes; this module's optimizer folds that arm
+// away before emission, so a fold over `mapk` in ANOTHER module is licensed in
+// both emitters -- and its unseeded seed must stay the base one (the write
+// analysis judges the folded callable records of the whole program). `mapw`
+// writes on every call: its fold is serial everywhere and its seed the exact
+// identity, so all -0.0 terms fold to -0.0 and the three writes happen.
+module Lib
+
+let mut hits = 0
+function mapk(x: Float64) -> Float64 = match 0 with
+    | 0 -> x
+    | _ -> {
+        hits = hits + 1
+        x
+    }
+function mapw(x: Float64) -> Float64 = {
+    hits = hits + 1
+    x
+}

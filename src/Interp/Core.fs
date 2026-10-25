@@ -1081,11 +1081,9 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
             match ty with
             | IRTIdxTagged _ -> VInt 0L
             | _ -> VFloat 0.0
-    // A generic strict seed IRMono did not resolve (gap G74): its literal.
-    | IRAddIdentity ty ->
-        match addIdentityLiteralOf ty with
-        | Some lit -> evalExpr st env lit
-        | None -> VFloat -0.0
+    // Lowering.resolveUnseededSeedsModule replaces every one before the
+    // optimizer (gap G74): reaching the interpreter is an internal error.
+    | IRUnseededSeed _ -> raise (InterpUnsupported "internal: an unresolved unseeded-fold seed (IRUnseededSeed)")
 
     // The let-rec buffer whose zero fill the desugar proved dead (IR.IRUninit;
     // formalism 7.5). The compiled lanes leave it unfilled; zeros here are

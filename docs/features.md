@@ -566,7 +566,18 @@ lane's fast-math flags at once — `where comm(a, b), omp, repro` on a fold
 kernel emits serial with a `// [omp] requested but emitted serial: fold
 kernel is `where repro`` marker; and (d) BLAS/LAPACK/cuBLAS routing declined
 while the body emits (BLAS differs in the last ULP; an eigenbasis is not even
-unique). Refusals: on a lambda (the annotation cannot travel into textual
+unique). The demand covers every fold the body PERFORMS (gap G80): the
+lambdas and sections lifted from the body inherit it, and a `reduce` there
+whose kernel is a function declared ELSEWHERE (`reduce(xs, add)`, `add`
+carrying `comm` / `omp`; local or imported, capturing or not, directly or
+through `let k = add` aliases) runs, for that use only, `add`'s REPRO TWIN:
+an exact copy (same parameter ids, body, captures, clauses and name in
+panic frames and locations) marked repro, placed beside its origin -- the
+fold keeps the ascending chain, the request its census line, and `add`'s
+other uses their licence (`blade test orbit-scatter`, corpus
+functions/550-553, multifile/041). A function-typed PARAMETER kernel has no
+callable to point at; both compiled lanes refuse such a fold (BL7004
+deferred, a pre-existing BL9002 stored). Refusals: on a lambda (the annotation cannot travel into textual
 inlining — name the kernel), on a `static function` (compile-time evaluation
 has no emitted body), and combined with `cuda` (device contraction/rounding
 cannot discharge the demand). A main-local emission (function forced into

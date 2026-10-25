@@ -1,0 +1,26 @@
+// TEST: A named kernel folded inside a repro body takes no licensed form
+// Gap G80. `add` is declared OUTSIDE the `where repro` functions (with `comm`
+// and `omp`, so its top-level use `lics` is licensed); folded INSIDE them --
+// stored, deferred, and as a join leg -- the fold use carries the body's repro
+// demand (Lowering's reproFoldUsesModule points it at a repro clone of
+// `add`), so every lane keeps the ascending chain: the cancellation row
+// [1e16, 1, -1e16, 1, 0, 0, 0, 0, 1] is exactly 2.0 (1e16 + 1 rounds to
+// 1e16, then -1e16, 1, the zeros and the last 1). The C++ lane's K-lane
+// tree gave 1.0 for `stored` and `deferred` before (the 1 beside 1e16 is lost
+// in lane 0, the last 1 folded into it). The join's second leg is an
+// unseeded `(+)` lifted in the body: strict, 2.0 too, so j = 4.0.
+type N = Idx<9>
+let v: Array<Float64 like N> = [1.0e16, 1.0, -1.0e16, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+function add(a: Float64, b: Float64) where comm(a, b), omp -> Float64 = a + b
+function stored() where repro -> Float64 = reduce(v, add, 0.0)
+function deferred() where repro -> Float64 = reduce(method_for(v) <@> lambda(x) -> x * 1.0, add, 0.0)
+function joined() where repro -> Float64 = {
+    let a, b = object_for(<&!>) <@> (reduce(v, add, 0.0), reduce(method_for(v) <@> lambda(x) -> x * 1.0, (+)))
+    a + b
+}
+let s = stored()
+let d = deferred()
+let j = joined()
+// EXPECT: s = 2.0
+// EXPECT: d = 2.0
+// EXPECT: j = 4.0

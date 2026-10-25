@@ -223,9 +223,6 @@ let rec inferExpr (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     match inferExprInner env expr with
     | Ok te when te.Span.StartLine = 0 && expr.Span.StartLine > 0 ->
         Ok { te with Span = expr.Span }
-    // a desugar's synthesized UNSEEDED seed (the rank-k full fold; gap G74)
-    // carries its mark onto the typed node
-    | Ok te when expr.Span = unseededSeedSpan -> Ok (markUnseeded te)
     | r -> r
 
 and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
@@ -3856,17 +3853,22 @@ and inferReduceCore (env: TypeEnv) array kernel (init: Expr option) (axes: Expr 
                     let synAt k = mkExpr span k
                     let iLit (v: int64) = synAt (ExprLit (LitInt v))
                     let elemTy = env.Subst.Resolve at.ElemType
-                    // The implicit `(+)` seed of this UNSEEDED fold carries the
-                    // unseeded mark (gap G74): Lowering keeps it on a licensed
-                    // route and gives a strict one the exact identity.
-                    let unseeded k = mkExpr unseededSeedSpan k
+                    // The implicit `(+)` seed of this UNSEEDED fold (gap G74).
+                    // The nest below is a plain accumulator loop -- SERIAL in
+                    // every build and lane, never a licensed form -- so this
+                    // fold is OBLIGATORILY serial on every route and its seed
+                    // is the EXACT identity in every build (`-0.0`;
+                    // `(-0.0, -0.0)` complex): the chain is the left fold of
+                    // the cells bit for bit, and a fold of no cells (a zero
+                    // extent) is that identity, as every strict route's empty
+                    // fold is (formalism 6.4).
                     let zeroOf () =
                         match elemTy with
-                        | IRTScalar (ETFloat64 | ETFloat32) -> Some (unseeded (ExprLit (LitFloat 0.0)))
+                        | IRTScalar (ETFloat64 | ETFloat32) -> Some (synAt (ExprLit (LitFloat -0.0)))
                         | IRTScalar (ETInt64 | ETInt32) -> Some (synAt (ExprLit (LitInt 0L)))
                         | IRTScalar (ETComplex128 | ETComplex64) ->
-                            Some (unseeded (ExprApp (synAt (ExprVar "complex"),
-                                                     [synAt (ExprLit (LitFloat 0.0)); synAt (ExprLit (LitFloat 0.0))])))
+                            Some (synAt (ExprApp (synAt (ExprVar "complex"),
+                                                  [synAt (ExprLit (LitFloat -0.0)); synAt (ExprLit (LitFloat -0.0))])))
                         | _ -> None
                     let oneOf () =
                         match elemTy with
