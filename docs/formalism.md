@@ -1345,9 +1345,23 @@ read consistently across the swap, and the samples honour the array's
 declared storage class (a `SymIdx` group answers every permutation of its
 coordinates from one cell, an `AntisymIdx` group negates by the permutation's
 sign and reads 0 on a repeated coordinate), so a claim the TYPE guarantees
-is never refuted. Cells are keyed by the binder read, so two names bound to
-one array (`let v = w`) are sampled independently, exactly as two captured
-scalars are: a claim true only because they alias is refused. A call of a
+is never refuted. Cells are keyed by the read's SEMANTIC OPERAND KEY and
+canonical coordinate: the identity-transparent aliases of one array (§8.3 -- a
+top-level pure deferred alias class, a never-written stored alias `let v = w`)
+are ONE key and share samples, so a claim true because the two names hold the
+same cells is a law about one array and is accepted (`v(i) * w(j)` under
+`comm(i, j)`, `symmetry/157`). Distinct or unproved keys are sampled
+independently, exactly as two captured scalars are: an alias some declaration
+may write is no identity-transparent alias (a write mints a new version and
+invalidates every equality the shared samples would rely on), so the same
+claim over it is refused (`symmetry/158`). The key is §8.3's identity and is
+applied where it is -- a kernel checked at module level; a declared
+function's or pack kernel's body keeps binder keys. The kernel's FORMAL
+arguments stay independently sampled whatever arrays the operands are (the
+operands' identity licenses storage, not a law about the kernel,
+`symmetry/159`). LANGUAGE CHANGE (`docs/plans/plan-identity-transpose-compute.md`
+§2.5); before it every binder was sampled independently and a claim true only
+because two names alias was refused. A call of a
 pure (no writes, output or external reads),
 non-recursive user function -- declared, or a module-level `let` of a
 lambda -- evaluates through the function's body with the arguments
@@ -1947,27 +1961,63 @@ At a call site, **neighboring identical arguments** form identity groups
 licenses symmetry only *within* an identity group.
 
 Two arguments are IDENTICAL when they name the same array, OR when they name
-members of one TOP-LEVEL PURE DEFERRED ALIAS CLASS (§10.2): a module-level
-`let g2 = g` (chains `let g3 = g2` included) over a pure deferred map binds
-the same deferred value, no member can be written (BL4005), so the members are
-one array, and `method_for(g, g2) <@> lambda(a, b) where comm(a, b) -> ...`
-is packed and triangular exactly as `method_for(g, g)` is (`blade plan` names
-the operands as written: `operands: g, g2`). The rule is applied only where
-the class is proved, and fails closed to distinct arrays otherwise: a root
-whose evaluation is not repeatable (it writes -- then it is stored at its
-definition and its alias is a copy -- prints, reads external data, or calls an
-unknown callee), a root that reads, directly or through a callable it names, a
-deferred value that is not itself such a root (a writing named map runs where
-it is read, so the reader is stored at its definition too: `symmetry/152`,
-`153`), an alias that is `let mut`, ascribed, or of another module's
-binding, an alias bound inside a block or a function body (a forcing copy,
-§10.2), and a use inside a lambda or function body all keep their own
-identities, as do a stored array's alias (`let B = A` deep-copies) and the
-parameters of a helper (`f(A, A)` over `f(x, y)` stays dense). LANGUAGE
-CHANGE, the P1 entry point of `docs/plans/plan-identity-transpose-compute.md`
-(§2.1); before it, an alias of a deferred map was a different array here
-(dense), contradicting §10.2. Corpus `symmetry/146`-`148` (packed), `149`-`153`
-(the cases this step does not change, and the fail-closed edges).
+two members of one top-level IDENTITY-TRANSPARENT ALIAS CLASS. There are two
+kinds (`docs/plans/plan-identity-transpose-compute.md` §2.1):
+
+- A TOP-LEVEL PURE DEFERRED ALIAS CLASS (§10.2): a module-level `let g2 = g`
+  (chains `let g3 = g2` included) over a pure deferred map binds the same
+  deferred value, no member can be written (BL4005), so the members are one
+  array, and `method_for(g, g2) <@> lambda(a, b) where comm(a, b) -> ...` is
+  packed and triangular exactly as `method_for(g, g)` is (`blade plan` names the
+  operands as written: `operands: g, g2`). It fails closed to distinct arrays
+  for a root whose evaluation is not repeatable (it writes -- then it is stored
+  at its definition and its alias is a copy -- prints, reads external data, or
+  calls an unknown callee), and for a root that reads, directly or through a
+  callable it names, a deferred value that is not itself such a root (a writing
+  named map runs where it is read, so the reader is stored at its definition
+  too: `symmetry/152`, `153`). Corpus `symmetry/146`-`148`.
+- A TOP-LEVEL NEVER-WRITTEN STORED ALIAS: a module-level plain `let B = A`
+  (chains included) whose root is STORED at its own site -- an array literal, a
+  `|> compute` of a computed value, or a call of a function the module declares
+  -- in a plain or compact array type, when NOTHING in the program can ever
+  write `A`, `B` or a value that may share their storage. `let B = A`
+  deep-copies (an assignable array binding, `loops/081`), but with no write possible the two names
+  hold the same cells for their whole lifetime, so they are one array:
+  `method_for(A, B) <@> comm-kernel` is packed as `method_for(A, A)` is, and
+  `gram(M, N)` with `let N = M` is the same-array gram (`symmetry/154`, `156`).
+  The never-written proof is syntactic, module-wide and fail-closed, decided
+  before the program is typed, so a write LATER in the source counts. It fails
+  when any top-level declaration that names a member -- the root, the alias,
+  the alias's source, or any binding or function whose declaration names a
+  member (a view, alias, tuple, map or call result derived from one may share
+  its storage) -- holds an assignment of any kind (a write to local storage
+  counts), names another module's code or a qualified name, or names a
+  definition that may write (one that does any of that, transitively; every
+  expression counts, a lambda parameter's default included, `symmetry/160`);
+  when the root may share what it names -- a call, or a `|> compute` of anything
+  but a map -- its whole reach (the arguments, the callee and everything they
+  name) must be never written too (`symmetry/155`: `id1(X)` hands back `X`'s
+  cells, with or without `|> compute`); and when another
+  module of the program imports this one. `blade plan` records every judged
+  alias, `[alias-identity v1] B: applied [...]` or `declined -- <first failed
+  condition>`. Identity is a language fact: `BLADE_TRANSPOSE_ELIDE`, which
+  decides whether `B` also SHARES `A`'s storage (the read-only alias plan, whose
+  own never-written proof this one is stricter than), never changes it -- every
+  lane reads each operand by position, so a packed product over two equal
+  copies is the same value. Because the proof is module-wide, the output TYPE of
+  `method_for(A, B)` can change when an unrelated declaration naming `A` gains a
+  write (plan §2.6: accepted, fail-closed, recorded).
+
+Everything else keeps its own identity: an alias that is `let mut`, ascribed,
+or of another module's binding, an alias bound inside a block or a function
+body (a forcing copy, §10.2), a use inside a lambda or function body, a stored
+alias some declaration may write (`symmetry/150`, `155`), and the parameters of
+a helper (`f(A, A)` over `f(x, y)` stays dense). LANGUAGE CHANGE, P1 of
+`docs/plans/plan-identity-transpose-compute.md` (§2.1, the deferred class first,
+the stored alias second); before it an alias of a deferred map was a different
+array here (dense), contradicting §10.2, and so was a never-written stored
+alias. Corpus `symmetry/149`-`153` and `155` are the cases this does not
+change and the fail-closed edges.
 
 This rule is proved SOUND and proved NOT OPTIMAL for non-adjacent repeats
 (proofs.md §Attain: `surface_comm_optimal`, `aba_beats_surface_rule`,

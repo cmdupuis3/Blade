@@ -1,0 +1,38 @@
+// TEST: Never-Written Stored Alias Comm Outer Product Packed
+// LANGUAGE CHANGE (docs/plans/plan-identity-transpose-compute.md 2.1, the
+// second step: stored arrays with a provable no-write interval; formalism
+// 8.3 identity groups). A top-level `let B = A` over a STORED array deep-copies
+// (loops/081), but when nothing in the program can ever write A, B or a value
+// that may share their storage, the two names hold the same cells for their
+// whole lifetime and are ONE array for the identity groups: `method_for(A, B)`
+// under a comm kernel is packed exactly as `method_for(A, A)` is (SymIdx<2, I>
+// storage -- the ascriptions below would be BL3001 if the results were dense
+// -- triangular iteration, the same logical reads). The proof is syntactic,
+// module-wide and fail-closed (symmetry/155 is its edges; symmetry/150 the
+// written case, still dense). Three stored roots: an array literal, a
+// `|> compute`, and a call of a declared function (whose whole reach, here
+// `mk`, is never written either). Until this change all three were dense.
+type I = Idx<3>
+let A: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let B = A
+let PAB: Array<Float64 like SymIdx<2, I>> = method_for(A, B) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+let C = method_for(range<I>) <@> lambda(i) -> Float64(i) * 2.0 |> compute
+let D = C
+let PDC: Array<Float64 like SymIdx<2, I>> = method_for(D, C) <@> lambda(a, b) where comm(a, b) -> a + b |> compute
+function mk() -> Array<Float64 like I> = [4.0, 5.0, 6.0]
+let E = mk()
+let F = E
+let PEF: Array<Float64 like SymIdx<2, I>> = method_for(E, F) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+let below = PAB((2 : I), (0 : I))
+let above = PAB((0 : I), (2 : I))
+let tot = reduce(PAB, (+), axes = 2)
+let mirror = PEF((2 : I), (1 : I))
+// EXPECT: A = [1.0, 2.0, 3.0]
+// EXPECT: B = [1.0, 2.0, 3.0]
+// EXPECT: PAB = [[1.0, 2.0, 3.0], [4.0, 6.0], [9.0]]
+// EXPECT: PDC = [[0.0, 2.0, 4.0], [4.0, 6.0], [8.0]]
+// EXPECT: PEF = [[16.0, 20.0, 24.0], [25.0, 30.0], [36.0]]
+// EXPECT: below = 3.0
+// EXPECT: above = 3.0
+// EXPECT: tot = 36.0
+// EXPECT: mirror = 30.0

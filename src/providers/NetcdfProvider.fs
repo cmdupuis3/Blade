@@ -468,7 +468,9 @@ let ncDimToNamedIndexType (builder: IRBuilder) (dim: NcDim) : string * IRIndexTy
 
 /// Builds an IRArrayType for a variable, reusing the module's named index
 /// types (dimMap: dim name -> IRIndexType) so variables sharing a dimension get the same reference.
-let ncVarToArrayType (dimMap: Map<string, IRIndexType>) (var: NcVar) : IRArrayType =
+/// `storeKey` names the load (Types.providerVarIdentity): the identity is the
+/// store's variable, never the bare file variable name.
+let ncVarToArrayType (storeKey: string) (dimMap: Map<string, IRIndexType>) (var: NcVar) : IRArrayType =
     let indexTypes =
         var.Dims
         |> List.map (fun dim ->
@@ -479,7 +481,7 @@ let ncVarToArrayType (dimMap: Map<string, IRIndexType>) (var: NcVar) : IRArrayTy
         ElemType = IRTScalar (ncTypeToElemType var.TypeCode)
         IndexTypes = indexTypes
         IsVirtual = false
-        Identity = Some (AIDVariable var.Name)
+        Identity = Some (providerVarIdentity storeKey var.Name)
     }
 
 /// Converts an NcFile into an IRModule using structs for dims/vars.
@@ -517,6 +519,12 @@ let ncFileToModule
     (externalDimMap: Map<string, IRIndexType> option)
     : IRModule =
 
+    // The load's store key (Types.providerVarIdentity): the binding name is
+    // program-unique already (the `<name>__vars` / `__dims` structs share one
+    // TypeDefs map), so two stores' same-named variables never share an
+    // identity.
+    let storeKey = $"netcdf:{moduleName}"
+
     // Build named index types
     let (indexTypeDefs, dimMap) =
         match externalDimMap with
@@ -533,7 +541,7 @@ let ncFileToModule
     let dimsFields =
         file.Dims |> List.map (fun dim ->
             let idx = dimMap.[dim.Name]
-            let arrType = mkArrayArrow [idx] (IRTScalar ETInt64) (Some (AIDVariable dim.Name))
+            let arrType = mkArrayArrow [idx] (IRTScalar ETInt64) (Some (providerVarIdentity storeKey ("dims." + dim.Name)))
             (dim.Name, arrType))
 
     let dimsStruct = IRTDStruct($"{moduleName}__dims", dimsFields)
@@ -549,7 +557,7 @@ let ncFileToModule
         file.Vars
         |> List.filter (not << isCoordinateVar)
         |> List.map (fun v ->
-            let arrType = ncVarToArrayType dimMap v
+            let arrType = ncVarToArrayType storeKey dimMap v
             (v.Name, mkArrayLike arrType))
 
     let varsStruct = IRTDStruct($"{moduleName}__vars", varsFields)

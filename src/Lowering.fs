@@ -4371,6 +4371,10 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // the interpreter keeps its copy. Last, over the final tree. Gate:
         // BLADE_TRANSPOSE_ELIDE.
         Optimize.planAliasElision programFuncs (foreignAll.Force()) irModule
+        // The checker's stored-alias identity verdicts (plan 2.1 second step,
+        // rule `alias-identity v1`), each applied one cross-checked against
+        // the plan above. Records only; no IR change.
+        Optimize.recordAliasIdentity programFuncs (foreignAll.Force()) irModule
         irModule)
 
     // DEAD-POLYMORPH ELIMINATION, last and whole-program: a lambda lifted out

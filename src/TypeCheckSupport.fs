@@ -7189,7 +7189,11 @@ let declSymmetryContradiction (env: TypeEnv) (typedParams: TypedParam list)
                             else
                                 let (a, b) = (typedParams.[p], typedParams.[q])
                                 let others = typedParams |> List.indexed |> List.filter (fun (k, _) -> k <> p && k <> q) |> List.map snd
-                                Blade.Deduce.witnessSwapLawFailure (witnessInlineFn env) a.VarId b.VarId (others |> List.map (_.VarId)) negate proved
+                                // A declared function's body: captured arrays
+                                // keep binder keys (the identity-transparent
+                                // alias rule applies at module level only, as
+                                // TypeCheckSupport.aliasRootOf does).
+                                Blade.Deduce.witnessSwapLawFailure (witnessInlineFn env) (fun _ vid -> vid) a.VarId b.VarId (others |> List.map (_.VarId)) negate proved
                                     (isIntTy a.Type && isIntTy b.Type) tBody
                                 |> Option.map (fun w ->
                                     let named =
@@ -7478,29 +7482,186 @@ let recordDeferredAliasMember (env: TypeEnv) (isPlainLet: bool) (hasAscription: 
                 env.DeferredAliasRoots.[varId] <- (name, varId, env.ModuleQualifier)
         | _ -> ()
 
+/// TOP-LEVEL STORED ALIAS CLASSES, the checker's half (docs/plans/plan-
+/// identity-transpose-compute.md 2.1, "stored arrays with provable no-write
+/// intervals come second"; formalism 8.3). A module-level `let B = A` over a
+/// STORED array deep-copies (loops/081), so A and B are two arrays -- UNLESS
+/// nothing in the program can ever write A, B or any value that may share
+/// their storage: then both hold the same cells for their whole lifetime and
+/// are ONE array for every identity question, so `method_for(A, B)` under a
+/// comm kernel is the identity group `method_for(A, A)` is. LANGUAGE CHANGE,
+/// no knob (identity is a language fact; the read-only alias PLAN,
+/// Optimize.planAliasElision, decides separately whether B also SHARES A's
+/// storage, and every lane reads each operand by position, so a packed
+/// product over two equal copies is the same value).
+///
+/// Called by checkDecl for every module-level `let` with a plain-variable
+/// pattern. Registers, fail-closed:
+///   * a ROOT: a `let` / `let mut` whose typed value is STORED at its own site
+///     (storedRootForm: an array literal, a `|> compute` of a computed value,
+///     a call of a declared function -- the callee forces) and whose type is a
+///     plain or compact stored array (storedAliasableType: what the read-only
+///     alias plan can share);
+///   * an ALIAS: a plain `let` (not `mut`), no type ascription, whose value is
+///     a bare unqualified variable naming a registered member of THIS module,
+///     when the module's never-written proof (env.StoredAliasNeverWritten,
+///     TypeCheck.storedAliasWriteProof: a syntactic, module-wide, fail-closed
+///     closure over the SURFACE declarations, computed before any is checked,
+///     because identity is decided here and the write may come later in the
+///     source) holds for the root, the alias's source and the alias.
+/// Every candidate alias (a plain top-level `let B = A` of an array binding of
+/// this module that is not a deferred class member) records its verdict in
+/// Types.StoredAliasIdentity, which Lowering reports as `[alias-identity v1]`.
+let private storedAliasableType (env: TypeEnv) (t: IRType) : bool =
+    match IR.stripUnits (env.Subst.Resolve t) with
+    | ArrayElem at ->
+        not at.IsVirtual
+        && not at.IndexTypes.IsEmpty
+        && at.IndexTypes |> List.forall (fun ix ->
+            ix.IxKind = IxKPlain
+            && (match ix.Symmetry with SymNone | SymSymmetric | SymAntisymmetric | SymHermitian -> true | _ -> false))
+    | _ -> false
+
+/// How a top-level binding's value is stored at its own site, and whether its
+/// cells may be SHARED with what the value names (a call's result -- the
+/// callee may hand back an argument's or a captured array's storage -- or a
+/// `|> compute` of anything but a map, which can be the identity on a stored
+/// name, view or call: formalism 10.2): the never-written proof then also
+/// covers everything the root's declaration reaches (Codex review of this
+/// rule, finding 1: `id1(X) |> compute` shares X). FRESH, with no reach, only:
+/// an array literal and a `|> compute` of an apply combinator (a map's pool).
+let private storedRootForm (env: TypeEnv) (tValue: TypedExpr) : (string * bool) option =
+    match tValue.Kind with
+    | TExprArrayLit _ -> Some ("an array literal", false)
+    | TExprCompute inner ->
+        match inner.Kind with
+        // `X |> compute` of a NAMED value is not proved a fresh pool (the
+        // read-only alias plan's freshRootForm refuses it too).
+        | TExprVar _ -> None
+        | TExprApply _ -> Some ("a `|> compute` of a map (a fresh pool)", false)
+        | _ -> Some ("a `|> compute` (its reach is never written either: it may share what it names)", true)
+    | TExprApp (h, _) ->
+        let rec head (e: TypedExpr) =
+            match e.Kind with
+            | TExprApp (f, _) -> head f
+            | TExprVar (_, fid, _) -> Some fid
+            | _ -> None
+        match head h with
+        | Some fid when env.DeclaredFuncIds.Contains fid -> Some ("a call of a declared function (the callee forces its result)", true)
+        | _ -> None
+    | _ -> None
+
+let recordStoredAliasMember (env: TypeEnv) (mutability: BindingMut) (hasAscription: bool)
+                            (surfaceVar: string option) (varId: IRId) (name: string)
+                            (tValue: TypedExpr) : unit =
+    let qual = env.ModuleQualifier
+    let isArrayTy (t: IRType) =
+        match IR.stripUnits (env.Subst.Resolve t) with
+        | ArrayElem at -> not at.IndexTypes.IsEmpty
+        | _ -> false
+    // ROOT registration (a root is its own member; only an alias maps away).
+    (if mutability <> BindConst
+        && storedAliasableType env tValue.Type
+        && (storedRootForm env tValue).IsSome then
+        env.StoredAliasRoots.[varId] <- (name, varId, qual))
+    match tValue.Kind, surfaceVar with
+    | TExprVar (src, srcVid, _), Some surf
+        when src = surf && not (src.Contains ".")
+             && not (env.DeferredAliasRoots.ContainsKey srcVid)
+             && isArrayTy tValue.Type ->
+        let record (rootName: string) (rootVid: IRId) (verdict: Result<string list, string>) =
+            Blade.Types.StoredAliasIdentity.record
+                { AliasId = varId; Alias = name; Root = rootName; RootId = rootVid; Verdict = verdict }
+        match env.StoredAliasRoots.TryGetValue srcVid with
+        | true, (rootName, rootVid, rq) when rq = qual ->
+            let verdict =
+                if mutability <> BindLet then Error $"`{name}` is declared `let mut`: an assignable copy by declaration"
+                elif hasAscription then Error $"`{name}` carries a type ascription (a declared type fixes its own elaboration)"
+                elif not (storedAliasableType env tValue.Type) then Error "the array is not a plain or compact stored array"
+                else
+                    let rootInfo =
+                        match Map.tryFind rootName env.Variables with
+                        | Some vi when vi.VarId = rootVid -> vi.TypedValue
+                        | _ -> None
+                    match rootInfo |> Option.bind (storedRootForm env) with
+                    | None -> Error $"`{rootName}` no longer resolves to its stored root"
+                    | Some (how, isCall) ->
+                        match env.StoredAliasNeverWritten.Value rootName isCall [ rootName; src; name ] with
+                        | Error why -> Error why
+                        | Ok why ->
+                            let chain = if src = rootName then "" else $" through `{src}`"
+                            Ok [ $"`{name}` = `{rootName}`{chain}: one array for the identity groups (formalism 8.3)"
+                                 $"storage of `{rootName}`: {how}"
+                                 why ]
+            (match verdict with
+             | Ok _ -> env.StoredAliasRoots.[varId] <- (rootName, rootVid, qual)
+             | Error _ -> ())
+            record rootName rootVid verdict
+        | true, _ -> ()
+        | _ ->
+            // An array binding of this module that is no stored root (a
+            // deferred-form-free view, a provider value, a tuple element, a
+            // scalar-typed name): the candidate keeps its own identity.
+            match Map.tryFind src env.Variables with
+            | Some vi when vi.VarId = srcVid ->
+                let why =
+                    match vi.TypedValue with
+                    | Some tv when (storedRootForm env tv).IsSome ->
+                        "the array is not a plain or compact stored array"
+                    | Some _ ->
+                        $"`{src}`'s value is not a form v1 proves stored at its own site (an array literal, a `|> compute` of a computed value, a call of a declared function, or a stored alias of one)"
+                    | None -> $"`{src}` is not a module binding the checker can see"
+                record src srcVid (Error why)
+            | _ -> ()
+    | _ -> ()
+
+/// The ROOT of an identity-transparent alias, when the class is visible as
+/// proved at this use: a non-root member of a top-level pure deferred alias
+/// class (recordDeferredAliasMember) or of a stored alias class
+/// (recordStoredAliasMember), used at module level (not in a lambda or
+/// function body), in the class's own module, spelled unqualified, and the
+/// root's name still resolving to the root binder (so no shadowing or import
+/// can make two different arrays share a name-keyed identity). None for
+/// everything else, the root itself included.
+let aliasRootOf (env: TypeEnv) (name: string) (vid: IRId) : (string * IRId) option =
+    let viaTable (table: System.Collections.Generic.Dictionary<IRId, string * IRId * string option>) =
+        match table.TryGetValue vid with
+        | true, (rootName, rootVid, qual)
+            when rootVid <> vid
+                 && not env.InCallableBody
+                 && qual = env.ModuleQualifier
+                 && not (name.Contains ".")
+                 && (match Map.tryFind rootName env.Variables with
+                     | Some vi -> vi.VarId = rootVid
+                     | None -> false) ->
+            Some (rootName, rootVid)
+        | _ -> None
+    match viaTable env.DeferredAliasRoots with
+    | Some r -> Some r
+    | None -> viaTable env.StoredAliasRoots
+
 /// THE identity of a loop former's VARIABLE operand (every TypeCheckInfer
-/// site that used to mint `AIDVariable name` from the operand's spelling).
-/// A member of a top-level pure deferred alias class (recordDeferredAliasMember)
-/// other than its root is `AIDAlias (AIDVariable root, name)` -- the root's
-/// identity, the operand's spelling kept for the decision record -- but ONLY
-/// when the class is visible as proved: the use is at module level (not in a
-/// lambda or function body), in the class's own module, spelled unqualified,
-/// and the root's name still resolves to the root binder (so no shadowing or
-/// import can make two different arrays share a name-keyed identity).
-/// Everything else -- the root itself included -- is `AIDVariable name`,
-/// exactly as before.
+/// site that used to mint `AIDVariable name` from the operand's spelling):
+/// `AIDAlias (AIDVariable root, name)` for a proved identity-transparent
+/// alias (aliasRootOf) -- the root's identity, the operand's spelling kept
+/// for the decision record -- else `AIDVariable name`, exactly as before.
 let loopOperandIdentity (env: TypeEnv) (name: string) (vid: IRId) : ArrayIdentity =
-    match env.DeferredAliasRoots.TryGetValue vid with
-    | true, (rootName, rootVid, qual)
-        when rootVid <> vid
-             && not env.InCallableBody
-             && qual = env.ModuleQualifier
-             && not (name.Contains ".")
-             && (match Map.tryFind rootName env.Variables with
-                 | Some vi -> vi.VarId = rootVid
-                 | None -> false) ->
-        AIDAlias (AIDVariable rootName, name)
-    | _ -> AIDVariable name
+    match aliasRootOf env name vid with
+    | Some (rootName, _) -> AIDAlias (AIDVariable rootName, name)
+    | None -> AIDVariable name
+
+/// THE comm/anticomm witness's key for a CAPTURED ARRAY read (formalism 4,
+/// the sampler; plan-identity-transpose-compute 2.5): reads are sampled by
+/// semantic operand key, so the identity-transparent aliases of one array
+/// (aliasRootOf) share samples -- a law true only because two names hold the
+/// same cells is a law about one array. Every other binder keys by itself
+/// (sampled independently, as before), and captured SCALARS are not routed
+/// through here at all.
+let witnessArrayKey (env: TypeEnv) : string -> IRId -> IRId =
+    fun name vid ->
+        match aliasRootOf env name vid with
+        | Some (_, rootVid) -> rootVid
+        | None -> vid
 
 /// Rejection message shared by the two orientations of the same unimplemented
 /// shape: a `zip(...)` sitting beside other arrays in ONE operand pack

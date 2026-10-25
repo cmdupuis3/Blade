@@ -357,6 +357,48 @@ partition (§2.2), §2.3, §2.4, §2.5 (the sampler is still binder-keyed), the 
 `__coi` fallback and the provider minting sites (§2.7). Noted: a module deferred alias
 read only by a function body is BL9002 on master (pre-existing).
 
+BUILT (wave 2, workstream B: §2.1's second step, §2.5, §2.7): a module-level
+plain `let B = A` (chains included) over a STORED root -- an array literal, a
+`|> compute` of a computed value, a call of a declared function -- of a plain or
+compact array type takes A's identity (`AIDAlias`; `TypeEnv.StoredAliasRoots`,
+`TypeCheckSupport.recordStoredAliasMember`, `aliasRootOf`) when the module's
+NEVER-WRITTEN PROOF holds: a PRE-PASS over the module's SURFACE declarations
+(`TypeCheck.storedAliasWriteProof`, installed before the first declaration is
+checked, because identity is decided at typecheck and the write may come later
+in the source -- lifting the typed-AST check was not possible, the later
+declarations are untyped when the identity is needed), syntactic, module-wide and
+fail-closed, mirroring `Optimize.aliasWriteClosure` and stricter than it at
+every point (members = seeds plus every top-level binder whose declaration names
+a member; refused when a member-naming declaration holds any assignment --
+lambda parameter defaults, align pads and halo offsets scanned too -- names
+an import or a qualified name, or names a writing definition, transitively; a
+root that may share what it names -- a call, a `|> compute` of anything but a
+map -- adds its whole reach to the seeds and is judged by its own and its
+reach's declarations; any importer module refuses). The read-only alias plan
+gained the same roots with the same reach (`aliasPlanChain`; a reach that names
+a binding this module cannot see -- another module's array -- declines), so
+every identity alias is one the plan may share; Lowering records
+`[alias-identity v1]` per judged alias and cross-checks each applied one
+against the plan's admission (`recordAliasIdentity`: a disagreement is an
+internal error, not a record -- a Codex review found three holes, all closed
+and pinned, symmetry/155, 160, `blade test optimize`); `[symmetric-storage v1]`
+names `identity-transparent aliases: B = A`. `gram(M, N)` with `let N = M` is
+the same-array gram. `BLADE_TRANSPOSE_ELIDE=0` changes the storage only. The
+comm sampler (§2.5) keys captured array reads by `witnessArrayKey` (the root for
+both alias kinds, at module level; binder keys elsewhere; formal arguments
+unchanged). §2.7: IRMono's `coIterIdentityOf` mints a fresh literal identity per
+non-variable operand (no shared `__coi`); provider identities carry the store
+(`Types.providerVarIdentity`, `<provider>:<binding>.<var>`); `AIDDerived` is
+retired (never constructed, never equal), `AIDParameter` kept with its
+definition for §2.2. Corpus symmetry/154-160, loops/598; migration manifest
+[plan-identity-transpose-compute-w2b-manifest.md](plan-identity-transpose-compute-w2b-manifest.md);
+formalism §8.3 and the
+sampler passage of §4 reworded. Open: provider-read roots (a provider load names
+an import, so the proof declines them), a write-free import judged through its
+callee's effects (imports decline today), the module-level-only scope (a
+function body reading two aliases keeps two identities), an incremental notebook
+path that checks an early cell before a later write.
+
 ### P2 — Structural transpose normal forms
 
 Typed map/action algebra, certificates, the fold-order rule of §3. Normalize before

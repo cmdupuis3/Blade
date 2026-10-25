@@ -1852,17 +1852,23 @@ let adaptFloatLiteralsModule (modul: IRModule) : IRModule =
 /// a callable may live in another module.
 /// The array identity a co-iteration/map operand carries: one per distinct
 /// operand variable, so codegen's symmetry deduction treats `A_0 + A_1` as two
-/// different arrays (and `A_0 + A_0` as the same array).
-let internal coIterIdentityOf (e: IRExpr) : ArrayIdentity =
+/// different arrays (and `A_0 + A_0` as the same array). A NON-variable
+/// operand (a pack element `A[0]`, a computed subexpression) has no key of its
+/// own, so it gets a FRESH literal identity per operand: two such operands are
+/// never one array (fail closed: an equal-looking expression is not proved the
+/// same storage). Before docs/plans/plan-identity-transpose-compute.md 2.7 every
+/// non-variable operand shared the constant `AIDVariable "__coi"`, so `A[0]`
+/// and `A[1]` answered the SAME identity.
+let internal coIterIdentityOf (builder: IRBuilder) (e: IRExpr) : ArrayIdentity =
     match e with
     | IRVar (id, _) -> AIDVariable $"__coi{id}"
-    | _ -> AIDVariable "__coi"
+    | _ -> AIDLiteral (builder.FreshId())
 
 /// `method_for(arr) <@> kernel` over ONE array with a scalar kernel, as the
 /// bare (deferred, unforced) combinator node. `lowerArrayBinOpsModule` wraps
 /// it in `IRCompute`; Optimize's sibling-fold pass uses it bare as a join leaf.
-let internal mapOneArrayApply (arr: IRExpr) (la: IRArrayType) (kernel: IRExpr) (outputType: IRType) : IRExpr =
-    let ident = coIterIdentityOf arr
+let internal mapOneArrayApply (builder: IRBuilder) (arr: IRExpr) (la: IRArrayType) (kernel: IRExpr) (outputType: IRType) : IRExpr =
+    let ident = coIterIdentityOf builder arr
     let sdims = la.IndexTypes.Length
     let mfInfo : MethodForInfo =
         { Arrays = [arr]; Identities = [ident]; ArrayTypes = [la]
@@ -1920,7 +1926,7 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs:
     // Distinct identity per distinct operand var so codegen's symmetry
     // deduction treats `A_0 + A_1` as two different arrays (and `A_0 + A_0` as
     // the same array -- correct commutative collapse).
-    let identityOf e = coIterIdentityOf e
+    let identityOf e = coIterIdentityOf builder e
     // Operand type, seeing through a `|> compute` wrapper so a *nested* array
     // binop -- whose inner rewrite already produced `IRCompute(IRApplyCombinator)`
     // (an array-typed, but not CarriedType-tagged, node) -- is still recognized
@@ -2069,7 +2075,7 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs:
     // `method_for(arr) <@> kernel |> compute` over ONE array with a scalar
     // kernel: the map both broadcast rewrites below build.
     let mapOneArray (arr: IRExpr) (la: IRArrayType) (kernel: IRExpr) (outputType: IRType) : IRExpr =
-        IRCompute (mapOneArrayApply arr la kernel outputType)
+        IRCompute (mapOneArrayApply builder arr la kernel outputType)
     // Broadcast a scalar against an array (`arr op scalar` / `scalar op
     // arr`): value-space twin of TypeCheck.inferBinOp's array-scalar path,
     // for operands whose types only resolve post-monomorphization (a pack

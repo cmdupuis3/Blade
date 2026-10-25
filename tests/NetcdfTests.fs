@@ -216,8 +216,10 @@ let runNetcdfTests () =
             (arr.IndexTypes.Length = 3) ($"got {arr.IndexTypes.Length}")
         check "A index types have no tags"
             (arr.IndexTypes |> List.forall (fun i -> i.Tag = None)) ""
-        check "A identity is AIDVariable 'A'"
-            (arr.Identity = Some (AIDVariable "A")) (sprintf "got %A" arr.Identity)
+        // The STORE's variable (plan-identity-transpose-compute 2.7), not the
+        // bare file variable name.
+        check "A identity is the store's variable netcdf:sample.A"
+            (arr.Identity = Some (providerVarIdentity "netcdf:sample" "A")) (sprintf "got %A" arr.Identity)
     | _ ->
         check "A is an array type" false ""
 
@@ -376,6 +378,17 @@ let runNetcdfTests () =
          | Some (ArrayElem a) -> a.ElemType = IRTScalar ETFloat32 && a.IndexTypes.Length = 1
          | _ -> false)
         (sprintf "got %A" (memberOf "second" "vars" "A"))
+    // Same-named variables of two stores are two arrays (plan-identity-
+    // transpose-compute 2.7): the identity carries the store, so sameIdentity,
+    // which keys symmetric storage and the identity groups, never conflates them.
+    check "two loads: first.vars.A and second.vars.A are different identities"
+        (match memberOf "first" "vars" "A", memberOf "second" "vars" "A" with
+         | Some (ArrayElem a1), Some (ArrayElem a2) ->
+             (match a1.Identity, a2.Identity with
+              | Some i1, Some i2 -> not (sameIdentity i1 i2) && sameIdentity i1 i1
+              | _ -> false)
+         | _ -> false)
+        (sprintf "first %A second %A" (memberOf "first" "vars" "A") (memberOf "second" "vars" "A"))
 
     // Non-overlapping members: under the clobber these produced a spurious
     // "field not found" (first) / resolved fine only by luck (second).

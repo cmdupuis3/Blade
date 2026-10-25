@@ -1,0 +1,14 @@
+// TEST: Comm Witness Keeps Formal Kernel Arguments Independent (rejects)
+// docs/plans/plan-identity-transpose-compute.md 2.5: only CAPTURED array
+// reads are sampled by operand key. The kernel's FORMAL arguments stay
+// independently sampled unless the law carries a sharing constraint: even
+// though A and its never-written alias B are ONE array (symmetry/154), so the
+// two operand slots receive the same array, `a / b` is no commutative law and
+// the claim is refused (2 at (2, 1), 0.5 at (1, 2): the formal arguments are
+// sampled as two inputs) -- the operands' identity licenses storage, never a
+// claim about the kernel.
+type I = Idx<3>
+let A: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let B = A
+let P = method_for(A, B) <@> lambda(a, b) where comm(a, b) -> a / b |> compute
+// ERROR: BL4013 @ 12:23

@@ -1,0 +1,15 @@
+// TEST: Comm Witness Samples A Written Alias Independently (rejects)
+// The other side of symmetry/157 (docs/plans/plan-identity-transpose-
+// compute.md 2.5; formalism 4): `v` is written later in the program, so the
+// never-written proof fails, `let v = w` is an ordinary copy with its own
+// identity, and the witness samples v and w INDEPENDENTLY -- `v(i) * w(j)` is
+// then no law (v(2) * w(1) = 0.3125 * -1.875 against v(1) * w(2) = 2.6875 *
+// 4.0625 at the sampled cells)
+// and the comm claim is refused with today's code. A write mints a new
+// version; no equality witness survives it.
+let w = [1.0, 5.0, 2.0]
+let v = w
+let idx = [0, 1, 2]
+let r = method_for(idx, idx) <@> lambda(i, j) where comm(i, j) -> v(i) * w(j) |> compute
+v(0) = 7.0
+// ERROR: BL4013 @ 12:25

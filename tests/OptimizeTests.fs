@@ -306,7 +306,7 @@ let private sliceWriteRk4Emission () =
         let body = if start < 0 then "" else cpp.Substring(start, cpp.IndexOf("\n}\n", start) - start)
         let stepCalls = System.Text.RegularExpressions.Regex.Matches(body, @"\bstep\(").Count
         let rowDeallocs = System.Text.RegularExpressions.Regex.Matches(body, @"deallocate<typename promote<double, 1>").Count
-        let rowStore = System.Text.RegularExpressions.Regex.IsMatch(body, @"__v\d+\[__k\d+\]\[__k\d+\] = __v\d+;")
+        let rowStore = System.Text.RegularExpressions.Regex.IsMatch(body, @"__v\d+\[__kv\d+\]\[__kv\d+\] = __v\d+;")
         if start >= 0 && stepCalls = 0 && rowDeallocs = 0 && rowStore then
             resultLine Pass name "kernel: no step call, no rank-1 temporary freed, cells stored straight into the trajectory row"
             true
@@ -367,7 +367,7 @@ let private recarrayGradEmission () =
     | Ok cpp ->
         let loops = System.Text.RegularExpressions.Regex.Matches(cpp, @"for \(int64_t ").Count
         let triangular = cpp.Contains "__rk" || cpp.Contains "__rm"
-        let descending = System.Text.RegularExpressions.Regex.IsMatch(cpp, @"- 1L\) - __k\d+\)")
+        let descending = System.Text.RegularExpressions.Regex.IsMatch(cpp, @"- 1L\) - __kv\d+\)")
         if loops = 3 && not triangular && descending then
             resultLine Pass name "3 counted loops (primal, replay, descending adjoint); no triangular ordinals"
             true
@@ -409,7 +409,7 @@ let private recarrayGradNonlinearEmission () =
     | Ok cpp ->
         let loops = System.Text.RegularExpressions.Regex.Matches(cpp, @"for \(int64_t ").Count
         let triangular = cpp.Contains "__rk" || cpp.Contains "__rm"
-        let descending = System.Text.RegularExpressions.Regex.IsMatch(cpp, @"- 1L\) - __k\d+\)")
+        let descending = System.Text.RegularExpressions.Regex.IsMatch(cpp, @"- 1L\) - __kv\d+\)")
         if loops = 3 && not triangular && descending then
             resultLine Pass name "3 counted loops (primal, replay, descending adjoint); no triangular ordinals"
             true
@@ -3861,6 +3861,64 @@ let private planBlockDeferredAliasSrc =
     + "let g = method_for(x) <@> lambda(v) -> v * 2.0\n"
     + "let r = {\n    let b = g\n    method_for(g, b) <@> lambda(a, c) where comm(a, c) -> a * c |> compute\n}\n"
 
+/// A NEVER-WRITTEN top-level alias of a STORED array (docs/plans/plan-
+/// identity-transpose-compute.md 2.1, second step; rule `alias-identity v1`):
+/// A and B are one array, so the comm product is packed. tests/corpus/
+/// symmetry/154.
+let private planStoredAliasSrc =
+    "type I = Idx<3>\n"
+    + "let A: Array<Float64 like I> = [1.0, 2.0, 3.0]\n"
+    + "let B = A\n"
+    + "let r = method_for(A, B) <@> lambda(a, b) where comm(a, b) -> a * b |> compute\n"
+
+/// The same alias over a CALL root: its reach (`mk`) joins the proof.
+let private planStoredAliasCallSrc =
+    "type I = Idx<3>\n"
+    + "function mk() -> Array<Float64 like I> = [4.0, 5.0, 6.0]\n"
+    + "let E = mk()\n"
+    + "let F = E\n"
+    + "let r = method_for(E, F) <@> lambda(a, b) where comm(a, b) -> a * b |> compute\n"
+
+/// The alias written later: declined, dense (tests/corpus/symmetry/150).
+let private planStoredAliasWrittenSrc =
+    planStoredAliasSrc + "B((0 : I)) = 9.0\n"
+
+/// The stored alias in a module another module imports: its writes are not
+/// judged here, so the proof fails closed.
+let private storedAliasImportedSources =
+    [ ("Data", "module Data\n\ntype I = Idx<3>\nlet A: Array<Float64 like I> = [1.0, 2.0, 3.0]\nlet B = A\nlet r = method_for(A, B) <@> lambda(a, b) where comm(a, b) -> a * b |> compute\n")
+      ("Main", "module Main\nimport Data\n\nlet s = reduce(Data.r, (+), axes = 2)\n") ]
+
+/// A call root whose callee lives in ANOTHER module and hands back that
+/// module's own array, which another call writes (Codex review of the call
+/// root, finding 3): the reach cannot judge Lib's binding, so neither the
+/// identity nor the storage plan may treat B as A.
+let private storedAliasForeignCallSources =
+    [ ("Lib", "module Lib\n\nlet mut X: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]\nfunction get() -> Array<Float64 like Idx<3>> = X\nfunction poke() -> Float64 = {\n    X(0) = 9.0\n    0.0\n}\n")
+      ("Main", "module Main\nimport Lib\n\nlet A = Lib.get()\nlet B = A\nlet z = Lib.poke()\nlet snapshot = B(0)\n") ]
+
+/// IRMono's co-iteration identities (plan 2.7): a variable operand keys by its
+/// id; every NON-variable operand mints its own identity (it used to share the
+/// constant `AIDVariable "__coi"`). tests/corpus/loops/598 runs the shape.
+let private coIterIdentityPins () : bool list =
+    let builder = IRBuilder()
+    let f64 = IRTScalar ETFloat64
+    let e1 = IRTupleProj (IRVar (101, f64), 0, true)
+    let e2 = IRTupleProj (IRVar (101, f64), 1, true)
+    let i1 = Blade.IRMono.coIterIdentityOf builder e1
+    let i2 = Blade.IRMono.coIterIdentityOf builder e2
+    let i1again = Blade.IRMono.coIterIdentityOf builder e1
+    let v1 = Blade.IRMono.coIterIdentityOf builder (IRVar (7, f64))
+    let v1again = Blade.IRMono.coIterIdentityOf builder (IRVar (7, f64))
+    let v2 = Blade.IRMono.coIterIdentityOf builder (IRVar (8, f64))
+    let check name ok detail =
+        resultLine (if ok then Pass else Fail) name detail
+        ok
+    [ check "coi_identity_non_variable_operands_distinct" (not (sameIdentity i1 i2) && not (sameIdentity i1 i1again))
+          $"two pack elements and one element twice: {i1}, {i2}, {i1again} (none shared)"
+      check "coi_identity_variable_operands_keyed_by_id" (sameIdentity v1 v1again && not (sameIdentity v1 v2))
+          $"the same variable twice is one array, two variables are two: {v1}, {v1again}, {v2}" ]
+
 /// An `omp`-licensed outer product: the placed construct is recorded.
 let private planOmpSrc =
     "let A = [1.0, 2.0, 3.0]\nlet B = [4.0, 5.0, 6.0]\n"
@@ -4506,6 +4564,63 @@ let private planCases () =
       planCase "plan_symmetric_storage_declined_block_alias" planBlockDeferredAliasSrc "symmetric-storage"
           (fun d -> (declinedMentioning "different arrays") d && evidenceMentioning "operands: g, b" d)
           "declined: a block alias is a forcing copy, two arrays"
+      // ---- stored aliases (plan 2.1 second step, rule `alias-identity v1`) ----
+      planCase "plan_alias_identity_applied_stored" planStoredAliasSrc "alias-identity"
+          (fun d -> applied d && d.Subject = "B" && evidenceMentioning "storage of `A`: an array literal" d
+                    && evidenceMentioning "never written (module-wide, syntactic)" d
+                    && evidenceMentioning "the read-only alias plan admits the same alias" d)
+          "a never-written stored alias takes its root's identity; the storage plan agrees"
+      planCase "plan_symmetric_storage_applied_stored_alias" planStoredAliasSrc "symmetric-storage"
+          (fun d -> applied d && evidenceMentioning "operands: A, B" d && evidenceMentioning "identity-transparent aliases: B = A" d)
+          "packed storage over a stored alias pair, the alias named"
+      planCase "plan_alias_identity_applied_call_root" planStoredAliasCallSrc "alias-identity"
+          (fun d -> applied d && d.Subject = "F" && evidenceMentioning "the call's reach (`mk`) is never written either" d
+                    && evidenceMentioning "the read-only alias plan admits the same alias" d)
+          "a call root: its reach joins the proof, and the storage plan admits it too"
+      planCase "plan_transpose_alias_applied_call_root" planStoredAliasCallSrc "transpose-normal-form"
+          (fun d -> applied d && d.Subject = "F" && evidenceMentioning "a call of `mk` (its reach is never written either)" d)
+          "the read-only alias plan shares a call root's storage when its reach is never written"
+      planCase "plan_alias_identity_declined_written" planStoredAliasWrittenSrc "alias-identity"
+          (fun d -> (declinedMentioning "names `B` and holds an assignment") d)
+          "declined: the alias is written later (symmetry/150)"
+      planCase "plan_symmetric_storage_declined_written_stored_alias" planStoredAliasWrittenSrc "symmetric-storage"
+          (declinedMentioning "different arrays") "declined: a written alias is a copy, two arrays"
+      // Identity is a LANGUAGE fact: the storage gate changes the storage
+      // decision only, never the identity or the packed layout.
+      withGate "BLADE_TRANSPOSE_ELIDE" "0" (fun () ->
+          planCase "plan_alias_identity_applied_gate_off" planStoredAliasSrc "alias-identity"
+              (fun d -> applied d && d.Subject = "B") "gate off: the identity is unchanged")
+      withGate "BLADE_TRANSPOSE_ELIDE" "0" (fun () ->
+          planCase "plan_symmetric_storage_applied_stored_alias_gate_off" planStoredAliasSrc "symmetric-storage"
+              (fun d -> applied d && evidenceMentioning "identity-transparent aliases: B = A" d)
+              "gate off: still packed (both lanes read each operand by position)")
+      withGate "BLADE_TRANSPOSE_ELIDE" "0" (fun () ->
+          planCase "plan_transpose_alias_declined_gate_off" planStoredAliasSrc "transpose-normal-form"
+              (fun d -> (declinedMentioning "disabled by BLADE_TRANSPOSE_ELIDE") d && d.Subject = "B")
+              "gate off: the storage is copied")
+      (match decisionsOfMulti storedAliasImportedSources with
+       | Error e -> resultLine Fail "plan_alias_identity_declined_imported_module" e; false
+       | Ok ds ->
+           let mine = ds |> List.filter (fun d -> d.Rule = "alias-identity")
+           let ok = mine |> List.exists (fun d -> d.Subject = "B" && (declinedMentioning "imports this module") d)
+           resultLine (if ok then Pass else Fail) "plan_alias_identity_declined_imported_module"
+               (if ok then "a module another module imports: its aliases keep their own identity (fail closed)"
+                else "wanted a decline naming the importer; the record: " + (mine |> List.map Blade.Effects.Decisions.render |> String.concat " | "))
+           ok)
+      (match decisionsOfMulti storedAliasForeignCallSources with
+       | Error e -> resultLine Fail "plan_alias_declined_foreign_call_root" e; false
+       | Ok ds ->
+           let pick rule = ds |> List.filter (fun d -> d.Rule = rule && d.Subject = "B")
+           let tnf = pick "transpose-normal-form"
+           let ai = pick "alias-identity"
+           let ok =
+               tnf |> List.exists (fun d -> match d.Outcome with Blade.Effects.Declined _ -> true | _ -> false)
+               && not (tnf |> List.exists applied)
+               && not (ai |> List.exists applied)
+           resultLine (if ok then Pass else Fail) "plan_alias_declined_foreign_call_root"
+               (if ok then "a call into another module returning its own (written) array: no shared storage, no shared identity"
+                else "the record: " + ((tnf @ ai) |> List.map Blade.Effects.Decisions.render |> String.concat " | "))
+           ok)
       withGate "BLADE_OMP_THREADS" null (fun () ->
           planCase "plan_omp_placement_applied" planOmpSrc "omp"
               (fun d -> applied d && evidenceMentioning "BLADE_OMP_PARALLEL_FOR" d)
@@ -7564,6 +7679,7 @@ let runOptimizeTests () =
           // Compute elision (BLADE_COMPUTE_ELIDE): single-consumer body computes.
           yield! computeElisionCases () ]
         @ planCases ()
+        @ coIterIdentityPins ()
         @ siblingCases ()
         @ [ parallelEmissionIsolated (); declSpanResetIsolated () ]
         @ validatorPins ()

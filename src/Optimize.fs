@@ -8493,7 +8493,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                                     match aty with
                                     | IRTArrow (slots, _, id2) -> IRTArrow (slots, elemTy, id2)
                                     | t -> t
-                                mapOneArrayApply arr at (IRVar (lam.Id, mkFuncArrow [ elemTy ] elemTy)) outTy
+                                mapOneArrayApply builder arr at (IRVar (lam.Id, mkFuncArrow [ elemTy ] elemTy)) outTy
                             let leg = { mkLeg leafF k c seed note false (Ok ()) (typeOf node) with Source = Some (aid, k, seed) }
                             Ok (baseM [ leg ] n ix [ aid ] (Some (canon node)) desc None))
                  | _ -> Error $"{desc}: the operand is not a stored array named by a variable")
@@ -8536,7 +8536,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                             with SourceName = anonymousCallableName (Some subject) "lambda" }
                         |> mint origin
                     let ats = typed |> List.map (fun (_, at, _, _) -> at)
-                    let ids = args |> List.map coIterIdentityOf
+                    let ids = args |> List.map (coIterIdentityOf builder)
                     let k = args.Length
                     let mf : MethodForInfo =
                         { Arrays = args; Identities = ids; ArrayTypes = ats; SDimsPerArray = List.replicate k 1
@@ -10091,29 +10091,127 @@ let normalizeTransposesModule (programFuncs: IRCallable list) (foreignRefs: Set<
             { f with Body = rewriteIn f.SourceName None locals false f.Body })
     { modul with Bindings = bindings'; Functions = functions' }
 
+/// THE STORED ROOT of a top-level alias chain for the read-only alias plan:
+/// `freshStoredChain`'s fresh roots, and -- plan 2.1's second step, so that
+/// every alias the CHECKER gives its root's identity is one this plan may
+/// share storage for (TypeCheckSupport.storedRootForm admits it) -- a CALL of
+/// a resolvable callable. A call's result may share storage with what the
+/// call reaches (an argument the callee returns, a module array it captures),
+/// so a call root also returns its REACH: every module binding and callable
+/// the root's payload names, transitively through module payloads and
+/// callable bodies and captures. The reach joins the never-written closure's
+/// seeds; with all of it never written, sharing is unobservable. Returns how
+/// the root is stored, the chain (the named binding first, the root last) and
+/// the reach (empty for a fresh root).
+let private aliasPlanChain (programFuncs: IRCallable list) (modul: IRModule) : IRBinding -> Result<string * IRBinding list * Set<IRId>, string> =
+    let fresh = freshStoredChain modul
+    let arr = List.toArray modul.Bindings
+    let indexOf = arr |> Array.mapi (fun i b -> (b.Id, i)) |> Map.ofArray
+    let payloadOf = intervalPayloadOf modul
+    let payById = arr |> Array.map (fun b -> (b.Id, payloadOf b.Id b.Value)) |> Map.ofArray
+    let callables = (modul.Functions @ programFuncs) |> List.distinctBy (fun f -> f.Id)
+    let funcsById = callables |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+    // The reach, or the ids it cannot account for. A reference that is
+    // neither this module's binding, a callable, nor a binder local to a
+    // visited body (a parameter, a let, a match or loop binder) is another
+    // module's binding or something unjudged: the reach FAILS CLOSED on it
+    // (Codex review of this rule, finding 3: `Lib.get()` returning Lib's own
+    // array, written by `Lib.poke()`, used to drop out of the reach).
+    let localBinders (e: IRExpr) : Set<IRId> =
+        let mutable s = Set.empty
+        iterIRExpr (fun n ->
+            match n with
+            | IRLet (id, _, _) -> s <- s.Add id
+            | _ -> ()) e
+        s
+    let reachOf (root: IRExpr) : Result<Set<IRId>, Set<IRId>> =
+        let mutable seen = Set.empty
+        let mutable unknown = Set.empty
+        let rec visitIn (locals: Set<IRId>) (id: IRId) =
+            if not (seen.Contains id) then
+                match Map.tryFind id payById, Map.tryFind id funcsById with
+                | Some p, _ ->
+                    seen <- seen.Add id
+                    let ls = localBinders p
+                    for r in collectVarRefsIR p do visitIn ls r
+                | None, Some f ->
+                    seen <- seen.Add id
+                    let ls = Set.union (localBinders f.Body) (f.Params |> List.map (fun q -> q.VarId) |> Set.ofList)
+                    for r in collectVarRefsIR f.Body do visitIn ls r
+                    for c in f.Captures do visitIn Set.empty c.Id
+                | None, None ->
+                    if not (locals.Contains id) then unknown <- unknown.Add id
+        let rootLocals = localBinders root
+        for r in collectVarRefsIR root do visitIn rootLocals r
+        if unknown.IsEmpty then Ok seen else Error unknown
+    let rec callRoot (seen: Set<IRId>) (b: IRBinding) : Result<string * IRBinding list * Set<IRId>, string> option =
+        match b.Value with
+        | IRVar (aid, _) ->
+            match Map.tryFind aid indexOf, Map.tryFind b.Id indexOf with
+            | Some ai, Some bi when ai < bi && not (seen.Contains aid) ->
+                callRoot (seen.Add b.Id) arr.[ai]
+                |> Option.map (Result.map (fun (how, chain, reach) -> ($"an alias of `{arr.[ai].Name}`, {how}", b :: chain, reach)))
+            | _ -> None
+        | v when not (Map.containsKey b.Id modul.ProviderReads)
+                 && not (modul.CompoundInits.ContainsKey b.Id || modul.SparseInits.ContainsKey b.Id || modul.RandomInits.ContainsKey b.Id) ->
+            let how =
+                match v with
+                | IRApp (IRVar (fid, _), _, _) when funcsById.ContainsKey fid ->
+                    Some $"a call of `{funcsById.[fid].SourceName}` (its reach is never written either)"
+                // A `|> compute` that is no fresh pool (freshStoredChain
+                // declined it): it may be the identity on what it names.
+                | IRCompute inner when (match inner with IRVar _ -> false | _ -> true) ->
+                    Some "a `|> compute` that may share what it names (its reach is never written either)"
+                | _ -> None
+            let isVirtual = match stripUnits b.Type with ArrayElem at -> at.IsVirtual | _ -> false
+            match how with
+            | Some how when not isVirtual ->
+                match reachOf v with
+                | Ok reach -> Some (Ok (how, [ b ], reach))
+                | Error unknown ->
+                    let ids = unknown |> Set.toList |> List.map (fun i -> $"__v{i}") |> String.concat ", "
+                    Some (Error $"`{b.Name}`'s value reaches storage this module cannot judge ({ids}: another module's binding or an unscoped binder)")
+            | _ -> None
+        | _ -> None
+    fun (b: IRBinding) ->
+        match fresh b with
+        | Ok (how, chain) -> Ok (how, chain, Set.empty)
+        | Error why ->
+            match callRoot Set.empty b with
+            | Some r -> r
+            | None -> Error why
+
+/// THE READ-ONLY ALIAS PLAN'S ADMISSION of one candidate, gate-independent:
+/// alias id `aid` of type `aty` bound to module binding `src`. Ok evidence or
+/// Error first failed condition. Shared by planAliasElision and the
+/// identity cross-check (recordAliasIdentity).
+let private aliasPlanAdmission (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (modul: IRModule) =
+    let chainOf = aliasPlanChain programFuncs modul
+    let closure = lazy (aliasWriteClosure programFuncs foreignRefs modul)
+    fun (aid: IRId) (aty: IRType) (src: IRBinding) ->
+        if not (aliasableArrayType aty) then Error "the alias is not a plain or compact stored array (compound, sparse, ragged, orbit and virtual shapes keep their own path)"
+        else
+        match chainOf src with
+        | Error why -> Error why
+        | Ok (how, chain, reach) ->
+            match closure.Force() (Set.union reach (Set.add aid (chain |> List.map (fun c -> c.Id) |> Set.ofList))) with
+            | Error why -> Error $"the copy keeps the two independent: {why}"
+            | Ok why -> Ok [ $"storage of `{src.Name}`: {how}"; why; "main's top level: the shared pool lives to program exit" ]
+
 /// Plan the read-only aliases of the module's top-level bindings (rule 2
 /// above): every ASSIGNABLE `let X = Y` over a stored array records a
 /// decision; an admitted one reaches AliasElideTable.
 let planAliasElision (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (modul: IRModule) : unit =
     let enabled = transposeElideEnabled ()
     let byId = modul.Bindings |> List.map (fun b -> (b.Id, b)) |> Map.ofList
-    let chainOf = freshStoredChain modul
-    let closure = lazy (aliasWriteClosure programFuncs foreignRefs modul)
+    let admission = aliasPlanAdmission programFuncs foreignRefs modul
     // One candidate: alias id `aid` (named `aname` in the record) bound to
     // module binding `src`; `rootChain` = the module bindings whose storage
     // it would share (src's alias chain to its fresh root).
     let decide (subject: string) (aid: IRId) (aname: string) (aty: IRType) (src: IRBinding) =
         let where = if byId.ContainsKey aid then "" else $" (a block let of `{subject}`)"
         let what = $"`{aname} = {src.Name}`{where}: a read-only alias of `{src.Name}`'s storage (no allocation, no pool copy)"
-        let decision : Result<string list, string> =
-            if not (aliasableArrayType aty) then Error "the alias is not a plain or compact stored array (compound, sparse, ragged, orbit and virtual shapes keep their own path)"
-            else
-            match chainOf src with
-            | Error why -> Error why
-            | Ok (how, chain) ->
-                match closure.Force() (Set.add aid (chain |> List.map (fun c -> c.Id) |> Set.ofList)) with
-                | Error why -> Error $"the copy keeps the two independent: {why}"
-                | Ok why -> Ok [ $"storage of `{src.Name}`: {how}"; why; "main's top level: the shared pool lives to program exit" ]
+        let decision : Result<string list, string> = admission aid aty src
         match decision with
         | Error why -> recordTransposeNF subject (Blade.Effects.Declined why) [ $"`{aname} = {src.Name}` deep-copies (copy-on-bind)" ]
         | Ok ev when not enabled -> recordTransposeNF subject (Blade.Effects.Declined "disabled by BLADE_TRANSPOSE_ELIDE") (what :: ev)
@@ -10142,6 +10240,57 @@ let planAliasElision (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (m
                                           && isArray vty ->
                     decide b.Name id $"__v{id}" vty byId.[srcId]
                 | _ -> ()
+
+/// THE ALIAS IDENTITY RECORD (docs/plans/plan-identity-transpose-compute.md
+/// 2.1 second step, rule `alias-identity v1`): every top-level `let B = A`
+/// over a module array that the CHECKER judged for identity transparency
+/// (Types.StoredAliasIdentity, TypeCheckSupport.recordStoredAliasMember) is
+/// recorded here, applied with the checker's evidence or declined with its
+/// first failed condition. An applied one is CROSS-CHECKED against the
+/// read-only alias plan's own admission (aliasPlanAdmission, gate-
+/// independent): the checker's never-written proof is meant to be stricter
+/// than the plan's at every point, so the plan admitting it is part of the
+/// evidence; a decline there would be named (the identity would still be
+/// sound -- both names hold the same cells -- but the storage would be
+/// copied). Identity is a language fact: BLADE_TRANSPOSE_ELIDE changes the
+/// storage decision only, never this record's outcome.
+let recordAliasIdentity (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (modul: IRModule) : unit =
+    let entries = Blade.Types.StoredAliasIdentity.all ()
+    if not entries.IsEmpty then
+        let byId = modul.Bindings |> List.map (fun b -> (b.Id, b)) |> Map.ofList
+        let admission = aliasPlanAdmission programFuncs foreignRefs modul
+        for e in entries do
+            match Map.tryFind e.AliasId byId with
+            | None -> ()
+            | Some b ->
+                let record outcome evidence =
+                    if Blade.Effects.Decisions.active () then
+                        Blade.Effects.Decisions.record
+                            { Blade.Effects.Rule = "alias-identity"; Version = 1
+                              Span = declSpanOf b.Name; Subject = b.Name
+                              Outcome = outcome; Evidence = evidence }
+                match e.Verdict with
+                | Error why ->
+                    record (Blade.Effects.Declined why)
+                        [ $"`{e.Alias}` keeps its own identity: a copy of `{e.Root}`, a second array for the identity groups and the comm witness" ]
+                | Ok ev ->
+                    let storage =
+                        match b.Value with
+                        | IRVar (srcId, _) when byId.ContainsKey srcId ->
+                            match admission b.Id b.Type byId.[srcId] with
+                            | Ok _ ->
+                                "storage: the read-only alias plan admits the same alias (it shares the pool unless BLADE_TRANSPOSE_ELIDE=0; the identity does not depend on that knob)"
+                            | Error why ->
+                                // AN INVARIANT, not a record (Codex review of
+                                // the rule: both disagreements it found were an
+                                // unsound identity). The checker's proof is
+                                // built to be stricter than the plan's; a
+                                // decline here means it admitted a write the
+                                // plan sees, and the program's types may rest
+                                // on a false equality. Fail loudly.
+                                failwith $"internal: stored-alias identity disagreement: the checker gave `{e.Alias}` the identity of `{e.Root}` (never written), but the read-only alias plan declines the same alias: {why}"
+                        | _ -> "storage: after lowering the binding is no plain alias the read-only alias plan reads"
+                    record Blade.Effects.Applied (ev @ [ storage ])
 
 /// `programFuncs` is every callable of the PROGRAM (all modules): a pass that
 /// judges a callee's effects resolves it there, since a generic defined in

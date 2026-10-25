@@ -4623,10 +4623,16 @@ and inferGram (env: TypeEnv) leftE rightE : TypeResult<TypedExpr> =
                         match outUnit with
                         | Some u -> IRTUnitAnnotated (outBare, u)
                         | None -> outBare
-                    // Conservative same-array test: both bare vars, same name.
+                    // Conservative same-array test: both bare vars, the SAME
+                    // identity -- the same name, or identity-transparent
+                    // aliases of one array (a top-level deferred alias class,
+                    // a never-written stored alias: loopOperandIdentity, plan-
+                    // identity-transpose-compute 2.1), exactly as the loop
+                    // formers' identity groups see them.
                     let sameArray =
                         match tL.Kind, tR.Kind with
-                        | TExprVar (n1, _, _), TExprVar (n2, _, _) -> n1 = n2
+                        | TExprVar (n1, v1, _), TExprVar (n2, v2, _) ->
+                            n1 = n2 || sameIdentity (loopOperandIdentity env n1 v1) (loopOperandIdentity env n2 v2)
                         | _ -> false
                     let freshSlot (ext: IRExpr) (sym: SymmetryClass) (rank: int) =
                         { Id = env.Builder.FreshId(); Rank = rank; Extent = ext
@@ -10552,7 +10558,7 @@ and buildApplyInfo (env: TypeEnv)
                         let (a, b) = (ps.[p], ps.[q])
                         let others = ps |> List.indexed |> List.filter (fun (k, _) -> k <> p && k <> q) |> List.map snd
                         let isInt = [ p; q ] |> List.exists (fun k -> k < arrayTypes.Length && intElemT arrayTypes.[k].ElemType)
-                        Blade.Deduce.witnessSwapLawFailure (witnessInlineFn env) a.VarId b.VarId (others |> List.map (_.VarId)) negate proved isInt lambdaInfo.Body
+                        Blade.Deduce.witnessSwapLawFailure (witnessInlineFn env) (witnessArrayKey env) a.VarId b.VarId (others |> List.map (_.VarId)) negate proved isInt lambdaInfo.Body
                         |> Option.map (fun w ->
                             let named =
                                 w.Fixed |> List.choose (fun (id, c) ->
@@ -10736,8 +10742,6 @@ and buildApplyInfo (env: TypeEnv)
                 | AIDVariable n -> n
                 | AIDAlias (_, n) -> n
                 | AIDParameter (n, _) -> n
-                | AIDDerived (AIDVariable n, _) -> n
-                | AIDDerived (AIDParameter (n, _), _) -> n
                 | _ -> $"operand {i + 1}"
         let real k = k >= 0 && k < identities.Length
                      && not (k < arrayTypes.Length && arrayTypes.[k].IsVirtual)
@@ -16764,6 +16768,10 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                  let surfaceVar = match binding.Value.Kind with ExprKind.ExprVar s -> Some s | _ -> None
                  recordDeferredAliasMember env (binding.Mutability = BindLet) binding.Type.IsSome
                                            surfaceVar varId name tValue
+                 // ... and top-level STORED alias classes (plan 2.1, second
+                 // step): a never-written `let B = A` over a stored array.
+                 recordStoredAliasMember env binding.Mutability binding.Type.IsSome
+                                         surfaceVar varId name tValue
              | _ -> ())
 
             // A module-level let-bound lambda is a callee like a declared

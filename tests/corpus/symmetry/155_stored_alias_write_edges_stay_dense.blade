@@ -1,0 +1,72 @@
+// TEST: Stored Alias Identity Fails Closed On Every Possible Write
+// The fail-closed edges of symmetry/154's rule (docs/plans/plan-identity-
+// transpose-compute.md 2.1, 2.6; formalism 8.3). The never-written proof is a
+// syntactic, module-wide closure over the source, computed before anything is
+// typed, so a write ANYWHERE -- before or after the product, at top level or
+// in a function -- keeps the alias a copy with its own identity, and the comm
+// product over the pair stays DENSE (each printed square below is the full
+// dense matrix). Each pair is its own case:
+//   (A, B)  the SOURCE is written after the product (B keeps the old cells);
+//   (C, D)  a function that READS the source also writes (a local scalar --
+//           the proof judges syntax, any assignment in a declaration that
+//           names a member counts);
+//   (X, E, F) the root is a CALL whose argument X is written later: a call's
+//           result may share storage with what the call reaches, so its whole
+//           reach must be never written too. It does here: id1 hands back its
+//           argument's storage, so the write shows through E but not through
+//           the copy F -- the two names DIFFER after it;
+//   (Y, J, K) the same through a `|> compute` of the call: a compute of a
+//           stored call result may be the identity on it, so it needs its
+//           reach exactly as the bare call does (Codex review, finding 1);
+//   (G, H)  a block-local COPY of the alias is written: the write cannot reach
+//           H, but the proof judges syntax and counts a write to local storage,
+//           exactly as the read-only alias plan's closure does (the copy that
+//           makes it local is the kind of copy an alias removes).
+// symmetry/150 is the alias-written case.
+type I = Idx<3>
+let A: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let B = A
+let PAB = method_for(A, B) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+A((0 : I)) = 9.0
+let C: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let D = C
+let PCD = method_for(C, D) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+function first() -> Float64 = {
+    let mut s = 0.0
+    s = C((0 : I))
+    s
+}
+let c0 = first()
+function id1(x: Array<Float64 like I>) -> Array<Float64 like I> = x
+let X: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let E = id1(X)
+let F = E
+let PEF = method_for(E, F) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+X((1 : I)) = 7.0
+let Y: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let J = id1(Y) |> compute
+let K = J
+let PJK = method_for(J, K) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+Y((0 : I)) = 9.0
+let G: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let H = G
+let PGH = method_for(G, H) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+let r = {
+    let v = H
+    v((0 : I)) = 5.0
+    v((0 : I))
+}
+// EXPECT: PAB = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [3.0, 6.0, 9.0]]
+// EXPECT: A = [9.0, 2.0, 3.0]
+// EXPECT: B = [1.0, 2.0, 3.0]
+// EXPECT: PCD = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [3.0, 6.0, 9.0]]
+// EXPECT: c0 = 1.0
+// EXPECT: PEF = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [3.0, 6.0, 9.0]]
+// EXPECT: E = [1.0, 7.0, 3.0]
+// EXPECT: F = [1.0, 2.0, 3.0]
+// EXPECT: PJK = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [3.0, 6.0, 9.0]]
+// EXPECT: K = [1.0, 2.0, 3.0]
+// EXPECT: PGH = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [3.0, 6.0, 9.0]]
+// EXPECT: r = 5.0
+// EXPECT: G = [1.0, 2.0, 3.0]
+// EXPECT: H = [1.0, 2.0, 3.0]

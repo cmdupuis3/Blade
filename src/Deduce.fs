@@ -977,6 +977,7 @@ let rec private witnessKindOf (t: IRType) : ElemType option =
 /// table -- so a body that calls one evaluates through it (D12). A call it
 /// does not resolve leaves the body unevaluable (trusted), as before.
 let witnessSwapLawFailure (inlineFn: IRId -> (IRId list * TypedExpr) option)
+                          (arrayKey: string -> IRId -> IRId)
                           (pi: IRId) (pj: IRId) (others: IRId list) (negate: bool)
                           (skipSwap: bool) (isInt: bool) (body: TypedExpr)
                           : LawWitness option =
@@ -1021,8 +1022,14 @@ let witnessSwapLawFailure (inlineFn: IRId -> (IRId list * TypedExpr) option)
     // Captured ARRAY cells (D12): a read `w(i, j)` of a captured array at
     // integer coordinates evaluates to a sampled value, per cell -- the law
     // must hold for every content of the capture, exactly as for a captured
-    // scalar. Keyed by (array binder, coordinates), memoized, so the same cell
+    // scalar. Keyed by (array KEY, coordinates), memoized, so the same cell
     // reads the same value across a swap; pools disjoint from the scalars'.
+    // The key is the read's semantic operand key (`arrayKey`, the checker's
+    // TypeCheckSupport.witnessArrayKey; plan-identity-transpose-compute 2.5):
+    // the binder itself, except that the identity-transparent aliases of one
+    // array -- a top-level deferred alias class, a never-written stored alias
+    // -- share their root's key and so its samples. A written alias is no
+    // such alias (it keeps its own binder, sampled independently).
     let cellPoolInt = [ 23L; -9L; 31L; 4L; -15L; 27L; 6L; -21L ]
     let cellPoolFloat = [ 0.3125; -1.875; 2.6875; 4.0625; -0.5625; 1.4375; 3.8125; -2.9375 ]
     let cells = System.Collections.Generic.Dictionary<IRId * int64 list, WitnessVal>()
@@ -1080,7 +1087,7 @@ let witnessSwapLawFailure (inlineFn: IRId -> (IRId list * TypedExpr) option)
                 | WInt i -> WInt (0L - i)
                 | WFloat f -> WFloat (-f)
                 | b -> b
-        let key = (id, canon)
+        let key = (arrayKey name id, canon)
         match cells.TryGetValue key with
         | true, v -> Some (negIf v)
         | _ ->
@@ -1659,5 +1666,7 @@ let witnessPackLawFailure (inlineFn: IRId -> (IRId list * TypedExpr) option)
                         let pi = expanded.[p]
                         let pj = expanded.[q]
                         let others = expanded |> List.filter (fun id -> id <> pi && id <> pj)
-                        witnessSwapLawFailure inlineFn pi pj others negate false isInt unrolled
+                        // A pack kernel's body: binder keys (as a declared
+                        // function's body; the alias rule is module-level).
+                        witnessSwapLawFailure inlineFn (fun _ vid -> vid) pi pj others negate false isInt unrolled
                         |> Option.map (fun w -> (k, p, q, expanded, w))))

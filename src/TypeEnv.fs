@@ -658,6 +658,27 @@ type TypeEnv = {
     /// checkDecl only (never in a block or a callable body: those aliases are
     /// forcing copies). Shared by reference.
     DeferredAliasRoots: System.Collections.Generic.Dictionary<IRId, string * IRId * string option>
+    /// TOP-LEVEL STORED ALIAS CLASSES (plan-identity-transpose-compute 2.1,
+    /// the second step): binder id of every member -- a ROOT, a module-level
+    /// `let A = <stored>` (an array literal, a `|> compute`, a call of a
+    /// function this module declares) of a plain or compact array type, and
+    /// each module-level `let B = A` (chains included) whose names nothing in
+    /// the program can write (StoredAliasNeverWritten) -- to (root name, root
+    /// binder id, module qualifier). Read with DeferredAliasRoots by
+    /// TypeCheckSupport.loopOperandIdentity / aliasRootOf. Populated by
+    /// checkDecl only. Shared by reference.
+    StoredAliasRoots: System.Collections.Generic.Dictionary<IRId, string * IRId * string option>
+    /// THE MODULE'S NEVER-WRITTEN PROOF for stored aliases, installed per
+    /// module by TypeCheck.checkModule BEFORE its first declaration is checked
+    /// (identity is decided at typecheck, the writes may come later in the
+    /// source): (root name, the root's value is a call, member names) ->
+    /// Ok evidence | Error first failed condition. The default refuses
+    /// (fail closed). Shared by reference (one cell for the program).
+    StoredAliasNeverWritten: (string -> bool -> string list -> Result<string, string>) ref
+    /// The program's modules, for the never-written proof's "no other module
+    /// names it" condition (set by TypeCheck.checkProgram; empty = unknown,
+    /// which refuses).
+    ProgramModules: ModuleDecl list
     /// Function BINDER ID -> (parameter ids, typed body) of a PURE (Effects
     /// repeatable), NON-RECURSIVE, fixed-arity user function or module-level
     /// let-bound lambda: the bodies the comm/anticomm witness may evaluate
@@ -862,6 +883,9 @@ let emptyEnv () = {
     FuncEffects = System.Collections.Generic.Dictionary<IRId, Blade.Effects.EffectSummary>()
     FuncOuterWrites = System.Collections.Generic.Dictionary<IRId, (string * IRId) list>()
     DeferredAliasRoots = System.Collections.Generic.Dictionary<IRId, string * IRId * string option>()
+    StoredAliasRoots = System.Collections.Generic.Dictionary<IRId, string * IRId * string option>()
+    StoredAliasNeverWritten = ref (fun _ _ _ -> Error "the module's never-written proof was not installed (fail closed)")
+    ProgramModules = []
     FuncWitnessBodies = System.Collections.Generic.Dictionary<IRId, IRId list * TypedExpr>()
     FuncGenericObligations = System.Collections.Generic.Dictionary<IRId, GenericObligation list>()
     CurrentGenericObligations = None

@@ -1,0 +1,30 @@
+// TEST: Comm Witness Samples Identity-Transparent Aliases As One Array
+// LANGUAGE CHANGE (docs/plans/plan-identity-transpose-compute.md 2.5; the
+// sampler passage of formalism 4). The counterexample evaluator samples a
+// captured array read by its SEMANTIC OPERAND KEY: identity-transparent
+// aliases of one array -- a never-written stored alias (`let v = w`, plan 2.1
+// second step) and a top-level pure deferred alias class (`let g2 = g`) --
+// share samples, so `v(i) * w(j)`, symmetric exactly because v and w hold the
+// same cells, is a law about ONE array and the comm claim is ACCEPTED (it was
+// BL4013 until this change: every binder was sampled independently, as
+// symmetry/091's `w(i) * 2.0 + w(j)` still is refuted by one array alone).
+// symmetry/158 is the same claim over a written alias (refused), and /159
+// keeps the formal kernel arguments independent.
+let w = [1.0, 5.0, 2.0]
+let v = w
+let idx = [0, 1, 2]
+let r = method_for(idx, idx) <@> lambda(i, j) where comm(i, j) -> v(i) * w(j) |> compute
+let r01 = r(0, 1)
+let r10 = r(1, 0)
+let x = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(e) -> e * 2.0
+let g2 = g
+let q = method_for(idx, idx) <@> lambda(i, j) where comm(i, j) -> g(i) + 10.0 * g2(j) - 9.0 * g(j) |> compute
+let q21 = q(2, 1)
+let q12 = q(1, 2)
+// EXPECT: r = [[1.0, 5.0, 2.0], [25.0, 10.0], [4.0]]
+// EXPECT: r01 = 5.0
+// EXPECT: r10 = 5.0
+// EXPECT: q = [[4.0, 6.0, 8.0], [8.0, 10.0], [12.0]]
+// EXPECT: q21 = 10.0
+// EXPECT: q12 = 10.0
