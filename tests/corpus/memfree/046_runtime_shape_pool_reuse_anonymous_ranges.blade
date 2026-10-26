@@ -1,0 +1,14 @@
+// TEST: Run-time-shaped pools over anonymous ranges never share
+// PM60: `0..k` and `0..(k + 1)` carry the same anonymous run-time extent
+// marker, which proves nothing about their lengths, so each map keeps its
+// own pool (the planner keys only declared, singly bound index parameters).
+function ramp2(k: Int64) -> Float64 = {
+    let a = Float64(0..k) * 2.0 |> compute
+    let sa = reduce(a, (+))
+    let b = Float64(0..(k + 1)) - sa |> compute
+    reduce(b, (+))
+}
+let n = Int64(floor(6.5))
+let s = ramp2(n)
+// EXPECT: n = 6
+// EXPECT: s = -189.0

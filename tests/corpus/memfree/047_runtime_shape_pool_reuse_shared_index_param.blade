@@ -1,0 +1,14 @@
+// TEST: Run-time-shaped pools over one shared index type of two parameters never share
+// PM60: x and y are both `like I`, but the checker unifies the index type by
+// name, not by run-time length -- here they carry 5 and 7 cells -- so maps over
+// them prove nothing equal and each keeps its own pool.
+function g(x: Array<Float64 like I>, y: Array<Float64 like I>) -> Float64 = {
+    let a = x * 2.0 |> compute
+    let sa = reduce(a, (+))
+    let b = y * 3.0 - sa |> compute
+    reduce(b, (+))
+}
+let n = Int64(floor(4.5))
+let s = g(Float64(0..n), Float64(0..(n + 2)))
+// EXPECT: n = 4
+// EXPECT: s = -27.0

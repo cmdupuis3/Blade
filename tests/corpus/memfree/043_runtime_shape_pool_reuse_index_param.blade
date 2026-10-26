@@ -1,0 +1,21 @@
+// TEST: Run-time-shaped scratch pools share one pool when their extents are proved equal
+// PM60: y and z are dense maps over the function's index-type extent I, which
+// is a run-time extent here (the callers pass 4 and 7 cells); y is dead once
+// its sum m is taken, so z takes y's pool. The reuser's own run-time extents
+// table is still freed; the values are the as-written ones.
+function pipe(x: Array<Float64 like I>) -> Float64 = {
+    let y = x * 2.0 + 1.0 |> compute
+    let m = reduce(y, (+))
+    let z = x * 3.0 - m |> compute
+    reduce(z, (+))
+}
+let n = Int64(floor(4.5))
+let v = Float64(0..n)
+let s = pipe(v)
+let w = Float64(0..(n + 3))
+let t = pipe(w)
+// EXPECT: n = 4
+// EXPECT: v = [0.0, 1.0, 2.0, 3.0]
+// EXPECT: s = -46.0
+// EXPECT: w = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+// EXPECT: t = -280.0

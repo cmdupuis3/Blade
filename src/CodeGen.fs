@@ -932,8 +932,30 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
                  | Some dn ->
                      let name = $"__v{id}"
                      let (acc', matched) = rewritePoolAlias acc name dn
-                     if matched then suppressAllocName name
-                     acc'
+                     // the backing goes with the donor; an owned run-time extents
+                     // table (PM60) is still the reuser's to free
+                     if matched then spareReusedBacking name
+                     // PM60: a RUN-TIME-shaped pair (the reuser's extents are not
+                     // a static table) is proved equal by the planner; the
+                     // emitted belt checks it before the first store and fails
+                     // loudly (an internal error) rather than overrun the pool
+                     let staticExt = acc' |> List.exists (fun l -> l.TrimStart().StartsWith $"static constexpr const size_t {name}_extents[")
+                     if matched && not staticExt then
+                         let tag = $"/* pool reuse: {name} takes {dn}'s dead pool */"
+                         let rank =
+                             acc' |> List.tryPick (fun l ->
+                                 let m = System.Text.RegularExpressions.Regex.Match(l, @"Array<.+?, (\d+)> " + System.Text.RegularExpressions.Regex.Escape name + " = ")
+                                 if m.Success && l.Contains tag then Some (int m.Groups.[1].Value) else None)
+                         match rank with
+                         | Some r ->
+                             let cond = [ 0 .. r - 1 ] |> List.map (fun d -> $"{name}_extents[{d}] == {dn}.extents[{d}]") |> String.concat " && "
+                             acc' |> List.collect (fun l ->
+                                 if l.Contains tag then
+                                     let ind = l.Substring(0, l.Length - l.TrimStart().Length)
+                                     [ l; $"{ind}if (!({cond})) {{ blade_rt::panic(\"BL9002\", \"internal: run-time scratch reuse over unequal extents ({name} <- {dn})\", nullptr, 0); }}" ]
+                                 else [ l ])
+                         | None -> acc'
+                     else acc'
                  | None -> acc)
             | None -> acc) stmts
     // Return-arm emissions carry NO owner: a __retN temporary must not be matched
