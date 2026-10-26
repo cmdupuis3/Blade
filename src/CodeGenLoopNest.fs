@@ -5741,7 +5741,7 @@ let releaseInlinePools (ind: string) (names: Map<IRId, string>) (pools: IRExpr l
             let lines = freeAllocNow ind n $"deallocate<typename promote<{elem}, 1>::type, nullptr>({n}.data, {n}.extents);"
             if lines.IsEmpty then
                 failwith $"IRReleasePools: pool {n} is not owned by the current allocation frame"
-            $"{ind}// A7c: `{call}` (inlined for its input legs) returns here; its pool `{n}` is released at that return boundary" :: lines
+            $"{ind}// lifetime region `{call}` (an inlined call or an early release) closes here; its pool `{n}` is released at that return boundary" :: lines
         | _ -> failwith "IRReleasePools: an owned pool must be a binding reference")
 
 /// Generate code to allocate and initialize an array from literal values
