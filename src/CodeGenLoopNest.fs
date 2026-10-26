@@ -3676,7 +3676,12 @@ let internal siblingPreflight (g: Blade.Optimize.SiblingMapGroup) : Result<unit,
                 (flatElementwisePlanOf Map.empty info.ArrayTypes cg Map.empty 0) |> Option.map (fun fp -> fp.Pragma))
         if (pragmas |> List.distinct |> List.length) > 1 then Error "the members' flat sweeps take different pragmas"
         else Ok ()
-    | Blade.Optimize.SibHalo _ -> Ok ()
+    | Blade.Optimize.SibHalo _ ->
+        // one team for the shared segment: every member's own nest must take
+        // the SAME pragma (a member whose depth licenses no level stays serial)
+        let pragmas = built |> List.map (fun (_, _, cg) -> genNestPragma cg.Bindings "")
+        if (pragmas |> List.distinct |> List.length) > 1 then Error "the members' halo walks take different pragmas"
+        else Ok ()
 
 /// --- Row-fold jam (unroll-and-jam over the row axis) ------------------------
 /// The partial fold `reduce(A, op[, init])` (TypeCheck's partialFold desugars it

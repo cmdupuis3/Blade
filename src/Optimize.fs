@@ -13745,6 +13745,8 @@ let planSiblingMaps (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (si
         not k.IsCommutative && k.CommGroups.IsEmpty && k.AntisymGroups.IsEmpty
         && not k.IsCudaKernel && not k.IsMpiParallel && not k.IsArityPoly && not k.IsStatic
     let ompOf (k: IRCallable) = k.IsOmpParallel || not k.Parallelism.IsEmpty
+    // the exact licence (a bare `omp` and `omp(w: 0)` thread differently)
+    let licenceOf (k: IRCallable) = (k.IsOmpParallel, k.Parallelism |> List.sort)
     // ---- one candidate member ------------------------------------------------
     // None: not a candidate (silent); Some (Error why): a stored map that
     // cannot join a group; Some (Ok ...): its shape key and facts.
@@ -13797,14 +13799,20 @@ let planSiblingMaps (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (si
                               | IRIndex (IRVar (aid, _), [ IRBinOp (IRElementwise, IRAdd, wv, _, _) ], _) when isWin wv ->
                                   reads |> List.exists (fun r -> r.ArrayId = aid)
                               | _ -> false
-                          let zeroOf (n: IRExpr) =
+                          // a certified read becomes an OPAQUE immutable scalar of the
+                          // element's type (an unbound name the whitelist reads as a free
+                          // scalar): the certificate proves the read safe, never its VALUE
+                          // (a literal would prove, e.g., an integer exponent nonnegative)
+                          let opaqueSeq = ref 0
+                          let opaqueOf (n: IRExpr) =
+                              opaqueSeq.Value <- opaqueSeq.Value + 1
                               match n with
                               | IRIndex (IRVar (_, aty), _, _) ->
                                   (match stripUnits aty with
-                                   | ArrayElem at when (match at.ElemType with IRTScalar (ETInt64 | ETInt32) -> true | _ -> false) -> IRLit (IRLitInt 0L)
-                                   | _ -> IRLit (IRLitFloat 0.0))
-                              | _ -> IRLit (IRLitFloat 0.0)
-                          let body' = mapIRExpr (fun n -> if isRead n then zeroOf n else n) k.Body
+                                   | ArrayElem at -> IRVar (-1000000 - opaqueSeq.Value, at.ElemType)
+                                   | _ -> IRVar (-1000000 - opaqueSeq.Value, IRTScalar ETFloat64))
+                              | _ -> IRVar (-1000000 - opaqueSeq.Value, IRTScalar ETFloat64)
+                          let body' = mapIRExpr (fun n -> if isRead n then opaqueOf n else n) k.Body
                           match Blade.IRTotality.auditCallable resolve (fun _ -> None) deferred.Contains { k with Body = body' } [] with
                           | Error why -> Some (Error $"the halo kernel is not proved total beyond its certified window reads ({why})")
                           | Ok () ->
@@ -13933,20 +13941,20 @@ let planSiblingMaps (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (si
                 // realized by both emitters on the flat path: it owns the member
                 pendingDecline.Add((i, "claimed by the hot-row / cell-epilogue plan (it folds inside this producer's own flat sweep in both lanes)"))
                 if intervalBreak () then close ()
-            | Some (Ok ((kind, _, _, ins, omp, _) as facts)) when (claimedBy id).IsNone ->
+            | Some (Ok ((kind, _, _, ins, omp, kk) as facts)) when (claimedBy id).IsNone ->
                 match group with
                 | [] -> group <- [ (i, facts) ]
                 | _ ->
-                    let (hkind, _, _, hins, homp, _) = snd (List.last group)
+                    let (hkind, _, _, hins, homp, hk) = snd (List.last group)
                     let compatible =
-                        kind = hkind && omp = homp && not (Set.isEmpty (Set.intersect ins hins))
+                        kind = hkind && omp = homp && licenceOf kk = licenceOf hk && not (Set.isEmpty (Set.intersect ins hins))
                         && group.Length < 8 && streams ins <= 16
                     if compatible && not (intervalBreak ()) then group <- (i, facts) :: group
                     else
                         if kind = hkind && not (Set.isEmpty (Set.intersect ins hins)) && not compatible then
                             recordSiblingMaps $"{region}.{nm}"
                                 (Blade.Effects.Declined
-                                    (if omp <> homp then "its thread licence differs from the group's (v1 shares one team only when every sibling requests it the same way)"
+                                    (if omp <> homp || licenceOf kk <> licenceOf hk then "its thread licence differs from the group's (v1 shares one team only when every sibling requests it the same way)"
                                      elif group.Length >= 8 then "the group already holds 8 outputs (register-pressure cap)"
                                      else "the group's input and output streams would exceed 16 (the stream cap)")) []
                         close ()

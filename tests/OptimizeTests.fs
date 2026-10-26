@@ -9636,6 +9636,25 @@ let private smMixedOmpSrc =
     + "}\n"
     + "let r = two(0.5 * Float64(range<Idx<11>>) |> compute)\n"
 
+let private smPowSrc =
+    "type I = Idx<5>\n"
+    + "function probe(x: Array<Int64 like I>, q: Int64) -> Int64 = {\n"
+    + "    let y1 = method_for(halo<I, [0, 1]>) <@> lambda(w) -> x(w(0)) ^ x(w(1)) |> compute\n"
+    + "    let stop = 1 / q\n"
+    + "    let y2 = method_for(halo<I, [0, 1]>) <@> lambda(w) -> x(w(0)) + x(w(1)) |> compute\n"
+    + "    reduce(y1, (+)) + reduce(y2, (+)) + stop\n"
+    + "}\n"
+    + "let r = probe([2, -1, 2, 2, 2], 1)\n"
+
+let private smLicenceSrc =
+    "type I = Idx<23>\n"
+    + "function two(x: Array<Float64 like I>) -> Float64 = {\n"
+    + "    let y1 = method_for(halo<I, [0, 1]>) <@> lambda(w) where omp -> x(w(0)) + x(w(1)) |> compute\n"
+    + "    let y2 = method_for(halo<I, [0, 1]>) <@> lambda(w) where omp(w: 0) -> x(w(0)) - x(w(1)) |> compute\n"
+    + "    reduce(y1, (+)) + reduce(y2, (+)) * 3.0\n"
+    + "}\n"
+    + "let r = two(0.25 * Float64(range<Idx<23>>) |> compute)\n"
+
 let private smCount (pattern: string) (body: string) = System.Text.RegularExpressions.Regex.Matches(body, pattern).Count
 
 let private smCppCase (name: string) (src: string) (fn: string) (pattern: string) (wantOn: int -> bool) (wantOff: int -> bool) (describe: string) =
@@ -9689,6 +9708,12 @@ let private siblingMapCases () : bool list =
       decisionCase "decision_sibling_maps_declined_mixed_omp" smMixedOmpSrc "sibling-maps"
           (fun d -> declinedMentioning "thread licence differs" d)
           "declined: siblings with different thread requests"
+      decisionCase "decision_sibling_maps_halo_value_not_certified" smPowSrc "sibling-maps"
+          (fun d -> declinedMentioning "possibly negative exponent" d)
+          "declined: the window certificate proves a read safe, not its value (an integer power stays unproved)"
+      decisionCase "decision_sibling_maps_halo_mixed_licences" smLicenceSrc "sibling-maps"
+          (fun d -> declinedMentioning "thread licence differs" d)
+          "declined: halo siblings with different omp licences (bare omp vs omp(w: 0))"
       withGate "BLADE_SIBLING_MAPS" "0" (fun () ->
           decisionCase "decision_sibling_maps_disabled" smFlatSrc "sibling-maps"
               (declinedMentioning "disabled by BLADE_SIBLING_MAPS") "declined: disabled by BLADE_SIBLING_MAPS") ]
