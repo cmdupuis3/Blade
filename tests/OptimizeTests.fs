@@ -955,15 +955,18 @@ let private recFoldEmission () : bool list =
             let full = cpp.Contains "{ 1001 }"
             if ring && not full then resultLine Pass name "ring extents { 2 }, `% 2L` subscripts, no { 1001 } allocation"; true
             else resultLine Fail name $"ring={ring} full1001={full}"; false
-    let off =
-        let name = "rec_fold_ring_emission_gate_off: BLADE_REC_FOLD=0 keeps the 1001-row trajectory and records why"
-        match withGate "BLADE_REC_FOLD" "0" (fun () -> cppOfSource name src46, decisionsOf src46) with
+    // The DEFAULT build (unset) and an explicit `0` keep the full trajectory
+    // and record the opt-in decline (the analysis still says it would apply).
+    let offWith (label: string) (value: string) =
+        let name = $"rec_fold_ring_emission_default_{label}: BLADE_REC_FOLD {label} keeps the 1001-row trajectory and records the opt-in decline"
+        match withGate "BLADE_REC_FOLD" value (fun () -> cppOfSource name src46, decisionsOf src46) with
         | Error e, _ | _, Error e -> resultLine Fail name e; false
         | Ok cpp, Ok ds ->
             let full = cpp.Contains "{ 1001 }"
-            let declined = ds |> List.exists (fun d -> d.Rule = "rec-fold-ring" && declinedMentioning "disabled by BLADE_REC_FOLD" d)
-            if full && declined then resultLine Pass name "1001-row trajectory allocated; rec-fold-ring declined -- disabled by BLADE_REC_FOLD"; true
-            else resultLine Fail name $"full1001={full} declinedDisabled={declined}"; false
+            let declined = ds |> List.exists (fun d -> d.Rule = "rec-fold-ring" && declinedMentioning "opt-in this wave (BLADE_REC_FOLD=1)" d)
+            if full && declined then resultLine Pass name "1001-row trajectory allocated; rec-fold-ring declined -- opt-in this wave"; true
+            else resultLine Fail name $"full1001={full} declinedOptIn={declined}"; false
+    let off = offWith "unset" null && offWith "0" "0"
     let llvm =
         let name = "rec_fold_ring_llvm_lane: the LLVM lane emits the ringed recursion and its in-sweep folds"
         match lower src46 with
@@ -10902,8 +10905,10 @@ let runOptimizeTests () =
           yield! recWindowCorpusCases ()
           yield! recWindowEmission ()
           // PM35: folds riding a windowed recurrence.
-          yield! recFoldCorpusCases ()
-          yield! recFoldEmission ()
+          // (OPT-IN this wave: every APPLIED assertion runs with an explicit
+          // BLADE_REC_FOLD=1; the default-build decline is pinned inside.)
+          yield! withGate "BLADE_REC_FOLD" "1" (fun () -> recFoldCorpusCases ())
+          yield! withGate "BLADE_REC_FOLD" "1" (fun () -> recFoldEmission ())
           // PM14: the leading-axis fold's state updated in place.
           yield! foldStateCorpusCases ()
           yield! foldStateEmission ()

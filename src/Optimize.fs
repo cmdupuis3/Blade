@@ -228,12 +228,16 @@ let recWindowEnabled () = gateOn "BLADE_REC_WINDOW"
 /// rule `fold-state-in-place`, an arm of `fuseSliceWritesModule`, so it is
 /// also off under BLADE_FUSION=0). Unset = on.
 let foldStateEnabled () = gateOn "BLADE_FOLD_STATE"
-/// BLADE_REC_FOLD=0|off keeps a recursion whose trajectory is consumed only
-/// by folds at its full history (`windowRecFoldsModule`, round 4 wave 2,
-/// PM35; rule `rec-fold-ring`): no ring, no fold moved into the sweep. The
-/// admission still runs and records `declined -- disabled by BLADE_REC_FOLD`.
-/// Unset = on.
-let recFoldRingEnabled () = gateOn "BLADE_REC_FOLD"
+/// BLADE_REC_FOLD=1|on (EXPLICIT; OPT-IN this wave, the BLADE_EPILOGUE_LEGS
+/// pattern) rings a recursion whose trajectory is consumed only by folds and
+/// moves those folds into the sweep (`windowRecFoldsModule`, round 4 wave 2,
+/// PM35; rule `rec-fold-ring`). Unset / `0` / `off` = the full history: the
+/// admission still runs and records what it WOULD do, `declined -- opt-in
+/// this wave ...` (five review rounds each found a member of the trajectory
+/// use census; default-on is a next-wave item after one more class audit).
+let recFoldRingEnabled () = Blade.Toolchain.envSwitch "BLADE_REC_FOLD" = Blade.Toolchain.SwitchOn
+let recFoldOptInDecline =
+    "opt-in this wave (BLADE_REC_FOLD=1): five review rounds each found a member of the trajectory use census; default-on is a next-wave item after one more class audit"
 /// `BLADE_FOLD_LANES=0|off|false|no`: the fold-lane forms are off. The ONE
 /// parse both the C++ emitters (CodeGenExprSupport.foldLanesMode) and the
 /// optimizer's ring planner read (a threaded step's row partials need them).
@@ -264,7 +268,7 @@ let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE
 /// against its predecessor as well as against no optimizer at all (the
 /// all-off comparison alone never runs the predecessor). Each gate here is
 /// also in `optimizerGates`.
-let optimizerGateMirrors : (string * string) list = [ ("BLADE_COMPACTION_FUSION", "b4"); ("BLADE_COMPACTION_FUSION", "gather"); ("BLADE_COMPACTION_FUSION", "unshared"); ("BLADE_EPILOGUE_LEGS", "1") ]
+let optimizerGateMirrors : (string * string) list = [ ("BLADE_COMPACTION_FUSION", "b4"); ("BLADE_COMPACTION_FUSION", "gather"); ("BLADE_COMPACTION_FUSION", "unshared"); ("BLADE_EPILOGUE_LEGS", "1"); ("BLADE_REC_FOLD", "1") ]
 
 /// The decline reason for a LICENSED row prodsum (B2r applies only where
 /// the build keeps the serial association). `lanes` RESERVES the opt-in
@@ -8982,7 +8986,7 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
                 elif consumers.Count > 0 && (interval |> List.exists writes) then
                     decline "a statement between the recursion and its last fold may write (the folds would move across it)"
                 elif not (recFoldRingEnabled ()) then
-                    Some (Error "disabled by BLADE_REC_FOLD", evidenceBase)
+                    Some (Error recFoldOptInDecline, evidenceBase @ [ "admitted: with BLADE_REC_FOLD=1 the trajectory would ring and its folds ride the sweep" ])
                 else
                 // ---- the rewrite
                 let ringIx = { lead with Extent = IRLit (IRLitInt r); Tag = None; Id = builder.FreshId () }
