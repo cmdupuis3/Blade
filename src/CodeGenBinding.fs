@@ -2668,9 +2668,15 @@ and genProviderWriteBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
             // nothing deleted. `packedPoolTotal` raises the copy's refusals
             // (shape, literal extents, symmetry class) exactly as before.
             let total = packedPoolTotal arrTy spec.VarName
+            // An EMPTY pool is not traversed: `pool_base` descends through
+            // row 0 of the skeleton, which an empty interior row does not
+            // have (Codex review of D2, finding 1); zero cells need no base.
+            let baseExpr =
+                if total = 0L then "nullptr"
+                else $"nested_array_utilities::pool_base({srcCpp}.data)"
             let alias =
                 [ $"// Write {spec.VarName} (packed pool, {total} cells) to {spec.FilePath} (provider-sink v1: the writer reads the pool in place)"
-                  $"const {elemCpp}* {baseName}_flat = nested_array_utilities::pool_base({srcCpp}.data);" ]
+                  $"const {elemCpp}* {baseName}_flat = {baseExpr};" ]
             let writeCode = pspec.GenWriteVar spec.FilePath spec.VarName baseName arrTy spec.DimNames
             Blade.Optimize.recordProviderSink binding.Name Blade.Effects.Applied
                 [ $"provider '{spec.Provider}' write of `{spec.VarName}` from the packed pool of `{srcCpp}` ({total} cells): no flatten buffer, no copy, no delete"

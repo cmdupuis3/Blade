@@ -4477,16 +4477,25 @@ let m2 = method_for(A, A) <@> lambda(x: Array<Float32 like xdim>, y: Array<Float
         // effect, so nothing of the store is published.
         (let outStore = store + "_packed_out"
          (try Directory.Delete(outStore, true) with _ -> ())
-         match run "zarr_boundary_write_packed" ("let a = [1.0, 2.0, 3.0]\nlet g = lambda(p, q) where comm(p, q) -> p / (q - q)\nlet bad = method_for(a, a) <@> reynolds(g, Symmetric) |> compute\nlet _ = z.write(\"" + outStore + "\", bad)") with
+         // A PRE-EXISTING destination: the refusal must leave it untouched.
+         Directory.CreateDirectory outStore |> ignore
+         let sentinel = Path.Combine(outStore, "sentinel.txt")
+         File.WriteAllText(sentinel, "untouched")
+         // Pool order (0,0) (0,1) (0,2) (1,1) (1,2) (2,2) over a = [1, 2, 3]:
+         // a cell is infinite exactly when one of its coordinates holds 2.0,
+         // so 3 cells, the first at flat cell 1 (a finite prefix before it).
+         match run "zarr_boundary_write_packed" ("let a = [1.0, 2.0, 3.0]\nlet g = lambda(p, q) where comm(p, q) -> p / (q - 2.0)\nlet bad = method_for(a, a) <@> reynolds(g, Symmetric) |> compute\nlet _ = z.write(\"" + outStore + "\", bad)") with
          | Ok r ->
              check "zarr: a packed write reads the pool in place (provider-sink v1)"
                  (r.Cpp.Contains "_flat = nested_array_utilities::pool_base(bad.data);" && not (r.Cpp.Contains "delete[] bad_wr")) ""
              (match r.Compiled with
               | None -> printfn "  SKIP zarr packed write refusal: toolchain unavailable"
               | Some (Ok (code, out)) ->
-                  check "zarr: a packed write of infinite cells is refused (BL8015) before any file is created"
-                      (code <> 0 && out.Contains "error[BL8015]: provider write of 'bad'" && out.Contains "6 cell(s) are NaN or infinite"
-                       && not (Directory.Exists outStore)) out
+                  check "zarr: a packed write of infinite cells is refused (BL8015: count and first flat cell) and leaves an existing destination untouched"
+                      (code <> 0 && out.Contains "error[BL8015]: provider write of 'bad'" && out.Contains "3 cell(s) are NaN or infinite (first at flat cell 1)"
+                       && File.ReadAllText sentinel = "untouched"
+                       && not (File.Exists (Path.Combine(outStore, ".zgroup")))
+                       && not (Directory.Exists (Path.Combine(outStore, "bad")))) out
               | Some (Error e) -> check "zarr: packed write refusal runs" false e)
          | Error e -> check "zarr boundary packed write: lowers" false e)
         (match lower (prog "let static V = zb.vars.Q |> z.read") with
