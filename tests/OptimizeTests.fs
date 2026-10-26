@@ -906,7 +906,10 @@ let private recFoldCorpusTable : (string * Result<string, string> list) list =
       "053_fold_ring_declines_escape.blade", [ Error "used whole after the recursion" ]
       "054_fold_ring_declines_may_panic_kernel.blade", [ Error "not a pure total" ]
       "055_fold_ring_declines_branch_and_omp.blade", [ Error "in a branch or loop body"; Error "requests omp" ]
-      "056_fold_ring_long_trajectory_called_twice.blade", [ Ok "ring of 2 rows" ] ]
+      "056_fold_ring_long_trajectory_called_twice.blade", [ Ok "ring of 2 rows" ]
+      "057_fold_ring_declines_captured_trajectory.blade", [ Error "captures the trajectory" ]
+      "058_fold_ring_declines_seed_after_recursion.blade", [ Error "seed" ]
+      "059_fold_ring_declines_lag_past_extent.blade", [ Error "at or beyond the recursion's extent" ] ]
 
 let private recFoldCorpusCases () : bool list =
     let dir = System.IO.Path.Combine("tests", "corpus", "recursive-arrays")

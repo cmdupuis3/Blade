@@ -8396,6 +8396,9 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
               Outcome = outcome; Evidence = evidence }
     let mutable subject = ""
     let mutable enclosingRepro = false
+    // The callable whose body is being rewritten (its own body holds the
+    // region; every OTHER callable naming T or BUF reads it from outside).
+    let mutable currentFn : IRId = -1
     // ---- the ring audit -------------------------------------------------
     // The leading subscript of one buffer READ: the lag it may select (Some
     // c, c >= 1), a current-row read (Some 0), a seed row (literal), or why
@@ -8437,6 +8440,11 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
         let mutable bad : string option = None
         let fail (why: string) = if bad.IsNone then bad <- Some why
         let mutable maxLag = 0L
+        // A guarded lag at or past the extent is never selected, but it would
+        // size the ring (and K + 1 could overflow): v1 declines it.
+        let noteLag (c: int64) =
+            if c >= hi then fail "a guarded lag at or beyond the recursion's extent (never selected; v1 declines it rather than size a ring by it)"
+            elif c > maxLag then maxLag <- c
         let trailing = match bufT with ArrayElem at -> at.IndexTypes.Tail | _ -> []
         let cells = match trailing with [ ix ] -> staticExt ix | [] -> Some 1L | _ -> None
         // Classify every BUF mention of `e`. `ctx` = the conditions of the
@@ -8460,7 +8468,7 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
                  | IRIf _ ->
                     (match clampOf n lo i0 with
                      | Ok (lag, conds) ->
-                        (match lag with Some c when c > maxLag -> maxLag <- c | _ -> ())
+                        (match lag with Some c -> noteLag c | None -> ())
                         if not (conds |> List.forall (fun c -> List.contains c ctx)) then
                             fail "a guarded trajectory read used outside its guard (the clamp's slot could hold another row)"
                      | Error why -> fail why)
@@ -8475,7 +8483,7 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
                 rest |> List.iter (walk phase ctx raws)
                 (match clampOf n lo i0 with
                  | Ok (lag, conds) ->
-                    (match lag with Some c when c > maxLag -> maxLag <- c | _ -> ())
+                    (match lag with Some c -> noteLag c | None -> ())
                     walk phase ctx (Map.add id conds raws) body
                  | Error why -> fail why)
             | IRIf (c, a, b) ->
@@ -8484,8 +8492,8 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
                 walk phase ctx raws b
             | ExprShape (children, _) -> children |> List.iter (walk phase ctx raws)
         // Callables never see the buffer (a capture would read it whole).
-        if modul.Functions |> List.exists (fun f -> f.Captures |> List.exists (fun c -> c.Id = bufId)) then
-            fail "a callable captures the trajectory"
+        if callables.Values |> Seq.exists (fun f -> f.Id <> currentFn && (f.Captures |> List.exists (fun c -> c.Id = bufId) || mentions bufId f.Body)) then
+            fail "a callable captures the trajectory's buffer"
         // The seed: lo = 1 needs exactly one writer of row 0, complete.
         let isRowWriter (rowIdx: IRExpr -> bool) (v: IRExpr) =
             match v with
@@ -8538,7 +8546,7 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
                         rest |> List.iter (walk phase [] raws)
                         (match clampOf n lo i0 with
                          | Ok (lag, conds) ->
-                            (match lag with Some c when c > maxLag -> maxLag <- c | _ -> ())
+                            (match lag with Some c -> noteLag c | None -> ())
                             raws <- Map.add id conds raws
                          | Error why -> fail why)
                     | _ -> walk phase [] raws v
@@ -8579,14 +8587,25 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
                 let mutable cbad : string option = None
                 let cfail (why: string) = if cbad.IsNone then cbad <- Some why
                 let isT (e: IRExpr) = match e with IRVar (t, _) -> t = tId | _ -> false
+                // A callable (a lambda) reading the trajectory reads it whole,
+                // from a body this scan does not walk: decline.
+                if callables.Values |> Seq.exists (fun f -> f.Id <> currentFn && (f.Captures |> List.exists (fun c -> c.Id = tId) || mentions tId f.Body)) then
+                    cfail "a callable (a lambda) captures the trajectory: it reads the whole history from its own body"
                 let rec gridNest (e: IRExpr) =
                     match e with
                     | IRLet (acc, seed, IRLet (_, IRForRange (a, IRLit (IRLitInt 0L), IRLit (IRLitInt ha), IRLet (_, IRForRange (bv, IRLit (IRLitInt 0L), IRLit (IRLitInt hb), IRLet (_, IRAssign (IRVar (acc2, _), comb), IRLit IRLitUnit)), IRLit IRLitUnit)), cont))
                         when acc = acc2 && rank = 2 && ha = hi && Some hb = trailingCells
-                             && count tId comb = 1
-                             && (let mutable hit = false
-                                 iterIRExpr (fun x -> match x with IRIndex (IRVar (t, _), [ IRVar (ia, _); IRVar (ib, _) ], _) when t = tId && ia = a && ib = bv -> hit <- true | _ -> ()) comb
-                                 hit) ->
+                             // EXACTLY the desugar's combine: `acc OP T(a, b)`
+                             // or `k(acc, T(a, b))` -- nothing else reads a
+                             // coordinate, so the moved combine is closed
+                             && (let isRead (r: IRExpr) =
+                                     match r with
+                                     | IRIndex (IRVar (t, _), [ IRVar (ia, _); IRVar (ib, _) ], _) -> t = tId && ia = a && ib = bv
+                                     | _ -> false
+                                 match comb with
+                                 | IRBinOp (_, _, IRVar (a2, _), rd, _) -> a2 = acc && isRead rd
+                                 | IRApp (IRVar _, [ IRVar (a2, _); rd ], _) -> a2 = acc && isRead rd
+                                 | _ -> false) ->
                         Some (acc, seed, a, bv, comb, cont)
                     | _ -> None
                 let rec find (cond: bool) (e: IRExpr) : unit =
@@ -8687,10 +8706,23 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
                     iterIRExpr (fun x -> match x with IRAssign (IRVar (id, _), _) -> s.Add id |> ignore | _ -> ()) body
                     iterIRExpr (fun x -> match x with IRAssign (IRVar (id, _), _) -> s.Add id |> ignore | _ -> ()) block
                     s
+                // A seed moves ahead of the recursion: it must be CLOSED over
+                // values that dominate it -- literals, scalar arithmetic,
+                // casts, selects and reads of scalars bound before the
+                // recursion and never assigned. No call, no callable, no
+                // array form (a lambda's body could read a later binding).
                 let seedOk (s: IRExpr) =
-                    let mutable ok = totalExpr s && not (writes s)
-                    iterIRExpr (fun x -> match x with IRVar (id, _) when boundInBody.Contains id || assigned.Contains id -> ok <- false | _ -> ()) s
-                    ok
+                    let rec closed (x: IRExpr) =
+                        match x with
+                        | IRLit _ -> true
+                        | IRVar (id, ty) ->
+                            not (callables.ContainsKey id) && not (boundInBody.Contains id) && not (assigned.Contains id)
+                            && (match ty with IRTScalar _ -> true | _ -> false)
+                        | IRBinOp (_, _, a, b, _) -> closed a && closed b
+                        | IRUnaryOp (_, a) -> closed a
+                        | IRIf (c, a, b) -> closed c && closed a && closed b
+                        | _ -> false
+                    closed s && totalExpr s && not (writes s)
                 let foldKernelOk (fk: IRExpr) (f: IRCallable) = plainScalarCallable 2 f && totalCallable f && not (writes fk)
                 let rowCells = defaultArg trailingCells 1L
                 let mapKernelOk (info: ApplyInfo) =
@@ -8925,11 +8957,13 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
         modul.Functions |> List.map (fun f ->
             subject <- f.SourceName
             enclosingRepro <- f.IsRepro
+            currentFn <- f.Id
             { f with Body = rw f.Body })
     let newBindings =
         modul.Bindings |> List.map (fun b ->
             subject <- b.Name
             enclosingRepro <- false
+            currentFn <- -1
             { b with Value = rw b.Value })
     { modul with Functions = newFunctions; Bindings = newBindings }
 
