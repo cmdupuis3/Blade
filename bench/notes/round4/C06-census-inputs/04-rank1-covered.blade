@@ -1,5 +1,0 @@
-// TEST: C06 census existing rank1 direct scalar terminal
-let x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
-let total = reduce((method_for(x) <@> (lambda(v: Float64) -> v * v + 1.0)), lambda(a: Float64, b: Float64) -> a * 2.0 + b, 7.0)
-// EXPECT: x = [1.0, 2.0, 3.0]
-// EXPECT: total = 84.0

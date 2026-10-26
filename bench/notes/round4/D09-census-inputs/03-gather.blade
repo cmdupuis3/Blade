@@ -1,6 +1,0 @@
-// D09 emission-only locality control: B(0,0) remains global in every band.
-import zarr as z
-let s = z.load("__D09_FIXTURE__")
-let A = s.vars.A |> z.stream
-let B = s.vars.B |> z.stream
-let out = (method_for(zip(A, B)) <@> lambda(a: Float64, b: Float64) -> a + B(0, 0)) |> compute

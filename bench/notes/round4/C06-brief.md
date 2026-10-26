@@ -1,7 +1,0 @@
-# Next C card: PM09 full-fold composition census
-
-After C05 targeted acceptance, scope C06 against the integrated source, source-only first. PM09 is an explicit uncovered family in coverage-next-A.md. Existing rank-one IRReduceCompute deforestation is the control; C02 partial-row fusion does not establish that a full higher-rank fold avoids all private row intermediates.
-
-Inspect the actual Optimize/IRReduceCompute paths and existing corpus before inventing a route. Fix a small odd-extent rank-two deferred closed Float64 map consumed by a full scalar fold, plus its written nested row-then-outer seeded counterpart whose parenthesization is observable. Include demanded mapped/row intermediates and paired producer/fold failures as controls. Existing-route/no-gain evidence is a successful census outcome; do not disable a useful optimization to manufacture a target. Higher-rank traversal and seed/empty behavior must follow the actual lowered tree, never a flattened guess.
-
-First deliverable is a source topology/ownership proposal with actual API/types, minimal valid sources, complete demanded outputs and independently reasoned pins, anticipated stored intermediates, and a bounded sole-Luna lower/emit request. No production change, new IR form, execution, benchmark, shared map/fold scheduling or broad lifetime rule is authorized by this brief. Root must inspect observed topology and generated dataflow before selecting one implementation card. The coder remains Sol/high and Luna remains the sole executor.

@@ -2,9 +2,9 @@
 
 **Validated bounded diagnostic; performance unmeasured.** Fixed n=2053, R5 seeds 10000019/20000038.
 Round-4 B04 passed 27 validator fixtures and all eight numeric, provenance, native
-store and post-stop observation gates. See the [results](../../notes/round4/B04-tests.md)
-and [independent review](../../notes/round4/B04-review.md) for exact artifact identities.
-The reviewed [contract](../../notes/round4/B04-contract.md) requires both distinct full
+store and post-stop observation gates. See the results (`bench/notes/round4/B04-tests.md` at git `42f9e26b`; the tree was removed 2026-10-26)
+and independent review (`bench/notes/round4/B04-review.md` at git `42f9e26b`; the tree was removed 2026-10-26) for exact artifact identities.
+The reviewed contract (`bench/notes/round4/B04-contract.md` at git `42f9e26b`; the tree was removed 2026-10-26) requires both distinct full
 outputs p=1.5*x+y and q=p*p through observation after stop, plus checksum=sum(q) and
 input_checksum=sum(x)+sum(y). Required payload: input 32848 bytes, output 32848 bytes.
 These are payload models, not allocator capacity or measured traffic.
@@ -65,4 +65,4 @@ Distant/no reuse are separate unimplemented contracts. No performance ratio or b
 claim follows from these runs. B03 remains separate source-tree C++ pool API accounting;
 it is not LLVM/provider/process allocation instrumentation.
 
-Sole Luna's exact request and frozen identities: [B04-handoff.md](../../notes/round4/B04-handoff.md).
+Sole Luna's exact request and frozen identities: B04-handoff.md (`bench/notes/round4/B04-handoff.md` at git `42f9e26b`; the tree was removed 2026-10-26).

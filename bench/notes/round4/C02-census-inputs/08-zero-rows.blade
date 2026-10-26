@@ -1,6 +1,0 @@
-// C02 census: reachability probe; R=0 runs no row kernels or row seeds.
-type R = Idx<0>
-type C = Idx<3>
-let M: Array<Float64 like R, C> = []
-let rows = reduce(method_for(M) <@> lambda(v: Float64) -> v * v + 1.0, (+), -7.25)
-// If accepted, independent expected rows: []. Preserve the R index identity.

@@ -1,6 +1,0 @@
-// D09 emission-only control: independently 3945.0; observe actual terminal route.
-import zarr as z
-let s = z.load("__D09_FIXTURE__")
-let A = s.vars.A |> z.stream
-let B = s.vars.B |> z.stream
-let term = reduce(method_for(zip(A, B)) <@> lambda(a, b) -> a + 2.0 * b, (+), axes = 2)

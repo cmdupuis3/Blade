@@ -1,9 +1,0 @@
-// TEST: C06 census nested partial fold then outer scalar fold
-// Written two-stage tree: inner seed7 per row, outer seed-3 ONCE.
-type R = Idx<3>
-type C = Idx<3>
-let M: Array<Float64 like R, C> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]
-let total = reduce((reduce((method_for(M) <@> (lambda(v: Float64) -> v * v + 1.0)), lambda(a: Float64, b: Float64) -> a * 2.0 + b, 7.0)), lambda(a: Float64, b: Float64) -> a * 2.0 + b, -3.0)
-// Inner row results:84,213,468. Outer graph:-3 ->78 ->369 ->1206.
-// EXPECT: M = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]
-// EXPECT: total = 1206.0

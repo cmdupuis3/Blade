@@ -1,9 +1,0 @@
-// D08 topology/emit probe only. Independent expected result: 382.0.
-// Run from a private folder containing the authored fixture.zarr store.
-import zarr as z
-let s = z.load("fixture.zarr")
-let A = s.vars.A |> z.stream
-let p = (method_for(A) <@> lambda(x) -> x * x + 1.0) |> compute
-let t = reduce(p, (+), 5.0)
-let m = t / Float64(extents(p))
-let result = reduce(method_for(p) <@> lambda(v) -> (v - m) * (v - m), (+), 3.0)

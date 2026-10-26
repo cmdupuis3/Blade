@@ -1,10 +1,10 @@
 # B03 standalone scalar-pool capacity probe specification
 
 **Implementation authored after root design approval; unexecuted, pending diff review.**
-2026-10-22. Parent [B03 design](../../notes/round4/B03-design.md) defines API-linearized
+2026-10-22. Parent B03 design (`bench/notes/round4/B03-design.md` at git `42f9e26b`; the tree was removed 2026-10-26) defines API-linearized
 element-capacity accounting, validity and exclusions. `probe.cpp` and the gated header
 hooks implement this contract; root reviews the actual diff before Luna alone compiles
-or runs it. [B03 handoff](../../notes/round4/B03-handoff.md) supplies frozen identities
+or runs it. B03 handoff (`bench/notes/round4/B03-handoff.md` at git `42f9e26b`; the tree was removed 2026-10-26) supplies frozen identities
 and exact runner requests. The coder has run no validation.
 
 ## Work and independent observation contract
@@ -150,7 +150,7 @@ pilot. Default generated programs do not include it after preprocessing; enablin
 deployed/generated programs is a separate packaging/driver card. Do not silently use a
 stale deployed runtime for this source-tree probe.
 
-Exact isolated runner requests/hashes live in [B03-handoff.md](../../notes/round4/B03-handoff.md).
+Exact isolated runner requests/hashes live in B03-handoff.md (`bench/notes/round4/B03-handoff.md` at git `42f9e26b`; the tree was removed 2026-10-26).
 No hidden full suite, benchmark or performance run belongs to this probe. Report exact
 pass/fail/skip totals, policy, cache/sanitizer mode, source/compiled identity and native-vs-API
 measurement coverage. Unknown-release/overflow/in-flight/unsupported metrics remain explicit.

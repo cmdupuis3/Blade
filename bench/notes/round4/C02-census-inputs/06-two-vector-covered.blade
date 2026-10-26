@@ -1,7 +1,0 @@
-// C02 census: this anonymous two-vector partial fold ALREADY streams on C01.
-type R = Idx<2>
-type C = Idx<3>
-let a: Array<Float64 like R> = [1.0, 2.0]
-let b: Array<Float64 like C> = [3.0, 4.0, 5.0]
-let rows = reduce(method_for(a, b) <@> lambda(x, y) -> x * y + 1.0, (+), 7.0)
-// Independent expected rows: [22.0, 34.0]; no full rank-2 producer store expected.
