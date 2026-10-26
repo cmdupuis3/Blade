@@ -9,4 +9,4 @@ let c = method_for(range<Jx>) <@> lambda(i) -> Int64(i) * 10 |> compute
 let keep = mask(x, lambda(v) -> v > 4.5)
 let y1 = compound(x, keep)
 let y2 = compound(c, keep)
-// ERROR: BL3999 @ 10:22
+// ERROR: BL3007 @ 10:22

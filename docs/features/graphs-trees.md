@@ -59,7 +59,7 @@ branching per level — the extents. Trees relax both:
 |---|---|---|---|---|---|
 | Vector | 1 | n | `Idx<n>` | yes | no |
 | Tensor | r | n₁ × … × nᵣ | `Idx<n₁>, …, Idx<nᵣ>` | yes | no |
-| Ragged | 2 (fixed) | variable per outer row | `Idx<n>, RaggedIdx<lens>` | **no** (runtime) | **yes** (BL3999) |
+| Ragged | 2 (fixed) | variable per outer row | `Idx<n>, RaggedIdx<lens>` | **no** (runtime) | **yes** (BL4003) |
 | Dependent | r (fixed) | formula per outer index | `DepIdx<I, f>` | yes | n/a |
 | **Tree** | **variable per path** | **variable per node** | **`TreeIdx<shape>`** | **yes (v1)** | **no** |
 
@@ -85,7 +85,7 @@ variable *depth*, and inverts two of `RaggedIdx`'s properties:
   shape is a `let static` value, so cardinality, every subtree size and every
   node arity are compile-time constants. The runtime lane is `DynTreeIdx` (§7.2).
 - **Self-containment.** `RaggedIdx` cannot be the first index slot
-  (`IxKErrorRaggedNoPrior`, BL3999) because its extent is a *function of the
+  (`IxKErrorRaggedNoPrior`, BL4003) because its extent is a *function of the
   outer iteration position* — there is nothing to look the lengths up with.
   `TreeIdx` carries its whole shape in the type, so it is a legal first (and
   only) slot.
@@ -653,7 +653,7 @@ let rec pos: Array<Nat<Node> like Step, Walker> =
 ```
 
 (Probed 2026-08-26: the `let rec` element gate currently refuses Nat-tagged
-elements — BL3999, Float/Int/Complex only — so the v1 spelling stores untagged
+elements — BL3030, Float/Int/Complex only — so the v1 spelling stores untagged
 `Int64` walk state and casts at the read sites; lifting that gate is a P7
 decision. See plan §10, probe G5.)
 

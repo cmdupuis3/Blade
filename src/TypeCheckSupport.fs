@@ -902,7 +902,7 @@ let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
             // diagnostic. A payload-carrying constructor in pattern
             // position can only sensibly mean the variant test, so demand
             // the payload be spelled.
-            Error (Other $"pattern '{name}': this constructor of '{parentName}' carries a payload, so a bare '{name}' here would not test the variant -- it would bind a fresh VARIABLE named {name} that matches everything (making every later arm dead). Match it as {name}(p) (or {name}(_) to ignore the payload); rename the binder if a variable is what you meant.")
+            Error (PatternErr $"pattern '{name}': this constructor of '{parentName}' carries a payload, so a bare '{name}' here would not test the variant -- it would bind a fresh VARIABLE named {name} that matches everything (making every later arm dead). Match it as {name}(p) (or {name}(_) to ignore the payload); rename the binder if a variable is what you meant.")
         | None when env.AmbiguousCtors.ContainsKey name ->
             setCurrentExprSpan pat.Span
             Error (AmbiguousImport ("constructor", name, env.AmbiguousCtors.[name]))
@@ -2237,7 +2237,7 @@ let firstAbstractVarConflict (subst: Subst) (paramTys: IRType list) (argTys: IRT
 /// The message for a `firstAbstractVarConflict` verdict. Lives beside the
 /// predicate so the eager seam (`dispatchAppOrIndex`) and the post-zonk sweep
 /// (`collectAppRankErrors`) cannot word the same refusal two ways. Routed
-/// through `Other` (BL3999), the channel the sibling caret-arity refusal
+/// through `GenericVarErr` (BL3024), the channel the sibling caret-arity refusal
 /// already uses -- this is the same family of judgement about what a `T^k`
 /// annotation claims.
 let abstractVarConflictMessage (subst: Subst) (callee: string)
@@ -3534,7 +3534,7 @@ type internal CoIterVerdict =
 /// gets when its operands are concrete where it is written, in its order:
 /// a literal-vs-literal EXTENT disagreement first (BL3016: the walk is out of
 /// bounds), then NOMINAL identity on the leading record
-/// (`indexNamesCoIterable`, BL3999: in bounds, but two different index
+/// (`indexNamesCoIterable`, BL3027: in bounds, but two different index
 /// spaces walked as one). Every obligation's extent half is judged before any
 /// name half, so the memory error is the one reported when both exist. A
 /// position whose type is not (yet) an array is not judged -- the status quo,
@@ -3927,9 +3927,9 @@ let internal compactCoordWalk (a: IRArrayType) (n: int) : Result<IRIndexType lis
             else Error (ix, coords)
     match walk n a.IndexTypes None with
     | Error (ix, inside) ->
-        Error (Other (sprintf "a partial read of a compact (SymIdx / AntisymIdx / HermitianIdx) group has no residual class: the subscripts supply %d of the group's %d coordinates. Supply every coordinate of the group, or decompact(A, d) first and read the freed axis there." inside ix.Rank))
+        Error (CompactStorageErr (sprintf "a partial read of a compact (SymIdx / AntisymIdx / HermitianIdx) group has no residual class: the subscripts supply %d of the group's %d coordinates. Supply every coordinate of the group, or decompact(A, d) first and read the freed axis there." inside ix.Rank))
     | Ok (remaining, Some group) when not remaining.IsEmpty ->
-        Error (Other (sprintf "a read that completes a compact (SymIdx / AntisymIdx / HermitianIdx) group but leaves the %d index slot(s) after it unread has no view: the group's cell is folded per read (canonicalized, and sign- or conjugate-transformed for an antisymmetric or Hermitian group), so the rest of the array behind it is not a slice of storage. Supply all %d coordinates (the group takes %d), or decompact(A, d) first." remaining.Length (arrayCoordCount a) group.Rank))
+        Error (CompactStorageErr (sprintf "a read that completes a compact (SymIdx / AntisymIdx / HermitianIdx) group but leaves the %d index slot(s) after it unread has no view: the group's cell is folded per read (canonicalized, and sign- or conjugate-transformed for an antisymmetric or Hermitian group), so the rest of the array behind it is not a slice of storage. Supply all %d coordinates (the group takes %d), or decompact(A, d) first." remaining.Length (arrayCoordCount a) group.Rank))
     | Ok (remaining, _) -> Ok remaining
 
 let internal arrowObligationClash (env: TypeEnv) (tFunc: TypedExpr) (paramTys: IRType list)
@@ -4261,7 +4261,7 @@ let loopOperandIdentity (env: TypeEnv) (name: string) (vid: IRId) : ArrayIdentit
 /// the callee binder and the partition (relevant position -> class), the head
 /// naming the instance. Installed by TypeCheck.checkModule.
 let internal sharingVariantHook : (TypeEnv -> IRId -> Map<int, int> -> TypeResult<TypedExpr>) ref =
-    ref (fun _ _ _ -> Error (Other "internal: the sharing-instance checker is not installed (TypeCheck.checkModule installs it)"))
+    ref (fun _ _ _ -> Error (InternalErr "internal: the sharing-instance checker is not installed (TypeCheck.checkModule installs it)"))
 
 /// `[sharing-partition v1]` -- the rule name of every record below.
 let internal sharingRule = "sharing-partition"
@@ -4500,7 +4500,7 @@ let internal sharingInstanceHead (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typed
 /// which the checker's rec-chain owns -- installed by TypeCheck.checkModule
 /// before any declaration is checked.
 let internal arrowVariantHook : (TypeEnv -> IRId -> Map<int, IRType> -> TypeResult<TypedExpr>) ref =
-    ref (fun _ _ _ -> Error (Other "internal: the arrow-instance checker is not installed (TypeCheck.checkModule installs it)"))
+    ref (fun _ _ _ -> Error (InternalErr "internal: the arrow-instance checker is not installed (TypeCheck.checkModule installs it)"))
 
 /// An array argument's type as an ARRAY INSTANCE's parameter type: the
 /// argument's own type -- its element, index names and extents, so a literal
@@ -5064,7 +5064,7 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
             // A hole frees ONE axis of the group, and a partially-read compact
             // group has no residual class -- the same refusal the wreath arm
             // gives a partial read, and the reason `decompact` exists.
-            Error (Other "a wildcard `_` frees one axis of a compact (SymIdx / AntisymIdx / HermitianIdx) group, and a partially-read compact group has no residual class. Supply every coordinate of the group, or decompact(A, d) first and read the freed axis there.")
+            Error (CompactStorageErr "a wildcard `_` frees one axis of a compact (SymIdx / AntisymIdx / HermitianIdx) group, and a partially-read compact group has no residual class. Supply every coordinate of the group, or decompact(A, d) first and read the freed axis there.")
         else
             foldEnumIdxLabels env arrTy tArgs
             |> Result.bind (fun tArgs ->
@@ -5206,7 +5206,7 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                     else trailingSlots  // (validateTabulatedIndex/arity guard covers over-supply)
                 let finalSlots = residualFragment @ trailingRemaining
                 if interiorTrailingHole then
-                    Error (Other "A wildcard `_` among the trailing indices of a compound array must come AFTER all supplied trailing indices (a free interior trailing dimension would require restructuring the trailing blocks). Reorder, or leave the trailing dims free by omitting them.")
+                    Error (WildcardErr "A wildcard `_` among the trailing indices of a compound array must come AFTER all supplied trailing indices (a free interior trailing dimension would require restructuring the trailing blocks). Reorder, or leave the trailing dims free by omitting them.")
                 elif List.isEmpty finalSlots then
                     Ok (mkTyped (TExprIndex (tFunc, tArgs, identity)) arrTy.ElemType)
                 else
@@ -5509,7 +5509,7 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                 // the wrong magnitude.
                 | Some pu, Some au when not (unitSameScale pu au) ->
                     atArg i
-                    Some (Other (sprintf
+                    Some (UnitMagnitudeErr (sprintf
                             "argument %d expects %s but got %s: same dimensions, magnitudes differing by the factor %s"
                             (i + 1) (ppUnitSig pu) (ppUnitSig au)
                             (ppUnitScale (unitConversionFactor au pu))))
@@ -5581,7 +5581,7 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                                 Some (UnitMismatch (where, ppUnitSig pu, ppUnitSig au))
                             | _ when isConcrete ae && pr <> ar ->
                                 atArg i
-                                Some (Other (sprintf
+                                Some (TypeMismatchErr (sprintf
                                         "%s: the parameter component is declared %s (rank %d) but the argument component is %s (rank %d). A call site performs no conversion between these -- pass a value of the declared type, or change the declared component type."
                                         where (ppIRType (env.Subst.Resolve pc)) pr
                                         (ppIRType (env.Subst.Resolve ac)) ar))
@@ -5729,7 +5729,7 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
         // this ladder: a symbolic extent reads `.extents[d]` at runtime and
         // keeps the historical looseness.
         //
-        // The same obligation carries the NOMINAL half (BL3999,
+        // The same obligation carries the NOMINAL half (BL3027,
         // `coIterVerdict`): `cov(R(0), H(0))` over a DayIdx and an HourIdx row
         // of equal extent is in bounds, but walks two index spaces as one --
         // the refusal `R(0) * H(0)` gets at top level. buildApplyInfo
@@ -5903,7 +5903,7 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
             match firstAbstractVarConflict env.Subst paramTys (tArgs |> List.map (_.Type)) with
             | Some (firstPos, conflictPos, firstTy, conflictTy) ->
                 atArg conflictPos
-                Error (Other (abstractVarConflictMessage env.Subst calleeDesc
+                Error (GenericVarErr (abstractVarConflictMessage env.Subst calleeDesc
                                                          firstPos conflictPos firstTy conflictTy))
             | None ->
             // The SIXTH check, last because every one above it names the

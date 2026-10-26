@@ -1,5 +1,5 @@
 // TEST: A Poly pack destructured with a tuple pattern (rejects)
-// ERROR: BL3999
+// ERROR: BL3004
 // ERROR-CONTAINS: let head :: tail = args
 // A pack is not a tuple: `let (head, tail) = args` used to type-check and die
 // in IR validation as a dangling reference (BL6001). The pack forms are the

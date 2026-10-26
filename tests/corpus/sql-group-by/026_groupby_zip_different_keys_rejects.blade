@@ -1,5 +1,5 @@
 // TEST: GroupBy Zip Different Keys (rejects)
-// ERROR: BL3999
+// ERROR: BL3027
 // Co-iterating grouped arrays is a SAME-KEYS operation: the rows correspond
 // only because one offsets table partitioned both operands. Two independent
 // group_keys calls give two independent partitions -- structurally identical
@@ -17,6 +17,6 @@ let gk2 = group_keys(region)
 let ga = group_by(a, gk1)
 let gb = group_by(b, gk2)
 let dots = method_for(zip(ga, gb)) <@> lambda(ra: Array<Float64 like RaggedIdx<_>>, rb: Array<Float64 like RaggedIdx<_>>) -> prodsum(ra, rb) |> compute
-// EXPECT: BL3999 -- co-iterating grouped arrays requires every operand to be
+// EXPECT: BL3027 -- co-iterating grouped arrays requires every operand to be
 // grouped by the SAME group_keys binding. Identical KEY VALUES are not enough:
 // gk1 and gk2 are two separate partitions of the same data.

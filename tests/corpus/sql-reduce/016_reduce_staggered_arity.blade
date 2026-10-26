@@ -7,7 +7,7 @@
 // never stored, so no BL4010 storage suggestion fires (sql-reduce/030): the
 // DENSE nest is exactly what is under test -- p2 = sum(A)^2 counts the full
 // square -- and `where comm` here would be refused (reduce over a compact
-// output is BL3999), not a storage choice.
+// output is BL3026), not a storage choice.
 let A = [1.0, 2.0, 3.0]
 let k1 = lambda(x) -> x
 let k2 = lambda(x, y) -> x * y

@@ -529,7 +529,7 @@ type TypeEnv = {
     /// PARAMETERS: each entry names the parameter positions walked plus the
     /// literal leading extents and leading index records of that
     /// co-iteration's other operands, all of which must agree -- in extent
-    /// (BL3016) and in index NAME (BL3999, the top-level zip's nominal rule).
+    /// (BL3016) and in index NAME (BL3027, the top-level zip's nominal rule).
     ///
     /// The agreement obligation a zip carries is discharged AT the zip
     /// (`TypeLower.zipHeadClash`, BL3016) only when both extents are literals
@@ -1013,7 +1013,7 @@ module DeducedFacts =
 /// operands. Their output is folded, never stored, so the BL4010
 /// confirm-and-pin STORAGE suggestion ("output storage is DENSE today; pin
 /// `where comm`") has nothing to say about them, and following it is a hard
-/// refusal: `reduce` over a compact symmetric computation is BL3999 (folding
+/// refusal: `reduce` over a compact symmetric computation is BL3026 (folding
 /// the canonical cells and the logical cells differ). `inferReduce` scopes the
 /// set around the whole reduce inference (`within`) -- the operand is inferred
 /// more than once there -- and the BL4010 sites skip a span found here. Spans are unique source positions, so an apply OUTSIDE the
@@ -1549,6 +1549,12 @@ the array's flat storage holds them in." shape detail
     | ProviderImportByModule (suggestion, providers) -> $"provider modules are imported by module name -- write `import {suggestion} as <alias>` (the Providers.* spelling was removed; registered providers: {providers})"
     | ProviderNoSelectiveImport pname -> $"provider module '{pname}' does not support selective import -- use `import {pname} as <alias>` and call <alias>.load/read/write"
     | IndexTypeArithForbidden name -> $"Arithmetic on index type '{name}' is not permitted. Index types are nominal labels -- for value-level arithmetic on positions, use virtual array iteration (which produces plain ints); for new index types derived from arithmetic, type-level construction is a separate workstream not yet implemented."
+    | BuiltinArgErr msg | ArgCountErr msg | TypeMismatchErr msg | InvalidApplicationErr msg
+    | PatternErr msg | UnitMagnitudeErr msg | ExtentErr msg | UnknownAxisPathErr msg
+    | ConstraintErr msg | StaticEvalErr msg | IndexTypeErr msg | DistAlgebraErr msg
+    | InternalErr msg | GenericVarErr msg | ReductionFormErr msg | CompactStorageErr msg
+    | IndexSpaceErr msg | StaticValueErr msg | SegmentedDomainErr msg | RecArrayFormErr msg
+    | HaloFormErr msg | WildcardErr msg | NotYetSupportedErr msg | WhereClauseErr msg
     | Other msg -> msg
 
 /// Render the compiler's INTERNAL type spellings the way a reader can use them.
@@ -1658,7 +1664,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | ExtentArgMismatch _ | HaloExtentMismatch _ | ZipExtentMismatch _
             | CoIterArgExtentMismatch _ | CoIterBodyExtentMismatch _
             | CoIterKernelExtentMismatch _ -> "BL3016"
-            | CoIterIndexMismatch _ -> "BL3999"
+            | CoIterIndexMismatch _ -> "BL3027"
             | ProviderReadExtentMismatch _ | ExtentAscribeMismatch _ -> "BL3016"
             | QuantityTerminal _ -> "BL3011"
             | DefaultParamOrder _ | DefaultParamScope _ | DefaultParamShadowed _ -> "BL3012"
@@ -1781,6 +1787,31 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | ProviderWriteNeedsArray _ | ProviderWriteNamedBinding _ | ProviderWriteArgs _
             | ProviderWriteModuleScope _ -> "BL3007"
             | ProviderImportByModule _ | ProviderNoSelectiveImport _ -> "BL2003"
+            | BuiltinArgErr _ -> "BL3007"
+            | ArgCountErr _ -> "BL3002"
+            | TypeMismatchErr _ -> "BL3001"
+            | InvalidApplicationErr _ -> "BL3003"
+            | PatternErr _ -> "BL3004"
+            | UnitMagnitudeErr _ -> "BL3006"
+            | ExtentErr _ -> "BL3016"
+            | UnknownAxisPathErr _ -> "BL2002"
+            | ConstraintErr _ -> "BL4001"
+            | StaticEvalErr _ -> "BL4002"
+            | IndexTypeErr _ -> "BL4003"
+            | DistAlgebraErr _ -> "BL5100"
+            | InternalErr _ -> "BL9001"
+            | GenericVarErr _ -> "BL3024"
+            | ReductionFormErr _ -> "BL3025"
+            | CompactStorageErr _ -> "BL3026"
+            | IndexSpaceErr _ -> "BL3027"
+            | StaticValueErr _ -> "BL3028"
+            | SegmentedDomainErr _ -> "BL3029"
+            | RecArrayFormErr _ -> "BL3030"
+            | HaloFormErr _ -> "BL3031"
+            | WildcardErr _ -> "BL3032"
+            | NotYetSupportedErr _ -> "BL3033"
+            | WhereClauseErr _ -> "BL3034"
+            // The residual: a type error no family above names.
             | Other _ -> "BL3999"
     Blade.Diagnostics.mkError code (Blade.Diagnostics.Codes.phaseOfCode code) e.Span (formatTypeError e.Error)
     |> Blade.Diagnostics.withContext e.Context

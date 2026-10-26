@@ -1,5 +1,5 @@
 // TEST: GroupBy Zip Mixed Annotations (rejects)
-// ERROR: BL3999
+// ERROR: BL3027
 // Over an ALL-grouped operand pack the peel binds every parameter off ONE
 // offsets table at one group index, so the parameters must agree on what a
 // step IS: all rows, or all elements. A rank-1 annotation on one parameter
@@ -19,5 +19,5 @@ let gk = group_keys(region)
 let ga = group_by(a, gk)
 let gb = group_by(b, gk)
 let bad = method_for(zip(ga, gb)) <@> lambda(ra: T^1, rb) -> prodsum(ra, ra) + rb |> compute
-// EXPECT: BL3999 -- every kernel parameter must bind the same way over a
+// EXPECT: BL3027 -- every kernel parameter must bind the same way over a
 // grouped co-iteration: annotate every parameter rank-1, or none.

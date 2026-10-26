@@ -5,7 +5,7 @@
 // name and FAILS THE FOLD on violation (let-static assertion semantics,
 // StaticEval.fs:353-390) rather than deferring to a runtime guard. The
 // string-errored internal failure surfaces at the `let static` binding that
-// demanded the fold, as BL3999 — the compile-time-evaluation wrapper — with
+// demanded the fold, as BL4002 — the compile-time-evaluation wrapper — with
 // the fold's own reason carried inside it. The CODE belongs to the binding
 // ("this `let static` did not evaluate"); the MESSAGE is the constraint
 // system's, and it is the message that carries the contract pinned below.
@@ -30,5 +30,5 @@ struct Small {
 }
 
 let static bad = Small { n = 4 }
-// ERROR: BL3999
+// ERROR: BL4002
 // ERROR-CONTAINS: Constraint violation in Small (static, conjunct 2)

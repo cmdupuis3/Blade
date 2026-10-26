@@ -1021,7 +1021,7 @@ let classifyGramApply (a: IRExpr) (b: IRExpr) (x: IRExpr) : (LinAlgCall * LinAlg
 /// transposes. The first-class intrinsic's only classification.
 ///
 /// Only the `d` instance is reachable: `TypeCheck.inferMatmul` requires
-/// Float64 elements at the SURFACE (BL3999), so a f32/complex/int call never
+/// Float64 elements at the SURFACE (BL3007), so a f32/complex/int call never
 /// gets here. The precision generalisation below is a backstop that keeps
 /// this classifier honest if the surface is ever widened -- but widening it
 /// is a LANGUAGE decision (what should `matmul` mean for complex operands:

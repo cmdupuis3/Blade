@@ -3,7 +3,7 @@
 // already that, so there is nothing to retype and the honest answer is to say
 // so and point at the argument.
 //
-// MEASURED: this arrives as BL3999, not the BL4003 index-type family. That is
+// MEASURED: this arrives as BL3007, not the BL4003 index-type family. That is
 // deliberate rather than incidental -- BL4003's message template opens with
 // "<class> is a declarable index class", and there is no class here to name, so
 // routing a plain array through it would produce confident nonsense about the
@@ -12,5 +12,5 @@
 // REJECT-AT: lower
 let G: Array<Float64 like Idx<5>> = [1.0, 2.0, 3.0, 4.0, 5.0]
 let bad = leaves(G)
-// ERROR: BL3999
+// ERROR: BL3007
 // ERROR-CONTAINS: which has no tree slot

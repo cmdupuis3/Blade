@@ -284,7 +284,7 @@ let rec internal collectAppRankErrors (subst: Subst) (expr: TypedExpr) : Compile
                         match tFunc.Kind with
                         | TExprVar (name, _, _) -> $"'{name}'"
                         | _ -> "this function"
-                    [ { Error = Other (abstractVarConflictMessage subst calleeDesc
+                    [ { Error = GenericVarErr (abstractVarConflictMessage subst calleeDesc
                                                                   firstPos conflictPos firstTy conflictTy)
                         Span = arg.Span
                         Context = []
@@ -881,7 +881,7 @@ let rec internal collectValuelessZeros (env: TypeEnv) (expr: TypedExpr) : Compil
             let t = env.Subst.Resolve expr.Type
             if sumPart 32 t then
                 match IR.zeroHasNoValueMessage (IR.stripUnits t) with
-                | Some msg -> [ { Error = Other msg; Span = expr.Span; Context = []; Code = None } ]
+                | Some msg -> [ { Error = BuiltinArgErr msg; Span = expr.Span; Context = []; Code = None } ]
                 | None -> []
             else []
         | _ -> []

@@ -4,7 +4,7 @@
 // same apply consumed DIRECTLY by `reduce` -- a lone leaf, a <&!> tree, an
 // arity-polymorphic pack kernel -- is folded, never stored: there is no dense
 // output to compact, and following the suggestion (`where comm`) is refused
-// outright (reduce over a compact computation, BL3999). So no BL4010 fires
+// outright (reduce over a compact computation, BL3026). So no BL4010 fires
 // here; WARN pins are strict, so any BL4010 on these lines fails the test.
 // The folds still visit the FULL square: every ordered pair counts.
 function packprod(a: Poly<T^0>) -> T^0 = {

@@ -349,6 +349,21 @@ module Codes =
             // (BL8002) on the missing ones.
             "BL3022", "unreachable match arm"
             "BL3023", "non-exhaustive match over a variant type"
+            // BL3024 - BL3034: the families split out of the BL3999 catch-all
+            // (deep review #49). Other families of that split went to the
+            // existing codes they belong to (BL3007 builtin arguments, BL3002
+            // counts, BL3016 extents, BL4002 `let static`, BL9001 internal, ...).
+            "BL3024", "generic type variable bound inconsistently"
+            "BL3025", "invalid reduction form"
+            "BL3026", "operation not valid on compact storage"
+            "BL3027", "operands over different index spaces"
+            "BL3028", "value must be known at compile time"
+            "BL3029", "invalid chunked or segmented domain"
+            "BL3030", "invalid recursive array definition"
+            "BL3031", "invalid halo window"
+            "BL3032", "wildcard not valid here"
+            "BL3033", "construct not yet supported"
+            "BL3034", "where clause not applicable here"
             "BL3999", "type error"
             // BL4xxx: constraints / static
             "BL4001", "constraint violation"
@@ -554,7 +569,7 @@ module Codes =
             // (ProviderRegistry.MissingRule: blade_rt::refuse_missing in the
             // compiled lane, Interp/Run.fs materializeProviderRead in the
             // interpreter; the static fold refuses (the `let static` assertion,
-            // BL3999) carrying the
+            // BL4002) carrying the
             // same sentence). A provider WRITE of a NaN / infinite cell is
             // refused under the same code. The opt-in is the masked read,
             // `alias.read_present` / `alias.present`.

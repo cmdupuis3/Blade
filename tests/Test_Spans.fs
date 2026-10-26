@@ -216,7 +216,7 @@ let runSpanTests () : BlockResult =
     check "span leak: a later module's static assertion is located in its OWN module"
         (match crossModErrs with
          | [ (Some "mod_b.blade", 3, 1, code, msg) ] ->
-             code = "BL3999"
+             code = "BL4002"
              && msg.Contains "does not evaluate at compile time"
              && msg.Contains "let static bad"
          | _ -> false)

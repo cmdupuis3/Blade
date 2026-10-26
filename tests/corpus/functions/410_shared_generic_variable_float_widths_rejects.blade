@@ -1,5 +1,5 @@
 // TEST: Float32 and Float64 arguments sharing a variable (rejects)
-// ERROR: BL3999 @ 8:18
+// ERROR: BL3024 @ 8:18
 // ERROR-CONTAINS: argument 1 makes it Float64 while argument 2 makes it Float32
 // Exact agreement holds within a class too: `add(2.0, f)` was accepted (the
 // Float32 widened into the Float64 monomorph) while `add(f, 2.0)` was

@@ -1456,7 +1456,7 @@ let total = reduce(A, (+), axes = 2)
 
     /// The refusal a diverged axis earns: the ordinary NAMED-AXIS refusal, in
     /// whichever of its two wordings applies -- the rank->=2 product rule
-    /// ("same axis tags and extents") for a 2-D variable, BL3999's rank-1
+    /// ("same axis tags and extents") for a 2-D variable, BL3027's rank-1
     /// co-iteration message for a 1-D one. Both are the same fact: two index
     /// types with different names are not one index space.
     ///
@@ -1644,7 +1644,7 @@ let total = reduce(B, (+), axes = 2)
              | newest :: _ :: [] -> newest.SplitReason = Some "coordinate content differs"
              | _ -> false)
             (sprintf "%A" (axisIdentities axisCoordRoot "lat" |> List.map (fun i -> i.SplitReason)))
-        // The refusal is the ordinary named-axis one (BL3999): the two
+        // The refusal is the ordinary named-axis one (BL3027): the two
         // identities carry DIFFERENT axis names, and a named index type does
         // not co-iterate with a differently-named one merely by matching
         // extent. Ids alone would not do this -- `unify`'s ArrayElem arm never
@@ -2520,7 +2520,7 @@ let d = B - A
 
     /// The refusal a laundered axis earns. Which seam fires first depends on
     /// the shape: an ASCRIPTION refuses in `unify` (BL3001 "Type mismatch"),
-    /// a bare difference refuses in co-iteration (BL3999). Both are the same
+    /// a bare difference refuses in co-iteration (BL3027). Both are the same
     /// fact and either one is a pass here -- what is pinned is that the
     /// program does not compile, and that it failed on the index types.
     let refusesOnAxesOrAscription (r: Result<'a, string>) : bool =
@@ -2763,7 +2763,7 @@ let a: Array<Float64 like A> = b
          (not (incompat icA icA)) ""
      check "predicate: a provider tag against a USER name is incompatible"
          (incompat icA (Some "Lat") && incompat (Some "Lat") icA) ""
-     // The escape hatch BL3999's own message advertises, and the one route by
+     // The escape hatch BL3027's own message advertises, and the one route by
      // which a user can still assert that two diverged axes are one axis.
      check "predicate: a provider tag against an UNTAGGED record stays compatible"
          (not (incompat icA None) && not (incompat None icA)) ""

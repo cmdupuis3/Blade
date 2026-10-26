@@ -1279,10 +1279,10 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
                               (match arr.ElemType with
                                | IRTScalar ETBool -> ()
                                | other ->
-                                   raise (TypeErrorRaised (Other $"CompoundIdx<{name}>: the mask must be an array of Bool (Array<Bool like ...>), but '{name}' has element type {ppIRType other}", Some "BL3001")))
+                                   raise (TypeErrorRaised (TypeMismatchErr $"CompoundIdx<{name}>: the mask must be an array of Bool (Array<Bool like ...>), but '{name}' has element type {ppIRType other}", Some "BL3001")))
                               arr.IndexTypes |> List.sumBy (_.Rank)
                           | other ->
-                              raise (TypeErrorRaised (Other $"CompoundIdx<{name}>: the mask must be an array of Bool (Array<Bool like ...>), but '{name}' has type {ppIRType other}", Some "BL3001")))
+                              raise (TypeErrorRaised (TypeMismatchErr $"CompoundIdx<{name}>: the mask must be an array of Bool (Array<Bool like ...>), but '{name}' has type {ppIRType other}", Some "BL3001")))
                      IRVar (vi.VarId, vi.Type), rank
                  | None -> lowerExtentExpr env maskExpr, 1)
             | _ -> lowerExtentExpr env maskExpr, 1
@@ -1299,7 +1299,7 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
         let source, rank =
             match resolveSparseKeysSource env keysExpr with
             | Ok sr -> sr
-            | Error msg -> raise (TypeErrorRaised (Other msg, None))
+            | Error msg -> raise (TypeErrorRaised (IndexTypeErr msg, None))
         { Id = id; Rank = rank; Extent = IRSparseKeys source
           Symmetry = SymNone; Tag = Some "__sparseidx"; IxKind = IxKSparse
           Kind = SDimension; Dependencies = [] }
@@ -1686,14 +1686,14 @@ let private multiAxisShapeClash (shape0: IRIndexType list) (rest: IRArrayType li
 /// record the walk will actually use. Reports the first offender (1-based).
 ///
 /// Three obligations, in this order, because that is decreasing severity:
-///   1. Packing (`indexPackingCoIterable`) -> BL3999, the band this function's
+///   1. Packing (`indexPackingCoIterable`) -> BL3027, the band this function's
 ///      other structural refusals already use. No walk exists at all.
 ///   2. Extent, LITERAL vs LITERAL only -> BL3016 (`ZipExtentMismatch`). The
 ///      walk exists and is out of bounds. Checked BEFORE names so that
 ///      `I8 + I2` reports the memory-safety fact rather than the naming one.
 ///      A symbolic extent reads `.extents[d]` at runtime and keeps the
 ///      historical looseness -- the same rule `kernelExtentClash` follows.
-///   3. Nominal identity (`indexNamesCoIterable`) -> BL3999. The walk is
+///   3. Nominal identity (`indexNamesCoIterable`) -> BL3027. The walk is
 ///      in-bounds; the operands just are not over the same index space.
 ///
 /// Only the HEAD is compared. A rank-2 operand zipped with a rank-1 one takes
@@ -1714,7 +1714,7 @@ let private zipHeadClash (arrayTypes: IRArrayType list) : TypeError option =
                 | [] -> None
                 | h :: _ ->
                     if not (indexPackingCoIterable h0 h) then
-                        Some (Other ($"co-iteration operands must share ONE index space on the co-iterated axis, but operand 1 is over {(ppIndexType h0)} and operand {pos} is over {(ppIndexType h)}. These walk different cell counts with different subscript arithmetic (a packed/compact axis stores one cell per canonical tuple; a plain dense axis stores one per subscript), so there is no shared iteration for the kernel to run over. Decompact the packed operand, or write the traversal over each explicitly."))
+                        Some (IndexSpaceErr ($"co-iteration operands must share ONE index space on the co-iterated axis, but operand 1 is over {(ppIndexType h0)} and operand {pos} is over {(ppIndexType h)}. These walk different cell counts with different subscript arithmetic (a packed/compact axis stores one cell per canonical tuple; a plain dense axis stores one per subscript), so there is no shared iteration for the kernel to run over. Decompact the packed operand, or write the traversal over each explicitly."))
                     else
                         match tryEvalIntIR h0.Extent, tryEvalIntIR h.Extent with
                         | Some e0, Some e when e0 <> e -> Some (ZipExtentMismatch (pos, e0, e))
@@ -1730,7 +1730,7 @@ let private zipHeadClash (arrayTypes: IRArrayType list) : TypeError option =
                                 // sentinels) comes back unchanged, so this is
                                 // the old text for everything that is not a
                                 // provider axis.
-                                Some (Other (sprintf
+                                Some (IndexSpaceErr (sprintf
                                         "co-iteration operands are over DIFFERENT index types: operand 1 is indexed by '%s' and operand %d by '%s'. A named index type carries provenance, so two of them do not interoperate merely by having the same extent (%s) -- that is what makes a subscript bounds-safe by construction. Index one of them through the other's space, or drop the annotation on one operand if they really are the same axis (an UNNAMED index co-iterates with either).%s"
                                         (displayTagName (defaultArg h0.Tag "?")) pos
                                         (displayTagName (defaultArg h.Tag "?")) (ppExtentOf h0.Extent)
@@ -1761,7 +1761,7 @@ let zipSharedRecords (arrayTypes: IRArrayType list) : Result<IRIndexType list, T
             | Some e when minRank > 0 -> Error e
             | _ -> Ok (if minRank > 0 then [shape0.Head] else [])
         elif not (rest |> List.forall (fun at -> indexShapesAgree at.IndexTypes shape0)) then
-            Error (Other (multiAxisShapeClash shape0 rest))
+            Error (IndexSpaceErr (multiAxisShapeClash shape0 rest))
         elif isGroupedRaggedShape shape0 then
             // All operands grouped: the ragged member axis is NOT a product
             // axis, so this is not the plain-dense product rule -- the rows
@@ -1770,7 +1770,7 @@ let zipSharedRecords (arrayTypes: IRArrayType list) : Result<IRIndexType list, T
             // same-keys operands (checked by the caller).
             Ok shape0
         elif not (coIterableRecords shape0) then
-            Error (Other "co-iteration spans one index record per operand (dense rank-1 or packed symmetric), or a product of plain-dense records; mixed dense/packed multi-axis shapes are not supported")
+            Error (IndexSpaceErr "co-iteration spans one index record per operand (dense rank-1 or packed symmetric), or a product of plain-dense records; mixed dense/packed multi-axis shapes are not supported")
         else
             Ok shape0
 
@@ -1792,9 +1792,9 @@ let haloSlotsOf (env: TypeEnv) (innerTy: TypeExpr) (offsetsExpr: Expr) : TypeRes
     let inner = lowerIndexType env 0 innerTy
     // One slot from one flat per-axis offset set.
     let slotOfInts (offsets: int list) : TypeResult<IRIndexType> =
-        if List.isEmpty offsets then Error (Other "halo<...>: offsets array must be non-empty")
+        if List.isEmpty offsets then Error (HaloFormErr "halo<...>: offsets array must be non-empty")
         elif inner.Rank <> 1 then
-            Error (Other "halo<...>: the inner index must be rank-1 (n-D = per-axis offset arrays [[..],[..],..] or separate range<halo<..>, ..> slots)")
+            Error (HaloFormErr "halo<...>: the inner index must be rank-1 (n-D = per-axis offset arrays [[..],[..],..] or separate range<halo<..>, ..> slots)")
         else
         let offCsv = offsets |> List.map string |> String.concat ","
         match inner.Extent with
@@ -1839,7 +1839,7 @@ let haloSlotsOf (env: TypeEnv) (innerTy: TypeExpr) (offsetsExpr: Expr) : TypeRes
                     Tag = Some $"__halowin|d:{innerName}|{offCsv}"
                     IxKind = IxKPlain }
     match evalStaticValueExpr env offsetsExpr with
-    | Error msg -> Error (Other $"halo<...>: offsets must be a compile-time int array ({msg})")
+    | Error msg -> Error (HaloFormErr $"halo<...>: offsets must be a compile-time int array ({msg})")
     | Ok sv ->
         let asInt = function StaticEval.SVInt n -> Some (int n) | _ -> None
         match sv with
@@ -1870,8 +1870,8 @@ let haloSlotsOf (env: TypeEnv) (innerTy: TypeExpr) (offsetsExpr: Expr) : TypeRes
                         | Error e, _ -> Error e
                         | _, Error e -> Error e) (Ok [])
                 else
-                    Error (Other "halo<...>: offsets must be a flat int array [-1,0,1] or an array of per-axis int arrays [[-1,0,1],[0],[-1,0,1]] (no mixing, no empty axes)")
-        | _ -> Error (Other "halo<...>: offsets must be a compile-time array of integer literals, e.g. [-1, 0, 1]")
+                    Error (HaloFormErr "halo<...>: offsets must be a flat int array [-1,0,1] or an array of per-axis int arrays [[-1,0,1],[0],[-1,0,1]] (no mixing, no empty axes)")
+        | _ -> Error (HaloFormErr "halo<...>: offsets must be a compile-time array of integer literals, e.g. [-1, 0, 1]")
 
 
 // ---------------------------------------------------------------------------

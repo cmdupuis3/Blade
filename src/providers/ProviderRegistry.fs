@@ -51,7 +51,7 @@ type PackedReadOpts = {
 /// A default read (`read`, `stream`, `load_compound`, `read_window`) of a
 /// variable holding a missing cell refuses with BL8015 in every lane: the
 /// emitted C++ (blade_rt::refuse_missing over each reader's destination
-/// buffer, from `missingCpp`), the interpreter, and the static fold (BL3999,
+/// buffer, from `missingCpp`), the interpreter, and the static fold (BL4002,
 /// the `let static` assertion,
 /// carrying the same sentence) -- all from THIS record, through `isMissing`
 /// and `missingCpp`, so the predicates cannot drift. The opt-in is the

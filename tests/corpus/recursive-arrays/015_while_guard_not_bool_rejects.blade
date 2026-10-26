@@ -10,4 +10,5 @@ let rec b: Array<Float like It> =
     | zero :: s -> zero :: 1.0
     | prefix :: n while prefix(n - 1) -> prefix :: prefix(n - 1) * 0.5
 b
+// ERROR: BL3030
 // ERROR-CONTAINS: a `while` guard must be Bool

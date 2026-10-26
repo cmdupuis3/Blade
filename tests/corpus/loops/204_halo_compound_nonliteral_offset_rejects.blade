@@ -8,7 +8,7 @@
 // It is a typecheck refusal now, in the same family as the non-static
 // offset SET of loops/075. The dense sibling stays legal: loops/080 reads
 // `S(w(0 - i))` with an offset from a sibling range slot.
-// ERROR: BL3999
+// ERROR: BL3031
 // ERROR-CONTAINS: must be an integer literal
 type T = Idx<8>
 type Lag = Idx<2>

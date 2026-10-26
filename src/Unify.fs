@@ -358,7 +358,7 @@ type TypeError =
     /// quoted/described (`the kernel 'cov'`, `this kernel`); `posB = None` means the
     /// partner is an array the body fixes, of extent `extB`.
     | CoIterKernelExtentMismatch of owner: string * posA: int * posB: int option * extA: int64 * extB: int64
-    /// BL3999 (the NOMINAL half of the co-iteration obligation, the call-site
+    /// BL3027 (the NOMINAL half of the co-iteration obligation, the call-site
     /// twin of `TypeLower.zipHeadClash`'s "DIFFERENT index types" refusal): a
     /// body co-iterates two of its parameters (or one with an array it fixes)
     /// and the call -- or the kernel application -- hands them fibers over two
@@ -679,6 +679,57 @@ type TypeError =
     | ProviderWriteModuleScope of alias: string
     | ProviderImportByModule of suggestion: string * providers: string
     | ProviderNoSelectiveImport of pname: string
+    // ---- The BL3999 split (deep review #49, 2026-10-26). Each family
+    // below used to be an `Other` message under the catch-all BL3999; the
+    // case now names its code. The payload is the finished message.
+    /// BL3007: a builtin, intrinsic or provider verb was given an argument it cannot take.
+    | BuiltinArgErr of string
+    /// BL3002: the wrong number of arguments or subscripts.
+    | ArgCountErr of string
+    /// BL3001: a value of the wrong kind in a typed position.
+    | TypeMismatchErr of string
+    /// BL3003: an application the callee cannot take.
+    | InvalidApplicationErr of string
+    /// BL3004: a pattern that cannot match the value's shape.
+    | PatternErr of string
+    /// BL3006: same dimensions, different magnitudes, where no conversion is inserted.
+    | UnitMagnitudeErr of string
+    /// BL3016: two extents that must agree do not.
+    | ExtentErr of string
+    /// BL2002: a store axis path (`store.index.dim`) that names nothing.
+    | UnknownAxisPathErr of string
+    /// BL4001: a declared constraint that is violated or cannot be enforced.
+    | ConstraintErr of string
+    /// BL4002: a `let static` that does not evaluate at compile time.
+    | StaticEvalErr of string
+    /// BL4003: an index-type declaration or use that breaks the index-type rules.
+    | IndexTypeErr of string
+    /// BL5100: an operation the dist (cumulant) algebra does not define.
+    | DistAlgebraErr of string
+    /// BL9001: a compiler invariant failed during type checking.
+    | InternalErr of string
+    /// BL3024: one generic type variable (or caret rank claim) bound two incompatible ways.
+    | GenericVarErr of string
+    /// BL3025: a reduce / prodsum / reduction-join form the fold rules refuse.
+    | ReductionFormErr of string
+    /// BL3026: an operation that would read compact (SymIdx / AntisymIdx / HermitianIdx) storage wrongly.
+    | CompactStorageErr of string
+    /// BL3027: co-iterated or elementwise operands over different index spaces.
+    | IndexSpaceErr of string
+    /// BL3028: a value the type needs at compile time is only known at run time.
+    | StaticValueErr of string
+    /// BL3029: an ill-formed `Chunked<..>` / segments / files / ungroup declaration or use.
+    | SegmentedDomainErr of string
+    /// BL3030: an ill-formed `let rec` recursive array definition.
+    | RecArrayFormErr of string
+    /// BL3031: an ill-formed `halo<..>` window or window read.
+    | HaloFormErr of string
+    /// BL3032: a wildcard `_` where no wildcard is meaningful.
+    | WildcardErr of string
+    /// BL3033: a construct that is planned but not built yet.
+    | NotYetSupportedErr of string
+    /// BL3034: a `where` clause on a declaration it cannot apply to.
+    | WhereClauseErr of string
     | Other of string
 
 /// A compile error with source location and context stack
@@ -1320,7 +1371,7 @@ let indexPairIncompatible (i1: IRIndexType) (i2: IRIndexType) : bool =
     ///
     /// Provider-vs-untagged stays COMPATIBLE (this arm needs `Some` on both
     /// sides): an unnamed index is "some axis of this extent" and co-iterates
-    /// with either -- the escape hatch BL3999's own message advertises, and
+    /// with either -- the escape hatch BL3027's own message advertises, and
     /// the route by which a user can still assert two diverged axes are one.
     /// Provider-vs-other-`__` stays compatible too: those are kind sentinels,
     /// and gating them would refuse sound code.
@@ -1439,7 +1490,7 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
               | IRTInfer id2 -> id2 = id
               | _ -> false) -> Ok ()
     | IRTInfer id, ty | ty, IRTInfer id ->
-        if occursIn id ty then Error (Other "Infinite type detected")
+        if occursIn id ty then Error (TypeMismatchErr "Infinite type detected")
         else
             // A var-to-var bind must carry the HM-polymorphic flag to the
             // SURVIVING var. `polymorphicIds` is populated only at
@@ -1519,7 +1570,7 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
                     // bind, so no loss) refused the scalar correctly.
                     (match subst.GetArityConstraint(id2) with
                      | Some k2 when k2 <> k ->
-                        Error (Other $"a `^{k}` type variable cannot unify with a `^{k2}` one: the caret pins an EXACT rank, so the two annotations describe different shapes")
+                        Error (GenericVarErr $"a `^{k}` type variable cannot unify with a `^{k2}` one: the caret pins an EXACT rank, so the two annotations describe different shapes")
                      | _ ->
                         subst.CopyArityConstraint(id, id2)
                         subst.Bind(id, ty); Ok ())
@@ -1528,7 +1579,7 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
                     // ("got IRTScalar ETInt64") leaked F# constructor names
                     // into user-facing output, and the fold-kernel seam above
                     // now routes ordinary programs here.
-                    Error (Other ($"a `^{k}` type variable is a rank-{k} array, but this position supplies {(ppIRType ty)} -- the caret is a rank CLAIM, not a shorthand, so drop it (`T`) where the value is an element rather than an array. In fold-kernel position (`reduce(A, f)`) the parameters ARE the element type: a `T^1` kernel fits an array of rank-1 elements, not a rank-1 array of scalars."))
+                    Error (GenericVarErr ($"a `^{k}` type variable is a rank-{k} array, but this position supplies {(ppIRType ty)} -- the caret is a rank CLAIM, not a shorthand, so drop it (`T`) where the value is an element rather than an array. In fold-kernel position (`reduce(A, f)`) the parameters ARE the element type: a `T^1` kernel fits an array of rank-1 elements, not a rank-1 array of scalars."))
             | _ ->
                 match subst.GetLiteralDefault(id) with
                 | Some litE ->
@@ -1717,7 +1768,7 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
             // through. The scalar +/-/comparison seam is where a conversion
             // is actually inserted.
             elif not (unitSameScale u1 u2) then
-                Error (Other (sprintf
+                Error (UnitMagnitudeErr (sprintf
                         "these values relate %s and %s: same dimensions, but magnitudes differing by the factor %s. Scale the value explicitly, or annotate it as %s"
                         (ppUnitSig u1) (ppUnitSig u2)
                         (ppUnitScale (unitConversionFactor u2 u1)) (ppUnitSig u1)))

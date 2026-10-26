@@ -443,15 +443,147 @@
         "docs/formalism.md"
       ]
     },
-    "BL3999": {
-      "title": "type error",
-      "explanation": "The type band's catch-all, carried by every checker error that has no more specific code of its own. A large and deliberately heterogeneous set: the message is the diagnosis, not the code.",
-      "fix": "Read the message and the context lines under it, which name the declaration and the expression the checker was working on.",
+    "BL3024": {
+      "title": "generic type variable bound inconsistently",
+      "explanation": "One generic type variable, or one caret rank claim (`T^k`), is bound two incompatible ways in the same call: two arguments that share `T` arrive with different element types or ranks, or a `T^k` position receives a value of another rank. A call never converts, broadcasts or reduces to make them agree.",
+      "fix": "Make the arguments agree (convert one explicitly, e.g. `Float64(x)`), give the parameters separate type variables when they may differ, or drop the caret (`T`) where the position holds an element rather than a rank-k array.",
       "examples": [
         "tests/corpus/arity/030_caret_fold_kernel_not_vacuous.blade",
-        "tests/corpus/diagnostics/028_static_struct_bound_violation.blade",
-        "tests/corpus/diagnostics/032_static_bound_forward_ref_violated.blade"
+        "tests/corpus/functions/401_shared_generic_variable_later_int_literal_rejects.blade",
+        "tests/corpus/functions/523_generic_comparison_ranks_disagree_rejects.blade"
       ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL3025": {
+      "title": "invalid reduction form",
+      "explanation": "A `reduce`, `prodsum` or reduction-join (`<&!>`) form the fold rules refuse: an `axes = n` that is not a literal in 1..rank, a fused or joined fold whose kernel has no implicit identity and no explicit init, a join leg that is not a reduction or folds a different cell grid, a leading-axis fold over slices that do not share one shape, or a `prodsum` over operands that are not rank-1 fibers.",
+      "fix": "Follow the form the message names: write the init explicitly (`reduce(x, op, init)`), use an integer literal for `axes`, force a composed or partial fold with `|> compute` first, or pass `prodsum` the innermost rank-1 slices.",
+      "examples": [
+        "tests/corpus/diagnostics/066_reduce_axes_zero.blade",
+        "tests/corpus/loops/136_leading_axis_fold_axes_rejects.blade",
+        "tests/corpus/sql-reduce/014_reduce_deferred_no_init.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL3026": {
+      "title": "operation not valid on compact storage",
+      "explanation": "The operation would read compact (SymIdx / AntisymIdx / HermitianIdx) storage as if it were dense: folding the stored canonical cells differs from folding the logical (mirrored, sign-tracked) cells, a partial read of a compact group has no residual class, and a transpose across a group boundary would break the group's symmetry.",
+      "fix": "Supply every coordinate of the group, or `decompact(A, d)` first to get the logical dense array; for a full fold over every logical cell, `reduce(S, (+), axes = r)` folds the packed pool with orbit weights.",
+      "examples": [
+        "tests/corpus/index-types/107_reduce_symmetric_rejects.blade",
+        "tests/corpus/index-types/257_compact_partial_read_rejected.blade",
+        "tests/corpus/math/081_gram_apply_compact_factor_rejects.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL3027": {
+      "title": "operands over different index spaces",
+      "explanation": "Co-iterated or elementwise operands must walk ONE index space. These are over different named index types (provenance is part of the type, so equal extents do not make them interchangeable), mix dense and packed storage, or are grouped by different `group_keys` bindings.",
+      "fix": "Declare the operands over the same index type, or convert one with an explicit index cast; for grouped arrays bind the keys once (`let gk = group_keys(...)`) and group every operand by it. If the axes really are different, use the outer product `method_for(A, B)` instead of `zip`.",
+      "examples": [
+        "tests/corpus/diagnostics/074_zip_distinct_index_types_same_extent.blade",
+        "tests/corpus/diagnostics/098_coiter_param_index_names_direct_call_rejects.blade",
+        "tests/corpus/loops/092_binop_multi_axis_shape_mismatch_rejects.blade",
+        "tests/corpus/sql-group-by/053_groupby_zip_alias_different_keys_rejects.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL3028": {
+      "title": "value must be known at compile time",
+      "explanation": "The type of this construct depends on a value -- an extent, a count, an order, a weights length -- that is only known at run time here. A range is a virtual iteration space with no runtime object, and storage sized by the type must be sized at compile time.",
+      "fix": "Write the value as a literal, a `let static`, or a static-function call, or take it from a named index type whose extent is static.",
+      "examples": [
+        "tests/corpus/index-types/240_range_unresolved_extent_rejects.blade",
+        "tests/corpus/rand/016_categorical_nonstatic_weights_rejects.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL3029": {
+      "title": "invalid chunked or segmented domain",
+      "explanation": "A `Chunked<..>` index declaration, or a `segments` / `files` / `group_by` over segments / `ungroup` use of one, is ill-formed: the chunk edge is outside the axis, the inner type is not an index type or store axis, the store does not chunk the dimension uniformly, or the named alias is not a `Chunked` alias in scope.",
+      "fix": "Declare the chunked axis first (`type CI = Chunked<I, K>` with 1 <= K <= extent, or `Chunked<s.index.d, store>`), annotate the array's slots with it, and pass that alias to `segments` / `files` / `ungroup`.",
+      "examples": [
+        "tests/corpus/segments/006_chunked_edge_zero_rejects.blade",
+        "tests/corpus/segments/007_segments_of_plain_index_rejects.blade",
+        "tests/corpus/segments/015_segments_of_unannotated_value_rejects.blade"
+      ],
+      "docs": [
+        "docs/features/sql.md"
+      ]
+    },
+    "BL3030": {
+      "title": "invalid recursive array definition",
+      "explanation": "A `let rec` recursive array is ill-formed: it is used outside `let rec NAME: Array<..> = match NAME with ...`, its leading (recursion) axis has no static extent of at least 1, its element type is not Float / Int / Complex, its slice axes are not static, or its `while` guard is not a Bool predicate.",
+      "fix": "Annotate the binding with an Array type over a static recursion axis (`let rec x: Array<Float64 like Step> = match x with ...`) and make the `while` guard a comparison or boolean expression.",
+      "examples": [
+        "tests/corpus/recursive-arrays/015_while_guard_not_bool_rejects.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL3031": {
+      "title": "invalid halo window",
+      "explanation": "A `halo<I, offsets>` window is ill-formed: the offsets are empty, not a compile-time array of integer literals, or mix flat and per-axis forms; the inner index is not rank-1; or a window read over a masked (CompoundIdx) domain uses a non-literal offset.",
+      "fix": "Write the offsets as a literal integer array (`halo<I, [-1, 0, 1]>`, or per-axis `[[..], [..]]`) and read the window with literal offsets (`w(-1)`).",
+      "examples": [
+        "tests/corpus/loops/075_halo_nonstatic_offsets_rejects.blade",
+        "tests/corpus/loops/204_halo_compound_nonliteral_offset_rejects.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL3032": {
+      "title": "wildcard not valid here",
+      "explanation": "The wildcard `_` is not a value. It is meaningful only as a coordinate of a compound or sparse read (`B((a, _, c))`), where it frees one axis, and among a compound array's trailing indices only after every supplied index.",
+      "fix": "Use `_` only inside a read's coordinates; bind or return the read's RESULT, not the hole.",
+      "examples": [
+        "tests/corpus/index-types/026_wildcard_escape_in_let_rejects.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL3033": {
+      "title": "construct not yet supported",
+      "explanation": "The construct is planned but not built: the compiler refuses it rather than compile it wrongly. The message names the missing piece and, where one exists, the spelling that works today.",
+      "fix": "Use the workaround the message gives (often `|> compute` first, or a separate loop object), or restructure around the construct until it lands.",
+      "examples": [
+        "tests/corpus/arity/056_nth_is_planned_rejects.blade",
+        "tests/corpus/diagnostics/050_zip_in_object_for_pack.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL3034": {
+      "title": "where clause not applicable here",
+      "explanation": "A `where` clause sits on a declaration it cannot apply to: `where repro` on a lambda (it inlines into its call sites) or on a `static function` (evaluated at compile time), `comm` / `anticomm` beside a `Tuple<N>` parameter (positions are ambiguous), or a parallel clause on a sequential leading-axis fold (it would license nothing).",
+      "fix": "Move the clause to a named function declaration it can govern, or drop it where it licenses nothing.",
+      "examples": [
+        "tests/corpus/diagnostics/060_tuple_param_with_where_clause.blade",
+        "tests/corpus/loops/138_leading_axis_fold_omp_kernel_rejects.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL3999": {
+      "title": "type error",
+      "explanation": "The type band's residual code. Until deep review #49 it was a catch-all carried by every checker error without a code of its own; those families now have their own codes (BL3024 - BL3034) or the existing code they belong to (BL3007, BL3016, BL4002, BL9001, ...). No checker path raises it today; it stays registered for error sources that have no family yet.",
+      "fix": "Read the message and the context lines under it, which name the declaration and the expression the checker was working on.",
+      "examples": [],
       "docs": [
         "docs/formalism.md",
         "docs/features/sql.md"

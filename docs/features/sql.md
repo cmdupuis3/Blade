@@ -192,7 +192,7 @@ NaN that a program COMPUTES is untouched — the rule is about values entering
 the program, not arithmetic inside it. The rule holds in every lane: the
 compiled reader scans the buffer it filled, the interpreter scans the same
 cells with the same predicate, and a compile-time fold (`let static ... |>
-read`) fails the `let static` assertion (BL3999, the code of every
+read`) fails the `let static` assertion (BL4002, the code of every
 compile-time fold failure) carrying the same sentence. A streamed read
 (`.stream`) checks each fiber as it is read, with no pre-scan at open, so its
 refusal can come from inside the consuming loop after earlier output — the
@@ -760,7 +760,7 @@ and no outer product is formed.
   Two `group_keys` calls over identical key values are two independent
   partitions with structurally identical index records; each operand is chased
   to its `group_by` and the `group_keys` operands must resolve to the same
-  binding. Mismatched keys are `BL3999` — pinned by `sql-group-by/026`.
+  binding. Mismatched keys are `BL3027` — pinned by `sql-group-by/026`.
 - The kernel must **consume** its rows to a scalar (`prodsum`, `reduce`, …). A
   row-shaped result would need a grouped output type, which has no downstream
   consumers — the same reason the elementwise map above is gated.
