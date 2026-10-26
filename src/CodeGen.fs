@@ -158,10 +158,14 @@ let internal recordSameCellCpp (subject: string) (fid: IRId) (outcome: Blade.Eff
 /// suppressed -- whose declaration is the one plain dense allocation over a
 /// static constexpr extents table of the certified extent, and every scalar
 /// snapshot the kernel reads is an emitted name. Read-only: nothing is
-/// emitted, forced or freed here. Ok = the donor's C++ name and the rendered
-/// cell expression over `__sc_old`.
+/// emitted, forced or freed here. Ok = the donor's C++ name, the loop's four
+/// temporaries (pool pointer, cell count, index, old cell) -- each chosen so
+/// it is no emitted binding name and no identifier already in the body (a
+/// Blade name may itself be `__sc_old`; review A06-1) -- and the rendered
+/// cell expression over the old-cell temporary.
 let private sameCellRealization (proof: Blade.SameCellReturn.Certificate) (lets: (IRId * IRExpr) list)
-                                (info: ApplyInfo) (names: Map<IRId, string>) (stmts: string list) : Result<string * string, string> =
+                                (info: ApplyInfo) (names: Map<IRId, string>) (stmts: string list)
+                                : Result<string * (string * string * string * string) * string, string> =
     let rec spineIds e = match e with IRLet (id, _, b) -> id :: spineIds b | _ -> []
     if lets |> List.map fst <> spineIds proof.Body then Error "the emitted body's let spine is not the certified original spine"
     elif info <> proof.Tail then Error "the emitted return is not the certified tail"
@@ -189,7 +193,18 @@ let private sameCellRealization (proof: Blade.SameCellReturn.Certificate) (lets:
     match resolveCallable info.Kernel with
     | Some k when k.Params.Length = 1 ->
         let leaf = k.Params.Head.VarId
-        Ok (dn, exprToCpp (Map.add leaf "__sc_old" names) k.Body)
+        let taken = names |> Map.toSeq |> Seq.map snd |> Set.ofSeq
+        let body = String.concat "\n" stmts
+        let used = System.Collections.Generic.HashSet<string>()
+        let free (stem: string) =
+            let rec pick i =
+                let cand = if i = 0 then stem else $"{stem}{i}"
+                if taken.Contains cand || used.Contains cand || containsIdentToken body cand then pick (i + 1)
+                else (used.Add cand |> ignore; cand)
+            pick 0
+        let temps = (free "__sc_pool", free "__sc_cells", free "__sc_k", free "__sc_old")
+        let (_, _, _, oldName) = temps
+        Ok (dn, temps, exprToCpp (Map.add leaf oldName names) k.Body)
     | _ -> Error "the return kernel does not resolve to its certified one-parameter callable"
 
 let rec private genFuncBodyScoped
@@ -958,18 +973,18 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
                 | Error why ->
                     recordSameCellCpp cand.Subject cand.Proof.Function (Blade.Effects.Declined why) []
                     None
-                | Ok (dn, cell) ->
+                | Ok (dn, (pool, cells, k, old), cell) ->
                     let i2 = indent + "    "
                     let i3 = i2 + "    "
                     let code =
                         [ $"{indent}// same-cell return (A06, PM03): function v{cand.Proof.Function} donor v{cand.Proof.Donor} -- filled in {dn}'s own pool, each old cell loaded before its same-index store; no result pool"
                           $"{indent}{{"
-                          $"{i2}double* __sc_pool = nested_array_utilities::pool_base({dn}.data);"
-                          $"{i2}const size_t __sc_cells = {cand.Proof.Extent}UL;"
+                          $"{i2}double* {pool} = nested_array_utilities::pool_base({dn}.data);"
+                          $"{i2}const size_t {cells} = {cand.Proof.Extent}UL;"
                           $"{i2}BLADE_IVDEP"
-                          $"{i2}for (size_t __sc_k = 0; __sc_k < __sc_cells; __sc_k++) {{"
-                          $"{i3}const double __sc_old = __sc_pool[__sc_k];"
-                          $"{i3}__sc_pool[__sc_k] = {cell};"
+                          $"{i2}for (size_t {k} = 0; {k} < {cells}; {k}++) {{"
+                          $"{i3}const double {old} = {pool}[{k}];"
+                          $"{i3}{pool}[{k}] = {cell};"
                           $"{i2}}}"
                           $"{indent}}}" ]
                     // The donor's pool leaves with the value (its static

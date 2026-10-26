@@ -5361,7 +5361,37 @@ let private sameCellReturnCpp () =
                 resultLine Fail name (sprintf "declined=%b identical=%b records=%A" declined (on = off) (dOn |> List.map Blade.Effects.Decisions.render))
                 false
         | (Error e, _), _ | _, (Error e, _) -> resultLine Fail name e; false
+    // review A06-1: a Blade name equal to a loop temporary must not be shadowed:
+    // the scalar parameter `__sc_old` keeps its own C++ name and reads, the old-cell
+    // temporary takes another (memfree/042 pins the values in both lanes)
+    let collision () =
+        let name = "same_cell_return_cpp_temporary_names_never_shadow"
+        let src =
+            "type Ix = Idx<9>\n"
+            + "function scale_shift(x: Array<Float64 like Ix>, __sc_old: Float64) -> Array<Float64 like Ix> = {\n"
+            + "    let p = x * __sc_old - 1.0 |> compute\n"
+            + "    let t = reduce(p, (+))\n"
+            + "    let __sc_pool = t * 0.25 - __sc_old\n"
+            + "    p * __sc_pool - __sc_old\n"
+            + "}\n"
+            + "let x: Array<Float64 like Ix> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]\n"
+            + "let a = scale_shift(x, 2.0)\n"
+        match emit "1" src, emit "0" src with
+        | (Ok on, dOn), (Ok off, _) ->
+            let bOn, bOff = fnBody "scale_shift" on, fnBody "scale_shift" off
+            let loop = rx @"const double (\w+) = (\w+)\[(\w+)\];\s*\n\s*(\w+)\[(\w+)\] = (.*);" bOn
+            let cellOff = rx @"__fp___ret\d+\[__fk\] = (.*);" bOff
+            let donorFp = rx @"const double\* BLADE_RESTRICT (__fp___v\d+) = nested_array_utilities::pool_base\(__v\d+\.data\);" bOff
+            let applied = dOn |> List.exists (fun d -> d.Subject = "scale_shift" && d.Outcome = Blade.Effects.Applied)
+            let ok =
+                applied && loop.Success && cellOff.Success && donorFp.Success
+                && loop.Groups.[1].Value <> "__sc_old"
+                && cellOff.Groups.[1].Value.Replace(donorFp.Groups.[1].Value + "[__fk]", loop.Groups.[1].Value) = loop.Groups.[6].Value
+            if ok then resultLine Pass name $"temporaries `{loop.Groups.[2].Value}` / `{loop.Groups.[1].Value}`; cell `{loop.Groups.[6].Value}` = the fresh path's with only the leaf renamed"; true
+            else resultLine Fail name (sprintf "applied=%b loop=%b on=[%s] off=[%s]" applied loop.Success (if loop.Success then loop.Groups.[6].Value else "") (if cellOff.Success then cellOff.Groups.[1].Value else "")); false
+        | (Error e, _), _ | _, (Error e, _) -> resultLine Fail name e; false
     [ positive "memfree/033_same_cell_return_owned.blade" "same_cell"
+      collision ()
       positive "memfree/037_same_cell_return_cpp_scalar_param_snapshot.blade" "scale_shift"
       decline "memfree/038_same_cell_return_caller_owned_declines.blade" "caller_owned" "not one direct fresh computed local map"
       decline "memfree/039_same_cell_return_alias_fold_declines.blade" "retained" "retains an array/alias/deferred read"

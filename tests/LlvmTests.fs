@@ -1830,9 +1830,14 @@ let u = reduce(method_for(range<V>) <@> lambda(k) -> t(0, 0, k), (+))
                     | Ok ir ->
                         let donors = Blade.Types.PoolReuseTable.donors ()
                         let returns = Blade.Types.PoolReuseTable.returnDonors ()
-                        let cpp =
-                            if not pairedCpp then ""
-                            else try fst (CodeGen.genSelfContainedProgramFromIR ir "facts") with ex -> "<C++ emission raised: " + ex.Message + ">"
+                        // a C++ emission that RAISES fails the case (review A06-2):
+                        // a refusal is never mistaken for a working fresh fallback
+                        let cppR =
+                            if not pairedCpp then Ok ""
+                            else try Ok (fst (CodeGen.genSelfContainedProgramFromIR ir "facts")) with ex -> Error ("C++ emission raised: " + ex.Message)
+                        match cppR with
+                        | Error e -> Error e
+                        | Ok cpp ->
                         match EmitLlvm.tryEmitProgramNamed "facts" ir with
                         | Error e -> Error ("llvm: " + e)
                         | Ok ll ->
