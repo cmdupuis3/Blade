@@ -3167,12 +3167,22 @@ let tryGenFlatEpilogueNest (ep: FlatEpilogue) (outName: string) (outPool: string
 ///
 /// `operandTypes` is `ApplyInfo.ArrayTypes`, positionally parallel to
 /// `codeGen.InputArrayNames` (both are indexed by `ElementBinding.ArrayPosition`).
-let tryGenFlatElementwiseNest
+/// The flat elementwise path's PLAN (its gates, operand pointers, body and
+/// pragma), shared by the single-map renderer below and the sibling-map
+/// sweep (round 4 wave 2, PM04), which writes several outputs in one loop.
+type internal FlatPlan =
+    { Depth: int; AllDense: bool; Cells: int64; ShapeNote: string
+      OutPool: string; OutElem: string; OutDecl: string
+      OperandDecls: string list; OperandPools: string list
+      Body: string; AllParallel: bool; ThreadsOn: bool; ProducerWrites: bool
+      Pragma: string; PragmaMarker: string list; Head: string list }
+
+let internal flatElementwisePlanOf
         (streamed: Map<string, ProviderReadSpec>)
         (operandTypes: IRArrayType list)
         (codeGen: LoopNestCodeGen)
         (outerNames: Map<int, string>)
-        (indent: int) : string list option =
+        (indent: int) : FlatPlan option =
     let ind n = String.replicate n "    "
     let bindings = codeGen.Bindings
     let depth = List.length bindings
@@ -3363,27 +3373,310 @@ let tryGenFlatElementwiseNest
                 @ [ ind (indent + 1) + $"{outElem}* BLADE_RESTRICT {outPool} = nested_array_utilities::pool_base({codeGen.OutputName}.data);" ]
                 @ (operandDecls |> List.map (fun d -> ind (indent + 1) + d))
                 @ [ ind (indent + 1) + $"const size_t __fp_cells = {cells}UL;" ]
-            let epilogue =
-                match codeGen.FlatEpilogue with
-                | Some ep when depth = 1 && allDense ->
-                    (match tryGenFlatEpilogueNest ep codeGen.OutputName outPool outElem body.CppExpr cells allParallel threadsOn producerWrites pragmaMarker head (codeGen.InputArrayNames |> List.map poolOf) indent with
-                     | Some ls -> ep.OnEmitted (); Some ls
-                     | None -> None)
-                | _ -> None
-            match epilogue with
-            | Some lines -> Some lines
-            | None ->
-            if allParallel then
-                recordOmpConstruct codeGen.OutputName pragma "flat elementwise sweep over the whole pool"
-            Some (
-                head
-                @ pragmaMarker
-                @ (if pragma = "" then [] else [ ind (indent + 1) + pragma ])
-                @ [ ind (indent + 1) + "for (size_t __fk = 0; __fk < __fp_cells; __fk++)"
-                    ind (indent + 2) + $"{outPool}[__fk] = {body.CppExpr};"
-                    ind indent + "}" ])
+            Some { Depth = depth; AllDense = allDense; Cells = cells; ShapeNote = shapeNote
+                   OutPool = outPool; OutElem = outElem
+                   OutDecl = $"{outElem}* BLADE_RESTRICT {outPool} = nested_array_utilities::pool_base({codeGen.OutputName}.data);"
+                   OperandDecls = operandDecls; OperandPools = codeGen.InputArrayNames |> List.map poolOf
+                   Body = body.CppExpr; AllParallel = allParallel; ThreadsOn = threadsOn
+                   ProducerWrites = producerWrites; Pragma = pragma; PragmaMarker = pragmaMarker; Head = head }
         | Some _ -> None
     | _ -> None
+
+/// The flat elementwise nest (above's plan, rendered): one loop over the
+/// contiguous pool, or the planned rank-1 cell epilogue riding it.
+let tryGenFlatElementwiseNest
+        (streamed: Map<string, ProviderReadSpec>)
+        (operandTypes: IRArrayType list)
+        (codeGen: LoopNestCodeGen)
+        (outerNames: Map<int, string>)
+        (indent: int) : string list option =
+    let ind n = String.replicate n "    "
+    match flatElementwisePlanOf streamed operandTypes codeGen outerNames indent with
+    | None -> None
+    | Some fp ->
+    let epilogue =
+        match codeGen.FlatEpilogue with
+        | Some ep when fp.Depth = 1 && fp.AllDense ->
+            (match tryGenFlatEpilogueNest ep codeGen.OutputName fp.OutPool fp.OutElem fp.Body fp.Cells fp.AllParallel fp.ThreadsOn fp.ProducerWrites fp.PragmaMarker fp.Head fp.OperandPools indent with
+             | Some ls -> ep.OnEmitted (); Some ls
+             | None -> None)
+        | _ -> None
+    match epilogue with
+    | Some lines -> Some lines
+    | None ->
+    if fp.AllParallel then
+        recordOmpConstruct codeGen.OutputName fp.Pragma "flat elementwise sweep over the whole pool"
+    Some (
+        fp.Head
+        @ fp.PragmaMarker
+        @ (if fp.Pragma = "" then [] else [ ind (indent + 1) + fp.Pragma ])
+        @ [ ind (indent + 1) + "for (size_t __fk = 0; __fk < __fp_cells; __fk++)"
+            ind (indent + 2) + $"{fp.OutPool}[__fk] = {fp.Body};"
+            ind indent + "}" ])
+
+// --- Sibling maps (round 4 wave 2, PM04; Blade.Optimize.planSiblingMaps) -----
+// The C++ realization of a planned group: every member's site emits its own
+// prechecks, extents, allocation and registrations as usual; at the LOOP slot
+// of genApplyCombinator, a member before the last stashes its final nest
+// record and emits no loop, and the LAST member emits ONE sweep writing every
+// member's cells. The whole group is PREFLIGHTED at its first member (every
+// member's nest record built from its IR with a throwaway builder, every
+// gate checked) before any loop is suppressed; a member whose actual record
+// still fails at its own site (not expected: the gates are the preflight's)
+// flushes the stashed loops individually right there, in member order,
+// before its own -- the loops still only move DOWN, which the admission
+// licenses -- and the record says so. A stash still open when its last
+// member's arm returns is flushed after it the same way.
+
+type internal SibStash =
+    { SName: string; SCodeGen: LoopNestCodeGen; SNames: Map<int, string>
+      SOperandTypes: IRArrayType list; SIndent: int }
+
+type internal SibEmission =
+    { Group: Blade.Optimize.SiblingMapGroup
+      mutable Committed: bool
+      mutable Stash: SibStash list
+      mutable Completed: bool }
+
+let internal siblingEmissionStorage =
+    System.Threading.AsyncLocal<System.Collections.Generic.Dictionary<int, SibEmission>>()
+let internal siblingEmissionCell () : System.Collections.Generic.Dictionary<int, SibEmission> =
+    let v = siblingEmissionStorage.Value
+    if isNull (box v) then
+        let fresh = System.Collections.Generic.Dictionary<int, SibEmission>()
+        siblingEmissionStorage.Value <- fresh
+        fresh
+    else v
+/// The member being emitted, keyed by its C++ output name (the apply emitter
+/// knows the name, not the let id): (group id, member position).
+let internal siblingPendingStorage =
+    System.Threading.AsyncLocal<System.Collections.Generic.Dictionary<string, int * int>>()
+let internal siblingPendingCell () : System.Collections.Generic.Dictionary<string, int * int> =
+    let v = siblingPendingStorage.Value
+    if isNull (box v) then
+        let fresh = System.Collections.Generic.Dictionary<string, int * int>()
+        siblingPendingStorage.Value <- fresh
+        fresh
+    else v
+
+let internal siblingSubject (g: Blade.Optimize.SiblingMapGroup) = $"""{g.Region}: {String.concat ", " g.Names}"""
+
+/// The halo member's single level, when its record is exactly the planned
+/// walk: one level of the member's extent, one window element starting at
+/// the member's first centre, no fold / slab / Reynolds / shared-value mode.
+let internal siblingHaloLevel (cg: LoopNestCodeGen) (start: int64) (extent: int64) : (LoopIndexBinding * ElementBinding) option =
+    match cg.Bindings with
+    | [ b ] when b.FusedRank.IsNone && b.BoundDependencies.IsEmpty && b.StrictOffset = 0
+                 && b.Extent = IRLit (IRLitInt extent)
+                 && cg.FoldWrapper.IsNone && cg.FoldChunk.IsNone && not cg.MpiSlab && not cg.HasReynolds
+                 && cg.ShareDecl.IsNone && cg.RowEpilogue.IsNone && cg.CompactRowEpilogue.IsNone ->
+        (match b.Elements with
+         | [ e ] ->
+             (match e.Virtual with
+              | VirtualRange (Some (IRLit (IRLitInt s))) when s = start -> Some (b, e)
+              | VirtualRange None when start = 0L -> Some (b, e)
+              | _ -> None)
+         | _ -> None)
+    | _ -> None
+
+/// Does this member's FINAL nest record admit the group's sweep?
+let internal siblingMemberGate (g: Blade.Optimize.SiblingMapGroup) (j: int) (operandTypes: IRArrayType list)
+                               (cg: LoopNestCodeGen) (names: Map<int, string>) (indent: int) : Result<unit, string> =
+    if cg.RowEpilogue.IsSome || cg.CompactRowEpilogue.IsSome then Error "a row epilogue rides this member's nest"
+    else
+    match g.Kind with
+    | Blade.Optimize.SibFlat cells ->
+        if cg.FlatEpilogue.IsSome then Error "a cell epilogue rides this member's flat sweep"
+        else
+        match flatElementwisePlanOf Map.empty operandTypes cg names indent with
+        | Some fp when fp.Cells = cells && fp.AllDense && not fp.ProducerWrites -> Ok ()
+        | Some _ -> Error "the member's flat sweep differs from the group's (cells, storage or a writing kernel)"
+        | None -> Error "the member does not take the flat elementwise path"
+    | Blade.Optimize.SibHalo _ ->
+        match siblingHaloLevel cg (List.item j g.Starts) (List.item j g.Extents) with
+        | Some _ -> Ok ()
+        | None -> Error "the member's nest is not the planned single-level halo walk"
+
+/// One member's own loop, rendered as it would have been without the group
+/// (the fallback flush): the flat sweep, else the nest.
+let internal siblingSingleLoop (s: SibStash) : string list =
+    match tryGenFlatElementwiseNest Map.empty s.SOperandTypes s.SCodeGen s.SNames s.SIndent with
+    | Some lines -> lines
+    | None -> genLoopNestStreamed Map.empty s.SCodeGen s.SNames s.SIndent
+
+/// THE FUSED SWEEP over every member (stash, in member order).
+let internal siblingFusedLoop (g: Blade.Optimize.SiblingMapGroup) (members: SibStash list) : string list =
+    let ind n = String.replicate n "    "
+    let indent = (List.last members).SIndent
+    let k = members.Length
+    match g.Kind with
+    | Blade.Optimize.SibFlat cells ->
+        let fps = members |> List.map (fun s -> (s, (flatElementwisePlanOf Map.empty s.SOperandTypes s.SCodeGen s.SNames s.SIndent).Value))
+        let (_, fp0) = List.head fps
+        let distinct (xs: string list) = xs |> List.distinct
+        for (s, fp) in fps do
+            if fp.AllParallel then
+                recordOmpConstruct s.SName fp.Pragma $"flat elementwise sweep shared by {k} sibling outputs (one team)"
+        [ ind indent + $"// sibling maps: {k} outputs in one flat sweep of {cells} cells [{fp0.ShapeNote}] (each cell its own kernel)"
+          ind indent + "{" ]
+        @ (fps |> List.map (fun (_, fp) -> ind (indent + 1) + fp.OutDecl))
+        @ (fps |> List.collect (fun (_, fp) -> fp.OperandDecls) |> distinct |> List.map (fun d -> ind (indent + 1) + d))
+        @ [ ind (indent + 1) + $"const size_t __fp_cells = {cells}UL;" ]
+        @ (fps |> List.collect (fun (_, fp) -> fp.PragmaMarker) |> distinct)
+        @ (if fp0.Pragma = "" then [] else [ ind (indent + 1) + fp0.Pragma ])
+        @ [ ind (indent + 1) + "for (size_t __fk = 0; __fk < __fp_cells; __fk++) {" ]
+        @ (fps |> List.map (fun (_, fp) -> ind (indent + 2) + $"{fp.OutPool}[__fk] = {fp.Body};"))
+        @ [ ind (indent + 1) + "}"
+            ind indent + "}" ]
+    | Blade.Optimize.SibHalo (inner, baseN) ->
+        // per member: its level, its first centre and extent, its block body
+        let blocks =
+            members |> List.mapi (fun j s ->
+                let start = List.item j g.Starts
+                let ext = List.item j g.Extents
+                let (b, e) = (siblingHaloLevel s.SCodeGen start ext).Value
+                let (code, _) = genElementBindingPeel false b e e.ArrayName
+                let paramFinalNames = Map.ofList [ (e.ParamVarId, e.ParamName) ]
+                let nameMap = paramFinalNames |> Map.fold (fun acc key v -> Map.add key v acc) s.SNames
+                let nameMap = withCaptureNames EnclosingNamesWin s.SCodeGen.Captures nameMap
+                let body = genKernelExprWithReynolds s.SCodeGen.KernelExpr s.SCodeGen.KernelParams false false nameMap paramFinalNames
+                (start, start + ext, b, fun (d: int) ->
+                    [ ind d + "{"
+                      ind (d + 1) + $"const size_t {b.IndexName} = __sib_c - {start}UL;"
+                      ind (d + 1) + code
+                      ind (d + 1) + $"{s.SCodeGen.OutputName}[{b.IndexName}] = {body.CppExpr};"
+                      ind d + "}" ]))
+        let points = blocks |> List.collect (fun (a, z, _, _) -> [ a; z ]) |> List.distinct |> List.sort
+        let segments = List.pairwise points |> List.filter (fun (a, z) -> z > a)
+        let (_, _, b0, _) = List.head blocks
+        let cg0 = (List.head members).SCodeGen
+        let lo = blocks |> List.map (fun (a, _, _, _) -> a) |> List.max
+        let hi = blocks |> List.map (fun (_, z, _, _) -> z) |> List.min
+        // the pragma rides the segment where EVERY member is active (the
+        // intersection); the fringes are a few cells each and stay serial
+        let pragmaPrefix = genNestPragma cg0.Bindings (ind indent)
+        for s in members do
+            recordOmpConstruct s.SName pragmaPrefix $"sibling halo walk shared by {k} outputs, centres [{lo}, {hi}) (one team)"
+        let marker =
+            let reason = if not (ompThreadEmissionEnabled ()) then ompThreadsSuppressedReason () else "the omp(...) depth licenses no level of this nest"
+            ompSuppressedMarker cg0.OmpRequested (pragmaPrefix <> "") reason (ind indent)
+        let axis = if inner = "" then "anonymous" else inner
+        [ ind indent + $"// sibling maps: {k} halo outputs in one walk over the {axis} axis ({baseN} cells), centres peeled into {segments.Length} segment(s) by member domain (each cell its own kernel)" ]
+        @ (segments |> List.collect (fun (a, z) ->
+            let active = blocks |> List.filter (fun (s0, z0, _, _) -> s0 <= a && z <= z0)
+            if active.IsEmpty then []
+            else
+                let shared = active.Length = blocks.Length
+                (if shared then marker else [])
+                @ [ ind indent + (if shared then pragmaPrefix else "") + $"for (size_t __sib_c = {a}UL; __sib_c < {z}UL; __sib_c++) {{" ]
+                @ (active |> List.collect (fun (_, _, _, render) -> render (indent + 1)))
+                @ [ ind indent + "}" ]))
+        |> fun ls -> ignore b0; ls
+
+/// The hook at genApplyCombinator's loop slot.
+type internal SiblingLoopDecision =
+    | SibNormal
+    | SibReplace of string list
+    | SibPrefix of string list
+
+let internal siblingLoopHook (name: string) (routeFree: bool) (streamed: Map<string, ProviderReadSpec>)
+                             (operandTypes: IRArrayType list) (cg: LoopNestCodeGen) (names: Map<int, string>) (indent: int) : SiblingLoopDecision =
+    match (siblingPendingCell ()).TryGetValue name with
+    | false, _ -> SibNormal
+    | true, (gid, j) ->
+    match (siblingEmissionCell ()).TryGetValue gid with
+    | true, st when st.Committed && not st.Completed ->
+        let g = st.Group
+        let subject = siblingSubject g
+        let gate =
+            if not routeFree then Error "the member's apply took a dispatched, sliced, tiled or segmented route"
+            elif not (Map.isEmpty streamed) then Error "a streamed provider operand"
+            elif ompTestModeEnabled () then Error "omp test mode instruments the single nests"
+            else siblingMemberGate g j operandTypes cg names indent
+        let me = { SName = name; SCodeGen = cg; SNames = names; SOperandTypes = operandTypes; SIndent = indent }
+        match gate with
+        | Error why ->
+            st.Completed <- true
+            Blade.Optimize.recordSiblingMaps subject
+                (Blade.Effects.Declined $"C++ lane: {why} at member {j + 1} ({name}); the earlier members' loops run here, individually, before its own (they only move down)") []
+            SibPrefix (st.Stash |> List.collect siblingSingleLoop)
+        | Ok () when j < g.Members.Length - 1 ->
+            st.Stash <- st.Stash @ [ me ]
+            SibReplace [ String.replicate indent "    " + $"// sibling maps: {name}'s cells are written by the shared sweep at {List.last g.Names}" ]
+        | Ok () ->
+            st.Completed <- true
+            let lines = siblingFusedLoop g (st.Stash @ [ me ])
+            Blade.Optimize.recordSiblingMaps subject Blade.Effects.Applied
+                [ (match g.Kind with
+                   | Blade.Optimize.SibFlat _ -> $"C++ lane: one flat sweep writes {g.Members.Length} outputs"
+                   | Blade.Optimize.SibHalo _ -> $"C++ lane: one halo walk writes {g.Members.Length} outputs, peeled by member domain")
+                  "each member's prechecks, allocation and registrations stayed at its own site" ]
+            SibReplace lines
+    | _ -> SibNormal
+
+/// The arms' entry (CodeGen's function-body arm, genComputeBinding's top-level
+/// arm): at the group's FIRST member, preflight the whole group and commit or
+/// decline it for this emission; mark the member pending for the apply hook.
+let internal siblingArmBegin (id: IRId) (name: string) (preflight: Blade.Optimize.SiblingMapGroup -> Result<unit, string>) : unit =
+    match Blade.Optimize.SiblingMapTable.tryMember id with
+    | None -> ()
+    | Some (g, j) ->
+        let cell = siblingEmissionCell ()
+        if j = 0 then
+            let ok =
+                match preflight g with
+                | Ok () -> true
+                | Error why ->
+                    Blade.Optimize.recordSiblingMaps (siblingSubject g)
+                        (Blade.Effects.Declined $"C++ lane: preflight -- {why}; every member keeps its own loop") []
+                    false
+            cell.[g.GroupId] <- { Group = g; Committed = ok; Stash = []; Completed = false }
+        match cell.TryGetValue g.GroupId with
+        | true, st when st.Committed && not st.Completed -> (siblingPendingCell ()).[name] <- (g.GroupId, j)
+        | _ -> ()
+
+/// The arms' exit: clears the pending mark; after the LAST member, a group
+/// whose sweep was never emitted (its apply took another path) flushes the
+/// stashed loops right after it.
+let internal siblingArmEnd (id: IRId) (name: string) : string list =
+    (siblingPendingCell ()).Remove name |> ignore
+    match Blade.Optimize.SiblingMapTable.tryMember id with
+    | Some (g, j) when j = g.Members.Length - 1 ->
+        match (siblingEmissionCell ()).TryGetValue g.GroupId with
+        | true, st when st.Committed && not st.Completed ->
+            st.Completed <- true
+            Blade.Optimize.recordSiblingMaps (siblingSubject g)
+                (Blade.Effects.Declined $"C++ lane: the last member ({name}) never reached the shared sweep; the earlier members' loops run right after it, individually") []
+            st.Stash |> List.collect siblingSingleLoop
+        | _ -> []
+    | _ -> []
+
+/// THE PREFLIGHT at the group's first member: every member's nest record
+/// rebuilt from its planned apply (a throwaway builder, placeholder operand
+/// names) and checked against the member gate, the flat members' pragmas
+/// equal -- before any loop is suppressed.
+let internal siblingPreflight (g: Blade.Optimize.SiblingMapGroup) : Result<unit, string> =
+    if ompTestModeEnabled () then Error "omp test mode instruments the single nests"
+    else
+    let built =
+        g.Applies |> List.mapi (fun j info ->
+            let names = info.Arrays |> List.mapi (fun i _ -> $"__sibpf{j}_{i}")
+            let cg = routeKernelBodyThroughCall info (buildLoopNestCodeGen info names $"__sibpf{j}" (IRBuilder()))
+            (j, info, cg))
+    match built |> List.tryPick (fun (j, info, cg) ->
+            match siblingMemberGate g j info.ArrayTypes cg Map.empty 0 with
+            | Error why -> Some $"member {j + 1}: {why}"
+            | Ok () -> None) with
+    | Some why -> Error why
+    | None ->
+    match g.Kind with
+    | Blade.Optimize.SibFlat _ ->
+        let pragmas =
+            built |> List.map (fun (_, info, cg) ->
+                (flatElementwisePlanOf Map.empty info.ArrayTypes cg Map.empty 0) |> Option.map (fun fp -> fp.Pragma))
+        if (pragmas |> List.distinct |> List.length) > 1 then Error "the members' flat sweeps take different pragmas"
+        else Ok ()
+    | Blade.Optimize.SibHalo _ -> Ok ()
 
 /// --- Row-fold jam (unroll-and-jam over the row axis) ------------------------
 /// The partial fold `reduce(A, op[, init])` (TypeCheck's partialFold desugars it

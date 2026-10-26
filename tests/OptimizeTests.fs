@@ -9600,6 +9600,99 @@ let private foldMapElisionCases () : bool list =
                resultLine Pass "decision_fold_map_elision_nested_not_applied" "no applied fold-map-elision record: the nested read keeps the pool"
                true) ]
 
+// Sibling maps (BLADE_SIBLING_MAPS, rule `sibling-maps`; round 4 wave 2, PM04).
+// The VALUES are corpus sibling-maps/001-015; these read the emission: the
+// planned siblings' loops really become ONE sweep in each lane, the gate
+// restores one loop per map, and the declines are recorded.
+let private smFlatSrc =
+    "type I = Idx<9>\n"
+    + "function three(x: Array<Float64 like I>, w: Array<Float64 like I>) -> Float64 = {\n"
+    + "    let y1 = method_for(zip(x, w)) <@> lambda(a, b) -> a * b |> compute\n"
+    + "    let s = 2.5\n"
+    + "    let y2 = method_for(zip(x, w)) <@> lambda(a, b) -> a + b * s |> compute\n"
+    + "    let y3 = method_for(x) <@> lambda(a) -> a * a - 1.0 |> compute\n"
+    + "    reduce(y1, (+)) + reduce(y2, (+)) * 10.0 + reduce(y3, (+)) * 100.0\n"
+    + "}\n"
+    + "let r = three([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], [9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0])\n"
+
+let private smHaloSrc =
+    "type I = Idx<29>\n"
+    + "function fir2(x: Array<Float64 like I>) -> Float64 = {\n"
+    + "    let y1 = method_for(halo<I, [-3, 0, 3]>) <@> lambda(w) -> 0.25 * x(w(-3)) + 0.5 * x(w(0)) + 0.25 * x(w(3)) |> compute\n"
+    + "    let y2 = method_for(halo<I, [-8, 0, 8]>) <@> lambda(w) -> x(w(8)) - x(w(-8)) |> compute\n"
+    + "    let s1 = reduce(method_for(y1) <@> lambda(v) -> v * v, (+), 0.0)\n"
+    + "    let s2 = reduce(method_for(y2) <@> lambda(v) -> v * v, (+), 0.0)\n"
+    + "    s1 + s2\n"
+    + "}\n"
+    + "let x = 0.03125 * Float64(range<Idx<29>>) |> compute\n"
+    + "let c = fir2(x)\n"
+
+let private smMixedOmpSrc =
+    "type I = Idx<11>\n"
+    + "function two(x: Array<Float64 like I>) -> Float64 = {\n"
+    + "    let y1 = method_for(x) <@> lambda(a) where omp -> a * 2.0 |> compute\n"
+    + "    let y2 = method_for(x) <@> lambda(a) -> a + 7.0 |> compute\n"
+    + "    reduce(y1, (+)) + reduce(y2, (+))\n"
+    + "}\n"
+    + "let r = two(0.5 * Float64(range<Idx<11>>) |> compute)\n"
+
+let private smCount (pattern: string) (body: string) = System.Text.RegularExpressions.Regex.Matches(body, pattern).Count
+
+let private smCppCase (name: string) (src: string) (fn: string) (pattern: string) (wantOn: int -> bool) (wantOff: int -> bool) (describe: string) =
+    match cppOfSource name src, withGate "BLADE_SIBLING_MAPS" "0" (fun () -> cppOfSource name src) with
+    | Ok on, Ok off ->
+        match ceCppBody on fn, ceCppBody off fn with
+        | Some bOn, Some bOff ->
+            let nOn, nOff = smCount pattern bOn, smCount pattern bOff
+            if wantOn nOn && wantOff nOff then
+                resultLine Pass name ($"{fn}: {nOn} `{pattern}` with the gate on, {nOff} off; {describe}")
+                true
+            else
+                resultLine Fail name ($"{fn}: {nOn} `{pattern}` on, {nOff} off; wanted {describe}")
+                false
+        | _ -> resultLine Fail name ($"no C++ body for `{fn}`"); false
+    | Error e, _ | _, Error e -> resultLine Fail name e; false
+
+let private smLlvmCase (name: string) (src: string) (fn: string) (wantOn: int -> bool) (wantOff: int -> bool) (describe: string) =
+    match ceLlvmOf name src, withGate "BLADE_SIBLING_MAPS" "0" (fun () -> ceLlvmOf name src) with
+    | Ok on, Ok off ->
+        match ceLlvmBody on fn, ceLlvmBody off fn with
+        | Some bOn, Some bOff ->
+            let loops (b: string) = smCount @"\nloop\.cond\d+:" b
+            if wantOn (loops bOn) && wantOff (loops bOff) then
+                resultLine Pass name ($"llvm lane, {fn}: {loops bOn} loop(s) with the gate on, {loops bOff} off; {describe}")
+                true
+            else
+                resultLine Fail name ($"llvm lane, {fn}: {loops bOn} loop(s) on, {loops bOff} off; wanted {describe}")
+                false
+        | _ -> resultLine Fail name ($"no LLVM body for `{fn}`"); false
+    | Error e, _ | _, Error e -> resultLine Fail name ($"the llvm lane refused: {e}"); false
+
+let private siblingMapCases () : bool list =
+    [ smCppCase "sibling_maps_cpp_flat_one_sweep" smFlatSrc "three" @"for \(size_t __fk = 0; __fk < __fp_cells; __fk\+\+\)" ((=) 1) ((=) 3)
+          "one flat sweep writes the three outputs (three sweeps with the gate off)"
+      smCppCase "sibling_maps_cpp_flat_three_stores_in_the_sweep" smFlatSrc "three" @"__fp___v\d+\[__fk\] = " ((=) 3) ((=) 3)
+          "every output keeps its own store"
+      smCppCase "sibling_maps_cpp_halo_segments" smHaloSrc "fir2" @"for \(size_t __sib_c = " ((=) 3) ((=) 0)
+          "one walk over the union of centres, peeled into three segments"
+      smLlvmCase "sibling_maps_llvm_flat_one_sweep" smFlatSrc "three" ((=) 2) ((=) 4)
+          "one serial sweep fills the three pools (three map loops become one; the fold loop stays)"
+      smLlvmCase "sibling_maps_llvm_halo_keeps_epilogues" smHaloSrc "fir2" ((=) 2) ((=) 2)
+          "the LLVM lane's cell epilogue takes each halo producer (one pass that also folds its checksum): the group declines there"
+      decisionCase "decision_sibling_maps_flat_applied" smFlatSrc "sibling-maps"
+          (fun d -> d.Subject.StartsWith "three:" && applied d && d.Evidence |> List.exists (fun e -> e.Contains "3 sibling outputs")
+                    && d.Evidence |> List.exists (fun e -> e.StartsWith "legality: "))
+          "applied: three outputs share one flat sweep, with a legality line"
+      decisionCase "decision_sibling_maps_halo_applied" smHaloSrc "sibling-maps"
+          (fun d -> d.Subject.StartsWith "fir2:" && applied d && d.Evidence |> List.exists (fun e -> e.Contains "peeled into segments"))
+          "applied: two halo walks share one walk over the union of centres"
+      decisionCase "decision_sibling_maps_declined_mixed_omp" smMixedOmpSrc "sibling-maps"
+          (fun d -> declinedMentioning "thread licence differs" d)
+          "declined: siblings with different thread requests"
+      withGate "BLADE_SIBLING_MAPS" "0" (fun () ->
+          decisionCase "decision_sibling_maps_disabled" smFlatSrc "sibling-maps"
+              (declinedMentioning "disabled by BLADE_SIBLING_MAPS") "declined: disabled by BLADE_SIBLING_MAPS") ]
+
 let private computeElisionCases () : bool list =
     [ ceCppAllocCase "compute_elision_fold_no_pool" ceFoldSrc "total" ((=) 0) (fun n -> n >= 1)
           "the fold reads x's map in place (no pool) and the gate restores it"
@@ -11055,6 +11148,8 @@ let runOptimizeTests () =
           yield! ceRemainderCases ()
           // Fold-of-map elision (BLADE_FOLD_MAP_ELIDE): the PM12 centering temporary.
           yield! foldMapElisionCases ()
+          // Sibling maps (BLADE_SIBLING_MAPS): sibling stored maps share one sweep.
+          yield! siblingMapCases ()
           // Call elision (BLADE_CALL_ELIDE): a supported call read in place.
           yield! callElisionCases ()
           // A nested fold of an array-returning call evaluates it once.

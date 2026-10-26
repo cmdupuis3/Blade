@@ -83,7 +83,9 @@ let private owns (id: IRId) : bool =
     (Blade.Optimize.CompactionTable.tryMask id).IsSome || (Blade.Optimize.CompactionTable.tryCompound id).IsSome ||
     (Blade.Optimize.CompactionTable.tryFoldMap id).IsSome || not (Blade.Optimize.CompactionTable.foldsOf id).IsEmpty ||
     (Blade.Optimize.CompactRowTable.tryProducer id).IsSome || (Blade.Optimize.CompactRowTable.tryConsumer id).IsSome ||
-    not (Blade.Optimize.MemberHoistTable.plansOf id).IsEmpty
+    not (Blade.Optimize.MemberHoistTable.plansOf id).IsEmpty ||
+    // a sibling-map member, or an input an earlier sibling's moved sweep reads
+    Blade.Optimize.SiblingMapTable.isProtected id
 
 /// Private worker: callers cannot substitute the older extent-only foreign
 /// census for A05's dependency-aware final whole-program roots.

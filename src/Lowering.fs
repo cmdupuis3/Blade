@@ -4079,6 +4079,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     Optimize.OrbitActionTable.reset ()
     Optimize.MemberHoistTable.reset ()
     Optimize.GroupAggTable.reset ()
+    Optimize.SiblingMapTable.reset ()
     Optimize.EpilogueLegTable.reset ()
     Optimize.CallSpanTable.reset ()
     Optimize.InlineEventSpans.reset ()
@@ -4386,6 +4387,14 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // rule `alias-identity v1`), each applied one cross-checked against
         // the plan above. Records only; no IR change.
         Optimize.recordAliasIdentity programFuncs (foreignRefs) irModule
+        // Sibling maps (Blade.Optimize.planSiblingMaps, round 4 wave 2, PM04):
+        // two to eight stored maps of one spine over one input index space share
+        // ONE traversal, fused at the last sibling; side table, both emitters;
+        // the interpreter runs the maps as written. LAST of the plans: it reads
+        // every other plan's claims and the scratch-reuse decisions, and the
+        // early pool-release schedule below reads its protected ids. Gate:
+        // BLADE_SIBLING_MAPS.
+        Optimize.planSiblingMaps programFuncs foreignRefs (irModules.Length < 2) irModule
         irModule)
     // A05 consumes every module's final executable/type/side payload and ALL
     // established owners. No planner runs after these typed resource barriers.

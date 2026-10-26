@@ -1,0 +1,14 @@
+// TEST: Sibling Maps Decline A Sibling That Reads An Earlier One
+// ============================================================================
+// y2's kernel reads y1 (a capture): fused, y2's cells could read y1 cells
+// the sweep has not written yet. y2 declines -- its subscript `y1(4)` is not
+// proven total, and the dependency rule (no sibling reads an earlier one,
+// directly or through a reachable callable) would refuse it too.
+type I = Idx<5>
+function two(x: Array<Float64 like I>) -> Float64 = {
+    let y1 = method_for(x) <@> lambda(a) -> a * 2.0 |> compute
+    let y2 = method_for(x) <@> lambda(a) -> a + y1(4) |> compute
+    reduce(y1, (+)) + reduce(y2, (+))
+}
+let r = two([1.0, 2.0, 3.0, 4.0, 5.0])
+// EXPECT: r = 95.0

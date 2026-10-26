@@ -2339,6 +2339,18 @@ let private storeCell (c: Ctx) (elem: Sc) (ptr: string) (v: Val) : unit =
         ln c ($"store i8 {w}, ptr {ptr}")
     | _ -> ln c ($"store {(poolTy elem)} {v.Reg}, ptr {ptr}")
 
+/// Sibling maps (Optimize.planSiblingMaps): per group, (committed, the stashed
+/// members' (first centre, producer, pool), completed) for this emission.
+let private siblingLlvmStorage =
+    System.Threading.AsyncLocal<System.Collections.Generic.Dictionary<int, bool * (int64 * ArrVal * string) list * bool>>()
+let private siblingLlvmCell () : System.Collections.Generic.Dictionary<int, bool * (int64 * ArrVal * string) list * bool> =
+    let v = siblingLlvmStorage.Value
+    if isNull (box v) then
+        let fresh = System.Collections.Generic.Dictionary<int, bool * (int64 * ArrVal * string) list * bool>()
+        siblingLlvmStorage.Value <- fresh
+        fresh
+    else v
+
 /// An UNINITIALIZED pool of `n` cells -- `n` an OPERAND, so a runtime-sized
 /// ragged pool and a literal-sized dense one are the same call.
 ///
@@ -4944,6 +4956,10 @@ and private bindLetIn (c: Ctx) (id: IRId) (value: IRExpr) (scope: IRExpr) : unit
 and private bindNamed (c: Ctx) (id: IRId) (name: string) (declTy: IRType) (value: IRExpr) : unit =
     let rec peelCompute (e: IRExpr) = match e with IRCompute i -> peelCompute i | e -> e
     match value with
+    // Sibling maps (Optimize.planSiblingMaps, round 4 wave 2, PM04): a planned
+    // member allocates and binds its pool; the last member fills every pool
+    // in one sweep (tryBindSiblingMember).
+    | IRCompute (IRApplyCombinator ainfo) when (Blade.Optimize.SiblingMapTable.tryMember id).IsSome && tryBindSiblingMember c id name ainfo -> ()
     | IRBeginPoolScope call ->
         ln c ($"; A01: begin inline pool scope: {call}")
         pushPoolScope c
@@ -5135,6 +5151,88 @@ and private bindNamed (c: Ctx) (id: IRId) (name: string) (declTy: IRType) (value
             let target = match scalarTyOf declTy with Some t when t <> ScVoid -> t | _ -> v.Ty
             bindScalar c id name (coerce c target v)
     | VOpaque -> c.LoopObjs.Add id |> ignore
+
+/// SIBLING MAPS (round 4 wave 2, PM04; Blade.Optimize.planSiblingMaps), the
+/// LLVM realization: an earlier member's binding allocates its pool and binds
+/// it with NO fill (its producer stashed); the LAST member runs ONE serial
+/// sweep filling every member's pool, each cell its own producer. Preflighted
+/// at the first member (a member the cell epilogue takes in this lane keeps
+/// its own pass); a member whose producer is not the planned dense shape
+/// fills the stashed pools first, in member order, then takes its own path.
+and private siblingLlvmPreflight (g: Blade.Optimize.SiblingMapGroup) : Result<unit, string> =
+    match g.Members |> List.tryFindIndex (fun m -> (Blade.Optimize.HotRowTable.tryProducer m).IsSome) with
+    | Some j -> Error $"the cell epilogue takes {List.item j g.Names} in this lane (one pass that stores it and folds its consumer)"
+    | None -> Ok ()
+
+and private siblingFillInto (c: Ctx) (a: ArrVal) (ptr: string) : unit =
+    emitNest c a.Extents (fun idxs ->
+        let v = coerce c a.Elem (readCell c a idxs)
+        storeCell c a.Elem (gepCell c a.Elem ptr (storageOffset c a.Groups idxs)) v)
+
+and private tryBindSiblingMember (c: Ctx) (id: IRId) (name: string) (ainfo: ApplyInfo) : bool =
+    match Blade.Optimize.SiblingMapTable.tryMember id with
+    | None -> false
+    | Some (g, j) ->
+    let cell = siblingLlvmCell ()
+    let subject = $"""{g.Region}: {String.concat ", " g.Names}"""
+    let record outcome ev =
+        if Blade.Effects.Decisions.active () then Blade.Optimize.recordSiblingMaps subject outcome ev
+    if j = 0 then
+        match siblingLlvmPreflight g with
+        | Ok () -> cell.[g.GroupId] <- (true, [], false)
+        | Error why ->
+            record (Blade.Effects.Declined $"llvm lane: {why}; every member keeps its own pass") []
+            cell.[g.GroupId] <- (false, [], true)
+    match cell.TryGetValue g.GroupId with
+    | true, (true, stash, false) ->
+        let start = List.item j g.Starts
+        let ext = List.item j g.Extents
+        let a = applyToArr c ainfo
+        let shapeOk =
+            match a.Src with
+            | AVirt _ | AVirtFlat _ ->
+                isDenseShape a.Groups
+                && (match g.Kind with
+                    | Blade.Optimize.SibFlat cells -> shapeCells a.Groups = cells
+                    | Blade.Optimize.SibHalo _ -> a.Extents = [ ext ])
+            | APool _ -> false
+        if not shapeOk then
+            // fallback: the stashed pools are filled here, in member order
+            for (_, sa, sp) in stash do siblingFillInto c sa sp
+            cell.[g.GroupId] <- (true, [], true)
+            record (Blade.Effects.Declined $"llvm lane: member {j + 1} ({name}) is not the planned dense producer; the earlier members' pools are filled here, individually, before its own") []
+            false
+        else
+        let ptr = allocPool c a.Elem (string (shapeCells a.Groups))
+        bindArray c id name { a with Src = APool ptr }
+        let stash' = stash @ [ (start, a, ptr) ]
+        if j < g.Members.Length - 1 then
+            cell.[g.GroupId] <- (true, stash', false)
+        else
+            cell.[g.GroupId] <- (true, [], true)
+            match g.Kind with
+            | Blade.Optimize.SibFlat _ ->
+                let (_, a0, _) = List.head stash'
+                emitNest c a0.Extents (fun idxs ->
+                    for (_, sa, sp) in stash' do
+                        let v = coerce c sa.Elem (readCell c sa idxs)
+                        storeCell c sa.Elem (gepCell c sa.Elem sp (storageOffset c sa.Groups idxs)) v)
+                record Blade.Effects.Applied [ $"llvm lane: one serial flat sweep writes {stash'.Length} outputs (this lane has no thread form)" ]
+            | Blade.Optimize.SibHalo _ ->
+                let spans = stash' |> List.mapi (fun m (s, sa, sp) -> (s, s + List.item m g.Extents, sa, sp))
+                let points = spans |> List.collect (fun (s, z, _, _) -> [ s; z ]) |> List.distinct |> List.sort
+                for (lo, hi) in List.pairwise points do
+                    if hi > lo then
+                        let active = spans |> List.filter (fun (s, z, _, _) -> s <= lo && hi <= z)
+                        if not active.IsEmpty then
+                            emitCountedLoopTo c (string (hi - lo)) (fun k ->
+                                for (s, _, sa, sp) in active do
+                                    let idx = i64Add c k (string (lo - s))
+                                    let v = coerce c sa.Elem (readCell c sa [ { Reg = idx; Ty = ScI64 } ])
+                                    storeCell c sa.Elem (gepCell c sa.Elem sp idx) v)
+                record Blade.Effects.Applied [ $"llvm lane: one serial halo walk writes {stash'.Length} outputs, peeled by member domain (this lane has no thread form)" ]
+        true
+    | _ -> false
 
 /// Publish a top-level binding that some out-of-line function reads (see
 /// computeModuleReads). A SCALAR moves into its global outright: main's slot

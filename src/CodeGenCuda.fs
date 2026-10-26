@@ -4102,7 +4102,21 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                             | Ok lines -> Some (plan, lines)
                 | _ -> None
             let rank2BandPlan = rank2Rendered |> Option.map fst
+            // Sibling maps (Optimize.planSiblingMaps, round 4 wave 2, PM04): a
+            // planned member's loop is stashed (an earlier member) or becomes
+            // the group's one sweep (the last); a member whose route is not the
+            // planned one flushes the stashed loops ahead of its own.
+            let siblingDecision =
+                let routeFree =
+                    rank2Rendered.IsNone && segmentRun.IsNone && tilePlan.IsNone && rank1WindowPlan.IsNone
+                    && not mpiDense && not mpiRequested
+                siblingLoopHook name routeFree streamedMap info.ArrayTypes codeGen tempCtx.VarNames tempCtx.Indent
             let loopCode =
+                match siblingDecision with
+                | SibReplace lines -> lines
+                | _ ->
+                (match siblingDecision with SibPrefix ls -> ls | _ -> [])
+                @
                 match rank2Rendered with
                 | Some (_, lines) -> lines
                 | None ->

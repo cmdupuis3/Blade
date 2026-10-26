@@ -1,0 +1,23 @@
+// TEST: Sibling Halo Walks With Different Reaches Share One Walk
+// ============================================================================
+// The bench twofir shape at a small size: two FIR walks over one stored x
+// with reaches 3 and 8, so y1 has ten centres outside y2's domain. The C++
+// lane walks the union of centres once, peeled into three segments (y1 only,
+// both, y1 only); the window reads are certified in reach, x's extent checked
+// by each member's own BL8009 guard at its own site. The checksum folds are
+// unchanged (the LLVM lane keeps each producer's cell epilogue instead).
+type I = Idx<29>
+function gen(k: Int64) -> Float64 = Float64((k * 37 + 11) % 64) / 64.0
+function fir2(x: Array<Float64 like I>) -> Float64 = {
+    let y1 = method_for(halo<I, [-3, -2, -1, 0, 1, 2, 3]>) <@> lambda(w) ->
+        0.0625 * x(w(-3)) + 0.125 * x(w(-2)) + 0.1875 * x(w(-1)) + 0.25 * x(w(0))
+        + 0.1875 * x(w(1)) + 0.125 * x(w(2)) + 0.0625 * x(w(3)) |> compute
+    let y2 = method_for(halo<I, [-8, -4, 0, 4, 8]>) <@> lambda(w) ->
+        0.5 * x(w(0)) - 0.25 * x(w(-4)) - 0.25 * x(w(4)) + 0.125 * x(w(-8)) + 0.125 * x(w(8)) |> compute
+    let s1 = reduce(method_for(y1) <@> lambda(v) -> v * v, (+), 0.0)
+    let s2 = reduce(method_for(y2) <@> lambda(v) -> v * v, (+), 0.0)
+    s1 + s2 + y1(0) + y1(22) + y2(0) * 3.0 + y2(12) * 5.0
+}
+let x = method_for(range<I>) <@> lambda(i) -> gen(Int64(i)) |> compute
+let c = fir2(x)
+// EXPECT: c = 9.36283874511719
