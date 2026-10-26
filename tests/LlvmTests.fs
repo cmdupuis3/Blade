@@ -1549,7 +1549,10 @@ let u = reduce(method_for(range<V>) <@> lambda(k) -> t(0, 0, k), (+))
           "Two input-leg plans in ONE inlined call release its pools once", 2
           "Inline lifetime event survives deletion of an unused final join", 1
           "CSE cannot merge a caller map into a released inline pool", 1
-          "Inline cleanup survives CSE of a duplicate scalar return", 1
+          // 0: since the round-4 merge the kept inline's fail-closed ownership
+          // scope (master's W2-4 rounds 5-7) declines this callee (it calls the
+          // user function helper), so the call stays outlined and frees its own pool
+          "Inline cleanup survives CSE of a duplicate scalar return", 0
           "Function caller releases an inline pool after a non-atom return", 1
           "Inline pool is released before the caller first failure (aborts)", 1
           "Scratch reuse excludes retained inline lifetime regions", 2 ]
@@ -1558,9 +1561,19 @@ let u = reduce(method_for(range<V>) <@> lambda(k) -> t(0, 0, k), (+))
         match Blade.Tests.Corpus.category "sibling-folds" |> List.tryFind (fun (n, _) -> n = test) with
         | None -> fail name "missing corpus witness"
         | Some (_, src) ->
-            let pins = [ "BLADE_FP_REPRO", Some "1"; "BLADE_OMP_THREADS", Some "1"; "BLADE_BLAS", Some "off"; "BLADE_CSE", Some "1" ]
+            // the kept one-level inline is OPT-IN since the round-4 merge (master's
+            // W2-4 round 8, the user's decision): the retained-inline arm needs the
+            // explicit BLADE_EPILOGUE_LEGS=1; the default build keeps the call
+            let pins = [ "BLADE_FP_REPRO", Some "1"; "BLADE_OMP_THREADS", Some "1"; "BLADE_BLAS", Some "off"; "BLADE_CSE", Some "1"; "BLADE_EPILOGUE_LEGS", Some "1" ]
             match emitUnder pins "facts" src,
-                  emitUnder (("BLADE_EPILOGUE_LEGS", Some "0") :: pins) "facts" src with
+                  emitUnder (pins |> List.map (fun (k, v) -> if k = "BLADE_EPILOGUE_LEGS" then (k, Some "0") else (k, v))) "facts" src with
+            | Ok on, Ok off when expected = 0 ->
+                // a DECLINED kept inline: no region in either build; the outlined
+                // kernel frees its own pool in both
+                match outlinedLifetimeCleanupProof "kernel" on, outlinedLifetimeCleanupProof "kernel" off with
+                | Ok a, Ok b when a > 0 && b > 0 && not (on.Contains "; A01: inline return cleanup:") ->
+                    pass name ($"declined kept inline: no inline region; the outlined kernel frees its {a} owned allocation(s) in both builds")
+                | a, b -> fail name (sprintf "declined kept inline: on proof=%A off proof=%A region=%b" a b (on.Contains "; A01: inline return cleanup:"))
             | Ok on, Ok off ->
                 match inlineLifetimeCleanupProof on with
                 | Ok n when n = expected && on.Contains "; A01: inline return cleanup:" ->
@@ -1663,7 +1676,11 @@ let u = reduce(method_for(range<V>) <@> lambda(k) -> t(0, 0, k), (+))
     // A03: existing return plan -> exact owned backing in the ordinary ABI.
     let returnPins reuse =
         [ "BLADE_FP_REPRO", Some "1"; "BLADE_FP_CONTRACT", Some "off"; "BLADE_OMP_THREADS", Some "1"
-          "BLADE_BLAS", Some "off"; "BLADE_CSE", Some "0"; "BLADE_POOL_REUSE", Some reuse ]
+          "BLADE_BLAS", Some "off"; "BLADE_CSE", Some "0"; "BLADE_POOL_REUSE", Some reuse
+          // since the round-4 merge master's compute elision fuses the fixture's
+          // single-reader map into its fold, which leaves A03 no donor pool; the
+          // A03 / A04 facts pin the shape they are about
+          "BLADE_COMPUTE_ELIDE", Some "0" ]
     let rec directLets e =
         match e with
         | Blade.IR.IRLet (id, value, body) -> (id, value) :: directLets body
