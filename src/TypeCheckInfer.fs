@@ -14208,7 +14208,85 @@ and checkUnderDeclaredLayout (env: TypeEnv) (expected: IRType) (expr: Expr) : Ty
 ///   - the slice expression reads the prefix at earlier ordinals only
 ///     (the structural form guarantees the sweep order; lag validity
 ///     inside a step is the user's assertion, as it was imperatively).
+/// The storage decision for one block-level `let rec` given the statements
+/// that follow it (plan-rec-array-windowing.md sections 3-5; PM33/PM34).
+/// `Some (stmts, tail', final')`: window -- `stmts` replace the binding and
+/// the rest of the block reads snapshots; `None`: full buffer, as before
+/// (also when the windowed desugar itself fails, so the full path reports its
+/// own diagnostics). Every outcome is a `rec-window v1` record (`blade
+/// plan`). The syntactic checks run first, so a demotion on syntax alone
+/// never lowers the annotation.
+and recArrayWindowDecision (env: TypeEnv) (binding: Binding) (tail: Stmt list) (final: Expr option)
+                           : (Stmt list * Stmt list * Expr option) option =
+    match binding.Pattern.Kind, binding.Value.Kind, binding.Type with
+    | PatternKind.PatVar name, ExprKind.ExprRecArray def, Some annot ->
+        let span = binding.Value.Span
+        let record outcome evidence =
+            Blade.Effects.Decisions.record
+                { Blade.Effects.Rule = "rec-window"; Version = 1; Span = span
+                  Subject = name; Outcome = outcome; Evidence = evidence }
+        let decline (why: string) = record (Blade.Effects.Declined why) []; None
+        if not (Blade.Optimize.recWindowEnabled ()) then decline "disabled by BLADE_REC_WINDOW"
+        elif def.Guard.IsSome then decline "a `while` guard: its freeze epilogue repeats the last written row over the rest of the extent"
+        elif (Blade.Optimize.recognizeFreezeIdiom (fun _ -> None) def).IsSome then
+            decline "the freeze-idiom shape (`if G then STEP else prefix(n - 1)`) takes the guarded form"
+        else
+        match annot with
+        | TyArray (_, _ :: _) ->
+            match recArrayMaxLag def with
+            | Error why -> decline why
+            | Ok k ->
+            match recArrayTailReads name tail final with
+            | Error why -> decline why
+            | Ok snaps ->
+            let annotTy = lowerTypeExpr env annot
+            match annotTy with
+            | ArrayElem at when not at.IndexTypes.IsEmpty ->
+                let lit (ix: IRIndexType) = match ix.Extent with IRLit (IRLitInt v) -> Some v | _ -> None
+                match lit at.IndexTypes.Head, at.IndexTypes.Tail |> List.map lit with
+                | Some n, trailingOpt when trailingOpt |> List.forall Option.isSome ->
+                    match recArrayWindowVerdict k snaps n with
+                    | Error why -> decline why
+                    | Ok () ->
+                    match recArrayLower env annot annotTy def span (Some (k, snaps)) with
+                    | Ok (RecWindowStmts stmts) ->
+                        let rw = recSnapRewriter name
+                        let tail' = tail |> List.map (Blade.Unfold.mapStmtPre rw)
+                        let final' = final |> Option.map (Blade.Unfold.mapExprPre rw)
+                        let cells = trailingOpt |> List.fold (fun a o -> a * Option.get o) 1L
+                        let resident = k + 1L + int64 snaps.Length
+                        record Blade.Effects.Applied
+                            [ $"ring of {k + 1L} rows (max lag K = {k}) in place of the {n}-row trajectory, {cells} cells a row"
+                              (if snaps.IsEmpty then "no later row reads"
+                               else "snapshots of rows " + (snaps |> List.map string |> String.concat ", ") + $" for the reads after it")
+                              $"resident rows {n} -> {resident} ({n * cells} -> {resident * cells} cells)"
+                              $"`{name}` dissolves: every later use is a fixed-row read, rewritten to its snapshot" ]
+                        Some (stmts, tail', final')
+                    | Ok (RecFullTyped _) -> decline "internal: the windowed desugar returned a full value"
+                    | Error e -> decline $"the windowed desugar failed ({e}); the full buffer reports its own diagnostics"
+                | _ -> decline "a non-static extent (the full desugar reports it)"
+            | _ -> decline "the annotation is not an array type"
+        | _ -> decline "the annotation is not a literal `Array<...>` (the ring's head slot is rebuilt from its slots)"
+    | _ -> None
+
+/// Full materialization: the recursion as a block expression bound to its
+/// name, exactly as it has always been emitted.
 and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecArrayDef) (span: Span) : TypeResult<TypedExpr> =
+    recArrayLower env annot annotTy def span None
+    |> Result.bind (function
+        | RecFullTyped tv -> Ok tv
+        | RecWindowStmts _ -> Error (Other $"recursive array '{def.Name}': internal error -- a full desugar returned windowed statements"))
+
+/// The recursion's desugar. `window = None`: today's full buffer, checked and
+/// returned as the binding's value. `window = Some (K, R)` (decided by
+/// recArrayWindowDecision): a K+1-slot ring `__ring_NAME` -- slice i lives in
+/// slot i mod (K+1) -- plus one snapshot `__snap_<p>_NAME` per row p in R,
+/// returned UNCHECKED as the statements that replace the binding (NAME
+/// dissolves; inferBlock checks them in place). Zero history is untouched:
+/// out-of-prefix reads never reach the buffer, and the guard clamp keeps the
+/// discarded branch's ring index in bounds.
+and recArrayLower (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecArrayDef) (span: Span)
+                  (window: (int64 * int64 list) option) : TypeResult<RecLowered> =
     // Freeze-idiom recognition (Blade.Optimize, plan-match-statements.md
     // section 5 R7/B): an unguarded inductive arm whose slice is
     // `if G then STEP else prefix(n - 1)` with a lag-1-only guard is
@@ -14338,9 +14416,29 @@ and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
                      | _ -> None) seedExpr |> ignore
              | None -> ())
             def.Guard.IsNone && ok.Value
-        let bufName = if elideZeroFill then $"{Blade.IR.recUninitBufferPrefix}{def.Name}" else $"__rec_{def.Name}"
+        // The ring keeps the elision: every read of it is a guarded lag read
+        // (rows n - c, written at step n - c and not overwritten before step
+        // n - c + K + 1 > n) or a snapshot copy of a row just written.
+        let ringSize = match window with Some (k, _) -> k + 1L | None -> n
+        let snaps = match window with Some (_, r) -> r | None -> []
+        let bufName =
+            match window, elideZeroFill with
+            | Some _, true -> $"{Blade.IR.recUninitBufferPrefix}{recRingName def.Name}"
+            | Some _, false -> recRingName def.Name
+            | None, true -> $"{Blade.IR.recUninitBufferPrefix}{def.Name}"
+            | None, false -> $"__rec_{def.Name}"
         let bufVar = synAt (ExprVar bufName)
         let iLit (v: int64) = synAt (ExprLit (LitInt v))
+        // Leading subscript into the buffer. Full: the ordinal itself.
+        // Windowed: slot `i mod (K+1)`, applied AFTER the guard clamp so the
+        // branch a guard discards still forms an in-bounds index. The cast:
+        // a position of a named step axis is an index value, the ring's head
+        // slot an anonymous Idx<K+1>.
+        let ringIdx (e: Expr) : Expr =
+            match window with
+            | None -> e
+            | Some _ when ringSize = 1L -> iLit 0L
+            | Some _ -> synAt (ExprBinOp (Elementwise, OpMod, synAt (ExprUnaryOp (OpCast "Int64", e)), iLit ringSize))
         // Buffer pre-fill, checked against the DECLARED annotation (keeps
         // named index types / units authoritative). Small buffers use a
         // nested zero literal; large ones (QG-scale trajectories) would
@@ -14362,8 +14460,27 @@ and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
             | _ ->
                 List.foldBack (fun ext inner -> synAt (ExprArrayLit (List.replicate (int ext) inner)))
                               exts zed
-        let zerosValue = zerosOver "z" annotSlots (n :: trailing)
-        let bufLet = StmtLet { Mutability = BindMut; Pattern = mkPat span (PatVar bufName); Type = Some annot; Value = zerosValue }
+        // The ring's head slot is an ANONYMOUS Idx<K+1>: a named tag there
+        // would make every `i mod (K+1)` subscript a tag mismatch (BL4003's
+        // error branch, which the `__` buffer-name gate does not suppress).
+        // Trailing slots and the element type (units included) are copied
+        // verbatim, so slice writes check exactly as against the full buffer.
+        let bufSlots =
+            match window, annotSlots with
+            | Some _, Some (_ :: rest) -> Some (TyIdx (iLit ringSize) :: rest)
+            | Some _, _ -> None
+            | None, s -> s
+        let bufAnnot =
+            match window, annot, bufSlots with
+            | Some _, TyArray (elemT, _), Some slots -> TyArray (elemT, slots)
+            | _ -> annot
+        if window.IsSome && bufSlots.IsNone then
+            // Unreachable: recArrayWindowDecision demotes a non-`Array<...>`
+            // annotation, since the ring's head slot is rebuilt from its slots.
+            Error (Other $"recursive array '{def.Name}': internal error -- cannot window an annotation without literal Array slots")
+        else
+        let zerosValue = zerosOver "z" bufSlots (ringSize :: trailing)
+        let bufLet = StmtLet { Mutability = BindMut; Pattern = mkPat span (PatVar bufName); Type = Some bufAnnot; Value = zerosValue }
         // Write one slice into the buffer at step position `stepIdxE`.
         // Rank-1: direct scalar assign. Rank >= 2: materialize the slice
         // once (`let __slice = e`), then a nested elementwise copy over the
@@ -14472,8 +14589,12 @@ and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
                         let isPartial = args.Length <= trailing.Length
                         let key = sprintf "%A" (args |> List.map (_.Kind))
                         if not (needsLo || needsHi) then
-                            // Provably inside the prefix -- unchanged.
-                            if isPartial then Some (synAt (ExprVar (emit key (fun () -> synAt (ExprApp (bufVar, args))))))
+                            // Provably inside the prefix -- unchanged (full),
+                            // or redirected to its ring slot (windowed; the
+                            // classifier rejected prefix reads nested in
+                            // `rest`, so not descending into it loses none).
+                            if isPartial then Some (synAt (ExprVar (emit key (fun () -> synAt (ExprApp (bufVar, ringIdx idx :: rest))))))
+                            elif window.IsSome then Some (synAt (ExprApp (bufVar, ringIdx idx :: rest)))
                             else None
                         else
                             // Read through a CLAMPED index: merely FORMING an
@@ -14482,7 +14603,7 @@ and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
                             // (`Int64(idx)`: a position of a named step axis
                             // is an index value; the clamp's `0` is not.)
                             let safeIdx = guardWrap needsLo needsHi idx (synAt (ExprUnaryOp (OpCast "Int64", idx))) (iLit 0L)
-                            let read = synAt (ExprApp (bufVar, safeIdx :: rest))
+                            let read = synAt (ExprApp (bufVar, ringIdx safeIdx :: rest))
                             if isPartial then
                                 // Only the READ is hoisted (that is what the
                                 // row-view wrap keys off); the select stays
@@ -14580,17 +14701,74 @@ and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
                   StmtExpr (synAt (ExprAssign (synAt (ExprVar stopName),
                               synAt (ExprIf (synAt (ExprVar grdName), iLit n,
                                              synAt (ExprUnaryOp (OpCast "Int64", stepVarE))))))) ]
-        let stepLo =
+        // A loop lower bound: typed by the step axis when that axis is named,
+        // so the step variable is a position of it.
+        let stepBound (v: int64) =
             match at.IndexTypes.Head, annotSlots with
             | { Tag = Some tag; IxKind = IxKPlain; Symmetry = SymNone; Rank = 1 }, Some (slot0 :: _)
                     when not (tag.StartsWith "__") ->
-                synAt (ExprTyped (iLit loopStart, slot0))
-            | _ -> iLit loopStart
-        let stepRange = synAt (ExprKind.ExprDotDot (stepLo, iLit n))
-        let loop =
-            StmtForIn (def.StepVar,
-                       stepRange,
-                       lagStmts @ guardStmts @ sliceCopyStmts (synAt (ExprVar def.StepVar)) $"__slice_{def.Name}" slice')
+                synAt (ExprTyped (iLit v, slot0))
+            | _ -> iLit v
+        let loopBody =
+            lagStmts @ guardStmts @ sliceCopyStmts (ringIdx (synAt (ExprVar def.StepVar))) $"__slice_{def.Name}" slice'
+        let stepRange = synAt (ExprKind.ExprDotDot (stepBound loopStart, iLit n))
+        let loop = StmtForIn (def.StepVar, stepRange, loopBody)
+        // SNAPSHOTS (windowed). One per row the rest of the block reads, typed
+        // from the annotation's TRAILING slots -- exactly the type `NAME(p)`
+        // had -- so the rewritten tail checks identically, tags and units
+        // preserved. Assignable: the sweep copies into it.
+        let snapTrailingSlots =
+            annotSlots |> Option.bind (fun s -> if s.Length > 1 then Some (List.tail s) else None)
+        let snapStmts =
+            snaps |> List.map (fun p ->
+                let tyOpt =
+                    match annot with
+                    | TyArray (elemT, _) ->
+                        Some (match snapTrailingSlots with
+                              | Some slots -> TyArray (elemT, slots)
+                              | None -> elemT)
+                    | _ -> None
+                StmtLet { Mutability = BindMut; Pattern = mkPat span (PatVar (recSnapName def.Name p))
+                          Type = tyOpt; Value = zerosOver "sn" snapTrailingSlots trailing })
+        // Copy ring slot `p mod (K+1)` out to snapshot p, at the one moment
+        // that slot holds row p: written at step p, not overwritten before
+        // step p + K + 1.
+        let snapCopyStmts (p: int64) : Stmt list =
+            let slot = if ringSize = 1L then 0L else p % ringSize
+            let snapVar = synAt (ExprVar (recSnapName def.Name p))
+            match trailing with
+            | [] -> [ StmtExpr (synAt (ExprAssign (snapVar, synAt (ExprApp (bufVar, [iLit slot]))))) ]
+            | _ ->
+                let ivars = trailing |> List.mapi (fun k _ -> $"__pi{k}_{p}_{def.Name}")
+                let idxEs = ivars |> List.map (fun v -> synAt (ExprVar v))
+                let assign =
+                    StmtExpr (synAt (ExprAssign (
+                        synAt (ExprApp (snapVar, idxEs)),
+                        synAt (ExprApp (bufVar, iLit slot :: idxEs)))))
+                List.foldBack2 (fun ivar ext inner ->
+                    [ StmtForIn (ivar, synAt (ExprKind.ExprDotDot (iLit 0L, iLit ext)), inner) ])
+                    ivars trailing [assign]
+        // THE SWEEP. Full: one loop. Windowed: the same loop SPLIT after each
+        // snapshot row, the copy between the segments -- an unconditional copy
+        // at exactly the right moment, no per-step branch, no repeated work.
+        // A row the sweep never reaches (row 0 under a seed arm) is copied
+        // before it, straight off the seeded slot.
+        let sweepStmts =
+            match window with
+            | None -> [ loop ]
+            | Some _ ->
+                let acc = ResizeArray<Stmt>()
+                for p in snaps |> List.filter (fun p -> p < loopStart) do acc.AddRange (snapCopyStmts p)
+                let boundaries = snaps |> List.filter (fun p -> p >= loopStart) |> List.map (fun p -> p + 1L) |> List.distinct |> List.sort
+                let mutable cur = loopStart
+                for b in boundaries do
+                    if b > cur then
+                        acc.Add (StmtForIn (def.StepVar, synAt (ExprKind.ExprDotDot (stepBound cur, iLit b)), loopBody))
+                        cur <- b
+                    for p in snaps |> List.filter (fun p -> p + 1L = b) do acc.AddRange (snapCopyStmts p)
+                if cur < n then
+                    acc.Add (StmtForIn (def.StepVar, synAt (ExprKind.ExprDotDot (stepBound cur, iLit n)), loopBody))
+                List.ofSeq acc
         // Zero slices consumed by out-of-prefix lag reads. Annotated from the
         // declared slot list so their index tags match the row views they
         // alternate with.
@@ -14631,6 +14809,14 @@ and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
                                  sliceCopyStmts (synAt (ExprVar fkName)) $"__frzslice_{def.Name}"
                                                 (synAt (ExprApp (bufVar, [synAt (ExprVar frzName)])))) ]
                 pre, post
+        match window with
+        | Some _ when guard'.IsSome || guardIsBestEffort ->
+            // Unreachable: recArrayWindowDecision demotes a `while` guard and
+            // the freeze-idiom shape (its epilogue repeats the last row).
+            Error (Other $"recursive array '{def.Name}': internal error -- a guarded recursion reached the windowed desugar")
+        | Some _ ->
+            Ok (RecWindowStmts ((bufLet :: zeroSliceStmts) @ snapStmts @ seedStmts @ sweepStmts))
+        | None ->
         let block = synAt (ExprBlock ((bufLet :: zeroSliceStmts) @ seedStmts @ guardPre @ [loop] @ guardPost, Some bufVar))
         // Post-check injection for the `while` guard: the break (TExprBreakIf,
         // not surface-expressible) after the stop-ordinal record inside the
@@ -14710,8 +14896,8 @@ and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
             | _ -> Error (Other $"recursive array '{def.Name}': internal error -- checked recursive-array value is not a block")
         checkExpr env annotTy block |> Result.bind (fun tv ->
             match guard' with
-            | None -> Ok { tv with Type = annotTy }
-            | Some _ -> injectGuardControl tv |> Result.map (fun tv2 -> { tv2 with Type = annotTy })))
+            | None -> Ok (RecFullTyped { tv with Type = annotTy })
+            | Some _ -> injectGuardControl tv |> Result.map (fun tv2 -> RecFullTyped { tv2 with Type = annotTy })))
     | _ ->
         Error (Other $"recursive array '{def.Name}': the annotation must be an Array type (`let rec {def.Name}: Array<T like Step, ...> = ...`)")
 
@@ -15324,14 +15510,44 @@ and inferBlock env stmts finalExpr (expectedFinal: IRType option) : TypeResult<T
     // list at the (single) exit points, in the same order.
     let typedStmts = ResizeArray<TypedStmt>()
 
-    for stmt in stmts do
+    // A WORK LIST rather than a plain `for`: a windowed `let rec`
+    // (recArrayWindowDecision, the PM33/PM34 ring) replaces itself with its
+    // ring/snapshot statements AND rewrites the rest of the block -- its later
+    // `NAME(p, ...)` reads become snapshot reads -- before any of it is checked.
+    let pending = ResizeArray<Stmt>(stmts: Stmt list)
+    let mutable finalExpr = finalExpr
+    let mutable pos = 0
+    while pos < pending.Count do
+        let rawStmt = pending.[pos]
+        pos <- pos + 1
         if err.IsNone then
             // Unwrap the parser's span annotation and stamp the statement's
             // location for error reporting (see currentStmtSpanStorage).
             let stmt =
-                match stmt with
+                match rawStmt with
                 | StmtSpanned (inner, sp) -> setCurrentStmtSpan sp; inner
                 | s -> s
+            let windowed =
+                match stmt with
+                | StmtLet b ->
+                    (match b.Value.Kind with
+                     | ExprKind.ExprRecArray _ ->
+                         recArrayWindowDecision curEnv b (pending |> Seq.skip pos |> List.ofSeq) finalExpr
+                     | _ -> None)
+                | _ -> None
+            match windowed with
+            | Some (spliced, tail', final') ->
+                // The replacement statements carry the binding's own span, so a
+                // diagnostic inside them points at the `let rec`.
+                let spliced =
+                    match rawStmt with
+                    | StmtSpanned (_, sp) -> spliced |> List.map (fun s -> StmtSpanned (s, sp))
+                    | _ -> spliced
+                pending.RemoveRange (pos, pending.Count - pos)
+                pending.AddRange spliced
+                pending.AddRange tail'
+                finalExpr <- final'
+            | None ->
             match stmt with
             | StmtSpanned _ ->
                 // Unreachable: the parser emits exactly one annotation layer,

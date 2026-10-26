@@ -1,0 +1,18 @@
+// TEST: Ring Recursive Array Zero Lag Construction
+// ============================================================================
+// Recursive-array windowing with K = 0: the slice reads no prefix at all (a
+// pure function of the step ordinal), so the ring degenerates to ONE slot and
+// every write goes to slot 0. `rec-window` APPLIES (ring of 1, snapshot of
+// row 49). slice(n) = n^2 - 3n + 2; row 49 = 2256. Value = the full buffer's.
+// ============================================================================
+type T = Idx<50>
+
+let out = {
+    let rec traj: Array<Float like T> =
+        match traj with
+        | zero -> zero
+        | zero :: s -> zero :: 0.0
+        | prefix :: n -> prefix :: 1.0 * Float64(n) * Float64(n) - 3.0 * Float64(n) + 2.0
+    traj((49 : T))
+}
+// EXPECT: out = 2256.0

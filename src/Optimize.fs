@@ -213,6 +213,11 @@ let computeElideEnabled () = gateOn "BLADE_COMPUTE_ELIDE"
 /// lowered records `call-elision` DECLINED ("disabled by BLADE_CALL_ELIDE").
 /// Unset = on.
 let callElideEnabled () = gateOn "BLADE_CALL_ELIDE"
+/// BLADE_REC_WINDOW=0|off keeps every block-level `let rec` at its full
+/// history (TypeCheckInfer.recArrayWindowDecision, the PM33/PM34 ring): the
+/// decision records `rec-window` DECLINED ("disabled by BLADE_REC_WINDOW").
+/// Read by the TYPECHECKER (the desugar site), per call. Unset = on.
+let recWindowEnabled () = gateOn "BLADE_REC_WINDOW"
 /// The C++ lane's BLAS gate (`LinAlgPatterns.blasAvailable`, which compiles
 /// after this file), installed by Lowering before the optimizer runs: the
 /// epilogue-legs planner keeps an inline only when the cell epilogue it rides
@@ -225,7 +230,7 @@ let mutable blasGateProbe : unit -> bool = fun () -> false
 /// off for its reference lane, so a new pass's gate belongs in this list the
 /// day the pass lands -- a gate missing here is a pass the differential
 /// cannot see.
-let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_HOIST"; "BLADE_HOT_ROW"; "BLADE_CELL_EPILOGUE"; "BLADE_COMPACTION_FUSION"; "BLADE_COMPACT_ROW_CLASSES"; "BLADE_SIBLING_FOLDS"; "BLADE_REC_STEP_OMP"; "BLADE_MEMBER_HOIST"; "BLADE_EPILOGUE_LEGS"; "BLADE_ORBIT_ACTIONS"; "BLADE_HASH_JOIN"; "BLADE_GROUP_AGG"; "BLADE_COMPUTE_ELIDE"; "BLADE_TRANSPOSE_ELIDE"; "BLADE_CALL_ELIDE"; "BLADE_RECOMPUTE" ]
+let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_HOIST"; "BLADE_HOT_ROW"; "BLADE_CELL_EPILOGUE"; "BLADE_COMPACTION_FUSION"; "BLADE_COMPACT_ROW_CLASSES"; "BLADE_SIBLING_FOLDS"; "BLADE_REC_STEP_OMP"; "BLADE_MEMBER_HOIST"; "BLADE_EPILOGUE_LEGS"; "BLADE_ORBIT_ACTIONS"; "BLADE_HASH_JOIN"; "BLADE_GROUP_AGG"; "BLADE_COMPUTE_ELIDE"; "BLADE_TRANSPOSE_ELIDE"; "BLADE_CALL_ELIDE"; "BLADE_RECOMPUTE"; "BLADE_REC_WINDOW" ]
 
 /// A gate's KNOB MIRROR: a value that keeps a pass's PREVIOUS version, or
 /// selects an opt-in variant (not the pass off), for the passes whose forms

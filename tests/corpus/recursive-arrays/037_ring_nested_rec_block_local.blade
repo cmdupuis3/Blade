@@ -1,0 +1,35 @@
+// TEST: Ring Recursive Array Nested Rec Block-Local
+// ============================================================================
+// Recursive-array windowing with a `let rec` INSIDE another recursion's
+// slice (memfree/009's shape, wrapped in a block): the inner `itraj` lives in
+// the outer step's own block and is read only at its final row, so it
+// windows on every outer step; the outer `otraj` reads its prefix at lag 1
+// only and is itself read only at its final row, so it windows too.
+// `rec-window` APPLIES to both. Values = the full buffers' (memfree/009
+// pinned the same final row).
+// ============================================================================
+type C = Idx<4>
+type Outer = Idx<4>
+type Inner = Idx<4>
+function bump(u: Array<Float like C>, m: Int64) -> Array<Float like C> = {
+    let t = method_for(range<C>) <@> lambda(i) -> 1.0 * Float64(i) + 1.0 * Float64(m) |> compute
+    u + 0.1 * t
+}
+
+let final = {
+    let rec otraj: Array<Float like Outer, C> =
+        match otraj with
+        | zero -> zero
+        | zero :: s -> zero :: [1.0, 1.0, 1.0, 1.0]
+        | prefix :: n -> prefix :: {
+            let start = prefix(n - 1)
+            let rec itraj: Array<Float like Inner, C> =
+                match itraj with
+                | zero -> zero
+                | zero :: s2 -> zero :: start
+                | pre2 :: m -> pre2 :: bump(pre2(m - 1), m)
+            itraj((3 : Inner))
+          }
+    otraj((3 : Outer))
+}
+// EXPECT: final = [2.8, 3.7, 4.6, 5.5]

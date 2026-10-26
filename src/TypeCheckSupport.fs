@@ -8658,3 +8658,194 @@ let internal structFieldAccess (env: TypeEnv) (typeName: string) (field: string)
                                        fields |> List.map fst,
                                        providerSectionSteering env typeName field))
     | _ -> Ok None
+
+
+// Recursive-array windowing (docs/plans/plan-rec-array-windowing.md, P1;
+// bench/notes/peakmem-microkernel-plan.md PM33/PM34)
+//
+// A block-local `let rec NAME` whose recursion reads its prefix only at
+// constant lags (`prefix(n - c)`, max lag K) and whose LATER uses are all
+// fixed-row reads `NAME(p, ...)` does not need its whole history: a K+1-slot
+// ring holds every row a step reads, and one snapshot per read row p holds
+// what the rest of the block reads. The binding then DISSOLVES -- every later
+// `NAME(p, rest)` is rewritten to `__snap_<p>_NAME(rest)` before the rest of
+// the block is checked -- so a use the classifier and the rewriter disagree
+// on is an unbound-name compile error, never a wrong value. Demotion (the
+// full buffer, exactly as before) is always sound: the window is a storage
+// policy, not a semantics change. This section is the SYNTACTIC half (no
+// type environment); TypeCheckInfer.recArrayWindowDecision adds the extents.
+
+/// The physical buffers a windowed desugar emits. Shared by the emitter and
+/// the tail rewriter so the two cannot spell a name differently. No counter:
+/// a second binding of NAME in the same tail demotes (rebound), and sibling
+/// scopes already reuse the `__rec_` buffer names.
+let internal recRingName (name: string) = $"__ring_{name}"
+let internal recSnapName (name: string) (p: int64) = $"__snap_{p}_{name}"
+
+/// A literal leading ordinal, seeing through an ascription: both `traj(2)`
+/// and `traj((2 : Steps))` occur.
+let rec internal recLitOrdinal (e: Expr) : int64 option =
+    match e.Kind with
+    | ExprKind.ExprLit (LitInt v) -> Some v
+    | ExprKind.ExprTyped (inner, _) -> recLitOrdinal inner
+    | _ -> None
+
+/// Does the name occur anywhere in this expression (shadowing ignored)?
+let internal recMentions (name: string) (e: Expr) : bool =
+    let mutable found = false
+    Blade.Unfold.mapExprPre (fun x ->
+        match x.Kind with
+        | ExprKind.ExprVar v when v = name -> found <- true; Some x
+        | _ -> None) e |> ignore
+    found
+
+/// (a) The slice's own reads: the maximum lag K at which it reads its prefix,
+/// or why it cannot ride a K+1 ring. Recognises the index shapes the desugar's
+/// `guardsFor` pattern-matches: `n` and `n + c` (c >= 0) read past the built
+/// prefix -- zero by rule, never the buffer -- so they cost no slot; `n - c`
+/// (c >= 1) is lag c. Anything else demotes: a bare `prefix` (the WHOLE
+/// partly-built buffer), a fixed ordinal `prefix(3)` re-read every step (its
+/// slot would have to outlive the sweep), any other index expression, or a
+/// prefix read nested inside another read's index arguments (the desugar
+/// rebuilds the outer read from unmapped arguments).
+let internal recArrayMaxLag (def: RecArrayDef) : Result<int64, string> =
+    let mutable bad : string option = None
+    let mutable maxLag = 0L
+    let fail r = if bad.IsNone then bad <- Some r
+    let isStepVar (e: Expr) =
+        match e.Kind with ExprKind.ExprVar v -> v = def.StepVar | _ -> false
+    let scan (e: Expr) =
+        Blade.Unfold.mapExprPre (fun x ->
+            if bad.IsSome then Some x else
+            match x.Kind with
+            | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar p }, args) when p = def.PrefixVar ->
+                (match args with
+                 | [] -> fail "the slice applies its prefix with no index"
+                 | idx :: rest ->
+                     (match idx.Kind with
+                      | _ when isStepVar idx -> ()
+                      | ExprKind.ExprBinOp (_, OpSub, l, { Kind = ExprKind.ExprLit (LitInt c) }) when isStepVar l ->
+                          if c < 0L then () elif c > maxLag then maxLag <- c
+                      | ExprKind.ExprBinOp (_, OpAdd, l, { Kind = ExprKind.ExprLit (LitInt c) }) when isStepVar l ->
+                          if c < 0L && -c > maxLag then maxLag <- -c
+                      | _ -> fail $"the slice reads `{def.PrefixVar}` at a leading index that is not `{def.StepVar} - c` for a constant c (a fixed or computed ordinal must outlive the sweep)")
+                     if rest |> List.exists (recMentions def.PrefixVar) then
+                         fail $"a `{def.PrefixVar}` read is nested inside another read's index arguments")
+                Some x
+            | ExprKind.ExprVar p when p = def.PrefixVar ->
+                fail $"the slice uses `{def.PrefixVar}` whole (the partly built buffer)"; Some x
+            | ExprKind.ExprVar v when v = def.Name || v.StartsWith "__rec" ->
+                fail $"the slice names `{v}`"; Some x
+            | _ -> None) e |> ignore
+    scan def.SliceExpr
+    (match def.SeedArm with
+     | Some (_, seedExpr) when recMentions def.PrefixVar seedExpr || recMentions def.Name seedExpr ->
+         fail "the seed arm names the recursion"
+     | _ -> ())
+    match bad with Some r -> Error r | None -> Ok maxLag
+
+/// (b) Every LATER use of `name`: the block's remaining statements and its
+/// value expression. Returns the distinct, sorted set of rows read (the
+/// snapshot set), or why the rest of the block is not window-clean. Ordinals
+/// are only checked non-negative here; the upper bound needs the extent.
+/// Conservative throughout: any binder of `name`, any assignment through it,
+/// any use other than a fixed-row read, or an annotation that mentions it
+/// demotes.
+let internal recArrayTailReads (name: string) (tail: Stmt list) (final: Expr option) : Result<int64 list, string> =
+    let mutable bad : string option = None
+    let reads = ResizeArray<int64>()
+    let fail r = if bad.IsNone then bad <- Some r
+    // Types can carry expressions (`Idx<extents(x)>`), which `mapExprPre`
+    // does not walk: a mention there is a use this scan cannot classify.
+    let typeMentions (t: TypeExpr) = (sprintf "%A" t).Contains ("\"" + name + "\"")
+    let rec scan (e: Expr) : unit =
+        Blade.Unfold.mapExprPre (fun x ->
+            if bad.IsSome then Some x else
+            match x.Kind with
+            | ExprKind.ExprAssign (lhs, rhs) ->
+                if recMentions name lhs then fail $"`{name}` is assigned through" else (scan lhs; scan rhs)
+                Some x
+            | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar v }, args) when v = name && not args.IsEmpty ->
+                (match recLitOrdinal args.Head with
+                 | Some p when p >= 0L -> reads.Add p
+                 | _ -> fail $"`{name}` is read at a row that is not a literal ordinal")
+                args.Tail |> List.iter scan
+                Some x
+            | ExprKind.ExprVar v when v = name -> fail $"`{name}` is used whole (an alias, an argument or a value)"; Some x
+            | ExprKind.ExprTyped (_, t) when typeMentions t -> fail $"a type annotation mentions `{name}`"; Some x
+            // `mapExprPre`'s callback sees expressions only, so statements
+            // inside nested blocks are walked here.
+            | ExprKind.ExprBlock (ss, fin) ->
+                ss |> List.iter scanStmt
+                if bad.IsNone then fin |> Option.iter scan
+                Some x
+            | ExprKind.ExprLambda (ps, _, _)
+                    when ps |> List.exists (fun p -> p.Name = name || (p.Type |> Option.exists typeMentions)) ->
+                fail $"a lambda rebinds or annotates with `{name}`"; Some x
+            | ExprKind.ExprLet (b, _)
+                    when Set.contains name (Blade.StaticEval.collectPatternBindings b.Pattern)
+                         || (b.Type |> Option.exists typeMentions) ->
+                fail $"`{name}` is rebound or named in an annotation"; Some x
+            | ExprKind.ExprMatch (_, cases)
+                    when cases |> List.exists (fun c -> Set.contains name (Blade.StaticEval.collectPatternBindings c.Pattern)) ->
+                fail $"a match arm rebinds `{name}`"; Some x
+            | ExprKind.ExprRecArray d when d.Name = name || d.PrefixVar = name || d.StepVar = name ->
+                fail $"a later recursive array rebinds `{name}`"; Some x
+            | _ -> None) e |> ignore
+    and scanStmt (s: Stmt) : unit =
+        if bad.IsNone then
+            match s with
+            | StmtSpanned (inner, _) -> scanStmt inner
+            | StmtLet b ->
+                scan b.Value
+                if Set.contains name (Blade.StaticEval.collectPatternBindings b.Pattern) then fail $"`{name}` is rebound later in the block"
+                elif b.Type |> Option.exists typeMentions then fail $"a type annotation mentions `{name}`"
+            | StmtAssign (lhs, _, rhs) ->
+                if recMentions name lhs then fail $"`{name}` is assigned through" else (scan lhs; scan rhs)
+            | StmtExpr e -> scan e
+            | StmtForIn (v, r, body) ->
+                if v = name then fail $"`{name}` is rebound later in the block"
+                scan r
+                body |> List.iter scanStmt
+    tail |> List.iter scanStmt
+    if bad.IsNone then final |> Option.iter scan
+    match bad with
+    | Some r -> Error r
+    | None -> Ok (reads |> List.ofSeq |> List.distinct |> List.sort)
+
+/// (c) The coverage gate (plan section 3c). "Every later read is a literal"
+/// is not enough: a consumer reading (nearly) every row would get a "window"
+/// no smaller than the buffer plus a copy per row. Window only when the
+/// resident rows -- K + 1 ring slots plus one per snapshot -- are strictly
+/// fewer than the extent AND small in absolute terms.
+let internal recArrayWindowVerdict (k: int64) (snaps: int64 list) (extent: int64) : Result<unit, string> =
+    match snaps |> List.tryFind (fun p -> p >= extent) with
+    | Some p -> Error $"a later read is at row {p}, outside the recursion's extent {extent}"
+    | None ->
+        let resident = k + 1L + int64 (List.length snaps)
+        if resident < extent && resident <= max 8L (extent / 4L) then Ok ()
+        else Error $"dense coverage: {resident} resident rows (K + 1 = {k + 1L} ring slots, {List.length snaps} snapshots) against an extent of {extent}"
+
+/// The tail rewrite: `NAME(p, rest...)` becomes `__snap_<p>_NAME(rest...)`
+/// (the bare snapshot when `rest` is empty). Applied BEFORE the rest of the
+/// block is checked, so it sees the snapshot's declared type -- the
+/// annotation's trailing slots, exactly what `NAME(p)` produced.
+let internal recSnapRewriter (name: string) : Expr -> Expr option =
+    let rec f (x: Expr) : Expr option =
+        match x.Kind with
+        | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar v }, args) when v = name && not args.IsEmpty ->
+            match recLitOrdinal args.Head with
+            | Some p ->
+                let rest = args.Tail |> List.map (Blade.Unfold.mapExprPre f)
+                let snapVar = mkExpr x.Span (ExprVar (recSnapName name p))
+                Some (if rest.IsEmpty then snapVar else mkExpr x.Span (ExprApp (snapVar, rest)))
+            | None -> None
+        | _ -> None
+    f
+
+/// What `TypeCheckInfer.recArrayLower` produced: the full-materialization
+/// value (today's block, checked), or the windowed statement sequence that
+/// replaces the binding (checked later, as ordinary block statements).
+type RecLowered =
+    | RecFullTyped of TypedExpr
+    | RecWindowStmts of Stmt list

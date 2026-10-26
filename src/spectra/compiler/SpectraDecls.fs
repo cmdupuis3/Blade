@@ -371,115 +371,266 @@ let polyspecDecl (name: string) (n: int) (k: int) (fftName: string) : FunctionDe
     let ps = [ for i in 1 .. k -> ($"x{i}", tyFloatArr n) ]
     mkFunc name ps (tyCplxTensor outDims) body
 
-// fft2 / ifft2 -- separable 2-D DFT over a rank-2 field (rows, then columns). Both passes work on flat row-major complex
-// buffers of size r*c (MathDecls house style); the rank-2 result is the nested-literal-of-reads convention. Each axis
-// independently takes the radix-2 path when pow2 (>= 2), Bluestein when >= 3 otherwise (batched over the other axis),
-// and the one-term table at extent 1 -- the same per-axis contract
-// as the 1-D fft, and the same ulp discipline: twiddles baked, naive complex multiply, loop structure textually parallel
-// with rowPass2/colPass2 in spectra/Fft.fs.
+// fft2 / ifft2 -- separable 2-D DFT over a rank-2 field
+//
+// Both transforms are built from ONE batched kernel, `batchDft`: B independent complex DFTs of length n held SPLIT (a
+// Float64 re array and a Float64 im array) in BATCH-INNERMOST layout, element k of vector b at cell k*B + b. Every
+// butterfly is an inner loop over the B vectors with its twiddle (and the gather's bit-reversed index) computed once
+// outside it: no complex temporaries, no per-cell index arithmetic, unit-stride inner loops the C++ compiler vectorizes.
+//
+// The real side of each transform is used, not discarded:
+//   fft2  -- rows 2p and 2p+1 travel as the real and imaginary parts of ONE complex row transform, separated afterwards
+//            by X1(k) = (Z(k) + conj Z(-k))/2, X2(k) = (Z(k) - conj Z(-k))/2i. Only the half spectrum k = 0 .. c/2 is
+//            kept, so the column pass runs on c/2+1 columns; the output fills the others from X(i, l) = conj X(-i, -l).
+//   ifft2 -- real(IDFT2(X)) = IDFT2(H) with H(k, l) = (X(k, l) + conj X(-k, -l))/2 (exact by linearity: the inverse of
+//            the conjugate mirror is the conjugate of the inverse). H is Hermitian, so the column pass runs on its c/2+1
+//            columns (the others are their mirror), every resulting row is Hermitian, and two rows are synthesized by
+//            ONE complex row transform (row 2p the real part, row 2p+1 the imaginary part).
+// Each axis takes radix-2 when its extent is a power of two, Bluestein (over a power-of-two length) otherwise, and the
+// identity at extent 1 -- the per-axis contract of the 1-D fft. The trig values are the same baked quarter-wave, chirp
+// and kernel tables (no runtime trig). The packing changed the operation order relative to the earlier full-complex
+// row/column transform, so values moved at rounding level only; spectra/Fft.fs mirrors THIS structure step for step
+// (the ulp contract), and both Blade lanes run this same IR.
 
-/// Row pass: DFT along axis 1 of an r x c field into the flat complex work array `sa`. `readIn i j` builds the complex
-/// read of input cell (i, j); `mkTw` is fwdTwiddles or invTwiddles.
-let private rowPass2 (r: int) (c: int) (mkTw: int -> int -> (float * float) list) (sgn: float)
-                     (readIn: Expr -> Expr -> Expr) : Stmt list =
-    let flatIJ i j = add (mul i (iLit c)) j
-    if isPow2 c && c >= 2 then
-        let stages = fftStages c
-        (if c >= 4 then pow2TwiddleStmts "twc" "qcc" c sgn
-         else [ sLet "twc" (cplxArrLit (mkTw c (c / 2))) ])
-        @ [ sLetMut "sa" (cplxZerosLit (r * c))
-            // Gather copy-in through the per-row bit-reversal permutation.
-            sFor "i" 0 r
-              [ sFor "j" 0 c
-                  [ sAssign (idx "sa" (flatIJ (v "i") (v "j")))
-                            (readIn (v "i") (bitrevE stages (v "j"))) ] ] ]
-        @ [ for st in 1 .. stages do
-              let len = 1 <<< st
-              let half = len / 2
-              let tstr = c / len
-              yield sFor "i" 0 r
-                [ sFor "b" 0 (c / len)
-                    [ sFor "t" 0 half
-                        [ sLet "p" (add (mul (v "i") (iLit c)) (add (mul (v "b") (iLit len)) (v "t")))
-                          sLet "q" (add (v "p") (iLit half))
-                          sLet "tt" (mul (idx "twc" (mul (v "t") (iLit tstr))) (idx "sa" (v "q")))
-                          sLet "p0" (idx "sa" (v "p"))
-                          sAssign (idx "sa" (v "p")) (add (v "p0") (v "tt"))
-                          sAssign (idx "sa" (v "q")) (sub (v "p0") (v "tt")) ] ] ] ]
-    elif c >= 3 then
-        [ sLetMut "sa" (cplxZerosLit (r * c)) ]
-        @ bluesteinStmts "br_" c r sgn
-            (fun g j -> readIn g j)
-            (fun g k value -> sAssign (idx "sa" (flatIJ g k)) value)
-    else
-        [ sLet "twc" (cplxArrLit (mkTw c c))
-          sLetMut "sa" (cplxZerosLit (r * c))
-          sFor "i" 0 r
-            [ sFor "k" 0 c
-                [ sFor "j" 0 c
-                    [ sLet "t" (modE (mul (v "k") (v "j")) (iLit c))
-                      sAccum (idx "sa" (flatIJ (v "i") (v "k")))
-                             (mul (readIn (v "i") (v "j")) (idx "twc" (v "t"))) ] ] ] ]
+let private negE e = syn (ExprUnaryOp (OpNeg, e))
+let private floatArrLit (xs: float list) = syn (ExprArrayLit (xs |> List.map fLit))
 
-/// Column pass: DFT along axis 0, `sa` -> `sb` (both flat row-major r x c).
-let private colPass2 (r: int) (c: int) (mkTw: int -> int -> (float * float) list) (sgn: float) : Stmt list =
-    let flatIJ i j = add (mul i (iLit c)) j
-    if isPow2 r && r >= 2 then
-        let stages = fftStages r
-        (if r >= 4 then pow2TwiddleStmts "twr" "qcr" r sgn
-         else [ sLet "twr" (cplxArrLit (mkTw r (r / 2))) ])
-        @ [ sLetMut "sb" (cplxZerosLit (r * c))
-            // Gather copy-in through the per-column bit-reversal permutation.
-            sFor "i" 0 r
-              [ sFor "j" 0 c
-                  [ sAssign (idx "sb" (flatIJ (v "i") (v "j")))
-                            (idx "sa" (flatIJ (bitrevE stages (v "i")) (v "j"))) ] ] ]
-        @ [ for st in 1 .. stages do
-              let len = 1 <<< st
-              let half = len / 2
-              let tstr = r / len
-              yield sFor "j" 0 c
-                [ sFor "b" 0 (r / len)
-                    [ sFor "t" 0 half
-                        [ sLet "p" (add (mul (add (mul (v "b") (iLit len)) (v "t")) (iLit c)) (v "j"))
-                          sLet "q" (add (v "p") (iLit (half * c)))
-                          sLet "tt" (mul (idx "twr" (mul (v "t") (iLit tstr))) (idx "sb" (v "q")))
-                          sLet "p0" (idx "sb" (v "p"))
-                          sAssign (idx "sb" (v "p")) (add (v "p0") (v "tt"))
-                          sAssign (idx "sb" (v "q")) (sub (v "p0") (v "tt")) ] ] ] ]
-    elif r >= 3 then
-        [ sLetMut "sb" (cplxZerosLit (r * c)) ]
-        @ bluesteinStmts "bc_" r c sgn
-            (fun g i -> idx "sa" (flatIJ i g))
-            (fun g k value -> sAssign (idx "sb" (flatIJ k g)) value)
+/// A zero-filled rank-2 r x c array with cells `cell`, in O(1) source text (the rank-2 twin of zerosLit): the transform
+/// writes its result straight into it, cell by cell, so no flat work buffer has to outlive a reshape kernel.
+let private zeros2 (r: int) (c: int) (cell: Expr) =
+    let ps : LambdaParam list =
+        [ for nm in [ "__z0"; "__z1" ] -> { Name = nm; Type = None; Default = None; NameSpan = noSpan } ]
+    syn (ExprCompute (syn (ExprBinOp (Elementwise, OpApply,
+                                      syn (ExprMethodFor [ syn (ExprRange [ TyIdx (iLit r) ]); syn (ExprRange [ TyIdx (iLit c) ]) ]),
+                                      syn (ExprLambda (ps, None, cell))))))
+
+/// The split radix-2 twiddle tables `{pre}wr` / `{pre}wi` = e^(sgn*2*pi*i*j/n), j = 0 .. n/2-1, read from the
+/// quarter-wave cosine literal by pow2TwiddleStmts' exact symmetries (the same values, as two Float64 arrays). n >= 4.
+let private splitTwiddleStmts (pre: string) (n: int) (sgn: float) : Stmt list =
+    let q4 = n / 4
+    let qn = pre + "qc"
+    let jn = pre + "tj"
+    let jv = v jn
+    let le = cmp OpLe jv (iLit q4)
+    let re = ifE (le, idx qn jv, negE (idx qn (sub (iLit (n / 2)) jv)))
+    let s0 = ifE (le, idx qn (sub (iLit q4) jv), idx qn (sub jv (iLit q4)))
+    [ sLet qn (floatArrLit (quarterCos n))
+      sLetMut (pre + "wr") (zerosLit (n / 2))
+      sLetMut (pre + "wi") (zerosLit (n / 2))
+      sFor jn 0 (n / 2)
+        [ sAssign (idx (pre + "wr") jv) re
+          sAssign (idx (pre + "wi") jv) (if sgn < 0.0 then negE s0 else s0) ] ]
+
+/// One radix-2 butterfly on cells p = `pE` and q = p + `halfB` of the split buffers (inside the batch loop). `tw` is
+/// the twiddle (re, im) applied to the q cell; None is the unit twiddle of j = 0, whose multiply is skipped (1*x - 0*y
+/// is x for a finite cell). The product is the naive component formula, in std::complex's order.
+let private butterflyStmts (pre: string) (rN: string) (iN: string) (pE: Expr) (halfB: int) (tw: (Expr * Expr) option) : Stmt list =
+    let nm s = pre + s
+    let p, q = nm "p", nm "q"
+    let qr, qi = v (nm "qr"), v (nm "qi")
+    let tr, ti =
+        match tw with
+        | None -> qr, qi
+        | Some (wr, wi) -> sub (mul wr qr) (mul wi qi), add (mul wr qi) (mul wi qr)
+    [ sLet p pE
+      sLet q (add (v p) (iLit halfB))
+      sLet (nm "qr") (idx rN (v q))
+      sLet (nm "qi") (idx iN (v q))
+      sLet (nm "tr") tr
+      sLet (nm "ti") ti
+      sLet (nm "pr") (idx rN (v p))
+      sLet (nm "pi") (idx iN (v p))
+      sAssign (idx rN (v p)) (add (v (nm "pr")) (v (nm "tr")))
+      sAssign (idx iN (v p)) (add (v (nm "pi")) (v (nm "ti")))
+      sAssign (idx rN (v q)) (sub (v (nm "pr")) (v (nm "tr")))
+      sAssign (idx iN (v q)) (sub (v (nm "pi")) (v (nm "ti"))) ]
+
+/// The radix-2 stages (statically unrolled, as in fftDecl) over the bit-reversed split buffers: per stage, per block u,
+/// the unit-twiddle butterfly and then each twiddled one, every butterfly an inner loop over the bN vectors.
+let private pow2Stages (pre: string) (n: int) (bN: int) (rN: string) (iN: string) : Stmt list =
+    let un, tn, bn = pre + "u", pre + "t", pre + "b"
+    [ for st in 1 .. fftStages n do
+        let len = 1 <<< st
+        let half = len / 2
+        let tstr = n / len
+        let unit = sFor bn 0 bN (butterflyStmts pre rN iN (add (mul (v un) (iLit (len * bN))) (v bn)) (half * bN) None)
+        let twiddled =
+            if half < 2 then []
+            else
+                [ sFor tn 1 half
+                    [ sLet (pre + "cw") (idx (pre + "wr") (mul (v tn) (iLit tstr)))
+                      sLet (pre + "sw") (idx (pre + "wi") (mul (v tn) (iLit tstr)))
+                      sFor bn 0 bN
+                        (butterflyStmts pre rN iN
+                            (add (mul (add (mul (v un) (iLit len)) (v tn)) (iLit bN)) (v bn))
+                            (half * bN) (Some (v (pre + "cw"), v (pre + "sw")))) ] ]
+        yield sFor un 0 (n / len) (unit :: twiddled) ]
+
+/// bN independent complex DFTs of length n (unnormalized, sign `sgn`: -1 forward, +1 inverse synthesis), split and
+/// batch-innermost. `load k b` is element k of vector b as (re, im) expressions; it may be called with k in any order
+/// (the radix-2 path gathers through the bit-reversal), so it must be a pure read of in-range cells for every
+/// 0 <= k < n. Returns the statements and the names of the result buffers (re, im): element k of vector b at k*bN + b,
+/// natural order. `pre` prefixes every binding, so several transforms coexist in one body.
+let rec private batchDft (pre: string) (n: int) (bN: int) (sgn: float) (load: Expr -> Expr -> Expr * Expr)
+    : Stmt list * string * string =
+    let rN, iN = pre + "re", pre + "im"
+    let kn, bn = pre + "k", pre + "b"
+    let at (k: Expr) (b: Expr) = add (mul k (iLit bN)) b
+    let alloc size = [ sLetMut rN (zerosLit size); sLetMut iN (zerosLit size) ]
+    let cmulInto (dst: Expr) (a0: Expr) (a1: Expr) (c0: Expr) (c1: Expr) =
+        [ sAssign (idx rN dst) (sub (mul a0 c0) (mul a1 c1))
+          sAssign (idx iN dst) (add (mul a0 c1) (mul a1 c0)) ]
+    if n = 1 then
+        let re, im = load (iLit 0) (v bn)
+        alloc bN @ [ sFor bn 0 bN [ sAssign (idx rN (v bn)) re; sAssign (idx iN (v bn)) im ] ], rN, iN
+    elif isPow2 n then
+        let krn = pre + "kr"
+        let re, im = load (v krn) (v bn)
+        let stmts =
+            (if n >= 4 then splitTwiddleStmts pre n sgn else [])
+            @ alloc (n * bN)
+            @ [ sFor kn 0 n
+                  [ sLet krn (bitrevE (fftStages n) (v kn))
+                    sFor bn 0 bN
+                      [ sAssign (idx rN (at (v kn) (v bn))) re
+                        sAssign (idx iN (at (v kn) (v bn))) im ] ] ]
+            @ pow2Stages pre n bN rN iN
+        stmts, rN, iN
     else
-        [ sLet "twr" (cplxArrLit (mkTw r r))
-          sLetMut "sb" (cplxZerosLit (r * c))
-          sFor "k" 0 r
-            [ sFor "j" 0 c
-                [ sFor "i" 0 r
-                    [ sLet "t" (modE (mul (v "k") (v "i")) (iLit r))
-                      sAccum (idx "sb" (flatIJ (v "k") (v "j")))
-                             (mul (idx "sa" (flatIJ (v "i") (v "j"))) (idx "twr" (v "t"))) ] ] ] ]
+        // Bluestein: chirp-weighted input, FFT_m, the baked kernel spectrum (carrying 1/m), IFFT_m, chirp-weighted
+        // output -- bluesteinStmts' steps and products, split and batch-innermost.
+        let m = nextPow2 (2 * n - 1)
+        let chirp = bluesteinChirp n sgn
+        let kern = bluesteinKernel n m sgn
+        let nm s = pre + s
+        let cr, ci, hr, hi, zr, zi = nm "cr", nm "ci", nm "hr", nm "hi", nm "zr", nm "zi"
+        let jn = nm "j"
+        let xr, xi = load (v jn) (v bn)
+        let weigh =
+            [ sLet cr (floatArrLit (List.map fst chirp))
+              sLet ci (floatArrLit (List.map snd chirp))
+              sLet hr (floatArrLit (List.map fst kern))
+              sLet hi (floatArrLit (List.map snd kern))
+              sLetMut zr (zerosLit (n * bN))
+              sLetMut zi (zerosLit (n * bN))
+              sFor jn 0 n
+                [ sLet (nm "c0") (idx cr (v jn))
+                  sLet (nm "c1") (idx ci (v jn))
+                  sFor bn 0 bN
+                    [ sLet (nm "x0") xr
+                      sLet (nm "x1") xi
+                      sAssign (idx zr (at (v jn) (v bn)))
+                              (sub (mul (v (nm "x0")) (v (nm "c0"))) (mul (v (nm "x1")) (v (nm "c1"))))
+                      sAssign (idx zi (at (v jn) (v bn)))
+                              (add (mul (v (nm "x0")) (v (nm "c1"))) (mul (v (nm "x1")) (v (nm "c0")))) ] ] ]
+        let fS, ar, ai =
+            batchDft (nm "f_") m bN (-1.0) (fun k b ->
+                let inside = cmp OpLt k (iLit n)
+                ifE (inside, idx zr (at k b), fLit 0.0), ifE (inside, idx zi (at k b), fLit 0.0))
+        let conv =
+            [ sFor kn 0 m
+                [ sLet (nm "h0") (idx hr (v kn))
+                  sLet (nm "h1") (idx hi (v kn))
+                  sFor bn 0 bN
+                    [ sLet (nm "a0") (idx ar (at (v kn) (v bn)))
+                      sLet (nm "a1") (idx ai (at (v kn) (v bn)))
+                      sAssign (idx ar (at (v kn) (v bn)))
+                              (sub (mul (v (nm "a0")) (v (nm "h0"))) (mul (v (nm "a1")) (v (nm "h1"))))
+                      sAssign (idx ai (at (v kn) (v bn)))
+                              (add (mul (v (nm "a0")) (v (nm "h1"))) (mul (v (nm "a1")) (v (nm "h0")))) ] ] ]
+        let iS, dr, di = batchDft (nm "v_") m bN 1.0 (fun k b -> idx ar (at k b), idx ai (at k b))
+        let out =
+            alloc (n * bN)
+            @ [ sFor kn 0 n
+                  [ sLet (nm "c0") (idx cr (v kn))
+                    sLet (nm "c1") (idx ci (v kn))
+                    sFor bn 0 bN
+                      ([ sLet (nm "d0") (idx dr (at (v kn) (v bn)))
+                         sLet (nm "d1") (idx di (at (v kn) (v bn))) ]
+                       @ cmulInto (at (v kn) (v bn)) (v (nm "d0")) (v (nm "d1")) (v (nm "c0")) (v (nm "c1"))) ] ]
+        weigh @ fS @ conv @ iS @ out, rN, iN
 
 /// fft2 -- unnormalized forward 2-D DFT of a real r x c field, complex output.
 let fft2Decl (name: string) (r: int) (c: int) : FunctionDecl =
-    let stmts =
-        rowPass2 r c fwdTwiddles (-1.0) (fun i j -> cplx (idx2 "x" i j) (fLit 0.0))
-        @ colPass2 r c fwdTwiddles (-1.0)
-        @ [ sLet "po" (nestedFromFlatN "sb" [ r; c ] 0) ]
-    mkFunc name [ ("x", tyFloatTensor [ r; c ]) ] (tyCplxTensor [ r; c ]) (blockE (stmts, Some (v "po")))
+    let w = c / 2 + 1
+    let pN = (r + 1) / 2
+    // Row pass: pair b carries row 2b (real part) and row 2b+1 (imaginary part; zero past the last row when r is odd).
+    let rowLoad (k: Expr) (b: Expr) =
+        let i0 = mul b (iLit 2)
+        let i1 = add i0 (iLit 1)
+        let odd = if r % 2 = 1 then ifE (cmp OpLt i1 (iLit r), idx2 "x" i1 k, fLit 0.0) else idx2 "x" i1 k
+        idx2 "x" i0 k, odd
+    let rowS, zr, zi = batchDft "fr_" c pN (-1.0) rowLoad
+    // Separation into the half spectrum H (r x w, row-major): X1 for the even row of the pair, X2 for the odd one.
+    let zAt (k: Expr) = add (mul k (iLit pN)) (v "pb")
+    let hAt (i: Expr) (k: Expr) = add (mul i (iLit w)) k
+    let half x = mul (fLit 0.5) x
+    let z0, z1, m0, m1 = v "z0", v "z1", v "m0", v "m1"
+    let sep =
+        [ sLetMut "hr" (zerosLit (r * w))
+          sLetMut "hi" (zerosLit (r * w))
+          sFor "i" 0 r
+            [ sLet "pb" (divE (v "i") (iLit 2))
+              sLet "ev" (cmp OpEq (modE (v "i") (iLit 2)) (iLit 0))
+              sFor "k" 0 w
+                [ sLet "km" (ifE (cmp OpEq (v "k") (iLit 0), iLit 0, sub (iLit c) (v "k")))
+                  sLet "z0" (idx zr (zAt (v "k")))
+                  sLet "z1" (idx zi (zAt (v "k")))
+                  sLet "m0" (idx zr (zAt (v "km")))
+                  sLet "m1" (idx zi (zAt (v "km")))
+                  sAssign (idx "hr" (hAt (v "i") (v "k"))) (ifE (v "ev", half (add z0 m0), half (add z1 m1)))
+                  sAssign (idx "hi" (hAt (v "i") (v "k"))) (ifE (v "ev", half (sub z1 m1), half (sub m0 z0))) ] ] ]
+    // Column pass over the w kept columns.
+    let colS, cr, ci = batchDft "fc_" r w (-1.0) (fun i j -> idx "hr" (hAt i j), idx "hi" (hAt i j))
+    // Output: the kept columns directly, the rest from the conjugate mirror X(i, l) = conj X((r-i) mod r, c-l).
+    let out =
+        [ sLetMut "po" (zeros2 r c (cplxLit 0.0 0.0))
+          sFor "i" 0 r
+            ([ sLet "ii" (ifE (cmp OpEq (v "i") (iLit 0), iLit 0, sub (iLit r) (v "i")))
+               sFor "l" 0 w
+                 [ sAssign (idx2 "po" (v "i") (v "l")) (cplx (idx cr (hAt (v "i") (v "l"))) (idx ci (hAt (v "i") (v "l")))) ] ]
+             @ (if w < c then
+                    [ sFor "l" w c
+                        [ sLet "ll" (sub (iLit c) (v "l"))
+                          sAssign (idx2 "po" (v "i") (v "l"))
+                                  (cplx (idx cr (hAt (v "ii") (v "ll"))) (negE (idx ci (hAt (v "ii") (v "ll"))))) ] ]
+                else [])) ]
+    mkFunc name [ ("x", tyFloatTensor [ r; c ]) ] (tyCplxTensor [ r; c ]) (blockE (rowS @ sep @ colS @ out, Some (v "po")))
 
 /// ifft2 -- real inverse synthesis of an r x c complex spectrum (carries the 1/(r*c), applied once at copy-out).
 let ifft2Decl (name: string) (r: int) (c: int) : FunctionDecl =
-    let flatIJ i j = add (mul i (iLit c)) j
-    let stmts =
-        rowPass2 r c invTwiddles 1.0 (fun i j -> idx2 "xs" i j)
-        @ colPass2 r c invTwiddles 1.0
-        @ [ sLetMut "xo" (zerosLit (r * c))
-            sFor "i" 0 r
-              [ sFor "j" 0 c
-                  [ sAssign (idx "xo" (flatIJ (v "i") (v "j")))
-                            (divE (realE (idx "sb" (flatIJ (v "i") (v "j")))) (fLit (float (r * c)))) ] ]
-            sLet "po" (nestedFromFlatN "xo" [ r; c ] 0) ]
-    mkFunc name [ ("xs", tyCplxTensor [ r; c ]) ] (tyFloatTensor [ r; c ]) (blockE (stmts, Some (v "po")))
+    let w = c / 2 + 1
+    let pN = (r + 1) / 2
+    let mirror (n: int) (e: Expr) = ifE (cmp OpEq e (iLit 0), iLit 0, sub (iLit n) e)
+    let half x = mul (fLit 0.5) x
+    // Column pass over the w kept columns of the Hermitian part H.
+    let colLoad (i: Expr) (j: Expr) =
+        let a = idx2 "xs" i j
+        let b = idx2 "xs" (mirror r i) (mirror c j)
+        half (add (realE a) (realE b)), half (sub (imagE a) (imagE b))
+    let colS, yr, yi = batchDft "ic_" r w 1.0 colLoad
+    // Row pass: pair b is Y(2b) + i*Y(2b+1), each row's missing half read from its conjugate mirror.
+    let yAt (i: Expr) (k: Expr) = add (mul i (iLit w)) k
+    let rowLoad (k: Expr) (b: Expr) =
+        let i0 = mul b (iLit 2)
+        let i1 = add i0 (iLit 1)
+        let guard e = if r % 2 = 1 then ifE (cmp OpLt i1 (iLit r), e, fLit 0.0) else e
+        let y0r kk = idx yr (yAt i0 kk)
+        let y0i kk = idx yi (yAt i0 kk)
+        let y1r kk = guard (idx yr (yAt i1 kk))
+        let y1i kk = guard (idx yi (yAt i1 kk))
+        let lo = cmp OpLt k (iLit w)
+        let kk = sub (iLit c) k
+        ifE (lo, sub (y0r k) (y1i k), add (y0r kk) (y1i kk)),
+        ifE (lo, add (y0i k) (y1r k), sub (y1r kk) (y0i kk))
+    let rowS, zr, zi = batchDft "ir_" c pN 1.0 rowLoad
+    let scale = fLit (1.0 / float (r * c))
+    let zAt (j: Expr) = add (mul j (iLit pN)) (v "pb")
+    let out =
+        [ sLetMut "po" (zeros2 r c (fLit 0.0))
+          sFor "i" 0 r
+            [ sLet "pb" (divE (v "i") (iLit 2))
+              sLet "ev" (cmp OpEq (modE (v "i") (iLit 2)) (iLit 0))
+              sFor "j" 0 c
+                [ sAssign (idx2 "po" (v "i") (v "j")) (mul (ifE (v "ev", idx zr (zAt (v "j")), idx zi (zAt (v "j")))) scale) ] ] ]
+    mkFunc name [ ("xs", tyCplxTensor [ r; c ]) ] (tyFloatTensor [ r; c ]) (blockE (colS @ rowS @ out, Some (v "po")))

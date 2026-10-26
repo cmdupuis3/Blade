@@ -1843,6 +1843,22 @@ Rules, all checked syntactically:
   to dense, statically shaped buffers (IR `IRUninit`); the interpreter still
   allocates zeros, which no admitted read can tell apart. Corpus
   `recursive-arrays/009` (lags amplified by 1e300) and `024` pin both sides.
+- **Rolling window** (storage policy; no value changes; `BLADE_REC_WINDOW`).
+  A recursion bound in a block or function body is stored as a K+1-slot
+  ring -- slice `i` in slot `i mod (K+1)` -- when every prefix read in its
+  inductive arm is `prefix(n - c)` for a constant `c` (K the largest; `n`
+  and `n + c` read zero and need no slot) and every later use of the name is
+  a fixed-row read `NAME(p, ...)`. Each such row `p` gets its own snapshot,
+  copied when row `p` is written, and the name itself is no longer bound:
+  its later reads are the snapshots'. With lags at most K a slot written at
+  step `i` is next overwritten at step `i + K + 1`, after every read of it,
+  and the write slot never collides with a read slot, so no value changes;
+  out-of-range lags still read zero (the guard above never selects a slot).
+  The window applies only when it is smaller (K + 1 + snapshots below the
+  extent and at most max(8, N/4)); a `while` guard, a whole-prefix use, a
+  fixed or computed ordinal inside the recursion, any later whole use of
+  the array, and module scope keep the full buffer. Corpus
+  `recursive-arrays/033`-`045` pin both sides.
 - **Sequentiality is derived, not commanded.** The prefix dependence forces
   serial enumeration of the recursion axis; the compiler schedules the
   scheme as one serial sweep. Storage is policy, not semantics: consumers

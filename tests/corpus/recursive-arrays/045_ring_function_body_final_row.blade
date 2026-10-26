@@ -1,0 +1,24 @@
+// TEST: Ring Recursive Array Function Body Final Row
+// ============================================================================
+// Recursive-array windowing in a FUNCTION BODY (the path memfree/021 guards
+// for the full buffer): the body's recursion is read only at its final row,
+// returned to the caller. `rec-window` APPLIES inside `decay` -- a 2-slot ring
+// and one snapshot, which is what the function returns. Called twice with
+// different starts; each row halves and adds 1, so a row tends to 2.
+// ============================================================================
+type C = Idx<2>
+type T = Idx<60>
+
+function decay(start: Array<Float like C>) -> Array<Float like C> = {
+    let rec h: Array<Float like T, C> =
+        match h with
+        | zero -> zero
+        | zero :: s -> zero :: start
+        | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + 1.0
+    h((59 : T))
+}
+
+let a = decay([10.0, -4.0])
+let b = decay([2.0, 2.0])
+// EXPECT: a = [2.0, 2.0]
+// EXPECT: b = [2.0, 2.0]

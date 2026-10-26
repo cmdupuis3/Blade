@@ -805,6 +805,86 @@ let private withGate (var: string) (value: string) (f: unit -> 'a) : 'a =
     System.Environment.SetEnvironmentVariable(var, value)
     try f () finally System.Environment.SetEnvironmentVariable(var, prior)
 
+// ---------------------------------------------------------------------------
+// Recursive-array windowing (rule `rec-window`, TypeCheckInfer
+// .recArrayWindowDecision; plan-rec-array-windowing.md P1, bench PM33/PM34).
+// The corpus witnesses recursive-arrays/033-045 pin the VALUES (each equals
+// the full buffer's, BLADE_REC_WINDOW=0); these pin each file's DECISION, so
+// a ring that silently stops applying -- or starts applying where it must
+// not -- fails here rather than only costing memory.
+
+/// (file, expected rec-window outcomes in source order: `Ok evidence` =
+/// applied with that evidence substring, `Error reason` = declined naming it).
+let private recWindowCorpusTable : (string * Result<string, string> list) list =
+    [ "033_ring_rk4_block_local_final_read.blade", [ Ok "snapshots of rows 199" ]
+      "034_ring_k3_multilag_zero_history.blade", [ Ok "ring of 4 rows (max lag K = 3)" ]
+      "035_ring_scattered_snapshots.blade", [ Ok "snapshots of rows 50, 150" ]
+      "036_ring_continuation_two_legs.blade", [ Ok "snapshots of rows 9"; Ok "snapshots of rows 7" ]
+      "037_ring_nested_rec_block_local.blade", [ Ok "ring of 2 rows"; Ok "ring of 2 rows" ]
+      "038_ring_zero_lag_construction.blade", [ Ok "ring of 1 rows (max lag K = 0)" ]
+      "039_ring_rank1_scalar_slice.blade", [ Ok "snapshots of rows 29" ]
+      "040_ring_declines_whole_prefix_fold.blade", [ Error "uses `prefix` whole" ]
+      "041_ring_declines_bare_escape.blade", [ Error "`traj` is used whole" ]
+      "042_ring_declines_dense_coverage.blade", [ Error "dense coverage" ]
+      "043_ring_declines_while_guard.blade", [ Error "a `while` guard" ]
+      "044_ring_snapshot_seed_row_and_final.blade", [ Ok "snapshots of rows 0, 99" ]
+      "045_ring_function_body_final_row.blade", [ Ok "snapshots of rows 59" ] ]
+
+let private recWindowCorpusCases () : bool list =
+    let dir = System.IO.Path.Combine("tests", "corpus", "recursive-arrays")
+    [ for (file, want) in recWindowCorpusTable do
+        let name = $"rec_window_corpus: {file}"
+        let path = System.IO.Path.Combine(dir, file)
+        if not (System.IO.File.Exists path) then
+            resultLine Fail name $"missing {path} (run from the repo root)"; yield false
+        else
+        match decisionsOf (System.IO.File.ReadAllText path) with
+        | Error e -> resultLine Fail name e; yield false
+        | Ok ds ->
+            let mine = ds |> List.filter (fun d -> d.Rule = "rec-window")
+            let matches (w: Result<string, string>) (d: Blade.Effects.Decision) =
+                match w, d.Outcome with
+                | Ok ev, Blade.Effects.Applied -> d.Evidence |> List.exists (fun e -> e.Contains ev)
+                | Error why, Blade.Effects.Declined r -> r.Contains why
+                | _ -> false
+            // In source order: the nested case records the inner (re-checked
+            // per outer step) and outer decisions; duplicates collapse.
+            let ok = mine.Length = want.Length && List.forall2 matches want mine
+            let seen = mine |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+            if ok then resultLine Pass name $"{mine.Length} rec-window decision(s) as pinned"
+            else resultLine Fail name $"wanted {want}; saw: {seen}"
+            yield ok ]
+
+/// The flagship case's EMISSION, both ways: windowed, the C++ allocates the
+/// 2-row ring (extents { 2, 2, 2 }) and no 200-row buffer, and indexes it
+/// `% 2L`; with BLADE_REC_WINDOW=0 the 200-row buffer is back and the
+/// decision says why.
+let private recWindowEmission () : bool list =
+    let path = System.IO.Path.Combine("tests", "corpus", "recursive-arrays", "033_ring_rk4_block_local_final_read.blade")
+    if not (System.IO.File.Exists path) then
+        resultLine Fail "rec_window_emission" $"missing {path}"; [ false ]
+    else
+    let src = System.IO.File.ReadAllText path
+    let on =
+        let name = "rec_window_emission_ring: a 2-row ring indexed % 2, no 200-row buffer"
+        match cppOfSource name src with
+        | Error e -> resultLine Fail name e; false
+        | Ok cpp ->
+            let ring = cpp.Contains "_extents[3] = { 2, 2, 2 }" && cpp.Contains "% 2L)"
+            let full = cpp.Contains "{ 200, 2, 2 }"
+            if ring && not full then resultLine Pass name "ring extents { 2, 2, 2 }, `% 2L` subscripts, no { 200, 2, 2 } allocation"; true
+            else resultLine Fail name $"ring={ring} full200={full}"; false
+    let off =
+        let name = "rec_window_emission_gate_off: BLADE_REC_WINDOW=0 keeps the 200-row buffer and records why"
+        match withGate "BLADE_REC_WINDOW" "0" (fun () -> cppOfSource name src, decisionsOf src) with
+        | Error e, _ | _, Error e -> resultLine Fail name e; false
+        | Ok cpp, Ok ds ->
+            let full = cpp.Contains "{ 200, 2, 2 }"
+            let declined = ds |> List.exists (fun d -> d.Rule = "rec-window" && declinedMentioning "disabled by BLADE_REC_WINDOW" d)
+            if full && declined then resultLine Pass name "200-row buffer allocated; rec-window declined -- disabled by BLADE_REC_WINDOW"; true
+            else resultLine Fail name $"full200={full} declinedDisabled={declined}"; false
+    [ on; off ]
+
 /// The rank-2 orbit-class PASS itself, for the pins that read it: compact
 /// row classes (BLADE_COMPACT_ROW_CLASSES) would otherwise replace it behind
 /// the producer.
@@ -8521,6 +8601,10 @@ let runOptimizeTests () =
           decisionCase "decision_row_fold_declined_while" rowFoldWhileSrc "row-fold-fusion"
               (declinedMentioning "freeze") "declined: a while-guarded recursion rewrites rows after the loop"
           rowFoldRk4Emission ()
+          // Recursive-array windowing (rec-window): each corpus witness's
+          // decision, and the ring's emission both ways.
+          yield! recWindowCorpusCases ()
+          yield! recWindowEmission ()
           // Wave 3, E-G5: the threaded `let rec` step's admission and forms.
           yield! recStepCases ()
           // Reverse-mode AD of an additive recurrence is O(n): loop count pin.

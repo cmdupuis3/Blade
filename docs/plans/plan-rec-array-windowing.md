@@ -1,5 +1,20 @@
 # Plan: windowed (partially-materialized) recursive arrays
 
+> **Status (2026-10-25): P1 PORTED, branch `claude/recarray-ring` (off master 4919eefe).**
+> Block- and function-body `let rec`s window as specified in sections 3-4: classifier
+> (`TypeCheckSupport.recArrayMaxLag` / `recArrayTailReads` / `recArrayWindowVerdict`), the
+> ring + snapshot desugar (`TypeCheckInfer.recArrayLower`'s `window` argument; snapshots past
+> the ring copied at a loop split), the `inferBlock` statement splice, and NAME dissolution.
+> No diagnostic code: the decision is the `blade plan` record `rec-window v1`, pinned per
+> corpus file by `blade test optimize` (`rec_window_corpus`), so no corpus WARN churn; the
+> escape hatch is `BLADE_REC_WINDOW` (an optimizer gate). `while` guards and the freeze idiom
+> demote; differentiated recursions need no special case (the AD expansion runs before the
+> typechecker, and its tape reads demote by the tail scan; corpus `ad` passes). NOT ported:
+> P2 consumer fusion, P3 module-level print replay (module scope demotes), P4 provider
+> write terminals. Census 2026-10-25: 24 sites window across tests/examples/bench (examples/09
+> 3, memfree-stress/011 800000 -> 3 rows, physics/47 6001 -> 3), 66 demote (52 whole uses).
+> The history below is the August branch's.
+>
 > **Status (2026-10-11): BUILT ON AN UNMERGED BRANCH, NOT ON MASTER.** The code lives on
 > `claude/recursive-array-materialization-381708` (2026-08-10, kept as the reference
 > implementation). It predates the August file split (TypeCheck/CodeGen/IR groups), the

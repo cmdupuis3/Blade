@@ -1,0 +1,24 @@
+// TEST: Ring Recursive Array K3 Multi-Lag Zero History
+// ============================================================================
+// Recursive-array windowing under WRAPAROUND: lags 1, 2 and 3 (K = 3, a
+// 4-slot ring), each with its own weight (1x, 10x, 100x), so a read of the
+// wrong physical slot after the ring wraps is an order-of-magnitude error,
+// not a coincidence. The first steps exercise implicit zero history
+// (recursive-arrays/009): at n = 1 only the lag-1 read is in range, at n = 2
+// lag 3 still reads zero -- never through the ring. `rec-window` APPLIES
+// (ring of 4, snapshot of row 7); value = the full buffer's.
+// ============================================================================
+type C = Idx<3>
+type Steps = Idx<8>
+function combine3(p: Array<Float like C>, q: Array<Float like C>, r: Array<Float like C>) -> Array<Float like C> =
+    (method_for(zip(p, q, r)) <@> lambda(x, y, z) -> x + 10.0 * y + 100.0 * z) |> compute
+
+let out = {
+    let rec vec: Array<Float like Steps, C> =
+        match vec with
+        | zero -> zero
+        | zero :: s -> zero :: [1.0, 2.0, 3.0]
+        | prefix :: n -> prefix :: combine3(prefix(n - 1), prefix(n - 2), prefix(n - 3))
+    vec((7 : Steps))
+}
+// EXPECT: out = [77561.0, 155122.0, 232683.0]

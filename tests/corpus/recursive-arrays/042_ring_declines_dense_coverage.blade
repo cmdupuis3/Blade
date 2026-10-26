@@ -1,0 +1,18 @@
+// TEST: Ring Recursive Array Declines Dense Coverage
+// ============================================================================
+// The coverage gate (plan section 3c): every later read is a literal row, but
+// they cover 7 of the 8 rows, so 2 ring slots + 7 snapshots would be MORE
+// storage than the buffer. `rec-window` is DECLINED ("dense coverage").
+// x_n = 1 + n; the sum of rows 0..6 is 28.
+// ============================================================================
+type T = Idx<8>
+
+let out = {
+    let rec traj: Array<Float like T> =
+        match traj with
+        | zero -> zero
+        | zero :: s -> zero :: 1.0
+        | prefix :: n -> prefix :: prefix(n - 1) + 1.0
+    traj((0 : T)) + traj((1 : T)) + traj((2 : T)) + traj((3 : T)) + traj((4 : T)) + traj((5 : T)) + traj((6 : T))
+}
+// EXPECT: out = 28.0

@@ -1,0 +1,18 @@
+// TEST: Ring Recursive Array Declines Whole Prefix Fold
+// ============================================================================
+// Recursive-array windowing DEMOTES when the slice uses its prefix WHOLE:
+// `reduce(prefix, (+))` sums every row built so far on every step, so no
+// finite lag exists. `rec-window` is DECLINED ("uses `prefix` whole") and the
+// full buffer runs as before. x_n = sum(x_0 .. x_{n-1}) + 1 doubles: row 9 = 512.
+// ============================================================================
+type T = Idx<10>
+
+let out = {
+    let rec traj: Array<Float like T> =
+        match traj with
+        | zero -> zero
+        | zero :: s -> zero :: 1.0
+        | prefix :: n -> prefix :: reduce(prefix, (+)) + 1.0
+    traj((9 : T))
+}
+// EXPECT: out = 512.0

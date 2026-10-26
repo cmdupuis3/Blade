@@ -1,0 +1,18 @@
+// TEST: Ring Recursive Array Declines Bare Escape
+// ============================================================================
+// Recursive-array windowing DEMOTES when a later use takes the array WHOLE:
+// `traj` is passed to `total_sum`, which needs every row. `rec-window` is
+// DECLINED ("used whole"). x_n = 1 + 2n over 15 rows; the sum is 225.
+// ============================================================================
+type T = Idx<15>
+function total_sum(a: Array<Float like T>) -> Float = reduce(a, (+))
+
+let out = {
+    let rec traj: Array<Float like T> =
+        match traj with
+        | zero -> zero
+        | zero :: s -> zero :: 1.0
+        | prefix :: n -> prefix :: prefix(n - 1) + 2.0
+    total_sum(traj)
+}
+// EXPECT: out = 225.0

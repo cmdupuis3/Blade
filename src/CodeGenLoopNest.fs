@@ -4125,8 +4125,30 @@ let computeFreshReturnFacts (modul: IRModule) : Map<IRId, FreshReturn> =
                 // no second name can be holding it. An alias-shaped second use
                 // (`let s = r(0)` before the return) demotes to NotFresh.
                 let boundToLifted = lets |> List.exists (fun (id, v) -> id = rid && isLifted v)
+                // A use that is the base of a FULL, scalar-typed element access
+                // -- a cell store `r(i, j) = v` or a cell read `r(i, j)` -- makes
+                // no second name for the pool, so it does not demote. Every
+                // other mention (a row view, an alias, an argument, a whole-
+                // array assign) still does. Without this, a function that fills
+                // its result cell by cell (`let mut out = zeros; out(i, j) =
+                // ...; out`, the spectra transforms' output since the batched
+                // FFT rewrite) was NotFresh, and its caller never freed the
+                // result: one 32 / 64 KB field per sp.ifft2 / sp.fft2 call on
+                // examples/09_qg_atmosphere (1.25 GB over the run).
+                let aliasingUse (v: IRExpr) =
+                    let subs = allSubExprs v
+                    let refs = subs |> List.sumBy (fun e -> match e with IRVar (i, _) when i = rid -> 1 | _ -> 0)
+                    let cellAccesses =
+                        subs |> List.sumBy (fun e ->
+                            match e with
+                            | IRIndex (IRVar (i, _), _, _) when i = rid ->
+                                (match inferExprType e with
+                                 | IRTScalar _ | IRTUnitAnnotated (IRTScalar _, _) -> 1
+                                 | _ -> 0)
+                            | _ -> 0)
+                    refs > cellAccesses
                 let otherUses =
-                    lets |> List.filter (fun (id, v) -> id <> rid && Set.contains rid (collectVarRefsIR v))
+                    lets |> List.filter (fun (id, v) -> id <> rid && Set.contains rid (collectVarRefsIR v) && aliasingUse v)
                 if boundToLifted && List.isEmpty otherUses then FreshPool else NotFresh
             // An interior view of a scope-local array is no longer returned as
             // a view: genFuncBodyScoped's return arm copies the slice into its
@@ -4134,6 +4156,14 @@ let computeFreshReturnFacts (modul: IRModule) : Map<IRId, FreshReturn> =
             // storage it receives. Classifying it NotFresh here would leave the
             // caller-side free off and simply move the leak one frame out.
             | IRIndex _ when (returnedInteriorView lets retExpr).IsSome -> FreshPool
+            // A returned `stack(...)` / `join(...)` leaves in the fresh `__retN`
+            // pool the statement-shaped return arm materializes (a dense alloc
+            // plus per-source copies, spared from this frame's frees), so the
+            // CALLER owns it. NotFresh here leaked one result per call: the
+            // recursion step of examples/09_qg_atmosphere returns its stacked
+            // state, and the time loop copied it into the trajectory row and
+            // dropped it, every step (1.07 GB over the run).
+            | IRStack _ | IRJoin _ -> FreshPool
             | IRApp (f, _, _) ->
                 match resolveCallable f with
                 | Some c -> Map.tryFind c.Id facts |> Option.defaultValue NotFresh
@@ -4733,6 +4763,17 @@ let computeScopeEscapes (ctx: CodeGenContext) (kind: ScopeKind) (scopeLets: (IRI
             // genFuncBodyScoped's matching arm through returnedInteriorView;
             // narrowing here WITHOUT that arm would be a use-after-free.
             | IRIndex _ when (returnedInteriorView scopeLets retExpr).IsSome -> []
+            // A returned `stack(...)` / `join(...)`: genFuncBodyScoped's
+            // statement-shaped return arm materializes it into a FRESH `__retN`
+            // pool (genStackJoinBinding: a dense alloc plus a per-source copy;
+            // never a view) and only THEN emits the scope frees, so every
+            // source is dead before it is freed. Seeding the sources pinned the
+            // whole step state a time-stepping function stacks (measured on
+            // examples/09_qg_atmosphere: `bstep` returned `stack(q1n, q2n, h1n,
+            // g1, h2n, j1)` and leaked its four computed fields, 64 KB each,
+            // every step -- 1.4 GB over the run). `sequence` is NOT in this
+            // arm: it ALIASES its children (isFreshPoolForm says so).
+            | IRStack _ | IRJoin _ -> []
             | _ ->
                 match inferExprType retExpr with
                 | IRTScalar _ | IRTUnit -> []
