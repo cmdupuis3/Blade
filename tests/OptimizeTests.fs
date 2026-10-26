@@ -10092,6 +10092,15 @@ let private transposeNormalFormCases () =
        | Ok src ->
            decisionCase "decision_transpose_named_pipeline_declined" src "transpose-normal-form"
                (fun d -> d.Subject = "X" && declinedMentioning "may write" d) "declined: a named composition's writing kernel is applied to X")
+      // Gap G89: a write hidden in a TYPE's extent (`0..bump(y0)`, bump
+      // writing through a `mut` parameter) is a write the never-written
+      // closure must see -- it used to share y0's storage with x.
+      (match (try Ok (System.IO.File.ReadAllText "tests/corpus/index-types/566_alias_write_in_extent_kept.blade") with ex -> Error ex.Message) with
+       | Error e -> resultLine Fail "decision_transpose_alias_declined_write_in_extent" e; false
+       | Ok src ->
+           decisionCase "decision_transpose_alias_declined_write_in_extent" src "transpose-normal-form"
+               (fun d -> d.Subject = "x" && declinedMentioning "`m` names `y0` and may write" d)
+               "declined: m's range bound writes y0 through bump's `mut` parameter")
       withGate "BLADE_TRANSPOSE_ELIDE" "0" (fun () ->
           decisionCase "decision_transpose_declined_gate" tnfSymSrc "transpose-normal-form"
               (declinedMentioning "disabled by BLADE_TRANSPOSE_ELIDE") "declined: disabled by BLADE_TRANSPOSE_ELIDE") ]

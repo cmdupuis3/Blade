@@ -11800,11 +11800,32 @@ let private aliasWriteClosure (programFuncs: IRCallable list) (foreignRefs: Set<
     let arr = List.toArray modul.Bindings
     let payloadOf = intervalPayloadOf modul
     let pay = arr |> Array.map (fun b -> payloadOf b.Id b.Value)
-    let payRefs = pay |> Array.map collectVarRefsIR
+    // EXECUTABLE EXTENTS (gap G89): a statement's types run code too -- the
+    // range bound of `method_for(0..bump(a))` calls `bump`, which may write `a`
+    // through a `mut` parameter, and neither that reference nor that call is
+    // an expression child of the value. Every judgement below (references,
+    // assignments, writes) reads a statement as its payload PLUS the extent
+    // expressions embedded in its nodes PLUS its declared type's extents; a
+    // callable as its body, the extents embedded in it and its parameter,
+    // return and capture types. (`irTypeExtentExprs` of a type that cannot be
+    // walked fails closed: the statement is charged an unresolved call.)
+    let typeExtents (t: IRType) : IRExpr list =
+        try irTypeExtentExprs t
+        with _ -> [ IRApp (IRLit (IRLitInt 0L), [], IRTUnit) ]
+    let payX : IRExpr list [] =
+        arr |> Array.mapi (fun i b -> pay.[i] :: embeddedExtentExprs pay.[i] @ typeExtents b.Type)
+    let fnX (f: IRCallable) : IRExpr list =
+        f.Body :: embeddedExtentExprs f.Body
+        @ (f.Params |> List.collect (fun p -> typeExtents p.Type))
+        @ typeExtents f.RetType
+        @ (f.Captures |> List.collect (fun c -> typeExtents c.Type))
+    let refsOfAll (es: IRExpr list) = es |> List.map collectVarRefsIR |> Set.unionMany
+    let payRefs = payX |> Array.map refsOfAll
     let callables = (modul.Functions @ programFuncs) |> List.distinctBy (fun f -> f.Id)
+    let callableX = callables |> List.map (fun f -> (f.Id, fnX f)) |> Map.ofList
     let calleeRefs =
         callables |> List.map (fun f ->
-            (f, Set.union (collectVarRefsIR f.Body) (f.Captures |> List.map (fun c -> c.Id) |> Set.ofList)))
+            (f, Set.union (refsOfAll callableX.[f.Id]) (f.Captures |> List.map (fun c -> c.Id) |> Set.ofList)))
     let assigned =
         let mutable s = Set.empty
         let visit (e: IRExpr) =
@@ -11812,8 +11833,8 @@ let private aliasWriteClosure (programFuncs: IRCallable list) (foreignRefs: Set<
                 match n with
                 | IRAssign (t, _) -> s <- Set.union s (collectVarRefsIR t)
                 | _ -> ()) e
-        for e in pay do visit e
-        for f in callables do visit f.Body
+        for es in payX do List.iter visit es
+        for f in callables do List.iter visit callableX.[f.Id]
         s
     // WRITE-FREE, syntactically (fail closed). The shared write analysis
     // (`scheduleMayWriteIn`) judges a write to provably FRESH local storage
@@ -11834,7 +11855,7 @@ let private aliasWriteClosure (programFuncs: IRCallable list) (foreignRefs: Set<
             match Map.tryFind id letValue with
             | Some (IRVar (j, _)) when not (seen.Contains j) -> resolveId (seen.Add id) j
             | _ -> None
-    let directlyWrites (e: IRExpr) =
+    let directlyWrites1 (e: IRExpr) =
         let mutable hit = false
         iterIRExpr (fun n ->
             match n with
@@ -11849,6 +11870,7 @@ let private aliasWriteClosure (programFuncs: IRCallable list) (foreignRefs: Set<
                  | _ -> hit <- true)
             | _ -> ()) e
         hit
+    let directlyWrites (es: IRExpr list) = es |> List.exists directlyWrites1
     // The least fixpoint of "may write" over every callable AND every module
     // binding: a name's definition runs where the name is used when it is a
     // callable, a let alias of one, or a deferred value (a named composition
@@ -11858,8 +11880,8 @@ let private aliasWriteClosure (programFuncs: IRCallable list) (foreignRefs: Set<
     // runs nothing: only deferred forms and let aliases carry their payload
     // to the use (a stored binding's own payload is judged as a statement).
     let bodyOf =
-        (callables |> List.map (fun f -> (f.Id, f.Body)))
-        @ (arr |> Array.mapi (fun i b -> (b, pay.[i]))
+        (callables |> List.map (fun f -> (f.Id, callableX.[f.Id])))
+        @ (arr |> Array.mapi (fun i b -> (b, payX.[i]))
                |> Array.filter (fun (b, _) ->
                    isDeferredForm b.Value || (match b.Value with IRVar _ -> true | _ -> false)
                    // a value that may CARRY code (a closure, a loop object, a tuple
@@ -11867,8 +11889,8 @@ let private aliasWriteClosure (programFuncs: IRCallable list) (foreignRefs: Set<
                    || not ((try holdsNoStorage b.Type with _ -> false) || (match stripUnits b.Type with ArrayElem _ -> true | _ -> false)))
                |> Array.map (fun (b, p) -> (b.Id, p)) |> List.ofArray)
         |> Map.ofList
-    let refsOf (e: IRExpr) : IRId list =
-        collectVarRefsIR e |> Set.toList |> List.collect (fun id ->
+    let refsOf (es: IRExpr list) : IRId list =
+        refsOfAll es |> Set.toList |> List.collect (fun id ->
             match resolveId Set.empty id with
             | Some f -> [ id; f.Id ]
             | None -> [ id ])
@@ -11884,7 +11906,7 @@ let private aliasWriteClosure (programFuncs: IRCallable list) (foreignRefs: Set<
                     s <- s.Add id
                     changed <- true
         s
-    let writes (e: IRExpr) = directlyWrites e || (refsOf e |> List.exists writingDefs.Contains)
+    let writes (es: IRExpr list) = directlyWrites es || (refsOf es |> List.exists writingDefs.Contains)
     let nameOf =
         let m1 = arr |> Array.map (fun b -> (b.Id, b.Name)) |> Map.ofArray
         let m2 = callables |> List.map (fun f -> (f.Id, f.SourceName)) |> Map.ofList
@@ -11918,12 +11940,12 @@ let private aliasWriteClosure (programFuncs: IRCallable list) (foreignRefs: Set<
         else
             let writingBinding =
                 [ 0 .. arr.Length - 1 ] |> List.tryFind (fun i ->
-                    not (Set.isEmpty (Set.intersect payRefs.[i] members)) && writes pay.[i])
+                    not (Set.isEmpty (Set.intersect payRefs.[i] members)) && writes payX.[i])
             match writingBinding with
             | Some i -> Error $"`{arr.[i].Name}` names {named (Set.intersect payRefs.[i] members)} and may write (an assignment, a call to a writing callable, or an unresolved call -- a write to local storage counts: the copy it relies on is the one elided)"
             | None ->
                 let writingFn =
-                    calleeRefs |> List.tryFind (fun (f, _) -> members.Contains f.Id && writes f.Body)
+                    calleeRefs |> List.tryFind (fun (f, _) -> members.Contains f.Id && writes callableX.[f.Id])
                 match writingFn with
                 | Some (f, refs) -> Error $"function `{f.SourceName}` names {named (Set.intersect refs members)} and may write (an assignment, a writing callee or an unresolved call)"
                 | None ->
