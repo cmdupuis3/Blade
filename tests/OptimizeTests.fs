@@ -910,9 +910,10 @@ let private recFoldCorpusTable : (string * Result<string, string> list) list =
       "057_fold_ring_declines_captured_trajectory.blade", [ Error "the trajectory is named outside its block: a callable" ]
       "058_fold_ring_declines_seed_after_recursion.blade", [ Error "seed" ]
       "059_fold_ring_declines_lag_past_extent.blade", [ Error "at or beyond the recursion's extent" ]
-      "060_fold_ring_declines_escaping_row_view.blade", [ Error "may write storage outside its own buffer" ]
+      "060_fold_ring_declines_escaping_row_view.blade", [ Error "may write storage other than its own row stores" ]
       "061_fold_ring_declines_future_offset_past_extent.blade", [ Error "not `n - c`, `n + c` or `n`" ]
-      "062_fold_ring_declines_read_in_range_extent.blade", [ Error "inside a type's extent" ] ]
+      "062_fold_ring_declines_read_in_range_extent.blade", [ Error "inside a type's extent" ]
+      "063_fold_ring_declines_mut_param_row_write.blade", [ Error "other than its own row stores" ] ]
 
 let private recFoldCorpusCases () : bool list =
     let dir = System.IO.Path.Combine("tests", "corpus", "recursive-arrays")
@@ -988,8 +989,59 @@ let private recFoldEmission () : bool list =
             let declined = ds |> List.exists (fun d -> d.Rule = "rec-fold-ring" && declinedMentioning "strict post-pass" d)
             if declined || not (Blade.Toolchain.ompThreadEmissionEnabled ()) then resultLine Pass name "rec-fold-ring declined -- the threaded step's strict post-pass"; true
             else resultLine Fail name "no strict decline recorded"; false
-    [ on; off; llvm; team; strict ]
-
+    // Codex review round 4: decision-only (the C++ lane cannot emit these
+    // shapes, BL9002 / an exponential emission at ten nested ranges, so they
+    // are no corpus files).
+    let ring11 =
+        "type T = Idx<11>\n"
+        + "type X = Idx<3>\n"
+    let effectInExtent =
+        ring11
+        + "let mut saved: Array<Float64 like X> = [0.0, 0.0, 0.0]\n"
+        + "function stash(r: Array<Float64 like X>, n: Int64) -> Int64 = {\n"
+        + "    let z = if n == 1 then { saved = r; 0.0 } else 0.0\n"
+        + "    1\n"
+        + "}\n"
+        + "function keep(r: Array<Float64 like X>, n: Int64) -> Array<Float64 like X> = {\n"
+        + "    let ys = 0..stash(r, n)\n"
+        + "    r + Float64(reduce(ys, (+), 0)) + 1.0\n"
+        + "}\n"
+        + "function run(u0: Array<Float64 like X>) -> Float64 = {\n"
+        + "    let rec traj: Array<Float64 like T, X> =\n"
+        + "        match traj with\n"
+        + "        | zero -> zero\n"
+        + "        | zero :: s -> zero :: u0\n"
+        + "        | prefix :: n -> prefix :: keep(prefix(n - 1), Int64(n))\n"
+        + "    let total = reduce(method_for(traj) <@> lambda(row) -> reduce(row, (+)), (+))\n"
+        + "    total + reduce(saved, (+))\n"
+        + "}\n"
+        + "let u: Array<Float64 like X> = [1.0, 2.0, 3.0]\n"
+        + "let v = run(u)\n"
+    let deepExtent =
+        let inner = "0..Int64(floor(s(0)))"
+        let nested = [ 1 .. 10 ] |> List.fold (fun acc _ -> $"0..reduce({acc}, lambda(p, q) -> p + 1, 0)") inner
+        ring11
+        + "function deep(a: Float64) -> Float64 = {\n"
+        + "    let rec s: Array<Float64 like T> =\n"
+        + "        match s with\n"
+        + "        | zero -> zero\n"
+        + "        | zero :: k -> zero :: a\n"
+        + "        | prefix :: n -> prefix :: prefix(n - 1) + 1.0\n"
+        + $"    let ys = {nested}\n"
+        + "    reduce(s, (+)) + Float64(reduce(ys, (+), 0))\n"
+        + "}\n"
+        + "let v = deep(1.0)\n"
+    let declinesWith (name: string) (src: string) (why: string) =
+        match decisionsOf src with
+        | Error e -> resultLine Fail name e; false
+        | Ok ds ->
+            let mine = ds |> List.filter (fun d -> d.Rule = "rec-fold-ring")
+            if not mine.IsEmpty && mine |> List.forall (fun d -> declinedMentioning why d) then
+                resultLine Pass name $"rec-fold-ring declined -- ...{why}..."; true
+            else resultLine Fail name ("saw: " + (mine |> List.map Blade.Effects.Decisions.render |> String.concat " | ")); false
+    let effect = declinesWith "rec_fold_ring_declines_effect_in_range_extent: a range bound that calls a storing helper" effectInExtent "a type carries"
+    let deep = declinesWith "rec_fold_ring_declines_deep_extent_read: a trajectory read ten range extents deep" deepExtent "inside a type's extent"
+    [ on; off; llvm; team; strict; effect; deep ]
 // ---------------------------------------------------------------------------
 // PM14 (round 4 wave 2): the leading-axis fold's state updated in place
 // (rule `fold-state-in-place`, Optimize.fuseSliceWritesModule's fold-state

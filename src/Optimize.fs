@@ -8333,8 +8333,57 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
         List.foldBack (fun (id, v) acc -> IRLet (id, v, acc)) stmts fin
     // Does `id` occur in an expression a TYPE carries (a range's extent, a
     // variable's index extents ..)? The generic child walk never enters those.
+    // EVERY expression a type carries, transitively and with NO depth bound
+    // (embeddedExtentExprs stops descending at depth 8): a worklist over the
+    // extents each extent's own nodes carry, deduplicated by reference, under
+    // a node budget. None = the budget ran out (callers fail closed).
+    let typeCarried (e: IRExpr) : IRExpr list option =
+        let seen = System.Collections.Generic.HashSet<IRExpr>(HashIdentity.Reference)
+        let out = ResizeArray<IRExpr>()
+        let work = System.Collections.Generic.Queue<IRExpr>()
+        for x in embeddedExtentExprs e do work.Enqueue x
+        let mutable budget = 200000
+        while work.Count > 0 && budget > 0 do
+            let x = work.Dequeue ()
+            if seen.Add x then
+                budget <- budget - 1
+                out.Add x
+                for y in embeddedExtentExprs x do work.Enqueue y
+        if work.Count > 0 then None else Some (List.ofSeq out)
     let mentionsInTypes (id: IRId) (e: IRExpr) =
-        embeddedExtentExprs e |> List.exists (mentions id)
+        match typeCarried e with
+        | None -> true
+        | Some xs -> xs |> List.exists (mentions id)
+    // A type-carried expression that COMPUTES (anything but literals, names
+    // and scalar arithmetic) runs at its type's materialization, outside what
+    // the shared write analysis walks: its effects are unaudited.
+    let typeCarriedSimple (e: IRExpr) =
+        let rec simple (x: IRExpr) =
+            match x with
+            | IRLit _ | IRVar _ | IRParam _ -> true
+            | IRBinOp (_, _, a, b, _) -> simple a && simple b
+            | IRUnaryOp (_, a) -> simple a
+            | _ -> false
+        match typeCarried e with
+        | None -> false
+        | Some xs -> xs |> List.forall simple
+    // The callables an expression reaches (by name, through bodies and the
+    // expressions their types carry), transitively.
+    let reachableCallables (roots: IRExpr list) : IRCallable list =
+        let seen = System.Collections.Generic.HashSet<IRId>()
+        let out = ResizeArray<IRCallable>()
+        let rec visit (e: IRExpr) =
+            let extents = match typeCarried e with Some xs -> xs | None -> []
+            for x in e :: extents do
+                iterIRExpr (fun n ->
+                    match n with
+                    | IRVar (id, _) ->
+                        (match callables.TryGetValue id with
+                         | true, c when seen.Add id -> out.Add c; visit c.Body
+                         | _ -> ())
+                    | _ -> ()) x
+        roots |> List.iter visit
+        List.ofSeq out
     let boundInBlock (blk: IRExpr) (id: IRId) =
         let mutable hit = false
         iterIRExpr (fun x -> match x with IRLet (b, _, _) when b = id -> hit <- true | _ -> ()) blk
@@ -8873,15 +8922,40 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
                 // exemption is a SCALAR accumulator bound outside the region
                 // -- row-fold fusion's own in-sweep fold state -- which cannot
                 // hold a view; its value is still audited.
-                let blockMasked =
+                // The CHAIN without the buffer's binder (so the buffer counts as
+                // outside storage), the classified row stores replaced by their
+                // values (the audit proved they are the only syntactic stores),
+                // and assignments to SCALAR lets bound outside the region
+                // masked: what remains must write NOTHING -- no write into an
+                // earlier row through a view, an alias or a `mut` parameter
+                // (the moved folds read rows once, right after their write),
+                // no storage a row view could escape into.
+                let chainMasked =
                     let outsideScalar (id: IRId) (t: IRType) =
                         (match t with IRTScalar _ -> true | _ -> false) && not (boundInBlock block id)
                     mapIRExpr (fun x ->
                         match x with
+                        | IRAssign (IRIndex (IRVar (b, _), _, _), v) when b = bufId -> v
                         | IRAssign (IRVar (id, t), v) when outsideScalar id t -> v
-                        | _ -> x) block
-                if writes blockMasked then
-                    decline "the recursion (the producer) may write storage outside its own buffer (a row view could escape its step, or the folds would move across the write)"
+                        | _ -> x) chain
+                // Effects hidden in type-carried expressions (a range bound
+                // that calls) are outside the write analysis: every expression
+                // the region and the callables it reaches carry in types must
+                // be literals, names and scalar arithmetic.
+                let typesQuiet (roots: IRExpr list) =
+                    let cs = reachableCallables roots
+                    roots |> List.forall typeCarriedSimple
+                    && cs |> List.forall (fun c ->
+                        typeCarriedSimple c.Body
+                        && (c.RetType :: (c.Params |> List.map (fun p -> p.Type)))
+                           |> List.forall (fun t -> irTypeExtentExprs t |> List.forall typeCarriedSimple
+                                                     && irTypeExtentExprs t |> List.forall (fun e -> match e with IRLit _ | IRVar _ | IRParam _ | IRBinOp _ | IRUnaryOp _ -> true | _ -> false)))
+                if writes chainMasked then
+                    decline "the recursion may write storage other than its own row stores (an earlier row through a view, an alias or a `mut` parameter, or storage a row view could escape into)"
+                elif not (typesQuiet [ chain ]) then
+                    decline "an expression a type carries in the recursion (or in a function it calls) computes (a call or an array form): its effects are not audited"
+                elif consumers.Count > 0 && not (typesQuiet (interval @ (consumers |> Seq.map snd |> List.ofSeq))) then
+                    decline "an expression a type carries between the recursion and its last fold (or in a kernel it calls) computes: its effects are not audited"
                 elif consumers.Count > 0 && writes block then
                     decline "the recursion (the producer) may write storage outside its own buffer (the folds would move across it)"
                 elif consumers.Count > 0 && (interval |> List.exists writes) then
