@@ -1,0 +1,18 @@
+// TEST: Ungroup Of A Structural Group View Shares The Source
+// `ungroup(g)` and `ungroup(g, CI)` of a viewed grouping are cell for cell the
+// source (the structural accessor is the identity), and the never-written
+// closure holds over both results, so each shares the source's storage
+// instead of allocating and scattering a copy.
+type I = Idx<11>
+type CI = Chunked<I, 3>
+let a: Array<Float like I> = Float64(0..11) * 3.0 - 1.0 |> compute
+let seg = segments(CI)
+let g = group_by(a, seg)
+let back = ungroup(g)
+let back2: Array<Float like CI> = ungroup(g, CI)
+let s1 = reduce(back, (+))
+// EXPECT: s1 = 154.0
+let s2 = reduce(back2 * 2.0, (+))
+// EXPECT: s2 = 308.0
+let last = back2(10)
+// EXPECT: last = 29.0

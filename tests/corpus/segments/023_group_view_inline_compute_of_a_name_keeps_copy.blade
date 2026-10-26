@@ -1,0 +1,13 @@
+// TEST: A Structural Group Of An Inline Compute Of A Name Keeps Its Copy
+// `group_by(a |> compute, seg)` binds a temporary that SHARES a's storage
+// (the compute of a stored name is its wrapper), so a temporary is no proof
+// of private storage: the view declines and the later write to `a` is not
+// seen by gc.
+type I = Idx<10>
+type CI = Chunked<I, 4>
+let a: Array<Float like I> = 1.0 + 0.5 * Float64(0..10) |> compute
+let seg = segments(CI)
+let gc = group_by(a |> compute, seg)
+a(0) = 99.0
+let sums = method_for(gc) <@> lambda(r) -> reduce(r, (+)) |> compute
+// EXPECT: sums = [7.0, 15.0, 10.5]

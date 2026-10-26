@@ -3958,8 +3958,16 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
              | Some vn -> Map.tryFind vn ctx.StreamedArrays |> Option.map (fun s -> (vn, s))
              | None -> None)
         | _ -> None
+    // A structural-group-view verdict reaching an arm that keeps its pool
+    // (streamed rows, a tile gather) is recorded as declined there.
+    let recordViewKept (why: string) =
+        match Blade.Optimize.GroupViewTable.tryGroup binding.Id with
+        | Some (Error planWhy) -> Blade.Optimize.recordGroupView binding.Name (Blade.Effects.Declined planWhy) []
+        | Some (Ok ev) -> Blade.Optimize.recordGroupView binding.Name (Blade.Effects.Declined ("C++ lane: " + why)) ev
+        | None -> ()
     match streamedVals with
     | Some (valsName, spec) ->
+        recordViewKept "the values are streamed (the pool is their only materialization)"
         let gkName = exprToCppCtx ctx gk
         if not (Set.contains gkName ctx.StructuralGroupings) then
             let ctx' = addVarName binding.Id name ctx
@@ -4036,6 +4044,7 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         Map.tryFind gkName ctx.GridGroupings |> Option.map (fun b -> (gkName, b))
     match gridGk with
     | Some (gkName, bounds) ->
+        recordViewKept "a tile grouping (a tile is a window of the row-major source, not a run)"
         // TILE GATHER (docs/plans/structural/07 §4.1b): the values are rank 2,
         // addressed by coordinates; tile t = (t / G1, t % G1) copies its
         // window row-major into its slot of the pool.
@@ -4092,17 +4101,57 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         | Some p -> p.EmittedCpp.Value
         | None -> false
     let elideGather = aggregated || Set.contains binding.Id (extentsOnlyGroupBysCell ()).Value
+    // STRUCTURAL GROUP VIEW (Blade.Optimize.planStructuralGroupView, rule
+    // `structural-group-view v1`): the plan proved the source, the grouped
+    // array and every value that may share their storage never written, so
+    // the CSR pool -- a byte copy of the source under the identity accessor --
+    // is replaced by row pointers INTO the source's storage. The emitter
+    // re-checks what only it knows: the rows are gathered at all, the
+    // grouping is a structural one, main's top level, no MPI program, and the
+    // materialized values are a plain dense rank-1 array.
+    let viewDecline : string option =
+        match Blade.Optimize.GroupViewTable.tryGroup binding.Id with
+        | None -> Some ""
+        | Some (Error _) -> Some ""
+        | Some (Ok _) ->
+            if elideGather then Some "the rows are not gathered at all (every consumer reads extents or a group-aggregate state)"
+            elif not (Set.contains gkName ctx.StructuralGroupings) then Some "the grouping is not a structural one at its emission"
+            elif (currentAllocScope ()).IsSome then Some "not at main's top level (a scope frees its allocations)"
+            elif mpiProgramOn () then Some "an MPI program (slab-distributed storage is not audited)"
+            else
+                match vals, inferExprType vals with
+                | IRVar _, ArrayElem at when not at.IsVirtual
+                                            && not (isCompoundArrayType at) && not (isSparseArrayType at)
+                                            && (match at.IndexTypes with
+                                                | [ ix ] -> ix.Rank = 1 && ix.IxKind = IxKPlain && ix.Symmetry = SymNone
+                                                | _ -> false) -> None
+                | _ -> Some "the materialized values are not a plain dense rank-1 array"
+    let asView = viewDecline.IsNone
+    (match Blade.Optimize.GroupViewTable.tryGroup binding.Id, viewDecline with
+     | Some (Ok ev), None ->
+         Blade.Optimize.GroupViewTable.noteEmitted binding.Id valsName
+         Blade.Optimize.recordGroupView binding.Name Blade.Effects.Applied (ev @ [ $"C++ lane: rows of `{name}` point into `{valsName}`'s pool" ])
+     | Some (Ok ev), Some why ->
+         Blade.Optimize.recordGroupView binding.Name (Blade.Effects.Declined ("C++ lane: " + why)) ev
+     | Some (Error why), _ ->
+         Blade.Optimize.recordGroupView binding.Name (Blade.Effects.Declined why) []
+     | None, _ -> ())
     let code =
         elemErrCode
         @ [ if aggregated
             then $"{ind}// group_by: rows NOT gathered -- every consumer reads its group-aggregate state (Blade.Optimize.planGroupAggregate)"
             elif elideGather
             then $"{ind}// group_by: rows NOT gathered -- every consumer reads only extents(row)"
+            elif asView
+            then $"{ind}// group_by: rows VIEW {valsName}'s storage -- contiguous structural runs, never written (structural-group-view v1): no pool, no copy"
             else $"{ind}// group_by: per-group nested allocation, group-contiguous via gk__perm" ]
         @ extentsDecl
         @ [ $$"""{{ind}}Array<{{elemStr}}*, 1> {{name}} = { new {{elemStr}}*[{{gkName}}__ngroups], {{name}}_extents };""" ]
         @ (if elideGather then
              [ $"{ind}for (size_t __g = 0; __g < {gkName}__ngroups; __g++) {name}[__g] = nullptr;" ]
+           elif asView then
+             [ $"{ind}{{ {elemStr}* __gv_base = nested_array_utilities::pool_base({valsName}.data);"
+               $"{ind}  for (size_t __g = 0; __g < {gkName}__ngroups; __g++) {name}[__g] = __gv_base + {gkName}__offsets[__g]; }}" ]
            else
              // ONE CSR POOL, not one `new[]` per group. The total is already in
              // hand -- `gk__offsets[gk__ngroups]` is the CSR convention -- so the
@@ -4145,6 +4194,10 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
     if elideGather then
         registerShapedAlloc name "deallocate_ragged_rows_owned"
             ($"{name}.data, {gkName}__ngroups")
+    elif asView then
+        // The VIEW owns its row table only; the cells are the source's.
+        registerShapedAlloc name "deallocate_ragged_storage"
+            ($"{name}.data, static_cast<{elemStr}*>(nullptr)")
     else
         registerShapedAlloc name "deallocate_ragged_storage"
             ($"{name}.data, {name}__pool")
@@ -4269,6 +4322,37 @@ and genUngroupBinding (ctx: CodeGenContext) (binding: IRBinding) (g: IRExpr) (sr
             | _ -> $"{gkName}__offsets[{gkName}__ngroups]"
         let (extentsDecl, ownedExtents) =
             emitExtentsTable ind (name + "_extents") 1 [(total, false)]
+        // STRUCTURAL GROUP VIEW, D1b (rule `structural-group-view v1`): G's
+        // rows were emitted as a view of the source's storage and the
+        // accessor is the identity, so the reassembled array IS the source
+        // cell for cell; the plan's closure holds over this binding too
+        // (it names G), so it shares the source's storage: no pool, no copy.
+        let shared =
+            match Blade.Optimize.GroupViewTable.tryUngroup binding.Id with
+            | Some (gid, Ok ev) ->
+                (match Blade.Optimize.GroupViewTable.tryEmitted gid with
+                 | Some srcCpp when (currentAllocScope ()).IsNone ->
+                     Blade.Optimize.recordGroupView binding.Name Blade.Effects.Applied (ev @ [ $"C++ lane: `{name}` shares `{srcCpp}`'s pool" ])
+                     Some srcCpp
+                 | Some _ ->
+                     Blade.Optimize.recordGroupView binding.Name (Blade.Effects.Declined "C++ lane: not at main's top level") ev
+                     None
+                 | None ->
+                     Blade.Optimize.recordGroupView binding.Name (Blade.Effects.Declined ($"C++ lane: `{gName}`'s rows were not emitted as a view")) ev
+                     None)
+            | Some (_, Error why) ->
+                Blade.Optimize.recordGroupView binding.Name (Blade.Effects.Declined why) []
+                None
+            | None -> None
+        match shared with
+        | Some srcCpp ->
+            let code =
+                [ $"{ind}// ungroup: rows of {gName} ARE {srcCpp}'s storage (structural-group-view v1): {name} shares it -- no pool, no copy" ]
+                @ extentsDecl
+                @ [ $$"""{{ind}}Array<{{elemStr}}, 1> {{name}} = { {{srcCpp}}.data, {{name}}_extents };""" ]
+            let ctx' = addVarName binding.Id name ctx
+            (code, ctx')
+        | None ->
         let code =
             [ $"{ind}// ungroup: rows of {gName} written back over the source axis ({total} cells)" ]
             @ extentsDecl

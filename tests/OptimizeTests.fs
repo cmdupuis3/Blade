@@ -10585,6 +10585,50 @@ let private hashJoinCodegenCases () =
                resultLine Fail name ($"refusal: {why}; recorded: {rec'}")
                false) ]
 
+/// The structural group view (structural-group-view v1, BLADE_GROUP_VIEW,
+/// PM57): the corpus witnesses' emission and decisions.
+let private groupViewCases () : bool list =
+    let corpus (file: string) =
+        try System.IO.File.ReadAllText ("tests/corpus/segments/" + file) with _ -> ""
+    let viewSrc = corpus "018_group_view_rows_read_the_source.blade"
+    let has (needle: string) (cpp: string) = cpp.Contains needle
+    [ tnfEmission "group_view_rows_point_into_source" viewSrc (fun cpp ->
+          if has "nested_array_utilities::pool_base(a.data);" cpp && has "g[__g] = __gv_base + seg__offsets[__g];" cpp
+             && not (has "g__pool = new" cpp) then Ok "g's rows point into a's pool: no CSR pool, no copy"
+          else Error "the view emission is missing (or the pool is still allocated)")
+      tnfEmission "group_view_ungroup_shares_source" viewSrc (fun cpp ->
+          if has "Array<double, 1> back = { a.data, back_extents };" cpp then Ok "back shares a's pool"
+          else Error "ungroup(g) still allocates its copy")
+      withGate "BLADE_GROUP_VIEW" "0" (fun () ->
+          tnfEmission "group_view_gate_off_keeps_pool_and_copy" viewSrc (fun cpp ->
+              if has "double* g__pool = new double[seg__offsets[seg__ngroups]];" cpp
+                 && has "Array<double, 1> back = { allocate<promote<double, 1>::type>(back_extents), back_extents };" cpp
+                 && not (has "__gv_base" cpp) then Ok "gate off: the CSR pool and the ungroup copy"
+              else Error "gate off did not restore the pool copy"))
+      tnfEmission "group_view_inline_map_views_private_temporary" (corpus "022_group_view_inline_map_source.blade") (fun cpp ->
+          if has "pool_base(gi__vals.data);" cpp && not (has "gi__pool = new" cpp) then Ok "gi's rows view the inline map's private temporary"
+          else Error "the inline map's temporary is copied again")
+      tnfEmission "group_view_source_written_keeps_pool" (corpus "019_group_view_source_written_keeps_snapshot.blade") (fun cpp ->
+          if has "double* g__pool = new" cpp && not (has "__gv_base" cpp) then Ok "a is written: g keeps its snapshot pool"
+          else Error "the snapshot pool is missing")
+      planCase "decision_group_view_applied" viewSrc "structural-group-view"
+          (fun d -> d.Subject = "g" && applied d && evidenceMentioning "rows view the source's storage" d) "applied: g views a"
+      planCase "decision_group_view_ungroup_applied" viewSrc "structural-group-view"
+          (fun d -> d.Subject = "back" && applied d && evidenceMentioning "shares `a`'s pool" d) "applied: back shares a"
+      planCase "decision_group_view_declined_source_assigned" (corpus "019_group_view_source_written_keeps_snapshot.blade") "structural-group-view"
+          (fun d -> d.Subject = "g" && declinedMentioning "`a` is assigned" d) "declined: a is assigned"
+      planCase "decision_group_view_declined_row_view_written" (corpus "020_group_view_row_view_written_keeps_copy.blade") "structural-group-view"
+          (fun d -> d.Subject = "g" && declinedMentioning "`r` is assigned" d) "declined: a row view of g is written"
+      planCase "decision_group_view_declined_inline_compute_of_a_name" (corpus "023_group_view_inline_compute_of_a_name_keeps_copy.blade") "structural-group-view"
+          (fun d -> d.Subject = "gc" && declinedMentioning "not proved to materialize a private temporary" d) "declined: `a |> compute` shares a's storage"
+      planCase "decision_group_view_declined_write_in_extent" (corpus "024_group_view_write_in_extent_keeps_snapshot.blade") "structural-group-view"
+          (fun d -> d.Subject = "g" && declinedMentioning "`m` names `a` and may write" d) "declined: m's range bound writes a"
+      planCase "decision_group_view_declined_tile_grouping" (corpus "012_segments_grid_two_slots.blade") "structural-group-view"
+          (fun d -> d.Subject = "g" && declinedMentioning "a tile grouping" d) "declined: a tile grouping"
+      withGate "BLADE_GROUP_VIEW" "0" (fun () ->
+          planCase "decision_group_view_declined_gate" viewSrc "structural-group-view"
+              (fun d -> d.Subject = "g" && declinedMentioning "disabled by BLADE_GROUP_VIEW" d) "declined: disabled by BLADE_GROUP_VIEW") ]
+
 let runOptimizeTests () =
     printHeader "Blade-DSL: Optimization Layer Tests"
     let results =
@@ -10665,6 +10709,8 @@ let runOptimizeTests () =
           // Transpose normal form and the read-only alias plan (P2 entry).
           yield! transposeNormalFormCases ()
           yield! transposeNormalFormWave3Cases ()
+          // The structural group view (PM57, round 4 wave 2).
+          yield! groupViewCases ()
           // Hot-row fold scheduling (bench review M13).
           hotRowEmitted ()
           hotRowGateOff ()

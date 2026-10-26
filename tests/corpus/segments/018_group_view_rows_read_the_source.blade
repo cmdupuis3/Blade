@@ -1,0 +1,19 @@
+// TEST: A Structural Group Views Its Never-Written Source
+// structural-group-view v1 (BLADE_GROUP_VIEW, PM57): `group_by(a, seg)` over
+// contiguous segments copies `a` into a CSR pool cell for cell -- the accessor
+// is the identity. Nothing writes `a`, `g` or a value derived from them, so
+// the row table points into a's own storage (no pool, no copy) and
+// `ungroup(g)` -- cell for cell `a` -- shares it too. Same values either way.
+type I = Idx<10>
+type CI = Chunked<I, 4>
+let a: Array<Float like I> = 1.0 + 0.5 * Float64(0..10) |> compute
+let seg = segments(CI)
+let g = group_by(a, seg)
+let sums = method_for(g) <@> lambda(r) -> reduce(r, (+)) |> compute
+// EXPECT: sums = [7.0, 15.0, 10.5]
+let first = method_for(g) <@> lambda(r) -> r(0) |> compute
+// EXPECT: first = [1.0, 3.0, 5.0]
+let back = ungroup(g)
+// EXPECT: back = [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5]
+let dev = reduce(back - a, (+))
+// EXPECT: dev = 0.0

@@ -1,0 +1,14 @@
+// TEST: A Write Through A Row View Of A Structural Group Keeps The Copy
+// `r = g(0)` is a view of g's first row; `r(1) = 5.0` writes g's own pool.
+// Were g a view of `a`, the write would reach `a`, so the structural group
+// view declines (`r` is assigned): `a` keeps 1.5 at cell 1.
+type I = Idx<10>
+type CI = Chunked<I, 4>
+let a: Array<Float like I> = 1.0 + 0.5 * Float64(0..10) |> compute
+let seg = segments(CI)
+let g = group_by(a, seg)
+let r = g(0)
+r(1) = 5.0
+let sums = method_for(g) <@> lambda(row) -> reduce(row, (+)) |> compute
+// EXPECT: sums = [10.5, 15.0, 10.5]
+// EXPECT: a = [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5]

@@ -682,6 +682,8 @@ flat fold -- the alias IS the axis, nothing is reassociated, no license is asked
 A per-segment fold is what `group_by(a, segments(A))` and an explicit combine
 spell; nothing implicit exists to refuse.
 
+Storage: over a never-written plain source, a top-level structural `group_by` reads its rows in the source's own storage and its `ungroup` shares it (no pool, no copy; `BLADE_GROUP_VIEW`). A per-group ROW map `h = method_for(g) <@> lambda(r) -> <row>` followed by `ungroup(h, A)` typechecks but is refused by the emitter (BL7004; gap G90: a language feature, not built).
+
 Not yet: an elementwise map over a grouped array (the ragged-map emitter's
 standing refusal; stream the source instead, or `ungroup` then map); streaming
 of rank >= 3 variables, of a rank-2 stencil, and of netcdf/icechunk stores (zarr

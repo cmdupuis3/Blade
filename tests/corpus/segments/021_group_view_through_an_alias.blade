@@ -1,0 +1,15 @@
+// TEST: A Structural Group Views Its Source Through An Alias
+// The values reach the grouping through `let b = a` (a read-only alias of a's
+// storage). The storage proof follows the alias chain to a's fresh root and
+// the never-written closure holds over both names, so the rows view the
+// shared storage.
+type I = Idx<7>
+type CI = Chunked<I, 3>
+let a: Array<Float like I> = [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0]
+let b = a
+let seg = segments(CI)
+let g = group_by(b, seg)
+let sums = method_for(g) <@> lambda(r) -> reduce(r, (+)) |> compute
+// EXPECT: sums = [12.0, 30.0, 14.0]
+let lens = method_for(g) <@> lambda(r) -> extents(r) |> compute
+// EXPECT: lens = [3, 3, 1]
