@@ -1,0 +1,19 @@
+// TEST: Sibling Maps Fuse Three Outputs In A Function Body
+// ============================================================================
+// Three stored maps over x (two co-iterations with w, one single-operand
+// map) in one function body share ONE flat sweep; a scalar statement between
+// the first two (`let s = 2.5`, read by the second) is part of the interval:
+// it writes nothing and reads no earlier sibling, and the moved loop runs
+// after it. Values are the knob-off build's.
+type I = Idx<9>
+function three(x: Array<Float64 like I>, w: Array<Float64 like I>) -> Float64 = {
+    let y1 = method_for(zip(x, w)) <@> lambda(a, b) -> a * b |> compute
+    let s = 2.5
+    let y2 = method_for(zip(x, w)) <@> lambda(a, b) -> a + b * s |> compute
+    let y3 = method_for(x) <@> lambda(a) -> a * a - 1.0 |> compute
+    reduce(y1, (+)) + reduce(y2, (+)) * 10.0 + reduce(y3, (+)) * 100.0
+}
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+let w: Array<Float64 like I> = [9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0]
+let r = three(x, w)
+// EXPECT: r = 29340.0

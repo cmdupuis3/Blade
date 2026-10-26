@@ -211,7 +211,7 @@ let rec private genFuncBodyScoped
             | IRVar (rid, _) when deferredLets |> List.exists (fun (i, _) -> i = rid) ->
                 Set.add rid read
             | _ -> read
-    let stmts = lets |> List.collect (fun (id, value) ->
+    let emitBodyLet (id: IRId, value: IRExpr) : string list =
         // Every allocation emitted while THIS let renders is owned by it (see
         // setAllocOwner); the fold overwrites the stamp each iteration.
         setAllocOwner (Some id)
@@ -845,7 +845,14 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
         | _ ->
             let valStr = exprToCpp currentNames value
             currentNames <- Map.add id varName currentNames
-            [$"{indent}auto {varName} = {valStr};"])
+            [$"{indent}auto {varName} = {valStr};"]
+    // Sibling maps (Optimize.planSiblingMaps): each let renders inside the
+    // group protocol -- the first member preflights the group, the last
+    // flushes any stash its apply never reached (CodeGenLoopNest).
+    let stmts = lets |> List.collect (fun (id, value) ->
+        siblingArmBegin id $"__v{id}" siblingPreflight
+        let lines = emitBodyLet (id, value)
+        lines @ siblingArmEnd id $"__v{id}")
     // Scratch reuse: a let the plan gave a donor takes the donor's pool -- its
     // `allocate<>` declaration is rewritten into an alias of the donor's data
     // (its own extents table stays), and its scope free is spared; the donor's
@@ -2070,6 +2077,9 @@ let private genModuleBinding
         (hoistIds: Set<IRId>) : string list * CodeGenContext =
     let atBinding =
         { ctx with TopLevelProviderRead = if ctx.ProviderReads.ContainsKey binding.Id then Some binding.Id else None }
+    // Sibling maps (Optimize.planSiblingMaps): the group protocol around
+    // every module binding (CodeGenLoopNest.siblingArmBegin / siblingArmEnd)
+    siblingArmBegin binding.Id (bindingCppName binding) siblingPreflight
     let (code, emittedCtx) =
         match ctx.PrivateSpoolRegion with
         | Some region when obj.ReferenceEquals(binding, region.Plan.Producer) && not region.Committed ->
@@ -2087,6 +2097,7 @@ let private genModuleBinding
                            && ([region.Plan.Statistic;region.Plan.Barrier;region.Plan.Terminal]
                                |> List.exists (fun b -> obj.ReferenceEquals(b,binding))) -> [], atBinding
         | _ -> genBinding atBinding binding builder
+    let code = code @ siblingArmEnd binding.Id (bindingCppName binding)
     let ctx' = { emittedCtx with TopLevelProviderRead = ctx.TopLevelProviderRead }
     if not (Set.contains binding.Id hoistIds) then (code, ctx')
     else

@@ -212,6 +212,17 @@ let joinReportEnabled () = Blade.Toolchain.envFlag "BLADE_JOIN_REPORT" false
 /// a compute it would have elided records `compute-elision` DECLINED
 /// ("disabled by BLADE_COMPUTE_ELIDE"). Unset = on.
 let computeElideEnabled () = gateOn "BLADE_COMPUTE_ELIDE"
+/// BLADE_FOLD_MAP_ELIDE=0|off keeps the FOLD-OF-MAP consumer out of compute
+/// elision (round 4 wave 2, PM12, rule `fold-map-elision`): a `|> compute` read
+/// only by the operand map of one fold (`reduce(c * c, (+)) / n`) stays stored and
+/// records compute elision's previous decline, byte for byte. Unset = on (it also
+/// needs BLADE_COMPUTE_ELIDE and BLADE_FUSION, its realization).
+let foldMapElideEnabled () = gateOn "BLADE_FOLD_MAP_ELIDE"
+/// BLADE_SIBLING_MAPS=0|off keeps every stored map its own traversal (round 4
+/// wave 2, PM04, rule `sibling-maps`; `planSiblingMaps`): the admission still
+/// runs and a group it would have fused records DECLINED ("disabled by
+/// BLADE_SIBLING_MAPS"). Unset = on.
+let siblingMapsEnabled () = gateOn "BLADE_SIBLING_MAPS"
 /// BLADE_CALL_ELIDE=0|off keeps every call as a call (`elideCallsModule`, the
 /// P4 entry): the admission still runs and a call it would have jointly
 /// lowered records `call-elision` DECLINED ("disabled by BLADE_CALL_ELIDE").
@@ -234,7 +245,7 @@ let mutable blasGateProbe : unit -> bool = fun () -> false
 /// off for its reference lane, so a new pass's gate belongs in this list the
 /// day the pass lands -- a gate missing here is a pass the differential
 /// cannot see.
-let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_POOL_EARLY_RELEASE"; "BLADE_HOIST"; "BLADE_HOT_ROW"; "BLADE_CELL_EPILOGUE"; "BLADE_COMPACTION_FUSION"; "BLADE_COMPACT_ROW_CLASSES"; "BLADE_SIBLING_FOLDS"; "BLADE_REC_STEP_OMP"; "BLADE_MEMBER_HOIST"; "BLADE_EPILOGUE_LEGS"; "BLADE_ORBIT_ACTIONS"; "BLADE_HASH_JOIN"; "BLADE_GROUP_AGG"; "BLADE_COMPUTE_ELIDE"; "BLADE_TRANSPOSE_ELIDE"; "BLADE_CALL_ELIDE"; "BLADE_RECOMPUTE"; "BLADE_REC_WINDOW"; "BLADE_GROUP_VIEW"; "BLADE_SINK_ALIAS" ]
+let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_POOL_EARLY_RELEASE"; "BLADE_HOIST"; "BLADE_HOT_ROW"; "BLADE_CELL_EPILOGUE"; "BLADE_COMPACTION_FUSION"; "BLADE_COMPACT_ROW_CLASSES"; "BLADE_SIBLING_FOLDS"; "BLADE_REC_STEP_OMP"; "BLADE_MEMBER_HOIST"; "BLADE_EPILOGUE_LEGS"; "BLADE_ORBIT_ACTIONS"; "BLADE_HASH_JOIN"; "BLADE_GROUP_AGG"; "BLADE_COMPUTE_ELIDE"; "BLADE_TRANSPOSE_ELIDE"; "BLADE_CALL_ELIDE"; "BLADE_RECOMPUTE"; "BLADE_REC_WINDOW"; "BLADE_GROUP_VIEW"; "BLADE_SINK_ALIAS"; "BLADE_FOLD_MAP_ELIDE"; "BLADE_SIBLING_MAPS" ]
 
 /// A gate's KNOB MIRROR: a value that keeps a pass's PREVIOUS version, or
 /// selects an opt-in variant (not the pass off), for the passes whose forms
@@ -10501,9 +10512,13 @@ let recordPendingElision (rule: string) (subject: string) (outcome: Blade.Effect
 
 /// A MAP-consumer elision, recorded once elementwise fusion has run: applied
 /// iff no application of the host kernel still carries a computed operand.
-type ComputeElisionPending = { PendingRule: string; PendingSubject: string; HostKernel: IRId; PendingEvidence: string list }
+type ComputeElisionPending = { PendingRule: string; PendingSubject: string; HostKernel: IRId; PendingEvidence: string list
+                               /// fold-map elision: the PRODUCER's kernel -- the record is applied only
+                               /// when no computed operand over it survives fusion (a host whose other
+                               /// operand fused may get a new id while this producer stays unspliced)
+                               SplicedKernel: IRId option }
 
-let elideSingleConsumerComputesModule (programFuncs: IRCallable list) (singleModule: bool) (modul: IRModule) : IRModule * ComputeElisionPending list =
+let elideSingleConsumerComputesModule (builder: IRBuilder) (programFuncs: IRCallable list) (singleModule: bool) (modul: IRModule) : IRModule * ComputeElisionPending list =
     if modul.Functions |> List.exists (fun f -> f.IsCudaKernel) then (modul, []) else
     let pending = ResizeArray<ComputeElisionPending>()
     let enabled = computeElideEnabled ()
@@ -10586,6 +10601,99 @@ let elideSingleConsumerComputesModule (programFuncs: IRCallable list) (singleMod
                         | IRAssign _ -> "is assigned"
                         | _ -> "")) sv
             if found.Count = 1 && found.[0] <> "" then Some found.[0] else None
+    // ---- FOLD-OF-MAP (round 4 wave 2, PM12; BLADE_FOLD_MAP_ELIDE) -----------
+    // The operand MAP of a fold node: `reduce(<map>, k[, s])` or the fused
+    // terminal `IRReduceCompute(<map>, k, s)`.
+    let foldOperandMap (n: IRExpr) : ApplyInfo option =
+        match n with
+        | IRReduce ((IRApplyCombinator h | IRCompute (IRApplyCombinator h)), _, _)
+        | IRReduceCompute ((IRApplyCombinator h | IRCompute (IRApplyCombinator h)), _, _) -> Some h
+        | _ -> None
+    /// The ONE fold in `sv` whose operand map reads x at an operand position,
+    /// when every reference to x in `sv` is in that map's operand lists (its
+    /// Arrays and their Loop-provenance copy): not the fold's kernel or seed,
+    /// not the map's kernel, nothing else in the statement.
+    let foldMapConsumerOf (x: IRId) (sv: IRExpr) : ApplyInfo option =
+        let found = ResizeArray<ApplyInfo>()
+        iterIRExpr (fun n ->
+            match foldOperandMap n with
+            | Some h when h.Arrays |> List.exists (isX x) -> found.Add h
+            | _ -> ()) sv
+        if found.Count <> 1 then None
+        else
+            let h = found.[0]
+            // every read is a DIRECT operand position (not inside a nested map
+            // operand, whose own evaluation would then repeat the producer)
+            let direct = h.Arrays |> List.filter (isX x) |> List.length
+            if refsOf x h.Kernel = 0 && refsOf x sv = refsOf x (IRApplyCombinator h)
+               && (h.Arrays |> List.sumBy (refsOf x)) = direct
+               // v1: SEVERAL positions (`c * c`) only; one position is the B1
+               // cell epilogue's shape and keeps today's record (collapseOperand)
+               && direct >= 2 then Some h else None
+    /// Collapse the duplicate operand positions of x in a plain co-iteration
+    /// (`zip(c, c)` -> one operand): the duplicates are the SAME stored array
+    /// at the SAME shared coordinate, so their kernel parameters always hold
+    /// the same cell; the collapsed kernel reads the kept parameter for each.
+    /// Every positional list is rebuilt in lockstep. One position: unchanged.
+    let collapseOperand (x: IRId) (h: ApplyInfo) (hk: IRCallable) : Result<ApplyInfo * IRCallable * IRCallable option, string> =
+        let posns = h.Arrays |> List.indexed |> List.filter (fun (_, a) -> isX x a) |> List.map fst
+        match posns with
+        | [] -> Error "the fold's map does not read the compute"
+        // ONE position (`reduce(method_for(y) <@> lambda(w) -> w * w, ..)`) is the
+        // B1 cell epilogue's shape: that plan keeps the producer's store and
+        // folds inside its loop, so v1 leaves it to the epilogue (both must
+        // not claim one producer)
+        | [ _ ] -> Error "the fold's map reads the compute at one operand position: the cell epilogue's (B1) shape, which keeps the producer stored and folds inside its loop (v1 elides only a co-iteration reading it at several positions, `c * c`)"
+        | keep :: rest ->
+        let n = h.Arrays.Length
+        let drop = Set.ofList rest
+        let lengthsOk =
+            h.Identities.Length = n && h.ArrayTypes.Length = n && h.SDimsPerArray.Length = n
+            && h.SymcomStates.Length = n && h.TriangularLevels.Length = n && h.KernelInputRanks.Length = n
+            && hk.Params.Length = n
+        if not lengthsOk then Error "the fold's map carries positional records of another length than its operands"
+        elif rest |> List.exists (fun j ->
+                 h.ArrayTypes.[j] <> h.ArrayTypes.[keep] || h.SDimsPerArray.[j] <> h.SDimsPerArray.[keep]
+                 || h.KernelInputRanks.[j] <> 0 || h.KernelInputRanks.[keep] <> 0
+                 || hk.Params.[j].Type <> hk.Params.[keep].Type) then
+            Error "the duplicate operand positions do not read the same cell the same way (types, peels or parameter types differ)"
+        else
+        let keepIdx (l: 'a list) = l |> List.indexed |> List.filter (fun (i, _) -> not (drop.Contains i)) |> List.map snd
+        let kp = hk.Params.[keep]
+        let body =
+            rest |> List.fold (fun b j ->
+                let dv = hk.Params.[j].VarId
+                mapIRExpr (fun e -> match e with IRVar (id, _) when id = dv -> IRVar (kp.VarId, kp.Type) | e -> e) b) hk.Body
+        let ps = keepIdx hk.Params |> List.mapi (fun i p -> { p with Index = i })
+        let lam =
+            { mkLambdaCallable builder ps body hk.RetType hk.Captures false [] [] false false 256 false
+                with SourceName = hk.SourceName; IsRepro = hk.IsRepro }
+        let kv = IRVar (lam.Id, IRTArrow (ps |> List.map (fun p -> SVal p.Type), hk.RetType, None))
+        let arrays = keepIdx h.Arrays
+        let single = arrays.Length = 1
+        let shared = if single then [] else h.SharedIndexTypes
+        let sdims = keepIdx h.SDimsPerArray
+        let loop =
+            match h.Loop with
+            | IRMethodFor mf when mf.Arrays.Length = n && mf.Identities.Length = n && mf.ArrayTypes.Length = n && mf.SDimsPerArray.Length = n ->
+                let mfs = keepIdx mf.SDimsPerArray
+                Ok (IRMethodFor { mf with Arrays = keepIdx mf.Arrays; Identities = keepIdx mf.Identities
+                                          ArrayTypes = keepIdx mf.ArrayTypes; SDimsPerArray = mfs
+                                          TotalSDims = List.sum mfs
+                                          SharedIndexTypes = (if single then [] else mf.SharedIndexTypes) })
+            | IRObjectFor o when o.InputRanks.Length = n ->
+                Ok (IRObjectFor { o with Kernel = kv; InputRanks = keepIdx o.InputRanks })
+            | _ -> Error "the fold's map loop does not carry one record per operand"
+        match loop with
+        | Error why -> Error why
+        | Ok loop' ->
+        Ok ({ h with Loop = loop'; Kernel = kv; Arrays = arrays; Identities = keepIdx h.Identities
+                     ArrayTypes = keepIdx h.ArrayTypes; SharedIndexTypes = shared
+                     SymcomStates = keepIdx h.SymcomStates; TriangularLevels = keepIdx h.TriangularLevels
+                     SDimsPerArray = sdims; KernelInputRanks = keepIdx h.KernelInputRanks
+                     IsCoIteration = not single },
+            lam, Some lam)
+    let mintedKernels = ResizeArray<IRCallable>()
     let bindingById = modul.Bindings |> List.map (fun b -> (b.Id, b)) |> Map.ofList
     let nameOfLet (xid: IRId) (p: ApplyInfo) =
         match Map.tryFind xid bindingById, resolve p.Kernel with
@@ -10694,10 +10802,16 @@ let elideSingleConsumerComputesModule (programFuncs: IRCallable list) (singleMod
                         // kernel or the seed would outlive the dropped let
                         if refsOf xid k + (init |> Option.map (refsOf xid) |> Option.defaultValue 0) > 0 then
                             Error $"`{xn}` is read again by the fold's kernel or seed"
-                        else Ok (Choice1Of2 (k, init))
+                        else Ok (Choice1Of3 (k, init))
                     | IRCompute (IRApplyCombinator h)
                         when (h.Arrays |> List.filter (isX xid) |> List.length) = 1
-                             && refsOf xid h.Kernel = 0 -> Ok (Choice2Of2 h)
+                             && refsOf xid h.Kernel = 0 -> Ok (Choice2Of3 h)
+                    // FOLD-OF-MAP (round 4 wave 2, PM12, rule `fold-map-elision`):
+                    // x's only reads are operand positions of the MAP one fold
+                    // folds (`reduce(c * c, (+)) / n`), anywhere in the statement.
+                    // Off: today's decline, byte for byte.
+                    | _ when foldMapElideEnabled () && (foldMapConsumerOf xid sv).IsSome ->
+                        Ok (Choice3Of3 (foldMapConsumerOf xid sv).Value)
                     | _ ->
                         match describeRead xid isTail sv with
                         | Some what -> Error $"`{xn}` {what}"
@@ -10706,6 +10820,11 @@ let elideSingleConsumerComputesModule (programFuncs: IRCallable list) (singleMod
                 match consumer with
                 | Error why -> decline why []
                 | Ok kind ->
+                // a fold-of-map candidate's decisions are its own rule's
+                let decline (why: string) (ev: string list) =
+                    match kind with
+                    | Choice3Of3 _ -> recordPendingElision "fold-map-elision" subj (Blade.Effects.Declined why) ev
+                    | _ -> decline why ev
                 // ---- the producer --------------------------------------------
                 let pk = resolve p.Kernel
                 let operandOk (a: IRExpr) =
@@ -10763,7 +10882,7 @@ let elideSingleConsumerComputesModule (programFuncs: IRCallable list) (singleMod
                        | Some _ -> [ $"top level: `{xn}` is not in the print selection (BLADE_PRINT / --print), so it was materialized only to be printed; the print selection licensed the elision" ]
                        | None -> [])
                 match kind with
-                | Choice1Of2 (k, init) ->
+                | Choice1Of3 (k, init) ->
                     // ---- FOLD -----------------------------------------------
                     let fold = elidedFoldSeed regionRepro.Value p.OutputType (resolve k) init
                     match fold with
@@ -10780,7 +10899,7 @@ let elideSingleConsumerComputesModule (programFuncs: IRCallable list) (singleMod
                             match at with
                             | Some j -> lets.[j] <- (fst lets.[j], folded)
                             | None -> tail <- folded
-                | Choice2Of2 h ->
+                | Choice2Of3 h ->
                     // ---- MAP (realized by elementwise fusion) ---------------
                     let pos = h.Arrays |> List.findIndex (isX xid)
                     let mapProblem =
@@ -10811,9 +10930,126 @@ let elideSingleConsumerComputesModule (programFuncs: IRCallable list) (singleMod
                         if not enabled then decline "disabled by BLADE_COMPUTE_ELIDE" ev
                         else
                             let hkId = match h.Kernel with IRVar (kid, _) -> kid | _ -> -1
-                            pending.Add { PendingRule = "compute-elision"; PendingSubject = subj; HostKernel = hkId; PendingEvidence = ev }
+                            pending.Add { PendingRule = "compute-elision"; PendingSubject = subj; HostKernel = hkId; PendingEvidence = ev; SplicedKernel = None }
                             dropped.Add i |> ignore
                             let v' = IRCompute (IRApplyCombinator h')
+                            match at with
+                            | Some j -> lets.[j] <- (fst lets.[j], v')
+                            | None -> tail <- v'
+                | Choice3Of3 h ->
+                    // ---- FOLD-OF-MAP (realized by elementwise fusion) -------
+                    // The fold node is kept exactly (kernel, seed, extent, axes):
+                    // only its operand map's x operands change, collapsed to one
+                    // and replaced by x's producer map, which fusion splices into
+                    // the fold's map kernel (bound once per cell when read twice).
+                    let shaped =
+                        match tileKernelOf localCallables h with
+                        | _ when not (Blade.Toolchain.envFlag "BLADE_FUSION" true) ->
+                            Error "elementwise fusion, the fold map's realization, is disabled (BLADE_FUSION)"
+                        | None -> Error "the fold's map kernel is not a resolvable callable"
+                        | Some hk ->
+                            if not (tilePlainInfo h) then Error "the fold's map is not a plain dense map or co-iteration"
+                            elif not (tilePlainKernel hk h.Arrays.Length) then Error "the fold's map kernel declares symmetry, a parallel strategy or arity polymorphism"
+                            elif not (tilePureBody resolver Set.empty hk.Body) then Error "the fold's map kernel is not repeatable"
+                            // the minted kernels (the collapse's, fusion's) do not carry a
+                            // repro policy: a strict region keeps its maps as written
+                            elif regionRepro.Value || hk.IsRepro then Error "a `where repro` region (v1: the collapsed and fused map kernels would not carry the repro policy)"
+                            // a lifted callable reachable from a kernel this rewrite or fusion
+                            // renames -- the fold's map kernel (collapse, fusion), the
+                            // producer's and any inner producer's (fusion freshens their
+                            // parameters and lets) -- that CAPTURES one of that kernel's
+                            // binders would keep naming a binder that no longer exists
+                            elif (let kernels =
+                                      [ Some hk; pk ] @ (p.Arrays |> List.map (function IRCompute (IRApplyCombinator q) -> resolve q.Kernel | _ -> None))
+                                      |> List.choose id
+                                  kernels |> List.exists (fun (k: IRCallable) ->
+                                      let binders =
+                                          let s = System.Collections.Generic.HashSet<IRId>(k.Params |> List.map (fun q -> q.VarId))
+                                          iterIRExpr (function IRLet (lid, _, _) -> s.Add lid |> ignore | _ -> ()) k.Body
+                                          s
+                                      let rec reach (seen: Set<IRId>) (body: IRExpr) : bool =
+                                          let hit = ref false
+                                          iterIRExpr (fun n ->
+                                              if not hit.Value then
+                                                  match n with
+                                                  | IRVar (cid, _) when not (seen.Contains cid) ->
+                                                      match resolver.TryGetValue cid with
+                                                      | true, cc ->
+                                                          if cc.Captures |> List.exists (fun cap -> binders.Contains cap.Id) then hit.Value <- true
+                                                          elif reach (seen.Add cid) cc.Body then hit.Value <- true
+                                                      | _ -> ()
+                                                  | _ -> ()) body
+                                          hit.Value
+                                      reach (Set.singleton k.Id) k.Body)) then
+                                Error "a lifted callable reachable from the fold's map kernel or the producer's kernel captures one of that kernel's parameters or lets (the collapse and fusion rename those binders)"
+                            elif (match pk with Some pkc -> not (tilePureBody resolver Set.empty pkc.Body) | None -> true) then Error "the producer kernel is not repeatable"
+                            else
+                            match collapseOperand xid h hk with
+                            | Error why -> Error why
+                            | Ok (h1, hk1, minted) ->
+                                let pos = h1.Arrays |> List.findIndex (isX xid)
+                                let occ = refsOf hk1.Params.[pos].VarId hk1.Body
+                                if occ < 1 || occ > 2 then
+                                    Error $"the fold's map kernel reads `{xn}`'s cell {occ} times (once or twice is required: fusion binds a twice-read operand once per cell)"
+                                // fusion splices left to right under one fan-in cap: v1 admits
+                                // a fold map whose ONLY computed operand is x's producer (another
+                                // computed operand could exhaust the cap first), counting the
+                                // producer's own operands after ITS inner fusion
+                                elif h1.Arrays |> List.exists (function IRCompute _ -> true | _ -> false) then
+                                    Error "another operand of the fold's map is a computed map (v1 splices only the elided producer, so fusion's fan-in order cannot leave it unspliced)"
+                                elif h1.Arrays.Length - 1 + (p.Arrays |> List.sumBy (function IRCompute (IRApplyCombinator q) -> q.Arrays.Length | _ -> 1)) > 8 then
+                                    Error "the fused operand count would exceed elementwise fusion's fan-in cap (8)"
+                                elif h1.SharedIndexTypes.IsEmpty && h1.Arrays.Length + p.Arrays.Length - 1 > 1 && p.SharedIndexTypes.IsEmpty then
+                                    Error "the fused node would read as an outer product (no shared index records)"
+                                else Ok (h1, minted, h.Arrays.Length - h1.Arrays.Length)
+                    match shaped with
+                    | Error why -> decline why common
+                    | Ok (h1, minted, collapsed) ->
+                        let repl = IRCompute (IRApplyCombinator p)
+                        let subst (e: IRExpr) = mapIRExpr (fun n -> match n with IRVar (y, _) when y = xid -> repl | n -> n) e
+                        let h' = { h1 with Arrays = h1.Arrays |> List.map subst; Loop = subst h1.Loop }
+                        let foldKernel =
+                            let mutable k = None
+                            iterIRExpr (fun n ->
+                                match n, foldOperandMap n with
+                                | (IRReduce (_, fk, _) | IRReduceCompute (_, fk, _)), Some hh when hh.Arrays |> List.exists (isX xid) -> k <- Some fk
+                                | _ -> ()) sv
+                            k
+                        let stored (e: IRExpr) = match e with IRVar (id, _) when id = xid -> Some xn | _ -> Blade.CostModel.storedArrayName costNameOf e
+                        // the pricing resolver must see the collapsed kernel it mints
+                        let resolveMinted (k: IRExpr) =
+                            match k, minted with
+                            | IRVar (kid, _), Some lam when kid = lam.Id -> Some lam
+                            | _ -> resolve k
+                        let costLine = Blade.CostModel.foldMapElisionLine resolveMinted costNameOf stored stored xn p h h' (foldKernel |> Option.bind resolve)
+                        let ev =
+                            [ "single consumer: the operand map of one fold in its statement (the fold node -- kernel, seed, extent -- is kept as written)" ]
+                            @ (if collapsed > 0 then [ $"`{xn}` read at {collapsed + 1} operand positions of one co-iteration: collapsed to one (the same stored cell at the same coordinate), so the producer runs once per cell" ] else [])
+                            @ common
+                            @ [ "realized by elementwise fusion: the producer is spliced into the fold's map kernel, no pool for it"
+                                Blade.CostModel.legalityLine "fold-of-map compute elision (snapshot: no write or provider effect from the let through the consumer statement; failure site: an IRTotality-total producer over plain extents, the fold's own failures unchanged; evaluation count: one reader, each cell once after the operand collapse; fold order and seed: the fold node is unchanged, bitwise under BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off; a licensed fold may take another licensed form)"
+                                costLine ]
+                        if not enabled then decline "disabled by BLADE_COMPUTE_ELIDE" ev
+                        else
+                            minted |> Option.iter mintedKernels.Add
+                            let hkId = match h'.Kernel with IRVar (kid, _) -> kid | _ -> -1
+                            let producerKernel = match p.Kernel with IRVar (kid, _) -> Some kid | _ -> None
+                            pending.Add { PendingRule = "fold-map-elision"; PendingSubject = subj; HostKernel = hkId; PendingEvidence = ev; SplicedKernel = producerKernel }
+                            dropped.Add i |> ignore
+                            let rebuild (op: IRExpr) =
+                                match op with
+                                | IRCompute (IRApplyCombinator _) -> IRCompute (IRApplyCombinator h')
+                                | _ -> IRApplyCombinator h'
+                            let isTarget (op: IRExpr) =
+                                match op with
+                                | IRApplyCombinator hh | IRCompute (IRApplyCombinator hh) -> hh.Arrays |> List.exists (isX xid)
+                                | _ -> false
+                            let v' =
+                                mapIRExpr (fun n ->
+                                    match n with
+                                    | IRReduce (op, fk, init) when isTarget op -> IRReduce (rebuild op, fk, init)
+                                    | IRReduceCompute (op, fk, seed) when isTarget op -> IRReduceCompute (rebuild op, fk, seed)
+                                    | n -> n) sv
                             match at with
                             | Some j -> lets.[j] <- (fst lets.[j], v')
                             | None -> tail <- v'
@@ -10864,13 +11100,17 @@ let elideSingleConsumerComputesModule (programFuncs: IRCallable list) (singleMod
             let values = flatten spine' |> Map.ofList
             bindings' |> List.choose (fun b -> Map.tryFind b.Id values |> Option.map (fun v -> { b with Value = v }))
         | _ -> bindings'
-    ({ modul with Functions = functions'; Bindings = bindings'' }, List.ofSeq pending)
+    // the fold-of-map elisions' collapsed map kernels (each referenced by its
+    // rewritten map; fusion resolves them module-locally)
+    ({ modul with Functions = functions' @ List.ofSeq mintedKernels; Bindings = bindings'' }, List.ofSeq pending)
 
 /// The map-consumer elisions' records, once elementwise fusion has run: the
 /// host kernel survives with a computed operand only where fusion declined.
 let recordComputeElisionMapOutcomes (pending: ComputeElisionPending list) (modul: IRModule) : unit =
     if not pending.IsEmpty then
         let unfused = System.Collections.Generic.HashSet<IRId>()
+        // the kernels of the computed OPERANDS still standing (unspliced producers)
+        let unspliced = System.Collections.Generic.HashSet<IRId>()
         let scan (e: IRExpr) =
             iterIRExpr (fun n ->
                 match n with
@@ -10879,11 +11119,16 @@ let recordComputeElisionMapOutcomes (pending: ComputeElisionPending list) (modul
                      | IRVar (kid, _) when info.Arrays |> List.exists (function IRCompute (IRApplyCombinator _) -> true | _ -> false) ->
                          unfused.Add kid |> ignore
                      | _ -> ())
+                    for a in info.Arrays do
+                        match a with
+                        | IRCompute (IRApplyCombinator q) ->
+                            (match q.Kernel with IRVar (qk, _) -> unspliced.Add qk |> ignore | _ -> ())
+                        | _ -> ()
                 | _ -> ()) e
         for f in modul.Functions do scan f.Body
         for b in modul.Bindings do scan b.Value
         for p in pending do
-            if unfused.Contains p.HostKernel then
+            if unfused.Contains p.HostKernel || (match p.SplicedKernel with Some pk -> unspliced.Contains pk | None -> false) then
                 // the cost line priced the FUSED form, which was not realized
                 let evidence =
                     p.PendingEvidence |> List.collect (fun e ->
@@ -11452,7 +11697,7 @@ let elideCallsModule (builder: IRBuilder) (programFuncs: IRCallable list) (modul
                 if not enabled then decline "disabled by BLADE_CALL_ELIDE" ev
                 else
                     let hkId = match h.Kernel with IRVar (kid, _) -> kid | _ -> -1
-                    pending.Add { PendingRule = "call-elision"; PendingSubject = subject; HostKernel = hkId; PendingEvidence = ev }
+                    pending.Add { PendingRule = "call-elision"; PendingSubject = subject; HostKernel = hkId; PendingEvidence = ev; SplicedKernel = None }
                     commit (IRCompute (IRApplyCombinator h'))
 
     // A fold whose call is KEPT (declined, or the gate off) still evaluates
@@ -13586,6 +13831,435 @@ let recordRecomputeMapOutcomes (pending: RecomputePending list) (modul: IRModule
 /// the calling module's own table.
 /// singleModule: the program is this one module (compute elision's
 /// top-level mode, which reads the print selection's names, runs only then).
+// ===========================================================================
+// SIBLING MAPS (round 4 wave 2, bench PM04; BLADE_SIBLING_MAPS, rule
+// `sibling-maps v1`). Two to eight STORED `|> compute` maps of one spine over
+// one input index space each traverse their inputs again (the bench twofir:
+// two FIR walks over one stored x). Every named output stays stored -- the
+// required bytes do not disappear -- the win is INPUT traffic: ONE traversal
+// writes every output, each cell its own kernel's arithmetic at its own
+// coordinate.
+//
+// FUSED AT THE LAST SIBLING. Each member keeps its own site for everything
+// but its loop -- its prechecks (the halo BL8009 guard), extents, allocation
+// and registrations, in source order, so allocation positions and the peak
+// are unchanged; the earlier members' LOOPS move DOWN to the last member,
+// which runs one sweep for all. A side table: both emitters realize it (each
+// preflights the WHOLE group before it suppresses any loop, so a group is
+// either fully fused or fully ordinary); the interpreter runs the IR as
+// written, so `blade test interp` is an independent oracle.
+//
+// Moving a loop down past the statements between it and the last member is
+// unobservable when (the admission, fail closed): every member kernel is
+// closed-total (no cell fails, so no failure moves) and writes nothing; no
+// statement in the interval -- and no later member -- writes, carries a
+// provider effect or a lifetime barrier, or reads an EARLIER member, directly
+// or through any callable reachable from it; no earlier member's storage or
+// INPUT storage changes hands before the sweep (no scratch pool reuse inside
+// the interval, no return donor among them, and the early-release schedule
+// treats them as owned); every member is read after the last one (an unread
+// output could be released early); no member is claimed by another plan.
+// ===========================================================================
+
+type SiblingMapKind =
+    /// plain dense co-iterations over one cell space of `cells` cells: one
+    /// flat sweep
+    | SibFlat of cells: int64
+    /// rank-1 single-slot dense halo walks over ONE inner axis of `baseExtent`
+    /// cells: one walk over the union of the members' centres, peeled into
+    /// segments by member domain
+    | SibHalo of inner: string * baseExtent: int64
+
+type SiblingMapGroup = {
+    GroupId: int
+    Region: string
+    /// the members' let / binding ids, in spine order
+    Members: IRId list
+    Names: string list
+    Kind: SiblingMapKind
+    /// per member: the first centre of its walk (halo; 0 for flat) and its
+    /// output extent (cells)
+    Starts: int64 list
+    Extents: int64 list
+    /// every member requests the same thread licence (all or none)
+    Omp: bool
+    Evidence: string list
+    /// the members' applies as planned (the emitters' preflight rebuilds each
+    /// member's nest record from them before suppressing any loop)
+    Applies: ApplyInfo list
+}
+
+module SiblingMapTable =
+    open System.Threading
+    type State = { ByMember: Map<IRId, SiblingMapGroup * int>; Protected: Set<IRId>; Next: int }
+    let private empty = { ByMember = Map.empty; Protected = Set.empty; Next = 0 }
+    let private cell = new AsyncLocal<State>()
+    let private get () = match box cell.Value with null -> empty | _ -> cell.Value
+    let reset () = cell.Value <- empty
+    let nextId () =
+        let s = get ()
+        cell.Value <- { s with Next = s.Next + 1 }
+        s.Next
+    let record (g: SiblingMapGroup) (protectedIds: Set<IRId>) =
+        let s = get ()
+        cell.Value <-
+            { s with
+                ByMember = g.Members |> List.mapi (fun j m -> (m, (g, j))) |> List.fold (fun acc (m, v) -> Map.add m v acc) s.ByMember
+                Protected = Set.union s.Protected protectedIds }
+    /// The group a binding belongs to, with its position.
+    let tryMember (id: IRId) : (SiblingMapGroup * int) option = Map.tryFind id (get ()).ByMember
+    /// A member or an input an EARLIER member's moved sweep still reads: a
+    /// later owner (the early pool-release schedule) must leave it live.
+    let isProtected (id: IRId) : bool = Set.contains id (get ()).Protected
+
+let recordSiblingMaps (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
+    Blade.Effects.Decisions.record
+        { Blade.Effects.Rule = "sibling-maps"; Version = 1; Span = Blade.Ast.noSpan
+          Subject = subject; Outcome = outcome; Evidence = evidence }
+
+/// The planner (Lowering, after CSE, scratch pool reuse and every other
+/// side-table plan; before the early pool-release schedule, which reads the
+/// table's protected ids).
+let planSiblingMaps (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (singleModule: bool) (modul: IRModule) : unit =
+    if modul.Functions |> List.exists (fun f -> f.IsCudaKernel) then () else
+    let enabled = siblingMapsEnabled ()
+    // revision reuse (BLADE_TILE_CACHE) plans tiled bindings at emission: v1
+    // leaves every map its own loop under it
+    let tileCache = match System.Environment.GetEnvironmentVariable "BLADE_TILE_CACHE" with null | "" | "0" | "off" -> false | _ -> true
+    if tileCache then () else
+    let own = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+    let funcs = programFuncs |> List.fold (fun m f -> if Map.containsKey f.Id m then m else Map.add f.Id f m) own
+    let resolve (k: IRExpr) = resolveCallableIn funcs k
+    let writes = scheduleMayWriteWithCallbacksIn programFuncs modul
+    let barrier = scheduleHasLifetimeBarrierIn programFuncs modul
+    let payloadOf = intervalPayloadOf modul
+    // ---- the module census --------------------------------------------------
+    let deferred = System.Collections.Generic.HashSet<IRId>()
+    let letOwners = System.Collections.Generic.Dictionary<IRId, int>()
+    for f in modul.Functions do
+        iterIRExpr (fun n ->
+            match n with
+            | IRLet (id, v, _) ->
+                if isDeferredForm v then deferred.Add id |> ignore
+                letOwners.[id] <- (match letOwners.TryGetValue id with | true, c -> c + 1 | _ -> 1)
+            | _ -> ()) f.Body
+    for b in modul.Bindings do
+        if isDeferredForm b.Value then deferred.Add b.Id |> ignore
+    let reuse = Blade.Types.PoolReuseTable.donors ()
+    let reusers = reuse |> Map.toSeq |> Seq.map fst |> Set.ofSeq
+    let donorsOf = reuse |> Map.toSeq |> Seq.map snd |> Set.ofSeq
+    let returnDonors =
+        modul.Functions |> List.choose (fun f -> Blade.Types.PoolReuseTable.tryReturnDonor f.Id) |> Set.ofList
+    /// Every id `e` reads, through every callable reachable from it (called,
+    /// named as a kernel, captured) -- the dependency census.
+    let reachRefs (e: IRExpr) : Set<IRId> =
+        let seen = System.Collections.Generic.HashSet<IRId>()
+        let acc = System.Collections.Generic.HashSet<IRId>()
+        let rec go (x: IRExpr) =
+            for id in collectVarRefsIR x do
+                acc.Add id |> ignore
+                match Map.tryFind id funcs with
+                | Some c when seen.Add c.Id ->
+                    for cap in c.Captures do acc.Add cap.Id |> ignore
+                    go c.Body
+                | _ -> ()
+        go e
+        Set.ofSeq acc
+    let claimedBy (id: IRId) : string option =
+        if (HotRowTable.tryConsumer id).IsSome then Some "the hot-row / cell-epilogue plan (as its consumer)"
+        elif (CompactRowTable.tryProducer id).IsSome || (CompactRowTable.tryConsumer id).IsSome then Some "the compact-row-classes plan"
+        elif (CompactionTable.tryMask id).IsSome || (CompactionTable.tryCompound id).IsSome || (CompactionTable.tryFoldMap id).IsSome then Some "the compaction-fusion plan"
+        elif (GroupAggTable.tryPeel id).IsSome || (GroupAggTable.tryGroupBy id).IsSome then Some "the group-aggregate plan"
+        elif not (MemberHoistTable.plansOf id).IsEmpty then Some "the membership-hoist plan"
+        elif (EpilogueLegTable.tryProducer id).IsSome || (EpilogueLegTable.tryJoin id).IsSome then Some "the epilogue-legs plan"
+        elif (RecStepTable.tryStep id).IsSome then Some "the threaded recursion step"
+        elif AliasElideTable.contains id then Some "the read-only alias plan"
+        elif reusers.Contains id || donorsOf.Contains id || returnDonors.Contains id then Some "scratch pool reuse (a donor, a reuser or a return donor)"
+        elif foreignRefs.Contains id then Some "another module (a foreign reader)"
+        elif modul.ProviderReads.ContainsKey id || modul.ProviderWrites.ContainsKey id || not (bindingSideOperands modul id).IsEmpty then Some "a provider read / write or side-table operands"
+        elif (match letOwners.TryGetValue id with | true, c -> c > 1 | _ -> false) then Some "shape specializations (its let id is copied into several callables)"
+        else None
+    let staticExtents (at: IRArrayType) =
+        at.IndexTypes |> List.map (fun ix -> match ix.Extent with IRLit (IRLitInt n) when n > 0L -> Some n | _ -> None)
+    let denseLiteral (at: IRArrayType) =
+        not at.IsVirtual && not at.IndexTypes.IsEmpty
+        && at.IndexTypes |> List.forall (fun ix -> ix.Rank = 1 && ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Dependencies.IsEmpty)
+        && staticExtents at |> List.forall Option.isSome
+    let kernelPlain (k: IRCallable) =
+        not k.IsCommutative && k.CommGroups.IsEmpty && k.AntisymGroups.IsEmpty
+        && not k.IsCudaKernel && not k.IsMpiParallel && not k.IsArityPoly && not k.IsStatic
+    let ompOf (k: IRCallable) = k.IsOmpParallel || not k.Parallelism.IsEmpty
+    // the exact licence (a bare `omp` and `omp(w: 0)` thread differently)
+    let licenceOf (k: IRCallable) = (k.IsOmpParallel, k.Parallelism |> List.sort)
+    // ---- one candidate member ------------------------------------------------
+    // None: not a candidate (silent); Some (Error why): a stored map that
+    // cannot join a group; Some (Ok ...): its shape key and facts.
+    let classify (id: IRId) (v: IRExpr) : Result<SiblingMapKind * int64 * int64 * Set<IRId> * bool * IRCallable, string> option =
+        match v with
+        | IRCompute (IRApplyCombinator info) ->
+            (match stripUnits info.OutputType, resolve info.Kernel with
+             | ArrayElem outAt, Some k when denseLiteral outAt && not info.HasReynolds && info.KernelTDims.IsEmpty && info.KernelOutputRank = 0 ->
+                 let outExt = staticExtents outAt |> List.map Option.get
+                 let cells = outExt |> List.fold (*) 1L
+                 let kernelOk () =
+                     if not (kernelPlain k) then Error "the kernel declares symmetry, a device or MPI strategy, arity polymorphism or is static"
+                     elif writes (IRApplyCombinator info) then Error "the kernel may write (its writes would move with the loop)"
+                     else Ok ()
+                 match info.Arrays with
+                 | [ IRRange ([ ix ], _) ] ->
+                     // ---- kind H: a rank-1 single-slot dense halo walk ----------
+                     (match ix.Tag |> Option.bind Blade.Types.haloAccessOfTag, ix.Extent, k.Params with
+                      | Some h, IRLit (IRLitInt m), [ p ] when not h.IsCompound && outExt = [ m ] && m > 0L
+                                                            && (ix.Tag |> Option.exists (fun t -> t.StartsWith (Blade.Types.haloWinTagPrefix + "d:"))) ->
+                          match kernelOk () with
+                          | Error why -> Some (Error why)
+                          | Ok () ->
+                          let baseN = m + h.Shrink
+                          let isWin (wv: IRExpr) = match wv with IRVar (wid, _) -> wid = p.VarId | _ -> false
+                          let reads = Blade.IRAccess.windowReadsOf isWin k.Body
+                          let refsP = (let c = ref 0 in iterIRExpr (function IRVar (q, _) when q = p.VarId -> c.Value <- c.Value + 1 | _ -> ()) k.Body; c.Value)
+                          let readOk (r: Blade.IRAccess.WindowRead) =
+                              r.Rank = 1 && r.Dim = 0 && not (deferred.Contains r.ArrayId)
+                              && (match r.Offset with Some o -> Blade.Types.haloOffsetInReach h o | None -> false)
+                              && (match r.Node with
+                                  | IRIndex (IRVar (_, aty), _, _) ->
+                                      (match stripUnits aty with
+                                       | ArrayElem at -> denseLiteral at && staticExtents at = [ Some baseN ]
+                                       | _ -> false)
+                                  | _ -> false)
+                          if reads.IsEmpty then Some (Error "the halo kernel reads no stored array through its window")
+                          elif not (reads |> List.forall readOk) then
+                              Some (Error "a window read is not a literal in-reach offset of a stored rank-1 array over the halo's inner axis (the window certificate)")
+                          elif refsP <> reads.Length then Some (Error "the window variable is used outside its window reads")
+                          else
+                          // THE WINDOW CERTIFICATE: every array read is a declared
+                          // in-reach offset of an array whose declared extent is
+                          // the halo's inner extent -- checked at run time by the
+                          // member's own BL8009 guard, which stays at its site,
+                          // ahead of the sweep. With those reads proven, the rest
+                          // of the body must pass the closed totality whitelist.
+                          let isRead (n: IRExpr) =
+                              match n with
+                              | IRIndex (IRVar (aid, _), [ IRBinOp (IRElementwise, IRAdd, wv, _, _) ], _) when isWin wv ->
+                                  reads |> List.exists (fun r -> r.ArrayId = aid)
+                              | _ -> false
+                          // a certified read becomes an OPAQUE immutable scalar of the
+                          // element's type (an unbound name the whitelist reads as a free
+                          // scalar): the certificate proves the read safe, never its VALUE
+                          // (a literal would prove, e.g., an integer exponent nonnegative)
+                          let opaqueSeq = ref 0
+                          let opaqueOf (n: IRExpr) =
+                              opaqueSeq.Value <- opaqueSeq.Value + 1
+                              match n with
+                              | IRIndex (IRVar (_, aty), _, _) ->
+                                  (match stripUnits aty with
+                                   | ArrayElem at -> IRVar (-1000000 - opaqueSeq.Value, at.ElemType)
+                                   | _ -> IRVar (-1000000 - opaqueSeq.Value, IRTScalar ETFloat64))
+                              | _ -> IRVar (-1000000 - opaqueSeq.Value, IRTScalar ETFloat64)
+                          let body' = mapIRExpr (fun n -> if isRead n then opaqueOf n else n) k.Body
+                          match Blade.IRTotality.auditCallable resolve (fun _ -> None) deferred.Contains { k with Body = body' } [] with
+                          | Error why -> Some (Error $"the halo kernel is not proved total beyond its certified window reads ({why})")
+                          | Ok () ->
+                          let inputs = reads |> List.map (fun r -> r.ArrayId) |> Set.ofList
+                          if inputs |> Set.exists modul.ProviderReads.ContainsKey then Some (Error "an input is a provider read (a streamed source has no pool to share)") else
+                          Some (Ok (SibHalo (h.Inner, baseN), h.Start, m, inputs, ompOf k, k))
+                      | _ -> None)
+                 | arrays ->
+                     // ---- kind F: a plain dense flat co-iteration -----------------
+                     if not (tilePlainInfo info) then None
+                     elif info.Arrays.Length > 1 && not info.IsCoIteration then None
+                     else
+                     let opIds = arrays |> List.choose (function IRVar (aid, _) -> Some aid | _ -> None)
+                     if opIds.Length <> arrays.Length then Some (Error "an operand is not a stored array (a range, a computed map or a view)")
+                     elif opIds |> List.exists deferred.Contains then Some (Error "an operand is a deferred map (formalism 10.2: it has no storage to share)")
+                     elif not (info.ArrayTypes |> List.forall (fun at -> denseLiteral at && (staticExtents at |> List.map Option.get) = outExt)) then
+                         Some (Error "an operand's extents differ from the output's (the flat sweep needs one cell space)")
+                     elif k.Params.Length <> arrays.Length then Some (Error "the kernel's arity differs from its operands")
+                     elif ompOf k && outExt.Length > 1 then Some (Error "a threaded rank >= 2 map (v1 fuses a thread licence on rank 1 only: a partial licence keeps the nest)")
+                     else
+                     match kernelOk () with
+                     | Error why -> Some (Error why)
+                     | Ok () ->
+                     match Blade.IRTotality.auditApply resolve (fun _ -> None) deferred.Contains info with
+                     | Error why -> Some (Error $"the kernel is not proved total ({why}): interleaving the sweeps would move its first failing cell")
+                     | Ok () when opIds |> List.exists modul.ProviderReads.ContainsKey -> Some (Error "an input is a provider read (a streamed source has no pool to share)")
+                     | Ok () -> Some (Ok (SibFlat cells, 0L, cells, Set.ofList opIds, ompOf k, k))
+             | _ -> None)
+        | _ -> None
+    // ---- one spine -------------------------------------------------------------
+    // `stmts`: (id, name, value) in order; `after`: everything that runs after
+    // the spine's last statement and may read it (the tail, the print list).
+    let processSpine (region: string) (stmts: (IRId * string * IRExpr) array) (laterReaders: IRId -> int -> bool) =
+        let n = stmts.Length
+        let payload (i: int) = let (id, _, v) = stmts.[i] in payloadOf id v
+        let reach = Array.init n (fun i -> lazy (reachRefs (payload i)))
+        let classified = stmts |> Array.map (fun (id, _, v) -> classify id v)
+        let finalize (members: (int * (SiblingMapKind * int64 * int64 * Set<IRId> * bool * IRCallable)) list) =
+            // drop members nothing reads after the last one (an unread output
+            // could be released before the sweep that writes it)
+            let lastIdx = members |> List.map fst |> List.max
+            let readLater (i: int) = let (id, _, _) = stmts.[i] in laterReaders id lastIdx
+            let kept = members |> List.filter (fun (i, _) -> readLater i)
+            for (i, _) in members do
+                if not (readLater i) then
+                    let (_, nm, _) = stmts.[i]
+                    recordSiblingMaps $"{region}.{nm}" (Blade.Effects.Declined "nothing reads it after the last sibling (an unread output may be released before a moved sweep writes it)") []
+            match kept with
+            | _ :: _ :: _ ->
+                let firstI = kept |> List.head |> fst
+                let lastI = kept |> List.last |> fst
+                let ids = kept |> List.map (fun (i, _) -> let (id, _, _) = stmts.[i] in id)
+                let names = kept |> List.map (fun (i, _) -> let (_, nm, _) = stmts.[i] in nm)
+                let subject = $"""{region}: {String.concat ", " names}"""
+                let delayedInputs = kept |> List.take (kept.Length - 1) |> List.map (fun (_, (_, _, _, ins, _, _)) -> ins) |> Set.unionMany
+                // scratch pool reuse decided before this plan: nothing in the
+                // interval (the last member included) may take over storage
+                let intervalIds = [ firstI + 1 .. lastI ] |> List.map (fun i -> let (id, _, _) = stmts.[i] in id)
+                let reuserInside = intervalIds |> List.tryFind reusers.Contains
+                let donatedInput = delayedInputs |> Set.toList |> List.tryFind (fun d -> donorsOf.Contains d || returnDonors.Contains d)
+                match reuserInside, donatedInput with
+                | Some r, _ ->
+                    recordSiblingMaps subject (Blade.Effects.Declined $"scratch pool reuse hands a pool to __v{r} inside the group's interval (a moved sweep could read storage that changed hands)") []
+                | _, Some d ->
+                    recordSiblingMaps subject (Blade.Effects.Declined $"an input of an earlier sibling (__v{d}) donates its pool to scratch reuse (the moved sweep reads it later)") []
+                | None, None ->
+                let (kind, _, _, _, omp, _) = snd kept.Head
+                let starts = kept |> List.map (fun (_, (_, s, _, _, _, _)) -> s)
+                let exts = kept |> List.map (fun (_, (_, _, e, _, _, _)) -> e)
+                let inputs = kept |> List.map (fun (_, (_, _, _, ins, _, _)) -> ins) |> Set.unionMany
+                let kindText =
+                    match kind with
+                    | SibFlat cells -> $"one flat sweep of {cells} cells"
+                    | SibHalo (inner, baseN) ->
+                        let lo = List.min starts
+                        let hi = List.map2 (+) starts exts |> List.max
+                        let axis = if inner = "" then "anonymous" else inner
+                        $"one halo walk over the {axis} axis ({baseN} cells), centres [{lo}, {hi}) peeled into segments by member domain"
+                let namesText = String.concat ", " names
+                let inputsText = inputs |> Set.toList |> List.map (fun i -> "__v" + string i) |> String.concat ", "
+                let ev =
+                    [ $"{kept.Length} sibling outputs {{{namesText}}} share {kindText}; inputs {{{inputsText}}} read once per sweep instead of once per output"
+                      "every output stays stored (its own allocation, extents and prechecks at its own site, in source order); each cell is its own kernel's arithmetic at its own coordinate"
+                      "fused at the LAST sibling: the earlier siblings' loops move down to it (allocation positions, and so the peak, unchanged)"
+                      "kernels closed-total (IRTotality whitelist; a halo kernel's window reads by the window certificate, guarded by each member's own BL8009 check) and write-free (scheduleMayWriteIn with callbacks): no cell fails, so no failure moves"
+                      $"interval ({lastI - firstI - 1} intervening statement(s) and every later sibling): no write, provider effect or lifetime barrier, no read of an earlier sibling directly or through a reachable callable"
+                      "no storage changes hands before the sweep: no scratch pool reuse inside the interval, no donor among the moved inputs, members and moved inputs protected from the early pool-release schedule"
+                      (if omp then "every sibling requests the thread licence: the sweep's shared segment carries one team" else "no sibling requests a thread licence")
+                      Blade.CostModel.legalityLine "sibling-map fusion (values: each cell its own kernel over unchanged inputs; failure order: closed-total kernels, prechecks and allocations at their own sites; observation: nothing reads, frees, donates or releases a member or a moved input before the sweep; folds: none move)" ]
+                if not enabled then recordSiblingMaps subject (Blade.Effects.Declined "disabled by BLADE_SIBLING_MAPS") ev
+                else
+                    let g = { GroupId = SiblingMapTable.nextId (); Region = region; Members = ids; Names = names
+                              Kind = kind; Starts = starts; Extents = exts; Omp = omp; Evidence = ev
+                              Applies = kept |> List.map (fun (i, _) -> match stmts.[i] with (_, _, IRCompute (IRApplyCombinator info)) -> info | _ -> failwith "sibling-maps: a member is not a forced apply") }
+                    SiblingMapTable.record g (Set.union (Set.ofList ids) delayedInputs)
+                    recordSiblingMaps subject Blade.Effects.Applied ev
+            | _ -> ()
+        // member-level declines are recorded only for a stored map that shares an
+        // input with another candidate of the spine (a group it could have joined)
+        let pendingDecline = System.Collections.Generic.List<int * string>()
+        let rawInputs (i: int) : Set<IRId> =
+            let (_, _, v) = stmts.[i]
+            match v with
+            | IRCompute (IRApplyCombinator info) ->
+                let ops = info.Arrays |> List.choose (function IRVar (a, _) -> Some a | _ -> None) |> Set.ofList
+                let caps = match resolve info.Kernel with Some k -> k.Captures |> List.map (fun c -> c.Id) |> Set.ofList | None -> Set.empty
+                Set.union ops caps
+            | _ -> Set.empty
+        // greedy grouping in spine order
+        let mutable group : (int * (SiblingMapKind * int64 * int64 * Set<IRId> * bool * IRCallable)) list = []
+        let close () =
+            if group.Length >= 2 then finalize (List.rev group)
+            group <- []
+        let memberIds () = group |> List.map (fun (i, _) -> let (id, _, _) = stmts.[i] in id) |> Set.ofList
+        let streams (extra: Set<IRId>) =
+            (group |> List.map (fun (_, (_, _, _, ins, _, _)) -> ins) |> Set.unionMany |> Set.union extra).Count + group.Length + 1
+        for i in 0 .. n - 1 do
+            let (id, nm, _) = stmts.[i]
+            let p = payload i
+            let intervalBreak () =
+                writes p || intervalHasProviderEffect modul id || barrier p
+                || not (Set.isEmpty (Set.intersect (reach.[i].Force ()) (memberIds ())))
+            match classified.[i] with
+            | Some (Ok ((SibFlat _, _, _, _, _, _))) when (HotRowTable.tryProducer id).IsSome ->
+                // a flat producer's cell epilogue (B1) / hot-row schedule is
+                // realized by both emitters on the flat path: it owns the member
+                pendingDecline.Add((i, "claimed by the hot-row / cell-epilogue plan (it folds inside this producer's own flat sweep in both lanes)"))
+                if intervalBreak () then close ()
+            | Some (Ok ((kind, _, _, ins, omp, kk) as facts)) when (claimedBy id).IsNone ->
+                match group with
+                | [] -> group <- [ (i, facts) ]
+                | _ ->
+                    let (hkind, _, _, hins, homp, hk) = snd (List.last group)
+                    let compatible =
+                        kind = hkind && omp = homp && licenceOf kk = licenceOf hk && not (Set.isEmpty (Set.intersect ins hins))
+                        && group.Length < 8 && streams ins <= 16
+                    if compatible && not (intervalBreak ()) then group <- (i, facts) :: group
+                    else
+                        if kind = hkind && not (Set.isEmpty (Set.intersect ins hins)) && not compatible then
+                            recordSiblingMaps $"{region}.{nm}"
+                                (Blade.Effects.Declined
+                                    (if omp <> homp || licenceOf kk <> licenceOf hk then "its thread licence differs from the group's (v1 shares one team only when every sibling requests it the same way)"
+                                     elif group.Length >= 8 then "the group already holds 8 outputs (register-pressure cap)"
+                                     else "the group's input and output streams would exceed 16 (the stream cap)")) []
+                        close ()
+                        group <- [ (i, facts) ]
+            | Some (Error why) ->
+                pendingDecline.Add((i, why))
+                if intervalBreak () then close ()
+            | Some (Ok _) ->
+                pendingDecline.Add((i, $"claimed by {(claimedBy id).Value}"))
+                if intervalBreak () then close ()
+            | None ->
+                if intervalBreak () then close ()
+        close ()
+        let okInputs =
+            [ for j in 0 .. n - 1 do
+                match classified.[j] with
+                | Some (Ok _) -> yield (j, rawInputs j)
+                | _ -> () ]
+        for (i, why) in pendingDecline do
+            let mine = rawInputs i
+            if okInputs |> List.exists (fun (j, ins) -> j <> i && not (Set.isEmpty (Set.intersect mine ins))) then
+                let (_, nm, _) = stmts.[i]
+                recordSiblingMaps $"{region}.{nm}" (Blade.Effects.Declined why) []
+    // ---- the regions -----------------------------------------------------------------
+    for f in modul.Functions do
+        if not (f.IsStatic || f.IsCudaKernel || f.IsMpiParallel || f.IsArityPoly || hasTypeVarsInSignature f) then
+            let rec spine (e: IRExpr) acc =
+                match e with
+                | IRLet (id, v, rest) -> spine rest ((id, $"__v{id}", v) :: acc)
+                | tail -> (List.rev acc |> Array.ofList, tail)
+            let (stmts, tail) = spine f.Body []
+            if stmts.Length >= 2 then
+                let tailRefs = lazy (reachRefs tail)
+                let laterReaders (id: IRId) (lastIdx: int) =
+                    (tailRefs.Force ()).Contains id
+                    || [ lastIdx + 1 .. stmts.Length - 1 ] |> List.exists (fun j ->
+                        let (sid, _, sv) = stmts.[j]
+                        (reachRefs (payloadOf sid sv)).Contains id)
+                let region = if System.String.IsNullOrEmpty f.SourceName then f.Name else f.SourceName
+                processSpine region stmts laterReaders
+    if singleModule && modul.Bindings.Length >= 2 then
+        let stmts = modul.Bindings |> List.map (fun b -> (b.Id, b.Name, b.Value)) |> Array.ofList
+        let printSel =
+            match System.Environment.GetEnvironmentVariable "BLADE_PRINT" with
+            | null -> None
+            | v ->
+                let ns = v.Split([| ','; ' '; ';' |], System.StringSplitOptions.RemoveEmptyEntries) |> Array.map (fun s -> s.Trim()) |> Array.filter (fun s -> s <> "")
+                if ns.Length = 0 then None else Some (Set.ofArray ns)
+        let byId = modul.Bindings |> List.map (fun b -> (b.Id, b.Name)) |> Map.ofList
+        let laterReaders (id: IRId) (lastIdx: int) =
+            // a top-level binding is printed at the end unless a print
+            // selection leaves it out
+            (match printSel, Map.tryFind id byId with
+             | None, Some _ -> true
+             | Some sel, Some nm -> sel.Contains nm
+             | _ -> false)
+            || [ lastIdx + 1 .. stmts.Length - 1 ] |> List.exists (fun j ->
+                let (sid, _, sv) = stmts.[j]
+                (reachRefs (payloadOf sid sv)).Contains id)
+        processSpine "top level" stmts laterReaders
+
 let private optimizeModuleCore (builder: IRBuilder) (programFuncs: IRCallable list) (singleModule: bool) foreignCensus (modul: IRModule) : IRModule =
     // Normal lowering constructs the events LAST. If a consumer re-applies
     // this stage to optimized IR, retain the established lifetime regions.
@@ -13596,7 +14270,7 @@ let private optimizeModuleCore (builder: IRBuilder) (programFuncs: IRCallable li
     // call elision first: a jointly lowered call leaves a fused fold or a
     // map operand that compute elision and fusion then see as written out
     let (callElided, pendingCalls) = elideCallsModule builder programFuncs (foldConstMatchesModule modul)
-    let (elided, pendingComputes) = elideSingleConsumerComputesModule programFuncs singleModule callElided
+    let (elided, pendingComputes) = elideSingleConsumerComputesModule builder programFuncs singleModule callElided
     let pendingMaps = pendingCalls @ pendingComputes
     // P5: the two-consumer intermediates compute elision left, priced and
     // chosen by the cost model (BLADE_RECOMPUTE)

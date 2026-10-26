@@ -9472,6 +9472,252 @@ let private ceRemainderCases () : bool list =
       withGate "BLADE_PRINT" "x,s" (fun () ->
           ceNoRecordFor "compute_elision_top_level_printed_is_inert" ceTopSrc "top level.x") ]
 
+// Fold-of-map elision (BLADE_FOLD_MAP_ELIDE, rule `fold-map-elision`; round 4
+// wave 2, PM12). The VALUES are corpus functions/586-593; these read the
+// emission: the centered array a variance fold's map reads is never stored
+// in either lane, the gate restores it, and the off build keeps compute
+// elision's previous decline word for word.
+let private fmeSpreadSrc =
+    "type I = Idx<5>\n"
+    + "function spread(a: Array<Float64 like I>) -> Float64 = {\n"
+    + "    let n = Float64(extents(a))\n"
+    + "    let m = reduce(a, (+)) / n\n"
+    + "    let c = a - m\n"
+    + "    reduce(c * c, (+)) / n\n"
+    + "}\n"
+    + "let s = spread([1.0, 2.0, 4.0, 8.0, 16.0])\n"
+
+let private fmeNestedSrc =
+    "type I = Idx<5>\n"
+    + "function skew(a: Array<Float64 like I>) -> Float64 = {\n"
+    + "    let m = reduce(a, (+)) / 5.0\n"
+    + "    let c = a - m\n"
+    + "    reduce(c * c * c, (+)) / 5.0\n"
+    + "}\n"
+    + "let s = skew([1.0, 2.0, 4.0, 8.0, 16.0])\n"
+
+let private fmeWriteSrc =
+    "type I = Idx<4>\n"
+    + "function spread(a: mut Array<Float64 like I>) -> Float64 = {\n"
+    + "    let m = reduce(a, (+)) / 4.0\n"
+    + "    let c = a - m\n"
+    + "    a(0) = 100.0\n"
+    + "    reduce(c * c, (+)) / 4.0\n"
+    + "}\n"
+    + "let mut x: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0]\n"
+    + "let s = spread(x)\n"
+
+let private fmeCaptureSrc =
+    "function f(x: T^1) -> T^0 = {\n"
+    + "    let c = x + 1.0\n"
+    + "    reduce(method_for(zip(c, c)) <@> lambda(a, b) -> a + reduce(method_for(0..2) <@> lambda(t) -> b + Float64(t), (+)), (+))\n"
+    + "}\n"
+    + "let s = f([1.0, 2.0, 3.0])\n"
+
+let private fmeProducerCaptureSrc =
+    "function f(x: T^1) -> T^0 = {\n"
+    + "    let c = method_for(x) <@> lambda(a) -> a + reduce(method_for(0..2) <@> lambda(t) -> a + Float64(t), (+)) |> compute\n"
+    + "    reduce(c * c, (+))\n"
+    + "}\n"
+    + "let s = f([1.0, 2.0, 3.0])\n"
+
+let private fmeReproSrc =
+    "type I = Idx<5>\n"
+    + "function spread(a: Array<Float64 like I>) where repro -> Float64 = {\n"
+    + "    let m = reduce(a, (+)) / 5.0\n"
+    + "    let c = a - m\n"
+    + "    reduce(c * c, (+)) / 5.0\n"
+    + "}\n"
+    + "let s = spread([1.0, 2.0, 4.0, 8.0, 16.0])\n"
+
+let private fmeCppAllocCase (name: string) (src: string) (fn: string) (wantOn: int -> bool) (wantOff: int -> bool) (describe: string) =
+    match cppOfSource name src, withGate "BLADE_FOLD_MAP_ELIDE" "0" (fun () -> cppOfSource name src) with
+    | Ok on, Ok off ->
+        match ceCppBody on fn, ceCppBody off fn with
+        | Some bOn, Some bOff ->
+            let aOn, aOff = ceAllocs bOn, ceAllocs bOff
+            if wantOn aOn && wantOff aOff then
+                resultLine Pass name ($"{fn}: {aOn} allocation(s) with the gate on, {aOff} off; {describe}")
+                true
+            else
+                resultLine Fail name ($"{fn}: {aOn} allocation(s) on, {aOff} off; wanted {describe}")
+                false
+        | _ -> resultLine Fail name ($"no C++ body for `{fn}`"); false
+    | Error e, _ | _, Error e -> resultLine Fail name e; false
+
+let private fmeLlvmNoPool () =
+    let name = "fold_map_elision_llvm_no_pool"
+    match ceLlvmOf name fmeSpreadSrc, withGate "BLADE_FOLD_MAP_ELIDE" "0" (fun () -> ceLlvmOf name fmeSpreadSrc) with
+    | Ok on, Ok off ->
+        match ceLlvmBody on "spread", ceLlvmBody off "spread" with
+        | Some bOn, Some bOff ->
+            let count (b: string) = System.Text.RegularExpressions.Regex.Matches(b, @"blade_alloc_cells").Count
+            if count bOn = 0 && count bOff >= 1 then
+                resultLine Pass name ($"llvm lane, spread: 0 pool allocations with the gate on, {count bOff} off")
+                true
+            else
+                resultLine Fail name ($"llvm lane, spread: {count bOn} allocation(s) on, {count bOff} off; wanted 0 on, >= 1 off")
+                false
+        | _ -> resultLine Fail name "no LLVM body for `spread`"; false
+    | Error e, _ | _, Error e -> resultLine Fail name ($"the llvm lane refused: {e}"); false
+
+let private foldMapElisionCases () : bool list =
+    [ fmeCppAllocCase "fold_map_elision_cpp_no_pool" fmeSpreadSrc "spread" ((=) 0) (fun n -> n >= 1)
+          "the variance fold reads `a - m` in place (no centered pool); the gate restores it"
+      fmeLlvmNoPool ()
+      fmeCppAllocCase "fold_map_elision_nested_read_keeps_pool" fmeNestedSrc "skew" (fun n -> n >= 1) (fun n -> n >= 1)
+          "a read inside a nested map operand keeps the centered pool"
+      decisionCase "decision_fold_map_elision_applied_collapsed" fmeSpreadSrc "fold-map-elision"
+          (fun d -> d.Subject.StartsWith "spread." && applied d
+                    && d.Evidence |> List.exists (fun e -> e.Contains "read at 2 operand positions of one co-iteration: collapsed to one")
+                    && d.Evidence |> List.exists (fun e -> e.StartsWith "legality: ")
+                    && d.Evidence |> List.exists (fun e -> e.StartsWith "cost: " && not (e.StartsWith "cost: not priced")))
+          "applied, the duplicate operand positions collapsed, with legality and a PRICED cost line (the minted kernel resolves)"
+      decisionCase "decision_fold_map_elision_declined_captured_param" fmeCaptureSrc "fold-map-elision"
+          (fun d -> d.Subject.StartsWith "f." && declinedMentioning "captures one of that kernel's parameters or lets" d)
+          "declined: a nested callable captures the map kernel's cell parameter"
+      decisionCase "decision_fold_map_elision_declined_producer_capture" fmeProducerCaptureSrc "fold-map-elision"
+          (fun d -> d.Subject.StartsWith "f." && declinedMentioning "the producer's kernel captures one of that kernel's parameters or lets" d)
+          "declined: a nested callable captures the PRODUCER kernel's parameter (fusion freshens it)"
+      withGate "BLADE_FP_REPRO" "0" (fun () ->
+          decisionCase "decision_fold_map_elision_declined_repro_region" fmeReproSrc "fold-map-elision"
+              (fun d -> d.Subject.StartsWith "spread." && declinedMentioning "where repro" d)
+              "declined: a where repro region keeps its maps as written")
+      decisionCase "decision_fold_map_elision_declined_write_between" fmeWriteSrc "fold-map-elision"
+          (fun d -> d.Subject.StartsWith "spread." && declinedMentioning "may write between the compute and its consumer" d)
+          "declined: a write between the compute and its fold"
+      withGate "BLADE_FOLD_MAP_ELIDE" "0" (fun () ->
+          decisionCase "decision_fold_map_elision_off_keeps_previous_decline" fmeSpreadSrc "compute-elision"
+              (fun d -> d.Subject.StartsWith "spread." && declinedMentioning "is read by a map that is not the whole computed value of its statement, or reads it more than once" d)
+              "gate off: compute elision's previous decline, word for word")
+      (match decisionsOf fmeNestedSrc with
+       | Error e -> resultLine Fail "decision_fold_map_elision_nested_not_applied" e; false
+       | Ok ds ->
+           if ds |> List.exists (fun d -> d.Rule = "fold-map-elision" && applied d) then
+               resultLine Fail "decision_fold_map_elision_nested_not_applied" "a fold-map-elision record applied; wanted none (a read inside a nested map operand)"
+               false
+           else
+               resultLine Pass "decision_fold_map_elision_nested_not_applied" "no applied fold-map-elision record: the nested read keeps the pool"
+               true) ]
+
+// Sibling maps (BLADE_SIBLING_MAPS, rule `sibling-maps`; round 4 wave 2, PM04).
+// The VALUES are corpus sibling-maps/001-015; these read the emission: the
+// planned siblings' loops really become ONE sweep in each lane, the gate
+// restores one loop per map, and the declines are recorded.
+let private smFlatSrc =
+    "type I = Idx<9>\n"
+    + "function three(x: Array<Float64 like I>, w: Array<Float64 like I>) -> Float64 = {\n"
+    + "    let y1 = method_for(zip(x, w)) <@> lambda(a, b) -> a * b |> compute\n"
+    + "    let s = 2.5\n"
+    + "    let y2 = method_for(zip(x, w)) <@> lambda(a, b) -> a + b * s |> compute\n"
+    + "    let y3 = method_for(x) <@> lambda(a) -> a * a - 1.0 |> compute\n"
+    + "    reduce(y1, (+)) + reduce(y2, (+)) * 10.0 + reduce(y3, (+)) * 100.0\n"
+    + "}\n"
+    + "let r = three([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], [9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0])\n"
+
+let private smHaloSrc =
+    "type I = Idx<29>\n"
+    + "function fir2(x: Array<Float64 like I>) -> Float64 = {\n"
+    + "    let y1 = method_for(halo<I, [-3, 0, 3]>) <@> lambda(w) -> 0.25 * x(w(-3)) + 0.5 * x(w(0)) + 0.25 * x(w(3)) |> compute\n"
+    + "    let y2 = method_for(halo<I, [-8, 0, 8]>) <@> lambda(w) -> x(w(8)) - x(w(-8)) |> compute\n"
+    + "    let s1 = reduce(method_for(y1) <@> lambda(v) -> v * v, (+), 0.0)\n"
+    + "    let s2 = reduce(method_for(y2) <@> lambda(v) -> v * v, (+), 0.0)\n"
+    + "    s1 + s2\n"
+    + "}\n"
+    + "let x = 0.03125 * Float64(range<Idx<29>>) |> compute\n"
+    + "let c = fir2(x)\n"
+
+let private smMixedOmpSrc =
+    "type I = Idx<11>\n"
+    + "function two(x: Array<Float64 like I>) -> Float64 = {\n"
+    + "    let y1 = method_for(x) <@> lambda(a) where omp -> a * 2.0 |> compute\n"
+    + "    let y2 = method_for(x) <@> lambda(a) -> a + 7.0 |> compute\n"
+    + "    reduce(y1, (+)) + reduce(y2, (+))\n"
+    + "}\n"
+    + "let r = two(0.5 * Float64(range<Idx<11>>) |> compute)\n"
+
+let private smPowSrc =
+    "type I = Idx<5>\n"
+    + "function probe(x: Array<Int64 like I>, q: Int64) -> Int64 = {\n"
+    + "    let y1 = method_for(halo<I, [0, 1]>) <@> lambda(w) -> x(w(0)) ^ x(w(1)) |> compute\n"
+    + "    let stop = 1 / q\n"
+    + "    let y2 = method_for(halo<I, [0, 1]>) <@> lambda(w) -> x(w(0)) + x(w(1)) |> compute\n"
+    + "    reduce(y1, (+)) + reduce(y2, (+)) + stop\n"
+    + "}\n"
+    + "let r = probe([2, -1, 2, 2, 2], 1)\n"
+
+let private smLicenceSrc =
+    "type I = Idx<23>\n"
+    + "function two(x: Array<Float64 like I>) -> Float64 = {\n"
+    + "    let y1 = method_for(halo<I, [0, 1]>) <@> lambda(w) where omp -> x(w(0)) + x(w(1)) |> compute\n"
+    + "    let y2 = method_for(halo<I, [0, 1]>) <@> lambda(w) where omp(w: 0) -> x(w(0)) - x(w(1)) |> compute\n"
+    + "    reduce(y1, (+)) + reduce(y2, (+)) * 3.0\n"
+    + "}\n"
+    + "let r = two(0.25 * Float64(range<Idx<23>>) |> compute)\n"
+
+let private smCount (pattern: string) (body: string) = System.Text.RegularExpressions.Regex.Matches(body, pattern).Count
+
+let private smCppCase (name: string) (src: string) (fn: string) (pattern: string) (wantOn: int -> bool) (wantOff: int -> bool) (describe: string) =
+    match cppOfSource name src, withGate "BLADE_SIBLING_MAPS" "0" (fun () -> cppOfSource name src) with
+    | Ok on, Ok off ->
+        match ceCppBody on fn, ceCppBody off fn with
+        | Some bOn, Some bOff ->
+            let nOn, nOff = smCount pattern bOn, smCount pattern bOff
+            if wantOn nOn && wantOff nOff then
+                resultLine Pass name ($"{fn}: {nOn} `{pattern}` with the gate on, {nOff} off; {describe}")
+                true
+            else
+                resultLine Fail name ($"{fn}: {nOn} `{pattern}` on, {nOff} off; wanted {describe}")
+                false
+        | _ -> resultLine Fail name ($"no C++ body for `{fn}`"); false
+    | Error e, _ | _, Error e -> resultLine Fail name e; false
+
+let private smLlvmCase (name: string) (src: string) (fn: string) (wantOn: int -> bool) (wantOff: int -> bool) (describe: string) =
+    match ceLlvmOf name src, withGate "BLADE_SIBLING_MAPS" "0" (fun () -> ceLlvmOf name src) with
+    | Ok on, Ok off ->
+        match ceLlvmBody on fn, ceLlvmBody off fn with
+        | Some bOn, Some bOff ->
+            let loops (b: string) = smCount @"\nloop\.cond\d+:" b
+            if wantOn (loops bOn) && wantOff (loops bOff) then
+                resultLine Pass name ($"llvm lane, {fn}: {loops bOn} loop(s) with the gate on, {loops bOff} off; {describe}")
+                true
+            else
+                resultLine Fail name ($"llvm lane, {fn}: {loops bOn} loop(s) on, {loops bOff} off; wanted {describe}")
+                false
+        | _ -> resultLine Fail name ($"no LLVM body for `{fn}`"); false
+    | Error e, _ | _, Error e -> resultLine Fail name ($"the llvm lane refused: {e}"); false
+
+let private siblingMapCases () : bool list =
+    [ smCppCase "sibling_maps_cpp_flat_one_sweep" smFlatSrc "three" @"for \(size_t __fk = 0; __fk < __fp_cells; __fk\+\+\)" ((=) 1) ((=) 3)
+          "one flat sweep writes the three outputs (three sweeps with the gate off)"
+      smCppCase "sibling_maps_cpp_flat_three_stores_in_the_sweep" smFlatSrc "three" @"__fp___v\d+\[__fk\] = " ((=) 3) ((=) 3)
+          "every output keeps its own store"
+      smCppCase "sibling_maps_cpp_halo_segments" smHaloSrc "fir2" @"for \(size_t __sib_c = " ((=) 3) ((=) 0)
+          "one walk over the union of centres, peeled into three segments"
+      smLlvmCase "sibling_maps_llvm_flat_one_sweep" smFlatSrc "three" ((=) 2) ((=) 4)
+          "one serial sweep fills the three pools (three map loops become one; the fold loop stays)"
+      smLlvmCase "sibling_maps_llvm_halo_keeps_epilogues" smHaloSrc "fir2" ((=) 2) ((=) 2)
+          "the LLVM lane's cell epilogue takes each halo producer (one pass that also folds its checksum): the group declines there"
+      decisionCase "decision_sibling_maps_flat_applied" smFlatSrc "sibling-maps"
+          (fun d -> d.Subject.StartsWith "three:" && applied d && d.Evidence |> List.exists (fun e -> e.Contains "3 sibling outputs")
+                    && d.Evidence |> List.exists (fun e -> e.StartsWith "legality: "))
+          "applied: three outputs share one flat sweep, with a legality line"
+      decisionCase "decision_sibling_maps_halo_applied" smHaloSrc "sibling-maps"
+          (fun d -> d.Subject.StartsWith "fir2:" && applied d && d.Evidence |> List.exists (fun e -> e.Contains "peeled into segments"))
+          "applied: two halo walks share one walk over the union of centres"
+      decisionCase "decision_sibling_maps_declined_mixed_omp" smMixedOmpSrc "sibling-maps"
+          (fun d -> declinedMentioning "thread licence differs" d)
+          "declined: siblings with different thread requests"
+      decisionCase "decision_sibling_maps_halo_value_not_certified" smPowSrc "sibling-maps"
+          (fun d -> declinedMentioning "possibly negative exponent" d)
+          "declined: the window certificate proves a read safe, not its value (an integer power stays unproved)"
+      decisionCase "decision_sibling_maps_halo_mixed_licences" smLicenceSrc "sibling-maps"
+          (fun d -> declinedMentioning "thread licence differs" d)
+          "declined: halo siblings with different omp licences (bare omp vs omp(w: 0))"
+      withGate "BLADE_SIBLING_MAPS" "0" (fun () ->
+          decisionCase "decision_sibling_maps_disabled" smFlatSrc "sibling-maps"
+              (declinedMentioning "disabled by BLADE_SIBLING_MAPS") "declined: disabled by BLADE_SIBLING_MAPS") ]
+
 let private computeElisionCases () : bool list =
     [ ceCppAllocCase "compute_elision_fold_no_pool" ceFoldSrc "total" ((=) 0) (fun n -> n >= 1)
           "the fold reads x's map in place (no pool) and the gate restores it"
@@ -11031,6 +11277,10 @@ let runOptimizeTests () =
           // Compute elision (BLADE_COMPUTE_ELIDE): single-consumer body computes.
           yield! computeElisionCases ()
           yield! ceRemainderCases ()
+          // Fold-of-map elision (BLADE_FOLD_MAP_ELIDE): the PM12 centering temporary.
+          yield! foldMapElisionCases ()
+          // Sibling maps (BLADE_SIBLING_MAPS): sibling stored maps share one sweep.
+          yield! siblingMapCases ()
           // Call elision (BLADE_CALL_ELIDE): a supported call read in place.
           yield! callElisionCases ()
           // A nested fold of an array-returning call evaluates it once.

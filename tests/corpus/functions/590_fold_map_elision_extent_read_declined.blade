@@ -1,0 +1,12 @@
+// TEST: Fold-Map Elision Declines A Second Read In The Statement
+// ============================================================================
+// The statement also reads c through `extents(c)`: c has a reader outside the
+// fold's map, so the fold-of-map consumer declines and c stays stored.
+type I = Idx<5>
+function spread(a: Array<Float64 like I>) -> Float64 = {
+    let m = reduce(a, (+)) / 5.0
+    let c = a - m
+    reduce(c * c, (+)) / Float64(extents(c))
+}
+let s = spread([1.0, 2.0, 4.0, 8.0, 16.0])
+// EXPECT: s = 29.76
