@@ -8710,6 +8710,11 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
                 let mutable breaks = false
                 iterIRExpr (fun x -> match x with IRBreakIf _ -> breaks <- true | _ -> ()) chain
                 if breaks then decline "a `while` guard or the freeze idiom (its epilogue repeats the last written row)" else
+                // The type-carried walk is unbounded in depth but budgeted:
+                // an exhausted budget is its own recorded decline (every check
+                // built on the walk also fails closed on it).
+                if (typeCarried chain).IsNone || (typeCarried body).IsNone then
+                    decline "the expressions the region's types carry exceed the type-carried walk's budget (200000 nodes): fail closed" else
                 // ---- the consumers in `body`
                 let consumers = System.Collections.Generic.List<string * IRExpr>()
                 let mutable cbad : string option = None
