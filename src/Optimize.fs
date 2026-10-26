@@ -11816,23 +11816,22 @@ let private aliasWriteClosure (programFuncs: IRCallable list) (foreignRefs: Set<
     // expressions embedded in its nodes PLUS its declared type's extents; a
     // callable as its body, the extents embedded in it and its parameter,
     // return and capture types. The traversal is COMPLETE: `embeddedExtentExprs`
-    // bounds its own recursion depth, so every extent it returns is expanded
-    // again (by reference -- extents are subterms of finite type trees) until
-    // no new one appears. A type or expression that cannot be walked makes the
-    // whole closure decline (`unwalkable`), never a guess.
+    // expands every extent it finds to completion (no depth bound), and a
+    // declared type's extents are taken with everything embedded in them. A
+    // type or expression that cannot be walked makes the whole closure
+    // decline (`unwalkable`), never a guess.
     let unwalkable : string option ref = ref None
     let closedExtents (roots: IRExpr list) (types: IRType list) (owner: string) : IRExpr list =
         try
             let seen = System.Collections.Generic.HashSet<IRExpr>(HashIdentity.Reference)
             let out = ResizeArray<IRExpr>()
-            let rec expand (x: IRExpr) =
-                if seen.Add x then
-                    out.Add x
-                    for y in embeddedExtentExprs x do expand y
+            let add (x: IRExpr) = if seen.Add x then out.Add x
             for r in roots do
-                for x in embeddedExtentExprs r do expand x
+                for x in embeddedExtentExprs r do add x
             for t in types do
-                for x in irTypeExtentExprs t do expand x
+                for x in irTypeExtentExprs t do
+                    add x
+                    for y in embeddedExtentExprs x do add y
             List.ofSeq out
         with ex ->
             if unwalkable.Value.IsNone then unwalkable.Value <- Some $"the types of `{owner}` cannot be walked ({ex.Message})"
