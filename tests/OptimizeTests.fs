@@ -896,7 +896,8 @@ let private foldStateCorpusTable : (string * Result<string, string> list) list =
       "601_fold_state_in_place_nested_kernel_constants.blade", [ Ok "in place"; Ok "in place" ]
       "602_fold_state_declines_non_pointwise.blade", [ Error "not pointwise" ]
       "603_fold_state_declines_may_abort.blade", [ Error "may abort" ]
-      "604_fold_state_in_place_inside_kernel.blade", [ Ok "in place" ] ]
+      "604_fold_state_in_place_inside_kernel.blade", [ Ok "in place" ]
+      "605_fold_state_cross_cell_and_repeated_state.blade", [ Error "not pointwise"; Ok "in place" ] ]
 
 let private foldStateCorpusCases () : bool list =
     let dir = System.IO.Path.Combine("tests", "corpus", "loops")

@@ -7599,8 +7599,24 @@ let fuseSliceWritesModule (modul: IRModule) (builder: IRBuilder) (programFuncs: 
         | ArrayElem at when (staticExtent at).IsSome && scalarElem at.ElemType && not at.IsVirtual ->
             let m = (staticExtent at).Value
             let rowT = try typeOf rowE with _ -> IRTUnit
-            let fresh = match seedV with IRCompute _ -> true | _ -> false
-            if not fresh then Error "the state's seed is not a private copy (a fresh compute)"
+            // The desugar's `matCopy`: the identity map over the seed (or G(0)),
+            // computed -- an IRCompute of an IRApplyCombinator always writes a
+            // FRESH output pool. Any other compute may return existing storage
+            // (IRCompute delegates freshness to its operand), so it declines.
+            let fresh =
+                match seedV with
+                | IRCompute (IRApplyCombinator info) when info.Arrays.Length = 1 && not info.HasReynolds ->
+                    (match info.Kernel with
+                     | IRVar (kid, _) ->
+                        (match callables.TryGetValue kid with
+                         | true, k ->
+                            (match k.Params, k.Body with
+                             | [ p ], IRVar (b, _) -> b = p.VarId && k.Captures.IsEmpty
+                             | _ -> false)
+                         | _ -> false)
+                     | _ -> false)
+                | _ -> false
+            if not fresh then Error "the state's seed is not the desugar's private copy (the identity map over the seed, computed)"
             elif not (rowOfExtent m rowT) then Error "the folded slices are not dense rank-1 rows of the state's static extent (v1: a dense rank-2 operand)"
             elif not (rowOfExtent m retT) then Error "the kernel's result is not a dense rank-1 row of the state's extent"
             elif (match Map.tryFind g scope with Some v -> mentions accId v | None -> false) then
