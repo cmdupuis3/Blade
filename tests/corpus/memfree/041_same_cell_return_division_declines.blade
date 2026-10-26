@@ -1,0 +1,15 @@
+// TEST: Same-cell return declines a dividing return kernel
+// PM03 (A06): the certificate's closed kernel grammar is `+ - *` over the
+// cell and completed snapshots; a division declines, the fresh pool stays.
+type Ix = Idx<7>
+function divided(x: Array<Float64 like Ix>) -> Array<Float64 like Ix> = {
+    let p = x * 2.0 + 1.0 |> compute
+    let old_sum = reduce(p, (+))
+    p / old_sum
+}
+let x: Array<Float64 like Ix> = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let a = divided(x)
+let sa = reduce(a, (+))
+// EXPECT: x = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+// EXPECT: a = [0.0204081632653061, 0.0612244897959184, 0.102040816326531, 0.142857142857143, 0.183673469387755, 0.224489795918367, 0.26530612244898]
+// EXPECT: sa = 1.0
