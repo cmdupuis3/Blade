@@ -1,0 +1,35 @@
+// TEST: Fold Ring Grid Full Fold
+// ============================================================================
+// PM35: `reduce(traj, (+), axes = 2)` is ONE accumulator over every cell in
+// row-major order (serial in every build); riding the sweep, each row's cells
+// are folded into it right after the row is written -- the same chain. The
+// unseeded `(+)` starts at -0.0, the seeded spelling at 0.0: they agree.
+// ============================================================================
+type T = Idx<121>
+type X = Idx<3>
+
+function decay3(r: Array<Float64 like X>) -> Array<Float64 like X> = r * 0.995 + 0.002
+
+function grid_sum(u0: Array<Float64 like X>) -> Float64 = {
+    let rec traj: Array<Float64 like T, X> =
+        match traj with
+        | zero -> zero
+        | zero :: k -> zero :: u0
+        | prefix :: n -> prefix :: decay3(prefix(n - 1))
+    reduce(traj, (+), axes = 2)
+}
+
+function grid_sum_seeded(u0: Array<Float64 like X>) -> Float64 = {
+    let rec traj: Array<Float64 like T, X> =
+        match traj with
+        | zero -> zero
+        | zero :: k -> zero :: u0
+        | prefix :: n -> prefix :: decay3(prefix(n - 1))
+    reduce(traj, (+), 0.0, axes = 2)
+}
+
+let u: Array<Float64 like X> = [0.75, 0.5, 0.25]
+let a = grid_sum(u)
+let b = grid_sum_seeded(u)
+// EXPECT: a = 172.485218756244
+// EXPECT: b = 172.485218756244

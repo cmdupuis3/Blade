@@ -1,0 +1,24 @@
+// TEST: Fold Ring Declines Escape
+// ============================================================================
+// PM35 decline control: the trajectory is used whole after the recursion (a
+// transpose operand, then folded along time): it escapes the fold whitelist,
+// so the ring declines and the trajectory is stored whole.
+// ============================================================================
+type T = Idx<31>
+type X = Idx<3>
+
+function decay(r: Array<Float64 like X>) -> Array<Float64 like X> = r * 0.9 + 0.05
+
+function along_time(u0: Array<Float64 like X>) -> Float64 = {
+    let rec traj: Array<Float64 like T, X> =
+        match traj with
+        | zero -> zero
+        | zero :: k -> zero :: u0
+        | prefix :: n -> prefix :: decay(prefix(n - 1))
+    let per = reduce(transpose(traj, [0, 1]), (+))
+    per(0) + per(2)
+}
+
+let u: Array<Float64 like X> = [1.0, 2.0, 3.0]
+let w = along_time(u)
+// EXPECT: w = 59.8554387265692
