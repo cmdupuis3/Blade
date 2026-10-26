@@ -8331,6 +8331,10 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
         | _ -> [], e
     let rebuild (stmts: (IRId * IRExpr) list) (fin: IRExpr) =
         List.foldBack (fun (id, v) acc -> IRLet (id, v, acc)) stmts fin
+    // Does `id` occur in an expression a TYPE carries (a range's extent, a
+    // variable's index extents ..)? The generic child walk never enters those.
+    let mentionsInTypes (id: IRId) (e: IRExpr) =
+        embeddedExtentExprs e |> List.exists (mentions id)
     let boundInBlock (blk: IRExpr) (id: IRId) =
         let mutable hit = false
         iterIRExpr (fun x -> match x with IRLet (b, _, _) when b = id -> hit <- true | _ -> ()) blk
@@ -8415,7 +8419,7 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
         let leafLag (leaf: IRExpr) =
             match leaf with
             | IRBinOp (_, IRSub, IRVar (v, _), IRLit (IRLitInt c), _) when v = n && c >= 1L -> Some (Some c)   // n - c: selected only under `>= 0`
-            | IRBinOp (_, IRAdd, IRVar (v, _), IRLit (IRLitInt c), _) when v = n && c >= 0L && c <= hi -> Some None   // n + c: never selected under `< n` (c <= the extent: no Int64 wrap for n < extent)
+            | IRBinOp (_, IRAdd, IRVar (v, _), IRLit (IRLitInt c), _) when v = n && c >= 0L && c <= hi && hi > 0L && c <= System.Int64.MaxValue - (hi - 1L) -> Some None   // n + c: never selected under `< n` (c <= the extent: no Int64 wrap for n < extent)
             | IRVar (v, _) when v = n -> Some None                                                                 // n: never selected under `< n`
             | _ -> None
         let condOk (leaf: IRExpr) (c: IRExpr) =
@@ -8496,8 +8500,12 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
                 walk phase ctx raws b
             | ExprShape (children, _) -> children |> List.iter (walk phase ctx raws)
         // Callables never see the buffer (a capture would read it whole).
-        if callables.Values |> Seq.exists (fun f -> f.Id <> currentFn && (f.Captures |> List.exists (fun c -> c.Id = bufId) || mentions bufId f.Body)) then
+        if callables.Values |> Seq.exists (fun f -> f.Id <> currentFn && (f.Captures |> List.exists (fun c -> c.Id = bufId) || mentions bufId f.Body || mentionsInTypes bufId f.Body)) then
             fail "a callable captures the trajectory's buffer"
+        // a buffer read hidden in a type (a range's extent ..) is outside
+        // every classified site
+        if (pre |> List.exists (fun (_, v) -> mentionsInTypes bufId v)) || (step |> List.exists (fun (_, v) -> mentionsInTypes bufId v)) then
+            fail "the trajectory's buffer is read inside a type's extent (a range bound or an index extent: not a classified read)"
         // The seed: lo = 1 needs exactly one writer of row 0, complete.
         let isRowWriter (rowIdx: IRExpr -> bool) (v: IRExpr) =
             match v with
@@ -8593,7 +8601,7 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
                 let isT (e: IRExpr) = match e with IRVar (t, _) -> t = tId | _ -> false
                 // A callable (a lambda) reading the trajectory reads it whole,
                 // from a body this scan does not walk: decline.
-                if callables.Values |> Seq.exists (fun f -> f.Id <> currentFn && (f.Captures |> List.exists (fun c -> c.Id = tId) || mentions tId f.Body)) then
+                if callables.Values |> Seq.exists (fun f -> f.Id <> currentFn && (f.Captures |> List.exists (fun c -> c.Id = tId) || mentions tId f.Body || mentionsInTypes tId f.Body)) then
                     cfail "a callable (a lambda) captures the trajectory: it reads the whole history from its own body"
                 let rec gridNest (e: IRExpr) =
                     match e with
@@ -8639,6 +8647,8 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
                     | IRBinOp (_, (IRAnd | IROr), a, b, _) -> find cond a; find true b
                     | ExprShape (children, _) -> children |> List.iter (find cond)
                 find false body
+                if mentionsInTypes tId body then
+                    cfail "the trajectory is read inside a type's extent after the recursion (a range bound or an index extent: not a classified consumer)"
                 match cbad with
                 | Some why -> decline why
                 | None ->
@@ -8928,7 +8938,7 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
                         | _ -> x) chain'
                 let block' = IRLet (bufId, IRUninit ringT, ringed)
                 let body' = replaceNodes (plans |> List.map (fun (_, _, rp) -> rp)) body
-                if mentions tId body' then decline "internal: a use of the trajectory survived the consumer rewrite" else
+                if mentions tId body' || mentionsInTypes tId body' then decline "internal: a use of the trajectory survived the consumer rewrite" else
                 let states = plans |> List.collect (fun (s, _, _) -> s)
                 let result = rebuild states (IRLet (tId, block', body'))
                 let consumerTxt = verdicts |> List.map (fun (_, v) -> match v with Ok t -> t | Error w -> w)

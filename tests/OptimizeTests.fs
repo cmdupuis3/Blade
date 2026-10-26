@@ -911,7 +911,8 @@ let private recFoldCorpusTable : (string * Result<string, string> list) list =
       "058_fold_ring_declines_seed_after_recursion.blade", [ Error "seed" ]
       "059_fold_ring_declines_lag_past_extent.blade", [ Error "at or beyond the recursion's extent" ]
       "060_fold_ring_declines_escaping_row_view.blade", [ Error "may write storage outside its own buffer" ]
-      "061_fold_ring_declines_future_offset_past_extent.blade", [ Error "not `n - c`, `n + c` or `n`" ] ]
+      "061_fold_ring_declines_future_offset_past_extent.blade", [ Error "not `n - c`, `n + c` or `n`" ]
+      "062_fold_ring_declines_read_in_range_extent.blade", [ Error "inside a type's extent" ] ]
 
 let private recFoldCorpusCases () : bool list =
     let dir = System.IO.Path.Combine("tests", "corpus", "recursive-arrays")
