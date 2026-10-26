@@ -1,0 +1,16 @@
+// TEST: An imported structural group keeps its snapshot across a foreign write deep in extents
+// MODULE: Lib
+// structural-group-view v1 would let g's rows view a's storage and back
+// share it -- unless something can write a. The only write is in ANOTHER
+// module, twenty extents deep in a range bound (02_Main). The foreign-reference
+// census walks embedded extents to completion (gap G89), so `a` counts as named
+// by another module and the view declines: g and back keep the snapshot.
+module Lib
+type I = Idx<6>
+type CI = Chunked<I, 4>
+let mut a: Array<Int64 like I> = [1, 2, 3, 4, 5, 6]
+let seg = segments(CI)
+let g = group_by(a, seg)
+let back = ungroup(g)
+// EXPECT: Lib.g = [[1, 2, 3, 4], [5, 6]]
+// EXPECT: Lib.back = [1, 2, 3, 4, 5, 6]

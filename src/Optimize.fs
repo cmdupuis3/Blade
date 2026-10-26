@@ -3708,11 +3708,13 @@ let private arrayTypeExtentExprs (at: IRArrayType) : IRExpr list =
 /// variable's or call's type, an array literal's, an apply's output, operand
 /// and shared index types, a range's index records, an `ungroup`'s source
 /// index records -- as extent expressions; and, recursively, those embedded
-/// in the extracted extents themselves (types are finite trees, so this ends;
-/// a depth bound keeps it linear-ish on pathological nesting -- past it the
-/// extent itself is still returned, and its references still collected).
+/// in the extracted extents themselves, to COMPLETION (types are finite
+/// trees; each extent object is expanded once, by reference, which also keeps
+/// it linear on a type shared by many nodes). Each extent object is returned
+/// once.
 let embeddedExtentExprs (e: IRExpr) : IRExpr list =
     let acc = ResizeArray<IRExpr>()
+    let seen = System.Collections.Generic.HashSet<IRExpr>(HashIdentity.Reference)
     let rec visit (depth: int) (root: IRExpr) =
         let found = ResizeArray<IRExpr>()
         let addTy (t: IRType) = found.AddRange(irTypeExtentExprs t)
@@ -3738,8 +3740,14 @@ let embeddedExtentExprs (e: IRExpr) : IRExpr list =
             | IRUngroupGrid (_, srcs, _) -> addIx srcs
             | _ -> ()) root
         for x in found do
-            acc.Add x
-            if depth < 8 then visit (depth + 1) x
+            // COMPLETE (gap G89, lane-D review): every extent is expanded
+            // once, by reference -- extents are subterms of finite type
+            // trees, so this terminates without a depth bound (the old bound
+            // of 8 let a write nested deeper slip past every client: the
+            // never-written closure, the foreign-reference census).
+            if seen.Add x then
+                acc.Add x
+                visit (depth + 1) x
     visit 0 e
     List.ofSeq acc
 /// A root of THE MODULE TRAVERSAL that the compaction census (T4b) and the
