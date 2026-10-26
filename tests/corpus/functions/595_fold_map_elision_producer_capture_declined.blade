@@ -1,0 +1,14 @@
+// TEST: Fold-Map Elision Declines A Producer Whose Parameter Is Captured
+// ============================================================================
+// The PRODUCER's kernel holds a nested map that captures its cell parameter
+// `a`. Fusion freshens the producer's parameters and lets when it splices it
+// into the fold's map, so the lifted nested callable would keep naming a
+// binder that no longer exists: the fold-of-map consumer declines and c stays
+// stored (Codex review of PM12, round 2).
+function f(x: T^1) -> T^0 = {
+    let c = method_for(x) <@> lambda(a) ->
+        a + reduce(method_for(0..2) <@> lambda(t) -> a + Float64(t), (+)) |> compute
+    reduce(c * c, (+))
+}
+let s = f([1.0, 2.0, 3.0])
+// EXPECT: s = 165.0

@@ -9514,6 +9514,13 @@ let private fmeCaptureSrc =
     + "}\n"
     + "let s = f([1.0, 2.0, 3.0])\n"
 
+let private fmeProducerCaptureSrc =
+    "function f(x: T^1) -> T^0 = {\n"
+    + "    let c = method_for(x) <@> lambda(a) -> a + reduce(method_for(0..2) <@> lambda(t) -> a + Float64(t), (+)) |> compute\n"
+    + "    reduce(c * c, (+))\n"
+    + "}\n"
+    + "let s = f([1.0, 2.0, 3.0])\n"
+
 let private fmeReproSrc =
     "type I = Idx<5>\n"
     + "function spread(a: Array<Float64 like I>) where repro -> Float64 = {\n"
@@ -9567,8 +9574,11 @@ let private foldMapElisionCases () : bool list =
                     && d.Evidence |> List.exists (fun e -> e.StartsWith "cost: " && not (e.StartsWith "cost: not priced")))
           "applied, the duplicate operand positions collapsed, with legality and a PRICED cost line (the minted kernel resolves)"
       decisionCase "decision_fold_map_elision_declined_captured_param" fmeCaptureSrc "fold-map-elision"
-          (fun d -> d.Subject.StartsWith "f." && declinedMentioning "captures one of its cell parameters" d)
+          (fun d -> d.Subject.StartsWith "f." && declinedMentioning "captures one of that kernel's parameters or lets" d)
           "declined: a nested callable captures the map kernel's cell parameter"
+      decisionCase "decision_fold_map_elision_declined_producer_capture" fmeProducerCaptureSrc "fold-map-elision"
+          (fun d -> d.Subject.StartsWith "f." && declinedMentioning "the producer's kernel captures one of that kernel's parameters or lets" d)
+          "declined: a nested callable captures the PRODUCER kernel's parameter (fusion freshens it)"
       withGate "BLADE_FP_REPRO" "0" (fun () ->
           decisionCase "decision_fold_map_elision_declined_repro_region" fmeReproSrc "fold-map-elision"
               (fun d -> d.Subject.StartsWith "spread." && declinedMentioning "where repro" d)

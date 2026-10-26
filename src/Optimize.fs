@@ -10941,25 +10941,34 @@ let elideSingleConsumerComputesModule (builder: IRBuilder) (programFuncs: IRCall
                             // the minted kernels (the collapse's, fusion's) do not carry a
                             // repro policy: a strict region keeps its maps as written
                             elif regionRepro.Value || hk.IsRepro then Error "a `where repro` region (v1: the collapsed and fused map kernels would not carry the repro policy)"
-                            // a lifted callable reachable from the map kernel that CAPTURES
-                            // one of its parameters (a nested map over `b`) would keep
-                            // naming a parameter the collapse (or fusion) removes
-                            elif (let pids = hk.Params |> List.map (fun q -> q.VarId) |> Set.ofList
-                                  let rec reach (seen: Set<IRId>) (e: IRExpr) : bool =
-                                      let hit = ref false
-                                      iterIRExpr (fun n ->
-                                          if not hit.Value then
-                                              match n with
-                                              | IRVar (cid, _) when not (seen.Contains cid) ->
-                                                  match resolver.TryGetValue cid with
-                                                  | true, cc ->
-                                                      if cc.Captures |> List.exists (fun cap -> pids.Contains cap.Id) then hit.Value <- true
-                                                      elif reach (seen.Add cid) cc.Body then hit.Value <- true
-                                                  | _ -> ()
-                                              | _ -> ()) e
-                                      hit.Value
-                                  reach (Set.singleton hk.Id) hk.Body) then
-                                Error "a lifted callable reachable from the fold's map kernel captures one of its cell parameters (the collapse and fusion rename those parameters)"
+                            // a lifted callable reachable from a kernel this rewrite or fusion
+                            // renames -- the fold's map kernel (collapse, fusion), the
+                            // producer's and any inner producer's (fusion freshens their
+                            // parameters and lets) -- that CAPTURES one of that kernel's
+                            // binders would keep naming a binder that no longer exists
+                            elif (let kernels =
+                                      [ Some hk; pk ] @ (p.Arrays |> List.map (function IRCompute (IRApplyCombinator q) -> resolve q.Kernel | _ -> None))
+                                      |> List.choose id
+                                  kernels |> List.exists (fun (k: IRCallable) ->
+                                      let binders =
+                                          let s = System.Collections.Generic.HashSet<IRId>(k.Params |> List.map (fun q -> q.VarId))
+                                          iterIRExpr (function IRLet (lid, _, _) -> s.Add lid |> ignore | _ -> ()) k.Body
+                                          s
+                                      let rec reach (seen: Set<IRId>) (body: IRExpr) : bool =
+                                          let hit = ref false
+                                          iterIRExpr (fun n ->
+                                              if not hit.Value then
+                                                  match n with
+                                                  | IRVar (cid, _) when not (seen.Contains cid) ->
+                                                      match resolver.TryGetValue cid with
+                                                      | true, cc ->
+                                                          if cc.Captures |> List.exists (fun cap -> binders.Contains cap.Id) then hit.Value <- true
+                                                          elif reach (seen.Add cid) cc.Body then hit.Value <- true
+                                                      | _ -> ()
+                                                  | _ -> ()) body
+                                          hit.Value
+                                      reach (Set.singleton k.Id) k.Body)) then
+                                Error "a lifted callable reachable from the fold's map kernel or the producer's kernel captures one of that kernel's parameters or lets (the collapse and fusion rename those binders)"
                             elif (match pk with Some pkc -> not (tilePureBody resolver Set.empty pkc.Body) | None -> true) then Error "the producer kernel is not repeatable"
                             else
                             match collapseOperand xid h hk with
@@ -10969,7 +10978,14 @@ let elideSingleConsumerComputesModule (builder: IRBuilder) (programFuncs: IRCall
                                 let occ = refsOf hk1.Params.[pos].VarId hk1.Body
                                 if occ < 1 || occ > 2 then
                                     Error $"the fold's map kernel reads `{xn}`'s cell {occ} times (once or twice is required: fusion binds a twice-read operand once per cell)"
-                                elif h1.Arrays.Length + p.Arrays.Length - 1 > 8 then Error "the fused operand count would exceed elementwise fusion's fan-in cap (8)"
+                                // fusion splices left to right under one fan-in cap: v1 admits
+                                // a fold map whose ONLY computed operand is x's producer (another
+                                // computed operand could exhaust the cap first), counting the
+                                // producer's own operands after ITS inner fusion
+                                elif h1.Arrays |> List.exists (function IRCompute _ -> true | _ -> false) then
+                                    Error "another operand of the fold's map is a computed map (v1 splices only the elided producer, so fusion's fan-in order cannot leave it unspliced)"
+                                elif h1.Arrays.Length - 1 + (p.Arrays |> List.sumBy (function IRCompute (IRApplyCombinator q) -> q.Arrays.Length | _ -> 1)) > 8 then
+                                    Error "the fused operand count would exceed elementwise fusion's fan-in cap (8)"
                                 elif h1.SharedIndexTypes.IsEmpty && h1.Arrays.Length + p.Arrays.Length - 1 > 1 && p.SharedIndexTypes.IsEmpty then
                                     Error "the fused node would read as an outer product (no shared index records)"
                                 else Ok (h1, minted, h.Arrays.Length - h1.Arrays.Length)
