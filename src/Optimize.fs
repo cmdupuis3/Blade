@@ -11807,18 +11807,35 @@ let private aliasWriteClosure (programFuncs: IRCallable list) (foreignRefs: Set<
     // assignments, writes) reads a statement as its payload PLUS the extent
     // expressions embedded in its nodes PLUS its declared type's extents; a
     // callable as its body, the extents embedded in it and its parameter,
-    // return and capture types. (`irTypeExtentExprs` of a type that cannot be
-    // walked fails closed: the statement is charged an unresolved call.)
-    let typeExtents (t: IRType) : IRExpr list =
-        try irTypeExtentExprs t
-        with _ -> [ IRApp (IRLit (IRLitInt 0L), [], IRTUnit) ]
+    // return and capture types. The traversal is COMPLETE: `embeddedExtentExprs`
+    // bounds its own recursion depth, so every extent it returns is expanded
+    // again (by reference -- extents are subterms of finite type trees) until
+    // no new one appears. A type or expression that cannot be walked makes the
+    // whole closure decline (`unwalkable`), never a guess.
+    let unwalkable : string option ref = ref None
+    let closedExtents (roots: IRExpr list) (types: IRType list) (owner: string) : IRExpr list =
+        try
+            let seen = System.Collections.Generic.HashSet<IRExpr>(HashIdentity.Reference)
+            let out = ResizeArray<IRExpr>()
+            let rec expand (x: IRExpr) =
+                if seen.Add x then
+                    out.Add x
+                    for y in embeddedExtentExprs x do expand y
+            for r in roots do
+                for x in embeddedExtentExprs r do expand x
+            for t in types do
+                for x in irTypeExtentExprs t do expand x
+            List.ofSeq out
+        with ex ->
+            if unwalkable.Value.IsNone then unwalkable.Value <- Some $"the types of `{owner}` cannot be walked ({ex.Message})"
+            []
     let payX : IRExpr list [] =
-        arr |> Array.mapi (fun i b -> pay.[i] :: embeddedExtentExprs pay.[i] @ typeExtents b.Type)
+        arr |> Array.mapi (fun i b -> pay.[i] :: closedExtents [ pay.[i] ] [ b.Type ] b.Name)
     let fnX (f: IRCallable) : IRExpr list =
-        f.Body :: embeddedExtentExprs f.Body
-        @ (f.Params |> List.collect (fun p -> typeExtents p.Type))
-        @ typeExtents f.RetType
-        @ (f.Captures |> List.collect (fun c -> typeExtents c.Type))
+        f.Body
+        :: closedExtents [ f.Body ]
+               ((f.Params |> List.map (fun p -> p.Type)) @ [ f.RetType ] @ (f.Captures |> List.map (fun c -> c.Type)))
+               f.SourceName
     let refsOfAll (es: IRExpr list) = es |> List.map collectVarRefsIR |> Set.unionMany
     let payRefs = payX |> Array.map refsOfAll
     let callables = (modul.Functions @ programFuncs) |> List.distinctBy (fun f -> f.Id)
@@ -11915,6 +11932,9 @@ let private aliasWriteClosure (programFuncs: IRCallable list) (foreignRefs: Set<
             | Some n -> n
             | None -> match Map.tryFind id m2 with Some n -> n | None -> $"__v{id}"
     fun (seeds: Set<IRId>) ->
+        match unwalkable.Value with
+        | Some why -> Error $"the closure cannot judge the module: {why}"
+        | None ->
         let mutable members = seeds
         let mutable changed = true
         while changed do
@@ -13091,8 +13111,12 @@ let planStructuralGroupView (programFuncs: IRCallable list) (foreignRefs: Set<IR
                 | Error why -> Error why
                 | Ok (how, chain) ->
                     let seeds = Set.add g.Id chain
-                    let rel = Set.intersect seeds (released.Force())
-                    if not rel.IsEmpty then Error "an explicit lifetime-region release (IRReleasePools) names the source or the grouped array"
+                    // Any module binding a lifetime-region release names --
+                    // not only the seeds: every closure member that holds
+                    // storage is a module binding (fail closed; regions
+                    // release their own local pools only).
+                    let rel = Set.intersect (byId |> Map.keys |> Set.ofSeq) (released.Force())
+                    if not rel.IsEmpty then Error "an explicit lifetime-region release (IRReleasePools) names a module binding"
                     else
                     match closure.Force() seeds with
                     | Error why -> Error $"the copy keeps the grouped rows a snapshot: {why}"

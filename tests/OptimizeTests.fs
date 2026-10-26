@@ -10101,6 +10101,12 @@ let private transposeNormalFormCases () =
            decisionCase "decision_transpose_alias_declined_write_in_extent" src "transpose-normal-form"
                (fun d -> d.Subject = "x" && declinedMentioning "`m` names `y0` and may write" d)
                "declined: m's range bound writes y0 through bump's `mut` parameter")
+      (match (try Ok (System.IO.File.ReadAllText "tests/corpus/index-types/567_alias_write_deep_in_extents_kept.blade") with ex -> Error ex.Message) with
+       | Error e -> resultLine Fail "decision_transpose_alias_declined_write_deep_in_extents" e; false
+       | Ok src ->
+           decisionCase "decision_transpose_alias_declined_write_deep_in_extents" src "transpose-normal-form"
+               (fun d -> d.Subject = "x" && declinedMentioning "`m` names `y0` and may write" d)
+               "declined: the write ten extents deep is seen (the traversal is complete)")
       withGate "BLADE_TRANSPOSE_ELIDE" "0" (fun () ->
           decisionCase "decision_transpose_declined_gate" tnfSymSrc "transpose-normal-form"
               (declinedMentioning "disabled by BLADE_TRANSPOSE_ELIDE") "declined: disabled by BLADE_TRANSPOSE_ELIDE") ]
@@ -10623,6 +10629,8 @@ let private groupViewCases () : bool list =
           (fun d -> d.Subject = "gc" && declinedMentioning "not proved to materialize a private temporary" d) "declined: `a |> compute` shares a's storage"
       planCase "decision_group_view_declined_write_in_extent" (corpus "024_group_view_write_in_extent_keeps_snapshot.blade") "structural-group-view"
           (fun d -> d.Subject = "g" && declinedMentioning "`m` names `a` and may write" d) "declined: m's range bound writes a"
+      planCase "decision_group_view_declined_write_deep_in_extents" (corpus "026_group_view_write_deep_in_extents_keeps_snapshot.blade") "structural-group-view"
+          (fun d -> d.Subject = "g" && declinedMentioning "`m` names `a` and may write" d) "declined: the write ten extents deep is seen"
       planCase "decision_group_view_declined_tile_grouping" (corpus "012_segments_grid_two_slots.blade") "structural-group-view"
           (fun d -> d.Subject = "g" && declinedMentioning "a tile grouping" d) "declined: a tile grouping"
       withGate "BLADE_GROUP_VIEW" "0" (fun () ->
