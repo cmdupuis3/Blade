@@ -8932,7 +8932,7 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
                     | IRIndex (t, _, _) when isT t -> cfail "a fixed-row read of the trajectory after the recursion (rec-window's snapshots ride the surface only; a ring beside snapshots is v1.1)"
                     | IRVar (t, _) when t = tId -> cfail "the trajectory is used whole after the recursion (an escape: a value, an argument, an alias, a transpose or another operand)"
                     | IRIf (c, a, b) -> find cond c; find true a; find true b
-                    | IRMatch _ -> (match e with ExprShape (ch, _) -> ch |> List.iter (find true) | _ -> ())
+                    | IRMatch _ -> (match e with ExprShape (ch, _) -> ch |> List.iter (find true))
                     | IRForRange (_, l, h, b) -> find cond l; find cond h; find true b
                     | IRBinOp (_, (IRAnd | IROr), a, b, _) -> find cond a; find true b
                     | ExprShape (children, _) -> children |> List.iter (find cond)
