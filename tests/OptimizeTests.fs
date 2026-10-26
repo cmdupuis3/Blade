@@ -1041,7 +1041,32 @@ let private recFoldEmission () : bool list =
             else resultLine Fail name ("saw: " + (mine |> List.map Blade.Effects.Decisions.render |> String.concat " | ")); false
     let effect = declinesWith "rec_fold_ring_declines_effect_in_range_extent: a range bound that calls a storing helper" effectInExtent "a type carries"
     let deep = declinesWith "rec_fold_ring_declines_deep_extent_read: a trajectory read ten range extents deep" deepExtent "inside a type's extent"
-    [ on; off; llvm; team; strict; effect; deep ]
+    // Codex review round 5: a module-level DEFERRED map the step forces, whose
+    // kernel calls a writer in a range bound (reached by the write analysis
+    // through the deferred initializer, not by the type-effect audit then).
+    let deferredEffect =
+        "type T = Idx<11>\n"
+        + "let mut offset = 0.0\n"
+        + "function stash(x: Int64) -> Int64 = {\n"
+        + "    offset = offset + 1.0\n"
+        + "    1\n"
+        + "}\n"
+        + "let dirty = lambda(x) -> {\n"
+        + "    let ys = 0..stash(Int64(x))\n"
+        + "    Float64(reduce(ys, (+), 0))\n"
+        + "}\n"
+        + "let d = method_for(range<T>) <@> dirty\n"
+        + "function run(a: Float64) -> Float64 = {\n"
+        + "    let rec s: Array<Float64 like T> =\n"
+        + "        match s with\n"
+        + "        | zero -> zero\n"
+        + "        | zero :: k -> zero :: a\n"
+        + "        | prefix :: n -> prefix :: prefix(n - 1) + d(n)\n"
+        + "    reduce(s, (+), offset)\n"
+        + "}\n"
+        + "let v = run(1.0)\n"
+    let deferred = declinesWith "rec_fold_ring_declines_deferred_producer_extent_effect: a forced deferred map whose kernel writes in a range bound" deferredEffect "a type carries"
+    [ on; off; llvm; team; strict; effect; deep; deferred ]
 // ---------------------------------------------------------------------------
 // PM14 (round 4 wave 2): the leading-axis fold's state updated in place
 // (rule `fold-state-in-place`, Optimize.fuseSliceWritesModule's fold-state

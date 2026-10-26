@@ -8367,23 +8367,38 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
         match typeCarried e with
         | None -> false
         | Some xs -> xs |> List.forall simple
-    // The callables an expression reaches (by name, through bodies and the
-    // expressions their types carry), transitively.
-    let reachableCallables (roots: IRExpr list) : IRCallable list =
+    // What an expression can EXECUTE beyond its own tree, transitively: the
+    // callables it names (their bodies, and the expressions their types
+    // carry) and the MODULE BINDINGS it names -- a deferred binding runs its
+    // initializer where it is forced, and a binding's side-table operands
+    // (compound / sparse / random) run at its site -- with the payloads of
+    // those bindings (Codex review round 5: a deferred map whose producer
+    // called a writer in a range bound was reached by the write analysis but
+    // not by the type-effect audit). Returns the callables and the payloads.
+    let moduleBindingById = modul.Bindings |> List.map (fun b -> b.Id, b) |> Map.ofList
+    let reachableFrom (roots: IRExpr list) : IRCallable list * IRExpr list =
         let seen = System.Collections.Generic.HashSet<IRId>()
         let out = ResizeArray<IRCallable>()
+        let payloads = ResizeArray<IRExpr>()
         let rec visit (e: IRExpr) =
             let extents = match typeCarried e with Some xs -> xs | None -> []
             for x in e :: extents do
                 iterIRExpr (fun n ->
                     match n with
-                    | IRVar (id, _) ->
+                    | IRVar (id, _) when seen.Add id ->
                         (match callables.TryGetValue id with
-                         | true, c when seen.Add id -> out.Add c; visit c.Body
-                         | _ -> ())
+                         | true, c -> out.Add c; visit c.Body
+                         | _ ->
+                            match Map.tryFind id moduleBindingById with
+                            | Some b ->
+                                let p = bindingPayloadExpr modul b
+                                payloads.Add p
+                                visit p
+                            | _ -> ())
                     | _ -> ()) x
         roots |> List.iter visit
-        List.ofSeq out
+        List.ofSeq out, List.ofSeq payloads
+    let reachableCallables (roots: IRExpr list) : IRCallable list = fst (reachableFrom roots)
     let boundInBlock (blk: IRExpr) (id: IRId) =
         let mutable hit = false
         iterIRExpr (fun x -> match x with IRLet (b, _, _) when b = id -> hit <- true | _ -> ()) blk
@@ -8948,8 +8963,9 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
                 // the region and the callables it reaches carry in types must
                 // be literals, names and scalar arithmetic.
                 let typesQuiet (roots: IRExpr list) =
-                    let cs = reachableCallables roots
+                    let cs, payloads = reachableFrom roots
                     roots |> List.forall typeCarriedSimple
+                    && payloads |> List.forall typeCarriedSimple
                     && cs |> List.forall (fun c ->
                         typeCarriedSimple c.Body
                         && (c.RetType :: (c.Params |> List.map (fun p -> p.Type)))
