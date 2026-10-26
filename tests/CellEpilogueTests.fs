@@ -708,8 +708,13 @@ let runCellEpilogueTests () : BlockResult =
         use _o = pinEnv "BLADE_OMP_THREADS" "1"
         use _r = pinEnv "BLADE_FP_REPRO" "1"
         use _c = pinEnv "BLADE_FP_CONTRACT" "off"
-        // 035 is the scratch-reuse witness: reuse ON there (the default), off elsewhere.
-        use _pr = pinEnv "BLADE_POOL_REUSE" (if rel.Contains "035" then null else "off")
+        // master's 035_input_legs is the scratch-reuse witness: reuse ON there (the
+        // default), off for master's other fixtures. Round 4's `_lifetime_` fixtures
+        // keep the default they were written under (037_lifetime is a reuse witness).
+        // Names are matched WHOLE: a bare "035" also matched 035_lifetime after the
+        // round-4 merge.
+        let lifetimeFixture = rel.Contains "_lifetime_"
+        use _pr = pinEnv "BLADE_POOL_REUSE" (if rel.Contains "035_input_legs" || lifetimeFixture then null else "off")
         let runWith (gate: string) (memcheck: bool) : Result<int * string, string> =
             use _g = pinEnv "BLADE_EPILOGUE_LEGS" (if isNull gate then "1" else gate)
             use _m = pinEnv "BLADE_MEMCHECK" (if memcheck then "1" else null)
@@ -748,8 +753,13 @@ let runCellEpilogueTests () : BlockResult =
                     // release, nothing left outstanding that gate-off frees.
                     // 030 / 032: gate-off keeps W1-D's own join-driven inline, whose
                     // pools then live to exit (pre-existing): gate-on frees more.
-                    if rel.Contains "031" || rel.Contains "033" then a1 = a2 && f1 = f2 && o1 = o2
-                    elif rel.Contains "035" then a1 = a2 + 1L && f1 = f2 + 1L && o1 = o2
+                    // Round 4's `_lifetime_` fixtures keep round 4's rule (the inline
+                    // allocates nothing gate-off does not, and frees no less).
+                    // 037_lifetime is round 4's scratch-reuse witness and behaves like
+                    // 035_input_legs: the event-bearing function forgoes its reuse.
+                    if rel.Contains "035_input_legs" || rel.Contains "037_lifetime" then a1 = a2 + 1L && f1 = f2 + 1L && o1 = o2
+                    elif lifetimeFixture then a1 = a2 && f1 >= f2 && o1 <= o2
+                    elif rel.Contains "031_input_legs" || rel.Contains "033_input_legs" then a1 = a2 && f1 = f2 && o1 = o2
                     else a1 = a2 && f1 >= f2 && o1 <= o2
                 | _ -> false
             if aOn <> 0 || aOff <> 0 || nOn <> 0 || nOff <> 0 then fail name ($"exit codes asan {aOn}/{aOff} plain {nOn}/{nOff}: {tOn}")
