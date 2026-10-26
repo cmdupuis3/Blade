@@ -2079,10 +2079,108 @@ let one = contains(evens, 44)
                         if got <> r.Hosts then fail name ($"""hosts [{String.concat ", " got}], want [{String.concat ", " r.Hosts}]""")
                         else pass name ($"""{String.concat ", " got}: init -> report -> probes -> fini"""))
 
+    printSubHeader "call argument order (gap G57; G79's run checks are runLlvmCallOrderRunTests)"
+    // G57: the ordered path (a call holding an explicit compute and a bare
+    // deferred argument) needs the call to be its statement's WHOLE value in
+    // main; nested in an expression it is refused by name, fail closed.
+    let nestedOrdered =
+        "type Row = Idx<1>\n"
+        + "let a: Array<Int64 like Row> = [1]\n"
+        + "let z: Array<Int64 like Row> = [0]\n"
+        + "let bad = method_for(z) <@> lambda(v) -> 1 / v\n"
+        + "let good = method_for(a) <@> lambda(v) -> v + 1\n"
+        + "function h(k: Int64, p: Array<Int64 like Row>, q: Array<Int64 like Row>) -> Int64 = k + p(0) + q(0)\n"
+        + "let r = 1 + h(a((a(0) : Row)), bad, good |> compute)\n"
+    (match emitUnder [] "facts" nestedOrdered with
+     | Error e when e.Contains "the ordered argument path needs the call to be a statement's whole value" ->
+         pass "g57_ordered_call_nested_in_an_expression_refuses" "refused by name"
+     | Error e -> fail "g57_ordered_call_nested_in_an_expression_refuses" ("refused for another reason: " + e)
+     | Ok _ -> fail "g57_ordered_call_nested_in_an_expression_refuses" "emitted (the hoisted force would run before the cast)")
+    // G75: a function body evaluates a deferred module map privately; a call
+    // from main AFTER main forced the map is refused by name (the forced
+    // snapshot is the class value, which the private evaluation would not
+    // read), and one BEFORE any force is taken.
+    let g75 (forceFirst: bool) =
+        "type Row = Idx<3>\n"
+        + "let z: Array<Int64 like Row> = [1, 2, 3]\n"
+        + "let lazy = method_for(z) <@> lambda(v) -> v * 10\n"
+        + "function at(n: Int64) -> Int64 = lazy(1) + n\n"
+        + (if forceFirst then "let w = lazy(0) + lazy(2)\n" else "")
+        + "let one = at(1)\n"
+    (match emitUnder [] "facts" (g75 true) with
+     | Error e when e.Contains "reads the deferred module binding 'lazy', which main forced before this call" ->
+         pass "g75_call_after_main_forced_the_map_refuses" "refused by name"
+     | Error e -> fail "g75_call_after_main_forced_the_map_refuses" ("refused for another reason: " + e)
+     | Ok _ -> fail "g75_call_after_main_forced_the_map_refuses" "emitted")
+    (match emitUnder [] "facts" (g75 false) with
+     | Ok ll when ll.Contains "define internal i64 @bl_at_" -> pass "g75_function_reads_unforced_map_privately" "taken (out-of-line `at`)"
+     | Ok _ -> fail "g75_function_reads_unforced_map_privately" "no out-of-line `at` in the emitted .ll"
+     | Error e -> fail "g75_function_reads_unforced_map_privately" e)
+
     printFooter "LLVM Fact Layer"
         [ $"{passed} passed"; $"{failed} failed"; "0 skipped" ]
     { Block = "LLVM Fact Layer"; Passed = passed; Failed = failed; Skipped = 0
       FailedNames = failedNames }
+
+/// Gap G79: an ORDINARY call (no `|> compute` argument) with two failing
+/// arguments evaluates them LEFT TO RIGHT in the llvm lane -- the checked cast
+/// (BL8006) before the later division by zero (BL8013) -- on the out-of-line
+/// and the capturing-inline path alike (the interpreter agrees; the C++ lane's
+/// order is unspecified there, g++ runs right to left: the open G79 row). Run,
+/// not read: the emitted guard order is not the executed order.
+///
+/// Its own block, NOT the fact layer: `test llvm goldens` (the fact layer's
+/// CI step, on Linux) is the toolchain-free gate and must spawn no compiler.
+/// Skipped without clang.
+let runLlvmCallOrderRunTests () : BlockResult =
+    printHeader "LLVM Call Argument Order (G79, compiled and run)"
+    let block = "LLVM Call Argument Order"
+    let mutable passed = 0
+    let mutable failed = 0
+    let mutable skipped = 0
+    let mutable failedNames = []
+    let pass name detail =
+        passed <- passed + 1
+        resultLine Pass name detail
+    let fail name detail =
+        failed <- failed + 1
+        failedNames <- failedNames @ [ name ]
+        resultLine Fail name detail
+    let ordinaryCall (inlined: bool) =
+        "type Row = Idx<1>\n"
+        + "let a: Array<Int64 like Row> = [1]\n"
+        + "let z: Array<Int64 like Row> = [0]\n"
+        + "let base: Array<Int64 like Row> = [100]\n"
+        + (if inlined then "let f = lambda(k: Int64, m: Int64) -> k + m + base(0)\n"
+           else "function f(k: Int64, m: Int64) -> Int64 = k + m\n")
+        + "let r = f(a((a(0) : Row)), 1 / z(0))\n"
+    let firstAbort name (source: string) (want: string) =
+        match Build.resolveClang () with
+        | None -> skipped <- skipped + 1; resultLine Skip name "no clang (BLADE_LLVM_CLANG)"
+        | Some _ ->
+        match emitUnder [] "facts" source with
+        | Error e -> fail name e
+        | Ok ll ->
+            let dir = Path.Combine("generated_cpp_tests", "llvm_facts")
+            Directory.CreateDirectory dir |> ignore
+            EmitLlvm.deployShim dir
+            let llFile = Path.Combine(dir, "facts_" + name + ".ll")
+            File.WriteAllText(llFile, ll)
+            match Build.compileLlvmProgram llFile dir with
+            | Error e when e.StartsWith "Skipped:" -> skipped <- skipped + 1; resultLine Skip name e
+            | Error e -> fail name ("llvm compile: " + (if e.Length > 300 then e.Substring(0, 300) else e))
+            | Ok exe ->
+                match runExeCapture exe with
+                | Error e -> fail name e
+                | Ok (code, _, err) ->
+                    let first = err.Replace("\r\n", "\n").Split('\n') |> Array.tryFind (fun l -> l.StartsWith "error[")
+                    match first with
+                    | Some l when code <> 0 && l.StartsWith ("error[" + want + "]") -> pass name l
+                    | other -> fail name ($"exit {code}, first error {other}, wanted {want}")
+    firstAbort "g79_ordinary_call_left_to_right_out_of_line" (ordinaryCall false) "BL8006"
+    firstAbort "g79_ordinary_call_left_to_right_inlined" (ordinaryCall true) "BL8006"
+    printFooter block [ $"{passed} passed"; $"{failed} failed"; $"{skipped} skipped" ]
+    { Block = block; Passed = passed; Failed = failed; Skipped = skipped; FailedNames = failedNames }
 
 // ---------------------------------------------------------------------------
 // Block 2b: the syrk tile core, raw bits across the lanes (M6)
@@ -3063,6 +3161,79 @@ let runLlvmDifferentialTestsFor (categories: string list) : BlockResult =
 let runLlvmDifferentialTests () : BlockResult =
     runLlvmDifferentialTestsFor defaultCategories
 
+/// Gap G60 (review codex-diff-W4B-B-2 finding 1): ordinary positional reads
+/// of a deferred module map inside a top-level BLOCK keep the statement's
+/// force boundary in the llvm lane -- forced at the START of the whole
+/// statement, as the C++ lane's block pre-pass forces them -- so the two
+/// compiled lanes agree on the value twin (the write after the force: r = 15,
+/// g = [10, 5]) and the first-failure twin (g's BL8013 before the block's
+/// earlier cast). The interpreter evaluates both at the read (r = 7; BL8006):
+/// the inherited C++ / interpreter order gap is OPEN in G60, so these twins
+/// are C++-vs-LLVM differentials here rather than corpus files (`test interp`
+/// would fail them). Skipped without clang or g++.
+let runLlvmBlockForceTwins () : BlockResult =
+    printHeader "LLVM Block Force Boundary (C++ vs llvm, G60)"
+    let block = "LLVM Block Force Boundary"
+    let twins =
+        [ "block_reads_after_write_keep_statement_boundary",
+          "type Row = Idx<2>\nlet mut x: Array<Int64 like Row> = [1, 2]\nlet g = method_for(x) <@> lambda(v) -> 10 / v\nlet r = {\n    x(0) = 5\n    g(0) + g(1)\n}\n"
+          "block_reads_after_failing_statement_keep_statement_boundary (aborts)",
+          "type Row = Idx<2>\nlet x: Array<Int64 like Row> = [1, 0]\nlet g = method_for(x) <@> lambda(v) -> 10 / v\nlet r = {\n    let early = x((x(0) + 5 : Row))\n    g(0) + g(1) + early\n}\n"
+          // codex-diff-W4B-B-3 finding 1: an alias AND later direct reads --
+          // the pre-pass forces g at the statement start, the alias copies
+          "block_alias_with_later_reads_keeps_statement_boundary",
+          "type Row = Idx<2>\nlet mut x: Array<Int64 like Row> = [1, 2]\nlet g = method_for(x) <@> lambda(v) -> 10 / v\nlet r = {\n    x(0) = 5\n    let b = g\n    g(0) + g(1)\n}\n"
+          "block_alias_with_later_reads_after_failing_statement (aborts)",
+          "type Row = Idx<2>\nlet x: Array<Int64 like Row> = [1, 0]\nlet g = method_for(x) <@> lambda(v) -> 10 / v\nlet r = {\n    let early = x((x(0) + 5 : Row))\n    let b = g\n    g(0) + g(1) + early\n}\n"
+          // finding 2: a tuple INITIALIZER inside the block is covered by the
+          // pre-pass, not member-ordered
+          "block_tuple_initializer_keeps_statement_boundary",
+          "type Row = Idx<2>\nlet mut x: Array<Int64 like Row> = [1, 2]\nlet g = method_for(x) <@> lambda(v) -> 10 / v\nlet r = {\n    x(0) = 5\n    let t = (0, g(0) + g(1))\n    t[0] + t[1]\n}\n"
+          "block_tuple_initializer_after_failing_statement (aborts)",
+          "type Row = Idx<2>\nlet x: Array<Int64 like Row> = [1, 0]\nlet g = method_for(x) <@> lambda(v) -> 10 / v\nlet r = {\n    let early = x((x(0) + 5 : Row))\n    let t = (0, g(0) + g(1))\n    t[0] + t[1] + early\n}\n"
+          // codex-diff-W4B-B-4 finding 1: prodsum operands are pre-pass reads
+          "block_alias_with_later_prodsum_keeps_statement_boundary",
+          "type Row = Idx<2>\nlet mut x: Array<Int64 like Row> = [1, 2]\nlet g = method_for(x) <@> lambda(v) -> 10 / v\nlet r = {\n    x(0) = 5\n    let b = g\n    prodsum(g, g)\n}\n"
+          "block_alias_with_later_prodsum_after_failing_statement (aborts)",
+          "type Row = Idx<2>\nlet x: Array<Int64 like Row> = [1, 0]\nlet g = method_for(x) <@> lambda(v) -> 10 / v\nlet r = {\n    let early = x((x(0) + 5 : Row))\n    let b = g\n    prodsum(g, g) + early\n}\n"
+          // finding 2: an alias of g must not suppress h's statement-start force
+          "block_alias_of_one_map_reads_of_another",
+          "type Row = Idx<2>\nlet mut x: Array<Int64 like Row> = [1, 2]\nlet g = method_for(x) <@> lambda(v) -> v + 1\nlet h = method_for(x) <@> lambda(v) -> 10 / v\nlet r = {\n    x(0) = 5\n    let b = g\n    h(0) + h(1) + b(0) + b(1)\n}\n"
+          // codex-diff-W4B-B-5 finding 1: a TOTAL kernel over a FAILING
+          // deferred input is not "cannot fail"; every collected map is
+          // forced up front in collector order (h, then later)
+          "block_total_kernel_over_failing_input_forced_in_order (aborts)",
+          "type Row = Idx<2>\nlet x: Array<Int64 like Row> = [1, 0]\nlet bad = method_for(x) <@> lambda(v) -> 10 / v\nlet h = method_for(bad) <@> lambda(v) -> v + 1\nlet later = method_for(x) <@> lambda(v) -> x((v + 5 : Row))\nlet r = {\n    let first = h(0)\n    first + h(1) + later(0) + later(1)\n}\n"
+          "block_total_kernel_over_input_values",
+          "type Row = Idx<2>\nlet x: Array<Int64 like Row> = [1, 2]\nlet bad = method_for(x) <@> lambda(v) -> 10 / v\nlet h = method_for(bad) <@> lambda(v) -> v + 1\nlet later = method_for(x) <@> lambda(v) -> x((v - 1 : Row))\nlet r = {\n    let first = h(0)\n    first + h(1) + later(0) + later(1)\n}\n"
+          "block_alias_of_one_map_reads_of_another_after_failing_statement (aborts)",
+          "type Row = Idx<2>\nlet x: Array<Int64 like Row> = [1, 0]\nlet g = method_for(x) <@> lambda(v) -> v + 1\nlet h = method_for(x) <@> lambda(v) -> 10 / v\nlet r = {\n    let early = x((x(0) + 5 : Row))\n    let b = g\n    h(0) + h(1) + b(0) + b(1) + early\n}\n" ]
+    match Build.resolveClang () with
+    | None ->
+        printfn "Skipped: no clang found."
+        printFooter block [ "0 passed"; "0 failed"; $"{twins.Length} skipped" ]
+        { Block = block; Passed = 0; Failed = 0; Skipped = twins.Length; FailedNames = [] }
+    | Some _ when not Build.capabilities.Value.HasGpp ->
+        printfn "Skipped: requires g++ for the C++ oracle lane."
+        printFooter block [ "0 passed"; "0 failed"; $"{twins.Length} skipped" ]
+        { Block = block; Passed = 0; Failed = 0; Skipped = twins.Length; FailedNames = [] }
+    | Some _ ->
+    let dir = outputDir
+    Directory.CreateDirectory dir |> ignore
+    CodeGen.deployRuntimeHeaders dir
+    EmitLlvm.deployShim dir
+    let mutable passed = 0
+    let mutable failed = 0
+    let mutable skipped = 0
+    let mutable names = []
+    for (name, src) in twins do
+        match runCase dir name src with
+        | Matched note -> passed <- passed + 1; resultLine Pass name (if note = "" then "C++ and llvm agree (whole stdout / abort identity)" else note)
+        | SkippedCase why -> skipped <- skipped + 1; resultLine Skip name why
+        | FailedCase why -> failed <- failed + 1; names <- names @ [ name ]; resultLine Fail name why
+    printFooter block [ $"{passed} passed"; $"{failed} failed"; $"{skipped} skipped" ]
+    { Block = block; Passed = passed; Failed = failed; Skipped = skipped; FailedNames = names }
+
 // ---------------------------------------------------------------------------
 // Block 5: the three-way blocked-simplex gate
 // ---------------------------------------------------------------------------
@@ -3788,7 +3959,7 @@ let runLlvmBench () : int =
 
 // ---------------------------------------------------------------------------
 // Block: the runtime shim's build identity and its retained-block cache
-// (bench/notes/microkernel-sketches-review.md M0 + M1)
+// (bench/notes/microkernel-sketches-review.md (removed 2026-10-24; in git history at cf2028cc) M0 + M1)
 // ---------------------------------------------------------------------------
 
 /// A C driver over the shim's allocator ABI. It reads the cache counters
@@ -4028,6 +4199,92 @@ let runLlvmRuntimeShimTests () : BlockResult =
     { Block = block; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }
 
 // ---------------------------------------------------------------------------
+// Block: MUST-NATIVE fixtures (round 3 wave 4, W4B-C; gaps G64 / G67)
+// ---------------------------------------------------------------------------
+//
+// The differential maps ANY llvm emission refusal to a skip, so a program
+// claimed native could lose the lane while `blade test llvm <dir>` stays
+// green. The files below are claimed NATIVE: each is lowered,
+// `EmitLlvm.tryEmitProgramNamed` must SUCCEED (a refusal FAILS here),
+// the .ll is compiled and run, and its stdout must carry every `// EXPECT:`
+// pin of the file verbatim -- index-types/544's sign Booleans (`dn_neg`,
+// `dk_neg`) included. Runs after the differential of the category it names.
+let private mustNativeFixtures : (string * string) list =
+    [ "index-types", "544_whole_array_kernel_over_dense_is_call.blade"
+      "symmetry", "144_packed_comm_contraction_direct_call_accepted.blade"
+      "symmetry", "146_zero_level_compact_application_is_call.blade"
+      // A top-level compute forces its deferred operands (formalism 10.2):
+      // the alias class prints natively (wave 3 B, goal 1).
+      "symmetry", "147_deferred_alias_chain_packed.blade"
+      "loops", "599_compute_operand_force_prints_deferred_map.blade" ]
+
+let runLlvmMustNativeTestsFor (categories: string list) : BlockResult =
+    let block = "LLVM Must-Native"
+    let wanted = mustNativeFixtures |> List.filter (fun (c, _) -> List.contains c categories)
+    if wanted.IsEmpty then { Block = block; Passed = 0; Failed = 0; Skipped = 0; FailedNames = [] } else
+    printHeader "LLVM Must-Native (a refusal fails)"
+    match Build.resolveClang () with
+    | None ->
+        printfn "Skipped: no clang found (set BLADE_LLVM_CLANG, or install C:\\msys64\\clang64)."
+        printFooter block [ "0 passed"; "0 failed"; "1 skipped" ]
+        { Block = block; Passed = 0; Failed = 0; Skipped = 1; FailedNames = [] }
+    | Some _ ->
+    let dir = Path.GetFullPath(Path.Combine(outputDir, "llvm_must_native"))
+    Directory.CreateDirectory dir |> ignore
+    EmitLlvm.deployShim dir
+    let mutable passed = 0
+    let mutable failed = 0
+    let mutable failedNames = []
+    for (cat, file) in wanted do
+        let name = $"{cat}/{file}: native llvm route, EXPECT pins"
+        let verdict =
+            let candidates =
+                [ Path.Combine(Directory.GetCurrentDirectory(), "tests", "corpus", cat, file)
+                  Path.Combine(AppContext.BaseDirectory, "tests", "corpus", cat, file) ]
+            match candidates |> List.tryFind File.Exists with
+            | None -> Error "corpus file not found"
+            | Some path ->
+            let source = File.ReadAllText path
+            let pins =
+                source.Replace("\r\n", "\n").Split('\n')
+                |> Array.choose (fun l -> if l.StartsWith "// EXPECT: " then Some (l.Substring("// EXPECT: ".Length).Trim()) else None)
+                |> List.ofArray
+            if pins.IsEmpty then Error "the fixture carries no EXPECT pin" else
+            match fst (Lowering.lowerCaptured source) with
+            | Error e -> Error ($"lower: {e}")
+            | Ok ir0 ->
+            match IRValidate.validateIR ir0 with
+            | Error errs -> Error ($"""IR validation: {String.concat "; " errs}""")
+            | Ok ir ->
+            let stem = "mustnative_" + Build.sanitizeFileName (Path.GetFileNameWithoutExtension file)
+            match (try EmitLlvm.tryEmitProgramNamed stem ir with ex -> Error ("raised: " + ex.Message)) with
+            | Error why -> Error ($"the llvm lane REFUSED a must-native fixture: {why}")
+            | Ok ll ->
+            let llFile = Path.Combine(dir, stem + ".ll")
+            File.WriteAllText(llFile, ll)
+            match Build.compileLlvmProgram llFile dir with
+            | Error e -> Error ($"llvm compile: {e}")
+            | Ok exe ->
+            match runExeCapture exe with
+            | Error e -> Error e
+            | Ok (code, out, err) when code <> 0 -> Error ($"exit {code}: {err.Trim()}")
+            | Ok (_, out, _) ->
+                let lines = out.Replace("\r\n", "\n").Split('\n') |> Array.map (fun l -> l.Trim())
+                match pins |> List.filter (fun p -> not (Array.contains p lines)) with
+                | [] -> Ok ($"""native; {pins.Length} pins: {String.concat "; " pins}""")
+                | missing -> Error ($"""native output lacks {String.concat "; " missing}: {out.Trim()}""")
+        match verdict with
+        | Ok note ->
+            passed <- passed + 1
+            resultLine Pass name note
+        | Error e ->
+            failed <- failed + 1
+            failedNames <- failedNames @ [ name ]
+            resultLine Fail name e
+    printFooter block [ $"{passed} passed"; $"{failed} failed"; "0 skipped" ]
+    { Block = block; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }
+
+// ---------------------------------------------------------------------------
 // Entry points for `blade test llvm [category]`
 // ---------------------------------------------------------------------------
 
@@ -4040,11 +4297,13 @@ let runLlvmTests () : int =
         [ runLlvmCompareRuleTests ()
           runLlvmGoldenTests ()
           runLlvmFactTests ()
+          runLlvmCallOrderRunTests ()
           runLlvmTilesRawBitTests ()
           runSimplexAgreementTests ()
           runLlvmSimplexGate ()
           runLlvmRuntimeShimTests ()
-          runLlvmDifferentialTests () ]
+          runLlvmDifferentialTests ()
+          runLlvmMustNativeTestsFor defaultCategories ]
     printGrandTotal blocks
     if blocks |> List.sumBy (_.Failed) = 0 then 0 else 1
 
@@ -4092,7 +4351,9 @@ let runLlvmCategory (cat: string) : int =
         if r.Failed + g.Failed + f.Failed + s.Failed = 0 then 0 else 1
     | "facts" ->
         let f = runLlvmFactTests ()
-        if f.Failed = 0 then 0 else 1
+        let c = runLlvmCallOrderRunTests ()
+        let t = runLlvmBlockForceTwins ()
+        if f.Failed + c.Failed + t.Failed = 0 then 0 else 1
     | "shim" ->
         let s = runLlvmRuntimeShimTests ()
         if s.Failed = 0 then 0 else 1
@@ -4110,4 +4371,5 @@ let runLlvmCategory (cat: string) : int =
         runLlvmBench ()
     | _ ->
         let r = runLlvmDifferentialTestsFor [ cat ]
-        if r.Failed = 0 then 0 else 1
+        let m = runLlvmMustNativeTestsFor [ cat ]
+        if r.Failed + m.Failed = 0 then 0 else 1

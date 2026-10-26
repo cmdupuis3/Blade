@@ -605,6 +605,32 @@ let mkTypedSpan kind ty span : TypedExpr =
 /// Create a typed literal
 let mkLit lit ty = mkTyped (TExprLit lit) ty
 
+/// THE UNSEEDED MARKER (gap G74). An unseeded `(+)` fold over a deferred
+/// computation has no seed: its value is the left fold of its cells. The
+/// checker still synthesizes the fold's base seed (the section's `+0.0` /
+/// `0` / `zero`, exactly as before) because the fused terminal needs one, and
+/// marks it with THIS span, which no source expression can carry (line 0, a
+/// file name no path has). Lowering (`lowerUnseededSeed`) turns the mark into
+/// the IR node `IRUnseededSeed`, which keeps the provenance until
+/// `resolveUnseededSeedsModule` (after monomorphization, before the optimizer)
+/// knows the fold's EFFECTIVE route: on an obligatorily serial one --
+/// `BLADE_FP_REPRO=1`, a `where repro` body, a repro-vetoed kernel, a deferred
+/// map body that may WRITE -- the seed becomes the EXACT identity (`-0.0` for a
+/// real float, `(-0.0, -0.0)` complex; formalism 2.4's identity insertion), so
+/// the seeded chain is the head-peeled one bit for bit; on a licensed route the
+/// base seed is kept unchanged (a licensed fold's signed zero is the
+/// licence's, G40). The mark is never a value: nothing but Lowering reads it.
+/// (The rank >= 2 full fold's accumulator loop is serial on every route and
+/// takes the identity at the checker directly; it carries no mark.)
+let unseededSeedSpan : Span =
+    { StartLine = 0; StartCol = -74; EndLine = 0; EndCol = -74; File = Some "<unseeded fold seed>" }
+
+/// Mark a checker-synthesized `(+)` seed as the seed of an UNSEEDED fold.
+let markUnseeded (e: TypedExpr) : TypedExpr = { e with Span = unseededSeedSpan }
+
+/// Is this typed expression a marked unseeded-fold seed?
+let isUnseededSeed (e: TypedExpr) : bool = e.Span = unseededSeedSpan
+
 /// Create a typed variable reference
 let mkVar name varId identity ty = 
     mkTyped (TExprVar (name, varId, identity)) ty

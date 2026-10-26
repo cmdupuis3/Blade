@@ -54,3 +54,7 @@ BladeAttain.v
 BladeInduction.v
 BladeLicence.v
 BladeBoundary.v
+BladeStructuralIdentity.v
+BladeCompositionalOptimization.v
+BladeLayoutOptimizationBridge.v
+BladeMaterialization.v

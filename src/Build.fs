@@ -1261,7 +1261,7 @@ let internal llvmShimDefines () : string =
 /// only when a file of exactly that name exists. It used to be one fixed name
 /// reused by TIMESTAMP alone, so a memcheck build in a directory that already
 /// held a normal build linked the normal object -- the retained-block cache
-/// silently ON under the leak counter (bench/notes/microkernel-sketches-review.md
+/// silently ON under the leak counter (bench/notes/microkernel-sketches-review.md (removed 2026-10-24; in git history at cf2028cc)
 /// M0). Now two configurations sharing a directory each link their own object,
 /// and a rebuild in the same configuration is still one link input, not a C
 /// compile. The identity also enters the executable cache key
@@ -1387,7 +1387,7 @@ let private llvmExeCacheKey (clang: string) (args: string) (llText: string) (shi
     |> String.concat ""
 
 // ---------------------------------------------------------------------------
-// The LLVM lane's TILE CORE object (bench/notes/microkernel-sketches-review.md
+// The LLVM lane's TILE CORE object (bench/notes/microkernel-sketches-review.md (removed 2026-10-24; in git history at cf2028cc)
 // item M6): blade_llvm_tiles.c over blade_tiles.h -- the same arithmetic core
 // the C++ lane's blade_pgemm::dsyrk_tri includes -- compiled by clang as C.
 //

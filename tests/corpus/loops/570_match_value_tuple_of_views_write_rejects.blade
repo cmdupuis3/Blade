@@ -1,0 +1,20 @@
+// TEST: Match Value Tuple Of Views Write (rejects)
+// ----------------------------------------------------------------------------
+// Gap G60(a), Codex review of W4B-A finding 2: the tuple of row views of the
+// deferred map m is the value of a `match` (a literal scrutinee, which the
+// optimizer later folds to the first case). The provenance walk follows
+// every case body along the projection path: the write is refused at
+// lowering in every lane (BL4005).
+// ----------------------------------------------------------------------------
+type Y = Idx<2>
+type X = Idx<3>
+let m = method_for(range<Y>, range<X>) <@> lambda(i, j) -> Float64(i) * 10.0 + Float64(j)
+let pair = match 0 with
+    | 0 -> (m(0), m(1))
+    | _ -> (m(1), m(0))
+let row = pair[0]
+row(1) = 9.0
+let s = reduce(m, (+), axes = 2)
+// ERROR: BL4005 @ 15:1
+// ERROR-CONTAINS: a write through `m`, a deferred computation
+// REJECT-AT: lower

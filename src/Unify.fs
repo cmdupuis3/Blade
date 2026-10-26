@@ -262,6 +262,11 @@ type TypeError =
     | JoinDimRange of dim: int * totalDims: int
     | JoinShapeMismatch of pos: int * detail: string
     | StackJoinCompactSlot of op: string * slot: int
+    /// G67: a map whose KERNEL returns a compact (SymIdx / AntisymIdx /
+    /// HermitianIdx) array -- a row map with a packed cell. No lane stores it
+    /// (a grouped compact output is not built); refused by name. cell names
+    /// the cell's compact slot.
+    | RowMapCompactCell of cell: string
     // Unit mismatch (BL3006)
     | UnitMismatch of context: string * left: string * right: string
     // Quantity (nominal unit) violations
@@ -1109,6 +1114,39 @@ type Subst() =
     member _.PopTypeVarScope(saved: Map<string, IRType * int> * Set<string>) =
         typeVarScope <- fst saved
         knownTypeVarNames <- snd saved
+
+    /// The whole substitution state (every table is a persistent map or set,
+    /// so this is a handful of references), for a SPECULATIVE check whose
+    /// result may be discarded (TypeCheckInfer.checkUnderDeclaredLayout):
+    /// `Restore` puts every binding and constraint back. The fresh-id counter
+    /// is NOT rolled back -- ids minted by the discarded attempt stay unused,
+    /// so nothing it built can collide with what is minted next.
+    member _.Snapshot() : obj =
+        box (map, typeVarScope, arityConstraints, literalDefaults, knownTypeVarNames, polymorphicIds,
+             rankLowerBounds, indexDefaults, paramDefaults,
+             (elemCasts, elemCastMemo, elemCastPartner, elemCastDropUnits, elemBoolMemo, scalarPins))
+
+    member _.Restore(s: obj) =
+        let (m, tvs, ac, ld, kn, poly, rlb, idd, pd, (ec, ecm, ecp, ecd, ebm, sp)) =
+            unbox<Map<int, IRType> * Map<string, IRType * int> * Map<int, int> * Map<int, ElemType> * Set<string>
+                  * Set<int> * Map<int, int> * Set<int> * Map<int, ElemType>
+                  * (Map<int, int * ElemType> * Map<int * ElemType, int> * Map<int, int> * Set<int>
+                     * Map<int * int * ElemType, int> * Set<int>)> s
+        map <- m
+        typeVarScope <- tvs
+        arityConstraints <- ac
+        literalDefaults <- ld
+        knownTypeVarNames <- kn
+        polymorphicIds <- poly
+        rankLowerBounds <- rlb
+        indexDefaults <- idd
+        paramDefaults <- pd
+        elemCasts <- ec
+        elemCastMemo <- ecm
+        elemCastPartner <- ecp
+        elemCastDropUnits <- ecd
+        elemBoolMemo <- ebm
+        scalarPins <- sp
 
     /// Instrumented twin of the `IRTInfer` hop below, used ONLY when
     /// `PerfCounters.enabled` (docs/plan-compile-speed.md Stage 5): the same

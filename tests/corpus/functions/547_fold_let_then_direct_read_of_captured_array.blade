@@ -1,0 +1,21 @@
+// TEST: Memfree Fold Let Then Direct Read Of Captured Array (G54)
+// A scalar fold let whose map kernel captures `y` (a proved-synchronous slot,
+// so the capture pins nothing) followed by a LATER statement that reads `y`
+// directly (`let m = s + y(2)`): `y` takes the scope-exit free, after every
+// statement of the body has run, so the direct read sees live storage.
+// Values: y = [1, c + 1, 2 c + 1, 3 c + 1, 4 c + 1], m = sum(y * y) + y(2):
+// c = 2 -> 165 + 5, c = 3 -> 335 + 7.
+type I = Idx<5>
+
+function kernel(c: Float64) -> Float64 = {
+    let t = Float64(0..5) * c |> compute
+    let y = t + 1.0 |> compute
+    let s = reduce(method_for(range<I>) <@> lambda(a) -> y(a) * y(a), (+))
+    let m = s + y(2)
+    m
+}
+
+let k2 = kernel(2.0)
+let k3 = kernel(3.0)
+// EXPECT: k2 = 170.0
+// EXPECT: k3 = 342.0

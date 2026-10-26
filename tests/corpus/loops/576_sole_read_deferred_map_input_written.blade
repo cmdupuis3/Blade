@@ -1,0 +1,29 @@
+// TEST: Sole Read Deferred Map Input Written
+// ----------------------------------------------------------------------------
+// Gap G60 (b): a module deferred map read EXACTLY ONCE (`a = g(0)`, never
+// aliased) and then its input written. The read forces the whole map at its
+// statement, so its class value is that first-forcing snapshot (formalism
+// 10.2) and `g` prints [10, 5]. The llvm lane used to consume the sole read
+// in place and RERUN the producer at the print, over the written input:
+// `10 / 0` aborted there (BL8013) where the C++ lane and the interpreter
+// print the stored cells. A sole read inside a kernel (`ws` below, a fold of
+// `c`) is the same forcing use: c prints the cells from before its write.
+// ----------------------------------------------------------------------------
+type Row = Idx<2>
+let mut x: Array<Int64 like Row> = [1, 2]
+let g = method_for(x) <@> lambda(v) -> 10 / v
+let a = g(0)
+x(0) = 0
+type X = Idx<4>
+let mut A: Array<Float64 like X> = [1.0, 2.0, 3.0, 4.0]
+let c = method_for(A) <@> lambda(v) -> v * 2.0
+type W = Idx<2>
+let ws: Array<Float64 like W> = [1.0, 10.0]
+let out = ws <@> lambda(w) -> w * reduce(c, (+)) |> compute
+A(0) = 100.0
+// EXPECT: x = [0, 2]
+// EXPECT: g = [10, 5]
+// EXPECT: a = 10
+// EXPECT: A = [100.0, 2.0, 3.0, 4.0]
+// EXPECT: c = [2.0, 4.0, 6.0, 8.0]
+// EXPECT: out = [20.0, 200.0]

@@ -1,0 +1,19 @@
+// TEST: Tuple Member Deferred Tuple First Failure (aborts)
+// ----------------------------------------------------------------------------
+// Gap G58's first failure. `p = (g, ok)` is a deferred tuple: binding it
+// evaluates nothing, so g's division by zero does not fire there. `q = (p,
+// 1.0)` is a value, and constructing it evaluates p's members left to right:
+// g's integer division by zero (BL8013) fires at q, before `bad`'s checked
+// cast (BL8006) on the next line -- in every lane.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let z: Array<Int64 like Row> = [0]
+let g = method_for(z) <@> lambda(v) -> 1 / v
+let ok = method_for(a) <@> lambda(v) -> v + 1
+let p = (g, ok)
+let q = (p, 1.0)
+let bad = a((a(0) : Row))
+// ABORT: BL8013
+// ABORT: integer division by zero
+// ABORT: .blade:11

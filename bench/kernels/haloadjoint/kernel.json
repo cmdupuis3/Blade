@@ -8,7 +8,7 @@
       "n": 1013
     },
     "full": {
-      "n": 50021
+      "n": 1000003
     }
   },
   "regimes": [
@@ -22,7 +22,7 @@
     "natural": "LOSS ~0.5-0.8 today (both make one pass per update; this emission adds the source-named loss tape d and its fold and the dw pass: 5(n - 4) source-level transcendental calls vs natural's 3(n - 4), the two extra sin calls per window re-evaluating arguments another pass already evaluated; its adjoint is serial in mt8)",
     "expert": "LOSS ~0.35-0.6 today (Blade: primal map + loss tape + 7 serial destination passes, 5(n - 4) transcendental calls in this emission; expert: one fused destination-owned pass, approximately two calls per cell -- sin n + 2B, cos n - 4, B = ceil((n - 8) / 1024) blocks -- sums fused); closing it needs the per-update passes merged into one destination pass (the U1..U6 order kept) and cross-pass sharing of the primal and its sin evaluations; the source-named d, dw and lv stay computed and stored under this frozen source"
   },
-  "notes": "Round 3 (catalog N02, corrected by review C/2; W2-5's fallback after N10's per-group packed H failed the emission gate, gap G67, reproducers bench/notes/repro/W2-5-G67-*.blade). Required outputs y (n - 4 interior centres) and dx (n cells; every cell receives at least one window contribution, so dx has no zero boundary -- dw does). The derivative reference is the EXPLICIT ORDERED UPDATE LIST of spec.md (checked by exact numeric equality, ==, against both Blade lanes' ad.grad by dump/haloadjoint_order.blade). Extra work computed only by the Blade arms: the AD-required auxiliaries the source names (the forced loss tape d, n - 4; the dw buffer, n; the loss value lv) and the synthesized cotangent of d (n - 4 ones). Reverse mode refuses a where clause in the differentiated function (BL5500), so the adjoint is serial in mt8. Full size capped at n = 50021 by G68 (the cotangent zero buffer is an (n - 4)-element literal; lowering is super-linear in n) -- a compiler limit, not the 64 MB rule. Input share estimated 10-30%: inputonly twin per arm.",
+  "notes": "Round 3 (catalog N02, corrected by review C/2; W2-5's fallback after N10's per-group packed H failed the emission gate, gap G67, reproducers bench/notes/repro/W2-5-G67-*.blade). Required outputs y (n - 4 interior centres) and dx (n cells; every cell receives at least one window contribution, so dx has no zero boundary -- dw does). The derivative reference is the EXPLICIT ORDERED UPDATE LIST of spec.md (checked by exact numeric equality, ==, against both Blade lanes' ad.grad by dump/haloadjoint_order.blade). Extra work computed only by the Blade arms: the AD-required auxiliaries the source names (the forced loss tape d, n - 4; the dw buffer, n; the loss value lv) and the synthesized cotangent of d (n - 4 ones). Reverse mode refuses a where clause in the differentiated function (BL5500), so the adjoint is serial in mt8. Full size n = 1,000,003, the catalog's (round 3 wave 4, W4-4: raised from 50021 once G68 was FIXED -- the cotangent zero buffer, formerly an (n - 4)-element literal whose lowering was super-linear in n, is a zero fill; the Blade arm's arrays are 56,000,072 bytes at this n by arithmetic; the per-arm peak-live / store audit and the machine-code store verification of y and dx are PENDING for the integration measurement gate, and the LLVM lane's tape and cotangent escape the gradient function's cleanup, gap G78). Input share estimated 10-30%: inputonly twin per arm.",
   "arms": [
     "blade-llvm",
     "blade-cpp",

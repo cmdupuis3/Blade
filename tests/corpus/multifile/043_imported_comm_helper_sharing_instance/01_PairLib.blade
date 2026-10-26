@@ -1,0 +1,11 @@
+// TEST: An imported two-parameter comm helper is sharing-specialized at its caller
+// MODULE: PairLib
+// docs/plans/plan-identity-transpose-compute.md section 2.2 (wave 2). The
+// helper reads its own module's `scale`, so its sharing instance -- checked
+// from this declaration, in this module's environment -- must keep reading
+// PairLib's binding wherever the instance is placed.
+module PairLib
+
+let scale = 2.0
+function pair(x: T^1, y: T^1) where comm(x, y) =
+    method_for(x, y) <@> lambda(a, b) where comm(a, b) -> a * b * scale |> compute

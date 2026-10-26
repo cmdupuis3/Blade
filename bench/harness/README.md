@@ -5,7 +5,7 @@ discovers kernels, builds every arm of a kernel/regime up front, validates BOTH 
 EVERY run against independent pins, runs the interleaved timing protocol, and writes an
 immutable session bundle. The protocol's entry point is `bench/README.md` (fairness,
 regimes, honesty rules) and its kernel-side rules are `bench/kernels/README.md` (tiers,
-output contract, SIZE marker, Blade facts), as amended by `bench/notes/review-method.md`;
+output contract, SIZE marker, Blade facts), as amended by `bench/notes/review-method.md (removed 2026-10-24; in git history at cf2028cc)`;
 this file documents the tool and, since the 2026-10-18 consolidation, carries the
 protocol's statistics-and-bookkeeping and hygiene text ("Protocol and statistics" and
 "Limits: hygiene, not safety" below, formerly `bench/README.md` §6 and §7).

@@ -1,0 +1,14 @@
+// TEST: If Arm Capture Of Deferred (rejects)
+// ----------------------------------------------------------------------------
+// Finding 4's capture case: the arm's computed member is an inline map whose
+// kernel CAPTURES the deferred map `g` -- computing the member forces g, on
+// the taken arm only. Refused at lowering in every lane (BL6002).
+// ----------------------------------------------------------------------------
+type Row = Idx<3>
+let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let c = reduce(x, (+)) > 5.0
+let t = if c then (method_for(x) <@> lambda(v) -> v * g(0) |> compute, 1.0) else (x, 2.0)
+// ERROR: BL6002 @ 10:1
+// ERROR-CONTAINS: whose arm reads the deferred computation `g`
+// REJECT-AT: lower

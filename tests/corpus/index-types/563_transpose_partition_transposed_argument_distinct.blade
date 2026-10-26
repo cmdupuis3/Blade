@@ -1,0 +1,17 @@
+// TEST: Transpose Partition Transposed Argument Distinct
+// A STRUCTURAL-MAP RELATION in the sharing partition (plan sections 2.2 and 3;
+// transpose-normal-form v1, rule 4): `f(Q, transpose(Q, [0, 1]))` hands the
+// identity-sensitive `f` ONE root under two coordinate maps. They are not
+// exchangeable (f's comm pair over (x, y) would read Q against Q's columns,
+// not its rows), so the transposed argument is its own class: the partition
+// is all-distinct, the generic `f` elaborates a DENSE pair space, and the
+// transpose keeps its copy. `f(Q, Q)` is the [0,0] instance (packed).
+// PQT(i, j) = row i of Q . row j of Q^T = (Q Q)(i, j); PQQ = Q Q^T, packed.
+type I = Idx<2>
+let Q: Array<Float64 like I, I> = [[1.0, 2.0], [3.0, 4.0]]
+function f(x: T^2, y: T^2) where comm(x, y) =
+    method_for(x, y) <@> lambda(a, b) where comm(a, b) -> prodsum(a, b) |> compute
+let PQT = f(Q, transpose(Q, [0, 1]))
+let PQQ = f(Q, Q)
+// EXPECT: PQT = [[7.0, 10.0], [15.0, 22.0]]
+// EXPECT: PQQ = [5.0, 11.0, 25.0]

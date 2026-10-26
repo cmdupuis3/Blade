@@ -1,0 +1,14 @@
+// TEST: Transpose Double Copy Independent
+// The identity chain keeps the transposes' copy semantics: `T2` is bound
+// before `M` is written, so it must keep the old values, and a write through
+// `U` must not reach `M`. Both names are written, so the read-only alias plan
+// declines and each binding keeps its own pool (transpose-normal-form v1:
+// zero transpose copies, one copy-on-bind copy each).
+let M: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let T2 = transpose(transpose(M, [0, 1]), [0, 1])
+M(0, 0) = 100.0
+let U = transpose(transpose(M, [0, 1]), [0, 1])
+U(1, 1) = -5.0
+// EXPECT: M = [100.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+// EXPECT: T2 = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+// EXPECT: U = [100.0, 2.0, 3.0, 4.0, -5.0, 6.0]

@@ -1,7 +1,0 @@
-plan: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-19-LAPTOP-350H6LDB\session-132026\build\band\full\serial-licensed-native\blade-cpp\src\band.blade -- 5 optimization decision(s)
-  [omp v1] inputs @ 31:1: declined -- BLADE_OMP_THREADS=1 -- this build emits no thread-level OpenMP (the omp licence in source is unchanged; omp simd is unaffected) [[omp] requested but emitted serial]
-  [domain-enum v1] __v51 @ 41:1: applied [enumeration of Band: closed-form affine nest (2 level(s): i in [0, 20010], j in [max(0, i - 101), min(20010, i + 101)]), 4051931 cell(s); consumer: streamed fold (no array, no key table); order: diagonal (k = i - j outer, k in [-101, 101]; i inner and contiguous) -- a licensed fold over a difference-bounded band: same cells, same per-cell arithmetic, and a term depending only on i - j is invariant in the inner run]
-  [fold-form v1] __v51 @ 41:1: applied [fold form: simd-reduction; reduce over a closed-form domain (Band: band walked by diagonal, k = i - j in [-101, 101], simd on the i run)]
-  [omp v1] kernel @ 41:1: declined -- BLADE_OMP_THREADS=1 -- this build emits no thread-level OpenMP (the omp licence in source is unchanged; omp simd is unaffected) [[omp] requested but emitted serial]
-  [fold-form v1] _(checksum,input_checksum): applied [fold form: K-lanes(8); reduce in expression position]
-inputs: 0 (identity policy: `content` = folded at compile time, hashed; `version` = read at run time, size + mtime observed -- BLADE_RUN_RECORD=<path> writes the run record)

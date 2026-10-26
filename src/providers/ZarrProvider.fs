@@ -1126,6 +1126,11 @@ let zarrStoreToModuleWith
     (poolAxis: (string -> IRIndexType -> IRIndexType) option)
     : IRModule =
 
+    // The load's store key (Types.providerVarIdentity): the binding name is
+    // program-unique (the `<name>__vars` / `__dims` structs share one TypeDefs
+    // map), so two stores' same-named arrays never share an identity.
+    let storeKey = $"zarr:{moduleName}"
+
     // Dimension universe (first-seen order), extent-consistent. A blade-packed
     // array's POOL dimension is not shareable (its extent is a derived
     // cardinality, typed per-var below), so only trailing dense dims join it.
@@ -1173,7 +1178,7 @@ let zarrStoreToModuleWith
     let dimsFields =
         dimOrder |> List.ofSeq |> List.map (fun dn ->
             let idx = dimMap.[dn]
-            let arrType = mkArrayArrow [idx] (IRTScalar (coordElem dn)) (Some (AIDVariable dn))
+            let arrType = mkArrayArrow [idx] (IRTScalar (coordElem dn)) (Some (providerVarIdentity storeKey ("dims." + dn)))
             (dn, arrType))
     let dimsStruct = IRTDStruct($"{moduleName}__dims", dimsFields)
 
@@ -1228,7 +1233,7 @@ let zarrStoreToModuleWith
                 ElemType = IRTScalar a.Dtype.Elem
                 IndexTypes = indexTypes
                 IsVirtual = false
-                Identity = Some (AIDVariable a.Name)
+                Identity = Some (providerVarIdentity storeKey a.Name)
             }
             (a.Name, mkArrayLike arrType))
     let varsStruct = IRTDStruct($"{moduleName}__vars", varsFields)

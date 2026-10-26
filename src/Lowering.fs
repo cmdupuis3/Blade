@@ -133,6 +133,12 @@ type TypedLowerEnv = {
     /// `(/) in mk`). Set by every binding, function and named lambda around
     /// the expression being lowered (withLambdaScope); None at top level.
     LambdaScope: string option
+    /// Lowering INSIDE a `where repro` function's body (gap G74): every lambda
+    /// and operator section lifted from it is `IsRepro` too, so the repro
+    /// demand vetoes the reorder licence of every fold the body runs (each
+    /// lane's `foldReorderLicensed`), and an unseeded fold's seed takes the
+    /// strict identity (lowerUnseededSeed).
+    InRepro: bool
 }
 
 let emptyTypedEnv () : TypedLowerEnv = {
@@ -159,6 +165,7 @@ let emptyTypedEnv () : TypedLowerEnv = {
     LiftedCallables = ResizeArray<IRCallable>()
     MutableArrayLets = ResizeArray<IRId>()
     LambdaScope = None
+    InRepro = false
 }
 
 let bindTypedVar name id (env: TypedLowerEnv) : TypedLowerEnv =
@@ -533,8 +540,39 @@ let private alignRangeOperandExtents (arrays: IRExpr list) (arrayTypes: IRArrayT
         (arrayTypes |> List.map (fun at -> { at with IndexTypes = at.IndexTypes |> List.map fix }),
          shared |> List.map fix)
 
+/// THE ZERO-LEVEL APPLY (gap G64; formalism §6, "a zero-level application is
+/// a call"): `object_for(f) <@> y` where f takes every operand WHOLE (no
+/// S-dimension level on any operand: `SDimsPerArray` all 0) and returns a
+/// scalar has no loop to run -- its value is the ONE term f(y1, .., yk). It is
+/// lowered to that call, once, before the C++ / LLVM / interpreter lanes
+/// split, so every lane evaluates the same call (each operand bound whole,
+/// the term evaluated exactly once, its value -- signed zero included -- the
+/// result) and no lane carries a zero-level nest form of its own (the C++
+/// nest used to leave the whole-operand parameter unbound, BL9002; the
+/// interpreter's added the term to a zero accumulator). Fail closed: a
+/// resolvable lifted kernel (`IRVar`), at least one operand, one kernel
+/// parameter per operand, no co-iteration, no Reynolds, a scalar result;
+/// anything else keeps `IRApplyCombinator`.
+let isZeroLevelWholeArrayApply (info: TypedApplyInfo) (loweredKernel: IRExpr) : bool =
+    (match loweredKernel with IRVar _ -> true | _ -> false)
+    && (match info.Loop.Kind with TExprObjectFor _ -> true | _ -> false)
+    && not (List.isEmpty info.Arrays)
+    && info.SDimsPerArray.Length = info.Arrays.Length
+    && info.SDimsPerArray |> List.forall ((=) 0)
+    && info.KernelInputRanks.Length = info.Arrays.Length
+    // each operand's KNOWN rank is the rank its parameter takes: the kernel
+    // consumes it whole (a generic `T^2` operand of a rank-1 row kernel --
+    // sql-group-by/054's `rowdots` -- is a row map, not a call)
+    && info.ArrayTypes.Length = info.Arrays.Length
+    && List.forall2 (fun (at: IRArrayTypeG<IRExpr>) (k: int) -> k > 0 && (at.IndexTypes |> List.sumBy (fun ix -> ix.Rank)) = k)
+           info.ArrayTypes info.KernelInputRanks
+    && not info.IsCoIteration
+    && not info.HasReynolds
+    && (match stripUnits info.OutputType with IRTScalar _ -> true | _ -> false)
+
 /// Lower a TypedExpr to IRExpr
 let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
+    if isUnseededSeed texpr then lowerUnseededSeed env texpr else
     match texpr.Kind with
     | TExprLit lit ->
         IRLit (lowerLiteralValued lit texpr.Type)
@@ -627,7 +665,10 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         // the lambda is inlined or lifted to a top-level function.
         match func.Type with
         | ArrayElem _ -> IRIndex (f, as', None)
-        | _ -> IRApp (f, as', texpr.Type)
+        | _ ->
+            // The call's span, for the opt-in kept inline's BL7005 (G69).
+            (match f with IRVar (fid, _) -> Optimize.CallSpanTable.record fid as' texpr.Span | _ -> ())
+            IRApp (f, as', texpr.Type)
     
     | TExprIndex (array, indices, identity) ->
         let arr = lowerTypedExpr env array
@@ -743,6 +784,13 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
                 }
             | _ -> lowerTypedExpr env info.Loop
         let arrays = info.Arrays |> List.map (lowerTypedExpr env)
+        if isZeroLevelWholeArrayApply info loweredKernel then
+            // G64: a ZERO-LEVEL scalar apply IS the call (see
+            // isZeroLevelWholeArrayApply). Lowered here, before the lanes
+            // split, so the C++ lane, the LLVM lane and the interpreter all
+            // evaluate the same `f(operands)` -- one term, the operands whole.
+            IRApp (loweredKernel, arrays, info.OutputType)
+        else
         let (arrayTypes, shared) = alignRangeOperandExtents arrays info.ArrayTypes info.SharedIndexTypes
         IRApplyCombinator {
             Loop = loweredLoop
@@ -867,6 +915,13 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
                   let copies = List.replicate (int n) (lowerTypedExpr env inner)
                   IRArrayLit (copies, arrTy)
               | _ -> computeWrap (lowerTypedExpr env e))
+         | TExprApply _ ->
+             // A zero-level apply lowers to its scalar call (G64,
+             // isZeroLevelWholeArrayApply): `|> compute` of that value is
+             // the value, so no wrapper.
+             (match lowerTypedExpr env e with
+              | IRApp (IRVar _, _, _) as call -> call
+              | other -> computeWrap other)
          | _ -> computeWrap (lowerTypedExpr env e))
     
     | TExprRead e ->
@@ -1136,6 +1191,24 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     | TExprPartialApp (op, arg, isLeft) ->
         lowerTypedPartialApp env op (lowerTypedExpr env arg) isLeft texpr.Type
 
+/// THE SEED OF AN UNSEEDED FOLD (gap G74; TypedAst.unseededSeedSpan marks the
+/// checker's synthesized `(+)` seed). An unseeded fold's value is the left
+/// fold of its cells. The mark becomes the IR node `IRUnseededSeed (base,
+/// type, inRepro)` -- the BASE seed lowered exactly as before, and whether the
+/// fold sits in a `where repro` body -- which carries the provenance through
+/// monomorphization to `resolveUnseededSeedsModule` (before the optimizer):
+/// once the producer's effects and the fold's effective licence are known, it
+/// gives every OBLIGATORILY SERIAL route the EXACT `(+)` identity
+/// (IR.addIdentityLiteralOf: `-0.0`, `-0.0f`, `(-0.0, -0.0)`, `0`), so every
+/// form that keeps the seed (the walk's row callable, the ordered scatter,
+/// the row-owned pull, the row action, the strict cell chains, the
+/// interpreter) runs the head-peeled chain bit for bit (formalism 2.4's
+/// identity insertion), and every licensed route the base seed byte for byte
+/// (the licence's signed zero, G40).
+and lowerUnseededSeed env (texpr: TypedExpr) : IRExpr =
+    let baseSeed = lowerTypedExpr env { texpr with Span = Blade.Ast.noSpan }
+    IRUnseededSeed (baseSeed, texpr.Type, env.InRepro)
+
 /// Lower the value of the binding `name` (a top-level or block `let`, an
 /// expression `let`): a lambda bound directly is no longer anonymous -- it
 /// prints as `name` -- and the anonymous functions anywhere else in the value
@@ -1219,7 +1292,9 @@ and lowerTypedLambdaAs env (boundTo: string option) (info: TypedLambdaInfo) : IR
                  // the same way, so codegen and the interpreter can hand
                  // IRLoopStructure.deduceWreathTie the values typecheck judged from.
                  SignParities = info.SignParities
-                 SourceName = shownName }
+                 SourceName = shownName
+                 // a lambda in a `where repro` body inherits the demand (G74)
+                 IsRepro = env.InRepro }
     // Emit IRVar(callable.Id, funcType): the callable lives in
     // LiftedCallables -> module.Functions, and the IRVar carries just the
     // function type for type-inference and consumer dispatch. Consumers use
@@ -1442,7 +1517,9 @@ and lowerTypedSection env (op: BinOp) (funcTy: IRType) : IRExpr =
     let commGroups = if isComm then [[0; 1]] else []
     let callable =
         { mkLambdaCallable env.Builder parms body retType [] isComm commGroups [] false false 256 false
-            with SourceName = operatorCallableName env irOp }
+            with SourceName = operatorCallableName env irOp
+                 // inside a `where repro` body it is a repro kernel (G74)
+                 IsRepro = env.InRepro }
     env.LiftedCallables.Add(callable)
     let funcType =
         let paramTypes = callable.Params |> List.map _.Type
@@ -1503,7 +1580,9 @@ and lowerTypedPartialAppWith env (op: BinOp) (argExpr: IRExpr) (isLeft: bool) (f
         | _ -> retTy
     let callable =
         { mkLambdaCallable env.Builder parms body retType captures false [] [] false false 256 false
-            with SourceName = operatorCallableName env irOp }
+            with SourceName = operatorCallableName env irOp
+                 // inside a `where repro` body it is a repro kernel (G74)
+                 IsRepro = env.InRepro }
     env.LiftedCallables.Add(callable)
     let funcType =
         let paramTypes = callable.Params |> List.map _.Type
@@ -1571,7 +1650,9 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType (loc: SrcLoc) 
         let commGroups = if mode = Elementwise then [[0; 1]] else []
         let lambdaInfo =
             { mkLambdaCallable env.Builder parms body kernelRetType [] false commGroups [] false false 256 false
-                with SourceName = operatorCallableName env irOp }
+                with SourceName = operatorCallableName env irOp
+                     // inside a `where repro` body it is a repro kernel (G74)
+                     IsRepro = env.InRepro }
         env.LiftedCallables.Add(lambdaInfo)
         // Kernel slot references the lifted callable via IRVar;
         // genObjectForApplication uses resolveCallable + wrapper to consume it.
@@ -1726,7 +1807,10 @@ let lowerTypedFuncDecl (env: TypedLowerEnv) (decl: TypedFunctionDecl) : IRFuncDe
 
     // Bind parameters in environment for body lowering
     // The anonymous functions in the body print as `lambda in <name>`.
-    let mutable paramEnv = withLambdaScope decl.SourceName { env with PolyParamNames = polyParamNames }
+    // `where repro` covers the WHOLE body: the lambdas and sections lifted
+    // from it inherit the demand (gap G74; TypedLowerEnv.InRepro).
+    let declRepro = (match decl.WhereClause with Some wc -> wc.Repro | None -> false) || env.InRepro
+    let mutable paramEnv = withLambdaScope decl.SourceName { env with PolyParamNames = polyParamNames; InRepro = declRepro }
     let irParams = decl.Params |> List.map (fun p ->
         paramEnv <- bindTypedVar p.Name p.VarId paramEnv
         { Name = p.Name; Type = p.Type; Index = p.Index; VarId = p.VarId } : IRParam)
@@ -1757,10 +1841,7 @@ let lowerTypedFuncDecl (env: TypedLowerEnv) (decl: TypedFunctionDecl) : IRFuncDe
                 // `where repro`, grafted here exactly as lowerTypedLambda
                 // grafts AntisymGroups: this is the one construction site
                 // that still sees the clause.
-                IsRepro =
-                    (match decl.WhereClause with
-                     | Some wc -> wc.Repro
-                     | None -> false)
+                IsRepro = declRepro
                 // The effect summary, from the same typed declaration -- the
                 // shared legality fact fusion's splice reads (IRMono.pureBody).
                 Effects = decl.Effects
@@ -2785,22 +2866,11 @@ let private forceEffectfulModuleLets (programFuncs: IRCallable list) (m: IRModul
             else { b with Value = spine b.Value })
     { m with Bindings = bindings }
 
-/// A JOIN WHOSE LEG WRITES (gap G43, BL4005). A join -- a `<&!>` / `<&>`
-/// tree, or a reduction join `object_for(<&!>) <@> (reduce(..), ..)` -- runs
-/// its legs side by side, one joint cell at a time, and legs naming the same
-/// named deferred computation evaluate it ONCE per joint cell (formalism
-/// §10.2). That schedule is the join's meaning for values; it was never a
-/// promise about effects, and the lanes kept three different ones (the C++
-/// lane shared the cell, the LLVM lane interleaved one evaluation per leg,
-/// the interpreter ran the legs one after another), so a leg whose map kernel
-/// or fold kernel WRITES a captured binding printed three different answers.
-/// A serial write is an ordered side effect (§5.2), and a join has no single
-/// order to give it: refused, like a write in a parallel body. The fix is to
-/// force the writing map first (`|> compute`: one evaluation, stored) or fold
-/// the legs separately. A joined evaluation must be PROVED free of observable
-/// writes: an unresolvable callee or function-typed kernel counts as a write
-/// (Optimize.exprMayWriteWith). Spanned at the enclosing declaration.
-let private refuseWritingJoinLegs (modules: IRModule list) : unit =
+/// The program-wide context the write refusals share: every callable, every
+/// let-bound value (ids are unique per program), the assignable block lets,
+/// let-alias chasing, the callee resolver and the shared write analysis's facts
+/// (Optimize.exprMayWriteWith / callableWriteSummaryWith).
+let private programWriteContext (modules: IRModule list) =
     let funcs =
         modules |> List.collect (fun m -> m.Functions) |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     // Every let-bound value in the program (ids are unique per program): a leg
@@ -2841,6 +2911,270 @@ let private refuseWritingJoinLegs (modules: IRModule list) : unit =
           CopiedLet = copied
           UnknownIsWrite = true
           Callbacks = (fun _ -> None) }
+    (funcs, lets, mutableLets, chaseAlias, resolve, facts)
+
+/// THE REPRO DEMAND ON EACH FOLD USE (gap G80). A fold performed in a `where
+/// repro` body declines reordering WHATEVER ITS KERNEL (formalism 2.4: the
+/// body "declines reordered folds"), but every lane's licence predicate
+/// (`CodeGenExprSupport.foldReorderLicensed`, which the LLVM lane's
+/// `foldFmfLicensed` / `foldFmfDecorable` read) consults the KERNEL's
+/// `IsRepro`: a kernel lifted from the body carries it (TypedLowerEnv.InRepro),
+/// a callable declared ELSEWHERE -- `reduce(xs, add)` with `add` a top-level or
+/// imported function, a lambda lifted outside the body -- does not. So in the
+/// body of every `IsRepro` callable of the program, each `reduce` (stored and
+/// fused; a join's kernels leg by leg) whose kernel names such a binary
+/// callable -- directly, or through `let k = add` aliases (local or
+/// top-level, any chain) -- is pointed, FOR THAT USE ONLY, at the callable's
+/// REPRO TWIN: an exact copy (same parameters, parameter ids, body, captures,
+/// clauses and SourceName; a fresh id and emitted name; `IsRepro`) placed
+/// right after its origin IN THE MODULE THAT DEFINES IT and recorded in
+/// `DerivedFuncOrigins` (so codegen emits it at its origin's program point,
+/// a main-local `std::function` included). Sharing the parameter ids keeps
+/// every nested closure the body lifts valid -- a lambda inside the kernel
+/// capturing its parameter captures the twin's (shape monomorphization's
+/// copies share ids the same way); the SourceName keeps a panic's frame, and
+/// `copyTwinDeclSpans` its declaration location, those of the origin. Every
+/// clause is copied, so a `where omp` request is still a request, declined
+/// by the repro veto with its census line. The twin's body is compiled
+/// strict too (contraction off), as the body that runs it is; the origin's
+/// other uses keep their licence. A function-typed PARAMETER kernel has no
+/// callable to point at -- both compiled lanes refuse such a fold anyway
+/// (BL7004 deferred, a pre-existing BL9002 stored) -- and is left as written.
+/// Runs over the WHOLE PROGRAM after monomorphization, before every
+/// per-module pass; a no-op in the reproducible build, where every fold is
+/// strict. Returns the program and the (twin id, origin id) pairs.
+let reproFoldUsesProgram (irModules: IRModule list) (builder: IRBuilder) : IRModule list * (IRId * IRId) list =
+    let allFuncs = irModules |> List.collect (fun m -> m.Functions)
+    if Blade.Toolchain.fpReproEnabled () || not (allFuncs |> List.exists (fun f -> f.IsRepro)) then irModules, []
+    else
+    let funcs = allFuncs |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+    let twins = System.Collections.Generic.Dictionary<IRId, IRCallable>()   // origin id -> its repro twin
+    // a NAME bound to a callable -- `let k = add` in a body or at module level,
+    // through any chain of such lets -- is that callable here
+    let aliasOf =
+        let acc = System.Collections.Generic.Dictionary<IRId, IRId>()
+        let note (id: IRId) (v: IRExpr) = match v with IRVar (g, FuncElem _) -> acc.[id] <- g | _ -> ()
+        for m in irModules do
+            for b in m.Bindings do note b.Id b.Value
+            for f in m.Functions do iterIRExpr (fun e -> match e with IRLet (id, v, _) -> note id v | _ -> ()) f.Body
+        let rec chase (seen: Set<IRId>) (id: IRId) =
+            match acc.TryGetValue id with
+            | true, g when not (seen.Contains g) && not (funcs.ContainsKey id) -> chase (seen.Add id) g
+            | _ -> id
+        chase Set.empty
+    let rec variantOf (k: IRExpr) : IRExpr =
+        match k with
+        | IRTuple ks -> IRTuple (ks |> List.map variantOf)
+        | IRVar (id0, (FuncElem (paramTys, _) as fty)) when paramTys.Length = 2 ->
+            let id = aliasOf id0
+            (match Map.tryFind id funcs with
+             | Some c when not c.IsRepro && c.Params.Length = 2 ->
+                 let twin =
+                     match twins.TryGetValue id with
+                     | true, w -> w
+                     | _ ->
+                         let cid = builder.FreshId()
+                         let w = { c with Id = cid; Name = $"{c.Name}__repro{cid}"; IsRepro = true }
+                         twins.[id] <- w
+                         w
+                 IRVar (twin.Id, fty)
+             | _ -> k)
+        | _ -> k
+    let rewriteBody (body: IRExpr) =
+        body |> mapIRExpr (fun e ->
+            match e with
+            | IRReduce (src, k, init) -> IRReduce (src, variantOf k, init)
+            | IRReduceCompute (comp, k, init) -> IRReduceCompute (comp, variantOf k, init)
+            | _ -> e)
+    let rewritten =
+        irModules |> List.map (fun m ->
+            { m with Functions = m.Functions |> List.map (fun f -> if f.IsRepro then { f with Body = rewriteBody f.Body } else f) })
+    if twins.Count = 0 then irModules, []
+    else
+        let placed =
+            rewritten |> List.map (fun m ->
+                let mine = m.Functions |> List.choose (fun f -> match twins.TryGetValue f.Id with | true, w -> Some (f.Id, w) | _ -> None)
+                if mine.IsEmpty then m
+                else
+                    { m with
+                        Functions = m.Functions |> List.collect (fun f -> match twins.TryGetValue f.Id with | true, w -> [ f; w ] | _ -> [ f ])
+                        DerivedFuncOrigins = mine |> List.fold (fun acc (oid, w) -> Map.add w.Id oid acc) m.DerivedFuncOrigins })
+        placed, (twins |> Seq.map (fun kv -> (kv.Value.Id, kv.Key)) |> List.ofSeq)
+
+/// The repro twins' DECLARATION SPANS (gap G80 / G76): a twin is located
+/// where its origin is declared, in every lane. Run on the FINAL program
+/// (after module qualification, which prefixes a non-main module's names):
+/// the twin's emitted name gets its origin's recorded span.
+let copyTwinDeclSpans (program: IRProgram) (pairs: (IRId * IRId) list) : unit =
+    if not pairs.IsEmpty then
+        let byId = program.Modules |> List.collect (fun m -> m.Functions) |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+        for (tid, oid) in pairs do
+            match Map.tryFind tid byId, Map.tryFind oid byId with
+            | Some t, Some o ->
+                let s = IR.declSpanOf o.Name
+                let s = if s.StartLine > 0 then s else IR.declSpanOf o.SourceName
+                IR.recordDeclSpan t.Name s
+            | _ -> ()
+
+/// Every EXECUTABLE expression of a module: function bodies, binding values
+/// and the side-table payloads each back end and the interpreter run at a
+/// binding's site -- random fills (the modulus; a generator's key,
+/// parameters, weights and address), compound constructors (dense source and
+/// mask) and sparse constructors (the values). Provider specs carry no
+/// expression.
+let moduleExecutablePayloads (m: IRModule) : IRExpr list =
+    [ for f in m.Functions do yield f.Body
+      for b in m.Bindings do yield b.Value
+      for kv in m.RandomInits do
+          match kv.Value with
+          | FillModulus e -> yield e
+          | RandGen (_, key, pars, weights, address) ->
+              yield key
+              yield! pars
+              match weights with Some (w, _) -> yield w | None -> ()
+              match address with Some (s, o) -> yield s; yield o | None -> ()
+      for kv in m.CompoundInits do
+          let (d, k) = kv.Value
+          yield d
+          yield k
+      for kv in m.SparseInits do yield kv.Value ]
+
+/// `moduleExecutablePayloads`'s surface, rewritten: `body` over function
+/// bodies and binding values, `side` over the side-table payloads.
+let mapModuleExecutablePayloads (body: IRExpr -> IRExpr) (side: IRExpr -> IRExpr) (m: IRModule) : IRModule =
+    { m with
+        Functions = m.Functions |> List.map (fun f -> { f with Body = body f.Body })
+        Bindings = m.Bindings |> List.map (fun b -> { b with Value = body b.Value })
+        RandomInits =
+            m.RandomInits |> Map.map (fun _ spec ->
+                match spec with
+                | FillModulus e -> FillModulus (side e)
+                | RandGen (kind, key, pars, weights, address) ->
+                    RandGen (kind, side key, pars |> List.map side,
+                             weights |> Option.map (fun (w, n) -> (side w, n)),
+                             address |> Option.map (fun (s, o) -> (side s, side o))))
+        CompoundInits = m.CompoundInits |> Map.map (fun _ (d, k) -> (side d, side k))
+        SparseInits = m.SparseInits |> Map.map (fun _ e -> side e) }
+
+/// THE UNSEEDED-SEED RESOLUTION (gap G74): every `IRUnseededSeed` of the
+/// module's EXECUTABLE payloads (`moduleExecutablePayloads`: bodies, binding
+/// values and side tables) becomes an ordinary seed, after monomorphization
+/// (types concrete), after `reproFoldUsesProgram` and BEFORE the optimizer
+/// (whose passes and plans read literal seeds); a surviving mark is an
+/// internal error. The seed is the EXACT identity (`addIdentityLiteralOf`)
+/// on every route that carries NO reorder licence -- the facts each compiled
+/// lane's effective licence reads (C++ `licensedFold = foldReorderLicensed
+/// callable && not mapBodyWrites`, LLVM `foldFmfLicensed`'s
+/// `FoldOperandWrites`): the reproducible build; a `where repro` body (the
+/// node's flag); a repro-vetoed kernel (`foldKernelReproVetoed`'s shapes,
+/// the G80 twins included); a deferred computation that MAY WRITE (the shared
+/// write analysis with callbacks joined, `Optimize.scheduleMayWriteWithCallbacksIn`,
+/// asked of the code the emitters will see: constant-scrutinee matches
+/// folded as the optimizer's first pass folds them) -- and the BASE seed,
+/// byte for byte, on a licensed route, INCLUDING a licensed fold some lane
+/// emits serially for want of a vector form (a streamed-source,
+/// multi-level or mixed-operator join: formalism 6.4, its zero is the
+/// licence's). A join's seeds share its computation's verdict (a writing leg
+/// is refused at lowering, BL4005); a mark outside any fold node (none is
+/// built today) is judged by the build and its flag alone. Tested on the
+/// witnesses in `blade test orbit-scatter` (route leg) and the base-vs-head
+/// emission sweep (`bench/harness/emission-sweep.ps1`), not proved in
+/// general.
+let resolveUnseededSeedsModule (programFuncs: IRCallable list) (modul: IRModule) : IRModule =
+    let hasMark (e: IRExpr) =
+        let mutable hit = false
+        iterIRExpr (fun n -> match n with IRUnseededSeed _ -> hit <- true | _ -> ()) e
+        hit
+    if not (moduleExecutablePayloads modul |> List.exists hasMark) then modul
+    else
+    let funcs = (programFuncs @ modul.Functions) |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+    // The write analysis asks of the code the EMITTERS will see: the
+    // optimizer's first pass folds constant-scrutinee matches (a dead arm's
+    // write disappears there -- the second Codex look of W4B-D, finding 3:
+    // `match 0 with | 0 -> x | _ -> { G(0) = 1.0; x }` is licensed in both
+    // emitters), so the analysis runs over the module with that same fold
+    // applied to its bodies and bindings (side-table payloads are not folded
+    // by the optimizer, and are judged as written). No other pre-emission
+    // pass removes a write (each consults the shared write analysis and
+    // declines on one); that is tested on the witnesses, not proved.
+    // ...and so must every OTHER module's callables the analysis resolves: an
+    // imported kernel's dead writing arm is folded away by ITS module's
+    // optimizer before emission too (the third Codex look of W4B-D). The
+    // caller passes the whole-program snapshot ALREADY folded
+    // (`foldedProgramFuncs`); this module's own entries are refolded here
+    // (its per-module passes ran since the snapshot), and the analysis --
+    // the callback table included -- sees only folded records.
+    let folded = IRMono.foldConstMatchesModule modul
+    let mayWrite = Optimize.scheduleMayWriteWithCallbacksIn programFuncs folded
+    let repro = Blade.Toolchain.fpReproEnabled ()
+    // `foldKernelReproVetoed`'s two shapes, over this module's callables
+    let rec kernelRepro (k: IRExpr) =
+        match k with
+        | IRTuple ks -> ks |> List.exists kernelRepro
+        | IRVar (id, _) ->
+            (match Map.tryFind id funcs with
+             | Some c ->
+                 c.IsRepro
+                 || (match c.Body with
+                     | IRApp (IRVar (g, _), _, _) -> (match Map.tryFind g funcs with Some cg -> cg.IsRepro | None -> false)
+                     | _ -> false)
+             | None -> false)
+        | _ -> false
+    // the identity at the MARK's type (the fold's accumulator type, carried
+    // through HM substitution and IRMono's open-seed arm); the base value's
+    // own type only when the mark's says nothing (a still-open variable) --
+    // a generic base can be IRMono's Float64 fallback zero, whose type is not
+    // the fold's (a Complex128 instance kept (-0.0, -0.0) this way)
+    let identityOf (b: IRExpr) (ty: IRType) =
+        match addIdentityLiteralOf ty with
+        | Some l -> l
+        | None ->
+            match exprTypeIfKnown b |> Option.bind addIdentityLiteralOf with
+            | Some l -> l
+            | None -> b
+    let pick (strict: unit -> bool) (seed: IRExpr) =
+        match seed with
+        | IRUnseededSeed (b, ty, r) -> if r || strict () then identityOf b ty else b
+        | other -> other
+    let resolve (foldDead: bool) (e: IRExpr) =
+        match e with
+        | IRReduceCompute (comp, k, init) when hasMark init ->
+            let strict = lazy (repro || kernelRepro k || mayWrite (if foldDead then IRMono.foldConstMatchesExpr comp else comp))
+            let strictFor () = strict.Value
+            (match init with
+             | IRTuple ss -> IRReduceCompute (comp, k, IRTuple (ss |> List.map (pick strictFor)))
+             | _ -> IRReduceCompute (comp, k, pick strictFor init))
+        | _ -> e
+    let leftover (e: IRExpr) =
+        match e with
+        | IRUnseededSeed (b, ty, r) -> if repro || r then identityOf b ty else b
+        | _ -> e
+    let rewriteWith (foldDead: bool) (x: IRExpr) = x |> mapIRExpr (resolve foldDead) |> mapIRExpr leftover
+    let resolved = mapModuleExecutablePayloads (rewriteWith true) (rewriteWith false) modul
+    // FAIL CLOSED: no mark survives anywhere a back end or the interpreter
+    // executes (the first W4B-D cut missed the side tables -- a random key or
+    // parameter, a compound's mask -- review finding 1)
+    if moduleExecutablePayloads resolved |> List.exists hasMark then
+        failwith $"internal: an unseeded-fold seed survived its resolution in module {modul.Name} (gap G74)"
+    resolved
+/// A JOIN WHOSE LEG WRITES (gap G43, BL4005). A join -- a `<&!>` / `<&>`
+/// tree, or a reduction join `object_for(<&!>) <@> (reduce(..), ..)` -- runs
+/// its legs side by side, one joint cell at a time, and legs naming the same
+/// named deferred computation evaluate it ONCE per joint cell (formalism
+/// §10.2). That schedule is the join's meaning for values; it was never a
+/// promise about effects, and the lanes kept three different ones (the C++
+/// lane shared the cell, the LLVM lane interleaved one evaluation per leg,
+/// the interpreter ran the legs one after another), so a leg whose map kernel
+/// or fold kernel WRITES a captured binding printed three different answers.
+/// A serial write is an ordered side effect (§5.2), and a join has no single
+/// order to give it: refused, like a write in a parallel body. The fix is to
+/// force the writing map first (`|> compute`: one evaluation, stored) or fold
+/// the legs separately. A joined evaluation must be PROVED free of observable
+/// writes: an unresolvable callee or function-typed kernel counts as a write
+/// (Optimize.exprMayWriteWith). Spanned at the enclosing declaration.
+let private refuseWritingJoinLegs (modules: IRModule list) : unit =
+    let (funcs, lets, mutableLets, chaseAlias, resolve, facts) = programWriteContext modules
+    ignore mutableLets
     // An unresolved call head counts as a write here too: a joined evaluation
     // must be PROVED free of observable writes, not merely not seen writing.
     let writes (e: IRExpr) = Optimize.exprMayWriteWith facts e
@@ -2948,6 +3282,788 @@ let private refuseWritingJoinLegs (modules: IRModule list) : unit =
                 raise (Blade.Diagnostics.BladeDiagnosticException
                         (Blade.Diagnostics.mkError "BL4005" Blade.Diagnostics.PhConstraints span
                             "a parallel kernel (`where omp` / cuda) writes storage captured from outside it -- through a local view or alias (a `let` bound to, or rebound to, a slice or element view of a captured array) or through a callback it calls (a function-valued parameter whose argument writes, or one that cannot be resolved): its cells run concurrently, so the store is a data race. Write through a fresh local array, pass a callback that writes nothing outside itself, or return the value and fold it."))
+/// Two shapes the lanes cannot give ONE meaning, refused here so every lane
+/// (C++, LLVM, the interpreter -- all lower through this pass) reports the
+/// same diagnostic (round 3 wave 4, W4-1; formalism 10.2). COMPLETE rather
+/// than clever: every judgment below over-approximates, and an approximation
+/// it cannot finish refuses.
+///
+///   * A WRITE THROUGH A DEFERRED COMPUTATION (BL4005; gap G60). A deferred
+///     binder -- a top-level map, its top-level aliases, a deferred tuple, a
+///     bare map or non-copy alias bound in any block or callable body -- has
+///     no storage of its own: it is evaluated where it is read and fused into
+///     the folds over it. The WRITTEN-BINDER set is a program-wide fixpoint by
+///     binder IDENTITY: the binders an element write or a whole reassignment
+///     lands in (through every `let` view, alias, rebinding and `if` of one,
+///     stopping only at a PROVED copy -- an assignable `let a = Z` of a dense
+///     array, which every lane deep-copies -- or at fresh storage), the
+///     arguments a call passes to a parameter in the set (two hops and more,
+///     by iteration), every array argument of a call whose callee cannot be
+///     resolved (a callback), and the inputs of a map whose kernel writes a
+///     parameter. A deferred binder in the set is refused at its first write
+///     site; a provenance walk that runs out of budget refuses too.
+///   * AN `if` VALUE OVER COMPUTED ARRAYS the compiled lanes cannot order or
+///     own (BL6002; gap G59) -- the shapes IRLift.ifNeedsOrderedArms names
+///     (the C++ emitter's own judgment, shared). Inside a function body, a
+///     lambda or a loop body: the taken arm's storage has no owner after the
+///     branch. Anywhere: an arm that READS a deferred computation other than
+///     as a copy member (a positional read, a capture, a member whose own
+///     computation reads another deferred binding, a nested condition) would
+///     force it only on the taken arm, and no lane's static print list follows
+///     the branch.
+let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit =
+    let (funcs, lets, mutableLets, _chaseAlias, resolve, _facts) = programWriteContext modules
+    let allBindings = modules |> List.collect (fun m -> m.Bindings)
+    let allFuncs = modules |> List.collect (fun m -> m.Functions)
+    let bindingById = allBindings |> List.map (fun b -> (b.Id, b)) |> Map.ofList
+    let isArrayTy (t: IRType) = match stripUnits t with ArrayElem _ -> true | _ -> false
+    let typeIsArray (e: IRExpr) = try isArrayTy (typeOf e) with _ -> false
+    let isDeferredForm (e: IRExpr) =
+        match e with
+        | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRFunctorMap _
+        | IRChoice _ | IRFallback _ | IRComposeObj _ | IRComposeMeth _ | IRBind _ | IRZip _ -> true
+        | _ -> false
+    // ---- the deferred binders -------------------------------------------------
+    // The module bindings computeDeferredIds classifies (the classification
+    // every lane's print pass reads), plus every let in a block or callable
+    // body that is a deferred form, a deferred tuple, or a NON-copy alias of
+    // one (a block / body alias in MutableArrayLets is an assignable copy).
+    // Callable bodies' bare maps are stored by S2 (forceBareCombinatorLets),
+    // so they arrive here as computes and are not deferred.
+    let deferred =
+        let localLets = ResizeArray<IRId * IRExpr>()
+        let collect (e: IRExpr) =
+            iterIRExpr (fun n -> match n with IRLet (id, v, _) -> localLets.Add((id, v)) | _ -> ()) e
+        for b in allBindings do collect b.Value
+        for f in allFuncs do collect f.Body
+        let mutable acc = IRLift.computeDeferredIds allBindings
+        let mutable changed = true
+        while changed do
+            changed <- false
+            for (id, v) in localLets do
+                if not (acc.Contains id) then
+                    let isDef (e: IRExpr) =
+                        match e with
+                        | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRFunctorMap _ -> true
+                        | IRVar (s, _) -> acc.Contains s
+                        | _ -> false
+                    // a block-valued initializer is judged by its let chain's
+                    // RESULT (computeDeferredIds' and the C++ emitter's reading)
+                    let rec norm (v: IRExpr) =
+                        match v with
+                        | IRLet _ -> norm (snd (IRLift.peelLetChain v))
+                        | v -> v
+                    // (tuples only: a block whose result is a bare alias keeps
+                    // its own reading, a local copy)
+                    let d =
+                        match v, norm v with
+                        | IRVar (src, _), _ -> acc.Contains src && not (mutableLets.Contains id)
+                        | _, IRTuple es -> not es.IsEmpty && es |> List.forall isDef
+                        | v, _ -> isDeferredForm v
+                    if d then
+                        acc <- acc.Add id
+                        changed <- true
+        acc
+    let dv : IRLift.DeferredView =
+        { IsDeferred = deferred.Contains
+          ValueOf = (fun id -> if deferred.Contains id then (match lets.TryGetValue id with | true, v -> Some v | _ -> None) else None)
+          TypeOfExpr = (fun e -> try typeOf e with _ -> IRTUnit) }
+    // A usable name for a refusal: a module binding's own name, else the
+    // shape of the local binder (its IR let carries no surface name).
+    let describe (id: IRId) =
+        match bindingById.TryFind id with
+        | Some b -> ($"`{b.Name}`", $"bind `{b.Name} |> compute`")
+        | None -> ("a deferred map bound by a `let` inside a block or a function body",
+                   "add `|> compute` at that `let` (`let m = <map> |> compute`)")
+    let users = allBindings |> List.map (fun b -> (b, collectVarRefsIR b.Value))
+    let funcSpan (f: IRCallable) =
+        let s = IR.declSpanOf f.Name
+        if s <> Blade.Ast.noSpan then s
+        else
+            match users |> List.tryFind (fun (_, refs) -> Set.contains f.Id refs) with
+            | Some (b, _) -> IR.declSpanOf b.Name
+            | None ->
+                match allFuncs |> List.tryFind (fun g -> g.Id <> f.Id && Set.contains f.Id (collectVarRefsIR g.Body)) with
+                | Some g -> IR.declSpanOf g.Name
+                | None -> s
+    // ---- the written binders ----------------------------------------------------
+    // Every rebinding of a name (`row = m(1)`) is another value it may hold.
+    let rebinds = System.Collections.Generic.Dictionary<IRId, ResizeArray<IRExpr>>()
+    let noteRebinds (e: IRExpr) =
+        iterIRExpr (fun n ->
+            match n with
+            | IRAssign (IRVar (id, _), rhs) ->
+                (match rebinds.TryGetValue id with
+                 | true, l -> l.Add rhs
+                 | _ -> rebinds.[id] <- ResizeArray [ rhs ])
+            | _ -> ()) e
+    for b in allBindings do noteRebinds b.Value
+    for f in allFuncs do noteRebinds f.Body
+    // Every match pattern variable, with the scrutinee and the projection
+    // path its pattern binds it at (a tuple component's index; any other
+    // pattern form -- a cons, a variant payload, a struct field -- the whole
+    // scrutinee, conservatively).
+    let patBinds = System.Collections.Generic.Dictionary<IRId, IRExpr * (int * bool) list>()
+    let notePatBinds (e: IRExpr) =
+        iterIRExpr (fun n ->
+            match n with
+            | IRMatch (scrut, cases) ->
+                let rec bind (pat: IRPattern) (path: (int * bool) list) =
+                    match pat with
+                    | IRPatVar id -> patBinds.[id] <- (scrut, path)
+                    | IRPatTuple ps -> ps |> List.iteri (fun k p -> bind p (path @ [ (k, false) ]))
+                    | IRPatCons (h, tl) -> bind h []; bind tl []
+                    | IRPatVariant (_, _, Some p, _) -> bind p []
+                    | IRPatStruct (_, fs) -> fs |> List.iter (fun (_, p) -> bind p [])
+                    | _ -> ()
+                for c in cases do bind c.Pattern []
+            | _ -> ()) e
+    for b in allBindings do notePatBinds b.Value
+    for f in allFuncs do notePatBinds f.Body
+    // `let a = Z` that every lane deep-copies: an ASSIGNABLE let (a block /
+    // body MutableArrayLets member, or a non-static module binding) of a
+    // plain dense array (the copy is dense-only in every lane).
+    let isProvedCopy (id: IRId) (v: IRExpr) =
+        match v with
+        | IRVar (_, ty) ->
+            let assignable =
+                mutableLets.Contains id
+                || (match bindingById.TryFind id with Some b -> b.IsMutable | None -> false)
+            assignable
+            && (match stripUnits ty with
+                | ArrayElem at -> at.IndexTypes |> List.forall (fun ix -> ix.IxKind = IxKPlain && ix.Symmetry = SymNone)
+                | _ -> false)
+        | _ -> false
+    // The binders an array expression's storage may belong to (None: the
+    // budget ran out -- the caller refuses). Followed: names (their
+    // initializer unless it is a proved copy or fresh storage, and every
+    // rebinding), views (index, curry, slice, field, tuple projection), both
+    // arms of an `if`, a let chain's value, and the array arguments of a call
+    // (a callee may return one of them). Anything else is fresh storage.
+    //
+    // AGGREGATE CARRIERS (gap G60(a)): a tuple, a struct or a computation
+    // value may HOLD views (`let pair = (m(0), m(1))`), so a name of such a
+    // type is followed exactly as an array name is -- its initializer and
+    // every rebinding, by binder identity -- and a projection follows the
+    // carrier along its PATH: `pair[0]` reaches the first member of the
+    // tuple literal that initialized `pair` (through nested tuples, `if`
+    // values, let chains and aliases of it), never its siblings. A path that
+    // meets a form it cannot see into (a call's result, a struct) falls back
+    // to the whole carrier: over-approximate, never under. A tuple wrapper is
+    // NOT a copy: only a proved copy or fresh storage ends the walk.
+    let rec holdsStorage (t: IRType) =
+        match t with
+        | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> holdsStorage inner
+        | IRTTuple ts -> ts |> List.exists holdsStorage
+        | IRTNamed _ | IRTComputation _ -> true
+        | t -> isArrayTy t
+    let exprHoldsStorage (e: IRExpr) = try holdsStorage (typeOf e) with _ -> false
+    let rec storageAt (seen: System.Collections.Generic.HashSet<IRId * (int * bool) list>) (fuel: int) (owner: IRCallable option) (path: (int * bool) list) (e: IRExpr) : Set<IRId> option =
+        if fuel <= 0 then None
+        else
+            let allAt (p: (int * bool) list) (xs: IRExpr list) =
+                xs |> List.fold (fun acc x ->
+                    match acc, storageAt seen (fuel - 1) owner p x with
+                    | Some a, Some b -> Some (Set.union a b)
+                    | _ -> None) (Some Set.empty)
+            let all = allAt []
+            match e with
+            // a binder already being followed along this path adds nothing new
+            // (the walk is a union): a cyclic rebinding ends here, not at fuel
+            | IRVar (id, ty) when (holdsStorage ty || deferred.Contains id) && not (seen.Add((id, path))) -> Some (Set.singleton id)
+            | IRVar (id, ty) when holdsStorage ty || deferred.Contains id ->
+                let viaInit =
+                    match lets.TryGetValue id with
+                    | true, v when path.IsEmpty && isProvedCopy id v -> Some Set.empty
+                    | true, v -> storageAt seen (fuel - 1) owner path v
+                    | _ ->
+                        // a match PATTERN variable: the part of the scrutinee
+                        // its pattern binds (finding 2's pattern-bound aliases)
+                        match patBinds.TryGetValue id with
+                        | true, (scrut, ppath) -> storageAt seen (fuel - 1) owner (ppath @ path) scrut
+                        | _ -> Some Set.empty
+                let viaRebinds =
+                    match rebinds.TryGetValue id with
+                    | true, rs -> allAt path (List.ofSeq rs)
+                    | _ -> Some Set.empty
+                (match viaInit, viaRebinds with
+                 | Some a, Some b -> Some (Set.add id (Set.union a b))
+                 | _ -> None)
+            | IRVar _ -> Some Set.empty
+            | IRParam (nm, _, _) ->
+                (match owner |> Option.bind (fun c -> c.Params |> List.tryFind (fun p -> p.Name = nm)) with
+                 | Some p -> Some (Set.singleton p.VarId)
+                 | None -> Some Set.empty)
+            | IRTupleProj (a, k, isFlat) -> storageAt seen (fuel - 1) owner ((k, isFlat) :: path) a
+            | IRTuple es ->
+                (match path with
+                 | (k, false) :: rest when k >= 0 && k < es.Length -> storageAt seen (fuel - 1) owner rest es.[k]
+                 // a FLAT leaf index selects precisely only over leaves that
+                 // are not themselves tuples; otherwise every member
+                 | (k, true) :: rest when k >= 0 && k < es.Length
+                                         && es |> List.forall (fun m -> match (try typeOf m with _ -> IRTUnit) with IRTTuple _ -> false | _ -> true) ->
+                     storageAt seen (fuel - 1) owner rest es.[k]
+                 // the whole carrier: every member that can hold storage (a
+                 // scalar member -- `m(0, 1)` -- is a value read, no view)
+                 | _ -> all (es |> List.filter exprHoldsStorage))
+            | IRStructLit (_, fields) -> all (fields |> List.map snd |> List.filter exprHoldsStorage)
+            | IRIndex (a, _, _) | IRCurry (a, _, _) | IRSlice (a, _, _, _) | IRFieldAccess (a, _) ->
+                storageAt seen (fuel - 1) owner [] a
+            | IRIf (_, t, f) -> allAt path [ t; f ]
+            | IRLet _ -> storageAt seen (fuel - 1) owner path (snd (IRLift.peelLetChain e))
+            // a call returns (a view of) a storage-carrying argument, and an
+            // APPLIED storage-carrying value (`row(1)` over a computation-typed
+            // `row`) is a read of it
+            | IRApp (f, args, _) -> all ((if exprHoldsStorage f then [ f ] else []) @ (args |> List.filter exprHoldsStorage))
+            | IRTupleCons (h, t) -> all [ h; t ]
+            | IRTupleDecons t -> all [ t ]
+            // a match VALUE: every case body along the path, as an if's
+            // arms (Codex review of W4B-A, finding 2: it used to be "fresh")
+            | IRMatch (_, cases) -> allAt path (cases |> List.map (fun c -> c.Body))
+            // forms that may hand back (a view of) an operand's storage and
+            // have no proved fresh-copy emission in every lane (residual
+            // view nodes, pack projections): their operands, conservatively
+            | IRSubset (a, _, _, _) | IRReverse (a, _) | IRShift (a, _, _, _) | IRDiag a
+            | IRPolyIndex (a, _) | IRPolyTail (a, _) | IRCompoundProject (a, _) ->
+                storageAt seen (fuel - 1) owner [] a
+            // `|> compute` of a DEFERRED computation (a map, a deferred binder)
+            // or of any computing form (a guard, a transpose, a sequence, ...)
+            // materializes FRESH cells (third Codex look of W4B-A, finding 1:
+            // `guard(true, g) |> compute` is its own pool); of a stored VIEW or
+            // name it is the identity in the compiled lanes (measured: a write
+            // through `mc(0) |> compute` lands in mc in C++ and LLVM), so that
+            // operand is followed
+            | IRCompute x ->
+                let rec strip (e: IRExpr) = match e with IRCompute y -> strip y | e -> e
+                (match strip x with
+                 | IRVar (id, _) when deferred.Contains id -> Some Set.empty
+                 | (IRVar _ | IRParam _ | IRIndex _ | IRCurry _ | IRSlice _ | IRTupleProj _ | IRFieldAccess _ | IRPure _) as c ->
+                     storageAt seen (fuel - 1) owner path c
+                 | _ -> Some Set.empty)
+            // IDENTITY WRAPPERS (second Codex look, finding 3): `pure(x)` is the
+            // identity in every lane; a bare `guard` / `<|>` / `<|:>` / bind
+            // VALUE stands for its operand(s) (as a named binding it is a
+            // deferred binder anyway) -- followed
+            | IRPure a | IRGuard (_, a) | IRBind (a, _) -> storageAt seen (fuel - 1) owner path a
+            | IRChoice (l, r) | IRFallback (l, r) -> allAt path [ l; r ]
+            // FRESH: a computed value (the result's own new cells) or no
+            // storage at all
+            | IRLit _ | IRArrayLit _ | IRBinOp _ | IRUnaryOp _ | IRComplex _ | IRFma _ | IRRandAt _
+            | IRMethodFor _ | IRObjectFor _ | IRApplyCombinator _ | IRComposeApply _ | IRParallel _
+            | IRFusion _ | IRArrayProduct _ | IRComposeObj _ | IRComposeMeth _
+            | IRCompose _ | IRFunctorMap _ | IRReynolds _
+            // copies into their own pool in the C++ lane and the interpreter
+            // (transpose in all three lanes); a sequence / replicate copies in C++
+            // (the interpreter's concrete-array sequence SHARES its members' stores:
+            // a pre-existing cross-lane divergence, recorded in G60, not refused here)
+            | IRTranspose _ | IRDecompact _ | IRGroupBy _ | IRUngroup _ | IRUngroupGrid _ | IRStack _ | IRJoin _
+            | IRUngroupRows _ | IRSequence _ | IRReplicate _
+            | IRMask _ | IRIntersect _ | IRUnion _ | IRUnique _ | IRContains _ | IRDisplayEmit _ | IRDisplayJson _
+            | IRDisplayNum _ | IRDisplayStr _ | IRGroupKeys _ | IRGroupBucket _ | IRSegments _ | IRSegmentsGrid _
+            | IRGroupSizes _ | IRSort _ | IRReduce _ | IRReduceCompute _ | IRProdSum _ | IRZip _ | IRAlign _
+            | IRGram _ | IRGramApply _ | IRMatmul _ | IREigh _ | IRSolve _ | IRLu _ | IRLuSolve _
+            | IRArrayNegate _ | IRArrayConjugate _ | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _
+            | IRNth | IRZero _ | IRUnseededSeed _ | IRUninit _ | IRBeginPoolScope _ | IRReleasePools _ | IRRank _ | IRExtent _
+            | IRRaggedLookup _ | IRCompoundMask _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent
+            | IRAssign _ | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ ->
+                Some Set.empty
+            // (EXHAUSTIVE over IRExpr, no wildcard: a form added later is an
+            // incomplete-match warning here until it is classified, never
+            // silently "fresh")
+    let storageOf (fuel: int) (owner: IRCallable option) (e: IRExpr) =
+        storageAt (System.Collections.Generic.HashSet<IRId * (int * bool) list>()) fuel owner [] e
+    let written = System.Collections.Generic.HashSet<IRId>()
+    let writeSite = System.Collections.Generic.Dictionary<IRId, Blade.Ast.Span>()
+    let changed = ref true
+    let mark (span: Blade.Ast.Span) (owner: IRCallable option) (e: IRExpr) =
+        match storageOf 48 owner e with
+        | Some ids ->
+            for id in ids do
+                if written.Add id then
+                    writeSite.[id] <- span
+                    changed.Value <- true
+        | None ->
+            raise (Blade.Diagnostics.BladeDiagnosticException
+                    (Blade.Diagnostics.mkError "BL4005" Blade.Diagnostics.PhConstraints span
+                        "a write whose target's storage could not be traced (through a storage-carrying form the provenance walk does not know, or more than 48 nested view, alias, projection or rebinding steps; a cycle of rebindings is followed once, not counted): it may write a deferred computation, which has no storage of its own (formalism 10.2). Bind the array the write is meant for with `|> compute` and write that name directly."))
+    // Every site, with its owner (the callable whose parameters an IRParam
+    // names) and the span a refusal reports.
+    let sites =
+        [ for b in allBindings -> (IR.declSpanOf b.Name, None, b.Value)
+          for f in allFuncs -> (funcSpan f, Some f, f.Body) ]
+    let paramNamesOf (owner: IRCallable option) =
+        match owner with
+        | Some c -> c.Params |> List.map (fun p -> p.Name) |> Set.ofList
+        | None -> Set.empty
+    while changed.Value do
+        changed.Value <- false
+        for (span, owner, root) in sites do
+            let ownParams = paramNamesOf owner
+            iterIRExpr (fun n ->
+                match n with
+                | IRAssign (target, _) -> mark span owner target
+                | IRApp (f, args, _) ->
+                    (match resolve f with
+                     | Some c ->
+                         List.zip (List.truncate args.Length c.Params) (List.truncate c.Params.Length args)
+                         |> List.iter (fun (p, a) -> if written.Contains p.VarId then mark span owner a)
+                     | None ->
+                         // a FUNCTION VALUE (a callback parameter, a function-
+                         // typed name): its effects are unknown, so every array
+                         // it receives may be written. An intrinsic or a
+                         // constructor (an IRParam head that is no parameter of
+                         // this callable) writes nothing.
+                         let unknownCallee =
+                             match f with
+                             | IRVar _ -> true
+                             | IRParam (nm, _, _) -> ownParams.Contains nm
+                             | _ -> true
+                         if unknownCallee then
+                             // (a tuple / struct carrying arrays too: finding 2)
+                             args |> List.iter (fun a -> if exprHoldsStorage a then mark span owner a))
+                | IRApplyCombinator info ->
+                    (match resolve info.Kernel with
+                     | Some k when k.Params |> List.exists (fun p -> written.Contains p.VarId) ->
+                         info.Arrays |> List.iter (mark span owner)
+                     | _ -> ())
+                | _ -> ()) root
+    for id in written do
+        if deferred.Contains id then
+            let (what, remedy) = describe id
+            raise (Blade.Diagnostics.BladeDiagnosticException
+                    (Blade.Diagnostics.mkError "BL4005" Blade.Diagnostics.PhConstraints writeSite.[id]
+                        ($"a write through {what}, a deferred computation: a map is evaluated where it is read and fused into the folds over it (formalism 10.2), so it has no storage of its own to write -- the write would leave its folds, its prints and its aliases disagreeing. Materialize it first: {remedy} (for a writable copy, `let mut c = <it> |> compute`) and write that.")))
+    // ---- if values over computed arrays -----------------------------------------
+    let rec stripC (e: IRExpr) = match e with IRCompute x -> stripC x | e -> e
+    // The deferred binders a piece of an arm READS: its references plus the
+    // captures of every callable it names (a kernel's capture is a force).
+    let readsOf (n: IRExpr) : IRId list =
+        let refs = collectVarRefsIR n
+        let all =
+            refs |> Set.fold (fun acc id ->
+                match Map.tryFind id funcs with
+                | Some c -> c.Captures |> List.fold (fun a ci -> Set.add ci.Id a) acc
+                | None -> acc) refs
+        Set.intersect all deferred |> Set.toList
+    // To the alias chain's end, no depth cutoff (gap G59); the visited set
+    // only guards it (an initializer names only earlier binders).
+    let rec computationOf (seen: Set<IRId>) (id: IRId) =
+        match lets.TryGetValue id with
+        | true, IRVar (src, _) when not (seen.Contains src) && deferred.Contains src -> computationOf (seen.Add id) src
+        | true, v -> Some v
+        | _ -> None
+    // The first deferred binder an arm would force, if any. A copy member
+    // (`m`, `m |> compute`, an inline map under compute) is admitted when its
+    // own computation reads no deferred binding.
+    let rec badRead (e: IRExpr) : IRId option =
+        match e with
+        | IRIf (c, t, f) ->
+            (match readsOf c with
+             | id :: _ -> Some id
+             | [] -> badRead t |> Option.orElse (badRead f))
+        | IRTuple es -> es |> List.tryPick badRead
+        | m when (IRLift.deferredTupleMembersOf dv m).IsSome -> (IRLift.deferredTupleMembersOf dv m).Value |> List.tryPick badRead
+        | e ->
+            match stripC e with
+            | IRVar (id, ty) when deferred.Contains id && isArrayTy ty ->
+                (match computationOf Set.empty id with
+                 | Some v -> readsOf v |> List.tryHead
+                 | None -> None)
+            | c when isDeferredForm c -> readsOf c |> List.tryHead
+            | other -> readsOf other |> List.tryHead
+    // The deferred binders a piece of an ARM forces when it is evaluated (gap
+    // G77): a positional / extent / membership / slice read, a whole-array call
+    // argument, a prodsum operand, an assignment's right-hand side, a fold over
+    // a deferred value-keyed wrapper (no fold form reads it cell by cell), and
+    // every capture of a callable the arm names. A fold or a map OVER a
+    // deferred map fuses and forces nothing, so it is not here.
+    let forcingReads (n: IRExpr) : IRId list =
+        let out = ResizeArray<IRId>()
+        let note (b: IRExpr) =
+            match stripC b with
+            | IRVar (id, _) when deferred.Contains id -> out.Add id
+            | _ -> ()
+        let isWrapper (b: IRExpr) =
+            match stripC b with
+            | IRVar (id, _) when deferred.Contains id ->
+                (match computationOf Set.empty id with
+                 | Some (IRChoice _ | IRFallback _) -> true
+                 | _ -> false)
+            | _ -> false
+        iterIRExpr (fun x ->
+            match x with
+            | IRIndex (a, _, _) | IRCurry (a, _, _) | IRSlice (a, _, _, _) | IRSubset (a, _, _, _)
+            | IRExtent (a, _) | IRContains (a, _) -> note a
+            | IRApp (_, args, _) -> args |> List.iter note
+            | IRProdSum es -> es |> List.iter note
+            | IRAssign (_, v) -> note v
+            | IRReduce (a, _, _) when isWrapper a -> note a
+            | _ -> ()) n
+        let refs = collectVarRefsIR n
+        for id in refs do
+            match Map.tryFind id funcs with
+            | Some c -> for ci in c.Captures do if deferred.Contains ci.Id then out.Add ci.Id
+            | None -> ()
+        out |> Seq.distinct |> List.ofSeq
+    // THE ADMITTED CONDITION FORCE (gap G77; Codex reviews of W4B-A, findings
+    // 1 / 2). The C++ lane forces every deferred binder a statement reads
+    // positionally at the START of that statement; the interpreter and the LLVM
+    // lane force it where the evaluation reaches it. The two agree on the print
+    // set AND the first failure only when the force is the FIRST thing in the
+    // statement that can fail. So the one binder an `if`'s arm may read is the
+    // binder whose forcing read is the condition's FIRST evaluated operation
+    // that is not inert (operands left to right, before the node): a read
+    // `g(..)` / `g(i, j)` of the binder itself, never a `|> compute` COPY of it
+    // (a copy forces nothing and prints nothing) -- and only when the `if` is
+    // the whole value of its statement (a let's value, a block's result, a
+    // function's return), so no other work of the statement precedes it.
+    // Inert: names, literals, parameters, `+ - *`, float `/`, comparisons, logic
+    // (the left operand of `&&` / `||` runs first; the first event found is in
+    // it), negation, tuple / field projections. Everything else may fail.
+    let firstForceOf (cond: IRExpr) : IRId option =
+        // the SCALAR element of a type, every unit / index-tag wrapper peeled
+        // RECURSIVELY (thirteenth Codex look); None = not a proven scalar
+        let rec peelScalar (ty: IRType) =
+            match ty with
+            | IRTScalar et -> Some et
+            | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> peelScalar inner
+            | _ -> None
+        let elemOf (x: IRExpr) = try peelScalar (typeOf x) with _ -> None
+        let isScalarExpr (x: IRExpr) = (elemOf x).IsSome
+        // FAIL CLOSED: an operand whose type is not a proven real-float / complex
+        // scalar may be an integer (IRTInfer, a named type, a Nat, a typeOf
+        // failure), so integer division / modulus / power keep their barrier
+        let maybeInt (x: IRExpr) =
+            match elemOf x with
+            | Some (ETFloat64 | ETFloat32 | ETComplex64 | ETComplex128) -> false
+            | Some _ -> true
+            | None -> true
+        // a cast SOURCE that may be a float (unknown fails closed too)
+        let maybeFloat (x: IRExpr) =
+            match elemOf x with
+            | Some (ETInt64 | ETInt32 | ETBool) -> false
+            | _ -> true
+        // Some (Some id) = the first event is the force of id; Some None = the
+        // first event may fail otherwise; None = nothing evaluated may fail
+        // EXHAUSTIVE over IRExpr (eleventh Codex look of W4B-A): every node is
+        // its evaluated children in evaluation order, then -- when the node
+        // itself may fail -- a barrier; or inert; or a force of a binder. No
+        // wildcard: a constructor added later is an incomplete-match warning.
+        let rec first (e: IRExpr) : IRId option option =
+            let seq (xs: IRExpr list) (self: IRId option option) =
+                match xs |> List.tryPick first with
+                | Some ev -> Some ev
+                | None -> self
+            let barrier = Some None
+            // a whole-array operand position that FORCES a bare deferred binder
+            // (a call argument, a prodsum operand: C++'s pre-pass and the
+            // interpreter both force it there)
+            let operand (a: IRExpr) =
+                match a with
+                | IRVar (id, _) when deferred.Contains id -> Some (Some id)
+                | a -> first a
+            let seqOperands (xs: IRExpr list) (self: IRId option option) =
+                match xs |> List.tryPick operand with
+                | Some ev -> Some ev
+                | None -> self
+            match e with
+            // leaves
+            | IRLit _ | IRParam _ -> None
+            // a bare deferred binder evaluated as a value is a COPY of its
+            // computation (it may fail), never a stored force
+            | IRVar (id, _) -> if deferred.Contains id then barrier else None
+            // reads of the binder itself: its force
+            | IRIndex (IRVar (id, _), _, _) | IRCurry (IRVar (id, _), _, _) | IRSlice (IRVar (id, _), _, _, _)
+            | IRSubset (IRVar (id, _), _, _, _) | IRContains (IRVar (id, _), _) when deferred.Contains id -> Some (Some id)
+            // checked reads: operands, then the read (a checked subscript) may fail
+            | IRIndex (a, idxs, _) -> seq (a :: idxs) barrier
+            | IRCurry (a, i, _) -> seq [ a; i ] barrier
+            | IRSlice (a, _, s, t) -> seq [ a; s; t ] barrier
+            | IRSubset (a, _, s, l) -> seq [ a; s; l ] barrier
+            | IRContains (a, v) -> seq [ a; v ] barrier
+            | IRExtent (IRVar (id, _), _) when deferred.Contains id -> barrier
+            | IRExtent (a, _) | IRRank a -> seq [ a ] None
+            // `&&` / `||`: only the LEFT operand runs unconditionally; an inert left
+            // operand leaves the right one CONDITIONAL, a barrier (third look, finding 2)
+            | IRBinOp (_, (IRAnd | IROr), l, _, _) -> (match first l with Some ev -> Some ev | None -> barrier)
+            // SCALAR PANICS, formalism 2.4 exactly (twelfth Codex look): an operation
+            // is a barrier after its operands ONLY if 2.4 says it can panic --
+            //   integer `/` and `%` (by zero)                        BL8013
+            //   integer-base `^` (a negative integer exponent)       BL8013
+            //   a float -> INTEGER cast (NaN / out of range)         BL8014
+            //   a checked read (above)                               BL8006
+            //   a call (below: its body is not entered)
+            // everything else is INERT after its operands: `+ - *`, float `/`,
+            // a REAL-base `^` (whatever the exponent), comparisons, logic,
+            // negation, every libm intrinsic (IEEE values, never a language
+            // panic), a cast to Float64 / Float32 (or int -> int), complex ops, fma
+            | IRBinOp (_, op, l, r, _) ->
+                let selfFails =
+                    match op with
+                    | IRDiv | IRMod -> maybeInt l && maybeInt r
+                    | IRCaret -> maybeInt l && (match r with IRLit (IRLitInt k) -> k < 0L | _ -> true)
+                    | _ -> false
+                seq [ l; r ] (if selfFails then barrier else None)
+            // lgamma / digamma are Blade's series and panic BL8008 outside x > 0
+            // (formalism 2.4; IR.irNodeMayAbort): a barrier after the operand
+            | IRUnaryOp (IRMath ("lgamma" | "digamma"), a) -> seq [ a ] barrier
+            | IRUnaryOp ((IRNeg | IRNot | IRConj | IRReal | IRImag | IRArg | IRMath _), a) -> seq [ a ] None
+            | IRUnaryOp (IRCast (et, _), a) ->
+                let toInt = (et = ETInt64 || et = ETInt32)
+                let fromFloat = maybeFloat a
+                seq [ a ] (if toInt && fromFloat then barrier else None)
+            | IRComplex (a, b) -> seq [ a; b ] None
+            | IRFma (a, b, c) -> seq [ a; b; c ] None
+            | IRRandAt (_, args, w) -> seq (args @ (w |> Option.map fst |> Option.toList)) barrier
+            // aggregates: members left to right
+            | IRTuple es -> seq es None
+            | IRTupleProj (a, _, _) | IRFieldAccess (a, _) | IRTupleDecons a | IRPure a -> seq [ a ] None
+            | IRTupleCons (h, tl) -> seq [ h; tl ] None
+            | IRStructLit (_, fields) -> seq (fields |> List.map snd) None
+            | IRArrayLit (es, _) -> seq es None
+            | IRPolyIndex (pk, i) -> seq [ pk; i ] None
+            | IRPolyTail (pk, _) -> seq [ pk ] None
+            // a CALL (eleventh look, finding 1): the callee expression and every
+            // argument left to right first, then the invocation -- a barrier (its
+            // body is not entered)
+            | IRApp (f, args, _) -> (match first f with Some ev -> Some ev | None -> seqOperands args barrier)
+            | IRProdSum es -> seqOperands es barrier
+            // control: the condition / scrutinee runs first; the next event is in
+            // an arm or case, which is conditional
+            | IRIf (c, _, _) -> (match first c with Some ev -> Some ev | None -> barrier)
+            | IRMatch (s, _) -> (match first s with Some ev -> Some ev | None -> barrier)
+            | IRLet (_, v, b) -> seq [ v; b ] None
+            // `|> compute` (finding 2): over a STORED name (not deferred: the
+            // member-order predicate's reading) it adds no event; over a deferred
+            // computation it evaluates a COPY -- may fail, never a force
+            | IRCompute x ->
+                let rec strip (y: IRExpr) = match y with IRCompute z -> strip z | y -> y
+                (match strip x with
+                 | IRVar (id, _) when not (deferred.Contains id) -> None
+                 | IRLit _ | IRParam _ -> None
+                 | _ -> barrier)
+            // loop objects and function values: compile-time, nothing evaluated
+            | IRMethodFor _ | IRObjectFor _ | IRCompose _ | IRComposeObj _ | IRComposeMeth _ | IRReynolds _ -> None
+            // deferred computations and computation wrappers held as values: their
+            // consumers evaluate them (may fail)
+            // a SCALAR guard / choice (second regression of the twelfth look): the
+            // guard's condition, the choice's LEFT operand run unconditionally --
+            // walk them, then a barrier (never admit from the conditional body /
+            // right operand); an array-valued (deferred) wrapper stays opaque
+            | IRGuard (c, _) when isScalarExpr e ->
+                (match first c with Some ev -> Some ev | None -> barrier)
+            | IRChoice (l, _) when isScalarExpr e ->
+                (match first l with Some ev -> Some ev | None -> barrier)
+            // deferred computations, computation wrappers and an eager sequence
+            // held as values: opaque barriers (their consumers evaluate them)
+            | IRApplyCombinator _ | IRComposeApply _ | IRBind _ | IRParallel _ | IRFusion _ | IRChoice _
+            | IRFallback _ | IRArrayProduct _ | IRFunctorMap _ | IRGuard _ | IRSequence _ | IRReplicate _
+            | IRZip _ | IRAlign _ -> barrier
+            // eager array operations, folds, factorizations, effects: operands
+            // first, then the operation may fail
+            | IRMask _ | IRIntersect _ | IRUnion _ | IRUnique _ | IRSort _ | IRReduce _ | IRReduceCompute _
+            | IRStack _ | IRJoin _ | IRTranspose _ | IRDecompact _ | IRGram _ | IRGramApply _ | IRMatmul _
+            | IREigh _ | IRSolve _ | IRLu _ | IRLuSolve _ | IRArrayNegate _ | IRArrayConjugate _ | IRReverse _
+            | IRShift _ | IRDiag _ | IRGroupBy _ | IRGroupKeys _ | IRGroupBucket _ | IRGroupSizes _ | IRUngroup _
+            | IRUngroupGrid _ | IRUngroupRows _ | IRDisplayEmit _ | IRDisplayJson _ | IRDisplayNum _
+            | IRDisplayStr _ -> seq (childrenOf e) barrier
+            // inert markers and constants
+            | IRSegments _ | IRSegmentsGrid _ | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _
+            | IRNth | IRZero _ | IRUnseededSeed _ | IRUninit _ | IRBeginPoolScope _ | IRReleasePools _ | IRSparseKeys _ | IROrbitClass _
+            | IROpaqueExtent -> None
+            | IRRaggedLookup a | IRCompoundMask a | IRCompoundProject (a, _) -> seq [ a ] None
+            // statements: their operands, then they may fail / branch
+            | IRAssign (_, v) -> seq [ v ] barrier
+            | IRForRange (_, lo, hi, _) -> seq [ lo; hi ] barrier
+            | IRConstraintCheck (c, _, _, _) -> seq [ c ] barrier
+            | IRBreakIf c -> seq [ c ] barrier
+        match first cond with
+        | Some (Some id) -> Some id
+        | _ -> None
+    // The deferred binders a statement DEFINITELY FORCES -- forced at that
+    // statement on every evaluation path (seventh Codex look of W4B-A): a read
+    // of the binder itself (`g(k)`, a curry, a slice, a subset, a membership
+    // test), the binder as a whole-array call argument, a prodsum operand; an
+    // operand that runs unconditionally (only the LEFT side of `&&` / `||`, an
+    // `if`'s condition plus what BOTH arms force, a `match`'s scrutinee plus what
+    // EVERY case forces, a let chain's lets and result). NOT a force: a
+    // `|> compute` COPY, a fold or a map over it (fused: it evaluates the
+    // computation but neither stores nor prints it), an extent, anything under a
+    // deferred computation, a kernel (a lifted callable: its capture is read where
+    // its body reads it) or a computation wrapper. Forcing one member of a module
+    // ALIAS CLASS forces the class (formalism 10.2).
+    let aliasClasses = IRLift.deferredAliasClasses allBindings (IRLift.computeDeferredIds allBindings)
+    let rec definitelyForces (e: IRExpr) : Set<IRId> =
+        let note (b: IRExpr) =
+            match b with
+            | IRVar (id, _) when deferred.Contains id -> Set.singleton id
+            | _ -> Set.empty
+        let here =
+            match e with
+            | IRIndex (a, _, _) | IRCurry (a, _, _) | IRSlice (a, _, _, _) | IRSubset (a, _, _, _) | IRContains (a, _) -> note a
+            | IRApp (_, args, _) -> args |> List.map note |> Set.unionMany
+            | IRProdSum es -> es |> List.map note |> Set.unionMany
+            | _ -> Set.empty
+        let inter (xs: Set<IRId> list) = match xs with [] -> Set.empty | x :: rest -> List.fold Set.intersect x rest
+        let kids =
+            match e with
+            | IRBinOp (_, (IRAnd | IROr), l, _, _) -> definitelyForces l
+            | IRIf (c, t, f) -> Set.union (definitelyForces c) (Set.intersect (definitelyForces t) (definitelyForces f))
+            | IRMatch (s, cases) -> Set.union (definitelyForces s) (cases |> List.map (fun c -> definitelyForces c.Body) |> inter)
+            | IRLet (_, v, b) -> Set.union (definitelyForces v) (definitelyForces b)
+            | IRForRange (_, lo, hi, _) -> Set.union (definitelyForces lo) (definitelyForces hi)
+            | IRReduce _ | IRReduceCompute _ | IRExtent _ -> Set.empty
+            | IRGuard _ | IRSequence _ | IRReplicate _ | IRChoice _ | IRFallback _ -> Set.empty
+            | e when isDeferredForm e -> Set.empty
+            | e -> childrenOf e |> List.map definitelyForces |> Set.unionMany
+        Set.union here kids
+    let dominatingForces (e: IRExpr) : Set<IRId> =
+        definitelyForces e
+        |> Set.fold (fun acc id ->
+            match aliasClasses.TryFind id with
+            | Some cls -> cls |> List.fold (fun a m -> Set.add m a) acc
+            | None -> Set.add id acc) Set.empty
+    let checkIfs (span: Blade.Ast.Span) (inFrame: bool) (initialForced: Set<IRId>) (root: IRExpr) =
+        // `stmt`: the whole value of the statement `e` sits in (a binding's
+        // value, a let's value, a let chain's result, a loop bound / body).
+        let rec walk (frame: bool) (stmt: IRExpr) (forced: Set<IRId>) (e: IRExpr) =
+            (match e with
+             // AN `if` VALUE WHOSE ARM FORCES A DEFERRED COMPUTATION (gap G77):
+             // the condition first, then only the taken arm is the
+             // interpreter's order; the C++ lane forced every deferred map
+             // either arm reads BEFORE the condition (so an untaken arm's map
+             // printed and its failure fired), and the LLVM lane printed it
+             // from both arms (forcing it, and failing, at print time). No lane
+             // has a print rule that follows the branch, so the shape is
+             // refused, every lane alike; the one binder whose forcing read is the
+             // condition's first possibly-failing operation, in an `if` that is
+             // its statement's whole value, is admitted (firstForceOf).
+             // (TOP-LEVEL code only -- module statements and their blocks, NOT a
+             // function / lambda / kernel body (ninth Codex look) nor a LOOP body
+             // -- a let-rec step, a while guard (tenth look): the CURRENT frame;
+             // there the entry force state is not decidable here, so only the
+             // structural audit below applies)
+             | IRIf (c, t, f) when not frame && not (IRLift.ifNeedsOrderedArms dv e) ->
+                 // the binder whose force is the first event of the whole
+                 // STATEMENT (what the C++ pre-pass moves to its start) and
+                 // of this condition
+                 // the binder whose force is the FIRST possibly-failing event of the
+                 // whole STATEMENT (region): the C++ pre-pass moves it to the
+                 // statement's start, where it already is in every lane -- whether it
+                 // sits in this condition or anywhere earlier in the statement
+                 // (`g(0) + (if z(0) > 0 then g(0) else 0)`; tenth Codex look). Any
+                 // may-fail event before it vetoes (firstForceOf's barrier).
+                 let admitted = firstForceOf stmt
+                 (match forcingReads t @ forcingReads f |> List.tryFind (fun id -> Some id <> admitted && not (forced.Contains id)) with
+                  | Some id ->
+                      let (what, _) = describe id
+                      refuseLowering span
+                          ($"an `if` value whose arm forces the deferred computation {what} (by position, as a call argument, through a capture, ...): only the TAKEN arm is evaluated, and no lane's print list or first-failure point follows the branch (formalism 10.2). Force it before the `if` (`let v = <it> |> compute`, or read it in a statement of its own) and read `v` in the arm.")
+                  | None -> ())
+             | IRIf (_, t, f) when IRLift.ifNeedsOrderedArms dv e ->
+                 if frame then
+                     refuseLowering span
+                         "an `if` value that selects between computed arrays (a `|> compute`, or a deferred map held in a tuple) inside a function body, a lambda or a loop body: the compiled lanes have no owner for the taken arm's storage after the branch. Compute each array before the `if` (`let a = m |> compute`) and select between the names, or bind the `if` at the top level."
+                 else
+                     match badRead t |> Option.orElse (badRead f) with
+                     | Some id ->
+                         let (what, _) = describe id
+                         refuseLowering span
+                             ($"an `if` value whose arm reads the deferred computation {what} (by position, through a capture, or inside a computed member): it would be evaluated only on the TAKEN arm, and no lane's static print list follows the branch. Force it before the `if` (`let v = <it> |> compute`) and read `v` in the arm.")
+                     | None -> ()
+             | _ -> ())
+            match e with
+            | IRForRange (_, lo, hi, body) ->
+                walk frame lo forced lo
+                walk frame hi forced hi
+                walk true body (Set.union forced (Set.union (dominatingForces lo) (dominatingForces hi))) body
+            // a let chain (a block, a function body) is ONE hoist region: the
+            // C++ lane forces the whole block's deferred reads before its lets
+            // (genLetChainBinding; third look, finding 3), so every earlier let
+            // precedes the admitted force
+            // a binding's tuple value the C++ emitter evaluates MEMBER BY
+            // MEMBER (genMemberOrderedTupleBinding; IRLift.tupleNeedsMemberOrderOf,
+            // the emitter's own judgment): each leaf is its own region, left to
+            // right (fifth Codex look of W4B-A, finding 1). A tuple the emitter
+            // renders whole keeps the enclosing region.
+            | IRTuple _ when obj.ReferenceEquals (e, stmt) && not inFrame
+                             && not (IRLift.isWhollyDeferredTupleOf dv (match e with IRTuple es -> es | _ -> []))
+                             // the emitter's two halves: the STRUCTURAL one (an explicit
+                             // compute / bare deferred / deferred-tuple member) over the
+                             // program's deferred view -- a binder the emitter already
+                             // forced makes it skip the ordered path, but then that member
+                             // is a copy of stored cells, which cannot fail, so the first
+                             // failure is the same either way (sixth Codex look, finding
+                             // 1) -- and the may-fail COUNT with NO binder deferred: the
+                             // emitter's count can only be higher, so a tuple ordered here
+                             // by the count is ordered there
+                             && (IRLift.memberNeedsOrderOf dv e
+                                 || (IRLift.tupleLeavesOf e
+                                     |> List.filter (IRLift.memberMayFailOf { dv with IsDeferred = (fun _ -> false); ValueOf = (fun _ -> None) })
+                                     |> List.length) >= 2) ->
+                // the leaves run left to right (C++ threads its context leaf to leaf):
+                // each leaf is checked with what the EARLIER leaves definitely forced
+                (IRLift.tupleLeavesOf e |> List.fold (fun acc leaf ->
+                    walk frame leaf acc leaf
+                    Set.union acc (dominatingForces leaf)) forced) |> ignore
+            | IRLet (_, v, b) when inFrame ->
+                // a FUNCTION / lambda body is emitted statement by statement
+                // (genFuncBody): each let's value is its own region, and the
+                // return's forcing code follows the preceding statements
+                walk frame v forced v
+                walk frame b (Set.union forced (dominatingForces v)) b
+            | IRLet (_, v, b) ->
+                walk frame stmt forced v
+                let forcedB = Set.union forced (dominatingForces v)
+                // a block whose RESULT is a tuple: the C++ block pre-pass
+                // excludes the final tuple's reads, which force at the tuple's
+                // own binding, after the block's statements -- its own region
+                match stmt, b with
+                | IRLet _, IRTuple _ -> walk frame b forcedB b
+                | _ -> walk frame stmt forcedB b
+            // the condition / scrutinee / loop bounds run BEFORE the arms / cases /
+            // body in every lane: their definite forces are carried in (never one
+            // arm into another, never one iteration into the next)
+            | IRIf (c, t, f) ->
+                walk frame stmt forced c
+                let fc = Set.union forced (dominatingForces c)
+                walk frame stmt fc t
+                walk frame stmt fc f
+            | IRMatch (s, cases) ->
+                walk frame stmt forced s
+                let fs = Set.union forced (dominatingForces s)
+                for cs in cases do
+                    cs.Guard |> Option.iter (walk frame stmt fs)
+                    walk frame stmt fs cs.Body
+            | _ -> childrenOf e |> List.iter (walk frame stmt forced)
+        // The shared predicate refuses a cyclic deferred-tuple provenance
+        // unspanned (IRLift.deferredTupleMembersOf); locate it at the binding.
+        try walk inFrame root initialForced root
+        with Blade.Diagnostics.BladeDiagnosticException d when d.Code = "BL6002" && d.Span = Blade.Ast.noSpan ->
+            refuseLowering span d.Message
+    // top-level statements DOMINATE the ones after them, module by module
+    // in binding order: what an earlier statement definitely forced is stored
+    // when a later `if`'s arm reads it (seventh Codex look, the one finding)
+    // REGION BOUNDARIES of the force state (eighth Codex look of W4B-A):
+    //   top-level statements -- accumulate, module by module in binding order;
+    //   block lets and function-body lets -- accumulate (walk's IRLet arms);
+    //   a block's final tuple -- inherits the block's lets (walk);
+    //   member-ordered tuple leaves -- accumulate left to right (walk);
+    //   if / match arms -- inherit PLUS the condition's / scrutinee's definite
+    //     forces; add nothing for later code unless every branch forces;
+    //   a FUNCTION, lambda or kernel body -- NOT AUDITED by the ordinary-arm
+    //     refusal (only the structural one): a sound entry state needs every
+    //     invocation / consumption site (captures, recursion, deferred kernels),
+    //     recorded OPEN in G77;
+    //   a loop body -- inherits plus the bounds' forces, adds nothing across iterations;
+    //   a kernel -- like a function body (not audited).
+    for m in modules do
+        let mutable moduleForced = Set.empty
+        for b in m.Bindings do
+            checkIfs (IR.declSpanOf b.Name) false moduleForced b.Value
+            moduleForced <- Set.union moduleForced (dominatingForces b.Value)
+    for f in allFuncs do checkIfs (funcSpan f) true Set.empty f.Body
+
 let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (builder: IRBuilder) : IRProgram =
     // The scratch-reuse plan is keyed by let id and let ids restart per
     // compile, so a stale plan from an earlier program in this flow (the test
@@ -2957,10 +4073,16 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     Optimize.CellFoldTable.reset ()
     Optimize.RecStepTable.reset ()
     Optimize.CompactionTable.reset ()
+    Optimize.EquiJoinTable.reset ()
     Optimize.CompactRowTable.reset ()
     Optimize.OrbitPullTable.reset ()
+    Optimize.OrbitActionTable.reset ()
     Optimize.MemberHoistTable.reset ()
+    Optimize.GroupAggTable.reset ()
     Optimize.EpilogueLegTable.reset ()
+    Optimize.CallSpanTable.reset ()
+    Optimize.InlineEventSpans.reset ()
+    Optimize.AliasElideTable.reset ()
     Optimize.blasGateProbe <- Blade.LinAlgPatterns.blasAvailable
     // The raw decl list callers hand us is the program they PARSED, not the
     // one `TypeCheck.typeCheck` desugared inside itself -- so the icechunk
@@ -3069,6 +4191,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         let allFuncs = irModules |> List.collect (fun m -> m.Functions)
         irModules |> List.map (forceEffectfulModuleLets allFuncs)
     refuseWritingJoinLegs irModules
+    refuseDeferredWritesAndUnorderedIfs irModules
 
     // Every struct the program declares, for `zero` at a struct type
     // (IRMono.resolveTypedZerosModule): the struct may live in another module
@@ -3083,7 +4206,15 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     // Every callable of the program, as the monomorphizers left it: the
     // optimizer resolves a callee defined in ANOTHER module here (a callee's
     // effect summary does not change under the per-module rewrites below).
+    // the repro demand on every fold use in a `where repro` body (gap G80):
+    // whole-program, so a twin lives in the module that defines its origin
+    let (irModules, reproTwins) = reproFoldUsesProgram irModules env.Builder
     let programFuncs = irModules |> List.collect (fun m -> m.Functions)
+    // The same snapshot with constant-scrutinee matches folded, as every module's
+    // optimizer folds them first: the unseeded-seed resolution judges writes on
+    // the code the emitters will see, imported callables included (gap G74).
+    let foldedProgramFuncs =
+        lazy (programFuncs |> List.map (fun f -> { f with Body = IRMono.foldConstMatchesExpr f.Body }))
     // Every id each module's executable code, types and side tables name
     // (Optimize.moduleReferencedIds: the SAME traversal the census walks --
     // binding values, every side-table operand executed at a binding's site,
@@ -3093,6 +4224,10 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     // Computed lazily once for a multi-module program.
     let moduleRefs =
         lazy (irModules |> List.map (fun m -> (m.Name, Optimize.moduleReferencedIds m)))
+    // Call elision's program-wide value-reference census (a callee in another
+    // module: Optimize.CallElideProgram), over the modules as they reach the
+    // optimizer.
+    Optimize.CallElideProgram.install (Optimize.programValueRefs irModules)
     let irModules =
         irModules |> List.map (fun irModule ->
         // Rewrite raw array-typed binops into object_for combinators now
@@ -3113,15 +4248,22 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // values is refused (keys are represented as positions, D2).
         IRMono.refuseEnumKeyArithModule irModule
         let irModule = IRMono.lowerArrayBinOpsModule irModule env.Builder programFuncs
-        // PM19 terminal selection must run before IRLift/CSE and every
-        // schedule side table. The whole-program census is already available
-        // here; a removed private mask can never orphan a membership plan.
+        // every unseeded fold's seed by its EFFECTIVE route (gap G74), before any
+        // optimizer pass reads a seed (the repro twins of gap G80 are in place)
+        let irModule = resolveUnseededSeedsModule (foldedProgramFuncs.Force()) irModule
+        // Every id another module names: the transpose normal form's and the
+        // read-only alias plan's never-written closure treats such a name as
+        // unjudged (Blade.Optimize.aliasWriteClosure). This is also PM19's and
+        // C04's COMPLETE foreign-demand evidence. A private transpose has no
+        // CompoundInits entry, so that shortcut would silently erase foreign
+        // binding/type/side-payload observers.
         let foreignRefs =
-            // This is also C04's COMPLETE foreign-demand evidence. A private
-            // transpose has no CompoundInits entry, so that shortcut would
-            // silently erase foreign binding/type/side-payload observers.
             if irModules.Length < 2 then Set.empty
             else moduleRefs.Force() |> List.filter (fun (n, _) -> n <> irModule.Name) |> List.map snd |> Set.unionMany
+        // PM19 terminal selection must run before IRLift/CSE and every
+        // schedule side table (the transpose normal form's alias plan
+        // included). It reads explicit seeds only, after their resolution
+        // above; a removed private mask can never orphan a membership plan.
         let irModule = Optimize.fuseSelectedTerminalModule env.Builder programFuncs foreignRefs irModule
         // The semantic-equivalence optimization stage (Blade.Optimize --
         // see its charter): constant-scrutinee match folding (which also
@@ -3141,7 +4283,16 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // CANNOT see an optimizer bug (both print the same wrong answer); the
         // lane that can is `blade test opt-diff` (tests/OptDiff.fs), which
         // compares every gate OFF against every gate ON.
-        let irModule = Optimize.optimizeModuleWithForeignCensus env.Builder programFuncs foreignRefs irModule
+        // The transpose normal form (Blade.Optimize.normalizeTransposesModule,
+        // P2 of docs/plans/plan-identity-transpose-compute.md): a chain of
+        // transposes composes to one permutation, an identity disappears. A
+        // semantic normal form every lane consumes; first among the optimizer
+        // passes, so the passes below (C04's private transpose partial folds
+        // included) see the base. Gate: BLADE_TRANSPOSE_ELIDE.
+        let irModule = Optimize.normalizeTransposesModule env.Builder programFuncs foreignRefs (irModules.Length < 2) irModule
+        // (a single-module program: compute elision's top-level mode reads the
+        // print selection's names, which name the program's own bindings)
+        let irModule = Optimize.optimizeModuleWithForeignCensus env.Builder programFuncs (irModules.Length < 2) foreignRefs irModule
         // Lift inline forms (mask/sort/intersect/union/group_by/group_keys
         // appearing in non-let-RHS positions) into auto-let bindings so
         // codegen sees the canonical "let-bound" pattern uniformly.
@@ -3196,6 +4347,12 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // the interpreter runs the tree as written. Gate:
         // BLADE_COMPACTION_FUSION.
         Optimize.planCompactionFusion programFuncs foreignRefs irModule
+        // Hash equijoin (Blade.Optimize.planEquiJoin, round 3 W3-2, item
+        // T2): an inline rank-2 equijoin compound becomes a stable CSR build
+        // over the right keys plus a left-major / right-minor probe in the
+        // C++ lane; side table, the interpreter runs the as-written tree.
+        // Gate: BLADE_HASH_JOIN.
+        Optimize.planEquiJoin programFuncs foreignRefs irModule
         // Compact row classes (Blade.Optimize.planCompactRowClasses): a
         // compact rank-2 producer's orbit-fold class partials computed behind
         // each packed row; side table, both emitters. Gate:
@@ -3206,6 +4363,29 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // rank-3 scatter dispatch; no IR change. Knob: BLADE_ORBIT_PULL (the
         // emitter's).
         Optimize.planOrbitPull programFuncs irModule
+        // The row orbit action's five-party audit (Blade.Optimize.
+        // planOrbitActions, round 3 D-P2 / gap G73): facts only, read by both
+        // emitters' action admission (OrbitFold.orbitActionAdmissible); no IR
+        // change. Knob: BLADE_ORBIT_ACTIONS (the emitters').
+        Optimize.planOrbitActions programFuncs irModule
+        // Aggregate-only grouping (Blade.Optimize.planGroupAggregate, round 3
+        // W3-1 / gap G71): a function-body `group_keys` consumed only by
+        // per-group aggregate peels advances every peel's chain in ONE pass
+        // over the rows in source order (no perm, no gather); side table,
+        // both emitters; the interpreter runs the as-written CSR. Gate:
+        // BLADE_GROUP_AGG.
+        Optimize.planGroupAggregate programFuncs irModule
+        // The read-only alias plan (Blade.Optimize.planAliasElision): an
+        // assignable top-level `let X = Y` whose two names are never written
+        // shares Y's storage instead of copying it (the symmetric transpose
+        // alias, the identity transpose chain). A side table, both emitters;
+        // the interpreter keeps its copy. Last, over the final tree. Gate:
+        // BLADE_TRANSPOSE_ELIDE.
+        Optimize.planAliasElision programFuncs (foreignRefs) irModule
+        // The checker's stored-alias identity verdicts (plan 2.1 second step,
+        // rule `alias-identity v1`), each applied one cross-checked against
+        // the plan above. Records only; no IR change.
+        Optimize.recordAliasIdentity programFuncs (foreignRefs) irModule
         irModule)
     // A05 consumes every module's final executable/type/side payload and ALL
     // established owners. No planner runs after these typed resource barriers.
@@ -3217,10 +4397,19 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     // drops it. Unreachable from any binding, it can only ever be a BL6001.
     // Must run after EVERY specializing pass -- each can make a function
     // concrete or mint new references -- and before validateIR.
-    IRValidate.eliminateDeadPolymorphs { Modules = irModules }
+    // The declaration-span table TRAVELS WITH THE PROGRAM (gap G76): carried
+    // in the record (IRProgram.DeclSpans), so every `{ p with .. }` copy --
+    // qualifyModuleNames' multi-module arm among them (the second Codex look
+    // of W4-3, NEW 3: an object-keyed attachment made before it was lost for
+    // every multi-module program) -- keeps it; a consumer in another flow
+    // (the interpreter differential) installs it.
+    let program = IRValidate.eliminateDeadPolymorphs { Modules = irModules; DeclSpans = Map.empty }
     // Module namespacing, after every pass that could mint or specialize a
     // member (see qualifyModuleNames).
-    |> qualifyModuleNames
+    let program = program |> qualifyModuleNames
+    // a repro twin is located at its origin's declaration (gap G80)
+    copyTwinDeclSpans program reproTwins
+    { program with DeclSpans = (IR.declSpansCell ()).Value }
 
 // Typecheck warning surfacing (shared by every CLI lane)
 

@@ -1,0 +1,22 @@
+// TEST: Ring Recursive Array Scattered Snapshots
+// ============================================================================
+// Recursive-array windowing with two snapshots far apart (examples/09's
+// `jtB(800)`, `jtB(1600)` shape, PM34): rows 50 and 150 of a lag-1, N = 200
+// recursion. Row 50 is long overwritten in the ring by the end, so the sweep
+// is SPLIT after step 50 and the copy sits between the two segments; row
+// 150 likewise. `rec-window` APPLIES (ring of 2, snapshots 50 and 150).
+// x_n = x_{n-1} * 1.01, x_0 = 1.0; value = the full buffer's.
+// ============================================================================
+type T = Idx<200>
+
+let out = {
+    let rec traj: Array<Float like T> =
+        match traj with
+        | zero -> zero
+        | zero :: s -> zero :: 1.0
+        | prefix :: n -> prefix :: prefix(n - 1) * 1.01
+    let a = traj((50 : T))
+    let b = traj((150 : T))
+    a + b
+}
+// EXPECT: out = 6.09305471787394

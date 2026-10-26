@@ -1,0 +1,20 @@
+// TEST: Transpose Symmetric Alias Readonly
+// The symmetric transpose is the certified identity (erased at typecheck to
+// `let ST = S`); neither name is ever written, so the read-only alias plan
+// (transpose-normal-form v1) lets ST share S's packed pool: no allocation,
+// no pool copy. Every reader sees the same canonical cells: the print, a
+// full orbit-weighted fold, a mirrored subscript, and a map.
+// S = reynolds(2x + y) over [1, 2, 3]: canonicals 6 9 12 / 12 15 / 18.
+let A = [1.0, 2.0, 3.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
+let S = L <@> reynolds(g) |> compute
+let ST = transpose(S, [0, 1])
+let tot = reduce(ST, (+), axes = 2)
+let c = ST(2, 0)
+let D = method_for(ST) <@> lambda(x) -> x * 2.0 |> compute
+// EXPECT: S = [6.0, 9.0, 12.0, 12.0, 15.0, 18.0]
+// EXPECT: ST = [6.0, 9.0, 12.0, 12.0, 15.0, 18.0]
+// EXPECT: tot = 108.0
+// EXPECT: c = 12.0
+// EXPECT: D = [12.0, 18.0, 24.0, 24.0, 30.0, 36.0]

@@ -288,6 +288,23 @@ let rec private genFuncBodyScoped
             // Loop objects are compile-time only -- they're resolved when <@> is processed
             currentNames <- Map.add id varName currentNames
             []
+        | IRTuple elems when IRLift.isWhollyDeferredTupleOf
+                                { IsDeferred = (fun i -> Map.containsKey i currentDeferred)
+                                  ValueOf = (fun i -> Map.tryFind i currentDeferred)
+                                  TypeOfExpr = inferExprType } elems ->
+            // A WHOLLY DEFERRED TUPLE bound in a function body (gap G58): every
+            // member is a deferred computation -- a module map the body has not
+            // forced, an inline map, or another deferred tuple of this body --
+            // so the tuple is itself deferred, exactly as at module level
+            // (genScalarExprBinding's arm; IRLift.isWhollyDeferredTupleOf is the
+            // shared judgment, the lowering pass's and the interpreter's twin).
+            // Binding it evaluates nothing; a projection reads one member
+            // (resolved through currentDeferred). It used to fall to the default
+            // arm's `std::make_tuple(g, g)`, naming a module map this body never
+            // declared (BL9002 at g++).
+            currentNames <- Map.add id varName currentNames
+            currentDeferred <- Map.add id value currentDeferred
+            [$"{indent}// {varName} = <deferred computation tuple>"]
         | IRApplyCombinator info when Set.contains id forcedDeferredIds ->
             // Still-deferred combinator that a LATER statement reads BY NAME.
             // Materialize it here, through the same statement-form path the
@@ -357,6 +374,11 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
              | Some plan -> plan.EmittedCpp.Value <- None; plan.DeclinedCpp.Value <- false; (compactRowPendingCell ()).[varName] <- plan
              | None -> ())
             let code =
+                // Aggregate-only grouping (Blade.Optimize.planGroupAggregate):
+                // a planned peel reads its state from the grouping's one pass.
+                match genGroupAggPeelCpp bodyCtx id varName with
+                | Some lines -> lines
+                | None ->
                 try genApplyCombinator bodyCtx varName info builder
                 finally
                     (hotRowPendingCell ()).Remove varName |> ignore
@@ -529,7 +551,23 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             code
         | (IRReduce _ | IRCompute (IRReduce _)) when
             (let inner = (match value with IRCompute e -> e | e -> e)
-             match inferExprType inner with ArrayElem _ -> true | _ -> false) ->
+             match inferExprType inner with
+             | ArrayElem _ -> true
+             // G55: a SCALAR fold let whose kernel asks for a team
+             // (`let s = reduce(x, lambda(p, q) where omp -> p + q, 0.0)`)
+             // IS its own let: route it through the statement fold path
+             // (genReduceBinding: the team, the census line, the K-lane /
+             // Path B forms) exactly as at module level, instead of the
+             // inline IIFE's expression-position decline. A scalar fold with
+             // no request keeps the IIFE (the same K-lane form either way).
+             | IRTScalar _ ->
+                 (match inner with
+                  | IRReduce (_, k, _) ->
+                      (match resolveCallable k with
+                       | Some c -> c.Params.Length = 2 && c.IsOmpParallel
+                       | None -> false)
+                  | _ -> false)
+             | _ -> false) ->
             // An ARRAY-VALUED reduce (axis fold: rank-2 -> rank-1, lswosa's
             // per-frequency segment fold `reduce(ls_e <@> mag2, (+)) |> compute`)
             // as a function-body let, with or without the user's IRCompute
@@ -545,7 +583,52 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
                 Type = inferExprType (match value with IRCompute e -> e | e -> e)
                 Value = value; IsConst = false; IsMutable = true
             }
-            let (code, ctxAfter) = genBinding bodyCtx tempBinding builder
+            // G55's plan subject: a SCALAR fold let's decisions -- the applied
+            // `[omp]` record (subjected by the emitted `__v<id>`) and every
+            // decline (subjected by the function) -- are ONE subject,
+            // `<function>.<let name>`. The let's name is its fold kernel's
+            // scope: Lowering names an anonymous lambda in a let's value
+            // `lambda in <let>` (lowerBoundValue). A NAMED kernel (a function,
+            // a separately bound local lambda) carries no let name -- IRLet has
+            // none and Lowering records none (gap G55) -- so the subject is
+            // `<function>.<fold k>`, the k-th scalar fold let of this body in
+            // source order: distinct per fold, the same in every outcome, and a
+            // spelling no let name can take (`<` / space are no identifier
+            // characters), so it never collides with a real `<function>.<let>`.
+            let subjectCell = localDecisionSubjectCell ()
+            let priorSubject = subjectCell.Value
+            (match tempBinding.Type with
+             | IRTScalar _ ->
+                 let owner = (currentDeclCell ()).Value
+                 let fnShown = shownDeclName owner
+                 let letName =
+                     match (match value with IRCompute e -> e | e -> e) with
+                     | IRReduce (_, k, _) ->
+                         (match resolveCallable k with
+                          | Some c ->
+                              let sn = c.SourceName
+                              let at = sn.LastIndexOf " in "
+                              if at > 0 && sn.StartsWith "lambda in " then
+                                  let scope = sn.Substring(at + 4)
+                                  if scope <> fnShown && scope <> "" then Some scope else None
+                              else None
+                          | None -> None)
+                     | _ -> None
+                 let isScalarFoldLet (v: IRExpr) =
+                     match v with
+                     | IRReduce _ | IRCompute (IRReduce _) ->
+                         (match inferExprType (match v with IRCompute e -> e | e -> e) with
+                          | IRTScalar _ -> true
+                          | _ -> false)
+                     | _ -> false
+                 let ordinal =
+                     1 + (lets |> List.takeWhile (fun (i, _) -> i <> id) |> List.filter (snd >> isScalarFoldLet) |> List.length)
+                 let shown = match letName with Some n -> fnShown + "." + n | None -> $"{fnShown}.<fold {ordinal}>"
+                 subjectCell.Value <- Some (varName, owner, shown)
+             | _ -> ())
+            let (code, ctxAfter) =
+                try genBinding bodyCtx tempBinding builder
+                finally subjectCell.Value <- priorSubject
             currentTupleChildren <- ctxAfter.TupleChildren
             currentNames <- Map.add id varName currentNames
             code
@@ -637,8 +720,10 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // three or more did not compile. genTupleProjBinding keeps the
             // std::get form as its own fallback for tuples with no registered
             // children (a callee's returned tuple), so nothing that worked
-            // before is rerouted.
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
+            // before is rerouted. `currentDeferred` so a projection of a
+            // deferred tuple this body bound (gap G58) resolves to its member.
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped
+                                     DeferredComputations = currentDeferred; TupleChildren = currentTupleChildren }
             let tempBinding = {
                 Id = id; Name = varName; Type = inferExprType value
                 Value = value; IsConst = true; IsMutable = false
@@ -981,6 +1066,19 @@ or return a scalar and materialize at the call site"
             // across the call boundary. No caller-side change is needed: the
             // caller already binds the returned wrapper and reads shape off
             // it (`c.extents[0]`), never off a companion `c_extents`.
+            //
+            // A MODULE-LEVEL deferred map the returned expression reads by
+            // name (`function f(n) = lazy(1) + n`, gap G75) is forced HERE,
+            // inside the body, at the body's indent -- block-scoped and
+            // unprinted, re-evaluated per call, exactly as a body-local map
+            // kernel's capture of it is (formalism 10.2). It used to reach
+            // the return as an undeclared `lazy` (BL9002).
+            let (retForce, retCtx) =
+                forceDeferredPositionalReads
+                    { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
+                    builder "__retdef" retExpr
+            let stmts = stmts @ retForce
+            let currentNames = retCtx.VarNames
             let retStr = exprToCpp currentNames retExpr
             // `return t` where a body let bound `t` to a JOINED reduce: the
             // local is the emitters' flat tuple, the signature says nested.
@@ -1110,6 +1208,34 @@ and genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, str
             | _ -> (innerLets @ [(id, innerFinal)] @ restLets, restFinal)
         | _ -> ([], expr)
     let (lets0, retExpr0) = deepUnroll body
+    // ORDERED CALL ARGUMENTS (gap G79; Codex review of W4B-A, finding 4): a
+    // body let's value, or the returned value, that is a call two or more of
+    // whose arguments may fail has those arguments bound to lets of their own,
+    // in source order, BEFORE any hoisting below -- the loop-app and fresh-pool
+    // hoists lift array-valued arguments ahead of the others, so a later
+    // argument would otherwise run first (C++ also leaves argument order
+    // unspecified). Each argument let then takes its ordinary arm (a fresh-pool
+    // call result is registered with the frame there); the call names them.
+    // A bare map argument is bound under `|> compute` (a body let must be
+    // forced; the call would materialize it anyway).
+    let splitOrderedArgs (v: IRExpr) : (IRId * IRExpr) list * IRExpr =
+        match v with
+        | IRApp (f, args, ty) when callNeedsArgumentOrder ctx args ->
+            let (pre, args') =
+                args |> List.fold (fun (pre, acc) a ->
+                    if memberMayFail ctx a then
+                        let tmp = builder.FreshId()
+                        let bound =
+                            match a with
+                            | IRApplyCombinator _ | IRComposeApply _ -> IRCompute a
+                            | a -> a
+                        (pre @ [ (tmp, bound) ], acc @ [ IRVar (tmp, inferExprType a) ])
+                    else (pre, acc @ [ a ])) ([], [])
+            (pre, IRApp (f, args', ty))
+        | v -> ([], v)
+    let lets0 = lets0 |> List.collect (fun (id, v) -> let (pre, v') = splitOrderedArgs v in pre @ [ (id, v') ])
+    let (retPre, retExpr0) = splitOrderedArgs retExpr0
+    let lets0 = lets0 @ retPre
     // Expression-position loop materialization. Synthesized
     // elementwise/broadcast loops (IRApp over IRObjectFor) are statement-
     // shaped: at module level genBinding materializes them, but inside a
@@ -2899,65 +3025,10 @@ let genPrintArrayWreath (name: string) (levels: (int * bool) list) (extent: int6
       "    }"
       "    cout << \"]\" << endl;" ]
 
-/// Compute which binding IDs are deferred (no C++ code generated).
-/// A binding is deferred if it's a computation that hasn't been materialized via |> compute.
-let computeDeferredIds (bindings: IRBinding list) : Set<int> =
-    let isDeferred (ids: Set<int>) (e: IRExpr) =
-        match e with
-        | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRFunctorMap _ | IRChoice _ | IRFallback _ | IRComposeObj _ | IRComposeMeth _ | IRBind _ | IRZip _ | IRSequence _ -> true
-        | IRVar (id, _) -> Set.contains id ids
-        | _ -> false
-    let rec shouldDeferValue (ids: Set<int>) (ty: IRType) (value: IRExpr) : bool =
-        // A combinator whose RESULT TYPE is an array is a deferred computation
-        // regardless of whether its operands are already deferred -- it materializes
-        // only at |> compute, exactly like `<@>` (which always defers). Without this,
-        // `<$>` / sequence / `<|>` / guard / `>>=` / `>>@` applied to CONCRETE arrays
-        // fell through to `| _ -> false` and were eagerly materialized (and printed)
-        // with no |> compute. Scalar `<|>` / guard stay eager ternaries (result type
-        // is IRTScalar, so resultIsArray is false).
-        let resultIsArray = match IR.stripUnits ty with ArrayElem _ -> true | _ -> false
-        match value with
-        // A let CHAIN defers exactly when its final value does: genBinding
-        // routes it through genLetChainBinding, which emits the inner lets as
-        // temporaries and then genBinding's the final expression under the
-        // binding's own name. IRLift wraps a deferred binding this way when it
-        // hoists an inline operand -- `method_for(T(0)) <@> k`, `method_for([1.0,
-        // 2.0]) <@> k` lift the row / literal into a `__v<id>` let -- and the
-        // binding stays a deferred computation (only a comment in the C++),
-        // so it must not print ('mapped' was not declared, BL9002). An inner
-        // let that itself defers makes a final alias of it defer too.
-        | IRLet _ ->
-            let (lets, finalExpr) = IRLift.peelLetChain value
-            let inner =
-                lets |> List.fold (fun acc (id, lty, v) ->
-                    if shouldDeferValue acc lty v then Set.add id acc else acc) ids
-            shouldDeferValue inner ty finalExpr
-        | _ ->
-            match value with
-            | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ -> true
-            | IRZip _ -> true
-            | IRComposeObj _ -> true
-            | IRBind (comp, _) -> resultIsArray || isDeferred ids comp
-            | IRComposeMeth (left, right) -> resultIsArray || isDeferred ids left || isDeferred ids right
-            | IRFunctorMap (_, inner) -> resultIsArray || isDeferred ids inner
-            | IRChoice (left, right) -> resultIsArray || isDeferred ids left || isDeferred ids right
-            // <|:> operands are arrays, so the binding ALWAYS defers
-            // (genFallbackBinding) -- materialization happens at |> compute.
-            | IRFallback _ -> true
-            | IRGuard (_, body) ->
-                let rec leafIsDeferred e =
-                    match e with
-                    | IRGuard (_, inner) -> leafIsDeferred inner
-                    | _ -> isDeferred ids e
-                resultIsArray || leafIsDeferred body
-            | IRSequence elems -> resultIsArray || (elems |> List.exists (isDeferred ids))
-            | IRTuple elems -> elems |> List.forall (isDeferred ids)
-            | IRTupleProj (IRVar (pid, _), _, _) -> Set.contains pid ids
-            | IRVar (srcId, _) -> Set.contains srcId ids
-            | _ -> false
-    bindings |> List.fold (fun ids b ->
-        if shouldDeferValue ids b.Type b.Value then Set.add b.Id ids else ids
-    ) Set.empty
+/// Compute which binding IDs are deferred (no C++ code generated). The ONE
+/// classification lives in IRLift (shared with the lowering refusals, the
+/// interpreter and the llvm lane).
+let computeDeferredIds (bindings: IRBinding list) : Set<int> = IRLift.computeDeferredIds bindings
 
 /// Top-level bindings that hold a FUNCTION -- a binding of function type
 /// (`let g = sq`), plus the generic-function aliases monomorphization removed
@@ -3096,7 +3167,26 @@ let genPrintStatements (modul: IRModule) : string list =
     // stayed deferred through the whole program prints nothing. The cell is
     // populated during genModule, so callers must assemble print code AFTER
     // body generation.
-    let forcedIds = (forcedDeferredIdsCell ()).Value
+    let forcedOwn = (forcedDeferredIdsCell ()).Value
+    // ALIAS CLASSES (gap G60, formalism 10.2): a deferred map and its
+    // top-level aliases are ONE value, so the class prints under every name
+    // as soon as any member was forced at main's top level. A member never
+    // materialized under its own name there is declared as a reference to a
+    // forced member just before the prints (the cells are the same: a write
+    // through any member is refused at lowering). Shared with the interpreter
+    // and the llvm lane (IRLift.deferredAliasClasses).
+    let aliasClasses = IRLift.deferredAliasClasses modul.Bindings deferredIds
+    let forcedIds =
+        aliasClasses |> Map.fold (fun acc m cls ->
+            if cls |> List.exists (fun x -> Set.contains x forcedOwn) then Set.add m acc else acc) forcedOwn
+    let aliasDecls =
+        modul.Bindings |> List.choose (fun b ->
+            match Map.tryFind b.Id aliasClasses with
+            | Some cls when Set.contains b.Id forcedIds && not (Set.contains b.Id forcedOwn) ->
+                cls |> List.tryFind (fun x -> Set.contains x forcedOwn)
+                |> Option.bind (fun rep -> modul.Bindings |> List.tryFind (fun r -> r.Id = rep))
+                |> Option.map (fun r -> $"    auto& {sanitizeCppName b.Name} = {sanitizeCppName r.Name};")
+            | _ -> None)
     // |> compute of a DEFERRED combinator is a forced materialization and
     // always prints; |> compute of anything ELSE prints exactly when the
     // wrapped value itself would (an eager reduce/scalar is unchanged by
@@ -3171,7 +3261,7 @@ let genPrintStatements (modul: IRModule) : string list =
                 else
                     [ refusalErrorLine "    " (formlessPrintRefusal modul formless) ]
         | None -> []
-    selectionRefusal @
+    aliasDecls @ selectionRefusal @
     (let printLinesOf (b: IRBinding) : string list =
         let isPrintable = isPrintableBinding b
         
@@ -3980,6 +4070,7 @@ let private genSelfContainedProgram (spool: Blade.OptimizePrivateSpool.Plan opti
 /// flow and every sibling pipeline (CodeGenState.freshCell).
 let beginProgramAssembly () : unit =
     resetProgramStateCells ()
+    Blade.Diagnostics.EmitterWarnings.reset ()
     resetExprSupportCells ()
     resetLoopNestCells ()
     Blade.LinAlgPatterns.resetReproScope ()

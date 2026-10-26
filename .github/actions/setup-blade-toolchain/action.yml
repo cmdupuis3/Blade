@@ -94,12 +94,18 @@ runs:
     # clang64 goes last, and only so a binary the LLVM lane links can find its
     # own runtime DLLs. `clang` itself is never resolved through PATH here --
     # BLADE_LLVM_CLANG names it outright.
+    #
+    # GITHUB_PATH PREPENDS each line, so the line written LAST ends up FIRST:
+    # clang64 is written first here so that ucrt64 lands ahead of it. (This
+    # loop used to write them the other way round, which put clang64's
+    # zlib1.dll / libzstd.dll / libxml2-16.dll / libwinpthread-1.dll ahead of
+    # ucrt64's on every later step's PATH.)
     # ----------------------------------------------------------------------
     - name: PATH (ucrt64 first, clang64 last)
       shell: pwsh
       run: |
         $root = '${{ inputs.msys2-location }}'
-        foreach ($dir in @((Join-Path $root 'ucrt64\bin'), (Join-Path $root 'clang64\bin'))) {
+        foreach ($dir in @((Join-Path $root 'clang64\bin'), (Join-Path $root 'ucrt64\bin'))) {
           if (-not (Test-Path $dir)) { throw "expected toolchain directory missing: $dir" }
           Add-Content -Path $env:GITHUB_PATH -Value $dir -Encoding utf8
         }

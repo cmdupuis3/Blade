@@ -1,0 +1,20 @@
+// TEST: Cyclic Deferred Tuple Rebinding (rejects)
+// ----------------------------------------------------------------------------
+// Gap G59's cyclic provenance: a deferred tuple p, an alias q of it, then p
+// REBOUND to q -- a cycle of rebindings. The provenance walk follows a cycle
+// once (it no longer runs out its step budget around it), and the rebinding
+// is a write through the deferred tuple's maps: refused at lowering in every
+// lane (BL4005), never answered `not deferred`.
+// ----------------------------------------------------------------------------
+type Row = Idx<3>
+let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
+let m = method_for(x) <@> lambda(v) -> v * 2.0
+let r = {
+    let mut p = (m, m)
+    let mut q = p
+    p = q
+    7
+}
+// ERROR: BL4005 @ 11:1
+// ERROR-CONTAINS: a write through `m`, a deferred computation
+// REJECT-AT: lower

@@ -1,0 +1,18 @@
+// TEST: Deferred Map Through Callback (rejects)
+// ----------------------------------------------------------------------------
+// Finding 2's callback: `apply` hands its array parameter to a FUNCTION VALUE
+// it received, whose effects no analysis can see at that call. The written-
+// binder fixpoint therefore treats every array an unresolved callee receives
+// as possibly written -- complete rather than clever: even this callback,
+// which only reads, makes passing a deferred map to `apply` a refused write
+// (BL4005, every lane). Bind `g |> compute` to pass stored cells.
+// ----------------------------------------------------------------------------
+type Row = Idx<3>
+let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+function total(v: Array<Float64 like Row>) -> Float64 = reduce(v, (+))
+function apply(cb, a: Array<Float64 like Row>) -> Float64 = cb(a)
+let r = apply(total, g)
+// ERROR: BL4005 @ 14:1
+// ERROR-CONTAINS: a write through `g`, a deferred computation
+// REJECT-AT: lower

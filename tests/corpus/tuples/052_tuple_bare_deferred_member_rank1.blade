@@ -1,0 +1,16 @@
+// TEST: Tuple Bare Deferred Member Rank 1
+// ----------------------------------------------------------------------------
+// Gap G61, the value: a bare deferred rank-1 map held in a tuple, `(g, 1.0)`,
+// is evaluated at the tuple's construction (formalism 10.2), in every lane.
+// The member is a COPY, as `g |> compute` makes: `g` itself is not forced by
+// the tuple and prints nothing; `held` and the projection print.
+// ----------------------------------------------------------------------------
+type Row = Idx<3>
+let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let held = (g, 1.0)
+let h0 = held[0]
+let s = reduce(h0, (+))
+// EXPECT: held = ([2.0, 4.0, 6.0], 1.0)
+// EXPECT: h0 = [2.0, 4.0, 6.0]
+// EXPECT: s = 12.0

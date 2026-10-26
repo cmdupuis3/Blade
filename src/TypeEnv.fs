@@ -647,6 +647,38 @@ type TypeEnv = {
     /// `mut` parameters are not listed (a call's arguments are checked at the
     /// call). Shared by reference.
     FuncOuterWrites: System.Collections.Generic.Dictionary<IRId, (string * IRId) list>
+    /// TOP-LEVEL PURE DEFERRED ALIAS CLASSES (formalism 10.2, 8.3;
+    /// docs/plans/plan-identity-transpose-compute.md 2.1): binder id of every
+    /// MEMBER -- the root, a module-level `let g = <map>` whose evaluation is
+    /// repeatable (Effects: no write, output, external read or unknown
+    /// callee), and each module-level `let g2 = g` (chains included) -- to
+    /// (root name, root binder id, module qualifier). Read by
+    /// TypeCheckInfer.loopOperandIdentity, which gives a member operand its
+    /// root's identity so identity groups see ONE array. Populated by
+    /// checkDecl only (never in a block or a callable body: those aliases are
+    /// forcing copies). Shared by reference.
+    DeferredAliasRoots: System.Collections.Generic.Dictionary<IRId, string * IRId * string option>
+    /// TOP-LEVEL STORED ALIAS CLASSES (plan-identity-transpose-compute 2.1,
+    /// the second step): binder id of every member -- a ROOT, a module-level
+    /// `let A = <stored>` (an array literal, a `|> compute`, a call of a
+    /// function this module declares) of a plain or compact array type, and
+    /// each module-level `let B = A` (chains included) whose names nothing in
+    /// the program can write (StoredAliasNeverWritten) -- to (root name, root
+    /// binder id, module qualifier). Read with DeferredAliasRoots by
+    /// TypeCheckSupport.loopOperandIdentity / aliasRootOf. Populated by
+    /// checkDecl only. Shared by reference.
+    StoredAliasRoots: System.Collections.Generic.Dictionary<IRId, string * IRId * string option>
+    /// THE MODULE'S NEVER-WRITTEN PROOF for stored aliases, installed per
+    /// module by TypeCheck.checkModule BEFORE its first declaration is checked
+    /// (identity is decided at typecheck, the writes may come later in the
+    /// source): (root name, the root's value is a call, member names) ->
+    /// Ok evidence | Error first failed condition. The default refuses
+    /// (fail closed). Shared by reference (one cell for the program).
+    StoredAliasNeverWritten: (string -> bool -> string list -> Result<string, string>) ref
+    /// The program's modules, for the never-written proof's "no other module
+    /// names it" condition (set by TypeCheck.checkProgram; empty = unknown,
+    /// which refuses).
+    ProgramModules: ModuleDecl list
     /// Function BINDER ID -> (parameter ids, typed body) of a PURE (Effects
     /// repeatable), NON-RECURSIVE, fixed-arity user function or module-level
     /// let-bound lambda: the bodies the comm/anticomm witness may evaluate
@@ -707,6 +739,43 @@ type TypeEnv = {
     /// their origin binder (TypeCheck.checkModule places each after its
     /// origin). Shared by reference.
     ArrowVariantDecls: ResizeArray<IRId * TypedDecl>
+    /// IDENTITY-SENSITIVE declarations (docs/plans/plan-identity-transpose-compute.md
+    /// 2.2; formalism 8.3 "Sharing-partition instances"), by binder id: one
+    /// whose body holds a comm / anticomm application, a `gram`, or a
+    /// `reynolds` kernel application over two or more of its array
+    /// parameters -- directly, or by handing them to such positions of a
+    /// resolved identity-sensitive callee. Value: the SOURCE declaration, the
+    /// environment it was checked in (its own name bound), the RELEVANT
+    /// parameter positions (ascending), and -- when the declaration may not be
+    /// specialized -- the first fail-closed condition (a declared array return
+    /// type, recursion, `static` / `mpi` / `cuda`, a synthesized declaration,
+    /// array instances, a `mut` or reassigned relevant parameter). A call
+    /// whose arguments SHARE an identity at two relevant positions is the call
+    /// of a SHARING INSTANCE (TypeCheckInfer.checkSharingVariant) unless that
+    /// condition is set. Recorded by TypeCheckSupport.noteSharingRelevance
+    /// for generic declarations only (never for an instance). Shared by
+    /// reference.
+    SharingDeclSources: System.Collections.Generic.Dictionary<IRId, FunctionDecl * TypeEnv * int list * string option>
+    /// The sharing instances made so far, keyed by origin binder and the
+    /// normalized partition of the relevant positions. Registered before the
+    /// instance's body is checked. The checked declarations go to
+    /// ArrowVariantDecls, placed after their origin like array instances.
+    /// Shared by reference.
+    SharingVariants: System.Collections.Generic.Dictionary<string, ArrowVariant>
+    /// Inside a SHARING INSTANCE: the binder id of each relevant parameter ->
+    /// its identity, `AIDAlias (AIDParameter (instance, class), name)` -- the
+    /// parameters of one partition class share it, so the identity groups of
+    /// formalism 8.3 see the one array the call passed. Read by
+    /// TypeCheckSupport.loopOperandIdentity. Shared by reference.
+    SharingParamIdentities: System.Collections.Generic.Dictionary<IRId, ArrayIdentity>
+    /// True while the VALUE of a `let` whose explicit DENSE array ascription
+    /// the ordinary elaboration did not meet is re-checked (plan 2.3, the
+    /// declared-signature rule): every operand identity minted at the value's
+    /// own level is fresh, so no identity group forms, and no call there is
+    /// sharing-specialized -- the value is elaborated dense, as declared.
+    /// Cleared on entering a callable body (enterCallableBody): a kernel's own
+    /// applications are not that boundary.
+    DenseAscription: bool
     /// Typed CALLS to be REPLACED before zonk (keyed by the node, by
     /// reference): a call that handed an arrow parameter a value open when it
     /// was judged, and an array since, by the call of the declaration's array
@@ -850,6 +919,10 @@ let emptyEnv () = {
     FuncSigVarRange = System.Collections.Generic.Dictionary<IRId, int * int>()
     FuncEffects = System.Collections.Generic.Dictionary<IRId, Blade.Effects.EffectSummary>()
     FuncOuterWrites = System.Collections.Generic.Dictionary<IRId, (string * IRId) list>()
+    DeferredAliasRoots = System.Collections.Generic.Dictionary<IRId, string * IRId * string option>()
+    StoredAliasRoots = System.Collections.Generic.Dictionary<IRId, string * IRId * string option>()
+    StoredAliasNeverWritten = ref (fun _ _ _ -> Error "the module's never-written proof was not installed (fail closed)")
+    ProgramModules = []
     FuncWitnessBodies = System.Collections.Generic.Dictionary<IRId, IRId list * TypedExpr>()
     FuncGenericObligations = System.Collections.Generic.Dictionary<IRId, GenericObligation list>()
     CurrentGenericObligations = None
@@ -860,6 +933,10 @@ let emptyEnv () = {
     ArrowDeclSources =System.Collections.Generic.Dictionary<IRId, FunctionDecl * TypeEnv * Map<int, IRType> * IRId>()
     ArrowVariants = System.Collections.Generic.Dictionary<string, ArrowVariant>()
     ArrowVariantDecls = ResizeArray<IRId * TypedDecl>()
+    SharingDeclSources = System.Collections.Generic.Dictionary<IRId, FunctionDecl * TypeEnv * int list * string option>()
+    SharingVariants = System.Collections.Generic.Dictionary<string, ArrowVariant>()
+    SharingParamIdentities = System.Collections.Generic.Dictionary<IRId, ArrayIdentity>()
+    DenseAscription = false
     ArrowRetargets = System.Collections.Generic.Dictionary<TypedExpr, TypedExpr>(HashIdentity.Reference)
     OpenCallArgs = System.Collections.Generic.HashSet<TypedExpr>(HashIdentity.Reference)
     ArrowSubscripts = System.Collections.Generic.Dictionary<TypedExpr, TypedExpr>(HashIdentity.Reference)
@@ -1238,6 +1315,7 @@ class IS implemented, and the dense result folds like any other array." op level
     | JoinDimRange (dim, totalDims) -> $"join: dimension {dim} is out of range for a rank-{totalDims} array (valid dims 0..{totalDims - 1})"
     | JoinShapeMismatch (pos, detail) -> $"join: argument {pos} does not match argument 1 ({detail}). join(A, B, d) requires equal rank, equal element type, and equal extents on EVERY axis except the joined dimension d."
     | StackJoinCompactSlot (op, slot) -> $"{op}: index slot {slot} is a compact, ragged, or compound group. {op} materializes a dense rectangular result, so its operands must be dense (plain Idx) on every axis -- decompact the axis first."
+    | RowMapCompactCell cell -> $"a map whose kernel returns a compact array (each cell {cell}) is not supported: a grouped compact output -- one packed pool per outer cell -- is not built in any lane. Return a DENSE cell instead -- end the callee with `decompact(h, 0)` (`let h = method_for(r, r) <@> ...; decompact(h, 0)`) -- or write the flat map over every axis (`method_for(range<G, P, P>) <@> lambda(g, a, b) -> prodsum(x(g, a), x(g, b))`), or fold or read each compact result inside the kernel instead of storing it per cell."
     // An empty context is `unify`'s own (Unify.unifyUnitContext): it cannot
     // know the seam, so it names none rather than guess one.
     | UnitMismatch ("", left, right) -> $"Unit mismatch: {left} vs {right}"
@@ -1687,7 +1765,8 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | DecompactDimRange _ | DecompactPlainAxis _ | DecompactLastSlotOnly _
             | TransposeAxisRange _ | TransposeAxesEqual _ | TransposeWithinGroup _
             | StackNeedsArrays _ | StackShapeMismatch _ | JoinNeedsArrays _
-            | JoinDimRange _ | JoinShapeMismatch _ | StackJoinCompactSlot _ -> "BL4004"
+            | JoinDimRange _ | JoinShapeMismatch _ | StackJoinCompactSlot _
+            | RowMapCompactCell _ -> "BL4004"
             | ImmutableStaticAssign _ | MutParamNotArray _ | MutAssignRefused _
             | MutArgNotPassable _ | MutArgAliased _ | MutArgAliasesCalleeGlobal _ | MutCaptureEscapes _ -> "BL4005"
             | MutualBindJointly _ | MutualDirectElementsOnly _ | MutualMixedGroups
@@ -1752,7 +1831,8 @@ let assignOfBindingMut = function
 let enterCallableBody env =
     { env with
         OuterScope = Map.foldBack Map.add env.Variables env.OuterScope
-        InCallableBody = true }
+        InCallableBody = true
+        DenseAscription = false }
 
 /// Was `name` bound INSIDE the callable body currently being inferred?
 ///

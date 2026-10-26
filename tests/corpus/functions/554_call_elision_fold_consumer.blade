@@ -1,0 +1,28 @@
+// TEST: Call Elision Fold Consumer
+// ============================================================================
+// plan-identity-transpose-compute P4 entry (BLADE_CALL_ELIDE). THE CALLEE
+// FORCES: `prep` materializes its map, so `reduce(prep(A), (+))` used to
+// allocate prep's return pool and fold it in a second loop. A DIRECT call of
+// a supported callee (a pure total body ending in one dense `|> compute` map
+// over its parameters) that is the sole operand of a fold is jointly lowered
+// at the call site: the fold reads prep's map in place -- the node the
+// written-out `reduce(method_for(A) <@> lambda(v) -> v * 2.0 + 1.0, (+))` is,
+// no return pool, no separate loop -- while prep itself keeps its ABI. At top
+// level, in a function body, unseeded (W4-3's route seed) and seeded.
+// BLADE_CALL_ELIDE=0 prints the same (opt-diff compares them).
+function prep(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> v * 2.0 + 1.0 |> compute }
+function total(b: T^1) -> T^0 = { reduce(prep(b), (+)) }
+function seeded(b: T^1) -> T^0 = {
+    let s = reduce(prep(b), (+), 100.0)
+    s
+}
+let A = 0.5 * Float64(0..1001)
+let s = reduce(prep(A), (+))
+let t = total(A)
+let u = seeded(A)
+let small = [1.0, 2.0, 3.0]
+let q = reduce(prep(small), (*))
+// EXPECT: s = 501501.0
+// EXPECT: t = 501501.0
+// EXPECT: u = 501601.0
+// EXPECT: q = 105.0

@@ -1,0 +1,26 @@
+// TEST: Tuple Member Deferred Tuple
+// ----------------------------------------------------------------------------
+// Gap G58 (round 3, W1-3; pre-existing): a deferred TUPLE as a member of a
+// tuple value, `let p = (m1, m2); let q = (p, 1.0)`. `p` (every member a
+// deferred map) is itself a deferred tuple and stays one; `q` is a VALUE, so
+// p's members are evaluated at q's construction, left to right (formalism
+// 10.2, "Deferred members of a tuple value"). The C++ lane named the
+// undeclared `p` (BL9002); the member-ordered tuple path now descends into a
+// named deferred tuple. `p` prints nothing, m1 and m2 print nothing (the
+// members are copies, as `|> compute` makes), q and its projections print.
+// ----------------------------------------------------------------------------
+type Row = Idx<3>
+let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
+let m1 = method_for(x) <@> lambda(v) -> v * 2.0
+let m2 = method_for(x) <@> lambda(v) -> v + 1.0
+let p = (m1, m2)
+let q = (p, 1.0)
+let a = q[0]
+let b = a[1]
+let s = reduce(b, (+))
+let q2 = (2.0, p |> compute)
+// EXPECT: q = (([2.0, 4.0, 6.0], [2.0, 3.0, 4.0]), 1.0)
+// EXPECT: a = ([2.0, 4.0, 6.0], [2.0, 3.0, 4.0])
+// EXPECT: b = [2.0, 3.0, 4.0]
+// EXPECT: s = 9.0
+// EXPECT: q2 = (2.0, ([2.0, 4.0, 6.0], [2.0, 3.0, 4.0]))

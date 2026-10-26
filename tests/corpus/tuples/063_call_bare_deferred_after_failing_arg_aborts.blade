@@ -1,0 +1,19 @@
+// TEST: Call Bare Deferred After Failing Arg (aborts)
+// ----------------------------------------------------------------------------
+// Codex second look of W4-1, finding 5: a call holding an explicit compute
+// evaluates its arguments left to right, so the first argument's checked cast
+// (BL8006) fires before the LATER bare deferred argument `bad` divides by zero
+// (BL8013). The llvm lane hoisted a bare deferred argument's producer to the
+// statement's start; it now refuses this call (fail closed) and the C++
+// lane's ordered path runs it, so every executed lane reports the cast.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let z: Array<Int64 like Row> = [0]
+let bad = method_for(z) <@> lambda(v) -> 1 / v
+let good = method_for(a) <@> lambda(v) -> v + 1
+function h(k: Int64, p: Array<Int64 like Row>, q: Array<Int64 like Row>) -> Int64 = k + p(0) + q(0)
+let r = h(a((a(0) : Row)), bad, good |> compute)
+// ABORT: BL8006
+// ABORT: outside Row
+// ABORT: .blade:15

@@ -1,0 +1,17 @@
+// TEST: Compute Elision Keeps A Failing Range Bound At The Compute (aborts)
+// ============================================================================
+// The producer's range bound `10 / z` panics BL8013 at z = 0, AT the compute,
+// before the later out-of-range read `a(z - 1)` (BL8006) runs. An elided x
+// would evaluate the bound at the fold, after that read, and report BL8006
+// instead: BLADE_COMPUTE_ELIDE admits only extents that cannot fail or write
+// (a literal, a name, an extent read, `+ - *` of those), so x keeps its
+// compute and its failure site.
+function f(z: Int64) -> Int64 = {
+    let x = method_for(0..(10 / z)) <@> lambda(v) -> v + 1 |> compute
+    let a = [8, 9]
+    let bad = a(z - 1)
+    let s = reduce(x, (+), 0)
+    s + bad
+}
+let t = f(0)
+// ABORT: BL8013

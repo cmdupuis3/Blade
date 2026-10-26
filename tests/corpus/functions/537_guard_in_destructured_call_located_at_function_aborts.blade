@@ -1,0 +1,27 @@
+// TEST: A guard panic inside a destructured call is located at the function (aborts)
+// Gap G76. A guard panic raised inside a named function's body -- here the
+// non-exhaustive `match` (BL8002) -- names the FUNCTION's declaration as its
+// `-->` location and the function as its frame, in every lane and for every
+// call form. The LLVM lane INLINES a tuple-returning call (it has no
+// struct-return ABI), and used to locate the inlined body's guards at the
+// CALLER's binding, which a destructuring `let (a, b) = f(..)` does not have:
+// it printed no `-->` line at all, where the C++ lane named the function; the
+// interpreter likewise named only a top-level binding, so it printed none.
+// The location is the function's line (line 17 once the harness drops the TEST
+// line); the arguments are the caller's. `blade test llvm functions` compares
+// the two compiled lanes' error and `-->` lines here, and `blade test cli`
+// pins the complete text (frames included) of this shape and the plain one.
+// `blade test interp` checks the same pins in the interpreter, which reads the
+// declaration table the lowered program carries.
+let d: Array<Int64 like Idx<3>> = [2, 0, 1]
+let four = reduce(d, (+)) + 1
+function classify(i: Int64) = {
+    let m = match i with
+        | 5 -> 1
+    (m, m + 1)
+}
+let (a, b) = classify(four - 1)
+// ABORT: error[BL8002]: Blade: non-exhaustive match
+// ABORT: -->
+// ABORT: .blade:17
+// ABORT:   at classify

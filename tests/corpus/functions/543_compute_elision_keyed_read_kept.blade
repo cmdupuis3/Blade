@@ -1,0 +1,20 @@
+// TEST: Compute Elision Declines A Keyed Read And A Returned Value
+// ============================================================================
+// Only a fold or a pointwise map consumes a `|> compute` cell by cell. A
+// keyed read `x(1)` (a gather: which cells, how often, is the reader's), and
+// returning `x` itself (the caller receives the stored array) both keep x's
+// pool: BLADE_COMPUTE_ELIDE declines "is read by a keyed subscript or a
+// view" / "is returned".
+function second(a: T^1) -> T^0 = {
+    let x = method_for(a) <@> lambda(v) -> v * 3.0 |> compute
+    x(1)
+}
+function tripled(a: T^1) -> T^1 = {
+    let x = method_for(a) <@> lambda(v) -> v * 3.0 |> compute
+    x
+}
+let a = [1.0, 2.0, 3.0]
+let k = second(a)
+let r = tripled(a)
+// EXPECT: k = 6.0
+// EXPECT: r = [3.0, 6.0, 9.0]

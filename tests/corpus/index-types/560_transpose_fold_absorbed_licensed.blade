@@ -1,0 +1,22 @@
+// TEST: Transpose Fold Absorbed Licensed
+// ABSORPTION into a licensed full fold (transpose-normal-form v1, rule 3;
+// plan section 3's fold-order rule): `reduce(transpose(M, [0, 1]), k, ..)`
+// with a kernel whose own licence admits any permutation -- `where omp` on a
+// builtin `+` (the fused-terminal form), a builtin `(+)` / `(*)` section (the
+// rank-2 accumulator nest) -- folds M itself in its ascending SOURCE order,
+// forward and contiguous: no transpose copy, no pool, the same 2 x 3 cells
+// and seed. Integer-valued cells, so the pinned results do not depend on the
+// association. Under BLADE_FP_REPRO=1 (the differential lanes) each one is
+// declined and keeps its copy; index-types/561 is the strict case.
+let M: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let s = reduce(transpose(M, [0, 1]), lambda(u, v) where omp -> u + v, 0.0, axes = 2)
+let s2 = reduce(transpose(M, [0, 1]), (+), axes = 2)
+let p = reduce(transpose(M, [0, 1]), (*), axes = 2)
+let s3 = reduce(transpose(M, [0, 1]), (+), 10.0, axes = 2)
+let I: Array<Int64 like Idx<3>, Idx<2>> = [[1, 2], [3, 4], [5, 6]]
+let si = reduce(transpose(I, [0, 1]), (+), axes = 2)
+// EXPECT: s = 21.0
+// EXPECT: s2 = 21.0
+// EXPECT: p = 720.0
+// EXPECT: s3 = 31.0
+// EXPECT: si = 21

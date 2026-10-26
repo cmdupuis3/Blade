@@ -1,0 +1,20 @@
+// TEST: Equijoin No Matches Seeded
+// ----------------------------------------------------------------------------
+// No left key equals any right key: the counting pass sizes the relation at
+// zero cells, the probe stores nothing, and the seeded folds over the empty
+// relation return their seeds -- the same values the as-written six passes
+// give. (The unseeded fold is 005.)
+// ----------------------------------------------------------------------------
+type LeftRow = Idx<3>
+type RightRow = Idx<2>
+let left_key: Array<Int64 like LeftRow> = [1, 2, 3]
+let left_amount: Array<Int64 like LeftRow> = [1, 2, 3]
+let right_key: Array<Int64 like RightRow> = [4, 5]
+let right_amount: Array<Int64 like RightRow> = [10, 20]
+let matched = compound(method_for(left_amount, right_amount) <@> lambda(l, r) -> l * r, mask(method_for(left_key, right_key) <@> lambda(l, r) -> l == r, lambda(e) -> e))
+let match_count = extents(matched)
+let total = reduce(matched, (+), 17)
+let fp = reduce(matched, lambda(a, b) -> 3 * a + b, 5)
+// EXPECT: match_count = 0
+// EXPECT: total = 17
+// EXPECT: fp = 5

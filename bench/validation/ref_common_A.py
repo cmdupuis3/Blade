@@ -1,4 +1,4 @@
-"""Shared helpers for blade-A's numpy references (gram, comoment3, antisym, pairkernel).
+"""Shared helpers for blade-A's numpy references (gram, comoment3, antisym, pairkernel, pairaction).
 
 The generator itself is `benchgen.py` (the suite's one numpy transcription of README
 section 5); this module only adds size lookup from each kernel's kernel.json and the
@@ -35,7 +35,7 @@ def sizes(kernel):
 
 def call_with(fn, params, kernel):
     """Call fn with the kernel's parameters in its declared order."""
-    order = {"gram": ("p", "n"), "comoment3": ("p", "n"), "antisym": ("p", "n"), "pairkernel": ("n",)}[kernel]
+    order = {"gram": ("p", "n"), "comoment3": ("p", "n"), "antisym": ("p", "n"), "pairkernel": ("n",), "pairaction": ("n",)}[kernel]
     return fn(*(int(params[k]) for k in order))
 
 

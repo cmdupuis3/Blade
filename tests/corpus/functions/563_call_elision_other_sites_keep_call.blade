@@ -1,0 +1,22 @@
+// TEST: Call Elision Keeps The Callee's ABI At Every Other Site
+// ============================================================================
+// Joint lowering is per call site: `reduce(prep(A), (+))` reads prep's map in
+// place, while `let r = prep(A)` (a stored, printed value) and the call inside
+// `twice` (an argument of another call) keep prep's materialized-array ABI
+// and its forcing point. The callee referenced as a VALUE (`pick` passes it
+// as an argument) is declined at every site of its own.
+function prep(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> v * 2.0 + 1.0 |> compute }
+function inc(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> v + 1.0 |> compute }
+function twice(a: T^1) -> T^1 = { a + a }
+function apply_to(f: T^1 -> T^1, a: T^1) -> T^1 = { f(a) }
+let A = [1.0, 2.0, 3.0]
+let s = reduce(prep(A), (+))
+let r = prep(A)
+let w = twice(prep(A))
+let viaValue = reduce(apply_to(inc, A), (+))
+let direct = reduce(inc(A), (+))
+// EXPECT: s = 15.0
+// EXPECT: r = [3.0, 5.0, 7.0]
+// EXPECT: w = [6.0, 10.0, 14.0]
+// EXPECT: viaValue = 9.0
+// EXPECT: direct = 9.0

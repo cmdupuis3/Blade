@@ -1,0 +1,24 @@
+// TEST: A Pure-Looking Map Over A Writing Map Is No Alias Root
+// Fail-closed edge of the deferred-alias identity rule (symmetry/146;
+// docs/plans/plan-identity-transpose-compute.md 2.1; formalism 8.3, 10.2).
+// g's own kernel writes nothing, but it READS the writing named map w, and a
+// named deferred producer runs where it is read: lowering's G45 judgment
+// therefore computes g at its definition, and `let g2 = g` is an ordinary
+// writable COPY. g and g2 hold different cells after the write, so the comm
+// product over (g, g2) must stay DENSE: packing it would reconstruct
+// P(1, 0) = 5 * 99 = 495 from P(0, 1) = 3 * 5 = 15 (Codex diff look of the
+// rule, finding 1). The checker's admission chases every name the root reads
+// to storage or to an already admitted root, and refuses this one.
+let x = [1.0, 2.0, 3.0]
+let mut G = [0]
+let w = method_for(x) <@> lambda(v) -> { G(0) = G(0) + 1; v * 2.0 }
+let g = method_for(w) <@> lambda(v) -> v + 1.0
+let g2 = g
+g2(0) = 99.0
+let P = method_for(g, g2) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+let p10 = P(1, 0)
+// EXPECT: G = [3]
+// EXPECT: g = [3.0, 5.0, 7.0]
+// EXPECT: g2 = [99.0, 5.0, 7.0]
+// EXPECT: P = [[297.0, 15.0, 21.0], [495.0, 25.0, 35.0], [693.0, 35.0, 49.0]]
+// EXPECT: p10 = 495.0

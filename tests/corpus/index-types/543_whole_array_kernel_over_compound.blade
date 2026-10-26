@@ -1,0 +1,52 @@
+// TEST: Whole-Array Kernel Over A Compound (G64)
+// A ZERO-LEVEL apply -- `object_for(f) <@> y` with `f` taking every operand
+// WHOLE (`c: Array<Float64 like CompoundIdx<keep>>`, or a dense array) and
+// returning a scalar -- is the call `f(y)` (formalism §6): one term, the
+// operands bound whole, its value the result. Lowered to that call before the
+// lanes split (Lowering.isZeroLevelWholeArrayApply), so the C++ lane (which
+// used to render an undeclared `__v<id>`, BL9002), the interpreter (which
+// skipped the compound form and added the dense term to a zero accumulator,
+// losing -0.0) and the LLVM lane evaluate the same call. The keyed read `c(2)`
+// goes through the compound's index (dense coordinate 2), so the compaction
+// plan keeps the kept-position table (`blade test optimize`
+// decision_compaction_v2_whole_array_kernel_requires). The EXPECT harness
+// reads -0.0 as 0.0, so the signs are pinned by the Booleans `*_neg`.
+let x = Float64(0..4)
+let keep = mask(x, lambda(v) -> v > 1.5)
+let y = compound(x, keep)
+let xd = Float64(0..4) |> compute
+
+function at0(c: Array<Float64 like CompoundIdx<keep>>) -> Float64 = c(2)
+function tot(c: Array<Float64 like CompoundIdx<keep>>) -> Float64 = reduce(c, (+)) + c(3)
+function negz(c: Array<Float64 like CompoundIdx<keep>>) -> Float64 = -0.0 * c(2)
+function negk(c: Array<Float64 like CompoundIdx<keep>>) -> Float64 = -0.0
+function dsum(c: Array<Float64 like Idx<4>>) -> Float64 = reduce(c, (+)) * c(1)
+function dneg(c: Array<Float64 like Idx<4>>) -> Float64 = -0.0 * c(3)
+function dnegk(c: Array<Float64 like Idx<4>>) -> Float64 = -0.0
+
+let z = object_for(at0) <@> y |> compute
+let w = object_for(tot) <@> y |> compute
+let zn = object_for(negz) <@> y |> compute
+let zk = object_for(negk) <@> y |> compute
+let d = object_for(dsum) <@> xd |> compute
+let dn = object_for(dneg) <@> xd |> compute
+let dk = object_for(dnegk) <@> xd |> compute
+let zn_neg = 1.0 / zn < 0.0
+let zk_neg = 1.0 / zk < 0.0
+let dn_neg = 1.0 / dn < 0.0
+let dk_neg = 1.0 / dk < 0.0
+// EXPECT: x = [0.0, 1.0, 2.0, 3.0]
+// EXPECT: keep = [false, false, true, true]
+// EXPECT: y = [2.0, 3.0]
+// EXPECT: xd = [0.0, 1.0, 2.0, 3.0]
+// EXPECT: z = 2.0
+// EXPECT: w = 8.0
+// EXPECT: zn = -0.0
+// EXPECT: zk = -0.0
+// EXPECT: d = 6.0
+// EXPECT: dn = -0.0
+// EXPECT: dk = -0.0
+// EXPECT: zn_neg = true
+// EXPECT: zk_neg = true
+// EXPECT: dn_neg = true
+// EXPECT: dk_neg = true

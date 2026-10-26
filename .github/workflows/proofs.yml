@@ -73,39 +73,46 @@ jobs:
 
       # The image puts Rocq in an opam switch under its user's home and only
       # its login shell adds that to PATH; a container step's shell does not.
-      # In Rocq 9 `coqc` can be a symlink to `rocq`, so match links too.
+      #
+      # The image ships ONLY the Rocq 9 tool names -- `rocq` (with the `c`,
+      # `makefile` and `dep` subcommands) and `rocqchk` -- and none of the Coq
+      # ones (`coqc`, `coq_makefile`, `coqchk`), which come from the separate
+      # `coq-core` compatibility package. So every step below uses the Rocq
+      # names; looking for `coqc` found the switch and then failed with 127.
       - name: Locate Rocq
         run: |
-          if ! command -v coqc >/dev/null 2>&1; then
+          if ! command -v rocq >/dev/null 2>&1; then
             bin=""
             for d in /home/*/.opam/*/bin /root/.opam/*/bin; do
-              if [ -e "$d/coqc" ] || [ -e "$d/rocq" ]; then bin="$d"; break; fi
+              if [ -e "$d/rocq" ]; then bin="$d"; break; fi
             done
             if [ -z "$bin" ]; then
-              hit=$(find / -path /proc -prune -o \( -name coqc -o -name rocq \) \( -type f -o -type l \) -print 2>/dev/null | head -n 1)
+              hit=$(find / -path /proc -prune -o -name rocq \( -type f -o -type l \) -print 2>/dev/null | head -n 1)
               [ -n "$hit" ] && bin=$(dirname "$hit")
             fi
             if [ -z "$bin" ]; then
-              echo "no coqc or rocq anywhere in the image"; ls -la /home/* 2>/dev/null; exit 1
+              echo "no rocq anywhere in the image"; ls -la /home/* 2>/dev/null; exit 1
             fi
             echo "Rocq bin: $bin"; ls "$bin" | grep -E '^(coq|rocq)' || true
             echo "$bin" >> "$GITHUB_PATH"
           fi
 
       - name: Rocq version
-        run: coqc --version
+        run: |
+          rocq c --version
+          command -v rocqchk
 
       - name: Build the tower
         working-directory: proofs
         run: |
-          coq_makefile -f _CoqProject -o Makefile.coq
+          rocq makefile -f _CoqProject -o Makefile.coq
           make -f Makefile.coq -j2
 
-      - name: Independent check of the tower (coqchk)
+      - name: Independent check of the tower (rocqchk)
         working-directory: proofs
         run: |
           mods=$(grep -E '\.v$' _CoqProject | sed -E 's/\.v$//; s/^/Blade./')
-          coqchk -silent -o -Q . Blade $mods
+          rocqchk -silent -o -Q . Blade $mods
 
       - uses: actions/download-artifact@v4
         with:
@@ -117,7 +124,7 @@ jobs:
         run: |
           probe="$RUNNER_TEMP/probe/BladeAssumptionsProbe.v"
           total=$(grep -c '^Print Assumptions' "$probe")
-          out=$(coqc -Q . Blade "$probe" 2>&1) || { echo "$out" | tail -n 30; exit 1; }
+          out=$(rocq c -Q . Blade "$probe" 2>&1) || { echo "$out" | tail -n 30; exit 1; }
           closed=$(printf '%s\n' "$out" | grep -c '^Closed under the global context' || true)
           axioms=$(printf '%s\n' "$out" | grep -c '^Axioms:' || true)
           echo "queries: $total  closed: $closed  with axioms: $axioms"
@@ -130,14 +137,14 @@ jobs:
         working-directory: proofs/reals
         run: |
           for f in $(grep -E '\.v$' _CoqProject); do
-            echo "coqc $f"
-            coqc -Q .. Blade -Q . BladeReals "$f"
+            echo "rocq c $f"
+            rocq c -Q .. Blade -Q . BladeReals "$f"
           done
 
       - name: Build the floats lane
         working-directory: proofs/floats
         run: |
           for f in $(grep -E '\.v$' _CoqProject); do
-            echo "coqc $f"
-            coqc -Q . BladeFloats "$f"
+            echo "rocq c $f"
+            rocq c -Q . BladeFloats "$f"
           done

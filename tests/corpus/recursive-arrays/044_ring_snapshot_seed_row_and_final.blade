@@ -1,0 +1,22 @@
+// TEST: Ring Recursive Array Snapshot Seed Row And Final
+// ============================================================================
+// Recursive-array windowing reading row 0 (the SEED row, written before the
+// sweep starts) and the final row of a rank-2 recursion. Row 0 is copied out
+// of ring slot 0 before the first step can overwrite it at step 2; the final
+// row is copied after the sweep. `rec-window` APPLIES (ring of 2, snapshots
+// 0 and 99). Each step adds 0.5 to every cell, so row 99 = row 0 + 49.5.
+// ============================================================================
+type C = Idx<3>
+type T = Idx<100>
+
+let span_sum = {
+    let rec r: Array<Float like T, C> =
+        match r with
+        | zero -> zero
+        | zero :: s -> zero :: [1.0, 2.0, 3.0]
+        | prefix :: n -> prefix :: prefix(n - 1) + 0.5
+    let first = r((0 : T))
+    let last = r((99 : T))
+    reduce(last - first, (+))
+}
+// EXPECT: span_sum = 148.5

@@ -221,7 +221,7 @@ let optimizerCases () : bool list =
                     if foreign then [m; { m with Name = "foreign_unused"; Bindings = [b]; Functions = []; Types = [] }]
                     else [{ m with Bindings = b :: m.Bindings }]
                 let scheduled = withDefaults "1" (fun () -> EarlyPoolRelease.scheduleModules (IRBuilder()) modules)
-                let after = host { Modules = scheduled }
+                let after = host { Modules = scheduled; DeclSpans = Map.empty }
                 match after.Body with
                 | IRLet (beginId, IRBeginPoolScope _, _) ->
                     check (beginId > high + 1 && eventCount after.Body = 2) "fresh lifetime id collided with an unused binding/nested declaration"

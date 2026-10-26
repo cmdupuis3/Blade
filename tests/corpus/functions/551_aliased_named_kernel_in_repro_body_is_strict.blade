@@ -1,0 +1,19 @@
+// TEST: An aliased named kernel folded inside a repro body takes no licensed form
+// Gap G80, functions/550's rule through a NAME: `let k = add` in the body and
+// a top-level `let kmod = add` both reach the fold as `add`, and the fold use
+// keeps the body's repro demand (Lowering's reproFoldUsesModule follows the
+// alias to the callable): the cancellation row is exactly 2.0, the ascending
+// chain. The C++ lane's K-lane tree gave 1.0 for both before.
+type N = Idx<9>
+let v: Array<Float64 like N> = [1.0e16, 1.0, -1.0e16, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+function add(a: Float64, b: Float64) where comm(a, b) -> Float64 = a + b
+let kmod = add
+function localalias() where repro -> Float64 = {
+    let k = add
+    reduce(v, k, 0.0)
+}
+function modalias() where repro -> Float64 = reduce(v, kmod, 0.0)
+let a = localalias()
+let b = modalias()
+// EXPECT: a = 2.0
+// EXPECT: b = 2.0

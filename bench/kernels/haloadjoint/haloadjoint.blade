@@ -26,13 +26,12 @@
 // Licences: the two generator maps, the primal map, the two buffer fills, the two checksum
 // folds and the two input-sum folds carry `where omp`; a serial build (BLADE_OMP_THREADS=1)
 // emits none of the thread pragmas.
-// Size: n = 50021, not the catalog's 1,000,003 -- the reverse sweep's zero buffer for the
-// loss map's cotangent is an (n - 4)-element array LITERAL, and lowering it is super-linear
-// in n (gap register G68: 19 s at n = 50021, 95 s at 100003, unfinished after 10 CPU
-// minutes at 1,000,003) -- a compiler limit, not the 64 MB rule.
+// Size: n = 1,000,003, the catalog's. Until round 3 wave 4 it was capped at 50021: the reverse
+// sweep's zero buffer for the loss map's cotangent was an (n - 4)-element array LITERAL whose
+// lowering was super-linear in n (gap register G68, FIXED: the buffer is now a zero fill).
 import ad as ad
 
-type I = Idx<50021>   // SIZE n
+type I = Idx<1000003>   // SIZE n
 
 /// README section 5 input generator: five rounds mod 2^31 (affine, quadratic, affine,
 /// middle-square, affine), exact in Int64 (h3 * h3 < 2^62).

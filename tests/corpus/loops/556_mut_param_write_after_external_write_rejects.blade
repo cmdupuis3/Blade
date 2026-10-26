@@ -1,0 +1,22 @@
+// TEST: Mut Param Write After External Write (rejects)
+// ----------------------------------------------------------------------------
+// Codex second look of W4-1, finding 2: the callee FIRST writes an unrelated
+// module counter, THEN its `mut` parameter. The old consumer read a write
+// summary that stopped at the first external write and missed the parameter.
+// The written-binder set is a program-wide fixpoint over every assignment and
+// every call argument, so passing the deferred map is refused (BL4005).
+// ----------------------------------------------------------------------------
+type Row = Idx<3>
+type One = Idx<1>
+let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
+let mut calls: Array<Int64 like One> = [0]
+let mut g = method_for(x) <@> lambda(v) -> v * 2.0
+function poke(a: mut Array<Float64 like Row>) -> Float64 = {
+    calls(0) = calls(0) + 1
+    a(0) = 5.0
+    a(1)
+}
+let r = poke(g)
+// ERROR: BL4005 @ 18:1
+// ERROR-CONTAINS: a write through `g`, a deferred computation
+// REJECT-AT: lower

@@ -1543,6 +1543,27 @@ let rec internal zerosOfDims (dims: int list) : Expr =
     | [] -> fLit 0.0
     | n :: rest -> syn (ExprArrayLit (List.replicate n (zerosOfDims rest)))
 
+/// The ZERO FILL a combinator-built diff local's cotangent buffer starts from
+/// (C6; gap register G68): `method_for(range<Idx<d1>, ..>) <@> lambda(..) ->
+/// 0.0 |> compute` -- the zero FORMER the let-rec buffer desugar already uses
+/// past 4096 cells (TypeCheckInfer, `zerosOver`). O(rank) AST, lowered as a
+/// dense map whose cells are all `0.0`: every lane fills the allocated pool
+/// with a loop (the C++ and LLVM lanes) or a filled array (the interpreter),
+/// so the compile-time cost no longer grows with the extent. `zerosOfDims`
+/// spelled the same zeros as an n-cell nested ARRAY LITERAL, whose lowering
+/// was super-linear in n (haloadjoint: 95 s at n = 100,003). Same values:
+/// +0.0 in every cell.
+let internal zeroFillOfDims (ctx: Ctx) (dims: int list) : Expr =
+    match dims with
+    | [] -> fLit 0.0
+    | _ ->
+        let slots = dims |> List.map (fun d -> TyIdx (iLit (int64 d)))
+        let ps : LambdaParam list =
+            dims |> List.map (fun _ -> { Name = fresh ctx "__zf"; Type = None; Default = None; NameSpan = noSpan })
+        syn (ExprCompute (syn (ExprBinOp (Elementwise, OpApply,
+                                          syn (ExprMethodFor [ syn (ExprRange slots) ]),
+                                          syn (ExprLambda (ps, None, fLit 0.0))))))
+
 /// Nested accumulation loops over `dims`: lhs(idx...) += rhs(idx...).
 let internal accumLoop (ctx: Ctx) (dims: int list)
                       (mkLhs: Expr list -> Expr) (mkRhs: Expr list -> Expr) : NStmt list =

@@ -1,0 +1,19 @@
+// TEST: Pack-Element Co-Iteration Operands Are Distinct Arrays
+// docs/plans/plan-identity-transpose-compute.md 2.7: the elementwise binop of
+// two PACK ELEMENTS (`A[0] - A[1]`, whose array types resolve only after
+// monomorphization) is rewritten by IRMono into a synthesized co-iteration.
+// A non-variable operand -- a pack element, the nested binop's computed
+// value -- used to take ONE shared identity (`AIDVariable "__coi"`), so every
+// such pair claimed to be the same array; each now mints its own. Values
+// over distinct and over repeated arguments, and over nested computed
+// operands; `blade test optimize` pins the identities themselves.
+function d2(A: Poly<T^1>) -> T^1 = A[0] - A[1]
+function sq2(A: Poly<T^1>) -> T^1 = (A[0] + A[1]) * (A[0] - A[1])
+let x = [5.0, 7.0]
+let y = [2.0, 3.0]
+let r = d2(x, y)
+let s = d2(x, x)
+let t = sq2(x, y)
+// EXPECT: r = [3.0, 4.0]
+// EXPECT: s = [0.0, 0.0]
+// EXPECT: t = [21.0, 40.0]

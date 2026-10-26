@@ -1,0 +1,35 @@
+// TEST: A Map Whose Callable Reads A Writing Map Is No Alias Root
+// The callable twin of symmetry/152 (Codex second look of the deferred-alias
+// identity rule, docs/plans/plan-identity-transpose-compute.md 2.1): lowering's
+// write analysis follows a callable REFERENCE into its body and every named
+// producer it reads, called or not. A declared kernel `add_w` reading the
+// writing map w, and a let-bound lambda h reading w that the kernel only
+// NAMES, both make the map's evaluation writing, so it is computed at its
+// definition and its alias is a writable copy: the comm products stay DENSE
+// (P(1, 0) = 4 * 99 = 396, not the mirrored 3 * 4 = 12).
+let x = [1.0, 2.0, 3.0]
+let mut G = [0]
+let w = method_for(x) <@> lambda(v) -> { G(0) = G(0) + 1; v * 2.0 }
+function add_w(v: Float64) -> Float64 = { v + w(0) }
+let g = method_for(x) <@> add_w
+let g2 = g
+g2(0) = 99.0
+let P = method_for(g, g2) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+let p10 = P(1, 0)
+let h = lambda(v: Float64) -> v + w(0)
+let k = method_for(x) <@> lambda(v) -> {
+    let unused = h
+    v + 2.0
+}
+let k2 = k
+k2(0) = 99.0
+let Q = method_for(k, k2) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+let q10 = Q(1, 0)
+// EXPECT: g = [3.0, 4.0, 5.0]
+// EXPECT: g2 = [99.0, 4.0, 5.0]
+// EXPECT: P = [[297.0, 12.0, 15.0], [396.0, 16.0, 20.0], [495.0, 20.0, 25.0]]
+// EXPECT: p10 = 396.0
+// EXPECT: k = [3.0, 4.0, 5.0]
+// EXPECT: k2 = [99.0, 4.0, 5.0]
+// EXPECT: Q = [[297.0, 12.0, 15.0], [396.0, 16.0, 20.0], [495.0, 20.0, 25.0]]
+// EXPECT: q10 = 396.0

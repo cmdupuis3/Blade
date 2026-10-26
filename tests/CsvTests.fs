@@ -213,6 +213,23 @@ let runCsvTests () =
               && arrTy.IndexTypes |> List.forall (fun ix -> ix.Tag = None)
           | _ -> false)
          (sprintf "%A" varsStructs))
+    // Every CSV store holds a variable `data`: its identity carries the STORE
+    // (plan-identity-transpose-compute 2.7), so two loads never answer one
+    // array (the bare variable name used to make every pair of stores one).
+    (let p1 = tmpFile "id_a.csv" "1,2\n3,4\n"
+     let p2 = tmpFile "id_b.csv" "1,2\n3,4\n"
+     let builder = IRBuilder()
+     let identityOf (pm: IRModule) =
+         pm.Types |> List.tryPick (function
+             | IRTDStruct (_, [("data", ArrayElem arrTy)]) -> arrTy.Identity
+             | _ -> None)
+     let ia = identityOf (loadAsModule builder "sa" p1)
+     let ib = identityOf (loadAsModule builder "sb" p2)
+     check "meta: two stores' `data` are different identities (the store is in the key)"
+         (match ia, ib with
+          | Some a, Some b -> not (sameIdentity a b) && sameIdentity a a
+          | _ -> false)
+         (sprintf "%A / %A" ia ib))
 
     // ---------------------------------------------------------------
     // 6. Lowering: two loads in one program (struct-name isolation),

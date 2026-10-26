@@ -1,0 +1,31 @@
+// TEST: Ring Recursive Array Continuation Two Legs
+// ============================================================================
+// Recursive-array windowing, the continuation idiom (recursive-arrays/006)
+// with each leg in its own block: legA's only use is its final row (which
+// seeds `mid`), legB's seed reads `mid` -- an ordinary scalar by then, not a
+// prefix read -- and its only use is its own final row. `rec-window` APPLIES
+// to both. legA doubles 1.0 over 10 rows (row 9 = 512), legB halves it and
+// doubles over 8 rows (row 7 = 32768); values = the full buffers'.
+// ============================================================================
+type A = Idx<10>
+type B = Idx<8>
+
+let mid = {
+    let rec legA: Array<Float like A> =
+        match legA with
+        | zero -> zero
+        | zero :: s -> zero :: 1.0
+        | prefix :: n -> prefix :: prefix(n - 1) * 2.0
+    legA((9 : A))
+}
+
+let final = {
+    let rec legB: Array<Float like B> =
+        match legB with
+        | zero -> zero
+        | zero :: s -> zero :: mid * 0.5
+        | prefix :: n -> prefix :: prefix(n - 1) * 2.0
+    legB((7 : B))
+}
+// EXPECT: mid = 512.0
+// EXPECT: final = 32768.0

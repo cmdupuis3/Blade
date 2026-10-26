@@ -1,0 +1,25 @@
+// TEST: An imported helper's call is jointly lowered at its caller
+// MODULE: Main
+// Folded (`reduce(prep(A), (+))`), qualified in a pointwise map
+// (`Helpers.prep(A) * 10.0`), let-bound in a body, and the declined
+// module-value reader `scaled` and the helper-calling `squared`.
+// prep(A) = [3, 5, 7].
+module Main
+import Helpers
+from Helpers import prep
+
+function body(a: T^1) -> T^0 = {
+    let x = prep(a)
+    reduce(x, (+), 0.5)
+}
+let A = [1.0, 2.0, 3.0]
+let s = reduce(prep(A), (+))
+let y = method_for(Helpers.prep(A)) <@> lambda(v) -> v * 10.0 |> compute
+let b = body(A)
+let z = reduce(Helpers.scaled(A), (+))
+let q = reduce(Helpers.squared(A), (+))
+// EXPECT: s = 15.0
+// EXPECT: y = [30.0, 50.0, 70.0]
+// EXPECT: b = 15.5
+// EXPECT: z = 18.0
+// EXPECT: q = 14.0

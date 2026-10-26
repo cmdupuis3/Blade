@@ -1,4 +1,4 @@
-/// The ORBIT-CLASS FOLD (bench/notes/microkernel-sketches-review.md M4; plan
+/// The ORBIT-CLASS FOLD (bench/notes/microkernel-sketches-review.md (removed 2026-10-24; in git history at cf2028cc) M4; plan
 /// docs/plans/plan-compact-sym-folds.md section 4.3-4.4): the logical sum over
 /// the cells of a compact (symmetric / antisymmetric) array, regrouped by
 /// orbit class and computed in ONE pass over the packed pool.
@@ -189,9 +189,15 @@ let private irChildren (e: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     match e with
     | ExprShape (kids, rebuild) -> (kids, rebuild)
 
+/// A zero LITERAL inner seed the licensed orbit-class fold may drop. A `-0.0`
+/// literal is accepted beside `+0.0` (gap G74): it is the seed a STRICT route
+/// gives an unseeded fold (Lowering.lowerUnseededSeed), where this licensed
+/// plan then declines for the strict reason itself (the repro build / the
+/// repro kernel), as it did over the base `+0.0`; dropping it is exact. A
+/// source `-0.0` / `-zero` is a negation node, not a literal, and declines.
 let private isZeroSeed (acc: ElemType) (e: IRExpr) : bool =
     match e with
-    | IRLit (IRLitFloat v) -> (acc = ETFloat64 || acc = ETFloat32) && v = 0.0 && not (System.Double.IsNegative v)
+    | IRLit (IRLitFloat v) -> (acc = ETFloat64 || acc = ETFloat32) && v = 0.0
     | IRLit (IRLitInt 0L) -> acc = ETInt64 || acc = ETInt32
     | _ -> false
 
@@ -868,7 +874,7 @@ let scatterG35Precedence = "the threaded complete-row form (G35) is taken under 
 /// ordered scatter both admit a walk (repro, threads on, an omp request on
 /// the outer level, a stored SymIdx<2/3> pool, every level strict, the
 /// closed total whitelist), the SCATTER is taken -- measured faster under
-/// mt8 repro in the wave-1 harness A/B (bench/notes/round3/w1-ab.md, 21
+/// mt8 repro in the wave-1 harness A/B (bench/results/stats.csv, labels r3old / r3new (the former bench/notes/round3/w1-ab.md, in git history at cf2028cc), 21
 /// interleaved rounds, blade-cpp: pairkernel 9.23 -> 7.76 ms, 0.841
 /// [0.811, 0.872]; comoment3 4.43 -> 3.74 ms, 0.843 [0.817, 0.885]). Both
 /// strict forms are bitwise the serial walk under REPRO + CONTRACT=off --
@@ -1067,3 +1073,559 @@ let recordTaken (subject: string) (p: OrbitPlan) : unit =
 let recordDeclined (subject: string) (why: string) : unit =
     recordCodegenDecision "fold-form" subject (Blade.Effects.Declined $"orbit-class fold not taken: {why}")
         [ "fold form: orbit-class fold not taken -- the logical walk is kept"; why ]
+
+// ===========================================================================
+// THE ROW ORBIT ACTION (round 3, D-P2; gap G73): rank 2, ONE channel, a
+// STORED SymIdx<2, n> pool
+// ===========================================================================
+//
+// THE SHAPE (v1). A row action is a map binding
+//
+//     u = method_for(range<I>) <@> lambda(i) ->
+//             reduce(method_for(range<I>) <@> lambda(j) -> g(S(i, j), V1(i), V1(j), ..), k, s) |> compute
+//
+// -- an IRApplyCombinator over `range<I>` whose kernel body is ONE
+// IRReduceCompute level over `range<I>` (S's own tag) -- with g a pure, total
+// scalar function of x = S(i, j) (or S(j, i): the same stored cell), of
+// rank-1 dense arrays read at the chain's OWN coordinate i or at the PARTNER
+// j, and of invariant scalars; no other use of i, j. Row chain i of the walk
+// is fold_k(s, [ g(S(i, j), V(i), V(j)) for j = 0 .. n-1 ]), stored as u(i).
+// (The ordered scatter's scalar walk is the special case "outer level a fold,
+// g coordinate-free".)
+//
+// THE ROLE-TERM RULE (Codex review D, finding 5). One pass over the canonical
+// cells: cell (a, b), a < b, is read ONCE and gives row chain a the term
+// g(x, own = V(a), partner = V(b)) and row chain b the term g(x, own = V(b),
+// partner = V(a)) -- TWO evaluations with the own / partner weights swapped,
+// never one weighted term at both endpoints (S01 = 2, V = [3, 5]:
+// S(i, j) * V(i) is 6 at (0, 1) and 10 at (1, 0); the packed READ is
+// invariant, the cell TERM is not); a = b gives one term g(x, V(a), V(a)).
+// Each term is bitwise the source's term at that position: symmetric storage
+// answers (a, b) and (b, a) from one cell, the weights are read from the same
+// stored cells, g is pure and its expression tree is the source's. The ORDER
+// is the rank-2 scatter's (blade_orbit_scatter.hpp tri, unchanged proof):
+// row chain r receives rows 0 .. r-1's column-r terms ascending, then its own
+// row's terms ascending -- j = 0 .. n-1, the walk's order -- from its own
+// seed, through its own kernel applied accumulator-first. Hence the walk's
+// value: tested as raw bits for Float64 under BLADE_FP_REPRO=1
+// BLADE_FP_CONTRACT=off in the C++ and the LLVM lane (`blade test
+// orbit-scatter`'s action leg). The chains start from the fold's SEED (an
+// explicit -0.0 seed is preserved); a seedless deferred `(+)` carries the
+// seed Lowering gives an UNSEEDED fold (gap G74): the exact identity -0.0 on a
+// strict route, so the row is the left fold of its cells, the base +0.0 on a
+// licensed one -- in every lane, the walk and the interpreter alike. Under `-ffp-contract=fast` a term
+// stored to a Z block may contract differently from the walk's own context
+// (the scatter's status; contraction invariance is not claimed).
+//
+// LICENSED BUILDS: v1 takes the strict form for row actions too -- the
+// serial chain is an admissible association of a licensed fold, and its only
+// licensed competitor is the per-row K-lane walk over canonicalizing reads;
+// the licence is not consumed and the record says so. `BLADE_ORBIT_ACTIONS=
+// strict` restricts the form to strict builds (BLADE_FP_REPRO=1, or a fold
+// without a reorder licence) for the A/B. A walk that FOLDS the weighted rows
+// (an outer fold over the action) is recognised and declined in v1 -- a mixed
+// licence nest first, by planStrict's own rule (D/5's [1e16, -1e16, 1] nest:
+// the ascending chain gives 1, a regrouped one 0).
+//
+// REFUSALS (fail closed; each names the first failed condition): two
+// contracted axes in one stage; AntisymIdx (signed events, v2); Hermitian;
+// wreath; a compact array that is not rank 2; the pool read at both
+// coordinate orders, or a second compact array; a read of any other array, or
+// of a weight at a subscript other than i / j; a weight that is not a rank-1
+// dense array over S's index; a per-row seed; f, the kernel or the seed
+// outside the closed total whitelist (IRTotality: no panic can arrive in a
+// different order); state > 2^20 chains; a DEFERRED pool or weight (P1-style
+// fusion is v2); a block-local or function-body action (v1's storage proof is
+// storedArrayProof over top-level bindings); in the C++ lane only, a thread
+// request on the map, the inner map or the fold in a threaded build (the old
+// emitter keeps the row walk; the LLVM lane has no thread runtime and takes
+// the serial action when its own admission succeeds). Types: the C++ lane
+// admits Float64 / Float32 / Int64 / Int32, the LLVM lane Float64 / Int64.
+// Multi-channel is NOT RECOGNIZED: a tuple kernel or seed returns
+// ActionNotAction (recogniseAction), with no refusal record (v1.1). A finite
+// set of tested refusals, not an exhaustive list. ADMISSION: `orbitActionAdmissible` (the planner's
+// five-party audit, Optimize.planOrbitActions, plus the callback-aware codegen
+// write analysis of the term, kernel and seed). The interpreter is unchanged:
+// it is the oracle, the walk.
+
+/// BLADE_ORBIT_ACTIONS: unset / `1` / `on` = the row action wherever it is
+/// admitted (licensed builds too, recorded); `strict` = strict builds only
+/// (BLADE_FP_REPRO=1, or a fold with no reorder licence); `0` / `off` = the
+/// row walk. An optimizer gate (`Optimize.optimizerGates`: `blade test
+/// opt-diff` compares off vs on, under REPRO, where the form fires). Read per
+/// call; any other value reads as on.
+type ActionsMode =
+    | ActionsOn
+    | ActionsStrict
+    | ActionsOff
+
+let orbitActionsMode () : ActionsMode =
+    match Blade.Toolchain.envSwitch "BLADE_ORBIT_ACTIONS" with
+    | Blade.Toolchain.SwitchOff -> ActionsOff
+    | Blade.Toolchain.SwitchOther v when v.ToLowerInvariant() = "strict" -> ActionsStrict
+    | _ -> ActionsOn
+
+/// The sentinel variables the plan's body reads weight k through: its value
+/// at the chain's OWN coordinate and at the PARTNER. Negative and private to
+/// one emitted action (each lane binds them around its rendering of the
+/// body), disjoint from `readVarId`.
+let actionOwnId (k: int) : IRId = -770100 - 2 * k
+let actionPartnerId (k: int) : IRId = -770101 - 2 * k
+
+type ActionWeight =
+    { ArrayId: IRId
+      ArrayName: string
+      ElemTy: ElemType
+      /// The read's own IR type (the sentinel's).
+      ReadTy: IRType
+      /// Read at the own coordinate / at the partner somewhere in g.
+      Own: bool
+      Partner: bool
+      /// Sentinels actionOwnId Index / actionPartnerId Index.
+      Index: int }
+
+type ActionShape =
+    { SourceId: IRId
+      SourceType: IRType
+      SourceName: string
+      Extent: int64
+      ElemTy: ElemType
+      AccTy: ElemType
+      /// g with the pool read replaced by `readVarId` and each weight read by
+      /// its own / partner sentinel: a scalar function of the cell value and
+      /// the weights' values only.
+      Body: IRExpr
+      /// The row coordinate (the map's parameter) and the partner (the inner
+      /// level's).
+      OwnVarId: IRId
+      OwnName: string
+      Level: OrbitLevel
+      /// The map kernel's own thread request (`where omp(...)`).
+      MapOmp: bool
+      Weights: ActionWeight list }
+
+type ActionPlan =
+    { Shape: ActionShape
+      /// The fold kernel is exactly `p0 + p1` with no repro demand (inline,
+      /// and the row chains' vector add).
+      LevelAdd: bool
+      PoolCells: int64
+      StateCells: int64
+      RowGroup: int
+      ColBlock: int
+      /// Free scalars of g, the kernel (or a callee) and the seed.
+      FreeIds: Set<IRId>
+      /// The fold carries a reorder licence in this build (the strict form
+      /// is then an admissible association, recorded as such).
+      Licensed: bool }
+
+type ActionRecognition =
+    | ActionNotAction
+    | ActionDeclined of reason: string
+    | ActionTaken of ActionPlan
+
+/// The shared analysis of one row's inner level: `(iId, iName)` the row
+/// coordinate, `ixO` its range's index type, `(c2, k2, s2)` the inner fold.
+/// Ok shape / Error (decline reason) / None (not an action over a compact
+/// pool: say nothing).
+let private analyseAction (resolve: IRExpr -> IRExpr) (resolveCl: IRExpr -> IRCallable option)
+                          (sourceName: IRId -> string) (iId: IRId) (iName: string) (mapOmp: bool) (ixO: IRIndexType)
+                          (c2: IRExpr) (k2: IRExpr) (s2: IRExpr) : Result<ActionShape, string> option =
+    match levelOf resolveCl (resolve c2) k2 s2 with
+    | None -> None
+    | Some (lvl, ixJ, gBody) ->
+    let jId = lvl.VarId
+    let jName = lvl.ParamName
+    let coordKey (e: IRExpr) =
+        match e with
+        | IRVar (id, _) when id = iId -> Some "i"
+        | IRVar (id, _) when id = jId -> Some "j"
+        | IRParam (name, _, _) when name = jName -> Some "j"
+        | _ -> None
+    let isCoord (e: IRExpr) = (coordKey e).IsSome
+    // TWO CONTRACTED AXES: the term is itself a fold over a third level
+    // (`T(i, j, k) * v(j) * w(k)`): ordered events need per-destination
+    // queues (v2). Recognised only when a compact array is read there.
+    let nested =
+        match gBody with
+        | IRReduceCompute (c3, k3, s3) ->
+            (match levelOf resolveCl (resolve c3) k3 s3 with
+             | Some (l3, _, b3) ->
+                 let isCoord3 (e: IRExpr) =
+                     isCoord e
+                     || (match e with
+                         | IRVar (id, _) -> id = l3.VarId
+                         | IRParam (name, _, _) -> name = l3.ParamName
+                         | _ -> false)
+                 let rs = ResizeArray()
+                 collectReads isCoord3 b3 rs
+                 Some (rs.Count > 0)
+             | None -> None)
+        | _ -> None
+    match nested with
+    | Some true ->
+        Some (Error "two contracted axes in one stage (the term folds a third level): ordered events need per-destination queues (v2)")
+    | _ ->
+    let reads = ResizeArray()
+    collectReads isCoord gBody reads
+    if reads.Count = 0 then None else
+    let (gid, gty, idxs0) = reads.[0]
+    let (gix, gelemTy) = (compactGroupOf gty).Value
+    let decline (why: string) = Some (Error why)
+    let keys (xs: IRExpr list) = xs |> List.map coordKey
+    let ks = keys idxs0
+    if gix.Rank <> 2 || idxs0.Length <> 2 then
+        decline $"the compact array `{sourceName gid}` is rank {gix.Rank}: v1's row action reads a rank-2 pool (the rank-3 one-axis stage is a separate item)"
+    elif ks <> [ Some "i"; Some "j" ] && ks <> [ Some "j"; Some "i" ] then
+        decline "the pool read does not use the row coordinate and the partner coordinate exactly once each"
+    elif reads |> Seq.exists (fun (g, _, xs) -> g <> gid || keys xs <> ks) then
+        decline "the term reads the compact array at more than one coordinate order, or reads a second compact array"
+    else
+    match gix.Symmetry with
+    | SymHermitian -> decline "Hermitian storage: a mirror cell reads the conjugate (no real orbit action)"
+    | SymAntisymmetric ->
+        decline "antisymmetric storage: a mirror cell reads -x and the diagonal +0 (signed events, v2) -- the packed read is not the mirror's value"
+    | SymWreath -> decline "wreath (OrbIdx) storage: v1's row action covers SymIdx<2, n>"
+    | SymNone -> None
+    | SymSymmetric ->
+    match scalarElem gelemTy |> Option.filter realNumeric with
+    | None -> decline "the compact array's elements are not real numbers"
+    | Some et ->
+    let nOpt = tryEvalIntIR gix.Extent
+    match nOpt with
+    | None -> decline "the compact group's extent is not static"
+    | Some n ->
+    let levelOk (ix: IRIndexType) =
+        ix.Rank = 1 && ix.Symmetry = SymNone && ix.IxKind = IxKPlain
+        && tryEvalIntIR ix.Extent = Some n
+        && (match ix.Tag, gix.Tag with
+            | Some a, Some b -> a = b
+            | _ -> true)
+    if not (levelOk ixO && levelOk ixJ) then
+        decline $"the row and partner ranges do not each cover the pool's {n} positions"
+    elif n < 1L then decline "an empty pool"
+    else
+    let readTy = IRTScalar et
+    let body1 = substReads gid (fun xs -> keys xs = ks && xs |> List.forall isCoord) readTy gBody
+    // THE WEIGHTS: every remaining read `W(c)`, c the row or the partner
+    // coordinate, of a rank-1 dense array over S's index becomes a sentinel.
+    let weights = System.Collections.Generic.List<ActionWeight>()
+    let mutable weightWhy : string option = None
+    let weightOk (wty: IRType) =
+        match wty with
+        | ArrayElem at when not at.IsVirtual ->
+            (match at.IndexTypes, scalarElem at.ElemType |> Option.filter realNumeric with
+             | [ ix ], Some wet when levelOk ix -> Some wet
+             | _ -> None)
+        | _ -> None
+    let rec subst (e: IRExpr) : IRExpr =
+        match e with
+        | IRIndex (IRVar (wid, wty), [ c ], _) when isCoord c && wid <> gid ->
+            (match weightOk (IR.stripUnits wty) with
+             | None ->
+                 if weightWhy.IsNone then
+                     weightWhy <- Some $"the weight `{sourceName wid}` is not a rank-1 dense array of real numbers over the pool's index ({n} positions)"
+                 e
+             | Some wet ->
+                 let own = coordKey c = Some "i"
+                 let k =
+                     match weights |> Seq.tryFindIndex (fun w -> w.ArrayId = wid) with
+                     | Some k ->
+                         let w = weights.[k]
+                         weights.[k] <- { w with Own = w.Own || own; Partner = w.Partner || not own }
+                         k
+                     | None ->
+                         weights.Add { ArrayId = wid; ArrayName = sourceName wid; ElemTy = wet; ReadTy = IRTScalar wet
+                                       Own = own; Partner = not own; Index = weights.Count }
+                         weights.Count - 1
+                 IRVar ((if own then actionOwnId k else actionPartnerId k), IRTScalar wet))
+        | _ ->
+            let kids, rebuild = irChildren e
+            if kids.IsEmpty then e else rebuild (kids |> List.map subst)
+    let body2 = subst body1
+    let rec hasIndex (e: IRExpr) =
+        match e with
+        | IRIndex _ -> true
+        | _ -> (fst (irChildren e)) |> List.exists hasIndex
+    match weightWhy with
+    | Some why -> decline why
+    | None ->
+    if hasIndex body2 then
+        decline "the term reads another array, or a weight at a subscript other than the row / partner coordinate (a third coordinate, an index expression, a second compact array)"
+    else
+    let accOpt =
+        match scalarElem lvl.Fold.RetType with
+        | Some a when realNumeric a -> Some a
+        | _ -> None
+    match accOpt with
+    | None -> decline "the fold's accumulator is not a real numeric type"
+    | Some acc ->
+    Some (Ok
+        { SourceId = gid
+          SourceType = gty
+          SourceName = sourceName gid
+          Extent = n
+          ElemTy = et
+          AccTy = acc
+          Body = body2
+          OwnVarId = iId
+          OwnName = iName
+          Level = lvl
+          MapOmp = mapOmp
+          Weights = List.ofSeq weights })
+
+/// THE ACTION PLAN for a recognised shape: the knob, the licence policy, the
+/// closed total whitelist over g, the kernel and the seed (planStrict's own
+/// predicates), coordinate-free seeds, the state cap.
+let planAction (resolveCl: IRExpr -> IRCallable option) (deferredOf: IRId -> IRExpr option) (shape: ActionShape) : ActionRecognition =
+    let isDeferred (id: IRId) = (deferredOf id).IsSome
+    let totalExpr (e: IRExpr) =
+        match Blade.IRTotality.walk resolveCl deferredOf isDeferred Map.empty Map.empty Set.empty Set.empty Set.empty e with
+        | Ok _ -> None
+        | Error why -> Some why
+    let decline why = ActionDeclined why
+    let fold = shape.Level.Fold
+    let licensed = foldReorderLicensed fold && not (fpReproEnabled ())
+    match orbitActionsMode () with
+    | ActionsOff -> decline "disabled by BLADE_ORBIT_ACTIONS=0"
+    | ActionsStrict when licensed ->
+        decline "BLADE_ORBIT_ACTIONS=strict: the fold carries a reorder licence in this non-repro build (the strict form is restricted to strict builds; the row walk keeps its licensed form)"
+    | _ ->
+    let levels = Set.ofList [ shape.OwnVarId; shape.Level.VarId ]
+    let names = Set.ofList [ shape.OwnName; shape.Level.ParamName ]
+    let fTy = try Blade.IRTotality.scalarElem (typeOf shape.Body) with _ -> None
+    if fTy <> Some shape.AccTy then decline "the cell term's value type is not the fold's accumulator type"
+    else
+    let free = System.Collections.Generic.HashSet<IRId>()
+    let coord = "it uses the row or partner coordinate beyond the pool and weight reads (v1: no other use of i, j)"
+    // the weight sentinels are the plan's own bound scalars, not free reads
+    let sentinels =
+        shape.Weights |> List.collect (fun w -> [ actionOwnId w.Index; actionPartnerId w.Index ]) |> Set.ofList
+    let fWhy =
+        match strictWalk resolveCl levels names coord sentinels Set.empty Set.empty free shape.Body with
+        | Some why -> Some why
+        | None -> totalExpr shape.Body
+    match fWhy with
+    | Some why -> decline $"the cell term is outside the closed total whitelist ({why})"
+    | None ->
+    let kernelWhy =
+        if fold.Params.Length <> 2 then Some "the fold kernel does not take two parameters"
+        else
+        match (match strictCallable resolveCl levels names coord Set.empty free fold with
+               | Some why -> Some why
+               | None ->
+                   match Blade.IRTotality.auditCallable resolveCl deferredOf isDeferred fold [] with
+                   | Ok () -> None
+                   | Error why -> Some why) with
+        | Some why -> Some $"the fold kernel is outside the closed total whitelist ({why})"
+        | None ->
+            match Blade.IRTotality.scalarElem fold.RetType with
+            | Some t when t = shape.AccTy -> None
+            | _ -> Some "the fold kernel does not return the accumulator type"
+    match kernelWhy with
+    | Some why -> decline why
+    | None ->
+    let seed = shape.Level.Seed
+    let seedMentionsRow =
+        (collectVarRefsIR seed).Contains shape.OwnVarId
+        || (let rec m (e: IRExpr) =
+                match e with
+                | IRParam (name, _, _) -> name = shape.OwnName
+                | _ -> (fst (irChildren e)) |> List.exists m
+            m seed)
+    if seedMentionsRow then decline "the seed mentions the row coordinate (per-row seeds are v2)"
+    else
+    let seedWhy =
+        match strictWalk resolveCl levels names "it mentions a coordinate (per-row seeds are v2)" Set.empty Set.empty Set.empty free seed with
+        | Some why -> Some why
+        | None -> totalExpr seed
+    match seedWhy with
+    | Some why -> decline $"the seed is outside the action's admission ({why})"
+    | None ->
+    let n = shape.Extent
+    if n > scatterStateMax then
+        decline $"the action's state ({n} row chains) exceeds its cap of {scatterStateMax} accumulators"
+    else
+    ActionTaken
+        { Shape = shape
+          LevelAdd = isPlainAdd fold && not (foldKernelReproVetoed fold)
+          PoolCells = n * (n + 1L) / 2L
+          StateCells = n
+          RowGroup = scatterRowGroup ()
+          ColBlock = scatterColBlock ()
+          FreeIds = Set.ofSeq free
+          Licensed = licensed }
+
+let private deferredOfResolve (resolve: IRExpr -> IRExpr) (id: IRId) : IRExpr option =
+    match resolve (IRVar (id, IRTUnit)) with
+    | IRVar (id2, _) when id2 = id -> None
+    | e -> Some e
+
+/// Recognise a ROW ACTION (the map form, v1) and plan it.
+let recogniseAction (resolve: IRExpr -> IRExpr) (resolveCl: IRExpr -> IRCallable option)
+                    (sourceName: IRId -> string) (info: ApplyInfo) : ActionRecognition =
+    match info.Arrays, resolveCl info.Kernel with
+    | [ IRRange ([ ixO ], None) ], Some cl
+            when info.KernelOutputRank = 0 && not info.IsCoIteration && not info.HasReynolds && cl.Params.Length = 1 ->
+        (match cl.Body with
+         | IRReduceCompute (c2, k2, s2) ->
+             (match k2, s2 with
+              | IRTuple _, _ | _, IRTuple _ -> ActionNotAction
+              | _ ->
+              let p = cl.Params.Head
+              // a cuda / mpi / arity strategy on the map kernel, or on the inner
+              // map's, is outside the serial action (fail closed)
+              let strategyOf (k: IRCallable option) =
+                  match k with
+                  | Some c -> c.IsCudaKernel || c.IsMpiParallel || c.IsArityPoly
+                  | None -> false
+              let innerStrategy =
+                  match resolve c2 with
+                  | IRApplyCombinator i2 -> strategyOf (resolveCl i2.Kernel)
+                  | _ -> false
+              match analyseAction resolve resolveCl sourceName p.VarId p.Name cl.IsOmpParallel ixO c2 k2 s2 with
+              | None -> ActionNotAction
+              | Some (Error why) -> ActionDeclined why
+              | Some (Ok _) when strategyOf (Some cl) || innerStrategy ->
+                  ActionDeclined "the map kernel (or the inner map's) carries a cuda / mpi / arity strategy"
+              | Some (Ok shape) -> planAction resolveCl (deferredOfResolve resolve) shape)
+         | _ -> ActionNotAction)
+    | _ -> ActionNotAction
+
+/// A WALK that folds weighted rows -- `reduce(method_for(range<I>) <@>
+/// lambda(i) -> reduce(.. g(S(i, j), V(i), V(j)) .., k1, s1), k0, s0)` with
+/// at least one weight (a coordinate-free g is the ordered scatter's) -- is
+/// recognised and DECLINED in v1: a mixed licence nest first (planStrict's
+/// rule and words: making the licensed level strict would change the default
+/// build's bits; D/5's [1e16, -1e16, 1] nest), then a fully licensed nest in
+/// a non-repro build (the licensed walk owns it), then the scalar form
+/// itself (v1 builds the stored vector output only). Some why = a census line;
+/// None = not such a walk.
+let recogniseActionWalk (resolve: IRExpr -> IRExpr) (resolveCl: IRExpr -> IRCallable option)
+                        (sourceName: IRId -> string) (comp: IRExpr) (kernel: IRExpr) (seed: IRExpr) : string option =
+    match levelOf resolveCl (resolve comp) kernel seed with
+    | Some (outer, ixO, IRReduceCompute (c2, k2, s2)) ->
+        (match k2, s2 with
+         | IRTuple _, _ | _, IRTuple _ -> None
+         | _ ->
+         match analyseAction resolve resolveCl sourceName outer.VarId outer.ParamName outer.MapOmp ixO c2 k2 s2 with
+         | Some (Ok shape) when not shape.Weights.IsEmpty ->
+             let lic = [ foldReorderLicensed outer.Fold; foldReorderLicensed shape.Level.Fold ]
+             let repro = fpReproEnabled ()
+             if not repro && List.exists id lic && not (List.forall id lic) then
+                 let li = lic |> List.findIndex id
+                 let ui = lic |> List.findIndex not
+                 Some $"a mixed nest: level {li + 1}'s fold carries a reorder licence and level {ui + 1}'s does not (v1 keeps the walk; making the licensed level strict would change the default build's bits)"
+             elif not repro && List.forall id lic then
+                 Some "every level's fold carries a reorder licence in a non-repro build (the licensed row walk owns it)"
+             else
+                 Some "an outer fold over the weighted rows: v1 builds the row action's stored vector output only (the scalar form is v1.1) -- the walk is kept"
+         | _ -> None)
+    | _ -> None
+
+/// `blade plan`'s form line of a taken action (both lanes' form).
+let actionForm (p: ActionPlan) : string =
+    $"orbit action (rank 2, extent {p.Shape.Extent}, 1 channel, row groups of {p.RowGroup}): own / partner role terms; every row chain fed its source order from its seed"
+
+let actionEvidence (p: ActionPlan) : string =
+    let s = p.Shape
+    let ws =
+        if s.Weights.IsEmpty then "no weights"
+        else
+            s.Weights
+            |> List.map (fun w ->
+                let roles = [ (if w.Own then "own" else ""); (if w.Partner then "partner" else "") ] |> List.filter ((<>) "") |> String.concat " + "
+                $"`{w.ArrayName}` ({roles})")
+            |> String.concat ", "
+    let lic =
+        if p.Licensed then
+            "the fold carries a reorder licence in this build: the strict form is taken for the row action too (the serial chain is an admissible association; the licence is not consumed -- BLADE_ORBIT_ACTIONS=strict restricts the form to strict builds)"
+        elif fpReproEnabled () then "every fold strict in this build (BLADE_FP_REPRO=1)"
+        else "the fold carries no reorder licence"
+    $"one pass over the {p.PoolCells}-cell SymIdx<2, {s.Extent}> pool of `{s.SourceName}` instead of {s.Extent * s.Extent} logical reads; each off-diagonal canonical cell (a, b) read ONCE and its term evaluated TWICE -- row chain a with own = a, partner = b, row chain b with own = b, partner = a (never one weighted term at both endpoints) -- the diagonal once; weights {ws}; {lic}; each chain keeps its seed, its operand order and its kernel (accumulator first); column block {p.ColBlock}; bitwise the walk under BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off"
+
+/// The evidence tag the LLVM emitter's own action records carry (the same tag
+/// as its scatter records, so CliCommands' merge treats them alike).
+let isActionRecord (d: Blade.Effects.Decision) : bool =
+    d.Rule = "fold-form"
+    && (match d.Outcome with
+        | Blade.Effects.Declined why -> why.StartsWith "orbit action not taken"
+        | Blade.Effects.Applied -> d.Evidence |> List.exists (fun e -> e.StartsWith "fold form: orbit action (rank"))
+
+let actionDeclinedForm = "fold form: orbit action not taken -- the row walk is kept"
+
+let actionDeclineOutcome (why: string) = Blade.Effects.Declined $"orbit action not taken: {why}"
+
+let recordActionTaken (subject: string) (p: ActionPlan) (matrix: string list) (ompNote: string option) : unit =
+    recordCodegenDecision "fold-form" subject Blade.Effects.Applied
+        ([ "fold form: " + actionForm p; actionEvidence p ] @ matrix @ (match ompNote with Some n -> [ n ] | None -> []))
+
+let recordActionDeclined (subject: string) (why: string) : unit =
+    recordCodegenDecision "fold-form" subject (actionDeclineOutcome why) [ actionDeclinedForm; why ]
+
+/// The thread requests the action's levels carry (the map kernel's and the
+/// fold kernel's). v1's action is serial. C++ lane: where threads are emitted
+/// the old emitter's row walk keeps the request (declined); where they are
+/// not, the action is taken and the dropped request reaches the census. LLVM
+/// lane: no thread runtime -- the serial action is taken whenever its own
+/// admission succeeds, the request recorded as unserved there.
+let actionThreadRequests (p: ActionPlan) : string list =
+    [ if p.Shape.MapOmp then yield "the map"
+      if p.Shape.Level.MapOmp then yield "the inner map"
+      if p.Shape.Level.Fold.IsOmpParallel then yield "the fold" ]
+
+/// THE ADMISSION (both lanes): the planner's five-party audit
+/// (Optimize.planOrbitActions over the top-level bindings: producers of the
+/// pool, every weight and every free scalar by payload and storage proof;
+/// the consumer, the fold kernel and the seed; every intervening binding --
+/// the shared transitive write analysis, unknown = refuse) plus the
+/// callback-aware codegen write analysis of the term, the kernel and the
+/// seed (`deferred`: the lane's deferred computations). Ok the matrix lines,
+/// or Error the first failed condition.
+let orbitActionAdmissible (deferred: Map<IRId, IRExpr>) (actionId: IRId) (p: ActionPlan) : Result<string list, string> =
+    let s = p.Shape
+    match Blade.Optimize.OrbitActionTable.tryAudit actionId with
+    | None -> Error "no five-party audit recorded for this action (v1 admits a TOP-LEVEL action binding over top-level pools and weights: the storage proof is storedArrayProof): unknown declines"
+    | Some audit ->
+    match audit.Consumer with
+    | Some why -> Error why
+    | None ->
+    let parties =
+        [ yield ("the pool", s.SourceId)
+          for w in s.Weights do yield ($"the weight `{w.ArrayName}`", w.ArrayId)
+          for f in p.FreeIds do yield ("a free scalar", f) ]
+    let readWhy =
+        parties |> List.tryPick (fun (what, id) ->
+            match Map.tryFind id audit.Reads with
+            | None -> Some $"{what} is not a top-level binding ahead of the action (v1: unknown declines)"
+            | Some r ->
+                match r.Producer, r.Between with
+                | Error why, _ -> Some why
+                | _, Error why -> Some why
+                | Ok _, Ok _ -> None)
+    match readWhy with
+    | Some why -> Error why
+    | None ->
+    if exprMayWriteIn deferred s.Body then Error "the cell term may write (callback-aware codegen write analysis)"
+    elif callableMayWrite s.Level.Fold then Error "the fold kernel may write (callback-aware codegen write analysis)"
+    elif exprMayWriteIn deferred s.Level.Seed then Error "the seed may write (callback-aware codegen write analysis)"
+    else
+    let line (id: IRId) =
+        let r = audit.Reads.[id]
+        let between = match r.Between with Ok k -> k | Error _ -> 0
+        let how = match r.Producer with Ok h -> h | Error _ -> ""
+        $"`{r.Name}` {how}, {between} binding(s) between it and the action -- no write"
+    let weightsLine =
+        if s.Weights.IsEmpty then "none"
+        else s.Weights |> List.map (fun w -> line w.ArrayId) |> String.concat "; "
+    let freeLine =
+        if p.FreeIds.IsEmpty then "none"
+        else p.FreeIds |> Seq.map line |> String.concat "; "
+    Ok [ "five-party audit (planner: Optimize.scheduleMayWriteIn over the module + cseFactsOf, payloads by intervalPayloadOf, storage by storedArrayProof; emitter: the callback-aware codegen write analysis): "
+         + $"producer = the pool {line s.SourceId}; "
+         + $"weights = {weightsLine}; free scalars = {freeLine}; "
+         + "consumer = the action's map kernel and its cell term -- no write; "
+         + "fold kernel -- no write; seed -- no write, coordinate-free; "
+         + "intervening = every top-level binding between each read binding and the action (counted above) -- no write, no provider effect (none is moved: the action runs at its own site and only interleaves its own pure, total row chains); "
+         + "parallel bodies = none (v1's action is serial: no team, so the callback table is not consulted); "
+         + "totality: the closed whitelist (Blade.IRTotality) over the term, the kernel and the seed -- no panic, so no failure can arrive in a different order; the output stays stored under its own name" ]

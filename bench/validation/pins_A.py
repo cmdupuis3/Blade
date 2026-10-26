@@ -17,9 +17,10 @@ import ref_antisym  # noqa: E402
 import ref_comoment3
 import ref_common_A as rc
 import ref_gram
+import ref_pairaction
 import ref_pairkernel
 
-MODULES = (ref_gram, ref_comoment3, ref_antisym, ref_pairkernel)
+MODULES = (ref_gram, ref_comoment3, ref_antisym, ref_pairkernel, ref_pairaction)
 
 
 def main(which):

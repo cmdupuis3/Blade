@@ -35,7 +35,7 @@ program haloadjoint_expert
   use, intrinsic :: iso_fortran_env, only: real64
   use bench_support
   implicit none
-  integer, parameter :: n = 50021   ! SIZE n
+  integer, parameter :: n = 1000003   ! SIZE n
   integer, parameter :: nb = 1024
   integer, parameter :: seed_x = 10000019, seed_w = 20000038
   real(real64), parameter :: lo = 0.0_real64, hi = 1.0_real64

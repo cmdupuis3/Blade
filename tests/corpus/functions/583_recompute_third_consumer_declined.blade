@@ -1,0 +1,16 @@
+// TEST: Recompute Selection Declines A Third Consumer
+// ============================================================================
+// x is read by THREE statements. The selection's family is bounded to two
+// consumers, so it declines (`x` is read by 3 statements) and x keeps its
+// pool, written once and read three times. Values: x = [3, 5, 7], s = 15,
+// q = 83, m = 105.
+function stats(a: T^1) -> T^0 = {
+    let x = method_for(a) <@> lambda(v) -> v * 2.0 + 1.0 |> compute
+    let s = reduce(x, (+))
+    let q = reduce(x, lambda(p, r) -> p + r * r, 0.0)
+    let m = reduce(x, (*))
+    s + q + m
+}
+let a = [1.0, 2.0, 3.0]
+let t = stats(a)
+// EXPECT: t = 203.0

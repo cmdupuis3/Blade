@@ -1,0 +1,26 @@
+// TEST: Whole-Array Kernel Over A Dense Array Is Its Call (G64)
+// The dense twin of index-types/543: a zero-level apply `object_for(f) <@> xd`
+// with `f` taking the whole dense operand is the call `f(xd)` in every lane
+// (Lowering.isZeroLevelWholeArrayApply) -- one term, its value the result,
+// signed zero kept (the interpreter used to add the term to a zero
+// accumulator and pass the operand unbound). Dense operands only, so the
+// LLVM lane runs it natively (`blade test llvm index-types` compares the two
+// lanes on it). The used operand (`dsum`, `dneg`) and the unused one
+// (`dnegk`) are both pinned; the Booleans pin the signs.
+type I = Idx<4>
+let xd: Array<Float64 like I> = [0.5, 1.0, 2.0, 3.0]
+
+function dsum(c: Array<Float64 like I>) -> Float64 = reduce(c, (+)) * c(1)
+function dneg(c: Array<Float64 like I>) -> Float64 = -0.0 * c(3)
+function dnegk(c: Array<Float64 like I>) -> Float64 = -0.0
+
+let d = object_for(dsum) <@> xd |> compute
+let dn = object_for(dneg) <@> xd |> compute
+let dk = object_for(dnegk) <@> xd |> compute
+let dn_neg = 1.0 / dn < 0.0
+let dk_neg = 1.0 / dk < 0.0
+// EXPECT: d = 6.5
+// EXPECT: dn = -0.0
+// EXPECT: dk = -0.0
+// EXPECT: dn_neg = true
+// EXPECT: dk_neg = true

@@ -547,7 +547,7 @@ fusedchain 4.6304649681954004E+01 / 1.0027016977054533E+04; onepass 1.1229114825
 The LLVM lane refused maskagg (`a compound-index initializer; falling back to C++`), as
 the spec expects.
 
-## 8b. Codex Fortran review (bench/notes/review-fortran-codex.md): what was applied
+## 8b. Codex Fortran review (bench/notes/review-fortran-codex.md (removed 2026-10-24; in git history at cf2028cc)): what was applied
 
 | # | finding | applied |
 |---|---|---|

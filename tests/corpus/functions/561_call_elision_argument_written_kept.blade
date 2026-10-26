@@ -1,0 +1,17 @@
+// TEST: Call Elision Keeps The Snapshot When The Consumer Writes An Argument
+// ============================================================================
+// The call commits a SNAPSHOT of its argument: prep(M) is computed before the
+// fold runs, so the fold kernel's write `M(2) = 100.0` must not reach the
+// values folded. A jointly lowered call would read M cell by cell while the
+// kernel writes it; BLADE_CALL_ELIDE declines ("the consumer statement may
+// write"), the call stays, and the fold sees the snapshot: 2 + 4 + 6 = 12
+// (an elided call would have folded 2 + 4 + 200). The write is visible after.
+function prep(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> v * 2.0 |> compute }
+let mut M = [1.0, 2.0, 3.0]
+let s = reduce(prep(M), lambda(acc, v) -> {
+    M(2) = 100.0
+    acc + v
+})
+let m2 = M(2)
+// EXPECT: s = 12.0
+// EXPECT: m2 = 100.0

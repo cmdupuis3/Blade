@@ -1,0 +1,42 @@
+// TEST: Call Elision Takes A Let-Bound Call With One Reader
+// ============================================================================
+// `let x = prep(a)` whose ONE reader is a later fold `reduce(x, ..)` (or one
+// operand of a pointwise map) is jointly lowered exactly like the inline
+// `reduce(prep(a), ..)`: the call moves to its reader, the let is dropped, no
+// return pool (BLADE_CALL_ELIDE, `call-elision v1`). The arguments' snapshot
+// must hold at the reader: nothing in between may write. Declines keep the let
+// and the call: a second reader (`twice`), a write between the let and its
+// reader (`written`: the fold reads prep's values from BEFORE the write,
+// 2 + 4 + 6 = 12 -- never 2 + 4 + 200).
+function prep(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> v * 2.0 |> compute }
+function folded(a: T^1) -> T^0 = {
+    let x = prep(a)
+    let k = 0.5
+    reduce(x, (+), k)
+}
+function mapped(a: T^1, b: T^1) -> T^1 = {
+    let x = prep(a)
+    method_for(zip(x, b)) <@> lambda(u, w) -> u + w |> compute
+}
+function twice(a: T^1) -> T^0 = {
+    let x = prep(a)
+    let s1 = reduce(x, (+))
+    s1 + reduce(x, (*))
+}
+function written(a: mut Array<Float64 like Idx<3>>) -> Float64 = {
+    let x = prep(a)
+    a(2) = 100.0
+    reduce(x, (+))
+}
+let A = [1.0, 2.0, 3.0]
+let B = [10.0, 20.0, 30.0]
+let f = folded(A)
+let m = mapped(A, B)
+let t = twice(A)
+let mut M = [1.0, 2.0, 3.0]
+let w = written(M)
+// EXPECT: f = 12.5
+// EXPECT: m = [12.0, 24.0, 36.0]
+// EXPECT: t = 60.0
+// EXPECT: w = 12.0
+// EXPECT: M = [1.0, 2.0, 100.0]

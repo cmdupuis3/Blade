@@ -1,0 +1,18 @@
+// TEST: A source `-zero` keeps its negation, complex, concrete and generic
+// The unseeded-fold identity (gap G74) is a DEDICATED mark on a synthesized
+// seed, never a rewrite of source syntax: `-zero` is the negation of the
+// typed zero wherever the program writes it, so a complex one's components
+// carry the sign -- (-0.0, -0.0) -- through a concrete binding and a generic
+// instance alike (the reciprocals pin the signs). The real cases are basic/527,
+// which the LLVM lane takes (it refuses Complex128).
+let z: Complex128 = -zero
+let zr = 1.0 / real(z)
+let zi = 1.0 / imag(z)
+function nzero(x: T) -> T = -zero
+let g = nzero(complex(1.0, 1.0))
+let gr = 1.0 / real(g)
+let gi = 1.0 / imag(g)
+// EXPECT: zr = "-inf"
+// EXPECT: zi = "-inf"
+// EXPECT: gr = "-inf"
+// EXPECT: gi = "-inf"

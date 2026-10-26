@@ -1,0 +1,11 @@
+// TEST: Call Elision Keeps BL8003 On An Empty Input (aborts)
+// ============================================================================
+// An UNSEEDED fold over an empty call result panics BL8003 at the fold. A
+// jointly lowered fold would seed with the identity and return it, so
+// BLADE_CALL_ELIDE admits an unseeded fold only over a LITERAL extent >= 1
+// (compute elision's rule, `Optimize.elidedFoldSeed`): here (extent 0) it
+// declines, the call stays, and the fold aborts with the message pinned today.
+function prep(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> v * 2.0 + 1.0 |> compute }
+let none: Array<Float64 like Idx<0>> = []
+let t = reduce(prep(none), (+))
+// ABORT: error[BL8003]: reduce: empty array, no reduction possible

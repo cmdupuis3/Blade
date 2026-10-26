@@ -1,0 +1,18 @@
+// TEST: Ring Recursive Array Rank1 Scalar Slice
+// ============================================================================
+// Recursive-array windowing with NO trailing axes: a row is a scalar, so the
+// ring is a rank-1 array of 2 cells and the snapshot of row 29 a bare Float
+// -- exactly what `traj((29 : T))` produced before. `rec-window` APPLIES.
+// x_n = 1.5 x_{n-1} + 0.5, x_0 = 3.0; value = the full buffer's.
+// ============================================================================
+type T = Idx<30>
+
+let out = {
+    let rec traj: Array<Float like T> =
+        match traj with
+        | zero -> zero
+        | zero :: s -> zero :: 3.0
+        | prefix :: n -> prefix :: prefix(n - 1) * 1.5 + 0.5
+    traj((29 : T))
+}
+// EXPECT: out = 511335.157954358

@@ -69,6 +69,19 @@ let partialSparseGatherTeardown (value: IRExpr) : string option =
 /// Match-arm spelling of partialSparseGatherTeardown (one evaluation per arm).
 let (|GatherTeardown|_|) (value: IRExpr) : string option = partialSparseGatherTeardown value
 
+/// An inline ARRAY-RETURNING call -- `prep(A)` as a fold's operand -- which a
+/// consumer that spells its operand per element read would re-evaluate per
+/// read (bindInlineArrayCall binds it once). An `object_for` application is
+/// a loop, not a call, and keeps its own forms.
+let (|InlineArrayCall|_|) (value: IRExpr) : unit option =
+    match value with
+    | IRApp (IRObjectFor _, _, _) -> None
+    | IRApp _ ->
+        (match stripUnits (inferExprType value) with
+         | ArrayElem _ -> Some ()
+         | _ -> None)
+    | _ -> None
+
 /// Is `e` a canonicalizing compact read worth binding once when it is BOTH
 /// operands of a binary operator (`t(i, j, k) * t(i, j, k)`)? A full-cover
 /// read of a compact-group array whose array and coordinates are plain
@@ -197,7 +210,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             | None, IRCaret -> $"pow({lStr}, {rStr})"
             | None, IRMath2 name -> renderMath2 name lStr rStr
             | None, _ -> emitBinOpWithComplexCoercion op l r lStr rStr inferExprType binOpToCpp
-        // BIND ONCE (bench/notes/microkernel-sketches-review.md M2): the SAME
+        // BIND ONCE (bench/notes/microkernel-sketches-review.md (removed 2026-10-24; in git history at cf2028cc) M2): the SAME
         // canonicalizing compact read on both sides (`t(i, j, k) * t(i, j, k)`)
         // is evaluated once into a local and the operator applied to it --
         // one fold and one fetch instead of two. Pure read, same cell, same
@@ -654,6 +667,9 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
          | Some lit, _ -> exprToCppCore subst names lit
          | None, Some refusal -> exprError refusal
          | None, None -> "0")
+    // Lowering.resolveUnseededSeedsModule replaces every one before the
+    // optimizer (gap G74): reaching an emitter is an internal error.
+    | IRUnseededSeed _ -> exprError "internal: an unresolved unseeded-fold seed (IRUnseededSeed) reached codegen"
     | IRPolyIndex (pack, idx) ->
         // For static index, use std::get; otherwise runtime indexing
         match idx with
@@ -1428,6 +1444,14 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
         renderCompactionFold names (Blade.Optimize.CompactionTable.tryFoldMap mid).Value kernelExpr
     | GatherTeardown _ ->
         bindInlineGathers subst names [ arrExpr ] (fun ops -> renderReduceExpr subst names (List.head ops) kernelExpr initExpr)
+    // An inline ARRAY-RETURNING CALL as the operand (`1.0 + reduce(prep(A),
+    // (+))`, a kernel body folding `prep(x)`): the fold below spells its
+    // operand at every element read, the bound and the guard, so the call ran
+    // n + 1 times (O(n^2)) and leaked every returned pool. Bind it once, at the
+    // fold's own evaluation point (operand before seed, the interpreter's
+    // order), fold the binding, free a caller-owned pool after the fold.
+    | InlineArrayCall _ ->
+        bindInlineArrayCall subst names arrExpr (fun op -> renderReduceExpr subst names op kernelExpr initExpr)
     | _ ->
     // Inline reduction as an IIFE (mirrors genBinding's loop, wrapped in
     // `[&]() { ... }()` for expression context: kernel bodies, arithmetic).
@@ -1559,7 +1583,7 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
         // text either way.
         let ompNote =
             ompSuppressedBlockMarker callable.IsOmpParallel
-                "reduce in expression position (kernel body / inline arithmetic) opens no team -- its context may already be a parallel region; bind the fold to its own `let` (or fold all axes with `axes = rank`) for the parallel form"
+                "reduce in expression position (kernel body / inline arithmetic) opens no team -- its context may already be a parallel region; for the parallel form make the fold the WHOLE value of its own `let` (`let s = reduce(...)`, then use `s`) -- an operand of arithmetic or a bare kernel return stays serial"
         // BLADE_FP_REASSOC, expression form. Same K-lane shape as the statement
         // form, minus the thread chunking: ONE chunk, K lanes, no pragma. That
         // is the right shape here for the reason the note above gives -- an IIFE
@@ -1628,6 +1652,39 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
         "/* reduce: non-callable kernel (typechecker or IR bug) */"
 
 
+
+/// AN INLINE ARRAY-RETURNING CALL in a fold's operand position (wave 3 B, the
+/// nested fold bind-once; plan-identity-transpose-compute P4 open issue 1).
+/// Bind the call once in an IIFE -- `auto __rcall<h> = <call>;` -- render the
+/// consumer over the binding (an IRParam renders as its bare name and types
+/// as the call's result), then free the result when the CALLER owns it: the
+/// guard is the function-body let's (CodeGen.genFuncBody site 3b): a FreshPool
+/// callee, a freeable dense type, AllocDense storage, no real symmetry --
+/// exactly the pools `deallocate<promote<T, r>, nullptr>` frees. A NotFresh
+/// callee may hand back its own parameter, so its result is bound but never
+/// freed. The consumer's result is a scalar, never a view into the binding,
+/// so the free cannot dangle. The IIFE sits where the fold sat, so the call
+/// is evaluated exactly once, at the fold's own point in evaluation order.
+and bindInlineArrayCall (subst: SubstMap) (names: Map<IRId, string>) (call: IRExpr) (render: IRExpr -> string) : string =
+    let fnv (t: string) =
+        let mutable h = 2166136261u
+        for c in t do
+            h <- (h ^^^ uint32 c) * 16777619u
+        h.ToString("x8")
+    let text = exprToCppCore subst names call
+    let ty = inferExprType call
+    let cname = "__rcall" + fnv text
+    let inner = render (IRParam (cname, 0, ty))
+    let free =
+        match call, stripUnits ty with
+        | IRApp (f, _, _), ArrayElem at
+            when freshReturnOf f = FreshPool
+                 && isFreeableDenseArrayType at
+                 && classifyOutputStorage ty = AllocDense
+                 && not (hasRealSymmetry (buildSymmVec ty)) ->
+            $" deallocate<typename promote<{elemTypeToCpp at.ElemType}, {arrayRank at}>::type, nullptr>({cname}.data, {cname}.extents);"
+        | _ -> ""
+    $$"""([&]() { auto {{cname}} = {{text}}; auto __rcres = {{inner}};{{free}} return __rcres; }())"""
 
 /// INLINE PARTIAL SPARSE READS in expression position (a fold, a prodsum or
 /// an extent of `S((k, _))`). Each is an allocating gather, and the consumers
@@ -1852,7 +1909,10 @@ and renderUnitStmts (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) 
         // loops read like their module-level counterparts. int64_t, not
         // size_t: the loop var is the user's Int64 for-in variable, and an
         // unsigned binding wraps negative intermediates in body arithmetic.
-        let varName = $"__k{vid}"
+        // `__kv`, not `__k`: clang predefines `__k8` / `__k8__` (x86-64 CPU
+        // macros), so a `__k8` counter broke every memcheck (clang64) build
+        // whose var id reached 8.
+        let varName = $"__kv{vid}"
         let names' = Map.add vid varName names
         let loStr = exprToCppCore subst names lo
         let hiStr = exprToCppCore subst names hi

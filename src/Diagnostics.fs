@@ -137,6 +137,28 @@ let buildOutputNote (span: Span) : string option =
                `blade doctor` reports which stdlib root answered")
     | _ -> None
 
+// Emitter warnings: coded, spanned WARNINGS a back end raises while emitting
+// a program (today only BL7005, the opt-in kept inline of G69). One per KEY
+// (a lane and the event it was raised for), so an emitter that renders a
+// binding twice still warns once. Each lane's whole-program entry resets the
+// channel; the CLI drains it after the lane that produced the artifact and
+// prints the warnings on stderr (a lane that refuses and falls back discards
+// its own). Per async flow, like Effects.Decisions.
+
+module EmitterWarnings =
+    let private cell = System.Threading.AsyncLocal<(string * Diagnostic) list>()
+    let private get () = match box cell.Value with null -> [] | _ -> cell.Value
+    /// Start a fresh channel (each lane's whole-program entry).
+    let reset () = cell.Value <- []
+    /// Raise `d` once for `key`.
+    let add (key: string) (d: Diagnostic) =
+        let cur = get ()
+        if not (cur |> List.exists (fun (k, _) -> k = key)) then cell.Value <- cur @ [ (key, d) ]
+    /// Everything raised since the last reset, in order, and clear.
+    let drain () : Diagnostic list =
+        let cur = get ()
+        cell.Value <- []
+        cur |> List.map snd
 // Code registry: every code the compiler can emit, with a short title.
 // Test_Diagnostics asserts shape and uniqueness; emitting an unregistered
 // code is a bug the corpus tests catch.
@@ -452,6 +474,12 @@ module Codes =
             // instead of a g++ preprocessor error. BL7001 stays the
             // unhandled-node (back-end gap) code.
             "BL7004", "construct not supported by the C++ backend"
+            // A WARNING (never an error): the producer-input legs' kept one-level
+            // inline (round 3 A7c, gap G69) was RETAINED by a lane's emitter under
+            // the explicit opt-in BLADE_EPILOGUE_LEGS=1 -- its lifetime audit is
+            // incomplete. One per retained inline per lane; the default build
+            // declines the inline and never emits it.
+            "BL7005", "experimental kept inline with an incomplete lifetime audit"
             // BL8xxx: runtime (generated C++)
             "BL8001", "constraint violation"
             "BL8002", "non-exhaustive match"

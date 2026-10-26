@@ -1,0 +1,18 @@
+// TEST: Real Base Power Before If Force (aborts)
+// ----------------------------------------------------------------------------
+// Gap G77, the twelfth Codex look of W4B-A: before the if's force of g comes
+// a REAL-base power (`2.0 ^ n`: never a panic, whatever the exponent),
+// so it is inert (or the force itself) and the arm's read of g is admitted;
+// g's kernel divides by zero at its first force (BL8013 at the kernel's
+// line), first, in every lane.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let z: Array<Int64 like Row> = [0]
+let g = method_for(z) <@> lambda(v) -> 1 / v
+let n = 1
+let r = {
+    let t = 2.0 ^ n
+    if g(0) > 0 then Float64(g(0)) + t else t
+}
+// ABORT: BL8013
+// ABORT: .blade:10

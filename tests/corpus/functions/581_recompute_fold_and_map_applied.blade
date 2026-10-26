@@ -1,0 +1,18 @@
+// TEST: Recompute Selection Fold And Map Consumers
+// ============================================================================
+// Two consumers of one computed x: a fold and a pointwise co-iteration that
+// reads x's cell once. Materialize = work 12, traffic 18 (a 3, x 3 + 3 + 3,
+// b 3, r 3), peak 6; recompute = work 15, traffic 12, peak 3: work +3 <=
+// traffic -6, so the model chooses recompute (BLADE_RECOMPUTE) and
+// elementwise fusion splices x's map into r's nest. Values as materialized:
+// x = [2, 4, 6], s = 12, r = x * b + 1 = [21, 81, 181], 12 + 283 = 295.
+function scaled(a: T^1, b: T^1) -> T^0 = {
+    let x = method_for(a) <@> lambda(v) -> v * 2.0 |> compute
+    let s = reduce(x, (+), 0.0)
+    let r = method_for(zip(x, b)) <@> lambda(p, q) -> p * q + 1.0 |> compute
+    s + reduce(r, (+), 0.0)
+}
+let a = [1.0, 2.0, 3.0]
+let b = [10.0, 20.0, 30.0]
+let t = scaled(a, b)
+// EXPECT: t = 295.0

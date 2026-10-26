@@ -1,0 +1,23 @@
+// TEST: Deferred Alias Comm Outer Product Packed
+// LANGUAGE CHANGE (docs/plans/plan-identity-transpose-compute.md 2.1, the P1
+// entry point; formalism 8.3 identity groups, 10.2 deferred alias classes):
+// a TOP-LEVEL `let g2 = g` over a PURE deferred map binds the SAME deferred
+// value (10.2), so g and g2 are ONE array for the identity groups and
+// `method_for(g, g2)` under a comm kernel is packed exactly as
+// `method_for(g, g)` is: SymIdx<2, I> storage (the ascription below would be
+// BL3001 if the result were dense), triangular iteration, the same logical
+// reads. Until this change it was dense (review 2026-10-24 section 2.2).
+type I = Idx<3>
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let g2 = g
+let Pgg = method_for(g, g) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+let Pgg2: Array<Float64 like SymIdx<2, I>> = method_for(g, g2) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+let below = Pgg2((2 : I), (0 : I))
+let above = Pgg2((0 : I), (2 : I))
+let tot = reduce(Pgg2, (+), axes = 2)
+// EXPECT: Pgg = [[4.0, 8.0, 12.0], [16.0, 24.0], [36.0]]
+// EXPECT: Pgg2 = [[4.0, 8.0, 12.0], [16.0, 24.0], [36.0]]
+// EXPECT: below = 12.0
+// EXPECT: above = 12.0
+// EXPECT: tot = 144.0

@@ -299,7 +299,9 @@ let loadAsModule (builder: IRBuilder) (moduleName: string) (path: string) : IRMo
         ElemType = IRTScalar f.Elem
         IndexTypes = [rowIdx; colIdx]
         IsVirtual = false
-        Identity = Some (AIDVariable DataVarName)
+        // The store's variable (Types.providerVarIdentity): every CSV store
+        // holds a `data`, so the bare name made every two stores one array.
+        Identity = Some (providerVarIdentity $"csv:{moduleName}" DataVarName)
     }
     let varsStruct = IRTDStruct ($"{moduleName}__vars", [(DataVarName, mkArrayLike arrType)])
     {

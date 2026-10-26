@@ -432,6 +432,29 @@ static void run_pool_cache_tests() {
         deallocate<promote<int64_t, 1>::type>(c, k_ext3000);
         blade_pool::flush();
     }
+    // std::complex<double> pools are cached too (examples/09's 64 KB spectral
+    // temporaries): a reused complex block comes back ZEROED, as a fresh
+    // new std::complex<double>[] does, and is never handed to a double request
+    // of the same byte size.
+    {
+        using C1 = promote<std::complex<double>, 1>::type;
+        static const size_t k_c1500[1] = { 1500 };   // 24 KB of complex<double>: eligible
+        blade_pool::flush();
+        std::complex<double>* a = allocate<C1>(k_c1500);
+        for (size_t i = 0; i < 1500; i++) a[i] = std::complex<double>(double(i) + 1.0, -2.0);
+        long long r0 = pool_reused(), t0 = pool_retained();
+        deallocate<C1>(a, k_c1500);
+        bool kept = pool_retained() == t0 + 1;
+        double* d = allocate<P1>(k_ext3000);           // same 24 KB, other type: a miss
+        std::complex<double>* b = allocate<C1>(k_c1500);
+        bool zeroed = true;
+        for (size_t i = 0; i < 1500; i++) zeroed = zeroed && b[i] == std::complex<double>(0.0, 0.0);
+        check("pool_complex_reused_zeroed_and_typed", kept && b == a && (void*)d != (void*)a
+                                                      && pool_reused() == r0 + 1 && zeroed);
+        deallocate<C1>(b, k_c1500);
+        deallocate<P1>(d, k_ext3000);
+        blade_pool::flush();
+    }
     // Outside the size band nothing is retained: a small pool and a pool above
     // the 4 MB block cap both go straight back to delete[]. (Under a
     // BLADE_POOL_RETAIN arm whose cap admits 4.8 MB, that pool IS retained.)

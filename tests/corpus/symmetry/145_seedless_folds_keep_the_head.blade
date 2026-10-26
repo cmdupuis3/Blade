@@ -1,0 +1,52 @@
+// TEST: Seedless (+) folds are the left fold of their cells on a strict route: all -0.0 rows stay -0.0
+// An UNSEEDED `reduce(<deferred map>, (+))` has no seed: its value is the
+// left fold of its cells, c0 + c1 + .. (formalism 6.4). On a STRICT route --
+// here a `where repro` function, strict in EVERY build (its lifted kernels
+// inherit the demand, so no lane reorders its folds) -- the implementation's
+// synthesized seed is the EXACT identity -0.0 (gap G74; formalism 2.4:
+// `-0.0 + x` is x bit for bit), so the chain is the head-peeled one: an
+// all-(-0.0) row folds to -0.0, as the same fold over a STORED row does
+// (`reduce(z, (+))` copies z(0)). It used to be +0.0 there, which turned
+// such a row into +0.0. Covered: a row fold, the full nest, a join leg, the
+// rank-2 full fold, the stored-row control, a NaN first cell (it survives as
+// the head). A LICENSED fold keeps its base +0.0 seed (the licence's signed
+// zero, G40); `blade test orbit-scatter` and `omp-reduce` pin the top-level
+// strict forms (the ordered scatter, the pull, the row action) under
+// BLADE_FP_REPRO=1 by raw bits. QUOTED pins: a numeric `-0.0` pin accepts
+// either zero; the reciprocal pins the sign.
+let static p = 7
+type Var = Idx<p>
+type Obs = Idx<3>
+let w = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 5 + s * 3) % 7) - 2.5 |> compute
+let h = method_for(w, w) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute
+let wn = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> (if i == 0 then sqrt(Float64(s) - 5.0) else Float64(i + s) * 0.5) |> compute
+let hn = method_for(wn, wn) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute
+function neg_row(i: Nat<Var>) where repro -> Float64 = reduce(method_for(range<Var>) <@> lambda(j) -> -0.0 * abs(h(i, j)), (+))
+function nan_row(i: Nat<Var>) where repro -> Float64 = reduce(method_for(range<Var>) <@> lambda(j) -> hn(i, j), (+))
+function neg_total() where repro -> Float64 = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> -0.0 * abs(h(i, j)), (+)), (+))
+function stored_row(i: Nat<Var>) where repro -> Float64 = {
+    let z = method_for(range<Var>) <@> lambda(j) -> -0.0 * abs(h(i, j)) |> compute
+    reduce(z, (+))
+}
+function neg_pair() where repro -> Float64 = {
+    let a, b = object_for(<&!>) <@> (reduce(method_for(range<Var>) <@> lambda(j) -> -0.0 * abs(h(0, j)), (+)), reduce(method_for(range<Var>) <@> lambda(j) -> abs(h(1, j)), (+)))
+    a
+}
+function neg_full() where repro -> Float64 = {
+    let mm = method_for(range<Var>, range<Var>) <@> lambda(i, j) -> -0.0 * abs(h(i, j)) |> compute
+    reduce(mm, (+), axes = 2)
+}
+let r3 = neg_row(3)
+let inv_r3 = 1.0 / r3
+let inv_stored = 1.0 / stored_row(3)
+let inv_total = 1.0 / neg_total()
+let inv_pair = 1.0 / neg_pair()
+let inv_full = 1.0 / neg_full()
+let nan_head = nan_row(4)
+// EXPECT: r3 = "-0.0"
+// EXPECT: inv_r3 = "-inf"
+// EXPECT: inv_stored = "-inf"
+// EXPECT: inv_total = "-inf"
+// EXPECT: inv_pair = "-inf"
+// EXPECT: inv_full = "-inf"
+// EXPECT: nan_head = "nan"

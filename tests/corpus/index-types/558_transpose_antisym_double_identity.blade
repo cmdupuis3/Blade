@@ -1,0 +1,30 @@
+// TEST: Transpose Antisym Double Identity
+// Payload actions are explicit in the normal form (transpose-normal-form v1,
+// rule 2): an antisymmetric transpose is a whole-array NEGATION, and two of
+// them cancel -- -(-x) = x exactly on every stored cell (a sign flip twice,
+// signed zeros included), and the implicit diagonal zero is never stored, so
+// nothing changes representation. `back` is bound as `back = anti` (then a
+// read-only alias: no negate_pool, no pool). A SINGLE transpose keeps
+// today's materialization: `neg` negates into a fresh pool, and its stored
+// zero is -0.0 (the cell (0, 1) of anti is +0.0 here: A = [1, 1, 3]). Also
+// through a named intermediate (rule 1b): transpose(neg) is anti again.
+// anti = reynolds(2x + y, Antisymmetric) = x - y over the strict canonicals.
+let A = [1.0, 1.0, 3.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
+let anti = L <@> reynolds(g, Antisymmetric) |> compute
+let neg = transpose(anti, [0, 1])
+let back = transpose(transpose(anti, [0, 1]), [0, 1])
+let again = transpose(neg, [0, 1])
+let z = back(0, 1)
+let nz = neg(0, 1)
+let mirror = back(2, 0)
+let diag = back(1, 1)
+// EXPECT: anti = [0.0, -2.0, -2.0]
+// EXPECT: neg = [-0.0, 2.0, 2.0]
+// EXPECT: back = [0.0, -2.0, -2.0]
+// EXPECT: again = [0.0, -2.0, -2.0]
+// EXPECT: z = 0.0
+// EXPECT: nz = -0.0
+// EXPECT: mirror = 2.0
+// EXPECT: diag = 0.0

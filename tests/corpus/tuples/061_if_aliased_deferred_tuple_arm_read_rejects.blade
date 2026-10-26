@@ -1,0 +1,18 @@
+// TEST: If Aliased Deferred Tuple Arm Read (rejects)
+// ----------------------------------------------------------------------------
+// Finding 4 at top level: the arms hold an alias of a deferred tuple, so the
+// `if` is on the member-ordered path, and the else arm also READS the deferred
+// map `h` by position -- a force on that arm only. The arm-read audit now runs
+// for this shape too: refused at lowering in every lane (BL6002).
+// ----------------------------------------------------------------------------
+type Row = Idx<3>
+let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
+let m = method_for(x) <@> lambda(v) -> v * 2.0
+let h = method_for(x) <@> lambda(v) -> v + 5.0
+let p = (m, m)
+let q = p
+let c = reduce(x, (+)) > 5.0
+let t = if c then (q, 1.0) else (q, h(0))
+// ERROR: BL6002 @ 14:1
+// ERROR-CONTAINS: whose arm reads the deferred computation `h`
+// REJECT-AT: lower

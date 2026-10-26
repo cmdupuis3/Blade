@@ -188,7 +188,7 @@ let runPrivateSpoolTests (workDirectory: string) : int =
                 check "D08 observed mutable m capture flag is accepted only with no actual assignments"
                     (plan.TransformKernel.Captures.Head.IsMutable) ""
                 let replaceProducer (value: IRExpr) : IRProgram =
-                    { Modules=[{modul with Bindings=modul.Bindings |> List.map (fun b -> if b.Id=producer.Id then {b with Value=value} else b)}] }
+                    { ir with Modules = [{modul with Bindings=modul.Bindings |> List.map (fun b -> if b.Id=producer.Id then {b with Value=value} else b)}] }
                 let pi = match producer.Value with IRCompute (IRApplyCombinator i) -> i | _ -> failwith "producer topology changed"
                 let loop = match pi.Loop with IRMethodFor l -> l | _ -> failwith "method_for topology changed"
                 let ri, replayFold, replaySeed =
@@ -210,7 +210,7 @@ let runPrivateSpoolTests (workDirectory: string) : int =
                     let changedModule : IRModule =
                         { modul with
                             Bindings = modul.Bindings |> List.map (fun b -> if b.Id=terminal.Id then {b with Value=value} else b) }
-                    { Modules = [changedModule] }
+                    { ir with Modules = [changedModule] }
                 let changedInput (info: ApplyInfo) (at: IRArrayType) : ApplyInfo =
                     let id = match info.Arrays with [IRVar (id,_)] -> id | _ -> failwith "unary input topology changed"
                     let arrays = [IRVar(id,mkArrayLike at)]
@@ -250,7 +250,7 @@ let runPrivateSpoolTests (workDirectory: string) : int =
                 let badKernel : IRCallable =
                     {plan.ProducerKernel with Body=mapIRExpr (function IRVar(id,_) -> IRVar(id,IRTScalar ETFloat32) | e -> e) plan.ProducerKernel.Body}
                 rejects "D08 scalar variable payload type is certified"
-                    {Modules=[{modul with Functions=modul.Functions |> List.map (fun f -> if f.Id=badKernel.Id then badKernel else f)}]}
+                    { ir with Modules = [{modul with Functions=modul.Functions |> List.map (fun f -> if f.Id=badKernel.Id then badKernel else f)}]}
                 let unitType = IRTUnitAnnotated(IRTScalar ETFloat64, unitOfDims (Map.ofList ["meters",1]))
                 let unitKernel : IRCallable =
                     { plan.ProducerKernel with
@@ -261,7 +261,7 @@ let runPrivateSpoolTests (workDirectory: string) : int =
                     { modul with
                         Functions = modul.Functions |> List.map (fun f -> if f.Id=unitKernel.Id then unitKernel else f)
                         Bindings = modul.Bindings |> List.map (fun b -> if b.Id=producer.Id then {b with Value=IRCompute(IRApplyCombinator unitInfo)} else b) }
-                rejects "D08 unit-bearing F64 cannot be stripped into this unitless route" {Modules=[unitModule]}
+                rejects "D08 unit-bearing F64 cannot be stripped into this unitless route" { ir with Modules = [unitModule]}
                 let badIndexType =
                     match producer.Type with
                     | ArrayElem at -> mkArrayLike {at with IndexTypes=[{at.IndexTypes.Head with Id=900001;Tag=None}]}
@@ -269,12 +269,12 @@ let runPrivateSpoolTests (workDirectory: string) : int =
                 let changedBarrier =
                     {barrier with Value=mapIRExpr (function IRVar(id,_) when id=producer.Id -> IRVar(id,badIndexType) | e -> e) barrier.Value}
                 rejects "D08 barrier extent retains exact index provenance"
-                    {Modules=[{modul with Bindings=modul.Bindings |> List.map (fun b -> if b.Id=barrier.Id then changedBarrier else b)}]}
+                    { ir with Modules = [{modul with Bindings=modul.Bindings |> List.map (fun b -> if b.Id=barrier.Id then changedBarrier else b)}]}
                 let alias : IRBinding = {producer with Id=900002;Name="escape";Value=IRVar(producer.Id,producer.Type)}
-                rejects "D08 private array alias escape refuses" {Modules=[{modul with Bindings=modul.Bindings @ [alias]}]}
+                rejects "D08 private array alias escape refuses" { ir with Modules = [{modul with Bindings=modul.Bindings @ [alias]}]}
                 let terminalAlias : IRBinding = {terminal with Id=900005;Name="terminal_escape";Value=IRVar(terminal.Id,terminal.Type)}
                 rejects "D08 terminal demand beyond final print refuses hoist/lifetime changes"
-                    {Modules=[{modul with Bindings=modul.Bindings @ [terminalAlias]}]}
+                    { ir with Modules = [{modul with Bindings=modul.Bindings @ [terminalAlias]}]}
                 let terminalFunction : IRCallable =
                     { plan.TransformKernel with
                         Id = 900006
@@ -284,18 +284,18 @@ let runPrivateSpoolTests (workDirectory: string) : int =
                         Body = IRVar(terminal.Id,terminal.Type)
                         Captures = [{plan.TransformKernel.Captures.Head with Id=terminal.Id;Name=terminal.Name;Type=terminal.Type}] }
                 rejects "D08 namespace callable terminal capture cannot lose its hoisted declaration"
-                    {Modules=[{modul with Functions=modul.Functions @ [terminalFunction]}]}
+                    { ir with Modules = [{modul with Functions=modul.Functions @ [terminalFunction]}]}
                 let assignment : IRBinding =
                     {Id=900003;Name="assignment";Type=IRTUnit;Value=IRAssign(IRVar(barrier.Id,barrier.Type),IRLit(IRLitFloat 0.0));IsConst=false;IsMutable=false}
                 rejects "D08 actual assignment differs from a mutable capture flag"
-                    {Modules=[{modul with Bindings=modul.Bindings @ [assignment]}]}
+                    { ir with Modules = [{modul with Bindings=modul.Bindings @ [assignment]}]}
                 let ix = plan.SourceSpec.VarType.IndexTypes.Head
                 rejects "D08 declared type extent demand is included"
-                    {Modules=[{modul with Types=modul.Types @ [IRTDIndexType("Hidden",{ix with Extent=IRExtent(IRVar(producer.Id,producer.Type),0)})]}]}
+                    { ir with Modules = [{modul with Types=modul.Types @ [IRTDIndexType("Hidden",{ix with Extent=IRExtent(IRVar(producer.Id,producer.Type),0)})]}]}
                 rejects "D08 hidden initialization payload refuses"
-                    {Modules=[{modul with RandomInits=Map.add terminal.Id (FillModulus(IRVar(producer.Id,producer.Type))) modul.RandomInits}]}
+                    { ir with Modules = [{modul with RandomInits=Map.add terminal.Id (FillModulus(IRVar(producer.Id,producer.Type))) modul.RandomInits}]}
                 rejects "D08 foreign-module demand cannot be hidden by module assembly"
-                    {Modules=[modul;{modul with Name="Foreign";Bindings=[alias];Functions=[];ProviderReads=Map.empty}]}
+                    { ir with Modules = [modul;{modul with Name="Foreign";Bindings=[alias];Functions=[];ProviderReads=Map.empty}]}
                 PoolReuseTable.recordReturn 900004 producer.Id
                 rejects "D08 return-donor VALUE into the region is a storage conflict" ir
                 PoolReuseTable.reset ()
@@ -323,7 +323,7 @@ let runPrivateSpoolTests (workDirectory: string) : int =
                     (Blade.OptimizePrivateSpool.emissionOrderMatches plan modul.Bindings
                      && not (Blade.OptimizePrivateSpool.emissionOrderMatches plan (List.rev modul.Bindings))) ""
                 let reorderedIr : IRProgram =
-                    {Modules=[{modul with DerivedFuncOrigins=Map.add plan.Statistic.Id 900007 modul.DerivedFuncOrigins}]}
+                    { ir with Modules = [{modul with DerivedFuncOrigins=Map.add plan.Statistic.Id 900007 modul.DerivedFuncOrigins}]}
                 let reorderedCpp = emit policy reorderedIr
                 check "D08 derived-origin emission reordering cannot inherit omission authority"
                     (not (reorderedCpp.Contains marker) && reorderedCpp.Contains "Array<double, 1> p =") ""

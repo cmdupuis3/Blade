@@ -1,0 +1,146 @@
+// TEST: Memfree Fold Below A Block In An If Arm Freed (G54)
+// The analogous scalar return CONTAINERS of functions/548, for the GENERIC
+// return walk (every child of a scalar node): an `if` arm that is a BLOCK with
+// its own `let` (`kernel`: `{ let z = 2.0; reduce(..) * z }`), and a fold under
+// a `complex` constructor (`kcplx`, IRComplex: the fourth Codex look of W4B-C;
+// 2c3a724a leaked its `y`), and a UNIT-ANNOTATED fold (`kunit`, a `Float<meters>`
+// result: the fifth look's pool-free predicate peels units recursively), and an
+// IMMEDIATELY INVOKED capturing lambda (`kinv`: `(lambda(i) -> y(i))(k)`, the sixth
+// look -- 63623b8b pinned its `y` per call; the callee itself is the slot), one that
+// WRITES a cell of the scope's own `y` (`kwr`, the seventh look: a closed
+// owned-cell write proof admits it; 3cad1d25 pinned `y`), and its CONTROL `kwrx`,
+// whose lambda also stores a closure over `y` into caller storage (not admitted:
+// `y` kept -- the base freed it under the stored closure). The eighth look's
+// controls, each keeping `y` (1 / 0): `kesc` -- an INDEX expression of the owned-cell
+// store is a call that exports a closure over `y` (the proof keeps every index and
+// value operand in its residual body), `kidxw` -- a writing index call, `krhsw` -- a
+// writing call in the stored value. Each kernel is a proved-synchronous slot, so
+// `y` is freed at each function's exit on every path; both are called once
+// per step of a recursion (`blade test cell-epilogue` pins the exact frees and
+// that the ASan outstanding blocks do not grow with the step count). (A scalar
+// `match` return holding a fold -- in an arm or the scrutinee -- is a C++
+// BL7004, pre-existing, so it has no lifetime case to pin.) Values:
+// y = [1, 2, 3, 4, 5], sum(y * y) = 55, kcplx = |15 * 2i| = 30, kunit = 15 m, kinv(x, (2 : I)) = y(2) = 3, kwr = y(2) + 1 = 4,
+// kwrx = 4 and the stored closure's reduce(y, (+)) * 2 = 16 * 2 = 32; kesc = 55 + 4 = 59
+// and its closure 32; kidxw = krhsw = 4, and their counter ends at 2.
+Unit meters
+type I = Idx<5>
+type One = Idx<1>
+type Steps = Idx<40>
+
+function kernel(x: Array<Float64 like I>, choose: Bool) -> Float64 = {
+    let y = x + 1.0 |> compute
+    if choose then {
+        let z = 2.0
+        reduce(method_for(range<I>) <@> lambda(i) -> y(i) * y(i), (+)) * z
+    } else 1.0
+}
+
+function kcplx(x: Array<Float64 like I>) -> Float64 = {
+    let y = x + 1.0 |> compute
+    abs(complex(reduce(method_for(range<I>) <@> lambda(i) -> y(i), (+)), 0.0) * complex(0.0, 2.0))
+}
+
+function kunit(x: Array<Float64 like I>) -> Float<meters> = {
+    let y = method_for(range<I>) <@> lambda(i) -> (x(i) + 1.0 : meters) |> compute
+    reduce(method_for(range<I>) <@> lambda(i) -> y(i), (+))
+}
+
+function kinv(x: Array<Float64 like I>, k: Nat<I>) -> Float64 = {
+    let y = x + 1.0 |> compute
+    (lambda(i: Nat<I>) -> y(i))(k)
+}
+
+function kwr(x: Array<Float64 like I>, k: Nat<I>) -> Float64 = {
+    let mut y = x + 1.0 |> compute
+    (lambda(i: Nat<I>) -> {
+        y(i) = y(i) + 1.0
+        y(i)
+    })(k)
+}
+
+function kwrx(out: mut Array<(Float64 -> Float64) like One>, x: Array<Float64 like I>, k: Nat<I>) -> Float64 = {
+    let mut y = x + 1.0 |> compute
+    (lambda(i: Nat<I>) -> {
+        y(i) = y(i) + 1.0
+        out(0) = lambda(z: Float64) -> reduce(y, (+)) * z
+        y(i)
+    })(k)
+}
+
+function stash_ix(out: mut Array<(Float64 -> Float64) like One>, f: Float64 -> Float64) -> Nat<I> = {
+    out(0) = f
+    (2 : I)
+}
+
+function kesc(out: mut Array<(Float64 -> Float64) like One>, x: Array<Float64 like I>, k: Nat<I>) -> Float64 = {
+    let mut y = x + 1.0 |> compute
+    let s = reduce(method_for(range<I>) <@> lambda(a) -> y(a) * y(a), (+))
+    s + (lambda(i: Nat<I>) -> {
+        y(stash_ix(out, lambda(z: Float64) -> reduce(y, (+)) * z)) = y(i) + 1.0
+        y(i)
+    })(k)
+}
+
+function bump(cnt: mut Array<Int64 like One>) -> Nat<I> = {
+    cnt(0) = cnt(0) + 1
+    (2 : I)
+}
+
+function bumpf(cnt: mut Array<Int64 like One>) -> Float64 = {
+    cnt(0) = cnt(0) + 1
+    1.0
+}
+
+function kidxw(cnt: mut Array<Int64 like One>, x: Array<Float64 like I>, k: Nat<I>) -> Float64 = {
+    let mut y = x + 1.0 |> compute
+    (lambda(i: Nat<I>) -> {
+        y(bump(cnt)) = y(i) + 1.0
+        y(i)
+    })(k)
+}
+
+function krhsw(cnt: mut Array<Int64 like One>, x: Array<Float64 like I>, k: Nat<I>) -> Float64 = {
+    let mut y = x + 1.0 |> compute
+    (lambda(i: Nat<I>) -> {
+        y(i) = y(i) + bumpf(cnt)
+        y(i)
+    })(k)
+}
+
+let x: Array<Float64 like I> = [0.0, 1.0, 2.0, 3.0, 4.0]
+let b1 = kernel(x, true)
+let b0 = kernel(x, false)
+let c = kcplx(x)
+let u = kunit(x)
+let vi = kinv(x, (2 : I))
+let vw = kwr(x, (2 : I))
+let mut out: Array<(Float64 -> Float64) like One> = [lambda(z: Float64) -> z]
+let vx = kwrx(out, x, (2 : I))
+let vc = out(0)(2.0)
+let re = kesc(out, x, (2 : I))
+let ve = out(0)(2.0)
+let mut cnt: Array<Int64 like One> = [0]
+let ri = kidxw(cnt, x, (2 : I))
+let rr = krhsw(cnt, x, (2 : I))
+let cc = cnt(0)
+let rec acc: Array<Float64 like Steps> =
+    match acc with
+    | zero -> zero
+    | zero :: s -> zero :: kernel(x, true) + kcplx(x) + Float64(kunit(x)) + kinv(x, (2 : I)) + kwr(x, (2 : I))
+    | prefix :: n -> prefix :: kernel(x, n % 2 == 0) + kcplx(x) + Float64(kunit(x)) + kinv(x, (2 : I)) + kwr(x, (2 : I))
+let total = reduce(acc, (+))
+// EXPECT: b1 = 110.0
+// EXPECT: b0 = 1.0
+// EXPECT: c = 30.0
+// EXPECT: u = 15.0
+// EXPECT: vi = 3.0
+// EXPECT: vw = 4.0
+// EXPECT: vx = 4.0
+// EXPECT: vc = 32.0
+// EXPECT: re = 59.0
+// EXPECT: ve = 32.0
+// EXPECT: ri = 4.0
+// EXPECT: rr = 4.0
+// EXPECT: cc = 2
+// EXPECT: total = 4300.0

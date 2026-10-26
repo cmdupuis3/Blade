@@ -51,7 +51,7 @@ computed pins.  `count-theorems.ps1` is the mechanical implementation --
 run it with `-Check` to verify the numbers below and the headline in
 `docs/proofs.md`, which quotes the same total.
 
-## Contents (2121 theorems total)
+## Contents (2205 theorems total)
 
 - BladeCore.v (16): Group Law both halves (diagonal swap sound; per-dim
   product swap refuted), counting lemma (no lossless product layout),
@@ -996,6 +996,36 @@ run it with `-Check` to verify the numbers below and the headline in
   kernel >= n/2, ceil(n/2) at zero (nat artefact).  orbit_bound_boundary
   packages it (converse open); genericity_two_sides pairs it with
   nongeneric_data_beats_bound.  Pins 6 vs 3, 15 vs 5.
+- BladeStructuralIdentity.v (18): Oriented-key laws: transpose is an
+  involution preserving origin/epoch; bind_alias copies a key, hence its
+  read. Same and distinct keys select compact and dense layouts by
+  definition, with computed layout and outer-addition witnesses. No theorem
+  connects layout selection to symmetric reads; no mutation transition
+  increments epoch. Alias substitution is only the key-copy update lemma,
+  not the paper's general substitution theorem.
+- BladeCompositionalOptimization.v (35): Reindexing and unsigned packing
+  laws under assumed rank/enumerate bijections and reconstruction, with no
+  link to BladeDMWF's bijections. Same-state componentwise dominance is a
+  partial order; pruning and frontier coverage preserve an optimum for
+  every cost_le-monotone objective at a fixed depth. These guarantees also
+  hold for prune := id: no antichain or size bound, comparison across
+  depths, or composite structural-transpose theorem is proved.
+- BladeLayoutOptimizationBridge.v (10): Argmin properties over an admissible
+  filter of BladeLayout schedules; existing_canon_if_admissible reuses
+  canonical_is_cost_minimal. Schedules carry no direction and admissible
+  is an opaque Boolean predicate: forward legality requires checker_sound.
+  Resource dominance requires resource_factor and resource_monotone;
+  no traversal checker or hardware cost model is verified.
+- BladeMaterialization.v (21): Denotational finite-buffer readback:
+  packed_read_equals_virtual uses locate_bound and keeps structural zeros
+  ahead of reconstruction actions. Congruence lifts it through producer
+  graphs and an unchanged ordered persistent-store effect/snapshot skeleton,
+  preserving final store, trace and result for every retention policy.
+  Both readers use the same scalar tree and predecessor environment;
+  no operational retention, allocation/evaluation counts, lifetimes or
+  physical old-version availability are modelled. Pure nodes never read
+  mutable backing and scalars are total; failing/effectful cells and
+  source-to-graph lowering remain outside the theorem.
 
 ## Outside the tower: conditional on Coq's Reals axioms
 

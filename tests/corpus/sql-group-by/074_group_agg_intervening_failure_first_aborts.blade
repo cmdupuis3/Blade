@@ -1,0 +1,21 @@
+// TEST: Group aggregate intervening failure fires before the peel's BL8003 (aborts)
+// ABORT: BL8013
+// The accumulation moved from the peel up to the grouping (gap G71), but the
+// pass is TOTAL (stored sources, closed-total kernels), so it cannot fail in
+// a new place: the integer division between the grouping and the unseeded
+// peel still raises BL8013 first, exactly as in the as-written order, and
+// the peel's own BL8003 for its empty group 1 is never reached.
+type Region = Idx<3>
+type Row = Idx<4>
+
+function agg(k: Array<Region like Row>, v: Array<Int64 like Row>, d: Int64) = {
+    let gk = group_keys(k)
+    let g = group_by(v, gk)
+    let z = 10 / d
+    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b) |> compute
+    (z, s)
+}
+
+let keys: Array<Region like Row> = [0, 2, 0, 2]
+let vals: Array<Int64 like Row> = [1, 2, 3, 4]
+let (z, s) = agg(keys, vals, 0)

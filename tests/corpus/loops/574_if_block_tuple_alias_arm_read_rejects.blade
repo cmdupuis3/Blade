@@ -1,0 +1,23 @@
+// TEST: If Block Tuple Alias Arm Read (rejects)
+// ----------------------------------------------------------------------------
+// Gap G59, Codex review of W4B-A finding 3: the deferred tuple is the RESULT
+// of a block (`p0 = { let n = ..; (m, m) }`), aliased twice. The shared
+// predicate judges a block initializer by its let chain's result, as the C++
+// emitter does, so the member-ordered `if`'s arm read of h is refused at
+// lowering in every lane (BL6002).
+// ----------------------------------------------------------------------------
+type Row = Idx<3>
+let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
+let m = method_for(x) <@> lambda(v) -> v * 2.0
+let h = method_for(x) <@> lambda(v) -> v + 5.0
+let p0 = {
+    let n = extents(x)
+    (m, m)
+}
+let p1 = p0
+let p2 = p1
+let c = reduce(x, (+)) > 5.0
+let t = if c then (p2, 1.0) else (p2, h(0))
+// ERROR: BL6002 @ 19:1
+// ERROR-CONTAINS: whose arm reads the deferred computation `h`
+// REJECT-AT: lower

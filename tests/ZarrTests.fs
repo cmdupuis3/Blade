@@ -420,7 +420,8 @@ let runRank2StreamedValueBoundaryTests (workDirectory: string) : int =
                 { Modules = gatherIr.Modules |> List.map (fun m ->
                     { m with
                         Functions = m.Functions |> List.map (fun f -> { f with Body = mapIRExpr rewrite f.Body })
-                        Bindings = m.Bindings |> List.map (fun b -> { b with Value = mapIRExpr rewrite b.Value }) }) }
+                        Bindings = m.Bindings |> List.map (fun b -> { b with Value = mapIRExpr rewrite b.Value }) })
+                  DeclSpans = gatherIr.DeclSpans }
             File.WriteAllText(Path.Combine(directory,"metadata.rewrite.txt"),"IRIndex(B,[0,0]) -> Float64(IRExtent(B,0)); original source/capture types unchanged")
             let metadata = accepted "metadata" "out" metadataIr
             fallbackTable "metadata" metadata
@@ -2260,7 +2261,8 @@ let scaled = method_for(zip(A, m)) <@> lambda(x, w) -> x * w |> compute
                     let transformExpr rewrite (program: IRProgram) =
                         { Modules = program.Modules |> List.map (fun m ->
                             { m with Functions = m.Functions |> List.map (fun f -> { f with Body = mapIRExpr rewrite f.Body })
-                                     Bindings = m.Bindings |> List.map (fun b -> { b with Value = mapIRExpr rewrite b.Value }) }) }
+                                     Bindings = m.Bindings |> List.map (fun b -> { b with Value = mapIRExpr rewrite b.Value }) })
+                          DeclSpans = program.DeclSpans }
                     let rewriteRead change = function
                         | IRIndex (IRVar (aid, ty), [IRBinOp (IRElementwise, IRAdd, w, off, loc)], ident) as e
                             when (Blade.IRAccess.denseHaloTagOf w).IsSome -> change e aid ty w off loc ident
@@ -2297,7 +2299,8 @@ let scaled = method_for(zip(A, m)) <@> lambda(x, w) -> x * w |> compute
                             { Modules = ir.Modules |> List.map (fun m ->
                                 if m.Functions |> List.exists (fun c -> c.Id = f.Id) then
                                     { m with Functions = (m.Functions |> List.map (fun c -> if c.Id = f.Id then {c with Body = call} else c)) @ [callee] }
-                                else m) }
+                                else m)
+                              DeclSpans = ir.DeclSpans }
                         refuse "captured_callee" opaque
                     let arraySource = (source store "Float" "").Replace("let hi = A(w(1)); hi - A(w(-1))", "[A(w(1)), A(w(-1))]")
                     match lower arraySource with
@@ -2311,7 +2314,7 @@ let scaled = method_for(zip(A, m)) <@> lambda(x, w) -> x * w |> compute
                     let changedModule (m: IRModule) : IRModule =
                         let changedReads : Map<IRId, ProviderReadSpec> = Map.map changedProvider m.ProviderReads
                         {m with ProviderReads = changedReads}
-                    let disagree : IRProgram = {Modules = List.map changedModule ir.Modules}
+                    let disagree : IRProgram = {ir with Modules = List.map changedModule ir.Modules}
                     refuse "source_extent_disagreement" disagree
                     // The immutable certificate is scoped to the final IR and
                     // exact binding records; it cannot be reused after a rewrite.

@@ -1,7 +1,0 @@
-plan: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-19-LAPTOP-350H6LDB\session-135344\build\stencil\full\mt8-licensed-native\blade-llvm-inputonly\src\stencil_inputonly.blade -- 4 optimization decision(s)
-lane: LLVM (BLADE_LLVM=1): C++-only routes below are reported for this lane
-  [omp v1] __ret1073741824 @ 18:1: declined -- the LLVM lane has no thread-level form; the licence is honoured as fold reassociation [[omp] requested but emitted serial; C++ lane: applied; BLADE_OMP_PARALLEL_FOR; loop nest level 0 (__i0)]
-  [fold-form v1] _(checksum,input_checksum): applied [fold form: one accumulator chain with `reassoc nsz` (LLVM lane; the vectorizer picks the lanes); C++ lane fold form: K-lanes(8); reduce in expression position]
-  [fold-form v1] __v46: applied [fold form: one accumulator chain with `reassoc nsz` (LLVM lane; the vectorizer picks the lanes); C++ lane fold form: simd-reduction; reduce over a deferred computation (one level)]
-  [fold-form v1] lambda in _(checksum,input_checksum): applied [fold form: one accumulator chain with `reassoc nsz` (LLVM lane; the vectorizer picks the lanes); C++ lane fold form: K-lanes(8); reduce in expression position]
-inputs: 0 (identity policy: `content` = folded at compile time, hashed; `version` = read at run time, size + mtime observed -- BLADE_RUN_RECORD=<path> writes the run record)

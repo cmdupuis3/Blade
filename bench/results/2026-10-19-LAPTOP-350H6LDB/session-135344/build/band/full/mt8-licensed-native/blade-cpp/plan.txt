@@ -1,7 +1,0 @@
-plan: C:\Users\cdupu\Documents\GitHub\Blade\.claude\worktrees\bench-fortran\bench\results\2026-10-19-LAPTOP-350H6LDB\session-135344\build\band\full\mt8-licensed-native\blade-cpp\src\band.blade -- 5 optimization decision(s)
-  [omp v1] __ret1073741824 @ 31:1: applied [BLADE_OMP_PARALLEL_FOR; loop nest level 0 (__i0)]
-  [domain-enum v1] __v51 @ 41:1: applied [enumeration of Band: closed-form affine nest (2 level(s): i in [0, 20010], j in [max(0, i - 101), min(20010, i + 101)]), 4051931 cell(s); consumer: streamed fold (no array, no key table); order: diagonal (k = i - j outer, k in [-101, 101]; i inner and contiguous) -- a licensed fold over a difference-bounded band: same cells, same per-cell arithmetic, and a term depending only on i - j is invariant in the inner run]
-  [omp v1] __v51 @ 41:1: applied [omp parallel num_threads(T) + fixed-order combine; closed-form domain fold (Band): the diagonal index k cut into fixed per-thread blocks (each innermost run cut instead when the team outnumbers its trips)]
-  [fold-form v1] __v51 @ 41:1: applied [fold form: threaded(fixed blocks over the diagonal index k, fixed-order combine; simd within each block); reduce over a closed-form domain (Band: band walked by diagonal, k = i - j in [-101, 101], simd on the i run)]
-  [fold-form v1] _(checksum,input_checksum): applied [fold form: K-lanes(8); reduce in expression position]
-inputs: 0 (identity policy: `content` = folded at compile time, hashed; `version` = read at run time, size + mtime observed -- BLADE_RUN_RECORD=<path> writes the run record)

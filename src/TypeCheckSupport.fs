@@ -4179,6 +4179,306 @@ let internal arrowObligationClash (env: TypeEnv) (tFunc: TypedExpr) (paramTys: I
             | t -> refuse t)
     | _ -> None
 
+/// The ROOT of an identity-transparent alias, when the class is visible as
+/// proved at this use: a non-root member of a top-level pure deferred alias
+/// class (recordDeferredAliasMember) or of a stored alias class
+/// (recordStoredAliasMember), used at module level (not in a lambda or
+/// function body), in the class's own module, spelled unqualified, and the
+/// root's name still resolving to the root binder (so no shadowing or import
+/// can make two different arrays share a name-keyed identity). None for
+/// everything else, the root itself included.
+let aliasRootOf (env: TypeEnv) (name: string) (vid: IRId) : (string * IRId) option =
+    let viaTable (table: System.Collections.Generic.Dictionary<IRId, string * IRId * string option>) =
+        match table.TryGetValue vid with
+        | true, (rootName, rootVid, qual)
+            when rootVid <> vid
+                 && not env.InCallableBody
+                 && qual = env.ModuleQualifier
+                 && not (name.Contains ".")
+                 && (match Map.tryFind rootName env.Variables with
+                     | Some vi -> vi.VarId = rootVid
+                     | None -> false) ->
+            Some (rootName, rootVid)
+        | _ -> None
+    match viaTable env.DeferredAliasRoots with
+    | Some r -> Some r
+    | None -> viaTable env.StoredAliasRoots
+
+/// THE identity of a loop former's VARIABLE operand (every TypeCheckInfer
+/// site that used to mint `AIDVariable name` from the operand's spelling).
+/// A proved identity-transparent alias (aliasRootOf: a non-root member of a
+/// top-level pure deferred alias class, or of a never-written stored alias
+/// class) is `AIDAlias (AIDVariable root, name)` -- the root's identity, the
+/// operand's spelling kept for the decision record. Everything else -- the
+/// root itself included -- is `AIDVariable name`, exactly as before.
+///
+/// Two more keys come first (docs/plans/plan-identity-transpose-compute.md
+/// 2.2 / 2.3; formalism 8.3):
+///   * under a DENSE ASCRIPTION's re-check (TypeEnv.DenseAscription) every
+///     operand is a FRESH identity (`AIDAlias (AIDLiteral fresh, name)`, equal
+///     to nothing else), so the value forms no identity group;
+///   * inside a SHARING INSTANCE a relevant parameter is its partition class's
+///     identity (TypeEnv.SharingParamIdentities), provided the name still
+///     resolves to the parameter's binder.
+/// Every caller keys on what this returns, so a new kind of key flows through
+/// unchanged -- the sharing partition of a call (sharingPartitionOf) is
+/// computed from these very identities. ONE definition: the wave-2 merge
+/// found two (the sharing one here, the stored-alias one beside
+/// witnessArrayKey), and the later would have shadowed the earlier for every
+/// inference site typed after it.
+let loopOperandIdentity (env: TypeEnv) (name: string) (vid: IRId) : ArrayIdentity =
+    if env.DenseAscription then AIDAlias (AIDLiteral (env.Builder.FreshId()), name) else
+    match env.SharingParamIdentities.TryGetValue vid with
+    | true, shared when (match Map.tryFind name env.Variables with
+                         | Some vi -> vi.VarId = vid
+                         | None -> false) -> shared
+    | _ ->
+    match aliasRootOf env name vid with
+    | Some (rootName, _) -> AIDAlias (AIDVariable rootName, name)
+    | None -> AIDVariable name
+
+// ---------------------------------------------------------------------------
+// SHARING-PARTITION INSTANCES (docs/plans/plan-identity-transpose-compute.md
+// 2.2; formalism 8.3 "Sharing-partition instances")
+//
+// A call's argument TYPES do not say whether two arguments are the same
+// array, but the identity groups of 8.3 do -- `method_for(x, y) <@> k` under
+// a comm kernel is packed exactly when x and y are one array. So an
+// IDENTITY-SENSITIVE declaration (noteSharingRelevance) is specialized on the
+// NORMALIZED SHARING PARTITION of its relevant arguments, beside its ordinary
+// type key: `f(A, A)` is the call of the instance over [0,0], whose relevant
+// parameters carry one identity (TypeEnv.SharingParamIdentities), and
+// `f(A, B)` keeps the generic declaration, which elaborates every parameter
+// as a distinct array (today's meaning, the all-distinct partition). Only
+// ENCOUNTERED partitions are made (at most Bell(k) for k relevant
+// parameters); the key is the partition, never a root id or a caller's name.
+// Fail closed (the generic declaration) whenever sharing is not proved: a
+// non-variable argument is its own class, and an ineligible declaration
+// (TypeEnv.SharingDeclSources) declines with its reason on `blade plan`.
+// ---------------------------------------------------------------------------
+
+/// The checker of sharing instances (TypeCheckInfer.checkSharingVariant): given
+/// the callee binder and the partition (relevant position -> class), the head
+/// naming the instance. Installed by TypeCheck.checkModule.
+let internal sharingVariantHook : (TypeEnv -> IRId -> Map<int, int> -> TypeResult<TypedExpr>) ref =
+    ref (fun _ _ _ -> Error (Other "internal: the sharing-instance checker is not installed (TypeCheck.checkModule installs it)"))
+
+/// `[sharing-partition v1]` -- the rule name of every record below.
+let internal sharingRule = "sharing-partition"
+
+/// A partition spelled for the record: `[0,0]` over the relevant positions.
+let internal sharingPartitionText (relevant: int list) (cls: Map<int, int>) : string =
+    let classes = relevant |> List.map (fun p -> string (Map.tryFind p cls |> Option.defaultValue -1))
+    "[" + String.concat "," classes + "]"
+
+let internal sharingRecord (decl: FunctionDecl) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) : unit =
+    Blade.Effects.Decisions.record
+        { Rule = sharingRule; Version = 1; Span = decl.NameSpan; Subject = decl.Name
+          Outcome = outcome; Evidence = evidence }
+
+/// The RELEVANT parameters of a declaration whose body has just been typed,
+/// and whether it may be specialized at all (TypeEnv.SharingDeclSources).
+/// Relevant: the array parameters that, as BARE operands, fill two or more
+/// operand positions of one identity-sensitive site together with ANOTHER
+/// parameter --
+///   * an application (`<@>`, not a co-iteration) whose kernel declares
+///     `comm` / `anticomm` groups, is a `reynolds` kernel, or is not a lambda
+///     literal (a named kernel: kept, conservatively), or whose `object_for`
+///     declares comm groups;
+///   * a `gram(x, y)`;
+///   * a call of an ELIGIBLE identity-sensitive declaration (resolved through
+///     calleeDeclId; a callback, a lambda parameter or any other head
+///     contributes nothing), at its relevant positions.
+/// Ineligible, first condition wins: a synthesized declaration (a name
+/// containing `__`, or a generated decl with no source name span: AD
+/// transforms, elaborator output -- plan 2.4: a differentiated body keeps
+/// independent argument slots), `static`, `mpi` / `cuda`, a parameter pack,
+/// array instances (TypeEnv.ArrowDeclSources), recursion, a DECLARED return
+/// type other than a scalar (plan 2.3: the annotation fixes the layout and the
+/// elaboration at that boundary), or a relevant parameter that is `mut` or
+/// assigned in the body. Called for generic declarations only.
+let internal noteSharingRelevance (env: TypeEnv) (srcEnv: TypeEnv) (funcVarId: IRId) (funcDecl: FunctionDecl)
+                                  (parms: TypedParam list) (retType: IRType) (body: TypedExpr) : unit =
+    env.SharingDeclSources.Remove funcVarId |> ignore
+    let byVar = parms |> List.map (fun p -> (p.VarId, p.Index)) |> Map.ofList
+    let isArrayParam (i: int) =
+        match parms |> List.tryFind (fun p -> p.Index = i) with
+        | Some p ->
+            (match IR.stripUnits (env.Subst.Resolve p.Type) with
+             | ArrayElem _ -> true
+             | IRTInfer v -> env.Subst.GetArityConstraint v |> Option.exists (fun k -> k >= 1)
+             | _ -> false)
+        | None -> false
+    let paramOf (e: TypedExpr) =
+        match e.Kind with
+        | TExprVar (_, vid, _) -> Map.tryFind vid byVar
+        | _ -> None
+    let relevant = System.Collections.Generic.HashSet<int>()
+    let noteGroup (ps: int list) =
+        let ps = ps |> List.distinct |> List.filter isArrayParam
+        if ps.Length >= 2 then for p in ps do relevant.Add p |> ignore
+    let sensitiveKernel (info: TypedApplyInfo) =
+        info.HasReynolds
+        || (match info.Loop.Kind with
+            | TExprObjectFor oi -> not oi.CommGroups.IsEmpty
+            | _ -> false)
+        || (match info.Kernel.Kind with
+            | TExprLambda li -> not li.CommGroups.IsEmpty || not li.AntisymGroups.IsEmpty || li.IsCommutative
+            | TExprReynolds _ -> true
+            // A declared function kernel: sensitive exactly when it declares
+            // comm / anticomm groups (a deduced swap law licenses no storage).
+            | TExprVar (_, kid, _) when env.DeclaredFuncIds.Contains kid ->
+                let declares (d: System.Collections.Generic.Dictionary<IRId, int list list>) =
+                    match d.TryGetValue kid with
+                    | true, g -> not g.IsEmpty
+                    | _ -> false
+                declares env.FuncCommGroups || declares env.FuncAntisymGroups
+            // Anything else (a let-bound lambda, a composed kernel): kept.
+            | _ -> true)
+    let mutable recursive = false
+    let assigned = System.Collections.Generic.HashSet<int>()
+    let rec assignRoot (e: TypedExpr) =
+        match e.Kind with
+        | TExprVar (_, vid, _) -> Map.tryFind vid byVar
+        | TExprIndex (a, _, _) -> assignRoot a
+        | _ -> None
+    let rec walk (e: TypedExpr) =
+        (match e.Kind with
+         | TExprVar (_, vid, _) when vid = funcVarId -> recursive <- true
+         | TExprApply info when not info.IsCoIteration && sensitiveKernel info ->
+             noteGroup (info.Arrays |> List.choose paramOf)
+         | TExprGram (l, r, _) ->
+             noteGroup ([ l; r ] |> List.choose paramOf)
+         | TExprApp (f, args) ->
+             (match f.Kind, calleeDeclId env f with
+              | TExprVar (_, hv, _), Some fid when hv = fid && fid <> funcVarId ->
+                  (match env.SharingDeclSources.TryGetValue fid with
+                   | true, (_, _, rel, None) ->
+                       noteGroup (rel |> List.choose (fun p -> List.tryItem p args |> Option.bind paramOf))
+                   | _ -> ())
+              | _ -> ())
+         | TExprAssign (lhs, _) ->
+             (match assignRoot lhs with Some i -> assigned.Add i |> ignore | None -> ())
+         | TExprBlock (stmts, _) ->
+             let rec stmtAssigns (s: TypedStmt) =
+                 match s with
+                 | TStmtAssign (lhs, _) ->
+                     (match assignRoot lhs with Some i -> assigned.Add i |> ignore | None -> ())
+                 | TStmtForIn (_, _, _, _, body) -> List.iter stmtAssigns body
+                 | _ -> ()
+             List.iter stmtAssigns stmts
+         | _ -> ())
+        typedExprChildren e |> List.iter walk
+    walk body
+    if relevant.Count >= 2 then
+        let rel = relevant |> Seq.sort |> List.ofSeq
+        // A declared ARRAY return (a concrete array, a `T^k` caret with k >= 1,
+        // a tuple holding one): the annotation is the boundary's layout. A
+        // declared scalar or element variable (`-> Float64`, `-> T`) fixes
+        // no layout, so the body's internal elaboration stays free.
+        let declaredNonScalar =
+            let isArrayTy (t: IRType) =
+                match IR.stripUnits (env.Subst.Resolve t) with
+                | ArrayElem _ -> true
+                | IRTInfer v -> env.Subst.GetArityConstraint v |> Option.exists (fun k -> k >= 1)
+                | _ -> false
+            match funcDecl.ReturnType with
+            | None -> false
+            | Some _ ->
+                match IR.stripUnits (env.Subst.Resolve retType) with
+                | IRTTuple ts -> ts |> List.exists isArrayTy
+                | t -> isArrayTy t
+        let hasParallel (pred: ParallelStrategy -> bool) =
+            funcDecl.WhereClause |> Option.exists (fun w -> w.Parallel |> List.exists pred)
+        let relName (i: int) = (List.item i funcDecl.Params).Name
+        let ineligible =
+            if funcDecl.Name.Contains "__" || funcDecl.NameSpan.StartLine <= 0 then
+                Some "a compiler-synthesized declaration (an AD transform or elaborator output) keeps independent argument slots (plan 2.4)"
+            elif funcDecl.IsStatic then Some "a `static function` evaluates at compile time"
+            elif hasParallel (fun s -> match s with Mpi -> true | _ -> false) then Some "an `mpi` callable is decomposed per rank"
+            elif hasParallel (fun s -> match s with Cuda _ -> true | _ -> false) then Some "a `cuda` callable is a device kernel"
+            elif parms |> List.exists (fun p -> (env.Subst.Resolve p.Type).IsIRTPoly) then Some "a parameter pack spans several arguments"
+            elif env.ArrowDeclSources.ContainsKey funcVarId then Some "the declaration has array instances (an arrow parameter, a computed read of an unnamed axis, or a symbolic rank)"
+            elif recursive then Some "a recursive declaration"
+            elif declaredNonScalar then Some "the declared return type fixes the layout and the elaboration at this boundary (plan 2.3)"
+            else
+                match rel |> List.tryFind (fun i -> (List.item i funcDecl.Params).Mutability = Mutable) with
+                | Some i -> Some $"the relevant parameter `{relName i}` is `mut` (its writes alias the caller's array)"
+                | None ->
+                match rel |> List.tryFind assigned.Contains with
+                | Some i -> Some $"the relevant parameter `{relName i}` is assigned in the body"
+                | None -> None
+        env.SharingDeclSources.[funcVarId] <- (funcDecl, srcEnv, rel, ineligible)
+
+/// THE SHARING PARTITION of a call: when the callee is identity-sensitive
+/// (TypeEnv.SharingDeclSources) and two of its relevant arguments share an
+/// identity (loopOperandIdentity of a bare-variable argument; anything else
+/// is its own class), the head of the instance over that partition
+/// (sharingVariantHook) -- or, the callee being ineligible or the call under a
+/// dense ascription, None with the decline on `blade plan`. None also for the
+/// all-distinct partition (the generic declaration IS that elaboration).
+let internal sharingInstanceHead (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedExpr list) : TypeResult<TypedExpr> option =
+    // The head must NAME the declaration itself: a `let k = f` alias can be
+    // reassigned in its scope (`k = g`), and calleeDeclId follows the alias's
+    // first value, so a call through one keeps the generic dispatch (Codex
+    // review, finding 1).
+    let directDecl =
+        match tFunc.Kind, calleeDeclId env tFunc with
+        | TExprVar (_, hv, _), Some fid when hv = fid -> Some fid
+        | _ -> None
+    match directDecl with
+    | None -> None
+    | Some fid ->
+    match env.SharingDeclSources.TryGetValue fid with
+    | false, _ -> None
+    | true, (decl, _, rel, ineligible) ->
+    if rel |> List.exists (fun p -> p >= tArgs.Length) then None else
+    // The arguments' own identities (a dense ascription's fresh-operand rule
+    // is for the operands it re-checks, not for telling this call's sharing).
+    let idEnv = if env.DenseAscription then { env with DenseAscription = false } else env
+    let idOf (p: int) =
+        match (List.item p tArgs).Kind with
+        | TExprVar (name, vid, _) -> Some (loopOperandIdentity idEnv name vid)
+        | _ -> None
+    // Classes in first-occurrence order over the relevant positions.
+    let reps = ResizeArray<ArrayIdentity>()
+    let cls =
+        rel |> List.map (fun p ->
+            match idOf p with
+            | Some id ->
+                (match reps |> Seq.tryFindIndex (fun r -> sameIdentity r id) with
+                 | Some c -> (p, c)
+                 | None -> reps.Add id; (p, reps.Count - 1))
+            // Its own class: a placeholder equal to no other (compared only
+            // within this call; no id is minted, so the emission's numbering
+            // is untouched).
+            | None -> reps.Add (AIDLiteral (-1 - p)); (p, reps.Count - 1))
+        |> Map.ofList
+    let shared = (cls |> Map.toList |> List.map snd |> List.distinct |> List.length) < rel.Length
+    let names = rel |> List.map (fun p -> (List.item p decl.Params).Name) |> String.concat ", "
+    let text = $"partition {sharingPartitionText rel cls} of ({names})"
+    if not shared then None
+    elif env.DenseAscription then
+        sharingRecord decl (Blade.Effects.Declined "a dense ascription fixes the layout and the elaboration at this boundary (plan 2.3)")
+            [ text; "the generic declaration elaborates every parameter as a distinct array" ]
+        None
+    else
+    match ineligible with
+    | Some why ->
+        sharingRecord decl (Blade.Effects.Declined why) [ text; "the generic declaration elaborates every parameter as a distinct array" ]
+        None
+    | None ->
+        // An instance that does not check under the shared identities (a
+        // refusal only the shared elaboration meets -- a returned wreath, a
+        // deduction the body cannot honour) keeps the generic declaration:
+        // the all-distinct elaboration is always available.
+        match sharingVariantHook.Value env fid cls with
+        | Ok head -> Some (Ok head)
+        | Error e ->
+            sharingRecord decl (Blade.Effects.Declined ("the instance does not check under the shared identities: " + formatTypeError e))
+                [ text; "the generic declaration elaborates every parameter as a distinct array" ]
+            None
+
 // ---------------------------------------------------------------------------
 // ARRAY INSTANCES of arrow parameters (TypeEnv.ArrowVariant)
 //
@@ -4998,6 +5298,16 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
         | Some (fid, arrays) ->
             arrowVariantHook.Value env fid arrays
             |> Result.bind (fun head -> dispatchAppOrIndex env { head with Span = tFunc.Span } tArgs)
+        | None ->
+        // A SHARING-PARTITION INSTANCE (the section note above
+        // sharingVariantHook): an identity-sensitive callee handed ONE array
+        // at two relevant positions is the call of its instance over that
+        // partition, judged as an ordinary call of it (its own return type:
+        // packed where the shared body is). An instance is no sharing source
+        // itself, so the re-dispatch ends here.
+        match sharingInstanceHead env tFunc tArgs with
+        | Some headR ->
+            headR |> Result.bind (fun head -> dispatchAppOrIndex env { head with Span = tFunc.Span } tArgs)
         | None ->
         // AN ARROW PARAMETER MEETS ITS ARGUMENT. A parameter the callee's body
         // applied while it was open (`let u = lambda(c) -> c(0) + 1.0`; see
@@ -7189,7 +7499,11 @@ let declSymmetryContradiction (env: TypeEnv) (typedParams: TypedParam list)
                             else
                                 let (a, b) = (typedParams.[p], typedParams.[q])
                                 let others = typedParams |> List.indexed |> List.filter (fun (k, _) -> k <> p && k <> q) |> List.map snd
-                                Blade.Deduce.witnessSwapLawFailure (witnessInlineFn env) a.VarId b.VarId (others |> List.map (_.VarId)) negate proved
+                                // A declared function's body: captured arrays
+                                // keep binder keys (the identity-transparent
+                                // alias rule applies at module level only, as
+                                // TypeCheckSupport.aliasRootOf does).
+                                Blade.Deduce.witnessSwapLawFailure (witnessInlineFn env) (fun _ vid -> vid) a.VarId b.VarId (others |> List.map (_.VarId)) negate proved
                                     (isIntTy a.Type && isIntTy b.Type) tBody
                                 |> Option.map (fun w ->
                                     let named =
@@ -7352,6 +7666,277 @@ let parallelCalleeWriteError (env: TypeEnv) (paramIds: IRId list) (body: TypedEx
         | Some err -> Some err
         | None -> typedExprChildren e |> List.tryPick go
     go body
+
+/// TOP-LEVEL PURE DEFERRED ALIAS CLASSES, the checker's half (formalism 10.2
+/// "Aliases and printing of deferred maps", 8.3 identity groups;
+/// docs/plans/plan-identity-transpose-compute.md 2.1, the P1 entry point).
+/// A module-level `let g2 = g` over a pure deferred map binds the SAME
+/// deferred value -- no write through any member is possible (BL4005,
+/// Lowering.refuseDeferredWritesAndUnorderedIfs) -- so the members are ONE
+/// array for every identity question, and `method_for(g, g2)` under a comm
+/// kernel is the identity group `method_for(g, g)` is. LANGUAGE CHANGE, no
+/// knob.
+///
+/// Called by checkDecl for every module-level `let` with a plain-variable
+/// pattern (never in a block or a callable body, whose aliases are forcing
+/// COPIES). Registers, fail-closed:
+///   * a ROOT: a plain `let` (not `mut`) whose typed value is a bare apply
+///     combinator (`method_for(..) <@> k`, `object_for(k) <@> ..`) whose
+///     evaluation is REPEATABLE (Effects: no assignment, display output,
+///     external read or unknown callee anywhere in it -- a let-bound lambda or
+///     a higher-order callee is Unknown) and writes nothing outside itself
+///     (the G45 twins: outerWritesOfBody / parallelCalleeWriteError). A
+///     writing map is computed at its definition (G45) and is no class root.
+///   * an ALIAS: a plain `let` (not `mut`), no type ascription, whose value is
+///     a bare unqualified variable naming a registered member of THIS module.
+/// Anything else registers nothing and keeps its own spelled identity.
+///
+/// THE TRANSITIVE HALF of the root's purity (Codex diff look, finding 1): a
+/// named deferred producer runs where it is READ, so lowering's G45 judgment
+/// (Lowering.forceEffectfulModuleLets over Optimize.scheduleMayWriteIn, which
+/// chases every outer name to its deferred value) forces a map that reads a
+/// WRITING named map -- and then the alias is a writable copy. So every name
+/// the root's value reads from outside itself must be proved inert first
+/// (deferredRootReadsAdmissible): a class member already registered (its own
+/// value passed this same check), a callable whose recorded outside reads are
+/// all admissible in turn (its own effects are effectsOfBody's call summary,
+/// Unknown when it has none), a scalar value (a
+/// scalar `let` is evaluated at its let), or an array binding whose value
+/// chases -- through bare-name aliases only -- to STORAGE or a virtual range:
+/// an array literal, a `|> compute`, a declared function's call result (the
+/// callee forces), `range<..>`. Anything else (a deferred map that is not a
+/// registered root, a view, a tuple, a provider value, a name not found in
+/// scope) keeps the root unregistered.
+let private deferredRootReadsAdmissible (env: TypeEnv) (value: TypedExpr) : bool =
+    let inside = bindersInside value
+    let findVar (name: string) (vid: IRId) =
+        match Map.tryFind name env.Variables with
+        | Some vi when vi.VarId = vid -> Some vi
+        | _ -> None
+    let rec storedValue (fuel: int) (tv: TypedExpr) : bool =
+        fuel > 0
+        && (match tv.Kind with
+            | TExprArrayLit _ | TExprLit _ | TExprCompute _ | TExprRange _ -> true
+            | TExprApp (h, _) ->
+                let rec head (e: TypedExpr) =
+                    match e.Kind with
+                    | TExprApp (f, _) -> head f
+                    | TExprVar (_, fid, _) -> env.DeclaredFuncIds.Contains fid
+                    | _ -> false
+                head h
+            | TExprVar (n, v, _) -> admissibleVar (fuel - 1) n v
+            | _ -> false)
+    // A CALLABLE is admissible when every outside binding it names (its
+    // recorded TypeEnv.FuncOuterReads, which already folds in the declared
+    // functions it names) is: lowering's write analysis follows a callable
+    // REFERENCE into its body and every named producer it reads, whether or
+    // not the reference is called (Codex second look: a declared kernel or an
+    // unused let-bound lambda reading a writing map). No entry means the
+    // recording ran and found none -- for a declared function or a let-bound
+    // lambda literal only; any other function-typed value (a call result, a
+    // parameter) is unprovable. `seen` makes a recursive callable's own name
+    // a closed cycle, not a refusal.
+    and admissibleCallable (fuel: int) (seen: Set<IRId>) (vid: IRId) (isRecorded: bool) : bool =
+        if seen.Contains vid then true
+        else
+            match env.FuncOuterReads.TryGetValue vid with
+            | true, reads -> reads |> List.forall (fun (n, id) -> admissibleVarIn (fuel - 1) (seen.Add vid) n id)
+            | _ -> isRecorded
+    and admissibleVar (fuel: int) (name: string) (vid: IRId) : bool = admissibleVarIn fuel Set.empty name vid
+    and admissibleVarIn (fuel: int) (seen: Set<IRId>) (name: string) (vid: IRId) : bool =
+        if fuel <= 0 then false
+        elif env.DeferredAliasRoots.ContainsKey vid then true
+        elif env.DeclaredFuncIds.Contains vid then admissibleCallable fuel seen vid true
+        else
+            match findVar name vid with
+            | None -> false
+            | Some vi ->
+                match IR.stripUnits (env.Subst.Resolve vi.Type) with
+                | FuncElem _ ->
+                    (match vi.TypedValue with
+                     | Some { Kind = TExprLambda _ } -> admissibleCallable fuel seen vid true
+                     | Some { Kind = TExprVar (n2, v2, _) } -> admissibleVarIn (fuel - 1) seen n2 v2
+                     | _ -> false)
+                | ArrayElem _ | IRTTuple _ | IRTLoop _ | IRTComputation _ -> (match vi.TypedValue with Some tv -> storedValue fuel tv | None -> false)
+                | IRTScalar _ -> true
+                | _ -> false
+    let rec go (e: TypedExpr) : bool =
+        let own =
+            match e.Kind with
+            | TExprVar (n, v, _) when not (inside.Contains v) -> admissibleVar 16 n v
+            | _ -> true
+        own && (typedExprChildren e |> List.forall go)
+    go value
+
+let recordDeferredAliasMember (env: TypeEnv) (isPlainLet: bool) (hasAscription: bool)
+                              (surfaceVar: string option) (varId: IRId) (name: string)
+                              (tValue: TypedExpr) : unit =
+    if isPlainLet then
+        match tValue.Kind, surfaceVar with
+        | TExprVar (src, srcVid, _), Some surf when not hasAscription && src = surf && not (src.Contains ".") ->
+            (match env.DeferredAliasRoots.TryGetValue srcVid with
+             | true, (rootName, rootVid, qual) when qual = env.ModuleQualifier ->
+                 env.DeferredAliasRoots.[varId] <- (rootName, rootVid, qual)
+             | _ -> ())
+        | TExprApply _, _ ->
+            let isPure =
+                Blade.Effects.isRepeatable (effectsOfBody env None tValue)
+                && (outerWritesOfBody env env tValue).IsEmpty
+                && (parallelCalleeWriteError env [] tValue).IsNone
+                && deferredRootReadsAdmissible env tValue
+            let isArray =
+                match IR.stripUnits (env.Subst.Resolve tValue.Type) with
+                | ArrayElem at -> not at.IndexTypes.IsEmpty
+                | _ -> false
+            if isPure && isArray then
+                env.DeferredAliasRoots.[varId] <- (name, varId, env.ModuleQualifier)
+        | _ -> ()
+
+/// TOP-LEVEL STORED ALIAS CLASSES, the checker's half (docs/plans/plan-
+/// identity-transpose-compute.md 2.1, "stored arrays with provable no-write
+/// intervals come second"; formalism 8.3). A module-level `let B = A` over a
+/// STORED array deep-copies (loops/081), so A and B are two arrays -- UNLESS
+/// nothing in the program can ever write A, B or any value that may share
+/// their storage: then both hold the same cells for their whole lifetime and
+/// are ONE array for every identity question, so `method_for(A, B)` under a
+/// comm kernel is the identity group `method_for(A, A)` is. LANGUAGE CHANGE,
+/// no knob (identity is a language fact; the read-only alias PLAN,
+/// Optimize.planAliasElision, decides separately whether B also SHARES A's
+/// storage, and every lane reads each operand by position, so a packed
+/// product over two equal copies is the same value).
+///
+/// Called by checkDecl for every module-level `let` with a plain-variable
+/// pattern. Registers, fail-closed:
+///   * a ROOT: a `let` / `let mut` whose typed value is STORED at its own site
+///     (storedRootForm: an array literal, a `|> compute` of a computed value,
+///     a call of a declared function -- the callee forces) and whose type is a
+///     plain or compact stored array (storedAliasableType: what the read-only
+///     alias plan can share);
+///   * an ALIAS: a plain `let` (not `mut`), no type ascription, whose value is
+///     a bare unqualified variable naming a registered member of THIS module,
+///     when the module's never-written proof (env.StoredAliasNeverWritten,
+///     TypeCheck.storedAliasWriteProof: a syntactic, module-wide, fail-closed
+///     closure over the SURFACE declarations, computed before any is checked,
+///     because identity is decided here and the write may come later in the
+///     source) holds for the root, the alias's source and the alias.
+/// Every candidate alias (a plain top-level `let B = A` of an array binding of
+/// this module that is not a deferred class member) records its verdict in
+/// Types.StoredAliasIdentity, which Lowering reports as `[alias-identity v1]`.
+let private storedAliasableType (env: TypeEnv) (t: IRType) : bool =
+    match IR.stripUnits (env.Subst.Resolve t) with
+    | ArrayElem at ->
+        not at.IsVirtual
+        && not at.IndexTypes.IsEmpty
+        && at.IndexTypes |> List.forall (fun ix ->
+            ix.IxKind = IxKPlain
+            && (match ix.Symmetry with SymNone | SymSymmetric | SymAntisymmetric | SymHermitian -> true | _ -> false))
+    | _ -> false
+
+/// How a top-level binding's value is stored at its own site, and whether its
+/// cells may be SHARED with what the value names (a call's result -- the
+/// callee may hand back an argument's or a captured array's storage -- or a
+/// `|> compute` of anything but a map, which can be the identity on a stored
+/// name, view or call: formalism 10.2): the never-written proof then also
+/// covers everything the root's declaration reaches (Codex review of this
+/// rule, finding 1: `id1(X) |> compute` shares X). FRESH, with no reach, only:
+/// an array literal and a `|> compute` of an apply combinator (a map's pool).
+let private storedRootForm (env: TypeEnv) (tValue: TypedExpr) : (string * bool) option =
+    match tValue.Kind with
+    | TExprArrayLit _ -> Some ("an array literal", false)
+    | TExprCompute inner ->
+        match inner.Kind with
+        // `X |> compute` of a NAMED value is not proved a fresh pool (the
+        // read-only alias plan's freshRootForm refuses it too).
+        | TExprVar _ -> None
+        | TExprApply _ -> Some ("a `|> compute` of a map (a fresh pool)", false)
+        | _ -> Some ("a `|> compute` (its reach is never written either: it may share what it names)", true)
+    | TExprApp (h, _) ->
+        let rec head (e: TypedExpr) =
+            match e.Kind with
+            | TExprApp (f, _) -> head f
+            | TExprVar (_, fid, _) -> Some fid
+            | _ -> None
+        match head h with
+        | Some fid when env.DeclaredFuncIds.Contains fid -> Some ("a call of a declared function (the callee forces its result)", true)
+        | _ -> None
+    | _ -> None
+
+let recordStoredAliasMember (env: TypeEnv) (mutability: BindingMut) (hasAscription: bool)
+                            (surfaceVar: string option) (varId: IRId) (name: string)
+                            (tValue: TypedExpr) : unit =
+    let qual = env.ModuleQualifier
+    let isArrayTy (t: IRType) =
+        match IR.stripUnits (env.Subst.Resolve t) with
+        | ArrayElem at -> not at.IndexTypes.IsEmpty
+        | _ -> false
+    // ROOT registration (a root is its own member; only an alias maps away).
+    (if mutability <> BindConst
+        && storedAliasableType env tValue.Type
+        && (storedRootForm env tValue).IsSome then
+        env.StoredAliasRoots.[varId] <- (name, varId, qual))
+    match tValue.Kind, surfaceVar with
+    | TExprVar (src, srcVid, _), Some surf
+        when src = surf && not (src.Contains ".")
+             && not (env.DeferredAliasRoots.ContainsKey srcVid)
+             && isArrayTy tValue.Type ->
+        let record (rootName: string) (rootVid: IRId) (verdict: Result<string list, string>) =
+            Blade.Types.StoredAliasIdentity.record
+                { AliasId = varId; Alias = name; Root = rootName; RootId = rootVid; Verdict = verdict }
+        match env.StoredAliasRoots.TryGetValue srcVid with
+        | true, (rootName, rootVid, rq) when rq = qual ->
+            let verdict =
+                if mutability <> BindLet then Error $"`{name}` is declared `let mut`: an assignable copy by declaration"
+                elif hasAscription then Error $"`{name}` carries a type ascription (a declared type fixes its own elaboration)"
+                elif not (storedAliasableType env tValue.Type) then Error "the array is not a plain or compact stored array"
+                else
+                    let rootInfo =
+                        match Map.tryFind rootName env.Variables with
+                        | Some vi when vi.VarId = rootVid -> vi.TypedValue
+                        | _ -> None
+                    match rootInfo |> Option.bind (storedRootForm env) with
+                    | None -> Error $"`{rootName}` no longer resolves to its stored root"
+                    | Some (how, isCall) ->
+                        match env.StoredAliasNeverWritten.Value rootName isCall [ rootName; src; name ] with
+                        | Error why -> Error why
+                        | Ok why ->
+                            let chain = if src = rootName then "" else $" through `{src}`"
+                            Ok [ $"`{name}` = `{rootName}`{chain}: one array for the identity groups (formalism 8.3)"
+                                 $"storage of `{rootName}`: {how}"
+                                 why ]
+            (match verdict with
+             | Ok _ -> env.StoredAliasRoots.[varId] <- (rootName, rootVid, qual)
+             | Error _ -> ())
+            record rootName rootVid verdict
+        | true, _ -> ()
+        | _ ->
+            // An array binding of this module that is no stored root (a
+            // deferred-form-free view, a provider value, a tuple element, a
+            // scalar-typed name): the candidate keeps its own identity.
+            match Map.tryFind src env.Variables with
+            | Some vi when vi.VarId = srcVid ->
+                let why =
+                    match vi.TypedValue with
+                    | Some tv when (storedRootForm env tv).IsSome ->
+                        "the array is not a plain or compact stored array"
+                    | Some _ ->
+                        $"`{src}`'s value is not a form v1 proves stored at its own site (an array literal, a `|> compute` of a computed value, a call of a declared function, or a stored alias of one)"
+                    | None -> $"`{src}` is not a module binding the checker can see"
+                record src srcVid (Error why)
+            | _ -> ()
+    | _ -> ()
+
+/// THE comm/anticomm witness's key for a CAPTURED ARRAY read (formalism 4,
+/// the sampler; plan-identity-transpose-compute 2.5): reads are sampled by
+/// semantic operand key, so the identity-transparent aliases of one array
+/// (aliasRootOf) share samples -- a law true only because two names hold the
+/// same cells is a law about one array. Every other binder keys by itself
+/// (sampled independently, as before), and captured SCALARS are not routed
+/// through here at all.
+let witnessArrayKey (env: TypeEnv) : string -> IRId -> IRId =
+    fun name vid ->
+        match aliasRootOf env name vid with
+        | Some (_, rootVid) -> rootVid
+        | None -> vid
 
 /// Rejection message shared by the two orientations of the same unimplemented
 /// shape: a `zip(...)` sitting beside other arrays in ONE operand pack
@@ -8073,3 +8658,194 @@ let internal structFieldAccess (env: TypeEnv) (typeName: string) (field: string)
                                        fields |> List.map fst,
                                        providerSectionSteering env typeName field))
     | _ -> Ok None
+
+
+// Recursive-array windowing (docs/plans/plan-rec-array-windowing.md, P1;
+// bench/notes/peakmem-microkernel-plan.md PM33/PM34)
+//
+// A block-local `let rec NAME` whose recursion reads its prefix only at
+// constant lags (`prefix(n - c)`, max lag K) and whose LATER uses are all
+// fixed-row reads `NAME(p, ...)` does not need its whole history: a K+1-slot
+// ring holds every row a step reads, and one snapshot per read row p holds
+// what the rest of the block reads. The binding then DISSOLVES -- every later
+// `NAME(p, rest)` is rewritten to `__snap_<p>_NAME(rest)` before the rest of
+// the block is checked -- so a use the classifier and the rewriter disagree
+// on is an unbound-name compile error, never a wrong value. Demotion (the
+// full buffer, exactly as before) is always sound: the window is a storage
+// policy, not a semantics change. This section is the SYNTACTIC half (no
+// type environment); TypeCheckInfer.recArrayWindowDecision adds the extents.
+
+/// The physical buffers a windowed desugar emits. Shared by the emitter and
+/// the tail rewriter so the two cannot spell a name differently. No counter:
+/// a second binding of NAME in the same tail demotes (rebound), and sibling
+/// scopes already reuse the `__rec_` buffer names.
+let internal recRingName (name: string) = $"__ring_{name}"
+let internal recSnapName (name: string) (p: int64) = $"__snap_{p}_{name}"
+
+/// A literal leading ordinal, seeing through an ascription: both `traj(2)`
+/// and `traj((2 : Steps))` occur.
+let rec internal recLitOrdinal (e: Expr) : int64 option =
+    match e.Kind with
+    | ExprKind.ExprLit (LitInt v) -> Some v
+    | ExprKind.ExprTyped (inner, _) -> recLitOrdinal inner
+    | _ -> None
+
+/// Does the name occur anywhere in this expression (shadowing ignored)?
+let internal recMentions (name: string) (e: Expr) : bool =
+    let mutable found = false
+    Blade.Unfold.mapExprPre (fun x ->
+        match x.Kind with
+        | ExprKind.ExprVar v when v = name -> found <- true; Some x
+        | _ -> None) e |> ignore
+    found
+
+/// (a) The slice's own reads: the maximum lag K at which it reads its prefix,
+/// or why it cannot ride a K+1 ring. Recognises the index shapes the desugar's
+/// `guardsFor` pattern-matches: `n` and `n + c` (c >= 0) read past the built
+/// prefix -- zero by rule, never the buffer -- so they cost no slot; `n - c`
+/// (c >= 1) is lag c. Anything else demotes: a bare `prefix` (the WHOLE
+/// partly-built buffer), a fixed ordinal `prefix(3)` re-read every step (its
+/// slot would have to outlive the sweep), any other index expression, or a
+/// prefix read nested inside another read's index arguments (the desugar
+/// rebuilds the outer read from unmapped arguments).
+let internal recArrayMaxLag (def: RecArrayDef) : Result<int64, string> =
+    let mutable bad : string option = None
+    let mutable maxLag = 0L
+    let fail r = if bad.IsNone then bad <- Some r
+    let isStepVar (e: Expr) =
+        match e.Kind with ExprKind.ExprVar v -> v = def.StepVar | _ -> false
+    let scan (e: Expr) =
+        Blade.Unfold.mapExprPre (fun x ->
+            if bad.IsSome then Some x else
+            match x.Kind with
+            | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar p }, args) when p = def.PrefixVar ->
+                (match args with
+                 | [] -> fail "the slice applies its prefix with no index"
+                 | idx :: rest ->
+                     (match idx.Kind with
+                      | _ when isStepVar idx -> ()
+                      | ExprKind.ExprBinOp (_, OpSub, l, { Kind = ExprKind.ExprLit (LitInt c) }) when isStepVar l ->
+                          if c < 0L then () elif c > maxLag then maxLag <- c
+                      | ExprKind.ExprBinOp (_, OpAdd, l, { Kind = ExprKind.ExprLit (LitInt c) }) when isStepVar l ->
+                          if c < 0L && -c > maxLag then maxLag <- -c
+                      | _ -> fail $"the slice reads `{def.PrefixVar}` at a leading index that is not `{def.StepVar} - c` for a constant c (a fixed or computed ordinal must outlive the sweep)")
+                     if rest |> List.exists (recMentions def.PrefixVar) then
+                         fail $"a `{def.PrefixVar}` read is nested inside another read's index arguments")
+                Some x
+            | ExprKind.ExprVar p when p = def.PrefixVar ->
+                fail $"the slice uses `{def.PrefixVar}` whole (the partly built buffer)"; Some x
+            | ExprKind.ExprVar v when v = def.Name || v.StartsWith "__rec" ->
+                fail $"the slice names `{v}`"; Some x
+            | _ -> None) e |> ignore
+    scan def.SliceExpr
+    (match def.SeedArm with
+     | Some (_, seedExpr) when recMentions def.PrefixVar seedExpr || recMentions def.Name seedExpr ->
+         fail "the seed arm names the recursion"
+     | _ -> ())
+    match bad with Some r -> Error r | None -> Ok maxLag
+
+/// (b) Every LATER use of `name`: the block's remaining statements and its
+/// value expression. Returns the distinct, sorted set of rows read (the
+/// snapshot set), or why the rest of the block is not window-clean. Ordinals
+/// are only checked non-negative here; the upper bound needs the extent.
+/// Conservative throughout: any binder of `name`, any assignment through it,
+/// any use other than a fixed-row read, or an annotation that mentions it
+/// demotes.
+let internal recArrayTailReads (name: string) (tail: Stmt list) (final: Expr option) : Result<int64 list, string> =
+    let mutable bad : string option = None
+    let reads = ResizeArray<int64>()
+    let fail r = if bad.IsNone then bad <- Some r
+    // Types can carry expressions (`Idx<extents(x)>`), which `mapExprPre`
+    // does not walk: a mention there is a use this scan cannot classify.
+    let typeMentions (t: TypeExpr) = (sprintf "%A" t).Contains ("\"" + name + "\"")
+    let rec scan (e: Expr) : unit =
+        Blade.Unfold.mapExprPre (fun x ->
+            if bad.IsSome then Some x else
+            match x.Kind with
+            | ExprKind.ExprAssign (lhs, rhs) ->
+                if recMentions name lhs then fail $"`{name}` is assigned through" else (scan lhs; scan rhs)
+                Some x
+            | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar v }, args) when v = name && not args.IsEmpty ->
+                (match recLitOrdinal args.Head with
+                 | Some p when p >= 0L -> reads.Add p
+                 | _ -> fail $"`{name}` is read at a row that is not a literal ordinal")
+                args.Tail |> List.iter scan
+                Some x
+            | ExprKind.ExprVar v when v = name -> fail $"`{name}` is used whole (an alias, an argument or a value)"; Some x
+            | ExprKind.ExprTyped (_, t) when typeMentions t -> fail $"a type annotation mentions `{name}`"; Some x
+            // `mapExprPre`'s callback sees expressions only, so statements
+            // inside nested blocks are walked here.
+            | ExprKind.ExprBlock (ss, fin) ->
+                ss |> List.iter scanStmt
+                if bad.IsNone then fin |> Option.iter scan
+                Some x
+            | ExprKind.ExprLambda (ps, _, _)
+                    when ps |> List.exists (fun p -> p.Name = name || (p.Type |> Option.exists typeMentions)) ->
+                fail $"a lambda rebinds or annotates with `{name}`"; Some x
+            | ExprKind.ExprLet (b, _)
+                    when Set.contains name (Blade.StaticEval.collectPatternBindings b.Pattern)
+                         || (b.Type |> Option.exists typeMentions) ->
+                fail $"`{name}` is rebound or named in an annotation"; Some x
+            | ExprKind.ExprMatch (_, cases)
+                    when cases |> List.exists (fun c -> Set.contains name (Blade.StaticEval.collectPatternBindings c.Pattern)) ->
+                fail $"a match arm rebinds `{name}`"; Some x
+            | ExprKind.ExprRecArray d when d.Name = name || d.PrefixVar = name || d.StepVar = name ->
+                fail $"a later recursive array rebinds `{name}`"; Some x
+            | _ -> None) e |> ignore
+    and scanStmt (s: Stmt) : unit =
+        if bad.IsNone then
+            match s with
+            | StmtSpanned (inner, _) -> scanStmt inner
+            | StmtLet b ->
+                scan b.Value
+                if Set.contains name (Blade.StaticEval.collectPatternBindings b.Pattern) then fail $"`{name}` is rebound later in the block"
+                elif b.Type |> Option.exists typeMentions then fail $"a type annotation mentions `{name}`"
+            | StmtAssign (lhs, _, rhs) ->
+                if recMentions name lhs then fail $"`{name}` is assigned through" else (scan lhs; scan rhs)
+            | StmtExpr e -> scan e
+            | StmtForIn (v, r, body) ->
+                if v = name then fail $"`{name}` is rebound later in the block"
+                scan r
+                body |> List.iter scanStmt
+    tail |> List.iter scanStmt
+    if bad.IsNone then final |> Option.iter scan
+    match bad with
+    | Some r -> Error r
+    | None -> Ok (reads |> List.ofSeq |> List.distinct |> List.sort)
+
+/// (c) The coverage gate (plan section 3c). "Every later read is a literal"
+/// is not enough: a consumer reading (nearly) every row would get a "window"
+/// no smaller than the buffer plus a copy per row. Window only when the
+/// resident rows -- K + 1 ring slots plus one per snapshot -- are strictly
+/// fewer than the extent AND small in absolute terms.
+let internal recArrayWindowVerdict (k: int64) (snaps: int64 list) (extent: int64) : Result<unit, string> =
+    match snaps |> List.tryFind (fun p -> p >= extent) with
+    | Some p -> Error $"a later read is at row {p}, outside the recursion's extent {extent}"
+    | None ->
+        let resident = k + 1L + int64 (List.length snaps)
+        if resident < extent && resident <= max 8L (extent / 4L) then Ok ()
+        else Error $"dense coverage: {resident} resident rows (K + 1 = {k + 1L} ring slots, {List.length snaps} snapshots) against an extent of {extent}"
+
+/// The tail rewrite: `NAME(p, rest...)` becomes `__snap_<p>_NAME(rest...)`
+/// (the bare snapshot when `rest` is empty). Applied BEFORE the rest of the
+/// block is checked, so it sees the snapshot's declared type -- the
+/// annotation's trailing slots, exactly what `NAME(p)` produced.
+let internal recSnapRewriter (name: string) : Expr -> Expr option =
+    let rec f (x: Expr) : Expr option =
+        match x.Kind with
+        | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar v }, args) when v = name && not args.IsEmpty ->
+            match recLitOrdinal args.Head with
+            | Some p ->
+                let rest = args.Tail |> List.map (Blade.Unfold.mapExprPre f)
+                let snapVar = mkExpr x.Span (ExprVar (recSnapName name p))
+                Some (if rest.IsEmpty then snapVar else mkExpr x.Span (ExprApp (snapVar, rest)))
+            | None -> None
+        | _ -> None
+    f
+
+/// What `TypeCheckInfer.recArrayLower` produced: the full-materialization
+/// value (today's block, checked), or the windowed statement sequence that
+/// replaces the binding (checked later, as ordinary block statements).
+type RecLowered =
+    | RecFullTyped of TypedExpr
+    | RecWindowStmts of Stmt list

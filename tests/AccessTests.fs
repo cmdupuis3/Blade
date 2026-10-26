@@ -261,12 +261,338 @@ let private twoArrayProgram =
     + "let mut db: Array<Float like H> = 0.0 * Float64(0..11)\n"
     + "let fv = ad.grad(f)(a0, b0, da, db)\n"
 
+// ---------------------------------------------------------------------------
+// Gap G68: the cotangent ZERO FILL of a combinator-built diff local (C6).
+//
+// Reverse mode gives a combinator-built local (a halo map, a gram) a
+// cotangent buffer that starts at +0. It used to be an n-cell ARRAY LITERAL
+// (`static const double __vN__init[n] = { 0.0, ... }` + `std::copy_n`),
+// whose lowering was super-linear in n; it is now the zero FORMER
+// `method_for(range<Idx<d1>, ..>) <@> lambda(..) -> 0.0 |> compute`
+// (GradExpand.zeroFillOfDims). The value differentials cannot see the
+// difference (both forms are +0 everywhere), so these pins read the FORM, at
+// two non-power-of-two extents per program: the lowered `__grad` function
+// holds a materializing zero map over an `IRRange` of the cotangent's
+// extents and no `IRArrayLit`; the C++ has a counted fill loop and no
+// `__init[` image; the LLVM lane ACCEPTS the program (a refusal fails the
+// pin -- it must not fall back silently) and emits a counted loop storing
+// +0.0; and both lanes' text is the same size at both extents (an n-cell
+// form grows with n). The programs read only a few cells of the local, so
+// most of its cotangent is never written after the fill: the value pins
+// (C++ always when g++ is present, LLVM when clang is) see those untouched
+// cells through the gradient's exact zeros. No timing is asserted.
+// ---------------------------------------------------------------------------
+
+/// Rank 1: a halo map local over `Idx<n>` (cotangent extent n - 2) whose
+/// loss reads two cells, `2 d(1) + d(5)`: da = 2a(3), 2a(1), a(7), a(5) at
+/// cells 1, 3, 5, 7 (a(i) = 1 + 0.25 i), exactly zero everywhere else.
+let private zeroFillHaloProgram (n: int) =
+    "import ad as ad\n"
+    + $"type H = Idx<{n}>\n"
+    + "function f(a: Array<Float like H>) -> Float = {\n"
+    + "    let d = method_for(halo<H, [-1, 0, 1]>) <@> lambda(w) -> a(w(1)) * a(w(-1)) |> compute\n"
+    + "    d(1) * 2.0 + d(5)\n"
+    + "}\n"
+    + $"let a0: Array<Float like H> = 1.0 + 0.25 * Float64(0..{n})\n"
+    + $"let mut da: Array<Float like H> = 0.0 * Float64(0..{n})\n"
+    + "let fv = ad.grad(f)(a0, da)\n"
+    + "let gsum = reduce(da, (+))\n"
+    + "let gsq = reduce(da * da, (+))\n"
+    + $"let gzero = da(0) + da(2) + da(4) + da(6) + da(8) + da({n - 1})\n"
+
+/// Rank 2 (a multi-slot range): a gram local over `Idx<n> x Idx<3>`
+/// (cotangent extents n x n) whose loss reads g(0, 1) and g(1, 0): only rows
+/// 0 and 1 of da / db are nonzero (da row 0 = 2 b(1, .), row 1 = b(0, .);
+/// db row 1 = 2 a(0, .), row 0 = a(1, .)).
+let private zeroFillGramProgram (n: int) =
+    "import ad as ad\n"
+    + $"type I = Idx<{n}>\n"
+    + "type K = Idx<3>\n"
+    + "function floss(a: Array<Float like I, K>, b: Array<Float like I, K>) -> Float = {\n"
+    + "    let g = gram(a, b)\n"
+    + "    g(0, 1) * 2.0 + g(1, 0)\n"
+    + "}\n"
+    + "let a0 = method_for(range<I, K>) <@> lambda(i, k) -> 1.0 + Float64(i) + 0.5 * Float64(k) |> compute\n"
+    + "let b0 = method_for(range<I, K>) <@> lambda(i, k) -> Float64(k) - 0.25 * Float64(i) |> compute\n"
+    + "let mut da = method_for(range<I, K>) <@> lambda(i, k) -> 0.0 |> compute\n"
+    + "let mut db = method_for(range<I, K>) <@> lambda(i, k) -> 0.0 |> compute\n"
+    + "let gv = ad.grad(floss)(a0, b0, da, db)\n"
+    + "let dasum = reduce(reduce(da, (+)), (+))\n"
+    + "let dbsum = reduce(reduce(db, (+)), (+))\n"
+    + $"let gzero = reduce(da(2), (+)) + reduce(db(2), (+)) + reduce(da({n - 1}), (+)) + reduce(db({n - 1}), (+))\n"
+
+type private ZeroFillCase =
+    { Label: string
+      Extents: int list
+      Program: int -> string
+      /// the cotangent's extents at program size n
+      CotDims: int -> int list
+      Expected: (string * string) list }
+
+let private zeroFillCases =
+    [ { Label = "halo_rank1"; Extents = [ 37; 1013 ]; Program = zeroFillHaloProgram
+        CotDims = (fun n -> [ n - 2 ])
+        Expected = [ "fv", "10.5625"; "gsum", "11.0"; "gsq", "31.125"; "gzero", "0.0" ] }
+      { Label = "gram_rank2"; Extents = [ 7; 23 ]; Program = zeroFillGramProgram
+        CotDims = (fun n -> [ n; n ])
+        Expected = [ "gv", "17.25"; "dasum", "7.5"; "dbsum", "16.5"; "gzero", "0.0" ] } ]
+
+/// IR: the `__grad` callable holds an `IRCompute` over an `IRApplyCombinator`
+/// whose subtree has an `IRRange` with exactly the cotangent's literal
+/// extents, and no `IRArrayLit` at all (its inputs are parameters, so a
+/// literal there could only be a zero buffer).
+let private zeroFillIrFacts (ir: IR.IRProgram) (dims: int list) : Result<unit, string> =
+    let gradFns =
+        ir.Modules |> List.collect (fun m -> m.Functions) |> List.filter (fun f -> f.Name.EndsWith "__grad")
+    match gradFns with
+    | [] -> Error "no __grad callable in the lowered program"
+    | fns ->
+        let mutable lits = 0
+        let mutable zeroMaps = 0
+        let wantExt = dims |> List.map (fun d -> IR.IRLit (IR.IRLitInt (int64 d)))
+        for f in fns do
+            f.Body |> IR.iterIRExpr (fun e ->
+                match e with
+                | IR.IRArrayLit _ -> lits <- lits + 1
+                | IR.IRCompute (IR.IRApplyCombinator _ as ac) ->
+                    let mutable hit = false
+                    ac |> IR.iterIRExpr (fun x ->
+                        match x with
+                        | IR.IRRange (ixs, _) when (ixs |> List.map (fun ix -> ix.Extent)) = wantExt -> hit <- true
+                        | _ -> ())
+                    if hit then zeroMaps <- zeroMaps + 1
+                | _ -> ())
+        if lits > 0 then Error $"{lits} IRArrayLit node(s) in the __grad callable (the n-cell literal form)"
+        elif zeroMaps = 0 then Error $"no IRCompute(IRApplyCombinator ..) over an IRRange of extents {dims}"
+        else Ok ()
+
+/// C++: one counted loop per cotangent axis, each binding the zero lambda's
+/// parameter, the innermost storing 0.0; and no static initializer image.
+let private zeroFillCppFacts (cpp: string) (dims: int list) : Result<unit, string> =
+    let rx (p: string) = System.Text.RegularExpressions.Regex.IsMatch(cpp, p)
+    let r = dims.Length
+    let axisOk =
+        dims |> List.mapi (fun k d -> rx $@"__i{k} < {d}; __i{k}\+\+\) \{{\s*int64_t __zf\d+ = __i{k};")
+    if cpp.Contains "__init[" then Error "a static `__init[` initializer image is emitted"
+    elif axisOk |> List.exists not then Error $"no counted fill loop over every cotangent axis {dims}"
+    elif not (rx $@"int64_t __zf\d+ = __i{r - 1};\s*[\w\[\]]+ = 0\.0;") then Error "the innermost fill loop does not store 0.0"
+    else Ok ()
+
+/// LLVM: a counted loop bound for every cotangent axis and a +0.0 store.
+let private zeroFillLlvmFacts (ll: string) (dims: int list) : Result<unit, string> =
+    let rx (p: string) = System.Text.RegularExpressions.Regex.IsMatch(ll, p)
+    if dims |> List.exists (fun d -> not (rx $@"icmp slt i64 %%r\d+, {d}\b")) then Error $"no counted loop bound for every cotangent axis {dims}"
+    elif not (rx @"store double 0x0000000000000000, ptr %r\d+") then Error "no +0.0 store"
+    elif rx @"\[\d+ x double\]" then Error "an `[N x double]` aggregate is emitted"
+    else Ok ()
+
+let private zeroStoreCount (ll: string) =
+    System.Text.RegularExpressions.Regex.Matches(ll, @"store double 0x0000000000000000").Count
+
+/// The printed `name = value` lines for the expected names.
+let private pickValues (names: string list) (lines: string list) =
+    names |> List.map (fun nm ->
+        nm, (lines |> List.tryPick (fun l -> if l.StartsWith (nm + " = ") then Some (l.Substring(nm.Length + 3).Trim()) else None)))
+
+let private checkValues (lane: string) (expected: (string * string) list) (lines: string list) : Result<unit, string> =
+    let got = pickValues (expected |> List.map fst) lines
+    match List.zip expected got |> List.tryFind (fun ((_, want), (_, g)) -> g <> Some want) with
+    | None -> Ok ()
+    | Some ((nm, want), (_, g)) -> Error $"""{lane}: {nm} = {defaultArg g "<not printed>"}, expected {want}"""
+
+/// One case: the form pins at both extents (no toolchain), then the value
+/// pins in the C++ lane (g++) and the LLVM lane (clang). Some pass/fail per
+/// executed check; None = skipped for a missing toolchain.
+let private zeroFillCase (c: ZeroFillCase) : bool option list =
+    let name = $"g68_zero_fill_{c.Label}"
+    let forms =
+        c.Extents |> List.map (fun n ->
+            let src = c.Program n
+            let dims = c.CotDims n
+            match (try lower src with ex -> Error ex.Message) with
+            | Error e -> Error $"n = {n}: lower: {e}"
+            | Ok ir ->
+            match zeroFillIrFacts ir dims with
+            | Error e -> Error $"n = {n}: IR: {e}"
+            | Ok () ->
+            match (try Ok (fst (CodeGen.genSelfContainedProgramFromIR ir $"{name}_{n}")) with ex -> Error ex.Message) with
+            | Error e -> Error $"n = {n}: codegen: {e}"
+            | Ok cpp ->
+            match zeroFillCppFacts cpp dims with
+            | Error e -> Error $"n = {n}: C++: {e}"
+            | Ok () ->
+            match (try EmitLlvm.tryEmitProgramNamed $"{name}_{n}" ir with ex -> Error ("raised: " + ex.Message)) with
+            | Error why -> Error $"n = {n}: the LLVM lane refused the program (it must take it): {why}"
+            | Ok ll ->
+            match zeroFillLlvmFacts ll dims with
+            | Error e -> Error $"n = {n}: LLVM: {e}"
+            | Ok () -> Ok (n, src, cpp, ll))
+    match forms |> List.tryPick (function Error e -> Some e | Ok _ -> None) with
+    | Some e -> resultLine Fail (name + "_form") e; [ Some false ]
+    | None ->
+    let ok = forms |> List.choose (function Ok x -> Some x | Error _ -> None)
+    let (n1, _, cpp1, ll1), (n2, _, cpp2, ll2) = ok.[0], ok.[1]
+    let llLines (s: string) = s.Split('\n').Length
+    // the extents change only numerals (and a small extent may unroll a
+    // little differently), so the growth is a few digits per occurrence,
+    // never the cotangent's cell count
+    let bounded =
+        cpp2.Length - cpp1.Length < 400
+        && llLines ll1 = llLines ll2
+        && zeroStoreCount ll1 = zeroStoreCount ll2
+    let formResult =
+        if bounded then
+            resultLine Pass (name + "_form")
+                $"n = {n1}, {n2}: zero map over IRRange{c.CotDims n2}, no IRArrayLit; C++ counted fill, no __init image ({cpp1.Length} vs {cpp2.Length} chars); LLVM taken, counted +0.0 fill ({llLines ll2} lines at both extents)"
+            Some true
+        else
+            resultLine Fail (name + "_form") $"emitted size grows with the extent: C++ {cpp1.Length} -> {cpp2.Length} chars, LLVM {llLines ll1} -> {llLines ll2} lines, +0.0 stores {zeroStoreCount ll1} -> {zeroStoreCount ll2}"
+            Some false
+    let valueRuns =
+        ok |> List.collect (fun (n, src, _, ll) ->
+            let cppRun =
+                if not Build.capabilities.Value.HasGpp then
+                    resultLine Skip $"{name}_values_cpp_{n}" "g++ not available"; None
+                else
+                    match runUnder $"{name}_cpp_{n}" None src with
+                    | Error e when e.StartsWith "Skipped:" -> resultLine Skip $"{name}_values_cpp_{n}" e; None
+                    | Error e -> resultLine Fail $"{name}_values_cpp_{n}" e; Some false
+                    | Ok lines ->
+                        match checkValues "C++" c.Expected lines with
+                        | Ok () -> resultLine Pass $"{name}_values_cpp_{n}" "pins hold, untouched cells exactly 0.0"; Some true
+                        | Error e -> resultLine Fail $"{name}_values_cpp_{n}" e; Some false
+            let llRun =
+                match Build.resolveClang () with
+                | None -> resultLine Skip $"{name}_values_llvm_{n}" "no clang (BLADE_LLVM_CLANG)"; None
+                | Some _ ->
+                    Directory.CreateDirectory outputDir |> ignore
+                    CodeGen.deployRuntimeHeaders outputDir
+                    EmitLlvm.deployShim outputDir
+                    let llFile = Path.Combine(outputDir, $"{name}_ll_{n}.ll")
+                    File.WriteAllText(llFile, ll)
+                    match Build.compileLlvmProgram llFile outputDir with
+                    | Error e when e.StartsWith "Skipped:" -> resultLine Skip $"{name}_values_llvm_{n}" e; None
+                    | Error e -> resultLine Fail $"{name}_values_llvm_{n}" ("llvm compile: " + (if e.Length > 300 then e.Substring(0, 300) else e)); Some false
+                    | Ok exe ->
+                        match Build.runExecutable exe with
+                        | Error e -> resultLine Fail $"{name}_values_llvm_{n}" e; Some false
+                        | Ok (code, out) when code <> 0 -> resultLine Fail $"{name}_values_llvm_{n}" $"exit {code}: {out.Trim()}"; Some false
+                        | Ok (_, out) ->
+                            let lines = out.Split('\n') |> Array.map (fun l -> l.TrimEnd('\r')) |> List.ofArray
+                            match checkValues "LLVM" c.Expected lines with
+                            | Ok () -> resultLine Pass $"{name}_values_llvm_{n}" "pins hold, untouched cells exactly 0.0"; Some true
+                            | Error e -> resultLine Fail $"{name}_values_llvm_{n}" e; Some false
+            [ cppRun; llRun ])
+    formResult :: valueRuns
+
+// ---------------------------------------------------------------------------
+// Gap G78: the LLVM lane's pool ownership across a YOUNGER loop scope.
+//
+// A pool a function allocates -- a combinator-built local, its reverse-mode
+// tape and cotangent -- is read by loop scopes opened after it (the adjoint
+// sweep's loops, a `let rec`'s trips). Such a read used to null the pool's
+// tracking slot in EVERY open scope, the owning function scope included, so
+// the function's exit `blade_free` loaded null and the pool leaked once per
+// call (haloadjoint's `loss__grad`: the tape d and its cotangent at full
+// size). Now only the younger scopes give the pool up; the owner keeps it, or
+// receives a pool a younger scope allocated through a fresh slot of its own
+// (`; G78: handed`). These pins read the emitted .ll of each named function:
+// every pool it allocates is FREED through a slot that holds it, and no such
+// slot is nulled after the allocation except as an explicit hand-off. No
+// toolchain is needed (emission only); the values are the corpus's.
+// ---------------------------------------------------------------------------
+
+/// The body of every `define` whose symbol starts with `@<prefix>` (the
+/// lane's `@bl_<name>_<id>`), each as its line array.
+let private llvmFunctionBodies (ll: string) (prefix: string) : string[] list =
+    let lines = ll.Replace("\r\n", "\n").Split('\n')
+    [ for i in 0 .. lines.Length - 1 do
+        if lines.[i].StartsWith "define " && lines.[i].Contains("@" + prefix) then
+            let stop = (lines |> Array.skip i |> Array.findIndex (fun l -> l = "}")) + i
+            yield lines.[i .. stop] ]
+
+/// Ok (pools checked) when every pool the body allocates is freed through a
+/// slot holding it and no slot holding it is nulled after its allocation
+/// except where the next line hands it to another (freed) slot.
+let private llvmPoolsFreed (body: string[]) : Result<int, string> =
+    let rx (p: string) (l: string) = System.Text.RegularExpressions.Regex.Match(l, p)
+    let allocs =
+        body |> Array.mapi (fun i l -> (i, rx @"^\s*(%r\d+) = call ptr @blade_alloc_cells" l))
+        |> Array.filter (fun (_, m) -> m.Success) |> Array.map (fun (i, m) -> (i, m.Groups.[1].Value))
+    let freedSlot (slot: string) =
+        body |> Array.mapi (fun i l -> (i, rx (@"^\s*(%r\d+) = load ptr, ptr " + System.Text.RegularExpressions.Regex.Escape slot + "$") l))
+        |> Array.exists (fun (i, m) ->
+            m.Success && i + 1 < body.Length && body.[i + 1].Trim() = $"call void @blade_free(ptr {m.Groups.[1].Value})")
+    let check (at: int, pool: string) : string option =
+        let after = body.[at + 1 ..]
+        let slots =
+            after |> Array.choose (fun l ->
+                let m = rx (@"^\s*store ptr " + System.Text.RegularExpressions.Regex.Escape pool + @", ptr (%r\d+)") l
+                if m.Success then Some m.Groups.[1].Value else None)
+            |> Array.distinct
+        if slots.Length = 0 then Some $"{pool} is never stored to a tracking slot"
+        else
+            let nulledBad =
+                slots |> Array.tryPick (fun s ->
+                    after |> Array.mapi (fun j l -> (j, l))
+                    |> Array.tryPick (fun (j, l) ->
+                        if l.Trim() = $"store ptr null, ptr {s}" then
+                            let handed = j + 1 < after.Length && after.[j + 1].Contains $"store ptr {pool}, ptr " && after.[j + 1].Contains "G78: handed"
+                            if handed then None else Some $"the slot {s} of {pool} is nulled after its allocation (the pool escapes its owner)"
+                        else None))
+            match nulledBad with
+            | Some why -> Some why
+            | None when slots |> Array.exists freedSlot -> None
+            | None -> Some $"{pool} is never freed through its slot"
+    match allocs |> Array.tryPick check with
+    | Some why -> Error why
+    | None -> Ok allocs.Length
+
+let private g78Case (name: string) (src: Result<string, string>) (fns: string list) : bool =
+    match src with
+    | Error e -> resultLine Fail name e; false
+    | Ok src ->
+    match (try lower src with ex -> Error ex.Message) with
+    | Error e -> resultLine Fail name $"lower: {e}"; false
+    | Ok ir ->
+    match (try EmitLlvm.tryEmitProgramNamed name ir with ex -> Error ("raised: " + ex.Message)) with
+    | Error why -> resultLine Fail name $"the LLVM lane refused the program (it must take it): {why}"; false
+    | Ok ll ->
+        let results =
+            fns |> List.map (fun fn ->
+                match llvmFunctionBodies ll fn with
+                | [] -> fn, Error "no such function in the emitted .ll"
+                | bodies ->
+                    bodies |> List.fold (fun acc b ->
+                        match acc, llvmPoolsFreed b with
+                        | Error e, _ | _, Error e -> Error e
+                        | Ok n, Ok m -> Ok (n + m)) (Ok 0)
+                    |> fun r -> fn, r)
+        match results |> List.tryPick (fun (fn, r) -> match r with Error e -> Some $"@{fn}: {e}" | Ok 0 -> Some $"@{fn}: no pool allocated (the witness lost its shape)" | Ok _ -> None) with
+        | Some why -> resultLine Fail name why; false
+        | None ->
+            let counts = results |> List.map (fun (fn, r) -> match r with Ok n -> $"@{fn} {n}" | Error _ -> "") |> String.concat ", "
+            resultLine Pass name $"every pool freed by its owning scope, no escape-by-null ({counts} pools)"
+            true
+
+let private g78Pins () : bool list =
+    // read relative to the CURRENT DIRECTORY (like corpusSource): run the
+    // block from the repo root, or from a directory that links `bench`
+    let benchFile = Path.Combine("bench", "kernels", "haloadjoint", "haloadjoint.blade")
+    let bench = if File.Exists benchFile then Ok (File.ReadAllText benchFile) else Error $"missing {benchFile} (run from the repo root)"
+    [ g78Case "g78_llvm_frees_halo_grad_linear" (corpusSource "030_halo_stencil_grad_linear.blade") [ "bl_f__grad" ]
+      g78Case "g78_llvm_frees_grad_and_let_rec_reader" (corpusSource "044_grad_combinator_local_read_by_loop_scope.blade") [ "bl_f__grad"; "bl_g_" ]
+      // the saved full-size shape (n = 1,000,003): the tape d and its cotangent
+      g78Case "g78_llvm_frees_haloadjoint_full_size" bench [ "bl_loss__grad" ] ]
+
 let runAccessTests () =
     printHeader "Blade-DSL: Halo Access Tests"
     let pins =
         [ recordPins ()
           routeEmission ()
           computedOffsetDeclines () ]
+        @ g78Pins ()
+    let zeroFill = zeroFillCases |> List.collect zeroFillCase
     let diffs =
         if not Build.capabilities.Value.HasGpp then
             resultLine Skip "halo_route_differential" "g++ not available"
@@ -282,6 +608,7 @@ let runAccessTests () =
               differential "halo_route_differential_wide_127" wideProgram
               differential "halo_route_differential_scalar_capture" scalarCaptureProgram
               differential "halo_route_differential_two_arrays" twoArrayProgram ]
+    let diffs = diffs @ zeroFill
     let passed = (pins |> List.filter id |> List.length) + (diffs |> List.filter (fun d -> d = Some true) |> List.length)
     let failed = (pins |> List.filter not |> List.length) + (diffs |> List.filter (fun d -> d = Some false) |> List.length)
     let skipped = diffs |> List.filter Option.isNone |> List.length

@@ -1,0 +1,14 @@
+// TEST: Call Elision Keeps A Recursive Callee
+// ============================================================================
+// A self-recursive callee is never jointly lowered (BLADE_CALL_ELIDE
+// declines "a recursive callee", at the top-level fold and at the fold inside
+// its own body): the calls and their materialized returns stay, and the
+// values are the calls'. deep(A, 0) = A (sum 6); deep(A, 1) = A + 6 (sum 24);
+// deep(A, 2) = A + 24 (sum 78).
+function deep(a: Array<Float64 like Idx<3>>, n: Int64) -> Array<Float64 like Idx<3>> = {
+    let k = if n == 0 then 0.0 else reduce(deep(a, n - 1), (+))
+    method_for(a) <@> lambda(v) -> v + k |> compute
+}
+let A = [1.0, 2.0, 3.0]
+let s = reduce(deep(A, 2), (+))
+// EXPECT: s = 78.0

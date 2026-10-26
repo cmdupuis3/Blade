@@ -1,0 +1,25 @@
+// TEST: Call Elision Keeps A Callee Whose Scalar Let Applies A Capturing Lambda
+// ============================================================================
+// A scalar let that applies a lambda capturing the callee's own names
+// (`c` here) cannot move into the caller: the lambda's capture would name a
+// parameter the caller does not bind. BLADE_CALL_ELIDE declines ("the callee
+// body names a capturing callable outside its map kernel") and the call
+// stays, evaluated once: k = 2 + 1 = 3, so the fold is 3 + 6 + 9 = 18. The
+// order witness beside it keeps its left-to-right argument evaluation: bump
+// writes M(0) before prep(M) is folded (20 + 4 + 6 = 30).
+function prep(a: T^1, c: Float64) -> T^1 = {
+    let k = (lambda(x: Float64) -> c + x)(1.0)
+    method_for(a) <@> lambda(v) -> v * k |> compute
+}
+function doubled(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> v * 2.0 |> compute }
+function bump(a: mut Array<Float64 like Idx<3>>) -> Float64 = {
+    a(0) = 10.0
+    0.0
+}
+function combine(x: Float64, y: Float64) -> Float64 = { x + y }
+let A = [1.0, 2.0, 3.0]
+let s = reduce(prep(A, 2.0), (+))
+let mut M = [1.0, 2.0, 3.0]
+let o = combine(bump(M), reduce(doubled(M), (+)))
+// EXPECT: s = 18.0
+// EXPECT: o = 30.0

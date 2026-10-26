@@ -133,6 +133,20 @@ module Decisions =
         | null -> ()
         | l -> if not (l.Contains d) then l.Add d
 
+    /// How many decisions are recorded so far (0 without a collector): a mark
+    /// `rollback` cuts back to, for a speculative check whose result is
+    /// discarded (TypeCheckInfer.checkUnderDeclaredLayout).
+    let mark () : int =
+        match cell.Value with
+        | null -> 0
+        | l -> l.Count
+
+    /// Drop every decision recorded after `mark`.
+    let rollback (m: int) =
+        match cell.Value with
+        | null -> ()
+        | l -> if l.Count > m then l.RemoveRange(m, l.Count - m)
+
     /// Take every decision recorded since `start` and clear the collector.
     let drain () : Decision list =
         match cell.Value with
@@ -166,8 +180,15 @@ module Decisions =
         sb.Append('"') |> ignore
         sb.ToString()
 
+    /// The record's COST BASIS and LEGALITY clause (plan-identity-transpose-
+    /// compute P5): the evidence items spelled `cost: ...` / `legality: ...`
+    /// (the text after the prefix), or None. They stay in the evidence too.
+    let evidenceField (prefix: string) (d: Decision) : string option =
+        d.Evidence |> List.tryPick (fun e -> if e.StartsWith (prefix + ": ") then Some (e.Substring (prefix.Length + 2)) else None)
+
     /// One JSON object per plan: `{"file":..., "decisions":[{rule, version,
-    /// subject, line, col, outcome, reason, evidence}]}`.
+    /// subject, line, col, outcome, reason, cost, legality, evidence}]}`;
+    /// `cost` and `legality` are null where the record states none.
     let renderJson (file: string) (ds: Decision list) : string =
         let one (d: Decision) =
             let outcome, reason =
@@ -175,6 +196,8 @@ module Decisions =
                 | Applied -> "applied", "null"
                 | Declined why -> "declined", jsonString why
             let ev = d.Evidence |> List.map jsonString |> String.concat ","
-            $"{{\"rule\":{jsonString d.Rule},\"version\":{d.Version},\"subject\":{jsonString d.Subject},\"line\":{d.Span.StartLine},\"col\":{d.Span.StartCol},\"outcome\":\"{outcome}\",\"reason\":{reason},\"evidence\":[{ev}]}}"
+            let field (prefix: string) = match evidenceField prefix d with Some s -> jsonString s | None -> "null"
+            let cost, legality = field "cost", field "legality"
+            $"{{\"rule\":{jsonString d.Rule},\"version\":{d.Version},\"subject\":{jsonString d.Subject},\"line\":{d.Span.StartLine},\"col\":{d.Span.StartCol},\"outcome\":\"{outcome}\",\"reason\":{reason},\"cost\":{cost},\"legality\":{legality},\"evidence\":[{ev}]}}"
         let body = ds |> List.map one |> String.concat ","
         $"{{\"file\":{jsonString file},\"decisions\":[{body}]}}"

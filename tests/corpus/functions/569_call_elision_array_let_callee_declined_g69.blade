@@ -1,0 +1,18 @@
+// TEST: Call Elision Declines A Callee With An Array Let (G69)
+// ============================================================================
+// A callee whose spine holds a NON-SCALAR let (a rank-1 intermediate `t`)
+// would need its inlined storage released at an IR-level return-boundary
+// event every pass and both lanes honour; that lifetime is not audited (gap
+// G69), so BLADE_CALL_ELIDE declines (the record names G69 and the plan's
+// scope model A) and the call keeps its ABI: evaluated once, its pools its
+// own. t = 2a, the map adds 1: (3 + 5 + 7) = 15, and 15 + 0.5 seeded.
+function prep2(a: T^1) -> T^1 = {
+    let t = method_for(a) <@> lambda(v) -> v * 2.0 |> compute
+    method_for(t) <@> lambda(v) -> v + 1.0 |> compute
+}
+function total(a: T^1) -> T^0 = { reduce(prep2(a), (+), 0.5) }
+let A = [1.0, 2.0, 3.0]
+let s = reduce(prep2(A), (+))
+let t = total(A)
+// EXPECT: s = 15.0
+// EXPECT: t = 15.5

@@ -1,0 +1,51 @@
+// TEST: Row orbit action: refusals keep the row walk
+// Every shape below is recognised by the row orbit action (src/OrbitFold.fs
+// recogniseAction / recogniseActionWalk) and DECLINED with its first failed
+// condition (`blade plan`: `declined -- orbit action not taken: ...`; the
+// texts are pinned by tests/OptimizeTests.fs plan_orbit_action_*): the
+// program keeps the walk, whose values these are.
+//   r_anti   -- AntisymIdx storage (signed events, v2). D/5's counterexample:
+//               A01 = 2 reads A10 = -2 at the mirror, so treating the
+//               packed read as invariant would give r_anti(1) = 6.0, not
+//               -6.0;
+//   r_two    -- two contracted axes in one stage (T(i, j, k) * v(j) * w(k));
+//   r_third  -- a weight read at an index expression, not at i or j;
+//   r_late   -- a weight that is a DEFERRED map (its definition would run
+//               inside the action: not stored before it);
+//   r_seed   -- a per-row seed (v2);
+//   r_defs   -- a deferred pool (P1-style fusion is v2);
+//   r_mixed  -- a walk FOLDING weighted rows with a strict (`where repro`)
+//               outer fold over a licensed inner `(+)`: a mixed licence nest
+//               (D/5's [1e16, -1e16, 1] row is pinned under REPRO by `blade
+//               test orbit-scatter`; here every term is a small dyadic
+//               rational (the pool's points are positive: no exact-zero
+//               licensed sum, whose sign the lanes need not agree on), so every
+//               association agrees).
+let static p = 13
+type Var = Idx<p>
+type Two = Idx<2>
+type Obs = Idx<3>
+function radd(a: Float64, b: Float64) where repro -> Float64 = a + b
+let pv = method_for(range<Two>) <@> lambda(i) -> Float64(3 - 2 * i) |> compute
+let an = method_for(pv, pv) <@> lambda(a: Float64, b: Float64) where anticomm(a, b) -> a - b |> compute
+let w2 = method_for(range<Two>) <@> lambda(i) -> Float64(3 + 2 * i) |> compute
+let r_anti = method_for(range<Two>) <@> lambda(i) -> reduce(method_for(range<Two>) <@> lambda(j) -> an(i, j) * w2(j), (+)) |> compute
+let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 5) + 0.25 |> compute
+let g = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute
+let t3 = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) |> compute
+let v = method_for(range<Var>) <@> lambda(i) -> Float64((i * 5) % 7) - 3.0 |> compute
+let vlate = method_for(range<Var>) <@> lambda(i) -> Float64((i * 3) % 4) - 1.0
+let gd = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b)
+let r_two = method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> reduce(method_for(range<Var>) <@> lambda(k) -> t3(i, j, k) * v(j) * v(k), (+)), (+)) |> compute
+let r_third = method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * v((i + j) % 13), (+)) |> compute
+let r_late = method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * vlate(j), (+)) |> compute
+let r_seed = method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * v(j), (+), v(i)) |> compute
+let r_defs = method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> gd(i, j) * v(j), (+)) |> compute
+let r_mixed = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * v(j), (+)), radd, 0.5)
+// EXPECT: r_anti = [10.0, -6.0]
+// EXPECT: r_two = [1062.296875, 1565.859375, 831.921875, 1720.484375, 2224.046875, 1062.296875, 1565.859375, 831.921875, 1720.484375, 2224.046875, 1062.296875, 1565.859375, 831.921875]
+// EXPECT: r_third = [-13.8125, -30.3125, 85.6875, 1.1875, -38.5625, -0.0625, -4.8125, 18.6875, 34.4375, -28.5625, -33.5625, -17.8125, 37.4375]
+// EXPECT: r_late = [33.9375, 68.1875, 52.4375, 61.6875, 95.9375, 33.9375, 68.1875, 52.4375, 61.6875, 95.9375, 33.9375, 68.1875, 52.4375]
+// EXPECT: r_seed = [-16.8125, 85.4375, 15.6875, 0.9375, 103.1875, -12.8125, 82.4375, 12.6875, 4.9375, 100.1875, -15.8125, 86.4375, 16.6875]
+// EXPECT: r_defs = [-13.8125, 83.4375, 15.6875, 2.9375, 100.1875, -13.8125, 83.4375, 15.6875, 2.9375, 100.1875, -13.8125, 83.4375, 15.6875]
+// EXPECT: r_mixed = 462.6875

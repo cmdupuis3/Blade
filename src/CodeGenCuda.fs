@@ -1961,13 +1961,24 @@ let private recordApplyStructure (name: string) (info: ApplyInfo) : unit =
             match resolveKernel info.Kernel with
             | Some rk -> rk.Callable.IsCommutative || not rk.Callable.CommGroups.IsEmpty
             | None -> false
-        let rec showId (a: ArrayIdentity) =
+        let showId (a: ArrayIdentity) =
             match a with
             | AIDVariable n -> n
+            | AIDAlias (_, n) -> n
             | AIDParameter (n, _) -> n
             | AIDLiteral id -> $"<literal #{id}>"
-            | AIDDerived (b, op) -> $"{op}({showId b})"
         let operands = info.Identities |> List.map showId |> String.concat ", "
+        // Identity-transparent aliases (plan-identity-transpose-compute 2.1):
+        // the operand is named as written above; its root is named here.
+        let aliasNotes =
+            info.Identities |> List.choose (fun a ->
+                match a with
+                | AIDAlias (r, n) -> Some $"{n} = {showId r}"
+                | _ -> None)
+            |> List.distinct
+        let aliasEvidence =
+            if aliasNotes.IsEmpty then []
+            else [ $"""identity-transparent aliases: {String.concat ", " aliasNotes} (one array for the identity groups)""" ]
         let states = info.SymcomStates |> List.map string |> String.concat ", "
         let packed =
             match info.OutputType with
@@ -1993,7 +2004,7 @@ let private recordApplyStructure (name: string) (info: ApplyInfo) : unit =
         | _ :: _ ->
             recordCodegenDecision "symmetric-storage" name Blade.Effects.Applied
                 ([ for ix in packed -> $"packed {ix.Symmetry} storage over {ix.Rank} levels (one canonical cell per orbit)" ]
-                 @ [ $"operands: {operands}" ])
+                 @ [ $"operands: {operands}" ] @ aliasEvidence)
         | [] when declared ->
             let why =
                 if nonAdjacentRepeat then
@@ -2001,7 +2012,7 @@ let private recordApplyStructure (name: string) (info: ApplyInfo) : unit =
                 elif not sameArray then
                     $"the commuting positions hold different arrays ({operands}); packed storage is licensed only when the SAME array fills them"
                 else $"no commuting level survived deduction (symcom states: {states})"
-            recordCodegenDecision "symmetric-storage" name (Blade.Effects.Declined why) [ $"operands: {operands}" ]
+            recordCodegenDecision "symmetric-storage" name (Blade.Effects.Declined why) ([ $"operands: {operands}" ] @ aliasEvidence)
         | [] -> ()
         let tri = info.TriangularLevels |> List.indexed |> List.filter snd |> List.map fst
         if not tri.IsEmpty then
@@ -2241,7 +2252,7 @@ let attachEpilogueLegs (producerId: IRId) (producer: LoopNestCodeGen) (names: Ma
         Blade.Optimize.recordEpilogueLegs lp.Subject (Blade.Effects.Declined ("C++ lane: " + why))
             ([ $"legs {legNames} keep their joined pass after `{lp.ProducerName}`'s producer loop" ]
              @ (match lp.InlinedCall with
-                | Some call -> [ $"{call} stays inlined (planned for these legs); its pools are still released once at the call's return boundary (behind the inlined spine's evaluated return)" ]
+                | Some call -> [ $"{call} stays inlined (planned for these legs under the OPT-IN BLADE_EPILOGUE_LEGS=1 arm, whose lifetime audit is incomplete, G69); its pools are still released once at the call's return-boundary event (IRReleasePools)" ]
                 | None -> []))
         ep
     let tag = sanitizeCppName producer.OutputName

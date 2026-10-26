@@ -1,0 +1,24 @@
+// TEST: Tuple Bare Deferred Member (aborts)
+// ----------------------------------------------------------------------------
+// A BARE deferred array as a tuple member, `(g, 1.0)` (Codex review of round-3
+// W1-3, finding 2; gap G61). The lanes had three behaviours: the llvm lane
+// kept the member a producer and ran it only where the tuple was read, the
+// interpreter held the deferred value inside the tuple, the C++ lane refused
+// (`unevaluated computation used as value`; this file was a `(rejects)`
+// probe). ONE contract now (formalism 10.2, "Deferred members of a tuple
+// value"): a tuple is a value, so a deferred member is evaluated AT THE
+// TUPLE'S CONSTRUCTION, at its own position, as `g |> compute` would be.
+// The FIRST-FAILURE consequence is deliberate: g's integer division by zero
+// (BL8013) now fires at `held`, before `bad`'s checked cast (BL8006) on the
+// next line -- although the program never projects `held`. The explicit
+// spelling, 042, fails the same way.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let z: Array<Int64 like Row> = [0]
+let g = method_for(z) <@> lambda(v) -> 1 / v
+let held = (g, 1.0)
+let bad = a((a(0) : Row))
+// ABORT: BL8013
+// ABORT: integer division by zero
+// ABORT: .blade:18

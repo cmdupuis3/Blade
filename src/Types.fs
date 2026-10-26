@@ -94,20 +94,79 @@ type SymcomState =
 
 // Array Identity Tracking (critical for symmetry exploitation)
 
-/// Tracks the identity of arrays for commutativity detection
+/// Tracks the identity of arrays for commutativity detection.
+///
+/// (docs/plans/plan-identity-transpose-compute.md 2.7.) The former
+/// `AIDDerived of base * op` constructor is RETIRED: nothing ever constructed
+/// it and `sameIdentity` never answered it equal, so it named no identity
+/// (a derived operand -- a transpose, a view -- needs the plan's versioned
+/// operand key with its structural map, section 2 / P2, not a string tag).
+/// `AIDParameter` is KEPT with the definition it has always had (one
+/// parameter slot of one callable, equal by name and position): it is the
+/// constructor reserved for section 2.2's parameter keys and is still never
+/// minted on this branch.
 type ArrayIdentity =
     | AIDLiteral of IRId                    // Literal array with unique ID
     | AIDVariable of name: string           // Named variable
-    | AIDParameter of name: string * idx: int  // Function parameter
-    | AIDDerived of base': ArrayIdentity * op: string  // Derived from another array
+    | AIDParameter of name: string * idx: int  // Function parameter slot (reserved for plan 2.2; not minted yet)
+    /// An IDENTITY-TRANSPARENT alias spelled `name` of the array `root`: a
+    /// member of a top-level pure deferred alias class (formalism 10.2, 8.3;
+    /// docs/plans/plan-identity-transpose-compute.md 2.1), or a top-level
+    /// `let B = A` over a STORED array that nothing in the program can write
+    /// (plan 2.1's second step; TypeCheckSupport.recordStoredAliasMember). It
+    /// IS `root` for every identity question (`sameIdentity` sees through
+    /// it); `name` is kept only so decision records name the operand as
+    /// written. Minted by TypeCheckSupport.loopOperandIdentity alone, which
+    /// fails closed to the operand's own `AIDVariable` whenever the class is
+    /// not proved.
+    | AIDAlias of root: ArrayIdentity * name: string
 
 /// Check if two array identities are the same
-let sameIdentity a b =
+let rec sameIdentity a b =
     match a, b with
+    | AIDAlias (r, _), _ -> sameIdentity r b
+    | _, AIDAlias (r, _) -> sameIdentity a r
     | AIDVariable n1, AIDVariable n2 -> n1 = n2
     | AIDParameter (n1, i1), AIDParameter (n2, i2) -> n1 = n2 && i1 = i2
     | AIDLiteral id1, AIDLiteral id2 -> id1 = id2
     | _ -> false
+
+/// A PROVIDER VARIABLE's array identity (plan-identity-transpose-compute 2.7):
+/// the STORE it belongs to and its name in that store. `storeKey` is minted
+/// ONCE PER LOAD by the provider (`<binding>#<fresh id>`), so two stores that
+/// both hold a variable `A` -- every CSV store's `data` -- can never answer the
+/// same identity, while every read of one store's `A` shares one. Before,
+/// the identity was the bare file variable name.
+let providerVarIdentity (storeKey: string) (varName: string) : ArrayIdentity =
+    AIDVariable $"{storeKey}.{varName}"
+
+/// THE STORED-ALIAS IDENTITY DECISIONS (docs/plans/plan-identity-transpose-
+/// compute.md 2.1, second step): one entry per top-level `let B = A` the
+/// checker judged for identity transparency over a STORED array
+/// (TypeCheckSupport.recordStoredAliasMember), with its verdict -- Ok
+/// evidence (B takes A's identity) or Error first-failed-condition (B keeps
+/// its own). Written at typecheck, read by Lowering, which records each as
+/// `[alias-identity v1]` and cross-checks every applied one against the
+/// read-only alias plan's own admission (Optimize.recordAliasIdentity).
+/// Identity is a LANGUAGE fact: nothing here depends on a knob. Reset by
+/// TypeCheck.checkProgram; without a reset `record` is a no-op.
+module StoredAliasIdentity =
+    type Entry =
+        { AliasId: IRId
+          Alias: string
+          Root: string
+          RootId: IRId
+          Verdict: Result<string list, string> }
+    let private cell = new System.Threading.AsyncLocal<System.Collections.Generic.List<Entry>>()
+    let reset () = cell.Value <- System.Collections.Generic.List<Entry>()
+    let record (e: Entry) =
+        match cell.Value with
+        | null -> ()
+        | l -> if not (l |> Seq.exists (fun x -> x.AliasId = e.AliasId)) then l.Add e
+    let all () : Entry list =
+        match cell.Value with
+        | null -> []
+        | l -> List.ofSeq l
 
 // Index Types with Dependency Tracking
 

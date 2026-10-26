@@ -1,0 +1,17 @@
+// TEST: Block Prefix Before If Let (rejects)
+// ----------------------------------------------------------------------------
+// Gap G77, finding 3 with the `if` as a let's VALUE inside the block, after
+// the failing cast statement: the same hoist region, refused at lowering in
+// every lane (BL6002).
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let z: Array<Int64 like Row> = [2]
+let g = method_for(z) <@> lambda(v) -> 1 / (v - 2)
+let r = {
+    let a = z((z(0) : Row))
+    let b = if g(0) > 0 then g(0) else 0
+    b
+}
+// ERROR: BL6002 @ 9:1
+// ERROR-CONTAINS: whose arm forces the deferred computation `g`
+// REJECT-AT: lower

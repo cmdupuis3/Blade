@@ -508,10 +508,13 @@ let runCellEpilogueTests () : BlockResult =
     let corpusFile (rel: string) =
         [ Path.Combine(Directory.GetCurrentDirectory(), "tests", "corpus", rel)
           Path.Combine(AppContext.BaseDirectory, "tests", "corpus", rel) ] |> List.tryFind File.Exists
+    // (since the round-4 merge the kept inline's fail-closed ownership scope --
+    // round-3 W2-4 rounds 5-7 -- declines 032_lifetime (a tuple-typed callee let)
+    // and 034_lifetime (a user call in the callee): their legs do not ride, so
+    // they have no gate-on / gate-off raw-bit arm here; `blade test optimize`
+    // pins their declines and releases)
     let lifetimePrograms =
-        [ "032_lifetime_deleted_final_join.blade", ["r"; "t"]
-          "033_lifetime_cse_equal_caller_map.blade", ["r"]
-          "034_lifetime_duplicate_scalar_return.blade", ["r"]
+        [ "033_lifetime_cse_equal_caller_map.blade", ["r"]
           "035_lifetime_function_scalar_return.blade", ["r"]
           "037_lifetime_scratch_reuse_region.blade", ["r"] ]
         |> List.choose (fun (file, scalars) ->
@@ -535,7 +538,7 @@ let runCellEpilogueTests () : BlockResult =
         use _r = pinEnv "BLADE_FP_REPRO" (if repro then "1" else null)
         use _o = pinEnv "BLADE_OMP_THREADS" "1"
         let emitWith (gate: string) =
-            use _g = pinEnv "BLADE_EPILOGUE_LEGS" gate
+            use _g = pinEnv "BLADE_EPILOGUE_LEGS" (if isNull gate then "1" else gate)
             stemN <- stemN + 1
             let stem = $"epl_{p.Name}_{stemN}"
             emitCpp p stem |> Result.map (fun cpp -> (stem, cpp))
@@ -579,7 +582,7 @@ let runCellEpilogueTests () : BlockResult =
         use _r = pinEnv "BLADE_FP_REPRO" "1"
         use _o = pinEnv "BLADE_OMP_THREADS" "1"
         let runWith (gate: string) =
-            use _g = pinEnv "BLADE_EPILOGUE_LEGS" gate
+            use _g = pinEnv "BLADE_EPILOGUE_LEGS" (if isNull gate then "1" else gate)
             stemN <- stemN + 1
             let stem = $"epl_ll_{p.Name}_{stemN}"
             match lower p.Source with
@@ -626,6 +629,10 @@ let runCellEpilogueTests () : BlockResult =
     //     legs; BL8013 fires inside `kernel`'s own frame (`at kernel`).
     for (rel, frame) in [ ("sibling-folds/026_input_legs_failure_between_aborts.blade", None)
                           ("sibling-folds/029_input_legs_throwing_callee_keeps_frame.blade", Some "at kernel")
+                          ("sibling-folds/034_input_legs_function_caller_failure_after_return.blade", Some "at driver")
+                          ("sibling-folds/037_input_legs_decline_alias_function_caller_aborts.blade", Some "at driver")
+                          ("sibling-folds/041_input_legs_decline_nested_alias_function_caller_aborts.blade", Some "at driver")
+                          ("sibling-folds/045_input_legs_decline_user_call_function_caller_aborts.blade", Some "at driver")
                           ("sibling-folds/036_lifetime_caller_panic.blade", Some "at driver") ] do
       for lane in [ "cpp"; "llvm" ] do
         let name = $"{Path.GetFileNameWithoutExtension rel} {lane}: fault, site and frame equal gate on vs off"
@@ -636,7 +643,7 @@ let runCellEpilogueTests () : BlockResult =
         let src = src.Substring(src.IndexOf '\n' + 1)
         use _o = pinEnv "BLADE_OMP_THREADS" "1"
         let runWith (gate: string) : Result<int * string, string> =
-            use _g = pinEnv "BLADE_EPILOGUE_LEGS" gate
+            use _g = pinEnv "BLADE_EPILOGUE_LEGS" (if isNull gate then "1" else gate)
             stemN <- stemN + 1
             let stem = $"epl_fault_{lane}_{stemN}"
             match lower src with
@@ -684,6 +691,9 @@ let runCellEpilogueTests () : BlockResult =
     // less. Then the ordinary build (pool cache ON): printed values equal.
     for rel in [ "sibling-folds/030_input_legs_join_inside_inlined_callee.blade"
                  "sibling-folds/031_input_legs_two_plans_one_inlined_call.blade"
+                 "sibling-folds/032_input_legs_unused_final_join_atom_return.blade"
+                 "sibling-folds/033_input_legs_cse_barrier_function_caller.blade"
+                 "sibling-folds/035_input_legs_scratch_reuse_inside_callee.blade"
                  "sibling-folds/032_lifetime_deleted_final_join.blade"
                  "sibling-folds/033_lifetime_cse_equal_caller_map.blade"
                  "sibling-folds/034_lifetime_duplicate_scalar_return.blade"
@@ -698,9 +708,10 @@ let runCellEpilogueTests () : BlockResult =
         use _o = pinEnv "BLADE_OMP_THREADS" "1"
         use _r = pinEnv "BLADE_FP_REPRO" "1"
         use _c = pinEnv "BLADE_FP_CONTRACT" "off"
-        use _pr = pinEnv "BLADE_POOL_REUSE" "off"
+        // 035 is the scratch-reuse witness: reuse ON there (the default), off elsewhere.
+        use _pr = pinEnv "BLADE_POOL_REUSE" (if rel.Contains "035" then null else "off")
         let runWith (gate: string) (memcheck: bool) : Result<int * string, string> =
-            use _g = pinEnv "BLADE_EPILOGUE_LEGS" gate
+            use _g = pinEnv "BLADE_EPILOGUE_LEGS" (if isNull gate then "1" else gate)
             use _m = pinEnv "BLADE_MEMCHECK" (if memcheck then "1" else null)
             stemN <- stemN + 1
             let stem = $"epl_rel_{stemN}"
@@ -731,13 +742,451 @@ let runCellEpilogueTests () : BlockResult =
             let censusOk =
                 match cOn, cOff with
                 | Some (a1, f1, o1), Some (a2, f2, o2) ->
-                    if rel.Contains "031" then a1 = a2 && f1 = f2 && o1 = o2 else a1 = a2 && f1 >= f2 && o1 <= o2
+                    // 031 / 033: the inline changes no lifetime -- identical census.
+                    // 035: scratch reuse is forgone for the inlined callee's pools
+                    // (the documented exclusion): one more allocation and one more
+                    // release, nothing left outstanding that gate-off frees.
+                    // 030 / 032: gate-off keeps W1-D's own join-driven inline, whose
+                    // pools then live to exit (pre-existing): gate-on frees more.
+                    if rel.Contains "031" || rel.Contains "033" then a1 = a2 && f1 = f2 && o1 = o2
+                    elif rel.Contains "035" then a1 = a2 + 1L && f1 = f2 + 1L && o1 = o2
+                    else a1 = a2 && f1 >= f2 && o1 <= o2
                 | _ -> false
             if aOn <> 0 || aOff <> 0 || nOn <> 0 || nOff <> 0 then fail name ($"exit codes asan {aOn}/{aOff} plain {nOn}/{nOff}: {tOn}")
             elif not (asanClean tOn && asanClean tOff) then fail name ($"ASan reported: {tOn}")
             elif not censusOk then fail name ($"census on {cOn} off {cOff}")
             elif values vOn <> values vOff || values vOn <> values tOn then fail name "printed values differ between gate on / off or between the cache-on and cache-off builds"
             else pass name ($"ASan clean; census on {cOn} off {cOff} (allocs, frees, outstanding bytes); values equal with the pool cache on and off")
+    // G54 (W4-2 + its fix round). memfree/027: a function-local `y` read ONLY
+    // through a capture in a PROVED-SYNCHRONOUS fold kernel (the map kernel of
+    // a scalar fold let: one reference, writes nothing, returns no function)
+    // is freed at scope exit like its sibling `t`; `kernel` runs 10 times.
+    //   (1) C++: the emitted `kernel` frees every pool it allocates;
+    //   (2) LLVM: the native lane's `kernel` frees both pools before its
+    //       `ret`, in allocation order (t's, then y's);
+    //   (3) under BLADE_MEMCHECK=1 (ASan, the pool cache OFF) the run is
+    //       clean, prints the pinned values, and leaves less than one call's
+    //       worth of `y` (10 x 35 doubles = 2800 bytes) outstanding.
+    // memfree/028, the ESCAPING controls (a closure over `y` stored by an
+    // assignment, passed as an argument and stored, stored by a fold kernel,
+    // returned -- each invoked after its helper returned): no helper frees its
+    // `y`, and the ASan run is clean with the pinned values (the first W4-2
+    // build freed one: heap-use-after-free). The LLVM lane refuses function
+    // values, so 028 is a C++-lane pin only.
+    (let count (needle: string) (s: string) =
+         let mutable n = 0
+         let mutable at = s.IndexOf needle
+         while at >= 0 do
+             n <- n + 1
+             at <- s.IndexOf(needle, at + needle.Length)
+         n
+     let srcOf (rel: string) =
+         corpusFile rel |> Option.map (fun path ->
+             let src = File.ReadAllText path
+             src.Substring(src.IndexOf '\n' + 1))
+     let build (src: string) (memcheck: bool) : Result<string * string, string> =
+         use _m = pinEnv "BLADE_MEMCHECK" (if memcheck then "1" else null)
+         stemN <- stemN + 1
+         let stem = $"g54_free_{stemN}"
+         match emitCpp { saxpySq with Name = stem; Source = src } stem with
+         | Error e -> Error e
+         | Ok cpp ->
+         let file = Path.Combine(work, stem + ".cpp")
+         File.WriteAllText(file, cpp)
+         match Build.compileCpp file work with
+         | Error e -> Error ("compile: " + (if e.Length > 300 then e.Substring(0, 300) else e))
+         | Ok exe ->
+             match runProc exe 120000 with
+             | Ok (code, out, err) when code = 0 -> Ok (cpp.Replace("\r\n", "\n"), (out + "\n" + err).Replace("\r\n", "\n"))
+             | Ok (code, out, err) -> Error ($"exit {code}: {out} {err}")
+             | Error e -> Error e
+     // the DEFINITION (`<ret> name(...) {`), not the forward declaration
+     let defBody (cpp: string) (fname: string) =
+         let dm = Text.RegularExpressions.Regex.Match(cpp, "\n[^\n;]* " + fname + @"\([^;{]*\) \{\n")
+         let defAt = if dm.Success then dm.Index + dm.Length - 2 else -1
+         let endAt = if defAt < 0 then -1 else cpp.IndexOf("\n}\n", defAt)
+         if endAt < 0 then None else Some (cpp.Substring(defAt, endAt - defAt))
+     let census (t: string) =
+         t.Split('\n') |> Array.tryFind (fun l -> l.Contains "BLADE-MEMCHECK:")
+     let num (l: string) (k: string) =
+         let m = Text.RegularExpressions.Regex.Match(l, k + @"=(\d+)")
+         if m.Success then int64 m.Groups.[1].Value else -1L
+     // ---- memfree/027 ----
+     (let name = "memfree/027 (G54): fold-captured function local freed at scope exit; C++ frees, LLVM frees + order, ASan census"
+      match srcOf "memfree/027_fold_captured_function_local_freed.blade" with
+      | None -> fail name "corpus file not found"
+      | Some src ->
+      match build src false with
+      | Error e -> fail name e
+      | Ok (cpp, plain) ->
+      let valuesOk (t: string) = t.Contains "k2 = 57155.0" && t.Contains "total = 2834895.0"
+      match defBody cpp "kernel" with
+      | None -> fail name "no `double kernel(...)` definition in the emission"
+      | Some body ->
+      let allocs = count "= { allocate<" body
+      let frees = count "deallocate<" body
+      if allocs < 2 || frees <> allocs then
+          fail name ($"C++ kernel allocates {allocs} pools and frees {frees} (want every pool freed, >= 2)")
+      elif not (valuesOk plain) then fail name ($"values: {plain}")
+      else
+      // LLVM: `@bl_kernel_*`'s two pool slots, freed before `ret` in allocation order
+      let llvmVerdict =
+          match lower src with
+          | Error e -> Error ("lower: " + e)
+          | Ok ir ->
+          match (try EmitLlvm.tryEmitProgramNamed "g54_llvm" ir with ex -> Error ("raised: " + ex.Message)) with
+          | Error why -> Error ("the llvm lane refused memfree/027: " + why)
+          | Ok ll ->
+          let ll = ll.Replace("\r\n", "\n")
+          let fm = Text.RegularExpressions.Regex.Match(ll, @"\ndefine internal double @bl_kernel_\d+\([^\n]*\{\n")
+          if not fm.Success then Error "no `@bl_kernel_*` definition in the LLVM emission" else
+          let fEnd = ll.IndexOf("\n}\n", fm.Index)
+          let fb = ll.Substring(fm.Index, fEnd - fm.Index)
+          let slots =
+              Text.RegularExpressions.Regex.Matches(fb, @"(%r\d+) = call ptr @blade_alloc_cells\([^\n]*\n\s*store ptr \1, ptr (%r\d+)")
+              |> Seq.map (fun m -> m.Groups.[2].Value) |> List.ofSeq
+          let freed =
+              Text.RegularExpressions.Regex.Matches(fb, @"(%r\d+) = load ptr, ptr (%r\d+)\n\s*call void @blade_free\(ptr \1\)")
+              |> Seq.map (fun m -> m.Groups.[2].Value) |> List.ofSeq
+          let retAt = fb.LastIndexOf "\n  ret double"
+          let lastFree = fb.LastIndexOf "call void @blade_free"
+          if slots.Length <> 2 then Error ($"LLVM kernel allocates {slots.Length} pools (want 2): {slots}")
+          elif freed <> slots then Error ($"LLVM kernel frees slots {freed}, want {slots} (both, allocation order)")
+          elif lastFree < 0 || retAt < lastFree then Error "LLVM kernel's frees are not before its `ret`"
+          else Ok ($"""LLVM frees {String.concat ", " freed} (allocation order) before `ret`""")
+      match llvmVerdict with
+      | Error e -> fail name e
+      | Ok llvmNote ->
+      match build src true with
+      | Error e when e.Contains "Skipped" || e.Contains "sanitize" || e.Contains "vcvars" -> skip name e
+      | Error e -> fail name e
+      | Ok (_, t) ->
+          match census t with
+          | None -> fail name ($"no BLADE-MEMCHECK census line: {t}")
+          | Some l ->
+              let outstanding = num l "outstanding_bytes"
+              if t.Contains "ERROR: AddressSanitizer" then fail name ($"ASan reported: {t}")
+              elif not (valuesOk t) then fail name ($"ASan build values: {t}")
+              elif outstanding < 0L || outstanding >= 2800L then
+                  fail name ($"outstanding_bytes = {outstanding} (>= 2800: a per-call pool survives): {l.Trim()}")
+              else pass name ($"C++ kernel frees all {frees} of its pools; {llvmNote}; ASan clean; census {l.Trim()}"))
+     // ---- memfree/028: the escaping controls ----
+     (let name = "memfree/028 (G54 controls): escaping closures keep their captured `y`; ASan clean"
+      match srcOf "memfree/028_escaping_closure_captures_stay_alive.blade" with
+      | None -> fail name "corpus file not found"
+      | Some src ->
+      match build src false with
+      | Error e -> fail name e
+      | Ok (cpp, plain) ->
+      let want = [ "v1 = 60.0"; "v2 = 31.0"; "v3 = 38.0"; "v4 = 100.0" ]
+      let freesIn =
+          [ "store_direct"; "store_via_arg"; "store_in_kernel"; "mk" ]
+          |> List.map (fun f -> (f, defBody cpp f |> Option.map (fun b -> (count "= { allocate<" b, count "deallocate<" b))))
+      match freesIn |> List.tryFind (fun (_, r) -> match r with Some (a, fr) -> a <> 1 || fr <> 0 | None -> true) with
+      | Some (f, r) -> fail name (sprintf "helper %s (allocs, frees) = %A: want its one `y` allocated and NOT freed" f r)
+      | None ->
+      if want |> List.exists (fun w -> not (plain.Contains w)) then fail name ($"values: {plain}") else
+      match build src true with
+      | Error e when e.Contains "Skipped" || e.Contains "sanitize" || e.Contains "vcvars" -> skip name e
+      | Error e -> fail name e
+      | Ok (_, t) ->
+          if t.Contains "ERROR: AddressSanitizer" then fail name ($"ASan reported: {t}")
+          elif want |> List.exists (fun w -> not (t.Contains w)) then fail name ($"ASan build values: {t}")
+          else pass name ($"""no helper frees its captured `y`; ASan clean; {(census t |> Option.map (fun l -> l.Trim()) |> Option.defaultValue "no census")}"""))
+     // ---- memfree/029-035, functions/545-547: the RETURN classified slot by slot (W4B-C) ----
+     // Each file's `kernel` allocates and frees EXACTLY the pinned pool counts:
+     // every pool freed where the captured `y` is read only by a proved-
+     // synchronous kernel slot (031 the return-position fold, 035 an
+     // object_for kernel counted once, 547 a fold let followed by a direct read
+     // of `y`); `y` kept where a closure over it escapes (029 a scalar-
+     // arithmetic tail store, 030 a tail call, 032 a return fold beside a
+     // stored closure, 033 one kernel referenced twice, 034 a writing return
+     // fold kernel, 545 a fold SEED that stores a closure -- each closure
+     // invoked after `kernel` returned) or where the slot is not proved (546
+     // one kernel in two object_for folds: two references, `y` pinned, a
+     // conservative leak; `t` freed). Plain build: the emission + the pinned
+     // values; BLADE_MEMCHECK=1: ASan clean with the same values.
+     for (rel, fname, (wantAllocs, wantFrees), want) in
+           [ ("memfree/029_scalar_return_call_stores_closure_keeps_capture.blade", "kernel", (1, 0), [ "r = 120.0"; "v = 60.0" ])
+             ("memfree/030_tail_call_stores_closure_keeps_capture.blade", "kernel", (1, 0), [ "r = 0.0"; "v = 180.0" ])
+             ("memfree/031_return_position_fold_kernel_capture_freed.blade", "kernel", (2, 2), [ "k2 = 57155.0"; "total = 2834895.0" ])
+             ("memfree/032_return_fold_plus_stored_closure_keeps_capture.blade", "kernel", (1, 0), [ "r = 120.0"; "v = 60.0" ])
+             ("memfree/033_kernel_referenced_twice_keeps_capture.blade", "kernel", (1, 0), [ "r = 120.0"; "v = 60.0" ])
+             ("memfree/034_return_fold_writing_kernel_keeps_capture.blade", "kernel", (1, 0), [ "r = 40.0"; "v = 38.0" ])
+             ("memfree/035_object_for_kernel_capture_freed.blade", "kernel", (2, 2), [ "k2 = 180.0"; "k3 = 390.0" ])
+             ("functions/545_fold_seed_stores_closure_keeps_capture.blade", "kernel", (1, 0), [ "r = 120.0"; "v = 60.0" ])
+             ("functions/546_one_kernel_two_object_for_folds_keeps_capture.blade", "kernel", (2, 1), [ "k2 = 361.0"; "k3 = 781.0" ])
+             // (1, 1) since compute elision (BLADE_COMPUTE_ELIDE, plan-identity-
+             // transpose-compute P3): `t`'s single pointwise consumer `y` reads
+             // its map in place, so the kernel owns ONE pool (`y`), freed once;
+             // it was (2, 2) with `t` stored.
+             ("functions/547_fold_let_then_direct_read_of_captured_array.blade", "kernel", (1, 1), [ "k2 = 170.0"; "k3 = 342.0" ])
+             ("functions/548_memfree_fold_below_scalar_if_return_freed.blade", "kernel", (1, 1), [ "yes = 55.0"; "no = 0.0"; "total = 5300.0" ])
+             ("functions/548_memfree_fold_below_scalar_if_return_freed.blade", "kjoin", (1, 1), [ "s = 15.0"; "ss = 55.0"; "total = 5300.0" ])
+             ("functions/548_memfree_fold_below_scalar_if_return_freed.blade", "kfma", (1, 1), [ "r = 31.0"; "total = 5300.0" ])
+             ("functions/548_memfree_fold_below_scalar_if_return_freed.blade", "ktag", (1, 1), [ "rt = 4"; "total = 5300.0" ])
+             ("functions/549_memfree_fold_below_block_in_if_arm_freed.blade", "kernel", (1, 1), [ "b1 = 110.0"; "b0 = 1.0"; "total = 4300.0" ])
+             ("functions/549_memfree_fold_below_block_in_if_arm_freed.blade", "kcplx", (1, 1), [ "c = 30.0"; "total = 4300.0" ])
+             ("functions/549_memfree_fold_below_block_in_if_arm_freed.blade", "kunit", (1, 1), [ "u = 15.0"; "total = 4300.0" ])
+             ("functions/549_memfree_fold_below_block_in_if_arm_freed.blade", "kinv", (1, 1), [ "vi = 3.0"; "total = 4300.0" ])
+             ("functions/549_memfree_fold_below_block_in_if_arm_freed.blade", "kwr", (1, 1), [ "vw = 4.0"; "total = 4300.0" ])
+             ("functions/549_memfree_fold_below_block_in_if_arm_freed.blade", "kwrx", (1, 0), [ "vx = 4.0"; "vc = 32.0" ])
+             ("functions/549_memfree_fold_below_block_in_if_arm_freed.blade", "kesc", (1, 0), [ "re = 59.0"; "ve = 32.0" ])
+             ("functions/549_memfree_fold_below_block_in_if_arm_freed.blade", "kidxw", (1, 0), [ "ri = 4.0"; "cc = 2" ])
+             ("functions/549_memfree_fold_below_block_in_if_arm_freed.blade", "krhsw", (1, 0), [ "rr = 4.0"; "cc = 2" ]) ] do
+         let name = $"""{rel.Substring(0, rel.IndexOf('_'))} (G54 slots): {fname} allocates {wantAllocs}, frees {wantFrees}; values; ASan clean"""
+         match srcOf rel with
+         | None -> fail name "corpus file not found"
+         | Some src ->
+         match build src false with
+         | Error e -> fail name e
+         | Ok (cpp, plain) ->
+         match defBody cpp fname with
+         | None -> fail name ($"no `{fname}(...)` definition in the emission")
+         | Some body ->
+         let allocs = count "= { allocate<" body
+         let frees = count "deallocate<" body
+         if allocs <> wantAllocs || frees <> wantFrees then
+             fail name ($"C++ kernel allocates {allocs} pools and frees {frees} (want {wantAllocs} / {wantFrees})")
+         elif want |> List.exists (fun w -> not (plain.Contains w)) then fail name ($"values: {plain}")
+         else
+         match build src true with
+         | Error e when e.Contains "Skipped" || e.Contains "sanitize" || e.Contains "vcvars" -> skip name e
+         | Error e -> fail name e
+         | Ok (_, t) ->
+             if t.Contains "ERROR: AddressSanitizer" then fail name ($"ASan reported: {t}")
+             elif want |> List.exists (fun w -> not (t.Contains w)) then fail name ($"ASan build values: {t}")
+             else pass name ($"""kernel allocates {allocs}, frees {frees}; ASan clean; {(census t |> Option.map (fun l -> l.Trim()) |> Option.defaultValue "no census")}"""))
+    // ---- functions/548: no per-call growth (the second Codex look, finding 1) ----
+    // The fold below a scalar `if` return frees `y` on every call: under
+    // BLADE_MEMCHECK=1 the OUTSTANDING BLOCKS after 40 steps equal those after 4
+    // (the same program, `Steps = Idx<4>`), both branches taken along the way;
+    // the outstanding BYTES differ by exactly the longer trajectory (36 x 8 =
+    // 288), where a per-call `y` would add 36 blocks / 1440 bytes.
+    for (rel, wantTotal) in [ ("functions/548_memfree_fold_below_scalar_if_return_freed.blade", "total = 5300.0"); ("functions/549_memfree_fold_below_block_in_if_arm_freed.blade", "total = 4300.0") ] do
+     let name = $"""{rel.Substring(0, rel.IndexOf('_'))} (G54 slots): outstanding blocks do not grow with the call count (40 vs 4 steps, ASan)"""
+     let path =
+         [ Path.Combine(Directory.GetCurrentDirectory(), "tests", "corpus", rel)
+           Path.Combine(AppContext.BaseDirectory, "tests", "corpus", rel) ] |> List.tryFind File.Exists
+     match path with
+     | None -> fail name "corpus file not found"
+     | Some p ->
+     let src40 = (let s = File.ReadAllText p in s.Substring(s.IndexOf '\n' + 1))
+     let src4 = src40.Replace("type Steps = Idx<40>", "type Steps = Idx<4>")
+     let outstanding (tag: string) (src: string) =
+         use _m = pinEnv "BLADE_MEMCHECK" "1"
+         match emitCpp { saxpySq with Name = tag; Source = src } tag with
+         | Error e -> Error e
+         | Ok cpp ->
+         let file = Path.Combine(work, tag + ".cpp")
+         File.WriteAllText(file, cpp)
+         match Build.compileCpp file work with
+         | Error e -> Error ("compile: " + e)
+         | Ok exe ->
+         match runProc exe 120000 with
+         | Ok (0, out, err) ->
+             let t = out + "\n" + err
+             let m = Text.RegularExpressions.Regex.Match(t, @"outstanding_bytes=(\d+) outstanding_blocks=(\d+)")
+             if t.Contains "ERROR: AddressSanitizer" then Error ("ASan: " + t)
+             elif m.Success then Ok ((int64 m.Groups.[1].Value, int64 m.Groups.[2].Value), t) else Error ("no census: " + t)
+         | Ok (code, out, err) -> Error ($"exit {code}: {out} {err}")
+         | Error e -> Error e
+     let stem = rel.Substring(rel.IndexOf('/') + 1, 3)
+     match outstanding $"g54_{stem}_40" src40, outstanding $"g54_{stem}_4" src4 with
+     | Error e, _ | _, Error e when e.Contains "Skipped" || e.Contains "sanitize" || e.Contains "vcvars" -> skip name e
+     | Error e, _ | _, Error e -> fail name e
+     | Ok ((o40, b40), t40), Ok ((o4, b4), _) ->
+         if b40 <> b4 || o40 - o4 <> 288L then fail name ($"outstanding {o40} bytes / {b40} blocks after 40 steps vs {o4} / {b4} after 4 (want equal blocks, +288 bytes): a per-call pool survives")
+         elif not (t40.Contains wantTotal) then fail name ($"values: {t40}")
+         else pass name ($"outstanding {b40} blocks after 40 steps = {b4} after 4 (bytes {o40} vs {o4}: the trajectory); ASan clean")
+    // ---- G67 (W4B-C fix round): the zero-level compact application IS the call ----
+    // File-backed twins: the DIRECT call `group_h(op)` vs the zero-level
+    // application `object_for(group_h) <@> op` (bare and `|> compute`d, the
+    // direct call `|> compute`d as its twin), with a FAILING compact-returning
+    // kernel (kfail), a DEFERRED operand (dop), a deferred FAILING operand the
+    // kernel ignores (dfign) and uses (dfuse), and two competing failing
+    // deferred operands (compete: BL8013 in the first, BL8014 in the second).
+    // Per scenario, the SELECTED normalized lines -- the printed `name = value`
+    // lines (x0 / c0 excluded) and the `error[..]` / `--> <file>:<line>` /
+    // `at <frame>` lines -- are the
+    // SAME for every spelling in each lane, and the same in the C++ lane, the
+    // NATIVE llvm lane (`tryEmitProgramNamed` must succeed) and the
+    // interpreter. ONE named exception (gap G88, pre-existing, not the
+    // zero-level rewrite): the C++ lane refuses `f(op) |> compute` over a
+    // DEFERRED operand at g++ (`'<op>' was not declared`, BL9002) for the
+    // direct call and the application alike, so there both spellings are
+    // asserted refused with the same text and the C++ value is not compared.
+    (let pre =
+         "type P = Idx<3>\ntype S = Idx<4>\nlet x0 = Float64(0..3) |> compute\nlet zz = extents(x0) - 3\n"
+         + "let c0 = method_for(range<P, S>) <@> lambda(a, s) -> Float64(a + s) |> compute\n"
+         + "function group_h(jg: Array<Float64 like P, S>) = method_for(jg, jg) <@> lambda(ra, rb) where comm(ra, rb) -> prodsum(ra, rb)\n"
+         + "function gfail(jg: Array<Float64 like P, S>) = method_for(jg, jg) <@> lambda(ra, rb) where comm(ra, rb) -> prodsum(ra, rb) * Float64(7 / zz)\n"
+         + "function gign(jg: Array<Float64 like P, S>) = method_for(c0, c0) <@> lambda(ra, rb) where comm(ra, rb) -> prodsum(ra, rb)\n"
+         + "function g2(ja: Array<Float64 like P, S>, jb: Array<Float64 like P, S>) = method_for(ja, ja) <@> lambda(ra, rb) where comm(ra, rb) -> prodsum(ra, rb)\n"
+     // (scenario, operand lets, kernel, call arguments, deferred operand?, expected error line, `-->` line, frames)
+     let scenarios =
+         [ ("kfail", "let jg = method_for(range<P, S>) <@> lambda(a, s) -> Float64(24 + a * 4 + s) |> compute\nlet before = reduce(jg, (+))\n", "gfail", "jg", false,
+            Some "error[BL8013]: integer division by zero", "--> <file>:7", [ "at gfail" ])
+           ("dop", "let jd = method_for(range<P, S>) <@> lambda(a, s) -> Float64(24 + a * 4 + s)\nlet before = 1.5\n", "group_h", "jd", true, None, "", [])
+           ("dfign", "let jf = method_for(range<P, S>) <@> lambda(a, s) -> Float64(24 + a) * Float64(7 / zz)\nlet before = 2.5\n", "gign", "jf", true,
+            Some "error[BL8013]: integer division by zero", "--> <file>:10", [])
+           ("dfuse", "let jf = method_for(range<P, S>) <@> lambda(a, s) -> Float64(24 + a) * Float64(7 / zz)\nlet before = 2.5\n", "group_h", "jf", true,
+            Some "error[BL8013]: integer division by zero", "--> <file>:10", [])
+           ("compete", "let da = method_for(range<P, S>) <@> lambda(a, s) -> Float64(a) * Float64(7 / zz)\nlet db = method_for(range<P, S>) <@> lambda(a, s) -> Float64(Int64(floor(Float64(a) / 0.0 * 0.0)))\nlet before = 3.5\n", "g2", "da, db", true,
+            Some "error[BL8013]: integer division by zero", "--> <file>:10", []) ]
+     let keep (l: string) =
+         let l = l.Trim()
+         let l = if l.StartsWith "[stderr]: " then l.Substring 10 else l
+         if l.StartsWith "error[" || l.StartsWith "at " then Some l
+         elif l.StartsWith "--> " then Some (Text.RegularExpressions.Regex.Replace(l, @"^--> .*?\.blade:", "--> <file>:"))
+         elif l.Contains " = " && not (l.StartsWith "x0 =") && not (l.StartsWith "c0 =") then Some l
+         else None
+     let shape (code: int) (text: string) =
+         (code <> 0, text.Replace("\r\n", "\n").Split('\n') |> Array.choose keep |> List.ofArray)
+     let lanes (stem: string) (src: string) : Result<(string * Result<bool * string list, string>) list, string> =
+         let path = Path.Combine(work, stem + ".blade")
+         File.WriteAllText(path, src)
+         let lowerIt () =
+             match fst (Lowering.lowerDiag (Some path) src) with
+             | Ok (ir, _) -> Ok ir
+             | Error ds -> Error (ds |> List.map (fun d -> d.Message) |> String.concat "; ")
+         match lowerIt () with
+         | Error e -> Error ("lower: " + e)
+         | Ok _ ->
+         let run (exe: string) =
+             use _t = pinEnv "OMP_NUM_THREADS" "1"
+             match runProc exe 120000 with
+             | Ok (code, out, err) -> Ok (shape code (out + "\n" + err))
+             | Error e -> Error e
+         let cpp =
+             match lowerIt () with
+             | Error e -> Error e
+             | Ok ir ->
+             let code = fst (CodeGen.genSelfContainedProgramFromIR ir (stem + "_c"))
+             CodeGen.takeUnhandledIRNodeDiagnostics () |> ignore
+             let file = Path.Combine(work, stem + "_c.cpp")
+             File.WriteAllText(file, code)
+             match Build.compileCpp file work with
+             | Error e ->
+                 let first =
+                     e.Replace("\r\n", "\n").Split('\n')
+                     |> Array.tryFind (fun l -> l.Contains "was not declared")
+                     |> Option.map (fun l -> l.Substring(l.IndexOf "error:"))
+                 Ok (true, [ "C++ COMPILE REFUSED: " + defaultArg first "(other)" ])
+             | Ok exe -> run exe
+         let llvm =
+             match lowerIt () with
+             | Error e -> Error e
+             | Ok ir ->
+             match (try EmitLlvm.tryEmitProgramNamed (stem + "_l") ir with ex -> Error ("raised: " + ex.Message)) with
+             | Error why -> Error ("the llvm lane REFUSED (native required): " + why)
+             | Ok ll ->
+                 let llFile = Path.Combine(work, stem + "_l.ll")
+                 File.WriteAllText(llFile, ll)
+                 match Build.compileLlvmProgram llFile work with
+                 | Error e -> Error ("llvm compile: " + e)
+                 | Ok exe -> run exe
+         let interp =
+             match lowerIt () with
+             | Error e -> Error e
+             | Ok ir ->
+                 let res = Blade.Interp.Run.runProgram ir stem Blade.Interp.Value.defaultLimits
+                 Ok (shape res.ExitCode (res.Stdout + "\n" + res.Stderr))
+         Ok [ ("C++", cpp); ("llvm", llvm); ("interpreter", interp) ]
+     for (scen, ops, f, args, deferred, err, loc, frames) in scenarios do
+         let name = $"G67 zero-level compact call twins ({scen}): direct call == application, every lane"
+         let isPack = args.Contains ","
+         let applied = if isPack then $"({args})" else args
+         let spellings =
+             [ ("direct", $"let h = {f}({args})"); ("bare", $"let h = object_for({f}) <@> {applied}")
+               ("dircomp", $"let h = {f}({args}) |> compute"); ("comp", $"let h = object_for({f}) <@> {applied} |> compute") ]
+         let results =
+             spellings |> List.map (fun (sp, line) ->
+                 (sp, lanes $"g67_{scen}_{sp}" (pre + ops + line + "\nlet after = h((0 : P), (1 : P))\n")))
+         match results |> List.tryPick (fun (sp, r) -> match r with Error e -> Some ($"{sp}: {e}") | Ok _ -> None) with
+         | Some e -> fail name e
+         | None ->
+         let byLane (sp: string) =
+             match results |> List.find (fun (s, _) -> s = sp) |> snd with
+             | Ok ls -> ls
+             | Error _ -> []
+         let laneErr =
+             results |> List.tryPick (fun (sp, r) ->
+                 match r with
+                 | Ok ls -> ls |> List.tryPick (fun (lane, x) -> match x with Error e -> Some ($"{sp} {lane}: {e}") | Ok _ -> None)
+                 | Error _ -> None)
+         match laneErr with
+         | Some e -> fail name e
+         | None ->
+         let get sp lane = byLane sp |> List.find (fun (l, _) -> l = lane) |> snd |> function Ok x -> x | Error _ -> (false, [])
+         // (1) each lane: the application equals its direct-call twin
+         let twinBad =
+             [ for lane in [ "C++"; "llvm"; "interpreter" ] do
+                 for (a, b) in [ ("direct", "bare"); ("dircomp", "comp") ] do
+                     if get a lane <> get b lane then yield $"{lane}: {a} {get a lane} vs {b} {get b lane}" ]
+         // (2) across lanes, per spelling (G88: the C++ `|> compute` over a deferred operand is a g++ refusal)
+         let g88 (sp: string) = deferred && (sp = "dircomp" || sp = "comp")
+         let laneBad =
+             [ for (sp, _) in spellings do
+                 let l, i = get sp "llvm", get sp "interpreter"
+                 if l <> i then yield $"{sp}: llvm {l} vs interpreter {i}"
+                 let c = get sp "C++"
+                 if g88 sp then
+                     let refusedOk =
+                         match c with
+                         | (true, [ r ]) -> r.StartsWith "C++ COMPILE REFUSED: error: '" && r.Contains "was not declared"
+                         | _ -> false
+                     if not refusedOk then yield $"{sp}: C++ {c}, want the G88 g++ refusal"
+                 elif c <> i then yield $"{sp}: C++ {c} vs interpreter {i}" ]
+         // (3) the expected first failure (or success) itself
+         let (failed0, lines0) = get "direct" "interpreter"
+         let wantBad =
+             match err with
+             | Some e ->
+                 let want = [ e; loc ] @ frames
+                 let got = lines0 |> List.filter (fun l -> l.StartsWith "error[" || l.StartsWith "--> " || l.StartsWith "at ")
+                 if failed0 && got = want then [] else [ $"first failure {got}, want {want}" ]
+             | None ->
+                 if not failed0 && lines0 |> List.contains "h = [[2606.0, 3014.0, 3422.0], [3486.0, 3958.0], [4494.0]]" && lines0 |> List.contains "after = 3014.0"
+                 then [] else [ $"values {lines0}" ]
+         match twinBad @ laneBad @ wantBad with
+         | [] ->
+             let g88Note = if deferred then "; C++ `|> compute` over the deferred operand: the G88 g++ refusal for the direct call and the application alike" else ""
+             pass name ($"""{(if failed0 then "fails" else "runs")}: {String.concat " | " lines0}; native llvm + interpreter + C++ agree{g88Note}""")
+         | bad -> fail name (String.concat " ;; " bad)
+     // EXPLICIT-WRAPPER CONTROLS (the second Codex look, finding 2): only the
+     // COMPILER-SYNTHESIZED eta wrapper of a named kernel is reduced to the
+     // callee. A user-written wrapper -- a plain eta wrapper, one with its own
+     // `where comm` clause, one permuting or dropping arguments, a let-bound
+     // lambda kernel -- is called as the lambda it is: its failure carries the
+     // callee's frame AND the wrapper's (`at lambda in h`), the same in every
+     // lane; the synthesized wrapper (`object_for(gfail)`) carries the callee's
+     // only. Each a bare zero-level application over the stored `jg`.
+     let etaPre =
+         pre + "function g2fail(ja: Array<Float64 like P, S>, jb: Array<Float64 like P, S>) = method_for(ja, ja) <@> lambda(ra, rb) where comm(ra, rb) -> prodsum(ra, rb) * Float64(7 / zz)\n"
+         + "let jg = method_for(range<P, S>) <@> lambda(a, s) -> Float64(24 + a * 4 + s) |> compute\n"
+     let fr1 = [ "at gfail"; "at lambda in h" ]
+     let fr2 = [ "at g2fail"; "at lambda in h" ]
+     for (ctl, line, frames) in
+           [ ("user_eta", "let h = object_for(lambda(j: Array<Float64 like P, S>) -> gfail(j)) <@> jg", fr1)
+             ("user_clause", "let h = object_for(lambda(a: Array<Float64 like P, S>, b: Array<Float64 like P, S>) where comm(a, b) -> g2fail(a, b)) <@> (jg, jg)", fr2)
+             ("user_permuted", "let h = object_for(lambda(a: Array<Float64 like P, S>, b: Array<Float64 like P, S>) -> g2fail(b, a)) <@> (jg, jg)", fr2)
+             ("user_dropped", "let h = object_for(lambda(a: Array<Float64 like P, S>, b: Array<Float64 like P, S>) -> gfail(a)) <@> (jg, jg)", fr1)
+             ("let_bound_lambda", "let gl = lambda(j: Array<Float64 like P, S>) -> gfail(j)\nlet h = object_for(gl) <@> jg", fr1)
+             ("synthesized", "let h = object_for(gfail) <@> jg", [ "at gfail" ]) ] do
+         let name = $"""G67 zero-level eta control ({ctl}): wrapper frames {String.concat ", " frames}, every lane"""
+         match lanes $"g67_eta_{ctl}" (etaPre + line + "\nlet after = h((0 : P), (1 : P))\n") with
+         | Error e -> fail name e
+         | Ok ls ->
+         match ls |> List.tryPick (fun (lane, x) -> match x with Error e -> Some ($"{lane}: {e}") | Ok _ -> None) with
+         | Some e -> fail name e
+         | None ->
+         let outs = ls |> List.map (fun (lane, x) -> (lane, match x with Ok v -> v | Error _ -> (false, [])))
+         let (_, first) = outs.Head
+         let got = snd first |> List.filter (fun l -> l.StartsWith "at ")
+         if outs |> List.exists (fun (_, v) -> v <> first) then fail name (sprintf "lanes disagree: %A" outs)
+         elif not (fst first) || got <> frames then fail name ($"frames {got}, want {frames}: {snd first}")
+         else pass name ($"""{String.concat " | " (snd first)} in C++, native llvm and the interpreter"""))
     (try Directory.Delete(work, true) with _ -> ())
     printFooter blockName [ $"{passed} passed"; $"{failed} failed"; $"{skipped} skipped" ]
     { Block = blockName; Passed = passed; Failed = failed; Skipped = skipped; FailedNames = names }

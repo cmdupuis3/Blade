@@ -1,0 +1,48 @@
+// TEST: Row orbit action: rank-2 role terms over a stored SymIdx pool
+// A ROW ACTION u(i) = fold_k(s, [ g(S(i, j), V(i), V(j)) for j ]) over a
+// stored SymIdx<2, p> pool S, written as a `|> compute` map whose kernel is
+// one fold over the partner coordinate, is ONE pass over S's canonical
+// cells (src/OrbitFold.fs planAction; `blade plan`: `fold form: orbit action
+// (rank 2, extent 13, 1 channel, row groups of 4): own / partner role
+// terms; ...`). THE ROLE-TERM RULE: an off-diagonal cell (a, b) is read once
+// and its term evaluated TWICE -- row chain a with own = V(a), partner =
+// V(b), row chain b with own = V(b), partner = V(a) -- never one weighted
+// term at both endpoints; every row chain is fed j = 0 .. p-1 ascending from
+// its own seed through its own kernel (the rank-2 scatter's order), so the
+// values are the walk's (bitwise under BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off;
+// `blade test orbit-scatter` pins the raw bits against the walk-forced twins).
+// Seeds -0.0 / 0.75 / -1.25 / 0.0, a builtin `(+)`, a `where repro` add and the
+// non-commutative `b - a * 0.5` (any order change shows), a free scalar, and
+// both read orders S(i, j) / S(j, i). D/5's counterexample (Codex review D,
+// finding 5): S01 = 2, V = [3, 5] -- S(i, j) * V(i) is 6 at (0, 1) and 10 at
+// (1, 0): the packed READ is invariant, the cell TERM is not -- so own_2(1) is
+// 2 * 5 + 4 * 5 = 30, where one weighted term reused at both endpoints would
+// give 6 + 20 = 26.
+let static p = 13
+type Var = Idx<p>
+type Obs = Idx<3>
+type Two = Idx<2>
+function radd(a: Float64, b: Float64) where repro -> Float64 = a + b
+function rhalf(a: Float64, b: Float64) where repro -> Float64 = b - a * 0.5
+let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 11) * 0.37 + 0.1 / Float64(i + 1) |> compute
+let g = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute
+let v = method_for(range<Var>) <@> lambda(i) -> Float64((i * 5) % 7) * 0.25 - 0.5 |> compute
+let y = method_for(range<Var>) <@> lambda(i) -> Float64((i * 3) % 5) * 0.5 + 0.125 |> compute
+let c = 0.375
+let a0 = method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j), (+), -0.0) |> compute
+let a1 = method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * v(j), radd, 0.75) |> compute
+let a2 = method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * (v(j) - y(i)), rhalf, -1.25) |> compute
+let a3 = method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> (g(j, i) - y(i)) * v(j) + c, (+), 0.0) |> compute
+let pv = method_for(range<Two>) <@> lambda(i) -> Float64(i + 1) |> compute
+let s2 = method_for(pv, pv) <@> lambda(a: Float64, b: Float64) where comm(a, b) -> a * b |> compute
+let w2 = method_for(range<Two>) <@> lambda(i) -> Float64(3 + 2 * i) |> compute
+let own_2 = method_for(range<Two>) <@> lambda(i) -> reduce(method_for(range<Two>) <@> lambda(j) -> s2(i, j) * w2(i), (+)) |> compute
+let partner_2 = method_for(range<Two>) <@> lambda(i) -> reduce(method_for(range<Two>) <@> lambda(j) -> s2(i, j) * w2(j), (+)) |> compute
+let both_2 = method_for(range<Two>) <@> lambda(i) -> reduce(method_for(range<Two>) <@> lambda(j) -> s2(i, j) * (w2(j) - w2(i)), (+)) |> compute
+// EXPECT: a0 = [87.9711885531136, 175.609836036186, 163.471003751804, 150.429305135143, 146.66421998557, 135.490241569542, 122.879281286967, 119.346794837801, 108.313524277574, 95.7944548396048, 188.49141883798, 81.3378182081807, 172.548280492371]
+// EXPECT: a1 = [24.8667615384615, 51.2629055361305, 45.041928030303, 36.3467690268065, 43.5280174242424, 37.5648695221445, 28.984813020313, 36.228216768648, 30.302669017094, 21.7471677156177, 51.7279184361093, 23.0941830128205, 50.4447923704501]
+// EXPECT: a2 = [-1.2178481238173, -28.0364748110203, -7.29780693546091, -25.5362833391088, -14.6982718655541, -0.792310945192232, -14.9304876274529, -4.22146686593495, -17.3991075042563, -7.02791702886448, -0.317680875632101, -9.63942220057486, -6.31573881781275]
+// EXPECT: a3 = [28.5542615384615, 49.7004055361305, 46.979428030303, 33.0342690268065, 43.7155174242424, 41.2523695221445, 27.422313020313, 38.165716768648, 26.990169017094, 21.9346677156177, 55.4154184361093, 21.5316830128205, 52.3822923704501]
+// EXPECT: own_2 = [9.0, 30.0]
+// EXPECT: partner_2 = [13.0, 26.0]
+// EXPECT: both_2 = [4.0, -4.0]

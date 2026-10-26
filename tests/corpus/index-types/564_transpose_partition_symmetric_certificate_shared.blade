@@ -1,0 +1,19 @@
+// TEST: Transpose Partition Symmetric Certificate Shared
+// The certificate side of index-types/563 (plan sections 2.2 and 3): over a
+// SymIdx operand the transpose is the certified identity, erased at
+// typecheck, so `g(S, transpose(S, [0, 1]))` IS `g(S, S)` -- its arguments
+// are one class and the call takes the [0,0] sharing instance g__share1 (one
+// array for the body's identity groups: the inner pair space of x and y is a
+// packed wreath). `GSS` is the same instance. S = v v^T over [1, 2, 3], packed.
+type K = Idx<3>
+let v: Array<Float64 like K> = [1.0, 2.0, 3.0]
+let S = method_for(v, v) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+function g(x: Array<Float64 like SymIdx<2, K>>, y: Array<Float64 like SymIdx<2, K>>) where comm(x, y) = {
+    let P = method_for(x, y) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+    P((2 : K), (1 : K), (0 : K), (1 : K))
+}
+let GS = g(S, transpose(S, [0, 1]))
+let GSS = g(S, S)
+// EXPECT: S = [1.0, 2.0, 3.0, 4.0, 6.0, 9.0]
+// EXPECT: GS = 12.0
+// EXPECT: GSS = 12.0

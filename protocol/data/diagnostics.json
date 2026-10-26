@@ -870,6 +870,15 @@
       "examples": [],
       "docs": []
     },
+    "BL7005": {
+      "title": "experimental kept inline with an incomplete lifetime audit",
+      "explanation": "A WARNING, never an error. Under the explicit opt-in BLADE_EPILOGUE_LEGS=1, the producer-input legs (gap G69) keep a one-level inline of the call that holds their producer, and the lane that emitted the program RETAINED it (whether or not its fused form carried the legs). That inline's lifetime audit is incomplete: allocations made by the fold / map kernels the inlined callee names may survive its return. Raised once per retained inline per lane, spanned at the call. The default build declines the inline and never raises it.",
+      "fix": "Nothing is wrong with the program. Unset BLADE_EPILOGUE_LEGS (the default build keeps the legs in their joined pass and the call as written), or accept the experimental arm knowingly; the planned closure is real lifetime scopes (gap G69's scope model A).",
+      "examples": [],
+      "docs": [
+        "docs/features.md"
+      ]
+    },
     "BL8001": {
       "title": "constraint violation",
       "explanation": "A RUNTIME check stamped into the generated C++ failed: a `where` constraint on a struct or index type evaluated false for actual data, or `sparse(values, keys)` was given a values array whose length does not match the key count. Raised identically by the generated binary and by the interpreter.",

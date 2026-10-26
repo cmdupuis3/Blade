@@ -1,0 +1,21 @@
+// TEST: Ring Recursive Array Declines While Guard
+// ============================================================================
+// Recursive-array windowing DEMOTES a `while`-guarded recursion: once the
+// guard goes false its freeze epilogue repeats the last written row over the
+// rest of the budget, which reads rows a ring no longer holds. `rec-window`
+// is DECLINED ("a `while` guard"). Newton for sqrt(2) from 1.0, stopping when
+// the step is below 1e-12; the final row of the 40-row budget is the frozen
+// root.
+// ============================================================================
+type T = Idx<40>
+
+let root = {
+    let rec x: Array<Float like T> =
+        match x with
+        | zero -> zero
+        | zero :: s -> zero :: 1.0
+        | prefix :: n while abs(prefix(n - 1) * prefix(n - 1) - 2.0) > 1.0e-12 ->
+            prefix :: 0.5 * (prefix(n - 1) + 2.0 / prefix(n - 1))
+    x((39 : T))
+}
+// EXPECT: root = 1.41421356237309

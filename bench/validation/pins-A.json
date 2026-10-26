@@ -61,6 +61,22 @@
       }
     }
   },
+  "pairaction": {
+    "full": {
+      "checksum": 12490171.447548622,
+      "input_checksum": 7509.800705458969,
+      "sizes": {
+        "n": 2503
+      }
+    },
+    "smoke": {
+      "checksum": 5502.64756708748,
+      "input_checksum": 145.4618777781725,
+      "sizes": {
+        "n": 53
+      }
+    }
+  },
   "pairkernel": {
     "full": {
       "checksum": 2266701.751854711,

@@ -1,0 +1,32 @@
+// TEST: Ring Recursive Array RK4 Block-Local Final Read
+// ============================================================================
+// Recursive-array windowing (docs/plans/plan-rec-array-windowing.md P1;
+// bench PM33): the block-wrap idiom `let out = { let rec traj: ...;
+// traj(final) }` with lag K = 1 and a rank-2 slice (the RK4 litmus of
+// recursive-arrays/007 at N = 200). The only later use is the final-row read,
+// so `rec-window` APPLIES: a 2-slot ring plus one snapshot (row 199) replaces
+// the 200-row trajectory, and `traj` dissolves. The decision is pinned by
+// `blade test optimize` (rec_window_corpus); the value is the full buffer's
+// (BLADE_REC_WINDOW=0 prints the same).
+// du/dt = -u, h = 0.1: each RK4 step multiplies every cell by 0.9048375.
+// ============================================================================
+type Y = Idx<2>
+type X = Idx<2>
+type T = Idx<200>
+function rk4(u: Array<Float like Y, X>) -> Array<Float like Y, X> = {
+    let k1 = 0.0 - u
+    let k2 = 0.0 - (u + 0.05 * k1)
+    let k3 = 0.0 - (u + 0.05 * k2)
+    let k4 = 0.0 - (u + 0.1 * k3)
+    u + (0.1 / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+}
+
+let final = {
+    let rec traj: Array<Float like T, Y, X> =
+        match traj with
+        | zero -> zero
+        | zero :: s -> zero :: [[1.0, 2.0], [3.0, 4.0]]
+        | prefix :: n -> prefix :: rk4(prefix(n - 1))
+    traj((199 : T))
+}
+// EXPECT: final = [[2.27796810410261e-09, 4.55593620820522e-09], [6.83390431230783e-09, 9.11187241641043e-09]]

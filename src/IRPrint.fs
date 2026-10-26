@@ -423,6 +423,7 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
     | IRArity (Some n, name) -> $"arity({name}={n})"
     | IRNth -> "nth"
     | IRZero _ -> "zero"
+    | IRUnseededSeed (b, _, r) -> (if r then $"unseeded_seed[repro]({pp b})" else $"unseeded_seed({pp b})")
     | IRUninit ty -> $"uninit<{ppIRType ty}>"
     | IRRank arr -> $"rank({pp arr})"
     | IRPolyIndex (pack, idx) -> $"{pp pack}[{pp idx}]"

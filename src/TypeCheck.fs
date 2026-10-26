@@ -240,8 +240,220 @@ let private generalizeArrowLetLambdas (decls: Located<Decl> list) : Located<Decl
         | _ -> ld)
     |> List.ofArray
 
+/// THE NEVER-WRITTEN PROOF OF STORED ALIASES, the checker's half
+/// (docs/plans/plan-identity-transpose-compute.md 2.1 second step, 2.6;
+/// TypeCheckSupport.recordStoredAliasMember is its one reader). Identity is
+/// decided at TYPECHECK -- the output type of `method_for(A, B) <@> comm-
+/// kernel` depends on it -- while a write that would refute it may come later
+/// in the source, so this is a PRE-PASS over the module's SURFACE
+/// declarations, computed before any declaration is checked: a syntactic,
+/// module-wide, fail-closed closure that mirrors the read-only alias plan's
+/// IR closure (Optimize.aliasWriteClosure) and is STRICTER than it at every
+/// point, so an alias given its root's identity is always one the plan may
+/// share storage for (Lowering cross-checks and records the plan's verdict,
+/// `[alias-identity v1]`). Names, not binder ids (nothing is resolved yet);
+/// a top-level name is unique per module (BL2009), and a local binder that
+/// shadows one is scoped out by collectFreeVars.
+///
+/// Per top-level declaration: its binders, its FREE names, whether it holds
+/// any assignment (`x = ..`, `A(i) = ..`, `p.f = ..`, `s += ..`, anywhere in
+/// it, lambdas and blocks included, to ANY target -- a write to local storage
+/// counts, as in the IR closure), and whether it names foreign code (a
+/// qualified name, or a name an import binds: another module's bodies are not
+/// judged here). A WRITING definition is one that does any of that, or names
+/// a writing definition (least fixpoint). For seeds S (the root, the alias's
+/// source, the alias; for a CALL root also every top-level name the root's
+/// declaration reaches through references, transitively -- a call's result
+/// may share storage with its arguments or with what the callee reads), the
+/// MEMBERS are S plus every top-level binder whose declaration names a member
+/// (a view, alias, tuple, map or call result derived from one may share its
+/// storage), to a fixpoint. Ok iff no other module of the program imports
+/// this one and no declaration that names a member is writing. Higher-order
+/// calls need no rule of their own: code reaches a call site only through
+/// names, so a call that could write a member's storage is in a declaration
+/// that names both the member (or a member derived from it) and the writing
+/// code (or a writing definition naming it). Builtins are assumed to write
+/// nothing (no builtin takes a `mut` argument).
+let private storedAliasWriteProof (decls: Located<Decl> list) (imports: ImportDecl list) (importedElsewhere: string option)
+                                  : string -> bool -> string list -> Result<string, string> =
+    let mapPre = Blade.Unfold.mapExprPre
+    let scopesOf (d: Decl) : (Set<string> * Expr) list =
+        let fnScopes (f: FunctionDecl) =
+            let ps = f.Params |> List.map (_.Name) |> Set.ofList
+            (ps, f.Body) :: (f.Params |> List.choose (_.Default) |> List.map (fun e -> (ps, e)))
+        match d with
+        | DeclLet b | DeclStatic b -> [ (Set.empty, b.Value) ]
+        | DeclFunction f -> fnScopes f
+        | DeclImpl impl -> impl.Methods |> List.collect fnScopes
+        | DeclType (TyDeclStruct (_, _, _, cs, _)) | DeclType (TyDeclMutualGroup (_, cs)) ->
+            cs |> List.map (fun e -> (Set.empty, e))
+        | DeclType _ | DeclInterface _ | DeclUnit _ | DeclImport _ -> []
+    let bindersOf (d: Decl) : string list =
+        match d with
+        | DeclLet b | DeclStatic b -> patternNames b.Pattern |> List.filter (fun n -> n <> "_")
+        | DeclFunction f -> [ f.Name ]
+        | DeclImpl impl -> impl.Methods |> List.map (_.Name)
+        | _ -> []
+    let importNames =
+        decls |> List.collect (fun d ->
+            match d.Value with
+            | DeclImport (qn, ImportSelective ids) -> ids @ [ String.concat "." qn ]
+            | DeclImport (qn, ImportQualified alias) ->
+                (match alias with Some a -> [ a ] | None -> []) @ [ String.concat "." qn; List.last qn ]
+            | _ -> [])
+        |> List.append (imports |> List.collect (fun i ->
+               (match i.Alias with Some a -> [ a ] | None -> [])
+               @ (match i.Items with
+                  | Some items -> items |> List.choose (fun it -> match it with ImportName n -> Some n | ImportHiding _ -> None)
+                  | None -> [])
+               @ [ String.concat "." i.Module; List.last i.Module ]))
+        |> Set.ofList
+    // (binders, free names, assigns anything, names foreign code)
+    let facts =
+        decls |> List.map (fun d ->
+            let scopes = scopesOf d.Value
+            let free = scopes |> List.map (fun (bound, e) -> collectFreeVars bound e) |> Set.unionMany
+            let mutable assigns = false
+            let mutable qualified = false
+            let rec stmts (ss: Stmt list) =
+                for s in ss do
+                    match unwrapStmt s with
+                    | StmtAssign _ -> assigns <- true
+                    | StmtForIn (_, _, body) -> stmts body
+                    | _ -> ()
+            // mapExprPre does not descend into a lambda's parameter DEFAULTS,
+            // an align's pad expression or a halo's offsets (Codex review of
+            // this rule, finding 2: a write inside a default escaped), so
+            // the visitor scans those itself.
+            let rec scan (e: Expr) =
+                mapPre (fun x ->
+                    (match x.Kind with
+                     | ExprKind.ExprAssign _ -> assigns <- true
+                     | ExprKind.ExprBlock (ss, _) -> stmts ss
+                     | ExprKind.ExprQualified _ -> qualified <- true
+                     | ExprKind.ExprLambda (ps, _, _) -> for p in ps do Option.iter scan p.Default
+                     | ExprKind.ExprAlign (_, Some { Boundary = Ast.BoundaryMode.BndPad p }) -> scan p
+                     | ExprKind.ExprHalo (_, offsets) -> scan offsets
+                     | _ -> ())
+                    None) e |> ignore
+            for (_, e) in scopes do scan e
+            (bindersOf d.Value, free, assigns, qualified || not (Set.isEmpty (Set.intersect free importNames))))
+        |> List.toArray
+    let topNames = facts |> Array.collect (fun (bs, _, _, _) -> List.toArray bs) |> Set.ofArray
+    let refsTop = facts |> Array.map (fun (_, free, _, _) -> Set.intersect free topNames)
+    let declOf =
+        facts |> Array.mapi (fun i (bs, _, _, _) -> bs |> List.map (fun n -> (n, i))) |> List.concat |> Map.ofList
+    let writingNames =
+        let mutable w = Set.empty
+        let mutable writingDecls = Set.empty
+        for i in 0 .. facts.Length - 1 do
+            let (bs, _, assigns, foreign) = facts.[i]
+            if assigns || foreign then
+                writingDecls <- writingDecls.Add i
+                w <- Set.union w (Set.ofList bs)
+        let mutable changed = true
+        while changed do
+            changed <- false
+            for i in 0 .. facts.Length - 1 do
+                if not (writingDecls.Contains i) && not (Set.isEmpty (Set.intersect refsTop.[i] w)) then
+                    let (bs, _, _, _) = facts.[i]
+                    writingDecls <- writingDecls.Add i
+                    w <- Set.union w (Set.ofList bs)
+                    changed <- true
+        w
+    let writingDecl (i: int) =
+        let (_, _, assigns, foreign) = facts.[i]
+        assigns || foreign || not (Set.isEmpty (Set.intersect refsTop.[i] writingNames))
+    let nameOfDecl (i: int) =
+        match facts.[i] with
+        | (b :: _, _, _, _) -> $"`{b}`"
+        | _ -> $"the declaration at line {decls.[i].Span.StartLine}"
+    let named (ns: Set<string>) = ns |> Set.toList |> List.map (fun n -> $"`{n}`") |> String.concat ", "
+    fun (root: string) (rootIsCall: bool) (seedNames: string list) ->
+        match importedElsewhere with
+        | Some why -> Error why
+        | None ->
+        // A call's result may share storage with whatever its declaration
+        // reaches (arguments, the callee's captures, transitively): those are
+        // seeds too, never written either.
+        let backward =
+            if not rootIsCall then Set.empty
+            else
+                let mutable seen = Set.empty
+                let rec visit (n: string) =
+                    if not (seen.Contains n) then
+                        seen <- seen.Add n
+                        match Map.tryFind n declOf with
+                        | Some i -> for m in refsTop.[i] do visit m
+                        | None -> ()
+                visit root
+                seen.Remove root
+        let seeds = Set.union (Set.ofList seedNames) backward
+        let mutable members = seeds
+        let mutable changed = true
+        while changed do
+            changed <- false
+            for i in 0 .. facts.Length - 1 do
+                let (bs, _, _, _) = facts.[i]
+                if not (Set.isEmpty (Set.intersect refsTop.[i] members))
+                   && bs |> List.exists (fun b -> not (members.Contains b)) then
+                    members <- Set.union members (Set.ofList bs)
+                    changed <- true
+        // A root that needs its reach is judged by its OWN declaration too, and
+        // by every declaration in the reach: what the root's value may share
+        // is decided by that code (a call into another module, `Lib.get()`,
+        // names an import and fails here).
+        let reachDecls =
+            if not rootIsCall then []
+            else (Set.add root backward) |> Set.toList |> List.choose (fun n -> Map.tryFind n declOf)
+        let offender =
+            (reachDecls |> List.tryFind writingDecl)
+            |> Option.orElse (
+                [ 0 .. facts.Length - 1 ] |> List.tryFind (fun i ->
+                    not (Set.isEmpty (Set.intersect refsTop.[i] members)) && writingDecl i))
+        match offender with
+        | Some i ->
+            let (_, _, assigns, foreign) = facts.[i]
+            let how =
+                if assigns then "holds an assignment (a write to local storage counts: the copy it relies on is the one an identity-transparent alias removes)"
+                elif foreign then "names another module's code or a qualified name (its writes are not judged here)"
+                else $"""names a definition that may write ({named (Set.intersect refsTop.[i] writingNames)})"""
+            let hit = Set.intersect refsTop.[i] members
+            if hit.IsEmpty then Error $"{nameOfDecl i} (in the reach of `{root}`, whose cells may be shared with what it names) {how}"
+            else Error $"{nameOfDecl i} names {named hit} and {how}"
+        | None ->
+            let derived = Set.difference members seeds
+            let seedTxt = named (Set.ofList seedNames)
+            let backTxt = if backward.IsEmpty then "" else $"; the call's reach ({named backward}) is never written either"
+            Ok ($"never written (module-wide, syntactic): no assignment, mutating call or writing definition names {seedTxt}"
+                + (if derived.IsEmpty then "" else $" or a value that may share their storage ({named derived})")
+                + backTxt
+                + "; no other module imports this one")
+
 let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * CompileError list =
     let modul = { modul with Decls = generalizeArrowLetLambdas modul.Decls }
+    // The never-written proof of top-level stored aliases (plan 2.1 second
+    // step): over the WHOLE module's surface, before any declaration is
+    // checked (TypeCheckSupport.recordStoredAliasMember reads it).
+    (let importedElsewhere =
+        match env.ProgramModules with
+        | [] -> Some "the program's other modules are not known to this check (fail closed)"
+        | mods ->
+            let me = modul.Name
+            let related (qn: string list) =
+                let n = min qn.Length me.Length
+                n > 0 && List.truncate n qn = List.truncate n me
+            let importsMe (m: ModuleDecl) =
+                m.Name <> me
+                && ((m.Imports |> List.exists (fun i -> related i.Module))
+                    || (m.Decls |> List.exists (fun d -> match d.Value with DeclImport (qn, _) -> related qn | _ -> false)))
+            match mods |> List.tryFind importsMe with
+            | Some m -> Some $"""module `{String.concat "." m.Name}` imports this module (its writes are not judged here)"""
+            | None -> None
+     env.StoredAliasNeverWritten.Value <- storedAliasWriteProof modul.Decls modul.Imports importedElsewhere)
+    // Binder ids restart per compile: a block-local id from an earlier module
+    // or program must not stop this module's reduce alias chase (G60).
+    Blade.TypeCheckInfer.blockLocalVidsStorage.Value <- System.Collections.Generic.HashSet<_>()
     // Fresh module: drop any span the PREVIOUS module's decl loop left in the
     // side-channel. The static-assertion errors below are raised before this
     // module's first `checkDecl` (which is where the per-decl reset lives), so
@@ -253,6 +465,8 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     // judgment reaches through a forward reference (it re-checks a
     // declaration). Installed here, at the one entry every check passes.
     arrowVariantHook.Value <- checkArrowVariant
+    // ...and of identity-sensitive declarations' SHARING INSTANCES (plan 2.2).
+    sharingVariantHook.Value <- checkSharingVariant
     // (The callee-fact tables -- defaults, where-conjuncts, `mut` positions,
     // co-iteration, units -- are keyed by binder id, program-unique, and
     // shared by reference across the program's modules: a module's entries
@@ -643,6 +857,7 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
 
 let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError list * string list =
     resetInferSideTables ()
+    Blade.Types.StoredAliasIdentity.reset ()
     let env = emptyEnv ()
     let mutable modules = []
     let mutable allErrors = []
@@ -656,7 +871,7 @@ let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError li
         let qualifier =
             if Blade.Types.TypeOrigins.isMainModule i program.Modules.Length || moduleName = "" then None
             else Some moduleName
-        let envWithExports = { env with ModuleExports = moduleExports; ModuleQualifier = qualifier }
+        let envWithExports = { env with ModuleExports = moduleExports; ModuleQualifier = qualifier; ProgramModules = program.Modules }
         let (tm, finalEnv, errs) = checkModule envWithExports modul
         modules <- tm :: modules
         allErrors <- allErrors @ errs
