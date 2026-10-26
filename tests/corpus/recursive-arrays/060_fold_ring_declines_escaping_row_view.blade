@@ -1,0 +1,32 @@
+// TEST: Fold Ring Declines Escaping Row View
+// ============================================================================
+// PM35 decline control (Codex review round 2): the step hands its lag row to a
+// helper that stores it in a module array; under a ring that row's slot is
+// overwritten two steps later. The producer writes storage outside its buffer,
+// so the ring declines (the trajectory's own row fold would otherwise ride the
+// sweep with no use of it left).
+// ============================================================================
+type T = Idx<11>
+type X = Idx<3>
+
+let mut saved: Array<Float64 like X> = [0.0, 0.0, 0.0]
+
+function keep(r: Array<Float64 like X>, n: Int64) -> Array<Float64 like X> = {
+    let z = if n == 1 then { saved = r; 0.0 } else 0.0
+    r + 1.0
+}
+
+function run(u0: Array<Float64 like X>) -> Float64 = {
+    let rec traj: Array<Float64 like T, X> =
+        match traj with
+        | zero -> zero
+        | zero :: s -> zero :: u0
+        | prefix :: n -> prefix :: keep(prefix(n - 1), Int64(n))
+    let total = reduce(method_for(traj) <@> lambda(row) -> reduce(row, (+)), (+))
+    total + reduce(saved, (+))
+}
+
+let u: Array<Float64 like X> = [1.0, 2.0, 3.0]
+let v = run(u)
+// EXPECT: saved = [1.0, 2.0, 3.0]
+// EXPECT: v = 237.0

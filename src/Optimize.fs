@@ -8331,6 +8331,10 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
         | _ -> [], e
     let rebuild (stmts: (IRId * IRExpr) list) (fin: IRExpr) =
         List.foldBack (fun (id, v) acc -> IRLet (id, v, acc)) stmts fin
+    let boundInBlock (blk: IRExpr) (id: IRId) =
+        let mutable hit = false
+        iterIRExpr (fun x -> match x with IRLet (b, _, _) when b = id -> hit <- true | _ -> ()) blk
+        hit
     let staticExt (ix: IRIndexType) = match ix.Extent with IRLit (IRLitInt v) -> Some v | _ -> None
     let plainIx (ix: IRIndexType) = ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank = 1
     let scalarTy (t: IRType) = match t with IRTScalar _ -> true | _ -> false
@@ -8404,14 +8408,14 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
     // c, c >= 1), a current-row read (Some 0), a seed row (literal), or why
     // the ring cannot hold it. Guarded forms return the guard conditions their
     // clamp needs to hold for the read to be selected.
-    let rec clampOf (n: IRId) (lo: int64) (e: IRExpr) : Result<int64 option * IRExpr list, string> =
+    let rec clampOf (n: IRId) (hi: int64) (e: IRExpr) : Result<int64 option * IRExpr list, string> =
         let leafOf (x: IRExpr) =
             match x with
             | IRUnaryOp (IRCast (ETInt64, _), leaf) | leaf -> leaf
         let leafLag (leaf: IRExpr) =
             match leaf with
             | IRBinOp (_, IRSub, IRVar (v, _), IRLit (IRLitInt c), _) when v = n && c >= 1L -> Some (Some c)   // n - c: selected only under `>= 0`
-            | IRBinOp (_, IRAdd, IRVar (v, _), IRLit (IRLitInt c), _) when v = n && c >= 0L -> Some None       // n + c: never selected under `< n`
+            | IRBinOp (_, IRAdd, IRVar (v, _), IRLit (IRLitInt c), _) when v = n && c >= 0L && c <= hi -> Some None   // n + c: never selected under `< n` (c <= the extent: no Int64 wrap for n < extent)
             | IRVar (v, _) when v = n -> Some None                                                                 // n: never selected under `< n`
             | _ -> None
         let condOk (leaf: IRExpr) (c: IRExpr) =
@@ -8466,7 +8470,7 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
                  | IRBinOp (_, IRSub, IRVar (v, _), IRLit (IRLitInt c), _) when v = n && c >= 1L && c <= lo ->
                     if c > maxLag then maxLag <- c
                  | IRIf _ ->
-                    (match clampOf n lo i0 with
+                    (match clampOf n hi i0 with
                      | Ok (lag, conds) ->
                         (match lag with Some c -> noteLag c | None -> ())
                         if not (conds |> List.forall (fun c -> List.contains c ctx)) then
@@ -8481,7 +8485,7 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
                 // A hoisted guarded row view: forming it is safe (an in-range
                 // slot); every USE must sit under the guard.
                 rest |> List.iter (walk phase ctx raws)
-                (match clampOf n lo i0 with
+                (match clampOf n hi i0 with
                  | Ok (lag, conds) ->
                     (match lag with Some c -> noteLag c | None -> ())
                     walk phase ctx (Map.add id conds raws) body
@@ -8544,7 +8548,7 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
                     match v with
                     | IRIndex (IRVar (b, _), (IRIf _ as i0) :: rest, _) when b = bufId ->
                         rest |> List.iter (walk phase [] raws)
-                        (match clampOf n lo i0 with
+                        (match clampOf n hi i0 with
                          | Ok (lag, conds) ->
                             (match lag with Some c -> noteLag c | None -> ())
                             raws <- Map.add id conds raws
@@ -8784,7 +8788,23 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
                 match verdicts |> List.tryPick (fun (_, v) -> match v with Error why -> Some why | Ok _ -> None) with
                 | Some why -> decline why
                 | None ->
-                if consumers.Count > 0 && writes block then
+                // The producer writes nothing outside its buffer (ring or
+                // not, consumers or not): a write is how a row VIEW could
+                // escape the step it was formed in (a callee storing its
+                // argument in a module array outlives the row's slot). The one
+                // exemption is a SCALAR accumulator bound outside the region
+                // -- row-fold fusion's own in-sweep fold state -- which cannot
+                // hold a view; its value is still audited.
+                let blockMasked =
+                    let outsideScalar (id: IRId) (t: IRType) =
+                        (match t with IRTScalar _ -> true | _ -> false) && not (boundInBlock block id)
+                    mapIRExpr (fun x ->
+                        match x with
+                        | IRAssign (IRVar (id, t), v) when outsideScalar id t -> v
+                        | _ -> x) block
+                if writes blockMasked then
+                    decline "the recursion (the producer) may write storage outside its own buffer (a row view could escape its step, or the folds would move across the write)"
+                elif consumers.Count > 0 && writes block then
                     decline "the recursion (the producer) may write storage outside its own buffer (the folds would move across it)"
                 elif consumers.Count > 0 && (interval |> List.exists writes) then
                     decline "a statement between the recursion and its last fold may write (the folds would move across it)"
