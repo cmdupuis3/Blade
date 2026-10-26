@@ -212,6 +212,12 @@ let joinReportEnabled () = Blade.Toolchain.envFlag "BLADE_JOIN_REPORT" false
 /// a compute it would have elided records `compute-elision` DECLINED
 /// ("disabled by BLADE_COMPUTE_ELIDE"). Unset = on.
 let computeElideEnabled () = gateOn "BLADE_COMPUTE_ELIDE"
+/// BLADE_FOLD_MAP_ELIDE=0|off keeps the FOLD-OF-MAP consumer out of compute
+/// elision (round 4 wave 2, PM12, rule `fold-map-elision`): a `|> compute` read
+/// only by the operand map of one fold (`reduce(c * c, (+)) / n`) stays stored and
+/// records compute elision's previous decline, byte for byte. Unset = on (it also
+/// needs BLADE_COMPUTE_ELIDE and BLADE_FUSION, its realization).
+let foldMapElideEnabled () = gateOn "BLADE_FOLD_MAP_ELIDE"
 /// BLADE_CALL_ELIDE=0|off keeps every call as a call (`elideCallsModule`, the
 /// P4 entry): the admission still runs and a call it would have jointly
 /// lowered records `call-elision` DECLINED ("disabled by BLADE_CALL_ELIDE").
@@ -234,7 +240,7 @@ let mutable blasGateProbe : unit -> bool = fun () -> false
 /// off for its reference lane, so a new pass's gate belongs in this list the
 /// day the pass lands -- a gate missing here is a pass the differential
 /// cannot see.
-let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_POOL_EARLY_RELEASE"; "BLADE_HOIST"; "BLADE_HOT_ROW"; "BLADE_CELL_EPILOGUE"; "BLADE_COMPACTION_FUSION"; "BLADE_COMPACT_ROW_CLASSES"; "BLADE_SIBLING_FOLDS"; "BLADE_REC_STEP_OMP"; "BLADE_MEMBER_HOIST"; "BLADE_EPILOGUE_LEGS"; "BLADE_ORBIT_ACTIONS"; "BLADE_HASH_JOIN"; "BLADE_GROUP_AGG"; "BLADE_COMPUTE_ELIDE"; "BLADE_TRANSPOSE_ELIDE"; "BLADE_CALL_ELIDE"; "BLADE_RECOMPUTE"; "BLADE_REC_WINDOW" ]
+let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_POOL_EARLY_RELEASE"; "BLADE_HOIST"; "BLADE_HOT_ROW"; "BLADE_CELL_EPILOGUE"; "BLADE_COMPACTION_FUSION"; "BLADE_COMPACT_ROW_CLASSES"; "BLADE_SIBLING_FOLDS"; "BLADE_REC_STEP_OMP"; "BLADE_MEMBER_HOIST"; "BLADE_EPILOGUE_LEGS"; "BLADE_ORBIT_ACTIONS"; "BLADE_HASH_JOIN"; "BLADE_GROUP_AGG"; "BLADE_COMPUTE_ELIDE"; "BLADE_TRANSPOSE_ELIDE"; "BLADE_CALL_ELIDE"; "BLADE_RECOMPUTE"; "BLADE_REC_WINDOW"; "BLADE_FOLD_MAP_ELIDE" ]
 
 /// A gate's KNOB MIRROR: a value that keeps a pass's PREVIOUS version, or
 /// selects an opt-in variant (not the pass off), for the passes whose forms
@@ -10495,7 +10501,7 @@ let recordPendingElision (rule: string) (subject: string) (outcome: Blade.Effect
 /// iff no application of the host kernel still carries a computed operand.
 type ComputeElisionPending = { PendingRule: string; PendingSubject: string; HostKernel: IRId; PendingEvidence: string list }
 
-let elideSingleConsumerComputesModule (programFuncs: IRCallable list) (singleModule: bool) (modul: IRModule) : IRModule * ComputeElisionPending list =
+let elideSingleConsumerComputesModule (builder: IRBuilder) (programFuncs: IRCallable list) (singleModule: bool) (modul: IRModule) : IRModule * ComputeElisionPending list =
     if modul.Functions |> List.exists (fun f -> f.IsCudaKernel) then (modul, []) else
     let pending = ResizeArray<ComputeElisionPending>()
     let enabled = computeElideEnabled ()
@@ -10578,6 +10584,99 @@ let elideSingleConsumerComputesModule (programFuncs: IRCallable list) (singleMod
                         | IRAssign _ -> "is assigned"
                         | _ -> "")) sv
             if found.Count = 1 && found.[0] <> "" then Some found.[0] else None
+    // ---- FOLD-OF-MAP (round 4 wave 2, PM12; BLADE_FOLD_MAP_ELIDE) -----------
+    // The operand MAP of a fold node: `reduce(<map>, k[, s])` or the fused
+    // terminal `IRReduceCompute(<map>, k, s)`.
+    let foldOperandMap (n: IRExpr) : ApplyInfo option =
+        match n with
+        | IRReduce ((IRApplyCombinator h | IRCompute (IRApplyCombinator h)), _, _)
+        | IRReduceCompute ((IRApplyCombinator h | IRCompute (IRApplyCombinator h)), _, _) -> Some h
+        | _ -> None
+    /// The ONE fold in `sv` whose operand map reads x at an operand position,
+    /// when every reference to x in `sv` is in that map's operand lists (its
+    /// Arrays and their Loop-provenance copy): not the fold's kernel or seed,
+    /// not the map's kernel, nothing else in the statement.
+    let foldMapConsumerOf (x: IRId) (sv: IRExpr) : ApplyInfo option =
+        let found = ResizeArray<ApplyInfo>()
+        iterIRExpr (fun n ->
+            match foldOperandMap n with
+            | Some h when h.Arrays |> List.exists (isX x) -> found.Add h
+            | _ -> ()) sv
+        if found.Count <> 1 then None
+        else
+            let h = found.[0]
+            // every read is a DIRECT operand position (not inside a nested map
+            // operand, whose own evaluation would then repeat the producer)
+            let direct = h.Arrays |> List.filter (isX x) |> List.length
+            if refsOf x h.Kernel = 0 && refsOf x sv = refsOf x (IRApplyCombinator h)
+               && (h.Arrays |> List.sumBy (refsOf x)) = direct
+               // v1: SEVERAL positions (`c * c`) only; one position is the B1
+               // cell epilogue's shape and keeps today's record (collapseOperand)
+               && direct >= 2 then Some h else None
+    /// Collapse the duplicate operand positions of x in a plain co-iteration
+    /// (`zip(c, c)` -> one operand): the duplicates are the SAME stored array
+    /// at the SAME shared coordinate, so their kernel parameters always hold
+    /// the same cell; the collapsed kernel reads the kept parameter for each.
+    /// Every positional list is rebuilt in lockstep. One position: unchanged.
+    let collapseOperand (x: IRId) (h: ApplyInfo) (hk: IRCallable) : Result<ApplyInfo * IRCallable * IRCallable option, string> =
+        let posns = h.Arrays |> List.indexed |> List.filter (fun (_, a) -> isX x a) |> List.map fst
+        match posns with
+        | [] -> Error "the fold's map does not read the compute"
+        // ONE position (`reduce(method_for(y) <@> lambda(w) -> w * w, ..)`) is the
+        // B1 cell epilogue's shape: that plan keeps the producer's store and
+        // folds inside its loop, so v1 leaves it to the epilogue (both must
+        // not claim one producer)
+        | [ _ ] -> Error "the fold's map reads the compute at one operand position: the cell epilogue's (B1) shape, which keeps the producer stored and folds inside its loop (v1 elides only a co-iteration reading it at several positions, `c * c`)"
+        | keep :: rest ->
+        let n = h.Arrays.Length
+        let drop = Set.ofList rest
+        let lengthsOk =
+            h.Identities.Length = n && h.ArrayTypes.Length = n && h.SDimsPerArray.Length = n
+            && h.SymcomStates.Length = n && h.TriangularLevels.Length = n && h.KernelInputRanks.Length = n
+            && hk.Params.Length = n
+        if not lengthsOk then Error "the fold's map carries positional records of another length than its operands"
+        elif rest |> List.exists (fun j ->
+                 h.ArrayTypes.[j] <> h.ArrayTypes.[keep] || h.SDimsPerArray.[j] <> h.SDimsPerArray.[keep]
+                 || h.KernelInputRanks.[j] <> 0 || h.KernelInputRanks.[keep] <> 0
+                 || hk.Params.[j].Type <> hk.Params.[keep].Type) then
+            Error "the duplicate operand positions do not read the same cell the same way (types, peels or parameter types differ)"
+        else
+        let keepIdx (l: 'a list) = l |> List.indexed |> List.filter (fun (i, _) -> not (drop.Contains i)) |> List.map snd
+        let kp = hk.Params.[keep]
+        let body =
+            rest |> List.fold (fun b j ->
+                let dv = hk.Params.[j].VarId
+                mapIRExpr (fun e -> match e with IRVar (id, _) when id = dv -> IRVar (kp.VarId, kp.Type) | e -> e) b) hk.Body
+        let ps = keepIdx hk.Params |> List.mapi (fun i p -> { p with Index = i })
+        let lam =
+            { mkLambdaCallable builder ps body hk.RetType hk.Captures false [] [] false false 256 false
+                with SourceName = hk.SourceName }
+        let kv = IRVar (lam.Id, IRTArrow (ps |> List.map (fun p -> SVal p.Type), hk.RetType, None))
+        let arrays = keepIdx h.Arrays
+        let single = arrays.Length = 1
+        let shared = if single then [] else h.SharedIndexTypes
+        let sdims = keepIdx h.SDimsPerArray
+        let loop =
+            match h.Loop with
+            | IRMethodFor mf when mf.Arrays.Length = n && mf.Identities.Length = n && mf.ArrayTypes.Length = n && mf.SDimsPerArray.Length = n ->
+                let mfs = keepIdx mf.SDimsPerArray
+                Ok (IRMethodFor { mf with Arrays = keepIdx mf.Arrays; Identities = keepIdx mf.Identities
+                                          ArrayTypes = keepIdx mf.ArrayTypes; SDimsPerArray = mfs
+                                          TotalSDims = List.sum mfs
+                                          SharedIndexTypes = (if single then [] else mf.SharedIndexTypes) })
+            | IRObjectFor o when o.InputRanks.Length = n ->
+                Ok (IRObjectFor { o with Kernel = kv; InputRanks = keepIdx o.InputRanks })
+            | _ -> Error "the fold's map loop does not carry one record per operand"
+        match loop with
+        | Error why -> Error why
+        | Ok loop' ->
+        Ok ({ h with Loop = loop'; Kernel = kv; Arrays = arrays; Identities = keepIdx h.Identities
+                     ArrayTypes = keepIdx h.ArrayTypes; SharedIndexTypes = shared
+                     SymcomStates = keepIdx h.SymcomStates; TriangularLevels = keepIdx h.TriangularLevels
+                     SDimsPerArray = sdims; KernelInputRanks = keepIdx h.KernelInputRanks
+                     IsCoIteration = not single },
+            lam, Some lam)
+    let mintedKernels = ResizeArray<IRCallable>()
     let bindingById = modul.Bindings |> List.map (fun b -> (b.Id, b)) |> Map.ofList
     let nameOfLet (xid: IRId) (p: ApplyInfo) =
         match Map.tryFind xid bindingById, resolve p.Kernel with
@@ -10686,10 +10785,16 @@ let elideSingleConsumerComputesModule (programFuncs: IRCallable list) (singleMod
                         // kernel or the seed would outlive the dropped let
                         if refsOf xid k + (init |> Option.map (refsOf xid) |> Option.defaultValue 0) > 0 then
                             Error $"`{xn}` is read again by the fold's kernel or seed"
-                        else Ok (Choice1Of2 (k, init))
+                        else Ok (Choice1Of3 (k, init))
                     | IRCompute (IRApplyCombinator h)
                         when (h.Arrays |> List.filter (isX xid) |> List.length) = 1
-                             && refsOf xid h.Kernel = 0 -> Ok (Choice2Of2 h)
+                             && refsOf xid h.Kernel = 0 -> Ok (Choice2Of3 h)
+                    // FOLD-OF-MAP (round 4 wave 2, PM12, rule `fold-map-elision`):
+                    // x's only reads are operand positions of the MAP one fold
+                    // folds (`reduce(c * c, (+)) / n`), anywhere in the statement.
+                    // Off: today's decline, byte for byte.
+                    | _ when foldMapElideEnabled () && (foldMapConsumerOf xid sv).IsSome ->
+                        Ok (Choice3Of3 (foldMapConsumerOf xid sv).Value)
                     | _ ->
                         match describeRead xid isTail sv with
                         | Some what -> Error $"`{xn}` {what}"
@@ -10698,6 +10803,11 @@ let elideSingleConsumerComputesModule (programFuncs: IRCallable list) (singleMod
                 match consumer with
                 | Error why -> decline why []
                 | Ok kind ->
+                // a fold-of-map candidate's decisions are its own rule's
+                let decline (why: string) (ev: string list) =
+                    match kind with
+                    | Choice3Of3 _ -> recordPendingElision "fold-map-elision" subj (Blade.Effects.Declined why) ev
+                    | _ -> decline why ev
                 // ---- the producer --------------------------------------------
                 let pk = resolve p.Kernel
                 let operandOk (a: IRExpr) =
@@ -10755,7 +10865,7 @@ let elideSingleConsumerComputesModule (programFuncs: IRCallable list) (singleMod
                        | Some _ -> [ $"top level: `{xn}` is not in the print selection (BLADE_PRINT / --print), so it was materialized only to be printed; the print selection licensed the elision" ]
                        | None -> [])
                 match kind with
-                | Choice1Of2 (k, init) ->
+                | Choice1Of3 (k, init) ->
                     // ---- FOLD -----------------------------------------------
                     let fold = elidedFoldSeed regionRepro.Value p.OutputType (resolve k) init
                     match fold with
@@ -10772,7 +10882,7 @@ let elideSingleConsumerComputesModule (programFuncs: IRCallable list) (singleMod
                             match at with
                             | Some j -> lets.[j] <- (fst lets.[j], folded)
                             | None -> tail <- folded
-                | Choice2Of2 h ->
+                | Choice2Of3 h ->
                     // ---- MAP (realized by elementwise fusion) ---------------
                     let pos = h.Arrays |> List.findIndex (isX xid)
                     let mapProblem =
@@ -10806,6 +10916,79 @@ let elideSingleConsumerComputesModule (programFuncs: IRCallable list) (singleMod
                             pending.Add { PendingRule = "compute-elision"; PendingSubject = subj; HostKernel = hkId; PendingEvidence = ev }
                             dropped.Add i |> ignore
                             let v' = IRCompute (IRApplyCombinator h')
+                            match at with
+                            | Some j -> lets.[j] <- (fst lets.[j], v')
+                            | None -> tail <- v'
+                | Choice3Of3 h ->
+                    // ---- FOLD-OF-MAP (realized by elementwise fusion) -------
+                    // The fold node is kept exactly (kernel, seed, extent, axes):
+                    // only its operand map's x operands change, collapsed to one
+                    // and replaced by x's producer map, which fusion splices into
+                    // the fold's map kernel (bound once per cell when read twice).
+                    let shaped =
+                        match tileKernelOf localCallables h with
+                        | _ when not (Blade.Toolchain.envFlag "BLADE_FUSION" true) ->
+                            Error "elementwise fusion, the fold map's realization, is disabled (BLADE_FUSION)"
+                        | None -> Error "the fold's map kernel is not a resolvable callable"
+                        | Some hk ->
+                            if not (tilePlainInfo h) then Error "the fold's map is not a plain dense map or co-iteration"
+                            elif not (tilePlainKernel hk h.Arrays.Length) then Error "the fold's map kernel declares symmetry, a parallel strategy or arity polymorphism"
+                            elif not (tilePureBody resolver Set.empty hk.Body) then Error "the fold's map kernel is not repeatable"
+                            elif (match pk with Some pkc -> not (tilePureBody resolver Set.empty pkc.Body) | None -> true) then Error "the producer kernel is not repeatable"
+                            else
+                            match collapseOperand xid h hk with
+                            | Error why -> Error why
+                            | Ok (h1, hk1, minted) ->
+                                let pos = h1.Arrays |> List.findIndex (isX xid)
+                                let occ = refsOf hk1.Params.[pos].VarId hk1.Body
+                                if occ < 1 || occ > 2 then
+                                    Error $"the fold's map kernel reads `{xn}`'s cell {occ} times (once or twice is required: fusion binds a twice-read operand once per cell)"
+                                elif h1.Arrays.Length + p.Arrays.Length - 1 > 8 then Error "the fused operand count would exceed elementwise fusion's fan-in cap (8)"
+                                elif h1.SharedIndexTypes.IsEmpty && h1.Arrays.Length + p.Arrays.Length - 1 > 1 && p.SharedIndexTypes.IsEmpty then
+                                    Error "the fused node would read as an outer product (no shared index records)"
+                                else Ok (h1, minted, h.Arrays.Length - h1.Arrays.Length)
+                    match shaped with
+                    | Error why -> decline why common
+                    | Ok (h1, minted, collapsed) ->
+                        let repl = IRCompute (IRApplyCombinator p)
+                        let subst (e: IRExpr) = mapIRExpr (fun n -> match n with IRVar (y, _) when y = xid -> repl | n -> n) e
+                        let h' = { h1 with Arrays = h1.Arrays |> List.map subst; Loop = subst h1.Loop }
+                        let foldKernel =
+                            let mutable k = None
+                            iterIRExpr (fun n ->
+                                match n, foldOperandMap n with
+                                | (IRReduce (_, fk, _) | IRReduceCompute (_, fk, _)), Some hh when hh.Arrays |> List.exists (isX xid) -> k <- Some fk
+                                | _ -> ()) sv
+                            k
+                        let stored (e: IRExpr) = match e with IRVar (id, _) when id = xid -> Some xn | _ -> Blade.CostModel.storedArrayName costNameOf e
+                        let costLine = Blade.CostModel.foldMapElisionLine resolve costNameOf stored stored xn p h h' (foldKernel |> Option.bind resolve)
+                        let ev =
+                            [ "single consumer: the operand map of one fold in its statement (the fold node -- kernel, seed, extent -- is kept as written)" ]
+                            @ (if collapsed > 0 then [ $"`{xn}` read at {collapsed + 1} operand positions of one co-iteration: collapsed to one (the same stored cell at the same coordinate), so the producer runs once per cell" ] else [])
+                            @ common
+                            @ [ "realized by elementwise fusion: the producer is spliced into the fold's map kernel, no pool for it"
+                                Blade.CostModel.legalityLine "fold-of-map compute elision (snapshot: no write or provider effect from the let through the consumer statement; failure site: an IRTotality-total producer over plain extents, the fold's own failures unchanged; evaluation count: one reader, each cell once after the operand collapse; fold order and seed: the fold node is unchanged, bitwise under BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off; a licensed fold may take another licensed form)"
+                                costLine ]
+                        if not enabled then decline "disabled by BLADE_COMPUTE_ELIDE" ev
+                        else
+                            minted |> Option.iter mintedKernels.Add
+                            let hkId = match h'.Kernel with IRVar (kid, _) -> kid | _ -> -1
+                            pending.Add { PendingRule = "fold-map-elision"; PendingSubject = subj; HostKernel = hkId; PendingEvidence = ev }
+                            dropped.Add i |> ignore
+                            let rebuild (op: IRExpr) =
+                                match op with
+                                | IRCompute (IRApplyCombinator _) -> IRCompute (IRApplyCombinator h')
+                                | _ -> IRApplyCombinator h'
+                            let isTarget (op: IRExpr) =
+                                match op with
+                                | IRApplyCombinator hh | IRCompute (IRApplyCombinator hh) -> hh.Arrays |> List.exists (isX xid)
+                                | _ -> false
+                            let v' =
+                                mapIRExpr (fun n ->
+                                    match n with
+                                    | IRReduce (op, fk, init) when isTarget op -> IRReduce (rebuild op, fk, init)
+                                    | IRReduceCompute (op, fk, seed) when isTarget op -> IRReduceCompute (rebuild op, fk, seed)
+                                    | n -> n) sv
                             match at with
                             | Some j -> lets.[j] <- (fst lets.[j], v')
                             | None -> tail <- v'
@@ -10856,7 +11039,9 @@ let elideSingleConsumerComputesModule (programFuncs: IRCallable list) (singleMod
             let values = flatten spine' |> Map.ofList
             bindings' |> List.choose (fun b -> Map.tryFind b.Id values |> Option.map (fun v -> { b with Value = v }))
         | _ -> bindings'
-    ({ modul with Functions = functions'; Bindings = bindings'' }, List.ofSeq pending)
+    // the fold-of-map elisions' collapsed map kernels (each referenced by its
+    // rewritten map; fusion resolves them module-locally)
+    ({ modul with Functions = functions' @ List.ofSeq mintedKernels; Bindings = bindings'' }, List.ofSeq pending)
 
 /// The map-consumer elisions' records, once elementwise fusion has run: the
 /// host kernel survives with a computed operand only where fusion declined.
@@ -13352,7 +13537,7 @@ let private optimizeModuleCore (builder: IRBuilder) (programFuncs: IRCallable li
     // call elision first: a jointly lowered call leaves a fused fold or a
     // map operand that compute elision and fusion then see as written out
     let (callElided, pendingCalls) = elideCallsModule builder programFuncs (foldConstMatchesModule modul)
-    let (elided, pendingComputes) = elideSingleConsumerComputesModule programFuncs singleModule callElided
+    let (elided, pendingComputes) = elideSingleConsumerComputesModule builder programFuncs singleModule callElided
     let pendingMaps = pendingCalls @ pendingComputes
     // P5: the two-consumer intermediates compute elision left, priced and
     // chosen by the cost model (BLADE_RECOMPUTE)

@@ -1,0 +1,15 @@
+// TEST: Fold-Map Elision Leaves A Single-Position Fold Map Stored
+// ============================================================================
+// `reduce(method_for(c) <@> lambda(w) -> w * 0.5, (+), 1.0)` reads c at ONE
+// operand position: the cell epilogue's (B1) shape, which keeps a producer
+// stored and folds inside its loop (the benches' named outputs: twofir,
+// saxpy). The fold-of-map consumer takes only a co-iteration reading c at
+// several positions (`c * c`), so c keeps its store and compute elision's
+// previous decline.
+type I = Idx<6>
+function half_sum(a: Array<Float64 like I>) -> Float64 = {
+    let c = a + 3.0
+    reduce(method_for(c) <@> lambda(w) -> w * 0.5, (+), 1.0) * 2.0
+}
+let s = half_sum([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+// EXPECT: s = 41.0

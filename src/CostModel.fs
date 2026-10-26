@@ -485,6 +485,25 @@ let foldElisionLine (resolve: IRExpr -> IRCallable option) (nameOf: IRId -> stri
             Ok (renderTransition before after
                     $"{cellsText n}; producer {opsText pc.CellOps}, fold {opsText fops}; baseline: `{pool}` written, then folded from storage"))))))
 
+/// FOLD-OF-MAP ELISION (round 4 wave 2, PM12): the baseline writes the
+/// producer into `pool`, then the fold reads its operand map `h` over the
+/// stored pool in place; the elided form folds `h'` (the producer spliced in)
+/// in place. The fold's own work is the same on both sides.
+let foldMapElisionLine (resolve: IRExpr -> IRCallable option) (nameOf: IRId -> string)
+                       (storedBefore: IRExpr -> string option) (storedAfter: IRExpr -> string option)
+                       (pool: string) (p: ApplyInfo) (h: ApplyInfo) (h': ApplyInfo) (fold: IRCallable option) : string =
+    lineOf (fun () ->
+        bindR (mapCells nameOf p) (fun n ->
+        bindR (mapCells nameOf h) (fun nFold ->
+        bindR (mapPerCell resolve storedBefore p) (fun pcP ->
+        bindR (mapPerCell resolve storedBefore h) (fun pcH ->
+        bindR (mapPerCell resolve storedAfter h') (fun pcF ->
+        bindR (foldOpsOf resolve fold) (fun fops ->
+            let before = seqSteps [ materializedMap pool n pcP Poly.zero; inPlaceFold nFold pcH fops n ]
+            let after = seqSteps [ inPlaceFold nFold pcF fops Poly.zero ]
+            Ok (renderTransition before after
+                    $"{cellsText n}; producer {opsText pcP.CellOps}, fold map {opsText pcH.CellOps}, fold {opsText fops}; baseline: `{pool}` written, then read by the fold's map; fused: the fold reads the producer in place"))))))))
+
 /// MAP ELISION (the pointwise consumer, realized by elementwise fusion): the
 /// baseline writes the producer into `pool`, then the consumer `h` reads it
 /// into `out`; the fused form `h'` reads the producer in place. `storedBefore`

@@ -1,0 +1,22 @@
+// TEST: Fold-Map Elision Keeps NaN And Signed-Zero Behaviour
+// ============================================================================
+// The elided centering runs the same per-cell operations in the same order:
+// a NaN input cell poisons the mean, the centered squares and every output
+// cell; an all-(-0.0) input centers to +0.0 squares, a +0.0 variance and 0/0
+// outputs. Values are the knob-off build's.
+type I = Idx<4>
+function spread(a: Array<Float64 like I>) -> Float64 = {
+    let n = Float64(extents(a))
+    let m = reduce(a, (+)) / n
+    let c = a - m
+    reduce(c * c, (+)) / n
+}
+let nanv = 0.0 / 0.0
+let xn: Array<Float64 like I> = [1.0, nanv, 2.0, 3.0]
+let xz: Array<Float64 like I> = [-0.0, -0.0, -0.0, -0.0]
+let s_nan = spread(xn)
+let s_zero = spread(xz)
+let s_one = spread([1.0, 2.0, 3.0, 4.0])
+// EXPECT: s_nan = nan
+// EXPECT: s_zero = 0.0
+// EXPECT: s_one = 1.25

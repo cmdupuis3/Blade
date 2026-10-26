@@ -9472,6 +9472,101 @@ let private ceRemainderCases () : bool list =
       withGate "BLADE_PRINT" "x,s" (fun () ->
           ceNoRecordFor "compute_elision_top_level_printed_is_inert" ceTopSrc "top level.x") ]
 
+// Fold-of-map elision (BLADE_FOLD_MAP_ELIDE, rule `fold-map-elision`; round 4
+// wave 2, PM12). The VALUES are corpus functions/586-593; these read the
+// emission: the centered array a variance fold's map reads is never stored
+// in either lane, the gate restores it, and the off build keeps compute
+// elision's previous decline word for word.
+let private fmeSpreadSrc =
+    "type I = Idx<5>\n"
+    + "function spread(a: Array<Float64 like I>) -> Float64 = {\n"
+    + "    let n = Float64(extents(a))\n"
+    + "    let m = reduce(a, (+)) / n\n"
+    + "    let c = a - m\n"
+    + "    reduce(c * c, (+)) / n\n"
+    + "}\n"
+    + "let s = spread([1.0, 2.0, 4.0, 8.0, 16.0])\n"
+
+let private fmeNestedSrc =
+    "type I = Idx<5>\n"
+    + "function skew(a: Array<Float64 like I>) -> Float64 = {\n"
+    + "    let m = reduce(a, (+)) / 5.0\n"
+    + "    let c = a - m\n"
+    + "    reduce(c * c * c, (+)) / 5.0\n"
+    + "}\n"
+    + "let s = skew([1.0, 2.0, 4.0, 8.0, 16.0])\n"
+
+let private fmeWriteSrc =
+    "type I = Idx<4>\n"
+    + "function spread(a: mut Array<Float64 like I>) -> Float64 = {\n"
+    + "    let m = reduce(a, (+)) / 4.0\n"
+    + "    let c = a - m\n"
+    + "    a(0) = 100.0\n"
+    + "    reduce(c * c, (+)) / 4.0\n"
+    + "}\n"
+    + "let mut x: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0]\n"
+    + "let s = spread(x)\n"
+
+let private fmeCppAllocCase (name: string) (src: string) (fn: string) (wantOn: int -> bool) (wantOff: int -> bool) (describe: string) =
+    match cppOfSource name src, withGate "BLADE_FOLD_MAP_ELIDE" "0" (fun () -> cppOfSource name src) with
+    | Ok on, Ok off ->
+        match ceCppBody on fn, ceCppBody off fn with
+        | Some bOn, Some bOff ->
+            let aOn, aOff = ceAllocs bOn, ceAllocs bOff
+            if wantOn aOn && wantOff aOff then
+                resultLine Pass name ($"{fn}: {aOn} allocation(s) with the gate on, {aOff} off; {describe}")
+                true
+            else
+                resultLine Fail name ($"{fn}: {aOn} allocation(s) on, {aOff} off; wanted {describe}")
+                false
+        | _ -> resultLine Fail name ($"no C++ body for `{fn}`"); false
+    | Error e, _ | _, Error e -> resultLine Fail name e; false
+
+let private fmeLlvmNoPool () =
+    let name = "fold_map_elision_llvm_no_pool"
+    match ceLlvmOf name fmeSpreadSrc, withGate "BLADE_FOLD_MAP_ELIDE" "0" (fun () -> ceLlvmOf name fmeSpreadSrc) with
+    | Ok on, Ok off ->
+        match ceLlvmBody on "spread", ceLlvmBody off "spread" with
+        | Some bOn, Some bOff ->
+            let count (b: string) = System.Text.RegularExpressions.Regex.Matches(b, @"blade_alloc_cells").Count
+            if count bOn = 0 && count bOff >= 1 then
+                resultLine Pass name ($"llvm lane, spread: 0 pool allocations with the gate on, {count bOff} off")
+                true
+            else
+                resultLine Fail name ($"llvm lane, spread: {count bOn} allocation(s) on, {count bOff} off; wanted 0 on, >= 1 off")
+                false
+        | _ -> resultLine Fail name "no LLVM body for `spread`"; false
+    | Error e, _ | _, Error e -> resultLine Fail name ($"the llvm lane refused: {e}"); false
+
+let private foldMapElisionCases () : bool list =
+    [ fmeCppAllocCase "fold_map_elision_cpp_no_pool" fmeSpreadSrc "spread" ((=) 0) (fun n -> n >= 1)
+          "the variance fold reads `a - m` in place (no centered pool); the gate restores it"
+      fmeLlvmNoPool ()
+      fmeCppAllocCase "fold_map_elision_nested_read_keeps_pool" fmeNestedSrc "skew" (fun n -> n >= 1) (fun n -> n >= 1)
+          "a read inside a nested map operand keeps the centered pool"
+      decisionCase "decision_fold_map_elision_applied_collapsed" fmeSpreadSrc "fold-map-elision"
+          (fun d -> d.Subject.StartsWith "spread." && applied d
+                    && d.Evidence |> List.exists (fun e -> e.Contains "read at 2 operand positions of one co-iteration: collapsed to one")
+                    && d.Evidence |> List.exists (fun e -> e.StartsWith "legality: ")
+                    && d.Evidence |> List.exists (fun e -> e.StartsWith "cost: "))
+          "applied, the duplicate operand positions collapsed, with legality and cost lines"
+      decisionCase "decision_fold_map_elision_declined_write_between" fmeWriteSrc "fold-map-elision"
+          (fun d -> d.Subject.StartsWith "spread." && declinedMentioning "may write between the compute and its consumer" d)
+          "declined: a write between the compute and its fold"
+      withGate "BLADE_FOLD_MAP_ELIDE" "0" (fun () ->
+          decisionCase "decision_fold_map_elision_off_keeps_previous_decline" fmeSpreadSrc "compute-elision"
+              (fun d -> d.Subject.StartsWith "spread." && declinedMentioning "is read by a map that is not the whole computed value of its statement, or reads it more than once" d)
+              "gate off: compute elision's previous decline, word for word")
+      (match decisionsOf fmeNestedSrc with
+       | Error e -> resultLine Fail "decision_fold_map_elision_nested_not_applied" e; false
+       | Ok ds ->
+           if ds |> List.exists (fun d -> d.Rule = "fold-map-elision" && applied d) then
+               resultLine Fail "decision_fold_map_elision_nested_not_applied" "a fold-map-elision record applied; wanted none (a read inside a nested map operand)"
+               false
+           else
+               resultLine Pass "decision_fold_map_elision_nested_not_applied" "no applied fold-map-elision record: the nested read keeps the pool"
+               true) ]
+
 let private computeElisionCases () : bool list =
     [ ceCppAllocCase "compute_elision_fold_no_pool" ceFoldSrc "total" ((=) 0) (fun n -> n >= 1)
           "the fold reads x's map in place (no pool) and the gate restores it"
@@ -10925,6 +11020,8 @@ let runOptimizeTests () =
           // Compute elision (BLADE_COMPUTE_ELIDE): single-consumer body computes.
           yield! computeElisionCases ()
           yield! ceRemainderCases ()
+          // Fold-of-map elision (BLADE_FOLD_MAP_ELIDE): the PM12 centering temporary.
+          yield! foldMapElisionCases ()
           // Call elision (BLADE_CALL_ELIDE): a supported call read in place.
           yield! callElisionCases ()
           // A nested fold of an array-returning call evaluates it once.
