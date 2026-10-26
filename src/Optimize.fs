@@ -8407,6 +8407,57 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
     // The callable whose body is being rewritten (its own body holds the
     // region; every OTHER callable naming T or BUF reads it from outside).
     let mutable currentFn : IRId = -1
+    // The module binding whose value is being rewritten (-1: a function).
+    let mutable currentBinding : IRId = -1
+    // EVERY channel other than the body being rewritten that can name `id`
+    // (the trajectory T or its buffer): the first one found, or None. The
+    // census and the buffer audit classify the body's own mentions; any
+    // OTHER naming is unclassified and declines. Channels (exhaustive over
+    // what can carry an IRId or an expression):
+    //   - callables (every module's, incl. lifted lambdas and named
+    //     functions) other than the one being rewritten: captures, body,
+    //     expressions embedded in the body's types, parameter and return
+    //     types' extents;
+    //   - module bindings other than the one being rewritten: value, the
+    //     extents of its type;
+    //   - the module's side tables: CompoundInits / SparseInits / RandomInits
+    //     operands and keys, ProviderWrites' source and keys, ProviderReads'
+    //     keys (its spec carries no expression). MutableArrayLets is ADMITTED: the
+    //     desugar records both its buffer and the let rec binding there, and an
+    //     assignment to either is a tree node the census / audit classifies.
+    // Side tables the optimizer's LATER passes fill (pool reuse, CSE facts,
+    // hot-row / member / compaction / join / orbit / group / alias plans,
+    // sibling folds, epilogue legs, pool-scope events) are computed over the
+    // REWRITTEN tree, where the ring is an ordinary local buffer; the two
+    // filled BEFORE this pass (RecStepTable, CellFoldTable) name the buffer
+    // by design and their emitters re-verify the store shape (the threaded
+    // step through `recStepFoldForm`).
+    let foreignNaming (id: IRId) (isT: bool) : string option =
+        let inTypes (t: IRType) = irTypeExtentExprs t |> List.exists (mentions id)
+        let callable =
+            callables.Values |> Seq.tryFind (fun f ->
+                f.Id <> currentFn
+                && (f.Captures |> List.exists (fun c -> c.Id = id) || mentions id f.Body || mentionsInTypes id f.Body
+                    || f.Params |> List.exists (fun p -> inTypes p.Type) || inTypes f.RetType))
+        match callable with
+        | Some f -> Some $"a callable (`{f.SourceName}`) names it (a capture, its body, or a type it carries)"
+        | None ->
+        let binding =
+            modul.Bindings |> List.tryFind (fun b ->
+                b.Id <> currentBinding && (mentions id b.Value || mentionsInTypes id b.Value || inTypes b.Type))
+        match binding with
+        | Some b -> Some $"the module binding `{b.Name}` names it"
+        | None ->
+        let sideKeys =
+            Seq.concat [ modul.CompoundInits |> Map.toSeq |> Seq.map fst; modul.SparseInits |> Map.toSeq |> Seq.map fst
+                         modul.RandomInits |> Map.toSeq |> Seq.map fst; modul.ProviderWrites |> Map.toSeq |> Seq.map fst
+                         modul.ProviderReads |> Map.toSeq |> Seq.map fst ]
+            |> Seq.distinct |> List.ofSeq
+        if sideKeys |> List.contains id then Some "a module side table (compound / sparse / random / provider) is keyed by it"
+        elif sideKeys |> List.exists (fun k -> bindingSideOperands modul k |> List.exists (fun e -> mentions id e || mentionsInTypes id e)) then
+            Some "a module side-table operand (compound / sparse / random) names it"
+        elif modul.ProviderWrites |> Map.exists (fun _ w -> w.SourceId = id) then Some "a provider write reads it"
+        else None
     // ---- the ring audit -------------------------------------------------
     // The leading subscript of one buffer READ: the lag it may select (Some
     // c, c >= 1), a current-row read (Some 0), a seed row (literal), or why
@@ -8500,8 +8551,9 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
                 walk phase ctx raws b
             | ExprShape (children, _) -> children |> List.iter (walk phase ctx raws)
         // Callables never see the buffer (a capture would read it whole).
-        if callables.Values |> Seq.exists (fun f -> f.Id <> currentFn && (f.Captures |> List.exists (fun c -> c.Id = bufId) || mentions bufId f.Body || mentionsInTypes bufId f.Body)) then
-            fail "a callable captures the trajectory's buffer"
+        (match foreignNaming bufId false with
+         | Some why -> fail ("the trajectory's buffer is named outside the recursion: " + why)
+         | None -> ())
         // a buffer read hidden in a type (a range's extent ..) is outside
         // every classified site
         if (pre |> List.exists (fun (_, v) -> mentionsInTypes bufId v)) || (step |> List.exists (fun (_, v) -> mentionsInTypes bufId v)) then
@@ -8539,6 +8591,21 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
                     if mentions bufId (writerValue v) then fail "the seed row reads the trajectory"
                 elif seenSeed then walk 2 [] Map.empty v
                 else fail "a statement before the seed reads the trajectory"
+        // A value bound before the sweep from the seed rows (a row view of
+        // row 0) must not be used inside it: row 0's slot is overwritten R
+        // steps later. Closed transitively over the pre-sweep lets.
+        let preViews =
+            let mutable s = pre |> List.filter (fun (_, v) -> mentions bufId v) |> List.map fst |> Set.ofList
+            let mutable grow = true
+            while grow do
+                grow <- false
+                for (id, v) in pre do
+                    if not (s.Contains id) && (s |> Set.exists (fun x -> mentions x v)) then
+                        s <- s.Add id
+                        grow <- true
+            s
+        if step |> List.exists (fun (_, v) -> preViews |> Set.exists (fun x -> mentions x v || mentionsInTypes x v)) then
+            fail "a value read from the seed rows before the sweep is used inside it (row 0's slot is overwritten R steps later)"
         // The step: exactly one complete writer of row n; before it lags only.
         let isN (i: IRExpr) = match i with IRVar (v, _) -> v = n | _ -> false
         let writers = step |> List.filter (fun (_, v) -> isRowWriter isN v)
@@ -8601,8 +8668,9 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
                 let isT (e: IRExpr) = match e with IRVar (t, _) -> t = tId | _ -> false
                 // A callable (a lambda) reading the trajectory reads it whole,
                 // from a body this scan does not walk: decline.
-                if callables.Values |> Seq.exists (fun f -> f.Id <> currentFn && (f.Captures |> List.exists (fun c -> c.Id = tId) || mentions tId f.Body || mentionsInTypes tId f.Body)) then
-                    cfail "a callable (a lambda) captures the trajectory: it reads the whole history from its own body"
+                (match foreignNaming tId true with
+                 | Some why -> cfail ("the trajectory is named outside its block: " + why + " -- a read this census cannot classify")
+                 | None -> ())
                 let rec gridNest (e: IRExpr) =
                     match e with
                     | IRLet (acc, seed, IRLet (_, IRForRange (a, IRLit (IRLitInt 0L), IRLit (IRLitInt ha), IRLet (_, IRForRange (bv, IRLit (IRLitInt 0L), IRLit (IRLitInt hb), IRLet (_, IRAssign (IRVar (acc2, _), comb), IRLit IRLitUnit)), IRLit IRLitUnit)), cont))
@@ -8988,12 +9056,14 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
             subject <- f.SourceName
             enclosingRepro <- f.IsRepro
             currentFn <- f.Id
+            currentBinding <- -1
             { f with Body = rw f.Body })
     let newBindings =
         modul.Bindings |> List.map (fun b ->
             subject <- b.Name
             enclosingRepro <- false
             currentFn <- -1
+            currentBinding <- b.Id
             { b with Value = rw b.Value })
     { modul with Functions = newFunctions; Bindings = newBindings }
 
