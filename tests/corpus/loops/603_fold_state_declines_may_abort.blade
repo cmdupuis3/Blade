@@ -1,0 +1,11 @@
+// TEST: Fold State In Place Declines May Abort Kernel
+// ============================================================================
+// PM14 decline control: an Int64 kernel dividing by the slice (`a / b`) may
+// panic (BL8013 on a zero divisor), and the in-place update never moves an
+// evaluation that may abort; the fold keeps its materialized steps. No divisor
+// is zero here, so the values print.
+// ============================================================================
+let g = (method_for(range<Idx<4>>) <@> lambda(r) ->
+          (method_for(range<Idx<3>>) <@> lambda(c) -> Int64(r) + Int64(c) + 1)) |> compute
+let q = reduce(g, lambda(a: T^1, b: T^1) -> a * 100 / b)
+// EXPECT: q = [41650, 33000, 25000]

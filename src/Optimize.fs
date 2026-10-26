@@ -222,6 +222,12 @@ let callElideEnabled () = gateOn "BLADE_CALL_ELIDE"
 /// decision records `rec-window` DECLINED ("disabled by BLADE_REC_WINDOW").
 /// Read by the TYPECHECKER (the desugar site), per call. Unset = on.
 let recWindowEnabled () = gateOn "BLADE_REC_WINDOW"
+/// BLADE_FOLD_STATE=0|off keeps the leading-axis fold's per-step state
+/// (`let nxt = kernel(acc, G(j)) |> compute; acc = nxt`, a fresh slice every
+/// step) instead of the in-place pointwise update (round 4 wave 2, PM14;
+/// rule `fold-state-in-place`, an arm of `fuseSliceWritesModule`, so it is
+/// also off under BLADE_FUSION=0). Unset = on.
+let foldStateEnabled () = gateOn "BLADE_FOLD_STATE"
 /// The C++ lane's BLAS gate (`LinAlgPatterns.blasAvailable`, which compiles
 /// after this file), installed by Lowering before the optimizer runs: the
 /// epilogue-legs planner keeps an inline only when the cell epilogue it rides
@@ -234,7 +240,7 @@ let mutable blasGateProbe : unit -> bool = fun () -> false
 /// off for its reference lane, so a new pass's gate belongs in this list the
 /// day the pass lands -- a gate missing here is a pass the differential
 /// cannot see.
-let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_POOL_EARLY_RELEASE"; "BLADE_HOIST"; "BLADE_HOT_ROW"; "BLADE_CELL_EPILOGUE"; "BLADE_COMPACTION_FUSION"; "BLADE_COMPACT_ROW_CLASSES"; "BLADE_SIBLING_FOLDS"; "BLADE_REC_STEP_OMP"; "BLADE_MEMBER_HOIST"; "BLADE_EPILOGUE_LEGS"; "BLADE_ORBIT_ACTIONS"; "BLADE_HASH_JOIN"; "BLADE_GROUP_AGG"; "BLADE_COMPUTE_ELIDE"; "BLADE_TRANSPOSE_ELIDE"; "BLADE_CALL_ELIDE"; "BLADE_RECOMPUTE"; "BLADE_REC_WINDOW" ]
+let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_POOL_EARLY_RELEASE"; "BLADE_HOIST"; "BLADE_HOT_ROW"; "BLADE_CELL_EPILOGUE"; "BLADE_COMPACTION_FUSION"; "BLADE_COMPACT_ROW_CLASSES"; "BLADE_SIBLING_FOLDS"; "BLADE_REC_STEP_OMP"; "BLADE_MEMBER_HOIST"; "BLADE_EPILOGUE_LEGS"; "BLADE_ORBIT_ACTIONS"; "BLADE_HASH_JOIN"; "BLADE_GROUP_AGG"; "BLADE_COMPUTE_ELIDE"; "BLADE_TRANSPOSE_ELIDE"; "BLADE_CALL_ELIDE"; "BLADE_RECOMPUTE"; "BLADE_REC_WINDOW"; "BLADE_FOLD_STATE" ]
 
 /// A gate's KNOB MIRROR: a value that keeps a pass's PREVIOUS version, or
 /// selects an opt-in variant (not the pass off), for the passes whose forms
@@ -7382,6 +7388,8 @@ let fuseSliceWritesModule (modul: IRModule) (builder: IRBuilder) (programFuncs: 
     // The requesting ROOT kernels the knob kept out of the fusion (recorded
     // per body as `rec-step-parallel` declines).
     let knobDeclines = System.Collections.Generic.List<string>()
+    // The PM14 fold-state arm's extra expander case (see the IRObjectFor arm).
+    let mutable objectForArm = false
     let expand (ext: int64) (kVar: IRExpr) (outsideOk: IRId -> bool)
                (prelude: System.Collections.Generic.List<IRId * IRExpr>) (root: IRExpr) : Result<IRExpr * IRCallable option * bool, string> =
         // The FIRST reason a node is not a cell expression is the decline.
@@ -7475,6 +7483,35 @@ let fuseSliceWritesModule (modul: IRModule) (builder: IRBuilder) (programFuncs: 
                     let env' = List.zip (f.Params |> List.map (fun p -> p.VarId)) (atoms |> List.map Option.get) |> Map.ofList
                     go env' (visiting.Add fid) atRoot f.Body
                  | _ -> fail "a callee is not a plain function of dense row parameters (static, capturing, arity-polymorphic, or parallel)")
+            // PM14 only (`objectForArm`, set by the fold-state arm; slice-write
+            // fusion's own admission is unchanged): the elementwise object_for
+            // application a generic `T^1` kernel body lowers `a + b` to --
+            // `object_for(k) <@> (p, q)` with every input rank 0 is cell c of
+            // each operand through k (Interp `materializeObjectForApp`'s
+            // [0; 0] / [0] arms), each operand a dense row of the loop's
+            // static extent (checked by the operand atoms below).
+            | IRApp (IRObjectFor o, args, retT)
+                    when objectForArm && rowOfExtent ext retT
+                         && not o.InputRanks.IsEmpty && o.InputRanks |> List.forall (fun r -> r = 0) ->
+                let elems = match args with [ IRTuple es ] -> es | _ -> args
+                (match o.Kernel with
+                 | IRVar (kid, _) ->
+                    (match callables.TryGetValue kid with
+                     | true, k when elems.Length = o.InputRanks.Length && k.Params.Length = elems.Length
+                                    && k.Captures.IsEmpty && not (hasCall k.Body)
+                                    && not k.IsStatic && not k.IsArityPoly && not k.IsOmpParallel
+                                    && not k.IsCudaKernel && not k.IsMpiParallel
+                                    && IRMono.tilePureBody callables Set.empty k.Body
+                                    && not (IRMono.tileMayAbort callables Set.empty k.Body)
+                                    && scalarElem k.RetType ->
+                        if k.IsRepro then sawRepro <- true
+                        let atoms = elems |> List.map (go env visiting false)
+                        if atoms |> List.exists Option.isNone then None else
+                        let m = List.zip (k.Params |> List.map (fun p -> p.VarId)) (atoms |> List.map Option.get) |> Map.ofList
+                        Some (bind (substParams m (freshenLets k.Body)) k.RetType)
+                     | true, _ -> fail "an elementwise object_for kernel is not a plain pure capture-free scalar kernel that cannot abort"
+                     | _ -> fail "an elementwise object_for kernel is not a resolvable callable")
+                 | _ -> fail "an elementwise object_for kernel is not a named callable")
             | IRApp _ -> fail "the slice calls a function that is recursive, defined in another module, or not row-valued"
             | IRApplyCombinator _ -> fail "an operation over the row is not a plain elementwise map of the loop's extent (a fold, a structured index, or a different shape)"
             | IRIf _ | IRMatch _ -> fail "the slice selects between whole rows (a guarded read or a branch), which is no cell expression"
@@ -7515,6 +7552,80 @@ let fuseSliceWritesModule (modul: IRModule) (builder: IRBuilder) (programFuncs: 
     let moduleIds = modul.Bindings |> List.map (fun b -> b.Id) |> List.filter (moduleReadable Set.empty) |> Set.ofList
     let mutable outer = moduleIds
     let mutable subjectName = ""
+    // --- PM14 (round 4 wave 2): the leading-axis fold's state, in place ----
+    //
+    // TypeCheckInfer's leading-axis fold desugar (`reduce(G, lambda(a: T^1,
+    // b: T^1) -> ..[, seed])`) lowers to
+    //
+    //   let mut acc = <private copy of G(0) / of the seed>     -- MutableArrayLets
+    //   for j in lo..hi { let nxt = kernel(acc, G(j)) |> compute; acc <- nxt }
+    //
+    // so every step allocates a fresh slice inside the kernel and the C++
+    // lane then MOVES it into `acc` by pointer, leaking the previous state
+    // (2001 x 5003: 80 MB of leaked slices; the LLVM lane refuses the
+    // rebinding and falls back). When the kernel is POINTWISE -- this pass's
+    // own cell expander succeeds on `kernel(acc, row)` -- each cell c of the
+    // next state reads the state at cell c only, so the step is computed in
+    // place: `let row = G(j); for c { <cell chain>; acc[c] <- v }`.
+    //   - per cell the chain is s_c <- k_c(s_c, G(j)_c), j ascending from the
+    //     same seed cell -- exactly the materialized step's arithmetic (the
+    //     expander inlines the kernel operation for operation), so bitwise
+    //     under contraction off;
+    //   - every read of `acc` in the cell chain is at cell c and precedes the
+    //     store of cell c (the prelude, then the store); no other cell is read;
+    //   - `acc` is the desugar's private copy (a fresh compute, a
+    //     MutableArrayLets binding), named only by the call and the assign in
+    //     the loop; nothing else in the loop writes; the kernel is pure,
+    //     capture-free and may not abort (the expander's own admission), so
+    //     no failure moves.
+    // Declines (recorded, rule `fold-state-in-place`): a non-pointwise kernel
+    // (the leak stays: gap register), slices that are not dense rank-1 rows of
+    // the state's static extent, a seed that is not a private copy, a `where
+    // repro` callee (its boundary does not survive the splice), an omp root.
+    let mutable foldStateFired = 0
+    let foldStateDeclines = System.Collections.Generic.List<string>()
+    let rec stripCompute (e: IRExpr) = match e with IRCompute inner -> stripCompute inner | _ -> e
+    let foldStateCall (accId: IRId) (jId: IRId) (nxtV: IRExpr) =
+        match stripCompute nxtV with
+        | IRApp (IRVar (fid, ft), [ IRVar (a, _); (IRIndex (IRVar (g, _), [ IRVar (j2, _) ], _) as rowE) ], retT)
+            when a = accId && j2 = jId && g <> accId ->
+            Some (fid, ft, g, rowE, retT)
+        | _ -> None
+    let foldStateInPlace (scope: Map<IRId, IRExpr>) (accId: IRId) (accT: IRType) (seedV: IRExpr)
+                         (jId: IRId) (nxtV: IRExpr) : Result<IRExpr, string> =
+        if not (foldStateEnabled ()) then Error "disabled by BLADE_FOLD_STATE" else
+        let (fid, ft, g, rowE, retT) = (foldStateCall accId jId nxtV).Value
+        match accT with
+        | ArrayElem at when (staticExtent at).IsSome && scalarElem at.ElemType && not at.IsVirtual ->
+            let m = (staticExtent at).Value
+            let rowT = try typeOf rowE with _ -> IRTUnit
+            let fresh = match seedV with IRCompute _ -> true | _ -> false
+            if not fresh then Error "the state's seed is not a private copy (a fresh compute)"
+            elif not (rowOfExtent m rowT) then Error "the folded slices are not dense rank-1 rows of the state's static extent (v1: a dense rank-2 operand)"
+            elif not (rowOfExtent m retT) then Error "the kernel's result is not a dense rank-1 row of the state's extent"
+            elif (match Map.tryFind g scope with Some v -> mentions accId v | None -> false) then
+                Error "the folded array may alias the state"
+            else
+            let kId = builder.FreshId ()
+            let rvId = builder.FreshId ()
+            let kVar = IRVar (kId, IRTScalar ETInt64)
+            let prelude = System.Collections.Generic.List<IRId * IRExpr>()
+            let root = IRApp (IRVar (fid, ft), [ IRVar (accId, accT); IRVar (rvId, rowT) ], retT)
+            let expanded =
+                objectForArm <- true
+                try expand m kVar (fun x -> x = accId || x = rvId) prelude root
+                finally objectForArm <- false
+            match expanded with
+            | Error why -> Error ("the kernel is not pointwise: " + why)
+            | Ok (_, Some _, _) -> Error "the kernel's map carries an omp request"
+            | Ok (_, None, true) -> Error "a spliced kernel or callee is `where repro` (its boundary does not survive the in-place splice)"
+            | Ok (atom, None, false) ->
+                let sId = builder.FreshId ()
+                let store = IRLet (sId, IRAssign (IRIndex (IRVar (accId, accT), [ kVar ], None), atom), IRLit IRLitUnit)
+                let body = Seq.foldBack (fun (id, v) acc -> IRLet (id, v, acc)) prelude store
+                let wId = builder.FreshId ()
+                Ok (IRLet (rvId, rowE, IRLet (wId, IRForRange (kId, IRLit (IRLitInt 0L), IRLit (IRLitInt m), body), IRLit IRLitUnit)))
+        | _ -> Error "the state is not a dense rank-1 array of static extent with scalar cells"
     // Walk a body keeping the values of enclosing lets (to judge aliases of
     // the buffer). Only let-chains are walked into; the rewrite is local to
     // a `let s = SLICE in let w = <copy loop> in rest` triple. `enclosing`
@@ -7657,6 +7768,19 @@ let fuseSliceWritesModule (modul: IRModule) (builder: IRBuilder) (programFuncs: 
                 iterIRExpr (fun n -> match n with IRApp _ | IRApplyCombinator _ -> looksFusable <- true | _ -> ()) slice
                 if looksFusable then declines.Add why
                 IRLet (sId, rw enclosing scope slice, IRLet (wId, rwInner enclosing scope loop, rw enclosing (Map.add wId loop (Map.add sId slice scope)) rest))
+        | IRLet (accId, seedV, IRLet (loopId, (IRForRange (jId, jLo, jHi, IRLet (nxtId, nxtV, IRLet (asgId, IRAssign (IRVar (acc2, accT), IRVar (nxt2, _)), IRLit IRLitUnit))) as loop), rest))
+                when acc2 = accId && nxt2 = nxtId && modul.MutableArrayLets.Contains accId
+                     && (foldStateCall accId jId nxtV).IsSome ->
+            match foldStateInPlace scope accId accT seedV jId nxtV with
+            | Ok cellLoop ->
+                foldStateFired <- foldStateFired + 1
+                let loop' = IRForRange (jId, jLo, jHi, cellLoop)
+                IRLet (accId, rw enclosing scope seedV,
+                       IRLet (loopId, loop', rw enclosing (Map.add loopId loop' (Map.add accId seedV scope)) rest))
+            | Error why ->
+                // Exactly the generic let arm below (knob off: byte-identical).
+                foldStateDeclines.Add why
+                IRLet (accId, rw enclosing scope seedV, rw enclosing (Map.add accId seedV scope) (IRLet (loopId, loop, rest)))
         | IRLet (id, v, body) -> IRLet (id, rw enclosing scope v, rw enclosing (Map.add id v scope) body)
         | _ -> rwInner enclosing scope e
     and rwInner (enclosing: (IRId * int64 * IRExpr) option) (scope: Map<IRId, IRExpr>) (e: IRExpr) : IRExpr =
@@ -7671,8 +7795,10 @@ let fuseSliceWritesModule (modul: IRModule) (builder: IRBuilder) (programFuncs: 
     // reason -- a body can hold a fused arm and a declined one.
     let rewriteBody (subject: string) (outerIds: Set<IRId>) (body: IRExpr) =
         let before = fired
+        let foldStateBefore = foldStateFired
         declines.Clear ()
         knobDeclines.Clear ()
+        foldStateDeclines.Clear ()
         outer <- outerIds
         subjectName <- subject
         let body' = rw None Map.empty body
@@ -7689,6 +7815,18 @@ let fuseSliceWritesModule (modul: IRModule) (builder: IRBuilder) (programFuncs: 
         for kname in knobDeclines do
             recordRecStep subject (Blade.Effects.Declined "disabled by BLADE_REC_STEP_OMP")
                 [ $"the `where omp` request of `{kname}` (the step's final map) is kept out of the fusion: the map runs as its own per-step team and the row is copied" ]
+        let recordFoldState outcome evidence =
+            Blade.Effects.Decisions.record
+                { Blade.Effects.Rule = "fold-state-in-place"; Version = 1
+                  Span = Blade.Ast.noSpan; Subject = subject
+                  Outcome = outcome; Evidence = evidence }
+        if foldStateFired > foldStateBefore then
+            recordFoldState Blade.Effects.Applied
+                [ $"{foldStateFired - foldStateBefore} leading-axis fold(s) update their state in place: per step one pass over the state's cells, each cell's chain s <- k(s, G(j)) evaluated by the kernel's own pointwise arithmetic (callees inlined) and stored back into the same cell -- no per-step slice, no move of a fresh pool into the state (the previous state is no longer leaked)"
+                  "fold order: per cell, j ascending from the same seed cell, the materialized step's operations unchanged (bitwise under BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off); the state is the desugar's private copy, read only at the cell being written" ]
+        for why in foldStateDeclines do
+            recordFoldState (Blade.Effects.Declined why)
+                [ "each step materializes the kernel's result and moves it into the state, as written" ]
         body'
     let newFunctions =
         modul.Functions |> List.map (fun f ->

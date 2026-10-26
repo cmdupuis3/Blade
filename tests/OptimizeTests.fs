@@ -885,6 +885,93 @@ let private recWindowEmission () : bool list =
             else resultLine Fail name $"full200={full} declinedDisabled={declined}"; false
     [ on; off ]
 
+// ---------------------------------------------------------------------------
+// PM14 (round 4 wave 2): the leading-axis fold's state updated in place
+// (rule `fold-state-in-place`, Optimize.fuseSliceWritesModule's fold-state
+// arm). Corpus loops/600-604 pin the VALUES (equal to BLADE_FOLD_STATE=0);
+// these pin each file's DECISION and the emission both ways.
+
+let private foldStateCorpusTable : (string * Result<string, string> list) list =
+    [ "600_fold_state_in_place_function_body.blade", [ Ok "in place"; Ok "in place"; Ok "in place" ]
+      "601_fold_state_in_place_nested_kernel_constants.blade", [ Ok "in place"; Ok "in place" ]
+      "602_fold_state_declines_non_pointwise.blade", [ Error "not pointwise" ]
+      "603_fold_state_declines_may_abort.blade", [ Error "may abort" ]
+      "604_fold_state_in_place_inside_kernel.blade", [ Ok "in place" ] ]
+
+let private foldStateCorpusCases () : bool list =
+    let dir = System.IO.Path.Combine("tests", "corpus", "loops")
+    [ for (file, want) in foldStateCorpusTable do
+        let name = $"fold_state_corpus: {file}"
+        let path = System.IO.Path.Combine(dir, file)
+        if not (System.IO.File.Exists path) then
+            resultLine Fail name $"missing {path} (run from the repo root)"; yield false
+        else
+        match decisionsOf (System.IO.File.ReadAllText path) with
+        | Error e -> resultLine Fail name e; yield false
+        | Ok ds ->
+            let mine = ds |> List.filter (fun d -> d.Rule = "fold-state-in-place")
+            let matches (w: Result<string, string>) (d: Blade.Effects.Decision) =
+                match w, d.Outcome with
+                | Ok ev, Blade.Effects.Applied -> d.Evidence |> List.exists (fun e -> e.Contains ev)
+                | Error why, Blade.Effects.Declined r -> r.Contains why
+                | _ -> false
+            let ok = mine.Length = want.Length && List.forall2 matches want mine
+            let seen = mine |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+            if ok then resultLine Pass name $"{mine.Length} fold-state decision(s) as pinned"
+            else resultLine Fail name $"wanted {want}; saw: {seen}"
+            yield ok ]
+
+/// The state update, both ways: in place (no fresh slice per step, no pool
+/// moved into the state) with the gate on; the materialized step and its
+/// pointer move with BLADE_FOLD_STATE=0. The LLVM lane, which refused the
+/// rebinding, now takes the program.
+let private foldStateEmission () : bool list =
+    let src =
+        "type R = Idx<7>\n"
+        + "type C = Idx<5>\n"
+        + "function col_sums(g: Array<Float64 like R, C>) -> Array<Float64 like C> = {\n"
+        + "    reduce(g, lambda(a: T^1, b: T^1) -> a + b)\n"
+        + "}\n"
+        + "let g0 = method_for(range<R, C>) <@> lambda(r, c) -> Float64(r) * 1.5 + Float64(c) |> compute\n"
+        + "let s1 = col_sums(g0)\n"
+    let bodyOf (cpp: string) =
+        let head = "Array<double, 1> col_sums(Array<double, 2> g) {"
+        let i = cpp.IndexOf head
+        if i < 0 then "" else
+        let j = cpp.IndexOf("\n}\n", i)
+        if j < 0 then cpp.Substring i else cpp.Substring(i, j - i)
+    let moves (body: string) = System.Text.RegularExpressions.Regex.IsMatch(body, @"\n\s*__v\d+ = __v\d+;")
+    let on =
+        let name = "fold_state_emission_in_place: the state's cells are stored in place, no per-step slice moved into it"
+        match cppOfSource name src with
+        | Error e -> resultLine Fail name e; false
+        | Ok cpp ->
+            let body = bodyOf cpp
+            let inPlace = System.Text.RegularExpressions.Regex.IsMatch(body, @"__v\d+\[__kv\d+\] = __v\d+;")
+            let callsKernel = body.Contains "__lambda_"
+            if body <> "" && inPlace && not (moves body) && not callsKernel then
+                resultLine Pass name "cell stores into the state, no kernel call, no pool move"; true
+            else resultLine Fail name $"found={body <> System.String.Empty} inPlace={inPlace} moves={moves body} callsKernel={callsKernel}"; false
+    let off =
+        let name = "fold_state_emission_gate_off: BLADE_FOLD_STATE=0 keeps the per-step kernel call and pool move, and records why"
+        match withGate "BLADE_FOLD_STATE" "0" (fun () -> cppOfSource name src, decisionsOf src) with
+        | Error e, _ | _, Error e -> resultLine Fail name e; false
+        | Ok cpp, Ok ds ->
+            let body = bodyOf cpp
+            let declined = ds |> List.exists (fun d -> d.Rule = "fold-state-in-place" && declinedMentioning "disabled by BLADE_FOLD_STATE" d)
+            if moves body && body.Contains "__lambda_" && declined then
+                resultLine Pass name "kernel call + pool move kept; fold-state-in-place declined -- disabled by BLADE_FOLD_STATE"; true
+            else resultLine Fail name $"moves={moves body} declined={declined}"; false
+    let llvm =
+        let name = "fold_state_llvm_lane_takes_in_place_fold: the LLVM lane emits the program (it refused the per-step rebinding)"
+        let viaLlvm () = match lower src with Error e -> Error e | Ok ir -> EmitLlvm.tryEmitProgramNamed name ir
+        match viaLlvm (), withGate "BLADE_FOLD_STATE" "0" viaLlvm with
+        | Ok _, Error offWhy when offWhy.Contains "rebound" ->
+            resultLine Pass name "llvm emits the in-place fold; with the gate off it refuses the rebinding as before"; true
+        | Ok _, other -> resultLine Fail name $"gate-off lane result was not the rebinding refusal: {other}"; false
+        | Error e, _ -> resultLine Fail name $"llvm refused the in-place fold: {e}"; false
+    [ on; off; llvm ]
+
 /// The rank-2 orbit-class PASS itself, for the pins that read it: compact
 /// row classes (BLADE_COMPACT_ROW_CLASSES) would otherwise replace it behind
 /// the producer.
@@ -10631,6 +10718,9 @@ let runOptimizeTests () =
           // decision, and the ring's emission both ways.
           yield! recWindowCorpusCases ()
           yield! recWindowEmission ()
+          // PM14: the leading-axis fold's state updated in place.
+          yield! foldStateCorpusCases ()
+          yield! foldStateEmission ()
           // Wave 3, E-G5: the threaded `let rec` step's admission and forms.
           yield! recStepCases ()
           // Reverse-mode AD of an additive recurrence is O(n): loop count pin.
