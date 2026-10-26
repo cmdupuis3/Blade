@@ -1,0 +1,17 @@
+// TEST: Same-cell return temporaries never shadow a Blade name
+// PM03 (A06, review finding 1): the scalar parameter is spelled `__sc_old`, the
+// C++ lane's natural old-cell temporary; the loop takes another name, so the
+// return still subtracts the PARAMETER, not the cell.
+type Ix = Idx<9>
+function scale_shift(x: Array<Float64 like Ix>, __sc_old: Float64) -> Array<Float64 like Ix> = {
+    let p = x * __sc_old - 1.0 |> compute
+    let t = reduce(p, (+))
+    let __sc_pool = t * 0.25 - __sc_old
+    p * __sc_pool - __sc_old
+}
+let x: Array<Float64 like Ix> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+let a = scale_shift(x, 2.0)
+let sa = reduce(a, (+))
+// EXPECT: x = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+// EXPECT: a = [16.25, 52.75, 89.25, 125.75, 162.25, 198.75, 235.25, 271.75, 308.25]
+// EXPECT: sa = 1460.25

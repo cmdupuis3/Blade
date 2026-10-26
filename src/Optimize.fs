@@ -57,6 +57,7 @@ let cseEnabled () = gateOn "BLADE_CSE"
 /// by BLADE_POOL_REUSE") with the pairs as evidence.
 let poolReuseEnabled () = gateOn "BLADE_POOL_REUSE"
 
+
 /// A05: exact ordinary-function scratch lifetime, independent of donation.
 /// Read per lowering; the off arm keeps the original scope-exit cleanup.
 let earlyPoolReleaseEnabled () = gateOn "BLADE_POOL_EARLY_RELEASE"
@@ -256,7 +257,7 @@ let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE
 /// against its predecessor as well as against no optimizer at all (the
 /// all-off comparison alone never runs the predecessor). Each gate here is
 /// also in `optimizerGates`.
-let optimizerGateMirrors : (string * string) list = [ ("BLADE_COMPACTION_FUSION", "b4"); ("BLADE_COMPACTION_FUSION", "gather"); ("BLADE_COMPACTION_FUSION", "unshared"); ("BLADE_EPILOGUE_LEGS", "1") ]
+let optimizerGateMirrors : (string * string) list = [ ("BLADE_COMPACTION_FUSION", "b4"); ("BLADE_COMPACTION_FUSION", "gather"); ("BLADE_COMPACTION_FUSION", "unshared"); ("BLADE_EPILOGUE_LEGS", "1"); ("BLADE_POOL_REUSE", "literal") ]
 
 /// The decline reason for a LICENSED row prodsum (B2r applies only where
 /// the build keeps the serial association). `lanes` RESERVES the opt-in
@@ -621,6 +622,22 @@ let private densePoolShape (ty: IRType) : (IRType * int64 list) option =
         if exts |> List.forall Option.isSome then Some (stripUnits at.ElemType, exts |> List.map Option.get) else None
     | _ -> None
 
+/// PM60: a plain dense pool shape with a run-time extent on some axis:
+/// (bare element type, rank). The planner never keys such a pool by its
+/// TYPE -- an index type `like I` is unified by name, not by run-time length
+/// (two `like I` arguments, a call result typed I or a lambda's capture typed
+/// I may each carry a different length; review PM60-1) -- but by the
+/// PROVENANCE of its producer's operand (see planPoolReuse).
+let private runtimeDenseShape (ty: IRType) : (IRType * int) option =
+    match ty with
+    | ArrayElem at when not at.IndexTypes.IsEmpty
+                        && at.IndexTypes |> List.forall (fun ix -> ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank = 1 && ix.Dependencies.IsEmpty)
+                        && (poolReuseElemBytes at.ElemType).IsSome
+                        && at.IndexTypes |> List.exists (fun ix -> match ix.Extent with IRLit _ -> false | _ -> true)
+                        && at.IndexTypes |> List.forall (fun ix -> match ix.Extent with IRLit (IRLitInt n) -> n > 0L | IRLit _ -> false | _ -> true) ->
+        Some (stripUnits at.ElemType, at.IndexTypes.Length)
+    | _ -> None
+
 /// The shared fresh-pool classification (IR.isFreshPoolFormWith -- the same
 /// definition codegen's escape analysis uses). A CALL is never fresh here: the
 /// planner cannot see what a callee hands back.
@@ -688,6 +705,66 @@ let planPoolReuse (modul: IRModule) : unit =
         let positions = (lets |> List.map (fun (id, v) -> (Some id, v))) @ [ (None, ret) ]
         let refsAt = positions |> List.map (fun (_, v) -> refsOf v) |> Array.ofList
         let valueAt = positions |> List.map snd |> Array.ofList
+        // Every id an assignment names (its target, and every array its RHS
+        // or an indexed target reads), anywhere in the body.
+        let assignedAnywhere =
+            let mutable s = Set.empty
+            iterIRExpr (fun e ->
+                match e with
+                | IRAssign (t, rhs) ->
+                    (match t with LVVar tid -> s <- Set.add tid s | _ -> ())
+                    s <- Set.union s (collectVarRefsIR rhs)
+                    (match t with LVVar _ -> () | _ -> s <- Set.union s (collectVarRefsIR t))
+                | _ -> ()) f.Body
+            s
+        // PM60: an IMMUTABLE array -- a parameter of this function or a let of
+        // its own body, never named by an assignment (an array's extents never
+        // change, so its run-time extents are one value for the whole call).
+        let paramIds = f.Params |> List.map (fun p -> p.VarId) |> Set.ofList
+        let ownIds = Set.union paramIds (lets |> List.map fst |> Set.ofList)
+        let immutable (id: IRId) = ownIds.Contains id && not (assignedAnywhere.Contains id)
+        // `literal` restricts the ANALYSIS to the previous literal-only planner;
+        // `0`/`off` still analyses (the disabled record names the pairs)
+        let runtimeOn =
+            match System.Environment.GetEnvironmentVariable "BLADE_POOL_REUSE" with
+            | null -> true
+            | v -> v.Trim().ToLowerInvariant() <> "literal"
+        let unprovedRuntime = ResizeArray<string>()
+        // PM60: the run-time extent KEY of a pool, by the PROVENANCE of the
+        // producer's operands (the emitted allocation reads its extents from
+        // them): a POINTWISE map (every operand cell-for-cell, kernel input
+        // rank 0, the output of the operands' rank) whose operands are all
+        // the same immutable ARRAY PARAMETER of this function, or all the same
+        // earlier run-time candidate (its key, transitively). Anything else --
+        // a call result, a capture, a provider / compound / grouped / sorted
+        // array, an outer product, a range, a rebound let -- has no key.
+        let runtimeKeys = System.Collections.Generic.Dictionary<IRId, string>()
+        let provenanceKey (v: IRExpr) (rank: int) : Result<string, string> =
+            match collapse v with
+            | IRCompute (IRApplyCombinator info) | IRApplyCombinator info ->
+                // one operand (no shared axes), or a co-iteration (zip) whose
+                // shared axes are exactly the output's plain axes (review PM60-2)
+                let pointwise =
+                    info.KernelInputRanks |> List.forall (fun r -> r = 0)
+                    && info.KernelTDims.IsEmpty
+                    && not info.HasReynolds
+                    && info.ArrayTypes |> List.forall (fun at -> at.IndexTypes.Length = rank)
+                    && ((info.Arrays.Length = 1 && info.SharedIndexTypes.IsEmpty)
+                        || (info.IsCoIteration && info.SharedIndexTypes.Length = rank
+                            && info.SharedIndexTypes |> List.forall (fun ix -> ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank = 1 && ix.Dependencies.IsEmpty)))
+                if not pointwise then Error "the producer is not a pointwise map of its operands (its extents are not an operand's)"
+                else
+                    let keyOf (op: IRExpr) =
+                        match op with
+                        | IRVar (id, _) when paramIds.Contains id && immutable id -> Some $"extents(param v{id})"
+                        | IRVar (id, _) when runtimeKeys.ContainsKey id && immutable id -> Some runtimeKeys.[id]
+                        | _ -> None
+                    match info.Arrays |> List.map keyOf with
+                    | [] -> Error "the producer has no operand"
+                    | ks when ks |> List.forall Option.isSome && (ks |> List.map Option.get |> List.distinct).Length = 1 -> Ok ks.Head.Value
+                    | ks when ks |> List.forall Option.isSome -> Error "the operands have different provenances"
+                    | _ -> Error "an operand is not an immutable array parameter or an earlier keyed pool (a call result, a capture, a provider / compound / grouped array, a range or a rebound let proves no extent)"
+            | _ -> Error "the value is not a map"
         // Candidate pools: (position, let id option, shape, bytes).
         let candidateAt (k: int) =
             let (idOpt, v) = positions.[k]
@@ -700,10 +777,23 @@ let planPoolReuse (modul: IRModule) : unit =
                     | None -> (match collapse v with IRCompute (IRApplyCombinator _) | IRApplyCombinator _ -> true | _ -> false))
             if not ok then None
             else
-                match densePoolShape (typeOf (collapse v)) with
+                let ty = typeOf (collapse v)
+                match densePoolShape ty with
                 | Some (elem, exts) ->
                     let bytes = (poolReuseElemBytes elem |> Option.defaultValue 0L) * (exts |> List.fold (*) 1L)
-                    Some (elem, exts, bytes)
+                    Some (elem, exts |> List.map (fun n -> $"{n}"), bytes, false)
+                | None when runtimeOn ->
+                    match runtimeDenseShape ty with
+                    | Some (elem, rank) ->
+                        match provenanceKey v rank with
+                        | Ok key ->
+                            (match idOpt with Some id -> runtimeKeys.[id] <- key | None -> ())
+                            // a PROVED run-time shape: no static byte count (not priced)
+                            Some (elem, [ key ], 0L, true)
+                        | Error why ->
+                            (match idOpt with Some id -> unprovedRuntime.Add $"__v{id}: {why}" | None -> unprovedRuntime.Add $"the return: {why}")
+                            None
+                    | None -> None
                 | None -> None
         let candidates = [ for k in 0 .. n -> (k, candidateAt k) ] |> List.choose (fun (k, c) -> c |> Option.map (fun c -> (k, c)))
         if candidates.Length >= 2 then
@@ -753,14 +843,39 @@ let planPoolReuse (modul: IRModule) : unit =
                         | Some mid -> not (Set.contains mid refsAt.[p])
                         | None -> true))
             let pairs = ResizeArray<int * int>()
-            for (k, (elem, exts, _)) in candidates do
+            let runtimeDeclines = ResizeArray<string>()
+            // PM60 v1 (run-time shapes): the reuser is a body let (not the
+            // return position, whose wrapper would leave with the reuser's own
+            // run-time extents table), it is itself unaliased, and no member of
+            // the shared pool, the reuser included, is read by the return
+            // expression -- so neither storage nor its extents table escapes
+            // the frame (the C++ frame frees the reuser's own extents table).
+            let runtimeOk (k: int) (members: int list) =
+                match idAt k with
+                | None -> Error "the return position (its wrapper would leave with its own run-time extents table)"
+                | Some rid when not (unaliased k rid) -> Error $"__v{rid} is aliased, captured, assigned or passed to a call"
+                | Some _ ->
+                    // a SCALAR return that calls no callable only reads the cells
+                    let retEscapes (mid: IRId) = Set.contains mid refsAt.[n] && (callsCallable valueAt.[n] || not (scalarValued valueAt.[n]))
+                    if (k :: members) |> List.exists (fun m -> match idAt m with Some mid -> retEscapes mid | None -> true) then
+                        Error "a member of the shared pool is read by a non-scalar or calling return expression (it could escape the frame)"
+                    else Ok ()
+            for (k, (elem, exts, _, runtime)) in candidates do
                 let donor =
                     candidates
-                    |> List.filter (fun (r, (relem, rexts, _)) ->
+                    |> List.filter (fun (r, (relem, rexts, _, _)) ->
                         r < k && relem = elem && rexts = exts
                         && pools.ContainsKey r
                         && (match idAt r with Some a -> unaliased r a | None -> false)
-                        && deadFrom pools.[r] k)
+                        && deadFrom pools.[r] k
+                        && (not runtime
+                            || (match runtimeOk k pools.[r] with
+                                | Ok () -> true
+                                | Error why ->
+                                    let who = match idAt k with Some id -> "__v" + string id | None -> "the return"
+                                    let donorName = "__v" + string ((idAt r) |> Option.defaultValue -1)
+                                    runtimeDeclines.Add $"{who} would take {donorName}'s dead pool: declined -- {why}"
+                                    false)))
                     |> List.tryHead
                 match donor with
                 | Some (r, _) ->
@@ -771,7 +886,18 @@ let planPoolReuse (modul: IRModule) : unit =
                     pools.[k] <- [ k ]
                     owner.[k] <- k
             let nameOf (p: int) = match idAt p with Some id -> $"__v{id}" | None -> "the return"
-            let bytesOf (p: int) = candidates |> List.tryPick (fun (q, (_, _, b)) -> if q = p then Some b else None) |> Option.defaultValue 0L
+            let bytesOf (p: int) = candidates |> List.tryPick (fun (q, (_, _, b, _)) -> if q = p then Some b else None) |> Option.defaultValue 0L
+            let runtimeAt (p: int) = candidates |> List.exists (fun (q, (_, _, _, rt)) -> q = p && rt)
+            let keysAt (p: int) = candidates |> List.tryPick (fun (q, (_, ks, _, _)) -> if q = p then Some (String.concat " x " ks) else None) |> Option.defaultValue "?"
+            let pairText (verb: string) (k: int) (r: int) =
+                if runtimeAt k then $"{nameOf k} {verb} {nameOf r}'s dead pool (run-time shape [{keysAt k}], proved equal; not priced)"
+                else $"{nameOf k} {verb} {nameOf r}'s dead pool ({bytesOf k} B)"
+            let runtimeNotes =
+                (if runtimeDeclines.Count = 0 then [] else List.ofSeq runtimeDeclines)
+                @ (if unprovedRuntime.Count = 0 then [] else unprovedRuntime |> Seq.map (fun u -> $"not a candidate: {u}") |> List.ofSeq)
+                @ (if pairs |> Seq.exists (fun (k, _) -> runtimeAt k)
+                   then [ "run-time-shaped pairs: realized by the C++ lane (the reuser's declaration aliases the donor's data, its own run-time extents table is still freed); the LLVM lane does not consume let-level scratch reuse (its pools stay fresh)" ]
+                   else [])
             // Peak live pool bytes: each pool live from its first member's
             // definition to its members' last read.
             let lastRead (p: int) =
@@ -787,18 +913,22 @@ let planPoolReuse (modul: IRModule) : unit =
                 // The escape hatch: the plan is computed (so the A/B names
                 // what it would have done) and not one pair reaches codegen.
                 decide f.SourceName (Blade.Effects.Declined "disabled by BLADE_POOL_REUSE")
-                    (pairs |> List.ofSeq |> List.map (fun (k, r) -> $"{nameOf k} would take {nameOf r}'s dead pool ({bytesOf k} B)"))
+                    ((pairs |> List.ofSeq |> List.map (fun (k, r) -> pairText "would take" k r)) @ runtimeNotes)
             elif pairs.Count > 0 then
                 for (k, r) in pairs do
                     match idAt k with
                     | Some id -> Blade.Types.PoolReuseTable.record id (idAt r).Value
                     | None -> Blade.Types.PoolReuseTable.recordReturn f.Id (idAt r).Value
                 decide f.SourceName Blade.Effects.Applied
-                    ((pairs |> List.ofSeq |> List.map (fun (k, r) -> $"{nameOf k} takes {nameOf r}'s dead pool ({bytesOf k} B)"))
-                     @ [ $"pools {candidates.Length} -> {pools.Count}; peak live pool bytes {before} -> {after} (literal extents only)" ])
+                    ((pairs |> List.ofSeq |> List.map (fun (k, r) -> pairText "takes" k r))
+                     @ [ $"pools {candidates.Length} -> {pools.Count}; peak live pool bytes {before} -> {after} (literal extents only)" ]
+                     @ runtimeNotes)
             else
                 decide f.SourceName (Blade.Effects.Declined "no candidate pool is both dead and unaliased when a pool of the same shape is allocated")
-                    [ $"{candidates.Length} candidate pools, peak live pool bytes {before}" ]
+                    ([ $"{candidates.Length} candidate pools, peak live pool bytes {before}" ] @ runtimeNotes)
+        elif unprovedRuntime.Count > 0 then
+            decide f.SourceName (Blade.Effects.Declined "fewer than two candidate pools")
+                (unprovedRuntime |> Seq.map (fun u -> $"not a candidate: {u}") |> List.ofSeq)
 
 /// A kernel reference resolved through the module's own function table
 /// (the AsyncLocal CallablesTable is not installed at this point in the

@@ -155,6 +155,9 @@
     <!-- Exact ordinary scratch lifetime; consumes final planner ownership and
          emits existing typed pool events before either backend. -->
     <Compile Include="src/EarlyPoolRelease.fs" />
+    <!-- PM03 same-cell RETURN certificate (A04 LLVM / A06 C++): one semantic
+         proof over the original callable, read by both backends. -->
+    <Compile Include="src/SameCellReturn.fs" />
     <!-- Provider registry: the core<->provider seam (ProviderSpec records
          keyed by surface module name). Compiles after IR.fs and before the
          provider implementations that register into it. -->

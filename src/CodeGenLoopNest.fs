@@ -5867,6 +5867,26 @@ let suppressAllocName (n: string) : unit =
     | None -> ()
     | Some frame -> frame.SuppressNames <- Set.add n frame.SuppressNames
 
+/// SCRATCH REUSE (PM60, run-time shapes): a reuser whose declaration now
+/// aliases its donor's data no longer owns a pool -- but it may still own the
+/// run-time extents table its site `new`-ed (`size_t* r_extents = new
+/// size_t[R]`), which the donor's free does not release. Spare the backing
+/// and KEEP that table's `delete[]` in the frame (same position, same owner,
+/// so an escaping owner still spares it); a reuser with a static extents
+/// table is suppressed whole, exactly as before.
+let spareReusedBacking (n: string) : unit =
+    match currentAllocScope () with
+    | None -> ()
+    | Some frame ->
+        let mutable kept = false
+        frame.Allocs <-
+            frame.Allocs |> List.map (fun a ->
+                match a with
+                | PoolAlloc (name, _, _, Some ex, owner) when name = n && not kept ->
+                    kept <- true
+                    RawAlloc (ex, owner)
+                | a -> a)
+        if not kept then frame.SuppressNames <- Set.add n frame.SuppressNames
 /// A cursor into the live frame's registration list, and its companion that
 /// spares EVERYTHING registered after it (`suppressAllocsSince`).
 ///

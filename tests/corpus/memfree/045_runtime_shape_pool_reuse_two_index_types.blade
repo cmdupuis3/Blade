@@ -1,0 +1,18 @@
+// TEST: Run-time-shaped pools over different index types never share
+// PM60: y is over I and z over J; both happen to have 5 cells at run time,
+// but nothing proves it, so each keeps its own pool (capacity-compatible
+// backing of unequal shapes is out of scope).
+function two_axes(x: Array<Float64 like I>, u: Array<Float64 like J>) -> Float64 = {
+    let y = x * 2.0 |> compute
+    let m = reduce(y, (+))
+    let z = u * 3.0 - m |> compute
+    reduce(z, (+))
+}
+let n = Int64(floor(5.5))
+let v = Float64(0..n)
+let w = Float64(0..n) + 1.0
+let s = two_axes(v, w)
+// EXPECT: n = 5
+// EXPECT: v = [0.0, 1.0, 2.0, 3.0, 4.0]
+// EXPECT: w = [1.0, 2.0, 3.0, 4.0, 5.0]
+// EXPECT: s = -55.0

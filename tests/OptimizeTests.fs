@@ -5293,6 +5293,187 @@ let private poolReuseGateOffEmitsNoAlias () =
             resultLine Pass name "no pool alias with BLADE_POOL_REUSE=0"
             true
 
+/// PM03 same-cell RETURN in the C++ lane (round 4 A06; the shared
+/// Blade.SameCellReturn certificate, A04's admission). memfree/033 and 037:
+/// with BLADE_POOL_REUSE on the function allocates ONE pool (the donor), fills
+/// the return in it through one pointer -- the old cell loaded into a scalar
+/// before its same-index store -- and returns it (no result pool, no
+/// in-callee free); the cell expression is the fresh path's, the leaf renamed
+/// (so every operation and its order are unchanged); one `applied` record.
+/// The knob off keeps the fresh result pool and its free. 038-041 (caller-owned
+/// storage, an alias fold, a second array, a division) each record the
+/// certificate's decline and emit byte-identically to the knob off.
+let private sameCellReturnCpp () =
+    let rx (p: string) (t: string) = System.Text.RegularExpressions.Regex.Match(t, p)
+    let count (p: string) (t: string) = System.Text.RegularExpressions.Regex.Matches(t, p).Count
+    let allocs = @" = \{ allocate<typename promote<double, 1>::type, nullptr>"
+    let frees = @"deallocate<typename promote<double, 1>::type, nullptr>"
+    let emit (gate: string) (src: string) =
+        withGate "BLADE_BLAS" "off" (fun () -> withGate "BLADE_POOL_REUSE" gate (fun () ->
+            Blade.Effects.Decisions.start ()
+            try
+                let r = cppOfSource "same_cell_cpp" src
+                (r, Blade.Effects.Decisions.drain () |> List.filter (fun d -> d.Rule = "same-cell-return-cpp"))
+            finally Blade.Effects.Decisions.drain () |> ignore))
+    let fnBody (fn: string) (cpp: string) =
+        let m = rx (@"(?s)Array<double, 1> " + fn + @"\([^)]*\) \{(.*?)\n\}") cpp
+        if m.Success then m.Value else ""
+    let positive (rel: string) (fn: string) =
+        let name = $"same_cell_return_cpp_{fn}"
+        match corpusSource rel with
+        | Error e -> resultLine Fail name e; false
+        | Ok src ->
+        match emit "1" src, emit "0" src with
+        | (Ok on, dOn), (Ok off, dOff) ->
+            let bOn, bOff = fnBody fn on, fnBody fn off
+            let ret = rx @"return (__v\d+);" bOn
+            let cellOn = rx @"__sc_pool\[__sc_k\] = (.*);" bOn
+            let cellOff = rx @"__fp___ret\d+\[__fk\] = (.*);" bOff
+            let donorFp = rx @"const double\* BLADE_RESTRICT (__fp___v\d+) = nested_array_utilities::pool_base\(__v\d+\.data\);" bOff
+            let sameExpr =
+                cellOn.Success && cellOff.Success && donorFp.Success
+                && cellOff.Groups.[1].Value.Replace(donorFp.Groups.[1].Value + "[__fk]", "__sc_old") = cellOn.Groups.[1].Value
+            let applied = dOn |> List.filter (fun d -> d.Subject = fn && d.Outcome = Blade.Effects.Applied)
+            let offDeclined = dOff |> List.exists (fun d -> d.Subject = fn && (match d.Outcome with Blade.Effects.Declined w -> w.Contains "disabled by BLADE_POOL_REUSE" | _ -> false))
+            if ret.Success && count allocs bOn = 1 && count frees bOn = 0
+               && bOn.Contains ("double* __sc_pool = nested_array_utilities::pool_base(" + ret.Groups.[1].Value + ".data);")
+               && bOn.Contains "const double __sc_old = __sc_pool[__sc_k];"
+               && count allocs bOff = 2 && count frees bOff = 1 && not (bOff.Contains "__sc_")
+               && sameExpr && applied.Length = 1 && offDeclined then
+                resultLine Pass name $"one pool, filled in place and returned (`{ret.Groups.[1].Value}`); cell expression = the fresh path's with the leaf renamed (`{cellOn.Groups.[1].Value}`); knob off: fresh result pool + one free"
+                true
+            else
+                resultLine Fail name (sprintf "ret=%b allocs %d/%d frees %d/%d sameExpr=%b applied=%d offDeclined=%b" ret.Success (count allocs bOn) (count allocs bOff) (count frees bOn) (count frees bOff) sameExpr applied.Length offDeclined)
+                false
+        | (Error e, _), _ | _, (Error e, _) -> resultLine Fail name e; false
+    let decline (rel: string) (fn: string) (needle: string) =
+        let name = $"same_cell_return_cpp_declines_{fn}"
+        match corpusSource rel with
+        | Error e -> resultLine Fail name e; false
+        | Ok src ->
+        match emit "1" src, emit "0" src with
+        | (Ok on, dOn), (Ok off, _) ->
+            let declined = dOn |> List.exists (fun d -> d.Subject = fn && (match d.Outcome with Blade.Effects.Declined w -> w.Contains needle | _ -> false))
+            if declined && on = off && not (on.Contains "__sc_old") then
+                resultLine Pass name $"declined ({needle}); emission byte-identical to BLADE_POOL_REUSE=0"
+                true
+            else
+                resultLine Fail name (sprintf "declined=%b identical=%b records=%A" declined (on = off) (dOn |> List.map Blade.Effects.Decisions.render))
+                false
+        | (Error e, _), _ | _, (Error e, _) -> resultLine Fail name e; false
+    // review A06-1: a Blade name equal to a loop temporary must not be shadowed:
+    // the scalar parameter `__sc_old` keeps its own C++ name and reads, the old-cell
+    // temporary takes another (memfree/042 pins the values in both lanes)
+    let collision () =
+        let name = "same_cell_return_cpp_temporary_names_never_shadow"
+        let src =
+            "type Ix = Idx<9>\n"
+            + "function scale_shift(x: Array<Float64 like Ix>, __sc_old: Float64) -> Array<Float64 like Ix> = {\n"
+            + "    let p = x * __sc_old - 1.0 |> compute\n"
+            + "    let t = reduce(p, (+))\n"
+            + "    let __sc_pool = t * 0.25 - __sc_old\n"
+            + "    p * __sc_pool - __sc_old\n"
+            + "}\n"
+            + "let x: Array<Float64 like Ix> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]\n"
+            + "let a = scale_shift(x, 2.0)\n"
+        match emit "1" src, emit "0" src with
+        | (Ok on, dOn), (Ok off, _) ->
+            let bOn, bOff = fnBody "scale_shift" on, fnBody "scale_shift" off
+            let loop = rx @"const double (\w+) = (\w+)\[(\w+)\];\s*\n\s*(\w+)\[(\w+)\] = (.*);" bOn
+            let cellOff = rx @"__fp___ret\d+\[__fk\] = (.*);" bOff
+            let donorFp = rx @"const double\* BLADE_RESTRICT (__fp___v\d+) = nested_array_utilities::pool_base\(__v\d+\.data\);" bOff
+            let applied = dOn |> List.exists (fun d -> d.Subject = "scale_shift" && d.Outcome = Blade.Effects.Applied)
+            let ok =
+                applied && loop.Success && cellOff.Success && donorFp.Success
+                && loop.Groups.[1].Value <> "__sc_old"
+                && cellOff.Groups.[1].Value.Replace(donorFp.Groups.[1].Value + "[__fk]", loop.Groups.[1].Value) = loop.Groups.[6].Value
+            if ok then resultLine Pass name $"temporaries `{loop.Groups.[2].Value}` / `{loop.Groups.[1].Value}`; cell `{loop.Groups.[6].Value}` = the fresh path's with only the leaf renamed"; true
+            else resultLine Fail name (sprintf "applied=%b loop=%b on=[%s] off=[%s]" applied loop.Success (if loop.Success then loop.Groups.[6].Value else "") (if cellOff.Success then cellOff.Groups.[1].Value else "")); false
+        | (Error e, _), _ | _, (Error e, _) -> resultLine Fail name e; false
+    [ positive "memfree/033_same_cell_return_owned.blade" "same_cell"
+      collision ()
+      positive "memfree/037_same_cell_return_cpp_scalar_param_snapshot.blade" "scale_shift"
+      decline "memfree/038_same_cell_return_caller_owned_declines.blade" "caller_owned" "not one direct fresh computed local map"
+      decline "memfree/039_same_cell_return_alias_fold_declines.blade" "retained" "retains an array/alias/deferred read"
+      decline "memfree/040_same_cell_return_second_array_declines.blade" "mixed" "return kernel/metadata"
+      decline "memfree/041_same_cell_return_division_declines.blade" "divided" "return kernel/metadata" ]
+
+/// PM60 (round 4 wave 2): scratch reuse between RUN-TIME-shaped pools whose
+/// extents the planner PROVES equal by their producers' PROVENANCE (memfree/043:
+/// two pointwise maps of the same immutable array parameter of `pipe`). Default: the reuser's declaration
+/// aliases the donor's data, the reuser's own `new`-ed run-time extents table
+/// is still freed, the BL9002 belt checks the extents before the first store,
+/// one allocation fewer; `pool-reuse` applied with the run-time shape.
+/// `BLADE_POOL_REUSE=literal` (the opt-diff mirror): no alias, both pools and
+/// both tables freed. Declines: the return position (044), two different
+/// index types (045), anonymous run-time ranges (047), one index type shared
+/// by two parameters (048) -- no alias in any of them.
+let private pm60RuntimeShapeReuse () =
+    let count (p: string) (t: string) = System.Text.RegularExpressions.Regex.Matches(t, p).Count
+    let emit (gate: string) (src: string) =
+        withGate "BLADE_BLAS" "off" (fun () -> withGate "BLADE_POOL_REUSE" gate (fun () ->
+            Blade.Effects.Decisions.start ()
+            try
+                let r = cppOfSource "pm60" src
+                (r, Blade.Effects.Decisions.drain () |> List.filter (fun d -> d.Rule = "pool-reuse"))
+            finally Blade.Effects.Decisions.drain () |> ignore))
+    let positive () =
+        let name = "pool_reuse_runtime_shapes_pipe"
+        match corpusSource "memfree/043_runtime_shape_pool_reuse_index_param.blade" with
+        | Error e -> resultLine Fail name e; false
+        | Ok src ->
+        match emit null src, emit "literal" src with
+        | (Ok on, dOn), (Ok off, dOff) ->
+            let alias = System.Text.RegularExpressions.Regex.Match(on, @"Array<double, 1> (__v\d+) = \{ (__v\d+)\.data, (__v\d+_extents) \}; /\* pool reuse: ")
+            let reuser = alias.Groups.[1].Value
+            let applied = dOn |> List.exists (fun d -> d.Subject = "pipe" && d.Outcome = Blade.Effects.Applied && (d.Evidence |> List.exists (fun e -> e.Contains "run-time shape [extents(param v" && e.Contains "proved equal")))
+            let literalKept = dOff |> List.forall (fun d -> not (d.Evidence |> List.exists (fun e -> e.Contains "run-time shape")))
+            let allocs = @" = \{ allocate<typename promote<double, 1>::type, nullptr>"
+            if alias.Success && applied && literalKept
+               && on.Contains ($"delete[] {reuser}_extents;")
+               && on.Contains ($"if (!({reuser}_extents[0] == {alias.Groups.[2].Value}.extents[0])) {{ blade_rt::panic(\"BL9002\"")
+               && count allocs on = count allocs off - 1
+               && not (off.Contains "pool reuse:") && off.Contains ($"delete[] {reuser}_extents;") then
+                resultLine Pass name $"`{reuser}` aliases `{alias.Groups.[2].Value}`'s dead pool; its own run-time extents table is still freed; the BL9002 belt guards the extents; one allocation fewer than BLADE_POOL_REUSE=literal"
+                true
+            else
+                resultLine Fail name (sprintf "alias=%b applied=%b literalKept=%b allocs %d/%d" alias.Success applied literalKept (count allocs on) (count allocs off))
+                false
+        | (Error e, _), _ | _, (Error e, _) -> resultLine Fail name e; false
+    let decline (rel: string) (fn: string) (needle: string) =
+        let name = $"pool_reuse_runtime_shapes_declines_{fn}"
+        match corpusSource rel with
+        | Error e -> resultLine Fail name e; false
+        | Ok src ->
+        match emit null src with
+        | (Ok on, ds) ->
+            let recorded = ds |> List.exists (fun d -> d.Subject = fn && ((match d.Outcome with Blade.Effects.Declined w -> w.Contains needle | _ -> false) || (d.Evidence |> List.exists (fun e -> e.Contains needle))))
+            if recorded && not (on.Contains "pool reuse:") then
+                resultLine Pass name $"no alias; recorded: {needle}"
+                true
+            else
+                resultLine Fail name (sprintf "recorded=%b alias=%b records=%A" recorded (on.Contains "pool reuse:") (ds |> List.map Blade.Effects.Decisions.render))
+                false
+        | (Error e, _) -> resultLine Fail name e; false
+    [ positive ()
+      decline "memfree/044_runtime_shape_pool_reuse_return_declines.blade" "ret_shape" "the return position"
+      decline "memfree/045_runtime_shape_pool_reuse_two_index_types.blade" "two_axes" "no candidate pool is both dead and unaliased"
+      decline "memfree/046_runtime_shape_pool_reuse_anonymous_ranges.blade" "ramp2" "an operand is not an immutable array parameter"
+      decline "memfree/047_runtime_shape_pool_reuse_shared_index_param.blade" "g" "no candidate pool is both dead and unaliased"
+      decline "memfree/048_runtime_shape_pool_reuse_call_result_declines.blade" "probe" "an operand is not an immutable array parameter"
+      // review PM60-2: a zip of one provenance pairs too
+      (let name = "pool_reuse_runtime_shapes_zip_coiteration"
+       match corpusSource "memfree/049_runtime_shape_pool_reuse_zip_coiteration.blade" with
+       | Error e -> resultLine Fail name e; false
+       | Ok src ->
+       match emit null src with
+       | (Ok on, ds) ->
+           let applied = ds |> List.exists (fun d -> d.Subject = "zips" && d.Outcome = Blade.Effects.Applied && (d.Evidence |> List.exists (fun e -> e.Contains "run-time shape [extents(param v")))
+           if applied && on.Contains "pool reuse:" && on.Contains "internal: run-time scratch reuse over unequal extents" then
+               resultLine Pass name "a zip map over a parameter and its keyed map takes the dead zip's pool, guarded"; true
+           else resultLine Fail name (sprintf "applied=%b alias=%b" applied (on.Contains "pool reuse:")); false
+       | (Error e, _) -> resultLine Fail name e; false) ]
+
 /// KERNEL-INVARIANT HOISTING (Blade.Optimize.hoistKernelInvariantsModule).
 /// `x - avg(x)` is `method_for(x) <@> lambda(e) -> e - avg(x) |> compute`,
 /// so the fold of `x` used to run once PER CELL -- O(T^2) for a length-T
@@ -11240,6 +11421,8 @@ let runOptimizeTests () =
               decisionCase "decision_cse_disabled" cseSrc "cse" (declinedMentioning "disabled by BLADE_CSE")
                   "cse declined, disabled by BLADE_CSE")
           poolReuseGateOffEmitsNoAlias ()
+          yield! sameCellReturnCpp ()
+          yield! pm60RuntimeShapeReuse ()
           withGate "BLADE_POOL_REUSE" "0" (fun () ->
               decisionCase "decision_pool_reuse_disabled" poolReuseChainSrc "pool-reuse"
                   (declinedMentioning "disabled by BLADE_POOL_REUSE") "pool-reuse declined, disabled by BLADE_POOL_REUSE")

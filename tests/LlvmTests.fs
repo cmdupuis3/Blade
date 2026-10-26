@@ -1805,8 +1805,11 @@ let u = reduce(method_for(range<V>) <@> lambda(k) -> t(0, 0, k), (+))
                     pass name "fresh-result fallback; exact backend refusal; no speculative donor fill/input forcing"
                 else fail name (sprintf "decline=%b; no speculative force=%b; decisions=%A" decline noSpeculativeForce decisions)
 
-    // A04: same-cell proof is backend-local; shared dead-donor tables and
-    // C++'s fresh-output/restrict path must remain unchanged.
+    // A04 / A06: ONE shared same-cell certificate (Blade.SameCellReturn), two
+    // realizations. The shared dead-donor tables stay unchanged; the C++
+    // lane (A06) fills the return in the donor's pool through one pointer,
+    // old cell to a scalar before the same-index store, and the knob off
+    // keeps its fresh-output/restrict path.
     let samePins reuse defaultSchedule =
         returnPins reuse @
         [ "BLADE_HOT_ROW", (if defaultSchedule then None else Some "0")
@@ -1827,7 +1830,14 @@ let u = reduce(method_for(range<V>) <@> lambda(k) -> t(0, 0, k), (+))
                     | Ok ir ->
                         let donors = Blade.Types.PoolReuseTable.donors ()
                         let returns = Blade.Types.PoolReuseTable.returnDonors ()
-                        let cpp = if pairedCpp then fst (CodeGen.genSelfContainedProgramFromIR ir "facts") else ""
+                        // a C++ emission that RAISES fails the case (review A06-2):
+                        // a refusal is never mistaken for a working fresh fallback
+                        let cppR =
+                            if not pairedCpp then Ok ""
+                            else try Ok (fst (CodeGen.genSelfContainedProgramFromIR ir "facts")) with ex -> Error ("C++ emission raised: " + ex.Message)
+                        match cppR with
+                        | Error e -> Error e
+                        | Ok cpp ->
                         match EmitLlvm.tryEmitProgramNamed "facts" ir with
                         | Error e -> Error ("llvm: " + e)
                         | Ok ll ->
@@ -1846,15 +1856,25 @@ let u = reduce(method_for(range<V>) <@> lambda(k) -> t(0, 0, k), (+))
             match emitSame "1" schedule true source unchanged, emitSame "0" schedule true source unchanged with
             | Ok (on, cppOn, decisions, tablesOn), Ok (off, cppOff, _, tablesOff) ->
                 let admissions = decisions |> List.filter (fun d -> d.Rule = "same-cell-return-llvm" && d.Subject = "same_cell" && d.Outcome = Blade.Effects.Applied)
-                let cppFresh =
-                    let body = System.Text.RegularExpressions.Regex.Match(cppOn, @"(?s)Array<double, 1> same_cell\(Array<double, 1> x\) \{(.*?)return __ret\d+;\s*\}")
-                    body.Success && System.Text.RegularExpressions.Regex.Matches(body.Value, @" = \{ allocate<typename promote<double, 1>::type, nullptr>").Count = 2 &&
-                    System.Text.RegularExpressions.Regex.Matches(body.Value, @"deallocate<typename promote<double, 1>::type, nullptr>").Count = 1 &&
-                    not (body.Value.Contains "pool reuse:") && cppOn = cppOff
+                let cppAdmissions = decisions |> List.filter (fun d -> d.Rule = "same-cell-return-cpp" && d.Subject = "same_cell" && d.Outcome = Blade.Effects.Applied)
+                let count (pat: string) (t: string) = System.Text.RegularExpressions.Regex.Matches(t, pat).Count
+                let allocs = @" = \{ allocate<typename promote<double, 1>::type, nullptr>"
+                let frees = @"deallocate<typename promote<double, 1>::type, nullptr>"
+                // ON (A06): one pool, filled in place, returned; OFF: the fresh result pool
+                let cppSameCell =
+                    let body = System.Text.RegularExpressions.Regex.Match(cppOn, @"(?s)Array<double, 1> same_cell\(Array<double, 1> x\) \{(.*?)return (__v\d+);\s*\}")
+                    body.Success && count allocs body.Value = 1 && count frees body.Value = 0 &&
+                    body.Value.Contains "const double __sc_old = __sc_pool[__sc_k];" &&
+                    body.Value.Contains ("double* __sc_pool = nested_array_utilities::pool_base(" + body.Groups.[2].Value + ".data);") &&
+                    not (body.Value.Contains "pool reuse:") && not (body.Value.Contains "BLADE_RESTRICT __sc")
+                let cppFreshOff =
+                    let body = System.Text.RegularExpressions.Regex.Match(cppOff, @"(?s)Array<double, 1> same_cell\(Array<double, 1> x\) \{(.*?)return __ret\d+;\s*\}")
+                    body.Success && count allocs body.Value = 2 && count frees body.Value = 1 &&
+                    not (body.Value.Contains "pool reuse:") && not (body.Value.Contains "__sc_")
                 match sameCellReturnProof true on, sameCellReturnProof false off with
-                | Ok a, Ok b when a = b && admissions.Length = 1 && tablesOn && tablesOff && cppFresh ->
-                    pass name "same-root old load before same-index store; one owner escapes; two calls and later input/result reads; same final-cell graph; C++ stays fresh"
-                | a, b -> fail name (sprintf "on=%A off=%A admissions=%d tables=%b/%b C++fresh=%b" a b admissions.Length tablesOn tablesOff cppFresh)
+                | Ok a, Ok b when a = b && admissions.Length = 1 && cppAdmissions.Length = 1 && tablesOn && tablesOff && cppSameCell && cppFreshOff ->
+                    pass name "same-root old load before same-index store in BOTH lanes (LLVM A04, C++ A06: one pool, no result allocation, no in-callee free); one owner escapes; two calls and later input/result reads; same final-cell graph; knob off: C++ fresh result pool"
+                | a, b -> fail name (sprintf "on=%A off=%A admissions=%d/%d tables=%b/%b C++on=%b C++off=%b" a b admissions.Length cppAdmissions.Length tablesOn tablesOff cppSameCell cppFreshOff)
             | Error e, _ | _, Error e -> fail name e
 
         let tupleSource =
@@ -1983,23 +2003,31 @@ let u = reduce(method_for(range<V>) <@> lambda(k) -> t(0, 0, k), (+))
               "other return donor value", source, genericValue, "another planner owns this body"
               "current return donor", source, currentDonor, "another planner owns this body" ]
         for label, src, tweak, expected in controls do
-            let name = "same-cell return declines (llvm): " + label
-            match emitSame "1" false false src tweak with
+            let name = "same-cell return declines (llvm + C++): " + label
+            // the C++ lane installs its current return donor per function body
+            // (genFuncDefCore), so the forged GLOBAL current donor is an
+            // LLVM-only control
+            // ... and a bare unforced donor let is IR the C++ emitter never receives
+            // (Lowering forces every body-level map; it raises BL9001), so the
+            // deferred-donor control is LLVM-only too
+            let pairedCpp = label <> "current return donor" && label <> "deferred donor"
+            match emitSame "1" false pairedCpp src tweak with
             | Error e -> fail name e
-            | Ok (ll, _, decisions, tables) ->
-                let refusals = decisions |> List.filter (fun d -> d.Rule = "same-cell-return-llvm" && d.Subject = "same_cell")
-                let declined =
-                    match refusals with
+            | Ok (ll, cpp, decisions, tables) ->
+                let judged rule =
+                    match decisions |> List.filter (fun d -> d.Rule = rule && d.Subject = "same_cell") with
                     | [d] ->
                         match d.Outcome with
                         | Blade.Effects.Declined why when label = "gather closure" -> why = expected
                         | Blade.Effects.Declined why -> why.Contains(expected: string)
                         | _ -> false
                     | _ -> false
+                let declined = judged "same-cell-return-llvm"
+                let cppDeclined = not pairedCpp || (judged "same-cell-return-cpp" && not (cpp.Contains "same-cell return (A06") && not (cpp.Contains "__sc_old"))
                 let failureKept = label <> "failure in kernel" || ll.Contains "A04 retained failure"
-                if declined && tables && failureKept && not (ll.Contains "; A04: same-cell return:") then
-                    pass name "one truthful backend refusal; no same-cell fill; shared donor tables unchanged"
-                else fail name (sprintf "declined=%b tables=%b failureKept=%b decisions=%A" declined tables failureKept refusals)
+                if declined && cppDeclined && tables && failureKept && not (ll.Contains "; A04: same-cell return:") then
+                    pass name "one truthful refusal per lane (the shared certificate's reason); no same-cell fill; shared donor tables unchanged"
+                else fail name (sprintf "declined=%b cppDeclined=%b tables=%b failureKept=%b decisions=%A" declined cppDeclined tables failureKept (decisions |> List.filter (fun d -> d.Rule.StartsWith "same-cell")))
 
     // ---- contains and membership hoisting (round 3, B-T1) ------------------
     // The lane has a real IRContains arm (it used to refuse the node, so every

@@ -136,8 +136,80 @@ let private groupKeysTypeInScope (id: IRId) (scope: IRExpr list) : IRType option
 /// deterministic-deallocation frame can be pushed and popped around it inside a
 /// `try ... finally` WITHOUT adding a closure layer over the mutable `currentNames`
 /// the fold threads (see setAllocOwner's note on that hazard).
+/// PM03 same-cell RETURN, the C++ realization (round 4 A06). The semantic
+/// proof is Blade.SameCellReturn's certificate over the ORIGINAL callable
+/// (shared with the LLVM lane's A04); `Decided` says the return arm recorded
+/// this function's `same-cell-return-cpp` outcome.
+type internal SameCellCandidate =
+    { Proof: Blade.SameCellReturn.Certificate
+      Subject: string
+      Decided: bool ref }
+
+let internal recordSameCellCpp (subject: string) (fid: IRId) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
+    Blade.Effects.Decisions.record
+        { Blade.Effects.Rule = "same-cell-return-cpp"; Version = 1; Span = declSpanOf subject; Subject = subject
+          Outcome = outcome; Evidence = ($"function v{fid}; the shared same-cell certificate (Blade.SameCellReturn, A04's admission), no generic return donor" :: evidence) }
+
+/// The ACTUAL allocation-frame check, immediately before the tail is emitted:
+/// the body the frame renders is exactly the certified original spine, the
+/// live frame is the function's own depth-one SFunc holding exactly ONE
+/// registration -- the donor's dense pool, owned by the donor let, its free
+/// the dense `deallocate` mirror, no owned dynamic extents, not escaping, not
+/// suppressed -- whose declaration is the one plain dense allocation over a
+/// static constexpr extents table of the certified extent, and every scalar
+/// snapshot the kernel reads is an emitted name. Read-only: nothing is
+/// emitted, forced or freed here. Ok = the donor's C++ name, the loop's four
+/// temporaries (pool pointer, cell count, index, old cell) -- each chosen so
+/// it is no emitted binding name and no identifier already in the body (a
+/// Blade name may itself be `__sc_old`; review A06-1) -- and the rendered
+/// cell expression over the old-cell temporary.
+let private sameCellRealization (proof: Blade.SameCellReturn.Certificate) (lets: (IRId * IRExpr) list)
+                                (info: ApplyInfo) (names: Map<IRId, string>) (stmts: string list)
+                                : Result<string * (string * string * string * string) * string, string> =
+    let rec spineIds e = match e with IRLet (id, _, b) -> id :: spineIds b | _ -> []
+    if lets |> List.map fst <> spineIds proof.Body then Error "the emitted body's let spine is not the certified original spine"
+    elif info <> proof.Tail then Error "the emitted return is not the certified tail"
+    else
+    match Map.tryFind proof.Donor names with
+    | None -> Error "the donor has no emitted name"
+    | Some dn ->
+    let frameOk =
+        allocScopeDepth () = 1 &&
+        (match currentAllocScope () with
+         | Some frame when frame.Kind = SFunc ->
+             (match frame.Allocs with
+              | [ PoolAlloc (n, "deallocate", "typename promote<double, 1>::type, nullptr", None, Some owner) ] ->
+                  n = dn && owner = proof.Donor && not (frame.Escapes.Contains proof.Donor) && not (frame.SuppressNames.Contains dn)
+              | _ -> false)
+         | _ -> false)
+    if not frameOk then Error "the donor is not the frame's sole tracked dense allocation (owner, routine, extents, escape or suppression differ)"
+    else
+    let decl = $"Array<double, 1> {dn} = {{ allocate<typename promote<double, 1>::type, nullptr>({dn}_extents), {dn}_extents }};"
+    let ext = $"static constexpr const size_t {dn}_extents[1] = {{ {proof.Extent} }};"
+    let count (needle: string) = stmts |> List.filter (fun l -> l.Trim() = needle) |> List.length
+    if count decl <> 1 || count ext <> 1 then Error "the donor's declaration is not the one plain dense allocation over its static extents table"
+    elif proof.Snapshots |> Set.exists (fun id -> not (Map.containsKey id names)) then Error "a scalar snapshot is not an emitted binding"
+    else
+    match resolveCallable info.Kernel with
+    | Some k when k.Params.Length = 1 ->
+        let leaf = k.Params.Head.VarId
+        let taken = names |> Map.toSeq |> Seq.map snd |> Set.ofSeq
+        let body = String.concat "\n" stmts
+        let used = System.Collections.Generic.HashSet<string>()
+        let free (stem: string) =
+            let rec pick i =
+                let cand = if i = 0 then stem else $"{stem}{i}"
+                if taken.Contains cand || used.Contains cand || containsIdentToken body cand then pick (i + 1)
+                else (used.Add cand |> ignore; cand)
+            pick 0
+        let temps = (free "__sc_pool", free "__sc_cells", free "__sc_k", free "__sc_old")
+        let (_, _, _, oldName) = temps
+        Ok (dn, temps, exprToCpp (Map.add leaf oldName names) k.Body)
+    | _ -> Error "the return kernel does not resolve to its certified one-parameter callable"
+
 let rec private genFuncBodyScoped
         (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, string>) (indent: string)
+        (sameCell: SameCellCandidate option)
         (lets: (IRId * IRExpr) list) (retExpr: IRExpr) : string list =
     let mutable currentNames = names
     // Grouped-array registrations made by THIS body's lets (group_by ->
@@ -867,8 +939,30 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
                  | Some dn ->
                      let name = $"__v{id}"
                      let (acc', matched) = rewritePoolAlias acc name dn
-                     if matched then suppressAllocName name
-                     acc'
+                     // the backing goes with the donor; an owned run-time extents
+                     // table (PM60) is still the reuser's to free
+                     if matched then spareReusedBacking name
+                     // PM60: a RUN-TIME-shaped pair (the reuser's extents are not
+                     // a static table) is proved equal by the planner; the
+                     // emitted belt checks it before the first store and fails
+                     // loudly (an internal error) rather than overrun the pool
+                     let staticExt = acc' |> List.exists (fun l -> l.TrimStart().StartsWith $"static constexpr const size_t {name}_extents[")
+                     if matched && not staticExt then
+                         let tag = $"/* pool reuse: {name} takes {dn}'s dead pool */"
+                         let rank =
+                             acc' |> List.tryPick (fun l ->
+                                 let m = System.Text.RegularExpressions.Regex.Match(l, @"Array<.+?, (\d+)> " + System.Text.RegularExpressions.Regex.Escape name + " = ")
+                                 if m.Success && l.Contains tag then Some (int m.Groups.[1].Value) else None)
+                         match rank with
+                         | Some r ->
+                             let cond = [ 0 .. r - 1 ] |> List.map (fun d -> $"{name}_extents[{d}] == {dn}.extents[{d}]") |> String.concat " && "
+                             acc' |> List.collect (fun l ->
+                                 if l.Contains tag then
+                                     let ind = l.Substring(0, l.Length - l.TrimStart().Length)
+                                     [ l; $"{ind}if (!({cond})) {{ blade_rt::panic(\"BL9002\", \"internal: run-time scratch reuse over unequal extents ({name} <- {dn})\", nullptr, 0); }}" ]
+                                 else [ l ])
+                         | None -> acc'
+                     else acc'
                  | None -> acc)
             | None -> acc) stmts
     // Return-arm emissions carry NO owner: a __retN temporary must not be matched
@@ -896,6 +990,44 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
         // the inline-expression sentinel (UNEVALUATED_COMPUTATION_USED_AS_
         // VALUE) even though the statement-form emitter handles it exactly
         // as it handles the computed spelling.
+        // PM03 same-cell return (A06): the certified tail fills the donor's
+        // own pool -- old cell to a scalar, then the same-index store -- and
+        // returns it; any realization failure takes the fresh return below,
+        // once, nothing emitted or evaluated before it.
+        let sameCellArm =
+            match retExpr, sameCell with
+            | IRCompute (IRApplyCombinator info), Some cand when not cand.Decided.Value ->
+                cand.Decided.Value <- true
+                match sameCellRealization cand.Proof lets info currentNames stmts with
+                | Error why ->
+                    recordSameCellCpp cand.Subject cand.Proof.Function (Blade.Effects.Declined why) []
+                    None
+                | Ok (dn, (pool, cells, k, old), cell) ->
+                    let i2 = indent + "    "
+                    let i3 = i2 + "    "
+                    let code =
+                        [ $"{indent}// same-cell return (A06, PM03): function v{cand.Proof.Function} donor v{cand.Proof.Donor} -- filled in {dn}'s own pool, each old cell loaded before its same-index store; no result pool"
+                          $"{indent}{{"
+                          $"{i2}double* {pool} = nested_array_utilities::pool_base({dn}.data);"
+                          $"{i2}const size_t {cells} = {cand.Proof.Extent}UL;"
+                          $"{i2}BLADE_IVDEP"
+                          $"{i2}for (size_t {k} = 0; {k} < {cells}; {k}++) {{"
+                          $"{i3}const double {old} = {pool}[{k}];"
+                          $"{i3}{pool}[{k}] = {cell};"
+                          $"{i2}}}"
+                          $"{indent}}}" ]
+                    // The donor's pool leaves with the value (its static
+                    // constexpr extents survive the frame); nothing else owns it.
+                    suppressAllocName dn
+                    recordSameCellCpp cand.Subject cand.Proof.Function Blade.Effects.Applied
+                        [ $"donor v{cand.Proof.Donor} (`{dn}`), the frame's sole tracked dense pool, returned; one pool, no result allocation, no in-callee free"
+                          "old cell loaded into a scalar before the same-index store; the kernel, its operand order and every scalar snapshot unchanged"
+                          "serial; no restricted second access path" ]
+                    Some (stmts @ code @ popAllocScopeFrees indent @ [$"{indent}return {dn};"])
+            | _ -> None
+        match sameCellArm with
+        | Some lines -> lines
+        | None ->
         match retExpr with
         | IRCompute (IRApplyCombinator info) | IRApplyCombinator info ->
             let retVarName = $"__ret{builder.FreshId()}"
@@ -1202,6 +1334,12 @@ or return a scalar and materialize at the call site"
 /// registers into that frame and is freed immediately before the single exit,
 /// unless the escape analysis (or a return-name suppression) spares it.
 and genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, string>) (indent: string) (body: IRExpr) : string list =
+    genFuncBodyWith ctx builder names indent None body
+
+/// genFuncBody with the ordinary function return's same-cell candidate (A06):
+/// only genFuncDefCore passes one; every other body renderer passes None.
+and internal genFuncBodyWith (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, string>) (indent: string)
+                             (sameCell: SameCellCandidate option) (body: IRExpr) : string list =
     // Deep unroll: flatten all nested IRLet chains into a flat list
     let rec deepUnroll (expr: IRExpr) : (IRId * IRExpr) list * IRExpr =
         match expr with
@@ -1304,7 +1442,7 @@ and genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, str
         computeScopeEscapes ctx (FuncScope (if isUnitExpr retExpr then None else Some retExpr)) lets
     let allocDepth = allocScopeDepth ()
     pushAllocScope SFunc escapes
-    try genFuncBodyScoped ctx builder names indent lets retExpr
+    try genFuncBodyScoped ctx builder names indent sameCell lets retExpr
     finally truncateAllocScopeStack allocDepth
 
 // Shadow-stack frames: emission markers and panic-reachability resolution
@@ -1674,6 +1812,24 @@ and private genFuncDefCore (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: 
     // Scratch reuse: the plan's donor for THIS body's return position, read
     // by genFuncBody's return arm; cleared after so no other body sees it.
     Blade.Types.PoolReuseTable.setCurrentReturnDonor (Blade.Types.PoolReuseTable.tryReturnDonor funcDef.Id)
+    // PM03 same-cell return (A06): the shared certificate over THIS original
+    // callable, read only by this ordinary function return (every other body
+    // renderer passes None). An array return with a generic return donor is
+    // the generic path's; any other array return records why it declines.
+    let sameCell =
+        match funcDef.RetType with
+        | ArrayElem _ when (Blade.Types.PoolReuseTable.tryReturnDonor funcDef.Id).IsNone && unforwardableCaptureRefusal.IsNone ->
+            let callables = (IR.currentAnalysisCtx ()).Callables
+            match Blade.SameCellReturn.certify callables (Blade.SameCellReturn.reachesSelf callables) funcDef with
+            | Error why ->
+                recordSameCellCpp funcDef.SourceName funcDef.Id (Blade.Effects.Declined why) []
+                None
+            | Ok proof when proof.Function = funcDef.Id && proof.Body = funcDef.Body ->
+                Some { Proof = proof; Subject = funcDef.SourceName; Decided = ref false }
+            | Ok _ ->
+                recordSameCellCpp funcDef.SourceName funcDef.Id (Blade.Effects.Declined "the certificate belongs to a different function/body") []
+                None
+        | _ -> None
     let bodyStmts =
         try
             match unforwardableCaptureRefusal with
@@ -1682,12 +1838,18 @@ and private genFuncDefCore (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: 
             if funcDef.IsRepro then
                 (Blade.LinAlgPatterns.reproScopeDepth ()).Value <-
                     (Blade.LinAlgPatterns.reproScopeDepth ()).Value + 1
-                try genFuncBody bodyCtx builder bodyNames bodyInd funcDef.Body
+                try genFuncBodyWith bodyCtx builder bodyNames bodyInd sameCell funcDef.Body
                 finally
                     (Blade.LinAlgPatterns.reproScopeDepth ()).Value <-
                         (Blade.LinAlgPatterns.reproScopeDepth ()).Value - 1
-            else genFuncBody bodyCtx builder bodyNames bodyInd funcDef.Body
+            else genFuncBodyWith bodyCtx builder bodyNames bodyInd sameCell funcDef.Body
         finally Blade.Types.PoolReuseTable.setCurrentReturnDonor None
+    // a certified body whose return arm was never reached (an emitted spine
+    // the frame did not render as certified) records its decline here
+    (match sameCell with
+     | Some cand when not cand.Decided.Value ->
+         recordSameCellCpp cand.Subject cand.Proof.Function (Blade.Effects.Declined "the certified return arm was not reached by the emitted body") []
+     | _ -> ())
     // Shadow-stack frame: named as the Blade function so a runtime
     // panic prints a Blade call stack. file/line are nullptr/0 because
     // IRCallable carries no span (adding one touches TypeCheck.fs's IRCallable
