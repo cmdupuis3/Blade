@@ -9507,6 +9507,22 @@ let private fmeWriteSrc =
     + "let mut x: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0]\n"
     + "let s = spread(x)\n"
 
+let private fmeCaptureSrc =
+    "function f(x: T^1) -> T^0 = {\n"
+    + "    let c = x + 1.0\n"
+    + "    reduce(method_for(zip(c, c)) <@> lambda(a, b) -> a + reduce(method_for(0..2) <@> lambda(t) -> b + Float64(t), (+)), (+))\n"
+    + "}\n"
+    + "let s = f([1.0, 2.0, 3.0])\n"
+
+let private fmeReproSrc =
+    "type I = Idx<5>\n"
+    + "function spread(a: Array<Float64 like I>) where repro -> Float64 = {\n"
+    + "    let m = reduce(a, (+)) / 5.0\n"
+    + "    let c = a - m\n"
+    + "    reduce(c * c, (+)) / 5.0\n"
+    + "}\n"
+    + "let s = spread([1.0, 2.0, 4.0, 8.0, 16.0])\n"
+
 let private fmeCppAllocCase (name: string) (src: string) (fn: string) (wantOn: int -> bool) (wantOff: int -> bool) (describe: string) =
     match cppOfSource name src, withGate "BLADE_FOLD_MAP_ELIDE" "0" (fun () -> cppOfSource name src) with
     | Ok on, Ok off ->
@@ -9548,8 +9564,15 @@ let private foldMapElisionCases () : bool list =
           (fun d -> d.Subject.StartsWith "spread." && applied d
                     && d.Evidence |> List.exists (fun e -> e.Contains "read at 2 operand positions of one co-iteration: collapsed to one")
                     && d.Evidence |> List.exists (fun e -> e.StartsWith "legality: ")
-                    && d.Evidence |> List.exists (fun e -> e.StartsWith "cost: "))
-          "applied, the duplicate operand positions collapsed, with legality and cost lines"
+                    && d.Evidence |> List.exists (fun e -> e.StartsWith "cost: " && not (e.StartsWith "cost: not priced")))
+          "applied, the duplicate operand positions collapsed, with legality and a PRICED cost line (the minted kernel resolves)"
+      decisionCase "decision_fold_map_elision_declined_captured_param" fmeCaptureSrc "fold-map-elision"
+          (fun d -> d.Subject.StartsWith "f." && declinedMentioning "captures one of its cell parameters" d)
+          "declined: a nested callable captures the map kernel's cell parameter"
+      withGate "BLADE_FP_REPRO" "0" (fun () ->
+          decisionCase "decision_fold_map_elision_declined_repro_region" fmeReproSrc "fold-map-elision"
+              (fun d -> d.Subject.StartsWith "spread." && declinedMentioning "where repro" d)
+              "declined: a where repro region keeps its maps as written")
       decisionCase "decision_fold_map_elision_declined_write_between" fmeWriteSrc "fold-map-elision"
           (fun d -> d.Subject.StartsWith "spread." && declinedMentioning "may write between the compute and its consumer" d)
           "declined: a write between the compute and its fold"

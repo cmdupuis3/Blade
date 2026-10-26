@@ -1,0 +1,14 @@
+// TEST: Fold-Map Elision Declines A Map Kernel Whose Parameter Is Captured
+// ============================================================================
+// The fold's map `zip(c, c)` has a kernel whose SECOND cell parameter `b` is
+// captured by a nested map inside it. Collapsing the two positions (and fusion
+// after it) renames the parameters, so the lifted nested callable would keep
+// naming a parameter that no longer exists: the fold-of-map consumer declines
+// and c stays stored (Codex review of PM12, finding 1).
+function f(x: T^1) -> T^0 = {
+    let c = x + 1.0
+    reduce(method_for(zip(c, c)) <@> lambda(a, b) ->
+        a + reduce(method_for(0..2) <@> lambda(t) -> b + Float64(t), (+)), (+))
+}
+let s = f([1.0, 2.0, 3.0])
+// EXPECT: s = 30.0

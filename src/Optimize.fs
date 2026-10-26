@@ -10499,7 +10499,11 @@ let recordPendingElision (rule: string) (subject: string) (outcome: Blade.Effect
 
 /// A MAP-consumer elision, recorded once elementwise fusion has run: applied
 /// iff no application of the host kernel still carries a computed operand.
-type ComputeElisionPending = { PendingRule: string; PendingSubject: string; HostKernel: IRId; PendingEvidence: string list }
+type ComputeElisionPending = { PendingRule: string; PendingSubject: string; HostKernel: IRId; PendingEvidence: string list
+                               /// fold-map elision: the PRODUCER's kernel -- the record is applied only
+                               /// when no computed operand over it survives fusion (a host whose other
+                               /// operand fused may get a new id while this producer stays unspliced)
+                               SplicedKernel: IRId option }
 
 let elideSingleConsumerComputesModule (builder: IRBuilder) (programFuncs: IRCallable list) (singleModule: bool) (modul: IRModule) : IRModule * ComputeElisionPending list =
     if modul.Functions |> List.exists (fun f -> f.IsCudaKernel) then (modul, []) else
@@ -10650,7 +10654,7 @@ let elideSingleConsumerComputesModule (builder: IRBuilder) (programFuncs: IRCall
         let ps = keepIdx hk.Params |> List.mapi (fun i p -> { p with Index = i })
         let lam =
             { mkLambdaCallable builder ps body hk.RetType hk.Captures false [] [] false false 256 false
-                with SourceName = hk.SourceName }
+                with SourceName = hk.SourceName; IsRepro = hk.IsRepro }
         let kv = IRVar (lam.Id, IRTArrow (ps |> List.map (fun p -> SVal p.Type), hk.RetType, None))
         let arrays = keepIdx h.Arrays
         let single = arrays.Length = 1
@@ -10913,7 +10917,7 @@ let elideSingleConsumerComputesModule (builder: IRBuilder) (programFuncs: IRCall
                         if not enabled then decline "disabled by BLADE_COMPUTE_ELIDE" ev
                         else
                             let hkId = match h.Kernel with IRVar (kid, _) -> kid | _ -> -1
-                            pending.Add { PendingRule = "compute-elision"; PendingSubject = subj; HostKernel = hkId; PendingEvidence = ev }
+                            pending.Add { PendingRule = "compute-elision"; PendingSubject = subj; HostKernel = hkId; PendingEvidence = ev; SplicedKernel = None }
                             dropped.Add i |> ignore
                             let v' = IRCompute (IRApplyCombinator h')
                             match at with
@@ -10934,6 +10938,28 @@ let elideSingleConsumerComputesModule (builder: IRBuilder) (programFuncs: IRCall
                             if not (tilePlainInfo h) then Error "the fold's map is not a plain dense map or co-iteration"
                             elif not (tilePlainKernel hk h.Arrays.Length) then Error "the fold's map kernel declares symmetry, a parallel strategy or arity polymorphism"
                             elif not (tilePureBody resolver Set.empty hk.Body) then Error "the fold's map kernel is not repeatable"
+                            // the minted kernels (the collapse's, fusion's) do not carry a
+                            // repro policy: a strict region keeps its maps as written
+                            elif regionRepro.Value || hk.IsRepro then Error "a `where repro` region (v1: the collapsed and fused map kernels would not carry the repro policy)"
+                            // a lifted callable reachable from the map kernel that CAPTURES
+                            // one of its parameters (a nested map over `b`) would keep
+                            // naming a parameter the collapse (or fusion) removes
+                            elif (let pids = hk.Params |> List.map (fun q -> q.VarId) |> Set.ofList
+                                  let rec reach (seen: Set<IRId>) (e: IRExpr) : bool =
+                                      let hit = ref false
+                                      iterIRExpr (fun n ->
+                                          if not hit.Value then
+                                              match n with
+                                              | IRVar (cid, _) when not (seen.Contains cid) ->
+                                                  match resolver.TryGetValue cid with
+                                                  | true, cc ->
+                                                      if cc.Captures |> List.exists (fun cap -> pids.Contains cap.Id) then hit.Value <- true
+                                                      elif reach (seen.Add cid) cc.Body then hit.Value <- true
+                                                  | _ -> ()
+                                              | _ -> ()) e
+                                      hit.Value
+                                  reach (Set.singleton hk.Id) hk.Body) then
+                                Error "a lifted callable reachable from the fold's map kernel captures one of its cell parameters (the collapse and fusion rename those parameters)"
                             elif (match pk with Some pkc -> not (tilePureBody resolver Set.empty pkc.Body) | None -> true) then Error "the producer kernel is not repeatable"
                             else
                             match collapseOperand xid h hk with
@@ -10961,7 +10987,12 @@ let elideSingleConsumerComputesModule (builder: IRBuilder) (programFuncs: IRCall
                                 | _ -> ()) sv
                             k
                         let stored (e: IRExpr) = match e with IRVar (id, _) when id = xid -> Some xn | _ -> Blade.CostModel.storedArrayName costNameOf e
-                        let costLine = Blade.CostModel.foldMapElisionLine resolve costNameOf stored stored xn p h h' (foldKernel |> Option.bind resolve)
+                        // the pricing resolver must see the collapsed kernel it mints
+                        let resolveMinted (k: IRExpr) =
+                            match k, minted with
+                            | IRVar (kid, _), Some lam when kid = lam.Id -> Some lam
+                            | _ -> resolve k
+                        let costLine = Blade.CostModel.foldMapElisionLine resolveMinted costNameOf stored stored xn p h h' (foldKernel |> Option.bind resolve)
                         let ev =
                             [ "single consumer: the operand map of one fold in its statement (the fold node -- kernel, seed, extent -- is kept as written)" ]
                             @ (if collapsed > 0 then [ $"`{xn}` read at {collapsed + 1} operand positions of one co-iteration: collapsed to one (the same stored cell at the same coordinate), so the producer runs once per cell" ] else [])
@@ -10973,7 +11004,8 @@ let elideSingleConsumerComputesModule (builder: IRBuilder) (programFuncs: IRCall
                         else
                             minted |> Option.iter mintedKernels.Add
                             let hkId = match h'.Kernel with IRVar (kid, _) -> kid | _ -> -1
-                            pending.Add { PendingRule = "fold-map-elision"; PendingSubject = subj; HostKernel = hkId; PendingEvidence = ev }
+                            let producerKernel = match p.Kernel with IRVar (kid, _) -> Some kid | _ -> None
+                            pending.Add { PendingRule = "fold-map-elision"; PendingSubject = subj; HostKernel = hkId; PendingEvidence = ev; SplicedKernel = producerKernel }
                             dropped.Add i |> ignore
                             let rebuild (op: IRExpr) =
                                 match op with
@@ -11048,6 +11080,8 @@ let elideSingleConsumerComputesModule (builder: IRBuilder) (programFuncs: IRCall
 let recordComputeElisionMapOutcomes (pending: ComputeElisionPending list) (modul: IRModule) : unit =
     if not pending.IsEmpty then
         let unfused = System.Collections.Generic.HashSet<IRId>()
+        // the kernels of the computed OPERANDS still standing (unspliced producers)
+        let unspliced = System.Collections.Generic.HashSet<IRId>()
         let scan (e: IRExpr) =
             iterIRExpr (fun n ->
                 match n with
@@ -11056,11 +11090,16 @@ let recordComputeElisionMapOutcomes (pending: ComputeElisionPending list) (modul
                      | IRVar (kid, _) when info.Arrays |> List.exists (function IRCompute (IRApplyCombinator _) -> true | _ -> false) ->
                          unfused.Add kid |> ignore
                      | _ -> ())
+                    for a in info.Arrays do
+                        match a with
+                        | IRCompute (IRApplyCombinator q) ->
+                            (match q.Kernel with IRVar (qk, _) -> unspliced.Add qk |> ignore | _ -> ())
+                        | _ -> ()
                 | _ -> ()) e
         for f in modul.Functions do scan f.Body
         for b in modul.Bindings do scan b.Value
         for p in pending do
-            if unfused.Contains p.HostKernel then
+            if unfused.Contains p.HostKernel || (match p.SplicedKernel with Some pk -> unspliced.Contains pk | None -> false) then
                 // the cost line priced the FUSED form, which was not realized
                 let evidence =
                     p.PendingEvidence |> List.collect (fun e ->
@@ -11629,7 +11668,7 @@ let elideCallsModule (builder: IRBuilder) (programFuncs: IRCallable list) (modul
                 if not enabled then decline "disabled by BLADE_CALL_ELIDE" ev
                 else
                     let hkId = match h.Kernel with IRVar (kid, _) -> kid | _ -> -1
-                    pending.Add { PendingRule = "call-elision"; PendingSubject = subject; HostKernel = hkId; PendingEvidence = ev }
+                    pending.Add { PendingRule = "call-elision"; PendingSubject = subject; HostKernel = hkId; PendingEvidence = ev; SplicedKernel = None }
                     commit (IRCompute (IRApplyCombinator h'))
 
     // A fold whose call is KEPT (declined, or the gate off) still evaluates
