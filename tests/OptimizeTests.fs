@@ -5460,7 +5460,19 @@ let private pm60RuntimeShapeReuse () =
       decline "memfree/045_runtime_shape_pool_reuse_two_index_types.blade" "two_axes" "no candidate pool is both dead and unaliased"
       decline "memfree/046_runtime_shape_pool_reuse_anonymous_ranges.blade" "ramp2" "an operand is not an immutable array parameter"
       decline "memfree/047_runtime_shape_pool_reuse_shared_index_param.blade" "g" "no candidate pool is both dead and unaliased"
-      decline "memfree/048_runtime_shape_pool_reuse_call_result_declines.blade" "probe" "an operand is not an immutable array parameter" ]
+      decline "memfree/048_runtime_shape_pool_reuse_call_result_declines.blade" "probe" "an operand is not an immutable array parameter"
+      // review PM60-2: a zip of one provenance pairs too
+      (let name = "pool_reuse_runtime_shapes_zip_coiteration"
+       match corpusSource "memfree/049_runtime_shape_pool_reuse_zip_coiteration.blade" with
+       | Error e -> resultLine Fail name e; false
+       | Ok src ->
+       match emit null src with
+       | (Ok on, ds) ->
+           let applied = ds |> List.exists (fun d -> d.Subject = "zips" && d.Outcome = Blade.Effects.Applied && (d.Evidence |> List.exists (fun e -> e.Contains "run-time shape [extents(param v")))
+           if applied && on.Contains "pool reuse:" && on.Contains "internal: run-time scratch reuse over unequal extents" then
+               resultLine Pass name "a zip map over a parameter and its keyed map takes the dead zip's pool, guarded"; true
+           else resultLine Fail name (sprintf "applied=%b alias=%b" applied (on.Contains "pool reuse:")); false
+       | (Error e, _) -> resultLine Fail name e; false) ]
 
 /// KERNEL-INVARIANT HOISTING (Blade.Optimize.hoistKernelInvariantsModule).
 /// `x - avg(x)` is `method_for(x) <@> lambda(e) -> e - avg(x) |> compute`,

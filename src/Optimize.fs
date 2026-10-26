@@ -731,12 +731,16 @@ let planPoolReuse (modul: IRModule) : unit =
         let provenanceKey (v: IRExpr) (rank: int) : Result<string, string> =
             match collapse v with
             | IRCompute (IRApplyCombinator info) | IRApplyCombinator info ->
+                // one operand (no shared axes), or a co-iteration (zip) whose
+                // shared axes are exactly the output's plain axes (review PM60-2)
                 let pointwise =
                     info.KernelInputRanks |> List.forall (fun r -> r = 0)
-                    && info.SharedIndexTypes.IsEmpty && info.KernelTDims.IsEmpty
+                    && info.KernelTDims.IsEmpty
                     && not info.HasReynolds
                     && info.ArrayTypes |> List.forall (fun at -> at.IndexTypes.Length = rank)
-                    && (info.Arrays.Length = 1 || info.IsCoIteration)
+                    && ((info.Arrays.Length = 1 && info.SharedIndexTypes.IsEmpty)
+                        || (info.IsCoIteration && info.SharedIndexTypes.Length = rank
+                            && info.SharedIndexTypes |> List.forall (fun ix -> ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank = 1 && ix.Dependencies.IsEmpty)))
                 if not pointwise then Error "the producer is not a pointwise map of its operands (its extents are not an operand's)"
                 else
                     let keyOf (op: IRExpr) =
