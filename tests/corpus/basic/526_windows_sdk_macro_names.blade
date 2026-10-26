@@ -1,0 +1,31 @@
+// TEST: Windows SDK Macro And Typedef Names Are Ordinary Bindings
+// Every generated program includes blade_run_record.hpp. When that header
+// pulled in <libloaderapi.h> (round 4), minwindef.h / winnt.h leaked macros
+// (IN, OUT, OPTIONAL, CONST, DELETE, TRUE, FALSE, far, near, pascal) and
+// typedefs (INT, BOOL, DWORD) into user code, so these plain Blade names
+// expanded or collided and g++ rejected the program (BL9002).
+type INT = Idx<3>
+let IN = 2.0
+let OUT = IN * 3.0
+let OPTIONAL = OUT + 1.0
+let CONST = [1.0, 2.0, 4.0]
+let DELETE = reduce(CONST, (+))
+let TRUE = 5
+let FALSE = TRUE - 1
+let far = 0.5
+let near = far * 2.0
+let pascal = near + OPTIONAL
+let BOOL = method_for(range<INT>) <@> lambda(i) -> Float64(i) * far |> compute
+let DWORD = reduce(BOOL, (+))
+// EXPECT: IN = 2.0
+// EXPECT: OUT = 6.0
+// EXPECT: OPTIONAL = 7.0
+// EXPECT: CONST = [1.0, 2.0, 4.0]
+// EXPECT: DELETE = 7.0
+// EXPECT: TRUE = 5
+// EXPECT: FALSE = 4
+// EXPECT: far = 0.5
+// EXPECT: near = 1.0
+// EXPECT: pascal = 8.0
+// EXPECT: BOOL = [0.0, 0.5, 1.0]
+// EXPECT: DWORD = 1.5

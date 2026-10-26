@@ -969,6 +969,9 @@ and private Ctx =
       /// bindings ITS value names too (the C++ lane's `forceDeferredArrayInput`
       /// recursion), and each of those then prints.
       mutable BindingValues: Map<IRId, IRExpr>
+      /// A LOCAL array let bound to a still-deferred producer -> that producer's IR,
+      /// so applyToArr can audit it before keeping its rows streaming.
+      DeferredLetValues: Dictionary<IRId, IRExpr>
       /// Each virtual domain map's kernel body, keyed by its AVirt producer
       /// closure (by reference): what a fold over it hands domainFoldOrder, the
       /// order decision the C++ lane and `blade plan` share.
@@ -1112,6 +1115,7 @@ let private newCtx (callables: Map<IRId, IRCallable>) (facts: ModuleFacts) =
       TupleSlots = Dictionary()
       Forced = HashSet()
       BindingValues = Map.empty
+      DeferredLetValues = Dictionary()
       DomainMapBodies = Dictionary(HashIdentity.Reference)
       Inlining = HashSet()
       ModuleReads = Dictionary()
@@ -2807,6 +2811,7 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
                           refuse "a function rebinding a whole module-level array"
                       let a = if published then materialize c (emitArr c value) else emitArr c value
                       bindArray c id "" a
+                      c.DeferredLetValues.Remove id |> ignore
                       (match a.Src with
                        | APool p when c.PoolScopes |> Seq.exists (fun s -> s.KnownIds.Contains id) ->
                            keepPool c p
@@ -4267,6 +4272,9 @@ and private bindNamed (c: Ctx) (id: IRId) (name: string) (declTy: IRType) (value
             | (IRVar _ | IRParam _), APool _ -> copyArr c a
             | _ -> a
         bindArray c id name stored
+        (match stored.Src with
+         | AVirt _ | AVirtFlat _ -> c.DeferredLetValues.[id] <- value
+         | _ -> c.DeferredLetValues.Remove id |> ignore)
     | VTuple vs -> c.TupleSlots.[id] <- vs
     | VScalar v ->
         if v.Ty <> ScVoid then
@@ -6258,12 +6266,49 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
                     refuse "an apply whose array input rank names a scalar kernel parameter"
                 | _ -> ()
                 remaining > 0)
+    // Forcing a row operand matters only where the interleaving it prevents
+    // could be OBSERVED: a producer that may panic or write, or a consuming
+    // apply that writes. A closed-total, write-free scalar-cell producer over
+    // stored operands, consumed by a write-free apply, keeps its AVirt row
+    // views (one pass, no pool -- the pre-round-4 route): each cell is
+    // evaluated once, in row order, and no program can tell when. Anything
+    // unproved -- a producer this lane cannot see (a function-local deferred
+    // let), a Reynolds kernel, a deferred operand of the producer -- is forced.
+    let isDeferredId (id: IRId) =
+        match c.ArrSlots.TryGetValue id with
+        | true, v -> (match v.Src with AVirt _ | AVirtFlat _ -> true | _ -> false)
+        | _ -> false
+    let consumerWrites = lazy (Blade.CodeGenExprSupport.exprMayWriteIn c.BindingValues (IRApplyCombinator info))
+    let deferredValue (id: IRId) =
+        if not (isDeferredId id) then None
+        else
+            match Map.tryFind id c.BindingValues with
+            | Some v -> Some v
+            | None -> (match c.DeferredLetValues.TryGetValue id with | true, v -> Some v | _ -> None)
+    let streamRow (a: IRExpr) =
+        let producer =
+            match a with
+            | IRVar (id, _) -> deferredValue id
+            | e -> Some e
+        match producer with
+        | Some (IRApplyCombinator p) when not p.HasReynolds && p.KernelOutputRank = 0 ->
+            let storedOperand = function
+                | IRRange _ | IRVirtualReverse _ -> true
+                | IRVar (id, ty) -> not (isDeferredId id) && (match Blade.IR.stripUnits ty with ArrayElem at -> not at.IsVirtual | _ -> false)
+                | _ -> false
+            let res (k: IRExpr) = Blade.IR.resolveKernel k |> Option.map (fun r -> r.Callable)
+            let dOf (id: IRId) = deferredValue id
+            List.forall storedOperand p.Arrays
+            && (match Blade.IRTotality.auditApply res dOf isDeferredId p with Ok () -> true | Error _ -> false)
+            && not (Blade.CodeGenExprSupport.exprMayWriteIn c.BindingValues (IRApplyCombinator p))
+            && not consumerWrites.Value
+        | _ -> false
     let operands =
         info.Arrays |> List.mapi (fun pos a ->
             match a with
             | IRRange _ | IRVirtualReverse _ -> None
             | _ ->
-                let value = if rowOperands.[pos] then materializeExpr c a else emitArr c a
+                let value = if rowOperands.[pos] && not (streamRow a) then materializeExpr c a else emitArr c a
                 let sourceRank =
                     match Blade.IR.stripUnits (typeOf a) with
                     | ArrayElem at -> at.IndexTypes |> List.sumBy _.Rank

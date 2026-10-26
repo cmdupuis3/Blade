@@ -44,9 +44,14 @@
 // pulls no <filesystem>, <chrono>, <string> or <windows.h>, and the writer is
 // cold C stdio code -- a std::string-building writer cost g++ ~0.4 s of -O3
 // per program (measured on a two-line program: 1.15 s vs 0.76 s). File
-// observation is POSIX/MinGW stat(); the executable's own path uses the
-// narrow Win32 loader API header or /proc/self/exe. Use the SDK's declaration
-// so both include orders with other Win32 runtime headers agree on HMODULE.
+// observation is POSIX/MinGW stat(); the executable's own path is one
+// declared Win32 entry point or /proc/self/exe. The declaration is written by
+// hand, NOT taken from an SDK header: <libloaderapi.h> drags minwindef.h /
+// winnt.h into every program, whose macros (IN, OUT, DELETE, TRUE, far, ...)
+// and typedefs (INT, BOOL, DWORD, ...) collide with Blade names. Its parameter
+// type is the SDK's own HMODULE (struct HINSTANCE__* under STRICT, the SDK
+// default; void* under NO_STRICT), so it redeclares the same function as the
+// private spool's <windows.h> in either include order.
 #pragma once
 #if !defined(__CUDA_ARCH__)
 #include <atomic>
@@ -59,31 +64,12 @@
 #include <sys/stat.h>
 #include "blade_runtime.hpp"
 #if defined(_WIN32)
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-// The SDK's legacy memory/calling-convention macros are not Blade names.
-// Preserve even a caller-defined value; do not leak newly defined macros.
-#pragma push_macro("far")
-#pragma push_macro("near")
-#pragma push_macro("pascal")
-// A previous narrow SDK include may have set minwindef's include guard.
-// Supply its exact legacy definitions while parsing any remaining SDK headers;
-// caller sentinels must not enter the SDK even when that guard is already set.
-#undef far
-#undef near
-#undef pascal
-#define far
-#define near
-#if defined(_ARM_)
-#define pascal
+#if defined(NO_STRICT)
+extern "C" __declspec(dllimport) unsigned long __stdcall GetModuleFileNameA(void* module, char* out, unsigned long size);
 #else
-#define pascal __stdcall
+struct HINSTANCE__;
+extern "C" __declspec(dllimport) unsigned long __stdcall GetModuleFileNameA(HINSTANCE__* module, char* out, unsigned long size);
 #endif
-#include <libloaderapi.h>
-#pragma pop_macro("pascal")
-#pragma pop_macro("near")
-#pragma pop_macro("far")
 #else
 #include <unistd.h>
 #endif

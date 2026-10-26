@@ -1435,8 +1435,12 @@ let private partialRowsEmission () =
 
 let private partialRowsLlvm () =
     withPartialRows (fun () ->
-        // L1 restores method_for's row-input forcing boundary in LLVM.
-        // C02 safely removes that pool ON; the corrected OFF reference has it.
+        // L1 restores method_for's row-input forcing boundary in LLVM, but only
+        // where it is observable: this producer (`v * v + 1.0`) is closed-total
+        // and write-free and the row fold writes nothing, so the OFF reference
+        // streams its rows with no intermediate pool, as before round 4 (a
+        // forced pool here measured 1.8x slower and 2x the peak memory).
+        // C02 removes the pool ON. A DEMANDED named matrix keeps it either way.
         let route name src demanded =
             let emit gate = withGate "BLADE_FUSION" gate (fun () ->
                 match lower src with Error e -> Error e | Ok ir -> EmitLlvm.tryEmitProgramNamed name ir)
@@ -1448,7 +1452,7 @@ let private partialRowsLlvm () =
                         [ for m in matches @"(%r\d+) = call ptr @blade_alloc_cells\(i64 (\d+), i64 (\d+)\)" do
                             yield (m.Groups.[1].Value, m.Groups.[2].Value + "x" + m.Groups.[3].Value) ]
                     let layouts = pools |> List.map snd
-                    let expected = if demanded || label = "OFF" then ["6x8"; "6x8"; "2x8"] else ["6x8"; "2x8"]
+                    let expected = if demanded then ["6x8"; "6x8"; "2x8"] else ["6x8"; "2x8"]
                     let calls = (matches @"call ptr @blade_alloc_cells\(").Count
                     let description = $"{label}: calls={calls}, layouts={layouts}"
                     // Limit dataflow checks to evaluation, before printing can
@@ -1486,10 +1490,10 @@ let private partialRowsLlvm () =
                       ($"required prints ({description})", printed "M = [" false && printed "rows = [" false
                           && (not demanded || (printed "P = [" false && printed "sample" true)));
                       ($"serial graph ({description})", not (s.Contains "fadd reassoc") && not (s.Contains "fmul reassoc")) ]
-                checkAll name ll "C02 streams ON; L1 restores the full row-input boundary OFF; demanded P stays stored"
+                checkAll name ll "C02 streams ON; OFF streams the total producer too; demanded P stays stored"
                     (audit "ON" ll @ audit "OFF" old)
             | a, b -> resultLine Fail name ($"ON={a}; OFF={b}"); false
-        [ route "partial_rows_llvm_C02_two_pools_vs_L1_corrected_three_pool_reference" partialRowsSrc false;
+        [ route "partial_rows_llvm_two_pools_on_and_off_for_a_total_producer" partialRowsSrc false;
           route "partial_rows_llvm_demanded_P_keeps_three_required_allocations" partialRowsNamedSrc true ])
 
 let private partialRowsMetadata () =
@@ -1550,6 +1554,10 @@ let private partialRowsLlvmInputBoundary () =
         + "    let first_rows = reduce(P, (+), 7.0)\n"
         + "    let second_rows = reduce(P, (+), -7.0)\n"
         + "    (reduce(first_rows, (+), 0.0), reduce(second_rows, (+), 0.0))\n}\n"
+    let panicking =
+        "type R = Idx<2>\ntype C = Idx<3>\n"
+        + "let M: Array<Int64 like R, C> = [[1, 2, 3], [4, 5, 6]]\n"
+        + "let rows = reduce(method_for(M) <@> lambda(v: Int64) -> 100 / v, (+), 0)\n"
     let scalarMap = prologue + "let P = method_for(M) <@> lambda(v: Float64) -> v * v + 1.0 |> compute\n"
     let scalarTerminal =
         "let x = [1.0, 2.0, 3.0]\nlet total = reduce(method_for(x) <@> lambda(v: Float64) -> v * v + 1.0, (+), 7.0)\n"
@@ -1573,7 +1581,10 @@ let private partialRowsLlvmInputBoundary () =
     let controls: (string * string * string list) list =
         [ ("stored_row_input_no_copy", stored, ["6x8"; "2x8"]);
           ("packed_record_row_has_two_axes_one_input_rank", packedStored, ["12x8"; "2x8"]);
-          ("shared_named_input_forced_once", shared, ["6x8"; "6x8"; "2x8"; "2x8"]);
+          // A total, write-free deferred P streams into each of its two row folds (no shared pool).
+          ("shared_total_named_input_streams", shared, ["6x8"; "2x8"; "2x8"]);
+          // A producer that may panic (integer `/`) keeps the forced row input.
+          ("panicking_producer_row_input_forced", panicking, ["6x8"; "6x8"; "2x8"]);
           ("scalar_input_map_unchanged", scalarMap, ["6x8"; "6x8"]);
           ("rank1_direct_scalar_terminal_unchanged", scalarTerminal, ["3x8"]);
           ("rank2_full_fold_materialized_desugar", rankTwoMaterialized, ["6x8"; "6x8"]);
@@ -1587,7 +1598,7 @@ let private partialRowsLlvmInputBoundary () =
                 | Error e -> resultLine Fail name e; false
                 | Ok (ll, ir) ->
                     let actual = layouts ll
-                    let privateOutput = suffix <> "shared_named_input_forced_once" || (not (ll.Contains "P = [") && ll.Contains "totals")
+                    let privateOutput = suffix <> "shared_total_named_input_streams" || (not (ll.Contains "P = [") && ll.Contains "totals")
                     let mutable fused = false
                     let mutable serialNest = false
                     let mapped = System.Collections.Generic.HashSet<int>()
@@ -7257,26 +7268,39 @@ module private Pm07Decompact =
                 | None -> resultLine Fail name "the pre-existing rank-two materializer refused"; yield false
                 | Some (lines, allocs) ->
                     let cpp = String.concat "\n" lines
-                    let diagonalStore = "pm07_out[__dcz0][__dcz0] = 0;"
                     let fullStore = "pm07_out[__dcz0][__dcz1] = 0;"
-                    let initAt = cpp.IndexOf (if diagonal then diagonalStore else fullStore)
-                    let scatterAt = cpp.IndexOf "for (size_t __dcpm07_out_a = 0;"
-                    let copyAt = cpp.IndexOf "pm07_out[__dci][__dcj] = "
-                    let negateAt = cpp.IndexOf "pm07_out[__dcj][__dci] = -("
                     let ownership =
                         match allocs with
                         | [Blade.CodeGenState.MatPool (n, e, 2, "nullptr", None, owned)] ->
                             let expectedOwned = if tag = "dynamic_fallback" then Some "pm07_out_extents" else None
                             n = "pm07_out" && e = elem && owned = expectedOwned
                         | _ -> false
+                    // Admitted: the row-wise gather (each dense cell written once,
+                    // row by row: negated lower half, +0 diagonal, upper half).
+                    // Fallback: the full zero grid, then the paired strict scatter.
+                    let lowerStore = "pm07_out[__dcpm07_out_a][__dcpm07_out_b] = -(pm07_src[__dcpm07_out_b][__dcpm07_out_a - __dcpm07_out_b - 1]);"
+                    let diagStore = "pm07_out[__dcpm07_out_a][__dcpm07_out_a] = 0;"
+                    let upperStore = "pm07_out[__dcpm07_out_a][__dcpm07_out_b] = pm07_src[__dcpm07_out_a][__dcpm07_out_b - __dcpm07_out_a - 1];"
+                    let routeChecks =
+                        if diagonal then
+                            let lo, dg, up = cpp.IndexOf lowerStore, cpp.IndexOf diagStore, cpp.IndexOf upperStore
+                            [ "admitted case gathers rows: negated lower half, +0 diagonal, upper half, in that order", lo >= 0 && dg > lo && up > dg
+                              "lower half bounded by the diagonal", cpp.Contains "for (size_t __dcpm07_out_b = 0; __dcpm07_out_b < __dcpm07_out_a; __dcpm07_out_b++)"
+                              "upper half starts after the diagonal", cpp.Contains "for (size_t __dcpm07_out_b = __dcpm07_out_a + 1; __dcpm07_out_b < "
+                              "no zero-fill and no paired scatter", not (cpp.Contains "__dcz0") && not (cpp.Contains "__dci") ]
+                        else
+                            let initAt = cpp.IndexOf fullStore
+                            let scatterAt = cpp.IndexOf "for (size_t __dcpm07_out_a = 0;"
+                            let copyAt = cpp.IndexOf "pm07_out[__dci][__dcj] = "
+                            let negateAt = cpp.IndexOf "pm07_out[__dcj][__dci] = -("
+                            [ "exact full-grid fallback retained", cpp.Contains fullStore && cpp.Contains "for (size_t __dcz1 = 0;"
+                              "no gather on a fallback", not (cpp.Contains diagStore)
+                              "initialization precedes original paired scatter", initAt >= 0 && scatterAt > initAt && copyAt > scatterAt && negateAt > copyAt
+                              "strict-pair bounds/order retained", cpp.Contains "__dcpm07_out_b + 1 < " && cpp.Contains " - __dcpm07_out_a; __dcpm07_out_b++)" && cpp.Contains "size_t __dci = __dcpm07_out_a; size_t __dcj = __dcpm07_out_a + __dcpm07_out_b + 1;"
+                              "stored payload copy and unary negation retained", sourceKind = "conditional" || (cpp.Contains "pm07_out[__dci][__dcj] = pm07_src[__dcpm07_out_a][__dcpm07_out_b];" && cpp.Contains "pm07_out[__dcj][__dci] = -(pm07_src[__dcpm07_out_a][__dcpm07_out_b]);") ]
                     let checks =
-                        [ "only admitted cases select diagonal initialization", cpp.Contains diagonalStore = diagonal
-                          "exact full-grid fallback retained", cpp.Contains fullStore = not diagonal
-                          "inner zero loop absent only on admitted cases", cpp.Contains "for (size_t __dcz1 = 0;" = not diagonal
-                          "initialization precedes original paired scatter", initAt >= 0 && scatterAt > initAt && copyAt > scatterAt && negateAt > copyAt
-                          "strict-pair bounds/order retained", cpp.Contains "__dcpm07_out_b + 1 < " && cpp.Contains " - __dcpm07_out_a; __dcpm07_out_b++)" && cpp.Contains "size_t __dci = __dcpm07_out_a; size_t __dcj = __dcpm07_out_a + __dcpm07_out_b + 1;"
-                          "stored payload copy and unary negation retained", sourceKind = "conditional" || (cpp.Contains "pm07_out[__dci][__dcj] = pm07_src[__dcpm07_out_a][__dcpm07_out_b];" && cpp.Contains "pm07_out[__dcj][__dci] = -(pm07_src[__dcpm07_out_a][__dcpm07_out_b]);")
-                          "destination allocation and ownership retained", cpp.Contains ($"allocate<typename promote<{elem}, 2>::type, nullptr>(pm07_out_extents)") && ownership ]
+                        routeChecks
+                        @ [ "destination allocation and ownership retained", cpp.Contains ($"allocate<typename promote<{elem}, 2>::type, nullptr>(pm07_out_extents)") && ownership ]
                     let bad = checks |> List.filter (snd >> not) |> List.map fst
                     let ok = bad.IsEmpty
                     resultLine (if ok then Pass else Fail) name (if ok then "initialization route, strict-pair order and destination ownership" else String.concat "; " bad)
@@ -7298,7 +7322,7 @@ module private Pm07Decompact =
                 match withGate "BLADE_PRINT" "anti,result" (fun () -> cppOfSource name src) with
                 | Error e -> resultLine Fail name e; yield false
                 | Ok cpp ->
-                    let diag = cpp.Contains "result[__dcz0][__dcz0] = 0;"
+                    let diag = cpp.Contains "result[__dcresult_a][__dcresult_a] = 0;"
                     let grid = cpp.Contains "result[__dcz0][__dcz1] = 0;"
                     let ok = diag = diagonal && grid = not diagonal && cpp.Contains "\"anti = [\"" && cpp.Contains "\"result = [\""
                     resultLine (if ok then Pass else Fail) name (if ok then "correct initialization route with anti and full result print paths" else "wrong initialization or missing required full output")

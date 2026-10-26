@@ -3023,11 +3023,10 @@ and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
                 $"Array<{elemTypeStr}, 2> {varName} = {{ allocate<typename promote<{elemTypeStr}, 2>::type, nullptr>({extentsName}), {extentsName} }};"
             let a = $"__dc{varName}_a"
             let b = $"__dc{varName}_b"
-            let zeroFill =
+            let useGather =
                 // A sole static positive F64 group has exactly one strict
-                // pair (a,b) for every i<j. The unchanged scatter below writes
-                // both off-diagonal images once, so only the diagonal needs
-                // initialization. A stored name is not a fresh-ownership claim:
+                // pair (a,b) for every i<j, so a gather over the dense rows
+                // writes every cell exactly once and needs no zero-fill. A stored name is not a fresh-ownership claim:
                 // the source remains read-only and the destination stays new.
                 let storedSource =
                     match arrExpr with IRVar _ | IRParam _ -> true | _ -> false
@@ -3035,22 +3034,35 @@ and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
                     leadingN = 0 && not arrTy.IsVirtual && storedSource
                     && arrTy.ElemType = IRTScalar ETFloat64
                     && (literalExtentOfArray arrTy 0 |> Option.exists (fun n -> n > 0L))
-                if diagonalOnly then
-                    [ $"for (size_t __dcz0 = 0; __dcz0 < {nExpr}; __dcz0++)"
-                      $"    {varName}[__dcz0][__dcz0] = 0;" ]
-                else
-                    [ $"for (size_t __dcz0 = 0; __dcz0 < {nExpr}; __dcz0++)"
-                      $"    for (size_t __dcz1 = 0; __dcz1 < {nExpr}; __dcz1++)"
-                      $"        {varName}[__dcz0][__dcz1] = 0;" ]
-            let loops =
-                [ $$"""for (size_t {{a}} = 0; {{a}} < {{nExpr}}; {{a}}++) {"""
+                diagonalOnly
+            let scatter =
+                [ $"for (size_t __dcz0 = 0; __dcz0 < {nExpr}; __dcz0++)"
+                  $"    for (size_t __dcz1 = 0; __dcz1 < {nExpr}; __dcz1++)"
+                  $"        {varName}[__dcz0][__dcz1] = 0;"
+                  $$"""for (size_t {{a}} = 0; {{a}} < {{nExpr}}; {{a}}++) {"""
                   $$"""    for (size_t {{b}} = 0; {{b}} + 1 < {{nExpr}} - {{a}}; {{b}}++) {"""
                   $"        size_t __dci = {a}; size_t __dcj = {a} + {b} + 1;"
                   $"        {varName}[__dci][__dcj] = {arrName}[{a}][{b}];"
                   $"        {varName}[__dcj][__dci] = -({arrName}[{a}][{b}]);"
                   "    }"
                   "}" ]
-            Some (extentDecl @ [allocDecl] @ zeroFill @ loops,
+            // Row-wise GATHER, the same values bit for bit (the diagonal +0, the
+            // lower half the negated packed cell, so +0 -> -0 as in the
+            // scatter): each output row is written once, left to right, so a
+            // fresh destination's pages are first touched in order. Skipping
+            // the zero-fill but keeping the scatter (round 4 B08) moved every
+            // first touch into the column-strided mirror store and measured
+            // 12-16% slower at n = 3001; the strided access here is a READ of
+            // the resident packed source instead.
+            let gather =
+                [ $$"""for (size_t {{a}} = 0; {{a}} < {{nExpr}}; {{a}}++) {"""
+                  $$"""    for (size_t {{b}} = 0; {{b}} < {{a}}; {{b}}++)"""
+                  $"        {varName}[{a}][{b}] = -({arrName}[{b}][{a} - {b} - 1]);"
+                  $"    {varName}[{a}][{a}] = 0;"
+                  $$"""    for (size_t {{b}} = {{a}} + 1; {{b}} < {{nExpr}}; {{b}}++)"""
+                  $"        {varName}[{a}][{b}] = {arrName}[{a}][{b} - {a} - 1];"
+                  "}" ]
+            Some (extentDecl @ [allocDecl] @ (if useGather then gather else scatter),
                   [MatPool (varName, elemTypeStr, 2, "nullptr", None, ownedExtents)])
          | SymHermitian when r = 2 ->
             // ----- Hermitian rank-2: dissolves to dense nxn -----
