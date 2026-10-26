@@ -1,0 +1,10 @@
+// TEST: An imported read-only alias keeps its copy across a foreign write deep in extents
+// MODULE: Lib
+// The read-only alias plan would let x share y0's storage -- unless something
+// can write y0. The only write is in ANOTHER module, twenty extents deep in a
+// range bound (02_Main). The foreign-reference census walks embedded extents
+// to completion (gap G89), so x keeps its copy.
+module Lib
+let mut y0 = [1, 2, 3]
+let x = y0
+// EXPECT: Lib.x = [1, 2, 3]

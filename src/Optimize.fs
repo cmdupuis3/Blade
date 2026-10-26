@@ -234,7 +234,7 @@ let mutable blasGateProbe : unit -> bool = fun () -> false
 /// off for its reference lane, so a new pass's gate belongs in this list the
 /// day the pass lands -- a gate missing here is a pass the differential
 /// cannot see.
-let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_POOL_EARLY_RELEASE"; "BLADE_HOIST"; "BLADE_HOT_ROW"; "BLADE_CELL_EPILOGUE"; "BLADE_COMPACTION_FUSION"; "BLADE_COMPACT_ROW_CLASSES"; "BLADE_SIBLING_FOLDS"; "BLADE_REC_STEP_OMP"; "BLADE_MEMBER_HOIST"; "BLADE_EPILOGUE_LEGS"; "BLADE_ORBIT_ACTIONS"; "BLADE_HASH_JOIN"; "BLADE_GROUP_AGG"; "BLADE_COMPUTE_ELIDE"; "BLADE_TRANSPOSE_ELIDE"; "BLADE_CALL_ELIDE"; "BLADE_RECOMPUTE"; "BLADE_REC_WINDOW" ]
+let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_POOL_EARLY_RELEASE"; "BLADE_HOIST"; "BLADE_HOT_ROW"; "BLADE_CELL_EPILOGUE"; "BLADE_COMPACTION_FUSION"; "BLADE_COMPACT_ROW_CLASSES"; "BLADE_SIBLING_FOLDS"; "BLADE_REC_STEP_OMP"; "BLADE_MEMBER_HOIST"; "BLADE_EPILOGUE_LEGS"; "BLADE_ORBIT_ACTIONS"; "BLADE_HASH_JOIN"; "BLADE_GROUP_AGG"; "BLADE_COMPUTE_ELIDE"; "BLADE_TRANSPOSE_ELIDE"; "BLADE_CALL_ELIDE"; "BLADE_RECOMPUTE"; "BLADE_REC_WINDOW"; "BLADE_GROUP_VIEW"; "BLADE_SINK_ALIAS" ]
 
 /// A gate's KNOB MIRROR: a value that keeps a pass's PREVIOUS version, or
 /// selects an opt-in variant (not the pass off), for the passes whose forms
@@ -3708,11 +3708,13 @@ let private arrayTypeExtentExprs (at: IRArrayType) : IRExpr list =
 /// variable's or call's type, an array literal's, an apply's output, operand
 /// and shared index types, a range's index records, an `ungroup`'s source
 /// index records -- as extent expressions; and, recursively, those embedded
-/// in the extracted extents themselves (types are finite trees, so this ends;
-/// a depth bound keeps it linear-ish on pathological nesting -- past it the
-/// extent itself is still returned, and its references still collected).
+/// in the extracted extents themselves, to COMPLETION (types are finite
+/// trees; each extent object is expanded once, by reference, which also keeps
+/// it linear on a type shared by many nodes). Each extent object is returned
+/// once.
 let embeddedExtentExprs (e: IRExpr) : IRExpr list =
     let acc = ResizeArray<IRExpr>()
+    let seen = System.Collections.Generic.HashSet<IRExpr>(HashIdentity.Reference)
     let rec visit (depth: int) (root: IRExpr) =
         let found = ResizeArray<IRExpr>()
         let addTy (t: IRType) = found.AddRange(irTypeExtentExprs t)
@@ -3738,8 +3740,14 @@ let embeddedExtentExprs (e: IRExpr) : IRExpr list =
             | IRUngroupGrid (_, srcs, _) -> addIx srcs
             | _ -> ()) root
         for x in found do
-            acc.Add x
-            if depth < 8 then visit (depth + 1) x
+            // COMPLETE (gap G89, lane-D review): every extent is expanded
+            // once, by reference -- extents are subterms of finite type
+            // trees, so this terminates without a depth bound (the old bound
+            // of 8 let a write nested deeper slip past every client: the
+            // never-written closure, the foreign-reference census).
+            if seen.Add x then
+                acc.Add x
+                visit (depth + 1) x
     visit 0 e
     List.ofSeq acc
 /// A root of THE MODULE TRAVERSAL that the compaction census (T4b) and the
@@ -11800,11 +11808,48 @@ let private aliasWriteClosure (programFuncs: IRCallable list) (foreignRefs: Set<
     let arr = List.toArray modul.Bindings
     let payloadOf = intervalPayloadOf modul
     let pay = arr |> Array.map (fun b -> payloadOf b.Id b.Value)
-    let payRefs = pay |> Array.map collectVarRefsIR
+    // EXECUTABLE EXTENTS (gap G89): a statement's types run code too -- the
+    // range bound of `method_for(0..bump(a))` calls `bump`, which may write `a`
+    // through a `mut` parameter, and neither that reference nor that call is
+    // an expression child of the value. Every judgement below (references,
+    // assignments, writes) reads a statement as its payload PLUS the extent
+    // expressions embedded in its nodes PLUS its declared type's extents; a
+    // callable as its body, the extents embedded in it and its parameter,
+    // return and capture types. The traversal is COMPLETE: `embeddedExtentExprs`
+    // expands every extent it finds to completion (no depth bound), and a
+    // declared type's extents are taken with everything embedded in them. A
+    // type or expression that cannot be walked makes the whole closure
+    // decline (`unwalkable`), never a guess.
+    let unwalkable : string option ref = ref None
+    let closedExtents (roots: IRExpr list) (types: IRType list) (owner: string) : IRExpr list =
+        try
+            let seen = System.Collections.Generic.HashSet<IRExpr>(HashIdentity.Reference)
+            let out = ResizeArray<IRExpr>()
+            let add (x: IRExpr) = if seen.Add x then out.Add x
+            for r in roots do
+                for x in embeddedExtentExprs r do add x
+            for t in types do
+                for x in irTypeExtentExprs t do
+                    add x
+                    for y in embeddedExtentExprs x do add y
+            List.ofSeq out
+        with ex ->
+            if unwalkable.Value.IsNone then unwalkable.Value <- Some $"the types of `{owner}` cannot be walked ({ex.Message})"
+            []
+    let payX : IRExpr list [] =
+        arr |> Array.mapi (fun i b -> pay.[i] :: closedExtents [ pay.[i] ] [ b.Type ] b.Name)
+    let fnX (f: IRCallable) : IRExpr list =
+        f.Body
+        :: closedExtents [ f.Body ]
+               ((f.Params |> List.map (fun p -> p.Type)) @ [ f.RetType ] @ (f.Captures |> List.map (fun c -> c.Type)))
+               f.SourceName
+    let refsOfAll (es: IRExpr list) = es |> List.map collectVarRefsIR |> Set.unionMany
+    let payRefs = payX |> Array.map refsOfAll
     let callables = (modul.Functions @ programFuncs) |> List.distinctBy (fun f -> f.Id)
+    let callableX = callables |> List.map (fun f -> (f.Id, fnX f)) |> Map.ofList
     let calleeRefs =
         callables |> List.map (fun f ->
-            (f, Set.union (collectVarRefsIR f.Body) (f.Captures |> List.map (fun c -> c.Id) |> Set.ofList)))
+            (f, Set.union (refsOfAll callableX.[f.Id]) (f.Captures |> List.map (fun c -> c.Id) |> Set.ofList)))
     let assigned =
         let mutable s = Set.empty
         let visit (e: IRExpr) =
@@ -11812,8 +11857,8 @@ let private aliasWriteClosure (programFuncs: IRCallable list) (foreignRefs: Set<
                 match n with
                 | IRAssign (t, _) -> s <- Set.union s (collectVarRefsIR t)
                 | _ -> ()) e
-        for e in pay do visit e
-        for f in callables do visit f.Body
+        for es in payX do List.iter visit es
+        for f in callables do List.iter visit callableX.[f.Id]
         s
     // WRITE-FREE, syntactically (fail closed). The shared write analysis
     // (`scheduleMayWriteIn`) judges a write to provably FRESH local storage
@@ -11834,7 +11879,7 @@ let private aliasWriteClosure (programFuncs: IRCallable list) (foreignRefs: Set<
             match Map.tryFind id letValue with
             | Some (IRVar (j, _)) when not (seen.Contains j) -> resolveId (seen.Add id) j
             | _ -> None
-    let directlyWrites (e: IRExpr) =
+    let directlyWrites1 (e: IRExpr) =
         let mutable hit = false
         iterIRExpr (fun n ->
             match n with
@@ -11849,6 +11894,7 @@ let private aliasWriteClosure (programFuncs: IRCallable list) (foreignRefs: Set<
                  | _ -> hit <- true)
             | _ -> ()) e
         hit
+    let directlyWrites (es: IRExpr list) = es |> List.exists directlyWrites1
     // The least fixpoint of "may write" over every callable AND every module
     // binding: a name's definition runs where the name is used when it is a
     // callable, a let alias of one, or a deferred value (a named composition
@@ -11858,8 +11904,8 @@ let private aliasWriteClosure (programFuncs: IRCallable list) (foreignRefs: Set<
     // runs nothing: only deferred forms and let aliases carry their payload
     // to the use (a stored binding's own payload is judged as a statement).
     let bodyOf =
-        (callables |> List.map (fun f -> (f.Id, f.Body)))
-        @ (arr |> Array.mapi (fun i b -> (b, pay.[i]))
+        (callables |> List.map (fun f -> (f.Id, callableX.[f.Id])))
+        @ (arr |> Array.mapi (fun i b -> (b, payX.[i]))
                |> Array.filter (fun (b, _) ->
                    isDeferredForm b.Value || (match b.Value with IRVar _ -> true | _ -> false)
                    // a value that may CARRY code (a closure, a loop object, a tuple
@@ -11867,8 +11913,8 @@ let private aliasWriteClosure (programFuncs: IRCallable list) (foreignRefs: Set<
                    || not ((try holdsNoStorage b.Type with _ -> false) || (match stripUnits b.Type with ArrayElem _ -> true | _ -> false)))
                |> Array.map (fun (b, p) -> (b.Id, p)) |> List.ofArray)
         |> Map.ofList
-    let refsOf (e: IRExpr) : IRId list =
-        collectVarRefsIR e |> Set.toList |> List.collect (fun id ->
+    let refsOf (es: IRExpr list) : IRId list =
+        refsOfAll es |> Set.toList |> List.collect (fun id ->
             match resolveId Set.empty id with
             | Some f -> [ id; f.Id ]
             | None -> [ id ])
@@ -11884,7 +11930,7 @@ let private aliasWriteClosure (programFuncs: IRCallable list) (foreignRefs: Set<
                     s <- s.Add id
                     changed <- true
         s
-    let writes (e: IRExpr) = directlyWrites e || (refsOf e |> List.exists writingDefs.Contains)
+    let writes (es: IRExpr list) = directlyWrites es || (refsOf es |> List.exists writingDefs.Contains)
     let nameOf =
         let m1 = arr |> Array.map (fun b -> (b.Id, b.Name)) |> Map.ofArray
         let m2 = callables |> List.map (fun f -> (f.Id, f.SourceName)) |> Map.ofList
@@ -11893,6 +11939,9 @@ let private aliasWriteClosure (programFuncs: IRCallable list) (foreignRefs: Set<
             | Some n -> n
             | None -> match Map.tryFind id m2 with Some n -> n | None -> $"__v{id}"
     fun (seeds: Set<IRId>) ->
+        match unwalkable.Value with
+        | Some why -> Error $"the closure cannot judge the module: {why}"
+        | None ->
         let mutable members = seeds
         let mutable changed = true
         while changed do
@@ -11918,12 +11967,12 @@ let private aliasWriteClosure (programFuncs: IRCallable list) (foreignRefs: Set<
         else
             let writingBinding =
                 [ 0 .. arr.Length - 1 ] |> List.tryFind (fun i ->
-                    not (Set.isEmpty (Set.intersect payRefs.[i] members)) && writes pay.[i])
+                    not (Set.isEmpty (Set.intersect payRefs.[i] members)) && writes payX.[i])
             match writingBinding with
             | Some i -> Error $"`{arr.[i].Name}` names {named (Set.intersect payRefs.[i] members)} and may write (an assignment, a call to a writing callable, or an unresolved call -- a write to local storage counts: the copy it relies on is the one elided)"
             | None ->
                 let writingFn =
-                    calleeRefs |> List.tryFind (fun (f, _) -> members.Contains f.Id && writes f.Body)
+                    calleeRefs |> List.tryFind (fun (f, _) -> members.Contains f.Id && writes callableX.[f.Id])
                 match writingFn with
                 | Some (f, refs) -> Error $"function `{f.SourceName}` names {named (Set.intersect refs members)} and may write (an assignment, a writing callee or an unresolved call)"
                 | None ->
@@ -12937,6 +12986,201 @@ let planAliasElision (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (m
                                           && isArray vty ->
                     decide b.Name id $"__v{id}" vty byId.[srcId]
                 | _ -> ()
+
+// ===========================================================================
+// STRUCTURAL GROUP VIEW (BLADE_GROUP_VIEW, plan rule `structural-group-view
+// v1`; round 4 wave 2, PM57). `group_by(a, seg)` over a STRUCTURAL grouping
+// (`segments(CI)` / `files(T)`: static run boundaries, identity position
+// accessor) copies `a` into a CSR pool cell for cell -- the pool is a byte
+// copy of the source, and `ungroup(g)` copies it back. When nothing can
+// write the source, the grouped array or anything that may share their
+// storage (the never-written closure), the snapshot the copy takes is
+// unobservable: the row table points INTO the source's storage (D1a), and
+// `ungroup(g)` -- cell for cell the source, since the accessor is the
+// identity -- shares it too (D1b). Main's top level only: no ordinary
+// allocation there is scope-freed, and the only explicit release form, a
+// lifetime region's paired IRBeginPoolScope / IRReleasePools, names pools
+// local to its region (checked: no release names a member).
+// ===========================================================================
+
+/// PROVIDER SINK DESTINATION PASSING (BLADE_SINK_ALIAS, rule `provider-sink
+/// v1`; round 4 wave 2, PM45): a provider write of a PACKED (SymIdx /
+/// AntisymIdx leading group + dense trailing) or an OrbIdx (wreath) source
+/// hands the writer the source's own pool -- the flatten was a linear copy
+/// of exactly those cells in exactly that order -- instead of a new buffer
+/// and a copy. `0`/`off` = the copy. Read per call by the C++ emitter.
+let sinkAliasEnabled () = gateOn "BLADE_SINK_ALIAS"
+
+/// The decision record of provider-sink v1 (written by the C++ emitter).
+let recordProviderSink (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
+    Blade.Effects.Decisions.record
+        { Blade.Effects.Rule = "provider-sink"; Version = 1
+          Span = declSpanOf subject; Subject = subject
+          Outcome = outcome; Evidence = evidence }
+/// BLADE_GROUP_VIEW=0|off keeps the CSR pool copy and the ungroup copy;
+/// unset = on. Read per call.
+let groupViewEnabled () = gateOn "BLADE_GROUP_VIEW"
+
+/// The plan's verdicts, read by the C++ emitter (genGroupByBinding,
+/// genUngroupBinding), which records the decision where it emits: a group_by
+/// binding id -> its verdict (evidence, or the first failed condition); an
+/// ungroup binding id -> (its group's id, verdict); and, written by the
+/// emitter, the C++ name of the storage an emitted view reads (D1b needs it).
+module GroupViewTable =
+    open System.Threading
+    type State =
+        { Groups: Map<IRId, Result<string list, string>>
+          Ungroups: Map<IRId, IRId * Result<string list, string>>
+          Emitted: Map<IRId, string> }
+    let private empty = { Groups = Map.empty; Ungroups = Map.empty; Emitted = Map.empty }
+    let private cell = new AsyncLocal<State>()
+    let private get () = match box cell.Value with null -> empty | _ -> cell.Value
+    let reset () = cell.Value <- empty
+    let recordGroup (id: IRId) (v: Result<string list, string>) =
+        let s = get () in cell.Value <- { s with Groups = Map.add id v s.Groups }
+    let recordUngroup (id: IRId) (gid: IRId) (v: Result<string list, string>) =
+        let s = get () in cell.Value <- { s with Ungroups = Map.add id (gid, v) s.Ungroups }
+    let tryGroup (id: IRId) = Map.tryFind id (get ()).Groups
+    let tryUngroup (id: IRId) = Map.tryFind id (get ()).Ungroups
+    let noteEmitted (gid: IRId) (sourceCpp: string) =
+        let s = get () in cell.Value <- { s with Emitted = Map.add gid sourceCpp s.Emitted }
+    let tryEmitted (gid: IRId) = Map.tryFind gid (get ()).Emitted
+
+/// The decision record of the rule (written by the C++ emitter, which knows
+/// whether the view was emitted).
+let recordGroupView (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
+    Blade.Effects.Decisions.record
+        { Blade.Effects.Rule = "structural-group-view"; Version = 1
+          Span = declSpanOf subject; Subject = subject
+          Outcome = outcome; Evidence = evidence }
+
+/// Plan the views. Every module binding `let g = group_by(v, seg)` whose
+/// grouping is a structural one (IRSegments or IRSegmentsGrid) gets a verdict;
+/// a key grouping gets none (it permutes its members: no candidate).
+let planStructuralGroupView (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (modul: IRModule) : unit =
+    let arr = List.toArray modul.Bindings
+    let byId = arr |> Array.map (fun b -> (b.Id, b)) |> Map.ofArray
+    let indexOf = arr |> Array.mapi (fun i b -> (b.Id, i)) |> Map.ofArray
+    let fresh = freshStoredChain modul
+    let closure = lazy (aliasWriteClosure programFuncs foreignRefs modul)
+    let callables = (modul.Functions @ programFuncs) |> List.distinctBy (fun f -> f.Id)
+    // Pools an explicit lifetime-region release names, anywhere.
+    let released =
+        lazy (
+            let mutable s = Set.empty
+            let visit (e: IRExpr) =
+                iterIRExpr (fun n ->
+                    match n with
+                    | IRReleasePools (_, pools, _) -> for p in pools do s <- Set.union s (collectVarRefsIR p)
+                    | _ -> ()) e
+            for b in arr do visit b.Value
+            for f in callables do visit f.Body
+            s)
+    let plainRank1 (t: IRType) : (IRType * int64) option =
+        match stripUnits t with
+        | ArrayElem at when not at.IsVirtual ->
+            match at.IndexTypes with
+            | [ ix ] when ix.Rank = 1 && ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Dependencies.IsEmpty ->
+                (match ix.Extent with IRLit (IRLitInt n) -> Some (stripUnits at.ElemType, n) | _ -> None)
+            | _ -> None
+        | _ -> None
+    // The inline operands forceDeferredArrayInput materializes into a FRESH
+    // private temporary: a map (deferred or `|> compute`d). An inline compute
+    // of a NAME (`a |> compute` emits `Array<T, 1> tmp = a;`, sharing a's
+    // data), a bind, a parallel / fusion / functor form or any other inline
+    // value is not proved private.
+    let freshInline (v: IRExpr) : bool =
+        match v with
+        | IRApplyCombinator _ | IRComposeApply _ -> true
+        | IRCompute _ -> isFreshPoolFormWith (fun _ -> false) v
+        | _ -> false
+    let hasCuda = callables |> List.exists (fun f -> f.IsCudaKernel)
+    let hasMpi = callables |> List.exists (fun f -> f.IsMpiParallel)
+    let groupVerdict (g: IRBinding) (vals: IRExpr) (segB: IRBinding) : Result<string list, string> =
+        match segB.Value with
+        | IRSegmentsGrid _ -> Error "a tile grouping (segments(C0, C1)): a tile is a rectangular window of the row-major source, not a run of it"
+        | IRSegments (offsets, _) ->
+            if hasMpi then Error "an MPI build (slab-distributed storage is not audited)"
+            elif hasCuda then Error "the module holds a CUDA kernel (device copies of the rows are not audited)"
+            else
+            match plainRank1 (typeOf vals), plainRank1 g.Type with
+            | None, _ -> Error "the values are not a plain dense rank-1 array with a literal extent"
+            | Some (velem, n), gt ->
+                let gelemOk =
+                    match stripUnits g.Type with
+                    | ArrayElem gat -> stripUnits gat.ElemType = velem
+                    | _ -> false
+                ignore gt
+                let offsetsOk =
+                    not offsets.IsEmpty && offsets.Head = 0L && List.last offsets = n
+                    && (offsets |> List.pairwise |> List.forall (fun (x, y) -> x <= y))
+                if not gelemOk then Error "the grouped array's element type is not the values' element type"
+                elif not offsetsOk then Error "the run boundaries are not a static partition of the source axis from 0 to its extent"
+                else
+                let source : Result<string * Set<IRId>, string> =
+                    match vals with
+                    | IRVar (vid, _) ->
+                        (match Map.tryFind vid byId, Map.tryFind vid indexOf, Map.tryFind g.Id indexOf with
+                         | Some vb, Some vi, Some gi when vi < gi ->
+                             (match fresh vb with
+                              | Ok (how, chain) -> Ok ($"the values `{vb.Name}`: {how}", chain |> List.map (fun c -> c.Id) |> Set.ofList)
+                              | Error why -> Error $"the values are not proved stored and fresh: {why}")
+                         | _ -> Error "the values are not an earlier top-level binding")
+                    | v when freshInline v -> Ok ("the values: an inline map materialized into a private temporary named by nothing else", Set.empty)
+                    | _ -> Error "the values are an inline form not proved to materialize a private temporary (an inline `|> compute` of a name, a bind or a parallel form may share storage)"
+                match source with
+                | Error why -> Error why
+                | Ok (how, chain) ->
+                    let seeds = Set.add g.Id chain
+                    // Any module binding a lifetime-region release names --
+                    // not only the seeds: every closure member that holds
+                    // storage is a module binding (fail closed; regions
+                    // release their own local pools only).
+                    let rel = Set.intersect (byId |> Map.keys |> Set.ofSeq) (released.Force())
+                    if not rel.IsEmpty then Error "an explicit lifetime-region release (IRReleasePools) names a module binding"
+                    else
+                    match closure.Force() seeds with
+                    | Error why -> Error $"the copy keeps the grouped rows a snapshot: {why}"
+                    | Ok why ->
+                        Ok [ $"rows view the source's storage: {offsets.Length - 1} contiguous run(s) over {n} cells, identity position accessor (no pool, no copy)"
+                             how
+                             why
+                             "main's top level: no ordinary allocation is scope-freed, and no lifetime-region release names a member" ]
+        | _ -> Error "the grouping is not a structural one"
+    let disabled (v: Result<string list, string>) =
+        match v with
+        | Ok ev when not (groupViewEnabled ()) -> Error "disabled by BLADE_GROUP_VIEW", ev
+        | Ok ev -> Ok ev, ev
+        | Error why -> Error why, []
+    for g in arr do
+        match g.Value with
+        | IRGroupBy (vals, IRVar (sid, _)) ->
+            (match Map.tryFind sid byId with
+             | Some segB when (match segB.Value with IRSegments _ | IRSegmentsGrid _ -> true | _ -> false) ->
+                 let v = groupVerdict g vals segB
+                 let (outcome, ev) = disabled v
+                 let recorded =
+                     match outcome with
+                     | Error why when not ev.IsEmpty -> Error (why + " [" + String.concat "; " ev + "]")
+                     | o -> o
+                 GroupViewTable.recordGroup g.Id recorded
+                 // D1b: an `ungroup` of an admitted view. Its binding names g,
+                 // so the closure above already holds over it.
+                 match v with
+                 | Ok _ ->
+                     for u in arr do
+                         match u.Value with
+                         | IRUngroup (IRVar (gid, _), _) when gid = g.Id ->
+                             let uv =
+                                 match plainRank1 u.Type, plainRank1 (typeOf vals) with
+                                 | Some (ue, un), Some (ve, vn) when ue = ve && un = vn ->
+                                     Ok [ $"`{u.Name}` = ungroup(`{g.Name}`): cell for cell the source (identity accessor), never written (the closure holds over it): it shares the source's storage" ]
+                                 | _ -> Error "the reassembled array is not the source's plain rank-1 shape"
+                             GroupViewTable.recordUngroup u.Id g.Id (fst (disabled uv))
+                         | _ -> ()
+                 | Error _ -> ()
+             | _ -> ())
+        | _ -> ()
 
 /// THE ALIAS IDENTITY RECORD (docs/plans/plan-identity-transpose-compute.md
 /// 2.1 second step, rule `alias-identity v1`): every top-level `let B = A`

@@ -1,0 +1,22 @@
+// TEST: Read-Only Alias Keeps The Copy Across A Write In An Extent
+// ============================================================================
+// The read-only alias plan (transpose-normal-form v1, rule 2) shares y0's
+// storage with `x = y0` only when nothing can write either name. Here the
+// write hides in a TYPE: m's range bound `0..bump(y0)` calls a function that
+// writes `a(0) = 100` through its `mut` parameter. The never-written closure
+// now reads the extents a statement's types carry (gap G89), so the alias
+// declines and x keeps the copy it took at its binding: [1, 2, 3], sum 6
+// (the shared alias printed x = [100, 2, 3], sum 105).
+// ============================================================================
+function bump(a: mut Array<Int64 like Idx<3>>) -> Int64 = {
+    a(0) = 100
+    3
+}
+let mut y0 = [1, 2, 3]
+let x = y0
+let m = method_for(0..bump(y0)) <@> lambda(v) -> v + 1 |> compute
+let sx = reduce(x, (+), 0)
+// EXPECT: y0 = [100, 2, 3]
+// EXPECT: x = [1, 2, 3]
+// EXPECT: m = [1, 2, 3]
+// EXPECT: sx = 6

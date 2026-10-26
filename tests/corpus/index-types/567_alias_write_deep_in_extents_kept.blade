@@ -1,0 +1,17 @@
+// TEST: Read-Only Alias Keeps The Copy Across A Write Deep In Nested Extents
+// 566's write, hidden ten extents deep: m's range bound is
+// `extents(0..extents(0..(... bump(y0))))`. The never-written closure walks
+// embedded extents to completion (gap G89: the collector's own depth bound is
+// not a proof), so `x = y0` keeps its copy: [1, 2, 3], sum 6.
+function bump(a: mut Array<Int64 like Idx<3>>) -> Int64 = {
+    a(0) = 100
+    3
+}
+let mut y0 = [1, 2, 3]
+let x = y0
+let m = method_for(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..bump(y0)))))))))))) <@> lambda(v) -> v + 1 |> compute
+let sx = reduce(x, (+), 0)
+// EXPECT: y0 = [100, 2, 3]
+// EXPECT: x = [1, 2, 3]
+// EXPECT: m = [1, 2, 3]
+// EXPECT: sx = 6

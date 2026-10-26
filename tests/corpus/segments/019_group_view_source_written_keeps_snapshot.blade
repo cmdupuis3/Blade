@@ -1,0 +1,16 @@
+// TEST: A Write To The Source After A Structural Group Keeps The Snapshot
+// `g = group_by(a, seg)` takes a SNAPSHOT of `a`; the later `a(0) = 99.0` is
+// not seen by g. A view of a's storage would see it, so the structural group
+// view declines (`a` is assigned) and the pool copy stays: g's first run
+// still sums to 1.0 + 1.5 + 2.0 + 2.5 = 7.0, not 105.0.
+type I = Idx<10>
+type CI = Chunked<I, 4>
+let a: Array<Float like I> = 1.0 + 0.5 * Float64(0..10) |> compute
+let seg = segments(CI)
+let g = group_by(a, seg)
+a(0) = 99.0
+let sums = method_for(g) <@> lambda(r) -> reduce(r, (+)) |> compute
+// EXPECT: sums = [7.0, 15.0, 10.5]
+let back = ungroup(g)
+// EXPECT: back = [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5]
+// EXPECT: a = [99.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5]

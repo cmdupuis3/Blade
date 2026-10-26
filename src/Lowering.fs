@@ -4083,6 +4083,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     Optimize.CallSpanTable.reset ()
     Optimize.InlineEventSpans.reset ()
     Optimize.AliasElideTable.reset ()
+    Optimize.GroupViewTable.reset ()
     Optimize.blasGateProbe <- Blade.LinAlgPatterns.blasAvailable
     // The raw decl list callers hand us is the program they PARSED, not the
     // one `TypeCheck.typeCheck` desugared inside itself -- so the icechunk
@@ -4382,6 +4383,12 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // the interpreter keeps its copy. Last, over the final tree. Gate:
         // BLADE_TRANSPOSE_ELIDE.
         Optimize.planAliasElision programFuncs (foreignRefs) irModule
+        // The structural group view (Blade.Optimize.planStructuralGroupView,
+        // PM57): a top-level group_by over contiguous segments whose source,
+        // grouped array and derived values are never written reads its rows
+        // in the source's storage (and its ungroup shares it). Verdicts only;
+        // the C++ emitter records the decision. Gate: BLADE_GROUP_VIEW.
+        Optimize.planStructuralGroupView programFuncs (foreignRefs) irModule
         // The checker's stored-alias identity verdicts (plan 2.1 second step,
         // rule `alias-identity v1`), each applied one cross-checked against
         // the plan above. Records only; no IR change.

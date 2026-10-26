@@ -1,0 +1,13 @@
+// TEST: A Structural Group Of An Inline Map Views Its Private Temporary
+// `group_by(a * 2.0, seg)` materializes the map into a temporary nothing else
+// names, then copied it again into the CSR pool. The rows now view the
+// temporary: one materialization instead of two.
+type I = Idx<10>
+type CI = Chunked<I, 4>
+let a: Array<Float like I> = 1.0 + 0.5 * Float64(0..10) |> compute
+let seg = segments(CI)
+let gi = group_by(a * 2.0, seg)
+let firsts = method_for(gi) <@> lambda(r) -> r(0) |> compute
+// EXPECT: firsts = [2.0, 6.0, 10.0]
+let sums = method_for(gi) <@> lambda(r) -> reduce(r, (+)) |> compute
+// EXPECT: sums = [14.0, 30.0, 21.0]

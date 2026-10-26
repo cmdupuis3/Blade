@@ -10092,6 +10092,21 @@ let private transposeNormalFormCases () =
        | Ok src ->
            decisionCase "decision_transpose_named_pipeline_declined" src "transpose-normal-form"
                (fun d -> d.Subject = "X" && declinedMentioning "may write" d) "declined: a named composition's writing kernel is applied to X")
+      // Gap G89: a write hidden in a TYPE's extent (`0..bump(y0)`, bump
+      // writing through a `mut` parameter) is a write the never-written
+      // closure must see -- it used to share y0's storage with x.
+      (match (try Ok (System.IO.File.ReadAllText "tests/corpus/index-types/566_alias_write_in_extent_kept.blade") with ex -> Error ex.Message) with
+       | Error e -> resultLine Fail "decision_transpose_alias_declined_write_in_extent" e; false
+       | Ok src ->
+           decisionCase "decision_transpose_alias_declined_write_in_extent" src "transpose-normal-form"
+               (fun d -> d.Subject = "x" && declinedMentioning "`m` names `y0` and may write" d)
+               "declined: m's range bound writes y0 through bump's `mut` parameter")
+      (match (try Ok (System.IO.File.ReadAllText "tests/corpus/index-types/567_alias_write_deep_in_extents_kept.blade") with ex -> Error ex.Message) with
+       | Error e -> resultLine Fail "decision_transpose_alias_declined_write_deep_in_extents" e; false
+       | Ok src ->
+           decisionCase "decision_transpose_alias_declined_write_deep_in_extents" src "transpose-normal-form"
+               (fun d -> d.Subject = "x" && declinedMentioning "`m` names `y0` and may write" d)
+               "declined: the write ten extents deep is seen (the traversal is complete)")
       withGate "BLADE_TRANSPOSE_ELIDE" "0" (fun () ->
           decisionCase "decision_transpose_declined_gate" tnfSymSrc "transpose-normal-form"
               (declinedMentioning "disabled by BLADE_TRANSPOSE_ELIDE") "declined: disabled by BLADE_TRANSPOSE_ELIDE") ]
@@ -10576,6 +10591,93 @@ let private hashJoinCodegenCases () =
                resultLine Fail name ($"refusal: {why}; recorded: {rec'}")
                false) ]
 
+/// The structural group view (structural-group-view v1, BLADE_GROUP_VIEW,
+/// PM57): the corpus witnesses' emission and decisions.
+let private groupViewCases () : bool list =
+    let corpus (file: string) =
+        try System.IO.File.ReadAllText ("tests/corpus/segments/" + file) with _ -> ""
+    let viewSrc = corpus "018_group_view_rows_read_the_source.blade"
+    let has (needle: string) (cpp: string) = cpp.Contains needle
+    [ tnfEmission "group_view_rows_point_into_source" viewSrc (fun cpp ->
+          if has "nested_array_utilities::pool_base(a.data);" cpp && has "g[__g] = __gv_base + seg__offsets[__g];" cpp
+             && not (has "g__pool = new" cpp) then Ok "g's rows point into a's pool: no CSR pool, no copy"
+          else Error "the view emission is missing (or the pool is still allocated)")
+      tnfEmission "group_view_ungroup_shares_source" viewSrc (fun cpp ->
+          if has "Array<double, 1> back = { a.data, back_extents };" cpp then Ok "back shares a's pool"
+          else Error "ungroup(g) still allocates its copy")
+      withGate "BLADE_GROUP_VIEW" "0" (fun () ->
+          tnfEmission "group_view_gate_off_keeps_pool_and_copy" viewSrc (fun cpp ->
+              if has "double* g__pool = new double[seg__offsets[seg__ngroups]];" cpp
+                 && has "Array<double, 1> back = { allocate<promote<double, 1>::type>(back_extents), back_extents };" cpp
+                 && not (has "__gv_base" cpp) then Ok "gate off: the CSR pool and the ungroup copy"
+              else Error "gate off did not restore the pool copy"))
+      tnfEmission "group_view_inline_map_views_private_temporary" (corpus "022_group_view_inline_map_source.blade") (fun cpp ->
+          if has "pool_base(gi__vals.data);" cpp && not (has "gi__pool = new" cpp) then Ok "gi's rows view the inline map's private temporary"
+          else Error "the inline map's temporary is copied again")
+      tnfEmission "group_view_source_written_keeps_pool" (corpus "019_group_view_source_written_keeps_snapshot.blade") (fun cpp ->
+          if has "double* g__pool = new" cpp && not (has "__gv_base" cpp) then Ok "a is written: g keeps its snapshot pool"
+          else Error "the snapshot pool is missing")
+      planCase "decision_group_view_applied" viewSrc "structural-group-view"
+          (fun d -> d.Subject = "g" && applied d && evidenceMentioning "rows view the source's storage" d) "applied: g views a"
+      planCase "decision_group_view_ungroup_applied" viewSrc "structural-group-view"
+          (fun d -> d.Subject = "back" && applied d && evidenceMentioning "shares `a`'s pool" d) "applied: back shares a"
+      planCase "decision_group_view_declined_source_assigned" (corpus "019_group_view_source_written_keeps_snapshot.blade") "structural-group-view"
+          (fun d -> d.Subject = "g" && declinedMentioning "`a` is assigned" d) "declined: a is assigned"
+      planCase "decision_group_view_declined_row_view_written" (corpus "020_group_view_row_view_written_keeps_copy.blade") "structural-group-view"
+          (fun d -> d.Subject = "g" && declinedMentioning "`r` is assigned" d) "declined: a row view of g is written"
+      planCase "decision_group_view_declined_inline_compute_of_a_name" (corpus "023_group_view_inline_compute_of_a_name_keeps_copy.blade") "structural-group-view"
+          (fun d -> d.Subject = "gc" && declinedMentioning "not proved to materialize a private temporary" d) "declined: `a |> compute` shares a's storage"
+      planCase "decision_group_view_declined_write_in_extent" (corpus "024_group_view_write_in_extent_keeps_snapshot.blade") "structural-group-view"
+          (fun d -> d.Subject = "g" && declinedMentioning "`m` names `a` and may write" d) "declined: m's range bound writes a"
+      planCase "decision_group_view_declined_write_deep_in_extents" (corpus "026_group_view_write_deep_in_extents_keeps_snapshot.blade") "structural-group-view"
+          (fun d -> d.Subject = "g" && declinedMentioning "`m` names `a` and may write" d) "declined: the write ten extents deep is seen"
+      planCase "decision_group_view_declined_tile_grouping" (corpus "012_segments_grid_two_slots.blade") "structural-group-view"
+          (fun d -> d.Subject = "g" && declinedMentioning "a tile grouping" d) "declined: a tile grouping"
+      withGate "BLADE_GROUP_VIEW" "0" (fun () ->
+          planCase "decision_group_view_declined_gate" viewSrc "structural-group-view"
+              (fun d -> d.Subject = "g" && declinedMentioning "disabled by BLADE_GROUP_VIEW" d) "declined: disabled by BLADE_GROUP_VIEW") ]
+
+/// Provider sink destination passing (provider-sink v1, BLADE_SINK_ALIAS,
+/// PM45): a packed and a wreath Zarr write read the source pool in place.
+let private providerSinkCases () : bool list =
+    let packedSrc =
+        "import zarr as z\n"
+        + "let A = [1.0, 2.0, 3.0, 4.0, 5.0]\n"
+        + "let g = lambda(p, q) where comm(p, q) -> p * 10.0 + q\n"
+        + "let C = method_for(A, A) <@> reynolds(g, Symmetric) |> compute\n"
+        + "let w = z.write(\"generated_cpp_tests/sink_sym_out\", C)\n"
+        + "let D = A * 2.0 |> compute\n"
+        + "let w2 = z.write(\"generated_cpp_tests/sink_dense_out\", D)\n"
+    let wreathSrc =
+        "import zarr as z\n"
+        + "let A = [1.0, 2.0, 3.0]\n"
+        + "let g = lambda(x, y) where comm(x, y) -> x * y\n"
+        + "let S = method_for(A, A) <@> g |> compute\n"
+        + "let h = lambda(p, q) where comm(p, q) -> p + q\n"
+        + "let W = method_for(S, S) <@> h |> compute\n"
+        + "let w = z.write(\"generated_cpp_tests/sink_orb_out\", W)\n"
+    let has (needle: string) (cpp: string) = cpp.Contains needle
+    [ tnfEmission "provider_sink_packed_reads_pool_in_place" packedSrc (fun cpp ->
+          if has "const double* C_wr" cpp && has "_flat = nested_array_utilities::pool_base(C.data);" cpp
+             && not (has "__pc_pool" cpp) && not (has "delete[] C_wr" cpp)
+             && has "_flat = pool_base(D.data);" cpp then Ok "C's packed pool is the writer's buffer (no new, no copy, no delete); D keeps its dense alias"
+          else Error "the packed write still flattens into a buffer")
+      withGate "BLADE_SINK_ALIAS" "0" (fun () ->
+          tnfEmission "provider_sink_gate_off_keeps_flatten" packedSrc (fun cpp ->
+              if has "__pc_pool" cpp && has "delete[] C_wr" cpp then Ok "gate off: the linear pool copy and its delete"
+              else Error "gate off did not restore the flatten copy"))
+      tnfEmission "provider_sink_wreath_reads_pool_in_place" wreathSrc (fun cpp ->
+          if has "orb_cell_count" cpp && has "_flat = &(W[0]);" cpp && not (has "_flat[__ow_i]" cpp) && not (has "delete[] W_wr" cpp)
+          then Ok "W's OrbIdx pool is the writer's buffer; the BL8004 pin stays"
+          else Error "the wreath write still copies its pool")
+      planCase "decision_provider_sink_packed_applied" packedSrc "provider-sink"
+          (fun d -> d.Subject = "w" && applied d && evidenceMentioning "no flatten buffer, no copy, no delete" d) "applied: the packed write"
+      planCase "decision_provider_sink_wreath_applied" wreathSrc "provider-sink"
+          (fun d -> d.Subject = "w" && applied d && evidenceMentioning "OrbIdx pool" d) "applied: the wreath write"
+      withGate "BLADE_SINK_ALIAS" "0" (fun () ->
+          planCase "decision_provider_sink_declined_gate" packedSrc "provider-sink"
+              (fun d -> d.Subject = "w" && declinedMentioning "disabled by BLADE_SINK_ALIAS" d) "declined: disabled by BLADE_SINK_ALIAS") ]
+
 let runOptimizeTests () =
     printHeader "Blade-DSL: Optimization Layer Tests"
     let results =
@@ -10656,6 +10758,10 @@ let runOptimizeTests () =
           // Transpose normal form and the read-only alias plan (P2 entry).
           yield! transposeNormalFormCases ()
           yield! transposeNormalFormWave3Cases ()
+          // The structural group view (PM57, round 4 wave 2).
+          yield! groupViewCases ()
+          // Provider sink destination passing (PM45, round 4 wave 2).
+          yield! providerSinkCases ()
           // Hot-row fold scheduling (bench review M13).
           hotRowEmitted ()
           hotRowGateOff ()
