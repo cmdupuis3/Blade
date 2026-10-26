@@ -44,8 +44,18 @@
 //   * new[] / delete[] pairing is kept per type: a cached block is a live
 //     `new T[cells]` array, handed out again as that T, and finally released
 //     with that T's delete[] (a typed deleter rides each slot);
-//   * arithmetic element types only (`new T[]` of a class type runs
-//     constructors, e.g. std::complex zero-initializes);
+//   * arithmetic element types and std::complex of a floating type only
+//     (`cacheable<T>` below). `new std::complex<F>[n]` runs complex's
+//     default constructor, which zeroes every cell, so a REUSED complex block
+//     is zero-filled before it is handed back -- the same contents a fresh
+//     new[] gives (an arithmetic block is handed back as is, like new T[]);
+//     other class types are never cached. Complex pools are cached because
+//     leaving them to the heap is what made examples/09_qg_atmosphere SLOWER
+//     with the cache: its 64 KB complex temporaries went to the UCRT heap
+//     (~10 us per new/free above 16 KB, 40% of the run without any cache),
+//     and the real blocks the cache pinned between them fragmented that heap
+//     (60% of the run) -- 6.6 s uncached, 9.8 s caching reals only, 3.6 s
+//     caching both;
 //   * blocks of 16 KB .. 4 MB; at most 16 slots and 8 MB per THREAD, one
 //     budget across all element types (oldest slot evicted first). Both
 //     numbers are measured policy (review section 4.4), not semantics -- the
@@ -77,6 +87,11 @@
 #endif
 
 namespace blade_pool {
+
+    // Element types the cache may hold (see the CONTRACT above): arithmetic
+    // types, and std::complex of a floating type.
+    template<class T> struct cacheable : std::is_arithmetic<T> {};
+    template<class F> struct cacheable<std::complex<F>> : std::is_floating_point<F> {};
 
 #if defined(BLADE_POOL_CACHE_STATS) && BLADE_POOL_CACHE_STATS
     // Process-wide counters (atomics: OpenMP workers allocate too).
@@ -141,7 +156,7 @@ namespace blade_pool {
 
 #if defined(BLADE_POOL_CACHE_OFF) && BLADE_POOL_CACHE_OFF
     template<class T> inline T* alloc(size_t cells) {
-        if constexpr (std::is_arithmetic<T>::value) { if (eligible<T>(cells)) BLADE_POOL_COUNT(fresh); }
+        if constexpr (cacheable<T>::value) { if (eligible<T>(cells)) BLADE_POOL_COUNT(fresh); }
         return new T[cells];
     }
     template<class T> inline void release(T* p, size_t /*cells*/) { delete[] p; }
@@ -175,13 +190,15 @@ namespace blade_pool {
     struct Reaper { ~Reaper() { flush(); tl_cache.dead = true; } };
 
     template<class T> inline T* alloc(size_t cells) {
-        if constexpr (std::is_arithmetic<T>::value) {
+        if constexpr (cacheable<T>::value) {
             if (eligible<T>(cells)) {
                 Cache& c = tl_cache;
                 const char* type = &TypeTag<T>::id;
                 for (size_t k = c.n; k-- > 0; ) {            // newest first: the hottest pages
                     if (c.s[k].type == type && c.s[k].cells == cells) {
                         T* r = static_cast<T*>(c.s[k].p);
+                        // a fresh new std::complex<F>[] is all zeros; so is a reused one
+                        if constexpr (!std::is_arithmetic<T>::value) std::fill(r, r + cells, T());
                         c.bytes -= c.s[k].bytes;
                         for (size_t m = k + 1; m < c.n; m++) c.s[m - 1] = c.s[m];
                         c.n--;
@@ -202,7 +219,7 @@ namespace blade_pool {
     }
 
     template<class T> inline void release(T* p, size_t cells) {
-        if constexpr (std::is_arithmetic<T>::value) {
+        if constexpr (cacheable<T>::value) {
             if (p && eligible<T>(cells)) {
                 Cache& c = tl_cache;
                 if (!c.dead) {
