@@ -1,0 +1,20 @@
+// TEST: Fold Ring Declines Mixed Fixed Row
+// ============================================================================
+// PM35 decline control: a fold of the trajectory AND a fixed-row read of it.
+// rec-window's snapshots ride the typechecker's surface only, so the IR ring
+// declines ("a fixed-row read of the trajectory after the recursion") and the
+// trajectory is stored whole. Values identical either way.
+// ============================================================================
+type T = Idx<41>
+
+function mixed(a: Float64) -> Float64 = {
+    let rec s: Array<Float64 like T> =
+        match s with
+        | zero -> zero
+        | zero :: k -> zero :: a
+        | prefix :: n -> prefix :: prefix(n - 1) * 0.9 + 0.1
+    reduce(s, (+)) + s(20)
+}
+
+let m = mixed(3.0)
+// EXPECT: m = 61.9770974162353

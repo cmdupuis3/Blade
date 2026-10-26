@@ -234,6 +234,29 @@ let callElideEnabled () = gateOn "BLADE_CALL_ELIDE"
 /// decision records `rec-window` DECLINED ("disabled by BLADE_REC_WINDOW").
 /// Read by the TYPECHECKER (the desugar site), per call. Unset = on.
 let recWindowEnabled () = gateOn "BLADE_REC_WINDOW"
+/// BLADE_FOLD_STATE=0|off keeps the leading-axis fold's per-step state
+/// (`let nxt = kernel(acc, G(j)) |> compute; acc = nxt`, a fresh slice every
+/// step) instead of the in-place pointwise update (round 4 wave 2, PM14;
+/// rule `fold-state-in-place`, an arm of `fuseSliceWritesModule`, so it is
+/// also off under BLADE_FUSION=0). Unset = on.
+let foldStateEnabled () = gateOn "BLADE_FOLD_STATE"
+/// BLADE_REC_FOLD=1|on (EXPLICIT; OPT-IN this wave, the BLADE_EPILOGUE_LEGS
+/// pattern) rings a recursion whose trajectory is consumed only by folds and
+/// moves those folds into the sweep (`windowRecFoldsModule`, round 4 wave 2,
+/// PM35; rule `rec-fold-ring`). Unset / `0` / `off` = the full history: the
+/// admission still runs and records what it WOULD do, `declined -- opt-in
+/// this wave ...` (five review rounds each found a member of the trajectory
+/// use census; default-on is a next-wave item after one more class audit).
+let recFoldRingEnabled () = Blade.Toolchain.envSwitch "BLADE_REC_FOLD" = Blade.Toolchain.SwitchOn
+let recFoldOptInDecline =
+    "opt-in this wave (BLADE_REC_FOLD=1): five review rounds each found a member of the trajectory use census; default-on is a next-wave item after one more class audit"
+/// `BLADE_FOLD_LANES=0|off|false|no`: the fold-lane forms are off. The ONE
+/// parse both the C++ emitters (CodeGenExprSupport.foldLanesMode) and the
+/// optimizer's ring planner read (a threaded step's row partials need them).
+let foldLanesSwitchedOff () =
+    match System.Environment.GetEnvironmentVariable "BLADE_FOLD_LANES" with
+    | null -> false
+    | v -> (match v.Trim().ToLowerInvariant() with "0" | "off" | "false" | "no" -> true | _ -> false)
 /// The C++ lane's BLAS gate (`LinAlgPatterns.blasAvailable`, which compiles
 /// after this file), installed by Lowering before the optimizer runs: the
 /// epilogue-legs planner keeps an inline only when the cell epilogue it rides
@@ -246,7 +269,7 @@ let mutable blasGateProbe : unit -> bool = fun () -> false
 /// off for its reference lane, so a new pass's gate belongs in this list the
 /// day the pass lands -- a gate missing here is a pass the differential
 /// cannot see.
-let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_POOL_EARLY_RELEASE"; "BLADE_HOIST"; "BLADE_HOT_ROW"; "BLADE_CELL_EPILOGUE"; "BLADE_COMPACTION_FUSION"; "BLADE_COMPACT_ROW_CLASSES"; "BLADE_SIBLING_FOLDS"; "BLADE_REC_STEP_OMP"; "BLADE_MEMBER_HOIST"; "BLADE_EPILOGUE_LEGS"; "BLADE_ORBIT_ACTIONS"; "BLADE_HASH_JOIN"; "BLADE_GROUP_AGG"; "BLADE_COMPUTE_ELIDE"; "BLADE_TRANSPOSE_ELIDE"; "BLADE_CALL_ELIDE"; "BLADE_RECOMPUTE"; "BLADE_REC_WINDOW"; "BLADE_GROUP_VIEW"; "BLADE_SINK_ALIAS"; "BLADE_FOLD_MAP_ELIDE"; "BLADE_SIBLING_MAPS" ]
+let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE"; "BLADE_POOL_EARLY_RELEASE"; "BLADE_HOIST"; "BLADE_HOT_ROW"; "BLADE_CELL_EPILOGUE"; "BLADE_COMPACTION_FUSION"; "BLADE_COMPACT_ROW_CLASSES"; "BLADE_SIBLING_FOLDS"; "BLADE_REC_STEP_OMP"; "BLADE_MEMBER_HOIST"; "BLADE_EPILOGUE_LEGS"; "BLADE_ORBIT_ACTIONS"; "BLADE_HASH_JOIN"; "BLADE_GROUP_AGG"; "BLADE_COMPUTE_ELIDE"; "BLADE_TRANSPOSE_ELIDE"; "BLADE_CALL_ELIDE"; "BLADE_RECOMPUTE"; "BLADE_REC_WINDOW"; "BLADE_GROUP_VIEW"; "BLADE_SINK_ALIAS"; "BLADE_FOLD_MAP_ELIDE"; "BLADE_SIBLING_MAPS"; "BLADE_FOLD_STATE"; "BLADE_REC_FOLD" ]
 
 /// A gate's KNOB MIRROR: a value that keeps a pass's PREVIOUS version, or
 /// selects an opt-in variant (not the pass off), for the passes whose forms
@@ -257,7 +280,7 @@ let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE
 /// against its predecessor as well as against no optimizer at all (the
 /// all-off comparison alone never runs the predecessor). Each gate here is
 /// also in `optimizerGates`.
-let optimizerGateMirrors : (string * string) list = [ ("BLADE_COMPACTION_FUSION", "b4"); ("BLADE_COMPACTION_FUSION", "gather"); ("BLADE_COMPACTION_FUSION", "unshared"); ("BLADE_EPILOGUE_LEGS", "1"); ("BLADE_POOL_REUSE", "literal") ]
+let optimizerGateMirrors : (string * string) list = [ ("BLADE_COMPACTION_FUSION", "b4"); ("BLADE_COMPACTION_FUSION", "gather"); ("BLADE_COMPACTION_FUSION", "unshared"); ("BLADE_EPILOGUE_LEGS", "1"); ("BLADE_POOL_REUSE", "literal"); ("BLADE_REC_FOLD", "1") ]
 
 /// The decline reason for a LICENSED row prodsum (B2r applies only where
 /// the build keeps the serial association). `lanes` RESERVES the opt-in
@@ -2828,6 +2851,45 @@ module RecStepTable =
     /// The entries no emitter decided (see `Decided`).
     let undecided () : RecStepEntry list =
         (get ()).ByStep |> Map.toList |> List.map snd |> List.filter (fun e -> not e.Decided.Value)
+
+/// How the C++ time-loop emitter (CodeGenBinding.genRecStepTimeLoop) folds a
+/// threaded step's fused row consumer -- the ONE predicate that emitter and
+/// the recursion-ring planner (`windowRecFoldsModule`) both call, so the
+/// planner can only ring a trajectory whose rows the emitter never reads
+/// after the team. `strict` = the build or the enclosing scope keeps every
+/// fold's serial association (BLADE_FP_REPRO=1, `where repro`); `lanesOff` =
+/// `foldLanesSwitchedOff ()`; `rowVec` = the row's element type has
+/// blade_fold vector forms (double / float).
+type RecStepFoldForm =
+    /// No fused row consumer: the team writes rows, nothing reads them after.
+    | RecStepNoFold
+    /// Licensed self-dot partials per worker chunk inside the team; after the
+    /// team only the partials array is read.
+    | RecStepInTeamPartials
+    /// The strict post-pass: the row kernel on each COMPLETE row after the
+    /// team (every row is read again).
+    | RecStepStrictPostPass
+
+let recStepFoldForm (strict: bool) (lanesOff: bool) (rowVec: bool) (fold: RecStepFold option) : RecStepFoldForm =
+    match fold with
+    | None -> RecStepNoFold
+    | Some f ->
+        if not strict && not f.StrictOnly && f.Term = Some Square && rowVec && not lanesOff then RecStepInTeamPartials
+        else RecStepStrictPostPass
+
+/// The recursion ring's leading subscript: `Int64(i) % R` (the form the
+/// rec-window desugar's ring already lowers to); a literal row is folded.
+let recRingIndex (r: int64) (i0: IRExpr) : IRExpr =
+    match i0 with
+    | IRLit (IRLitInt v) -> IRLit (IRLitInt (v % r))
+    | _ -> IRBinOp (IRElementwise, IRMod, IRUnaryOp (IRCast (ETInt64, SrcLoc.Nowhere), i0), IRLit (IRLitInt r), SrcLoc.Nowhere)
+
+/// Is `i0` the ring subscript of the step variable `n` (`Int64(n) % R`)? The
+/// slot count when it is.
+let (|RecRingOfStep|_|) (n: IRId) (i0: IRExpr) : int64 option =
+    match i0 with
+    | IRBinOp (_, IRMod, IRUnaryOp (IRCast (ETInt64, _), IRVar (v, _)), IRLit (IRLitInt r), _) when v = n -> Some r
+    | _ -> None
 
 /// One `rec-step-parallel` v1 decision record (the planner's admission and
 /// its declines; the C++ emitter records the per-build applied / declined
@@ -7531,6 +7593,8 @@ let fuseSliceWritesModule (modul: IRModule) (builder: IRBuilder) (programFuncs: 
     // The requesting ROOT kernels the knob kept out of the fusion (recorded
     // per body as `rec-step-parallel` declines).
     let knobDeclines = System.Collections.Generic.List<string>()
+    // The PM14 fold-state arm's extra expander case (see the IRObjectFor arm).
+    let mutable objectForArm = false
     let expand (ext: int64) (kVar: IRExpr) (outsideOk: IRId -> bool)
                (prelude: System.Collections.Generic.List<IRId * IRExpr>) (root: IRExpr) : Result<IRExpr * IRCallable option * bool, string> =
         // The FIRST reason a node is not a cell expression is the decline.
@@ -7624,6 +7688,35 @@ let fuseSliceWritesModule (modul: IRModule) (builder: IRBuilder) (programFuncs: 
                     let env' = List.zip (f.Params |> List.map (fun p -> p.VarId)) (atoms |> List.map Option.get) |> Map.ofList
                     go env' (visiting.Add fid) atRoot f.Body
                  | _ -> fail "a callee is not a plain function of dense row parameters (static, capturing, arity-polymorphic, or parallel)")
+            // PM14 only (`objectForArm`, set by the fold-state arm; slice-write
+            // fusion's own admission is unchanged): the elementwise object_for
+            // application a generic `T^1` kernel body lowers `a + b` to --
+            // `object_for(k) <@> (p, q)` with every input rank 0 is cell c of
+            // each operand through k (Interp `materializeObjectForApp`'s
+            // [0; 0] / [0] arms), each operand a dense row of the loop's
+            // static extent (checked by the operand atoms below).
+            | IRApp (IRObjectFor o, args, retT)
+                    when objectForArm && rowOfExtent ext retT
+                         && not o.InputRanks.IsEmpty && o.InputRanks |> List.forall (fun r -> r = 0) ->
+                let elems = match args with [ IRTuple es ] -> es | _ -> args
+                (match o.Kernel with
+                 | IRVar (kid, _) ->
+                    (match callables.TryGetValue kid with
+                     | true, k when elems.Length = o.InputRanks.Length && k.Params.Length = elems.Length
+                                    && k.Captures.IsEmpty && not (hasCall k.Body)
+                                    && not k.IsStatic && not k.IsArityPoly && not k.IsOmpParallel
+                                    && not k.IsCudaKernel && not k.IsMpiParallel
+                                    && IRMono.tilePureBody callables Set.empty k.Body
+                                    && not (IRMono.tileMayAbort callables Set.empty k.Body)
+                                    && scalarElem k.RetType ->
+                        if k.IsRepro then sawRepro <- true
+                        let atoms = elems |> List.map (go env visiting false)
+                        if atoms |> List.exists Option.isNone then None else
+                        let m = List.zip (k.Params |> List.map (fun p -> p.VarId)) (atoms |> List.map Option.get) |> Map.ofList
+                        Some (bind (substParams m (freshenLets k.Body)) k.RetType)
+                     | true, _ -> fail "an elementwise object_for kernel is not a plain pure capture-free scalar kernel that cannot abort"
+                     | _ -> fail "an elementwise object_for kernel is not a resolvable callable")
+                 | _ -> fail "an elementwise object_for kernel is not a named callable")
             | IRApp _ -> fail "the slice calls a function that is recursive, defined in another module, or not row-valued"
             | IRApplyCombinator _ -> fail "an operation over the row is not a plain elementwise map of the loop's extent (a fold, a structured index, or a different shape)"
             | IRIf _ | IRMatch _ -> fail "the slice selects between whole rows (a guarded read or a branch), which is no cell expression"
@@ -7664,6 +7757,96 @@ let fuseSliceWritesModule (modul: IRModule) (builder: IRBuilder) (programFuncs: 
     let moduleIds = modul.Bindings |> List.map (fun b -> b.Id) |> List.filter (moduleReadable Set.empty) |> Set.ofList
     let mutable outer = moduleIds
     let mutable subjectName = ""
+    // --- PM14 (round 4 wave 2): the leading-axis fold's state, in place ----
+    //
+    // TypeCheckInfer's leading-axis fold desugar (`reduce(G, lambda(a: T^1,
+    // b: T^1) -> ..[, seed])`) lowers to
+    //
+    //   let mut acc = <private copy of G(0) / of the seed>     -- MutableArrayLets
+    //   for j in lo..hi { let nxt = kernel(acc, G(j)) |> compute; acc <- nxt }
+    //
+    // so every step allocates a fresh slice inside the kernel and the C++
+    // lane then MOVES it into `acc` by pointer, leaking the previous state
+    // (2001 x 5003: 80 MB of leaked slices; the LLVM lane refuses the
+    // rebinding and falls back). When the kernel is POINTWISE -- this pass's
+    // own cell expander succeeds on `kernel(acc, row)` -- each cell c of the
+    // next state reads the state at cell c only, so the step is computed in
+    // place: `let row = G(j); for c { <cell chain>; acc[c] <- v }`.
+    //   - per cell the chain is s_c <- k_c(s_c, G(j)_c), j ascending from the
+    //     same seed cell -- exactly the materialized step's arithmetic (the
+    //     expander inlines the kernel operation for operation), so bitwise
+    //     under contraction off;
+    //   - every read of `acc` in the cell chain is at cell c and precedes the
+    //     store of cell c (the prelude, then the store); no other cell is read;
+    //   - `acc` is the desugar's private copy (a fresh compute, a
+    //     MutableArrayLets binding), named only by the call and the assign in
+    //     the loop; nothing else in the loop writes; the kernel is pure,
+    //     capture-free and may not abort (the expander's own admission), so
+    //     no failure moves.
+    // Declines (recorded, rule `fold-state-in-place`): a non-pointwise kernel
+    // (the leak stays: gap register), slices that are not dense rank-1 rows of
+    // the state's static extent, a seed that is not a private copy, a `where
+    // repro` callee (its boundary does not survive the splice), an omp root.
+    let mutable foldStateFired = 0
+    let foldStateDeclines = System.Collections.Generic.List<string>()
+    let rec stripCompute (e: IRExpr) = match e with IRCompute inner -> stripCompute inner | _ -> e
+    let foldStateCall (accId: IRId) (jId: IRId) (nxtV: IRExpr) =
+        match stripCompute nxtV with
+        | IRApp (IRVar (fid, ft), [ IRVar (a, _); (IRIndex (IRVar (g, _), [ IRVar (j2, _) ], _) as rowE) ], retT)
+            when a = accId && j2 = jId && g <> accId ->
+            Some (fid, ft, g, rowE, retT)
+        | _ -> None
+    let foldStateInPlace (scope: Map<IRId, IRExpr>) (accId: IRId) (accT: IRType) (seedV: IRExpr)
+                         (jId: IRId) (nxtV: IRExpr) : Result<IRExpr, string> =
+        if not (foldStateEnabled ()) then Error "disabled by BLADE_FOLD_STATE" else
+        let (fid, ft, g, rowE, retT) = (foldStateCall accId jId nxtV).Value
+        match accT with
+        | ArrayElem at when (staticExtent at).IsSome && scalarElem at.ElemType && not at.IsVirtual ->
+            let m = (staticExtent at).Value
+            let rowT = try typeOf rowE with _ -> IRTUnit
+            // The desugar's `matCopy`: the identity map over the seed (or G(0)),
+            // computed -- an IRCompute of an IRApplyCombinator always writes a
+            // FRESH output pool. Any other compute may return existing storage
+            // (IRCompute delegates freshness to its operand), so it declines.
+            let fresh =
+                match seedV with
+                | IRCompute (IRApplyCombinator info) when info.Arrays.Length = 1 && not info.HasReynolds ->
+                    (match info.Kernel with
+                     | IRVar (kid, _) ->
+                        (match callables.TryGetValue kid with
+                         | true, k ->
+                            (match k.Params, k.Body with
+                             | [ p ], IRVar (b, _) -> b = p.VarId && k.Captures.IsEmpty
+                             | _ -> false)
+                         | _ -> false)
+                     | _ -> false)
+                | _ -> false
+            if not fresh then Error "the state's seed is not the desugar's private copy (the identity map over the seed, computed)"
+            elif not (rowOfExtent m rowT) then Error "the folded slices are not dense rank-1 rows of the state's static extent (v1: a dense rank-2 operand)"
+            elif not (rowOfExtent m retT) then Error "the kernel's result is not a dense rank-1 row of the state's extent"
+            elif (match Map.tryFind g scope with Some v -> mentions accId v | None -> false) then
+                Error "the folded array may alias the state"
+            else
+            let kId = builder.FreshId ()
+            let rvId = builder.FreshId ()
+            let kVar = IRVar (kId, IRTScalar ETInt64)
+            let prelude = System.Collections.Generic.List<IRId * IRExpr>()
+            let root = IRApp (IRVar (fid, ft), [ IRVar (accId, accT); IRVar (rvId, rowT) ], retT)
+            let expanded =
+                objectForArm <- true
+                try expand m kVar (fun x -> x = accId || x = rvId) prelude root
+                finally objectForArm <- false
+            match expanded with
+            | Error why -> Error ("the kernel is not pointwise: " + why)
+            | Ok (_, Some _, _) -> Error "the kernel's map carries an omp request"
+            | Ok (_, None, true) -> Error "a spliced kernel or callee is `where repro` (its boundary does not survive the in-place splice)"
+            | Ok (atom, None, false) ->
+                let sId = builder.FreshId ()
+                let store = IRLet (sId, IRAssign (IRIndex (IRVar (accId, accT), [ kVar ], None), atom), IRLit IRLitUnit)
+                let body = Seq.foldBack (fun (id, v) acc -> IRLet (id, v, acc)) prelude store
+                let wId = builder.FreshId ()
+                Ok (IRLet (rvId, rowE, IRLet (wId, IRForRange (kId, IRLit (IRLitInt 0L), IRLit (IRLitInt m), body), IRLit IRLitUnit)))
+        | _ -> Error "the state is not a dense rank-1 array of static extent with scalar cells"
     // Walk a body keeping the values of enclosing lets (to judge aliases of
     // the buffer). Only let-chains are walked into; the rewrite is local to
     // a `let s = SLICE in let w = <copy loop> in rest` triple. `enclosing`
@@ -7806,6 +7989,19 @@ let fuseSliceWritesModule (modul: IRModule) (builder: IRBuilder) (programFuncs: 
                 iterIRExpr (fun n -> match n with IRApp _ | IRApplyCombinator _ -> looksFusable <- true | _ -> ()) slice
                 if looksFusable then declines.Add why
                 IRLet (sId, rw enclosing scope slice, IRLet (wId, rwInner enclosing scope loop, rw enclosing (Map.add wId loop (Map.add sId slice scope)) rest))
+        | IRLet (accId, seedV, IRLet (loopId, (IRForRange (jId, jLo, jHi, IRLet (nxtId, nxtV, IRLet (asgId, IRAssign (IRVar (acc2, accT), IRVar (nxt2, _)), IRLit IRLitUnit))) as loop), rest))
+                when acc2 = accId && nxt2 = nxtId && modul.MutableArrayLets.Contains accId
+                     && (foldStateCall accId jId nxtV).IsSome ->
+            match foldStateInPlace scope accId accT seedV jId nxtV with
+            | Ok cellLoop ->
+                foldStateFired <- foldStateFired + 1
+                let loop' = IRForRange (jId, jLo, jHi, cellLoop)
+                IRLet (accId, rw enclosing scope seedV,
+                       IRLet (loopId, loop', rw enclosing (Map.add loopId loop' (Map.add accId seedV scope)) rest))
+            | Error why ->
+                // Exactly the generic let arm below (knob off: byte-identical).
+                foldStateDeclines.Add why
+                IRLet (accId, rw enclosing scope seedV, rw enclosing (Map.add accId seedV scope) (IRLet (loopId, loop, rest)))
         | IRLet (id, v, body) -> IRLet (id, rw enclosing scope v, rw enclosing (Map.add id v scope) body)
         | _ -> rwInner enclosing scope e
     and rwInner (enclosing: (IRId * int64 * IRExpr) option) (scope: Map<IRId, IRExpr>) (e: IRExpr) : IRExpr =
@@ -7820,8 +8016,10 @@ let fuseSliceWritesModule (modul: IRModule) (builder: IRBuilder) (programFuncs: 
     // reason -- a body can hold a fused arm and a declined one.
     let rewriteBody (subject: string) (outerIds: Set<IRId>) (body: IRExpr) =
         let before = fired
+        let foldStateBefore = foldStateFired
         declines.Clear ()
         knobDeclines.Clear ()
+        foldStateDeclines.Clear ()
         outer <- outerIds
         subjectName <- subject
         let body' = rw None Map.empty body
@@ -7838,6 +8036,18 @@ let fuseSliceWritesModule (modul: IRModule) (builder: IRBuilder) (programFuncs: 
         for kname in knobDeclines do
             recordRecStep subject (Blade.Effects.Declined "disabled by BLADE_REC_STEP_OMP")
                 [ $"the `where omp` request of `{kname}` (the step's final map) is kept out of the fusion: the map runs as its own per-step team and the row is copied" ]
+        let recordFoldState outcome evidence =
+            Blade.Effects.Decisions.record
+                { Blade.Effects.Rule = "fold-state-in-place"; Version = 1
+                  Span = Blade.Ast.noSpan; Subject = subject
+                  Outcome = outcome; Evidence = evidence }
+        if foldStateFired > foldStateBefore then
+            recordFoldState Blade.Effects.Applied
+                [ $"{foldStateFired - foldStateBefore} leading-axis fold(s) update their state in place: per step one pass over the state's cells, each cell's chain s <- k(s, G(j)) evaluated by the kernel's own pointwise arithmetic (callees inlined) and stored back into the same cell -- no per-step slice, no move of a fresh pool into the state (the previous state is no longer leaked)"
+                  "fold order: per cell, j ascending from the same seed cell, the materialized step's operations unchanged (bitwise under BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off); the state is the desugar's private copy, read only at the cell being written" ]
+        for why in foldStateDeclines do
+            recordFoldState (Blade.Effects.Declined why)
+                [ "each step materializes the kernel's result and moves it into the state, as written" ]
         body'
     let newFunctions =
         modul.Functions |> List.map (fun f ->
@@ -8196,6 +8406,912 @@ let fuseRowFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: IRC
     let newBindings =
         modul.Bindings |> List.map (fun b ->
             subject <- b.Name
+            { b with Value = rw b.Value })
+    { modul with Functions = newFunctions; Bindings = newBindings }
+
+// --- Folds riding a windowed recurrence (PM35, rule `rec-fold-ring` v1) -------
+//
+// A block- or function-body `let rec` whose LATER uses are folds of the
+// trajectory is not windowed by the typechecker's ring (rec-window P1 demands
+// fixed-row reads), so it allocates its whole N-row history even when every
+// consumer is a fold -- bench recur's 301 x 20011 trajectory (48 MB) is folded
+// INSIDE the sweep by row-fold fusion and never read again. This pass runs
+// right after `fuseRowFoldsModule`, over the region
+//
+//   let T = (let BUF = uninit in <seed>; for n in lo..N { <step> }; BUF) in rest
+//
+// and, when every use of T in `rest` is a fold it can ride the sweep (or T
+// has no use left), (1) moves each fold's state into the sweep -- the
+// fold's per-row work right after row n is written (after the seed for row
+// 0) -- and (2) stores BUF as a RING of R = K + 1 rows, K the step's maximum
+// lag: every leading subscript i becomes `Int64(i) % R`.
+//
+// RING (storage only, every build): row r lives in slot r mod R, is written
+// once (step r, or the seed), and is overwritten at step r + R; the audit
+// below proves every row the program SELECTS is read at a step s with
+// r <= s <= r + K (a lag c <= K, or the current row after its complete write),
+// and a seed row only before the sweep -- so each read sees the value the
+// full buffer held. A guarded zero-history read's clamp branch (index 0 when
+// the guard fails) forms an in-range slot whose value the guard discards: the
+// audit proves every use of such a read sits under its guard's conditions.
+//
+// CONSUMERS (each its own state; applied only together with the ring):
+//   C1 `reduce(T, F[, s])`, T rank 1: acc <- F(acc, BUF[n]) after each row;
+//      seeded from s (evaluated before the recursion), unseeded from row 0
+//      (a seed arm is required: lo = 1);
+//   C2 `reduce(method_for(T) <@> K, F, s)` over a plain map of T's rows /
+//      cells: acc <- F(acc, K(BUF[n]));
+//   C3 `method_for(T) <@> K |> compute`, scalar K (the partial fold
+//      `reduce(traj, op)` lowers to it): out[n] <- K(BUF[n]), out stored;
+//   C4 the rank-2 accumulator nest of `reduce(traj, op, axes = 2)`:
+//      for j: acc <- op(acc, BUF[n][j]).
+// FOLD ORDER: each chain applies F (op) to the same terms in the same
+// ascending order from the same seed or first element -- exactly the
+// strict-route association, so bitwise under BLADE_FP_REPRO=1
+// BLADE_FP_CONTRACT=off; C4 is serial in every build (bitwise there too). In
+// a licensed build C1/C2 run the serial chain instead of the lane tree, and a
+// C3 row fold its own licensed per-row form instead of the bitwise row jam
+// (licensed association changes, recorded).
+// FAILURE ORDER: K, F and s are TOTAL (IRTotality, plus the row-fold /
+// self-dot forms a row kernel takes) and write nothing, every statement from
+// the recursion through the last consumer writes nothing (the shared write
+// analysis), so evaluating the folds early is unobservable. The kernels are
+// CALLED, never inlined (a `where repro` boundary stays).
+// DECLINES (each recorded): T used otherwise (an escape, a fixed-row read --
+// P1's snapshots ride the surface only --, a transpose ..), a consumer in a
+// branch / loop body, a fold kernel with an omp request, a may-panic kernel or
+// seed, a seed read after the recursion, an unseeded C1 with no seed arm,
+// rank > 2, a `while` guard / freeze epilogue, a zero-filled buffer, a buffer
+// mention the audit cannot classify, dense coverage, and a threaded step whose
+// C++ form folds complete rows after the team (`recStepFoldForm`).
+let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: IRCallable list) : IRModule =
+    let writes = scheduleMayWriteIn programFuncs modul
+    let callables = System.Collections.Generic.Dictionary<IRId, IRCallable>()
+    for f in programFuncs do callables.[f.Id] <- f
+    for f in modul.Functions do callables.[f.Id] <- f
+    let resolveE (e: IRExpr) = match e with IRVar (kid, _) -> (match callables.TryGetValue kid with | true, c -> Some c | _ -> None) | _ -> None
+    let mentions (vid: IRId) (e: IRExpr) =
+        let mutable hit = false
+        iterIRExpr (fun n -> match n with IRVar (id, _) when id = vid -> hit <- true | _ -> ()) e
+        hit
+    let count (vid: IRId) (e: IRExpr) =
+        let mutable n = 0
+        iterIRExpr (fun x -> match x with IRVar (id, _) when id = vid -> n <- n + 1 | _ -> ()) e
+        n
+    let rec chainOf (e: IRExpr) : (IRId * IRExpr) list * IRExpr =
+        match e with
+        | IRLet (id, v, b) -> let s, fin = chainOf b in (id, v) :: s, fin
+        | _ -> [], e
+    let rebuild (stmts: (IRId * IRExpr) list) (fin: IRExpr) =
+        List.foldBack (fun (id, v) acc -> IRLet (id, v, acc)) stmts fin
+    // Does `id` occur in an expression a TYPE carries (a range's extent, a
+    // variable's index extents ..)? The generic child walk never enters those.
+    // EVERY expression a type carries, transitively and with NO depth bound
+    // (embeddedExtentExprs stops descending at depth 8): a worklist over the
+    // extents each extent's own nodes carry, deduplicated by reference, under
+    // a node budget. None = the budget ran out (callers fail closed).
+    let typeCarried (e: IRExpr) : IRExpr list option =
+        let seen = System.Collections.Generic.HashSet<IRExpr>(HashIdentity.Reference)
+        let out = ResizeArray<IRExpr>()
+        let work = System.Collections.Generic.Queue<IRExpr>()
+        for x in embeddedExtentExprs e do work.Enqueue x
+        let mutable budget = 200000
+        while work.Count > 0 && budget > 0 do
+            let x = work.Dequeue ()
+            if seen.Add x then
+                budget <- budget - 1
+                out.Add x
+                for y in embeddedExtentExprs x do work.Enqueue y
+        if work.Count > 0 then None else Some (List.ofSeq out)
+    let mentionsInTypes (id: IRId) (e: IRExpr) =
+        match typeCarried e with
+        | None -> true
+        | Some xs -> xs |> List.exists (mentions id)
+    // A type-carried expression that COMPUTES (anything but literals, names
+    // and scalar arithmetic) runs at its type's materialization, outside what
+    // the shared write analysis walks: its effects are unaudited.
+    let typeCarriedSimple (e: IRExpr) =
+        let rec simple (x: IRExpr) =
+            match x with
+            | IRLit _ | IRVar _ | IRParam _ -> true
+            | IRBinOp (_, _, a, b, _) -> simple a && simple b
+            | IRUnaryOp (_, a) -> simple a
+            | _ -> false
+        match typeCarried e with
+        | None -> false
+        | Some xs -> xs |> List.forall simple
+    // What an expression can EXECUTE beyond its own tree, transitively: the
+    // callables it names (their bodies, and the expressions their types
+    // carry) and the MODULE BINDINGS it names -- a deferred binding runs its
+    // initializer where it is forced, and a binding's side-table operands
+    // (compound / sparse / random) run at its site -- with the payloads of
+    // those bindings (Codex review round 5: a deferred map whose producer
+    // called a writer in a range bound was reached by the write analysis but
+    // not by the type-effect audit). Returns the callables and the payloads.
+    let moduleBindingById = modul.Bindings |> List.map (fun b -> b.Id, b) |> Map.ofList
+    let reachableFrom (roots: IRExpr list) : IRCallable list * IRExpr list =
+        let seen = System.Collections.Generic.HashSet<IRId>()
+        let out = ResizeArray<IRCallable>()
+        let payloads = ResizeArray<IRExpr>()
+        let rec visit (e: IRExpr) =
+            let extents = match typeCarried e with Some xs -> xs | None -> []
+            for x in e :: extents do
+                iterIRExpr (fun n ->
+                    match n with
+                    | IRVar (id, _) when seen.Add id ->
+                        (match callables.TryGetValue id with
+                         | true, c -> out.Add c; visit c.Body
+                         | _ ->
+                            match Map.tryFind id moduleBindingById with
+                            | Some b ->
+                                let p = bindingPayloadExpr modul b
+                                payloads.Add p
+                                visit p
+                            | _ -> ())
+                    | _ -> ()) x
+        roots |> List.iter visit
+        List.ofSeq out, List.ofSeq payloads
+    let reachableCallables (roots: IRExpr list) : IRCallable list = fst (reachableFrom roots)
+    let boundInBlock (blk: IRExpr) (id: IRId) =
+        let mutable hit = false
+        iterIRExpr (fun x -> match x with IRLet (b, _, _) when b = id -> hit <- true | _ -> ()) blk
+        hit
+    let staticExt (ix: IRIndexType) = match ix.Extent with IRLit (IRLitInt v) -> Some v | _ -> None
+    let plainIx (ix: IRIndexType) = ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank = 1
+    let scalarTy (t: IRType) = match t with IRTScalar _ -> true | _ -> false
+    let totalCallable (c: IRCallable) =
+        match IRTotality.auditCallable resolveE (fun _ -> None) (fun _ -> false) c [] with
+        | Ok () -> true
+        | Error _ -> false
+    let totalExpr (e: IRExpr) =
+        match IRTotality.walk resolveE (fun _ -> None) (fun _ -> false) Map.empty Map.empty Set.empty Set.empty Set.empty e with
+        | Ok _ -> true
+        | Error _ -> false
+    let plainScalarCallable (arity: int) (c: IRCallable) =
+        c.Params.Length = arity && c.Captures.IsEmpty && not c.IsStatic && not c.IsOmpParallel
+        && not c.IsCudaKernel && not c.IsMpiParallel && not c.IsArityPoly && scalarTy c.RetType
+    // A row kernel K of a rank-2 trajectory: its one parameter is the row.
+    // Total when IRTotality admits its body with the row bound as a plain
+    // value, or the body is one of the two row forms that whitelist does not
+    // list: a fold over the row (non-empty static extent, or seeded) whose
+    // kernel and seed are total, and the self-dot / dot of the row.
+    let rowKernelTotal (rowCells: int64) (k: IRCallable) =
+        match k.Params with
+        | [ p ] ->
+            // Each row form is judged on its own; the rest of the body, those
+            // forms replaced by a scalar literal of the row's element type,
+            // must pass the whitelist with the row bound as a plain value.
+            let mutable ok = true
+            let rowElem = match p.Type with ArrayElem at -> Some at.ElemType | _ -> None
+            let floatRow = match rowElem with Some (IRTScalar (ETFloat64 | ETFloat32)) -> true | _ -> false
+            let lit =
+                match rowElem with
+                | Some (IRTScalar ETFloat64) -> Some (IRLit (IRLitFloat 0.0))
+                | Some (IRTScalar ETFloat32) -> Some (IRLit (IRLitFloat32 0.0f))
+                | Some (IRTScalar ETInt64) -> Some (IRLit (IRLitInt 0L))
+                | _ -> None
+            let isRow (e: IRExpr) = match e with IRVar (r, _) -> r = p.VarId | _ -> false
+            match lit with
+            | None -> false
+            | Some lit ->
+            let rest =
+                mapIRExpr (fun x ->
+                    match x with
+                    | IRReduce (r, f2, s2) when isRow r ->
+                        let fine =
+                            (s2.IsSome || rowCells >= 1L)
+                            && (match resolveE f2 with Some fc -> plainScalarCallable 2 fc && totalCallable fc | None -> false)
+                            && (match s2 with Some s -> totalExpr s | None -> true)
+                        if not fine then ok <- false
+                        lit
+                    | IRProdSum args when not args.IsEmpty && args |> List.forall isRow ->
+                        if not floatRow then ok <- false
+                        lit
+                    | _ -> x) k.Body
+            ok
+            && (match IRTotality.walk resolveE (fun _ -> None) (fun _ -> false) Map.empty Map.empty
+                                      (Set.singleton p.VarId) (Set.singleton p.Name) (Set.singleton k.Id) rest with
+                | Ok _ -> true
+                | Error _ -> false)
+        | _ -> false
+    let record (subject: string) outcome evidence =
+        Blade.Effects.Decisions.record
+            { Blade.Effects.Rule = "rec-fold-ring"; Version = 1
+              Span = Blade.Ast.noSpan; Subject = subject
+              Outcome = outcome; Evidence = evidence }
+    let mutable subject = ""
+    let mutable enclosingRepro = false
+    // The callable whose body is being rewritten (its own body holds the
+    // region; every OTHER callable naming T or BUF reads it from outside).
+    let mutable currentFn : IRId = -1
+    // The module binding whose value is being rewritten (-1: a function).
+    let mutable currentBinding : IRId = -1
+    // EVERY channel other than the body being rewritten that can name `id`
+    // (the trajectory T or its buffer): the first one found, or None. The
+    // census and the buffer audit classify the body's own mentions; any
+    // OTHER naming is unclassified and declines. Channels (exhaustive over
+    // what can carry an IRId or an expression):
+    //   - callables (every module's, incl. lifted lambdas and named
+    //     functions) other than the one being rewritten: captures, body,
+    //     expressions embedded in the body's types, parameter and return
+    //     types' extents;
+    //   - module bindings other than the one being rewritten: value, the
+    //     extents of its type;
+    //   - the module's side tables: CompoundInits / SparseInits / RandomInits
+    //     operands and keys, ProviderWrites' source and keys, ProviderReads'
+    //     keys (its spec carries no expression). MutableArrayLets is ADMITTED: the
+    //     desugar records both its buffer and the let rec binding there, and an
+    //     assignment to either is a tree node the census / audit classifies.
+    // Side tables the optimizer's LATER passes fill (pool reuse, CSE facts,
+    // hot-row / member / compaction / join / orbit / group / alias plans,
+    // sibling folds, epilogue legs, pool-scope events) are computed over the
+    // REWRITTEN tree, where the ring is an ordinary local buffer; the two
+    // filled BEFORE this pass (RecStepTable, CellFoldTable) name the buffer
+    // by design and their emitters re-verify the store shape (the threaded
+    // step through `recStepFoldForm`).
+    let foreignNaming (id: IRId) (isT: bool) : string option =
+        let inTypes (t: IRType) = irTypeExtentExprs t |> List.exists (mentions id)
+        let callable =
+            callables.Values |> Seq.tryFind (fun f ->
+                f.Id <> currentFn
+                && (f.Captures |> List.exists (fun c -> c.Id = id) || mentions id f.Body || mentionsInTypes id f.Body
+                    || f.Params |> List.exists (fun p -> inTypes p.Type) || inTypes f.RetType))
+        match callable with
+        | Some f -> Some $"a callable (`{f.SourceName}`) names it (a capture, its body, or a type it carries)"
+        | None ->
+        let binding =
+            modul.Bindings |> List.tryFind (fun b ->
+                b.Id <> currentBinding && (mentions id b.Value || mentionsInTypes id b.Value || inTypes b.Type))
+        match binding with
+        | Some b -> Some $"the module binding `{b.Name}` names it"
+        | None ->
+        let sideKeys =
+            Seq.concat [ modul.CompoundInits |> Map.toSeq |> Seq.map fst; modul.SparseInits |> Map.toSeq |> Seq.map fst
+                         modul.RandomInits |> Map.toSeq |> Seq.map fst; modul.ProviderWrites |> Map.toSeq |> Seq.map fst
+                         modul.ProviderReads |> Map.toSeq |> Seq.map fst ]
+            |> Seq.distinct |> List.ofSeq
+        if sideKeys |> List.contains id then Some "a module side table (compound / sparse / random / provider) is keyed by it"
+        elif sideKeys |> List.exists (fun k -> bindingSideOperands modul k |> List.exists (fun e -> mentions id e || mentionsInTypes id e)) then
+            Some "a module side-table operand (compound / sparse / random) names it"
+        elif modul.ProviderWrites |> Map.exists (fun _ w -> w.SourceId = id) then Some "a provider write reads it"
+        else None
+    // ---- the ring audit -------------------------------------------------
+    // The leading subscript of one buffer READ: the lag it may select (Some
+    // c, c >= 1), a current-row read (Some 0), a seed row (literal), or why
+    // the ring cannot hold it. Guarded forms return the guard conditions their
+    // clamp needs to hold for the read to be selected.
+    let rec clampOf (n: IRId) (hi: int64) (e: IRExpr) : Result<int64 option * IRExpr list, string> =
+        let leafOf (x: IRExpr) =
+            match x with
+            | IRUnaryOp (IRCast (ETInt64, _), leaf) | leaf -> leaf
+        let leafLag (leaf: IRExpr) =
+            match leaf with
+            | IRBinOp (_, IRSub, IRVar (v, _), IRLit (IRLitInt c), _) when v = n && c >= 1L -> Some (Some c)   // n - c: selected only under `>= 0`
+            | IRBinOp (_, IRAdd, IRVar (v, _), IRLit (IRLitInt c), _) when v = n && c >= 0L && c <= hi && hi > 0L && c <= System.Int64.MaxValue - (hi - 1L) -> Some None   // n + c: never selected under `< n` (c <= the extent: no Int64 wrap for n < extent)
+            | IRVar (v, _) when v = n -> Some None                                                                 // n: never selected under `< n`
+            | _ -> None
+        let condOk (leaf: IRExpr) (c: IRExpr) =
+            match c with
+            | IRBinOp (_, IRGe, l, IRLit (IRLitInt 0L), _) -> l = leaf
+            | IRBinOp (_, IRLt, l, IRVar (v, _), _) -> l = leaf && v = n
+            | _ -> false
+        match e with
+        | IRIf (_, IRIf _, _) -> Error "a doubly guarded trajectory read (v1 audits the single zero-history clamp)"
+        | IRIf (c, inner, IRLit (IRLitInt 0L)) ->
+            let leaf = leafOf inner
+            (match leafLag leaf with
+             | Some lag ->
+                // the clamp's guard must be the bound its leaf needs: a lag
+                // `n - c` selected only when `n - c >= 0`; a current / future
+                // row `n + c` only when `n + c < n` (never)
+                let need = match lag with Some _ -> IRGe | None -> IRLt
+                (match c with
+                 | IRBinOp (_, op, _, _, _) when op = need && condOk leaf c -> Ok (lag, [ c ])
+                 | _ -> Error "a guarded trajectory read whose guard is not the zero-history bound of its own index")
+             | None -> Error "a guarded trajectory read at a leading index that is not `n - c`, `n + c` or `n`")
+        | _ -> Error "a trajectory read whose leading index is a select other than the zero-history clamp"
+    // The audit proper. Ok (K, ringable reason text) or the first failure.
+    let auditRegion (bufId: IRId) (bufT: IRType) (pre: (IRId * IRExpr) list) (n: IRId) (lo: int64) (hi: int64)
+                    (step: (IRId * IRExpr) list) : Result<int64, string> =
+        let mutable bad : string option = None
+        let fail (why: string) = if bad.IsNone then bad <- Some why
+        let mutable maxLag = 0L
+        // A guarded lag at or past the extent is never selected, but it would
+        // size the ring (and K + 1 could overflow): v1 declines it.
+        let noteLag (c: int64) =
+            if c >= hi then fail "a guarded lag at or beyond the recursion's extent (never selected; v1 declines it rather than size a ring by it)"
+            elif c > maxLag then maxLag <- c
+        let trailing = match bufT with ArrayElem at -> at.IndexTypes.Tail | _ -> []
+        let cells = match trailing with [ ix ] -> staticExt ix | [] -> Some 1L | _ -> None
+        // Classify every BUF mention of `e`. `ctx` = the conditions of the
+        // enclosing then-branches; `rawConds` = let-bound guarded views and
+        // the conditions their uses need; `phase`: 0 = before the row's
+        // writer (lags only), 1 = after it (lags and the current row), 2 =
+        // a seed statement after the seed writer (row reads < lo).
+        let rec walk (phase: int) (ctx: IRExpr list) (raws: Map<IRId, IRExpr list>) (e: IRExpr) : unit =
+            if bad.IsSome then () else
+            match e with
+            | IRAssign (IRIndex (IRVar (b, _), _, _), _) when b = bufId -> fail "a second store into the trajectory"
+            | IRAssign (IRVar (b, _), _) when b = bufId -> fail "a whole-array assignment of the trajectory"
+            | IRIndex (IRVar (b, _), i0 :: rest, _) when b = bufId ->
+                rest |> List.iter (walk phase ctx raws)
+                (match i0 with
+                 | IRLit (IRLitInt r) when phase = 2 && r >= 0L && r < lo -> ()
+                 | IRLit _ -> fail "a read of a FIXED row inside the sweep (its slot would have to outlive the sweep)"
+                 | IRVar (v, _) when v = n -> if phase <> 1 then fail "a read of the current row before its complete write"
+                 | IRBinOp (_, IRSub, IRVar (v, _), IRLit (IRLitInt c), _) when v = n && c >= 1L && c <= lo ->
+                    if c > maxLag then maxLag <- c
+                 | IRIf _ ->
+                    (match clampOf n hi i0 with
+                     | Ok (lag, conds) ->
+                        (match lag with Some c -> noteLag c | None -> ())
+                        if not (conds |> List.forall (fun c -> List.contains c ctx)) then
+                            fail "a guarded trajectory read used outside its guard (the clamp's slot could hold another row)"
+                     | Error why -> fail why)
+                 | _ -> fail "a trajectory read at a leading index the ring audit cannot bound (not `n - c`, a guarded lag, the current row or a seed row)")
+            | IRVar (b, _) when b = bufId -> fail "the trajectory is used whole inside the recursion (an alias, an argument or a view of the whole buffer)"
+            | IRVar (r, _) when raws.ContainsKey r ->
+                if not (raws.[r] |> List.forall (fun c -> List.contains c ctx)) then
+                    fail "a guarded row view used outside its guard (the clamp's slot could hold another row)"
+            | IRLet (id, (IRIndex (IRVar (b, _), (IRIf _ as i0) :: rest, _) as v), body) when b = bufId ->
+                // A hoisted guarded row view: forming it is safe (an in-range
+                // slot); every USE must sit under the guard.
+                rest |> List.iter (walk phase ctx raws)
+                (match clampOf n hi i0 with
+                 | Ok (lag, conds) ->
+                    (match lag with Some c -> noteLag c | None -> ())
+                    walk phase ctx (Map.add id conds raws) body
+                 | Error why -> fail why)
+            | IRIf (c, a, b) ->
+                walk phase ctx raws c
+                walk phase (c :: ctx) raws a
+                walk phase ctx raws b
+            | ExprShape (children, _) -> children |> List.iter (walk phase ctx raws)
+        // Callables never see the buffer (a capture would read it whole).
+        (match foreignNaming bufId false with
+         | Some why -> fail ("the trajectory's buffer is named outside the recursion: " + why)
+         | None -> ())
+        // a buffer read hidden in a type (a range's extent ..) is outside
+        // every classified site
+        if (pre |> List.exists (fun (_, v) -> mentionsInTypes bufId v)) || (step |> List.exists (fun (_, v) -> mentionsInTypes bufId v)) then
+            fail "the trajectory's buffer is read inside a type's extent (a range bound or an index extent: not a classified read)"
+        // The seed: lo = 1 needs exactly one writer of row 0, complete.
+        let isRowWriter (rowIdx: IRExpr -> bool) (v: IRExpr) =
+            match v with
+            | IRAssign (IRIndex (IRVar (b, _), [ i0 ], _), _) when b = bufId && trailing.IsEmpty -> rowIdx i0
+            | IRForRange (k, IRLit (IRLitInt 0L), IRLit (IRLitInt m), cellBody) when Some m = cells && trailing.Length = 1 ->
+                let cs, cfin = chainOf cellBody
+                (match List.tryLast cs, cfin with
+                 | Some (_, IRAssign (IRIndex (IRVar (b, _), [ i0; IRVar (k2, _) ], _), _)), IRLit IRLitUnit ->
+                    b = bufId && k2 = k && rowIdx i0
+                 | _ -> false)
+            | _ -> false
+        let writerValue (v: IRExpr) : IRExpr =
+            // the writer's own reads (its value / cell chain minus the store)
+            match v with
+            | IRAssign (IRIndex (_, _, _), rhs) -> rhs
+            | IRForRange (_, _, _, cellBody) ->
+                let cs, _ = chainOf cellBody
+                let lets = cs |> List.take (cs.Length - 1)
+                let rhs = match List.last cs with (_, IRAssign (_, r)) -> r | _ -> IRLit IRLitUnit
+                rebuild lets rhs
+            | _ -> v
+        let preWriters = pre |> List.filter (fun (_, v) -> mentions bufId v && isRowWriter (fun i -> i = IRLit (IRLitInt 0L)) v)
+        if lo = 1L && preWriters.Length <> 1 then fail "the seed does not write row 0 exactly once and completely"
+        elif lo = 0L && not preWriters.IsEmpty then fail "a statement before a seedless recursion writes the trajectory"
+        elif lo <> 0L && lo <> 1L then fail "the recursion loop starts past row 1"
+        let mutable seenSeed = false
+        for (_, v) in pre do
+            if bad.IsNone && mentions bufId v then
+                if isRowWriter (fun i -> i = IRLit (IRLitInt 0L)) v && not seenSeed then
+                    seenSeed <- true
+                    if mentions bufId (writerValue v) then fail "the seed row reads the trajectory"
+                elif seenSeed then walk 2 [] Map.empty v
+                else fail "a statement before the seed reads the trajectory"
+        // A value bound before the sweep from the seed rows (a row view of
+        // row 0) must not be used inside it: row 0's slot is overwritten R
+        // steps later. Closed transitively over the pre-sweep lets.
+        let preViews =
+            let mutable s = pre |> List.filter (fun (_, v) -> mentions bufId v) |> List.map fst |> Set.ofList
+            let mutable grow = true
+            while grow do
+                grow <- false
+                for (id, v) in pre do
+                    if not (s.Contains id) && (s |> Set.exists (fun x -> mentions x v)) then
+                        s <- s.Add id
+                        grow <- true
+            s
+        if step |> List.exists (fun (_, v) -> preViews |> Set.exists (fun x -> mentions x v || mentionsInTypes x v)) then
+            fail "a value read from the seed rows before the sweep is used inside it (row 0's slot is overwritten R steps later)"
+        // The step: exactly one complete writer of row n; before it lags only.
+        let isN (i: IRExpr) = match i with IRVar (v, _) -> v = n | _ -> false
+        let writers = step |> List.filter (fun (_, v) -> isRowWriter isN v)
+        if writers.Length <> 1 then fail "the step does not write row n exactly once and completely (a conditional, partial or second writer)"
+        let mutable phase = 0
+        // Raw guarded views are let-bound in the STEP's own spine (the
+        // desugar hoists them before the writer); thread them through.
+        let mutable raws : Map<IRId, IRExpr list> = Map.empty
+        for (id, v) in step do
+            if bad.IsNone then
+                if phase = 0 && isRowWriter isN v then
+                    walk 0 [] raws (writerValue v)
+                    phase <- 1
+                else
+                    match v with
+                    | IRIndex (IRVar (b, _), (IRIf _ as i0) :: rest, _) when b = bufId ->
+                        rest |> List.iter (walk phase [] raws)
+                        (match clampOf n hi i0 with
+                         | Ok (lag, conds) ->
+                            (match lag with Some c -> noteLag c | None -> ())
+                            raws <- Map.add id conds raws
+                         | Error why -> fail why)
+                    | _ -> walk phase [] raws v
+        match bad with
+        | Some why -> Error why
+        | None -> Ok maxLag
+    // ---- consumers ------------------------------------------------------
+    // (kind, node) per use of T; the rewrite replaces each node.
+    let tryRegion (tId: IRId) (block: IRExpr) (body: IRExpr) : (Result<IRExpr, string> * string list) option =
+        match block with
+        | IRLet (bufId, IRUninit bufT, chain) ->
+            let stmts, fin = chainOf chain
+            match fin, List.tryLast stmts, bufT with
+            | IRVar (b, _), Some (loopId, IRForRange (nId, IRLit (IRLitInt lo), IRLit (IRLitInt hi), stepBody)), ArrayElem at
+                    when b = bufId && not at.IsVirtual ->
+                let pre = stmts |> List.take (stmts.Length - 1)
+                let rank = at.IndexTypes.Length
+                let lead = at.IndexTypes.Head
+                let trailingCells =
+                    match at.IndexTypes.Tail with
+                    | [] -> Some 1L
+                    | [ ix ] when plainIx ix -> staticExt ix
+                    | _ -> None
+                let elem = at.ElemType
+                let evidenceBase = [ $"the {hi}-row trajectory ({hi} x {defaultArg trailingCells 0L} cells)" ]
+                let decline (why: string) = Some (Error why, evidenceBase)
+                if staticExt lead <> Some hi || not (plainIx lead) then decline "the recursion loop does not run over the buffer's whole leading axis"
+                elif rank > 2 || trailingCells.IsNone then decline "v1 rings rank-1 and rank-2 trajectories with a static plain trailing axis"
+                elif not (scalarTy elem) then decline "the trajectory's cells are not scalars"
+                else
+                let stepStmts, stepFin = chainOf stepBody
+                if stepFin <> IRLit IRLitUnit then decline "the step does not end in unit (an early exit or a value)" else
+                let mutable breaks = false
+                iterIRExpr (fun x -> match x with IRBreakIf _ -> breaks <- true | _ -> ()) chain
+                if breaks then decline "a `while` guard or the freeze idiom (its epilogue repeats the last written row)" else
+                // The type-carried walk is unbounded in depth but budgeted:
+                // an exhausted budget is its own recorded decline (every check
+                // built on the walk also fails closed on it).
+                if (typeCarried chain).IsNone || (typeCarried body).IsNone then
+                    decline "the expressions the region's types carry exceed the type-carried walk's budget (200000 nodes): fail closed" else
+                // ---- the consumers in `body`
+                let consumers = System.Collections.Generic.List<string * IRExpr>()
+                let mutable cbad : string option = None
+                let cfail (why: string) = if cbad.IsNone then cbad <- Some why
+                let isT (e: IRExpr) = match e with IRVar (t, _) -> t = tId | _ -> false
+                // A callable (a lambda) reading the trajectory reads it whole,
+                // from a body this scan does not walk: decline.
+                (match foreignNaming tId true with
+                 | Some why -> cfail ("the trajectory is named outside its block: " + why + " -- a read this census cannot classify")
+                 | None -> ())
+                let rec gridNest (e: IRExpr) =
+                    match e with
+                    | IRLet (acc, seed, IRLet (_, IRForRange (a, IRLit (IRLitInt 0L), IRLit (IRLitInt ha), IRLet (_, IRForRange (bv, IRLit (IRLitInt 0L), IRLit (IRLitInt hb), IRLet (_, IRAssign (IRVar (acc2, _), comb), IRLit IRLitUnit)), IRLit IRLitUnit)), cont))
+                        when acc = acc2 && rank = 2 && ha = hi && Some hb = trailingCells
+                             // EXACTLY the desugar's combine: `acc OP T(a, b)`
+                             // or `k(acc, T(a, b))` -- nothing else reads a
+                             // coordinate, so the moved combine is closed
+                             && (let isRead (r: IRExpr) =
+                                     match r with
+                                     | IRIndex (IRVar (t, _), [ IRVar (ia, _); IRVar (ib, _) ], _) -> t = tId && ia = a && ib = bv
+                                     | _ -> false
+                                 match comb with
+                                 | IRBinOp (_, _, IRVar (a2, _), rd, _) -> a2 = acc && isRead rd
+                                 | IRApp (IRVar _, [ IRVar (a2, _); rd ], _) -> a2 = acc && isRead rd
+                                 | _ -> false) ->
+                        Some (acc, seed, a, bv, comb, cont)
+                    | _ -> None
+                let rec find (cond: bool) (e: IRExpr) : unit =
+                    if cbad.IsSome || not (mentions tId e) then () else
+                    match e with
+                    | IRReduce (t, _, _) when isT t ->
+                        if cond then cfail "a fold of the trajectory sits in a branch or loop body (v1 rides unconditional consumers)"
+                        else consumers.Add ("C1", e)
+                    | IRReduceCompute (IRApplyCombinator info, _, _) when (match info.Arrays with [ t ] -> isT t | _ -> false) ->
+                        if cond then cfail "a fold of the trajectory sits in a branch or loop body (v1 rides unconditional consumers)"
+                        else consumers.Add ("C2", e)
+                    | IRCompute (IRApplyCombinator info) when (match info.Arrays with [ t ] -> isT t | _ -> false) ->
+                        if cond then cfail "a row map of the trajectory sits in a branch or loop body (v1 rides unconditional consumers)"
+                        else consumers.Add ("C3", e)
+                    | _ when (gridNest e).IsSome ->
+                        let (_, seed, _, _, comb, cont) = (gridNest e).Value
+                        if cond then cfail "a fold of the trajectory sits in a branch or loop body (v1 rides unconditional consumers)"
+                        else consumers.Add ("C4", e)
+                        find cond seed
+                        if mentions tId comb && count tId comb <> 1 then cfail "the accumulator nest reads the trajectory twice"
+                        find cond cont
+                    | IRIndex (t, _, _) when isT t -> cfail "a fixed-row read of the trajectory after the recursion (rec-window's snapshots ride the surface only; a ring beside snapshots is v1.1)"
+                    | IRVar (t, _) when t = tId -> cfail "the trajectory is used whole after the recursion (an escape: a value, an argument, an alias, a transpose or another operand)"
+                    | IRIf (c, a, b) -> find cond c; find true a; find true b
+                    | IRMatch _ -> (match e with ExprShape (ch, _) -> ch |> List.iter (find true) | _ -> ())
+                    | IRForRange (_, l, h, b) -> find cond l; find cond h; find true b
+                    | IRBinOp (_, (IRAnd | IROr), a, b, _) -> find cond a; find true b
+                    | ExprShape (children, _) -> children |> List.iter (find cond)
+                find false body
+                if mentionsInTypes tId body then
+                    cfail "the trajectory is read inside a type's extent after the recursion (a range bound or an index extent: not a classified consumer)"
+                match cbad with
+                | Some why -> decline why
+                | None ->
+                // (`find` classifies every subtree that mentions T: a mention
+                // outside a consumer node reaches its IRVar arm and declines;
+                // the rewrite re-checks that no mention survives.)
+                // ---- ring audit
+                match auditRegion bufId bufT pre nId lo hi stepStmts with
+                | Error why -> decline why
+                | Ok k ->
+                let r = k + 1L
+                if not (r < hi && r <= max 8L (hi / 4L)) then
+                    decline $"dense coverage: a {r}-row ring (max lag K = {k}) against an extent of {hi}"
+                else
+                // ---- the threaded step (C++ persistent team)
+                let stepEntry = RecStepTable.tryStep nId |> Option.filter (fun en -> en.BufferId = bufId)
+                let rowVec = match elem with IRTScalar (ETFloat64 | ETFloat32) -> true | _ -> false
+                let strict = Blade.Toolchain.fpReproEnabled () || enclosingRepro
+                let teamForm =
+                    match stepEntry with
+                    | Some en -> Some (recStepFoldForm strict (foldLanesSwitchedOff ()) rowVec en.Fold.Value)
+                    | None -> None
+                if Blade.Toolchain.ompThreadEmissionEnabled () && teamForm = Some RecStepStrictPostPass then
+                    decline "the threaded step's strict post-pass folds COMPLETE rows after the team (BLADE_FP_REPRO=1, `where repro`, a row kernel other than the self-dot, or lanes off): the trajectory must stay whole"
+                else
+                // ---- per-consumer admission
+                // Replace each consumer node (by reference) through `by`.
+                let replaceNodes (table: (IRExpr * IRExpr) list) (e: IRExpr) =
+                    let rec go (x: IRExpr) =
+                        match table |> List.tryFind (fun (n0, _) -> obj.ReferenceEquals (n0, x)) with
+                        | Some (_, by) -> go by
+                        | None ->
+                            match x with
+                            | ExprShape ([], _) -> x
+                            | ExprShape (children, rb) -> rb (children |> List.map go)
+                    go e
+                let interval =
+                    // every statement of `rest` up to (and including) the one
+                    // holding the last consumer, each consumer node masked by
+                    // a sentinel (a C4 nest keeps its continuation): the
+                    // consumers' own state writes are not the interval's
+                    // (the sentinel is T's own id -- no use of T survives the
+                    // masking, and minting ids here would shift every id a
+                    // declined region's program emits)
+                    let sentinel = tId
+                    let sV = IRVar (sentinel, IRTUnit)
+                    let masked =
+                        replaceNodes
+                            (consumers |> List.ofSeq |> List.map (fun (kind, node) ->
+                                if kind = "C4" then
+                                    let (_, _, _, _, _, cont) = (gridNest node).Value
+                                    node, IRLet (sentinel, sV, cont)
+                                else node, sV)) body
+                    let ss, fin = chainOf masked
+                    let rec upTo (acc: IRExpr list) (xs: (IRId * IRExpr) list) =
+                        match xs with
+                        | [] -> List.rev (fin :: acc)
+                        | (_, v) :: t ->
+                            let acc' = v :: acc
+                            if mentions sentinel (rebuild t fin) then upTo acc' t else List.rev acc'
+                    upTo [] ss
+                let boundInBody =
+                    let s = System.Collections.Generic.HashSet<IRId>()
+                    iterIRExpr (fun x -> match x with IRLet (id, _, _) -> s.Add id |> ignore | IRForRange (id, _, _, _) -> s.Add id |> ignore | _ -> ()) body
+                    iterIRExpr (fun x -> match x with IRLet (id, _, _) -> s.Add id |> ignore | _ -> ()) block
+                    s
+                let assigned =
+                    let s = System.Collections.Generic.HashSet<IRId>()
+                    iterIRExpr (fun x -> match x with IRAssign (IRVar (id, _), _) -> s.Add id |> ignore | _ -> ()) body
+                    iterIRExpr (fun x -> match x with IRAssign (IRVar (id, _), _) -> s.Add id |> ignore | _ -> ()) block
+                    s
+                // A seed moves ahead of the recursion: it must be CLOSED over
+                // values that dominate it -- literals, scalar arithmetic,
+                // casts, selects and reads of scalars bound before the
+                // recursion and never assigned. No call, no callable, no
+                // array form (a lambda's body could read a later binding).
+                let seedOk (s: IRExpr) =
+                    let rec closed (x: IRExpr) =
+                        match x with
+                        | IRLit _ -> true
+                        | IRVar (id, ty) ->
+                            not (callables.ContainsKey id) && not (boundInBody.Contains id) && not (assigned.Contains id)
+                            && (match ty with IRTScalar _ -> true | _ -> false)
+                        | IRBinOp (_, _, a, b, _) -> closed a && closed b
+                        | IRUnaryOp (_, a) -> closed a
+                        | IRIf (c, a, b) -> closed c && closed a && closed b
+                        | _ -> false
+                    closed s && totalExpr s && not (writes s)
+                let foldKernelOk (fk: IRExpr) (f: IRCallable) = plainScalarCallable 2 f && totalCallable f && not (writes fk)
+                let rowCells = defaultArg trailingCells 1L
+                let mapKernelOk (info: ApplyInfo) =
+                    not info.HasReynolds && not info.IsCoIteration && info.KernelOutputRank = 0
+                    && (match resolveE info.Kernel with
+                        | Some kc ->
+                            kc.Params.Length = 1 && kc.Captures.IsEmpty && not kc.IsStatic && not kc.IsOmpParallel
+                            && not kc.IsCudaKernel && not kc.IsMpiParallel && not kc.IsArityPoly && scalarTy kc.RetType
+                            && (if rank = 2 then rowKernelTotal rowCells kc else totalCallable kc)
+                            && not (writes info.Kernel)
+                        | None -> false)
+                let admit (kind: string, node: IRExpr) : Result<string, string> =
+                    match kind, node with
+                    | "C1", IRReduce (_, fk, init) ->
+                        if rank <> 1 then Error "a whole-array fold of a rank-2 trajectory that is not the default partial fold"
+                        else
+                        (match resolveE fk with
+                         | Some f when f.IsOmpParallel -> Error "the fold kernel requests omp (a fused serial chain would drop the request)"
+                         | Some f when foldKernelOk fk f ->
+                            (match init with
+                             | Some s when not (seedOk s) -> Error "the fold's seed may panic, write, or read a value bound or assigned after the recursion"
+                             | None when lo = 0L && not (match elem with IRTScalar (ETFloat64 | ETFloat32 | ETInt64) -> true | _ -> false) -> Error "an unseeded fold over a recursion with no seed arm, of a cell type the placeholder state cannot hold"
+                             | None when lo = 0L -> Ok "a full fold of the rank-1 trajectory with no seed arm: acc <- (n == 0 ? x(0) : F(acc, x(n))) after each row, ascending from row 0"
+                             | _ -> Ok "a full fold of the rank-1 trajectory: acc <- F(acc, x(n)) after each row, ascending")
+                         | Some _ -> Error "the fold kernel is not a pure total capture-free scalar kernel"
+                         | None -> Error "the fold kernel does not resolve to a callable")
+                    | "C2", IRReduceCompute (IRApplyCombinator info, fk, init) ->
+                        (match resolveE fk with
+                         | Some f when f.IsOmpParallel -> Error "the fold kernel requests omp (a fused serial chain would drop the request)"
+                         | Some f when foldKernelOk fk f && mapKernelOk info ->
+                            if not (seedOk init) then Error "the fold's seed may panic, write, or read a value bound or assigned after the recursion"
+                            else Ok "a fold over a map of the trajectory: acc <- F(acc, K(x(n))) after each row, ascending from the seed"
+                         | Some _ -> Error "the map or fold kernel is not a pure total capture-free scalar kernel (or the map is not a plain row map)"
+                         | None -> Error "the fold kernel does not resolve to a callable")
+                    | "C3", IRCompute (IRApplyCombinator info) ->
+                        if not (mapKernelOk info) then Error "the row map's kernel is not a pure total capture-free scalar kernel of one row (or the map is not plain)"
+                        else
+                        (match info.OutputType with
+                         | ArrayElem ot when ot.IndexTypes.Length = 1 && staticExt ot.IndexTypes.Head = Some hi && not ot.IsVirtual ->
+                            Ok "a row map of the trajectory: out(n) <- K(x(n)) right after each row (out is stored)"
+                         | _ -> Error "the row map's output is not a dense vector over the recursion axis")
+                    | "C4", _ ->
+                        let (_, seed, _, _, comb, _) = (gridNest node).Value
+                        let combOk =
+                            match comb with
+                            | IRBinOp (_, op, IRVar _, _, _) ->
+                                (match op, elem with
+                                 | (IRAdd | IRSub | IRMul), _ -> true
+                                 | IRDiv, IRTScalar (ETFloat64 | ETFloat32) -> true
+                                 | _ -> false)
+                            | IRApp (kf, [ IRVar _; _ ], _) ->
+                                (match resolveE kf with Some f -> not f.IsOmpParallel && foldKernelOk kf f | None -> false)
+                            | _ -> false
+                        if not combOk then Error "the accumulator nest's combine may panic or is not a pure total kernel"
+                        elif not (seedOk seed) then Error "the fold's seed may panic, write, or read a value bound or assigned after the recursion"
+                        else Ok "the rank-2 full fold: for j, acc <- op(acc, x(n, j)) right after each row (the nest's own row-major chain)"
+                    | _ -> Error "internal: unknown consumer"
+                let verdicts = consumers |> Seq.map (fun c -> c, admit c) |> List.ofSeq
+                match verdicts |> List.tryPick (fun (_, v) -> match v with Error why -> Some why | Ok _ -> None) with
+                | Some why -> decline why
+                | None ->
+                // The producer writes nothing outside its buffer (ring or
+                // not, consumers or not): a write is how a row VIEW could
+                // escape the step it was formed in (a callee storing its
+                // argument in a module array outlives the row's slot). The one
+                // exemption is a SCALAR accumulator bound outside the region
+                // -- row-fold fusion's own in-sweep fold state -- which cannot
+                // hold a view; its value is still audited.
+                // The CHAIN without the buffer's binder (so the buffer counts as
+                // outside storage), the classified row stores replaced by their
+                // values (the audit proved they are the only syntactic stores),
+                // and assignments to SCALAR lets bound outside the region
+                // masked: what remains must write NOTHING -- no write into an
+                // earlier row through a view, an alias or a `mut` parameter
+                // (the moved folds read rows once, right after their write),
+                // no storage a row view could escape into.
+                let chainMasked =
+                    let outsideScalar (id: IRId) (t: IRType) =
+                        (match t with IRTScalar _ -> true | _ -> false) && not (boundInBlock block id)
+                    mapIRExpr (fun x ->
+                        match x with
+                        | IRAssign (IRIndex (IRVar (b, _), _, _), v) when b = bufId -> v
+                        | IRAssign (IRVar (id, t), v) when outsideScalar id t -> v
+                        | _ -> x) chain
+                // Effects hidden in type-carried expressions (a range bound
+                // that calls) are outside the write analysis: every expression
+                // the region and the callables it reaches carry in types must
+                // be literals, names and scalar arithmetic.
+                let typesQuiet (roots: IRExpr list) =
+                    let cs, payloads = reachableFrom roots
+                    roots |> List.forall typeCarriedSimple
+                    && payloads |> List.forall typeCarriedSimple
+                    && cs |> List.forall (fun c ->
+                        typeCarriedSimple c.Body
+                        && (c.RetType :: (c.Params |> List.map (fun p -> p.Type)))
+                           |> List.forall (fun t -> irTypeExtentExprs t |> List.forall typeCarriedSimple
+                                                     && irTypeExtentExprs t |> List.forall (fun e -> match e with IRLit _ | IRVar _ | IRParam _ | IRBinOp _ | IRUnaryOp _ -> true | _ -> false)))
+                if writes chainMasked then
+                    decline "the recursion may write storage other than its own row stores (an earlier row through a view, an alias or a `mut` parameter, or storage a row view could escape into)"
+                elif not (typesQuiet [ chain ]) then
+                    decline "an expression a type carries in the recursion (or in a function it calls) computes (a call or an array form): its effects are not audited"
+                elif consumers.Count > 0 && not (typesQuiet (interval @ (consumers |> Seq.map snd |> List.ofSeq))) then
+                    decline "an expression a type carries between the recursion and its last fold (or in a kernel it calls) computes: its effects are not audited"
+                elif consumers.Count > 0 && writes block then
+                    decline "the recursion (the producer) may write storage outside its own buffer (the folds would move across it)"
+                elif consumers.Count > 0 && (interval |> List.exists writes) then
+                    decline "a statement between the recursion and its last fold may write (the folds would move across it)"
+                elif not (recFoldRingEnabled ()) then
+                    Some (Error recFoldOptInDecline, evidenceBase @ [ "admitted: with BLADE_REC_FOLD=1 the trajectory would ring and its folds ride the sweep" ])
+                else
+                // ---- the rewrite
+                let ringIx = { lead with Extent = IRLit (IRLitInt r); Tag = None; Id = builder.FreshId () }
+                let ringT = mkArrayLike { at with IndexTypes = ringIx :: at.IndexTypes.Tail }
+                let nVar =
+                    let mutable found = None
+                    iterIRExpr (fun x -> match x with IRVar (v, t) when v = nId && found.IsNone -> found <- Some (IRVar (v, t)) | _ -> ()) stepBody
+                    defaultArg found (IRVar (nId, IRTScalar ETInt64))
+                let bufV = IRVar (bufId, bufT)
+                let rowRead (row: IRExpr) = IRIndex (bufV, [ row ], None)
+                let elemZero =
+                    match elem with
+                    | IRTScalar ETFloat64 -> Some (IRLit (IRLitFloat 0.0))
+                    | IRTScalar ETFloat32 -> Some (IRLit (IRLitFloat32 0.0f))
+                    | IRTScalar ETInt64 -> Some (IRLit (IRLitInt 0L))
+                    | _ -> None
+                let unitLet (v: IRExpr) (tail: IRExpr) = IRLet (builder.FreshId (), v, tail)
+                // K applied to row `row`. A rank-2 row kernel is INLINED (its
+                // own lets freshened, its parameter bound to a row-view let),
+                // as row-fold fusion splices its K: the LLVM lane has no
+                // array-parameter calls. A `where repro` kernel, or one whose
+                // body names a capturing callable (an inner lambda capturing
+                // the row by id), stays a call (the C++ lane; the LLVM lane
+                // then falls back, its refusal recorded).
+                let applyRowKernel (kExpr: IRExpr) (kc: IRCallable) (row: IRExpr) (k: IRExpr -> IRExpr) : IRExpr =
+                    let pId = builder.FreshId ()
+                    let pV = IRVar (pId, kc.RetType)
+                    let capturing =
+                        let mutable hit = false
+                        iterIRExpr (fun x -> match x with IRVar (id, _) -> (match callables.TryGetValue id with | true, c when not c.Captures.IsEmpty -> hit <- true | _ -> ()) | _ -> ()) kc.Body
+                        hit
+                    if rank = 1 || kc.IsRepro || capturing then IRLet (pId, IRApp (kExpr, [ rowRead row ], kc.RetType), k pV)
+                    else
+                    let binders = System.Collections.Generic.List<IRId>()
+                    iterIRExpr (fun x -> match x with IRLet (id, _, _) | IRForRange (id, _, _, _) -> binders.Add id | _ -> ()) kc.Body
+                    let mapped = binders |> Seq.distinct |> Seq.map (fun id -> id, builder.FreshId ()) |> Map.ofSeq
+                    let rowId = builder.FreshId ()
+                    let p = kc.Params.Head
+                    let body =
+                        mapIRExpr (fun x ->
+                            match x with
+                            | IRVar (id, t) when id = p.VarId -> IRVar (rowId, t)
+                            | IRVar (id, t) -> (match Map.tryFind id mapped with Some m -> IRVar (m, t) | None -> x)
+                            | IRLet (id, v, b) -> (match Map.tryFind id mapped with Some m -> IRLet (m, v, b) | None -> x)
+                            | IRForRange (id, l, h, b) -> (match Map.tryFind id mapped with Some m -> IRForRange (m, l, h, b) | None -> x)
+                            | _ -> x) kc.Body
+                    IRLet (rowId, rowRead row, IRLet (pId, body, k pV))
+                // per consumer: (state lets before the region, update(row) -> IR, replacement)
+                let plans =
+                    consumers |> List.ofSeq |> List.map (fun (kind, node) ->
+                        match kind, node with
+                        | "C1", IRReduce (_, fk, init) ->
+                            let f = (resolveE fk).Value
+                            let accId = builder.FreshId ()
+                            let accT = f.RetType
+                            let accV = IRVar (accId, accT)
+                            let initV = match init with Some s -> s | None -> (defaultArg elemZero (IRLit (IRLitInt 0L)))
+                            let upd (row: IRExpr) (isSeed: bool) =
+                                if init.IsNone && isSeed then IRAssign (accV, rowRead row)
+                                elif init.IsNone && lo = 0L then
+                                    // no seed arm: row 0 is written by the sweep's
+                                    // first step; the chain starts there (a VALUE
+                                    // select, the placeholder state never folded)
+                                    let first = IRBinOp (IRElementwise, IREq, IRUnaryOp (IRCast (ETInt64, SrcLoc.Nowhere), row), IRLit (IRLitInt 0L), SrcLoc.Nowhere)
+                                    IRAssign (accV, IRIf (first, rowRead row, IRApp (fk, [ accV; rowRead row ], accT)))
+                                else IRAssign (accV, IRApp (fk, [ accV; rowRead row ], accT))
+                            ([ accId, initV ], upd, (node, accV))
+                        | "C2", IRReduceCompute (IRApplyCombinator info, fk, init) ->
+                            let f = (resolveE fk).Value
+                            let accId = builder.FreshId ()
+                            let accT = f.RetType
+                            let accV = IRVar (accId, accT)
+                            let kc = (resolveE info.Kernel).Value
+                            let upd (row: IRExpr) (_: bool) =
+                                applyRowKernel info.Kernel kc row (fun pV -> IRAssign (accV, IRApp (fk, [ accV; pV ], accT)))
+                            ([ accId, init ], upd, (node, accV))
+                        | "C3", IRCompute (IRApplyCombinator info) ->
+                            let kc = (resolveE info.Kernel).Value
+                            let outId = builder.FreshId ()
+                            let outT = info.OutputType
+                            let outV = IRVar (outId, outT)
+                            let upd (row: IRExpr) (_: bool) =
+                                applyRowKernel info.Kernel kc row (fun pV -> IRAssign (IRIndex (outV, [ row ], None), pV))
+                            ([ outId, IRUninit outT ], upd, (node, outV))
+                        | _ ->
+                            let (accId, seed, _, bv, comb, cont) = (gridNest node).Value
+                            let accT = (match comb with IRBinOp _ | IRApp _ -> (try typeOf comb with _ -> elem) | _ -> elem)
+                            let upd (row: IRExpr) (_: bool) =
+                                let j = builder.FreshId ()
+                                let jV = IRVar (j, IRTScalar ETInt64)
+                                let comb' =
+                                    mapIRExpr (fun x ->
+                                        match x with
+                                        | IRIndex (IRVar (t, _), [ _; IRVar (ib, _) ], _) when t = tId && ib = bv -> IRIndex (bufV, [ row; jV ], None)
+                                        | _ -> x) comb
+                                IRForRange (j, IRLit (IRLitInt 0L), IRLit (IRLitInt rowCells),
+                                            unitLet (IRAssign (IRVar (accId, accT), comb')) (IRLit IRLitUnit))
+                            ([ accId, seed ], upd, (node, cont)))
+                // Spliced into the spine (a let chain, never a block value).
+                let updatesAt (row: IRExpr) (isSeed: bool) (tail: IRExpr) =
+                    List.foldBack (fun (_, upd, _) acc ->
+                        let lets, final = chainOf (upd row isSeed)
+                        rebuild lets (unitLet final acc)) plans tail
+                // the step: its statements, then every consumer's update of row n
+                let step' = rebuild stepStmts (updatesAt nVar false (IRLit IRLitUnit))
+                let pre' =
+                    if lo = 1L then pre @ fst (chainOf (updatesAt (IRLit (IRLitInt 0L)) true (IRLit IRLitUnit)))
+                    else pre
+                let chain' = rebuild (pre' @ [ loopId, IRForRange (nId, IRLit (IRLitInt lo), IRLit (IRLitInt hi), step') ]) (IRVar (bufId, ringT))
+                // the ring: every leading subscript of BUF, every BUF type
+                let ringed =
+                    mapIRExpr (fun x ->
+                        match x with
+                        | IRIndex (IRVar (b, _), i0 :: rest, ident) when b = bufId -> IRIndex (IRVar (bufId, ringT), recRingIndex r i0 :: rest, ident)
+                        | IRVar (b, _) when b = bufId -> IRVar (bufId, ringT)
+                        | _ -> x) chain'
+                let block' = IRLet (bufId, IRUninit ringT, ringed)
+                let body' = replaceNodes (plans |> List.map (fun (_, _, rp) -> rp)) body
+                if mentions tId body' || mentionsInTypes tId body' then decline "internal: a use of the trajectory survived the consumer rewrite" else
+                let states = plans |> List.collect (fun (s, _, _) -> s)
+                let result = rebuild states (IRLet (tId, block', body'))
+                let consumerTxt = verdicts |> List.map (fun (_, v) -> match v with Ok t -> t | Error w -> w)
+                let teamTxt =
+                    match teamForm with
+                    | Some RecStepInTeamPartials -> [ "the threaded step folds each worker's chunk inside the team (licensed self-dot partials); after the team only the partials are read" ]
+                    | Some RecStepNoFold -> [ "the threaded step keeps its persistent team; nothing reads the rows after it" ]
+                    | Some RecStepStrictPostPass -> [ "the time loop is emitted without a team in this build (threads suppressed); the C++ emitter re-checks recStepFoldForm and runs the plain serial loop over the ring if it would fold complete rows" ]
+                    | None -> []
+                let licTxt =
+                    if consumers.Count = 0 then [ "no fold moves: the trajectory's consumer already rides the sweep (row-fold fusion) or nothing reads it; the ring changes no value in any build" ]
+                    else [ "fold order: every chain applies its kernel to the same terms in the same ascending order from the same seed / first element (bitwise under BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off); in a LICENSED build a full fold runs its serial chain instead of the lane tree and a row fold its own licensed form instead of the bitwise row jam (licensed association changes)"
+                           "failure order: the moved kernels and seeds are total and write nothing, and nothing from the recursion through the last fold writes (the shared write analysis), so evaluating them inside the sweep is unobservable; the kernels are called, not inlined" ]
+                let ev =
+                    [ $"ring of {r} rows (max lag K = {k}) in place of the {hi}-row trajectory, {rowCells} cells a row; resident rows {hi} -> {r} ({hi * rowCells} -> {r * rowCells} cells)" ]
+                    @ (if consumerTxt.IsEmpty then [] else [ "consumers: " + String.concat "; " consumerTxt ])
+                    @ teamTxt @ licTxt
+                    @ [ "the ring: row i in slot i mod R, written once and overwritten R steps later; every selected read is a lag c <= K, the current row after its complete write, or a seed row before the sweep (each guarded zero-history read used only under its guard)" ]
+                Some (Ok result, ev)
+            | _ -> None
+        | _ -> None
+    let rec rw (e: IRExpr) : IRExpr =
+        match e with
+        | IRLet (tId, block, body) ->
+            (match tryRegion tId block body with
+             | Some (Ok e', ev) ->
+                record subject Blade.Effects.Applied ev
+                // the rewritten region's tail may hold further regions
+                let rec descend (x: IRExpr) =
+                    match x with
+                    | IRLet (t, b, rest) when t = tId -> IRLet (t, b, rw rest)
+                    | IRLet (id, v, rest) -> IRLet (id, v, descend rest)
+                    | _ -> x
+                descend e'
+             | Some (Error why, ev) ->
+                record subject (Blade.Effects.Declined why) (ev @ [ "the trajectory is stored whole; its folds (if any) stay where they are" ])
+                IRLet (tId, rwInner block, rw body)
+             | None -> IRLet (tId, rw block, rw body))
+        | _ -> rwInner e
+    and rwInner (e: IRExpr) =
+        match e with
+        | IRLet _ -> rw e
+        | ExprShape ([], _) -> e
+        | ExprShape (children, rebuild) -> rebuild (children |> List.map rw)
+    let newFunctions =
+        modul.Functions |> List.map (fun f ->
+            subject <- f.SourceName
+            enclosingRepro <- f.IsRepro
+            currentFn <- f.Id
+            currentBinding <- -1
+            { f with Body = rw f.Body })
+    let newBindings =
+        modul.Bindings |> List.map (fun b ->
+            subject <- b.Name
+            enclosingRepro <- false
+            currentFn <- -1
+            currentBinding <- b.Id
             { b with Value = rw b.Value })
     { modul with Functions = newFunctions; Bindings = newBindings }
 
@@ -14412,6 +15528,9 @@ let private optimizeModuleCore (builder: IRBuilder) (programFuncs: IRCallable li
     |> fusePartialRowTerminalsWithCensusModule builder programFuncs foreignCensus
     |> (fun m -> fuseSliceWritesModule m builder programFuncs)
     |> (fun m -> fuseRowFoldsModule m builder programFuncs)
+    // PM35: right behind row-fold fusion (it consumes that pass's in-sweep
+    // folds and the threaded-step table), before hoisting and sibling folds.
+    |> (fun m -> windowRecFoldsModule m builder programFuncs)
     |> hoistKernelInvariantsModule builder programFuncs
     // LAST (it sees every fold the passes above left in place); before
     // IRLift and CSE, so the pass dedupes repeated legs itself.

@@ -1,0 +1,20 @@
+// TEST: Fold Ring Rank1 No Seed Arm Lag3
+// ============================================================================
+// PM35: no seed arm (the sweep writes row 0 itself) and lags up to 3 -- the
+// zero-history reads `prefix(n - 3)` at n < 3 are guarded and answer zero,
+// and under the 4-row ring their clamped slot is never selected. The unseeded
+// fold starts its chain at row 0 inside the sweep; the seeded one at its seed.
+// ============================================================================
+type T = Idx<203>
+
+function lagged(c: Float64) -> (Float64, Float64) = {
+    let rec s: Array<Float64 like T> =
+        match s with
+        | zero -> zero
+        | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + prefix(n - 2) * 0.25 + prefix(n - 3) * 0.125 + c
+    (reduce(s, (+)), reduce(s, lambda(p, q) -> p * 0.5 + q, 1.0))
+}
+
+let (total, smoothed) = lagged(0.75)
+// EXPECT: total = 1152.00000272063
+// EXPECT: smoothed = 11.9999994790332

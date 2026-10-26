@@ -1,0 +1,32 @@
+// TEST: Fold Ring Threaded Row Checksum
+// ============================================================================
+// PM35: the bench recur shape at a small size -- a threaded `let rec` step
+// (`where omp(v: 1)` on its final map, rec-step-parallel) whose row checksum
+// row-fold fusion already folds inside the sweep. The trajectory is a 2-row
+// ring: the persistent team's workers own fixed cells and read only their own
+// cells of the previous row, and after the team only the per-row partials are
+// read. Under BLADE_FP_REPRO=1 with threads the strict post-pass reads complete
+// rows after the team, so the ring declines there.
+// ============================================================================
+type T = Idx<61>
+type X = Idx<103>
+
+function rhs(u: Array<Float64 like X>) -> Array<Float64 like X> = u - u * u * u
+
+function step(u: Array<Float64 like X>) -> Array<Float64 like X> = {
+    let k1 = rhs(u)
+    method_for(zip(u, k1)) <@> lambda(v, a) where omp(v: 1) -> v + 0.01 * a |> compute
+}
+
+function kernel(u0: Array<Float64 like X>) -> Float64 = {
+    let rec traj: Array<Float64 like T, X> =
+        match traj with
+        | zero -> zero
+        | zero :: s -> zero :: u0
+        | prefix :: n -> prefix :: step(prefix(n - 1))
+    reduce(method_for(traj) <@> lambda(row) -> prodsum(row, row), lambda(p, q) where omp -> p + q, 0.0)
+}
+
+let u0 = method_for(range<X>) <@> lambda(i) -> 0.5 + Float64(i) * 0.005 |> compute
+let checksum = kernel(u0)
+// EXPECT: checksum = 4399.84852318536

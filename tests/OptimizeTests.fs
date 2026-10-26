@@ -306,7 +306,9 @@ let private sliceWriteRk4Emission () =
         let body = if start < 0 then "" else cpp.Substring(start, cpp.IndexOf("\n}\n", start) - start)
         let stepCalls = System.Text.RegularExpressions.Regex.Matches(body, @"\bstep\(").Count
         let rowDeallocs = System.Text.RegularExpressions.Regex.Matches(body, @"deallocate<typename promote<double, 1>").Count
-        let rowStore = System.Text.RegularExpressions.Regex.IsMatch(body, @"__v\d+\[__kv\d+\]\[__kv\d+\] = __v\d+;")
+        // (row n's slot: `n`, or `n % R` when rec-fold-ring rings the
+        // trajectory -- its only consumer is the fused row fold)
+        let rowStore = System.Text.RegularExpressions.Regex.IsMatch(body, @"__v\d+\[(__kv\d+|\(static_cast<int64_t>\(__kv\d+\) % \d+L\))\]\[__kv\d+\] = __v\d+;")
         if start >= 0 && stepCalls = 0 && rowDeallocs = 0 && rowStore then
             resultLine Pass name "kernel: no step call, no rank-1 temporary freed, cells stored straight into the trajectory row"
             true
@@ -884,6 +886,277 @@ let private recWindowEmission () : bool list =
             if full && declined then resultLine Pass name "200-row buffer allocated; rec-window declined -- disabled by BLADE_REC_WINDOW"; true
             else resultLine Fail name $"full200={full} declinedDisabled={declined}"; false
     [ on; off ]
+
+// ---------------------------------------------------------------------------
+// PM35 (round 4 wave 2): folds riding a windowed recurrence (rule
+// `rec-fold-ring`, Optimize.windowRecFoldsModule). Corpus recursive-arrays/
+// 046-056 pin the VALUES (equal to BLADE_REC_FOLD=0 within the pins'
+// tolerance; bitwise under BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off); these pin
+// each file's DECISION, the ring's emission both ways, the LLVM lane, and the
+// threaded step's strict decline.
+
+let private recFoldCorpusTable : (string * Result<string, string> list) list =
+    [ "046_fold_ring_rank1_full_folds.blade", [ Ok "ring of 2 rows" ]
+      "047_fold_ring_rank1_no_seed_arm_lag3.blade", [ Ok "ring of 4 rows (max lag K = 3)" ]
+      "048_fold_ring_partial_fold_vector.blade", [ Ok "a row map of the trajectory" ]
+      "049_fold_ring_row_map_and_nested.blade", [ Ok "a row map of the trajectory"; Ok "ring of 2 rows" ]
+      "050_fold_ring_grid_full_fold.blade", [ Ok "the rank-2 full fold"; Ok "the rank-2 full fold" ]
+      "051_fold_ring_threaded_row_checksum.blade", [ Ok "inside the team" ]
+      "052_fold_ring_declines_mixed_fixed_row.blade", [ Error "a fixed-row read" ]
+      "053_fold_ring_declines_escape.blade", [ Error "used whole after the recursion" ]
+      "054_fold_ring_declines_may_panic_kernel.blade", [ Error "not a pure total" ]
+      "055_fold_ring_declines_branch_and_omp.blade", [ Error "in a branch or loop body"; Error "requests omp" ]
+      "056_fold_ring_long_trajectory_called_twice.blade", [ Ok "ring of 2 rows" ]
+      "057_fold_ring_declines_captured_trajectory.blade", [ Error "the trajectory is named outside its block: a callable" ]
+      "058_fold_ring_declines_seed_after_recursion.blade", [ Error "seed" ]
+      "059_fold_ring_declines_lag_past_extent.blade", [ Error "at or beyond the recursion's extent" ]
+      "060_fold_ring_declines_escaping_row_view.blade", [ Error "may write storage other than its own row stores" ]
+      "061_fold_ring_declines_future_offset_past_extent.blade", [ Error "not `n - c`, `n + c` or `n`" ]
+      "062_fold_ring_declines_read_in_range_extent.blade", [ Error "inside a type's extent" ]
+      "063_fold_ring_declines_mut_param_row_write.blade", [ Error "other than its own row stores" ] ]
+
+let private recFoldCorpusCases () : bool list =
+    let dir = System.IO.Path.Combine("tests", "corpus", "recursive-arrays")
+    [ for (file, want) in recFoldCorpusTable do
+        let name = $"rec_fold_ring_corpus: {file}"
+        let path = System.IO.Path.Combine(dir, file)
+        if not (System.IO.File.Exists path) then
+            resultLine Fail name $"missing {path} (run from the repo root)"; yield false
+        else
+        match decisionsOf (System.IO.File.ReadAllText path) with
+        | Error e -> resultLine Fail name e; yield false
+        | Ok ds ->
+            let mine = ds |> List.filter (fun d -> d.Rule = "rec-fold-ring")
+            let matches (w: Result<string, string>) (d: Blade.Effects.Decision) =
+                match w, d.Outcome with
+                | Ok ev, Blade.Effects.Applied -> d.Evidence |> List.exists (fun e -> e.Contains ev)
+                | Error why, Blade.Effects.Declined r -> r.Contains why
+                | _ -> false
+            let ok = mine.Length = want.Length && List.forall2 matches want mine
+            let seen = mine |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+            if ok then resultLine Pass name $"{mine.Length} rec-fold-ring decision(s) as pinned"
+            else resultLine Fail name $"wanted {want}; saw: {seen}"
+            yield ok ]
+
+/// The ring's emission: a 2-row ring indexed `% 2L` and no 1001-row buffer
+/// (gate on); the full buffer and the recorded decline (gate off); the LLVM
+/// lane takes the ringed program; the threaded step's team indexes the ring;
+/// under BLADE_FP_REPRO=1 the strict post-pass keeps the trajectory whole.
+let private recFoldEmission () : bool list =
+    let read (f: string) = System.IO.File.ReadAllText (System.IO.Path.Combine("tests", "corpus", "recursive-arrays", f))
+    let src46 = read "046_fold_ring_rank1_full_folds.blade"
+    let src51 = read "051_fold_ring_threaded_row_checksum.blade"
+    let on =
+        let name = "rec_fold_ring_emission: a 2-row ring indexed % 2, no 1001-row trajectory"
+        match cppOfSource name src46 with
+        | Error e -> resultLine Fail name e; false
+        | Ok cpp ->
+            let ring = cpp.Contains "_extents[1] = { 2 }" && cpp.Contains "% 2L)"
+            let full = cpp.Contains "{ 1001 }"
+            if ring && not full then resultLine Pass name "ring extents { 2 }, `% 2L` subscripts, no { 1001 } allocation"; true
+            else resultLine Fail name $"ring={ring} full1001={full}"; false
+    // The DEFAULT build (unset) and an explicit `0` keep the full trajectory
+    // and record the opt-in decline (the analysis still says it would apply).
+    let offWith (label: string) (value: string) =
+        let name = $"rec_fold_ring_emission_default_{label}: BLADE_REC_FOLD {label} keeps the 1001-row trajectory and records the opt-in decline"
+        match withGate "BLADE_REC_FOLD" value (fun () -> cppOfSource name src46, decisionsOf src46) with
+        | Error e, _ | _, Error e -> resultLine Fail name e; false
+        | Ok cpp, Ok ds ->
+            let full = cpp.Contains "{ 1001 }"
+            let declined = ds |> List.exists (fun d -> d.Rule = "rec-fold-ring" && declinedMentioning "opt-in this wave (BLADE_REC_FOLD=1)" d)
+            if full && declined then resultLine Pass name "1001-row trajectory allocated; rec-fold-ring declined -- opt-in this wave"; true
+            else resultLine Fail name $"full1001={full} declinedOptIn={declined}"; false
+    let off = offWith "unset" null && offWith "0" "0"
+    let llvm =
+        let name = "rec_fold_ring_llvm_lane: the LLVM lane emits the ringed recursion and its in-sweep folds"
+        match lower src46 with
+        | Error e -> resultLine Fail name e; false
+        | Ok ir ->
+            match EmitLlvm.tryEmitProgramNamed name ir with
+            | Ok _ -> resultLine Pass name "llvm emits the program"; true
+            | Error e -> resultLine Fail name $"llvm refused: {e}"; false
+    let team =
+        let name = "rec_fold_ring_threaded_team_indexes_the_ring: the persistent team's partials read row n % 2"
+        match cppOfSource name src51 with
+        | Error e -> resultLine Fail name e; false
+        | Ok cpp ->
+            let teamRing = System.Text.RegularExpressions.Regex.IsMatch(cpp, @"\.data\[\(__kv\d+ % 2L\)\] \+ __rlo")
+            let full = cpp.Contains "{ 61, 103 }"
+            if teamRing && not full then resultLine Pass name "rec-step-parallel team over a { 2, 103 } ring, partials over row n % 2"; true
+            else resultLine Fail name $"teamRing={teamRing} full={full}"; false
+    let strict =
+        let name = "rec_fold_ring_strict_threaded_declines: BLADE_FP_REPRO=1 keeps the trajectory whole (the strict post-pass reads complete rows)"
+        match withGate "BLADE_FP_REPRO" "1" (fun () -> decisionsOf src51) with
+        | Error e -> resultLine Fail name e; false
+        | Ok ds ->
+            let declined = ds |> List.exists (fun d -> d.Rule = "rec-fold-ring" && declinedMentioning "strict post-pass" d)
+            if declined || not (Blade.Toolchain.ompThreadEmissionEnabled ()) then resultLine Pass name "rec-fold-ring declined -- the threaded step's strict post-pass"; true
+            else resultLine Fail name "no strict decline recorded"; false
+    // Codex review round 4: decision-only (the C++ lane cannot emit these
+    // shapes, BL9002 / an exponential emission at ten nested ranges, so they
+    // are no corpus files).
+    let ring11 =
+        "type T = Idx<11>\n"
+        + "type X = Idx<3>\n"
+    let effectInExtent =
+        ring11
+        + "let mut saved: Array<Float64 like X> = [0.0, 0.0, 0.0]\n"
+        + "function stash(r: Array<Float64 like X>, n: Int64) -> Int64 = {\n"
+        + "    let z = if n == 1 then { saved = r; 0.0 } else 0.0\n"
+        + "    1\n"
+        + "}\n"
+        + "function keep(r: Array<Float64 like X>, n: Int64) -> Array<Float64 like X> = {\n"
+        + "    let ys = 0..stash(r, n)\n"
+        + "    r + Float64(reduce(ys, (+), 0)) + 1.0\n"
+        + "}\n"
+        + "function run(u0: Array<Float64 like X>) -> Float64 = {\n"
+        + "    let rec traj: Array<Float64 like T, X> =\n"
+        + "        match traj with\n"
+        + "        | zero -> zero\n"
+        + "        | zero :: s -> zero :: u0\n"
+        + "        | prefix :: n -> prefix :: keep(prefix(n - 1), Int64(n))\n"
+        + "    let total = reduce(method_for(traj) <@> lambda(row) -> reduce(row, (+)), (+))\n"
+        + "    total + reduce(saved, (+))\n"
+        + "}\n"
+        + "let u: Array<Float64 like X> = [1.0, 2.0, 3.0]\n"
+        + "let v = run(u)\n"
+    let deepExtent =
+        let inner = "0..Int64(floor(s(0)))"
+        let nested = [ 1 .. 10 ] |> List.fold (fun acc _ -> $"0..reduce({acc}, lambda(p, q) -> p + 1, 0)") inner
+        ring11
+        + "function deep(a: Float64) -> Float64 = {\n"
+        + "    let rec s: Array<Float64 like T> =\n"
+        + "        match s with\n"
+        + "        | zero -> zero\n"
+        + "        | zero :: k -> zero :: a\n"
+        + "        | prefix :: n -> prefix :: prefix(n - 1) + 1.0\n"
+        + $"    let ys = {nested}\n"
+        + "    reduce(s, (+)) + Float64(reduce(ys, (+), 0))\n"
+        + "}\n"
+        + "let v = deep(1.0)\n"
+    let declinesWith (name: string) (src: string) (why: string) =
+        match decisionsOf src with
+        | Error e -> resultLine Fail name e; false
+        | Ok ds ->
+            let mine = ds |> List.filter (fun d -> d.Rule = "rec-fold-ring")
+            if not mine.IsEmpty && mine |> List.forall (fun d -> declinedMentioning why d) then
+                resultLine Pass name $"rec-fold-ring declined -- ...{why}..."; true
+            else resultLine Fail name ("saw: " + (mine |> List.map Blade.Effects.Decisions.render |> String.concat " | ")); false
+    let effect = declinesWith "rec_fold_ring_declines_effect_in_range_extent: a range bound that calls a storing helper" effectInExtent "a type carries"
+    let deep = declinesWith "rec_fold_ring_declines_deep_extent_read: a trajectory read ten range extents deep" deepExtent "inside a type's extent"
+    // Codex review round 5: a module-level DEFERRED map the step forces, whose
+    // kernel calls a writer in a range bound (reached by the write analysis
+    // through the deferred initializer, not by the type-effect audit then).
+    let deferredEffect =
+        "type T = Idx<11>\n"
+        + "let mut offset = 0.0\n"
+        + "function stash(x: Int64) -> Int64 = {\n"
+        + "    offset = offset + 1.0\n"
+        + "    1\n"
+        + "}\n"
+        + "let dirty = lambda(x) -> {\n"
+        + "    let ys = 0..stash(Int64(x))\n"
+        + "    Float64(reduce(ys, (+), 0))\n"
+        + "}\n"
+        + "let d = method_for(range<T>) <@> dirty\n"
+        + "function run(a: Float64) -> Float64 = {\n"
+        + "    let rec s: Array<Float64 like T> =\n"
+        + "        match s with\n"
+        + "        | zero -> zero\n"
+        + "        | zero :: k -> zero :: a\n"
+        + "        | prefix :: n -> prefix :: prefix(n - 1) + d(n)\n"
+        + "    reduce(s, (+), offset)\n"
+        + "}\n"
+        + "let v = run(1.0)\n"
+    let deferred = declinesWith "rec_fold_ring_declines_deferred_producer_extent_effect: a forced deferred map whose kernel writes in a range bound" deferredEffect "a type carries"
+    [ on; off; llvm; team; strict; effect; deep; deferred ]
+// ---------------------------------------------------------------------------
+// PM14 (round 4 wave 2): the leading-axis fold's state updated in place
+// (rule `fold-state-in-place`, Optimize.fuseSliceWritesModule's fold-state
+// arm). Corpus loops/600-604 pin the VALUES (equal to BLADE_FOLD_STATE=0);
+// these pin each file's DECISION and the emission both ways.
+
+let private foldStateCorpusTable : (string * Result<string, string> list) list =
+    [ "600_fold_state_in_place_function_body.blade", [ Ok "in place"; Ok "in place"; Ok "in place" ]
+      "601_fold_state_in_place_nested_kernel_constants.blade", [ Ok "in place"; Ok "in place" ]
+      "602_fold_state_declines_non_pointwise.blade", [ Error "not pointwise" ]
+      "603_fold_state_declines_may_abort.blade", [ Error "may abort" ]
+      "604_fold_state_in_place_inside_kernel.blade", [ Ok "in place" ]
+      "605_fold_state_cross_cell_and_repeated_state.blade", [ Error "not pointwise"; Ok "in place" ] ]
+
+let private foldStateCorpusCases () : bool list =
+    let dir = System.IO.Path.Combine("tests", "corpus", "loops")
+    [ for (file, want) in foldStateCorpusTable do
+        let name = $"fold_state_corpus: {file}"
+        let path = System.IO.Path.Combine(dir, file)
+        if not (System.IO.File.Exists path) then
+            resultLine Fail name $"missing {path} (run from the repo root)"; yield false
+        else
+        match decisionsOf (System.IO.File.ReadAllText path) with
+        | Error e -> resultLine Fail name e; yield false
+        | Ok ds ->
+            let mine = ds |> List.filter (fun d -> d.Rule = "fold-state-in-place")
+            let matches (w: Result<string, string>) (d: Blade.Effects.Decision) =
+                match w, d.Outcome with
+                | Ok ev, Blade.Effects.Applied -> d.Evidence |> List.exists (fun e -> e.Contains ev)
+                | Error why, Blade.Effects.Declined r -> r.Contains why
+                | _ -> false
+            let ok = mine.Length = want.Length && List.forall2 matches want mine
+            let seen = mine |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+            if ok then resultLine Pass name $"{mine.Length} fold-state decision(s) as pinned"
+            else resultLine Fail name $"wanted {want}; saw: {seen}"
+            yield ok ]
+
+/// The state update, both ways: in place (no fresh slice per step, no pool
+/// moved into the state) with the gate on; the materialized step and its
+/// pointer move with BLADE_FOLD_STATE=0. The LLVM lane, which refused the
+/// rebinding, now takes the program.
+let private foldStateEmission () : bool list =
+    let src =
+        "type R = Idx<7>\n"
+        + "type C = Idx<5>\n"
+        + "function col_sums(g: Array<Float64 like R, C>) -> Array<Float64 like C> = {\n"
+        + "    reduce(g, lambda(a: T^1, b: T^1) -> a + b)\n"
+        + "}\n"
+        + "let g0 = method_for(range<R, C>) <@> lambda(r, c) -> Float64(r) * 1.5 + Float64(c) |> compute\n"
+        + "let s1 = col_sums(g0)\n"
+    let bodyOf (cpp: string) =
+        let head = "Array<double, 1> col_sums(Array<double, 2> g) {"
+        let i = cpp.IndexOf head
+        if i < 0 then "" else
+        let j = cpp.IndexOf("\n}\n", i)
+        if j < 0 then cpp.Substring i else cpp.Substring(i, j - i)
+    let moves (body: string) = System.Text.RegularExpressions.Regex.IsMatch(body, @"\n\s*__v\d+ = __v\d+;")
+    let on =
+        let name = "fold_state_emission_in_place: the state's cells are stored in place, no per-step slice moved into it"
+        match cppOfSource name src with
+        | Error e -> resultLine Fail name e; false
+        | Ok cpp ->
+            let body = bodyOf cpp
+            let inPlace = System.Text.RegularExpressions.Regex.IsMatch(body, @"__v\d+\[__kv\d+\] = __v\d+;")
+            let callsKernel = body.Contains "__lambda_"
+            if body <> "" && inPlace && not (moves body) && not callsKernel then
+                resultLine Pass name "cell stores into the state, no kernel call, no pool move"; true
+            else resultLine Fail name $"found={body <> System.String.Empty} inPlace={inPlace} moves={moves body} callsKernel={callsKernel}"; false
+    let off =
+        let name = "fold_state_emission_gate_off: BLADE_FOLD_STATE=0 keeps the per-step kernel call and pool move, and records why"
+        match withGate "BLADE_FOLD_STATE" "0" (fun () -> cppOfSource name src, decisionsOf src) with
+        | Error e, _ | _, Error e -> resultLine Fail name e; false
+        | Ok cpp, Ok ds ->
+            let body = bodyOf cpp
+            let declined = ds |> List.exists (fun d -> d.Rule = "fold-state-in-place" && declinedMentioning "disabled by BLADE_FOLD_STATE" d)
+            if moves body && body.Contains "__lambda_" && declined then
+                resultLine Pass name "kernel call + pool move kept; fold-state-in-place declined -- disabled by BLADE_FOLD_STATE"; true
+            else resultLine Fail name $"moves={moves body} declined={declined}"; false
+    let llvm =
+        let name = "fold_state_llvm_lane_takes_in_place_fold: the LLVM lane emits the program (it refused the per-step rebinding)"
+        let viaLlvm () = match lower src with Error e -> Error e | Ok ir -> EmitLlvm.tryEmitProgramNamed name ir
+        match viaLlvm (), withGate "BLADE_FOLD_STATE" "0" viaLlvm with
+        | Ok _, Error offWhy when offWhy.Contains "rebound" ->
+            resultLine Pass name "llvm emits the in-place fold; with the gate off it refuses the rebinding as before"; true
+        | Ok _, other -> resultLine Fail name $"gate-off lane result was not the rebinding refusal: {other}"; false
+        | Error e, _ -> resultLine Fail name $"llvm refused the in-place fold: {e}"; false
+    [ on; off; llvm ]
 
 /// The rank-2 orbit-class PASS itself, for the pins that read it: compact
 /// row classes (BLADE_COMPACT_ROW_CLASSES) would otherwise replace it behind
@@ -11160,6 +11433,14 @@ let runOptimizeTests () =
           // decision, and the ring's emission both ways.
           yield! recWindowCorpusCases ()
           yield! recWindowEmission ()
+          // PM35: folds riding a windowed recurrence.
+          // (OPT-IN this wave: every APPLIED assertion runs with an explicit
+          // BLADE_REC_FOLD=1; the default-build decline is pinned inside.)
+          yield! withGate "BLADE_REC_FOLD" "1" (fun () -> recFoldCorpusCases ())
+          yield! withGate "BLADE_REC_FOLD" "1" (fun () -> recFoldEmission ())
+          // PM14: the leading-axis fold's state updated in place.
+          yield! foldStateCorpusCases ()
+          yield! foldStateEmission ()
           // Wave 3, E-G5: the threaded `let rec` step's admission and forms.
           yield! recStepCases ()
           // Reverse-mode AD of an additive recurrence is O(n): loop count pin.

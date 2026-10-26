@@ -2440,9 +2440,9 @@ type FoldLanesMode =
 let foldLanesMode () : FoldLanesMode =
     match System.Environment.GetEnvironmentVariable "BLADE_FOLD_LANES" with
     | null -> FoldLanesAuto
+    | _ when Blade.Optimize.foldLanesSwitchedOff () -> FoldLanesOff
     | v ->
         match v.Trim().ToLowerInvariant() with
-        | "0" | "off" | "false" | "no" -> FoldLanesOff
         | "4" -> FoldLanesFixed 4
         | "8" -> FoldLanesFixed 8
         | _ -> FoldLanesAuto

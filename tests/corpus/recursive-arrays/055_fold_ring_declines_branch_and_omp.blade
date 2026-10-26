@@ -1,0 +1,30 @@
+// TEST: Fold Ring Declines Branch And Omp
+// ============================================================================
+// PM35 decline controls: a fold that sits in an `if` branch (v1 rides only
+// unconditional consumers), and a fold kernel carrying `where omp` (a serial
+// chain inside the sweep would drop the request silently).
+// ============================================================================
+type T = Idx<51>
+
+function cond_fold(a: Float64, on: Bool) -> Float64 = {
+    let rec s: Array<Float64 like T> =
+        match s with
+        | zero -> zero
+        | zero :: k -> zero :: a
+        | prefix :: n -> prefix :: prefix(n - 1) * 0.95 + 0.2
+    if on then reduce(s, (+)) else 0.0
+}
+
+function omp_fold(a: Float64) -> Float64 = {
+    let rec s: Array<Float64 like T> =
+        match s with
+        | zero -> zero
+        | zero :: k -> zero :: a
+        | prefix :: n -> prefix :: prefix(n - 1) * 0.95 + 0.2
+    reduce(s, lambda(p, q) where omp -> p + q, 0.0)
+}
+
+let c = cond_fold(1.0, true)
+let o = omp_fold(1.0)
+// EXPECT: c = 148.385863590773
+// EXPECT: o = 148.385863590773

@@ -1,0 +1,37 @@
+// TEST: Fold Ring Row Map And Nested Fold
+// ============================================================================
+// PM35: a general scalar row map (`|> compute`) and the nested fold
+// `reduce(reduce(traj, (+)), (+))` both ride the sweep; each row kernel runs
+// on the row right after it is written.
+// ============================================================================
+type T = Idx<97>
+type X = Idx<5>
+
+function step(r: Array<Float64 like X>) -> Array<Float64 like X> = r * 0.99 + 0.02
+
+function obs(u0: Array<Float64 like X>) -> (Float64, Float64, Float64) = {
+    let rec traj: Array<Float64 like T, X> =
+        match traj with
+        | zero -> zero
+        | zero :: k -> zero :: u0
+        | prefix :: n -> prefix :: step(prefix(n - 1))
+    let m = method_for(traj) <@> lambda(row: Array<Float64 like X>) -> reduce(row, (+)) * 0.5 |> compute
+    (m(0), m(96), reduce(m, (+)))
+}
+
+function total(u0: Array<Float64 like X>) -> Float64 = {
+    let rec traj: Array<Float64 like T, X> =
+        match traj with
+        | zero -> zero
+        | zero :: k -> zero :: u0
+        | prefix :: n -> prefix :: step(prefix(n - 1))
+    reduce(reduce(traj, (+)), (+))
+}
+
+let u: Array<Float64 like X> = [1.0, 0.5, 0.25, 0.125, 0.0625]
+let (m0, m96, msum) = obs(u)
+let z = total(u)
+// EXPECT: m0 = 0.96875
+// EXPECT: m96 = 3.46390380514103
+// EXPECT: msum = 233.948523291038
+// EXPECT: z = 467.897046582075

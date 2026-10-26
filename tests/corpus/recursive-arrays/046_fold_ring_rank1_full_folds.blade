@@ -1,0 +1,29 @@
+// TEST: Fold Ring Rank1 Full Folds
+// ============================================================================
+// PM35 (round 4 wave 2, rule `rec-fold-ring`): a function-body recursion whose
+// only later uses are FOLDS rides the sweep -- each fold's state advances right
+// after each row is written, and the trajectory is stored as a 2-row ring
+// instead of 1001 rows. Three folds of one recursion, each its own chain: an
+// unseeded `(+)` (seeded by row 0), a non-commutative left fold (the order is
+// visible in the value) and a seeded fold. Values equal the full buffer's
+// (BLADE_REC_FOLD=0).
+// ============================================================================
+type T = Idx<1001>
+
+function stats(a: Float64) -> (Float64, Float64, Float64) = {
+    let rec s: Array<Float64 like T> =
+        match s with
+        | zero -> zero
+        | zero :: k -> zero :: a
+        | prefix :: n -> prefix :: prefix(n - 1) * 0.999 + 0.001
+    (reduce(s, (+)), reduce(s, lambda(p, q) -> p - q), reduce(s, (+), 100.0))
+}
+
+let (sum1, diff1, seeded1) = stats(0.5)
+let (sum2, diff2, seeded2) = stats(2.0)
+// EXPECT: sum1 = 684.663864673096
+// EXPECT: diff1 = -683.663864673097
+// EXPECT: seeded1 = 784.663864673096
+// EXPECT: sum2 = 1633.67227065381
+// EXPECT: diff2 = -1629.67227065381
+// EXPECT: seeded2 = 1733.67227065381

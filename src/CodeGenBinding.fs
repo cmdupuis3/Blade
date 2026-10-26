@@ -8225,8 +8225,13 @@ and genRecStepTimeLoop (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
     let cellBodyOk (cellBody: IRExpr) =
         let (lets, fin) = unrollLetChain cellBody
         match List.tryLast lets, fin with
-        | Some (_, IRAssign (IRIndex (IRVar (b, _), [ IRVar (n, _); IRVar (k2, _) ], _), IRVar (sv, _))), IRLit IRLitUnit
-            when b = entry.BufferId && n = vid && k2 = entry.CellLoopVar && lets |> List.exists (fun (id, _) -> id = sv) ->
+        | Some (_, IRAssign (IRIndex (IRVar (b, _), [ i0; IRVar (k2, _) ], _), IRVar (sv, _))), IRLit IRLitUnit
+            when b = entry.BufferId && k2 = entry.CellLoopVar && lets |> List.exists (fun (id, _) -> id = sv)
+                 && (match i0 with
+                     | IRVar (n, _) -> n = vid
+                     // PM35: the trajectory is a ring (rec-fold-ring): row n's slot
+                     | Blade.Optimize.RecRingOfStep vid _ -> true
+                     | _ -> false) ->
             lets |> List.take (lets.Length - 1)
             |> List.forall (fun (_, v) -> match inferExprType v with IRTScalar _ -> true | _ -> false)
         | _ -> false
@@ -8256,12 +8261,30 @@ and genRecStepTimeLoop (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
     // The in-team partial is the self-dot's K-lane form over the worker's
     // chunk: a licensed build, a Float64 / Float32 row, lanes not turned off
     // (BLADE_FOLD_LANES), and neither K nor F `where repro` (objection 11).
-    let licensedSquare =
-        match fold with
-        | Some (f, _, _, _) ->
-            not strict && not f.StrictOnly && f.Term = Some Blade.Optimize.Square
-            && foldVecElem elem && foldLanesMode () <> FoldLanesOff
-        | None -> false
+    // The ONE predicate the recursion-ring planner also calls
+    // (Optimize.recStepFoldForm, PM35).
+    let foldForm =
+        Blade.Optimize.recStepFoldForm strict (Blade.Optimize.foldLanesSwitchedOff ()) (foldVecElem elem)
+            (fold |> Option.map (fun (f, _, _, _) -> f))
+    let licensedSquare = (foldForm = Blade.Optimize.RecStepInTeamPartials)
+    // PM35: a RING trajectory (rec-fold-ring rewrote the row subscripts to
+    // `Int64(n) % R`): row n is slot n % R. Its rows are gone after the team,
+    // so a form that folds complete rows after it cannot run over it --
+    // fail closed to the plain serial loop (the ring is correct there).
+    let ringSlots =
+        match cellLoop with
+        | IRForRange (_, _, _, cb) ->
+            (match unrollLetChain cb with
+             | (lets, _) ->
+                match List.tryLast lets with
+                | Some (_, IRAssign (IRIndex (_, [ Blade.Optimize.RecRingOfStep vid r; _ ], _), _)) -> Some r
+                | _ -> None)
+        | _ -> None
+    if ringSlots.IsSome && foldForm = Blade.Optimize.RecStepStrictPostPass then
+        declined "the trajectory is a ring (rec-fold-ring) and this build's row fold reads complete rows after the team (the planner predicted otherwise): the plain serial loop runs over the ring"
+                 (Some (ompSuppressedPhrase "rec-step-parallel: the trajectory is a ring and the row fold would read complete rows after the team"))
+    else
+    let rowSlot = match ringSlots with Some r -> $"(__kv{vid} %% {r}L)" | None -> $"__kv{vid}"
     // The strict post-pass runs rows in PARALLEL only under the outer fold
     // kernel's own `where omp` (the row-slot gate, G35): the step's spatial
     // request never licenses the row axis (objection 10).
@@ -8321,7 +8344,7 @@ and genRecStepTimeLoop (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
                     // The configured lane count (BLADE_FOLD_LANES=4|8), as the
                     // prodsum emitter's own self-dot takes it.
                     let lanes = foldVecLanes VecSq
-                    [ i3 + $"{part}[(size_t){nVar} * (size_t){t} + (size_t)__rt] = __rhi > __rlo ? blade_fold::sq<{elem}, {lanes}>({bufName}.data[{nVar}] + __rlo, __rhi - __rlo) : ({elem})0;   // this worker's chunk of the row it just wrote" ]
+                    [ i3 + $"{part}[(size_t){nVar} * (size_t){t} + (size_t)__rt] = __rhi > __rlo ? blade_fold::sq<{elem}, {lanes}>({bufName}.data[{rowSlot}] + __rlo, __rhi - __rlo) : ({elem})0;   // this worker's chunk of the row it just wrote" ]
                 else []
             lagCode @ cellCode @ partial)
     let region =

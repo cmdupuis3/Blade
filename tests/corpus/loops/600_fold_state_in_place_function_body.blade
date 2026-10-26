@@ -1,0 +1,38 @@
+// TEST: Fold State In Place Function Body
+// ============================================================================
+// PM14 (round 4 wave 2, rule `fold-state-in-place`): a leading-axis fold's
+// state is updated IN PLACE when its kernel is pointwise -- each step is one
+// pass over the state's cells, cell c reading the state at c only, instead of
+// a fresh slice per step moved into the state (which leaked the previous
+// state every step). Per cell the chain is s <- k(s, G(j)), j ascending from
+// the same seed, so the values are the materialized fold's
+// (BLADE_FOLD_STATE=0). Odd extents; unseeded, seeded and non-commutative.
+// ============================================================================
+type R = Idx<7>
+type C = Idx<5>
+
+function grid(off: Float64) -> Array<Float64 like R, C> =
+    method_for(range<R, C>) <@> lambda(r, c) -> Float64(r) * 1.5 + Float64(c) * 0.25 + off |> compute
+
+function col_sums(g: Array<Float64 like R, C>) -> Array<Float64 like C> = {
+    reduce(g, lambda(a: T^1, b: T^1) -> a + b)
+}
+
+function col_sums_seeded(g: Array<Float64 like R, C>, s: Array<Float64 like C>) -> Array<Float64 like C> = {
+    reduce(g, lambda(a: T^1, b: T^1) -> a + b, s)
+}
+
+function col_diffs(g: Array<Float64 like R, C>) -> Array<Float64 like C> = {
+    reduce(g, lambda(a: T^1, b: T^1) -> a - b)
+}
+
+let g0 = grid(0.5)
+let seed: Array<Float64 like C> = [100.0, 200.0, 300.0, 400.0, 500.0]
+let s1 = col_sums(g0)
+let s2 = col_sums_seeded(g0, seed)
+let d1 = col_diffs(g0)
+let s3 = col_sums(grid(-2.0))
+// EXPECT: s1 = [35.0, 36.75, 38.5, 40.25, 42.0]
+// EXPECT: s2 = [135.0, 236.75, 338.5, 440.25, 542.0]
+// EXPECT: d1 = [-34.0, -35.25, -36.5, -37.75, -39.0]
+// EXPECT: s3 = [17.5, 19.25, 21.0, 22.75, 24.5]
