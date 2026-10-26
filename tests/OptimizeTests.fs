@@ -5399,8 +5399,8 @@ let private sameCellReturnCpp () =
       decline "memfree/041_same_cell_return_division_declines.blade" "divided" "return kernel/metadata" ]
 
 /// PM60 (round 4 wave 2): scratch reuse between RUN-TIME-shaped pools whose
-/// extents the planner PROVES equal (memfree/043: two maps over the singly
-/// declared index parameter I of `pipe`). Default: the reuser's declaration
+/// extents the planner PROVES equal by their producers' PROVENANCE (memfree/043:
+/// two pointwise maps of the same immutable array parameter of `pipe`). Default: the reuser's declaration
 /// aliases the donor's data, the reuser's own `new`-ed run-time extents table
 /// is still freed, the BL9002 belt checks the extents before the first store,
 /// one allocation fewer; `pool-reuse` applied with the run-time shape.
@@ -5426,7 +5426,7 @@ let private pm60RuntimeShapeReuse () =
         | (Ok on, dOn), (Ok off, dOff) ->
             let alias = System.Text.RegularExpressions.Regex.Match(on, @"Array<double, 1> (__v\d+) = \{ (__v\d+)\.data, (__v\d+_extents) \}; /\* pool reuse: ")
             let reuser = alias.Groups.[1].Value
-            let applied = dOn |> List.exists (fun d -> d.Subject = "pipe" && d.Outcome = Blade.Effects.Applied && (d.Evidence |> List.exists (fun e -> e.Contains "run-time shape [index(I#0)], proved equal")))
+            let applied = dOn |> List.exists (fun d -> d.Subject = "pipe" && d.Outcome = Blade.Effects.Applied && (d.Evidence |> List.exists (fun e -> e.Contains "run-time shape [extents(param v" && e.Contains "proved equal")))
             let literalKept = dOff |> List.forall (fun d -> not (d.Evidence |> List.exists (fun e -> e.Contains "run-time shape")))
             let allocs = @" = \{ allocate<typename promote<double, 1>::type, nullptr>"
             if alias.Success && applied && literalKept
@@ -5458,8 +5458,9 @@ let private pm60RuntimeShapeReuse () =
     [ positive ()
       decline "memfree/044_runtime_shape_pool_reuse_return_declines.blade" "ret_shape" "the return position"
       decline "memfree/045_runtime_shape_pool_reuse_two_index_types.blade" "two_axes" "no candidate pool is both dead and unaliased"
-      decline "memfree/046_runtime_shape_pool_reuse_anonymous_ranges.blade" "ramp2" "the parameter reference ?#"
-      decline "memfree/047_runtime_shape_pool_reuse_shared_index_param.blade" "g" "the parameter reference I#" ]
+      decline "memfree/046_runtime_shape_pool_reuse_anonymous_ranges.blade" "ramp2" "an operand is not an immutable array parameter"
+      decline "memfree/047_runtime_shape_pool_reuse_shared_index_param.blade" "g" "no candidate pool is both dead and unaliased"
+      decline "memfree/048_runtime_shape_pool_reuse_call_result_declines.blade" "probe" "an operand is not an immutable array parameter" ]
 
 /// KERNEL-INVARIANT HOISTING (Blade.Optimize.hoistKernelInvariantsModule).
 /// `x - avg(x)` is `method_for(x) <@> lambda(e) -> e - avg(x) |> compute`,
