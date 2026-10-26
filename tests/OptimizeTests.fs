@@ -10637,6 +10637,47 @@ let private groupViewCases () : bool list =
           planCase "decision_group_view_declined_gate" viewSrc "structural-group-view"
               (fun d -> d.Subject = "g" && declinedMentioning "disabled by BLADE_GROUP_VIEW" d) "declined: disabled by BLADE_GROUP_VIEW") ]
 
+/// Provider sink destination passing (provider-sink v1, BLADE_SINK_ALIAS,
+/// PM45): a packed and a wreath Zarr write read the source pool in place.
+let private providerSinkCases () : bool list =
+    let packedSrc =
+        "import zarr as z\n"
+        + "let A = [1.0, 2.0, 3.0, 4.0, 5.0]\n"
+        + "let g = lambda(p, q) where comm(p, q) -> p * 10.0 + q\n"
+        + "let C = method_for(A, A) <@> reynolds(g, Symmetric) |> compute\n"
+        + "let w = z.write(\"generated_cpp_tests/sink_sym_out\", C)\n"
+        + "let D = A * 2.0 |> compute\n"
+        + "let w2 = z.write(\"generated_cpp_tests/sink_dense_out\", D)\n"
+    let wreathSrc =
+        "import zarr as z\n"
+        + "let A = [1.0, 2.0, 3.0]\n"
+        + "let g = lambda(x, y) where comm(x, y) -> x * y\n"
+        + "let S = method_for(A, A) <@> g |> compute\n"
+        + "let h = lambda(p, q) where comm(p, q) -> p + q\n"
+        + "let W = method_for(S, S) <@> h |> compute\n"
+        + "let w = z.write(\"generated_cpp_tests/sink_orb_out\", W)\n"
+    let has (needle: string) (cpp: string) = cpp.Contains needle
+    [ tnfEmission "provider_sink_packed_reads_pool_in_place" packedSrc (fun cpp ->
+          if has "const double* C_wr" cpp && has "_flat = nested_array_utilities::pool_base(C.data);" cpp
+             && not (has "__pc_pool" cpp) && not (has "delete[] C_wr" cpp)
+             && has "_flat = pool_base(D.data);" cpp then Ok "C's packed pool is the writer's buffer (no new, no copy, no delete); D keeps its dense alias"
+          else Error "the packed write still flattens into a buffer")
+      withGate "BLADE_SINK_ALIAS" "0" (fun () ->
+          tnfEmission "provider_sink_gate_off_keeps_flatten" packedSrc (fun cpp ->
+              if has "__pc_pool" cpp && has "delete[] C_wr" cpp then Ok "gate off: the linear pool copy and its delete"
+              else Error "gate off did not restore the flatten copy"))
+      tnfEmission "provider_sink_wreath_reads_pool_in_place" wreathSrc (fun cpp ->
+          if has "orb_cell_count" cpp && has "_flat = &(W[0]);" cpp && not (has "_flat[__ow_i]" cpp) && not (has "delete[] W_wr" cpp)
+          then Ok "W's OrbIdx pool is the writer's buffer; the BL8004 pin stays"
+          else Error "the wreath write still copies its pool")
+      planCase "decision_provider_sink_packed_applied" packedSrc "provider-sink"
+          (fun d -> d.Subject = "w" && applied d && evidenceMentioning "no flatten buffer, no copy, no delete" d) "applied: the packed write"
+      planCase "decision_provider_sink_wreath_applied" wreathSrc "provider-sink"
+          (fun d -> d.Subject = "w" && applied d && evidenceMentioning "OrbIdx pool" d) "applied: the wreath write"
+      withGate "BLADE_SINK_ALIAS" "0" (fun () ->
+          planCase "decision_provider_sink_declined_gate" packedSrc "provider-sink"
+              (fun d -> d.Subject = "w" && declinedMentioning "disabled by BLADE_SINK_ALIAS" d) "declined: disabled by BLADE_SINK_ALIAS") ]
+
 let runOptimizeTests () =
     printHeader "Blade-DSL: Optimization Layer Tests"
     let results =
@@ -10719,6 +10760,8 @@ let runOptimizeTests () =
           yield! transposeNormalFormWave3Cases ()
           // The structural group view (PM57, round 4 wave 2).
           yield! groupViewCases ()
+          // Provider sink destination passing (PM45, round 4 wave 2).
+          yield! providerSinkCases ()
           // Hot-row fold scheduling (bench review M13).
           hotRowEmitted ()
           hotRowGateOff ()

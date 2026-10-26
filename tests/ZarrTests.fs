@@ -3115,6 +3115,11 @@ let w = z.write("%s", C)
                 let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir ($"zarr_kw_{label}_e2e")
                 check ($"kernel-write {label}: pool flatten is a linear pool_base copy")
                     (cppCode.Contains "pool_base" && not (cppCode.Contains "antisymmetric::unlinearize")) ""
+                // provider-sink v1 (BLADE_SINK_ALIAS, default on): the writer
+                // reads C's pool in place -- no flatten buffer, no delete.
+                check ($"kernel-write {label}: the writer reads the pool in place (provider-sink v1)")
+                    (cppCode.Contains "_flat = nested_array_utilities::pool_base(C.data);"
+                     && not (cppCode.Contains "__pc_pool") && not (cppCode.Contains "delete[] C_wr")) ""
                 CodeGen.deployRuntimeHeaders e2eDir
                 let cppFile = Path.Combine(e2eDir, $"zarr_kw_{label}_e2e.cpp")
                 File.WriteAllText(cppFile, cppCode)
@@ -3448,10 +3453,22 @@ let w = z.write("%s", W)
                 // the Iliffe skeleton. That is an unrelated array and says nothing
                 // about how W is written -- but it turned this into a false red.
                 let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir ($"{label}_write")
-                check ($"{label}: write emits a flat pool copy + the orb_cell_count pin (no skeleton route for W)")
-                    (cppCode.Contains "orb_cell_count" && cppCode.Contains "_flat[__ow_i]"
+                // provider-sink v1 (BLADE_SINK_ALIAS, default on): the writer
+                // reads W's flat pool in place through a const pointer -- no
+                // flatten buffer, no copy, no delete; the pin stays first.
+                check ($"{label}: write reads the flat pool in place + the orb_cell_count pin (no skeleton route for W)")
+                    (cppCode.Contains "orb_cell_count" && cppCode.Contains "_flat = &(W[0]);"
+                     && not (cppCode.Contains "_flat[__ow_i]") && not (cppCode.Contains "delete[] W_wr")
                      && not (cppCode.Contains "pool_base(W.data)")
                      && not (cppCode.Contains "__pc_pool")) ""
+                // ... and with the gate off, the flat pool copy of old.
+                let offCode =
+                    let prev = Environment.GetEnvironmentVariable "BLADE_SINK_ALIAS"
+                    Environment.SetEnvironmentVariable("BLADE_SINK_ALIAS", "0")
+                    try fst (CodeGen.genSelfContainedProgramFromIR ir ($"{label}_write_off"))
+                    finally Environment.SetEnvironmentVariable("BLADE_SINK_ALIAS", prev)
+                check ($"{label}: BLADE_SINK_ALIAS=0 restores the flat pool copy")
+                    (offCode.Contains "orb_cell_count" && offCode.Contains "_flat[__ow_i]" && offCode.Contains "delete[] W_wr") ""
                 CodeGen.deployRuntimeHeaders e2eDir
                 let cppFile = Path.Combine(e2eDir, $"{label}_write.cpp")
                 File.WriteAllText(cppFile, cppCode)
@@ -4455,6 +4472,23 @@ let m2 = method_for(A, A) <@> lambda(x: Array<Float32 like xdim>, y: Array<Float
                       (code <> 0 && out.Contains "error[BL8015]: provider write of 'bad'" && out.Contains "2 cell(s) are NaN or infinite") out
               | Some (Error e) -> check "zarr: write refusal runs" false e)
          | Error e -> check "zarr boundary write: lowers" false e)
+        // provider-sink v1: a PACKED write reads the pool in place (no flatten
+        // buffer); the BL8015 scan of that pool still runs BEFORE any file
+        // effect, so nothing of the store is published.
+        (let outStore = store + "_packed_out"
+         (try Directory.Delete(outStore, true) with _ -> ())
+         match run "zarr_boundary_write_packed" ("let a = [1.0, 2.0, 3.0]\nlet g = lambda(p, q) where comm(p, q) -> p / (q - q)\nlet bad = method_for(a, a) <@> reynolds(g, Symmetric) |> compute\nlet _ = z.write(\"" + outStore + "\", bad)") with
+         | Ok r ->
+             check "zarr: a packed write reads the pool in place (provider-sink v1)"
+                 (r.Cpp.Contains "_flat = nested_array_utilities::pool_base(bad.data);" && not (r.Cpp.Contains "delete[] bad_wr")) ""
+             (match r.Compiled with
+              | None -> printfn "  SKIP zarr packed write refusal: toolchain unavailable"
+              | Some (Ok (code, out)) ->
+                  check "zarr: a packed write of infinite cells is refused (BL8015) before any file is created"
+                      (code <> 0 && out.Contains "error[BL8015]: provider write of 'bad'" && out.Contains "6 cell(s) are NaN or infinite"
+                       && not (Directory.Exists outStore)) out
+              | Some (Error e) -> check "zarr: packed write refusal runs" false e)
+         | Error e -> check "zarr boundary packed write: lowers" false e)
         (match lower (prog "let static V = zb.vars.Q |> z.read") with
          | Ok _ -> check "zarr: static fold of a NaN cell refused" false "lowered without error"
          | Error e ->

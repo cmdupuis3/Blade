@@ -2605,7 +2605,28 @@ and genProviderWriteBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
         // elided: the writer's cleanup deletes the buffer it was handed, and
         // that must not be the array.
         (match classifyOutputStorage (mkArrayLike arrTy) with
+         | AllocWreath (levels, n, cells) when Blade.Optimize.sinkAliasEnabled () ->
+             // PROVIDER SINK DESTINATION PASSING (provider-sink v1): the source
+             // IS the flat pool the copy below reproduced cell for cell, so the
+             // writer reads it in place through a CONST pointer (the writers and
+             // the BL8015 scan only read; const makes that a compile-time fact),
+             // and nothing is deleted: the pool stays the array's. The BL8004
+             // pin, the BL8015 scan before any file effect and the writer's own
+             // commit order are unchanged.
+             let pin =
+                 $"if (orbit_wreath_utilities::orb_cell_count<{(orbLevelArgs levels)}>({n}) != {cells}LL) {{ blade_rt::panic(\"BL8004\", \"OrbIdx pool size disagreement: orb_cell_count vs the compiler's iterated-binomial fold\", nullptr, 0); }}"
+             let alias =
+                 [ $"// Write {spec.VarName} (OrbIdx{(ppOrbitLevels levels)} pool, {cells} cells) to {spec.FilePath} (provider-sink v1: the writer reads the pool in place)"
+                   pin
+                   $"const {elemCpp}* {baseName}_flat = &({srcCpp}[0]);" ]
+             let writeCode = pspec.GenWriteVar spec.FilePath spec.VarName baseName arrTy spec.DimNames
+             Blade.Optimize.recordProviderSink binding.Name Blade.Effects.Applied
+                 [ $"provider '{spec.Provider}' write of `{spec.VarName}` from the OrbIdx pool of `{srcCpp}` ({cells} cells): no flatten buffer, no copy, no delete"
+                   "legality: the removed copy was a linear copy of exactly these cells in this order; the writer and the BL8015 scan read the buffer through a const pointer; validation (BL8004, BL8015) still precedes every file effect" ]
+             (guardProviderWrite ind (alias @ refuseNonFinite (string cells) @ writeCode), ctx)
          | AllocWreath (levels, n, cells) ->
+             Blade.Optimize.recordProviderSink binding.Name (Blade.Effects.Declined "disabled by BLADE_SINK_ALIAS")
+                 [ $"provider '{spec.Provider}' write of `{spec.VarName}`: the OrbIdx pool is copied into a flatten buffer" ]
              let pin =
                  $"if (orbit_wreath_utilities::orb_cell_count<{(orbLevelArgs levels)}>({n}) != {cells}LL) {{ blade_rt::panic(\"BL8004\", \"OrbIdx pool size disagreement: orb_cell_count vs the compiler's iterated-binomial fold\", nullptr, 0); }}"
              let flatten =
@@ -2640,6 +2661,24 @@ and genProviderWriteBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
             raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan ($"provider '{spec.Provider}' does not support packed (symmetric/antisymmetric) writes (variable '{spec.VarName}')")))
         let poolCount =
             deviceBufferCardinality (deviceBufferTypeOfArray arrTy) |> exprToCpp ctx.VarNames
+        if Blade.Optimize.sinkAliasEnabled () then
+            // PROVIDER SINK DESTINATION PASSING (provider-sink v1): the flatten
+            // below is a LINEAR copy of pool_base(src.data)[0 .. total), so the
+            // writer reads that pool in place, through a const pointer, with
+            // nothing deleted. `packedPoolTotal` raises the copy's refusals
+            // (shape, literal extents, symmetry class) exactly as before.
+            let total = packedPoolTotal arrTy spec.VarName
+            let alias =
+                [ $"// Write {spec.VarName} (packed pool, {total} cells) to {spec.FilePath} (provider-sink v1: the writer reads the pool in place)"
+                  $"const {elemCpp}* {baseName}_flat = nested_array_utilities::pool_base({srcCpp}.data);" ]
+            let writeCode = pspec.GenWriteVar spec.FilePath spec.VarName baseName arrTy spec.DimNames
+            Blade.Optimize.recordProviderSink binding.Name Blade.Effects.Applied
+                [ $"provider '{spec.Provider}' write of `{spec.VarName}` from the packed pool of `{srcCpp}` ({total} cells): no flatten buffer, no copy, no delete"
+                  "legality: the removed copy was a linear copy of exactly these cells in this order; the writer and the BL8015 scan read the buffer through a const pointer; validation (BL8015) still precedes every file effect" ]
+            (guardProviderWrite ind (alias @ refuseNonFinite poolCount @ writeCode), ctx)
+        else
+        Blade.Optimize.recordProviderSink binding.Name (Blade.Effects.Declined "disabled by BLADE_SINK_ALIAS")
+            [ $"provider '{spec.Provider}' write of `{spec.VarName}`: the packed pool is copied into a flatten buffer" ]
         let flatten =
             [ $"// Write {spec.VarName} (packed pool) to {spec.FilePath}"
               $"{elemCpp}* {baseName}_flat = new {elemCpp}[{poolCount}];" ]
